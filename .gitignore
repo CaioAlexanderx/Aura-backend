@@ -1,0 +1,26 @@
+# Dependências
+node_modules/
+
+# Variáveis de ambiente — NUNCA commitar
+.env
+.env.local
+.env.production
+
+# Cobertura de testes
+coverage/
+
+# Logs
+*.log
+logs/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Build
+dist/
+build/
