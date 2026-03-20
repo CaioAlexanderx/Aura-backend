@@ -35,8 +35,8 @@ describe('Payroll — calculateINSS', () => {
     // Faixa 1: 1518 * 0.075 = 113.85
     // Faixa 2: (2793.88 - 1518) * 0.09 = 114.83
     // Faixa 3: (3500 - 2793.88) * 0.12 = 84.74
-    // Total: 313.42
-    expect(calculateINSS(3500)).toBe(313.42);
+    // Total: 313.41
+    expect(calculateINSS(3500)).toBe(313.41);
   });
 
   test('salário acima do teto retorna valor máximo', () => {
