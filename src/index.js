@@ -3,9 +3,15 @@ require('dotenv').config();
 const express = require('express');
 const helmet  = require('helmet');
 const cors    = require('cors');
+const { Sentry, initSentry } = require('./config/sentry');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+
+// ── Sentry (deve ser o primeiro middleware) ──────────────────
+initSentry();
+app.use(Sentry.Handlers.requestHandler());
+app.use(Sentry.Handlers.tracingHandler());
 
 // ── Segurança e parsing ──────────────────────────────────────
 app.use(helmet());
@@ -18,7 +24,6 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // ── Health check simples (Railway) ───────────────────────────
-// Responde imediatamente — sem dependência do banco
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -27,7 +32,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ── Health check com banco (diagnóstico) ─────────────────────
+// ── Health check com banco ───────────────────────────────────
 app.get('/health/db', async (req, res) => {
   try {
     const db = require('./config/database');
@@ -47,6 +52,9 @@ app.get('/', (req, res) => {
     docs: 'https://github.com/CaioAlexanderx/aura-backend',
   });
 });
+
+// ── Sentry error handler (antes do error handler global) ─────
+app.use(Sentry.Handlers.errorHandler());
 
 // ── 404 ──────────────────────────────────────────────────────
 app.use((req, res) => {
