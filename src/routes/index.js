@@ -4,6 +4,7 @@
 
 const express = require('express');
 const router  = express.Router();
+const { reviewsRouter, publicReviewsRouter } = require('./reviews');
 
 // BE-01 — Analytics de vendas
 router.use('/companies/:id/sales/analytics',    require('./salesAnalytics'));
@@ -19,5 +20,11 @@ router.use('/companies/:id/financial/history',  require('./financialHistory'));
 
 // BE-05 — CRM expandido
 router.use('/companies/:id/customers',          require('./crm'));
+
+// BE-06 — Avaliações (autenticado)
+router.use('/companies/:id/reviews',            reviewsRouter);
+
+// BE-06 — Avaliações (público — link do cliente)
+router.use('/reviews',                          publicReviewsRouter);
 
 module.exports = router;
