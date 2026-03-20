@@ -1,10 +1,3 @@
-// ============================================================
-// AURA. — Serviço de Folha de Pagamento
-// Tabelas INSS/IRRF 2026 (Portaria MPS)
-// LINGUAGEM: sempre "estimativa" — nunca "declaração oficial"
-// ============================================================
-
-// Faixas INSS 2026 — progressiva
 const INSS_BRACKETS_2026 = [
   { min: 0,       max: 1518.00,  rate: 0.075 },
   { min: 1518.01, max: 2793.88,  rate: 0.09  },
@@ -12,11 +5,10 @@ const INSS_BRACKETS_2026 = [
   { min: 4190.84, max: 8157.41,  rate: 0.14  },
 ];
 
-const INSS_TETO_2026    = 8157.41;
-const INSS_MAX_2026     = 951.63; // desconto máximo (teto)
-const FGTS_RATE         = 0.08;
+const INSS_TETO_2026 = 8157.41;
+const INSS_MAX_2026  = 951.63;
+const FGTS_RATE      = 0.08;
 
-// Faixas IRRF 2026 — progressiva
 const IRRF_BRACKETS_2026 = [
   { min: 0,       max: 2259.20,  rate: 0,     deduction: 0      },
   { min: 2259.21, max: 2826.65,  rate: 0.075, deduction: 169.44 },
@@ -27,18 +19,11 @@ const IRRF_BRACKETS_2026 = [
 
 const IRRF_DEDUCTION_PER_DEPENDENT = 189.59;
 
-/**
- * Calcula INSS progressivo do empregado
- * @param {number} grossSalary - Salário bruto
- * @returns {number} Valor do INSS
- */
 function calculateINSS(grossSalary) {
   if (grossSalary <= 0) return 0;
-
   const base = Math.min(grossSalary, INSS_TETO_2026);
   let inss = 0;
   let remaining = base;
-
   for (const bracket of INSS_BRACKETS_2026) {
     if (remaining <= 0) break;
     const bracketSize = bracket.max - bracket.min;
@@ -46,60 +31,34 @@ function calculateINSS(grossSalary) {
     inss += taxable * bracket.rate;
     remaining -= taxable;
   }
-
   return Math.min(parseFloat(inss.toFixed(2)), INSS_MAX_2026);
 }
 
-/**
- * Calcula IRRF mensal
- * @param {number} grossSalary - Salário bruto
- * @param {number} inss - INSS já calculado
- * @param {number} dependents - Número de dependentes
- * @returns {number} Valor do IRRF
- */
 function calculateIRRF(grossSalary, inss, dependents = 0) {
   if (grossSalary <= 0) return 0;
-
   const deductionDependents = dependents * IRRF_DEDUCTION_PER_DEPENDENT;
   const base = grossSalary - inss - deductionDependents;
-
   if (base <= 0) return 0;
-
   for (const bracket of IRRF_BRACKETS_2026) {
     if (base <= bracket.max) {
       const irrf = base * bracket.rate - bracket.deduction;
       return Math.max(parseFloat(irrf.toFixed(2)), 0);
     }
   }
-
   return 0;
 }
 
-/**
- * Calcula FGTS do empregador
- * @param {number} grossSalary - Salário bruto
- * @returns {number} Valor do FGTS
- */
 function calculateFGTS(grossSalary) {
   if (grossSalary <= 0) return 0;
   return parseFloat((grossSalary * FGTS_RATE).toFixed(2));
 }
 
-/**
- * Calcula holerite completo
- * @param {number} grossSalary - Salário bruto
- * @param {number} dependents - Número de dependentes
- * @param {number} otherDeductions - Outras deduções (vale, adiantamento)
- * @param {number} otherAdditions - Outras adições (horas extras, bônus)
- * @returns {object} Holerite completo
- */
 function calculatePayroll(grossSalary, dependents = 0, otherDeductions = 0, otherAdditions = 0) {
   const gross = parseFloat((grossSalary + otherAdditions).toFixed(2));
   const inss  = calculateINSS(gross);
   const irrf  = calculateIRRF(gross, inss, dependents);
   const fgts  = calculateFGTS(gross);
   const net   = parseFloat((gross - inss - irrf - otherDeductions).toFixed(2));
-
   return {
     gross_salary:     gross,
     inss_employee:    inss,
@@ -112,13 +71,6 @@ function calculatePayroll(grossSalary, dependents = 0, otherDeductions = 0, othe
 }
 
 module.exports = {
-  calculateINSS,
-  calculateIRRF,
-  calculateFGTS,
-  calculatePayroll,
-  INSS_BRACKETS_2026,
-  IRRF_BRACKETS_2026,
-  INSS_TETO_2026,
-  INSS_MAX_2026,
-  FGTS_RATE,
+  calculateINSS, calculateIRRF, calculateFGTS, calculatePayroll,
+  INSS_BRACKETS_2026, IRRF_BRACKETS_2026, INSS_TETO_2026, INSS_MAX_2026, FGTS_RATE,
 };
