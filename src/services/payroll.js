@@ -13,7 +13,7 @@ const INSS_BRACKETS_2026 = [
 ];
 
 const INSS_TETO_2026    = 8157.41;
-const INSS_MAX_2026     = 1141.04; // desconto máximo (teto)
+const INSS_MAX_2026     = 951.63; // desconto máximo (teto)
 const FGTS_RATE         = 0.08;
 
 // Faixas IRRF 2026 — progressiva
