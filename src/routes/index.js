@@ -6,15 +6,15 @@ const express = require('express');
 const router  = express.Router();
 
 // BE-01 — Analytics de vendas
-const salesAnalyticsRouter = require('./salesAnalytics');
-router.use('/companies/:id/sales/analytics', salesAnalyticsRouter);
+router.use('/companies/:id/sales/analytics',   require('./salesAnalytics'));
 
 // BE-02 — Ranking de funcionários / funcionário do mês
-const employeesRankingRouter = require('./employeesRanking');
-router.use('/companies/:id/employees/ranking', employeesRankingRouter);
+router.use('/companies/:id/employees/ranking', require('./employeesRanking'));
 
 // BE-03 — Categorias + curva ABC
-const productsRankingRouter = require('./productsRanking');
-router.use('/companies/:id/products', productsRankingRouter);
+router.use('/companies/:id/products',          require('./productsRanking'));
+
+// BE-04 — Histórico financeiro comparativo anual
+router.use('/companies/:id/financial/history', require('./financialHistory'));
 
 module.exports = router;
