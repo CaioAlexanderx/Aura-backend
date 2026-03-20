@@ -8,12 +8,10 @@ const { Sentry, initSentry } = require('./config/sentry');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Sentry (deve ser o primeiro middleware) ──────────────────
 initSentry();
 app.use(Sentry.Handlers.requestHandler());
 app.use(Sentry.Handlers.tracingHandler());
 
-// ── Segurança e parsing ──────────────────────────────────────
 app.use(helmet());
 app.use(cors({
   origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
@@ -23,16 +21,11 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// ── Health check simples (Railway) ───────────────────────────
+// ── Health checks ────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    version: '1.0.0',
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ status: 'ok', version: '1.0.0', timestamp: new Date().toISOString() });
 });
 
-// ── Health check com banco ───────────────────────────────────
 app.get('/health/db', async (req, res) => {
   try {
     const db = require('./config/database');
@@ -45,15 +38,14 @@ app.get('/health/db', async (req, res) => {
 
 // ── Rota raiz ────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({
-    name: 'Aura. API',
-    version: '1.0.0',
-    status: 'online',
-    docs: 'https://github.com/CaioAlexanderx/aura-backend',
-  });
+  res.json({ name: 'Aura. API', version: '1.0.0', status: 'online' });
 });
 
-// ── Sentry error handler (antes do error handler global) ─────
+// ── Rotas da API ─────────────────────────────────────────────
+const apiRouter = require('./routes/index');
+app.use('/api/v1', apiRouter);
+
+// ── Sentry error handler ─────────────────────────────────────
 app.use(Sentry.Handlers.errorHandler());
 
 // ── 404 ──────────────────────────────────────────────────────
@@ -67,7 +59,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Erro interno do servidor' });
 });
 
-// ── Iniciar servidor ─────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 Aura. API rodando na porta ${PORT}`);
   console.log(`   Ambiente: ${process.env.NODE_ENV || 'development'}`);
