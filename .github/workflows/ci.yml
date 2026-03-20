@@ -47,4 +47,4 @@ jobs:
         run: railway up --service aura-backend --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-
+          RAILWAY_PROJECT_ID: 957e2420-6768-4048-8826-0afcc730e769
