@@ -18,13 +18,16 @@ router.use('/companies/:id/products',           require('./productsRanking'));
 // BE-04 — Histórico financeiro comparativo anual
 router.use('/companies/:id/financial/history',  require('./financialHistory'));
 
-// BE-05 — CRM expandido
-router.use('/companies/:id/customers',          require('./crm'));
+// BE-05 + BE-07 — CRM expandido + Retenção
+const crmRouter       = require('./crm');
+const retentionRouter = require('./retention');
+router.use('/companies/:id/customers', crmRouter);
+router.use('/companies/:id/customers', retentionRouter);
 
 // BE-06 — Avaliações (autenticado)
-router.use('/companies/:id/reviews',            reviewsRouter);
+router.use('/companies/:id/reviews', reviewsRouter);
 
 // BE-06 — Avaliações (público — link do cliente)
-router.use('/reviews',                          publicReviewsRouter);
+router.use('/reviews', publicReviewsRouter);
 
 module.exports = router;
