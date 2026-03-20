@@ -47,3 +47,4 @@ jobs:
         run: railway up --service aura-backend --detach
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
