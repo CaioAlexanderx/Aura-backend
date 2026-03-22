@@ -32,7 +32,8 @@ router.use('/companies/:id/obligations',        require('./fiscalObligations'));
 // BE-13/15 — Código de barras e QR Code (cadastro + lookup PDV)
 router.use('/companies/:id/products',           require('./barcode'));
 
-// BE-14 — Etiquetas (dados para impressão client-side)
+// BE-19/20 — Comissão de vendas + Metas por funcionário
+router.use('/companies/:id/employees',          require('./commission'));
 router.use('/companies/:id/products',           require('./labels'));
 
 // BE-15 — Scanner PDV (lookup por código escaneado)
