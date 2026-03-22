@@ -1,5 +1,5 @@
 // ============================================================
-// AURA. — Rotas de Obrigações Fiscais (BE-10)
+// AURA. — Rotas de Obrigações Fiscais (BE-10 + BE-24)
 // ============================================================
 
 const express = require('express');
@@ -8,13 +8,12 @@ const {
   calculateMEIDAS, calculateSNDAS, checkMEILimit,
   generateMonthlyObligations, getObligations, updateCheckpoint,
 } = require('../services/fiscalObligations');
+const { getPersonalizedCalendar } = require('../services/obligationsCalendar');
+const db = require('../config/database');
 
 /**
  * GET /companies/:id/obligations
  * Lista obrigações com status e alertas
- * Query params:
- *   status = pending | completed | overdue
- *   year   = YYYY
  */
 router.get('/', async (req, res) => {
   try {
@@ -28,9 +27,32 @@ router.get('/', async (req, res) => {
 });
 
 /**
+ * GET /companies/:id/obligations/calendar
+ * Calendário personalizado por regime + CNAE + tem funcionário
+ * Query params: filter = all | aura_resolve | voce_faz
+ */
+router.get('/calendar', async (req, res) => {
+  try {
+    const { filter = 'all' } = req.query;
+    const validFilters = ['all', 'aura_resolve', 'voce_faz', 'contador'];
+    if (!validFilters.includes(filter)) {
+      return res.status(400).json({ error: `filter inválido. Use: ${validFilters.join(', ')}` });
+    }
+    const data = await getPersonalizedCalendar(req.params.id);
+    if (!data) return res.status(404).json({ error: 'Empresa não encontrada' });
+    const calendar = filter === 'all'
+      ? data.calendar
+      : data.calendar.filter(c => c.filter_label === filter);
+    res.json({ ...data, calendar });
+  } catch (err) {
+    console.error('Erro em GET /obligations/calendar:', err.message);
+    res.status(500).json({ error: 'Erro ao montar calendário de obrigações' });
+  }
+});
+
+/**
  * POST /companies/:id/obligations/generate
- * Gera obrigações do mês (chamado pelo worker mensal)
- * body: { reference_month } ex: "2026-03-01"
+ * Gera obrigações do mês
  */
 router.post('/generate', async (req, res) => {
   try {
@@ -48,8 +70,7 @@ router.post('/generate', async (req, res) => {
 
 /**
  * PATCH /companies/:id/obligations/:obligationId/checkpoint
- * Atualiza progresso dos checkpoints gamificados
- * body: { checkpoint_done }
+ * Atualiza checkpoints gamificados
  */
 router.patch('/:obligationId/checkpoint', async (req, res) => {
   try {
@@ -73,17 +94,12 @@ router.patch('/:obligationId/checkpoint', async (req, res) => {
 /**
  * GET /companies/:id/obligations/das/preview
  * Estimativa do DAS do mês
- * Query params:
- *   activity_type    = commerce | services | both (MEI)
- *   current_revenue  = receita do mês atual (SN)
- *   revenue_12m      = receita acumulada 12 meses (SN)
  */
 router.get('/das/preview', async (req, res) => {
   try {
     const companyId = req.params.id;
     const { activity_type, current_revenue, revenue_12m } = req.query;
 
-    // Buscar regime da empresa
     const { rows } = await db.query(
       'SELECT tax_regime, annual_revenue FROM companies WHERE id = $1',
       [companyId]
@@ -93,8 +109,8 @@ router.get('/das/preview', async (req, res) => {
     const { tax_regime, annual_revenue } = rows[0];
 
     if (tax_regime === 'mei') {
-      const das         = calculateMEIDAS(activity_type || 'services');
-      const limitCheck  = checkMEILimit(parseFloat(annual_revenue));
+      const das        = calculateMEIDAS(activity_type || 'services');
+      const limitCheck = checkMEILimit(parseFloat(annual_revenue));
       return res.json({ regime: 'mei', das, limit_check: limitCheck });
     }
 
@@ -114,8 +130,5 @@ router.get('/das/preview', async (req, res) => {
     res.status(500).json({ error: 'Erro ao calcular estimativa DAS' });
   }
 });
-
-// Importar db para o endpoint das/preview
-const db = require('../config/database');
 
 module.exports = router;
