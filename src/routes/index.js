@@ -32,11 +32,19 @@ router.use('/companies/:id/obligations',        require('./fiscalObligations'));
 // BE-13/15 — Código de barras e QR Code (cadastro + lookup PDV)
 router.use('/companies/:id/products',           require('./barcode'));
 
-// BE-19/20 — Comissão de vendas + Metas por funcionário
-router.use('/companies/:id/employees',          require('./commission'));
+// BE-14 — Etiquetas (dados para impressão client-side)
 router.use('/companies/:id/products',           require('./labels'));
 
 // BE-15 — Scanner PDV (lookup por código escaneado)
 router.use('/companies/:id/pdv',                require('./scanner'));
+
+// BE-16 — Variantes de produto
+router.use('/companies/:id/products/:pid/variants', require('./variants'));
+
+// BE-19/20 — Comissão de vendas + Metas por funcionário
+router.use('/companies/:id/employees',          require('./commission'));
+
+// BE-17/18 — Gestão Aura (dashboard + equipe)
+router.use('/admin',                            require('./admin'));
 
 module.exports = router;
