@@ -47,4 +47,7 @@ router.use('/companies/:id/employees',          require('./commission'));
 // BE-17/18 — Gestão Aura (dashboard + equipe)
 router.use('/admin',                            require('./admin'));
 
+// BE-22 — Modo Salão Parceiro (Lei 13.352/2016)
+router.use('/companies/:id/salon-partners',     require('./salonPartner'));
+
 module.exports = router;
