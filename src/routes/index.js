@@ -50,4 +50,8 @@ router.use('/admin',                            require('./admin'));
 // BE-22 — Modo Salão Parceiro (Lei 13.352/2016)
 router.use('/companies/:id/salon-partners',     require('./salonPartner'));
 
+// BE-25 — Módulo Odontologia
+router.use('/companies/:id/dental',             require('./dental'));
+router.use('/dental',                           require('./dental')); // rota pública /dental/sign/:token
+
 module.exports = router;
