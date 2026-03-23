@@ -26,32 +26,36 @@ router.use('/companies/:id/customers',          require('./retention'));
 router.use('/companies/:id/reviews',            reviewsRouter);
 router.use('/reviews',                          publicReviewsRouter);
 
+// BE-09 — Multi-usuário RBAC
+router.use('/companies/:id/members',            require('./members'));
+router.use('/members',                          require('./members')); // /members/accept/:token
+
 // BE-10 — Obrigações fiscais
 router.use('/companies/:id/obligations',        require('./fiscalObligations'));
 
-// BE-13/15 — Código de barras e QR Code (cadastro + lookup PDV)
+// BE-13/15 — Código de barras e QR Code
 router.use('/companies/:id/products',           require('./barcode'));
 
-// BE-14 — Etiquetas (dados para impressão client-side)
+// BE-14 — Etiquetas
 router.use('/companies/:id/products',           require('./labels'));
 
-// BE-15 — Scanner PDV (lookup por código escaneado)
+// BE-15 — Scanner PDV
 router.use('/companies/:id/pdv',                require('./scanner'));
 
 // BE-16 — Variantes de produto
 router.use('/companies/:id/products/:pid/variants', require('./variants'));
 
-// BE-19/20 — Comissão de vendas + Metas por funcionário
+// BE-19/20 — Comissão de vendas + Metas
 router.use('/companies/:id/employees',          require('./commission'));
 
-// BE-17/18 — Gestão Aura (dashboard + equipe)
+// BE-17/18 — Gestão Aura
 router.use('/admin',                            require('./admin'));
 
-// BE-22 — Modo Salão Parceiro (Lei 13.352/2016)
+// BE-22 — Salão Parceiro
 router.use('/companies/:id/salon-partners',     require('./salonPartner'));
 
 // BE-25 — Módulo Odontologia
 router.use('/companies/:id/dental',             require('./dental'));
-router.use('/dental',                           require('./dental')); // rota pública /dental/sign/:token
+router.use('/dental',                           require('./dental'));
 
 module.exports = router;
