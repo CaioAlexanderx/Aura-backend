@@ -62,4 +62,7 @@ router.use('/dental',                           require('./dentalSign'));
 // INF-04 — Impressão window.print()
 router.use('/companies/:id/print',              require('./print'));
 
+// BE-26 — Guia Fiscal Assistido
+router.use('/companies/:id/guides',             require('./guides'));
+
 module.exports = router;
