@@ -7,6 +7,8 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "jest --forceExit --detectOpenHandles",
+    "test:unit": "jest --forceExit --detectOpenHandles --testPathPattern=tests/unit",
+    "test:integration": "jest --forceExit --detectOpenHandles --testPathPattern=tests/integration",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage --forceExit"
   },
