@@ -55,7 +55,9 @@ router.use('/companies/:id/salon-partners',     require('./salonPartner'));
 
 // BE-25 — Módulo Odontologia
 router.use('/companies/:id/dental',             require('./dental'));
-router.use('/dental',                           require('./dental'));
+
+// BE-25-10 — Assinatura via QR+WebSocket (rotas públicas)
+router.use('/dental',                           require('./dentalSign'));
 
 // INF-04 — Impressão window.print()
 router.use('/companies/:id/print',              require('./print'));
