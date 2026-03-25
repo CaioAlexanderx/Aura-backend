@@ -69,4 +69,8 @@ router.use('/companies/:id/guides',             require('./guides'));
 // Nota: registrado ANTES do roteador genérico de transactions para evitar conflito
 router.use('/companies/:id/transactions',       require('./transactionsBatch'));
 
+// BE-28 — Importação de Dados (clientes, produtos, NF-e XML)
+// Registrar em /companies/:id para compartilhar o prefixo correto
+router.use('/companies/:id',                    require('./importData'));
+
 module.exports = router;

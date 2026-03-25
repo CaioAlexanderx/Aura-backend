@@ -1,0 +1,5 @@
+nome,preco_venda,preco_custo,estoque,estoque_minimo,codigo_barras,sku,categoria,unidade
+Camiseta Azul M,79.90,35.00,50,10,7891234567890,CAM-AZM,Vestuário,un
+Caneca 300ml,24.90,8.50,120,20,7897654321098,CAN-300,Utilidades,un
+Shampoo Keratina 300ml,45.00,18.00,80,15,7890123456789,SHA-KER,Beleza,un
+Bolo de Chocolate 1kg,65.00,28.00,5,2,,BOL-CHO,Alimentos,un
