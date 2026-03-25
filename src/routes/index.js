@@ -62,7 +62,11 @@ router.use('/dental',                           require('./dentalSign'));
 // INF-04 — Impressão window.print()
 router.use('/companies/:id/print',              require('./print'));
 
-// BE-26 — Guia Fiscal Assistido
+// BE-26 — Guia Assistido Universal
 router.use('/companies/:id/guides',             require('./guides'));
+
+// BE-27 — Lançamento em Massa + Importação OFX
+// Nota: registrado ANTES do roteador genérico de transactions para evitar conflito
+router.use('/companies/:id/transactions',       require('./transactionsBatch'));
 
 module.exports = router;
