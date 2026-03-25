@@ -66,11 +66,12 @@ router.use('/companies/:id/print',              require('./print'));
 router.use('/companies/:id/guides',             require('./guides'));
 
 // BE-27 — Lançamento em Massa + Importação OFX
-// Nota: registrado ANTES do roteador genérico de transactions para evitar conflito
 router.use('/companies/:id/transactions',       require('./transactionsBatch'));
 
 // BE-28 — Importação de Dados (clientes, produtos, NF-e XML)
-// Registrar em /companies/:id para compartilhar o prefixo correto
 router.use('/companies/:id',                    require('./importData'));
+
+// BE-29 — eSocial ME (geração de XMLs S-1.3 + status do ciclo)
+router.use('/companies/:id/esocial',            require('./esocial'));
 
 module.exports = router;
