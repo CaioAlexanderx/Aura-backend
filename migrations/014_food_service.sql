@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS food_menus (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   company_id    UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
   name          TEXT NOT NULL DEFAULT 'Cardápio',
-  slug          TEXT,                        -- URL pública: /cardapio/:slug
+  slug          TEXT,
   description   TEXT,
   is_active     BOOLEAN NOT NULL DEFAULT TRUE,
   accepts_online_orders BOOLEAN NOT NULL DEFAULT FALSE,
@@ -38,26 +38,26 @@ CREATE TABLE IF NOT EXISTS food_items (
   name            TEXT NOT NULL,
   description     TEXT,
   price           NUMERIC(10,2) NOT NULL DEFAULT 0,
-  cost_price      NUMERIC(10,2),             -- calculado da ficha técnica
-  photo_url       TEXT,                      -- Cloudflare R2
+  cost_price      NUMERIC(10,2),
+  photo_url       TEXT,
   is_active       BOOLEAN NOT NULL DEFAULT TRUE,
   is_available    BOOLEAN NOT NULL DEFAULT TRUE,
-  preparation_time_min INTEGER,              -- tempo de preparo em minutos
-  serves          INTEGER DEFAULT 1,         -- porção para quantas pessoas
+  preparation_time_min INTEGER,
+  serves          INTEGER DEFAULT 1,
   sort_order      INTEGER NOT NULL DEFAULT 0,
-  tags            TEXT[],                    -- ['vegano','sem_gluten','picante']
+  tags            TEXT[],
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ── 4. VARIAÇÕES (tamanho, ponto, etc.) ───────────────────────
+-- ── 4. VARIAÇÕES ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS food_item_variations (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   item_id     UUID NOT NULL REFERENCES food_items(id) ON DELETE CASCADE,
   company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-  name        TEXT NOT NULL,                 -- 'P', 'M', 'G' / 'Mal passado', etc.
-  price_delta NUMERIC(10,2) NOT NULL DEFAULT 0, -- diferença de preço (+/-)
-  is_required BOOLEAN NOT NULL DEFAULT FALSE, -- variação obrigatória?
+  name        TEXT NOT NULL,
+  price_delta NUMERIC(10,2) NOT NULL DEFAULT 0,
+  is_required BOOLEAN NOT NULL DEFAULT FALSE,
   sort_order  INTEGER NOT NULL DEFAULT 0,
   is_active   BOOLEAN NOT NULL DEFAULT TRUE
 );
@@ -66,24 +66,23 @@ CREATE TABLE IF NOT EXISTS food_item_variations (
 CREATE TABLE IF NOT EXISTS food_addons (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-  item_id     UUID REFERENCES food_items(id) ON DELETE CASCADE, -- null = global
+  item_id     UUID REFERENCES food_items(id) ON DELETE CASCADE,
   name        TEXT NOT NULL,
   price       NUMERIC(10,2) NOT NULL DEFAULT 0,
   max_qty     INTEGER DEFAULT 1,
   is_active   BOOLEAN NOT NULL DEFAULT TRUE
 );
 
--- ── 6. FICHA TÉCNICA (ingredientes por item) ──────────────────
+-- ── 6. FICHA TÉCNICA ──────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS food_recipes (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   item_id         UUID NOT NULL REFERENCES food_items(id) ON DELETE CASCADE,
   company_id      UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
   ingredient_name TEXT NOT NULL,
-  unit            TEXT NOT NULL DEFAULT 'un', -- kg, g, l, ml, un, colher_sopa
+  unit            TEXT NOT NULL DEFAULT 'un',
   quantity        NUMERIC(10,4) NOT NULL,
-  unit_cost       NUMERIC(10,4) NOT NULL DEFAULT 0, -- custo por unidade
-  -- custo total = quantity * unit_cost (calculado on-read)
-  product_id      UUID REFERENCES products(id) ON DELETE SET NULL, -- vínculo com estoque
+  unit_cost       NUMERIC(10,4) NOT NULL DEFAULT 0,
+  product_id      UUID REFERENCES products(id) ON DELETE SET NULL,
   notes           TEXT,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -93,22 +92,29 @@ CREATE TABLE IF NOT EXISTS food_recipes (
 CREATE TABLE IF NOT EXISTS food_tables (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-  number      TEXT NOT NULL,                 -- '1', '2', 'Varanda 3', etc.
+  number      TEXT NOT NULL,
   seats       INTEGER,
-  qr_code_url TEXT,                          -- QR para auto-pedido
-  status      TEXT NOT NULL DEFAULT 'free'   -- free | occupied | reserved
+  qr_code_url TEXT,
+  status      TEXT NOT NULL DEFAULT 'free'
     CHECK (status IN ('free','occupied','reserved')),
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(company_id, number)
 );
 
--- ── 8. PEDIDOS ────────────────────────────────────────────────
-CREATE TYPE IF NOT EXISTS food_order_channel AS ENUM
-  ('presencial','delivery_proprio','ifood','whatsapp','online');
+-- ── 8. ENUMs (padrão PostgreSQL — sem IF NOT EXISTS) ──────────
+DO $$ BEGIN
+  CREATE TYPE food_order_channel AS ENUM
+    ('presencial','delivery_proprio','ifood','whatsapp','online');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TYPE IF NOT EXISTS food_order_status AS ENUM
-  ('pending','confirmed','preparing','ready','delivered','cancelled');
+DO $$ BEGIN
+  CREATE TYPE food_order_status AS ENUM
+    ('pending','confirmed','preparing','ready','delivered','cancelled');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
+-- ── 9. PEDIDOS ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS food_orders (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   company_id      UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -121,9 +127,9 @@ CREATE TABLE IF NOT EXISTS food_orders (
   delivery_fee    NUMERIC(10,2) NOT NULL DEFAULT 0,
   total           NUMERIC(10,2) NOT NULL DEFAULT 0,
   notes           TEXT,
-  customer_name   TEXT,                      -- para pedidos sem cadastro
+  customer_name   TEXT,
   customer_phone  TEXT,
-  delivery_address JSONB,                    -- {street, number, complement, neighborhood}
+  delivery_address JSONB,
   payment_method  TEXT,
   paid_at         TIMESTAMPTZ,
   confirmed_at    TIMESTAMPTZ,
@@ -135,23 +141,23 @@ CREATE TABLE IF NOT EXISTS food_orders (
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ── 9. ITENS DO PEDIDO ────────────────────────────────────────
+-- ── 10. ITENS DO PEDIDO ───────────────────────────────────────
 CREATE TABLE IF NOT EXISTS food_order_items (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   order_id        UUID NOT NULL REFERENCES food_orders(id) ON DELETE CASCADE,
   item_id         UUID REFERENCES food_items(id) ON DELETE SET NULL,
-  item_name       TEXT NOT NULL,             -- snapshot do nome no momento do pedido
+  item_name       TEXT NOT NULL,
   variation_name  TEXT,
   quantity        INTEGER NOT NULL DEFAULT 1,
   unit_price      NUMERIC(10,2) NOT NULL,
   total_price     NUMERIC(10,2) NOT NULL,
-  addons          JSONB,                     -- [{name, price, qty}]
-  notes           TEXT,                      -- observações do cliente
+  addons          JSONB,
+  notes           TEXT,
   kds_status      TEXT NOT NULL DEFAULT 'pending'
     CHECK (kds_status IN ('pending','preparing','done'))
 );
 
--- ── 10. EVENTOS KDS (histórico de status) ─────────────────────
+-- ── 11. EVENTOS KDS ───────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS food_kds_events (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   order_id    UUID NOT NULL REFERENCES food_orders(id) ON DELETE CASCADE,
@@ -163,18 +169,18 @@ CREATE TABLE IF NOT EXISTS food_kds_events (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ── 11. ZONAS DE ENTREGA ──────────────────────────────────────
+-- ── 12. ZONAS DE ENTREGA ──────────────────────────────────────
 CREATE TABLE IF NOT EXISTS food_delivery_zones (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-  name        TEXT NOT NULL,                 -- 'Centro', 'Zona Sul'
+  name        TEXT NOT NULL,
   fee         NUMERIC(10,2) NOT NULL DEFAULT 0,
-  min_time_min INTEGER,                      -- tempo mínimo de entrega
+  min_time_min INTEGER,
   max_time_min INTEGER,
   is_active   BOOLEAN NOT NULL DEFAULT TRUE
 );
 
--- ── 12. ÍNDICES ───────────────────────────────────────────────
+-- ── 13. ÍNDICES ───────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_food_items_company     ON food_items(company_id);
 CREATE INDEX IF NOT EXISTS idx_food_items_category    ON food_items(category_id);
 CREATE INDEX IF NOT EXISTS idx_food_orders_company    ON food_orders(company_id);
@@ -184,7 +190,7 @@ CREATE INDEX IF NOT EXISTS idx_food_order_items_order ON food_order_items(order_
 CREATE INDEX IF NOT EXISTS idx_food_kds_company       ON food_kds_events(company_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_food_recipes_item      ON food_recipes(item_id);
 
--- ── 13. RLS (Row Level Security) ──────────────────────────────
+-- ── 14. RLS ───────────────────────────────────────────────────
 ALTER TABLE food_menus            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE food_categories       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE food_items            ENABLE ROW LEVEL SECURITY;
