@@ -5,6 +5,7 @@
 const express = require('express');
 const router  = express.Router();
 const { reviewsRouter, publicReviewsRouter } = require('./reviews');
+const { checklistRouter } = require('./checklist');
 
 // BE-01 — Analytics de vendas
 router.use('/companies/:id/sales/analytics',    require('./salesAnalytics'));
@@ -54,10 +55,17 @@ router.use('/companies/:id',                    require('./importData'));
 // BE-29 — eSocial ME
 router.use('/companies/:id/esocial',            require('./esocial'));
 
+// ── CORE ──────────────────────────────────────────────────────
+// CORE-01 — Onboarding: CNPJ lookup RF + detecção regime/vertical
+router.post('/onboarding/cnpj-lookup',          require('./onboarding'));
+router.use('/companies/:id/onboarding',         require('./onboarding'));
+// CORE-02 — Checklist mensal inteligente por regime + vertical
+router.use('/companies/:id/checklist',          checklistRouter);
+
 // ── FOOD SERVICE ──────────────────────────────────────────────
 // FOOD-01/02 — Cardápio, ficha técnica, mesas, zonas de entrega
 router.use('/companies/:id/food',               require('./food'));
-// FOOD-03/04 — Pedidos, KDS, delivery, WhatsApp, baixa de estoque, review
+// FOOD-03/04 — Pedidos, KDS, delivery, WhatsApp, baixa estoque
 router.use('/companies/:id/food/orders',        require('./foodOrders'));
 // FOOD-04b — Motoboys: CRUD, despacho, comissão, histórico
 router.use('/companies/:id/food/deliverers',    require('./foodDeliverers'));
@@ -65,14 +73,14 @@ router.use('/companies/:id/food/deliverers',    require('./foodDeliverers'));
 router.use('/companies/:id/food/reports',       require('./foodReports'));
 // FOOD-06 — iFood: import CSV, pedidos importados, stats, template
 router.use('/companies/:id/food/ifood',         require('./foodIfood'));
-// FOOD-07 — App garçom: mesas, menu, chamadas (auth) + QR mesa (público)
+// FOOD-07 — App garçom: mesas, menu, chamadas (auth) + QR mesa
 router.use('/companies/:id/food/waiter',        require('./foodWaiter'));
 // FOOD-08 — NFC-e + Comanda térmica 80mm
 router.use('/companies/:id/food/nfce',          require('./foodNfce'));
-// FOOD-09 — Cardápio por período (horários de ativação automática)
+// FOOD-09 — Cardápio por período
 router.use('/companies/:id/food/schedule',      require('./foodSchedule'));
 
-// Rotas públicas (QR mesa + cardápio público + schedule/active)
+// Rotas públicas
 router.use('/food/table',                       require('./foodWaiter'));
 router.use('/food/schedule',                    require('./foodSchedule'));
 router.use('/food',                             require('./food'));
