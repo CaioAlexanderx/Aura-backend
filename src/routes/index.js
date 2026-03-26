@@ -74,13 +74,24 @@ router.use('/companies/:id',                    require('./importData'));
 // BE-29 — eSocial ME (geração de XMLs S-1.3 + status do ciclo)
 router.use('/companies/:id/esocial',            require('./esocial'));
 
-// FOOD-01..04 — Módulo Food Service
-// Cardápio, variações, adicionais, ficha técnica, mesas, zonas de entrega
+// ── FOOD SERVICE ─────────────────────────────────────────────
+// FOOD-01/02 — Cardápio, ficha técnica, mesas, zonas de entrega
 router.use('/companies/:id/food',               require('./food'));
-// Pedidos, KDS (controle de produção), delivery, notificações WhatsApp
+
+// FOOD-03/04 — Pedidos, KDS, delivery, WhatsApp stub
 router.use('/companies/:id/food/orders',        require('./foodOrders'));
 
-// Cardápio público (sem auth) — /food/menu/public/:slug
+// FOOD-05 — Relatórios: top-itens, pico, desperdício, dashboard
+router.use('/companies/:id/food/reports',       require('./foodReports'));
+
+// FOOD-06 — iFood: import CSV, pedidos importados, stats, template
+router.use('/companies/:id/food/ifood',         require('./foodIfood'));
+
+// FOOD-07 — App garçom: mesas, menu, chamadas (auth)
+router.use('/companies/:id/food/waiter',        require('./foodWaiter'));
+
+// Rotas públicas (QR mesa + cardápio público) — sem auth
+router.use('/food/table',                       require('./foodWaiter'));
 router.use('/food',                             require('./food'));
 
 module.exports = router;
