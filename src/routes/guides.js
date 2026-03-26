@@ -1,6 +1,6 @@
 // ============================================================
 // AURA. — Guia Assistido Universal
-// Features: BE-26 (fiscal) + BE-29 (trabalhista ME)
+// Features: BE-26 (fiscal) + BE-29 (trabalhista ME) + GUIDE-01
 // ============================================================
 // Endpoints:
 //   GET  /companies/:id/guides                        → listar guias (filtros: category, module, plan)
@@ -22,8 +22,7 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
-// ─── Utilitários ────────────────────────────────────────────
-
+// ── Utilitários ──────────────────────────────────────────────────
 function formatBRL(value) {
   return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value || 0);
 }
@@ -59,14 +58,13 @@ function calcIRRF(baseCalculo) {
   return baseCalculo * 0.275 - 896.00;
 }
 
-// ─── computeGuideValues — motor central ─────────────────────
-
+// ── computeGuideValues — motor central ──────────────────────────
 async function computeGuideValues(slug, companyId, period) {
   const values = {};
 
   try {
 
-    // ── FISCAL ──────────────────────────────────────────────
+    // ── FISCAL ─────────────────────────────────────────────
 
     if (slug === 'pgdas_d') {
       const { year, month } = parsePeriod(period);
@@ -163,7 +161,133 @@ async function computeGuideValues(slug, companyId, period) {
       values.media_funcionarios         = { label: 'Média de funcionários no ano',   value: String(mediaR.rows[0]?.media || 0) };
     }
 
-    // ── TRABALHISTA ──────────────────────────────────────────
+    // ── GUIDE-01: PRÓ-LABORE + FATOR R ────────────────────────
+
+    if (slug === 'pro_labore' || slug === 'fator_r') {
+      const INSS_CAP  = 7786.02;
+      const INSS_RATE = 0.11;
+      const FR_TARGET = 0.28;
+
+      // Receita bruta 12 meses
+      const revR = await db.query(
+        `SELECT
+           COALESCE(SUM(amount),0) AS rev12,
+           COALESCE(SUM(CASE WHEN date_trunc('month', paid_at)=date_trunc('month',NOW()) THEN amount ELSE 0 END),0) AS rev_month
+         FROM transactions
+         WHERE company_id=$1 AND type='income' AND status='confirmed'
+           AND paid_at >= NOW() - INTERVAL '12 months'`,
+        [companyId]
+      );
+      const rev12    = parseFloat(revR.rows[0]?.rev12   || 0);
+      const revMonth = parseFloat(revR.rows[0]?.rev_month || 0);
+
+      // Pró-labore acumulado 12 meses
+      const plR = await db.query(
+        `SELECT COALESCE(SUM(amount),0) AS pl12
+         FROM prolabore_history
+         WHERE company_id=$1
+           AND reference_month >= date_trunc('month',NOW()) - INTERVAL '11 months'`,
+        [companyId]
+      );
+      const pl12 = parseFloat(plR.rows[0]?.pl12 || 0);
+
+      // Fator R atual
+      const frCurrent = rev12 > 0 ? parseFloat((pl12 / rev12 * 100).toFixed(1)) : null;
+      const inAnexoIII = frCurrent !== null && frCurrent >= 28;
+
+      // Pró-labore sugerido para atingir Fator R 28%
+      const minNeeded  = Math.max(rev12 * FR_TARGET - pl12, 1518);
+      const suggested  = parseFloat(minNeeded.toFixed(2));
+      const inss       = parseFloat((Math.min(suggested, INSS_CAP) * INSS_RATE).toFixed(2));
+      const netPl      = parseFloat((suggested - inss).toFixed(2));
+
+      // Economia estimada ao migrar Anexo V → III (sobre receita de serviços do mês)
+      const aliqV     = 0.155;
+      const aliqIII   = 0.06;
+      const economia  = parseFloat((revMonth * (aliqV - aliqIII)).toFixed(2));
+
+      const gap = frCurrent !== null ? parseFloat(Math.max(0, 28 - frCurrent).toFixed(1)) : null;
+
+      values.fator_r_percentual       = { label: 'Fator R atual (últimos 12 meses)',  value: frCurrent !== null ? `${frCurrent}%` : 'Sem dados', raw: frCurrent,
+        alert: !inAnexoIII ? `Fator R em ${frCurrent}% — Anexo V (~15,5%). Aumente o pró-labore para chegar a 28%.` : null };
+      values.fator_r_gap              = { label: 'Pontos para chegar ao Anexo III',   value: gap !== null ? `${gap}pp` : '—', raw: gap };
+      values.anexo_resultado          = { label: 'Anexo atual',                        value: inAnexoIII ? 'III (~6%)' : 'V (~15,5%)', raw: inAnexoIII ? 'III' : 'V' };
+      values.valor_prolabore_sugerido = { label: 'Pró-labore sugerido este mês',       value: formatBRL(suggested), raw: suggested,
+        note: 'Estimativa da Aura para atingir o Fator R de 28%. Consulte seu contador para decisões oficiais.' };
+      values.inss_prolabore           = { label: 'INSS do sócio (11%)',                value: formatBRL(inss), raw: inss };
+      values.valor_liquido            = { label: 'Pró-labore líquido (após INSS)',      value: formatBRL(netPl), raw: netPl };
+      values.economia_mensal_estimada = { label: 'Economia estimada/mês (se Anexo III)', value: formatBRL(economia), raw: economia,
+        note: 'Estimativa com base na receita de serviços do mês atual. Fator R é calculado sobre os 12 meses.' };
+    }
+
+    // ── GUIDE-01: IRPF MEI ──────────────────────────────────
+
+    if (slug === 'irpf_mei') {
+      const { year } = parsePeriod(period) || { year: String(new Date().getFullYear() - 1) };
+      const start = `${year}-01-01`, end = `${year}-12-31`;
+
+      // Faturamento total do ano (base para calcular lucro isento MEI)
+      const revR = await db.query(
+        `SELECT COALESCE(SUM(amount),0) AS total FROM transactions
+         WHERE company_id=$1 AND type='income' AND status='confirmed'
+           AND paid_at::date BETWEEN $2 AND $3`,
+        [companyId, start, end]
+      );
+      const totalRev = parseFloat(revR.rows[0]?.total || 0);
+
+      // Regime para calcular percentual de lucro isento
+      const compR = await db.query(
+        `SELECT tax_regime FROM companies WHERE id=$1`, [companyId]
+      );
+      const regime = compR.rows[0]?.tax_regime || 'mei';
+
+      // Percentuais de isenção conforme atividade (MEI simplificado)
+      // Comeércio/indústria: 8%, Transporte carga: 16%, Serviços: 32%
+      // Usamos 32% como conservador (pior caso para serviços)
+      const ISENCAO_PCT = 0.32;
+      const rendIsento = parseFloat((totalRev * ISENCAO_PCT).toFixed(2));
+      const limiteObrig = 33888; // 2025 base year
+
+      // Pró-labore do ano (rendimento tributável)
+      const plR = await db.query(
+        `SELECT COALESCE(SUM(amount),0) AS total FROM prolabore_history
+         WHERE company_id=$1 AND reference_month BETWEEN $2 AND $3`,
+        [companyId, start, end]
+      );
+      const plAnual = parseFloat(plR.rows[0]?.total || 0);
+
+      // Obrigado a declarar se pró-labore > limite ou rendimentos isentos > 200k
+      const obrigadoTrib  = plAnual > limiteObrig;
+      const obrigadoIsento= rendIsento > 200000;
+      const obrigado      = obrigadoTrib || obrigadoIsento;
+
+      values.obrigado_declarar   = {
+        label: 'Você está obrigado a declarar?',
+        value: obrigado ? 'Sim' : 'Provavelmente não (confira os critérios)',
+        raw:   obrigado,
+        alert: obrigado ? 'A Aura identificou que você pode estar obrigado a declarar o IRPF. Confira com seu contador.' : null,
+        note:  'Baseado nos lançamentos cadastrados. Outros critérios (bens, bolsa, etc.) não são verificados aqui.',
+      };
+      values.rendimentos_isentos = {
+        label: `Lucros MEI isentos estimados — ${year}`,
+        value: formatBRL(rendIsento),
+        raw:   rendIsento,
+        note:  'Estimativa: 32% do faturamento (regra para serviços). Comércio usa 8%. Valor exato: ver DASN-SIMEI.',
+      };
+      values.rendimentos_tributaveis = {
+        label: `Pró-labore tributado — ${year}`,
+        value: formatBRL(plAnual),
+        raw:   plAnual,
+        note:  'Pró-labore registrado na Aura. Inclua também rendimentos de outros empregos.',
+      };
+      values.limite_rendimento = {
+        label: 'Limite para obrigatoriedade (tributáveis)',
+        value: formatBRL(limiteObrig),
+        raw:   limiteObrig,
+      };
+    }
+
+    // ── TRABALHISTA ─────────────────────────────────────────
 
     if (slug === 'esocial_folha_mensal') {
       const { year, month } = parsePeriod(period);
@@ -209,14 +333,14 @@ async function computeGuideValues(slug, companyId, period) {
 
       const totalINSSPatronal = calcINSSPatronal(totalBruto);
 
-      values.num_funcionarios       = { label: 'Funcionários na folha',             value: String(numFunc), raw: numFunc };
-      values.total_salarios         = { label: `Total de salários — ${month}/${year}`, value: formatBRL(totalBruto), raw: totalBruto };
+      values.num_funcionarios        = { label: 'Funcionários na folha',             value: String(numFunc), raw: numFunc };
+      values.total_salarios          = { label: `Total de salários — ${month}/${year}`, value: formatBRL(totalBruto), raw: totalBruto };
       values.total_inss_funcionarios = { label: 'INSS descontado dos funcionários', value: formatBRL(totalINSSFunc), raw: totalINSSFunc };
-      values.total_irrf             = { label: 'IRRF retido na fonte',              value: formatBRL(totalIRRF), raw: totalIRRF };
-      values.total_fgts             = { label: 'FGTS a depositar (8%)',             value: formatBRL(totalFGTS), raw: totalFGTS,
+      values.total_irrf              = { label: 'IRRF retido na fonte',              value: formatBRL(totalIRRF), raw: totalIRRF };
+      values.total_fgts              = { label: 'FGTS a depositar (8%)',             value: formatBRL(totalFGTS), raw: totalFGTS,
         note: 'Pago via FGTS Digital após fechar a folha no eSocial.' };
-      values.total_liquido          = { label: 'Total líquido a pagar',             value: formatBRL(totalLiquido), raw: totalLiquido };
-      values.inss_patronal_estimado = { label: 'INSS patronal estimado (25,8%)',    value: formatBRL(totalINSSPatronal), raw: totalINSSPatronal,
+      values.total_liquido           = { label: 'Total líquido a pagar',             value: formatBRL(totalLiquido), raw: totalLiquido };
+      values.inss_patronal_estimado  = { label: 'INSS patronal estimado (25,8%)',    value: formatBRL(totalINSSPatronal), raw: totalINSSPatronal,
         note: 'Pago via DCTFWeb no e-CAC até o dia 20.' };
     }
 
@@ -336,7 +460,7 @@ async function computeGuideValues(slug, companyId, period) {
   return values;
 }
 
-// ─── GET /companies/:id/guides ───────────────────────────────
+// ── GET /companies/:id/guides ─────────────────────────────────────
 router.get('/', requireAuth, async (req, res) => {
   try {
     const companyId = req.params.id;
@@ -392,7 +516,7 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-// ─── GET /companies/:id/guides/:slug ────────────────────────
+// ── GET /companies/:id/guides/:slug ────────────────────────────
 router.get('/:slug', requireAuth, async (req, res) => {
   try {
     const { id: companyId, slug } = req.params;
@@ -440,7 +564,7 @@ router.get('/:slug', requireAuth, async (req, res) => {
   }
 });
 
-// ─── POST /companies/:id/guides/:slug/complete ──────────────
+// ── POST /companies/:id/guides/:slug/complete ──────────────────
 router.post('/:slug/complete', requireAuth, async (req, res) => {
   try {
     const { id: companyId, slug } = req.params;
@@ -463,7 +587,7 @@ router.post('/:slug/complete', requireAuth, async (req, res) => {
   }
 });
 
-// ─── POST /companies/:id/guides/:slug/report-stale ──────────
+// ── POST /companies/:id/guides/:slug/report-stale ──────────────
 router.post('/:slug/report-stale', requireAuth, async (req, res) => {
   try {
     const { id: companyId, slug } = req.params;
@@ -482,7 +606,7 @@ router.post('/:slug/report-stale', requireAuth, async (req, res) => {
   }
 });
 
-// ─── ADMIN ───────────────────────────────────────────────────
+// ── ADMIN ───────────────────────────────────────────────────
 
 router.get('/admin/guides', requireAuth, requireRole('admin'), async (req, res) => {
   try {
