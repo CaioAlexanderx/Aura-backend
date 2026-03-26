@@ -81,6 +81,9 @@ router.use('/companies/:id/food',               require('./food'));
 // FOOD-03/04 — Pedidos, KDS, delivery, WhatsApp stub
 router.use('/companies/:id/food/orders',        require('./foodOrders'));
 
+// FOOD-04b — Motoboys: CRUD, despacho, comissão, histórico
+router.use('/companies/:id/food/deliverers',    require('./foodDeliverers'));
+
 // FOOD-05 — Relatórios: top-itens, pico, desperdício, dashboard
 router.use('/companies/:id/food/reports',       require('./foodReports'));
 
