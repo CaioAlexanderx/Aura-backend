@@ -2,6 +2,8 @@
 // AURA. — Módulo Food Service
 // FOOD-03: Pedidos + KDS (controle de produção)
 // FOOD-04: Delivery própria + notificação WhatsApp
+// FOOD-04c: Baixa de estoque automática ao entregar
+// FOOD-04d: Avaliação pós-entrega via WhatsApp
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -9,7 +11,6 @@ const { requireAuth, requirePlan } = require('../middleware/auth');
 
 const guard = [requireAuth, requirePlan(['negocio','expansao'])];
 
-// Helpers
 const notFound = (res, e='Pedido') => res.status(404).json({ error: `${e} não encontrado` });
 const ORDER_TRANSITIONS = {
   pending:   ['confirmed','cancelled'],
@@ -24,26 +25,25 @@ const ORDER_TRANSITIONS = {
 // FOOD-03 — PEDIDOS + KDS
 // ============================================================
 
-// GET  /companies/:id/food/orders         — listar pedidos (com filtros)
 router.get('/', guard, async (req, res) => {
   const { status, channel, date, limit = 50, offset = 0 } = req.query;
   const cond = ['fo.company_id=$1'];
   const vals = [req.params.id];
   let i = 2;
-  if (status)  { cond.push(`fo.status=$${i++}`);                     vals.push(status); }
-  if (channel) { cond.push(`fo.channel=$${i++}`);                    vals.push(channel); }
-  if (date)    { cond.push(`fo.created_at::date=$${i++}`);           vals.push(date); }
-
+  if (status)  { cond.push(`fo.status=$${i++}`);           vals.push(status); }
+  if (channel) { cond.push(`fo.channel=$${i++}`);          vals.push(channel); }
+  if (date)    { cond.push(`fo.created_at::date=$${i++}`); vals.push(date); }
   try {
     const { rows } = await db.query(
-      `SELECT fo.*,
-         ft.number AS table_number,
+      `SELECT fo.*, ft.number AS table_number,
+         fd.name AS deliverer_name,
          COALESCE(json_agg(foi.* ORDER BY foi.id) FILTER (WHERE foi.id IS NOT NULL), '[]') AS items
        FROM food_orders fo
        LEFT JOIN food_tables ft ON ft.id = fo.table_id
+       LEFT JOIN food_deliverers fd ON fd.id = fo.deliverer_id
        LEFT JOIN food_order_items foi ON foi.order_id = fo.id
        WHERE ${cond.join(' AND ')}
-       GROUP BY fo.id, ft.number
+       GROUP BY fo.id, ft.number, fd.name
        ORDER BY fo.created_at DESC
        LIMIT $${i} OFFSET $${i+1}`,
       [...vals, limit, offset]
@@ -52,20 +52,21 @@ router.get('/', guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET  /companies/:id/food/orders/kds     — visão KDS (pending + preparing)
 router.get('/kds', guard, async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT fo.id, fo.status, fo.channel, fo.created_at, fo.notes,
          fo.customer_name, ft.number AS table_number,
          fo.estimated_ready_at,
+         fd.name AS deliverer_name,
          EXTRACT(EPOCH FROM (NOW() - fo.confirmed_at))/60 AS waiting_minutes,
          json_agg(foi.* ORDER BY foi.id) AS items
        FROM food_orders fo
        LEFT JOIN food_tables ft ON ft.id = fo.table_id
+       LEFT JOIN food_deliverers fd ON fd.id = fo.deliverer_id
        LEFT JOIN food_order_items foi ON foi.order_id = fo.id
        WHERE fo.company_id=$1 AND fo.status IN ('confirmed','preparing')
-       GROUP BY fo.id, ft.number
+       GROUP BY fo.id, ft.number, fd.name
        ORDER BY fo.confirmed_at ASC NULLS LAST`,
       [req.params.id]
     );
@@ -73,40 +74,72 @@ router.get('/kds', guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET  /companies/:id/food/orders/stats   — métricas do dia/semana/mês
 router.get('/stats', guard, async (req, res) => {
   const { period = 'today' } = req.query;
-  const periodMap = { today: `created_at::date = NOW()::date`, week: `created_at >= NOW()-INTERVAL'7 days'`, month: `created_at >= NOW()-INTERVAL'30 days'` };
-  const periodFilter = periodMap[period] || periodMap.today;
+  const pf = { today:`created_at::date=NOW()::date`, week:`created_at>=NOW()-INTERVAL'7 days'`, month:`created_at>=NOW()-INTERVAL'30 days'` }[period] || `created_at::date=NOW()::date`;
   try {
     const { rows } = await db.query(
-      `SELECT
-         COUNT(*) FILTER (WHERE status NOT IN ('cancelled'))         AS total_orders,
-         COUNT(*) FILTER (WHERE status = 'delivered')                AS delivered_orders,
-         COUNT(*) FILTER (WHERE status = 'cancelled')                AS cancelled_orders,
-         ROUND(AVG(total) FILTER (WHERE status='delivered'),2)        AS avg_ticket,
-         SUM(total)  FILTER (WHERE status='delivered')               AS revenue,
-         AVG(EXTRACT(EPOCH FROM (ready_at - confirmed_at))/60)
-           FILTER (WHERE ready_at IS NOT NULL AND confirmed_at IS NOT NULL) AS avg_prep_minutes
-       FROM food_orders
-       WHERE company_id=$1 AND ${periodFilter}`,
+      `SELECT COUNT(*) FILTER (WHERE status NOT IN ('cancelled'))     AS total_orders,
+              COUNT(*) FILTER (WHERE status='delivered')              AS delivered_orders,
+              COUNT(*) FILTER (WHERE status='cancelled')              AS cancelled_orders,
+              ROUND(AVG(total) FILTER (WHERE status='delivered'),2)   AS avg_ticket,
+              SUM(total) FILTER (WHERE status='delivered')            AS revenue,
+              AVG(EXTRACT(EPOCH FROM (ready_at - confirmed_at))/60)
+                FILTER (WHERE ready_at IS NOT NULL AND confirmed_at IS NOT NULL) AS avg_prep_minutes
+       FROM food_orders WHERE company_id=$1 AND ${pf}`,
       [req.params.id]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET  /companies/:id/food/orders/:oid
+router.get('/kds/history', guard, async (req, res) => {
+  const { date } = req.query;
+  const df = date ? `AND ke.created_at::date=$2` : '';
+  try {
+    const { rows } = await db.query(
+      `SELECT ke.*, fo.customer_name, fo.channel
+       FROM food_kds_events ke
+       JOIN food_orders fo ON fo.id=ke.order_id
+       WHERE ke.company_id=$1 ${df}
+       ORDER BY ke.created_at DESC LIMIT 200`,
+      date ? [req.params.id, date] : [req.params.id]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/delivery/active', guard, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT fo.*, ft.number AS table_number, fd.name AS deliverer_name,
+         json_agg(foi.* ORDER BY foi.id) AS items
+       FROM food_orders fo
+       LEFT JOIN food_tables ft ON ft.id=fo.table_id
+       LEFT JOIN food_deliverers fd ON fd.id=fo.deliverer_id
+       LEFT JOIN food_order_items foi ON foi.order_id=fo.id
+       WHERE fo.company_id=$1
+         AND fo.channel IN ('delivery_proprio','whatsapp','online')
+         AND fo.status NOT IN ('delivered','cancelled')
+       GROUP BY fo.id, ft.number, fd.name
+       ORDER BY fo.created_at ASC`,
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/:oid', guard, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT fo.*, ft.number AS table_number,
+      `SELECT fo.*, ft.number AS table_number, fd.name AS deliverer_name,
          json_agg(foi.* ORDER BY foi.id) AS items
        FROM food_orders fo
-       LEFT JOIN food_tables ft ON ft.id = fo.table_id
-       LEFT JOIN food_order_items foi ON foi.order_id = fo.id
+       LEFT JOIN food_tables ft ON ft.id=fo.table_id
+       LEFT JOIN food_deliverers fd ON fd.id=fo.deliverer_id
+       LEFT JOIN food_order_items foi ON foi.order_id=fo.id
        WHERE fo.id=$1 AND fo.company_id=$2
-       GROUP BY fo.id, ft.number`,
+       GROUP BY fo.id, ft.number, fd.name`,
       [req.params.oid, req.params.id]
     );
     if (!rows.length) return notFound(res);
@@ -114,57 +147,44 @@ router.get('/:oid', guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /companies/:id/food/orders         — criar pedido
 router.post('/', guard, async (req, res) => {
-  const {
-    table_id, customer_id, channel = 'presencial',
-    items, notes, customer_name, customer_phone,
-    delivery_address, payment_method
-  } = req.body;
-
+  const { table_id, customer_id, channel = 'presencial', items, notes,
+          customer_name, customer_phone, delivery_address, payment_method } = req.body;
   if (!items?.length) return res.status(400).json({ error: 'items obrigatório' });
 
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
-
-    // Calcular totais
     let subtotal = 0;
     const enrichedItems = items.map(item => {
       const lineTotal = parseFloat(item.unit_price) * item.quantity;
       subtotal += lineTotal;
       return { ...item, total_price: lineTotal };
     });
-
     const delivery_fee = req.body.delivery_fee || 0;
     const discount     = req.body.discount     || 0;
     const total = subtotal + parseFloat(delivery_fee) - parseFloat(discount);
 
-    // Tempo estimado (soma dos tempos de preparo)
-    const { rows: preptimes } = await client.query(
-      `SELECT COALESCE(SUM(fi.preparation_time_min * oi_qty.qty),15) AS prep_min
-       FROM (SELECT UNNEST($1::uuid[]) AS iid, UNNEST($2::int[]) AS qty) oi_qty
-       LEFT JOIN food_items fi ON fi.id = oi_qty.iid`,
+    const { rows: pt } = await client.query(
+      `SELECT COALESCE(SUM(fi.preparation_time_min * q.qty),15) AS prep_min
+       FROM (SELECT UNNEST($1::uuid[]) AS iid, UNNEST($2::int[]) AS qty) q
+       LEFT JOIN food_items fi ON fi.id=q.iid`,
       [items.map(i => i.item_id), items.map(i => i.quantity)]
     );
-    const prepMin = preptimes[0]?.prep_min || 15;
+    const prepMin = pt[0]?.prep_min || 15;
 
-    // Inserir pedido
     const { rows: orders } = await client.query(
       `INSERT INTO food_orders
          (company_id, table_id, customer_id, channel, subtotal, discount, delivery_fee, total,
           notes, customer_name, customer_phone, delivery_address, payment_method, estimated_ready_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW()+($14||' minutes')::interval)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW()+($14||' minutes')::interval)
        RETURNING *`,
-      [req.params.id, table_id||null, customer_id||null, channel,
-       subtotal, discount, delivery_fee, total,
-       notes||null, customer_name||null, customer_phone||null,
-       delivery_address ? JSON.stringify(delivery_address) : null,
-       payment_method||null, prepMin]
+      [req.params.id, table_id||null, customer_id||null, channel, subtotal, discount, delivery_fee,
+       total, notes||null, customer_name||null, customer_phone||null,
+       delivery_address ? JSON.stringify(delivery_address) : null, payment_method||null, prepMin]
     );
     const order = orders[0];
 
-    // Inserir itens
     for (const item of enrichedItems) {
       await client.query(
         `INSERT INTO food_order_items
@@ -176,20 +196,16 @@ router.post('/', guard, async (req, res) => {
       );
     }
 
-    // Marcar mesa como occupied
     if (table_id) {
       await client.query(
         `UPDATE food_tables SET status='occupied' WHERE id=$1 AND company_id=$2`,
         [table_id, req.params.id]
       );
     }
-
-    // KDS event
     await client.query(
       `INSERT INTO food_kds_events (order_id, company_id, to_status) VALUES ($1,$2,'pending')`,
       [order.id, req.params.id]
     );
-
     await client.query('COMMIT');
     res.status(201).json(order);
   } catch (e) {
@@ -198,30 +214,30 @@ router.post('/', guard, async (req, res) => {
   } finally { client.release(); }
 });
 
-// PATCH /companies/:id/food/orders/:oid/status  — transição de status (KDS)
+// PATCH /:oid/status — KDS + baixa de estoque automática ao entregar
 router.patch('/:oid/status', guard, async (req, res) => {
   const { status, note } = req.body;
   const client = await db.pool.connect();
   try {
     const { rows } = await client.query(
-      `SELECT status FROM food_orders WHERE id=$1 AND company_id=$2`,
+      `SELECT fo.*, json_agg(foi.* ORDER BY foi.id) AS items
+       FROM food_orders fo
+       LEFT JOIN food_order_items foi ON foi.order_id=fo.id
+       WHERE fo.id=$1 AND fo.company_id=$2
+       GROUP BY fo.id`,
       [req.params.oid, req.params.id]
     );
     if (!rows.length) return notFound(res);
 
-    const current = rows[0].status;
+    const order   = rows[0];
+    const current = order.status;
     const allowed = ORDER_TRANSITIONS[current] || [];
     if (!allowed.includes(status))
       return res.status(400).json({ error: `Transição inválida: ${current} → ${status}` });
 
     await client.query('BEGIN');
 
-    // Timestamps automáticos por status
-    const tsMap = {
-      confirmed:  'confirmed_at = NOW()',
-      ready:      'ready_at = NOW()',
-      delivered:  'delivered_at = NOW()',
-    };
+    const tsMap = { confirmed:'confirmed_at=NOW()', ready:'ready_at=NOW()', delivered:'delivered_at=NOW()' };
     const tsUpdate = tsMap[status] ? `, ${tsMap[status]}` : '';
 
     const { rows: updated } = await client.query(
@@ -230,31 +246,65 @@ router.patch('/:oid/status', guard, async (req, res) => {
       [status, req.params.oid, req.params.id]
     );
 
-    // Registrar evento no KDS
     await client.query(
       `INSERT INTO food_kds_events (order_id, company_id, from_status, to_status, triggered_by, note)
        VALUES ($1,$2,$3,$4,$5,$6)`,
       [req.params.oid, req.params.id, current, status, req.user?.id||null, note||null]
     );
 
-    // Liberar mesa se entregue/cancelado
+    // ── Liberar mesa ──────────────────────────────────────────
     if (['delivered','cancelled'].includes(status) && updated[0].table_id) {
-      const { rows: otherOpen } = await client.query(
+      const { rows: others } = await client.query(
         `SELECT id FROM food_orders
          WHERE table_id=$1 AND status NOT IN ('delivered','cancelled') AND id!=$2`,
         [updated[0].table_id, req.params.oid]
       );
-      if (!otherOpen.length) {
-        await client.query(
-          `UPDATE food_tables SET status='free' WHERE id=$1`, [updated[0].table_id]
+      if (!others.length) {
+        await client.query(`UPDATE food_tables SET status='free' WHERE id=$1`, [updated[0].table_id]);
+      }
+    }
+
+    // ── FOOD-04c: Baixa de estoque automática ao entregar ─────
+    // Para cada item do pedido com ficha técnica vinculada a produto,
+    // deduz a quantidade proporcional do estoque.
+    if (status === 'delivered' && order.items?.length) {
+      for (const orderItem of order.items) {
+        if (!orderItem.item_id) continue;
+        // Busca ingredientes da ficha técnica que têm produto vinculado
+        const { rows: recipes } = await client.query(
+          `SELECT fr.product_id, fr.quantity AS unit_qty
+           FROM food_recipes fr
+           WHERE fr.item_id=$1 AND fr.product_id IS NOT NULL`,
+          [orderItem.item_id]
         );
+        for (const recipe of recipes) {
+          const totalDeduct = recipe.unit_qty * orderItem.quantity;
+          await client.query(
+            `UPDATE products
+             SET stock_quantity = GREATEST(0, stock_quantity - $1),
+                 updated_at = NOW()
+             WHERE id=$2 AND company_id=$3`,
+            [totalDeduct, recipe.product_id, req.params.id]
+          );
+          // Log de movimentação de estoque
+          await client.query(
+            `INSERT INTO stock_movements
+               (product_id, company_id, type, quantity, reference_id, reference_type, notes)
+             VALUES ($1,$2,'out',$3,$4,'food_order','Baixa automática — pedido entregue')
+             ON CONFLICT DO NOTHING`,
+            [recipe.product_id, req.params.id, totalDeduct, req.params.oid]
+          );
+        }
       }
     }
 
     await client.query('COMMIT');
 
-    // Notificação WhatsApp (FOOD-04) — stub assíncrono
+    // ── FOOD-04d: WhatsApp — notificação + link de avaliação ──
     _notifyWhatsApp(updated[0]).catch(() => {});
+    if (status === 'delivered') {
+      _sendReviewLink(updated[0], req.params.id).catch(() => {});
+    }
 
     res.json(updated[0]);
   } catch (e) {
@@ -263,7 +313,6 @@ router.patch('/:oid/status', guard, async (req, res) => {
   } finally { client.release(); }
 });
 
-// PATCH /companies/:id/food/orders/:oid/items/:iid/kds  — status por item (KDS granular)
 router.patch('/:oid/items/:iid/kds', guard, async (req, res) => {
   const { kds_status } = req.body;
   if (!['pending','preparing','done'].includes(kds_status))
@@ -281,48 +330,6 @@ router.patch('/:oid/items/:iid/kds', guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET  /companies/:id/food/orders/kds/history  — histórico de eventos KDS
-router.get('/kds/history', guard, async (req, res) => {
-  const { date } = req.query;
-  const dateFilter = date ? `AND ke.created_at::date=$2` : '';
-  try {
-    const { rows } = await db.query(
-      `SELECT ke.*, fo.customer_name, fo.channel
-       FROM food_kds_events ke
-       JOIN food_orders fo ON fo.id = ke.order_id
-       WHERE ke.company_id=$1 ${dateFilter}
-       ORDER BY ke.created_at DESC LIMIT 200`,
-      date ? [req.params.id, date] : [req.params.id]
-    );
-    res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ============================================================
-// FOOD-04 — DELIVERY PRÓPRIA
-// ============================================================
-
-// GET  /companies/:id/food/orders/delivery  — pedidos de delivery ativos
-router.get('/delivery/active', guard, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT fo.*, ft.number AS table_number,
-         json_agg(foi.* ORDER BY foi.id) AS items
-       FROM food_orders fo
-       LEFT JOIN food_tables ft ON ft.id = fo.table_id
-       LEFT JOIN food_order_items foi ON foi.order_id = fo.id
-       WHERE fo.company_id=$1
-         AND fo.channel IN ('delivery_proprio','whatsapp','online')
-         AND fo.status NOT IN ('delivered','cancelled')
-       GROUP BY fo.id, ft.number
-       ORDER BY fo.created_at ASC`,
-      [req.params.id]
-    );
-    res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// POST /companies/:id/food/orders/:oid/notify  — reenviar notificação WhatsApp
 router.post('/:oid/notify', guard, async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -335,31 +342,53 @@ router.post('/:oid/notify', guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── WhatsApp helpers (stub — substituir por API real pós-CNPJ) ──
+// ── WhatsApp helpers ──────────────────────────────────────────
 const STATUS_MESSAGES = {
-  confirmed:  'recebido e confirmado! Em breve começa a preparação.',
-  preparing:  'em preparo na cozinha. Aguarde!',
-  ready:      'pronto para retirada ou saiu para entrega.',
-  delivered:  'entregue! Bom apetite. 😊',
-  cancelled:  'cancelado. Em caso de dúvidas, entre em contato conosco.'
+  confirmed: 'recebido e confirmado! Em breve começa a preparação.',
+  preparing: 'em preparo na cozinha. Aguarde!',
+  ready:     'pronto para retirada ou saiu para entrega.',
+  delivered: 'entregue! Bom apetite. 😊',
+  cancelled: 'cancelado. Em caso de dúvidas, entre em contato.',
 };
 
 function _buildWhatsAppMsg(order) {
   const verb = STATUS_MESSAGES[order.status];
   if (!verb) return null;
-  const id = order.id.slice(-6).toUpperCase();
-  return `Olá${order.customer_name ? ', ' + order.customer_name.split(' ')[0] : ''}! 🍽️\n\nSeu pedido *#${id}* está ${verb}\n\nAcompanhe pelo link: getaura.com.br/pedido/${order.id}\n\nObrigado pela preferência! ✨`;
+  const id   = order.id.slice(-6).toUpperCase();
+  const name = order.customer_name ? ', ' + order.customer_name.split(' ')[0] : '';
+  return `Olá${name}! 🍽️\n\nSeu pedido *#${id}* está ${verb}\n\nAcompanhe: getaura.com.br/pedido/${order.id}\n\nObrigado pela preferência! ✨`;
 }
 
 async function _notifyWhatsApp(order) {
-  // Stub: integração real via WhatsApp Business API (pós-CNPJ)
-  // Quando ativo, substituir por chamada à API do Meta
   const msg = _buildWhatsAppMsg(order);
   if (!msg || !order.customer_phone) return false;
-
-  // TODO pós-CNPJ:
-  // await whatsappClient.sendMessage(order.customer_phone, msg);
+  // TODO pós-CNPJ: await whatsappClient.sendMessage(order.customer_phone, msg);
   console.log(`[food/whatsapp] STUB — ${order.customer_phone}: ${msg.slice(0,60)}...`);
+  return true;
+}
+
+// ── FOOD-04d: Link de avaliação pós-entrega ───────────────────
+async function _sendReviewLink(order, companyId) {
+  if (!order.customer_phone) return false;
+  // Só envia se ainda não enviou avaliação para este pedido
+  const { rows } = await db.query(
+    `SELECT review_sent_at FROM food_orders WHERE id=$1`, [order.id]
+  );
+  if (rows[0]?.review_sent_at) return false; // já enviado
+
+  const id   = order.id.slice(-6).toUpperCase();
+  const name = order.customer_name ? ', ' + order.customer_name.split(' ')[0] : '';
+  // Token de review: aproveita o sistema de purchase_reviews existente
+  const reviewUrl = `getaura.com.br/avaliar/${order.id}`;
+  const msg = `Olá${name}! 🙏\n\nEsperamos que tenha gostado do pedido *#${id}*!\n\nAvalie o seu pedido (leva 30 segundos):\n👉 ${reviewUrl}\n\nSua opinião é muito importante para nós! ⭐`;
+
+  // TODO pós-CNPJ: await whatsappClient.sendMessage(order.customer_phone, msg);
+  console.log(`[food/review] STUB — ${order.customer_phone}: ${msg.slice(0,60)}...`);
+
+  // Marca como enviado
+  await db.query(
+    `UPDATE food_orders SET review_sent_at=NOW() WHERE id=$1`, [order.id]
+  );
   return true;
 }
 
