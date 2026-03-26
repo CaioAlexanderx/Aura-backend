@@ -62,22 +62,20 @@ router.use('/companies/:id/onboarding',         require('./onboarding'));
 // CORE-02 — Checklist mensal inteligente por regime + vertical
 router.use('/companies/:id/checklist',          checklistRouter);
 
+// ── FINANCEIRO ──────────────────────────────────────────────
+// FIN-01 — Pró-labore + Fator R + distribuição de lucros
+router.use('/companies/:id/prolabore',          require('./prolabore'));
+// FIN-02 — DRE gerencial + fluxo de caixa projetado
+router.use('/companies/:id/dre',                require('./dre'));
+
 // ── FOOD SERVICE ──────────────────────────────────────────────
-// FOOD-01/02 — Cardápio, ficha técnica, mesas, zonas de entrega
 router.use('/companies/:id/food',               require('./food'));
-// FOOD-03/04 — Pedidos, KDS, delivery, WhatsApp, baixa estoque
 router.use('/companies/:id/food/orders',        require('./foodOrders'));
-// FOOD-04b — Motoboys: CRUD, despacho, comissão, histórico
 router.use('/companies/:id/food/deliverers',    require('./foodDeliverers'));
-// FOOD-05 — Relatórios: top-itens, pico, desperdício, dashboard
 router.use('/companies/:id/food/reports',       require('./foodReports'));
-// FOOD-06 — iFood: import CSV, pedidos importados, stats, template
 router.use('/companies/:id/food/ifood',         require('./foodIfood'));
-// FOOD-07 — App garçom: mesas, menu, chamadas (auth) + QR mesa
 router.use('/companies/:id/food/waiter',        require('./foodWaiter'));
-// FOOD-08 — NFC-e + Comanda térmica 80mm
 router.use('/companies/:id/food/nfce',          require('./foodNfce'));
-// FOOD-09 — Cardápio por período
 router.use('/companies/:id/food/schedule',      require('./foodSchedule'));
 
 // Rotas públicas
