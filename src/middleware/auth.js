@@ -1,16 +1,9 @@
-// ============================================================
-// AURA. — Middleware de Autenticação e RBAC
-// JWT + roles: client | analyst | admin
-// ============================================================
-
 const jwt = require('jsonwebtoken');
+const { validateRuntimeEnv } = require('../config/env');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'aura-dev-secret';
+const env = validateRuntimeEnv();
+const JWT_SECRET = env.JWT_SECRET;
 
-/**
- * requireAuth — valida JWT e injeta req.user
- * Header esperado: Authorization: Bearer <token>
- */
 function requireAuth(req, res, next) {
   const header = req.headers['authorization'];
   if (!header || !header.startsWith('Bearer ')) {
@@ -20,7 +13,7 @@ function requireAuth(req, res, next) {
   const token = header.split(' ')[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // { id, email, role, company_id, plan }
+    req.user = decoded;
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
@@ -30,10 +23,6 @@ function requireAuth(req, res, next) {
   }
 }
 
-/**
- * requireRole(...roles) — garante que req.user.role está na lista
- * Uso: requireRole('client', 'analyst', 'admin')
- */
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user) {
@@ -46,10 +35,6 @@ function requireRole(...roles) {
   };
 }
 
-/**
- * requirePlan(...plans) — garante que req.user.plan está na lista
- * Uso: requirePlan('negocio', 'expansao')
- */
 function requirePlan(...plans) {
   return (req, res, next) => {
     if (!req.user) {
@@ -66,10 +51,6 @@ function requirePlan(...plans) {
   };
 }
 
-/**
- * requireFeature(feature) — garante que req.user.features inclui a feature
- * Uso: requireFeature('vertical_module')
- */
 function requireFeature(feature) {
   return (req, res, next) => {
     if (!req.user) {
