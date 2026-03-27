@@ -94,10 +94,20 @@ app.use(function(req, res) {
 });
 
 app.use(function(err, req, res, next) {
-  const status = err.status || err.statusCode || 500;
-  const msg = status >= 500 ? 'Erro interno do servidor' : err.message;
-  if (status >= 500) console.error('[ERROR]', err.message);
-  res.status(status).json({ error: msg });
-});
+  const status = err.statusCode || err.status || err.statusCode || 500;
+  const isServerError = status >= 500;
 
-module.exports = app;
+  if (isServerError) {
+    console.error('[ERROR]', err.message);
+  }
+
+  const payload = {
+    error: isServerError ? 'Erro interno do servidor' : err.message,
+  };
+
+  if (err.details && !isServerError) {
+    payload.details = err.details;
+  }
+
+  res.status(status).json(payload);
+});
