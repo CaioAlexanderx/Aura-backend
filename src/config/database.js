@@ -1,10 +1,12 @@
 const { Pool } = require('pg');
 const dns = require('dns');
+const { validateRuntimeEnv } = require('./env');
 
-// Forçar resolução DNS via IPv4 (Supabase Free não aceita IPv6)
 dns.setDefaultResultOrder('ipv4first');
 
-const connectionString = (process.env.SUPABASE_DB_URL || '').replace('?family=4', '');
+const env = validateRuntimeEnv();
+
+const connectionString = env.SUPABASE_DB_URL.replace('?family=4', '');
 
 const pool = new Pool({
   connectionString,
