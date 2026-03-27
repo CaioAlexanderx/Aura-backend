@@ -30,6 +30,7 @@ jobs:
       - name: Deploy to Railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}   
           RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
         run: |
           railway up --service "$RAILWAY_SERVICE" --detach
@@ -76,6 +77,7 @@ jobs:
       - name: Set GIT_SHA on Railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}   
           RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
         run: |
           SHA=$(git rev-parse --short HEAD)
