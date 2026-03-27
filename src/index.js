@@ -51,13 +51,38 @@ app.get('/health/db', async function(req, res) {
   }
 });
 
-// health/sentry: dispara evento de teste (bloqueado em producao)
+// health/sentry: dispara evento de teste para validar integracao
+// Protegido por HEALTH_SECRET — funciona em qualquer ambiente
+// Uso: GET /health/sentry?token=SEU_HEALTH_SECRET
 app.get('/health/sentry', function(req, res) {
-  if (process.env.NODE_ENV === 'production') {
-    return res.status(403).json({ error: 'Indisponivel em producao' });
+  var secret = process.env.HEALTH_SECRET;
+
+  // Se HEALTH_SECRET nao estiver configurado, so permite fora de producao
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({
+        error: 'Configure HEALTH_SECRET no Railway para usar este endpoint em producao',
+      });
+    }
+  } else {
+    // Em qualquer ambiente: valida o token da query string
+    if (req.query.token !== secret) {
+      return res.status(401).json({ error: 'Token invalido' });
+    }
   }
+
+  var sentryActive = !!(process.env.SENTRY_DSN);
   Sentry.captureMessage('Aura Sentry health check OK', 'info');
-  res.json({ status: 'ok', message: 'Evento de teste enviado ao Sentry' });
+
+  res.json({
+    status:       'ok',
+    sentry_dsn:   sentryActive ? 'configurado' : 'ausente — eventos nao serao enviados',
+    environment:  process.env.NODE_ENV || 'development',
+    release:      process.env.GIT_SHA  || 'local',
+    message:      sentryActive
+      ? 'Evento de teste enviado. Verifique em sentry.io em ~30s.'
+      : 'SENTRY_DSN nao configurado. Adicione a variavel no Railway.',
+  });
 });
 
 // -- Rota raiz ----------------------------------------------
