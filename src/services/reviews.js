@@ -4,15 +4,18 @@
 // independente de nota esperada — sem review gating
 // ============================================================
 
-const db    = require('../config/database');
+const db = require('../config/database');
 const crypto = require('crypto');
+const { validateRuntimeEnv } = require('../config/env');
+
+const env = validateRuntimeEnv();
 
 /**
  * Gera token único para link de avaliação
  */
 function generateReviewToken(saleId, companyId) {
   return crypto
-    .createHmac('sha256', process.env.JWT_SECRET || 'aura-review')
+    .createHmac('sha256', env.JWT_SECRET)
     .update(`${saleId}-${companyId}-${Date.now()}`)
     .digest('hex')
     .slice(0, 32);
@@ -25,10 +28,14 @@ function generateReviewToken(saleId, companyId) {
 async function createReviewRequest(companyId, saleId, customerId) {
   // Buscar dados da empresa (Google URL)
   const { rows: companyRows } = await db.query(`
-    SELECT trade_name, legal_name, website FROM companies WHERE id = $1
+    SELECT trade_name, legal_name, website
+    FROM companies
+    WHERE id = $1
   `, [companyId]);
 
-  if (!companyRows.length) throw new Error('Empresa não encontrada');
+  if (!companyRows.length) {
+    throw new Error('Empresa não encontrada');
+  }
 
   const token = generateReviewToken(saleId, companyId);
   const expiresAt = new Date();
@@ -44,17 +51,17 @@ async function createReviewRequest(companyId, saleId, customerId) {
 
   const reviewId = rows[0].id;
 
-  // URL base da Aura (configurável por empresa futuramente)
-  const baseUrl = process.env.APP_URL || 'https://getaura.com.br';
+  // URL base da Aura
+  const baseUrl = env.APP_URL;
 
   return {
-    review_id:      reviewId,
+    review_id: reviewId,
     token,
-    expires_at:     expiresAt,
+    expires_at: expiresAt,
     // Link avaliação interna Aura
-    review_url:     `${baseUrl}/r/${token}`,
+    review_url: `${baseUrl}/r/${token}`,
     // Link Google — empresa cadastra a URL do perfil GMB nas configurações
-    google_url:     null, // preenchido quando empresa cadastrar Google URL
+    google_url: null,
     // Mensagem WhatsApp pré-formatada
     whatsapp_message: buildWhatsAppMessage(companyRows[0], baseUrl, token),
   };
@@ -77,7 +84,9 @@ async function submitReview(token, data) {
     WHERE review_token = $1
   `, [token]);
 
-  if (!rows.length) throw new Error('Link de avaliação inválido');
+  if (!rows.length) {
+    throw new Error('Link de avaliação inválido');
+  }
 
   const review = rows[0];
 
@@ -89,7 +98,7 @@ async function submitReview(token, data) {
     throw new Error('Avaliação já respondida');
   }
 
-  // Registrar avaliação — SEMPRE independente da nota (sem review gating)
+  // Registrar avaliação — SEMPRE independente da nota
   const { rows: updated } = await db.query(`
     UPDATE purchase_reviews
     SET rating = $1, comment = $2, responded_at = NOW()
@@ -98,10 +107,10 @@ async function submitReview(token, data) {
   `, [rating, comment || null, token]);
 
   return {
-    success:    true,
-    review_id:  updated[0].id,
-    rating:     updated[0].rating,
-    // Sempre retorna flag para redirecionar ao Google — sem condicional de nota
+    success: true,
+    review_id: updated[0].id,
+    rating: updated[0].rating,
+    // Sempre retorna flag para redirecionar ao Google
     redirect_to_google: true,
   };
 }
@@ -124,9 +133,14 @@ async function getReviews(companyId, options = {}) {
 
   const { rows } = await db.query(`
     SELECT
-      r.id, r.rating, r.comment, r.responded_at,
-      r.sent_to_google, r.created_at,
-      c.name AS customer_name, c.phone AS customer_phone,
+      r.id,
+      r.rating,
+      r.comment,
+      r.responded_at,
+      r.sent_to_google,
+      r.created_at,
+      c.name AS customer_name,
+      c.phone AS customer_phone,
       s.total_amount AS sale_amount
     FROM purchase_reviews r
     LEFT JOIN customers c ON c.id = r.customer_id
@@ -141,19 +155,20 @@ async function getReviews(companyId, options = {}) {
   // Métricas agregadas
   const { rows: stats } = await db.query(`
     SELECT
-      COUNT(*)::int                        AS total,
-      ROUND(AVG(rating)::numeric, 1)       AS avg_rating,
+      COUNT(*)::int AS total,
+      ROUND(AVG(rating)::numeric, 1) AS avg_rating,
       COUNT(CASE WHEN rating = 5 THEN 1 END)::int AS five_star,
       COUNT(CASE WHEN rating = 4 THEN 1 END)::int AS four_star,
       COUNT(CASE WHEN rating = 3 THEN 1 END)::int AS three_star,
       COUNT(CASE WHEN rating = 2 THEN 1 END)::int AS two_star,
       COUNT(CASE WHEN rating = 1 THEN 1 END)::int AS one_star
     FROM purchase_reviews
-    WHERE company_id = $1 AND rating IS NOT NULL
+    WHERE company_id = $1
+      AND rating IS NOT NULL
   `, [companyId]);
 
   return {
-    stats:   stats[0],
+    stats: stats[0],
     reviews: rows,
   };
 }
@@ -163,6 +178,7 @@ async function getReviews(companyId, options = {}) {
  */
 function buildWhatsAppMessage(company, baseUrl, token) {
   const name = company.trade_name || company.legal_name;
+
   return encodeURIComponent(
     `Olá! Obrigado por comprar na ${name} 😊\n\n` +
     `Sua opinião é muito importante para nós!\n\n` +
@@ -171,4 +187,8 @@ function buildWhatsAppMessage(company, baseUrl, token) {
   );
 }
 
-module.exports = { createReviewRequest, submitReview, getReviews };
+module.exports = {
+  createReviewRequest,
+  submitReview,
+  getReviews,
+};
