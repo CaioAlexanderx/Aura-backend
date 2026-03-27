@@ -20,6 +20,22 @@ const PLAN_PRICES = {
   expansao: 299,
 };
 
+function normalizeProfile(profile) {
+  if (!profile) return null;
+
+  const map = {
+    admin: 'admin',
+    analyst: 'analyst',
+    analista: 'analyst',
+    support: 'support',
+    suporte: 'support',
+    finance: 'finance',
+    financeiro: 'finance',
+  };
+
+  return map[String(profile).trim().toLowerCase()] || null;
+}
+
 // ── BE-17: Dashboard ───────────────────────────────────────────
 
 router.get('/dashboard', ...adminOnly, asyncHandler(async (req, res) => {
@@ -263,9 +279,10 @@ router.post('/team', ...adminOnly, asyncHandler(async (req, res) => {
     throw new AppError('user_id e profile são obrigatórios', 400);
   }
 
-  const validProfiles = ['admin', 'analista', 'suporte', 'financeiro'];
-  if (!validProfiles.includes(profile)) {
-    throw new AppError(`profile inválido. Use: ${validProfiles.join(', ')}`, 400);
+  const normalizedProfile = normalizeProfile(profile);
+
+  if (!normalizedProfile) {
+    throw new AppError('profile inválido. Use: admin, analyst, support, finance', 400);
   }
 
   try {
@@ -273,7 +290,7 @@ router.post('/team', ...adminOnly, asyncHandler(async (req, res) => {
       `INSERT INTO aura_team_members (user_id, profile, permissions, notes)
        VALUES ($1,$2,$3,$4)
        RETURNING *`,
-      [user_id, profile, JSON.stringify(permissions), notes || null]
+      [user_id, normalizedProfile, JSON.stringify(permissions), notes || null]
     );
 
     res.status(201).json({ member: rows[0] });
@@ -294,8 +311,14 @@ router.patch('/team/:mid', ...adminOnly, asyncHandler(async (req, res) => {
   let idx = 1;
 
   if (profile !== undefined) {
+    const normalizedProfile = normalizeProfile(profile);
+
+    if (!normalizedProfile) {
+      throw new AppError('profile inválido. Use: admin, analyst, support, finance', 400);
+    }
+
     fields.push(`profile=$${idx++}`);
-    values.push(profile);
+    values.push(normalizedProfile);
   }
 
   if (permissions !== undefined) {
@@ -349,7 +372,6 @@ router.delete('/team/:mid', ...adminOnly, asyncHandler(async (req, res) => {
 }));
 
 // ── FEAT-01: Simulador de Prospect por CNPJ ───────────────────
-// Acessível por: admin + analyst (Analista Comercial durante o pitch)
 
 router.get('/prospect/:cnpj', ...analystAccess, asyncHandler(async (req, res) => {
   try {
