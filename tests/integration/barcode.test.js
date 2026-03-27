@@ -15,8 +15,8 @@ jest.mock('../../src/services/dentalWs', () => ({ setupDentalWebSocket: jest.fn(
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'aura-dev-secret';
-const token = jwt.sign({ id: 'u1', role: 'client' }, JWT_SECRET, { expiresIn: '1h' });
+const JWT_SECRET = process.env.JWT_SECRET || 'aura-test-secret-2026';
+const token = jwt.sign({ id: 'u1', role: 'client', plan: 'negocio' }, JWT_SECRET, { expiresIn: '1h' });
 const auth = { Authorization: `Bearer ${token}` };
 
 let app, db;
@@ -79,8 +79,10 @@ describe('POST /companies/:id/products/:pid/barcode', () => {
 });
 
 describe('GET /companies/:id/pdv/scan/:code', () => {
-  test('200 match=exact — código encontrado', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Produto', barcode: '7891000315507' }] });
+  // Scanner faz 4 queries: (1) barcode exato, (2) variant barcode, (3) SKU exato, (4) busca textual
+
+  test('200 match=exact — código encontrado por barcode', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Produto', barcode: '7891000315507', variants: [] }] });
     const res = await request(app)
       .get('/api/v1/companies/c1/pdv/scan/7891000315507')
       .set(auth);
@@ -88,11 +90,12 @@ describe('GET /companies/:id/pdv/scan/:code', () => {
     expect(res.body.match).toBe('exact');
   });
 
-  test('207 match=partial — busca textual', async () => {
+  test('207 match=partial — busca textual (4 queries)', async () => {
     db.query
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Camisa Azul' }] });
+      .mockResolvedValueOnce({ rows: [] })  // query 1: barcode exato
+      .mockResolvedValueOnce({ rows: [] })  // query 2: variant barcode
+      .mockResolvedValueOnce({ rows: [] })  // query 3: SKU exato
+      .mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Camisa Azul' }] }); // query 4: texto
     const res = await request(app)
       .get('/api/v1/companies/c1/pdv/scan/camisa')
       .set(auth);
@@ -100,11 +103,12 @@ describe('GET /companies/:id/pdv/scan/:code', () => {
     expect(res.body.match).toBe('partial');
   });
 
-  test('404 — nenhum resultado', async () => {
+  test('404 — nenhum resultado (4 queries vazias)', async () => {
     db.query
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [] })  // query 1: barcode
+      .mockResolvedValueOnce({ rows: [] })  // query 2: variant
+      .mockResolvedValueOnce({ rows: [] })  // query 3: SKU
+      .mockResolvedValueOnce({ rows: [] }); // query 4: texto
     const res = await request(app)
       .get('/api/v1/companies/c1/pdv/scan/xyz999')
       .set(auth);

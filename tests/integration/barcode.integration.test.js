@@ -48,27 +48,33 @@ describe('POST /products/:pid/barcode', () => {
 });
 
 describe('GET /pdv/scan/:code', () => {
+  // Scanner faz 4 queries: (1) barcode exato, (2) variant barcode, (3) SKU exato, (4) busca textual
   beforeEach(() => jest.clearAllMocks());
 
   test('exact match por barcode', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ id:pid, name:'Produto', price:29.90 }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id:pid, name:'Produto', price:29.90, variants:[] }] });
     const res = await request(app).get(`/api/v1/companies/${cid}/pdv/scan/7891000315507`).set(auth);
     expect(res.status).toBe(200);
     expect(res.body.match).toBe('exact');
   });
 
-  test('partial match por nome (207)', async () => {
+  test('partial match por nome (207) — 4 queries', async () => {
     db.query
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ id:pid, name:'Camiseta', price:59.90 }] });
+      .mockResolvedValueOnce({ rows: [] })  // query 1: barcode
+      .mockResolvedValueOnce({ rows: [] })  // query 2: variant
+      .mockResolvedValueOnce({ rows: [] })  // query 3: SKU
+      .mockResolvedValueOnce({ rows: [{ id:pid, name:'Camiseta', price:59.90 }] }); // query 4: texto
     const res = await request(app).get(`/api/v1/companies/${cid}/pdv/scan/Camiseta`).set(auth);
     expect(res.status).toBe(207);
     expect(res.body.match).toBe('partial');
   });
 
-  test('retorna 404 quando nada encontrado', async () => {
-    db.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
+  test('retorna 404 quando nada encontrado — 4 queries vazias', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [] })  // query 1
+      .mockResolvedValueOnce({ rows: [] })  // query 2
+      .mockResolvedValueOnce({ rows: [] })  // query 3
+      .mockResolvedValueOnce({ rows: [] }); // query 4
     const res = await request(app).get(`/api/v1/companies/${cid}/pdv/scan/xxxxxx`).set(auth);
     expect(res.status).toBe(404);
     expect(res.body.match).toBe('none');
