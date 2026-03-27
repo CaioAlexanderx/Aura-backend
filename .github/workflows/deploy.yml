@@ -30,8 +30,9 @@ jobs:
       - name: Deploy to Railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
         run: |
-          railway up --detach
+          railway up --service "$RAILWAY_SERVICE" --detach
           echo "Deploy iniciado em $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
       - name: Wait + Health check
@@ -75,9 +76,10 @@ jobs:
       - name: Set GIT_SHA on Railway
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
         run: |
           SHA=$(git rev-parse --short HEAD)
-          railway variables set GIT_SHA=$SHA
+          railway variables set GIT_SHA=$SHA --service "$RAILWAY_SERVICE"
           echo "GIT_SHA=$SHA definido no Railway"
 
       - name: Notify on failure
