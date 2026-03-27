@@ -69,11 +69,11 @@ jobs:
             PGPASSWORD=aura_test psql -h localhost -U aura_test -d aura_test -f "$f" --on-error-continue 2>&1 | tail -3
           done
 
-      - name: Run tests
-        run: npm test
+      - name: Run tests with coverage
+        run: npm run test:coverage
 
       - name: Upload coverage
-        if: success()
+        if: success() && hashFiles('coverage/**') != ''
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
