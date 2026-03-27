@@ -1,89 +1,122 @@
-// BE-15 — Lookup de produto por código escaneado (PDV)
-// Suporta: leitor USB/HID (envia como texto), câmera via QuaggaJS/ZXing (envia o código decoded)
-// O frontend faz a decodificação; o backend apenas resolve o código → produto.
-
+// ============================================================
+// AURA. — PDV: Lookup de produto por código (BE-15 + PDV-01)
+// Suporta: barcode (EAN-13, CODE-128, QR), SKU, nome parcial
+// Retorna variantes quando produto tem variantes cadastradas
+// ============================================================
 const express = require('express');
-const router = express.Router({ mergeParams: true });
-const pool = require('../config/database');
+const router  = require('express').Router({ mergeParams: true });
+const db      = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 
 // GET /companies/:id/pdv/scan/:code
-// Lookup principal — chamado pelo PDV ao receber qualquer código escaneado
+// Lookup chamado pelo PDV ao receber código escaneado (jsQR / leitor USB)
 router.get('/scan/:code', requireAuth, async (req, res) => {
   const { id: company_id, code } = req.params;
-
-  if (!code || code.trim().length === 0) {
-    return res.status(400).json({ error: 'Código não informado' });
-  }
-
-  const cleanCode = code.trim();
+  const cleanCode = (code || '').trim();
+  if (!cleanCode) return res.status(400).json({ error: 'Código não informado' });
 
   try {
-    // 1. Tentativa direta pelo barcode
-    let result = await pool.query(
+    // 1. Match exato por barcode
+    let { rows } = await db.query(
       `SELECT p.id, p.name, p.description, p.price, p.cost_price,
-              p.stock_quantity, p.barcode, p.barcode_format,
-              p.category, p.sku, p.active,
-              p.barcode_format AS format
+              p.stock_qty, p.barcode, p.barcode_format, p.category,
+              p.sku, p.is_active, p.unit,
+              COALESCE(json_agg(
+                json_build_object(
+                  'id', pv.id, 'sku_suffix', pv.sku_suffix,
+                  'price_override', pv.price_override,
+                  'stock_qty', pv.stock_qty, 'barcode', pv.barcode,
+                  'attributes', (
+                    SELECT json_agg(json_build_object('attr', pvval.attribute_name, 'val', pvval.value))
+                    FROM product_variant_values pvval WHERE pvval.variant_id=pv.id
+                  )
+                )
+              ) FILTER (WHERE pv.id IS NOT NULL), '[]') AS variants
        FROM products p
-       WHERE p.company_id = $1 AND p.barcode = $2 AND p.active = true
+       LEFT JOIN product_variants pv ON pv.product_id=p.id AND pv.is_active=TRUE
+       WHERE p.company_id=$1 AND p.barcode=$2 AND p.is_active=TRUE
+       GROUP BY p.id
        LIMIT 1`,
       [company_id, cleanCode]
     );
+    if (rows.length) return res.json({ match: 'exact', source: 'barcode', product: rows[0] });
 
-    // 2. Fallback: busca por SKU
-    if (result.rows.length === 0) {
-      result = await pool.query(
-        `SELECT id, name, description, price, cost_price,
-                stock_quantity, barcode, barcode_format,
-                category, sku, active
-         FROM products
-         WHERE company_id = $1 AND sku = $2 AND active = true
-         LIMIT 1`,
-        [company_id, cleanCode]
-      );
-    }
-
-    // 3. Fallback: busca textual pelo nome (útil para debug/teclado manual)
-    if (result.rows.length === 0) {
-      result = await pool.query(
-        `SELECT id, name, description, price, cost_price,
-                stock_quantity, barcode, barcode_format,
-                category, sku, active
-         FROM products
-         WHERE company_id = $1
-           AND active = true
-           AND (name ILIKE $2 OR sku ILIKE $2)
-         ORDER BY name
-         LIMIT 5`,
-        [company_id, `%${cleanCode}%`]
-      );
-
-      // Retorna lista para o PDV escolher (não é match exato)
-      if (result.rows.length > 0) {
-        return res.status(207).json({
-          match: 'partial',
-          message: 'Nenhum código exato encontrado. Sugestões por nome/SKU:',
-          suggestions: result.rows,
-        });
-      }
-
-      return res.status(404).json({
-        match: 'none',
-        error: 'Produto não encontrado para este código',
-        code: cleanCode,
+    // 2. Match por barcode de variante
+    const { rows: varRows } = await db.query(
+      `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty,
+              p.barcode, p.category, p.sku, p.is_active, p.unit,
+              pv.id AS variant_id, pv.sku_suffix, pv.price_override,
+              pv.stock_qty AS variant_stock
+       FROM product_variants pv
+       JOIN products p ON p.id=pv.product_id
+       WHERE p.company_id=$1 AND pv.barcode=$2 AND pv.is_active=TRUE AND p.is_active=TRUE
+       LIMIT 1`,
+      [company_id, cleanCode]
+    );
+    if (varRows.length) {
+      return res.json({
+        match: 'exact', source: 'variant_barcode',
+        product: varRows[0],
+        variant_id: varRows[0].variant_id,
+        effective_price: varRows[0].price_override || varRows[0].price,
       });
     }
 
-    res.json({
-      match: 'exact',
-      product: result.rows[0],
-    });
+    // 3. Match por SKU
+    ({ rows } = await db.query(
+      `SELECT p.id, p.name, p.price, p.cost_price, p.stock_qty,
+              p.barcode, p.category, p.sku, p.is_active, p.unit
+       FROM products p
+       WHERE p.company_id=$1 AND p.sku=$2 AND p.is_active=TRUE LIMIT 1`,
+      [company_id, cleanCode]
+    ));
+    if (rows.length) return res.json({ match: 'exact', source: 'sku', product: rows[0] });
 
+    // 4. Busca textual por nome/SKU (retorna até 8 sugestões)
+    ({ rows } = await db.query(
+      `SELECT id, name, price, stock_qty, barcode, sku, category, unit
+       FROM products
+       WHERE company_id=$1 AND is_active=TRUE
+         AND (name ILIKE $2 OR sku ILIKE $2)
+       ORDER BY name LIMIT 8`,
+      [company_id, `%${cleanCode}%`]
+    ));
+    if (rows.length) {
+      return res.status(207).json({
+        match: 'partial',
+        message: 'Nenhum código exato encontrado. Sugestões:',
+        suggestions: rows,
+      });
+    }
+
+    res.status(404).json({ match: 'none', error: 'Produto não encontrado', code: cleanCode });
   } catch (err) {
     console.error('scanner lookup error:', err);
     res.status(500).json({ error: 'Erro na busca do código' });
   }
+});
+
+// GET /companies/:id/pdv/scan/batch
+// Body: { codes: ['123','456'] }
+// Lookup em lote para carregar múltiplos itens de uma vez
+router.post('/scan/batch', requireAuth, async (req, res) => {
+  const { codes } = req.body;
+  if (!codes?.length) return res.status(400).json({ error: 'codes obrigatório' });
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, price, cost_price, stock_qty, barcode, sku, category, unit
+       FROM products
+       WHERE company_id=$1 AND is_active=TRUE
+         AND (barcode=ANY($2) OR sku=ANY($2))`,
+      [req.params.id, codes]
+    );
+    const byCode = {};
+    rows.forEach(p => {
+      if (p.barcode) byCode[p.barcode] = p;
+      if (p.sku)     byCode[p.sku]     = p;
+    });
+    res.json({ found: rows.length, products: byCode });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 module.exports = router;

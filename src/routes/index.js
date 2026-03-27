@@ -31,7 +31,9 @@ router.use('/companies/:id/barbershop',         require('./barbershop'));
 // BE-13/15 — Barcode + Scanner
 router.use('/companies/:id/products',           require('./barcode'));
 router.use('/companies/:id/products',           require('./labels'));
+// BE-15 + PDV-01 — Scanner + PDV
 router.use('/companies/:id/pdv',                require('./scanner'));
+router.use('/companies/:id/pdv',                require('./pdv'));
 // BE-16 — Variantes
 router.use('/companies/:id/products/:pid/variants', require('./variants'));
 // BE-19/20 — Comissão + Metas
@@ -44,7 +46,7 @@ router.use('/companies/:id/salon-partners',     require('./salonPartner'));
 router.use('/companies/:id/dental',             require('./dental'));
 // BE-25-10 — Assinatura via QR+WebSocket
 router.use('/dental',                           require('./dentalSign'));
-// INF-04 — Impressão
+// INF-04 + PDV-01 — Cupom térmico
 router.use('/companies/:id/print',              require('./print'));
 // BE-26 — Guia Assistido Universal
 router.use('/companies/:id/guides',             require('./guides'));
@@ -56,16 +58,12 @@ router.use('/companies/:id',                    require('./importData'));
 router.use('/companies/:id/esocial',            require('./esocial'));
 
 // ── CORE ──────────────────────────────────────────────────────
-// CORE-01 — Onboarding: CNPJ lookup RF + detecção regime/vertical
 router.post('/onboarding/cnpj-lookup',          require('./onboarding'));
 router.use('/companies/:id/onboarding',         require('./onboarding'));
-// CORE-02 — Checklist mensal inteligente por regime + vertical
 router.use('/companies/:id/checklist',          checklistRouter);
 
 // ── FINANCEIRO ──────────────────────────────────────────────
-// FIN-01 — Pró-labore + Fator R + distribuição de lucros
 router.use('/companies/:id/prolabore',          require('./prolabore'));
-// FIN-02 — DRE gerencial + fluxo de caixa projetado
 router.use('/companies/:id/dre',                require('./dre'));
 
 // ── FOOD SERVICE ──────────────────────────────────────────────
