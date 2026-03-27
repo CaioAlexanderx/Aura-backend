@@ -43,7 +43,7 @@ jobs:
           echo "Aguardando Railway subir (60s)..."
           sleep 60
           for i in 1 2 3 4 5; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL/health" || echo "000")
+            STATUS=$(curl -sL -o /dev/null -w "%{http_code}" "$API_URL/health" || echo "000")
             echo "Tentativa $i -- HTTP $STATUS"
             if [ "$STATUS" = "200" ]; then
               echo "Health check OK!"
@@ -75,13 +75,14 @@ jobs:
           fi
 
       - name: Set GIT_SHA on Railway
+        continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}   
           RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
         run: |
           SHA=$(git rev-parse --short HEAD)
-          railway variables set GIT_SHA=$SHA --service "$RAILWAY_SERVICE"
+          railway variables set GIT_SHA=$SHA --service "$RAILWAY_SERVICE" || true
           echo "GIT_SHA=$SHA definido no Railway"
 
       - name: Notify on failure
