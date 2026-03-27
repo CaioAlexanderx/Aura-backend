@@ -1,0 +1,90 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to Railway
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway up --service aura-backend --detach
+          echo "Deploy iniciado em $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+      - name: Wait + Health check
+        env:
+          API_URL: ${{ secrets.RAILWAY_API_URL }}
+        run: |
+          echo "Aguardando Railway subir (60s)..."
+          sleep 60
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL/health" || echo "000")
+            echo "Tentativa $i -- HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check OK!"
+              break
+            fi
+            if [ $i -eq 5 ]; then
+              echo "Health check falhou apos 5 tentativas"
+              exit 1
+            fi
+            sleep 15
+          done
+
+      - name: Create Sentry release
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        run: |
+          if [ -n "$SENTRY_AUTH_TOKEN" ]; then
+            npm install -g @sentry/cli
+            VERSION="aura-backend@$(git rev-parse --short HEAD)"
+            sentry-cli releases new "$VERSION"
+            sentry-cli releases set-commits "$VERSION" --auto
+            sentry-cli releases finalize "$VERSION"
+            sentry-cli releases deploys "$VERSION" new -e production
+            echo "Sentry release criada: $VERSION"
+          else
+            echo "SENTRY_AUTH_TOKEN nao configurado, pulando release Sentry"
+          fi
+
+      - name: Set GIT_SHA on Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          railway variables set GIT_SHA=$SHA --service aura-backend
+          echo "GIT_SHA=$SHA definido no Railway"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "Deploy falhou no commit $(git rev-parse --short HEAD)"
+          echo "Branch: ${{ github.ref_name }} | Autor: ${{ github.actor }}"
+```
+
+                            ├── health check (5 tentativas)
+                            ├── sentry-cli release (se SENTRY_AUTH_TOKEN configurado)
+                            └── GIT_SHA atualizado no Railway
