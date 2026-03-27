@@ -76,6 +76,13 @@ router.use('/checklist', require('./checklist').checklistRouter);
 router.use('/prolabore', require('./prolabore'));
 router.use('/dre', require('./dre'));
 
+// CORE-04 — Categorização automática via IA (Claude Haiku)
+router.use('/transactions/categorize', require('./categorize'));
+router.use('/transactions', require('./categorize')); // rota /:txId/categorize
+
+// CORE-05 — Exportação PDF + CSV com branding Aura
+router.use('/export', require('./exportReports'));
+
 // FOOD SERVICE — privado
 router.use('/food', require('./food'));
 router.use('/food/orders', require('./foodOrders'));
