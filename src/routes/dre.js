@@ -10,9 +10,10 @@ const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireAuth, requirePlan } = require('../middleware/auth');
 
-const guard = [requireAuth, requirePlan(['negocio','expansao'])];
+// fix: requirePlan recebe rest args, não array
+const guard = [requireAuth, requirePlan('negocio', 'expansao')];
 
-// ── Mapeamento padrão categoria → linha DRE ───────────────────
+// ── Mapeamento padrão categoria → linha DRE ─────────────────
 // O usuário pode personalizar via dre_category_map
 const DEFAULT_LINE_MAP = {
   // Receitas
@@ -54,16 +55,14 @@ function _mapCategory(category, customMap) {
   const key = (category || 'outros').toLowerCase().trim();
   if (customMap[key]) return customMap[key];
   if (DEFAULT_LINE_MAP[key]) return DEFAULT_LINE_MAP[key];
-  return { line: 'outros', group: 'Outros', sign: -1 }; // despesa por padrão
+  return { line: 'outros', group: 'Outros', sign: -1 };
 }
 
-// ── GET /companies/:id/dre?from=YYYY-MM-01&to=YYYY-MM-31 ────────
-// DRE gerencial do período
+// ── GET /companies/:id/dre?from=YYYY-MM-01&to=YYYY-MM-31 ──────
 router.get('/', guard, async (req, res) => {
   const cid = req.params.id;
   let { from, to, period } = req.query;
 
-  // Se period=month, from/to do mês atual
   if (!from || !to) {
     const now  = new Date();
     const y    = now.getFullYear();
@@ -79,7 +78,6 @@ router.get('/', guard, async (req, res) => {
   }
 
   try {
-    // Carrega mapeamento personalizado
     const { rows: mapRows } = await db.query(
       `SELECT category, dre_line AS line, dre_group AS group FROM dre_category_map
        WHERE company_id=$1 AND is_active=TRUE`, [cid]
@@ -87,7 +85,6 @@ router.get('/', guard, async (req, res) => {
     const customMap = {};
     mapRows.forEach(r => { customMap[r.category.toLowerCase()] = { line: r.line, group: r.group, sign: r.line.startsWith('receita') ? 1 : -1 }; });
 
-    // Busca lançamentos pagos no período
     const { rows: txns } = await db.query(
       `SELECT type, category, amount, description
        FROM transactions
@@ -98,7 +95,6 @@ router.get('/', guard, async (req, res) => {
       [cid, from, to]
     );
 
-    // Agrupa por linha DRE
     const lineMap = {};
     for (const t of txns) {
       const sign   = t.type === 'income' ? 1 : -1;
@@ -109,7 +105,6 @@ router.get('/', guard, async (req, res) => {
       lineMap[key].items.push({ desc: t.description, amount: parseFloat(t.amount) * sign });
     }
 
-    // Calcula linhas do DRE
     const get = (k) => parseFloat((lineMap[k]?.total || 0).toFixed(2));
 
     const receita_bruta        = get('receita_bruta') + get('outras_receitas');
@@ -125,14 +120,15 @@ router.get('/', guard, async (req, res) => {
     const total_despesas_op    = despesa_pessoal + despesa_fixa + despesa_variavel + outros;
     const ebitda               = parseFloat((lucro_bruto - total_despesas_op).toFixed(2));
     const lucro_antes_financ   = parseFloat((ebitda - despesa_financeira).toFixed(2));
-    const impostos             = deducoes; // impostos já capturados em deduções
     const lucro_liquido        = parseFloat((lucro_antes_financ).toFixed(2));
     const margem_liquida       = receita_bruta > 0
       ? parseFloat((lucro_liquido / receita_bruta * 100).toFixed(1)) : 0;
 
     res.json({
-      note:            'DRE Gerencial — estimativa Aura com base nos lançamentos cadastrados',
-      period:          { from, to },
+      note:    'DRE Gerencial — estimativa Aura com base nos lançamentos cadastrados',
+      period:  { from, to },
+      income:  { total: receita_bruta },
+      expenses:{ total: deducoes + cmv + despesa_pessoal + despesa_fixa + despesa_variavel + despesa_financeira },
       summary: {
         receita_bruta,
         deducoes:          -deducoes,
@@ -157,8 +153,7 @@ router.get('/', guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── GET /companies/:id/dre/monthly?months=12 ──────────────────
-// DRE mensal consolidado (evoluição ao longo do tempo)
+// ── GET /companies/:id/dre/monthly?months=12 ─────────────────
 router.get('/monthly', guard, async (req, res) => {
   const { months = 12 } = req.query;
   try {
@@ -176,24 +171,21 @@ router.get('/monthly', guard, async (req, res) => {
       [req.params.id, months]
     );
     res.json(rows.map(r => ({
-      month:         r.month,
-      receita:       parseFloat(r.receita),
-      despesa:       parseFloat(r.despesa),
-      lucro:         parseFloat((r.receita - r.despesa).toFixed(2)),
-      margem_pct:    r.receita > 0 ? parseFloat(((r.receita - r.despesa)/r.receita*100).toFixed(1)) : 0,
+      month:      r.month,
+      receita:    parseFloat(r.receita),
+      despesa:    parseFloat(r.despesa),
+      lucro:      parseFloat((r.receita - r.despesa).toFixed(2)),
+      margem_pct: r.receita > 0 ? parseFloat(((r.receita - r.despesa)/r.receita*100).toFixed(1)) : 0,
     })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /companies/:id/dre/cashflow?months_ahead=3 ────────────
-// Fluxo de caixa projetado: média móvel dos últimos 3 meses
-// + a receber em aberto + despesas pendentes
 router.get('/cashflow', guard, async (req, res) => {
   const cid = req.params.id;
   const months_ahead = Math.min(parseInt(req.query.months_ahead || 3), 12);
 
   try {
-    // ── 1. Média histórica dos últimos 3 meses (base da projeção) ──
     const { rows: hist } = await db.query(
       `SELECT
          COALESCE(AVG(monthly_income),0)   AS avg_income,
@@ -214,97 +206,63 @@ router.get('/cashflow', guard, async (req, res) => {
     const avg_income  = parseFloat(hist[0]?.avg_income  || 0);
     const avg_expense = parseFloat(hist[0]?.avg_expense || 0);
 
-    // ── 2. A receber em aberto (por mês de vencimento) ──────────
     const { rows: receivables } = await db.query(
-      `SELECT
-         to_char(date_trunc('month', due_date),'YYYY-MM') AS month,
-         SUM(amount) AS total
-       FROM transactions
-       WHERE company_id=$1
-         AND type='income'
-         AND status='pending'
+      `SELECT to_char(date_trunc('month', due_date),'YYYY-MM') AS month, SUM(amount) AS total
+       FROM transactions WHERE company_id=$1 AND type='income' AND status='pending'
          AND due_date BETWEEN NOW() AND NOW() + ($2 || ' months')::INTERVAL
-       GROUP BY month
-       ORDER BY month`,
+       GROUP BY month ORDER BY month`,
       [cid, months_ahead]
     );
     const receivablesByMonth = {};
     receivables.forEach(r => { receivablesByMonth[r.month] = parseFloat(r.total); });
 
-    // ── 3. Despesas pendentes (por mês de vencimento) ──────────
     const { rows: payables } = await db.query(
-      `SELECT
-         to_char(date_trunc('month', due_date),'YYYY-MM') AS month,
-         SUM(amount) AS total
-       FROM transactions
-       WHERE company_id=$1
-         AND type='expense'
-         AND status='pending'
+      `SELECT to_char(date_trunc('month', due_date),'YYYY-MM') AS month, SUM(amount) AS total
+       FROM transactions WHERE company_id=$1 AND type='expense' AND status='pending'
          AND due_date BETWEEN NOW() AND NOW() + ($2 || ' months')::INTERVAL
-       GROUP BY month
-       ORDER BY month`,
+       GROUP BY month ORDER BY month`,
       [cid, months_ahead]
     );
     const payablesByMonth = {};
     payables.forEach(p => { payablesByMonth[p.month] = parseFloat(p.total); });
 
-    // ── 4. Saldo atual (caixa real) ────────────────────────────
     const { rows: balance } = await db.query(
-      `SELECT
-         COALESCE(SUM(amount) FILTER (WHERE type='income'),0)  -
-         COALESCE(SUM(amount) FILTER (WHERE type='expense'),0) AS current_balance
-       FROM transactions
-       WHERE company_id=$1 AND status='confirmed'`,
+      `SELECT COALESCE(SUM(amount) FILTER (WHERE type='income'),0) -
+              COALESCE(SUM(amount) FILTER (WHERE type='expense'),0) AS current_balance
+       FROM transactions WHERE company_id=$1 AND status='confirmed'`,
       [cid]
     );
     let running_balance = parseFloat(balance[0]?.current_balance || 0);
 
-    // ── 5. Monta projeção mês a mês ──────────────────────────
     const projection = [];
     const now = new Date();
-
     for (let i = 0; i < months_ahead; i++) {
-      const d     = new Date(now.getFullYear(), now.getMonth() + i + 1, 1);
-      const mKey  = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-
-      // Receita projetada = média histórica + a receber confirmado
+      const d    = new Date(now.getFullYear(), now.getMonth() + i + 1, 1);
+      const mKey = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
       const proj_income  = avg_income + (receivablesByMonth[mKey] || 0);
-      // Despesa projetada = média histórica + despesas confirmadas
       const proj_expense = avg_expense + (payablesByMonth[mKey] || 0);
       const proj_net     = parseFloat((proj_income - proj_expense).toFixed(2));
       running_balance    = parseFloat((running_balance + proj_net).toFixed(2));
-
       projection.push({
-        month:                mKey,
-        projected_income:     parseFloat(proj_income.toFixed(2)),
-        projected_expense:    parseFloat(proj_expense.toFixed(2)),
-        projected_net:        proj_net,
-        running_balance:      running_balance,
-        receivables_confirmed:parseFloat((receivablesByMonth[mKey]||0).toFixed(2)),
-        payables_confirmed:   parseFloat((payablesByMonth[mKey]||0).toFixed(2)),
-        is_negative:          running_balance < 0,
+        month: mKey, projected_income: parseFloat(proj_income.toFixed(2)),
+        projected_expense: parseFloat(proj_expense.toFixed(2)), projected_net: proj_net,
+        running_balance, receivables_confirmed: parseFloat((receivablesByMonth[mKey]||0).toFixed(2)),
+        payables_confirmed: parseFloat((payablesByMonth[mKey]||0).toFixed(2)),
+        is_negative: running_balance < 0,
       });
     }
 
     res.json({
-      note:             'Projeção estimada pela Aura com base no histórico dos últimos 3 meses + lançamentos pendentes',
-      current_balance:  parseFloat(balance[0]?.current_balance || 0),
-      basis: {
-        avg_monthly_income:  parseFloat(avg_income.toFixed(2)),
-        avg_monthly_expense: parseFloat(avg_expense.toFixed(2)),
-        avg_monthly_net:     parseFloat((avg_income - avg_expense).toFixed(2)),
-      },
-      months_ahead,
-      projection,
-      alert: projection.some(p => p.is_negative)
-        ? 'Atenção: projeção indica saldo negativo em um ou mais meses.'
-        : null,
+      note: 'Projeção estimada pela Aura com base no histórico dos últimos 3 meses + lançamentos pendentes',
+      current_balance: parseFloat(balance[0]?.current_balance || 0),
+      basis: { avg_monthly_income: parseFloat(avg_income.toFixed(2)), avg_monthly_expense: parseFloat(avg_expense.toFixed(2)), avg_monthly_net: parseFloat((avg_income - avg_expense).toFixed(2)) },
+      months_ahead, projection,
+      alert: projection.some(p => p.is_negative) ? 'Atenção: projeção indica saldo negativo em um ou mais meses.' : null,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── POST /companies/:id/dre/category-map ──────────────────────
-// Mapeia uma categoria personalizada para uma linha do DRE
+// ── POST /companies/:id/dre/category-map ────────────────────
 router.post('/category-map', guard, async (req, res) => {
   const { category, dre_line, dre_group } = req.body;
   if (!category || !dre_line || !dre_group)
@@ -322,14 +280,12 @@ router.post('/category-map', guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /companies/:id/dre/category-map
 router.get('/category-map', guard, async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT * FROM dre_category_map WHERE company_id=$1 AND is_active=TRUE ORDER BY dre_group, category`,
       [req.params.id]
     );
-    // Retorna também os defaults para referência
     res.json({ custom: rows, defaults: DEFAULT_LINE_MAP });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
