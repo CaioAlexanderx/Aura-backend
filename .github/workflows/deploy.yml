@@ -31,7 +31,7 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway up --service aura-backend --detach
+          railway up --detach
           echo "Deploy iniciado em $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
       - name: Wait + Health check
@@ -77,7 +77,7 @@ jobs:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
           SHA=$(git rev-parse --short HEAD)
-          railway variables set GIT_SHA=$SHA --service aura-backend
+          railway variables set GIT_SHA=$SHA
           echo "GIT_SHA=$SHA definido no Railway"
 
       - name: Notify on failure
