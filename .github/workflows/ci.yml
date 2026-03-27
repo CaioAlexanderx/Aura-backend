@@ -1,4 +1,4 @@
-name: Aura Backend CI/CD
+name: CI
 
 on:
   push:
@@ -8,24 +8,74 @@ on:
 
 jobs:
   test:
-    name: Testes
+    name: Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aura_test
+          POSTGRES_PASSWORD: aura_test
+          POSTGRES_DB: aura_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      PORT: 3000
+      SUPABASE_DB_URL: postgresql://aura_test:aura_test@localhost:5432/aura_test
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-test-secret-aura-2026
+      JWT_EXPIRES_IN: 1h
+      SENTRY_DSN: ""
 
     steps:
-      - name: Checkout do código
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configurar Node.js 20
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
 
-      - name: Instalar dependências
-        run: npm install
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Rodar testes
-        run: npm test -- --passWithNoTests
-        env:
-          NODE_ENV: test
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      - name: Syntax check
+        run: node --check src/index.js
+
+      - name: Apply test schema
+        run: |
+          for f in migrations/*.sql; do
+            echo "-> Applying $f"
+            PGPASSWORD=aura_test psql -h localhost -U aura_test -d aura_test -f "$f" --on-error-continue 2>&1 | tail -3
+          done
+
+      - name: Run tests
+        run: npm test
+
+      - name: Upload coverage
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
