@@ -1,12 +1,12 @@
 // ============================================================
 // AURA. — Roteador Principal
-// fix(B-04): /auth montado com register, login e me
 // ============================================================
 const express = require('express');
 const router  = express.Router();
 
-const privateCompaniesRouter = require('./private');
+const privateCompaniesRouter  = require('./private');
 const { publicReviewsRouter } = require('./reviews');
+const onboardingRouter        = require('./onboarding');
 
 // ── AUTENTICAÇÃO (pública) ──────────────────────────────────
 router.use('/auth', require('./auth'));
@@ -21,10 +21,10 @@ router.use('/admin', require('./admin'));
 router.use('/reviews', publicReviewsRouter);
 router.use('/dental',  require('./dentalSign'));
 
-// Onboarding: lookup público de CNPJ (sem auth)
-router.post('/onboarding/cnpj-lookup', require('./onboarding'));
+// Onboarding: rota pública de CNPJ lookup montada via router
+router.use('/onboarding', onboardingRouter);
 
-// FOOD — rotas públicas (mesa, cardápio, agendamento)
+// FOOD — rotas públicas
 router.use('/food/table',    require('./foodWaiter'));
 router.use('/food/schedule', require('./foodSchedule'));
 router.use('/food',          require('./food'));

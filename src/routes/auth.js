@@ -1,13 +1,15 @@
 // ============================================================
 // AURA. — Autenticação
-// fix(B-04): POST /auth/register e /auth/login implementados
+// POST /api/v1/auth/register
+// POST /api/v1/auth/login
+// POST /api/v1/auth/me
 // ============================================================
-const express = require('express');
 const router  = require('express').Router();
-const bcrypt  = require('bcryptjs');
+const bcrypt  = require('bcrypt');          // pacote correto no package.json
 const jwt     = require('jsonwebtoken');
 const db      = require('../config/database');
 const { validateRuntimeEnv } = require('../config/env');
+const { requireAuth } = require('../middleware/auth');
 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -17,7 +19,7 @@ function signToken(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_TTL });
 }
 
-// POST /api/v1/auth/register
+// ── POST /api/v1/auth/register ───────────────────────────────
 // Body: { name, email, password, company_name, plan? }
 router.post('/register', async (req, res) => {
   const { name, email, password, company_name, plan = 'essencial' } = req.body;
@@ -74,7 +76,11 @@ router.post('/register', async (req, res) => {
     await client.query('COMMIT');
 
     const token = signToken({ id: user.id, role: user.role, plan: company.plan, company: company.id });
-    res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role }, company });
+    res.status(201).json({
+      token,
+      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      company,
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('register error:', err);
@@ -84,7 +90,7 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// POST /api/v1/auth/login
+// ── POST /api/v1/auth/login ──────────────────────────────────
 // Body: { email, password }
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
@@ -122,7 +128,9 @@ router.post('/login', async (req, res) => {
     res.json({
       token,
       user:    { id: user.id, name: user.name, email: user.email, role: user.role },
-      company: user.company_id ? { id: user.company_id, name: user.company_name, plan: user.plan, onboarding_step: user.onboarding_step } : null,
+      company: user.company_id
+        ? { id: user.company_id, name: user.company_name, plan: user.plan, onboarding_step: user.onboarding_step }
+        : null,
     });
   } catch (err) {
     console.error('login error:', err);
@@ -130,8 +138,8 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// POST /api/v1/auth/me — retorna perfil do token autenticado
-router.post('/me', require('../middleware/auth').requireAuth, async (req, res) => {
+// ── POST /api/v1/auth/me ────────────────────────────────────
+router.post('/me', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT u.id, u.name, u.email, u.role,
@@ -147,7 +155,9 @@ router.post('/me', require('../middleware/auth').requireAuth, async (req, res) =
     const u = rows[0];
     res.json({
       user:    { id: u.id, name: u.name, email: u.email, role: u.role },
-      company: u.company_id ? { id: u.company_id, name: u.legal_name, plan: u.plan, onboarding_step: u.onboarding_step } : null,
+      company: u.company_id
+        ? { id: u.company_id, name: u.legal_name, plan: u.plan, onboarding_step: u.onboarding_step }
+        : null,
     });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao buscar perfil' });
