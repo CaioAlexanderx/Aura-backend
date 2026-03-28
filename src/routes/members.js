@@ -1,25 +1,27 @@
 // ============================================================
 // AURA. — Rotas Multi-usuário RBAC (BE-09)
+// fix(security): B-01 — requireCompanyAccess aplicado em todos os endpoints
 // ============================================================
 
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireCompanyAccess } = require('../middleware/auth');
 const {
   countActiveMembers, listMembers, inviteMember,
   acceptInvite, updateMemberPermissions,
 } = require('../services/members');
 
 // GET /companies/:id/members
-router.get('/', requireAuth, async (req, res) => {
+// Qualquer membro ativo da empresa pode listar
+router.get('/', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const members = await listMembers(req.params.id);
-    const activeCount = members.filter(m => m.status==='active' && m.is_active).length;
+    const activeCount = members.filter(m => m.status === 'active' && m.is_active).length;
     res.json({
       total: members.length,
       active: activeCount,
-      pending: members.filter(m => m.status==='pending').length,
+      pending: members.filter(m => m.status === 'pending').length,
       monthly_cost: Math.max(activeCount - 1, 0) * 19,
       members,
     });
@@ -27,7 +29,8 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // POST /companies/:id/members/invite
-router.post('/invite', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
+// Apenas owner ou admin da empresa podem convidar
+router.post('/invite', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const result = await inviteMember(req.params.id, req.user.id, req.body);
     res.status(201).json(result);
@@ -36,7 +39,7 @@ router.post('/invite', requireAuth, requireRole('client','analyst','admin'), asy
   }
 });
 
-// POST /members/accept/:token
+// POST /members/accept/:token  (rota pública por token — sem :id de empresa)
 router.post('/accept/:token', requireAuth, async (req, res) => {
   try {
     const member = await acceptInvite(req.params.token, req.user.id);
@@ -47,7 +50,8 @@ router.post('/accept/:token', requireAuth, async (req, res) => {
 });
 
 // PATCH /companies/:id/members/:mid
-router.patch('/:mid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
+// Apenas owner ou admin da empresa
+router.patch('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const member = await updateMemberPermissions(req.params.id, req.params.mid, req.body);
     res.json({ member });
@@ -57,7 +61,8 @@ router.patch('/:mid', requireAuth, requireRole('client','analyst','admin'), asyn
 });
 
 // DELETE /companies/:id/members/:mid
-router.delete('/:mid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
+// Apenas owner ou admin da empresa
+router.delete('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const { rows } = await db.query(
       'SELECT user_id FROM company_members WHERE id=$1 AND company_id=$2',
@@ -74,7 +79,8 @@ router.delete('/:mid', requireAuth, requireRole('client','analyst','admin'), asy
 });
 
 // GET /companies/:id/members/billing
-router.get('/billing', requireAuth, async (req, res) => {
+// Qualquer membro ativo pode ver o billing
+router.get('/billing', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const activeCount = await countActiveMembers(req.params.id);
     const billable = Math.max(activeCount - 1, 0);
@@ -89,7 +95,8 @@ router.get('/billing', requireAuth, async (req, res) => {
 });
 
 // GET /companies/:id/members/roles
-router.get('/roles', requireAuth, async (req, res) => {
+// Qualquer membro pode listar templates de roles
+router.get('/roles', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT id, name, description, permissions, is_default,
@@ -104,36 +111,39 @@ router.get('/roles', requireAuth, async (req, res) => {
 });
 
 // POST /companies/:id/members/roles
-router.post('/roles', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { name, description, permissions={} } = req.body;
+// Apenas owner ou admin
+router.post('/roles', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
+  const { name, description, permissions = {} } = req.body;
   if (!name) return res.status(400).json({ error: 'name é obrigatório' });
   try {
     const { rows } = await db.query(
       `INSERT INTO role_templates (company_id, name, description, permissions)
        VALUES ($1,$2,$3,$4) RETURNING *`,
-      [req.params.id, name, description||null, JSON.stringify(permissions)]
+      [req.params.id, name, description || null, JSON.stringify(permissions)]
     );
     res.status(201).json({ template: rows[0] });
   } catch (err) {
-    if (err.code==='23505') return res.status(409).json({ error: 'Já existe um template com este nome' });
+    if (err.code === '23505') return res.status(409).json({ error: 'Já existe um template com este nome' });
     res.status(500).json({ error: 'Erro ao criar template' });
   }
 });
 
 // PATCH /companies/:id/members/roles/:rid
-router.patch('/roles/:rid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
+// Apenas owner ou admin
+router.patch('/roles/:rid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   const { name, description, permissions } = req.body;
-  const fields=[], values=[];
-  let idx=1;
+  const fields = [], values = [];
+  let idx = 1;
   if (name        !== undefined) { fields.push(`name=$${idx++}`);        values.push(name); }
   if (description !== undefined) { fields.push(`description=$${idx++}`); values.push(description); }
   if (permissions !== undefined) { fields.push(`permissions=$${idx++}`); values.push(JSON.stringify(permissions)); }
   if (!fields.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-  fields.push(`updated_at=NOW()`);
+  fields.push('updated_at=NOW()');
   values.push(req.params.rid, req.params.id);
   try {
     const { rows } = await db.query(
-      `UPDATE role_templates SET ${fields.join(',')} WHERE id=$${idx++} AND company_id=$${idx} RETURNING *`, values
+      `UPDATE role_templates SET ${fields.join(',')} WHERE id=$${idx++} AND company_id=$${idx} RETURNING *`,
+      values
     );
     if (!rows.length) return res.status(404).json({ error: 'Template não encontrado ou é global' });
     res.json({ template: rows[0] });
@@ -141,7 +151,8 @@ router.patch('/roles/:rid', requireAuth, requireRole('client','analyst','admin')
 });
 
 // DELETE /companies/:id/members/roles/:rid
-router.delete('/roles/:rid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
+// Apenas owner ou admin
+router.delete('/roles/:rid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const { rows } = await db.query(
       'DELETE FROM role_templates WHERE id=$1 AND company_id=$2 RETURNING id',
