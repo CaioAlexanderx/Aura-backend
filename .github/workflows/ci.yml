@@ -63,10 +63,13 @@ jobs:
         run: node --check src/index.js
 
       - name: Apply test schema
+        env:
+          PGPASSWORD: aura_test
         run: |
-          for f in migrations/*.sql; do
+          for f in $(ls migrations/*.sql | sort); do
             echo "-> Applying $f"
-            PGPASSWORD=aura_test psql -h localhost -U aura_test -d aura_test -f "$f" --on-error-continue 2>&1 | tail -3
+            psql -h localhost -U aura_test -d aura_test -v ON_ERROR_STOP=1 -f "$f"
+            echo "   OK: $f"
           done
 
       - name: Run tests with coverage
