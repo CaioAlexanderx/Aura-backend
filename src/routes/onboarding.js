@@ -21,7 +21,6 @@ async function _checkRateLimit(ip) {
   } catch (_) { return true; }
 }
 
-// ── ETAPAS DO ONBOARDING ──────────────────────────────────────
 const STEPS = ['cnpj', 'regime', 'perfil', 'vertical', 'done'];
 function nextStep(current) {
   const idx = STEPS.indexOf(current);
@@ -31,7 +30,6 @@ function nextStep(current) {
 // ── ROTAS PÚBLICAS ────────────────────────────────────────────
 
 // POST /onboarding/cnpj-lookup
-// Consulta pública (pré-cadastro) — não requer empresa criada
 router.post('/cnpj-lookup', async (req, res) => {
   const { cnpj } = req.body;
   if (!cnpj) return res.status(400).json({ error: 'cnpj obrigatório' });
@@ -44,7 +42,6 @@ router.post('/cnpj-lookup', async (req, res) => {
 
   try {
     const data = await lookupCNPJ(cnpj, redis);
-    // Não retorna dados se CNPJ inativo
     if (!data.is_active) {
       return res.status(422).json({
         error: 'CNPJ com situação irregular na Receita Federal.',
@@ -59,10 +56,9 @@ router.post('/cnpj-lookup', async (req, res) => {
   }
 });
 
-// ── ROTAS AUTENTICADAS (empresa já criada) ────────────────────
+// ── ROTAS AUTENTICADAS ────────────────────────────────────────
 
 // GET /companies/:id/onboarding
-// Retorna status atual do onboarding + dados da sessão
 router.get('/', requireAuth, async (req, res) => {
   const cid = req.params.id;
   try {
@@ -93,17 +89,17 @@ router.get('/', requireAuth, async (req, res) => {
         vertical: c.step_vertical_done || false,
       },
       company: {
-        cnpj:           c.cnpj,
-        legal_name:     c.legal_name,
-        trade_name:     c.trade_name,
-        tax_regime:     c.tax_regime,
-        vertical_active:c.vertical_active,
-        cnaes:          c.cnaes,
-        legal_nature:   c.legal_nature,
-        company_size:   c.company_size,
-        rf_situation:   c.rf_situation,
-        city:           c.address_city,
-        state:          c.address_state,
+        cnpj:            c.cnpj,
+        legal_name:      c.legal_name,
+        trade_name:      c.trade_name,
+        tax_regime:      c.tax_regime,
+        vertical_active: c.vertical_active,
+        cnaes:           c.cnaes,
+        legal_nature:    c.legal_nature,
+        company_size:    c.company_size,
+        rf_situation:    c.rf_situation,
+        city:            c.address_city,
+        state:           c.address_state,
       },
       rf_data: c.rf_data || null,
     });
@@ -111,7 +107,6 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // POST /companies/:id/onboarding/step/cnpj
-// Etapa 1: consulta RF, preenche empresa automaticamente
 router.post('/step/cnpj', requireAuth, async (req, res) => {
   const cid = req.params.id;
   const { cnpj } = req.body;
@@ -124,7 +119,6 @@ router.post('/step/cnpj', requireAuth, async (req, res) => {
     return res.status(429).json({ error: 'Limite de consultas atingido' });
 
   try {
-    // Verifica ownership
     const { rows } = await db.query(
       `SELECT id FROM companies WHERE id=$1 AND owner_id=$2`, [cid, req.user.id]
     );
@@ -134,11 +128,11 @@ router.post('/step/cnpj', requireAuth, async (req, res) => {
     if (!rf.is_active)
       return res.status(422).json({ error: 'CNPJ com situação irregular na RF.', situation: rf.rf_situation });
 
-    const client = await db.pool.connect();
+    // fix: usar db.connect() — db já é o Pool, não tem .pool
+    const client = await db.connect();
     try {
       await client.query('BEGIN');
 
-      // Atualiza dados da empresa com informações da RF
       await client.query(
         `UPDATE companies SET
            cnpj             = $1,  tax_id          = $1,
@@ -158,25 +152,16 @@ router.post('/step/cnpj', requireAuth, async (req, res) => {
            updated_at       = NOW()
          WHERE id = $17`,
         [
-          rf.cnpj_raw,
-          rf.legal_name,
-          rf.trade_name,
-          rf.legal_nature,
-          rf.legal_nature_code,
-          rf.company_size,
-          rf.rf_situation,
-          rf.opening_date || null,
-          JSON.stringify({
-            principal:    rf.cnae_principal,
-            secundarios:  rf.cnaes_secundarios,
-          }),
+          rf.cnpj_raw, rf.legal_name, rf.trade_name,
+          rf.legal_nature, rf.legal_nature_code, rf.company_size,
+          rf.rf_situation, rf.opening_date || null,
+          JSON.stringify({ principal: rf.cnae_principal, secundarios: rf.cnaes_secundarios }),
           rf.address_street, rf.address_number, rf.address_complement,
           rf.address_district, rf.address_city, rf.address_state, rf.address_zip,
           cid,
         ]
       );
 
-      // Upsert sessão de onboarding
       await client.query(
         `INSERT INTO onboarding_sessions (company_id, current_step, rf_data, step_cnpj_done)
          VALUES ($1, 'regime', $2, TRUE)
@@ -197,9 +182,9 @@ router.post('/step/cnpj', requireAuth, async (req, res) => {
     res.json({
       next_step: 'regime',
       suggestions: {
-        tax_regime:   rf.suggested_regime,
-        vertical:     rf.suggested_vertical,
-        is_mei:       rf.is_mei,
+        tax_regime: rf.suggested_regime,
+        vertical:   rf.suggested_vertical,
+        is_mei:     rf.is_mei,
       },
       rf_data: rf,
     });
@@ -211,7 +196,6 @@ router.post('/step/cnpj', requireAuth, async (req, res) => {
 });
 
 // POST /companies/:id/onboarding/step/regime
-// Etapa 2: confirmar regime tributário detectado (ou escolher manualmente)
 router.post('/step/regime', requireAuth, async (req, res) => {
   const cid = req.params.id;
   const { tax_regime } = req.body;
@@ -238,7 +222,6 @@ router.post('/step/regime', requireAuth, async (req, res) => {
              step_regime_done=TRUE, updated_at=NOW()`,
       [cid]
     );
-    // Audit log se mudou regime
     if (prevRegime !== tax_regime) {
       await db.query(
         `INSERT INTO audit_logs (company_id, user_id, action, entity_type, entity_id, old_value, new_value)
@@ -251,7 +234,6 @@ router.post('/step/regime', requireAuth, async (req, res) => {
 });
 
 // POST /companies/:id/onboarding/step/perfil
-// Etapa 3: dados complementares (nome fantasia, telefone, email)
 router.post('/step/perfil', requireAuth, async (req, res) => {
   const cid = req.params.id;
   const { trade_name, phone, email, name } = req.body;
@@ -285,10 +267,9 @@ router.post('/step/perfil', requireAuth, async (req, res) => {
 });
 
 // POST /companies/:id/onboarding/step/vertical
-// Etapa 4: escolher vertical (ou pular)
 router.post('/step/vertical', requireAuth, async (req, res) => {
   const cid = req.params.id;
-  const { vertical } = req.body; // null = sem vertical
+  const { vertical } = req.body;
   const validVerticals = [null,'odonto','salao','estetica','academia','pet','food','moda'];
   if (!validVerticals.includes(vertical))
     return res.status(400).json({ error: 'Vertical inválido' });
@@ -328,7 +309,6 @@ router.post('/step/vertical', requireAuth, async (req, res) => {
 });
 
 // POST /companies/:id/onboarding/restart
-// Reinicia o onboarding (útil se empresa mudou de CNPJ)
 router.post('/restart', requireAuth, async (req, res) => {
   const cid = req.params.id;
   try {
@@ -339,9 +319,7 @@ router.post('/restart', requireAuth, async (req, res) => {
     await db.query(
       `UPDATE companies SET onboarding_step='cnpj', onboarding_completed_at=NULL WHERE id=$1`, [cid]
     );
-    await db.query(
-      `DELETE FROM onboarding_sessions WHERE company_id=$1`, [cid]
-    );
+    await db.query(`DELETE FROM onboarding_sessions WHERE company_id=$1`, [cid]);
     res.json({ ok: true, step: 'cnpj' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
