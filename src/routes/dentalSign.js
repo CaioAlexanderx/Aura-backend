@@ -120,12 +120,27 @@ router.get('/sign/:token/status', async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Token não encontrado' });
     const row = rows[0];
-    const sessionStatus = getSessionStatus(token);
-    res.json({
-      token, signed: !!row.conclusion_signed, conclusion_at: row.conclusion_at,
-      patient_connected: sessionStatus.connected,
-      status: row.conclusion_signed ? 'signed' : sessionStatus.connected ? 'patient_connected' : 'waiting',
-    });
+const sessionStatus = getSessionStatus(token);
+
+const isSigned =
+  row.conclusion_signed === true ||
+  row.conclusion_signed === 1 ||
+  row.conclusion_signed === '1' ||
+  row.conclusion_signed === 'true' ||
+  !!row.conclusion_at ||
+  !!row.used_at;
+
+res.json({
+  token,
+  signed: isSigned,
+  conclusion_at: row.conclusion_at,
+  patient_connected: !!sessionStatus?.connected,
+  status: isSigned
+    ? 'signed'
+    : sessionStatus?.connected
+      ? 'patient_connected'
+      : 'waiting',
+});
   } catch (err) { res.status(500).json({ error: 'Erro ao verificar status' }); }
 });
 
