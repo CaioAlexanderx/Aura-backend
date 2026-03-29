@@ -4,13 +4,12 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
-const { requireAuth, requirePlan } = require('../middleware/auth');
+const { requirePlan } = require('../middleware/auth');
 
-const guard = [requireAuth, requirePlan(['negocio','expansao'])];
+// Nota: requireAuth + requireCompanyAccess já aplicados em private.js
+const guard = [requirePlan('negocio', 'expansao')];
 
 // ── MAPEAMENTO iFood → Aura ──────────────────────────────────
-// Status iFood:  PLACED → CONFIRMED → PREPARATION_STARTED → READY_TO_PICKUP
-//                → DISPATCHED → CONCLUDED | CANCELLED
 const IFOOD_STATUS_MAP = {
   PLACED:               'pending',
   CONFIRMED:            'confirmed',
@@ -21,21 +20,14 @@ const IFOOD_STATUS_MAP = {
   CANCELLED:            'cancelled',
 };
 
-// Canal mapeado como 'ifood' nos food_orders
-
 // ── PARSER CSV iFood ─────────────────────────────────────────
-// Colunas esperadas no export do iFood Admin:
-// Número do pedido, Data, Cliente, Itens, Subtotal, Taxa entrega, Total,
-// Status, Forma pagamento, Endereço de entrega
 function parseIfoodCSV(csvText) {
   const lines  = csvText.trim().split('\n').filter(Boolean);
   if (lines.length < 2) throw new Error('CSV vazio ou sem dados');
 
-  // Detecta delimitador: ponto-e-vírgula (padrão iFood BR) ou vírgula
   const delimiter = lines[0].includes(';') ? ';' : ',';
   const headers   = lines[0].split(delimiter).map(h => h.trim().replace(/"/g, '').toLowerCase());
 
-  // Índices das colunas — aceita variações de nome
   const col = (aliases) => {
     for (const a of aliases) {
       const idx = headers.findIndex(h => h.includes(a));
@@ -69,7 +61,6 @@ function parseIfoodCSV(csvText) {
     const rawDate    = get(idx.date);
     const createdAt  = rawDate ? _parseDate(rawDate) : new Date();
 
-    // Parse simples dos itens (texto livre do export iFood)
     const rawItems = get(idx.items) || '';
     const parsedItems = rawItems.split(/[,;|]+/).filter(Boolean).map(s => ({
       item_name:  s.trim(),
@@ -94,7 +85,7 @@ function parseIfoodCSV(csvText) {
       items:            parsedItems.length ? parsedItems : [{ item_name: 'Pedido iFood', quantity:1, unit_price: total, total_price: total }],
       _line: lineNum + 2,
     };
-  }).filter(r => r.external_id); // ignora linhas sem ID de pedido
+  }).filter(r => r.external_id);
 }
 
 function splitCSVLine(line, delimiter) {
@@ -110,7 +101,6 @@ function splitCSVLine(line, delimiter) {
 }
 
 function _parseDate(s) {
-  // Tenta formatos: DD/MM/YYYY HH:MM, DD/MM/YYYY, YYYY-MM-DD
   if (s.includes('/')) {
     const [d, m, yRest] = s.split('/');
     const [y, time] = (yRest||'').split(' ');
@@ -121,27 +111,24 @@ function _parseDate(s) {
 
 // ── ROTAS ────────────────────────────────────────────────────
 
-// POST /companies/:id/food/ifood/import
-// Body: { csv: '<texto do CSV>' } ou multipart (futuro)
 router.post('/import', guard, async (req, res) => {
   const { csv } = req.body;
   if (!csv) return res.status(400).json({ error: 'Campo csv obrigatório no body' });
 
   let parsed;
   try { parsed = parseIfoodCSV(csv); }
-  catch (e) { return res.status(400).json({ error: `Erro ao ler CSV: ${e.message}` }); }
+  catch (e) { return res.status(400).json({ error: 'Erro ao ler CSV. Verifique o formato.' }); }
 
   if (!parsed.length) return res.status(400).json({ error: 'Nenhum pedido encontrado no CSV' });
 
   const batchId  = require('crypto').randomUUID();
   const results  = { imported: 0, skipped: 0, errors: [] };
-  const client   = await db.pool.connect();
+  const client   = await db.connect();
 
   try {
     await client.query('BEGIN');
 
     for (const order of parsed) {
-      // Verifica se external_id já existe para esta empresa
       const { rows: exists } = await client.query(
         `SELECT id FROM food_orders WHERE company_id=$1 AND external_id=$2`,
         [req.params.id, order.external_id]
@@ -164,7 +151,6 @@ router.post('/import', guard, async (req, res) => {
            isNaN(order.created_at) ? new Date() : order.created_at]
         );
 
-        // Inserir itens
         for (const item of order.items) {
           await client.query(
             `INSERT INTO food_order_items
@@ -175,7 +161,7 @@ router.post('/import', guard, async (req, res) => {
         }
         results.imported++;
       } catch (rowErr) {
-        results.errors.push({ line: order._line, external_id: order.external_id, error: rowErr.message });
+        results.errors.push({ line: order._line, external_id: order.external_id, error: 'Erro ao importar linha' });
       }
     }
 
@@ -187,12 +173,11 @@ router.post('/import', guard, async (req, res) => {
     });
   } catch (e) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: e.message });
+    console.error('[food/ifood/import] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao importar pedidos do iFood' });
   } finally { client.release(); }
 });
 
-// GET /companies/:id/food/ifood/orders?limit=50&offset=0
-// Lista pedidos importados do iFood
 router.get('/orders', guard, async (req, res) => {
   const { limit = 50, offset = 0, status } = req.query;
   const conds = ["fo.company_id=$1", "fo.source='csv_import'", "fo.channel='ifood'"];
@@ -210,11 +195,12 @@ router.get('/orders', guard, async (req, res) => {
       [...vals, limit, offset]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/ifood/orders] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao listar pedidos iFood' });
+  }
 });
 
-// GET /companies/:id/food/ifood/stats
-// Comparativo iFood vs canal próprio
 router.get('/stats', guard, async (req, res) => {
   try {
     const { rows } = await db.query(`
@@ -232,11 +218,12 @@ router.get('/stats', guard, async (req, res) => {
       [req.params.id]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/ifood/stats] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar estatísticas iFood' });
+  }
 });
 
-// GET /companies/:id/food/ifood/template
-// Retorna modelo de CSV compatível para o cliente preencher manualmente
 router.get('/template', guard, (_req, res) => {
   const csv = [
     'Número do pedido;Data;Cliente;Itens;Subtotal;Taxa entrega;Total;Status;Forma pagamento;Endereço de entrega',
@@ -245,7 +232,7 @@ router.get('/template', guard, (_req, res) => {
   ].join('\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="modelo-ifood-aura.csv"');
-  res.send('\uFEFF' + csv); // BOM para Excel reconhecer UTF-8
+  res.send('\uFEFF' + csv);
 });
 
 module.exports = router;
