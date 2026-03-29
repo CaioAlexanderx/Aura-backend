@@ -12,6 +12,8 @@ beforeAll(() => {
 
 const SECRET      = 'aura-test-secret-2026';
 const validToken  = 'valid-token-123';
+const cid         = '00000000-0000-0000-0000-000000000001';
+const aid         = '00000000-0000-0000-0000-000000000002';
 const authHeader  = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', plan:'negocio' }, SECRET, { expiresIn:'1h' })}` };
 
 jest.mock('../../src/services/dental', () => ({
@@ -66,7 +68,10 @@ describe('GET /dental/sign/:token/pad', () => {
 });
 
 describe('GET /dental/sign/:token/status', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.query.mockReset(); // Clear mockResolvedValueOnce queue
+  });
 
   test('retorna status waiting quando paciente não conectou', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ used_at:null, conclusion_signed:false, conclusion_at:null }] });
@@ -92,12 +97,13 @@ describe('GET /dental/sign/:token/status', () => {
 });
 
 describe('POST /dental/appointments/:aid/signature-token', () => {
-  beforeEach(() => jest.clearAllMocks());
-
-  const cid = '00000000-0000-0000-0000-000000000001';
-  const aid = '00000000-0000-0000-0000-000000000002';
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.query.mockReset();
+  });
 
   test('gera token de assinatura', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     generateWsToken.mockResolvedValueOnce({ token:'new-token-abc', pad_url:'https://example.com/pad', expires_at: new Date(Date.now()+600000).toISOString(), qr_data:'https://...' });
     const res = await request(app).post(`/api/v1/companies/${cid}/dental/appointments/${aid}/signature-token`).set(authHeader);
     expect(res.status).toBe(200);
