@@ -5,9 +5,10 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
-const { requireAuth, requirePlan } = require('../middleware/auth');
+const { requirePlan } = require('../middleware/auth');
 
-const guardFood = [requireAuth, requirePlan(['negocio','expansao'])];
+// Nota: requireAuth + requireCompanyAccess já aplicados em private.js
+const guardFood = [requirePlan('negocio', 'expansao')];
 
 // ── helpers ──────────────────────────────────────────────────
 const notFound = (res, entity = 'Item') => res.status(404).json({ error: `${entity} não encontrado` });
@@ -20,23 +21,19 @@ const ownedBy  = async (table, id, companyId) => {
 // FOOD-01 — CARDÁPIO
 // ============================================================
 
-// GET  /companies/:id/food/menu           — cardápio completo (com categorias + itens)
 router.get('/menu', guardFood, async (req, res) => {
   const cid = req.params.id;
   try {
-    // Menu
     const { rows: menus } = await db.query(
       `SELECT * FROM food_menus WHERE company_id=$1 ORDER BY created_at LIMIT 1`, [cid]
     );
     if (!menus.length) return res.json({ menu: null, categories: [], items: [] });
     const menu = menus[0];
 
-    // Categorias
     const { rows: categories } = await db.query(
       `SELECT * FROM food_categories WHERE menu_id=$1 AND is_active=TRUE ORDER BY sort_order`, [menu.id]
     );
 
-    // Itens com variações e adicionais
     const { rows: items } = await db.query(
       `SELECT fi.*,
         COALESCE(json_agg(DISTINCT fiv.*) FILTER (WHERE fiv.id IS NOT NULL), '[]') AS variations,
@@ -50,10 +47,12 @@ router.get('/menu', guardFood, async (req, res) => {
     );
 
     res.json({ menu, categories, items });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/menu] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar cardápio' });
+  }
 });
 
-// GET  /companies/:id/food/menu/public/:slug  — menu público (sem auth)
 router.get('/menu/public/:slug', async (req, res) => {
   try {
     const { rows: menus } = await db.query(
@@ -80,10 +79,12 @@ router.get('/menu/public/:slug', async (req, res) => {
     );
 
     res.json({ menu, categories, items });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/menu/public] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar cardápio público' });
+  }
 });
 
-// POST /companies/:id/food/menu           — criar/atualizar menu
 router.post('/menu', guardFood, async (req, res) => {
   const { name, slug, description, accepts_online_orders, min_order_amount } = req.body;
   const cid = req.params.id;
@@ -97,11 +98,13 @@ router.post('/menu', guardFood, async (req, res) => {
       [cid, name||'Cardápio', slug||null, description||null, accepts_online_orders||false, min_order_amount||null]
     );
     res.status(201).json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/menu] Erro ao criar:', e.message);
+    res.status(500).json({ error: 'Erro ao criar cardápio' });
+  }
 });
 
 // ── CATEGORIAS ───────────────────────────────────────────────
-// POST /companies/:id/food/categories
 router.post('/categories', guardFood, async (req, res) => {
   const { menu_id, name, sort_order } = req.body;
   if (!menu_id || !name) return res.status(400).json({ error: 'menu_id e name obrigatórios' });
@@ -111,10 +114,12 @@ router.post('/categories', guardFood, async (req, res) => {
       [menu_id, req.params.id, name, sort_order||0]
     );
     res.status(201).json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/categories] Erro ao criar:', e.message);
+    res.status(500).json({ error: 'Erro ao criar categoria' });
+  }
 });
 
-// PATCH /companies/:id/food/categories/:cid
 router.patch('/categories/:cid', guardFood, async (req, res) => {
   const { name, sort_order, is_active } = req.body;
   try {
@@ -126,11 +131,13 @@ router.patch('/categories/:cid', guardFood, async (req, res) => {
     );
     if (!rows.length) return notFound(res, 'Categoria');
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/categories] Erro ao atualizar:', e.message);
+    res.status(500).json({ error: 'Erro ao atualizar categoria' });
+  }
 });
 
 // ── ITENS ─────────────────────────────────────────────────────
-// POST /companies/:id/food/items
 router.post('/items', guardFood, async (req, res) => {
   const { category_id, name, description, price, photo_url, preparation_time_min, serves, tags, sort_order } = req.body;
   if (!name || price == null) return res.status(400).json({ error: 'name e price obrigatórios' });
@@ -143,10 +150,12 @@ router.post('/items', guardFood, async (req, res) => {
        photo_url||null, preparation_time_min||null, serves||1, tags||null, sort_order||0]
     );
     res.status(201).json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/items] Erro ao criar:', e.message);
+    res.status(500).json({ error: 'Erro ao criar item' });
+  }
 });
 
-// PATCH /companies/:id/food/items/:iid
 router.patch('/items/:iid', guardFood, async (req, res) => {
   const fields = ['category_id','name','description','price','photo_url',
                   'is_active','is_available','preparation_time_min','serves','tags','sort_order'];
@@ -165,20 +174,24 @@ router.patch('/items/:iid', guardFood, async (req, res) => {
     );
     if (!rows.length) return notFound(res);
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/items] Erro ao atualizar:', e.message);
+    res.status(500).json({ error: 'Erro ao atualizar item' });
+  }
 });
 
-// DELETE /companies/:id/food/items/:iid  (soft-delete)
 router.delete('/items/:iid', guardFood, async (req, res) => {
   try {
     await db.query(`UPDATE food_items SET is_active=FALSE WHERE id=$1 AND company_id=$2`,
       [req.params.iid, req.params.id]);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/items] Erro ao remover:', e.message);
+    res.status(500).json({ error: 'Erro ao remover item' });
+  }
 });
 
 // ── VARIAÇÕES ────────────────────────────────────────────────
-// POST /companies/:id/food/items/:iid/variations
 router.post('/items/:iid/variations', guardFood, async (req, res) => {
   const { name, price_delta, is_required, sort_order } = req.body;
   if (!name) return res.status(400).json({ error: 'name obrigatório' });
@@ -191,20 +204,24 @@ router.post('/items/:iid/variations', guardFood, async (req, res) => {
       [req.params.iid, req.params.id, name, price_delta||0, is_required||false, sort_order||0]
     );
     res.status(201).json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/variations] Erro ao criar:', e.message);
+    res.status(500).json({ error: 'Erro ao criar variação' });
+  }
 });
 
-// DELETE /companies/:id/food/items/:iid/variations/:vid
 router.delete('/items/:iid/variations/:vid', guardFood, async (req, res) => {
   try {
     await db.query(`UPDATE food_item_variations SET is_active=FALSE WHERE id=$1 AND company_id=$2`,
       [req.params.vid, req.params.id]);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/variations] Erro ao remover:', e.message);
+    res.status(500).json({ error: 'Erro ao remover variação' });
+  }
 });
 
 // ── ADICIONAIS ───────────────────────────────────────────────
-// POST /companies/:id/food/addons
 router.post('/addons', guardFood, async (req, res) => {
   const { item_id, name, price, max_qty } = req.body;
   if (!name) return res.status(400).json({ error: 'name obrigatório' });
@@ -215,21 +232,25 @@ router.post('/addons', guardFood, async (req, res) => {
       [req.params.id, item_id||null, name, price||0, max_qty||1]
     );
     res.status(201).json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/addons] Erro ao criar:', e.message);
+    res.status(500).json({ error: 'Erro ao criar adicional' });
+  }
 });
 
 // ── MESAS ────────────────────────────────────────────────────
-// GET  /companies/:id/food/tables
 router.get('/tables', guardFood, async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT * FROM food_tables WHERE company_id=$1 ORDER BY number`, [req.params.id]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/tables] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar mesas' });
+  }
 });
 
-// POST /companies/:id/food/tables
 router.post('/tables', guardFood, async (req, res) => {
   const { number, seats } = req.body;
   if (!number) return res.status(400).json({ error: 'number obrigatório' });
@@ -240,10 +261,12 @@ router.post('/tables', guardFood, async (req, res) => {
       [req.params.id, number, seats||null]
     );
     res.status(201).json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/tables] Erro ao criar:', e.message);
+    res.status(500).json({ error: 'Erro ao criar mesa' });
+  }
 });
 
-// PATCH /companies/:id/food/tables/:tid/status
 router.patch('/tables/:tid/status', guardFood, async (req, res) => {
   const { status } = req.body;
   if (!['free','occupied','reserved'].includes(status))
@@ -255,14 +278,16 @@ router.patch('/tables/:tid/status', guardFood, async (req, res) => {
     );
     if (!rows.length) return notFound(res, 'Mesa');
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/tables] Erro ao atualizar:', e.message);
+    res.status(500).json({ error: 'Erro ao atualizar mesa' });
+  }
 });
 
 // ============================================================
 // FOOD-02 — FICHA TÉCNICA (custo automático)
 // ============================================================
 
-// GET  /companies/:id/food/items/:iid/recipe
 router.get('/items/:iid/recipe', guardFood, async (req, res) => {
   if (!(await ownedBy('food_items', req.params.iid, req.params.id)))
     return notFound(res, 'Item');
@@ -274,10 +299,8 @@ router.get('/items/:iid/recipe', guardFood, async (req, res) => {
        WHERE fr.item_id=$1 ORDER BY fr.created_at`,
       [req.params.iid]
     );
-    // Custo total da ficha
     const totalCost = ingredients.reduce((sum, r) => sum + (parseFloat(r.unit_cost) * parseFloat(r.quantity)), 0);
 
-    // Buscar preço de venda do item para calcular margem
     const { rows: items } = await db.query(
       `SELECT price, name FROM food_items WHERE id=$1`, [req.params.iid]
     );
@@ -292,13 +315,15 @@ router.get('/items/:iid/recipe', guardFood, async (req, res) => {
       sale_price: item?.price,
       total_cost: parseFloat(totalCost.toFixed(4)),
       margin_pct: marginPct ? parseFloat(marginPct) : null,
-      margin_alert: marginPct !== null && parseFloat(marginPct) < 30, // alerta se margem < 30%
+      margin_alert: marginPct !== null && parseFloat(marginPct) < 30,
       ingredients
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/recipe] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar ficha técnica' });
+  }
 });
 
-// POST /companies/:id/food/items/:iid/recipe  — adicionar ingrediente
 router.post('/items/:iid/recipe', guardFood, async (req, res) => {
   const { ingredient_name, unit, quantity, unit_cost, product_id, notes } = req.body;
   if (!ingredient_name || quantity == null || unit_cost == null)
@@ -312,15 +337,14 @@ router.post('/items/:iid/recipe', guardFood, async (req, res) => {
       [req.params.iid, req.params.id, ingredient_name, unit||'un',
        quantity, unit_cost, product_id||null, notes||null]
     );
-
-    // Recalcular e atualizar cost_price no item
     await _recalcItemCost(req.params.iid);
-
     res.status(201).json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/recipe] Erro ao adicionar ingrediente:', e.message);
+    res.status(500).json({ error: 'Erro ao adicionar ingrediente' });
+  }
 });
 
-// PUT /companies/:id/food/items/:iid/recipe/:rid  — atualizar ingrediente
 router.put('/items/:iid/recipe/:rid', guardFood, async (req, res) => {
   const { ingredient_name, unit, quantity, unit_cost, product_id, notes } = req.body;
   try {
@@ -336,20 +360,24 @@ router.put('/items/:iid/recipe/:rid', guardFood, async (req, res) => {
     if (!rows.length) return notFound(res, 'Ingrediente');
     await _recalcItemCost(req.params.iid);
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/recipe] Erro ao atualizar ingrediente:', e.message);
+    res.status(500).json({ error: 'Erro ao atualizar ingrediente' });
+  }
 });
 
-// DELETE /companies/:id/food/items/:iid/recipe/:rid
 router.delete('/items/:iid/recipe/:rid', guardFood, async (req, res) => {
   try {
     await db.query(`DELETE FROM food_recipes WHERE id=$1 AND item_id=$2 AND company_id=$3`,
       [req.params.rid, req.params.iid, req.params.id]);
     await _recalcItemCost(req.params.iid);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/recipe] Erro ao remover ingrediente:', e.message);
+    res.status(500).json({ error: 'Erro ao remover ingrediente' });
+  }
 });
 
-// Recalcula custo do prato e atualiza food_items.cost_price
 async function _recalcItemCost(itemId) {
   const { rows } = await db.query(
     `SELECT SUM(quantity * unit_cost) AS total FROM food_recipes WHERE item_id=$1`, [itemId]
@@ -359,7 +387,6 @@ async function _recalcItemCost(itemId) {
   return cost;
 }
 
-// GET  /companies/:id/food/recipes/summary  — margem de todos os pratos
 router.get('/recipes/summary', guardFood, async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -375,21 +402,25 @@ router.get('/recipes/summary', guardFood, async (req, res) => {
       [req.params.id]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/recipes/summary] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar resumo de fichas técnicas' });
+  }
 });
 
 // ── ZONAS DE ENTREGA ─────────────────────────────────────────
-// GET  /companies/:id/food/delivery/zones
 router.get('/delivery/zones', guardFood, async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT * FROM food_delivery_zones WHERE company_id=$1 ORDER BY name`, [req.params.id]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/delivery/zones] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar zonas de entrega' });
+  }
 });
 
-// POST /companies/:id/food/delivery/zones
 router.post('/delivery/zones', guardFood, async (req, res) => {
   const { name, fee, min_time_min, max_time_min } = req.body;
   if (!name) return res.status(400).json({ error: 'name obrigatório' });
@@ -400,7 +431,10 @@ router.post('/delivery/zones', guardFood, async (req, res) => {
       [req.params.id, name, fee||0, min_time_min||null, max_time_min||null]
     );
     res.status(201).json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/delivery/zones] Erro ao criar:', e.message);
+    res.status(500).json({ error: 'Erro ao criar zona de entrega' });
+  }
 });
 
 module.exports = router;
