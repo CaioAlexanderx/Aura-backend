@@ -4,14 +4,13 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
-const { requireAuth, requirePlan } = require('../middleware/auth');
+const { requirePlan } = require('../middleware/auth');
 
-const guard = [requireAuth, requirePlan(['negocio','expansao'])];
+// Nota: requireAuth + requireCompanyAccess já aplicados em private.js
+const guard = [requirePlan('negocio', 'expansao')];
 
 // ── ROTAS AUTENTICADAS (App Garçom interno) ──────────────────
 
-// GET /companies/:id/food/waiter/tables
-// Visão de mesas com status + pedido ativo (para tela principal do garçom)
 router.get('/tables', guard, async (req, res) => {
   try {
     const { rows } = await db.query(`
@@ -23,7 +22,6 @@ router.get('/tables', guard, async (req, res) => {
         COALESCE(SUM(fo.total) FILTER (
           WHERE fo.status NOT IN ('delivered','cancelled')
         ), 0) AS open_total,
-        -- Última chamada de garçom pendente
         (SELECT reason FROM food_waiter_calls wc
          WHERE wc.table_id=ft.id AND wc.status='pending'
          ORDER BY wc.created_at DESC LIMIT 1) AS pending_call
@@ -35,11 +33,9 @@ router.get('/tables', guard, async (req, res) => {
       [req.params.id]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('[food/waiter/tables]', e.message); res.status(500).json({ error: 'Erro ao buscar mesas' }); }
 });
 
-// GET /companies/:id/food/waiter/menu
-// Cardápio simplificado para o garçom (categorias + itens disponíveis)
 router.get('/menu', guard, async (req, res) => {
   try {
     const { rows: categories } = await db.query(
@@ -62,11 +58,9 @@ router.get('/menu', guard, async (req, res) => {
       [req.params.id]
     );
     res.json({ categories, items });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('[food/waiter/menu]', e.message); res.status(500).json({ error: 'Erro ao buscar cardápio' }); }
 });
 
-// GET /companies/:id/food/waiter/calls
-// Lista chamadas de garçom pendentes
 router.get('/calls', guard, async (req, res) => {
   try {
     const { rows } = await db.query(`
@@ -78,10 +72,9 @@ router.get('/calls', guard, async (req, res) => {
       [req.params.id]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('[food/waiter/calls]', e.message); res.status(500).json({ error: 'Erro ao buscar chamadas' }); }
 });
 
-// PATCH /companies/:id/food/waiter/calls/:callId/answer
 router.patch('/calls/:callId/answer', guard, async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -92,14 +85,10 @@ router.patch('/calls/:callId/answer', guard, async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Chamada não encontrada' });
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('[food/waiter/calls]', e.message); res.status(500).json({ error: 'Erro ao responder chamada' }); }
 });
 
-// POST /companies/:id/food/waiter/orders
-// Garçom cria pedido para uma mesa (atalho com validação de mesa)
 router.post('/orders', guard, async (req, res) => {
-  // Delega para foodOrders.js reutilizando a mesma lógica
-  // Adiciona channel='presencial' e valida que a mesa pertence à empresa
   const { table_id } = req.body;
   if (table_id) {
     const { rows } = await db.query(
@@ -109,8 +98,6 @@ router.post('/orders', guard, async (req, res) => {
     if (!rows.length) return res.status(400).json({ error: 'Mesa não pertence a esta empresa' });
   }
   req.body.channel = req.body.channel || 'presencial';
-  // Redireciona internamente para o handler de foodOrders
-  // Na implementação real, chama o service diretamente
   res.status(501).json({
     message: 'Use POST /companies/:id/food/orders — este endpoint é um alias documentado.',
     forward_to: `/companies/${req.params.id}/food/orders`,
@@ -119,8 +106,6 @@ router.post('/orders', guard, async (req, res) => {
 
 // ── ROTAS PÚBLICAS (QR Code da Mesa — sem auth) ─────────────
 
-// GET /food/table/:tableId/menu
-// Cliente escaneia QR na mesa → vê o cardápio
 router.get('/public/:tableId/menu', async (req, res) => {
   try {
     const { rows: tables } = await db.query(
@@ -163,11 +148,9 @@ router.get('/public/:tableId/menu', async (req, res) => {
       categories,
       items,
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('[food/waiter/public/menu]', e.message); res.status(500).json({ error: 'Erro ao buscar cardápio' }); }
 });
 
-// POST /food/table/:tableId/order
-// Cliente faz pedido direto pelo QR da mesa (sem login)
 router.post('/public/:tableId/order', async (req, res) => {
   const { items, customer_name, notes, payment_method } = req.body;
   if (!items?.length) return res.status(400).json({ error: 'items obrigatório' });
@@ -180,7 +163,7 @@ router.post('/public/:tableId/order', async (req, res) => {
     if (!tables.length) return res.status(404).json({ error: 'Mesa não encontrada' });
     const companyId = tables[0].company_id;
 
-    const client = await db.pool.connect();
+    const client = await db.connect();
     try {
       await client.query('BEGIN');
 
@@ -191,7 +174,6 @@ router.post('/public/:tableId/order', async (req, res) => {
         return { ...item, total_price: line };
       });
 
-      // Estima tempo de preparo
       const { rows: pt } = await client.query(
         `SELECT COALESCE(SUM(fi.preparation_time_min * q.qty), 15) AS prep_min
          FROM (SELECT UNNEST($1::uuid[]) AS iid, UNNEST($2::int[]) AS qty) q
@@ -224,7 +206,6 @@ router.post('/public/:tableId/order', async (req, res) => {
         );
       }
 
-      // Marca mesa como occupied
       await client.query(
         `UPDATE food_tables SET status='occupied' WHERE id=$1`, [req.params.tableId]
       );
@@ -248,11 +229,9 @@ router.post('/public/:tableId/order', async (req, res) => {
       await client.query('ROLLBACK');
       throw e;
     } finally { client.release(); }
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('[food/waiter/public/order]', e.message); res.status(500).json({ error: 'Erro ao criar pedido' }); }
 });
 
-// POST /food/table/:tableId/call
-// Cliente chama o garçom pelo QR da mesa
 router.post('/public/:tableId/call', async (req, res) => {
   const { reason = 'Chamada' } = req.body;
   try {
@@ -267,7 +246,7 @@ router.post('/public/:tableId/call', async (req, res) => {
       [tables[0].company_id, req.params.tableId, reason]
     );
     res.status(201).json({ ok: true, call_id: rows[0].id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { console.error('[food/waiter/public/call]', e.message); res.status(500).json({ error: 'Erro ao chamar garçom' }); }
 });
 
 module.exports = router;
