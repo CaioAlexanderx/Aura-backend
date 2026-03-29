@@ -13,9 +13,10 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
-const { requireAuth, requirePlan } = require('../middleware/auth');
+const { requirePlan } = require('../middleware/auth');
 
-const guard = [requireAuth, requirePlan(['negocio','expansao'])];
+// Nota: requireAuth + requireCompanyAccess já aplicados em private.js
+const guard = [requirePlan('negocio', 'expansao')];
 const notFound = (res, e='Pedido') => res.status(404).json({ error: `${e} não encontrado` });
 
 // ── helpers ──────────────────────────────────────────────────
@@ -30,7 +31,6 @@ function fmtDate(d) {
 // ── NFC-e payload para parceiro emissor (NFE.io / Focus NFe) ─
 function buildNfcePayload(order, items, company) {
   return {
-    // Campos obrigatórios para a maioria dos emissores
     naturezaOperacao:     'VENDA AO CONSUMIDOR',
     dataEmissao:          new Date().toISOString(),
     dataEntradaSaida:     new Date().toISOString(),
@@ -53,23 +53,21 @@ function buildNfcePayload(order, items, company) {
         nomePais:        'Brasil',
       },
     },
-    // Destinatário: consumidor não identificado (padrão NFC-e)
     destinatario: order.customer_phone || order.customer_name ? {
       nome:    order.customer_name || 'Consumidor',
-      cpfCnpj: '',   // opcional — preencher se cliente informou
+      cpfCnpj: '',
     } : undefined,
     itens: items.map((item, idx) => ({
       numero:            idx + 1,
       codigo:            item.item_id || `ITEM${idx+1}`,
       descricao:         item.item_name + (item.variation_name ? ` (${item.variation_name})` : ''),
-      ncm:               '21069090',  // NCM genérico para alimentos preparados
-      cfop:              '5102',      // Venda de produto
+      ncm:               '21069090',
+      cfop:              '5102',
       unidadeComercial:  'UN',
       quantidade:        item.quantity,
       valorUnitario:     parseFloat(item.unit_price),
       valorTotal:        parseFloat(item.total_price),
       impostos: {
-        // Simples Nacional — sem destaque de impostos na NFC-e
         simplesNacional: { csosn: '400' }
       },
     })),
@@ -125,7 +123,6 @@ function buildThermalHtml(order, items, company, type) {
   }).join('');
 
   if (isComanda) {
-    // Comanda para cozinha/bar: foco nos itens, sem valores
     return `<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
 <style>
@@ -150,7 +147,6 @@ ${itemsHtml}
 </body></html>`;
   }
 
-  // Cupom fiscal simplificado (NFC-e manual / pré-emissão)
   return `<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
 <style>
@@ -216,35 +212,34 @@ async function _fetchOrderData(orderId, companyId) {
 // ROTAS
 // ============================================================
 
-// GET /companies/:id/food/nfce/:oid/payload
-// Payload JSON pronto para envio ao parceiro emissor (NFE.io / Focus NFe)
 router.get('/:oid/payload', guard, async (req, res) => {
   try {
     const data = await _fetchOrderData(req.params.oid, req.params.id);
     if (!data) return notFound(res);
     const payload = buildNfcePayload(data.order, data.items, data.company);
     res.json(payload);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/nfce/payload] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao gerar payload NFC-e' });
+  }
 });
 
-// GET /companies/:id/food/nfce/:oid/cupom
-// HTML de cupom para impressora térmica 80mm
 router.get('/:oid/cupom', guard, async (req, res) => {
   try {
     const data = await _fetchOrderData(req.params.oid, req.params.id);
     if (!data) return notFound(res);
-    // Incrementa contador de impressão
     await db.query(
       `UPDATE food_orders SET comanda_print_count=comanda_print_count+1 WHERE id=$1`,
       [req.params.oid]
     );
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(buildThermalHtml(data.order, data.items, data.company, 'cupom'));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/nfce/cupom] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao gerar cupom' });
+  }
 });
 
-// GET /companies/:id/food/nfce/:oid/comanda
-// Comanda para cozinha/bar (sem valores, foco nos itens)
 router.get('/:oid/comanda', guard, async (req, res) => {
   try {
     const data = await _fetchOrderData(req.params.oid, req.params.id);
@@ -255,22 +250,22 @@ router.get('/:oid/comanda', guard, async (req, res) => {
     );
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(buildThermalHtml(data.order, data.items, data.company, 'comanda'));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/nfce/comanda] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao gerar comanda' });
+  }
 });
 
-// POST /companies/:id/food/nfce/:oid/emit
-// Emissão real via parceiro (stub — ativo pós-CNPJ + homologação SEFAZ)
 router.post('/:oid/emit', guard, async (req, res) => {
   try {
     const data = await _fetchOrderData(req.params.oid, req.params.id);
     if (!data) return notFound(res);
     const payload = buildNfcePayload(data.order, data.items, data.company);
 
-    // Verificações mínimas antes de tentar emitir
     if (!data.company.tax_id) {
       return res.status(400).json({
         error: 'CNPJ não cadastrado — a emissão real exige CNPJ aprovado e certificado digital.',
-        payload, // retorna payload para referência
+        payload,
       });
     }
 
@@ -283,7 +278,10 @@ router.post('/:oid/emit', guard, async (req, res) => {
       message:  'Emissão real disponível após CNPJ aprovado e homologação SEFAZ.',
       payload,
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/nfce/emit] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao emitir NFC-e' });
+  }
 });
 
 module.exports = router;
