@@ -23,7 +23,7 @@ describe('GET /health/db', () => {
     db.query.mockRejectedValueOnce(new Error('Connection refused'));
     const res = await request(app).get('/health/db');
     expect(res.status).toBe(503);
-    expect(res.body.database).toBe('disconnected');
+    expect(res.body.database).toBe('unavailable');
   });
 });
 

@@ -25,6 +25,7 @@ afterEach(() => jest.clearAllMocks());
 
 describe('GET /companies/:id/obligations', () => {
   test('200 — lista obrigações com campos calculados', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [
       { id: 'o1', code: 'DAS_MEI', description: 'DAS-MEI', due_date: new Date(),
         status: 'pending', estimated_amount: 80.90, checkpoint_total: 3, checkpoint_done: 0 },
@@ -38,6 +39,7 @@ describe('GET /companies/:id/obligations', () => {
   });
 
   test('200 — lista vazia', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).get('/api/v1/companies/c1/obligations').set(auth);
     expect(res.status).toBe(200);
@@ -57,6 +59,7 @@ describe('GET /companies/:id/obligations/calendar', () => {
   ];
 
   test('200 — calendário completo MEI', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })
       .mockResolvedValueOnce({ rows: mockTemplates })
@@ -70,6 +73,7 @@ describe('GET /companies/:id/obligations/calendar', () => {
   });
 
   test('200 — filtro aura_resolve', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })
       .mockResolvedValueOnce({ rows: mockTemplates })
@@ -80,11 +84,13 @@ describe('GET /companies/:id/obligations/calendar', () => {
   });
 
   test('400 — filtro inválido', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app).get('/api/v1/companies/c1/obligations/calendar?filter=invalido').set(auth);
     expect(res.status).toBe(400);
   });
 
   test('404 — empresa não encontrada', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).get('/api/v1/companies/c1/obligations/calendar').set(auth);
     expect(res.status).toBe(404);
@@ -93,6 +99,7 @@ describe('GET /companies/:id/obligations/calendar', () => {
 
 describe('PATCH /companies/:id/obligations/:id/checkpoint', () => {
   test('400 — sem checkpoint_done', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .patch('/api/v1/companies/c1/obligations/o1/checkpoint')
       .set(auth).send({});
@@ -100,6 +107,7 @@ describe('PATCH /companies/:id/obligations/:id/checkpoint', () => {
   });
 
   test('200 — checkpoint atualizado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [{ id: 'o1', checkpoint_done: 2, status: 'pending' }] });
     const res = await request(app)
       .patch('/api/v1/companies/c1/obligations/o1/checkpoint')

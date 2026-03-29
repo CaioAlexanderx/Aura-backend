@@ -32,6 +32,7 @@ describe('POST /companies/:id/products/:pid/barcode', () => {
   // todos os testes precisam do mock de ownership como primeiro mock
 
   test('400 — sem code e format', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce(OWN); // requireCompanyAccess
     const res = await request(app)
       .post('/api/v1/companies/c1/products/p1/barcode')
@@ -40,6 +41,7 @@ describe('POST /companies/:id/products/:pid/barcode', () => {
   });
 
   test('400 — format inválido', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce(OWN);
     const res = await request(app)
       .post('/api/v1/companies/c1/products/p1/barcode')
@@ -49,6 +51,7 @@ describe('POST /companies/:id/products/:pid/barcode', () => {
   });
 
   test('400 — EAN-13 com dígito verificador errado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce(OWN);
     const res = await request(app)
       .post('/api/v1/companies/c1/products/p1/barcode')
@@ -58,6 +61,7 @@ describe('POST /companies/:id/products/:pid/barcode', () => {
   });
 
   test('404 — produto não encontrado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWN)           // requireCompanyAccess
       .mockResolvedValueOnce({ rows: [] }); // produto não encontrado
@@ -68,6 +72,7 @@ describe('POST /companies/:id/products/:pid/barcode', () => {
   });
 
   test('409 — código duplicado em outro produto', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWN)                         // requireCompanyAccess
       .mockResolvedValueOnce({ rows: [{ id: 'p1' }] })   // produto existe
@@ -79,6 +84,7 @@ describe('POST /companies/:id/products/:pid/barcode', () => {
   });
 
   test('200 — EAN-13 válido vinculado com sucesso', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWN)                // requireCompanyAccess
       .mockResolvedValueOnce({ rows: [{ id: 'p1' }] })   // produto existe
@@ -96,6 +102,7 @@ describe('GET /companies/:id/pdv/scan/:code', () => {
   // Scanner (scanner.js) não usa requireCompanyAccess — mocks sem owner prepended
 
   test('200 match=exact — código encontrado por barcode', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Produto', barcode: '7891000315507', variants: [] }] });
     const res = await request(app)
       .get('/api/v1/companies/c1/pdv/scan/7891000315507')
@@ -105,6 +112,7 @@ describe('GET /companies/:id/pdv/scan/:code', () => {
   });
 
   test('match=partial — busca textual (4 queries)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [] })  // query 1: barcode exato
       .mockResolvedValueOnce({ rows: [] })  // query 2: variant barcode
@@ -117,6 +125,7 @@ describe('GET /companies/:id/pdv/scan/:code', () => {
   });
 
   test('match=none — nenhum resultado (4 queries vazias)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })

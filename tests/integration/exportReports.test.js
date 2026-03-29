@@ -22,6 +22,7 @@ const mockCompany = { legal_name:'Empresa Teste Ltda', trade_name:'Empresa Teste
 // ─── DRE ─────────────────────────────────────────────────────
 describe('GET /companies/:id/export/dre', () => {
   test('200 HTML — DRE padrão', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })   // getCompany
       .mockResolvedValueOnce({ rows: [              // transactions
@@ -39,6 +40,7 @@ describe('GET /companies/:id/export/dre', () => {
   });
 
   test('200 CSV — DRE em formato CSV com BOM UTF-8', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })
       .mockResolvedValueOnce({ rows: [
@@ -55,6 +57,7 @@ describe('GET /companies/:id/export/dre', () => {
   });
 
   test('200 CSV — cabeçalhos corretos', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })
       .mockResolvedValueOnce({ rows: [] });
@@ -81,6 +84,7 @@ describe('GET /companies/:id/export/sales', () => {
   ];
 
   test('200 HTML — relatório de vendas', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })
       .mockResolvedValueOnce({ rows: mockSales });
@@ -95,6 +99,7 @@ describe('GET /companies/:id/export/sales', () => {
   });
 
   test('200 CSV — relatório de vendas', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })
       .mockResolvedValueOnce({ rows: mockSales });
@@ -122,6 +127,7 @@ describe('GET /companies/:id/export/payroll', () => {
   ];
 
   test('200 HTML — folha de pagamento', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })
       .mockResolvedValueOnce({ rows: mockPayroll });
@@ -136,6 +142,7 @@ describe('GET /companies/:id/export/payroll', () => {
   });
 
   test('200 CSV — folha de pagamento', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })
       .mockResolvedValueOnce({ rows: mockPayroll });
@@ -162,6 +169,7 @@ describe('GET /companies/:id/export/prolabore', () => {
   ];
 
   test('200 CSV — pró-labore (plano negocio)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })
       .mockResolvedValueOnce({ rows: mockProlabore });
@@ -174,6 +182,7 @@ describe('GET /companies/:id/export/prolabore', () => {
   });
 
   test('200 HTML — pró-labore', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [mockCompany] })
       .mockResolvedValueOnce({ rows: mockProlabore });
@@ -186,6 +195,7 @@ describe('GET /companies/:id/export/prolabore', () => {
   });
 
   test('403 — plano essencial não tem acesso', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .get(`/api/v1/companies/${cid}/export/prolabore`)
       .set(authEss);

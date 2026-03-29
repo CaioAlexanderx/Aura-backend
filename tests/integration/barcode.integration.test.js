@@ -19,6 +19,7 @@ describe('POST /products/:pid/barcode', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('retorna 400 sem code e format', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce(OWN); // requireCompanyAccess antes do handler
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/products/${pid}/barcode`)
@@ -27,6 +28,7 @@ describe('POST /products/:pid/barcode', () => {
   });
 
   test('retorna 400 com format inválido', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce(OWN);
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/products/${pid}/barcode`)
@@ -35,6 +37,7 @@ describe('POST /products/:pid/barcode', () => {
   });
 
   test('retorna 400 com EAN-13 dígito verificador errado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce(OWN);
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/products/${pid}/barcode`)
@@ -44,6 +47,7 @@ describe('POST /products/:pid/barcode', () => {
   });
 
   test('aceita EAN-13 válido', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWN)                // requireCompanyAccess
       .mockResolvedValueOnce({ rows: [{ id:pid }] })           // produto existe
@@ -57,6 +61,7 @@ describe('POST /products/:pid/barcode', () => {
   });
 
   test('aceita QR Code', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWN)
       .mockResolvedValueOnce({ rows: [{ id:pid }] })
@@ -74,6 +79,7 @@ describe('GET /pdv/scan/:code', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('exact match por barcode', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [{ id:pid, name:'Produto', price:29.90, variants:[] }] });
     const res = await request(app)
       .get(`/api/v1/companies/${cid}/pdv/scan/7891000315507`)
@@ -83,6 +89,7 @@ describe('GET /pdv/scan/:code', () => {
   });
 
   test('partial match por nome — 4 queries', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -95,6 +102,7 @@ describe('GET /pdv/scan/:code', () => {
   });
 
   test('sem resultado — 4 queries vazias', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })

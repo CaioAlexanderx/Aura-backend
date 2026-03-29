@@ -20,6 +20,7 @@ const auth   = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', pla
 // Sem ANTHROPIC_API_KEY no env de teste → sempre usa fallback gracioso
 describe('POST /companies/:id/transactions/categorize — lote', () => {
   test('400 — descriptions ausente', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/transactions/categorize`)
       .set(auth).send({});
@@ -28,6 +29,7 @@ describe('POST /companies/:id/transactions/categorize — lote', () => {
   });
 
   test('400 — array vazio', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/transactions/categorize`)
       .set(auth).send({ descriptions: [] });
@@ -35,6 +37,7 @@ describe('POST /companies/:id/transactions/categorize — lote', () => {
   });
 
   test('400 — mais de 50 descrições', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const big = Array.from({ length: 51 }, (_, i) => `desc ${i}`);
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/transactions/categorize`)
@@ -44,6 +47,7 @@ describe('POST /companies/:id/transactions/categorize — lote', () => {
   });
 
   test('200 — fallback gracioso sem ANTHROPIC_API_KEY', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     // Em ambiente de teste, a chave não está configurada
     // categorizeWithHaiku retorna { fallback: true, suggested_category: 'outros' }
     const res = await request(app)
@@ -59,6 +63,7 @@ describe('POST /companies/:id/transactions/categorize — lote', () => {
   });
 
   test('200 — note de revisão presente na resposta', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/transactions/categorize`)
       .set(auth).send({ descriptions: ['Pagamento fornecedor'] });
@@ -76,6 +81,7 @@ describe('POST /companies/:id/transactions/categorize — lote', () => {
 
 describe('POST /companies/:id/transactions/:txId/categorize — individual', () => {
   test('404 — lançamento não encontrado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/transactions/${txId}/categorize`)
@@ -84,6 +90,7 @@ describe('POST /companies/:id/transactions/:txId/categorize — individual', () 
   });
 
   test('200 — categoriza sem aplicar (apply omitido)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({
       rows: [{ id:txId, description:'Aluguel sala comercial', category:null }],
     });
@@ -97,6 +104,7 @@ describe('POST /companies/:id/transactions/:txId/categorize — individual', () 
   });
 
   test('200 — categoriza e aplica (apply: true)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id:txId, description:'Energia CPFL', category:null }] }) // SELECT
       .mockResolvedValueOnce({ rows: [] });                                                        // UPDATE
@@ -105,8 +113,8 @@ describe('POST /companies/:id/transactions/:txId/categorize — individual', () 
       .set(auth).send({ apply: true });
     expect(res.status).toBe(200);
     expect(res.body.applied).toBe(true);
-    // Deve ter chamado UPDATE (segunda query)
-    expect(db.query).toHaveBeenCalledTimes(2);
+    // Deve ter chamado UPDATE (companyAccess + select + update)
+    expect(db.query).toHaveBeenCalledTimes(3);
   });
 
   test('401 — sem token', async () => {

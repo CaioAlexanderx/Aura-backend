@@ -31,6 +31,7 @@ beforeEach(() => jest.clearAllMocks());
 describe('GET /companies/:id/obligations/das/preview — MEI', () => {
   test('200 — DAS MEI para atividade de serviços', async () => {
     // Rota: busca company → retorna { tax_regime, annual_revenue }
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({
       rows: [{ tax_regime: 'mei', annual_revenue: 40000 }],
     });
@@ -44,6 +45,7 @@ describe('GET /companies/:id/obligations/das/preview — MEI', () => {
   });
 
   test('200 — DAS MEI para comércio (activity_type omitido usa default)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({
       rows: [{ tax_regime: 'mei', annual_revenue: 60000 }],
     });
@@ -56,6 +58,7 @@ describe('GET /companies/:id/obligations/das/preview — MEI', () => {
   });
 
   test('404 — empresa não encontrada', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app)
       .get('/api/v1/companies/nao-existe/obligations/das/preview')
@@ -66,6 +69,7 @@ describe('GET /companies/:id/obligations/das/preview — MEI', () => {
 
 describe('GET /companies/:id/obligations/das/preview — Simples Nacional', () => {
   test('400 — Simples sem current_revenue e revenue_12m obrigatórios', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({
       rows: [{ tax_regime: 'simples_nacional', annual_revenue: 200000 }],
     });
@@ -78,6 +82,7 @@ describe('GET /companies/:id/obligations/das/preview — Simples Nacional', () =
   });
 
   test('200 — DAS Simples com parâmetros corretos', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({
       rows: [{ tax_regime: 'simples_nacional', annual_revenue: 200000 }],
     });

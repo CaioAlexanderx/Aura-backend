@@ -11,6 +11,7 @@ describe('GET /obligations', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('retorna lista vazia', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).get(`/api/v1/companies/${cid}/obligations`).set(auth);
     expect(res.status).toBe(200);
@@ -18,6 +19,7 @@ describe('GET /obligations', () => {
   });
 
   test('retorna obrigações com campos esperados', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [{ id:'ob1', code:'DAS_MEI', description:'DAS-MEI', due_date: new Date(), status:'pending', checkpoint_total:3, checkpoint_done:0, estimated_amount:80.90 }] });
     const res = await request(app).get(`/api/v1/companies/${cid}/obligations`).set(auth);
     expect(res.status).toBe(200);
@@ -32,17 +34,20 @@ describe('GET /obligations/calendar', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('retorna 404 quando empresa não existe', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).get(`/api/v1/companies/${cid}/obligations/calendar`).set(auth);
     expect(res.status).toBe(404);
   });
 
   test('filter inválido retorna 400', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app).get(`/api/v1/companies/${cid}/obligations/calendar?filter=invalido`).set(auth);
     expect(res.status).toBe(400);
   });
 
   test('retorna calendário completo para empresa MEI', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id: cid, name: 'João MEI', tax_regime: 'mei', cnae_code: '8650-0/00', annual_revenue: 50000, has_employee: false }] })
       .mockResolvedValueOnce({ rows: [{ code:'DAS_MEI', name_display:'DAS-MEI', frequency:'monthly', due_rule:'day_20', responsible:'aura', filter_label:'aura_resolve', aura_action:'Calcula', checkpoint_total:3 }] })
@@ -55,6 +60,7 @@ describe('GET /obligations/calendar', () => {
   });
 
   test('filter=aura_resolve filtra corretamente', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id:cid, name:'Test', tax_regime:'mei', has_employee:false }] })
       .mockResolvedValueOnce({ rows: [
@@ -72,6 +78,7 @@ describe('POST /obligations/generate', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('retorna 400 sem reference_month', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app).post(`/api/v1/companies/${cid}/obligations/generate`).set(auth).send({});
     expect(res.status).toBe(400);
   });

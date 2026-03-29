@@ -56,6 +56,7 @@ describe('POST /api/v1/onboarding/cnpj-lookup — público', () => {
 // ─── Status do Onboarding ───────────────────────────────────
 describe('GET /api/v1/companies/:id/onboarding — status', () => {
   test('200 — retorna step e steps_done', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({
       rows: [{
         onboarding_step: 'regime',
@@ -83,6 +84,7 @@ describe('GET /api/v1/companies/:id/onboarding — status', () => {
   });
 
   test('404 — empresa não encontrada', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app)
       .get(`/api/v1/companies/${cid}/onboarding`)
@@ -99,6 +101,7 @@ describe('GET /api/v1/companies/:id/onboarding — status', () => {
 // ─── Step: Regime ───────────────────────────────────────────
 describe('POST /companies/:id/onboarding/step/regime', () => {
   test('400 — tax_regime inválido', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/onboarding/step/regime`)
       .set(auth).send({ tax_regime: 'invalido' });
@@ -107,6 +110,7 @@ describe('POST /companies/:id/onboarding/step/regime', () => {
   });
 
   test('400 — tax_regime ausente', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/onboarding/step/regime`)
       .set(auth).send({});
@@ -114,6 +118,7 @@ describe('POST /companies/:id/onboarding/step/regime', () => {
   });
 
   test('200 — regime MEI confirmado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id: cid, tax_regime: null }] }) // SELECT company
       .mockResolvedValueOnce({ rows: [] })  // UPDATE companies
@@ -127,6 +132,7 @@ describe('POST /companies/:id/onboarding/step/regime', () => {
   });
 
   test('200 — audit log gerado ao trocar regime', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id: cid, tax_regime: 'mei' }] }) // SELECT (regime anterior: mei)
       .mockResolvedValueOnce({ rows: [] })  // UPDATE
@@ -136,11 +142,12 @@ describe('POST /companies/:id/onboarding/step/regime', () => {
       .post(`/api/v1/companies/${cid}/onboarding/step/regime`)
       .set(auth).send({ tax_regime: 'simples_nacional' });
     expect(res.status).toBe(200);
-    // 4 queries: select, update, session, audit
-    expect(db.query).toHaveBeenCalledTimes(4);
+    // 5 queries: companyAccess + select, update, session, audit
+    expect(db.query).toHaveBeenCalledTimes(5);
   });
 
   test('403 — empresa de outro usuário', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] }); // empresa não encontrada para este user
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/onboarding/step/regime`)
@@ -152,6 +159,7 @@ describe('POST /companies/:id/onboarding/step/regime', () => {
 // ─── Step: Perfil ───────────────────────────────────────────
 describe('POST /companies/:id/onboarding/step/perfil', () => {
   test('200 — atualiza nome fantasia e avança', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id: cid }] })  // SELECT
       .mockResolvedValueOnce({ rows: [] })              // UPDATE
@@ -164,6 +172,7 @@ describe('POST /companies/:id/onboarding/step/perfil', () => {
   });
 
   test('200 — sem dados (tudo opcional)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id: cid }] })
       .mockResolvedValueOnce({ rows: [] })
@@ -178,6 +187,7 @@ describe('POST /companies/:id/onboarding/step/perfil', () => {
 // ─── Step: Vertical ─────────────────────────────────────────
 describe('POST /companies/:id/onboarding/step/vertical', () => {
   test('200 — sem vertical (null = pular)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id: cid }] })
       .mockResolvedValueOnce({ rows: [] })
@@ -190,6 +200,7 @@ describe('POST /companies/:id/onboarding/step/vertical', () => {
   });
 
   test('200 — vertical odonto selecionado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id: cid }] })
       .mockResolvedValueOnce({ rows: [] })
@@ -203,6 +214,7 @@ describe('POST /companies/:id/onboarding/step/vertical', () => {
   });
 
   test('400 — vertical inválido', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/onboarding/step/vertical`)
       .set(auth).send({ vertical: 'clinica' });
@@ -213,6 +225,7 @@ describe('POST /companies/:id/onboarding/step/vertical', () => {
 // ─── Restart ────────────────────────────────────────────────
 describe('POST /companies/:id/onboarding/restart', () => {
   test('200 — reinicia onboarding para step cnpj', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id: cid }] })
       .mockResolvedValueOnce({ rows: [] })

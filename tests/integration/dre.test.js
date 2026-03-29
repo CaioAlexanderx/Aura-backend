@@ -22,6 +22,7 @@ const authEss = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', pl
 describe('GET /companies/:id/dre', () => {
   test('200 — DRE retorna income, expenses e summary', async () => {
     // 2 queries: dre_category_map + transactions
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [] })  // dre_category_map vazio
       .mockResolvedValueOnce({ rows: [    // transactions
@@ -40,6 +41,7 @@ describe('GET /companies/:id/dre', () => {
   });
 
   test('200 — DRE com período personalizado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] }); // sem lançamentos
@@ -52,6 +54,7 @@ describe('GET /companies/:id/dre', () => {
   });
 
   test('403 — plano essencial não tem acesso ao DRE', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .get(`/api/v1/companies/${cid}/dre`)
       .set(authEss);
@@ -66,6 +69,7 @@ describe('GET /companies/:id/dre', () => {
 
 describe('GET /companies/:id/dre/monthly', () => {
   test('200 — retorna evolução mensal', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({
       rows: [
         { month:'2026-03', receita:'5000', despesa:'3000' },

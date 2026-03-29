@@ -19,6 +19,7 @@ describe('GET /members', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('retorna lista com campos esperados', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWNER_MOCK)          // requireCompanyAccess
       .mockResolvedValueOnce({ rows: [] });        // listMembers
@@ -29,6 +30,7 @@ describe('GET /members', () => {
   });
 
   test('monthly_cost=0 com 1 membro (titular)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWNER_MOCK)
       .mockResolvedValueOnce({ rows: [{ id:'m1', status:'active', is_active:true }] });
@@ -37,6 +39,7 @@ describe('GET /members', () => {
   });
 
   test('monthly_cost=19 com 2 membros ativos', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWNER_MOCK)
       .mockResolvedValueOnce({ rows: [
@@ -53,6 +56,7 @@ describe('POST /members/invite', () => {
 
   test('retorna 400 sem invite_email', async () => {
     // requireCompanyAccess roda antes do handler — precisa do mock mesmo para 400
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce(OWNER_MOCK);
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/members/invite`)
@@ -62,6 +66,7 @@ describe('POST /members/invite', () => {
   });
 
   test('retorna 409 se email já tem convite', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWNER_MOCK)                         // requireCompanyAccess
       .mockResolvedValueOnce({ rows: [{ id:'m1', status:'pending' }] }); // check duplicata
@@ -72,6 +77,7 @@ describe('POST /members/invite', () => {
   });
 
   test('cria convite com sucesso', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWNER_MOCK)           // requireCompanyAccess
       .mockResolvedValueOnce({ rows: [] })          // check duplicata
@@ -89,6 +95,7 @@ describe('GET /members/billing', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('retorna resumo de cobrança', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWNER_MOCK)                         // requireCompanyAccess
       .mockResolvedValueOnce({ rows: [{ total:'3' }] });         // countActiveMembers
@@ -103,6 +110,7 @@ describe('GET /members/roles', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('retorna templates', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWNER_MOCK)
       .mockResolvedValueOnce({ rows: [{ id:'r1', name:'Vendedor', is_default:true, type:'global' }] });

@@ -34,6 +34,7 @@ function mockClient(queryResults = []) {
 
 describe('POST /companies/:id/pdv/sale — validações de entrada', () => {
   test('400 — items vazio', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/pdv/sale`)
       .set(auth).send({ payment_method: 'pix', items: [] });
@@ -42,6 +43,7 @@ describe('POST /companies/:id/pdv/sale — validações de entrada', () => {
   });
 
   test('400 — items ausente', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/pdv/sale`)
       .set(auth).send({ payment_method: 'pix' });
@@ -67,6 +69,7 @@ describe('POST /companies/:id/pdv/sale — venda atômica', () => {
     ]);
     db.connect.mockResolvedValueOnce(client);
     // db.query extra após COMMIT (busca itens)
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
@@ -83,6 +86,7 @@ describe('POST /companies/:id/pdv/sale — venda atômica', () => {
   });
 
   test('409 — estoque insuficiente', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const client = mockClient([
       { rows: [] },                                                           // BEGIN
       { rows: [{ name:'Produto', cost_price:10, stock_qty: '0' }] },         // SELECT produto (estoque 0)
@@ -103,6 +107,7 @@ describe('POST /companies/:id/pdv/sale — venda atômica', () => {
 
 describe('GET /companies/:id/pdv/summary — resumo do dia', () => {
   test('200 — retorna resumo', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({
       rows: [{ total_sales:'5', gross_revenue:'250.00', total_discounts:'0', avg_ticket:'50.00', by_payment_method:null }],
     });

@@ -30,6 +30,7 @@ const tokenB = jwt.sign(
 describe('requireCompanyAccess — isolamento multi-tenant', () => {
   test('200 — owner acessa própria empresa', async () => {
     // Mock: usuário A é owner da empresa A
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ role: 'owner' }] }) // requireCompanyAccess
       .mockResolvedValueOnce({                              // listMembers
@@ -48,6 +49,7 @@ describe('requireCompanyAccess — isolamento multi-tenant', () => {
 
   test('403 — usuário B não acessa empresa A (IDOR bloqueado)', async () => {
     // Mock: usuário B não é owner nem member da empresa A
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] }); // requireCompanyAccess retorna vazio
 
     const res = await request(app)
@@ -60,6 +62,7 @@ describe('requireCompanyAccess — isolamento multi-tenant', () => {
 
   test('403 — membro sem role adequada não pode convidar', async () => {
     // Mock: usuário A é membro simples (role: 'member'), não owner/admin
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [{ role: 'member' }] });
 
     const res = await request(app)
@@ -77,6 +80,7 @@ describe('requireCompanyAccess — isolamento multi-tenant', () => {
       SECRET, { expiresIn: '1h' }
     );
     // Admin não precisa de lookup de empresa
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({
       rows: [{ id: '1', status: 'active', is_active: true, role: 'owner' }]
     });
@@ -97,7 +101,9 @@ describe('requireCompanyAccess — isolamento multi-tenant', () => {
 
 describe('barcode lookup — schema correto (B-02)', () => {
   test('200 — retorna stock_qty e is_active (não stock_quantity/active)', async () => {
+    db.query.mockReset();
     // Mock: requireCompanyAccess passa, depois lookup do produto
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ role: 'owner' }] }) // requireCompanyAccess
       .mockResolvedValueOnce({                              // barcode lookup
@@ -125,6 +131,8 @@ describe('barcode lookup — schema correto (B-02)', () => {
   });
 
   test('404 — produto não encontrado retorna 404', async () => {
+    db.query.mockReset();
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ role: 'owner' }] }) // requireCompanyAccess
       .mockResolvedValueOnce({ rows: [] });                  // produto não encontrado

@@ -33,6 +33,7 @@ describe('POST /dental/patients — LGPD', () => {
   });
 
   test('cria paciente com consentimento válido', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: 'pat1', full_name: 'João Silva' }] });
@@ -52,6 +53,7 @@ describe('GET /dental/sign/:token', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('retorna 404 para token inválido ou expirado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).get('/api/v1/dental/sign/token-inexistente');
     // A rota retorna 404 para token não encontrado
