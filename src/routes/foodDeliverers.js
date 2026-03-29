@@ -4,9 +4,10 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
-const { requireAuth, requirePlan } = require('../middleware/auth');
+const { requirePlan } = require('../middleware/auth');
 
-const guard = [requireAuth, requirePlan(['negocio', 'expansao'])];
+// Nota: requireAuth + requireCompanyAccess já aplicados em private.js
+const guard = [requirePlan('negocio', 'expansao')];
 
 // ── helpers ──────────────────────────────────────────────────
 const notFound = (res, e = 'Registro') =>
@@ -23,7 +24,6 @@ function calcCommission(deliverer, deliveryFee) {
 // CRUD DE ENTREGADORES
 // ============================================================
 
-// GET /companies/:id/food/deliverers
 router.get('/', guard, async (req, res) => {
   const { active } = req.query;
   try {
@@ -35,10 +35,12 @@ router.get('/', guard, async (req, res) => {
       vals
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/deliverers] Erro ao listar:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar entregadores' });
+  }
 });
 
-// GET /companies/:id/food/deliverers/:did
 router.get('/:did', guard, async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -47,10 +49,12 @@ router.get('/:did', guard, async (req, res) => {
     );
     if (!rows.length) return notFound(res, 'Entregador');
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/deliverers] Erro ao buscar:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar entregador' });
+  }
 });
 
-// POST /companies/:id/food/deliverers
 router.post('/', guard, async (req, res) => {
   const {
     name, phone, vehicle_type, vehicle_plate,
@@ -73,10 +77,12 @@ router.post('/', guard, async (req, res) => {
       ]
     );
     res.status(201).json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/deliverers] Erro ao criar:', e.message);
+    res.status(500).json({ error: 'Erro ao criar entregador' });
+  }
 });
 
-// PATCH /companies/:id/food/deliverers/:did
 router.patch('/:did', guard, async (req, res) => {
   const fields = [
     'name','phone','vehicle_type','vehicle_plate',
@@ -103,10 +109,12 @@ router.patch('/:did', guard, async (req, res) => {
     );
     if (!rows.length) return notFound(res, 'Entregador');
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/deliverers] Erro ao atualizar:', e.message);
+    res.status(500).json({ error: 'Erro ao atualizar entregador' });
+  }
 });
 
-// DELETE /companies/:id/food/deliverers/:did  (soft-delete)
 router.delete('/:did', guard, async (req, res) => {
   try {
     await db.query(
@@ -115,25 +123,25 @@ router.delete('/:did', guard, async (req, res) => {
       [req.params.did, req.params.id]
     );
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/deliverers] Erro ao remover:', e.message);
+    res.status(500).json({ error: 'Erro ao remover entregador' });
+  }
 });
 
 // ============================================================
 // DESPACHO — atribuir / remover entregador de um pedido
 // ============================================================
 
-// POST /companies/:id/food/deliverers/dispatch
-// Body: { order_id, deliverer_id, note? }
 router.post('/dispatch', guard, async (req, res) => {
   const { order_id, deliverer_id, note } = req.body;
   if (!order_id || !deliverer_id)
     return res.status(400).json({ error: 'order_id e deliverer_id obrigatórios' });
 
-  const client = await db.pool.connect();
+  const client = await db.connect();
   try {
     await client.query('BEGIN');
 
-    // Valida pedido
     const { rows: orders } = await client.query(
       `SELECT id, status, delivery_fee FROM food_orders
        WHERE id = $1 AND company_id = $2`,
@@ -146,7 +154,6 @@ router.post('/dispatch', guard, async (req, res) => {
       return res.status(400).json({ error: `Pedido já ${order.status} — não pode ser despachado` });
     }
 
-    // Valida entregador
     const { rows: deliverers } = await client.query(
       `SELECT * FROM food_deliverers WHERE id = $1 AND company_id = $2 AND is_active = TRUE`,
       [deliverer_id, req.params.id]
@@ -154,10 +161,8 @@ router.post('/dispatch', guard, async (req, res) => {
     if (!deliverers.length) { await client.query('ROLLBACK'); return notFound(res, 'Entregador'); }
     const deliverer = deliverers[0];
 
-    // Calcular comissão
     const commission = calcCommission(deliverer, order.delivery_fee);
 
-    // Registrar despacho anterior como 'unassigned' se havia outro
     const { rows: prev } = await client.query(
       `SELECT deliverer_id FROM food_orders WHERE id = $1`, [order_id]
     );
@@ -169,7 +174,6 @@ router.post('/dispatch', guard, async (req, res) => {
       );
     }
 
-    // Atualizar pedido
     const { rows: updated } = await client.query(
       `UPDATE food_orders
        SET deliverer_id = $1, deliverer_commission = $2,
@@ -178,7 +182,6 @@ router.post('/dispatch', guard, async (req, res) => {
       [deliverer_id, commission, order_id, req.params.id]
     );
 
-    // Log
     await client.query(
       `INSERT INTO food_dispatch_log (order_id, company_id, deliverer_id, commission_calc, action, note)
        VALUES ($1,$2,$3,$4,'assigned',$5)`,
@@ -193,14 +196,13 @@ router.post('/dispatch', guard, async (req, res) => {
     });
   } catch (e) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: e.message });
+    console.error('[food/dispatch] Erro ao despachar:', e.message);
+    res.status(500).json({ error: 'Erro ao despachar entregador' });
   } finally { client.release(); }
 });
 
-// DELETE /companies/:id/food/deliverers/dispatch/:orderId
-// Remove entregador de um pedido
 router.delete('/dispatch/:orderId', guard, async (req, res) => {
-  const client = await db.pool.connect();
+  const client = await db.connect();
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
@@ -225,7 +227,8 @@ router.delete('/dispatch/:orderId', guard, async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: e.message });
+    console.error('[food/dispatch] Erro ao remover despacho:', e.message);
+    res.status(500).json({ error: 'Erro ao remover despacho' });
   } finally { client.release(); }
 });
 
@@ -233,8 +236,6 @@ router.delete('/dispatch/:orderId', guard, async (req, res) => {
 // HISTÓRICO E COMISSÕES
 // ============================================================
 
-// GET /companies/:id/food/deliverers/:did/orders
-// Pedidos de um entregador com filtro de período
 router.get('/:did/orders', guard, async (req, res) => {
   const { start, end, status, limit = 50, offset = 0 } = req.query;
   const cond = ['fo.company_id = $1', 'fo.deliverer_id = $2'];
@@ -257,18 +258,17 @@ router.get('/:did/orders', guard, async (req, res) => {
       [...vals, limit, offset]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/deliverers/orders] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar pedidos do entregador' });
+  }
 });
 
-// GET /companies/:id/food/deliverers/:did/commission
-// Resumo de comissão por período
 router.get('/:did/commission', guard, async (req, res) => {
   const { start, end } = req.query;
-  // Padrão: mês atual
   const dateStart = start || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
   const dateEnd   = end   || new Date().toISOString();
   try {
-    // Verifica que o entregador pertence à empresa
     const { rows: d } = await db.query(
       `SELECT name, commission_mode, commission_pct, commission_fixed
        FROM food_deliverers WHERE id = $1 AND company_id = $2`,
@@ -297,11 +297,12 @@ router.get('/:did/commission', guard, async (req, res) => {
       ...rows[0],
       total_commission: parseFloat(rows[0].total_commission || 0),
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/deliverers/commission] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar comissão' });
+  }
 });
 
-// GET /companies/:id/food/deliverers/commission/summary
-// Ranking de todos os entregadores no período
 router.get('/commission/summary', guard, async (req, res) => {
   const { start, end } = req.query;
   const dateStart = start || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
@@ -326,11 +327,12 @@ router.get('/commission/summary', guard, async (req, res) => {
       [req.params.id, dateStart, dateEnd]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/deliverers/commission/summary] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar resumo de comissões' });
+  }
 });
 
-// GET /companies/:id/food/deliverers/:did/log
-// Histórico de despachos de um entregador
 router.get('/:did/log', guard, async (req, res) => {
   const { limit = 50 } = req.query;
   try {
@@ -343,7 +345,10 @@ router.get('/:did/log', guard, async (req, res) => {
       [req.params.id, req.params.did, limit]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/deliverers/log] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar histórico de despachos' });
+  }
 });
 
 module.exports = router;
