@@ -7,9 +7,11 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
-const { requireAuth, requirePlan } = require('../middleware/auth');
+const { requirePlan } = require('../middleware/auth');
 
-const guard = [requireAuth, requirePlan(['negocio','expansao'])];
+// Nota: requireAuth + requireCompanyAccess já aplicados em private.js
+// SEC-02: requirePlan recebe strings separadas, NÃO array
+const guard = [requirePlan('negocio', 'expansao')];
 
 const notFound = (res, e='Pedido') => res.status(404).json({ error: `${e} não encontrado` });
 const ORDER_TRANSITIONS = {
@@ -49,7 +51,10 @@ router.get('/', guard, async (req, res) => {
       [...vals, limit, offset]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/orders] Erro ao listar pedidos:', e.message);
+    res.status(500).json({ error: 'Erro ao listar pedidos' });
+  }
 });
 
 router.get('/kds', guard, async (req, res) => {
@@ -71,7 +76,10 @@ router.get('/kds', guard, async (req, res) => {
       [req.params.id]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/kds] Erro ao buscar KDS:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar painel KDS' });
+  }
 });
 
 router.get('/stats', guard, async (req, res) => {
@@ -90,7 +98,10 @@ router.get('/stats', guard, async (req, res) => {
       [req.params.id]
     );
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/stats] Erro ao buscar estatísticas:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar estatísticas' });
+  }
 });
 
 router.get('/kds/history', guard, async (req, res) => {
@@ -106,7 +117,10 @@ router.get('/kds/history', guard, async (req, res) => {
       date ? [req.params.id, date] : [req.params.id]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/kds/history] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar histórico KDS' });
+  }
 });
 
 router.get('/delivery/active', guard, async (req, res) => {
@@ -126,7 +140,10 @@ router.get('/delivery/active', guard, async (req, res) => {
       [req.params.id]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/delivery] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar entregas ativas' });
+  }
 });
 
 router.get('/:oid', guard, async (req, res) => {
@@ -144,7 +161,10 @@ router.get('/:oid', guard, async (req, res) => {
     );
     if (!rows.length) return notFound(res);
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/order] Erro ao buscar pedido:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar pedido' });
+  }
 });
 
 router.post('/', guard, async (req, res) => {
@@ -152,7 +172,8 @@ router.post('/', guard, async (req, res) => {
           customer_name, customer_phone, delivery_address, payment_method } = req.body;
   if (!items?.length) return res.status(400).json({ error: 'items obrigatório' });
 
-  const client = await db.pool.connect();
+  // SEC-02: usar db.connect() (não db.pool.connect())
+  const client = await db.connect();
   try {
     await client.query('BEGIN');
     let subtotal = 0;
@@ -210,14 +231,16 @@ router.post('/', guard, async (req, res) => {
     res.status(201).json(order);
   } catch (e) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: e.message });
+    console.error('[food/order] Erro ao criar pedido:', e.message);
+    res.status(500).json({ error: 'Erro ao criar pedido' });
   } finally { client.release(); }
 });
 
 // PATCH /:oid/status — KDS + baixa de estoque automática ao entregar
 router.patch('/:oid/status', guard, async (req, res) => {
   const { status, note } = req.body;
-  const client = await db.pool.connect();
+  // SEC-02: usar db.connect() (não db.pool.connect())
+  const client = await db.connect();
   try {
     const { rows } = await client.query(
       `SELECT fo.*, json_agg(foi.* ORDER BY foi.id) AS items
@@ -265,12 +288,9 @@ router.patch('/:oid/status', guard, async (req, res) => {
     }
 
     // ── FOOD-04c: Baixa de estoque automática ao entregar ─────
-    // Para cada item do pedido com ficha técnica vinculada a produto,
-    // deduz a quantidade proporcional do estoque.
     if (status === 'delivered' && order.items?.length) {
       for (const orderItem of order.items) {
         if (!orderItem.item_id) continue;
-        // Busca ingredientes da ficha técnica que têm produto vinculado
         const { rows: recipes } = await client.query(
           `SELECT fr.product_id, fr.quantity AS unit_qty
            FROM food_recipes fr
@@ -286,7 +306,6 @@ router.patch('/:oid/status', guard, async (req, res) => {
              WHERE id=$2 AND company_id=$3`,
             [totalDeduct, recipe.product_id, req.params.id]
           );
-          // Log de movimentação de estoque
           await client.query(
             `INSERT INTO stock_movements
                (product_id, company_id, type, quantity, reference_id, reference_type, notes)
@@ -309,7 +328,8 @@ router.patch('/:oid/status', guard, async (req, res) => {
     res.json(updated[0]);
   } catch (e) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: e.message });
+    console.error('[food/order/status] Erro ao atualizar status:', e.message);
+    res.status(500).json({ error: 'Erro ao atualizar status do pedido' });
   } finally { client.release(); }
 });
 
@@ -327,7 +347,10 @@ router.patch('/:oid/items/:iid/kds', guard, async (req, res) => {
     );
     if (!rows.length) return notFound(res, 'Item do pedido');
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/kds/item] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao atualizar status do item' });
+  }
 });
 
 router.post('/:oid/notify', guard, async (req, res) => {
@@ -339,7 +362,10 @@ router.post('/:oid/notify', guard, async (req, res) => {
     if (!rows.length) return notFound(res);
     const sent = await _notifyWhatsApp(rows[0]);
     res.json({ sent, message: _buildWhatsAppMsg(rows[0]) });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[food/notify] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao enviar notificação' });
+  }
 });
 
 // ── WhatsApp helpers ──────────────────────────────────────────
@@ -370,22 +396,19 @@ async function _notifyWhatsApp(order) {
 // ── FOOD-04d: Link de avaliação pós-entrega ───────────────────
 async function _sendReviewLink(order, companyId) {
   if (!order.customer_phone) return false;
-  // Só envia se ainda não enviou avaliação para este pedido
   const { rows } = await db.query(
     `SELECT review_sent_at FROM food_orders WHERE id=$1`, [order.id]
   );
-  if (rows[0]?.review_sent_at) return false; // já enviado
+  if (rows[0]?.review_sent_at) return false;
 
   const id   = order.id.slice(-6).toUpperCase();
   const name = order.customer_name ? ', ' + order.customer_name.split(' ')[0] : '';
-  // Token de review: aproveita o sistema de purchase_reviews existente
   const reviewUrl = `getaura.com.br/avaliar/${order.id}`;
   const msg = `Olá${name}! 🙏\n\nEsperamos que tenha gostado do pedido *#${id}*!\n\nAvalie o seu pedido (leva 30 segundos):\n👉 ${reviewUrl}\n\nSua opinião é muito importante para nós! ⭐`;
 
   // TODO pós-CNPJ: await whatsappClient.sendMessage(order.customer_phone, msg);
   console.log(`[food/review] STUB — ${order.customer_phone}: ${msg.slice(0,60)}...`);
 
-  // Marca como enviado
   await db.query(
     `UPDATE food_orders SET review_sent_at=NOW() WHERE id=$1`, [order.id]
   );
