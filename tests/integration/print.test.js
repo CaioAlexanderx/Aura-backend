@@ -22,20 +22,23 @@ const mockItems   = [
   { product_name:'Feijão 1kg', quantity:2, unit_price:7.50, total_price:15.00, discount:0, variant_label:null },
   { product_name:'Arroz 5kg',  quantity:1, unit_price:25.00, total_price:25.00, discount:0, variant_label:null },
 ];
-// _loadSaleData faz 4 queries: company, sale, items, payments
+
 function mockSaleQueries(dbInstance) {
   dbInstance.query
-    .mockResolvedValueOnce({ rows: [mockCompany] })  // 1: company
-    .mockResolvedValueOnce({ rows: [mockSale] })     // 2: sale
-    .mockResolvedValueOnce({ rows: mockItems })       // 3: items
-    .mockResolvedValueOnce({ rows: [] });             // 4: sale_payments
+    .mockResolvedValueOnce({ rows: [mockCompany] })
+    .mockResolvedValueOnce({ rows: [mockSale] })
+    .mockResolvedValueOnce({ rows: mockItems })
+    .mockResolvedValueOnce({ rows: [] });
 }
 
 describe('GET /print/receipt/:saleId', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.query.mockReset();
+  });
 
   test('retorna HTML com Content-Type text/html', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     mockSaleQueries(db);
     const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}`).set(auth);
     expect(res.status).toBe(200);
@@ -43,33 +46,31 @@ describe('GET /print/receipt/:saleId', () => {
   });
 
   test('HTML contém nome da empresa', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     mockSaleQueries(db);
     const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}`).set(auth);
     expect(res.text).toContain('Mercado João');
   });
 
   test('HTML contém total da venda formatado', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     mockSaleQueries(db);
     const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}`).set(auth);
     expect(res.text).toContain('85.50');
   });
 
   test('HTML contém CNPJ da empresa', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     mockSaleQueries(db);
     const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}`).set(auth);
     expect(res.text).toContain('12.345.678/0001-90');
   });
 
   test('retorna 404 se venda não encontrada', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
-      .mockResolvedValueOnce({ rows: [{ role: 'owner' }] }) // companyAccess
-      .mockResolvedValueOnce({ rows: [mockCompany] })        // company
-      .mockResolvedValueOnce({ rows: [] });                  // sale (empty = 404)
+      .mockResolvedValueOnce({ rows: [{ role: 'owner' }] })  // 1: companyAccess
+      .mockResolvedValueOnce({ rows: [mockCompany] })         // 2: company
+      .mockResolvedValueOnce({ rows: [] });                   // 3: sale not found → null → 404
     const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}`).set(auth);
     expect(res.status).toBe(404);
   });
@@ -81,10 +82,13 @@ describe('GET /print/receipt/:saleId', () => {
 });
 
 describe('GET /print/receipt/:saleId/preview', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.query.mockReset();
+  });
 
   test('HTML do preview contém window.print()', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     mockSaleQueries(db);
     const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}/preview`).set(auth);
     expect(res.status).toBe(200);
@@ -92,7 +96,7 @@ describe('GET /print/receipt/:saleId/preview', () => {
   });
 
   test('HTML do preview contém itens da venda', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     mockSaleQueries(db);
     const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}/preview`).set(auth);
     expect(res.text).toContain('Feijão 1kg');
