@@ -160,7 +160,7 @@ async function _loadSaleData(saleId, companyId) {
 // GET /print/receipt/:saleId  — HTML do cupom (sem autoprint)
 router.get('/receipt/:saleId', requireAuth, async (req, res) => {
   try {
-    const data = await _loadSaleData(req.params.saleId, req.params.id);
+    const data = await _loadSaleData(req.params.saleId, req.params.cid);
     if (!data) return res.status(404).json({ error: 'Venda não encontrada' });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(receiptHTML({ ...data, options: { autoprint: false } }));
@@ -170,7 +170,7 @@ router.get('/receipt/:saleId', requireAuth, async (req, res) => {
 // GET /print/receipt/:saleId/preview  — abre e imprime automaticamente
 router.get('/receipt/:saleId/preview', requireAuth, async (req, res) => {
   try {
-    const data = await _loadSaleData(req.params.saleId, req.params.id);
+    const data = await _loadSaleData(req.params.saleId, req.params.cid);
     if (!data) return res.status(404).json({ error: 'Venda não encontrada' });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(receiptHTML({ ...data, options: { autoprint: true } }));
@@ -180,7 +180,7 @@ router.get('/receipt/:saleId/preview', requireAuth, async (req, res) => {
 // GET /print/receipt/:saleId/a4  — cupom formato A4 (para impressoras comuns)
 router.get('/receipt/:saleId/a4', requireAuth, async (req, res) => {
   try {
-    const data = await _loadSaleData(req.params.saleId, req.params.id);
+    const data = await _loadSaleData(req.params.saleId, req.params.cid);
     if (!data) return res.status(404).json({ error: 'Venda não encontrada' });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(receiptHTML({ ...data, options: { autoprint: false, width80: false } }));
