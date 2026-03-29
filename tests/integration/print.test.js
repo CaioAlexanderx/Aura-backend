@@ -67,8 +67,9 @@ describe('GET /print/receipt/:saleId', () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
-      .mockResolvedValueOnce({ rows: [mockCompany] })
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [{ role: 'owner' }] }) // companyAccess
+      .mockResolvedValueOnce({ rows: [mockCompany] })        // company
+      .mockResolvedValueOnce({ rows: [] });                  // sale (empty = 404)
     const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}`).set(auth);
     expect(res.status).toBe(404);
   });
