@@ -5,16 +5,15 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
-const { requireAuth, requirePlan } = require('../middleware/auth');
 
-const guard = [requireAuth];
+// Nota: requireAuth + requireCompanyAccess já aplicados em private.js
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 
 // ============================================================
 // POST /companies/:id/pdv/sale
 // ============================================================
-router.post('/sale', guard, async (req, res) => {
+router.post('/sale', async (req, res) => {
   const {
     items, customer_id, payment_method,
     discount_amount, discount_pct,
@@ -24,7 +23,6 @@ router.post('/sale', guard, async (req, res) => {
   if (!items?.length)
     return res.status(400).json({ error: 'items obrigatório' });
 
-  // fix: db já é o Pool — usar db.connect() direto, não db.pool.connect()
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -149,12 +147,13 @@ router.post('/sale', guard, async (req, res) => {
     });
   } catch (e) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: e.message });
+    console.error('[PDV] Erro ao registrar venda:', e.message);
+    res.status(500).json({ error: 'Erro ao registrar venda' });
   } finally { client.release(); }
 });
 
 // GET /companies/:id/pdv/sale/:saleId
-router.get('/sale/:saleId', guard, async (req, res) => {
+router.get('/sale/:saleId', async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT s.*, u.full_name AS seller_name, c.name AS customer_name
@@ -169,11 +168,14 @@ router.get('/sale/:saleId', guard, async (req, res) => {
       [req.params.saleId]
     );
     res.json({ ...rows[0], items });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[PDV] Erro ao buscar venda:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar venda' });
+  }
 });
 
 // GET /companies/:id/pdv/sales
-router.get('/sales', guard, async (req, res) => {
+router.get('/sales', async (req, res) => {
   const { date, limit = 50, offset = 0 } = req.query;
   const cond = ['s.company_id=$1'];
   const vals = [req.params.id];
@@ -190,11 +192,14 @@ router.get('/sales', guard, async (req, res) => {
       [...vals, limit, offset]
     );
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[PDV] Erro ao listar vendas:', e.message);
+    res.status(500).json({ error: 'Erro ao listar vendas' });
+  }
 });
 
 // GET /companies/:id/pdv/summary
-router.get('/summary', guard, async (req, res) => {
+router.get('/summary', async (req, res) => {
   const date = req.query.date || new Date().toISOString().slice(0,10);
   try {
     const { rows } = await db.query(
@@ -208,12 +213,14 @@ router.get('/summary', guard, async (req, res) => {
       [req.params.id, date]
     );
     res.json({ date, ...rows[0] });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[PDV] Erro ao buscar resumo:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar resumo do caixa' });
+  }
 });
 
 // DELETE /companies/:id/pdv/sale/:saleId
-router.delete('/sale/:saleId', guard, async (req, res) => {
-  // fix: usar db.connect() direto
+router.delete('/sale/:saleId', async (req, res) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -239,7 +246,8 @@ router.delete('/sale/:saleId', guard, async (req, res) => {
     res.json({ ok: true, cancelled: req.params.saleId });
   } catch (e) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: e.message });
+    console.error('[PDV] Erro ao cancelar venda:', e.message);
+    res.status(500).json({ error: 'Erro ao cancelar venda' });
   } finally { client.release(); }
 });
 
