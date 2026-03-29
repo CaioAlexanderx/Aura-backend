@@ -18,6 +18,7 @@ describe('POST /dental/patients — LGPD', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('retorna 400 sem full_name', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/dental/patients`)
       .set(auth).send({ cpf: '123.456.789-00' });
@@ -25,6 +26,7 @@ describe('POST /dental/patients — LGPD', () => {
   });
 
   test('retorna 400 sem consentimento LGPD', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/dental/patients`)
       .set(auth).send({ full_name: 'João Silva', cpf: '123.456.789-00' });
@@ -34,6 +36,7 @@ describe('POST /dental/patients — LGPD', () => {
 
   test('cria paciente com consentimento válido', async () => {
     db.query
+      .mockResolvedValueOnce({ rows: [{ role: 'owner' }] }) // companyAccess
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: 'pat1', full_name: 'João Silva' }] });
     const res = await request(app)
@@ -54,8 +57,6 @@ describe('GET /dental/sign/:token', () => {
   test('retorna 404 para token inválido ou expirado', async () => {
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).get('/api/v1/dental/sign/token-inexistente');
-    // A rota retorna 404 para token não encontrado
-    // (semanticamente seria 410 Gone, mas a implementação usa 404)
     expect([404, 410]).toContain(res.status);
     expect(res.body.error).toBeDefined();
   });
