@@ -1,9 +1,12 @@
 const express = require('express');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireCompanyAccess } = require('../middleware/auth');
 
 const router = express.Router({ mergeParams: true });
 
+// SEC-01: requireAuth valida JWT, requireCompanyAccess garante
+// que o usuário pertence à empresa de :id (previne IDOR)
 router.use(requireAuth);
+router.use(requireCompanyAccess());
 
 // BE-01 — Analytics de vendas
 router.use('/sales/analytics', require('./salesAnalytics'));
