@@ -67,14 +67,15 @@ describe('GET /dental/sign/:token/pad', () => {
   });
 });
 
+// NOTA: GET /dental/sign/:token/status é ROTA PÚBLICA — NÃO passa por
+// requireCompanyAccess. Apenas 1 mock de db.query (o dado real).
 describe('GET /dental/sign/:token/status', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    db.query.mockReset(); // Clear mockResolvedValueOnce queue
+    db.query.mockReset();
   });
 
   test('retorna status waiting quando paciente não conectou', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [{ used_at:null, conclusion_signed:false, conclusion_at:null }] });
     const res = await request(app).get(`/api/v1/dental/sign/${validToken}/status`);
     expect(res.status).toBe(200);
@@ -83,8 +84,6 @@ describe('GET /dental/sign/:token/status', () => {
   });
 
   test('retorna status signed após assinatura registrada', async () => {
-    db.query.mockReset();
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [{ used_at: new Date().toISOString(), conclusion_signed:true, conclusion_at: new Date().toISOString() }] });
     const res = await request(app).get(`/api/v1/dental/sign/${validToken}/status`);
     expect(res.status).toBe(200);
@@ -93,14 +92,13 @@ describe('GET /dental/sign/:token/status', () => {
   });
 
   test('retorna 404 com token inexistente', async () => {
-    db.query.mockReset();
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).get('/api/v1/dental/sign/nao-existe/status');
     expect(res.status).toBe(404);
   });
 });
 
+// POST /companies/:id/dental/... PASSA por requireCompanyAccess — precisa do mock
 describe('POST /dental/appointments/:aid/signature-token', () => {
   beforeEach(() => {
     jest.clearAllMocks();
