@@ -10,6 +10,9 @@ router.use(requireCompanyAccess());
 
 // ── ESSENCIAL (todos os planos) ──────────────────────────────
 
+// PERF-01: Dashboard agregado (1 request em vez de 2-3)
+router.use('/dashboard', require('./dashboard'));
+
 // Financeiro core
 router.use('/transactions', require('./transactionsBatch'));
 router.use('/transactions/categorize', require('./categorize'));
