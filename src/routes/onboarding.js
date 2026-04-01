@@ -1,6 +1,10 @@
 // ============================================================
 // AURA. — CORE-01: Onboarding
 // Fluxo: CNPJ → RF → detecção regime/vertical → perfil → done
+//
+// REGRA: vertical NUNCA é ativada automaticamente.
+// A detecção por CNAE serve apenas como referência para pitch.
+// Ativação real: toggle no painel Gestão Aura após contratação do Add-on.
 // ============================================================
 const router  = require('express').Router({ mergeParams: true });
 const db      = require('../config/database');
@@ -21,7 +25,7 @@ async function _checkRateLimit(ip) {
   } catch (_) { return true; }
 }
 
-const STEPS = ['cnpj', 'regime', 'perfil', 'vertical', 'done'];
+const STEPS = ['cnpj', 'regime', 'perfil', 'done'];
 function nextStep(current) {
   const idx = STEPS.indexOf(current);
   return idx < STEPS.length - 1 ? STEPS[idx + 1] : 'done';
@@ -67,8 +71,9 @@ router.get('/', requireAuth, async (req, res) => {
               c.tax_regime, c.vertical_active, c.cnpj, c.legal_name,
               c.trade_name, c.cnaes, c.legal_nature, c.company_size,
               c.rf_situation, c.address_city, c.address_state,
+              c.suggested_vertical,
               os.rf_data, os.step_cnpj_done, os.step_regime_done,
-              os.step_perfil_done, os.step_vertical_done
+              os.step_perfil_done
        FROM companies c
        LEFT JOIN onboarding_sessions os ON os.company_id = c.id
        WHERE c.id = $1 AND c.owner_id = $2`,
@@ -86,14 +91,14 @@ router.get('/', requireAuth, async (req, res) => {
         cnpj:     c.step_cnpj_done     || false,
         regime:   c.step_regime_done   || false,
         perfil:   c.step_perfil_done   || false,
-        vertical: c.step_vertical_done || false,
       },
       company: {
         cnpj:            c.cnpj,
         legal_name:      c.legal_name,
         trade_name:      c.trade_name,
         tax_regime:      c.tax_regime,
-        vertical_active: c.vertical_active,
+        vertical_active: c.vertical_active, // null até equipe Aura ativar
+        suggested_vertical: c.suggested_vertical, // sugestão baseada no CNAE (para pitch)
         cnaes:           c.cnaes,
         legal_nature:    c.legal_nature,
         company_size:    c.company_size,
@@ -128,11 +133,12 @@ router.post('/step/cnpj', requireAuth, async (req, res) => {
     if (!rf.is_active)
       return res.status(422).json({ error: 'CNPJ com situação irregular na RF.', situation: rf.rf_situation });
 
-    // fix: usar db.connect() — db já é o Pool, não tem .pool
     const client = await db.connect();
     try {
       await client.query('BEGIN');
 
+      // REGRA: suggested_vertical é salvo como REFERÊNCIA para pitch.
+      // vertical_active permanece NULL — só a equipe Aura ativa via Gestão Aura.
       await client.query(
         `UPDATE companies SET
            cnpj             = $1,  tax_id          = $1,
@@ -148,9 +154,10 @@ router.post('/step/cnpj', requireAuth, async (req, res) => {
            address_city     = COALESCE(NULLIF($14,''), address_city),
            address_state    = COALESCE(NULLIF($15,''), address_state),
            address_zip      = COALESCE(NULLIF($16,''), address_zip),
+           suggested_vertical = $17,
            onboarding_step  = 'regime',
            updated_at       = NOW()
-         WHERE id = $17`,
+         WHERE id = $18`,
         [
           rf.cnpj_raw, rf.legal_name, rf.trade_name,
           rf.legal_nature, rf.legal_nature_code, rf.company_size,
@@ -158,6 +165,7 @@ router.post('/step/cnpj', requireAuth, async (req, res) => {
           JSON.stringify({ principal: rf.cnae_principal, secundarios: rf.cnaes_secundarios }),
           rf.address_street, rf.address_number, rf.address_complement,
           rf.address_district, rf.address_city, rf.address_state, rf.address_zip,
+          rf.suggested_vertical, // salva como sugestão, NÃO ativa
           cid,
         ]
       );
@@ -183,7 +191,7 @@ router.post('/step/cnpj', requireAuth, async (req, res) => {
       next_step: 'regime',
       suggestions: {
         tax_regime: rf.suggested_regime,
-        vertical:   rf.suggested_vertical,
+        vertical:   rf.suggested_vertical, // sugestão para pitch — NÃO ativação
         is_mei:     rf.is_mei,
       },
       rf_data: rf,
@@ -234,6 +242,7 @@ router.post('/step/regime', requireAuth, async (req, res) => {
 });
 
 // POST /companies/:id/onboarding/step/perfil
+// Último step — conclui o onboarding
 router.post('/step/perfil', requireAuth, async (req, res) => {
   const cid = req.params.id;
   const { trade_name, phone, email, name } = req.body;
@@ -249,61 +258,24 @@ router.post('/step/perfil', requireAuth, async (req, res) => {
          phone      = COALESCE($2, phone),
          email      = COALESCE($3, email),
          legal_name = COALESCE($4, legal_name),
-         onboarding_step = 'vertical',
+         onboarding_step = 'done',
+         onboarding_completed_at = NOW(),
          updated_at = NOW()
        WHERE id = $5`,
       [trade_name||null, phone||null, email||null, name||null, cid]
     );
     await db.query(
-      `INSERT INTO onboarding_sessions (company_id, current_step, step_perfil_done)
-       VALUES ($1,'vertical',TRUE)
-       ON CONFLICT (company_id) DO UPDATE
-         SET current_step=CASE WHEN current_step='perfil' THEN 'vertical' ELSE current_step END,
-             step_perfil_done=TRUE, updated_at=NOW()`,
-      [cid]
-    );
-    res.json({ next_step: 'vertical' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// POST /companies/:id/onboarding/step/vertical
-router.post('/step/vertical', requireAuth, async (req, res) => {
-  const cid = req.params.id;
-  const { vertical } = req.body;
-  const validVerticals = [null,'odonto','salao','estetica','academia','pet','food','moda'];
-  if (!validVerticals.includes(vertical))
-    return res.status(400).json({ error: 'Vertical inválido' });
-
-  try {
-    const { rows } = await db.query(
-      `SELECT id FROM companies WHERE id=$1 AND owner_id=$2`, [cid, req.user.id]
-    );
-    if (!rows.length) return res.status(403).json({ error: 'Acesso negado' });
-
-    await db.query(
-      `UPDATE companies SET
-         vertical_active = $1,
-         vertical_enabled_at = CASE WHEN $1 IS NOT NULL THEN NOW() ELSE NULL END,
-         onboarding_step = 'done',
-         onboarding_completed_at = NOW(),
-         updated_at = NOW()
-       WHERE id = $2`,
-      [vertical, cid]
-    );
-    await db.query(
-      `INSERT INTO onboarding_sessions
-         (company_id, current_step, step_vertical_done, completed_at)
+      `INSERT INTO onboarding_sessions (company_id, current_step, step_perfil_done, completed_at)
        VALUES ($1,'done',TRUE,NOW())
        ON CONFLICT (company_id) DO UPDATE
-         SET current_step='done', step_vertical_done=TRUE,
-             completed_at=NOW(), updated_at=NOW()`,
+         SET current_step='done',
+             step_perfil_done=TRUE, completed_at=NOW(), updated_at=NOW()`,
       [cid]
     );
     res.json({
       next_step: 'done',
       onboarding_complete: true,
-      vertical_active: vertical,
-      message: 'Onboarding concluído! O checklist mensal foi gerado automaticamente.',
+      message: 'Onboarding concluído!',
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
