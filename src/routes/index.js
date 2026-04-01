@@ -7,9 +7,16 @@ const router  = express.Router();
 const privateCompaniesRouter  = require('./private');
 const { publicReviewsRouter } = require('./reviews');
 const onboardingRouter        = require('./onboarding');
+const accessCodesRouter       = require('./accessCodes');
 
 // ── AUTENTICAÇÃO (pública) ──────────────────────────────────
 router.use('/auth', require('./auth'));
+
+// ── VALIDAÇÃO DE CÓDIGOS (pública) ──────────────────────────
+router.use('/auth', accessCodesRouter);  // POST /auth/validate-code
+
+// ── REFERRALS (autenticada) ─────────────────────────────────
+router.use('/referrals', accessCodesRouter);  // POST /referrals/generate, GET /referrals/mine
 
 // ── ROTAS PRIVADAS POR EMPRESA ──────────────────────────────
 router.use('/companies/:id', privateCompaniesRouter);
