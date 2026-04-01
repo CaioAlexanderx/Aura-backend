@@ -3,15 +3,16 @@ const { requireAuth, requireCompanyAccess, requirePlan } = require('../middlewar
 
 const router = express.Router({ mergeParams: true });
 
-// SEC-01: requireAuth valida JWT, requireCompanyAccess garante
-// que o usuário pertence à empresa de :id (previne IDOR)
 router.use(requireAuth);
 router.use(requireCompanyAccess());
 
 // ── ESSENCIAL (todos os planos) ──────────────────────────────
 
-// PERF-01: Dashboard agregado (1 request em vez de 2-3)
+// PERF-01: Dashboard agregado
 router.use('/dashboard', require('./dashboard'));
+
+// BE-REV-02: Sparkline standalone
+router.use('/dashboard/sparkline', require('./dashboardSparkline'));
 
 // Financeiro core
 router.use('/transactions', require('./transactionsBatch'));
@@ -21,7 +22,7 @@ router.use('/prolabore', require('./prolabore'));
 router.use('/dre', require('./dre'));
 router.use('/financial/history', require('./financialHistory'));
 
-// PDV + Estoque (Essencial)
+// PDV + Estoque
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
 router.use('/products', require('./productsRanking'));
@@ -29,57 +30,45 @@ router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 router.use('/products/:pid/variants', require('./variants'));
 
-// Contabilidade (Essencial)
+// Contabilidade
 router.use('/obligations', require('./fiscalObligations'));
 router.use('/guides', require('./guides'));
 router.use('/checklist', require('./checklist').checklistRouter);
 
-// Onboarding (Essencial)
+// Onboarding
 router.use('/onboarding', require('./onboarding'));
 
-// Export (Essencial)
+// Export + Import + Print
 router.use('/export', require('./exportReports'));
-
-// Import (Essencial)
 router.use('/', require('./importData'));
-
-// Print (Essencial)
 router.use('/print', require('./print'));
 
-// Sales analytics (Essencial)
+// Sales analytics + Reviews
 router.use('/sales/analytics', require('./salesAnalytics'));
-
-// Reviews (Essencial)
 router.use('/reviews', require('./reviews').reviewsRouter);
 
-// ── NEGOCIO+ (CRM, WhatsApp, Canal, Folha, Agendamento) ─────
+// ── NEGOCIO+ ─────────────────────────────────────────────────
 
-// SEC-01: CRM requer plano Negocio ou superior
+// CRM + Ranking LTV
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
+router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
 
-// Multi-usuário RBAC (Negocio+)
+// Multi-usuário
 router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
 
-// Ranking funcionários (Negocio+)
+// BE-REV-04: Ranking funcionários com link PDV
 router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
 
-// Agendamento / Barbershop (Negocio+)
+// Agendamento
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
-
-// Salão parceiro (Negocio+)
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
-
-// eSocial ME (Negocio+)
 router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
 
-// ── EXPANSAO (Verticais, IA, Food) ──────────────────────────
+// ── EXPANSAO ─────────────────────────────────────────────────
 
-// Odontologia (Expansao ou Add-on vertical)
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
-
-// Food service (Expansao ou Add-on vertical)
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
 router.use('/food/deliverers', requirePlan('negocio', 'expansao'), require('./foodDeliverers'));
