@@ -15,16 +15,61 @@ const app = express();
 initSentry();
 app.use(Sentry.Handlers.requestHandler());
 
-// ── Segurança + parsing ─────────────────────────────────────
-app.use(helmet());
+// ── BE-REV-14: Security headers (Helmet + CSP) ─────────────
+const allowedOrigins = env.ALLOWED_ORIGINS === '*'
+  ? ['*']
+  : env.ALLOWED_ORIGINS.split(',').map(o => o.trim());
 
-// A-02: CORS — fallback '*' só em dev/test, nunca em produção
+app.use(helmet({
+  // Content Security Policy
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc:  ["'self'"],
+      styleSrc:   ["'self'", "'unsafe-inline'"],
+      imgSrc:     ["'self'", 'data:', 'https://cdn.jsdelivr.net'],
+      connectSrc: ["'self'", ...allowedOrigins.filter(o => o !== '*')],
+      fontSrc:    ["'self'"],
+      objectSrc:  ["'none'"],
+      frameSrc:   ["'none'"],
+      baseUri:    ["'self'"],
+      formAction: ["'self'"],
+    },
+  },
+  // Strict-Transport-Security: max-age=1 year, includeSubDomains
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
+  },
+  // X-Content-Type-Options: nosniff
+  noSniff: true,
+  // X-Frame-Options: DENY
+  frameguard: { action: 'deny' },
+  // Referrer-Policy: strict-origin-when-cross-origin
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  // X-XSS-Protection: 0 (modern browsers use CSP instead)
+  xssFilter: false,
+  // X-Permitted-Cross-Domain-Policies: none
+  permittedCrossDomainPolicies: { permittedPolicies: 'none' },
+  // X-DNS-Prefetch-Control: off
+  dnsPrefetchControl: { allow: false },
+  // X-Download-Options: noopen (IE specific)
+  ieNoOpen: true,
+}));
+
+// Disable X-Powered-By (redundant with helmet, but explicit)
+app.disable('x-powered-by');
+
+// ── CORS ────────────────────────────────────────────────────
 app.use(cors({
   origin: env.ALLOWED_ORIGINS === '*'
     ? '*'
-    : env.ALLOWED_ORIGINS.split(',').map(o => o.trim()),
+    : allowedOrigins,
   methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Idempotency-Key'],
+  exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
+  maxAge:         600, // Preflight cache: 10 min
 }));
 
 app.use(express.json({ limit: '5mb' }));
@@ -32,9 +77,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(sentryContext);
 
 // ── Rate limiting ────────────────────────────────────────────
-// A-01: proteção contra brute force em auth e onboarding público
 
-// Auth: 10 tentativas por IP a cada 15 minutos
 const authLimiter = rateLimit({
   windowMs:  15 * 60 * 1000,
   max:       10,
@@ -44,8 +87,6 @@ const authLimiter = rateLimit({
   skip: (req) => env.NODE_ENV === 'test',
 });
 
-// CNPJ lookup público: 10 por hora por IP (já tem rate limit interno via Redis,
-// mas esse garante proteção mesmo sem Redis)
 const cnpjLimiter = rateLimit({
   windowMs:  60 * 60 * 1000,
   max:       20,
@@ -55,7 +96,6 @@ const cnpjLimiter = rateLimit({
   skip: (req) => env.NODE_ENV === 'test',
 });
 
-// API geral: 300 req/min por IP (proteção contra flood)
 const globalLimiter = rateLimit({
   windowMs:  60 * 1000,
   max:       300,
@@ -77,14 +117,12 @@ app.get('/health', function(req, res) {
   });
 });
 
-// A-04: /health/db não expõe mensagem de erro interna
 app.get('/health/db', async function(req, res) {
   try {
     const db = require('./config/database');
     await db.query('SELECT 1');
     res.json({ status: 'ok', database: 'connected' });
   } catch (err) {
-    // Erro real vai para Sentry/logs — cliente recebe mensagem genérica
     console.error('[health/db]', err.message);
     res.status(503).json({ status: 'error', database: 'unavailable' });
   }
@@ -114,12 +152,9 @@ app.get('/', function(req, res) {
 
 // ── Rotas da API ─────────────────────────────────────────────
 const apiRouter = require('./routes/index');
-
-// Rate limits específicos aplicados antes do roteador
 apiRouter.use('/auth/login',    authLimiter);
 apiRouter.use('/auth/register', authLimiter);
 apiRouter.use('/onboarding/cnpj-lookup', cnpjLimiter);
-
 app.use('/api/v1', apiRouter);
 
 // ── Error handlers ───────────────────────────────────────────
