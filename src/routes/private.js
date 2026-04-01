@@ -8,13 +8,11 @@ router.use(requireCompanyAccess());
 
 // ── ESSENCIAL (todos os planos) ──────────────────────────────
 
-// PERF-01: Dashboard agregado
+// Dashboard
 router.use('/dashboard', require('./dashboard'));
-
-// BE-REV-02: Sparkline standalone
 router.use('/dashboard/sparkline', require('./dashboardSparkline'));
 
-// Financeiro core
+// Financeiro
 router.use('/transactions', require('./transactionsBatch'));
 router.use('/transactions/categorize', require('./categorize'));
 router.use('/transactions', require('./categorize'));
@@ -35,39 +33,41 @@ router.use('/obligations', require('./fiscalObligations'));
 router.use('/guides', require('./guides'));
 router.use('/checklist', require('./checklist').checklistRouter);
 
-// Onboarding
+// Onboarding + Export + Import + Print
 router.use('/onboarding', require('./onboarding'));
-
-// Export + Import + Print
 router.use('/export', require('./exportReports'));
 router.use('/', require('./importData'));
 router.use('/print', require('./print'));
 
-// Sales analytics + Reviews
+// Analytics + Reviews
 router.use('/sales/analytics', require('./salesAnalytics'));
 router.use('/reviews', require('./reviews').reviewsRouter);
 
 // ── NEGOCIO+ ─────────────────────────────────────────────────
 
-// CRM + Ranking LTV
+// BE-REV-08: Plan enforcement — CRM, appointments, members, employees
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
 
-// Multi-usuário
-router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
+// BE-REV-06: Generic appointments (reusable for any vertical)
+router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appointments'));
 
-// BE-REV-04: Ranking funcionários com link PDV
+// Multi-usuario + Funcionarios
+router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
 router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
 
-// Agendamento
+// Barbershop (vertical-specific, Negocio+ with add-on)
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
+
+// eSocial
 router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
 
 // ── EXPANSAO ─────────────────────────────────────────────────
 
+// Verticais (require add-on activation via Gestao Aura)
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
