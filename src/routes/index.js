@@ -8,12 +8,16 @@ const privateCompaniesRouter  = require('./private');
 const { publicReviewsRouter } = require('./reviews');
 const onboardingRouter        = require('./onboarding');
 const accessCodesRouter       = require('./accessCodes');
+const verificationRouter      = require('./verification');
 
 // ── AUTENTICAÇÃO (pública) ──────────────────────────────────
 router.use('/auth', require('./auth'));
 
 // ── VALIDAÇÃO DE CÓDIGOS (pública) ──────────────────────────
 router.use('/auth', accessCodesRouter);  // POST /auth/validate-code
+
+// ── VERIFICAÇÃO EMAIL/PHONE (autenticada) ───────────────────
+router.use('/auth', verificationRouter); // POST /auth/send-verification, /auth/verify-email, etc.
 
 // ── REFERRALS (autenticada) ─────────────────────────────────
 router.use('/referrals', accessCodesRouter);  // POST /referrals/generate, GET /referrals/mine
