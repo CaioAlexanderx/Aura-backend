@@ -1,5 +1,5 @@
 const express = require('express');
-const { requireAuth, requireCompanyAccess } = require('../middleware/auth');
+const { requireAuth, requireCompanyAccess, requirePlan } = require('../middleware/auth');
 
 const router = express.Router({ mergeParams: true });
 
@@ -8,92 +8,82 @@ const router = express.Router({ mergeParams: true });
 router.use(requireAuth);
 router.use(requireCompanyAccess());
 
-// BE-01 — Analytics de vendas
-router.use('/sales/analytics', require('./salesAnalytics'));
+// ── ESSENCIAL (todos os planos) ──────────────────────────────
 
-// BE-02 — Ranking de funcionários
-router.use('/employees/ranking', require('./employeesRanking'));
-
-// BE-03 — Categorias + curva ABC
-router.use('/products', require('./productsRanking'));
-
-// BE-04 — Histórico financeiro
-router.use('/financial/history', require('./financialHistory'));
-
-// BE-05 + BE-07 — CRM + Retenção
-router.use('/customers', require('./crm'));
-router.use('/customers', require('./retention'));
-
-// BE-06 — Avaliações internas
-router.use('/reviews', require('./reviews').reviewsRouter);
-
-// BE-09 — Multi-usuário RBAC
-router.use('/members', require('./members'));
-
-// BE-10 — Obrigações fiscais
-router.use('/obligations', require('./fiscalObligations'));
-
-// BE-11 — Módulo Barbearia/Salão
-router.use('/barbershop', require('./barbershop'));
-
-// BE-13/15 — Barcode + Labels
-router.use('/products', require('./barcode'));
-router.use('/products', require('./labels'));
-
-// BE-15 + PDV-01 — Scanner + PDV
-router.use('/pdv', require('./scanner'));
-router.use('/pdv', require('./pdv'));
-
-// BE-16 — Variantes
-router.use('/products/:pid/variants', require('./variants'));
-
-// BE-19/20 — Comissão + Metas
-router.use('/employees', require('./commission'));
-
-// BE-22 — Salão Parceiro
-router.use('/salon-partners', require('./salonPartner'));
-
-// BE-25 — Módulo Odontologia
-router.use('/dental', require('./dental'));
-
-// INF-04 + PDV-01 — Cupom térmico
-router.use('/print', require('./print'));
-
-// BE-26 — Guia Assistido Universal
-router.use('/guides', require('./guides'));
-
-// BE-27 — Lançamento em Massa + OFX
+// Financeiro core
 router.use('/transactions', require('./transactionsBatch'));
-
-// BE-28 — Importação de Dados
-router.use('/', require('./importData'));
-
-// BE-29 — eSocial ME
-router.use('/esocial', require('./esocial'));
-
-// CORE
-router.use('/onboarding', require('./onboarding'));
-router.use('/checklist', require('./checklist').checklistRouter);
-
-// FINANCEIRO
+router.use('/transactions/categorize', require('./categorize'));
+router.use('/transactions', require('./categorize'));
 router.use('/prolabore', require('./prolabore'));
 router.use('/dre', require('./dre'));
+router.use('/financial/history', require('./financialHistory'));
 
-// CORE-04 — Categorização automática via IA (Claude Haiku)
-router.use('/transactions/categorize', require('./categorize'));
-router.use('/transactions', require('./categorize')); // rota /:txId/categorize
+// PDV + Estoque (Essencial)
+router.use('/pdv', require('./scanner'));
+router.use('/pdv', require('./pdv'));
+router.use('/products', require('./productsRanking'));
+router.use('/products', require('./barcode'));
+router.use('/products', require('./labels'));
+router.use('/products/:pid/variants', require('./variants'));
 
-// CORE-05 — Exportação PDF + CSV com branding Aura
+// Contabilidade (Essencial)
+router.use('/obligations', require('./fiscalObligations'));
+router.use('/guides', require('./guides'));
+router.use('/checklist', require('./checklist').checklistRouter);
+
+// Onboarding (Essencial)
+router.use('/onboarding', require('./onboarding'));
+
+// Export (Essencial)
 router.use('/export', require('./exportReports'));
 
-// FOOD SERVICE — privado
-router.use('/food', require('./food'));
-router.use('/food/orders', require('./foodOrders'));
-router.use('/food/deliverers', require('./foodDeliverers'));
-router.use('/food/reports', require('./foodReports'));
-router.use('/food/ifood', require('./foodIfood'));
-router.use('/food/waiter', require('./foodWaiter'));
-router.use('/food/nfce', require('./foodNfce'));
-router.use('/food/schedule', require('./foodSchedule'));
+// Import (Essencial)
+router.use('/', require('./importData'));
+
+// Print (Essencial)
+router.use('/print', require('./print'));
+
+// Sales analytics (Essencial)
+router.use('/sales/analytics', require('./salesAnalytics'));
+
+// Reviews (Essencial)
+router.use('/reviews', require('./reviews').reviewsRouter);
+
+// ── NEGOCIO+ (CRM, WhatsApp, Canal, Folha, Agendamento) ─────
+
+// SEC-01: CRM requer plano Negocio ou superior
+router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
+router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
+
+// Multi-usuário RBAC (Negocio+)
+router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
+
+// Ranking funcionários (Negocio+)
+router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
+router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
+
+// Agendamento / Barbershop (Negocio+)
+router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
+
+// Salão parceiro (Negocio+)
+router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
+
+// eSocial ME (Negocio+)
+router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
+
+// ── EXPANSAO (Verticais, IA, Food) ──────────────────────────
+
+// Odontologia (Expansao ou Add-on vertical)
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
+
+// Food service (Expansao ou Add-on vertical)
+router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
+router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
+router.use('/food/deliverers', requirePlan('negocio', 'expansao'), require('./foodDeliverers'));
+router.use('/food/reports', requirePlan('negocio', 'expansao'), require('./foodReports'));
+router.use('/food/ifood', requirePlan('negocio', 'expansao'), require('./foodIfood'));
+router.use('/food/waiter', requirePlan('negocio', 'expansao'), require('./foodWaiter'));
+router.use('/food/nfce', requirePlan('negocio', 'expansao'), require('./foodNfce'));
+router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./foodSchedule'));
 
 module.exports = router;
