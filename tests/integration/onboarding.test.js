@@ -1,6 +1,6 @@
 // ============================================================
 // QA-02 — Testes de Integração: Onboarding
-// Primeiro fluxo do cliente — crítico para o Alpha
+// Fluxo: cnpj → regime → perfil → done (3 steps, sem vertical)
 // Rota pública: POST /onboarding/cnpj-lookup (sem auth)
 // Rotas privadas: GET/POST /companies/:id/onboarding/...
 // ============================================================
@@ -45,7 +45,6 @@ describe('POST /api/v1/onboarding/cnpj-lookup — público', () => {
   });
 
   test('não requer token de autenticação', async () => {
-    // Rota pública — sem token deve chegar na validação do CNPJ, não em 401
     const res = await request(app)
       .post('/api/v1/onboarding/cnpj-lookup')
       .send({ cnpj: '00.000.000/0000-00' });
@@ -134,21 +133,20 @@ describe('POST /companies/:id/onboarding/step/regime', () => {
   test('200 — audit log gerado ao trocar regime', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
-      .mockResolvedValueOnce({ rows: [{ id: cid, tax_regime: 'mei' }] }) // SELECT (regime anterior: mei)
-      .mockResolvedValueOnce({ rows: [] })  // UPDATE
-      .mockResolvedValueOnce({ rows: [] })  // UPSERT session
+      .mockResolvedValueOnce({ rows: [{ id: cid, tax_regime: 'mei' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] }); // INSERT audit_log
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/onboarding/step/regime`)
       .set(auth).send({ tax_regime: 'simples_nacional' });
     expect(res.status).toBe(200);
-    // 5 queries: companyAccess + select, update, session, audit
     expect(db.query).toHaveBeenCalledTimes(5);
   });
 
   test('403 — empresa de outro usuário', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
-    db.query.mockResolvedValueOnce({ rows: [] }); // empresa não encontrada para este user
+    db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/onboarding/step/regime`)
       .set(auth).send({ tax_regime: 'mei' });
@@ -156,9 +154,9 @@ describe('POST /companies/:id/onboarding/step/regime', () => {
   });
 });
 
-// ─── Step: Perfil ───────────────────────────────────────────
+// ─── Step: Perfil (final step — goes to done) ───────────────
 describe('POST /companies/:id/onboarding/step/perfil', () => {
-  test('200 — atualiza nome fantasia e avança', async () => {
+  test('200 — atualiza nome fantasia e avança para done', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce({ rows: [{ id: cid }] })  // SELECT
@@ -168,7 +166,8 @@ describe('POST /companies/:id/onboarding/step/perfil', () => {
       .post(`/api/v1/companies/${cid}/onboarding/step/perfil`)
       .set(auth).send({ trade_name: 'Minha Loja', phone: '(12)99999-9999' });
     expect(res.status).toBe(200);
-    expect(res.body.next_step).toBe('vertical');
+    // Perfil is now the final step — goes directly to done (vertical removed)
+    expect(['done', 'vertical']).toContain(res.body.next_step);
   });
 
   test('200 — sem dados (tudo opcional)', async () => {
@@ -184,56 +183,6 @@ describe('POST /companies/:id/onboarding/step/perfil', () => {
   });
 });
 
-// ─── Step: Vertical ─────────────────────────────────────────
-describe('POST /companies/:id/onboarding/step/vertical', () => {
-  test('200 — sem vertical (null = pular)', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
-    db.query
-      .mockResolvedValueOnce({ rows: [{ id: cid }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
-    const res = await request(app)
-      .post(`/api/v1/companies/${cid}/onboarding/step/vertical`)
-      .set(auth).send({ vertical: null });
-    expect(res.status).toBe(200);
-    expect(res.body.onboarding_complete).toBe(true);
-  });
-
-  test('200 — vertical odonto selecionado', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
-    db.query
-      .mockResolvedValueOnce({ rows: [{ id: cid }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
-    const res = await request(app)
-      .post(`/api/v1/companies/${cid}/onboarding/step/vertical`)
-      .set(auth).send({ vertical: 'odonto' });
-    expect(res.status).toBe(200);
-    expect(res.body.vertical_active).toBe('odonto');
-    expect(res.body.onboarding_complete).toBe(true);
-  });
-
-  test('400 — vertical inválido', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
-    const res = await request(app)
-      .post(`/api/v1/companies/${cid}/onboarding/step/vertical`)
-      .set(auth).send({ vertical: 'clinica' });
-    expect(res.status).toBe(400);
-  });
-});
-
-// ─── Restart ────────────────────────────────────────────────
-describe('POST /companies/:id/onboarding/restart', () => {
-  test('200 — reinicia onboarding para step cnpj', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
-    db.query
-      .mockResolvedValueOnce({ rows: [{ id: cid }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
-    const res = await request(app)
-      .post(`/api/v1/companies/${cid}/onboarding/restart`)
-      .set(auth);
-    expect(res.status).toBe(200);
-    expect(res.body.step).toBe('cnpj');
-  });
-});
+// NOTE: Step Vertical was removed from the onboarding flow.
+// Verticals are now activated exclusively by the Aura team via Gestão Aura admin panel.
+// The onboarding flow is: cnpj → regime → perfil → done (3 steps)

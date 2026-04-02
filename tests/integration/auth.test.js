@@ -1,5 +1,6 @@
 // ============================================================
 // QA — Testes de Integração: Auth (B-04)
+// Updated: plan field removed from register body (plan comes from access_code)
 // ============================================================
 const request = require('supertest');
 
@@ -31,11 +32,21 @@ describe('POST /api/v1/auth/register', () => {
     expect(res.body.error).toMatch(/E-mail inv/);
   });
 
-  test('400 — plano inválido', async () => {
+  test('400 — código de acesso inválido', async () => {
+    const mockClient = {
+      query: jest.fn()
+        .mockResolvedValueOnce(undefined) // BEGIN
+        .mockResolvedValueOnce({ rows: [] }) // check email (not exists)
+        .mockResolvedValueOnce({ rows: [] }) // access_codes lookup (not found)
+        .mockResolvedValueOnce(undefined), // ROLLBACK
+      release: jest.fn(),
+    };
+    db.connect.mockResolvedValueOnce(mockClient);
+
     const res = await request(app).post('/api/v1/auth/register')
-      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja', plan: 'enterprise' });
+      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja', access_code: 'INVALID-CODE' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Plano inv/);
+    expect(res.body.error).toMatch(/Código/);
   });
 
   test('201 — registro bem-sucedido retorna token sem password_hash', async () => {
@@ -43,8 +54,8 @@ describe('POST /api/v1/auth/register', () => {
       query: jest.fn()
         .mockResolvedValueOnce(undefined) // BEGIN
         .mockResolvedValueOnce({ rows: [] }) // check email
-        .mockResolvedValueOnce({ rows: [{ id: 'u1', name: 'João', email: 'a@b.com', role: 'client', created_at: new Date() }] }) // INSERT user
-        .mockResolvedValueOnce({ rows: [{ id: 'c1', legal_name: 'Loja', trade_name: 'Loja', plan: 'essencial', onboarding_step: 'cnpj' }] }) // INSERT company
+        .mockResolvedValueOnce({ rows: [{ id: 'u1', name: 'João', email: 'a@b.com', role: 'client', is_staff: false, created_at: new Date() }] }) // INSERT user
+        .mockResolvedValueOnce({ rows: [{ id: 'c1', legal_name: 'Loja', trade_name: 'Loja', plan: 'essencial', onboarding_step: 'cnpj', trial_ends_at: null }] }) // INSERT company
         .mockResolvedValueOnce({ rows: [] }) // INSERT member
         .mockResolvedValueOnce(undefined), // COMMIT
       release: jest.fn(),
