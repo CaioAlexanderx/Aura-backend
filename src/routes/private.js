@@ -70,6 +70,9 @@ router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'))
 
 // ── EXPANSAO ─────────────────────────────────────────────────
 
+// BE-REV-07: Agentes IA (chat contextual + activity log)
+router.use('/ai', requirePlan('expansao'), require('./aiChat'));
+
 // Verticais (require add-on activation via Gestao Aura)
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
