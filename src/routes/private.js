@@ -53,6 +53,9 @@ router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require
 // BE-REV-06: Generic appointments (reusable for any vertical)
 router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appointments'));
 
+// BE-REV-05: Canal Digital (mini-site + storefront config)
+router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
+
 // Multi-usuario + Funcionarios
 router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
 router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
