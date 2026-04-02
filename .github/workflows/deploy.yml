@@ -18,6 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
 
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
@@ -66,7 +67,7 @@ jobs:
             npm install -g @sentry/cli
             VERSION="aura-backend@$(git rev-parse --short HEAD)"
             sentry-cli releases new "$VERSION"
-            sentry-cli releases set-commits "$VERSION" --auto
+            sentry-cli releases set-commits "$VERSION" --auto --ignore-missing
             sentry-cli releases finalize "$VERSION"
             sentry-cli releases deploys "$VERSION" new -e production
             echo "Sentry release criada: $VERSION"
