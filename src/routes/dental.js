@@ -284,6 +284,10 @@ router.get('/patients/:pid/prescriptions', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar documentos' }); }
 });
 
+// ── D-02: Planos de Tratamento / Orcamentos ───────────────
+
+router.use('/treatment-plans', require('./dentalTreatmentPlans'));
+
 // ── WebSocket token prep (BE-25-10) ───────────────────────
 
 router.post('/appointments/:aid/signature-token', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
