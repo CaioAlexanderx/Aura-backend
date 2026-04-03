@@ -31,6 +31,7 @@ router.use('/admin', require('./admin'));
 // ── ROTAS PÚBLICAS ──────────────────────────────────────────
 router.use('/reviews', publicReviewsRouter);
 router.use('/dental',  require('./dentalSign'));
+router.use('/dental/book', require('./dentalBooking'));  // D-11: Public booking
 
 // Onboarding: rota pública de CNPJ lookup montada via router
 router.use('/onboarding', onboardingRouter);
