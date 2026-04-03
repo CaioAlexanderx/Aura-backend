@@ -43,6 +43,9 @@ router.use('/print', require('./print'));
 router.use('/sales/analytics', require('./salesAnalytics'));
 router.use('/reviews', require('./reviews').reviewsRouter);
 
+// VER-01b: Modules (accessible to all plans, admin-only write inside route)
+router.use('/modules', require('./modules'));
+
 // ── NEGOCIO+ ─────────────────────────────────────────────────
 
 // BE-REV-08: Plan enforcement — CRM, appointments, members, employees
