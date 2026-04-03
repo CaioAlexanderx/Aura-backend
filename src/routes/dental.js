@@ -1,6 +1,7 @@
 // ============================================================
-// AURA. — Rotas Módulo Odontologia (BE-25)
+// AURA. — Rotas Módulo Odontologia (BE-25 + S4)
 // Plano mínimo: Negócio (módulo Odontologia ativo)
+// Sub-routes: treatment-plans (D-02), images (D-07)
 // ============================================================
 
 const express = require('express');
@@ -285,8 +286,10 @@ router.get('/patients/:pid/prescriptions', requireAuth, async (req, res) => {
 });
 
 // ── D-02: Planos de Tratamento / Orcamentos ───────────────
-
 router.use('/treatment-plans', require('./dentalTreatmentPlans'));
+
+// ── D-07: Imagens Clinicas ────────────────────────────────
+router.use('/', require('./dentalImages'));
 
 // ── WebSocket token prep (BE-25-10) ───────────────────────
 
