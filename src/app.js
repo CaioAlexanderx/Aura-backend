@@ -11,7 +11,7 @@ const { validateRuntimeEnv } = require('./config/env');
 const env = validateRuntimeEnv();
 const app = express();
 
-// ── Sentry ──────────────────────────────────────────────────
+// ── Sentry ────────────────────────────────────────────────────────
 initSentry();
 app.use(Sentry.Handlers.requestHandler());
 
@@ -21,7 +21,6 @@ const allowedOrigins = env.ALLOWED_ORIGINS === '*'
   : env.ALLOWED_ORIGINS.split(',').map(o => o.trim());
 
 app.use(helmet({
-  // Content Security Policy
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
@@ -36,47 +35,32 @@ app.use(helmet({
       formAction: ["'self'"],
     },
   },
-  // Strict-Transport-Security: max-age=1 year, includeSubDomains
-  hsts: {
-    maxAge: 31536000,
-    includeSubDomains: true,
-    preload: true,
-  },
-  // X-Content-Type-Options: nosniff
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
   noSniff: true,
-  // X-Frame-Options: DENY
   frameguard: { action: 'deny' },
-  // Referrer-Policy: strict-origin-when-cross-origin
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-  // X-XSS-Protection: 0 (modern browsers use CSP instead)
   xssFilter: false,
-  // X-Permitted-Cross-Domain-Policies: none
   permittedCrossDomainPolicies: { permittedPolicies: 'none' },
-  // X-DNS-Prefetch-Control: off
   dnsPrefetchControl: { allow: false },
-  // X-Download-Options: noopen (IE specific)
   ieNoOpen: true,
 }));
 
-// Disable X-Powered-By (redundant with helmet, but explicit)
 app.disable('x-powered-by');
 
-// ── CORS ────────────────────────────────────────────────────
+// ── CORS ──────────────────────────────────────────────────────────
 app.use(cors({
-  origin: env.ALLOWED_ORIGINS === '*'
-    ? '*'
-    : allowedOrigins,
+  origin: env.ALLOWED_ORIGINS === '*' ? '*' : allowedOrigins,
   methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Idempotency-Key'],
   exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
-  maxAge:         600, // Preflight cache: 10 min
+  maxAge:         600,
 }));
 
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(sentryContext);
 
-// ── Rate limiting ────────────────────────────────────────────
+// ── Rate limiting ────────────────────────────────────────────────
 
 const authLimiter = rateLimit({
   windowMs:  15 * 60 * 1000,
@@ -99,7 +83,7 @@ const cnpjLimiter = rateLimit({
 const globalLimiter = rateLimit({
   windowMs:  60 * 1000,
   max:       300,
-  message:   { error: 'Muitas requisições. Tente novamente em 1 minuto.' },
+  message:   { error: 'Muitas requisi\u00e7\u00f5es. Tente novamente em 1 minuto.' },
   standardHeaders: true,
   legacyHeaders:   false,
   skip: (req) => env.NODE_ENV === 'test',
@@ -107,13 +91,14 @@ const globalLimiter = rateLimit({
 
 app.use('/api/v1', globalLimiter);
 
-// ── Health checks ────────────────────────────────────────────
+// ── Health checks ────────────────────────────────────────────────
 app.get('/health', function(req, res) {
   res.json({
     status:    'ok',
     version:   env.GIT_SHA || '1.0.0',
     env:       env.NODE_ENV,
     timestamp: new Date().toISOString(),
+    uptime:    Math.floor(process.uptime()) + 's',
   });
 });
 
@@ -126,6 +111,54 @@ app.get('/health/db', async function(req, res) {
     console.error('[health/db]', err.message);
     res.status(503).json({ status: 'error', database: 'unavailable' });
   }
+});
+
+// S0-BE-05: Full health check (DB + Redis + uptime)
+app.get('/health/full', async function(req, res) {
+  const checks = { database: 'unknown', redis: 'unknown' };
+  let healthy = true;
+
+  // DB check
+  try {
+    const db = require('./config/database');
+    const start = Date.now();
+    await db.query('SELECT 1');
+    checks.database = 'connected';
+    checks.db_latency_ms = Date.now() - start;
+  } catch (err) {
+    checks.database = 'unavailable';
+    checks.db_error = err.message;
+    healthy = false;
+  }
+
+  // Redis check
+  try {
+    const redis = require('./config/redis');
+    const client = redis.default || redis;
+    if (client && typeof client.ping === 'function') {
+      const start = Date.now();
+      await client.ping();
+      checks.redis = 'connected';
+      checks.redis_latency_ms = Date.now() - start;
+    } else {
+      checks.redis = 'not_configured';
+    }
+  } catch (err) {
+    checks.redis = 'unavailable';
+    checks.redis_error = err.message;
+    // Redis down is degraded, not fully unhealthy
+  }
+
+  const status = healthy ? 200 : 503;
+  res.status(status).json({
+    status: healthy ? 'ok' : 'degraded',
+    version: env.GIT_SHA || '1.0.0',
+    env: env.NODE_ENV,
+    uptime: Math.floor(process.uptime()) + 's',
+    memory_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+    checks,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 app.get('/health/sentry', function(req, res) {
@@ -150,14 +183,14 @@ app.get('/', function(req, res) {
   res.json({ name: 'Aura. API', version: env.GIT_SHA || '1.0.0', status: 'online' });
 });
 
-// ── Rotas da API ─────────────────────────────────────────────
+// ── Rotas da API ─────────────────────────────────────────────────
 const apiRouter = require('./routes/index');
 apiRouter.use('/auth/login',    authLimiter);
 apiRouter.use('/auth/register', authLimiter);
 apiRouter.use('/onboarding/cnpj-lookup', cnpjLimiter);
 app.use('/api/v1', apiRouter);
 
-// ── Error handlers ───────────────────────────────────────────
+// ── Error handlers ───────────────────────────────────────────────
 app.use(sentryError);
 app.use(Sentry.Handlers.errorHandler());
 
