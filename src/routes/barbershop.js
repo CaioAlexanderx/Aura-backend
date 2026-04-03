@@ -1,6 +1,6 @@
 // ============================================================
-// AURA. — Módulo Barbearia/Salão (BE-11)
-// Plano mínimo: Negócio (módulo Barbearia ativo)
+// AURA. — Módulo Barbearia/Salão (BE-11 + S5)
+// Sub-routes: cash (B-04), blocks (B-08)
 // ============================================================
 
 const express = require('express');
@@ -102,7 +102,8 @@ router.get('/agenda', requireAuth, async (req, res) => {
     if (professional_id) { params.push(professional_id); profFilter = `AND a.professional_id=$${params.length}`; }
     const { rows } = await db.query(
       `SELECT a.*, p.name AS professional_name, p.color AS professional_color,
-              COALESCE(c.name, a.customer_name) AS client_name, a.customer_phone
+              COALESCE(c.name, a.customer_name) AS client_name, a.customer_phone,
+              a.tip_amount, a.payment_method
        FROM barbershop_appointments a
        JOIN barbershop_professionals p ON p.id=a.professional_id
        LEFT JOIN customers c ON c.id=a.customer_id
@@ -157,15 +158,18 @@ router.post('/appointments', requireAuth, requireRole('client','analyst','admin'
   } finally { client.release(); }
 });
 
+// B-05: Updated to include tip_amount and payment_method
 router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { status, notes, cancel_reason } = req.body;
+  const { status, notes, cancel_reason, tip_amount, payment_method } = req.body;
   try {
     const tsMap = { em_atendimento:'started_at', concluido:'concluded_at', cancelado:'cancelled_at' };
     const tsField = status && tsMap[status] ? `, ${tsMap[status]}=NOW()` : '';
     const fields=[], values=[]; let idx=1;
-    if (status)        { fields.push(`status=$${idx++}::barber_appointment_status`); values.push(status); }
-    if (notes)         { fields.push(`notes=$${idx++}`);         values.push(notes); }
-    if (cancel_reason) { fields.push(`cancel_reason=$${idx++}`); values.push(cancel_reason); }
+    if (status)         { fields.push(`status=$${idx++}::barber_appointment_status`); values.push(status); }
+    if (notes)          { fields.push(`notes=$${idx++}`);          values.push(notes); }
+    if (cancel_reason)  { fields.push(`cancel_reason=$${idx++}`);  values.push(cancel_reason); }
+    if (tip_amount !== undefined)    { fields.push(`tip_amount=$${idx++}`);    values.push(tip_amount); }
+    if (payment_method) { fields.push(`payment_method=$${idx++}`); values.push(payment_method); }
     if (!fields.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
     fields.push(`updated_at=NOW()`);
     values.push(req.params.aid, req.params.id);
@@ -258,5 +262,11 @@ router.post('/cut-history', requireAuth, requireRole('client','analyst','admin')
     res.status(201).json({ entry: rows[0] });
   } catch (err) { res.status(500).json({ error: 'Erro ao registrar histórico' }); }
 });
+
+// ── B-04: Cash Register sub-routes ────────────────────────
+router.use('/cash', require('./barberCash'));
+
+// ── B-08: Schedule Blocks sub-routes ──────────────────────
+router.use('/blocks', require('./barberBlocks'));
 
 module.exports = router;
