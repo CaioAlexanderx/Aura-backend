@@ -1,9 +1,10 @@
 require('dotenv').config();
 
-const express    = require('express');
-const helmet     = require('helmet');
-const cors       = require('cors');
-const rateLimit  = require('express-rate-limit');
+const express      = require('express');
+const helmet       = require('helmet');
+const cors         = require('cors');
+const cookieParser = require('cookie-parser');
+const rateLimit    = require('express-rate-limit');
 const { Sentry, initSentry } = require('./config/sentry');
 const { sentryContext, sentryError } = require('./middleware/sentryContext');
 const { validateRuntimeEnv } = require('./config/env');
@@ -50,6 +51,7 @@ app.disable('x-powered-by');
 // ── CORS ──────────────────────────────────────────────────────────
 app.use(cors({
   origin: env.ALLOWED_ORIGINS === '*' ? '*' : allowedOrigins,
+  credentials: true,
   methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Idempotency-Key'],
   exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
@@ -58,6 +60,7 @@ app.use(cors({
 
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 app.use(sentryContext);
 
 // ── Rate limiting ────────────────────────────────────────────────
@@ -83,7 +86,7 @@ const cnpjLimiter = rateLimit({
 const globalLimiter = rateLimit({
   windowMs:  60 * 1000,
   max:       300,
-  message:   { error: 'Muitas requisi\u00e7\u00f5es. Tente novamente em 1 minuto.' },
+  message:   { error: 'Muitas requisições. Tente novamente em 1 minuto.' },
   standardHeaders: true,
   legacyHeaders:   false,
   skip: (req) => env.NODE_ENV === 'test',
@@ -113,12 +116,10 @@ app.get('/health/db', async function(req, res) {
   }
 });
 
-// S0-BE-05: Full health check (DB + Redis + uptime)
 app.get('/health/full', async function(req, res) {
   const checks = { database: 'unknown', redis: 'unknown' };
   let healthy = true;
 
-  // DB check
   try {
     const db = require('./config/database');
     const start = Date.now();
@@ -131,7 +132,6 @@ app.get('/health/full', async function(req, res) {
     healthy = false;
   }
 
-  // Redis check
   try {
     const redis = require('./config/redis');
     const client = redis.default || redis;
@@ -146,7 +146,6 @@ app.get('/health/full', async function(req, res) {
   } catch (err) {
     checks.redis = 'unavailable';
     checks.redis_error = err.message;
-    // Redis down is degraded, not fully unhealthy
   }
 
   const status = healthy ? 200 : 503;
