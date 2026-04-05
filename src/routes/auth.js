@@ -1,6 +1,7 @@
 // ============================================================
 // AURA. — Autenticação
 // S1: SEC-02 Refresh token + SEC-06 httpOnly cookie
+// S10: SEC-07 2FA TOTP sub-router
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -32,7 +33,6 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-// SEC-06: Set refresh token as httpOnly cookie
 function setRefreshCookie(res, refreshToken) {
   res.cookie('aura_refresh', refreshToken, {
     httpOnly: true,
@@ -63,13 +63,13 @@ router.post('/register', async (req, res) => {
   const { name, email, password, company_name, phone, cnpj, access_code } = req.body;
 
   if (!name || !email || !password || !company_name) {
-    return res.status(400).json({ error: 'Campos obrigat\u00f3rios: name, email, password, company_name' });
+    return res.status(400).json({ error: 'Campos obrigatórios: name, email, password, company_name' });
   }
   if (password.length < 8) {
     return res.status(400).json({ error: 'Senha deve ter pelo menos 8 caracteres' });
   }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: 'E-mail inv\u00e1lido' });
+    return res.status(400).json({ error: 'E-mail inválido' });
   }
 
   const client = await db.connect();
@@ -81,7 +81,7 @@ router.post('/register', async (req, res) => {
     );
     if (existing.length > 0) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'E-mail j\u00e1 cadastrado' });
+      return res.status(409).json({ error: 'E-mail já cadastrado' });
     }
 
     let plan = 'essencial', trialDays = 0, discountPct = 0, codeType = null, codeId = null, referrerId = null;
@@ -91,11 +91,11 @@ router.post('/register', async (req, res) => {
         `SELECT id, type, plan, discount_pct, trial_days, max_uses, uses, expires_at, is_active, referrer_id
          FROM access_codes WHERE code = $1`, [access_code.toUpperCase().trim()]
       );
-      if (!codes.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'C\u00f3digo de acesso inv\u00e1lido' }); }
+      if (!codes.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Código de acesso inválido' }); }
       const ac = codes[0];
-      if (!ac.is_active) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'C\u00f3digo desativado' }); }
-      if (ac.uses >= ac.max_uses) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'C\u00f3digo esgotado' }); }
-      if (ac.expires_at && new Date(ac.expires_at) < new Date()) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'C\u00f3digo expirado' }); }
+      if (!ac.is_active) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Código desativado' }); }
+      if (ac.uses >= ac.max_uses) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Código esgotado' }); }
+      if (ac.expires_at && new Date(ac.expires_at) < new Date()) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Código expirado' }); }
       plan = ac.plan || 'essencial'; trialDays = ac.trial_days || 0;
       discountPct = ac.discount_pct || 0; codeType = ac.type; codeId = ac.id; referrerId = ac.referrer_id;
       await client.query('UPDATE access_codes SET uses = uses + 1, updated_at = NOW() WHERE id = $1', [ac.id]);
@@ -140,7 +140,7 @@ router.post('/register', async (req, res) => {
     const { token: refreshToken } = signRefreshToken({ id: user.id });
 
     await storeRefreshToken(user.id, refreshToken, req);
-    setRefreshCookie(res, refreshToken); // SEC-06
+    setRefreshCookie(res, refreshToken);
 
     logAuditAction(user.id, company.id, 'register', `New account: ${email.toLowerCase().trim()}`);
 
@@ -164,11 +164,11 @@ router.post('/register', async (req, res) => {
 // ── POST /api/v1/auth/login ────────────────────────────
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'email e password s\u00e3o obrigat\u00f3rios' });
+  if (!email || !password) return res.status(400).json({ error: 'email e password são obrigatórios' });
 
   try {
     const { rows } = await db.query(
-      `SELECT u.id, u.name, u.email, u.password_hash, u.role, u.is_active, u.is_staff,
+      `SELECT u.id, u.name, u.email, u.password_hash, u.role, u.is_active, u.is_staff, u.totp_enabled,
               c.id AS company_id, c.legal_name AS company_name, c.plan, c.onboarding_step, c.trial_ends_at
        FROM users u
        LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = 'active' AND cm.is_active = true
@@ -178,7 +178,7 @@ router.post('/login', async (req, res) => {
       [email.toLowerCase().trim()]
     );
 
-    if (!rows.length) return res.status(401).json({ error: 'Credenciais inv\u00e1lidas' });
+    if (!rows.length) return res.status(401).json({ error: 'Credenciais inválidas' });
 
     const user = rows[0];
     if (!user.is_active) return res.status(403).json({ error: 'Conta desativada. Entre em contato com o suporte.' });
@@ -186,7 +186,16 @@ router.post('/login', async (req, res) => {
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
       logAuditAction(null, null, 'login_failed', `Failed login for ${email.toLowerCase().trim()}`, { ip: req.ip });
-      return res.status(401).json({ error: 'Credenciais inv\u00e1lidas' });
+      return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
+    // SEC-07: If 2FA enabled, require TOTP before issuing tokens
+    if (user.totp_enabled) {
+      return res.json({
+        requires_2fa: true,
+        user_id: user.id,
+        message: 'Autenticacao de dois fatores necessaria. Envie o codigo para /auth/2fa/validate',
+      });
     }
 
     const tokenPayload = { id: user.id, role: user.role, plan: user.plan || 'essencial', company: user.company_id, is_staff: user.is_staff || false };
@@ -194,7 +203,7 @@ router.post('/login', async (req, res) => {
     const { token: refreshToken } = signRefreshToken({ id: user.id });
 
     await storeRefreshToken(user.id, refreshToken, req);
-    setRefreshCookie(res, refreshToken); // SEC-06
+    setRefreshCookie(res, refreshToken);
 
     const trialActive = user.trial_ends_at && new Date(user.trial_ends_at) > new Date();
     logAuditAction(user.id, user.company_id, 'login', `Login: ${user.email}`);
@@ -216,15 +225,13 @@ router.post('/login', async (req, res) => {
 
 // ── POST /api/v1/auth/refresh (SEC-02 + SEC-06) ───────────
 router.post('/refresh', async (req, res) => {
-  // SEC-06: Accept from body OR httpOnly cookie
   const refreshTokenInput = req.body.refresh_token || req.cookies?.aura_refresh;
-  if (!refreshTokenInput) return res.status(400).json({ error: 'refresh_token \u00e9 obrigat\u00f3rio' });
+  if (!refreshTokenInput) return res.status(400).json({ error: 'refresh_token é obrigatório' });
 
   try {
     const decoded = jwt.verify(refreshTokenInput, JWT_SECRET);
-    if (decoded.type !== 'refresh') return res.status(400).json({ error: 'Token n\u00e3o \u00e9 refresh' });
+    if (decoded.type !== 'refresh') return res.status(400).json({ error: 'Token não é refresh' });
 
-    // Check revocation
     const tokenHash = hashToken(refreshTokenInput);
     try {
       const { rows } = await db.query(
@@ -236,7 +243,6 @@ router.post('/refresh', async (req, res) => {
       }
     } catch (_) {}
 
-    // Fetch fresh user data
     const { rows } = await db.query(
       `SELECT u.id, u.role, u.is_staff,
               c.id AS company_id, c.plan
@@ -247,7 +253,7 @@ router.post('/refresh', async (req, res) => {
        ORDER BY c.created_at ASC LIMIT 1`,
       [decoded.id]
     );
-    if (!rows.length) return res.status(401).json({ error: 'Usu\u00e1rio desativado' });
+    if (!rows.length) return res.status(401).json({ error: 'Usuário desativado' });
 
     const user = rows[0];
     const newAccessToken = signAccessToken({
@@ -261,7 +267,7 @@ router.post('/refresh', async (req, res) => {
       clearRefreshCookie(res);
       return res.status(401).json({ error: 'Refresh token expirado', code: 'REFRESH_EXPIRED' });
     }
-    return res.status(401).json({ error: 'Refresh token inv\u00e1lido' });
+    return res.status(401).json({ error: 'Refresh token inválido' });
   }
 });
 
@@ -279,7 +285,7 @@ router.post('/logout', async (req, res) => {
     logAuditAction(decoded.id, null, 'logout', 'User logged out');
   } catch (_) {}
 
-  clearRefreshCookie(res); // SEC-06
+  clearRefreshCookie(res);
   res.json({ message: 'Logout realizado com sucesso' });
 });
 
@@ -287,7 +293,7 @@ router.post('/logout', async (req, res) => {
 router.post('/me', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT u.id, u.name, u.email, u.role, u.is_staff,
+      `SELECT u.id, u.name, u.email, u.role, u.is_staff, u.totp_enabled,
               c.id AS company_id, c.legal_name, c.plan, c.onboarding_step, c.trial_ends_at
        FROM users u
        LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status='active' AND cm.is_active=true
@@ -296,11 +302,11 @@ router.post('/me', requireAuth, async (req, res) => {
        ORDER BY c.created_at ASC LIMIT 1`,
       [req.user.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Usu\u00e1rio n\u00e3o encontrado' });
+    if (!rows.length) return res.status(404).json({ error: 'Usuário não encontrado' });
     const u = rows[0];
     const trialActive = u.trial_ends_at && new Date(u.trial_ends_at) > new Date();
     res.json({
-      user: { id: u.id, name: u.name, email: u.email, role: u.role, is_staff: u.is_staff || false },
+      user: { id: u.id, name: u.name, email: u.email, role: u.role, is_staff: u.is_staff || false, totp_enabled: u.totp_enabled || false },
       company: u.company_id
         ? { id: u.company_id, name: u.legal_name, plan: u.plan, onboarding_step: u.onboarding_step, trial_active: trialActive, trial_ends_at: u.trial_ends_at }
         : null,
@@ -309,5 +315,8 @@ router.post('/me', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Erro ao buscar perfil' });
   }
 });
+
+// ── SEC-07: 2FA sub-routes ────────────────────────────────
+router.use('/', require('./twoFactor'));
 
 module.exports = router;
