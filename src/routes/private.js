@@ -75,6 +75,7 @@ router.use('/employees', requirePlan('negocio', 'expansao'), require('./commissi
 
 // Barbershop (vertical-specific, Negocio+ with add-on)
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
+router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3')); // B-17 to B-21
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
 
 // MKT-03: Marketplaces (Negocio+)
