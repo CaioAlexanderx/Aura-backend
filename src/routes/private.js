@@ -31,6 +31,9 @@ router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 router.use('/products/:pid/variants', require('./variants'));
 
+// MKT-02: NFC-e (Cupom Fiscal)
+router.use('/nfce', require('./nfce'));
+
 // Contabilidade
 router.use('/obligations', require('./fiscalObligations'));
 router.use('/guides', require('./guides'));
@@ -70,6 +73,9 @@ router.use('/employees', requirePlan('negocio', 'expansao'), require('./commissi
 // Barbershop (vertical-specific, Negocio+ with add-on)
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
+
+// MKT-03: Marketplaces (Negocio+)
+router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplace'));
 
 // eSocial
 router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
