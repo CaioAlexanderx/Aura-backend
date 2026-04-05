@@ -34,6 +34,9 @@ router.use('/products/:pid/variants', require('./variants'));
 // MKT-02: NFC-e (Cupom Fiscal)
 router.use('/nfce', require('./nfce'));
 
+// MKT-04: Document Storage (R2)
+router.use('/storage', require('./storage'));
+
 // Contabilidade
 router.use('/obligations', require('./fiscalObligations'));
 router.use('/guides', require('./guides'));
