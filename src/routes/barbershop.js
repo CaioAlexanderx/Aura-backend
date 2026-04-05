@@ -1,6 +1,6 @@
 // ============================================================
-// AURA. — Módulo Barbearia/Salão (BE-11 + S5)
-// Sub-routes: cash (B-04), blocks (B-08)
+// AURA. — Módulo Barbearia/Salão (BE-11 + S5 + S8)
+// Sub-routes: cash (B-04), blocks (B-08), loyalty (B-09/10/11)
 // ============================================================
 
 const express = require('express');
@@ -34,7 +34,7 @@ router.post('/professionals', requireAuth, requireRole('client','analyst','admin
 });
 
 router.patch('/professionals/:pid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const allowed = ['name','phone','color','commission_pct','salon_partner_id','is_active'];
+  const allowed = ['name','phone','color','commission_pct','salon_partner_id','is_active','product_commission_pct'];
   const fields=[], values=[]; let idx=1;
   for (const key of allowed) {
     if (req.body[key] !== undefined) { fields.push(`${key}=$${idx++}`); values.push(req.body[key]); }
@@ -54,23 +54,41 @@ router.patch('/professionals/:pid', requireAuth, requireRole('client','analyst',
 router.get('/services', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT * FROM barbershop_services WHERE company_id=$1 AND active=true ORDER BY name`, [req.params.id]
+      `SELECT s.*, (SELECT json_agg(json_build_object('product_id',sm.product_id,'quantity',sm.quantity_per_use,'unit',sm.unit))
+        FROM barber_service_materials sm WHERE sm.service_id=s.id) AS materials
+       FROM barbershop_services s WHERE s.company_id=$1 AND s.active=true ORDER BY s.name`, [req.params.id]
     );
     res.json({ total: rows.length, services: rows });
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar serviços' }); }
 });
 
 router.post('/services', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { name, description, duration_min=30, price, commission_pct } = req.body;
+  const { name, description, duration_min=30, price, commission_pct, materials } = req.body;
   if (!name || price === undefined) return res.status(400).json({ error: 'name e price são obrigatórios' });
+  const client = await db.connect();
   try {
-    const { rows } = await db.query(
+    await client.query('BEGIN');
+    const { rows } = await client.query(
       `INSERT INTO barbershop_services (company_id, name, description, duration_min, price, commission_pct)
        VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
       [req.params.id, name, description||null, duration_min, price, commission_pct||null]
     );
+    // B-15: Link materials
+    if (materials && materials.length) {
+      for (const m of materials) {
+        await client.query(
+          `INSERT INTO barber_service_materials (company_id, service_id, product_id, quantity_per_use, unit)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [req.params.id, rows[0].id, m.product_id, m.quantity_per_use || 1, m.unit || 'un']
+        );
+      }
+    }
+    await client.query('COMMIT');
     res.status(201).json({ service: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro ao criar serviço' }); }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: 'Erro ao criar serviço' });
+  } finally { client.release(); }
 });
 
 router.patch('/services/:sid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
@@ -150,6 +168,21 @@ router.post('/appointments', requireAuth, requireRole('client','analyst','admin'
         [appt.id, svc.service_id||null, svc.service_name||svc.name, svc.price, svc.commPct, svc.comm]
       );
     }
+    // B-15: Auto-debit service materials from stock
+    for (const svc of serviceRows) {
+      if (svc.service_id) {
+        const { rows: mats } = await client.query(
+          'SELECT product_id, quantity_per_use FROM barber_service_materials WHERE service_id=$1 AND auto_debit=true',
+          [svc.service_id]
+        );
+        for (const mat of mats) {
+          await client.query(
+            'UPDATE products SET stock_quantity=GREATEST(stock_quantity-$1,0) WHERE id=$2 AND company_id=$3',
+            [mat.quantity_per_use, mat.product_id, req.params.id]
+          );
+        }
+      }
+    }
     await client.query('COMMIT');
     res.status(201).json({ appointment: { ...appt, services: serviceRows } });
   } catch (err) {
@@ -158,7 +191,7 @@ router.post('/appointments', requireAuth, requireRole('client','analyst','admin'
   } finally { client.release(); }
 });
 
-// B-05: Updated to include tip_amount and payment_method
+// B-05: tip_amount + payment_method
 router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { status, notes, cancel_reason, tip_amount, payment_method } = req.body;
   try {
@@ -180,6 +213,67 @@ router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','
     if (!rows.length) return res.status(404).json({ error: 'Agendamento não encontrado' });
     res.json({ appointment: rows[0] });
   } catch (err) { res.status(500).json({ error: 'Erro ao atualizar agendamento' }); }
+});
+
+// B-13: Profissional da vez (next available for walk-in)
+router.get('/next-available', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT p.id, p.name, p.color,
+              (SELECT COUNT(*) FROM barbershop_appointments a
+               WHERE a.professional_id=p.id AND a.status='em_atendimento') AS current_appointments,
+              (SELECT COUNT(*) FROM barbershop_queue q
+               WHERE q.professional_id=p.id AND q.status IN ('waiting','called','in_service')) AS queue_count
+       FROM barbershop_professionals p
+       WHERE p.company_id=$1 AND p.is_active=true
+       ORDER BY queue_count ASC, current_appointments ASC, p.name
+       LIMIT 1`,
+      [req.params.id]
+    );
+    res.json({ professional: rows[0] || null });
+  } catch (err) { res.status(500).json({ error: 'Erro ao buscar proximo disponivel' }); }
+});
+
+// B-14: Recurring appointments
+router.get('/recurring', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT r.*, p.name AS professional_name, p.color AS professional_color
+       FROM barber_recurring_appointments r
+       JOIN barbershop_professionals p ON p.id=r.professional_id
+       WHERE r.company_id=$1 AND r.is_active=true
+       ORDER BY r.day_of_week, r.time_slot`, [req.params.id]
+    );
+    res.json({ total: rows.length, recurring: rows });
+  } catch (err) { res.status(500).json({ error: 'Erro ao buscar recorrencias' }); }
+});
+
+router.post('/recurring', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
+  const { customer_id, customer_name, professional_id, service_id, service_name, day_of_week, time_slot, duration_min, notes } = req.body;
+  if (!customer_name || !professional_id || day_of_week === undefined || !time_slot) {
+    return res.status(400).json({ error: 'customer_name, professional_id, day_of_week e time_slot obrigatorios' });
+  }
+  try {
+    const { rows } = await db.query(
+      `INSERT INTO barber_recurring_appointments
+         (company_id, customer_id, customer_name, professional_id, service_id, service_name, day_of_week, time_slot, duration_min, notes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [req.params.id, customer_id||null, customer_name, professional_id, service_id||null,
+       service_name||null, day_of_week, time_slot, duration_min||30, notes||null]
+    );
+    res.status(201).json({ recurring: rows[0] });
+  } catch (err) { res.status(500).json({ error: 'Erro ao criar recorrencia' }); }
+});
+
+router.delete('/recurring/:recId', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      'UPDATE barber_recurring_appointments SET is_active=false WHERE id=$1 AND company_id=$2 RETURNING id',
+      [req.params.recId, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Recorrencia nao encontrada' });
+    res.json({ message: 'Recorrencia desativada' });
+  } catch (err) { res.status(500).json({ error: 'Erro ao desativar recorrencia' }); }
 });
 
 router.get('/queue', requireAuth, async (req, res) => {
@@ -263,10 +357,9 @@ router.post('/cut-history', requireAuth, requireRole('client','analyst','admin')
   } catch (err) { res.status(500).json({ error: 'Erro ao registrar histórico' }); }
 });
 
-// ── B-04: Cash Register sub-routes ────────────────────────
-router.use('/cash', require('./barberCash'));
-
-// ── B-08: Schedule Blocks sub-routes ──────────────────────
-router.use('/blocks', require('./barberBlocks'));
+// ── Sub-routes ────────────────────────────────────────────
+router.use('/cash', require('./barberCash'));         // B-04
+router.use('/blocks', require('./barberBlocks'));     // B-08
+router.use('/loyalty', require('./barberLoyalty'));   // B-09/10/11
 
 module.exports = router;
