@@ -6,11 +6,11 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "npx jest --forceExit --detectOpenHandles --runInBand",
-    "test:watch": "npx jest --watch --runInBand",
-    "test:coverage": "npx jest --coverage --forceExit --runInBand",
-    "test:uat": "npx jest --forceExit --detectOpenHandles --testPathPattern=__tests__/uat",
-    "test:integration": "npx jest --forceExit --detectOpenHandles --testPathPattern=tests/integration"
+    "test": "node node_modules/jest/bin/jest.js --forceExit --detectOpenHandles --runInBand",
+    "test:watch": "node node_modules/jest/bin/jest.js --watch --runInBand",
+    "test:coverage": "node node_modules/jest/bin/jest.js --coverage --forceExit --runInBand",
+    "test:uat": "node node_modules/jest/bin/jest.js --forceExit --detectOpenHandles --testPathPattern=__tests__/uat",
+    "test:integration": "node node_modules/jest/bin/jest.js --forceExit --detectOpenHandles --testPathPattern=tests/integration"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -35,17 +35,5 @@
     "jest": "^29.7.0",
     "nodemon": "^3.1.0",
     "supertest": "^7.0.0"
-  },
-  "jest": {
-    "testEnvironment": "node",
-    "testMatch": [
-      "**/tests/**/*.test.js",
-      "**/__tests__/**/*.test.js"
-    ],
-    "setupFilesAfterSetup": [],
-    "coverageDirectory": "coverage",
-    "collectCoverageFrom": [
-      "src/**/*.js"
-    ]
   }
 }
