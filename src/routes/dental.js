@@ -1,6 +1,7 @@
 // ============================================================
-// AURA. — Rotas Módulo Odontologia (BE-25 + S4 + S7)
+// AURA. — Rotas Módulo Odontologia (BE-25 + S4 + S7 + S11)
 // Sub-routes: treatment-plans (D-02), images (D-07), lab (D-12)
+//             insurance (D-16/17), advanced (D-18/19/20/21)
 // ============================================================
 
 const express = require('express');
@@ -284,14 +285,22 @@ router.get('/patients/:pid/prescriptions', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar documentos' }); }
 });
 
-// ── D-02: Planos de Tratamento / Orcamentos ───────────────
+// ── Sub-routes ────────────────────────────────────────────
+
+// D-02: Planos de Tratamento / Orcamentos
 router.use('/treatment-plans', require('./dentalTreatmentPlans'));
 
-// ── D-07: Imagens Clinicas ────────────────────────────────
+// D-07: Imagens Clinicas
 router.use('/', require('./dentalImages'));
 
-// ── D-12: Pedidos de Laboratorio ──────────────────────────
+// D-12: Pedidos de Laboratorio
 router.use('/', require('./dentalLab'));
+
+// D-16/D-17: Convênios + Guias TISS
+router.use('/insurance', require('./dentalInsurance'));
+
+// D-18/D-19/D-20/D-21: Specialty forms, Perio, Waitlist, Checkin
+router.use('/advanced', require('./dentalAdvanced'));
 
 // ── WebSocket token prep (BE-25-10) ───────────────────────
 
