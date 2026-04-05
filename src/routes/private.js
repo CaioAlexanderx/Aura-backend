@@ -20,6 +20,9 @@ router.use('/prolabore', require('./prolabore'));
 router.use('/dre', require('./dre'));
 router.use('/financial/history', require('./financialHistory'));
 
+// MKT-01: Bank Reconciliation
+router.use('/bank', require('./bankReconciliation'));
+
 // PDV + Estoque
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
