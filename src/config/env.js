@@ -42,7 +42,7 @@ function validateRuntimeEnv() {
     NODE_ENV:        nodeEnv,
     PORT:            getOptionalEnv('PORT', '3000'),
     JWT_SECRET:      nodeEnv === 'test'
-                       ? getOptionalEnv('JWT_SECRET', 'ci-test-secret-aura-2026')
+                       ? getOptionalEnv('JWT_SECRET', 'aura-test-secret-2026')
                        : requireEnv('JWT_SECRET'),
     SUPABASE_DB_URL: nodeEnv === 'test'
                        ? getOptionalEnv('SUPABASE_DB_URL', 'postgresql://aura_test:aura_test@localhost:5432/aura_test')
