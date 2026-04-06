@@ -4,6 +4,11 @@
 // Individual test files can override with their own jest.mock() calls
 // ============================================================
 
+// Force JWT_SECRET to match what test files hardcode in their token creation
+// This ensures requireAuth middleware and test tokens use the same secret
+process.env.JWT_SECRET = 'aura-test-secret-2026';
+process.env.NODE_ENV = 'test';
+
 jest.mock('../src/config/database', () => ({
   query: jest.fn(),
   connect: jest.fn(() => ({
