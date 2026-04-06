@@ -1,6 +1,7 @@
 // ============================================================
 // AURA. — Middleware de autenticação e autorização
 // SEC-02: Refresh token support
+// FIX: role_label (real schema) instead of role
 // ============================================================
 const jwt  = require('jsonwebtoken');
 const db   = require('../config/database');
@@ -17,14 +18,14 @@ try { redis = require('../config/redis').default || require('../config/redis'); 
 function requireAuth(req, res, next) {
   const header = req.headers['authorization'];
   if (!header || !header.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Token n\u00e3o fornecido' });
+    return res.status(401).json({ error: 'Token não fornecido' });
   }
   const token = header.split(' ')[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     // SEC-02: Reject refresh tokens used as access tokens
     if (decoded.type === 'refresh') {
-      return res.status(401).json({ error: 'Use o access token, n\u00e3o o refresh token' });
+      return res.status(401).json({ error: 'Use o access token, não o refresh token' });
     }
     req.user = decoded;
     next();
@@ -32,15 +33,16 @@ function requireAuth(req, res, next) {
     if (err.name === 'TokenExpiredError') {
       return res.status(401).json({ error: 'Token expirado', code: 'TOKEN_EXPIRED' });
     }
-    return res.status(401).json({ error: 'Token inv\u00e1lido' });
+    return res.status(401).json({ error: 'Token inválido' });
   }
 }
 
 // ── requireCompanyAccess ──────────────────────────────────
+// FIX: schema uses role_label (not role) in company_members
 function requireCompanyAccess(opts = {}) {
   return async (req, res, next) => {
     if (!req.user) {
-      return res.status(401).json({ error: 'N\u00e3o autenticado' });
+      return res.status(401).json({ error: 'Não autenticado' });
     }
     const companyId = req.params.id;
     if (!companyId) {
@@ -54,7 +56,7 @@ function requireCompanyAccess(opts = {}) {
       const { rows } = await db.query(
         `SELECT 'owner' AS role FROM companies WHERE id = $1 AND owner_id = $2
          UNION
-         SELECT cm.role FROM company_members cm
+         SELECT cm.role_label AS role FROM company_members cm
          WHERE cm.company_id = $1 AND cm.user_id = $2 AND cm.status = 'active' AND cm.is_active = true
          LIMIT 1`,
         [companyId, req.user.id]
@@ -64,7 +66,7 @@ function requireCompanyAccess(opts = {}) {
       }
       const role = rows[0].role;
       if (opts.roles && opts.roles.length > 0 && !opts.roles.includes(role)) {
-        return res.status(403).json({ error: 'Permiss\u00e3o insuficiente', required_roles: opts.roles, your_role: role });
+        return res.status(403).json({ error: 'Permissão insuficiente', required_roles: opts.roles, your_role: role });
       }
       req.companyRole = role;
       next();
@@ -78,9 +80,9 @@ function requireCompanyAccess(opts = {}) {
 // ── requireRole ───────────────────────────────────────────
 function requireRole(...roles) {
   return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: 'N\u00e3o autenticado' });
+    if (!req.user) return res.status(401).json({ error: 'Não autenticado' });
     if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ error: 'Permiss\u00e3o insuficiente' });
+      return res.status(403).json({ error: 'Permissão insuficiente' });
     }
     next();
   };
@@ -89,9 +91,9 @@ function requireRole(...roles) {
 // ── requirePlan ───────────────────────────────────────────
 function requirePlan(...plans) {
   return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: 'N\u00e3o autenticado' });
+    if (!req.user) return res.status(401).json({ error: 'Não autenticado' });
     if (!plans.includes(req.user.plan)) {
-      return res.status(403).json({ error: 'Plano atual n\u00e3o inclui esta funcionalidade', required_plans: plans, current_plan: req.user.plan });
+      return res.status(403).json({ error: 'Plano atual não inclui esta funcionalidade', required_plans: plans, current_plan: req.user.plan });
     }
     next();
   };
@@ -99,10 +101,10 @@ function requirePlan(...plans) {
 
 function requireFeature(feature) {
   return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ error: 'N\u00e3o autenticado' });
+    if (!req.user) return res.status(401).json({ error: 'Não autenticado' });
     const features = req.user.features || [];
     if (!features.includes(feature)) {
-      return res.status(403).json({ error: 'Funcionalidade n\u00e3o dispon\u00edvel', required_feature: feature });
+      return res.status(403).json({ error: 'Funcionalidade não disponível', required_feature: feature });
     }
     next();
   };
