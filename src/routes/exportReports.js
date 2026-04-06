@@ -250,7 +250,7 @@ router.get('/payroll', guard, async (req, res) => {
 
   const { rows } = await db.query(
     `SELECT
-       e.name AS employee_name, e.role,
+       e.name AS employee_name, e.role_title AS role,
        pr.gross_salary, pr.inss_employee, pr.irrf, pr.fgts, pr.net_salary,
        pr.other_deductions, pr.other_additions
      FROM payroll_records pr

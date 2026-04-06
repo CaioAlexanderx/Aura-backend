@@ -1,5 +1,6 @@
 // ============================================================
 // AURA. — Serviço Multi-usuário RBAC (BE-09)
+// FIX: full_name (real schema) instead of name
 // ============================================================
 
 const db = require('../config/database');
@@ -24,13 +25,13 @@ async function listMembers(companyId) {
     `SELECT
        m.id, m.role_label, m.permissions, m.status, m.is_active,
        m.invited_at, m.accepted_at, m.invite_email, m.template_id,
-       u.id AS user_id, u.name AS user_name, u.email AS user_email,
+       u.id AS user_id, u.full_name AS user_name, u.email AS user_email,
        rt.name AS template_name
      FROM company_members m
      LEFT JOIN users u ON u.id=m.user_id
      LEFT JOIN role_templates rt ON rt.id=m.template_id
      WHERE m.company_id=$1
-     ORDER BY m.status, u.name`,
+     ORDER BY m.status, u.full_name`,
     [companyId]
   );
   return rows;

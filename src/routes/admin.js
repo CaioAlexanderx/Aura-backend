@@ -263,10 +263,10 @@ router.get('/team', ...adminOnly, asyncHandler(async (req, res) => {
        t.notes,
        t.created_at,
        u.email,
-       u.name
+       u.full_name AS name
      FROM aura_team_members t
      JOIN users u ON u.id = t.user_id
-     ORDER BY t.profile, u.name`
+     ORDER BY t.profile, u.full_name`
   );
 
   res.json({ total: rows.length, team: rows });

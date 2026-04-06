@@ -77,11 +77,11 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     let customerId = company.asaas_customer_id;
     if (!customerId) {
       const customer = await asaas('POST', '/customers', {
-        name: user.name,
+        name: user.full_name,
         email: user.email,
         phone: user.phone || undefined,
         cpfCnpj: company.cnpj?.replace(/\D/g, '') || undefined,
-        company: company.name,
+        company: company.legal_name || company.trade_name,
         externalReference: company.id,
       });
       customerId = customer.id;
