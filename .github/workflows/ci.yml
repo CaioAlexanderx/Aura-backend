@@ -42,7 +42,7 @@ jobs:
       PORT: 3000
       SUPABASE_DB_URL: postgresql://aura_test:aura_test@localhost:5432/aura_test
       REDIS_URL: redis://localhost:6379
-      JWT_SECRET: ci-test-secret-aura-2026
+      JWT_SECRET: aura-test-secret-2026
       JWT_EXPIRES_IN: 1h
       SENTRY_DSN: ""
 
