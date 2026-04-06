@@ -28,6 +28,9 @@ router.use('/companies/:id', privateCompaniesRouter);
 // ── ADMIN ───────────────────────────────────────────────────
 router.use('/admin', require('./admin'));
 
+// ── WEBHOOKS (públicos, validação HMAC interna) ─────────────
+router.use('/webhooks/asaas', require('./webhookAsaas'));
+
 // ── ROTAS PÚBLICAS ──────────────────────────────────────────
 router.use('/reviews', publicReviewsRouter);
 router.use('/dental',  require('./dentalSign'));
