@@ -55,6 +55,9 @@ router.use('/reviews', require('./reviews').reviewsRouter);
 // VER-01b: Modules (accessible to all plans, admin-only write inside route)
 router.use('/modules', require('./modules'));
 
+// F6: Billing (Asaas — all plans)
+router.use('/billing', require('./billing'));
+
 // ── NEGOCIO+ ─────────────────────────────────────────────────
 
 // BE-REV-08: Plan enforcement — CRM, appointments, members, employees
