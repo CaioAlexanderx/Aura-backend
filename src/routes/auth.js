@@ -105,9 +105,9 @@ router.post('/register', async (req, res) => {
     const password_hash = await bcrypt.hash(password, 12);
 
     const { rows: [user] } = await client.query(
-      `INSERT INTO users (name, email, password_hash, role, is_staff, phone)
+      `INSERT INTO users (full_name, email, password_hash, role, is_staff, phone)
        VALUES ($1, $2, $3, 'client', $4, $5)
-       RETURNING id, name, email, role, is_staff, created_at`,
+       RETURNING id, full_name AS name, email, role, is_staff, created_at`,
       [name.trim(), email.toLowerCase().trim(), password_hash, isStaff, phone || null]
     );
 
@@ -121,7 +121,7 @@ router.post('/register', async (req, res) => {
     );
 
     await client.query(
-      `INSERT INTO company_members (company_id, user_id, role, status, is_active) VALUES ($1, $2, 'owner', 'active', true)`,
+      `INSERT INTO company_members (company_id, user_id, role_label, status, is_active) VALUES ($1, $2, 'owner', 'active', true)`,
       [company.id, user.id]
     );
 
@@ -168,7 +168,7 @@ router.post('/login', async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      `SELECT u.id, u.name, u.email, u.password_hash, u.role, u.is_active, u.is_staff, u.totp_enabled,
+      `SELECT u.id, u.full_name AS name, u.email, u.password_hash, u.role, u.is_active, u.is_staff, u.totp_enabled,
               c.id AS company_id, c.legal_name AS company_name, c.plan, c.onboarding_step, c.trial_ends_at
        FROM users u
        LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = 'active' AND cm.is_active = true
@@ -293,7 +293,7 @@ router.post('/logout', async (req, res) => {
 router.post('/me', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT u.id, u.name, u.email, u.role, u.is_staff, u.totp_enabled,
+      `SELECT u.id, u.full_name AS name, u.email, u.role, u.is_staff, u.totp_enabled,
               c.id AS company_id, c.legal_name, c.plan, c.onboarding_step, c.trial_ends_at
        FROM users u
        LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status='active' AND cm.is_active=true
