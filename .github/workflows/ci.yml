@@ -57,7 +57,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Syntax check
         run: node --check src/index.js
@@ -72,8 +72,8 @@ jobs:
             echo "   OK: $f"
           done
 
-      - name: Run tests with coverage
-        run: npm run test:coverage
+      - name: Run tests
+        run: node node_modules/jest/bin/jest.js --forceExit --detectOpenHandles --runInBand --coverage
 
       - name: Upload coverage
         if: success() && hashFiles('coverage/**') != ''
