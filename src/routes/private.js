@@ -24,9 +24,10 @@ router.use('/financial/history', require('./financialHistory'));
 // MKT-01: Bank Reconciliation
 router.use('/bank', require('./bankReconciliation'));
 
-// PDV + Estoque
+// PDV + Estoque — S4: CRUD simples ANTES das rotas ranking
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
+router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
 router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
