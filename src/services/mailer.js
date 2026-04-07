@@ -1,63 +1,93 @@
 // ============================================================
 // AURA. — Email Service
-// Envia emails via SMTP a partir de contato@getaura.com.br
-// FIX: connection/greeting timeouts + TLS config for cloud hosts
+// Resend: HTTP API (porta 443, nunca bloqueada)
+// Fallback: SMTP via nodemailer | Dev: console.log
 // ============================================================
-const nodemailer = require('nodemailer');
 
-let transporter = null;
+const FROM_DEFAULT = 'Aura. <onboarding@resend.dev>';
+const FROM = process.env.SMTP_FROM || FROM_DEFAULT;
 
-function getTransporter() {
-  if (transporter) return transporter;
+// ── Resend HTTP API (preferred — no SMTP ports needed) ──────
+async function sendViaResend(opts) {
+  const key = process.env.RESEND_API_KEY;
+  if (!key) return null;
 
-  if (process.env.RESEND_API_KEY) {
-    transporter = nodemailer.createTransport({
-      host: 'smtp.resend.com',
-      port: 465,
-      secure: true,
-      auth: { user: 'resend', pass: process.env.RESEND_API_KEY },
-      connectionTimeout: 5000,
-      greetingTimeout: 5000,
-      socketTimeout: 10000,
-    });
-    return transporter;
-  }
-
-  if (process.env.SMTP_HOST) {
-    const port = parseInt(process.env.SMTP_PORT || '587', 10);
-    const secure = port === 465 || process.env.SMTP_SECURE === 'true';
-    transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port,
-      secure,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      connectionTimeout: 5000,
-      greetingTimeout: 5000,
-      socketTimeout: 10000,
-      tls: { rejectUnauthorized: true },
-      // Port 587 uses STARTTLS automatically when secure=false
-    });
-    console.log(`[mailer] SMTP configured: ${process.env.SMTP_HOST}:${port} secure=${secure}`);
-    return transporter;
-  }
-
-  // Dev fallback: log to console
-  transporter = {
-    sendMail: async (opts) => {
-      console.log('\n\ud83d\udce7 [DEV] Email would be sent:');
-      console.log(`   To: ${opts.to}`);
-      console.log(`   Subject: ${opts.subject}`);
-      console.log(`   Link/Code: ${opts.text?.match(/(https?:\/\/\S+|\d{4,6})/)?.[0] || 'N/A'}`);
-      return { messageId: 'dev-' + Date.now() };
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${key}`,
+      'Content-Type': 'application/json',
     },
-  };
-  return transporter;
+    body: JSON.stringify({
+      from: FROM,
+      to: Array.isArray(opts.to) ? opts.to : [opts.to],
+      subject: opts.subject,
+      html: opts.html,
+      text: opts.text,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(`Resend API ${res.status}: ${err.message || JSON.stringify(err)}`);
+  }
+
+  const data = await res.json();
+  console.log(`[mailer] Resend OK: ${data.id} → ${opts.to}`);
+  return data;
 }
 
-const FROM = process.env.SMTP_FROM || 'Aura. <contato@getaura.com.br>';
+// ── SMTP fallback (nodemailer) ──────────────────────────────
+let _smtpTransporter = null;
+function getSmtpTransporter() {
+  if (_smtpTransporter) return _smtpTransporter;
+  if (!process.env.SMTP_HOST) return null;
+
+  const nodemailer = require('nodemailer');
+  const port = parseInt(process.env.SMTP_PORT || '587', 10);
+  const secure = port === 465 || process.env.SMTP_SECURE === 'true';
+  _smtpTransporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port,
+    secure,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    connectionTimeout: 5000,
+    greetingTimeout: 5000,
+    socketTimeout: 10000,
+  });
+  console.log(`[mailer] SMTP configured: ${process.env.SMTP_HOST}:${port}`);
+  return _smtpTransporter;
+}
+
+// ── Dev fallback ────────────────────────────────────────────
+async function sendViaDev(opts) {
+  console.log('\n📧 [DEV] Email would be sent:');
+  console.log(`   To: ${opts.to}`);
+  console.log(`   Subject: ${opts.subject}`);
+  console.log(`   Link/Code: ${opts.text?.match(/(https?:\/\/\S+|\d{4,6})/)?.[0] || 'N/A'}`);
+  return { id: 'dev-' + Date.now() };
+}
+
+// ── Unified send ────────────────────────────────────────────
+async function sendMail(opts) {
+  // 1. Try Resend HTTP API first (always works on cloud hosts)
+  if (process.env.RESEND_API_KEY) {
+    return sendViaResend(opts);
+  }
+
+  // 2. Try SMTP
+  const smtp = getSmtpTransporter();
+  if (smtp) {
+    return smtp.sendMail({ from: FROM, ...opts });
+  }
+
+  // 3. Dev fallback
+  return sendViaDev(opts);
+}
+
+// ── Email templates ─────────────────────────────────────────
 
 async function sendVerificationEmail(to, code, userName) {
-  const t = getTransporter();
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #0a0b14; color: #e2e8f0; border-radius: 16px;">
       <div style="text-align: center; margin-bottom: 24px;">
@@ -75,8 +105,7 @@ async function sendVerificationEmail(to, code, userName) {
     </div>
   `;
 
-  return t.sendMail({
-    from: FROM,
+  return sendMail({
     to,
     subject: `${code} — Seu código de verificação Aura.`,
     text: `Seu código de verificação Aura é: ${code}. Válido por 10 minutos.`,
@@ -85,7 +114,6 @@ async function sendVerificationEmail(to, code, userName) {
 }
 
 async function sendPasswordResetEmail(to, resetUrl, userName) {
-  const t = getTransporter();
   const firstName = userName ? userName.split(' ')[0] : '';
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #0a0b14; color: #e2e8f0; border-radius: 16px;">
@@ -106,8 +134,7 @@ async function sendPasswordResetEmail(to, resetUrl, userName) {
     </div>
   `;
 
-  return t.sendMail({
-    from: FROM,
+  return sendMail({
     to,
     subject: 'Redefina sua senha — Aura.',
     text: `Olá${firstName ? ' ' + firstName : ''}! Clique neste link para redefinir sua senha: ${resetUrl} (válido por 30 minutos).`,
