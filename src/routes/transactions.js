@@ -77,7 +77,7 @@ router.get('/', async (req, res) => {
 // POST / — create single transaction
 router.post('/', async (req, res) => {
   const cid = req.params.id;
-  const { type, amount, description, category, status, notes, due_date } = req.body;
+  const { type, amount, description, category, notes, due_date } = req.body;
 
   if (!type || !['income', 'expense'].includes(type)) {
     return res.status(400).json({ error: 'type deve ser income ou expense' });
@@ -90,9 +90,10 @@ router.post('/', async (req, res) => {
   }
 
   try {
+    // Insert without status — let DB default handle it
     const result = await db.query(
-      `INSERT INTO transactions (company_id, type, amount, description, category, status, notes, due_date, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id, type, amount, description, category, status, created_at`,
       [
         cid,
@@ -100,7 +101,6 @@ router.post('/', async (req, res) => {
         parseFloat(amount),
         String(description).trim(),
         category || 'Outros',
-        status || 'paid',
         notes || null,
         due_date || new Date().toISOString().slice(0, 10),
         req.user?.id || null,
