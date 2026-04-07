@@ -21,9 +21,6 @@ router.use('/prolabore', require('./prolabore'));
 router.use('/dre', require('./dre'));
 router.use('/financial/history', require('./financialHistory'));
 
-// Withdrawal summary
-router.use('/withdrawal', require('./withdrawal'));
-
 // MKT-01: Bank Reconciliation
 router.use('/bank', require('./bankReconciliation'));
 
@@ -64,39 +61,23 @@ router.use('/billing', require('./billing'));
 
 // ── NEGOCIO+ ─────────────────────────────────────────────────
 
-// BE-REV-08: Plan enforcement — CRM, appointments, members, employees
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
-
-// BE-REV-06: Generic appointments (reusable for any vertical)
 router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appointments'));
-
-// BE-REV-05: Canal Digital (mini-site + storefront config)
 router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
-
-// Multi-usuario + Funcionarios
 router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
 router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
-
-// Barbershop (vertical-specific, Negocio+ with add-on)
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3'));
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
-
-// MKT-03: Marketplaces (Negocio+)
 router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplace'));
-
-// eSocial
 router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
 
 // ── EXPANSAO ─────────────────────────────────────────────────
 
-// BE-REV-07: Agentes IA (chat contextual + activity log)
 router.use('/ai', requirePlan('expansao'), require('./aiChat'));
-
-// Verticais (require add-on activation via Gestao Aura)
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
