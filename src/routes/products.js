@@ -33,8 +33,8 @@ router.get('/', async (req, res) => {
     );
 
     const dataRes = await db.query(
-      `SELECT id, name, sku, barcode, category, price, cost_price,
-              stock_qty, min_stock, unit, brand, notes, abc_class, created_at
+      `SELECT id, name, sku, barcode, category, description, price, cost_price,
+              stock_qty, stock_min, stock_max, unit, is_active, created_at
        FROM products ${where}
        ORDER BY name ASC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -47,14 +47,14 @@ router.get('/', async (req, res) => {
       sku: r.sku || '',
       barcode: r.barcode || '',
       category: r.category || 'Produtos',
+      description: r.description || '',
       price: parseFloat(r.price) || 0,
       cost_price: parseFloat(r.cost_price) || 0,
       stock_qty: parseInt(r.stock_qty) || 0,
-      min_stock: parseInt(r.min_stock) || 0,
+      min_stock: parseInt(r.stock_min) || 0,
+      stock_max: parseInt(r.stock_max) || 0,
       unit: r.unit || 'un',
-      brand: r.brand || '',
-      notes: r.notes || '',
-      abc_class: r.abc_class || 'C',
+      is_active: r.is_active !== false,
       created_at: r.created_at,
     }));
 
@@ -73,7 +73,7 @@ router.get('/', async (req, res) => {
 // POST / -- create product
 router.post('/', async (req, res) => {
   const cid = req.params.id;
-  const { name, sku, barcode, category, price, cost_price, stock_qty, min_stock, unit, brand, notes } = req.body;
+  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit } = req.body;
 
   if (!name || !String(name).trim()) {
     return res.status(400).json({ error: 'name e obrigatorio' });
@@ -81,7 +81,7 @@ router.post('/', async (req, res) => {
 
   try {
     const result = await db.query(
-      `INSERT INTO products (company_id, name, sku, barcode, category, price, cost_price, stock_qty, min_stock, unit, brand, notes)
+      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
       [
@@ -90,13 +90,13 @@ router.post('/', async (req, res) => {
         sku || null,
         barcode || null,
         category || 'Produtos',
+        description || null,
         parseFloat(price) || 0,
         parseFloat(cost_price) || 0,
         parseInt(stock_qty) || 0,
         parseInt(min_stock) || 0,
+        parseInt(stock_max) || 0,
         unit || 'un',
-        brand || null,
-        notes || null,
       ]
     );
 
@@ -110,16 +110,22 @@ router.post('/', async (req, res) => {
 // PATCH /:pid -- update product
 router.patch('/:pid', async (req, res) => {
   const { id: cid, pid } = req.params;
-  const fields = ['name', 'sku', 'barcode', 'category', 'price', 'cost_price', 'stock_qty', 'min_stock', 'unit', 'brand', 'notes'];
+  // Map frontend field names to DB column names
+  const fieldMap = {
+    name: 'name', sku: 'sku', barcode: 'barcode', category: 'category',
+    description: 'description', price: 'price', cost_price: 'cost_price',
+    stock_qty: 'stock_qty', min_stock: 'stock_min', stock_max: 'stock_max',
+    unit: 'unit', is_active: 'is_active',
+  };
+  const numFields = ['price', 'cost_price', 'stock_qty', 'stock_min', 'stock_max'];
   const updates = [];
   const values = [];
   let idx = 1;
 
-  for (const f of fields) {
-    if (req.body[f] !== undefined) {
-      updates.push(`${f} = $${idx}`);
-      const numFields = ['price', 'cost_price', 'stock_qty', 'min_stock'];
-      values.push(numFields.includes(f) ? parseFloat(req.body[f]) : req.body[f]);
+  for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
+    if (req.body[bodyKey] !== undefined) {
+      updates.push(`${dbCol} = $${idx}`);
+      values.push(numFields.includes(dbCol) ? parseFloat(req.body[bodyKey]) : req.body[bodyKey]);
       idx++;
     }
   }
