@@ -184,8 +184,9 @@ app.get('/', function(req, res) {
 
 // ── Rotas da API ─────────────────────────────────────────────────
 const apiRouter = require('./routes/index');
-apiRouter.use('/auth/login',    authLimiter);
-apiRouter.use('/auth/register', authLimiter);
+apiRouter.use('/auth/login',           authLimiter);
+apiRouter.use('/auth/register',        authLimiter);
+apiRouter.use('/auth/forgot-password', authLimiter); // S1: rate limit password reset
 apiRouter.use('/onboarding/cnpj-lookup', cnpjLimiter);
 app.use('/api/v1', apiRouter);
 
