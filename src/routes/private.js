@@ -62,6 +62,8 @@ router.use('/billing', require('./billing'));
 
 // ── NEGOCIO+ ─────────────────────────────────────────────────
 
+// S5: Customers CRUD ANTES das rotas de ranking/retention
+router.use('/customers', requirePlan('negocio', 'expansao'), require('./customers'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
