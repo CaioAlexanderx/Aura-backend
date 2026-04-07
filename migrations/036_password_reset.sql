@@ -14,3 +14,4 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_prt_token ON password_reset_tokens(token) WHERE used_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_prt_user  ON password_reset_tokens(user_id);
+
