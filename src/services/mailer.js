@@ -1,13 +1,52 @@
 // ============================================================
 // AURA. — Email Service
-// Resend: HTTP API (porta 443, nunca bloqueada)
-// Fallback: SMTP via nodemailer | Dev: console.log
+// Resend HTTP API (porta 443) | SMTP fallback | Dev fallback
 // ============================================================
 
 const FROM_DEFAULT = 'Aura. <onboarding@resend.dev>';
 const FROM = process.env.SMTP_FROM || FROM_DEFAULT;
+const ICON_URL = 'https://cdn.jsdelivr.net/gh/CaioAlexanderx/aura-app@main/assets/Icon.png';
 
-// ── Resend HTTP API (preferred — no SMTP ports needed) ──────
+// ── Email wrapper (consistent branding) ─────────────────────
+function emailLayout(content) {
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#08090f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#08090f;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="480" cellpadding="0" cellspacing="0" style="max-width:480px;width:100%;background:#0f1019;border:1px solid #1e1b4b;border-radius:20px;overflow:hidden;">
+        <!-- Header gradient bar -->
+        <tr><td style="height:4px;background:linear-gradient(90deg,#7c3aed,#a78bfa,#7c3aed);"></td></tr>
+
+        <!-- Logo -->
+        <tr><td align="center" style="padding:32px 32px 0 32px;">
+          <img src="${ICON_URL}" width="56" height="56" alt="Aura." style="display:block;border-radius:14px;" />
+          <p style="margin:12px 0 0;font-size:22px;font-weight:800;color:#e2e8f0;letter-spacing:-0.5px;">
+            Aura<span style="color:#7c3aed;">.</span>
+          </p>
+        </td></tr>
+
+        <!-- Content -->
+        <tr><td style="padding:24px 32px 32px 32px;">
+          ${content}
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="padding:0 32px 28px 32px;border-top:1px solid #1e293b;">
+          <p style="margin:20px 0 0;font-size:11px;color:#475569;text-align:center;line-height:18px;">
+            Aura. &middot; Tecnologia para Neg&oacute;cios<br>
+            <a href="https://getaura.com.br" style="color:#7c3aed;text-decoration:none;">getaura.com.br</a>
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+// ── Resend HTTP API ─────────────────────────────────────────
 async function sendViaResend(opts) {
   const key = process.env.RESEND_API_KEY;
   if (!key) return null;
@@ -37,7 +76,7 @@ async function sendViaResend(opts) {
   return data;
 }
 
-// ── SMTP fallback (nodemailer) ──────────────────────────────
+// ── SMTP fallback ───────────────────────────────────────────
 let _smtpTransporter = null;
 function getSmtpTransporter() {
   if (_smtpTransporter) return _smtpTransporter;
@@ -47,15 +86,10 @@ function getSmtpTransporter() {
   const port = parseInt(process.env.SMTP_PORT || '587', 10);
   const secure = port === 465 || process.env.SMTP_SECURE === 'true';
   _smtpTransporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port,
-    secure,
+    host: process.env.SMTP_HOST, port, secure,
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    connectionTimeout: 5000,
-    greetingTimeout: 5000,
-    socketTimeout: 10000,
+    connectionTimeout: 5000, greetingTimeout: 5000, socketTimeout: 10000,
   });
-  console.log(`[mailer] SMTP configured: ${process.env.SMTP_HOST}:${port}`);
   return _smtpTransporter;
 }
 
@@ -70,40 +104,29 @@ async function sendViaDev(opts) {
 
 // ── Unified send ────────────────────────────────────────────
 async function sendMail(opts) {
-  // 1. Try Resend HTTP API first (always works on cloud hosts)
-  if (process.env.RESEND_API_KEY) {
-    return sendViaResend(opts);
-  }
-
-  // 2. Try SMTP
+  if (process.env.RESEND_API_KEY) return sendViaResend(opts);
   const smtp = getSmtpTransporter();
-  if (smtp) {
-    return smtp.sendMail({ from: FROM, ...opts });
-  }
-
-  // 3. Dev fallback
+  if (smtp) return smtp.sendMail({ from: FROM, ...opts });
   return sendViaDev(opts);
 }
 
-// ── Email templates ─────────────────────────────────────────
+// ── Templates ───────────────────────────────────────────────
 
 async function sendVerificationEmail(to, code, userName) {
-  const html = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #0a0b14; color: #e2e8f0; border-radius: 16px;">
-      <div style="text-align: center; margin-bottom: 24px;">
-        <span style="font-size: 28px; font-weight: 800; color: #e2e8f0;">Aura</span><span style="font-size: 28px; font-weight: 800; color: #7c3aed;">.</span>
-      </div>
-      <p style="font-size: 16px; color: #e2e8f0; margin-bottom: 8px;">Olá${userName ? ', ' + userName.split(' ')[0] : ''}!</p>
-      <p style="font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 24px;">Use o código abaixo para verificar seu e-mail na Aura:</p>
-      <div style="background: #1e1b4b; border: 2px solid #7c3aed; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 24px;">
-        <span style="font-size: 32px; font-weight: 800; letter-spacing: 8px; color: #c4b5fd;">${code}</span>
-      </div>
-      <p style="font-size: 12px; color: #64748b; text-align: center;">Este código expira em <strong>10 minutos</strong>.</p>
-      <p style="font-size: 12px; color: #64748b; text-align: center;">Se você não solicitou este código, ignore este e-mail.</p>
-      <hr style="border: none; border-top: 1px solid #1e293b; margin: 24px 0;" />
-      <p style="font-size: 11px; color: #475569; text-align: center;">Aura. · Tecnologia para Negócios · getaura.com.br</p>
-    </div>
-  `;
+  const firstName = userName ? userName.split(' ')[0] : '';
+  const html = emailLayout(`
+    <p style="font-size:15px;color:#e2e8f0;margin:0 0 6px;">Ol&aacute;${firstName ? ', ' + firstName : ''}!</p>
+    <p style="font-size:13px;color:#94a3b8;line-height:22px;margin:0 0 24px;">Use o c&oacute;digo abaixo para verificar seu e-mail:</p>
+
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center" style="background:#1e1b4b;border:2px solid #7c3aed;border-radius:14px;padding:22px;">
+        <span style="font-size:36px;font-weight:800;letter-spacing:10px;color:#c4b5fd;font-family:'Courier New',monospace;">${code}</span>
+      </td></tr>
+    </table>
+
+    <p style="font-size:12px;color:#64748b;text-align:center;margin:20px 0 4px;">Este c&oacute;digo expira em <strong style="color:#94a3b8;">10 minutos</strong>.</p>
+    <p style="font-size:11px;color:#475569;text-align:center;margin:0;">Se voc&ecirc; n&atilde;o solicitou, ignore este e-mail.</p>
+  `);
 
   return sendMail({
     to,
@@ -115,24 +138,31 @@ async function sendVerificationEmail(to, code, userName) {
 
 async function sendPasswordResetEmail(to, resetUrl, userName) {
   const firstName = userName ? userName.split(' ')[0] : '';
-  const html = `
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #0a0b14; color: #e2e8f0; border-radius: 16px;">
-      <div style="text-align: center; margin-bottom: 24px;">
-        <span style="font-size: 28px; font-weight: 800; color: #e2e8f0;">Aura</span><span style="font-size: 28px; font-weight: 800; color: #7c3aed;">.</span>
-      </div>
-      <p style="font-size: 16px; color: #e2e8f0; margin-bottom: 8px;">Olá${firstName ? ', ' + firstName : ''}!</p>
-      <p style="font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 24px;">Recebemos uma solicitação para redefinir sua senha. Clique no botão abaixo para criar uma nova senha:</p>
-      <div style="text-align: center; margin-bottom: 24px;">
-        <a href="${resetUrl}" style="display: inline-block; background: #7c3aed; color: #fff; font-size: 15px; font-weight: 700; padding: 14px 32px; border-radius: 12px; text-decoration: none;">Redefinir minha senha</a>
-      </div>
-      <p style="font-size: 12px; color: #64748b; text-align: center; margin-bottom: 8px;">Ou copie e cole este link no navegador:</p>
-      <p style="font-size: 11px; color: #7c3aed; text-align: center; word-break: break-all; margin-bottom: 24px;">${resetUrl}</p>
-      <p style="font-size: 12px; color: #64748b; text-align: center;">Este link expira em <strong>30 minutos</strong>.</p>
-      <p style="font-size: 12px; color: #64748b; text-align: center;">Se você não solicitou esta alteração, ignore este e-mail. Sua senha continua segura.</p>
-      <hr style="border: none; border-top: 1px solid #1e293b; margin: 24px 0;" />
-      <p style="font-size: 11px; color: #475569; text-align: center;">Aura. · Tecnologia para Negócios · getaura.com.br</p>
-    </div>
-  `;
+  const html = emailLayout(`
+    <p style="font-size:15px;color:#e2e8f0;margin:0 0 6px;">Ol&aacute;${firstName ? ', ' + firstName : ''}!</p>
+    <p style="font-size:13px;color:#94a3b8;line-height:22px;margin:0 0 28px;">Recebemos uma solicita&ccedil;&atilde;o para redefinir sua senha. Clique no bot&atilde;o abaixo para criar uma nova:</p>
+
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center">
+        <!--[if mso]>
+        <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="${resetUrl}" style="height:50px;v-text-anchor:middle;width:280px;" arcsize="24%" fillcolor="#7c3aed">
+        <center style="color:#ffffff;font-size:15px;font-weight:bold;">Redefinir minha senha</center>
+        </v:roundrect>
+        <![endif]-->
+        <a href="${resetUrl}" style="display:inline-block;background:#7c3aed;color:#fff;font-size:15px;font-weight:700;padding:15px 36px;border-radius:12px;text-decoration:none;mso-hide:all;">Redefinir minha senha</a>
+      </td></tr>
+    </table>
+
+    <p style="font-size:11px;color:#64748b;text-align:center;margin:24px 0 6px;">Ou copie e cole este link:</p>
+    <p style="font-size:10px;color:#7c3aed;text-align:center;word-break:break-all;margin:0 0 24px;background:#1e1b4b;padding:10px 14px;border-radius:8px;">${resetUrl}</p>
+
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#0c0d18;border-radius:10px;padding:14px;">
+      <tr><td style="padding:14px;">
+        <p style="font-size:11px;color:#64748b;margin:0 0 4px;">⏱ Este link expira em <strong style="color:#94a3b8;">30 minutos</strong>.</p>
+        <p style="font-size:11px;color:#64748b;margin:0;">🔒 Se n&atilde;o solicitou, ignore. Sua senha continua segura.</p>
+      </td></tr>
+    </table>
+  `);
 
   return sendMail({
     to,
