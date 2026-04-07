@@ -8,7 +8,6 @@ const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { validateWebhookSignature } = require('../utils/webhook');
 
 const ASAAS_URL = process.env.ASAAS_URL || 'https://api.asaas.com/v3';
 const ASAAS_KEY = process.env.ASAAS_API_KEY;
@@ -38,7 +37,7 @@ const PLANS = {
 router.get('/status', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT c.plan, c.trial_active, c.trial_ends_at,
+      `SELECT c.plan, c.trial_days, c.trial_ends_at,
               c.asaas_customer_id, c.asaas_subscription_id,
               c.billing_status, c.next_billing_date
        FROM companies c WHERE c.id=$1`, [req.params.id]
@@ -56,7 +55,10 @@ router.get('/status', requireAuth, async (req, res) => {
       next_billing_date: company.next_billing_date,
       has_payment_method: !!company.asaas_subscription_id,
     });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar status' }); }
+  } catch (err) {
+    console.error('[BILLING] Status error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar status' });
+  }
 });
 
 // POST /billing/subscribe — Create Asaas customer + subscription
@@ -95,12 +97,13 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
 
     // Create subscription
     const planConfig = PLANS[plan];
+    const trialActive = company.trial_ends_at && new Date(company.trial_ends_at) > new Date();
     const nextDueDate = new Date();
-    nextDueDate.setDate(nextDueDate.getDate() + (company.trial_active ? 0 : 1));
+    nextDueDate.setDate(nextDueDate.getDate() + (trialActive ? 0 : 1));
 
     const subscription = await asaas('POST', '/subscriptions', {
       customer: customerId,
-      billingType: billing_type, // BOLETO, CREDIT_CARD, PIX, UNDEFINED
+      billingType: billing_type,
       value: planConfig.value,
       nextDueDate: nextDueDate.toISOString().split('T')[0],
       cycle: 'MONTHLY',
