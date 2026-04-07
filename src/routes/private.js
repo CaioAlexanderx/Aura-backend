@@ -12,13 +12,17 @@ router.use(requireCompanyAccess());
 router.use('/dashboard', require('./dashboard'));
 router.use('/dashboard/sparkline', require('./dashboardSparkline'));
 
-// Financeiro
+// Financeiro — S3: CRUD simples ANTES das rotas batch
+router.use('/transactions', require('./transactions'));
 router.use('/transactions', require('./transactionsBatch'));
 router.use('/transactions/categorize', require('./categorize'));
 router.use('/transactions', require('./categorize'));
 router.use('/prolabore', require('./prolabore'));
 router.use('/dre', require('./dre'));
 router.use('/financial/history', require('./financialHistory'));
+
+// Withdrawal summary
+router.use('/withdrawal', require('./withdrawal'));
 
 // MKT-01: Bank Reconciliation
 router.use('/bank', require('./bankReconciliation'));
@@ -78,7 +82,7 @@ router.use('/employees', requirePlan('negocio', 'expansao'), require('./commissi
 
 // Barbershop (vertical-specific, Negocio+ with add-on)
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
-router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3')); // B-17 to B-21
+router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3'));
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
 
 // MKT-03: Marketplaces (Negocio+)
