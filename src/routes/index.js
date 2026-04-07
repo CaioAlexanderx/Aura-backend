@@ -13,6 +13,9 @@ const verificationRouter      = require('./verification');
 // ── AUTENTICAÇÃO (pública) ──────────────────────────────────
 router.use('/auth', require('./auth'));
 
+// ── ESQUECI MINHA SENHA (pública) ───────────────────────────
+router.use('/auth', require('./passwordReset'));
+
 // ── VALIDAÇÃO DE CÓDIGOS (pública) ──────────────────────────
 router.use('/auth', accessCodesRouter);  // POST /auth/validate-code
 
