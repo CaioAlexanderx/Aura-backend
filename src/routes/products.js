@@ -1,9 +1,9 @@
 // ============================================================
 // AURA. -- S4: Products CRUD
-// GET    /companies/:id/products          -- list
-// POST   /companies/:id/products          -- create
-// PATCH  /companies/:id/products/:prodId  -- update
-// DELETE /companies/:id/products/:prodId  -- delete
+// GET    /companies/:id/products       -- list
+// POST   /companies/:id/products       -- create
+// PATCH  /companies/:id/products/:pid  -- update
+// DELETE /companies/:id/products/:pid  -- delete
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -24,8 +24,8 @@ router.get('/', async (req, res) => {
       params.push(category);
     }
     if (search) {
-      where += ` AND (LOWER(name) LIKE $${params.length + 1} OR LOWER(sku) LIKE $${params.length + 1})`;
-      params.push('%' + search.toLowerCase() + '%');
+      where += ` AND (name ILIKE $${params.length + 1} OR sku ILIKE $${params.length + 1})`;
+      params.push(`%${search}%`);
     }
 
     const countRes = await db.query(
@@ -34,46 +34,28 @@ router.get('/', async (req, res) => {
 
     const dataRes = await db.query(
       `SELECT id, name, sku, barcode, category, price, cost_price,
-              stock_qty, min_stock, unit, brand, notes, abc_class,
-              created_at, updated_at
+              stock_qty, min_stock, unit, brand, notes, abc_class, created_at
        FROM products ${where}
        ORDER BY name ASC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
     );
 
-    // Summary
-    const sumRes = await db.query(
-      `SELECT
-         COUNT(*) AS total_products,
-         COALESCE(SUM(stock_qty), 0) AS total_units,
-         COALESCE(SUM(stock_qty * cost_price), 0) AS total_value,
-         COUNT(*) FILTER (WHERE stock_qty <= min_stock AND min_stock > 0) AS low_stock
-       FROM products WHERE company_id = $1`,
-      [cid]
-    );
-
     const products = dataRes.rows.map(r => ({
       id: r.id,
       name: r.name || '',
-      code: r.sku || '',
       sku: r.sku || '',
       barcode: r.barcode || '',
       category: r.category || 'Produtos',
       price: parseFloat(r.price) || 0,
-      cost: parseFloat(r.cost_price) || 0,
       cost_price: parseFloat(r.cost_price) || 0,
-      stock: parseInt(r.stock_qty) || 0,
       stock_qty: parseInt(r.stock_qty) || 0,
-      minStock: parseInt(r.min_stock) || 0,
       min_stock: parseInt(r.min_stock) || 0,
       unit: r.unit || 'un',
       brand: r.brand || '',
       notes: r.notes || '',
-      abc: r.abc_class || 'C',
       abc_class: r.abc_class || 'C',
       created_at: r.created_at,
-      updated_at: r.updated_at,
     }));
 
     res.json({
@@ -81,12 +63,6 @@ router.get('/', async (req, res) => {
       total: parseInt(countRes.rows[0]?.total) || 0,
       limit,
       offset,
-      summary: {
-        total_products: parseInt(sumRes.rows[0]?.total_products) || 0,
-        total_units: parseInt(sumRes.rows[0]?.total_units) || 0,
-        total_value: parseFloat(sumRes.rows[0]?.total_value) || 0,
-        low_stock: parseInt(sumRes.rows[0]?.low_stock) || 0,
-      },
     });
   } catch (err) {
     console.error('[products] list error:', err.message);
@@ -123,6 +99,7 @@ router.post('/', async (req, res) => {
         notes || null,
       ]
     );
+
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('[products] create error:', err.message);
@@ -130,9 +107,9 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PATCH /:prodId -- update
-router.patch('/:prodId', async (req, res) => {
-  const { id: cid, prodId } = req.params;
+// PATCH /:pid -- update product
+router.patch('/:pid', async (req, res) => {
+  const { id: cid, pid } = req.params;
   const fields = ['name', 'sku', 'barcode', 'category', 'price', 'cost_price', 'stock_qty', 'min_stock', 'unit', 'brand', 'notes'];
   const updates = [];
   const values = [];
@@ -141,9 +118,8 @@ router.patch('/:prodId', async (req, res) => {
   for (const f of fields) {
     if (req.body[f] !== undefined) {
       updates.push(`${f} = $${idx}`);
-      const val = ['price', 'cost_price'].includes(f) ? parseFloat(req.body[f]) :
-                  ['stock_qty', 'min_stock'].includes(f) ? parseInt(req.body[f]) : req.body[f];
-      values.push(val);
+      const numFields = ['price', 'cost_price', 'stock_qty', 'min_stock'];
+      values.push(numFields.includes(f) ? parseFloat(req.body[f]) : req.body[f]);
       idx++;
     }
   }
@@ -153,14 +129,18 @@ router.patch('/:prodId', async (req, res) => {
   }
 
   updates.push('updated_at = NOW()');
-  values.push(prodId, cid);
+  values.push(pid, cid);
 
   try {
     const result = await db.query(
       `UPDATE products SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = $${idx + 1} RETURNING *`,
       values
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Produto nao encontrado' });
+    }
+
     res.json(result.rows[0]);
   } catch (err) {
     console.error('[products] update error:', err.message);
@@ -168,16 +148,21 @@ router.patch('/:prodId', async (req, res) => {
   }
 });
 
-// DELETE /:prodId
-router.delete('/:prodId', async (req, res) => {
-  const { id: cid, prodId } = req.params;
+// DELETE /:pid
+router.delete('/:pid', async (req, res) => {
+  const { id: cid, pid } = req.params;
+
   try {
     const result = await db.query(
       'DELETE FROM products WHERE id = $1 AND company_id = $2 RETURNING id, name',
-      [prodId, cid]
+      [pid, cid]
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
-    res.json({ deleted: true, id: prodId, name: result.rows[0].name });
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Produto nao encontrado' });
+    }
+
+    res.json({ deleted: true, id: pid, name: result.rows[0].name });
   } catch (err) {
     console.error('[products] delete error:', err.message);
     res.status(500).json({ error: 'Erro ao deletar produto' });
