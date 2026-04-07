@@ -3,7 +3,7 @@
 // GET    /companies/:id/customers       -- list
 // POST   /companies/:id/customers       -- create
 // PATCH  /companies/:id/customers/:cid  -- update
-// DELETE /companies/:id/customers/:cid  -- soft delete
+// DELETE /companies/:id/customers/:cid  -- delete
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -16,10 +16,10 @@ router.get('/', async (req, res) => {
   const search = req.query.search;
 
   try {
-    let where = 'WHERE company_id = $1 AND is_active = true';
+    let where = 'WHERE company_id = $1';
     const params = [companyId];
     if (search) {
-      where += ` AND (name ILIKE $${params.length + 1} OR phone ILIKE $${params.length + 1} OR email ILIKE $${params.length + 1})`;
+      where += ` AND (name ILIKE $${params.length + 1} OR email ILIKE $${params.length + 1} OR phone ILIKE $${params.length + 1})`;
       params.push(`%${search}%`);
     }
 
@@ -28,33 +28,14 @@ router.get('/', async (req, res) => {
     );
 
     const dataRes = await db.query(
-      `SELECT id, name, phone, email, birth_date, instagram_handle,
-              total_purchases, total_spent, last_purchase_at, first_purchase_at,
-              notes, rating, created_at
-       FROM customers ${where}
+      `SELECT * FROM customers ${where}
        ORDER BY name ASC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
     );
 
-    const customers = dataRes.rows.map(r => ({
-      id: r.id,
-      name: r.name || '',
-      phone: r.phone || '',
-      email: r.email || '',
-      birth_date: r.birth_date || null,
-      instagram: r.instagram_handle || '',
-      total_spent: parseFloat(r.total_spent) || 0,
-      visit_count: parseInt(r.total_purchases) || 0,
-      last_purchase: r.last_purchase_at || null,
-      first_visit: r.first_purchase_at || r.created_at || null,
-      notes: r.notes || '',
-      rating: r.rating != null ? parseInt(r.rating) : null,
-      created_at: r.created_at,
-    }));
-
     res.json({
-      customers,
+      customers: dataRes.rows,
       total: parseInt(countRes.rows[0]?.total) || 0,
       limit,
       offset,
@@ -68,31 +49,61 @@ router.get('/', async (req, res) => {
 // POST / -- create customer
 router.post('/', async (req, res) => {
   const companyId = req.params.id;
-  const { name, phone, email, birth_date, instagram, notes } = req.body;
+  const { name, email, phone, notes, birthday, instagram } = req.body;
 
   if (!name || !String(name).trim()) {
     return res.status(400).json({ error: 'name e obrigatorio' });
   }
 
   try {
+    // Build dynamic INSERT based on which columns exist
+    const cols = ['company_id', 'name'];
+    const vals = [companyId, String(name).trim()];
+    const placeholders = ['$1', '$2'];
+    let idx = 3;
+
+    const optionalFields = { email, phone, notes };
+    for (const [key, val] of Object.entries(optionalFields)) {
+      if (val !== undefined) {
+        cols.push(key);
+        vals.push(val || null);
+        placeholders.push(`$${idx++}`);
+      }
+    }
+
+    // Try birthday and instagram — may not exist in all schemas
+    if (birthday) {
+      cols.push('birthday');
+      vals.push(birthday);
+      placeholders.push(`$${idx++}`);
+    }
+    if (instagram) {
+      cols.push('instagram');
+      vals.push(instagram);
+      placeholders.push(`$${idx++}`);
+    }
+
     const result = await db.query(
-      `INSERT INTO customers (company_id, name, phone, email, birth_date, instagram_handle, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING *`,
-      [
-        companyId,
-        String(name).trim(),
-        phone || null,
-        email || null,
-        birth_date || null,
-        instagram || null,
-        notes || null,
-      ]
+      `INSERT INTO customers (${cols.join(', ')}) VALUES (${placeholders.join(', ')}) RETURNING *`,
+      vals
     );
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('[customers] create error:', err.message);
+    // If column doesn't exist, retry with minimal fields
+    if (err.message.includes('does not exist')) {
+      try {
+        const result = await db.query(
+          `INSERT INTO customers (company_id, name, email, phone, notes)
+           VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+          [companyId, String(name).trim(), email || null, phone || null, notes || null]
+        );
+        return res.status(201).json(result.rows[0]);
+      } catch (err2) {
+        console.error('[customers] create fallback error:', err2.message);
+      }
+    }
     res.status(500).json({ error: 'Erro ao criar cliente' });
   }
 });
@@ -100,19 +111,15 @@ router.post('/', async (req, res) => {
 // PATCH /:cid -- update customer
 router.patch('/:cid', async (req, res) => {
   const { id: companyId, cid } = req.params;
-  const fieldMap = {
-    name: 'name', phone: 'phone', email: 'email',
-    birth_date: 'birth_date', instagram: 'instagram_handle',
-    notes: 'notes', rating: 'rating',
-  };
+  const allowed = ['name', 'email', 'phone', 'notes', 'birthday', 'instagram'];
   const updates = [];
   const values = [];
   let idx = 1;
 
-  for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
-    if (req.body[bodyKey] !== undefined) {
-      updates.push(`${dbCol} = $${idx}`);
-      values.push(req.body[bodyKey]);
+  for (const f of allowed) {
+    if (req.body[f] !== undefined) {
+      updates.push(`${f} = $${idx}`);
+      values.push(req.body[f]);
       idx++;
     }
   }
@@ -141,14 +148,13 @@ router.patch('/:cid', async (req, res) => {
   }
 });
 
-// DELETE /:cid -- soft delete
+// DELETE /:cid
 router.delete('/:cid', async (req, res) => {
   const { id: companyId, cid } = req.params;
 
   try {
     const result = await db.query(
-      `UPDATE customers SET is_active = false, updated_at = NOW()
-       WHERE id = $1 AND company_id = $2 RETURNING id, name`,
+      'DELETE FROM customers WHERE id = $1 AND company_id = $2 RETURNING id, name',
       [cid, companyId]
     );
 
