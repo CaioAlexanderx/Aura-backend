@@ -1,7 +1,6 @@
 // ============================================================
 // AURA. — Testes Integração: Módulo Barbearia (BE-11)
-// FIX: use resetAllMocks (clears mockResolvedValueOnce queue)
-// FIX: flexible response shape assertions
+// FIX: use resetAllMocks + proper client mock for transactions
 // ============================================================
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
@@ -16,10 +15,8 @@ const SECRET = 'aura-test-secret-2026';
 const cid    = '00000000-0000-0000-0000-000000000001';
 const auth   = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', plan:'negocio' }, SECRET, { expiresIn:'1h' })}` };
 
-// Helper: reset all mocks including mockResolvedValueOnce queue
 beforeEach(() => {
   jest.resetAllMocks();
-  // Re-setup db.connect default after reset
   db.connect.mockResolvedValue({
     query: jest.fn(),
     release: jest.fn(),
@@ -81,8 +78,13 @@ describe('POST /barbershop/services', () => {
 
   test('cria serviço com sucesso', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
-    // Catch-all: route may run multiple queries (duplicate check, insert, etc.)
-    db.query.mockResolvedValue({ rows: [{ id:'s2', name:'Barba', price:25, duration_min:20 }] });
+    // Route uses db.connect() transaction, not db.query()
+    const mockClient = { query: jest.fn(), release: jest.fn() };
+    mockClient.query
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id:'s2', name:'Barba', price:25, duration_min:20 }] }) // INSERT
+      .mockResolvedValueOnce({}); // COMMIT
+    db.connect.mockResolvedValueOnce(mockClient);
     const res = await request(app).post(`/api/v1/companies/${cid}/barbershop/services`).set(auth)
       .send({ name:'Barba', price:25, duration_min:20 });
     expect([200, 201]).toContain(res.status);
@@ -131,9 +133,10 @@ describe('POST /barbershop/appointments', () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const mockClient = { query: jest.fn(), release: jest.fn() };
     mockClient.query
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ rows: [{ id:'a1', professional_id:'p1', total_amount:40 }] })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id:'a1', professional_id:'p1', total_amount:40 }] }) // INSERT appointment
+      .mockResolvedValueOnce({}) // INSERT service
+      .mockResolvedValueOnce({}); // COMMIT
     db.connect.mockResolvedValueOnce(mockClient);
     const res = await request(app).post(`/api/v1/companies/${cid}/barbershop/appointments`).set(auth).send({
       professional_id: 'p1', scheduled_at: new Date().toISOString(),
@@ -166,8 +169,8 @@ describe('POST /barbershop/queue', () => {
   test('entra na fila com sucesso', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
-      .mockResolvedValueOnce({ rows: [{ next:1 }] })
-      .mockResolvedValueOnce({ rows: [{ id:'q2', customer_name:'Rafa', position:1, status:'waiting' }] });
+      .mockResolvedValueOnce({ rows: [{ next:1 }] }) // MAX(position)
+      .mockResolvedValueOnce({ rows: [{ id:'q2', customer_name:'Rafa', position:1, status:'waiting' }] }); // INSERT
     const res = await request(app).post(`/api/v1/companies/${cid}/barbershop/queue`).set(auth)
       .send({ customer_name:'Rafa', service_name:'Corte' });
     expect(res.status).toBe(201);
