@@ -12,11 +12,14 @@ const { validateRuntimeEnv } = require('./config/env');
 const env = validateRuntimeEnv();
 const app = express();
 
-// ── Sentry ────────────────────────────────────────────────────────
+// Railway/Cloudflare run behind a reverse proxy
+app.set('trust proxy', 1);
+
+// ── Sentry ────────────────────────────────────────────────────
 initSentry();
 app.use(Sentry.Handlers.requestHandler());
 
-// ── BE-REV-14: Security headers (Helmet + CSP) ─────────────
+// ── BE-REV-14: Security headers (Helmet + CSP) ─────────
 const allowedOrigins = env.ALLOWED_ORIGINS === '*'
   ? ['*']
   : env.ALLOWED_ORIGINS.split(',').map(o => o.trim());
@@ -48,7 +51,7 @@ app.use(helmet({
 
 app.disable('x-powered-by');
 
-// ── CORS ──────────────────────────────────────────────────────────
+// ── CORS ──────────────────────────────────────────────────────
 app.use(cors({
   origin: env.ALLOWED_ORIGINS === '*' ? '*' : allowedOrigins,
   credentials: true,
@@ -63,7 +66,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(sentryContext);
 
-// ── Rate limiting ────────────────────────────────────────────────
+// ── Rate limiting ────────────────────────────────────────────
 
 const authLimiter = rateLimit({
   windowMs:  15 * 60 * 1000,
@@ -94,7 +97,7 @@ const globalLimiter = rateLimit({
 
 app.use('/api/v1', globalLimiter);
 
-// ── Health checks ────────────────────────────────────────────────
+// ── Health checks ────────────────────────────────────────────
 app.get('/health', function(req, res) {
   res.json({
     status:    'ok',
@@ -182,15 +185,15 @@ app.get('/', function(req, res) {
   res.json({ name: 'Aura. API', version: env.GIT_SHA || '1.0.0', status: 'online' });
 });
 
-// ── Rotas da API ─────────────────────────────────────────────────
+// ── Rotas da API ─────────────────────────────────────────────
 const apiRouter = require('./routes/index');
 apiRouter.use('/auth/login',           authLimiter);
 apiRouter.use('/auth/register',        authLimiter);
-apiRouter.use('/auth/forgot-password', authLimiter); // S1: rate limit password reset
+apiRouter.use('/auth/forgot-password', authLimiter);
 apiRouter.use('/onboarding/cnpj-lookup', cnpjLimiter);
 app.use('/api/v1', apiRouter);
 
-// ── Error handlers ───────────────────────────────────────────────
+// ── Error handlers ───────────────────────────────────────────
 app.use(sentryError);
 app.use(Sentry.Handlers.errorHandler());
 
