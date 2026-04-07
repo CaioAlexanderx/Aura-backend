@@ -10,7 +10,6 @@ const db     = require('../config/database');
 router.get('/', async (req, res) => {
   const cid = req.params.id;
   try {
-    // All queries in parallel
     const [summaryRes, recentRes, sparkRes, obligationsRes] = await Promise.all([
       // 1. Monthly summary
       db.query(
@@ -25,9 +24,9 @@ router.get('/', async (req, res) => {
            AND created_at < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'`,
         [cid]
       ),
-      // 2. Recent sales (last 5)
+      // 2. Recent sales (last 5) — only columns that exist
       db.query(
-        `SELECT id, description, amount, payment_method, type, created_at
+        `SELECT id, description, amount, type, created_at
          FROM transactions
          WHERE company_id = $1 AND type = 'income'
          ORDER BY created_at DESC LIMIT 5`,
@@ -61,7 +60,7 @@ router.get('/', async (req, res) => {
          ORDER BY due_date ASC
          LIMIT 5`,
         [cid]
-      ).catch(() => ({ rows: [] })), // graceful if table doesn't exist yet
+      ).catch(() => ({ rows: [] })),
     ]);
 
     const summary = summaryRes.rows[0] || {};
@@ -147,7 +146,7 @@ router.get('/', async (req, res) => {
         customer: r.description || 'Venda',
         amount: parseFloat(r.amount) || 0,
         time: r.created_at ? new Date(r.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--',
-        method: r.payment_method || 'Pix',
+        method: 'Pix',
       })),
       obligations: obligationsRes.rows.map(r => ({
         id: r.id,
