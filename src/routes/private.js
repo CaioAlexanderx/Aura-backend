@@ -36,8 +36,11 @@ router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 router.use('/products/:pid/variants', require('./variants'));
 
-// MKT-02: NFC-e
+// MKT-02: NFC-e (legacy)
 router.use('/nfce', require('./nfce'));
+
+// Sprint 4: NF-e via Focus NFe (NFSe + NFCe)
+router.use('/nfe', require('./nfe'));
 
 // MKT-04: Document Storage (R2)
 router.use('/storage', require('./storage'));
