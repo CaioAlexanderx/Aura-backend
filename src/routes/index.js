@@ -12,18 +12,12 @@ const verificationRouter      = require('./verification');
 
 // ── AUTENTICAÇÃO (pública) ──────────────────────────────────
 router.use('/auth', require('./auth'));
-
-// ── ESQUECI MINHA SENHA (pública) ───────────────────────────
 router.use('/auth', require('./passwordReset'));
-
-// ── VALIDAÇÃO DE CÓDIGOS (pública) ──────────────────────────
-router.use('/auth', accessCodesRouter);  // POST /auth/validate-code
-
-// ── VERIFICAÇÃO EMAIL/PHONE (autenticada) ───────────────────
-router.use('/auth', verificationRouter); // POST /auth/send-verification, /auth/verify-email, etc.
+router.use('/auth', accessCodesRouter);
+router.use('/auth', verificationRouter);
 
 // ── REFERRALS (autenticada) ─────────────────────────────────
-router.use('/referrals', accessCodesRouter);  // POST /referrals/generate, GET /referrals/mine
+router.use('/referrals', accessCodesRouter);
 
 // ── ROTAS PRIVADAS POR EMPRESA ──────────────────────────────
 router.use('/companies/:id', privateCompaniesRouter);
@@ -35,16 +29,15 @@ router.use('/admin', require('./admin'));
 router.use('/webhooks/asaas', require('./webhookAsaas'));
 router.use('/webhooks/whatsapp', require('./webhookWhatsapp'));
 
+// ── STOREFRONT PÚBLICO ──────────────────────────────────────
+router.use('/storefront', require('./storefront'));
+
 // ── ROTAS PÚBLICAS ──────────────────────────────────────────
 router.use('/reviews', publicReviewsRouter);
 router.use('/dental',  require('./dentalSign'));
-router.use('/dental/book', require('./dentalBooking'));   // D-11: Public dental booking
-router.use('/barber/book', require('./barberBooking'));   // B-12: Public barber booking
-
-// Onboarding: rota pública de CNPJ lookup montada via router
+router.use('/dental/book', require('./dentalBooking'));
+router.use('/barber/book', require('./barberBooking'));
 router.use('/onboarding', onboardingRouter);
-
-// FOOD — rotas públicas
 router.use('/food/table',    require('./foodWaiter'));
 router.use('/food/schedule', require('./foodSchedule'));
 router.use('/food',          require('./food'));

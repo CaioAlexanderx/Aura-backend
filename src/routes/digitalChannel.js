@@ -1,26 +1,17 @@
 // ============================================================
-// AURA. — BE-REV-05: Canal Digital CRUD
+// AURA. — Canal Digital CRUD + Storefront + Dominio
 // GET  /companies/:id/digital-channel
 // PUT  /companies/:id/digital-channel
-// Stores mini-site config: name, colors, logo, featured products, hours
+// POST /companies/:id/digital-channel/request-domain
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
 
 const DEFAULT_CONFIG = {
-  site_name: null,
-  tagline: '',
-  primary_color: '#7c3aed',
-  secondary_color: '#a78bfa',
-  logo_url: null,
-  cover_url: null,
-  description: '',
-  address: '',
-  phone: '',
-  whatsapp: '',
-  instagram: '',
-  google_maps_url: '',
+  site_name: null, tagline: '', primary_color: '#7c3aed', secondary_color: '#a78bfa',
+  logo_url: null, cover_url: null, description: '', address: '', phone: '', whatsapp: '',
+  instagram: '', google_maps_url: '',
   business_hours: {
     seg: { open: '09:00', close: '18:00', closed: false },
     ter: { open: '09:00', close: '18:00', closed: false },
@@ -30,50 +21,53 @@ const DEFAULT_CONFIG = {
     sab: { open: '09:00', close: '13:00', closed: false },
     dom: { open: null, close: null, closed: true },
   },
-  featured_product_ids: [],
-  show_prices: true,
-  show_stock: false,
-  delivery_enabled: false,
-  delivery_fee: 0,
-  delivery_radius_km: 5,
-  pickup_enabled: true,
-  is_published: false,
+  featured_product_ids: [], show_prices: true, show_stock: false,
+  delivery_enabled: false, delivery_fee: 0, delivery_radius_km: 5,
+  pickup_enabled: true, is_published: false, slug: null,
+  custom_domain: null, custom_domain_status: 'none',
+  custom_domain_plan: null, custom_domain_expires_at: null, custom_domain_price: null,
 };
+
+function generateSlug(name) {
+  return (name || 'loja')
+    .toLowerCase().trim()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .substring(0, 80);
+}
 
 // GET /companies/:id/digital-channel
 router.get('/', async (req, res) => {
   const cid = req.params.id;
   try {
-    const { rows } = await db.query(
-      `SELECT * FROM digital_channel_config WHERE company_id = $1`, [cid]
-    );
-
+    const { rows } = await db.query(`SELECT * FROM digital_channel_config WHERE company_id = $1`, [cid]);
     if (!rows.length) {
-      // Return defaults merged with company info
       const { rows: companies } = await db.query(
-        `SELECT name, trade_name, phone, address_city, address_state FROM companies WHERE id = $1`, [cid]
+        `SELECT legal_name, trade_name, phone FROM companies WHERE id = $1`, [cid]
       );
       const co = companies[0] || {};
       return res.json({
         ...DEFAULT_CONFIG,
-        site_name: co.trade_name || co.name || null,
+        site_name: co.trade_name || co.legal_name || null,
         phone: co.phone || '',
-        address: co.address_city ? `${co.address_city}/${co.address_state}` : '',
         exists: false,
+        storefront_url: null,
       });
     }
-
     const config = rows[0];
+    const baseUrl = process.env.APP_URL || 'https://getaura.com.br';
     res.json({
       ...config,
       business_hours: config.business_hours || DEFAULT_CONFIG.business_hours,
       featured_product_ids: config.featured_product_ids || [],
       exists: true,
+      storefront_url: config.slug ? `${baseUrl}/loja/${config.slug}` : null,
+      domain_pricing: { '1year': 80, '2years': 152 },
     });
   } catch (err) {
-    // Graceful fallback if table doesn't exist yet
     if (err.message?.includes('does not exist')) {
-      return res.json({ ...DEFAULT_CONFIG, exists: false });
+      return res.json({ ...DEFAULT_CONFIG, exists: false, storefront_url: null });
     }
     console.error('digital channel get error:', err);
     res.status(500).json({ error: 'Erro ao buscar configuracao do canal digital' });
@@ -91,6 +85,17 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     delivery_radius_km, pickup_enabled, is_published,
   } = req.body;
 
+  // Auto-generate slug on first save if not set
+  let slug = req.body.slug || null;
+  if (!slug && site_name) {
+    slug = generateSlug(site_name);
+    // Ensure uniqueness
+    const { rows: existing } = await db.query(
+      `SELECT slug FROM digital_channel_config WHERE slug = $1 AND company_id != $2`, [slug, cid]
+    );
+    if (existing.length > 0) slug = slug + '-' + Date.now().toString(36).slice(-4);
+  }
+
   try {
     const { rows } = await db.query(`
       INSERT INTO digital_channel_config (
@@ -98,10 +103,10 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         logo_url, cover_url, description, address, phone, whatsapp,
         instagram, google_maps_url, business_hours, featured_product_ids,
         show_prices, show_stock, delivery_enabled, delivery_fee,
-        delivery_radius_km, pickup_enabled, is_published
+        delivery_radius_km, pickup_enabled, is_published, slug
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $20, $21, $22
+        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
       )
       ON CONFLICT (company_id) DO UPDATE SET
         site_name = COALESCE($2, digital_channel_config.site_name),
@@ -125,6 +130,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         delivery_radius_km = COALESCE($20, digital_channel_config.delivery_radius_km),
         pickup_enabled = COALESCE($21, digital_channel_config.pickup_enabled),
         is_published = COALESCE($22, digital_channel_config.is_published),
+        slug = COALESCE($23, digital_channel_config.slug),
         updated_at = NOW()
       RETURNING *
     `, [
@@ -136,13 +142,78 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       featured_product_ids ? JSON.stringify(featured_product_ids) : null,
       show_prices ?? null, show_stock ?? null, delivery_enabled ?? null,
       delivery_fee ?? null, delivery_radius_km ?? null,
-      pickup_enabled ?? null, is_published ?? null,
+      pickup_enabled ?? null, is_published ?? null, slug,
     ]);
 
-    res.json({ config: rows[0], saved: true });
+    const baseUrl = process.env.APP_URL || 'https://getaura.com.br';
+    res.json({
+      config: rows[0],
+      saved: true,
+      storefront_url: rows[0].slug ? `${baseUrl}/loja/${rows[0].slug}` : null,
+    });
   } catch (err) {
+    if (err.code === '23505' && err.constraint?.includes('slug')) {
+      return res.status(409).json({ error: 'Esse slug ja esta em uso. Escolha outro nome.' });
+    }
     console.error('digital channel save error:', err);
     res.status(500).json({ error: 'Erro ao salvar configuracao do canal digital' });
+  }
+});
+
+// POST /companies/:id/digital-channel/request-domain
+// Solicita registro de dominio personalizado (.com.br)
+router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const cid = req.params.id;
+  const { domain, plan } = req.body; // plan: '1year' ou '2years'
+
+  if (!domain || !domain.includes('.')) {
+    return res.status(400).json({ error: 'Informe um dominio valido (ex: meunegocio.com.br)' });
+  }
+  if (!['1year', '2years'].includes(plan)) {
+    return res.status(400).json({ error: 'Plano deve ser 1year ou 2years' });
+  }
+
+  const pricing = { '1year': 80, '2years': 152 };
+  const cleanDomain = domain.toLowerCase().trim();
+
+  try {
+    // Check if domain is already in use
+    const { rows: existing } = await db.query(
+      `SELECT company_id FROM digital_channel_config WHERE custom_domain = $1`, [cleanDomain]
+    );
+    if (existing.length > 0 && existing[0].company_id !== cid) {
+      return res.status(409).json({ error: 'Este dominio ja esta em uso por outra empresa.' });
+    }
+
+    // Save domain request (status = pending_dns until Aura team configures)
+    await db.query(`
+      UPDATE digital_channel_config SET
+        custom_domain = $1,
+        custom_domain_status = 'pending_dns',
+        custom_domain_plan = $2,
+        custom_domain_price = $3,
+        custom_domain_expires_at = NOW() + INTERVAL '${plan === '2years' ? '2 years' : '1 year'}',
+        updated_at = NOW()
+      WHERE company_id = $4
+    `, [cleanDomain, plan, pricing[plan], cid]);
+
+    res.json({
+      domain: cleanDomain,
+      plan,
+      price: pricing[plan],
+      status: 'pending_dns',
+      message: 'Solicitacao de dominio registrada. A equipe Aura vai configurar o DNS e registrar o dominio. Voce sera notificado quando estiver ativo.',
+      note: 'A disponibilidade do dominio depende de verificacao junto ao Registro.br.',
+      next_steps: [
+        'Equipe Aura verifica disponibilidade do dominio',
+        'Registro realizado via Registro.br',
+        'Configuracao DNS no Cloudflare',
+        'Dominio ativo em ate 48h uteis',
+      ],
+    });
+  } catch (err) {
+    console.error('request-domain error:', err);
+    res.status(500).json({ error: 'Erro ao solicitar dominio' });
   }
 });
 
