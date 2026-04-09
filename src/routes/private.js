@@ -8,6 +8,9 @@ router.use(requireCompanyAccess());
 
 // ── ESSENCIAL (todos os planos) ──────────────────────────────
 
+// INT-COMPANY-01: Company Profile (GET + PUT)
+router.use('/', require('./company'));
+
 // Dashboard
 router.use('/dashboard', require('./dashboard'));
 router.use('/dashboard/sparkline', require('./dashboardSparkline'));
