@@ -1,5 +1,7 @@
 // ============================================================
-// AURA. — F6: Asaas Billing Integration
+// AURA. — F6: Asaas Billing Integration (Hybrid Checkout)
+// Pix inline + Credit Card recurring via tokenization
+// Customer never leaves the app, never sees Asaas
 // Mounted at: /companies/:id/billing
 // ============================================================
 
@@ -24,13 +26,48 @@ async function asaas(method, path, body) {
   return data;
 }
 
+// ── Plan config with annual pricing ─────────────────────────
 const PLANS = {
-  essencial: { name: 'Aura Essencial', value: 89 },
-  negocio:   { name: 'Aura Negocio', value: 199 },
-  expansao:  { name: 'Aura Expansao', value: 299 },
+  essencial: { name: 'Aura Essencial', monthly: 89 },
+  negocio:   { name: 'Aura Negocio',   monthly: 199 },
+  expansao:  { name: 'Aura Expansao',   monthly: 299 },
 };
 
-// GET /billing/status
+const ANNUAL_CARD_DISCOUNT = 0.15;  // 15% off monthly price
+const ANNUAL_PIX_DISCOUNT  = 0.20;  // 20% off total annual
+
+function getPlanValue(plan, cycle, billingType) {
+  const cfg = PLANS[plan];
+  if (!cfg) return null;
+  if (cycle === 'annual') {
+    if (billingType === 'PIX') {
+      // Pix a vista: 12 months * monthly * (1 - 20%)
+      return Math.round(cfg.monthly * 12 * (1 - ANNUAL_PIX_DISCOUNT) * 100) / 100;
+    }
+    // Card annual: monthly * (1 - 15%) — billed monthly
+    return Math.round(cfg.monthly * (1 - ANNUAL_CARD_DISCOUNT) * 100) / 100;
+  }
+  return cfg.monthly; // monthly cycle
+}
+
+// ── Ensure Asaas customer exists ─────────────────────────────
+async function ensureAsaasCustomer(company, user) {
+  if (company.asaas_customer_id) return company.asaas_customer_id;
+
+  const customer = await asaas('POST', '/customers', {
+    name: user.full_name || user.name,
+    email: user.email,
+    phone: user.phone || undefined,
+    cpfCnpj: company.cnpj?.replace(/\D/g, '') || undefined,
+    company: company.legal_name || company.trade_name,
+    externalReference: company.id,
+  });
+
+  await db.query('UPDATE companies SET asaas_customer_id=$1 WHERE id=$2', [customer.id, company.id]);
+  return customer.id;
+}
+
+// ── GET /billing/status ─────────────────────────────────────
 router.get('/status', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
@@ -41,6 +78,7 @@ router.get('/status', requireAuth, async (req, res) => {
     res.json({
       plan: c.plan || 'essencial',
       billing_status: c.billing_status || (trialActive ? 'trial' : 'inactive'),
+      billing_cycle: c.billing_cycle || 'monthly',
       trial_active: !!trialActive,
       trial_days_left: daysLeft,
       trial_ends_at: c.trial_ends_at || null,
@@ -53,10 +91,27 @@ router.get('/status', requireAuth, async (req, res) => {
   }
 });
 
-// POST /billing/subscribe
+// ── POST /billing/subscribe ─────────────────────────────────
+// Hybrid checkout: supports PIX (QR inline) + CREDIT_CARD (tokenized)
 router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (req, res) => {
-  const { plan, billing_type = 'UNDEFINED' } = req.body;
-  if (!plan || !PLANS[plan]) return res.status(400).json({ error: 'Plano invalido. Opcoes: essencial, negocio, expansao' });
+  const {
+    plan,
+    billing_type = 'PIX',        // PIX or CREDIT_CARD
+    cycle = 'monthly',            // monthly or annual
+    credit_card_token,            // Required for CREDIT_CARD
+    credit_card_holder_name,
+    credit_card_holder_cpf,
+  } = req.body;
+
+  if (!plan || !PLANS[plan]) {
+    return res.status(400).json({ error: 'Plano invalido. Opcoes: essencial, negocio, expansao' });
+  }
+  if (billing_type === 'CREDIT_CARD' && !credit_card_token) {
+    return res.status(400).json({ error: 'credit_card_token obrigatorio para cartao' });
+  }
+
+  const value = getPlanValue(plan, cycle, billing_type);
+  if (!value) return res.status(400).json({ error: 'Erro ao calcular valor' });
 
   try {
     const { rows: companies } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
@@ -66,59 +121,127 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     const { rows: users } = await db.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
     const user = users[0];
 
-    let customerId = company.asaas_customer_id;
-    if (!customerId) {
-      const customer = await asaas('POST', '/customers', {
-        name: user.full_name,
-        email: user.email,
-        phone: user.phone || undefined,
-        cpfCnpj: company.cnpj?.replace(/\D/g, '') || undefined,
-        company: company.legal_name || company.trade_name,
-        externalReference: company.id,
-      });
-      customerId = customer.id;
-      await db.query('UPDATE companies SET asaas_customer_id=$1 WHERE id=$2', [customerId, company.id]);
-    }
+    // Ensure Asaas customer exists (silent — client never sees this)
+    const customerId = await ensureAsaasCustomer(company, user);
 
+    // Cancel existing subscription if upgrading
     if (company.asaas_subscription_id) {
       try { await asaas('DELETE', `/subscriptions/${company.asaas_subscription_id}`); } catch {}
     }
 
-    const planConfig = PLANS[plan];
-    const trialActive = company.trial_ends_at && new Date(company.trial_ends_at) > new Date();
     const nextDueDate = new Date();
-    nextDueDate.setDate(nextDueDate.getDate() + (trialActive ? 0 : 1));
+    nextDueDate.setDate(nextDueDate.getDate() + 1);
+    const dueDateStr = nextDueDate.toISOString().split('T')[0];
 
-    const subscription = await asaas('POST', '/subscriptions', {
+    // ── PIX: Annual a vista (single payment) ──────────────
+    if (billing_type === 'PIX' && cycle === 'annual') {
+      const payment = await asaas('POST', '/payments', {
+        customer: customerId,
+        billingType: 'PIX',
+        value,
+        dueDate: dueDateStr,
+        description: `${PLANS[plan].name} - Anual (Pix a vista)`,
+        externalReference: company.id,
+      });
+
+      // Get QR code immediately
+      let pixData = null;
+      try {
+        pixData = await asaas('GET', `/payments/${payment.id}/pixQrCode`);
+      } catch {}
+
+      await db.query(
+        `UPDATE companies SET plan=$1, billing_cycle='annual', billing_status='pending',
+         asaas_pending_payment_id=$2, updated_at=NOW() WHERE id=$3`,
+        [plan, payment.id, company.id]
+      );
+
+      return res.status(201).json({
+        payment_id: payment.id,
+        plan, cycle: 'annual', value,
+        billing_type: 'PIX',
+        pix_qr_code: pixData?.encodedImage || null,
+        pix_copy_paste: pixData?.payload || null,
+        pix_expiration: pixData?.expirationDate || null,
+      });
+    }
+
+    // ── PIX or CARD: Monthly subscription ─────────────────
+    const subscriptionBody = {
       customer: customerId,
       billingType: billing_type,
-      value: planConfig.value,
-      nextDueDate: nextDueDate.toISOString().split('T')[0],
+      value,
+      nextDueDate: dueDateStr,
       cycle: 'MONTHLY',
-      description: planConfig.name,
+      description: `${PLANS[plan].name}${cycle === 'annual' ? ' (Anual)' : ''}`,
       externalReference: company.id,
-    });
+    };
 
+    // Add card token for CREDIT_CARD
+    if (billing_type === 'CREDIT_CARD' && credit_card_token) {
+      subscriptionBody.creditCardToken = credit_card_token;
+      // Asaas needs holder info for tokenized cards
+      if (credit_card_holder_name) {
+        subscriptionBody.creditCardHolderInfo = {
+          name: credit_card_holder_name,
+          cpfCnpj: (credit_card_holder_cpf || company.cnpj || '').replace(/\D/g, ''),
+          email: user.email,
+          phone: user.phone || undefined,
+          postalCode: company.address_zip || undefined,
+        };
+      }
+    }
+
+    const subscription = await asaas('POST', '/subscriptions', subscriptionBody);
+
+    // For PIX subscription, get QR for first payment
+    let pixData = null;
+    if (billing_type === 'PIX') {
+      try {
+        // Asaas auto-generates first payment for PIX subscriptions
+        const payments = await asaas('GET', `/subscriptions/${subscription.id}/payments?limit=1`);
+        if (payments.data?.[0]?.id) {
+          pixData = await asaas('GET', `/payments/${payments.data[0].id}/pixQrCode`);
+        }
+      } catch {}
+    }
+
+    // Update company
     await db.query(
-      `UPDATE companies SET plan=$1, asaas_subscription_id=$2, billing_status='active', next_billing_date=$3, updated_at=NOW() WHERE id=$4`,
-      [plan, subscription.id, subscription.nextDueDate, company.id]
+      `UPDATE companies SET plan=$1, asaas_subscription_id=$2, billing_status=$3,
+       billing_cycle=$4, next_billing_date=$5, updated_at=NOW() WHERE id=$6`,
+      [
+        plan,
+        subscription.id,
+        billing_type === 'CREDIT_CARD' ? 'active' : 'pending',
+        cycle,
+        subscription.nextDueDate,
+        company.id,
+      ]
     );
 
-    res.status(201).json({
+    const response = {
       subscription_id: subscription.id,
-      plan,
-      value: planConfig.value,
+      plan, cycle, value,
+      billing_type,
       next_due_date: subscription.nextDueDate,
-      billing_type: subscription.billingType,
-      payment_link: subscription.paymentLink || null,
-    });
+    };
+
+    // Include Pix data if PIX billing
+    if (billing_type === 'PIX' && pixData) {
+      response.pix_qr_code = pixData.encodedImage || null;
+      response.pix_copy_paste = pixData.payload || null;
+      response.pix_expiration = pixData.expirationDate || null;
+    }
+
+    res.status(201).json(response);
   } catch (err) {
     console.error('[BILLING] Subscribe error:', err.message);
     res.status(500).json({ error: err.message || 'Erro ao criar assinatura' });
   }
 });
 
-// POST /billing/cancel
+// ── POST /billing/cancel ────────────────────────────────────
 router.post('/cancel', requireAuth, requireRole('client', 'admin'), async (req, res) => {
   try {
     const { rows } = await db.query('SELECT asaas_subscription_id FROM companies WHERE id=$1', [req.params.id]);
@@ -134,7 +257,7 @@ router.post('/cancel', requireAuth, requireRole('client', 'admin'), async (req, 
   } catch (err) { res.status(500).json({ error: 'Erro ao cancelar' }); }
 });
 
-// GET /billing/invoices
+// ── GET /billing/invoices ───────────────────────────────────
 router.get('/invoices', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query('SELECT asaas_customer_id FROM companies WHERE id=$1', [req.params.id]);
@@ -143,18 +266,33 @@ router.get('/invoices', requireAuth, async (req, res) => {
     const invoices = (data.data || []).map(p => ({
       id: p.id, value: p.value, status: p.status, due_date: p.dueDate,
       payment_date: p.paymentDate, billing_type: p.billingType,
-      invoice_url: p.invoiceUrl, bank_slip_url: p.bankSlipUrl, pix_qr_code: p.pixQrCodeUrl,
+      invoice_url: p.invoiceUrl, bank_slip_url: p.bankSlipUrl,
     }));
     res.json({ total: invoices.length, invoices });
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar faturas' }); }
 });
 
-// POST /billing/generate-pix/:paymentId
+// ── POST /billing/generate-pix/:paymentId ───────────────────
 router.post('/generate-pix/:paymentId', requireAuth, async (req, res) => {
   try {
     const pix = await asaas('GET', `/payments/${req.params.paymentId}/pixQrCode`);
     res.json({ qr_code: pix.encodedImage, copy_paste: pix.payload, expiration: pix.expirationDate });
   } catch (err) { res.status(500).json({ error: 'Erro ao gerar Pix' }); }
+});
+
+// ── GET /billing/plans ──────────────────────────────────────
+// Public-friendly endpoint for website CTAs
+router.get('/plans', async (req, res) => {
+  const plans = Object.entries(PLANS).map(([key, cfg]) => ({
+    key,
+    name: cfg.name,
+    monthly: cfg.monthly,
+    annual_card: getPlanValue(key, 'annual', 'CREDIT_CARD'),
+    annual_pix: getPlanValue(key, 'annual', 'PIX'),
+    annual_card_discount: `${Math.round(ANNUAL_CARD_DISCOUNT * 100)}%`,
+    annual_pix_discount: `${Math.round(ANNUAL_PIX_DISCOUNT * 100)}%`,
+  }));
+  res.json({ plans });
 });
 
 module.exports = router;
