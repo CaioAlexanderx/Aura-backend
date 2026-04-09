@@ -15,7 +15,7 @@ router.use('/', require('./company'));
 router.use('/dashboard', require('./dashboard'));
 router.use('/dashboard/sparkline', require('./dashboardSparkline'));
 
-// Financeiro — S3: CRUD simples ANTES das rotas batch
+// Financeiro
 router.use('/transactions', require('./transactions'));
 router.use('/transactions', require('./transactionsBatch'));
 router.use('/transactions/categorize', require('./categorize'));
@@ -27,7 +27,7 @@ router.use('/financial/history', require('./financialHistory'));
 // MKT-01: Bank Reconciliation
 router.use('/bank', require('./bankReconciliation'));
 
-// PDV + Estoque — S4: CRUD simples ANTES das rotas ranking
+// PDV + Estoque
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
 router.use('/products', require('./products'));
@@ -36,7 +36,7 @@ router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 router.use('/products/:pid/variants', require('./variants'));
 
-// MKT-02: NFC-e (Cupom Fiscal)
+// MKT-02: NFC-e
 router.use('/nfce', require('./nfce'));
 
 // MKT-04: Document Storage (R2)
@@ -57,24 +57,29 @@ router.use('/print', require('./print'));
 router.use('/sales/analytics', require('./salesAnalytics'));
 router.use('/reviews', require('./reviews').reviewsRouter);
 
-// VER-01b: Modules (accessible to all plans, admin-only write inside route)
+// VER-01b: Modules
 router.use('/modules', require('./modules'));
 
-// F6: Billing (Asaas — all plans)
+// F6: Billing (Asaas)
 router.use('/billing', require('./billing'));
 
 // ── NEGOCIO+ ─────────────────────────────────────────────────
 
-// S5: Customers CRUD ANTES das rotas de ranking/retention
+// Customers
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./customers'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
+
+// Employees: CRUD ANTES de ranking e commission
+router.use('/employees', requirePlan('negocio', 'expansao'), require('./employees'));
+router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
+router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
+
+// Other Negocio+
 router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appointments'));
 router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
 router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
-router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
-router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3'));
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
