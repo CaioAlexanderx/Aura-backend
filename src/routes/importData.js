@@ -193,7 +193,7 @@ router.post('/customers/import', requireAuth, async (req, res) => {
   const batchId = uuidv4();
   let saved = 0, dupes = 0;
 
-  const client = await db.pool.connect();
+  const client = await db.connect();
   try {
     await client.query('BEGIN');
 
@@ -331,7 +331,7 @@ router.post('/products/import', requireAuth, async (req, res) => {
   const batchId = uuidv4();
   let saved = 0, dupes = 0;
 
-  const client = await db.pool.connect();
+  const client = await db.connect();
   try {
     await client.query('BEGIN');
 
@@ -511,7 +511,7 @@ router.post('/products/import-nfe', requireAuth, async (req, res) => {
   const batchId = uuidv4();
   let saved = 0, dupes = 0;
 
-  const client = await db.pool.connect();
+  const client = await db.connect();
   try {
     await client.query('BEGIN');
 
@@ -684,7 +684,7 @@ router.delete('/imports/:batch_id', requireAuth, async (req, res) => {
       return res.status(400).json({ error: `Módulo '${module}' não suporta desfazer` });
     }
 
-    const client = await db.pool.connect();
+    const client = await db.connect();
     try {
       await client.query('BEGIN');
 
