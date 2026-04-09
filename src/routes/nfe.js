@@ -1,13 +1,13 @@
 // ============================================================
-// AURA. — Sprint 4: NF-e Routes (Focus NFe)
+// AURA. — Sprint 4 v2: NF-e Routes (Nuvem Fiscal)
 // Fase 1: NFS-e (servicos) | Fase 2: NFC-e (varejo)
+// FREE tier: 1,000 ops/month, unlimited CNPJs
 // Mounted at: /companies/:id/nfe
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
-const focusnfe = require('../services/focusnfe');
-const { v4: uuid } = require('uuid');
+const nuvem = require('../services/nuvemfiscal');
 
 // ── Helper: get company with NFe config ──────────────────
 async function getCompanyNfe(companyId) {
@@ -25,23 +25,40 @@ async function getCompanyNfe(companyId) {
   return rows[0];
 }
 
-// ── POST /nfe/setup — Register company with Focus NFe ────
+// ── POST /nfe/setup — Register company with Nuvem Fiscal ──
 router.post('/setup', async (req, res) => {
   const cid = req.params.id;
   try {
     const company = await getCompanyNfe(cid);
     if (company.focus_company_id) {
-      return res.json({ message: 'Empresa ja registrada na Focus NFe', focus_id: company.focus_company_id });
+      return res.json({ message: 'Empresa ja registrada', provider_id: company.focus_company_id });
     }
-    const result = await focusnfe.registerCompany(company);
-    const focusId = result.data?.id || company.cnpj?.replace(/\D/g, '');
+    const result = await nuvem.registerCompany(company);
+    const providerId = result.cpf_cnpj || company.cnpj?.replace(/\D/g, '');
     await db.query(
       'UPDATE companies SET focus_company_id = $1, updated_at = NOW() WHERE id = $2',
-      [focusId, cid]
+      [providerId, cid]
     );
-    res.status(201).json({ message: 'Empresa registrada na Focus NFe', focus_id: focusId });
+    res.status(201).json({ message: 'Empresa registrada na Nuvem Fiscal', provider_id: providerId });
   } catch (err) {
     console.error('[NFE] Setup error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /nfe/certificate — Upload certificate A1 ────────
+router.post('/certificate', async (req, res) => {
+  const cid = req.params.id;
+  const { certificate, password } = req.body;
+  if (!certificate || !password) return res.status(400).json({ error: 'certificate (base64) e password obrigatorios' });
+  try {
+    const company = await getCompanyNfe(cid);
+    if (!company.cnpj) return res.status(400).json({ error: 'Empresa sem CNPJ cadastrado' });
+    await nuvem.uploadCertificate(company.cnpj, certificate, password);
+    await db.query('UPDATE companies SET certificate_uploaded = true, updated_at = NOW() WHERE id = $1', [cid]);
+    res.json({ message: 'Certificado A1 enviado com sucesso' });
+  } catch (err) {
+    console.error('[NFE] Certificate error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -62,30 +79,29 @@ router.post('/emit/nfse', async (req, res) => {
     if (!company.cnpj) return res.status(400).json({ error: 'Empresa sem CNPJ cadastrado' });
     if (!company.inscricao_municipal) return res.status(400).json({ error: 'Inscricao municipal nao cadastrada. Atualize em Configuracoes.' });
 
-    // Save to DB first
-    const { rows } = await db.query(
+    // Save to DB
+    await db.query(
       `INSERT INTO nfe_documents (company_id, ref, type, status, recipient_cnpj, recipient_name, description, service_code, value, iss_rate, payload)
-       VALUES ($1,$2,'nfse','pending',$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+       VALUES ($1,$2,'nfse','pending',$3,$4,$5,$6,$7,$8,$9)`,
       [cid, ref, recipient_cnpj || recipient_cpf || '', recipient_name || '', description, service_code || '', value, iss_rate || 2, JSON.stringify(req.body)]
     );
 
-    // Emit via Focus NFe
-    const result = await focusnfe.emitNfse(ref, company, req.body);
+    // Emit via Nuvem Fiscal
+    const result = await nuvem.emitNfse(company, req.body);
+    const nuvemId = result.id || null;
+    const status = result.status === 'autorizado' ? 'authorized'
+                 : result.status === 'rejeitado' ? 'error'
+                 : 'processing';
 
-    // Update with Focus response
-    const status = result.data?.status || (result.status === 422 ? 'error' : 'processing');
     await db.query(
-      `UPDATE nfe_documents SET status=$1, focus_id=$2, error_message=$3, updated_at=NOW() WHERE ref=$4 AND company_id=$5`,
-      [status === 'autorizado' ? 'authorized' : status === 'erro_autorizacao' ? 'error' : 'processing',
-       result.data?.id || null, result.data?.mensagem_sefaz || result.data?.erros?.[0]?.mensagem || null, ref, cid]
+      `UPDATE nfe_documents SET status=$1, focus_id=$2, number=$3, xml_url=$4, pdf_url=$5,
+       error_message=$6, issued_at=CASE WHEN $1='authorized' THEN NOW() ELSE NULL END, updated_at=NOW()
+       WHERE ref=$7 AND company_id=$8`,
+      [status, nuvemId, result.numero || null, result.link_xml || null, result.link_pdf || null,
+       result.mensagem || null, ref, cid]
     );
 
-    res.status(201).json({
-      ref,
-      status: result.data?.status || 'processing',
-      focus_response: result.data,
-      message: result.status === 422 ? 'Erro de validacao' : 'NFS-e em processamento',
-    });
+    res.status(201).json({ ref, nuvem_id: nuvemId, status, response: result });
   } catch (err) {
     console.error('[NFE] Emit NFSe error:', err.message);
     await db.query('UPDATE nfe_documents SET status=$1, error_message=$2 WHERE ref=$3', ['error', err.message, ref]).catch(() => {});
@@ -113,19 +129,21 @@ router.post('/emit/nfce', async (req, res) => {
       [cid, ref, recipient_cpf || '', recipient_name || 'Consumidor', total_value, JSON.stringify(req.body)]
     );
 
-    const result = await focusnfe.emitNfce(ref, company, req.body);
-    const status = result.data?.status || 'processing';
+    const result = await nuvem.emitNfce(company, req.body);
+    const nuvemId = result.id || null;
+    const status = result.status === 'autorizado' ? 'authorized'
+                 : result.status === 'rejeitado' ? 'error'
+                 : 'processing';
 
     await db.query(
-      `UPDATE nfe_documents SET status=$1, focus_id=$2, number=$3, access_key=$4, xml_url=$5, pdf_url=$6, error_message=$7, issued_at=CASE WHEN $1='authorized' THEN NOW() ELSE NULL END, updated_at=NOW()
+      `UPDATE nfe_documents SET status=$1, focus_id=$2, number=$3, access_key=$4, xml_url=$5, pdf_url=$6,
+       error_message=$7, issued_at=CASE WHEN $1='authorized' THEN NOW() ELSE NULL END, updated_at=NOW()
        WHERE ref=$8 AND company_id=$9`,
-      [status === 'autorizado' ? 'authorized' : status === 'erro_autorizacao' ? 'error' : 'processing',
-       result.data?.id || null, result.data?.numero || null, result.data?.chave_nfe || null,
-       result.data?.caminho_xml_nota_fiscal || null, result.data?.caminho_danfe || null,
-       result.data?.mensagem_sefaz || null, ref, cid]
+      [status, nuvemId, result.numero || null, result.chave_acesso || null,
+       result.link_xml || null, result.link_pdf || null, result.mensagem || null, ref, cid]
     );
 
-    res.status(201).json({ ref, status, focus_response: result.data });
+    res.status(201).json({ ref, nuvem_id: nuvemId, status, response: result });
   } catch (err) {
     console.error('[NFE] Emit NFCe error:', err.message);
     await db.query('UPDATE nfe_documents SET status=$1, error_message=$2 WHERE ref=$3', ['error', err.message, ref]).catch(() => {});
@@ -137,25 +155,24 @@ router.post('/emit/nfce', async (req, res) => {
 router.get('/:ref', async (req, res) => {
   const { id: cid, ref } = req.params;
   try {
-    // Check local DB first
     const { rows } = await db.query('SELECT * FROM nfe_documents WHERE ref=$1 AND company_id=$2', [ref, cid]);
     if (!rows.length) return res.status(404).json({ error: 'Documento nao encontrado' });
-
     const doc = rows[0];
-    // If still processing, check Focus NFe for updates
-    if (doc.status === 'processing' || doc.status === 'pending') {
+
+    // If still processing, poll Nuvem Fiscal
+    if ((doc.status === 'processing' || doc.status === 'pending') && doc.focus_id) {
       try {
-        const result = await focusnfe.query(doc.type, ref);
-        if (result.data?.status === 'autorizado') {
+        const queryFn = doc.type === 'nfse' ? nuvem.queryNfse : nuvem.queryNfce;
+        const result = await queryFn(doc.focus_id);
+        if (result.status === 'autorizado') {
           await db.query(
             `UPDATE nfe_documents SET status='authorized', number=$1, access_key=$2, xml_url=$3, pdf_url=$4, issued_at=NOW(), updated_at=NOW() WHERE ref=$5`,
-            [result.data.numero || null, result.data.chave_nfe || result.data.codigo_verificacao || null,
-             result.data.caminho_xml_nota_fiscal || result.data.url || null,
-             result.data.caminho_danfe || result.data.url || null, ref]
+            [result.numero || null, result.chave_acesso || result.codigo_verificacao || null,
+             result.link_xml || null, result.link_pdf || null, ref]
           );
           doc.status = 'authorized';
-          doc.number = result.data.numero;
-          doc.pdf_url = result.data.caminho_danfe || result.data.url;
+          doc.number = result.numero;
+          doc.pdf_url = result.link_pdf;
         }
       } catch {}
     }
@@ -172,15 +189,16 @@ router.post('/:ref/cancel', async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Documento nao encontrado' });
     const doc = rows[0];
     if (doc.status === 'cancelled') return res.status(400).json({ error: 'Documento ja cancelado' });
+    if (!doc.focus_id) return res.status(400).json({ error: 'Documento sem ID do provedor' });
 
-    const cancelFn = doc.type === 'nfse' ? focusnfe.cancelNfse : focusnfe.cancelNfce;
-    const result = await cancelFn(ref, justificativa || 'Cancelamento solicitado');
+    const cancelFn = doc.type === 'nfse' ? nuvem.cancelNfse : nuvem.cancelNfce;
+    const result = await cancelFn(doc.focus_id, justificativa || 'Cancelamento solicitado');
 
     await db.query(
-      `UPDATE nfe_documents SET status='cancelled', cancelled_at=NOW(), cancel_xml_url=$1, updated_at=NOW() WHERE ref=$2`,
-      [result.data?.caminho_xml_cancelamento || null, ref]
+      `UPDATE nfe_documents SET status='cancelled', cancelled_at=NOW(), updated_at=NOW() WHERE ref=$1`,
+      [ref]
     );
-    res.json({ ref, status: 'cancelled', focus_response: result.data });
+    res.json({ ref, status: 'cancelled', response: result });
   } catch (err) {
     console.error('[NFE] Cancel error:', err.message);
     res.status(500).json({ error: err.message });
