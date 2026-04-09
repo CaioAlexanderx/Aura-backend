@@ -31,8 +31,9 @@ router.use('/companies/:id', privateCompaniesRouter);
 // ── ADMIN ───────────────────────────────────────────────────
 router.use('/admin', require('./admin'));
 
-// ── WEBHOOKS (públicos, validação HMAC interna) ─────────────
+// ── WEBHOOKS (públicos, validação interna) ──────────────────
 router.use('/webhooks/asaas', require('./webhookAsaas'));
+router.use('/webhooks/whatsapp', require('./webhookWhatsapp'));
 
 // ── ROTAS PÚBLICAS ──────────────────────────────────────────
 router.use('/reviews', publicReviewsRouter);
