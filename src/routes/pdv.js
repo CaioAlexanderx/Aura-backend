@@ -1,12 +1,10 @@
 // ============================================================
 // AURA. — PDV-01: Caixa de Vendas Touch
-// Venda atômica: sale + items + baixa de estoque + métricas cliente
+// Venda atômica: sale + items + baixa de estoque + métricas cliente + métricas funcionário
 // Suporte a desconto, variantes, Pix, múltiplos pagamentos
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
-
-// Nota: requireAuth + requireCompanyAccess já aplicados em private.js
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 
@@ -15,7 +13,7 @@ const fmt = (v) => parseFloat(v || 0).toFixed(2);
 // ============================================================
 router.post('/sale', async (req, res) => {
   const {
-    items, customer_id, payment_method,
+    items, customer_id, employee_id, payment_method,
     discount_amount, discount_pct,
     notes, seller_id, payments,
   } = req.body;
@@ -66,15 +64,27 @@ router.post('/sale', async (req, res) => {
     }
     const totalAmount = parseFloat((subtotal - discountAmt).toFixed(2));
 
+    // Validate employee_id belongs to this company (if provided)
+    if (employee_id) {
+      const { rows: empCheck } = await client.query(
+        `SELECT id FROM employees WHERE id=$1 AND company_id=$2`, [employee_id, req.params.id]
+      );
+      if (!empCheck.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' });
+      }
+    }
+
     const { rows: sales } = await client.query(
       `INSERT INTO sales
-         (company_id, customer_id, seller_id, total_amount, discount_amount,
+         (company_id, customer_id, seller_id, employee_id, total_amount, discount_amount,
           payment_method, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        RETURNING *`,
       [
         req.params.id, customer_id || null,
         seller_id || req.user?.id || null,
+        employee_id || null,
         totalAmount, discountAmt,
         payment_method || (payments?.[0]?.method) || 'dinheiro',
         notes || null,
@@ -124,12 +134,22 @@ router.post('/sale', async (req, res) => {
       }
     }
 
+    // Update customer metrics (spending)
     if (customer_id) {
       await client.query(
         `UPDATE customers SET total_purchases=total_purchases+1, total_spent=total_spent+$1,
            last_purchase_at=NOW(), first_purchase_at=COALESCE(first_purchase_at,NOW()), updated_at=NOW()
          WHERE id=$2 AND company_id=$3`,
         [totalAmount, customer_id, req.params.id]
+      );
+    }
+
+    // Update employee metrics (sales performance)
+    if (employee_id) {
+      await client.query(
+        `UPDATE employees SET total_sales=COALESCE(total_sales,0)+1, total_revenue=COALESCE(total_revenue,0)+$1, updated_at=NOW()
+         WHERE id=$2 AND company_id=$3`,
+        [totalAmount, employee_id, req.params.id]
       );
     }
 
@@ -156,8 +176,9 @@ router.post('/sale', async (req, res) => {
 router.get('/sale/:saleId', async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT s.*, u.full_name AS seller_name, c.name AS customer_name
+      `SELECT s.*, u.full_name AS seller_name, c.name AS customer_name, e.name AS employee_name
        FROM sales s LEFT JOIN users u ON u.id=s.seller_id LEFT JOIN customers c ON c.id=s.customer_id
+       LEFT JOIN employees e ON e.id=s.employee_id
        WHERE s.id=$1 AND s.company_id=$2`,
       [req.params.saleId, req.params.id]
     );
@@ -184,10 +205,12 @@ router.get('/sales', async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.created_at,
-              u.full_name AS seller_name, c.name AS customer_name, COUNT(si.id) AS item_count
+              u.full_name AS seller_name, c.name AS customer_name, e.name AS employee_name,
+              COUNT(si.id) AS item_count
        FROM sales s LEFT JOIN users u ON u.id=s.seller_id LEFT JOIN customers c ON c.id=s.customer_id
+       LEFT JOIN employees e ON e.id=s.employee_id
        LEFT JOIN sale_items si ON si.sale_id=s.id
-       WHERE ${cond.join(' AND ')} GROUP BY s.id, u.full_name, c.name
+       WHERE ${cond.join(' AND ')} GROUP BY s.id, u.full_name, c.name, e.name
        ORDER BY s.created_at DESC LIMIT $${i} OFFSET $${i+1}`,
       [...vals, limit, offset]
     );
@@ -219,16 +242,43 @@ router.get('/summary', async (req, res) => {
   }
 });
 
+// GET /companies/:id/pdv/employee-ranking — Sales by employee
+router.get('/employee-ranking', async (req, res) => {
+  const { period = '30d' } = req.query;
+  const days = period === '7d' ? 7 : period === '90d' ? 90 : 30;
+  try {
+    const { rows } = await db.query(
+      `SELECT e.id, e.name, e.role,
+              COUNT(s.id) AS sales_count,
+              COALESCE(SUM(s.total_amount), 0) AS total_revenue,
+              ROUND(COALESCE(AVG(s.total_amount), 0)::NUMERIC, 2) AS avg_ticket,
+              MAX(s.created_at) AS last_sale_at
+       FROM employees e
+       LEFT JOIN sales s ON s.employee_id = e.id AND s.created_at >= NOW() - INTERVAL '${days} days'
+       WHERE e.company_id = $1 AND e.status = 'active'
+       GROUP BY e.id, e.name, e.role
+       ORDER BY total_revenue DESC`,
+      [req.params.id]
+    );
+    res.json({ period, employees: rows });
+  } catch (e) {
+    console.error('[PDV] Erro ao buscar ranking:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar ranking de funcionarios' });
+  }
+});
+
 // DELETE /companies/:id/pdv/sale/:saleId
 router.delete('/sale/:saleId', async (req, res) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT id FROM sales WHERE id=$1 AND company_id=$2`,
+      `SELECT id, customer_id, employee_id, total_amount FROM sales WHERE id=$1 AND company_id=$2`,
       [req.params.saleId, req.params.id]
     );
     if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda não encontrada' }); }
+    const sale = rows[0];
+
     const { rows: items } = await client.query(
       `SELECT product_id, variant_id, quantity FROM sale_items WHERE sale_id=$1`,
       [req.params.saleId]
@@ -241,6 +291,25 @@ router.delete('/sale/:saleId', async (req, res) => {
         await client.query(`UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`, [item.quantity, item.product_id, req.params.id]);
       }
     }
+
+    // Revert customer metrics
+    if (sale.customer_id) {
+      await client.query(
+        `UPDATE customers SET total_purchases=GREATEST(0,total_purchases-1), total_spent=GREATEST(0,total_spent-$1), updated_at=NOW()
+         WHERE id=$2 AND company_id=$3`,
+        [sale.total_amount, sale.customer_id, req.params.id]
+      );
+    }
+
+    // Revert employee metrics
+    if (sale.employee_id) {
+      await client.query(
+        `UPDATE employees SET total_sales=GREATEST(0,COALESCE(total_sales,0)-1), total_revenue=GREATEST(0,COALESCE(total_revenue,0)-$1), updated_at=NOW()
+         WHERE id=$2 AND company_id=$3`,
+        [sale.total_amount, sale.employee_id, req.params.id]
+      );
+    }
+
     await client.query(`UPDATE sales SET notes=CONCAT(COALESCE(notes,''),' [CANCELADA]'), updated_at=NOW() WHERE id=$1`, [req.params.saleId]);
     await client.query('COMMIT');
     res.json({ ok: true, cancelled: req.params.saleId });
