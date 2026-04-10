@@ -54,9 +54,9 @@ const PRODUCT_FIELDS = {
   name:       ['nome', 'produto', 'name', 'descricao', 'descrição', 'description', 'item'],
   price:      ['preco', 'preço', 'price', 'valor venda', 'valor', 'preco venda'],
   cost_price: ['custo', 'cost', 'preco custo', 'preço custo', 'cost_price', 'valor custo'],
-  stock_qty:  ['estoque', 'quantidade', 'qty', 'stock', 'qtd', 'saldo'],
+  stock_qty:  ['estoque atual', 'estoque', 'quantidade', 'qty', 'stock', 'qtd', 'saldo'],
   stock_min:  ['estoque minimo', 'min', 'minimo', 'stock_min'],
-  barcode:    ['codigo barras', 'código barras', 'ean', 'barcode', 'gtin', 'codigo', 'código'],
+  barcode:    ['codigo de barras', 'codigo barras', 'código barras', 'ean', 'barcode', 'gtin'],
   sku:        ['sku', 'referencia', 'referência', 'cod interno', 'codigo interno'],
   category:   ['categoria', 'category', 'grupo', 'tipo'],
   unit:       ['unidade', 'un', 'unit', 'medida'],
@@ -70,7 +70,7 @@ function suggestMapping(headers, fieldDefs) {
     const normalized = header.toLowerCase().trim()
       .normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // remove acentos
     for (const [field, aliases] of Object.entries(fieldDefs)) {
-      if (aliases.some(a => normalized.includes(a) || a.includes(normalized))) {
+      if (aliases.some(a => normalized === a || normalized.startsWith(a + " ") || normalized.startsWith(a + "(") || normalized.endsWith(" " + a) || (a.length >= 4 && normalized.includes(a)))) {
         if (!map[header]) map[header] = field;
       }
     }
@@ -82,12 +82,18 @@ function suggestMapping(headers, fieldDefs) {
 
 function parseBRL(value) {
   if (!value) return null;
-  const clean = String(value)
-    .replace(/[R$\s]/g, '')
-    .replace(/\./g, '')
-    .replace(',', '.');
+  let clean = String(value).replace(/[R$\s]/g, '').trim();
+  if (!clean) return null;
+  // Both dot and comma present: Brazilian format (1.234,56)
+  if (clean.includes(',') && clean.includes('.')) {
+    clean = clean.replace(/\./g, '').replace(',', '.');
+  } else if (clean.includes(',')) {
+    // Comma only: comma is decimal (49,90)
+    clean = clean.replace(',', '.');
+  }
+  // Dot only: dot is decimal (49.90) - leave as-is
   const n = parseFloat(clean);
-  return isNaN(n) ? null : n;
+  return isNaN(n) || n < 0 ? null : n;
 }
 
 function parseDate(value) {
