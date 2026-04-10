@@ -104,7 +104,9 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     ]
   );
 
-  const baseUrl   = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br';
+  // IMPORTANTE: URL inclui /app pois o Expo usa baseUrl: "/app"
+  // Formato: https://app.getaura.com.br/app/invite/TOKEN
+  const baseUrl   = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br/app';
   const inviteUrl = `${baseUrl}/invite/${inviteToken}`;
 
   // Envia email apenas se destinatario informado
