@@ -1,6 +1,7 @@
 // ============================================================
-// AURA. — Rotas Multi-usuário RBAC (BE-09)
+// AURA. — Rotas Multi-usuario RBAC (BE-09)
 // fix(security): B-01 — requireCompanyAccess aplicado em todos os endpoints
+// fix(ci): checks de erro usam strings sem acento (consistente com o service)
 // ============================================================
 
 const express = require('express');
@@ -13,7 +14,6 @@ const {
 } = require('../services/members');
 
 // GET /companies/:id/members
-// Qualquer membro ativo da empresa pode listar
 router.get('/', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const members = await listMembers(req.params.id);
@@ -29,47 +29,56 @@ router.get('/', requireAuth, requireCompanyAccess(), async (req, res) => {
 });
 
 // POST /companies/:id/members/invite
-// Apenas owner ou admin da empresa podem convidar
 router.post('/invite', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const result = await inviteMember(req.params.id, req.user.id, req.body);
     res.status(201).json(result);
   } catch (err) {
-    res.status(err.message.includes('já tem') ? 409 : 400).json({ error: err.message });
+    // 'ja tem' (sem acento) — gerado pelo service via push_files
+    const status = err.message.includes('ja tem') || err.message.includes('ja tem')
+      ? 409
+      : 400;
+    res.status(status).json({ error: err.message });
   }
 });
 
-// POST /members/accept/:token  (rota pública por token — sem :id de empresa)
+// POST /members/accept/:token (legado — use /invite/:token/accept para novos clientes)
 router.post('/accept/:token', requireAuth, async (req, res) => {
   try {
     const member = await acceptInvite(req.params.token, req.user.id);
-    res.json({ message: 'Convite aceito. Bem-vindo à equipe!', member });
+    res.json({ message: 'Convite aceito. Bem-vindo a equipe!', member });
   } catch (err) {
-    res.status(err.message.includes('inválido') ? 410 : 403).json({ error: err.message });
+    // 'invalido' ou 'nvalid' (sem acento)
+    const status = err.message.includes('invalido') || err.message.includes('nvalid')
+      ? 410
+      : 403;
+    res.status(status).json({ error: err.message });
   }
 });
 
 // PATCH /companies/:id/members/:mid
-// Apenas owner ou admin da empresa
 router.patch('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const member = await updateMemberPermissions(req.params.id, req.params.mid, req.body);
     res.json({ member });
   } catch (err) {
-    res.status(err.message.includes('não encontrado') ? 404 : 400).json({ error: err.message });
+    // 'nao encontrado' (sem acento) — gerado pelo service
+    const status = err.message.includes('nao encontrado') || err.message.includes('encontrado')
+      ? 404
+      : 400;
+    res.status(status).json({ error: err.message });
   }
 });
 
 // DELETE /companies/:id/members/:mid
-// Apenas owner ou admin da empresa
 router.delete('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const { rows } = await db.query(
       'SELECT user_id FROM company_members WHERE id=$1 AND company_id=$2',
       [req.params.mid, req.params.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Membro não encontrado' });
-    if (rows[0].user_id === req.user.id) return res.status(400).json({ error: 'Você não pode remover a si mesmo' });
+    if (!rows.length) return res.status(404).json({ error: 'Membro nao encontrado' });
+    if (rows[0].user_id === req.user.id) return res.status(400).json({ error: 'Voce nao pode remover a si mesmo' });
     await db.query(
       `UPDATE company_members SET status='suspended', is_active=false WHERE id=$1 AND company_id=$2`,
       [req.params.mid, req.params.id]
@@ -79,7 +88,6 @@ router.delete('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'adm
 });
 
 // GET /companies/:id/members/billing
-// Qualquer membro ativo pode ver o billing
 router.get('/billing', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const activeCount = await countActiveMembers(req.params.id);
@@ -89,13 +97,12 @@ router.get('/billing', requireAuth, requireCompanyAccess(), async (req, res) => 
       billable_members: billable,
       price_per_member: 19,
       monthly_total: billable * 19,
-      note: 'O titular da conta não é cobrado. R$19/membro adicional ativo/mês.',
+      note: 'O titular da conta nao e cobrado. R$19/membro adicional ativo/mes.',
     });
-  } catch (err) { res.status(500).json({ error: 'Erro ao calcular cobrança' }); }
+  } catch (err) { res.status(500).json({ error: 'Erro ao calcular cobranca' }); }
 });
 
 // GET /companies/:id/members/roles
-// Qualquer membro pode listar templates de roles
 router.get('/roles', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -111,10 +118,9 @@ router.get('/roles', requireAuth, requireCompanyAccess(), async (req, res) => {
 });
 
 // POST /companies/:id/members/roles
-// Apenas owner ou admin
 router.post('/roles', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   const { name, description, permissions = {} } = req.body;
-  if (!name) return res.status(400).json({ error: 'name é obrigatório' });
+  if (!name) return res.status(400).json({ error: 'name e obrigatorio' });
   try {
     const { rows } = await db.query(
       `INSERT INTO role_templates (company_id, name, description, permissions)
@@ -123,13 +129,12 @@ router.post('/roles', requireAuth, requireCompanyAccess({ roles: ['owner', 'admi
     );
     res.status(201).json({ template: rows[0] });
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'Já existe um template com este nome' });
+    if (err.code === '23505') return res.status(409).json({ error: 'Ja existe um template com este nome' });
     res.status(500).json({ error: 'Erro ao criar template' });
   }
 });
 
 // PATCH /companies/:id/members/roles/:rid
-// Apenas owner ou admin
 router.patch('/roles/:rid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   const { name, description, permissions } = req.body;
   const fields = [], values = [];
@@ -145,20 +150,19 @@ router.patch('/roles/:rid', requireAuth, requireCompanyAccess({ roles: ['owner',
       `UPDATE role_templates SET ${fields.join(',')} WHERE id=$${idx++} AND company_id=$${idx} RETURNING *`,
       values
     );
-    if (!rows.length) return res.status(404).json({ error: 'Template não encontrado ou é global' });
+    if (!rows.length) return res.status(404).json({ error: 'Template nao encontrado ou e global' });
     res.json({ template: rows[0] });
   } catch (err) { res.status(500).json({ error: 'Erro ao atualizar template' }); }
 });
 
 // DELETE /companies/:id/members/roles/:rid
-// Apenas owner ou admin
 router.delete('/roles/:rid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const { rows } = await db.query(
       'DELETE FROM role_templates WHERE id=$1 AND company_id=$2 RETURNING id',
       [req.params.rid, req.params.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Template não encontrado ou é global' });
+    if (!rows.length) return res.status(404).json({ error: 'Template nao encontrado ou e global' });
     res.json({ message: 'Template removido' });
   } catch (err) { res.status(500).json({ error: 'Erro ao remover template' }); }
 });
