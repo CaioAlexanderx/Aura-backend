@@ -8,14 +8,12 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 
-// Plan-based item limits
-// essencial: 1000 | negocio: 5000 | expansao: unlimited
 function getPlanLimit(plan) {
   switch ((plan || '').toLowerCase()) {
     case 'expansao':
     case 'personalizado': return 999999;
     case 'negocio':       return 5000;
-    default:              return 1000; // essencial / trial / unknown
+    default:              return 1000;
   }
 }
 
@@ -40,13 +38,11 @@ router.get('/', async (req, res) => {
       params.push(`%${search}%`);
     }
 
-    const countRes = await db.query(
-      `SELECT COUNT(*) AS total FROM products ${where}`, params
-    );
+    const countRes = await db.query(`SELECT COUNT(*) AS total FROM products ${where}`, params);
 
     const dataRes = await db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
-              stock_qty, stock_min, stock_max, unit, is_active, created_at
+              stock_qty, stock_min, stock_max, unit, color, size, is_active, created_at
        FROM products ${where}
        ORDER BY name ASC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -59,6 +55,7 @@ router.get('/', async (req, res) => {
       price: parseFloat(r.price) || 0, cost_price: parseFloat(r.cost_price) || 0,
       stock_qty: parseInt(r.stock_qty) || 0, min_stock: parseInt(r.stock_min) || 0,
       stock_max: parseInt(r.stock_max) || 0, unit: r.unit || 'un',
+      color: r.color || '', size: r.size || '',
       is_active: r.is_active !== false, created_at: r.created_at,
     }));
 
@@ -72,13 +69,13 @@ router.get('/', async (req, res) => {
 // POST / -- create product
 router.post('/', async (req, res) => {
   const cid = req.params.id;
-  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit } = req.body;
+  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size } = req.body;
 
   if (!name || !String(name).trim()) {
     return res.status(400).json({ error: 'name e obrigatorio' });
   }
 
-  // Enforce plan limit on create
+  // Enforce plan limit
   try {
     const planLimit = getPlanLimit(req.company?.plan);
     const countRes = await db.query('SELECT COUNT(*) AS total FROM products WHERE company_id = $1', [cid]);
@@ -86,8 +83,7 @@ router.post('/', async (req, res) => {
     if (current >= planLimit) {
       return res.status(403).json({
         error: `Limite de produtos atingido para o seu plano (${planLimit} itens). Faca upgrade para continuar.`,
-        limit: planLimit,
-        current,
+        limit: planLimit, current,
       });
     }
   } catch (err) {
@@ -96,12 +92,17 @@ router.post('/', async (req, res) => {
 
   try {
     const result = await db.query(
-      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
-      [cid, String(name).trim(), sku || null, barcode || null, category || 'Produtos',
-       description || null, parseFloat(price) || 0, parseFloat(cost_price) || 0,
-       parseInt(stock_qty) || 0, parseInt(min_stock) || 0, parseInt(stock_max) || 0, unit || 'un']
+      [
+        cid, String(name).trim(), sku || null, barcode || null, category || 'Produtos',
+        description || null, parseFloat(price) || 0, parseFloat(cost_price) || 0,
+        parseInt(stock_qty) || 0, parseInt(min_stock) || 0, parseInt(stock_max) || 0,
+        unit || 'un',
+        color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
+        size ? String(size).slice(0, 100) : null,
+      ]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -111,11 +112,10 @@ router.post('/', async (req, res) => {
 });
 
 // PATCH /:pid -- update product
-// INT-STOCK-01: Supports stock_qty_decrement for atomic stock reduction
 router.patch('/:pid', async (req, res) => {
   const { id: cid, pid } = req.params;
 
-  // INT-STOCK-01: Handle stock_qty_decrement atomically
+  // Atomic stock decrement
   if (req.body.stock_qty_decrement !== undefined) {
     const decrement = parseInt(req.body.stock_qty_decrement);
     if (!decrement || decrement <= 0) {
@@ -135,12 +135,11 @@ router.patch('/:pid', async (req, res) => {
     }
   }
 
-  // Regular field update
   const fieldMap = {
     name: 'name', sku: 'sku', barcode: 'barcode', category: 'category',
     description: 'description', price: 'price', cost_price: 'cost_price',
     stock_qty: 'stock_qty', min_stock: 'stock_min', stock_max: 'stock_max',
-    unit: 'unit', is_active: 'is_active',
+    unit: 'unit', is_active: 'is_active', color: 'color', size: 'size',
   };
   const numFields = ['price', 'cost_price', 'stock_qty', 'stock_min', 'stock_max'];
   const updates = [];
@@ -150,14 +149,15 @@ router.patch('/:pid', async (req, res) => {
   for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
     if (req.body[bodyKey] !== undefined) {
       updates.push(`${dbCol} = $${idx}`);
-      values.push(numFields.includes(dbCol) ? parseFloat(req.body[bodyKey]) : req.body[bodyKey]);
+      let val = req.body[bodyKey];
+      if (numFields.includes(dbCol)) val = parseFloat(val);
+      if (dbCol === 'color' && val && !/^#[0-9A-Fa-f]{6}$/.test(val)) val = null;
+      values.push(val);
       idx++;
     }
   }
 
-  if (updates.length === 0) {
-    return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-  }
+  if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
 
   updates.push('updated_at = NOW()');
   values.push(pid, cid);
