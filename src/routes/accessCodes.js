@@ -9,10 +9,10 @@ const db     = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const crypto = require('crypto');
 
-// ── POST /auth/validate-code ──────────────────────────────────
+// POST /auth/validate-code
 router.post('/validate-code', async (req, res) => {
   const { code } = req.body;
-  if (!code) return res.status(400).json({ error: 'code obrigat\u00f3rio' });
+  if (!code) return res.status(400).json({ error: 'code obrigatorio' });
 
   try {
     const { rows } = await db.query(
@@ -22,19 +22,19 @@ router.post('/validate-code', async (req, res) => {
     );
 
     if (!rows.length) {
-      return res.status(404).json({ valid: false, error: 'C\u00f3digo n\u00e3o encontrado' });
+      return res.status(404).json({ valid: false, error: 'Codigo nao encontrado' });
     }
 
     const ac = rows[0];
 
     if (!ac.is_active) {
-      return res.json({ valid: false, error: 'C\u00f3digo desativado' });
+      return res.json({ valid: false, error: 'Codigo desativado' });
     }
     if (ac.uses >= ac.max_uses) {
-      return res.json({ valid: false, error: 'C\u00f3digo j\u00e1 atingiu o limite de usos' });
+      return res.json({ valid: false, error: 'Codigo ja atingiu o limite de usos' });
     }
     if (ac.expires_at && new Date(ac.expires_at) < new Date()) {
-      return res.json({ valid: false, error: 'C\u00f3digo expirado' });
+      return res.json({ valid: false, error: 'Codigo expirado' });
     }
 
     res.json({
@@ -46,11 +46,11 @@ router.post('/validate-code', async (req, res) => {
     });
   } catch (err) {
     console.error('validate-code error:', err);
-    res.status(500).json({ error: 'Erro ao validar c\u00f3digo' });
+    res.status(500).json({ error: 'Erro ao validar codigo' });
   }
 });
 
-// ── POST /referrals/generate ─────────────────────────────────
+// POST /referrals/generate
 router.post('/generate', requireAuth, async (req, res) => {
   try {
     // Check if user already has a referral code
@@ -63,11 +63,11 @@ router.post('/generate', requireAuth, async (req, res) => {
       return res.json({ code: existing[0].code, existing: true });
     }
 
-    // Get user name for code
+    // BUGFIX: column is full_name, not name
     const { rows: users } = await db.query(
-      `SELECT name FROM users WHERE id = $1`, [req.user.id]
+      `SELECT full_name FROM users WHERE id = $1`, [req.user.id]
     );
-    const firstName = (users[0]?.name || 'USER').split(' ')[0].toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Z]/g, '').slice(0, 8);
+    const firstName = (users[0]?.full_name || 'USER').split(' ')[0].toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Z]/g, '').slice(0, 8);
     const suffix = crypto.randomBytes(2).toString('hex').toUpperCase().slice(0, 4);
     const code = `REF-${firstName}${suffix}`;
 
@@ -80,24 +80,22 @@ router.post('/generate', requireAuth, async (req, res) => {
     res.status(201).json({ code, existing: false });
   } catch (err) {
     console.error('generate referral error:', err);
-    res.status(500).json({ error: 'Erro ao gerar c\u00f3digo de indica\u00e7\u00e3o' });
+    res.status(500).json({ error: 'Erro ao gerar codigo de indicacao' });
   }
 });
 
-// ── GET /referrals/mine ─────────────────────────────────────
+// GET /referrals/mine
 router.get('/mine', requireAuth, async (req, res) => {
   try {
-    // Get user's referral code
     const { rows: codes } = await db.query(
       `SELECT code, uses, max_uses, discount_pct, expires_at, created_at
        FROM access_codes WHERE referrer_id = $1 AND type = 'referral'`,
       [req.user.id]
     );
 
-    // Get referral history
     const { rows: referrals } = await db.query(
       `SELECT r.referred_email, r.status, r.created_at, r.completed_at,
-              u.name AS referred_name
+              u.full_name AS referred_name
        FROM referrals r
        LEFT JOIN users u ON u.id = r.referred_user_id
        WHERE r.referrer_id = $1
@@ -106,7 +104,6 @@ router.get('/mine', requireAuth, async (req, res) => {
     );
 
     const completed = referrals.filter(r => r.status === 'completed').length;
-    const savings = completed * 0.20; // 20% discount count
 
     res.json({
       code: codes[0] || null,
@@ -120,7 +117,7 @@ router.get('/mine', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('my referrals error:', err);
-    res.status(500).json({ error: 'Erro ao buscar indica\u00e7\u00f5es' });
+    res.status(500).json({ error: 'Erro ao buscar indicacoes' });
   }
 });
 
