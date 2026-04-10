@@ -8,10 +8,22 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 
+// Plan-based item limits
+// essencial: 1000 | negocio: 5000 | expansao: unlimited
+function getPlanLimit(plan) {
+  switch ((plan || '').toLowerCase()) {
+    case 'expansao':
+    case 'personalizado': return 999999;
+    case 'negocio':       return 5000;
+    default:              return 1000; // essencial / trial / unknown
+  }
+}
+
 // GET / -- list customers
 router.get('/', async (req, res) => {
   const companyId = req.params.id;
-  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+  const planLimit = getPlanLimit(req.company?.plan);
+  const limit = Math.min(parseInt(req.query.limit) || planLimit, planLimit);
   const offset = parseInt(req.query.offset) || 0;
   const search = req.query.search;
 
@@ -64,6 +76,7 @@ router.get('/', async (req, res) => {
       total: parseInt(countRes.rows[0]?.total) || 0,
       limit,
       offset,
+      plan_limit: planLimit,
     });
   } catch (err) {
     console.error('[customers] list error:', err.message);
@@ -78,6 +91,22 @@ router.post('/', async (req, res) => {
 
   if (!name || !String(name).trim()) {
     return res.status(400).json({ error: 'name e obrigatorio' });
+  }
+
+  // Enforce plan limit on create
+  try {
+    const planLimit = getPlanLimit(req.company?.plan);
+    const countRes = await db.query('SELECT COUNT(*) AS total FROM customers WHERE company_id = $1', [companyId]);
+    const current = parseInt(countRes.rows[0]?.total) || 0;
+    if (current >= planLimit) {
+      return res.status(403).json({
+        error: `Limite de clientes atingido para o seu plano (${planLimit} registros). Faca upgrade para continuar.`,
+        limit: planLimit,
+        current,
+      });
+    }
+  } catch (err) {
+    console.error('[customers] count check error:', err.message);
   }
 
   const finalBirthDate = birth_date || birthday || null;
