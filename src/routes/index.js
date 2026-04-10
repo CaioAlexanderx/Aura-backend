@@ -1,5 +1,5 @@
 // ============================================================
-// AURA. — Roteador Principal
+// AURA. - Roteador Principal
 // ============================================================
 const express = require('express');
 const router  = express.Router();
@@ -10,36 +10,39 @@ const onboardingRouter        = require('./onboarding');
 const accessCodesRouter       = require('./accessCodes');
 const verificationRouter      = require('./verification');
 
-// ── AUTENTICAÇÃO (pública) ──────────────────────────────────
+// Autenticacao (publica)
 router.use('/auth', require('./auth'));
 router.use('/auth', require('./passwordReset'));
 router.use('/auth', accessCodesRouter);
 router.use('/auth', verificationRouter);
 
-// ── REFERRALS (autenticada) ─────────────────────────────────
+// Referrals (autenticada)
 router.use('/referrals', accessCodesRouter);
 
-// ── ROTAS PRIVADAS POR EMPRESA ──────────────────────────────
+// Convites publicos (aceite sem company access)
+router.use('/invite', require('./invitePublic'));
+
+// Rotas privadas por empresa
 router.use('/companies/:id', privateCompaniesRouter);
 
-// ── ADMIN ───────────────────────────────────────────────────
+// Admin
 router.use('/admin', require('./admin'));
 
-// ── WEBHOOKS (públicos, validação interna) ──────────────────
-router.use('/webhooks/asaas', require('./webhookAsaas'));
-router.use('/webhooks/whatsapp', require('./webhookWhatsapp'));
+// Webhooks (publicos, validacao interna)
+router.use('/webhooks/asaas',     require('./webhookAsaas'));
+router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
 
-// ── STOREFRONT PÚBLICO ──────────────────────────────────────
+// Storefront publico
 router.use('/storefront', require('./storefront'));
 
-// ── ROTAS PÚBLICAS ──────────────────────────────────────────
-router.use('/reviews', publicReviewsRouter);
-router.use('/dental',  require('./dentalSign'));
-router.use('/dental/book', require('./dentalBooking'));
-router.use('/barber/book', require('./barberBooking'));
-router.use('/onboarding', onboardingRouter);
-router.use('/food/table',    require('./foodWaiter'));
-router.use('/food/schedule', require('./foodSchedule'));
-router.use('/food',          require('./food'));
+// Rotas publicas
+router.use('/reviews',           publicReviewsRouter);
+router.use('/dental',            require('./dentalSign'));
+router.use('/dental/book',       require('./dentalBooking'));
+router.use('/barber/book',       require('./barberBooking'));
+router.use('/onboarding',        onboardingRouter);
+router.use('/food/table',        require('./foodWaiter'));
+router.use('/food/schedule',     require('./foodSchedule'));
+router.use('/food',              require('./food'));
 
 module.exports = router;

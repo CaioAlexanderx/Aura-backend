@@ -1,14 +1,20 @@
 // ============================================================
-// AURA. — Serviço Multi-usuário RBAC (BE-09)
+// AURA. - Servico Multi-usuario RBAC (BE-09)
 // FIX: full_name (real schema) instead of name
+// FIX: invite URL aponta para app.getaura.com.br
 // ============================================================
 
 const db = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 
 const DEFAULT_PERMISSIONS = {
-  pdv: true, estoque: false, clientes: false,
-  financeiro: false, relatorios: false, folha: false, configuracoes: false,
+  pdv:           true,
+  estoque:       false,
+  clientes:      false,
+  financeiro:    false,
+  relatorios:    false,
+  folha:         false,
+  configuracoes: false,
 };
 
 async function countActiveMembers(companyId) {
@@ -37,8 +43,8 @@ async function listMembers(companyId) {
   return rows;
 }
 
-async function inviteMember(companyId, invitedByUserId, { invite_email, role_label='funcionário', template_id, permissions }) {
-  if (!invite_email) throw new Error('invite_email é obrigatório');
+async function inviteMember(companyId, invitedByUserId, { invite_email, role_label = 'funcionario', template_id, permissions }) {
+  if (!invite_email) throw new Error('invite_email e obrigatorio');
 
   const existing = await db.query(
     `SELECT m.id, m.status FROM company_members m
@@ -48,7 +54,7 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
   );
   if (existing.rows.length > 0) {
     const s = existing.rows[0].status;
-    throw new Error(`Este e-mail já tem um convite ${s==='pending'?'pendente':'ativo'} nesta empresa`);
+    throw new Error(`Este e-mail ja tem um convite ${s === 'pending' ? 'pendente' : 'ativo'} nesta empresa`);
   }
 
   let finalPermissions = permissions || DEFAULT_PERMISSIONS;
@@ -61,7 +67,7 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
   }
 
   const userResult = await db.query('SELECT id FROM users WHERE email=$1', [invite_email]);
-  const userId = userResult.rows[0]?.id || null;
+  const userId     = userResult.rows[0]?.id || null;
   const inviteToken = uuidv4();
 
   const { rows } = await db.query(
@@ -70,14 +76,17 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
         invited_by, invited_at, invite_token, invite_email, status, is_active)
      VALUES ($1,$2,$3,$4,$5,$6,NOW(),$7,$8,'pending',false)
      RETURNING id, invite_token, invite_email, role_label, status`,
-    [companyId, userId, role_label, JSON.stringify(finalPermissions),
-     template_id||null, invitedByUserId, inviteToken, invite_email]
+    [
+      companyId, userId, role_label, JSON.stringify(finalPermissions),
+      template_id || null, invitedByUserId, inviteToken, invite_email,
+    ]
   );
 
+  // URL aponta para app.getaura.com.br/invite/TOKEN
+  const baseUrl = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br';
   return {
     ...rows[0],
-    invite_url: `${process.env.APP_URL||'https://getaura.com.br'}/invite/${inviteToken}`,
-    note: 'Envio do e-mail de convite: BE-08/BE-12 (aguarda CNPJ)',
+    invite_url: `${baseUrl}/invite/${inviteToken}`,
   };
 }
 
@@ -87,7 +96,7 @@ async function acceptInvite(token, userId) {
      WHERE invite_token=$1 AND status='pending'`,
     [token]
   );
-  if (!rows.length) throw new Error('Convite inválido ou já utilizado');
+  if (!rows.length) throw new Error('Convite invalido ou ja utilizado');
 
   const member = rows[0];
   const { rows: userRows } = await db.query('SELECT email FROM users WHERE id=$1', [userId]);
@@ -115,11 +124,11 @@ async function updateMemberPermissions(companyId, memberId, { role_label, permis
     if (rows.length) finalPermissions = rows[0].permissions;
   }
 
-  const fields=[], values=[];
-  let idx=1;
-  if (role_label       !== undefined) { fields.push(`role_label=$${idx++}`);   values.push(role_label); }
-  if (finalPermissions !== undefined) { fields.push(`permissions=$${idx++}`);  values.push(JSON.stringify(finalPermissions)); }
-  if (template_id      !== undefined) { fields.push(`template_id=$${idx++}`);  values.push(template_id); }
+  const fields = [], values = [];
+  let idx = 1;
+  if (role_label       !== undefined) { fields.push(`role_label=$${idx++}`);  values.push(role_label); }
+  if (finalPermissions !== undefined) { fields.push(`permissions=$${idx++}`); values.push(JSON.stringify(finalPermissions)); }
+  if (template_id      !== undefined) { fields.push(`template_id=$${idx++}`); values.push(template_id); }
   if (status           !== undefined) {
     fields.push(`status=$${idx++}`);
     values.push(status);
@@ -133,7 +142,7 @@ async function updateMemberPermissions(companyId, memberId, { role_label, permis
     `UPDATE company_members SET ${fields.join(',')} WHERE id=$${idx++} AND company_id=$${idx} RETURNING *`,
     values
   );
-  if (!rows.length) throw new Error('Membro não encontrado');
+  if (!rows.length) throw new Error('Membro nao encontrado');
   return rows[0];
 }
 
