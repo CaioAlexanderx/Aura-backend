@@ -50,17 +50,22 @@ const CUSTOMER_FIELDS = {
   notes:            ['observacao', 'observação', 'obs', 'notas', 'notes'],
 };
 
+// IMPORTANTE: cost_price DEVE vir antes de price para evitar que o alias
+// generico 'preco' capture "Preco de custo (R$)" antes de cost_price ser testado.
+// A funcao suggestMapping usa o primeiro match encontrado na ordem de iteracao.
 const PRODUCT_FIELDS = {
-  name:       ['nome', 'produto', 'name', 'descricao', 'descrição', 'description', 'item'],
-  price:      ['preco de venda', 'preco venda', 'preco', 'preço', 'price', 'valor venda', 'valor'],
-  cost_price: ['preco de custo', 'preco custo', 'preço custo', 'custo', 'cost', 'cost_price', 'valor custo'],
+  cost_price: ['preco de custo', 'preco custo', 'preço custo', 'custo', 'cost', 'cost_price', 'valor custo', 'preco de custo (r$)'],
+  name:       ['nome do produto', 'nome', 'produto', 'name', 'descricao', 'descrição', 'description', 'item'],
+  price:      ['preco de venda', 'preco venda', 'preço de venda', 'price', 'valor venda', 'valor', 'preco de venda (r$)'],
   stock_qty:  ['estoque atual', 'estoque', 'quantidade', 'qty', 'stock', 'qtd', 'saldo'],
-  stock_min:  ['estoque minimo', 'min', 'minimo', 'stock_min'],
-  barcode:    ['codigo de barras', 'codigo barras', 'código barras', 'ean', 'barcode', 'gtin'],
-  sku:        ['sku', 'referencia', 'referência', 'cod interno', 'codigo interno'],
+  stock_min:  ['estoque minimo', 'estoque mínimo', 'min', 'minimo', 'stock_min'],
+  barcode:    ['codigo de barras', 'codigo barras', 'código barras', 'ean', 'barcode', 'gtin', 'codigo de barras (ean)'],
+  sku:        ['sku / codigo interno', 'sku', 'referencia', 'referência', 'cod interno', 'codigo interno'],
   category:   ['categoria', 'category', 'grupo', 'tipo'],
+  color:      ['cor', 'color', 'cores'],
+  size:       ['tamanho', 'tam', 'grade', 'size'],
   unit:       ['unidade', 'un', 'unit', 'medida'],
-  description:['descricao longa', 'descrição longa', 'detalhes', 'obs'],
+  description:['descricao longa', 'descrição longa', 'detalhes', 'observacoes', 'observações'],
   ncm:        ['ncm', 'ncm produto'],
 };
 
@@ -294,7 +299,7 @@ router.post('/products/import', requireAuth, async (req, res) => {
     }
 
     const price = parseBRL(data.price);
-    if (!price || price < 0) {
+    if (price === null || price < 0) {
       errors.push({ index: i, error: 'Preço de venda inválido ou ausente', row });
       return;
     }
@@ -308,6 +313,8 @@ router.post('/products/import', requireAuth, async (req, res) => {
       barcode:     data.barcode || null,
       sku:         data.sku     || null,
       category:    data.category || null,
+      color:       data.color    || null,
+      size:        data.size     || null,
       unit:        data.unit     || 'un',
       description: data.description || null,
       ncm:         data.ncm || null,
@@ -342,12 +349,19 @@ router.post('/products/import', requireAuth, async (req, res) => {
     await client.query('BEGIN');
 
     for (const p of valid) {
-      // Deduplicação por código de barras (EAN) ou por nome normalizado
+      // Deduplicação por código de barras (EAN) ou SKU ou por nome normalizado
       let existing = null;
       if (p.barcode) {
         const r = await client.query(
           `SELECT id FROM products WHERE company_id=$1 AND barcode=$2 LIMIT 1`,
           [companyId, p.barcode]
+        );
+        existing = r.rows[0];
+      }
+      if (!existing && p.sku) {
+        const r = await client.query(
+          `SELECT id FROM products WHERE company_id=$1 AND sku=$2 LIMIT 1`,
+          [companyId, p.sku]
         );
         existing = r.rows[0];
       }
@@ -364,11 +378,12 @@ router.post('/products/import', requireAuth, async (req, res) => {
       await client.query(
         `INSERT INTO products
            (company_id, name, price, cost_price, stock_qty, stock_min,
-            barcode, sku, category, unit, description, ncm, import_batch_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+            barcode, sku, category, color, size, unit, description, ncm, import_batch_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
         [
           companyId, p.name, p.price, p.cost_price, p.stock_qty, p.stock_min,
-          p.barcode, p.sku, p.category, p.unit, p.description, p.ncm, batchId,
+          p.barcode, p.sku, p.category, p.color, p.size, p.unit,
+          p.description, p.ncm, batchId,
         ]
       );
       saved++;
@@ -742,11 +757,11 @@ router.get('/import-templates/:type', requireAuth, (req, res) => {
     },
     products: {
       filename: 'modelo-importacao-produtos.csv',
-      fields: ['nome', 'preco_venda', 'preco_custo', 'estoque', 'estoque_minimo', 'codigo_barras', 'sku', 'categoria', 'unidade'],
-      required: ['nome', 'preco_venda'],
+      fields: ['nome do produto', 'preco de venda (r$)', 'preco de custo (r$)', 'estoque atual', 'estoque minimo', 'codigo de barras (ean)', 'sku / codigo interno', 'categoria', 'cor', 'tamanho', 'unidade'],
+      required: ['nome do produto', 'preco de venda (r$)'],
       example_rows: [
-        ['Camiseta Azul M', '79,90', '35,00', '50', '10', '7891234567890', 'CAM-AZM', 'Vestuário', 'un'],
-        ['Caneca 300ml', '24,90', '8,50', '120', '20', '7897654321098', 'CAN-300', 'Utilidades', 'un'],
+        ['Camiseta Azul M', '79.90', '35.00', '50', '10', '7891234567890', 'CAM-AZM', 'Vestuário', '#0000FF', 'M', 'un'],
+        ['Vestido Temis', '185.00', '', '4', '', '3125580047102', '18345775', 'Vestido', '#000000', 'U', 'un'],
       ],
     },
   };
