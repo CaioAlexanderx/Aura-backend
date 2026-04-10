@@ -1,7 +1,8 @@
 // ============================================================
-// QA — Testes de Integração: Members / RBAC
+// QA - Testes de Integracao: Members / RBAC
 // fix: requireCompanyAccess consome 1 db.query antes do handler
-// cada teste precisa de um mock extra no início para o lookup de ownership
+// fix: inviteMember agora tem query de contexto (empresa + convidante)
+//      para o email de convite — adicionado mock extra na cadeia
 // ============================================================
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
@@ -12,8 +13,8 @@ const token = jwt.sign({ id:'owner-id', role:'client', plan:'negocio' }, 'aura-t
 const auth  = { Authorization: `Bearer ${token}` };
 const cid   = '00000000-0000-0000-0000-000000000001';
 
-// helper: mock do requireCompanyAccess (consumido antes do handler)
-const OWNER_MOCK = { rows: [{ role: 'owner' }] };
+const OWNER_MOCK    = { rows: [{ role: 'owner' }] };
+const CONTEXT_MOCK  = { rows: [{ company_name: 'Empresa Teste', inviter_name: 'Caio' }] };
 
 describe('GET /members', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -21,8 +22,8 @@ describe('GET /members', () => {
   test('retorna lista com campos esperados', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
-      .mockResolvedValueOnce(OWNER_MOCK)          // requireCompanyAccess
-      .mockResolvedValueOnce({ rows: [] });        // listMembers
+      .mockResolvedValueOnce(OWNER_MOCK)         // requireCompanyAccess
+      .mockResolvedValueOnce({ rows: [] });       // listMembers
     const res = await request(app).get(`/api/v1/companies/${cid}/members`).set(auth);
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('members');
@@ -55,7 +56,6 @@ describe('POST /members/invite', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('retorna 400 sem invite_email', async () => {
-    // requireCompanyAccess roda antes do handler — precisa do mock mesmo para 400
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce(OWNER_MOCK);
     const res = await request(app)
@@ -65,10 +65,10 @@ describe('POST /members/invite', () => {
     expect(res.body.error).toMatch(/invite_email/i);
   });
 
-  test('retorna 409 se email já tem convite', async () => {
+  test('retorna 409 se email ja tem convite', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
-      .mockResolvedValueOnce(OWNER_MOCK)                         // requireCompanyAccess
+      .mockResolvedValueOnce(OWNER_MOCK)                          // requireCompanyAccess
       .mockResolvedValueOnce({ rows: [{ id:'m1', status:'pending' }] }); // check duplicata
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/members/invite`)
@@ -77,12 +77,17 @@ describe('POST /members/invite', () => {
   });
 
   test('cria convite com sucesso', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess (private router)
     db.query
-      .mockResolvedValueOnce(OWNER_MOCK)           // requireCompanyAccess
-      .mockResolvedValueOnce({ rows: [] })          // check duplicata
-      .mockResolvedValueOnce({ rows: [] })          // busca usuário existente
-      .mockResolvedValueOnce({ rows: [{ id:'m2', invite_token:'tok', invite_email:'joao@teste.com', status:'pending' }] }); // INSERT
+      .mockResolvedValueOnce(OWNER_MOCK)     // requireCompanyAccess (members route)
+      .mockResolvedValueOnce({ rows: [] })   // check duplicata
+      // FIX: nova query de contexto adicionada para o email (SELECT company_name, inviter_name)
+      .mockResolvedValueOnce(CONTEXT_MOCK)   // busca nome da empresa + convidante para o email
+      .mockResolvedValueOnce({ rows: [] })   // busca usuario existente (userId para vincular)
+      .mockResolvedValueOnce({ rows: [{     // INSERT company_members
+        id: 'm2', invite_token: 'tok-abc',
+        invite_email: 'joao@teste.com', role_label: 'vendedor', status: 'pending',
+      }] });
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/members/invite`)
       .set(auth).send({ invite_email:'joao@teste.com', role_label:'vendedor' });
@@ -94,7 +99,7 @@ describe('POST /members/invite', () => {
 describe('GET /members/billing', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test('retorna resumo de cobrança', async () => {
+  test('retorna resumo de cobranca', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
       .mockResolvedValueOnce(OWNER_MOCK)                         // requireCompanyAccess
