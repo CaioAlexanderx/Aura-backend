@@ -15,6 +15,7 @@ router.use('/auth', require('./auth'));
 router.use('/auth', require('./passwordReset'));
 router.use('/auth', accessCodesRouter);
 router.use('/auth', verificationRouter);
+router.use('/auth', require('./myPermissions'));
 
 // Referrals (autenticada)
 router.use('/referrals', accessCodesRouter);
