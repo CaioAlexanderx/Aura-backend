@@ -1,8 +1,7 @@
 // ============================================================
-// AURA. - Servico Multi-usuario RBAC (BE-09)
-// FIX: full_name (real schema) instead of name
-// FIX: invite URL aponta para app.getaura.com.br
-// FEAT: envia email de convite via Resend
+// AURA. - Servico Multi-usuario RBAC
+// invite_email agora e opcional: se null, qualquer pessoa pode
+// usar o link para entrar na equipe (link aberto, uso unico)
 // ============================================================
 
 const db = require('../config/database');
@@ -45,19 +44,22 @@ async function listMembers(companyId) {
   return rows;
 }
 
-async function inviteMember(companyId, invitedByUserId, { invite_email, role_label = 'funcionario', template_id, permissions }) {
-  if (!invite_email) throw new Error('invite_email e obrigatorio');
+async function inviteMember(companyId, invitedByUserId, { invite_email, role_label = 'colaborador', template_id, permissions }) {
+  // invite_email e opcional: null = link aberto (qualquer pessoa com o link pode usar)
+  const emailToUse = invite_email && invite_email.trim() ? invite_email.trim().toLowerCase() : null;
 
-  // Verifica duplicata
-  const existing = await db.query(
-    `SELECT m.id, m.status FROM company_members m
-     LEFT JOIN users u ON u.id=m.user_id
-     WHERE m.company_id=$1 AND (u.email=$2 OR m.invite_email=$2)`,
-    [companyId, invite_email]
-  );
-  if (existing.rows.length > 0) {
-    const s = existing.rows[0].status;
-    throw new Error(`Este e-mail ja tem um convite ${s === 'pending' ? 'pendente' : 'ativo'} nesta empresa`);
+  // Verifica duplicata apenas se email foi informado
+  if (emailToUse) {
+    const existing = await db.query(
+      `SELECT m.id, m.status FROM company_members m
+       LEFT JOIN users u ON u.id=m.user_id
+       WHERE m.company_id=$1 AND (u.email=$2 OR m.invite_email=$2)`,
+      [companyId, emailToUse]
+    );
+    if (existing.rows.length > 0) {
+      const st = existing.rows[0].status;
+      throw new Error(`Este e-mail ja tem um convite ${st === 'pending' ? 'pendente' : 'ativo'} nesta empresa`);
+    }
   }
 
   // Resolve permissoes
@@ -70,7 +72,7 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     if (rows.length) finalPermissions = rows[0].permissions;
   }
 
-  // Busca contexto para o email: nome da empresa + nome do convidante
+  // Contexto para o email (nome da empresa + convidante)
   const { rows: ctx } = await db.query(
     `SELECT
        COALESCE(c.trade_name, c.legal_name, 'Aura') AS company_name,
@@ -83,9 +85,11 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
   const companyName = ctx[0]?.company_name || 'a empresa';
   const inviterName = ctx[0]?.inviter_name || 'a equipe';
 
-  // Verifica se o email ja tem conta
-  const userResult = await db.query('SELECT id FROM users WHERE email=$1', [invite_email]);
-  const userId     = userResult.rows[0]?.id || null;
+  // Se email informado, verifica se ja tem conta
+  const userId = emailToUse
+    ? (await db.query('SELECT id FROM users WHERE email=$1', [emailToUse])).rows[0]?.id || null
+    : null;
+
   const inviteToken = uuidv4();
 
   const { rows } = await db.query(
@@ -96,17 +100,19 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
      RETURNING id, invite_token, invite_email, role_label, status`,
     [
       companyId, userId, role_label, JSON.stringify(finalPermissions),
-      template_id || null, invitedByUserId, inviteToken, invite_email,
+      template_id || null, invitedByUserId, inviteToken, emailToUse,
     ]
   );
 
-  const baseUrl  = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br';
+  const baseUrl   = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br';
   const inviteUrl = `${baseUrl}/invite/${inviteToken}`;
 
-  // Envia email de convite via Resend (nao-bloqueante: falha no email nao cancela o convite)
-  sendInviteEmail(invite_email, inviteUrl, companyName, role_label, inviterName)
-    .then(result => console.log(`[members] invite email sent: ${result?.id} to ${invite_email}`))
-    .catch(err  => console.error(`[members] invite email failed for ${invite_email}:`, err.message));
+  // Envia email apenas se destinatario informado
+  if (emailToUse) {
+    sendInviteEmail(emailToUse, inviteUrl, companyName, role_label, inviterName)
+      .then(r  => console.log(`[members] invite email sent: ${r?.id} to ${emailToUse}`))
+      .catch(e  => console.error(`[members] invite email failed:`, e.message));
+  }
 
   return { ...rows[0], invite_url: inviteUrl };
 }
@@ -120,9 +126,13 @@ async function acceptInvite(token, userId) {
   if (!rows.length) throw new Error('Convite invalido ou ja utilizado');
 
   const member = rows[0];
-  const { rows: userRows } = await db.query('SELECT email FROM users WHERE id=$1', [userId]);
-  if (!userRows.length || userRows[0].email !== member.invite_email) {
-    throw new Error('Este convite foi enviado para outro e-mail');
+
+  // Se o convite tem email especifico, valida que e o mesmo usuario
+  if (member.invite_email) {
+    const { rows: userRows } = await db.query('SELECT email FROM users WHERE id=$1', [userId]);
+    if (!userRows.length || userRows[0].email !== member.invite_email) {
+      throw new Error('Este convite foi enviado para outro e-mail');
+    }
   }
 
   const { rows: updated } = await db.query(
@@ -151,10 +161,8 @@ async function updateMemberPermissions(companyId, memberId, { role_label, permis
   if (finalPermissions !== undefined) { fields.push(`permissions=$${idx++}`); values.push(JSON.stringify(finalPermissions)); }
   if (template_id      !== undefined) { fields.push(`template_id=$${idx++}`); values.push(template_id); }
   if (status           !== undefined) {
-    fields.push(`status=$${idx++}`);
-    values.push(status);
-    fields.push(`is_active=$${idx++}`);
-    values.push(status === 'active');
+    fields.push(`status=$${idx++}`);   values.push(status);
+    fields.push(`is_active=$${idx++}`); values.push(status === 'active');
   }
   if (!fields.length) throw new Error('Nenhum campo para atualizar');
 
