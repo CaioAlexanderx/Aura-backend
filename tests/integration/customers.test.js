@@ -1,0 +1,203 @@
+// ============================================================
+// QA — Testes: Customers CRUD + Plan Limits
+// Cobertura: P1 (limites por plano), editar cliente (P0-2)
+// ============================================================
+const request = require('supertest');
+const jwt     = require('jsonwebtoken');
+
+let app, db;
+beforeAll(() => {
+  ({ app } = require('../../src/index'));
+  db = require('../../src/config/database');
+});
+beforeEach(() => jest.clearAllMocks());
+
+const SECRET = 'aura-test-secret-2026';
+const cid    = '00000000-0000-0000-0000-000000000001';
+
+const authEssencial = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', plan:'essencial' }, SECRET, { expiresIn:'1h' })}` };
+const authNegocio   = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', plan:'negocio'   }, SECRET, { expiresIn:'1h' })}` };
+const authExpansao  = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', plan:'expansao'  }, SECRET, { expiresIn:'1h' })}` };
+
+// ── GET /customers — plan limits ─────────────────────────
+describe('GET /companies/:id/customers — plan limits', () => {
+  test('plan essencial: limit padrao = 1000', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '50' }] });
+    db.query.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .get(`/api/v1/companies/${cid}/customers`)
+      .set(authEssencial);
+
+    expect(res.status).toBe(200);
+    expect(res.body.plan_limit).toBe(1000);
+    expect(res.body.limit).toBe(1000);
+  });
+
+  test('plan negocio: limit = 5000', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '200' }] });
+    db.query.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .get(`/api/v1/companies/${cid}/customers`)
+      .set(authNegocio);
+
+    expect(res.status).toBe(200);
+    expect(res.body.plan_limit).toBe(5000);
+  });
+
+  test('plan expansao: limit = 999999', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '9999' }] });
+    db.query.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .get(`/api/v1/companies/${cid}/customers`)
+      .set(authExpansao);
+
+    expect(res.status).toBe(200);
+    expect(res.body.plan_limit).toBe(999999);
+  });
+});
+
+// ── POST /customers — plan limit enforcement ──────────────
+describe('POST /companies/:id/customers — plan limit enforcement', () => {
+  test('201 — cria cliente quando abaixo do limite', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '50' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'c1', name: 'Maria Silva' }] });
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/customers`)
+      .set(authEssencial)
+      .send({ name: 'Maria Silva' });
+
+    expect(res.status).toBe(201);
+  });
+
+  test('403 — bloqueia criacao no limite do plano (essencial=1000)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '1000' }] });
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/customers`)
+      .set(authEssencial)
+      .send({ name: 'Maria Extra' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/Limite/);
+    expect(res.body.limit).toBe(1000);
+  });
+
+  test('403 — bloqueia para negocio no limite de 5000', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '5000' }] });
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/customers`)
+      .set(authNegocio)
+      .send({ name: 'Cliente Negocio Extra' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.limit).toBe(5000);
+  });
+
+  test('201 — expansao cria cliente com 9999 existentes', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '9999' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'c2', name: 'VIP Customer' }] });
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/customers`)
+      .set(authExpansao)
+      .send({ name: 'VIP Customer' });
+
+    expect(res.status).toBe(201);
+  });
+
+  test('400 — name obrigatorio', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/customers`)
+      .set(authEssencial)
+      .send({ email: 'sem-nome@test.com' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/name/);
+  });
+});
+
+// ── PATCH /:cid — editar cliente (P0-2) ───────────────────
+describe('PATCH /companies/:id/customers/:cid — editar cliente', () => {
+  test('200 — atualiza campos do cliente', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'c1', name: 'Maria Atualizada', phone: '(12) 99999-0000' }] });
+
+    const res = await request(app)
+      .patch(`/api/v1/companies/${cid}/customers/c1`)
+      .set(authEssencial)
+      .send({ name: 'Maria Atualizada', phone: '(12) 99999-0000' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('Maria Atualizada');
+  });
+
+  test('400 — nenhum campo para atualizar', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+
+    const res = await request(app)
+      .patch(`/api/v1/companies/${cid}/customers/c1`)
+      .set(authEssencial)
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Nenhum campo/);
+  });
+
+  test('404 — cliente nao encontrado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .patch(`/api/v1/companies/${cid}/customers/nao-existe`)
+      .set(authEssencial)
+      .send({ name: 'Novo Nome' });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ── DELETE /:cid ──────────────────────────────────────────
+describe('DELETE /companies/:id/customers/:cid', () => {
+  test('200 — deleta cliente existente', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'c1', name: 'Maria' }] });
+
+    const res = await request(app)
+      .delete(`/api/v1/companies/${cid}/customers/c1`)
+      .set(authEssencial);
+
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(true);
+  });
+
+  test('404 — cliente nao encontrado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .delete(`/api/v1/companies/${cid}/customers/nao-existe`)
+      .set(authEssencial);
+
+    expect(res.status).toBe(404);
+  });
+
+  test('401 — sem token', async () => {
+    const res = await request(app)
+      .delete(`/api/v1/companies/${cid}/customers/c1`);
+    expect(res.status).toBe(401);
+  });
+});
