@@ -2,10 +2,12 @@
 // AURA. - Servico Multi-usuario RBAC (BE-09)
 // FIX: full_name (real schema) instead of name
 // FIX: invite URL aponta para app.getaura.com.br
+// FEAT: envia email de convite via Resend
 // ============================================================
 
 const db = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
+const { sendInviteEmail } = require('./mailer');
 
 const DEFAULT_PERMISSIONS = {
   pdv:           true,
@@ -46,6 +48,7 @@ async function listMembers(companyId) {
 async function inviteMember(companyId, invitedByUserId, { invite_email, role_label = 'funcionario', template_id, permissions }) {
   if (!invite_email) throw new Error('invite_email e obrigatorio');
 
+  // Verifica duplicata
   const existing = await db.query(
     `SELECT m.id, m.status FROM company_members m
      LEFT JOIN users u ON u.id=m.user_id
@@ -57,6 +60,7 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     throw new Error(`Este e-mail ja tem um convite ${s === 'pending' ? 'pendente' : 'ativo'} nesta empresa`);
   }
 
+  // Resolve permissoes
   let finalPermissions = permissions || DEFAULT_PERMISSIONS;
   if (template_id) {
     const { rows } = await db.query(
@@ -66,6 +70,20 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     if (rows.length) finalPermissions = rows[0].permissions;
   }
 
+  // Busca contexto para o email: nome da empresa + nome do convidante
+  const { rows: ctx } = await db.query(
+    `SELECT
+       COALESCE(c.trade_name, c.legal_name, 'Aura') AS company_name,
+       u.full_name AS inviter_name
+     FROM companies c
+     LEFT JOIN users u ON u.id = $2
+     WHERE c.id = $1`,
+    [companyId, invitedByUserId]
+  );
+  const companyName = ctx[0]?.company_name || 'a empresa';
+  const inviterName = ctx[0]?.inviter_name || 'a equipe';
+
+  // Verifica se o email ja tem conta
   const userResult = await db.query('SELECT id FROM users WHERE email=$1', [invite_email]);
   const userId     = userResult.rows[0]?.id || null;
   const inviteToken = uuidv4();
@@ -82,12 +100,15 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     ]
   );
 
-  // URL aponta para app.getaura.com.br/invite/TOKEN
-  const baseUrl = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br';
-  return {
-    ...rows[0],
-    invite_url: `${baseUrl}/invite/${inviteToken}`,
-  };
+  const baseUrl  = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br';
+  const inviteUrl = `${baseUrl}/invite/${inviteToken}`;
+
+  // Envia email de convite via Resend (nao-bloqueante: falha no email nao cancela o convite)
+  sendInviteEmail(invite_email, inviteUrl, companyName, role_label, inviterName)
+    .then(result => console.log(`[members] invite email sent: ${result?.id} to ${invite_email}`))
+    .catch(err  => console.error(`[members] invite email failed for ${invite_email}:`, err.message));
+
+  return { ...rows[0], invite_url: inviteUrl };
 }
 
 async function acceptInvite(token, userId) {
