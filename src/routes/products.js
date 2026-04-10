@@ -1,9 +1,7 @@
 // ============================================================
 // AURA. -- S4: Products CRUD
-// GET    /companies/:id/products       -- list
-// POST   /companies/:id/products       -- create
-// PATCH  /companies/:id/products/:pid  -- update (+ stock_qty_decrement)
-// DELETE /companies/:id/products/:pid  -- delete
+// Plan limits: essencial=1000, negocio=5000, expansao=unlimited
+// Plan comes from req.user.plan (JWT token), not req.company
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -13,14 +11,14 @@ function getPlanLimit(plan) {
     case 'expansao':
     case 'personalizado': return 999999;
     case 'negocio':       return 5000;
-    default:              return 1000;
+    default:              return 1000; // essencial / trial / unknown
   }
 }
 
 // GET / -- list products
 router.get('/', async (req, res) => {
   const cid = req.params.id;
-  const planLimit = getPlanLimit(req.company?.plan);
+  const planLimit = getPlanLimit(req.user?.plan);
   const limit = Math.min(parseInt(req.query.limit) || planLimit, planLimit);
   const offset = parseInt(req.query.offset) || 0;
   const category = req.query.category;
@@ -77,7 +75,7 @@ router.post('/', async (req, res) => {
 
   // Enforce plan limit
   try {
-    const planLimit = getPlanLimit(req.company?.plan);
+    const planLimit = getPlanLimit(req.user?.plan);
     const countRes = await db.query('SELECT COUNT(*) AS total FROM products WHERE company_id = $1', [cid]);
     const current = parseInt(countRes.rows[0]?.total) || 0;
     if (current >= planLimit) {
