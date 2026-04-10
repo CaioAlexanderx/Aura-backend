@@ -52,8 +52,8 @@ const CUSTOMER_FIELDS = {
 
 const PRODUCT_FIELDS = {
   name:       ['nome', 'produto', 'name', 'descricao', 'descrição', 'description', 'item'],
-  price:      ['preco', 'preço', 'price', 'valor venda', 'valor', 'preco venda'],
-  cost_price: ['custo', 'cost', 'preco custo', 'preço custo', 'cost_price', 'valor custo'],
+  price:      ['preco de venda', 'preco venda', 'preco', 'preço', 'price', 'valor venda', 'valor'],
+  cost_price: ['preco de custo', 'preco custo', 'preço custo', 'custo', 'cost', 'cost_price', 'valor custo'],
   stock_qty:  ['estoque atual', 'estoque', 'quantidade', 'qty', 'stock', 'qtd', 'saldo'],
   stock_min:  ['estoque minimo', 'min', 'minimo', 'stock_min'],
   barcode:    ['codigo de barras', 'codigo barras', 'código barras', 'ean', 'barcode', 'gtin'],
