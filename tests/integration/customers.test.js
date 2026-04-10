@@ -1,6 +1,7 @@
 // ============================================================
 // QA — Testes: Customers CRUD + Plan Limits
 // Cobertura: P1 (limites por plano), editar cliente (P0-2)
+// NOTA: /customers requer requirePlan('negocio','expansao')
 // ============================================================
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
@@ -19,22 +20,21 @@ const authEssencial = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'clien
 const authNegocio   = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', plan:'negocio'   }, SECRET, { expiresIn:'1h' })}` };
 const authExpansao  = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', plan:'expansao'  }, SECRET, { expiresIn:'1h' })}` };
 
-// ── GET /customers — plan limits ─────────────────────────
-describe('GET /companies/:id/customers — plan limits', () => {
-  test('plan essencial: limit padrao = 1000', async () => {
+// -- Plano essencial bloqueado pelo requirePlan ---------------
+describe('GET /companies/:id/customers -- plano essencial bloqueado', () => {
+  test('403 -- plano essencial nao tem acesso a clientes (requer negocio+)', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
-    db.query.mockResolvedValueOnce({ rows: [{ total: '50' }] });
-    db.query.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
       .get(`/api/v1/companies/${cid}/customers`)
       .set(authEssencial);
 
-    expect(res.status).toBe(200);
-    expect(res.body.plan_limit).toBe(1000);
-    expect(res.body.limit).toBe(1000);
+    expect(res.status).toBe(403);
   });
+});
 
+// -- GET /customers -- plan limits ----------------------------
+describe('GET /companies/:id/customers -- plan limits', () => {
   test('plan negocio: limit = 5000', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     db.query.mockResolvedValueOnce({ rows: [{ total: '200' }] });
@@ -62,49 +62,36 @@ describe('GET /companies/:id/customers — plan limits', () => {
   });
 });
 
-// ── POST /customers — plan limit enforcement ──────────────
-describe('POST /companies/:id/customers — plan limit enforcement', () => {
-  test('201 — cria cliente quando abaixo do limite', async () => {
+// -- POST /customers -- plan limit enforcement ----------------
+describe('POST /companies/:id/customers -- plan limit enforcement', () => {
+  test('201 -- cria cliente quando abaixo do limite (negocio)', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     db.query.mockResolvedValueOnce({ rows: [{ total: '50' }] });
     db.query.mockResolvedValueOnce({ rows: [{ id: 'c1', name: 'Maria Silva' }] });
 
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/customers`)
-      .set(authEssencial)
+      .set(authNegocio)
       .send({ name: 'Maria Silva' });
 
     expect(res.status).toBe(201);
   });
 
-  test('403 — bloqueia criacao no limite do plano (essencial=1000)', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
-    db.query.mockResolvedValueOnce({ rows: [{ total: '1000' }] });
-
-    const res = await request(app)
-      .post(`/api/v1/companies/${cid}/customers`)
-      .set(authEssencial)
-      .send({ name: 'Maria Extra' });
-
-    expect(res.status).toBe(403);
-    expect(res.body.error).toMatch(/Limite/);
-    expect(res.body.limit).toBe(1000);
-  });
-
-  test('403 — bloqueia para negocio no limite de 5000', async () => {
+  test('403 -- bloqueia criacao no limite do plano (negocio=5000)', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     db.query.mockResolvedValueOnce({ rows: [{ total: '5000' }] });
 
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/customers`)
       .set(authNegocio)
-      .send({ name: 'Cliente Negocio Extra' });
+      .send({ name: 'Cliente Extra' });
 
     expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/Limite/);
     expect(res.body.limit).toBe(5000);
   });
 
-  test('201 — expansao cria cliente com 9999 existentes', async () => {
+  test('201 -- expansao cria cliente com 9999 existentes', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     db.query.mockResolvedValueOnce({ rows: [{ total: '9999' }] });
     db.query.mockResolvedValueOnce({ rows: [{ id: 'c2', name: 'VIP Customer' }] });
@@ -117,12 +104,12 @@ describe('POST /companies/:id/customers — plan limit enforcement', () => {
     expect(res.status).toBe(201);
   });
 
-  test('400 — name obrigatorio', async () => {
+  test('400 -- name obrigatorio', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
 
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/customers`)
-      .set(authEssencial)
+      .set(authNegocio)
       .send({ email: 'sem-nome@test.com' });
 
     expect(res.status).toBe(400);
@@ -130,72 +117,72 @@ describe('POST /companies/:id/customers — plan limit enforcement', () => {
   });
 });
 
-// ── PATCH /:cid — editar cliente (P0-2) ───────────────────
-describe('PATCH /companies/:id/customers/:cid — editar cliente', () => {
-  test('200 — atualiza campos do cliente', async () => {
+// -- PATCH /:cid -- editar cliente ----------------------------
+describe('PATCH /companies/:id/customers/:cid -- editar cliente', () => {
+  test('200 -- atualiza campos do cliente', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     db.query.mockResolvedValueOnce({ rows: [{ id: 'c1', name: 'Maria Atualizada', phone: '(12) 99999-0000' }] });
 
     const res = await request(app)
       .patch(`/api/v1/companies/${cid}/customers/c1`)
-      .set(authEssencial)
+      .set(authNegocio)
       .send({ name: 'Maria Atualizada', phone: '(12) 99999-0000' });
 
     expect(res.status).toBe(200);
     expect(res.body.name).toBe('Maria Atualizada');
   });
 
-  test('400 — nenhum campo para atualizar', async () => {
+  test('400 -- nenhum campo para atualizar', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
 
     const res = await request(app)
       .patch(`/api/v1/companies/${cid}/customers/c1`)
-      .set(authEssencial)
+      .set(authNegocio)
       .send({});
 
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/Nenhum campo/);
   });
 
-  test('404 — cliente nao encontrado', async () => {
+  test('404 -- cliente nao encontrado', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     db.query.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
       .patch(`/api/v1/companies/${cid}/customers/nao-existe`)
-      .set(authEssencial)
+      .set(authNegocio)
       .send({ name: 'Novo Nome' });
 
     expect(res.status).toBe(404);
   });
 });
 
-// ── DELETE /:cid ──────────────────────────────────────────
+// -- DELETE /:cid ---------------------------------------------
 describe('DELETE /companies/:id/customers/:cid', () => {
-  test('200 — deleta cliente existente', async () => {
+  test('200 -- deleta cliente existente', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     db.query.mockResolvedValueOnce({ rows: [{ id: 'c1', name: 'Maria' }] });
 
     const res = await request(app)
       .delete(`/api/v1/companies/${cid}/customers/c1`)
-      .set(authEssencial);
+      .set(authNegocio);
 
     expect(res.status).toBe(200);
     expect(res.body.deleted).toBe(true);
   });
 
-  test('404 — cliente nao encontrado', async () => {
+  test('404 -- cliente nao encontrado', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     db.query.mockResolvedValueOnce({ rows: [] });
 
     const res = await request(app)
       .delete(`/api/v1/companies/${cid}/customers/nao-existe`)
-      .set(authEssencial);
+      .set(authNegocio);
 
     expect(res.status).toBe(404);
   });
 
-  test('401 — sem token', async () => {
+  test('401 -- sem token', async () => {
     const res = await request(app)
       .delete(`/api/v1/companies/${cid}/customers/c1`);
     expect(res.status).toBe(401);
