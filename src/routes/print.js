@@ -1,7 +1,8 @@
 // ============================================================
-// AURA. — Impressão de Cupom via window.print() (INF-04 + PDV-01)
+// AURA. — Impressao de Cupom via window.print() (INF-04 + PDV-01)
 // Fase 1: HTML formatado para impressora 80mm ou qualquer impressora
 // Melhorias PDV-01: desconto inline, QR Pix, variante, assinatura
+// FIX: req.params.cid → req.params.id (mergeParams de /companies/:id)
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -56,7 +57,7 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>Cupom — ${company.trade_name || company.legal_name}</title>
+  <title>Cupom - ${company.trade_name || company.legal_name}</title>
   <style>
     @page { margin: 4mm 5mm; size: ${width80 ? '80mm' : 'A4'} auto; }
     * { margin:0; padding:0; box-sizing:border-box; }
@@ -81,10 +82,10 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
     ${company.cnpj ? `<div>CNPJ: ${company.cnpj}</div>` : ''}
     ${company.phone ? `<div>Tel: ${company.phone}</div>` : ''}
     ${company.address_street ? `<div>${company.address_street}${company.address_number ? ', '+company.address_number : ''}</div>` : ''}
-    ${company.address_city ? `<div>${company.address_city}${company.address_state ? ' — '+company.address_state : ''}</div>` : ''}
+    ${company.address_city ? `<div>${company.address_city}${company.address_state ? ' - '+company.address_state : ''}</div>` : ''}
   </div>
   <div class="divider"></div>
-  <div class="center bold">CUPOM NÃO FISCAL</div>
+  <div class="center bold">CUPOM NAO FISCAL</div>
   <div class="divider"></div>
   <div>Data: ${date}</div>
   <div class="sale-id">Venda: #${sale.id.slice(-8).toUpperCase()}</div>
@@ -112,16 +113,16 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
   ${pixSection}
   <div class="divider"></div>
   ${sale.notes ? `<div style="font-size:10px">Obs: ${sale.notes}</div><div class="divider"></div>` : ''}
-  <div class="footer">Obrigado pela preferência!<br>${company.trade_name || company.legal_name}<br><small>Powered by Aura. — getaura.com.br</small></div>
-  ${autoprint ? `<script>window.onload=()=>window.print();</script>` : '<br><button onclick="window.print()" style="width:100%;padding:8px;margin-top:8px;cursor:pointer">🖨️ Imprimir</button>'}
+  <div class="footer">Obrigado pela preferencia!<br>${company.trade_name || company.legal_name}<br><small>Powered by Aura. - getaura.com.br</small></div>
+  ${autoprint ? `<script>window.onload=()=>window.print();</script>` : '<br><button onclick="window.print()" style="width:100%;padding:8px;margin-top:8px;cursor:pointer">Imprimir</button>'}
 </body>
 </html>`;
 }
 
 function _payLabel(method) {
   const m = {
-    pix: 'Pix', dinheiro: 'Dinheiro', cartao: 'Cartão',
-    debito: 'Cartão Débito', credito: 'Cartão Crédito',
+    pix: 'Pix', dinheiro: 'Dinheiro', cartao: 'Cartao',
+    debito: 'Cartao Debito', credito: 'Cartao Credito',
     fiado: 'Fiado', outro: 'Outro'
   };
   return m[method] || method;
@@ -150,7 +151,7 @@ async function _loadSaleData(saleId, companyId) {
      LEFT JOIN product_variants pv ON pv.id=si.variant_id
      WHERE si.sale_id=$1`, [saleId]
   );
-  // Pagamentos múltiplos
+  // Pagamentos multiplos
   const { rows: payments } = await db.query(
     `SELECT method, amount FROM sale_payments WHERE sale_id=$1`, [saleId]
   );
@@ -160,31 +161,31 @@ async function _loadSaleData(saleId, companyId) {
 // GET /print/receipt/:saleId  — HTML do cupom (sem autoprint)
 router.get('/receipt/:saleId', requireAuth, async (req, res) => {
   try {
-    const data = await _loadSaleData(req.params.saleId, req.params.cid);
-    if (!data) return res.status(404).json({ error: 'Venda não encontrada' });
+    const data = await _loadSaleData(req.params.saleId, req.params.id);
+    if (!data) return res.status(404).json({ error: 'Venda nao encontrada' });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(receiptHTML({ ...data, options: { autoprint: false } }));
-  } catch (err) { res.status(500).json({ error: 'Erro ao gerar cupom' }); }
+  } catch (err) { console.error('[print] receipt error:', err.message); res.status(500).json({ error: 'Erro ao gerar cupom' }); }
 });
 
 // GET /print/receipt/:saleId/preview  — abre e imprime automaticamente
 router.get('/receipt/:saleId/preview', requireAuth, async (req, res) => {
   try {
-    const data = await _loadSaleData(req.params.saleId, req.params.cid);
-    if (!data) return res.status(404).json({ error: 'Venda não encontrada' });
+    const data = await _loadSaleData(req.params.saleId, req.params.id);
+    if (!data) return res.status(404).json({ error: 'Venda nao encontrada' });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(receiptHTML({ ...data, options: { autoprint: true } }));
-  } catch (err) { res.status(500).json({ error: 'Erro ao gerar cupom' }); }
+  } catch (err) { console.error('[print] preview error:', err.message); res.status(500).json({ error: 'Erro ao gerar cupom' }); }
 });
 
 // GET /print/receipt/:saleId/a4  — cupom formato A4 (para impressoras comuns)
 router.get('/receipt/:saleId/a4', requireAuth, async (req, res) => {
   try {
-    const data = await _loadSaleData(req.params.saleId, req.params.cid);
-    if (!data) return res.status(404).json({ error: 'Venda não encontrada' });
+    const data = await _loadSaleData(req.params.saleId, req.params.id);
+    if (!data) return res.status(404).json({ error: 'Venda nao encontrada' });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(receiptHTML({ ...data, options: { autoprint: false, width80: false } }));
-  } catch (err) { res.status(500).json({ error: 'Erro ao gerar cupom' }); }
+  } catch (err) { console.error('[print] a4 error:', err.message); res.status(500).json({ error: 'Erro ao gerar cupom' }); }
 });
 
 module.exports = router;
