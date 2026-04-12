@@ -11,7 +11,7 @@ router.get('/profile', async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT id, trade_name, legal_name, cnpj, phone, email, address,
-              tax_regime, plan, billing_status,
+              tax_regime, plan, billing_status, logo_url,
               trial_ends_at, onboarding_step, created_at, updated_at
        FROM companies WHERE id = $1`,
       [req.params.id]
@@ -30,6 +30,7 @@ router.get('/profile', async (req, res) => {
       tax_regime:      c.tax_regime   || 'simples',
       plan:            c.plan         || 'essencial',
       billing_status:  c.billing_status || 'inactive',
+      logo_url:        c.logo_url     || '',
       trial_ends_at:   c.trial_ends_at,
       onboarding_step: c.onboarding_step,
       created_at:      c.created_at,
@@ -52,6 +53,7 @@ router.put('/profile', async (req, res) => {
     email:      'email',
     address:    'address',
     tax_regime: 'tax_regime',
+    logo_url:   'logo_url',
   };
 
   const updates = [];
@@ -103,6 +105,7 @@ router.put('/profile', async (req, res) => {
       email:      c.email       || '',
       address:    c.address     || '',
       tax_regime: c.tax_regime  || 'simples',
+      logo_url:   c.logo_url   || '',
       updated:    true,
     });
   } catch (err) {
