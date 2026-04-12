@@ -3,7 +3,10 @@
 // Resend HTTP API (porta 443) | SMTP fallback | Dev fallback
 // ============================================================
 
-const FROM_DEFAULT = 'Aura. <onboarding@resend.dev>';
+// IMPORTANT: FROM must use a verified domain in Resend.
+// onboarding@resend.dev = sandbox (only sends to account owner).
+// getaura.com.br is verified (DKIM + SPF + MX green).
+const FROM_DEFAULT = 'Aura. <noreply@getaura.com.br>';
 const FROM = process.env.SMTP_FROM || FROM_DEFAULT;
 const ICON_URL = 'https://cdn.jsdelivr.net/gh/CaioAlexanderx/aura-app@main/assets/Icon.png';
 
