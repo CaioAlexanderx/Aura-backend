@@ -23,6 +23,7 @@ router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
 router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
+router.use('/products', require('./productImage'));
 router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 router.use('/products/:pid/variants', require('./variants'));
