@@ -1,8 +1,8 @@
 // ============================================================
-// AURA. — Esqueci minha senha (S1)
-// POST /auth/forgot-password  — envia email com link de reset
-// POST /auth/reset-password   — valida token e troca a senha
-// FIX: email send with timeout to prevent route hanging
+// AURA. -- Esqueci minha senha (S1)
+// POST /auth/forgot-password  -- envia email com link de reset
+// POST /auth/reset-password   -- valida token e troca a senha
+// DELETE /auth/tokens/cleanup  -- limpa tokens expirados/usados
 // ============================================================
 const express = require('express');
 const crypto  = require('crypto');
@@ -26,7 +26,6 @@ async function trySendEmail(email, resetUrl, userName) {
     await Promise.race([emailPromise, timeout]);
     console.log(`[forgot-password] Email sent to ${email}`);
   } catch (err) {
-    // Log but do NOT block — user still gets the success response
     console.warn(`[forgot-password] Email failed for ${email}: ${err.message}`);
   }
 }
@@ -45,6 +44,7 @@ router.post('/forgot-password', async (req, res) => {
     if (rows.length > 0) {
       const user = rows[0];
 
+      // Invalidate previous tokens
       await db.query(
         `UPDATE password_reset_tokens SET used_at = NOW()
          WHERE user_id = $1 AND used_at IS NULL`,
@@ -60,8 +60,9 @@ router.post('/forgot-password', async (req, res) => {
         [user.id, token, expiresAt]
       );
 
-      const resetUrl = `${APP_URL}/(auth)/reset-password?token=${token}`;
-      // Fire-and-forget with timeout — never blocks response
+      // FIX: Expo Router route groups (auth) don't appear in URL
+      // Correct: /reset-password?token=...  NOT /(auth)/reset-password
+      const resetUrl = `${APP_URL}/reset-password?token=${token}`;
       trySendEmail(email, resetUrl, user.full_name);
     }
 
@@ -116,6 +117,27 @@ router.post('/reset-password', async (req, res) => {
   } catch (err) {
     console.error('[reset-password]', err.message);
     res.status(500).json({ error: 'Erro ao redefinir senha' });
+  }
+});
+
+// DELETE /auth/tokens/cleanup -- Remove expired/used tokens (admin utility)
+router.delete('/tokens/cleanup', async (req, res) => {
+  try {
+    const r1 = await db.query(
+      `DELETE FROM password_reset_tokens WHERE used_at IS NOT NULL OR expires_at < NOW()`
+    );
+    const r2 = await db.query(
+      `DELETE FROM verification_codes WHERE verified_at IS NOT NULL OR expires_at < NOW()`
+    );
+    res.json({
+      deleted: {
+        password_reset_tokens: r1.rowCount || 0,
+        verification_codes: r2.rowCount || 0,
+      },
+    });
+  } catch (err) {
+    console.error('[tokens/cleanup]', err.message);
+    res.status(500).json({ error: 'Erro ao limpar tokens' });
   }
 });
 
