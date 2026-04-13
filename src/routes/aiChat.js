@@ -2,6 +2,7 @@
 // AURA. — BE-REV-07: Agentes IA Proxy (with real data context)
 // POST /companies/:id/ai/chat — chat contextual por aba
 // GET  /companies/:id/ai/activity — log de atividade
+// P1 #8: plan check reads from DB (not stale JWT)
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -82,7 +83,13 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
     return res.status(400).json({ error: 'Mensagem muito longa (max 2000 caracteres)' });
   }
 
-  const plan = req.user?.plan || 'essencial';
+  // P1 #8: Read plan from DB (not stale JWT) to avoid 403 after plan change
+  let plan = req.user?.plan || 'essencial';
+  try {
+    const { rows } = await db.query('SELECT plan FROM companies WHERE id = $1', [cid]);
+    if (rows[0]) plan = rows[0].plan || 'essencial';
+  } catch (_) {}
+
   if (plan === 'essencial') {
     return res.status(403).json({ error: 'Agentes IA disponiveis a partir do plano Negocio', requiredPlan: 'negocio' });
   }
@@ -112,7 +119,9 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
     if (Object.keys(data).length > 0) {
       businessData = '\n\n=== DADOS REAIS DO NEGOCIO ===\n' + JSON.stringify(data, null, 2) + '\n=== FIM DOS DADOS ===';
     }
-  } catch (_) {}
+  } catch (err) {
+    console.error('[ai] context data error:', err.message);
+  }
 
   const fullSystemPrompt = systemPrompt + companyContext + businessData;
 
@@ -136,16 +145,23 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
       { role: 'user', content: message.trim() },
     ];
 
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 30000) : null;
+
     const response = await fetch(CLAUDE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1024, system: fullSystemPrompt, messages }),
+      signal: controller?.signal,
     });
+
+    if (timer) clearTimeout(timer);
 
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
-      console.error('Claude API error:', response.status, errData);
-      return res.status(502).json({ error: 'Erro na API de IA. Tente novamente.' });
+      console.error('[ai] Claude API error:', response.status, errData);
+      const errMsg = errData.error?.message || errData.message || `Erro ${response.status}`;
+      return res.status(502).json({ error: `Erro na API de IA: ${errMsg}` });
     }
 
     const data = await response.json();
@@ -159,8 +175,11 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
 
     res.json({ response: text, context, model: CLAUDE_MODEL, usage: data.usage || null });
   } catch (err) {
-    console.error('AI chat error:', err);
-    res.status(500).json({ error: 'Erro ao processar mensagem' });
+    console.error('[ai] chat error:', err.message);
+    if (err.name === 'AbortError') {
+      return res.status(504).json({ error: 'A IA demorou demais para responder. Tente uma pergunta mais curta.' });
+    }
+    res.status(500).json({ error: 'Erro ao processar mensagem: ' + (err.message || '') });
   }
 });
 
