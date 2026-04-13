@@ -1,18 +1,17 @@
 // ============================================================
-// AURA. — BE-REV-07: Agentes IA Proxy
+// AURA. — BE-REV-07: Agentes IA Proxy (with real data context)
 // POST /companies/:id/ai/chat — chat contextual por aba
-// GET  /companies/:id/ai/activity — log de atividade dos agentes
-// Uses Claude Sonnet API with contextual system prompts
+// GET  /companies/:id/ai/activity — log de atividade
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
+const { getContextData } = require('../services/aiContext');
 
 const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || null;
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const CLAUDE_URL = 'https://api.anthropic.com/v1/messages';
 
-// Rate limit: max requests per hour by plan
 const RATE_LIMITS = { expansao: 100, negocio: 20, essencial: 0 };
 let redis = null;
 try { redis = require('../config/redis').default || require('../config/redis'); } catch (_) {}
@@ -20,7 +19,7 @@ try { redis = require('../config/redis').default || require('../config/redis'); 
 async function checkRateLimit(companyId, plan) {
   const limit = RATE_LIMITS[plan] || 0;
   if (limit === 0) return false;
-  if (!redis) return true; // no redis = no rate limit
+  if (!redis) return true;
   const key = `rl:ai:${companyId}`;
   try {
     const cnt = await redis.incr(key);
@@ -29,46 +28,46 @@ async function checkRateLimit(companyId, plan) {
   } catch (_) { return true; }
 }
 
-// Context-specific system prompts per tab
 const SYSTEM_PROMPTS = {
-  financeiro: `Voce e o Agente Financeiro da Aura. Analise dados financeiros do negocio e ajude com:
-- Fluxo de caixa e projecoes
-- Identificar cobran\u00e7as em atraso e sugerir acoes
-- Analise de receitas vs despesas
+  financeiro: `Voce e o Agente Financeiro da Aura. Analise os DADOS REAIS do negocio fornecidos abaixo e ajude com:
+- Fluxo de caixa e projecoes baseadas nos numeros reais
+- Identificar cobrancas em atraso e sugerir acoes concretas
+- Analise de receitas vs despesas do mes atual
 - Sugestoes para melhorar margem de lucro
-Sempre responda em portugues brasileiro, de forma pratica e direta. Use dados reais quando fornecidos.`,
+Sempre responda em portugues brasileiro, de forma pratica e direta. SEMPRE use os dados reais fornecidos, nunca invente numeros.`,
 
-  estoque: `Voce e o Agente de Estoque da Aura. Ajude com:
-- Alertas de reposicao e estoque baixo
-- Analise da curva ABC
-- Sugestoes de pedidos de compra
+  estoque: `Voce e o Agente de Estoque da Aura. Analise os DADOS REAIS do estoque fornecidos abaixo e ajude com:
+- Alertas de reposicao baseados no estoque real
+- Analise dos produtos mais vendidos
+- Sugestoes de pedidos de compra com quantidades
 - Otimizacao de estoque minimo
-Sempre responda em portugues brasileiro. Seja pratico e objetivo.`,
+Sempre use os dados reais. Nunca invente numeros.`,
 
-  crm: `Voce e o Agente de CRM da Aura. Ajude com:
-- Identificar clientes inativos para reativacao
-- Sugerir acoes de fidelizacao
-- Aniversarios e oportunidades de relacionamento
-- Analise de ranking e LTV
-Sempre responda em portugues brasileiro. Foque em acoes praticas.`,
+  crm: `Voce e o Agente de CRM da Aura. Analise os DADOS REAIS de clientes fornecidos abaixo e ajude com:
+- Reativar clientes inativos com acoes especificas
+- Aproveitar aniversarios para fidelizacao
+- Ranking de clientes por valor gasto
+- Estrategias de retencao baseadas nos dados reais
+Sempre use os dados reais. Foque em acoes praticas e personalizadas.`,
 
-  contabil: `Voce e o Agente Contabil da Aura. Ajude com:
-- Lembretes de obrigacoes fiscais (DAS, eSocial, PGDAS-D)
-- Estimativas de impostos
-- Orientacao sobre prazos e procedimentos
-- IMPORTANTE: Tudo e estimativa e apoio contabil. Nunca diga que e declaracao oficial ou assessoria tributaria.
-Sempre responda em portugues brasileiro.`,
+  contabil: `Voce e o Agente Contabil da Aura. Analise os DADOS REAIS das obrigacoes fornecidos abaixo e ajude com:
+- Lembretes de obrigacoes fiscais com prazos reais
+- Estimativas de impostos baseadas no faturamento
+- Orientacao sobre procedimentos
+- IMPORTANTE: Tudo e estimativa e apoio contabil informativo. Nunca diga que e declaracao oficial.
+Sempre use os dados reais do checklist e obrigacoes.`,
 
-  marketing: `Voce e o Agente de Marketing da Aura. Ajude com:
-- Criar posts para Instagram e WhatsApp
-- Sugestoes de promocoes e campanhas
-- Textos para comunicacao com clientes
-- Estrategias de divulgacao para pequenos negocios
-Sempre responda em portugues brasileiro. Seja criativo mas pratico.`,
+  marketing: `Voce e o Agente de Marketing da Aura. Analise os DADOS REAIS de vendas fornecidos abaixo e ajude com:
+- Criar posts destacando produtos mais vendidos
+- Sugestoes de promocoes baseadas no estoque e tendencias
+- Textos para WhatsApp e Instagram
+- Estrategias de divulgacao baseadas nos dados reais do negocio
+Seja criativo mas sempre use os numeros reais.`,
 
   geral: `Voce e o Assistente IA da Aura, uma plataforma de gestao para pequenos negocios.
-Ajude o usuario com qualquer duvida sobre o negocio. Seja pratico, direto e responda em portugues brasileiro.
-Nao forneca assessoria tributaria vinculante — tudo e estimativa e apoio contabil informativo.`,
+Voce tem acesso aos DADOS REAIS do negocio fornecidos abaixo. Use-os para dar respostas precisas e personalizadas.
+Seja pratico, direto e responda em portugues brasileiro.
+Nao forneca assessoria tributaria vinculante.`,
 };
 
 // POST /companies/:id/ai/chat
@@ -83,62 +82,50 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
     return res.status(400).json({ error: 'Mensagem muito longa (max 2000 caracteres)' });
   }
 
-  // Check plan
   const plan = req.user?.plan || 'essencial';
   if (plan === 'essencial') {
-    return res.status(403).json({ error: 'Agentes IA disponiveis a partir do plano Expansao', requiredPlan: 'expansao' });
+    return res.status(403).json({ error: 'Agentes IA disponiveis a partir do plano Negocio', requiredPlan: 'negocio' });
   }
 
-  // Rate limit
   const allowed = await checkRateLimit(cid, plan);
   if (!allowed) {
     return res.status(429).json({ error: 'Limite de mensagens atingido. Tente novamente em 1 hora.' });
   }
 
-  // Get system prompt
+  // Build enriched system prompt
   const systemPrompt = SYSTEM_PROMPTS[context] || SYSTEM_PROMPTS.geral;
-
-  // Build enriched system prompt with company context
   let companyContext = '';
   try {
     const { rows } = await db.query(
-      `SELECT c.legal_name, c.trade_name, c.tax_regime, c.plan, c.vertical_active,
-              c.address_city, c.address_state
-       FROM companies c WHERE c.id = $1`, [cid]
-    );
+      `SELECT legal_name, trade_name, tax_regime, plan, vertical_active, address_city, address_state
+       FROM companies WHERE id = $1`, [cid]);
     if (rows[0]) {
       const co = rows[0];
-      companyContext = `\n\nContexto da empresa:\n- Nome: ${co.trade_name || co.legal_name || 'N/A'}\n- Regime: ${co.tax_regime || 'N/A'}\n- Plano: ${co.plan || 'N/A'}\n- Cidade: ${co.address_city || 'N/A'}/${co.address_state || 'SP'}`;
-      if (co.vertical_active) companyContext += `\n- Vertical: ${co.vertical_active}`;
+      companyContext = `\n\nEmpresa: ${co.trade_name || co.legal_name || 'N/A'} | Regime: ${co.tax_regime || 'N/A'} | Plano: ${co.plan || 'N/A'} | ${co.address_city || ''}/${co.address_state || 'SP'}`;
     }
   } catch (_) {}
 
-  const fullSystemPrompt = systemPrompt + companyContext;
+  // Fetch REAL business data for this context
+  let businessData = '';
+  try {
+    const data = await getContextData(cid, context);
+    if (Object.keys(data).length > 0) {
+      businessData = '\n\n=== DADOS REAIS DO NEGOCIO ===\n' + JSON.stringify(data, null, 2) + '\n=== FIM DOS DADOS ===';
+    }
+  } catch (_) {}
 
-  // If no API key, return a helpful mock response
+  const fullSystemPrompt = systemPrompt + companyContext + businessData;
+
+  // Mock response if no API key
   if (!CLAUDE_API_KEY) {
-    const mockResponses = {
-      financeiro: 'Com base nos seus dados, seu fluxo de caixa esta saudavel com margem de 46,6%. Recomendo cobrar os 2 clientes em atraso (Joao Santos R$ 1.240 e Carlos Lima R$ 430) via WhatsApp para manter a saude financeira.',
-      estoque: 'Identifiquei 3 produtos abaixo do estoque minimo: Pomada modeladora (2 un.), Condicionador Premium (3 un.) e Pos-Barba Premium (2 un.). Custo estimado de reposicao: R$ 132,00. Sugiro criar um pedido de compra.',
-      crm: 'Voce tem 8 clientes inativos ha mais de 30 dias e 1 aniversario proximo (Joao Santos - 08/04). Sugiro enviar uma mensagem de reativacao com oferta especial e parabens antecipados para o Joao.',
-      contabil: 'Proximo vencimento: DAS-MEI em 20/04 (R$ 76,90). Estimativa informativa. O QR Code Pix esta disponivel na aba de checkpoints. Lembre-se de verificar o eSocial ate 15/04.',
-      marketing: 'Que tal um post no Instagram destacando o combo Corte+Barba por R$ 65? Texto sugerido: "Combo que e sucesso! Corte + barba completa por apenas R$ 65. Agende agora pelo WhatsApp!"',
-      geral: 'Como posso ajudar com seu negocio? Posso analisar financas, estoque, clientes, obrigacoes contabeis ou criar conteudo de marketing. Escolha uma area ou me faca uma pergunta!',
-    };
-    // Log activity
     try {
       await db.query(
-        `INSERT INTO ai_activity_log (company_id, user_id, agent, action, detail, status)
-         VALUES ($1, $2, $3, 'Chat', $4, 'done')`,
-        [cid, req.user.id, context, message.substring(0, 200)]
-      ).catch(() => {});
+        `INSERT INTO ai_activity_log (company_id, user_id, agent, action, detail, status) VALUES ($1,$2,$3,'Chat',$4,'done')`,
+        [cid, req.user.id, context, message.substring(0, 200)]).catch(() => {});
     } catch (_) {}
-
     return res.json({
-      response: mockResponses[context] || mockResponses.geral,
-      context,
-      model: 'mock',
-      note: 'Resposta demonstrativa. Configure CLAUDE_API_KEY no Railway para respostas reais.',
+      response: 'Configure CLAUDE_API_KEY no Railway para ativar os agentes com dados reais. Os dados do seu negocio estao prontos para analise.',
+      context, model: 'mock',
     });
   }
 
@@ -151,17 +138,8 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
 
     const response = await fetch(CLAUDE_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': CLAUDE_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: CLAUDE_MODEL,
-        max_tokens: 1024,
-        system: fullSystemPrompt,
-        messages,
-      }),
+      headers: { 'Content-Type': 'application/json', 'x-api-key': CLAUDE_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1024, system: fullSystemPrompt, messages }),
     });
 
     if (!response.ok) {
@@ -173,21 +151,13 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
     const data = await response.json();
     const text = data.content?.map(c => c.text || '').join('') || 'Sem resposta.';
 
-    // Log activity
     try {
       await db.query(
-        `INSERT INTO ai_activity_log (company_id, user_id, agent, action, detail, status)
-         VALUES ($1, $2, $3, 'Chat', $4, 'done')`,
-        [cid, req.user.id, context, message.substring(0, 200)]
-      ).catch(() => {});
+        `INSERT INTO ai_activity_log (company_id, user_id, agent, action, detail, status) VALUES ($1,$2,$3,'Chat',$4,'done')`,
+        [cid, req.user.id, context, message.substring(0, 200)]).catch(() => {});
     } catch (_) {}
 
-    res.json({
-      response: text,
-      context,
-      model: CLAUDE_MODEL,
-      usage: data.usage || null,
-    });
+    res.json({ response: text, context, model: CLAUDE_MODEL, usage: data.usage || null });
   } catch (err) {
     console.error('AI chat error:', err);
     res.status(500).json({ error: 'Erro ao processar mensagem' });
@@ -198,56 +168,24 @@ router.post('/chat', requireRole('client', 'analyst', 'admin'), async (req, res)
 router.get('/activity', async (req, res) => {
   const cid = req.params.id;
   const limit = Math.min(parseInt(req.query.limit) || 20, 50);
-
   try {
     const { rows } = await db.query(
-      `SELECT id, agent, action, detail, status, created_at
-       FROM ai_activity_log
-       WHERE company_id = $1
-       ORDER BY created_at DESC
-       LIMIT $2`,
-      [cid, limit]
-    );
-
-    // Agent summary
+      `SELECT id, agent, action, detail, status, created_at FROM ai_activity_log
+       WHERE company_id=$1 ORDER BY created_at DESC LIMIT $2`, [cid, limit]);
     let summary = [];
     try {
       const { rows: sumRows } = await db.query(
-        `SELECT agent,
-                COUNT(*) AS actions,
-                COUNT(DISTINCT DATE(created_at)) AS active_days
-         FROM ai_activity_log
-         WHERE company_id = $1
-           AND created_at >= date_trunc('month', CURRENT_DATE)
-         GROUP BY agent
-         ORDER BY actions DESC`,
-        [cid]
-      );
-      summary = sumRows.map(r => ({
-        name: r.agent,
-        actions: parseInt(r.actions) || 0,
-        active_days: parseInt(r.active_days) || 0,
-      }));
+        `SELECT agent, COUNT(*) AS actions FROM ai_activity_log
+         WHERE company_id=$1 AND created_at >= date_trunc('month', CURRENT_DATE)
+         GROUP BY agent ORDER BY actions DESC`, [cid]);
+      summary = sumRows.map(r => ({ name: r.agent, actions: parseInt(r.actions) || 0 }));
     } catch (_) {}
-
     res.json({
-      activity: rows.map(r => ({
-        id: r.id,
-        agent: r.agent,
-        action: r.action,
-        detail: r.detail,
-        status: r.status,
-        time: r.created_at,
-      })),
-      summary,
-      total: rows.length,
+      activity: rows.map(r => ({ id: r.id, agent: r.agent, action: r.action, detail: r.detail, status: r.status, time: r.created_at })),
+      summary, total: rows.length,
     });
   } catch (err) {
-    // Graceful fallback if table doesn't exist
-    if (err.message?.includes('does not exist')) {
-      return res.json({ activity: [], summary: [], total: 0 });
-    }
-    console.error('ai activity error:', err);
+    if (err.message?.includes('does not exist')) return res.json({ activity: [], summary: [], total: 0 });
     res.status(500).json({ error: 'Erro ao buscar atividade' });
   }
 });
