@@ -1,6 +1,6 @@
 // ============================================================
 // AURA. — Etiquetas de produto (impressao direta)
-// P0 #3: Simplificado — apenas 33x21mm com QR Code
+// P0 #3: 33x21mm — suporta BARCODE (JsBarcode SVG) e QR Code
 // Impressora alvo: Bematech LB-1000 / 042 (203dpi, TSPL2)
 // ============================================================
 const express = require('express');
@@ -8,13 +8,10 @@ const router = express.Router({ mergeParams: true });
 const pool = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 
-// Unico layout suportado: etiqueta 33x21mm com QR
 const LABEL_WIDTH = 33;  // mm
 const LABEL_HEIGHT = 21; // mm
-const QR_SIZE = 17;      // mm (cabe no height com 2mm padding)
 
 // GET /companies/:id/products/:pid/label
-// Retorna dados estruturados para uso no frontend
 router.get('/:pid/label', requireAuth, async (req, res) => {
   const { id: company_id, pid: product_id } = req.params;
   const { show_name = 'true', show_price = 'true', qty = '1' } = req.query;
@@ -46,12 +43,13 @@ router.get('/:pid/label', requireAuth, async (req, res) => {
   }
 });
 
-// GET /companies/:id/products/:pid/label/print
+// GET /companies/:id/products/:pid/label/print?mode=barcode|qr
 // Retorna HTML pronto para window.print() na Bematech 33x21
 router.get('/:pid/label/print', requireAuth, async (req, res) => {
   const { id: company_id, pid: product_id } = req.params;
-  const { show_name = 'true', show_price = 'true', qty = '1' } = req.query;
+  const { show_name = 'true', show_price = 'true', qty = '1', mode = 'barcode' } = req.query;
   const quantity = Math.min(Math.max(parseInt(qty) || 1, 1), 200);
+  const useQR = mode === 'qr';
 
   try {
     const result = await pool.query(
@@ -66,68 +64,116 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     const showName = show_name === 'true';
     const showPrice = show_price === 'true';
     const priceText = product.price ? `R$ ${parseFloat(product.price).toFixed(2).replace('.', ',')}` : '';
-    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(product.barcode)}&bgcolor=ffffff&color=000000&margin=1`;
+    const barcodeData = product.barcode;
+
+    // Detect barcode format for JsBarcode
+    const barcodeLen = barcodeData.replace(/\D/g, '').length;
+    let jsFormat = 'CODE128'; // default
+    if (/^\d+$/.test(barcodeData)) {
+      if (barcodeLen === 13) jsFormat = 'EAN13';
+      else if (barcodeLen === 8) jsFormat = 'EAN8';
+      else if (barcodeLen === 12) jsFormat = 'UPC';
+    }
+    if (product.barcode_format) {
+      const fmtMap = { ean13: 'EAN13', ean8: 'EAN8', upc: 'UPC', code128: 'CODE128', code39: 'CODE39' };
+      jsFormat = fmtMap[product.barcode_format] || jsFormat;
+    }
+
+    // QR URL (for QR mode)
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(barcodeData)}&bgcolor=ffffff&color=000000&margin=1`;
 
     const labels = [];
     for (let i = 0; i < quantity; i++) {
-      labels.push(`<div class="label">
-        <img src="${qrUrl}" class="qr" alt="QR">
-        <div class="info">
+      if (useQR) {
+        // QR layout: QR left, info right
+        labels.push(`<div class="label qr-layout">
+          <img src="${qrUrl}" class="qr" alt="QR">
+          <div class="info">
+            ${showName ? `<div class="name">${product.name}</div>` : ''}
+            ${showPrice ? `<div class="price">${priceText}</div>` : ''}
+          </div>
+        </div>`);
+      } else {
+        // Barcode layout: barcode top, info bottom
+        labels.push(`<div class="label barcode-layout">
+          <svg class="barcode" id="bc-${i}"></svg>
           ${showName ? `<div class="name">${product.name}</div>` : ''}
           ${showPrice ? `<div class="price">${priceText}</div>` : ''}
-        </div>
-      </div>`);
+        </div>`);
+      }
     }
-
-    // INSTRUCOES para a cliente configurar a Bematech:
-    // 1. Instalar driver Bematech LB-1000 no Windows
-    // 2. Nas propriedades da impressora > Preferencias > Tamanho do papel: 33mm x 21mm
-    // 3. Orientacao: Paisagem (ou retrato dependendo do modelo)
-    // 4. No Chrome: Ctrl+P > Impressora: Bematech > Mais config > Tamanho do papel: 33x21
-    // 5. Margens: Nenhuma / Minima
-    // 6. Escala: 100%
 
     const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<title>Etiqueta 33x21 - ${product.name}</title>
+<title>Etiqueta - ${product.name}</title>
+${!useQR ? '<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>' : ''}
 <style>
-  /* P0 #3: @page exato para Bematech 33x21mm */
   @page {
     margin: 0;
     padding: 0;
     size: ${LABEL_WIDTH}mm ${LABEL_HEIGHT}mm;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: Arial, Helvetica, sans-serif;
-    background: #f5f5f5;
-  }
+  body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; }
 
   .label {
     width: ${LABEL_WIDTH}mm;
     height: ${LABEL_HEIGHT}mm;
+    background: #fff;
+    overflow: hidden;
+    page-break-after: always;
+  }
+  .label:last-child { page-break-after: auto; }
+
+  /* BARCODE layout: vertical stack */
+  .barcode-layout {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0.5mm 1mm;
+    gap: 0;
+    text-align: center;
+  }
+  .barcode-layout .barcode {
+    width: 30mm;
+    height: 11mm;
+    flex-shrink: 0;
+  }
+  .barcode-layout .name {
+    font-size: 5pt;
+    font-weight: 600;
+    line-height: 1.1;
+    max-height: 5mm;
+    overflow: hidden;
+    word-break: break-word;
+    color: #000;
+    margin-top: 0.3mm;
+  }
+  .barcode-layout .price {
+    font-size: 7pt;
+    font-weight: 900;
+    color: #000;
+    white-space: nowrap;
+  }
+
+  /* QR layout: horizontal */
+  .qr-layout {
     display: flex;
     flex-direction: row;
     align-items: center;
     padding: 1mm 1.5mm;
     gap: 1.5mm;
-    background: #fff;
-    page-break-after: always;
-    overflow: hidden;
   }
-  .label:last-child { page-break-after: auto; }
-
-  .qr {
-    width: ${QR_SIZE}mm;
-    height: ${QR_SIZE}mm;
+  .qr-layout .qr {
+    width: 17mm;
+    height: 17mm;
     flex-shrink: 0;
     image-rendering: pixelated;
-    image-rendering: -webkit-optimize-contrast;
   }
-
-  .info {
+  .qr-layout .info {
     flex: 1;
     min-width: 0;
     display: flex;
@@ -136,8 +182,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     gap: 0.5mm;
     overflow: hidden;
   }
-
-  .name {
+  .qr-layout .name {
     font-size: 5.5pt;
     font-weight: 700;
     line-height: 1.15;
@@ -146,26 +191,19 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     word-break: break-word;
     color: #000;
   }
-
-  .price {
+  .qr-layout .price {
     font-size: 7.5pt;
     font-weight: 900;
     color: #000;
     white-space: nowrap;
   }
 
-  /* Tela de preview (nao imprime) */
+  /* Preview */
   .preview-bar {
-    position: fixed;
-    bottom: 0; left: 0; right: 0;
-    background: #1a1a2e;
-    padding: 12px 20px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    z-index: 999;
-    font-family: -apple-system, sans-serif;
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: #1a1a2e; padding: 12px 20px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    z-index: 999; font-family: -apple-system, sans-serif;
   }
   .preview-bar span { color: #a78bfa; font-size: 12px; }
   .preview-bar b { color: #e2e8f0; font-size: 13px; }
@@ -175,28 +213,17 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     font-weight: 700; cursor: pointer;
   }
   .preview-bar button:hover { background: #6d28d9; }
-
   .setup-info {
     max-width: 600px; margin: 20px auto; padding: 16px 20px;
     background: #fff; border-radius: 12px; border: 1px solid #e2e8f0;
-    font-family: -apple-system, sans-serif; font-size: 12px; color: #555;
-    line-height: 1.6;
+    font-family: -apple-system, sans-serif; font-size: 12px; color: #555; line-height: 1.6;
   }
   .setup-info h3 { font-size: 14px; color: #1a1a2e; margin-bottom: 8px; }
-  .setup-info li { margin-bottom: 4px; }
-
   .label-preview {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    justify-content: center;
-    padding: 20px;
-    padding-bottom: 80px;
+    display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+    padding: 20px; padding-bottom: 80px;
   }
-  .label-preview .label {
-    border: 1px dashed #ccc;
-    border-radius: 2px;
-  }
+  .label-preview .label { border: 1px dashed #ccc; border-radius: 2px; }
 
   @media print {
     .preview-bar, .setup-info { display: none !important; }
@@ -211,10 +238,10 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
 <div class="setup-info">
   <h3>Configuracao da impressora Bematech</h3>
   <ol>
-    <li>No <b>Painel de Controle > Impressoras</b>, clique com botao direito na Bematech e va em <b>Preferencias de impressao</b></li>
-    <li>Defina o tamanho do papel como <b>33mm x 21mm</b> (ou crie um tamanho personalizado)</li>
-    <li>Ao imprimir no Chrome: <b>Ctrl+P</b> > selecione a Bematech > <b>Mais configuracoes</b></li>
-    <li>Tamanho do papel: <b>33 x 21 mm</b> | Margens: <b>Nenhuma</b> | Escala: <b>100%</b></li>
+    <li>No <b>Painel de Controle > Impressoras</b>, abra <b>Preferencias de impressao</b> da Bematech</li>
+    <li>Defina o tamanho do papel como <b>33mm x 21mm</b></li>
+    <li>No Chrome: <b>Ctrl+P</b> > Bematech > <b>Mais configuracoes</b></li>
+    <li>Tamanho: <b>33 x 21 mm</b> | Margens: <b>Nenhuma</b> | Escala: <b>100%</b></li>
   </ol>
 </div>
 
@@ -224,7 +251,7 @@ ${labels.join('\n')}
 
 <div class="preview-bar">
   <div>
-    <span>Etiqueta 33x21mm</span><br>
+    <span>Etiqueta 33x21mm (${useQR ? 'QR Code' : 'Codigo de barras'})</span><br>
     <b>${product.name} ${showPrice ? '| ' + priceText : ''}</b>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
@@ -232,6 +259,36 @@ ${labels.join('\n')}
     <button onclick="window.print()">Imprimir</button>
   </div>
 </div>
+
+${!useQR ? `<script>
+  // Generate barcodes via JsBarcode (SVG — crisp at any DPI)
+  document.querySelectorAll('.barcode').forEach(function(el) {
+    try {
+      JsBarcode(el, "${barcodeData}", {
+        format: "${jsFormat}",
+        width: 1.2,
+        height: 28,
+        margin: 0,
+        fontSize: 7,
+        textMargin: 1,
+        displayValue: true,
+        font: "Arial",
+        textAlign: "center",
+        background: "#ffffff",
+        lineColor: "#000000"
+      });
+    } catch(e) {
+      // Fallback to CODE128 if format fails
+      try {
+        JsBarcode(el, "${barcodeData}", {
+          format: "CODE128", width: 1, height: 28, margin: 0,
+          fontSize: 7, textMargin: 1, displayValue: true,
+          font: "Arial", background: "#ffffff", lineColor: "#000000"
+        });
+      } catch(e2) { el.innerHTML = '<text y="15" font-size="8" fill="red">Erro no codigo</text>'; }
+    }
+  });
+<\/script>` : ''}
 
 </body>
 </html>`;
@@ -245,11 +302,9 @@ ${labels.join('\n')}
 });
 
 // GET /companies/:id/products/labels/batch?ids=pid1,pid2
-// Batch: gera multiplas etiquetas de varios produtos
 router.get('/labels/batch', requireAuth, async (req, res) => {
   const { id: company_id } = req.params;
   const { ids, show_name = 'true', show_price = 'true' } = req.query;
-
   if (!ids) return res.status(400).json({ error: 'Informe ids separados por virgula' });
   const productIds = ids.split(',').map(s => s.trim()).filter(Boolean).slice(0, 50);
   if (productIds.length === 0) return res.status(400).json({ error: 'Nenhum id valido' });
