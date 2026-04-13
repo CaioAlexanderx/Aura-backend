@@ -1,5 +1,5 @@
 // ============================================================
-// AURA. -- Employees CRUD (fixed column mapping)
+// AURA. -- Employees CRUD (fixed parameter types)
 // GET/POST/PATCH/DELETE /companies/:id/employees
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
@@ -55,35 +55,46 @@ router.post('/', async (req, res) => {
   const cid = req.params.id;
   const { name, role, salary, admission_date, cpf, pis, phone, email, work_hours, status } = req.body;
 
-  // Validations
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'Nome e obrigatorio' });
   if (!cpf || !String(cpf).trim()) return res.status(400).json({ error: 'CPF e obrigatorio' });
   if (!admission_date) return res.status(400).json({ error: 'Data de admissao e obrigatoria (formato: YYYY-MM-DD)' });
 
   const salaryVal = parseFloat(salary) || 0;
   const cpfClean = String(cpf).replace(/\D/g, '');
+  const roleVal = role || 'Colaborador';
+  const pisVal = pis || null;
 
   if (cpfClean.length !== 11) return res.status(400).json({ error: 'CPF deve ter 11 digitos' });
 
   try {
-    // Check duplicate CPF in same company
     const { rows: existing } = await db.query(
       'SELECT id FROM employees WHERE company_id=$1 AND cpf=$2 AND is_active=true',
       [cid, cpfClean]
     );
     if (existing.length) return res.status(409).json({ error: 'Funcionario com este CPF ja cadastrado' });
 
+    // Each column gets its own parameter (no reuse) to avoid type conflicts
     const { rows } = await db.query(
       `INSERT INTO employees
          (company_id, name, role, role_title, salary, base_salary, admission_date,
           cpf, pis, pis_pasep, phone, email, work_hours, status)
-       VALUES ($1,$2,$3,$3,$4,$4,$5,$6,$7,$7,$8,$9,$10,$11)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [
-        cid, String(name).trim(), role || null,
-        salaryVal, admission_date,
-        cpfClean, pis || null, phone || null, email || null,
-        parseInt(work_hours) || 220, status || 'active',
+        cid,                        // $1
+        String(name).trim(),        // $2
+        roleVal,                    // $3 -> role (varchar)
+        roleVal,                    // $4 -> role_title (text)
+        salaryVal,                  // $5 -> salary (numeric nullable)
+        salaryVal,                  // $6 -> base_salary (numeric NOT NULL)
+        admission_date,             // $7
+        cpfClean,                   // $8
+        pisVal,                     // $9  -> pis (text)
+        pisVal,                     // $10 -> pis_pasep (text)
+        phone || null,              // $11
+        email || null,              // $12
+        parseInt(work_hours) || 220,// $13
+        status || 'active',         // $14
       ]
     );
     res.status(201).json(rows[0]);
@@ -96,28 +107,36 @@ router.post('/', async (req, res) => {
 // PATCH /:eid — update employee
 router.patch('/:eid', async (req, res) => {
   const { id: cid, eid } = req.params;
-  const allowedFields = {
-    name: 'name', role: 'role', salary: 'salary',
-    admission_date: 'admission_date', cpf: 'cpf', pis: 'pis',
-    phone: 'phone', email: 'email', work_hours: 'work_hours',
-    status: 'status', is_active: 'is_active',
-    commission_enabled: 'commission_enabled', commission_rate: 'commission_rate',
-  };
-  const numFields = ['salary', 'work_hours', 'commission_rate'];
   const updates = [], values = [];
   let idx = 1;
-  for (const [bodyKey, dbCol] of Object.entries(allowedFields)) {
-    if (req.body[bodyKey] !== undefined) {
-      updates.push(`${dbCol} = $${idx}`);
-      const val = numFields.includes(dbCol) ? parseFloat(req.body[bodyKey]) : req.body[bodyKey];
-      values.push(val);
-      // Sync dual columns
-      if (dbCol === 'salary') { updates.push(`base_salary = $${idx}`); }
-      if (dbCol === 'role') { updates.push(`role_title = $${idx}`); }
-      if (dbCol === 'pis') { updates.push(`pis_pasep = $${idx}`); }
-      idx++;
-    }
+
+  // Build dynamic SET clause — sync dual columns with separate params
+  function addField(bodyKey, dbCol, transform) {
+    if (req.body[bodyKey] === undefined) return;
+    const val = transform ? transform(req.body[bodyKey]) : req.body[bodyKey];
+    updates.push(`${dbCol} = $${idx}`);
+    values.push(val);
+    idx++;
+    // Sync dual columns with a NEW param index
+    if (dbCol === 'salary') { updates.push(`base_salary = $${idx}`); values.push(val); idx++; }
+    if (dbCol === 'role') { updates.push(`role_title = $${idx}`); values.push(val); idx++; }
+    if (dbCol === 'pis') { updates.push(`pis_pasep = $${idx}`); values.push(val); idx++; }
   }
+
+  addField('name', 'name');
+  addField('role', 'role');
+  addField('salary', 'salary', v => parseFloat(v));
+  addField('admission_date', 'admission_date');
+  addField('cpf', 'cpf');
+  addField('pis', 'pis');
+  addField('phone', 'phone');
+  addField('email', 'email');
+  addField('work_hours', 'work_hours', v => parseInt(v));
+  addField('status', 'status');
+  addField('is_active', 'is_active');
+  addField('commission_enabled', 'commission_enabled');
+  addField('commission_rate', 'commission_rate', v => parseFloat(v));
+
   if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   updates.push('updated_at = NOW()');
   values.push(eid, cid);
