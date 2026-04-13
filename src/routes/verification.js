@@ -13,9 +13,9 @@ const { sendVerificationLinkEmail } = require('../services/mailer');
 const { validateRuntimeEnv } = require('../config/env');
 
 const env = validateRuntimeEnv();
-const API_URL = env.API_URL || 'https://aura-backend-production-f805.up.railway.app/api/v1';
-const APP_URL = env.APP_URL || 'https://app.getaura.com.br';
-const VERIFY_TTL_MIN = 60; // link valido por 1 hora
+const API_URL = env.API_URL;
+const APP_URL = env.APP_URL;
+const VERIFY_TTL_MIN = 60;
 
 function generateCode(length) {
   const digits = '0123456789';
@@ -25,7 +25,6 @@ function generateCode(length) {
   return code;
 }
 
-// Fire-and-forget email send with timeout (same pattern as password reset)
 async function trySendVerificationEmail(email, confirmUrl, userName) {
   try {
     const p = sendVerificationLinkEmail(email, confirmUrl, userName);
@@ -39,7 +38,6 @@ async function trySendVerificationEmail(email, confirmUrl, userName) {
 }
 
 // -- POST /auth/send-verification --
-// Gera token UUID, salva no DB, envia email com link de confirmacao
 router.post('/send-verification', requireAuth, async (req, res) => {
   try {
     const { rows: users } = await db.query(
@@ -64,6 +62,7 @@ router.post('/send-verification', requireAuth, async (req, res) => {
     );
 
     const confirmUrl = `${API_URL}/auth/confirm-email/${token}`;
+    // Fire-and-forget — response is sent immediately
     trySendVerificationEmail(user.email, confirmUrl, user.full_name);
 
     res.json({
@@ -72,13 +71,12 @@ router.post('/send-verification', requireAuth, async (req, res) => {
       expires_in: VERIFY_TTL_MIN * 60,
     });
   } catch (err) {
-    console.error('send-verification error:', err.message);
+    console.error('[send-verification] error:', err.message, err.stack);
     res.status(500).json({ error: 'Erro ao enviar email de verificacao' });
   }
 });
 
-// -- GET /auth/confirm-email/:token --
-// PUBLICO: usuario clica no link do email, valida token, redireciona pro app
+// -- GET /auth/confirm-email/:token -- (PUBLIC)
 router.get('/confirm-email/:token', async (req, res) => {
   const { token } = req.params;
   try {
@@ -99,19 +97,18 @@ router.get('/confirm-email/:token', async (req, res) => {
       return res.redirect(`${APP_URL}/?verify_error=expired`);
     }
 
-    // Mark verified
     await db.query('UPDATE verification_codes SET verified_at=NOW() WHERE id=$1', [vc.id]);
     await db.query('UPDATE users SET email_verified=true WHERE id=$1', [vc.user_id]);
 
     console.log(`[verify] Email confirmed for user ${vc.user_id} (${vc.full_name})`);
     res.redirect(`${APP_URL}/?email_verified=true`);
   } catch (err) {
-    console.error('confirm-email error:', err.message);
+    console.error('[confirm-email] error:', err.message);
     res.redirect(`${APP_URL}/?verify_error=server`);
   }
 });
 
-// -- Phone verification (unchanged) --
+// -- Phone verification --
 router.post('/send-phone-verification', requireAuth, async (req, res) => {
   try {
     const { rows: users } = await db.query('SELECT phone, phone_verified FROM users WHERE id=$1', [req.user.id]);
