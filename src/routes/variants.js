@@ -1,6 +1,6 @@
 // ============================================================
 // AURA. — Variantes de Produto (BE-16)
-// Plano mínimo: Negócio
+// P0 #11: SKU optional (auto-generated), attributes optional
 // ============================================================
 
 const express = require('express');
@@ -21,7 +21,7 @@ router.get('/', requireAuth, async (req, res) => {
   const { id: company_id, pid: product_id } = req.params;
   try {
     if (!await checkProductOwnership(company_id, product_id)) {
-      return res.status(404).json({ error: 'Produto não encontrado' });
+      return res.status(404).json({ error: 'Produto nao encontrado' });
     }
     const { rows } = await pool.query(
       `SELECT
@@ -56,38 +56,50 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // POST /companies/:id/products/:pid/variants
+// P0 #11: sku_suffix is now optional (auto-generated), attributes optional
 router.post('/', requireAuth, requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const { id: company_id, pid: product_id } = req.params;
   const { sku_suffix, price_override, stock_qty = 0, barcode, barcode_format, attributes = [] } = req.body;
-
-  if (!sku_suffix || sku_suffix.trim() === '') {
-    return res.status(400).json({ error: 'sku_suffix é obrigatório (ex: ROSA-38, P, Azul)' });
-  }
-  if (attributes.length === 0) {
-    return res.status(400).json({ error: 'Informe ao menos um atributo (ex: [{attribute: "Cor", value: "Rosa"}])' });
-  }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     if (!await checkProductOwnership(company_id, product_id)) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Produto não encontrado' });
+      return res.status(404).json({ error: 'Produto nao encontrado' });
     }
+
+    // Auto-generate SKU if not provided
+    let finalSku = (sku_suffix || '').trim();
+    if (!finalSku) {
+      const { rows: countRows } = await client.query(
+        'SELECT COUNT(*) AS cnt FROM product_variants WHERE product_id = $1', [product_id]
+      );
+      const idx = parseInt(countRows[0].cnt) + 1;
+      // Build SKU from attributes if available
+      if (attributes.length > 0) {
+        finalSku = attributes.map(a => (a.value || '').slice(0, 6).toUpperCase().replace(/\s+/g, '')).join('-');
+      } else {
+        finalSku = `V${idx}`;
+      }
+    }
+
+    // Check duplicate SKU
     const dupCheck = await client.query(
       'SELECT id FROM product_variants WHERE product_id = $1 AND sku_suffix = $2',
-      [product_id, sku_suffix.trim()]
+      [product_id, finalSku]
     );
     if (dupCheck.rows.length > 0) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Já existe uma variante com este SKU' });
+      // Append number to make unique
+      finalSku = finalSku + '-' + Date.now().toString(36).slice(-4);
     }
+
     const { rows: variantRows } = await client.query(
       `INSERT INTO product_variants
          (product_id, sku_suffix, price_override, stock_qty, barcode, barcode_format)
        VALUES ($1, $2, $3, $4, $5, $6::barcode_format)
        RETURNING *`,
-      [product_id, sku_suffix.trim(), price_override || null, stock_qty,
+      [product_id, finalSku, price_override || null, stock_qty,
        barcode || null, barcode_format || null]
     );
     const variant = variantRows[0];
@@ -120,7 +132,7 @@ router.patch('/:vid', requireAuth, requireRole('client', 'analyst', 'admin'), as
   const { sku_suffix, price_override, stock_qty, barcode, barcode_format, is_active, attributes } = req.body;
   try {
     if (!await checkProductOwnership(company_id, product_id)) {
-      return res.status(404).json({ error: 'Produto não encontrado' });
+      return res.status(404).json({ error: 'Produto nao encontrado' });
     }
     const fields = [], values = [];
     let idx = 1;
@@ -142,7 +154,7 @@ router.patch('/:vid', requireAuth, requireRole('client', 'analyst', 'admin'), as
          WHERE id = $${idx++} AND product_id = $${idx++} RETURNING *`,
         values
       );
-      if (rows.length === 0) return res.status(404).json({ error: 'Variante não encontrada' });
+      if (rows.length === 0) return res.status(404).json({ error: 'Variante nao encontrada' });
       variant = rows[0];
     }
     if (attributes && Array.isArray(attributes)) {
@@ -168,13 +180,13 @@ router.delete('/:vid', requireAuth, requireRole('client', 'analyst', 'admin'), a
   const { id: company_id, pid: product_id, vid: variant_id } = req.params;
   try {
     if (!await checkProductOwnership(company_id, product_id)) {
-      return res.status(404).json({ error: 'Produto não encontrado' });
+      return res.status(404).json({ error: 'Produto nao encontrado' });
     }
     const { rows } = await pool.query(
       'DELETE FROM product_variants WHERE id = $1 AND product_id = $2 RETURNING id',
       [variant_id, product_id]
     );
-    if (rows.length === 0) return res.status(404).json({ error: 'Variante não encontrada' });
+    if (rows.length === 0) return res.status(404).json({ error: 'Variante nao encontrada' });
     res.json({ message: 'Variante removida' });
   } catch (err) {
     res.status(500).json({ error: 'Erro ao remover variante' });
