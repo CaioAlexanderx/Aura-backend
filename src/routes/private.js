@@ -6,7 +6,7 @@ const router = express.Router({ mergeParams: true });
 router.use(requireAuth);
 router.use(requireCompanyAccess());
 
-// ── ESSENCIAL (todos os planos) ──────────────────────────────
+// -- ESSENCIAL (todos os planos) --
 
 router.use('/', require('./company'));
 router.use('/dashboard', require('./dashboard'));
@@ -26,6 +26,7 @@ router.use('/products', require('./productsRanking'));
 router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 router.use('/products/:pid/variants', require('./variants'));
+router.use('/coupons', require('./coupons'));
 router.use('/nfce', require('./nfce'));
 router.use('/nfe', require('./nfe'));
 router.use('/storage', require('./storage'));
@@ -41,7 +42,7 @@ router.use('/reviews', require('./reviews').reviewsRouter);
 router.use('/modules', require('./modules'));
 router.use('/billing', require('./billing'));
 
-// ── NEGOCIO+ ─────────────────────────────────────────────────
+// -- NEGOCIO+ --
 
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./customers'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
@@ -60,7 +61,7 @@ router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./sal
 router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplace'));
 router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
 
-// ── EXPANSAO ─────────────────────────────────────────────────
+// -- EXPANSAO --
 
 router.use('/ai', requirePlan('expansao'), require('./aiChat'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
