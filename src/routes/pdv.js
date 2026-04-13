@@ -1,6 +1,6 @@
 // ============================================================
 // AURA. -- PDV-01: Caixa de Vendas Touch
-// Venda atomica: sale + items + baixa de estoque + metricas + cupom
+// Venda atomica: sale + items + estoque + metricas + cupom + financeiro
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -24,6 +24,7 @@ router.post('/sale', async (req, res) => {
 
     let subtotal = 0;
     const enrichedItems = [];
+    const productNames = [];
 
     for (const item of items) {
       const qty       = parseFloat(item.quantity);
@@ -50,6 +51,7 @@ router.post('/sale', async (req, res) => {
           }
         }
       }
+      productNames.push(productName);
       enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, line_total: lineTotal });
     }
 
@@ -59,29 +61,16 @@ router.post('/sale', async (req, res) => {
     let couponCodeUsed = null;
 
     if (coupon_code) {
-      // Validate and apply coupon
       const upperCode = String(coupon_code).toUpperCase().trim();
       const { rows: coupons } = await client.query(
         `SELECT * FROM coupons WHERE company_id=$1 AND code=$2 AND is_active=true`,
         [req.params.id, upperCode]
       );
-      if (!coupons.length) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Cupom nao encontrado' });
-      }
+      if (!coupons.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom nao encontrado' }); }
       const coupon = coupons[0];
-      if (coupon.expires_at && new Date(coupon.expires_at) < new Date()) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Cupom expirado' });
-      }
-      if (coupon.max_uses !== null && coupon.current_uses >= coupon.max_uses) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Cupom esgotado' });
-      }
-      if (coupon.min_order_value > 0 && subtotal < parseFloat(coupon.min_order_value)) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: `Valor minimo: R$ ${Number(coupon.min_order_value).toFixed(2).replace('.', ',')}` });
-      }
+      if (coupon.expires_at && new Date(coupon.expires_at) < new Date()) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom expirado' }); }
+      if (coupon.max_uses !== null && coupon.current_uses >= coupon.max_uses) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom esgotado' }); }
+      if (coupon.min_order_value > 0 && subtotal < parseFloat(coupon.min_order_value)) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Valor minimo: R$ ${Number(coupon.min_order_value).toFixed(2).replace('.', ',')}` }); }
       discountAmt = coupon.discount_type === 'percent'
         ? Math.round(subtotal * parseFloat(coupon.discount_value) / 100 * 100) / 100
         : Math.min(parseFloat(coupon.discount_value), subtotal);
@@ -99,10 +88,7 @@ router.post('/sale', async (req, res) => {
       const { rows: empCheck } = await client.query(
         `SELECT id FROM employees WHERE id=$1 AND company_id=$2`, [employee_id, req.params.id]
       );
-      if (!empCheck.length) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' });
-      }
+      if (!empCheck.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' }); }
     }
 
     const { rows: sales } = await client.query(
@@ -188,6 +174,22 @@ router.post('/sale', async (req, res) => {
       await client.query(
         `UPDATE coupons SET current_uses=current_uses+1, updated_at=NOW() WHERE id=$1`,
         [couponId]
+      );
+    }
+
+    // ── CREATE TRANSACTION (Financeiro) ─────────────────────
+    // So cria lancamento se totalAmount > 0 (cupom 100% nao gera receita)
+    if (totalAmount > 0) {
+      const itemsSummary = productNames.slice(0, 3).join(', ') + (productNames.length > 3 ? ` +${productNames.length - 3}` : '');
+      const payLabel = payment_method || (payments?.[0]?.method) || 'dinheiro';
+      const txDesc = `Venda PDV - ${itemsSummary} (${payLabel})`;
+
+      await client.query(
+        `INSERT INTO transactions
+           (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
+         VALUES ($1, 'income', 'confirmed', $2, $3, 'Vendas', CURRENT_DATE, NOW(), $4, $5)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        [req.params.id, totalAmount, txDesc, req.user?.id || null, 'pdv-sale-' + sale.id]
       );
     }
 
@@ -345,13 +347,18 @@ router.delete('/sale/:saleId', async (req, res) => {
         [sale.total_amount, sale.employee_id, req.params.id]
       );
     }
-    // Revert coupon usage
     if (sale.coupon_id) {
       await client.query(
         `UPDATE coupons SET current_uses=GREATEST(0,current_uses-1), updated_at=NOW() WHERE id=$1`,
         [sale.coupon_id]
       );
     }
+
+    // Cancel the corresponding transaction in Financeiro
+    await client.query(
+      `DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`,
+      ['pdv-sale-' + req.params.saleId, req.params.id]
+    );
 
     await client.query(`UPDATE sales SET notes=CONCAT(COALESCE(notes,''),' [CANCELADA]'), updated_at=NOW() WHERE id=$1`, [req.params.saleId]);
     await client.query('COMMIT');
