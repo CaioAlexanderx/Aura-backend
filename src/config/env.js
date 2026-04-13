@@ -1,6 +1,6 @@
 // ============================================================
-// AURA. — Variáveis de ambiente
-// A-02: CORS falha em produção se ALLOWED_ORIGINS não definido
+// AURA. -- Variaveis de ambiente
+// A-02: CORS falha em producao se ALLOWED_ORIGINS nao definido
 // ============================================================
 function requireEnv(name) {
   const value = process.env[name];
@@ -28,12 +28,10 @@ function validateRuntimeEnv() {
     requireEnv('SUPABASE_DB_URL');
   }
 
-  // A-02: CORS — em produção ALLOWED_ORIGINS é obrigatório.
-  // Em dev/test aceita '*' como fallback seguro.
   const allowedOrigins = getOptionalEnv('ALLOWED_ORIGINS', '');
   if (nodeEnv === 'production' && !allowedOrigins) {
     throw new Error(
-      'ALLOWED_ORIGINS obrigatório em produção. ' +
+      'ALLOWED_ORIGINS obrigatorio em producao. ' +
       'Defina no Railway: https://getaura.com.br,https://app.getaura.com.br'
     );
   }
@@ -50,9 +48,10 @@ function validateRuntimeEnv() {
     REDIS_URL:       getOptionalEnv('REDIS_URL', ''),
     SENTRY_DSN:      getOptionalEnv('SENTRY_DSN', ''),
     GIT_SHA:         getOptionalEnv('GIT_SHA', ''),
-    APP_URL:         getOptionalEnv('APP_URL', 'https://getaura.com.br'),
+    // FIX: APP_URL deve apontar pro app, nao pro site institucional
+    APP_URL:         getOptionalEnv('APP_URL', 'https://app.getaura.com.br'),
+    API_URL:         getOptionalEnv('API_URL', 'https://aura-backend-production-f805.up.railway.app/api/v1'),
     HEALTH_SECRET:   getOptionalEnv('HEALTH_SECRET', ''),
-    // Em produção: lista separada por vírgula. Em dev/test: '*'
     ALLOWED_ORIGINS: allowedOrigins || '*',
     JWT_EXPIRES_IN:  getOptionalEnv('JWT_EXPIRES_IN', '7d'),
   };
