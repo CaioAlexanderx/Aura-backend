@@ -50,6 +50,7 @@ router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./employees'));
+router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
 router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
 router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appointments'));
