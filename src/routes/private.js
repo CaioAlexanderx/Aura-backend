@@ -55,6 +55,7 @@ router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appoi
 router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
 router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
 router.use('/whatsapp', requirePlan('negocio', 'expansao'), require('./whatsappRoutes'));
+router.use('/ai/insights', requirePlan('negocio', 'expansao'), require('./aiInsights'));
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3'));
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
@@ -63,7 +64,7 @@ router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'))
 
 // -- EXPANSAO --
 
-router.use('/ai', requirePlan('expansao'), require('./aiChat'));
+router.use('/ai', requirePlan('negocio', 'expansao'), require('./aiChat'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
