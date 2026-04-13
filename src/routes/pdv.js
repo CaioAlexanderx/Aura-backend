@@ -1,25 +1,22 @@
 // ============================================================
-// AURA. — PDV-01: Caixa de Vendas Touch
-// Venda atômica: sale + items + baixa de estoque + métricas cliente + métricas funcionário
-// Suporte a desconto, variantes, Pix, múltiplos pagamentos
+// AURA. -- PDV-01: Caixa de Vendas Touch
+// Venda atomica: sale + items + baixa de estoque + metricas + cupom
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 
-// ============================================================
 // POST /companies/:id/pdv/sale
-// ============================================================
 router.post('/sale', async (req, res) => {
   const {
     items, customer_id, employee_id, payment_method,
-    discount_amount, discount_pct,
+    discount_amount, discount_pct, coupon_code,
     notes, seller_id, payments,
   } = req.body;
 
   if (!items?.length)
-    return res.status(400).json({ error: 'items obrigatório' });
+    return res.status(400).json({ error: 'items obrigatorio' });
 
   const client = await db.connect();
   try {
@@ -47,7 +44,7 @@ router.post('/sale', async (req, res) => {
           if (parseFloat(p[0].stock_qty) < qty) {
             await client.query('ROLLBACK');
             return res.status(409).json({
-              error: `Estoque insuficiente para "${p[0].name}". Disponível: ${p[0].stock_qty}`,
+              error: `Estoque insuficiente para "${p[0].name}". Disponivel: ${p[0].stock_qty}`,
               product_id: item.product_id,
             });
           }
@@ -56,15 +53,48 @@ router.post('/sale', async (req, res) => {
       enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, line_total: lineTotal });
     }
 
+    // Discount: manual or coupon
     let discountAmt = 0;
-    if (discount_amount && parseFloat(discount_amount) > 0) {
+    let couponId = null;
+    let couponCodeUsed = null;
+
+    if (coupon_code) {
+      // Validate and apply coupon
+      const upperCode = String(coupon_code).toUpperCase().trim();
+      const { rows: coupons } = await client.query(
+        `SELECT * FROM coupons WHERE company_id=$1 AND code=$2 AND is_active=true`,
+        [req.params.id, upperCode]
+      );
+      if (!coupons.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Cupom nao encontrado' });
+      }
+      const coupon = coupons[0];
+      if (coupon.expires_at && new Date(coupon.expires_at) < new Date()) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Cupom expirado' });
+      }
+      if (coupon.max_uses !== null && coupon.current_uses >= coupon.max_uses) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Cupom esgotado' });
+      }
+      if (coupon.min_order_value > 0 && subtotal < parseFloat(coupon.min_order_value)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: `Valor minimo: R$ ${Number(coupon.min_order_value).toFixed(2).replace('.', ',')}` });
+      }
+      discountAmt = coupon.discount_type === 'percent'
+        ? Math.round(subtotal * parseFloat(coupon.discount_value) / 100 * 100) / 100
+        : Math.min(parseFloat(coupon.discount_value), subtotal);
+      couponId = coupon.id;
+      couponCodeUsed = upperCode;
+    } else if (discount_amount && parseFloat(discount_amount) > 0) {
       discountAmt = parseFloat(discount_amount);
     } else if (discount_pct && parseFloat(discount_pct) > 0) {
       discountAmt = parseFloat((subtotal * parseFloat(discount_pct) / 100).toFixed(2));
     }
     const totalAmount = parseFloat((subtotal - discountAmt).toFixed(2));
 
-    // Validate employee_id belongs to this company (if provided)
+    // Validate employee
     if (employee_id) {
       const { rows: empCheck } = await client.query(
         `SELECT id FROM employees WHERE id=$1 AND company_id=$2`, [employee_id, req.params.id]
@@ -78,8 +108,8 @@ router.post('/sale', async (req, res) => {
     const { rows: sales } = await client.query(
       `INSERT INTO sales
          (company_id, customer_id, seller_id, employee_id, total_amount, discount_amount,
-          payment_method, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+          payment_method, notes, coupon_id, coupon_code)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        RETURNING *`,
       [
         req.params.id, customer_id || null,
@@ -87,7 +117,7 @@ router.post('/sale', async (req, res) => {
         employee_id || null,
         totalAmount, discountAmt,
         payment_method || (payments?.[0]?.method) || 'dinheiro',
-        notes || null,
+        notes || null, couponId, couponCodeUsed,
       ]
     );
     const sale = sales[0];
@@ -134,7 +164,7 @@ router.post('/sale', async (req, res) => {
       }
     }
 
-    // Update customer metrics (spending)
+    // Update customer metrics
     if (customer_id) {
       await client.query(
         `UPDATE customers SET total_purchases=total_purchases+1, total_spent=total_spent+$1,
@@ -144,12 +174,20 @@ router.post('/sale', async (req, res) => {
       );
     }
 
-    // Update employee metrics (sales performance)
+    // Update employee metrics
     if (employee_id) {
       await client.query(
         `UPDATE employees SET total_sales=COALESCE(total_sales,0)+1, total_revenue=COALESCE(total_revenue,0)+$1, updated_at=NOW()
          WHERE id=$2 AND company_id=$3`,
         [totalAmount, employee_id, req.params.id]
+      );
+    }
+
+    // Increment coupon usage
+    if (couponId) {
+      await client.query(
+        `UPDATE coupons SET current_uses=current_uses+1, updated_at=NOW() WHERE id=$1`,
+        [couponId]
       );
     }
 
@@ -162,6 +200,7 @@ router.post('/sale', async (req, res) => {
 
     res.status(201).json({
       sale: { ...sale, items: saleItems },
+      coupon_applied: couponCodeUsed ? { code: couponCodeUsed, discount: discountAmt } : null,
       receipt_url: `/companies/${req.params.id}/print/receipt/${sale.id}`,
       receipt_auto_url: `/companies/${req.params.id}/print/receipt/${sale.id}/preview`,
     });
@@ -182,7 +221,7 @@ router.get('/sale/:saleId', async (req, res) => {
        WHERE s.id=$1 AND s.company_id=$2`,
       [req.params.saleId, req.params.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Venda não encontrada' });
+    if (!rows.length) return res.status(404).json({ error: 'Venda nao encontrada' });
     const { rows: items } = await db.query(
       `SELECT si.*, COALESCE(p.name, si.product_name_snapshot) AS product_name
        FROM sale_items si LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`,
@@ -204,7 +243,7 @@ router.get('/sales', async (req, res) => {
   if (date) { cond.push(`s.created_at::date=$${i++}`); vals.push(date); }
   try {
     const { rows } = await db.query(
-      `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.created_at,
+      `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.coupon_code, s.created_at,
               u.full_name AS seller_name, c.name AS customer_name, e.name AS employee_name,
               COUNT(si.id) AS item_count
        FROM sales s LEFT JOIN users u ON u.id=s.seller_id LEFT JOIN customers c ON c.id=s.customer_id
@@ -242,7 +281,7 @@ router.get('/summary', async (req, res) => {
   }
 });
 
-// GET /companies/:id/pdv/employee-ranking — Sales by employee
+// GET /companies/:id/pdv/employee-ranking
 router.get('/employee-ranking', async (req, res) => {
   const { period = '30d' } = req.query;
   const days = period === '7d' ? 7 : period === '90d' ? 90 : 30;
@@ -273,10 +312,10 @@ router.delete('/sale/:saleId', async (req, res) => {
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT id, customer_id, employee_id, total_amount FROM sales WHERE id=$1 AND company_id=$2`,
+      `SELECT id, customer_id, employee_id, total_amount, coupon_id FROM sales WHERE id=$1 AND company_id=$2`,
       [req.params.saleId, req.params.id]
     );
-    if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda não encontrada' }); }
+    if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda nao encontrada' }); }
     const sale = rows[0];
 
     const { rows: items } = await client.query(
@@ -292,7 +331,6 @@ router.delete('/sale/:saleId', async (req, res) => {
       }
     }
 
-    // Revert customer metrics
     if (sale.customer_id) {
       await client.query(
         `UPDATE customers SET total_purchases=GREATEST(0,total_purchases-1), total_spent=GREATEST(0,total_spent-$1), updated_at=NOW()
@@ -300,13 +338,18 @@ router.delete('/sale/:saleId', async (req, res) => {
         [sale.total_amount, sale.customer_id, req.params.id]
       );
     }
-
-    // Revert employee metrics
     if (sale.employee_id) {
       await client.query(
         `UPDATE employees SET total_sales=GREATEST(0,COALESCE(total_sales,0)-1), total_revenue=GREATEST(0,COALESCE(total_revenue,0)-$1), updated_at=NOW()
          WHERE id=$2 AND company_id=$3`,
         [sale.total_amount, sale.employee_id, req.params.id]
+      );
+    }
+    // Revert coupon usage
+    if (sale.coupon_id) {
+      await client.query(
+        `UPDATE coupons SET current_uses=GREATEST(0,current_uses-1), updated_at=NOW() WHERE id=$1`,
+        [sale.coupon_id]
       );
     }
 
