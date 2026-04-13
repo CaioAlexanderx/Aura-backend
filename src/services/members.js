@@ -1,7 +1,7 @@
 // ============================================================
 // AURA. - Servico Multi-usuario RBAC
-// invite_email agora e opcional: se null, qualquer pessoa pode
-// usar o link para entrar na equipe (link aberto, uso unico)
+// FIX: duplicate key on (company_id, user_id) — handle suspended/existing records
+// FIX: acceptInvite checks for existing membership before setting user_id
 // ============================================================
 
 const db = require('../config/database');
@@ -37,7 +37,7 @@ async function listMembers(companyId) {
      FROM company_members m
      LEFT JOIN users u ON u.id=m.user_id
      LEFT JOIN role_templates rt ON rt.id=m.template_id
-     WHERE m.company_id=$1
+     WHERE m.company_id=$1 AND m.status != 'suspended'
      ORDER BY m.status, u.full_name`,
     [companyId]
   );
@@ -45,24 +45,56 @@ async function listMembers(companyId) {
 }
 
 async function inviteMember(companyId, invitedByUserId, { invite_email, role_label = 'colaborador', template_id, permissions }) {
-  // invite_email e opcional: null = link aberto (qualquer pessoa com o link pode usar)
   const emailToUse = invite_email && invite_email.trim() ? invite_email.trim().toLowerCase() : null;
 
-  // Verifica duplicata apenas se email foi informado
+  // Check for existing membership by email
   if (emailToUse) {
     const existing = await db.query(
-      `SELECT m.id, m.status FROM company_members m
+      `SELECT m.id, m.status, m.user_id FROM company_members m
        LEFT JOIN users u ON u.id=m.user_id
        WHERE m.company_id=$1 AND (u.email=$2 OR m.invite_email=$2)`,
       [companyId, emailToUse]
     );
     if (existing.rows.length > 0) {
-      const st = existing.rows[0].status;
-      throw new Error(`Este e-mail ja tem um convite ${st === 'pending' ? 'pendente' : 'ativo'} nesta empresa`);
+      const rec = existing.rows[0];
+      if (rec.status === 'active') {
+        throw new Error('Este e-mail ja e membro ativo nesta empresa');
+      }
+      if (rec.status === 'pending') {
+        throw new Error('Este e-mail ja tem um convite pendente nesta empresa');
+      }
+      // Suspended — remove old record to allow fresh invite
+      if (rec.status === 'suspended') {
+        await db.query('DELETE FROM company_members WHERE id=$1', [rec.id]);
+      }
     }
   }
 
-  // Resolve permissoes
+  // Look up user_id if email has an account
+  let userId = null;
+  if (emailToUse) {
+    const userResult = await db.query('SELECT id FROM users WHERE email=$1', [emailToUse]);
+    userId = userResult.rows[0]?.id || null;
+  }
+
+  // If we found a user_id, also check for existing records by user_id
+  // (handles case where email check didn't catch it — e.g., user changed email)
+  if (userId) {
+    const existingByUserId = await db.query(
+      'SELECT id, status FROM company_members WHERE company_id=$1 AND user_id=$2',
+      [companyId, userId]
+    );
+    if (existingByUserId.rows.length > 0) {
+      const rec = existingByUserId.rows[0];
+      if (rec.status === 'active') {
+        throw new Error('Este usuario ja e membro ativo nesta empresa');
+      }
+      // Pending or suspended — delete old to avoid constraint violation
+      await db.query('DELETE FROM company_members WHERE id=$1', [rec.id]);
+    }
+  }
+
+  // Resolve permissions
   let finalPermissions = permissions || DEFAULT_PERMISSIONS;
   if (template_id) {
     const { rows } = await db.query(
@@ -72,7 +104,7 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     if (rows.length) finalPermissions = rows[0].permissions;
   }
 
-  // Contexto para o email (nome da empresa + convidante)
+  // Company context for email
   const { rows: ctx } = await db.query(
     `SELECT
        COALESCE(c.trade_name, c.legal_name, 'Aura') AS company_name,
@@ -84,11 +116,6 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
   );
   const companyName = ctx[0]?.company_name || 'a empresa';
   const inviterName = ctx[0]?.inviter_name || 'a equipe';
-
-  // Se email informado, verifica se ja tem conta
-  const userId = emailToUse
-    ? (await db.query('SELECT id FROM users WHERE email=$1', [emailToUse])).rows[0]?.id || null
-    : null;
 
   const inviteToken = uuidv4();
 
@@ -104,12 +131,9 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     ]
   );
 
-  // IMPORTANTE: URL inclui /app pois o Expo usa baseUrl: "/app"
-  // Formato: https://app.getaura.com.br/app/invite/TOKEN
   const baseUrl   = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br/app';
   const inviteUrl = `${baseUrl}/invite/${inviteToken}`;
 
-  // Envia email apenas se destinatario informado
   if (emailToUse) {
     sendInviteEmail(emailToUse, inviteUrl, companyName, role_label, inviterName)
       .then(r  => console.log(`[members] invite email sent: ${r?.id} to ${emailToUse}`))
@@ -129,12 +153,23 @@ async function acceptInvite(token, userId) {
 
   const member = rows[0];
 
-  // Se o convite tem email especifico, valida que e o mesmo usuario
+  // Validate email match if invite was targeted
   if (member.invite_email) {
     const { rows: userRows } = await db.query('SELECT email FROM users WHERE id=$1', [userId]);
     if (!userRows.length || userRows[0].email !== member.invite_email) {
       throw new Error('Este convite foi enviado para outro e-mail');
     }
+  }
+
+  // FIX: Check if user already has another record for this company
+  // (e.g., was previously suspended, or has a different pending invite)
+  const { rows: existingRecords } = await db.query(
+    'SELECT id, status FROM company_members WHERE company_id=$1 AND user_id=$2 AND id != $3',
+    [member.company_id, userId, member.id]
+  );
+  for (const rec of existingRecords) {
+    // Remove any old records to avoid constraint violation
+    await db.query('DELETE FROM company_members WHERE id=$1', [rec.id]);
   }
 
   const { rows: updated } = await db.query(
