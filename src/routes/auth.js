@@ -1,7 +1,8 @@
 // ============================================================
-// AURA. — Autenticação
+// AURA. — Autenticacao
 // S1: SEC-02 Refresh token + SEC-06 httpOnly cookie
 // S10: SEC-07 2FA TOTP sub-router
+// FIX: register with existing CNPJ joins existing company
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -39,24 +40,24 @@ async function storeRefreshToken(userId, refreshToken, req) {
 // ── POST /api/v1/auth/register ─────────────────────────
 router.post('/register', async (req, res) => {
   const { name, email, password, company_name, phone, cnpj, access_code } = req.body;
-  if (!name || !email || !password || !company_name) return res.status(400).json({ error: 'Campos obrigatórios: name, email, password, company_name' });
+  if (!name || !email || !password || !company_name) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password, company_name' });
   if (password.length < 8) return res.status(400).json({ error: 'Senha deve ter pelo menos 8 caracteres' });
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'E-mail inválido' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'E-mail invalido' });
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
     const { rows: existing } = await client.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase().trim()]);
-    if (existing.length > 0) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'E-mail já cadastrado' }); }
+    if (existing.length > 0) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'E-mail ja cadastrado' }); }
 
     let plan = 'essencial', trialDays = 0, discountPct = 0, codeType = null, codeId = null, referrerId = null;
     if (access_code) {
       const { rows: codes } = await client.query(`SELECT id, type, plan, discount_pct, trial_days, max_uses, uses, expires_at, is_active, referrer_id FROM access_codes WHERE code = $1`, [access_code.toUpperCase().trim()]);
-      if (!codes.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Código de acesso inválido' }); }
+      if (!codes.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Codigo de acesso invalido' }); }
       const ac = codes[0];
-      if (!ac.is_active) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Código desativado' }); }
-      if (ac.uses >= ac.max_uses) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Código esgotado' }); }
-      if (ac.expires_at && new Date(ac.expires_at) < new Date()) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Código expirado' }); }
+      if (!ac.is_active) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Codigo desativado' }); }
+      if (ac.uses >= ac.max_uses) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Codigo esgotado' }); }
+      if (ac.expires_at && new Date(ac.expires_at) < new Date()) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Codigo expirado' }); }
       plan = ac.plan || 'essencial'; trialDays = ac.trial_days || 0; discountPct = ac.discount_pct || 0; codeType = ac.type; codeId = ac.id; referrerId = ac.referrer_id;
       await client.query('UPDATE access_codes SET uses = uses + 1, updated_at = NOW() WHERE id = $1', [ac.id]);
     }
@@ -68,30 +69,64 @@ router.post('/register', async (req, res) => {
       [name.trim(), email.toLowerCase().trim(), password_hash, isStaff, phone || null]
     );
 
-    const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
-    const { rows: [company] } = await client.query(
-      `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides`,
-      [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj || null]
+    // FIX: Check if CNPJ already exists — if so, join existing company as member
+    let company = null;
+    let isNewCompany = true;
+    let memberRole = 'owner';
+
+    if (cnpj) {
+      const cleanCnpj = cnpj.replace(/\D/g, '');
+      if (cleanCnpj.length === 14 || cleanCnpj.length === 11) {
+        const { rows: existingCompanies } = await client.query(
+          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides FROM companies WHERE cnpj = $1',
+          [cleanCnpj]
+        );
+        if (existingCompanies.length > 0) {
+          // Company already exists — join as member (not owner)
+          company = existingCompanies[0];
+          isNewCompany = false;
+          memberRole = 'vendedor'; // Default role for employees joining via CNPJ
+          plan = company.plan; // Use existing company's plan
+          console.log(`[auth] User ${email} joining existing company ${company.id} via CNPJ ${cleanCnpj}`);
+        }
+      }
+    }
+
+    if (isNewCompany) {
+      // Create new company
+      const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
+      const { rows: [newCompany] } = await client.query(
+        `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides`,
+        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null]
+      );
+      company = newCompany;
+    }
+
+    // Add user as member
+    await client.query(
+      `INSERT INTO company_members (company_id, user_id, role_label, status, is_active) VALUES ($1, $2, $3, 'active', true)`,
+      [company.id, user.id, memberRole]
     );
 
-    await client.query(`INSERT INTO company_members (company_id, user_id, role_label, status, is_active) VALUES ($1, $2, 'owner', 'active', true)`, [company.id, user.id]);
     if (codeType === 'referral' && referrerId) {
       await client.query(`INSERT INTO referrals (referrer_id, referred_user_id, referred_email, code, status, completed_at) VALUES ($1, $2, $3, $4, 'completed', NOW())`, [referrerId, user.id, email.toLowerCase().trim(), access_code.toUpperCase().trim()]);
     }
     await client.query('COMMIT');
 
+    const trialEndsAt = company.trial_ends_at;
     const tokenPayload = { id: user.id, role: user.role, plan: company.plan, company: company.id, is_staff: user.is_staff };
     const accessToken = signAccessToken(tokenPayload);
     const { token: refreshToken } = signRefreshToken({ id: user.id });
     await storeRefreshToken(user.id, refreshToken, req);
     setRefreshCookie(res, refreshToken);
-    logAuditAction(user.id, company.id, 'register', `New account: ${email.toLowerCase().trim()}`);
+    logAuditAction(user.id, company.id, 'register', `New account: ${email.toLowerCase().trim()}${!isNewCompany ? ' (joined existing company)' : ''}`);
 
     res.status(201).json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '15m',
       user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff, email_verified: user.email_verified || false },
       company: { ...company, module_overrides: company.module_overrides || {}, trial_active: !!trialEndsAt, trial_ends_at: trialEndsAt },
       code_applied: access_code ? { type: codeType, plan, discount_pct: discountPct, trial_days: trialDays } : null,
+      joined_existing: !isNewCompany,
     });
   } catch (err) { await client.query('ROLLBACK'); console.error('register error:', err); res.status(500).json({ error: 'Erro ao criar conta' }); }
   finally { client.release(); }
@@ -100,7 +135,7 @@ router.post('/register', async (req, res) => {
 // ── POST /api/v1/auth/login ────────────────────────────
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'email e password são obrigatórios' });
+  if (!email || !password) return res.status(400).json({ error: 'email e password sao obrigatorios' });
 
   try {
     const { rows } = await db.query(
@@ -113,12 +148,12 @@ router.post('/login', async (req, res) => {
        ORDER BY c.created_at ASC LIMIT 1`,
       [email.toLowerCase().trim()]
     );
-    if (!rows.length) return res.status(401).json({ error: 'Credenciais inválidas' });
+    if (!rows.length) return res.status(401).json({ error: 'Credenciais invalidas' });
     const user = rows[0];
     if (!user.is_active) return res.status(403).json({ error: 'Conta desativada. Entre em contato com o suporte.' });
 
     const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) { logAuditAction(null, null, 'login_failed', `Failed login for ${email.toLowerCase().trim()}`, { ip: req.ip }); return res.status(401).json({ error: 'Credenciais inválidas' }); }
+    if (!valid) { logAuditAction(null, null, 'login_failed', `Failed login for ${email.toLowerCase().trim()}`, { ip: req.ip }); return res.status(401).json({ error: 'Credenciais invalidas' }); }
     if (user.totp_enabled) return res.json({ requires_2fa: true, user_id: user.id, message: 'Autenticacao de dois fatores necessaria.' });
 
     const tokenPayload = { id: user.id, role: user.role, plan: user.plan || 'essencial', company: user.company_id, is_staff: user.is_staff || false };
@@ -143,20 +178,20 @@ router.post('/login', async (req, res) => {
 // ── POST /api/v1/auth/refresh ───────────────────────────
 router.post('/refresh', async (req, res) => {
   const refreshTokenInput = req.body.refresh_token || req.cookies?.aura_refresh;
-  if (!refreshTokenInput) return res.status(400).json({ error: 'refresh_token é obrigatório' });
+  if (!refreshTokenInput) return res.status(400).json({ error: 'refresh_token e obrigatorio' });
   try {
     const decoded = jwt.verify(refreshTokenInput, JWT_SECRET);
-    if (decoded.type !== 'refresh') return res.status(400).json({ error: 'Token não é refresh' });
+    if (decoded.type !== 'refresh') return res.status(400).json({ error: 'Token nao e refresh' });
     const tokenHash = hashToken(refreshTokenInput);
     try { const { rows } = await db.query(`SELECT id, revoked FROM refresh_tokens WHERE token_hash = $1 AND user_id = $2`, [tokenHash, decoded.id]); if (rows.length > 0 && rows[0].revoked) { clearRefreshCookie(res); return res.status(401).json({ error: 'Refresh token revogado', code: 'REFRESH_REVOKED' }); } } catch (_) {}
     const { rows } = await db.query(`SELECT u.id, u.role, u.is_staff, c.id AS company_id, c.plan FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = 'active' AND cm.is_active = true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.id = $1 AND u.is_active = true ORDER BY c.created_at ASC LIMIT 1`, [decoded.id]);
-    if (!rows.length) return res.status(401).json({ error: 'Usuário desativado' });
+    if (!rows.length) return res.status(401).json({ error: 'Usuario desativado' });
     const user = rows[0];
     const newAccessToken = signAccessToken({ id: user.id, role: user.role, plan: user.plan || 'essencial', company: user.company_id, is_staff: user.is_staff || false });
     res.json({ token: newAccessToken, token_expires_in: '15m' });
   } catch (err) {
     if (err.name === 'TokenExpiredError') { clearRefreshCookie(res); return res.status(401).json({ error: 'Refresh token expirado', code: 'REFRESH_EXPIRED' }); }
-    return res.status(401).json({ error: 'Refresh token inválido' });
+    return res.status(401).json({ error: 'Refresh token invalido' });
   }
 });
 
@@ -182,7 +217,7 @@ router.post('/me', requireAuth, async (req, res) => {
        ORDER BY c.created_at ASC LIMIT 1`,
       [req.user.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Usuário não encontrado' });
+    if (!rows.length) return res.status(404).json({ error: 'Usuario nao encontrado' });
     const u = rows[0];
     const trialActive = u.trial_ends_at && new Date(u.trial_ends_at) > new Date();
     res.json({
