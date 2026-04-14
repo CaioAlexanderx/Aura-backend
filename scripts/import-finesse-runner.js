@@ -12,8 +12,8 @@
  * 
  * O que faz:
  *   1. Executa o SQL de importacao (6795 vendas)
- *   2. Atualiza total_sales/total_revenue das funcionarias cadastradas
- *   3. Mery nao e mais funcionaria — vendas ficam com employee_name apenas
+ *   2. Atualiza total_sales/total_revenue das funcionarias cadastradas (Kaila, Paula, Amanda)
+ *   3. Mery nao e mais funcionaria - vendas ficam com employee_name apenas
  */
 
 const { Pool } = require('pg');
@@ -36,7 +36,7 @@ async function run() {
   const client = await pool.connect();
   
   try {
-    // Step 1: Check existing import
+    // Check existing import (prevent duplicates)
     const existing = await client.query(
       'SELECT COUNT(*) AS n FROM transactions WHERE import_batch_id = $1',
       [BATCH_UUID]
@@ -45,11 +45,12 @@ async function run() {
       console.log(`AVISO: Ja existem ${existing.rows[0].n} registros com batch ${BATCH_UUID}`);
       console.log('Para reimportar, rode primeiro:');
       console.log(`  DELETE FROM transactions WHERE import_batch_id = '${BATCH_UUID}';`);
+      console.log(`  DELETE FROM import_logs WHERE batch_id = '${BATCH_UUID}';`);
       process.exit(1);
     }
 
-    // Step 2: Run the SQL import
-    console.log('\n=== Etapa 1: Importar vendas ===');
+    // Etapa 1: Importar vendas
+    console.log('\n=== Etapa 1: Importar 6795 vendas ===');
     const sqlPath = path.join(__dirname, 'import_vendas_finesse.sql');
     if (!fs.existsSync(sqlPath)) {
       console.error(`Erro: Arquivo nao encontrado: ${sqlPath}`);
@@ -58,8 +59,6 @@ async function run() {
     }
     
     const sql = fs.readFileSync(sqlPath, 'utf-8');
-    
-    // Extract individual INSERT statements and run them
     const statements = sql
       .split(';\n')
       .map(s => s.trim())
@@ -82,7 +81,7 @@ async function run() {
     }
     console.log(`\n  Total inserido: ${totalInserted}`);
 
-    // Step 3: Update employee stats (Kaila, Paula, Amanda — Mery nao e funcionaria)
+    // Etapa 2: Atualizar stats das funcionarias ativas (Kaila, Paula, Amanda)
     console.log('\n=== Etapa 2: Atualizar stats funcionarias ===');
     const empStats = await client.query(`
       UPDATE employees e SET
@@ -98,7 +97,7 @@ async function run() {
     `, [COMPANY_ID]);
     console.log(`  ${empStats.rowCount} funcionarias atualizadas`);
 
-    // Verification
+    // Verificacao
     console.log('\n=== Verificacao ===');
     const verify = await client.query(
       `SELECT employee_name, COUNT(*) AS vendas, ROUND(SUM(amount)::numeric, 2) AS faturamento
