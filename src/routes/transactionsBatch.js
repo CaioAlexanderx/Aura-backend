@@ -1,6 +1,7 @@
 // ============================================================
 // AURA. — Lancamento em Massa + Importacao OFX
-// FIX: db.pool.connect() → db.connect() (4 ocorrencias)
+// FIX: db.pool.connect() → db.connect()
+// FEAT: batch limit 500 → 5000 for large imports
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -9,6 +10,7 @@ const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 
 const VALID_TYPES = ['income', 'expense'];
+const MAX_BATCH = 5000; // was 500 — increased for large historical imports
 
 function validateTransaction(tx, index) {
   const errors = [];
@@ -51,7 +53,7 @@ router.post('/batch', requireAuth, async (req, res) => {
   const { transactions } = req.body;
 
   if (!Array.isArray(transactions) || transactions.length === 0) return res.status(400).json({ error: 'Campo transactions deve ser um array nao-vazio' });
-  if (transactions.length > 500) return res.status(400).json({ error: 'Maximo de 500 lancamentos por lote' });
+  if (transactions.length > MAX_BATCH) return res.status(400).json({ error: `Maximo de ${MAX_BATCH} lancamentos por lote` });
 
   const validItems = [], errorItems = [];
   transactions.forEach((tx, i) => {
@@ -65,14 +67,13 @@ router.post('/batch', requireAuth, async (req, res) => {
   }
 
   if (dryRun) {
-    return res.json({ dry_run: true, total: transactions.length, valid: validItems.length, error_count: errorItems.length, errors: errorItems, preview: validItems.map(v => v.data) });
+    return res.json({ dry_run: true, total: transactions.length, valid: validItems.length, error_count: errorItems.length, errors: errorItems, preview: validItems.slice(0, 20).map(v => v.data) });
   }
 
   const batchId = uuidv4();
   let saved = 0;
   const dbErrors = [];
 
-  // FIX: use db.connect() instead of db.pool.connect()
   const client = await db.connect();
   try {
     await client.query('BEGIN');
