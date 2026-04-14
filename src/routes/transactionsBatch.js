@@ -1,7 +1,7 @@
 // ============================================================
 // AURA. — Lancamento em Massa + Importacao OFX
-// FIX: db.pool.connect() → db.connect()
-// FEAT: batch limit 500 → 5000 for large imports
+// FEAT: employee_name/vendedor field for historical imports
+// FEAT: auto-match employee by name → employee_id
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -10,7 +10,7 @@ const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 
 const VALID_TYPES = ['income', 'expense'];
-const MAX_BATCH = 5000; // was 500 — increased for large historical imports
+const MAX_BATCH = 5000;
 
 function validateTransaction(tx, index) {
   const errors = [];
@@ -70,6 +70,20 @@ router.post('/batch', requireAuth, async (req, res) => {
     return res.json({ dry_run: true, total: transactions.length, valid: validItems.length, error_count: errorItems.length, errors: errorItems, preview: validItems.slice(0, 20).map(v => v.data) });
   }
 
+  // Pre-load employees for name matching
+  let employeeMap = {};
+  try {
+    const { rows: emps } = await db.query(
+      'SELECT id, name FROM employees WHERE company_id = $1', [companyId]
+    );
+    emps.forEach(e => {
+      employeeMap[e.name.toLowerCase().trim()] = e.id;
+      // Also map first name only for fuzzy matching
+      const first = e.name.split(' ')[0].toLowerCase().trim();
+      if (!employeeMap[first]) employeeMap[first] = e.id;
+    });
+  } catch (_) {}
+
   const batchId = uuidv4();
   let saved = 0;
   const dbErrors = [];
@@ -79,10 +93,24 @@ router.post('/batch', requireAuth, async (req, res) => {
     await client.query('BEGIN');
     for (const { index, data } of validItems) {
       try {
+        // Resolve employee: accept vendedor, employee_name, or seller
+        const empName = (data.vendedor || data.employee_name || data.seller || '').trim();
+        let empId = null;
+        if (empName) {
+          empId = employeeMap[empName.toLowerCase()] || null;
+        }
+
         await client.query(
-          `INSERT INTO transactions (company_id, type, amount, description, category, due_date, status, notes, import_batch_id, created_by, paid_at, created_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-          [companyId, data.type, parseFloat(data.amount), String(data.description).trim(), data.category || null, data.due_date, data.status || 'confirmed', data.notes || null, batchId, req.user?.id || null, data.due_date, data.due_date]
+          `INSERT INTO transactions (company_id, type, amount, description, category, due_date, status, notes, import_batch_id, created_by, paid_at, created_at, employee_name, employee_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          [
+            companyId, data.type, parseFloat(data.amount),
+            String(data.description).trim(), data.category || null,
+            data.due_date, data.status || 'confirmed',
+            data.notes || null, batchId, req.user?.id || null,
+            data.due_date, data.due_date,
+            empName || null, empId
+          ]
         );
         saved++;
       } catch (err) {
@@ -103,7 +131,7 @@ router.post('/batch', requireAuth, async (req, res) => {
     client.release();
   }
 
-  res.status(201).json({ saved, total: transactions.length, error_count: errorItems.length + dbErrors.length, batch_id: batchId, errors: [...errorItems, ...dbErrors].sort((a, b) => a.index - b.index) });
+  res.status(201).json({ saved, total: transactions.length, error_count: errorItems.length + dbErrors.length, batch_id: batchId, employees_matched: Object.keys(employeeMap).length, errors: [...errorItems, ...dbErrors].sort((a, b) => a.index - b.index) });
 });
 
 // POST /companies/:id/transactions/import-ofx
