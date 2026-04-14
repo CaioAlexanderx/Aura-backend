@@ -1,7 +1,7 @@
 // ============================================================
 // AURA. - Servico Multi-usuario RBAC
-// FIX: duplicate key on (company_id, user_id) — handle suspended/existing records
-// FIX: acceptInvite checks for existing membership before setting user_id
+// FIX: painel added to default permissions
+// FIX: acceptInvite relaxed email validation (warns but doesn't block)
 // ============================================================
 
 const db = require('../config/database');
@@ -9,6 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 const { sendInviteEmail } = require('./mailer');
 
 const DEFAULT_PERMISSIONS = {
+  painel:        true,
   pdv:           true,
   estoque:       false,
   clientes:      false,
@@ -20,8 +21,7 @@ const DEFAULT_PERMISSIONS = {
 
 async function countActiveMembers(companyId) {
   const { rows } = await db.query(
-    `SELECT COUNT(*) AS total FROM company_members
-     WHERE company_id=$1 AND status='active' AND is_active=true`,
+    'SELECT COUNT(*) AS total FROM company_members WHERE company_id=$1 AND status=\'active\' AND is_active=true',
     [companyId]
   );
   return parseInt(rows[0].total);
@@ -47,7 +47,6 @@ async function listMembers(companyId) {
 async function inviteMember(companyId, invitedByUserId, { invite_email, role_label = 'colaborador', template_id, permissions }) {
   const emailToUse = invite_email && invite_email.trim() ? invite_email.trim().toLowerCase() : null;
 
-  // Check for existing membership by email
   if (emailToUse) {
     const existing = await db.query(
       `SELECT m.id, m.status, m.user_id FROM company_members m
@@ -57,28 +56,18 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     );
     if (existing.rows.length > 0) {
       const rec = existing.rows[0];
-      if (rec.status === 'active') {
-        throw new Error('Este e-mail ja e membro ativo nesta empresa');
-      }
-      if (rec.status === 'pending') {
-        throw new Error('Este e-mail ja tem um convite pendente nesta empresa');
-      }
-      // Suspended — remove old record to allow fresh invite
-      if (rec.status === 'suspended') {
-        await db.query('DELETE FROM company_members WHERE id=$1', [rec.id]);
-      }
+      if (rec.status === 'active') throw new Error('Este e-mail ja e membro ativo nesta empresa');
+      if (rec.status === 'pending') throw new Error('Este e-mail ja tem um convite pendente nesta empresa');
+      if (rec.status === 'suspended') await db.query('DELETE FROM company_members WHERE id=$1', [rec.id]);
     }
   }
 
-  // Look up user_id if email has an account
   let userId = null;
   if (emailToUse) {
     const userResult = await db.query('SELECT id FROM users WHERE email=$1', [emailToUse]);
     userId = userResult.rows[0]?.id || null;
   }
 
-  // If we found a user_id, also check for existing records by user_id
-  // (handles case where email check didn't catch it — e.g., user changed email)
   if (userId) {
     const existingByUserId = await db.query(
       'SELECT id, status FROM company_members WHERE company_id=$1 AND user_id=$2',
@@ -86,15 +75,11 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     );
     if (existingByUserId.rows.length > 0) {
       const rec = existingByUserId.rows[0];
-      if (rec.status === 'active') {
-        throw new Error('Este usuario ja e membro ativo nesta empresa');
-      }
-      // Pending or suspended — delete old to avoid constraint violation
+      if (rec.status === 'active') throw new Error('Este usuario ja e membro ativo nesta empresa');
       await db.query('DELETE FROM company_members WHERE id=$1', [rec.id]);
     }
   }
 
-  // Resolve permissions
   let finalPermissions = permissions || DEFAULT_PERMISSIONS;
   if (template_id) {
     const { rows } = await db.query(
@@ -104,7 +89,6 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     if (rows.length) finalPermissions = rows[0].permissions;
   }
 
-  // Company context for email
   const { rows: ctx } = await db.query(
     `SELECT
        COALESCE(c.trade_name, c.legal_name, 'Aura') AS company_name,
@@ -132,12 +116,12 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
   );
 
   const baseUrl   = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br/app';
-  const inviteUrl = `${baseUrl}/invite/${inviteToken}`;
+  const inviteUrl = baseUrl + '/invite/' + inviteToken;
 
   if (emailToUse) {
     sendInviteEmail(emailToUse, inviteUrl, companyName, role_label, inviterName)
-      .then(r  => console.log(`[members] invite email sent: ${r?.id} to ${emailToUse}`))
-      .catch(e  => console.error(`[members] invite email failed:`, e.message));
+      .then(function(r) { console.log('[members] invite email sent: ' + (r?.id || '') + ' to ' + emailToUse); })
+      .catch(function(e) { console.error('[members] invite email failed:', e.message); });
   }
 
   return { ...rows[0], invite_url: inviteUrl };
@@ -145,38 +129,37 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
 
 async function acceptInvite(token, userId) {
   const { rows } = await db.query(
-    `SELECT id, company_id, invite_email FROM company_members
-     WHERE invite_token=$1 AND status='pending'`,
+    "SELECT id, company_id, invite_email FROM company_members WHERE invite_token=$1 AND status='pending'",
     [token]
   );
   if (!rows.length) throw new Error('Convite invalido ou ja utilizado');
 
   const member = rows[0];
 
-  // Validate email match if invite was targeted
+  // FIX: relaxed email validation — log mismatch but don't block
+  // The invite token itself is the security mechanism (UUID, single-use)
+  // Blocking on email mismatch prevented users from registering with
+  // a different email than what the admin used to invite them
   if (member.invite_email) {
     const { rows: userRows } = await db.query('SELECT email FROM users WHERE id=$1', [userId]);
-    if (!userRows.length || userRows[0].email !== member.invite_email) {
-      throw new Error('Este convite foi enviado para outro e-mail');
+    if (userRows.length && userRows[0].email !== member.invite_email) {
+      console.log('[members] accept: email mismatch — invite=' + member.invite_email + ' user=' + userRows[0].email + ' (allowing)');
+      // Previously: throw new Error('Este convite foi enviado para outro e-mail');
+      // Now: allow it — the token is the auth mechanism, not the email
     }
   }
 
-  // FIX: Check if user already has another record for this company
-  // (e.g., was previously suspended, or has a different pending invite)
+  // Check if user already has another record for this company
   const { rows: existingRecords } = await db.query(
     'SELECT id, status FROM company_members WHERE company_id=$1 AND user_id=$2 AND id != $3',
     [member.company_id, userId, member.id]
   );
   for (const rec of existingRecords) {
-    // Remove any old records to avoid constraint violation
     await db.query('DELETE FROM company_members WHERE id=$1', [rec.id]);
   }
 
   const { rows: updated } = await db.query(
-    `UPDATE company_members
-     SET user_id=$1, status='active', is_active=true,
-         accepted_at=NOW(), invite_token=NULL
-     WHERE id=$2 RETURNING *`,
+    "UPDATE company_members SET user_id=$1, status='active', is_active=true, accepted_at=NOW(), invite_token=NULL WHERE id=$2 RETURNING *",
     [userId, member.id]
   );
   return updated[0];
@@ -194,18 +177,18 @@ async function updateMemberPermissions(companyId, memberId, { role_label, permis
 
   const fields = [], values = [];
   let idx = 1;
-  if (role_label       !== undefined) { fields.push(`role_label=$${idx++}`);  values.push(role_label); }
-  if (finalPermissions !== undefined) { fields.push(`permissions=$${idx++}`); values.push(JSON.stringify(finalPermissions)); }
-  if (template_id      !== undefined) { fields.push(`template_id=$${idx++}`); values.push(template_id); }
+  if (role_label       !== undefined) { fields.push('role_label=$' + idx++);  values.push(role_label); }
+  if (finalPermissions !== undefined) { fields.push('permissions=$' + idx++); values.push(JSON.stringify(finalPermissions)); }
+  if (template_id      !== undefined) { fields.push('template_id=$' + idx++); values.push(template_id); }
   if (status           !== undefined) {
-    fields.push(`status=$${idx++}`);   values.push(status);
-    fields.push(`is_active=$${idx++}`); values.push(status === 'active');
+    fields.push('status=$' + idx++);   values.push(status);
+    fields.push('is_active=$' + idx++); values.push(status === 'active');
   }
   if (!fields.length) throw new Error('Nenhum campo para atualizar');
 
   values.push(memberId, companyId);
   const { rows } = await db.query(
-    `UPDATE company_members SET ${fields.join(',')} WHERE id=$${idx++} AND company_id=$${idx} RETURNING *`,
+    'UPDATE company_members SET ' + fields.join(',') + ' WHERE id=$' + idx++ + ' AND company_id=$' + idx + ' RETURNING *',
     values
   );
   if (!rows.length) throw new Error('Membro nao encontrado');
