@@ -11,10 +11,9 @@
  *   node scripts/import-finesse-runner.js
  * 
  * O que faz:
- *   1. Cadastra Mery como funcionaria (se nao existir)
- *   2. Executa o SQL de importacao (6795 vendas)
- *   3. Vincula employee_id da Mery nos lancamentos dela
- *   4. Atualiza total_sales/total_revenue de todos os employees
+ *   1. Executa o SQL de importacao (6795 vendas)
+ *   2. Atualiza total_sales/total_revenue das funcionarias cadastradas
+ *   3. Mery nao e mais funcionaria — vendas ficam com employee_name apenas
  */
 
 const { Pool } = require('pg');
@@ -22,7 +21,6 @@ const fs = require('fs');
 const path = require('path');
 
 const COMPANY_ID = 'ba768cfa-cce5-4a7b-bcc9-3279b305cb70';
-const USER_ID = '48b6ae04-f83b-4840-a7ad-298a2ae89e56';
 const BATCH_UUID = 'c18f0267-3241-4a59-84cd-662a4e4cbf4f';
 
 const dbUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
@@ -50,30 +48,8 @@ async function run() {
       process.exit(1);
     }
 
-    // Step 2: Register Mery as employee
-    console.log('\n=== Etapa 1: Cadastrar Mery ===');
-    const meryCheck = await client.query(
-      'SELECT id FROM employees WHERE company_id = $1 AND name ILIKE $2',
-      [COMPANY_ID, '%mery%']
-    );
-    
-    let meryId;
-    if (meryCheck.rows.length > 0) {
-      meryId = meryCheck.rows[0].id;
-      console.log(`Mery ja cadastrada: ${meryId}`);
-    } else {
-      const insert = await client.query(
-        `INSERT INTO employees (company_id, name, role, role_title, cpf, admission_date, base_salary, salary, status)
-         VALUES ($1, 'Mery', 'vendedora', 'Vendedora', '00000000000', '2025-03-01', 0, 0, 'active')
-         RETURNING id`,
-        [COMPANY_ID]
-      );
-      meryId = insert.rows[0].id;
-      console.log(`Mery cadastrada: ${meryId}`);
-    }
-
-    // Step 3: Run the SQL import
-    console.log('\n=== Etapa 2: Importar vendas ===');
+    // Step 2: Run the SQL import
+    console.log('\n=== Etapa 1: Importar vendas ===');
     const sqlPath = path.join(__dirname, 'import_vendas_finesse.sql');
     if (!fs.existsSync(sqlPath)) {
       console.error(`Erro: Arquivo nao encontrado: ${sqlPath}`);
@@ -106,18 +82,8 @@ async function run() {
     }
     console.log(`\n  Total inserido: ${totalInserted}`);
 
-    // Step 4: Link Mery's employee_id
-    console.log('\n=== Etapa 3: Vincular Mery ===');
-    const updateMery = await client.query(
-      `UPDATE transactions 
-       SET employee_id = $1 
-       WHERE import_batch_id = $2 AND employee_name = 'Mery' AND employee_id IS NULL`,
-      [meryId, BATCH_UUID]
-    );
-    console.log(`  ${updateMery.rowCount} lancamentos da Mery vinculados`);
-
-    // Step 5: Update employee stats
-    console.log('\n=== Etapa 4: Atualizar stats ===');
+    // Step 3: Update employee stats (Kaila, Paula, Amanda — Mery nao e funcionaria)
+    console.log('\n=== Etapa 2: Atualizar stats funcionarias ===');
     const empStats = await client.query(`
       UPDATE employees e SET
         total_sales = sub.cnt,
@@ -130,7 +96,7 @@ async function run() {
       ) sub
       WHERE e.id = sub.employee_id AND e.company_id = $1
     `, [COMPANY_ID]);
-    console.log(`  ${empStats.rowCount} funcionarios atualizados`);
+    console.log(`  ${empStats.rowCount} funcionarias atualizadas`);
 
     // Verification
     console.log('\n=== Verificacao ===');
@@ -149,7 +115,8 @@ async function run() {
       [BATCH_UUID]
     );
     console.log(`\nTOTAL: ${total.rows[0].n} vendas, R$ ${total.rows[0].total}`);
-    console.log('\nImportacao concluida com sucesso!');
+    console.log('\nNota: Vendas da Mery ficam com employee_name apenas (sem employee_id)');
+    console.log('Importacao concluida com sucesso!');
 
   } catch (err) {
     console.error('\nErro fatal:', err.message);
