@@ -18,6 +18,7 @@ router.use('/transactions', require('./categorize'));
 router.use('/prolabore', require('./prolabore'));
 router.use('/dre', require('./dre'));
 router.use('/financial/history', require('./financialHistory'));
+router.use('/financial/analysis', require('./financialAnalysis'));
 router.use('/bank', require('./bankReconciliation'));
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
