@@ -2,12 +2,9 @@
 /**
  * AURA. - Import Finesse Runner
  * 
- * Pre-requisitos:
- *   1. Copiar import_vendas_finesse.sql para scripts/
- *   2. Ter DATABASE_URL ou SUPABASE_DB_URL configurado
- * 
  * Uso:
  *   cd aura-backend
+ *   export SUPABASE_DB_URL="postgresql://postgres:SENHA@db.hawtujkztrjpvvkihowb.supabase.co:5432/postgres"
  *   node scripts/import-finesse-runner.js
  */
 
@@ -41,16 +38,30 @@ async function run() {
       console.log(`AVISO: Ja existem ${existing.rows[0].n} registros com batch ${BATCH_UUID}`);
       console.log('Para reimportar, rode primeiro:');
       console.log(`  DELETE FROM transactions WHERE import_batch_id = '${BATCH_UUID}';`);
-      console.log(`  DELETE FROM import_logs WHERE batch_id = '${BATCH_UUID}';`);
       process.exit(1);
     }
 
-    // Etapa 1: Ler e corrigir SQL
-    console.log('\n=== Etapa 1: Importar 6795 vendas ===');
-    const sqlPath = path.join(__dirname, 'import_vendas_finesse.sql');
-    if (!fs.existsSync(sqlPath)) {
-      console.error(`Erro: Arquivo nao encontrado: ${sqlPath}`);
-      console.error('Copie o arquivo import_vendas_finesse.sql para scripts/');
+    // Etapa 1: Ler SQL — tenta varios nomes de arquivo
+    console.log('\n=== Etapa 1: Importar vendas ===');
+    const possibleNames = [
+      'import_vendas_finesse_1.sql',
+      'import_vendas_finesse.sql',
+      'import_vendas_finesse_2.sql',
+    ];
+    
+    let sqlPath = null;
+    for (const name of possibleNames) {
+      const candidate = path.join(__dirname, name);
+      if (fs.existsSync(candidate)) {
+        sqlPath = candidate;
+        console.log(`  Arquivo encontrado: ${name}`);
+        break;
+      }
+    }
+    
+    if (!sqlPath) {
+      console.error('Erro: Nenhum arquivo SQL encontrado em scripts/');
+      console.error('Procurei por:', possibleNames.join(', '));
       process.exit(1);
     }
     
@@ -62,32 +73,50 @@ async function run() {
       sql = sql.replaceAll(`'${OLD_BATCH_STRING}'`, `'${BATCH_UUID}'`);
     }
     
-    // Remove BEGIN/COMMIT (we handle transaction ourselves if needed)
-    sql = sql.replace(/^BEGIN;\s*/m, '');
-    sql = sql.replace(/\s*COMMIT;\s*$/m, '');
+    // Remove BEGIN/COMMIT
+    sql = sql.replace(/^BEGIN;?\s*/im, '');
+    sql = sql.replace(/\s*COMMIT;?\s*$/im, '');
     
-    // Split into individual INSERT statements
+    // Split into individual statements
     const statements = sql
-      .split(';\n')
+      .split(/;\s*\n/)
       .map(s => s.trim())
-      .filter(s => s.startsWith('INSERT INTO'));
+      .filter(s => s.toUpperCase().startsWith('INSERT INTO'));
     
     console.log(`  Encontrados ${statements.length} INSERTs`);
     
+    if (statements.length === 0) {
+      console.error('Erro: Nenhum INSERT encontrado no arquivo SQL');
+      console.error('Primeiros 500 chars do arquivo:');
+      console.error(sql.substring(0, 500));
+      process.exit(1);
+    }
+    
     let totalInserted = 0;
+    let errors = 0;
     for (let i = 0; i < statements.length; i++) {
-      const stmt = statements[i] + ';';
+      const stmt = statements[i].endsWith(';') ? statements[i] : statements[i] + ';';
       try {
         const res = await client.query(stmt);
         totalInserted += res.rowCount || 0;
-        process.stdout.write(`\r  Lote ${i + 1}/${statements.length} - ${totalInserted} registros`);
+        if ((i + 1) % 100 === 0 || i === statements.length - 1) {
+          process.stdout.write(`\r  Progresso: ${i + 1}/${statements.length} — ${totalInserted} registros inseridos, ${errors} erros`);
+        }
       } catch (err) {
-        console.error(`\nErro no lote ${i + 1}: ${err.message}`);
-        console.error('Primeiros 200 chars:', stmt.substring(0, 200));
-        throw err;
+        errors++;
+        if (errors <= 3) {
+          console.error(`\n  Erro no lote ${i + 1}: ${err.message}`);
+          console.error('  SQL (200 chars):', stmt.substring(0, 200));
+        }
+        // Continue with next statement instead of aborting
       }
     }
-    console.log(`\n  Total inserido: ${totalInserted}`);
+    console.log(`\n  Total inserido: ${totalInserted} (${errors} erros)`);
+
+    if (totalInserted === 0) {
+      console.error('\nNenhum registro inserido. Verifique o formato do SQL.');
+      process.exit(1);
+    }
 
     // Etapa 2: Atualizar stats
     console.log('\n=== Etapa 2: Atualizar stats funcionarias ===');
@@ -122,7 +151,6 @@ async function run() {
       [BATCH_UUID]
     );
     console.log(`\nTOTAL: ${total.rows[0].n} vendas, R$ ${total.rows[0].total}`);
-    console.log('\nNota: Vendas da Mery ficam com employee_name apenas (sem employee_id)');
     console.log('Importacao concluida com sucesso!');
 
   } catch (err) {
