@@ -8,7 +8,8 @@ const db = require('../config/database');
 
 router.get('/', async (req, res) => {
   const cid = req.params.id;
-  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  // FIX: cap raised from 200 to 10000 — client needs all transactions for period filters
+  const limit = Math.min(parseInt(req.query.limit) || 50, 10000);
   const offset = parseInt(req.query.offset) || 0;
   const type = req.query.type;
   try {
@@ -18,7 +19,7 @@ router.get('/', async (req, res) => {
     const countRes = await db.query(`SELECT COUNT(*) AS total FROM transactions ${where}`, params);
     const dataRes = await db.query(
       `SELECT id, type, amount, description, category, status, notes, due_date, paid_at, created_at
-       FROM transactions ${where} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+       FROM transactions ${where} ORDER BY due_date DESC, created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
     );
     const sumRes = await db.query(
@@ -41,20 +42,14 @@ router.get('/', async (req, res) => {
   } catch (err) { console.error('[transactions] list:', err.message); res.status(500).json({ error: 'Erro ao listar lancamentos' }); }
 });
 
-// POST / — create transaction
-// status defaults to 'confirmed' (registro imediato)
-// user can explicitly send status='pending' for contas a receber/pagar
 router.post('/', async (req, res) => {
   const cid = req.params.id;
   const { type, amount, description, category, notes, due_date, status } = req.body;
   if (!type || !['income', 'expense'].includes(type)) return res.status(400).json({ error: 'type deve ser income ou expense' });
   if (!amount || parseFloat(amount) <= 0) return res.status(400).json({ error: 'amount deve ser maior que zero' });
   if (!description || !String(description).trim()) return res.status(400).json({ error: 'description e obrigatoria' });
-
-  // Default: confirmed (algo que ja aconteceu). Use 'pending' para contas futuras.
   const finalStatus = (status === 'pending') ? 'pending' : 'confirmed';
   const paidAt = finalStatus === 'confirmed' ? 'NOW()' : 'NULL';
-
   try {
     const result = await db.query(
       `INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by)
@@ -81,7 +76,6 @@ router.patch('/:txId', async (req, res) => {
       updates.push(`${f} = $${idx}`); values.push(f === 'amount' ? parseFloat(req.body[f]) : req.body[f]); idx++;
     }
   }
-  // Auto-set paid_at when confirming
   if (req.body.status === 'confirmed') { updates.push('paid_at = COALESCE(paid_at, NOW())'); }
   if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   updates.push('updated_at = NOW()'); values.push(txId, cid);
