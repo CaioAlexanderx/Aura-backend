@@ -1,7 +1,6 @@
 // ============================================================
 // AURA. — Autenticacao
-// S1: SEC-02 Refresh token + SEC-06 httpOnly cookie
-// S10: SEC-07 2FA TOTP sub-router
+// FIX: register without company_name allowed (for invite flows)
 // FIX: register with existing CNPJ joins existing company
 // ============================================================
 const router  = require('express').Router();
@@ -34,13 +33,13 @@ function setRefreshCookie(res, refreshToken) {
 }
 function clearRefreshCookie(res) { res.clearCookie('aura_refresh', { path: '/api/v1/auth' }); }
 async function storeRefreshToken(userId, refreshToken, req) {
-  try { await db.query(`INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5)`, [userId, hashToken(refreshToken), new Date(Date.now() + REFRESH_TTL_MS), req.ip, (req.headers['user-agent'] || '').substring(0, 200)]); } catch (_) {}
+  try { await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5)', [userId, hashToken(refreshToken), new Date(Date.now() + REFRESH_TTL_MS), req.ip, (req.headers['user-agent'] || '').substring(0, 200)]); } catch (_) {}
 }
 
-// ── POST /api/v1/auth/register ─────────────────────────
+// POST /api/v1/auth/register
 router.post('/register', async (req, res) => {
   const { name, email, password, company_name, phone, cnpj, access_code } = req.body;
-  if (!name || !email || !password || !company_name) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password, company_name' });
+  if (!name || !email || !password) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password' });
   if (password.length < 8) return res.status(400).json({ error: 'Senha deve ter pelo menos 8 caracteres' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'E-mail invalido' });
 
@@ -52,7 +51,7 @@ router.post('/register', async (req, res) => {
 
     let plan = 'essencial', trialDays = 0, discountPct = 0, codeType = null, codeId = null, referrerId = null;
     if (access_code) {
-      const { rows: codes } = await client.query(`SELECT id, type, plan, discount_pct, trial_days, max_uses, uses, expires_at, is_active, referrer_id FROM access_codes WHERE code = $1`, [access_code.toUpperCase().trim()]);
+      const { rows: codes } = await client.query('SELECT id, type, plan, discount_pct, trial_days, max_uses, uses, expires_at, is_active, referrer_id FROM access_codes WHERE code = $1', [access_code.toUpperCase().trim()]);
       if (!codes.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Codigo de acesso invalido' }); }
       const ac = codes[0];
       if (!ac.is_active) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Codigo desativado' }); }
@@ -65,16 +64,18 @@ router.post('/register', async (req, res) => {
     const isStaff = email.toLowerCase().trim().endsWith('@getaura.com.br');
     const password_hash = await bcrypt.hash(password, 12);
     const { rows: [user] } = await client.query(
-      `INSERT INTO users (full_name, email, password_hash, role, is_staff, phone) VALUES ($1, $2, $3, 'client', $4, $5) RETURNING id, full_name AS name, email, role, is_staff, email_verified, created_at`,
+      'INSERT INTO users (full_name, email, password_hash, role, is_staff, phone) VALUES ($1, $2, $3, \'client\', $4, $5) RETURNING id, full_name AS name, email, role, is_staff, email_verified, created_at',
       [name.trim(), email.toLowerCase().trim(), password_hash, isStaff, phone || null]
     );
 
-    // FIX: Check if CNPJ already exists — if so, join existing company as member
+    // FIX: company_name is now optional — if not provided (invite flow),
+    // just create the user without a company. The invite accept will link them.
     let company = null;
-    let isNewCompany = true;
+    let isNewCompany = false;
     let memberRole = 'owner';
+    let skipCompany = !company_name;
 
-    if (cnpj) {
+    if (!skipCompany && cnpj) {
       const cleanCnpj = cnpj.replace(/\D/g, '');
       if (cleanCnpj.length === 14 || cleanCnpj.length === 11) {
         const { rows: existingCompanies } = await client.query(
@@ -82,70 +83,66 @@ router.post('/register', async (req, res) => {
           [cleanCnpj]
         );
         if (existingCompanies.length > 0) {
-          // Company already exists — join as member (not owner)
           company = existingCompanies[0];
           isNewCompany = false;
-          memberRole = 'vendedor'; // Default role for employees joining via CNPJ
-          plan = company.plan; // Use existing company's plan
-          console.log(`[auth] User ${email} joining existing company ${company.id} via CNPJ ${cleanCnpj}`);
+          memberRole = 'vendedor';
+          plan = company.plan;
+          console.log('[auth] User ' + email + ' joining existing company ' + company.id + ' via CNPJ ' + cleanCnpj);
         }
       }
     }
 
-    if (isNewCompany) {
+    if (!skipCompany && !company) {
       // Create new company
+      isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
       const { rows: [newCompany] } = await client.query(
-        `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides`,
+        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides',
         [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null]
       );
       company = newCompany;
     }
 
-    // Add user as member
-    await client.query(
-      `INSERT INTO company_members (company_id, user_id, role_label, status, is_active) VALUES ($1, $2, $3, 'active', true)`,
-      [company.id, user.id, memberRole]
-    );
+    // Add user as member (only if we have a company)
+    if (company) {
+      await client.query(
+        'INSERT INTO company_members (company_id, user_id, role_label, status, is_active) VALUES ($1, $2, $3, \'active\', true)',
+        [company.id, user.id, memberRole]
+      );
+    }
 
     if (codeType === 'referral' && referrerId) {
-      await client.query(`INSERT INTO referrals (referrer_id, referred_user_id, referred_email, code, status, completed_at) VALUES ($1, $2, $3, $4, 'completed', NOW())`, [referrerId, user.id, email.toLowerCase().trim(), access_code.toUpperCase().trim()]);
+      await client.query('INSERT INTO referrals (referrer_id, referred_user_id, referred_email, code, status, completed_at) VALUES ($1, $2, $3, $4, \'completed\', NOW())', [referrerId, user.id, email.toLowerCase().trim(), access_code.toUpperCase().trim()]);
     }
     await client.query('COMMIT');
 
-    const trialEndsAt = company.trial_ends_at;
-    const tokenPayload = { id: user.id, role: user.role, plan: company.plan, company: company.id, is_staff: user.is_staff };
+    const tokenPayload = { id: user.id, role: user.role, plan: company ? company.plan : 'essencial', company: company ? company.id : null, is_staff: user.is_staff };
     const accessToken = signAccessToken(tokenPayload);
     const { token: refreshToken } = signRefreshToken({ id: user.id });
     await storeRefreshToken(user.id, refreshToken, req);
     setRefreshCookie(res, refreshToken);
-    logAuditAction(user.id, company.id, 'register', `New account: ${email.toLowerCase().trim()}${!isNewCompany ? ' (joined existing company)' : ''}`);
+    logAuditAction(user.id, company ? company.id : null, 'register', 'New account: ' + email.toLowerCase().trim() + (skipCompany ? ' (invite flow, no company)' : !isNewCompany ? ' (joined existing company)' : ''));
 
     res.status(201).json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '15m',
       user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff, email_verified: user.email_verified || false },
-      company: { ...company, module_overrides: company.module_overrides || {}, trial_active: !!trialEndsAt, trial_ends_at: trialEndsAt },
-      code_applied: access_code ? { type: codeType, plan, discount_pct: discountPct, trial_days: trialDays } : null,
-      joined_existing: !isNewCompany,
+      company: company ? { ...company, module_overrides: company.module_overrides || {}, trial_active: !!(company.trial_ends_at), trial_ends_at: company.trial_ends_at } : null,
+      code_applied: access_code ? { type: codeType, plan: plan, discount_pct: discountPct, trial_days: trialDays } : null,
+      joined_existing: company ? !isNewCompany : false,
+      no_company: skipCompany,
     });
   } catch (err) { await client.query('ROLLBACK'); console.error('register error:', err); res.status(500).json({ error: 'Erro ao criar conta' }); }
   finally { client.release(); }
 });
 
-// ── POST /api/v1/auth/login ────────────────────────────
+// POST /api/v1/auth/login
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'email e password sao obrigatorios' });
 
   try {
     const { rows } = await db.query(
-      `SELECT u.id, u.full_name AS name, u.email, u.password_hash, u.role, u.is_active, u.is_staff, u.totp_enabled, u.email_verified,
-              c.id AS company_id, c.legal_name AS company_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides
-       FROM users u
-       LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = 'active' AND cm.is_active = true
-       LEFT JOIN companies c ON c.id = cm.company_id
-       WHERE u.email = $1
-       ORDER BY c.created_at ASC LIMIT 1`,
+      'SELECT u.id, u.full_name AS name, u.email, u.password_hash, u.role, u.is_active, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name AS company_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = \'active\' AND cm.is_active = true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.email = $1 ORDER BY c.created_at ASC LIMIT 1',
       [email.toLowerCase().trim()]
     );
     if (!rows.length) return res.status(401).json({ error: 'Credenciais invalidas' });
@@ -153,7 +150,7 @@ router.post('/login', async (req, res) => {
     if (!user.is_active) return res.status(403).json({ error: 'Conta desativada. Entre em contato com o suporte.' });
 
     const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) { logAuditAction(null, null, 'login_failed', `Failed login for ${email.toLowerCase().trim()}`, { ip: req.ip }); return res.status(401).json({ error: 'Credenciais invalidas' }); }
+    if (!valid) { logAuditAction(null, null, 'login_failed', 'Failed login for ' + email.toLowerCase().trim(), { ip: req.ip }); return res.status(401).json({ error: 'Credenciais invalidas' }); }
     if (user.totp_enabled) return res.json({ requires_2fa: true, user_id: user.id, message: 'Autenticacao de dois fatores necessaria.' });
 
     const tokenPayload = { id: user.id, role: user.role, plan: user.plan || 'essencial', company: user.company_id, is_staff: user.is_staff || false };
@@ -162,7 +159,7 @@ router.post('/login', async (req, res) => {
     await storeRefreshToken(user.id, refreshToken, req);
     setRefreshCookie(res, refreshToken);
     const trialActive = user.trial_ends_at && new Date(user.trial_ends_at) > new Date();
-    logAuditAction(user.id, user.company_id, 'login', `Login: ${user.email}`);
+    logAuditAction(user.id, user.company_id, 'login', 'Login: ' + user.email);
 
     res.json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '15m',
@@ -175,7 +172,7 @@ router.post('/login', async (req, res) => {
   } catch (err) { console.error('login error:', err); res.status(500).json({ error: 'Erro ao autenticar' }); }
 });
 
-// ── POST /api/v1/auth/refresh ───────────────────────────
+// POST /api/v1/auth/refresh
 router.post('/refresh', async (req, res) => {
   const refreshTokenInput = req.body.refresh_token || req.cookies?.aura_refresh;
   if (!refreshTokenInput) return res.status(400).json({ error: 'refresh_token e obrigatorio' });
@@ -183,8 +180,8 @@ router.post('/refresh', async (req, res) => {
     const decoded = jwt.verify(refreshTokenInput, JWT_SECRET);
     if (decoded.type !== 'refresh') return res.status(400).json({ error: 'Token nao e refresh' });
     const tokenHash = hashToken(refreshTokenInput);
-    try { const { rows } = await db.query(`SELECT id, revoked FROM refresh_tokens WHERE token_hash = $1 AND user_id = $2`, [tokenHash, decoded.id]); if (rows.length > 0 && rows[0].revoked) { clearRefreshCookie(res); return res.status(401).json({ error: 'Refresh token revogado', code: 'REFRESH_REVOKED' }); } } catch (_) {}
-    const { rows } = await db.query(`SELECT u.id, u.role, u.is_staff, c.id AS company_id, c.plan FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = 'active' AND cm.is_active = true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.id = $1 AND u.is_active = true ORDER BY c.created_at ASC LIMIT 1`, [decoded.id]);
+    try { const { rows } = await db.query('SELECT id, revoked FROM refresh_tokens WHERE token_hash = $1 AND user_id = $2', [tokenHash, decoded.id]); if (rows.length > 0 && rows[0].revoked) { clearRefreshCookie(res); return res.status(401).json({ error: 'Refresh token revogado', code: 'REFRESH_REVOKED' }); } } catch (_) {}
+    const { rows } = await db.query('SELECT u.id, u.role, u.is_staff, c.id AS company_id, c.plan FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = \'active\' AND cm.is_active = true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.id = $1 AND u.is_active = true ORDER BY c.created_at ASC LIMIT 1', [decoded.id]);
     if (!rows.length) return res.status(401).json({ error: 'Usuario desativado' });
     const user = rows[0];
     const newAccessToken = signAccessToken({ id: user.id, role: user.role, plan: user.plan || 'essencial', company: user.company_id, is_staff: user.is_staff || false });
@@ -195,26 +192,20 @@ router.post('/refresh', async (req, res) => {
   }
 });
 
-// ── POST /api/v1/auth/logout ───────────────────────────
+// POST /api/v1/auth/logout
 router.post('/logout', async (req, res) => {
   const refreshTokenInput = req.body.refresh_token || req.cookies?.aura_refresh;
   if (!refreshTokenInput) return res.json({ message: 'Logout realizado' });
-  try { const decoded = jwt.verify(refreshTokenInput, JWT_SECRET, { ignoreExpiration: true }); const tokenHash = hashToken(refreshTokenInput); try { await db.query(`UPDATE refresh_tokens SET revoked = true, revoked_at = NOW() WHERE token_hash = $1 AND user_id = $2`, [tokenHash, decoded.id]); } catch (_) {} logAuditAction(decoded.id, null, 'logout', 'User logged out'); } catch (_) {}
+  try { const decoded = jwt.verify(refreshTokenInput, JWT_SECRET, { ignoreExpiration: true }); const tokenHash = hashToken(refreshTokenInput); try { await db.query('UPDATE refresh_tokens SET revoked = true, revoked_at = NOW() WHERE token_hash = $1 AND user_id = $2', [tokenHash, decoded.id]); } catch (_) {} logAuditAction(decoded.id, null, 'logout', 'User logged out'); } catch (_) {}
   clearRefreshCookie(res);
   res.json({ message: 'Logout realizado com sucesso' });
 });
 
-// ── POST /api/v1/auth/me ──────────────────────────────
+// POST /api/v1/auth/me
 router.post('/me', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT u.id, u.full_name AS name, u.email, u.role, u.is_staff, u.totp_enabled, u.email_verified,
-              c.id AS company_id, c.legal_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides
-       FROM users u
-       LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status='active' AND cm.is_active=true
-       LEFT JOIN companies c ON c.id = cm.company_id
-       WHERE u.id = $1
-       ORDER BY c.created_at ASC LIMIT 1`,
+      'SELECT u.id, u.full_name AS name, u.email, u.role, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status=\'active\' AND cm.is_active=true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.id = $1 ORDER BY c.created_at ASC LIMIT 1',
       [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario nao encontrado' });
@@ -230,7 +221,7 @@ router.post('/me', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar perfil' }); }
 });
 
-// ── SEC-07: 2FA sub-routes ────────────────────────────────
+// SEC-07: 2FA sub-routes
 router.use('/', require('./twoFactor'));
 
 module.exports = router;
