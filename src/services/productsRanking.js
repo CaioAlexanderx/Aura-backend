@@ -1,16 +1,12 @@
 // ============================================================
-// AURA. — Serviço de Categorias + Curva ABC (BE-03)
+// AURA. — Servico de Categorias + Curva ABC (BE-03)
+// FIX: ranking now uses INNER JOIN so only products with
+//      sales IN the period appear (was LEFT JOIN = all-time data)
 // ============================================================
 
 const db = require('../config/database');
 const { resolvePeriod } = require('./salesAnalytics');
 
-/**
- * Curva ABC — classifica produtos por participação na receita
- * A = produtos que representam os primeiros 80% da receita
- * B = produtos que representam os próximos 15% (80–95%)
- * C = produtos que representam os últimos 5% (95–100%)
- */
 function classifyABC(products, totalRevenue) {
   let accumulated = 0;
   return products.map(product => {
@@ -21,17 +17,16 @@ function classifyABC(products, totalRevenue) {
   });
 }
 
-/**
- * Ranking de produtos com curva ABC
- */
 async function getProductsRanking(companyId, options = {}) {
   const { period = 'month', start_date, end_date, category } = options;
   const { startDate, endDate } = resolvePeriod(period, start_date, end_date);
 
   const params = [companyId, startDate, endDate];
-  const categoryFilter = category ? `AND p.category = $4` : '';
+  const categoryFilter = category ? 'AND p.category = $4' : '';
   if (category) params.push(category);
 
+  // FIX: INNER JOIN ensures only products with actual sales in period appear
+  // Old code used LEFT JOIN which included sale_items from ALL periods
   const { rows } = await db.query(`
     SELECT
       p.id,
@@ -43,13 +38,13 @@ async function getProductsRanking(companyId, options = {}) {
       COALESCE(SUM(si.total_price), 0)    AS total_revenue,
       COALESCE(AVG(si.unit_price), 0)     AS avg_price,
       COUNT(DISTINCT s.id)::int           AS total_orders
-    FROM products p
-    LEFT JOIN sale_items si ON si.product_id = p.id
-    LEFT JOIN sales s ON s.id = si.sale_id
+    FROM sale_items si
+    JOIN sales s ON s.id = si.sale_id
       AND s.company_id = $1
       AND s.created_at >= $2
       AND s.created_at < $3
-    WHERE p.company_id = $1
+    JOIN products p ON p.id = si.product_id
+      AND p.company_id = $1
       AND p.is_active = true
       ${categoryFilter}
     GROUP BY p.id, p.name, p.category, p.price, p.stock_qty
@@ -57,18 +52,21 @@ async function getProductsRanking(companyId, options = {}) {
   `, params);
 
   const totalRevenue = rows.reduce((sum, r) => sum + parseFloat(r.total_revenue), 0);
+  const totalSold = rows.reduce((sum, r) => sum + (parseFloat(r.total_qty) || 0), 0);
 
   const products = rows.map(r => ({
-    id:           r.id,
-    name:         r.name,
-    category:     r.category,
-    price:        parseFloat(r.price),
-    stock_qty:    parseFloat(r.stock_qty),
-    total_qty:    parseFloat(r.total_qty) || 0,
+    id:            r.id,
+    name:          r.name,
+    category:      r.category,
+    price:         parseFloat(r.price),
+    stock_qty:     parseFloat(r.stock_qty),
+    qty_sold:      parseFloat(r.total_qty) || 0,
+    total_qty:     parseFloat(r.total_qty) || 0,
     total_revenue: parseFloat(r.total_revenue),
-    avg_price:    parseFloat(parseFloat(r.avg_price).toFixed(2)),
-    total_orders: r.total_orders,
-    share_pct:    totalRevenue > 0
+    revenue:       parseFloat(r.total_revenue),
+    avg_price:     parseFloat(parseFloat(r.avg_price).toFixed(2)),
+    total_orders:  r.total_orders,
+    share_pct:     totalRevenue > 0
       ? parseFloat(((parseFloat(r.total_revenue) / totalRevenue) * 100).toFixed(1))
       : 0,
   }));
@@ -76,9 +74,14 @@ async function getProductsRanking(companyId, options = {}) {
   const ranked = classifyABC(products, totalRevenue);
 
   return {
-    period:        { start: startDate, end: endDate, label: period },
-    total_revenue: parseFloat(totalRevenue.toFixed(2)),
+    period:         { start: startDate, end: endDate, label: period },
+    total_revenue:  parseFloat(totalRevenue.toFixed(2)),
     total_products: ranked.length,
+    summary: {
+      total_products: ranked.length,
+      total_sold:     totalSold,
+      total_revenue:  parseFloat(totalRevenue.toFixed(2)),
+    },
     curve_summary: {
       A: ranked.filter(p => p.curve === 'A').length,
       B: ranked.filter(p => p.curve === 'B').length,
@@ -88,26 +91,24 @@ async function getProductsRanking(companyId, options = {}) {
   };
 }
 
-/**
- * Lista categorias cadastradas com métricas
- */
 async function getCategories(companyId, options = {}) {
   const { period = 'month', start_date, end_date } = options;
   const { startDate, endDate } = resolvePeriod(period, start_date, end_date);
 
+  // Also INNER JOIN for categories — only show categories with actual sales
   const { rows } = await db.query(`
     SELECT
       COALESCE(p.category, 'Sem categoria')  AS category,
       COUNT(DISTINCT p.id)::int              AS total_products,
       COALESCE(SUM(si.total_price), 0)       AS total_revenue,
       COALESCE(SUM(si.quantity), 0)::float   AS total_qty
-    FROM products p
-    LEFT JOIN sale_items si ON si.product_id = p.id
-    LEFT JOIN sales s ON s.id = si.sale_id
+    FROM sale_items si
+    JOIN sales s ON s.id = si.sale_id
       AND s.company_id = $1
       AND s.created_at >= $2
       AND s.created_at < $3
-    WHERE p.company_id = $1
+    JOIN products p ON p.id = si.product_id
+      AND p.company_id = $1
       AND p.is_active = true
     GROUP BY p.category
     ORDER BY total_revenue DESC
