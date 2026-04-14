@@ -9,11 +9,6 @@
  * Uso:
  *   cd aura-backend
  *   node scripts/import-finesse-runner.js
- * 
- * O que faz:
- *   1. Executa o SQL de importacao (6795 vendas)
- *   2. Atualiza total_sales/total_revenue das funcionarias cadastradas (Kaila, Paula, Amanda)
- *   3. Mery nao e mais funcionaria - vendas ficam com employee_name apenas
  */
 
 const { Pool } = require('pg');
@@ -22,6 +17,7 @@ const path = require('path');
 
 const COMPANY_ID = 'ba768cfa-cce5-4a7b-bcc9-3279b305cb70';
 const BATCH_UUID = 'c18f0267-3241-4a59-84cd-662a4e4cbf4f';
+const OLD_BATCH_STRING = 'import-historico-14abr-2026';
 
 const dbUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
 if (!dbUrl) {
@@ -36,7 +32,7 @@ async function run() {
   const client = await pool.connect();
   
   try {
-    // Check existing import (prevent duplicates)
+    // Check existing import
     const existing = await client.query(
       'SELECT COUNT(*) AS n FROM transactions WHERE import_batch_id = $1',
       [BATCH_UUID]
@@ -49,7 +45,7 @@ async function run() {
       process.exit(1);
     }
 
-    // Etapa 1: Importar vendas
+    // Etapa 1: Ler e corrigir SQL
     console.log('\n=== Etapa 1: Importar 6795 vendas ===');
     const sqlPath = path.join(__dirname, 'import_vendas_finesse.sql');
     if (!fs.existsSync(sqlPath)) {
@@ -58,13 +54,25 @@ async function run() {
       process.exit(1);
     }
     
-    const sql = fs.readFileSync(sqlPath, 'utf-8');
+    let sql = fs.readFileSync(sqlPath, 'utf-8');
+    
+    // Auto-fix: replace string batch ID with proper UUID
+    if (sql.includes(OLD_BATCH_STRING)) {
+      console.log(`  Auto-fix: substituindo '${OLD_BATCH_STRING}' por UUID '${BATCH_UUID}'`);
+      sql = sql.replaceAll(`'${OLD_BATCH_STRING}'`, `'${BATCH_UUID}'`);
+    }
+    
+    // Remove BEGIN/COMMIT (we handle transaction ourselves if needed)
+    sql = sql.replace(/^BEGIN;\s*/m, '');
+    sql = sql.replace(/\s*COMMIT;\s*$/m, '');
+    
+    // Split into individual INSERT statements
     const statements = sql
       .split(';\n')
       .map(s => s.trim())
       .filter(s => s.startsWith('INSERT INTO'));
     
-    console.log(`Encontrados ${statements.length} INSERTs`);
+    console.log(`  Encontrados ${statements.length} INSERTs`);
     
     let totalInserted = 0;
     for (let i = 0; i < statements.length; i++) {
@@ -81,7 +89,7 @@ async function run() {
     }
     console.log(`\n  Total inserido: ${totalInserted}`);
 
-    // Etapa 2: Atualizar stats das funcionarias ativas (Kaila, Paula, Amanda)
+    // Etapa 2: Atualizar stats
     console.log('\n=== Etapa 2: Atualizar stats funcionarias ===');
     const empStats = await client.query(`
       UPDATE employees e SET
