@@ -68,6 +68,8 @@ router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'))
 // -- EXPANSAO --
 
 router.use('/ai', requirePlan('negocio', 'expansao'), require('./aiChat'));
+router.use('/cashflow', requirePlan('expansao'), require('./cashFlowProjection'));
+router.use('/goals', requirePlan('expansao'), require('./salesGoals'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
