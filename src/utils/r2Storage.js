@@ -1,105 +1,98 @@
 // ============================================================
-// AURA. — MKT-04: Cloudflare R2 Storage Client
-// Upload/download/list XMLs de NF-e com retencao de 5 anos
-// Requires: AWS SDK v3 (S3-compatible) or fetch with signed URLs
+// AURA. — Cloudflare R2 Storage Client (REAL uploads)
+// Uses @aws-sdk/client-s3 (S3-compatible API)
 // ============================================================
 
-const crypto = require('crypto');
+var crypto = require('crypto');
 
-// R2 config from environment
-const R2_CONFIG = {
-  accountId:  process.env.R2_ACCOUNT_ID,
-  accessKey:  process.env.R2_ACCESS_KEY_ID,
-  secretKey:  process.env.R2_SECRET_ACCESS_KEY,
-  bucketName: process.env.R2_BUCKET_NAME || 'aura-documents',
-  publicUrl:  process.env.R2_PUBLIC_URL, // Optional: for public access
-};
+var R2_ACCOUNT_ID  = process.env.R2_ACCOUNT_ID;
+var R2_ACCESS_KEY  = process.env.R2_ACCESS_KEY_ID;
+var R2_SECRET_KEY  = process.env.R2_SECRET_ACCESS_KEY;
+var R2_BUCKET      = process.env.R2_BUCKET_NAME || 'aura-storage';
+var R2_PUBLIC_URL  = process.env.R2_PUBLIC_URL || 'https://r2.getaura.com.br';
 
-// S3-compatible endpoint for Cloudflare R2
-const R2_ENDPOINT = R2_CONFIG.accountId
-  ? `https://${R2_CONFIG.accountId}.r2.cloudflarestorage.com`
+var R2_ENDPOINT = R2_ACCOUNT_ID
+  ? 'https://' + R2_ACCOUNT_ID + '.r2.cloudflarestorage.com'
   : null;
 
-/**
- * Generate a storage key for NF-e XML files
- * Pattern: {company_id}/nfe/{year}/{month}/{chave_acesso}.xml
- * This structure enables efficient listing and lifecycle policies
- */
-function generateNfeKey(companyId, chaveAcesso, type = 'nfe') {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  return `${companyId}/${type}/${year}/${month}/${chaveAcesso}.xml`;
+// Lazy-load S3 client (only when needed)
+var _s3Client = null;
+function getS3Client() {
+  if (_s3Client) return _s3Client;
+  if (!R2_ENDPOINT || !R2_ACCESS_KEY || !R2_SECRET_KEY) return null;
+  var S3Client = require('@aws-sdk/client-s3').S3Client;
+  _s3Client = new S3Client({
+    region: 'auto',
+    endpoint: R2_ENDPOINT,
+    credentials: {
+      accessKeyId: R2_ACCESS_KEY,
+      secretAccessKey: R2_SECRET_KEY,
+    },
+  });
+  return _s3Client;
 }
 
-/**
- * Generate key for NFC-e DANFE PDF
- */
-function generateDanfeKey(companyId, numero, type = 'nfce') {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  return `${companyId}/${type}/${year}/${month}/danfe_${numero}.pdf`;
+// Key generators
+function generateNfeKey(companyId, chaveAcesso, type) {
+  var now = new Date();
+  var year = now.getFullYear();
+  var month = String(now.getMonth() + 1).padStart(2, '0');
+  return companyId + '/' + (type || 'nfe') + '/' + year + '/' + month + '/' + chaveAcesso + '.xml';
 }
 
-/**
- * Generate key for dental/clinical images
- */
+function generateDanfeKey(companyId, numero, type) {
+  var now = new Date();
+  var year = now.getFullYear();
+  var month = String(now.getMonth() + 1).padStart(2, '0');
+  return companyId + '/' + (type || 'nfce') + '/' + year + '/' + month + '/danfe_' + numero + '.pdf';
+}
+
 function generateImageKey(companyId, patientId, filename) {
-  const ext = filename.split('.').pop() || 'jpg';
-  const hash = crypto.randomBytes(8).toString('hex');
-  return `${companyId}/clinical/${patientId}/${hash}.${ext}`;
+  var ext = (filename || 'image.jpg').split('.').pop() || 'jpg';
+  var hash = crypto.randomBytes(8).toString('hex');
+  return companyId + '/clinical/' + patientId + '/' + hash + '.' + ext;
 }
 
-/**
- * Generate key for general documents
- */
 function generateDocKey(companyId, category, filename) {
-  const ext = filename.split('.').pop() || 'pdf';
-  const hash = crypto.randomBytes(8).toString('hex');
-  const now = new Date();
-  return `${companyId}/docs/${category}/${now.getFullYear()}/${hash}.${ext}`;
+  var ext = (filename || 'document.pdf').split('.').pop() || 'pdf';
+  var hash = crypto.randomBytes(8).toString('hex');
+  var now = new Date();
+  return companyId + '/docs/' + category + '/' + now.getFullYear() + '/' + hash + '.' + ext;
 }
 
-/**
- * Upload file to R2
- * In production: use @aws-sdk/client-s3 with R2 endpoint
- * For now: returns the expected URL pattern
- */
-async function uploadToR2(key, content, contentType = 'application/xml') {
-  if (!R2_ENDPOINT) {
-    // Dev/staging: return mock URL
-    console.warn('[R2] R2 not configured, using mock storage');
+// Upload file to R2
+async function uploadToR2(key, content, contentType) {
+  var client = getS3Client();
+  if (!client) {
+    console.warn('[R2] Not configured (missing R2_ACCOUNT_ID/KEY) — using mock');
     return {
       success: true,
-      key,
-      url: `https://r2.getaura.com.br/${key}`,
+      key: key,
+      url: R2_PUBLIC_URL + '/' + key,
       size: typeof content === 'string' ? Buffer.byteLength(content) : content.length,
       mock: true,
     };
   }
 
   try {
-    // In production, use AWS SDK S3 client:
-    // const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-    // const client = new S3Client({
-    //   region: 'auto',
-    //   endpoint: R2_ENDPOINT,
-    //   credentials: { accessKeyId: R2_CONFIG.accessKey, secretAccessKey: R2_CONFIG.secretKey },
-    // });
-    // await client.send(new PutObjectCommand({
-    //   Bucket: R2_CONFIG.bucketName,
-    //   Key: key,
-    //   Body: content,
-    //   ContentType: contentType,
-    //   Metadata: { 'retention-years': '5' },
-    // }));
+    var PutObjectCommand = require('@aws-sdk/client-s3').PutObjectCommand;
+    var body = typeof content === 'string' ? Buffer.from(content, 'base64') : content;
+
+    await client.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: key,
+      Body: body,
+      ContentType: contentType || 'application/octet-stream',
+    }));
+
+    var url = R2_PUBLIC_URL + '/' + key;
+    console.log('[R2] Uploaded:', key, '(' + body.length + ' bytes)');
 
     return {
       success: true,
-      key,
-      url: `${R2_ENDPOINT}/${R2_CONFIG.bucketName}/${key}`,
-      size: typeof content === 'string' ? Buffer.byteLength(content) : content.length,
+      key: key,
+      url: url,
+      size: body.length,
     };
   } catch (err) {
     console.error('[R2] Upload failed:', err.message);
@@ -107,86 +100,84 @@ async function uploadToR2(key, content, contentType = 'application/xml') {
   }
 }
 
-/**
- * Get a pre-signed download URL (valid for 1 hour)
- */
-async function getSignedUrl(key, expiresIn = 3600) {
-  if (!R2_ENDPOINT) {
-    return `https://r2.getaura.com.br/${key}?mock=true`;
+// Get pre-signed download URL
+async function getSignedUrl(key, expiresIn) {
+  var client = getS3Client();
+  if (!client) return R2_PUBLIC_URL + '/' + key;
+
+  try {
+    var GetObjectCommand = require('@aws-sdk/client-s3').GetObjectCommand;
+    var getSignedUrlFn = require('@aws-sdk/s3-request-presigner').getSignedUrl;
+    return await getSignedUrlFn(client, new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }), { expiresIn: expiresIn || 3600 });
+  } catch (err) {
+    console.error('[R2] Signed URL failed:', err.message);
+    return R2_PUBLIC_URL + '/' + key;
   }
-
-  // In production, use AWS SDK:
-  // const { GetObjectCommand } = require('@aws-sdk/client-s3');
-  // const { getSignedUrl: s3SignedUrl } = require('@aws-sdk/s3-request-presigner');
-  // return s3SignedUrl(client, new GetObjectCommand({ Bucket, Key: key }), { expiresIn });
-
-  return `${R2_ENDPOINT}/${R2_CONFIG.bucketName}/${key}`;
 }
 
-/**
- * Delete a file from R2
- */
+// Delete file from R2
 async function deleteFromR2(key) {
-  if (!R2_ENDPOINT) {
-    return { success: true, mock: true };
+  var client = getS3Client();
+  if (!client) return { success: true, mock: true };
+
+  try {
+    var DeleteObjectCommand = require('@aws-sdk/client-s3').DeleteObjectCommand;
+    await client.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+    console.log('[R2] Deleted:', key);
+    return { success: true };
+  } catch (err) {
+    console.error('[R2] Delete failed:', err.message);
+    return { success: false, error: err.message };
   }
-
-  // In production, use AWS SDK:
-  // const { DeleteObjectCommand } = require('@aws-sdk/client-s3');
-  // await client.send(new DeleteObjectCommand({ Bucket, Key: key }));
-
-  return { success: true };
 }
 
-/**
- * List files in a prefix (for listing all XMLs of a company/year)
- */
-async function listR2Files(prefix, maxKeys = 1000) {
-  if (!R2_ENDPOINT) {
-    return { files: [], mock: true };
+// List files by prefix
+async function listR2Files(prefix, maxKeys) {
+  var client = getS3Client();
+  if (!client) return { files: [], mock: true };
+
+  try {
+    var ListObjectsV2Command = require('@aws-sdk/client-s3').ListObjectsV2Command;
+    var result = await client.send(new ListObjectsV2Command({
+      Bucket: R2_BUCKET,
+      Prefix: prefix,
+      MaxKeys: maxKeys || 1000,
+    }));
+    return { files: result.Contents || [] };
+  } catch (err) {
+    console.error('[R2] List failed:', err.message);
+    return { files: [], error: err.message };
   }
-
-  // In production, use AWS SDK:
-  // const { ListObjectsV2Command } = require('@aws-sdk/client-s3');
-  // const result = await client.send(new ListObjectsV2Command({ Bucket, Prefix: prefix, MaxKeys: maxKeys }));
-  // return { files: result.Contents || [] };
-
-  return { files: [] };
 }
 
-/**
- * Retention policy check:
- * NF-e XMLs must be kept for 5 years (Art. 174 CTN)
- * This function lists files older than 5 years for cleanup
- */
+// Retention check
 function getRetentionCutoffDate() {
-  const cutoff = new Date();
+  var cutoff = new Date();
   cutoff.setFullYear(cutoff.getFullYear() - 5);
   return cutoff;
 }
 
 async function listExpiredFiles(companyId) {
-  const cutoff = getRetentionCutoffDate();
-  const cutoffYear = cutoff.getFullYear();
-  // Files organized as {companyId}/nfe/{year}/ — list years before cutoff
-  const expired = [];
-  for (let year = 2020; year <= cutoffYear; year++) {
-    const files = await listR2Files(`${companyId}/nfe/${year}/`);
-    expired.push(...(files.files || []));
+  var cutoff = getRetentionCutoffDate();
+  var cutoffYear = cutoff.getFullYear();
+  var expired = [];
+  for (var year = 2020; year <= cutoffYear; year++) {
+    var files = await listR2Files(companyId + '/nfe/' + year + '/');
+    expired.push.apply(expired, files.files || []);
   }
   return expired;
 }
 
 module.exports = {
-  generateNfeKey,
-  generateDanfeKey,
-  generateImageKey,
-  generateDocKey,
-  uploadToR2,
-  getSignedUrl,
-  deleteFromR2,
-  listR2Files,
-  listExpiredFiles,
-  getRetentionCutoffDate,
-  R2_CONFIG,
+  generateNfeKey: generateNfeKey,
+  generateDanfeKey: generateDanfeKey,
+  generateImageKey: generateImageKey,
+  generateDocKey: generateDocKey,
+  uploadToR2: uploadToR2,
+  getSignedUrl: getSignedUrl,
+  deleteFromR2: deleteFromR2,
+  listR2Files: listR2Files,
+  listExpiredFiles: listExpiredFiles,
+  getRetentionCutoffDate: getRetentionCutoffDate,
+  R2_CONFIG: { accountId: R2_ACCOUNT_ID, accessKey: R2_ACCESS_KEY, secretKey: R2_SECRET_KEY, bucketName: R2_BUCKET, publicUrl: R2_PUBLIC_URL },
 };
