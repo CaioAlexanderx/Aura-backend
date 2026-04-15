@@ -1,1 +1,84 @@
-const router=require('express').Router({mergeParams:true});const db=require('../config/database');const{requireAuth}=require('../middleware/auth');router.get('/',requireAuth,async(req,res)=>{const cid=req.params.id;const{month}=req.query;const ref=month?`${month}-01`:new Date().toISOString().slice(0,7)+'-01';try{const{rows}=await db.query(`SELECT g.*,e.name AS employee_name,e.commission_rate,e.commission_enabled FROM employee_goals g JOIN employees e ON e.id=g.employee_id WHERE g.company_id=$1 AND g.reference_month=$2 ORDER BY g.goal_amount DESC`,[cid,ref]);res.json(rows);}catch(err){res.status(500).json({error:'Erro ao listar metas'});}});router.get('/tracking',requireAuth,async(req,res)=>{const cid=req.params.id;const{month}=req.query;const ref=month?`${month}-01`:new Date().toISOString().slice(0,7)+'-01';const mEnd=new Date(new Date(ref).setMonth(new Date(ref).getMonth()+1)).toISOString().slice(0,10);try{const{rows:goals}=await db.query(`SELECT g.*,e.name AS employee_name,e.commission_rate,e.commission_enabled FROM employee_goals g JOIN employees e ON e.id=g.employee_id WHERE g.company_id=$1 AND g.reference_month=$2`,[cid,ref]);const{rows:actual}=await db.query(`SELECT name,SUM(total_sales)::int AS vendas,SUM(total_revenue) AS faturamento FROM(SELECT COALESCE(e.name,'Sem vendedor') AS name,COUNT(s.id) AS total_sales,COALESCE(SUM(s.total_amount),0) AS total_revenue FROM sales s LEFT JOIN employees e ON e.id=s.employee_id WHERE s.company_id=$1 AND s.created_at>=$2 AND s.created_at<$3 GROUP BY e.name UNION ALL SELECT COALESCE(t.employee_name,'Sem vendedor'),COUNT(t.id),COALESCE(SUM(t.amount),0) FROM transactions t WHERE t.company_id=$1 AND t.type='income' AND t.employee_name IS NOT NULL AND t.created_at>=$2 AND t.created_at<$3 GROUP BY t.employee_name) combined GROUP BY name`,[cid,ref,mEnd]);const now=new Date();const md=new Date(ref);const dim=new Date(md.getFullYear(),md.getMonth()+1,0).getDate();const isCur=now.getMonth()===md.getMonth()&&now.getFullYear()===md.getFullYear();const dom=isCur?now.getDate():dim;const tracking=goals.map(g=>{const act=actual.find(a=>a.name===g.employee_name)||{vendas:0,faturamento:0};const fat=parseFloat(act.faturamento)||0;const vnd=parseInt(act.vendas)||0;const ga=parseFloat(g.goal_amount)||0;const gu=parseInt(g.goal_units)||0;const pR=ga>0?Math.round(fat/ga*100):0;const pU=gu>0?Math.round(vnd/gu*100):0;const dRate=dom>0?fat/dom:0;const proj=Math.round(dRate*dim);const cRate=parseFloat(g.commission_rate)||0;const comm=g.commission_enabled?Math.round(fat*cRate/100*100)/100:0;return{employee_id:g.employee_id,employee_name:g.employee_name,goal_amount:ga,goal_units:gu,actual_revenue:fat,actual_units:vnd,pct_revenue:pR,pct_units:pU,projected_revenue:proj,on_track:proj>=ga,remaining:Math.max(ga-fat,0),commission_rate:cRate,commission_amount:comm,days_remaining:dim-dom,ticket_medio:vnd>0?Math.round(fat/vnd*100)/100:0};});const tRev=tracking.reduce((s,t)=>s+t.actual_revenue,0);const tGoal=tracking.reduce((s,t)=>s+t.goal_amount,0);const tComm=tracking.reduce((s,t)=>s+t.commission_amount,0);res.json({month:ref,days_in_month:dim,day_of_month:dom,is_current_month:isCur,employees:tracking,team:{total_revenue:tRev,total_goal:tGoal,pct:tGoal>0?Math.round(tRev/tGoal*100):0,total_commission:tComm}});}catch(err){console.error(err);res.status(500).json({error:'Erro no tracking'});}});router.post('/',requireAuth,async(req,res)=>{const cid=req.params.id;const{employee_id,reference_month,goal_amount,goal_units,goal_type='revenue'}=req.body;if(!employee_id||!reference_month||!goal_amount)return res.status(400).json({error:'employee_id, reference_month, goal_amount obrigatorios'});const ref=reference_month.length===7?`${reference_month}-01`:reference_month;try{const{rows}=await db.query(`INSERT INTO employee_goals(company_id,employee_id,reference_month,goal_amount,goal_units,goal_type) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(company_id,employee_id,reference_month) DO UPDATE SET goal_amount=EXCLUDED.goal_amount,goal_units=EXCLUDED.goal_units,goal_type=EXCLUDED.goal_type,updated_at=NOW() RETURNING *`,[cid,employee_id,ref,goal_amount,goal_units||null,goal_type]);res.status(201).json(rows[0]);}catch(err){console.error(err);res.status(500).json({error:'Erro ao salvar meta'});}});router.post('/batch',requireAuth,async(req,res)=>{const cid=req.params.id;const{goals,reference_month}=req.body;if(!goals||!reference_month)return res.status(400).json({error:'goals[] e reference_month obrigatorios'});const ref=reference_month.length===7?`${reference_month}-01`:reference_month;const client=await db.connect();try{await client.query('BEGIN');const results=[];for(const g of goals){const{rows}=await client.query(`INSERT INTO employee_goals(company_id,employee_id,reference_month,goal_amount,goal_units,goal_type) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(company_id,employee_id,reference_month) DO UPDATE SET goal_amount=EXCLUDED.goal_amount,goal_units=EXCLUDED.goal_units,updated_at=NOW() RETURNING *`,[cid,g.employee_id,ref,g.goal_amount,g.goal_units||null,g.goal_type||'revenue']);results.push(rows[0]);}await client.query('COMMIT');res.status(201).json({saved:results.length,goals:results});}catch(err){await client.query('ROLLBACK');res.status(500).json({error:'Erro ao salvar'});}finally{client.release();}});router.delete('/:gid',requireAuth,async(req,res)=>{try{await db.query('DELETE FROM employee_goals WHERE id=$1 AND company_id=$2',[req.params.gid,req.params.id]);res.json({deleted:true});}catch(err){res.status(500).json({error:'Erro'});}});router.post('/calculate-commissions',requireAuth,async(req,res)=>{const cid=req.params.id;const{reference_month}=req.body;if(!reference_month)return res.status(400).json({error:'reference_month obrigatorio'});const ref=reference_month.length===7?`${reference_month}-01`:reference_month;const mEnd=new Date(new Date(ref).setMonth(new Date(ref).getMonth()+1)).toISOString().slice(0,10);try{const{rows:emps}=await db.query(`SELECT id,name,commission_rate FROM employees WHERE company_id=$1 AND commission_enabled=TRUE AND is_active=TRUE`,[cid]);const results=[];for(const e of emps){const{rows:s}=await db.query(`SELECT COUNT(*)::int AS v,COALESCE(SUM(amount),0) AS f FROM transactions WHERE company_id=$1 AND type='income' AND employee_name=$2 AND created_at>=$3 AND created_at<$4`,[cid,e.name,ref,mEnd]);const v=parseInt(s[0]?.v)||0;const f=parseFloat(s[0]?.f)||0;const r=parseFloat(e.commission_rate)||0;const c=Math.round(f*r/100*100)/100;const{rows:gr}=await db.query(`SELECT goal_amount FROM employee_goals WHERE company_id=$1 AND employee_id=$2 AND reference_month=$3`,[cid,e.id,ref]);const ga=parseFloat(gr[0]?.goal_amount)||0;const ach=ga>0&&f>=ga;const{rows:led}=await db.query(`INSERT INTO commission_ledger(company_id,employee_id,reference_month,total_sales,total_revenue,commission_rate,commission_amount,goal_amount,goal_achieved,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending') ON CONFLICT(company_id,employee_id,reference_month) DO UPDATE SET total_sales=EXCLUDED.total_sales,total_revenue=EXCLUDED.total_revenue,commission_amount=EXCLUDED.commission_amount,goal_amount=EXCLUDED.goal_amount,goal_achieved=EXCLUDED.goal_achieved,updated_at=NOW() RETURNING *`,[cid,e.id,ref,v,f,r,c,ga,ach]);results.push({...led[0],employee_name:e.name});}res.json({month:ref,employees:results,total_commission:results.reduce((s,r)=>s+parseFloat(r.commission_amount),0),total_revenue:results.reduce((s,r)=>s+parseFloat(r.total_revenue),0)});}catch(err){console.error(err);res.status(500).json({error:'Erro ao calcular comissoes'});}});router.get('/commissions',requireAuth,async(req,res)=>{const cid=req.params.id;const{month}=req.query;const ref=month?(month.length===7?`${month}-01`:month):new Date().toISOString().slice(0,7)+'-01';try{const{rows}=await db.query(`SELECT cl.*,e.name AS employee_name FROM commission_ledger cl JOIN employees e ON e.id=cl.employee_id WHERE cl.company_id=$1 AND cl.reference_month=$2 ORDER BY cl.commission_amount DESC`,[cid,ref]);res.json(rows);}catch(err){res.status(500).json({error:'Erro'});}});module.exports=router;
+const router=require('express').Router({mergeParams:true});const db=require('../config/database');const{requireAuth}=require('../middleware/auth');
+
+router.get('/',requireAuth,async(req,res)=>{
+  const cid=req.params.id;const{month}=req.query;
+  const ref=month?`${month}-01`:new Date().toISOString().slice(0,7)+'-01';
+  try{const{rows}=await db.query(`SELECT g.*,e.name AS employee_name,e.commission_rate,e.commission_enabled FROM employee_goals g JOIN employees e ON e.id=g.employee_id WHERE g.company_id=$1 AND g.reference_month=$2 ORDER BY g.goal_amount DESC`,[cid,ref]);res.json(rows);
+  }catch(err){res.status(500).json({error:'Erro ao listar metas'});}
+});
+
+router.get('/tracking',requireAuth,async(req,res)=>{
+  const cid=req.params.id;const{month}=req.query;
+  const ref=month?`${month}-01`:new Date().toISOString().slice(0,7)+'-01';
+  const mEnd=new Date(new Date(ref).setMonth(new Date(ref).getMonth()+1)).toISOString().slice(0,10);
+  try{
+    const{rows:goals}=await db.query(`SELECT g.*,e.name AS employee_name,e.commission_rate,e.commission_enabled FROM employee_goals g JOIN employees e ON e.id=g.employee_id WHERE g.company_id=$1 AND g.reference_month=$2`,[cid,ref]);
+    const{rows:actual}=await db.query(`SELECT name,SUM(total_sales)::int AS vendas,SUM(total_revenue) AS faturamento FROM(SELECT COALESCE(e.name,'Sem vendedor') AS name,COUNT(s.id) AS total_sales,COALESCE(SUM(s.total_amount),0) AS total_revenue FROM sales s LEFT JOIN employees e ON e.id=s.employee_id WHERE s.company_id=$1 AND s.created_at>=$2 AND s.created_at<$3 GROUP BY e.name UNION ALL SELECT COALESCE(t.employee_name,'Sem vendedor'),COUNT(t.id),COALESCE(SUM(t.amount),0) FROM transactions t WHERE t.company_id=$1 AND t.type='income' AND t.employee_name IS NOT NULL AND t.created_at>=$2 AND t.created_at<$3 GROUP BY t.employee_name) combined GROUP BY name`,[cid,ref,mEnd]);
+    const now=new Date();const md=new Date(ref);const dim=new Date(md.getFullYear(),md.getMonth()+1,0).getDate();
+    const isCur=now.getMonth()===md.getMonth()&&now.getFullYear()===md.getFullYear();const dom=isCur?now.getDate():dim;
+    const tracking=goals.map(g=>{
+      const act=actual.find(a=>a.name===g.employee_name)||{vendas:0,faturamento:0};
+      const fat=parseFloat(act.faturamento)||0;const vnd=parseInt(act.vendas)||0;
+      const ga=parseFloat(g.goal_amount)||0;const gu=parseInt(g.goal_units)||0;
+      const dRate=dom>0?fat/dom:0;const proj=Math.round(dRate*dim);
+      const cRate=parseFloat(g.commission_rate)||0;
+      const comm=g.commission_enabled?Math.round(fat*cRate/100*100)/100:0;
+      return{employee_id:g.employee_id,employee_name:g.employee_name,goal_amount:ga,goal_units:gu,actual_revenue:fat,actual_units:vnd,pct_revenue:ga>0?Math.round(fat/ga*100):0,pct_units:gu>0?Math.round(vnd/gu*100):0,projected_revenue:proj,on_track:proj>=ga,remaining:Math.max(ga-fat,0),commission_rate:cRate,commission_amount:comm,days_remaining:dim-dom,ticket_medio:vnd>0?Math.round(fat/vnd*100)/100:0};
+    });
+    const tRev=tracking.reduce((s,t)=>s+t.actual_revenue,0);const tGoal=tracking.reduce((s,t)=>s+t.goal_amount,0);
+    res.json({month:ref,days_in_month:dim,day_of_month:dom,is_current_month:isCur,employees:tracking,team:{total_revenue:tRev,total_goal:tGoal,pct:tGoal>0?Math.round(tRev/tGoal*100):0,total_commission:tracking.reduce((s,t)=>s+t.commission_amount,0)}});
+  }catch(err){console.error(err);res.status(500).json({error:'Erro no tracking'});}
+});
+
+router.post('/',requireAuth,async(req,res)=>{
+  const cid=req.params.id;const{employee_id,reference_month,goal_amount,goal_units,goal_type='revenue'}=req.body;
+  if(!employee_id||!reference_month||!goal_amount)return res.status(400).json({error:'employee_id, reference_month, goal_amount obrigatorios'});
+  const ref=reference_month.length===7?`${reference_month}-01`:reference_month;
+  try{const{rows}=await db.query(`INSERT INTO employee_goals(company_id,employee_id,reference_month,goal_amount,goal_units,goal_type) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(company_id,employee_id,reference_month) DO UPDATE SET goal_amount=EXCLUDED.goal_amount,goal_units=EXCLUDED.goal_units,goal_type=EXCLUDED.goal_type,updated_at=NOW() RETURNING *`,[cid,employee_id,ref,goal_amount,goal_units||null,goal_type]);res.status(201).json(rows[0]);
+  }catch(err){console.error(err);res.status(500).json({error:'Erro ao salvar meta'});}
+});
+
+router.post('/batch',requireAuth,async(req,res)=>{
+  const cid=req.params.id;const{goals,reference_month}=req.body;
+  if(!goals||!reference_month)return res.status(400).json({error:'goals[] e reference_month obrigatorios'});
+  const ref=reference_month.length===7?`${reference_month}-01`:reference_month;
+  const client=await db.connect();
+  try{await client.query('BEGIN');const results=[];
+    for(const g of goals){const{rows}=await client.query(`INSERT INTO employee_goals(company_id,employee_id,reference_month,goal_amount,goal_units,goal_type) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(company_id,employee_id,reference_month) DO UPDATE SET goal_amount=EXCLUDED.goal_amount,goal_units=EXCLUDED.goal_units,updated_at=NOW() RETURNING *`,[cid,g.employee_id,ref,g.goal_amount,g.goal_units||null,g.goal_type||'revenue']);results.push(rows[0]);}
+    await client.query('COMMIT');res.status(201).json({saved:results.length,goals:results});
+  }catch(err){await client.query('ROLLBACK');res.status(500).json({error:'Erro ao salvar'});}finally{client.release();}
+});
+
+router.delete('/:gid',requireAuth,async(req,res)=>{
+  try{await db.query('DELETE FROM employee_goals WHERE id=$1 AND company_id=$2',[req.params.gid,req.params.id]);res.json({deleted:true});
+  }catch(err){res.status(500).json({error:'Erro'});}
+});
+
+router.post('/calculate-commissions',requireAuth,async(req,res)=>{
+  const cid=req.params.id;const{reference_month}=req.body;
+  if(!reference_month)return res.status(400).json({error:'reference_month obrigatorio'});
+  const ref=reference_month.length===7?`${reference_month}-01`:reference_month;
+  const mEnd=new Date(new Date(ref).setMonth(new Date(ref).getMonth()+1)).toISOString().slice(0,10);
+  try{
+    const{rows:emps}=await db.query(`SELECT id,name,commission_rate FROM employees WHERE company_id=$1 AND commission_enabled=TRUE AND is_active=TRUE`,[cid]);
+    const results=[];
+    for(const e of emps){
+      const{rows:s}=await db.query(`SELECT COUNT(*)::int AS v,COALESCE(SUM(amount),0) AS f FROM transactions WHERE company_id=$1 AND type='income' AND employee_name=$2 AND created_at>=$3 AND created_at<$4`,[cid,e.name,ref,mEnd]);
+      const v=parseInt(s[0]?.v)||0;const f=parseFloat(s[0]?.f)||0;const r=parseFloat(e.commission_rate)||0;const c=Math.round(f*r/100*100)/100;
+      const{rows:gr}=await db.query(`SELECT goal_amount FROM employee_goals WHERE company_id=$1 AND employee_id=$2 AND reference_month=$3`,[cid,e.id,ref]);
+      const ga=parseFloat(gr[0]?.goal_amount)||0;
+      const{rows:led}=await db.query(`INSERT INTO commission_ledger(company_id,employee_id,reference_month,total_sales,total_revenue,commission_rate,commission_amount,goal_amount,goal_achieved,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending') ON CONFLICT(company_id,employee_id,reference_month) DO UPDATE SET total_sales=EXCLUDED.total_sales,total_revenue=EXCLUDED.total_revenue,commission_amount=EXCLUDED.commission_amount,goal_achieved=EXCLUDED.goal_achieved,updated_at=NOW() RETURNING *`,[cid,e.id,ref,v,f,r,c,ga,ga>0&&f>=ga]);
+      results.push({...led[0],employee_name:e.name});
+    }
+    res.json({month:ref,employees:results,total_commission:results.reduce((s,r)=>s+parseFloat(r.commission_amount),0),total_revenue:results.reduce((s,r)=>s+parseFloat(r.total_revenue),0)});
+  }catch(err){console.error(err);res.status(500).json({error:'Erro ao calcular comissoes'});}
+});
+
+router.get('/commissions',requireAuth,async(req,res)=>{
+  const cid=req.params.id;const{month}=req.query;
+  const ref=month?(month.length===7?`${month}-01`:month):new Date().toISOString().slice(0,7)+'-01';
+  try{const{rows}=await db.query(`SELECT cl.*,e.name AS employee_name FROM commission_ledger cl JOIN employees e ON e.id=cl.employee_id WHERE cl.company_id=$1 AND cl.reference_month=$2 ORDER BY cl.commission_amount DESC`,[cid,ref]);res.json(rows);
+  }catch(err){res.status(500).json({error:'Erro'});}
+});
+
+module.exports=router;
