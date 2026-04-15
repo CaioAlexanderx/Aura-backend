@@ -1,17 +1,22 @@
 // ============================================================
 // AURA. — Transactions CRUD
-// FIX: Added start/end date params for server-side period filter
+// FIX: Default date uses America/Sao_Paulo timezone
 // ============================================================
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
+
+// Always use Brazil timezone for default dates
+function todayBR() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+}
 
 router.get('/', async function(req, res) {
   var cid = req.params.id;
   var limit = Math.min(parseInt(req.query.limit) || 200, 10000);
   var offset = parseInt(req.query.offset) || 0;
   var type = req.query.type;
-  var start = req.query.start; // ISO date e.g. 2026-01-01
-  var end = req.query.end;     // ISO date e.g. 2026-12-31
+  var start = req.query.start;
+  var end = req.query.end;
 
   try {
     var where = 'WHERE company_id = $1';
@@ -41,13 +46,11 @@ router.get('/', async function(req, res) {
       dataParams
     );
 
-    // Summary respects period filter too
     var sumWhere = 'WHERE company_id = $1';
     var sumParams = [cid];
     if (start) { sumParams.push(start); sumWhere += ' AND COALESCE(due_date, created_at::date) >= $' + sumParams.length; }
     if (end) { sumParams.push(end); sumWhere += ' AND COALESCE(due_date, created_at::date) <= $' + sumParams.length; }
-    // Fallback: if no period, use current month
-    if (!start && !end) { sumWhere += ' AND created_at >= date_trunc(\'month\', CURRENT_DATE)'; }
+    if (!start && !end) { sumWhere += " AND created_at >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')::date)"; }
 
     var sumRes = await db.query(
       'SELECT COALESCE(SUM(CASE WHEN type=\'income\' THEN amount ELSE 0 END), 0) AS income,' +
@@ -61,7 +64,9 @@ router.get('/', async function(req, res) {
         desc: r.description || '', description: r.description || '',
         category: r.category || 'Outros', status: r.status || 'confirmed',
         notes: r.notes || '',
-        date: r.created_at ? new Date(r.created_at).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '--/--',
+        date: r.due_date
+          ? new Date(r.due_date + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
+          : (r.created_at ? new Date(r.created_at).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', timeZone: 'America/Sao_Paulo' }) : '--/--'),
         due_date: r.due_date, paid_at: r.paid_at, created_at: r.created_at,
       };
     });
@@ -89,16 +94,20 @@ router.post('/', async function(req, res) {
   if (!body.description || !String(body.description).trim()) return res.status(400).json({ error: 'description e obrigatoria' });
   var finalStatus = (body.status === 'pending') ? 'pending' : 'confirmed';
   var paidAt = finalStatus === 'confirmed' ? 'NOW()' : 'NULL';
+
+  // FIX: default date uses Brazil timezone (was UTC — wrong after 21h BRT)
+  var dueDate = body.due_date || todayBR();
+
   try {
     var result = await db.query(
       'INSERT INTO transactions (company_id, type, amount, description, category, notes, due_date, status, paid_at, created_by)' +
       ' VALUES ($1, $2, $3, $4, $5, $6, $7, $8, ' + paidAt + ', $9)' +
-      ' RETURNING id, type, amount, description, category, status, paid_at, created_at',
+      ' RETURNING id, type, amount, description, category, status, due_date, paid_at, created_at',
       [cid, body.type, parseFloat(body.amount), String(body.description).trim(), body.category || 'Outros',
-       body.notes || null, body.due_date || new Date().toISOString().slice(0, 10), finalStatus, req.user?.id || null]
+       body.notes || null, dueDate, finalStatus, req.user?.id || null]
     );
     var tx = result.rows[0];
-    res.status(201).json({ id: tx.id, type: tx.type, amount: parseFloat(tx.amount), description: tx.description, category: tx.category, status: tx.status, paid_at: tx.paid_at, created_at: tx.created_at });
+    res.status(201).json({ id: tx.id, type: tx.type, amount: parseFloat(tx.amount), description: tx.description, category: tx.category, status: tx.status, due_date: tx.due_date, paid_at: tx.paid_at, created_at: tx.created_at });
   } catch (err) { console.error('[transactions] create:', err.message); res.status(500).json({ error: 'Erro ao criar lancamento' }); }
 });
 
