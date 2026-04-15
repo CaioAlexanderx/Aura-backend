@@ -1,6 +1,7 @@
 // ============================================================
 // AURA. — F6: Asaas Webhook Handler
-// Receives payment confirmations, updates company billing status
+// FIX: Asaas sends access token in header, NOT HMAC signature
+// Asaas header: asaas-access-token (plain token comparison)
 // Mounted at: /webhooks/asaas (PUBLIC, no auth)
 // ============================================================
 
@@ -11,18 +12,36 @@ const crypto  = require('crypto');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
-// Timing-safe HMAC validation
-function validateSignature(body, signature) {
-  if (!ASAAS_WEBHOOK_TOKEN || !signature) return false;
-  const expected = crypto.createHmac('sha256', ASAAS_WEBHOOK_TOKEN)
-    .update(JSON.stringify(body)).digest('hex');
+// FIX: Asaas uses a plain access token, NOT HMAC-SHA256
+// They send the token in the 'asaas-access-token' header
+function validateToken(req) {
+  if (!ASAAS_WEBHOOK_TOKEN) {
+    // No secret configured — accept all (log warning)
+    console.warn('[WEBHOOK] ASAAS_WEBHOOK_SECRET not set — accepting all events');
+    return true;
+  }
+
+  // Asaas sends the token in this header
+  var token = req.headers['asaas-access-token'] || '';
+
+  if (!token) {
+    console.warn('[WEBHOOK] No asaas-access-token header received');
+    return false;
+  }
+
+  // Timing-safe comparison
   try {
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-  } catch { return false; }
+    var a = Buffer.from(String(token));
+    var b = Buffer.from(String(ASAAS_WEBHOOK_TOKEN));
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
 }
 
 // Event mapping
-const PAYMENT_STATUS_MAP = {
+var PAYMENT_STATUS_MAP = {
   PAYMENT_CONFIRMED: 'active',
   PAYMENT_RECEIVED: 'active',
   PAYMENT_OVERDUE: 'overdue',
@@ -31,64 +50,52 @@ const PAYMENT_STATUS_MAP = {
   PAYMENT_CHARGEBACK_REQUESTED: 'chargeback',
 };
 
-router.post('/', async (req, res) => {
-  // Validate webhook signature if configured
-  const sig = req.headers['asaas-signature'] || req.headers['x-asaas-signature'];
-  if (ASAAS_WEBHOOK_TOKEN && !validateSignature(req.body, sig)) {
-    console.warn('[WEBHOOK] Invalid Asaas signature');
-    return res.status(403).json({ error: 'Invalid signature' });
+router.post('/', async function(req, res) {
+  // Validate webhook token
+  if (!validateToken(req)) {
+    console.warn('[WEBHOOK] Invalid Asaas token — rejecting');
+    return res.status(403).json({ error: 'Invalid token' });
   }
 
-  const { event, payment } = req.body;
+  var event = req.body.event;
+  var payment = req.body.payment;
   if (!event || !payment) return res.status(200).json({ received: true });
 
-  console.log(`[WEBHOOK] Asaas event: ${event} | Payment: ${payment.id} | Status: ${payment.status}`);
+  console.log('[WEBHOOK] Asaas event: ' + event + ' | Payment: ' + payment.id + ' | Status: ' + payment.status);
 
   try {
-    const newStatus = PAYMENT_STATUS_MAP[event];
+    var newStatus = PAYMENT_STATUS_MAP[event];
     if (!newStatus) {
-      // Event we don't handle — acknowledge
       return res.status(200).json({ received: true, handled: false });
     }
 
     // Find company by Asaas customer or external reference
-    const { rows } = await db.query(
-      `SELECT id, plan FROM companies 
-       WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1`,
+    var result = await db.query(
+      'SELECT id, plan, billing_status FROM companies WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1',
       [payment.customer, payment.externalReference]
     );
 
-    if (!rows.length) {
-      console.warn(`[WEBHOOK] Company not found for customer ${payment.customer}`);
+    if (!result.rows.length) {
+      console.warn('[WEBHOOK] Company not found for customer ' + payment.customer);
       return res.status(200).json({ received: true, company_found: false });
     }
 
-    const company = rows[0];
+    var company = result.rows[0];
+    var prevStatus = company.billing_status;
 
     // Update billing status
     await db.query(
-      `UPDATE companies SET 
-        billing_status=$1, 
-        last_payment_date=$2,
-        next_billing_date=$3,
-        updated_at=NOW()
-       WHERE id=$4`,
-      [
-        newStatus,
-        payment.paymentDate || null,
-        payment.dueDate || null,
-        company.id,
-      ]
+      'UPDATE companies SET billing_status=$1, last_payment_date=$2, next_billing_date=$3, updated_at=NOW() WHERE id=$4',
+      [newStatus, payment.paymentDate || null, payment.dueDate || null, company.id]
     );
 
     // Log the webhook event
     await db.query(
-      `INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at)
-       VALUES ($1, 'asaas', $2, $3, NOW())`,
+      'INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at) VALUES ($1, \'asaas\', $2, $3, NOW())',
       [company.id, event, JSON.stringify(payment)]
-    ).catch(() => {}); // Don't fail if log table doesn't exist yet
+    ).catch(function() {}); // Don't fail if log table doesn't exist
 
-    console.log(`[WEBHOOK] Company ${company.id} billing updated to ${newStatus}`);
+    console.log('[WEBHOOK] Company ' + company.id + ' billing: ' + prevStatus + ' -> ' + newStatus);
     res.status(200).json({ received: true, handled: true, status: newStatus });
   } catch (err) {
     console.error('[WEBHOOK] Error processing:', err.message);
