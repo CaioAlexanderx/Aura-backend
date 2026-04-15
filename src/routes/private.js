@@ -72,6 +72,8 @@ router.use('/cashflow', requirePlan('expansao'), require('./cashFlowProjection')
 router.use('/goals', requirePlan('expansao'), require('./salesGoals'));
 router.use('/margin', requirePlan('expansao'), require('./productMargin'));
 router.use('/dre-simples', requirePlan('expansao'), require('./dreSimples'));
+router.use('/alerts', requirePlan('expansao'), require('./smartAlerts'));
+router.use('/reactivation', requirePlan('expansao'), require('./customerReactivation'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
