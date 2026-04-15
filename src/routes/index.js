@@ -28,6 +28,7 @@ router.use('/companies/:id', privateCompaniesRouter);
 
 // Admin
 router.use('/admin', require('./admin'));
+router.use('/admin', require('./adminSupport'));
 
 // Webhooks (publicos, validacao interna)
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
