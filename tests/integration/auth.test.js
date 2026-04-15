@@ -1,6 +1,7 @@
 // ============================================================
 // QA — Testes de Integração: Auth (B-04)
 // Updated: plan field removed from register body (plan comes from access_code)
+// Fix: accent-free assertions to match backend responses
 // ============================================================
 const request = require('supertest');
 
@@ -46,7 +47,7 @@ describe('POST /api/v1/auth/register', () => {
     const res = await request(app).post('/api/v1/auth/register')
       .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja', access_code: 'INVALID-CODE' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Código/);
+    expect(res.body.error).toMatch(/odigo/);
   });
 
   test('201 — registro bem-sucedido retorna token sem password_hash', async () => {
@@ -84,7 +85,7 @@ describe('POST /api/v1/auth/register', () => {
     const res = await request(app).post('/api/v1/auth/register')
       .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja' });
     expect(res.status).toBe(409);
-    expect(res.body.error).toMatch(/já cadastrado/);
+    expect(res.body.error).toMatch(/ja cadastrado/);
   });
 });
 
@@ -99,7 +100,7 @@ describe('POST /api/v1/auth/login', () => {
     const res = await request(app).post('/api/v1/auth/login')
       .send({ email: 'naoexiste@ok.com', password: 'qualquer' });
     expect(res.status).toBe(401);
-    expect(res.body.error).toBe('Credenciais inválidas');
+    expect(res.body.error).toBe('Credenciais invalidas');
   });
 
   test('403 — conta desativada', async () => {
