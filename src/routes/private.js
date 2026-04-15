@@ -43,6 +43,7 @@ router.use('/sales/analytics', require('./salesAnalytics'));
 router.use('/reviews', require('./reviews').reviewsRouter);
 router.use('/modules', require('./modules'));
 router.use('/billing', require('./billing'));
+router.use('/support', require('./support'));
 
 // -- NEGOCIO+ --
 
