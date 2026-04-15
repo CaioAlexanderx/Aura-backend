@@ -70,6 +70,8 @@ router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'))
 router.use('/ai', requirePlan('negocio', 'expansao'), require('./aiChat'));
 router.use('/cashflow', requirePlan('expansao'), require('./cashFlowProjection'));
 router.use('/goals', requirePlan('expansao'), require('./salesGoals'));
+router.use('/margin', requirePlan('expansao'), require('./productMargin'));
+router.use('/dre-simples', requirePlan('expansao'), require('./dreSimples'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
