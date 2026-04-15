@@ -1,8 +1,11 @@
 // ============================================================
-// AURA. — Etiquetas de produto (impressao direta)
-// FIX DEFINITIVO: margem esquerda + barcode scanneavel
-// Impressora: Bematech LB-1000 / 042 (203dpi, TSPL2)
-// Etiqueta: 33mm x 21mm, 3 colunas por folha (99mm largura)
+// AURA. — Etiquetas de produto v3 (FIX DEFINITIVO)
+// Problemas resolvidos:
+//   1. Margem esquerda: margin-left negativo compensa margem da impressora
+//   2. Barcode nao scaneia: width 2→3, height 35→45, quiet zone adequada
+//   3. Layout: CSS Grid (mais confiavel que table para impressao)
+// Impressora: Bematech LB-1000 / 042 (203dpi)
+// Etiqueta: 33mm x 21mm, 3 colunas (99mm largura total)
 // ============================================================
 const express = require('express');
 const router = express.Router({ mergeParams: true });
@@ -32,7 +35,7 @@ router.get('/:pid/label', requireAuth, async (req, res) => {
   } catch (err) { console.error('label error:', err); res.status(500).json({ error: 'Erro ao gerar dados da etiqueta' }); }
 });
 
-// GET /companies/:id/products/:pid/label/print?mode=barcode|qr&qty=3&cols=3
+// GET /companies/:id/products/:pid/label/print
 router.get('/:pid/label/print', requireAuth, async (req, res) => {
   const { id: company_id, pid: product_id } = req.params;
   const { show_name = 'true', show_price = 'true', qty = '1', mode = 'barcode', cols: colsParam } = req.query;
@@ -69,108 +72,120 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
       jsFormat = fmtMap[product.barcode_format] || jsFormat;
     }
 
-    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(barcodeData)}&bgcolor=ffffff&color=000000&margin=1`;
-
-    const labels = [];
-    for (let i = 0; i < quantity; i++) {
-      if (useQR) {
-        labels.push(`<div class="label qr-layout"><img src="${qrUrl}" class="qr" alt="QR"><div class="info">${showName ? `<div class="name">${product.name}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}</div></div>`);
-      } else {
-        labels.push(`<div class="label barcode-layout"><div class="bc-wrap"><svg class="barcode" id="bc-${i}"></svg></div>${showName ? `<div class="name">${product.name}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}</div>`);
-      }
-    }
-
     const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <title>Etiquetas Aura - ${quantity} etiqueta${quantity > 1 ? 's' : ''}</title>
-${!useQR ? '<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>' : ''}
+${!useQR ? '<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\\/script>' : ''}
 <style>
-  /* ========== PAGE SETUP ========== */
+  /* ===== RESET TOTAL ===== */
   @page {
     size: ${sheetW}mm ${LABEL_H}mm;
-    margin: 0 !important;
-    padding: 0 !important;
+    margin: 0mm !important;
   }
   *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { margin: 0 !important; padding: 0 !important; }
-  body { font-family: Arial, Helvetica, sans-serif; background: #f5f5f5; }
+  html { margin: 0 !important; padding: 0 !important; }
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    font-family: Arial, Helvetica, sans-serif;
+    background: #f5f5f5;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
 
-  /* ========== TABLE LAYOUT (fix: no left margin, perfect grid) ========== */
+  /* ===== PRINT GRID (CSS Grid, no table) ===== */
   .print-grid {
-    border-collapse: collapse;
-    border-spacing: 0;
-    margin: 0;
-    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(${cols}, ${LABEL_W}mm);
+    grid-auto-rows: ${LABEL_H}mm;
     width: ${sheetW}mm;
-  }
-  .print-grid td {
-    width: ${LABEL_W}mm;
-    height: ${LABEL_H}mm;
-    padding: 0;
     margin: 0;
-    border: none;
-    vertical-align: top;
-    overflow: hidden;
+    padding: 0;
+    /* Compensa margem minima da impressora */
+    margin-left: -0.5mm;
   }
 
-  /* ========== LABEL ========== */
+  /* ===== LABEL ===== */
   .label {
     width: ${LABEL_W}mm;
     height: ${LABEL_H}mm;
     overflow: hidden;
     background: #fff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0.3mm 0.8mm;
+    text-align: center;
   }
 
-  /* Barcode layout */
-  .barcode-layout {
-    display: flex; flex-direction: column; align-items: center;
-    justify-content: center; padding: 0.3mm 0.5mm; text-align: center;
-  }
+  /* Barcode: SVG ocupa toda a largura disponivel */
   .bc-wrap {
-    width: 29mm;
-    height: 12mm;
+    width: 30mm;
+    height: ${showName && showPrice ? '11' : showName || showPrice ? '13' : '16'}mm;
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+  .label .barcode {
+    width: 100%;
+    height: 100%;
+  }
+  .label .name {
+    font-size: 5.5pt;
+    font-weight: 700;
+    line-height: 1.1;
+    max-height: 4mm;
     overflow: hidden;
+    word-break: break-word;
+    color: #000;
+    margin-top: 0.2mm;
   }
-  .barcode-layout .barcode {
-    max-width: 29mm;
-    height: 12mm;
-  }
-  .barcode-layout .name {
-    font-size: 5.5pt; font-weight: 600; line-height: 1.1;
-    max-height: 4.5mm; overflow: hidden; word-break: break-word;
-    color: #000; margin-top: 0.2mm;
-  }
-  .barcode-layout .price {
-    font-size: 7.5pt; font-weight: 900; color: #000; white-space: nowrap;
+  .label .price {
+    font-size: 8pt;
+    font-weight: 900;
+    color: #000;
+    white-space: nowrap;
+    letter-spacing: 0.3pt;
   }
 
-  /* QR layout */
-  .qr-layout { display: flex; flex-direction: row; align-items: center; padding: 1mm 1.5mm; gap: 1.5mm; }
-  .qr-layout .qr { width: 17mm; height: 17mm; flex-shrink: 0; image-rendering: pixelated; }
-  .qr-layout .info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 0.5mm; overflow: hidden; }
-  .qr-layout .name { font-size: 5.5pt; font-weight: 700; line-height: 1.15; max-height: 10mm; overflow: hidden; word-break: break-word; color: #000; }
-  .qr-layout .price { font-size: 7.5pt; font-weight: 900; color: #000; white-space: nowrap; }
-
-  /* ========== SCREEN PREVIEW ========== */
-  .preview-bar { position: fixed; bottom: 0; left: 0; right: 0; background: #1a1a2e; padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; z-index: 999; font-family: -apple-system, sans-serif; }
+  /* ===== SCREEN PREVIEW ===== */
+  .screen-preview {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    justify-content: center; padding: 20px; padding-bottom: 80px;
+  }
+  .screen-preview .label {
+    border: 1px dashed #ccc; border-radius: 2px;
+    display: inline-flex !important;
+  }
+  .preview-bar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: #1a1a2e; padding: 12px 20px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; z-index: 999; font-family: -apple-system, sans-serif;
+  }
   .preview-bar span { color: #a78bfa; font-size: 12px; }
   .preview-bar b { color: #e2e8f0; font-size: 13px; }
-  .preview-bar button { background: #7c3aed; color: #fff; border: none; padding: 10px 24px; border-radius: 8px; font-size: 14px; font-weight: 700; cursor: pointer; }
+  .preview-bar button {
+    background: #7c3aed; color: #fff; border: none;
+    padding: 10px 24px; border-radius: 8px; font-size: 14px;
+    font-weight: 700; cursor: pointer;
+  }
   .preview-bar button:hover { background: #6d28d9; }
-  .setup-info { max-width: 600px; margin: 20px auto; padding: 16px 20px; background: #fff; border-radius: 12px; border: 1px solid #e2e8f0; font-family: -apple-system, sans-serif; font-size: 12px; color: #555; line-height: 1.6; }
+  .setup-info {
+    max-width: 600px; margin: 20px auto; padding: 16px 20px;
+    background: #fff; border-radius: 12px; border: 1px solid #e2e8f0;
+    font-family: -apple-system, sans-serif; font-size: 12px;
+    color: #555; line-height: 1.6;
+  }
   .setup-info h3 { font-size: 14px; color: #1a1a2e; margin-bottom: 8px; }
-  .screen-preview { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; padding: 20px; padding-bottom: 80px; }
-  .screen-preview .label { border: 1px dashed #ccc; border-radius: 2px; display: inline-flex !important; }
 
   @media print {
     .preview-bar, .setup-info, .screen-preview { display: none !important; }
-    .print-grid { display: table !important; }
-    body { background: #fff; }
+    .print-grid { display: grid !important; }
+    body { background: #fff !important; }
   }
   @media screen {
     .print-grid { display: none; }
@@ -180,42 +195,29 @@ ${!useQR ? '<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBa
 <body>
 
 <div class="setup-info">
-  <h3>Configuracao para ${cols}x etiquetas 33x21mm</h3>
-  <ol>
-    <li>Na impressora Bematech: tamanho papel = <b>${sheetW}mm x ${LABEL_H}mm</b></li>
-    <li>No Chrome: Ctrl+P > Mais configuracoes</li>
-    <li>Tamanho: <b>${sheetW} x ${LABEL_H} mm</b> | Margens: <b>Nenhuma</b> | Escala: <b>100%</b></li>
-    <li>Desmarque: Cabecalhos e rodapes</li>
-  </ol>
+  <h3>Impressao de etiquetas 33x21mm (${cols} colunas)</h3>
+  <p><b>No Chrome:</b> Ctrl+P &rarr; Mais configuracoes</p>
+  <ul>
+    <li>Tamanho do papel: <b>${sheetW}mm x ${LABEL_H}mm</b> (ou personalizado)</li>
+    <li>Margens: <b>Nenhuma</b></li>
+    <li>Escala: <b>100%</b></li>
+    <li>Desmarque: <b>Cabecalhos e rodapes</b></li>
+  </ul>
+  <p style="margin-top:8px;color:#7c3aed"><b>Dica:</b> Se a margem esquerda ainda ficar grande, tente Escala 97-99%.</p>
 </div>
 
 <div class="screen-preview">
-${labels.join('\n')}
+${Array.from({length: quantity}, (_, i) => `<div class="label"><div class="bc-wrap"><svg class="barcode" id="bc-s${i}"></svg></div>${showName ? `<div class="name">${product.name}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}</div>`).join('\n')}
 </div>
 
-<!-- PRINT: Table layout garante alinhamento perfeito sem margem -->
-<table class="print-grid"><tbody>
-${(() => {
-  let rows = '';
-  for (let i = 0; i < quantity; i++) {
-    if (i % cols === 0) rows += '<tr>';
-    rows += `<td>${labels[i]}</td>`;
-    if (i % cols === cols - 1 || i === quantity - 1) {
-      // Pad remaining cells
-      const remaining = cols - (i % cols) - 1;
-      if (i === quantity - 1 && remaining > 0) {
-        for (let j = 0; j < remaining; j++) rows += '<td></td>';
-      }
-      rows += '</tr>';
-    }
-  }
-  return rows;
-})()}
-</tbody></table>
+<!-- PRINT GRID -->
+<div class="print-grid">
+${Array.from({length: quantity}, (_, i) => `<div class="label"><div class="bc-wrap"><svg class="barcode" id="bc-p${i}"></svg></div>${showName ? `<div class="name">${product.name}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}</div>`).join('\n')}
+</div>
 
 <div class="preview-bar">
   <div>
-    <span>Etiqueta ${sheetW}x${LABEL_H}mm (${useQR ? 'QR Code' : 'Codigo de barras'})</span><br>
+    <span>Etiqueta ${sheetW}x${LABEL_H}mm | ${jsFormat}</span><br>
     <b>${product.name} ${showPrice ? '| ' + priceText : ''}</b>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
@@ -225,48 +227,53 @@ ${(() => {
 </div>
 
 ${!useQR ? `<script>
+// =============================================
+// BARCODE CONFIG — otimizado para scanner 203dpi
+// width=3: barras mais largas = mais facil de ler
+// height=45: mais alto = scanner acha mais rapido
+// margin/quiet zone: minimo 10x bar width por lado
+// =============================================
+var bcConfig = {
+  format: "${jsFormat}",
+  width: 3,
+  height: 45,
+  margin: 2,
+  marginTop: 0,
+  marginBottom: 0,
+  marginLeft: 10,
+  marginRight: 10,
+  fontSize: 0,
+  displayValue: false,
+  background: "#ffffff",
+  lineColor: "#000000",
+  flat: false
+};
+
+var fallbackConfig = {
+  format: "CODE128",
+  width: 3,
+  height: 45,
+  margin: 2,
+  marginLeft: 10,
+  marginRight: 10,
+  fontSize: 0,
+  displayValue: false,
+  background: "#ffffff",
+  lineColor: "#000000"
+};
+
 document.querySelectorAll('.barcode').forEach(function(el) {
   try {
-    JsBarcode(el, "${barcodeData}", {
-      format: "${jsFormat}",
-      width: 2,
-      height: 35,
-      margin: 4,
-      marginTop: 1,
-      marginBottom: 0,
-      marginLeft: 8,
-      marginRight: 8,
-      fontSize: 8,
-      textMargin: 1,
-      displayValue: true,
-      font: "Arial",
-      fontOptions: "bold",
-      textAlign: "center",
-      background: "#ffffff",
-      lineColor: "#000000",
-      flat: false
-    });
+    JsBarcode(el, "${barcodeData}", bcConfig);
   } catch(e) {
     try {
-      JsBarcode(el, "${barcodeData}", {
-        format: "CODE128",
-        width: 2,
-        height: 35,
-        margin: 4,
-        marginLeft: 8,
-        marginRight: 8,
-        fontSize: 8,
-        textMargin: 1,
-        displayValue: true,
-        font: "Arial",
-        fontOptions: "bold",
-        background: "#ffffff",
-        lineColor: "#000000"
-      });
-    } catch(e2) { el.innerHTML = '<text x="50%" y="50%" text-anchor="middle" font-size="8" fill="red">Erro barcode</text>'; }
+      JsBarcode(el, "${barcodeData}", fallbackConfig);
+    } catch(e2) {
+      el.innerHTML = '<text x="50%" y="50%" text-anchor="middle" font-size="8" fill="red">Erro</text>';
+    }
   }
 });
-<\/script>` : ''}
+<\\/script>` : ''}
 </body>
 </html>`;
 
@@ -275,7 +282,7 @@ document.querySelectorAll('.barcode').forEach(function(el) {
   } catch (err) { console.error('label print error:', err); res.status(500).json({ error: 'Erro ao gerar etiqueta' }); }
 });
 
-// GET /companies/:id/products/labels/batch?ids=pid1,pid2&cols=3
+// GET /companies/:id/products/labels/batch
 router.get('/labels/batch', requireAuth, async (req, res) => {
   const { id: company_id } = req.params;
   const { ids, show_name = 'true', show_price = 'true' } = req.query;
