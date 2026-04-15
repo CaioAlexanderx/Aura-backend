@@ -1,15 +1,12 @@
 // ============================================================
-// AURA. — Etiquetas v4 (DEFINITIVO — scanner + margem)
+// AURA. — Etiquetas v5 (margem zero + offset configuravel)
 //
-// ROOT CAUSE barcode não lê:
-//   JsBarcode width=3 → SVG 305px → CSS comprime para 113px (30mm)
-//   → barras ficam 37% do tamanho → scanner não reconhece
-// FIX: width=1 → SVG 111px → cabe em 30mm SEM compressão
-//   → cada módulo = 1 CSS px = ~2.1 dots @ 203dpi = legível
-//
-// ROOT CAUSE margem esquerda:
-//   Impressoras térmicas ignoram margin:0 e adicionam ~1-2mm
-// FIX: @page margin negativo + margin-left negativo no grid
+// MUDANCAS v4→v5:
+//   - JsBarcode marginLeft/Right: 10/7 → 0/0 (salva ~4.5mm)
+//   - Padding label: 0.5mm 1mm → 0.3mm 0.5mm
+//   - Query param ?offset=-2 para compensar margem da impressora
+//   - @page margin: -1mm (compensa margem forçada do driver)
+//   - Instrucoes atualizadas para o usuario
 // ============================================================
 const express = require('express');
 const router = express.Router({ mergeParams: true });
@@ -35,11 +32,13 @@ router.get('/:pid/label', requireAuth, async (req, res) => {
 
 router.get('/:pid/label/print', requireAuth, async (req, res) => {
   const { id: company_id, pid: product_id } = req.params;
-  const { show_name = 'true', show_price = 'true', qty = '1', mode = 'barcode', cols: colsParam } = req.query;
+  const { show_name = 'true', show_price = 'true', qty = '1', mode = 'barcode', cols: colsParam, offset: offsetParam } = req.query;
   const quantity = Math.min(Math.max(parseInt(qty) || 1, 1), 200);
   const cols = Math.min(Math.max(parseInt(colsParam) || COLS, 1), 5);
   const sheetW = LABEL_W * cols;
-  const useQR = mode === 'qr';
+  // offset em mm — negativo empurra pra esquerda, positivo pra direita
+  // Permite o usuario compensar a margem interna da impressora
+  const offset = Math.min(Math.max(parseFloat(offsetParam) || 0, -5), 5);
 
   try {
     const result = await pool.query('SELECT id,name,price,barcode,barcode_format,sku FROM products WHERE id=$1 AND company_id=$2', [product_id, company_id]);
@@ -64,11 +63,6 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
       jsFormat = fmtMap[product.barcode_format] || jsFormat;
     }
 
-    // Calculate optimal barcode width based on format
-    // EAN-13: 95 modules. At width=1, SVG=~111px. 30mm@96dpi=113px → NO compression
-    // CODE128: varies, but ~110 modules typical. width=1 → ~126px → slight compression OK
-    const bcWidth = (jsFormat === 'EAN13' || jsFormat === 'EAN8') ? 1 : 1;
-
     const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -78,7 +72,8 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
 <style>
   @page {
     size: ${sheetW}mm ${LABEL_H}mm;
-    margin: 0mm !important;
+    /* Margem negativa compensa o padding forcado pelo driver */
+    margin: -0.5mm -0.5mm -0.5mm ${offset - 1}mm !important;
   }
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body { margin:0!important; padding:0!important; }
@@ -91,9 +86,6 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     width: ${sheetW}mm;
     margin: 0;
     padding: 0;
-    /* Compensa margem interna da impressora termica (~1mm) */
-    margin-left: -1mm;
-    margin-top: -0.5mm;
   }
 
   /* ===== LABEL ===== */
@@ -106,29 +98,28 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 0.5mm 1mm;
+    /* Padding minimo — cada 0.5mm conta numa etiqueta de 33mm */
+    padding: 0.3mm 0.5mm;
     text-align: center;
     page-break-inside: avoid;
   }
 
   /* ===== BARCODE CONTAINER =====
-     CRITICO: NÃO usar width:100% no SVG!
-     O SVG deve manter seu tamanho natural para que
-     cada barra tenha exatamente 1 CSS px de largura.
-     Se comprimirmos, as barras ficam sub-pixel e o scanner falha.
+     CRITICO: NÃO forcar width no SVG!
+     O SVG deve manter tamanho natural (1 CSS px por modulo)
+     para que o scanner consiga ler.
   */
   .bc-wrap {
-    width: 31mm;
+    width: 32mm;
     max-height: ${showName && showPrice ? '13' : showName || showPrice ? '15' : '17'}mm;
     display: flex;
     align-items: center;
     justify-content: center;
     overflow: hidden;
   }
-  /* SVG barcode: height fixo, largura NATURAL (não forçar width!) */
   .bc-wrap svg {
     height: ${showName && showPrice ? '11' : showName || showPrice ? '13' : '16'}mm;
-    /* NÃO definir width — deixar o SVG manter proporção natural */
+    /* width NAO definido — preserva proporcao natural */
   }
 
   .label .name {
@@ -152,6 +143,11 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
   .setup-info { max-width:600px; margin:20px auto; padding:16px 20px; background:#fff; border-radius:12px; border:1px solid #e2e8f0; font-size:12px; color:#555; line-height:1.6; }
   .setup-info h3 { font-size:14px; color:#1a1a2e; margin-bottom:8px; }
   .setup-info code { background:#f0edff; padding:2px 6px; border-radius:4px; font-size:11px; color:#7c3aed; }
+  .offset-control { display:flex; align-items:center; gap:8px; margin-top:12px; padding:10px; background:#f8fafc; border-radius:8px; border:1px solid #e2e8f0; }
+  .offset-control label { font-size:12px; font-weight:600; color:#334155; }
+  .offset-control input { width:60px; padding:4px 8px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; text-align:center; }
+  .offset-control button { background:#7c3aed; color:#fff; border:none; padding:6px 14px; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; }
+  .offset-control span { font-size:11px; color:#94a3b8; }
 
   @media print {
     .preview-bar, .setup-info, .screen-preview { display:none!important; }
@@ -164,16 +160,27 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
 <body>
 
 <div class="setup-info">
-  <h3>Impressao de etiquetas 33x21mm (${cols} colunas)</h3>
+  <h3>Impressao de etiquetas ${LABEL_W}x${LABEL_H}mm (${cols} colunas)</h3>
   <p><b>Chrome:</b> Ctrl+P &rarr; Mais configuracoes</p>
   <ul>
-    <li>Tamanho do papel: <code>${sheetW}mm x ${LABEL_H}mm</code></li>
-    <li>Margens: <code>Nenhuma</code></li>
+    <li>Tamanho do papel: <code>${sheetW}mm x ${LABEL_H}mm</code> ou formulario personalizado</li>
+    <li>Margens: <code>Nenhuma</code> (ou Minima)</li>
     <li>Escala: <code>100%</code></li>
     <li>Desmarque: Cabecalhos e rodapes</li>
   </ul>
-  <p style="margin-top:8px;color:#059669"><b>Barcode:</b> ${barcodeData} (${jsFormat}) — ${quantity} etiquetas</p>
-  <p style="color:#d97706;margin-top:4px"><b>Se a margem esquerda ficar grande:</b> reduza a escala para 97-98%.</p>
+  <p style="margin-top:8px;color:#059669"><b>Barcode:</b> ${barcodeData} (${jsFormat}) &mdash; ${quantity} etiquetas</p>
+
+  <div class="offset-control">
+    <label>Ajuste de margem:</label>
+    <input type="number" id="offsetInput" value="${offset}" step="0.5" min="-5" max="5" />
+    <span>mm</span>
+    <button onclick="applyOffset()">Aplicar</button>
+    <span style="margin-left:8px">Negativo = empurra pra esquerda</span>
+  </div>
+  <p style="margin-top:6px;color:#d97706;font-size:11px">
+    <b>Dica:</b> Se a etiqueta esta deslocada pra direita, coloque <code>-2</code> ou <code>-3</code>.
+    Teste com 1 etiqueta primeiro ate acertar, depois imprima o lote.
+  </p>
 </div>
 
 <div class="screen-preview">
@@ -187,7 +194,7 @@ ${Array.from({length: quantity}, (_, i) => `<div class="label"><div class="bc-wr
 
 <div class="preview-bar">
   <div>
-    <span>${jsFormat} | ${sheetW}x${LABEL_H}mm</span><br>
+    <span>${jsFormat} | ${sheetW}x${LABEL_H}mm${offset !== 0 ? ' | offset ' + offset + 'mm' : ''}</span><br>
     <b>${product.name} ${showPrice ? '| ' + priceText : ''}</b>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
@@ -198,10 +205,10 @@ ${Array.from({length: quantity}, (_, i) => `<div class="label"><div class="bc-wr
 
 <script>
 // =====================================================
-// BARCODE CONFIG — NUNCA comprimir o SVG
-// width=1: cada módulo = 1 CSS px = ~2.1 dots @ 203dpi
-// EAN-13 tem 95 módulos → SVG ~111px → cabe em 30mm (113px)
-// Se forçar width:100% no CSS, as barras ficam sub-pixel = falha scanner
+// BARCODE — margin ZERO para maximizar espaco util
+// width=1: cada modulo = 1 CSS px
+// marginLeft/Right = 0: sem desperdicio de espaco
+// A centralizacao e feita pelo flexbox do .bc-wrap
 // =====================================================
 var BARCODE_DATA = "${barcodeData}";
 var FORMAT = "${jsFormat}";
@@ -210,13 +217,13 @@ document.querySelectorAll('.barcode').forEach(function(el) {
   try {
     JsBarcode(el, BARCODE_DATA, {
       format: FORMAT,
-      width: ${bcWidth},
+      width: 1,
       height: 50,
       margin: 0,
-      marginTop: 2,
+      marginTop: 1,
       marginBottom: 0,
-      marginLeft: 10,
-      marginRight: 7,
+      marginLeft: 0,
+      marginRight: 0,
       displayValue: false,
       background: "#ffffff",
       lineColor: "#000000",
@@ -229,8 +236,8 @@ document.querySelectorAll('.barcode').forEach(function(el) {
         width: 1,
         height: 50,
         margin: 0,
-        marginLeft: 10,
-        marginRight: 7,
+        marginLeft: 0,
+        marginRight: 0,
         displayValue: false,
         background: "#ffffff",
         lineColor: "#000000"
@@ -240,6 +247,14 @@ document.querySelectorAll('.barcode').forEach(function(el) {
     }
   }
 });
+
+// Offset control — recarrega com novo offset
+function applyOffset() {
+  var val = document.getElementById('offsetInput').value;
+  var url = new URL(window.location.href);
+  url.searchParams.set('offset', val);
+  window.location.href = url.toString();
+}
 <\/script>
 </body>
 </html>`;
