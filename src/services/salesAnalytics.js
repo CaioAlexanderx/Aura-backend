@@ -4,9 +4,26 @@
 //      Financeiro completo (PDV + lancamentos manuais do Financeiro).
 //      Timezone: AT TIME ZONE 'America/Sao_Paulo' em todas as
 //      comparacoes de datas — corrige drift UTC-3 no servidor Railway.
+// FIX 2: resolvePeriod agora usa calculo UTC-3 direto em vez de
+//      toLocaleDateString('en-CA', {timeZone}) que depende de ICU.
+//      Railway pode nao ter ICU completo, retornando formatos errados.
 // ============================================================
 
 const db = require('../config/database');
+
+// Calcula data SP sem depender de ICU/locale
+// Brazil (SP) = UTC-3 sempre (sem horario de verao desde 2019)
+function todaySP() {
+  var d = new Date(Date.now() - 3 * 3600000);
+  return d.toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+function addDaysSP(dateStr, n) {
+  var parts = dateStr.split('-');
+  var y = parseInt(parts[0]), m = parseInt(parts[1]) - 1, day = parseInt(parts[2]);
+  var dt = new Date(Date.UTC(y, m, day + n));
+  return dt.toISOString().slice(0, 10);
+}
 
 async function getSalesAnalytics(companyId, options = {}) {
   const { period = 'month', group_by = 'day', start_date, end_date } = options;
@@ -221,39 +238,34 @@ async function getByPaymentMethod(companyId, startDate, endDate) {
 
 /**
  * Resolve periodo para datas de inicio e fim em horario de Brasilia.
- * Retorna strings 'YYYY-MM-DD' que o Postgres usa como timestamps locais
- * ao comparar com `(created_at AT TIME ZONE 'America/Sao_Paulo')`.
  *
- * O servidor Railway roda em UTC. Sem esse ajuste, "hoje" comecava
- * as 00:00 UTC = 21:00 BRT do dia anterior, distorcendo os resultados.
+ * FIX: Usa calculo UTC-3 direto + toISOString().slice(0,10) em vez de
+ * toLocaleDateString('en-CA', {timeZone}) que depende de ICU completo.
+ * Railway Node.js pode nao ter ICU, fazendo toLocaleDateString retornar
+ * formatos nao-ISO (ex: "4/16/2026" em vez de "2026-04-16"), quebrando
+ * o split('-') no addDays e gerando "Invalid Date" no SQL → endpoint 500.
  */
 function resolvePeriod(period, start_date, end_date) {
-  // Data atual em BRT no formato YYYY-MM-DD
-  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
-  const [y, m]   = todayStr.split('-').map(Number);
+  var today = todaySP();
+  var parts = today.split('-');
+  var y = parseInt(parts[0]);
+  var m = parseInt(parts[1]);
 
-  // Adiciona N dias a uma string YYYY-MM-DD sem drift de DST
-  function addDays(dateStr, n) {
-    const parts = dateStr.split('-').map(Number);
-    const dt = new Date(parts[0], parts[1] - 1, parts[2] + n);
-    return dt.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
-  }
+  var tomorrow     = addDaysSP(today, 1);
+  var yesterday    = addDaysSP(today, -1);
+  var weekStart    = addDaysSP(today, -6);
+  var firstOfMonth = y + '-' + String(m).padStart(2, '0') + '-01';
+  var firstOfYear  = y + '-01-01';
 
-  const firstOfMonth = `${y}-${String(m).padStart(2, '0')}-01`;
-  const firstOfYear  = `${y}-01-01`;
-  const tomorrow     = addDays(todayStr, 1);
-  const yesterday    = addDays(todayStr, -1);
-  const weekStart    = addDays(todayStr, -6);
-
-  const periods = {
-    today:     { startDate: todayStr,     endDate: tomorrow    },
-    yesterday: { startDate: yesterday,    endDate: todayStr    },
+  var periods = {
+    today:     { startDate: today,        endDate: tomorrow    },
+    yesterday: { startDate: yesterday,    endDate: today       },
     week:      { startDate: weekStart,    endDate: tomorrow    },
     month:     { startDate: firstOfMonth, endDate: tomorrow    },
     year:      { startDate: firstOfYear,  endDate: tomorrow    },
     custom: {
       startDate: start_date || firstOfMonth,
-      endDate:   end_date   ? addDays(end_date, 1) : tomorrow,
+      endDate:   end_date   ? addDaysSP(end_date, 1) : tomorrow,
     },
   };
 
