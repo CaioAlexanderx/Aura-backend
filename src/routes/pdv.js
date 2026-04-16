@@ -2,15 +2,13 @@
 // AURA. -- PDV-01: Caixa de Vendas Touch
 // Venda atomica: sale + items + estoque + metricas + cupom + financeiro
 // TIMEZONE FIX: Todas as datas em SP (America/Sao_Paulo), nao UTC.
-// DB roda em UTC, entao CURRENT_DATE / ::date retornam UTC e vendas
-// feitas depois das 21h BRT iam pro dia seguinte. Corrigido abaixo.
+// sale_date: param opcional para vendas retroativas (due_date no financeiro).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 
-// Brazil timezone date expressions — USE THESE em vez de CURRENT_DATE/created_at::date
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 const SP_DATE_COL = (col) => `(${col} AT TIME ZONE 'America/Sao_Paulo')::date`;
 
@@ -20,6 +18,7 @@ router.post('/sale', async (req, res) => {
     items, customer_id, employee_id, payment_method,
     discount_amount, discount_pct, coupon_code,
     notes, seller_id, payments,
+    sale_date, // opcional: YYYY-MM-DD para venda retroativa
   } = req.body;
 
   if (!items?.length)
@@ -49,7 +48,8 @@ router.post('/sale', async (req, res) => {
         if (p.length) {
           productName = productName || p[0].name;
           costPrice   = parseFloat(p[0].cost_price || 0);
-          if (parseFloat(p[0].stock_qty) < qty) {
+          // Verifica estoque (aviso, nao bloqueia venda retroativa)
+          if (!sale_date && parseFloat(p[0].stock_qty) < qty) {
             await client.query('ROLLBACK');
             return res.status(409).json({
               error: `Estoque insuficiente para "${p[0].name}". Disponivel: ${p[0].stock_qty}`,
@@ -90,7 +90,6 @@ router.post('/sale', async (req, res) => {
     }
     const totalAmount = parseFloat((subtotal - discountAmt).toFixed(2));
 
-    // Validate employee
     if (employee_id) {
       const { rows: empCheck } = await client.query(
         `SELECT id FROM employees WHERE id=$1 AND company_id=$2`, [employee_id, req.params.id]
@@ -157,7 +156,6 @@ router.post('/sale', async (req, res) => {
       }
     }
 
-    // Update customer metrics
     if (customer_id) {
       await client.query(
         `UPDATE customers SET total_purchases=total_purchases+1, total_spent=total_spent+$1,
@@ -167,7 +165,6 @@ router.post('/sale', async (req, res) => {
       );
     }
 
-    // Update employee metrics
     if (employee_id) {
       await client.query(
         `UPDATE employees SET total_sales=COALESCE(total_sales,0)+1, total_revenue=COALESCE(total_revenue,0)+$1, updated_at=NOW()
@@ -176,7 +173,6 @@ router.post('/sale', async (req, res) => {
       );
     }
 
-    // Increment coupon usage
     if (couponId) {
       await client.query(
         `UPDATE coupons SET current_uses=current_uses+1, updated_at=NOW() WHERE id=$1`,
@@ -185,20 +181,26 @@ router.post('/sale', async (req, res) => {
     }
 
     // ── CREATE TRANSACTION (Financeiro) ─────────────────────
-    // So cria lancamento se totalAmount > 0 (cupom 100% nao gera receita)
-    // TIMEZONE FIX: due_date usa data SP (nao CURRENT_DATE = UTC).
-    // Vendas depois de 21h BRT iam pro dia seguinte.
+    // sale_date: venda retroativa usa a data informada como due_date.
+    // Sem sale_date: usa data SP atual (TIMEZONE FIX original).
     if (totalAmount > 0) {
       const itemsSummary = productNames.slice(0, 3).join(', ') + (productNames.length > 3 ? ` +${productNames.length - 3}` : '');
       const payLabel = payment_method || (payments?.[0]?.method) || 'dinheiro';
-      const txDesc = `Venda PDV - ${itemsSummary} (${payLabel})`;
+      const txDesc = sale_date
+        ? `Venda (retroativa) - ${itemsSummary} (${payLabel})`
+        : `Venda PDV - ${itemsSummary} (${payLabel})`;
+
+      // Monta expressao de data e params dinamicamente
+      const dueDateExpr = sale_date ? `$6::date` : SP_DATE_NOW;
+      const txParams = [req.params.id, totalAmount, txDesc, req.user?.id || null, 'pdv-sale-' + sale.id];
+      if (sale_date) txParams.push(sale_date);
 
       await client.query(
         `INSERT INTO transactions
            (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
-         VALUES ($1, 'income', 'confirmed', $2, $3, 'Vendas', ${SP_DATE_NOW}, NOW(), $4, $5)
+         VALUES ($1, 'income', 'confirmed', $2, $3, 'Vendas', ${dueDateExpr}, NOW(), $4, $5)
          ON CONFLICT (idempotency_key) DO NOTHING`,
-        [req.params.id, totalAmount, txDesc, req.user?.id || null, 'pdv-sale-' + sale.id]
+        txParams
       );
     }
 
@@ -213,7 +215,6 @@ router.post('/sale', async (req, res) => {
       sale: { ...sale, items: saleItems },
       coupon_applied: couponCodeUsed ? { code: couponCodeUsed, discount: discountAmt } : null,
       receipt_url: `/companies/${req.params.id}/print/receipt/${sale.id}`,
-      receipt_auto_url: `/companies/${req.params.id}/print/receipt/${sale.id}/preview`,
     });
   } catch (e) {
     await client.query('ROLLBACK');
@@ -246,7 +247,6 @@ router.get('/sale/:saleId', async (req, res) => {
 });
 
 // GET /companies/:id/pdv/sales
-// TIMEZONE FIX: filtro por data usa SP local, nao UTC.
 router.get('/sales', async (req, res) => {
   const { date, limit = 50, offset = 0 } = req.query;
   const cond = ['s.company_id=$1'];
@@ -273,7 +273,6 @@ router.get('/sales', async (req, res) => {
 });
 
 // GET /companies/:id/pdv/summary
-// TIMEZONE FIX: default 'hoje' e filtro por data usam SP.
 router.get('/summary', async (req, res) => {
   const date = req.query.date
     || new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
@@ -366,7 +365,6 @@ router.delete('/sale/:saleId', async (req, res) => {
       );
     }
 
-    // Cancel the corresponding transaction in Financeiro
     await client.query(
       `DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`,
       ['pdv-sale-' + req.params.saleId, req.params.id]

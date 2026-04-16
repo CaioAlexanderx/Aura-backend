@@ -1,7 +1,8 @@
 // ============================================================
 // AURA. -- S4: Products CRUD
 // Plan limits: essencial=2000, negocio=7000, expansao=unlimited
-// Plan comes from req.user.plan (JWT token), not req.company
+// has_variants: scalar subquery -- true quando produto tem registros
+//   ativos em product_variants (sistema de variantes por atributos).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -40,7 +41,11 @@ router.get('/', async (req, res) => {
 
     const dataRes = await db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
-              stock_qty, stock_min, stock_max, unit, color, size, is_active, created_at
+              stock_qty, stock_min, stock_max, unit, color, size, is_active, created_at,
+              (SELECT EXISTS(
+                SELECT 1 FROM product_variants pv
+                WHERE pv.product_id = products.id AND pv.is_active = true
+              )) AS has_variants
        FROM products ${where}
        ORDER BY name ASC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -55,12 +60,52 @@ router.get('/', async (req, res) => {
       stock_max: parseInt(r.stock_max) || 0, unit: r.unit || 'un',
       color: r.color || '', size: r.size || '',
       is_active: r.is_active !== false, created_at: r.created_at,
+      has_variants: r.has_variants || false,
     }));
 
     res.json({ products, total: parseInt(countRes.rows[0]?.total) || 0, limit, offset, plan_limit: planLimit });
   } catch (err) {
     console.error('[products] list error:', err.message);
     res.status(500).json({ error: 'Erro ao listar produtos' });
+  }
+});
+
+// GET /:pid/variants -- lista variantes de um produto com seus atributos
+router.get('/:pid/variants', async (req, res) => {
+  const { id: companyId, pid: productId } = req.params;
+  try {
+    // Verifica que o produto pertence a empresa
+    const { rows: check } = await db.query(
+      'SELECT id FROM products WHERE id=$1 AND company_id=$2',
+      [productId, companyId]
+    );
+    if (!check.length) return res.status(404).json({ error: 'Produto nao encontrado' });
+
+    const { rows } = await db.query(`
+      SELECT
+        pv.id,
+        pv.sku_suffix,
+        pv.price_override,
+        pv.stock_qty,
+        pv.barcode,
+        COALESCE(
+          json_agg(
+            json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
+            ORDER BY pvv.attribute_name
+          ) FILTER (WHERE pvv.id IS NOT NULL),
+          '[]'::json
+        ) AS attributes
+      FROM product_variants pv
+      LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
+      WHERE pv.product_id = $1 AND pv.is_active = true
+      GROUP BY pv.id, pv.sku_suffix, pv.price_override, pv.stock_qty, pv.barcode
+      ORDER BY pv.created_at ASC
+    `, [productId]);
+
+    res.json({ variants: rows });
+  } catch (err) {
+    console.error('[products] variants error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar variantes' });
   }
 });
 
@@ -73,7 +118,6 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'name e obrigatorio' });
   }
 
-  // Enforce plan limit
   try {
     const planLimit = getPlanLimit(req.user?.plan);
     const countRes = await db.query('SELECT COUNT(*) AS total FROM products WHERE company_id = $1', [cid]);
@@ -113,7 +157,6 @@ router.post('/', async (req, res) => {
 router.patch('/:pid', async (req, res) => {
   const { id: cid, pid } = req.params;
 
-  // Atomic stock decrement
   if (req.body.stock_qty_decrement !== undefined) {
     const decrement = parseInt(req.body.stock_qty_decrement);
     if (!decrement || decrement <= 0) {
