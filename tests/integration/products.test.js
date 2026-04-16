@@ -1,6 +1,7 @@
 // ============================================================
 // QA — Testes: Products CRUD + Plan Limits + Color/Size
 // Cobertura: P1 (limites por plano), P1-8 (cor/tamanho)
+// Limites atuais: essencial=2000, negocio=7000, expansao=999999
 // ============================================================
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
@@ -21,7 +22,7 @@ const authExpansao  = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'clien
 
 // ── GET /products ─────────────────────────────────────────
 describe('GET /companies/:id/products — plan limits', () => {
-  test('plan essencial: limit padrao = 1000', async () => {
+  test('plan essencial: limit padrao = 2000', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query.mockResolvedValueOnce({ rows: [{ total: '50' }] });   // countRes
     db.query.mockResolvedValueOnce({ rows: [] });                  // dataRes
@@ -31,11 +32,11 @@ describe('GET /companies/:id/products — plan limits', () => {
       .set(authEssencial);
 
     expect(res.status).toBe(200);
-    expect(res.body.plan_limit).toBe(1000);
-    expect(res.body.limit).toBe(1000);
+    expect(res.body.plan_limit).toBe(2000);
+    expect(res.body.limit).toBe(2000);
   });
 
-  test('plan negocio: limit padrao = 5000', async () => {
+  test('plan negocio: limit padrao = 7000', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
     db.query.mockResolvedValueOnce({ rows: [{ total: '100' }] });
     db.query.mockResolvedValueOnce({ rows: [] });
@@ -45,8 +46,8 @@ describe('GET /companies/:id/products — plan limits', () => {
       .set(authNegocio);
 
     expect(res.status).toBe(200);
-    expect(res.body.plan_limit).toBe(5000);
-    expect(res.body.limit).toBe(5000);
+    expect(res.body.plan_limit).toBe(7000);
+    expect(res.body.limit).toBe(7000);
   });
 
   test('plan expansao: limit = 999999 (ilimitado)', async () => {
@@ -67,13 +68,13 @@ describe('GET /companies/:id/products — plan limits', () => {
     db.query.mockResolvedValueOnce({ rows: [{ total: '50' }] });
     db.query.mockResolvedValueOnce({ rows: [] });
 
-    // Essencial tentando pedir 9999 — deve ser capped em 1000
+    // Essencial tentando pedir 9999 — deve ser capped em 2000
     const res = await request(app)
       .get(`/api/v1/companies/${cid}/products?limit=9999`)
       .set(authEssencial);
 
     expect(res.status).toBe(200);
-    expect(res.body.limit).toBe(1000);
+    expect(res.body.limit).toBe(2000);
   });
 });
 
@@ -81,7 +82,7 @@ describe('GET /companies/:id/products — plan limits', () => {
 describe('POST /companies/:id/products — plan limit enforcement', () => {
   test('201 — cria produto quando abaixo do limite (essencial)', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
-    db.query.mockResolvedValueOnce({ rows: [{ total: '500' }] }); // count check (500 < 1000)
+    db.query.mockResolvedValueOnce({ rows: [{ total: '500' }] }); // count check (500 < 2000)
     db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Produto Novo' }] }); // INSERT
 
     const res = await request(app)
@@ -94,7 +95,7 @@ describe('POST /companies/:id/products — plan limit enforcement', () => {
 
   test('403 — bloqueia criacao quando no limite do plano (essencial)', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
-    db.query.mockResolvedValueOnce({ rows: [{ total: '1000' }] }); // count = 1000 (no limite)
+    db.query.mockResolvedValueOnce({ rows: [{ total: '2000' }] }); // count = 2000 (no limite)
 
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/products`)
@@ -103,13 +104,13 @@ describe('POST /companies/:id/products — plan limit enforcement', () => {
 
     expect(res.status).toBe(403);
     expect(res.body.error).toMatch(/Limite/);
-    expect(res.body.limit).toBe(1000);
-    expect(res.body.current).toBe(1000);
+    expect(res.body.limit).toBe(2000);
+    expect(res.body.current).toBe(2000);
   });
 
-  test('403 — bloqueia para negocio no limite de 5000', async () => {
+  test('403 — bloqueia para negocio no limite de 7000', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
-    db.query.mockResolvedValueOnce({ rows: [{ total: '5000' }] }); // count = 5000
+    db.query.mockResolvedValueOnce({ rows: [{ total: '7000' }] }); // count = 7000
 
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/products`)
@@ -117,7 +118,7 @@ describe('POST /companies/:id/products — plan limit enforcement', () => {
       .send({ name: 'Produto Extra', price: 10 });
 
     expect(res.status).toBe(403);
-    expect(res.body.limit).toBe(5000);
+    expect(res.body.limit).toBe(7000);
   });
 
   test('201 — expansao cria produto mesmo com 5000+ existentes', async () => {
@@ -248,14 +249,14 @@ describe('DELETE /companies/:id/products/:pid', () => {
 
 // ── getPlanLimit unit test ────────────────────────────────
 describe('getPlanLimit — logica de planos', () => {
-  // Acessa a funcao via endpoint que a usa internamente
+  // Limites atuais: essencial=2000, negocio=7000, expansao/personalizado=999999
   const cases = [
-    { plan: 'essencial', expected: 1000 },
-    { plan: 'negocio',   expected: 5000 },
+    { plan: 'essencial', expected: 2000 },
+    { plan: 'negocio',   expected: 7000 },
     { plan: 'expansao',  expected: 999999 },
     { plan: 'personalizado', expected: 999999 },
-    { plan: undefined,   expected: 1000 },
-    { plan: '',          expected: 1000 },
+    { plan: undefined,   expected: 2000 },
+    { plan: '',          expected: 2000 },
   ];
 
   cases.forEach(({ plan, expected }) => {
