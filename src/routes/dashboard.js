@@ -2,6 +2,8 @@
 // AURA. — PERF-01: Aggregated Dashboard Endpoint
 // GET /companies/:id/dashboard
 // Returns ALL dashboard data in 1 request instead of 2-3
+// TIMEZONE FIX: todas as agregacoes por data usam SP (America/Sao_Paulo).
+// DB roda em UTC — CURRENT_DATE retornaria dia errado apos 21h BRT.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -11,7 +13,7 @@ router.get('/', async (req, res) => {
   const cid = req.params.id;
   try {
     const [summaryRes, recentRes, sparkRes, obligationsRes] = await Promise.all([
-      // 1. Monthly summary
+      // 1. Monthly summary — SP timezone
       db.query(
         `SELECT
            COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END), 0) AS revenue,
@@ -20,8 +22,8 @@ router.get('/', async (req, res) => {
            COUNT(*) AS total_count
          FROM transactions
          WHERE company_id = $1
-           AND created_at >= date_trunc('month', CURRENT_DATE)
-           AND created_at < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'`,
+           AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))
+           AND (created_at AT TIME ZONE 'America/Sao_Paulo') < date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '1 month'`,
         [cid]
       ),
       // 2. Recent sales (last 5) — only columns that exist
@@ -32,31 +34,31 @@ router.get('/', async (req, res) => {
          ORDER BY created_at DESC LIMIT 5`,
         [cid]
       ),
-      // 3. Sparkline (last 7 days revenue + expenses)
+      // 3. Sparkline (last 7 days revenue + expenses) — SP timezone bucketing
       db.query(
         `SELECT
            d.day::date AS date,
            COALESCE(SUM(CASE WHEN t.type='income' THEN t.amount ELSE 0 END), 0) AS revenue,
            COALESCE(SUM(CASE WHEN t.type='expense' THEN t.amount ELSE 0 END), 0) AS expenses
          FROM generate_series(
-           CURRENT_DATE - INTERVAL '6 days',
-           CURRENT_DATE,
+           (NOW() AT TIME ZONE 'America/Sao_Paulo')::date - INTERVAL '6 days',
+           (NOW() AT TIME ZONE 'America/Sao_Paulo')::date,
            '1 day'
          ) AS d(day)
          LEFT JOIN transactions t
            ON t.company_id = $1
-           AND t.created_at::date = d.day::date
+           AND (t.created_at AT TIME ZONE 'America/Sao_Paulo')::date = d.day::date
          GROUP BY d.day
          ORDER BY d.day ASC`,
         [cid]
       ),
-      // 4. Upcoming obligations (next 30 days)
+      // 4. Upcoming obligations (next 30 days) — date field (no timezone issue)
       db.query(
         `SELECT id, name, due_date, estimated_amount, status, category
          FROM fiscal_obligations
          WHERE company_id = $1
-           AND due_date >= CURRENT_DATE
-           AND due_date <= CURRENT_DATE + INTERVAL '30 days'
+           AND due_date >= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+           AND due_date <= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date + INTERVAL '30 days'
          ORDER BY due_date ASC
          LIMIT 5`,
         [cid]
@@ -68,7 +70,7 @@ router.get('/', async (req, res) => {
     const expenses = parseFloat(summary.expenses) || 0;
     const net = revenue - expenses;
 
-    // Previous month for delta comparison
+    // Previous month for delta comparison — SP timezone
     let prevRevenue = 0;
     let prevExpenses = 0;
     try {
@@ -78,8 +80,8 @@ router.get('/', async (req, res) => {
            COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END), 0) AS expenses
          FROM transactions
          WHERE company_id = $1
-           AND created_at >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month'
-           AND created_at < date_trunc('month', CURRENT_DATE)`,
+           AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) - INTERVAL '1 month'
+           AND (created_at AT TIME ZONE 'America/Sao_Paulo') < date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))`,
         [cid]
       );
       prevRevenue = parseFloat(prevRes.rows[0]?.revenue) || 0;
@@ -92,26 +94,26 @@ router.get('/', async (req, res) => {
       ? Math.round(((net - (prevRevenue - prevExpenses)) / (prevRevenue - prevExpenses)) * 100)
       : 0;
 
-    // Today's sales
+    // Today's sales — SP timezone (nao UTC)
     let salesToday = 0;
     try {
       const todayRes = await db.query(
         `SELECT COALESCE(SUM(amount), 0) AS total
          FROM transactions
          WHERE company_id = $1 AND type = 'income'
-           AND created_at::date = CURRENT_DATE`,
+           AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date`,
         [cid]
       );
       salesToday = parseFloat(todayRes.rows[0]?.total) || 0;
     } catch (_) {}
 
-    // New customers this month
+    // New customers this month — SP timezone
     let newCustomers = 0;
     try {
       const custRes = await db.query(
         `SELECT COUNT(*) AS cnt FROM customers
          WHERE company_id = $1
-           AND created_at >= date_trunc('month', CURRENT_DATE)`,
+           AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))`,
         [cid]
       );
       newCustomers = parseInt(custRes.rows[0]?.cnt) || 0;
@@ -145,7 +147,7 @@ router.get('/', async (req, res) => {
         id: r.id,
         customer: r.description || 'Venda',
         amount: parseFloat(r.amount) || 0,
-        time: r.created_at ? new Date(r.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '--:--',
+        time: r.created_at ? new Date(r.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : '--:--',
         method: 'Pix',
       })),
       obligations: obligationsRes.rows.map(r => ({
