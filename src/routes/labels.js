@@ -1,12 +1,10 @@
 // ============================================================
-// AURA. — Etiquetas v6 (transform offset — ignora driver)
+// AURA. — Etiquetas v7 (grid explicito — 3 por linha)
 //
-// PROBLEMA: @page margin negativo depende do driver respeitar.
-// Impressoras termicas ignoram e adicionam 1-3mm de margem.
-// SOLUCAO: transform: translateX() no grid de impressao.
-// O transform desloca fisicamente o conteudo renderizado
-// DEPOIS que o driver ja aplicou a margem dele.
-// O offset e configuravel pelo usuario via ?offset=-2
+// FIX: flex-wrap nao garante N por linha em contexto de impressao.
+// Solucao: CSS Grid com grid-template-columns: repeat(cols, LABEL_W).
+// Isso forca exatamente 3 etiquetas por LINHA (horizontal),
+// independente do driver ou tamanho de papel.
 // ============================================================
 const express = require('express');
 const router = express.Router({ mergeParams: true });
@@ -36,7 +34,6 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
   const quantity = Math.min(Math.max(parseInt(qty) || 1, 1), 200);
   const cols = Math.min(Math.max(parseInt(colsParam) || COLS, 1), 5);
   const sheetW = LABEL_W * cols;
-  // offset em mm — negativo empurra pra esquerda, positivo pra direita
   const offset = Math.min(Math.max(parseFloat(offsetParam) || -2, -8), 5);
 
   try {
@@ -78,16 +75,14 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
   body { font-family:Arial,Helvetica,sans-serif; background:#f5f5f5; -webkit-print-color-adjust:exact; }
 
   /* ===== PRINT GRID =====
-     transform: translateX() e a chave.
-     O driver da impressora adiciona margem ANTES do render.
-     O transform desloca o conteudo JA RENDERIZADO pra esquerda,
-     compensando a margem que o driver forçou.
-     Isso funciona porque transform acontece na camada de pintura,
-     nao na camada de layout — o driver nao consegue impedir.
+     GRID explicito garante exatamente ${cols} etiquetas por LINHA.
+     flex-wrap podia desalinhar dependendo do driver; grid nao.
+     transform: translateX() compensa a margem extra do driver.
   */
   .print-grid {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(${cols}, ${LABEL_W}mm);
+    grid-auto-rows: ${LABEL_H}mm;
     width: ${sheetW}mm;
     margin: 0;
     padding: 0;
@@ -107,6 +102,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     padding: 0.3mm 0.5mm;
     text-align: center;
     page-break-inside: avoid;
+    break-inside: avoid;
   }
 
   .bc-wrap {
@@ -131,10 +127,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     white-space:nowrap; letter-spacing:0.3pt;
   }
 
-  /* ===== SCREEN PREVIEW =====
-     Simula a margem da impressora para o usuario ver
-     como vai ficar ANTES de imprimir
-  */
+  /* ===== SCREEN PREVIEW ===== */
   .preview-wrapper {
     max-width: 600px;
     margin: 0 auto;
@@ -163,7 +156,6 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     position: relative;
     padding: 0;
   }
-  /* Margem simulada da impressora (zona vermelha) */
   .printer-margin-overlay {
     position: absolute;
     top: 0; left: 0; bottom: 0;
@@ -181,10 +173,11 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     writing-mode: vertical-rl;
     z-index: 3;
   }
-  /* Labels no preview (com transform aplicado) */
+  /* Preview: grid espelha o layout de impressao */
   .sim-labels {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(${cols}, ${LABEL_W}mm);
+    grid-auto-rows: ${LABEL_H}mm;
     transform: translateX(${offset}mm);
     padding: 0;
   }
@@ -217,7 +210,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
 
   @media print {
     .preview-bar, .setup-info, .preview-wrapper { display:none!important; }
-    .print-grid { display:flex!important; }
+    .print-grid { display:grid!important; }
     body { background:#fff!important; }
   }
   @media screen { .print-grid { display:none; } }
@@ -226,15 +219,15 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
 <body>
 
 <div class="setup-info">
-  <h3>Etiquetas ${LABEL_W}x${LABEL_H}mm &mdash; ${jsFormat}</h3>
-  <p style="color:#059669"><b>${barcodeData}</b> &mdash; ${quantity} etiqueta${quantity > 1 ? 's' : ''} (${cols} colunas)</p>
+  <h3>Etiquetas ${LABEL_W}x${LABEL_H}mm &mdash; ${jsFormat} &mdash; ${cols} por linha</h3>
+  <p style="color:#059669"><b>${barcodeData}</b> &mdash; ${quantity} etiqueta${quantity > 1 ? 's' : ''} (${cols} colunas &times; ${Math.ceil(quantity / cols)} linhas)</p>
 
   <div class="offset-control">
     <label>Compensar margem da impressora:</label>
     <input type="range" id="offsetRange" min="-6" max="2" step="0.5" value="${offset}" oninput="document.getElementById('offsetVal').textContent=this.value+'mm'; updateSimPreview(this.value);" />
     <span class="val" id="offsetVal">${offset}mm</span>
     <button onclick="applyOffset()">Aplicar e imprimir</button>
-    <span class="hint">Arraste para a esquerda ate o codigo de barras ficar centralizado na etiqueta. A zona vermelha simula a margem da impressora.</span>
+    <span class="hint">Arraste para a esquerda ate o codigo de barras ficar centralizado na etiqueta.</span>
   </div>
 
   <div class="presets">
@@ -247,14 +240,14 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
 
   <p style="margin-top:10px;font-size:11px;color:#64748b">
     <b>Ctrl+P:</b> Margens=Nenhuma, Escala=100%, Desmarcar cabecalho/rodape.
-    Papel: <code>${sheetW}mm x ${LABEL_H}mm</code>
+    Papel: <code>${sheetW}mm x ${LABEL_H}mm</code> (${cols} colunas)
   </p>
 </div>
 
 <div class="preview-wrapper">
   <div class="printer-sim">
     <div class="printer-sim-header">
-      <span>Simulacao de impressao (com margem da impressora)</span>
+      <span>Simulacao de impressao &mdash; ${cols} etiquetas por linha</span>
       <span style="color:#ef4444;font-weight:600">Zona vermelha = margem do driver</span>
     </div>
     <div class="printer-sim-body">
@@ -274,7 +267,7 @@ ${Array.from({length: quantity}, (_, i) => `<div class="label"><div class="bc-wr
 
 <div class="preview-bar">
   <div>
-    <span>${jsFormat} | ${sheetW}x${LABEL_H}mm | offset ${offset}mm</span><br>
+    <span>${jsFormat} | ${sheetW}x${LABEL_H}mm | ${cols} por linha | offset ${offset}mm</span><br>
     <b>${product.name} ${showPrice ? '| ' + priceText : ''}</b>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
@@ -312,7 +305,6 @@ document.querySelectorAll('.barcode').forEach(function(el) {
   }
 });
 
-// Live preview: atualiza o transform do sim-labels conforme o slider
 function updateSimPreview(val) {
   document.getElementById('simLabels').style.transform = 'translateX(' + val + 'mm)';
 }
