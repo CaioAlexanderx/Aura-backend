@@ -1,5 +1,7 @@
 // ============================================================
-// AURA. — AI Insights (fixed: stock_min not min_stock_qty)
+// AURA. — AI Insights
+// FIX: contabil query usava 'name' (nao existe) e 'due_day' (nao existe).
+//      Corrigido para 'description' e comparacao com due_date.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -56,16 +58,23 @@ router.get('/:context', async (req, res) => {
         break;
       }
       case 'contabil': case 'contabilidade': {
+        // FIX: coluna correta e 'description' (nao 'name') e comparacao por due_date (nao due_day)
         const { rows: urgent } = await db.query(
-          `SELECT code, name, due_day FROM fiscal_obligations
+          `SELECT code, description, due_date FROM fiscal_obligations
            WHERE company_id=$1 AND status IN ('pending','overdue')
-             AND due_day <= EXTRACT(DAY FROM CURRENT_DATE) + 7
-           ORDER BY due_day LIMIT 3`, [cid]);
+             AND due_date <= CURRENT_DATE + INTERVAL '7 days'
+           ORDER BY due_date LIMIT 3`, [cid]);
         for (const ob of urgent) {
-          insights.push({ id: 'ob-' + ob.code, severity: ob.due_day <= new Date().getDate() ? 'critical' : 'warning',
-            agent: 'Contabil', title: `${ob.name} vence dia ${ob.due_day}`,
+          const dueDay = ob.due_date ? new Date(ob.due_date).getDate() : null;
+          const isOverdue = ob.due_date && new Date(ob.due_date) <= new Date();
+          insights.push({
+            id: 'ob-' + ob.code,
+            severity: isOverdue ? 'critical' : 'warning',
+            agent: 'Contabil',
+            title: `${ob.description || ob.code} vence dia ${dueDay}`,
             description: `Obrigacao ${ob.code}.`,
-            action: { type: 'navigate', target: '/contabilidade', label: 'Ver guia' } });
+            action: { type: 'navigate', target: '/contabilidade', label: 'Ver guia' },
+          });
         }
         break;
       }
