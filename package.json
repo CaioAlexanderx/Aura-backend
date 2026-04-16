@@ -1,7 +1,7 @@
 {
   "name": "aura-backend",
   "version": "1.0.0",
-  "description": "Aura. — Backend API",
+  "description": "Aura. \u2014 Backend API",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -31,6 +31,7 @@
     "nodemailer": "^6.9.14",
     "pdfkit": "^0.15.2",
     "pg": "^8.11.5",
+    "qrcode": "^1.5.4",
     "uuid": "^9.0.1",
     "ws": "^8.17.0"
   },
