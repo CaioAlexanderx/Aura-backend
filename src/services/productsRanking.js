@@ -2,6 +2,8 @@
 // AURA. — Servico de Categorias + Curva ABC (BE-03)
 // FIX: ranking now uses INNER JOIN so only products with
 //      sales IN the period appear (was LEFT JOIN = all-time data)
+// FIX 2: queries usam AT TIME ZONE 'America/Sao_Paulo' para
+//      consistencia com salesAnalytics.js (era created_at direto = UTC)
 // ============================================================
 
 const db = require('../config/database');
@@ -20,13 +22,12 @@ function classifyABC(products, totalRevenue) {
 async function getProductsRanking(companyId, options = {}) {
   const { period = 'month', start_date, end_date, category } = options;
   const { startDate, endDate } = resolvePeriod(period, start_date, end_date);
+  const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
 
   const params = [companyId, startDate, endDate];
   const categoryFilter = category ? 'AND p.category = $4' : '';
   if (category) params.push(category);
 
-  // FIX: INNER JOIN ensures only products with actual sales in period appear
-  // Old code used LEFT JOIN which included sale_items from ALL periods
   const { rows } = await db.query(`
     SELECT
       p.id,
@@ -41,8 +42,8 @@ async function getProductsRanking(companyId, options = {}) {
     FROM sale_items si
     JOIN sales s ON s.id = si.sale_id
       AND s.company_id = $1
-      AND s.created_at >= $2
-      AND s.created_at < $3
+      AND (s.created_at ${SP}) >= $2::timestamp
+      AND (s.created_at ${SP}) < $3::timestamp
     JOIN products p ON p.id = si.product_id
       AND p.company_id = $1
       AND p.is_active = true
@@ -94,8 +95,8 @@ async function getProductsRanking(companyId, options = {}) {
 async function getCategories(companyId, options = {}) {
   const { period = 'month', start_date, end_date } = options;
   const { startDate, endDate } = resolvePeriod(period, start_date, end_date);
+  const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
 
-  // Also INNER JOIN for categories — only show categories with actual sales
   const { rows } = await db.query(`
     SELECT
       COALESCE(p.category, 'Sem categoria')  AS category,
@@ -105,8 +106,8 @@ async function getCategories(companyId, options = {}) {
     FROM sale_items si
     JOIN sales s ON s.id = si.sale_id
       AND s.company_id = $1
-      AND s.created_at >= $2
-      AND s.created_at < $3
+      AND (s.created_at ${SP}) >= $2::timestamp
+      AND (s.created_at ${SP}) < $3::timestamp
     JOIN products p ON p.id = si.product_id
       AND p.company_id = $1
       AND p.is_active = true
