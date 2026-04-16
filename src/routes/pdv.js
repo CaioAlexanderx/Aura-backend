@@ -1,11 +1,18 @@
 // ============================================================
 // AURA. -- PDV-01: Caixa de Vendas Touch
 // Venda atomica: sale + items + estoque + metricas + cupom + financeiro
+// TIMEZONE FIX: Todas as datas em SP (America/Sao_Paulo), nao UTC.
+// DB roda em UTC, entao CURRENT_DATE / ::date retornam UTC e vendas
+// feitas depois das 21h BRT iam pro dia seguinte. Corrigido abaixo.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
+
+// Brazil timezone date expressions — USE THESE em vez de CURRENT_DATE/created_at::date
+const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
+const SP_DATE_COL = (col) => `(${col} AT TIME ZONE 'America/Sao_Paulo')::date`;
 
 // POST /companies/:id/pdv/sale
 router.post('/sale', async (req, res) => {
@@ -179,6 +186,8 @@ router.post('/sale', async (req, res) => {
 
     // ── CREATE TRANSACTION (Financeiro) ─────────────────────
     // So cria lancamento se totalAmount > 0 (cupom 100% nao gera receita)
+    // TIMEZONE FIX: due_date usa data SP (nao CURRENT_DATE = UTC).
+    // Vendas depois de 21h BRT iam pro dia seguinte.
     if (totalAmount > 0) {
       const itemsSummary = productNames.slice(0, 3).join(', ') + (productNames.length > 3 ? ` +${productNames.length - 3}` : '');
       const payLabel = payment_method || (payments?.[0]?.method) || 'dinheiro';
@@ -187,7 +196,7 @@ router.post('/sale', async (req, res) => {
       await client.query(
         `INSERT INTO transactions
            (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
-         VALUES ($1, 'income', 'confirmed', $2, $3, 'Vendas', CURRENT_DATE, NOW(), $4, $5)
+         VALUES ($1, 'income', 'confirmed', $2, $3, 'Vendas', ${SP_DATE_NOW}, NOW(), $4, $5)
          ON CONFLICT (idempotency_key) DO NOTHING`,
         [req.params.id, totalAmount, txDesc, req.user?.id || null, 'pdv-sale-' + sale.id]
       );
@@ -237,12 +246,13 @@ router.get('/sale/:saleId', async (req, res) => {
 });
 
 // GET /companies/:id/pdv/sales
+// TIMEZONE FIX: filtro por data usa SP local, nao UTC.
 router.get('/sales', async (req, res) => {
   const { date, limit = 50, offset = 0 } = req.query;
   const cond = ['s.company_id=$1'];
   const vals = [req.params.id];
   let i = 2;
-  if (date) { cond.push(`s.created_at::date=$${i++}`); vals.push(date); }
+  if (date) { cond.push(`${SP_DATE_COL('s.created_at')}=$${i++}`); vals.push(date); }
   try {
     const { rows } = await db.query(
       `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.coupon_code, s.created_at,
@@ -263,8 +273,10 @@ router.get('/sales', async (req, res) => {
 });
 
 // GET /companies/:id/pdv/summary
+// TIMEZONE FIX: default 'hoje' e filtro por data usam SP.
 router.get('/summary', async (req, res) => {
-  const date = req.query.date || new Date().toISOString().slice(0,10);
+  const date = req.query.date
+    || new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
   try {
     const { rows } = await db.query(
       `SELECT COUNT(*) AS total_sales, COALESCE(SUM(total_amount),0) AS gross_revenue,
@@ -273,7 +285,7 @@ router.get('/summary', async (req, res) => {
               json_object_agg(payment_method, cnt) AS by_payment_method
        FROM (SELECT s.total_amount, s.discount_amount, s.payment_method,
                     COUNT(*) OVER (PARTITION BY s.payment_method) AS cnt
-             FROM sales s WHERE s.company_id=$1 AND s.created_at::date=$2) sub`,
+             FROM sales s WHERE s.company_id=$1 AND ${SP_DATE_COL('s.created_at')}=$2) sub`,
       [req.params.id, date]
     );
     res.json({ date, ...rows[0] });
