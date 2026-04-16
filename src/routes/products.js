@@ -1,6 +1,6 @@
 // ============================================================
 // AURA. -- S4: Products CRUD
-// Plan limits: essencial=1000, negocio=5000, expansao=unlimited
+// Plan limits: essencial=2000, negocio=7000, expansao=unlimited
 // Plan comes from req.user.plan (JWT token), not req.company
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
@@ -10,8 +10,8 @@ function getPlanLimit(plan) {
   switch ((plan || '').toLowerCase()) {
     case 'expansao':
     case 'personalizado': return 999999;
-    case 'negocio':       return 5000;
-    default:              return 1000; // essencial / trial / unknown
+    case 'negocio':       return 7000;
+    default:              return 2000; // essencial / trial / unknown
   }
 }
 
