@@ -22,6 +22,7 @@ router.use('/financial/analysis', require('./financialAnalysis'));
 router.use('/bank', require('./bankReconciliation'));
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
+router.use('/products', require('./productsDuplicates'));
 router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
 router.use('/products', require('./productImage'));
