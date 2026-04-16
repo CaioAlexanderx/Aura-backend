@@ -2,9 +2,12 @@
 // AURA. — Autenticacao
 // FIX: register without company_name allowed (for invite flows)
 // FIX: register with existing CNPJ joins existing company
-// FIX: /me + /login + /register now expose billing_status and
-//      access_code_used so the frontend can gate unpaid accounts
-//      to the checkout screen without an extra API call.
+// FIX: /me + /login + /register now expose billing_status,
+//      access_code_used and member_role so the frontend can:
+//      - gate unpaid company owners to checkout
+//      - bypass employees (non-owners) from the billing gate
+//      - distinguish permanent codes (no trial_ends_at) from
+//        time-limited trials (access code + trial_ends_at set)
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -130,10 +133,12 @@ router.post('/register', async (req, res) => {
         module_overrides: company.module_overrides || {},
         trial_active: !!(company.trial_ends_at),
         trial_ends_at: company.trial_ends_at,
-        // billing_status: new companies always start as null (unpaid).
-        // access_code_used: boolean so the gate can allow alpha/beta testers.
         billing_status: company.billing_status || null,
         access_code_used: !!(company.access_code_used),
+        // member_role: role do usuario nesta empresa
+        // 'owner' = fundador/dono, 'vendedor' etc = funcionario convidado.
+        // Usado no billing gate: apenas owners sao redirecionados ao checkout.
+        member_role: memberRole,
       } : null,
       code_applied: access_code ? { type: codeType, plan: plan, discount_pct: discountPct, trial_days: trialDays } : null,
       joined_existing: company ? !isNewCompany : false,
@@ -150,7 +155,7 @@ router.post('/login', async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      'SELECT u.id, u.full_name AS name, u.email, u.password_hash, u.role, u.is_active, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name AS company_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides, c.billing_status, c.access_code_used FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = \'active\' AND cm.is_active = true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.email = $1 ORDER BY c.created_at ASC LIMIT 1',
+      'SELECT u.id, u.full_name AS name, u.email, u.password_hash, u.role, u.is_active, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name AS company_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides, c.billing_status, c.access_code_used, cm.role_label AS member_role FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = \'active\' AND cm.is_active = true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.email = $1 ORDER BY c.created_at ASC LIMIT 1',
       [email.toLowerCase().trim()]
     );
     if (!rows.length) return res.status(401).json({ error: 'Credenciais invalidas' });
@@ -175,7 +180,8 @@ router.post('/login', async (req, res) => {
       company: user.company_id
         ? { id: user.company_id, name: user.company_name, plan: user.plan, onboarding_step: user.onboarding_step,
             module_overrides: user.module_overrides || {}, trial_active: trialActive, trial_ends_at: user.trial_ends_at,
-            billing_status: user.billing_status || null, access_code_used: !!(user.access_code_used) }
+            billing_status: user.billing_status || null, access_code_used: !!(user.access_code_used),
+            member_role: user.member_role || 'owner' }
         : null,
     });
   } catch (err) { console.error('login error:', err); res.status(500).json({ error: 'Erro ao autenticar' }); }
@@ -214,7 +220,7 @@ router.post('/logout', async (req, res) => {
 router.post('/me', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      'SELECT u.id, u.full_name AS name, u.email, u.role, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides, c.billing_status, c.access_code_used FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status=\'active\' AND cm.is_active=true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.id = $1 ORDER BY c.created_at ASC LIMIT 1',
+      'SELECT u.id, u.full_name AS name, u.email, u.role, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides, c.billing_status, c.access_code_used, cm.role_label AS member_role FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status=\'active\' AND cm.is_active=true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.id = $1 ORDER BY c.created_at ASC LIMIT 1',
       [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario nao encontrado' });
@@ -225,7 +231,8 @@ router.post('/me', requireAuth, async (req, res) => {
       company: u.company_id
         ? { id: u.company_id, name: u.legal_name, plan: u.plan, onboarding_step: u.onboarding_step,
             module_overrides: u.module_overrides || {}, trial_active: trialActive, trial_ends_at: u.trial_ends_at,
-            billing_status: u.billing_status || null, access_code_used: !!(u.access_code_used) }
+            billing_status: u.billing_status || null, access_code_used: !!(u.access_code_used),
+            member_role: u.member_role || 'owner' }
         : null,
     });
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar perfil' }); }
