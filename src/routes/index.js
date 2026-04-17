@@ -32,6 +32,8 @@ router.use('/admin', require('./adminSupport'));
 router.use('/admin', require('./adminMetrics'));
 router.use('/admin', require('./adminClients360'));
 router.use('/admin', require('./adminRevenue'));
+router.use('/admin', require('./adminOps'));
+router.use('/admin', require('./adminGrowth'));
 
 // Webhooks (publicos, validacao interna)
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
