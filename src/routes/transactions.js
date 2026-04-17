@@ -1,11 +1,10 @@
 // ============================================================
 // AURA. — Transactions CRUD
-// FIX: Default date uses America/Sao_Paulo timezone
+// FIX: DELETE handles FK constraints, timezone SP
 // ============================================================
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
 
-// Always use Brazil timezone for default dates
 function todayBR() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
 }
@@ -21,29 +20,17 @@ router.get('/', async function(req, res) {
   try {
     var where = 'WHERE company_id = $1';
     var params = [cid];
-
-    if (type === 'income' || type === 'expense') {
-      params.push(type);
-      where += ' AND type = $' + params.length;
-    }
-    if (start) {
-      params.push(start);
-      where += ' AND COALESCE(due_date, created_at::date) >= $' + params.length;
-    }
-    if (end) {
-      params.push(end);
-      where += ' AND COALESCE(due_date, created_at::date) <= $' + params.length;
-    }
+    if (type === 'income' || type === 'expense') { params.push(type); where += ' AND type = $' + params.length; }
+    if (start) { params.push(start); where += ' AND COALESCE(due_date, created_at::date) >= $' + params.length; }
+    if (end) { params.push(end); where += ' AND COALESCE(due_date, created_at::date) <= $' + params.length; }
 
     var countRes = await db.query('SELECT COUNT(*) AS total FROM transactions ' + where, params);
-
     var dataParams = params.concat([limit, offset]);
     var dataRes = await db.query(
       'SELECT id, type, amount, description, category, status, notes, due_date, paid_at, created_at' +
       ' FROM transactions ' + where +
       ' ORDER BY COALESCE(due_date, created_at::date) DESC, created_at DESC' +
-      ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2),
-      dataParams
+      ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2), dataParams
     );
 
     var sumWhere = 'WHERE company_id = $1';
@@ -75,15 +62,9 @@ router.get('/', async function(req, res) {
       transactions: transactions,
       total: parseInt(countRes.rows[0]?.total) || 0,
       limit: limit, offset: offset,
-      summary: {
-        income: parseFloat(sumRes.rows[0]?.income) || 0,
-        expenses: parseFloat(sumRes.rows[0]?.expenses) || 0,
-      },
+      summary: { income: parseFloat(sumRes.rows[0]?.income) || 0, expenses: parseFloat(sumRes.rows[0]?.expenses) || 0 },
     });
-  } catch (err) {
-    console.error('[transactions] list:', err.message);
-    res.status(500).json({ error: 'Erro ao listar lancamentos' });
-  }
+  } catch (err) { console.error('[transactions] list:', err.message); res.status(500).json({ error: 'Erro ao listar lancamentos' }); }
 });
 
 router.post('/', async function(req, res) {
@@ -94,8 +75,6 @@ router.post('/', async function(req, res) {
   if (!body.description || !String(body.description).trim()) return res.status(400).json({ error: 'description e obrigatoria' });
   var finalStatus = (body.status === 'pending') ? 'pending' : 'confirmed';
   var paidAt = finalStatus === 'confirmed' ? 'NOW()' : 'NULL';
-
-  // FIX: default date uses Brazil timezone (was UTC — wrong after 21h BRT)
   var dueDate = body.due_date || todayBR();
 
   try {
@@ -126,22 +105,31 @@ router.patch('/:txId', async function(req, res) {
   if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   updates.push('updated_at = NOW()'); values.push(txId, cid);
   try {
-    var result = await db.query(
-      'UPDATE transactions SET ' + updates.join(', ') + ' WHERE id = $' + idx + ' AND company_id = $' + (idx + 1) + ' RETURNING *', values
-    );
+    var result = await db.query('UPDATE transactions SET ' + updates.join(', ') + ' WHERE id = $' + idx + ' AND company_id = $' + (idx + 1) + ' RETURNING *', values);
     if (!result.rows.length) return res.status(404).json({ error: 'Lancamento nao encontrado' });
     res.json(result.rows[0]);
   } catch (err) { console.error('[transactions] update:', err.message); res.status(500).json({ error: 'Erro ao atualizar lancamento' }); }
 });
 
+// DELETE — FIX: handles FK constraints
 router.delete('/:txId', async function(req, res) {
   var cid = req.params.id;
   var txId = req.params.txId;
   try {
+    // Nullify references before deleting (keeps related records history)
+    await db.query('UPDATE bank_statement_entries SET matched_transaction_id = NULL WHERE matched_transaction_id = $1', [txId]).catch(function() {});
+    await db.query('UPDATE nfce_emissions SET transaction_id = NULL WHERE transaction_id = $1', [txId]).catch(function() {});
+    // Delete
     var result = await db.query('DELETE FROM transactions WHERE id = $1 AND company_id = $2 RETURNING id', [txId, cid]);
     if (!result.rows.length) return res.status(404).json({ error: 'Lancamento nao encontrado' });
     res.json({ deleted: true, id: txId });
-  } catch (err) { console.error('[transactions] delete:', err.message); res.status(500).json({ error: 'Erro ao deletar lancamento' }); }
+  } catch (err) {
+    console.error('[transactions] delete:', err.message, err.code);
+    if (err.code === '23503') {
+      return res.status(409).json({ error: 'Este lancamento esta vinculado a outros registros e nao pode ser excluido.', code: 'FK_VIOLATION' });
+    }
+    res.status(500).json({ error: 'Erro ao deletar lancamento' });
+  }
 });
 
 module.exports = router;
