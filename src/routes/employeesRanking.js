@@ -1,8 +1,7 @@
 // ============================================================
 // AURA. — Ranking de Funcionários + Link PDV (BE-02 + BE-REV-04)
 // GET /companies/:id/employees/ranking
-// Includes PDV sales data: revenue, count, ticket, trend
-// FIX: includes unassigned sales in totals + separate entry
+// FIX: excludes cancelled sales, timezone SP, unassigned sales
 // ============================================================
 
 const express = require('express');
@@ -10,29 +9,28 @@ const router  = express.Router({ mergeParams: true });
 const db = require('../config/database');
 
 const VALID_PERIODS = ['week', 'month', 'year', 'custom'];
+const CANCEL_FILTER = "AND COALESCE(s.status,'completed') != 'cancelled'";
 
 function resolvePeriod(period, startDate, endDate) {
   const now = new Date();
   switch (period) {
     case 'week': {
-      // Semana começa no domingo (SP timezone)
       const spNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
       const start = new Date(spNow);
       start.setDate(spNow.getDate() - spNow.getDay());
       start.setHours(0,0,0,0);
-      // Converter de volta pra UTC (+3h)
       const startUTC = new Date(start.getTime() + 3 * 3600000);
       const endUTC = new Date(startUTC.getTime() + 7 * 86400000);
       return { startDate: startUTC.toISOString(), endDate: endUTC.toISOString() };
     }
     case 'year': {
-      const start = new Date(Date.UTC(now.getUTCFullYear(), 0, 1, 3, 0, 0)); // Jan 1 00:00 SP = 03:00 UTC
+      const start = new Date(Date.UTC(now.getUTCFullYear(), 0, 1, 3, 0, 0));
       const end = new Date(Date.UTC(now.getUTCFullYear() + 1, 0, 1, 3, 0, 0));
       return { startDate: start.toISOString(), endDate: end.toISOString() };
     }
     case 'custom':
       return { startDate: new Date(startDate).toISOString(), endDate: new Date(endDate).toISOString() };
-    default: { // month
+    default: {
       const spNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
       const start = new Date(Date.UTC(spNow.getFullYear(), spNow.getMonth(), 1, 3, 0, 0));
       const end = new Date(Date.UTC(spNow.getFullYear(), spNow.getMonth() + 1, 1, 3, 0, 0));
@@ -41,10 +39,6 @@ function resolvePeriod(period, startDate, endDate) {
   }
 }
 
-/**
- * GET /companies/:id/employees/ranking
- * FIX: e.name (coluna real), inclui vendas sem employee, timezone SP
- */
 router.get('/', async (req, res) => {
   try {
     const companyId = req.params.id;
@@ -59,7 +53,7 @@ router.get('/', async (req, res) => {
 
     const { startDate, endDate } = resolvePeriod(period, start_date, end_date);
 
-    // 1. Employees com vendas vinculadas
+    // 1. Employees com vendas vinculadas (exclui canceladas)
     const { rows: employees } = await db.query(`
       SELECT
         e.id,
@@ -82,6 +76,7 @@ router.get('/', async (req, res) => {
           AND s.employee_id = e.id
           AND s.created_at >= $2
           AND s.created_at < $3
+          ${CANCEL_FILTER}
       ) sales ON true
       LEFT JOIN LATERAL (
         SELECT COALESCE(SUM(s2.total_amount), 0) AS prev_revenue
@@ -90,12 +85,13 @@ router.get('/', async (req, res) => {
           AND s2.employee_id = e.id
           AND s2.created_at >= ($2::timestamptz - ($3::timestamptz - $2::timestamptz))
           AND s2.created_at < $2
+          AND COALESCE(s2.status,'completed') != 'cancelled'
       ) prev ON true
       WHERE e.company_id = $1 AND e.is_active = true
       ORDER BY sales.total_revenue DESC NULLS LAST
     `, [companyId, startDate, endDate]);
 
-    // 2. Vendas SEM employee_id (orfas)
+    // 2. Vendas SEM employee_id (orfas, exclui canceladas)
     const { rows: unassignedRows } = await db.query(`
       SELECT
         COUNT(s.id) AS total_sales,
@@ -105,12 +101,13 @@ router.get('/', async (req, res) => {
         AND s.employee_id IS NULL
         AND s.created_at >= $2
         AND s.created_at < $3
+        ${CANCEL_FILTER}
     `, [companyId, startDate, endDate]);
     const unassigned = unassignedRows[0] || { total_sales: 0, total_revenue: 0 };
     const unassignedSales = parseInt(unassigned.total_sales) || 0;
     const unassignedRevenue = parseFloat(unassigned.total_revenue) || 0;
 
-    // 3. Total geral (employees + orfas)
+    // 3. Total geral
     const employeeTotalRevenue = employees.reduce((s, e) => s + parseFloat(e.total_revenue), 0);
     const totalRevenue = employeeTotalRevenue + unassignedRevenue;
     const employeeTotalSales = employees.reduce((s, e) => s + (parseInt(e.total_sales) || 0), 0);
