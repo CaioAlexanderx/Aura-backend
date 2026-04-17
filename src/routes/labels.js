@@ -1,5 +1,5 @@
 // ============================================================
-// AURA. — Etiquetas v7 (grid explicito — 3 por linha)
+// AURA. -- Etiquetas v7 (grid explicito -- 3 por linha)
 //
 // FIX: flex-wrap nao garante N por linha em contexto de impressao.
 // Solucao: CSS Grid com grid-template-columns: repeat(cols, LABEL_W).
@@ -30,7 +30,7 @@ router.get('/:pid/label', requireAuth, async (req, res) => {
 
 router.get('/:pid/label/print', requireAuth, async (req, res) => {
   const { id: company_id, pid: product_id } = req.params;
-  const { show_name = 'true', show_price = 'true', qty = '1', mode = 'barcode', cols: colsParam, offset: offsetParam } = req.query;
+  const { show_name = 'true', show_price = 'true', qty = '1', mode = 'barcode', cols: colsParam, offset: offsetParam, override_color, override_size } = req.query;
   const quantity = Math.min(Math.max(parseInt(qty) || 1, 1), 200);
   const cols = Math.min(Math.max(parseInt(colsParam) || COLS, 1), 5);
   const sheetW = LABEL_W * cols;
@@ -46,7 +46,28 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     const showPrice = show_price === 'true';
     const priceText = product.price ? `R$ ${parseFloat(product.price).toFixed(2).replace('.', ',')}` : '';
     const barcodeData = product.barcode;
-    const labelName = (function() { var n = product.name || ''; var sz = product.size ? product.size.trim() : ''; var cl = product.color && /^#[0-9A-Fa-f]{6}$/.test(product.color) ? product.color : ''; if (!sz && !cl) return n; var p = [n.length > 16 ? n.substring(0,16).trim()+'...' : n]; if (sz) p.push(sz); if (cl) { var m = {'#000000':'Preto','#ffffff':'Branco','#ff0000':'Vermelho','#0000ff':'Azul','#00ff00':'Verde','#ffff00':'Amarelo','#ffa500':'Laranja','#ffc0cb':'Rosa','#800080':'Roxo','#a52a2a':'Marrom','#800000':'Vinho','#808080':'Cinza','#000080':'Marinho','#c0c0c0':'Prata','#ffd700':'Dourado','#f5f5dc':'Bege','#ff6347':'Coral','#4b0082':'Indigo','#d2691e':'Caramelo'}; p.push(m[cl.toLowerCase()]||cl); } return p.join(' | '); })();
+    const effectiveSize = (override_size || (product.size ? product.size.trim() : ''));
+    const effectiveColor = (override_color || product.color || '');
+    const labelName = (function() {
+      var n = product.name || '';
+      var sz = effectiveSize;
+      var cl = effectiveColor && /^#[0-9A-Fa-f]{6}$/.test(effectiveColor) ? effectiveColor : '';
+      if (!sz && !cl) return n;
+      var parts = [n.length > 16 ? n.substring(0,16).trim()+'...' : n];
+      if (sz) parts.push(sz);
+      if (cl) {
+        var map = {'#000000':'Preto','#ffffff':'Branco','#ff0000':'Vermelho','#0000ff':'Azul','#00ff00':'Verde','#ffff00':'Amarelo','#ffa500':'Laranja','#ffc0cb':'Rosa','#800080':'Roxo','#a52a2a':'Marrom','#800000':'Vinho','#808080':'Cinza','#000080':'Marinho','#c0c0c0':'Prata','#ffd700':'Dourado','#f5f5dc':'Bege','#ff6347':'Coral','#4b0082':'Indigo','#d2691e':'Caramelo','#40e0d0':'Turquesa','#dc143c':'Carmesim','#ff69b4':'Pink','#daa520':'Mostarda','#8b4513':'Cafe','#ff1493':'Magenta','#8b0000':'Bordo','#006400':'Vd Esc','#191970':'Az Esc','#556b2f':'Oliva','#2f4f4f':'Chumbo','#cd853f':'Areia','#9acd32':'Limao','#964b00':'Marrom','#8be8b3':'Menta','#196110':'Vd Esc','#fa946c':'Salmao','#ff6ec7':'Pink'};
+        var colorName = map[cl.toLowerCase()];
+        if (!colorName) {
+          var r1=parseInt(cl.slice(1,3),16),g1=parseInt(cl.slice(3,5),16),b1=parseInt(cl.slice(5,7),16);
+          var best=999,bn='';
+          for(var h in map){var r2=parseInt(h.slice(1,3),16),g2=parseInt(h.slice(3,5),16),b2=parseInt(h.slice(5,7),16);var d=Math.sqrt((r1-r2)*(r1-r2)+(g1-g2)*(g1-g2)+(b1-b2)*(b1-b2));if(d<best){best=d;bn=map[h];}}
+          colorName = bn;
+        }
+        parts.push(colorName);
+      }
+      return parts.join(' | ');
+    })();
 
     const barcodeLen = barcodeData.replace(/\D/g, '').length;
     let jsFormat = 'CODE128';
@@ -75,11 +96,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
   html, body { margin:0!important; padding:0!important; }
   body { font-family:Arial,Helvetica,sans-serif; background:#f5f5f5; -webkit-print-color-adjust:exact; }
 
-  /* ===== PRINT GRID =====
-     GRID explicito garante exatamente ${cols} etiquetas por LINHA.
-     flex-wrap podia desalinhar dependendo do driver; grid nao.
-     transform: translateX() compensa a margem extra do driver.
-  */
+  /* ===== PRINT GRID ===== */
   .print-grid {
     display: grid;
     grid-template-columns: repeat(${cols}, ${LABEL_W}mm);
