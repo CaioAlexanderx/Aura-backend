@@ -1,7 +1,8 @@
 // ============================================================
 // AURA. — Ranking de Funcionários + Link PDV (BE-02 + BE-REV-04)
 // GET /companies/:id/employees/ranking
-// Now includes PDV sales data: revenue, count, ticket, trend
+// Includes PDV sales data: revenue, count, ticket, trend
+// FIX: includes unassigned sales in totals + separate entry
 // ============================================================
 
 const express = require('express');
@@ -14,21 +15,27 @@ function resolvePeriod(period, startDate, endDate) {
   const now = new Date();
   switch (period) {
     case 'week': {
-      const start = new Date(now); start.setDate(now.getDate() - now.getDay());
+      // Semana começa no domingo (SP timezone)
+      const spNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+      const start = new Date(spNow);
+      start.setDate(spNow.getDate() - spNow.getDay());
       start.setHours(0,0,0,0);
-      const end = new Date(start); end.setDate(start.getDate() + 7);
-      return { startDate: start.toISOString(), endDate: end.toISOString() };
+      // Converter de volta pra UTC (+3h)
+      const startUTC = new Date(start.getTime() + 3 * 3600000);
+      const endUTC = new Date(startUTC.getTime() + 7 * 86400000);
+      return { startDate: startUTC.toISOString(), endDate: endUTC.toISOString() };
     }
     case 'year': {
-      const start = new Date(now.getFullYear(), 0, 1);
-      const end = new Date(now.getFullYear() + 1, 0, 1);
+      const start = new Date(Date.UTC(now.getUTCFullYear(), 0, 1, 3, 0, 0)); // Jan 1 00:00 SP = 03:00 UTC
+      const end = new Date(Date.UTC(now.getUTCFullYear() + 1, 0, 1, 3, 0, 0));
       return { startDate: start.toISOString(), endDate: end.toISOString() };
     }
     case 'custom':
       return { startDate: new Date(startDate).toISOString(), endDate: new Date(endDate).toISOString() };
     default: { // month
-      const start = new Date(now.getFullYear(), now.getMonth(), 1);
-      const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      const spNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+      const start = new Date(Date.UTC(spNow.getFullYear(), spNow.getMonth(), 1, 3, 0, 0));
+      const end = new Date(Date.UTC(spNow.getFullYear(), spNow.getMonth() + 1, 1, 3, 0, 0));
       return { startDate: start.toISOString(), endDate: end.toISOString() };
     }
   }
@@ -36,7 +43,7 @@ function resolvePeriod(period, startDate, endDate) {
 
 /**
  * GET /companies/:id/employees/ranking
- * FIX: e.full_name → e.name (coluna real na tabela employees)
+ * FIX: e.name (coluna real), inclui vendas sem employee, timezone SP
  */
 router.get('/', async (req, res) => {
   try {
@@ -52,7 +59,7 @@ router.get('/', async (req, res) => {
 
     const { startDate, endDate } = resolvePeriod(period, start_date, end_date);
 
-    // FIX: e.name (not e.full_name), e.role (varchar column)
+    // 1. Employees com vendas vinculadas
     const { rows: employees } = await db.query(`
       SELECT
         e.id,
@@ -88,9 +95,28 @@ router.get('/', async (req, res) => {
       ORDER BY sales.total_revenue DESC NULLS LAST
     `, [companyId, startDate, endDate]);
 
-    // Total revenue for share calculation
-    const totalRevenue = employees.reduce((s, e) => s + parseFloat(e.total_revenue), 0);
+    // 2. Vendas SEM employee_id (orfas)
+    const { rows: unassignedRows } = await db.query(`
+      SELECT
+        COUNT(s.id) AS total_sales,
+        COALESCE(SUM(s.total_amount), 0) AS total_revenue
+      FROM sales s
+      WHERE s.company_id = $1
+        AND s.employee_id IS NULL
+        AND s.created_at >= $2
+        AND s.created_at < $3
+    `, [companyId, startDate, endDate]);
+    const unassigned = unassignedRows[0] || { total_sales: 0, total_revenue: 0 };
+    const unassignedSales = parseInt(unassigned.total_sales) || 0;
+    const unassignedRevenue = parseFloat(unassigned.total_revenue) || 0;
 
+    // 3. Total geral (employees + orfas)
+    const employeeTotalRevenue = employees.reduce((s, e) => s + parseFloat(e.total_revenue), 0);
+    const totalRevenue = employeeTotalRevenue + unassignedRevenue;
+    const employeeTotalSales = employees.reduce((s, e) => s + (parseInt(e.total_sales) || 0), 0);
+    const totalSales = employeeTotalSales + unassignedSales;
+
+    // 4. Montar ranking
     const ranking = employees.map((emp, index) => {
       const revenue = parseFloat(emp.total_revenue) || 0;
       const prevRevenue = parseFloat(emp.prev_revenue) || 0;
@@ -118,8 +144,15 @@ router.get('/', async (req, res) => {
     res.json({
       period: { start: startDate, end: endDate, label: period },
       total_revenue: totalRevenue,
+      total_sales: totalSales,
       total_employees: ranking.length,
       ranking,
+      unassigned: unassignedSales > 0 ? {
+        total_sales: unassignedSales,
+        total_revenue: unassignedRevenue,
+        avg_ticket: unassignedSales > 0 ? Math.round((unassignedRevenue / unassignedSales) * 100) / 100 : 0,
+        share_pct: totalRevenue > 0 ? parseFloat(((unassignedRevenue / totalRevenue) * 100).toFixed(1)) : 0,
+      } : null,
       employee_of_month: ranking[0] || null,
     });
 
