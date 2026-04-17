@@ -26,11 +26,12 @@ router.use('/invite', require('./invitePublic'));
 // Rotas privadas por empresa
 router.use('/companies/:id', privateCompaniesRouter);
 
-// Admin
+// Admin — Central de Comando
 router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminSupport'));
 router.use('/admin', require('./adminMetrics'));
 router.use('/admin', require('./adminClients360'));
+router.use('/admin', require('./adminRevenue'));
 
 // Webhooks (publicos, validacao interna)
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
