@@ -1,27 +1,27 @@
 // ============================================================
-// AURA. — Fase 1 Contabilidade: PDFs de apoio fiscal
+// AURA. — Fase 1+2 Contabilidade: PDFs de apoio fiscal
 //
-// Endpoints:
-//   GET /obligations/das-mei/pdf          — Resumo DAS-MEI
-//   GET /obligations/das-sn/pdf?month=    — Resumo DAS Simples Nacional
-//   GET /obligations/dasn/report?year=    — Relatorio anual DASN-SIMEI
-//   GET /obligations/das/auto-preview     — Auto-preenchimento receita
+// Fase 1:
+//   GET /obligations/das-mei/pdf
+//   GET /obligations/das-sn/pdf?month=
+//   GET /obligations/dasn/report?year=
+//   GET /obligations/das/auto-preview
+// Fase 2:
+//   GET /obligations/gps/pdf?month=
+//   GET /obligations/defis/report?year=
+//   GET /obligations/esocial/summary?month=
+//   GET /obligations/fgts/pdf?month=
 //
 // LINGUAGEM: sempre "estimativa", nunca "declaracao oficial"
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
-const { requireAuth } = require('../middleware/auth');
-const { calculateMEIDAS, calculateSNDAS, checkMEILimit } = require('../services/fiscalObligations');
+const { requireAuth, requirePlan } = require('../middleware/auth');
+const { calculateMEIDAS, calculateSNDAS, checkMEILimit, calculateFGTS, calculateGPS } = require('../services/fiscalObligations');
 
 const BRL = (v) => `R$\u00a0${parseFloat(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const DATE_BR = (d) => new Date(d).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 const MONTH_NAMES = ['Janeiro','Fevereiro','Marco','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
-
-function todaySP() {
-  const d = new Date(Date.now() - 3 * 3600000);
-  return d.toISOString().slice(0, 10);
-}
 
 async function getCompany(id) {
   const { rows } = await db.query('SELECT legal_name, trade_name, cnpj, tax_regime, annual_revenue FROM companies WHERE id=$1', [id]);
@@ -34,22 +34,14 @@ function fiscalPdfHtml({ title, subtitle, company, sections, notes }) {
   const sectionsHtml = sections.map(s => {
     if (s.type === 'table') {
       const headHtml = s.headers.map(h => `<th>${h}</th>`).join('');
-      const rowsHtml = s.rows.map(r =>
-        `<tr>${r.map((c, i) => `<td class="${i === 0 ? 'label' : 'num'}">${c}</td>`).join('')}</tr>`
-      ).join('');
-      const totHtml = (s.totals || []).map(t =>
-        `<tr class="total-row"><td class="label">${t[0]}</td>${t.slice(1).map(c => `<td class="num">${c}</td>`).join('')}</tr>`
-      ).join('');
+      const rowsHtml = s.rows.map(r => `<tr>${r.map((c, i) => `<td class="${i === 0 ? 'label' : 'num'}">${c}</td>`).join('')}</tr>`).join('');
+      const totHtml = (s.totals || []).map(t => `<tr class="total-row"><td class="label">${t[0]}</td>${t.slice(1).map(c => `<td class="num">${c}</td>`).join('')}</tr>`).join('');
       return `${s.title ? `<h2 class="sec-title">${s.title}</h2>` : ''}<table><thead><tr>${headHtml}</tr></thead><tbody>${rowsHtml}${totHtml}</tbody></table>`;
     }
     if (s.type === 'info') {
-      return `<div class="info-block">${s.title ? `<h2 class="sec-title">${s.title}</h2>` : ''}${s.items.map(i =>
-        `<div class="info-row"><span class="info-label">${i.label}</span><span class="info-value">${i.value}</span></div>`
-      ).join('')}</div>`;
+      return `<div class="info-block">${s.title ? `<h2 class="sec-title">${s.title}</h2>` : ''}${s.items.map(i => `<div class="info-row"><span class="info-label">${i.label}</span><span class="info-value">${i.value}</span></div>`).join('')}</div>`;
     }
-    if (s.type === 'alert') {
-      return `<div class="alert-block ${s.level}">${s.text}</div>`;
-    }
+    if (s.type === 'alert') { return `<div class="alert-block ${s.level}">${s.text}</div>`; }
     return '';
   }).join('');
 
@@ -99,268 +91,214 @@ ${notes ? `<p class="notes">${notes}</p>` : ''}
 </body></html>`;
 }
 
-// ── C1-01: PDF Resumo DAS-MEI ────────────────────────────────────────
+// ── FASE 1 ──────────────────────────────────────────────────
+
+// C1-01: PDF DAS-MEI
 router.get('/das-mei/pdf', requireAuth, async (req, res) => {
   try {
     const company = await getCompany(req.params.id);
     if (company.tax_regime !== 'mei') return res.status(400).json({ error: 'Disponivel apenas para MEI' });
-
     const activity = req.query.activity || 'services';
     const das = calculateMEIDAS(activity);
-    const now = new Date();
-    const refMonth = MONTH_NAMES[now.getMonth()];
-    const dueDate = new Date(now.getFullYear(), now.getMonth(), 20);
-    const duePast = dueDate < now;
+    const now = new Date(); const refMonth = MONTH_NAMES[now.getMonth()];
+    const dueDate = new Date(now.getFullYear(), now.getMonth(), 20); const duePast = dueDate < now;
     const actLabel = activity === 'commerce' ? 'Comercio' : activity === 'both' ? 'Comercio e Servicos' : 'Servicos';
-
-    // Limite MEI
-    const { rows: revRows } = await db.query(
-      `SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= date_trunc('year', NOW() AT TIME ZONE 'America/Sao_Paulo')::date`,
-      [req.params.id]
-    );
-    const annualRev = parseFloat(revRows[0]?.total || 0);
-    const limit = checkMEILimit(annualRev);
-
-    const html = fiscalPdfHtml({
-      title: 'Resumo DAS-MEI',
-      subtitle: `Competencia: ${refMonth} ${now.getFullYear()} | Vencimento: ${DATE_BR(dueDate)}`,
-      company,
-      sections: [
-        { type: 'info', title: 'Dados do DAS', items: [
-          { label: 'Competencia', value: `${refMonth}/${now.getFullYear()}` },
-          { label: 'Atividade', value: actLabel },
-          { label: 'Vencimento', value: DATE_BR(dueDate) },
-          { label: 'Situacao', value: duePast ? 'VENCIDO' : 'A vencer' },
-        ]},
-        { type: 'table', title: 'Composicao do valor', headers: ['Tributo', 'Valor (R$)'], rows: [
-          ['INSS (contribuicao previdenciaria)', BRL(das.inss)],
-          ['ICMS (comercio/industria)', BRL(das.icms)],
-          ['ISS (servicos)', BRL(das.iss)],
-        ], totals: [['DAS-MEI Total', BRL(das.total)]] },
-        duePast ? { type: 'alert', level: 'critical', text: `ATENCAO: O DAS de ${refMonth} venceu em ${DATE_BR(dueDate)}. Pague o mais rapido possivel para evitar juros e multa.` }
-          : { type: 'alert', level: 'ok', text: `DAS dentro do prazo. Vence em ${DATE_BR(dueDate)}.` },
-        { type: 'info', title: 'Monitor de faturamento anual', items: [
-          { label: 'Faturamento acumulado no ano', value: BRL(annualRev) },
-          { label: 'Limite anual MEI', value: BRL(81000) },
-          { label: 'Utilizado', value: limit.used_pct.toFixed(1) + '%' },
-          { label: 'Disponivel', value: BRL(limit.remaining) },
-        ]},
-        limit.alert_level ? { type: 'alert', level: limit.alert_level === 'critical' ? 'critical' : 'warning', text: limit.alert_message } : null,
-        { type: 'info', title: 'Como pagar', items: [
-          { label: 'Portal PGMEI', value: 'www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/ATSPO/pgmei.app' },
-          { label: 'Opcoes de pagamento', value: 'Boleto, Pix ou Debito Automatico' },
-          { label: 'Dica', value: 'Use o QR Code na aba Contabilidade da Aura para abrir o portal com CNPJ preenchido' },
-        ]},
-      ].filter(Boolean),
-      notes: 'Estimativa com base na tabela DAS-MEI vigente. Confirme o valor no portal PGMEI antes de efetuar o pagamento. Este documento nao substitui a guia oficial.',
-    });
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(html);
-  } catch (err) {
-    console.error('[fiscal-pdf] das-mei error:', err.message);
-    res.status(500).json({ error: 'Erro ao gerar PDF do DAS-MEI' });
-  }
+    const { rows: revRows } = await db.query(`SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= date_trunc('year', NOW() AT TIME ZONE 'America/Sao_Paulo')::date`, [req.params.id]);
+    const annualRev = parseFloat(revRows[0]?.total || 0); const limit = checkMEILimit(annualRev);
+    const html = fiscalPdfHtml({ title: 'Resumo DAS-MEI', subtitle: `Competencia: ${refMonth} ${now.getFullYear()} | Vencimento: ${DATE_BR(dueDate)}`, company, sections: [
+      { type: 'info', title: 'Dados do DAS', items: [{ label: 'Competencia', value: `${refMonth}/${now.getFullYear()}` },{ label: 'Atividade', value: actLabel },{ label: 'Vencimento', value: DATE_BR(dueDate) },{ label: 'Situacao', value: duePast ? 'VENCIDO' : 'A vencer' }]},
+      { type: 'table', title: 'Composicao do valor', headers: ['Tributo', 'Valor (R$)'], rows: [['INSS', BRL(das.inss)],['ICMS', BRL(das.icms)],['ISS', BRL(das.iss)]], totals: [['DAS-MEI Total', BRL(das.total)]] },
+      duePast ? { type: 'alert', level: 'critical', text: `ATENCAO: DAS vencido em ${DATE_BR(dueDate)}.` } : { type: 'alert', level: 'ok', text: `DAS dentro do prazo. Vence em ${DATE_BR(dueDate)}.` },
+      { type: 'info', title: 'Monitor faturamento anual', items: [{ label: 'Acumulado', value: BRL(annualRev) },{ label: 'Limite MEI', value: BRL(81000) },{ label: 'Utilizado', value: limit.used_pct.toFixed(1)+'%' },{ label: 'Disponivel', value: BRL(limit.remaining) }]},
+      limit.alert_level ? { type: 'alert', level: limit.alert_level === 'critical' ? 'critical' : 'warning', text: limit.alert_message } : null,
+    ].filter(Boolean), notes: 'Estimativa com base na tabela DAS-MEI vigente. Confirme no portal PGMEI.' });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.send(html);
+  } catch (err) { console.error('[fiscal-pdf] das-mei:', err.message); res.status(500).json({ error: 'Erro ao gerar PDF' }); }
 });
 
-// ── C1-02: PDF Resumo DAS Simples Nacional ───────────────────────────
+// C1-02: PDF DAS Simples Nacional
 router.get('/das-sn/pdf', requireAuth, async (req, res) => {
   try {
     const company = await getCompany(req.params.id);
     if (company.tax_regime !== 'simples_nacional') return res.status(400).json({ error: 'Disponivel apenas para Simples Nacional' });
-
-    const now = new Date();
-    const month = req.query.month || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const [y, m] = month.split('-').map(Number);
-    const monthName = MONTH_NAMES[m - 1];
-    const dueDate = new Date(y, m - 1, 20);
-
-    const { rows: curR } = await db.query(
-      `SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $2::date AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date < $3::date`,
-      [req.params.id, `${y}-${String(m).padStart(2,'0')}-01`, m === 12 ? `${y+1}-01-01` : `${y}-${String(m+1).padStart(2,'0')}-01`]
-    );
-    const { rows: r12 } = await db.query(
-      `SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND created_at >= NOW() - INTERVAL '12 months'`,
-      [req.params.id]
-    );
-    const currentRev = parseFloat(curR[0]?.total || 0);
-    const rev12m = parseFloat(r12[0]?.total || 0);
-    const das = calculateSNDAS(rev12m, currentRev);
-
-    // Fator R (se disponivel)
-    let fatorRInfo = null;
-    try {
-      const { rows: plRows } = await db.query(
-        `SELECT COALESCE(SUM(amount),0) AS total FROM prolabore_history WHERE company_id=$1 AND reference_month >= NOW() - INTERVAL '11 months'`,
-        [req.params.id]
-      );
-      const pl12 = parseFloat(plRows[0]?.total || 0);
-      if (rev12m > 0) {
-        const fatorR = ((pl12 / rev12m) * 100).toFixed(1);
-        fatorRInfo = { fatorR, anexo: parseFloat(fatorR) >= 28 ? 'III' : 'V', pl12 };
-      }
-    } catch {}
-
+    const now = new Date(); const month = req.query.month || `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const [y, m] = month.split('-').map(Number); const monthName = MONTH_NAMES[m-1]; const dueDate = new Date(y, m-1, 20);
+    const { rows: curR } = await db.query(`SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $2::date AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date < $3::date`, [req.params.id, `${y}-${String(m).padStart(2,'0')}-01`, m===12?`${y+1}-01-01`:`${y}-${String(m+1).padStart(2,'0')}-01`]);
+    const { rows: r12 } = await db.query(`SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND created_at >= NOW() - INTERVAL '12 months'`, [req.params.id]);
+    const currentRev = parseFloat(curR[0]?.total||0); const rev12m = parseFloat(r12[0]?.total||0);
+    let fatorR = null;
+    try { const { rows: pl } = await db.query(`SELECT COALESCE(SUM(amount),0) AS total FROM prolabore_history WHERE company_id=$1 AND reference_month >= NOW() - INTERVAL '11 months'`, [req.params.id]); if (rev12m > 0) fatorR = parseFloat(((parseFloat(pl[0]?.total||0)/rev12m)*100).toFixed(1)); } catch {}
+    const das = calculateSNDAS(rev12m, currentRev, fatorR);
     const sections = [
-      { type: 'info', title: 'Dados da apuracao', items: [
-        { label: 'Competencia', value: `${monthName}/${y}` },
-        { label: 'Receita bruta do mes', value: BRL(currentRev) },
-        { label: 'Receita bruta 12 meses (RBT12)', value: BRL(rev12m) },
-        { label: 'Vencimento', value: DATE_BR(dueDate) },
-      ]},
-      { type: 'table', title: 'Calculo estimado do DAS', headers: ['Item', 'Valor'], rows: [
-        ['Receita bruta do mes', BRL(currentRev)],
-        ['RBT12 (receita bruta acumulada 12m)', BRL(rev12m)],
-        ['Aliquota nominal (Anexo ' + (fatorRInfo ? fatorRInfo.anexo : 'III') + ')', das.nominal_rate_pct + '%'],
-        ['Aliquota efetiva', das.effective_rate_pct + '%'],
-      ], totals: [['DAS estimado', BRL(das.estimated_das)]] },
+      { type: 'info', title: 'Dados da apuracao', items: [{ label: 'Competencia', value: `${monthName}/${y}` },{ label: 'Receita do mes', value: BRL(currentRev) },{ label: 'RBT12', value: BRL(rev12m) },{ label: 'Vencimento', value: DATE_BR(dueDate) }]},
+      { type: 'table', title: 'Calculo DAS (Anexo '+das.anexo+')', headers: ['Item','Valor'], rows: [['Receita bruta do mes',BRL(currentRev)],['RBT12',BRL(rev12m)],['Aliquota nominal',das.nominal_rate_pct+'%'],['Aliquota efetiva',das.effective_rate_pct+'%']], totals: [['DAS estimado',BRL(das.estimated_das)]] },
     ];
-
-    if (fatorRInfo) {
-      sections.push({ type: 'info', title: 'Fator R', items: [
-        { label: 'Pro-labore acumulado 12m', value: BRL(fatorRInfo.pl12) },
-        { label: 'Fator R', value: fatorRInfo.fatorR + '%' },
-        { label: 'Anexo enquadrado', value: 'Anexo ' + fatorRInfo.anexo },
-        { label: 'Status', value: parseFloat(fatorRInfo.fatorR) >= 28 ? 'OK - Anexo III (aliquota menor)' : 'Atencao - Anexo V (aliquota maior)' },
-      ]});
-    }
-
-    sections.push({ type: 'info', title: 'Proximos passos', items: [
-      { label: '1. Transmitir PGDAS-D', value: 'Portal Simples Nacional' },
-      { label: '2. Gerar guia DAS', value: 'No portal, apos transmissao' },
-      { label: '3. Pagar', value: 'Boleto ou Pix ate ' + DATE_BR(dueDate) },
-    ]});
-
-    const html = fiscalPdfHtml({
-      title: 'Demonstrativo DAS - Simples Nacional',
-      subtitle: `Competencia: ${monthName}/${y} | Vencimento: ${DATE_BR(dueDate)}`,
-      company, sections,
-      notes: 'Estimativa calculada pela Aura com base no Anexo ' + (fatorRInfo ? fatorRInfo.anexo : 'III') + ' do Simples Nacional. A apuracao oficial deve ser feita no Portal PGDAS-D. Valores podem divergir da apuracao oficial.',
-    });
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(html);
-  } catch (err) {
-    console.error('[fiscal-pdf] das-sn error:', err.message);
-    res.status(500).json({ error: 'Erro ao gerar PDF do DAS-SN' });
-  }
+    if (fatorR !== null) sections.push({ type: 'info', title: 'Fator R', items: [{ label: 'Fator R', value: fatorR+'%' },{ label: 'Anexo', value: das.anexo },{ label: 'Status', value: fatorR>=28?'OK - Anexo III':'Atencao - Anexo V' }]});
+    const html = fiscalPdfHtml({ title: 'Demonstrativo DAS - Simples Nacional', subtitle: `Competencia: ${monthName}/${y}`, company, sections, notes: das.disclaimer });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.send(html);
+  } catch (err) { console.error('[fiscal-pdf] das-sn:', err.message); res.status(500).json({ error: 'Erro ao gerar PDF' }); }
 });
 
-// ── C1-03: PDF Relatorio Anual DASN-SIMEI ────────────────────────────
+// C1-03: PDF Relatorio Anual DASN-SIMEI
 router.get('/dasn/report', requireAuth, async (req, res) => {
   try {
     const company = await getCompany(req.params.id);
-    const year = parseInt(req.query.year) || (new Date().getFullYear() - 1);
-
-    const { rows: monthly } = await db.query(
-      `SELECT
-         TO_CHAR(date_trunc('month', created_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS month,
-         COALESCE(SUM(amount) FILTER(WHERE category IN ('Vendas','Revenda','Comercio','Produto','Mercadoria')), 0) AS comercio,
-         COALESCE(SUM(amount) FILTER(WHERE category NOT IN ('Vendas','Revenda','Comercio','Produto','Mercadoria')), 0) AS servicos,
-         COALESCE(SUM(amount), 0) AS total
-       FROM transactions
-       WHERE company_id=$1 AND type='income'
-         AND EXTRACT(YEAR FROM created_at AT TIME ZONE 'America/Sao_Paulo') = $2
-       GROUP BY month ORDER BY month`,
-      [req.params.id, year]
-    );
-
-    const totalComercio = monthly.reduce((s, r) => s + parseFloat(r.comercio), 0);
-    const totalServicos = monthly.reduce((s, r) => s + parseFloat(r.servicos), 0);
-    const totalGeral = monthly.reduce((s, r) => s + parseFloat(r.total), 0);
-    const limit = checkMEILimit(totalGeral);
-
-    // Preencher meses sem dados
-    const allMonths = [];
-    for (let i = 0; i < 12; i++) {
-      const key = `${year}-${String(i + 1).padStart(2, '0')}`;
-      const found = monthly.find(m => m.month === key);
-      allMonths.push({
-        label: MONTH_NAMES[i],
-        comercio: found ? parseFloat(found.comercio) : 0,
-        servicos: found ? parseFloat(found.servicos) : 0,
-        total: found ? parseFloat(found.total) : 0,
-      });
-    }
-
-    const sections = [
-      { type: 'info', title: 'Informacoes da declaracao', items: [
-        { label: 'Ano-calendario', value: String(year) },
-        { label: 'Regime', value: 'MEI - Simples Nacional (SIMEI)' },
-        { label: 'Prazo de entrega', value: '31/05/' + (year + 1) },
-        { label: 'Portal', value: 'DASN-SIMEI (Simples Nacional)' },
-      ]},
-      { type: 'table', title: 'Faturamento mensal - ' + year, headers: ['Mes', 'Comercio/Industria (R$)', 'Servicos (R$)', 'Total (R$)'],
-        rows: allMonths.map(m => [m.label, BRL(m.comercio), BRL(m.servicos), BRL(m.total)]),
-        totals: [['TOTAL ANUAL', BRL(totalComercio), BRL(totalServicos), BRL(totalGeral)]],
-      },
-      { type: 'info', title: 'Resumo para preenchimento', items: [
-        { label: 'Receita bruta - Comercio e Industria', value: BRL(totalComercio) },
-        { label: 'Receita bruta - Prestacao de Servicos', value: BRL(totalServicos) },
-        { label: 'Receita bruta total', value: BRL(totalGeral) },
-        { label: 'Percentual do limite MEI utilizado', value: limit.used_pct.toFixed(1) + '%' },
-      ]},
-      limit.alert_level ? { type: 'alert', level: limit.alert_level === 'critical' ? 'critical' : 'warning', text: limit.alert_message } : null,
-      { type: 'info', title: 'Como transmitir', items: [
-        { label: '1.', value: 'Acesse o portal DASN-SIMEI (link na aba Contabilidade da Aura)' },
-        { label: '2.', value: 'Informe seu CNPJ e codigo de acesso' },
-        { label: '3.', value: 'Preencha os valores de Comercio e Servicos conforme este relatorio' },
-        { label: '4.', value: 'Confira, transmita e guarde o recibo' },
-      ]},
-    ].filter(Boolean);
-
-    const html = fiscalPdfHtml({
-      title: 'Relatorio Anual de Faturamento - DASN-SIMEI',
-      subtitle: `Ano-calendario ${year} | Entrega ate 31/05/${year + 1}`,
-      company, sections,
-      notes: `Dados consolidados pela Aura com base nos lancamentos de receita registrados em ${year}. Confira os valores antes de transmitir a DASN-SIMEI. A separacao entre comercio e servicos e baseada nas categorias dos lancamentos e pode precisar de ajuste manual.`,
-    });
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(html);
-  } catch (err) {
-    console.error('[fiscal-pdf] dasn error:', err.message);
-    res.status(500).json({ error: 'Erro ao gerar relatorio DASN' });
-  }
+    const year = parseInt(req.query.year) || (new Date().getFullYear()-1);
+    const { rows: monthly } = await db.query(`SELECT TO_CHAR(date_trunc('month', created_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS month, COALESCE(SUM(amount) FILTER(WHERE category IN ('Vendas','Revenda','Comercio','Produto','Mercadoria')), 0) AS comercio, COALESCE(SUM(amount) FILTER(WHERE category NOT IN ('Vendas','Revenda','Comercio','Produto','Mercadoria')), 0) AS servicos, COALESCE(SUM(amount), 0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND EXTRACT(YEAR FROM created_at AT TIME ZONE 'America/Sao_Paulo') = $2 GROUP BY month ORDER BY month`, [req.params.id, year]);
+    const totalC = monthly.reduce((s,r) => s+parseFloat(r.comercio), 0);
+    const totalS = monthly.reduce((s,r) => s+parseFloat(r.servicos), 0);
+    const totalG = monthly.reduce((s,r) => s+parseFloat(r.total), 0);
+    const limit = checkMEILimit(totalG);
+    const allMonths = []; for (let i=0;i<12;i++) { const k=`${year}-${String(i+1).padStart(2,'0')}`; const f=monthly.find(m=>m.month===k); allMonths.push({ label:MONTH_NAMES[i], comercio:f?parseFloat(f.comercio):0, servicos:f?parseFloat(f.servicos):0, total:f?parseFloat(f.total):0 }); }
+    const html = fiscalPdfHtml({ title: 'Relatorio Anual DASN-SIMEI', subtitle: `Ano ${year} | Entrega ate 31/05/${year+1}`, company, sections: [
+      { type: 'info', title: 'Informacoes', items: [{ label: 'Ano', value: String(year) },{ label: 'Regime', value: 'MEI (SIMEI)' },{ label: 'Prazo', value: '31/05/'+(year+1) }]},
+      { type: 'table', title: 'Faturamento mensal', headers: ['Mes','Comercio (R$)','Servicos (R$)','Total (R$)'], rows: allMonths.map(m=>[m.label,BRL(m.comercio),BRL(m.servicos),BRL(m.total)]), totals: [['TOTAL',BRL(totalC),BRL(totalS),BRL(totalG)]] },
+      { type: 'info', title: 'Resumo', items: [{ label: 'Comercio', value: BRL(totalC) },{ label: 'Servicos', value: BRL(totalS) },{ label: 'Total', value: BRL(totalG) },{ label: 'Limite MEI', value: limit.used_pct.toFixed(1)+'%' }]},
+      limit.alert_level ? { type: 'alert', level: limit.alert_level==='critical'?'critical':'warning', text: limit.alert_message } : null,
+    ].filter(Boolean), notes: 'Dados consolidados pela Aura. Confira antes de transmitir.' });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.send(html);
+  } catch (err) { console.error('[fiscal-pdf] dasn:', err.message); res.status(500).json({ error: 'Erro' }); }
 });
 
-// ── C4-03: Auto-preview DAS (sem parametros manuais) ─────────────────
+// C4-03: Auto-preview DAS
 router.get('/das/auto-preview', requireAuth, async (req, res) => {
   try {
-    const company = await getCompany(req.params.id);
-    const now = new Date();
-    const y = now.getFullYear();
-    const m = now.getMonth() + 1;
-
+    const company = await getCompany(req.params.id); const now = new Date(); const y = now.getFullYear(); const m = now.getMonth()+1;
     if (company.tax_regime === 'mei') {
-      const activity = req.query.activity || 'services';
-      const das = calculateMEIDAS(activity);
-      const { rows } = await db.query(
-        `SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= date_trunc('year', NOW() AT TIME ZONE 'America/Sao_Paulo')::date`,
-        [req.params.id]
-      );
-      const annualRev = parseFloat(rows[0]?.total || 0);
-      const limit = checkMEILimit(annualRev);
-      return res.json({ regime: 'mei', das, limit_check: limit, due_date: `${y}-${String(m).padStart(2,'0')}-20` });
+      const das = calculateMEIDAS(req.query.activity||'services');
+      const { rows } = await db.query(`SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= date_trunc('year', NOW() AT TIME ZONE 'America/Sao_Paulo')::date`, [req.params.id]);
+      return res.json({ regime: 'mei', das, limit_check: checkMEILimit(parseFloat(rows[0]?.total||0)), due_date: `${y}-${String(m).padStart(2,'0')}-20` });
     }
-
     if (company.tax_regime === 'simples_nacional') {
-      const { rows: curR } = await db.query(
-        `SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $2::date AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date < $3::date`,
-        [req.params.id, `${y}-${String(m).padStart(2,'0')}-01`, m === 12 ? `${y+1}-01-01` : `${y}-${String(m+1).padStart(2,'0')}-01`]
-      );
-      const { rows: r12 } = await db.query(
-        `SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND created_at >= NOW() - INTERVAL '12 months'`,
-        [req.params.id]
-      );
-      const currentRev = parseFloat(curR[0]?.total || 0);
-      const rev12m = parseFloat(r12[0]?.total || 0);
-      const das = calculateSNDAS(rev12m, currentRev);
-      return res.json({ regime: 'simples_nacional', das, current_revenue: currentRev, revenue_12m: rev12m, due_date: `${y}-${String(m).padStart(2,'0')}-20` });
+      const { rows: curR } = await db.query(`SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $2::date AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date < $3::date`, [req.params.id, `${y}-${String(m).padStart(2,'0')}-01`, m===12?`${y+1}-01-01`:`${y}-${String(m+1).padStart(2,'0')}-01`]);
+      const { rows: r12 } = await db.query(`SELECT COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND created_at >= NOW() - INTERVAL '12 months'`, [req.params.id]);
+      const currentRev = parseFloat(curR[0]?.total||0); const rev12m = parseFloat(r12[0]?.total||0);
+      let fatorR = null;
+      try { const { rows: pl } = await db.query(`SELECT COALESCE(SUM(amount),0) AS total FROM prolabore_history WHERE company_id=$1 AND reference_month >= NOW() - INTERVAL '11 months'`, [req.params.id]); if (rev12m > 0) fatorR = parseFloat(((parseFloat(pl[0]?.total||0)/rev12m)*100).toFixed(1)); } catch {}
+      const das = calculateSNDAS(rev12m, currentRev, fatorR);
+      return res.json({ regime: 'simples_nacional', das, current_revenue: currentRev, revenue_12m: rev12m, fator_r: fatorR, due_date: `${y}-${String(m).padStart(2,'0')}-20` });
     }
+    res.status(400).json({ error: 'Regime nao suportado' });
+  } catch (err) { console.error('[auto-preview]:', err.message); res.status(500).json({ error: 'Erro' }); }
+});
 
-    res.status(400).json({ error: 'Regime nao suportado: ' + company.tax_regime });
-  } catch (err) {
-    console.error('[das-auto-preview] error:', err.message);
-    res.status(500).json({ error: 'Erro ao calcular DAS' });
-  }
+// ── FASE 2 ──────────────────────────────────────────────────
+
+// C1-04: PDF Guia GPS/DARF (pro-labore INSS)
+router.get('/gps/pdf', [requireAuth, requirePlan('negocio','expansao')], async (req, res) => {
+  try {
+    const company = await getCompany(req.params.id);
+    const now = new Date(); const month = req.query.month || `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const [y, m] = month.split('-').map(Number); const monthName = MONTH_NAMES[m-1];
+    const dueDate = new Date(y, m-1, 20);
+    // Buscar pro-labore do mes
+    const { rows: plRows } = await db.query(`SELECT amount, inss_amount, net_amount, fator_r_result FROM prolabore_history WHERE company_id=$1 AND reference_month=$2`, [req.params.id, `${y}-${String(m).padStart(2,'0')}-01`]);
+    let grossPL, gps;
+    if (plRows.length > 0) {
+      grossPL = parseFloat(plRows[0].amount);
+      gps = calculateGPS(grossPL);
+    } else {
+      // Preview: calcular sugerido
+      const { rows: cfg } = await db.query(`SELECT * FROM prolabore_config WHERE company_id=$1`, [req.params.id]);
+      grossPL = parseFloat(cfg[0]?.fixed_amount || 1518);
+      gps = calculateGPS(grossPL);
+    }
+    const html = fiscalPdfHtml({ title: 'Guia GPS/DARF - INSS Pro-labore', subtitle: `Competencia: ${monthName}/${y} | Vencimento: ${DATE_BR(dueDate)}`, company, sections: [
+      { type: 'info', title: 'Dados do recolhimento', items: [{ label: 'Competencia', value: `${monthName}/${y}` },{ label: 'Codigo de receita', value: gps.code_receita+' (INSS)' },{ label: 'Vencimento', value: DATE_BR(dueDate) }]},
+      { type: 'table', title: 'Calculo GPS', headers: ['Item','Valor (R$)'], rows: [
+        ['Pro-labore bruto', BRL(grossPL)],
+        ['INSS retido ('+Math.round(gps.inss_rate*100)+'% ate teto '+BRL(gps.inss_cap)+')', BRL(gps.inss_retido)],
+        ['INSS patronal ('+Math.round(gps.patronal_rate*100)+'%)', BRL(gps.inss_patronal)],
+      ], totals: [['Total GPS a recolher', BRL(gps.total_gps)]] },
+      { type: 'info', title: 'Como pagar', items: [{ label: '1.', value: 'Acesse o Sicalc Web (receita.fazenda.gov.br/sicalc)' },{ label: '2.', value: 'Informe CNPJ, periodo e codigo 1007' },{ label: '3.', value: 'Gere a guia DARF e pague via Pix ou boleto' }]},
+      { type: 'alert', level: 'info', text: 'O recolhimento do INSS sobre pro-labore e obrigatorio para socios de empresas do Simples Nacional.' },
+    ], notes: gps.disclaimer });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.send(html);
+  } catch (err) { console.error('[fiscal-pdf] gps:', err.message); res.status(500).json({ error: 'Erro ao gerar PDF GPS' }); }
+});
+
+// C1-05: PDF Relatorio Anual DEFIS
+router.get('/defis/report', [requireAuth], async (req, res) => {
+  try {
+    const company = await getCompany(req.params.id);
+    const year = parseInt(req.query.year) || (new Date().getFullYear()-1);
+    // Receitas mensais
+    const { rows: recM } = await db.query(`SELECT TO_CHAR(date_trunc('month', created_at AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS month, COALESCE(SUM(amount),0) AS total FROM transactions WHERE company_id=$1 AND type='income' AND EXTRACT(YEAR FROM created_at AT TIME ZONE 'America/Sao_Paulo')=$2 GROUP BY month ORDER BY month`, [req.params.id, year]);
+    // Despesas por categoria
+    const { rows: despCat } = await db.query(`SELECT COALESCE(category,'Outros') AS category, SUM(amount) AS total FROM transactions WHERE company_id=$1 AND type='expense' AND EXTRACT(YEAR FROM created_at AT TIME ZONE 'America/Sao_Paulo')=$2 GROUP BY category ORDER BY total DESC`, [req.params.id, year]);
+    // Pro-labore anual
+    const { rows: plAn } = await db.query(`SELECT COALESCE(SUM(amount),0) AS total, COALESCE(SUM(inss_amount),0) AS inss FROM prolabore_history WHERE company_id=$1 AND EXTRACT(YEAR FROM reference_month)=$2`, [req.params.id, year]);
+    // Folha
+    const { rows: folha } = await db.query(`SELECT COALESCE(SUM(gross_salary),0) AS total_bruto, COALESCE(SUM(fgts),0) AS total_fgts FROM payroll_records WHERE company_id=$1 AND period LIKE $2`, [req.params.id, year+'%']).catch(() => ({ rows: [{ total_bruto: 0, total_fgts: 0 }] }));
+
+    const totalRec = recM.reduce((s,r) => s+parseFloat(r.total), 0);
+    const totalDesp = despCat.reduce((s,r) => s+parseFloat(r.total), 0);
+    const totalPL = parseFloat(plAn[0]?.total||0);
+    const totalINSS = parseFloat(plAn[0]?.inss||0);
+    const totalFolha = parseFloat(folha[0]?.total_bruto||0);
+    const totalFGTS = parseFloat(folha[0]?.total_fgts||0);
+
+    const allMonths = []; for (let i=0;i<12;i++) { const k=`${year}-${String(i+1).padStart(2,'0')}`; const f=recM.find(m=>m.month===k); allMonths.push({ label: MONTH_NAMES[i], total: f?parseFloat(f.total):0 }); }
+
+    const html = fiscalPdfHtml({ title: 'Relatorio Anual - DEFIS', subtitle: `Ano-calendario ${year} | Entrega ate 31/03/${year+1}`, company, sections: [
+      { type: 'info', title: 'Informacoes gerais', items: [{ label: 'Ano', value: String(year) },{ label: 'Regime', value: 'Simples Nacional' },{ label: 'Prazo DEFIS', value: '31/03/'+(year+1) }]},
+      { type: 'table', title: 'Receita bruta mensal', headers: ['Mes','Receita (R$)'], rows: allMonths.map(m=>[m.label, BRL(m.total)]), totals: [['TOTAL ANUAL', BRL(totalRec)]] },
+      { type: 'table', title: 'Despesas por categoria', headers: ['Categoria','Total (R$)'], rows: despCat.map(d=>[d.category, BRL(d.total)]), totals: [['TOTAL DESPESAS', BRL(totalDesp)]] },
+      { type: 'info', title: 'Folha e encargos', items: [{ label: 'Pro-labore anual', value: BRL(totalPL) },{ label: 'INSS sobre pro-labore', value: BRL(totalINSS) },{ label: 'Folha de pagamento', value: BRL(totalFolha) },{ label: 'FGTS', value: BRL(totalFGTS) }]},
+      { type: 'info', title: 'Resultado', items: [{ label: 'Receita bruta', value: BRL(totalRec) },{ label: 'Despesas', value: BRL(totalDesp) },{ label: 'Resultado bruto', value: BRL(totalRec-totalDesp) }]},
+    ], notes: 'Dados consolidados pela Aura. A transmissao oficial da DEFIS deve ser feita no Portal do Simples Nacional.' });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.send(html);
+  } catch (err) { console.error('[fiscal-pdf] defis:', err.message); res.status(500).json({ error: 'Erro ao gerar DEFIS' }); }
+});
+
+// C1-06: PDF Resumo Folha / eSocial
+router.get('/esocial/summary', [requireAuth, requirePlan('negocio','expansao')], async (req, res) => {
+  try {
+    const company = await getCompany(req.params.id);
+    const now = new Date(); const month = req.query.month || `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const [y, m] = month.split('-').map(Number); const monthName = MONTH_NAMES[m-1];
+    // Empregados ativos
+    const { rows: emps } = await db.query(`SELECT name, role_title, salary, hire_date FROM employees WHERE company_id=$1 AND status='active' ORDER BY name`, [req.params.id]);
+    // Folha do mes
+    const { rows: payroll } = await db.query(`SELECT e.name, pr.gross_salary, pr.inss_employee, pr.irrf, pr.fgts, pr.net_salary FROM payroll_records pr JOIN employees e ON e.id=pr.employee_id WHERE pr.company_id=$1 AND pr.period=$2 ORDER BY e.name`, [req.params.id, month]).catch(() => ({ rows: [] }));
+
+    const totalBruto = payroll.reduce((s,r) => s+parseFloat(r.gross_salary||0), 0);
+    const totalINSS = payroll.reduce((s,r) => s+parseFloat(r.inss_employee||0), 0);
+    const totalFGTS = payroll.reduce((s,r) => s+parseFloat(r.fgts||0), 0);
+    const totalLiq = payroll.reduce((s,r) => s+parseFloat(r.net_salary||0), 0);
+
+    const sections = [
+      { type: 'info', title: 'Dados do periodo', items: [{ label: 'Competencia', value: `${monthName}/${y}` },{ label: 'Empregados ativos', value: String(emps.length) },{ label: 'Portal', value: 'eSocial (login.esocial.gov.br)' }]},
+      { type: 'table', title: 'Empregados ativos', headers: ['Nome','Cargo','Salario (R$)','Admissao'], rows: emps.map(e=>[e.name, e.role_title||'-', BRL(e.salary), e.hire_date ? DATE_BR(e.hire_date) : '-']) },
+    ];
+    if (payroll.length > 0) {
+      sections.push({ type: 'table', title: 'Folha do mes', headers: ['Nome','Bruto (R$)','INSS (R$)','IRRF (R$)','FGTS (R$)','Liquido (R$)'], rows: payroll.map(p=>[p.name, BRL(p.gross_salary), BRL(p.inss_employee), BRL(p.irrf), BRL(p.fgts), BRL(p.net_salary)]), totals: [['TOTAIS', BRL(totalBruto), BRL(totalINSS), '-', BRL(totalFGTS), BRL(totalLiq)]] });
+    }
+    sections.push(
+      { type: 'info', title: 'Eventos eSocial do mes', items: [{ label: 'S-1200', value: 'Remuneracao ('+emps.length+' empregados)' },{ label: 'S-1210', value: 'Pagamentos (folha do mes)' },{ label: 'S-1299', value: 'Fechamento dos eventos periodicos' }]},
+      { type: 'info', title: 'Como enviar', items: [{ label: '1.', value: 'Acesse login.esocial.gov.br com Gov.br' },{ label: '2.', value: 'Navegue ate Enviar eventos' },{ label: '3.', value: 'Confira os dados com este resumo e envie' }]},
+    );
+    const html = fiscalPdfHtml({ title: 'Resumo da Folha - eSocial', subtitle: `Competencia: ${monthName}/${y}`, company, sections, notes: 'Resumo de apoio para envio no eSocial. Nao substitui o envio oficial dos eventos. Confira todos os dados antes de transmitir.' });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.send(html);
+  } catch (err) { console.error('[fiscal-pdf] esocial:', err.message); res.status(500).json({ error: 'Erro ao gerar resumo eSocial' }); }
+});
+
+// C1-07: PDF Guia FGTS
+router.get('/fgts/pdf', [requireAuth, requirePlan('negocio','expansao')], async (req, res) => {
+  try {
+    const company = await getCompany(req.params.id);
+    const now = new Date(); const month = req.query.month || `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const [y, m] = month.split('-').map(Number); const monthName = MONTH_NAMES[m-1];
+    const fgtsData = await calculateFGTS(req.params.id, month);
+    if (fgtsData.employees.length === 0) return res.status(400).json({ error: 'Nenhum empregado ativo encontrado' });
+    const dueDate = new Date(y, m-1, 7);
+    const html = fiscalPdfHtml({ title: 'Guia FGTS Estimada', subtitle: `Competencia: ${monthName}/${y} | Vencimento: ${DATE_BR(dueDate)}`, company, sections: [
+      { type: 'info', title: 'Dados do recolhimento', items: [{ label: 'Competencia', value: `${monthName}/${y}` },{ label: 'Aliquota', value: '8%' },{ label: 'Vencimento', value: DATE_BR(dueDate) },{ label: 'Empregados', value: String(fgtsData.employees.length) }]},
+      { type: 'table', title: 'FGTS por empregado', headers: ['Nome','Cargo','Salario (R$)','FGTS (R$)'], rows: fgtsData.employees.map(e=>[e.name, e.role||'-', BRL(e.salary), BRL(e.fgts)]), totals: [['TOTAL', '', BRL(fgtsData.total_salary), BRL(fgtsData.total_fgts)]] },
+      { type: 'info', title: 'Como recolher', items: [{ label: '1.', value: 'Acesse o FGTS Digital (fgtsdigital.gov.br)' },{ label: '2.', value: 'Gere a guia de recolhimento' },{ label: '3.', value: 'Pague via Pix ate '+DATE_BR(dueDate) }]},
+    ], notes: fgtsData.disclaimer });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.send(html);
+  } catch (err) { console.error('[fiscal-pdf] fgts:', err.message); res.status(500).json({ error: 'Erro ao gerar PDF FGTS' }); }
 });
 
 module.exports = router;
