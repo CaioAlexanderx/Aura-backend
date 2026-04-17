@@ -30,6 +30,7 @@ router.use('/companies/:id', privateCompaniesRouter);
 router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminSupport'));
 router.use('/admin', require('./adminMetrics'));
+router.use('/admin', require('./adminClients360'));
 
 // Webhooks (publicos, validacao interna)
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
