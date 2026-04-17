@@ -2,7 +2,7 @@
 // AURA. -- PDV-01: Caixa de Vendas Touch
 // Venda atomica: sale + items + estoque + metricas + cupom + financeiro
 // TIMEZONE FIX: Todas as datas em SP (America/Sao_Paulo), nao UTC.
-// sale_date: param opcional para vendas retroativas (due_date no financeiro).
+// FIX: Cancel restores stock + sets status='cancelled' + stock_movements
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -18,7 +18,7 @@ router.post('/sale', async (req, res) => {
     items, customer_id, employee_id, payment_method,
     discount_amount, discount_pct, coupon_code,
     notes, seller_id, payments,
-    sale_date, // opcional: YYYY-MM-DD para venda retroativa
+    sale_date,
   } = req.body;
 
   if (!items?.length)
@@ -48,7 +48,6 @@ router.post('/sale', async (req, res) => {
         if (p.length) {
           productName = productName || p[0].name;
           costPrice   = parseFloat(p[0].cost_price || 0);
-          // Verifica estoque (aviso, nao bloqueia venda retroativa)
           if (!sale_date && parseFloat(p[0].stock_qty) < qty) {
             await client.query('ROLLBACK');
             return res.status(409).json({
@@ -62,7 +61,6 @@ router.post('/sale', async (req, res) => {
       enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, line_total: lineTotal });
     }
 
-    // Discount: manual or coupon
     let discountAmt = 0;
     let couponId = null;
     let couponCodeUsed = null;
@@ -100,8 +98,8 @@ router.post('/sale', async (req, res) => {
     const { rows: sales } = await client.query(
       `INSERT INTO sales
          (company_id, customer_id, seller_id, employee_id, total_amount, discount_amount,
-          payment_method, notes, coupon_id, coupon_code)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+          payment_method, notes, coupon_id, coupon_code, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'completed')
        RETURNING *`,
       [
         req.params.id, customer_id || null,
@@ -180,17 +178,12 @@ router.post('/sale', async (req, res) => {
       );
     }
 
-    // ── CREATE TRANSACTION (Financeiro) ─────────────────────
-    // sale_date: venda retroativa usa a data informada como due_date.
-    // Sem sale_date: usa data SP atual (TIMEZONE FIX original).
     if (totalAmount > 0) {
       const itemsSummary = productNames.slice(0, 3).join(', ') + (productNames.length > 3 ? ` +${productNames.length - 3}` : '');
       const payLabel = payment_method || (payments?.[0]?.method) || 'dinheiro';
       const txDesc = sale_date
         ? `Venda (retroativa) - ${itemsSummary} (${payLabel})`
         : `Venda PDV - ${itemsSummary} (${payLabel})`;
-
-      // Monta expressao de data e params dinamicamente
       const dueDateExpr = sale_date ? `$6::date` : SP_DATE_NOW;
       const txParams = [req.params.id, totalAmount, txDesc, req.user?.id || null, 'pdv-sale-' + sale.id];
       if (sale_date) txParams.push(sale_date);
@@ -246,16 +239,17 @@ router.get('/sale/:saleId', async (req, res) => {
   }
 });
 
-// GET /companies/:id/pdv/sales
+// GET /companies/:id/pdv/sales — exclui canceladas por padrao
 router.get('/sales', async (req, res) => {
-  const { date, limit = 50, offset = 0 } = req.query;
+  const { date, limit = 50, offset = 0, include_cancelled } = req.query;
   const cond = ['s.company_id=$1'];
   const vals = [req.params.id];
   let i = 2;
   if (date) { cond.push(`${SP_DATE_COL('s.created_at')}=$${i++}`); vals.push(date); }
+  if (!include_cancelled) { cond.push("s.status != 'cancelled'"); }
   try {
     const { rows } = await db.query(
-      `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.coupon_code, s.created_at,
+      `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.coupon_code, s.status, s.created_at,
               u.full_name AS seller_name, c.name AS customer_name, e.name AS employee_name,
               COUNT(si.id) AS item_count
        FROM sales s LEFT JOIN users u ON u.id=s.seller_id LEFT JOIN customers c ON c.id=s.customer_id
@@ -272,7 +266,7 @@ router.get('/sales', async (req, res) => {
   }
 });
 
-// GET /companies/:id/pdv/summary
+// GET /companies/:id/pdv/summary — exclui canceladas
 router.get('/summary', async (req, res) => {
   const date = req.query.date
     || new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
@@ -284,7 +278,7 @@ router.get('/summary', async (req, res) => {
               json_object_agg(payment_method, cnt) AS by_payment_method
        FROM (SELECT s.total_amount, s.discount_amount, s.payment_method,
                     COUNT(*) OVER (PARTITION BY s.payment_method) AS cnt
-             FROM sales s WHERE s.company_id=$1 AND ${SP_DATE_COL('s.created_at')}=$2) sub`,
+             FROM sales s WHERE s.company_id=$1 AND ${SP_DATE_COL('s.created_at')}=$2 AND s.status != 'cancelled') sub`,
       [req.params.id, date]
     );
     res.json({ date, ...rows[0] });
@@ -294,7 +288,7 @@ router.get('/summary', async (req, res) => {
   }
 });
 
-// GET /companies/:id/pdv/employee-ranking
+// GET /companies/:id/pdv/employee-ranking — exclui canceladas
 router.get('/employee-ranking', async (req, res) => {
   const { period = '30d' } = req.query;
   const days = period === '7d' ? 7 : period === '90d' ? 90 : 30;
@@ -306,7 +300,7 @@ router.get('/employee-ranking', async (req, res) => {
               ROUND(COALESCE(AVG(s.total_amount), 0)::NUMERIC, 2) AS avg_ticket,
               MAX(s.created_at) AS last_sale_at
        FROM employees e
-       LEFT JOIN sales s ON s.employee_id = e.id AND s.created_at >= NOW() - INTERVAL '${days} days'
+       LEFT JOIN sales s ON s.employee_id = e.id AND s.created_at >= NOW() - INTERVAL '${days} days' AND s.status != 'cancelled'
        WHERE e.company_id = $1 AND e.status = 'active'
        GROUP BY e.id, e.name, e.role
        ORDER BY total_revenue DESC`,
@@ -319,31 +313,50 @@ router.get('/employee-ranking', async (req, res) => {
   }
 });
 
-// DELETE /companies/:id/pdv/sale/:saleId
+// ============================================================
+// DELETE /companies/:id/pdv/sale/:saleId — CANCELAR VENDA
+// Restaura: estoque, metricas cliente/employee, cupom, financeiro
+// Registra: stock_movement 'return', status='cancelled'
+// ============================================================
 router.delete('/sale/:saleId', async (req, res) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT id, customer_id, employee_id, total_amount, coupon_id FROM sales WHERE id=$1 AND company_id=$2`,
+      `SELECT id, customer_id, employee_id, total_amount, coupon_id, status FROM sales WHERE id=$1 AND company_id=$2`,
       [req.params.saleId, req.params.id]
     );
     if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda nao encontrada' }); }
     const sale = rows[0];
 
+    // Impedir cancelar venda ja cancelada
+    if (sale.status === 'cancelled') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Esta venda ja foi cancelada' });
+    }
+
+    // 1. Restaurar estoque dos itens
     const { rows: items } = await client.query(
-      `SELECT product_id, variant_id, quantity FROM sale_items WHERE sale_id=$1`,
+      `SELECT product_id, variant_id, quantity, product_name_snapshot FROM sale_items WHERE sale_id=$1`,
       [req.params.saleId]
     );
     for (const item of items) {
       if (!item.product_id) continue;
+      const qty = parseFloat(item.quantity);
       if (item.variant_id) {
-        await client.query(`UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`, [item.quantity, item.variant_id]);
+        await client.query(`UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`, [qty, item.variant_id]);
       } else {
-        await client.query(`UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`, [item.quantity, item.product_id, req.params.id]);
+        await client.query(`UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`, [qty, item.product_id, req.params.id]);
       }
+      // Registrar movimento de retorno no estoque
+      await client.query(
+        `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
+         VALUES ($1,$2,'in',$3,$4,'sale_cancel',$5)`,
+        [item.product_id, req.params.id, qty, req.params.saleId, 'Cancelamento venda - ' + (item.product_name_snapshot || 'Produto')]
+      );
     }
 
+    // 2. Reverter metricas do cliente
     if (sale.customer_id) {
       await client.query(
         `UPDATE customers SET total_purchases=GREATEST(0,total_purchases-1), total_spent=GREATEST(0,total_spent-$1), updated_at=NOW()
@@ -351,6 +364,8 @@ router.delete('/sale/:saleId', async (req, res) => {
         [sale.total_amount, sale.customer_id, req.params.id]
       );
     }
+
+    // 3. Reverter metricas do funcionario
     if (sale.employee_id) {
       await client.query(
         `UPDATE employees SET total_sales=GREATEST(0,COALESCE(total_sales,0)-1), total_revenue=GREATEST(0,COALESCE(total_revenue,0)-$1), updated_at=NOW()
@@ -358,6 +373,8 @@ router.delete('/sale/:saleId', async (req, res) => {
         [sale.total_amount, sale.employee_id, req.params.id]
       );
     }
+
+    // 4. Reverter uso do cupom
     if (sale.coupon_id) {
       await client.query(
         `UPDATE coupons SET current_uses=GREATEST(0,current_uses-1), updated_at=NOW() WHERE id=$1`,
@@ -365,14 +382,28 @@ router.delete('/sale/:saleId', async (req, res) => {
       );
     }
 
+    // 5. Remover lancamento financeiro vinculado
     await client.query(
       `DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`,
       ['pdv-sale-' + req.params.saleId, req.params.id]
     );
 
-    await client.query(`UPDATE sales SET notes=CONCAT(COALESCE(notes,''),' [CANCELADA]'), updated_at=NOW() WHERE id=$1`, [req.params.saleId]);
+    // 6. Marcar venda como cancelada (preserva registro)
+    await client.query(
+      `UPDATE sales SET status='cancelled', cancelled_at=NOW(), cancelled_by=$1,
+         notes=CONCAT(COALESCE(notes,''),' [CANCELADA]'), updated_at=NOW()
+       WHERE id=$2`,
+      [req.user?.id || null, req.params.saleId]
+    );
+
     await client.query('COMMIT');
-    res.json({ ok: true, cancelled: req.params.saleId });
+
+    res.json({
+      ok: true,
+      cancelled: req.params.saleId,
+      items_restored: items.filter(i => i.product_id).length,
+      amount_reversed: parseFloat(sale.total_amount),
+    });
   } catch (e) {
     await client.query('ROLLBACK');
     console.error('[PDV] Erro ao cancelar venda:', e.message);
