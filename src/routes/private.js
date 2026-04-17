@@ -34,6 +34,7 @@ router.use('/nfce', require('./nfce'));
 router.use('/nfe', require('./nfe'));
 router.use('/storage', require('./storage'));
 router.use('/obligations', require('./fiscalObligations'));
+router.use('/obligations', require('./fiscalPdf'));
 router.use('/guides', require('./guides'));
 router.use('/checklist', require('./checklist').checklistRouter);
 router.use('/onboarding', require('./onboarding'));
