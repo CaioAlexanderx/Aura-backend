@@ -36,7 +36,7 @@ function resolvePeriod(period, startDate, endDate) {
 
 /**
  * GET /companies/:id/employees/ranking
- * BE-REV-04: Now includes PDV sales linked by employee_id
+ * FIX: e.full_name → e.name (coluna real na tabela employees)
  */
 router.get('/', async (req, res) => {
   try {
@@ -52,12 +52,12 @@ router.get('/', async (req, res) => {
 
     const { startDate, endDate } = resolvePeriod(period, start_date, end_date);
 
-    // BE-REV-04: Query employees with PDV sales data
+    // FIX: e.name (not e.full_name), e.role (varchar column)
     const { rows: employees } = await db.query(`
       SELECT
         e.id,
-        e.full_name,
-        e.role AS job_role,
+        e.name AS full_name,
+        COALESCE(e.role, e.role_title, 'Vendedor') AS job_role,
         COALESCE(sales.total_sales, 0) AS total_sales,
         COALESCE(sales.total_revenue, 0) AS total_revenue,
         CASE WHEN COALESCE(sales.total_sales, 0) > 0
@@ -106,7 +106,7 @@ router.get('/', async (req, res) => {
         total_sales: parseInt(emp.total_sales) || 0,
         total_revenue: revenue,
         avg_ticket: parseFloat(emp.avg_ticket) || 0,
-        trend_pct: trend, // BE-REV-04: trend vs previous period
+        trend_pct: trend,
         share_pct: totalRevenue > 0
           ? parseFloat(((revenue / totalRevenue) * 100).toFixed(1))
           : 0,
