@@ -1,6 +1,7 @@
 // ============================================================
-// AURA. — Analise Financeira v4
-// FIX: period param (week/month/year/prev_year), PT-BR labels
+// AURA. — Analise Financeira v5
+// FIX: employees query unified (sales only, no UNION ALL dupe)
+// FIX: timezone SP, period filter consistency
 // ============================================================
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
@@ -17,9 +18,7 @@ function labelPtBR(enLabel) {
 }
 function dowPtBR(enDay) { return DOW_MAP[enDay] || enDay; }
 
-// Convert period to SQL date range
 function periodToDateRange(period) {
-  var now = new Date();
   switch (period) {
     case 'week':
       return { interval: "7 days", months: 1, label: 'Ultimos 7 dias' };
@@ -28,6 +27,7 @@ function periodToDateRange(period) {
     case 'year':
       return { interval: null, months: 12, label: 'Ultimos 12 meses' };
     case 'prev_year': {
+      var now = new Date();
       var prevY = now.getFullYear() - 1;
       return { interval: null, months: 24, from: prevY + '-01-01', to: prevY + '-12-31', label: 'Ano anterior (' + prevY + ')' };
     }
@@ -36,57 +36,46 @@ function periodToDateRange(period) {
   }
 }
 
-// Build WHERE clause fragment for the date range
-function buildDateFilter(period, paramIndex) {
+function buildDateSQL(period) {
   var range = periodToDateRange(period);
   if (range.from && range.to) {
-    return { sql: 'created_at >= $' + paramIndex + ' AND created_at <= $' + (paramIndex + 1), params: [range.from, range.to + ' 23:59:59'], nextIdx: paramIndex + 2 };
+    return "created_at >= '" + range.from + "' AND created_at <= '" + range.to + " 23:59:59'";
   }
   if (period === 'week') {
-    return { sql: "created_at >= NOW() - INTERVAL '7 days'", params: [], nextIdx: paramIndex };
+    return "created_at >= NOW() - INTERVAL '7 days'";
   }
-  // Default: use months
-  return { sql: "created_at >= date_trunc('month',NOW())-((" + range.months + "-1)||' months')::interval", params: [], nextIdx: paramIndex };
+  if (period === 'month') {
+    // Timezone-aware: start of month in SP
+    return "created_at >= (date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')";
+  }
+  return "created_at >= date_trunc('month',NOW())-((" + range.months + "-1)||' months')::interval";
 }
 
 router.get('/', requireAuth, async function(req, res) {
   var cid = req.params.id;
-  var period = req.query.period; // week | month | year | prev_year
+  var period = req.query.period;
   var range = periodToDateRange(period);
-  var numMonths = range.months;
-
-  // SQL fragment for the main date filter
-  var dateSQL;
-  var extraParams = [];
-  if (range.from && range.to) {
-    dateSQL = "created_at >= '" + range.from + "' AND created_at <= '" + range.to + " 23:59:59'";
-  } else if (period === 'week') {
-    dateSQL = "created_at >= NOW() - INTERVAL '7 days'";
-  } else {
-    dateSQL = "created_at >= date_trunc('month',NOW())-((" + numMonths + "-1)||' months')::interval";
-  }
+  var dateSQL = buildDateSQL(period);
 
   try {
-    // Monthly breakdown (for week: group by day instead)
+    // Monthly breakdown
     var monthly;
     if (period === 'week') {
       monthly = (await db.query(
-        "SELECT TO_CHAR(created_at,'YYYY-MM-DD') AS month, TO_CHAR(created_at,'DD/MM') AS label," +
+        "SELECT TO_CHAR(created_at AT TIME ZONE 'America/Sao_Paulo','YYYY-MM-DD') AS month, TO_CHAR(created_at AT TIME ZONE 'America/Sao_Paulo','DD/MM') AS label," +
         " COALESCE(SUM(amount) FILTER(WHERE type='income'),0) AS receita," +
         " COALESCE(SUM(amount) FILTER(WHERE type='expense'),0) AS despesa," +
         " COUNT(*) FILTER(WHERE type='income') AS qtd_vendas," +
-        " COUNT(*) FILTER(WHERE type='expense') AS qtd_despesas," +
         " 1 AS dias_com_venda" +
         " FROM transactions WHERE company_id=$1 AND " + dateSQL +
         " GROUP BY month, label ORDER BY month ASC", [cid])).rows;
     } else {
       monthly = (await db.query(
-        "SELECT TO_CHAR(created_at,'YYYY-MM') AS month, TO_CHAR(created_at,'Mon/YY') AS label," +
+        "SELECT TO_CHAR(created_at AT TIME ZONE 'America/Sao_Paulo','YYYY-MM') AS month, TO_CHAR(created_at AT TIME ZONE 'America/Sao_Paulo','Mon/YY') AS label," +
         " COALESCE(SUM(amount) FILTER(WHERE type='income'),0) AS receita," +
         " COALESCE(SUM(amount) FILTER(WHERE type='expense'),0) AS despesa," +
         " COUNT(*) FILTER(WHERE type='income') AS qtd_vendas," +
-        " COUNT(*) FILTER(WHERE type='expense') AS qtd_despesas," +
-        " COUNT(DISTINCT DATE(created_at)) FILTER(WHERE type='income') AS dias_com_venda" +
+        " COUNT(DISTINCT DATE(created_at AT TIME ZONE 'America/Sao_Paulo')) FILTER(WHERE type='income') AS dias_com_venda" +
         " FROM transactions WHERE company_id=$1 AND " + dateSQL +
         " GROUP BY month, label ORDER BY month ASC", [cid])).rows;
     }
@@ -96,16 +85,18 @@ router.get('/', requireAuth, async function(req, res) {
       " COALESCE(SUM(amount) FILTER(WHERE type='expense'),0) AS despesa," +
       " COUNT(*) FILTER(WHERE type='income') AS qtd_vendas," +
       " COUNT(*) AS total_lancamentos," +
-      " COUNT(DISTINCT DATE(created_at)) FILTER(WHERE type='income') AS dias_com_venda" +
+      " COUNT(DISTINCT DATE(created_at AT TIME ZONE 'America/Sao_Paulo')) FILTER(WHERE type='income') AS dias_com_venda" +
       " FROM transactions WHERE company_id=$1 AND " + dateSQL, [cid])).rows;
 
-    // Previous period for comparison
+    // Previous period
     var prevSQL;
     if (period === 'week') {
       prevSQL = "created_at >= NOW() - INTERVAL '14 days' AND created_at < NOW() - INTERVAL '7 days'";
     } else if (range.from && range.to) {
       var prevY = parseInt(range.from.slice(0, 4)) - 1;
       prevSQL = "created_at >= '" + prevY + "-01-01' AND created_at <= '" + prevY + "-12-31 23:59:59'";
+    } else if (period === 'month') {
+      prevSQL = "created_at >= (date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month') AT TIME ZONE 'America/Sao_Paulo' AND created_at < (date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo') AT TIME ZONE 'America/Sao_Paulo')";
     } else {
       prevSQL = "created_at >= date_trunc('month',NOW())-INTERVAL '1 month' AND created_at < date_trunc('month',NOW())";
     }
@@ -117,50 +108,56 @@ router.get('/', requireAuth, async function(req, res) {
       " FROM transactions WHERE company_id=$1 AND " + prevSQL, [cid])).rows;
 
     var dayOfWeek = (await db.query(
-      "SELECT EXTRACT(DOW FROM created_at)::int AS dow," +
-      " TO_CHAR(created_at,'Dy') AS label," +
+      "SELECT EXTRACT(DOW FROM created_at AT TIME ZONE 'America/Sao_Paulo')::int AS dow," +
+      " TO_CHAR(created_at AT TIME ZONE 'America/Sao_Paulo','Dy') AS label," +
       " COUNT(*) AS vendas," +
       " COALESCE(SUM(amount),0) AS faturamento," +
       " ROUND(AVG(amount)::numeric,2) AS ticket_medio" +
       " FROM transactions WHERE company_id=$1 AND type='income' AND " + dateSQL +
       " GROUP BY dow, label ORDER BY dow", [cid])).rows;
 
+    // ====================================================================
+    // FIX v5: EMPLOYEES — source ONLY from sales table, NO UNION ALL
+    // The old UNION ALL with transactions caused double-counting because:
+    // 1) PDV creates both a sale AND a transaction
+    // 2) transaction.employee_name is free text (first name only)
+    // 3) sales.employee_id joins to employees.name (full name)
+    // Result: same person counted twice with different names
+    // ====================================================================
     var employees = [];
     try {
+      // FIX: total_revenue from sales table (authoritative source for PDV)
+      var salesDateSQL = dateSQL; // same period filter
       employees = (await db.query(
-        "SELECT name, SUM(total_sales)::int AS vendas, SUM(total_revenue) AS faturamento," +
-        " ROUND((SUM(total_revenue)/NULLIF(SUM(total_sales),0))::numeric,2) AS ticket_medio," +
-        " ROUND((SUM(total_revenue)*100.0/NULLIF((SELECT SUM(amount) FROM transactions WHERE company_id=$1 AND type='income' AND " + dateSQL + "),0))::numeric,1) AS pct_total" +
-        " FROM (" +
-        "   SELECT COALESCE(e.name,'Sem vendedor') AS name, COUNT(s.id) AS total_sales, COALESCE(SUM(s.total_amount),0) AS total_revenue" +
-        "   FROM sales s LEFT JOIN employees e ON e.id=s.employee_id" +
-        "   WHERE s.company_id=$1 AND s." + dateSQL.replace('created_at','created_at') +
-        "   GROUP BY e.name" +
-        "   UNION ALL" +
-        "   SELECT COALESCE(t.employee_name,'Sem vendedor') AS name, COUNT(t.id) AS total_sales, COALESCE(SUM(t.amount),0) AS total_revenue" +
-        "   FROM transactions t WHERE t.company_id=$1 AND t.type='income' AND t.employee_name IS NOT NULL" +
-        "   AND t." + dateSQL +
-        "   GROUP BY t.employee_name" +
-        " ) combined GROUP BY name ORDER BY faturamento DESC", [cid])).rows;
+        "SELECT COALESCE(e.name,'Sem vendedor') AS name," +
+        " COUNT(s.id)::int AS vendas," +
+        " COALESCE(SUM(s.total_amount),0) AS faturamento," +
+        " ROUND((COALESCE(SUM(s.total_amount),0)/NULLIF(COUNT(s.id),0))::numeric,2) AS ticket_medio," +
+        " ROUND((COALESCE(SUM(s.total_amount),0)*100.0/NULLIF((SELECT SUM(total_amount) FROM sales WHERE company_id=$1 AND " + salesDateSQL + "),0))::numeric,1) AS pct_total" +
+        " FROM sales s LEFT JOIN employees e ON e.id=s.employee_id" +
+        " WHERE s.company_id=$1 AND s." + salesDateSQL +
+        " GROUP BY e.name" +
+        " HAVING COUNT(s.id) > 0" +
+        " ORDER BY faturamento DESC", [cid])).rows;
     } catch (_) {}
 
-    // Employee monthly evolution
+    // Employee monthly evolution (also from sales only)
     var employeeMonthly = [];
     try {
       if (period === 'week') {
         employeeMonthly = (await db.query(
-          "SELECT TO_CHAR(s.created_at,'YYYY-MM-DD') AS month, COALESCE(e.name,'Sem vendedor') AS name," +
+          "SELECT TO_CHAR(s.created_at AT TIME ZONE 'America/Sao_Paulo','YYYY-MM-DD') AS month, COALESCE(e.name,'Sem vendedor') AS name," +
           " COUNT(s.id)::int AS vendas, COALESCE(SUM(s.total_amount),0) AS faturamento" +
           " FROM sales s LEFT JOIN employees e ON e.id=s.employee_id" +
           " WHERE s.company_id=$1 AND s." + dateSQL +
-          " GROUP BY month, name ORDER BY month", [cid])).rows;
+          " GROUP BY month, name HAVING COUNT(s.id) > 0 ORDER BY month", [cid])).rows;
       } else {
         employeeMonthly = (await db.query(
-          "SELECT TO_CHAR(s.created_at,'YYYY-MM') AS month, COALESCE(e.name,'Sem vendedor') AS name," +
+          "SELECT TO_CHAR(s.created_at AT TIME ZONE 'America/Sao_Paulo','YYYY-MM') AS month, COALESCE(e.name,'Sem vendedor') AS name," +
           " COUNT(s.id)::int AS vendas, COALESCE(SUM(s.total_amount),0) AS faturamento" +
           " FROM sales s LEFT JOIN employees e ON e.id=s.employee_id" +
           " WHERE s.company_id=$1 AND s." + dateSQL +
-          " GROUP BY month, name ORDER BY month", [cid])).rows;
+          " GROUP BY month, name HAVING COUNT(s.id) > 0 ORDER BY month", [cid])).rows;
       }
     } catch (_) {}
 
@@ -178,9 +175,9 @@ router.get('/', requireAuth, async function(req, res) {
 
     var velocityRows = (await db.query(
       "SELECT" +
-      " (SELECT ROUND(AVG(daily_total)::numeric,2) FROM (SELECT DATE(created_at), SUM(amount) AS daily_total FROM transactions WHERE company_id=$1 AND type='income' AND created_at >= NOW()-INTERVAL '30 days' GROUP BY DATE(created_at)) d30) AS avg_dia_30d," +
-      " (SELECT ROUND(AVG(daily_total)::numeric,2) FROM (SELECT DATE(created_at), SUM(amount) AS daily_total FROM transactions WHERE company_id=$1 AND type='income' AND created_at >= NOW()-INTERVAL '7 days' GROUP BY DATE(created_at)) d7) AS avg_dia_7d," +
-      " (SELECT ROUND(AVG(daily_count)::numeric,1) FROM (SELECT DATE(created_at), COUNT(*) AS daily_count FROM transactions WHERE company_id=$1 AND type='income' AND created_at >= NOW()-INTERVAL '30 days' GROUP BY DATE(created_at)) c30) AS avg_vendas_dia_30d", [cid])).rows;
+      " (SELECT ROUND(AVG(daily_total)::numeric,2) FROM (SELECT DATE(created_at AT TIME ZONE 'America/Sao_Paulo'), SUM(amount) AS daily_total FROM transactions WHERE company_id=$1 AND type='income' AND created_at >= NOW()-INTERVAL '30 days' GROUP BY DATE(created_at AT TIME ZONE 'America/Sao_Paulo')) d30) AS avg_dia_30d," +
+      " (SELECT ROUND(AVG(daily_total)::numeric,2) FROM (SELECT DATE(created_at AT TIME ZONE 'America/Sao_Paulo'), SUM(amount) AS daily_total FROM transactions WHERE company_id=$1 AND type='income' AND created_at >= NOW()-INTERVAL '7 days' GROUP BY DATE(created_at AT TIME ZONE 'America/Sao_Paulo')) d7) AS avg_dia_7d," +
+      " (SELECT ROUND(AVG(daily_count)::numeric,1) FROM (SELECT DATE(created_at AT TIME ZONE 'America/Sao_Paulo'), COUNT(*) AS daily_count FROM transactions WHERE company_id=$1 AND type='income' AND created_at >= NOW()-INTERVAL '30 days' GROUP BY DATE(created_at AT TIME ZONE 'America/Sao_Paulo')) c30) AS avg_vendas_dia_30d", [cid])).rows;
 
     var ticketDist = (await db.query(
       "SELECT CASE WHEN amount<50 THEN 'Ate R$50' WHEN amount<100 THEN 'R$50-100' WHEN amount<150 THEN 'R$100-150' WHEN amount<200 THEN 'R$150-200' WHEN amount<300 THEN 'R$200-300' WHEN amount<500 THEN 'R$300-500' ELSE 'Acima R$500' END AS faixa," +
@@ -189,14 +186,13 @@ router.get('/', requireAuth, async function(req, res) {
       " GROUP BY faixa ORDER BY MIN(amount)", [cid])).rows;
 
     var weeklyTrend = (await db.query(
-      "SELECT TO_CHAR(date_trunc('week',created_at),'DD/MM') AS semana," +
-      " date_trunc('week',created_at) AS week_start," +
+      "SELECT TO_CHAR(date_trunc('week',created_at AT TIME ZONE 'America/Sao_Paulo'),'DD/MM') AS semana," +
+      " date_trunc('week',created_at AT TIME ZONE 'America/Sao_Paulo') AS week_start," +
       " COUNT(*) AS vendas, COALESCE(SUM(amount),0) AS faturamento," +
       " ROUND(AVG(amount)::numeric,2) AS ticket_medio" +
       " FROM transactions WHERE company_id=$1 AND type='income' AND " + dateSQL +
       " GROUP BY semana, week_start ORDER BY week_start", [cid])).rows;
 
-    // Income/expense categories for the period
     var incomeCategories = [];
     var expenseCategories = [];
     try {
@@ -228,7 +224,7 @@ router.get('/', requireAuth, async function(req, res) {
     var prevAvgTicket = prevVendas > 0 ? prevReceita / prevVendas : 0;
 
     var completedMonths = monthly.filter(function(m) {
-      if (period === 'week') return true; // all days are "complete"
+      if (period === 'week') return true;
       return new Date(m.month + '-01') < new Date(new Date().getFullYear(), new Date().getMonth(), 1);
     });
     var avgMonthlyReceita = completedMonths.length > 0 ? completedMonths.reduce(function(s, m) { return s + parseFloat(m.receita); }, 0) / completedMonths.length : 0;
