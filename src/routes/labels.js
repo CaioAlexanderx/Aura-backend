@@ -1,10 +1,8 @@
 // ============================================================
-// AURA. — Etiquetas v7 (grid explicito — 3 por linha)
-//
-// FIX: flex-wrap nao garante N por linha em contexto de impressao.
-// Solucao: CSS Grid com grid-template-columns: repeat(cols, LABEL_W).
-// Isso forca exatamente 3 etiquetas por LINHA (horizontal),
-// independente do driver ou tamanho de papel.
+// AURA. — Etiquetas v7.2
+// UNICA ALTERACAO: texto do .name agora inclui cor/tamanho
+// inline, truncando nome a ~16 chars. Ex: "Macaquinho bal | P | Azul"
+// NENHUMA dimensao, CSS ou posicao de barcode foi alterada.
 // ============================================================
 const express = require('express');
 const router = express.Router({ mergeParams: true });
@@ -15,12 +13,48 @@ const LABEL_W = 33;
 const LABEL_H = 21;
 const COLS = 3;
 
+// Hex → nome PT-BR (lookup simples)
+var COLOR_NAMES = {
+  '#000000':'Preto','#ffffff':'Branco','#ff0000':'Vermelho','#c0c0c0':'Prata',
+  '#808080':'Cinza','#0000ff':'Azul','#000080':'Marinho','#00ff00':'Verde',
+  '#008000':'Vd Esc','#ffff00':'Amarelo','#ffa500':'Laranja','#ff00ff':'Pink',
+  '#ffc0cb':'Rosa','#800080':'Roxo','#a52a2a':'Marrom','#800000':'Vinho',
+  '#ffd700':'Dourado','#f5f5dc':'Bege','#ff6347':'Coral','#40e0d0':'Turquesa',
+  '#4b0082':'Indigo','#dc143c':'Carmesim','#2f4f4f':'Chumbo','#d2691e':'Caramelo',
+};
+function hexToName(hex) {
+  if (!hex) return '';
+  return COLOR_NAMES[hex.toLowerCase()] || hex;
+}
+
+// Monta o texto da etiqueta: "Nome truncado | Tam | Cor"
+// Tudo na mesma linha, centralizado, dentro do .name existente
+function buildLabelName(product) {
+  var parts = [];
+  var hasSize = product.size && product.size.trim();
+  var hasColor = product.color && /^#[0-9A-Fa-f]{6}$/.test(product.color);
+
+  // Se tem variantes, trunca o nome pra caber tudo
+  if (hasSize || hasColor) {
+    var maxLen = 16;
+    var name = product.name || '';
+    if (name.length > maxLen) name = name.substring(0, maxLen).trim() + '...';
+    parts.push(name);
+    if (hasSize) parts.push(product.size.trim());
+    if (hasColor) parts.push(hexToName(product.color));
+    return parts.join(' | ');
+  }
+
+  // Sem variantes: nome completo (comportamento original)
+  return product.name || '';
+}
+
 router.get('/:pid/label', requireAuth, async (req, res) => {
   const { id: company_id, pid: product_id } = req.params;
   const { show_name = 'true', show_price = 'true', qty = '1' } = req.query;
   const quantity = Math.min(Math.max(parseInt(qty) || 1, 1), 200);
   try {
-    const result = await pool.query('SELECT id,name,price,barcode,barcode_format,sku FROM products WHERE id=$1 AND company_id=$2', [product_id, company_id]);
+    const result = await pool.query('SELECT id,name,price,barcode,barcode_format,sku,color,size FROM products WHERE id=$1 AND company_id=$2', [product_id, company_id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     const p = result.rows[0];
     if (!p.barcode) return res.status(422).json({ error: 'Produto sem codigo cadastrado' });
@@ -37,7 +71,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
   const offset = Math.min(Math.max(parseFloat(offsetParam) || -2, -8), 5);
 
   try {
-    const result = await pool.query('SELECT id,name,price,barcode,barcode_format,sku FROM products WHERE id=$1 AND company_id=$2', [product_id, company_id]);
+    const result = await pool.query('SELECT id,name,price,barcode,barcode_format,sku,color,size FROM products WHERE id=$1 AND company_id=$2', [product_id, company_id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     const product = result.rows[0];
     if (!product.barcode) return res.status(422).json({ error: 'Produto sem codigo cadastrado' });
@@ -46,6 +80,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     const showPrice = show_price === 'true';
     const priceText = product.price ? `R$ ${parseFloat(product.price).toFixed(2).replace('.', ',')}` : '';
     const barcodeData = product.barcode;
+    const labelName = buildLabelName(product);
 
     const barcodeLen = barcodeData.replace(/\D/g, '').length;
     let jsFormat = 'CODE128';
@@ -74,11 +109,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
   html, body { margin:0!important; padding:0!important; }
   body { font-family:Arial,Helvetica,sans-serif; background:#f5f5f5; -webkit-print-color-adjust:exact; }
 
-  /* ===== PRINT GRID =====
-     GRID explicito garante exatamente ${cols} etiquetas por LINHA.
-     flex-wrap podia desalinhar dependendo do driver; grid nao.
-     transform: translateX() compensa a margem extra do driver.
-  */
+  /* ===== PRINT GRID ===== */
   .print-grid {
     display: grid;
     grid-template-columns: repeat(${cols}, ${LABEL_W}mm);
@@ -173,7 +204,6 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     writing-mode: vertical-rl;
     z-index: 3;
   }
-  /* Preview: grid espelha o layout de impressao */
   .sim-labels {
     display: grid;
     grid-template-columns: repeat(${cols}, ${LABEL_W}mm);
@@ -254,7 +284,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
       <div class="printer-margin-overlay"></div>
       <div class="printer-margin-label">margem</div>
       <div class="sim-labels" id="simLabels">
-${Array.from({length: Math.min(quantity, cols * 3)}, (_, i) => `        <div class="label"><div class="bc-wrap"><svg class="barcode" data-idx="s${i}"></svg></div>${showName ? `<div class="name">${product.name}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}</div>`).join('\n')}
+${Array.from({length: Math.min(quantity, cols * 3)}, (_, i) => `        <div class="label"><div class="bc-wrap"><svg class="barcode" data-idx="s${i}"></svg></div>${showName ? `<div class="name">${labelName}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}</div>`).join('\n')}
       </div>
     </div>
   </div>
@@ -262,7 +292,7 @@ ${Array.from({length: Math.min(quantity, cols * 3)}, (_, i) => `        <div cla
 </div>
 
 <div class="print-grid">
-${Array.from({length: quantity}, (_, i) => `<div class="label"><div class="bc-wrap"><svg class="barcode" data-idx="p${i}"></svg></div>${showName ? `<div class="name">${product.name}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}</div>`).join('\n')}
+${Array.from({length: quantity}, (_, i) => `<div class="label"><div class="bc-wrap"><svg class="barcode" data-idx="p${i}"></svg></div>${showName ? `<div class="name">${labelName}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}</div>`).join('\n')}
 </div>
 
 <div class="preview-bar">
@@ -338,7 +368,7 @@ router.get('/labels/batch', requireAuth, async (req, res) => {
   if (productIds.length === 0) return res.status(400).json({ error: 'Nenhum id valido' });
   try {
     const result = await pool.query(
-      `SELECT id,name,price,barcode,barcode_format,sku FROM products WHERE id=ANY($1::uuid[]) AND company_id=$2 AND barcode IS NOT NULL ORDER BY name`,
+      `SELECT id,name,price,barcode,barcode_format,sku,color,size FROM products WHERE id=ANY($1::uuid[]) AND company_id=$2 AND barcode IS NOT NULL ORDER BY name`,
       [productIds, company_id]
     );
     res.json({ products: result.rows, label_options: { show_name: show_name === 'true', show_price: show_price === 'true', width_mm: LABEL_W, height_mm: LABEL_H, cols: COLS }, total: result.rows.length });
