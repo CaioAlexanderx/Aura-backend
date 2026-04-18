@@ -46,6 +46,7 @@ router.use('/storefront', require('./storefront'));
 router.use('/reviews',           publicReviewsRouter);
 router.use('/dental',            require('./dentalSign'));
 router.use('/dental/book',       require('./dentalBooking'));
+router.use('/dental-portal',     require('./dentalPortalPublic'));
 router.use('/barber/book',       require('./barberBooking'));
 router.use('/onboarding',        onboardingRouter);
 router.use('/food/table',        require('./foodWaiter'));
