@@ -1,7 +1,7 @@
 // ============================================================
 // AURA. -- S4: Products CRUD
 // Plan limits: essencial=2000, negocio=7000, expansao=unlimited
-// FIX: DELETE handles FK constraints gracefully
+// FIX: DELETE tries first, handles FK with retry
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -131,21 +131,30 @@ router.patch('/:pid', async (req, res) => {
   } catch (err) { console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' }); }
 });
 
-// DELETE /:pid — FIX: handles FK constraints
+// DELETE /:pid — try DELETE first, handle FK with nullify + retry
 router.delete('/:pid', async (req, res) => {
   const { id: cid, pid } = req.params;
   try {
-    // Nullify references in sale_items before deleting (keeps sales history)
-    await db.query('UPDATE sale_items SET product_id = NULL WHERE product_id = $1', [pid]);
-    // Delete product
+    // Try direct delete first (works when no FK references exist)
     const result = await db.query('DELETE FROM products WHERE id = $1 AND company_id = $2 RETURNING id, name', [pid, cid]);
-    if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
+    if (!result || !result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     res.json({ deleted: true, id: pid, name: result.rows[0].name });
   } catch (err) {
-    console.error('[products] delete error:', err.message, err.code);
+    // FK violation — nullify references and retry
     if (err.code === '23503') {
-      return res.status(409).json({ error: 'Este produto esta vinculado a outros registros e nao pode ser excluido. Tente desativa-lo.', code: 'FK_VIOLATION' });
+      try {
+        await db.query('UPDATE sale_items SET product_id = NULL WHERE product_id = $1', [pid]);
+        await db.query('UPDATE barber_stock_movements SET product_id = NULL WHERE product_id = $1', [pid]);
+        await db.query('UPDATE stock_movements SET product_id = NULL WHERE product_id = $1', [pid]);
+        const retry = await db.query('DELETE FROM products WHERE id = $1 AND company_id = $2 RETURNING id, name', [pid, cid]);
+        if (retry && retry.rows.length) return res.json({ deleted: true, id: pid, name: retry.rows[0].name });
+        return res.status(404).json({ error: 'Produto nao encontrado' });
+      } catch (retryErr) {
+        console.error('[products] delete retry error:', retryErr.message, retryErr.code);
+        return res.status(409).json({ error: 'Este produto esta vinculado a outros registros e nao pode ser excluido. Tente desativa-lo.', code: 'FK_VIOLATION' });
+      }
     }
+    console.error('[products] delete error:', err.message, err.code);
     res.status(500).json({ error: 'Erro ao deletar produto' });
   }
 });
