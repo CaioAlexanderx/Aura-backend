@@ -1,7 +1,7 @@
 // ============================================================
-// AURA. — Rotas Módulo Odontologia (BE-25 + S4 + S7 + S11)
-// Sub-routes: treatment-plans (D-02), images (D-07), lab (D-12)
-//             insurance (D-16/17), advanced (D-18/19/20/21)
+// AURA. — Rotas Módulo Odontologia (core)
+// Agenda, Appointments, Chart, Prescriptions + sub-route mounts
+// Patients and Procedures extracted to dentalPatients/dentalProcedures
 // ============================================================
 
 const express = require('express');
@@ -9,129 +9,14 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const {
-  listPatients, getAgendaByPeriod, updateAppointmentStatus,
+  getAgendaByPeriod, updateAppointmentStatus,
   addProcedureToAppointment, recalcAppointmentTotal,
-  calcAppointmentTotal, generateWsToken, validateWsToken,
+  generateWsToken, validateWsToken,
 } = require('../services/dental');
 
-// ── Pacientes ──────────────────────────────────────────────
-
-router.get('/patients', requireAuth, async (req, res) => {
-  try {
-    const { search, page, limit } = req.query;
-    const patients = await listPatients(req.params.id, { search, page: parseInt(page), limit: parseInt(limit) });
-    res.json({ total: patients.length, patients });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar pacientes' }); }
-});
-
-router.get('/patients/:pid', requireAuth, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      'SELECT * FROM dental_patients WHERE id=$1 AND company_id=$2',
-      [req.params.pid, req.params.id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Paciente não encontrado' });
-    res.json({ patient: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar paciente' }); }
-});
-
-router.post('/patients', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { full_name, birth_date, cpf, phone, email, gender,
-          allergies, medical_history, medications, notes, lgpd_consent = false } = req.body;
-  if (!full_name) return res.status(400).json({ error: 'full_name é obrigatório' });
-  if (!lgpd_consent) return res.status(400).json({ error: 'Consentimento LGPD Art.11 é obrigatório para dados de saúde' });
-  try {
-    const { rows } = await db.query(
-      `INSERT INTO dental_patients
-         (company_id, full_name, birth_date, cpf, phone, email, gender,
-          allergies, medical_history, medications, notes, lgpd_consent, lgpd_consent_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW()) RETURNING *`,
-      [req.params.id, full_name, birth_date||null, cpf||null, phone||null,
-       email||null, gender||null, allergies||null, medical_history||null,
-       medications||null, notes||null, true]
-    );
-    res.status(201).json({ patient: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro ao cadastrar paciente' }); }
-});
-
-router.patch('/patients/:pid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const allowed = ['full_name','birth_date','cpf','phone','email','gender',
-                   'allergies','medical_history','medications','notes',
-                   'insurance_name','insurance_card','insurance_plan','insurance_exp'];
-  const fields=[], values=[];
-  let idx=1;
-  for (const key of allowed) {
-    if (req.body[key] !== undefined) { fields.push(`${key}=$${idx++}`); values.push(req.body[key]); }
-  }
-  if (!fields.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-  fields.push(`updated_at=NOW()`);
-  values.push(req.params.pid, req.params.id);
-  try {
-    const { rows } = await db.query(
-      `UPDATE dental_patients SET ${fields.join(',')} WHERE id=$${idx++} AND company_id=$${idx} RETURNING *`, values
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Paciente não encontrado' });
-    res.json({ patient: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro ao atualizar paciente' }); }
-});
-
-// ── Catálogo de procedimentos ─────────────────────────────
-
-router.get('/procedures', requireAuth, async (req, res) => {
-  const { category } = req.query;
-  try {
-    const params = [req.params.id];
-    let where = 'WHERE company_id=$1 AND active=true';
-    if (category) { params.push(category); where += ` AND category=$2::dental_category`; }
-    const { rows } = await db.query(
-      `SELECT id, code_internal, category, name, description, price_private, price_plan, active
-       FROM dental_procedures ${where} ORDER BY category, name`, params
-    );
-    res.json({ total: rows.length, procedures: rows });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar procedimentos' }); }
-});
-
-router.post('/procedures', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { code_internal, code_tuss, category, name, description, price_private, price_plan } = req.body;
-  if (!code_internal || !name || price_private === undefined)
-    return res.status(400).json({ error: 'code_internal, name e price_private são obrigatórios' });
-  try {
-    const { rows } = await db.query(
-      `INSERT INTO dental_procedures
-         (company_id, code_internal, code_tuss, category, name, description, price_private, price_plan)
-       VALUES ($1,$2,$3,$4::dental_category,$5,$6,$7,$8) RETURNING *`,
-      [req.params.id, code_internal, code_tuss||null, category||'outros',
-       name, description||null, price_private, price_plan||null]
-    );
-    res.status(201).json({ procedure: rows[0] });
-  } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'Código interno já existe' });
-    res.status(500).json({ error: 'Erro ao cadastrar procedimento' });
-  }
-});
-
-router.patch('/procedures/:procId', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const allowed = ['code_internal','code_tuss','category','name','description','price_private','price_plan','active'];
-  const fields=[], values=[];
-  let idx=1;
-  for (const key of allowed) {
-    if (req.body[key] !== undefined) {
-      const cast = key === 'category' ? '::dental_category' : '';
-      fields.push(`${key}=$${idx++}${cast}`);
-      values.push(req.body[key]);
-    }
-  }
-  if (!fields.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-  fields.push(`updated_at=NOW()`);
-  values.push(req.params.procId, req.params.id);
-  try {
-    const { rows } = await db.query(
-      `UPDATE dental_procedures SET ${fields.join(',')} WHERE id=$${idx++} AND company_id=$${idx} RETURNING *`, values
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Procedimento não encontrado' });
-    res.json({ procedure: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro ao atualizar procedimento' }); }
-});
+// ── Sub-routes (extracted) ────────────────────────────────
+router.use('/', require('./dentalPatients'));
+router.use('/', require('./dentalProcedures'));
 
 // ── Agenda ────────────────────────────────────────────────
 
@@ -147,7 +32,7 @@ router.get('/agenda', requireAuth, async (req, res) => {
 
 router.post('/appointments', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { patient_id, scheduled_at, duration_min = 60, chief_complaint } = req.body;
-  if (!patient_id || !scheduled_at) return res.status(400).json({ error: 'patient_id e scheduled_at são obrigatórios' });
+  if (!patient_id || !scheduled_at) return res.status(400).json({ error: 'patient_id e scheduled_at sao obrigatorios' });
   try {
     const { rows } = await db.query(
       `INSERT INTO dental_appointments (company_id, patient_id, scheduled_at, duration_min, chief_complaint)
@@ -166,7 +51,7 @@ router.get('/appointments/:aid', requireAuth, async (req, res) => {
        WHERE a.id=$1 AND a.company_id=$2`,
       [req.params.aid, req.params.id]
     );
-    if (!appt.length) return res.status(404).json({ error: 'Agendamento não encontrado' });
+    if (!appt.length) return res.status(404).json({ error: 'Agendamento nao encontrado' });
     const { rows: procs } = await db.query(
       'SELECT * FROM dental_appointment_procedures WHERE appointment_id=$1 ORDER BY created_at',
       [req.params.aid]
@@ -195,7 +80,7 @@ router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','
     const { rows } = await db.query(
       `UPDATE dental_appointments SET ${fields.join(',')} WHERE id=$${idx++} AND company_id=$${idx} RETURNING *`, values
     );
-    if (!rows.length) return res.status(404).json({ error: 'Agendamento não encontrado' });
+    if (!rows.length) return res.status(404).json({ error: 'Agendamento nao encontrado' });
     if (discount_type !== undefined || discount_value !== undefined) await recalcAppointmentTotal(req.params.aid);
     res.json({ appointment: rows[0] });
   } catch (err) {
@@ -219,13 +104,13 @@ router.delete('/appointments/:aid/procedures/:procId', requireAuth, requireRole(
       'DELETE FROM dental_appointment_procedures WHERE id=$1 AND appointment_id=$2 RETURNING id',
       [req.params.procId, req.params.aid]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Procedimento não encontrado' });
+    if (!rows.length) return res.status(404).json({ error: 'Procedimento nao encontrado' });
     await recalcAppointmentTotal(req.params.aid);
     res.json({ message: 'Procedimento removido' });
   } catch (err) { res.status(500).json({ error: 'Erro ao remover procedimento' }); }
 });
 
-// ── Odontograma (BE-25-09) ────────────────────────────────
+// ── Odontograma ───────────────────────────────────────────
 
 router.get('/patients/:pid/chart', requireAuth, async (req, res) => {
   try {
@@ -247,7 +132,7 @@ router.get('/patients/:pid/chart', requireAuth, async (req, res) => {
 
 router.post('/patients/:pid/chart', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { appointment_id, tooth_number, face, status, procedure_id, notes } = req.body;
-  if (!tooth_number || !status) return res.status(400).json({ error: 'tooth_number e status são obrigatórios' });
+  if (!tooth_number || !status) return res.status(400).json({ error: 'tooth_number e status sao obrigatorios' });
   try {
     const { rows } = await db.query(
       `INSERT INTO dental_chart_entries
@@ -260,11 +145,11 @@ router.post('/patients/:pid/chart', requireAuth, requireRole('client','analyst',
   } catch (err) { res.status(500).json({ error: 'Erro ao registrar no odontograma' }); }
 });
 
-// ── Receituário e atestados (BE-25-05) ────────────────────
+// ── Receituário e atestados ───────────────────────────────
 
 router.post('/prescriptions', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { patient_id, appointment_id, doc_type = 'receituario', content } = req.body;
-  if (!patient_id || !content) return res.status(400).json({ error: 'patient_id e content são obrigatórios' });
+  if (!patient_id || !content) return res.status(400).json({ error: 'patient_id e content sao obrigatorios' });
   try {
     const { rows } = await db.query(
       `INSERT INTO dental_prescriptions (company_id, patient_id, appointment_id, doc_type, content)
@@ -285,24 +170,15 @@ router.get('/patients/:pid/prescriptions', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar documentos' }); }
 });
 
-// ── Sub-routes ────────────────────────────────────────────
+// ── Sub-routes (feature modules) ──────────────────────────
 
-// D-02: Planos de Tratamento / Orcamentos
 router.use('/treatment-plans', require('./dentalTreatmentPlans'));
-
-// D-07: Imagens Clinicas
 router.use('/', require('./dentalImages'));
-
-// D-12: Pedidos de Laboratorio
 router.use('/', require('./dentalLab'));
-
-// D-16/D-17: Convênios + Guias TISS
 router.use('/insurance', require('./dentalInsurance'));
-
-// D-18/D-19/D-20/D-21: Specialty forms, Perio, Waitlist, Checkin
 router.use('/advanced', require('./dentalAdvanced'));
 
-// ── WebSocket token prep (BE-25-10) ───────────────────────
+// ── WebSocket token ───────────────────────────────────────
 
 router.post('/appointments/:aid/signature-token', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   try {
@@ -314,13 +190,8 @@ router.post('/appointments/:aid/signature-token', requireAuth, requireRole('clie
 router.get('/sign/:token', async (req, res) => {
   try {
     const tokenData = await validateWsToken(req.params.token);
-    if (!tokenData) return res.status(410).json({ error: 'Link expirado ou inválido. Solicite um novo ao dentista.' });
-    res.json({
-      valid: true,
-      appointment_id: tokenData.appointment_id,
-      expires_at: tokenData.expires_at,
-      message: 'Token válido. WebSocket disponível em /ws/sign/:token — implementado no BE-25-10',
-    });
+    if (!tokenData) return res.status(410).json({ error: 'Link expirado ou invalido.' });
+    res.json({ valid: true, appointment_id: tokenData.appointment_id, expires_at: tokenData.expires_at });
   } catch (err) { res.status(500).json({ error: 'Erro ao validar token' }); }
 });
 
