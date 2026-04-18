@@ -1,6 +1,7 @@
 // ============================================================
 // AURA. — AI Context: real business data per agent context
 // Fixed column names: stock_min (not min_stock_qty), price (not sell_price)
+// ODT-11: Added odonto context
 // ============================================================
 const db = require('../config/database');
 
@@ -88,6 +89,61 @@ async function getContextData(companyId, context) {
            WHERE s.company_id=$1 AND s.created_at >= NOW()-INTERVAL '30 days'
            GROUP BY p.name ORDER BY vendidos DESC LIMIT 5`, [companyId]);
         data.produtos_populares = pop.map(r => ({ nome: r.name, vendidos: parseInt(r.vendidos) }));
+        break;
+      }
+      case 'odonto': {
+        // Consultas do dia
+        try {
+          const { rows: [today] } = await db.query(
+            `SELECT COUNT(*) AS total,
+                    COUNT(CASE WHEN status='confirmed' THEN 1 END) AS confirmados,
+                    COUNT(CASE WHEN status IN ('scheduled','pending') THEN 1 END) AS pendentes,
+                    COUNT(CASE WHEN status='no_show' THEN 1 END) AS faltas
+             FROM dental_appointments
+             WHERE company_id=$1 AND (scheduled_at AT TIME ZONE 'America/Sao_Paulo')::date = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date`, [companyId]);
+          data.consultas_hoje = { total: parseInt(today?.total||0), confirmados: parseInt(today?.confirmados||0), pendentes: parseInt(today?.pendentes||0), faltas: parseInt(today?.faltas||0) };
+        } catch (_) { data.consultas_hoje = { total: 0 }; }
+
+        // Funil de leads
+        try {
+          const { rows: funnel } = await db.query(
+            `SELECT stage, COUNT(*) AS cnt, COALESCE(SUM(treatment_value),0) AS valor
+             FROM dental_leads WHERE company_id=$1 AND stage NOT IN ('completed','lost')
+             GROUP BY stage`, [companyId]);
+          data.funil_ativo = funnel.map(r => ({ stage: r.stage, qtd: parseInt(r.cnt), valor: parseFloat(r.valor) }));
+          data.pipeline_total = funnel.reduce((s, r) => s + parseFloat(r.valor), 0);
+        } catch (_) { data.funil_ativo = []; data.pipeline_total = 0; }
+
+        // Parcelas vencidas
+        try {
+          const { rows: [ov] } = await db.query(
+            `SELECT COUNT(*) AS cnt, COALESCE(SUM(tp.amount),0) AS valor
+             FROM dental_treatment_payments tp
+             JOIN dental_treatment_plans t ON t.id = tp.treatment_plan_id
+             WHERE t.company_id=$1 AND tp.status='pending' AND tp.due_date < CURRENT_DATE`, [companyId]);
+          data.parcelas_vencidas = { qtd: parseInt(ov?.cnt||0), valor: parseFloat(ov?.valor||0) };
+        } catch (_) { data.parcelas_vencidas = { qtd: 0, valor: 0 }; }
+
+        // Pacientes para recall
+        try {
+          const { rows: [recall] } = await db.query(
+            `SELECT COUNT(*) AS cnt FROM dental_patients p
+             WHERE p.company_id=$1
+               AND (SELECT MAX(a.scheduled_at) FROM dental_appointments a WHERE a.patient_id=p.id AND a.status='completed') < NOW()-INTERVAL '150 days'`, [companyId]);
+          data.pacientes_recall = parseInt(recall?.cnt || 0);
+        } catch (_) { data.pacientes_recall = 0; }
+
+        // Top procedimentos do mes
+        try {
+          const { rows: procs } = await db.query(
+            `SELECT ap.procedure_name, COUNT(*) AS qtd, COALESCE(SUM(ap.final_price),0) AS receita
+             FROM dental_appointment_procedures ap
+             JOIN dental_appointments a ON a.id = ap.appointment_id
+             WHERE a.company_id=$1 AND a.scheduled_at >= date_trunc('month', CURRENT_DATE)
+             GROUP BY ap.procedure_name ORDER BY receita DESC LIMIT 5`, [companyId]);
+          data.procedimentos_mes = procs.map(r => ({ nome: r.procedure_name, qtd: parseInt(r.qtd), receita: parseFloat(r.receita) }));
+        } catch (_) { data.procedimentos_mes = []; }
+
         break;
       }
     }
