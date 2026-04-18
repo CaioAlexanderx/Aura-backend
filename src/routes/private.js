@@ -81,6 +81,8 @@ router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalFunnel'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalBilling'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalRepasse'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalPortal'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalAutomation'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
 router.use('/food/deliverers', requirePlan('negocio', 'expansao'), require('./foodDeliverers'));
