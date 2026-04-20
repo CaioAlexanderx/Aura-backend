@@ -2,6 +2,7 @@
 // AURA. -- S4: Products CRUD
 // Plan limits: essencial=2000, negocio=7000, expansao=unlimited
 // FIX: DELETE tries first, handles FK with retry
+// FEAT: image_url included in GET and PATCH
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -33,7 +34,7 @@ router.get('/', async (req, res) => {
     const countRes = await db.query(`SELECT COUNT(*) AS total FROM products ${where}`, params);
     const dataRes = await db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
-              stock_qty, stock_min, stock_max, unit, color, size, is_active, created_at,
+              stock_qty, stock_min, stock_max, unit, color, size, image_url, is_active, created_at,
               (SELECT EXISTS(SELECT 1 FROM product_variants pv WHERE pv.product_id = products.id AND pv.is_active = true)) AS has_variants
        FROM products ${where} ORDER BY name ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
@@ -46,6 +47,7 @@ router.get('/', async (req, res) => {
       stock_qty: parseInt(r.stock_qty) || 0, min_stock: parseInt(r.stock_min) || 0,
       stock_max: parseInt(r.stock_max) || 0, unit: r.unit || 'un',
       color: r.color || '', size: r.size || '',
+      image_url: r.image_url || '',
       is_active: r.is_active !== false, created_at: r.created_at,
       has_variants: r.has_variants || false,
     }));
@@ -111,7 +113,7 @@ router.patch('/:pid', async (req, res) => {
     } catch (err) { console.error('[products] decrement error:', err.message); return res.status(500).json({ error: 'Erro ao decrementar estoque' }); }
   }
 
-  const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size' };
+  const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size', image_url:'image_url' };
   const numFields = ['price','cost_price','stock_qty','stock_min','stock_max'];
   const updates = [], values = []; let idx = 1;
   for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
@@ -135,12 +137,10 @@ router.patch('/:pid', async (req, res) => {
 router.delete('/:pid', async (req, res) => {
   const { id: cid, pid } = req.params;
   try {
-    // Try direct delete first (works when no FK references exist)
     const result = await db.query('DELETE FROM products WHERE id = $1 AND company_id = $2 RETURNING id, name', [pid, cid]);
     if (!result || !result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     res.json({ deleted: true, id: pid, name: result.rows[0].name });
   } catch (err) {
-    // FK violation — nullify references and retry
     if (err.code === '23503') {
       try {
         await db.query('UPDATE sale_items SET product_id = NULL WHERE product_id = $1', [pid]);
