@@ -29,6 +29,7 @@ router.use('/products', require('./productImage'));
 router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 router.use('/products/:pid/variants', require('./variants'));
+router.use('/product-categories', require('./productCategories'));
 router.use('/coupons', require('./coupons'));
 router.use('/nfce', require('./nfce'));
 router.use('/nfe', require('./nfe'));
