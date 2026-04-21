@@ -23,7 +23,7 @@ router.get('/tracking',requireAuth,async(req,res)=>{
       const dRate=dom>0?fat/dom:0;const proj=Math.round(dRate*dim);
       const cRate=parseFloat(g.commission_rate)||0;
       const comm=g.commission_enabled?Math.round(fat*cRate/100*100)/100:0;
-      return{employee_id:g.employee_id,employee_name:g.employee_name,goal_amount:ga,goal_units:gu,actual_revenue:fat,actual_units:vnd,pct_revenue:ga>0?Math.round(fat/ga*100):0,pct_units:gu>0?Math.round(vnd/gu*100):0,projected_revenue:proj,on_track:proj>=ga,remaining:Math.max(ga-fat,0),commission_rate:cRate,commission_amount:comm,days_remaining:dim-dom,ticket_medio:vnd>0?Math.round(fat/vnd*100)/100:0};
+      return{goal_id:g.id,employee_id:g.employee_id,employee_name:g.employee_name,goal_amount:ga,goal_units:gu,actual_revenue:fat,actual_units:vnd,pct_revenue:ga>0?Math.round(fat/ga*100):0,pct_units:gu>0?Math.round(vnd/gu*100):0,projected_revenue:proj,on_track:proj>=ga,remaining:Math.max(ga-fat,0),commission_rate:cRate,commission_amount:comm,days_remaining:dim-dom,ticket_medio:vnd>0?Math.round(fat/vnd*100)/100:0};
     });
     const tRev=tracking.reduce((s,t)=>s+t.actual_revenue,0);const tGoal=tracking.reduce((s,t)=>s+t.goal_amount,0);
     res.json({month:ref,days_in_month:dim,day_of_month:dom,is_current_month:isCur,employees:tracking,team:{total_revenue:tRev,total_goal:tGoal,pct:tGoal>0?Math.round(tRev/tGoal*100):0,total_commission:tracking.reduce((s,t)=>s+t.commission_amount,0)}});
