@@ -28,6 +28,7 @@ router.use('/companies/:id', privateCompaniesRouter);
 
 // Admin — Central de Comando
 router.use('/admin', require('./admin'));
+router.use('/admin', require('./adminAccessCodes'));
 router.use('/admin', require('./adminSupport'));
 router.use('/admin', require('./adminMetrics'));
 router.use('/admin', require('./adminClients360'));
