@@ -8,6 +8,8 @@
 //      - bypass employees (non-owners) from the billing gate
 //      - distinguish permanent codes (no trial_ends_at) from
 //        time-limited trials (access code + trial_ends_at set)
+// FEAT: expose vertical_active so the Vertical tab renders
+//      the correct screen without localStorage hack
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -83,7 +85,7 @@ router.post('/register', async (req, res) => {
       const cleanCnpj = cnpj.replace(/\D/g, '');
       if (cleanCnpj.length === 14 || cleanCnpj.length === 11) {
         const { rows: existingCompanies } = await client.query(
-          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used FROM companies WHERE cnpj = $1',
+          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active FROM companies WHERE cnpj = $1',
           [cleanCnpj]
         );
         if (existingCompanies.length > 0) {
@@ -100,7 +102,7 @@ router.post('/register', async (req, res) => {
       isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
       const { rows: [newCompany] } = await client.query(
-        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used',
+        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active',
         [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null]
       );
       company = newCompany;
@@ -135,6 +137,7 @@ router.post('/register', async (req, res) => {
         trial_ends_at: company.trial_ends_at,
         billing_status: company.billing_status || null,
         access_code_used: !!(company.access_code_used),
+        vertical_active: company.vertical_active || null,
         // member_role: role do usuario nesta empresa
         // 'owner' = fundador/dono, 'vendedor' etc = funcionario convidado.
         // Usado no billing gate: apenas owners sao redirecionados ao checkout.
@@ -155,7 +158,7 @@ router.post('/login', async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      'SELECT u.id, u.full_name AS name, u.email, u.password_hash, u.role, u.is_active, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name AS company_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides, c.billing_status, c.access_code_used, cm.role_label AS member_role FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = \'active\' AND cm.is_active = true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.email = $1 ORDER BY c.created_at ASC LIMIT 1',
+      'SELECT u.id, u.full_name AS name, u.email, u.password_hash, u.role, u.is_active, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name AS company_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides, c.billing_status, c.access_code_used, c.vertical_active, cm.role_label AS member_role FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = \'active\' AND cm.is_active = true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.email = $1 ORDER BY c.created_at ASC LIMIT 1',
       [email.toLowerCase().trim()]
     );
     if (!rows.length) return res.status(401).json({ error: 'Credenciais invalidas' });
@@ -181,6 +184,7 @@ router.post('/login', async (req, res) => {
         ? { id: user.company_id, name: user.company_name, plan: user.plan, onboarding_step: user.onboarding_step,
             module_overrides: user.module_overrides || {}, trial_active: trialActive, trial_ends_at: user.trial_ends_at,
             billing_status: user.billing_status || null, access_code_used: !!(user.access_code_used),
+            vertical_active: user.vertical_active || null,
             member_role: user.member_role || 'owner' }
         : null,
     });
@@ -220,7 +224,7 @@ router.post('/logout', async (req, res) => {
 router.post('/me', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      'SELECT u.id, u.full_name AS name, u.email, u.role, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides, c.billing_status, c.access_code_used, cm.role_label AS member_role FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status=\'active\' AND cm.is_active=true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.id = $1 ORDER BY c.created_at ASC LIMIT 1',
+      'SELECT u.id, u.full_name AS name, u.email, u.role, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides, c.billing_status, c.access_code_used, c.vertical_active, cm.role_label AS member_role FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status=\'active\' AND cm.is_active=true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.id = $1 ORDER BY c.created_at ASC LIMIT 1',
       [req.user.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Usuario nao encontrado' });
@@ -232,6 +236,7 @@ router.post('/me', requireAuth, async (req, res) => {
         ? { id: u.company_id, name: u.legal_name, plan: u.plan, onboarding_step: u.onboarding_step,
             module_overrides: u.module_overrides || {}, trial_active: trialActive, trial_ends_at: u.trial_ends_at,
             billing_status: u.billing_status || null, access_code_used: !!(u.access_code_used),
+            vertical_active: u.vertical_active || null,
             member_role: u.member_role || 'owner' }
         : null,
     });
