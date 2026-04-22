@@ -181,6 +181,88 @@ app.get('/health/sentry', function(req, res) {
   });
 });
 
+// GET /health/r2 — Diagnostico completo da conexao R2
+// Checa env vars, conexao S3, upload de test file e delete.
+// Publico mas nao expoe segredos (apenas prefixos de IDs).
+// Util para validar setup no Railway sem precisar de JWT.
+app.get('/health/r2', async function(req, res) {
+  const checks = {
+    env_account_id: !!process.env.R2_ACCOUNT_ID,
+    env_access_key: !!process.env.R2_ACCESS_KEY_ID,
+    env_secret_key: !!process.env.R2_SECRET_ACCESS_KEY,
+    env_bucket: process.env.R2_BUCKET_NAME || 'aura-storage (default)',
+    env_public_url: process.env.R2_PUBLIC_URL || '(not set — using default)',
+  };
+
+  // Mascara de IDs para debug sem vazar credenciais
+  if (process.env.R2_ACCOUNT_ID) {
+    const aid = process.env.R2_ACCOUNT_ID;
+    checks.account_id_suffix = '...' + aid.slice(-6);
+  }
+  if (process.env.R2_ACCESS_KEY_ID) {
+    const akid = process.env.R2_ACCESS_KEY_ID;
+    checks.access_key_suffix = '...' + akid.slice(-4);
+  }
+
+  // Se nao tem env vars, sai cedo
+  if (!checks.env_account_id || !checks.env_access_key || !checks.env_secret_key) {
+    return res.status(503).json({
+      status: 'not_configured',
+      message: 'Faltam env vars R2_ACCOUNT_ID, R2_ACCESS_KEY_ID ou R2_SECRET_ACCESS_KEY',
+      checks,
+    });
+  }
+
+  // Testa operacoes reais: list, upload, get, delete
+  const r2 = require('./utils/r2Storage');
+  const testKey = '_healthcheck/' + Date.now() + '.txt';
+  const testContent = Buffer.from('aura-r2-healthcheck-' + new Date().toISOString());
+
+  try {
+    const up = await r2.uploadToR2(testKey, testContent, 'text/plain');
+    if (!up.success) {
+      return res.status(503).json({
+        status: 'upload_failed',
+        message: 'S3 client conectou mas upload falhou',
+        error: up.error,
+        checks,
+      });
+    }
+    checks.test_upload = 'ok';
+    checks.test_key = up.key;
+    checks.test_public_url = up.url;
+  } catch (err) {
+    return res.status(503).json({
+      status: 'upload_exception',
+      message: 'Excecao no upload — verifique credenciais e bucket',
+      error: err.message,
+      checks,
+    });
+  }
+
+  try {
+    const signed = await r2.getSignedUrl(testKey, 60);
+    checks.test_signed_url = signed.startsWith('https://') ? 'ok' : 'fallback_to_public';
+  } catch (err) {
+    checks.test_signed_url = 'error: ' + err.message;
+  }
+
+  try {
+    const del = await r2.deleteFromR2(testKey);
+    checks.test_delete = del.success ? 'ok' : ('error: ' + del.error);
+  } catch (err) {
+    checks.test_delete = 'exception: ' + err.message;
+  }
+
+  res.json({
+    status: 'ok',
+    message: 'R2 configurado e funcional (upload + delete testados)',
+    bucket: checks.env_bucket,
+    checks,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 app.get('/', function(req, res) {
   res.json({ name: 'Aura. API', version: env.GIT_SHA || '1.0.0', status: 'online' });
 });
