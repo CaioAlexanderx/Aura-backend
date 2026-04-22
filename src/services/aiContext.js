@@ -2,6 +2,7 @@
 // AURA. — AI Context: real business data per agent context
 // Fixed column names: stock_min (not min_stock_qty), price (not sell_price)
 // ODT-11: Added odonto context
+// ODT-12: Fixed parcelas_vencidas query (table dental_treatment_plan_installments, col plan_id)
 // ============================================================
 const db = require('../config/database');
 
@@ -114,13 +115,13 @@ async function getContextData(companyId, context) {
           data.pipeline_total = funnel.reduce((s, r) => s + parseFloat(r.valor), 0);
         } catch (_) { data.funil_ativo = []; data.pipeline_total = 0; }
 
-        // Parcelas vencidas
+        // Parcelas vencidas (corrigido ODT-12: tabela dental_treatment_plan_installments, col plan_id)
         try {
           const { rows: [ov] } = await db.query(
-            `SELECT COUNT(*) AS cnt, COALESCE(SUM(tp.amount),0) AS valor
-             FROM dental_treatment_payments tp
-             JOIN dental_treatment_plans t ON t.id = tp.treatment_plan_id
-             WHERE t.company_id=$1 AND tp.status='pending' AND tp.due_date < CURRENT_DATE`, [companyId]);
+            `SELECT COUNT(*) AS cnt, COALESCE(SUM(i.amount),0) AS valor
+             FROM dental_treatment_plan_installments i
+             JOIN dental_treatment_plans t ON t.id = i.plan_id
+             WHERE t.company_id=$1 AND i.status='pending' AND i.due_date < CURRENT_DATE`, [companyId]);
           data.parcelas_vencidas = { qtd: parseInt(ov?.cnt||0), valor: parseFloat(ov?.valor||0) };
         } catch (_) { data.parcelas_vencidas = { qtd: 0, valor: 0 }; }
 
