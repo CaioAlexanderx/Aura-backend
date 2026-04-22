@@ -30,6 +30,7 @@ router.use('/companies/:id', privateCompaniesRouter);
 router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminAccessCodes'));
 router.use('/admin', require('./adminPlan'));
+router.use('/admin', require('./adminVertical'));
 router.use('/admin', require('./adminSupport'));
 router.use('/admin', require('./adminMetrics'));
 router.use('/admin', require('./adminClients360'));
