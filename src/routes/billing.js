@@ -2,6 +2,7 @@
 // AURA. — F6: Asaas Billing Integration (Hybrid Checkout)
 // Pix inline + Credit Card recurring via tokenization
 // FIX: Added /billing/tokenize endpoint for card tokenization
+// PRICING 21/04: Negocio 199->169.90, Expansao 299->269.90
 // ============================================================
 
 const express = require('express');
@@ -27,8 +28,8 @@ async function asaas(method, path, body) {
 
 const PLANS = {
   essencial: { name: 'Aura Essencial', monthly: 89 },
-  negocio:   { name: 'Aura Negocio',   monthly: 199 },
-  expansao:  { name: 'Aura Expansao',   monthly: 299 },
+  negocio:   { name: 'Aura Negocio',   monthly: 169.90 },
+  expansao:  { name: 'Aura Expansao',  monthly: 269.90 },
 };
 
 const ANNUAL_CARD_DISCOUNT = 0.15;
