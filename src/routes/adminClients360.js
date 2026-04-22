@@ -113,12 +113,13 @@ router.get('/clients/:cid/activity', ...adminOnly, asyncHandler(async (req, res)
   });
 }));
 
-// ── GET /admin/clients (enhanced — inclui health score) ─────────
+// ── GET /admin/clients (enhanced — inclui health score + vertical) ─
 router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(`
     SELECT c.id, c.trade_name, c.legal_name, c.plan, c.is_active,
        c.billing_status, c.billing_cycle, c.module_overrides,
        c.created_at, c.last_active_at, c.tax_regime, c.trial_ends_at,
+       c.vertical_active, c.vertical_enabled_at, c.suggested_vertical,
        u.email AS owner_email, u.full_name AS owner_name,
        h.score AS health_score, h.risk_level, h.activity_score, h.usage_score, h.payment_score, h.adoption_score,
        (SELECT COUNT(*) FROM transactions WHERE company_id=c.id) AS tx_count,
