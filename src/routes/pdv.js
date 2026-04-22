@@ -4,6 +4,7 @@
 // TIMEZONE FIX: Todas as datas em SP (America/Sao_Paulo), nao UTC.
 // FIX: Cancel restores stock + sets status='cancelled' + stock_movements
 // FEAT: seller_name — nome da vendedora salvo direto (plano Essencial)
+// FIX 22/04: validacao de estoque variant-aware (Fase C gap)
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -49,11 +50,27 @@ router.post('/sale', async (req, res) => {
         if (p.length) {
           productName = productName || p[0].name;
           costPrice   = parseFloat(p[0].cost_price || 0);
-          if (!sale_date && parseFloat(p[0].stock_qty) < qty) {
+
+          // FIX 22/04: validar estoque da variante quando variant_id presente
+          let stockAvailable = parseFloat(p[0].stock_qty);
+          let stockLabel = p[0].name;
+          if (item.variant_id) {
+            const { rows: v } = await client.query(
+              `SELECT stock_qty, sku_suffix FROM product_variants WHERE id=$1 AND product_id=$2`,
+              [item.variant_id, item.product_id]
+            );
+            if (v.length) {
+              stockAvailable = parseFloat(v[0].stock_qty);
+              stockLabel = p[0].name + (v[0].sku_suffix ? ` (${v[0].sku_suffix})` : ' (variante)');
+            }
+          }
+
+          if (!sale_date && stockAvailable < qty) {
             await client.query('ROLLBACK');
             return res.status(409).json({
-              error: `Estoque insuficiente para "${p[0].name}". Disponivel: ${p[0].stock_qty}`,
+              error: `Estoque insuficiente para "${stockLabel}". Disponivel: ${stockAvailable}`,
               product_id: item.product_id,
+              variant_id: item.variant_id || null,
             });
           }
         }
