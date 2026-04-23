@@ -1,6 +1,6 @@
 // ============================================================
 // AURA. — S11 D-16/D-17: Dental Insurance + TISS Guides
-// Mounted at: /companies/:id/dental/insurance
+// D-UNIFY: guias TISS referenciam customer_id (aceita patient_id legado).
 // ============================================================
 
 const express = require('express');
@@ -8,7 +8,17 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
-// ===== D-16: INSURANCE (Convênios) =====
+async function resolveCustomerId(companyId, body) {
+  const id = body.customer_id || body.patient_id;
+  if (!id) return null;
+  const { rows } = await db.query(
+    `SELECT id FROM customers WHERE id=$1 AND company_id=$2 AND is_patient=true`,
+    [id, companyId]
+  );
+  return rows.length ? rows[0].id : null;
+}
+
+// ===== D-16: INSURANCE =====
 
 router.get('/', requireAuth, async (req, res) => {
   try {
@@ -19,12 +29,12 @@ router.get('/', requireAuth, async (req, res) => {
       [req.params.id]
     );
     res.json({ total: rows.length, insurance: rows });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar convênios' }); }
+  } catch (err) { res.status(500).json({ error: 'Erro ao buscar convenios' }); }
 });
 
 router.post('/', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { name, registration, ans_code, contact_phone, contact_email, default_discount_pct, payment_deadline_days, notes } = req.body;
-  if (!name) return res.status(400).json({ error: 'name obrigatório' });
+  if (!name) return res.status(400).json({ error: 'name obrigatorio' });
   try {
     const { rows } = await db.query(
       `INSERT INTO dental_insurance (company_id, name, registration, ans_code, contact_phone, contact_email, default_discount_pct, payment_deadline_days, notes)
@@ -32,10 +42,9 @@ router.post('/', requireAuth, requireRole('client','analyst','admin'), async (re
       [req.params.id, name, registration||null, ans_code||null, contact_phone||null, contact_email||null, default_discount_pct||0, payment_deadline_days||30, notes||null]
     );
     res.status(201).json({ insurance: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro ao criar convênio' }); }
+  } catch (err) { res.status(500).json({ error: 'Erro ao criar convenio' }); }
 });
 
-// TUSS codes (global, read-only for clients)
 router.get('/tuss', requireAuth, async (req, res) => {
   const { specialty, search } = req.query;
   try {
@@ -48,7 +57,6 @@ router.get('/tuss', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar TUSS' }); }
 });
 
-// Insurance procedures (tabela do convênio)
 router.get('/:insId/procedures', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -60,7 +68,7 @@ router.get('/:insId/procedures', requireAuth, async (req, res) => {
 
 router.post('/:insId/procedures', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { tuss_code, tuss_description, covered_price, requires_auth, notes } = req.body;
-  if (!tuss_code || covered_price === undefined) return res.status(400).json({ error: 'tuss_code e covered_price obrigatórios' });
+  if (!tuss_code || covered_price === undefined) return res.status(400).json({ error: 'tuss_code e covered_price obrigatorios' });
   try {
     const { rows } = await db.query(
       `INSERT INTO dental_insurance_procedures (insurance_id, tuss_code, tuss_description, covered_price, requires_auth, notes)
@@ -72,6 +80,7 @@ router.post('/:insId/procedures', requireAuth, requireRole('client','analyst','a
 });
 
 // ===== D-17: TISS GUIDES =====
+// D-UNIFY: dental_tiss_guides.customer_id
 
 router.get('/tiss', requireAuth, async (req, res) => {
   const { status } = req.query;
@@ -80,9 +89,12 @@ router.get('/tiss', requireAuth, async (req, res) => {
     let where = 'WHERE g.company_id=$1';
     if (status) { params.push(status); where += ` AND g.status=$${params.length}`; }
     const { rows } = await db.query(
-      `SELECT g.*, dp.full_name AS patient_name, di.name AS insurance_name
+      `SELECT g.*,
+              g.customer_id AS patient_id,
+              c.name AS patient_name,
+              di.name AS insurance_name
        FROM dental_tiss_guides g
-       JOIN dental_patients dp ON dp.id=g.patient_id
+       JOIN customers c ON c.id=g.customer_id
        JOIN dental_insurance di ON di.id=g.insurance_id
        ${where} ORDER BY g.created_at DESC LIMIT 50`, params
     );
@@ -91,23 +103,34 @@ router.get('/tiss', requireAuth, async (req, res) => {
        FROM dental_tiss_guides WHERE company_id=$1 GROUP BY status`, [req.params.id]
     );
     res.json({ guides: rows, stats });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar guias' }); }
+  } catch (err) {
+    console.error('[insurance tiss GET]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar guias' });
+  }
 });
 
 router.post('/tiss', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { patient_id, insurance_id, treatment_plan_id, procedures, professional_id, professional_cro } = req.body;
-  if (!patient_id || !insurance_id || !procedures?.length) return res.status(400).json({ error: 'patient_id, insurance_id e procedures obrigatórios' });
+  const { insurance_id, treatment_plan_id, procedures, professional_id, professional_cro } = req.body;
+  if (!insurance_id || !procedures?.length) return res.status(400).json({ error: 'insurance_id e procedures obrigatorios' });
+
+  const customerId = await resolveCustomerId(req.params.id, req.body);
+  if (!customerId) return res.status(400).json({ error: 'Paciente (customer_id ou patient_id) invalido' });
+
   const totalValue = procedures.reduce((s, p) => s + (p.value || 0), 0);
   try {
     const { rows: configs } = await db.query('SELECT COUNT(*)::int AS c FROM dental_tiss_guides WHERE company_id=$1', [req.params.id]);
     const guideNumber = `GTO-${String((configs[0]?.c || 0) + 1).padStart(6, '0')}`;
     const { rows } = await db.query(
-      `INSERT INTO dental_tiss_guides (company_id, patient_id, insurance_id, treatment_plan_id, guide_number, procedures, total_value, professional_id, professional_cro)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [req.params.id, patient_id, insurance_id, treatment_plan_id||null, guideNumber, JSON.stringify(procedures), totalValue, professional_id||null, professional_cro||null]
+      `INSERT INTO dental_tiss_guides (company_id, customer_id, insurance_id, treatment_plan_id, guide_number, procedures, total_value, professional_id, professional_cro)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       RETURNING *, customer_id AS patient_id`,
+      [req.params.id, customerId, insurance_id, treatment_plan_id||null, guideNumber, JSON.stringify(procedures), totalValue, professional_id||null, professional_cro||null]
     );
     res.status(201).json({ guide: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro ao criar guia TISS' }); }
+  } catch (err) {
+    console.error('[insurance tiss POST]', err.message);
+    res.status(500).json({ error: 'Erro ao criar guia TISS' });
+  }
 });
 
 router.patch('/tiss/:guideId', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
@@ -126,7 +149,7 @@ router.patch('/tiss/:guideId', requireAuth, requireRole('client','analyst','admi
     const { rows } = await db.query(
       `UPDATE dental_tiss_guides SET ${fields.join(',')} WHERE id=$${idx++} AND company_id=$${idx} RETURNING *`, values
     );
-    if (!rows.length) return res.status(404).json({ error: 'Guia não encontrada' });
+    if (!rows.length) return res.status(404).json({ error: 'Guia nao encontrada' });
     res.json({ guide: rows[0] });
   } catch (err) { res.status(500).json({ error: 'Erro ao atualizar guia' }); }
 });
