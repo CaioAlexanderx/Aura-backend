@@ -2,16 +2,6 @@
 // AURA. — D-FIX #6: Dental Practitioners (CRUD)
 // Mounted at: /companies/:id/dental/practitioners
 // + Settings endpoint at /companies/:id/dental/settings
-//
-// Migration 049 cria:
-//   - tabela dental_practitioners (id, name, cro, specialty, color, ...)
-//   - companies.dental_settings jsonb
-//     ({ chairs_active: [bool, ...], chair_practitioner_ids: [uuid|null, ...] })
-//
-// Plano define max chairs:
-//   - essencial:    1 (sem opcao de odonto, mas defensivo)
-//   - negocio:      2
-//   - expansao+:    4
 // ============================================================
 
 const express = require('express');
@@ -28,18 +18,16 @@ function getMaxChairs(plan) {
   }
 }
 
-// Default settings: 1 cadeira ativa + N-1 inativas (limpa a UI)
 function buildDefaultSettings(plan) {
   const max = getMaxChairs(plan);
   const chairs_active = Array(max).fill(false);
-  chairs_active[0] = true;  // primeira sempre ativa
+  chairs_active[0] = true;
   return {
     chairs_active,
     chair_practitioner_ids: Array(max).fill(null),
   };
 }
 
-// Normaliza settings vindo do DB pra ter todas as keys e tamanho correto.
 function normalizeSettings(raw, plan) {
   const max = getMaxChairs(plan);
   const def = buildDefaultSettings(plan);
@@ -47,7 +35,7 @@ function normalizeSettings(raw, plan) {
 
   const chairs_active = Array.isArray(raw.chairs_active) ? raw.chairs_active.slice(0, max) : [];
   while (chairs_active.length < max) chairs_active.push(false);
-  if (!chairs_active.some(Boolean)) chairs_active[0] = true;  // garante 1 ativa
+  if (!chairs_active.some(Boolean)) chairs_active[0] = true;
 
   const chair_practitioner_ids = Array.isArray(raw.chair_practitioner_ids)
     ? raw.chair_practitioner_ids.slice(0, max)
@@ -59,7 +47,6 @@ function normalizeSettings(raw, plan) {
 
 // ===== SETTINGS =====
 
-// GET /companies/:id/dental/settings
 router.get('/settings', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -75,7 +62,6 @@ router.get('/settings', requireAuth, async (req, res) => {
   }
 });
 
-// PUT /companies/:id/dental/settings
 router.put('/settings', requireAuth, requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const { chairs_active, chair_practitioner_ids } = req.body || {};
   try {
@@ -85,7 +71,6 @@ router.put('/settings', requireAuth, requireRole('client', 'analyst', 'admin'), 
     const max = getMaxChairs(companyRows[0].plan);
     const newSettings = normalizeSettings({ chairs_active, chair_practitioner_ids }, companyRows[0].plan);
 
-    // Valida: practitioner_ids fornecidos devem existir e pertencer a empresa
     const ids = newSettings.chair_practitioner_ids.filter(Boolean);
     if (ids.length > 0) {
       const { rows: validIds } = await db.query(
@@ -109,9 +94,8 @@ router.put('/settings', requireAuth, requireRole('client', 'analyst', 'admin'), 
 
 // ===== PRACTITIONERS CRUD =====
 
-// GET /companies/:id/dental/practitioners
-// Auto-cria o owner (a partir do nome do owner da company) na primeira chamada
-// se nao tiver nenhum dentista cadastrado ainda.
+// D-FIX: bootstrap usa companies.owner_id + users.full_name
+// (antes: m.role='owner' e u.name, ambos inexistentes)
 router.get('/practitioners', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -122,16 +106,16 @@ router.get('/practitioners', requireAuth, async (req, res) => {
       [req.params.id]
     );
 
-    // Auto-bootstrap: se nao tem nenhum dentista, cria um placeholder pro owner
     if (rows.length === 0) {
       const { rows: ownerRows } = await db.query(
-        `SELECT u.name FROM users u
-         JOIN company_members m ON m.user_id = u.id
-         WHERE m.company_id = $1 AND m.role = 'owner'
+        `SELECT u.full_name
+         FROM companies c
+         JOIN users u ON u.id = c.owner_id
+         WHERE c.id = $1
          LIMIT 1`,
         [req.params.id]
       );
-      const ownerName = ownerRows[0]?.name || 'Dentista responsavel';
+      const ownerName = ownerRows[0]?.full_name || 'Dentista responsavel';
       const { rows: created } = await db.query(
         `INSERT INTO dental_practitioners (company_id, name, is_owner, color)
          VALUES ($1, $2, true, '#06B6D4') RETURNING *`,
@@ -147,7 +131,6 @@ router.get('/practitioners', requireAuth, async (req, res) => {
   }
 });
 
-// POST /companies/:id/dental/practitioners
 router.post('/practitioners', requireAuth, requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const { name, cro, specialty, color, email, phone } = req.body || {};
   if (!name || !String(name).trim()) {
@@ -171,7 +154,6 @@ router.post('/practitioners', requireAuth, requireRole('client', 'analyst', 'adm
   }
 });
 
-// PATCH /companies/:id/dental/practitioners/:pid
 router.patch('/practitioners/:pid', requireAuth, requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const { name, cro, specialty, color, email, phone, is_active } = req.body || {};
   const fields = [], values = [];
@@ -204,8 +186,6 @@ router.patch('/practitioners/:pid', requireAuth, requireRole('client', 'analyst'
   }
 });
 
-// DELETE /companies/:id/dental/practitioners/:pid
-// Owner nao pode ser deletado (so desativado via PATCH).
 router.delete('/practitioners/:pid', requireAuth, requireRole('client', 'analyst', 'admin'), async (req, res) => {
   try {
     const { rows: check } = await db.query(
@@ -224,6 +204,70 @@ router.delete('/practitioners/:pid', requireAuth, requireRole('client', 'analyst
     }
     console.error('[practitioners DELETE]', err.message);
     res.status(500).json({ error: 'Erro ao excluir dentista' });
+  }
+});
+
+// ===== LIST APPOINTMENTS =====
+// GET /companies/:id/dental/appointments
+// Lista agendamentos em formato de lista (para tabela CRUD).
+// Filtros: ?status=, ?practitioner_id=, ?from=YYYY-MM-DD, ?to=YYYY-MM-DD
+// Ordenado por scheduled_at DESC. Limit 500 (nao pensado pra paginacao ainda).
+router.get('/appointments', requireAuth, async (req, res) => {
+  const { status, practitioner_id, from, to } = req.query;
+  const params = [req.params.id];
+  let where = 'WHERE a.company_id = $1';
+
+  if (status) { params.push(status); where += ` AND a.status = $${params.length}`; }
+  if (practitioner_id) { params.push(practitioner_id); where += ` AND a.practitioner_id = $${params.length}`; }
+  if (from) { params.push(from); where += ` AND a.scheduled_at >= $${params.length}::date`; }
+  if (to)   { params.push(to);   where += ` AND a.scheduled_at < ($${params.length}::date + INTERVAL '1 day')`; }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT a.id, a.scheduled_at, a.duration_min, a.status, a.chief_complaint, a.total,
+              a.practitioner_id,
+              a.customer_id,
+              a.customer_id AS patient_id,
+              c.name  AS patient_name,
+              c.phone AS patient_phone,
+              pr.name AS professional_name
+       FROM dental_appointments a
+       JOIN customers c ON c.id = a.customer_id
+       LEFT JOIN dental_practitioners pr ON pr.id = a.practitioner_id
+       ${where}
+       ORDER BY a.scheduled_at DESC
+       LIMIT 500`,
+      params
+    );
+    res.json({ total: rows.length, appointments: rows });
+  } catch (err) {
+    console.error('[appointments list GET]', err.message);
+    res.status(500).json({ error: 'Erro ao listar agendamentos' });
+  }
+});
+
+// DELETE /companies/:id/dental/appointments/:aid
+// Remove um agendamento (hard delete). FK em cascade pra procedures.
+// Use PATCH status=cancelado para soft-delete (mantem historico).
+router.delete('/appointments/:aid', requireAuth, requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  try {
+    const { rows: check } = await db.query(
+      'SELECT status FROM dental_appointments WHERE id = $1 AND company_id = $2',
+      [req.params.aid, req.params.id]
+    );
+    if (!check.length) return res.status(404).json({ error: 'Agendamento nao encontrado' });
+    if (check[0].status === 'concluido') {
+      return res.status(409).json({ error: 'Agendamento concluido nao pode ser excluido (historico clinico).' });
+    }
+    await db.query('DELETE FROM dental_appointment_procedures WHERE appointment_id = $1', [req.params.aid]);
+    await db.query('DELETE FROM dental_appointments WHERE id = $1 AND company_id = $2', [req.params.aid, req.params.id]);
+    res.json({ deleted: true });
+  } catch (err) {
+    if (err.code === '23503') {
+      return res.status(409).json({ error: 'Agendamento possui registros vinculados. Cancele-o em vez de excluir.' });
+    }
+    console.error('[appointments DELETE]', err.message);
+    res.status(500).json({ error: 'Erro ao excluir agendamento' });
   }
 });
 
