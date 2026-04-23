@@ -86,6 +86,7 @@ router.use('/dre-simples', requirePlan('expansao'), require('./dreSimples'));
 router.use('/alerts', requirePlan('expansao'), require('./smartAlerts'));
 router.use('/reactivation', requirePlan('expansao'), require('./customerReactivation'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalDashboard'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalFunnel'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalBilling'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalRepasse'));
