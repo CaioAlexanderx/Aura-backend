@@ -44,7 +44,10 @@ router.use('/onboarding', require('./onboarding'));
 router.use('/export', require('./exportReports'));
 router.use('/', require('./importData'));
 router.use('/print', require('./print'));
+// /sales/analytics REGISTRADO ANTES de /sales pra que Express resolva
+// o sub-path mais especifico primeiro (ordem de registro importa).
 router.use('/sales/analytics', require('./salesAnalytics'));
+router.use('/sales', require('./sales'));
 router.use('/reviews', require('./reviews').reviewsRouter);
 router.use('/modules', require('./modules'));
 router.use('/billing', require('./billing'));
