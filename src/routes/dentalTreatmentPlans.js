@@ -1,6 +1,7 @@
 // ============================================================
 // AURA. — D-02: Dental Treatment Plans (Orcamentos)
-// CRUD for treatment plans with items and installments
+// D-UNIFY: patient_id = customers.id (paciente e customer).
+// Novos inserts usam customer_id; patient_id fica NULL.
 // Mounted at: /companies/:id/dental/treatment-plans
 // ============================================================
 
@@ -10,26 +11,42 @@ const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { logAuditAction } = require('../middleware/auditLog');
 
+// Aceita patient_id (legado) ou customer_id; valida existe + is_patient=true
+async function resolveCustomerId(companyId, source) {
+  const id = source.customer_id || source.patient_id;
+  if (!id) return null;
+  const { rows } = await db.query(
+    `SELECT id FROM customers
+     WHERE id = $1 AND company_id = $2 AND is_patient = true`,
+    [id, companyId]
+  );
+  return rows.length ? rows[0].id : null;
+}
+
 // ── LIST treatment plans (with filters) ─────────────────
 router.get('/', requireAuth, async (req, res) => {
-  const { status, patient_id } = req.query;
+  const { status, patient_id, customer_id } = req.query;
+  const filterPatient = customer_id || patient_id;
   try {
     const params = [req.params.id];
     let where = 'WHERE tp.company_id=$1';
     if (status) { params.push(status); where += ` AND tp.status=$${params.length}::dental_plan_status`; }
-    if (patient_id) { params.push(patient_id); where += ` AND tp.patient_id=$${params.length}`; }
+    if (filterPatient) { params.push(filterPatient); where += ` AND tp.customer_id=$${params.length}`; }
 
     const { rows } = await db.query(
-      `SELECT tp.*, p.full_name AS patient_name, p.phone AS patient_phone,
+      `SELECT tp.*,
+              tp.customer_id AS patient_id,
+              c.name  AS patient_name,
+              c.phone AS patient_phone,
               (SELECT COUNT(*) FROM dental_treatment_plan_items WHERE plan_id=tp.id) AS items_count,
               (SELECT COUNT(*) FROM dental_treatment_plan_items WHERE plan_id=tp.id AND status='concluido') AS items_done
        FROM dental_treatment_plans tp
-       JOIN dental_patients p ON p.id=tp.patient_id
+       JOIN customers c ON c.id = tp.customer_id
        ${where}
-       ORDER BY tp.created_at DESC`, params
+       ORDER BY tp.created_at DESC`,
+      params
     );
-    
-    // Funnel stats
+
     const { rows: funnel } = await db.query(
       `SELECT status, COUNT(*)::int AS count, COALESCE(SUM(total),0)::numeric AS total_value
        FROM dental_treatment_plans WHERE company_id=$1
@@ -38,7 +55,7 @@ router.get('/', requireAuth, async (req, res) => {
 
     res.json({ total: rows.length, plans: rows, funnel });
   } catch (err) {
-    console.error('treatment plans list error:', err);
+    console.error('[treatmentPlans GET /]', err.message);
     res.status(500).json({ error: 'Erro ao listar orcamentos' });
   }
 });
@@ -47,10 +64,14 @@ router.get('/', requireAuth, async (req, res) => {
 router.get('/:planId', requireAuth, async (req, res) => {
   try {
     const { rows: plans } = await db.query(
-      `SELECT tp.*, p.full_name AS patient_name, p.phone AS patient_phone, p.email AS patient_email
+      `SELECT tp.*,
+              tp.customer_id AS patient_id,
+              c.name  AS patient_name,
+              c.phone AS patient_phone,
+              c.email AS patient_email
        FROM dental_treatment_plans tp
-       JOIN dental_patients p ON p.id=tp.patient_id
-       WHERE tp.id=$1 AND tp.company_id=$2`,
+       JOIN customers c ON c.id = tp.customer_id
+       WHERE tp.id = $1 AND tp.company_id = $2`,
       [req.params.planId, req.params.id]
     );
     if (!plans.length) return res.status(404).json({ error: 'Orcamento nao encontrado' });
@@ -66,36 +87,37 @@ router.get('/:planId', requireAuth, async (req, res) => {
 
     res.json({ plan: { ...plans[0], items, installments } });
   } catch (err) {
+    console.error('[treatmentPlans GET /:planId]', err.message);
     res.status(500).json({ error: 'Erro ao buscar orcamento' });
   }
 });
 
 // ── CREATE treatment plan ────────────────────────────
 router.post('/', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { patient_id, items = [], discount_pct = 0, notes, valid_until } = req.body;
-  if (!patient_id) return res.status(400).json({ error: 'patient_id e obrigatorio' });
+  const { items = [], discount_pct = 0, notes, valid_until } = req.body;
+
+  const customerId = await resolveCustomerId(req.params.id, req.body);
+  if (!customerId) return res.status(400).json({ error: 'Paciente (customer_id ou patient_id) invalido ou nao encontrado' });
   if (!items.length) return res.status(400).json({ error: 'Adicione pelo menos um procedimento' });
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
 
-    // Calculate totals
     let subtotal = 0;
     for (const item of items) { subtotal += parseFloat(item.price || 0); }
     const discountAmount = Math.round(subtotal * discount_pct) / 100;
     const total = Math.round((subtotal - discountAmount) * 100) / 100;
 
-    // Create plan
     const { rows: [plan] } = await client.query(
       `INSERT INTO dental_treatment_plans
-         (company_id, patient_id, subtotal, discount_pct, discount_amount, total, notes, valid_until, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [req.params.id, patient_id, subtotal, discount_pct, discountAmount, total,
+         (company_id, customer_id, subtotal, discount_pct, discount_amount, total, notes, valid_until, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       RETURNING *, customer_id AS patient_id`,
+      [req.params.id, customerId, subtotal, discount_pct, discountAmount, total,
        notes||null, valid_until||null, req.user.id]
     );
 
-    // Insert items
     const insertedItems = [];
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
@@ -112,17 +134,17 @@ router.post('/', requireAuth, requireRole('client','analyst','admin'), async (re
     await client.query('COMMIT');
 
     logAuditAction(req.user.id, req.params.id, 'treatment_plan_created',
-      `Plan ${plan.plan_number} for patient ${patient_id} — R$ ${total}`);
+      `Plan ${plan.plan_number} for customer ${customerId} — R$ ${total}`);
 
     res.status(201).json({ plan: { ...plan, items: insertedItems } });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('create treatment plan error:', err);
+    console.error('[treatmentPlans POST /]', err.message);
     res.status(500).json({ error: 'Erro ao criar orcamento' });
   } finally { client.release(); }
 });
 
-// ── UPDATE plan status ───────────────────────────────
+// ── UPDATE plan (status, discount, notes) ────────────────
 router.patch('/:planId', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { status, discount_pct, notes, valid_until } = req.body;
   const fields = [], values = [];
@@ -151,7 +173,6 @@ router.patch('/:planId', requireAuth, requireRole('client','analyst','admin'), a
     );
     if (!rows.length) return res.status(404).json({ error: 'Orcamento nao encontrado' });
 
-    // Recalc if discount changed
     if (discount_pct !== undefined) {
       const { rows: items } = await db.query(
         'SELECT price FROM dental_treatment_plan_items WHERE plan_id=$1', [req.params.planId]
@@ -173,6 +194,7 @@ router.patch('/:planId', requireAuth, requireRole('client','analyst','admin'), a
 
     res.json({ plan: rows[0] });
   } catch (err) {
+    console.error('[treatmentPlans PATCH /:planId]', err.message);
     res.status(500).json({ error: 'Erro ao atualizar orcamento' });
   }
 });
@@ -193,7 +215,6 @@ router.post('/:planId/installments', requireAuth, requireRole('client','analyst'
     const installmentAmount = Math.floor(total / count * 100) / 100;
     const remainder = Math.round((total - installmentAmount * count) * 100) / 100;
 
-    // Clear existing installments
     await db.query('DELETE FROM dental_treatment_plan_installments WHERE plan_id=$1', [req.params.planId]);
 
     const baseDate = first_due_date ? new Date(first_due_date) : new Date();
@@ -215,7 +236,7 @@ router.post('/:planId/installments', requireAuth, requireRole('client','analyst'
 
     res.status(201).json({ count, total, installments });
   } catch (err) {
-    console.error('installments error:', err);
+    console.error('[treatmentPlans POST installments]', err.message);
     res.status(500).json({ error: 'Erro ao gerar parcelas' });
   }
 });
