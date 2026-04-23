@@ -26,6 +26,7 @@ router.use('/pdv', require('./pdv'));
 router.use('/', require('./pdvSettings'));
 router.use('/products', require('./productsDuplicates'));
 router.use('/products', require('./productsBatch'));
+router.use('/products', require('./productsVariations'));
 router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
 router.use('/products', require('./productImage'));
