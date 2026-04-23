@@ -15,6 +15,7 @@ router.use('/transactions', require('./transactions'));
 router.use('/transactions', require('./transactionsBatch'));
 router.use('/transactions/categorize', require('./categorize'));
 router.use('/transactions', require('./categorize'));
+router.use('/', require('./transactionSale'));
 router.use('/prolabore', require('./prolabore'));
 router.use('/dre', require('./dre'));
 router.use('/financial/history', require('./financialHistory'));
