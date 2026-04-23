@@ -1,11 +1,7 @@
 // ============================================================
 // AURA. — ODT-01: Funil de Vendas Odonto
-// GET  /dental/funnel          — kanban data por stage
-// GET  /dental/funnel/stats     — metricas conversao
-// POST /dental/funnel/leads     — criar lead
-// PATCH /dental/funnel/leads/:lid — mover stage / atualizar
-// POST /dental/funnel/leads/:lid/convert — converter em paciente
-// GET  /dental/funnel/leads/:lid/timeline — historico
+// D-UNIFY: dental_leads.customer_id (paciente = customer).
+// convert: cria customer com is_patient=true (NAO mais dental_patients).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -15,10 +11,13 @@ router.get('/funnel', requireAuth, async (req, res) => {
   const cid = req.params.id;
   try {
     const { rows } = await db.query(
-      `SELECT l.*, e.name AS assigned_name, p.full_name AS patient_name
+      `SELECT l.*,
+              l.customer_id AS patient_id,
+              e.name AS assigned_name,
+              c.name AS patient_name
        FROM dental_leads l
        LEFT JOIN employees e ON e.id = l.assigned_to
-       LEFT JOIN dental_patients p ON p.id = l.patient_id
+       LEFT JOIN customers c ON c.id = l.customer_id
        WHERE l.company_id = $1
        ORDER BY l.stage_changed_at DESC`, [cid]);
     const stages = ['lead','contacted','evaluation_scheduled','evaluation_done','budget_sent','budget_approved','in_treatment','completed','lost'];
@@ -32,7 +31,10 @@ router.get('/funnel', requireAuth, async (req, res) => {
       }
     }
     res.json({ stages: Object.values(byStage), total: rows.length });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro ao buscar funil' }); }
+  } catch (err) {
+    console.error('[dentalFunnel GET /funnel]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar funil' });
+  }
 });
 
 router.get('/funnel/stats', requireAuth, async (req, res) => {
@@ -64,7 +66,10 @@ router.get('/funnel/stats', requireAuth, async (req, res) => {
       completed_value: parseFloat(counts.completed_value),
       avg_days_to_complete: parseInt(avgTime?.avg_days) || null,
     });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro stats' }); }
+  } catch (err) {
+    console.error('[dentalFunnel GET /funnel/stats]', err.message);
+    res.status(500).json({ error: 'Erro stats' });
+  }
 });
 
 router.post('/funnel/leads', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
@@ -80,7 +85,10 @@ router.post('/funnel/leads', requireAuth, requireRole('client','analyst','admin'
       `INSERT INTO dental_lead_history (lead_id, to_stage, changed_by, notes) VALUES ($1,'lead',$2,'Lead criado')`,
       [rows[0].id, req.user.id]);
     res.status(201).json({ lead: rows[0] });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro ao criar lead' }); }
+  } catch (err) {
+    console.error('[dentalFunnel POST /funnel/leads]', err.message);
+    res.status(500).json({ error: 'Erro ao criar lead' });
+  }
 });
 
 router.patch('/funnel/leads/:lid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
@@ -110,29 +118,66 @@ router.patch('/funnel/leads/:lid', requireAuth, requireRole('client','analyst','
         [lid, oldStage, stage, req.user.id, notes || null]);
     }
     res.json({ lead: rows[0] });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro ao atualizar lead' }); }
+  } catch (err) {
+    console.error('[dentalFunnel PATCH /funnel/leads/:lid]', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar lead' });
+  }
 });
 
+// D-UNIFY: convert cria customer com is_patient=true (nao mais dental_patients)
 router.post('/funnel/leads/:lid/convert', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { lid } = req.params; const cid = req.params.id;
   const { lgpd_consent = true } = req.body;
+
+  if (!lgpd_consent) {
+    return res.status(400).json({
+      error: 'Consentimento LGPD Art.11 e obrigatorio para converter lead em paciente',
+    });
+  }
+
   try {
-    const { rows: leads } = await db.query('SELECT * FROM dental_leads WHERE id=$1 AND company_id=$2', [lid, cid]);
+    const { rows: leads } = await db.query(
+      'SELECT * FROM dental_leads WHERE id=$1 AND company_id=$2', [lid, cid]);
     if (!leads.length) return res.status(404).json({ error: 'Lead nao encontrado' });
     const lead = leads[0];
-    if (lead.patient_id) return res.status(409).json({ error: 'Lead ja convertido', patient_id: lead.patient_id });
-    const { rows: patient } = await db.query(
-      `INSERT INTO dental_patients (company_id, full_name, phone, email, lgpd_consent, lgpd_consent_at)
-       VALUES ($1,$2,$3,$4,$5,NOW()) RETURNING *`,
+    if (lead.customer_id) {
+      return res.status(409).json({ error: 'Lead ja convertido', customer_id: lead.customer_id, patient_id: lead.customer_id });
+    }
+
+    // Cria customer com is_patient=true
+    const { rows: customer } = await db.query(
+      `INSERT INTO customers (company_id, name, phone, email, is_patient, lgpd_consent, lgpd_consent_at)
+       VALUES ($1, $2, $3, $4, true, $5, NOW())
+       RETURNING *`,
       [cid, lead.lead_name, lead.lead_phone, lead.lead_email, lgpd_consent]);
+
+    // Vincula ao lead
     await db.query(
-      `UPDATE dental_leads SET patient_id=$1, stage='evaluation_scheduled', stage_changed_at=NOW(), updated_at=NOW() WHERE id=$2`,
-      [patient[0].id, lid]);
+      `UPDATE dental_leads
+       SET customer_id=$1, stage='evaluation_scheduled', stage_changed_at=NOW(), updated_at=NOW()
+       WHERE id=$2`,
+      [customer[0].id, lid]);
+
     await db.query(
-      `INSERT INTO dental_lead_history (lead_id, from_stage, to_stage, changed_by, notes) VALUES ($1,$2,'evaluation_scheduled',$3,'Convertido em paciente')`,
+      `INSERT INTO dental_lead_history (lead_id, from_stage, to_stage, changed_by, notes)
+       VALUES ($1, $2, 'evaluation_scheduled', $3, 'Convertido em paciente')`,
       [lid, lead.stage, req.user.id]);
-    res.json({ patient: patient[0], lead_id: lid });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Erro ao converter' }); }
+
+    // Response com alias patient pra compat com FE legado
+    const patient = {
+      id: customer[0].id,
+      full_name: customer[0].name,
+      phone: customer[0].phone,
+      email: customer[0].email,
+      lgpd_consent: customer[0].lgpd_consent,
+      ...customer[0],
+    };
+
+    res.json({ patient, customer: customer[0], lead_id: lid });
+  } catch (err) {
+    console.error('[dentalFunnel convert]', err.message);
+    res.status(500).json({ error: 'Erro ao converter' });
+  }
 });
 
 router.get('/funnel/leads/:lid/timeline', requireAuth, async (req, res) => {
@@ -142,7 +187,10 @@ router.get('/funnel/leads/:lid/timeline', requireAuth, async (req, res) => {
        LEFT JOIN users u ON u.id = h.changed_by
        WHERE h.lead_id = $1 ORDER BY h.created_at ASC`, [req.params.lid]);
     res.json({ timeline: rows });
-  } catch (err) { res.status(500).json({ error: 'Erro timeline' }); }
+  } catch (err) {
+    console.error('[dentalFunnel timeline]', err.message);
+    res.status(500).json({ error: 'Erro timeline' });
+  }
 });
 
 module.exports = router;
