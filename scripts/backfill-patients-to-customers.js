@@ -3,34 +3,74 @@
 //
 // Executar APOS aplicar migration 050_unify_customers_patients.sql
 //
-// Uso:
-//   node scripts/backfill-patients-to-customers.js --dry-run   # default, so simula
-//   node scripts/backfill-patients-to-customers.js --apply     # aplica de fato
-//   node scripts/backfill-patients-to-customers.js --apply --company=<uuid>  # so uma empresa
+// ── COMO RODAR (3 opcoes) ──────────────────────────────────
 //
+//  A) Via Railway (mais seguro, usa env de producao):
+//     railway run node scripts/backfill-patients-to-customers.js --dry-run
+//     railway run node scripts/backfill-patients-to-customers.js --apply
+//
+//  B) Via .env local (se .env esta na raiz do projeto):
+//     node scripts/backfill-patients-to-customers.js --dry-run
+//
+//  C) Via DATABASE_URL explicita:
+//     SUPABASE_DB_URL="postgresql://..." node scripts/backfill-patients-to-customers.js --dry-run
+//     ou:
+//     node scripts/backfill-patients-to-customers.js --dry-run --url="postgresql://..."
+//
+// ── FLAGS ──────────────────────────────────────────────────
+//  --dry-run          (default) simula, nao persiste nada
+//  --apply            aplica de verdade
+//  --company=<uuid>   filtra uma empresa
+//  --url=<pg-url>     connection string explicita
+//
+// ── LOGICA ─────────────────────────────────────────────────
 // Matching (por company_id):
 //   1. CPF exato (so digitos)
-//   2. Telefone exato (ultimos 10 digitos)
+//   2. Telefone (ultimos 10 digitos)
 //   3. Email (lowercase, trim)
 //
 // Merge rules (quando acha match):
 //   - Campos clinicos (allergies, medical_history, medications, insurance_*):
-//     sobrescreve do dental_patient (fonte de verdade clinica)
-//   - gender, birth_date: prioriza customers existente se nao-null; senao do dental
+//     sobrescreve com dental_patient (fonte de verdade clinica)
+//   - gender / birth_date / cpf_cnpj / phone / email: so preenche se customer vazio
 //   - name: mantem customers.name (nao sobrescreve)
-//   - is_patient: sempre true
+//   - is_patient: sempre true apos migracao
 //   - lgpd_consent: OR dos dois (true se qualquer um tiver)
-//   - cpf_cnpj: se customers.cpf_cnpj for null, popula do dental_patient.cpf
 //
-// Quando NAO acha match: cria novo customer com dados do dental_patient.
-// Idempotencia: skip se ja tem mapping (dental_patients_migration_map).
+// Quando NAO acha match: cria novo customer a partir do dental_patient.
+// Idempotente: skip se appointments do paciente ja tem customer_id.
 // ============================================================
 
-const db = require('../src/config/database');
+// Tenta carregar .env se existir (opcional). Silencia erro se nao encontrar.
+try { require('dotenv').config(); } catch (_) {}
+
+const { Pool } = require('pg');
 
 const args = process.argv.slice(2);
-const DRY_RUN = !args.includes('--apply');
-const COMPANY_FILTER = (args.find(a => a.startsWith('--company=')) || '').split('=')[1] || null;
+const DRY_RUN         = !args.includes('--apply');
+const COMPANY_FILTER  = (args.find(a => a.startsWith('--company=')) || '').split('=')[1] || null;
+const URL_FROM_FLAG   = (args.find(a => a.startsWith('--url=')) || '').split('=').slice(1).join('=');
+
+const DATABASE_URL = URL_FROM_FLAG
+                  || process.env.SUPABASE_DB_URL
+                  || process.env.DATABASE_URL;
+
+if (!DATABASE_URL) {
+  console.error('[backfill][ERROR] DATABASE_URL nao encontrada.');
+  console.error('');
+  console.error('Opcoes:');
+  console.error('  1) railway run node scripts/backfill-patients-to-customers.js --dry-run');
+  console.error('  2) Criar .env com SUPABASE_DB_URL=postgresql://...');
+  console.error('  3) SUPABASE_DB_URL="postgresql://..." node scripts/backfill-patients-to-customers.js --dry-run');
+  console.error('  4) node scripts/backfill-patients-to-customers.js --dry-run --url="postgresql://..."');
+  process.exit(1);
+}
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+  max: 3,
+});
 
 function log(...m)  { console.log('[backfill]', ...m); }
 function warn(...m) { console.warn('[backfill][WARN]', ...m); }
@@ -43,7 +83,6 @@ function normEmail(v) { return v ? String(v).trim().toLowerCase() : ''; }
 
 // ── Match logic ─────────────────────────────────────────
 async function findMatch(client, companyId, patient) {
-  // Prioridade: CPF > phone > email
   const cpf   = normCpf(patient.cpf);
   const phone = normPhone(patient.phone);
   const email = normEmail(patient.email);
@@ -88,7 +127,6 @@ async function mergeIntoCustomer(client, customer, patient) {
   const vals = [];
   let idx = 1;
 
-  // Campos clinicos — sempre do paciente (fonte de verdade)
   const clinical = ['allergies', 'medical_history', 'medications',
                     'insurance_name', 'insurance_card', 'insurance_plan', 'insurance_exp'];
   for (const f of clinical) {
@@ -98,17 +136,14 @@ async function mergeIntoCustomer(client, customer, patient) {
     }
   }
 
-  // gender / birth_date: so se customers estava vazio
   if (!customer.gender     && patient.gender)     { sets.push(`gender = $${idx++}`);     vals.push(patient.gender); }
   if (!customer.birth_date && patient.birth_date) { sets.push(`birth_date = $${idx++}`); vals.push(patient.birth_date); }
   if (!customer.cpf_cnpj   && patient.cpf)        { sets.push(`cpf_cnpj = $${idx++}`);   vals.push(patient.cpf); }
   if (!customer.phone      && patient.phone)      { sets.push(`phone = $${idx++}`);      vals.push(patient.phone); }
   if (!customer.email      && patient.email)      { sets.push(`email = $${idx++}`);      vals.push(patient.email); }
 
-  // Flags
   sets.push(`is_patient = true`);
 
-  // LGPD: OR dos dois
   const consent = customer.lgpd_consent || patient.lgpd_consent;
   if (consent && !customer.lgpd_consent) {
     sets.push(`lgpd_consent = true`);
@@ -119,7 +154,9 @@ async function mergeIntoCustomer(client, customer, patient) {
   sets.push(`updated_at = NOW()`);
   vals.push(customer.id);
 
-  if (sets.length === 1) return customer.id;  // nada a atualizar alem de is_patient
+  if (sets.length === 2) {
+    // so is_patient + updated_at — vale UPDATE mesmo assim pra marcar o flag
+  }
 
   if (!DRY_RUN) {
     await client.query(
@@ -133,7 +170,7 @@ async function mergeIntoCustomer(client, customer, patient) {
 // ── Create new customer from dental_patient ─────────────
 async function createCustomerFromPatient(client, companyId, patient) {
   if (!patient.lgpd_consent) {
-    warn(`Paciente ${patient.id} (${patient.full_name}) sem lgpd_consent — criado mesmo assim mas marque consent no primeiro uso.`);
+    warn(`Paciente ${patient.id} (${patient.full_name}) sem lgpd_consent — criando assim mesmo; colete consent no primeiro uso.`);
   }
 
   if (DRY_RUN) return '<DRY-RUN-NEW-UUID>';
@@ -203,7 +240,7 @@ async function updateDentalFKs(client, patientId, customerId) {
 
 // ── Processar uma empresa ───────────────────────────────
 async function processCompany(companyId) {
-  const client = await db.connect();
+  const client = await pool.connect();
   const stats = { patients: 0, merged: 0, created: 0, skipped: 0, fks: {} };
 
   try {
@@ -223,8 +260,7 @@ async function processCompany(companyId) {
     log(`Empresa ${companyId}: ${patients.length} paciente(s) a processar`);
 
     for (const p of patients) {
-      // Idempotencia: se ja existe customer com mesma empresa, lgpd_consent e is_patient
-      // e algum appointment ja tem customer_id, assume que foi migrado
+      // Idempotencia: se algum appointment do paciente ja tem customer_id, assume migrado
       const { rows: existingFks } = await client.query(
         `SELECT DISTINCT customer_id FROM dental_appointments
          WHERE patient_id = $1 AND customer_id IS NOT NULL LIMIT 1`,
@@ -232,7 +268,7 @@ async function processCompany(companyId) {
       );
       if (existingFks.length) {
         stats.skipped++;
-        log(`  [skip] paciente ${p.full_name} ja migrado (customer=${existingFks[0].customer_id})`);
+        log(`  [skip] ${p.full_name} ja migrado (customer=${existingFks[0].customer_id})`);
         continue;
       }
 
@@ -278,12 +314,20 @@ async function main() {
   log(DRY_RUN ? '=== DRY-RUN (nada sera escrito) ===' : '=== APPLY (dados serao modificados) ===');
   if (COMPANY_FILTER) log(`Filtro: company_id = ${COMPANY_FILTER}`);
 
+  // Testa conexao
+  try {
+    await pool.query('SELECT 1');
+  } catch (e) {
+    err(`Falha ao conectar no banco: ${e.message}`);
+    process.exit(1);
+  }
+
   const { rows: companies } = COMPANY_FILTER
-    ? await db.query('SELECT id, legal_name FROM companies WHERE id = $1', [COMPANY_FILTER])
-    : await db.query(`SELECT DISTINCT c.id, c.legal_name
-                       FROM companies c
-                       JOIN dental_patients dp ON dp.company_id = c.id
-                       ORDER BY c.legal_name`);
+    ? await pool.query('SELECT id, legal_name FROM companies WHERE id = $1', [COMPANY_FILTER])
+    : await pool.query(`SELECT DISTINCT c.id, c.legal_name
+                        FROM companies c
+                        JOIN dental_patients dp ON dp.company_id = c.id
+                        ORDER BY c.legal_name`);
 
   log(`${companies.length} empresa(s) com pacientes odonto`);
 
@@ -311,7 +355,7 @@ async function main() {
   for (const [t, n] of Object.entries(totals.fks)) log(`  ${t}: ${n}`);
   if (DRY_RUN) log('\nNenhuma alteracao aplicada (dry-run). Rode com --apply para persistir.');
 
-  await db.end?.();
+  await pool.end();
   process.exit(0);
 }
 
