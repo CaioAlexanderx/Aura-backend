@@ -2,6 +2,7 @@
 // AURA. — Rotas Modulo Odontologia (core)
 // D-UNIFY: patient_id do body = customers.id (paciente e customer sao
 // a mesma entidade). Novos inserts usam customer_id, patient_id fica NULL.
+// Appointments tambem gravam practitioner_id (cadeira via settings).
 // ============================================================
 
 const express = require('express');
@@ -14,14 +15,12 @@ const {
   generateWsToken, validateWsToken,
 } = require('../services/dental');
 
-// ── Sub-routes (extracted) ────────────────────────────────
+// ── Sub-routes (extracted) ──
 router.use('/', require('./dentalPatients'));
 router.use('/', require('./dentalProcedures'));
 router.use('/', require('./dentalPractitioners'));
 
-// ── Helpers ───────────────────────────────────────────────
-// Aceita tanto customer_id quanto patient_id no body (legado FE).
-// Valida que existe e e is_patient=true na empresa.
+// ── Helpers ──
 async function resolveCustomerId(companyId, body) {
   const id = body.customer_id || body.patient_id;
   if (!id) return null;
@@ -33,7 +32,7 @@ async function resolveCustomerId(companyId, body) {
   return rows.length ? rows[0].id : null;
 }
 
-// ── Agenda ────────────────────────────────────────────────
+// ── Agenda ──
 
 router.get('/agenda', requireAuth, async (req, res) => {
   const now = new Date();
@@ -49,7 +48,7 @@ router.get('/agenda', requireAuth, async (req, res) => {
 });
 
 router.post('/appointments', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { scheduled_at, duration_min = 60, chief_complaint } = req.body;
+  const { scheduled_at, duration_min = 60, chief_complaint, practitioner_id } = req.body;
   if (!scheduled_at) return res.status(400).json({ error: 'scheduled_at e obrigatorio' });
 
   const customerId = await resolveCustomerId(req.params.id, req.body);
@@ -58,10 +57,10 @@ router.post('/appointments', requireAuth, requireRole('client','analyst','admin'
   try {
     const { rows } = await db.query(
       `INSERT INTO dental_appointments
-         (company_id, customer_id, scheduled_at, duration_min, chief_complaint)
-       VALUES ($1, $2, $3, $4, $5)
+         (company_id, customer_id, scheduled_at, duration_min, chief_complaint, practitioner_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *, customer_id AS patient_id`,
-      [req.params.id, customerId, scheduled_at, duration_min, chief_complaint||null]
+      [req.params.id, customerId, scheduled_at, duration_min, chief_complaint||null, practitioner_id||null]
     );
     res.status(201).json({ appointment: rows[0] });
   } catch (err) {
@@ -78,9 +77,11 @@ router.get('/appointments/:aid', requireAuth, async (req, res) => {
               c.name           AS patient_name,
               c.phone          AS patient_phone,
               c.insurance_name,
-              c.allergies
+              c.allergies,
+              pr.name          AS professional_name
        FROM dental_appointments a
        JOIN customers c ON c.id = a.customer_id
+       LEFT JOIN dental_practitioners pr ON pr.id = a.practitioner_id
        WHERE a.id = $1 AND a.company_id = $2`,
       [req.params.aid, req.params.id]
     );
@@ -98,7 +99,7 @@ router.get('/appointments/:aid', requireAuth, async (req, res) => {
 
 router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { status, chief_complaint, anamnesis, clinical_notes,
-          discount_type, discount_value, cancel_reason } = req.body;
+          discount_type, discount_value, cancel_reason, practitioner_id, scheduled_at, duration_min } = req.body;
   try {
     if (status) {
       const updated = await updateAppointmentStatus(req.params.id, req.params.aid, status);
@@ -106,7 +107,7 @@ router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','
     }
     const fields=[], values=[];
     let idx=1;
-    const allowed = { chief_complaint, anamnesis, clinical_notes, discount_type, discount_value, cancel_reason };
+    const allowed = { chief_complaint, anamnesis, clinical_notes, discount_type, discount_value, cancel_reason, practitioner_id, scheduled_at, duration_min };
     for (const [k,v] of Object.entries(allowed)) {
       if (v !== undefined) { fields.push(`${k}=$${idx++}`); values.push(v); }
     }
@@ -120,7 +121,7 @@ router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','
     if (discount_type !== undefined || discount_value !== undefined) await recalcAppointmentTotal(req.params.aid);
     res.json({ appointment: rows[0] });
   } catch (err) {
-    if (err.message.includes('Transicao') || err.message.includes('Transição')) {
+    if (err.message.includes('Transicao') || err.message.includes('Transi\u00e7\u00e3o')) {
       return res.status(400).json({ error: err.message });
     }
     console.error('[dental PATCH /appointments/:aid]', err.message);
@@ -128,7 +129,7 @@ router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','
   }
 });
 
-// ── Procedimentos do atendimento ──────────────────────────
+// ── Procedimentos do atendimento ──
 
 router.post('/appointments/:aid/procedures', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   try {
@@ -155,8 +156,7 @@ router.delete('/appointments/:aid/procedures/:procId', requireAuth, requireRole(
   }
 });
 
-// ── Odontograma ───────────────────────────────────────────
-// :pid na URL = customer_id (paciente e customer apos D-UNIFY)
+// ── Odontograma ──
 
 router.get('/patients/:pid/chart', requireAuth, async (req, res) => {
   try {
@@ -199,7 +199,7 @@ router.post('/patients/:pid/chart', requireAuth, requireRole('client','analyst',
   }
 });
 
-// ── Receituario e atestados ───────────────────────────────
+// ── Receituario e atestados ──
 
 router.post('/prescriptions', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { appointment_id, doc_type = 'receituario', content } = req.body;
@@ -239,7 +239,7 @@ router.get('/patients/:pid/prescriptions', requireAuth, async (req, res) => {
   }
 });
 
-// ── Sub-routes (feature modules) ──────────────────────────
+// ── Sub-routes (feature modules) ──
 
 router.use('/treatment-plans', require('./dentalTreatmentPlans'));
 router.use('/', require('./dentalImages'));
@@ -247,7 +247,7 @@ router.use('/', require('./dentalLab'));
 router.use('/insurance', require('./dentalInsurance'));
 router.use('/advanced', require('./dentalAdvanced'));
 
-// ── WebSocket token ───────────────────────────────────────
+// ── WebSocket token ──
 
 router.post('/appointments/:aid/signature-token', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   try {

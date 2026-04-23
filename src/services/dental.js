@@ -1,7 +1,7 @@
 // ============================================================
 // AURA. — Servico Modulo Odontologia (BE-25)
-// D-UNIFY: usa customers (is_patient=true) como fonte de pacientes.
-//          Tabela dental_patients nao e mais lida/escrita.
+// D-UNIFY: usa customers (is_patient=true). Agenda inclui practitioner_id
+// + professional_name (LEFT JOIN dental_practitioners) pra mapear cadeira.
 // ============================================================
 
 const db = require('../config/database');
@@ -19,9 +19,6 @@ function calcAppointmentTotal(procedures, discountType, discountValue) {
   };
 }
 
-// ── listPatients ────────────────────────────────────────────
-// Le de customers onde is_patient=true. Preserva shape historico
-// (full_name, cpf, insurance_name) via alias pra nao quebrar FE.
 async function listPatients(companyId, { search, page = 1, limit = 20 } = {}) {
   const offset = (page - 1) * limit;
   const params = [companyId];
@@ -53,26 +50,28 @@ async function listPatients(companyId, { search, page = 1, limit = 20 } = {}) {
   return rows;
 }
 
-// ── getAgendaByPeriod ───────────────────────────────────────
-// Join agora e com customers via customer_id. Shape preservado:
-// patient_id/patient_name/patient_phone apontam pro customer.
+// D-UNIFY: agenda agora retorna practitioner_id + professional_name
 async function getAgendaByPeriod(companyId, startDate, endDate) {
   const { rows } = await db.query(
     `SELECT a.id,
             a.scheduled_at, a.duration_min, a.status,
             a.chief_complaint, a.total,
+            a.practitioner_id,
             c.id           AS patient_id,
             c.id           AS customer_id,
             c.name         AS patient_name,
             c.phone        AS patient_phone,
             c.insurance_name,
+            pr.name        AS professional_name,
+            pr.color       AS professional_color,
             COUNT(ap.id) AS procedure_count
      FROM dental_appointments a
      JOIN customers c ON c.id = a.customer_id
+     LEFT JOIN dental_practitioners pr ON pr.id = a.practitioner_id
      LEFT JOIN dental_appointment_procedures ap ON ap.appointment_id = a.id
      WHERE a.company_id = $1 AND a.scheduled_at >= $2 AND a.scheduled_at < $3
        AND a.status != 'cancelado'
-     GROUP BY a.id, c.id
+     GROUP BY a.id, c.id, pr.id
      ORDER BY a.scheduled_at ASC`,
     [companyId, startDate, endDate]
   );
@@ -171,7 +170,6 @@ async function generateWsToken(companyId, appointmentId) {
 }
 
 async function validateWsToken(token) {
-  // D-UNIFY: retorna customer_id como alias de patient_id para compat
   const { rows } = await db.query(
     `SELECT t.*, a.company_id,
             a.customer_id,
