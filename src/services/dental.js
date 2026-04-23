@@ -1,5 +1,7 @@
 // ============================================================
-// AURA. — Serviço Módulo Odontologia (BE-25)
+// AURA. — Servico Modulo Odontologia (BE-25)
+// D-UNIFY: usa customers (is_patient=true) como fonte de pacientes.
+//          Tabela dental_patients nao e mais lida/escrita.
 // ============================================================
 
 const db = require('../config/database');
@@ -17,42 +19,61 @@ function calcAppointmentTotal(procedures, discountType, discountValue) {
   };
 }
 
+// ── listPatients ────────────────────────────────────────────
+// Le de customers onde is_patient=true. Preserva shape historico
+// (full_name, cpf, insurance_name) via alias pra nao quebrar FE.
 async function listPatients(companyId, { search, page = 1, limit = 20 } = {}) {
   const offset = (page - 1) * limit;
   const params = [companyId];
-  let where = 'WHERE p.company_id = $1 AND p.is_active = true';
+  let where = 'WHERE c.company_id = $1 AND c.is_patient = true AND c.is_active = true';
   if (search) {
     params.push(`%${search}%`);
-    where += ` AND (p.full_name ILIKE $${params.length} OR p.cpf ILIKE $${params.length} OR p.phone ILIKE $${params.length})`;
+    where += ` AND (c.name ILIKE $${params.length} OR c.cpf_cnpj ILIKE $${params.length} OR c.phone ILIKE $${params.length})`;
   }
   const { rows } = await db.query(
-    `SELECT p.id, p.full_name, p.birth_date, p.phone, p.email, p.cpf,
-            p.insurance_name, p.lgpd_consent, p.created_at,
+    `SELECT c.id,
+            c.name      AS full_name,
+            c.birth_date,
+            c.phone,
+            c.email,
+            c.cpf_cnpj  AS cpf,
+            c.insurance_name,
+            c.lgpd_consent,
+            c.created_at,
             COUNT(a.id) FILTER (WHERE a.status NOT IN ('cancelado','faltou')) AS appointments_total,
             MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido') AS last_visit
-     FROM dental_patients p
-     LEFT JOIN dental_appointments a ON a.patient_id = p.id
+     FROM customers c
+     LEFT JOIN dental_appointments a ON a.customer_id = c.id
      ${where}
-     GROUP BY p.id ORDER BY p.full_name ASC
+     GROUP BY c.id
+     ORDER BY c.name ASC
      LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     [...params, limit, offset]
   );
   return rows;
 }
 
+// ── getAgendaByPeriod ───────────────────────────────────────
+// Join agora e com customers via customer_id. Shape preservado:
+// patient_id/patient_name/patient_phone apontam pro customer.
 async function getAgendaByPeriod(companyId, startDate, endDate) {
   const { rows } = await db.query(
-    `SELECT a.id, a.scheduled_at, a.duration_min, a.status,
+    `SELECT a.id,
+            a.scheduled_at, a.duration_min, a.status,
             a.chief_complaint, a.total,
-            p.id AS patient_id, p.full_name AS patient_name,
-            p.phone AS patient_phone, p.insurance_name,
+            c.id           AS patient_id,
+            c.id           AS customer_id,
+            c.name         AS patient_name,
+            c.phone        AS patient_phone,
+            c.insurance_name,
             COUNT(ap.id) AS procedure_count
      FROM dental_appointments a
-     JOIN dental_patients p ON p.id = a.patient_id
+     JOIN customers c ON c.id = a.customer_id
      LEFT JOIN dental_appointment_procedures ap ON ap.appointment_id = a.id
      WHERE a.company_id = $1 AND a.scheduled_at >= $2 AND a.scheduled_at < $3
        AND a.status != 'cancelado'
-     GROUP BY a.id, p.id ORDER BY a.scheduled_at ASC`,
+     GROUP BY a.id, c.id
+     ORDER BY a.scheduled_at ASC`,
     [companyId, startDate, endDate]
   );
   return rows;
@@ -69,10 +90,10 @@ async function updateAppointmentStatus(companyId, appointmentId, newStatus) {
     'SELECT status FROM dental_appointments WHERE id = $1 AND company_id = $2',
     [appointmentId, companyId]
   );
-  if (!current.length) throw new Error('Agendamento não encontrado');
+  if (!current.length) throw new Error('Agendamento nao encontrado');
   const currentStatus = current[0].status;
   const allowed = validTransitions[currentStatus] || [];
-  if (!allowed.includes(newStatus)) throw new Error(`Transição inválida: ${currentStatus} → ${newStatus}`);
+  if (!allowed.includes(newStatus)) throw new Error(`Transicao invalida: ${currentStatus} -> ${newStatus}`);
 
   const tsMap = { em_atendimento: 'started_at', concluido: 'concluded_at', cancelado: 'cancelled_at' };
   const tsField = tsMap[newStatus] ? `, ${tsMap[newStatus]} = NOW()` : '';
@@ -145,13 +166,17 @@ async function generateWsToken(companyId, appointmentId) {
     expires_at: rows[0].expires_at,
     expires_in: 600,
     qr_payload: `${process.env.APP_URL || 'https://getaura.com.br'}/sign/${rows[0].token}`,
-    note:       'WebSocket endpoint: ws://[host]/ws/sign/:token — implementado no BE-25-10',
+    note:       'WebSocket endpoint: ws://[host]/ws/sign/:token',
   };
 }
 
 async function validateWsToken(token) {
+  // D-UNIFY: retorna customer_id como alias de patient_id para compat
   const { rows } = await db.query(
-    `SELECT t.*, a.company_id, a.patient_id FROM dental_ws_tokens t
+    `SELECT t.*, a.company_id,
+            a.customer_id,
+            a.customer_id AS patient_id
+     FROM dental_ws_tokens t
      JOIN dental_appointments a ON a.id = t.appointment_id
      WHERE t.token=$1 AND t.expires_at>NOW() AND t.used_at IS NULL`,
     [token]
