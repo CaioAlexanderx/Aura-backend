@@ -8,6 +8,7 @@
 //
 // Rotas:
 //   GET    /transactions/:tx_id/sale-details
+//   POST   /transactions/:tx_id/sale-items           (adicionar produto - EXTRA C)
 //   DELETE /transactions/:tx_id/sale-items/:item_id  (devolucao parcial)
 //   PATCH  /transactions/:tx_id/seller               (mudar vendedora)
 // ============================================================
@@ -144,6 +145,163 @@ router.get('/transactions/:tx_id/sale-details', asyncHandler(async (req, res) =>
     }),
     available_employees: availableEmployees,
   });
+}));
+
+// POST /transactions/:tx_id/sale-items
+// Body: { product_id, variant_id?, quantity, unit_price?, product_name_snapshot? }
+//
+// Adiciona um produto a uma venda existente (EXTRA C):
+//   1. Valida produto + variant pertencem a empresa
+//   2. Valida estoque disponivel
+//   3. Decrementa estoque (variant tem prioridade sobre product)
+//   4. INSERT em sale_items
+//   5. Soma sales.total_amount
+//   6. Soma transactions.amount
+// Tudo atomico.
+//
+// Se venda esta cancelada (status='cancelled'), bloqueia.
+router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => {
+  const companyId = req.params.id;
+  const txId = req.params.tx_id;
+  const { product_id, variant_id, quantity, unit_price, product_name_snapshot } = req.body || {};
+
+  // Validacoes basicas
+  if (!product_id) throw new AppError('product_id e obrigatorio', 400);
+  const qty = parseFloat(quantity);
+  if (!qty || qty <= 0) throw new AppError('quantity deve ser maior que zero', 400);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Carrega transaction + valida vinculo com venda
+    const txRes = await client.query(
+      `SELECT id, idempotency_key, amount FROM transactions
+       WHERE id = $1 AND company_id = $2 FOR UPDATE`,
+      [txId, companyId]
+    );
+    if (!txRes.rows.length) throw new AppError('Lancamento nao encontrado', 404);
+    const tx = txRes.rows[0];
+    const saleId = extractSaleId(tx.idempotency_key);
+    if (!saleId) throw new AppError('Lancamento nao esta vinculado a uma venda', 400);
+
+    // 2. Carrega venda + valida nao cancelada
+    const saleRes = await client.query(
+      `SELECT id, total_amount, status FROM sales
+       WHERE id = $1 AND company_id = $2 FOR UPDATE`,
+      [saleId, companyId]
+    );
+    if (!saleRes.rows.length) throw new AppError('Venda nao encontrada', 404);
+    if (saleRes.rows[0].status === 'cancelled') {
+      throw new AppError('Nao eh possivel adicionar items a uma venda cancelada', 400);
+    }
+
+    // 3. Carrega produto + valida pertence a empresa
+    const prodRes = await client.query(
+      'SELECT id, name, price, stock_qty FROM products WHERE id = $1 AND company_id = $2 FOR UPDATE',
+      [product_id, companyId]
+    );
+    if (!prodRes.rows.length) throw new AppError('Produto nao encontrado', 404);
+    const product = prodRes.rows[0];
+
+    // 4. Se variant_id, valida pertence ao produto + tem estoque
+    let variant = null;
+    let effectivePrice = parseFloat(unit_price || product.price);
+    let displayName = product_name_snapshot || product.name;
+
+    if (variant_id) {
+      const varRes = await client.query(
+        `SELECT id, sku_suffix, price_override, stock_qty, is_active
+         FROM product_variants WHERE id = $1 AND product_id = $2 FOR UPDATE`,
+        [variant_id, product_id]
+      );
+      if (!varRes.rows.length) throw new AppError('Variante nao encontrada', 404);
+      if (varRes.rows[0].is_active === false) throw new AppError('Variante inativa', 400);
+      variant = varRes.rows[0];
+      const varStock = parseFloat(variant.stock_qty || 0);
+      if (varStock < qty) {
+        throw new AppError('Estoque insuficiente. Disponivel: ' + varStock + ' un', 400);
+      }
+      // Sobrescreve preco se cliente nao mandou e variant tem override
+      if (unit_price == null && variant.price_override != null) {
+        effectivePrice = parseFloat(variant.price_override);
+      }
+    } else {
+      // Validacao de estoque do produto (so se nao for variante, ja que produto pai pode ser ignorado)
+      const prodStock = parseFloat(product.stock_qty || 0);
+      if (prodStock < qty) {
+        throw new AppError('Estoque insuficiente. Disponivel: ' + prodStock + ' un', 400);
+      }
+    }
+
+    if (!effectivePrice || effectivePrice < 0) {
+      throw new AppError('unit_price invalido', 400);
+    }
+
+    const itemTotal = parseFloat((qty * effectivePrice).toFixed(2));
+
+    // 5. Decrementa estoque (variant tem prioridade)
+    if (variant) {
+      await client.query(
+        `UPDATE product_variants SET stock_qty = COALESCE(stock_qty, 0) - $1, updated_at = NOW()
+         WHERE id = $2`,
+        [qty, variant_id]
+      );
+    } else {
+      await client.query(
+        `UPDATE products SET stock_qty = COALESCE(stock_qty, 0) - $1, updated_at = NOW()
+         WHERE id = $2 AND company_id = $3`,
+        [qty, product_id, companyId]
+      );
+    }
+
+    // 6. INSERT no sale_items
+    const newItemRes = await client.query(
+      `INSERT INTO sale_items (
+         sale_id, product_id, variant_id, quantity, unit_price,
+         discount, total_price, product_name_snapshot, item_discount
+       ) VALUES ($1, $2, $3, $4, $5, 0, $6, $7, 0)
+       RETURNING id, product_id, variant_id, quantity, unit_price, discount, total_price, product_name_snapshot`,
+      [saleId, product_id, variant_id || null, qty, effectivePrice, itemTotal, displayName]
+    );
+    const newItem = newItemRes.rows[0];
+
+    // 7. Soma no sales.total_amount
+    const newSaleTotal = parseFloat(saleRes.rows[0].total_amount) + itemTotal;
+    await client.query(
+      'UPDATE sales SET total_amount = $1, updated_at = NOW() WHERE id = $2',
+      [newSaleTotal, saleId]
+    );
+
+    // 8. Soma na transactions.amount
+    const newTxAmount = parseFloat(tx.amount) + itemTotal;
+    await client.query(
+      'UPDATE transactions SET amount = $1, updated_at = NOW() WHERE id = $2',
+      [newTxAmount, txId]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({
+      ok: true,
+      item: {
+        id: newItem.id,
+        product_id: newItem.product_id,
+        variant_id: newItem.variant_id,
+        quantity: parseFloat(newItem.quantity),
+        unit_price: parseFloat(newItem.unit_price),
+        discount: parseFloat(newItem.discount || 0),
+        total_price: parseFloat(newItem.total_price),
+        product_name: displayName,
+      },
+      new_sale_total: newSaleTotal,
+      new_tx_amount: newTxAmount,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }));
 
 // DELETE /transactions/:tx_id/sale-items/:item_id
