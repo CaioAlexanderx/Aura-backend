@@ -1,8 +1,7 @@
 // ============================================================
-// AURA. — Rotas Módulo Odontologia (core)
-// Agenda, Appointments, Chart, Prescriptions + sub-route mounts
-// Patients and Procedures extracted to dentalPatients/dentalProcedures
-// D-FIX #1+#6: practitioners + settings via dentalPractitioners.js
+// AURA. — Rotas Modulo Odontologia (core)
+// D-UNIFY: patient_id do body = customers.id (paciente e customer sao
+// a mesma entidade). Novos inserts usam customer_id, patient_id fica NULL.
 // ============================================================
 
 const express = require('express');
@@ -18,7 +17,21 @@ const {
 // ── Sub-routes (extracted) ────────────────────────────────
 router.use('/', require('./dentalPatients'));
 router.use('/', require('./dentalProcedures'));
-router.use('/', require('./dentalPractitioners'));   // D-FIX #1+#6: settings + practitioners
+router.use('/', require('./dentalPractitioners'));
+
+// ── Helpers ───────────────────────────────────────────────
+// Aceita tanto customer_id quanto patient_id no body (legado FE).
+// Valida que existe e e is_patient=true na empresa.
+async function resolveCustomerId(companyId, body) {
+  const id = body.customer_id || body.patient_id;
+  if (!id) return null;
+  const { rows } = await db.query(
+    `SELECT id FROM customers
+     WHERE id = $1 AND company_id = $2 AND is_patient = true`,
+    [id, companyId]
+  );
+  return rows.length ? rows[0].id : null;
+}
 
 // ── Agenda ────────────────────────────────────────────────
 
@@ -29,28 +42,46 @@ router.get('/agenda', requireAuth, async (req, res) => {
   try {
     const appointments = await getAgendaByPeriod(req.params.id, startDate, endDate);
     res.json({ start: startDate, end: endDate, total: appointments.length, appointments });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar agenda' }); }
+  } catch (err) {
+    console.error('[dental GET /agenda]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar agenda' });
+  }
 });
 
 router.post('/appointments', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { patient_id, scheduled_at, duration_min = 60, chief_complaint } = req.body;
-  if (!patient_id || !scheduled_at) return res.status(400).json({ error: 'patient_id e scheduled_at sao obrigatorios' });
+  const { scheduled_at, duration_min = 60, chief_complaint } = req.body;
+  if (!scheduled_at) return res.status(400).json({ error: 'scheduled_at e obrigatorio' });
+
+  const customerId = await resolveCustomerId(req.params.id, req.body);
+  if (!customerId) return res.status(400).json({ error: 'Paciente (customer_id ou patient_id) invalido ou nao encontrado' });
+
   try {
     const { rows } = await db.query(
-      `INSERT INTO dental_appointments (company_id, patient_id, scheduled_at, duration_min, chief_complaint)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [req.params.id, patient_id, scheduled_at, duration_min, chief_complaint||null]
+      `INSERT INTO dental_appointments
+         (company_id, customer_id, scheduled_at, duration_min, chief_complaint)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *, customer_id AS patient_id`,
+      [req.params.id, customerId, scheduled_at, duration_min, chief_complaint||null]
     );
     res.status(201).json({ appointment: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro ao criar agendamento' }); }
+  } catch (err) {
+    console.error('[dental POST /appointments]', err.message);
+    res.status(500).json({ error: 'Erro ao criar agendamento' });
+  }
 });
 
 router.get('/appointments/:aid', requireAuth, async (req, res) => {
   try {
     const { rows: appt } = await db.query(
-      `SELECT a.*, p.full_name AS patient_name, p.phone AS patient_phone, p.insurance_name, p.allergies
-       FROM dental_appointments a JOIN dental_patients p ON p.id=a.patient_id
-       WHERE a.id=$1 AND a.company_id=$2`,
+      `SELECT a.*,
+              a.customer_id AS patient_id,
+              c.name           AS patient_name,
+              c.phone          AS patient_phone,
+              c.insurance_name,
+              c.allergies
+       FROM dental_appointments a
+       JOIN customers c ON c.id = a.customer_id
+       WHERE a.id = $1 AND a.company_id = $2`,
       [req.params.aid, req.params.id]
     );
     if (!appt.length) return res.status(404).json({ error: 'Agendamento nao encontrado' });
@@ -59,7 +90,10 @@ router.get('/appointments/:aid', requireAuth, async (req, res) => {
       [req.params.aid]
     );
     res.json({ appointment: { ...appt[0], procedures: procs } });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar agendamento' }); }
+  } catch (err) {
+    console.error('[dental GET /appointments/:aid]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar agendamento' });
+  }
 });
 
 router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
@@ -86,7 +120,10 @@ router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','
     if (discount_type !== undefined || discount_value !== undefined) await recalcAppointmentTotal(req.params.aid);
     res.json({ appointment: rows[0] });
   } catch (err) {
-    if (err.message.includes('Transição')) return res.status(400).json({ error: err.message });
+    if (err.message.includes('Transicao') || err.message.includes('Transição')) {
+      return res.status(400).json({ error: err.message });
+    }
+    console.error('[dental PATCH /appointments/:aid]', err.message);
     res.status(500).json({ error: 'Erro ao atualizar agendamento' });
   }
 });
@@ -97,7 +134,10 @@ router.post('/appointments/:aid/procedures', requireAuth, requireRole('client','
   try {
     const proc = await addProcedureToAppointment(req.params.aid, req.params.id, req.body);
     res.status(201).json({ procedure: proc });
-  } catch (err) { res.status(500).json({ error: 'Erro ao adicionar procedimento' }); }
+  } catch (err) {
+    console.error('[dental POST /appointments/:aid/procedures]', err.message);
+    res.status(500).json({ error: 'Erro ao adicionar procedimento' });
+  }
 });
 
 router.delete('/appointments/:aid/procedures/:procId', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
@@ -109,17 +149,22 @@ router.delete('/appointments/:aid/procedures/:procId', requireAuth, requireRole(
     if (!rows.length) return res.status(404).json({ error: 'Procedimento nao encontrado' });
     await recalcAppointmentTotal(req.params.aid);
     res.json({ message: 'Procedimento removido' });
-  } catch (err) { res.status(500).json({ error: 'Erro ao remover procedimento' }); }
+  } catch (err) {
+    console.error('[dental DELETE procedure]', err.message);
+    res.status(500).json({ error: 'Erro ao remover procedimento' });
+  }
 });
 
 // ── Odontograma ───────────────────────────────────────────
+// :pid na URL = customer_id (paciente e customer apos D-UNIFY)
 
 router.get('/patients/:pid/chart', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT c.*, p.name AS procedure_name FROM dental_chart_entries c
-       LEFT JOIN dental_procedures p ON p.id=c.procedure_id
-       WHERE c.patient_id=$1 AND c.company_id=$2
+      `SELECT c.*, p.name AS procedure_name
+       FROM dental_chart_entries c
+       LEFT JOIN dental_procedures p ON p.id = c.procedure_id
+       WHERE c.customer_id = $1 AND c.company_id = $2
        ORDER BY c.tooth_number, c.face, c.recorded_at DESC`,
       [req.params.pid, req.params.id]
     );
@@ -129,7 +174,10 @@ router.get('/patients/:pid/chart', requireAuth, async (req, res) => {
       byTooth[entry.tooth_number].faces.push(entry);
     }
     res.json({ patient_id: req.params.pid, teeth: Object.values(byTooth) });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar odontograma' }); }
+  } catch (err) {
+    console.error('[dental GET chart]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar odontograma' });
+  }
 });
 
 router.post('/patients/:pid/chart', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
@@ -138,38 +186,57 @@ router.post('/patients/:pid/chart', requireAuth, requireRole('client','analyst',
   try {
     const { rows } = await db.query(
       `INSERT INTO dental_chart_entries
-         (company_id, patient_id, appointment_id, tooth_number, face, status, procedure_id, notes)
-       VALUES ($1,$2,$3,$4,$5::dental_face,$6,$7,$8) RETURNING *`,
+         (company_id, customer_id, appointment_id, tooth_number, face, status, procedure_id, notes)
+       VALUES ($1, $2, $3, $4, $5::dental_face, $6, $7, $8)
+       RETURNING *`,
       [req.params.id, req.params.pid, appointment_id||null, tooth_number,
        face||null, status, procedure_id||null, notes||null]
     );
     res.status(201).json({ entry: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro ao registrar no odontograma' }); }
+  } catch (err) {
+    console.error('[dental POST chart]', err.message);
+    res.status(500).json({ error: 'Erro ao registrar no odontograma' });
+  }
 });
 
-// ── Receituário e atestados ───────────────────────────────
+// ── Receituario e atestados ───────────────────────────────
 
 router.post('/prescriptions', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { patient_id, appointment_id, doc_type = 'receituario', content } = req.body;
-  if (!patient_id || !content) return res.status(400).json({ error: 'patient_id e content sao obrigatorios' });
+  const { appointment_id, doc_type = 'receituario', content } = req.body;
+  if (!content) return res.status(400).json({ error: 'content e obrigatorio' });
+
+  const customerId = await resolveCustomerId(req.params.id, req.body);
+  if (!customerId) return res.status(400).json({ error: 'Paciente invalido ou nao encontrado' });
+
   try {
     const { rows } = await db.query(
-      `INSERT INTO dental_prescriptions (company_id, patient_id, appointment_id, doc_type, content)
-       VALUES ($1,$2,$3,$4::dental_document_type,$5) RETURNING *`,
-      [req.params.id, patient_id, appointment_id||null, doc_type, content]
+      `INSERT INTO dental_prescriptions
+         (company_id, customer_id, appointment_id, doc_type, content)
+       VALUES ($1, $2, $3, $4::dental_document_type, $5)
+       RETURNING *, customer_id AS patient_id`,
+      [req.params.id, customerId, appointment_id||null, doc_type, content]
     );
     res.status(201).json({ prescription: rows[0] });
-  } catch (err) { res.status(500).json({ error: 'Erro ao salvar documento' }); }
+  } catch (err) {
+    console.error('[dental POST /prescriptions]', err.message);
+    res.status(500).json({ error: 'Erro ao salvar documento' });
+  }
 });
 
 router.get('/patients/:pid/prescriptions', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT * FROM dental_prescriptions WHERE patient_id=$1 AND company_id=$2 ORDER BY issued_at DESC`,
+      `SELECT *, customer_id AS patient_id
+       FROM dental_prescriptions
+       WHERE customer_id = $1 AND company_id = $2
+       ORDER BY issued_at DESC`,
       [req.params.pid, req.params.id]
     );
     res.json({ total: rows.length, prescriptions: rows });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar documentos' }); }
+  } catch (err) {
+    console.error('[dental GET prescriptions]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar documentos' });
+  }
 });
 
 // ── Sub-routes (feature modules) ──────────────────────────
@@ -186,7 +253,10 @@ router.post('/appointments/:aid/signature-token', requireAuth, requireRole('clie
   try {
     const result = await generateWsToken(req.params.id, req.params.aid);
     res.json(result);
-  } catch (err) { res.status(500).json({ error: 'Erro ao gerar token de assinatura' }); }
+  } catch (err) {
+    console.error('[dental signature-token]', err.message);
+    res.status(500).json({ error: 'Erro ao gerar token de assinatura' });
+  }
 });
 
 router.get('/sign/:token', async (req, res) => {
@@ -194,7 +264,10 @@ router.get('/sign/:token', async (req, res) => {
     const tokenData = await validateWsToken(req.params.token);
     if (!tokenData) return res.status(410).json({ error: 'Link expirado ou invalido.' });
     res.json({ valid: true, appointment_id: tokenData.appointment_id, expires_at: tokenData.expires_at });
-  } catch (err) { res.status(500).json({ error: 'Erro ao validar token' }); }
+  } catch (err) {
+    console.error('[dental GET /sign/:token]', err.message);
+    res.status(500).json({ error: 'Erro ao validar token' });
+  }
 });
 
 module.exports = router;
