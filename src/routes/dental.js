@@ -2,6 +2,7 @@
 // AURA. — Rotas Módulo Odontologia (core)
 // Agenda, Appointments, Chart, Prescriptions + sub-route mounts
 // Patients and Procedures extracted to dentalPatients/dentalProcedures
+// D-FIX #1+#6: practitioners + settings via dentalPractitioners.js
 // ============================================================
 
 const express = require('express');
@@ -17,6 +18,7 @@ const {
 // ── Sub-routes (extracted) ────────────────────────────────
 router.use('/', require('./dentalPatients'));
 router.use('/', require('./dentalProcedures'));
+router.use('/', require('./dentalPractitioners'));   // D-FIX #1+#6: settings + practitioners
 
 // ── Agenda ────────────────────────────────────────────────
 
@@ -137,7 +139,7 @@ router.post('/patients/:pid/chart', requireAuth, requireRole('client','analyst',
     const { rows } = await db.query(
       `INSERT INTO dental_chart_entries
          (company_id, patient_id, appointment_id, tooth_number, face, status, procedure_id, notes)
-       VALUES ($1,$2,$3,$4,$5,$6::dental_face,$7,$8) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5::dental_face,$6,$7,$8) RETURNING *`,
       [req.params.id, req.params.pid, appointment_id||null, tooth_number,
        face||null, status, procedure_id||null, notes||null]
     );
