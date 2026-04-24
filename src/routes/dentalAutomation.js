@@ -2,6 +2,10 @@
 // AURA. — ODT-09/10/12: Automacoes Odonto
 // D-UNIFY: joins e inserts usam customer_id via dental_appointments
 // e customers (filtrando is_patient=true onde relevante).
+//
+// ODT-15 (23/04): Endpoints GET-only para telas Camada 4b:
+//   GET /automation/recall/list — lista pacientes pra recall SEM disparar
+//   GET /no-shows                — historico de faltas agregado por paciente
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -115,7 +119,7 @@ router.post('/automation/trigger', requireAuth, requireRole('client','admin'), a
   }
 });
 
-// POST recall
+// POST recall — disparador (insere log com msg pendente)
 router.post('/automation/recall', requireAuth, async (req, res) => {
   const cid = req.params.id;
   try {
@@ -154,6 +158,118 @@ router.post('/automation/recall', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[dentalAutomation recall]', err.message);
     res.status(500).json({ error: 'Erro recall' });
+  }
+});
+
+// ODT-15: GET recall/list — apenas listar pacientes devidos, SEM disparar
+// Inclui ja devidos + os que vao vencer nos proximos 30 dias (antecipacao).
+// Filtra pacientes com consulta futura ja agendada (nao precisam de recall).
+router.get('/automation/recall/list', requireAuth, async (req, res) => {
+  const cid = req.params.id;
+  try {
+    const { rows: config } = await db.query(
+      'SELECT recall_days FROM dental_automation_config WHERE company_id=$1', [cid]);
+    const days = config[0]?.recall_days || 180;
+
+    const { rows } = await db.query(
+      `WITH last_visits AS (
+         SELECT c.id,
+                c.name  AS full_name,
+                c.phone,
+                MAX(a.scheduled_at) FILTER (WHERE a.status IN ('concluido','completed')) AS last_visit,
+                COUNT(*) FILTER (WHERE a.status IN ('faltou','no_show'))::int AS no_show_count
+         FROM customers c
+         LEFT JOIN dental_appointments a
+           ON a.customer_id = c.id AND a.company_id = c.company_id
+         WHERE c.company_id = $1 AND c.is_patient = true AND c.is_active = true
+         GROUP BY c.id, c.name, c.phone
+         HAVING MAX(a.scheduled_at) FILTER (WHERE a.status IN ('concluido','completed')) IS NOT NULL
+       )
+       SELECT lv.id,
+              lv.full_name,
+              lv.phone,
+              lv.last_visit,
+              lv.no_show_count,
+              (lv.last_visit::date + ($2 || ' days')::interval)::date AS next_recall,
+              ((lv.last_visit::date + ($2 || ' days')::interval)::date - CURRENT_DATE)::int AS days_until_recall,
+              GREATEST(1, ($2::int / 30))::int AS recall_interval_months
+       FROM last_visits lv
+       WHERE (lv.last_visit::date + ($2 || ' days')::interval)::date <= CURRENT_DATE + INTERVAL '30 days'
+         AND NOT EXISTS (
+           SELECT 1 FROM dental_appointments a2
+           WHERE a2.customer_id = lv.id
+             AND a2.company_id = $1
+             AND a2.scheduled_at > NOW()
+             AND a2.status NOT IN ('cancelado','cancelled','faltou','no_show')
+         )
+       ORDER BY next_recall ASC
+       LIMIT 100`,
+      [cid, days]);
+
+    res.json({
+      recall_days: days,
+      total: rows.length,
+      patients: rows.map(r => ({
+        id: r.id,
+        full_name: r.full_name,
+        phone: r.phone,
+        next_recall: r.next_recall,
+        recall_interval_months: r.recall_interval_months,
+        days_until_recall: r.days_until_recall,
+        no_show_count: r.no_show_count,
+        last_visit: r.last_visit,
+      })),
+    });
+  } catch (err) {
+    console.error('[dentalAutomation recall/list]', err.message);
+    res.status(500).json({ error: 'Erro ao listar recall' });
+  }
+});
+
+// ODT-15: GET /no-shows — historico agregado de faltas por paciente
+router.get('/no-shows', requireAuth, async (req, res) => {
+  const cid = req.params.id;
+  try {
+    const { rows } = await db.query(
+      `SELECT c.id,
+              c.name  AS full_name,
+              c.phone,
+              COUNT(*) FILTER (WHERE a.status IN ('faltou','no_show'))::int AS no_show_count,
+              COUNT(*) FILTER (WHERE a.status NOT IN ('cancelado','cancelled'))::int AS total_appointments,
+              MAX(a.scheduled_at) FILTER (WHERE a.status IN ('faltou','no_show')) AS last_no_show,
+              CASE
+                WHEN COUNT(*) FILTER (WHERE a.status NOT IN ('cancelado','cancelled')) = 0 THEN 0
+                ELSE ROUND(
+                  COUNT(*) FILTER (WHERE a.status IN ('faltou','no_show'))::numeric
+                  / COUNT(*) FILTER (WHERE a.status NOT IN ('cancelado','cancelled'))::numeric
+                  * 100, 1
+                )
+              END AS no_show_rate
+       FROM customers c
+       INNER JOIN dental_appointments a
+         ON a.customer_id = c.id AND a.company_id = c.company_id
+       WHERE c.company_id = $1 AND c.is_patient = true
+       GROUP BY c.id, c.name, c.phone
+       HAVING COUNT(*) FILTER (WHERE a.status IN ('faltou','no_show')) > 0
+       ORDER BY no_show_count DESC, no_show_rate DESC
+       LIMIT 100`,
+      [cid]);
+
+    res.json({
+      total: rows.length,
+      patients: rows.map(r => ({
+        id: r.id,
+        full_name: r.full_name,
+        phone: r.phone,
+        no_show_count: parseInt(r.no_show_count) || 0,
+        total_appointments: parseInt(r.total_appointments) || 0,
+        last_no_show: r.last_no_show,
+        no_show_rate: parseFloat(r.no_show_rate) || 0,
+      })),
+    });
+  } catch (err) {
+    console.error('[dentalAutomation /no-shows]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar historico de faltas' });
   }
 });
 
