@@ -68,6 +68,73 @@ router.get('/billing/dashboard', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================================
+// GET /billing/patient/:pid  (W1-01 fase 2)
+//
+// Retorna TODAS as parcelas (pending + paid + overdue) de UM paciente.
+// Usado pela sub-tab "Cobrancas" do PatientHub.
+// Tem agregados pre-calculados pra economizar render no FE.
+// ============================================================
+router.get('/billing/patient/:pid', requireAuth, async (req, res) => {
+  const cid = req.params.id;
+  const pid = req.params.pid;
+  try {
+    const { rows } = await db.query(
+      `SELECT tp.id AS payment_id,
+              tp.treatment_plan_id,
+              tp.installment_number,
+              tp.amount,
+              tp.due_date,
+              tp.paid_at,
+              tp.status,
+              t.plan_number,
+              t.total AS plan_total,
+              CASE
+                WHEN tp.status = 'pending' AND tp.due_date < CURRENT_DATE
+                  THEN (CURRENT_DATE - tp.due_date)::int
+                ELSE NULL
+              END AS days_overdue
+       FROM dental_treatment_payments tp
+       JOIN dental_treatment_plans t ON t.id = tp.treatment_plan_id
+       WHERE t.company_id = $1 AND t.customer_id = $2
+       ORDER BY tp.due_date ASC`,
+      [cid, pid]
+    );
+
+    // Agregados em JS (simples, dataset pequeno)
+    let total_pending = 0;
+    let total_overdue = 0;
+    let total_paid = 0;
+    for (const r of rows) {
+      const amt = parseFloat(r.amount) || 0;
+      if (r.status === 'paid') total_paid += amt;
+      else if (r.status === 'pending') {
+        total_pending += amt;
+        if (r.days_overdue && r.days_overdue > 0) total_overdue += amt;
+      }
+    }
+
+    res.json({
+      patient_id: pid,
+      count: rows.length,
+      installments: rows,
+      total_pending,
+      total_overdue,
+      total_paid,
+    });
+  } catch (err) {
+    // Se as tabelas de payment ainda nao existem (migration pendente), retorna vazio
+    if (err.message && err.message.includes('does not exist')) {
+      return res.json({
+        patient_id: pid, count: 0, installments: [],
+        total_pending: 0, total_overdue: 0, total_paid: 0,
+      });
+    }
+    console.error('[dentalBilling patient]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar parcelas do paciente' });
+  }
+});
+
 router.post('/billing/send-reminder/:paymentId', requireAuth, async (req, res) => {
   const cid = req.params.id;
   const { paymentId } = req.params;
