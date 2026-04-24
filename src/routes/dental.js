@@ -18,6 +18,8 @@ const {
 // ── Sub-routes (extracted) ──
 router.use('/', require('./dentalPatients'));
 router.use('/', require('./dentalAnamnesis'));
+router.use('/', require('./dentalPerio'));
+router.use('/', require('./dentalSpecialtyForms'));
 router.use('/', require('./dentalProcedures'));
 router.use('/', require('./dentalPractitioners'));
 
@@ -245,6 +247,7 @@ router.get('/patients/:pid/prescriptions', requireAuth, async (req, res) => {
 router.use('/treatment-plans', require('./dentalTreatmentPlans'));
 router.use('/', require('./dentalImages'));
 router.use('/', require('./dentalLab'));
+router.use('/', require('./dentalBilling'));
 router.use('/insurance', require('./dentalInsurance'));
 router.use('/advanced', require('./dentalAdvanced'));
 
