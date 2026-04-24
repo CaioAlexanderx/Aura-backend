@@ -267,12 +267,12 @@ router.post('/booking/requests/:rid/convert', requireAuth, requireRole('client',
       if (byEmail.length) customerId = byEmail[0].id;
     }
 
-    // Cria customer se nao achou
+    // Cria customer se nao achou (so colunas que existem em customers)
     if (!customerId) {
       const { rows: newCust } = await db.query(
         `INSERT INTO customers
-           (company_id, name, full_name, phone, email, is_patient, source)
-         VALUES ($1, $2, $2, $3, $4, true, 'agenda_online')
+           (company_id, name, phone, email, is_patient)
+         VALUES ($1, $2, $3, $4, true)
          RETURNING id`,
         [
           req.params.id,
