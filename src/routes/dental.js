@@ -22,6 +22,7 @@ router.use('/', require('./dentalPerio'));
 router.use('/', require('./dentalSpecialtyForms'));
 router.use('/', require('./dentalProcedures'));
 router.use('/', require('./dentalPractitioners'));
+router.use('/', require('./dentalBookingAdmin'));
 
 // ── Helpers ──
 async function resolveCustomerId(companyId, body) {
