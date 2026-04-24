@@ -17,6 +17,7 @@ const {
 
 // ── Sub-routes (extracted) ──
 router.use('/', require('./dentalPatients'));
+router.use('/', require('./dentalAnamnesis'));
 router.use('/', require('./dentalProcedures'));
 router.use('/', require('./dentalPractitioners'));
 
