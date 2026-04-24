@@ -438,6 +438,13 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
 // PATCH /transactions/:tx_id/seller
 // Body: { employee_id: string | null, employee_name?: string }
 // Atualiza vendedora na transaction E na sale vinculada (se houver).
+//
+// NOTA (24/04): sales tem duas colunas pra vendedor com semantica diferente:
+//   - sales.employee_id  -> FK employees.id  (funcionaria atribuida, p/ comissao)
+//   - sales.seller_id    -> FK users.id      (usuario com login que CRIOU a venda)
+// Aqui so mexemos em employee_id + seller_name. O seller_id original (quem
+// processou no caixa) fica intacto. Setar seller_id = employee.id viola FK
+// quando a funcionaria nao e um usuario do sistema — que e o caso normal.
 router.patch('/transactions/:tx_id/seller', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const txId = req.params.tx_id;
@@ -467,12 +474,13 @@ router.patch('/transactions/:tx_id/seller', asyncHandler(async (req, res) => {
     );
     if (!txRes.rows.length) throw new AppError('Lancamento nao encontrado', 404);
 
-    // Sincroniza com a venda se vinculada
+    // Sincroniza com a venda se vinculada.
+    // NAO mexer em seller_id — FK aponta pra users, nao employees.
     const saleId = extractSaleId(txRes.rows[0].idempotency_key);
     if (saleId) {
       await client.query(
         `UPDATE sales
-         SET seller_id = $1, employee_id = $1, seller_name = $2, updated_at = NOW()
+         SET employee_id = $1, seller_name = $2, updated_at = NOW()
          WHERE id = $3 AND company_id = $4`,
         [employee_id || null, resolvedName, saleId, companyId]
       );
