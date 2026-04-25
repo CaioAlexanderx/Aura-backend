@@ -25,6 +25,7 @@ router.use('/', require('./dentalPractitioners'));
 router.use('/', require('./dentalBookingAdmin'));
 router.use('/', require('./dentalConsent')); // W2-04: TCLE templates + documents
 router.use('/ai', require('./dentalAi'));     // W2-05: IA Odonto persistente (Expansao only)
+router.use('/tiss', require('./dentalTiss')); // W2-02: TISS 4.01 completo
 
 // ── Helpers ──
 async function resolveCustomerId(companyId, body) {
@@ -251,7 +252,7 @@ router.use('/treatment-plans', require('./dentalTreatmentPlans'));
 router.use('/', require('./dentalImages'));
 router.use('/', require('./dentalLab'));
 router.use('/', require('./dentalBilling'));
-router.use('/insurance', require('./dentalInsurance'));
+router.use('/insurance', require('./dentalInsurance'));  // legado S11 (mantido pra retrocompat)
 router.use('/advanced', require('./dentalAdvanced'));
 
 // ── WebSocket token ──
