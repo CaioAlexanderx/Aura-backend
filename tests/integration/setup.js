@@ -32,5 +32,12 @@ jest.mock('../../src/services/dentalWs', () => ({
   getSessionStatus: jest.fn(() => ({ status: 'waiting', connected: false })),
 }));
 
+// W2-04: novo handler WS para TCLE (separado do dentalWs)
+jest.mock('../../src/services/dentalConsentWs', () => ({
+  setupConsentWebSocket: jest.fn(),
+  getConsentSessionStatus: jest.fn(() => ({ status: 'waiting', connected: false })),
+  validateConsentToken: jest.fn(),
+}));
+
 process.env.JWT_SECRET = 'aura-test-secret-2026';
 process.env.NODE_ENV   = 'test';
