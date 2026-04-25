@@ -93,9 +93,10 @@ router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalBilli
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalRepasse'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalPortal'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalAutomation'));
-router.use('/dental/implants',   requirePlan('negocio', 'expansao'), require('./dentalImplants'));   // W3 Sprint 1
-router.use('/dental/ortho',      requirePlan('negocio', 'expansao'), require('./dentalOrtho'));       // W3 Sprint 2
-router.use('/dental/documents',  requirePlan('negocio', 'expansao'), require('./dentalDocuments'));   // GAP-01
+router.use('/dental/implants',      requirePlan('negocio', 'expansao'), require('./dentalImplants'));      // W3 Sprint 1
+router.use('/dental/ortho',         requirePlan('negocio', 'expansao'), require('./dentalOrtho'));         // W3 Sprint 2
+router.use('/dental/documents',     requirePlan('negocio', 'expansao'), require('./dentalDocuments'));     // GAP-01
+router.use('/dental/transcribe',    requirePlan('negocio', 'expansao'), require('./dentalTranscription')); // GAP-02
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
 router.use('/food/deliverers', requirePlan('negocio', 'expansao'), require('./foodDeliverers'));
