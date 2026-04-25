@@ -42,6 +42,7 @@ router.use('/admin', require('./adminGrowth'));
 // Webhooks (publicos, validacao interna)
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
 router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
+router.use('/webhooks/instagram', require('./webhookInstagram')); // Hub Social P11 S3
 
 // Storefront publico
 router.use('/storefront', require('./storefront'));
