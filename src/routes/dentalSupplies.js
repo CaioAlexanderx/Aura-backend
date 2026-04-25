@@ -204,9 +204,9 @@ router.get('/categories', async (req, res) => {
     );
 
     // Inclui todas as categorias (mesmo as vazias)
-    const map: Record<string, any> = {};
+    const map = {};
     DENTAL_CATEGORIES.forEach(c => { map[c] = { category: c, total: 0, low_stock_count: 0 }; });
-    rows.forEach((r: any) => { if (r.category) map[r.category] = r; });
+    rows.forEach((r) => { if (r.category) map[r.category] = r; });
 
     res.json({ categories: Object.values(map) });
   } catch (err) {
@@ -289,7 +289,7 @@ router.post('/:id/movement', async (req, res) => {
     }
 
     const currentQty = Number(prodRows[0].stock_qty);
-    let newQty: number;
+    let newQty;
 
     if (type === 'ajuste') {
       newQty = qty;  // ajuste define o valor absoluto
