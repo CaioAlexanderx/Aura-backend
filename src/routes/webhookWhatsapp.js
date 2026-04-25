@@ -1,5 +1,5 @@
 // ============================================================
-// AURA. — Sprint 5: WhatsApp Webhook Handler
+// AURA. — WhatsApp Webhook Handler
 // Receives: message status updates, incoming messages
 // Mounted at: /webhooks/whatsapp (PUBLIC, no auth)
 // ============================================================
@@ -11,15 +11,46 @@ const db = require('../config/database');
 const VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN || 'aura_whatsapp_verify_2026';
 
 // GET /webhooks/whatsapp — Meta webhook verification
+// Meta envia: ?hub.mode=subscribe&hub.verify_token=TOKEN&hub.challenge=XXXX
+// Servidor deve responder com hub.challenge em plain text, status 200.
 router.get('/', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
+  const mode      = req.query['hub.mode'];
+  const token     = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
+
+  // Log completo para diagnostico via Railway
+  console.log('[WA-WEBHOOK] Verification attempt:', {
+    mode,
+    token_received:  token,
+    token_expected:  VERIFY_TOKEN,
+    token_match:     token === VERIFY_TOKEN,
+    challenge,
+    headers: {
+      host:       req.headers.host,
+      user_agent: req.headers['user-agent'],
+    },
+    raw_query: req.query,
+  });
+
   if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('[WA-WEBHOOK] Verified');
-    return res.status(200).send(challenge);
+    console.log('[WA-WEBHOOK] Verification OK — returning challenge:', challenge);
+    // Resposta deve ser EXATAMENTE o hub.challenge, sem JSON, sem newlines
+    res.setHeader('Content-Type', 'text/plain');
+    return res.status(200).end(String(challenge));
   }
+
+  console.warn('[WA-WEBHOOK] Verification FAILED — token mismatch ou mode incorreto');
   res.sendStatus(403);
+});
+
+// GET /webhooks/whatsapp/ping — diagnostico sem autenticacao
+router.get('/ping', (req, res) => {
+  res.json({
+    status: 'ok',
+    verify_token_set: !!process.env.WA_VERIFY_TOKEN,
+    verify_token_value: VERIFY_TOKEN, // Mostra o token em uso para comparar com Railway
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // POST /webhooks/whatsapp — Receive events
