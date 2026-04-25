@@ -19,6 +19,17 @@
 --   20260423125714 049_dental_practitioners_and_settings
 -- ============================================================
 
+-- ── 0. customers.is_patient (necessario pra 048 que indexa por is_patient) ──
+-- Em prod vem da 050_unify_customers_patients (aplicada via MCP).
+-- Em CI rodando ordem alfabetica, 048 vem antes da 050 e referencia esta
+-- coluna no CREATE INDEX ... WHERE is_patient = true. Adicionamos aqui
+-- (antes da 048) com IF NOT EXISTS pra ficar idempotente.
+ALTER TABLE customers
+  ADD COLUMN IF NOT EXISTS is_patient boolean NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS idx_customers_is_patient
+  ON customers(company_id, is_patient)
+  WHERE is_patient = true;
+
 -- ── 1. dental_practitioners (base pra repasses + FK) ──────────────
 CREATE TABLE IF NOT EXISTS dental_practitioners (
   id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
