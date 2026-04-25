@@ -34,3 +34,10 @@ jest.mock('../src/services/dentalWs', () => ({
   setupDentalWebSocket: jest.fn(),
   getSessionStatus: jest.fn(),
 }));
+
+// W2-04: novo handler WS para TCLE (separado do dentalWs)
+jest.mock('../src/services/dentalConsentWs', () => ({
+  setupConsentWebSocket: jest.fn(),
+  getConsentSessionStatus: jest.fn(() => ({ status: 'waiting', connected: false })),
+  validateConsentToken: jest.fn(),
+}));
