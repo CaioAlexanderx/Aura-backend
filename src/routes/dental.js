@@ -24,6 +24,7 @@ router.use('/', require('./dentalProcedures'));
 router.use('/', require('./dentalPractitioners'));
 router.use('/', require('./dentalBookingAdmin'));
 router.use('/', require('./dentalConsent')); // W2-04: TCLE templates + documents
+router.use('/ai', require('./dentalAi'));     // W2-05: IA Odonto persistente (Expansao only)
 
 // ── Helpers ──
 async function resolveCustomerId(companyId, body) {
