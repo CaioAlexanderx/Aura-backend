@@ -8,6 +8,14 @@
 -- Fase 3 do W1-01: persistencia de Periograma e Fichas por
 -- paciente, fechando as 2 ultimas sub-tabs do PatientHub
 -- (antes apenas renderizavam componente base sem save).
+--
+-- DRIFT FIX (25/04/2026): a tabela dental_specialty_forms ja foi
+-- criada em 033_dental_tier3.sql com `patient_id` e SEM customer_id.
+-- O D-UNIFY (migration 050) so adiciona customer_id em 4 tabelas
+-- (appointments, chart_entries, prescriptions, treatment_plans),
+-- nao em dental_specialty_forms. Em prod a coluna foi adicionada via
+-- MCP sem mirror. Aqui adicionamos ALTER ADD COLUMN IF NOT EXISTS
+-- ANTES dos CREATE INDEX pra garantir que CI rode em DB limpo.
 -- ============================================================
 
 -- ── dental_perio_exams ──
@@ -28,6 +36,12 @@ CREATE TABLE IF NOT EXISTS dental_perio_exams (
   updated_at      timestamptz  NOT NULL DEFAULT NOW()
 );
 
+-- Drift safety net: se a tabela ja existia com schema antigo
+-- (sem customer_id), garante que a coluna existe antes de indexar.
+-- Em DB limpo nao faz nada (CREATE TABLE acima ja criou com customer_id).
+ALTER TABLE dental_perio_exams
+  ADD COLUMN IF NOT EXISTS customer_id uuid REFERENCES customers(id) ON DELETE CASCADE;
+
 CREATE INDEX IF NOT EXISTS idx_dental_perio_customer_date
   ON dental_perio_exams(customer_id, exam_date DESC);
 CREATE INDEX IF NOT EXISTS idx_dental_perio_company
@@ -43,6 +57,11 @@ COMMENT ON COLUMN dental_perio_exams.plaque_index IS
   'Indice de placa (PI) em percentual 0-100. >30% indica higiene inadequada.';
 
 -- ── dental_specialty_forms ──
+-- Esta tabela JA foi criada em 033_dental_tier3.sql com patient_id
+-- (sem customer_id). O CREATE TABLE IF NOT EXISTS abaixo e skipped
+-- em CI (DB limpo) e em prod (ja existe).
+-- O ALTER ADD COLUMN IF NOT EXISTS DEPOIS do CREATE TABLE garante que
+-- customer_id exista em ambos os cenarios.
 CREATE TABLE IF NOT EXISTS dental_specialty_forms (
   id              uuid         PRIMARY KEY DEFAULT gen_random_uuid(),
   company_id      uuid         NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -58,6 +77,14 @@ CREATE TABLE IF NOT EXISTS dental_specialty_forms (
     specialty IN ('ortodontia','endodontia','periodontia','cirurgia','implante','protese')
   )
 );
+
+-- Drift safety net: a 033_dental_tier3.sql cria esta tabela com patient_id
+-- (sem customer_id). Adiciona customer_id se nao existir, alinhando com
+-- prod (onde a coluna foi adicionada via MCP no D-UNIFY) e permitindo o
+-- CREATE INDEX abaixo funcionar em CI.
+-- Note: nullable aqui (sem NOT NULL) pra coexistir com schema antigo da 033.
+ALTER TABLE dental_specialty_forms
+  ADD COLUMN IF NOT EXISTS customer_id uuid REFERENCES customers(id) ON DELETE CASCADE;
 
 CREATE INDEX IF NOT EXISTS idx_dental_specialty_customer
   ON dental_specialty_forms(customer_id);
