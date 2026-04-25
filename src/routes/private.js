@@ -37,6 +37,7 @@ router.use('/product-categories', require('./productCategories'));
 router.use('/coupons', require('./coupons'));
 router.use('/nfce', require('./nfce'));
 router.use('/nfe', require('./nfe'));
+router.use('/nfse', require('./nfse'));    // W2-03: NFS-e cross-vertical (Nuvem Fiscal/Norte Notas/mock)
 router.use('/storage', require('./storage'));
 router.use('/obligations', require('./fiscalObligations'));
 router.use('/obligations', require('./fiscalPdf'));
