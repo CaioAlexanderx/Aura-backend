@@ -37,7 +37,7 @@ router.use('/product-categories', require('./productCategories'));
 router.use('/coupons', require('./coupons'));
 router.use('/nfce', require('./nfce'));
 router.use('/nfe', require('./nfe'));
-router.use('/nfse', require('./nfse'));    // W2-03: NFS-e cross-vertical (Nuvem Fiscal/Norte Notas/mock)
+router.use('/nfse', require('./nfse'));    // W2-03: NFS-e cross-vertical
 router.use('/storage', require('./storage'));
 router.use('/obligations', require('./fiscalObligations'));
 router.use('/obligations', require('./fiscalPdf'));
@@ -47,8 +47,6 @@ router.use('/onboarding', require('./onboarding'));
 router.use('/export', require('./exportReports'));
 router.use('/', require('./importData'));
 router.use('/print', require('./print'));
-// /sales/analytics REGISTRADO ANTES de /sales pra que Express resolva
-// o sub-path mais especifico primeiro (ordem de registro importa).
 router.use('/sales/analytics', require('./salesAnalytics'));
 router.use('/sales', require('./sales'));
 router.use('/reviews', require('./reviews').reviewsRouter);
@@ -97,6 +95,7 @@ router.use('/dental/implants',      requirePlan('negocio', 'expansao'), require(
 router.use('/dental/ortho',         requirePlan('negocio', 'expansao'), require('./dentalOrtho'));         // W3 Sprint 2
 router.use('/dental/documents',     requirePlan('negocio', 'expansao'), require('./dentalDocuments'));     // GAP-01
 router.use('/dental/transcribe',    requirePlan('negocio', 'expansao'), require('./dentalTranscription')); // GAP-02
+router.use('/dental/supplies',      requirePlan('negocio', 'expansao'), require('./dentalSupplies'));      // GAP-03
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
 router.use('/food/deliverers', requirePlan('negocio', 'expansao'), require('./foodDeliverers'));
