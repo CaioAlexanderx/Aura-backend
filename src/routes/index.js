@@ -49,6 +49,7 @@ router.use('/storefront', require('./storefront'));
 // Rotas publicas
 router.use('/reviews',           publicReviewsRouter);
 router.use('/dental',            require('./dentalSign'));
+router.use('/dental/consent',    require('./dentalConsentPublic')); // W2-04: TCLE pad publico
 router.use('/dental/book',       require('./dentalBooking'));
 router.use('/dental-portal',     require('./dentalPortalPublic'));
 router.use('/barber/book',       require('./barberBooking'));

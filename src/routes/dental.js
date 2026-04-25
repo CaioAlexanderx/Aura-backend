@@ -23,6 +23,7 @@ router.use('/', require('./dentalSpecialtyForms'));
 router.use('/', require('./dentalProcedures'));
 router.use('/', require('./dentalPractitioners'));
 router.use('/', require('./dentalBookingAdmin'));
+router.use('/', require('./dentalConsent')); // W2-04: TCLE templates + documents
 
 // ── Helpers ──
 async function resolveCustomerId(companyId, body) {

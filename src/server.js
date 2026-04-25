@@ -2,6 +2,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const app = require('./app');
 const { setupDentalWebSocket } = require('./services/dentalWs');
+const { setupConsentWebSocket } = require('./services/dentalConsentWs');
 const { validateRuntimeEnv } = require('./config/env');
 
 const env = validateRuntimeEnv();
@@ -14,29 +15,41 @@ const server = http.createServer(app);
 process.on('unhandledRejection', function(reason, promise) {
   console.error('[UNHANDLED REJECTION] Promise:', promise);
   console.error('[UNHANDLED REJECTION] Reason:', reason);
-  // Nao encerra o processo — Railway reiniciaria em loop
-  // Se for erro critico, o Sentry captura via requestHandler
 });
 
 process.on('uncaughtException', function(err) {
   console.error('[UNCAUGHT EXCEPTION]', err.message);
   console.error(err.stack);
-  // Encerra graciosamente e deixa Railway reiniciar
-  // (uncaughtException geralmente deixa o processo em estado invalido)
   process.exit(1);
 });
 
-// ── WebSocket ───────────────────────────────────────────────
-const wss = new WebSocketServer({
-  server,
-  path: '/ws/sign',
-  verifyClient: function(info) {
-    return info.req.url.startsWith('/ws/sign/');
-  },
+// ── WebSocket: roteamento por path ──────────────────────────
+// upgrade tem que rotear pra wss diferente conforme o path.
+// /ws/sign/:token    -> dentalWs.js     (W1-04, appointment signing)
+// /ws/consent/:token -> dentalConsentWs.js (W2-04, TCLE signing)
+
+const wssDental = new WebSocketServer({ noServer: true });
+const wssConsent = new WebSocketServer({ noServer: true });
+
+setupDentalWebSocket(wssDental);
+setupConsentWebSocket(wssConsent);
+
+server.on('upgrade', function(request, socket, head) {
+  const url = request.url || '';
+  if (url.startsWith('/ws/sign/')) {
+    wssDental.handleUpgrade(request, socket, head, function(ws) {
+      wssDental.emit('connection', ws, request);
+    });
+  } else if (url.startsWith('/ws/consent/')) {
+    wssConsent.handleUpgrade(request, socket, head, function(ws) {
+      wssConsent.emit('connection', ws, request);
+    });
+  } else {
+    socket.destroy();
+  }
 });
 
-setupDentalWebSocket(wss);
-console.log('[WS] Configurado em /ws/sign/:token');
+console.log('[WS] Configurado em /ws/sign/:token (appointments) e /ws/consent/:token (TCLE)');
 
 // ── Start ───────────────────────────────────────────────────
 function startServer() {
