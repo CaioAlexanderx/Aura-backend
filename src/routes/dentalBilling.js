@@ -2,10 +2,16 @@
 // AURA. — ODT-03: Regua de Cobranca Odonto
 // D-UNIFY: join com customers via tp.customer_id (treatment_plans).
 // Reminders tambem usam customer_id.
+//
+// PR11 (2026-04-26): novo endpoint POST /billing/payments/:pid/pay
+// permite UI marcar parcela como recebida. Setar paid_at dispara
+// trigger backend (068) que cria transaction (income, receita_clinica).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireRole } = require('../middleware/auth');
+
+const requireWrite = requireRole('client', 'analyst', 'admin');
 
 router.get('/billing/overdue', requireAuth, async (req, res) => {
   const cid = req.params.id;
@@ -187,6 +193,73 @@ router.get('/billing/reminders', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[dentalBilling reminders]', err.message);
     res.status(500).json({ error: 'Erro' });
+  }
+});
+
+// ============================================================
+// POST /billing/payments/:paymentId/pay  (PR11 — 2026-04-26)
+//
+// Marca uma parcela como paga. Setar paid_at dispara trigger
+// backend (migration 068) que cria transaction (income,
+// receita_clinica) automaticamente — receita aparece no DRE
+// generico imediatamente.
+//
+// Body opcional:
+//   - method:    pix | dinheiro | cartao_credito | cartao_debito | boleto | transferencia
+//   - paid_at:   ISO timestamp (default: NOW())
+//   - notes:     observacoes opcionais
+//
+// Validacoes:
+//   - Parcela existe e pertence a company (via JOIN)
+//   - Status atual deve ser 'pending' (nao permite re-pagar)
+// ============================================================
+router.post('/billing/payments/:paymentId/pay', requireAuth, requireWrite, async (req, res) => {
+  const cid = req.params.id;
+  const { paymentId } = req.params;
+  const { method, paid_at, notes } = req.body || {};
+
+  // Valida method (whitelist) se fornecido
+  const ALLOWED_METHODS = ['pix', 'dinheiro', 'cartao_credito', 'cartao_debito', 'boleto', 'transferencia'];
+  if (method && !ALLOWED_METHODS.includes(method)) {
+    return res.status(400).json({ error: 'method invalido. Use: ' + ALLOWED_METHODS.join(', ') });
+  }
+
+  try {
+    // Confirma que parcela existe + pertence a company + esta pending
+    const { rows: check } = await db.query(
+      `SELECT tp.id, tp.status, tp.amount, t.company_id
+         FROM dental_treatment_payments tp
+         JOIN dental_treatment_plans t ON t.id = tp.treatment_plan_id
+        WHERE tp.id = $1 AND t.company_id = $2`,
+      [paymentId, cid]
+    );
+    if (!check.length) {
+      return res.status(404).json({ error: 'Parcela nao encontrada' });
+    }
+    if (check[0].status === 'paid') {
+      return res.status(409).json({ error: 'Parcela ja foi marcada como paga' });
+    }
+
+    // Update: setar paid_at + status + method (trigger 068 cria transaction)
+    const { rows } = await db.query(
+      `UPDATE dental_treatment_payments
+          SET paid_at        = COALESCE($1::timestamptz, NOW()),
+              status         = 'paid',
+              payment_method = COALESCE($2, payment_method),
+              notes          = COALESCE($3, notes),
+              updated_at     = NOW()
+        WHERE id = $4
+        RETURNING *`,
+      [paid_at || null, method || null, notes || null, paymentId]
+    );
+
+    res.json({
+      payment: rows[0],
+      message: 'Parcela marcada como paga. Receita disponivel no Financeiro.',
+    });
+  } catch (err) {
+    console.error('[dentalBilling payments/pay]', err.message);
+    res.status(500).json({ error: 'Erro ao registrar pagamento' });
   }
 });
 
