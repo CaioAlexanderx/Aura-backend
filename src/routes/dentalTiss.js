@@ -24,7 +24,7 @@
 //      GET    /companies/:cid/dental/tiss/guides
 //      POST   /companies/:cid/dental/tiss/guides
 //      GET    /companies/:cid/dental/tiss/guides/:gid
-//      PATCH  /companies/:cid/dental/tiss/guides/:gid
+//      PATCH  /companies/:cid/dental/tiss/guides/:gid    (PR13: + paid_value/paid_at)
 //      DELETE /companies/:cid/dental/tiss/guides/:gid
 //      GET    /companies/:cid/dental/tiss/guides/:gid/xml      (preview)
 //
@@ -541,6 +541,18 @@ router.get('/guides/:gid', requireAuth, async (req, res) => {
   }
 });
 
+// PATCH /guides/:gid
+//
+// PR13 (2026-04-26): expandido com paid_value, paid_at, glossed_value,
+// glossed_codes pra suportar reconciliacao manual de pagamento.
+// Trigger 067 (dental_tiss_guide_to_transaction) escuta paid_at e
+// dispara criacao automatica de transaction (income, receita_tiss).
+//
+// Auto-status: se body NAO especifica status mas informa paid_value
+// e/ou glossed_value, deduz:
+//   - paid_value > 0 e glossed_value === 0/ausente → 'paga'
+//   - paid_value > 0 e glossed_value > 0           → 'paga_parcial'
+//   - paid_value === 0 e glossed_value > 0         → 'negada'
 router.patch('/guides/:gid', requireAuth, requireWrite, async (req, res) => {
   const ALLOWED = [
     'status', 'auth_password', 'auth_number', 'auth_validity',
@@ -550,18 +562,46 @@ router.patch('/guides/:gid', requireAuth, requireWrite, async (req, res) => {
     'hospital_admission_at', 'hospital_discharge_at', 'hospital_regime',
     'clinical_indication', 'cid_code',
     'authorized_value', 'denied_reason',
+    // PR13: reconciliacao manual de pagamento
+    'paid_value', 'paid_at', 'glossed_value', 'glossed_codes',
   ];
+
+  // Auto-status quando body informa pagamento sem status explicito
+  const body = { ...req.body };
+  const hasPaidInfo = body.paid_value !== undefined || body.glossed_value !== undefined;
+  if (hasPaidInfo && body.status === undefined) {
+    const paid    = parseFloat(body.paid_value || 0) || 0;
+    const glossed = parseFloat(body.glossed_value || 0) || 0;
+    if (paid > 0 && glossed === 0)      body.status = 'paga';
+    else if (paid > 0 && glossed > 0)   body.status = 'paga_parcial';
+    else if (paid === 0 && glossed > 0) body.status = 'negada';
+    // (paid==0 e glossed==0 → nao muda status)
+  }
+
+  // Auto-paid_at: se status=paga/paga_parcial e paid_at nao foi fornecido
+  if (
+    (body.status === 'paga' || body.status === 'paga_parcial') &&
+    body.paid_at === undefined
+  ) {
+    body.paid_at = new Date().toISOString();
+  }
+
+  // Serializa glossed_codes se vier como array/objeto (jsonb)
+  if (body.glossed_codes !== undefined && typeof body.glossed_codes !== 'string') {
+    body.glossed_codes = JSON.stringify(body.glossed_codes);
+  }
+
   const fields = [];
   const values = [];
   let idx = 1;
   for (const k of ALLOWED) {
-    if (req.body[k] !== undefined) {
+    if (body[k] !== undefined) {
       fields.push(`${k} = $${idx++}`);
-      values.push(req.body[k]);
+      values.push(body[k]);
     }
   }
-  if (req.body.status === 'autorizada') fields.push(`authorized_at = NOW()`);
-  if (req.body.status === 'enviada') fields.push(`sent_at = NOW()`);
+  if (body.status === 'autorizada') fields.push(`authorized_at = NOW()`);
+  if (body.status === 'enviada') fields.push(`sent_at = NOW()`);
   if (!fields.length) return res.status(400).json({ error: 'Nada pra atualizar' });
   fields.push(`updated_at = NOW()`);
   values.push(req.params.gid, req.params.id);
