@@ -4,6 +4,12 @@
 // UNIFICACAO 27/04: summary.income vem de sales (fonte unica).
 // summary.transactions_income exposto separadamente para o frontend
 // calcular e exibir o gap (vendas sem lancamento correspondente).
+//
+// FIX DESPESAS 27/04: filtro de data padronizado para
+// (created_at AT TIME ZONE 'America/Sao_Paulo')::date em todas as
+// queries (listing + summary). Antes usava COALESCE(due_date, created_at::date)
+// o que fazia despesas com due_date em outro mes desaparecerem do Financeiro
+// mesmo aparecendo no Dashboard (que sempre usou created_at SP).
 // ============================================================
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
@@ -32,6 +38,12 @@ var RECURRENCE_DEFAULTS = { weekly: 4, monthly: 12, yearly: 3 };
 var RECURRENCE_MAX = { weekly: 52, monthly: 24, yearly: 10 };
 var RECURRENCE_LABELS = { weekly: 'semanal', monthly: 'mensal', yearly: 'anual' };
 
+// Helper: clausula de data por created_at em fuso SP (consistente com Dashboard)
+function dateClauseSP(alias, paramIdx) {
+  // "(created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $N"
+  return "(created_at AT TIME ZONE 'America/Sao_Paulo')::date " + (alias === '>=' ? '>=' : '<=') + ' $' + paramIdx;
+}
+
 router.get('/', async function(req, res) {
   var cid = req.params.id;
   var limit = Math.min(parseInt(req.query.limit) || 200, 10000);
@@ -41,11 +53,14 @@ router.get('/', async function(req, res) {
   var end = req.query.end;
   try {
     // --- Listagem ---
+    // Filtro de data: created_at em fuso SP (igual ao Dashboard).
+    // Antes: COALESCE(due_date, created_at::date) — causava despesas com
+    // due_date em outro mes sumirem do periodo correto.
     var where = 'WHERE company_id = $1';
     var params = [cid];
     if (type === 'income' || type === 'expense') { params.push(type); where += ' AND type = $' + params.length; }
-    if (start) { params.push(start); where += ' AND COALESCE(due_date, created_at::date) >= $' + params.length; }
-    if (end) { params.push(end); where += ' AND COALESCE(due_date, created_at::date) <= $' + params.length; }
+    if (start) { params.push(start); where += ' AND ' + dateClauseSP('>=', params.length); }
+    if (end)   { params.push(end);   where += ' AND ' + dateClauseSP('<=', params.length); }
     var countRes = await db.query('SELECT COUNT(*) AS total FROM transactions ' + where, params);
     var dataParams = params.concat([limit, offset]);
     var dataRes = await db.query(
@@ -53,7 +68,7 @@ router.get('/', async function(req, res) {
       '       recurrence_type, recurrence_group_id, recurrence_index,' +
       '       payment_method, employee_id, employee_name, idempotency_key' +
       ' FROM transactions ' + where +
-      ' ORDER BY COALESCE(due_date, created_at::date) DESC, created_at DESC' +
+      ' ORDER BY COALESCE(due_date, (created_at AT TIME ZONE \'America/Sao_Paulo\')::date) DESC, created_at DESC' +
       ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2), dataParams
     );
 
@@ -68,16 +83,16 @@ router.get('/', async function(req, res) {
     // 2. income bruto de transactions (para calculo do gap)
     var txIncP = [cid];
     var txIncW = "WHERE company_id = $1 AND type = 'income'";
-    if (start) { txIncP.push(start); txIncW += ' AND COALESCE(due_date, created_at::date) >= $' + txIncP.length; }
-    if (end)   { txIncP.push(end);   txIncW += ' AND COALESCE(due_date, created_at::date) <= $' + txIncP.length; }
-    if (!start && !end) txIncW += " AND created_at >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')::date)";
+    if (start) { txIncP.push(start); txIncW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $" + txIncP.length; }
+    if (end)   { txIncP.push(end);   txIncW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date <= $" + txIncP.length; }
+    if (!start && !end) txIncW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))";
 
-    // 3. expenses de transactions
+    // 3. expenses de transactions — mesmo filtro created_at SP (igual ao Dashboard)
     var expP = [cid];
     var expW = "WHERE company_id = $1 AND type = 'expense'";
-    if (start) { expP.push(start); expW += ' AND COALESCE(due_date, created_at::date) >= $' + expP.length; }
-    if (end)   { expP.push(end);   expW += ' AND COALESCE(due_date, created_at::date) <= $' + expP.length; }
-    if (!start && !end) expW += " AND created_at >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')::date)";
+    if (start) { expP.push(start); expW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $" + expP.length; }
+    if (end)   { expP.push(end);   expW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date <= $" + expP.length; }
+    if (!start && !end) expW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))";
 
     var [salesR, txIncR, expR] = await Promise.all([
       db.query('SELECT COALESCE(SUM(total_amount), 0) AS income FROM sales ' + salesW, salesP),
