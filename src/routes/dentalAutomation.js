@@ -6,6 +6,13 @@
 // ODT-15 (23/04): Endpoints GET-only para telas Camada 4b:
 //   GET /automation/recall/list — lista pacientes pra recall SEM disparar
 //   GET /no-shows                — historico de faltas agregado por paciente
+//
+// PR14 (27/04): cast a.status::text em todas as comparacoes IN/NOT IN.
+// O enum dental_appointment_status nao tem 'completed', 'no_show',
+// 'scheduled', 'cancelled' etc — cast pra text evita erro
+// "invalid input value for enum" quando Postgres tenta castar string
+// inexistente. Backwards compatible: rows nao casam com strings que
+// nao existem, comportamento e o mesmo.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -71,7 +78,7 @@ router.post('/automation/trigger', requireAuth, requireRole('client','admin'), a
                 c.phone AS phone
          FROM dental_appointments a
          JOIN customers c ON c.id = a.customer_id
-         WHERE a.company_id=$1 AND a.status IN ('scheduled','pending','agendado')
+         WHERE a.company_id=$1 AND a.status::text IN ('scheduled','pending','agendado')
            AND a.scheduled_at BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
            AND NOT EXISTS (
              SELECT 1 FROM dental_automation_log l
@@ -88,7 +95,7 @@ router.post('/automation/trigger', requireAuth, requireRole('client','admin'), a
                 c.phone AS phone
          FROM dental_appointments a
          JOIN customers c ON c.id = a.customer_id
-         WHERE a.company_id=$1 AND a.status IN ('scheduled','confirmed','agendado')
+         WHERE a.company_id=$1 AND a.status::text IN ('scheduled','confirmed','agendado')
            AND a.scheduled_at BETWEEN NOW() AND NOW() + INTERVAL '3 hours'
            AND NOT EXISTS (
              SELECT 1 FROM dental_automation_log l
@@ -135,7 +142,7 @@ router.post('/automation/recall', requireAuth, async (req, res) => {
               CURRENT_DATE - MAX(a.scheduled_at)::date AS days_since
        FROM customers c
        LEFT JOIN dental_appointments a
-         ON a.customer_id = c.id AND a.status IN ('completed','concluido')
+         ON a.customer_id = c.id AND a.status::text IN ('completed','concluido')
        WHERE c.company_id = $1 AND c.is_patient = true AND c.is_active = true
        GROUP BY c.id, c.name, c.phone
        HAVING MAX(a.scheduled_at) < NOW() - ($2 || ' days')::interval
@@ -176,14 +183,14 @@ router.get('/automation/recall/list', requireAuth, async (req, res) => {
          SELECT c.id,
                 c.name  AS full_name,
                 c.phone,
-                MAX(a.scheduled_at) FILTER (WHERE a.status IN ('concluido','completed')) AS last_visit,
-                COUNT(*) FILTER (WHERE a.status IN ('faltou','no_show'))::int AS no_show_count
+                MAX(a.scheduled_at) FILTER (WHERE a.status::text IN ('concluido','completed')) AS last_visit,
+                COUNT(*) FILTER (WHERE a.status::text IN ('faltou','no_show'))::int AS no_show_count
          FROM customers c
          LEFT JOIN dental_appointments a
            ON a.customer_id = c.id AND a.company_id = c.company_id
          WHERE c.company_id = $1 AND c.is_patient = true AND c.is_active = true
          GROUP BY c.id, c.name, c.phone
-         HAVING MAX(a.scheduled_at) FILTER (WHERE a.status IN ('concluido','completed')) IS NOT NULL
+         HAVING MAX(a.scheduled_at) FILTER (WHERE a.status::text IN ('concluido','completed')) IS NOT NULL
        )
        SELECT lv.id,
               lv.full_name,
@@ -200,7 +207,7 @@ router.get('/automation/recall/list', requireAuth, async (req, res) => {
            WHERE a2.customer_id = lv.id
              AND a2.company_id = $1
              AND a2.scheduled_at > NOW()
-             AND a2.status NOT IN ('cancelado','cancelled','faltou','no_show')
+             AND a2.status::text NOT IN ('cancelado','cancelled','faltou','no_show')
          )
        ORDER BY next_recall ASC
        LIMIT 100`,
@@ -234,14 +241,14 @@ router.get('/no-shows', requireAuth, async (req, res) => {
       `SELECT c.id,
               c.name  AS full_name,
               c.phone,
-              COUNT(*) FILTER (WHERE a.status IN ('faltou','no_show'))::int AS no_show_count,
-              COUNT(*) FILTER (WHERE a.status NOT IN ('cancelado','cancelled'))::int AS total_appointments,
-              MAX(a.scheduled_at) FILTER (WHERE a.status IN ('faltou','no_show')) AS last_no_show,
+              COUNT(*) FILTER (WHERE a.status::text IN ('faltou','no_show'))::int AS no_show_count,
+              COUNT(*) FILTER (WHERE a.status::text NOT IN ('cancelado','cancelled'))::int AS total_appointments,
+              MAX(a.scheduled_at) FILTER (WHERE a.status::text IN ('faltou','no_show')) AS last_no_show,
               CASE
-                WHEN COUNT(*) FILTER (WHERE a.status NOT IN ('cancelado','cancelled')) = 0 THEN 0
+                WHEN COUNT(*) FILTER (WHERE a.status::text NOT IN ('cancelado','cancelled')) = 0 THEN 0
                 ELSE ROUND(
-                  COUNT(*) FILTER (WHERE a.status IN ('faltou','no_show'))::numeric
-                  / COUNT(*) FILTER (WHERE a.status NOT IN ('cancelado','cancelled'))::numeric
+                  COUNT(*) FILTER (WHERE a.status::text IN ('faltou','no_show'))::numeric
+                  / COUNT(*) FILTER (WHERE a.status::text NOT IN ('cancelado','cancelled'))::numeric
                   * 100, 1
                 )
               END AS no_show_rate
@@ -250,7 +257,7 @@ router.get('/no-shows', requireAuth, async (req, res) => {
          ON a.customer_id = c.id AND a.company_id = c.company_id
        WHERE c.company_id = $1 AND c.is_patient = true
        GROUP BY c.id, c.name, c.phone
-       HAVING COUNT(*) FILTER (WHERE a.status IN ('faltou','no_show')) > 0
+       HAVING COUNT(*) FILTER (WHERE a.status::text IN ('faltou','no_show')) > 0
        ORDER BY no_show_count DESC, no_show_rate DESC
        LIMIT 100`,
       [cid]);
