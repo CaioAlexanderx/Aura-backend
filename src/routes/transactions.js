@@ -1,9 +1,11 @@
 // ============================================================
 // AURA. — Transactions CRUD + Recorrencia
 //
-// UNIFICACAO 27/04: summary.income vem de sales (fonte unica).
-// summary.transactions_income exposto separadamente para o frontend
-// calcular e exibir o gap (vendas sem lancamento correspondente).
+// FONTE DE RECEITA (revisao 27/04):
+//   summary.income = SUM(transactions WHERE type=income) no periodo.
+//   A tabela 'transactions' e a fonte financeira correta.
+//   A tabela 'sales' contem entradas invalidas/teste e NAO deve ser
+//   usada para calcular receita financeira.
 //
 // FIX DESPESAS 27/04: filtro de data padronizado para
 // (created_at AT TIME ZONE 'America/Sao_Paulo')::date em todas as
@@ -39,9 +41,8 @@ var RECURRENCE_MAX = { weekly: 52, monthly: 24, yearly: 10 };
 var RECURRENCE_LABELS = { weekly: 'semanal', monthly: 'mensal', yearly: 'anual' };
 
 // Helper: clausula de data por created_at em fuso SP (consistente com Dashboard)
-function dateClauseSP(alias, paramIdx) {
-  // "(created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $N"
-  return "(created_at AT TIME ZONE 'America/Sao_Paulo')::date " + (alias === '>=' ? '>=' : '<=') + ' $' + paramIdx;
+function dateClauseSP(op, paramIdx) {
+  return "(created_at AT TIME ZONE 'America/Sao_Paulo')::date " + op + ' $' + paramIdx;
 }
 
 router.get('/', async function(req, res) {
@@ -54,8 +55,6 @@ router.get('/', async function(req, res) {
   try {
     // --- Listagem ---
     // Filtro de data: created_at em fuso SP (igual ao Dashboard).
-    // Antes: COALESCE(due_date, created_at::date) — causava despesas com
-    // due_date em outro mes sumirem do periodo correto.
     var where = 'WHERE company_id = $1';
     var params = [cid];
     if (type === 'income' || type === 'expense') { params.push(type); where += ' AND type = $' + params.length; }
@@ -68,42 +67,32 @@ router.get('/', async function(req, res) {
       '       recurrence_type, recurrence_group_id, recurrence_index,' +
       '       payment_method, employee_id, employee_name, idempotency_key' +
       ' FROM transactions ' + where +
-      ' ORDER BY COALESCE(due_date, (created_at AT TIME ZONE \'America/Sao_Paulo\')::date) DESC, created_at DESC' +
+      " ORDER BY COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) DESC, created_at DESC" +
       ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2), dataParams
     );
 
-    // --- Summary: tres queries em paralelo ---
-    // 1. income de sales (fonte unificada com demais telas)
-    var salesP = [cid];
-    var salesW = "WHERE company_id = $1 AND COALESCE(status,'completed') != 'cancelled'";
-    if (start) { salesP.push(start); salesW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $" + salesP.length; }
-    if (end)   { salesP.push(end);   salesW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date <= $" + salesP.length; }
-    if (!start && !end) salesW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))";
+    // --- Summary: income e expenses de transactions ---
+    // Ambos filtrados por (created_at AT TIME ZONE 'America/Sao_Paulo')::date.
+    var defaultW = !start && !end
+      ? " AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))"
+      : '';
 
-    // 2. income bruto de transactions (para calculo do gap)
-    var txIncP = [cid];
-    var txIncW = "WHERE company_id = $1 AND type = 'income'";
-    if (start) { txIncP.push(start); txIncW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $" + txIncP.length; }
-    if (end)   { txIncP.push(end);   txIncW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date <= $" + txIncP.length; }
-    if (!start && !end) txIncW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))";
+    var sumP = [cid];
+    var sumW = 'WHERE company_id = $1';
+    if (start) { sumP.push(start); sumW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $" + sumP.length; }
+    if (end)   { sumP.push(end);   sumW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date <= $" + sumP.length; }
+    sumW += defaultW;
 
-    // 3. expenses de transactions — mesmo filtro created_at SP (igual ao Dashboard)
-    var expP = [cid];
-    var expW = "WHERE company_id = $1 AND type = 'expense'";
-    if (start) { expP.push(start); expW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $" + expP.length; }
-    if (end)   { expP.push(end);   expW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date <= $" + expP.length; }
-    if (!start && !end) expW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))";
+    var sumRes = await db.query(
+      'SELECT' +
+      "  COALESCE(SUM(amount) FILTER (WHERE type = 'income'),  0) AS income," +
+      "  COALESCE(SUM(amount) FILTER (WHERE type = 'expense'), 0) AS expenses" +
+      ' FROM transactions ' + sumW,
+      sumP
+    );
 
-    var [salesR, txIncR, expR] = await Promise.all([
-      db.query('SELECT COALESCE(SUM(total_amount), 0) AS income FROM sales ' + salesW, salesP),
-      db.query('SELECT COALESCE(SUM(amount), 0) AS income FROM transactions ' + txIncW, txIncP),
-      db.query('SELECT COALESCE(SUM(amount), 0) AS expenses FROM transactions ' + expW, expP),
-    ]);
-
-    var salesIncome = parseFloat(salesR.rows[0]?.income)  || 0;
-    var txIncome    = parseFloat(txIncR.rows[0]?.income)  || 0;
-    var expenses    = parseFloat(expR.rows[0]?.expenses)  || 0;
-    var gap         = Math.max(0, Math.round((salesIncome - txIncome) * 100) / 100);
+    var income   = parseFloat(sumRes.rows[0]?.income)   || 0;
+    var expenses = parseFloat(sumRes.rows[0]?.expenses) || 0;
 
     var transactions = dataRes.rows.map(function(r) {
       return {
@@ -126,15 +115,14 @@ router.get('/', async function(req, res) {
         source: r.idempotency_key && /^pdv-sale-/i.test(r.idempotency_key) ? 'pdv' : 'manual',
       };
     });
+
     res.json({
       transactions: transactions,
       total: parseInt(countRes.rows[0]?.total) || 0,
       limit: limit, offset: offset,
       summary: {
-        income:               salesIncome,  // de sales — fonte unica
-        transactions_income:  txIncome,     // de transactions — para calculo do gap
-        gap:                  gap,          // vendas sem lancamento (exibir aviso no FE)
-        expenses:             expenses,
+        income:   income,    // transactions income no periodo
+        expenses: expenses,  // transactions expense no periodo
       },
     });
   } catch (err) { console.error('[transactions] list:', err.message); res.status(500).json({ error: 'Erro ao listar lancamentos' }); }
