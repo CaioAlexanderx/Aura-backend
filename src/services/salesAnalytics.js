@@ -1,12 +1,16 @@
 // ============================================================
 // AURA. — Servico de Analytics de Vendas (BE-01)
-// FIX: summary + series leem de transactions (income) para refletir
-//      Financeiro completo (PDV + lancamentos manuais do Financeiro).
-//      Timezone: AT TIME ZONE 'America/Sao_Paulo' em todas as
-//      comparacoes de datas — corrige drift UTC-3 no servidor Railway.
-// FIX 2: resolvePeriod agora usa calculo UTC-3 direto em vez de
-//      toLocaleDateString('en-CA', {timeZone}) que depende de ICU.
-//      Railway pode nao ter ICU completo, retornando formatos errados.
+//
+// UNIFICACAO 27/04:
+//   getSummary e getTimeSeries migrados de transactions para sales,
+//   igualando a fonte de truth de Dashboard, Vendas e Folha.
+//   Antes: total_revenue = SUM(transactions.amount WHERE type=income)
+//   Agora: total_revenue = SUM(sales.total_amount WHERE status!=cancelled)
+//
+//   Financeiro/TabVisaoGeral NAO e afetado — usa useTransactions/transactions
+//   diretamente (fluxo de caixa realizado, semanticamente distinto).
+//
+// FIX: resolvePeriod usa calculo UTC-3 direto (sem ICU) para Railway.
 // ============================================================
 
 const db = require('../config/database');
@@ -48,64 +52,45 @@ async function getSalesAnalytics(companyId, options = {}) {
 }
 
 /**
- * Resumo do periodo:
- * - Receita total: le de transactions (type='income') para refletir
- *   todos os lancamentos do Financeiro, nao so PDV.
- * - Contagem de vendas PDV: le de sales (cada venda no caixa = 1).
- * - Ticket medio: receita / vendas PDV (fallback: receita / total tx).
+ * Resumo do periodo — fonte: tabela sales (status != 'cancelled').
+ * Unificado com /vendas e /folha para consistencia de faturamento.
  */
 async function getSummary(companyId, startDate, endDate) {
   const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
 
-  const [txRes, salesRes] = await Promise.all([
-    db.query(`
-      SELECT
-        COALESCE(SUM(amount), 0)                                        AS total_revenue,
-        COALESCE(AVG(amount), 0)                                        AS avg_per_tx,
-        COUNT(*)::int                                                   AS total_tx,
-        COUNT(DISTINCT (created_at ${SP})::date)::int                  AS active_days
-      FROM transactions
-      WHERE company_id = $1
-        AND type = 'income'
-        AND status != 'cancelled'
-        AND (created_at ${SP}) >= $2::timestamp
-        AND (created_at ${SP}) <  $3::timestamp
-    `, [companyId, startDate, endDate]),
+  const { rows } = await db.query(`
+    SELECT
+      COUNT(*)::int                                                          AS total_sales,
+      COALESCE(SUM(total_amount)  FILTER (WHERE COALESCE(status,'completed') != 'cancelled'), 0)  AS total_revenue,
+      COALESCE(SUM(discount_amount) FILTER (WHERE COALESCE(status,'completed') != 'cancelled'), 0) AS total_discounts,
+      COUNT(DISTINCT customer_id) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int  AS unique_customers,
+      COUNT(DISTINCT (created_at ${SP})::date) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int AS active_days
+    FROM sales
+    WHERE company_id = $1
+      AND (created_at ${SP}) >= $2::timestamp
+      AND (created_at ${SP}) <  $3::timestamp
+  `, [companyId, startDate, endDate]);
 
-    db.query(`
-      SELECT
-        COUNT(*)::int                     AS total_sales,
-        COALESCE(SUM(discount_amount), 0) AS total_discounts,
-        COUNT(DISTINCT customer_id)::int  AS unique_customers
-      FROM sales
-      WHERE company_id = $1
-        AND (created_at ${SP}) >= $2::timestamp
-        AND (created_at ${SP}) <  $3::timestamp
-    `, [companyId, startDate, endDate]),
-  ]);
-
-  const tx = txRes.rows[0];
-  const sl = salesRes.rows[0];
-  const totalRevenue = parseFloat(tx.total_revenue);
-  const totalSales   = sl.total_sales;
-
-  const avgTicket = totalSales > 0
+  const row = rows[0];
+  const totalRevenue = parseFloat(row.total_revenue) || 0;
+  const totalSales   = parseInt(row.total_sales)   || 0;
+  const avgTicket    = totalSales > 0
     ? parseFloat((totalRevenue / totalSales).toFixed(2))
-    : parseFloat(parseFloat(tx.avg_per_tx).toFixed(2));
+    : 0;
 
   return {
     total_sales:      totalSales,
     total_revenue:    totalRevenue,
     avg_ticket:       avgTicket,
-    total_discounts:  parseFloat(sl.total_discounts),
-    unique_customers: sl.unique_customers,
-    active_days:      tx.active_days,
+    total_discounts:  parseFloat(row.total_discounts) || 0,
+    unique_customers: parseInt(row.unique_customers)  || 0,
+    active_days:      parseInt(row.active_days)       || 0,
   };
 }
 
 /**
- * Serie temporal — receita agrupada por dia/semana/mes via transactions.
- * Reflete todos os lancamentos de receita (PDV + manual).
+ * Serie temporal — fonte: tabela sales (status != 'cancelled').
+ * Consistente com getSummary para que o grafico reflita o mesmo universo.
  */
 async function getTimeSeries(companyId, startDate, endDate, groupBy) {
   const SP  = `AT TIME ZONE 'America/Sao_Paulo'`;
@@ -121,13 +106,12 @@ async function getTimeSeries(companyId, startDate, endDate, groupBy) {
 
   const { rows } = await db.query(`
     SELECT
-      ${groupExpr}             AS period,
-      COUNT(*)::int            AS total_sales,
-      COALESCE(SUM(amount), 0) AS total_revenue
-    FROM transactions
+      ${groupExpr}                                                   AS period,
+      COUNT(*)::int                                                  AS total_sales,
+      COALESCE(SUM(total_amount), 0)                                 AS total_revenue
+    FROM sales
     WHERE company_id = $1
-      AND type = 'income'
-      AND status != 'cancelled'
+      AND COALESCE(status, 'completed') != 'cancelled'
       AND ${spCol} >= $2::timestamp
       AND ${spCol} <  $3::timestamp
     GROUP BY 1
@@ -142,8 +126,7 @@ async function getTimeSeries(companyId, startDate, endDate, groupBy) {
 }
 
 /**
- * Top 10 produtos mais vendidos — mantem leitura de sales/sale_items
- * (unico lugar com granularidade por item).
+ * Top 10 produtos mais vendidos — sale_items JOIN sales.
  */
 async function getTopProducts(companyId, startDate, endDate) {
   const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
@@ -160,6 +143,7 @@ async function getTopProducts(companyId, startDate, endDate) {
     JOIN sales    s ON s.id  = si.sale_id
     JOIN products p ON p.id  = si.product_id
     WHERE s.company_id = $1
+      AND COALESCE(s.status, 'completed') != 'cancelled'
       AND (s.created_at ${SP}) >= $2::timestamp
       AND (s.created_at ${SP}) <  $3::timestamp
     GROUP BY p.id, p.name, p.category
@@ -178,7 +162,7 @@ async function getTopProducts(companyId, startDate, endDate) {
 }
 
 /**
- * Ranking de funcionarios por vendas no periodo — mantem leitura de sales.
+ * Ranking de funcionarios por vendas no periodo — sales.
  */
 async function getTopEmployees(companyId, startDate, endDate) {
   const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
@@ -193,6 +177,7 @@ async function getTopEmployees(companyId, startDate, endDate) {
     FROM sales s
     JOIN users u ON u.id = s.seller_id
     WHERE s.company_id = $1
+      AND COALESCE(s.status, 'completed') != 'cancelled'
       AND (s.created_at ${SP}) >= $2::timestamp
       AND (s.created_at ${SP}) <  $3::timestamp
       AND s.seller_id IS NOT NULL
@@ -211,7 +196,7 @@ async function getTopEmployees(companyId, startDate, endDate) {
 }
 
 /**
- * Vendas por metodo de pagamento — mantem leitura de sales.
+ * Vendas por metodo de pagamento — sales.
  */
 async function getByPaymentMethod(companyId, startDate, endDate) {
   const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
@@ -223,6 +208,7 @@ async function getByPaymentMethod(companyId, startDate, endDate) {
       COALESCE(SUM(total_amount), 0)             AS total_revenue
     FROM sales
     WHERE company_id = $1
+      AND COALESCE(status, 'completed') != 'cancelled'
       AND (created_at ${SP}) >= $2::timestamp
       AND (created_at ${SP}) <  $3::timestamp
     GROUP BY payment_method
@@ -238,12 +224,7 @@ async function getByPaymentMethod(companyId, startDate, endDate) {
 
 /**
  * Resolve periodo para datas de inicio e fim em horario de Brasilia.
- *
- * FIX: Usa calculo UTC-3 direto + toISOString().slice(0,10) em vez de
- * toLocaleDateString('en-CA', {timeZone}) que depende de ICU completo.
- * Railway Node.js pode nao ter ICU, fazendo toLocaleDateString retornar
- * formatos nao-ISO (ex: "4/16/2026" em vez de "2026-04-16"), quebrando
- * o split('-') no addDays e gerando "Invalid Date" no SQL → endpoint 500.
+ * Usa calculo UTC-3 direto (sem ICU) para Railway.
  */
 function resolvePeriod(period, start_date, end_date) {
   var today = todaySP();
