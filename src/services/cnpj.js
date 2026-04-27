@@ -1,6 +1,6 @@
 // ============================================================
 // AURA. — Serviço de CNPJ
-// Validação + Lookup real via BrasilAPI (Receita Federal)
+// Validação + Lookup real via cnpj.ws (Receita Federal)
 // Rate limit: 10 req/hora por empresa (Redis) + cache 24h
 // ============================================================
 const https = require('https');
@@ -59,8 +59,8 @@ function detectVerticalFromCNAE(cnaePrincipal) {
   return map[code] || null;
 }
 
-// ── Lookup BrasilAPI (Receita Federal) ────────────────────────
-// https://brasilapi.com.br/api/cnpj/v1/:cnpj
+// ── Lookup cnpj.ws (Receita Federal) ─────────────────────────
+// https://publica.cnpj.ws/cnpj/:cnpj
 function _httpGet(url) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers: { 'User-Agent': 'Aura-Backend/1.0' } }, (res) => {
@@ -81,7 +81,7 @@ async function lookupCNPJ(cnpj, redis) {
   if (!validateCNPJ(cleaned)) throw new Error('CNPJ inválido');
 
   // Cache Redis 24h
-  const cacheKey = `cnpj:rf:${cleaned}`;
+  const cacheKey = `cnpj:ws:${cleaned}`;
   if (redis) {
     try {
       const cached = await redis.get(cacheKey);
@@ -90,7 +90,7 @@ async function lookupCNPJ(cnpj, redis) {
   }
 
   const { status, body } = await _httpGet(
-    `https://brasilapi.com.br/api/cnpj/v1/${cleaned}`
+    `https://publica.cnpj.ws/cnpj/${cleaned}`
   );
 
   if (status !== 200) {
@@ -101,46 +101,52 @@ async function lookupCNPJ(cnpj, redis) {
     );
   }
 
-  const rf = body;
+  const rf  = body;
+  const est = rf.estabelecimento || {};
 
-  // Normaliza para o formato interno da Aura
-  const cnaeCode  = rf.cnae_fiscal?.toString() || '';
-  const natCode   = rf.natureza_juridica?.toString().replace(/\D/g,'') || '';
+  // Códigos normalizados
+  const cnaeCode = (est.atividade_principal?.subclasse || '').replace(/\D/g, '');
+  const natCode  = (rf.natureza_juridica?.id            || '').replace(/\D/g, '');
+
+  // Telefone
+  const phone = est.ddd1 && est.telefone1
+    ? `(${est.ddd1}) ${est.telefone1}`
+    : '';
 
   const result = {
     cnpj:               formatCNPJ(cleaned),
     cnpj_raw:           cleaned,
-    legal_name:         rf.razao_social || '',
-    trade_name:         rf.nome_fantasia || '',
-    legal_nature:       rf.descricao_natureza_juridica || '',
+    legal_name:         rf.razao_social              || '',
+    trade_name:         est.nome_fantasia             || '',
+    legal_nature:       rf.natureza_juridica?.descricao || '',
     legal_nature_code:  natCode,
-    company_size:       rf.porte || '',
-    rf_situation:       rf.descricao_situacao_cadastral || '',
-    opening_date:       rf.data_inicio_atividade || null,
-    email:              rf.email ? rf.email.toLowerCase() : '',
-    phone:              rf.ddd_telefone_1 ? `(${rf.ddd_telefone_1}) ${rf.telefone_1||''}`.trim() : '',
+    company_size:       rf.porte?.descricao           || '',
+    rf_situation:       est.situacao_cadastral        || '',
+    opening_date:       est.data_inicio_atividade     || null,
+    email:              est.email ? est.email.toLowerCase() : '',
+    phone,
     // Endereço
-    address_street:     rf.logradouro    || '',
-    address_number:     rf.numero        || '',
-    address_complement: rf.complemento   || '',
-    address_district:   rf.bairro        || '',
-    address_city:       rf.municipio     || '',
-    address_state:      rf.uf            || '',
-    address_zip:        rf.cep           ? rf.cep.replace(/\D/g,'') : '',
+    address_street:     est.logradouro    || '',
+    address_number:     est.numero        || '',
+    address_complement: est.complemento   || '',
+    address_district:   est.bairro        || '',
+    address_city:       est.cidade?.nome  || '',
+    address_state:      est.estado?.sigla || '',
+    address_zip:        est.cep ? est.cep.replace(/\D/g,'') : '',
     // CNAEs
     cnae_principal: {
       code:        cnaeCode,
-      description: rf.cnae_fiscal_descricao || '',
+      description: est.atividade_principal?.descricao || '',
     },
-    cnaes_secundarios: (rf.cnaes_secundarios || []).map(c => ({
-      code:        c.codigo?.toString() || '',
+    cnaes_secundarios: (est.atividades_secundarias || []).map(c => ({
+      code:        (c.subclasse || '').replace(/\D/g,''),
       description: c.descricao || '',
     })),
     // Detecções automáticas
     suggested_regime:   detectRegimeFromNature(natCode),
     suggested_vertical: detectVerticalFromCNAE(cnaeCode),
     is_mei:             natCode === '2135',
-    is_active:          (rf.descricao_situacao_cadastral || '').toUpperCase() === 'ATIVA',
+    is_active:          (est.situacao_cadastral || '').toUpperCase() === 'ATIVA',
   };
 
   // Cache 24h
