@@ -24,6 +24,9 @@ router.use('/', require('./dentalProcedures'));
 router.use('/', require('./dentalPractitioners'));
 router.use('/', require('./dentalBookingAdmin'));
 router.use('/', require('./dentalConsent')); // W2-04: TCLE templates + documents
+// IMPORTANTE: rotas mais especificas ANTES das mais genericas (Express casa por ordem).
+router.use('/ai/consulta', require('./dentalConsultaAi')); // PR18: IA Modo Consulta (5 intents)
+router.use('/ai/settings', require('./dentalAiSettings')); // PR18: opt-in + consent LGPD + uso/quota
 router.use('/ai', require('./dentalAi'));     // W2-05: IA Odonto persistente (Expansao only)
 router.use('/tiss', require('./dentalTiss')); // W2-02: TISS 4.01 completo
 
@@ -128,7 +131,7 @@ router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','
     if (discount_type !== undefined || discount_value !== undefined) await recalcAppointmentTotal(req.params.aid);
     res.json({ appointment: rows[0] });
   } catch (err) {
-    if (err.message.includes('Transicao') || err.message.includes('Transi\u00e7\u00e3o')) {
+    if (err.message.includes('Transicao') || err.message.includes('Transição')) {
       return res.status(400).json({ error: err.message });
     }
     console.error('[dental PATCH /appointments/:aid]', err.message);
