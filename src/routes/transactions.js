@@ -10,6 +10,11 @@
 // Sincronizacao com sales: quando idempotency_key matches
 // 'pdv-sale-{uuid}', PATCH propaga payment_method/seller pra
 // sales correspondente automaticamente.
+//
+// UNIFICACAO 27/04: summary.income agora vem de sales (status!='cancelled')
+// para ser consistente com Dashboard, Vendas e Folha.
+// O gap entre transactions.income e sales.income ocorria porque algumas vendas
+// do PDV nao geravam transaction (race condition). Expenses continuam de transactions.
 // ============================================================
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
@@ -49,6 +54,7 @@ router.get('/', async function(req, res) {
   var start = req.query.start;
   var end = req.query.end;
   try {
+    // --- Listagem de lancamentos (transactions) ---
     var where = 'WHERE company_id = $1';
     var params = [cid];
     if (type === 'income' || type === 'expense') { params.push(type); where += ' AND type = $' + params.length; }
@@ -64,16 +70,36 @@ router.get('/', async function(req, res) {
       ' ORDER BY COALESCE(due_date, created_at::date) DESC, created_at DESC' +
       ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2), dataParams
     );
-    var sumWhere = 'WHERE company_id = $1';
-    var sumParams = [cid];
-    if (start) { sumParams.push(start); sumWhere += ' AND COALESCE(due_date, created_at::date) >= $' + sumParams.length; }
-    if (end) { sumParams.push(end); sumWhere += ' AND COALESCE(due_date, created_at::date) <= $' + sumParams.length; }
-    if (!start && !end) { sumWhere += " AND created_at >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')::date)"; }
-    var sumRes = await db.query(
-      "SELECT COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END), 0) AS income," +
-      "       COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END), 0) AS expenses" +
-      ' FROM transactions ' + sumWhere, sumParams
-    );
+
+    // --- Summary ---
+    // income: fonte sales (status!='cancelled') — mesma logica de /vendas, /folha e /dashboard.
+    //         Elimina divergencia causada por vendas sem transaction correspondente.
+    // expenses: fonte transactions (despesas nao vem do PDV, sao lancamentos manuais).
+    var salesParams = [cid];
+    var salesWhere = "WHERE company_id = $1 AND COALESCE(status,'completed') != 'cancelled'";
+    if (start) {
+      salesParams.push(start);
+      salesWhere += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $" + salesParams.length;
+    }
+    if (end) {
+      salesParams.push(end);
+      salesWhere += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date <= $" + salesParams.length;
+    }
+    if (!start && !end) {
+      salesWhere += " AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))";
+    }
+
+    var expParams = [cid];
+    var expWhere = "WHERE company_id = $1 AND type = 'expense'";
+    if (start) { expParams.push(start); expWhere += ' AND COALESCE(due_date, created_at::date) >= $' + expParams.length; }
+    if (end) { expParams.push(end); expWhere += ' AND COALESCE(due_date, created_at::date) <= $' + expParams.length; }
+    if (!start && !end) { expWhere += " AND created_at >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')::date)"; }
+
+    var [salesSumRes, expSumRes] = await Promise.all([
+      db.query('SELECT COALESCE(SUM(total_amount), 0) AS income FROM sales ' + salesWhere, salesParams),
+      db.query('SELECT COALESCE(SUM(amount), 0) AS expenses FROM transactions ' + expWhere, expParams),
+    ]);
+
     var transactions = dataRes.rows.map(function(r) {
       return {
         id: r.id, type: r.type, amount: parseFloat(r.amount) || 0,
@@ -88,7 +114,6 @@ router.get('/', async function(req, res) {
         recurrence_label: r.recurrence_type ? RECURRENCE_LABELS[r.recurrence_type] : null,
         recurrence_group_id: r.recurrence_group_id || null,
         recurrence_index: r.recurrence_index || 0,
-        // Campos novos (Sessao 22-23/04)
         payment_method: r.payment_method || null,
         employee_id: r.employee_id || null,
         employee_name: r.employee_name || null,
@@ -100,7 +125,10 @@ router.get('/', async function(req, res) {
       transactions: transactions,
       total: parseInt(countRes.rows[0]?.total) || 0,
       limit: limit, offset: offset,
-      summary: { income: parseFloat(sumRes.rows[0]?.income) || 0, expenses: parseFloat(sumRes.rows[0]?.expenses) || 0 },
+      summary: {
+        income:   parseFloat(salesSumRes.rows[0]?.income)   || 0,  // de sales
+        expenses: parseFloat(expSumRes.rows[0]?.expenses)   || 0,  // de transactions
+      },
     });
   } catch (err) { console.error('[transactions] list:', err.message); res.status(500).json({ error: 'Erro ao listar lancamentos' }); }
 });
@@ -123,7 +151,6 @@ router.post('/', async function(req, res) {
     recurrenceCount = Math.min(recurrenceCount, RECURRENCE_MAX[recurrenceType]);
   }
 
-  // Validacao dos novos campos
   var paymentMethod = body.payment_method || null;
   if (paymentMethod && VALID_PAYMENTS.indexOf(paymentMethod) === -1) {
     return res.status(400).json({ error: 'payment_method invalido (aceitos: ' + VALID_PAYMENTS.join(', ') + ')' });
@@ -131,7 +158,6 @@ router.post('/', async function(req, res) {
   var employeeId = body.employee_id || null;
   var employeeName = body.employee_name || null;
 
-  // Se employee_id fornecido, valida e resolve nome no servidor (snapshot denormalizado)
   if (employeeId) {
     try {
       var empRes = await db.query('SELECT id, name FROM employees WHERE id = $1 AND company_id = $2', [employeeId, cid]);
@@ -189,27 +215,22 @@ router.post('/', async function(req, res) {
 router.patch('/:txId', async function(req, res) {
   var cid = req.params.id;
   var txId = req.params.txId;
-  // Lista de campos editaveis. Nota: employee_id e payment_method foram adicionados.
   var fields = ['type', 'amount', 'description', 'category', 'status', 'notes', 'due_date', 'payment_method', 'employee_id', 'employee_name'];
   var updates = [], values = []; var idx = 1;
 
-  // Validacao especifica de payment_method
   if (req.body.payment_method !== undefined && req.body.payment_method !== null) {
     if (VALID_PAYMENTS.indexOf(req.body.payment_method) === -1) {
       return res.status(400).json({ error: 'payment_method invalido (aceitos: ' + VALID_PAYMENTS.join(', ') + ')' });
     }
   }
 
-  // Se employee_id mudou, valida e auto-resolve employee_name (snapshot)
   if (req.body.employee_id !== undefined && req.body.employee_id !== null) {
     try {
       var empRes = await db.query('SELECT id, name FROM employees WHERE id = $1 AND company_id = $2', [req.body.employee_id, cid]);
       if (!empRes.rows.length) return res.status(404).json({ error: 'Funcionario nao encontrado' });
-      // Sobrescreve employee_name pra evitar dessincronia (cliente envia ambos mas snapshot vem do server)
       req.body.employee_name = empRes.rows[0].name;
     } catch (err) { console.error('[transactions] validate employee:', err.message); }
   } else if (req.body.employee_id === null) {
-    // Limpando vendedor: garante que name tambem zera
     req.body.employee_name = null;
   }
 
@@ -227,7 +248,6 @@ router.patch('/:txId', async function(req, res) {
     if (!result.rows.length) return res.status(404).json({ error: 'Lancamento nao encontrado' });
     var updated = result.rows[0];
 
-    // Se vinculado a venda do PDV, sincroniza payment_method/seller no sales tambem
     var saleId = extractSaleId(updated.idempotency_key);
     if (saleId) {
       var saleUpdates = [], saleValues = []; var saleIdx = 1;
