@@ -53,7 +53,7 @@ function suggestMapping(headers, fieldDefs) {
   const map = {};
   for (const header of headers) {
     const normalized = header.toLowerCase().trim()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      .normalize('NFD').replace(/[̀-ͯ]/g, '');
     for (const [field, aliases] of Object.entries(fieldDefs)) {
       if (aliases.some(a => normalized === a || normalized.startsWith(a + ' ') || normalized.startsWith(a + '(') || normalized.endsWith(' ' + a) || (a.length >= 4 && normalized.includes(a)))) {
         if (!map[header]) map[header] = field;
@@ -125,16 +125,15 @@ router.post('/customers/import', requireAuth, async (req, res) => {
 
   rows.forEach((row, i) => {
     const data = applyMap(row, map);
-    if (!data.name || data.name.length === 0) {
+    // Unico campo obrigatorio: nome. phone/email sao opcionais — clientes
+    // migrando de outras plataformas geralmente vem so com nome.
+    const cleanName = (data.name || '').replace(/\s+/g, ' ').trim();
+    if (!cleanName) {
       errors.push({ index: i, error: 'Nome obrigatório', row });
       return;
     }
-    if (!data.phone && !data.email) {
-      errors.push({ index: i, error: 'Telefone ou e-mail obrigatório', row });
-      return;
-    }
     valid.push({
-      name:             data.name,
+      name:             cleanName,
       phone:            data.phone || null,
       email:            data.email ? data.email.toLowerCase() : null,
       cpf_cnpj:         data.cpf_cnpj || null,
@@ -171,10 +170,20 @@ router.post('/customers/import', requireAuth, async (req, res) => {
   const batchId = uuidv4();
   let saved = 0, dupes = 0;
 
+  // Dedup intra-batch por nome (case-insensitive). Sem isso, um CSV
+  // com "Maria" repetido 5 vezes geraria 5 inserts (lookup do banco
+  // nao dispara em null=null pra phone). Importacoes nome-only
+  // ficariam infladas com duplicatas exatas.
+  const seenNames = new Set();
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
     for (const c of valid) {
+      const nKey = c.name.toLowerCase();
+      if (seenNames.has(nKey + '|' + (c.phone || ''))) { dupes++; continue; }
+      seenNames.add(nKey + '|' + (c.phone || ''));
+
       let existing = null;
       if (c.cpf_cnpj) {
         const r = await client.query(
@@ -183,11 +192,20 @@ router.post('/customers/import', requireAuth, async (req, res) => {
         );
         existing = r.rows[0];
       }
-      if (!existing && c.name && c.phone) {
-        const r = await client.query(
-          `SELECT id FROM customers WHERE company_id=$1 AND name=$2 AND phone=$3 LIMIT 1`,
-          [companyId, c.name, c.phone]
-        );
+      if (!existing && c.name) {
+        // Quando phone existe: nome+phone (case-insensitive em nome).
+        // Quando nao existe: nome (case-insensitive) + phone IS NULL —
+        // em SQL `null = null` retorna unknown/false, entao precisa de
+        // comparacao explicita pra dedupar nome-only re-importado.
+        const r = c.phone
+          ? await client.query(
+              `SELECT id FROM customers WHERE company_id=$1 AND lower(name)=lower($2) AND phone=$3 LIMIT 1`,
+              [companyId, c.name, c.phone]
+            )
+          : await client.query(
+              `SELECT id FROM customers WHERE company_id=$1 AND lower(name)=lower($2) AND phone IS NULL LIMIT 1`,
+              [companyId, c.name]
+            );
         existing = r.rows[0];
       }
       if (existing) { dupes++; continue; }
@@ -645,10 +663,13 @@ router.get('/import-templates/:type', requireAuth, (req, res) => {
       filename: 'modelo-importacao-clientes.csv',
       fields: ['nome', 'telefone', 'email', 'cpf_cnpj', 'data_nascimento', 'instagram', 'rua', 'cidade', 'estado', 'cep'],
       required: ['nome'],
-      required_one_of: [['telefone', 'email']],
+      // Antes exigia required_one_of: [['telefone', 'email']] — removido
+      // pra permitir importacao de listas que so tem nome (migracao
+      // de outras plataformas).
       example_rows: [
         ['Maria Silva', '12991234567', 'maria@email.com', '123.456.789-00', '15/08/1985', '@mariasilva', 'Rua das Flores, 123', 'Jacareí', 'SP', '12300-000'],
         ['Restaurante Bom Sabor', '1233334444', 'contato@bomsabor.com.br', '12.345.678/0001-90', '', '', 'Av. Central, 456', 'Jacareí', 'SP', '12301-000'],
+        ['Joao da Silva', '', '', '', '', '', '', '', '', ''],
       ],
     },
     products: {
