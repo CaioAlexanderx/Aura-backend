@@ -204,10 +204,19 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
 }));
 
 // POST /companies/:id/sales/:sale_id/cancel
-// Cancela venda inteira: status='cancelled', devolve TODO estoque,
-// zera transaction original (se houver) e cria espelho de cancelamento
-// SOMENTE quando havia receita original a zerar. Vendas orfas (sem
-// transaction income espelho) cancelam sem mexer no financeiro.
+// Fluxo esperado:
+//   1. Marca venda como cancelled (status='cancelled', cancelled_at, cancelled_by, notes).
+//   2. Devolve estoque de todos os items (variant tem prioridade sobre product).
+//   3. Remove a transaction de receita (DELETE) — assim o valor sai do
+//      financeiro e dos relatorios. Sales-based dashboards ja filtram por
+//      status='cancelled', mas o transactions ainda alimenta o financeiro,
+//      por isso precisa sair tambem.
+//
+// NAO criamos espelho expense/devolucao: o codigo antigo fazia
+// UPDATE amount=0 + INSERT expense, o que (a) violava CHECK (amount > 0)
+// derrubando o cancelamento e (b) duplicava a baixa contabil.
+//
+// Auditoria preservada em sales.cancelled_at + cancelled_by + notes.
 router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
@@ -258,58 +267,34 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       [req.user && req.user.id ? req.user.id : null, reason, saleId]
     );
 
-    // 5. Acha tx original (se existir). Espelho de cancelamento so faz sentido
-    //    quando ha receita pra zerar — vendas orfas (pre-sync ou ja deletadas
-    //    em transactions) NAO geram despesa de devolucao.
+    // 5. Remove a transaction de receita vinculada (se existir).
+    //    Vendas orfas (pre-sync ou ja deletadas) nao tem nada pra remover.
     const txRes = await client.query(
       'SELECT id, amount FROM transactions WHERE idempotency_key = $1 AND company_id = $2',
       ['pdv-sale-' + saleId, companyId]
     );
 
-    let mirrorAmount = 0;
-    let createdMirror = false;
+    let refundedAmount = 0;
+    let txRemoved = false;
 
     if (txRes.rows.length) {
-      const txAmount = parseFloat(txRes.rows[0].amount);
-      if (txAmount > 0) {
-        // Zera transacao original (preserva linha pra auditoria)
-        await client.query(
-          'UPDATE transactions SET amount = 0, updated_at = NOW() WHERE id = $1',
-          [txRes.rows[0].id]
-        );
-        mirrorAmount = txAmount;
-
-        // Cria espelho de cancelamento (despesa pra zerar receita)
-        const mirrorDesc = 'Cancelamento de venda' + (reason ? ': ' + reason : '');
-        await client.query(
-          'INSERT INTO transactions (' +
-          '  company_id, type, status, amount, description, category, due_date, ' +
-          '  paid_at, idempotency_key, created_at, updated_at, created_by' +
-          ') VALUES (' +
-          "  $1, 'expense', 'confirmed', $2, $3, 'devolucao', " +
-          "  (NOW() AT TIME ZONE 'America/Sao_Paulo')::date, " +
-          '  NOW(), $4, NOW(), NOW(), $5' +
-          ')',
-          [
-            companyId,
-            mirrorAmount,
-            mirrorDesc,
-            'cancel-sale-' + saleId,
-            req.user && req.user.id ? req.user.id : null,
-          ]
-        );
-        createdMirror = true;
-      }
-      // Se txAmount == 0, ja foi cancelada antes — nao cria duplicata
+      refundedAmount = parseFloat(txRes.rows[0].amount);
+      await client.query(
+        'DELETE FROM transactions WHERE id = $1',
+        [txRes.rows[0].id]
+      );
+      txRemoved = true;
     }
-    // Se nao havia transaction (venda orfa), nao cria nada no financeiro.
 
     await client.query('COMMIT');
     res.json({
       ok: true,
       sale_id: saleId,
-      refunded_amount: mirrorAmount,
-      mirror_created: createdMirror,
+      refunded_amount: refundedAmount,
+      // mirror_created mantido pra compat com o frontend; sempre false agora
+      // (não criamos mais espelho expense/devolucao no cancelamento).
+      mirror_created: false,
+      tx_removed: txRemoved,
       items_returned: itemsRes.rows.length,
     });
   } catch (err) {
