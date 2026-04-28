@@ -37,10 +37,11 @@ router.use('/product-categories', require('./productCategories'));
 router.use('/coupons', require('./coupons'));
 router.use('/nfce', require('./nfce'));
 router.use('/nfe', require('./nfe'));
-router.use('/nfse', require('./nfse'));    // W2-03: NFS-e cross-vertical
+router.use('/nfse', require('./nfse'));
 router.use('/storage', require('./storage'));
 router.use('/obligations', require('./fiscalObligations'));
 router.use('/obligations', require('./fiscalPdf'));
+router.use('/', require('./obligationsReport')); // PR38: POST /obligations/:code/report
 router.use('/guides', require('./guides'));
 router.use('/checklist', require('./checklist').checklistRouter);
 router.use('/onboarding', require('./onboarding'));
@@ -91,11 +92,11 @@ router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalBilli
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalRepasse'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalPortal'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalAutomation'));
-router.use('/dental/implants',      requirePlan('negocio', 'expansao'), require('./dentalImplants'));      // W3 Sprint 1
-router.use('/dental/ortho',         requirePlan('negocio', 'expansao'), require('./dentalOrtho'));         // W3 Sprint 2
-router.use('/dental/documents',     requirePlan('negocio', 'expansao'), require('./dentalDocuments'));     // GAP-01
-router.use('/dental/transcribe',    requirePlan('negocio', 'expansao'), require('./dentalTranscription')); // GAP-02
-router.use('/dental/supplies',      requirePlan('negocio', 'expansao'), require('./dentalSupplies'));      // GAP-03
+router.use('/dental/implants',      requirePlan('negocio', 'expansao'), require('./dentalImplants'));
+router.use('/dental/ortho',         requirePlan('negocio', 'expansao'), require('./dentalOrtho'));
+router.use('/dental/documents',     requirePlan('negocio', 'expansao'), require('./dentalDocuments'));
+router.use('/dental/transcribe',    requirePlan('negocio', 'expansao'), require('./dentalTranscription'));
+router.use('/dental/supplies',      requirePlan('negocio', 'expansao'), require('./dentalSupplies'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
 router.use('/food/deliverers', requirePlan('negocio', 'expansao'), require('./foodDeliverers'));
