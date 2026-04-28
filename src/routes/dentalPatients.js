@@ -15,6 +15,9 @@
 //
 // PR22 (2026-04-28): expostos campos de endereco completo +
 // telefone secundario para suportar cadastro pra NF-e.
+//
+// PR30 (2026-04-28): photo_url em CRUD + filtros (has_allergies,
+// has_insurance, inactive_days, convenio) no GET listing.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -51,6 +54,8 @@ function patientShape(c) {
     neighborhood:       c.neighborhood,
     city:               c.city,
     state:              c.state,
+    // PR30: foto
+    photo_url:       c.photo_url,
     lgpd_consent:    c.lgpd_consent,
     lgpd_consent_at: c.lgpd_consent_at,
     is_active:       c.is_active,
@@ -61,13 +66,18 @@ function patientShape(c) {
 }
 
 // ── GET /patients ──
+// PR30: aceita filtros has_allergies, has_insurance, inactive_days, convenio
 router.get('/patients', requireAuth, async (req, res) => {
   try {
-    const { search, page, limit } = req.query;
+    const { search, page, limit, has_allergies, has_insurance, inactive_days, convenio } = req.query;
     const patients = await listPatients(req.params.id, {
       search,
       page: parseInt(page) || undefined,
       limit: parseInt(limit) || undefined,
+      hasAllergies: has_allergies,
+      hasInsurance: has_insurance,
+      inactiveDays: inactive_days,
+      convenio: convenio,
     });
     res.json({ total: patients.length, patients });
   } catch (err) {
@@ -103,6 +113,8 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
     insurance_name, insurance_card, insurance_plan, insurance_exp,
     // Endereco (PR22)
     postal_code, street, address_number, complement, neighborhood, city, state,
+    // PR30: foto
+    photo_url,
     lgpd_consent = false,
     existing_customer_id, // opcional: converter cliente existente em paciente
   } = req.body;
@@ -146,8 +158,9 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
            city            = COALESCE($19, city),
            state           = COALESCE($20, state),
            notes           = COALESCE($21, notes),
+           photo_url       = COALESCE($22, photo_url),
            updated_at      = NOW()
-         WHERE id = $22 AND company_id = $23
+         WHERE id = $23 AND company_id = $24
          RETURNING *`,
         [
           birth_date||null, finalCpf, phone||null, phone_secondary||null,
@@ -156,7 +169,7 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
           insurance_name||null, insurance_card||null, insurance_plan||null, insurance_exp||null,
           postal_code||null, street||null, address_number||null, complement||null,
           neighborhood||null, city||null, state||null,
-          notes||null, existing_customer_id, req.params.id,
+          notes||null, photo_url||null, existing_customer_id, req.params.id,
         ]
       );
       if (!rows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
@@ -170,12 +183,14 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
          allergies, medical_history, medications, notes,
          insurance_name, insurance_card, insurance_plan, insurance_exp,
          postal_code, street, address_number, complement, neighborhood, city, state,
+         photo_url,
          is_patient, lgpd_consent, lgpd_consent_at
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8,
          $9, $10, $11, $12,
          $13, $14, $15, $16,
          $17, $18, $19, $20, $21, $22, $23,
+         $24,
          true, true, NOW()
        ) RETURNING *`,
       [
@@ -185,6 +200,7 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
         insurance_name||null, insurance_card||null, insurance_plan||null, insurance_exp||null,
         postal_code||null, street||null, address_number||null, complement||null,
         neighborhood||null, city||null, state||null,
+        photo_url||null,
       ]
     );
     res.status(201).json({ patient: patientShape(rows[0]) });
@@ -223,6 +239,8 @@ router.patch('/patients/:pid', requireAuth, requireRole('client','analyst','admi
     neighborhood:    'neighborhood',
     city:            'city',
     state:           'state',
+    // PR30: foto
+    photo_url:       'photo_url',
   };
 
   const fields = [], values = [];
