@@ -205,8 +205,9 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
 
 // POST /companies/:id/sales/:sale_id/cancel
 // Cancela venda inteira: status='cancelled', devolve TODO estoque,
-// zera transaction original e cria lancamento espelho de "cancelamento"
-// no financeiro como contrapartida (auditoria).
+// zera transaction original (se houver) e cria espelho de cancelamento
+// SOMENTE quando havia receita original a zerar. Vendas orfas (sem
+// transaction income espelho) cancelam sem mexer no financeiro.
 router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
@@ -257,48 +258,58 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       [req.user && req.user.id ? req.user.id : null, reason, saleId]
     );
 
-    // 5. Acha tx original e zera amount + cria espelho de cancelamento
+    // 5. Acha tx original (se existir). Espelho de cancelamento so faz sentido
+    //    quando ha receita pra zerar — vendas orfas (pre-sync ou ja deletadas
+    //    em transactions) NAO geram despesa de devolucao.
     const txRes = await client.query(
       'SELECT id, amount FROM transactions WHERE idempotency_key = $1 AND company_id = $2',
       ['pdv-sale-' + saleId, companyId]
     );
 
-    let mirrorAmount = parseFloat(saleRes.rows[0].total_amount);
+    let mirrorAmount = 0;
+    let createdMirror = false;
+
     if (txRes.rows.length) {
       const txAmount = parseFloat(txRes.rows[0].amount);
-      // Zera transacao original (preserva linha pra auditoria)
-      await client.query(
-        'UPDATE transactions SET amount = 0, updated_at = NOW() WHERE id = $1',
-        [txRes.rows[0].id]
-      );
-      mirrorAmount = txAmount;
-    }
+      if (txAmount > 0) {
+        // Zera transacao original (preserva linha pra auditoria)
+        await client.query(
+          'UPDATE transactions SET amount = 0, updated_at = NOW() WHERE id = $1',
+          [txRes.rows[0].id]
+        );
+        mirrorAmount = txAmount;
 
-    // 6. Cria lancamento espelho de cancelamento (despesa pra zerar receita)
-    const mirrorDesc = 'Cancelamento de venda' + (reason ? ': ' + reason : '');
-    await client.query(
-      'INSERT INTO transactions (' +
-      '  company_id, type, status, amount, description, category, due_date, ' +
-      '  paid_at, idempotency_key, created_at, updated_at, created_by' +
-      ') VALUES (' +
-      "  $1, 'expense', 'confirmed', $2, $3, 'devolucao', " +
-      "  (NOW() AT TIME ZONE 'America/Sao_Paulo')::date, " +
-      '  NOW(), $4, NOW(), NOW(), $5' +
-      ')',
-      [
-        companyId,
-        mirrorAmount,
-        mirrorDesc,
-        'cancel-sale-' + saleId,
-        req.user && req.user.id ? req.user.id : null,
-      ]
-    );
+        // Cria espelho de cancelamento (despesa pra zerar receita)
+        const mirrorDesc = 'Cancelamento de venda' + (reason ? ': ' + reason : '');
+        await client.query(
+          'INSERT INTO transactions (' +
+          '  company_id, type, status, amount, description, category, due_date, ' +
+          '  paid_at, idempotency_key, created_at, updated_at, created_by' +
+          ') VALUES (' +
+          "  $1, 'expense', 'confirmed', $2, $3, 'devolucao', " +
+          "  (NOW() AT TIME ZONE 'America/Sao_Paulo')::date, " +
+          '  NOW(), $4, NOW(), NOW(), $5' +
+          ')',
+          [
+            companyId,
+            mirrorAmount,
+            mirrorDesc,
+            'cancel-sale-' + saleId,
+            req.user && req.user.id ? req.user.id : null,
+          ]
+        );
+        createdMirror = true;
+      }
+      // Se txAmount == 0, ja foi cancelada antes — nao cria duplicata
+    }
+    // Se nao havia transaction (venda orfa), nao cria nada no financeiro.
 
     await client.query('COMMIT');
     res.json({
       ok: true,
       sale_id: saleId,
       refunded_amount: mirrorAmount,
+      mirror_created: createdMirror,
       items_returned: itemsRes.rows.length,
     });
   } catch (err) {
