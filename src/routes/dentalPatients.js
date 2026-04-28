@@ -12,6 +12,9 @@
 //
 // Shape de resposta preserva os campos historicos (full_name, cpf)
 // via alias para retrocompat com o frontend ate a migracao do FE.
+//
+// PR22 (2026-04-28): expostos campos de endereco completo +
+// telefone secundario para suportar cadastro pra NF-e.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -29,6 +32,7 @@ function patientShape(c) {
     cpf:             c.cpf_cnpj,
     cpf_cnpj:        c.cpf_cnpj,
     phone:           c.phone,
+    phone_secondary: c.phone_secondary,
     email:           c.email,
     gender:          c.gender,
     allergies:       c.allergies,
@@ -39,6 +43,14 @@ function patientShape(c) {
     insurance_card:  c.insurance_card,
     insurance_plan:  c.insurance_plan,
     insurance_exp:   c.insurance_exp,
+    // Endereco (PR22)
+    postal_code:        c.postal_code,
+    street:             c.street,
+    address_number:     c.address_number,
+    complement:         c.complement,
+    neighborhood:       c.neighborhood,
+    city:               c.city,
+    state:              c.state,
     lgpd_consent:    c.lgpd_consent,
     lgpd_consent_at: c.lgpd_consent_at,
     is_active:       c.is_active,
@@ -86,9 +98,11 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
   const {
     // nome aceita full_name (legado) ou name
     full_name, name,
-    birth_date, cpf, cpf_cnpj, phone, email, gender,
+    birth_date, cpf, cpf_cnpj, phone, phone_secondary, email, gender,
     allergies, medical_history, medications, notes,
     insurance_name, insurance_card, insurance_plan, insurance_exp,
+    // Endereco (PR22)
+    postal_code, street, address_number, complement, neighborhood, city, state,
     lgpd_consent = false,
     existing_customer_id, // opcional: converter cliente existente em paciente
   } = req.body;
@@ -114,23 +128,34 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
            birth_date      = COALESCE(birth_date, $1),
            cpf_cnpj        = COALESCE(cpf_cnpj, $2),
            phone           = COALESCE(phone, $3),
-           email           = COALESCE(email, $4),
-           gender          = COALESCE(gender, $5),
-           allergies       = COALESCE($6, allergies),
-           medical_history = COALESCE($7, medical_history),
-           medications     = COALESCE($8, medications),
-           insurance_name  = COALESCE($9, insurance_name),
-           insurance_card  = COALESCE($10, insurance_card),
-           insurance_plan  = COALESCE($11, insurance_plan),
-           insurance_exp   = COALESCE($12, insurance_exp),
-           notes           = COALESCE($13, notes),
+           phone_secondary = COALESCE($4, phone_secondary),
+           email           = COALESCE(email, $5),
+           gender          = COALESCE(gender, $6),
+           allergies       = COALESCE($7, allergies),
+           medical_history = COALESCE($8, medical_history),
+           medications     = COALESCE($9, medications),
+           insurance_name  = COALESCE($10, insurance_name),
+           insurance_card  = COALESCE($11, insurance_card),
+           insurance_plan  = COALESCE($12, insurance_plan),
+           insurance_exp   = COALESCE($13, insurance_exp),
+           postal_code     = COALESCE($14, postal_code),
+           street          = COALESCE($15, street),
+           address_number  = COALESCE($16, address_number),
+           complement      = COALESCE($17, complement),
+           neighborhood    = COALESCE($18, neighborhood),
+           city            = COALESCE($19, city),
+           state           = COALESCE($20, state),
+           notes           = COALESCE($21, notes),
            updated_at      = NOW()
-         WHERE id = $14 AND company_id = $15
+         WHERE id = $22 AND company_id = $23
          RETURNING *`,
         [
-          birth_date||null, finalCpf, phone||null, email||null, gender||null,
+          birth_date||null, finalCpf, phone||null, phone_secondary||null,
+          email||null, gender||null,
           allergies||null, medical_history||null, medications||null,
           insurance_name||null, insurance_card||null, insurance_plan||null, insurance_exp||null,
+          postal_code||null, street||null, address_number||null, complement||null,
+          neighborhood||null, city||null, state||null,
           notes||null, existing_customer_id, req.params.id,
         ]
       );
@@ -141,20 +166,25 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
     // Caso 2: cadastro novo
     const { rows } = await db.query(
       `INSERT INTO customers (
-         company_id, name, birth_date, cpf_cnpj, phone, email, gender,
+         company_id, name, birth_date, cpf_cnpj, phone, phone_secondary, email, gender,
          allergies, medical_history, medications, notes,
          insurance_name, insurance_card, insurance_plan, insurance_exp,
+         postal_code, street, address_number, complement, neighborhood, city, state,
          is_patient, lgpd_consent, lgpd_consent_at
        ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7,
-         $8, $9, $10, $11,
-         $12, $13, $14, $15,
+         $1, $2, $3, $4, $5, $6, $7, $8,
+         $9, $10, $11, $12,
+         $13, $14, $15, $16,
+         $17, $18, $19, $20, $21, $22, $23,
          true, true, NOW()
        ) RETURNING *`,
       [
-        req.params.id, finalName, birth_date||null, finalCpf, phone||null, email||null, gender||null,
+        req.params.id, finalName, birth_date||null, finalCpf,
+        phone||null, phone_secondary||null, email||null, gender||null,
         allergies||null, medical_history||null, medications||null, notes||null,
         insurance_name||null, insurance_card||null, insurance_plan||null, insurance_exp||null,
+        postal_code||null, street||null, address_number||null, complement||null,
+        neighborhood||null, city||null, state||null,
       ]
     );
     res.status(201).json({ patient: patientShape(rows[0]) });
@@ -174,6 +204,7 @@ router.patch('/patients/:pid', requireAuth, requireRole('client','analyst','admi
     cpf:             'cpf_cnpj',
     cpf_cnpj:        'cpf_cnpj',
     phone:           'phone',
+    phone_secondary: 'phone_secondary',
     email:           'email',
     gender:          'gender',
     allergies:       'allergies',
@@ -184,6 +215,14 @@ router.patch('/patients/:pid', requireAuth, requireRole('client','analyst','admi
     insurance_card:  'insurance_card',
     insurance_plan:  'insurance_plan',
     insurance_exp:   'insurance_exp',
+    // Endereco (PR22)
+    postal_code:     'postal_code',
+    street:          'street',
+    address_number:  'address_number',
+    complement:      'complement',
+    neighborhood:    'neighborhood',
+    city:            'city',
+    state:           'state',
   };
 
   const fields = [], values = [];
