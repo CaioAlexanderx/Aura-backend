@@ -1,18 +1,20 @@
 // ============================================================
 // AURA. — Company Profile CRUD
-// GET  /companies/:id/profile  — retorna perfil da empresa
-// PUT  /companies/:id/profile  — atualiza perfil da empresa
+// PR37 (2026-04-28): whitelist expandida com campos compliance odonto.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 
-// GET /profile
 router.get('/profile', async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT id, trade_name, legal_name, cnpj, phone, email, address,
               tax_regime, plan, billing_status, logo_url,
-              trial_ends_at, onboarding_step, created_at, updated_at
+              trial_ends_at, onboarding_step, created_at, updated_at,
+              vigilancia_alvara_expires_at, vigilancia_alvara_number,
+              vigilancia_alvara_reminder_enabled,
+              cro_state, cro_pj_number, cro_rt_number, cro_rt_user_id,
+              cnes_number, uses_controlled_meds, dental_compliance_enabled
        FROM companies WHERE id = $1`,
       [req.params.id]
     );
@@ -35,6 +37,17 @@ router.get('/profile', async (req, res) => {
       onboarding_step: c.onboarding_step,
       created_at:      c.created_at,
       updated_at:      c.updated_at,
+      // PR37: compliance odonto
+      vigilancia_alvara_expires_at:        c.vigilancia_alvara_expires_at,
+      vigilancia_alvara_number:            c.vigilancia_alvara_number,
+      vigilancia_alvara_reminder_enabled:  c.vigilancia_alvara_reminder_enabled !== false,
+      cro_state:                           c.cro_state,
+      cro_pj_number:                       c.cro_pj_number,
+      cro_rt_number:                       c.cro_rt_number,
+      cro_rt_user_id:                      c.cro_rt_user_id,
+      cnes_number:                         c.cnes_number,
+      uses_controlled_meds:                !!c.uses_controlled_meds,
+      dental_compliance_enabled:           c.dental_compliance_enabled !== false,
     });
   } catch (err) {
     console.error('[company] GET /profile error:', err.message);
@@ -42,7 +55,6 @@ router.get('/profile', async (req, res) => {
   }
 });
 
-// PUT /profile
 router.put('/profile', async (req, res) => {
   const allowedFields = {
     trade_name: 'trade_name',
@@ -54,6 +66,17 @@ router.put('/profile', async (req, res) => {
     address:    'address',
     tax_regime: 'tax_regime',
     logo_url:   'logo_url',
+    // PR37: compliance odonto
+    vigilancia_alvara_expires_at:        'vigilancia_alvara_expires_at',
+    vigilancia_alvara_number:            'vigilancia_alvara_number',
+    vigilancia_alvara_reminder_enabled:  'vigilancia_alvara_reminder_enabled',
+    cro_state:                           'cro_state',
+    cro_pj_number:                       'cro_pj_number',
+    cro_rt_number:                       'cro_rt_number',
+    cro_rt_user_id:                      'cro_rt_user_id',
+    cnes_number:                         'cnes_number',
+    uses_controlled_meds:                'uses_controlled_meds',
+    dental_compliance_enabled:           'dental_compliance_enabled',
   };
 
   const updates = [];
@@ -70,7 +93,7 @@ router.put('/profile', async (req, res) => {
         }
       }
       if (dbCol === 'tax_regime' && req.body[bodyKey]) {
-        const valid = ['mei', 'simples', 'simples_nacional', 'lucro_presumido', 'lucro_real'];
+        const valid = ['mei', 'simples', 'simples_nacional', 'lucro_presumido', 'lucro_real', 'pessoa_fisica'];
         if (!valid.includes(req.body[bodyKey])) {
           return res.status(400).json({ error: 'Regime tributario invalido' });
         }
@@ -106,6 +129,12 @@ router.put('/profile', async (req, res) => {
       address:    c.address     || '',
       tax_regime: c.tax_regime  || 'simples',
       logo_url:   c.logo_url   || '',
+      vigilancia_alvara_expires_at:        c.vigilancia_alvara_expires_at,
+      vigilancia_alvara_reminder_enabled:  c.vigilancia_alvara_reminder_enabled !== false,
+      cro_state:                           c.cro_state,
+      cro_pj_number:                       c.cro_pj_number,
+      cnes_number:                         c.cnes_number,
+      uses_controlled_meds:                !!c.uses_controlled_meds,
       updated:    true,
     });
   } catch (err) {
