@@ -173,7 +173,7 @@ router.delete('/appointments/:aid/procedures/:procId', requireAuth, requireRole(
 router.get('/patients/:pid/chart', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT c.*, p.name AS procedure_name, u.name AS performed_by_name
+      `SELECT c.*, p.name AS procedure_name, u.full_name AS performed_by_name
        FROM dental_chart_entries c
        LEFT JOIN dental_procedures p ON p.id = c.procedure_id
        LEFT JOIN users u ON u.id = c.performed_by
