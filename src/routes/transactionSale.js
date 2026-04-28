@@ -308,9 +308,12 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
 // Devolucao parcial:
 //   1. Devolve quantidade ao stock (product ou variant)
 //   2. Reduz sales.total_amount
-//   3. Reduz transactions.amount
+//   3. Reduz transactions.amount (ou DELETE se for o último item)
 //   4. Cria nova transaction tipo 'expense' categoria 'devolucao'
-//      como contrapartida (auditoria)
+//      como contrapartida (auditoria) — APENAS quando ainda restam itens.
+//      Se foi o último item, a venda inteira é cancelada e a tx de receita
+//      é removida (mesmo fluxo de POST /sales/:sale_id/cancel) — não precisa
+//      de espelho de devolução porque a receita já some.
 // Tudo numa unica transacao SQL pra atomicidade.
 router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
@@ -374,9 +377,11 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
     );
     const remaining = remainingRes.rows[0];
     const newTotal = parseFloat(remaining.new_total);
+    const isLastItem = remaining.n === 0;
 
-    if (remaining.n === 0) {
-      // Sem itens restantes: cancela a venda inteira
+    if (isLastItem) {
+      // Sem itens restantes: cancela a venda inteira (mesmo fluxo do
+      // POST /sales/:sale_id/cancel — receita sai do financeiro).
       await client.query(
         `UPDATE sales SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
          WHERE id = $1`,
@@ -390,42 +395,57 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
       );
     }
 
-    // 6. Reduz transaction.amount (transacao original)
+    // 6. Ajusta transaction de receita.
+    //    - Último item: DELETE (UPDATE amount=0 violaria CHECK amount > 0).
+    //      Receita some do financeiro junto com o cancelamento da venda.
+    //    - Ainda há itens: UPDATE pra novo total. Mantém a tx de receita ativa.
     const newTxAmount = parseFloat(tx.amount) - itemTotal;
-    await client.query(
-      'UPDATE transactions SET amount = $1, updated_at = NOW() WHERE id = $2',
-      [Math.max(0, newTxAmount), txId]
-    );
+    let txRemoved = false;
 
-    // 7. Cria transacao espelho de "devolucao" (categoria devolucao)
-    //    Tipo expense (saida de dinheiro pra cliente).
-    //    due_date = data atual em America/Sao_Paulo.
-    const refundDesc = 'Devolucao: ' + itemName + ' (qty ' + itemQty + ')';
-    await client.query(
-      `INSERT INTO transactions (
-         company_id, type, status, amount, description, category, due_date,
-         paid_at, idempotency_key, created_at, updated_at, created_by
-       ) VALUES (
-         $1, 'expense', 'confirmed', $2, $3, 'devolucao',
-         (NOW() AT TIME ZONE 'America/Sao_Paulo')::date,
-         NOW(), $4, NOW(), NOW(), $5
-       )`,
-      [
-        companyId,
-        itemTotal,
-        refundDesc,
-        'refund-' + saleId + '-' + itemId,
-        req.user?.id || null,
-      ]
-    );
+    if (isLastItem || newTxAmount <= 0) {
+      await client.query('DELETE FROM transactions WHERE id = $1', [txId]);
+      txRemoved = true;
+    } else {
+      await client.query(
+        'UPDATE transactions SET amount = $1, updated_at = NOW() WHERE id = $2',
+        [newTxAmount, txId]
+      );
+    }
+
+    // 7. Cria transacao espelho de "devolucao" (categoria devolucao) APENAS
+    //    quando ainda há itens na venda — registra a saída de caixa pra
+    //    auditoria do refund parcial. Quando é o último item, a venda
+    //    inteira foi cancelada e a tx de receita removida; criar mirror aqui
+    //    duplicaria a baixa.
+    if (!isLastItem) {
+      const refundDesc = 'Devolucao: ' + itemName + ' (qty ' + itemQty + ')';
+      await client.query(
+        `INSERT INTO transactions (
+           company_id, type, status, amount, description, category, due_date,
+           paid_at, idempotency_key, created_at, updated_at, created_by
+         ) VALUES (
+           $1, 'expense', 'confirmed', $2, $3, 'devolucao',
+           (NOW() AT TIME ZONE 'America/Sao_Paulo')::date,
+           NOW(), $4, NOW(), NOW(), $5
+         )`,
+        [
+          companyId,
+          itemTotal,
+          refundDesc,
+          'refund-' + saleId + '-' + itemId,
+          req.user?.id || null,
+        ]
+      );
+    }
 
     await client.query('COMMIT');
     res.json({
       ok: true,
       removed_item: { id: itemId, name: itemName, quantity: itemQty, refund_amount: itemTotal },
       new_sale_total: newTotal,
-      new_tx_amount: Math.max(0, newTxAmount),
-      sale_cancelled: remaining.n === 0,
+      new_tx_amount: txRemoved ? 0 : Math.max(0, newTxAmount),
+      tx_removed: txRemoved,
+      sale_cancelled: isLastItem,
     });
   } catch (err) {
     await client.query('ROLLBACK');
