@@ -5,17 +5,24 @@
 // TIMEZONE FIX: todas as agregacoes por data usam SP (America/Sao_Paulo).
 // DB roda em UTC — CURRENT_DATE retornaria dia errado apos 21h BRT.
 //
-// FONTE DE RECEITA (revisao 27/04):
+// REGIME (revisao 27/04 noite — fechamento Finesse):
+//   Filtro de periodo de TRANSACTIONS usa COALESCE(due_date, created_at SP).
+//   Manda a "data do lancamento" que o usuario preencheu (default=hoje).
+//   Alinha com transactions.js — qualquer mudanca em um exige a outra.
+//
+//   SALES filtra por created_at SP (sales nao tem due_date — sao
+//   eventos instantaneos do PDV). Mantido como esta.
+//
+//   Recent income (timeline) e customer count tambem por created_at
+//   (representam ATIVIDADE recente do app, nao competencia financeira).
+//
+// FONTE DE RECEITA:
 //   revenue = cashInflow = SUM(transactions WHERE type=income AND status=confirmed)
+//   no periodo, filtrado por COALESCE(due_date, created_at SP).
 //
-//   Motivo: a tabela 'sales' contem entradas invalidas/de-teste que inflam o
-//   total. A tabela 'transactions' e a fonte financeira correta — todas as
-//   income transactions ja possuem idempotency_key 'pdv-sale-*', provando
-//   que 100% das receitas sao originadas do PDV sem gap real.
-//
-//   Impacto: Dashboard, Financeiro e DRE agora mostram o mesmo valor.
-//   A tela de Vendas (salesAnalytics) continua usando 'sales' para
-//   metricas operacionais (top produtos, por funcionario, etc.).
+//   A tabela 'sales' contem entradas invalidas/de-teste que inflam o
+//   total. Continua usada apenas para contagem (salesCountMonth, salesToday,
+//   avgTicket) e para o card de Vendas (que mantem semantica operacional).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -27,6 +34,7 @@ router.get('/', async (req, res) => {
     const [salesCountRes, prevTxRes, cashFlowRes, recentRes, sparkRes, obligationsRes] = await Promise.all([
 
       // 1. Contagem de vendas do mes e de hoje — sem somar valor.
+      //    Sales filtra por created_at SP (eventos instantaneos do PDV).
       //    O valor financeiro vem de transactions (cashInflow), nao de sales.
       db.query(
         `SELECT
@@ -41,19 +49,21 @@ router.get('/', async (req, res) => {
         [cid]
       ),
 
-      // 2. Income do mes anterior (transactions) — para revenueDelta
+      // 2. Income do mes anterior (transactions) — para revenueDelta.
+      //    Filtro por COALESCE(due_date, created_at SP).
       db.query(
         `SELECT COALESCE(SUM(amount), 0) AS prev_income
          FROM transactions
          WHERE company_id = $1
            AND type = 'income'
            AND status = 'confirmed'
-           AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) - INTERVAL '1 month'
-           AND (created_at AT TIME ZONE 'America/Sao_Paulo') < date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))`,
+           AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) - INTERVAL '1 month')::date
+           AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <  date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))::date`,
         [cid]
       ),
 
-      // 3. Fluxo de caixa do mes atual (transactions) — fonte principal de receita e despesa
+      // 3. Fluxo de caixa do mes atual (transactions) — fonte principal de receita e despesa.
+      //    Filtro por COALESCE(due_date, created_at SP).
       db.query(
         `SELECT
            COALESCE(SUM(CASE WHEN type='income'  AND status='confirmed' THEN amount ELSE 0 END), 0) AS cash_inflow,
@@ -62,12 +72,12 @@ router.get('/', async (req, res) => {
            COALESCE(SUM(CASE WHEN type='expense' AND status='pending'   THEN amount ELSE 0 END), 0) AS pending_expenses
          FROM transactions
          WHERE company_id = $1
-           AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))
-           AND (created_at AT TIME ZONE 'America/Sao_Paulo') < date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '1 month'`,
+           AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))::date
+           AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <  (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '1 month')::date`,
         [cid]
       ),
 
-      // 4. Ultimas 5 entradas confirmadas
+      // 4. Ultimas 5 entradas confirmadas — atividade recente (created_at).
       db.query(
         `SELECT id, description, amount, type, created_at
          FROM transactions
@@ -76,7 +86,9 @@ router.get('/', async (req, res) => {
         [cid]
       ),
 
-      // 5. Sparkline ultimos 7 dias — income e despesas de transactions
+      // 5. Sparkline ultimos 7 dias — agrupa por data do lancamento
+      //    (COALESCE(due_date, created_at SP)) pra ficar consistente com
+      //    o saldo/fluxo. Confirmed apenas.
       db.query(
         `SELECT
            d.day::date AS date,
@@ -90,7 +102,7 @@ router.get('/', async (req, res) => {
          LEFT JOIN transactions t
            ON t.company_id = $1
            AND t.status = 'confirmed'
-           AND (t.created_at AT TIME ZONE 'America/Sao_Paulo')::date = d.day::date
+           AND COALESCE(t.due_date, (t.created_at AT TIME ZONE 'America/Sao_Paulo')::date) = d.day::date
          GROUP BY d.day
          ORDER BY d.day ASC`,
         [cid]
@@ -134,7 +146,7 @@ router.get('/', async (req, res) => {
     const expensesDelta = 0;
     const netDelta      = 0;
 
-    // Clientes novos no mes
+    // Clientes novos no mes (registro de cadastro — created_at)
     let newCustomers = 0;
     try {
       const custRes = await db.query(
