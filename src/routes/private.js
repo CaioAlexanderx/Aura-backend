@@ -92,6 +92,7 @@ router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalBilli
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalRepasse'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalPortal'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalAutomation'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalTissRetentions')); // PR40 Sprint B
 router.use('/dental/implants',      requirePlan('negocio', 'expansao'), require('./dentalImplants'));
 router.use('/dental/ortho',         requirePlan('negocio', 'expansao'), require('./dentalOrtho'));
 router.use('/dental/documents',     requirePlan('negocio', 'expansao'), require('./dentalDocuments'));
