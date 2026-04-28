@@ -10,6 +10,12 @@
 // - pacientes_recall (sem consulta 150+ dias)
 // - repasse_mes (total a repassar)
 // - top_procedimentos_mes
+//
+// PR23 (2026-04-28): trocado 'confirmado' por 'aprovado' nas queries.
+// 'confirmado' nao existe no enum dental_appointment_status (valores
+// validos: agendado, avaliacao, aprovado, em_atendimento, concluido,
+// cancelado, faltou). Antes a query explodia silenciosamente via
+// .catch() e retornava todos os contadores zerados.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -26,7 +32,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       // Consultas hoje (SP timezone + status PT-BR)
       db.query(
         `SELECT COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status = 'confirmado')        AS confirmados,
+                COUNT(*) FILTER (WHERE status = 'aprovado')          AS confirmados,
                 COUNT(*) FILTER (WHERE status = 'agendado')          AS pendentes,
                 COUNT(*) FILTER (WHERE status = 'em_atendimento')    AS em_atendimento,
                 COUNT(*) FILTER (WHERE status = 'concluido')         AS concluidos,
@@ -54,7 +60,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       db.query(
         `SELECT
            COALESCE(SUM(total) FILTER (WHERE status='concluido'), 0) AS realizado,
-           COALESCE(SUM(total) FILTER (WHERE status IN ('agendado','confirmado','em_atendimento','aprovado','avaliacao')), 0) AS previsto
+           COALESCE(SUM(total) FILTER (WHERE status IN ('agendado','aprovado','em_atendimento','avaliacao')), 0) AS previsto
          FROM dental_appointments
          WHERE company_id = $1
            AND (scheduled_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))
