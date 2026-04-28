@@ -6,6 +6,11 @@
 // PR30 (2026-04-28): listPatients enriquecido com photo_url, last_visit_at,
 // next_appointment_at, e filtros opcionais (has_allergies, has_insurance,
 // inactive_days, convenio). Mantem retrocompat com chamadas existentes.
+//
+// PR33 (2026-04-28): qr_payload em generateWsToken corrigido. Antes
+// apontava pra APP_URL/sign/<token> (frontend), mas frontend nao tinha
+// rota /sign/:token e 404va. Agora aponta direto pro endpoint backend
+// /api/v1/dental/sign/:token/pad que serve HTML completo com canvas.
 // ============================================================
 
 const db = require('../config/database');
@@ -28,11 +33,7 @@ async function listPatients(companyId, opts = {}) {
     search,
     page = 1,
     limit = 20,
-    // PR30: filtros opcionais
-    hasAllergies,   // boolean - filtra pacientes com allergies != null/empty
-    hasInsurance,   // boolean - filtra pacientes com insurance_name != null/empty
-    inactiveDays,   // number - filtra pacientes sem last_visit OU last_visit > N dias
-    convenio,       // string - filtra por insurance_name ILIKE
+    hasAllergies, hasInsurance, inactiveDays, convenio,
   } = opts;
   const offset = (page - 1) * limit;
   const params = [companyId];
@@ -53,9 +54,6 @@ async function listPatients(companyId, opts = {}) {
     where += ` AND c.insurance_name ILIKE $${params.length}`;
   }
 
-  // ============================================================
-  // SELECT: inclui photo_url + agregados de visit/next_appt
-  // ============================================================
   let sql = `
     SELECT c.id,
            c.name      AS full_name,
@@ -76,8 +74,6 @@ async function listPatients(companyId, opts = {}) {
     ${where}
     GROUP BY c.id`;
 
-  // PR30: inactiveDays filtra apos GROUP BY via HAVING
-  // (last_visit_at e null => sempre passa quando inactiveDays especificado)
   if (inactiveDays != null && inactiveDays !== '' && !isNaN(parseInt(inactiveDays))) {
     const days = parseInt(inactiveDays);
     sql += ` HAVING (MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido' OR (a.status NOT IN ('cancelado','faltou') AND a.scheduled_at < NOW())) IS NULL
@@ -89,12 +85,9 @@ async function listPatients(companyId, opts = {}) {
     LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
 
   const { rows } = await db.query(sql, [...params, limit, offset]);
-
-  // Backward-compat: alias `last_visit` (sem _at) que o codigo legado pode esperar
   return rows.map((r) => ({ ...r, last_visit: r.last_visit_at }));
 }
 
-// D-UNIFY: agenda agora retorna practitioner_id + professional_name
 async function getAgendaByPeriod(companyId, startDate, endDate) {
   const { rows } = await db.query(
     `SELECT a.id,
@@ -204,11 +197,21 @@ async function generateWsToken(companyId, appointmentId) {
      VALUES ($1,$2,$3,$4) RETURNING id, token, expires_at`,
     [companyId, appointmentId, token, expiresAt]
   );
+
+  // PR33 fix: aponta pra endpoint backend do pad de assinatura.
+  // Antes: APP_URL/sign/<token> (frontend) - mas frontend nao tinha rota
+  // /sign/:token e dava 404. Agora vai direto pra rota REST que serve o
+  // HTML do canvas + WebSocket (dentalSign.js GET /sign/:token/pad).
+  //
+  // API_URL fallback usa o host de prod no Railway. Em dev, defina API_URL=http://localhost:PORT
+  const apiUrl = process.env.API_URL || process.env.APP_URL || 'https://aura-backend-production-f805.up.railway.app';
+  const qrPayload = `${apiUrl.replace(/\/$/, '')}/api/v1/dental/sign/${rows[0].token}/pad`;
+
   return {
     token:      rows[0].token,
     expires_at: rows[0].expires_at,
     expires_in: 600,
-    qr_payload: `${process.env.APP_URL || 'https://getaura.com.br'}/sign/${rows[0].token}`,
+    qr_payload: qrPayload,
     note:       'WebSocket endpoint: ws://[host]/ws/sign/:token',
   };
 }
