@@ -1,11 +1,13 @@
 // ============================================================
 // AURA. — Transactions CRUD + Recorrencia
 //
-// FONTE DE RECEITA (revisao 27/04):
-//   summary.income = SUM(transactions WHERE type=income) no periodo.
-//   A tabela 'transactions' e a fonte financeira correta.
-//   A tabela 'sales' contem entradas invalidas/teste e NAO deve ser
-//   usada para calcular receita financeira.
+// FONTE DE RECEITA/DESPESA (revisao 27/04 — fix despesas pendentes):
+//   summary.income   = SUM(transactions WHERE type=income  AND status=confirmed) no periodo
+//   summary.expenses = SUM(transactions WHERE type=expense AND status=confirmed) no periodo
+//   summary.pending_* exposto separadamente (parcelas futuras de recorrentes
+//   nao devem inflar o periodo atual — bug 27/04 detectado no fechamento da
+//   Finesse, R$29.282 de Simples Nacional pending entrando no mes).
+//   Alinhado com dashboard.js que sempre filtrou status='confirmed'.
 //
 // FIX DESPESAS 27/04: filtro de data padronizado para
 // (created_at AT TIME ZONE 'America/Sao_Paulo')::date em todas as
@@ -71,8 +73,10 @@ router.get('/', async function(req, res) {
       ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2), dataParams
     );
 
-    // --- Summary: income e expenses de transactions ---
-    // Ambos filtrados por (created_at AT TIME ZONE 'America/Sao_Paulo')::date.
+    // --- Summary: income/expenses CONFIRMED + pending_* separado ---
+    // status='confirmed' alinha com dashboard.js (cash flow real do periodo).
+    // Pending exposto a parte para o frontend mostrar como badge informativo
+    // sem inflar o saldo (ex: parcelas futuras de recorrentes mensais).
     var defaultW = !start && !end
       ? " AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))"
       : '';
@@ -85,14 +89,18 @@ router.get('/', async function(req, res) {
 
     var sumRes = await db.query(
       'SELECT' +
-      "  COALESCE(SUM(amount) FILTER (WHERE type = 'income'),  0) AS income," +
-      "  COALESCE(SUM(amount) FILTER (WHERE type = 'expense'), 0) AS expenses" +
+      "  COALESCE(SUM(amount) FILTER (WHERE type = 'income'  AND status = 'confirmed'), 0) AS income," +
+      "  COALESCE(SUM(amount) FILTER (WHERE type = 'expense' AND status = 'confirmed'), 0) AS expenses," +
+      "  COALESCE(SUM(amount) FILTER (WHERE type = 'income'  AND status = 'pending'),   0) AS pending_income," +
+      "  COALESCE(SUM(amount) FILTER (WHERE type = 'expense' AND status = 'pending'),   0) AS pending_expenses" +
       ' FROM transactions ' + sumW,
       sumP
     );
 
-    var income   = parseFloat(sumRes.rows[0]?.income)   || 0;
-    var expenses = parseFloat(sumRes.rows[0]?.expenses) || 0;
+    var income           = parseFloat(sumRes.rows[0]?.income)           || 0;
+    var expenses         = parseFloat(sumRes.rows[0]?.expenses)         || 0;
+    var pendingIncome    = parseFloat(sumRes.rows[0]?.pending_income)   || 0;
+    var pendingExpenses  = parseFloat(sumRes.rows[0]?.pending_expenses) || 0;
 
     var transactions = dataRes.rows.map(function(r) {
       return {
@@ -121,8 +129,10 @@ router.get('/', async function(req, res) {
       total: parseInt(countRes.rows[0]?.total) || 0,
       limit: limit, offset: offset,
       summary: {
-        income:   income,    // transactions income no periodo
-        expenses: expenses,  // transactions expense no periodo
+        income:           income,           // transactions income confirmed no periodo
+        expenses:         expenses,         // transactions expense confirmed no periodo
+        pending_income:   pendingIncome,    // income pending (nao soma no saldo do periodo)
+        pending_expenses: pendingExpenses,  // expense pending (parcelas futuras de recorrentes)
       },
     });
   } catch (err) { console.error('[transactions] list:', err.message); res.status(500).json({ error: 'Erro ao listar lancamentos' }); }
