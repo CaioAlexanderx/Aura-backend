@@ -2,6 +2,10 @@
 // AURA. — Servico Modulo Odontologia (BE-25)
 // D-UNIFY: usa customers (is_patient=true). Agenda inclui practitioner_id
 // + professional_name (LEFT JOIN dental_practitioners) pra mapear cadeira.
+//
+// PR30 (2026-04-28): listPatients enriquecido com photo_url, last_visit_at,
+// next_appointment_at, e filtros opcionais (has_allergies, has_insurance,
+// inactive_days, convenio). Mantem retrocompat com chamadas existentes.
 // ============================================================
 
 const db = require('../config/database');
@@ -19,35 +23,75 @@ function calcAppointmentTotal(procedures, discountType, discountValue) {
   };
 }
 
-async function listPatients(companyId, { search, page = 1, limit = 20 } = {}) {
+async function listPatients(companyId, opts = {}) {
+  const {
+    search,
+    page = 1,
+    limit = 20,
+    // PR30: filtros opcionais
+    hasAllergies,   // boolean - filtra pacientes com allergies != null/empty
+    hasInsurance,   // boolean - filtra pacientes com insurance_name != null/empty
+    inactiveDays,   // number - filtra pacientes sem last_visit OU last_visit > N dias
+    convenio,       // string - filtra por insurance_name ILIKE
+  } = opts;
   const offset = (page - 1) * limit;
   const params = [companyId];
   let where = 'WHERE c.company_id = $1 AND c.is_patient = true AND c.is_active = true';
+
   if (search) {
     params.push(`%${search}%`);
     where += ` AND (c.name ILIKE $${params.length} OR c.cpf_cnpj ILIKE $${params.length} OR c.phone ILIKE $${params.length})`;
   }
-  const { rows } = await db.query(
-    `SELECT c.id,
-            c.name      AS full_name,
-            c.birth_date,
-            c.phone,
-            c.email,
-            c.cpf_cnpj  AS cpf,
-            c.insurance_name,
-            c.lgpd_consent,
-            c.created_at,
-            COUNT(a.id) FILTER (WHERE a.status NOT IN ('cancelado','faltou')) AS appointments_total,
-            MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido') AS last_visit
-     FROM customers c
-     LEFT JOIN dental_appointments a ON a.customer_id = c.id
-     ${where}
-     GROUP BY c.id
-     ORDER BY c.name ASC
-     LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-    [...params, limit, offset]
-  );
-  return rows;
+  if (hasAllergies === true || hasAllergies === 'true' || hasAllergies === '1') {
+    where += ` AND c.allergies IS NOT NULL AND TRIM(c.allergies) <> ''`;
+  }
+  if (hasInsurance === true || hasInsurance === 'true' || hasInsurance === '1') {
+    where += ` AND c.insurance_name IS NOT NULL AND TRIM(c.insurance_name) <> ''`;
+  }
+  if (convenio) {
+    params.push(`%${convenio}%`);
+    where += ` AND c.insurance_name ILIKE $${params.length}`;
+  }
+
+  // ============================================================
+  // SELECT: inclui photo_url + agregados de visit/next_appt
+  // ============================================================
+  let sql = `
+    SELECT c.id,
+           c.name      AS full_name,
+           c.birth_date,
+           c.phone,
+           c.email,
+           c.cpf_cnpj  AS cpf,
+           c.insurance_name,
+           c.allergies,
+           c.photo_url,
+           c.lgpd_consent,
+           c.created_at,
+           COUNT(a.id) FILTER (WHERE a.status NOT IN ('cancelado','faltou')) AS appointments_total,
+           MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido' OR (a.status NOT IN ('cancelado','faltou') AND a.scheduled_at < NOW())) AS last_visit_at,
+           MIN(a.scheduled_at) FILTER (WHERE a.scheduled_at >= NOW() AND a.status NOT IN ('cancelado','faltou','concluido')) AS next_appointment_at
+    FROM customers c
+    LEFT JOIN dental_appointments a ON a.customer_id = c.id
+    ${where}
+    GROUP BY c.id`;
+
+  // PR30: inactiveDays filtra apos GROUP BY via HAVING
+  // (last_visit_at e null => sempre passa quando inactiveDays especificado)
+  if (inactiveDays != null && inactiveDays !== '' && !isNaN(parseInt(inactiveDays))) {
+    const days = parseInt(inactiveDays);
+    sql += ` HAVING (MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido' OR (a.status NOT IN ('cancelado','faltou') AND a.scheduled_at < NOW())) IS NULL
+                    OR MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido' OR (a.status NOT IN ('cancelado','faltou') AND a.scheduled_at < NOW())) < NOW() - INTERVAL '${days} days')`;
+  }
+
+  sql += `
+    ORDER BY c.name ASC
+    LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+
+  const { rows } = await db.query(sql, [...params, limit, offset]);
+
+  // Backward-compat: alias `last_visit` (sem _at) que o codigo legado pode esperar
+  return rows.map((r) => ({ ...r, last_visit: r.last_visit_at }));
 }
 
 // D-UNIFY: agenda agora retorna practitioner_id + professional_name
