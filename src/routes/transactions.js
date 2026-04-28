@@ -1,17 +1,22 @@
 // ============================================================
 // AURA. — Transactions CRUD + Recorrencia
 //
-// FONTE DE RECEITA (revisao 27/04):
-//   summary.income = SUM(transactions WHERE type=income) no periodo.
-//   A tabela 'transactions' e a fonte financeira correta.
-//   A tabela 'sales' contem entradas invalidas/teste e NAO deve ser
-//   usada para calcular receita financeira.
+// REGIME (revisao 27/04 noite — fechamento Finesse):
+//   Filtro de periodo agora usa a "data do lancamento" que o usuario
+//   preenche (campo due_date, default=hoje). Quando ela esta presente,
+//   manda. Quando nao (cenario raro pos-022), cai em created_at SP.
 //
-// FIX DESPESAS 27/04: filtro de data padronizado para
-// (created_at AT TIME ZONE 'America/Sao_Paulo')::date em todas as
-// queries (listing + summary). Antes usava COALESCE(due_date, created_at::date)
-// o que fazia despesas com due_date em outro mes desaparecerem do Financeiro
-// mesmo aparecendo no Dashboard (que sempre usou created_at SP).
+//   summary.income/expenses = SUM(... WHERE status='confirmed') no periodo.
+//   Saldo segue regime caixa (so confirmadas entram). pending_* exposto
+//   separado pro frontend mostrar como badge informativo.
+//
+//   Anterior (commit 14:27 hoje): forcava created_at SP em tudo. Resultado:
+//   despesa de Marco lancada em Abril aparecia em Abril (cliente reclamava).
+//   Anterior ao anterior: COALESCE(due_date, created_at SP) — mesmo de agora.
+//
+// FIX DESPESAS 27/04 (mantido): filtro de data padronizado entre listing
+// e summary. due_date eh date (nao timestamp), entao COALESCE com
+// (created_at AT TIME ZONE SP)::date retorna sempre date.
 // ============================================================
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
@@ -40,9 +45,11 @@ var RECURRENCE_DEFAULTS = { weekly: 4, monthly: 12, yearly: 3 };
 var RECURRENCE_MAX = { weekly: 52, monthly: 24, yearly: 10 };
 var RECURRENCE_LABELS = { weekly: 'semanal', monthly: 'mensal', yearly: 'anual' };
 
-// Helper: clausula de data por created_at em fuso SP (consistente com Dashboard)
-function dateClauseSP(op, paramIdx) {
-  return "(created_at AT TIME ZONE 'America/Sao_Paulo')::date " + op + ' $' + paramIdx;
+// Helper: clausula de data por "data do lancamento" (due_date com fallback
+// pra created_at SP). Usado em todas as queries que filtram periodo
+// (listing, summary, e dashboard.js — manter sincronizados).
+function dateClauseCompetencia(op, paramIdx) {
+  return "COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) " + op + ' $' + paramIdx;
 }
 
 router.get('/', async function(req, res) {
@@ -54,12 +61,12 @@ router.get('/', async function(req, res) {
   var end = req.query.end;
   try {
     // --- Listagem ---
-    // Filtro de data: created_at em fuso SP (igual ao Dashboard).
+    // Filtro por data do lancamento (due_date com fallback created_at SP).
     var where = 'WHERE company_id = $1';
     var params = [cid];
     if (type === 'income' || type === 'expense') { params.push(type); where += ' AND type = $' + params.length; }
-    if (start) { params.push(start); where += ' AND ' + dateClauseSP('>=', params.length); }
-    if (end)   { params.push(end);   where += ' AND ' + dateClauseSP('<=', params.length); }
+    if (start) { params.push(start); where += ' AND ' + dateClauseCompetencia('>=', params.length); }
+    if (end)   { params.push(end);   where += ' AND ' + dateClauseCompetencia('<=', params.length); }
     var countRes = await db.query('SELECT COUNT(*) AS total FROM transactions ' + where, params);
     var dataParams = params.concat([limit, offset]);
     var dataRes = await db.query(
@@ -71,28 +78,35 @@ router.get('/', async function(req, res) {
       ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2), dataParams
     );
 
-    // --- Summary: income e expenses de transactions ---
-    // Ambos filtrados por (created_at AT TIME ZONE 'America/Sao_Paulo')::date.
+    // --- Summary: income/expenses CONFIRMED + pending_* separado ---
+    // Filtra por COALESCE(due_date, created_at SP) (mesmo do listing).
+    // status='confirmed' alinha com dashboard.js (saldo regime caixa).
+    // Pending exposto a parte como info — frontend pode mostrar badge.
     var defaultW = !start && !end
-      ? " AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))"
+      ? " AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))::date" +
+        " AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <  (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '1 month')::date"
       : '';
 
     var sumP = [cid];
     var sumW = 'WHERE company_id = $1';
-    if (start) { sumP.push(start); sumW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date >= $" + sumP.length; }
-    if (end)   { sumP.push(end);   sumW += " AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date <= $" + sumP.length; }
+    if (start) { sumP.push(start); sumW += ' AND ' + dateClauseCompetencia('>=', sumP.length); }
+    if (end)   { sumP.push(end);   sumW += ' AND ' + dateClauseCompetencia('<=', sumP.length); }
     sumW += defaultW;
 
     var sumRes = await db.query(
       'SELECT' +
-      "  COALESCE(SUM(amount) FILTER (WHERE type = 'income'),  0) AS income," +
-      "  COALESCE(SUM(amount) FILTER (WHERE type = 'expense'), 0) AS expenses" +
+      "  COALESCE(SUM(amount) FILTER (WHERE type = 'income'  AND status = 'confirmed'), 0) AS income," +
+      "  COALESCE(SUM(amount) FILTER (WHERE type = 'expense' AND status = 'confirmed'), 0) AS expenses," +
+      "  COALESCE(SUM(amount) FILTER (WHERE type = 'income'  AND status = 'pending'),   0) AS pending_income," +
+      "  COALESCE(SUM(amount) FILTER (WHERE type = 'expense' AND status = 'pending'),   0) AS pending_expenses" +
       ' FROM transactions ' + sumW,
       sumP
     );
 
-    var income   = parseFloat(sumRes.rows[0]?.income)   || 0;
-    var expenses = parseFloat(sumRes.rows[0]?.expenses) || 0;
+    var income           = parseFloat(sumRes.rows[0]?.income)           || 0;
+    var expenses         = parseFloat(sumRes.rows[0]?.expenses)         || 0;
+    var pendingIncome    = parseFloat(sumRes.rows[0]?.pending_income)   || 0;
+    var pendingExpenses  = parseFloat(sumRes.rows[0]?.pending_expenses) || 0;
 
     var transactions = dataRes.rows.map(function(r) {
       return {
@@ -121,8 +135,10 @@ router.get('/', async function(req, res) {
       total: parseInt(countRes.rows[0]?.total) || 0,
       limit: limit, offset: offset,
       summary: {
-        income:   income,    // transactions income no periodo
-        expenses: expenses,  // transactions expense no periodo
+        income:           income,           // confirmed no periodo (regime caixa)
+        expenses:         expenses,         // confirmed no periodo (regime caixa)
+        pending_income:   pendingIncome,    // pending no periodo (informativo, nao soma no saldo)
+        pending_expenses: pendingExpenses,  // pending no periodo (informativo, nao soma no saldo)
       },
     });
   } catch (err) { console.error('[transactions] list:', err.message); res.status(500).json({ error: 'Erro ao listar lancamentos' }); }
