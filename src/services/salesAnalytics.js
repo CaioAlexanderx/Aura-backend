@@ -1,14 +1,15 @@
 // ============================================================
 // AURA. — Servico de Analytics de Vendas (BE-01)
 //
-// UNIFICACAO 27/04:
-//   getSummary e getTimeSeries migrados de transactions para sales,
-//   igualando a fonte de truth de Dashboard, Vendas e Folha.
-//   Antes: total_revenue = SUM(transactions.amount WHERE type=income)
-//   Agora: total_revenue = SUM(sales.total_amount WHERE status!=cancelled)
+// REVISAO 27/04 noite (pos PR #3):
+//   total_revenue agora vem de TRANSACTIONS (income confirmed) com filtro
+//   COALESCE(due_date, created_at SP) — mesma fonte do Painel/Financeiro/DRE.
+//   Garante que todas as telas mostrem o mesmo numero de receita.
 //
-//   Financeiro/TabVisaoGeral NAO e afetado — usa useTransactions/transactions
-//   diretamente (fluxo de caixa realizado, semanticamente distinto).
+//   Sales table continua sendo a fonte de:
+//     - total_sales (contagem operacional)
+//     - top_products, top_employees, by_payment (analitico operacional)
+//   Esses sao indicadores de PDV, nao financeiros.
 //
 // FIX: resolvePeriod usa calculo UTC-3 direto (sem ICU) para Railway.
 // ============================================================
@@ -52,16 +53,17 @@ async function getSalesAnalytics(companyId, options = {}) {
 }
 
 /**
- * Resumo do periodo — fonte: tabela sales (status != 'cancelled').
- * Unificado com /vendas e /folha para consistencia de faturamento.
+ * Resumo do periodo.
+ * total_revenue: TRANSACTIONS (income confirmed) — mesma fonte do Painel.
+ * Demais metricas: SALES (operacional do PDV).
  */
 async function getSummary(companyId, startDate, endDate) {
   const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
 
-  const { rows } = await db.query(`
+  // Operacional: contagem, descontos, clientes, dias ativos — vem de sales
+  const salesPromise = db.query(`
     SELECT
-      COUNT(*)::int                                                          AS total_sales,
-      COALESCE(SUM(total_amount)  FILTER (WHERE COALESCE(status,'completed') != 'cancelled'), 0)  AS total_revenue,
+      COUNT(*)::int                                                                                AS total_sales,
       COALESCE(SUM(discount_amount) FILTER (WHERE COALESCE(status,'completed') != 'cancelled'), 0) AS total_discounts,
       COUNT(DISTINCT customer_id) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int  AS unique_customers,
       COUNT(DISTINCT (created_at ${SP})::date) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int AS active_days
@@ -71,9 +73,25 @@ async function getSummary(companyId, startDate, endDate) {
       AND (created_at ${SP}) <  $3::timestamp
   `, [companyId, startDate, endDate]);
 
-  const row = rows[0];
-  const totalRevenue = parseFloat(row.total_revenue) || 0;
-  const totalSales   = parseInt(row.total_sales)   || 0;
+  // Financeiro: receita = transactions confirmed com filtro COALESCE(due_date, created_at SP)
+  // Identico ao Painel/Financeiro/DRE.
+  const txPromise = db.query(`
+    SELECT
+      COALESCE(SUM(amount), 0) AS total_revenue
+    FROM transactions
+    WHERE company_id = $1
+      AND type = 'income'
+      AND status = 'confirmed'
+      AND COALESCE(due_date, (created_at ${SP})::date) >= $2::date
+      AND COALESCE(due_date, (created_at ${SP})::date) <  $3::date
+  `, [companyId, startDate, endDate]);
+
+  const [salesRes, txRes] = await Promise.all([salesPromise, txPromise]);
+  const salesRow = salesRes.rows[0] || {};
+  const txRow    = txRes.rows[0]    || {};
+
+  const totalRevenue = parseFloat(txRow.total_revenue) || 0;
+  const totalSales   = parseInt(salesRow.total_sales)  || 0;
   const avgTicket    = totalSales > 0
     ? parseFloat((totalRevenue / totalSales).toFixed(2))
     : 0;
@@ -82,47 +100,80 @@ async function getSummary(companyId, startDate, endDate) {
     total_sales:      totalSales,
     total_revenue:    totalRevenue,
     avg_ticket:       avgTicket,
-    total_discounts:  parseFloat(row.total_discounts) || 0,
-    unique_customers: parseInt(row.unique_customers)  || 0,
-    active_days:      parseInt(row.active_days)       || 0,
+    total_discounts:  parseFloat(salesRow.total_discounts)  || 0,
+    unique_customers: parseInt(salesRow.unique_customers)   || 0,
+    active_days:      parseInt(salesRow.active_days)        || 0,
   };
 }
 
 /**
- * Serie temporal — fonte: tabela sales (status != 'cancelled').
- * Consistente com getSummary para que o grafico reflita o mesmo universo.
+ * Serie temporal.
+ * total_sales: contagem por periodo (sales).
+ * total_revenue: SOMA de transactions income confirmed por periodo (mesmo do Painel).
  */
 async function getTimeSeries(companyId, startDate, endDate, groupBy) {
-  const SP  = `AT TIME ZONE 'America/Sao_Paulo'`;
+  const SP    = `AT TIME ZONE 'America/Sao_Paulo'`;
   const spCol = `(created_at ${SP})`;
+  const txDateCol = `COALESCE(due_date, (created_at ${SP})::date)`;
 
   const formats = {
-    day:   `${spCol}::date`,
-    week:  `DATE_TRUNC('week',  ${spCol})`,
-    month: `DATE_TRUNC('month', ${spCol})`,
+    day:   { sales: `${spCol}::date`,                             tx: `${txDateCol}` },
+    week:  { sales: `DATE_TRUNC('week',  ${spCol})`,              tx: `DATE_TRUNC('week',  ${txDateCol})` },
+    month: { sales: `DATE_TRUNC('month', ${spCol})`,              tx: `DATE_TRUNC('month', ${txDateCol})` },
   };
 
-  const groupExpr = formats[groupBy] || formats.day;
+  const fmt = formats[groupBy] || formats.day;
 
-  const { rows } = await db.query(`
+  // Contagem operacional por periodo (sales)
+  const salesPromise = db.query(`
     SELECT
-      ${groupExpr}                                                   AS period,
-      COUNT(*)::int                                                  AS total_sales,
-      COALESCE(SUM(total_amount), 0)                                 AS total_revenue
+      ${fmt.sales} AS period,
+      COUNT(*)::int AS total_sales
     FROM sales
     WHERE company_id = $1
       AND COALESCE(status, 'completed') != 'cancelled'
       AND ${spCol} >= $2::timestamp
       AND ${spCol} <  $3::timestamp
     GROUP BY 1
-    ORDER BY 1
   `, [companyId, startDate, endDate]);
 
-  return rows.map(r => ({
-    period:        r.period,
-    total_sales:   r.total_sales,
-    total_revenue: parseFloat(r.total_revenue),
-  }));
+  // Receita por periodo (transactions confirmed, regime caixa+due_date)
+  const txPromise = db.query(`
+    SELECT
+      ${fmt.tx} AS period,
+      COALESCE(SUM(amount), 0) AS total_revenue
+    FROM transactions
+    WHERE company_id = $1
+      AND type = 'income'
+      AND status = 'confirmed'
+      AND ${txDateCol} >= $2::date
+      AND ${txDateCol} <  $3::date
+    GROUP BY 1
+  `, [companyId, startDate, endDate]);
+
+  const [salesRes, txRes] = await Promise.all([salesPromise, txPromise]);
+
+  // Merge as duas series por chave de periodo (datetime ou date)
+  const merged = new Map();
+  salesRes.rows.forEach(r => {
+    const k = r.period instanceof Date ? r.period.toISOString() : String(r.period);
+    merged.set(k, { period: r.period, total_sales: r.total_sales, total_revenue: 0 });
+  });
+  txRes.rows.forEach(r => {
+    const k = r.period instanceof Date ? r.period.toISOString() : String(r.period);
+    if (merged.has(k)) {
+      merged.get(k).total_revenue = parseFloat(r.total_revenue);
+    } else {
+      merged.set(k, { period: r.period, total_sales: 0, total_revenue: parseFloat(r.total_revenue) });
+    }
+  });
+
+  return Array.from(merged.values())
+    .sort((a, b) => {
+      const ka = a.period instanceof Date ? a.period.getTime() : String(a.period);
+      const kb = b.period instanceof Date ? b.period.getTime() : String(b.period);
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
 }
 
 /**
