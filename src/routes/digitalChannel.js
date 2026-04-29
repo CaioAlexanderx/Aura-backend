@@ -1,12 +1,14 @@
 // ============================================================
-// AURA. — Canal Digital CRUD + Storefront + Dominio
+// AURA. — Canal Digital CRUD + Storefront + Dominio + Imagens
 // GET  /companies/:id/digital-channel
 // PUT  /companies/:id/digital-channel
 // POST /companies/:id/digital-channel/request-domain
+// POST /companies/:id/digital-channel/upload-image?type=logo|banner
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
+const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
 
 const DEFAULT_CONFIG = {
   site_name: null, tagline: '', primary_color: '#7c3aed', secondary_color: '#a78bfa',
@@ -31,7 +33,7 @@ const DEFAULT_CONFIG = {
 function generateSlug(name) {
   return (name || 'loja')
     .toLowerCase().trim()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
     .substring(0, 80);
@@ -161,7 +163,6 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
 });
 
 // POST /companies/:id/digital-channel/request-domain
-// Solicita registro de dominio personalizado (.com.br)
 router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
   const { domain, plan } = req.body; // plan: '1year' ou '2years'
@@ -214,6 +215,79 @@ router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async 
   } catch (err) {
     console.error('request-domain error:', err);
     res.status(500).json({ error: 'Erro ao solicitar dominio' });
+  }
+});
+
+// POST /companies/:id/digital-channel/upload-image?type=logo|banner
+// Recebe imagem em base64, faz upload no R2, atualiza digital_channel_config
+router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const cid = req.params.id;
+  const { type } = req.query;
+  const { content, content_type } = req.body;
+
+  if (!['logo', 'banner'].includes(type)) {
+    return res.status(400).json({ error: 'type deve ser "logo" ou "banner"' });
+  }
+  if (!content) {
+    return res.status(400).json({ error: 'content (base64) obrigatorio' });
+  }
+
+  try {
+    const mime = content_type || 'image/jpeg';
+    const ext  = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
+    const field = type === 'logo' ? 'logo_url' : 'cover_url';
+    // Chave deterministíca por empresa — sobrescreve ao re-upload (sem acúmulo de arquivos)
+    const key = `${cid}/canal/${type}.${ext}`;
+
+    const result = await uploadToR2(key, content, mime);
+    if (!result.success) {
+      console.error('[canal-upload] R2 error:', result.error);
+      return res.status(500).json({ error: 'Erro no upload da imagem' });
+    }
+
+    // Força cache-bust adicionando timestamp na URL
+    const url = result.mock ? result.url : `${result.url}?v=${Date.now()}`;
+
+    // Upsert: cria config se não existir, ou atualiza só o campo de imagem
+    await db.query(`
+      INSERT INTO digital_channel_config (company_id, ${field})
+      VALUES ($1, $2)
+      ON CONFLICT (company_id) DO UPDATE SET ${field} = $2, updated_at = NOW()
+    `, [cid, url]);
+
+    res.json({ [field]: url, key: result.key });
+  } catch (err) {
+    console.error('[canal-upload] error:', err.message);
+    res.status(500).json({ error: 'Erro ao salvar imagem' });
+  }
+});
+
+// DELETE /companies/:id/digital-channel/upload-image?type=logo|banner
+router.delete('/upload-image', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const cid = req.params.id;
+  const { type } = req.query;
+
+  if (!['logo', 'banner'].includes(type)) {
+    return res.status(400).json({ error: 'type deve ser "logo" ou "banner"' });
+  }
+
+  const field = type === 'logo' ? 'logo_url' : 'cover_url';
+
+  try {
+    // Tenta deletar do R2 (melhor esforço)
+    for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
+      try { await deleteFromR2(`${cid}/canal/${type}.${ext}`); } catch (_) {}
+    }
+
+    await db.query(
+      `UPDATE digital_channel_config SET ${field} = NULL, updated_at = NOW() WHERE company_id = $1`,
+      [cid]
+    );
+
+    res.json({ deleted: true, field });
+  } catch (err) {
+    console.error('[canal-upload] delete error:', err.message);
+    res.status(500).json({ error: 'Erro ao remover imagem' });
   }
 });
 
