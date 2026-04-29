@@ -1,9 +1,10 @@
 // ============================================================
-// AURA. — Canal Digital CRUD + Storefront + Dominio + Imagens
+// AURA. — Canal Digital CRUD + Storefront + Dominio + Imagens + Pix
 // GET  /companies/:id/digital-channel
 // PUT  /companies/:id/digital-channel
 // POST /companies/:id/digital-channel/request-domain
 // POST /companies/:id/digital-channel/upload-image?type=logo|banner
+// POST /companies/:id/digital-channel/setup-pix
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -87,11 +88,9 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     delivery_radius_km, pickup_enabled, is_published,
   } = req.body;
 
-  // Auto-generate slug on first save if not set
   let slug = req.body.slug || null;
   if (!slug && site_name) {
     slug = generateSlug(site_name);
-    // Ensure uniqueness
     const { rows: existing } = await db.query(
       `SELECT slug FROM digital_channel_config WHERE slug = $1 AND company_id != $2`, [slug, cid]
     );
@@ -165,7 +164,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
 // POST /companies/:id/digital-channel/request-domain
 router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
-  const { domain, plan } = req.body; // plan: '1year' ou '2years'
+  const { domain, plan } = req.body;
 
   if (!domain || !domain.includes('.')) {
     return res.status(400).json({ error: 'Informe um dominio valido (ex: meunegocio.com.br)' });
@@ -178,7 +177,6 @@ router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async 
   const cleanDomain = domain.toLowerCase().trim();
 
   try {
-    // Check if domain is already in use
     const { rows: existing } = await db.query(
       `SELECT company_id FROM digital_channel_config WHERE custom_domain = $1`, [cleanDomain]
     );
@@ -186,7 +184,6 @@ router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async 
       return res.status(409).json({ error: 'Este dominio ja esta em uso por outra empresa.' });
     }
 
-    // Save domain request (status = pending_dns until Aura team configures)
     await db.query(`
       UPDATE digital_channel_config SET
         custom_domain = $1,
@@ -199,18 +196,8 @@ router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async 
     `, [cleanDomain, plan, pricing[plan], cid]);
 
     res.json({
-      domain: cleanDomain,
-      plan,
-      price: pricing[plan],
-      status: 'pending_dns',
-      message: 'Solicitacao de dominio registrada. A equipe Aura vai configurar o DNS e registrar o dominio. Voce sera notificado quando estiver ativo.',
-      note: 'A disponibilidade do dominio depende de verificacao junto ao Registro.br.',
-      next_steps: [
-        'Equipe Aura verifica disponibilidade do dominio',
-        'Registro realizado via Registro.br',
-        'Configuracao DNS no Cloudflare',
-        'Dominio ativo em ate 48h uteis',
-      ],
+      domain: cleanDomain, plan, price: pricing[plan], status: 'pending_dns',
+      message: 'Solicitacao de dominio registrada. A equipe Aura vai configurar o DNS em ate 48h uteis.',
     });
   } catch (err) {
     console.error('request-domain error:', err);
@@ -219,7 +206,6 @@ router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async 
 });
 
 // POST /companies/:id/digital-channel/upload-image?type=logo|banner
-// Recebe imagem em base64, faz upload no R2, atualiza digital_channel_config
 router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
   const { type } = req.query;
@@ -236,7 +222,6 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
     const mime = content_type || 'image/jpeg';
     const ext  = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
     const field = type === 'logo' ? 'logo_url' : 'cover_url';
-    // Chave deterministíca por empresa — sobrescreve ao re-upload (sem acúmulo de arquivos)
     const key = `${cid}/canal/${type}.${ext}`;
 
     const result = await uploadToR2(key, content, mime);
@@ -245,10 +230,8 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
       return res.status(500).json({ error: 'Erro no upload da imagem' });
     }
 
-    // Força cache-bust adicionando timestamp na URL
     const url = result.mock ? result.url : `${result.url}?v=${Date.now()}`;
 
-    // Upsert: cria config se não existir, ou atualiza só o campo de imagem
     await db.query(`
       INSERT INTO digital_channel_config (company_id, ${field})
       VALUES ($1, $2)
@@ -274,20 +257,90 @@ router.delete('/upload-image', requireRole('client', 'analyst', 'admin'), async 
   const field = type === 'logo' ? 'logo_url' : 'cover_url';
 
   try {
-    // Tenta deletar do R2 (melhor esforço)
     for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
       try { await deleteFromR2(`${cid}/canal/${type}.${ext}`); } catch (_) {}
     }
-
     await db.query(
       `UPDATE digital_channel_config SET ${field} = NULL, updated_at = NOW() WHERE company_id = $1`,
       [cid]
     );
-
     res.json({ deleted: true, field });
   } catch (err) {
     console.error('[canal-upload] delete error:', err.message);
     res.status(500).json({ error: 'Erro ao remover imagem' });
+  }
+});
+
+// ============================================================
+// POST /companies/:id/digital-channel/setup-pix
+// Cria subconta Asaas automaticamente — cliente so preenche dados basicos
+// ============================================================
+router.post('/setup-pix', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const cid = req.params.id;
+  const { name, email, cpf_cnpj, mobile_phone, company_type = 'MEI' } = req.body;
+
+  if (!name || !email || !cpf_cnpj || !mobile_phone) {
+    return res.status(400).json({ error: 'Nome, e-mail, CPF/CNPJ e celular sao obrigatorios' });
+  }
+
+  const ASAAS_BASE = (process.env.ASAAS_API_URL || 'https://api.asaas.com/api/v3')
+    .replace(/\/api\/v3\/?$/, '');
+  const ASAAS_MASTER_KEY = process.env.ASAAS_API_KEY;
+
+  if (!ASAAS_MASTER_KEY) {
+    console.error('[setup-pix] ASAAS_API_KEY nao configurada no servidor');
+    return res.status(503).json({ error: 'Integracao Pix nao configurada no servidor. Contate o suporte.' });
+  }
+
+  try {
+    const cleanCpfCnpj = cpf_cnpj.replace(/\D/g, '');
+    const cleanPhone   = mobile_phone.replace(/\D/g, '');
+
+    const resp = await fetch(`${ASAAS_BASE}/v3/accounts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'access_token': ASAAS_MASTER_KEY,
+        'User-Agent': 'Aura-Backend/1.0',
+      },
+      body: JSON.stringify({
+        name,
+        email,
+        loginEmail: email,
+        cpfCnpj:    cleanCpfCnpj,
+        mobilePhone: cleanPhone,
+        companyType: company_type,
+        incomeValue: 1000,
+        address:     'Rua Principal',
+        addressNumber: '1',
+        province:    'Centro',
+        postalCode:  '01310100',
+      }),
+    });
+
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      console.error('[setup-pix] Asaas error:', JSON.stringify(data));
+      const errMsg = (data.errors && data.errors[0] && data.errors[0].description)
+        || data.message || 'Erro ao criar conta de pagamentos';
+      return res.status(400).json({ error: errMsg });
+    }
+
+    const subcontaId    = data.walletId || data.id;
+    const subcontaToken = data.apiKey;
+
+    await db.query(
+      `UPDATE companies SET asaas_subconta_id = $1, asaas_subconta_token = $2, updated_at = NOW() WHERE id = $3`,
+      [subcontaId, subcontaToken, cid]
+    );
+
+    console.log('[setup-pix] Subconta Asaas criada para empresa', cid);
+    res.json({ success: true, message: 'Pix ativado com sucesso! Ja pode receber pagamentos.' });
+
+  } catch (err) {
+    console.error('[setup-pix] error:', err.message);
+    res.status(500).json({ error: 'Erro ao ativar Pix. Tente novamente.' });
   }
 });
 
