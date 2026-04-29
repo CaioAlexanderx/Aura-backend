@@ -5,6 +5,7 @@
 -- mensagem WhatsApp" no painel violeta.
 --
 -- Mudanças:
+--   0. coupons       : CREATE TABLE base (não existia antes desta migration)
 --   1. coupons       : customer_id, source (rastreio de origem)
 --   2. customers     : marketing_opt_out (LGPD)
 --   3. companies     : birthday_coupon_defaults (JSONB),
@@ -14,6 +15,33 @@
 -- Padrão idempotente: ALTER ... ADD COLUMN IF NOT EXISTS,
 -- CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS.
 -- ============================================================
+
+-- 0. Base da tabela coupons (criada aqui pela primeira vez)
+CREATE TABLE IF NOT EXISTS coupons (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id      UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  code            TEXT NOT NULL,
+  discount_type   TEXT NOT NULL DEFAULT 'percent'
+                    CHECK (discount_type IN ('percent', 'fixed')),
+  discount_value  NUMERIC(10,2) NOT NULL DEFAULT 0,
+  min_order_value NUMERIC(10,2) NULL,
+  max_discount    NUMERIC(10,2) NULL,
+  valid_from      TIMESTAMPTZ NULL,
+  valid_until     TIMESTAMPTZ NULL,
+  max_uses        INT NULL,
+  uses_count      INT NOT NULL DEFAULT 0,
+  is_active       BOOLEAN NOT NULL DEFAULT true,
+  description     TEXT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (company_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_coupons_company_id
+  ON coupons(company_id);
+
+CREATE INDEX IF NOT EXISTS idx_coupons_valid_until
+  ON coupons(valid_until) WHERE valid_until IS NOT NULL;
 
 -- 1. coupons: marcação de origem e vínculo opcional ao cliente
 ALTER TABLE coupons
