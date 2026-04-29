@@ -33,18 +33,17 @@ router.get('/ranking', async (req, res) => {
 /**
  * GET /companies/:id/customers/birthdays
  * Query params:
- *   days = número de dias à frente (padrão: 7)
+ *   days = janela de dias à frente — aceita 0 (só hoje)
+ *          até 365 (padrão: 7)
  */
 router.get('/birthdays', async (req, res) => {
   try {
     const companyId = req.params.id;
-    const { days = 7 } = req.query;
+    const rawDays   = req.query.days ?? 7;
+    const daysNum   = parseInt(rawDays);
 
-    const daysNum = parseInt(days);
-    if (isNaN(daysNum) || daysNum < 1 || daysNum > 365) {
-      return res.status(400).json({
-        error: 'days deve ser entre 1 e 365',
-      });
+    if (isNaN(daysNum) || daysNum < 0 || daysNum > 365) {
+      return res.status(400).json({ error: 'days deve ser entre 0 e 365' });
     }
 
     const data = await getUpcomingBirthdays(companyId, daysNum);

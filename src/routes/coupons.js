@@ -6,10 +6,17 @@ const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 
 // GET /coupons
+// Query: ?source=birthday|manual|... pra filtrar por origem
 router.get('/', async (req, res) => {
   try {
+    const params = [req.params.id];
+    let where = `company_id=$1`;
+    if (req.query.source) {
+      params.push(String(req.query.source));
+      where += ` AND source = $${params.length}`;
+    }
     const { rows } = await db.query(
-      `SELECT * FROM coupons WHERE company_id=$1 ORDER BY created_at DESC`, [req.params.id]
+      `SELECT * FROM coupons WHERE ${where} ORDER BY created_at DESC`, params
     );
     res.json({ total: rows.length, coupons: rows });
   } catch (err) { res.status(500).json({ error: 'Erro ao listar cupons' }); }
@@ -17,17 +24,25 @@ router.get('/', async (req, res) => {
 
 // POST /coupons
 router.post('/', async (req, res) => {
-  const { code, description, discount_type, discount_value, min_order_value, max_uses, expires_at } = req.body;
+  const { code, description, discount_type, discount_value, min_order_value,
+          max_uses, expires_at, customer_id, source } = req.body;
   if (!code || !discount_value) return res.status(400).json({ error: 'code e discount_value obrigatorios' });
   const upperCode = String(code).toUpperCase().trim();
   if (upperCode.length < 3 || upperCode.length > 30) return res.status(400).json({ error: 'Codigo deve ter entre 3 e 30 caracteres' });
+
+  // Sanitização do source (se vier do client)
+  const allowedSources = ['manual', 'birthday', 'campaign', 'reactivation'];
+  const cleanSource = source && allowedSources.includes(source) ? source : 'manual';
+
   try {
     const { rows } = await db.query(
-      `INSERT INTO coupons (company_id, code, description, discount_type, discount_value, min_order_value, max_uses, expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      `INSERT INTO coupons (company_id, code, description, discount_type, discount_value,
+                            min_order_value, max_uses, expires_at, customer_id, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [req.params.id, upperCode, description || null, discount_type || 'percent',
        parseFloat(discount_value), parseFloat(min_order_value || 0),
-       max_uses ? parseInt(max_uses) : null, expires_at || null]
+       max_uses ? parseInt(max_uses) : null, expires_at || null,
+       customer_id || null, cleanSource]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -66,6 +81,9 @@ router.post('/validate', async (req, res) => {
       discount_value: parseFloat(c.discount_value),
       discount_amount: discount,
       final_total: Math.max(0, total - discount),
+      // Cupom de aniversário: front pode personalizar a UX
+      source: c.source || 'manual',
+      customer_id: c.customer_id,
     });
   } catch (err) { res.status(500).json({ valid: false, error: 'Erro ao validar cupom' }); }
 });

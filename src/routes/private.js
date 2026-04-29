@@ -61,6 +61,7 @@ router.use('/customers', requirePlan('negocio', 'expansao'), require('./customer
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
+router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./employees'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
 router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
