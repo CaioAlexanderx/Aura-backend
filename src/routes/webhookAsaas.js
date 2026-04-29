@@ -1,8 +1,12 @@
 // ============================================================
-// AURA. — F6: Asaas Webhook Handler
+// AURA. — Asaas Webhook Handler
 // FIX: Asaas sends access token in header, NOT HMAC signature
 // Asaas header: asaas-access-token (plain token comparison)
 // Mounted at: /webhooks/asaas (PUBLIC, no auth)
+//
+// Handles two flows:
+//   1. externalReference = 'digital-order-<uuid>'  → pedido Canal Digital
+//   2. tudo mais                                    → billing de empresa (plano)
 // ============================================================
 
 const express = require('express');
@@ -12,24 +16,16 @@ const crypto  = require('crypto');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
-// FIX: Asaas uses a plain access token, NOT HMAC-SHA256
-// They send the token in the 'asaas-access-token' header
 function validateToken(req) {
   if (!ASAAS_WEBHOOK_TOKEN) {
-    // No secret configured — accept all (log warning)
     console.warn('[WEBHOOK] ASAAS_WEBHOOK_SECRET not set — accepting all events');
     return true;
   }
-
-  // Asaas sends the token in this header
   var token = req.headers['asaas-access-token'] || '';
-
   if (!token) {
     console.warn('[WEBHOOK] No asaas-access-token header received');
     return false;
   }
-
-  // Timing-safe comparison
   try {
     var a = Buffer.from(String(token));
     var b = Buffer.from(String(ASAAS_WEBHOOK_TOKEN));
@@ -40,36 +36,48 @@ function validateToken(req) {
   }
 }
 
-// Event mapping
 var PAYMENT_STATUS_MAP = {
   PAYMENT_CONFIRMED: 'active',
-  PAYMENT_RECEIVED: 'active',
-  PAYMENT_OVERDUE: 'overdue',
-  PAYMENT_DELETED: 'cancelled',
-  PAYMENT_REFUNDED: 'refunded',
+  PAYMENT_RECEIVED:  'active',
+  PAYMENT_OVERDUE:   'overdue',
+  PAYMENT_DELETED:   'cancelled',
+  PAYMENT_REFUNDED:  'refunded',
+  PAYMENT_CHARGEBACK_REQUESTED: 'chargeback',
+};
+
+// Mapeamento evento Asaas → payment_status do pedido
+var ORDER_PAYMENT_MAP = {
+  PAYMENT_CONFIRMED: 'confirmed',
+  PAYMENT_RECEIVED:  'confirmed',
+  PAYMENT_REFUNDED:  'refunded',
   PAYMENT_CHARGEBACK_REQUESTED: 'chargeback',
 };
 
 router.post('/', async function(req, res) {
-  // Validate webhook token
   if (!validateToken(req)) {
     console.warn('[WEBHOOK] Invalid Asaas token — rejecting');
     return res.status(403).json({ error: 'Invalid token' });
   }
 
-  var event = req.body.event;
+  var event   = req.body.event;
   var payment = req.body.payment;
   if (!event || !payment) return res.status(200).json({ received: true });
 
-  console.log('[WEBHOOK] Asaas event: ' + event + ' | Payment: ' + payment.id + ' | Status: ' + payment.status);
+  console.log('[WEBHOOK] Asaas event: ' + event + ' | Payment: ' + payment.id + ' | ref: ' + payment.externalReference);
 
+  // ── 1. Digital order payment ──────────────────────────────
+  var extRef = payment.externalReference || '';
+  if (extRef.startsWith('digital-order-')) {
+    return handleDigitalOrderPayment(req, res, event, payment, extRef);
+  }
+
+  // ── 2. Company billing (plano) ────────────────────────────
   try {
     var newStatus = PAYMENT_STATUS_MAP[event];
     if (!newStatus) {
       return res.status(200).json({ received: true, handled: false });
     }
 
-    // Find company by Asaas customer or external reference
     var result = await db.query(
       'SELECT id, plan, billing_status FROM companies WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1',
       [payment.customer, payment.externalReference]
@@ -80,28 +88,86 @@ router.post('/', async function(req, res) {
       return res.status(200).json({ received: true, company_found: false });
     }
 
-    var company = result.rows[0];
+    var company  = result.rows[0];
     var prevStatus = company.billing_status;
 
-    // Update billing status
     await db.query(
       'UPDATE companies SET billing_status=$1, last_payment_date=$2, next_billing_date=$3, updated_at=NOW() WHERE id=$4',
       [newStatus, payment.paymentDate || null, payment.dueDate || null, company.id]
     );
 
-    // Log the webhook event
     await db.query(
       'INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at) VALUES ($1, \'asaas\', $2, $3, NOW())',
       [company.id, event, JSON.stringify(payment)]
-    ).catch(function() {}); // Don't fail if log table doesn't exist
+    ).catch(function() {});
 
     console.log('[WEBHOOK] Company ' + company.id + ' billing: ' + prevStatus + ' -> ' + newStatus);
     res.status(200).json({ received: true, handled: true, status: newStatus });
   } catch (err) {
-    console.error('[WEBHOOK] Error processing:', err.message);
-    // Always return 200 to prevent Asaas retries
+    console.error('[WEBHOOK] Error processing billing:', err.message);
     res.status(200).json({ received: true, error: true });
   }
 });
+
+async function handleDigitalOrderPayment(req, res, event, payment, extRef) {
+  const orderId = extRef.replace('digital-order-', '').trim();
+  const newPaymentStatus = ORDER_PAYMENT_MAP[event];
+
+  if (!newPaymentStatus) {
+    // Evento irrelevante para pedidos (ex: PAYMENT_UPDATED)
+    return res.status(200).json({ received: true, handled: false, reason: 'event_ignored' });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT id, status, payment_status, company_id FROM digital_orders WHERE id = $1`, [orderId]
+    );
+    if (!rows.length) {
+      console.warn('[WEBHOOK] digital order not found:', orderId);
+      return res.status(200).json({ received: true, order_found: false });
+    }
+
+    const order = rows[0];
+    // Idempotência: não reprocessar se já confirmado
+    if (order.payment_status === 'confirmed' && newPaymentStatus === 'confirmed') {
+      return res.status(200).json({ received: true, handled: false, reason: 'already_confirmed' });
+    }
+
+    // Ao confirmar pagamento, avança status do pedido para 'confirmed'
+    // Isso dispara o trigger de deducão de estoque (trg_digital_order_stock_deduct)
+    const shouldConfirmOrder = newPaymentStatus === 'confirmed' && order.status === 'pending_payment';
+
+    await db.query(`
+      UPDATE digital_orders SET
+        payment_status = $1,
+        asaas_payment_id = COALESCE(asaas_payment_id, $2),
+        status = CASE WHEN $3 THEN 'confirmed' ELSE status END,
+        confirmed_at = CASE WHEN $3 AND confirmed_at IS NULL THEN NOW() ELSE confirmed_at END,
+        updated_at = NOW()
+      WHERE id = $4
+    `, [newPaymentStatus, payment.id, shouldConfirmOrder, orderId]);
+
+    // Log do evento
+    await db.query(
+      `INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at)
+       VALUES ($1, 'asaas', $2, $3, NOW())`,
+      [order.company_id, event, JSON.stringify(payment)]
+    ).catch(() => {});
+
+    console.log(`[WEBHOOK] digital_order ${orderId}: payment_status -> ${newPaymentStatus}` +
+      (shouldConfirmOrder ? ', status -> confirmed (stock trigger queued)' : ''));
+
+    res.status(200).json({
+      received: true,
+      handled: true,
+      order_id: orderId,
+      payment_status: newPaymentStatus,
+      order_confirmed: shouldConfirmOrder,
+    });
+  } catch (err) {
+    console.error('[WEBHOOK] Error processing digital order payment:', err.message);
+    res.status(200).json({ received: true, error: true });
+  }
+}
 
 module.exports = router;
