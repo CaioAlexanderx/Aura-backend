@@ -26,8 +26,12 @@ function buildStorefrontPage(data, slug) {
     products: data.products,
   });
 
-  const logoInTopbar = logoUrl ? `<img src="${logoUrl}" alt="">` : `<span id="logoInitial"></span>`;
-  const logoInHero   = logoUrl ? `<img src="${logoUrl}" alt="">` : `<span id="heroInitial"></span>`;
+  const logoInTopbar = logoUrl
+    ? `<img src="${logoUrl}" alt="" onerror="this.style.display='none';var s=document.getElementById('logoInitial');if(s){s.style.display='flex';}"><span id="logoInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:800;color:#fff;"></span>`
+    : `<span id="logoInitial" style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:800;color:#fff;"></span>`;
+  const logoInHero = logoUrl
+    ? `<img src="${logoUrl}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:16px;" onerror="this.style.display='none';var s=document.getElementById('heroInitial');if(s){s.style.display='flex';}"><span id="heroInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:26px;font-weight:800;color:#fff;"></span>`
+    : `<span id="heroInitial" style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:26px;font-weight:800;color:#fff;"></span>`;
 
   const contactBar = whatsNum ? `
 <div class="contact-bar">
@@ -351,9 +355,9 @@ function renderProducts(){
       :'<div style="font-size:32px;font-weight:800;color:var(--primary);">'+esc((p.name||'?')[0].toUpperCase())+'</div>';
     var priceH=(SETTINGS.show_prices!==false&&p.price!=null)?'<div class="product-price">'+fmt(p.price)+'</div>':'';
     var actionH=qty>0
-      ?'<div class="qty-ctrl"><button class="qty-btn" onclick="event.stopPropagation();changeQty(\''+p.id+'\',- 1)">−</button><span class="qty-num">'+qty+'</span><button class="qty-btn" onclick="event.stopPropagation();changeQty(\''+p.id+'\',1)">+</button></div>'
-      :'<button class="add-btn" onclick="event.stopPropagation();addToCart(\''+p.id+'\')" >+</button>';
-    return '<div class="product-card" onclick="showDetail(\''+p.id+'\')" ><div class="product-img">'+imgH+'</div><div class="product-body">'
+      ?'<div class="qty-ctrl"><button class="qty-btn" onclick="event.stopPropagation();changeQty(\''+p.id+'\',-1)">−</button><span class="qty-num">'+qty+'</span><button class="qty-btn" onclick="event.stopPropagation();changeQty(\''+p.id+'\',1)">+</button></div>'
+      :'<button class="add-btn" onclick="event.stopPropagation();addToCart(\''+p.id+'\')">+</button>';
+    return '<div class="product-card" onclick="showDetail(\''+p.id+'\')"><div class="product-img">'+imgH+'</div><div class="product-body">'
       +(p.category?'<div class="product-cat">'+esc(p.category)+'</div>':'')
       +'<div class="product-name">'+esc(p.name)+'</div>'
       +(p.description?'<div class="product-desc">'+esc((p.description||'').substring(0,80))+((p.description||'').length>80?'...':'')+'</div>':'')
@@ -388,7 +392,7 @@ function updateCartUI(){
     return '<div class="cart-item"><div class="cart-item-img">'+img+'</div>'
       +'<div class="cart-item-info"><div class="cart-item-name">'+esc(i.name)+'</div><div class="cart-item-price">'+fmt(i.price)+' × '+i.qty+'</div></div>'
       +'<div class="cart-item-right"><div class="cart-item-total">'+fmt(i.price*i.qty)+'</div>'
-      +'<div class="qty-ctrl" style="background:var(--bg);"><button class="qty-btn" style="width:24px;height:24px;font-size:14px;" onclick="changeQty(\''+i.id+'\',- 1)">−</button>'
+      +'<div class="qty-ctrl" style="background:var(--bg);"><button class="qty-btn" style="width:24px;height:24px;font-size:14px;" onclick="changeQty(\''+i.id+'\',-1)">−</button>'
       +'<span class="qty-num">'+i.qty+'</span>'
       +'<button class="qty-btn" style="width:24px;height:24px;font-size:14px;" onclick="changeQty(\''+i.id+'\',1)">+</button></div></div></div>';
   }).join('');
@@ -555,11 +559,11 @@ function startPolling(){
 function showConfirmation(order){
   clearInterval(pollInterval);clearInterval(timerInterval);
   closeCheckout();cart={};updateCartUI();renderProducts();
-  var wnum=(CONTACT.whatsapp||'').replace(/\\D/g,'');
+  var wnum=(CONTACT.whatsapp||'').replace(/\D/g,'');
   var wBtn=wnum?'<a class="whats-btn" href="https://wa.me/'+wnum+'" target="_blank">💬 Acompanhar no WhatsApp</a>':'';
   var ov=document.createElement('div');
   ov.className='checkout-overlay open';
-  ov.innerHTML='<div class="checkout-sheet"><div class="checkout-head"><div class="checkout-head-info" style="margin-left:46px;"><div class="checkout-title">Pedido confirmado!</div></div><div class="cart-close" onclick="this.closest(\'.checkout-overlay\').remove();document.body.style.overflow=\'\';" >×</div></div><div class="checkout-body"><div class="confirm-screen"><div class="confirm-icon">✅</div><div class="confirm-title">Pagamento recebido!</div><div class="confirm-desc">Pedido <strong>#'+esc(order.order_number||'')+'</strong> confirmado. Em breve você recebe atualizações.</div>'+wBtn+'</div></div></div>';
+  ov.innerHTML='<div class="checkout-sheet"><div class="checkout-head"><div class="checkout-head-info" style="margin-left:46px;"><div class="checkout-title">Pedido confirmado!</div></div><div class="cart-close" onclick="this.closest(\'.checkout-overlay\').remove();document.body.style.overflow=\'\';">×</div></div><div class="checkout-body"><div class="confirm-screen"><div class="confirm-icon">✅</div><div class="confirm-title">Pagamento recebido!</div><div class="confirm-desc">Pedido <strong>#'+esc(order.order_number||'')+'</strong> confirmado. Em breve você recebe atualizações.</div>'+wBtn+'</div></div></div>';
   document.body.appendChild(ov);
   document.body.style.overflow='hidden';
 }
