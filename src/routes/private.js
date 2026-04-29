@@ -69,6 +69,7 @@ router.use('/employees', requirePlan('negocio', 'expansao'), require('./commissi
 router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appointments'));
 router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
 router.use('/digital-channel/orders', requirePlan('negocio', 'expansao'), require('./digitalOrders'));
+router.use('/digital-channel/asaas', requirePlan('negocio', 'expansao'), require('./asaasSubconta'));
 router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
 router.use('/whatsapp', requirePlan('negocio', 'expansao'), require('./whatsappRoutes'));
 router.use('/ai/insights', requirePlan('negocio', 'expansao'), require('./aiInsights'));
