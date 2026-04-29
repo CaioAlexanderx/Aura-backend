@@ -196,4 +196,96 @@ async function sendInviteEmail(to, inviteUrl, companyName, role, inviterName) {
   });
 }
 
-module.exports = { sendVerificationEmail, sendVerificationLinkEmail, sendPasswordResetEmail, sendInviteEmail };
+// -- Template: confirmação de pedido Canal Digital --
+async function sendOrderConfirmationEmail(to, opts) {
+  const { order_number, customer_name, total, pix_payload, pix_expires_at, delivery_type, store_name, items } = opts;
+  const firstName     = customer_name ? customer_name.split(' ')[0] : '';
+  const fmtR          = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
+  const deliveryLabel = delivery_type === 'delivery' ? 'Entrega' : 'Retirada na loja';
+  const expiresLabel  = pix_expires_at
+    ? new Date(pix_expires_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+    : '30 min';
+
+  const itemRows = (items || []).map(i =>
+    `<tr>
+      <td style="padding:6px 0;font-size:13px;color:#94a3b8;">${i.product_name} &times; ${i.quantity}</td>
+      <td style="padding:6px 0;font-size:13px;color:#c4b5fd;text-align:right;">${fmtR(i.subtotal)}</td>
+    </tr>`
+  ).join('');
+
+  const html = emailLayout(`
+    <p style="font-size:15px;color:#e2e8f0;margin:0 0 6px;">Pedido recebido, ${firstName || customer_name}!</p>
+    <p style="font-size:13px;color:#94a3b8;line-height:22px;margin:0 0 20px;">
+      Seu pedido <strong style="color:#e2e8f0;">#${order_number}</strong> em
+      <strong style="color:#e2e8f0;">${store_name}</strong> foi recebido.
+      ${pix_payload ? 'Pague via Pix para confirmar.' : ''}
+    </p>
+    ${itemRows ? `
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;border-top:1px solid #1e293b;">
+      ${itemRows}
+      <tr>
+        <td style="padding:10px 0 0;font-size:14px;font-weight:700;color:#e2e8f0;border-top:1px solid #1e293b;">Total</td>
+        <td style="padding:10px 0 0;font-size:14px;font-weight:700;color:#7c3aed;text-align:right;border-top:1px solid #1e293b;">${fmtR(total)}</td>
+      </tr>
+    </table>` : `<p style="font-size:14px;font-weight:700;color:#7c3aed;margin:0 0 16px;">Total: ${fmtR(total)}</p>`}
+    <p style="font-size:12px;color:#64748b;margin:0 0 16px;">Modalidade: <strong style="color:#94a3b8;">${deliveryLabel}</strong></p>
+    ${pix_payload ? `
+    <p style="font-size:13px;color:#94a3b8;margin:0 0 8px;font-weight:600;">🔑 Pix Copia e Cola</p>
+    <p style="font-size:10px;color:#7c3aed;word-break:break-all;background:#1e1b4b;padding:12px;border-radius:8px;margin:0 0 8px;">${pix_payload}</p>
+    <p style="font-size:11px;color:#64748b;margin:0 0 20px;">Expira &agrave;s <strong style="color:#94a3b8;">${expiresLabel}</strong>. Pague no app do seu banco usando copia e cola.</p>
+    ` : ''}
+    <p style="font-size:11px;color:#475569;margin:0;">D&uacute;vidas? Entre em contato diretamente com a loja.</p>
+  `);
+
+  return sendMail({
+    to,
+    subject: `Pedido #${order_number} recebido — ${pix_payload ? 'pague via Pix' : 'aguardando confirmação'}`,
+    text: `Pedido #${order_number} recebido em ${store_name}. Total: ${fmtR(total)}. ${pix_payload ? 'Pix: ' + pix_payload : ''}`,
+    html,
+  });
+}
+
+// -- Template: atualização de status do pedido Canal Digital --
+async function sendOrderStatusEmail(to, { order_number, customer_name, status, store_name }) {
+  const firstName = customer_name ? customer_name.split(' ')[0] : '';
+  const STATUS_INFO = {
+    confirmed: { emoji: '✅', label: 'Confirmado',    msg: 'Pagamento confirmado! Seu pedido está sendo preparado.' },
+    preparing: { emoji: '👨‍🍳', label: 'Em preparo',    msg: 'Estamos preparando seu pedido agora.' },
+    ready:     { emoji: '📦', label: 'Pronto!',       msg: 'Seu pedido está pronto! Pode retirar ou aguardar a entrega.' },
+    delivered: { emoji: '🚀', label: 'Entregue',      msg: 'Pedido entregue! Obrigado pela preferência.' },
+    cancelled: { emoji: '❌', label: 'Cancelado',    msg: 'Seu pedido foi cancelado. Em caso de dúvidas, contate a loja.' },
+  };
+  const info = STATUS_INFO[status] || { emoji: '📋', label: status, msg: 'Status do seu pedido foi atualizado.' };
+
+  const html = emailLayout(`
+    <p style="font-size:15px;color:#e2e8f0;margin:0 0 6px;">Ol&aacute;, ${firstName || customer_name}!</p>
+    <p style="font-size:13px;color:#94a3b8;line-height:22px;margin:0 0 20px;">
+      Atualiza&ccedil;&atilde;o do seu pedido <strong style="color:#e2e8f0;">#${order_number}</strong>
+      em <strong style="color:#e2e8f0;">${store_name}</strong>:
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+      <tr><td align="center" style="background:#1e1b4b;border:1px solid #4c1d95;border-radius:14px;padding:24px;">
+        <p style="margin:0 0 8px;font-size:40px;">${info.emoji}</p>
+        <p style="margin:0 0 8px;font-size:18px;font-weight:800;color:#c4b5fd;">${info.label}</p>
+        <p style="margin:0;font-size:13px;color:#94a3b8;">${info.msg}</p>
+      </td></tr>
+    </table>
+    <p style="font-size:11px;color:#475569;margin:0;">Em caso de d&uacute;vidas, entre em contato com a loja diretamente.</p>
+  `);
+
+  return sendMail({
+    to,
+    subject: `${info.emoji} Pedido #${order_number}: ${info.label}`,
+    text: `Pedido #${order_number} em ${store_name}: ${info.label}. ${info.msg}`,
+    html,
+  });
+}
+
+module.exports = {
+  sendVerificationEmail,
+  sendVerificationLinkEmail,
+  sendPasswordResetEmail,
+  sendInviteEmail,
+  sendOrderConfirmationEmail,
+  sendOrderStatusEmail,
+};

@@ -7,6 +7,7 @@
 // ============================================================
 const router = require('express').Router();
 const db     = require('../config/database');
+const notify = require('../services/digitalOrderNotifications');
 
 async function buildStorefront(config) {
   const cid = config.company_id;
@@ -76,7 +77,7 @@ router.get('/:slug/page', async (req, res) => {
     if (!rows.length) return res.status(404).send('<h1>Loja nao encontrada</h1>');
     const data = await buildStorefront(rows[0]);
     const primary = data.site.primary_color || '#7c3aed';
-    const fmt = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}` ;
+    const fmt = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
 
     const productCards = data.products.map(p => {
       const img = p.image_url
@@ -160,7 +161,6 @@ router.post('/:slug/order', async (req, res) => {
   }
 
   try {
-    // Carregar configuração da loja
     const { rows: configs } = await db.query(
       `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]
     );
@@ -168,7 +168,6 @@ router.post('/:slug/order', async (req, res) => {
     const config = configs[0];
     const cid = config.company_id;
 
-    // Validar modalidade de entrega
     const dtype = delivery_type || 'pickup';
     if (dtype === 'delivery' && !config.delivery_enabled) {
       return res.status(400).json({ error: 'Entrega não disponível nesta loja' });
@@ -180,7 +179,6 @@ router.post('/:slug/order', async (req, res) => {
       return res.status(400).json({ error: 'Endereço de entrega é obrigatório' });
     }
 
-    // Buscar e validar produtos
     const productIds = items.map(i => i.product_id);
     const { rows: products } = await db.query(
       `SELECT id, name, price, stock_qty, image_url, is_active
@@ -193,12 +191,8 @@ router.post('/:slug/order', async (req, res) => {
 
     for (const item of items) {
       const p = productMap[item.product_id];
-      if (!p) {
-        return res.status(400).json({ error: `Produto ${item.product_id} não encontrado` });
-      }
-      if (!p.is_active) {
-        return res.status(400).json({ error: `Produto "${p.name}" não está disponível` });
-      }
+      if (!p) return res.status(400).json({ error: `Produto ${item.product_id} não encontrado` });
+      if (!p.is_active) return res.status(400).json({ error: `Produto "${p.name}" não está disponível` });
       if (p.stock_qty < item.quantity) {
         return res.status(400).json({
           error: `Estoque insuficiente para "${p.name}". Disponível: ${p.stock_qty}`,
@@ -207,24 +201,18 @@ router.post('/:slug/order', async (req, res) => {
       const itemSubtotal = parseFloat(p.price) * item.quantity;
       subtotal += itemSubtotal;
       orderItems.push({
-        product_id:    p.id,
-        product_name:  p.name,
-        product_image: p.image_url,
-        unit_price:    parseFloat(p.price),
-        quantity:      item.quantity,
-        subtotal:      itemSubtotal,
+        product_id: p.id, product_name: p.name, product_image: p.image_url,
+        unit_price: parseFloat(p.price), quantity: item.quantity, subtotal: itemSubtotal,
       });
     }
 
     const delivery_fee = dtype === 'delivery' ? (parseFloat(config.delivery_fee) || 0) : 0;
     const total = subtotal + delivery_fee;
 
-    // Persistir pedido + itens em transação
     const client = await db.connect();
     let order;
     try {
       await client.query('BEGIN');
-
       const { rows: [newOrder] } = await client.query(`
         INSERT INTO digital_orders (
           company_id, order_number, customer_name, customer_phone, customer_email,
@@ -236,30 +224,18 @@ router.post('/:slug/order', async (req, res) => {
           'pending_payment', 'pending', $10
         ) RETURNING *
       `, [
-        cid,
-        customer_name,
-        customer_phone,
-        customer_email || null,
-        dtype,
-        delivery_address || null,
-        delivery_fee,
-        subtotal,
-        total,
-        notes || null,
+        cid, customer_name, customer_phone, customer_email || null,
+        dtype, delivery_address || null, delivery_fee, subtotal, total, notes || null,
       ]);
       order = newOrder;
-
       for (const item of orderItems) {
         await client.query(`
           INSERT INTO digital_order_items
             (order_id, product_id, product_name, product_image, unit_price, quantity, subtotal)
           VALUES ($1, $2, $3, $4, $5, $6, $7)
-        `, [
-          order.id, item.product_id, item.product_name, item.product_image,
-          item.unit_price, item.quantity, item.subtotal,
-        ]);
+        `, [order.id, item.product_id, item.product_name, item.product_image,
+            item.unit_price, item.quantity, item.subtotal]);
       }
-
       await client.query('COMMIT');
     } catch (txErr) {
       await client.query('ROLLBACK');
@@ -268,20 +244,26 @@ router.post('/:slug/order', async (req, res) => {
       client.release();
     }
 
-    // Gerar Pix (Asaas real ou mock estruturado)
     const pixData = await generatePix({ order, company_id: cid, total });
 
-    // Salvar dados do Pix no pedido
     if (pixData) {
       await db.query(`
         UPDATE digital_orders SET
-          asaas_payment_id    = $1,
-          asaas_pix_qrcode    = $2,
-          asaas_pix_payload   = $3,
+          asaas_payment_id     = $1,
+          asaas_pix_qrcode     = $2,
+          asaas_pix_payload    = $3,
           asaas_pix_expires_at = $4
         WHERE id = $5
       `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
     }
+
+    // Notificações (fire-and-forget)
+    notify.notifyNewOrder({
+      order,
+      total,
+      pix_payload: pixData?.payload || null,
+      config,
+    }).catch(err => console.error('[notify] new order error:', err.message));
 
     res.status(201).json({
       order_id:     order.id,
@@ -324,7 +306,6 @@ async function generatePix({ order, company_id, total }) {
     `SELECT asaas_subconta_id, asaas_subconta_token FROM companies WHERE id = $1`, [company_id]
   );
   const co = rows[0];
-
   if (co && co.asaas_subconta_id && co.asaas_subconta_token) {
     return generateAsaasPix({ order, company: co, total });
   }
@@ -335,40 +316,30 @@ async function generateAsaasPix({ order, company, total }) {
   const ASAAS_BASE = process.env.ASAAS_API_URL || 'https://api.asaas.com/api/v3';
   const dueDate = new Date(Date.now() + 30 * 60 * 1000);
   const dueDateStr = dueDate.toISOString().split('T')[0];
-
   try {
     const payResp = await fetch(`${ASAAS_BASE}/payments`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'access_token': company.asaas_subconta_token,
-      },
+      headers: { 'Content-Type': 'application/json', 'access_token': company.asaas_subconta_token },
       body: JSON.stringify({
-        billingType:       'PIX',
-        customer:          company.asaas_subconta_id,
-        value:             total,
-        dueDate:           dueDateStr,
-        description:       `Pedido ${order.order_number}`,
+        billingType: 'PIX', customer: company.asaas_subconta_id,
+        value: total, dueDate: dueDateStr,
+        description: `Pedido ${order.order_number}`,
         externalReference: `digital-order-${order.id}`,
       }),
     });
     const payData = await payResp.json();
-
     if (!payResp.ok) {
       console.warn('[PIX] Asaas payment error, usando mock:', JSON.stringify(payData));
       return generateMockPix({ order, total });
     }
-
-    // Buscar QR Code
     const qrResp = await fetch(`${ASAAS_BASE}/payments/${payData.id}/pixQrCode`, {
       headers: { 'access_token': company.asaas_subconta_token },
     });
     const qrData = await qrResp.json();
-
     return {
       payment_id: payData.id,
-      qrcode:     qrData.encodedImage || null,  // PNG base64
-      payload:    qrData.payload || null,        // copia-e-cola
+      qrcode:     qrData.encodedImage || null,
+      payload:    qrData.payload || null,
       expires_at: dueDate.toISOString(),
     };
   } catch (err) {
@@ -378,7 +349,6 @@ async function generateAsaasPix({ order, company, total }) {
 }
 
 function generateMockPix({ order, total }) {
-  // Payload EMV estruturado para dev/demo (não escaneável em prod)
   const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
   const ref = order.order_number.replace('-', '').slice(0, 10).padEnd(10, '0');
   const amt = Number(total).toFixed(2);
@@ -394,13 +364,7 @@ function generateMockPix({ order, total }) {
     `6214051006${ref}`,
     '6304MOCK',
   ].join('');
-
-  return {
-    payment_id: `mock-${order.id}`,
-    qrcode:     null,
-    payload,
-    expires_at: expiresAt.toISOString(),
-  };
+  return { payment_id: `mock-${order.id}`, qrcode: null, payload, expires_at: expiresAt.toISOString() };
 }
 
 module.exports = router;

@@ -13,6 +13,7 @@ const express = require('express');
 const router  = express.Router();
 const db      = require('../config/database');
 const crypto  = require('crypto');
+const notify  = require('../services/digitalOrderNotifications');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
@@ -45,7 +46,6 @@ var PAYMENT_STATUS_MAP = {
   PAYMENT_CHARGEBACK_REQUESTED: 'chargeback',
 };
 
-// Mapeamento evento Asaas → payment_status do pedido
 var ORDER_PAYMENT_MAP = {
   PAYMENT_CONFIRMED: 'confirmed',
   PAYMENT_RECEIVED:  'confirmed',
@@ -65,37 +65,32 @@ router.post('/', async function(req, res) {
 
   console.log('[WEBHOOK] Asaas event: ' + event + ' | Payment: ' + payment.id + ' | ref: ' + payment.externalReference);
 
-  // ── 1. Digital order payment ──────────────────────────────
+  // ── 1. Digital order payment
   var extRef = payment.externalReference || '';
   if (extRef.startsWith('digital-order-')) {
     return handleDigitalOrderPayment(req, res, event, payment, extRef);
   }
 
-  // ── 2. Company billing (plano) ────────────────────────────
+  // ── 2. Company billing (plano)
   try {
     var newStatus = PAYMENT_STATUS_MAP[event];
-    if (!newStatus) {
-      return res.status(200).json({ received: true, handled: false });
-    }
+    if (!newStatus) return res.status(200).json({ received: true, handled: false });
 
     var result = await db.query(
       'SELECT id, plan, billing_status FROM companies WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1',
       [payment.customer, payment.externalReference]
     );
-
     if (!result.rows.length) {
       console.warn('[WEBHOOK] Company not found for customer ' + payment.customer);
       return res.status(200).json({ received: true, company_found: false });
     }
 
-    var company  = result.rows[0];
+    var company    = result.rows[0];
     var prevStatus = company.billing_status;
-
     await db.query(
       'UPDATE companies SET billing_status=$1, last_payment_date=$2, next_billing_date=$3, updated_at=NOW() WHERE id=$4',
       [newStatus, payment.paymentDate || null, payment.dueDate || null, company.id]
     );
-
     await db.query(
       'INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at) VALUES ($1, \'asaas\', $2, $3, NOW())',
       [company.id, event, JSON.stringify(payment)]
@@ -110,17 +105,17 @@ router.post('/', async function(req, res) {
 });
 
 async function handleDigitalOrderPayment(req, res, event, payment, extRef) {
-  const orderId = extRef.replace('digital-order-', '').trim();
+  const orderId          = extRef.replace('digital-order-', '').trim();
   const newPaymentStatus = ORDER_PAYMENT_MAP[event];
 
   if (!newPaymentStatus) {
-    // Evento irrelevante para pedidos (ex: PAYMENT_UPDATED)
     return res.status(200).json({ received: true, handled: false, reason: 'event_ignored' });
   }
 
   try {
     const { rows } = await db.query(
-      `SELECT id, status, payment_status, company_id FROM digital_orders WHERE id = $1`, [orderId]
+      `SELECT id, status, payment_status, company_id, customer_name, customer_email, order_number
+       FROM digital_orders WHERE id = $1`, [orderId]
     );
     if (!rows.length) {
       console.warn('[WEBHOOK] digital order not found:', orderId);
@@ -128,40 +123,42 @@ async function handleDigitalOrderPayment(req, res, event, payment, extRef) {
     }
 
     const order = rows[0];
-    // Idempotência: não reprocessar se já confirmado
     if (order.payment_status === 'confirmed' && newPaymentStatus === 'confirmed') {
       return res.status(200).json({ received: true, handled: false, reason: 'already_confirmed' });
     }
 
-    // Ao confirmar pagamento, avança status do pedido para 'confirmed'
-    // Isso dispara o trigger de deducão de estoque (trg_digital_order_stock_deduct)
     const shouldConfirmOrder = newPaymentStatus === 'confirmed' && order.status === 'pending_payment';
 
     await db.query(`
       UPDATE digital_orders SET
-        payment_status = $1,
+        payment_status   = $1,
         asaas_payment_id = COALESCE(asaas_payment_id, $2),
-        status = CASE WHEN $3 THEN 'confirmed' ELSE status END,
-        confirmed_at = CASE WHEN $3 AND confirmed_at IS NULL THEN NOW() ELSE confirmed_at END,
-        updated_at = NOW()
+        status           = CASE WHEN $3 THEN 'confirmed' ELSE status END,
+        confirmed_at     = CASE WHEN $3 AND confirmed_at IS NULL THEN NOW() ELSE confirmed_at END,
+        updated_at       = NOW()
       WHERE id = $4
     `, [newPaymentStatus, payment.id, shouldConfirmOrder, orderId]);
 
-    // Log do evento
     await db.query(
       `INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at)
        VALUES ($1, 'asaas', $2, $3, NOW())`,
       [order.company_id, event, JSON.stringify(payment)]
     ).catch(() => {});
 
-    console.log(`[WEBHOOK] digital_order ${orderId}: payment_status -> ${newPaymentStatus}` +
-      (shouldConfirmOrder ? ', status -> confirmed (stock trigger queued)' : ''));
+    console.log(`[WEBHOOK] digital_order ${orderId}: payment -> ${newPaymentStatus}` +
+      (shouldConfirmOrder ? ', status -> confirmed' : ''));
+
+    // Notificacões (fire-and-forget)
+    if (shouldConfirmOrder) {
+      notify.notifyPaymentConfirmed({ order: { ...order, status: 'confirmed' } })
+        .catch(err => console.error('[notify] payment confirmed error:', err.message));
+    }
 
     res.status(200).json({
-      received: true,
-      handled: true,
-      order_id: orderId,
-      payment_status: newPaymentStatus,
+      received:        true,
+      handled:         true,
+      order_id:        orderId,
+      payment_status:  newPaymentStatus,
       order_confirmed: shouldConfirmOrder,
     });
   } catch (err) {

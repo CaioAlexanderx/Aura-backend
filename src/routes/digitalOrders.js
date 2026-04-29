@@ -7,6 +7,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
+const notify = require('../services/digitalOrderNotifications');
 
 // GET — Lista pedidos com filtro por status e paginação
 router.get('/', async (req, res) => {
@@ -78,12 +79,10 @@ router.get('/:oid', async (req, res) => {
       `SELECT * FROM digital_orders WHERE id = $1 AND company_id = $2`, [oid, cid]
     );
     if (!orders.length) return res.status(404).json({ error: 'Pedido não encontrado' });
-
     const { rows: items } = await db.query(
       `SELECT id, product_id, product_name, product_image, unit_price, quantity, subtotal
        FROM digital_order_items WHERE order_id = $1 ORDER BY id`, [oid]
     );
-
     res.json({ ...orders[0], items });
   } catch (err) {
     console.error('digital order detail error:', err);
@@ -111,13 +110,9 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
     if (!rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
 
     const current = rows[0].status;
-
-    // Pedido já finalizado
     if (current === 'delivered' || current === 'cancelled') {
       return res.status(409).json({ error: `Pedido já finalizado com status "${current}"` });
     }
-
-    // Não permite retroceder no fluxo (exceto cancelar)
     const FLOW = ['pending_payment', 'confirmed', 'preparing', 'ready', 'delivered'];
     const curIdx = FLOW.indexOf(current);
     const newIdx = FLOW.indexOf(status);
@@ -127,7 +122,6 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
       });
     }
 
-    // Confirmar pedido com pagamento pendente é permitido (ex: pagamento em dinheiro na retirada)
     const { rows: updated } = await db.query(`
       UPDATE digital_orders SET
         status       = $1,
@@ -144,6 +138,11 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
     `, [status, oid, cid]);
 
     res.json({ order: updated[0], updated: true });
+
+    // Notificações ao cliente (fire-and-forget)
+    notify.notifyStatusChange(updated[0])
+      .catch(err => console.error('[notify] status change error:', err.message));
+
   } catch (err) {
     console.error('digital order status update error:', err);
     res.status(500).json({ error: 'Erro ao atualizar status' });
