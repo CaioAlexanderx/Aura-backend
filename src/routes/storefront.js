@@ -5,10 +5,14 @@
 // POST /storefront/:slug/order — Cria pedido + gera Pix
 // GET  /storefront/:slug/order/:oid — Poll status de pagamento
 // ============================================================
-const router = require('express').Router();
-const db     = require('../config/database');
-const notify = require('../services/digitalOrderNotifications');
+const router              = require('express').Router();
+const db                  = require('../config/database');
+const notify              = require('../services/digitalOrderNotifications');
+const buildStorefrontPage = require('../templates/storefrontPage');
 
+// ============================================================
+// buildStorefront — monta o objeto de dados da loja
+// ============================================================
 async function buildStorefront(config) {
   const cid = config.company_id;
   let products = [];
@@ -31,33 +35,44 @@ async function buildStorefront(config) {
   const company = companies[0] || {};
   return {
     site: {
-      name: config.site_name || company.trade_name || company.legal_name || 'Loja',
-      tagline: config.tagline || '', description: config.description || '',
+      name:          config.site_name || company.trade_name || company.legal_name || 'Loja',
+      tagline:       config.tagline       || '',
+      description:   config.description   || '',
       primary_color: config.primary_color || '#7c3aed',
-      logo_url: config.logo_url || company.logo_url || null,
-      cover_url: config.cover_url || null,
+      logo_url:      config.logo_url  || company.logo_url || null,
+      cover_url:     config.cover_url || null,
     },
-    contact: { phone: config.phone || '', whatsapp: config.whatsapp || '', instagram: config.instagram || '', address: config.address || '' },
+    contact: {
+      phone:     config.phone     || '',
+      whatsapp:  config.whatsapp  || '',
+      instagram: config.instagram || '',
+      address:   config.address   || '',
+    },
     business_hours: config.business_hours || {},
     settings: {
       show_prices:      config.show_prices !== false,
-      show_stock:       config.show_stock || false,
-      pickup_enabled:   config.pickup_enabled !== false,
+      show_stock:       config.show_stock  || false,
+      pickup_enabled:   config.pickup_enabled   !== false,
       delivery_enabled: config.delivery_enabled || false,
       delivery_fee:     parseFloat(config.delivery_fee) || 0,
     },
     products: products.map(p => ({
-      id: p.id, name: p.name, description: p.description,
-      price: config.show_prices !== false ? parseFloat(p.price) : null,
-      image_url: p.image_url, category: p.category,
-      stock_qty: p.stock_qty,
-      in_stock: p.stock_qty > 0,
+      id:          p.id,
+      name:        p.name,
+      description: p.description,
+      price:       config.show_prices !== false ? parseFloat(p.price) : null,
+      image_url:   p.image_url,
+      category:    p.category,
+      stock_qty:   p.stock_qty,
+      in_stock:    p.stock_qty > 0,
     })),
     total_products: products.length,
   };
 }
 
-// JSON API
+// ============================================================
+// GET /storefront/:slug — JSON API
+// ============================================================
 router.get('/:slug', async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -65,81 +80,29 @@ router.get('/:slug', async (req, res) => {
       [req.params.slug.toLowerCase().trim()]);
     if (!rows.length) return res.status(404).json({ error: 'Loja nao encontrada' });
     res.json(await buildStorefront(rows[0]));
-  } catch (err) { console.error('storefront error:', err); res.status(500).json({ error: 'Erro' }); }
+  } catch (err) {
+    console.error('storefront error:', err);
+    res.status(500).json({ error: 'Erro' });
+  }
 });
 
-// HTML rendered page
+// ============================================================
+// GET /storefront/:slug/page — HTML renderizado (SPA)
+// ============================================================
 router.get('/:slug/page', async (req, res) => {
   try {
+    const slug = req.params.slug.toLowerCase().trim();
     const { rows } = await db.query(
-      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`,
-      [req.params.slug.toLowerCase().trim()]);
-    if (!rows.length) return res.status(404).send('<h1>Loja nao encontrada</h1>');
+      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]);
+    if (!rows.length) {
+      return res.status(404).send('<!DOCTYPE html><html lang="pt-BR"><body style="font-family:sans-serif;text-align:center;padding:80px 20px"><h1>Loja não encontrada</h1><p style="color:#888">Verifique o endereço e tente novamente.</p></body></html>');
+    }
     const data = await buildStorefront(rows[0]);
-    const primary = data.site.primary_color || '#7c3aed';
-    const fmt = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
-
-    const productCards = data.products.map(p => {
-      const img = p.image_url
-        ? `<img src="${p.image_url}" alt="${p.name}" style="width:100%;height:200px;object-fit:cover;border-radius:12px 12px 0 0;">`
-        : `<div style="width:100%;height:200px;background:linear-gradient(135deg,${primary}22,${primary}11);border-radius:12px 12px 0 0;display:flex;align-items:center;justify-content:center;font-size:48px;">&#128722;</div>`;
-      const priceTag = p.price !== null ? `<div style="font-size:18px;font-weight:800;color:${primary};">${fmt(p.price)}</div>` : '';
-      const cat = p.category ? `<span style="font-size:10px;background:${primary}15;color:${primary};padding:3px 8px;border-radius:20px;font-weight:600;">${p.category}</span>` : '';
-      return `<div style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);transition:transform .2s;" onmouseover="this.style.transform='translateY(-4px)'" onmouseout="this.style.transform='none'">
-        ${img}
-        <div style="padding:16px;">
-          ${cat}
-          <h3 style="margin:8px 0 4px;font-size:15px;color:#1a1a2e;">${p.name}</h3>
-          ${p.description ? `<p style="font-size:12px;color:#666;margin:0 0 8px;line-height:1.4;">${p.description.substring(0,100)}${p.description.length>100?'...':''}</p>` : ''}
-          ${priceTag}
-        </div>
-      </div>`;
-    }).join('');
-
-    const whatsappBtn = data.contact.whatsapp
-      ? `<a href="https://wa.me/${data.contact.whatsapp.replace(/\D/g,'')}" target="_blank" style="display:inline-flex;align-items:center;gap:8px;background:#25D366;color:#fff;padding:12px 24px;border-radius:12px;text-decoration:none;font-weight:700;font-size:14px;margin-top:16px;">&#128172; Fale conosco no WhatsApp</a>`
-      : '';
-
-    const html = `<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>${data.site.name}</title>
-  <meta name="description" content="${data.site.tagline || data.site.description || ''}">
-  <style>
-    *{margin:0;padding:0;box-sizing:border-box;}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f8f7ff;color:#1a1a2e;}
-    .hero{background:linear-gradient(135deg,${primary},${primary}cc);color:#fff;padding:48px 24px;text-align:center;}
-    .hero h1{font-size:28px;font-weight:800;margin-bottom:8px;}
-    .hero p{font-size:14px;opacity:0.9;max-width:500px;margin:0 auto;}
-    .hero img{width:64px;height:64px;border-radius:16px;margin-bottom:16px;object-fit:cover;border:2px solid rgba(255,255,255,0.3);}
-    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px;max-width:960px;margin:0 auto;padding:32px 20px;}
-    .footer{text-align:center;padding:32px 20px;color:#888;font-size:12px;}
-    .contact{text-align:center;padding:24px 20px;background:#fff;}
-    @media(max-width:600px){.grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;padding:20px 12px;}}
-  </style>
-</head>
-<body>
-  <div class="hero">
-    ${data.site.logo_url ? `<img src="${data.site.logo_url}" alt="Logo">` : ''}
-    <h1>${data.site.name}</h1>
-    ${data.site.tagline ? `<p>${data.site.tagline}</p>` : ''}
-  </div>
-  <div class="grid">${productCards}</div>
-  ${(data.contact.whatsapp || data.contact.phone || data.contact.address) ? `<div class="contact">
-    ${data.contact.address ? `<p style="margin-bottom:8px;color:#666;">&#128205; ${data.contact.address}</p>` : ''}
-    ${data.contact.phone ? `<p style="margin-bottom:8px;color:#666;">&#128222; ${data.contact.phone}</p>` : ''}
-    ${whatsappBtn}
-  </div>` : ''}
-  <div class="footer"><p>Powered by <strong>Aura</strong> &mdash; Gestao inteligente</p></div>
-</body>
-</html>`;
-
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(html);
+    res.send(buildStorefrontPage(data, slug));
   } catch (err) {
     console.error('storefront page error:', err);
-    res.status(500).send('<h1>Erro ao carregar loja</h1>');
+    res.status(500).send('<!DOCTYPE html><html lang="pt-BR"><body style="font-family:sans-serif;text-align:center;padding:80px 20px"><h1>Erro ao carregar loja</h1><p style="color:#888">Tente novamente em instantes.</p></body></html>');
   }
 });
 
@@ -162,8 +125,7 @@ router.post('/:slug/order', async (req, res) => {
 
   try {
     const { rows: configs } = await db.query(
-      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]
-    );
+      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]);
     if (!configs.length) return res.status(404).json({ error: 'Loja não encontrada' });
     const config = configs[0];
     const cid = config.company_id;
@@ -182,8 +144,7 @@ router.post('/:slug/order', async (req, res) => {
     const productIds = items.map(i => i.product_id);
     const { rows: products } = await db.query(
       `SELECT id, name, price, stock_qty, image_url, is_active
-       FROM products WHERE id = ANY($1) AND company_id = $2`, [productIds, cid]
-    );
+       FROM products WHERE id = ANY($1) AND company_id = $2`, [productIds, cid]);
     const productMap = Object.fromEntries(products.map(p => [p.id, p]));
 
     const orderItems = [];
@@ -191,7 +152,7 @@ router.post('/:slug/order', async (req, res) => {
 
     for (const item of items) {
       const p = productMap[item.product_id];
-      if (!p) return res.status(400).json({ error: `Produto ${item.product_id} não encontrado` });
+      if (!p)           return res.status(400).json({ error: `Produto ${item.product_id} não encontrado` });
       if (!p.is_active) return res.status(400).json({ error: `Produto "${p.name}" não está disponível` });
       if (p.stock_qty < item.quantity) {
         return res.status(400).json({
@@ -201,8 +162,12 @@ router.post('/:slug/order', async (req, res) => {
       const itemSubtotal = parseFloat(p.price) * item.quantity;
       subtotal += itemSubtotal;
       orderItems.push({
-        product_id: p.id, product_name: p.name, product_image: p.image_url,
-        unit_price: parseFloat(p.price), quantity: item.quantity, subtotal: itemSubtotal,
+        product_id:    p.id,
+        product_name:  p.name,
+        product_image: p.image_url,
+        unit_price:    parseFloat(p.price),
+        quantity:      item.quantity,
+        subtotal:      itemSubtotal,
       });
     }
 
@@ -257,7 +222,6 @@ router.post('/:slug/order', async (req, res) => {
       `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
     }
 
-    // Notificações (fire-and-forget)
     notify.notifyNewOrder({
       order,
       total,
@@ -281,7 +245,9 @@ router.post('/:slug/order', async (req, res) => {
   }
 });
 
-// GET /storefront/:slug/order/:oid — Poll público de status de pagamento
+// ============================================================
+// GET /storefront/:slug/order/:oid — Poll público de status
+// ============================================================
 router.get('/:slug/order/:oid', async (req, res) => {
   try {
     const { rows } = await db.query(`
@@ -303,8 +269,7 @@ router.get('/:slug/order/:oid', async (req, res) => {
 
 async function generatePix({ order, company_id, total }) {
   const { rows } = await db.query(
-    `SELECT asaas_subconta_id, asaas_subconta_token FROM companies WHERE id = $1`, [company_id]
-  );
+    `SELECT asaas_subconta_id, asaas_subconta_token FROM companies WHERE id = $1`, [company_id]);
   const co = rows[0];
   if (co && co.asaas_subconta_id && co.asaas_subconta_token) {
     return generateAsaasPix({ order, company: co, total });
@@ -314,16 +279,18 @@ async function generatePix({ order, company_id, total }) {
 
 async function generateAsaasPix({ order, company, total }) {
   const ASAAS_BASE = process.env.ASAAS_API_URL || 'https://api.asaas.com/api/v3';
-  const dueDate = new Date(Date.now() + 30 * 60 * 1000);
+  const dueDate    = new Date(Date.now() + 30 * 60 * 1000);
   const dueDateStr = dueDate.toISOString().split('T')[0];
   try {
     const payResp = await fetch(`${ASAAS_BASE}/payments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'access_token': company.asaas_subconta_token },
       body: JSON.stringify({
-        billingType: 'PIX', customer: company.asaas_subconta_id,
-        value: total, dueDate: dueDateStr,
-        description: `Pedido ${order.order_number}`,
+        billingType:       'PIX',
+        customer:          company.asaas_subconta_id,
+        value:             total,
+        dueDate:           dueDateStr,
+        description:       `Pedido ${order.order_number}`,
         externalReference: `digital-order-${order.id}`,
       }),
     });
@@ -339,7 +306,7 @@ async function generateAsaasPix({ order, company, total }) {
     return {
       payment_id: payData.id,
       qrcode:     qrData.encodedImage || null,
-      payload:    qrData.payload || null,
+      payload:    qrData.payload      || null,
       expires_at: dueDate.toISOString(),
     };
   } catch (err) {
@@ -350,9 +317,9 @@ async function generateAsaasPix({ order, company, total }) {
 
 function generateMockPix({ order, total }) {
   const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
-  const ref = order.order_number.replace('-', '').slice(0, 10).padEnd(10, '0');
-  const amt = Number(total).toFixed(2);
-  const payload = [
+  const ref       = order.order_number.replace('-', '').slice(0, 10).padEnd(10, '0');
+  const amt       = Number(total).toFixed(2);
+  const payload   = [
     '000201',
     '26580014br.gov.bcb.pix',
     `0136mock-${order.id.slice(0, 22)}`,
