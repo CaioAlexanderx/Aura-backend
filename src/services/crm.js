@@ -64,7 +64,12 @@ async function getCustomersRanking(companyId, options = {}) {
 }
 
 /**
- * Clientes com aniversário nos próximos N dias
+ * Clientes com aniversário nos próximos N dias.
+ *
+ * NOTE: o parâmetro $2 é castado pra ::int explicitamente. node-pg
+ * envia parâmetros sem tipo (unknown) e 'CURRENT_DATE + unknown' é
+ * ambíguo no Postgres (date+integer vs date+interval) — quebrava com
+ * "operator is not unique" em prod ao chamar com days=0.
  */
 async function getUpcomingBirthdays(companyId, days = 7) {
   const { rows } = await db.query(`
@@ -104,14 +109,14 @@ async function getUpcomingBirthdays(companyId, days = 7) {
           LPAD(EXTRACT(MONTH FROM birth_date)::text, 2, '0') || '-' ||
           LPAD(EXTRACT(DAY FROM birth_date)::text, 2, '0'),
           'YYYY-MM-DD'
-        ) BETWEEN CURRENT_DATE AND CURRENT_DATE + $2
+        ) BETWEEN CURRENT_DATE AND CURRENT_DATE + ($2::int)
         OR
         TO_DATE(
           (EXTRACT(YEAR FROM NOW()) + 1)::text || '-' ||
           LPAD(EXTRACT(MONTH FROM birth_date)::text, 2, '0') || '-' ||
           LPAD(EXTRACT(DAY FROM birth_date)::text, 2, '0'),
           'YYYY-MM-DD'
-        ) BETWEEN CURRENT_DATE AND CURRENT_DATE + $2
+        ) BETWEEN CURRENT_DATE AND CURRENT_DATE + ($2::int)
       )
     ORDER BY days_until ASC
   `, [companyId, days]);
