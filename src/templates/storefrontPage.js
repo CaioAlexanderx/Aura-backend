@@ -324,7 +324,7 @@ var ALL_CATS=['Todos'];
 PRODUCTS.forEach(function(p){if(p.category&&ALL_CATS.indexOf(p.category)===-1)ALL_CATS.push(p.category);});
 (function(){
   var w=document.getElementById('catsWrap'); if(!w) return;
-  w.innerHTML=ALL_CATS.map(function(c,i){return '<div class="cat-chip'+(i===0?' active':'')+'" data-ci="'+i+'">'+esc(c)+'</div>';}).join('');
+  w.innerHTML=ALL_CATS.map(function(c,i){return '<div class="cat-chip'+(i===0?' active':'')+'\" data-ci="'+i+'">'+esc(c)+'</div>';}).join('');
   w.querySelectorAll('.cat-chip').forEach(function(chip){
     chip.addEventListener('click',function(){filterCat(ALL_CATS[parseInt(chip.dataset.ci)],chip);});
   });
@@ -355,9 +355,9 @@ function renderProducts(){
       :'<div style="font-size:32px;font-weight:800;color:var(--primary);">'+esc((p.name||'?')[0].toUpperCase())+'</div>';
     var priceH=(SETTINGS.show_prices!==false&&p.price!=null)?'<div class="product-price">'+fmt(p.price)+'</div>':'';
     var actionH=qty>0
-      ?'<div class="qty-ctrl"><button class="qty-btn" onclick="event.stopPropagation();changeQty(\''+p.id+'\',-1)">−</button><span class="qty-num">'+qty+'</span><button class="qty-btn" onclick="event.stopPropagation();changeQty(\''+p.id+'\',1)">+</button></div>'
-      :'<button class="add-btn" onclick="event.stopPropagation();addToCart(\''+p.id+'\')">+</button>';
-    return '<div class="product-card" onclick="showDetail(\''+p.id+'\')"><div class="product-img">'+imgH+'</div><div class="product-body">'
+      ?'<div class="qty-ctrl"><button class="qty-btn" onclick="event.stopPropagation();changeQty(\\''+p.id+'\\',-1)">−</button><span class="qty-num">'+qty+'</span><button class="qty-btn" onclick="event.stopPropagation();changeQty(\\''+p.id+'\\',1)">+</button></div>'
+      :'<button class="add-btn" onclick="event.stopPropagation();addToCart(\\''+p.id+'\\')">+</button>';
+    return '<div class="product-card" onclick="showDetail(\\''+p.id+'\\')"><div class="product-img">'+imgH+'</div><div class="product-body">'
       +(p.category?'<div class="product-cat">'+esc(p.category)+'</div>':'')
       +'<div class="product-name">'+esc(p.name)+'</div>'
       +(p.description?'<div class="product-desc">'+esc((p.description||'').substring(0,80))+((p.description||'').length>80?'...':'')+'</div>':'')
@@ -462,8 +462,8 @@ function renderCheckoutStep(){
       :'';
     body.innerHTML='<p style="font-size:12px;color:var(--text-3);margin-bottom:16px;">Como deseja receber?</p>'
       +'<div class="delivery-opts">'
-      +(pickupOk?'<div class="delivery-opt'+(selectedDelivery==="pickup"?" active":"")+'" id="opt_pickup"><div class="delivery-opt-radio"></div><div class="delivery-opt-icon">🏪</div><div class="delivery-opt-info"><div class="delivery-opt-name">Retirada no local</div><div class="delivery-opt-detail">'+(CONTACT.address||'Na loja')+'</div></div><div class="delivery-opt-price">Grátis</div></div>':'')
-      +(deliveryOk?'<div class="delivery-opt'+(selectedDelivery==="delivery"?" active":"")+'" id="opt_delivery"><div class="delivery-opt-radio"></div><div class="delivery-opt-icon">🚚</div><div class="delivery-opt-info"><div class="delivery-opt-name">Entrega a domicílio</div><div class="delivery-opt-detail">Conforme disponibilidade</div></div><div class="delivery-opt-price">'+(fee2?fmt(fee2):'Grátis')+'</div></div>':'')
+      +(pickupOk?'<div class="delivery-opt'+(selectedDelivery==="pickup"?" active":"")+'\" id="opt_pickup"><div class="delivery-opt-radio"></div><div class="delivery-opt-icon">🏪</div><div class="delivery-opt-info"><div class="delivery-opt-name">Retirada no local</div><div class="delivery-opt-detail">'+(CONTACT.address||'Na loja')+'</div></div><div class="delivery-opt-price">Grátis</div></div>':'')
+      +(deliveryOk?'<div class="delivery-opt'+(selectedDelivery==="delivery"?" active":"")+'\" id="opt_delivery"><div class="delivery-opt-radio"></div><div class="delivery-opt-icon">🚚</div><div class="delivery-opt-info"><div class="delivery-opt-name">Entrega a domicílio</div><div class="delivery-opt-detail">Conforme disponibilidade</div></div><div class="delivery-opt-price">'+(fee2?fmt(fee2):'Grátis')+'</div></div>':'')
       +'</div>'+addrHtml
       +'<div class="order-summary"><div class="summary-row"><span>Subtotal</span><span>'+fmt(sub)+'</span></div>'
       +'<div class="summary-row"><span>Entrega</span><span>'+(fee?fmt(fee):'Grátis')+'</span></div>'
@@ -563,7 +563,7 @@ function showConfirmation(order){
   var wBtn=wnum?'<a class="whats-btn" href="https://wa.me/'+wnum+'" target="_blank">💬 Acompanhar no WhatsApp</a>':'';
   var ov=document.createElement('div');
   ov.className='checkout-overlay open';
-  ov.innerHTML='<div class="checkout-sheet"><div class="checkout-head"><div class="checkout-head-info" style="margin-left:46px;"><div class="checkout-title">Pedido confirmado!</div></div><div class="cart-close" onclick="this.closest(\'.checkout-overlay\').remove();document.body.style.overflow=\'\';">×</div></div><div class="checkout-body"><div class="confirm-screen"><div class="confirm-icon">✅</div><div class="confirm-title">Pagamento recebido!</div><div class="confirm-desc">Pedido <strong>#'+esc(order.order_number||'')+'</strong> confirmado. Em breve você recebe atualizações.</div>'+wBtn+'</div></div></div>';
+  ov.innerHTML='<div class="checkout-sheet"><div class="checkout-head"><div class="checkout-head-info" style="margin-left:46px;"><div class="checkout-title">Pedido confirmado!</div></div><div class="cart-close" onclick="this.closest(\'checkout-overlay\').remove();document.body.style.overflow=\'\';">×</div></div><div class="checkout-body"><div class="confirm-screen"><div class="confirm-icon">✅</div><div class="confirm-title">Pagamento recebido!</div><div class="confirm-desc">Pedido <strong>#'+esc(order.order_number||'')+'</strong> confirmado. Em breve você recebe atualizações.</div>'+wBtn+'</div></div></div>';
   document.body.appendChild(ov);
   document.body.style.overflow='hidden';
 }
@@ -574,7 +574,7 @@ function showDetail(id){
   var imgH=p.image_url?'<img src="'+esc(p.image_url)+'" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:var(--r);">'
     :'<div style="font-size:64px;font-weight:800;color:var(--primary);">'+esc((p.name||'?')[0].toUpperCase())+'</div>';
   var ov=document.createElement('div');ov.className='checkout-overlay open';
-  ov.innerHTML='<div class="checkout-sheet" style="max-width:420px;"><div class="checkout-head"><div class="checkout-back" id="dClose">←</div><div class="checkout-head-info"><div class="checkout-title">'+esc(p.name)+'</div><div class="checkout-subtitle">'+(p.category||'Produto')+'</div></div><div class="cart-close" id="dCloseX">×</div></div><div class="checkout-body"><div style="width:100%;aspect-ratio:1;background:var(--primary-light);border-radius:var(--r);display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:20px;">'+imgH+'</div>'+(p.price!=null&&SETTINGS.show_prices!==false?'<div style="font-size:24px;font-weight:800;color:var(--primary);margin-bottom:8px;">'+fmt(p.price)+'</div>':'')+(p.description?'<p style="font-size:13px;color:var(--text-2);line-height:1.6;">'+esc(p.description)+'</p>':'')+'</div><div class="checkout-foot"><button class="next-btn'+(qty>0?' green':'')+'" id="dAddBtn">'+(qty>0?'✓ No carrinho ('+qty+')':'+ Adicionar ao carrinho')+'</button></div></div>';
+  ov.innerHTML='<div class="checkout-sheet" style="max-width:420px;"><div class="checkout-head"><div class="checkout-back" id="dClose">←</div><div class="checkout-head-info"><div class="checkout-title">'+esc(p.name)+'</div><div class="checkout-subtitle">'+(p.category||'Produto')+'</div></div><div class="cart-close" id="dCloseX">×</div></div><div class="checkout-body"><div style="width:100%;aspect-ratio:1;background:var(--primary-light);border-radius:var(--r);display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:20px;">'+imgH+'</div>'+(p.price!=null&&SETTINGS.show_prices!==false?'<div style="font-size:24px;font-weight:800;color:var(--primary);margin-bottom:8px;">'+fmt(p.price)+'</div>':'')+(p.description?'<p style="font-size:13px;color:var(--text-2);line-height:1.6;">'+esc(p.description)+'</p>':'')+'</div><div class="checkout-foot"><button class="next-btn'+(qty>0?' green':'')+'\" id="dAddBtn">'+(qty>0?'✓ No carrinho ('+qty+')':'+ Adicionar ao carrinho')+'</button></div></div>';
   document.body.appendChild(ov);document.body.style.overflow='hidden';
   function close(){ov.remove();document.body.style.overflow='';}
   ov.querySelector('#dClose').addEventListener('click',close);
