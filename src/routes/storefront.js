@@ -44,15 +44,16 @@ async function buildStorefront(config) {
 
   if (featuredIds.length > 0) {
     // id::text = ANY($2) evita problema de cast UUID vs text
+    // is_active IS NOT FALSE aceita NULL e true (produtos criados sem flag explícita)
     const { rows } = await db.query(
       `SELECT id, name, description, price, image_url, category, stock_qty
-       FROM products WHERE company_id = $1 AND id::text = ANY($2) AND is_active = true
+       FROM products WHERE company_id = $1 AND id::text = ANY($2) AND is_active IS NOT FALSE
        ORDER BY name`, [cid, featuredIds]);
     products = rows;
   } else {
     const { rows } = await db.query(
       `SELECT id, name, description, price, image_url, category, stock_qty
-       FROM products WHERE company_id = $1 AND is_active = true
+       FROM products WHERE company_id = $1 AND is_active IS NOT FALSE
        ORDER BY created_at DESC LIMIT 50`, [cid]);
     products = rows;
   }
@@ -180,7 +181,7 @@ router.post('/:slug/order', async (req, res) => {
     for (const item of items) {
       const p = productMap[item.product_id];
       if (!p)           return res.status(400).json({ error: `Produto ${item.product_id} não encontrado` });
-      if (!p.is_active) return res.status(400).json({ error: `Produto "${p.name}" não está disponível` });
+      if (p.is_active === false) return res.status(400).json({ error: `Produto "${p.name}" não está disponível` });
       if (p.stock_qty < item.quantity) {
         return res.status(400).json({
           error: `Estoque insuficiente para "${p.name}". Disponível: ${p.stock_qty}`,
