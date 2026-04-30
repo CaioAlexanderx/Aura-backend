@@ -11,13 +11,14 @@ const notify              = require('../services/digitalOrderNotifications');
 const buildStorefrontPage = require('../templates/storefrontPage');
 
 // CSP relaxado para a vitrine pública (usa scripts inline e imagens R2)
+// img-src inclui o domínio público do R2 (pub-*.r2.dev) além do custom domain
 const STOREFRONT_CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
   "script-src-attr 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https://r2.getaura.com.br",
-  "connect-src 'self'",
+  "img-src 'self' data: blob: https://r2.getaura.com.br https://pub-f21f233f50d1412abc93a05bbdffd0d3.r2.dev",
+  "connect-src 'self' https://cloudflareinsights.com",
   "font-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",
