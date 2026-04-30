@@ -31,6 +31,8 @@ const DEFAULT_CONFIG = {
   custom_domain_plan: null, custom_domain_expires_at: null, custom_domain_price: null,
 };
 
+const STOREFRONT_BASE = process.env.APP_URL || 'https://loja.getaura.com.br';
+
 function generateSlug(name) {
   return (name || 'loja')
     .toLowerCase().trim()
@@ -59,13 +61,12 @@ router.get('/', async (req, res) => {
       });
     }
     const config = rows[0];
-    const baseUrl = process.env.APP_URL || 'https://getaura.com.br';
     res.json({
       ...config,
       business_hours: config.business_hours || DEFAULT_CONFIG.business_hours,
       featured_product_ids: config.featured_product_ids || [],
       exists: true,
-      storefront_url: config.slug ? `${baseUrl}/loja/${config.slug}` : null,
+      storefront_url: config.slug ? `${STOREFRONT_BASE}/${config.slug}` : null,
       domain_pricing: { '1year': 80, '2years': 152 },
     });
   } catch (err) {
@@ -146,11 +147,10 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       pickup_enabled ?? null, is_published ?? null, slug,
     ]);
 
-    const baseUrl = process.env.APP_URL || 'https://getaura.com.br';
     res.json({
       config: rows[0],
       saved: true,
-      storefront_url: rows[0].slug ? `${baseUrl}/loja/${rows[0].slug}` : null,
+      storefront_url: rows[0].slug ? `${STOREFRONT_BASE}/${rows[0].slug}` : null,
     });
   } catch (err) {
     if (err.code === '23505' && err.constraint?.includes('slug')) {
