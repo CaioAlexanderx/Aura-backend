@@ -30,7 +30,7 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc:  ["'self'"],
       styleSrc:   ["'self'", "'unsafe-inline'"],
-      imgSrc:     ["'self'", 'data:', 'https://cdn.jsdelivr.net'],
+      imgSrc:     ["'self'", 'data:', 'https://cdn.jsdelivr.net', 'https://r2.getaura.com.br'],
       connectSrc: ["'self'", ...allowedOrigins.filter(o => o !== '*')],
       fontSrc:    ["'self'"],
       objectSrc:  ["'none'"],
@@ -89,7 +89,7 @@ const cnpjLimiter = rateLimit({
 const globalLimiter = rateLimit({
   windowMs:  60 * 1000,
   max:       300,
-  message:   { error: 'Muitas requisições. Tente novamente em 1 minuto.' },
+  message:   { error: 'Muitas requisicoes. Tente novamente em 1 minuto.' },
   standardHeaders: true,
   legacyHeaders:   false,
   skip: (req) => env.NODE_ENV === 'test',
@@ -181,10 +181,6 @@ app.get('/health/sentry', function(req, res) {
   });
 });
 
-// GET /health/r2 — Diagnostico completo da conexao R2
-// Checa env vars, conexao S3, upload de test file e delete.
-// Publico mas nao expoe segredos (apenas prefixos de IDs).
-// Util para validar setup no Railway sem precisar de JWT.
 app.get('/health/r2', async function(req, res) {
   const checks = {
     env_account_id: !!process.env.R2_ACCOUNT_ID,
@@ -194,7 +190,6 @@ app.get('/health/r2', async function(req, res) {
     env_public_url: process.env.R2_PUBLIC_URL || '(not set — using default)',
   };
 
-  // Mascara de IDs para debug sem vazar credenciais
   if (process.env.R2_ACCOUNT_ID) {
     const aid = process.env.R2_ACCOUNT_ID;
     checks.account_id_suffix = '...' + aid.slice(-6);
@@ -204,7 +199,6 @@ app.get('/health/r2', async function(req, res) {
     checks.access_key_suffix = '...' + akid.slice(-4);
   }
 
-  // Se nao tem env vars, sai cedo
   if (!checks.env_account_id || !checks.env_access_key || !checks.env_secret_key) {
     return res.status(503).json({
       status: 'not_configured',
@@ -213,7 +207,6 @@ app.get('/health/r2', async function(req, res) {
     });
   }
 
-  // Testa operacoes reais: list, upload, get, delete
   const r2 = require('./utils/r2Storage');
   const testKey = '_healthcheck/' + Date.now() + '.txt';
   const testContent = Buffer.from('aura-r2-healthcheck-' + new Date().toISOString());

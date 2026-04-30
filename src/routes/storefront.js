@@ -10,6 +10,20 @@ const db                  = require('../config/database');
 const notify              = require('../services/digitalOrderNotifications');
 const buildStorefrontPage = require('../templates/storefrontPage');
 
+// CSP relaxado para a vitrine pública (usa scripts inline e imagens R2)
+const STOREFRONT_CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "script-src-attr 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: https://r2.getaura.com.br",
+  "connect-src 'self'",
+  "font-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+].join('; ');
+
 // ============================================================
 // buildStorefront — monta o objeto de dados da loja
 // ============================================================
@@ -98,6 +112,8 @@ router.get('/:slug/page', async (req, res) => {
       return res.status(404).send('<!DOCTYPE html><html lang="pt-BR"><body style="font-family:sans-serif;text-align:center;padding:80px 20px"><h1>Loja não encontrada</h1><p style="color:#888">Verifique o endereço e tente novamente.</p></body></html>');
     }
     const data = await buildStorefront(rows[0]);
+    // Sobrescreve o CSP do Helmet para permitir scripts inline e imagens R2
+    res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(buildStorefrontPage(data, slug));
   } catch (err) {
