@@ -24,17 +24,29 @@ const STOREFRONT_CSP = [
   "form-action 'self'",
 ].join('; ');
 
+// Normaliza featured_product_ids — pode chegar como jsonb array, string JSON ou null
+function parseFeaturedIds(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map(String);
+  if (typeof raw === 'string') {
+    try { const p = JSON.parse(raw); return Array.isArray(p) ? p.map(String) : []; } catch { return []; }
+  }
+  return [];
+}
+
 // ============================================================
 // buildStorefront — monta o objeto de dados da loja
 // ============================================================
 async function buildStorefront(config) {
   const cid = config.company_id;
   let products = [];
-  const featuredIds = config.featured_product_ids || [];
+  const featuredIds = parseFeaturedIds(config.featured_product_ids);
+
   if (featuredIds.length > 0) {
+    // id::text = ANY($2) evita problema de cast UUID vs text
     const { rows } = await db.query(
       `SELECT id, name, description, price, image_url, category, stock_qty
-       FROM products WHERE company_id = $1 AND id = ANY($2) AND is_active = true
+       FROM products WHERE company_id = $1 AND id::text = ANY($2) AND is_active = true
        ORDER BY name`, [cid, featuredIds]);
     products = rows;
   } else {
@@ -112,7 +124,6 @@ router.get('/:slug/page', async (req, res) => {
       return res.status(404).send('<!DOCTYPE html><html lang="pt-BR"><body style="font-family:sans-serif;text-align:center;padding:80px 20px"><h1>Loja não encontrada</h1><p style="color:#888">Verifique o endereço e tente novamente.</p></body></html>');
     }
     const data = await buildStorefront(rows[0]);
-    // Sobrescreve o CSP do Helmet para permitir scripts inline e imagens R2
     res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(buildStorefrontPage(data, slug));
@@ -160,7 +171,7 @@ router.post('/:slug/order', async (req, res) => {
     const productIds = items.map(i => i.product_id);
     const { rows: products } = await db.query(
       `SELECT id, name, price, stock_qty, image_url, is_active
-       FROM products WHERE id = ANY($1) AND company_id = $2`, [productIds, cid]);
+       FROM products WHERE id::text = ANY($1) AND company_id = $2`, [productIds.map(String), cid]);
     const productMap = Object.fromEntries(products.map(p => [p.id, p]));
 
     const orderItems = [];
