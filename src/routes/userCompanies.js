@@ -1,5 +1,5 @@
 // ============================================================
-// AURA. — User Companies (Multi-CNPJ M1-02 + M2-02 + M2-04)
+// AURA. — User Companies (Multi-CNPJ M1-02 + M2-02 + M2-03 + M2-04)
 // Endpoints user-level: não dependem de :companyId no path.
 // Permite ao usuário listar suas empresas e criar adicionais.
 //
@@ -7,9 +7,14 @@
 // no Asaas via safeSyncSubscriptionValue (não bloqueia a resposta
 // se o Asaas falhar — user já tem a empresa criada localmente).
 //
+// M2-03: POST /me/companies/:id/transfer-primary — torna outra
+//        empresa a principal. Move o vínculo Asaas (customer +
+//        subscription) e atualiza billing_owner_company_id de
+//        TODAS as empresas do owner pra apontar pra nova primary.
+//
 // M2-04: DELETE /me/companies/:id desativa empresa secundária e
 //        reduz a cobrança no próximo ciclo. NÃO remove primary
-//        (precisa de transfer-primary primeiro — futuro M2-03).
+//        (precisa de transfer-primary primeiro).
 //
 // GET /me/companies/billing-preview: UI consulta valor antes de
 // criar pra mostrar "vai custar mais R$X" no modal de adicionar.
@@ -338,6 +343,180 @@ router.post('/', async (req, res) => {
   } catch (err) {
     console.error('[userCompanies] POST error:', err.message, err.stack);
     return res.status(500).json({ error: 'Erro ao criar empresa' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────
+// POST /me/companies/:companyId/transfer-primary  (M2-03)
+// Torna companyId a nova empresa principal do owner.
+//
+// Efeitos:
+//   - is_primary: troca entre as duas (transfer atômico)
+//   - asaas_customer_id e asaas_subscription_id: movem da antiga
+//     pra nova primary (a subscription ancorada migra junto)
+//   - billing_owner_company_id: TODAS as empresas do owner que
+//     apontavam pra antiga passam a apontar pra nova
+//   - billing_status: a antiga vira 'active' (mantém vivo, mas
+//     agora é uma "filha" de billing); a nova herda o status que
+//     a antiga tinha
+//
+// Validações:
+//   - target deve pertencer ao owner autenticado
+//   - target deve estar ativa
+//   - target NÃO pode já ser primary (no-op explícito)
+//   - owner deve ter >= 2 empresas
+//
+// Atenção: o índice uq_companies_primary_per_owner é parcial em
+// is_primary=true AND is_active=true. Por isso o swap precisa ser
+// feito em UMA única statement com CASE (ou em transação com defer-
+// red constraints). Optei por UPDATE com CASE — mais simples e 100%
+// atômico em PostgreSQL.
+// ──────────────────────────────────────────────────────────
+router.post('/:companyId/transfer-primary', async (req, res) => {
+  const userId = req.user.id;
+  const targetId = req.params.companyId;
+
+  if (!targetId) {
+    return res.status(400).json({ error: 'companyId é obrigatório' });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Lookup target + primary atual numa só query
+    const { rows: ctx } = await client.query(
+      `SELECT id, trade_name, legal_name, is_primary, is_active,
+              asaas_customer_id, asaas_subscription_id, billing_status
+         FROM companies
+        WHERE owner_id = $1 AND is_active = true
+        ORDER BY is_primary DESC`,
+      [userId]
+    );
+
+    const target = ctx.find((c) => c.id === targetId);
+    const currentPrimary = ctx.find((c) => c.is_primary === true);
+
+    if (!target) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        error: 'NOT_FOUND',
+        message: 'Empresa não encontrada ou você não é o dono.',
+      });
+    }
+    if (target.is_primary) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'ALREADY_PRIMARY',
+        message: 'Esta empresa já é a principal.',
+      });
+    }
+    if (!currentPrimary) {
+      await client.query('ROLLBACK');
+      return res.status(500).json({
+        error: 'NO_CURRENT_PRIMARY',
+        message: 'Estado inválido: não há empresa principal atual. Contate o suporte.',
+      });
+    }
+    if (ctx.length < 2) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'NOT_ENOUGH_COMPANIES',
+        message: 'Você precisa de pelo menos 2 empresas para transferir o título de principal.',
+      });
+    }
+
+    // 2. Swap atômico — uma única statement.
+    // Subtle: PostgreSQL valida unique indexes ao final do statement
+    // (não por-linha), então este UPDATE de 2 rows não viola o
+    // uq_companies_primary_per_owner mesmo com índice parcial.
+    await client.query(
+      `UPDATE companies
+          SET is_primary = CASE
+                WHEN id = $1 THEN true
+                WHEN id = $2 THEN false
+                ELSE is_primary
+              END,
+              -- Move o vínculo Asaas da antiga primary pra nova
+              asaas_customer_id     = CASE WHEN id = $1 THEN $3 WHEN id = $2 THEN NULL ELSE asaas_customer_id END,
+              asaas_subscription_id = CASE WHEN id = $1 THEN $4 WHEN id = $2 THEN NULL ELSE asaas_subscription_id END,
+              -- billing_status: nova herda o da antiga; antiga vira 'active' (segue viva como filha)
+              billing_status        = CASE
+                WHEN id = $1 THEN $5::text
+                WHEN id = $2 THEN 'active'
+                ELSE billing_status
+              END,
+              updated_at = NOW()
+        WHERE owner_id = $6
+          AND id IN ($1, $2)`,
+      [
+        targetId,
+        currentPrimary.id,
+        currentPrimary.asaas_customer_id,
+        currentPrimary.asaas_subscription_id,
+        currentPrimary.billing_status || 'active',
+        userId,
+      ]
+    );
+
+    // 3. Re-aponta billing_owner_company_id de TODAS as empresas
+    //    do owner que apontavam pra antiga primary → nova primary.
+    //    Inclui a antiga primary (que agora vira filha apontando
+    //    pra nova) e a própria nova (que aponta pra si mesma).
+    await client.query(
+      `UPDATE companies
+          SET billing_owner_company_id = $1, updated_at = NOW()
+        WHERE owner_id = $2
+          AND is_active = true
+          AND (billing_owner_company_id = $3 OR id = $1)`,
+      [targetId, userId, currentPrimary.id]
+    );
+
+    // 4. Audit
+    try {
+      await client.query(
+        `INSERT INTO multicnpj_audit
+           (user_id, action, source_company_id, target_company_id, metadata)
+         VALUES ($1, 'transfer_primary', $2, $3, $4::jsonb)`,
+        [
+          userId,
+          currentPrimary.id,
+          targetId,
+          JSON.stringify({
+            old_primary_name: currentPrimary.trade_name || currentPrimary.legal_name,
+            new_primary_name: target.trade_name || target.legal_name,
+            asaas_customer_moved: !!currentPrimary.asaas_customer_id,
+            asaas_subscription_moved: !!currentPrimary.asaas_subscription_id,
+          }),
+        ]
+      );
+    } catch (auditErr) {
+      console.error('[userCompanies] transfer-primary audit failed:', auditErr.message);
+    }
+
+    await client.query('COMMIT');
+
+    return res.json({
+      transferred: true,
+      old_primary: {
+        id: currentPrimary.id,
+        name: currentPrimary.trade_name || currentPrimary.legal_name,
+      },
+      new_primary: {
+        id: targetId,
+        name: target.trade_name || target.legal_name,
+      },
+      asaas_customer_moved: !!currentPrimary.asaas_customer_id,
+      asaas_subscription_moved: !!currentPrimary.asaas_subscription_id,
+      message: `"${target.trade_name || target.legal_name}" agora é sua empresa principal.`,
+      next_step: 'Atualize o switcher fazendo logout/login ou recarregue a página.',
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[userCompanies] transfer-primary error:', err.message, err.stack);
+    return res.status(500).json({ error: 'Erro ao transferir título de principal' });
+  } finally {
+    client.release();
   }
 });
 
