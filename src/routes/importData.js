@@ -251,6 +251,10 @@ router.post('/customers/import', requireAuth, async (req, res) => {
 //   Fase 2 — lookup de existentes em 2 queries ANY()
 //   Fase 3 — bulk INSERT em chunks de 100
 // Reduz ~4.000 queries para ~14, eliminando o statement timeout.
+//
+// LIMITE 02/05/2026: aumentado de 5.000 para 6.000 produtos por
+// importação (clientes com catálogo de calçados/vestuário com
+// muitas variações de tamanho/cor passam fácil dos 5k).
 
 router.post('/products/import', requireAuth, async (req, res) => {
   const companyId = req.params.id;
@@ -259,8 +263,8 @@ router.post('/products/import', requireAuth, async (req, res) => {
   if (!Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ error: 'Campo rows é obrigatório e deve ser um array não-vazio' });
   }
-  if (rows.length > 5000) {
-    return res.status(400).json({ error: 'Máximo de 5.000 produtos por importação' });
+  if (rows.length > 6000) {
+    return res.status(400).json({ error: 'Máximo de 6.000 produtos por importação' });
   }
 
   const headers = Object.keys(rows[0]);
