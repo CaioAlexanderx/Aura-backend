@@ -1,11 +1,18 @@
 // ============================================================
-// AURA. — User Companies (Multi-CNPJ M1-02 + M2-02)
+// AURA. — User Companies (Multi-CNPJ M1-02 + M2-02 + M2-04)
 // Endpoints user-level: não dependem de :companyId no path.
 // Permite ao usuário listar suas empresas e criar adicionais.
 //
 // M2-02: após criar 2° CNPJ, sincroniza valor da subscription
 // no Asaas via safeSyncSubscriptionValue (não bloqueia a resposta
 // se o Asaas falhar — user já tem a empresa criada localmente).
+//
+// M2-04: DELETE /me/companies/:id desativa empresa secundária e
+//        reduz a cobrança no próximo ciclo. NÃO remove primary
+//        (precisa de transfer-primary primeiro — futuro M2-03).
+//
+// GET /me/companies/billing-preview: UI consulta valor antes de
+// criar pra mostrar "vai custar mais R$X" no modal de adicionar.
 // ============================================================
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
@@ -65,6 +72,58 @@ router.get('/', async (req, res) => {
   } catch (err) {
     console.error('[userCompanies] GET error:', err.message);
     res.status(500).json({ error: 'Erro ao listar empresas' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────
+// GET /me/companies/billing-preview
+// Retorna o valor atual da assinatura E o que ela seria com
+// +1 CNPJ. Usado pelo modal de "Adicionar empresa" pra mostrar
+// "Sua mensalidade vai de R$X para R$Y" antes do user confirmar.
+// ──────────────────────────────────────────────────────────
+router.get('/billing-preview', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const primaryRes = await db.query(
+      `SELECT id, plan FROM companies
+       WHERE owner_id = $1 AND is_primary = true AND is_active = true
+       LIMIT 1`,
+      [userId]
+    );
+    if (!primaryRes.rows.length) {
+      return res.status(404).json({ error: 'Nenhuma empresa principal encontrada' });
+    }
+    const primaryId = primaryRes.rows[0].id;
+    const planKey = String(primaryRes.rows[0].plan || '').toLowerCase();
+
+    const current = await calculateMulticnpjValue(primaryId);
+    if (!current) {
+      return res.status(500).json({ error: 'Erro ao calcular valor atual' });
+    }
+
+    // Simula 1 empresa a mais
+    const basePrice = PLAN_PRICES[planKey] || 0;
+    const extraPrice = EXTRA_PRICES[planKey] || 0;
+    const included = INCLUDED_CNPJS[planKey] || 1;
+    const wouldBeTotal = current.total_companies + 1;
+    const wouldBeExtras = Math.max(0, wouldBeTotal - included);
+    const wouldBeMonthly = Math.round((basePrice + wouldBeExtras * extraPrice) * 100) / 100;
+    const delta = Math.round((wouldBeMonthly - current.total_monthly) * 100) / 100;
+
+    return res.json({
+      current: current,
+      if_add_one: {
+        total_companies: wouldBeTotal,
+        extra_cnpjs: wouldBeExtras,
+        new_total_monthly: wouldBeMonthly,
+        delta_monthly: delta,
+      },
+      can_add: planKey !== 'essencial',
+      block_reason: planKey === 'essencial' ? 'Plano Essencial não permite multi-CNPJ' : null,
+    });
+  } catch (err) {
+    console.error('[userCompanies] billing-preview error:', err.message);
+    res.status(500).json({ error: 'Erro ao calcular preview' });
   }
 });
 
@@ -279,6 +338,128 @@ router.post('/', async (req, res) => {
   } catch (err) {
     console.error('[userCompanies] POST error:', err.message, err.stack);
     return res.status(500).json({ error: 'Erro ao criar empresa' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────
+// DELETE /me/companies/:companyId — desativa empresa secundária
+// (M2-04)
+//
+// Comportamento:
+//  - NÃO permite remover primary (precisa transfer-primary antes)
+//  - Soft-delete via is_active=false (preserva histórico fiscal)
+//  - Sincroniza Asaas pra reduzir mensalidade
+//  - Audit log com ação remove_company
+//
+// Não permite remover se a empresa tem dados críticos pendentes
+// (ex: NF-es não autorizadas, vendas em aberto). Aqui validamos
+// apenas o caso "tem vendas" — outros gates podem ser adicionados.
+// ──────────────────────────────────────────────────────────
+router.delete('/:companyId', async (req, res) => {
+  const userId = req.user.id;
+  const companyId = req.params.companyId;
+
+  if (!companyId) {
+    return res.status(400).json({ error: 'companyId é obrigatório' });
+  }
+
+  try {
+    // 1. Achar a empresa, validar acesso e que NÃO é primary
+    const { rows } = await db.query(
+      `SELECT id, trade_name, legal_name, is_primary, billing_owner_company_id
+       FROM companies
+       WHERE id = $1 AND owner_id = $2 AND is_active = true
+       LIMIT 1`,
+      [companyId, userId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({
+        error: 'NOT_FOUND',
+        message: 'Empresa não encontrada ou você não é o dono.',
+      });
+    }
+
+    const company = rows[0];
+
+    if (company.is_primary) {
+      return res.status(403).json({
+        error: 'CANNOT_REMOVE_PRIMARY',
+        message:
+          'Não é possível remover a empresa principal. Transfira o título de "principal" para outra empresa primeiro.',
+      });
+    }
+
+    // 2. Bloquear se houver vendas registradas (preservação fiscal)
+    const salesCheck = await db.query(
+      `SELECT COUNT(*)::int AS total FROM sales WHERE company_id = $1 LIMIT 1`,
+      [companyId]
+    );
+    if (salesCheck.rows[0]?.total > 0) {
+      return res.status(409).json({
+        error: 'HAS_SALES',
+        message:
+          'Esta empresa tem vendas registradas. Por questões fiscais, não é possível removê-la. Você pode desativá-la temporariamente entrando em contato com o suporte.',
+        sales_count: salesCheck.rows[0].total,
+      });
+    }
+
+    // 3. Soft-delete + capturar billing_owner pra sincronizar depois
+    await db.query(
+      `UPDATE companies
+         SET is_active = false,
+             updated_at = NOW()
+       WHERE id = $1`,
+      [companyId]
+    );
+
+    // 4. Audit
+    try {
+      await db.query(
+        `INSERT INTO multicnpj_audit
+           (user_id, action, source_company_id, target_company_id, metadata)
+         VALUES ($1, 'remove_company', $2, $3, $4::jsonb)`,
+        [
+          userId,
+          company.billing_owner_company_id,
+          companyId,
+          JSON.stringify({
+            removed_company_name: company.trade_name || company.legal_name,
+          }),
+        ]
+      );
+    } catch (auditErr) {
+      console.error('[userCompanies] DELETE audit failed:', auditErr.message);
+    }
+
+    // 5. Sincronizar Asaas (reduz mensalidade)
+    const syncResult = await safeSyncSubscriptionValue(company.billing_owner_company_id);
+    const billingCalc = await calculateMulticnpjValue(company.billing_owner_company_id);
+
+    let note;
+    if (syncResult.synced) {
+      note = `Mensalidade reduzida de R$${syncResult.old_value?.toFixed(2)} para R$${syncResult.new_value.toFixed(2)}.`;
+    } else if (syncResult.reason === 'no_subscription') {
+      note = 'Empresa removida. Sem assinatura ativa para atualizar.';
+    } else if (syncResult.reason === 'no_change') {
+      note = 'Empresa removida. Mensalidade permanece a mesma (ainda dentro dos CNPJs inclusos).';
+    } else {
+      note = 'Empresa removida.';
+    }
+
+    return res.json({
+      removed: true,
+      company_id: companyId,
+      company_name: company.trade_name || company.legal_name,
+      billing_after: billingCalc ? {
+        total_companies: billingCalc.total_companies,
+        new_total_monthly: billingCalc.total_monthly,
+      } : null,
+      note,
+    });
+  } catch (err) {
+    console.error('[userCompanies] DELETE error:', err.message, err.stack);
+    return res.status(500).json({ error: 'Erro ao remover empresa' });
   }
 });
 
