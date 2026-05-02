@@ -7,6 +7,12 @@
 // Handles two flows:
 //   1. externalReference = 'digital-order-<uuid>'  → pedido Canal Digital
 //   2. tudo mais                                    → billing de empresa (plano)
+//
+// MULTI-CNPJ (M2): quando o billing da PRIMARY muda, propaga pras
+// empresas filhas (billing_owner_company_id = primary.id). Sem isso,
+// uma empresa secundária que nunca paga ficaria com status errado
+// (ex: primary cancela, mas filha continua 'active'). A primary é a
+// fonte da verdade de billing pra todo o "grupo" do owner.
 // ============================================================
 
 const express = require('express');
@@ -77,7 +83,7 @@ router.post('/', async function(req, res) {
     if (!newStatus) return res.status(200).json({ received: true, handled: false });
 
     var result = await db.query(
-      'SELECT id, plan, billing_status FROM companies WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1',
+      'SELECT id, plan, billing_status, is_primary FROM companies WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1',
       [payment.customer, payment.externalReference]
     );
     if (!result.rows.length) {
@@ -91,13 +97,42 @@ router.post('/', async function(req, res) {
       'UPDATE companies SET billing_status=$1, last_payment_date=$2, next_billing_date=$3, updated_at=NOW() WHERE id=$4',
       [newStatus, payment.paymentDate || null, payment.dueDate || null, company.id]
     );
+
+    // ── MULTI-CNPJ: propaga pra filhas se for primary ────
+    // billing_owner_company_id aponta pra primary; quando ela muda
+    // de status, todas as filhas devem refletir (atender requisições
+    // de plano, gates, etc). Não propagamos last_payment/next_billing
+    // pras filhas porque essas datas são da subscription real e podem
+    // confundir UIs que mostram "próximo vencimento por empresa".
+    var propagated = 0;
+    if (company.is_primary) {
+      var propagateRes = await db.query(
+        `UPDATE companies
+            SET billing_status = $1, updated_at = NOW()
+          WHERE billing_owner_company_id = $2
+            AND id <> $2
+            AND is_active = true`,
+        [newStatus, company.id]
+      );
+      propagated = propagateRes.rowCount || 0;
+      if (propagated > 0) {
+        console.log('[WEBHOOK] Propagated billing_status=' + newStatus +
+                    ' to ' + propagated + ' child companies of primary ' + company.id);
+      }
+    }
+
     await db.query(
       'INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at) VALUES ($1, \'asaas\', $2, $3, NOW())',
       [company.id, event, JSON.stringify(payment)]
     ).catch(function() {});
 
     console.log('[WEBHOOK] Company ' + company.id + ' billing: ' + prevStatus + ' -> ' + newStatus);
-    res.status(200).json({ received: true, handled: true, status: newStatus });
+    res.status(200).json({
+      received: true,
+      handled: true,
+      status: newStatus,
+      propagated_to_children: propagated,
+    });
   } catch (err) {
     console.error('[WEBHOOK] Error processing billing:', err.message);
     res.status(200).json({ received: true, error: true });
