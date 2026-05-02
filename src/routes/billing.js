@@ -3,6 +3,7 @@
 // Pix inline + Credit Card recurring via tokenization
 // FIX: Added /billing/tokenize endpoint for card tokenization
 // FIX: Desconto unificado 1/6 (2 meses grátis), endDate para anual cartão
+// FIX: addressNumber no creditCardHolderInfo (tokenize + subscribe)
 // PRICING 21/04: Negocio 199->169.90, Expansao 299->269.90
 // ============================================================
 
@@ -94,7 +95,7 @@ router.get('/status', requireAuth, async (req, res) => {
 router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req, res) => {
   const {
     card_number, card_expiry_month, card_expiry_year, card_ccv,
-    holder_name, holder_cpf, holder_postal_code,
+    holder_name, holder_cpf, holder_postal_code, holder_address_number,
   } = req.body;
 
   if (!card_number || !card_expiry_month || !card_expiry_year || !card_ccv || !holder_name) {
@@ -125,6 +126,7 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
         email: user.email,
         cpfCnpj: (holder_cpf || company.cnpj || '').replace(/\D/g, ''),
         postalCode: holder_postal_code || company.address_zip || undefined,
+        addressNumber: holder_address_number || undefined,
         phone: user.phone || undefined,
       },
     });
@@ -154,6 +156,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     credit_card_holder_name,
     credit_card_holder_cpf,
     credit_card_holder_postal_code,
+    credit_card_holder_address_number,
   } = req.body;
 
   if (!plan || !PLANS[plan]) {
@@ -233,6 +236,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           email: user.email,
           phone: user.phone || undefined,
           postalCode: credit_card_holder_postal_code || company.address_zip || undefined,
+          addressNumber: credit_card_holder_address_number || undefined,
         };
       }
     }
