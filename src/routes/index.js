@@ -17,6 +17,7 @@ router.use('/auth', accessCodesRouter);
 router.use('/auth', verificationRouter);
 router.use('/auth', require('./myPermissions'));
 router.use('/auth', require('./sidebarLayout'));
+router.use('/auth', require('./authSwitchCompany')); // Multi-CNPJ M1-03
 
 // Referrals (autenticada)
 router.use('/referrals', accessCodesRouter);
