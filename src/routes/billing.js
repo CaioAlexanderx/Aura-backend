@@ -4,6 +4,7 @@
 // FIX: Added /billing/tokenize endpoint for card tokenization
 // FIX: Desconto unificado 1/6 (2 meses grátis), endDate para anual cartão
 // FIX: addressNumber no creditCardHolderInfo (tokenize + subscribe)
+// FIX (02/05): address (logradouro) também no creditCardHolderInfo + logs de debug
 // PRICING 21/04: Negocio 199->169.90, Expansao 299->269.90
 // ============================================================
 
@@ -95,7 +96,7 @@ router.get('/status', requireAuth, async (req, res) => {
 router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req, res) => {
   const {
     card_number, card_expiry_month, card_expiry_year, card_ccv,
-    holder_name, holder_cpf, holder_postal_code, holder_address_number,
+    holder_name, holder_cpf, holder_postal_code, holder_address_number, holder_address,
   } = req.body;
 
   if (!card_number || !card_expiry_month || !card_expiry_year || !card_ccv || !holder_name) {
@@ -112,6 +113,15 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
 
     const customerId = await ensureAsaasCustomer(company, user);
 
+    // Log sanitizado — nunca logar dados de cartão
+    console.log('[BILLING] Tokenize for company ' + company.id + ' — holderInfo:', JSON.stringify({
+      hasName: !!holder_name,
+      hasCpf: !!holder_cpf,
+      hasPostalCode: !!holder_postal_code,
+      addressNumber: holder_address_number || '(empty)',
+      address: holder_address || '(empty)',
+    }));
+
     const tokenData = await asaas('POST', '/creditCard/tokenize', {
       customer: customerId,
       creditCard: {
@@ -127,6 +137,7 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
         cpfCnpj: (holder_cpf || company.cnpj || '').replace(/\D/g, ''),
         postalCode: holder_postal_code || company.address_zip || undefined,
         addressNumber: holder_address_number || undefined,
+        address: holder_address || undefined,
         phone: user.phone || undefined,
       },
     });
@@ -157,6 +168,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     credit_card_holder_cpf,
     credit_card_holder_postal_code,
     credit_card_holder_address_number,
+    credit_card_holder_address,
   } = req.body;
 
   if (!plan || !PLANS[plan]) {
@@ -237,8 +249,18 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           phone: user.phone || undefined,
           postalCode: credit_card_holder_postal_code || company.address_zip || undefined,
           addressNumber: credit_card_holder_address_number || undefined,
+          address: credit_card_holder_address || undefined,
         };
       }
+
+      // Log sanitizado — nunca logar token completo
+      console.log('[BILLING] Subscribe for company ' + company.id + ' — holderInfo:', JSON.stringify({
+        hasName: !!credit_card_holder_name,
+        hasCpf: !!credit_card_holder_cpf,
+        hasPostalCode: !!credit_card_holder_postal_code,
+        addressNumber: credit_card_holder_address_number || '(empty)',
+        address: credit_card_holder_address || '(empty)',
+      }));
     }
 
     const subscription = await asaas('POST', '/subscriptions', subscriptionBody);
