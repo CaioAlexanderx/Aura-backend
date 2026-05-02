@@ -1,1 +1,118 @@
-Ly8gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09Ci8vIEFVUkEuIOKAlCBTdG9yZWZyb250IEJ1aWxkZXIgU2VydmljZQovLyBNb250YSBvIG9iamV0byBkZSBkYWRvcyBkYSBsb2phIChwcm9kdXRvcywgdmFyaWFudGVzLCBjb25maWcpCi8vID09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQondXNlIHN0cmljdCc7Cgpjb25zdCBkYiA9IHJlcXVpcmUoJy4uL2NvbmZpZy9kYXRhYmFzZScpOwoKZnVuY3Rpb24gcGFyc2VGZWF0dXJlZElkcyhyYXcpIHsKICBpZiAoIXJhdykgcmV0dXJuIFtdOwogIGlmIChBcnJheS5pc0FycmF5KHJhdykpIHJldHVybiByYXcubWFwKFN0cmluZyk7CiAgaWYgKHR5cGVvZiByYXcgPT09ICdzdHJpbmcnKSB7CiAgICB0cnkgeyBjb25zdCBwID0gSlNPTi5wYXJzZShyYXcpOyByZXR1cm4gQXJyYXkuaXNBcnJheShwKSA/IHAubWFwKFN0cmluZykgOiBbXTsgfSBjYXRjaCB7IHJldHVybiBbXTsgfQogIH0KICByZXR1cm4gW107Cn0KCmFzeW5jIGZ1bmN0aW9uIGJ1aWxkU3RvcmVmcm9udChjb25maWcpIHsKICBjb25zdCBjaWQgPSBjb25maWcuY29tcGFueV9pZDsKICBsZXQgcHJvZHVjdHMgPSBbXTsKICBjb25zdCBmZWF0dXJlZElkcyA9IHBhcnNlRmVhdHVyZWRJZHMoY29uZmlnLmZlYXR1cmVkX3Byb2R1Y3RfaWRzKTsKCiAgaWYgKGZlYXR1cmVkSWRzLmxlbmd0aCA+IDApIHsKICAgIGNvbnN0IHsgcm93cyB9ID0gYXdhaXQgZGIucXVlcnkoCiAgICAgIGBTRUxFQ1QgaWQsIG5hbWUsIGRlc2NyaXB0aW9uLCBwcmljZSwgaW1hZ2VfdXJsLCBjYXRlZ29yeSwgc3RvY2tfcXR5CiAgICAgICBGUk9NIHByb2R1Y3RzIFdIRVJFIGNvbXBhbnlfaWQgPSAkMSBBTkQgaWQ6OnRleHQgPSBBTlkoJDIpIEFORCBpc19hY3RpdmUgSVMgTk9UIEZBTFNFCiAgICAgICBPUkRFUiBCWSBuYW1lYCwgW2NpZCwgZmVhdHVyZWRJZHNdKTsKICAgIHByb2R1Y3RzID0gcm93czsKICB9IGVsc2UgewogICAgY29uc3QgeyByb3dzIH0gPSBhd2FpdCBkYi5xdWVyeSgKICAgICAgYFNFTEVDVCBpZCwgbmFtZSwgZGVzY3JpcHRpb24sIHByaWNlLCBpbWFnZV91cmwsIGNhdGVnb3J5LCBzdG9ja19xdHkKICAgICAgIEZST00gcHJvZHVjdHMgV0hFUkUgY29tcGFueV9pZCA9ICQxIEFORCBpc19hY3RpdmUgSVMgTk9UIEZBTFNFCiAgICAgICBPUkRFUiBCWSBjcmVhdGVkX2F0IERFU0MgTElNSVQgNTBgLCBbY2lkXSk7CiAgICBwcm9kdWN0cyA9IHJvd3M7CiAgfQoKICAvLyBCdXNjYSB2YXJpYW50ZXMgZGUgdG9kb3Mgb3MgcHJvZHV0b3MKICBsZXQgdmFyaWFudHNCeVByb2R1Y3QgPSB7fTsKICBpZiAocHJvZHVjdHMubGVuZ3RoID4gMCkgewogICAgY29uc3QgcHJvZHVjdElkcyA9IHByb2R1Y3RzLm1hcChwID0+IHAuaWQpOwogICAgY29uc3QgeyByb3dzOiB2YXJpYW50Um93cyB9ID0gYXdhaXQgZGIucXVlcnkoYAogICAgICBTRUxFQ1QgcHYuaWQsIHB2LnByb2R1Y3RfaWQsIHB2LnNrdV9zdWZmaXgsCiAgICAgICAgICAgICBwdi5wcmljZV9vdmVycmlkZSwgcHYuc3RvY2tfcXR5LCBwdi5pc19hY3RpdmUsCiAgICAgICAgICAgICBDT0FMRVNDRSgKICAgICAgICAgICAgICAganNvbl9hZ2coCiAgICAgICAgICAgICAgICAganNvbl9idWlsZF9vYmplY3QoJ2F0dHJpYnV0ZScsIHB2di5hdHRyaWJ1dGVfbmFtZSwgJ3ZhbHVlJywgcHZ2LnZhbHVlKQogICAgICAgICAgICAgICAgIE9SREVSIEJZIHB2di5hdHRyaWJ1dGVfbmFtZQogICAgICAgICAgICAgICApIEZJTFRFUiAoV0hFUkUgcHZ2LmlkIElTIE5PVCBOVUxMKSwKICAgICAgICAgICAgICAgJ1tdJzo6anNvbgogICAgICAgICAgICAgKSBBUyB2YWx1ZXMKICAgICAgRlJPTSBwcm9kdWN0X3ZhcmlhbnRzIHB2CiAgICAgIExFRlQgSk9JTiBwcm9kdWN0X3ZhcmlhbnRfdmFsdWVzIHB2diBPTiBwdnYudmFyaWFudF9pZCA9IHB2LmlkCiAgICAgIFdIRVJFIHB2LnByb2R1Y3RfaWQgPSBBTlkoJDE6OnV1aWRbXSkgQU5EIHB2LmlzX2FjdGl2ZSA9IHRydWUKICAgICAgR1JPVVAgQlkgcHYuaWQKICAgICAgT1JERVIgQlkgcHYuY3JlYXRlZF9hdAogICAgYCwgW3Byb2R1Y3RJZHNdKTsKICAgIGZvciAoY29uc3QgdiBvZiB2YXJpYW50Um93cykgewogICAgICBpZiAoIXZhcmlhbnRzQnlQcm9kdWN0W3YucHJvZHVjdF9pZF0pIHZhcmlhbnRzQnlQcm9kdWN0W3YucHJvZHVjdF9pZF0gPSBbXTsKICAgICAgdmFyaWFudHNCeVByb2R1Y3Rbdi5wcm9kdWN0X2lkXS5wdXNoKHsKICAgICAgICBpZDogICAgICAgICAgICAgdi5pZCwKICAgICAgICBza3Vfc3VmZml4OiAgICAgdi5za3Vfc3VmZml4LAogICAgICAgIHByaWNlX292ZXJyaWRlOiB2LnByaWNlX292ZXJyaWRlICE9PSBudWxsID8gcGFyc2VGbG9hdCh2LnByaWNlX292ZXJyaWRlKSA6IG51bGwsCiAgICAgICAgc3RvY2tfcXR5OiAgICAgIHBhcnNlRmxvYXQodi5zdG9ja19xdHkpLAogICAgICAgIHZhbHVlczogICAgICAgICB2LnZhbHVlcyB8fCBbXSwKICAgICAgfSk7CiAgICB9CiAgfQoKICBjb25zdCB7IHJvd3M6IGNvbXBhbmllcyB9ID0gYXdhaXQgZGIucXVlcnkoCiAgICBgU0VMRUNUIHRyYWRlX25hbWUsIGxlZ2FsX25hbWUsIGxvZ29fdXJsIEZST00gY29tcGFuaWVzIFdIRVJFIGlkID0gJDFgLCBbY2lkXSk7CiAgY29uc3QgY29tcGFueSA9IGNvbXBhbmllc1swXSB8fCB7fTsKCiAgcmV0dXJuIHsKICAgIHNpdGU6IHsKICAgICAgbmFtZTogICAgICAgICAgY29uZmlnLnNpdGVfbmFtZSB8fCBjb21wYW55LnRyYWRlX25hbWUgfHwgY29tcGFueS5sZWdhbF9uYW1lIHx8ICdMb2phJywKICAgICAgdGFnbGluZTogICAgICAgY29uZmlnLnRhZ2xpbmUgICAgICAgfHwgJycsCiAgICAgIGRlc2NyaXB0aW9uOiAgIGNvbmZpZy5kZXNjcmlwdGlvbiAgIHx8ICcnLAogICAgICBwcmltYXJ5X2NvbG9yOiBjb25maWcucHJpbWFyeV9jb2xvciB8fCAnIzdjM2FlZCcsCiAgICAgIGxvZ29fdXJsOiAgICAgIGNvbmZpZy5sb2dvX3VybCAgfHwgY29tcGFueS5sb2dvX3VybCB8fCBudWxsLAogICAgICBjb3Zlcl91cmw6ICAgICBjb25maWcuY292ZXJfdXJsIHx8IG51bGwsCiAgICB9LAogICAgY29udGFjdDogewogICAgICBwaG9uZTogICAgIGNvbmZpZy5waG9uZSAgICAgfHwgJycsCiAgICAgIHdoYXRzYXBwOiAgY29uZmlnLndoYXRzYXBwICB8fCAnJywKICAgICAgaW5zdGFncmFtOiBjb25maWcuaW5zdGFncmFtIHx8ICcnLAogICAgICBhZGRyZXNzOiAgIGNvbmZpZy5hZGRyZXNzICAgfHwgJycsCiAgICB9LAogICAgYnVzaW5lc3NfaG91cnM6IGNvbmZpZy5idXNpbmVzc19ob3VycyB8fCB7fSwKICAgIHNldHRpbmdzOiB7CiAgICAgIHNob3dfcHJpY2VzOiAgICAgIGNvbmZpZy5zaG93X3ByaWNlcyAhPT0gZmFsc2UsCiAgICAgIHNob3dfc3RvY2s6ICAgICAgIGNvbmZpZy5zaG93X3N0b2NrICB8fCBmYWxzZSwKICAgICAgcGlja3VwX2VuYWJsZWQ6ICAgY29uZmlnLnBpY2t1cF9lbmFibGVkICAgIT09IGZhbHNlLAogICAgICBkZWxpdmVyeV9lbmFibGVkOiBjb25maWcuZGVsaXZlcnlfZW5hYmxlZCB8fCBmYWxzZSwKICAgICAgZGVsaXZlcnlfZmVlOiAgICAgcGFyc2VGbG9hdChjb25maWcuZGVsaXZlcnlfZmVlKSB8fCAwLAogICAgfSwKICAgIHByb2R1Y3RzOiBwcm9kdWN0cy5tYXAocCA9PiB7CiAgICAgIGNvbnN0IHB2YXJpYW50cyA9IHZhcmlhbnRzQnlQcm9kdWN0W3AuaWRdIHx8IFtdOwogICAgICBjb25zdCBoYXNWYXJpYW50cyA9IHB2YXJpYW50cy5sZW5ndGggPiAwOwogICAgICBjb25zdCBpblN0b2NrID0gaGFzVmFyaWFudHMKICAgICAgICA/IHB2YXJpYW50cy5zb21lKHYgPT4gdi5zdG9ja19xdHkgPiAwKQogICAgICAgIDogcC5zdG9ja19xdHkgPiAwOwogICAgICByZXR1cm4gewogICAgICAgIGlkOiAgICAgICAgICBwLmlkLAogICAgICAgIG5hbWU6ICAgICAgICBwLm5hbWUsCiAgICAgICAgZGVzY3JpcHRpb246IHAuZGVzY3JpcHRpb24sCiAgICAgICAgcHJpY2U6ICAgICAgIGNvbmZpZy5zaG93X3ByaWNlcyAhPT0gZmFsc2UgPyBwYXJzZUZsb2F0KHAucHJpY2UpIDogbnVsbCwKICAgICAgICBpbWFnZV91cmw6ICAgcC5pbWFnZV91cmwsCiAgICAgICAgY2F0ZWdvcnk6ICAgIHAuY2F0ZWdvcnksCiAgICAgICAgc3RvY2tfcXR5OiAgIHAuc3RvY2tfcXR5LAogICAgICAgIGluX3N0b2NrOiAgICBpblN0b2NrLAogICAgICAgIHZhcmlhbnRzOiAgICBwdmFyaWFudHMsCiAgICAgIH07CiAgICB9KSwKICAgIHRvdGFsX3Byb2R1Y3RzOiBwcm9kdWN0cy5sZW5ndGgsCiAgfTsKfQoKbW9kdWxlLmV4cG9ydHMgPSB7IGJ1aWxkU3RvcmVmcm9udCwgcGFyc2VGZWF0dXJlZElkcyB9Owo=
+// ============================================================
+// AURA. — Storefront Builder Service
+// Monta o objeto de dados da loja (produtos, variantes, config)
+// ============================================================
+'use strict';
+
+const db = require('../config/database');
+
+function parseFeaturedIds(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map(String);
+  if (typeof raw === 'string') {
+    try { const p = JSON.parse(raw); return Array.isArray(p) ? p.map(String) : []; } catch { return []; }
+  }
+  return [];
+}
+
+async function buildStorefront(config) {
+  const cid = config.company_id;
+  let products = [];
+  const featuredIds = parseFeaturedIds(config.featured_product_ids);
+
+  if (featuredIds.length > 0) {
+    const { rows } = await db.query(
+      `SELECT id, name, description, price, image_url, category, stock_qty
+       FROM products WHERE company_id = $1 AND id::text = ANY($2) AND is_active IS NOT FALSE
+       ORDER BY name`, [cid, featuredIds]);
+    products = rows;
+  } else {
+    const { rows } = await db.query(
+      `SELECT id, name, description, price, image_url, category, stock_qty
+       FROM products WHERE company_id = $1 AND is_active IS NOT FALSE
+       ORDER BY created_at DESC LIMIT 50`, [cid]);
+    products = rows;
+  }
+
+  // Busca variantes de todos os produtos
+  let variantsByProduct = {};
+  if (products.length > 0) {
+    const productIds = products.map(p => p.id);
+    const { rows: variantRows } = await db.query(`
+      SELECT pv.id, pv.product_id, pv.sku_suffix,
+             pv.price_override, pv.stock_qty, pv.is_active,
+             COALESCE(
+               json_agg(
+                 json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
+                 ORDER BY pvv.attribute_name
+               ) FILTER (WHERE pvv.id IS NOT NULL),
+               '[]'::json
+             ) AS values
+      FROM product_variants pv
+      LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
+      WHERE pv.product_id = ANY($1::uuid[]) AND pv.is_active = true
+      GROUP BY pv.id
+      ORDER BY pv.created_at
+    `, [productIds]);
+    for (const v of variantRows) {
+      if (!variantsByProduct[v.product_id]) variantsByProduct[v.product_id] = [];
+      variantsByProduct[v.product_id].push({
+        id:             v.id,
+        sku_suffix:     v.sku_suffix,
+        price_override: v.price_override !== null ? parseFloat(v.price_override) : null,
+        stock_qty:      parseFloat(v.stock_qty),
+        values:         v.values || [],
+      });
+    }
+  }
+
+  const { rows: companies } = await db.query(
+    `SELECT trade_name, legal_name, logo_url FROM companies WHERE id = $1`, [cid]);
+  const company = companies[0] || {};
+
+  return {
+    site: {
+      name:          config.site_name || company.trade_name || company.legal_name || 'Loja',
+      tagline:       config.tagline       || '',
+      description:   config.description   || '',
+      primary_color: config.primary_color || '#7c3aed',
+      logo_url:      config.logo_url  || company.logo_url || null,
+      cover_url:     config.cover_url || null,
+    },
+    contact: {
+      phone:     config.phone     || '',
+      whatsapp:  config.whatsapp  || '',
+      instagram: config.instagram || '',
+      address:   config.address   || '',
+    },
+    business_hours: config.business_hours || {},
+    settings: {
+      show_prices:      config.show_prices !== false,
+      show_stock:       config.show_stock  || false,
+      pickup_enabled:   config.pickup_enabled   !== false,
+      delivery_enabled: config.delivery_enabled || false,
+      delivery_fee:     parseFloat(config.delivery_fee) || 0,
+    },
+    products: products.map(p => {
+      const pvariants = variantsByProduct[p.id] || [];
+      const hasVariants = pvariants.length > 0;
+      const inStock = hasVariants
+        ? pvariants.some(v => v.stock_qty > 0)
+        : p.stock_qty > 0;
+      return {
+        id:          p.id,
+        name:        p.name,
+        description: p.description,
+        price:       config.show_prices !== false ? parseFloat(p.price) : null,
+        image_url:   p.image_url,
+        category:    p.category,
+        stock_qty:   p.stock_qty,
+        in_stock:    inStock,
+        variants:    pvariants,
+      };
+    }),
+    total_products: products.length,
+  };
+}
+
+module.exports = { buildStorefront, parseFeaturedIds };
