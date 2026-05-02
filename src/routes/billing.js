@@ -5,6 +5,7 @@
 // FIX: Desconto unificado 1/6 (2 meses grátis), endDate para anual cartão
 // FIX: addressNumber no creditCardHolderInfo (tokenize + subscribe)
 // FIX (02/05): address (logradouro) também no creditCardHolderInfo + logs de debug
+// FIX (02/05): reutilizar token existente quando cartão já tokenizado
 // PRICING 21/04: Negocio 199->169.90, Expansao 299->269.90
 // ============================================================
 
@@ -103,15 +104,19 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
     return res.status(400).json({ error: 'Dados do cartao incompletos' });
   }
 
+  // Hoisted so catch block pode acessar para recuperar token existente
+  let company = null;
+  let customerId = null;
+
   try {
     const { rows: companies } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
     if (!companies.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
-    const company = companies[0];
+    company = companies[0];
 
     const { rows: users } = await db.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
     const user = users[0];
 
-    const customerId = await ensureAsaasCustomer(company, user);
+    customerId = await ensureAsaasCustomer(company, user);
 
     // Log sanitizado — nunca logar dados de cartão
     console.log('[BILLING] Tokenize for company ' + company.id + ' — holderInfo:', JSON.stringify({
@@ -151,6 +156,27 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
       credit_card_last4: tokenData.creditCardNumber || null,
     });
   } catch (err) {
+    // Cartão já tokenizado no Asaas (ocorre quando o cliente foi deletado e recriado
+    // mas o token do cartão ainda existe). Busca o token existente e reutiliza.
+    const msg = (err.message || '').toLowerCase();
+    const isAlreadyTokenized = msg.includes('já tokenizado') || msg.includes('ja tokenizado') || msg.includes('already tokenized');
+    if (isAlreadyTokenized && customerId) {
+      try {
+        console.log('[BILLING] Card already tokenized — fetching existing token for customer ' + customerId);
+        const existing = await asaas('GET', '/creditCards?customer=' + customerId);
+        const card = existing?.data?.[0];
+        if (card?.creditCardToken) {
+          console.log('[BILLING] Reusing existing token for company ' + (company?.id || '?') + ', brand: ' + (card.creditCardBrand || 'unknown'));
+          return res.json({
+            credit_card_token: card.creditCardToken,
+            credit_card_brand: card.creditCardBrand || null,
+            credit_card_last4: card.creditCardNumber || null,
+          });
+        }
+      } catch (fetchErr) {
+        console.error('[BILLING] Failed to fetch existing token:', fetchErr.message);
+      }
+    }
     console.error('[BILLING] Tokenize error:', err.message);
     res.status(400).json({ error: err.message || 'Erro ao tokenizar cartao' });
   }
