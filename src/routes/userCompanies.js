@@ -1,18 +1,24 @@
 // ============================================================
-// AURA. — User Companies (Multi-CNPJ M1-02)
+// AURA. — User Companies (Multi-CNPJ M1-02 + M2-02)
 // Endpoints user-level: não dependem de :companyId no path.
 // Permite ao usuário listar suas empresas e criar adicionais.
+//
+// M2-02: após criar 2° CNPJ, sincroniza valor da subscription
+// no Asaas via safeSyncSubscriptionValue (não bloqueia a resposta
+// se o Asaas falhar — user já tem a empresa criada localmente).
 // ============================================================
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
 const db = require('../config/database');
+const {
+  calculateMulticnpjValue,
+  safeSyncSubscriptionValue,
+  PLAN_PRICES,
+  EXTRA_PRICES,
+  INCLUDED_CNPJS,
+} = require('../utils/multicnpjBilling');
 
 router.use(requireAuth);
-
-// ── Tabela de preços (deve casar com cálculo do M2-01) ────
-const PLAN_PRICES = { essencial: 89, negocio: 169, expansao: 269 };
-const EXTRA_PRICES = { essencial: 45, negocio: 85, expansao: 135 };
-const INCLUDED_CNPJS = { essencial: 1, negocio: 2, expansao: 2, personalizado: 999 };
 
 // ──────────────────────────────────────────────────────────
 // GET /me/companies — lista empresas do usuário
@@ -112,16 +118,16 @@ router.post('/', async (req, res) => {
       return res.status(403).json({
         error: 'PLAN_LIMIT_REACHED',
         message:
-          'O plano Essencial inclui apenas 1 CNPJ. Faça upgrade para o plano Negócio (R$169/mês) que inclui até 2 CNPJs e desbloqueia: CRM, Folha, Agenda, WhatsApp, Canal Digital, IA Analista e mais.',
+          'O plano Essencial inclui apenas 1 CNPJ. Faça upgrade para o plano Negócio (R$169,90/mês) que inclui até 2 CNPJs e desbloqueia: CRM, Folha, Agenda, WhatsApp, Canal Digital, IA Analista e mais.',
         current_plan: primary.plan,
         suggested_plan: 'negocio',
         suggested_plan_price: PLAN_PRICES.negocio,
         upgrade_savings_note:
-          'Adicionar 2º CNPJ no Essencial custaria R$45/mês extra (total R$134). Migrar para Negócio custa R$169 e desbloqueia muito mais.',
+          'Adicionar 2º CNPJ no Essencial custaria R$45/mês extra (total R$134). Migrar para Negócio custa R$169,90 e desbloqueia muito mais.',
       });
     }
 
-    // 3. Contar CNPJs ativos do owner
+    // 3. Contar CNPJs ativos do owner (pra dedup + audit metadata)
     const countRes = await db.query(
       `SELECT COUNT(*)::int AS total FROM companies
        WHERE owner_id = $1 AND is_active = true`,
@@ -210,14 +216,31 @@ router.post('/', async (req, res) => {
       console.error('[userCompanies] audit insert failed:', auditErr.message);
     }
 
-    // 7. Billing preview (cálculo definitivo no M2-01)
-    const basePrice = PLAN_PRICES[planKey] || 0;
-    const extraUnitPrice = EXTRA_PRICES[planKey] || 0;
-    const includedCnpjs = INCLUDED_CNPJS[planKey] || 1;
-    const newTotalCount = currentCount + 1;
-    const extraCnpjs = Math.max(0, newTotalCount - includedCnpjs);
-    const extrasPrice = extraCnpjs * extraUnitPrice;
-    const totalPrice = basePrice + extrasPrice;
+    // 7. M2-01: cálculo definitivo do billing preview (usa helper)
+    //    Faz a contagem real DEPOIS do INSERT (currentCount era pré-insert).
+    const billingCalc = await calculateMulticnpjValue(primary.id);
+
+    // 8. M2-02: sincroniza com Asaas (não bloqueia se falhar — user
+    //    já tem a empresa criada; sync rodará novamente em retries
+    //    futuros, ex: ao trocar de empresa ou manualmente).
+    const syncResult = await safeSyncSubscriptionValue(primary.id);
+
+    // Decide a "note" exibida ao user com base no resultado real do sync
+    let billingNote;
+    if (syncResult.synced) {
+      billingNote = `Mensalidade atualizada de R$${syncResult.old_value?.toFixed(2)} para R$${syncResult.new_value.toFixed(2)} no Asaas. Próxima fatura virá com o novo valor.`;
+    } else if (syncResult.reason === 'no_subscription') {
+      billingNote = 'Você está em período de teste. O valor será cobrado apenas quando ativar pagamento.';
+    } else if (syncResult.reason === 'no_change') {
+      billingNote = 'Nenhuma alteração de valor — esta empresa cabe nos CNPJs já inclusos do seu plano.';
+    } else if (syncResult.reason === 'subscription_not_found_in_asaas') {
+      billingNote = 'Atenção: sua assinatura no Asaas não foi encontrada. Reative o pagamento em Configurações > Faturamento.';
+    } else if (syncResult.reason === 'error') {
+      billingNote = 'Empresa criada. Houve um problema ao atualizar o Asaas — vamos tentar novamente em breve.';
+      console.error('[userCompanies] Asaas sync failed (non-blocking):', syncResult.error);
+    } else {
+      billingNote = 'Mensalidade ajustada conforme tabela do plano.';
+    }
 
     return res.status(201).json({
       company: {
@@ -232,16 +255,24 @@ router.post('/', async (req, res) => {
         billing_owner_company_id: newCompany.billing_owner_company_id,
         created_at: newCompany.created_at,
       },
-      billing_preview: {
-        total_companies: newTotalCount,
-        included_in_plan: includedCnpjs,
-        extra_cnpjs: extraCnpjs,
-        plan_base_price: basePrice,
-        extra_unit_price: extraUnitPrice,
-        extras_price: extrasPrice,
-        new_total_monthly: totalPrice,
-        note:
-          'Cobrança via Asaas será atualizada no próximo ciclo (implementação completa em M2-01).',
+      billing_preview: billingCalc ? {
+        total_companies: billingCalc.total_companies,
+        included_in_plan: billingCalc.included_in_plan,
+        extra_cnpjs: billingCalc.extra_cnpjs,
+        plan_base_price: billingCalc.base_price,
+        extra_unit_price: billingCalc.extra_unit_price,
+        extras_price: billingCalc.extras_value,
+        new_total_monthly: billingCalc.total_monthly,
+        note: billingNote,
+        // Metadata adicional pra UI mostrar status real do Asaas
+        asaas_synced: syncResult.synced,
+        asaas_reason: syncResult.reason || null,
+      } : {
+        // Fallback se o helper falhar (improvável — primary acabou de ser lida)
+        total_companies: currentCount + 1,
+        included_in_plan: INCLUDED_CNPJS[planKey] || 1,
+        new_total_monthly: PLAN_PRICES[planKey] || 0,
+        note: 'Cálculo de mensalidade indisponível no momento.',
       },
       message: `Empresa "${newCompany.trade_name || newCompany.legal_name}" criada com sucesso.`,
     });
