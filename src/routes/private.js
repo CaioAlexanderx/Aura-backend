@@ -34,10 +34,10 @@ router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 router.use('/products/:pid/variants', require('./variants'));
 router.use('/product-categories', require('./productCategories'));
-// M-STOCKLINK MSL-02/03/04: vincula produtos entre CNPJs do mesmo owner.
-// Monta no root porque o productLinks.js usa rotas /products/:pid/master-sku
-// e /products/aggregated (mergeParams pega o :id da empresa pai).
-router.use('/', require('./productLinks'));
+// M-STOCKLINK MSL-02/03: vincula produtos entre CNPJs do mesmo owner.
+// Monta o companyRouter no root porque ele tem rotas /products/:pid/master-sku
+// (mergeParams pega o :id da empresa pai do private.js).
+router.use('/', require('./productLinks').companyRouter);
 router.use('/coupons', require('./coupons'));
 router.use('/nfce', require('./nfce'));
 router.use('/nfe', require('./nfe'));
