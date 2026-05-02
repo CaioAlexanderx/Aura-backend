@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_companies_billing_owner
 
 -- 7. Audit log de operações multi-CNPJ
 CREATE TABLE IF NOT EXISTS multicnpj_audit (
-  id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   action TEXT NOT NULL CHECK (action IN (
     'add_company',
