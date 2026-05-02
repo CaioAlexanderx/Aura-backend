@@ -2,6 +2,7 @@
 // AURA. — F6: Asaas Billing Integration (Hybrid Checkout)
 // Pix inline + Credit Card recurring via tokenization
 // FIX: Added /billing/tokenize endpoint for card tokenization
+// FIX: Desconto unificado 1/6 (2 meses grátis), endDate para anual cartão
 // PRICING 21/04: Negocio 199->169.90, Expansao 299->269.90
 // ============================================================
 
@@ -32,17 +33,19 @@ const PLANS = {
   expansao:  { name: 'Aura Expansao',  monthly: 269.90 },
 };
 
-const ANNUAL_CARD_DISCOUNT = 0.15;
-const ANNUAL_PIX_DISCOUNT  = 0.20;
+// 2 meses grátis: paga 10, leva 12 — aplica tanto no Pix quanto no Cartão
+const ANNUAL_DISCOUNT = 1 / 6;
 
 function getPlanValue(plan, cycle, billingType) {
   const cfg = PLANS[plan];
   if (!cfg) return null;
   if (cycle === 'annual') {
     if (billingType === 'PIX') {
-      return Math.round(cfg.monthly * 12 * (1 - ANNUAL_PIX_DISCOUNT) * 100) / 100;
+      // Pix anual: pagamento único à vista com desconto de 2 meses
+      return Math.round(cfg.monthly * 12 * (1 - ANNUAL_DISCOUNT) * 100) / 100;
     }
-    return Math.round(cfg.monthly * (1 - ANNUAL_CARD_DISCOUNT) * 100) / 100;
+    // Cartão anual: assinatura mensal com valor descontado + endDate em 12 meses
+    return Math.round(cfg.monthly * (1 - ANNUAL_DISCOUNT) * 100) / 100;
   }
   return cfg.monthly;
 }
@@ -89,7 +92,10 @@ router.get('/status', requireAuth, async (req, res) => {
 // Card data flows through server but is NEVER stored
 // Returns only the token for use in /subscribe
 router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req, res) => {
-  const { card_number, card_expiry_month, card_expiry_year, card_ccv, holder_name, holder_cpf } = req.body;
+  const {
+    card_number, card_expiry_month, card_expiry_year, card_ccv,
+    holder_name, holder_cpf, holder_postal_code,
+  } = req.body;
 
   if (!card_number || !card_expiry_month || !card_expiry_year || !card_ccv || !holder_name) {
     return res.status(400).json({ error: 'Dados do cartao incompletos' });
@@ -118,7 +124,7 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
         name: holder_name,
         email: user.email,
         cpfCnpj: (holder_cpf || company.cnpj || '').replace(/\D/g, ''),
-        postalCode: company.address_zip || undefined,
+        postalCode: holder_postal_code || company.address_zip || undefined,
         phone: user.phone || undefined,
       },
     });
@@ -143,9 +149,11 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     plan,
     billing_type = 'PIX',
     cycle = 'monthly',
+    end_date,
     credit_card_token,
     credit_card_holder_name,
     credit_card_holder_cpf,
+    credit_card_holder_postal_code,
   } = req.body;
 
   if (!plan || !PLANS[plan]) {
@@ -176,7 +184,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     nextDueDate.setDate(nextDueDate.getDate() + 1);
     const dueDateStr = nextDueDate.toISOString().split('T')[0];
 
-    // PIX Annual: single payment
+    // PIX Annual: single upfront payment
     if (billing_type === 'PIX' && cycle === 'annual') {
       const payment = await asaas('POST', '/payments', {
         customer: customerId,
@@ -204,12 +212,14 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     }
 
     // Monthly subscription (PIX or CARD)
+    // Para anual no cartão: valor mensal descontado + endDate 12 meses à frente
     const subscriptionBody = {
       customer: customerId,
       billingType: billing_type,
       value: value,
       nextDueDate: dueDateStr,
       cycle: 'MONTHLY',
+      endDate: cycle === 'annual' ? end_date : undefined,
       description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : ''),
       externalReference: company.id,
     };
@@ -222,7 +232,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           cpfCnpj: (credit_card_holder_cpf || company.cnpj || '').replace(/\D/g, ''),
           email: user.email,
           phone: user.phone || undefined,
-          postalCode: company.address_zip || undefined,
+          postalCode: credit_card_holder_postal_code || company.address_zip || undefined,
         };
       }
     }
@@ -309,12 +319,12 @@ router.get('/plans', async (req, res) => {
   const plans = Object.entries(PLANS).map(function(entry) {
     var key = entry[0];
     var cfg = entry[1];
+    var annualMonthly = Math.round(cfg.monthly * (1 - ANNUAL_DISCOUNT) * 100) / 100;
     return {
       key: key, name: cfg.name, monthly: cfg.monthly,
-      annual_card: getPlanValue(key, 'annual', 'CREDIT_CARD'),
-      annual_pix: getPlanValue(key, 'annual', 'PIX'),
-      annual_card_discount: Math.round(ANNUAL_CARD_DISCOUNT * 100) + '%',
-      annual_pix_discount: Math.round(ANNUAL_PIX_DISCOUNT * 100) + '%',
+      annual_monthly: annualMonthly,
+      annual_pix_total: Math.round(cfg.monthly * 12 * (1 - ANNUAL_DISCOUNT) * 100) / 100,
+      annual_discount: Math.round(ANNUAL_DISCOUNT * 100) + '%',
     };
   });
   res.json({ plans: plans });
