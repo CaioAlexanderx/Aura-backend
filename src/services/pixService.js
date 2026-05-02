@@ -1,1 +1,76 @@
-Ly8gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09Ci8vIEFVUkEuIOKAlCBQaXggU2VydmljZSBwYXJhIENhbmFsIERpZ2l0YWwKLy8gR2VyYSBjb2JyYW7Dp2EgUGl4IHZpYSBBc2FhcyAoc3ViY29udGEpIG91IG1vY2sgbG9jYWwKLy8gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09CiAndXNlIHN0cmljdCc7Cgpjb25zdCBkYiA9IHJlcXVpcmUoJy4uL2NvbmZpZy9kYXRhYmFzZScpOwoKYXN5bmMgZnVuY3Rpb24gZ2VuZXJhdGVQaXgoeyBvcmRlciwgY29tcGFueV9pZCwgdG90YWwgfSkgewogIGNvbnN0IHsgcm93cyB9ID0gYXdhaXQgZGIucXVlcnkoCiAgICBgU0VMRUNUIGFzYWFzX3N1YmNvbnRhX2lkLCBhc2Fhc19zdWJjb250YV90b2tlbiBGUk9NIGNvbXBhbmllcyBXSEVSRSBpZCA9ICQxYCwgW2NvbXBhbnlfaWRdKTsKICBjb25zdCBjbyA9IHJvd3NbMF07CiAgaWYgKGNvICYmIGNvLmFzYWFzX3N1YmNvbnRhX2lkICYmIGNvLmFzYWFzX3N1YmNvbnRhX3Rva2VuKSB7CiAgICByZXR1cm4gZ2VuZXJhdGVBc2Fhc1BpeCh7IG9yZGVyLCBjb21wYW55OiBjbywgdG90YWwgfSk7CiAgfQogIHJldHVybiBnZW5lcmF0ZU1vY2tQaXgoeyBvcmRlciwgdG90YWwgfSk7Cn0KCmFzeW5jIGZ1bmN0aW9uIGdlbmVyYXRlQXNhYXNQaXgoeyBvcmRlciwgY29tcGFueSwgdG90YWwgfSkgewogIGNvbnN0IEFTQUFTX0JBU0UgPSBwcm9jZXNzLmVudi5BU0FBU19BUElfVVJMIHx8ICdodHRwczovL2FwaS5hc2Fhcy5jb20vYXBpL3YzJzsKICBjb25zdCBkdWVEYXRlICAgID0gbmV3IERhdGUoRGF0ZS5ub3coKSArIDMwICogNjAgKiAxMDAwKTsKICBjb25zdCBkdWVEYXRlU3RyID0gZHVlRGF0ZS50b0lTT1N0cmluZygpLnNwbGl0KCdUJylbMF07CiAgdHJ5IHsKICAgIGNvbnN0IHBheVJlc3AgPSBhd2FpdCBmZXRjaChgJHtBU0FBU19CQVNFfS9wYXltZW50c2AsIHsKICAgICAgbWV0aG9kOiAnUE9TVCcsCiAgICAgIGhlYWRlcnM6IHsgJ0NvbnRlbnQtVHlwZSc6ICdhcHBsaWNhdGlvbi9qc29uJywgJ2FjY2Vzc190b2tlbic6IGNvbXBhbnkuYXNhYXNfc3ViY29udGFfdG9rZW4gfSwKICAgICAgYm9keTogSlNPTi5zdHJpbmdpZnkoewogICAgICAgIGJpbGxpbmdUeXBlOiAgICAgICAnUElYJywKICAgICAgICBjdXN0b21lcjogICAgICAgICAgY29tcGFueS5hc2Fhc19zdWJjb250YV9pZCwKICAgICAgICB2YWx1ZTogICAgICAgICAgICAgdG90YWwsCiAgICAgICAgZHVlRGF0ZTogICAgICAgICAgIGR1ZURhdGVTdHIsCiAgICAgICAgZGVzY3JpcHRpb246ICAgICAgIGBQZWRpZG8gJHtvcmRlci5vcmRlcl9udW1iZXJ9YCwKICAgICAgICBleHRlcm5hbFJlZmVyZW5jZTogYGRpZ2l0YWwtb3JkZXItJHtvcmRlci5pZH1gLAogICAgICB9KSwKICAgIH0pOwogICAgY29uc3QgcGF5RGF0YSA9IGF3YWl0IHBheVJlc3AuanNvbigpOwogICAgaWYgKCFwYXlSZXNwLm9rKSB7CiAgICAgIGNvbnNvbGUud2FybignW1BJWF0gQXNhYXMgcGF5bWVudCBlcnJvciwgdXNhbmRvIG1vY2s6JywgSlNPTi5zdHJpbmdpZnkocGF5RGF0YSkpOwogICAgICByZXR1cm4gZ2VuZXJhdGVNb2NrUGl4KHsgb3JkZXIsIHRvdGFsIH0pOwogICAgfQogICAgY29uc3QgcXJSZXNwID0gYXdhaXQgZmV0Y2goYCR7QVNBQVNfQkFTRX0vcGF5bWVudHMvJHtwYXlEYXRhLmlkfS9waXhRckNvZGVgLCB7CiAgICAgIGhlYWRlcnM6IHsgJ2FjY2Vzc190b2tlbic6IGNvbXBhbnkuYXNhYXNfc3ViY29udGFfdG9rZW4gfSwKICAgIH0pOwogICAgY29uc3QgcXJEYXRhID0gYXdhaXQgcXJSZXNwLmpzb24oKTsKICAgIHJldHVybiB7CiAgICAgIHBheW1lbnRfaWQ6IHBheURhdGEuaWQsCiAgICAgIHFyY29kZTogICAgIHFyRGF0YS5lbmNvZGVkSW1hZ2UgfHwgbnVsbCwKICAgICAgcGF5bG9hZDogICAgcXJEYXRhLnBheWxvYWQgICAgICB8fCBudWxsLAogICAgICBleHBpcmVzX2F0OiBkdWVEYXRlLnRvSVNPU3RyaW5nKCksCiAgICB9OwogIH0gY2F0Y2ggKGVycikgewogICAgY29uc29sZS53YXJuKCdbUElYXSBBc2FhcyBjYWxsIGZhbGhvdSwgdXNhbmRvIG1vY2s6JywgZXJyLm1lc3NhZ2UpOwogICAgcmV0dXJuIGdlbmVyYXRlTW9ja1BpeCh7IG9yZGVyLCB0b3RhbCB9KTsKICB9Cn0KCmZ1bmN0aW9uIGdlbmVyYXRlTW9ja1BpeCh7IG9yZGVyLCB0b3RhbCB9KSB7CiAgY29uc3QgZXhwaXJlc0F0ID0gbmV3IERhdGUoRGF0ZS5ub3coKSArIDMwICogNjAgKiAxMDAwKTsKICBjb25zdCByZWYgICAgICAgPSBvcmRlci5vcmRlcl9udW1iZXIucmVwbGFjZSgnLScsICcnKS5zbGljZSgwLCAxMCkucGFkRW5kKDEwLCAnMCcpOwogIGNvbnN0IGFtdCAgICAgICA9IE51bWJlcih0b3RhbCkudG9GaXhlZCgyKTsKICBjb25zdCBwYXlsb2FkICAgPSBbCiAgICAnMDAwMjAxJywKICAgICcyNjU4MDAxNGJyLmdvdi5iY2IucGl4JywKICAgIGAwMTM2bW9jay0ke29yZGVyLmlkLnNsaWNlKDAsIDIyKX1gLAogICAgJzUyMDQwMDAwNTMwMzk4NicsCiAgICBgNTQwNiR7YW10fWAsCiAgICAnNTgwMkJSJywKICAgICc1OTIwQVVSQSBORUdPQ0lPIERJR0lUQUwnLAogICAgJzYwMDlTQU8gUEFVTE8nLAogICAgYDYyMTQwNTEwMDYke3JlZn1gLAogICAgJzYzMDRNT0NLJywKICBdLmpvaW4oJycpOwogIHJldHVybiB7IHBheW1lbnRfaWQ6IGBtb2NrLSR7b3JkZXIuaWR9YCwgcXJjb2RlOiBudWxsLCBwYXlsb2FkLCBleHBpcmVzX2F0OiBleHBpcmVzQXQudG9JU09TdHJpbmcoKSB9Owp9Cgptb2R1bGUuZXhwb3J0cyA9IHsgZ2VuZXJhdGVQaXggfTsK
+// ============================================================
+// AURA. — Pix Service para Canal Digital
+// Gera cobrança Pix via Asaas (subconta) ou mock local
+// ============================================================
+'use strict';
+
+const db = require('../config/database');
+
+async function generatePix({ order, company_id, total }) {
+  const { rows } = await db.query(
+    `SELECT asaas_subconta_id, asaas_subconta_token FROM companies WHERE id = $1`, [company_id]);
+  const co = rows[0];
+  if (co && co.asaas_subconta_id && co.asaas_subconta_token) {
+    return generateAsaasPix({ order, company: co, total });
+  }
+  return generateMockPix({ order, total });
+}
+
+async function generateAsaasPix({ order, company, total }) {
+  const ASAAS_BASE = process.env.ASAAS_API_URL || 'https://api.asaas.com/api/v3';
+  const dueDate    = new Date(Date.now() + 30 * 60 * 1000);
+  const dueDateStr = dueDate.toISOString().split('T')[0];
+  try {
+    const payResp = await fetch(`${ASAAS_BASE}/payments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'access_token': company.asaas_subconta_token },
+      body: JSON.stringify({
+        billingType:       'PIX',
+        customer:          company.asaas_subconta_id,
+        value:             total,
+        dueDate:           dueDateStr,
+        description:       `Pedido ${order.order_number}`,
+        externalReference: `digital-order-${order.id}`,
+      }),
+    });
+    const payData = await payResp.json();
+    if (!payResp.ok) {
+      console.warn('[PIX] Asaas payment error, usando mock:', JSON.stringify(payData));
+      return generateMockPix({ order, total });
+    }
+    const qrResp = await fetch(`${ASAAS_BASE}/payments/${payData.id}/pixQrCode`, {
+      headers: { 'access_token': company.asaas_subconta_token },
+    });
+    const qrData = await qrResp.json();
+    return {
+      payment_id: payData.id,
+      qrcode:     qrData.encodedImage || null,
+      payload:    qrData.payload      || null,
+      expires_at: dueDate.toISOString(),
+    };
+  } catch (err) {
+    console.warn('[PIX] Asaas call falhou, usando mock:', err.message);
+    return generateMockPix({ order, total });
+  }
+}
+
+function generateMockPix({ order, total }) {
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+  const ref       = order.order_number.replace('-', '').slice(0, 10).padEnd(10, '0');
+  const amt       = Number(total).toFixed(2);
+  const payload   = [
+    '000201',
+    '26580014br.gov.bcb.pix',
+    `0136mock-${order.id.slice(0, 22)}`,
+    '520400005303986',
+    `5406${amt}`,
+    '5802BR',
+    '5920AURA NEGOCIO DIGITAL',
+    '6009SAO PAULO',
+    `6214051006${ref}`,
+    '6304MOCK',
+  ].join('');
+  return { payment_id: `mock-${order.id}`, qrcode: null, payload, expires_at: expiresAt.toISOString() };
+}
+
+module.exports = { generatePix };
