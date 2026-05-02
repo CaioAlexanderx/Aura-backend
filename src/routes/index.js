@@ -9,6 +9,7 @@ const { publicReviewsRouter } = require('./reviews');
 const onboardingRouter        = require('./onboarding');
 const accessCodesRouter       = require('./accessCodes');
 const verificationRouter      = require('./verification');
+const { userRouter: productLinksUserRouter } = require('./productLinks'); // M-STOCKLINK MSL-04
 
 // Autenticacao (publica)
 router.use('/auth', require('./auth'));
@@ -27,6 +28,8 @@ router.use('/invite', require('./invitePublic'));
 
 // Multi-CNPJ M1-02: endpoints user-level (lista/cria empresas adicionais)
 router.use('/me/companies', require('./userCompanies'));
+// M-STOCKLINK MSL-04: produtos agregados (não precisa :id, view consolidada)
+router.use('/me', productLinksUserRouter);
 
 // Rotas privadas por empresa
 router.use('/companies/:id', privateCompaniesRouter);
