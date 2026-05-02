@@ -40,8 +40,13 @@ CREATE INDEX IF NOT EXISTS idx_products_name_trgm
   WHERE is_active = true;
 
 -- 6. Tabela de audit pra rastrear vínculos/desvínculos
+--
+-- IMPORTANTE: usa uuid_generate_v4() direto (sem schema qualifier).
+-- O Supabase-managed põe extensões em "extensions" mas o CI usa
+-- Postgres puro com extensions no public. Mantém o mesmo padrão das
+-- demais migrations do projeto (ver 001_initial_schema.sql).
 CREATE TABLE IF NOT EXISTS product_link_audit (
-  id            UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   product_id    UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
   company_id    UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
