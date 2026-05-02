@@ -24,6 +24,9 @@ router.use('/referrals', accessCodesRouter);
 // Convites publicos (aceite sem company access)
 router.use('/invite', require('./invitePublic'));
 
+// Multi-CNPJ M1-02: endpoints user-level (lista/cria empresas adicionais)
+router.use('/me/companies', require('./userCompanies'));
+
 // Rotas privadas por empresa
 router.use('/companies/:id', privateCompaniesRouter);
 
