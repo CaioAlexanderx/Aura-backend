@@ -1,7 +1,7 @@
 // ============================================================
-// AURA. — Auth Switch Company (Multi-CNPJ M1-03)
-// Re-emite access token com novo contexto de empresa.
-// Permite "Todas as empresas" como modo de visualização.
+// AURA. — Auth Multi-CNPJ (M1-03 + M1-04)
+// - POST /auth/switch-company: re-emite JWT com novo contexto
+// - GET  /auth/companies: lista empresas do user (pra switcher)
 // ============================================================
 const router = require('express').Router();
 const jwt = require('jsonwebtoken');
@@ -21,7 +21,63 @@ function signAccessToken(payload) {
 }
 
 // ──────────────────────────────────────────────────────────
-// POST /auth/switch-company
+// GET /auth/companies — lista empresas do user (M1-04)
+// Resposta enxuta otimizada pra renderização do switcher.
+// ──────────────────────────────────────────────────────────
+router.get('/companies', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { rows } = await db.query(
+      `SELECT
+         c.id, c.trade_name, c.legal_name, c.cnpj,
+         c.plan, c.is_primary, c.vertical_active, c.logo_url,
+         c.billing_status, c.trial_ends_at,
+         CASE
+           WHEN c.owner_id = $1 THEN 'owner'
+           ELSE COALESCE(cm.role_label, 'member')
+         END AS role
+       FROM companies c
+       LEFT JOIN company_members cm
+         ON cm.company_id = c.id AND cm.user_id = $1
+        AND cm.status = 'active' AND cm.is_active = true
+       WHERE (c.owner_id = $1 OR cm.user_id = $1)
+         AND c.is_active = true
+       ORDER BY c.is_primary DESC, c.created_at ASC`,
+      [userId]
+    );
+
+    const currentCompanyId = req.user.company || null;
+    const consolidated = !!req.user.consolidated_view;
+
+    res.json({
+      companies: rows.map((c) => ({
+        id: c.id,
+        name: c.trade_name || c.legal_name || '',
+        legal_name: c.legal_name || '',
+        trade_name: c.trade_name || '',
+        cnpj: c.cnpj || '',
+        plan: c.plan,
+        is_primary: c.is_primary,
+        vertical: c.vertical_active,
+        logo_url: c.logo_url,
+        billing_status: c.billing_status,
+        trial_active:
+          c.trial_ends_at && new Date(c.trial_ends_at) > new Date(),
+        role: c.role,
+        is_current: c.id === currentCompanyId,
+      })),
+      current_company_id: currentCompanyId,
+      consolidated_view: consolidated,
+      total: rows.length,
+    });
+  } catch (err) {
+    console.error('[auth/companies] GET error:', err.message);
+    res.status(500).json({ error: 'Erro ao listar empresas' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────
+// POST /auth/switch-company (M1-03)
 // Body: { company_id }  ou  { company_id: 'all' }
 // Retorna novo access token + dados da empresa atual.
 // Refresh token NÃO é rotacionado (é do user, não da company).
@@ -32,7 +88,6 @@ router.post('/switch-company', requireAuth, async (req, res) => {
 
   // ── Modo "Todas as empresas" (visualização agregada) ──
   if (company_id === null || company_id === 'all' || company_id === '*') {
-    // Lista empresas do user pra retornar contexto
     const { rows: companies } = await db.query(
       `SELECT c.id, c.plan
          FROM companies c
@@ -54,7 +109,6 @@ router.post('/switch-company', requireAuth, async (req, res) => {
       });
     }
 
-    // Pega o "maior" plano disponível (essencial < negocio < expansao < personalizado)
     const PLAN_RANK = {
       essencial: 1,
       negocio: 2,
@@ -75,7 +129,6 @@ router.post('/switch-company', requireAuth, async (req, res) => {
     };
     const accessToken = signAccessToken(tokenPayload);
 
-    // Audit
     try {
       await db.query(
         `INSERT INTO multicnpj_audit
@@ -116,7 +169,6 @@ router.post('/switch-company', requireAuth, async (req, res) => {
   }
 
   try {
-    // Validar acesso (owner OR member ativo)
     const { rows } = await db.query(
       `SELECT
          c.id, c.legal_name, c.trade_name, c.plan, c.cnpj,
@@ -147,7 +199,6 @@ router.post('/switch-company', requireAuth, async (req, res) => {
 
     const company = rows[0];
 
-    // Re-emitir access token com novo contexto
     const tokenPayload = {
       id: userId,
       role: req.user.role,
@@ -157,7 +208,6 @@ router.post('/switch-company', requireAuth, async (req, res) => {
     };
     const accessToken = signAccessToken(tokenPayload);
 
-    // Audit
     try {
       await db.query(
         `INSERT INTO multicnpj_audit
