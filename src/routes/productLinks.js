@@ -6,39 +6,26 @@
 // "o mesmo produto em CNPJs diferentes". A view consolidada (modo
 // "Todas as empresas") soma o estoque por master_sku.
 //
-// Endpoints (todos prefixed com /companies/:id):
-//   GET    /products/:productId/match-suggestions
-//          → sugere produtos similares em OUTRAS empresas do owner
-//            via barcode (exato) e name (similarity pg_trgm).
+// Este arquivo exporta DOIS routers:
+//   - companyRouter: pra montar em /companies/:id (precisa de :id)
+//        GET    /products/:productId/match-suggestions
+//        POST   /products/:productId/master-sku
+//        DELETE /products/:productId/master-sku
+//   - userRouter:    pra montar em /me (não precisa de :id)
+//        GET    /products/aggregated
 //
-//   POST   /products/:productId/master-sku
-//          → vincula produto a um master_sku.
-//          Body: { master_sku: string }
-//          Se master_sku já existir em OUTRO produto deste owner
-//          em OUTRA empresa, vira parte do mesmo grupo.
-//
-//   DELETE /products/:productId/master-sku
-//          → desvincula (master_sku=NULL).
-//
-//   GET    /products/aggregated
-//          → quando user está em modo consolidado, retorna lista
-//            de produtos AGREGADA por master_sku (estoque somado
-//            entre empresas).
+// A separação existe porque a view agregada SÓ faz sentido no modo
+// consolidado (req.user.company === null), e nesse modo não há um
+// :id de empresa pra colocar no path. Mounting no /me deixa isso
+// explícito e não conflita com o requireCompanyAccess middleware.
 // ============================================================
 
 const express = require('express');
-const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 
-// ── Helper: resolve owner_id da empresa do path ────────────
-async function getOwnerOfCompany(companyId) {
-  const { rows } = await db.query(
-    `SELECT owner_id FROM companies WHERE id = $1 AND is_active = true`,
-    [companyId]
-  );
-  return rows[0]?.owner_id || null;
-}
+const companyRouter = express.Router({ mergeParams: true });
+const userRouter    = express.Router();
 
 // ── Helper: lista IDs de TODAS as empresas ativas do owner ─
 async function getOwnerCompanyIds(ownerId) {
@@ -69,6 +56,10 @@ async function validateProductAccess(productId, companyId, userId) {
   return rows[0] || null;
 }
 
+// ════════════════════════════════════════════════════════════
+// COMPANY ROUTER (mounted em /companies/:id)
+// ════════════════════════════════════════════════════════════
+
 // ────────────────────────────────────────────────────────────
 // GET /products/:productId/match-suggestions
 //
@@ -81,7 +72,7 @@ async function validateProductAccess(productId, companyId, userId) {
 // Já filtra produtos que JÁ têm o mesmo master_sku (não faria
 // sentido sugerir vincular ao próprio grupo).
 // ────────────────────────────────────────────────────────────
-router.get('/products/:productId/match-suggestions', requireAuth, async (req, res) => {
+companyRouter.get('/products/:productId/match-suggestions', requireAuth, async (req, res) => {
   const { id: companyId, productId } = req.params;
   const userId = req.user.id;
 
@@ -216,11 +207,11 @@ router.get('/products/:productId/match-suggestions', requireAuth, async (req, re
 //
 // Validações:
 //   - Produto existe e pertence ao owner
-//   - master_sku tem >=2 chars, sem espaços (norma: trim + lower)
+//   - master_sku tem >=2 chars, sem espaços (norma: trim + uppercase)
 //   - master_sku NÃO está em uso por OUTRO produto da MESMA empresa
 //     (caso contrário viola índice uq_products_master_sku_per_company)
 // ────────────────────────────────────────────────────────────
-router.post('/products/:productId/master-sku', requireAuth, async (req, res) => {
+companyRouter.post('/products/:productId/master-sku', requireAuth, async (req, res) => {
   const { id: companyId, productId } = req.params;
   const userId = req.user.id;
   const rawSku = req.body?.master_sku;
@@ -330,7 +321,7 @@ router.post('/products/:productId/master-sku', requireAuth, async (req, res) => 
 // DELETE /products/:productId/master-sku
 // Desvincula o produto (master_sku = NULL).
 // ────────────────────────────────────────────────────────────
-router.delete('/products/:productId/master-sku', requireAuth, async (req, res) => {
+companyRouter.delete('/products/:productId/master-sku', requireAuth, async (req, res) => {
   const { id: companyId, productId } = req.params;
   const userId = req.user.id;
 
@@ -373,40 +364,32 @@ router.delete('/products/:productId/master-sku', requireAuth, async (req, res) =
   }
 });
 
+// ════════════════════════════════════════════════════════════
+// USER ROUTER (mounted em /me)
+// ════════════════════════════════════════════════════════════
+
 // ────────────────────────────────────────────────────────────
-// GET /products/aggregated
+// GET /me/products/aggregated
 //
-// Retorna lista de produtos AGREGADA por master_sku quando o user
-// está em modo consolidado. Produtos sem master_sku aparecem
+// Retorna lista de produtos AGREGADA por master_sku. Sempre
+// disponível (não depende de modo consolidado), mas faz mais
+// sentido nesse modo. Produtos sem master_sku aparecem
 // individualmente (cada um conta como um "grupo" de 1).
 //
 // Útil pra tela de Estoque quando o usuário troca pra "Todas as
 // empresas" — em vez de ver "Camiseta M" 2x (uma por CNPJ), vê
 // "Camiseta M" 1x com estoque somado e badge "vinculado em 2 lojas".
-//
-// Esta rota REQUER consolidated_view=true no JWT (user trocou pra
-// "Todas as empresas" via /auth/switch-company com company_id=null).
-// Se não estiver em modo consolidado, retorna 400 — o caller deve
-// usar GET /products normal.
 // ────────────────────────────────────────────────────────────
-router.get('/products/aggregated', requireAuth, async (req, res) => {
+userRouter.get('/products/aggregated', requireAuth, async (req, res) => {
   const userId = req.user.id;
 
-  // Modo consolidado é setado no JWT pelo /auth/switch-company.
-  // Se chegou aqui sem isso, provavelmente o caller errou — devolve
-  // mensagem clara.
-  if (!req.user.consolidated_view) {
-    return res.status(400).json({
-      error: 'NOT_CONSOLIDATED',
-      message: 'Esta rota só funciona no modo "Todas as empresas". Troque o switcher primeiro.',
-    });
-  }
-
   try {
-    // Resolve as empresas do owner
+    // Resolve as empresas do owner. Note: usa userId direto pra owner_id,
+    // o que assume que owners são sempre o user autenticado. Pra members
+    // (não-owners), retorna vazio — eles operam empresa-por-empresa.
     const ownerCompanyIds = await getOwnerCompanyIds(userId);
     if (ownerCompanyIds.length === 0) {
-      return res.json({ products: [], total: 0 });
+      return res.json({ products: [], total: 0, note: 'Nenhuma empresa encontrada para o owner.' });
     }
 
     // Query: agrega por master_sku quando existe; senão, cada produto
@@ -509,4 +492,4 @@ router.get('/products/aggregated', requireAuth, async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports = { companyRouter, userRouter };
