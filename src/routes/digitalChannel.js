@@ -9,6 +9,8 @@
 // Migration 088: PUT agora aceita pix_key, pix_key_type, pix_holder_name,
 // pix_holder_city — chave Pix manual do lojista, sem subconta Asaas.
 // pixService usa esses campos pra gerar BR Code estatico no checkout.
+// Migration 089: PUT tambem aceita pay_on_delivery_enabled (toggle do
+// lojista pra oferecer "pagar na entrega" como alternativa ao Pix).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -21,6 +23,7 @@ const DEFAULT_CONFIG = {
   logo_url: null, cover_url: null, description: '', address: '', phone: '', whatsapp: '',
   instagram: '', google_maps_url: '',
   pix_key: null, pix_key_type: null, pix_holder_name: null, pix_holder_city: null,
+  pay_on_delivery_enabled: false,
   business_hours: {
     seg: { open: '09:00', close: '18:00', closed: false },
     ter: { open: '09:00', close: '18:00', closed: false },
@@ -94,6 +97,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     show_prices, show_stock, delivery_enabled, delivery_fee,
     delivery_radius_km, pickup_enabled, is_published,
     pix_key, pix_key_type, pix_holder_name, pix_holder_city,
+    pay_on_delivery_enabled,
   } = req.body;
 
   // Validacao Pix manual: se chave veio, precisa ser valida pro tipo informado
@@ -121,11 +125,12 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         instagram, google_maps_url, business_hours, featured_product_ids,
         show_prices, show_stock, delivery_enabled, delivery_fee,
         delivery_radius_km, pickup_enabled, is_published, slug,
-        pix_key, pix_key_type, pix_holder_name, pix_holder_city
+        pix_key, pix_key_type, pix_holder_name, pix_holder_city,
+        pay_on_delivery_enabled
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
         $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-        $24, $25, $26, $27
+        $24, $25, $26, $27, $28
       )
       ON CONFLICT (company_id) DO UPDATE SET
         site_name = COALESCE($2, digital_channel_config.site_name),
@@ -154,6 +159,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         pix_key_type = COALESCE($25, digital_channel_config.pix_key_type),
         pix_holder_name = COALESCE($26, digital_channel_config.pix_holder_name),
         pix_holder_city = COALESCE($27, digital_channel_config.pix_holder_city),
+        pay_on_delivery_enabled = COALESCE($28, digital_channel_config.pay_on_delivery_enabled),
         updated_at = NOW()
       RETURNING *
     `, [
@@ -167,6 +173,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       delivery_fee ?? null, delivery_radius_km ?? null,
       pickup_enabled ?? null, is_published ?? null, slug,
       pix_key || null, pix_key_type || null, pix_holder_name || null, pix_holder_city || null,
+      pay_on_delivery_enabled ?? null,
     ]);
 
     res.json({
