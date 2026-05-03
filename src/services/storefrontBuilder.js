@@ -70,6 +70,10 @@ async function buildStorefront(config) {
     `SELECT trade_name, legal_name, logo_url FROM companies WHERE id = $1`, [cid]);
   const company = companies[0] || {};
 
+  // Tem Pix configurado? (sem expor a chave em si — usada server-side pra gerar BR Code)
+  const hasPix = !!(config.pix_key && String(config.pix_key).trim());
+  const payOnDeliveryEnabled = !!config.pay_on_delivery_enabled;
+
   return {
     site: {
       name:          config.site_name || company.trade_name || company.legal_name || 'Loja',
@@ -92,6 +96,9 @@ async function buildStorefront(config) {
       pickup_enabled:   config.pickup_enabled   !== false,
       delivery_enabled: config.delivery_enabled || false,
       delivery_fee:     parseFloat(config.delivery_fee) || 0,
+      // Metodos de pagamento disponiveis pra essa loja
+      has_pix:                  hasPix,
+      pay_on_delivery_enabled:  payOnDeliveryEnabled,
     },
     products: products.map(p => {
       const pvariants = variantsByProduct[p.id] || [];

@@ -3,6 +3,8 @@
 // GET    /companies/:id/digital-channel/orders
 // GET    /companies/:id/digital-channel/orders/:oid
 // PATCH  /companies/:id/digital-channel/orders/:oid/status
+// POST   /companies/:id/digital-channel/orders/:oid/approve-payment
+// POST   /companies/:id/digital-channel/orders/:oid/reject-payment
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -32,7 +34,8 @@ router.get('/', async (req, res) => {
       SELECT
         o.id, o.order_number, o.customer_name, o.customer_phone, o.customer_email,
         o.delivery_type, o.subtotal, o.total, o.delivery_fee,
-        o.status, o.payment_status, o.notes,
+        o.status, o.payment_status, o.payment_method, o.notes,
+        o.payment_proof_url, o.payment_proof_uploaded_at,
         o.confirmed_at, o.delivered_at, o.cancelled_at, o.created_at,
         COUNT(i.id)::int AS item_count
       FROM digital_orders o
@@ -45,13 +48,14 @@ router.get('/', async (req, res) => {
 
     const { rows: counts } = await db.query(`
       SELECT
-        COUNT(*)::int                                               AS total,
-        COUNT(*) FILTER (WHERE status = 'pending_payment')::int    AS pending_payment,
-        COUNT(*) FILTER (WHERE status = 'confirmed')::int          AS confirmed,
-        COUNT(*) FILTER (WHERE status = 'preparing')::int          AS preparing,
-        COUNT(*) FILTER (WHERE status = 'ready')::int              AS ready,
-        COUNT(*) FILTER (WHERE status = 'delivered')::int          AS delivered,
-        COUNT(*) FILTER (WHERE status = 'cancelled')::int          AS cancelled
+        COUNT(*)::int                                                 AS total,
+        COUNT(*) FILTER (WHERE status = 'pending_payment')::int      AS pending_payment,
+        COUNT(*) FILTER (WHERE status = 'awaiting_approval')::int    AS awaiting_approval,
+        COUNT(*) FILTER (WHERE status = 'confirmed')::int            AS confirmed,
+        COUNT(*) FILTER (WHERE status = 'preparing')::int            AS preparing,
+        COUNT(*) FILTER (WHERE status = 'ready')::int                AS ready,
+        COUNT(*) FILTER (WHERE status = 'delivered')::int            AS delivered,
+        COUNT(*) FILTER (WHERE status = 'cancelled')::int            AS cancelled
       FROM digital_orders WHERE company_id = $1
     `, [cid]);
 
@@ -113,7 +117,7 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
     if (current === 'delivered' || current === 'cancelled') {
       return res.status(409).json({ error: `Pedido já finalizado com status "${current}"` });
     }
-    const FLOW = ['pending_payment', 'confirmed', 'preparing', 'ready', 'delivered'];
+    const FLOW = ['pending_payment', 'awaiting_approval', 'confirmed', 'preparing', 'ready', 'delivered'];
     const curIdx = FLOW.indexOf(current);
     const newIdx = FLOW.indexOf(status);
     if (status !== 'cancelled' && newIdx < curIdx) {
@@ -146,6 +150,92 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
   } catch (err) {
     console.error('digital order status update error:', err);
     res.status(500).json({ error: 'Erro ao atualizar status' });
+  }
+});
+
+// ============================================================
+// POST /:oid/approve-payment — Lojista aprova pedido aguardando aprovacao
+// (uso tipico: cliente marcou Pix como pago, lojista confirmou no extrato)
+// ============================================================
+router.post('/:oid/approve-payment', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const { id: cid, oid } = req.params;
+  try {
+    const { rows } = await db.query(
+      `SELECT id, status, payment_method FROM digital_orders WHERE id = $1 AND company_id = $2`,
+      [oid, cid]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
+    const order = rows[0];
+    if (order.status !== 'awaiting_approval' && order.status !== 'pending_payment') {
+      return res.status(409).json({
+        error: `Pedido nao esta aguardando aprovacao (status atual: ${order.status})`,
+      });
+    }
+
+    const { rows: updated } = await db.query(`
+      UPDATE digital_orders SET
+        status = 'confirmed',
+        payment_status = 'confirmed',
+        confirmed_at = COALESCE(confirmed_at, NOW()),
+        updated_at = NOW()
+      WHERE id = $1 AND company_id = $2
+      RETURNING *
+    `, [oid, cid]);
+
+    res.json({ order: updated[0], approved: true });
+
+    notify.notifyStatusChange(updated[0])
+      .catch(err => console.error('[notify] approve-payment error:', err.message));
+
+  } catch (err) {
+    console.error('[orders] approve-payment error:', err.message);
+    res.status(500).json({ error: 'Erro ao aprovar pagamento' });
+  }
+});
+
+// ============================================================
+// POST /:oid/reject-payment — Lojista rejeita pedido (cancelled)
+// Body opcional: { reason: string }
+// ============================================================
+router.post('/:oid/reject-payment', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const { id: cid, oid } = req.params;
+  const { reason } = req.body || {};
+  try {
+    const { rows } = await db.query(
+      `SELECT id, status FROM digital_orders WHERE id = $1 AND company_id = $2`,
+      [oid, cid]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
+    const order = rows[0];
+    if (order.status === 'delivered' || order.status === 'cancelled') {
+      return res.status(409).json({
+        error: `Pedido ja finalizado com status "${order.status}"`,
+      });
+    }
+
+    const noteSuffix = reason
+      ? '\n[REJEITADO em ' + new Date().toISOString() + ']: ' + String(reason).substring(0, 200)
+      : '\n[REJEITADO em ' + new Date().toISOString() + ']';
+
+    const { rows: updated } = await db.query(`
+      UPDATE digital_orders SET
+        status = 'cancelled',
+        payment_status = 'cancelled',
+        cancelled_at = NOW(),
+        notes = COALESCE(notes, '') || $1,
+        updated_at = NOW()
+      WHERE id = $2 AND company_id = $3
+      RETURNING *
+    `, [noteSuffix, oid, cid]);
+
+    res.json({ order: updated[0], rejected: true });
+
+    notify.notifyStatusChange(updated[0])
+      .catch(err => console.error('[notify] reject-payment error:', err.message));
+
+  } catch (err) {
+    console.error('[orders] reject-payment error:', err.message);
+    res.status(500).json({ error: 'Erro ao rejeitar pedido' });
   }
 });
 
