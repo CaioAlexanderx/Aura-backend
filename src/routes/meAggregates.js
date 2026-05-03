@@ -7,13 +7,12 @@
 //
 // Onda 2.1: /me/dashboard — KPIs somados + breakdown.
 // Onda 2.2: /me/transactions — listagem + drill-down via ?company_id=.
-// Onda 2.3 (atual): /me/customers — lista UNICA owner-scoped.
-//   Decisao: clientes sao "do dono", nao da loja. Lista unica entre
-//   todos os CNPJs do mesmo owner. Vendedora membro so de Loja A
-//   tambem ve clientes registrados em Loja B do mesmo dono.
-// Proximas ondas:
-//   2.4: /me/sales
-//   2.5: /me/appointments
+// Onda 2.3: /me/customers — lista UNICA owner-scoped.
+// Onda 2.4 (atual): /me/sales — listagem agregada com stats e breakdown.
+//   Mantem mesma shape do /companies/:id/sales + breakdown por empresa.
+//   Drill-down via ?company_id=. Mutations (cancel) ficam no per-company
+//   pq sale_id pertence a uma empresa especifica — FE passa company_id
+//   do proprio sale (vem na listagem) ao invocar cancel/detail.
 //
 // Convencoes:
 // - Todas as queries filtram por `company_id = ANY($1)` onde $1
@@ -512,19 +511,6 @@ router.get('/transactions', async (req, res) => {
 
 // ──────────────────────────────────────────────────────────
 // GET /me/customers — Onda 2.3
-//
-// Lista UNICA de clientes do user. Quando consolidatedView=true,
-// FE chama este endpoint em vez do per-company. Retorna mesma
-// shape do /companies/:id/customers + cada item com company_id e
-// company_name (loja onde foi cadastrado).
-//
-// Decisao de produto: clientes sao do owner. Vendedora membro so
-// de Loja A em modo consolidated (caso raro: ela ser membro de
-// >=2 lojas) ve clientes de TODAS as lojas onde tem acesso.
-//
-// Filtros suportados:
-//   - search: busca em name, email, phone (ILIKE)
-//   - limit, offset
 // ──────────────────────────────────────────────────────────
 router.get('/customers', async (req, res) => {
   try {
@@ -587,7 +573,6 @@ router.get('/customers', async (req, res) => {
       is_active: r.is_active !== false,
       rating: null,
       created_at: r.created_at,
-      // Multi-CNPJ: empresa onde foi cadastrado
       company_id: r.company_id,
       company_name: companyNameById.get(r.company_id) || 'Empresa',
     }));
@@ -602,6 +587,212 @@ router.get('/customers', async (req, res) => {
   } catch (err) {
     console.error('[meAggregates] /customers error:', err.message, err.stack);
     res.status(500).json({ error: 'Erro ao listar clientes consolidados' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────
+// GET /me/sales — Onda 2.4
+//
+// Lista paginada de vendas de TODAS as empresas do user, com mesma
+// shape do /companies/:id/sales + breakdown por empresa.
+//
+// Query params:
+//   - date_from, date_to: timestamptz
+//   - status: 'active' | 'cancelled' | 'all' (default = sem filtro)
+//   - seller_id, customer_id: UUIDs
+//   - q: busca em customer.name e seller_name (ILIKE)
+//   - limit (default 50, max 200), offset (default 0)
+//   - company_id: filtra UMA empresa especifica dentro do consolidado
+//     (drill-down). Valida acesso. Quando passado, stats e breakdown
+//     ficam dessa empresa apenas.
+//
+// Mutations (cancel sale): NAO existem em /me/*. FE deve chamar
+// /companies/:cid/sales/:sid/cancel passando o company_id que vem
+// no proprio sale.company_id (incluso na resposta de /me/sales).
+// ──────────────────────────────────────────────────────────
+router.get('/sales', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const companies = await getUserCompanies(userId);
+
+    const limitNum = Math.min(parseInt(req.query.limit) || 50, 200);
+    const offsetNum = parseInt(req.query.offset) || 0;
+
+    if (companies.length === 0) {
+      return res.json({
+        sales: [], total: 0, limit: limitNum, offset: offsetNum,
+        stats: { total_sales: 0, active_sales: 0, cancelled_sales: 0, revenue: 0, avg_ticket: 0 },
+        breakdown: [], company_count: 0, filtered_company_id: null,
+      });
+    }
+
+    let companyIds = companies.map(c => c.id);
+    const filterCompanyId = req.query.company_id || null;
+
+    if (filterCompanyId) {
+      if (!companyIds.includes(filterCompanyId)) {
+        return res.status(403).json({ error: 'Sem acesso a essa empresa' });
+      }
+      companyIds = [filterCompanyId];
+    }
+
+    const { date_from, date_to, status, seller_id, customer_id, q } = req.query;
+
+    const conds = ['s.company_id = ANY($1)'];
+    const vals = [companyIds];
+    let i = 2;
+
+    if (date_from) {
+      conds.push(`s.created_at >= $${i++}::timestamptz`);
+      vals.push(date_from);
+    }
+    if (date_to) {
+      conds.push(`s.created_at <= $${i++}::timestamptz`);
+      vals.push(date_to);
+    }
+    if (status === 'active') {
+      conds.push("COALESCE(s.status, 'completed') != 'cancelled'");
+    } else if (status === 'cancelled') {
+      conds.push("s.status = 'cancelled'");
+    }
+    if (seller_id) {
+      conds.push(`(s.seller_id = $${i} OR s.employee_id = $${i})`);
+      vals.push(seller_id);
+      i++;
+    }
+    if (customer_id) {
+      conds.push(`s.customer_id = $${i++}`);
+      vals.push(customer_id);
+    }
+    if (q && String(q).trim()) {
+      conds.push(`(c.name ILIKE $${i} OR COALESCE(s.seller_name, e.name) ILIKE $${i})`);
+      vals.push('%' + String(q).trim() + '%');
+      i++;
+    }
+
+    const whereClause = conds.join(' AND ');
+
+    // Count
+    const countRes = await db.query(
+      `SELECT COUNT(*)::int AS total
+         FROM sales s
+         LEFT JOIN customers c ON c.id = s.customer_id
+         LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id
+        WHERE ${whereClause}`,
+      vals
+    );
+    const total = countRes.rows[0]?.total || 0;
+
+    // List
+    const listRes = await db.query(
+      `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status,
+              s.cancelled_at, s.created_at,
+              s.customer_id, c.name AS customer_name,
+              s.seller_id, COALESCE(s.seller_name, e.name) AS seller_name, s.employee_id,
+              (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS items_count,
+              (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS transaction_id,
+              s.company_id
+         FROM sales s
+         LEFT JOIN customers c ON c.id = s.customer_id
+         LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id
+        WHERE ${whereClause}
+        ORDER BY s.created_at DESC
+        LIMIT $${vals.length + 1} OFFSET $${vals.length + 2}`,
+      [...vals, limitNum, offsetNum]
+    );
+
+    // Stats agregados
+    const statsRes = await db.query(
+      `SELECT
+         COUNT(*)::int AS total_sales,
+         COUNT(*) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled')::int AS active_sales,
+         COUNT(*) FILTER (WHERE s.status = 'cancelled')::int AS cancelled_sales,
+         COALESCE(SUM(s.total_amount) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled'), 0)::numeric AS revenue,
+         COALESCE(AVG(s.total_amount) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled'), 0)::numeric AS avg_ticket
+         FROM sales s
+         LEFT JOIN customers c ON c.id = s.customer_id
+         LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id
+        WHERE ${whereClause}`,
+      vals
+    );
+    const stats = statsRes.rows[0] || {};
+
+    // Breakdown por empresa
+    const breakdownRes = await db.query(
+      `SELECT s.company_id,
+              COUNT(*)::int AS total_sales,
+              COUNT(*) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled')::int AS active_sales,
+              COUNT(*) FILTER (WHERE s.status = 'cancelled')::int AS cancelled_sales,
+              COALESCE(SUM(s.total_amount) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled'), 0)::numeric AS revenue,
+              COALESCE(AVG(s.total_amount) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled'), 0)::numeric AS avg_ticket
+         FROM sales s
+         LEFT JOIN customers c ON c.id = s.customer_id
+         LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id
+        WHERE ${whereClause}
+        GROUP BY s.company_id`,
+      vals
+    );
+
+    const companyMap = new Map(companies.map(c => [c.id, c]));
+    const breakdownMap = new Map(breakdownRes.rows.map(r => [r.company_id, r]));
+
+    const breakdownCompanies = filterCompanyId
+      ? companies.filter(c => c.id === filterCompanyId)
+      : companies;
+
+    const breakdown = breakdownCompanies.map(c => {
+      const b = breakdownMap.get(c.id) || {};
+      return {
+        company_id: c.id,
+        company_name: c.trade_name || c.legal_name || 'Empresa',
+        is_primary: c.is_primary,
+        total_sales: parseInt(b.total_sales) || 0,
+        active_sales: parseInt(b.active_sales) || 0,
+        cancelled_sales: parseInt(b.cancelled_sales) || 0,
+        revenue: parseFloat(b.revenue) || 0,
+        avg_ticket: parseFloat(b.avg_ticket) || 0,
+      };
+    });
+
+    const sales = listRes.rows.map(r => {
+      const c = companyMap.get(r.company_id);
+      return {
+        id: r.id,
+        total_amount: parseFloat(r.total_amount),
+        discount_amount: parseFloat(r.discount_amount || 0),
+        payment_method: r.payment_method,
+        status: r.status || 'completed',
+        cancelled_at: r.cancelled_at,
+        created_at: r.created_at,
+        customer: r.customer_id ? { id: r.customer_id, name: r.customer_name } : null,
+        seller: { id: r.seller_id || r.employee_id || null, name: r.seller_name || null },
+        items_count: r.items_count,
+        transaction_id: r.transaction_id,
+        // Multi-CNPJ: empresa onde a venda foi feita
+        company_id: r.company_id,
+        company_name: c ? (c.trade_name || c.legal_name || 'Empresa') : 'Empresa',
+      };
+    });
+
+    res.json({
+      sales,
+      total,
+      limit: limitNum,
+      offset: offsetNum,
+      stats: {
+        total_sales: parseInt(stats.total_sales) || 0,
+        active_sales: parseInt(stats.active_sales) || 0,
+        cancelled_sales: parseInt(stats.cancelled_sales) || 0,
+        revenue: parseFloat(stats.revenue) || 0,
+        avg_ticket: parseFloat(stats.avg_ticket) || 0,
+      },
+      breakdown,
+      company_count: companies.length,
+      filtered_company_id: filterCompanyId,
+    });
+  } catch (err) {
+    console.error('[meAggregates] /sales error:', err.message, err.stack);
+    res.status(500).json({ error: 'Erro ao listar vendas consolidadas' });
   }
 });
 
