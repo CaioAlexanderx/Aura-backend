@@ -17,6 +17,30 @@ const { buildStorefront } = require('../services/storefrontBuilder');
 const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 
+// ============================================================
+// CORS aberto pra vitrine publica
+// ─────────────────────────────────────────────────────────────
+// Vitrine pode ser servida em QUALQUER dominio: dominio dedicado da
+// loja (loja.getaura.com.br), custom domain do lojista, embed em
+// iframe, etc. O CORS global do app.js so aceita ALLOWED_ORIGINS, o
+// que bloqueia esses casos. Como vitrine eh publica e nao usa cookies
+// (binomio slug+order_id eh o secret), e seguro abrir CORS aqui.
+//
+// Importante: este middleware roda DEPOIS do cors() global do app.js.
+// Sobrescrevemos o header Access-Control-Allow-Origin manualmente
+// (cors() global nao seta nada quando origin nao esta na whitelist).
+// Tambem respondemos OPTIONS diretamente pra preflight passar.
+// ============================================================
+router.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID');
+  res.setHeader('Access-Control-Max-Age', '600');
+  // Sem Allow-Credentials: incompatible com origin '*' e nao precisamos
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 // API_BASE: URL do backend usada pelos fetches da vitrine (mesmo valor de
 // templates/storefrontPage.js). Precisa estar em connect-src do CSP, senao
 // o browser bloqueia fetch cross-origin (vitrine pode ser servida em
