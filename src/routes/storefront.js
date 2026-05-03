@@ -17,13 +17,13 @@ const { buildStorefront } = require('../services/storefrontBuilder');
 const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 
-// CSP relaxado para a vitrine publica (usa scripts inline e imagens R2)
+// CSP relaxado para a vitrine publica (usa scripts inline e imagens R2 + QR via api.qrserver.com)
 const STOREFRONT_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
   "script-src-attr 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https://r2.getaura.com.br https://pub-f21f233f50d1412abc93a05bbdffd0d3.r2.dev",
+  "img-src 'self' data: blob: https://r2.getaura.com.br https://pub-f21f233f50d1412abc93a05bbdffd0d3.r2.dev https://api.qrserver.com",
   "connect-src 'self' https://cloudflareinsights.com",
   "font-src 'self'",
   "object-src 'none'",
