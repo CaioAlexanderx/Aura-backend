@@ -1,10 +1,16 @@
 // ============================================================
 // AURA. — BE-REV-03: Customer Ranking by LTV or Visits
 // GET /companies/:id/customers/ranking-ltv?by=ltv|visits&limit=20
-// Complements existing crm.js ranking with LTV-specific sort
+//
+// MULTICNPJ Sessao 2 Onda 2.6 (03/05/2026): owner-scoped.
+// Vendedora ou owner ve o ranking unificado de TODAS as empresas
+// do mesmo dono. Consistente com a decisao de lista unica de
+// clientes (Onda 2.3). Aggregam-se vendas de todas as empresas
+// do owner pra calcular total_spent/visit_count por cliente.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
+const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
 
 router.get('/', async (req, res) => {
   const cid = req.params.id;
@@ -13,6 +19,12 @@ router.get('/', async (req, res) => {
 
   try {
     const orderCol = by === 'visits' ? 'visit_count' : 'total_spent';
+
+    // MULTICNPJ Onda 2.6: expande pra todas as empresas do owner
+    const ownerCompanyIds = await getOwnerScopedCompanyIds(cid);
+    if (ownerCompanyIds.length === 0) {
+      return res.json({ by, limit, total: 0, ranking: [] });
+    }
 
     const { rows } = await db.query(`
       SELECT
@@ -34,12 +46,12 @@ router.get('/', async (req, res) => {
           END AS avg_ticket,
           MAX(s.created_at) AS last_purchase
         FROM sales s
-        WHERE s.company_id = $1 AND s.customer_id = c.id
+        WHERE s.company_id = ANY($1) AND s.customer_id = c.id
       ) stats ON true
-      WHERE c.company_id = $1
+      WHERE c.company_id = ANY($1)
       ORDER BY ${orderCol} DESC NULLS LAST
       LIMIT $2
-    `, [cid, limit]);
+    `, [ownerCompanyIds, limit]);
 
     const ranking = rows.map((r, i) => ({
       position: i + 1,
