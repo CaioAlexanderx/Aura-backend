@@ -12,6 +12,14 @@
 // painel consolidado por padrao. Telas que precisam de scope
 // especifico (PDV/NF-e/Folha) usam <RequireCompanyScope /> que
 // abre picker e dispara switchCompany() pra trocar o JWT.
+//
+// FIX 2026-05-03: resolveDefaultContext e companyCount agora usam
+// query PERMISSIVE (`WHERE c.owner_id = $1 OR cm.user_id = $1`) em
+// vez de JOIN strict em company_members. Caso edge: empresa criada
+// via Multi-CNPJ podia nao ter entry em company_members, fazendo o
+// resolveDefaultContext nao ver e o user cair em modo single-company
+// com a primary em vez de consolidated. Agora robusto a essa falha
+// estrutural (que tambem foi corrigida em userCompanies.js POST).
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -57,25 +65,39 @@ async function storeRefreshToken(userId, refreshToken, req) {
 // - 1 empresa: nao consolidated, primary=essa empresa
 // - 2+ empresas: consolidated=true, primary=null (ainda retorna lista pra metadata)
 //
-// Plan efetivo:
-// - 0 ou 1 empresa: plan da empresa (ou 'essencial' fallback)
-// - 2+ empresas: MAIOR plano entre todas (PLAN_RANK)
+// FIX 2026-05-03: query agora usa WHERE (c.owner_id OR cm.user_id) — permissive.
+// Antes usava INNER JOIN company_members, perdendo empresas onde o owner nao
+// tinha row em company_members (caso bug do POST /me/companies que nao inseria).
 async function resolveDefaultContext(userId, dbConn) {
   const conn = dbConn || db;
   const { rows } = await conn.query(
-    `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
+    `SELECT DISTINCT ON (c.id)
+            c.id, c.legal_name, c.plan, c.onboarding_step,
             c.trial_ends_at, c.module_overrides, c.billing_status,
             c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
-            c.is_primary, cm.role_label AS member_role
-       FROM company_members cm
-       JOIN companies c ON c.id = cm.company_id
-      WHERE cm.user_id = $1
+            c.is_primary, c.created_at,
+            CASE
+              WHEN c.owner_id = $1 THEN 'owner'
+              ELSE COALESCE(cm.role_label, 'member')
+            END AS member_role
+       FROM companies c
+       LEFT JOIN company_members cm
+         ON cm.company_id = c.id
+        AND cm.user_id = $1
         AND cm.status = 'active'
         AND cm.is_active = true
+      WHERE (c.owner_id = $1 OR cm.user_id = $1)
         AND c.is_active = true
-      ORDER BY c.is_primary DESC NULLS LAST, c.created_at ASC`,
+      ORDER BY c.id, c.is_primary DESC NULLS LAST, c.created_at ASC`,
     [userId]
   );
+
+  // Re-ordena no app pra respeitar primary first (DISTINCT ON forca order por c.id primeiro)
+  rows.sort((a, b) => {
+    if (a.is_primary && !b.is_primary) return -1;
+    if (!a.is_primary && b.is_primary) return 1;
+    return new Date(a.created_at) - new Date(b.created_at);
+  });
 
   if (rows.length === 0) {
     return { count: 0, primary: null, consolidated: false, effectivePlan: 'essencial' };
@@ -346,6 +368,9 @@ router.post('/logout', async (req, res) => {
 //
 // Tambem inclui company_count na resposta pra frontend nao precisar fazer
 // 2a query ao /auth/companies pra mostrar o badge "N lojas".
+//
+// FIX 2026-05-03: company_count agora usa query permissive (OR c.owner_id)
+// pra contar empresas mesmo se faltar entry em company_members.
 router.post('/me', requireAuth, async (req, res) => {
   try {
     const { rows: uRows } = await db.query(
@@ -365,14 +390,18 @@ router.post('/me', requireAuth, async (req, res) => {
         `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
                 c.trial_ends_at, c.module_overrides, c.billing_status,
                 c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
-                cm.role_label AS member_role
+                CASE
+                  WHEN c.owner_id = $1 THEN 'owner'
+                  ELSE COALESCE(cm.role_label, 'member')
+                END AS member_role
            FROM companies c
            LEFT JOIN company_members cm
              ON cm.company_id = c.id
             AND cm.user_id = $1
             AND cm.status = 'active'
             AND cm.is_active = true
-          WHERE c.id = $2 AND c.is_active = true`,
+          WHERE c.id = $2 AND c.is_active = true
+            AND (c.owner_id = $1 OR cm.user_id = $1)`,
         [u.id, jwtCompanyId]
       );
       if (cRows.length) {
@@ -381,13 +410,17 @@ router.post('/me', requireAuth, async (req, res) => {
       }
     }
 
+    // FIX 2026-05-03: count permissive (OR c.owner_id), DISTINCT pra evitar
+    // dupla contagem se user for owner E member ao mesmo tempo.
     const { rows: countRows } = await db.query(
-      `SELECT COUNT(*)::int AS cnt
-         FROM company_members cm
-         JOIN companies c ON c.id = cm.company_id
-        WHERE cm.user_id = $1
+      `SELECT COUNT(DISTINCT c.id)::int AS cnt
+         FROM companies c
+         LEFT JOIN company_members cm
+           ON cm.company_id = c.id
+          AND cm.user_id = $1
           AND cm.status = 'active'
           AND cm.is_active = true
+        WHERE (c.owner_id = $1 OR cm.user_id = $1)
           AND c.is_active = true`,
       [u.id]
     );
