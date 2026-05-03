@@ -18,6 +18,12 @@
 //
 // GET /me/companies/billing-preview: UI consulta valor antes de
 // criar pra mostrar "vai custar mais R$X" no modal de adicionar.
+//
+// FIX 2026-05-03 (Sessao 1 + bug Davi): POST /me/companies agora
+// insere owner em company_members. Sem isso, resolveDefaultContext
+// (auth.js) nao via a empresa nova porque usa JOIN company_members,
+// fazendo o user cair em modo single-company com a primary em vez
+// de consolidated-default.
 // ============================================================
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
@@ -258,7 +264,29 @@ router.post('/', async (req, res) => {
 
     const newCompany = insertRes.rows[0];
 
-    // 6. Audit (best-effort, não bloqueia resposta)
+    // 6. CRITICO (FIX 2026-05-03): insere o owner em company_members.
+    // Sem isso, queries que dependem de company_members (resolveDefaultContext
+    // em auth.js, requireCompanyAccess em middleware) NAO veem essa empresa
+    // pro owner. Bug fix do caso Davi: empresa B (sem member row) fazia o
+    // resolveDefaultContext ver apenas A, jogando user em modo single-company
+    // em vez de consolidated-default. ON CONFLICT DO NOTHING garante idempotencia
+    // se o backfill ja inseriu.
+    try {
+      await db.query(
+        `INSERT INTO company_members (company_id, user_id, role_label, status, is_active)
+         VALUES ($1, $2, 'owner', 'active', true)
+         ON CONFLICT DO NOTHING`,
+        [newCompany.id, userId]
+      );
+    } catch (memberErr) {
+      // Nao bloqueia — empresa ja foi criada. Log pra investigar.
+      console.error(
+        '[userCompanies] company_members insert failed (non-blocking):',
+        memberErr.message
+      );
+    }
+
+    // 7. Audit (best-effort, não bloqueia resposta)
     try {
       await db.query(
         `INSERT INTO multicnpj_audit
@@ -280,11 +308,11 @@ router.post('/', async (req, res) => {
       console.error('[userCompanies] audit insert failed:', auditErr.message);
     }
 
-    // 7. M2-01: cálculo definitivo do billing preview (usa helper)
+    // 8. M2-01: cálculo definitivo do billing preview (usa helper)
     //    Faz a contagem real DEPOIS do INSERT (currentCount era pré-insert).
     const billingCalc = await calculateMulticnpjValue(primary.id);
 
-    // 8. M2-02: sincroniza com Asaas (não bloqueia se falhar — user
+    // 9. M2-02: sincroniza com Asaas (não bloqueia se falhar — user
     //    já tem a empresa criada; sync rodará novamente em retries
     //    futuros, ex: ao trocar de empresa ou manualmente).
     const syncResult = await safeSyncSubscriptionValue(primary.id);
