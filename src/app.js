@@ -52,7 +52,23 @@ app.use(helmet({
 
 app.disable('x-powered-by');
 
-// ── CORS ──────────────────────────────────────────────────────
+// ── CORS aberto pra storefront publico ───────────────────────
+// Registrado ANTES do cors() global pra interceptar o preflight OPTIONS
+// (cors() global trata OPTIONS internamente e sem isso meu router
+// middleware nunca rodaria). Vitrine eh publica, sem cookies — Allow-Origin: *
+// eh seguro e necessario porque a loja pode ser servida em qualquer dominio
+// (loja.getaura.com.br, custom domain do lojista, embed em iframe etc).
+app.use('/api/v1/storefront', function(req, res, next) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID');
+  res.setHeader('Access-Control-Max-Age', '600');
+  // Sem Allow-Credentials (incompativel com origin '*' e nao precisamos)
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// ── CORS global (rotas autenticadas) ─────────────────────────
 app.use(cors({
   origin: env.ALLOWED_ORIGINS === '*' ? '*' : allowedOrigins,
   credentials: true,
