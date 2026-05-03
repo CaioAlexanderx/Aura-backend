@@ -8,11 +8,11 @@
 // Onda 2.1: /me/dashboard — KPIs somados + breakdown.
 // Onda 2.2: /me/transactions — listagem + drill-down via ?company_id=.
 // Onda 2.3: /me/customers — lista UNICA owner-scoped.
-// Onda 2.4 (atual): /me/sales — listagem agregada com stats e breakdown.
-//   Mantem mesma shape do /companies/:id/sales + breakdown por empresa.
-//   Drill-down via ?company_id=. Mutations (cancel) ficam no per-company
-//   pq sale_id pertence a uma empresa especifica — FE passa company_id
-//   do proprio sale (vem na listagem) ao invocar cancel/detail.
+// Onda 2.4: /me/sales — listagem agregada com stats e breakdown.
+// Onda 2.6 (atual): /me/sales/analytics — analytics agregadas
+//   (summary/series/top_products/top_employees/by_payment) com
+//   breakdown opcional por empresa. Reabilita SalesAnalyticsCard
+//   no Painel em modo consolidated.
 //
 // Convencoes:
 // - Todas as queries filtram por `company_id = ANY($1)` onde $1
@@ -27,6 +27,7 @@
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
 const db = require('../config/database');
+const { resolvePeriod } = require('../services/salesAnalytics');
 
 router.use(requireAuth);
 
@@ -592,23 +593,6 @@ router.get('/customers', async (req, res) => {
 
 // ──────────────────────────────────────────────────────────
 // GET /me/sales — Onda 2.4
-//
-// Lista paginada de vendas de TODAS as empresas do user, com mesma
-// shape do /companies/:id/sales + breakdown por empresa.
-//
-// Query params:
-//   - date_from, date_to: timestamptz
-//   - status: 'active' | 'cancelled' | 'all' (default = sem filtro)
-//   - seller_id, customer_id: UUIDs
-//   - q: busca em customer.name e seller_name (ILIKE)
-//   - limit (default 50, max 200), offset (default 0)
-//   - company_id: filtra UMA empresa especifica dentro do consolidado
-//     (drill-down). Valida acesso. Quando passado, stats e breakdown
-//     ficam dessa empresa apenas.
-//
-// Mutations (cancel sale): NAO existem em /me/*. FE deve chamar
-// /companies/:cid/sales/:sid/cancel passando o company_id que vem
-// no proprio sale.company_id (incluso na resposta de /me/sales).
 // ──────────────────────────────────────────────────────────
 router.get('/sales', async (req, res) => {
   try {
@@ -672,7 +656,6 @@ router.get('/sales', async (req, res) => {
 
     const whereClause = conds.join(' AND ');
 
-    // Count
     const countRes = await db.query(
       `SELECT COUNT(*)::int AS total
          FROM sales s
@@ -683,7 +666,6 @@ router.get('/sales', async (req, res) => {
     );
     const total = countRes.rows[0]?.total || 0;
 
-    // List
     const listRes = await db.query(
       `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status,
               s.cancelled_at, s.created_at,
@@ -701,7 +683,6 @@ router.get('/sales', async (req, res) => {
       [...vals, limitNum, offsetNum]
     );
 
-    // Stats agregados
     const statsRes = await db.query(
       `SELECT
          COUNT(*)::int AS total_sales,
@@ -717,7 +698,6 @@ router.get('/sales', async (req, res) => {
     );
     const stats = statsRes.rows[0] || {};
 
-    // Breakdown por empresa
     const breakdownRes = await db.query(
       `SELECT s.company_id,
               COUNT(*)::int AS total_sales,
@@ -768,7 +748,6 @@ router.get('/sales', async (req, res) => {
         seller: { id: r.seller_id || r.employee_id || null, name: r.seller_name || null },
         items_count: r.items_count,
         transaction_id: r.transaction_id,
-        // Multi-CNPJ: empresa onde a venda foi feita
         company_id: r.company_id,
         company_name: c ? (c.trade_name || c.legal_name || 'Empresa') : 'Empresa',
       };
@@ -793,6 +772,248 @@ router.get('/sales', async (req, res) => {
   } catch (err) {
     console.error('[meAggregates] /sales error:', err.message, err.stack);
     res.status(500).json({ error: 'Erro ao listar vendas consolidadas' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────
+// GET /me/sales/analytics — Onda 2.6 (polish final)
+//
+// Replica src/services/salesAnalytics.js mas usando company_id = ANY($1).
+// Mantem a MESMA shape do per-company endpoint pra UI nao precisar
+// adaptacoes profundas — apenas hook ramifica e endpoint troca.
+//
+// Nota sobre fonte de receita (mesma decisao de salesAnalytics.js):
+// - total_revenue vem de TRANSACTIONS (income confirmed, regime caixa).
+// - Demais metricas operacionais vem de SALES (PDV).
+// - Mesma fonte que Painel/Financeiro/DRE — garante consistencia.
+//
+// Query params:
+//   - period: 'today' | 'yesterday' | 'week' | 'month' | 'year' | 'custom'
+//   - group_by: 'day' | 'week' | 'month'
+//   - start_date, end_date (so usado se period='custom')
+//   - company_id: drill-down opcional dentro do consolidado
+// ──────────────────────────────────────────────────────────
+router.get('/sales/analytics', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const companies = await getUserCompanies(userId);
+
+    if (companies.length === 0) {
+      return res.json({
+        period: { start: null, end: null, label: req.query.period || 'month' },
+        summary: {
+          total_sales: 0, total_revenue: 0, avg_ticket: 0,
+          total_discounts: 0, unique_customers: 0, active_days: 0,
+        },
+        series: [],
+        top_products: [],
+        top_employees: [],
+        by_payment: [],
+        company_count: 0,
+        filtered_company_id: null,
+      });
+    }
+
+    let companyIds = companies.map(c => c.id);
+    const filterCompanyId = req.query.company_id || null;
+
+    if (filterCompanyId) {
+      if (!companyIds.includes(filterCompanyId)) {
+        return res.status(403).json({ error: 'Sem acesso a essa empresa' });
+      }
+      companyIds = [filterCompanyId];
+    }
+
+    const period = req.query.period || 'month';
+    const groupBy = req.query.group_by || 'day';
+    const { startDate, endDate } = resolvePeriod(period, req.query.start_date, req.query.end_date);
+
+    const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
+    const spCol = `(created_at ${SP})`;
+    const txDateCol = `COALESCE(due_date, (created_at ${SP})::date)`;
+
+    const formats = {
+      day:   { sales: `${spCol}::date`,                tx: `${txDateCol}` },
+      week:  { sales: `DATE_TRUNC('week',  ${spCol})`, tx: `DATE_TRUNC('week',  ${txDateCol})` },
+      month: { sales: `DATE_TRUNC('month', ${spCol})`, tx: `DATE_TRUNC('month', ${txDateCol})` },
+    };
+    const fmt = formats[groupBy] || formats.day;
+
+    const [
+      salesSummaryRes,
+      txSummaryRes,
+      salesSeriesRes,
+      txSeriesRes,
+      topProductsRes,
+      topEmployeesRes,
+      byPaymentRes,
+    ] = await Promise.all([
+      db.query(
+        `SELECT
+           COUNT(*)::int                                                                                AS total_sales,
+           COALESCE(SUM(discount_amount) FILTER (WHERE COALESCE(status,'completed') != 'cancelled'), 0) AS total_discounts,
+           COUNT(DISTINCT customer_id) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int  AS unique_customers,
+           COUNT(DISTINCT (created_at ${SP})::date) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int AS active_days
+         FROM sales
+         WHERE company_id = ANY($1)
+           AND (created_at ${SP}) >= $2::timestamp
+           AND (created_at ${SP}) <  $3::timestamp`,
+        [companyIds, startDate, endDate]
+      ),
+
+      db.query(
+        `SELECT COALESCE(SUM(amount), 0) AS total_revenue
+         FROM transactions
+         WHERE company_id = ANY($1)
+           AND type = 'income' AND status = 'confirmed'
+           AND COALESCE(due_date, (created_at ${SP})::date) >= $2::date
+           AND COALESCE(due_date, (created_at ${SP})::date) <  $3::date`,
+        [companyIds, startDate, endDate]
+      ),
+
+      db.query(
+        `SELECT ${fmt.sales} AS period, COUNT(*)::int AS total_sales
+         FROM sales
+         WHERE company_id = ANY($1)
+           AND COALESCE(status, 'completed') != 'cancelled'
+           AND ${spCol} >= $2::timestamp
+           AND ${spCol} <  $3::timestamp
+         GROUP BY 1`,
+        [companyIds, startDate, endDate]
+      ),
+
+      db.query(
+        `SELECT ${fmt.tx} AS period, COALESCE(SUM(amount), 0) AS total_revenue
+         FROM transactions
+         WHERE company_id = ANY($1)
+           AND type = 'income' AND status = 'confirmed'
+           AND ${txDateCol} >= $2::date
+           AND ${txDateCol} <  $3::date
+         GROUP BY 1`,
+        [companyIds, startDate, endDate]
+      ),
+
+      db.query(
+        `SELECT
+           p.id, p.name, p.category,
+           SUM(si.quantity)::float          AS total_qty,
+           COALESCE(SUM(si.total_price), 0) AS total_revenue,
+           COUNT(DISTINCT s.id)::int        AS appearances
+         FROM sale_items si
+         JOIN sales    s ON s.id  = si.sale_id
+         JOIN products p ON p.id  = si.product_id
+         WHERE s.company_id = ANY($1)
+           AND COALESCE(s.status, 'completed') != 'cancelled'
+           AND (s.created_at ${SP}) >= $2::timestamp
+           AND (s.created_at ${SP}) <  $3::timestamp
+         GROUP BY p.id, p.name, p.category
+         ORDER BY total_revenue DESC
+         LIMIT 10`,
+        [companyIds, startDate, endDate]
+      ),
+
+      db.query(
+        `SELECT
+           u.id, u.full_name,
+           COUNT(s.id)::int                 AS total_sales,
+           COALESCE(SUM(s.total_amount), 0) AS total_revenue,
+           COALESCE(AVG(s.total_amount), 0) AS avg_ticket
+         FROM sales s
+         JOIN users u ON u.id = s.seller_id
+         WHERE s.company_id = ANY($1)
+           AND COALESCE(s.status, 'completed') != 'cancelled'
+           AND (s.created_at ${SP}) >= $2::timestamp
+           AND (s.created_at ${SP}) <  $3::timestamp
+           AND s.seller_id IS NOT NULL
+         GROUP BY u.id, u.full_name
+         ORDER BY total_revenue DESC
+         LIMIT 10`,
+        [companyIds, startDate, endDate]
+      ),
+
+      db.query(
+        `SELECT
+           COALESCE(payment_method, 'nao informado') AS method,
+           COUNT(*)::int                              AS total_sales,
+           COALESCE(SUM(total_amount), 0)             AS total_revenue
+         FROM sales
+         WHERE company_id = ANY($1)
+           AND COALESCE(status, 'completed') != 'cancelled'
+           AND (created_at ${SP}) >= $2::timestamp
+           AND (created_at ${SP}) <  $3::timestamp
+         GROUP BY payment_method
+         ORDER BY total_revenue DESC`,
+        [companyIds, startDate, endDate]
+      ),
+    ]);
+
+    const salesSum = salesSummaryRes.rows[0] || {};
+    const txSum = txSummaryRes.rows[0] || {};
+
+    const totalRevenue = parseFloat(txSum.total_revenue) || 0;
+    const totalSales   = parseInt(salesSum.total_sales)  || 0;
+    const avgTicket    = totalSales > 0
+      ? parseFloat((totalRevenue / totalSales).toFixed(2))
+      : 0;
+
+    // Merge series por chave de periodo
+    const merged = new Map();
+    salesSeriesRes.rows.forEach(r => {
+      const k = r.period instanceof Date ? r.period.toISOString() : String(r.period);
+      merged.set(k, { period: r.period, total_sales: r.total_sales, total_revenue: 0 });
+    });
+    txSeriesRes.rows.forEach(r => {
+      const k = r.period instanceof Date ? r.period.toISOString() : String(r.period);
+      if (merged.has(k)) {
+        merged.get(k).total_revenue = parseFloat(r.total_revenue);
+      } else {
+        merged.set(k, { period: r.period, total_sales: 0, total_revenue: parseFloat(r.total_revenue) });
+      }
+    });
+
+    const series = Array.from(merged.values()).sort((a, b) => {
+      const ka = a.period instanceof Date ? a.period.getTime() : String(a.period);
+      const kb = b.period instanceof Date ? b.period.getTime() : String(b.period);
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
+
+    res.json({
+      period: { start: startDate, end: endDate, label: period },
+      summary: {
+        total_sales:      totalSales,
+        total_revenue:    totalRevenue,
+        avg_ticket:       avgTicket,
+        total_discounts:  parseFloat(salesSum.total_discounts)  || 0,
+        unique_customers: parseInt(salesSum.unique_customers)   || 0,
+        active_days:      parseInt(salesSum.active_days)        || 0,
+      },
+      series,
+      top_products: topProductsRes.rows.map(r => ({
+        id:            r.id,
+        name:          r.name,
+        category:      r.category,
+        total_qty:     parseFloat(r.total_qty),
+        total_revenue: parseFloat(r.total_revenue),
+        appearances:   r.appearances,
+      })),
+      top_employees: topEmployeesRes.rows.map(r => ({
+        id:            r.id,
+        full_name:     r.full_name,
+        total_sales:   r.total_sales,
+        total_revenue: parseFloat(r.total_revenue),
+        avg_ticket:    parseFloat(parseFloat(r.avg_ticket).toFixed(2)),
+      })),
+      by_payment: byPaymentRes.rows.map(r => ({
+        method:        r.method,
+        total_sales:   r.total_sales,
+        total_revenue: parseFloat(r.total_revenue),
+      })),
+      company_count: companies.length,
+      filtered_company_id: filterCompanyId,
+    });
+  } catch (err) {
+    console.error('[meAggregates] /sales/analytics error:', err.message, err.stack);
+    res.status(500).json({ error: 'Erro ao calcular analytics de vendas consolidadas' });
   }
 });
 
