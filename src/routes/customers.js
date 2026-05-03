@@ -2,9 +2,18 @@
 // AURA. -- S5: Customers CRUD
 // Plan limits: essencial=1000, negocio=5000, expansao=unlimited
 // Plan comes from req.user.plan (JWT token), not req.company
+//
+// MULTICNPJ Sessao 2 Onda 2.3 (03/05/2026): clientes sao
+// owner-scoped. GET / lista clientes de TODAS as empresas do
+// mesmo dono. POST / continua criando na empresa atual (req.params.id),
+// mas o plan limit conta o owner inteiro. PATCH/DELETE permitem
+// editar cliente "registrado em outra loja" do mesmo dono.
+//
+// Justificativa em src/utils/ownerScope.js.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
 
 function getPlanLimit(plan) {
   switch ((plan || '').toLowerCase()) {
@@ -15,7 +24,7 @@ function getPlanLimit(plan) {
   }
 }
 
-// GET / -- list customers
+// GET / -- list customers (owner-scoped: todas as empresas do owner)
 router.get('/', async (req, res) => {
   const companyId = req.params.id;
   const planLimit = getPlanLimit(req.user?.plan);
@@ -24,21 +33,31 @@ router.get('/', async (req, res) => {
   const search = req.query.search;
 
   try {
-    let where = 'WHERE company_id = $1';
-    const params = [companyId];
+    // MULTICNPJ Onda 2.3: expande pra todas as empresas do owner
+    const ownerCompanyIds = await getOwnerScopedCompanyIds(companyId);
+    if (ownerCompanyIds.length === 0) {
+      return res.json({ customers: [], total: 0, limit, offset, plan_limit: planLimit });
+    }
+
+    let where = 'WHERE c.company_id = ANY($1)';
+    const params = [ownerCompanyIds];
     if (search) {
-      where += ` AND (name ILIKE $${params.length + 1} OR email ILIKE $${params.length + 1} OR phone ILIKE $${params.length + 1})`;
+      where += ` AND (c.name ILIKE $${params.length + 1} OR c.email ILIKE $${params.length + 1} OR c.phone ILIKE $${params.length + 1})`;
       params.push(`%${search}%`);
     }
 
-    const countRes = await db.query(`SELECT COUNT(*) AS total FROM customers ${where}`, params);
+    const countRes = await db.query(`SELECT COUNT(*) AS total FROM customers c ${where}`, params);
 
+    // JOIN companies pra trazer nome da loja onde foi registrado (info pra UI)
     const dataRes = await db.query(
-      `SELECT id, name, cpf_cnpj, email, phone, birth_date, instagram_handle,
-              total_purchases, total_spent, last_purchase_at, first_purchase_at,
-              notes, is_active, created_at
-       FROM customers ${where}
-       ORDER BY name ASC
+      `SELECT c.id, c.name, c.cpf_cnpj, c.email, c.phone, c.birth_date, c.instagram_handle,
+              c.total_purchases, c.total_spent, c.last_purchase_at, c.first_purchase_at,
+              c.notes, c.is_active, c.created_at, c.company_id,
+              comp.trade_name AS company_trade, comp.legal_name AS company_legal
+       FROM customers c
+       JOIN companies comp ON comp.id = c.company_id
+       ${where}
+       ORDER BY c.name ASC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
     );
@@ -52,16 +71,24 @@ router.get('/', async (req, res) => {
       visits: parseInt(r.total_purchases) || 0, visit_count: parseInt(r.total_purchases) || 0,
       last_purchase: r.last_purchase_at, first_visit: r.first_purchase_at,
       notes: r.notes || '', is_active: r.is_active !== false, rating: null, created_at: r.created_at,
+      // Multi-CNPJ: empresa onde foi cadastrado (FE mostra badge se owner tem 2+ lojas)
+      company_id: r.company_id,
+      company_name: r.company_trade || r.company_legal || 'Empresa',
     }));
 
-    res.json({ customers, total: parseInt(countRes.rows[0]?.total) || 0, limit, offset, plan_limit: planLimit });
+    res.json({
+      customers,
+      total: parseInt(countRes.rows[0]?.total) || 0,
+      limit, offset,
+      plan_limit: planLimit,
+    });
   } catch (err) {
     console.error('[customers] list error:', err.message);
     res.status(500).json({ error: 'Erro ao listar clientes' });
   }
 });
 
-// POST / -- create customer
+// POST / -- create customer (na empresa atual, com plan limit do OWNER inteiro)
 router.post('/', async (req, res) => {
   const companyId = req.params.id;
   const { name, email, phone, notes, birthday, birth_date, instagram, instagram_handle, cpf_cnpj } = req.body;
@@ -70,16 +97,23 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'name e obrigatorio' });
   }
 
-  // Enforce plan limit
+  // MULTICNPJ Onda 2.3: plan limit conta TODOS os clientes do owner,
+  // alinhado com a decisao de lista unica.
   try {
     const planLimit = getPlanLimit(req.user?.plan);
-    const countRes = await db.query('SELECT COUNT(*) AS total FROM customers WHERE company_id = $1', [companyId]);
-    const current = parseInt(countRes.rows[0]?.total) || 0;
-    if (current >= planLimit) {
-      return res.status(403).json({
-        error: `Limite de clientes atingido para o seu plano (${planLimit} registros). Faca upgrade para continuar.`,
-        limit: planLimit, current,
-      });
+    const ownerCompanyIds = await getOwnerScopedCompanyIds(companyId);
+    if (ownerCompanyIds.length > 0) {
+      const countRes = await db.query(
+        'SELECT COUNT(*) AS total FROM customers WHERE company_id = ANY($1)',
+        [ownerCompanyIds]
+      );
+      const current = parseInt(countRes.rows[0]?.total) || 0;
+      if (current >= planLimit) {
+        return res.status(403).json({
+          error: `Limite de clientes atingido para o seu plano (${planLimit} registros). Faca upgrade para continuar.`,
+          limit: planLimit, current,
+        });
+      }
     }
   } catch (err) {
     console.error('[customers] count check error:', err.message);
@@ -102,7 +136,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PATCH /:cid -- update customer
+// PATCH /:cid -- update customer (owner-scoped: pode editar de qualquer loja do owner)
 router.patch('/:cid', async (req, res) => {
   const { id: companyId, cid } = req.params;
   const fieldMap = {
@@ -123,11 +157,14 @@ router.patch('/:cid', async (req, res) => {
 
   if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   updates.push('updated_at = NOW()');
-  values.push(cid, companyId);
 
   try {
+    // MULTICNPJ Onda 2.3: pode editar cliente "de outra loja" do mesmo owner
+    const ownerCompanyIds = await getOwnerScopedCompanyIds(companyId);
+    values.push(cid, ownerCompanyIds);
+
     const result = await db.query(
-      `UPDATE customers SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = $${idx + 1} RETURNING *`,
+      `UPDATE customers SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = ANY($${idx + 1}) RETURNING *`,
       values
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
@@ -138,13 +175,14 @@ router.patch('/:cid', async (req, res) => {
   }
 });
 
-// DELETE /:cid
+// DELETE /:cid (owner-scoped tambem)
 router.delete('/:cid', async (req, res) => {
   const { id: companyId, cid } = req.params;
   try {
+    const ownerCompanyIds = await getOwnerScopedCompanyIds(companyId);
     const result = await db.query(
-      'DELETE FROM customers WHERE id = $1 AND company_id = $2 RETURNING id, name',
-      [cid, companyId]
+      'DELETE FROM customers WHERE id = $1 AND company_id = ANY($2) RETURNING id, name',
+      [cid, ownerCompanyIds]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
     res.json({ deleted: true, id: cid, name: result.rows[0].name });
