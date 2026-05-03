@@ -277,10 +277,18 @@ router.delete('/upload-image', requireRole('client', 'analyst', 'admin'), async 
 // ============================================================
 router.post('/setup-pix', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
-  const { name, email, cpf_cnpj, mobile_phone, company_type = 'MEI' } = req.body;
+  const { name, email, cpf_cnpj, mobile_phone, company_type = 'MEI', birth_date } = req.body;
 
   if (!name || !email || !cpf_cnpj || !mobile_phone) {
     return res.status(400).json({ error: 'Nome, e-mail, CPF/CNPJ e celular sao obrigatorios' });
+  }
+
+  // Asaas exige data de nascimento para pessoa fisica (CPF) e MEI
+  if ((company_type === 'INDIVIDUAL' || company_type === 'MEI') && !birth_date) {
+    return res.status(400).json({ error: 'Data de nascimento e obrigatoria para CPF/MEI' });
+  }
+  if (birth_date && !/^\d{4}-\d{2}-\d{2}$/.test(birth_date)) {
+    return res.status(400).json({ error: 'Data de nascimento deve estar no formato AAAA-MM-DD' });
   }
 
   const ASAAS_BASE = (process.env.ASAAS_API_URL || 'https://api.asaas.com/api/v3')
@@ -310,6 +318,7 @@ router.post('/setup-pix', requireRole('client', 'analyst', 'admin'), async (req,
         cpfCnpj:    cleanCpfCnpj,
         mobilePhone: cleanPhone,
         companyType: company_type,
+        birthDate:   birth_date || undefined,
         incomeValue: 1000,
         address:     'Rua Principal',
         addressNumber: '1',

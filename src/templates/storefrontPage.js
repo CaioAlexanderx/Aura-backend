@@ -19,10 +19,6 @@ function buildStorefrontPage(data, slug) {
   const whatsNum = (data.contact.whatsapp || '').replace(/\D/g, '');
   const addrText = escHtml(data.contact.address || '');
 
-  const heroStyle = coverUrl
-    ? `background:url('${coverUrl}') center/cover no-repeat; background-color:${primary};`
-    : `background:linear-gradient(135deg,${primary} 0%,${primary}cc 100%);`;
-
   const storeData = JSON.stringify({
     slug,
     site:     data.site,
@@ -35,7 +31,7 @@ function buildStorefrontPage(data, slug) {
     ? `<img src="${logoUrl}" alt="" onerror="this.style.display='none';var s=document.getElementById('logoInitial');if(s){s.style.display='flex';}"><span id="logoInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:800;color:#fff;"></span>`
     : `<span id="logoInitial" style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:800;color:#fff;"></span>`;
   const logoInHero = logoUrl
-    ? `<img src="${logoUrl}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:16px;" onerror="this.style.display='none';var s=document.getElementById('heroInitial');if(s){s.style.display='flex';}"><span id="heroInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:26px;font-weight:800;color:#fff;"></span>`
+    ? `<img src="${logoUrl}" alt="" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none';var s=document.getElementById('heroInitial');if(s){s.style.display='flex';}"><span id="heroInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:26px;font-weight:800;color:#fff;"></span>`
     : `<span id="heroInitial" style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:26px;font-weight:800;color:#fff;"></span>`;
 
   const contactBar = whatsNum ? `
@@ -47,8 +43,8 @@ function buildStorefrontPage(data, slug) {
   </a>
 </div>` : '';
 
-  const css    = buildStyles(primary, heroStyle, coverUrl);
-  const body   = buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar, addrText });
+  const css    = buildStyles(primary);
+  const body   = buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar, addrText, coverUrl });
   const script = buildScript(storeData, escJs(slug));
 
   return `<!DOCTYPE html>

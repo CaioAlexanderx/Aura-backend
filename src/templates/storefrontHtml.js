@@ -1,6 +1,9 @@
 // AURA. — HTML body da vitrine pública
-// buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar, addrText }) → string HTML
-function buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar, addrText }) {
+// buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar, addrText, coverUrl }) → string HTML
+function buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar, addrText, coverUrl }) {
+  const hasCover = !!coverUrl;
+  const heroSectionClass = hasCover ? 'hero-section has-cover' : 'hero-section no-cover';
+  const coverStyle = hasCover ? ` style="background-image:url('${coverUrl}')"` : '';
   return `<header class="topbar">
   <a class="topbar-brand" href="#" onclick="return false">
     <div class="topbar-logo">${logoInTopbar}</div>
@@ -26,13 +29,15 @@ function buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar
   </div>
 </div>
 
-<section class="hero">
-  <div class="hero-overlay"></div>
-  <div class="hero-content">
-    <div class="hero-logo-wrap">${logoInHero}</div>
-    <h1>${siteName}</h1>
-    ${tagline ? `<p>${tagline}</p>` : ''}
-    <div class="hero-pills" id="heroPills"></div>
+<section class="${heroSectionClass}">
+  <div class="hero-cover"${coverStyle}></div>
+  <div class="hero-card">
+    <div class="hero-card-logo">${logoInHero}</div>
+    <div class="hero-card-info">
+      <h1 class="hero-card-name">${siteName}</h1>
+      ${tagline ? `<p class="hero-card-tag">${tagline}</p>` : ''}
+      <div class="hero-card-pills" id="heroPills"></div>
+    </div>
   </div>
 </section>
 

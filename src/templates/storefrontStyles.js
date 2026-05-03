@@ -1,8 +1,10 @@
 // AURA. — CSS da vitrine pública
-// buildStyles(primary, heroStyle, coverUrl) → string CSS
-function buildStyles(primary, heroStyle, coverUrl) {
+// buildStyles(primary) → string CSS
+// Os parâmetros antigos (heroStyle, coverUrl) ficam aceitos mas ignorados
+// — o hero passou a ser controlado por classe no HTML (.hero-section.has-cover/.no-cover)
+function buildStyles(primary) {
   return `*,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
-:root{--primary:${primary};--primary-dark:${primary};--primary-light:rgba(124,58,237,.1);--primary-mid:rgba(124,58,237,.07);--text:#1a1a2e;--text-2:#4a4a6a;--text-3:#888;--bg:#fafafa;--card-bg:#fff;--border:#e8e8f0;--green:#10b981;--green-light:#d1fae5;--shadow-md:0 4px 20px rgba(0,0,0,.10);--shadow-lg:0 12px 40px rgba(0,0,0,.16);--r:14px;--r-sm:10px;}
+:root{--primary:${primary};--primary-dark:${primary};--primary-light:rgba(124,58,237,.1);--primary-mid:rgba(124,58,237,.07);--text:#1a1a2e;--text-2:#4a4a6a;--text-3:#888;--bg:#fafafa;--card-bg:#fff;--border:#e8e8f0;--green:#10b981;--green-light:#d1fae5;--shadow-sm:0 1px 2px rgba(15,23,42,.04),0 4px 14px rgba(15,23,42,.06);--shadow-md:0 4px 20px rgba(0,0,0,.10);--shadow-lg:0 12px 40px rgba(0,0,0,.16);--r:14px;--r-sm:10px;}
 html{scroll-behavior:smooth;}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;}
 .topbar{position:sticky;top:0;z-index:100;background:rgba(255,255,255,.96);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:0 20px;height:60px;display:flex;align-items:center;justify-content:space-between;gap:12px;}
@@ -17,15 +19,44 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .cart-btn:hover{background:var(--primary-light);border-color:var(--primary);}
 .cart-badge{position:absolute;top:-4px;right:-4px;background:var(--primary);color:#fff;width:18px;height:18px;border-radius:50%;font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid #fff;}
 .cart-badge.visible{display:flex;}
-.hero{position:relative;${heroStyle}color:#fff;padding:48px 20px 40px;text-align:center;overflow:hidden;}
-.hero-overlay{position:absolute;inset:0;${coverUrl?'background:linear-gradient(135deg,rgba(0,0,0,.35),rgba(0,0,0,.45));':'background:linear-gradient(135deg,rgba(0,0,0,.08),rgba(0,0,0,.18));'}pointer-events:none;}
-.hero-content{position:relative;z-index:1;max-width:520px;margin:0 auto;}
-.hero-logo-wrap{width:72px;height:72px;border-radius:18px;background:rgba(255,255,255,.2);border:2px solid rgba(255,255,255,.35);margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:26px;overflow:hidden;backdrop-filter:blur(4px);}
-.hero-logo-wrap img{width:100%;height:100%;object-fit:cover;border-radius:16px;}
-.hero h1{font-size:28px;font-weight:800;margin-bottom:8px;line-height:1.2;}
-.hero p{font-size:14px;opacity:.9;line-height:1.6;max-width:380px;margin:0 auto 20px;}
-.hero-pills{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;}
-.hero-pill{background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.28);border-radius:20px;padding:5px 14px;font-size:12px;font-weight:600;backdrop-filter:blur(4px);}
+
+/* ============================================================
+   HERO — cover separado do card de info (Opção 1 com cover,
+   fallback Opção 2 quando .no-cover)
+   ============================================================ */
+.hero-section{position:relative;background:#fff;}
+.hero-cover{width:100%;background-position:center;background-size:cover;background-repeat:no-repeat;background-color:var(--primary);}
+.hero-section.has-cover .hero-cover{height:180px;background-image:linear-gradient(135deg,var(--primary) 0%,${primary}cc 100%);}
+.hero-section.no-cover .hero-cover{height:90px;background-image:linear-gradient(135deg,var(--primary) 0%,${primary}cc 100%);}
+.hero-card{max-width:960px;margin:0 auto;padding:14px 20px 18px;display:flex;gap:14px;align-items:flex-start;position:relative;}
+.hero-section.has-cover .hero-card{margin-top:-26px;}
+.hero-card-logo{width:64px;height:64px;border-radius:18px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:800;flex-shrink:0;border:3px solid #fff;box-shadow:var(--shadow-sm);overflow:hidden;}
+.hero-section.has-cover .hero-card-logo{margin-top:-26px;}
+.hero-section.no-cover .hero-card-logo{width:54px;height:54px;border-radius:50%;margin-top:-30px;border-width:3px;}
+.hero-card-logo img{width:100%;height:100%;object-fit:cover;}
+.hero-card-info{flex:1;min-width:0;padding-top:4px;}
+.hero-card-name{font-size:18px;font-weight:800;color:var(--text);line-height:1.2;margin-bottom:4px;}
+.hero-card-tag{font-size:13px;color:var(--text-2);line-height:1.5;margin-bottom:10px;}
+.hero-card-pills{display:flex;gap:6px;flex-wrap:wrap;}
+.hero-pill{display:inline-flex;align-items:center;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:999px;padding:5px 11px;font-size:12px;font-weight:600;color:var(--text-2);white-space:nowrap;}
+
+@media(min-width:600px){
+  .hero-section.has-cover .hero-cover{height:240px;}
+  .hero-card-name{font-size:22px;}
+  .hero-card-tag{font-size:14px;}
+  .hero-card-logo{width:80px;height:80px;font-size:32px;}
+  .hero-section.has-cover .hero-card-logo{margin-top:-36px;}
+}
+@media(max-width:480px){
+  .hero-section.has-cover .hero-cover{height:140px;}
+  .hero-card{padding:12px 16px 16px;gap:12px;}
+  .hero-card-logo{width:54px;height:54px;font-size:22px;}
+  .hero-section.has-cover .hero-card-logo{margin-top:-22px;}
+  .hero-card-name{font-size:16px;}
+  .hero-card-tag{font-size:12px;}
+}
+/* ============================================================ */
+
 .cats-wrap{padding:12px 20px 0;display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;position:sticky;top:60px;z-index:50;background:var(--bg);border-bottom:1px solid var(--border);}
 .cats-wrap::-webkit-scrollbar{display:none;}
 .cat-chip{white-space:nowrap;padding:7px 16px;border-radius:20px;font-size:12px;font-weight:600;background:#fff;border:1.5px solid var(--border);color:var(--text-2);cursor:pointer;transition:all .18s;flex-shrink:0;margin-bottom:10px;}
@@ -145,6 +176,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .toast.show{transform:translateX(-50%) translateY(0);}
 @keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.2);}}
 .pulse{animation:pulse .3s ease;}
-@media(max-width:480px){.topbar-name{font-size:14px;}.search-pill span{display:none;}.hero h1{font-size:22px;}.products-grid{grid-template-columns:repeat(2,1fr);gap:10px;}}`;
+@media(max-width:480px){.topbar-name{font-size:14px;}.search-pill span{display:none;}.products-grid{grid-template-columns:repeat(2,1fr);gap:10px;}}`;
 }
 module.exports = buildStyles;

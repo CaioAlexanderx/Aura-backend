@@ -66,11 +66,21 @@ router.post('/onboard', requireRole('client', 'analyst', 'admin'), async (req, r
       return res.status(422).json({ error: 'CNPJ da empresa não cadastrado. Acesse Gestão > Empresa e complete o cadastro.' });
     }
 
+    const companyType = (req.body.overrides && req.body.overrides.companyType) || 'MEI';
+    const birthDate   = req.body.birth_date || (req.body.overrides && req.body.overrides.birthDate) || null;
+    if ((companyType === 'INDIVIDUAL' || companyType === 'MEI') && !birthDate) {
+      return res.status(422).json({ error: 'Data de nascimento (birth_date) é obrigatória para CPF/MEI no onboarding Asaas.' });
+    }
+    if (birthDate && !/^\d{4}-\d{2}-\d{2}$/.test(birthDate)) {
+      return res.status(422).json({ error: 'birth_date deve estar no formato AAAA-MM-DD' });
+    }
+
     const payload = {
       name:        co.trade_name || co.legal_name,
       email:       req.body.email || co.email,
       cpfCnpj,
-      companyType: 'MEI', // default; pode ser sobrescrito via body
+      companyType,
+      birthDate:   birthDate || undefined,
       phone:       (req.body.phone || co.phone || co.whatsapp || '').replace(/\D/g, ''),
       mobilePhone: (req.body.mobile_phone || co.phone || '').replace(/\D/g, ''),
       address:     co.address_street || req.body.address,
