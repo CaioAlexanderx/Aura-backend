@@ -1,7 +1,8 @@
 // AURA. -- storefront/index.js
 // Monta o <script> SPA da vitrine publica concatenando os modulos parts/*.
 // Mantem assinatura compativel com o antigo storefrontScript.js:
-//   buildScript(storeData, escapedSlug) -> string <script>...</script>
+//   buildScript(storeData, escapedSlug, apiBase) -> string <script>...</script>
+// apiBase e opcional (default ''); quando setado, fetches usam URL absoluta.
 'use strict';
 
 const prelude       = require('./parts/prelude');
@@ -15,8 +16,8 @@ const productDetail = require('./parts/product_detail');
 const toast         = require('./parts/toast');
 const bootstrap     = require('./parts/bootstrap');
 
-function buildScript(storeData, escapedSlug) {
-  return prelude(storeData, escapedSlug)
+function buildScript(storeData, escapedSlug, apiBase) {
+  return prelude(storeData, escapedSlug, apiBase)
        + init
        + stateUtils
        + products

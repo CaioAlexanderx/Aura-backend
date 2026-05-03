@@ -61,6 +61,20 @@ function showDetail(id){
           });
           var isSel=selected[a]===val;
           var cls='variant-chip'+(isSel?' active':'')+(possible?'':' disabled');
+          // Swatch de cor: se o valor parece hex (#RRGGBB ou #RGB), renderiza circulo colorido
+          var isHex=/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(val);
+          if(isHex){
+            var ringColor=isSel?'var(--primary)':(possible?'rgba(0,0,0,.15)':'#e5e7eb');
+            var swStyle='display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:999px;background:'+val+';border:2px solid '+ringColor+';box-shadow:'+(isSel?'0 0 0 2px #fff inset':'0 0 0 2px #fff inset')+';cursor:'+(possible?'pointer':'not-allowed')+';opacity:'+(possible?'1':'.4')+';transition:all .15s;'+(isSel?'transform:scale(1.05);':'');
+            // Checkmark visivel quando selecionado — cor do check ajusta conforme luminosidade
+            var r=parseInt(val.length===4?val[1]+val[1]:val.slice(1,3),16);
+            var g=parseInt(val.length===4?val[2]+val[2]:val.slice(3,5),16);
+            var b=parseInt(val.length===4?val[3]+val[3]:val.slice(5,7),16);
+            var luma=(0.299*r+0.587*g+0.114*b);
+            var checkColor=luma>160?'#000':'#fff';
+            var checkH=isSel?'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="'+checkColor+'" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>':'';
+            return '<span class="'+cls+'" data-attr="'+esc(a)+'" data-val="'+esc(val)+'" data-possible="'+(possible?'1':'0')+'" title="'+esc(val)+'" style="'+swStyle+'">'+checkH+'</span>';
+          }
           var style='display:inline-flex;align-items:center;justify-content:center;padding:6px 14px;border-radius:999px;border:1.5px solid '+(isSel?'var(--primary)':(possible?'var(--border)':'#e5e7eb'))+';background:'+(isSel?'var(--primary)':'#fff')+';color:'+(isSel?'#fff':(possible?'var(--text)':'#cbd5e1'))+';font-size:13px;font-weight:600;cursor:'+(possible?'pointer':'not-allowed')+';transition:all .15s;';
           return '<span class="'+cls+'" data-attr="'+esc(a)+'" data-val="'+esc(val)+'" data-possible="'+(possible?'1':'0')+'" style="'+style+'">'+esc(val)+'</span>';
         }).join('')

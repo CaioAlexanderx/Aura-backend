@@ -24,7 +24,7 @@ function startTimer(expiresAt){
 function startPolling(){
   clearInterval(pollInterval);if(!currentOrder)return;
   pollInterval=setInterval(function(){
-    fetch('/api/v1/storefront/'+SLUG+'/order/'+currentOrder.order_id)
+    fetch(API_BASE + '/api/v1/storefront/'+SLUG+'/order/'+currentOrder.order_id)
     .then(function(r){return r.json();})
     .then(function(o){
       if(o.payment_status==='confirmed' || ['confirmed','preparing','ready','delivered'].indexOf(o.status)>=0){
@@ -59,7 +59,7 @@ function markAsPaid(){
   if(!currentOrder) return;
   var btn=document.getElementById('nextBtn');
   btn.disabled=true; btn.textContent='Enviando...';
-  fetch('/api/v1/storefront/'+SLUG+'/order/'+currentOrder.order_id+'/mark-as-paid',{
+  fetch(API_BASE + '/api/v1/storefront/'+SLUG+'/order/'+currentOrder.order_id+'/mark-as-paid',{
     method:'POST', headers:{'Content-Type':'application/json'}
   })
   .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
@@ -90,7 +90,7 @@ function uploadProof(){
     var dataUrl=e.target.result;
     var base64=(dataUrl||'').split(',')[1];
     if(!base64){ label.textContent='📎 Erro — tentar novamente'; return; }
-    fetch('/api/v1/storefront/'+SLUG+'/order/'+currentOrder.order_id+'/upload-proof',{
+    fetch(API_BASE + '/api/v1/storefront/'+SLUG+'/order/'+currentOrder.order_id+'/upload-proof',{
       method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({content:base64, content_type:file.type})
     })

@@ -7,6 +7,14 @@ const buildStyles   = require('./storefrontStyles');
 const buildHtmlBody = require('./storefrontHtml');
 const buildScript   = require('./storefrontScript');
 
+// API_BASE: URL absoluta do backend Aura. Default produção (Railway).
+// Pode ser sobrescrito por env var STOREFRONT_API_BASE_URL.
+// Necessário porque a vitrine pode ser servida em domínio diferente do
+// backend (ex: loja.getaura.com.br via Cloudflare). Sem URL absoluta,
+// fetches relativos do JS da vitrine batem no domínio errado e dão 404.
+const API_BASE = process.env.STOREFRONT_API_BASE_URL
+  || 'https://aura-backend-production-f805.up.railway.app';
+
 function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function escJs(s)   { return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/[\n\r]/g,' '); }
 
@@ -45,7 +53,7 @@ function buildStorefrontPage(data, slug) {
 
   const css    = buildStyles(primary);
   const body   = buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar, addrText, coverUrl });
-  const script = buildScript(storeData, escJs(slug));
+  const script = buildScript(storeData, escJs(slug), API_BASE);
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">

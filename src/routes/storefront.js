@@ -17,6 +17,13 @@ const { buildStorefront } = require('../services/storefrontBuilder');
 const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 
+// API_BASE: URL do backend usada pelos fetches da vitrine (mesmo valor de
+// templates/storefrontPage.js). Precisa estar em connect-src do CSP, senao
+// o browser bloqueia fetch cross-origin (vitrine pode ser servida em
+// dominio diferente do backend, ex: loja.getaura.com.br via Cloudflare).
+const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
+  || 'https://aura-backend-production-f805.up.railway.app';
+
 // CSP relaxado para a vitrine publica (usa scripts inline e imagens R2 + QR via api.qrserver.com)
 const STOREFRONT_CSP = [
   "default-src 'self'",
@@ -24,7 +31,7 @@ const STOREFRONT_CSP = [
   "script-src-attr 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https://r2.getaura.com.br https://pub-f21f233f50d1412abc93a05bbdffd0d3.r2.dev https://api.qrserver.com",
-  "connect-src 'self' https://cloudflareinsights.com",
+  "connect-src 'self' https://cloudflareinsights.com " + STOREFRONT_API_BASE,
   "font-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",
