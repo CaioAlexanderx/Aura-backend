@@ -8,6 +8,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requirePlan } = require('../middleware/auth');
+const { buildWhatsAppMsg, notifyWhatsApp, sendReviewLink } = require('../services/foodOrderNotifications');
 
 // Nota: requireAuth + requireCompanyAccess já aplicados em private.js
 // SEC-02: requirePlan recebe strings separadas, NÃO array
@@ -320,9 +321,9 @@ router.patch('/:oid/status', guard, async (req, res) => {
     await client.query('COMMIT');
 
     // ── FOOD-04d: WhatsApp — notificação + link de avaliação ──
-    _notifyWhatsApp(updated[0]).catch(() => {});
+    notifyWhatsApp(updated[0]).catch(() => {});
     if (status === 'delivered') {
-      _sendReviewLink(updated[0], req.params.id).catch(() => {});
+      sendReviewLink(updated[0], req.params.id).catch(() => {});
     }
 
     res.json(updated[0]);
@@ -360,59 +361,12 @@ router.post('/:oid/notify', guard, async (req, res) => {
       [req.params.oid, req.params.id]
     );
     if (!rows.length) return notFound(res);
-    const sent = await _notifyWhatsApp(rows[0]);
-    res.json({ sent, message: _buildWhatsAppMsg(rows[0]) });
+    const sent = await notifyWhatsApp(rows[0]);
+    res.json({ sent, message: buildWhatsAppMsg(rows[0]) });
   } catch (e) {
     console.error('[food/notify] Erro:', e.message);
     res.status(500).json({ error: 'Erro ao enviar notificação' });
   }
 });
-
-// ── WhatsApp helpers ──────────────────────────────────────────
-const STATUS_MESSAGES = {
-  confirmed: 'recebido e confirmado! Em breve começa a preparação.',
-  preparing: 'em preparo na cozinha. Aguarde!',
-  ready:     'pronto para retirada ou saiu para entrega.',
-  delivered: 'entregue! Bom apetite. 😊',
-  cancelled: 'cancelado. Em caso de dúvidas, entre em contato.',
-};
-
-function _buildWhatsAppMsg(order) {
-  const verb = STATUS_MESSAGES[order.status];
-  if (!verb) return null;
-  const id   = order.id.slice(-6).toUpperCase();
-  const name = order.customer_name ? ', ' + order.customer_name.split(' ')[0] : '';
-  return `Olá${name}! 🍽️\n\nSeu pedido *#${id}* está ${verb}\n\nAcompanhe: getaura.com.br/pedido/${order.id}\n\nObrigado pela preferência! ✨`;
-}
-
-async function _notifyWhatsApp(order) {
-  const msg = _buildWhatsAppMsg(order);
-  if (!msg || !order.customer_phone) return false;
-  // TODO pós-CNPJ: await whatsappClient.sendMessage(order.customer_phone, msg);
-  console.log(`[food/whatsapp] STUB — ${order.customer_phone}: ${msg.slice(0,60)}...`);
-  return true;
-}
-
-// ── FOOD-04d: Link de avaliação pós-entrega ───────────────────
-async function _sendReviewLink(order, companyId) {
-  if (!order.customer_phone) return false;
-  const { rows } = await db.query(
-    `SELECT review_sent_at FROM food_orders WHERE id=$1`, [order.id]
-  );
-  if (rows[0]?.review_sent_at) return false;
-
-  const id   = order.id.slice(-6).toUpperCase();
-  const name = order.customer_name ? ', ' + order.customer_name.split(' ')[0] : '';
-  const reviewUrl = `getaura.com.br/avaliar/${order.id}`;
-  const msg = `Olá${name}! 🙏\n\nEsperamos que tenha gostado do pedido *#${id}*!\n\nAvalie o seu pedido (leva 30 segundos):\n👉 ${reviewUrl}\n\nSua opinião é muito importante para nós! ⭐`;
-
-  // TODO pós-CNPJ: await whatsappClient.sendMessage(order.customer_phone, msg);
-  console.log(`[food/review] STUB — ${order.customer_phone}: ${msg.slice(0,60)}...`);
-
-  await db.query(
-    `UPDATE food_orders SET review_sent_at=NOW() WHERE id=$1`, [order.id]
-  );
-  return true;
-}
 
 module.exports = router;
