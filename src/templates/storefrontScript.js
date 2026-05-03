@@ -49,6 +49,7 @@ PRODUCTS.forEach(function(p){if(p.category&&ALL_CATS.indexOf(p.category)===-1)AL
 var cart={},currentCat='Todos',searchTerm='';
 var checkoutStep=1,selectedDelivery=SETTINGS.pickup_enabled!==false?'pickup':'delivery';
 var customerData={},currentOrder=null,pollInterval=null,timerInterval=null;
+var paymentMarked=false;
 
 function fmt(v){return 'R$ '+Number(v).toFixed(2).replace('.',',');}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
@@ -177,8 +178,25 @@ function checkoutNext(){
       var bairro=document.getElementById('inp_bairro')?document.getElementById('inp_bairro').value.trim():'';
       customerData.delivery_address=addr+(bairro?', '+bairro:'');
     }
-    submitOrder();
-  }else if(checkoutStep===3){showToast('Aguardando confirmação do pagamento...');}
+    var hasPix=!!SETTINGS.has_pix, hasOd=!!SETTINGS.pay_on_delivery_enabled;
+    if(hasPix && hasOd){
+      customerData.payment_method=null;
+      checkoutStep=3; renderCheckoutStep();
+    } else if(hasPix){
+      customerData.payment_method='pix'; submitOrder();
+    } else if(hasOd){
+      customerData.payment_method='on_delivery'; submitOrder();
+    } else {
+      showToast('Loja sem método de pagamento configurado');
+    }
+  }else if(checkoutStep===3){
+    var pm=customerData.payment_method;
+    if(pm==='on_delivery'){ closeCheckout(); cart={}; updateCartUI(); renderProducts(); return; }
+    if(pm==='pix' && currentOrder){
+      if(paymentMarked){ closeCheckout(); cart={}; updateCartUI(); renderProducts(); return; }
+      markAsPaid();
+    }
+  }
 }
 
 function renderCheckoutStep(){
@@ -220,22 +238,78 @@ function renderCheckoutStep(){
     var op=document.getElementById('opt_pickup'),od=document.getElementById('opt_delivery');
     if(op) op.addEventListener('click',function(){selectDelivery('pickup');});
     if(od) od.addEventListener('click',function(){selectDelivery('delivery');});
-  }else if(s===3&&currentOrder){
-    var pix=currentOrder.pix,total=currentOrder.total;
-    var qrH=pix&&pix.qrcode?'<img src="data:image/png;base64,'+pix.qrcode+'" style="width:160px;height:160px;border-radius:8px;" alt="QR Pix">':'<div style="font-size:12px;color:var(--text-3);padding:20px;line-height:1.6;">Escaneie pelo app do banco<br>ou use o código abaixo</div>';
-    var payload=pix&&pix.payload?pix.payload:'Indisponível';
-    body.innerHTML='<div class="pix-box">'
-      +'<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:16px;"><span style="background:#32BCAD;border-radius:8px;padding:4px 12px;color:#fff;font-size:12px;font-weight:800;letter-spacing:.5px;">PIX</span><span style="font-size:12px;color:var(--text-3);">Pedido #'+esc(currentOrder.order_number)+'</span></div>'
-      +'<div class="pix-qr">'+qrH+'</div>'
-      +'<div style="font-size:26px;font-weight:800;color:var(--text);margin-bottom:4px;">'+fmt(total)+'</div>'
-      +'<div style="font-size:11px;color:var(--text-3);margin-bottom:14px;">Copie o código e pague no app do banco</div>'
-      +'<div class="pix-key-box"><span class="pix-key" id="pixPayload">'+esc(payload)+'</span><span class="pix-copy" id="pixCopyBtn">Copiar código</span></div>'
-      +'<div style="font-size:12px;color:var(--text-3);line-height:1.6;">App do banco → Pix → Pagar com código</div>'
-      +'<div class="pix-timer">⏱ Expira em <span id="timer">15:00</span></div></div>'
-      +'<div style="margin-top:14px;background:var(--green-light);border-radius:var(--r);padding:14px;font-size:12px;color:#065f46;display:flex;gap:10px;"><span style="flex-shrink:0;">✅</span><div><strong>Confirmação automática</strong><br>Após o pagamento, você recebe notificação e o pedido entra em preparo.</div></div>';
-    document.getElementById('pixCopyBtn').addEventListener('click',copyPix);
-    startTimer(pix&&pix.expires_at?pix.expires_at:null);
-    startPolling();
+  }else if(s===3){
+    var hasPix=!!SETTINGS.has_pix, hasOd=!!SETTINGS.pay_on_delivery_enabled;
+    // Substate: escolha de metodo (loja oferece os 2 e cliente nao escolheu ainda)
+    if(!customerData.payment_method && hasPix && hasOd){
+      body.innerHTML='<p style="font-size:13px;color:var(--text-2);margin-bottom:16px;">Como você quer pagar?</p>'
+        +'<div class="delivery-opts">'
+        +'<div class="delivery-opt" id="opt_pix_method" style="cursor:pointer;"><div style="background:#32BCAD;border-radius:6px;padding:6px 10px;color:#fff;font-size:11px;font-weight:800;flex-shrink:0;">PIX</div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar com Pix agora</div><div class="delivery-opt-detail">Você paga, anexa o comprovante, a loja confirma.</div></div><span style="color:var(--primary);font-size:18px;">→</span></div>'
+        +'<div class="delivery-opt" id="opt_od_method" style="cursor:pointer;"><div style="font-size:24px;flex-shrink:0;">💵</div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar na entrega</div><div class="delivery-opt-detail">Combine com a loja: dinheiro, cartão, etc.</div></div><span style="color:var(--primary);font-size:18px;">→</span></div>'
+        +'</div>';
+      var ep=document.getElementById('opt_pix_method'),eod=document.getElementById('opt_od_method');
+      if(ep) ep.addEventListener('click',function(){chooseMethod('pix');});
+      if(eod) eod.addEventListener('click',function(){chooseMethod('on_delivery');});
+      btn.style.display='none';
+      return;
+    }
+    btn.style.display='';
+
+    // Substate: on_delivery confirmado
+    if(customerData.payment_method==='on_delivery' && currentOrder){
+      body.innerHTML='<div class="confirm-screen">'
+        +'<div class="confirm-icon">✅</div>'
+        +'<div class="confirm-title">Pedido confirmado!</div>'
+        +'<div class="confirm-desc">Pedido <strong>#'+esc(currentOrder.order_number)+'</strong>. Você pagará '+fmt(currentOrder.total)+' na entrega.</div>'
+        +(selectedDelivery==='delivery'
+          ?'<p style="font-size:12px;color:var(--text-3);max-width:300px;margin:8px auto;">Aguarde nosso contato pra combinar a entrega.</p>'
+          :'<p style="font-size:12px;color:var(--text-3);max-width:300px;margin:8px auto;">Vá retirar na loja: '+esc(CONTACT.address||'')+'</p>')
+        +'</div>';
+      btn.textContent='Concluir';
+      btn.className='next-btn green';
+      return;
+    }
+
+    // Substate: Pix
+    if(customerData.payment_method==='pix' && currentOrder){
+      var pix=currentOrder.pix||{};
+      var payload=pix.payload||'';
+      // Já marcou como pago — aguardando aprovação
+      if(paymentMarked){
+        body.innerHTML='<div class="confirm-screen">'
+          +'<div class="confirm-icon" style="background:#fef3c7;">⏳</div>'
+          +'<div class="confirm-title">Aguardando confirmação</div>'
+          +'<div class="confirm-desc">Pedido <strong>#'+esc(currentOrder.order_number)+'</strong>. A loja vai confirmar seu pagamento em breve.</div>'
+          +(currentOrder.payment_proof_url
+            ?'<p style="font-size:12px;color:var(--green);margin-top:12px;">✓ Comprovante enviado</p>'
+            :'<p style="font-size:12px;color:var(--text-3);margin-top:12px;">Sem comprovante anexado</p>')
+          +'</div>';
+        btn.textContent='Fechar';
+        btn.className='next-btn green';
+        startPolling();
+        return;
+      }
+      // Mostrar QR + comprovante + botao Ja paguei
+      var qrUrl=payload?('https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=8&data='+encodeURIComponent(payload)):null;
+      body.innerHTML='<div class="pix-box">'
+        +'<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:14px;"><span style="background:#32BCAD;border-radius:8px;padding:4px 12px;color:#fff;font-size:12px;font-weight:800;letter-spacing:.5px;">PIX</span><span style="font-size:12px;color:var(--text-3);">Pedido #'+esc(currentOrder.order_number)+'</span></div>'
+        +'<div class="pix-qr">'+(qrUrl?'<img src="'+qrUrl+'" alt="QR Pix" style="width:200px;height:200px;border-radius:8px;background:#fff;padding:8px;">':'<div style="font-size:12px;color:var(--text-3);padding:20px;">QR indisponível — use o código abaixo</div>')+'</div>'
+        +'<div style="font-size:26px;font-weight:800;color:var(--text);margin:14px 0 4px;">'+fmt(currentOrder.total)+'</div>'
+        +'<div style="font-size:11px;color:var(--text-3);margin-bottom:14px;">Copie o código e pague no app do banco</div>'
+        +'<div class="pix-key-box"><span class="pix-key" id="pixPayload">'+esc(payload||'Indisponível')+'</span><span class="pix-copy" id="pixCopyBtn">Copiar código</span></div>'
+        +'</div>'
+        +'<div style="margin-top:14px;background:var(--bg);border:1.5px dashed var(--border);border-radius:var(--r);padding:14px;">'
+        +'<label for="proofInput" style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;color:var(--text-2);font-weight:600;"><span style="font-size:20px;">📎</span><span id="proofLabel">Anexar comprovante (opcional)</span></label>'
+        +'<input type="file" id="proofInput" accept="image/*,application/pdf" style="display:none;">'
+        +'<p style="margin-top:8px;font-size:11px;color:var(--text-3);line-height:1.5;">Anexar agiliza a confirmação do lojista.</p>'
+        +'</div>';
+      var pcb=document.getElementById('pixCopyBtn');
+      if(pcb) pcb.addEventListener('click',copyPix);
+      var pin=document.getElementById('proofInput');
+      if(pin) pin.addEventListener('change',uploadProof);
+      btn.textContent='Já paguei ✓';
+      btn.className='next-btn green';
+    }
   }
 }
 
@@ -264,12 +338,12 @@ function submitOrder(){
   var btn=document.getElementById('nextBtn');
   btn.disabled=true;btn.textContent='Criando pedido...';
   var items=Object.values(cart).map(function(i){return{product_id:i.product_id,variant_id:i.variant_id||null,quantity:i.qty};});
-  var body={customer_name:customerData.name,customer_phone:customerData.phone,customer_email:customerData.email||null,delivery_type:selectedDelivery,delivery_address:customerData.delivery_address||null,items:items};
+  var body={customer_name:customerData.name,customer_phone:customerData.phone,customer_email:customerData.email||null,delivery_type:selectedDelivery,delivery_address:customerData.delivery_address||null,payment_method:customerData.payment_method||null,items:items};
   fetch('/api/v1/storefront/'+SLUG+'/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
   .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
   .then(function(res){
     if(!res.ok){showToast(res.data.error||'Erro ao criar pedido');btn.disabled=false;btn.textContent='Ir para pagamento';return;}
-    currentOrder=res.data;checkoutStep=3;renderCheckoutStep();
+    currentOrder=res.data; paymentMarked=false; checkoutStep=3; renderCheckoutStep();
   })
   .catch(function(){showToast('Erro de conexão. Tente novamente.');btn.disabled=false;btn.textContent='Ir para pagamento';});
 }
@@ -298,11 +372,15 @@ function startPolling(){
     fetch('/api/v1/storefront/'+SLUG+'/order/'+currentOrder.order_id)
     .then(function(r){return r.json();})
     .then(function(o){
-      if(o.payment_status==='paid'||['confirmed','preparing','ready','delivered'].indexOf(o.status)>=0){
+      if(o.payment_status==='confirmed' || ['confirmed','preparing','ready','delivered'].indexOf(o.status)>=0){
         clearInterval(pollInterval);clearInterval(timerInterval);showConfirmation(o);
+      } else if(o.status==='awaiting_approval' && !paymentMarked){
+        paymentMarked=true;
+        if(o.payment_proof_url) currentOrder.payment_proof_url=o.payment_proof_url;
+        renderCheckoutStep();
       }
     }).catch(function(){});
-  },3000);
+  },4000);
 }
 
 function showConfirmation(order){
@@ -315,6 +393,68 @@ function showConfirmation(order){
   ov.innerHTML='<div class="checkout-sheet"><div class="checkout-head"><div class="checkout-head-info" style="margin-left:46px;"><div class="checkout-title">Pedido confirmado!</div></div><div class="cart-close" onclick="this.closest(\\'checkout-overlay\\').remove();document.body.style.overflow=\\'\\';" > ×</div></div><div class="checkout-body"><div class="confirm-screen"><div class="confirm-icon">✅</div><div class="confirm-title">Pagamento recebido!</div><div class="confirm-desc">Pedido <strong>#'+esc(order.order_number||'')+'</strong> confirmado. Em breve você recebe atualizações.</div>'+wBtn+'</div></div></div>';
   document.body.appendChild(ov);
   document.body.style.overflow='hidden';
+}
+
+function chooseMethod(method){
+  customerData.payment_method=method;
+  submitOrder();
+}
+
+function markAsPaid(){
+  if(!currentOrder) return;
+  var btn=document.getElementById('nextBtn');
+  btn.disabled=true; btn.textContent='Enviando...';
+  fetch('/api/v1/storefront/'+SLUG+'/order/'+currentOrder.order_id+'/mark-as-paid',{
+    method:'POST', headers:{'Content-Type':'application/json'}
+  })
+  .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
+  .then(function(res){
+    if(!res.ok){
+      showToast(res.data.error||'Erro ao marcar como pago');
+      btn.disabled=false; btn.textContent='Já paguei ✓';
+      return;
+    }
+    paymentMarked=true;
+    renderCheckoutStep();
+  })
+  .catch(function(){
+    showToast('Erro de conexão. Tente novamente.');
+    btn.disabled=false; btn.textContent='Já paguei ✓';
+  });
+}
+
+function uploadProof(){
+  var input=document.getElementById('proofInput');
+  if(!input || !input.files || !input.files[0]) return;
+  var file=input.files[0];
+  if(file.size > 5*1024*1024){ showToast('Arquivo muito grande (max 5MB)'); return; }
+  var label=document.getElementById('proofLabel');
+  label.textContent='Enviando...';
+  var reader=new FileReader();
+  reader.onload=function(e){
+    var dataUrl=e.target.result;
+    var base64=(dataUrl||'').split(',')[1];
+    if(!base64){ label.textContent='📎 Erro — tentar novamente'; return; }
+    fetch('/api/v1/storefront/'+SLUG+'/order/'+currentOrder.order_id+'/upload-proof',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({content:base64, content_type:file.type})
+    })
+    .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
+    .then(function(res){
+      if(!res.ok){
+        label.textContent='📎 Erro — tentar novamente';
+        showToast(res.data.error||'Erro ao enviar');
+      } else {
+        label.textContent='✓ Comprovante enviado';
+        currentOrder.payment_proof_url=res.data.payment_proof_url;
+      }
+    })
+    .catch(function(){
+      label.textContent='📎 Erro — tentar novamente';
+      showToast('Erro de conexão');
+    });
+  };
+  reader.readAsDataURL(file);
 }
 
 // ============================================================
