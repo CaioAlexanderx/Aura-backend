@@ -4,17 +4,23 @@
 // PUT  /companies/:id/digital-channel
 // POST /companies/:id/digital-channel/request-domain
 // POST /companies/:id/digital-channel/upload-image?type=logo|banner
-// POST /companies/:id/digital-channel/setup-pix
+// POST /companies/:id/digital-channel/setup-pix       (legado Asaas)
+//
+// Migration 088: PUT agora aceita pix_key, pix_key_type, pix_holder_name,
+// pix_holder_city — chave Pix manual do lojista, sem subconta Asaas.
+// pixService usa esses campos pra gerar BR Code estatico no checkout.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
 const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
+const { validatePixKey } = require('../services/staticPixService');
 
 const DEFAULT_CONFIG = {
   site_name: null, tagline: '', primary_color: '#7c3aed', secondary_color: '#a78bfa',
   logo_url: null, cover_url: null, description: '', address: '', phone: '', whatsapp: '',
   instagram: '', google_maps_url: '',
+  pix_key: null, pix_key_type: null, pix_holder_name: null, pix_holder_city: null,
   business_hours: {
     seg: { open: '09:00', close: '18:00', closed: false },
     ter: { open: '09:00', close: '18:00', closed: false },
@@ -87,7 +93,16 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     instagram, google_maps_url, business_hours, featured_product_ids,
     show_prices, show_stock, delivery_enabled, delivery_fee,
     delivery_radius_km, pickup_enabled, is_published,
+    pix_key, pix_key_type, pix_holder_name, pix_holder_city,
   } = req.body;
+
+  // Validacao Pix manual: se chave veio, precisa ser valida pro tipo informado
+  if (pix_key && String(pix_key).trim()) {
+    const v = validatePixKey(pix_key, pix_key_type);
+    if (!v.valid) {
+      return res.status(400).json({ error: 'Chave Pix invalida: ' + v.error });
+    }
+  }
 
   let slug = req.body.slug || null;
   if (!slug && site_name) {
@@ -105,10 +120,12 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         logo_url, cover_url, description, address, phone, whatsapp,
         instagram, google_maps_url, business_hours, featured_product_ids,
         show_prices, show_stock, delivery_enabled, delivery_fee,
-        delivery_radius_km, pickup_enabled, is_published, slug
+        delivery_radius_km, pickup_enabled, is_published, slug,
+        pix_key, pix_key_type, pix_holder_name, pix_holder_city
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+        $24, $25, $26, $27
       )
       ON CONFLICT (company_id) DO UPDATE SET
         site_name = COALESCE($2, digital_channel_config.site_name),
@@ -133,6 +150,10 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         pickup_enabled = COALESCE($21, digital_channel_config.pickup_enabled),
         is_published = COALESCE($22, digital_channel_config.is_published),
         slug = COALESCE($23, digital_channel_config.slug),
+        pix_key = COALESCE($24, digital_channel_config.pix_key),
+        pix_key_type = COALESCE($25, digital_channel_config.pix_key_type),
+        pix_holder_name = COALESCE($26, digital_channel_config.pix_holder_name),
+        pix_holder_city = COALESCE($27, digital_channel_config.pix_holder_city),
         updated_at = NOW()
       RETURNING *
     `, [
@@ -145,6 +166,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       show_prices ?? null, show_stock ?? null, delivery_enabled ?? null,
       delivery_fee ?? null, delivery_radius_km ?? null,
       pickup_enabled ?? null, is_published ?? null, slug,
+      pix_key || null, pix_key_type || null, pix_holder_name || null, pix_holder_city || null,
     ]);
 
     res.json({
@@ -272,8 +294,9 @@ router.delete('/upload-image', requireRole('client', 'analyst', 'admin'), async 
 });
 
 // ============================================================
-// POST /companies/:id/digital-channel/setup-pix
-// Cria subconta Asaas automaticamente — cliente so preenche dados basicos
+// POST /companies/:id/digital-channel/setup-pix  (LEGADO via Asaas)
+// Mantido pra retrocompat com lojistas que ja tem subconta. Novos
+// fluxos usam pix_key direto via PUT /digital-channel.
 // ============================================================
 router.post('/setup-pix', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
@@ -283,7 +306,6 @@ router.post('/setup-pix', requireRole('client', 'analyst', 'admin'), async (req,
     return res.status(400).json({ error: 'Nome, e-mail, CPF/CNPJ e celular sao obrigatorios' });
   }
 
-  // Asaas exige data de nascimento para pessoa fisica (CPF) e MEI
   if ((company_type === 'INDIVIDUAL' || company_type === 'MEI') && !birth_date) {
     return res.status(400).json({ error: 'Data de nascimento e obrigatoria para CPF/MEI' });
   }
