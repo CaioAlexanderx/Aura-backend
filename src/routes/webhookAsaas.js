@@ -2,7 +2,11 @@
 // AURA. — Asaas Webhook Handler
 // FIX: Asaas sends access token in header, NOT HMAC signature
 // Asaas header: asaas-access-token (plain token comparison)
-// Mounted at: /webhooks/asaas (PUBLIC, no auth)
+// Mounted at: /api/v1/webhooks/asaas (PUBLIC, no auth)
+// FIX (03/05): logs de debug ricos pra rastrear webhooks rejeitados
+//              (zero eventos chegavam ao DB desde 24/04 — investigando se
+//              é mismatch de token, header com nome diferente, ou Asaas
+//              pausou a integracao). Logs aparecem no Railway.
 //
 // Handles two flows:
 //   1. externalReference = 'digital-order-<uuid>'  → pedido Canal Digital
@@ -23,22 +27,67 @@ const notify  = require('../services/digitalOrderNotifications');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
+// Log inicial 1x no boot pra confirmar config
+if (ASAAS_WEBHOOK_TOKEN) {
+  console.log('[WEBHOOK] ASAAS_WEBHOOK_SECRET configurado (length=' + ASAAS_WEBHOOK_TOKEN.length + ', sha256-prefix=' +
+    crypto.createHash('sha256').update(ASAAS_WEBHOOK_TOKEN).digest('hex').slice(0, 8) + ')');
+} else {
+  console.warn('[WEBHOOK] ASAAS_WEBHOOK_SECRET NAO configurado — aceitando todos webhooks sem validar');
+}
+
+function logIncomingRequest(req, decision, reason) {
+  // Sanitiza headers pra log: nao loga valor de auth, so presence + length
+  const headerNames = Object.keys(req.headers || {}).sort();
+  const authLikeHeaders = headerNames.filter(h =>
+    /token|secret|signature|auth|asaas/i.test(h)
+  );
+  const headerSummary = authLikeHeaders.map(h => {
+    const v = req.headers[h];
+    const len = typeof v === 'string' ? v.length : (Array.isArray(v) ? v.join(',').length : 0);
+    return h + '(len=' + len + ')';
+  });
+  const event = req.body?.event || '(no event)';
+  const paymentId = req.body?.payment?.id || '(no payment)';
+  console.log('[WEBHOOK] ' + decision + ' — ' + reason + ' | event=' + event +
+    ' | payment=' + paymentId + ' | auth-headers=[' + headerSummary.join(', ') +
+    '] | all-header-count=' + headerNames.length + ' | from-ip=' + (req.ip || '(unknown)'));
+}
+
 function validateToken(req) {
   if (!ASAAS_WEBHOOK_TOKEN) {
-    console.warn('[WEBHOOK] ASAAS_WEBHOOK_SECRET not set — accepting all events');
+    logIncomingRequest(req, 'ACCEPTED', 'no secret configured');
     return true;
   }
   var token = req.headers['asaas-access-token'] || '';
   if (!token) {
-    console.warn('[WEBHOOK] No asaas-access-token header received');
+    // Tenta variantes comuns de nome de header (caso Asaas tenha mudado)
+    var alt = req.headers['asaas-token'] || req.headers['x-asaas-token'] ||
+              req.headers['x-asaas-signature'] || req.headers['authorization'] || '';
+    if (alt) {
+      logIncomingRequest(req, 'REJECTED-401',
+        'missing asaas-access-token header but found alternate auth-like header — Asaas pode ter mudado o nome do header');
+    } else {
+      logIncomingRequest(req, 'REJECTED-401', 'no asaas-access-token header at all');
+    }
     return false;
   }
   try {
     var a = Buffer.from(String(token));
     var b = Buffer.from(String(ASAAS_WEBHOOK_TOKEN));
-    if (a.length !== b.length) return false;
-    return crypto.timingSafeEqual(a, b);
-  } catch {
+    if (a.length !== b.length) {
+      logIncomingRequest(req, 'REJECTED-403',
+        'token length mismatch: received=' + a.length + ', expected=' + b.length);
+      return false;
+    }
+    const ok = crypto.timingSafeEqual(a, b);
+    if (!ok) {
+      logIncomingRequest(req, 'REJECTED-403', 'token value mismatch (same length)');
+      return false;
+    }
+    logIncomingRequest(req, 'ACCEPTED', 'token valid');
+    return true;
+  } catch (err) {
+    logIncomingRequest(req, 'REJECTED-403', 'comparison threw: ' + err.message);
     return false;
   }
 }
@@ -61,7 +110,6 @@ var ORDER_PAYMENT_MAP = {
 
 router.post('/', async function(req, res) {
   if (!validateToken(req)) {
-    console.warn('[WEBHOOK] Invalid Asaas token — rejecting');
     return res.status(403).json({ error: 'Invalid token' });
   }
 
@@ -80,7 +128,10 @@ router.post('/', async function(req, res) {
   // ── 2. Company billing (plano)
   try {
     var newStatus = PAYMENT_STATUS_MAP[event];
-    if (!newStatus) return res.status(200).json({ received: true, handled: false });
+    if (!newStatus) {
+      console.log('[WEBHOOK] Event ' + event + ' nao mapeado — ignorando (mas recebido)');
+      return res.status(200).json({ received: true, handled: false, event_ignored: event });
+    }
 
     var result = await db.query(
       'SELECT id, plan, billing_status, is_primary FROM companies WHERE asaas_customer_id=$1 OR id=$2 LIMIT 1',
@@ -201,5 +252,22 @@ async function handleDigitalOrderPayment(req, res, event, payment, extRef) {
     res.status(200).json({ received: true, error: true });
   }
 }
+
+// ── Endpoint de diagnostico (GET, sem validacao de token) ─────
+// Permite ao operador checar se o secret esta carregado e bate
+// com o que ele espera (compara hash de prefixo, nao o secret cru).
+// Uso: curl https://.../api/v1/webhooks/asaas/_diag
+router.get('/_diag', function(req, res) {
+  res.json({
+    status: 'ok',
+    secret_configured: !!ASAAS_WEBHOOK_TOKEN,
+    secret_length: ASAAS_WEBHOOK_TOKEN ? ASAAS_WEBHOOK_TOKEN.length : 0,
+    secret_sha256_prefix: ASAAS_WEBHOOK_TOKEN
+      ? crypto.createHash('sha256').update(ASAAS_WEBHOOK_TOKEN).digest('hex').slice(0, 8)
+      : null,
+    expected_header: 'asaas-access-token',
+    note: 'Compare secret_sha256_prefix com o hash do token configurado no painel Asaas pra confirmar que batem.',
+  });
+});
 
 module.exports = router;

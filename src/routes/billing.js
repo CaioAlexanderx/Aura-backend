@@ -6,6 +6,11 @@
 // FIX: addressNumber no creditCardHolderInfo (tokenize + subscribe)
 // FIX (02/05): address (logradouro) também no creditCardHolderInfo + logs de debug
 // FIX (02/05): reutilizar token existente quando cartão já tokenizado
+// FIX (03/05): cartão agora cobra primeira mensalidade IMEDIATAMENTE via POST /payments
+//              (antes criava subscription com nextDueDate=amanhã, que ficava PENDING
+//              e o cliente via "active" sem pagamento real). Subscription só agenda
+//              próximas mensalidades a partir do mês seguinte. Status active só
+//              quando primeira cobrança CONFIRMED/RECEIVED.
 // PRICING 21/04: Negocio 199->169.90, Expansao 299->269.90
 // ============================================================
 
@@ -221,17 +226,21 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       try { await asaas('DELETE', '/subscriptions/' + company.asaas_subscription_id); } catch {}
     }
 
-    const nextDueDate = new Date();
-    nextDueDate.setDate(nextDueDate.getDate() + 1);
-    const dueDateStr = nextDueDate.toISOString().split('T')[0];
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().split('T')[0];
 
-    // PIX Annual: single upfront payment
+    // ════════════════════════════════════════════════════════════════
+    // PIX Annual: single upfront payment (mantido)
+    // ════════════════════════════════════════════════════════════════
     if (billing_type === 'PIX' && cycle === 'annual') {
       const payment = await asaas('POST', '/payments', {
         customer: customerId,
         billingType: 'PIX',
         value: value,
-        dueDate: dueDateStr,
+        dueDate: tomorrowStr,
         description: PLANS[plan].name + ' - Anual (Pix a vista)',
         externalReference: company.id,
       });
@@ -252,71 +261,175 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       });
     }
 
-    // Monthly subscription (PIX or CARD)
-    // Para anual no cartão: valor mensal descontado + endDate 12 meses à frente
+    // ════════════════════════════════════════════════════════════════
+    // CREDIT_CARD: cobrar PRIMEIRO MÊS imediato + criar subscription
+    // pra recorrência a partir do mês seguinte. Só marca billing_status=
+    // 'active' se a primeira cobrança vier CONFIRMED/RECEIVED do Asaas.
+    // ════════════════════════════════════════════════════════════════
+    if (billing_type === 'CREDIT_CARD') {
+      const cardHolderInfo = credit_card_holder_name ? {
+        name: credit_card_holder_name,
+        cpfCnpj: (credit_card_holder_cpf || company.cnpj || '').replace(/\D/g, ''),
+        email: user.email,
+        phone: user.phone || undefined,
+        postalCode: credit_card_holder_postal_code || company.address_zip || undefined,
+        addressNumber: credit_card_holder_address_number || undefined,
+        address: credit_card_holder_address || undefined,
+      } : undefined;
+
+      console.log('[BILLING] Cobranca imediata cartao — company=' + company.id + ' value=' + value + ' cycle=' + cycle);
+
+      // 1. Cobrar primeira mensalidade AGORA (captura sincrona via cartao)
+      let firstPayment;
+      try {
+        const firstChargeBody = {
+          customer: customerId,
+          billingType: 'CREDIT_CARD',
+          value: value,
+          dueDate: todayStr,
+          description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual - 1ª mensalidade)' : ''),
+          externalReference: company.id,
+          creditCardToken: credit_card_token,
+        };
+        if (cardHolderInfo) firstChargeBody.creditCardHolderInfo = cardHolderInfo;
+        firstPayment = await asaas('POST', '/payments', firstChargeBody);
+      } catch (err) {
+        console.error('[BILLING] Cobranca imediata FALHOU:', err.message);
+        return res.status(402).json({
+          error: 'Cobrança recusada: ' + (err.message || 'verifique os dados do cartão'),
+          stage: 'first_charge',
+        });
+      }
+
+      const isPaid = firstPayment.status === 'CONFIRMED' || firstPayment.status === 'RECEIVED';
+      const isPending = firstPayment.status === 'PENDING' || firstPayment.status === 'AWAITING_RISK_ANALYSIS';
+
+      // Status nao reconhecido como sucesso nem como pendente → falha
+      if (!isPaid && !isPending) {
+        console.warn('[BILLING] Cobranca imediata nao aprovada — status=' + firstPayment.status);
+        return res.status(402).json({
+          error: 'Cobrança não aprovada (status: ' + firstPayment.status + '). Tente outro cartão.',
+          stage: 'first_charge_status',
+          payment_status: firstPayment.status,
+          payment_id: firstPayment.id,
+        });
+      }
+
+      // 2. Criar subscription pra cobranças recorrentes a partir do mês seguinte
+      const nextMonth = new Date(today);
+      nextMonth.setMonth(nextMonth.getMonth() + 1);
+      const subStartStr = nextMonth.toISOString().split('T')[0];
+
+      // Pra anual: subscription endDate = end_date - 1 mês (já cobrei 1 imediato,
+      // restam 11 mensalidades pra subscription gerar entre subStartStr e endDt).
+      let subscriptionEndDate = undefined;
+      if (cycle === 'annual' && end_date) {
+        const endDt = new Date(end_date);
+        endDt.setMonth(endDt.getMonth() - 1);
+        subscriptionEndDate = endDt.toISOString().split('T')[0];
+      }
+
+      const subscriptionBody = {
+        customer: customerId,
+        billingType: 'CREDIT_CARD',
+        value: value,
+        nextDueDate: subStartStr,
+        cycle: 'MONTHLY',
+        endDate: subscriptionEndDate,
+        description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : ''),
+        externalReference: company.id,
+        creditCardToken: credit_card_token,
+      };
+      if (cardHolderInfo) subscriptionBody.creditCardHolderInfo = cardHolderInfo;
+
+      let subscription = null;
+      try {
+        subscription = await asaas('POST', '/subscriptions', subscriptionBody);
+      } catch (subErr) {
+        // Subscription falhou mas a primeira cobranca ja foi capturada.
+        // Persistir payment_id e marcar pra reconciliacao manual.
+        console.error('[BILLING] Subscription falhou apos primeira cobranca OK:', subErr.message);
+        await db.query(
+          `UPDATE companies SET plan=$1, asaas_pending_payment_id=$2, billing_status=$3,
+             billing_cycle=$4, last_payment_date=$5, updated_at=NOW() WHERE id=$6`,
+          [plan, firstPayment.id, isPaid ? 'active' : 'pending', cycle,
+           isPaid ? todayStr : null, company.id]
+        );
+        return res.status(isPaid ? 201 : 202).json({
+          payment_id: firstPayment.id,
+          subscription_id: null,
+          payment_status: firstPayment.status,
+          plan, cycle, value, billing_type: 'CREDIT_CARD',
+          confirmed: isPaid,
+          warning: 'Primeira mensalidade capturada com sucesso, mas falha ao agendar recorrência. Suporte foi notificado para reconciliação manual.',
+        });
+      }
+
+      // 3. Atualizar empresa
+      const finalStatus = isPaid ? 'active' : 'pending';
+      await db.query(
+        `UPDATE companies SET plan=$1, asaas_subscription_id=$2, billing_status=$3,
+           billing_cycle=$4, asaas_pending_payment_id=$5, last_payment_date=$6,
+           next_billing_date=$7, updated_at=NOW() WHERE id=$8`,
+        [plan, subscription.id, finalStatus, cycle,
+         isPaid ? null : firstPayment.id,
+         isPaid ? todayStr : null,
+         subscription.nextDueDate, company.id]
+      );
+
+      console.log('[BILLING] Subscription ' + subscription.id + ' criada — billing_status=' + finalStatus + ' (payment_status=' + firstPayment.status + ')');
+
+      return res.status(isPaid ? 201 : 202).json({
+        payment_id: firstPayment.id,
+        subscription_id: subscription.id,
+        plan, cycle, value, billing_type: 'CREDIT_CARD',
+        payment_status: firstPayment.status,
+        next_due_date: subscription.nextDueDate,
+        confirmed: isPaid,
+        message: isPaid
+          ? 'Pagamento confirmado! Sua assinatura está ativa.'
+          : 'Cobrança em análise pelo emissor. Você receberá confirmação em alguns minutos.',
+      });
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // PIX Monthly: subscription com nextDueDate=amanhã (cliente paga
+    // o Pix gerado, webhook ativa quando confirma). Mantido como estava.
+    // ════════════════════════════════════════════════════════════════
     const subscriptionBody = {
       customer: customerId,
-      billingType: billing_type,
+      billingType: 'PIX',
       value: value,
-      nextDueDate: dueDateStr,
+      nextDueDate: tomorrowStr,
       cycle: 'MONTHLY',
       endDate: cycle === 'annual' ? end_date : undefined,
       description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : ''),
       externalReference: company.id,
     };
 
-    if (billing_type === 'CREDIT_CARD' && credit_card_token) {
-      subscriptionBody.creditCardToken = credit_card_token;
-      if (credit_card_holder_name) {
-        subscriptionBody.creditCardHolderInfo = {
-          name: credit_card_holder_name,
-          cpfCnpj: (credit_card_holder_cpf || company.cnpj || '').replace(/\D/g, ''),
-          email: user.email,
-          phone: user.phone || undefined,
-          postalCode: credit_card_holder_postal_code || company.address_zip || undefined,
-          addressNumber: credit_card_holder_address_number || undefined,
-          address: credit_card_holder_address || undefined,
-        };
-      }
-
-      // Log sanitizado — nunca logar token completo
-      console.log('[BILLING] Subscribe for company ' + company.id + ' — holderInfo:', JSON.stringify({
-        hasName: !!credit_card_holder_name,
-        hasCpf: !!credit_card_holder_cpf,
-        hasPostalCode: !!credit_card_holder_postal_code,
-        addressNumber: credit_card_holder_address_number || '(empty)',
-        address: credit_card_holder_address || '(empty)',
-      }));
-    }
-
     const subscription = await asaas('POST', '/subscriptions', subscriptionBody);
 
     let pixData = null;
-    if (billing_type === 'PIX') {
-      try {
-        const payments = await asaas('GET', '/subscriptions/' + subscription.id + '/payments?limit=1');
-        if (payments.data?.[0]?.id) {
-          pixData = await asaas('GET', '/payments/' + payments.data[0].id + '/pixQrCode');
-        }
-      } catch {}
-    }
+    try {
+      const payments = await asaas('GET', '/subscriptions/' + subscription.id + '/payments?limit=1');
+      if (payments.data?.[0]?.id) {
+        pixData = await asaas('GET', '/payments/' + payments.data[0].id + '/pixQrCode');
+      }
+    } catch {}
 
     await db.query(
-      'UPDATE companies SET plan=$1, asaas_subscription_id=$2, billing_status=$3, billing_cycle=$4, next_billing_date=$5, updated_at=NOW() WHERE id=$6',
-      [plan, subscription.id, billing_type === 'CREDIT_CARD' ? 'active' : 'pending', cycle, subscription.nextDueDate, company.id]
+      'UPDATE companies SET plan=$1, asaas_subscription_id=$2, billing_status=\'pending\', billing_cycle=$3, next_billing_date=$4, updated_at=NOW() WHERE id=$5',
+      [plan, subscription.id, cycle, subscription.nextDueDate, company.id]
     );
 
     const response = {
       subscription_id: subscription.id,
-      plan: plan, cycle: cycle, value: value, billing_type: billing_type,
+      plan, cycle, value, billing_type: 'PIX',
       next_due_date: subscription.nextDueDate,
+      pix_qr_code: pixData?.encodedImage || null,
+      pix_copy_paste: pixData?.payload || null,
+      pix_expiration: pixData?.expirationDate || null,
     };
-
-    if (billing_type === 'PIX' && pixData) {
-      response.pix_qr_code = pixData.encodedImage || null;
-      response.pix_copy_paste = pixData.payload || null;
-      response.pix_expiration = pixData.expirationDate || null;
-    }
 
     res.status(201).json(response);
   } catch (err) {
