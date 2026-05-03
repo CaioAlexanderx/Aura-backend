@@ -1,16 +1,25 @@
 // ============================================================
 // AURA. — Serviço de CRM Expandido (BE-05)
+//
+// MULTICNPJ Sessao 2 Onda 2.6 (03/05/2026): owner-scoped.
+// Ranking de clientes, aniversariantes e perfil completo agora
+// agregam dados de TODAS as empresas do mesmo dono. Consistente
+// com a Onda 2.3 (clientes sao do owner) e Onda 2.6 retention.
 // ============================================================
 
 const db = require('../config/database');
 const { resolvePeriod } = require('./salesAnalytics');
+const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
 
 /**
- * Ranking de clientes por LTV e frequência
+ * Ranking de clientes por LTV e frequência (owner-scoped).
  */
 async function getCustomersRanking(companyId, options = {}) {
   const { period = 'month', start_date, end_date, limit = 50 } = options;
   const { startDate, endDate } = resolvePeriod(period, start_date, end_date);
+
+  const ownerCompanyIds = await getOwnerScopedCompanyIds(companyId);
+  if (ownerCompanyIds.length === 0) return [];
 
   const { rows } = await db.query(`
     SELECT
@@ -25,20 +34,20 @@ async function getCustomersRanking(companyId, options = {}) {
       c.total_spent,
       c.last_purchase_at,
       c.first_purchase_at,
-      -- Vendas no período selecionado
+      -- Vendas no período selecionado (de qualquer empresa do owner)
       COUNT(s.id)::int                      AS period_purchases,
       COALESCE(SUM(s.total_amount), 0)      AS period_spent
     FROM customers c
     LEFT JOIN sales s ON s.customer_id = c.id
-      AND s.company_id = $1
+      AND s.company_id = ANY($1)
       AND s.created_at >= $2
       AND s.created_at < $3
-    WHERE c.company_id = $1
+    WHERE c.company_id = ANY($1)
       AND c.is_active = true
     GROUP BY c.id
     ORDER BY c.total_spent DESC
     LIMIT $4
-  `, [companyId, startDate, endDate, limit]);
+  `, [ownerCompanyIds, startDate, endDate, limit]);
 
   return rows.map((r, index) => ({
     position:          index + 1,
@@ -49,7 +58,6 @@ async function getCustomersRanking(companyId, options = {}) {
     birth_date:        r.birth_date,
     instagram_handle:  r.instagram_handle,
     follows_instagram: r.follows_instagram,
-    // LTV — histórico completo
     total_purchases:   r.total_purchases,
     total_spent:       parseFloat(r.total_spent),
     avg_ticket:        r.total_purchases > 0
@@ -57,27 +65,23 @@ async function getCustomersRanking(companyId, options = {}) {
       : 0,
     last_purchase_at:  r.last_purchase_at,
     first_purchase_at: r.first_purchase_at,
-    // Período selecionado
     period_purchases:  r.period_purchases,
     period_spent:      parseFloat(r.period_spent),
   }));
 }
 
 /**
- * Clientes com aniversário nos próximos N dias.
- *
- * NOTE: o parâmetro $2 é castado pra ::int explicitamente. node-pg
- * envia parâmetros sem tipo (unknown) e 'CURRENT_DATE + unknown' é
- * ambíguo no Postgres (date+integer vs date+interval) — quebrava com
- * "operator is not unique" em prod ao chamar com days=0.
+ * Clientes com aniversário nos próximos N dias (owner-scoped).
  */
 async function getUpcomingBirthdays(companyId, days = 7) {
+  const ownerCompanyIds = await getOwnerScopedCompanyIds(companyId);
+  if (ownerCompanyIds.length === 0) return [];
+
   const { rows } = await db.query(`
     SELECT
       id, name, phone, email, birth_date,
       instagram_handle, follows_instagram,
       total_purchases, total_spent,
-      -- Dias até o aniversário (considera ano atual/próximo)
       CASE
         WHEN TO_DATE(
           EXTRACT(YEAR FROM NOW())::text || '-' ||
@@ -99,11 +103,10 @@ async function getUpcomingBirthdays(companyId, days = 7) {
         ) - CURRENT_DATE
       END AS days_until
     FROM customers
-    WHERE company_id = $1
+    WHERE company_id = ANY($1)
       AND birth_date IS NOT NULL
       AND is_active = true
       AND (
-        -- Aniversário nos próximos N dias (ano atual ou virada de ano)
         TO_DATE(
           EXTRACT(YEAR FROM NOW())::text || '-' ||
           LPAD(EXTRACT(MONTH FROM birth_date)::text, 2, '0') || '-' ||
@@ -119,7 +122,7 @@ async function getUpcomingBirthdays(companyId, days = 7) {
         ) BETWEEN CURRENT_DATE AND CURRENT_DATE + ($2::int)
       )
     ORDER BY days_until ASC
-  `, [companyId, days]);
+  `, [ownerCompanyIds, days]);
 
   return rows.map(r => ({
     id:                r.id,
@@ -137,30 +140,39 @@ async function getUpcomingBirthdays(companyId, days = 7) {
 }
 
 /**
- * Ficha completa do cliente com histórico de compras
+ * Ficha completa do cliente com histórico de compras (owner-scoped).
+ * Aceita customer de qualquer empresa do mesmo dono — perfil reflete
+ * historico completo do cliente (todas as lojas do owner onde comprou).
  */
 async function getCustomerProfile(companyId, customerId) {
+  const ownerCompanyIds = await getOwnerScopedCompanyIds(companyId);
+  if (ownerCompanyIds.length === 0) return null;
+
   const { rows: customerRows } = await db.query(`
     SELECT * FROM customers
-    WHERE id = $1 AND company_id = $2 AND is_active = true
-  `, [customerId, companyId]);
+    WHERE id = $1 AND company_id = ANY($2) AND is_active = true
+  `, [customerId, ownerCompanyIds]);
 
   if (!customerRows.length) return null;
   const customer = customerRows[0];
 
-  // Últimas 10 compras
+  // Ultimas 10 compras (de qualquer empresa do owner)
   const { rows: salesRows } = await db.query(`
     SELECT
       s.id, s.total_amount, s.payment_method,
       s.created_at, s.discount_amount,
+      s.company_id,
+      comp.trade_name AS company_trade,
+      comp.legal_name AS company_legal,
       COUNT(si.id)::int AS items_count
     FROM sales s
     LEFT JOIN sale_items si ON si.sale_id = s.id
-    WHERE s.customer_id = $1 AND s.company_id = $2
-    GROUP BY s.id
+    LEFT JOIN companies comp ON comp.id = s.company_id
+    WHERE s.customer_id = $1 AND s.company_id = ANY($2)
+    GROUP BY s.id, comp.trade_name, comp.legal_name
     ORDER BY s.created_at DESC
     LIMIT 10
-  `, [customerId, companyId]);
+  `, [customerId, ownerCompanyIds]);
 
   return {
     ...customer,
@@ -175,6 +187,9 @@ async function getCustomerProfile(companyId, customerId) {
       items_count:    s.items_count,
       discount:       parseFloat(s.discount_amount),
       created_at:     s.created_at,
+      // Multi-CNPJ: mostra em qual loja foi a compra
+      company_id:     s.company_id,
+      company_name:   s.company_trade || s.company_legal || 'Empresa',
     })),
   };
 }
