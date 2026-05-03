@@ -16,6 +16,7 @@ const buildStorefrontPage = require('../templates/storefrontPage');
 const { buildStorefront } = require('../services/storefrontBuilder');
 const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
+const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 
 // ============================================================
 // CORS aberto pra vitrine publica
@@ -309,6 +310,15 @@ router.post('/:slug/order', async (req, res) => {
       pix_payload: pixData ? pixData.payload : null,
       config,
     }).catch(err => console.error('[notify] new order error:', err.message));
+
+    // Pedido on_delivery ja eh criado como 'confirmed' — dispara hook de
+    // confirmacao (estoque + cliente + financeiro). Pix manual nao chama aqui:
+    // ele dispara em routes/digitalOrders.js approve-payment quando lojista
+    // aprova. Fire-and-forget; idempotente via flags em digital_orders.
+    if (initialStatus === 'confirmed') {
+      onOrderConfirmed(order.id)
+        .catch(err => console.error('[storefront] onOrderConfirmed error:', err.message));
+    }
 
     res.status(201).json({
       order_id:       order.id,

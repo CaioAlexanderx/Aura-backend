@@ -10,6 +10,7 @@ const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
 const notify = require('../services/digitalOrderNotifications');
+const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 
 // GET — Lista pedidos com filtro por status e paginação
 router.get('/', async (req, res) => {
@@ -37,6 +38,7 @@ router.get('/', async (req, res) => {
         o.status, o.payment_status, o.payment_method, o.notes,
         o.payment_proof_url, o.payment_proof_uploaded_at,
         o.confirmed_at, o.delivered_at, o.cancelled_at, o.created_at,
+        o.customer_id, o.transaction_id,
         COUNT(i.id)::int AS item_count
       FROM digital_orders o
       LEFT JOIN digital_order_items i ON i.order_id = o.id
@@ -84,7 +86,7 @@ router.get('/:oid', async (req, res) => {
     );
     if (!orders.length) return res.status(404).json({ error: 'Pedido não encontrado' });
     const { rows: items } = await db.query(
-      `SELECT id, product_id, product_name, product_image, unit_price, quantity, subtotal
+      `SELECT id, product_id, variant_id, product_name, product_image, unit_price, quantity, subtotal
        FROM digital_order_items WHERE order_id = $1 ORDER BY id`, [oid]
     );
     res.json({ ...orders[0], items });
@@ -143,6 +145,13 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
 
     res.json({ order: updated[0], updated: true });
 
+    // Se a transicao foi pra 'confirmed', dispara hook de confirmacao
+    // (estoque + cliente + financeiro). Idempotente — pode rodar varias vezes.
+    if (status === 'confirmed' && current !== 'confirmed') {
+      onOrderConfirmed(oid)
+        .catch(err => console.error('[orders] onOrderConfirmed error (status patch):', err.message));
+    }
+
     // Notificações ao cliente (fire-and-forget)
     notify.notifyStatusChange(updated[0])
       .catch(err => console.error('[notify] status change error:', err.message));
@@ -183,6 +192,11 @@ router.post('/:oid/approve-payment', requireRole('client', 'analyst', 'admin'), 
     `, [oid, cid]);
 
     res.json({ order: updated[0], approved: true });
+
+    // Hook de confirmacao: baixa de estoque + cria/linka cliente + lancamento financeiro.
+    // Fire-and-forget (resposta ja foi enviada). Idempotente.
+    onOrderConfirmed(oid)
+      .catch(err => console.error('[orders] onOrderConfirmed error (approve-payment):', err.message));
 
     notify.notifyStatusChange(updated[0])
       .catch(err => console.error('[notify] approve-payment error:', err.message));
