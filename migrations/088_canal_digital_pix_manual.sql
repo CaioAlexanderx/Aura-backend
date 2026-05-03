@@ -6,6 +6,11 @@
 --   * Lojista cadastrar chave Pix propria (sem KYC Asaas)
 --   * Cliente final anexar comprovante de pagamento
 --   * Status do pedido "awaiting_approval" (com payment_proof_url)
+--
+-- NOTA: O partial index com WHERE status = 'awaiting_approval' foi
+-- movido pra migration 090, porque em CI/DB novo o enum
+-- digital_order_status (criado em 070) nao tem esse valor e o index
+-- explodia. 090 adiciona o valor ao enum E cria o index.
 -- ============================================================
 
 -- digital_channel_config: campos da chave Pix do lojista
@@ -34,7 +39,5 @@ COMMENT ON COLUMN digital_orders.payment_proof_url IS
 COMMENT ON COLUMN digital_orders.payment_proof_uploaded_at IS
   'Timestamp do upload do comprovante.';
 
--- Index pra acelerar listagem de pedidos aguardando aprovacao manual
-CREATE INDEX IF NOT EXISTS digital_orders_awaiting_approval_idx
-  ON digital_orders (company_id, status, created_at DESC)
-  WHERE status = 'awaiting_approval';
+-- O CREATE INDEX digital_orders_awaiting_approval_idx foi movido pra
+-- migration 090 (depende do enum aceitar 'awaiting_approval').
