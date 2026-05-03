@@ -5,6 +5,13 @@
 // ai_enabled e ai_consent_at no company. useAiAccess do frontend
 // usa pra gating do painel IA (Modo Consulta + brief auto). Sem
 // esses campos, IA nunca liberava mesmo com UPDATE no banco.
+//
+// MULTICNPJ Sessao 1 (2026-05-02): politica consolidated-default.
+// Quando user tem 2+ empresas ativas, login/me/refresh emitem JWT
+// com `company=null, consolidated_view=true`. Frontend renderiza
+// painel consolidado por padrao. Telas que precisam de scope
+// especifico (PDV/NF-e/Folha) usam <RequireCompanyScope /> que
+// abre picker e dispara switchCompany() pra trocar o JWT.
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -22,6 +29,12 @@ const REFRESH_TTL = '7d';
 const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const IS_PROD = env.NODE_ENV === 'production';
 
+// MULTICNPJ: ranking de planos pra calcular plan efetivo no modo consolidado.
+// JWT precisa do plano "mais alto" entre todas as empresas pra gates de feature
+// (ex: IA da Expansao, Folha do Negocio) liberarem corretamente quando user
+// esta em visao consolidada.
+const PLAN_RANK = { essencial: 1, negocio: 2, expansao: 3, personalizado: 4 };
+
 function signAccessToken(payload) {
   return jwt.sign({ ...payload, type: 'access' }, JWT_SECRET, { expiresIn: ACCESS_TTL });
 }
@@ -37,6 +50,76 @@ function setRefreshCookie(res, refreshToken) {
 function clearRefreshCookie(res) { res.clearCookie('aura_refresh', { path: '/api/v1/auth' }); }
 async function storeRefreshToken(userId, refreshToken, req) {
   try { await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5)', [userId, hashToken(refreshToken), new Date(Date.now() + REFRESH_TTL_MS), req.ip, (req.headers['user-agent'] || '').substring(0, 200)]); } catch (_) {}
+}
+
+// MULTICNPJ: resolve contexto padrao do user.
+// - 0 empresas: nao consolidated, primary=null
+// - 1 empresa: nao consolidated, primary=essa empresa
+// - 2+ empresas: consolidated=true, primary=null (ainda retorna lista pra metadata)
+//
+// Plan efetivo:
+// - 0 ou 1 empresa: plan da empresa (ou 'essencial' fallback)
+// - 2+ empresas: MAIOR plano entre todas (PLAN_RANK)
+async function resolveDefaultContext(userId, dbConn) {
+  const conn = dbConn || db;
+  const { rows } = await conn.query(
+    `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
+            c.trial_ends_at, c.module_overrides, c.billing_status,
+            c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
+            c.is_primary, cm.role_label AS member_role
+       FROM company_members cm
+       JOIN companies c ON c.id = cm.company_id
+      WHERE cm.user_id = $1
+        AND cm.status = 'active'
+        AND cm.is_active = true
+        AND c.is_active = true
+      ORDER BY c.is_primary DESC NULLS LAST, c.created_at ASC`,
+    [userId]
+  );
+
+  if (rows.length === 0) {
+    return { count: 0, primary: null, consolidated: false, effectivePlan: 'essencial' };
+  }
+  if (rows.length === 1) {
+    return {
+      count: 1,
+      primary: rows[0],
+      consolidated: false,
+      effectivePlan: rows[0].plan || 'essencial',
+    };
+  }
+
+  // 2+ empresas: consolidado por padrao
+  const maxPlan = rows.reduce((acc, c) => {
+    const r = PLAN_RANK[c.plan] || 1;
+    return r > acc.rank ? { plan: c.plan, rank: r } : acc;
+  }, { plan: 'essencial', rank: 1 });
+
+  return {
+    count: rows.length,
+    primary: rows[0],
+    consolidated: true,
+    effectivePlan: maxPlan.plan,
+  };
+}
+
+function shapeCompany(company, fallbackMemberRole) {
+  if (!company) return null;
+  return {
+    id: company.id,
+    name: company.legal_name || company.name || company.trade_name,
+    plan: company.plan,
+    onboarding_step: company.onboarding_step,
+    module_overrides: company.module_overrides || {},
+    trial_active: !!(company.trial_ends_at && new Date(company.trial_ends_at) > new Date()),
+    trial_ends_at: company.trial_ends_at,
+    billing_status: company.billing_status || null,
+    access_code_used: !!(company.access_code_used),
+    vertical_active: company.vertical_active || null,
+    ai_enabled: !!(company.ai_enabled),
+    ai_consent_at: company.ai_consent_at || null,
+    member_role: company.member_role || fallbackMemberRole || 'owner',
+  };
 }
 
 // POST /api/v1/auth/register
@@ -115,7 +198,17 @@ router.post('/register', async (req, res) => {
     }
     await client.query('COMMIT');
 
-    const tokenPayload = { id: user.id, role: user.role, plan: company ? company.plan : 'essencial', company: company ? company.id : null, is_staff: user.is_staff };
+    // MULTICNPJ: register sempre cria/joina 1 empresa, entao consolidated_view=false aqui.
+    // Se for joined_existing e o user ja era membro de outras empresas (caso raro), o /me
+    // subsequente vai detectar e consolidar. Por ora mantem comportamento simples.
+    const tokenPayload = {
+      id: user.id,
+      role: user.role,
+      plan: company ? company.plan : 'essencial',
+      company: company ? company.id : null,
+      is_staff: user.is_staff,
+      consolidated_view: false,
+    };
     const accessToken = signAccessToken(tokenPayload);
     const { token: refreshToken } = signRefreshToken({ id: user.id });
     await storeRefreshToken(user.id, refreshToken, req);
@@ -137,6 +230,8 @@ router.post('/register', async (req, res) => {
         ai_consent_at: company.ai_consent_at || null,
         member_role: memberRole,
       } : null,
+      consolidated_view: false,
+      company_count: company ? 1 : 0,
       code_applied: access_code ? { type: codeType, plan: plan, discount_pct: discountPct, trial_days: trialDays } : null,
       joined_existing: company ? !isNewCompany : false,
       no_company: skipCompany,
@@ -152,7 +247,7 @@ router.post('/login', async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      'SELECT u.id, u.full_name AS name, u.email, u.password_hash, u.role, u.is_active, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name AS company_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides, c.billing_status, c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at, cm.role_label AS member_role FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = \'active\' AND cm.is_active = true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.email = $1 ORDER BY c.created_at ASC LIMIT 1',
+      'SELECT id, full_name AS name, email, password_hash, role, is_active, is_staff, totp_enabled, email_verified FROM users WHERE email = $1',
       [email.toLowerCase().trim()]
     );
     if (!rows.length) return res.status(401).json({ error: 'Credenciais invalidas' });
@@ -163,26 +258,31 @@ router.post('/login', async (req, res) => {
     if (!valid) { logAuditAction(null, null, 'login_failed', 'Failed login for ' + email.toLowerCase().trim(), { ip: req.ip }); return res.status(401).json({ error: 'Credenciais invalidas' }); }
     if (user.totp_enabled) return res.json({ requires_2fa: true, user_id: user.id, message: 'Autenticacao de dois fatores necessaria.' });
 
-    const tokenPayload = { id: user.id, role: user.role, plan: user.plan || 'essencial', company: user.company_id, is_staff: user.is_staff || false };
+    // MULTICNPJ: aplica politica consolidated-default.
+    const ctx = await resolveDefaultContext(user.id);
+
+    const tokenPayload = {
+      id: user.id,
+      role: user.role,
+      plan: ctx.effectivePlan,
+      company: ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null),
+      is_staff: user.is_staff || false,
+      consolidated_view: ctx.consolidated,
+    };
     const accessToken = signAccessToken(tokenPayload);
     const { token: refreshToken } = signRefreshToken({ id: user.id });
     await storeRefreshToken(user.id, refreshToken, req);
     setRefreshCookie(res, refreshToken);
-    const trialActive = user.trial_ends_at && new Date(user.trial_ends_at) > new Date();
-    logAuditAction(user.id, user.company_id, 'login', 'Login: ' + user.email);
+    logAuditAction(user.id, ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null), 'login', 'Login: ' + user.email + (ctx.consolidated ? ' [consolidated]' : ''));
 
+    // Modo consolidado: NAO devolve company. Frontend renderiza painel consolidado.
+    // Modo single-company: devolve a unica empresa ativa.
     res.json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '15m',
       user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff || false, email_verified: user.email_verified || false },
-      company: user.company_id
-        ? { id: user.company_id, name: user.company_name, plan: user.plan, onboarding_step: user.onboarding_step,
-            module_overrides: user.module_overrides || {}, trial_active: trialActive, trial_ends_at: user.trial_ends_at,
-            billing_status: user.billing_status || null, access_code_used: !!(user.access_code_used),
-            vertical_active: user.vertical_active || null,
-            ai_enabled: !!(user.ai_enabled),
-            ai_consent_at: user.ai_consent_at || null,
-            member_role: user.member_role || 'owner' }
-        : null,
+      company: ctx.consolidated ? null : shapeCompany(ctx.primary, ctx.primary?.member_role),
+      consolidated_view: ctx.consolidated,
+      company_count: ctx.count,
     });
   } catch (err) { console.error('login error:', err); res.status(500).json({ error: 'Erro ao autenticar' }); }
 });
@@ -195,12 +295,34 @@ router.post('/refresh', async (req, res) => {
     const decoded = jwt.verify(refreshTokenInput, JWT_SECRET);
     if (decoded.type !== 'refresh') return res.status(400).json({ error: 'Token nao e refresh' });
     const tokenHash = hashToken(refreshTokenInput);
-    try { const { rows } = await db.query('SELECT id, revoked FROM refresh_tokens WHERE token_hash = $1 AND user_id = $2', [tokenHash, decoded.id]); if (rows.length > 0 && rows[0].revoked) { clearRefreshCookie(res); return res.status(401).json({ error: 'Refresh token revogado', code: 'REFRESH_REVOKED' }); } } catch (_) {}
-    const { rows } = await db.query('SELECT u.id, u.role, u.is_staff, c.id AS company_id, c.plan FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status = \'active\' AND cm.is_active = true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.id = $1 AND u.is_active = true ORDER BY c.created_at ASC LIMIT 1', [decoded.id]);
-    if (!rows.length) return res.status(401).json({ error: 'Usuario desativado' });
-    const user = rows[0];
-    const newAccessToken = signAccessToken({ id: user.id, role: user.role, plan: user.plan || 'essencial', company: user.company_id, is_staff: user.is_staff || false });
-    res.json({ token: newAccessToken, token_expires_in: '15m' });
+    try {
+      const { rows } = await db.query('SELECT id, revoked FROM refresh_tokens WHERE token_hash = $1 AND user_id = $2', [tokenHash, decoded.id]);
+      if (rows.length > 0 && rows[0].revoked) { clearRefreshCookie(res); return res.status(401).json({ error: 'Refresh token revogado', code: 'REFRESH_REVOKED' }); }
+    } catch (_) {}
+
+    const { rows: uRows } = await db.query('SELECT id, role, is_staff FROM users WHERE id = $1 AND is_active = true', [decoded.id]);
+    if (!uRows.length) return res.status(401).json({ error: 'Usuario desativado' });
+    const user = uRows[0];
+
+    // MULTICNPJ: refresh sempre re-aplica politica consolidated-default.
+    // Se user tinha trocado pra empresa X via picker e o access expirou,
+    // o refresh volta pro consolidado. Frontend tem sessionStorage com a
+    // ultima escolha pra resugerir sem friccao no <RequireCompanyScope />.
+    const ctx = await resolveDefaultContext(user.id);
+
+    const newAccessToken = signAccessToken({
+      id: user.id,
+      role: user.role,
+      plan: ctx.effectivePlan,
+      company: ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null),
+      is_staff: user.is_staff || false,
+      consolidated_view: ctx.consolidated,
+    });
+    res.json({
+      token: newAccessToken,
+      token_expires_in: '15m',
+      consolidated_view: ctx.consolidated,
+    });
   } catch (err) {
     if (err.name === 'TokenExpiredError') { clearRefreshCookie(res); return res.status(401).json({ error: 'Refresh token expirado', code: 'REFRESH_EXPIRED' }); }
     return res.status(401).json({ error: 'Refresh token invalido' });
@@ -217,28 +339,67 @@ router.post('/logout', async (req, res) => {
 });
 
 // POST /api/v1/auth/me
+//
+// MULTICNPJ: respeita o modo do JWT atual em vez de forcar default.
+// - JWT consolidated_view=true -> devolve company=null (ainda em consolidado)
+// - JWT company=<id> -> devolve essa empresa especifica (user trocou via picker)
+//
+// Tambem inclui company_count na resposta pra frontend nao precisar fazer
+// 2a query ao /auth/companies pra mostrar o badge "N lojas".
 router.post('/me', requireAuth, async (req, res) => {
   try {
-    const { rows } = await db.query(
-      'SELECT u.id, u.full_name AS name, u.email, u.role, u.is_staff, u.totp_enabled, u.email_verified, c.id AS company_id, c.legal_name, c.plan, c.onboarding_step, c.trial_ends_at, c.module_overrides, c.billing_status, c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at, cm.role_label AS member_role FROM users u LEFT JOIN company_members cm ON cm.user_id = u.id AND cm.status=\'active\' AND cm.is_active=true LEFT JOIN companies c ON c.id = cm.company_id WHERE u.id = $1 ORDER BY c.created_at ASC LIMIT 1',
+    const { rows: uRows } = await db.query(
+      'SELECT id, full_name AS name, email, role, is_staff, totp_enabled, email_verified FROM users WHERE id = $1',
       [req.user.id]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Usuario nao encontrado' });
-    const u = rows[0];
-    const trialActive = u.trial_ends_at && new Date(u.trial_ends_at) > new Date();
+    if (!uRows.length) return res.status(404).json({ error: 'Usuario nao encontrado' });
+    const u = uRows[0];
+
+    const jwtConsolidated = !!req.user.consolidated_view;
+    const jwtCompanyId = req.user.company || null;
+
+    let company = null;
+    let memberRole = 'owner';
+    if (!jwtConsolidated && jwtCompanyId) {
+      const { rows: cRows } = await db.query(
+        `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
+                c.trial_ends_at, c.module_overrides, c.billing_status,
+                c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
+                cm.role_label AS member_role
+           FROM companies c
+           LEFT JOIN company_members cm
+             ON cm.company_id = c.id
+            AND cm.user_id = $1
+            AND cm.status = 'active'
+            AND cm.is_active = true
+          WHERE c.id = $2 AND c.is_active = true`,
+        [u.id, jwtCompanyId]
+      );
+      if (cRows.length) {
+        company = cRows[0];
+        memberRole = cRows[0].member_role || 'owner';
+      }
+    }
+
+    const { rows: countRows } = await db.query(
+      `SELECT COUNT(*)::int AS cnt
+         FROM company_members cm
+         JOIN companies c ON c.id = cm.company_id
+        WHERE cm.user_id = $1
+          AND cm.status = 'active'
+          AND cm.is_active = true
+          AND c.is_active = true`,
+      [u.id]
+    );
+    const companyCount = countRows[0]?.cnt || 0;
+
     res.json({
       user: { id: u.id, name: u.name, email: u.email, role: u.role, is_staff: u.is_staff || false, totp_enabled: u.totp_enabled || false, email_verified: u.email_verified || false },
-      company: u.company_id
-        ? { id: u.company_id, name: u.legal_name, plan: u.plan, onboarding_step: u.onboarding_step,
-            module_overrides: u.module_overrides || {}, trial_active: trialActive, trial_ends_at: u.trial_ends_at,
-            billing_status: u.billing_status || null, access_code_used: !!(u.access_code_used),
-            vertical_active: u.vertical_active || null,
-            ai_enabled: !!(u.ai_enabled),
-            ai_consent_at: u.ai_consent_at || null,
-            member_role: u.member_role || 'owner' }
-        : null,
+      company: company ? shapeCompany(company, memberRole) : null,
+      consolidated_view: jwtConsolidated,
+      company_count: companyCount,
     });
-  } catch (err) { res.status(500).json({ error: 'Erro ao buscar perfil' }); }
+  } catch (err) { console.error('me error:', err); res.status(500).json({ error: 'Erro ao buscar perfil' }); }
 });
 
 // SEC-07: 2FA sub-routes
