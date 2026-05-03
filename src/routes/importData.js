@@ -33,12 +33,18 @@ const CUSTOMER_FIELDS = {
   notes:            ['observacao', 'observação', 'obs', 'notas', 'notes'],
 };
 
+// FIX: stock_min deve vir ANTES de stock_qty para que 'Estoque minimo'
+// case no match exato de stock_min antes de atingir a alias 'estoque'
+// de stock_qty via substring includes(). Se stock_qty vier primeiro,
+// 'estoque minimo'.includes('estoque') = true → stock_qty mapeado
+// duas vezes → applyMap sobrescreve o valor real com string vazia
+// → parseFloat('') = NaN → stock_qty = 0 para todos os produtos.
 const PRODUCT_FIELDS = {
   cost_price: ['preco de custo', 'preco custo', 'preço custo', 'custo', 'cost', 'cost_price', 'valor custo', 'preco de custo (r$)'],
   name:       ['nome do produto', 'nome', 'produto', 'name', 'descricao', 'descrição', 'description', 'item'],
   price:      ['preco de venda', 'preco venda', 'preço de venda', 'price', 'valor venda', 'valor', 'preco de venda (r$)'],
-  stock_qty:  ['estoque atual', 'estoque', 'quantidade', 'qty', 'stock', 'qtd', 'saldo'],
   stock_min:  ['estoque minimo', 'estoque mínimo', 'min', 'minimo', 'stock_min'],
+  stock_qty:  ['estoque atual', 'estoque', 'quantidade', 'qty', 'stock', 'qtd', 'saldo'],
   barcode:    ['codigo de barras', 'codigo barras', 'código barras', 'ean', 'barcode', 'gtin', 'codigo de barras (ean)'],
   sku:        ['sku / codigo interno', 'sku', 'referencia', 'referência', 'cod interno', 'codigo interno'],
   category:   ['categoria', 'category', 'grupo', 'tipo'],
