@@ -6,11 +6,12 @@
 // "Todas as empresas" no switcher).
 //
 // Onda 2.1: /me/dashboard — KPIs somados + breakdown.
-// Onda 2.2 (atual): /me/transactions — lista paginada agregada com
-//   filtros (start, end, type, status, q) + ?company_id= opcional
-//   pra drill-down dentro do consolidado.
+// Onda 2.2: /me/transactions — listagem + drill-down via ?company_id=.
+// Onda 2.3 (atual): /me/customers — lista UNICA owner-scoped.
+//   Decisao: clientes sao "do dono", nao da loja. Lista unica entre
+//   todos os CNPJs do mesmo owner. Vendedora membro so de Loja A
+//   tambem ve clientes registrados em Loja B do mesmo dono.
 // Proximas ondas:
-//   2.3: /me/customers (com customer_group_id pra dedup)
 //   2.4: /me/sales
 //   2.5: /me/appointments
 //
@@ -73,6 +74,15 @@ function emptyDashboardResponse() {
     breakdown: [],
     company_count: 0,
   };
+}
+
+function getPlanLimit(plan) {
+  switch ((plan || '').toLowerCase()) {
+    case 'expansao':
+    case 'personalizado': return 999999;
+    case 'negocio':       return 5000;
+    default:              return 1000;
+  }
 }
 
 // ──────────────────────────────────────────────────────────
@@ -301,18 +311,6 @@ router.get('/dashboard', async (req, res) => {
 
 // ──────────────────────────────────────────────────────────
 // GET /me/transactions — Onda 2.2
-//
-// Lista paginada de lancamentos de TODAS as empresas do user.
-// Query params:
-//   - limit (default 200, max 10000)
-//   - offset (default 0)
-//   - type: 'income' | 'expense'
-//   - status: 'confirmed' | 'pending'
-//   - start, end (datas YYYY-MM-DD; usa COALESCE(due_date, created_at SP))
-//   - q: busca em description (ILIKE %q%)
-//   - company_id: filtra UMA empresa especifica dentro do consolidado
-//     (drill-down). Valida acesso. Quando passado, summary e breakdown
-//     ficam dessa empresa apenas.
 // ──────────────────────────────────────────────────────────
 router.get('/transactions', async (req, res) => {
   try {
@@ -349,7 +347,6 @@ router.get('/transactions', async (req, res) => {
     const end = req.query.end;
     const q = req.query.q;
 
-    // Monta WHERE base. params[0] sempre eh companyIds (array).
     const params = [companyIds];
     let where = 'WHERE company_id = ANY($1)';
 
@@ -374,7 +371,6 @@ router.get('/transactions', async (req, res) => {
       where += ' AND description ILIKE $' + params.length;
     }
 
-    // Listing + count
     const countQ = await db.query(
       'SELECT COUNT(*) AS total FROM transactions ' + where,
       params
@@ -394,8 +390,6 @@ router.get('/transactions', async (req, res) => {
       dataParams
     );
 
-    // Summary: respeita os filtros mas com default = mes corrente quando
-    // start/end nao informados.
     const sumParams = [companyIds];
     let sumWhere = 'WHERE company_id = ANY($1)';
     if (type === 'income' || type === 'expense') {
@@ -470,7 +464,6 @@ router.get('/transactions', async (req, res) => {
         employee_name: r.employee_name,
         idempotency_key: r.idempotency_key,
         source: r.idempotency_key && /^pdv-sale-/i.test(r.idempotency_key) ? 'pdv' : 'manual',
-        // Multi-CNPJ
         company_id: r.company_id,
         company_name: c ? (c.trade_name || c.legal_name || 'Empresa') : 'Empresa',
       };
@@ -514,6 +507,101 @@ router.get('/transactions', async (req, res) => {
   } catch (err) {
     console.error('[meAggregates] /transactions error:', err.message, err.stack);
     res.status(500).json({ error: 'Erro ao listar lancamentos consolidados' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────
+// GET /me/customers — Onda 2.3
+//
+// Lista UNICA de clientes do user. Quando consolidatedView=true,
+// FE chama este endpoint em vez do per-company. Retorna mesma
+// shape do /companies/:id/customers + cada item com company_id e
+// company_name (loja onde foi cadastrado).
+//
+// Decisao de produto: clientes sao do owner. Vendedora membro so
+// de Loja A em modo consolidated (caso raro: ela ser membro de
+// >=2 lojas) ve clientes de TODAS as lojas onde tem acesso.
+//
+// Filtros suportados:
+//   - search: busca em name, email, phone (ILIKE)
+//   - limit, offset
+// ──────────────────────────────────────────────────────────
+router.get('/customers', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const companies = await getUserCompanies(userId);
+
+    const planLimit = getPlanLimit(req.user?.plan);
+    const limit = Math.min(parseInt(req.query.limit) || planLimit, planLimit);
+    const offset = parseInt(req.query.offset) || 0;
+    const search = req.query.search;
+
+    if (companies.length === 0) {
+      return res.json({
+        customers: [], total: 0, limit, offset,
+        plan_limit: planLimit, company_count: 0,
+      });
+    }
+
+    const companyIds = companies.map(c => c.id);
+    const companyNameById = new Map(
+      companies.map(c => [c.id, c.trade_name || c.legal_name || 'Empresa'])
+    );
+
+    let where = 'WHERE company_id = ANY($1)';
+    const params = [companyIds];
+    if (search) {
+      where += ` AND (name ILIKE $${params.length + 1} OR email ILIKE $${params.length + 1} OR phone ILIKE $${params.length + 1})`;
+      params.push(`%${search}%`);
+    }
+
+    const countRes = await db.query(
+      `SELECT COUNT(*) AS total FROM customers ${where}`,
+      params
+    );
+
+    const dataRes = await db.query(
+      `SELECT id, name, cpf_cnpj, email, phone, birth_date, instagram_handle,
+              total_purchases, total_spent, last_purchase_at, first_purchase_at,
+              notes, is_active, created_at, company_id
+         FROM customers ${where}
+        ORDER BY name ASC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limit, offset]
+    );
+
+    const customers = dataRes.rows.map(r => ({
+      id: r.id, name: r.name || '', email: r.email || '', phone: r.phone || '',
+      cpf_cnpj: r.cpf_cnpj || '',
+      birthday: r.birth_date ? new Date(r.birth_date).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) : '',
+      birth_date: r.birth_date,
+      instagram: r.instagram_handle || '',
+      instagram_handle: r.instagram_handle || '',
+      total_spent: parseFloat(r.total_spent) || 0,
+      totalSpent: parseFloat(r.total_spent) || 0,
+      visits: parseInt(r.total_purchases) || 0,
+      visit_count: parseInt(r.total_purchases) || 0,
+      last_purchase: r.last_purchase_at,
+      first_visit: r.first_purchase_at,
+      notes: r.notes || '',
+      is_active: r.is_active !== false,
+      rating: null,
+      created_at: r.created_at,
+      // Multi-CNPJ: empresa onde foi cadastrado
+      company_id: r.company_id,
+      company_name: companyNameById.get(r.company_id) || 'Empresa',
+    }));
+
+    res.json({
+      customers,
+      total: parseInt(countRes.rows[0]?.total) || 0,
+      limit, offset,
+      plan_limit: planLimit,
+      company_count: companies.length,
+    });
+  } catch (err) {
+    console.error('[meAggregates] /customers error:', err.message, err.stack);
+    res.status(500).json({ error: 'Erro ao listar clientes consolidados' });
   }
 });
 
