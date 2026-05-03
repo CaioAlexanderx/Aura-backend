@@ -5,9 +5,11 @@
 // Sao chamados pelo frontend quando consolidatedView=true (modo
 // "Todas as empresas" no switcher).
 //
-// Onda 2.1 (atual): /me/dashboard — KPIs somados + breakdown.
-// Proximas ondas (Sessao 2):
-//   2.2: /me/transactions, /me/financial/summary
+// Onda 2.1: /me/dashboard — KPIs somados + breakdown.
+// Onda 2.2 (atual): /me/transactions — lista paginada agregada com
+//   filtros (start, end, type, status, q) + ?company_id= opcional
+//   pra drill-down dentro do consolidado.
+// Proximas ondas:
 //   2.3: /me/customers (com customer_group_id pra dedup)
 //   2.4: /me/sales
 //   2.5: /me/appointments
@@ -16,10 +18,11 @@
 // - Todas as queries filtram por `company_id = ANY($1)` onde $1
 //   e o array de empresas que o user tem acesso (permissive:
 //   c.owner_id OR cm.user_id).
-// - Timezone Brasil (America/Sao_Paulo) consistente com
-//   /companies/:id/dashboard original.
+// - Timezone Brasil (America/Sao_Paulo).
 // - Shape do response = mesma do endpoint per-company + campo
 //   `breakdown` com array por empresa (pra UI mostrar split).
+// - Mutations (POST/PATCH/DELETE) NAO existem em /me/* — usuario
+//   precisa trocar pra empresa especifica antes de criar/editar.
 // ============================================================
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
@@ -29,8 +32,7 @@ router.use(requireAuth);
 
 // ──────────────────────────────────────────────────────────
 // Helper: lista IDs e nomes das empresas que o user tem acesso
-// (owner OU member ativo). Permissive query — mesma logica de
-// /auth/companies. Retorna array vazio se user nao tem nenhuma.
+// (owner OU member ativo). Permissive query.
 // ──────────────────────────────────────────────────────────
 async function getUserCompanies(userId) {
   const { rows } = await db.query(
@@ -47,7 +49,6 @@ async function getUserCompanies(userId) {
       ORDER BY c.id, c.is_primary DESC NULLS LAST, c.created_at ASC`,
     [userId]
   );
-  // Re-ordena pra primary first
   rows.sort((a, b) => {
     if (a.is_primary && !b.is_primary) return -1;
     if (!a.is_primary && b.is_primary) return 1;
@@ -76,14 +77,6 @@ function emptyDashboardResponse() {
 
 // ──────────────────────────────────────────────────────────
 // GET /me/dashboard — Onda 2.1
-//
-// Mesma shape do /companies/:id/dashboard + `breakdown[]` com
-// totais por empresa.
-//
-// Performance: 7 queries em paralelo, todas com company_id = ANY($1).
-// Pra Davi (2 empresas) = ~mesma latencia do per-company (1 round-trip
-// agregado por consulta). Escala linear ate ~50 empresas — depois
-// pode precisar de indices ou cache.
 // ──────────────────────────────────────────────────────────
 router.get('/dashboard', async (req, res) => {
   try {
@@ -99,7 +92,6 @@ router.get('/dashboard', async (req, res) => {
       companies.map(c => [c.id, c.trade_name || c.legal_name || 'Empresa'])
     );
 
-    // Todas as queries em paralelo
     const [
       breakdownTxRes,
       prevTxRes,
@@ -109,8 +101,6 @@ router.get('/dashboard', async (req, res) => {
       customersRes,
       breakdownSalesRes,
     ] = await Promise.all([
-      // 1. BREAKDOWN: cash flow do mes corrente, agrupado por company_id.
-      //    Quando o frontend mostrar "Loja A: R$ X", esse e o numero.
       db.query(
         `SELECT company_id,
                 COALESCE(SUM(CASE WHEN type='income'  AND status='confirmed' THEN amount ELSE 0 END), 0) AS cash_inflow,
@@ -125,7 +115,6 @@ router.get('/dashboard', async (req, res) => {
         [companyIds]
       ),
 
-      // 2. Receita do mes ANTERIOR (total) — pra revenueDelta.
       db.query(
         `SELECT COALESCE(SUM(amount), 0) AS prev_income
            FROM transactions
@@ -136,7 +125,6 @@ router.get('/dashboard', async (req, res) => {
         [companyIds]
       ),
 
-      // 3. Sparkline 7 dias (TOTAL agregado de todas empresas).
       db.query(
         `SELECT d.day::date AS date,
                 COALESCE(SUM(CASE WHEN t.type='income'  AND t.status='confirmed' THEN t.amount ELSE 0 END), 0) AS revenue,
@@ -155,7 +143,6 @@ router.get('/dashboard', async (req, res) => {
         [companyIds]
       ),
 
-      // 4. 5 entradas mais recentes do conjunto, com company_id pra UI mostrar de qual loja.
       db.query(
         `SELECT t.id, t.description, t.amount, t.type, t.created_at, t.company_id
            FROM transactions t
@@ -165,7 +152,6 @@ router.get('/dashboard', async (req, res) => {
         [companyIds]
       ),
 
-      // 5. Obrigacoes fiscais proximas (30 dias) — 5 mais cedo do conjunto.
       db.query(
         `SELECT id, name, due_date, estimated_amount, status, category, company_id
            FROM fiscal_obligations
@@ -176,9 +162,6 @@ router.get('/dashboard', async (req, res) => {
         [companyIds]
       ).catch(() => ({ rows: [] })),
 
-      // 6. Clientes novos no mes (TOTAL — soma de cadastros recentes).
-      //    Nota: pode ter duplicatas entre empresas. Onda 2.3 vai resolver
-      //    com customer_group_id; por ora, soma simples.
       db.query(
         `SELECT COUNT(*)::int AS cnt FROM customers
           WHERE company_id = ANY($1)
@@ -186,7 +169,6 @@ router.get('/dashboard', async (req, res) => {
         [companyIds]
       ).catch(() => ({ rows: [{ cnt: 0 }] })),
 
-      // 7. Sales count + today por empresa (pra avgTicket e cards de Hoje).
       db.query(
         `SELECT company_id,
                 COUNT(*)::int AS month_count,
@@ -202,7 +184,6 @@ router.get('/dashboard', async (req, res) => {
       ).catch(() => ({ rows: [] })),
     ]);
 
-    // ── Agrega TX (cash flow) e monta breakdown ──
     let cashInflow = 0, expenses = 0, pendingIncome = 0, pendingExpenses = 0;
     const txMap = new Map(breakdownTxRes.rows.map(r => [r.company_id, r]));
     const salesMap = new Map(breakdownSalesRes.rows.map(r => [r.company_id, r]));
@@ -247,7 +228,6 @@ router.get('/dashboard', async (req, res) => {
     const revenue = cashInflow;
     const net = cashInflow - expenses;
 
-    // Delta vs mes anterior (total)
     const prevIncome = parseFloat(prevTxRes.rows[0]?.prev_income) || 0;
     const revenueDelta = prevIncome > 0
       ? Math.round(((revenue - prevIncome) / prevIncome) * 100)
@@ -267,7 +247,6 @@ router.get('/dashboard', async (req, res) => {
     }));
 
     res.json({
-      // --- Receita (mesma shape do /companies/:id/dashboard) ---
       revenue,
       salesCountMonth,
       avgTicket,
@@ -275,7 +254,6 @@ router.get('/dashboard', async (req, res) => {
       salesCountToday,
       revenueDelta,
 
-      // --- Fluxo de caixa ---
       cashInflow,
       expenses,
       net,
@@ -284,7 +262,6 @@ router.get('/dashboard', async (req, res) => {
       expensesDelta: 0,
       netDelta: 0,
 
-      // --- Outros ---
       newCustomers,
       sparkRevenue: sparkline.map(s => s.revenue),
       sparkExpenses: sparkline.map(s => s.expenses),
@@ -299,7 +276,6 @@ router.get('/dashboard', async (req, res) => {
             })
           : '--:--',
         method: 'Pix',
-        // EXTRA pro modo consolidado: nome da empresa
         company_id: r.company_id,
         company_name: companyNameById.get(r.company_id) || 'Empresa',
       })),
@@ -314,13 +290,230 @@ router.get('/dashboard', async (req, res) => {
         company_name: companyNameById.get(r.company_id) || 'Empresa',
       })),
 
-      // --- Multi-CNPJ ---
       breakdown,
       company_count: companies.length,
     });
   } catch (err) {
     console.error('[meAggregates] /dashboard error:', err.message, err.stack);
     res.status(500).json({ error: 'Erro ao carregar painel consolidado' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────
+// GET /me/transactions — Onda 2.2
+//
+// Lista paginada de lancamentos de TODAS as empresas do user.
+// Query params:
+//   - limit (default 200, max 10000)
+//   - offset (default 0)
+//   - type: 'income' | 'expense'
+//   - status: 'confirmed' | 'pending'
+//   - start, end (datas YYYY-MM-DD; usa COALESCE(due_date, created_at SP))
+//   - q: busca em description (ILIKE %q%)
+//   - company_id: filtra UMA empresa especifica dentro do consolidado
+//     (drill-down). Valida acesso. Quando passado, summary e breakdown
+//     ficam dessa empresa apenas.
+// ──────────────────────────────────────────────────────────
+router.get('/transactions', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const companies = await getUserCompanies(userId);
+
+    if (companies.length === 0) {
+      return res.json({
+        transactions: [], total: 0,
+        limit: parseInt(req.query.limit) || 200,
+        offset: parseInt(req.query.offset) || 0,
+        summary: { income: 0, expenses: 0, pending_income: 0, pending_expenses: 0 },
+        breakdown: [],
+        company_count: 0,
+        filtered_company_id: null,
+      });
+    }
+
+    let companyIds = companies.map(c => c.id);
+    const filterCompanyId = req.query.company_id || null;
+
+    if (filterCompanyId) {
+      if (!companyIds.includes(filterCompanyId)) {
+        return res.status(403).json({ error: 'Sem acesso a essa empresa' });
+      }
+      companyIds = [filterCompanyId];
+    }
+
+    const limit = Math.min(parseInt(req.query.limit) || 200, 10000);
+    const offset = parseInt(req.query.offset) || 0;
+    const type = req.query.type;
+    const status = req.query.status;
+    const start = req.query.start;
+    const end = req.query.end;
+    const q = req.query.q;
+
+    // Monta WHERE base. params[0] sempre eh companyIds (array).
+    const params = [companyIds];
+    let where = 'WHERE company_id = ANY($1)';
+
+    if (type === 'income' || type === 'expense') {
+      params.push(type);
+      where += ' AND type = $' + params.length;
+    }
+    if (status === 'confirmed' || status === 'pending') {
+      params.push(status);
+      where += ' AND status = $' + params.length;
+    }
+    if (start) {
+      params.push(start);
+      where += ` AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= $${params.length}`;
+    }
+    if (end) {
+      params.push(end);
+      where += ` AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <= $${params.length}`;
+    }
+    if (q && String(q).trim()) {
+      params.push('%' + String(q).trim() + '%');
+      where += ' AND description ILIKE $' + params.length;
+    }
+
+    // Listing + count
+    const countQ = await db.query(
+      'SELECT COUNT(*) AS total FROM transactions ' + where,
+      params
+    );
+
+    const dataParams = params.concat([limit, offset]);
+    const dataQ = await db.query(
+      `SELECT id, type, amount, description, category, status, notes,
+              due_date, paid_at, created_at,
+              recurrence_type, recurrence_group_id, recurrence_index,
+              payment_method, employee_id, employee_name,
+              idempotency_key, company_id
+         FROM transactions ${where}
+        ORDER BY COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) DESC,
+                 created_at DESC
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      dataParams
+    );
+
+    // Summary: respeita os filtros mas com default = mes corrente quando
+    // start/end nao informados.
+    const sumParams = [companyIds];
+    let sumWhere = 'WHERE company_id = ANY($1)';
+    if (type === 'income' || type === 'expense') {
+      sumParams.push(type);
+      sumWhere += ' AND type = $' + sumParams.length;
+    }
+    if (status === 'confirmed' || status === 'pending') {
+      sumParams.push(status);
+      sumWhere += ' AND status = $' + sumParams.length;
+    }
+    if (start) {
+      sumParams.push(start);
+      sumWhere += ` AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= $${sumParams.length}`;
+    }
+    if (end) {
+      sumParams.push(end);
+      sumWhere += ` AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <= $${sumParams.length}`;
+    }
+    if (!start && !end) {
+      sumWhere += ` AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))::date`;
+      sumWhere += ` AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <  (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '1 month')::date`;
+    }
+
+    const sumTotalQ = await db.query(
+      `SELECT
+         COALESCE(SUM(amount) FILTER (WHERE type='income'  AND status='confirmed'), 0) AS income,
+         COALESCE(SUM(amount) FILTER (WHERE type='expense' AND status='confirmed'), 0) AS expenses,
+         COALESCE(SUM(amount) FILTER (WHERE type='income'  AND status='pending'),   0) AS pending_income,
+         COALESCE(SUM(amount) FILTER (WHERE type='expense' AND status='pending'),   0) AS pending_expenses
+         FROM transactions ${sumWhere}`,
+      sumParams
+    );
+
+    const sumByCompanyQ = await db.query(
+      `SELECT company_id,
+              COALESCE(SUM(amount) FILTER (WHERE type='income'  AND status='confirmed'), 0) AS income,
+              COALESCE(SUM(amount) FILTER (WHERE type='expense' AND status='confirmed'), 0) AS expenses,
+              COALESCE(SUM(amount) FILTER (WHERE type='income'  AND status='pending'),   0) AS pending_income,
+              COALESCE(SUM(amount) FILTER (WHERE type='expense' AND status='pending'),   0) AS pending_expenses
+         FROM transactions ${sumWhere}
+        GROUP BY company_id`,
+      sumParams
+    );
+
+    const companyMap = new Map(companies.map(c => [c.id, c]));
+    const sumMap = new Map(sumByCompanyQ.rows.map(r => [r.company_id, r]));
+
+    const transactions = dataQ.rows.map(r => {
+      const c = companyMap.get(r.company_id);
+      return {
+        id: r.id,
+        type: r.type,
+        amount: parseFloat(r.amount) || 0,
+        desc: r.description || '',
+        description: r.description || '',
+        category: r.category || 'Outros',
+        status: r.status || 'confirmed',
+        notes: r.notes || '',
+        date: r.due_date
+          ? new Date(r.due_date + 'T12:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
+          : (r.created_at
+              ? new Date(r.created_at).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', timeZone: 'America/Sao_Paulo' })
+              : '--/--'),
+        due_date: r.due_date,
+        paid_at: r.paid_at,
+        created_at: r.created_at,
+        recurrence_type: r.recurrence_type,
+        recurrence_group_id: r.recurrence_group_id,
+        recurrence_index: r.recurrence_index,
+        payment_method: r.payment_method,
+        employee_id: r.employee_id,
+        employee_name: r.employee_name,
+        idempotency_key: r.idempotency_key,
+        source: r.idempotency_key && /^pdv-sale-/i.test(r.idempotency_key) ? 'pdv' : 'manual',
+        // Multi-CNPJ
+        company_id: r.company_id,
+        company_name: c ? (c.trade_name || c.legal_name || 'Empresa') : 'Empresa',
+      };
+    });
+
+    const breakdownCompanies = filterCompanyId
+      ? companies.filter(c => c.id === filterCompanyId)
+      : companies;
+
+    const breakdown = breakdownCompanies.map(c => {
+      const s = sumMap.get(c.id) || {};
+      const income = parseFloat(s.income) || 0;
+      const expenses = parseFloat(s.expenses) || 0;
+      return {
+        company_id: c.id,
+        company_name: c.trade_name || c.legal_name || 'Empresa',
+        is_primary: c.is_primary,
+        income,
+        expenses,
+        net: income - expenses,
+        pending_income: parseFloat(s.pending_income) || 0,
+        pending_expenses: parseFloat(s.pending_expenses) || 0,
+      };
+    });
+
+    res.json({
+      transactions,
+      total: parseInt(countQ.rows[0]?.total) || 0,
+      limit,
+      offset,
+      summary: {
+        income: parseFloat(sumTotalQ.rows[0]?.income) || 0,
+        expenses: parseFloat(sumTotalQ.rows[0]?.expenses) || 0,
+        pending_income: parseFloat(sumTotalQ.rows[0]?.pending_income) || 0,
+        pending_expenses: parseFloat(sumTotalQ.rows[0]?.pending_expenses) || 0,
+      },
+      breakdown,
+      company_count: companies.length,
+      filtered_company_id: filterCompanyId,
+    });
+  } catch (err) {
+    console.error('[meAggregates] /transactions error:', err.message, err.stack);
+    res.status(500).json({ error: 'Erro ao listar lancamentos consolidados' });
   }
 });
 
