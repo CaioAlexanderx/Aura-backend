@@ -2,6 +2,12 @@
 // AURA. — Auth Multi-CNPJ (M1-03 + M1-04)
 // - POST /auth/switch-company: re-emite JWT com novo contexto
 // - GET  /auth/companies: lista empresas do user (pra switcher)
+//
+// FIX 2026-05-03: tokenPayload do branch single-company agora
+// inclui `consolidated_view: false` explicito. Sem isso, o JWT
+// emitido tinha consolidated_view=undefined, e o /me lia como
+// `!!undefined === false` (funcionava por coincidencia). Defensive
+// pra evitar bugs sutis no futuro.
 // ============================================================
 const router = require('express').Router();
 const jwt = require('jsonwebtoken');
@@ -199,12 +205,15 @@ router.post('/switch-company', requireAuth, async (req, res) => {
 
     const company = rows[0];
 
+    // FIX 2026-05-03: consolidated_view: false explicito no JWT.
+    // Antes era omitido, virando undefined no token decodificado.
     const tokenPayload = {
       id: userId,
       role: req.user.role,
       plan: company.plan || 'essencial',
       company: company.id,
       is_staff: req.user.is_staff || false,
+      consolidated_view: false,
     };
     const accessToken = signAccessToken(tokenPayload);
 
