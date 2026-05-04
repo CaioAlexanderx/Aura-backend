@@ -1,21 +1,23 @@
 // ============================================================
-// AURA. — Financeiro v2: Insights agregados (Onda 2 — enriquecido)
+// AURA. — Financeiro v2: Insights agregados (Onda 3 — cashflow + evolução + ranking)
 //
 // Endpoints:
 //   GET /companies/:id/financeiro/insights?period=month  (per-company)
 //   GET /me/financeiro/insights?period=month             (consolidated multi-CNPJ)
 //
-// Onda 1 (commit anterior): Health Score + Runway + Biggest Lever
-// Onda 2 (este commit): + Top5 receivables/payables, payment methods breakdown,
-//   timeline buckets (atrasadas/esta_semana/este_mes/futuras), DOW breakdown,
-//   anomalias por categoria (vs media 3m).
+// Onda 1: Health Score + Runway + Biggest Lever
+// Onda 2: Top5 + payment methods + timeline + DOW + anomalias
+// Onda 3 (este commit):
+//   - cashflow.history (últimos 30 dias dia a dia)
+//   - cashflow.projection [30, 60, 90] com banda confiança ±15%
+//   - monthly_evolution (últimos 12 meses income/expense/balance)
+//   - professional_ranking (só per-company, JOIN employees)
 //
-// Fica pra Onda 3: ranking profissionais (precisa join com employees),
-// evolucao mensal 12m, fixo x variavel 6m, cashflow projection 30/60/90
-// com banda de confianca.
+// Pulado pra Onda 4: fixed_vs_variable_6m (precisa schema migration na
+// transactions pra rotular fixed/variable, ou heurística por categoria).
 //
-// Multi-CNPJ: meRouter agrega todas company_ids do usuario via company_users.
-// Todas queries usam WHERE company_id = ANY($1::uuid[]) — uniforme.
+// Multi-CNPJ: ranking só per-company (employees nao tem cross-company JOIN).
+// Cashflow history e monthly_evolution funcionam consolidated normalmente.
 // ============================================================
 
 const express = require('express');
@@ -108,9 +110,9 @@ function fmtBRL(v) {
   return 'R$ ' + Math.round(v).toLocaleString('pt-BR');
 }
 
-// Helpers Onda 2 — queries adicionais sobre transactions
-
-// Top 5 maiores transações de um tipo (income ou expense), confirmadas, no período
+// ============================================================
+// Helpers Onda 2 (preservados)
+// ============================================================
 async function fetchTop5(companyIds, type, start, end) {
   const sql = `
     SELECT id, description, category, amount, payment_method, employee_name,
@@ -138,11 +140,10 @@ async function fetchTop5(companyIds, type, start, end) {
     employee_name: row.employee_name || null,
     status: row.status,
     date: row.event_date,
-    company_name: row.company_name || null, // pra exibir badge da loja em multi-CNPJ
+    company_name: row.company_name || null,
   }));
 }
 
-// Formas de pagamento agrupadas
 async function fetchPaymentMethods(companyIds, type, start, end) {
   const sql = `
     SELECT
@@ -171,8 +172,6 @@ async function fetchPaymentMethods(companyIds, type, start, end) {
   });
 }
 
-// Timeline buckets (atrasadas, esta_semana, este_mes, futuras)
-// Considera transactions com status='pending' do tipo dado
 async function fetchTimeline(companyIds, type) {
   const sql = `
     SELECT
@@ -192,7 +191,6 @@ async function fetchTimeline(companyIds, type) {
     GROUP BY bucket
   `;
   const r = await db.query(sql, [companyIds, type]);
-  // Garante todos os buckets retornam (mesmo se vazios) pra UI nao quebrar
   const out = { atrasadas: { total: 0, count: 0 }, esta_semana: { total: 0, count: 0 }, este_mes: { total: 0, count: 0 }, futuras: { total: 0, count: 0 } };
   r.rows.forEach((row) => {
     out[row.bucket] = { total: parseFloat(row.total) || 0, count: parseInt(row.count) || 0 };
@@ -200,7 +198,6 @@ async function fetchTimeline(companyIds, type) {
   return out;
 }
 
-// Dia da semana — receita/despesa por dow (0=Dom, 1=Seg, ..., 6=Sab)
 async function fetchDowBreakdown(companyIds, type, start, end) {
   const sql = `
     SELECT
@@ -216,7 +213,6 @@ async function fetchDowBreakdown(companyIds, type, start, end) {
     ORDER BY dow
   `;
   const r = await db.query(sql, [companyIds, type, start, end]);
-  // Preenche todos os 7 dias da semana com 0 se nao retornar
   const labels = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sab'];
   const map = {};
   r.rows.forEach((row) => {
@@ -230,7 +226,6 @@ async function fetchDowBreakdown(companyIds, type, start, end) {
   }));
 }
 
-// Anomalias: categorias de despesa do periodo atual >20% acima da media dos 3 meses anteriores
 async function fetchAnomalies(companyIds, start, end) {
   const sql = `
     WITH current_period AS (
@@ -284,18 +279,164 @@ async function fetchAnomalies(companyIds, start, end) {
       diff_pct: parseFloat(row.diff_pct) || 0,
     }));
   } catch (err) {
-    // Anomalia depende de historico de 3+ meses — em conta nova retorna vazio
-    console.warn('[financeiroInsights] anomalies failed (likely empty history):', err.message);
+    console.warn('[financeiroInsights] anomalies failed:', err.message);
     return [];
   }
 }
 
-// Core: calcula insights pra um conjunto de company_ids (1 = per-company, N = consolidated)
+// ============================================================
+// Helpers Onda 3 — novas queries
+// ============================================================
+
+// Cashflow histórico — últimos 30 dias dia a dia.
+// Usa generate_series pra preencher dias sem transacao com 0.
+async function fetchCashflowHistory(companyIds) {
+  const sql = `
+    SELECT
+      d.day::date AS date,
+      COALESCE(SUM(CASE WHEN t.type='income' AND t.status='confirmed' THEN t.amount ELSE 0 END), 0) AS income,
+      COALESCE(SUM(CASE WHEN t.type='expense' AND t.status='confirmed' THEN t.amount ELSE 0 END), 0) AS expenses
+    FROM generate_series(
+      CURRENT_DATE - INTERVAL '29 days',
+      CURRENT_DATE,
+      '1 day'
+    ) AS d(day)
+    LEFT JOIN transactions t
+      ON t.company_id = ANY($1::uuid[])
+      AND COALESCE(t.due_date, t.created_at::date) = d.day::date
+    GROUP BY d.day
+    ORDER BY d.day
+  `;
+  const r = await db.query(sql, [companyIds]);
+  return r.rows.map((row) => {
+    const inc = parseFloat(row.income) || 0;
+    const exp = parseFloat(row.expenses) || 0;
+    return {
+      date: row.date.toISOString ? row.date.toISOString().slice(0, 10) : String(row.date).slice(0, 10),
+      income: inc,
+      expenses: exp,
+      net: inc - exp,
+    };
+  });
+}
+
+// Projection 30/60/90 — média móvel dos últimos 30 dias + banda confiança ±15%.
+// Calcula a partir do history (já fetchado), nao precisa nova query.
+function buildCashflowProjection(history) {
+  if (!history || history.length === 0) {
+    return { avg_daily_net: 0, std_daily_net: 0, projection: [] };
+  }
+
+  const nets = history.map((d) => d.net);
+  const avg = nets.reduce((s, n) => s + n, 0) / nets.length;
+  const variance = nets.reduce((s, n) => s + Math.pow(n - avg, 2), 0) / nets.length;
+  const std = Math.sqrt(variance);
+
+  // Banda confiança: usa max(±15% do projection, ±std diário scaled by sqrt(days)).
+  // Simplificado: 15% do valor projetado.
+  const projection = [30, 60, 90].map((daysAhead) => {
+    const value = avg * daysAhead;
+    const bandPct = 0.15;
+    return {
+      days_ahead: daysAhead,
+      value: Math.round(value),
+      low: Math.round(value * (1 - bandPct)),
+      high: Math.round(value * (1 + bandPct)),
+    };
+  });
+
+  return {
+    avg_daily_net: Math.round(avg),
+    std_daily_net: Math.round(std),
+    projection: projection,
+  };
+}
+
+// Monthly evolution — últimos 12 meses (incluindo o atual).
+async function fetchMonthlyEvolution(companyIds) {
+  const sql = `
+    WITH months AS (
+      SELECT generate_series(
+        date_trunc('month', CURRENT_DATE - INTERVAL '11 months'),
+        date_trunc('month', CURRENT_DATE),
+        '1 month'
+      ) AS m
+    )
+    SELECT
+      m.m::date AS month,
+      COALESCE(SUM(CASE WHEN t.type='income' AND t.status='confirmed' THEN t.amount ELSE 0 END), 0) AS income,
+      COALESCE(SUM(CASE WHEN t.type='expense' AND t.status='confirmed' THEN t.amount ELSE 0 END), 0) AS expenses
+    FROM months m
+    LEFT JOIN transactions t
+      ON t.company_id = ANY($1::uuid[])
+      AND date_trunc('month', COALESCE(t.due_date, t.created_at::date)) = m.m
+    GROUP BY m.m
+    ORDER BY m.m
+  `;
+  const r = await db.query(sql, [companyIds]);
+  return r.rows.map((row) => {
+    const inc = parseFloat(row.income) || 0;
+    const exp = parseFloat(row.expenses) || 0;
+    const date = row.month;
+    const dateStr = date.toISOString ? date.toISOString().slice(0, 7) : String(date).slice(0, 7);
+    // Label tipo "out/26"
+    const [yearStr, monthStr] = dateStr.split('-');
+    const monthNames = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+    const label = monthNames[parseInt(monthStr) - 1] + '/' + yearStr.slice(2);
+    return {
+      month: dateStr,
+      label: label,
+      income: inc,
+      expenses: exp,
+      balance: inc - exp,
+    };
+  });
+}
+
+// Professional ranking — só per-company (employees é per-company).
+// Em consolidated, retorna [] (frontend mostra hint pra abrir empresa especifica).
+async function fetchProfessionalRanking(companyIds, start, end) {
+  if (!companyIds || companyIds.length !== 1) {
+    return []; // só per-company
+  }
+  const sql = `
+    SELECT
+      e.id,
+      e.name,
+      COUNT(t.id) AS tx_count,
+      COALESCE(SUM(t.amount), 0) AS total,
+      COALESCE(AVG(t.amount), 0) AS avg_ticket
+    FROM transactions t
+    INNER JOIN employees e ON e.id = t.employee_id
+    WHERE t.company_id = $1
+      AND t.type = 'income'
+      AND t.status = 'confirmed'
+      AND COALESCE(t.due_date, t.created_at::date) BETWEEN $2::date AND $3::date
+    GROUP BY e.id, e.name
+    ORDER BY total DESC
+    LIMIT 10
+  `;
+  try {
+    const r = await db.query(sql, [companyIds[0], start, end]);
+    return r.rows.map((row) => ({
+      id: row.id,
+      name: row.name || 'Sem nome',
+      tx_count: parseInt(row.tx_count) || 0,
+      total: parseFloat(row.total) || 0,
+      avg_ticket: parseFloat(row.avg_ticket) || 0,
+    }));
+  } catch (err) {
+    // Tabela employees pode nao existir ou employee_id pode estar nulo — retorna vazio
+    console.warn('[financeiroInsights] professional_ranking failed:', err.message);
+    return [];
+  }
+}
+
+// Core: calcula insights pra um conjunto de company_ids
 async function computeInsights(companyIds, period) {
   const range = computeRange(period);
   const prev = previousRange(period);
 
-  // Summary do periodo (ja existia na Onda 1)
   const summarySQL = `
     SELECT
       COALESCE(SUM(CASE WHEN type='income' AND status='confirmed' THEN amount ELSE 0 END), 0) AS income,
@@ -320,7 +461,6 @@ async function computeInsights(companyIds, period) {
     prevIncome = parseFloat(prevRes.rows[0].income) || 0;
   }
 
-  // Atrasados ja existia
   const overdueSQL = `
     SELECT
       COALESCE(SUM(amount), 0) AS total,
@@ -339,7 +479,7 @@ async function computeInsights(companyIds, period) {
   const overdueCount = parseInt(overdue.count) || 0;
   const oldestDays = parseInt(overdue.oldest_days) || 0;
 
-  // ----- Onda 2: queries paralelas pra enriquecer -----
+  // Onda 2 + Onda 3 — paralelo
   const [
     top5Income,
     top5Expense,
@@ -349,6 +489,9 @@ async function computeInsights(companyIds, period) {
     payableTimeline,
     incomeDow,
     anomalies,
+    cashflowHistory,
+    monthlyEvolution,
+    professionalRanking,
   ] = await Promise.all([
     fetchTop5(companyIds, 'income', range.start, range.end),
     fetchTop5(companyIds, 'expense', range.start, range.end),
@@ -358,9 +501,14 @@ async function computeInsights(companyIds, period) {
     fetchTimeline(companyIds, 'expense'),
     fetchDowBreakdown(companyIds, 'income', range.start, range.end),
     fetchAnomalies(companyIds, range.start, range.end),
+    fetchCashflowHistory(companyIds),
+    fetchMonthlyEvolution(companyIds),
+    fetchProfessionalRanking(companyIds, range.start, range.end),
   ]);
 
-  // ---- Drivers ----
+  // Cashflow: history + projection derivada
+  const projectionData = buildCashflowProjection(cashflowHistory);
+
   const margem = income > 0 ? ((balance / income) * 100) : 0;
   const margemScore = scoreVsTarget(margem, HEALTH_TARGETS.margin_pct);
 
@@ -388,7 +536,6 @@ async function computeInsights(companyIds, period) {
     score >= 50 ? 'Atencao' :
     'Critico';
 
-  // ---- Biggest Lever ----
   const leverImpactDays = dailyBurn > 0 ? Math.round(overdueTotal / dailyBurn) : 0;
   let biggest_lever = null;
   if (overdueCount > 0 && overdueTotal > 0) {
@@ -405,7 +552,6 @@ async function computeInsights(companyIds, period) {
     };
   }
 
-  // Gauge despesa/receita (% das despesas vs receita)
   const expenseRatio = income > 0 ? Math.round((expenses / income) * 100) : 0;
 
   return {
@@ -463,7 +609,6 @@ async function computeInsights(companyIds, period) {
       cash_balance: cashBalance,
     },
     biggest_lever: biggest_lever,
-    // ----- Onda 2: novos blocos -----
     income_breakdown: {
       top5: top5Income,
       payment_methods: incomeMethods,
@@ -483,6 +628,15 @@ async function computeInsights(companyIds, period) {
       },
       total: expenses,
     },
+    // ----- Onda 3 -----
+    cashflow: {
+      history: cashflowHistory,
+      avg_daily_net: projectionData.avg_daily_net,
+      std_daily_net: projectionData.std_daily_net,
+      projection: projectionData.projection,
+    },
+    monthly_evolution: monthlyEvolution,
+    professional_ranking: professionalRanking,
   };
 }
 
@@ -528,6 +682,9 @@ meRouter.get('/insights', async (req, res) => {
         biggest_lever: null,
         income_breakdown: { top5: [], payment_methods: [], timeline: {}, dow: [], total: 0, count: 0 },
         expense_breakdown: { top5: [], payment_methods: [], timeline: {}, anomalies: [], gauge: { expense_pct: 0, zone: 'saudavel' }, total: 0 },
+        cashflow: { history: [], avg_daily_net: 0, std_daily_net: 0, projection: [] },
+        monthly_evolution: [],
+        professional_ranking: [],
       });
     }
 
