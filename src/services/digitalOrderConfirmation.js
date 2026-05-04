@@ -1,7 +1,7 @@
 // ============================================================
 // AURA. — Service: Confirmacao de Pedido do Canal Digital
 //
-// Centraliza as 3 acoes que rolam quando um pedido digital vira 'confirmed':
+// Centraliza as 4 acoes que rolam quando um pedido digital vira 'confirmed':
 //   1. BAIXA DE ESTOQUE: deduz product_variants.stock_qty (se item tem variant)
 //      ou products.stock_qty. Idempotente via flag digital_orders.stock_deducted.
 //   2. MATCH/CRIA CLIENTE: busca em customers da empresa por phone normalizado
@@ -10,6 +10,8 @@
 //   3. LANCAMENTO FINANCEIRO: cria transaction (income/confirmed/Canal Digital)
 //      com idempotency_key = 'digital-order-{order_id}'. Se ja existe, skip.
 //      Salva transaction_id em digital_orders.
+//   4. NFCe AUTOMATICA (se nfce_requested): emite via nfceEmissionService.
+//      Skip silencioso se NFCe nao configurada na empresa. Salva nfce_id.
 //
 // TUDO DENTRO DE UMA TRANSACAO SQL — atomicidade garantida. Se qualquer
 // passo falhar, ROLLBACK e nada parcial fica.
@@ -24,6 +26,7 @@
 'use strict';
 
 const db = require('../config/database');
+const { emitForDigitalOrder } = require('./nfceEmissionService');
 
 function normalizePhone(phone) {
   return String(phone || '').replace(/\D/g, '');
@@ -178,8 +181,25 @@ async function onOrderConfirmed(orderId) {
       );
     }
 
+    // ── 5. NFCe AUTOMATICA (se solicitada) ─────────────────────
+    // Emite se cliente marcou checkbox 'Quero CPF na nota' OU informou CPF/CNPJ.
+    // Se NFCe nao configurada na empresa, retorna skipped — nao bloqueia pedido.
+    let nfceResult = null;
+    const wantsNfce = order.nfce_requested || (order.customer_cpf_cnpj && String(order.customer_cpf_cnpj).trim());
+    if (wantsNfce && !order.nfce_id) {
+      try {
+        nfceResult = await emitForDigitalOrder({ orderId, dbClient: client });
+        if (nfceResult.skipped) {
+          console.warn('[orderConfirmation] NFCe skipped:', nfceResult.reason, 'order:', orderId);
+        }
+      } catch (nfceErr) {
+        // Nao falha o COMMIT por erro de NFCe — apenas log
+        console.error('[orderConfirmation] NFCe emit error:', nfceErr.message);
+      }
+    }
+
     await client.query('COMMIT');
-    return { customerId, transactionId, stockDeducted: true };
+    return { customerId, transactionId, stockDeducted: true, nfce: nfceResult };
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[orderConfirmation] erro:', err.message);

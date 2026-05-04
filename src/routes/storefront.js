@@ -18,54 +18,66 @@ const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 
-// ============================================================
+// ── Validador CPF/CNPJ (mod 11) ──────────────────────────────
+function validateCpfCnpj(raw) {
+  if (!raw) return null;
+  const d = String(raw).replace(/\D/g, '');
+  if (d.length === 11) return validateCpf(d) ? d : false;
+  if (d.length === 14) return validateCnpj(d) ? d : false;
+  return false;
+}
+function validateCpf(d) {
+  if (/^(\d)\1{10}$/.test(d)) return false;
+  let s = 0;
+  for (let i = 0; i < 9; i++) s += parseInt(d[i]) * (10 - i);
+  let r = (s * 10) % 11; if (r === 10) r = 0;
+  if (r !== parseInt(d[9])) return false;
+  s = 0;
+  for (let i = 0; i < 10; i++) s += parseInt(d[i]) * (11 - i);
+  r = (s * 10) % 11; if (r === 10) r = 0;
+  return r === parseInt(d[10]);
+}
+function validateCnpj(d) {
+  if (/^(\d)\1{13}$/.test(d)) return false;
+  const w1 = [5,4,3,2,9,8,7,6,5,4,3,2];
+  const w2 = [6,5,4,3,2,9,8,7,6,5,4,3,2];
+  let s = 0;
+  for (let i = 0; i < 12; i++) s += parseInt(d[i]) * w1[i];
+  let r = s % 11; r = r < 2 ? 0 : 11 - r;
+  if (r !== parseInt(d[12])) return false;
+  s = 0;
+  for (let i = 0; i < 13; i++) s += parseInt(d[i]) * w2[i];
+  r = s % 11; r = r < 2 ? 0 : 11 - r;
+  return r === parseInt(d[13]);
+}
+
 // CORS aberto pra vitrine publica
-// ─────────────────────────────────────────────────────────────
-// Vitrine pode ser servida em QUALQUER dominio: dominio dedicado da
-// loja (loja.getaura.com.br), custom domain do lojista, embed em
-// iframe, etc. O CORS global do app.js so aceita ALLOWED_ORIGINS, o
-// que bloqueia esses casos. Como vitrine eh publica e nao usa cookies
-// (binomio slug+order_id eh o secret), e seguro abrir CORS aqui.
-//
-// Importante: este middleware roda DEPOIS do cors() global do app.js.
-// Sobrescrevemos o header Access-Control-Allow-Origin manualmente
-// (cors() global nao seta nada quando origin nao esta na whitelist).
-// Tambem respondemos OPTIONS diretamente pra preflight passar.
-// ============================================================
 router.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID');
   res.setHeader('Access-Control-Max-Age', '600');
-  // Sem Allow-Credentials: incompatible com origin '*' e nao precisamos
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-// API_BASE: URL do backend usada pelos fetches da vitrine (mesmo valor de
-// templates/storefrontPage.js). Precisa estar em connect-src do CSP, senao
-// o browser bloqueia fetch cross-origin (vitrine pode ser servida em
-// dominio diferente do backend, ex: loja.getaura.com.br via Cloudflare).
 const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
   || 'https://aura-backend-production-f805.up.railway.app';
 
-// CSP relaxado para a vitrine publica (usa scripts inline e imagens R2 + QR via api.qrserver.com)
+// CSP + viacep.com.br pra autocomplete CEP
 const STOREFRONT_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
   "script-src-attr 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https://r2.getaura.com.br https://pub-f21f233f50d1412abc93a05bbdffd0d3.r2.dev https://api.qrserver.com",
-  "connect-src 'self' https://cloudflareinsights.com " + STOREFRONT_API_BASE,
+  "connect-src 'self' https://cloudflareinsights.com https://viacep.com.br " + STOREFRONT_API_BASE,
   "font-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
 ].join('; ');
 
-// ============================================================
-// GET /storefront/:slug — JSON API
-// ============================================================
 router.get('/:slug', async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -79,9 +91,6 @@ router.get('/:slug', async (req, res) => {
   }
 });
 
-// ============================================================
-// GET /storefront/:slug/page — HTML renderizado (SPA)
-// ============================================================
 router.get('/:slug/page', async (req, res) => {
   try {
     const slug = req.params.slug.toLowerCase().trim();
@@ -100,15 +109,15 @@ router.get('/:slug/page', async (req, res) => {
   }
 });
 
-// ============================================================
-// POST /storefront/:slug/order — Criar pedido (Pix manual ou na entrega)
-// ============================================================
 router.post('/:slug/order', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const {
     customer_name, customer_phone, customer_email,
     delivery_type, delivery_address, notes, items,
     payment_method,
+    request_nfce, customer_cpf_cnpj,
+    address_zip, address_street, address_number, address_complement,
+    address_neighborhood, address_city, address_state,
   } = req.body;
 
   if (!customer_name || !customer_phone) {
@@ -132,16 +141,39 @@ router.post('/:slug/order', async (req, res) => {
     if (dtype === 'pickup' && config.pickup_enabled === false) {
       return res.status(400).json({ error: 'Retirada nao disponivel nesta loja' });
     }
-    if (dtype === 'delivery' && !delivery_address) {
+    if (dtype === 'delivery' && !delivery_address && !address_street) {
       return res.status(400).json({ error: 'Endereco de entrega e obrigatorio' });
     }
 
-    // ── Validacao do metodo de pagamento ──────────────────────
+    let cpfNorm = null;
+    if (request_nfce || customer_cpf_cnpj) {
+      cpfNorm = validateCpfCnpj(customer_cpf_cnpj);
+      if (cpfNorm === false) {
+        return res.status(400).json({ error: 'CPF/CNPJ invalido' });
+      }
+      if (request_nfce && !cpfNorm) {
+        return res.status(400).json({ error: 'CPF/CNPJ obrigatorio quando solicitar NFCe' });
+      }
+    }
+
+    if (dtype === 'delivery' && address_street) {
+      const required = { address_zip, address_street, address_number, address_neighborhood, address_city, address_state };
+      const missing = Object.entries(required).filter(([_, v]) => !v || !String(v).trim()).map(([k]) => k);
+      if (missing.length) {
+        return res.status(400).json({ error: 'Endereco incompleto. Faltam: ' + missing.join(', ') });
+      }
+      if (!/^\d{8}$/.test(String(address_zip).replace(/\D/g, ''))) {
+        return res.status(400).json({ error: 'CEP invalido (8 digitos)' });
+      }
+      if (!/^[A-Z]{2}$/.test(String(address_state).toUpperCase())) {
+        return res.status(400).json({ error: 'UF invalida (2 letras)' });
+      }
+    }
+
     const hasPix = !!(config.pix_key && String(config.pix_key).trim());
     const hasOnDelivery = !!config.pay_on_delivery_enabled;
     let pmethod = (payment_method || '').toLowerCase().trim();
     if (!pmethod) {
-      // Default: pix se loja tem; senao on_delivery; senao erro
       pmethod = hasPix ? 'pix' : (hasOnDelivery ? 'on_delivery' : null);
     }
     if (!pmethod) {
@@ -157,7 +189,6 @@ router.post('/:slug/order', async (req, res) => {
       return res.status(400).json({ error: 'Esta loja nao aceita pagamento na entrega' });
     }
 
-    // ── Carrega produtos + variantes ──────────────────────────
     const productIds = items.map(i => i.product_id);
     const { rows: products } = await db.query(
       `SELECT id, name, price, stock_qty, image_url, is_active
@@ -244,32 +275,48 @@ router.post('/:slug/order', async (req, res) => {
     const delivery_fee = dtype === 'delivery' ? (parseFloat(config.delivery_fee) || 0) : 0;
     const total = subtotal + delivery_fee;
 
-    // ── Status inicial conforme metodo ────────────────────────
-    // pix         → pending_payment (cliente paga e marca; lojista aprova)
-    // on_delivery → confirmed       (lojista cobra direto na entrega)
     const initialStatus = pmethod === 'on_delivery' ? 'confirmed' : 'pending_payment';
-    const initialPaymentStatus = 'pending'; // ambos comecam pending; on_delivery so confirma na entrega
+    const initialPaymentStatus = 'pending';
 
     const client = await db.connect();
     let order;
     try {
       await client.query('BEGIN');
+      let composedAddress = delivery_address || null;
+      if (dtype === 'delivery' && !composedAddress && address_street) {
+        composedAddress = `${address_street}, ${address_number}` +
+          (address_complement ? ` (${address_complement})` : '') +
+          ` - ${address_neighborhood}, ${address_city}/${String(address_state).toUpperCase()}` +
+          ` - CEP ${String(address_zip).replace(/\D/g, '')}`;
+      }
+
       const { rows: [newOrder] } = await client.query(`
         INSERT INTO digital_orders (
           company_id, order_number, customer_name, customer_phone, customer_email,
           delivery_type, delivery_address, delivery_fee, subtotal, total,
           status, payment_status, payment_method, notes,
-          confirmed_at
+          confirmed_at,
+          customer_cpf_cnpj, nfce_requested,
+          address_zip, address_street, address_number, address_complement,
+          address_neighborhood, address_city, address_state
         ) VALUES (
           $1, next_digital_order_number($1), $2, $3, $4,
           $5, $6, $7, $8, $9,
           $10, $11, $12, $13,
-          CASE WHEN $10 = 'confirmed' THEN NOW() ELSE NULL END
+          CASE WHEN $10 = 'confirmed' THEN NOW() ELSE NULL END,
+          $14, $15,
+          $16, $17, $18, $19,
+          $20, $21, $22
         ) RETURNING *
       `, [
         cid, customer_name, customer_phone, customer_email || null,
-        dtype, delivery_address || null, delivery_fee, subtotal, total,
+        dtype, composedAddress, delivery_fee, subtotal, total,
         initialStatus, initialPaymentStatus, pmethod, notes || null,
+        cpfNorm || null, !!request_nfce,
+        address_zip ? String(address_zip).replace(/\D/g, '') : null,
+        address_street || null, address_number || null, address_complement || null,
+        address_neighborhood || null, address_city || null,
+        address_state ? String(address_state).toUpperCase() : null,
       ]);
       order = newOrder;
       for (const item of orderItems) {
@@ -288,7 +335,6 @@ router.post('/:slug/order', async (req, res) => {
       client.release();
     }
 
-    // ── Gera Pix apenas se metodo=pix ─────────────────────────
     let pixData = null;
     if (pmethod === 'pix') {
       pixData = await generatePix({ order, company_id: cid, total });
@@ -311,10 +357,6 @@ router.post('/:slug/order', async (req, res) => {
       config,
     }).catch(err => console.error('[notify] new order error:', err.message));
 
-    // Pedido on_delivery ja eh criado como 'confirmed' — dispara hook de
-    // confirmacao (estoque + cliente + financeiro). Pix manual nao chama aqui:
-    // ele dispara em routes/digitalOrders.js approve-payment quando lojista
-    // aprova. Fire-and-forget; idempotente via flags em digital_orders.
     if (initialStatus === 'confirmed') {
       onOrderConfirmed(order.id)
         .catch(err => console.error('[storefront] onOrderConfirmed error:', err.message));
@@ -339,11 +381,6 @@ router.post('/:slug/order', async (req, res) => {
   }
 });
 
-// ============================================================
-// POST /storefront/:slug/order/:oid/upload-proof
-// Cliente envia comprovante (base64 + content_type). Sem auth — protegido
-// pelo binomio (slug, order_id) que so quem fez o pedido conhece.
-// ============================================================
 router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const { oid } = req.params;
@@ -399,11 +436,6 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
   }
 });
 
-// ============================================================
-// POST /storefront/:slug/order/:oid/mark-as-paid
-// Cliente avisa que pagou Pix. Status pending_payment → awaiting_approval.
-// Lojista ve o pedido em TabPedidos pra aprovar/rejeitar.
-// ============================================================
 router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const { oid } = req.params;
@@ -442,7 +474,6 @@ router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
       message: 'Aguardando confirmacao do lojista. Voce sera avisado por WhatsApp.',
     });
 
-    // Notifica lojista (fire-and-forget, tolera funcao ausente)
     if (typeof notify.notifyPaymentMarkedByCustomer === 'function') {
       notify.notifyPaymentMarkedByCustomer({ order })
         .catch(err => console.error('[notify] mark-as-paid error:', err.message));
@@ -456,9 +487,6 @@ router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
   }
 });
 
-// ============================================================
-// GET /storefront/:slug/order/:oid — Poll publico de status
-// ============================================================
 router.get('/:slug/order/:oid', async (req, res) => {
   try {
     const { rows } = await db.query(`
