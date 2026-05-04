@@ -24,6 +24,7 @@ router.use('/bank', require('./bankReconciliation'));
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
 router.use('/', require('./pdvSettings'));
+router.use('/caixa', require('./caixa'));
 router.use('/products', require('./productsDuplicates'));
 router.use('/products', require('./productsBatch'));
 router.use('/products', require('./productsVariations'));
