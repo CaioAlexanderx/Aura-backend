@@ -40,7 +40,11 @@ const DEFAULT_CONFIG = {
   custom_domain_plan: null, custom_domain_expires_at: null, custom_domain_price: null,
 };
 
-const STOREFRONT_BASE = process.env.APP_URL || 'https://loja.getaura.com.br';
+// FIX: usar STOREFRONT_BASE_URL (dominio publico da vitrine, ex.: loja.getaura.com.br)
+// em vez de APP_URL — esse ultimo e do app/Expo (app.getaura.com.br) e nao deve ser
+// reaproveitado aqui. Antes da separacao, mexer em APP_URL pra arrumar links de
+// password-reset quebrava o storefront_url retornado pra todos os lojistas.
+const STOREFRONT_BASE = process.env.STOREFRONT_BASE_URL || 'https://loja.getaura.com.br';
 
 function generateSlug(name) {
   return (name || 'loja')
