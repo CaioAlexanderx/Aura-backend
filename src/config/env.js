@@ -48,9 +48,12 @@ function validateRuntimeEnv() {
     REDIS_URL:       getOptionalEnv('REDIS_URL', ''),
     SENTRY_DSN:      getOptionalEnv('SENTRY_DSN', ''),
     GIT_SHA:         getOptionalEnv('GIT_SHA', ''),
-    // FIX: APP_URL deve apontar pro app, nao pro site institucional
-    APP_URL:         getOptionalEnv('APP_URL', 'https://app.getaura.com.br'),
-    API_URL:         getOptionalEnv('API_URL', 'https://aura-backend-production-f805.up.railway.app/api/v1'),
+    // FIX: APP_URL deve apontar pro app/Expo (login, reset-password, verify-email).
+    // Nao confundir com STOREFRONT_BASE_URL, que e o dominio publico das vitrines
+    // do Canal Digital (loja.getaura.com.br/<slug>).
+    APP_URL:             getOptionalEnv('APP_URL', 'https://app.getaura.com.br'),
+    STOREFRONT_BASE_URL: getOptionalEnv('STOREFRONT_BASE_URL', 'https://loja.getaura.com.br'),
+    API_URL:             getOptionalEnv('API_URL', 'https://aura-backend-production-f805.up.railway.app/api/v1'),
     HEALTH_SECRET:   getOptionalEnv('HEALTH_SECRET', ''),
     ALLOWED_ORIGINS: allowedOrigins || '*',
     JWT_EXPIRES_IN:  getOptionalEnv('JWT_EXPIRES_IN', '7d'),
