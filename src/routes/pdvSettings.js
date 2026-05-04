@@ -6,7 +6,11 @@
 //
 // Persistido em companies.pdv_settings (jsonb).
 // Estrutura suportada (extensivel):
-//   { require_customer: bool, require_seller: bool }
+//   {
+//     require_customer: bool,
+//     require_seller:   bool,
+//     caixa_enabled:    bool   ← toggle para o módulo de caixa
+//   }
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -14,8 +18,12 @@ const pool = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 
-const ALLOWED_KEYS = ['require_customer', 'require_seller'];
-const DEFAULT_SETTINGS = { require_customer: false, require_seller: false };
+const ALLOWED_KEYS = ['require_customer', 'require_seller', 'caixa_enabled'];
+const DEFAULT_SETTINGS = {
+  require_customer: false,
+  require_seller:   false,
+  caixa_enabled:    false,
+};
 
 function validateSettings(settings) {
   if (settings === null || settings === undefined) return { ...DEFAULT_SETTINGS };
