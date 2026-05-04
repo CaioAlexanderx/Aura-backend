@@ -32,6 +32,9 @@ router.use('/me/companies', require('./userCompanies'));
 router.use('/me', productLinksUserRouter);
 // Multi-CNPJ Sessao 2: endpoints /me/* consolidados (Onda 2.1+)
 router.use('/me', require('./meAggregates'));
+// Financeiro v2 — Insights consolidados multi-CNPJ (04/05/2026).
+// Agrega health score, runway e biggest lever de TODAS as empresas do usuario.
+router.use('/me/financeiro', require('./financeiroInsights').meRouter);
 
 // Rotas privadas por empresa
 router.use('/companies/:id', privateCompaniesRouter);
