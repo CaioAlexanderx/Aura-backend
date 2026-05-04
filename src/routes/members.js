@@ -1,6 +1,10 @@
 // ============================================================
 // AURA. — Rotas Multi-usuario RBAC (BE-09)
 // P1 #10: DELETE now truly removes pending members (not just suspend)
+// ONDA 2.7: unified multi-CNPJ member management
+//   GET /unified — membros de todos os CNPJs do mesmo dono
+//   POST /invite  — delega para inviteMemberMulti (suporta company_ids[])
+//   PATCH /:mid   — delega para updateMemberAndSync (sync automatico)
 // ============================================================
 
 const express = require('express');
@@ -10,7 +14,29 @@ const { requireAuth, requireCompanyAccess } = require('../middleware/auth');
 const {
   countActiveMembers, listMembers, inviteMember,
   acceptInvite, updateMemberPermissions,
+  listMembersUnified, inviteMemberMulti, updateMemberAndSync,
 } = require('../services/members');
+
+// GET /companies/:id/members/unified
+// Retorna uma entrada por usuario com campo companies:[{company_id, ...}].
+// Permissoes universais — sincronizadas automaticamente em todos os CNPJs.
+router.get('/unified', requireAuth, requireCompanyAccess(), async (req, res) => {
+  try {
+    const result = await listMembersUnified(req.params.id);
+    const activeCount = result.members.filter(m => m.status === 'active' && m.is_active).length;
+    res.json({
+      total:        result.members.length,
+      active:       activeCount,
+      pending:      result.members.filter(m => m.status === 'pending').length,
+      monthly_cost: Math.max(activeCount - 1, 0) * 19,
+      members:      result.members,
+      siblings:     result.siblings,
+    });
+  } catch (err) {
+    console.error('[members] unified list error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar membros' });
+  }
+});
 
 // GET /companies/:id/members
 router.get('/', requireAuth, requireCompanyAccess(), async (req, res) => {
@@ -28,12 +54,13 @@ router.get('/', requireAuth, requireCompanyAccess(), async (req, res) => {
 });
 
 // POST /companies/:id/members/invite
+// Aceita company_ids[] para convidar para multiplos CNPJs em uma so acao.
 router.post('/invite', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
-    const result = await inviteMember(req.params.id, req.user.id, req.body);
+    const result = await inviteMemberMulti(req.params.id, req.user.id, req.body);
     res.status(201).json(result);
   } catch (err) {
-    const status = err.message.includes('ja tem') ? 409 : 400;
+    const status = err.message.includes('ja tem') || err.message.includes('ja e membro') ? 409 : 400;
     res.status(status).json({ error: err.message });
   }
 });
@@ -50,9 +77,11 @@ router.post('/accept/:token', requireAuth, async (req, res) => {
 });
 
 // PATCH /companies/:id/members/:mid
+// Permissoes sao sincronizadas automaticamente para todos os CNPJs do mesmo usuario.
+// Aceita company_ids[] para alternar acesso a CNPJs especificos.
 router.patch('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
-    const member = await updateMemberPermissions(req.params.id, req.params.mid, req.body);
+    const member = await updateMemberAndSync(req.params.id, req.params.mid, req.body);
     res.json({ member });
   } catch (err) {
     const status = err.message.includes('nao encontrado') || err.message.includes('encontrado') ? 404 : 400;
@@ -72,14 +101,12 @@ router.delete('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'adm
     if (rows[0].user_id === req.user.id) return res.status(400).json({ error: 'Voce nao pode remover a si mesmo' });
 
     if (rows[0].status === 'pending') {
-      // Pending: truly delete the row (invite never accepted)
       await db.query(
         'DELETE FROM company_members WHERE id=$1 AND company_id=$2',
         [req.params.mid, req.params.id]
       );
       res.json({ message: 'Convite removido', deleted: true });
     } else {
-      // Active/suspended: suspend (keep record for audit)
       await db.query(
         `UPDATE company_members SET status='suspended', is_active=false WHERE id=$1 AND company_id=$2`,
         [req.params.mid, req.params.id]
