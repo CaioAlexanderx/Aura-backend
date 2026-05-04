@@ -114,7 +114,7 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
     // ── Produção: transmite à Nuvem Fiscal ─────────────────────
     try {
       const { rows: companies } = await dbClient.query(
-        `SELECT cnpj, legal_name, trade_name, name,
+        `SELECT cnpj, legal_name, trade_name,
                 address_street, address_number, address_neighborhood,
                 address_city, address_state, address_zip,
                 inscricao_estadual, inscricao_municipal,

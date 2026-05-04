@@ -122,7 +122,7 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
 
     // Dados da empresa para chamada à Nuvem Fiscal
     const { rows: companies } = await db.query(
-      `SELECT cnpj, legal_name, trade_name, name,
+      `SELECT cnpj, legal_name, trade_name,
               address_street, address_number, address_neighborhood,
               address_city, address_state, address_zip,
               inscricao_estadual, inscricao_municipal,
@@ -347,7 +347,6 @@ router.post('/:nfceId/cancel', requireAuth, requireRole('client', 'analyst', 'ad
         await cancelFn(emission.nuvemfiscal_id, reason);
       } catch (apiErr) {
         console.error('[nfce] Nuvem Fiscal cancel error:', apiErr.message);
-        // Não reverte cancelamento local — registra o erro para investigação
         await db.query(
           'UPDATE nfce_emissions SET error_message = $1 WHERE id = $2',
           ['Cancelamento local OK. Erro Nuvem Fiscal: ' + apiErr.message, emission.id]
