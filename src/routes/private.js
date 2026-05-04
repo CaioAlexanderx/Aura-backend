@@ -21,6 +21,9 @@ router.use('/dre', require('./dre'));
 router.use('/financial/history', require('./financialHistory'));
 router.use('/financial/analysis', require('./financialAnalysis'));
 router.use('/bank', require('./bankReconciliation'));
+// Financeiro v2: Insights agregados (Health Score / Runway / Biggest Lever).
+// Onda 1 (04/05/2026) calcula client-side; este endpoint enriquece com dados do server.
+router.use('/financeiro', require('./financeiroInsights').companyRouter);
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
 router.use('/', require('./pdvSettings'));
