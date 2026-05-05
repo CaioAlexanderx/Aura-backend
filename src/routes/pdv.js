@@ -5,6 +5,10 @@
 // FIX: Cancel restores stock + sets status='cancelled' + stock_movements
 // FEAT: seller_name — nome da vendedora salvo direto (plano Essencial)
 // FIX 22/04: validacao de estoque variant-aware (Fase C gap)
+// FEAT 05/05/2026: pagamento 'crediario' — cria debit em
+//   customer_credit_transactions e NAO entra no Financeiro/transactions.
+//   Em split (payments[]), so o valor 'crediario' fica fora do Financeiro;
+//   o resto vira receita normal. Cancelar venda apaga os debits (sale_id FK).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -13,6 +17,23 @@ const fmt = (v) => parseFloat(v || 0).toFixed(2);
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 const SP_DATE_COL = (col) => `(${col} AT TIME ZONE 'America/Sao_Paulo')::date`;
+
+// Calcula quanto da venda foi no crediario (split-aware).
+// Retorna [creditAmount, payLabelForFinanceiro] — payLabel exclui 'crediario'
+// pra descricao da transaction nao mentir.
+function calcCreditAmount({ payment_method, payments, totalAmount }) {
+  if (Array.isArray(payments) && payments.length > 0) {
+    let credit = 0;
+    for (const p of payments) {
+      if ((p.method || '').toLowerCase() === 'crediario') {
+        credit += parseFloat(p.amount || 0);
+      }
+    }
+    return parseFloat(credit.toFixed(2));
+  }
+  if ((payment_method || '').toLowerCase() === 'crediario') return totalAmount;
+  return 0;
+}
 
 // POST /companies/:id/pdv/sale
 router.post('/sale', async (req, res) => {
@@ -113,6 +134,17 @@ router.post('/sale', async (req, res) => {
       if (!empCheck.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' }); }
     }
 
+    // FEAT 05/05/2026: validar crediario antes do INSERT do sale.
+    // Se a venda inteira ou um split tem method='crediario', cliente
+    // e obrigatorio (saldo precisa de FK customer_id).
+    const creditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
+    if (creditAmount > 0 && !customer_id) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'Crediario exige um cliente identificado. Selecione o cliente antes de finalizar.',
+      });
+    }
+
     const { rows: sales } = await client.query(
       `INSERT INTO sales
          (company_id, customer_id, seller_id, employee_id, seller_name, total_amount, discount_amount,
@@ -197,14 +229,41 @@ router.post('/sale', async (req, res) => {
       );
     }
 
-    if (totalAmount > 0) {
+    // FEAT 05/05/2026: registrar debit no crediario (se aplicavel).
+    // sale_id FK garante que cancel da venda apaga este lancamento via
+    // ON DELETE SET NULL — mas como a gente usa status='cancelled' (nao DELETE),
+    // o cancelamento explicitamente apaga os debits no DELETE handler.
+    if (creditAmount > 0) {
+      await client.query(
+        `INSERT INTO customer_credit_transactions
+           (company_id, customer_id, sale_id, type, amount, notes, created_by)
+         VALUES ($1, $2, $3, 'debit', $4, $5, $6)`,
+        [
+          req.params.id, customer_id, sale.id, creditAmount,
+          `Venda no crediario (${productNames.slice(0, 2).join(', ') || 'Venda'})`,
+          req.user?.id || null,
+        ]
+      );
+    }
+
+    // Financeiro: receita confirmada APENAS pelo valor que NAO foi
+    // crediario. Crediario vira receita quando o pagamento for registrado
+    // separadamente (ou nunca, se o lojista nao quer integrar).
+    const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
+    if (cashAmount > 0) {
       const itemsSummary = productNames.slice(0, 3).join(', ') + (productNames.length > 3 ? ` +${productNames.length - 3}` : '');
-      const payLabel = payment_method || (payments?.[0]?.method) || 'dinheiro';
+      // Label do meio de pagamento pra descricao: se for split, pega o
+      // primeiro NAO-crediario; se for venda inteira nao-crediario, usa o payment_method.
+      let payLabel = payment_method || 'dinheiro';
+      if (Array.isArray(payments) && payments.length > 0) {
+        const nonCredit = payments.find(p => (p.method || '').toLowerCase() !== 'crediario');
+        if (nonCredit) payLabel = nonCredit.method;
+      }
       const txDesc = sale_date
         ? `Venda (retroativa) - ${itemsSummary} (${payLabel})`
         : `Venda PDV - ${itemsSummary} (${payLabel})`;
       const dueDateExpr = sale_date ? `$6::date` : SP_DATE_NOW;
-      const txParams = [req.params.id, totalAmount, txDesc, req.user?.id || null, 'pdv-sale-' + sale.id];
+      const txParams = [req.params.id, cashAmount, txDesc, req.user?.id || null, 'pdv-sale-' + sale.id];
       if (sale_date) txParams.push(sale_date);
 
       await client.query(
@@ -223,9 +282,24 @@ router.post('/sale', async (req, res) => {
        LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`, [sale.id]
     );
 
+    // Se foi crediario, devolve saldo atualizado pra UI mostrar feedback.
+    let creditInfo = null;
+    if (creditAmount > 0) {
+      const { rows: bal } = await db.query(
+        `SELECT balance FROM customer_credit_balances
+          WHERE customer_id=$1 AND company_id=$2`,
+        [customer_id, req.params.id]
+      );
+      creditInfo = {
+        debited: creditAmount,
+        new_balance: parseFloat(bal[0]?.balance || 0),
+      };
+    }
+
     res.status(201).json({
       sale: { ...sale, items: saleItems },
       coupon_applied: couponCodeUsed ? { code: couponCodeUsed, discount: discountAmt } : null,
+      credit: creditInfo,
       receipt_url: `/companies/${req.params.id}/print/receipt/${sale.id}`,
     });
   } catch (e) {
@@ -382,6 +456,16 @@ router.delete('/sale/:saleId', async (req, res) => {
     if (sale.coupon_id) {
       await client.query(`UPDATE coupons SET current_uses=GREATEST(0,current_uses-1), updated_at=NOW() WHERE id=$1`, [sale.coupon_id]);
     }
+
+    // FEAT 05/05/2026: apagar debits do crediario vinculados a esta venda.
+    // Pagamentos avulsos (sale_id IS NULL) ficam intactos — se o cliente
+    // ja pagou parte da divida, o saldo dele pode ficar negativo (= credito
+    // a favor do cliente), o que e o comportamento correto.
+    await client.query(
+      `DELETE FROM customer_credit_transactions
+        WHERE sale_id = $1 AND company_id = $2 AND type = 'debit'`,
+      [req.params.saleId, req.params.id]
+    );
 
     await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-sale-' + req.params.saleId, req.params.id]);
     await client.query(
