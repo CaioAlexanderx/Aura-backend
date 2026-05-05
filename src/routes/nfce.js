@@ -180,7 +180,7 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
     const config = configs[0];
 
     const { rows: companies } = await db.query(
-      `SELECT id, cnpj, legal_name, trade_name, name,
+      `SELECT id, cnpj, legal_name, trade_name,
               address_street, address_number,
               address_district AS address_neighborhood,
               address_city, address_state, address_zip,
