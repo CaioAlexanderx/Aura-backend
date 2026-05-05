@@ -135,27 +135,25 @@ router.get('/:eid/goals', requireAuth, async (req, res) => {
       [employee_id, company_id, reference_month]
     );
 
-    // Vendas do mês para calcular % atingimento
+    // Verificar funcionário
     const empResult = await pool.query(
-      'SELECT user_id, name FROM employees WHERE id = $1 AND company_id = $2',
+      'SELECT name FROM employees WHERE id = $1 AND company_id = $2',
       [employee_id, company_id]
     );
     if (empResult.rows.length === 0) return res.status(404).json({ error: 'Funcionário não encontrado' });
 
-    const { user_id, name } = empResult.rows[0];
+    const { name } = empResult.rows[0];
     const startDate = reference_month;
     const endDate = new Date(year, m, 1);
 
-    let achieved = 0;
-    if (user_id) {
-      const salesResult = await pool.query(
-        `SELECT COALESCE(SUM(total_amount), 0) AS total
-         FROM sales
-         WHERE company_id = $1 AND seller_id = $2 AND created_at >= $3 AND created_at < $4`,
-        [company_id, user_id, startDate, endDate]
-      );
-      achieved = parseFloat(salesResult.rows[0].total);
-    }
+    // Vendas do mês usando employee_id (join direto, sem depender de user_id)
+    const salesResult = await pool.query(
+      `SELECT COALESCE(SUM(total_amount), 0) AS total
+       FROM sales
+       WHERE company_id = $1 AND employee_id = $2 AND created_at >= $3 AND created_at < $4`,
+      [company_id, employee_id, startDate, endDate]
+    );
+    const achieved = parseFloat(salesResult.rows[0].total);
 
     const goal = goalResult.rows[0] || null;
     const goal_amount = goal ? parseFloat(goal.goal_amount) : null;
@@ -257,19 +255,18 @@ router.get('/goals/summary', requireAuth, async (req, res) => {
       `SELECT
          e.id              AS employee_id,
          e.name            AS employee_name,
-         e.user_id,
          g.goal_amount,
          COALESCE(SUM(s.total_amount), 0) AS achieved
        FROM employees e
        LEFT JOIN employee_goals g
          ON g.employee_id = e.id AND g.reference_month = $2
        LEFT JOIN sales s
-         ON s.company_id = e.company_id
-        AND s.seller_id  = e.user_id
+         ON s.company_id  = e.company_id
+        AND s.employee_id = e.id
         AND s.created_at >= $2
         AND s.created_at <  $3
        WHERE e.company_id = $1 AND e.is_active = true
-       GROUP BY e.id, e.name, e.user_id, g.goal_amount
+       GROUP BY e.id, e.name, g.goal_amount
        ORDER BY achieved DESC`,
       [company_id, startDate, endDate]
     );
@@ -283,7 +280,6 @@ router.get('/goals/summary', requireAuth, async (req, res) => {
       return {
         employee_id:     row.employee_id,
         employee_name:   row.employee_name,
-        has_user_linked: !!row.user_id,
         goal_amount,
         achieved,
         achievement_pct: pct,
