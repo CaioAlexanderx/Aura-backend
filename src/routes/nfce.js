@@ -39,12 +39,14 @@ function extractProvFields(resp) {
   const proto = aut.protocolo || aut;
   const supl  = resp.infNFeSupl || resp.inf_nfe_supl || {};
 
-  // codigo_status é o campo da Nuvem Fiscal para cStat SEFAZ (presente no GET)
+  // codigo_status é o campo da Nuvem Fiscal para cStat SEFAZ.
+  // Pode vir no nível raiz (GET) ou aninhado em autorizacao (POST/GET).
   const cStat = resp.codigo_status || resp.c_stat || resp.cStat
-    || aut.c_stat || aut.cStat || proto.cStat || null;
+    || aut.codigo_status || aut.c_stat || aut.cStat || proto.cStat || null;
 
-  // motivo_status é o campo da Nuvem Fiscal para xMotivo SEFAZ (presente no GET)
-  const xMotivo = resp.motivo_status || proto.xMotivo || aut.xMotivo
+  // motivo_status é o campo da Nuvem Fiscal para xMotivo SEFAZ.
+  // Pode vir no nível raiz (GET) ou aninhado em autorizacao (POST/GET).
+  const xMotivo = resp.motivo_status || aut.motivo_status || proto.xMotivo || aut.xMotivo
     || resp.x_motivo || resp.xMotivo || null;
 
   // motivo: ignora '-' (placeholder Nuvem Fiscal sem info adicional)
@@ -371,8 +373,13 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
         console.log(`[nfce] nfce #${numeroNF} status=${finalStatus} cStat=${prov.cStat} motivo=${prov.motivo}`);
 
         const authorizedAt = finalStatus === 'autorizada' ? new Date() : null;
+        // Persiste motivo SEFAZ completo. cStat fica como prefixo p/ facilitar busca.
+        // Se prov.motivo veio (extractProvFields agora lê aut.motivo_status), usa direto;
+        // senão guarda JSON bruto truncado em 5000 chars (TEXT defensivo).
         const errorMessage = finalStatus === 'rejeitada'
-          ? (prov.motivo || JSON.stringify(provResult).slice(0, 500))
+          ? (prov.motivo
+              ? (prov.cStat ? `[${prov.cStat}] ${prov.motivo}` : prov.motivo)
+              : JSON.stringify(provResult).slice(0, 5000))
           : null;
 
         await db.query(
