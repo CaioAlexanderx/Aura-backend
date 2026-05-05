@@ -80,8 +80,6 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
     });
 
     test('calcDvChaveAcesso (mod 11) — exemplo conhecido', () => {
-      // Chave de teste: cUF=35, AA=20, MM=03, CNPJ=...0199, mod=65, serie=001,
-      // nNF=000000042, tpEmis=1, cNF=12345678. dv calculado deve ser 0..9.
       const dv = nf.calcDvChaveAcesso('3520031234567800019965001000000042112345678');
       expect(dv).toMatch(/^[0-9]$/);
     });
@@ -100,9 +98,11 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
       expect(nf.validateTpag('03')).toBe('03');     // Cartão crédito
       expect(nf.validateTpag('99')).toBe('99');     // Outros
       expect(nf.validateTpag('xx')).toBe('99');     // Desconhecido → fallback
-      expect(nf.validateTpag('')).toBe('99');       // Vazio? na verdade default '01' padded → '01'
-      // Vazio pula pra '01' no default antes do whitelist; depois '01' passa.
-      // Já testado acima: validateTpag('xx')=99 confirma fallback.
+      // Vazio/null/undefined caem no default '01' (dinheiro) — comportamento
+      // intencional. Whitelist só valida quando há valor explícito.
+      expect(nf.validateTpag('')).toBe('01');
+      expect(nf.validateTpag(null)).toBe('01');
+      expect(nf.validateTpag(undefined)).toBe('01');
     });
   });
 
@@ -142,13 +142,12 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
       expect(ide.tpAmb).toBe(2);
       expect(ide.indFinal).toBe(1);
       expect(ide.indPres).toBe(1);
-      // Audit fixes:
-      expect(ide.cNF).toMatch(/^\d{8}$/);              // 8 dígitos
-      expect(typeof ide.cDV).toBe('number');           // dv numérico
+      expect(ide.cNF).toMatch(/^\d{8}$/);
+      expect(typeof ide.cDV).toBe('number');
       expect(ide.cDV).toBeGreaterThanOrEqual(0);
       expect(ide.cDV).toBeLessThanOrEqual(9);
-      expect(ide.dhEmi).toMatch(/-03:00$/);            // offset BR fixo
-      expect(ide.dhEmi).not.toMatch(/Z$/);             // não pode ser UTC
+      expect(ide.dhEmi).toMatch(/-03:00$/);
+      expect(ide.dhEmi).not.toMatch(/Z$/);
     });
 
     test('emit: emitente Simples Nacional', () => {
