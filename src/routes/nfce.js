@@ -2,13 +2,9 @@
 // AURA. — NFC-e / NF-e PDV
 // Mounted at: /companies/:id/nfce
 //
-// Mai/2026 audit:
-// - Idempotência por sale_id: se já existe emissão autorizada/processando
-//   pra mesma sale_id, retorna a existente (caixa clicar 2x não duplica)
-// - Numeração da série só incrementa APÓS Nuvem Fiscal aceitar.
-//   Antes incrementava antes de chamar a API → falha deixava lacuna que
-//   SEFAZ rejeita ("nNF não pode pular números").
-// - Validação de items: qty > 0 e unit_price >= 0 antes de chamar a API.
+// Mai/2026 features:
+// - /config GET/POST inclui auto_emit_nfce (toggle de emissão automática)
+// - /emit aceita body.payments[] (multi-pagamento, soma deve bater com total)
 // ============================================================
 
 const express = require('express');
@@ -50,7 +46,6 @@ function extractProvFields(resp) {
   };
 }
 
-// Valida items antes de tocar no banco. Retorna { ok, error } ou null se OK.
 function validateItems(items) {
   if (!Array.isArray(items) || items.length === 0) {
     return { error: 'items obrigatorio (array de produtos)' };
@@ -73,11 +68,38 @@ function validateItems(items) {
   return null;
 }
 
+// Valida payments[] do body se foi enviado.
+// Aceita array de { method, value, change?, indPag? }.
+// Soma de value deve bater com totalNfce (tolerância 1 centavo).
+function validatePayments(payments, totalNfce) {
+  if (!Array.isArray(payments)) return null; // shape legado, não valida aqui
+  if (payments.length === 0) {
+    return { error: 'payments[] vazio' };
+  }
+  let sum = 0;
+  for (let i = 0; i < payments.length; i++) {
+    const p = payments[i] || {};
+    if (!p.method) return { error: `payments[${i}]: method obrigatório` };
+    const v = Number(p.value);
+    if (!isFinite(v) || v <= 0) {
+      return { error: `payments[${i}]: value inválido (${p.value})` };
+    }
+    sum += v;
+  }
+  const diff = Math.abs(Math.round((sum - totalNfce) * 100));
+  if (diff > 1) {
+    return {
+      error: `Soma dos pagamentos (R$ ${sum.toFixed(2)}) não bate com total (R$ ${totalNfce.toFixed(2)})`,
+    };
+  }
+  return null;
+}
+
 router.get('/config', requireAuth, async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT id, company_id, serie_nfce, next_number, ambiente, uf,
-              inscricao_estadual, is_active, csc_id
+              inscricao_estadual, is_active, csc_id, auto_emit_nfce
          FROM nfce_config WHERE company_id=$1`,
       [req.params.id]
     );
@@ -88,11 +110,11 @@ router.get('/config', requireAuth, async (req, res) => {
 });
 
 router.post('/config', requireAuth, requireRole('client', 'analyst', 'admin'), async (req, res) => {
-  const { serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token } = req.body;
+  const { serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce } = req.body;
   try {
     const { rows } = await db.query(
-      `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
+      `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce)
+       VALUES ($1,$2,$3,$4,$5,$6,$7, COALESCE($8, false))
        ON CONFLICT (company_id) DO UPDATE SET
          serie_nfce         = COALESCE($2, nfce_config.serie_nfce),
          ambiente           = COALESCE($3, nfce_config.ambiente),
@@ -100,10 +122,12 @@ router.post('/config', requireAuth, requireRole('client', 'analyst', 'admin'), a
          inscricao_estadual = COALESCE($5, nfce_config.inscricao_estadual),
          csc_id             = COALESCE($6, nfce_config.csc_id),
          csc_token          = COALESCE($7, nfce_config.csc_token),
+         auto_emit_nfce     = COALESCE($8, nfce_config.auto_emit_nfce),
          updated_at         = NOW()
        RETURNING *`,
       [req.params.id, serie_nfce || 1, ambiente || 'homologacao', uf || 'SP',
-       inscricao_estadual || null, csc_id || null, csc_token || null]
+       inscricao_estadual || null, csc_id || null, csc_token || null,
+       typeof auto_emit_nfce === 'boolean' ? auto_emit_nfce : null]
     );
     res.json({ config: rows[0] });
   } catch (err) {
@@ -114,7 +138,8 @@ router.post('/config', requireAuth, requireRole('client', 'analyst', 'admin'), a
 router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const {
     items, customer_cpf, customer_name, customer_email, recipient_cnpj,
-    payment_method, payment_change, sale_id, transaction_id, observacoes,
+    payment_method, payment_change, payments, // payments[] novo (multi-pag)
+    sale_id, transaction_id, observacoes,
     tipo = 'nfce',
   } = req.body;
 
@@ -126,9 +151,6 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
   }
 
   try {
-    // ── Idempotência por sale_id ───────────────────────────────
-    // Se já existe emissão pra mesma venda em estado terminal autorizada
-    // ou ainda processando, retorna a existente em vez de duplicar.
     if (sale_id) {
       const { rows: existing } = await db.query(
         `SELECT * FROM nfce_emissions
@@ -175,7 +197,6 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
         error: 'Código IBGE da empresa não cadastrado (campo cMun obrigatório). Atualize em Configurações > Empresa.',
       });
     }
-
     if (!company.inscricao_estadual && config.inscricao_estadual) {
       company.inscricao_estadual = config.inscricao_estadual;
     }
@@ -191,6 +212,10 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
       totalDiscount += Number(item.discount) || 0;
     }
     const totalNfce = Math.round((totalProducts - totalDiscount) * 100) / 100;
+
+    // Valida payments[] se presente — soma deve bater com totalNfce
+    const paymentsErr = validatePayments(payments, totalNfce);
+    if (paymentsErr) return res.status(400).json(paymentsErr);
 
     const numeroNF = config.next_number;
     const serieNF  = config.serie_nfce;
@@ -213,7 +238,8 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
       [req.params.id, sale_id || null, transaction_id || null, numeroNF, serieNF, chaveAcessoTmp,
        customer_cpf || null, customer_name || null, JSON.stringify(items),
        totalProducts, totalDiscount, totalNfce,
-       payment_method || 'dinheiro', payment_change || 0, req.user.id, tipo]
+       Array.isArray(payments) ? JSON.stringify(payments) : (payment_method || 'dinheiro'),
+       payment_change || 0, req.user.id, tipo]
     );
     const emission = created[0];
 
@@ -221,20 +247,17 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
     let prov = {};
 
     if (config.ambiente === 'homologacao' && process.env.NUVEM_FISCAL_FORCE !== 'true') {
-      // Homologação local: autoriza sem transmitir
       prov.protocolo = 'HOMOLOG-' + String(numeroNF).padStart(6, '0');
       finalStatus = 'autorizada';
       await db.query(
         `UPDATE nfce_emissions SET status = 'autorizada', protocolo = $1, authorized_at = NOW() WHERE id = $2`,
         [prov.protocolo, emission.id]
       );
-      // Numeração só incrementa após "sucesso" local
       await db.query(
         'UPDATE nfce_config SET next_number = next_number + 1, updated_at = NOW() WHERE company_id=$1',
         [req.params.id]
       );
     } else {
-      // Produção: transmite à Nuvem Fiscal
       try {
         const nfItems = items.map(i => ({
           code:        String(i.product_id || i.code || ''),
@@ -248,11 +271,22 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
           barcode:     i.barcode || undefined,
         }));
 
+        // Constrói payments pra Nuvem Fiscal: prioriza array, fallback pra single
+        const nfPayments = Array.isArray(payments)
+          ? payments.map(p => ({
+              method: paymentCode(p.method),
+              value:  Number(p.value),
+              change: p.change,
+              indPag: p.indPag,
+            }))
+          : undefined;
+
         const emitFn = tipo === 'nfe' ? nuvemfiscal.emitNfe : nuvemfiscal.emitNfce;
         const provResult = await emitFn(company, {
           items:           nfItems,
           total_value:     totalNfce,
-          payment_method:  paymentCode(payment_method),
+          payments:        nfPayments,                          // novo
+          payment_method:  paymentCode(payment_method),         // legado
           payment_change:  payment_change,
           recipient_cpf:   customer_cpf,
           recipient_cnpj:  recipient_cnpj,
@@ -285,9 +319,6 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
            prov.xmlUrl, prov.pdfUrl, prov.qrCode, prov.urlConsulta, emission.id]
         );
 
-        // Incrementa numeração só se status NÃO for 'rejeitada'.
-        // Em 'autorizada' obviamente, e em 'processando' também (Nuvem Fiscal
-        // já consumiu o número internamente — se reusarmos, dá conflito).
         if (finalStatus !== 'rejeitada') {
           await db.query(
             'UPDATE nfce_config SET next_number = next_number + 1, updated_at = NOW() WHERE company_id=$1',
@@ -296,8 +327,6 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
         }
 
       } catch (apiErr) {
-        // Falha de transmissão — número NÃO foi consumido pela SEFAZ, então
-        // não incrementa next_number. Próxima emissão reusa o mesmo nNF.
         console.error('[nfce] Nuvem Fiscal emit error:', apiErr.message, apiErr.payload || '');
         await db.query(
           `UPDATE nfce_emissions SET status = 'erro', error_message = $1 WHERE id = $2`,
