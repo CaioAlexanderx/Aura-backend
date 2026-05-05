@@ -15,7 +15,7 @@ async function calculateEmployeeCommission(company_id, employee_id, reference_mo
 
   // Buscar funcionário com user_id e configuração de comissão
   const empResult = await pool.query(
-    `SELECT e.id, e.name, e.user_id, e.commission_enabled, e.commission_rate
+    `SELECT e.id, e.name, e.role, e.user_id, e.commission_enabled, e.commission_rate
      FROM employees e
      WHERE e.id = $1 AND e.company_id = $2 AND e.is_active = true`,
     [employee_id, company_id]
@@ -32,11 +32,12 @@ async function calculateEmployeeCommission(company_id, employee_id, reference_mo
     return {
       employee_id:        employee.id,
       employee_name:      employee.name,
+      role:               employee.role,
       commission_enabled: false,
       commission_rate:    null,
+      total_revenue:      0,
       total_sales:        0,
       commission_amount:  0,
-      sales_count:        0,
       reference_month,
     };
   }
@@ -46,8 +47,8 @@ async function calculateEmployeeCommission(company_id, employee_id, reference_mo
   if (employee.user_id) {
     salesResult = await pool.query(
       `SELECT
-         COALESCE(SUM(s.total_amount), 0) AS total_sales,
-         COUNT(*) AS sales_count
+         COALESCE(SUM(s.total_amount), 0) AS total_revenue,
+         COUNT(*) AS total_sales
        FROM sales s
        WHERE s.company_id = $1
          AND s.seller_id  = $2
@@ -57,19 +58,20 @@ async function calculateEmployeeCommission(company_id, employee_id, reference_mo
     );
   } else {
     // Funcionário sem user_id vinculado — vendas não rastreáveis
-    salesResult = { rows: [{ total_sales: 0, sales_count: 0 }] };
+    salesResult = { rows: [{ total_revenue: 0, total_sales: 0 }] };
   }
 
-  const { total_sales, sales_count } = salesResult.rows[0];
-  const commission_amount = (parseFloat(total_sales) * parseFloat(employee.commission_rate)) / 100;
+  const { total_revenue, total_sales } = salesResult.rows[0];
+  const commission_amount = (parseFloat(total_revenue) * parseFloat(employee.commission_rate)) / 100;
 
   return {
     employee_id:        employee.id,
     employee_name:      employee.name,
+    role:               employee.role,
     commission_enabled: true,
     commission_rate:    parseFloat(employee.commission_rate),
-    total_sales:        parseFloat(total_sales),
-    sales_count:        parseInt(sales_count),
+    total_revenue:      parseFloat(total_revenue),
+    total_sales:        parseInt(total_sales),
     commission_amount:  Math.round(commission_amount * 100) / 100,
     reference_month,
   };
@@ -87,11 +89,12 @@ async function getCommissionSummary(company_id, reference_month) {
     `SELECT
        e.id              AS employee_id,
        e.name            AS employee_name,
+       e.role,
        e.commission_enabled,
        e.commission_rate,
        e.user_id,
-       COALESCE(SUM(s.total_amount), 0) AS total_sales,
-       COUNT(s.id)                       AS sales_count
+       COALESCE(SUM(s.total_amount), 0) AS total_revenue,
+       COUNT(s.id)                       AS total_sales
      FROM employees e
      LEFT JOIN sales s
        ON s.company_id = e.company_id
@@ -100,20 +103,21 @@ async function getCommissionSummary(company_id, reference_month) {
       AND s.created_at <  $3
      WHERE e.company_id = $1
        AND e.is_active  = true
-     GROUP BY e.id, e.name, e.commission_enabled, e.commission_rate, e.user_id
-     ORDER BY total_sales DESC`,
+     GROUP BY e.id, e.name, e.role, e.commission_enabled, e.commission_rate, e.user_id
+     ORDER BY total_revenue DESC`,
     [company_id, startDate, endDate]
   );
 
   return result.rows.map(row => ({
     employee_id:        row.employee_id,
     employee_name:      row.employee_name,
+    role:               row.role,
     commission_enabled: row.commission_enabled,
     commission_rate:    row.commission_rate ? parseFloat(row.commission_rate) : null,
-    total_sales:        parseFloat(row.total_sales),
-    sales_count:        parseInt(row.sales_count),
+    total_revenue:      parseFloat(row.total_revenue),
+    total_sales:        parseInt(row.total_sales),
     commission_amount:  row.commission_enabled && row.commission_rate
-      ? Math.round(parseFloat(row.total_sales) * parseFloat(row.commission_rate)) / 100
+      ? Math.round(parseFloat(row.total_revenue) * parseFloat(row.commission_rate) / 100 * 100) / 100
       : 0,
     has_user_linked:    !!row.user_id,
     reference_month,
