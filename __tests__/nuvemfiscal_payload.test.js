@@ -1,6 +1,12 @@
 // Smoke test do payload NFC-e: gera o body que mandamos pra Nuvem Fiscal
 // e valida contra o schema oficial (envelope `infNFe` com ide/emit/dest/det/
 // total/transp/pag). Sem rede — stub do fetch só captura o body.
+//
+// IMPORTANTE — Workaround PIX (commit 1371d1a, mai/2026):
+// SEFAZ-SP rejeita 391 com tPag=17 (PIX) em produção mesmo com body
+// schema-válido. buildPag mapeia automaticamente PIX -> tPag=99 + xPag="PIX".
+// Os asserts abaixo refletem esse comportamento. Quando SEFAZ corrigir o
+// bug, reverter o swap em buildPag e atualizar testes pra tPag=17 nativo.
 
 process.env.NUVEM_FISCAL_URL = 'https://api.sandbox.nuvemfiscal.com.br';
 process.env.NUVEM_FISCAL_CLIENT_ID = 'fake_id';
@@ -104,22 +110,28 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
     });
 
     test('buildPag aceita array (multi-pagamento) — soma vTroco', () => {
+      // Workaround PIX: '17' input vira tPag=99 + xPag="PIX" no detPag.
+      // Outros métodos (01=Dinheiro) seguem tPag nativo.
       const r = nf.buildPag([
-        { method: '17', value: 100 },          // Pix R$100
+        { method: '17', value: 100 },          // Pix R$100  → tPag=99 + xPag=PIX
         { method: '01', value: 50, change: 5 } // Dinheiro R$50, troco R$5
       ], 150);
       expect(r.detPag.length).toBe(2);
-      expect(r.detPag[0].tPag).toBe('17');
+      expect(r.detPag[0].tPag).toBe('99');
+      expect(r.detPag[0].xPag).toBe('PIX');
       expect(r.detPag[0].vPag).toBe(100);
       expect(r.detPag[1].tPag).toBe('01');
+      expect(r.detPag[1].xPag).toBeUndefined();
       expect(r.detPag[1].vPag).toBe(50);
       expect(r.vTroco).toBe(5);
     });
 
     test('buildPag aceita objeto único legado — vPag = totalFallback', () => {
+      // Workaround PIX: '17' vira tPag=99 + xPag="PIX".
       const r = nf.buildPag({ method: '17', change: 0 }, 240);
       expect(r.detPag.length).toBe(1);
-      expect(r.detPag[0].tPag).toBe('17');
+      expect(r.detPag[0].tPag).toBe('99');
+      expect(r.detPag[0].xPag).toBe('PIX');
       expect(r.detPag[0].vPag).toBe(240);
       expect(r.vTroco).toBe(0);
     });
@@ -129,6 +141,21 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
       expect(r.detPag.length).toBe(1);
       expect(r.detPag[0].tPag).toBe('01');
       expect(r.detPag[0].vPag).toBe(100);
+    });
+
+    test('buildPag com tPag=99 nativo usa xPag="Outros" (default)', () => {
+      // Quando o input já é 99, mantemos xPag="Outros" como descrição padrão.
+      const r = nf.buildPag({ method: '99', value: 100 }, 100);
+      expect(r.detPag[0].tPag).toBe('99');
+      expect(r.detPag[0].xPag).toBe('Outros');
+    });
+
+    test('buildPag com tPag=03 (crédito) inclui bloco card', () => {
+      // tPag=03/04 exige bloco card (NfeSefazCard) com tpIntegra.
+      const r = nf.buildPag({ method: '03', value: 100 }, 100);
+      expect(r.detPag[0].tPag).toBe('03');
+      expect(r.detPag[0].card).toBeDefined();
+      expect(r.detPag[0].card.tpIntegra).toBe(2);
     });
   });
 
@@ -227,9 +254,11 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
       expect(body.infNFe.transp.modFrete).toBe(9);
     });
 
-    test('pag.detPag: tPag SEFAZ válido (Pix=17) e vPag = total', () => {
+    test('pag.detPag: PIX (input tPag=17) mapeia pra tPag=99 + xPag="PIX"', () => {
+      // Workaround SEFAZ-SP rejeição 391 spurious — input "17" sai como 99.
       const pag = body.infNFe.pag;
-      expect(pag.detPag[0].tPag).toBe('17');
+      expect(pag.detPag[0].tPag).toBe('99');
+      expect(pag.detPag[0].xPag).toBe('PIX');
       expect(pag.detPag[0].vPag).toBe(240);
       expect(pag.vTroco).toBe(0);
     });
@@ -262,23 +291,29 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
       ...nfceData,
       payment_method: 'metodo_inexistente',
     });
+    // validateTpag fallback é '99' (com xPag="Outros" do TPAG_DESCRIPTIONS)
     expect(capturedBody.infNFe.pag.detPag[0].tPag).toBe('99');
+    expect(capturedBody.infNFe.pag.detPag[0].xPag).toBe('Outros');
   });
 
   test('NFC-e com payments[] (multi-pagamento) — pag.detPag preserva split', async () => {
+    // Workaround PIX: '17' do array vira tPag=99 + xPag="PIX".
+    // '01' (dinheiro) fica nativo, sem xPag.
     capturedBody = null;
     await nf.emitNfce(company, {
       ...nfceData,
       payments: [
-        { method: '17', value: 150 },          // Pix R$150
-        { method: '01', value: 90, change: 0 }, // Dinheiro R$90
+        { method: '17', value: 150 },          // Pix → tPag=99 + xPag=PIX
+        { method: '01', value: 90, change: 0 }, // Dinheiro → tPag=01
       ],
     });
     const pag = capturedBody.infNFe.pag;
     expect(pag.detPag.length).toBe(2);
-    expect(pag.detPag[0].tPag).toBe('17');
+    expect(pag.detPag[0].tPag).toBe('99');
+    expect(pag.detPag[0].xPag).toBe('PIX');
     expect(pag.detPag[0].vPag).toBe(150);
     expect(pag.detPag[1].tPag).toBe('01');
+    expect(pag.detPag[1].xPag).toBeUndefined();
     expect(pag.detPag[1].vPag).toBe(90);
     expect(pag.vTroco).toBe(0);
   });
