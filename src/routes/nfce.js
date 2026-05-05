@@ -22,6 +22,22 @@ const INSTRUCOES_NOTA = {
   dica: 'Na dúvida, use NFC-e. Mude para NF-e somente quando o cliente pedir nota com CNPJ.',
 };
 
+// URL pública de consulta NFC-e por UF (SEFAZ estadual). Usada como fallback
+// quando a Nuvem Fiscal não retorna url_consulta direto no response — que é
+// o caso comum, já que ela só fornece via endpoint separado.
+const CONSULTA_NFCE_URL = {
+  SP: 'https://www.nfce.fazenda.sp.gov.br/NFCeConsultaPublica',
+  RJ: 'https://www4.fazenda.rj.gov.br/consultaNFCe/',
+  MG: 'https://nfce.fazenda.mg.gov.br/portalnfce',
+  RS: 'https://www.sefaz.rs.gov.br/NFCE/NFCE-COM.aspx',
+  PR: 'http://www.fazenda.pr.gov.br/nfce',
+  SC: 'https://sat.sef.sc.gov.br/nfce/consulta',
+  _: 'https://www.nfe.fazenda.gov.br/portal/consulta.aspx',
+};
+function consultaUrlByUf(uf) {
+  return CONSULTA_NFCE_URL[(uf || '').toUpperCase()] || CONSULTA_NFCE_URL._;
+}
+
 function paymentCode(method) {
   const map = {
     dinheiro: '01', cheque: '02', credito: '03', debito: '04',
@@ -31,9 +47,20 @@ function paymentCode(method) {
 }
 
 // Extrai campos padronizados da resposta bruta da Nuvem Fiscal.
-// O POST /nfce retorna campos básicos; o GET /nfce/{id} retorna
-// codigo_status + motivo_status com o detalhamento completo da rejeição SEFAZ.
-// motivo='-' é placeholder sem info; ignorado aqui.
+// Estrutura típica do response (POST /nfce):
+//   {
+//     id: "nfc_...",                  ← prov.nuvemfiscalId
+//     status: "autorizado|rejeitado",
+//     chave: "35260547...",           ← prov.chaveAcesso (raiz "chave", NÃO "chave_acesso")
+//     autorizacao: {
+//       chave_acesso: "35260547...",  ← prov.chaveAcesso (fallback)
+//       numero_protocolo: "...",      ← prov.protocolo (na autorização)
+//       codigo_status: 100|391|...,
+//       motivo_status: "..."
+//     }
+//   }
+// PDF/XML/QR Code são acessados via endpoints separados (/nfce/{id}/pdf etc),
+// não chegam aqui. url_consulta é construída no caller a partir da UF.
 function extractProvFields(resp) {
   if (!resp) return {};
 
@@ -42,12 +69,10 @@ function extractProvFields(resp) {
   const supl  = resp.infNFeSupl || resp.inf_nfe_supl || {};
 
   // codigo_status é o campo da Nuvem Fiscal para cStat SEFAZ.
-  // Pode vir no nível raiz (GET) ou aninhado em autorizacao (POST/GET).
   const cStat = resp.codigo_status || resp.c_stat || resp.cStat
     || aut.codigo_status || aut.c_stat || aut.cStat || proto.cStat || null;
 
   // motivo_status é o campo da Nuvem Fiscal para xMotivo SEFAZ.
-  // Pode vir no nível raiz (GET) ou aninhado em autorizacao (POST/GET).
   const xMotivo = resp.motivo_status || aut.motivo_status || proto.xMotivo || aut.xMotivo
     || resp.x_motivo || resp.xMotivo || null;
 
@@ -57,8 +82,14 @@ function extractProvFields(resp) {
 
   return {
     nuvemfiscalId: resp.id || null,
-    chaveAcesso:   resp.chave_acesso || resp.chNFe || proto.chNFe || null,
-    protocolo:     resp.protocolo || proto.nProt || aut.nProt || null,
+    // Nuvem Fiscal usa "chave" no nível raiz e "chave_acesso" dentro de autorizacao.
+    // Mantemos chave_acesso como primeira opção pra casos de outros providers.
+    chaveAcesso:   resp.chave_acesso || resp.chave || aut.chave_acesso || resp.chNFe || proto.chNFe || null,
+    // Protocolo: pode vir como "protocolo" raiz, "numero_protocolo" raiz/aut, ou nProt.
+    protocolo:     resp.protocolo || resp.numero_protocolo || aut.numero_protocolo
+                   || aut.protocolo || proto.nProt || aut.nProt || null,
+    // PDF/XML/QR: Nuvem Fiscal NÃO retorna no JSON. Mantidos pra outros providers
+    // que retornam URLs prontas (ex: Webmania).
     xmlUrl:        resp.link_xml || resp.url_xml || resp.xml_url || null,
     pdfUrl:        resp.link_pdf || resp.url_pdf || resp.pdf_url || resp.danfe_url || null,
     qrCode:        resp.qr_code  || resp.qrCode  || supl.qrCode  || supl.qr_code || null,
@@ -247,8 +278,11 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
     const yy = String(now.getFullYear()).slice(2);
     const mm = String(now.getMonth() + 1).padStart(2, '0');
     const modelo = tipo === 'nfe' ? '55' : '65';
+    // chaveAcessoTmp: chave provisória local até a Nuvem Fiscal devolver a real.
+    // cUF é numérico (35=SP, 33=RJ etc) — não usar a sigla literal.
+    const cUF = String(nuvemfiscal.ufToCodigo(config.uf || company.address_state)).padStart(2, '0');
     const chaveAcessoTmp =
-      `${config.uf}${yy}${mm}${'0'.repeat(14)}${modelo}${String(serieNF).padStart(3, '0')}` +
+      `${cUF}${yy}${mm}${'0'.repeat(14)}${modelo}${String(serieNF).padStart(3, '0')}` +
       `${String(numeroNF).padStart(9, '0')}1${'0'.repeat(8)}1`;
 
     const { rows: created } = await db.query(
@@ -370,6 +404,12 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
           } catch (e) {
             console.warn('[nfce] GET detalhe rejeição falhou:', e.message);
           }
+        }
+
+        // Constrói url_consulta a partir da UF se a Nuvem Fiscal não retornou
+        // (caso comum — ela só fornece via endpoint separado).
+        if (finalStatus === 'autorizada' && !prov.urlConsulta && prov.chaveAcesso) {
+          prov.urlConsulta = consultaUrlByUf(company.address_state || config.uf);
         }
 
         console.log(`[nfce] nfce #${numeroNF} status=${finalStatus} cStat=${prov.cStat} motivo=${prov.motivo}`);
@@ -565,6 +605,13 @@ router.get('/:nfceId', requireAuth, async (req, res) => {
         const provResult = await queryFn(emission.nuvemfiscal_id);
         const prov = extractProvFields(provResult);
         if (prov.status === 'autorizado' || prov.status === 'autorizada') {
+          // Constrói url_consulta a partir da UF se Nuvem Fiscal não retornou.
+          if (!prov.urlConsulta && prov.chaveAcesso) {
+            // Pega UF dos primeiros 2 dígitos da chave (cUF) — fallback se não tem company.
+            const cUF = String(prov.chaveAcesso).slice(0, 2);
+            const ufFromCuf = { '11':'RO','12':'AC','13':'AM','14':'RR','15':'PA','16':'AP','17':'TO','21':'MA','22':'PI','23':'CE','24':'RN','25':'PB','26':'PE','27':'AL','28':'SE','29':'BA','31':'MG','32':'ES','33':'RJ','35':'SP','41':'PR','42':'SC','43':'RS','50':'MS','51':'MT','52':'GO','53':'DF' }[cUF];
+            prov.urlConsulta = consultaUrlByUf(ufFromCuf);
+          }
           await db.query(
             `UPDATE nfce_emissions
                 SET status = 'autorizada',
