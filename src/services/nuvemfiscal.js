@@ -6,8 +6,10 @@
 // Mai/2026 (foundation):
 // - buildPag agora aceita array de pagamentos (multi-pagamento NFC-e)
 //   ou objeto único legado { method, change }. Ambos coexistem.
-// - buildPag inclui cartao.tpIntegra=2 para tPag 03/04 (crédito/débito)
-//   evitando Rejeição 391 do SEFAZ (dados do cartão obrigatórios)
+// - buildPag inclui card.tpIntegra=2 para tPag 03/04 (crédito/débito)
+//   evitando Rejeição 391 do SEFAZ (dados do cartão obrigatórios).
+//   Atenção: a propriedade JSON é `card` (confirmado em
+//   nuvem-fiscal/nuvemfiscal-sdk-php NfeSefazDetPag.php), NÃO `cartao`.
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -105,8 +107,10 @@ function validateTpag(method) {
   return VALID_TPAG.has(t) ? t : '99';
 }
 
-// tPag que exigem bloco cartao no SEFAZ NF-e 4.00
-// tpIntegra=2 = TEF não-integrado (não precisamos de CNPJ/tBand/cAut)
+// tPag que exigem o bloco `card` (NfeSefazCard) em TDetPag.
+// SEFAZ NF-e 4.00: tPag=03 (crédito) e 04 (débito) → card obrigatório,
+// senão Rejeição 391. tpIntegra=2 (TEF não-integrado) torna CNPJ/tBand/cAut
+// opcionais. Ver: nuvem-fiscal/nuvemfiscal-sdk-php NfeSefazDetPag.php
 const CARD_TPAG = new Set(['03', '04']);
 
 async function registerCompany(company) {
@@ -233,8 +237,10 @@ function buildICMSTot(det) {
 //   - Array (novo, multi-pagamento): [{ method, value, change?, indPag? }, ...]
 //   - Objeto único (legado): { method, change } — vPag = totalFallback
 // Em ambos, soma de change vira vTroco.
-// Para tPag 03 (crédito) e 04 (débito), inclui cartao.tpIntegra=2 (não-integrado)
+// Para tPag 03 (crédito) e 04 (débito), inclui card.tpIntegra=2 (não-integrado)
 // conforme exigência SEFAZ NF-e 4.00 — evita Rejeição 391.
+// IMPORTANTE: a propriedade JSON é `card`, NÃO `cartao` (confirmado em
+// NfeSefazDetPag.php do SDK oficial).
 function buildPag(payments, totalFallback) {
   const round = (n) => Math.round(n * 100) / 100;
   let list;
@@ -258,10 +264,10 @@ function buildPag(payments, totalFallback) {
       tPag,
       vPag: round(Number(p.value || 0)),
     };
-    // SEFAZ exige bloco cartao para crédito (03) e débito (04)
-    // tpIntegra=2: TEF não-integrado — CNPJ/tBand/cAut são opcionais
+    // SEFAZ exige bloco card (NfeSefazCard) para crédito (03) e débito (04).
+    // tpIntegra=2: TEF não-integrado — CNPJ/tBand/cAut são opcionais.
     if (CARD_TPAG.has(tPag)) {
-      entry.cartao = { tpIntegra: 2 };
+      entry.card = { tpIntegra: 2 };
     }
     return entry;
   });
@@ -347,6 +353,12 @@ async function emitNfce(company, nfceData) {
   };
 
   if (!body.infNFe.dest) delete body.infNFe.dest;
+
+  // Diagnóstico: log do bloco de pagamento que está saindo daqui pra
+  // Nuvem Fiscal. Ajuda a investigar Rejeição 391 (PIX) — caso ainda
+  // ocorra após o fix card/cartao, vamos saber se o tPag está chegando
+  // como esperado (17 pra PIX) ou se há corrupção em algum lugar.
+  console.log('[nuvemfiscal] emitNfce body.infNFe.pag:', JSON.stringify(body.infNFe.pag, null, 2));
 
   return nuvemRequest('POST', '/nfce', body);
 }
