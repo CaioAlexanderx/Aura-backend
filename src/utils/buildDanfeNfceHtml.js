@@ -10,12 +10,8 @@
 //   const html = buildDanfeNfceHtml({ emission, company });
 //   res.type('html').send(html);
 //
-// Onde:
-//   emission = row de nfce_emissions (com items jsonb, payment_method, etc.)
-//   company  = row de companies (legal_name, cnpj, address_*, etc.)
-//
-// QR Code: usa qrcode.js via CDN (jsdelivr). Renderiza no client após
-// document load. Fallback: link "consulta SEFAZ" abaixo do QR (texto).
+// QR Code: usa qrserver.com (img src) em vez de canvas+JS, evitando race
+// entre document.close() e carga de CDN. Mesmo padrão do PrintLabels.tsx.
 // ============================================================================
 
 function escapeHtml(s) {
@@ -117,6 +113,17 @@ function consultaUrlByUf(uf) {
   return CONSULTA_NFCE_URL[(uf || '').toUpperCase()] || CONSULTA_NFCE_URL._;
 }
 
+// QR Code via qrserver.com (API pública, gratuita). Retorna URL de imagem PNG.
+// Vantagem sobre canvas+lib JS: carrega como <img> síncrono pelo browser, sem
+// race com document.close() do popup. Mesma estratégia do PrintLabels.tsx.
+function qrImageUrl(text, size) {
+  const px = size || 200;
+  return `https://api.qrserver.com/v1/create-qr-code/?size=${px}x${px}&data=${encodeURIComponent(text)}&bgcolor=ffffff&color=000000&margin=1`;
+}
+
+// URL marca Aura (rodapé discreto da DANFE)
+const AURA_URL = 'https://www.getaura.com.br';
+
 // ============================================================
 // Builder principal
 // ============================================================
@@ -154,7 +161,10 @@ function buildDanfeNfceHtml({ emission, company }) {
   const cpfNota = emission.customer_cpf ? formatCpf(emission.customer_cpf) : null;
   const nomeCliente = emission.customer_name || '';
   const consultaUrl = consultaUrlByUf(company.address_state);
-  const qrText = emission.qr_code || consultaUrl;
+  // QR principal: usa o qr_code da Nuvem Fiscal se disponível (URL completa
+  // com chave + hash CSC), senão fallback pra chave de acesso (consumidor
+  // pode digitar manualmente no site SEFAZ).
+  const qrText = emission.qr_code || chave || consultaUrl;
   const isHomologacao = String(protocolo).startsWith('HOMOLOG-');
 
   // ========== ITEMS ==========
@@ -193,8 +203,6 @@ function buildDanfeNfceHtml({ emission, company }) {
   let html = '';
   html += '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">';
   html += `<title>DANFE NFC-e #${numero} - ${escapeHtml(empresaNome)}</title>`;
-  // qrcode.js (CDN) — gera QR no client-side, sem dep no backend
-  html += '<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>';
   html += '<style>';
   // ===== Configuração página térmica 80mm =====
   html += '@page{size:80mm auto;margin:2mm 3mm}';
@@ -223,13 +231,17 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '.item-line2{text-align:right;font-size:8pt;color:#000}';
   html += '.total-row{font-size:11pt;font-weight:800;margin-top:2mm}';
   html += '.qr-wrap{text-align:center;margin:3mm 0}';
-  html += '.qr-wrap canvas,.qr-wrap img{display:inline-block;width:46mm;height:46mm;image-rendering:pixelated}';
+  html += '.qr-wrap img{display:inline-block;width:46mm;height:46mm;image-rendering:pixelated}';
   html += '.consulta{text-align:center;font-size:7pt;line-height:1.3;margin:2mm 0}';
   html += '.consulta a{color:#000;text-decoration:none}';
   html += '.chave{font-size:8pt;font-weight:700;text-align:center;letter-spacing:0.2pt;line-height:1.5;word-break:break-all;margin:2mm 0}';
   html += '.protocol{font-size:7pt;text-align:center;line-height:1.4}';
   html += '.consumidor{font-size:8pt;line-height:1.4}';
   html += '.homolog-warn{text-align:center;border:2px dashed #dc2626;padding:2mm;font-size:8pt;font-weight:700;color:#dc2626;margin:2mm 0}';
+  // ===== Marca Aura discreta no rodapé =====
+  html += '.aura-mark{text-align:center;margin-top:4mm;padding-top:2mm}';
+  html += '.aura-mark img{display:inline-block;width:14mm;height:14mm;image-rendering:pixelated;opacity:0.85}';
+  html += '.aura-mark .label{font-size:6pt;color:#555;font-style:italic;margin-top:1mm;letter-spacing:0.2pt}';
   html += '</style></head><body>';
 
   // ========== Toolbar de tela (some no print) ==========
@@ -323,23 +335,25 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += `<b>${escapeHtml(consultaUrl.replace(/^https?:\/\//, ''))}</b></div>`;
 
   html += '<div class="divider-solid"></div>';
-  html += '<div class="qr-wrap"><canvas id="qrcanvas"></canvas></div>';
+  // QR principal via <img> qrserver.com — sem dep de JS, carrega síncrono
+  html += `<div class="qr-wrap"><img src="${escapeHtml(qrImageUrl(qrText, 240))}" alt="QR NFC-e"></div>`;
   html += '<div class="consulta tiny">QR Code para consulta pelo consumidor</div>';
+
+  // ===== Marca Aura discreta no rodapé =====
+  html += '<div class="aura-mark">';
+  html += `<img src="${escapeHtml(qrImageUrl(AURA_URL, 100))}" alt="Aura">`;
+  html += `<div class="label">Gerado por Aura · getaura.com.br</div>`;
+  html += '</div>';
 
   html += '</div>'; // /page
 
-  // Script: gera QR e dispara print após renderizar
+  // Script: dispara print() depois que TODAS as imagens carregaram.
+  // window.onload garante que <img> de QR já foi baixado.
   html += '<script>';
   html += '(function(){';
-  html += `var qrText = ${JSON.stringify(qrText)};`;
-  html += 'var canvas=document.getElementById("qrcanvas");';
-  html += 'function done(){setTimeout(function(){try{window.focus();window.print();}catch(e){}}, 350);}';
-  html += 'if(window.QRCode){';
-  // qrcode.js (CDN) usa QRCode.toCanvas
-  html += 'QRCode.toCanvas(canvas, qrText, {width:174, margin:1, errorCorrectionLevel:"M"}, function(err){';
-  html += 'if(err){console.error("QR fail",err);} done();';
-  html += '});';
-  html += '}else{done();}';
+  html += 'function tryPrint(){setTimeout(function(){try{window.focus();window.print();}catch(e){}}, 400);}';
+  html += 'if(document.readyState==="complete"){tryPrint();}';
+  html += 'else{window.addEventListener("load", tryPrint);}';
   html += '})();';
   html += '</script>';
 
