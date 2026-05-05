@@ -9,6 +9,11 @@
 // mas o plan limit conta o owner inteiro. PATCH/DELETE permitem
 // editar cliente "registrado em outra loja" do mesmo dono.
 //
+// FEAT 05/05/2026: GET / agora retorna credit_balance (saldo de
+// crediario na empresa onde o cliente foi cadastrado), via LEFT JOIN
+// com a view customer_credit_balances. Crediario e por (customer_id,
+// company_id), entao cada cliente exibe o saldo da sua propria loja.
+//
 // Justificativa em src/utils/ownerScope.js.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
@@ -49,13 +54,18 @@ router.get('/', async (req, res) => {
     const countRes = await db.query(`SELECT COUNT(*) AS total FROM customers c ${where}`, params);
 
     // JOIN companies pra trazer nome da loja onde foi registrado (info pra UI)
+    // LEFT JOIN customer_credit_balances pra trazer saldo do crediario.
+    // Match por (customer_id, company_id) pra respeitar o escopo da view.
     const dataRes = await db.query(
       `SELECT c.id, c.name, c.cpf_cnpj, c.email, c.phone, c.birth_date, c.instagram_handle,
               c.total_purchases, c.total_spent, c.last_purchase_at, c.first_purchase_at,
               c.notes, c.is_active, c.created_at, c.company_id,
-              comp.trade_name AS company_trade, comp.legal_name AS company_legal
+              comp.trade_name AS company_trade, comp.legal_name AS company_legal,
+              COALESCE(cb.balance, 0) AS credit_balance
        FROM customers c
        JOIN companies comp ON comp.id = c.company_id
+       LEFT JOIN customer_credit_balances cb
+         ON cb.customer_id = c.id AND cb.company_id = c.company_id
        ${where}
        ORDER BY c.name ASC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
@@ -74,6 +84,8 @@ router.get('/', async (req, res) => {
       // Multi-CNPJ: empresa onde foi cadastrado (FE mostra badge se owner tem 2+ lojas)
       company_id: r.company_id,
       company_name: r.company_trade || r.company_legal || 'Empresa',
+      // Crediario: saldo > 0 = cliente deve. Saldo na empresa onde ele foi cadastrado.
+      credit_balance: parseFloat(r.credit_balance) || 0,
     }));
 
     res.json({
