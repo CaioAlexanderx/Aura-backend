@@ -3,6 +3,8 @@
 // Plan limits: essencial=2000, negocio=7000, expansao=unlimited
 // FIX: DELETE tries first, handles FK with retry
 // FEAT: image_url included in GET and PATCH
+// FEAT (mai/2026): ncm exposto no CRUD — pré-requisito do form de NCM
+//   no aura-app. sanitizeNcm strip não-dígitos e exige 8 chars.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -14,6 +16,17 @@ function getPlanLimit(plan) {
     case 'negocio':       return 7000;
     default:              return 2000;
   }
+}
+
+// NCM SEFAZ: 8 dígitos. Strip de pontos/espaços e valida tamanho.
+// Retorna null pra entradas vazias/inválidas — não bloqueia request,
+// só evita salvar lixo no banco. SEFAZ valida na hora de emitir nota.
+function sanitizeNcm(raw) {
+  if (raw === undefined || raw === null) return null;
+  const digits = String(raw).replace(/\D/g, '');
+  if (digits.length === 0) return null;
+  if (digits.length !== 8) return null;
+  return digits;
 }
 
 // GET /
@@ -34,7 +47,7 @@ router.get('/', async (req, res) => {
     const countRes = await db.query(`SELECT COUNT(*) AS total FROM products ${where}`, params);
     const dataRes = await db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
-              stock_qty, stock_min, stock_max, unit, color, size, image_url, is_active, created_at,
+              stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm, is_active, created_at,
               (SELECT EXISTS(SELECT 1 FROM product_variants pv WHERE pv.product_id = products.id AND pv.is_active = true)) AS has_variants
        FROM products ${where} ORDER BY name ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
@@ -48,6 +61,7 @@ router.get('/', async (req, res) => {
       stock_max: parseInt(r.stock_max) || 0, unit: r.unit || 'un',
       color: r.color || '', size: r.size || '',
       image_url: r.image_url || '',
+      ncm: r.ncm || '',
       is_active: r.is_active !== false, created_at: r.created_at,
       has_variants: r.has_variants || false,
     }));
@@ -76,7 +90,7 @@ router.get('/:pid/variants', async (req, res) => {
 // POST /
 router.post('/', async (req, res) => {
   const cid = req.params.id;
-  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size } = req.body;
+  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size, ncm } = req.body;
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'name e obrigatorio' });
 
   try {
@@ -88,12 +102,12 @@ router.post('/', async (req, res) => {
 
   try {
     const result = await db.query(
-      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
       [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
        parseFloat(price)||0, parseFloat(cost_price)||0, parseInt(stock_qty)||0, parseInt(min_stock)||0,
        parseInt(stock_max)||0, unit||'un', color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
-       size ? String(size).slice(0,100) : null]
+       size ? String(size).slice(0,100) : null, sanitizeNcm(ncm)]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
@@ -113,7 +127,7 @@ router.patch('/:pid', async (req, res) => {
     } catch (err) { console.error('[products] decrement error:', err.message); return res.status(500).json({ error: 'Erro ao decrementar estoque' }); }
   }
 
-  const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size', image_url:'image_url' };
+  const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size', image_url:'image_url', ncm:'ncm' };
   const numFields = ['price','cost_price','stock_qty','stock_min','stock_max'];
   const updates = [], values = []; let idx = 1;
   for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
@@ -121,6 +135,7 @@ router.patch('/:pid', async (req, res) => {
       updates.push(`${dbCol} = $${idx}`); let val = req.body[bodyKey];
       if (numFields.includes(dbCol)) val = parseFloat(val);
       if (dbCol === 'color' && val && !/^#[0-9A-Fa-f]{6}$/.test(val)) val = null;
+      if (dbCol === 'ncm') val = sanitizeNcm(val);
       values.push(val); idx++;
     }
   }
