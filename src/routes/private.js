@@ -69,6 +69,10 @@ router.use('/customers', requirePlan('negocio', 'expansao'), require('./customer
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
+// Crediario (fiado) por cliente — gate igual /customers porque depende
+// da existencia do CRUD de cliente. Saldo via view, sem integracao com
+// Financeiro/contas a receber. Migration 099.
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
 router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./employees'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
