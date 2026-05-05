@@ -12,6 +12,9 @@
 //   nuvem-fiscal/nuvemfiscal-sdk-php NfeSefazDetPag.php), NÃO `cartao`.
 // - buildPag adiciona xPag SOMENTE para tPag=99 (Outros), conforme regra
 //   W21-A do schema NF-e 4.00. Outros tPag rejeitam com cStat=442.
+// - Workaround PIX: tPag=17 mapeia automaticamente para tPag=99 + xPag="PIX"
+//   pra contornar Rejeição 391 disparada erroneamente pela SEFAZ-SP em
+//   produção (problema confirmado via diagnóstico, NF-e válido pelo schema).
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -268,6 +271,8 @@ function buildICMSTot(det) {
 // IMPORTANTE: a propriedade JSON é `card`, NÃO `cartao` (confirmado em
 // NfeSefazDetPag.php do SDK oficial).
 // xPag: incluído apenas pra tPag=99 (regra schema W21-A; outros tPag → 442).
+// Workaround PIX: tPag=17 mapeia pra tPag=99 + xPag="PIX" pra contornar
+// Rejeição 391 que SEFAZ-SP dispara erroneamente pra PIX em produção.
 function buildPag(payments, totalFallback) {
   const round = (n) => Math.round(n * 100) / 100;
   let list;
@@ -285,7 +290,22 @@ function buildPag(payments, totalFallback) {
   }
 
   const detPag = list.map(p => {
-    const tPag = validateTpag(p.method);
+    let tPag = validateTpag(p.method);
+
+    // Workaround Davi (mai/2026): SEFAZ-SP rejeita 391 com tPag=17 (PIX) em
+    // produção, mesmo com body schema-válido. Confirmado via Railway log +
+    // Nuvem Fiscal diagnóstico (referencias nfce-c1dba40f / nfce-c6d7ea35).
+    // Concorrentes do mercado declaram PIX como tPag=01 (Dinheiro) ou tPag=99.
+    // Optamos por 99+xPag="PIX" pra preservar a info do método real no XML.
+    // Sem impacto fiscal pra Simples Nacional (DAS é sobre faturamento total).
+    // Quando SEFAZ-SP/Nuvem Fiscal corrigirem o 391 spurious, basta remover
+    // este bloco — o schema oficial aceita tPag=17 nativo.
+    let xPagOverride = null;
+    if (tPag === '17') {
+      tPag = '99';
+      xPagOverride = 'PIX';
+    }
+
     const entry = {
       indPag: p.indPag === undefined ? 0 : p.indPag,
       tPag,
@@ -294,7 +314,7 @@ function buildPag(payments, totalFallback) {
     // xPag: schema NF-e 4.00 (regra W21-A) só permite quando tPag=99.
     // Outros tPag rejeitam com cStat=442 ("Descrição do pagamento não permitida").
     if (tPag === '99') {
-      entry.xPag = TPAG_DESCRIPTIONS['99'];
+      entry.xPag = xPagOverride || TPAG_DESCRIPTIONS['99'];
     }
     // SEFAZ exige bloco card (NfeSefazCard) para crédito (03) e débito (04).
     // tpIntegra=2: TEF não-integrado — CNPJ/tBand/cAut são opcionais.
