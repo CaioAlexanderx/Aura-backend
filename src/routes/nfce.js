@@ -29,8 +29,9 @@ function paymentCode(method) {
 }
 
 // Extrai campos padronizados da resposta bruta da Nuvem Fiscal.
-// Nuvem Fiscal usa codigo_status + motivo_status no topo para rejeições SEFAZ.
-// motivo='-' é placeholder sem info; ignored aqui.
+// O POST /nfce retorna campos básicos; o GET /nfce/{id} retorna
+// codigo_status + motivo_status com o detalhamento completo da rejeição SEFAZ.
+// motivo='-' é placeholder sem info; ignorado aqui.
 function extractProvFields(resp) {
   if (!resp) return {};
 
@@ -38,11 +39,11 @@ function extractProvFields(resp) {
   const proto = aut.protocolo || aut;
   const supl  = resp.infNFeSupl || resp.inf_nfe_supl || {};
 
-  // codigo_status é o campo da Nuvem Fiscal para cStat SEFAZ
+  // codigo_status é o campo da Nuvem Fiscal para cStat SEFAZ (presente no GET)
   const cStat = resp.codigo_status || resp.c_stat || resp.cStat
     || aut.c_stat || aut.cStat || proto.cStat || null;
 
-  // motivo_status é o campo da Nuvem Fiscal para xMotivo SEFAZ
+  // motivo_status é o campo da Nuvem Fiscal para xMotivo SEFAZ (presente no GET)
   const xMotivo = resp.motivo_status || proto.xMotivo || aut.xMotivo
     || resp.x_motivo || resp.xMotivo || null;
 
@@ -316,19 +317,29 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
           reference:       `${tipo}-${emission.id}`,
         });
 
-        // Log completo para diagnóstico de rejeições
-        console.log('[nfce] provResult:', JSON.stringify(provResult, null, 2));
+        console.log('[nfce] provResult (POST):', JSON.stringify(provResult, null, 2));
 
         prov = extractProvFields(provResult);
-
-        // Log campos extraídos (facilita rastrear se o parsing está correto)
-        console.log(`[nfce] nfce #${numeroNF} status=${prov.status} cStat=${prov.cStat} motivo=${prov.motivo}`);
-
         finalStatus = (prov.status === 'autorizado' || prov.status === 'autorizada') ? 'autorizada'
                     : (prov.status === 'rejeitado'  || prov.status === 'rejeitada')  ? 'rejeitada'
                     : 'processando';
 
-        // $10 = authorized_at | $11 = error_message (motivo rejeição SEFAZ)
+        // POST /nfce não retorna codigo_status/motivo_status — precisamos do GET para o motivo real
+        if (finalStatus === 'rejeitada' && prov.nuvemfiscalId && !prov.motivo) {
+          try {
+            const queryFn = tipo === 'nfe' ? nuvemfiscal.queryNfe : nuvemfiscal.queryNfce;
+            const fullResult = await queryFn(prov.nuvemfiscalId);
+            console.log('[nfce] provResult (GET detalhe rejeição):', JSON.stringify(fullResult, null, 2));
+            const fullProv = extractProvFields(fullResult);
+            if (fullProv.motivo) prov.motivo = fullProv.motivo;
+            if (fullProv.cStat)  prov.cStat  = fullProv.cStat;
+          } catch (e) {
+            console.warn('[nfce] GET detalhe rejeição falhou:', e.message);
+          }
+        }
+
+        console.log(`[nfce] nfce #${numeroNF} status=${finalStatus} cStat=${prov.cStat} motivo=${prov.motivo}`);
+
         const authorizedAt = finalStatus === 'autorizada' ? new Date() : null;
         const errorMessage = finalStatus === 'rejeitada'
           ? (prov.motivo || JSON.stringify(provResult).slice(0, 500))
