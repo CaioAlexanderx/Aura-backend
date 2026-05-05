@@ -572,7 +572,8 @@ router.get('/:nfceId/danfe-termica', requireAuth, async (req, res) => {
     const { rows: companies } = await db.query(
       `SELECT id, cnpj, legal_name, trade_name, inscricao_estadual,
               address_street, address_number, address_district,
-              address_city, address_state, address_zip
+              address_city, address_state, address_zip,
+              logo_url
          FROM companies WHERE id=$1`,
       [cid]
     );
