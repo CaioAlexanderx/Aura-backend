@@ -1,5 +1,5 @@
 // BE-19 — Cálculo de comissão de vendas por funcionário
-// sales.seller_id → users.id ← employees.user_id
+// sales.employee_id → employees.id  (link direto, independe de user_id)
 
 const pool = require('../config/database');
 
@@ -13,9 +13,9 @@ async function calculateEmployeeCommission(company_id, employee_id, reference_mo
   const startDate = new Date(year, month - 1, 1);
   const endDate   = new Date(year, month, 1); // início do próximo mês
 
-  // Buscar funcionário com user_id e configuração de comissão
+  // Buscar funcionário e configuração de comissão
   const empResult = await pool.query(
-    `SELECT e.id, e.name, e.role, e.user_id, e.commission_enabled, e.commission_rate
+    `SELECT e.id, e.name, e.role, e.commission_enabled, e.commission_rate
      FROM employees e
      WHERE e.id = $1 AND e.company_id = $2 AND e.is_active = true`,
     [employee_id, company_id]
@@ -42,24 +42,18 @@ async function calculateEmployeeCommission(company_id, employee_id, reference_mo
     };
   }
 
-  // Somar vendas do período onde seller_id = employee.user_id
-  let salesResult;
-  if (employee.user_id) {
-    salesResult = await pool.query(
-      `SELECT
-         COALESCE(SUM(s.total_amount), 0) AS total_revenue,
-         COUNT(*) AS total_sales
-       FROM sales s
-       WHERE s.company_id = $1
-         AND s.seller_id  = $2
-         AND s.created_at >= $3
-         AND s.created_at <  $4`,
-      [company_id, employee.user_id, startDate, endDate]
-    );
-  } else {
-    // Funcionário sem user_id vinculado — vendas não rastreáveis
-    salesResult = { rows: [{ total_revenue: 0, total_sales: 0 }] };
-  }
+  // Somar vendas do período via employee_id (link direto, não precisa de user_id)
+  const salesResult = await pool.query(
+    `SELECT
+       COALESCE(SUM(s.total_amount), 0) AS total_revenue,
+       COUNT(*) AS total_sales
+     FROM sales s
+     WHERE s.company_id  = $1
+       AND s.employee_id = $2
+       AND s.created_at >= $3
+       AND s.created_at <  $4`,
+    [company_id, employee.id, startDate, endDate]
+  );
 
   const { total_revenue, total_sales } = salesResult.rows[0];
   const commission_amount = (parseFloat(total_revenue) * parseFloat(employee.commission_rate)) / 100;
@@ -92,18 +86,17 @@ async function getCommissionSummary(company_id, reference_month) {
        e.role,
        e.commission_enabled,
        e.commission_rate,
-       e.user_id,
        COALESCE(SUM(s.total_amount), 0) AS total_revenue,
        COUNT(s.id)                       AS total_sales
      FROM employees e
      LEFT JOIN sales s
-       ON s.company_id = e.company_id
-      AND s.seller_id  = e.user_id
+       ON s.company_id  = e.company_id
+      AND s.employee_id = e.id
       AND s.created_at >= $2
       AND s.created_at <  $3
      WHERE e.company_id = $1
        AND e.is_active  = true
-     GROUP BY e.id, e.name, e.role, e.commission_enabled, e.commission_rate, e.user_id
+     GROUP BY e.id, e.name, e.role, e.commission_enabled, e.commission_rate
      ORDER BY total_revenue DESC`,
     [company_id, startDate, endDate]
   );
@@ -119,7 +112,6 @@ async function getCommissionSummary(company_id, reference_month) {
     commission_amount:  row.commission_enabled && row.commission_rate
       ? Math.round(parseFloat(row.total_revenue) * parseFloat(row.commission_rate) / 100 * 100) / 100
       : 0,
-    has_user_linked:    !!row.user_id,
     reference_month,
   }));
 }
