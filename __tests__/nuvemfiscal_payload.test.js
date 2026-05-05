@@ -1,14 +1,13 @@
 // Smoke test do payload NFC-e: gera o body que mandamos pra Nuvem Fiscal
 // e valida contra o schema oficial (envelope `infNFe` com ide/emit/dest/det/
 // total/transp/pag). Sem rede — stub do fetch só captura o body.
-//
-// O CI do Jest captura todos arquivos __tests__/*.test.js, então precisa
-// usar describe/test/expect (não IIFE standalone).
 
 process.env.NUVEM_FISCAL_URL = 'https://api.sandbox.nuvemfiscal.com.br';
 process.env.NUVEM_FISCAL_CLIENT_ID = 'fake_id';
 process.env.NUVEM_FISCAL_CLIENT_SECRET = 'fake_secret';
 
+// Estado mutável do stub. NÃO resetar entre testes via beforeEach — o
+// inner describe captura num beforeAll e os testes leem variáveis locais.
 let capturedBody = null;
 let capturedPath = null;
 
@@ -31,11 +30,6 @@ beforeAll(() => {
       }),
     };
   };
-});
-
-beforeEach(() => {
-  capturedBody = null;
-  capturedPath = null;
 });
 
 const company = {
@@ -75,58 +69,66 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
   beforeAll(() => { nf = require('../src/services/nuvemfiscal'); });
 
   describe('emitNfce — envelope estrutural', () => {
+    // Captura body/path uma vez em locals — testes leem aqui sem
+    // depender do estado global mutável.
+    let body;
+    let path;
     beforeAll(async () => {
+      capturedBody = null;
+      capturedPath = null;
       await nf.emitNfce(company, nfceData);
+      body = capturedBody;
+      path = capturedPath;
     });
 
     test('endpoint = POST /nfce', () => {
-      expect(capturedPath).toMatch(/\/nfce$/);
+      expect(path).toMatch(/\/nfce$/);
     });
 
     test('top-level: ambiente, referencia, infNFe', () => {
-      expect(capturedBody.ambiente).toBe('homologacao');
-      expect(capturedBody.referencia).toBeTruthy();
-      expect(capturedBody.infNFe).toBeDefined();
-      expect(capturedBody.infNFe.versao).toBe('4.00');
+      expect(body.ambiente).toBe('homologacao');
+      expect(body.referencia).toBeTruthy();
+      expect(body.infNFe).toBeDefined();
+      expect(body.infNFe.versao).toBe('4.00');
     });
 
     test('ide: identificação NFC-e modelo 65', () => {
-      const ide = capturedBody.infNFe.ide;
-      expect(ide.cUF).toBe(35);          // SP
-      expect(ide.mod).toBe(65);          // NFC-e
+      const ide = body.infNFe.ide;
+      expect(ide.cUF).toBe(35);
+      expect(ide.mod).toBe(65);
       expect(ide.serie).toBe(1);
       expect(ide.nNF).toBe(42);
-      expect(ide.tpNF).toBe(1);          // saída
-      expect(ide.idDest).toBe(1);        // operação interna
+      expect(ide.tpNF).toBe(1);
+      expect(ide.idDest).toBe(1);
       expect(ide.cMunFG).toBe('3550308');
-      expect(ide.tpImp).toBe(4);         // DANFE NFC-e
-      expect(ide.tpEmis).toBe(1);        // emissão normal
-      expect(ide.tpAmb).toBe(2);         // homologação
-      expect(ide.indFinal).toBe(1);      // consumidor final
-      expect(ide.indPres).toBe(1);       // presencial
+      expect(ide.tpImp).toBe(4);
+      expect(ide.tpEmis).toBe(1);
+      expect(ide.tpAmb).toBe(2);
+      expect(ide.indFinal).toBe(1);
+      expect(ide.indPres).toBe(1);
       expect(ide.dhEmi).toMatch(/\d{4}-\d{2}-\d{2}T/);
     });
 
     test('emit: emitente Simples Nacional', () => {
-      const emit = capturedBody.infNFe.emit;
+      const emit = body.infNFe.emit;
       expect(emit.CNPJ).toMatch(/^\d{14}$/);
       expect(emit.xNome).toBeTruthy();
-      expect(emit.CRT).toBe(1);          // Simples Nacional
+      expect(emit.CRT).toBe(1);
       expect(emit.enderEmit.UF).toBe('SP');
       expect(emit.enderEmit.CEP).toMatch(/^\d{8}$/);
       expect(emit.enderEmit.cPais).toBe('1058');
     });
 
     test('dest: destinatário com CPF informado', () => {
-      const dest = capturedBody.infNFe.dest;
+      const dest = body.infNFe.dest;
       expect(dest).toBeDefined();
       expect(dest.CPF).toMatch(/^\d{11}$/);
       expect(dest.indIEDest).toBe(9);
     });
 
     test('det[0]: produto + ICMSSN102 + PIS/COFINS NT', () => {
-      expect(capturedBody.infNFe.det.length).toBe(2);
-      const d0 = capturedBody.infNFe.det[0];
+      expect(body.infNFe.det.length).toBe(2);
+      const d0 = body.infNFe.det[0];
       expect(d0.nItem).toBe(1);
       expect(d0.prod.cProd).toBeTruthy();
       expect(d0.prod.NCM).toBe('00000000');
@@ -142,36 +144,38 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
     });
 
     test('det[1]: subtotal calculado (qty * price)', () => {
-      const d1 = capturedBody.infNFe.det[1];
+      const d1 = body.infNFe.det[1];
       expect(d1.prod.qCom).toBe(2);
       expect(d1.prod.vProd).toBe(90);
     });
 
     test('total.ICMSTot: vProd e vNF batem com a soma dos itens', () => {
-      const t = capturedBody.infNFe.total.ICMSTot;
+      const t = body.infNFe.total.ICMSTot;
       expect(t.vProd).toBe(240);
       expect(t.vNF).toBe(240);
-      expect(t.vICMS).toBe(0);   // Simples
+      expect(t.vICMS).toBe(0);
     });
 
     test('transp.modFrete = 9 (sem ocorrência)', () => {
-      expect(capturedBody.infNFe.transp.modFrete).toBe(9);
+      expect(body.infNFe.transp.modFrete).toBe(9);
     });
 
     test('pag.detPag: tPag mapeado e vPag = total', () => {
-      const pag = capturedBody.infNFe.pag;
-      expect(pag.detPag[0].tPag).toBe('17');   // Pix
+      const pag = body.infNFe.pag;
+      expect(pag.detPag[0].tPag).toBe('17');
       expect(pag.detPag[0].vPag).toBe(240);
       expect(pag.vTroco).toBe(0);
     });
   });
 
   test('NFC-e sem CPF/CNPJ: dest é omitido (consumidor não identificado)', async () => {
+    capturedBody = null;
     await nf.emitNfce(company, {
       ...nfceData,
       recipient_cpf: undefined,
       recipient_name: undefined,
     });
+    expect(capturedBody).not.toBeNull();
     expect(capturedBody.infNFe.dest).toBeUndefined();
   });
 
