@@ -5,6 +5,7 @@
 // Mai/2026 features:
 // - /config GET/POST inclui auto_emit_nfce (toggle de emissão automática)
 // - /emit aceita body.payments[] (multi-pagamento, soma deve bater com total)
+// - /:nfceId/danfe-termica retorna HTML 80mm pra impressão térmica
 // ============================================================
 
 const express = require('express');
@@ -13,6 +14,7 @@ const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { logAuditAction }           = require('../middleware/auditLog');
 const nuvemfiscal                  = require('../services/nuvemfiscal');
+const { buildDanfeNfceHtml }       = require('../utils/buildDanfeNfceHtml');
 
 const INSTRUCOES_NOTA = {
   nfce: 'NFC-e (Nota Fiscal do Consumidor): ideal para vendas a pessoas físicas. O CPF do comprador é opcional. Use na maioria das vendas do balcão.',
@@ -499,6 +501,54 @@ router.get('/diagnostico/:nuvemfiscalId', requireAuth, async (req, res) => {
   }
 });
 // ───────────────────────────────────────────────────────────────────────────
+
+// ── DANFE NFC-e térmica (80mm) ───────────────────────────────────────────
+// GET /companies/:id/nfce/:nfceId/danfe-termica
+// Retorna HTML standalone otimizado pra impressora térmica 80mm.
+// Frontend (SaleComplete) faz fetch com auth Bearer, abre popup,
+// document.write(html), document.close() — popup auto-imprime.
+//
+// IMPORTANTE: declarada ANTES de /:nfceId (1 segment) pra clareza,
+// embora o Express resolva 2 segments antes pelo parser.
+router.get('/:nfceId/danfe-termica', requireAuth, async (req, res) => {
+  try {
+    const { id: cid, nfceId } = req.params;
+
+    const { rows: emissions } = await db.query(
+      'SELECT * FROM nfce_emissions WHERE id=$1 AND company_id=$2',
+      [nfceId, cid]
+    );
+    if (!emissions.length) {
+      return res.status(404).type('text/plain').send('Nota não encontrada');
+    }
+    const emission = emissions[0];
+
+    if (emission.status !== 'autorizada') {
+      return res.status(409).type('text/plain').send(
+        `DANFE só pode ser impressa quando a nota está autorizada. Status atual: ${emission.status}`
+      );
+    }
+
+    const { rows: companies } = await db.query(
+      `SELECT id, cnpj, legal_name, trade_name, inscricao_estadual,
+              address_street, address_number, address_district,
+              address_city, address_state, address_zip
+         FROM companies WHERE id=$1`,
+      [cid]
+    );
+    if (!companies.length) {
+      return res.status(404).type('text/plain').send('Empresa não encontrada');
+    }
+    const company = companies[0];
+
+    const html = buildDanfeNfceHtml({ emission, company });
+    res.type('html').send(html);
+  } catch (err) {
+    console.error('[nfce] danfe-termica error:', err);
+    res.status(500).type('text/plain').send('Erro ao gerar DANFE térmica');
+  }
+});
+// ────────────────────────────────────────────────────────────────────────
 
 router.get('/:nfceId', requireAuth, async (req, res) => {
   try {
