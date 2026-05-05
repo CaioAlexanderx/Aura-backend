@@ -215,7 +215,7 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
 
     // Valida payments[] se presente — soma deve bater com totalNfce
     const paymentsErr = validatePayments(payments, totalNfce);
-    if (paymentsErr) return res.status(400).json(paymentsErr);
+    if paymentsErr) return res.status(400).json(paymentsErr);
 
     const numeroNF = config.next_number;
     const serieNF  = config.serie_nfce;
@@ -408,6 +408,26 @@ router.get('/', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Erro ao listar emissões' });
   }
 });
+
+// ── Diagnóstico temporário ──────────────────────────────────────────────────
+// GET /companies/:id/nfce/diagnostico/:nuvemfiscalId
+// Retorna o JSON bruto da Nuvem Fiscal para identificar campos de rejeição SEFAZ.
+// IMPORTANTE: esta rota deve ficar ANTES de /:nfceId para não ser capturada por ela.
+router.get('/diagnostico/:nuvemfiscalId', requireAuth, async (req, res) => {
+  try {
+    const { nuvemfiscalId } = req.params;
+    const queryFn = nuvemfiscalId.startsWith('nfe_')
+      ? nuvemfiscal.queryNfe
+      : nuvemfiscal.queryNfce;
+    const raw = await queryFn(nuvemfiscalId);
+    console.log('[nfce] diagnostico raw:', JSON.stringify(raw, null, 2));
+    res.json({ nuvemfiscalId, raw });
+  } catch (err) {
+    console.error('[nfce] diagnostico error:', err.message, err.payload || '');
+    res.status(502).json({ error: err.message, payload: err.payload || null });
+  }
+});
+// ───────────────────────────────────────────────────────────────────────────
 
 router.get('/:nfceId', requireAuth, async (req, res) => {
   try {
