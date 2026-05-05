@@ -3,16 +3,9 @@
 // Auth: OAuth 2.0 client_credentials
 // Docs: https://dev.nuvemfiscal.com.br/docs/api
 //
-// Documentos suportados:
-//   NFC-e — modelo 65 (consumidor final, CPF opcional, PDV)
-//   NF-e  — modelo 55 (B2B, CPF/CNPJ obrigatório)
-//   NFS-e — Nota Fiscal de Serviço
-//
-// Mai/2026 audit:
-// - dhEmi com offset BR (-03:00) ao invés de UTC `Z` (SEFAZ pode rejeitar)
-// - cNF (8 díg) + cDV (mod 11) gerados localmente — Nuvem Fiscal aceita
-//   o que mandarmos e isso garante chave de acesso reproduzível
-// - tPag validado contra whitelist SEFAZ (fallback '99' se desconhecido)
+// Mai/2026 (foundation):
+// - buildPag agora aceita array de pagamentos (multi-pagamento NFC-e)
+//   ou objeto único legado { method, change }. Ambos coexistem.
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -20,7 +13,6 @@ const AUTH_URL     = 'https://auth.nuvemfiscal.com.br/oauth/token';
 const CLIENT_ID    = process.env.NUVEM_FISCAL_CLIENT_ID;
 const CLIENT_SECRET = process.env.NUVEM_FISCAL_CLIENT_SECRET;
 
-// ── Token cache ─────────────────────────────────────────────
 let _token = null;
 let _tokenExpires = 0;
 
@@ -63,7 +55,6 @@ async function nuvemRequest(method, path, body) {
   return data;
 }
 
-// ── Tabela UF → cUF IBGE ────────────────────────────────────
 const UF_CUF = {
   RO: 11, AC: 12, AM: 13, RR: 14, PA: 15, AP: 16, TO: 17,
   MA: 21, PI: 22, CE: 23, RN: 24, PB: 25, PE: 26, AL: 27, SE: 28, BA: 29,
@@ -73,23 +64,15 @@ const UF_CUF = {
 };
 function ufToCodigo(uf) { return UF_CUF[(uf || '').toUpperCase().trim()] || 35; }
 
-// ── Helpers SEFAZ ───────────────────────────────────────────
-
-// dhEmi com offset BR fixo (-03:00). BR aboliu DST em 2019; SP/JC fica UTC-3 ano todo.
-// Formato: 2026-05-05T08:34:00-03:00 (sem milissegundos, com offset explícito).
 function isoBR(d = new Date()) {
   const local = new Date(d.getTime() - 3 * 60 * 60 * 1000);
   return local.toISOString().replace(/\.\d{3}Z$/, '-03:00');
 }
 
-// cNF: código numérico 8 dígitos compõe a chave de acesso. Random é OK
-// (o verificador externo cDV garante unicidade da chave).
 function generateCNF() {
   return String(Math.floor(Math.random() * 100000000)).padStart(8, '0');
 }
 
-// Dígito verificador da chave de acesso (mod 11 sobre 43 dígitos).
-// Pesos cíclicos 2..9 da direita pra esquerda. Resto 0/1 → DV=0; senão 11-resto.
 function calcDvChaveAcesso(chave43) {
   const w = [2, 3, 4, 5, 6, 7, 8, 9];
   let sum = 0;
@@ -100,7 +83,6 @@ function calcDvChaveAcesso(chave43) {
   return String(mod < 2 ? 0 : 11 - mod);
 }
 
-// Constrói chave de acesso 43 dígitos (sem cDV). NF-e mod=55, NFC-e mod=65.
 function buildAccessKey44({ cUF, ano2, mes2, cnpj, mod, serie, nNF, tpEmis, cNF }) {
   const k43 =
     String(cUF).padStart(2, '0') +
@@ -115,17 +97,12 @@ function buildAccessKey44({ cUF, ano2, mes2, cnpj, mod, serie, nNF, tpEmis, cNF 
   return k43 + calcDvChaveAcesso(k43);
 }
 
-// tPag whitelist SEFAZ — códigos que a Nuvem Fiscal aceita pra detPag.
-// 01=dinheiro 02=cheque 03=créd 04=déb 05=créd_loja 10=val_alim 11=val_ref
-// 12=val_pres 13=val_combust 15=boleto 16=dep_banc 17=Pix 18=transf_banc
-// 19=fidelidade 90=sem_pgto 99=outros
 const VALID_TPAG = new Set(['01','02','03','04','05','10','11','12','13','15','16','17','18','19','90','99']);
 function validateTpag(method) {
   const t = String(method || '01').padStart(2, '0').slice(0, 2);
   return VALID_TPAG.has(t) ? t : '99';
 }
 
-// ── Empresas ────────────────────────────────────────────────
 async function registerCompany(company) {
   const cnpj = (company.cnpj || '').replace(/\D/g, '');
   if (!cnpj) throw new Error('CNPJ obrigatorio para emitir NF-e');
@@ -161,8 +138,6 @@ async function uploadCertificate(cnpj, certificateBase64, password) {
     password,
   });
 }
-
-// ── Helpers de payload NF-e/NFC-e ───────────────────────────
 
 function buildEmit(company) {
   const cnpj = (company.cnpj || '').replace(/\D/g, '');
@@ -248,56 +223,75 @@ function buildICMSTot(det) {
   };
 }
 
-function buildPag(payment, total) {
-  return {
-    detPag: [{
-      indPag: payment.indPag === undefined ? 0 : payment.indPag,
-      tPag: validateTpag(payment.method),
-      vPag: Number(total || 0),
-    }],
-    vTroco: Number(payment.change || 0) || 0,
-  };
+// buildPag: aceita 2 shapes pra retrocompat.
+//   - Array (novo, multi-pagamento): [{ method, value, change?, indPag? }, ...]
+//   - Objeto único (legado): { method, change } — vPag = totalFallback
+// Em ambos, soma de change vira vTroco.
+function buildPag(payments, totalFallback) {
+  const round = (n) => Math.round(n * 100) / 100;
+  let list;
+  if (Array.isArray(payments)) {
+    list = payments.length ? payments : [{ method: '01', value: totalFallback }];
+  } else if (payments && typeof payments === 'object') {
+    list = [{
+      method: payments.method,
+      value: payments.value !== undefined ? payments.value : totalFallback,
+      change: payments.change,
+      indPag: payments.indPag,
+    }];
+  } else {
+    list = [{ method: '01', value: totalFallback }];
+  }
+
+  const detPag = list.map(p => ({
+    indPag: p.indPag === undefined ? 0 : p.indPag,
+    tPag: validateTpag(p.method),
+    vPag: round(Number(p.value || 0)),
+  }));
+
+  const vTroco = list.reduce((s, p) => s + (Number(p.change) || 0), 0);
+  return { detPag, vTroco: round(vTroco) };
 }
 
-// Helper compartilhado para ide (NFC-e e NF-e). Recebe já as variáveis
-// numéricas e completa cNF/cDV/dhEmi com formato BR.
 function buildIde({ company, mod, serie, nNF, tpAmb, tpImp, indFinal, indPres, idDest, natOp, verProc }) {
   const dh = isoBR();
   const cUF = ufToCodigo(company.address_state);
-  const ano2 = dh.slice(2, 4);     // "26"
-  const mes2 = dh.slice(5, 7);     // "05"
+  const ano2 = dh.slice(2, 4);
+  const mes2 = dh.slice(5, 7);
   const cnpj = (company.cnpj || '').replace(/\D/g, '');
   const cNF = generateCNF();
   const tpEmis = 1;
-  // Calcula chave + cDV pra mandar coerente. Nuvem Fiscal pode regerar,
-  // mas mandar coerente reduz divergências de validação.
   const chave44 = buildAccessKey44({ cUF, ano2, mes2, cnpj, mod, serie, nNF, tpEmis, cNF });
   const cDV = chave44.slice(-1);
-
   return {
-    cUF,
-    cNF,
-    natOp,
-    mod,
+    cUF, cNF,
+    natOp, mod,
     serie: Number(serie),
     nNF: Number(nNF),
     dhEmi: dh,
-    tpNF: 1,         // saída
+    tpNF: 1,
     idDest: idDest || 1,
     cMunFG: company.ibge_code || '',
-    tpImp,
-    tpEmis,
+    tpImp, tpEmis,
     cDV: Number(cDV),
     tpAmb,
     finNFe: 1,
-    indFinal,
-    indPres,
+    indFinal, indPres,
     procEmi: 0,
     verProc: verProc || 'Aura/1.0',
   };
 }
 
-// ── NFC-e (modelo 65) ───────────────────────────────────────
+// Helper: resolve o input de pagamento(s) a partir de nfceData/nfeData.
+// Prefere nfeData.payments (array novo) → objeto legado { payment_method, payment_change }.
+function resolvePagInput(data) {
+  if (Array.isArray(data.payments) && data.payments.length) return data.payments;
+  return {
+    method: data.payment_method || '01',
+    change: data.payment_change,
+  };
+}
+
 async function emitNfce(company, nfceData) {
   const tpAmb = NUVEM_URL.includes('sandbox') ? 2 : 1;
   const crt = company.tax_regime === 'mei' ? 4 :
@@ -316,10 +310,8 @@ async function emitNfce(company, nfceData) {
         company, mod: 65,
         serie: nfceData.serie || 1,
         nNF: nfceData.numero || 1,
-        tpAmb, tpImp: 4,         // 4 = DANFE NFC-e
-        indFinal: 1,             // consumidor final
-        indPres: 1,              // operação presencial
-        idDest: 1,               // operação interna
+        tpAmb, tpImp: 4,
+        indFinal: 1, indPres: 1, idDest: 1,
         natOp: nfceData.natureza_operacao || 'Venda ao consumidor',
       }),
       emit: buildEmit(company),
@@ -332,10 +324,7 @@ async function emitNfce(company, nfceData) {
       det,
       total: { ICMSTot: total },
       transp: { modFrete: 9 },
-      pag: buildPag({
-        method: nfceData.payment_method || '01',
-        change: nfceData.payment_change,
-      }, totalValue),
+      pag: buildPag(resolvePagInput(nfceData), totalValue),
       infAdic: nfceData.observacoes ? { infCpl: String(nfceData.observacoes).slice(0, 5000) } : undefined,
     },
   };
@@ -352,7 +341,6 @@ async function cancelNfce(nfceId, justificativa) {
   });
 }
 
-// ── NF-e (modelo 55) ────────────────────────────────────────
 async function emitNfe(company, nfeData) {
   const tpAmb = NUVEM_URL.includes('sandbox') ? 2 : 1;
   const crt   = company.tax_regime === 'mei' ? 4 :
@@ -393,21 +381,17 @@ async function emitNfe(company, nfeData) {
         company, mod: 55,
         serie: nfeData.serie || 1,
         nNF: nfeData.numero || 1,
-        tpAmb, tpImp: 1,         // 1 = DANFE retrato
+        tpAmb, tpImp: 1,
         indFinal: nfeData.indFinal === undefined ? 1 : nfeData.indFinal,
         indPres: nfeData.indPres === undefined ? 1 : nfeData.indPres,
         idDest: nfeData.idDest || 1,
         natOp: nfeData.natureza_operacao || 'Venda',
       }),
       emit: buildEmit(company),
-      dest,
-      det,
+      dest, det,
       total: { ICMSTot: total },
       transp: { modFrete: 9 },
-      pag: buildPag({
-        method: nfeData.payment_method || '01',
-        change: nfeData.payment_change,
-      }, totalValue),
+      pag: buildPag(resolvePagInput(nfeData), totalValue),
       infAdic: nfeData.observacoes ? { infCpl: String(nfeData.observacoes).slice(0, 5000) } : undefined,
     },
   };
@@ -422,7 +406,6 @@ async function cancelNfe(nfeId, justificativa) {
   });
 }
 
-// ── NFS-e ──────────────────────────────────────────────────
 async function emitNfse(company, nfseData) {
   const cnpj = (company.cnpj || '').replace(/\D/g, '');
   return nuvemRequest('POST', '/nfse', {
@@ -453,6 +436,7 @@ module.exports = {
   getToken, nuvemRequest, ufToCodigo,
   isoBR, generateCNF, calcDvChaveAcesso, buildAccessKey44, validateTpag,
   buildEmit, buildDest, buildDet, buildICMSTot, buildPag, buildIde,
+  resolvePagInput,
   registerCompany, uploadCertificate,
   emitNfce, queryNfce, cancelNfce,
   emitNfe,  queryNfe,  cancelNfe,

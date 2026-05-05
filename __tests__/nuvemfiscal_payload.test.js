@@ -93,16 +93,42 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
     });
 
     test('validateTpag aceita códigos SEFAZ + fallback 99 pra desconhecidos', () => {
-      expect(nf.validateTpag('17')).toBe('17');     // Pix
-      expect(nf.validateTpag('01')).toBe('01');     // Dinheiro
-      expect(nf.validateTpag('03')).toBe('03');     // Cartão crédito
-      expect(nf.validateTpag('99')).toBe('99');     // Outros
-      expect(nf.validateTpag('xx')).toBe('99');     // Desconhecido → fallback
-      // Vazio/null/undefined caem no default '01' (dinheiro) — comportamento
-      // intencional. Whitelist só valida quando há valor explícito.
+      expect(nf.validateTpag('17')).toBe('17');
+      expect(nf.validateTpag('01')).toBe('01');
+      expect(nf.validateTpag('03')).toBe('03');
+      expect(nf.validateTpag('99')).toBe('99');
+      expect(nf.validateTpag('xx')).toBe('99');
       expect(nf.validateTpag('')).toBe('01');
       expect(nf.validateTpag(null)).toBe('01');
       expect(nf.validateTpag(undefined)).toBe('01');
+    });
+
+    test('buildPag aceita array (multi-pagamento) — soma vTroco', () => {
+      const r = nf.buildPag([
+        { method: '17', value: 100 },          // Pix R$100
+        { method: '01', value: 50, change: 5 } // Dinheiro R$50, troco R$5
+      ], 150);
+      expect(r.detPag.length).toBe(2);
+      expect(r.detPag[0].tPag).toBe('17');
+      expect(r.detPag[0].vPag).toBe(100);
+      expect(r.detPag[1].tPag).toBe('01');
+      expect(r.detPag[1].vPag).toBe(50);
+      expect(r.vTroco).toBe(5);
+    });
+
+    test('buildPag aceita objeto único legado — vPag = totalFallback', () => {
+      const r = nf.buildPag({ method: '17', change: 0 }, 240);
+      expect(r.detPag.length).toBe(1);
+      expect(r.detPag[0].tPag).toBe('17');
+      expect(r.detPag[0].vPag).toBe(240);
+      expect(r.vTroco).toBe(0);
+    });
+
+    test('buildPag com array vazio cai em default dinheiro', () => {
+      const r = nf.buildPag([], 100);
+      expect(r.detPag.length).toBe(1);
+      expect(r.detPag[0].tPag).toBe('01');
+      expect(r.detPag[0].vPag).toBe(100);
     });
   });
 
@@ -237,5 +263,23 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
       payment_method: 'metodo_inexistente',
     });
     expect(capturedBody.infNFe.pag.detPag[0].tPag).toBe('99');
+  });
+
+  test('NFC-e com payments[] (multi-pagamento) — pag.detPag preserva split', async () => {
+    capturedBody = null;
+    await nf.emitNfce(company, {
+      ...nfceData,
+      payments: [
+        { method: '17', value: 150 },          // Pix R$150
+        { method: '01', value: 90, change: 0 }, // Dinheiro R$90
+      ],
+    });
+    const pag = capturedBody.infNFe.pag;
+    expect(pag.detPag.length).toBe(2);
+    expect(pag.detPag[0].tPag).toBe('17');
+    expect(pag.detPag[0].vPag).toBe(150);
+    expect(pag.detPag[1].tPag).toBe('01');
+    expect(pag.detPag[1].vPag).toBe(90);
+    expect(pag.vTroco).toBe(0);
   });
 });
