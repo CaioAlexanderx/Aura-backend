@@ -122,6 +122,11 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   }
 
   try {
+    // FIX 05/05/2026: pay_on_delivery_enabled tem NOT NULL na coluna (default false).
+    // No path INSERT (primeiro save da vitrine), passar NULL violava a constraint
+    // e devolvia 500 pro lojista. Envolvo $28 em COALESCE(...,false) so no INSERT
+    // VALUES — UPDATE continua usando $28 cru pra preservar valor anterior via
+    // COALESCE($28, digital_channel_config.pay_on_delivery_enabled).
     const { rows } = await db.query(`
       INSERT INTO digital_channel_config (
         company_id, site_name, tagline, primary_color, secondary_color,
@@ -134,7 +139,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
         $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-        $24, $25, $26, $27, $28
+        $24, $25, $26, $27, COALESCE($28, false)
       )
       ON CONFLICT (company_id) DO UPDATE SET
         site_name = COALESCE($2, digital_channel_config.site_name),
