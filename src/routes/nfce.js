@@ -42,7 +42,7 @@ function extractProvFields(resp) {
     qrCode:        resp.qr_code  || resp.qrCode  || supl.qrCode  || supl.qr_code || null,
     urlConsulta:   resp.url_consulta || resp.urlChave || supl.urlChave || supl.url_chave || null,
     status:        resp.status || aut.status || null,
-    motivo:        resp.motivo || proto.xMotivo || resp.mensagem_sefaz || null,
+    motivo:        resp.motivo || proto.xMotivo || resp.mensagem_sefaz || resp.mensagem || null,
   };
 }
 
@@ -298,17 +298,19 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
           reference:       `${tipo}-${emission.id}`,
         });
 
+        // Log completo para diagnóstico de rejeições
+        console.log('[nfce] provResult:', JSON.stringify(provResult, null, 2));
+
         prov = extractProvFields(provResult);
         finalStatus = (prov.status === 'autorizado' || prov.status === 'autorizada') ? 'autorizada'
                     : (prov.status === 'rejeitado'  || prov.status === 'rejeitada')  ? 'rejeitada'
                     : 'processando';
 
-        console.log(`[nfce] ${tipo} #${numeroNF} status=${finalStatus} motivo=${prov.motivo || '-'}`);
-
-        // $10 = authorized_at (evita "inconsistent types" com CASE WHEN $1)
-        // $11 = error_message  (motivo da rejeição SEFAZ, null se autorizada)
-        const authorizedAt  = finalStatus === 'autorizada' ? new Date() : null;
-        const errorMessage  = finalStatus === 'rejeitada'  ? prov.motivo || 'Rejeitada pela SEFAZ' : null;
+        // $10 = authorized_at | $11 = error_message (motivo rejeição SEFAZ)
+        const authorizedAt = finalStatus === 'autorizada' ? new Date() : null;
+        const errorMessage = finalStatus === 'rejeitada'
+          ? (prov.motivo || JSON.stringify(provResult).slice(0, 500))
+          : null;
 
         await db.query(
           `UPDATE nfce_emissions
