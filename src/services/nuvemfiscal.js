@@ -8,9 +8,11 @@
 //   NF-e  — modelo 55 (B2B, CPF/CNPJ obrigatório)
 //   NFS-e — Nota Fiscal de Serviço
 //
-// Mai/2026: emitNfce/emitNfe reescritos para o layout SEFAZ correto
-// (envelope `infNFe` com ide/emit/dest/det/total/transp/pag).
-// O body antigo (snake_case "items") ficou anos sendo rejeitado.
+// Mai/2026 audit:
+// - dhEmi com offset BR (-03:00) ao invés de UTC `Z` (SEFAZ pode rejeitar)
+// - cNF (8 díg) + cDV (mod 11) gerados localmente — Nuvem Fiscal aceita
+//   o que mandarmos e isso garante chave de acesso reproduzível
+// - tPag validado contra whitelist SEFAZ (fallback '99' se desconhecido)
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -18,7 +20,7 @@ const AUTH_URL     = 'https://auth.nuvemfiscal.com.br/oauth/token';
 const CLIENT_ID    = process.env.NUVEM_FISCAL_CLIENT_ID;
 const CLIENT_SECRET = process.env.NUVEM_FISCAL_CLIENT_SECRET;
 
-// ── Token cache (renovado 60s antes de expirar) ─────────────
+// ── Token cache ─────────────────────────────────────────────
 let _token = null;
 let _tokenExpires = 0;
 
@@ -51,7 +53,6 @@ async function nuvemRequest(method, path, body) {
   const resp = await fetch(`${NUVEM_URL}${path}`, opts);
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    // Nuvem Fiscal devolve { error: { message } }, { mensagem }, ou message
     const msg = data?.error?.message || data?.mensagem || data?.message ||
                 data?.erros?.[0]?.mensagem || `Nuvem Fiscal error ${resp.status}`;
     const err = new Error(msg);
@@ -72,17 +73,66 @@ const UF_CUF = {
 };
 function ufToCodigo(uf) { return UF_CUF[(uf || '').toUpperCase().trim()] || 35; }
 
+// ── Helpers SEFAZ ───────────────────────────────────────────
+
+// dhEmi com offset BR fixo (-03:00). BR aboliu DST em 2019; SP/JC fica UTC-3 ano todo.
+// Formato: 2026-05-05T08:34:00-03:00 (sem milissegundos, com offset explícito).
+function isoBR(d = new Date()) {
+  const local = new Date(d.getTime() - 3 * 60 * 60 * 1000);
+  return local.toISOString().replace(/\.\d{3}Z$/, '-03:00');
+}
+
+// cNF: código numérico 8 dígitos compõe a chave de acesso. Random é OK
+// (o verificador externo cDV garante unicidade da chave).
+function generateCNF() {
+  return String(Math.floor(Math.random() * 100000000)).padStart(8, '0');
+}
+
+// Dígito verificador da chave de acesso (mod 11 sobre 43 dígitos).
+// Pesos cíclicos 2..9 da direita pra esquerda. Resto 0/1 → DV=0; senão 11-resto.
+function calcDvChaveAcesso(chave43) {
+  const w = [2, 3, 4, 5, 6, 7, 8, 9];
+  let sum = 0;
+  for (let i = chave43.length - 1, k = 0; i >= 0; i--, k = (k + 1) % w.length) {
+    sum += parseInt(chave43[i], 10) * w[k];
+  }
+  const mod = sum % 11;
+  return String(mod < 2 ? 0 : 11 - mod);
+}
+
+// Constrói chave de acesso 43 dígitos (sem cDV). NF-e mod=55, NFC-e mod=65.
+function buildAccessKey44({ cUF, ano2, mes2, cnpj, mod, serie, nNF, tpEmis, cNF }) {
+  const k43 =
+    String(cUF).padStart(2, '0') +
+    String(ano2).padStart(2, '0') +
+    String(mes2).padStart(2, '0') +
+    String(cnpj).replace(/\D/g, '').padStart(14, '0') +
+    String(mod).padStart(2, '0') +
+    String(serie).padStart(3, '0') +
+    String(nNF).padStart(9, '0') +
+    String(tpEmis).padStart(1, '0') +
+    String(cNF).padStart(8, '0');
+  return k43 + calcDvChaveAcesso(k43);
+}
+
+// tPag whitelist SEFAZ — códigos que a Nuvem Fiscal aceita pra detPag.
+// 01=dinheiro 02=cheque 03=créd 04=déb 05=créd_loja 10=val_alim 11=val_ref
+// 12=val_pres 13=val_combust 15=boleto 16=dep_banc 17=Pix 18=transf_banc
+// 19=fidelidade 90=sem_pgto 99=outros
+const VALID_TPAG = new Set(['01','02','03','04','05','10','11','12','13','15','16','17','18','19','90','99']);
+function validateTpag(method) {
+  const t = String(method || '01').padStart(2, '0').slice(0, 2);
+  return VALID_TPAG.has(t) ? t : '99';
+}
+
 // ── Empresas ────────────────────────────────────────────────
 async function registerCompany(company) {
   const cnpj = (company.cnpj || '').replace(/\D/g, '');
   if (!cnpj) throw new Error('CNPJ obrigatorio para emitir NF-e');
-
-  // Idempotência: se já registrada, retorna existente
   try {
     const existing = await nuvemRequest('GET', `/empresas/${cnpj}`);
     if (existing?.cpf_cnpj) return existing;
   } catch {}
-
   return nuvemRequest('POST', '/empresas', {
     cpf_cnpj: cnpj,
     nome_razao_social: company.legal_name || company.trade_name || company.name,
@@ -114,7 +164,6 @@ async function uploadCertificate(cnpj, certificateBase64, password) {
 
 // ── Helpers de payload NF-e/NFC-e ───────────────────────────
 
-// Bloco emit (emitente da nota)
 function buildEmit(company) {
   const cnpj = (company.cnpj || '').replace(/\D/g, '');
   return {
@@ -135,38 +184,28 @@ function buildEmit(company) {
     },
     IE: company.inscricao_estadual || undefined,
     IM: company.inscricao_municipal || undefined,
-    // CRT (Código de Regime Tributário): 1=Simples Nacional, 2=SN excesso sublimite,
-    // 3=Regime Normal, 4=MEI
     CRT: company.tax_regime === 'mei' ? 4 :
          company.tax_regime === 'lucro_presumido' || company.tax_regime === 'lucro_real' ? 3 : 1,
   };
 }
 
-// Bloco dest (destinatário; opcional na NFC-e quando consumidor não identificado)
 function buildDest({ cpf, cnpj, name, email }) {
   const cpfClean  = (cpf || '').replace(/\D/g, '');
   const cnpjClean = (cnpj || '').replace(/\D/g, '');
   if (!cpfClean && !cnpjClean) return undefined;
-
-  const dest = {
-    xNome: name || 'CONSUMIDOR',
-    indIEDest: 9,
-  };
+  const dest = { xNome: name || 'CONSUMIDOR', indIEDest: 9 };
   if (cnpjClean) dest.CNPJ = cnpjClean;
   else dest.CPF = cpfClean;
   if (email) dest.email = email;
   return dest;
 }
 
-// Bloco det[] (itens da nota) — Simples Nacional usa ICMSSN102
 function buildDet(items, opts = {}) {
   const isSimples = opts.crt === 1 || opts.crt === 4;
-
   return (items || []).map((item, i) => {
     const qty   = Number(item.quantity || 1);
     const price = Number(item.price || 0);
     const total = Math.round(qty * price * 100) / 100;
-
     const prod = {
       cProd: String(item.code || item.product_id || (i + 1)),
       cEAN: item.barcode || 'SEM GTIN',
@@ -183,19 +222,12 @@ function buildDet(items, opts = {}) {
       vUnTrib: price,
       indTot: 1,
     };
-
     const ICMS = isSimples
       ? { ICMSSN102: { orig: 0, CSOSN: '102' } }
       : { ICMS00:    { orig: 0, CST: '00', modBC: 3, vBC: total, pICMS: 0, vICMS: 0 } };
-
     return {
-      nItem: i + 1,
-      prod,
-      imposto: {
-        ICMS,
-        PIS:    { PISNT:    { CST: '07' } },
-        COFINS: { COFINSNT: { CST: '07' } },
-      },
+      nItem: i + 1, prod,
+      imposto: { ICMS, PIS: { PISNT: { CST: '07' } }, COFINS: { COFINSNT: { CST: '07' } } },
     };
   });
 }
@@ -216,59 +248,80 @@ function buildICMSTot(det) {
   };
 }
 
-// 01=dinheiro, 02=cheque, 03=cartão crédito, 04=cartão débito,
-// 05=crédito loja, 10=vale alimentação, 15=boleto, 17=Pix, 99=outros
 function buildPag(payment, total) {
-  const tPag = String(payment.method || '01').padStart(2, '0');
-  const pay = {
-    indPag: payment.indPag === undefined ? 0 : payment.indPag,
-    tPag,
-    vPag: Number(total || 0),
-  };
   return {
-    detPag: [pay],
+    detPag: [{
+      indPag: payment.indPag === undefined ? 0 : payment.indPag,
+      tPag: validateTpag(payment.method),
+      vPag: Number(total || 0),
+    }],
     vTroco: Number(payment.change || 0) || 0,
+  };
+}
+
+// Helper compartilhado para ide (NFC-e e NF-e). Recebe já as variáveis
+// numéricas e completa cNF/cDV/dhEmi com formato BR.
+function buildIde({ company, mod, serie, nNF, tpAmb, tpImp, indFinal, indPres, idDest, natOp, verProc }) {
+  const dh = isoBR();
+  const cUF = ufToCodigo(company.address_state);
+  const ano2 = dh.slice(2, 4);     // "26"
+  const mes2 = dh.slice(5, 7);     // "05"
+  const cnpj = (company.cnpj || '').replace(/\D/g, '');
+  const cNF = generateCNF();
+  const tpEmis = 1;
+  // Calcula chave + cDV pra mandar coerente. Nuvem Fiscal pode regerar,
+  // mas mandar coerente reduz divergências de validação.
+  const chave44 = buildAccessKey44({ cUF, ano2, mes2, cnpj, mod, serie, nNF, tpEmis, cNF });
+  const cDV = chave44.slice(-1);
+
+  return {
+    cUF,
+    cNF,
+    natOp,
+    mod,
+    serie: Number(serie),
+    nNF: Number(nNF),
+    dhEmi: dh,
+    tpNF: 1,         // saída
+    idDest: idDest || 1,
+    cMunFG: company.ibge_code || '',
+    tpImp,
+    tpEmis,
+    cDV: Number(cDV),
+    tpAmb,
+    finNFe: 1,
+    indFinal,
+    indPres,
+    procEmi: 0,
+    verProc: verProc || 'Aura/1.0',
   };
 }
 
 // ── NFC-e (modelo 65) ───────────────────────────────────────
 async function emitNfce(company, nfceData) {
   const tpAmb = NUVEM_URL.includes('sandbox') ? 2 : 1;
+  const crt = company.tax_regime === 'mei' ? 4 :
+              company.tax_regime === 'lucro_presumido' || company.tax_regime === 'lucro_real' ? 3 : 1;
 
-  const det = buildDet(nfceData.items || [], {
-    crt: company.tax_regime === 'mei' ? 4 :
-         company.tax_regime === 'lucro_presumido' || company.tax_regime === 'lucro_real' ? 3 : 1,
-  });
-
+  const det = buildDet(nfceData.items || [], { crt });
   const total = buildICMSTot(det);
-  const totalValue = nfceData.total_value !== undefined
-    ? Number(nfceData.total_value)
-    : total.vNF;
+  const totalValue = nfceData.total_value !== undefined ? Number(nfceData.total_value) : total.vNF;
 
   const body = {
     ambiente: tpAmb === 2 ? 'homologacao' : 'producao',
     referencia: nfceData.reference || `nfce-${Date.now()}`,
     infNFe: {
       versao: '4.00',
-      ide: {
-        cUF: ufToCodigo(company.address_state),
+      ide: buildIde({
+        company, mod: 65,
+        serie: nfceData.serie || 1,
+        nNF: nfceData.numero || 1,
+        tpAmb, tpImp: 4,         // 4 = DANFE NFC-e
+        indFinal: 1,             // consumidor final
+        indPres: 1,              // operação presencial
+        idDest: 1,               // operação interna
         natOp: nfceData.natureza_operacao || 'Venda ao consumidor',
-        mod: 65,
-        serie: Number(nfceData.serie || 1),
-        nNF: Number(nfceData.numero || 1),
-        dhEmi: new Date().toISOString(),
-        tpNF: 1,
-        idDest: 1,
-        cMunFG: company.ibge_code || '',
-        tpImp: 4,
-        tpEmis: 1,
-        tpAmb,
-        finNFe: 1,
-        indFinal: 1,
-        indPres: 1,
-        procEmi: 0,
-        verProc: 'Aura/1.0',
-      },
+      }),
       emit: buildEmit(company),
       dest: buildDest({
         cpf: nfceData.recipient_cpf,
@@ -336,25 +389,16 @@ async function emitNfe(company, nfeData) {
     referencia: nfeData.reference || `nfe-${Date.now()}`,
     infNFe: {
       versao: '4.00',
-      ide: {
-        cUF: ufToCodigo(company.address_state),
-        natOp: nfeData.natureza_operacao || 'Venda',
-        mod: 55,
-        serie: Number(nfeData.serie || 1),
-        nNF: Number(nfeData.numero || 1),
-        dhEmi: new Date().toISOString(),
-        tpNF: 1,
-        idDest: nfeData.idDest || 1,
-        cMunFG: company.ibge_code || '',
-        tpImp: 1,
-        tpEmis: 1,
-        tpAmb,
-        finNFe: 1,
+      ide: buildIde({
+        company, mod: 55,
+        serie: nfeData.serie || 1,
+        nNF: nfeData.numero || 1,
+        tpAmb, tpImp: 1,         // 1 = DANFE retrato
         indFinal: nfeData.indFinal === undefined ? 1 : nfeData.indFinal,
         indPres: nfeData.indPres === undefined ? 1 : nfeData.indPres,
-        procEmi: 0,
-        verProc: 'Aura/1.0',
-      },
+        idDest: nfeData.idDest || 1,
+        natOp: nfeData.natureza_operacao || 'Venda',
+      }),
       emit: buildEmit(company),
       dest,
       det,
@@ -378,7 +422,7 @@ async function cancelNfe(nfeId, justificativa) {
   });
 }
 
-// ── NFS-e (mantida no formato anterior — schema próprio) ────
+// ── NFS-e ──────────────────────────────────────────────────
 async function emitNfse(company, nfseData) {
   const cnpj = (company.cnpj || '').replace(/\D/g, '');
   return nuvemRequest('POST', '/nfse', {
@@ -407,7 +451,8 @@ async function cancelNfse(nfseId, justificativa) {
 
 module.exports = {
   getToken, nuvemRequest, ufToCodigo,
-  buildEmit, buildDest, buildDet, buildICMSTot, buildPag,
+  isoBR, generateCNF, calcDvChaveAcesso, buildAccessKey44, validateTpag,
+  buildEmit, buildDest, buildDet, buildICMSTot, buildPag, buildIde,
   registerCompany, uploadCertificate,
   emitNfce, queryNfce, cancelNfce,
   emitNfe,  queryNfe,  cancelNfe,
