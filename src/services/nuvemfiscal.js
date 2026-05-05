@@ -10,9 +10,8 @@
 //   evitando Rejeição 391 do SEFAZ (dados do cartão obrigatórios).
 //   Atenção: a propriedade JSON é `card` (confirmado em
 //   nuvem-fiscal/nuvemfiscal-sdk-php NfeSefazDetPag.php), NÃO `cartao`.
-// - buildPag adiciona xPag (descrição) em todos os detPag — workaround
-//   defensivo da Rejeição 391 com tPag=17 (PIX), que SEFAZ-SP retorna
-//   contra a regra A03B-110 da NT (só deveria disparar pra 03/04).
+// - buildPag adiciona xPag SOMENTE para tPag=99 (Outros), conforme regra
+//   W21-A do schema NF-e 4.00. Outros tPag rejeitam com cStat=442.
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -117,9 +116,10 @@ function validateTpag(method) {
 const CARD_TPAG = new Set(['03', '04']);
 
 // xPag: descrição amigável de cada tPag (max 60 chars no schema NF-e 4.00).
-// Schema considera xPag opcional pra maioria, obrigatório só pra tPag=99.
-// Adicionamos pra todos como workaround defensivo da Rejeição 391 PIX —
-// SEFAZ-SP pode estar exigindo descrição por regra não documentada.
+// Schema W21-A só PERMITE xPag quando tPag=99 (Outros). Pra qualquer outro
+// tPag, enviar xPag dispara cStat=442 ("Descrição do pagamento não
+// permitida"). Por isso só usamos abaixo quando tPag === '99'.
+// Mantemos o mapa completo pra eventuais usos em logs/UI.
 const TPAG_DESCRIPTIONS = {
   '01': 'Dinheiro',
   '02': 'Cheque',
@@ -267,7 +267,7 @@ function buildICMSTot(det) {
 // conforme exigência SEFAZ NF-e 4.00 — evita Rejeição 391.
 // IMPORTANTE: a propriedade JSON é `card`, NÃO `cartao` (confirmado em
 // NfeSefazDetPag.php do SDK oficial).
-// xPag: incluído pra todos como workaround do 391 PIX (mai/2026).
+// xPag: incluído apenas pra tPag=99 (regra schema W21-A; outros tPag → 442).
 function buildPag(payments, totalFallback) {
   const round = (n) => Math.round(n * 100) / 100;
   let list;
@@ -291,9 +291,11 @@ function buildPag(payments, totalFallback) {
       tPag,
       vPag: round(Number(p.value || 0)),
     };
-    // xPag: descrição amigável (max 60 chars). Workaround 391 PIX.
-    const tpagDesc = TPAG_DESCRIPTIONS[tPag];
-    if (tpagDesc) entry.xPag = tpagDesc;
+    // xPag: schema NF-e 4.00 (regra W21-A) só permite quando tPag=99.
+    // Outros tPag rejeitam com cStat=442 ("Descrição do pagamento não permitida").
+    if (tPag === '99') {
+      entry.xPag = TPAG_DESCRIPTIONS['99'];
+    }
     // SEFAZ exige bloco card (NfeSefazCard) para crédito (03) e débito (04).
     // tpIntegra=2: TEF não-integrado — CNPJ/tBand/cAut são opcionais.
     if (CARD_TPAG.has(tPag)) {
