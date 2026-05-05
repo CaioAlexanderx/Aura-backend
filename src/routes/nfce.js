@@ -29,8 +29,8 @@ function paymentCode(method) {
 }
 
 // Extrai campos padronizados da resposta bruta da Nuvem Fiscal.
-// A Nuvem Fiscal retorna motivo='-' quando não há texto adicional no topo;
-// o motivo real de rejeição SEFAZ fica em autorizacao.cStat + autorizacao.xMotivo.
+// Nuvem Fiscal usa codigo_status + motivo_status no topo para rejeições SEFAZ.
+// motivo='-' é placeholder sem info; ignored aqui.
 function extractProvFields(resp) {
   if (!resp) return {};
 
@@ -38,20 +38,17 @@ function extractProvFields(resp) {
   const proto = aut.protocolo || aut;
   const supl  = resp.infNFeSupl || resp.inf_nfe_supl || {};
 
-  // cStat e xMotivo: campos canônicos SEFAZ para rejeição
-  const cStat  = resp.c_stat  || resp.cStat  || aut.c_stat  || aut.cStat  || proto.cStat  || null;
-  const xMotivo = proto.xMotivo || aut.xMotivo || resp.x_motivo || resp.xMotivo || null;
+  // codigo_status é o campo da Nuvem Fiscal para cStat SEFAZ
+  const cStat = resp.codigo_status || resp.c_stat || resp.cStat
+    || aut.c_stat || aut.cStat || proto.cStat || null;
 
-  // motivo: ignora '-' (valor literal Nuvem Fiscal sem info); prefere xMotivo SEFAZ
+  // motivo_status é o campo da Nuvem Fiscal para xMotivo SEFAZ
+  const xMotivo = resp.motivo_status || proto.xMotivo || aut.xMotivo
+    || resp.x_motivo || resp.xMotivo || null;
+
+  // motivo: ignora '-' (placeholder Nuvem Fiscal sem info adicional)
   const motivoTop = (resp.motivo && resp.motivo !== '-') ? resp.motivo : null;
-  const motivoSefaz = xMotivo
-    ? (cStat ? `Rejeição ${cStat} - ${xMotivo}` : xMotivo)
-    : null;
-  const motivo = motivoTop
-    || motivoSefaz
-    || resp.mensagem_sefaz
-    || resp.mensagem
-    || null;
+  const motivo = motivoTop || xMotivo || resp.mensagem_sefaz || resp.mensagem || null;
 
   return {
     nuvemfiscalId: resp.id || null,
