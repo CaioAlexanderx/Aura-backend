@@ -28,11 +28,31 @@ function paymentCode(method) {
   return map[method] || '01';
 }
 
+// Extrai campos padronizados da resposta bruta da Nuvem Fiscal.
+// A Nuvem Fiscal retorna motivo='-' quando não há texto adicional no topo;
+// o motivo real de rejeição SEFAZ fica em autorizacao.cStat + autorizacao.xMotivo.
 function extractProvFields(resp) {
   if (!resp) return {};
-  const aut = resp.autorizacao || resp.protocolo_autorizacao || {};
+
+  const aut   = resp.autorizacao || resp.protocolo_autorizacao || {};
   const proto = aut.protocolo || aut;
-  const supl = resp.infNFeSupl || resp.inf_nfe_supl || {};
+  const supl  = resp.infNFeSupl || resp.inf_nfe_supl || {};
+
+  // cStat e xMotivo: campos canônicos SEFAZ para rejeição
+  const cStat  = resp.c_stat  || resp.cStat  || aut.c_stat  || aut.cStat  || proto.cStat  || null;
+  const xMotivo = proto.xMotivo || aut.xMotivo || resp.x_motivo || resp.xMotivo || null;
+
+  // motivo: ignora '-' (valor literal Nuvem Fiscal sem info); prefere xMotivo SEFAZ
+  const motivoTop = (resp.motivo && resp.motivo !== '-') ? resp.motivo : null;
+  const motivoSefaz = xMotivo
+    ? (cStat ? `Rejeição ${cStat} - ${xMotivo}` : xMotivo)
+    : null;
+  const motivo = motivoTop
+    || motivoSefaz
+    || resp.mensagem_sefaz
+    || resp.mensagem
+    || null;
+
   return {
     nuvemfiscalId: resp.id || null,
     chaveAcesso:   resp.chave_acesso || resp.chNFe || proto.chNFe || null,
@@ -42,7 +62,8 @@ function extractProvFields(resp) {
     qrCode:        resp.qr_code  || resp.qrCode  || supl.qrCode  || supl.qr_code || null,
     urlConsulta:   resp.url_consulta || resp.urlChave || supl.urlChave || supl.url_chave || null,
     status:        resp.status || aut.status || null,
-    motivo:        resp.motivo || proto.xMotivo || resp.mensagem_sefaz || resp.mensagem || null,
+    cStat,
+    motivo,
   };
 }
 
@@ -302,6 +323,10 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
         console.log('[nfce] provResult:', JSON.stringify(provResult, null, 2));
 
         prov = extractProvFields(provResult);
+
+        // Log campos extraídos (facilita rastrear se o parsing está correto)
+        console.log(`[nfce] nfce #${numeroNF} status=${prov.status} cStat=${prov.cStat} motivo=${prov.motivo}`);
+
         finalStatus = (prov.status === 'autorizado' || prov.status === 'autorizada') ? 'autorizada'
                     : (prov.status === 'rejeitado'  || prov.status === 'rejeitada')  ? 'rejeitada'
                     : 'processando';
@@ -364,6 +389,7 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
       qr_code:      prov.qrCode      || final[0].qr_code,
       url_consulta: prov.urlConsulta || final[0].url_consulta,
       motivo:       prov.motivo      || null,
+      cStat:        prov.cStat       || null,
     });
 
   } catch (err) {
