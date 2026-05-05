@@ -6,6 +6,8 @@
 // - /config GET/POST inclui auto_emit_nfce (toggle de emissão automática)
 // - /emit aceita body.payments[] (multi-pagamento, soma deve bater com total)
 // - /:nfceId/danfe-termica retorna HTML 80mm pra impressão térmica
+// - paymentCode mapeia 'crediario' → '01' (dinheiro). Decisão fiscal:
+//   crediário é operação interna do lojista, sem tPag SEFAZ próprio.
 // ============================================================
 
 const express = require('express');
@@ -38,10 +40,17 @@ function consultaUrlByUf(uf) {
   return CONSULTA_NFCE_URL[(uf || '').toUpperCase()] || CONSULTA_NFCE_URL._;
 }
 
+// Mapeia método PDV → tPag SEFAZ.
+// 'crediario' → '01' (dinheiro): SEFAZ não tem tPag pra fiado. Concorrentes
+// do mercado declaram fiado como dinheiro. Sem impacto fiscal — a venda
+// é fato gerador independente de quando o pagamento entra. O saldo do
+// cliente fica registrado em customer_credit_transactions (migration 099).
 function paymentCode(method) {
   const map = {
     dinheiro: '01', cheque: '02', credito: '03', debito: '04',
-    cartao: '03', boleto: '15', pix: '17', outros: '99',
+    cartao: '03', boleto: '15', pix: '17',
+    crediario: '01', // fiado declarado como dinheiro pra SEFAZ
+    outros: '99',
   };
   return map[method] || '01';
 }
