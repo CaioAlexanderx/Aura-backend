@@ -10,6 +10,9 @@
 //   evitando Rejeição 391 do SEFAZ (dados do cartão obrigatórios).
 //   Atenção: a propriedade JSON é `card` (confirmado em
 //   nuvem-fiscal/nuvemfiscal-sdk-php NfeSefazDetPag.php), NÃO `cartao`.
+// - buildPag adiciona xPag (descrição) em todos os detPag — workaround
+//   defensivo da Rejeição 391 com tPag=17 (PIX), que SEFAZ-SP retorna
+//   contra a regra A03B-110 da NT (só deveria disparar pra 03/04).
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -112,6 +115,29 @@ function validateTpag(method) {
 // senão Rejeição 391. tpIntegra=2 (TEF não-integrado) torna CNPJ/tBand/cAut
 // opcionais. Ver: nuvem-fiscal/nuvemfiscal-sdk-php NfeSefazDetPag.php
 const CARD_TPAG = new Set(['03', '04']);
+
+// xPag: descrição amigável de cada tPag (max 60 chars no schema NF-e 4.00).
+// Schema considera xPag opcional pra maioria, obrigatório só pra tPag=99.
+// Adicionamos pra todos como workaround defensivo da Rejeição 391 PIX —
+// SEFAZ-SP pode estar exigindo descrição por regra não documentada.
+const TPAG_DESCRIPTIONS = {
+  '01': 'Dinheiro',
+  '02': 'Cheque',
+  '03': 'Cartão de Crédito',
+  '04': 'Cartão de Débito',
+  '05': 'Crédito Loja',
+  '10': 'Vale Alimentação',
+  '11': 'Vale Refeição',
+  '12': 'Vale Presente',
+  '13': 'Vale Combustível',
+  '15': 'Boleto Bancário',
+  '16': 'Depósito Bancário',
+  '17': 'PIX',
+  '18': 'Transferência bancária',
+  '19': 'Programa de fidelidade',
+  '90': 'Sem pagamento',
+  '99': 'Outros',
+};
 
 async function registerCompany(company) {
   const cnpj = (company.cnpj || '').replace(/\D/g, '');
@@ -241,6 +267,7 @@ function buildICMSTot(det) {
 // conforme exigência SEFAZ NF-e 4.00 — evita Rejeição 391.
 // IMPORTANTE: a propriedade JSON é `card`, NÃO `cartao` (confirmado em
 // NfeSefazDetPag.php do SDK oficial).
+// xPag: incluído pra todos como workaround do 391 PIX (mai/2026).
 function buildPag(payments, totalFallback) {
   const round = (n) => Math.round(n * 100) / 100;
   let list;
@@ -264,6 +291,9 @@ function buildPag(payments, totalFallback) {
       tPag,
       vPag: round(Number(p.value || 0)),
     };
+    // xPag: descrição amigável (max 60 chars). Workaround 391 PIX.
+    const tpagDesc = TPAG_DESCRIPTIONS[tPag];
+    if (tpagDesc) entry.xPag = tpagDesc;
     // SEFAZ exige bloco card (NfeSefazCard) para crédito (03) e débito (04).
     // tpIntegra=2: TEF não-integrado — CNPJ/tBand/cAut são opcionais.
     if (CARD_TPAG.has(tPag)) {
