@@ -215,7 +215,7 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
 
     // Valida payments[] se presente — soma deve bater com totalNfce
     const paymentsErr = validatePayments(payments, totalNfce);
-    if paymentsErr) return res.status(400).json(paymentsErr);
+    if (paymentsErr) return res.status(400).json(paymentsErr);
 
     const numeroNF = config.next_number;
     const serieNF  = config.serie_nfce;
