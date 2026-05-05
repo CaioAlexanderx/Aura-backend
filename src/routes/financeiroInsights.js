@@ -114,12 +114,14 @@ function fmtBRL(v) {
 // Helpers Onda 2 (preservados)
 // ============================================================
 async function fetchTop5(companyIds, type, start, end) {
+  // companies não tem coluna `name` — usa trade_name (fantasia) com fallback
+  // pra legal_name (razão social). Bug anterior: c.name → 42703 quebrava tela.
   const sql = `
     SELECT id, description, category, amount, payment_method, employee_name,
            status, COALESCE(due_date, created_at::date) AS event_date,
            company_id, company_name
     FROM (
-      SELECT t.*, c.name AS company_name
+      SELECT t.*, COALESCE(c.trade_name, c.legal_name) AS company_name
       FROM transactions t
       LEFT JOIN companies c ON c.id = t.company_id
       WHERE t.company_id = ANY($1::uuid[])
