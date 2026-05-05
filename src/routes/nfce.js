@@ -8,6 +8,10 @@
 // Passamos serie/numero capturados de nfce_config para o service e
 // hidratamos a resposta com chave_acesso/protocolo/link_xml/link_pdf
 // retornados pela Nuvem Fiscal.
+//
+// Hotfix 05/05: SELECT em companies usava address_neighborhood (real:
+// address_district). IE pode vir só em nfce_config — fazemos fallback.
+// Validamos ibge_code antes de transmitir (cMun/cMunFG é obrigatório).
 // ============================================================
 
 const express = require('express');
@@ -108,9 +112,12 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
     }
     const config = configs[0];
 
+    // SELECT com alias address_district AS address_neighborhood (real column).
+    // ibge_code e inscricao_estadual existem desde a migration 095 (podem ser NULL).
     const { rows: companies } = await db.query(
       `SELECT id, cnpj, legal_name, trade_name, name,
-              address_street, address_number, address_neighborhood,
+              address_street, address_number,
+              address_district AS address_neighborhood,
               address_city, address_state, address_zip,
               inscricao_estadual, inscricao_municipal,
               ibge_code, email, phone, tax_regime
@@ -120,6 +127,21 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
     if (!companies.length) return res.status(404).json({ error: 'Empresa não encontrada' });
     const company = companies[0];
     if (!company.cnpj) return res.status(400).json({ error: 'CNPJ da empresa não cadastrado. Atualize em Configurações.' });
+    if (!company.ibge_code) {
+      return res.status(400).json({
+        error: 'Código IBGE da empresa não cadastrado (campo cMun obrigatório). Atualize em Configurações > Empresa.',
+      });
+    }
+
+    // Fallback: se IE não está em companies, usa do nfce_config (legado).
+    if (!company.inscricao_estadual && config.inscricao_estadual) {
+      company.inscricao_estadual = config.inscricao_estadual;
+    }
+    if (!company.inscricao_estadual) {
+      return res.status(400).json({
+        error: 'Inscrição Estadual da empresa não cadastrada. Atualize em Configurações > Empresa ou na configuração NFC-e.',
+      });
+    }
 
     let totalProducts = 0, totalDiscount = 0;
     for (const item of items) {

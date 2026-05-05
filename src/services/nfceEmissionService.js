@@ -5,41 +5,35 @@
 // Se nfce_config não existe ou está inativa, retorna {skipped: true}
 // sem erro — emissão é opcional e nunca bloqueia o pedido.
 //
-// Ambientes:
-//   homologacao — autoriza localmente sem transmissão real
-//   producao    — transmite à Nuvem Fiscal; falha é registrada em
-//                 error_message mas NÃO bloqueia a confirmação do pedido
+// Hotfix 05/05: SELECT alinhado com routes/nfce.js (alias
+// address_district AS address_neighborhood, IE fallback nfce_config,
+// passa serie/numero pro service de Nuvem Fiscal).
 // ============================================================
 'use strict';
 
 const nuvemfiscal = require('./nuvemfiscal');
 
-// Mapeamento forma de pagamento → código Nuvem Fiscal
 function paymentCode(method) {
   const map = { pix: '17', credito: '03', debito: '04', dinheiro: '01', outros: '99' };
   return map[method] || '01';
 }
 
 async function emitForDigitalOrder({ orderId, dbClient }) {
-  // Carrega pedido
   const { rows: orders } = await dbClient.query(
     'SELECT * FROM digital_orders WHERE id = $1', [orderId]
   );
   if (!orders.length) return { skipped: true, reason: 'order_not_found' };
   const order = orders[0];
 
-  // Idempotência: já tem NFC-e vinculada?
   if (order.nfce_id) {
     return { skipped: true, reason: 'already_emitted', nfce_id: order.nfce_id };
   }
 
-  // Carrega itens do pedido
   const { rows: items } = await dbClient.query(
     'SELECT * FROM digital_order_items WHERE order_id = $1', [orderId]
   );
   if (!items.length) return { skipped: true, reason: 'no_items' };
 
-  // Config NFC-e da empresa
   const { rows: configs } = await dbClient.query(
     'SELECT * FROM nfce_config WHERE company_id = $1', [order.company_id]
   );
@@ -49,7 +43,6 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
   }
   const config = configs[0];
 
-  // Monta items
   const nfceItems = items.map(i => ({
     product_id:   i.product_id,
     product_name: i.product_name,
@@ -63,11 +56,13 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
   for (const it of nfceItems) totalProducts += it.quantity * it.unit_price;
   const totalNfce = Math.round(totalProducts * 100) / 100;
 
-  // Chave de acesso placeholder (substituída pelo retorno da Nuvem Fiscal em produção)
+  const numeroNF = config.next_number;
+  const serieNF  = config.serie_nfce;
+
   const now = new Date();
   const yy  = String(now.getFullYear()).slice(2);
   const mm  = String(now.getMonth() + 1).padStart(2, '0');
-  const chaveAcesso = `${config.uf}${yy}${mm}${'0'.repeat(14)}65${String(config.serie_nfce).padStart(3, '0')}${String(config.next_number).padStart(9, '0')}1${'0'.repeat(8)}1`;
+  const chaveAcesso = `${config.uf}${yy}${mm}${'0'.repeat(14)}65${String(serieNF).padStart(3, '0')}${String(numeroNF).padStart(9, '0')}1${'0'.repeat(8)}1`;
 
   const customerName  = order.customer_name       || null;
   const customerCpf   = order.customer_cpf_cnpj   || null;
@@ -75,7 +70,6 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
                       : order.payment_method === 'on_delivery' ? 'dinheiro'
                       : order.payment_method || 'dinheiro';
 
-  // Insere registro inicial com status 'processando'
   const { rows: created } = await dbClient.query(
     `INSERT INTO nfce_emissions
        (company_id, sale_id, transaction_id, numero, serie, chave_acesso, status,
@@ -85,12 +79,11 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
              $6, $7, $8, $9, 0, $10, $11, 0, NULL, 'nfce')
      RETURNING id, numero, chave_acesso, status`,
     [order.company_id, order.transaction_id,
-     config.next_number, config.serie_nfce, chaveAcesso,
+     numeroNF, serieNF, chaveAcesso,
      customerCpf, customerName, JSON.stringify(nfceItems),
      totalProducts, totalNfce, paymentMethod]
   );
 
-  // Incrementa numeração
   await dbClient.query(
     'UPDATE nfce_config SET next_number = next_number + 1, updated_at = NOW() WHERE company_id = $1',
     [order.company_id]
@@ -98,8 +91,7 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
 
   let finalStatus = 'processando';
 
-  if (config.ambiente === 'homologacao') {
-    // ── Homologação: autoriza localmente ───────────────────────
+  if (config.ambiente === 'homologacao' && process.env.NUVEM_FISCAL_FORCE !== 'true') {
     await dbClient.query(
       `UPDATE nfce_emissions
           SET status       = 'autorizada',
@@ -111,11 +103,12 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
     finalStatus = 'autorizada';
 
   } else {
-    // ── Produção: transmite à Nuvem Fiscal ─────────────────────
     try {
+      // SELECT com alias address_district AS address_neighborhood (real column).
       const { rows: companies } = await dbClient.query(
         `SELECT cnpj, legal_name, trade_name,
-                address_street, address_number, address_neighborhood,
+                address_street, address_number,
+                address_district AS address_neighborhood,
                 address_city, address_state, address_zip,
                 inscricao_estadual, inscricao_municipal,
                 ibge_code, email, phone, tax_regime
@@ -124,7 +117,12 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
       );
       const company = companies[0];
 
-      if (company && company.cnpj) {
+      // IE fallback: companies.inscricao_estadual ?? nfce_config.inscricao_estadual
+      if (company && !company.inscricao_estadual && config.inscricao_estadual) {
+        company.inscricao_estadual = config.inscricao_estadual;
+      }
+
+      if (company && company.cnpj && company.ibge_code && company.inscricao_estadual) {
         const nfItems = nfceItems.map(i => ({
           code:        String(i.product_id || ''),
           name:        i.product_name,
@@ -142,6 +140,9 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
           payment_method: paymentCode(paymentMethod),
           recipient_cpf:  customerCpf,
           recipient_name: customerName,
+          serie:          serieNF,
+          numero:         numeroNF,
+          reference:      `nfce-auto-${created[0].id}`,
         });
 
         finalStatus = provResult.status === 'autorizado' ? 'autorizada'
@@ -154,14 +155,26 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
                   nuvemfiscal_id = $2,
                   chave_acesso   = COALESCE($3, chave_acesso),
                   protocolo      = $4,
+                  xml_url        = COALESCE(xml_url, $5),
+                  pdf_url        = COALESCE(pdf_url, $6),
                   authorized_at  = CASE WHEN $1 = 'autorizada' THEN NOW() ELSE NULL END
-            WHERE id = $5`,
+            WHERE id = $7`,
           [finalStatus, provResult.id || null, provResult.chave_acesso || null,
-           provResult.protocolo || null, created[0].id]
+           provResult.protocolo || null, provResult.link_xml || null,
+           provResult.link_pdf || null, created[0].id]
         );
+      } else {
+        const missing = [];
+        if (!company?.cnpj)               missing.push('cnpj');
+        if (!company?.ibge_code)          missing.push('ibge_code');
+        if (!company?.inscricao_estadual) missing.push('inscricao_estadual');
+        await dbClient.query(
+          `UPDATE nfce_emissions SET status = 'erro', error_message = $1 WHERE id = $2`,
+          [`Empresa sem campos obrigatórios: ${missing.join(', ')}`, created[0].id]
+        );
+        finalStatus = 'erro';
       }
     } catch (apiErr) {
-      // Falha na transmissão NÃO bloqueia o pedido — registra para investigação
       console.error('[nfce] Nuvem Fiscal emit error (digital order):', apiErr.message);
       await dbClient.query(
         `UPDATE nfce_emissions SET status = 'erro', error_message = $1 WHERE id = $2`,
@@ -171,7 +184,6 @@ async function emitForDigitalOrder({ orderId, dbClient }) {
     }
   }
 
-  // Vincula NFC-e ao pedido
   await dbClient.query(
     'UPDATE digital_orders SET nfce_id = $1 WHERE id = $2',
     [created[0].id, orderId]
