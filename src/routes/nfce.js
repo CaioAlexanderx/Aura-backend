@@ -42,7 +42,7 @@ function extractProvFields(resp) {
     qrCode:        resp.qr_code  || resp.qrCode  || supl.qrCode  || supl.qr_code || null,
     urlConsulta:   resp.url_consulta || resp.urlChave || supl.urlChave || supl.url_chave || null,
     status:        resp.status || aut.status || null,
-    motivo:        resp.motivo || proto.xMotivo || null,
+    motivo:        resp.motivo || proto.xMotivo || resp.mensagem_sefaz || null,
   };
 }
 
@@ -303,9 +303,12 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
                     : (prov.status === 'rejeitado'  || prov.status === 'rejeitada')  ? 'rejeitada'
                     : 'processando';
 
-        // Usa $10 para authorized_at em vez de CASE WHEN $1 — evita
-        // "inconsistent types deduced for parameter $1" no pg.
-        const authorizedAt = finalStatus === 'autorizada' ? new Date() : null;
+        console.log(`[nfce] ${tipo} #${numeroNF} status=${finalStatus} motivo=${prov.motivo || '-'}`);
+
+        // $10 = authorized_at (evita "inconsistent types" com CASE WHEN $1)
+        // $11 = error_message  (motivo da rejeição SEFAZ, null se autorizada)
+        const authorizedAt  = finalStatus === 'autorizada' ? new Date() : null;
+        const errorMessage  = finalStatus === 'rejeitada'  ? prov.motivo || 'Rejeitada pela SEFAZ' : null;
 
         await db.query(
           `UPDATE nfce_emissions
@@ -317,11 +320,12 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
                   pdf_url        = COALESCE(pdf_url, $6),
                   qr_code        = COALESCE(qr_code, $7),
                   url_consulta   = COALESCE(url_consulta, $8),
-                  authorized_at  = $10
+                  authorized_at  = $10,
+                  error_message  = $11
             WHERE id = $9`,
           [finalStatus, prov.nuvemfiscalId, prov.chaveAcesso, prov.protocolo,
            prov.xmlUrl, prov.pdfUrl, prov.qrCode, prov.urlConsulta, emission.id,
-           authorizedAt]
+           authorizedAt, errorMessage]
         );
 
         if (finalStatus !== 'rejeitada') {
@@ -351,12 +355,13 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
       `${tipo.toUpperCase()} nº ${numeroNF} emitida — R$ ${totalNfce}`);
 
     res.status(201).json({
-      nfce: final[0],
+      nfce:         final[0],
       tipo,
       pdf_url:      prov.pdfUrl      || final[0].pdf_url,
       xml_url:      prov.xmlUrl      || final[0].xml_url,
       qr_code:      prov.qrCode      || final[0].qr_code,
       url_consulta: prov.urlConsulta || final[0].url_consulta,
+      motivo:       prov.motivo      || null,
     });
 
   } catch (err) {
