@@ -6,6 +6,8 @@
 // Mai/2026 (foundation):
 // - buildPag agora aceita array de pagamentos (multi-pagamento NFC-e)
 //   ou objeto único legado { method, change }. Ambos coexistem.
+// - buildPag inclui cartao.tpIntegra=2 para tPag 03/04 (crédito/débito)
+//   evitando Rejeição 391 do SEFAZ (dados do cartão obrigatórios)
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -102,6 +104,10 @@ function validateTpag(method) {
   const t = String(method || '01').padStart(2, '0').slice(0, 2);
   return VALID_TPAG.has(t) ? t : '99';
 }
+
+// tPag que exigem bloco cartao no SEFAZ NF-e 4.00
+// tpIntegra=2 = TEF não-integrado (não precisamos de CNPJ/tBand/cAut)
+const CARD_TPAG = new Set(['03', '04']);
 
 async function registerCompany(company) {
   const cnpj = (company.cnpj || '').replace(/\D/g, '');
@@ -227,6 +233,8 @@ function buildICMSTot(det) {
 //   - Array (novo, multi-pagamento): [{ method, value, change?, indPag? }, ...]
 //   - Objeto único (legado): { method, change } — vPag = totalFallback
 // Em ambos, soma de change vira vTroco.
+// Para tPag 03 (crédito) e 04 (débito), inclui cartao.tpIntegra=2 (não-integrado)
+// conforme exigência SEFAZ NF-e 4.00 — evita Rejeição 391.
 function buildPag(payments, totalFallback) {
   const round = (n) => Math.round(n * 100) / 100;
   let list;
@@ -243,11 +251,20 @@ function buildPag(payments, totalFallback) {
     list = [{ method: '01', value: totalFallback }];
   }
 
-  const detPag = list.map(p => ({
-    indPag: p.indPag === undefined ? 0 : p.indPag,
-    tPag: validateTpag(p.method),
-    vPag: round(Number(p.value || 0)),
-  }));
+  const detPag = list.map(p => {
+    const tPag = validateTpag(p.method);
+    const entry = {
+      indPag: p.indPag === undefined ? 0 : p.indPag,
+      tPag,
+      vPag: round(Number(p.value || 0)),
+    };
+    // SEFAZ exige bloco cartao para crédito (03) e débito (04)
+    // tpIntegra=2: TEF não-integrado — CNPJ/tBand/cAut são opcionais
+    if (CARD_TPAG.has(tPag)) {
+      entry.cartao = { tpIntegra: 2 };
+    }
+    return entry;
+  });
 
   const vTroco = list.reduce((s, p) => s + (Number(p.change) || 0), 0);
   return { detPag, vTroco: round(vTroco) };
@@ -414,7 +431,7 @@ async function emitNfse(company, nfseData) {
     tomador: {
       cpf_cnpj: (nfseData.recipient_cnpj || nfseData.recipient_cpf || '').replace(/\D/g, '') || undefined,
       nome_razao_social: nfseData.recipient_name || 'Consumidor',
-      email: nfseData.recipient_email || undefined,
+      email: nfeData.recipient_email || undefined,
     },
     servico: {
       discriminacao: nfseData.description || 'Servico prestado',
