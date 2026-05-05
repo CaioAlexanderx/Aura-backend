@@ -278,17 +278,47 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
       );
     } else {
       try {
-        const nfItems = items.map(i => ({
-          code:        String(i.product_id || i.code || ''),
-          name:        i.product_name || i.name || '',
-          description: i.description || i.product_name || i.name || '',
-          ncm:         i.ncm     || '00000000',
-          cfop:        i.cfop    || '5102',
-          unit:        i.unit    || 'UN',
-          quantity:    Number(i.quantity   || 1),
-          price:       Number(i.unit_price || i.price || 0),
-          barcode:     i.barcode || undefined,
-        }));
+        // Plan B (05/05/2026): backend é fonte autoritativa de NCM.
+        // Frontend hoje não envia ncm/cfop nos itens; produtos têm products.ncm
+        // cadastrado. Sem essa resolução, fallback '00000000' é rejeitado pela
+        // SEFAZ em produção (NCM inválido).
+        const productIds = items
+          .map(i => i.product_id)
+          .filter(id => typeof id === 'string' && id.length > 0);
+
+        const ncmByProductId = new Map();
+        if (productIds.length > 0) {
+          const { rows: prodRows } = await db.query(
+            `SELECT id, ncm FROM products WHERE id = ANY($1::uuid[]) AND company_id = $2`,
+            [productIds, req.params.id]
+          );
+          for (const p of prodRows) {
+            const n = (p.ncm || '').trim();
+            if (n && n !== '00000000') ncmByProductId.set(p.id, n);
+          }
+        }
+
+        const nfItems = items.map(i => {
+          const ncmFromItem = (i.ncm && String(i.ncm).trim() !== '00000000') ? String(i.ncm).trim() : null;
+          const ncmFromDb   = ncmByProductId.get(i.product_id);
+          return {
+            code:        String(i.product_id || i.code || ''),
+            name:        i.product_name || i.name || '',
+            description: i.description || i.product_name || i.name || '',
+            ncm:         ncmFromItem || ncmFromDb || '00000000',
+            cfop:        i.cfop    || '5102',
+            unit:        i.unit    || 'UN',
+            quantity:    Number(i.quantity   || 1),
+            price:       Number(i.unit_price || i.price || 0),
+            barcode:     i.barcode || undefined,
+          };
+        });
+
+        const semNcm = nfItems.filter(it => it.ncm === '00000000');
+        if (semNcm.length > 0) {
+          console.warn('[nfce] itens sem NCM resolvido (SEFAZ deve rejeitar):',
+            semNcm.map(it => ({ code: it.code, name: it.name })));
+        }
 
         // Constrói payments pra Nuvem Fiscal: prioriza array, fallback pra single
         const nfPayments = Array.isArray(payments)
