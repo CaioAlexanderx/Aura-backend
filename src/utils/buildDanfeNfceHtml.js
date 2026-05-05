@@ -1,17 +1,19 @@
 // ============================================================================
-// AURA. — Gerador HTML da DANFE NFC-e térmica (80mm)
+// AURA. — Gerador HTML da DANFE NFC-e térmica (80mm) — v2 compacta
 //
-// Layout simplificado conforme manual SEFAZ NFC-e (modelo 65), versão térmica
-// (Cupom Fiscal Eletrônico). Impresso em papel 80mm, fonte monospace, QR
-// destacado pra escaneamento pelo consumidor.
+// Layout aprovado pelo Caio em 05/05/2026 (mockup mock_danfe_v2.html):
+// - Header com logo do cliente à esquerda + dados empresa à direita
+// - QR único 28mm centralizado (não 2 QRs como antes)
+// - Marca Aura textual discreta no rodapé
+// - Body 8.5pt monospace, layout ~30% mais compacto que v1
 //
 // Uso:
 //   const { buildDanfeNfceHtml } = require('../utils/buildDanfeNfceHtml');
 //   const html = buildDanfeNfceHtml({ emission, company });
 //   res.type('html').send(html);
 //
-// QR Code: usa qrserver.com (img src) em vez de canvas+JS, evitando race
-// entre document.close() e carga de CDN. Mesmo padrão do PrintLabels.tsx.
+// QR Code: usa qrserver.com (img src) — carrega síncrono pelo browser,
+// sem race com document.close() do popup. Mesmo padrão do PrintLabels.tsx.
 // ============================================================================
 
 function escapeHtml(s) {
@@ -57,6 +59,15 @@ function formatDateBR(dt) {
   const mi = String(d.getMinutes()).padStart(2, '0');
   const ss = String(d.getSeconds()).padStart(2, '0');
   return `${dd}/${mm}/${yyyy} ${hh}:${mi}:${ss}`;
+}
+
+// Iniciais 2 letras pra fallback do logo. "Davi Calçados Matriz" → "DC".
+function getInitials(name) {
+  if (!name) return '?';
+  const words = String(name).trim().split(/\s+/).filter(w => w.length > 0);
+  if (words.length === 0) return '?';
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+  return (words[0][0] + words[1][0]).toUpperCase();
 }
 
 // payment_method pode ser string ('pix') ou JSON de array (multi-pagamento)
@@ -114,15 +125,10 @@ function consultaUrlByUf(uf) {
 }
 
 // QR Code via qrserver.com (API pública, gratuita). Retorna URL de imagem PNG.
-// Vantagem sobre canvas+lib JS: carrega como <img> síncrono pelo browser, sem
-// race com document.close() do popup. Mesma estratégia do PrintLabels.tsx.
 function qrImageUrl(text, size) {
   const px = size || 200;
   return `https://api.qrserver.com/v1/create-qr-code/?size=${px}x${px}&data=${encodeURIComponent(text)}&bgcolor=ffffff&color=000000&margin=1`;
 }
-
-// URL marca Aura (rodapé discreto da DANFE)
-const AURA_URL = 'https://www.getaura.com.br';
 
 // ============================================================
 // Builder principal
@@ -149,7 +155,7 @@ function buildDanfeNfceHtml({ emission, company }) {
   const ie = company.inscricao_estadual || '';
   const enderecoLinha1 = [company.address_street, company.address_number].filter(Boolean).join(', ');
   const enderecoLinha2 = company.address_district || '';
-  const enderecoLinha3 = [company.address_city, company.address_state].filter(Boolean).join(' - ');
+  const enderecoLinha3 = [company.address_city, company.address_state].filter(Boolean).join(' — ');
   const cep = company.address_zip ? `CEP ${company.address_zip}` : '';
 
   const chave = emission.chave_acesso || '';
@@ -162,28 +168,30 @@ function buildDanfeNfceHtml({ emission, company }) {
   const nomeCliente = emission.customer_name || '';
   const consultaUrl = consultaUrlByUf(company.address_state);
   // QR principal: usa o qr_code da Nuvem Fiscal se disponível (URL completa
-  // com chave + hash CSC), senão fallback pra chave de acesso (consumidor
-  // pode digitar manualmente no site SEFAZ).
+  // com chave + hash CSC), senão fallback pra chave de acesso.
   const qrText = emission.qr_code || chave || consultaUrl;
   const isHomologacao = String(protocolo).startsWith('HOMOLOG-');
 
+  // Logo: se company.logo_url, usa <img>; senão fallback pra iniciais (2 letras)
+  const logoHtml = company.logo_url
+    ? `<img class="logo-img" src="${escapeHtml(company.logo_url)}" alt="">`
+    : `<div class="logo-fallback">${escapeHtml(getInitials(empresaNome))}</div>`;
+
   // ========== ITEMS ==========
-  // Cada item ocupa 2 linhas:
-  //   linha1: código + nome (truncado se necessário)
-  //   linha2: qtd UN x vUnit = total (alinhado à direita)
+  // Cada item ocupa 2 linhas: name + calc (qtd UN x vUnit = total).
   let itemsHtml = '';
   items.forEach((it, i) => {
     const idx = String(i + 1).padStart(3, '0');
     const code = escapeHtml(String(it.product_id || it.code || '').slice(-6));
-    const name = escapeHtml(String(it.product_name || it.name || '').slice(0, 36));
+    const name = escapeHtml(String(it.product_name || it.name || '').slice(0, 40));
     const qty = Number(it.quantity) || 1;
     const unit = it.unit || 'UN';
     const unitPrice = Number(it.unit_price || it.price) || 0;
     const total = qty * unitPrice;
     itemsHtml +=
       `<div class="item">` +
-      `<div class="item-line1">${idx} ${code} ${name}</div>` +
-      `<div class="item-line2">${qty} ${unit} x ${formatBRL(unitPrice)} = R$ ${formatBRL(total)}</div>` +
+      `<div class="item-name">${idx} ${code} ${name}</div>` +
+      `<div class="item-calc">${qty} ${unit} × ${formatBRL(unitPrice)} = R$ ${formatBRL(total)}</div>` +
       `</div>`;
   });
 
@@ -202,71 +210,87 @@ function buildDanfeNfceHtml({ emission, company }) {
   // ========== HTML ==========
   let html = '';
   html += '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">';
-  html += `<title>DANFE NFC-e #${numero} - ${escapeHtml(empresaNome)}</title>`;
+  html += `<title>DANFE NFC-e #${numero} — ${escapeHtml(empresaNome)}</title>`;
   html += '<style>';
-  // ===== Configuração página térmica 80mm =====
+  // ===== Página térmica 80mm =====
   html += '@page{size:80mm auto;margin:2mm 3mm}';
   html += '*{margin:0;padding:0;box-sizing:border-box}';
-  html += 'html,body{background:#f3f4f6;color:#000;font-family:"Courier New",Courier,monospace;font-size:9pt;line-height:1.25}';
+  html += 'html,body{background:#f3f4f6;color:#000;font-family:"Courier New",Courier,monospace;font-size:8.5pt;line-height:1.2}';
   html += '.page{width:74mm;margin:0 auto;background:#fff;padding:3mm;color:#000}';
   // Tela: imita papel térmico
   html += '@media screen{body{padding:24px 0}.page{box-shadow:0 4px 20px rgba(0,0,0,0.15);margin-bottom:24px}.print-toolbar{position:fixed;top:0;left:0;right:0;background:#1a1a2e;color:#fff;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;z-index:1000}.print-toolbar button{background:#7c3aed;color:#fff;border:none;padding:8px 18px;border-radius:6px;font-weight:700;cursor:pointer;font-size:13px}.print-toolbar span{font-size:12px;color:#a78bfa}}';
   // Print: papel cru
   html += '@media print{body{background:#fff;padding:0}.page{box-shadow:none;width:100%;padding:0}.print-toolbar{display:none!important}}';
-  // Conteúdo
-  html += '.center{text-align:center}.bold{font-weight:700}.small{font-size:8pt}.tiny{font-size:7pt}';
-  html += '.divider{border-top:1px dashed #000;margin:2mm 0}';
-  html += '.divider-solid{border-top:1px solid #000;margin:2mm 0}';
-  html += '.row{display:flex;justify-content:space-between;align-items:flex-end;gap:4px}';
+  // Helpers
+  html += '.center{text-align:center}.small{font-size:7.5pt}.tiny{font-size:6.5pt}.mt1{margin-top:1mm}';
+  // Divisores
+  html += '.divider{border-top:1px dashed #000;margin:1.5mm 0}';
+  html += '.divider-solid{border-top:1px solid #000;margin:1.5mm 0}';
+  // Linha row (label + value)
+  html += '.row{display:flex;justify-content:space-between;align-items:flex-end;gap:4px;line-height:1.3}';
   html += '.row span:first-child{flex:1;text-align:left}';
   html += '.row span:last-child{text-align:right;white-space:nowrap}';
-  html += '.empresa{text-align:center;margin-bottom:1mm}';
-  html += '.empresa .nome{font-size:10pt;font-weight:700;text-transform:uppercase;line-height:1.2;margin-bottom:1mm}';
-  html += '.empresa .info{font-size:8pt;line-height:1.3}';
-  html += '.titulo{text-align:center;font-size:9pt;font-weight:700;margin:2mm 0 1mm 0;text-transform:uppercase}';
-  html += '.subtitulo{text-align:center;font-size:7pt;line-height:1.25;margin-bottom:1mm}';
-  html += '.section-label{font-size:7pt;font-weight:700;text-transform:uppercase;letter-spacing:0.3pt;color:#000;margin-top:2mm;margin-bottom:1mm}';
-  html += '.item{margin-bottom:1.5mm;font-size:8.5pt}';
-  html += '.item-line1{font-weight:600;line-height:1.25;word-break:break-word}';
-  html += '.item-line2{text-align:right;font-size:8pt;color:#000}';
-  html += '.total-row{font-size:11pt;font-weight:800;margin-top:2mm}';
-  html += '.qr-wrap{text-align:center;margin:3mm 0}';
-  html += '.qr-wrap img{display:inline-block;width:46mm;height:46mm;image-rendering:pixelated}';
-  html += '.consulta{text-align:center;font-size:7pt;line-height:1.3;margin:2mm 0}';
-  html += '.consulta a{color:#000;text-decoration:none}';
-  html += '.chave{font-size:8pt;font-weight:700;text-align:center;letter-spacing:0.2pt;line-height:1.5;word-break:break-all;margin:2mm 0}';
-  html += '.protocol{font-size:7pt;text-align:center;line-height:1.4}';
-  html += '.consumidor{font-size:8pt;line-height:1.4}';
-  html += '.homolog-warn{text-align:center;border:2px dashed #dc2626;padding:2mm;font-size:8pt;font-weight:700;color:#dc2626;margin:2mm 0}';
-  // ===== Marca Aura discreta no rodapé =====
-  html += '.aura-mark{text-align:center;margin-top:4mm;padding-top:2mm}';
-  html += '.aura-mark img{display:inline-block;width:14mm;height:14mm;image-rendering:pixelated;opacity:0.85}';
-  html += '.aura-mark .label{font-size:6pt;color:#555;font-style:italic;margin-top:1mm;letter-spacing:0.2pt}';
+  // Header com logo
+  html += '.header{display:flex;align-items:center;gap:2.5mm;margin-bottom:1mm}';
+  html += '.header .logo-img,.header .logo-fallback{flex-shrink:0;width:14mm;height:14mm;border-radius:1.5mm;background:#fff}';
+  html += '.header .logo-img{object-fit:contain;border:1px solid #ddd}';
+  html += '.header .logo-fallback{border:1.2px solid #000;display:flex;align-items:center;justify-content:center;font-size:9pt;font-weight:800;line-height:1}';
+  html += '.header .empresa-info{flex:1;min-width:0;text-align:left}';
+  html += '.header .nome{font-size:9.5pt;font-weight:700;text-transform:uppercase;line-height:1.15;margin-bottom:0.5mm;word-break:break-word}';
+  html += '.header .info{font-size:7pt;line-height:1.25;color:#000}';
+  // Título e subtítulo
+  html += '.titulo{text-align:center;font-size:8.5pt;font-weight:700;margin:1mm 0 0.5mm 0;text-transform:uppercase;letter-spacing:0.3pt}';
+  html += '.subtitulo{text-align:center;font-size:6.5pt;line-height:1.2;margin-bottom:0.5mm}';
+  // Section label
+  html += '.section-label{font-size:6.5pt;font-weight:700;text-transform:uppercase;letter-spacing:0.3pt;color:#000;margin-top:1.5mm;margin-bottom:0.8mm}';
+  // Itens
+  html += '.item{margin-bottom:1mm;font-size:7.8pt;line-height:1.2}';
+  html += '.item-name{font-weight:600;word-break:break-word}';
+  html += '.item-calc{text-align:right;font-size:7.5pt;color:#000}';
+  // Total
+  html += '.total-row{font-size:10.5pt;font-weight:800;margin-top:1.5mm}';
+  // QR
+  html += '.qr-wrap{text-align:center;margin:2mm 0 1mm 0}';
+  html += '.qr-wrap img{display:inline-block;width:28mm;height:28mm;image-rendering:pixelated}';
+  // Consulta
+  html += '.consulta{text-align:center;font-size:6.5pt;line-height:1.2;margin:1mm 0}';
+  // Chave acesso
+  html += '.chave{font-size:7.5pt;font-weight:700;text-align:center;letter-spacing:0.2pt;line-height:1.4;word-break:break-all;margin:1mm 0}';
+  // Protocolo / consumidor
+  html += '.protocol{font-size:6.5pt;text-align:center;line-height:1.3}';
+  html += '.consumidor{font-size:7.5pt;line-height:1.3}';
+  // Aviso homologação
+  html += '.homolog-warn{text-align:center;border:2px dashed #dc2626;padding:1.5mm;font-size:7.5pt;font-weight:700;color:#dc2626;margin:1mm 0}';
+  // Marca Aura discreta (só texto, sem QR)
+  html += '.aura-mark{text-align:center;margin-top:2.5mm;padding-top:1.5mm;border-top:1px dotted #888;font-size:5.5pt;color:#666;font-style:italic;letter-spacing:0.3pt}';
   html += '</style></head><body>';
 
   // ========== Toolbar de tela (some no print) ==========
   html += '<div class="print-toolbar">';
-  html += `<span>DANFE NFC-e #${numero} - 80mm térmica</span>`;
+  html += `<span>DANFE NFC-e #${numero} — 80mm térmica</span>`;
   html += '<button onclick="window.print()">Imprimir</button>';
   html += '</div>';
 
   // ========== PÁGINA ==========
   html += '<div class="page">';
 
-  // Aviso homologação (impresso e na tela)
+  // Aviso homologação (se aplicável)
   if (isHomologacao) {
     html += '<div class="homolog-warn">EMITIDA EM AMBIENTE DE HOMOLOGAÇÃO<br>SEM VALOR FISCAL</div>';
   }
 
-  // Empresa
-  html += '<div class="empresa">';
+  // ===== Header: logo à esquerda + dados empresa =====
+  html += '<div class="header">';
+  html += logoHtml;
+  html += '<div class="empresa-info">';
   html += `<div class="nome">${escapeHtml(empresaNome)}</div>`;
   html += '<div class="info">';
   html += `CNPJ ${cnpj}`;
-  if (ie) html += ` &nbsp; IE ${escapeHtml(ie)}`;
+  if (ie) html += `<br>IE ${escapeHtml(ie)}`;
   if (enderecoLinha1) html += `<br>${escapeHtml(enderecoLinha1)}`;
-  if (enderecoLinha2) html += `<br>${escapeHtml(enderecoLinha2)}`;
-  if (enderecoLinha3 || cep) html += `<br>${escapeHtml(enderecoLinha3)} ${escapeHtml(cep)}`.trim();
+  if (enderecoLinha2) html += ` — ${escapeHtml(enderecoLinha2)}`;
+  if (enderecoLinha3 || cep) html += `<br>${escapeHtml(enderecoLinha3)}${cep ? ' · ' + escapeHtml(cep) : ''}`;
+  html += '</div>';
   html += '</div>';
   html += '</div>';
 
@@ -274,12 +298,12 @@ function buildDanfeNfceHtml({ emission, company }) {
 
   // Título DANFE
   html += '<div class="titulo">DANFE NFC-e</div>';
-  html += '<div class="subtitulo">Documento Auxiliar da Nota Fiscal de Consumidor Eletrônica<br>Não permite aproveitamento de crédito de ICMS</div>';
+  html += '<div class="subtitulo">Documento Auxiliar da NF-e ao Consumidor<br>Não permite aproveitamento de crédito de ICMS</div>';
 
   html += '<div class="divider"></div>';
 
   // Itens
-  html += '<div class="section-label">Cód  Descrição (Qtd UN x V.Un = Total)</div>';
+  html += '<div class="section-label">Itens</div>';
   html += itemsHtml;
 
   html += '<div class="divider"></div>';
@@ -288,7 +312,7 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += `<div class="row"><span>Qtd. itens</span><span>${totalQty}</span></div>`;
   if (totalDiscount > 0) {
     html += `<div class="row"><span>Subtotal</span><span>R$ ${formatBRL(totalProducts)}</span></div>`;
-    html += `<div class="row"><span>Desconto</span><span>- R$ ${formatBRL(totalDiscount)}</span></div>`;
+    html += `<div class="row"><span>Desconto</span><span>− R$ ${formatBRL(totalDiscount)}</span></div>`;
   }
   html += `<div class="row total-row"><span>VALOR TOTAL</span><span>R$ ${formatBRL(totalNfce)}</span></div>`;
 
@@ -297,9 +321,8 @@ function buildDanfeNfceHtml({ emission, company }) {
   // Pagamentos
   html += '<div class="section-label">Forma de Pagamento</div>';
   html += paymentsHtml;
-
   // Tributos aproximados (Lei 12.741) — placeholder neutro
-  html += '<div class="row small" style="margin-top:1mm;color:#000"><span>Trib. aprox. (Lei 12.741)</span><span>conforme NCM</span></div>';
+  html += '<div class="row small mt1"><span>Trib. aprox. (Lei 12.741)</span><span>conforme NCM</span></div>';
 
   html += '<div class="divider"></div>';
 
@@ -307,7 +330,8 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '<div class="section-label">Consumidor</div>';
   if (cpfNota || nomeCliente) {
     html += '<div class="consumidor">';
-    if (cpfNota) html += `CPF ${escapeHtml(cpfNota)}<br>`;
+    if (cpfNota) html += `CPF ${escapeHtml(cpfNota)}`;
+    if (cpfNota && nomeCliente) html += '<br>';
     if (nomeCliente) html += `${escapeHtml(nomeCliente)}`;
     html += '</div>';
   } else {
@@ -318,10 +342,10 @@ function buildDanfeNfceHtml({ emission, company }) {
 
   // Info NFC-e
   html += '<div class="section-label">Info NFC-e</div>';
-  html += `<div class="small">NFC-e nº <b>${escapeHtml(String(numero))}</b> - Série ${escapeHtml(String(serie))}<br>`;
+  html += `<div class="small">NFC-e nº <b>${escapeHtml(String(numero))}</b> · Série ${escapeHtml(String(serie))}<br>`;
   html += `Emitida em ${escapeHtml(dataEmissao)}</div>`;
   if (protocolo && !isHomologacao) {
-    html += `<div class="protocol">Protocolo de Autorização<br>${escapeHtml(protocolo)}</div>`;
+    html += `<div class="protocol mt1">Protocolo de Autorização<br>${escapeHtml(protocolo)}</div>`;
   }
 
   html += '<div class="divider"></div>';
@@ -330,25 +354,17 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '<div class="section-label center">Chave de Acesso</div>';
   html += `<div class="chave">${escapeHtml(chaveFmt)}</div>`;
 
-  // Consulta SEFAZ + QR
-  html += '<div class="consulta">Consulte pela chave em<br>';
+  // QR único (SEFAZ) 28mm
+  html += `<div class="qr-wrap"><img src="${escapeHtml(qrImageUrl(qrText, 200))}" alt="QR NFC-e"></div>`;
+  html += '<div class="consulta tiny">Consulte pela chave em<br>';
   html += `<b>${escapeHtml(consultaUrl.replace(/^https?:\/\//, ''))}</b></div>`;
 
-  html += '<div class="divider-solid"></div>';
-  // QR principal via <img> qrserver.com — sem dep de JS, carrega síncrono
-  html += `<div class="qr-wrap"><img src="${escapeHtml(qrImageUrl(qrText, 240))}" alt="QR NFC-e"></div>`;
-  html += '<div class="consulta tiny">QR Code para consulta pelo consumidor</div>';
-
-  // ===== Marca Aura discreta no rodapé =====
-  html += '<div class="aura-mark">';
-  html += `<img src="${escapeHtml(qrImageUrl(AURA_URL, 100))}" alt="Aura">`;
-  html += `<div class="label">Gerado por Aura · getaura.com.br</div>`;
-  html += '</div>';
+  // ===== Marca Aura discreta (só texto) =====
+  html += '<div class="aura-mark">gerado por Aura · getaura.com.br</div>';
 
   html += '</div>'; // /page
 
   // Script: dispara print() depois que TODAS as imagens carregaram.
-  // window.onload garante que <img> de QR já foi baixado.
   html += '<script>';
   html += '(function(){';
   html += 'function tryPrint(){setTimeout(function(){try{window.focus();window.print();}catch(e){}}, 400);}';
@@ -364,5 +380,5 @@ function buildDanfeNfceHtml({ emission, company }) {
 module.exports = {
   buildDanfeNfceHtml,
   // helpers expostos pra teste
-  formatCnpj, formatCpf, formatChaveAcesso, formatDateBR, formatBRL,
+  formatCnpj, formatCpf, formatChaveAcesso, formatDateBR, formatBRL, getInitials,
 };
