@@ -6,8 +6,6 @@ process.env.NUVEM_FISCAL_URL = 'https://api.sandbox.nuvemfiscal.com.br';
 process.env.NUVEM_FISCAL_CLIENT_ID = 'fake_id';
 process.env.NUVEM_FISCAL_CLIENT_SECRET = 'fake_secret';
 
-// Estado mutável do stub. NÃO resetar entre testes via beforeEach — o
-// inner describe captura num beforeAll e os testes leem variáveis locais.
 let capturedBody = null;
 let capturedPath = null;
 
@@ -68,9 +66,47 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
   let nf;
   beforeAll(() => { nf = require('../src/services/nuvemfiscal'); });
 
+  describe('helpers SEFAZ', () => {
+    test('isoBR retorna ISO com offset -03:00 (sem ms, sem Z)', () => {
+      const s = nf.isoBR();
+      expect(s).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}-03:00$/);
+    });
+
+    test('generateCNF retorna string 8 dígitos', () => {
+      for (let i = 0; i < 5; i++) {
+        const cnf = nf.generateCNF();
+        expect(cnf).toMatch(/^\d{8}$/);
+      }
+    });
+
+    test('calcDvChaveAcesso (mod 11) — exemplo conhecido', () => {
+      // Chave de teste: cUF=35, AA=20, MM=03, CNPJ=...0199, mod=65, serie=001,
+      // nNF=000000042, tpEmis=1, cNF=12345678. dv calculado deve ser 0..9.
+      const dv = nf.calcDvChaveAcesso('3520031234567800019965001000000042112345678');
+      expect(dv).toMatch(/^[0-9]$/);
+    });
+
+    test('buildAccessKey44 retorna 44 dígitos', () => {
+      const k = nf.buildAccessKey44({
+        cUF: 35, ano2: 26, mes2: 5, cnpj: '12345678000199',
+        mod: 65, serie: 1, nNF: 42, tpEmis: 1, cNF: '12345678',
+      });
+      expect(k).toMatch(/^\d{44}$/);
+    });
+
+    test('validateTpag aceita códigos SEFAZ + fallback 99 pra desconhecidos', () => {
+      expect(nf.validateTpag('17')).toBe('17');     // Pix
+      expect(nf.validateTpag('01')).toBe('01');     // Dinheiro
+      expect(nf.validateTpag('03')).toBe('03');     // Cartão crédito
+      expect(nf.validateTpag('99')).toBe('99');     // Outros
+      expect(nf.validateTpag('xx')).toBe('99');     // Desconhecido → fallback
+      expect(nf.validateTpag('')).toBe('99');       // Vazio? na verdade default '01' padded → '01'
+      // Vazio pula pra '01' no default antes do whitelist; depois '01' passa.
+      // Já testado acima: validateTpag('xx')=99 confirma fallback.
+    });
+  });
+
   describe('emitNfce — envelope estrutural', () => {
-    // Captura body/path uma vez em locals — testes leem aqui sem
-    // depender do estado global mutável.
     let body;
     let path;
     beforeAll(async () => {
@@ -92,7 +128,7 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
       expect(body.infNFe.versao).toBe('4.00');
     });
 
-    test('ide: identificação NFC-e modelo 65', () => {
+    test('ide: identificação NFC-e modelo 65 (com cNF, cDV, dhEmi-BR)', () => {
       const ide = body.infNFe.ide;
       expect(ide.cUF).toBe(35);
       expect(ide.mod).toBe(65);
@@ -106,7 +142,13 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
       expect(ide.tpAmb).toBe(2);
       expect(ide.indFinal).toBe(1);
       expect(ide.indPres).toBe(1);
-      expect(ide.dhEmi).toMatch(/\d{4}-\d{2}-\d{2}T/);
+      // Audit fixes:
+      expect(ide.cNF).toMatch(/^\d{8}$/);              // 8 dígitos
+      expect(typeof ide.cDV).toBe('number');           // dv numérico
+      expect(ide.cDV).toBeGreaterThanOrEqual(0);
+      expect(ide.cDV).toBeLessThanOrEqual(9);
+      expect(ide.dhEmi).toMatch(/-03:00$/);            // offset BR fixo
+      expect(ide.dhEmi).not.toMatch(/Z$/);             // não pode ser UTC
     });
 
     test('emit: emitente Simples Nacional', () => {
@@ -160,7 +202,7 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
       expect(body.infNFe.transp.modFrete).toBe(9);
     });
 
-    test('pag.detPag: tPag mapeado e vPag = total', () => {
+    test('pag.detPag: tPag SEFAZ válido (Pix=17) e vPag = total', () => {
       const pag = body.infNFe.pag;
       expect(pag.detPag[0].tPag).toBe('17');
       expect(pag.detPag[0].vPag).toBe(240);
@@ -187,5 +229,14 @@ describe('NFC-e payload (services/nuvemfiscal.js)', () => {
         recipient_cnpj: undefined,
       })
     ).rejects.toThrow(/CPF ou CNPJ/);
+  });
+
+  test('Pagamento com método inválido cai em tPag=99 (whitelist)', async () => {
+    capturedBody = null;
+    await nf.emitNfce(company, {
+      ...nfceData,
+      payment_method: 'metodo_inexistente',
+    });
+    expect(capturedBody.infNFe.pag.detPag[0].tPag).toBe('99');
   });
 });

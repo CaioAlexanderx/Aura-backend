@@ -1,8 +1,14 @@
 // ============================================================
 // AURA. — NFC-e / NF-e PDV
-// Emissão de cupom fiscal eletrônico (NFC-e, modelo 65) ou
-// nota fiscal eletrônica (NF-e, modelo 55) a partir do PDV.
 // Mounted at: /companies/:id/nfce
+//
+// Mai/2026 audit:
+// - Idempotência por sale_id: se já existe emissão autorizada/processando
+//   pra mesma sale_id, retorna a existente (caixa clicar 2x não duplica)
+// - Numeração da série só incrementa APÓS Nuvem Fiscal aceitar.
+//   Antes incrementava antes de chamar a API → falha deixava lacuna que
+//   SEFAZ rejeita ("nNF não pode pular números").
+// - Validação de items: qty > 0 e unit_price >= 0 antes de chamar a API.
 // ============================================================
 
 const express = require('express');
@@ -26,9 +32,6 @@ function paymentCode(method) {
   return map[method] || '01';
 }
 
-// Extrai campos da resposta Nuvem Fiscal, tolerando variações de layout.
-// qrCode e urlConsulta vêm em infNFeSupl (só NFC-e tem). Persistidos pra
-// o PDV renderizar o QR direto sem reconsultar a API.
 function extractProvFields(resp) {
   if (!resp) return {};
   const aut = resp.autorizacao || resp.protocolo_autorizacao || {};
@@ -45,6 +48,29 @@ function extractProvFields(resp) {
     status:        resp.status || aut.status || null,
     motivo:        resp.motivo || proto.xMotivo || null,
   };
+}
+
+// Valida items antes de tocar no banco. Retorna { ok, error } ou null se OK.
+function validateItems(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { error: 'items obrigatorio (array de produtos)' };
+  }
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i] || {};
+    const qty = Number(it.quantity);
+    const price = Number(it.unit_price !== undefined ? it.unit_price : it.price);
+    if (!isFinite(qty) || qty <= 0) {
+      return { error: `Item ${i + 1}: quantidade deve ser > 0 (recebido: ${it.quantity})` };
+    }
+    if (!isFinite(price) || price < 0) {
+      return { error: `Item ${i + 1}: preço unitário inválido (recebido: ${it.unit_price ?? it.price})` };
+    }
+    const name = String(it.product_name || it.name || '').trim();
+    if (!name) {
+      return { error: `Item ${i + 1}: nome do produto obrigatório` };
+    }
+  }
+  return null;
 }
 
 router.get('/config', requireAuth, async (req, res) => {
@@ -92,14 +118,36 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
     tipo = 'nfce',
   } = req.body;
 
-  if (!items || !items.length) {
-    return res.status(400).json({ error: 'items obrigatorio (array de produtos)' });
-  }
+  // Validação cedo: items, NF-e exige destinatário
+  const itemsErr = validateItems(items);
+  if (itemsErr) return res.status(400).json(itemsErr);
   if (tipo === 'nfe' && !customer_cpf && !recipient_cnpj) {
     return res.status(400).json({ error: 'NF-e (modelo 55) exige CPF ou CNPJ do destinatário.', instrucao: INSTRUCOES_NOTA.nfe });
   }
 
   try {
+    // ── Idempotência por sale_id ───────────────────────────────
+    // Se já existe emissão pra mesma venda em estado terminal autorizada
+    // ou ainda processando, retorna a existente em vez de duplicar.
+    if (sale_id) {
+      const { rows: existing } = await db.query(
+        `SELECT * FROM nfce_emissions
+          WHERE company_id=$1 AND sale_id=$2 AND tipo=$3
+            AND status IN ('autorizada','processando')
+          ORDER BY created_at DESC LIMIT 1`,
+        [req.params.id, sale_id, tipo]
+      );
+      if (existing.length) {
+        const e = existing[0];
+        return res.status(200).json({
+          nfce: e, tipo,
+          pdf_url: e.pdf_url, xml_url: e.xml_url,
+          qr_code: e.qr_code, url_consulta: e.url_consulta,
+          idempotent: true,
+        });
+      }
+    }
+
     const { rows: configs } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
     if (!configs.length || !configs[0].is_active) {
       return res.status(400).json({
@@ -109,8 +157,6 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
     }
     const config = configs[0];
 
-    // SELECT com alias address_district AS address_neighborhood (real column).
-    // ibge_code e inscricao_estadual existem desde a migration 095.
     const { rows: companies } = await db.query(
       `SELECT id, cnpj, legal_name, trade_name, name,
               address_street, address_number,
@@ -171,22 +217,24 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
     );
     const emission = created[0];
 
-    await db.query(
-      'UPDATE nfce_config SET next_number = next_number + 1, updated_at = NOW() WHERE company_id=$1',
-      [req.params.id]
-    );
-
     let finalStatus = 'processando';
     let prov = {};
 
     if (config.ambiente === 'homologacao' && process.env.NUVEM_FISCAL_FORCE !== 'true') {
+      // Homologação local: autoriza sem transmitir
       prov.protocolo = 'HOMOLOG-' + String(numeroNF).padStart(6, '0');
       finalStatus = 'autorizada';
       await db.query(
         `UPDATE nfce_emissions SET status = 'autorizada', protocolo = $1, authorized_at = NOW() WHERE id = $2`,
         [prov.protocolo, emission.id]
       );
+      // Numeração só incrementa após "sucesso" local
+      await db.query(
+        'UPDATE nfce_config SET next_number = next_number + 1, updated_at = NOW() WHERE company_id=$1',
+        [req.params.id]
+      );
     } else {
+      // Produção: transmite à Nuvem Fiscal
       try {
         const nfItems = items.map(i => ({
           code:        String(i.product_id || i.code || ''),
@@ -237,7 +285,19 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
            prov.xmlUrl, prov.pdfUrl, prov.qrCode, prov.urlConsulta, emission.id]
         );
 
+        // Incrementa numeração só se status NÃO for 'rejeitada'.
+        // Em 'autorizada' obviamente, e em 'processando' também (Nuvem Fiscal
+        // já consumiu o número internamente — se reusarmos, dá conflito).
+        if (finalStatus !== 'rejeitada') {
+          await db.query(
+            'UPDATE nfce_config SET next_number = next_number + 1, updated_at = NOW() WHERE company_id=$1',
+            [req.params.id]
+          );
+        }
+
       } catch (apiErr) {
+        // Falha de transmissão — número NÃO foi consumido pela SEFAZ, então
+        // não incrementa next_number. Próxima emissão reusa o mesmo nNF.
         console.error('[nfce] Nuvem Fiscal emit error:', apiErr.message, apiErr.payload || '');
         await db.query(
           `UPDATE nfce_emissions SET status = 'erro', error_message = $1 WHERE id = $2`,
