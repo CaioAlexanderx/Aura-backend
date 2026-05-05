@@ -3,15 +3,6 @@
 // Emissão de cupom fiscal eletrônico (NFC-e, modelo 65) ou
 // nota fiscal eletrônica (NF-e, modelo 55) a partir do PDV.
 // Mounted at: /companies/:id/nfce
-//
-// Mai/2026: alinhado com o novo nuvemfiscal.js (schema SEFAZ correto).
-// Passamos serie/numero capturados de nfce_config para o service e
-// hidratamos a resposta com chave_acesso/protocolo/link_xml/link_pdf
-// retornados pela Nuvem Fiscal.
-//
-// Hotfix 05/05: SELECT em companies usava address_neighborhood (real:
-// address_district). IE pode vir só em nfce_config — fazemos fallback.
-// Validamos ibge_code antes de transmitir (cMun/cMunFG é obrigatório).
 // ============================================================
 
 const express = require('express');
@@ -35,16 +26,22 @@ function paymentCode(method) {
   return map[method] || '01';
 }
 
+// Extrai campos da resposta Nuvem Fiscal, tolerando variações de layout.
+// qrCode e urlConsulta vêm em infNFeSupl (só NFC-e tem). Persistidos pra
+// o PDV renderizar o QR direto sem reconsultar a API.
 function extractProvFields(resp) {
   if (!resp) return {};
   const aut = resp.autorizacao || resp.protocolo_autorizacao || {};
   const proto = aut.protocolo || aut;
+  const supl = resp.infNFeSupl || resp.inf_nfe_supl || {};
   return {
     nuvemfiscalId: resp.id || null,
     chaveAcesso:   resp.chave_acesso || resp.chNFe || proto.chNFe || null,
     protocolo:     resp.protocolo || proto.nProt || aut.nProt || null,
     xmlUrl:        resp.link_xml || resp.url_xml || resp.xml_url || null,
     pdfUrl:        resp.link_pdf || resp.url_pdf || resp.pdf_url || resp.danfe_url || null,
+    qrCode:        resp.qr_code  || resp.qrCode  || supl.qrCode  || supl.qr_code || null,
+    urlConsulta:   resp.url_consulta || resp.urlChave || supl.urlChave || supl.url_chave || null,
     status:        resp.status || aut.status || null,
     motivo:        resp.motivo || proto.xMotivo || null,
   };
@@ -113,7 +110,7 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
     const config = configs[0];
 
     // SELECT com alias address_district AS address_neighborhood (real column).
-    // ibge_code e inscricao_estadual existem desde a migration 095 (podem ser NULL).
+    // ibge_code e inscricao_estadual existem desde a migration 095.
     const { rows: companies } = await db.query(
       `SELECT id, cnpj, legal_name, trade_name, name,
               address_street, address_number,
@@ -133,7 +130,6 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
       });
     }
 
-    // Fallback: se IE não está em companies, usa do nfce_config (legado).
     if (!company.inscricao_estadual && config.inscricao_estadual) {
       company.inscricao_estadual = config.inscricao_estadual;
     }
@@ -233,10 +229,12 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
                   protocolo      = $4,
                   xml_url        = COALESCE(xml_url, $5),
                   pdf_url        = COALESCE(pdf_url, $6),
+                  qr_code        = COALESCE(qr_code, $7),
+                  url_consulta   = COALESCE(url_consulta, $8),
                   authorized_at  = CASE WHEN $1 = 'autorizada' THEN NOW() ELSE NULL END
-            WHERE id = $7`,
+            WHERE id = $9`,
           [finalStatus, prov.nuvemfiscalId, prov.chaveAcesso, prov.protocolo,
-           prov.xmlUrl, prov.pdfUrl, emission.id]
+           prov.xmlUrl, prov.pdfUrl, prov.qrCode, prov.urlConsulta, emission.id]
         );
 
       } catch (apiErr) {
@@ -261,8 +259,10 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
     res.status(201).json({
       nfce: final[0],
       tipo,
-      pdf_url: prov.pdfUrl || final[0].pdf_url,
-      xml_url: prov.xmlUrl || final[0].xml_url,
+      pdf_url:      prov.pdfUrl      || final[0].pdf_url,
+      xml_url:      prov.xmlUrl      || final[0].xml_url,
+      qr_code:      prov.qrCode      || final[0].qr_code,
+      url_consulta: prov.urlConsulta || final[0].url_consulta,
     });
 
   } catch (err) {
@@ -284,7 +284,7 @@ router.get('/', requireAuth, async (req, res) => {
     const { rows } = await db.query(
       `SELECT id, numero, serie, tipo, chave_acesso, protocolo, status,
               customer_cpf, customer_name, total_nfce, payment_method,
-              xml_url, pdf_url,
+              xml_url, pdf_url, qr_code, url_consulta,
               authorized_at, cancelled_at, created_at, error_message
          FROM nfce_emissions ${where}
         ORDER BY numero DESC LIMIT 100`,
@@ -330,9 +330,12 @@ router.get('/:nfceId', requireAuth, async (req, res) => {
                     protocolo    = COALESCE($2, protocolo),
                     xml_url      = COALESCE($3, xml_url),
                     pdf_url      = COALESCE($4, pdf_url),
+                    qr_code      = COALESCE($5, qr_code),
+                    url_consulta = COALESCE($6, url_consulta),
                     authorized_at = NOW()
-              WHERE id = $5`,
-            [prov.chaveAcesso, prov.protocolo, prov.xmlUrl, prov.pdfUrl, emission.id]
+              WHERE id = $7`,
+            [prov.chaveAcesso, prov.protocolo, prov.xmlUrl, prov.pdfUrl,
+             prov.qrCode, prov.urlConsulta, emission.id]
           );
           const refreshed = await db.query('SELECT * FROM nfce_emissions WHERE id=$1', [emission.id]);
           emission = refreshed.rows[0];
