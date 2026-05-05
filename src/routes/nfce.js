@@ -285,8 +285,8 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
         const provResult = await emitFn(company, {
           items:           nfItems,
           total_value:     totalNfce,
-          payments:        nfPayments,                          // novo
-          payment_method:  paymentCode(payment_method),         // legado
+          payments:        nfPayments,
+          payment_method:  paymentCode(payment_method),
           payment_change:  payment_change,
           recipient_cpf:   customer_cpf,
           recipient_cnpj:  recipient_cnpj,
@@ -303,6 +303,10 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
                     : (prov.status === 'rejeitado'  || prov.status === 'rejeitada')  ? 'rejeitada'
                     : 'processando';
 
+        // Usa $10 para authorized_at em vez de CASE WHEN $1 — evita
+        // "inconsistent types deduced for parameter $1" no pg.
+        const authorizedAt = finalStatus === 'autorizada' ? new Date() : null;
+
         await db.query(
           `UPDATE nfce_emissions
               SET status         = $1,
@@ -313,10 +317,11 @@ router.post('/emit', requireAuth, requireRole('client', 'analyst', 'admin'), asy
                   pdf_url        = COALESCE(pdf_url, $6),
                   qr_code        = COALESCE(qr_code, $7),
                   url_consulta   = COALESCE(url_consulta, $8),
-                  authorized_at  = CASE WHEN $1 = 'autorizada' THEN NOW() ELSE NULL END
+                  authorized_at  = $10
             WHERE id = $9`,
           [finalStatus, prov.nuvemfiscalId, prov.chaveAcesso, prov.protocolo,
-           prov.xmlUrl, prov.pdfUrl, prov.qrCode, prov.urlConsulta, emission.id]
+           prov.xmlUrl, prov.pdfUrl, prov.qrCode, prov.urlConsulta, emission.id,
+           authorizedAt]
         );
 
         if (finalStatus !== 'rejeitada') {
