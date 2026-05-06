@@ -51,6 +51,12 @@ router.get('/', async (req, res) => {
 });
 
 // POST / — create employee
+//
+// FIX 06/05/2026: a constraint UNIQUE (company_id, cpf) nao filtra por
+// is_active, entao um funcionario soft-deleted (DELETE faz is_active=false)
+// ainda bloqueia recadastro com mesmo CPF. O pre-check antes filtrava
+// is_active=true e deixava passar -> INSERT explodia em 500 com mensagem
+// crua do Postgres. Agora detecta inativo e reativa em vez de erro.
 router.post('/', async (req, res) => {
   const cid = req.params.id;
   const { name, role, salary, admission_date, cpf, pis, phone, email, work_hours, status } = req.body;
@@ -67,11 +73,50 @@ router.post('/', async (req, res) => {
   if (cpfClean.length !== 11) return res.status(400).json({ error: 'CPF deve ter 11 digitos' });
 
   try {
+    // Inclui inativos pra detectar soft-deleted com mesmo CPF.
     const { rows: existing } = await db.query(
-      'SELECT id FROM employees WHERE company_id=$1 AND cpf=$2 AND is_active=true',
+      'SELECT id, name, is_active FROM employees WHERE company_id=$1 AND cpf=$2',
       [cid, cpfClean]
     );
-    if (existing.length) return res.status(409).json({ error: 'Funcionario com este CPF ja cadastrado' });
+
+    if (existing.length) {
+      const old = existing[0];
+      if (old.is_active) {
+        return res.status(409).json({ error: 'Funcionario com este CPF ja cadastrado' });
+      }
+      // Inativo (soft-deleted): reativa com os novos dados em vez de erro.
+      // Mantem o id pra preservar historico (sales_count, total_revenue, etc).
+      const { rows: reactivated } = await db.query(
+        `UPDATE employees SET
+           name = $1,
+           role = $2, role_title = $2,
+           salary = $3, base_salary = $3,
+           admission_date = $4,
+           pis = $5, pis_pasep = $5,
+           phone = $6,
+           email = $7,
+           work_hours = $8,
+           status = $9,
+           is_active = true,
+           updated_at = NOW()
+         WHERE id = $10 AND company_id = $11
+         RETURNING *`,
+        [
+          String(name).trim(),
+          roleVal,
+          salaryVal,
+          admission_date,
+          pisVal,
+          phone || null,
+          email || null,
+          parseInt(work_hours) || 220,
+          status || 'active',
+          old.id,
+          cid,
+        ]
+      );
+      return res.status(200).json({ ...reactivated[0], reactivated: true, previous_name: old.name });
+    }
 
     // Each column gets its own parameter (no reuse) to avoid type conflicts
     const { rows } = await db.query(
@@ -99,6 +144,16 @@ router.post('/', async (req, res) => {
     );
     res.status(201).json(rows[0]);
   } catch (err) {
+    // Catch defensivo: se constraint UNIQUE escapou do pre-check (race
+    // condition entre 2 abas, ou constraint nova adicionada no futuro),
+    // converte em 409 amigavel em vez de 500 cru.
+    if (err && err.code === '23505') {
+      const constraintName = (err.constraint || '').toLowerCase();
+      if (constraintName.includes('cpf')) {
+        return res.status(409).json({ error: 'Funcionario com este CPF ja cadastrado' });
+      }
+      return res.status(409).json({ error: 'Registro duplicado: ' + (err.constraint || 'constraint nao identificada') });
+    }
     console.error('[employees] create error:', err.message);
     res.status(500).json({ error: 'Erro ao cadastrar funcionario: ' + err.message });
   }
@@ -148,6 +203,9 @@ router.patch('/:eid', async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Funcionario nao encontrado' });
     res.json(rows[0]);
   } catch (err) {
+    if (err && err.code === '23505') {
+      return res.status(409).json({ error: 'Conflito: ja existe outro funcionario com esses dados' });
+    }
     console.error('[employees] update error:', err.message);
     res.status(500).json({ error: 'Erro ao atualizar funcionario' });
   }
