@@ -9,6 +9,9 @@
 //   customer_credit_transactions e NAO entra no Financeiro/transactions.
 //   Em split (payments[]), so o valor 'crediario' fica fora do Financeiro;
 //   o resto vira receita normal. Cancelar venda apaga os debits (sale_id FK).
+// FEAT 06/05/2026: GET /scan/:code — lookup normalizado por barcode.
+//   Trata EAN-12 (UPC-A) vs EAN-13: tenta exato, depois +0 na frente,
+//   depois sem o zero-líder. Cobre produtos E variantes.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -34,6 +37,100 @@ function calcCreditAmount({ payment_method, payments, totalAmount }) {
   if ((payment_method || '').toLowerCase() === 'crediario') return totalAmount;
   return 0;
 }
+
+// ── GET /companies/:id/pdv/scan/:code ────────────────────────
+// Lookup de produto por codigo de barras com normalizacao EAN-12↔13.
+// Ordem de busca:
+//   1. Exato (qualquer tamanho)
+//   2. Codigo 12 digitos → tenta com '0' na frente (EAN-13)
+//   3. Codigo 13 digitos com zero-lider → tenta sem o zero (EAN-12/UPC-A)
+//   4. Variantes com barcode proprio
+// Retorna { match, source, product, variant_id?, effective_price? }
+// compativel com o tipo PdvScanResult do frontend (services/api.ts).
+router.get('/scan/:code', async (req, res) => {
+  const raw = decodeURIComponent(req.params.code || '').trim();
+  if (!raw) return res.status(400).json({ error: 'code obrigatorio', match: 'none' });
+
+  // Monta lista de candidates sem duplicatas
+  const candidates = new Set([raw]);
+  if (/^\d{12}$/.test(raw))                            candidates.add('0' + raw);
+  if (/^\d{13}$/.test(raw) && raw.startsWith('0'))    candidates.add(raw.slice(1));
+  const alts = [...candidates];
+
+  try {
+    // 1. Busca em products
+    const { rows: prods } = await db.query(
+      `SELECT id, name, price, cost_price, barcode, stock_qty, has_variants,
+              category, image_url, sku
+       FROM products
+       WHERE company_id = $1
+         AND barcode = ANY($2::text[])
+         AND is_active = true
+       LIMIT 1`,
+      [req.params.id, alts]
+    );
+
+    if (prods.length) {
+      const p = prods[0];
+      return res.json({
+        match: 'exact',
+        source: 'barcode',
+        product: {
+          id:          p.id,
+          name:        p.name,
+          price:       parseFloat(p.price) || 0,
+          cost_price:  parseFloat(p.cost_price) || 0,
+          barcode:     p.barcode,
+          stock_qty:   parseInt(p.stock_qty) || 0,
+          has_variants: p.has_variants || false,
+          category:    p.category,
+          image_url:   p.image_url,
+          sku:         p.sku,
+        },
+      });
+    }
+
+    // 2. Busca em product_variants
+    const { rows: vars } = await db.query(
+      `SELECT pv.id AS variant_id, pv.price_override, pv.sku_suffix, pv.stock_qty AS variant_stock,
+              p.id, p.name, p.price, p.barcode, p.image_url
+       FROM product_variants pv
+       JOIN products p ON p.id = pv.product_id
+       WHERE p.company_id = $1
+         AND pv.barcode = ANY($2::text[])
+         AND pv.is_active = true
+         AND p.is_active = true
+       LIMIT 1`,
+      [req.params.id, alts]
+    );
+
+    if (vars.length) {
+      const v = vars[0];
+      return res.json({
+        match: 'exact',
+        source: 'variant_barcode',
+        product: {
+          id:        v.id,
+          name:      v.name,
+          price:     parseFloat(v.price) || 0,
+          barcode:   v.barcode,
+          image_url: v.image_url,
+          sku_suffix: v.sku_suffix,
+        },
+        variant_id:      v.variant_id,
+        effective_price: parseFloat(v.price_override) || parseFloat(v.price) || 0,
+      });
+    }
+
+    return res.json({
+      match: 'none',
+      message: 'Nenhum produto encontrado para este codigo de barras',
+    });
+  } catch (e) {
+    console.error('[PDV] scan error:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar produto por codigo de barras', match: 'none' });
+  }
+});
 
 // POST /companies/:id/pdv/sale
 router.post('/sale', async (req, res) => {
@@ -134,9 +231,6 @@ router.post('/sale', async (req, res) => {
       if (!empCheck.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' }); }
     }
 
-    // FEAT 05/05/2026: validar crediario antes do INSERT do sale.
-    // Se a venda inteira ou um split tem method='crediario', cliente
-    // e obrigatorio (saldo precisa de FK customer_id).
     const creditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
     if (creditAmount > 0 && !customer_id) {
       await client.query('ROLLBACK');
@@ -229,10 +323,6 @@ router.post('/sale', async (req, res) => {
       );
     }
 
-    // FEAT 05/05/2026: registrar debit no crediario (se aplicavel).
-    // sale_id FK garante que cancel da venda apaga este lancamento via
-    // ON DELETE SET NULL — mas como a gente usa status='cancelled' (nao DELETE),
-    // o cancelamento explicitamente apaga os debits no DELETE handler.
     if (creditAmount > 0) {
       await client.query(
         `INSERT INTO customer_credit_transactions
@@ -246,14 +336,9 @@ router.post('/sale', async (req, res) => {
       );
     }
 
-    // Financeiro: receita confirmada APENAS pelo valor que NAO foi
-    // crediario. Crediario vira receita quando o pagamento for registrado
-    // separadamente (ou nunca, se o lojista nao quer integrar).
     const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
     if (cashAmount > 0) {
       const itemsSummary = productNames.slice(0, 3).join(', ') + (productNames.length > 3 ? ` +${productNames.length - 3}` : '');
-      // Label do meio de pagamento pra descricao: se for split, pega o
-      // primeiro NAO-crediario; se for venda inteira nao-crediario, usa o payment_method.
       let payLabel = payment_method || 'dinheiro';
       if (Array.isArray(payments) && payments.length > 0) {
         const nonCredit = payments.find(p => (p.method || '').toLowerCase() !== 'crediario');
@@ -282,7 +367,6 @@ router.post('/sale', async (req, res) => {
        LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`, [sale.id]
     );
 
-    // Se foi crediario, devolve saldo atualizado pra UI mostrar feedback.
     let creditInfo = null;
     if (creditAmount > 0) {
       const { rows: bal } = await db.query(
@@ -457,10 +541,6 @@ router.delete('/sale/:saleId', async (req, res) => {
       await client.query(`UPDATE coupons SET current_uses=GREATEST(0,current_uses-1), updated_at=NOW() WHERE id=$1`, [sale.coupon_id]);
     }
 
-    // FEAT 05/05/2026: apagar debits do crediario vinculados a esta venda.
-    // Pagamentos avulsos (sale_id IS NULL) ficam intactos — se o cliente
-    // ja pagou parte da divida, o saldo dele pode ficar negativo (= credito
-    // a favor do cliente), o que e o comportamento correto.
     await client.query(
       `DELETE FROM customer_credit_transactions
         WHERE sale_id = $1 AND company_id = $2 AND type = 'debit'`,
