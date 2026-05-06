@@ -5,6 +5,8 @@
 // ONDA 2.7: unified multi-CNPJ member management
 //   - getSiblingCompanyIds / getSiblingCompanies
 //   - listMembersUnified — one entry per user across all sibling companies
+//     (06/05/2026: agora inclui invite_token + invite_url pra pending —
+//      frontend pode mostrar link a qualquer momento, nao so logo apos gerar)
 //   - inviteMemberMulti  — invite to multiple CNPJs with a shared token
 //   - updateMemberAndSync — sync permissions + CNPJ access toggle
 // ============================================================
@@ -24,6 +26,14 @@ const DEFAULT_PERMISSIONS = {
   configuracoes: false,
 };
 
+// Base URL pra construir invite_url. Mesma logica do sendInviteEmail.
+const INVITE_BASE_URL = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br/app';
+
+function buildInviteUrl(token) {
+  if (!token) return null;
+  return INVITE_BASE_URL + '/invite/' + token;
+}
+
 async function countActiveMembers(companyId) {
   const { rows } = await db.query(
     'SELECT COUNT(*) AS total FROM company_members WHERE company_id=$1 AND status=\'active\' AND is_active=true',
@@ -36,7 +46,7 @@ async function listMembers(companyId) {
   const { rows } = await db.query(
     `SELECT
        m.id, m.role_label, m.permissions, m.status, m.is_active,
-       m.invited_at, m.accepted_at, m.invite_email, m.template_id,
+       m.invited_at, m.accepted_at, m.invite_email, m.invite_token, m.template_id,
        u.id AS user_id, u.full_name AS user_name, u.email AS user_email,
        rt.name AS template_name
      FROM company_members m
@@ -46,7 +56,13 @@ async function listMembers(companyId) {
      ORDER BY m.status, u.full_name`,
     [companyId]
   );
-  return rows;
+  // Annotate invite_url for pending invites
+  return rows.map(function(r) {
+    return {
+      ...r,
+      invite_url: r.status === 'pending' ? buildInviteUrl(r.invite_token) : null,
+    };
+  });
 }
 
 // existingToken: optional pre-generated token for multi-CNPJ invite sharing.
@@ -122,8 +138,7 @@ async function inviteMember(companyId, invitedByUserId, { invite_email, role_lab
     ]
   );
 
-  const baseUrl   = process.env.INVITE_BASE_URL || 'https://app.getaura.com.br/app';
-  const inviteUrl = baseUrl + '/invite/' + inviteToken;
+  const inviteUrl = buildInviteUrl(inviteToken);
 
   // Email is sent only when this is the primary invite (no pre-existing token)
   if (emailToUse && !existingToken) {
@@ -238,6 +253,10 @@ async function getSiblingCompanies(companyId) {
 
 // Unified member list: one entry per user across all sibling companies.
 // Each entry has companies:[{company_id, company_name, is_primary, member_id}]
+//
+// 06/05/2026: agora retorna invite_token + invite_url pra membros 'pending'.
+// Frontend usa pra mostrar o link a qualquer momento (botoes copiar/WhatsApp
+// inline na MemberRow), em vez de so logo apos a geracao.
 async function listMembersUnified(companyId) {
   const siblingIds = await getSiblingCompanyIds(companyId);
   if (!siblingIds.length) return { members: [], siblings: [] };
@@ -247,7 +266,7 @@ async function listMembersUnified(companyId) {
   const { rows } = await db.query(`
     SELECT
       m.id, m.company_id, m.role_label, m.permissions, m.status, m.is_active,
-      m.invited_at, m.accepted_at, m.invite_email,
+      m.invited_at, m.accepted_at, m.invite_email, m.invite_token,
       u.id AS user_id, u.full_name AS user_name, u.email AS user_email,
       COALESCE(c.trade_name, c.legal_name, 'Empresa') AS company_name, c.is_primary
     FROM company_members m
@@ -273,6 +292,8 @@ async function listMembersUnified(companyId) {
         permissions:  typeof row.permissions === 'string'
           ? JSON.parse(row.permissions) : (row.permissions || {}),
         invite_email: row.invite_email,
+        invite_token: row.status === 'pending' ? row.invite_token : null,
+        invite_url:   row.status === 'pending' ? buildInviteUrl(row.invite_token) : null,
         invited_at:   row.invited_at,
         accepted_at:  row.accepted_at,
         companies:    [],
@@ -393,4 +414,6 @@ module.exports = {
   // ONDA 2.7 — unified multi-CNPJ
   getSiblingCompanyIds, getSiblingCompanies,
   listMembersUnified, inviteMemberMulti, updateMemberAndSync,
+  // Helpers expostos pra reuso
+  buildInviteUrl,
 };
