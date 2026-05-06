@@ -12,6 +12,8 @@
 // FEAT 06/05/2026: GET /scan/:code — lookup normalizado por barcode.
 //   Trata EAN-12 (UPC-A) vs EAN-13: tenta exato, depois +0 na frente,
 //   depois sem o zero-líder. Cobre produtos E variantes.
+// FIX 06/05/2026: split payments — frontend envia p.value (não p.amount).
+//   calcCreditAmount e INSERT sale_payments agora leem p.value ?? p.amount.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -24,12 +26,13 @@ const SP_DATE_COL = (col) => `(${col} AT TIME ZONE 'America/Sao_Paulo')::date`;
 // Calcula quanto da venda foi no crediario (split-aware).
 // Retorna [creditAmount, payLabelForFinanceiro] — payLabel exclui 'crediario'
 // pra descricao da transaction nao mentir.
+// FIX 06/05/2026: frontend envia p.value (PaymentEntry), nao p.amount.
 function calcCreditAmount({ payment_method, payments, totalAmount }) {
   if (Array.isArray(payments) && payments.length > 0) {
     let credit = 0;
     for (const p of payments) {
       if ((p.method || '').toLowerCase() === 'crediario') {
-        credit += parseFloat(p.amount || 0);
+        credit += parseFloat(p.value ?? p.amount ?? 0);
       }
     }
     return parseFloat(credit.toFixed(2));
@@ -290,11 +293,13 @@ router.post('/sale', async (req, res) => {
       }
     }
 
+    // FIX 06/05/2026: frontend envia p.value (campo PaymentEntry), nao p.amount.
+    // Usando p.value ?? p.amount para retrocompatibilidade.
     if (payments?.length > 1) {
       for (const p of payments) {
         await client.query(
           `INSERT INTO sale_payments (sale_id,company_id,method,amount) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
-          [sale.id, req.params.id, p.method, p.amount]
+          [sale.id, req.params.id, p.method, p.value ?? p.amount]
         );
       }
     }
