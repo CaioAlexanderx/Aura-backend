@@ -3,6 +3,7 @@
 //
 // GET    /companies/:id/sales              -> lista paginada + stats agregados
 // GET    /companies/:id/sales/:sale_id     -> detalhes completos + items
+// PATCH  /companies/:id/sales/:sale_id     -> atualiza seller da venda
 // POST   /companies/:id/sales/:sale_id/cancel  -> cancela venda inteira
 //
 // Vinculo com transactions: cada sale tem uma tx no financeiro com
@@ -201,6 +202,47 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       };
     }),
   });
+}));
+
+// PATCH /companies/:id/sales/:sale_id
+// Atualiza o vendedor da venda. Aceita seller_id (UUID do employee) ou
+// null pra limpar. Persiste seller_name denormalizado pra garantir que
+// o nome apareca mesmo se o employee for deletado depois (fix "nao puxa
+// vendedor em algumas vendas").
+router.patch('/:sale_id', asyncHandler(async (req, res) => {
+  const companyId = req.params.id;
+  const saleId = req.params.sale_id;
+  const { seller_id } = req.body || {};
+
+  // Verifica existencia da venda
+  const saleRes = await pool.query(
+    'SELECT id, status FROM sales WHERE id = $1 AND company_id = $2',
+    [saleId, companyId]
+  );
+  if (!saleRes.rows.length) throw new AppError('Venda nao encontrada', 404);
+
+  // Resolve nome do vendedor a partir do employee
+  let sellerName = null;
+  const resolvedSellerId = seller_id || null;
+
+  if (seller_id) {
+    const empRes = await pool.query(
+      'SELECT id, name FROM employees WHERE id = $1 AND company_id = $2',
+      [seller_id, companyId]
+    );
+    if (!empRes.rows.length) throw new AppError('Vendedor nao encontrado nesta empresa', 404);
+    sellerName = empRes.rows[0].name;
+  }
+
+  // Atualiza seller_id, employee_id e seller_name em sincronia.
+  // seller_name denormalizado garante exibicao correta mesmo se o
+  // employee for removido no futuro.
+  await pool.query(
+    'UPDATE sales SET seller_id = $1, employee_id = $1, seller_name = $2, updated_at = NOW() WHERE id = $3 AND company_id = $4',
+    [resolvedSellerId, sellerName, saleId, companyId]
+  );
+
+  res.json({ ok: true, sale_id: saleId, seller_id: resolvedSellerId, seller_name: sellerName });
 }));
 
 // POST /companies/:id/sales/:sale_id/cancel
