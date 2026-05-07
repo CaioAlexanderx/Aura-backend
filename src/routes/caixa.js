@@ -13,6 +13,8 @@
 // /fechar passou a retornar metricas extras (sales_count,
 // new_customers_count, sessao_label, closed_at) pro PDF de
 // fechamento do aura-app.
+// 07/05/2026 (hotfix): /fechar aceita observacao null (frontend
+// manda null quando o campo esta vazio).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -55,7 +57,7 @@ router.post('/abrir', asyncHandler(async (req, res) => {
 }));
 
 // ── POST /caixa/fechar ────────────────────────────────────────────────────
-// Body: { dinheiro_contado: number, observacao?: string }
+// Body: { dinheiro_contado: number, observacao?: string | null }
 // Fecha a sessão aberta. Cria o snapshot em caixa_fechamentos e retorna
 // metricas extras (sales_count, new_customers_count, sessao_label, closed_at).
 router.post('/fechar', asyncHandler(async (req, res) => {
@@ -69,7 +71,14 @@ router.post('/fechar', asyncHandler(async (req, res) => {
   if (typeof dinheiro_contado !== 'number' || dinheiro_contado < 0) {
     throw new AppError('dinheiro_contado deve ser um número >= 0', 400);
   }
-  if (observacao !== undefined && typeof observacao !== 'string') {
+  // observacao pode ser undefined (omitida) OU null (campo vazio enviado pelo
+  // frontend) OU string (campo preenchido). typeof null === 'object', por isso
+  // checamos null explicitamente antes do typeof.
+  if (
+    observacao !== undefined &&
+    observacao !== null &&
+    typeof observacao !== 'string'
+  ) {
     throw new AppError('observacao deve ser uma string', 400);
   }
 
