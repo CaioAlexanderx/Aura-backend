@@ -17,6 +17,11 @@
 // FIX 07/05/2026: crediário anônimo — cliente não é mais obrigatório.
 //   Sem customer_id: creditAmount = 0, venda entra inteira no financeiro.
 //   Com customer_id: comportamento original (ledger de crédito).
+// FEAT 07/05/2026: POST /pdv/troca — Troca Option B.
+//   Cria sales(type='troca', exchange_of_sale_id), sale_items para novos
+//   itens, troca_returned_items para itens devolvidos. Restaura estoque dos
+//   devolvidos, desconta dos novos. Se net > 0 cria transaction no financeiro.
+//   Migration 101 adiciona coluna type + exchange_of_sale_id + tabela troca_returned_items.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -566,6 +571,294 @@ router.delete('/sale/:saleId', async (req, res) => {
     await client.query('ROLLBACK');
     console.error('[PDV] Erro ao cancelar venda:', e.message);
     res.status(500).json({ error: 'Erro ao cancelar venda' });
+  } finally { client.release(); }
+});
+
+// ── POST /companies/:id/pdv/troca ────────────────────────────
+// Troca Option B: cria sale(type='troca'), restaura estoque dos itens
+// devolvidos, desconta estoque dos novos, registra financeiro se net > 0.
+// Body:
+//   original_sale_id  UUID  (obrigatorio)
+//   returned_items    [{ product_id, variant_id?, quantity, unit_price, product_name_snapshot? }]
+//   new_items         [{ product_id, variant_id?, quantity, unit_price, product_name_snapshot }]
+//   payment_method?   string (metodo para diferenca positiva, ex: 'dinheiro')
+//   customer_id?      UUID
+//   employee_id?      UUID
+//   seller_name?      string
+// Response: { sale, returned_items, new_items, net_amount, receipt_url }
+router.post('/troca', async (req, res) => {
+  const {
+    original_sale_id,
+    returned_items = [],
+    new_items = [],
+    payment_method,
+    customer_id,
+    employee_id,
+    seller_name,
+  } = req.body;
+
+  if (!original_sale_id)
+    return res.status(400).json({ error: 'original_sale_id obrigatorio' });
+  if (!returned_items.length && !new_items.length)
+    return res.status(400).json({ error: 'Informe ao menos um item devolvido ou novo' });
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Valida venda original
+    const { rows: origRows } = await client.query(
+      `SELECT id, status, company_id FROM sales WHERE id=$1 AND company_id=$2`,
+      [original_sale_id, req.params.id]
+    );
+    if (!origRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Venda original nao encontrada' });
+    }
+    if (origRows[0].status === 'cancelled') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Nao e possivel trocar itens de uma venda cancelada' });
+    }
+
+    // 2. Carrega itens da venda original para validacao
+    const { rows: origItems } = await client.query(
+      `SELECT product_id, variant_id, quantity, unit_price, product_name_snapshot
+       FROM sale_items WHERE sale_id=$1`,
+      [original_sale_id]
+    );
+
+    // 3. Valida itens devolvidos (qty nao pode exceder o original)
+    for (const ret of returned_items) {
+      if (!ret.product_id) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Cada item devolvido precisa de product_id' });
+      }
+      const origItem = origItems.find(
+        o => o.product_id === ret.product_id &&
+             (ret.variant_id ? o.variant_id === ret.variant_id : !o.variant_id)
+      );
+      if (!origItem) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: `Produto ${ret.product_name_snapshot || ret.product_id} nao encontrado na venda original`,
+        });
+      }
+      if (parseFloat(ret.quantity) > parseFloat(origItem.quantity)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: `Quantidade devolvida (${ret.quantity}) excede a original (${origItem.quantity}) para "${origItem.product_name_snapshot || ret.product_id}"`,
+        });
+      }
+    }
+
+    // 4. Calcula valores
+    const returnedValue = returned_items.reduce(
+      (acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0
+    );
+    const newValue = new_items.reduce(
+      (acc, n) => acc + parseFloat(n.quantity) * parseFloat(n.unit_price), 0
+    );
+    const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
+    // total_amount da troca = valor dos novos itens (bruto); net fica no financeiro
+    const saleTotal = parseFloat(newValue.toFixed(2));
+
+    // 5. Restaura estoque dos itens devolvidos
+    for (const ret of returned_items) {
+      const qty = parseFloat(ret.quantity);
+      if (ret.variant_id) {
+        await client.query(
+          `UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`,
+          [qty, ret.variant_id]
+        );
+      } else {
+        await client.query(
+          `UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`,
+          [qty, ret.product_id, req.params.id]
+        );
+      }
+      await client.query(
+        `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
+         VALUES ($1,$2,'in',$3,$4,'troca','Troca — devolucao') ON CONFLICT DO NOTHING`,
+        [ret.product_id, req.params.id, qty, original_sale_id]
+      );
+    }
+
+    // 6. Valida e desconta estoque dos novos itens
+    for (const item of new_items) {
+      if (!item.product_id) continue;
+      const qty = parseFloat(item.quantity);
+      let stockAvailable;
+      let stockLabel = item.product_name_snapshot || item.product_id;
+
+      if (item.variant_id) {
+        const { rows: vr } = await client.query(
+          `SELECT stock_qty, sku_suffix FROM product_variants WHERE id=$1 AND product_id=$2`,
+          [item.variant_id, item.product_id]
+        );
+        if (vr.length) {
+          stockAvailable = parseFloat(vr[0].stock_qty);
+          stockLabel += vr[0].sku_suffix ? ` (${vr[0].sku_suffix})` : ' (variante)';
+        }
+      } else {
+        const { rows: pr } = await client.query(
+          `SELECT stock_qty FROM products WHERE id=$1 AND company_id=$2`,
+          [item.product_id, req.params.id]
+        );
+        if (pr.length) stockAvailable = parseFloat(pr[0].stock_qty);
+      }
+
+      if (stockAvailable !== undefined && stockAvailable < qty) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: `Estoque insuficiente para "${stockLabel}". Disponivel: ${stockAvailable}`,
+          product_id: item.product_id,
+          variant_id: item.variant_id || null,
+        });
+      }
+
+      if (item.variant_id) {
+        await client.query(
+          `UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2`,
+          [qty, item.variant_id]
+        );
+      } else {
+        await client.query(
+          `UPDATE products SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2 AND company_id=$3`,
+          [qty, item.product_id, req.params.id]
+        );
+      }
+    }
+
+    // 7. Cria o registro de venda da troca
+    const { rows: trocaSales } = await client.query(
+      `INSERT INTO sales
+         (company_id, customer_id, seller_id, employee_id, seller_name,
+          total_amount, discount_amount, payment_method, notes,
+          status, type, exchange_of_sale_id)
+       VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'completed','troca',$9)
+       RETURNING *`,
+      [
+        req.params.id,
+        customer_id || null,
+        req.user?.id || null,
+        employee_id || null,
+        seller_name || null,
+        saleTotal,
+        payment_method || 'dinheiro',
+        `Troca referente a venda ${original_sale_id}`,
+        original_sale_id,
+      ]
+    );
+    const trocaSale = trocaSales[0];
+
+    // 8. Insere sale_items para novos itens
+    for (const item of new_items) {
+      const qty = parseFloat(item.quantity);
+      const unitPrice = parseFloat(item.unit_price);
+      const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
+
+      let costPrice = 0;
+      let productName = item.product_name_snapshot || '';
+      if (item.product_id) {
+        const { rows: pr } = await client.query(
+          `SELECT name, cost_price FROM products WHERE id=$1 AND company_id=$2`,
+          [item.product_id, req.params.id]
+        );
+        if (pr.length) {
+          productName = productName || pr[0].name;
+          costPrice = parseFloat(pr[0].cost_price || 0);
+        }
+      }
+
+      await client.query(
+        `INSERT INTO sale_items
+           (sale_id, product_id, variant_id, quantity, unit_price,
+            unit_cost, discount, total_price, product_name_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8)`,
+        [
+          trocaSale.id,
+          item.product_id || null,
+          item.variant_id || null,
+          qty, unitPrice, costPrice, lineTotal,
+          productName,
+        ]
+      );
+
+      if (item.product_id) {
+        await client.query(
+          `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
+           VALUES ($1,$2,'out',$3,$4,'troca','Troca — saida novo item') ON CONFLICT DO NOTHING`,
+          [item.product_id, req.params.id, qty, trocaSale.id]
+        );
+      }
+    }
+
+    // 9. Insere troca_returned_items
+    for (const ret of returned_items) {
+      await client.query(
+        `INSERT INTO troca_returned_items
+           (troca_sale_id, original_sale_id, product_id, variant_id,
+            quantity, unit_price, product_name_snapshot)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          trocaSale.id,
+          original_sale_id,
+          ret.product_id || null,
+          ret.variant_id || null,
+          parseFloat(ret.quantity),
+          parseFloat(ret.unit_price),
+          ret.product_name_snapshot || null,
+        ]
+      );
+    }
+
+    // 10. Se net > 0, registra diferenca no financeiro
+    if (netAmount > 0) {
+      await client.query(
+        `INSERT INTO transactions
+           (company_id, type, status, amount, description, category,
+            due_date, paid_at, created_by, idempotency_key)
+         VALUES ($1,'income','confirmed',$2,$3,'Vendas',${SP_DATE_NOW},NOW(),$4,$5)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        [
+          req.params.id,
+          netAmount,
+          `Troca PDV — diferenca a receber (${payment_method || 'dinheiro'})`,
+          req.user?.id || null,
+          'pdv-troca-' + trocaSale.id,
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    // Monta resposta
+    const { rows: respNewItems } = await db.query(
+      `SELECT si.*, COALESCE(p.name, si.product_name_snapshot) AS product_name
+       FROM sale_items si LEFT JOIN products p ON p.id=si.product_id
+       WHERE si.sale_id=$1`,
+      [trocaSale.id]
+    );
+    const { rows: respRetItems } = await db.query(
+      `SELECT tri.*, COALESCE(p.name, tri.product_name_snapshot) AS product_name
+       FROM troca_returned_items tri LEFT JOIN products p ON p.id=tri.product_id
+       WHERE tri.troca_sale_id=$1`,
+      [trocaSale.id]
+    );
+
+    res.status(201).json({
+      sale: { ...trocaSale, items: respNewItems },
+      returned_items: respRetItems,
+      new_items: respNewItems,
+      net_amount: netAmount,
+      returned_value: parseFloat(returnedValue.toFixed(2)),
+      new_value: parseFloat(newValue.toFixed(2)),
+      receipt_url: `/companies/${req.params.id}/print/receipt/${trocaSale.id}`,
+    });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[PDV] Erro ao registrar troca:', e.message);
+    res.status(500).json({ error: 'Erro ao registrar troca' });
   } finally { client.release(); }
 });
 
