@@ -1,6 +1,9 @@
 // ============================================================
 // QA-02 — Testes de Integração: PDV (Ponto de Venda)
 // PDV usa db.connect() (transação atômica) — mock precisa de connect
+//
+// 07/05/2026: /summary virou Promise.all com 2 queries (vendas + trocas)
+// via pdv-summary-patch.js. Teste atualizado pra mockar ambas.
 // ============================================================
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
@@ -108,8 +111,14 @@ describe('POST /companies/:id/pdv/sale — venda atômica', () => {
 describe('GET /companies/:id/pdv/summary — resumo do dia', () => {
   test('200 — retorna resumo', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
+    // pdv-summary-patch.js faz Promise.all com 2 queries:
+    //   (1) vendas regulares (type IS NULL ou 'sale')
+    //   (2) trocas do dia (type='troca' + transactions netAmount)
     db.query.mockResolvedValueOnce({
       rows: [{ total_sales:'5', gross_revenue:'250.00', total_discounts:'0', avg_ticket:'50.00', by_payment_method:null }],
+    });
+    db.query.mockResolvedValueOnce({
+      rows: [{ trocas_count: 0, trocas_net_received: 0 }],
     });
     const res = await request(app)
       .get(`/api/v1/companies/${cid}/pdv/summary`)
@@ -117,6 +126,8 @@ describe('GET /companies/:id/pdv/summary — resumo do dia', () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('total_sales');
     expect(res.body).toHaveProperty('gross_revenue');
+    expect(res.body).toHaveProperty('trocas_count');
+    expect(res.body).toHaveProperty('trocas_net_received');
   });
 
   test('401 — sem token', async () => {
