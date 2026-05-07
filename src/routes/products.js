@@ -9,9 +9,23 @@
 //   ficam visíveis para CNPJs subsidiários do mesmo grupo (migration 100).
 // FIX (mai/2026): multi-CNPJ WHERE usa subquery inline — sem round-trip
 //   extra de coInfo, mantém 2 db.query calls no GET (compat. com testes).
+// FIX (07/05/2026): GET listagem desacoplada do plan limit. Plan limit
+//   ainda gating do CADASTRO (POST), mas o GET agora só aplica HARD_CAP
+//   (20k) — clientes com produtos cadastrados acima do plano (import CSV
+//   legacy ou downgrade) continuam enxergando todo o catálogo.
+//   Bug Davi (07/05): plano negocio (7000) com 10.157 produtos →
+//   3.157 produtos invisíveis no Estoque (filtro local não tinha como
+//   achar barcodes que nem chegaram no payload). PDV não sofria porque
+//   chama /scan que consulta direto no DB.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+
+// HARD_CAP: limite máximo de itens devolvidos em uma única chamada do GET,
+// independente do plano. Defesa contra payload gigante / OOM no client.
+// Acima disso o cliente precisa de busca server-side (TODO) ou paginação
+// real via ?offset.
+const HARD_CAP = 20000;
 
 function getPlanLimit(plan) {
   switch ((plan || '').toLowerCase()) {
@@ -37,7 +51,14 @@ function sanitizeNcm(raw) {
 router.get('/', async (req, res) => {
   const cid = req.params.id;
   const planLimit = getPlanLimit(req.user?.plan);
-  const limit = Math.min(parseInt(req.query.limit) || planLimit, planLimit);
+  // Listagem NÃO capa por plano (bug Davi #2 — 07/05). Default sem ?limit
+  // = HARD_CAP, suficiente pra Davi (10157) e folga grande pra clientes
+  // típicos. Cliente pode pedir ?limit=N (cap em HARD_CAP).
+  const requested = parseInt(req.query.limit);
+  const limit = Math.min(
+    Number.isFinite(requested) && requested > 0 ? requested : HARD_CAP,
+    HARD_CAP
+  );
   const offset = parseInt(req.query.offset) || 0;
   const category = req.query.category;
   const search = req.query.search;
@@ -55,7 +76,7 @@ router.get('/', async (req, res) => {
     const params = [cid];
 
     if (category) { where += ` AND category = $${params.length + 1}`; params.push(category); }
-    if (search)   { where += ` AND (name ILIKE $${params.length + 1} OR sku ILIKE $${params.length + 1})`; params.push(`%${search}%`); }
+    if (search)   { where += ` AND (name ILIKE $${params.length + 1} OR sku ILIKE $${params.length + 1} OR barcode ILIKE $${params.length + 1})`; params.push(`%${search}%`); }
 
     const countRes = await db.query(`SELECT COUNT(*) AS total FROM products ${where}`, params);
     const dataRes = await db.query(
