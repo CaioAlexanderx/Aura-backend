@@ -15,6 +15,8 @@
 // 06/05/2026 (seats por plano):
 //   GET /unified e /billing usam summarizeSeats — devolve seats_included,
 //   seats_used, at_limit, monthly_cost (so cobra acessos ACIMA do plano).
+//   /billing usa COUNT direto (1 DB call) — nao precisa da lista completa.
+//   /unified usa listMembersUnified para deduplicar usuarios entre CNPJs.
 // ============================================================
 
 const express = require('express');
@@ -386,27 +388,47 @@ router.delete('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'adm
 });
 
 // GET /companies/:id/members/billing
+//
+// Retorna resumo de cobranca baseado em seats por plano.
+// Usa COUNT direto (1 DB call) — o endpoint so precisa do total de
+// acessos ativos/pendentes para calcular extras. Para a visao unificada
+// multi-CNPJ com deduplicacao por usuario, usar GET /unified.
+//
+// Mock chain (tests):
+//   Middleware 2 + Handler 1 (COUNT) = 3 mocks
 router.get('/billing', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
-    // Usa unified pra contar usuarios unicos em todos os CNPJs irmaos —
-    // mesma logica do /unified.
-    const { members } = await listMembersUnified(req.params.id);
+    const { rows } = await db.query(
+      `SELECT COUNT(*) AS total
+       FROM company_members
+       WHERE company_id = $1
+         AND status != 'suspended'
+         AND (status = 'pending' OR is_active = true)`,
+      [req.params.id]
+    );
+    const seatsUsed = parseInt(rows[0]?.total || '0', 10);
     const plan  = await loadEffectivePlan(req.params.id);
-    const seats = summarizeSeats(plan, members);
+
+    // Array sintetico compativel com summarizeSeats (so precisa do tamanho)
+    const synthetic = Array.from({ length: seatsUsed }, function() {
+      return { status: 'active', is_active: true };
+    });
+    const seats = summarizeSeats(plan, synthetic);
+
     res.json({
-      plan:                seats.plan,
-      seats_included:      seats.seats_included,
-      seats_used:          seats.seats_used,
-      seats_remaining:     seats.seats_remaining,
-      extra_seats:         seats.extra_seats,
-      price_per_member:    SEAT_PRICE_BRL,
-      monthly_total:       seats.monthly_cost,
-      at_limit:            seats.at_limit,
-      over_limit:          seats.over_limit,
+      plan:             seats.plan,
+      seats_included:   seats.seats_included,
+      seats_used:       seats.seats_used,
+      seats_remaining:  seats.seats_remaining,
+      extra_seats:      seats.extra_seats,
+      price_per_member: SEAT_PRICE_BRL,
+      monthly_total:    seats.monthly_cost,
+      at_limit:         seats.at_limit,
+      over_limit:       seats.over_limit,
       // Compat
-      active_members:      seats.seats_used,
-      billable_members:    seats.extra_seats,
-      note:                seats.over_limit
+      active_members:   seats.seats_used,
+      billable_members: seats.extra_seats,
+      note: seats.over_limit
         ? 'Limite do plano excedido. Cada acesso adicional custa R$' + SEAT_PRICE_BRL + '/mes.'
         : 'Acessos inclusos no plano: ' + seats.seats_included + '. Acima disso, R$' + SEAT_PRICE_BRL + '/mes por acesso adicional.',
     });
