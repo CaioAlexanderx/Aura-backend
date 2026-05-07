@@ -57,6 +57,11 @@ router.get('/', async (req, res) => {
 // ainda bloqueia recadastro com mesmo CPF. O pre-check antes filtrava
 // is_active=true e deixava passar -> INSERT explodia em 500 com mensagem
 // crua do Postgres. Agora detecta inativo e reativa em vez de erro.
+//
+// FIX 06/05/2026 (v2): UPDATE de reativacao reusava params em colunas de
+// tipos diferentes (role varchar + role_title text com mesmo $2; etc),
+// disparando "inconsistent types deduced for parameter $2". Cada coluna
+// agora ganha seu proprio param (mesma estrategia do INSERT).
 router.post('/', async (req, res) => {
   const cid = req.params.id;
   const { name, role, salary, admission_date, cpf, pis, phone, email, work_hours, status } = req.body;
@@ -86,33 +91,44 @@ router.post('/', async (req, res) => {
       }
       // Inativo (soft-deleted): reativa com os novos dados em vez de erro.
       // Mantem o id pra preservar historico (sales_count, total_revenue, etc).
+      //
+      // IMPORTANTE: cada coluna recebe seu PROPRIO parametro (sem reuso) pra
+      // evitar "inconsistent types deduced for parameter $X" — o pg driver
+      // falha em inferir o tipo quando o mesmo $N alimenta colunas de tipos
+      // distintos (varchar vs text vs numeric). Mesma logica do INSERT abaixo.
       const { rows: reactivated } = await db.query(
         `UPDATE employees SET
-           name = $1,
-           role = $2, role_title = $2,
-           salary = $3, base_salary = $3,
-           admission_date = $4,
-           pis = $5, pis_pasep = $5,
-           phone = $6,
-           email = $7,
-           work_hours = $8,
-           status = $9,
-           is_active = true,
-           updated_at = NOW()
-         WHERE id = $10 AND company_id = $11
+           name           = $1,
+           role           = $2,
+           role_title     = $3,
+           salary         = $4,
+           base_salary    = $5,
+           admission_date = $6,
+           pis            = $7,
+           pis_pasep      = $8,
+           phone          = $9,
+           email          = $10,
+           work_hours     = $11,
+           status         = $12,
+           is_active      = true,
+           updated_at     = NOW()
+         WHERE id = $13 AND company_id = $14
          RETURNING *`,
         [
-          String(name).trim(),
-          roleVal,
-          salaryVal,
-          admission_date,
-          pisVal,
-          phone || null,
-          email || null,
-          parseInt(work_hours) || 220,
-          status || 'active',
-          old.id,
-          cid,
+          String(name).trim(),         // $1  -> name (text)
+          roleVal,                     // $2  -> role (varchar)
+          roleVal,                     // $3  -> role_title (text)
+          salaryVal,                   // $4  -> salary (numeric nullable)
+          salaryVal,                   // $5  -> base_salary (numeric NOT NULL)
+          admission_date,              // $6  -> admission_date (date)
+          pisVal,                      // $7  -> pis (text)
+          pisVal,                      // $8  -> pis_pasep (text)
+          phone || null,               // $9  -> phone (varchar)
+          email || null,               // $10 -> email (varchar)
+          parseInt(work_hours) || 220, // $11 -> work_hours (integer)
+          status || 'active',          // $12 -> status (varchar)
+          old.id,                      // $13 -> id (uuid)
+          cid,                         // $14 -> company_id (uuid)
         ]
       );
       return res.status(200).json({ ...reactivated[0], reactivated: true, previous_name: old.name });
