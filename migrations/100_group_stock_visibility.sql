@@ -1,18 +1,26 @@
 -- ============================================================
--- Migration 100: Group Stock Visibility (Multi-CNPJ)
--- Permite que produtos de uma empresa primária (billing_owner)
--- sejam visíveis para CNPJs vinculados do mesmo grupo.
--- PDV e cancelamentos usam o company_id real do produto para
--- mover estoque — sem pool compartilhado, apenas visibilidade.
+-- 100_group_stock_visibility.sql
+-- Group Stock: subsidiárias vendem do catálogo da Matriz sem
+-- duplicar produtos. Produtos marcados com is_group_shared=true
+-- no billing_owner_company ficam visíveis para todas as
+-- empresas do grupo (scan, PDV, troca).
+--
+-- Uso no backend (pdv.js):
+--   WHERE (p.company_id = $cid
+--     OR (p.company_id = c.billing_owner_company_id
+--         AND p.is_group_shared = true))
 -- ============================================================
 
+-- Coluna principal: opt-in por produto
 ALTER TABLE products
   ADD COLUMN IF NOT EXISTS is_group_shared BOOLEAN NOT NULL DEFAULT false;
 
--- Índice parcial: só produtos marked como shared (lista pequena)
+-- Índice parcial: só os produtos compartilhados são consultados
+-- com o filtro de billing_owner, então a cobertura fica pequena
 CREATE INDEX IF NOT EXISTS idx_products_group_shared
   ON products (company_id)
   WHERE is_group_shared = true;
 
 COMMENT ON COLUMN products.is_group_shared IS
-  'Quando true, produto visível para todos CNPJs cujo billing_owner_company_id aponte para este company_id.';
+  'true = produto visível para todas as empresas do mesmo billing_owner_company_id. '
+  'Movimentação de estoque usa company_id real do produto (stock_company_id).';
