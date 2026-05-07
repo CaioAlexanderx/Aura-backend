@@ -8,6 +8,10 @@
 // 06/05/2026 (Sprint UX Equipe):
 //   POST /:mid/resend-email — reenvia email com mesmo token
 //   PATCH /:mid/invite-email — edita destinatario e reenvia (mesmo token)
+// 06/05/2026 (Sprint 4 — backlog futuro):
+//   POST /:mid/extend     — renova validade do convite mantendo token
+//   GET  /:mid/audit-log  — historico de acoes do member
+//   logAction()           — registrado em todas as rotas mutativas
 // ============================================================
 
 const express = require('express');
@@ -21,10 +25,9 @@ const {
   buildInviteUrl,
 } = require('../services/members');
 const { sendInviteEmail } = require('../services/mailer');
+const { logAction, listAudit, diffPermissions } = require('../services/memberAudit');
 
 // GET /companies/:id/members/unified
-// Retorna uma entrada por usuario com campo companies:[{company_id, ...}].
-// Permissoes universais — sincronizadas automaticamente em todos os CNPJs.
 router.get('/unified', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const result = await listMembersUnified(req.params.id);
@@ -59,10 +62,18 @@ router.get('/', requireAuth, requireCompanyAccess(), async (req, res) => {
 });
 
 // POST /companies/:id/members/invite
-// Aceita company_ids[] para convidar para multiplos CNPJs em uma so acao.
 router.post('/invite', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const result = await inviteMemberMulti(req.params.id, req.user.id, req.body);
+    // Sprint 4: log invite_created com role + permissions snapshot
+    if (result?.id) {
+      logAction(req.params.id, result.id, req.user.id, 'invite_created', {
+        invite_email: result.invite_email || null,
+        role_label:   result.role_label || null,
+        company_ids:  req.body.company_ids || null,
+        permissions:  req.body.permissions || null,
+      });
+    }
     res.status(201).json(result);
   } catch (err) {
     const status = err.message.includes('ja tem') || err.message.includes('ja e membro') ? 409 : 400;
@@ -74,6 +85,10 @@ router.post('/invite', requireAuth, requireCompanyAccess({ roles: ['owner', 'adm
 router.post('/accept/:token', requireAuth, async (req, res) => {
   try {
     const member = await acceptInvite(req.params.token, req.user.id);
+    // Sprint 4: log invite_accepted
+    if (member?.id && member?.company_id) {
+      logAction(member.company_id, member.id, req.user.id, 'invite_accepted', {});
+    }
     res.json({ message: 'Convite aceito. Bem-vindo a equipe!', member });
   } catch (err) {
     const status = err.message.includes('invalido') || err.message.includes('nvalid') ? 410 : 403;
@@ -81,7 +96,7 @@ router.post('/accept/:token', requireAuth, async (req, res) => {
   }
 });
 
-// Helper compartilhado: busca contexto pra montar email (company_name, inviter_name).
+// Helper compartilhado: busca contexto pra montar email.
 async function loadInviteContext(companyId, inviterUserId) {
   const { rows } = await db.query(
     `SELECT
@@ -99,14 +114,11 @@ async function loadInviteContext(companyId, inviterUserId) {
 }
 
 // POST /companies/:id/members/:mid/resend-email
-// Reenvia o email do convite usando o mesmo invite_token. Member precisa
-// estar pending e ter invite_email cadastrado.
 router.post('/:mid/resend-email', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT id, invite_token, invite_email, role_label, status
-       FROM company_members
-       WHERE id=$1 AND company_id=$2`,
+       FROM company_members WHERE id=$1 AND company_id=$2`,
       [req.params.mid, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Convite nao encontrado' });
@@ -122,6 +134,7 @@ router.post('/:mid/resend-email', requireAuth, requireCompanyAccess({ roles: ['o
     try {
       const r = await sendInviteEmail(m.invite_email, inviteUrl, companyName, m.role_label || 'Colaborador', inviterName);
       console.log('[members] resend email sent:', r?.id || '', 'to', m.invite_email);
+      logAction(req.params.id, m.id, req.user.id, 'invite_resent', { invite_email: m.invite_email });
       res.json({ message: 'Email reenviado', invite_email: m.invite_email, invite_url: inviteUrl });
     } catch (mailErr) {
       console.error('[members] resend email failed:', mailErr.message);
@@ -134,8 +147,6 @@ router.post('/:mid/resend-email', requireAuth, requireCompanyAccess({ roles: ['o
 });
 
 // PATCH /companies/:id/members/:mid/invite-email
-// Atualiza o destinatario do convite (mesmo token) e reenvia.
-// Body: { invite_email: 'novo@email.com' }
 router.patch('/:mid/invite-email', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   const { invite_email } = req.body || {};
   if (!invite_email || !String(invite_email).trim()) {
@@ -149,8 +160,7 @@ router.patch('/:mid/invite-email', requireAuth, requireCompanyAccess({ roles: ['
   try {
     const { rows } = await db.query(
       `SELECT id, invite_token, invite_email, role_label, status
-       FROM company_members
-       WHERE id=$1 AND company_id=$2`,
+       FROM company_members WHERE id=$1 AND company_id=$2`,
       [req.params.mid, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Convite nao encontrado' });
@@ -159,7 +169,6 @@ router.patch('/:mid/invite-email', requireAuth, requireCompanyAccess({ roles: ['
     if (m.status !== 'pending') return res.status(400).json({ error: 'Convite ja foi aceito ou cancelado' });
     if (!m.invite_token) return res.status(400).json({ error: 'Convite sem token. Gere um novo convite.' });
 
-    // Checa se o novo email ja eh membro ATIVO ou pendente nessa empresa (em outro registro)
     const { rows: clash } = await db.query(
       `SELECT cm.id FROM company_members cm
        LEFT JOIN users u ON u.id = cm.user_id
@@ -173,7 +182,7 @@ router.patch('/:mid/invite-email', requireAuth, requireCompanyAccess({ roles: ['
       return res.status(409).json({ error: 'Este email ja esta vinculado a outro membro/convite nesta empresa' });
     }
 
-    // Atualiza email + reseta invited_at pra contar 7 dias do reenvio
+    const oldEmail = m.invite_email;
     const { rows: updated } = await db.query(
       `UPDATE company_members
          SET invite_email = $1, invited_at = NOW()
@@ -188,9 +197,10 @@ router.patch('/:mid/invite-email', requireAuth, requireCompanyAccess({ roles: ['
     try {
       const r = await sendInviteEmail(newEmail, inviteUrl, companyName, updated[0].role_label || 'Colaborador', inviterName);
       console.log('[members] invite email updated+sent:', r?.id || '', 'to', newEmail);
+      logAction(req.params.id, m.id, req.user.id, 'invite_email_changed', { old_email: oldEmail, new_email: newEmail });
     } catch (mailErr) {
-      // Email atualizado mas envio falhou — retorna OK com warning
       console.error('[members] new email failed to send:', mailErr.message);
+      logAction(req.params.id, m.id, req.user.id, 'invite_email_changed', { old_email: oldEmail, new_email: newEmail, send_failed: true });
       return res.status(200).json({
         message: 'Email atualizado, mas nao conseguimos reenviar agora. Tente reenviar em alguns minutos.',
         invite_email: newEmail,
@@ -206,12 +216,78 @@ router.patch('/:mid/invite-email', requireAuth, requireCompanyAccess({ roles: ['
   }
 });
 
+// POST /companies/:id/members/:mid/extend  (Sprint 4)
+// Renova invited_at = NOW() (mais 7 dias) mantendo invite_token e link.
+router.post('/:mid/extend', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, invite_token, status, invited_at
+       FROM company_members WHERE id=$1 AND company_id=$2`,
+      [req.params.mid, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Convite nao encontrado' });
+    const m = rows[0];
+    if (m.status !== 'pending') return res.status(400).json({ error: 'So convites pendentes podem ser estendidos' });
+    if (!m.invite_token) return res.status(400).json({ error: 'Convite sem token valido. Gere um novo.' });
+
+    const { rows: updated } = await db.query(
+      `UPDATE company_members SET invited_at = NOW()
+       WHERE id = $1 AND company_id = $2
+       RETURNING id, invited_at, invite_token`,
+      [req.params.mid, req.params.id]
+    );
+
+    const inviteUrl = buildInviteUrl(updated[0].invite_token);
+    logAction(req.params.id, m.id, req.user.id, 'invite_extended', { previous_invited_at: m.invited_at });
+    res.json({ message: 'Validade estendida em 7 dias', invited_at: updated[0].invited_at, invite_url: inviteUrl });
+  } catch (err) {
+    console.error('[members] extend error:', err.message);
+    res.status(500).json({ error: 'Erro ao estender validade' });
+  }
+});
+
+// GET /companies/:id/members/:mid/audit-log  (Sprint 4)
+router.get('/:mid/audit-log', requireAuth, requireCompanyAccess(), async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 50;
+    const entries = await listAudit(req.params.id, req.params.mid, limit);
+    res.json({ total: entries.length, entries });
+  } catch (err) {
+    console.error('[members] audit-log error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar historico' });
+  }
+});
+
 // PATCH /companies/:id/members/:mid
-// Permissoes sao sincronizadas automaticamente para todos os CNPJs do mesmo usuario.
-// Aceita company_ids[] para alternar acesso a CNPJs especificos.
 router.patch('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
+    // Sprint 4: snapshot do estado anterior pra calcular diff no log
+    const { rows: before } = await db.query(
+      `SELECT permissions, role_label
+       FROM company_members WHERE id=$1 AND company_id=$2`,
+      [req.params.mid, req.params.id]
+    );
+    const oldPerms = before[0]?.permissions || {};
+    const oldRole  = before[0]?.role_label;
+
     const member = await updateMemberAndSync(req.params.id, req.params.mid, req.body);
+
+    // Loga eventos relevantes (so o que de fato mudou)
+    if (req.body.permissions !== undefined) {
+      const oldP = typeof oldPerms === 'string' ? JSON.parse(oldPerms) : (oldPerms || {});
+      const newP = typeof member.permissions === 'string' ? JSON.parse(member.permissions) : (member.permissions || {});
+      const diff = diffPermissions(oldP, newP);
+      if (diff.added.length || diff.removed.length) {
+        logAction(req.params.id, req.params.mid, req.user.id, 'permissions_updated', diff);
+      }
+    }
+    if (req.body.role_label !== undefined && oldRole !== req.body.role_label) {
+      logAction(req.params.id, req.params.mid, req.user.id, 'role_changed', { from: oldRole, to: req.body.role_label });
+    }
+    if (req.body.company_ids !== undefined) {
+      logAction(req.params.id, req.params.mid, req.user.id, 'companies_changed', { company_ids: req.body.company_ids });
+    }
+
     res.json({ member });
   } catch (err) {
     const status = err.message.includes('nao encontrado') || err.message.includes('encontrado') ? 404 : 400;
@@ -220,17 +296,23 @@ router.patch('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admi
 });
 
 // DELETE /companies/:id/members/:mid
-// P1 #10: pending members are truly deleted, active members are suspended
 router.delete('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
   try {
     const { rows } = await db.query(
-      'SELECT user_id, status FROM company_members WHERE id=$1 AND company_id=$2',
+      'SELECT id, user_id, status, invite_email, role_label FROM company_members WHERE id=$1 AND company_id=$2',
       [req.params.mid, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Membro nao encontrado' });
     if (rows[0].user_id === req.user.id) return res.status(400).json({ error: 'Voce nao pode remover a si mesmo' });
 
-    if (rows[0].status === 'pending') {
+    const m = rows[0];
+
+    if (m.status === 'pending') {
+      // Sprint 4: log ANTES do DELETE pra preservar member_id na metadata
+      logAction(req.params.id, m.id, req.user.id, 'invite_cancelled', {
+        invite_email: m.invite_email || null,
+        role_label:   m.role_label || null,
+      });
       await db.query(
         'DELETE FROM company_members WHERE id=$1 AND company_id=$2',
         [req.params.mid, req.params.id]
@@ -241,6 +323,7 @@ router.delete('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'adm
         `UPDATE company_members SET status='suspended', is_active=false WHERE id=$1 AND company_id=$2`,
         [req.params.mid, req.params.id]
       );
+      logAction(req.params.id, m.id, req.user.id, 'member_suspended', {});
       res.json({ message: 'Membro suspenso', deleted: false });
     }
   } catch (err) { res.status(500).json({ error: 'Erro ao remover membro' }); }
