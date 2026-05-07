@@ -54,15 +54,20 @@ function parseBRFloat(val) {
  *   - <det> como objeto único ou array → sempre normaliza pra array
  *   - Decimal brasileiro em qCom/vUnCom/vNF
  *
+ * Nota sobre CNPJ: fast-xml-parser com parseTagValue=true converte
+ * strings numéricas para JS Number, o que descarta zeros à esquerda
+ * (ex: 04883797000141 vira 4883797000141). Por isso aplicamos
+ * padStart(14, '0') após extrair o CNPJ como string.
+ *
  * @param {string} xmlString  Conteúdo bruto do arquivo .xml
- * @returns {{
+ * @returns {{\
  *   supplier_name: string|null,
  *   supplier_cnpj: string|null,
  *   invoice_number: string|null,
  *   invoice_series: string|null,
  *   invoice_date: string|null,
  *   total_value: number,
- *   items: Array<{
+ *   items: Array<{\
  *     idx: number,
  *     description: string,
  *     quantity: number,
@@ -147,9 +152,14 @@ function parseNFeXML(xmlString) {
     invoiceDate = String(rawDate).split('T')[0]; // "2026-04-30"
   }
 
+  // CNPJ: fast-xml-parser pode converter para Number descartando zeros
+  // à esquerda. Forçamos string e aplicamos padStart(14) para garantir
+  // o formato correto (ex: "04883797000141" em vez de "4883797000141").
+  const rawCnpj = String(infNFe.emit?.CNPJ || '').replace(/\D/g, '');
+
   return {
     supplier_name:  String(infNFe.emit?.xNome || infNFe.emit?.xFant || '').trim() || null,
-    supplier_cnpj:  String(infNFe.emit?.CNPJ  || '').replace(/\D/g, '') || null,
+    supplier_cnpj:  rawCnpj ? rawCnpj.padStart(14, '0') : null,
     invoice_number: String(infNFe.ide?.nNF    || '').trim() || null,
     invoice_series: String(infNFe.ide?.serie  || '').trim() || null,
     invoice_date:   invoiceDate,
