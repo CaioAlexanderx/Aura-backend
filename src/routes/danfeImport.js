@@ -1,16 +1,20 @@
 // ============================================================
-// AURA. — DANFE PDF import (07/05/2026)
-// Endpoint: POST /companies/:id/products/import-danfe-preview
-// Recebe um PDF de DANFE em base64, manda pro Claude com prompt
-// estruturado, retorna a lista de itens extraidos pra revisao no
-// frontend. NAO salva produtos — frontend confirma via POST /products
-// item por item depois que o cliente revisa/edita.
+// AURA. — DANFE import (07/05/2026)
 //
-// Quota:
-//   essencial → 0 (sem acesso, gate via plan check)
-//   negocio   → 50/mes
-//   expansao  → ilimitado
-//   personalizado → ilimitado
+// Dois endpoints:
+//
+// 1. POST /companies/:id/products/import-danfe-xml   ← NOVO
+//    Recebe XML da NF-e (string), parseia deterministicamente
+//    com fast-xml-parser. Zero custo, zero quota, instantâneo.
+//    Suporta NF-e 4.00 (nfeProc/NFe e NFe raw, namespaces).
+//
+// 2. POST /companies/:id/products/import-danfe-preview  ← LEGADO
+//    Recebe PDF em base64, extrai via Claude (IA).
+//    Quota: Negocio=50/mes, Expansao=ilimitado.
+//    Manter como fallback para DANFEs escaneadas/fotografadas.
+//
+// Ambos retornam o mesmo shape de resposta para o frontend
+// poder usar o mesmo fluxo de revisão.
 // ============================================================
 
 const express = require('express');
@@ -18,7 +22,183 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { extractFromPdf, parseJsonResponse } = require('../services/claudeClient');
 
-// Quota mensal por plano
+// ── Parser NF-e XML ──────────────────────────────────────────
+// Carregado lazy para não quebrar o boot se a lib não estiver
+// instalada ainda (primeiro deploy após o commit do package.json).
+function getXMLParser() {
+  try {
+    return require('fast-xml-parser');
+  } catch (e) {
+    throw new Error('fast-xml-parser não instalado. Execute npm install no servidor.');
+  }
+}
+
+/**
+ * Converte string decimal brasileira ou americana para float.
+ * "76,1000" → 76.1   |   "1.234,56" → 1234.56   |   "76.1000" → 76.1
+ */
+function parseBRFloat(val) {
+  if (val === null || val === undefined) return 0;
+  const s = String(val).trim();
+  // Se tem vírgula E ponto: ponto é separador de milhar, vírgula é decimal
+  if (s.includes(',') && s.includes('.')) {
+    return parseFloat(s.replace(/\./g, '').replace(',', '.')) || 0;
+  }
+  // Só vírgula: vírgula é decimal
+  if (s.includes(',')) {
+    return parseFloat(s.replace(',', '.')) || 0;
+  }
+  // Só ponto ou inteiro: padrão americano / sem separador
+  return parseFloat(s) || 0;
+}
+
+/**
+ * Parseia NF-e XML (padrão SEFAZ 4.00) deterministicamente.
+ * Lida com:
+ *   - nfeProc/NFe/infNFe  (mais comum — nota já autorizada)
+ *   - NFe/infNFe          (raw sem wrapper)
+ *   - Prefixos de namespace (nfe:NFe etc) → removidos pelo parser
+ *   - det como objeto único ou array (fast-xml-parser isArray)
+ *
+ * @param {string} xmlString  Conteúdo bruto do arquivo .xml
+ * @returns {{ supplier_name, invoice_number, invoice_date, total_value, items[] }}
+ */
+function parseNFeXML(xmlString) {
+  const { XMLParser } = getXMLParser();
+
+  const parser = new XMLParser({
+    ignoreAttributes:    false,
+    attributeNamePrefix: '@_',
+    removeNSPrefix:      true,   // remove nfe: nfeProc: etc
+    isArray: (name) => name === 'det',  // det sempre array, mesmo com 1 item
+    parseTagValue:       true,
+    trimValues:          true,
+  });
+
+  let obj;
+  try {
+    obj = parser.parse(xmlString);
+  } catch (e) {
+    throw new Error('XML inválido: ' + e.message);
+  }
+
+  // Localiza infNFe independente do wrapper
+  const nfe = obj.nfeProc?.NFe || obj.NFe || obj.nfeProc?.nfe || obj.nfe;
+  if (!nfe) {
+    throw new Error('XML não reconhecido: elemento NFe não encontrado. Verifique se é um arquivo NF-e válido.');
+  }
+
+  const infNFe = nfe.infNFe;
+  if (!infNFe) {
+    throw new Error('XML inválido: elemento infNFe não encontrado.');
+  }
+
+  // det é sempre array (isArray acima garante isso)
+  const det = Array.isArray(infNFe.det) ? infNFe.det : [];
+  if (det.length === 0) {
+    throw new Error('Nenhum item encontrado no XML. Verifique se a NF-e contém produtos.');
+  }
+
+  const items = det.map((item, idx) => {
+    const prod        = item.prod || {};
+    const qCom        = parseBRFloat(prod.qCom);
+    const vUnCom      = parseBRFloat(prod.vUnCom);
+    const ncmRaw      = String(prod.NCM || '').replace(/\D/g, '');
+    const ean         = String(prod.cEAN || '').trim();
+    const validEan    = ean && ean !== 'SEM GTIN' && /^\d+$/.test(ean) ? ean : null;
+
+    return {
+      idx,
+      description:   String(prod.xProd   || '').trim().slice(0, 200),
+      quantity:      qCom,
+      unit_cost:     vUnCom,
+      unit:          String(prod.uCom    || 'un').trim().slice(0, 10),
+      ncm:           /^\d{8}$/.test(ncmRaw) ? ncmRaw : null,
+      supplier_code: prod.cProd ? String(prod.cProd).trim().slice(0, 50) : null,
+      ean:           validEan,   // bônus: pré-popula barcode no frontend
+    };
+  }).filter(it => it.description && it.quantity > 0);
+
+  // Data de emissão: dhEmi (com hora) ou dEmi (só data)
+  let invoiceDate = null;
+  const rawDate = infNFe.ide?.dhEmi || infNFe.ide?.dEmi;
+  if (rawDate) {
+    invoiceDate = String(rawDate).split('T')[0]; // "2026-04-30"
+  }
+
+  return {
+    supplier_name:  String(infNFe.emit?.xNome || infNFe.emit?.xFant || '').trim() || null,
+    supplier_cnpj:  String(infNFe.emit?.CNPJ  || '').replace(/\D/g, '') || null,
+    invoice_number: String(infNFe.ide?.nNF    || '').trim() || null,
+    invoice_series: String(infNFe.ide?.serie  || '').trim() || null,
+    invoice_date:   invoiceDate,
+    total_value:    parseBRFloat(infNFe.total?.ICMSTot?.vNF),
+    items,
+  };
+}
+
+// ── POST /import-danfe-xml ───────────────────────────────────
+// Aceita: { xml_content: string }  (conteúdo bruto do .xml)
+// Sem quota, sem IA, sem custo.
+router.post('/import-danfe-xml', async (req, res) => {
+  const companyId = req.params.id;
+  const { xml_content } = req.body || {};
+
+  if (!xml_content || typeof xml_content !== 'string') {
+    return res.status(400).json({
+      error: 'xml_content obrigatório (conteúdo do arquivo .xml da NF-e como string)',
+    });
+  }
+
+  if (xml_content.length > 5 * 1024 * 1024) {
+    return res.status(413).json({ error: 'XML muito grande. Máximo 5 MB.' });
+  }
+
+  const startedAt = Date.now();
+  let parsed;
+  try {
+    parsed = parseNFeXML(xml_content);
+  } catch (err) {
+    console.warn('[danfeXML] parse error:', err.message);
+    return res.status(422).json({
+      error: err.message || 'Não foi possível interpretar o XML. Verifique se é um arquivo NF-e válido.',
+    });
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  console.log(`[danfeXML] parsed ${parsed.items.length} items in ${elapsedMs}ms (NF ${parsed.invoice_number || '?'})`);
+
+  if (parsed.items.length === 0) {
+    return res.json({
+      items:          [],
+      supplier_name:  parsed.supplier_name,
+      supplier_cnpj:  parsed.supplier_cnpj,
+      invoice_number: parsed.invoice_number,
+      invoice_series: parsed.invoice_series,
+      invoice_date:   parsed.invoice_date,
+      total_value:    parsed.total_value,
+      warning: 'Nenhum item válido encontrado no XML.',
+      stats: { extracted_count: 0, elapsed_ms: elapsedMs, source: 'xml' },
+    });
+  }
+
+  res.json({
+    items:          parsed.items,
+    supplier_name:  parsed.supplier_name,
+    supplier_cnpj:  parsed.supplier_cnpj,
+    invoice_number: parsed.invoice_number,
+    invoice_series: parsed.invoice_series,
+    invoice_date:   parsed.invoice_date,
+    total_value:    parsed.total_value,
+    stats: {
+      extracted_count: parsed.items.length,
+      elapsed_ms:      elapsedMs,
+      source:          'xml',  // diferencia do endpoint de IA no frontend
+    },
+  });
+});
+
+// ── Quota helper (para o endpoint PDF/IA abaixo) ─────────────
 const MONTHLY_QUOTA = {
   essencial:     0,
   negocio:       50,
@@ -31,7 +211,6 @@ async function checkQuota(companyId, plan) {
   if (limit <= 0) return { allowed: false, used: 0, limit: 0 };
   if (limit >= 9999) return { allowed: true, used: -1, limit: -1 };
 
-  // Conta uso do mes corrente (timezone do servidor — suficiente pro propósito)
   const { rows } = await db.query(
     `SELECT COUNT(*)::int AS total
      FROM ai_activity_log
@@ -65,10 +244,6 @@ async function logActivity(companyId, userId, status, detail, tokens) {
   }
 }
 
-// Prompt principal — pede JSON estruturado.
-// Mantemos a resposta enxuta pra economizar tokens: descricao, quantidade,
-// custo unitario, NCM, codigo do fornecedor, unidade. Tudo opcional exceto
-// descricao + quantidade.
 const EXTRACT_PROMPT = `Analise o PDF da DANFE/Nota Fiscal anexada e extraia TODOS os itens listados na seção de produtos.
 
 Para cada item, retorne os campos:
@@ -103,7 +278,7 @@ Regras importantes:
 const SYSTEM_PROMPT = `Você é um assistente especialista em documentos fiscais brasileiros (NF-e/DANFE).
 Extrai dados estruturados de PDFs de notas fiscais com precisão. Sempre responde com JSON válido conforme o schema solicitado.`;
 
-// POST /companies/:id/products/import-danfe-preview
+// ── POST /import-danfe-preview (legado — PDF via IA) ─────────
 router.post('/import-danfe-preview', async (req, res) => {
   const companyId = req.params.id;
   const userId = req.user?.id;
@@ -114,8 +289,6 @@ router.post('/import-danfe-preview', async (req, res) => {
     return res.status(400).json({ error: 'pdf_base64 obrigatorio (PDF da DANFE em base64)' });
   }
 
-  // Limit de tamanho: ~3.5 MB de PDF (apos base64 fica ~4.7 MB,
-  // dentro do body limit de 5mb do app)
   const sizeBytes = Math.floor((pdf_base64.length * 3) / 4);
   if (sizeBytes > 4 * 1024 * 1024) {
     return res.status(413).json({
@@ -123,7 +296,6 @@ router.post('/import-danfe-preview', async (req, res) => {
     });
   }
 
-  // Quota check
   const quota = await checkQuota(companyId, userPlan);
   if (!quota.allowed) {
     return res.status(429).json({
@@ -140,7 +312,7 @@ router.post('/import-danfe-preview', async (req, res) => {
       pdfBase64: pdf_base64,
       system:    SYSTEM_PROMPT,
       prompt:    EXTRACT_PROMPT,
-      maxTokens: 6000,  // DANFEs grandes podem ter 50+ itens
+      maxTokens: 6000,
     });
 
     let parsed;
@@ -171,10 +343,10 @@ router.post('/import-danfe-preview', async (req, res) => {
         invoice_date: parsed.invoice_date || null,
         warning: 'Nenhum item encontrado no PDF. Verifique se a DANFE esta legivel.',
         quota: { used: quota.used + 1, limit: quota.limit },
+        stats: { source: 'ai' },
       });
     }
 
-    // Sanitize items — garante tipos corretos
     const cleanItems = items.map((it, idx) => ({
       idx,
       description:    String(it.description || '').trim().slice(0, 200),
@@ -185,6 +357,7 @@ router.post('/import-danfe-preview', async (req, res) => {
                         ? String(it.ncm).replace(/\D/g, '')
                         : null,
       supplier_code:  it.supplier_code ? String(it.supplier_code).trim().slice(0, 50) : null,
+      ean:            null,  // IA não extrai EAN do PDF
     })).filter(it => it.description && it.quantity > 0);
 
     const elapsedMs = Date.now() - startedAt;
@@ -208,6 +381,7 @@ router.post('/import-danfe-preview', async (req, res) => {
         elapsed_ms:      elapsedMs,
         input_tokens:    result.inputTokens,
         output_tokens:   result.outputTokens,
+        source:          'ai',
       },
       quota: {
         used:  quota.used + 1,
@@ -227,7 +401,7 @@ router.post('/import-danfe-preview', async (req, res) => {
   }
 });
 
-// GET /companies/:id/products/danfe-quota — retorna cota atual sem consumir
+// GET /companies/:id/products/danfe-quota
 router.get('/danfe-quota', async (req, res) => {
   const userPlan = (req.user?.plan || '').toLowerCase();
   const quota = await checkQuota(req.params.id, userPlan);
