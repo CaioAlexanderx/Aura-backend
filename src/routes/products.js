@@ -7,6 +7,8 @@
 //   no aura-app. sanitizeNcm strip não-dígitos e exige 8 chars.
 // FEAT (mai/2026): is_group_shared — produtos do billing_owner_company_id
 //   ficam visíveis para CNPJs subsidiários do mesmo grupo (migration 100).
+// FIX (mai/2026): multi-CNPJ WHERE usa subquery inline — sem round-trip
+//   extra de coInfo, mantém 2 db.query calls no GET (compat. com testes).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -41,19 +43,16 @@ router.get('/', async (req, res) => {
   const search = req.query.search;
 
   try {
-    // Visibilidade multi-CNPJ (migration 100):
-    // Se esta company é subsidiária (billing_owner != próprio id),
-    // inclui também produtos do billing owner onde is_group_shared = true.
-    const { rows: coInfo } = await db.query(
-      'SELECT billing_owner_company_id FROM companies WHERE id = $1', [cid]
-    );
-    const billingOwner = coInfo[0]?.billing_owner_company_id;
-    const isSubsidiary = billingOwner && billingOwner !== cid;
-
-    let where = isSubsidiary
-      ? 'WHERE (company_id = $1 OR (company_id = $2 AND is_group_shared = true))'
-      : 'WHERE company_id = $1';
-    const params = isSubsidiary ? [cid, billingOwner] : [cid];
+    // Visibilidade multi-CNPJ (migration 100): subquery inline — sem round-trip extra.
+    // Subsidiárias enxergam produtos shared do billing_owner sem query separada.
+    let where = `WHERE (company_id = $1 OR (
+      is_group_shared = true
+      AND company_id = (
+        SELECT billing_owner_company_id FROM companies
+        WHERE id = $1 AND billing_owner_company_id IS NOT NULL AND billing_owner_company_id != $1
+      )
+    ))`;
+    const params = [cid];
 
     if (category) { where += ` AND category = $${params.length + 1}`; params.push(category); }
     if (search)   { where += ` AND (name ILIKE $${params.length + 1} OR sku ILIKE $${params.length + 1})`; params.push(`%${search}%`); }
