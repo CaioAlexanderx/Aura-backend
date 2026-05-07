@@ -1,1 +1,18 @@
-LS0gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09Ci0tIE1pZ3JhdGlvbiAxMDA6IEdyb3VwIFN0b2NrIFZpc2liaWxpdHkgKE11bHRpLUNOUEopCi0tIFBlcm1pdGUgcXVlIHByb2R1dG9zIGRlIHVtYSBlbXByZXNhIHByaW3DoXJpYSAoYmlsbGluZ19vd25lcikKLS0gc2VqYW0gdmlzw612ZWlzIHBhcmEgQ05QSnMgdmluY3VsYWRvcyBkbyBtZXNtbyBncnVwby4KLS0gUERWIGUgY2FuY2VsYW1lbnRvcyB1c2FtIG8gY29tcGFueV9pZCByZWFsIGRvIHByb2R1dG8gcGFyYQotLSBtb3ZlciBlc3RvcXVlIOKAlCBzZW0gcG9vbCBjb21wYXJ0aWxoYWRvLCBhcGVuYXMgdmlzaWJpbGlkYWRlLgotLSA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KCkFMVEVSIFRBQkxFIHByb2R1Y3RzCiAgQUREIENPTFVNTiBJRiBOT1QgRVhJU1RTIGlzX2dyb3VwX3NoYXJlZCBCT09MRUFOIE5PVCBOVUxMIERFRkFVTFQgZmFsc2U7CgotLSDDjW5kaWNlIHBhcmNpYWw6IHPDsyBwcm9kdXRvcyBtYXJrZWQgY29tbyBzaGFyZWQgKGxpc3RhIHBlcXVlbmEpCkNSRUFURSBJTkRFWCBJRiBOT1QgRVhJU1RTIGlkeF9wcm9kdWN0c19ncm91cF9zaGFyZWQKICBPTiBwcm9kdWN0cyAoY29tcGFueV9pZCkKICBXSEVSRSBpc19ncm91cF9zaGFyZWQgPSB0cnVlOwoKQ09NTUVOVCBPTiBDT0xVTU4gcHJvZHVjdHMuaXNfZ3JvdXBfc2hhcmVkIElTCiAgJ1F1YW5kbyB0cnVlLCBwcm9kdXRvIHZpc8OtdmVsIHBhcmEgdG9kb3MgQ05QSnMgY3VqbyBiaWxsaW5nX293bmVyX2NvbXBhbnlfaWQgYXBvbnRlIHBhcmEgZXN0ZSBjb21wYW55X2lkLic7Cg==
+-- ============================================================
+-- Migration 100: Group Stock Visibility (Multi-CNPJ)
+-- Permite que produtos de uma empresa primária (billing_owner)
+-- sejam visíveis para CNPJs vinculados do mesmo grupo.
+-- PDV e cancelamentos usam o company_id real do produto para
+-- mover estoque — sem pool compartilhado, apenas visibilidade.
+-- ============================================================
+
+ALTER TABLE products
+  ADD COLUMN IF NOT EXISTS is_group_shared BOOLEAN NOT NULL DEFAULT false;
+
+-- Índice parcial: só produtos marked como shared (lista pequena)
+CREATE INDEX IF NOT EXISTS idx_products_group_shared
+  ON products (company_id)
+  WHERE is_group_shared = true;
+
+COMMENT ON COLUMN products.is_group_shared IS
+  'Quando true, produto visível para todos CNPJs cujo billing_owner_company_id aponte para este company_id.';
