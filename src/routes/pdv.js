@@ -22,6 +22,10 @@
 //   itens, troca_returned_items para itens devolvidos. Restaura estoque dos
 //   devolvidos, desconta dos novos. Se net > 0 cria transaction no financeiro.
 //   Migration 101 adiciona coluna type + exchange_of_sale_id + tabela troca_returned_items.
+// FEAT 07/05/2026: Group Stock Visibility (migration 100).
+//   scan, POST /sale, DELETE /sale e POST /troca usam company_id real do
+//   produto para mover estoque — subsidiárias vendem do catálogo do
+//   billing_owner_company_id sem criar pool separado.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -51,13 +55,8 @@ function calcCreditAmount({ payment_method, payments, totalAmount }) {
 
 // ── GET /companies/:id/pdv/scan/:code ────────────────────────
 // Lookup de produto por codigo de barras com normalizacao EAN-12↔13.
-// Ordem de busca:
-//   1. Exato (qualquer tamanho)
-//   2. Codigo 12 digitos → tenta com '0' na frente (EAN-13)
-//   3. Codigo 13 digitos com zero-lider → tenta sem o zero (EAN-12/UPC-A)
-//   4. Variantes com barcode proprio
-// Retorna { match, source, product, variant_id?, effective_price? }
-// compativel com o tipo PdvScanResult do frontend (services/api.ts).
+// FEAT (migration 100): busca também em produtos do billing_owner_company_id
+// onde is_group_shared = true.
 router.get('/scan/:code', async (req, res) => {
   const raw = decodeURIComponent(req.params.code || '').trim();
   if (!raw) return res.status(400).json({ error: 'code obrigatorio', match: 'none' });
@@ -69,14 +68,15 @@ router.get('/scan/:code', async (req, res) => {
   const alts = [...candidates];
 
   try {
-    // 1. Busca em products
+    // 1. Busca em products (inclui shared do billing owner)
     const { rows: prods } = await db.query(
-      `SELECT id, name, price, cost_price, barcode, stock_qty, has_variants,
-              category, image_url, sku
-       FROM products
-       WHERE company_id = $1
-         AND barcode = ANY($2::text[])
-         AND is_active = true
+      `SELECT p.id, p.name, p.price, p.cost_price, p.barcode, p.stock_qty, p.has_variants,
+              p.category, p.image_url, p.sku, p.company_id AS stock_company_id
+       FROM products p
+       JOIN companies c ON c.id = $1
+       WHERE (p.company_id = $1 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))
+         AND p.barcode = ANY($2::text[])
+         AND p.is_active = true
        LIMIT 1`,
       [req.params.id, alts]
     );
@@ -97,17 +97,19 @@ router.get('/scan/:code', async (req, res) => {
           category:    p.category,
           image_url:   p.image_url,
           sku:         p.sku,
+          stock_company_id: p.stock_company_id,
         },
       });
     }
 
-    // 2. Busca em product_variants
+    // 2. Busca em product_variants (inclui shared do billing owner)
     const { rows: vars } = await db.query(
       `SELECT pv.id AS variant_id, pv.price_override, pv.sku_suffix, pv.stock_qty AS variant_stock,
-              p.id, p.name, p.price, p.barcode, p.image_url
+              p.id, p.name, p.price, p.barcode, p.image_url, p.company_id AS stock_company_id
        FROM product_variants pv
        JOIN products p ON p.id = pv.product_id
-       WHERE p.company_id = $1
+       JOIN companies c ON c.id = $1
+       WHERE (p.company_id = $1 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))
          AND pv.barcode = ANY($2::text[])
          AND pv.is_active = true
          AND p.is_active = true
@@ -127,6 +129,7 @@ router.get('/scan/:code', async (req, res) => {
           barcode:   v.barcode,
           image_url: v.image_url,
           sku_suffix: v.sku_suffix,
+          stock_company_id: v.stock_company_id,
         },
         variant_id:      v.variant_id,
         effective_price: parseFloat(v.price_override) || parseFloat(v.price) || 0,
@@ -171,14 +174,22 @@ router.post('/sale', async (req, res) => {
 
       let productName = item.product_name_snapshot || '';
       let costPrice   = 0;
+      let stockCompanyId = req.params.id; // fallback: assume produto próprio
+
       if (item.product_id) {
+        // FEAT migration 100: busca produto considerando shared do billing owner
         const { rows: p } = await client.query(
-          `SELECT name, cost_price, stock_qty FROM products WHERE id=$1 AND company_id=$2`,
+          `SELECT p.name, p.cost_price, p.stock_qty, p.company_id AS stock_company_id
+           FROM products p
+           JOIN companies c ON c.id = $2
+           WHERE p.id = $1
+             AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
           [item.product_id, req.params.id]
         );
         if (p.length) {
-          productName = productName || p[0].name;
-          costPrice   = parseFloat(p[0].cost_price || 0);
+          productName  = productName || p[0].name;
+          costPrice    = parseFloat(p[0].cost_price || 0);
+          stockCompanyId = p[0].stock_company_id;
 
           // FIX 22/04: validar estoque da variante quando variant_id presente
           let stockAvailable = parseFloat(p[0].stock_qty);
@@ -205,7 +216,7 @@ router.post('/sale', async (req, res) => {
         }
       }
       productNames.push(productName);
-      enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, line_total: lineTotal });
+      enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, line_total: lineTotal, stock_company_id: stockCompanyId });
     }
 
     let discountAmt = 0;
@@ -280,6 +291,7 @@ router.post('/sale', async (req, res) => {
       );
 
       if (item.product_id) {
+        // FEAT migration 100: usa company_id real do produto para mover estoque
         if (item.variant_id) {
           await client.query(
             `UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2`,
@@ -288,13 +300,13 @@ router.post('/sale', async (req, res) => {
         } else {
           await client.query(
             `UPDATE products SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2 AND company_id=$3`,
-            [item.quantity, item.product_id, req.params.id]
+            [item.quantity, item.product_id, item.stock_company_id]
           );
         }
         await client.query(
           `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
            VALUES ($1,$2,'out',$3,$4,'sale','Venda PDV') ON CONFLICT DO NOTHING`,
-          [item.product_id, req.params.id, item.quantity, sale.id]
+          [item.product_id, item.stock_company_id, item.quantity, sale.id]
         );
       }
     }
@@ -522,15 +534,18 @@ router.delete('/sale/:saleId', async (req, res) => {
     for (const item of items) {
       if (!item.product_id) continue;
       const qty = parseFloat(item.quantity);
+      // FEAT migration 100: usa company_id real do produto para restaurar estoque
+      const { rows: pInfo } = await client.query('SELECT company_id FROM products WHERE id=$1', [item.product_id]);
+      const stockCompanyId = pInfo[0]?.company_id || req.params.id;
       if (item.variant_id) {
         await client.query(`UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`, [qty, item.variant_id]);
       } else {
-        await client.query(`UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`, [qty, item.product_id, req.params.id]);
+        await client.query(`UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`, [qty, item.product_id, stockCompanyId]);
       }
       await client.query(
         `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
          VALUES ($1,$2,'in',$3,$4,'sale_cancel',$5)`,
-        [item.product_id, req.params.id, qty, req.params.saleId, 'Cancelamento venda - ' + (item.product_name_snapshot || 'Produto')]
+        [item.product_id, stockCompanyId, qty, req.params.saleId, 'Cancelamento venda - ' + (item.product_name_snapshot || 'Produto')]
       );
     }
 
@@ -577,15 +592,7 @@ router.delete('/sale/:saleId', async (req, res) => {
 // ── POST /companies/:id/pdv/troca ────────────────────────────
 // Troca Option B: cria sale(type='troca'), restaura estoque dos itens
 // devolvidos, desconta estoque dos novos, registra financeiro se net > 0.
-// Body:
-//   original_sale_id  UUID  (obrigatorio)
-//   returned_items    [{ product_id, variant_id?, quantity, unit_price, product_name_snapshot? }]
-//   new_items         [{ product_id, variant_id?, quantity, unit_price, product_name_snapshot }]
-//   payment_method?   string (metodo para diferenca positiva, ex: 'dinheiro')
-//   customer_id?      UUID
-//   employee_id?      UUID
-//   seller_name?      string
-// Response: { sale, returned_items, new_items, net_amount, receipt_url }
+// FEAT migration 100: usa company_id real do produto para mover estoque.
 router.post('/troca', async (req, res) => {
   const {
     original_sale_id,
@@ -659,12 +666,14 @@ router.post('/troca', async (req, res) => {
       (acc, n) => acc + parseFloat(n.quantity) * parseFloat(n.unit_price), 0
     );
     const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
-    // total_amount da troca = valor dos novos itens (bruto); net fica no financeiro
     const saleTotal = parseFloat(newValue.toFixed(2));
 
     // 5. Restaura estoque dos itens devolvidos
     for (const ret of returned_items) {
       const qty = parseFloat(ret.quantity);
+      // FEAT migration 100: company_id real do produto
+      const { rows: pInfo } = await client.query('SELECT company_id FROM products WHERE id=$1', [ret.product_id]);
+      const stockCompanyId = pInfo[0]?.company_id || req.params.id;
       if (ret.variant_id) {
         await client.query(
           `UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`,
@@ -673,13 +682,13 @@ router.post('/troca', async (req, res) => {
       } else {
         await client.query(
           `UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`,
-          [qty, ret.product_id, req.params.id]
+          [qty, ret.product_id, stockCompanyId]
         );
       }
       await client.query(
         `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
          VALUES ($1,$2,'in',$3,$4,'troca','Troca — devolucao') ON CONFLICT DO NOTHING`,
-        [ret.product_id, req.params.id, qty, original_sale_id]
+        [ret.product_id, stockCompanyId, qty, original_sale_id]
       );
     }
 
@@ -689,22 +698,35 @@ router.post('/troca', async (req, res) => {
       const qty = parseFloat(item.quantity);
       let stockAvailable;
       let stockLabel = item.product_name_snapshot || item.product_id;
+      let trocaStockCompanyId = req.params.id;
 
       if (item.variant_id) {
         const { rows: vr } = await client.query(
-          `SELECT stock_qty, sku_suffix FROM product_variants WHERE id=$1 AND product_id=$2`,
+          `SELECT pv.stock_qty, pv.sku_suffix, p.company_id AS stock_company_id
+           FROM product_variants pv
+           JOIN products p ON p.id = pv.product_id
+           WHERE pv.id=$1 AND pv.product_id=$2`,
           [item.variant_id, item.product_id]
         );
         if (vr.length) {
           stockAvailable = parseFloat(vr[0].stock_qty);
           stockLabel += vr[0].sku_suffix ? ` (${vr[0].sku_suffix})` : ' (variante)';
+          trocaStockCompanyId = vr[0].stock_company_id || req.params.id;
         }
       } else {
+        // FEAT migration 100: group fallback
         const { rows: pr } = await client.query(
-          `SELECT stock_qty FROM products WHERE id=$1 AND company_id=$2`,
+          `SELECT p.stock_qty, p.company_id AS stock_company_id
+           FROM products p
+           JOIN companies c ON c.id = $2
+           WHERE p.id = $1
+             AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
           [item.product_id, req.params.id]
         );
-        if (pr.length) stockAvailable = parseFloat(pr[0].stock_qty);
+        if (pr.length) {
+          stockAvailable = parseFloat(pr[0].stock_qty);
+          trocaStockCompanyId = pr[0].stock_company_id || req.params.id;
+        }
       }
 
       if (stockAvailable !== undefined && stockAvailable < qty) {
@@ -724,9 +746,11 @@ router.post('/troca', async (req, res) => {
       } else {
         await client.query(
           `UPDATE products SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2 AND company_id=$3`,
-          [qty, item.product_id, req.params.id]
+          [qty, item.product_id, trocaStockCompanyId]
         );
       }
+      // Armazena stockCompanyId no item para uso posterior
+      item._stock_company_id = trocaStockCompanyId;
     }
 
     // 7. Cria o registro de venda da troca
@@ -760,8 +784,13 @@ router.post('/troca', async (req, res) => {
       let costPrice = 0;
       let productName = item.product_name_snapshot || '';
       if (item.product_id) {
+        // FEAT migration 100: group fallback para nome/custo
         const { rows: pr } = await client.query(
-          `SELECT name, cost_price FROM products WHERE id=$1 AND company_id=$2`,
+          `SELECT p.name, p.cost_price
+           FROM products p
+           JOIN companies c ON c.id = $2
+           WHERE p.id = $1
+             AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
           [item.product_id, req.params.id]
         );
         if (pr.length) {
@@ -785,10 +814,11 @@ router.post('/troca', async (req, res) => {
       );
 
       if (item.product_id) {
+        const mvCompanyId = item._stock_company_id || req.params.id;
         await client.query(
           `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
            VALUES ($1,$2,'out',$3,$4,'troca','Troca — saida novo item') ON CONFLICT DO NOTHING`,
-          [item.product_id, req.params.id, qty, trocaSale.id]
+          [item.product_id, mvCompanyId, qty, trocaSale.id]
         );
       }
     }
