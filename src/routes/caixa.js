@@ -8,6 +8,11 @@
 // GET  /companies/:id/caixa/sessao/:sessaoId — detalhe de uma sessão
 //
 // Pré-requisito: caixa habilitado em pdv_settings.caixa_enabled = true
+//
+// 07/05/2026: /abrir aceita responsavel_employee_id (opcional).
+// /fechar passou a retornar metricas extras (sales_count,
+// new_customers_count, sessao_label, closed_at) pro PDF de
+// fechamento do aura-app.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -24,24 +29,35 @@ router.get('/status', asyncHandler(async (req, res) => {
 }));
 
 // ── POST /caixa/abrir ─────────────────────────────────────────────────────
-// Body: { troco_inicial?: number }
+// Body: { troco_inicial?: number, responsavel_employee_id?: string }
 // Abre nova sessão. Rejeita com 409 se já há uma sessão aberta.
 router.post('/abrir', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const userId    = req.user.id;
-  const { troco_inicial = 0 } = req.body || {};
+  const { troco_inicial = 0, responsavel_employee_id = null } = req.body || {};
 
   if (typeof troco_inicial !== 'number' || troco_inicial < 0) {
     throw new AppError('troco_inicial deve ser um número >= 0', 400);
   }
+  if (responsavel_employee_id !== null && responsavel_employee_id !== undefined) {
+    if (typeof responsavel_employee_id !== 'string' || responsavel_employee_id.length === 0) {
+      throw new AppError('responsavel_employee_id deve ser uma string UUID', 400);
+    }
+  }
 
-  const sessao = await caixaService.abrir(companyId, userId, troco_inicial);
+  const sessao = await caixaService.abrir(
+    companyId,
+    userId,
+    troco_inicial,
+    responsavel_employee_id || null
+  );
   res.status(201).json({ sessao });
 }));
 
 // ── POST /caixa/fechar ────────────────────────────────────────────────────
 // Body: { dinheiro_contado: number, observacao?: string }
-// Fecha a sessão aberta. Cria o snapshot em caixa_fechamentos.
+// Fecha a sessão aberta. Cria o snapshot em caixa_fechamentos e retorna
+// metricas extras (sales_count, new_customers_count, sessao_label, closed_at).
 router.post('/fechar', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const userId    = req.user.id;

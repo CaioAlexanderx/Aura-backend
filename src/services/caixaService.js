@@ -1,6 +1,16 @@
 // ============================================================
 // AURA. — caixaService.js
 // Lógica de negócio do módulo de Abertura/Fechamento de Caixa
+//
+// 07/05/2026:
+// - abrir() aceita opcionalmente employeeId (responsavel operacional)
+//   gravado em caixa_sessoes.opened_by_employee_id.
+// - getStatus() prefere o nome do employee no header da sessao quando
+//   houver vinculo; cai pro user.full_name caso contrario.
+// - fechar() agora retorna metricas extras (sales_count,
+//   new_customers_count, sessao_label, closed_at) usadas pelo PDF de
+//   fechamento do aura-app. As metricas sao best-effort: erro retorna
+//   zero/null em vez de quebrar o fechamento.
 // ============================================================
 
 const pool = require('../config/database');
@@ -8,10 +18,6 @@ const AppError = require('../errors/AppError');
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/**
- * Verifica se o caixa está habilitado para a empresa.
- * O toggle é armazenado em companies.pdv_settings.caixa_enabled (boolean).
- */
 async function assertCaixaEnabled(companyId) {
   const { rows } = await pool.query(
     `SELECT pdv_settings->>'caixa_enabled' AS caixa_enabled FROM companies WHERE id = $1`,
@@ -28,13 +34,19 @@ async function assertCaixaEnabled(companyId) {
 
 /**
  * Retorna a sessão aberta de uma empresa, ou null se não houver.
+ * Faz LEFT JOIN com employees pra resolver o nome do operador
+ * preferindo o employee escolhido no fluxo, caindo pro user autenticado.
  */
 async function getSessaoAberta(companyId) {
   const { rows } = await pool.query(
-    `SELECT cs.*, 
-            u.full_name AS opened_by_name
+    `SELECT cs.*,
+            COALESCE(e.name, u.full_name) AS operator_name,
+            CASE WHEN cs.opened_by_employee_id IS NOT NULL THEN cs.opened_by_employee_id
+                 ELSE cs.opened_by
+            END AS operator_id
      FROM caixa_sessoes cs
      JOIN users u ON u.id = cs.opened_by
+     LEFT JOIN employees e ON e.id = cs.opened_by_employee_id
      WHERE cs.company_id = $1 AND cs.status = 'aberta'
      LIMIT 1`,
     [companyId]
@@ -42,20 +54,9 @@ async function getSessaoAberta(companyId) {
   return rows[0] || null;
 }
 
-/**
- * Calcula totais por forma de pagamento para uma sessão/período.
- *
- * Estratégia dupla:
- *   1. Pagamentos vinculados via sessao_id (preciso)
- *   2. Fallback por período (opened_at → closed_at/NOW) para pagamentos
- *      registrados antes de sessao_id ser preenchido.
- *
- * Fonte: sale_payments (PDV) + transactions income confirmadas.
- */
 async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
   const until = closedAt || new Date();
 
-  // -- Totais de sale_payments (PDV) por método
   const { rows: spRows } = await pool.query(
     `SELECT
        sp.method,
@@ -75,7 +76,6 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
     [companyId, sessaoId, openedAt, until]
   );
 
-  // -- Receitas avulsas confirmadas em transactions (sem método, totaliza como "outros")
   const { rows: txRows } = await pool.query(
     `SELECT COALESCE(SUM(amount), 0)::numeric(12,2) AS total
      FROM transactions
@@ -87,7 +87,6 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
     [companyId, openedAt, until]
   );
 
-  // Montar objeto de totais
   const totais = {
     pix:            0,
     cartao_debito:  0,
@@ -113,22 +112,63 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
   }
 
   totais.geral = Object.values(totais).reduce((acc, v) => acc + v, 0);
-
-  // Arredondar tudo para 2 casas
   for (const k of Object.keys(totais)) {
     totais[k] = Math.round(totais[k] * 100) / 100;
   }
-
   return totais;
+}
+
+/**
+ * Calcula metricas adicionais do dia (best-effort).
+ * Retorna { sales_count, new_customers_count } com 0 em caso de erro.
+ */
+async function calcularMetricas(companyId, sessaoId, openedAt, closedAt) {
+  const until = closedAt || new Date();
+  const result = { sales_count: 0, new_customers_count: 0 };
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT COUNT(DISTINCT s.id)::int AS c
+       FROM sales s
+       JOIN sale_payments sp ON sp.sale_id = s.id
+       WHERE s.company_id = $1
+         AND (sp.sessao_id = $2
+              OR (sp.sessao_id IS NULL
+                  AND s.created_at >= $3 AND s.created_at < $4))
+         AND COALESCE(s.status, 'active') = 'active'`,
+      [companyId, sessaoId, openedAt, until]
+    );
+    result.sales_count = rows[0]?.c || 0;
+  } catch (err) {
+    // tabela ausente ou schema diferente — segue silenciosamente
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int AS c
+       FROM customers
+       WHERE company_id = $1
+         AND created_at >= $2
+         AND created_at < $3`,
+      [companyId, openedAt, until]
+    );
+    result.new_customers_count = rows[0]?.c || 0;
+  } catch (err) {
+    // idem
+  }
+
+  return result;
 }
 
 // ── Operações públicas ────────────────────────────────────────────────────
 
 /**
  * Abre uma nova sessão de caixa para a empresa.
- * Rejeita se já houver uma sessão aberta (UNIQUE INDEX + check explícito).
+ * @param {string|null} employeeId Funcionario operacional responsavel.
+ *                                  Quando informado, salva em
+ *                                  opened_by_employee_id (FK employees).
  */
-async function abrir(companyId, userId, trocoInicial = 0) {
+async function abrir(companyId, userId, trocoInicial = 0, employeeId = null) {
   await assertCaixaEnabled(companyId);
 
   const existente = await getSessaoAberta(companyId);
@@ -140,20 +180,15 @@ async function abrir(companyId, userId, trocoInicial = 0) {
   }
 
   const { rows } = await pool.query(
-    `INSERT INTO caixa_sessoes (company_id, opened_by, troco_inicial)
-     VALUES ($1, $2, $3)
+    `INSERT INTO caixa_sessoes (company_id, opened_by, opened_by_employee_id, troco_inicial)
+     VALUES ($1, $2, $3, $4)
      RETURNING *`,
-    [companyId, userId, trocoInicial]
+    [companyId, userId, employeeId, trocoInicial]
   );
 
   return rows[0];
 }
 
-/**
- * Retorna o status atual do caixa:
- * - sessao_ativa com totais ao vivo, se houver sessão aberta
- * - null caso contrário
- */
 async function getStatus(companyId) {
   await assertCaixaEnabled(companyId);
 
@@ -173,8 +208,8 @@ async function getStatus(companyId) {
       opened_at:     sessao.opened_at,
       troco_inicial: parseFloat(sessao.troco_inicial),
       opened_by: {
-        id:   sessao.opened_by,
-        name: sessao.opened_by_name,
+        id:   sessao.operator_id,
+        name: sessao.operator_name,
       },
       totais_ao_vivo: totais,
     },
@@ -183,7 +218,10 @@ async function getStatus(companyId) {
 
 /**
  * Fecha a sessão aberta atual.
- * Cria o snapshot em caixa_fechamentos e marca a sessão como 'fechada'.
+ * Retorna o snapshot enriquecido com:
+ *   - sales_count, new_customers_count (metricas do dia)
+ *   - sessao_label (#XXXXX baseado no UUID, util pra exibir/PDF)
+ *   - closed_at (timestamp de fechamento)
  */
 async function fechar(companyId, userId, dinheiroContado, observacao = null) {
   await assertCaixaEnabled(companyId);
@@ -205,10 +243,10 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
     Math.round((parseFloat(sessao.troco_inicial) + totais.dinheiro) * 100) / 100;
 
   const client = await pool.connect();
+  let snapshot;
   try {
     await client.query('BEGIN');
 
-    // 1. Fechar a sessão
     await client.query(
       `UPDATE caixa_sessoes
        SET status = 'fechada', closed_at = $1, closed_by = $2
@@ -216,7 +254,6 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
       [closedAt, userId, sessao.id]
     );
 
-    // 2. Salvar o snapshot do fechamento
     const { rows } = await client.query(
       `INSERT INTO caixa_fechamentos (
          sessao_id,
@@ -242,18 +279,34 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
     );
 
     await client.query('COMMIT');
-    return rows[0];
+    snapshot = rows[0];
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
   } finally {
     client.release();
   }
+
+  // Metricas best-effort apos commit (nao impacta o snapshot)
+  const metricas = await calcularMetricas(
+    companyId,
+    sessao.id,
+    sessao.opened_at,
+    closedAt
+  );
+
+  // sessao_label: '#' + 5 primeiros chars do UUID (estavel + curto)
+  const sessao_label = '#' + String(sessao.id).replace(/-/g, '').slice(0, 5).toUpperCase();
+
+  return {
+    ...snapshot,
+    closed_at: closedAt,
+    sessao_label,
+    sales_count: metricas.sales_count,
+    new_customers_count: metricas.new_customers_count,
+  };
 }
 
-/**
- * Lista o histórico de sessões fechadas com seus fechamentos.
- */
 async function getHistorico(companyId, { limit = 20, offset = 0, de, ate } = {}) {
   await assertCaixaEnabled(companyId);
 
@@ -281,7 +334,7 @@ async function getHistorico(companyId, { limit = 20, offset = 0, de, ate } = {})
        cs.troco_inicial,
        cs.status,
        cs.observacao AS obs_sessao,
-       u_open.full_name  AS opened_by_name,
+       COALESCE(e.name, u_open.full_name) AS opened_by_name,
        u_close.full_name AS closed_by_name,
        cf.dinheiro_esperado,
        cf.dinheiro_contado,
@@ -297,6 +350,7 @@ async function getHistorico(companyId, { limit = 20, offset = 0, de, ate } = {})
      FROM caixa_sessoes cs
      JOIN users u_open  ON u_open.id  = cs.opened_by
      LEFT JOIN users u_close ON u_close.id = cs.closed_by
+     LEFT JOIN employees e ON e.id = cs.opened_by_employee_id
      LEFT JOIN caixa_fechamentos cf ON cf.sessao_id = cs.id
      WHERE cs.company_id = $1
        AND cs.status = 'fechada'
@@ -316,16 +370,13 @@ async function getHistorico(companyId, { limit = 20, offset = 0, de, ate } = {})
   return { sessoes: rows, total: countRows[0].total };
 }
 
-/**
- * Retorna o detalhe de uma sessão específica pelo ID.
- */
 async function getSessao(companyId, sessaoId) {
   await assertCaixaEnabled(companyId);
 
   const { rows } = await pool.query(
     `SELECT
        cs.*,
-       u_open.full_name  AS opened_by_name,
+       COALESCE(e.name, u_open.full_name) AS opened_by_name,
        u_close.full_name AS closed_by_name,
        cf.dinheiro_esperado,
        cf.dinheiro_contado,
@@ -341,6 +392,7 @@ async function getSessao(companyId, sessaoId) {
      FROM caixa_sessoes cs
      JOIN users u_open  ON u_open.id  = cs.opened_by
      LEFT JOIN users u_close ON u_close.id = cs.closed_by
+     LEFT JOIN employees e ON e.id = cs.opened_by_employee_id
      LEFT JOIN caixa_fechamentos cf ON cf.sessao_id = cs.id
      WHERE cs.id = $1 AND cs.company_id = $2`,
     [sessaoId, companyId]
