@@ -5,6 +5,9 @@
 //   GET /unified — membros de todos os CNPJs do mesmo dono
 //   POST /invite  — delega para inviteMemberMulti (suporta company_ids[])
 //   PATCH /:mid   — delega para updateMemberAndSync (sync automatico)
+// 06/05/2026 (Sprint UX Equipe):
+//   POST /:mid/resend-email — reenvia email com mesmo token
+//   PATCH /:mid/invite-email — edita destinatario e reenvia (mesmo token)
 // ============================================================
 
 const express = require('express');
@@ -15,7 +18,9 @@ const {
   countActiveMembers, listMembers, inviteMember,
   acceptInvite, updateMemberPermissions,
   listMembersUnified, inviteMemberMulti, updateMemberAndSync,
+  buildInviteUrl,
 } = require('../services/members');
+const { sendInviteEmail } = require('../services/mailer');
 
 // GET /companies/:id/members/unified
 // Retorna uma entrada por usuario com campo companies:[{company_id, ...}].
@@ -73,6 +78,131 @@ router.post('/accept/:token', requireAuth, async (req, res) => {
   } catch (err) {
     const status = err.message.includes('invalido') || err.message.includes('nvalid') ? 410 : 403;
     res.status(status).json({ error: err.message });
+  }
+});
+
+// Helper compartilhado: busca contexto pra montar email (company_name, inviter_name).
+async function loadInviteContext(companyId, inviterUserId) {
+  const { rows } = await db.query(
+    `SELECT
+       COALESCE(c.trade_name, c.legal_name, 'Aura') AS company_name,
+       u.full_name AS inviter_name
+     FROM companies c
+     LEFT JOIN users u ON u.id = $2
+     WHERE c.id = $1`,
+    [companyId, inviterUserId]
+  );
+  return {
+    companyName: rows[0]?.company_name || 'a empresa',
+    inviterName: rows[0]?.inviter_name || 'a equipe',
+  };
+}
+
+// POST /companies/:id/members/:mid/resend-email
+// Reenvia o email do convite usando o mesmo invite_token. Member precisa
+// estar pending e ter invite_email cadastrado.
+router.post('/:mid/resend-email', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, invite_token, invite_email, role_label, status
+       FROM company_members
+       WHERE id=$1 AND company_id=$2`,
+      [req.params.mid, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Convite nao encontrado' });
+
+    const m = rows[0];
+    if (m.status !== 'pending') return res.status(400).json({ error: 'Convite ja foi aceito ou cancelado' });
+    if (!m.invite_email) return res.status(400).json({ error: 'Este convite nao tem email cadastrado. Compartilhe o link manualmente ou edite o email primeiro.' });
+    if (!m.invite_token) return res.status(400).json({ error: 'Convite sem token valido. Gere um novo convite.' });
+
+    const inviteUrl = buildInviteUrl(m.invite_token);
+    const { companyName, inviterName } = await loadInviteContext(req.params.id, req.user.id);
+
+    try {
+      const r = await sendInviteEmail(m.invite_email, inviteUrl, companyName, m.role_label || 'Colaborador', inviterName);
+      console.log('[members] resend email sent:', r?.id || '', 'to', m.invite_email);
+      res.json({ message: 'Email reenviado', invite_email: m.invite_email, invite_url: inviteUrl });
+    } catch (mailErr) {
+      console.error('[members] resend email failed:', mailErr.message);
+      res.status(502).json({ error: 'Nao foi possivel enviar o email agora. Tente novamente em alguns minutos.' });
+    }
+  } catch (err) {
+    console.error('[members] resend route error:', err.message);
+    res.status(500).json({ error: 'Erro ao reenviar email' });
+  }
+});
+
+// PATCH /companies/:id/members/:mid/invite-email
+// Atualiza o destinatario do convite (mesmo token) e reenvia.
+// Body: { invite_email: 'novo@email.com' }
+router.patch('/:mid/invite-email', requireAuth, requireCompanyAccess({ roles: ['owner', 'admin'] }), async (req, res) => {
+  const { invite_email } = req.body || {};
+  if (!invite_email || !String(invite_email).trim()) {
+    return res.status(400).json({ error: 'invite_email e obrigatorio' });
+  }
+  const newEmail = String(invite_email).trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(newEmail)) {
+    return res.status(400).json({ error: 'Email invalido' });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT id, invite_token, invite_email, role_label, status
+       FROM company_members
+       WHERE id=$1 AND company_id=$2`,
+      [req.params.mid, req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Convite nao encontrado' });
+
+    const m = rows[0];
+    if (m.status !== 'pending') return res.status(400).json({ error: 'Convite ja foi aceito ou cancelado' });
+    if (!m.invite_token) return res.status(400).json({ error: 'Convite sem token. Gere um novo convite.' });
+
+    // Checa se o novo email ja eh membro ATIVO ou pendente nessa empresa (em outro registro)
+    const { rows: clash } = await db.query(
+      `SELECT cm.id FROM company_members cm
+       LEFT JOIN users u ON u.id = cm.user_id
+       WHERE cm.company_id = $1
+         AND cm.id != $2
+         AND cm.status IN ('active', 'pending')
+         AND (cm.invite_email = $3 OR u.email = $3)`,
+      [req.params.id, m.id, newEmail]
+    );
+    if (clash.length) {
+      return res.status(409).json({ error: 'Este email ja esta vinculado a outro membro/convite nesta empresa' });
+    }
+
+    // Atualiza email + reseta invited_at pra contar 7 dias do reenvio
+    const { rows: updated } = await db.query(
+      `UPDATE company_members
+         SET invite_email = $1, invited_at = NOW()
+       WHERE id = $2 AND company_id = $3
+       RETURNING id, invite_token, invite_email, role_label`,
+      [newEmail, req.params.mid, req.params.id]
+    );
+
+    const inviteUrl = buildInviteUrl(updated[0].invite_token);
+    const { companyName, inviterName } = await loadInviteContext(req.params.id, req.user.id);
+
+    try {
+      const r = await sendInviteEmail(newEmail, inviteUrl, companyName, updated[0].role_label || 'Colaborador', inviterName);
+      console.log('[members] invite email updated+sent:', r?.id || '', 'to', newEmail);
+    } catch (mailErr) {
+      // Email atualizado mas envio falhou — retorna OK com warning
+      console.error('[members] new email failed to send:', mailErr.message);
+      return res.status(200).json({
+        message: 'Email atualizado, mas nao conseguimos reenviar agora. Tente reenviar em alguns minutos.',
+        invite_email: newEmail,
+        invite_url: inviteUrl,
+        warning: 'send_failed',
+      });
+    }
+
+    res.json({ message: 'Email atualizado e reenviado', invite_email: newEmail, invite_url: inviteUrl });
+  } catch (err) {
+    console.error('[members] update invite-email error:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar email do convite' });
   }
 });
 
