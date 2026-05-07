@@ -36,6 +36,9 @@ router.use('/products', require('./productsRanking'));
 router.use('/products', require('./productImage'));
 router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
+// 07/05/2026: Importacao de DANFE PDF via IA. Gate de plano dentro da rota
+// (Negocio = 50/mes, Expansao = ilimitado).
+router.use('/products', require('./danfeImport'));
 router.use('/products/:pid/variants', require('./variants'));
 router.use('/product-categories', require('./productCategories'));
 // M-STOCKLINK MSL-02/03: vincula produtos entre CNPJs do mesmo owner.
