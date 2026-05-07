@@ -12,6 +12,9 @@
 //   POST /:mid/extend     — renova validade do convite mantendo token
 //   GET  /:mid/audit-log  — historico de acoes do member
 //   logAction()           — registrado em todas as rotas mutativas
+// 06/05/2026 (seats por plano):
+//   GET /unified e /billing usam summarizeSeats — devolve seats_included,
+//   seats_used, at_limit, monthly_cost (so cobra acessos ACIMA do plano).
 // ============================================================
 
 const express = require('express');
@@ -26,17 +29,55 @@ const {
 } = require('../services/members');
 const { sendInviteEmail } = require('../services/mailer');
 const { logAction, listAudit, diffPermissions } = require('../services/memberAudit');
+const { summarizeSeats, SEAT_PRICE_BRL } = require('../services/memberSeats');
+
+// Carrega plano efetivo da empresa (fallback essencial). billing_owner_company_id
+// puxa o plano do "dono" no caso de CNPJs irmaos. Se a coluna nao existir
+// (esquema antigo), cai pra plano da propria company.
+async function loadEffectivePlan(companyId) {
+  try {
+    const { rows } = await db.query(`
+      WITH owner AS (
+        SELECT COALESCE(billing_owner_company_id, id) AS oid
+        FROM companies WHERE id = $1
+      )
+      SELECT c.plan
+      FROM companies c
+      JOIN owner ON c.id = owner.oid
+    `, [companyId]);
+    return (rows[0]?.plan || 'essencial').toLowerCase();
+  } catch (err) {
+    console.error('[members] loadEffectivePlan failed:', err.message);
+    return 'essencial';
+  }
+}
 
 // GET /companies/:id/members/unified
 router.get('/unified', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const result = await listMembersUnified(req.params.id);
-    const activeCount = result.members.filter(m => m.status === 'active' && m.is_active).length;
+    const plan   = await loadEffectivePlan(req.params.id);
+    const seats  = summarizeSeats(plan, result.members);
+
+    const activeCount  = result.members.filter(m => m.status === 'active' && m.is_active).length;
+    const pendingCount = result.members.filter(m => m.status === 'pending').length;
+
     res.json({
       total:        result.members.length,
       active:       activeCount,
-      pending:      result.members.filter(m => m.status === 'pending').length,
-      monthly_cost: Math.max(activeCount - 1, 0) * 19,
+      pending:      pendingCount,
+      // Compat: monthly_cost agora considera seats inclusos no plano.
+      // 0 enquanto ha vagas; (extras * 19) acima do limite.
+      monthly_cost: seats.monthly_cost,
+      // Novos campos (seats por plano)
+      plan:               seats.plan,
+      seats_included:     seats.seats_included,
+      seats_used:         seats.seats_used,
+      seats_remaining:    seats.seats_remaining,
+      extra_seats:        seats.extra_seats,
+      extra_seat_price:   seats.extra_seat_price,
+      at_limit:           seats.at_limit,
+      over_limit:         seats.over_limit,
       members:      result.members,
       siblings:     result.siblings,
     });
@@ -50,12 +91,27 @@ router.get('/unified', requireAuth, requireCompanyAccess(), async (req, res) => 
 router.get('/', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const members = await listMembers(req.params.id);
+    const plan    = await loadEffectivePlan(req.params.id);
+    // Adapta lista single-company pro shape esperado por summarizeSeats
+    const summarizable = members.map(m => ({
+      status:    m.status,
+      is_active: m.is_active,
+    }));
+    const seats = summarizeSeats(plan, summarizable);
     const activeCount = members.filter(m => m.status === 'active' && m.is_active).length;
     res.json({
-      total: members.length,
-      active: activeCount,
-      pending: members.filter(m => m.status === 'pending').length,
-      monthly_cost: Math.max(activeCount - 1, 0) * 19,
+      total:        members.length,
+      active:       activeCount,
+      pending:      members.filter(m => m.status === 'pending').length,
+      monthly_cost: seats.monthly_cost,
+      plan:             seats.plan,
+      seats_included:   seats.seats_included,
+      seats_used:       seats.seats_used,
+      seats_remaining:  seats.seats_remaining,
+      extra_seats:      seats.extra_seats,
+      extra_seat_price: seats.extra_seat_price,
+      at_limit:         seats.at_limit,
+      over_limit:       seats.over_limit,
       members,
     });
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar membros' }); }
@@ -332,14 +388,32 @@ router.delete('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'adm
 // GET /companies/:id/members/billing
 router.get('/billing', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
-    const activeCount = await countActiveMembers(req.params.id);
-    const billable = Math.max(activeCount - 1, 0);
+    // Usa unified pra contar usuarios unicos em todos os CNPJs irmaos —
+    // mesma logica do /unified.
+    const { members } = await listMembersUnified(req.params.id);
+    const plan  = await loadEffectivePlan(req.params.id);
+    const seats = summarizeSeats(plan, members);
     res.json({
-      active_members: activeCount, billable_members: billable,
-      price_per_member: 19, monthly_total: billable * 19,
-      note: 'O titular da conta nao e cobrado. R$19/membro adicional ativo/mes.',
+      plan:                seats.plan,
+      seats_included:      seats.seats_included,
+      seats_used:          seats.seats_used,
+      seats_remaining:     seats.seats_remaining,
+      extra_seats:         seats.extra_seats,
+      price_per_member:    SEAT_PRICE_BRL,
+      monthly_total:       seats.monthly_cost,
+      at_limit:            seats.at_limit,
+      over_limit:          seats.over_limit,
+      // Compat
+      active_members:      seats.seats_used,
+      billable_members:    seats.extra_seats,
+      note:                seats.over_limit
+        ? 'Limite do plano excedido. Cada acesso adicional custa R$' + SEAT_PRICE_BRL + '/mes.'
+        : 'Acessos inclusos no plano: ' + seats.seats_included + '. Acima disso, R$' + SEAT_PRICE_BRL + '/mes por acesso adicional.',
     });
-  } catch (err) { res.status(500).json({ error: 'Erro ao calcular cobranca' }); }
+  } catch (err) {
+    console.error('[members] billing error:', err.message);
+    res.status(500).json({ error: 'Erro ao calcular cobranca' });
+  }
 });
 
 // GET /companies/:id/members/roles
