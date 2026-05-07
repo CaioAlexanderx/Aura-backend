@@ -14,6 +14,9 @@
 //   depois sem o zero-líder. Cobre produtos E variantes.
 // FIX 06/05/2026: split payments — frontend envia p.value (não p.amount).
 //   calcCreditAmount e INSERT sale_payments agora leem p.value ?? p.amount.
+// FIX 07/05/2026: crediário anônimo — cliente não é mais obrigatório.
+//   Sem customer_id: creditAmount = 0, venda entra inteira no financeiro.
+//   Com customer_id: comportamento original (ledger de crédito).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -234,13 +237,11 @@ router.post('/sale', async (req, res) => {
       if (!empCheck.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' }); }
     }
 
-    const creditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
-    if (creditAmount > 0 && !customer_id) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({
-        error: 'Crediario exige um cliente identificado. Selecione o cliente antes de finalizar.',
-      });
-    }
+    // Crediário anônimo: sem customer_id não lança no ledger de crédito — o valor
+    // inteiro vai pro financeiro como receita normal. Com customer_id, o crédito
+    // fica fora do financeiro e entra em customer_credit_transactions.
+    const rawCreditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
+    const creditAmount = (rawCreditAmount > 0 && customer_id) ? rawCreditAmount : 0;
 
     const { rows: sales } = await client.query(
       `INSERT INTO sales
