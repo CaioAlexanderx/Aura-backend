@@ -26,6 +26,8 @@
 //   scan, POST /sale, DELETE /sale e POST /troca usam company_id real do
 //   produto para mover estoque — subsidiárias vendem do catálogo do
 //   billing_owner_company_id sem criar pool separado.
+// FIX 07/05/2026: DELETE /sale — JOIN products no SELECT sale_items para
+//   obter stock_company_id sem round-trip por item (compat. com testes).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -527,16 +529,19 @@ router.delete('/sale/:saleId', async (req, res) => {
     const sale = rows[0];
     if (sale.status === 'cancelled') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Esta venda ja foi cancelada' }); }
 
+    // FEAT migration 100: JOIN products para obter stock_company_id sem round-trip por item.
     const { rows: items } = await client.query(
-      `SELECT product_id, variant_id, quantity, product_name_snapshot FROM sale_items WHERE sale_id=$1`,
-      [req.params.saleId]
+      `SELECT si.product_id, si.variant_id, si.quantity, si.product_name_snapshot,
+              COALESCE(p.company_id, $2) AS stock_company_id
+       FROM sale_items si
+       LEFT JOIN products p ON p.id = si.product_id
+       WHERE si.sale_id=$1`,
+      [req.params.saleId, req.params.id]
     );
     for (const item of items) {
       if (!item.product_id) continue;
       const qty = parseFloat(item.quantity);
-      // FEAT migration 100: usa company_id real do produto para restaurar estoque
-      const { rows: pInfo } = await client.query('SELECT company_id FROM products WHERE id=$1', [item.product_id]);
-      const stockCompanyId = pInfo[0]?.company_id || req.params.id;
+      const stockCompanyId = item.stock_company_id || req.params.id;
       if (item.variant_id) {
         await client.query(`UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`, [qty, item.variant_id]);
       } else {
