@@ -15,6 +15,11 @@
 //
 // Soft-delete (is_active=false) em vez de DELETE porque sale_items
 // tem FK NO ACTION em variant_id (preserva historico de vendas).
+//
+// 08/05/2026: ao salvar variantes, se uma combinacao criada coincide
+// com color/size proprios do pai, limpamos color=NULL e size=NULL do
+// pai pra evitar dupla exibicao no VariantPickerModal e loop de
+// banner-amarelo no editor (ver comentario no UPDATE final).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -135,9 +140,12 @@ router.put('/:pid/variations', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Valida produto
+    // Valida produto + captura color/size proprios atuais (necessario pra
+    // detectar migracao do estoque do pai pra variante e limpar os campos
+    // depois — evita dupla exibicao no VariantPickerModal e loop de banner
+    // amarelo no editor)
     const { rows: prodRows } = await client.query(
-      'SELECT id FROM products WHERE id = $1 AND company_id = $2',
+      'SELECT id, color, size FROM products WHERE id = $1 AND company_id = $2',
       [pid, cid]
     );
     if (!prodRows.length) {
@@ -145,6 +153,8 @@ router.put('/:pid/variations', async (req, res) => {
       client.release();
       return res.status(404).json({ error: 'Produto nao encontrado' });
     }
+    const parentColor = prodRows[0].color || null;
+    const parentSize  = prodRows[0].size  || null;
 
     // Soft-delete variantes ativas atuais (preserva sale_items FK)
     await client.query(
@@ -228,12 +238,41 @@ router.put('/:pid/variations', async (req, res) => {
 
     // Atualiza stock_qty do produto pai como SOMA das variantes
     // (se nao tem variantes, mantem o valor atual do produto)
+    //
+    // Detecta migracao: se alguma combinacao criada coincide com a
+    // cor+tamanho proprios do pai, esse "estoque orfao" do pai foi agora
+    // formalizado como variante. Limpa color/size do pai pra:
+    //  - VariantPickerModal nao mostrar mais "Preto · M · estoque do pai"
+    //  - useEffect do ProductVariationsSection nao re-disparar o merge
+    //    no proximo open do editor (loop do banner amarelo)
     if (combinations.length > 0) {
       const totalStock = combinations.reduce((acc, c) => acc + c.stock, 0);
-      await client.query(
-        'UPDATE products SET stock_qty = $1, updated_at = NOW() WHERE id = $2',
-        [totalStock, pid]
-      );
+
+      // Logica de match adapta-se ao mode (matrix / color / size)
+      const parentMigrated = combinations.some(c => {
+        const matchColor = !!(parentColor && c.colorHex &&
+          String(c.colorHex).toUpperCase() === String(parentColor).toUpperCase());
+        const matchSize = !!(parentSize && c.sizeValue &&
+          String(c.sizeValue) === String(parentSize));
+        if (parentColor && parentSize) return matchColor && matchSize;     // matrix mode
+        if (parentColor) return matchColor;                                 // color-only mode
+        if (parentSize) return matchSize;                                   // size-only mode
+        return false;                                                        // pai sem atributos
+      });
+
+      if (parentMigrated) {
+        await client.query(
+          `UPDATE products
+           SET stock_qty = $1, color = NULL, size = NULL, updated_at = NOW()
+           WHERE id = $2`,
+          [totalStock, pid]
+        );
+      } else {
+        await client.query(
+          'UPDATE products SET stock_qty = $1, updated_at = NOW() WHERE id = $2',
+          [totalStock, pid]
+        );
+      }
     }
 
     await client.query('COMMIT');
