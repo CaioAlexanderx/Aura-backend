@@ -11,6 +11,11 @@
 //   new_customers_count, sessao_label, closed_at) usadas pelo PDF de
 //   fechamento do aura-app. As metricas sao best-effort: erro retorna
 //   zero/null em vez de quebrar o fechamento.
+//
+// 08/05/2026 (hotfix):
+// - abrir() agora valida employeeId contra a tabela employees antes do
+//   INSERT. Previne FK violation caixa_sessoes_opened_by_employee_id_fkey
+//   quando o front envia user.id (UUID auth) no lugar do employees.id.
 // ============================================================
 
 const pool = require('../config/database');
@@ -165,8 +170,10 @@ async function calcularMetricas(companyId, sessaoId, openedAt, closedAt) {
 /**
  * Abre uma nova sessão de caixa para a empresa.
  * @param {string|null} employeeId Funcionario operacional responsavel.
- *                                  Quando informado, salva em
- *                                  opened_by_employee_id (FK employees).
+ *                                  Quando informado, valida contra a tabela
+ *                                  employees antes do INSERT para evitar FK
+ *                                  violation quando o front envia user.id
+ *                                  (UUID do auth) em vez do employees.id.
  */
 async function abrir(companyId, userId, trocoInicial = 0, employeeId = null) {
   await assertCaixaEnabled(companyId);
@@ -179,11 +186,24 @@ async function abrir(companyId, userId, trocoInicial = 0, employeeId = null) {
     );
   }
 
+  // Guard: verifica se employeeId é realmente um registro em employees.
+  // Previne FK violation quando UI manda user.id (UUID do auth) no lugar
+  // do employees.id. Se não encontrar, abre como opened_by apenas
+  // (opened_by já registra quem abriu via auth UUID).
+  let validEmployeeId = null;
+  if (employeeId) {
+    const { rows: empCheck } = await pool.query(
+      'SELECT id FROM employees WHERE id = $1 AND company_id = $2',
+      [employeeId, companyId]
+    );
+    validEmployeeId = empCheck.length ? employeeId : null;
+  }
+
   const { rows } = await pool.query(
     `INSERT INTO caixa_sessoes (company_id, opened_by, opened_by_employee_id, troco_inicial)
      VALUES ($1, $2, $3, $4)
      RETURNING *`,
-    [companyId, userId, employeeId, trocoInicial]
+    [companyId, userId, validEmployeeId, trocoInicial]
   );
 
   return rows[0];
