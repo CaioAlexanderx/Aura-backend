@@ -7,24 +7,28 @@
 //   no aura-app. sanitizeNcm strip não-dígitos e exige 8 chars.
 // FEAT (mai/2026): is_group_shared — produtos do billing_owner_company_id
 //   ficam visíveis para CNPJs subsidiários do mesmo grupo (migration 100).
-// FIX (mai/2026): multi-CNPJ WHERE usa subquery inline — sem round-trip
-//   extra de coInfo, mantém 2 db.query calls no GET (compat. com testes).
 // FIX (07/05/2026): GET listagem desacoplada do plan limit. Plan limit
 //   ainda gating do CADASTRO (POST), mas o GET agora só aplica HARD_CAP
 //   (20k) — clientes com produtos cadastrados acima do plano (import CSV
 //   legacy ou downgrade) continuam enxergando todo o catálogo.
 //   Bug Davi (07/05): plano negocio (7000) com 10.157 produtos →
-//   3.157 produtos invisíveis no Estoque (filtro local não tinha como
-//   achar barcodes que nem chegaram no payload). PDV não sofria porque
-//   chama /scan que consulta direto no DB.
+//   3.157 produtos invisíveis no Estoque.
+// FIX (08/05/2026): visibilidade BIDIRECIONAL no grupo. Antes a migration
+//   100 só fazia subsidiária ver produtos shared do billing_owner; matriz
+//   NÃO via produtos shared das subsidiárias.
+//   Bug Davi: produto criado em Villa Branca (cnpj2) ficava invisível na
+//   Matriz. Sintoma "alterar preço dá 404" era a inconsistência GET-vs-
+//   PATCH (PATCH não casava produto shared visto pela subsidiária).
+//   Solução:
+//     - GET/PATCH/DELETE usam visibilityWhere() — bidirecional via group_root.
+//     - POST defaulta is_group_shared=true para empresa em billing group.
+//     - Migration 102 backfill em produtos existentes.
+//     - group_root(empresa) = billing_owner se subsidiária, senão a própria
+//       empresa. Empresas com mesmo group_root estão no mesmo grupo.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 
-// HARD_CAP: limite máximo de itens devolvidos em uma única chamada do GET,
-// independente do plano. Defesa contra payload gigante / OOM no client.
-// Acima disso o cliente precisa de busca server-side (TODO) ou paginação
-// real via ?offset.
 const HARD_CAP = 20000;
 
 function getPlanLimit(plan) {
@@ -36,9 +40,6 @@ function getPlanLimit(plan) {
   }
 }
 
-// NCM SEFAZ: 8 dígitos. Strip de pontos/espaços e valida tamanho.
-// Retorna null pra entradas vazias/inválidas — não bloqueia request,
-// só evita salvar lixo no banco. SEFAZ valida na hora de emitir nota.
 function sanitizeNcm(raw) {
   if (raw === undefined || raw === null) return null;
   const digits = String(raw).replace(/\D/g, '');
@@ -47,13 +48,47 @@ function sanitizeNcm(raw) {
   return digits;
 }
 
-// GET /
+// ─── Visibilidade de grupo (BIDIRECIONAL) ────────────────
+//
+// Regra: produto P visível para empresa X se
+//   P.company_id = X
+//   OU (P.is_group_shared E group_root(P.company_id) = group_root(X))
+//
+// SQL: COALESCE(NULLIF(billing_owner_company_id, id), id) = group_root.
+//
+// Pra empresa standalone (sem grupo), a lista de empresas-do-grupo
+// contém só ela mesma → visibilidade idêntica ao caso single-company.
+function visibilityWhere(idParam, cidParam) {
+  return `id = ${idParam} AND (company_id = ${cidParam} OR (
+    is_group_shared = true
+    AND company_id IN (
+      SELECT id FROM companies
+      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
+        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
+        FROM companies WHERE id = ${cidParam}
+      )
+    )
+  ))`;
+}
+
+// Versão sem o `id =` para uso em listagens.
+function listVisibilityWhere(cidParam) {
+  return `(company_id = ${cidParam} OR (
+    is_group_shared = true
+    AND company_id IN (
+      SELECT id FROM companies
+      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
+        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
+        FROM companies WHERE id = ${cidParam}
+      )
+    )
+  ))`;
+}
+
+// ─── GET / ──────────────────────────────────
 router.get('/', async (req, res) => {
   const cid = req.params.id;
   const planLimit = getPlanLimit(req.user?.plan);
-  // Listagem NÃO capa por plano (bug Davi #2 — 07/05). Default sem ?limit
-  // = HARD_CAP, suficiente pra Davi (10157) e folga grande pra clientes
-  // típicos. Cliente pode pedir ?limit=N (cap em HARD_CAP).
   const requested = parseInt(req.query.limit);
   const limit = Math.min(
     Number.isFinite(requested) && requested > 0 ? requested : HARD_CAP,
@@ -64,15 +99,7 @@ router.get('/', async (req, res) => {
   const search = req.query.search;
 
   try {
-    // Visibilidade multi-CNPJ (migration 100): subquery inline — sem round-trip extra.
-    // Subsidiárias enxergam produtos shared do billing_owner sem query separada.
-    let where = `WHERE (company_id = $1 OR (
-      is_group_shared = true
-      AND company_id = (
-        SELECT billing_owner_company_id FROM companies
-        WHERE id = $1 AND billing_owner_company_id IS NOT NULL AND billing_owner_company_id != $1
-      )
-    ))`;
+    let where = `WHERE ${listVisibilityWhere('$1')}`;
     const params = [cid];
 
     if (category) { where += ` AND category = $${params.length + 1}`; params.push(category); }
@@ -99,7 +126,6 @@ router.get('/', async (req, res) => {
       ncm: r.ncm || '',
       is_active: r.is_active !== false,
       is_group_shared: r.is_group_shared || false,
-      // stock_company_id exposto para o frontend saber qual CNPJ detém o estoque
       stock_company_id: r.company_id,
       created_at: r.created_at,
       has_variants: r.has_variants || false,
@@ -109,16 +135,12 @@ router.get('/', async (req, res) => {
   } catch (err) { console.error('[products] list error:', err.message); res.status(500).json({ error: 'Erro ao listar produtos' }); }
 });
 
-// GET /:pid/variants
+// ─── GET /:pid/variants ────────────────────────────
 router.get('/:pid/variants', async (req, res) => {
   const { id: companyId, pid: productId } = req.params;
   try {
-    // Permite buscar variantes de produto shared
     const { rows: check } = await db.query(
-      `SELECT p.id FROM products p
-       JOIN companies c ON c.id = $2
-       WHERE p.id = $1
-         AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
+      `SELECT id FROM products WHERE ${visibilityWhere('$1', '$2')}`,
       [productId, companyId]
     );
     if (!check.length) return res.status(404).json({ error: 'Produto nao encontrado' });
@@ -132,33 +154,60 @@ router.get('/:pid/variants', async (req, res) => {
   } catch (err) { console.error('[products] variants error:', err.message); res.status(500).json({ error: 'Erro ao buscar variantes' }); }
 });
 
-// POST /
+// ─── POST / ──────────────────────────────────
+//
+// Default de is_group_shared: true se a empresa está em billing group
+// (tem billing_owner != self OU tem subsidiárias). Senão false.
+//
+// Override via body.is_group_shared se cliente quiser explícito (ex:
+// produto privado mesmo em grupo, ou shared mesmo standalone).
+//
+// in_group é pego no MESMO query do count (mantém número de db.query
+// calls — compat com testes existentes).
 router.post('/', async (req, res) => {
   const cid = req.params.id;
   const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size, ncm } = req.body;
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'name e obrigatorio' });
 
+  let defaultShared = false;
   try {
     const planLimit = getPlanLimit(req.user?.plan);
-    const countRes = await db.query('SELECT COUNT(*) AS total FROM products WHERE company_id = $1', [cid]);
-    const current = parseInt(countRes.rows[0]?.total) || 0;
+    const stats = await db.query(
+      `SELECT
+         (SELECT COUNT(*) FROM products WHERE company_id = $1) AS total,
+         EXISTS(
+           SELECT 1 FROM companies c
+           WHERE c.id = $1
+             AND (
+               (c.billing_owner_company_id IS NOT NULL AND c.billing_owner_company_id != c.id)
+               OR EXISTS (SELECT 1 FROM companies sub WHERE sub.billing_owner_company_id = c.id AND sub.id != c.id)
+             )
+         ) AS in_group`,
+      [cid]
+    );
+    const current = parseInt(stats.rows[0]?.total) || 0;
+    defaultShared = stats.rows[0]?.in_group === true;
     if (current >= planLimit) return res.status(403).json({ error: `Limite de produtos atingido (${planLimit}).`, limit: planLimit, current });
-  } catch (err) { console.error('[products] count check error:', err.message); }
+  } catch (err) { console.error('[products] count/group check error:', err.message); }
+
+  const isGroupShared = req.body.is_group_shared !== undefined
+    ? !!req.body.is_group_shared
+    : defaultShared;
 
   try {
     const result = await db.query(
-      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
       [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
        parseFloat(price)||0, parseFloat(cost_price)||0, parseInt(stock_qty)||0, parseInt(min_stock)||0,
        parseInt(stock_max)||0, unit||'un', color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
-       size ? String(size).slice(0,100) : null, sanitizeNcm(ncm)]
+       size ? String(size).slice(0,100) : null, sanitizeNcm(ncm), isGroupShared]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
 });
 
-// PATCH /:pid
+// ─── PATCH /:pid ────────────────────────────────
 router.patch('/:pid', async (req, res) => {
   const { id: cid, pid } = req.params;
 
@@ -166,7 +215,11 @@ router.patch('/:pid', async (req, res) => {
     const decrement = parseInt(req.body.stock_qty_decrement);
     if (!decrement || decrement <= 0) return res.status(400).json({ error: 'stock_qty_decrement deve ser positivo' });
     try {
-      const result = await db.query('UPDATE products SET stock_qty = GREATEST(0, stock_qty - $1), updated_at = NOW() WHERE id = $2 AND company_id = $3 RETURNING *', [decrement, pid, cid]);
+      const result = await db.query(
+        `UPDATE products SET stock_qty = GREATEST(0, stock_qty - $1), updated_at = NOW()
+         WHERE ${visibilityWhere('$2', '$3')} RETURNING *`,
+        [decrement, pid, cid]
+      );
       if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
       return res.json(result.rows[0]);
     } catch (err) { console.error('[products] decrement error:', err.message); return res.status(500).json({ error: 'Erro ao decrementar estoque' }); }
@@ -187,17 +240,23 @@ router.patch('/:pid', async (req, res) => {
   if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   updates.push('updated_at = NOW()'); values.push(pid, cid);
   try {
-    const result = await db.query(`UPDATE products SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = $${idx+1} RETURNING *`, values);
+    const result = await db.query(
+      `UPDATE products SET ${updates.join(', ')} WHERE ${visibilityWhere(`$${idx}`, `$${idx+1}`)} RETURNING *`,
+      values
+    );
     if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     res.json(result.rows[0]);
   } catch (err) { console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' }); }
 });
 
-// DELETE /:pid — try DELETE first, handle FK with nullify + retry
+// ─── DELETE /:pid ───────────────────────────────
 router.delete('/:pid', async (req, res) => {
   const { id: cid, pid } = req.params;
   try {
-    const result = await db.query('DELETE FROM products WHERE id = $1 AND company_id = $2 RETURNING id, name', [pid, cid]);
+    const result = await db.query(
+      `DELETE FROM products WHERE ${visibilityWhere('$1', '$2')} RETURNING id, name`,
+      [pid, cid]
+    );
     if (!result || !result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     res.json({ deleted: true, id: pid, name: result.rows[0].name });
   } catch (err) {
@@ -206,7 +265,10 @@ router.delete('/:pid', async (req, res) => {
         await db.query('UPDATE sale_items SET product_id = NULL WHERE product_id = $1', [pid]);
         await db.query('UPDATE barber_stock_movements SET product_id = NULL WHERE product_id = $1', [pid]);
         await db.query('UPDATE stock_movements SET product_id = NULL WHERE product_id = $1', [pid]);
-        const retry = await db.query('DELETE FROM products WHERE id = $1 AND company_id = $2 RETURNING id, name', [pid, cid]);
+        const retry = await db.query(
+          `DELETE FROM products WHERE ${visibilityWhere('$1', '$2')} RETURNING id, name`,
+          [pid, cid]
+        );
         if (retry && retry.rows.length) return res.json({ deleted: true, id: pid, name: retry.rows[0].name });
         return res.status(404).json({ error: 'Produto nao encontrado' });
       } catch (retryErr) {
