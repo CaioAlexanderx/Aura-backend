@@ -7,6 +7,9 @@
 //   do plano [import CSV legacy / downgrade] ficavam sem ver parte do
 //   próprio catálogo. Listagem foi desacoplada do plan limit, gating
 //   de plano agora vale só pra POST).
+// PATCH/DELETE — Davi 08/05/2026: subsidiária podia listar mas não
+//   editar produtos group-shared do billing_owner (404). Fix: WHERE
+//   espelha visibilidade do GET (own + shared do billing_owner).
 // ============================================================
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
@@ -289,6 +292,73 @@ describe('DELETE /companies/:id/products/:pid', () => {
     const res = await request(app)
       .delete(`/api/v1/companies/${cid}/products/p1`);
     expect(res.status).toBe(401);
+  });
+});
+
+// ── PATCH/DELETE — group-shared (Davi 08/05/2026) ─────────
+// Bug: subsidiária loga, vê produtos shared do billing_owner na
+// listagem (migration 100), tenta editar/deletar e leva 404 porque
+// o WHERE só batia em company_id próprio. Após fix, o WHERE espelha
+// a visibilidade do GET — own + shared do billing_owner via subquery.
+describe('PATCH /companies/:id/products/:pid — group-shared (filial edita produto da matriz)', () => {
+  test('200 — filial atualiza preço de produto shared do billing_owner', async () => {
+    // O UPDATE com a nova WHERE clause encontra o produto shared
+    // (company_id = matriz, mas billing_owner_company_id da filial = matriz).
+    // O mock simula a query devolvendo o produto atualizado.
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
+    db.query.mockResolvedValueOnce({                                // UPDATE RETURNING
+      rows: [{ id: 'p_shared', name: 'Tenis Activita', price: 99.90, is_group_shared: true, company_id: 'matriz_id' }]
+    });
+
+    const res = await request(app)
+      .patch(`/api/v1/companies/filial_id/products/p_shared`)
+      .set(authNegocio)
+      .send({ price: 99.90 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe('p_shared');
+    expect(parseFloat(res.body.price)).toBe(99.90);
+  });
+
+  test('404 — produto NAO-shared de outra empresa permanece bloqueado', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [] }); // WHERE nao acha
+
+    const res = await request(app)
+      .patch(`/api/v1/companies/filial_id/products/p_privado`)
+      .set(authNegocio)
+      .send({ price: 99.90 });
+
+    expect(res.status).toBe(404);
+  });
+
+  test('200 — stock_qty_decrement em produto shared (venda na filial reduz estoque do registro da matriz)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({
+      rows: [{ id: 'p_shared', stock_qty: 4, company_id: 'matriz_id', is_group_shared: true }]
+    });
+
+    const res = await request(app)
+      .patch(`/api/v1/companies/filial_id/products/p_shared`)
+      .set(authNegocio)
+      .send({ stock_qty_decrement: 1 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.stock_qty).toBe(4);
+  });
+});
+
+describe('DELETE /companies/:id/products/:pid — group-shared', () => {
+  test('200 — filial deleta produto shared (delegação de gerenciamento ao grupo)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p_shared', name: 'Tenis Activita' }] });
+
+    const res = await request(app)
+      .delete(`/api/v1/companies/filial_id/products/p_shared`)
+      .set(authNegocio);
+
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(true);
   });
 });
 
