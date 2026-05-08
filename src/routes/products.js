@@ -17,6 +17,15 @@
 //   3.157 produtos invisíveis no Estoque (filtro local não tinha como
 //   achar barcodes que nem chegaram no payload). PDV não sofria porque
 //   chama /scan que consulta direto no DB.
+// FIX (08/05/2026): PATCH/DELETE agora aceitam produtos group-shared.
+//   Bug Davi: subsidiária loga, lista produtos via GET (que JÁ inclui
+//   shared do billing_owner via migration 100), tenta editar preço de
+//   um produto shared → 404 porque o WHERE do PATCH só batia em
+//   `company_id = $cid`. Solução: WHERE do PATCH/DELETE espelha o
+//   WHERE do GET — own + shared do billing_owner. Sintoma reportado
+//   era "alterar preço dá 404", mas o bug afeta QUALQUER edição
+//   (PATCH name/sku/category/etc) e DELETE de produto shared a partir
+//   da subsidiária.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -45,6 +54,30 @@ function sanitizeNcm(raw) {
   if (digits.length === 0) return null;
   if (digits.length !== 8) return null;
   return digits;
+}
+
+// Helper: WHERE clause de escopo de escrita. Permite editar/deletar
+// produtos próprios da empresa OU produtos group-shared do billing_owner
+// (migration 100). Espelha a visibilidade do GET — não faz sentido um
+// produto aparecer na listagem da subsidiária e dar 404 no PATCH.
+//
+// Os parâmetros idParam/cidParam são as strings dos placeholders já
+// numerados (ex: '$2', '$3') — não temos um único `$N` fixo porque
+// o PATCH monta os updates dinamicamente.
+//
+// Mantém a subquery inline (sem round-trip extra) — para empresas que
+// NÃO são subsidiária a subquery devolve NULL e o OR fica falso, então
+// o comportamento é idêntico ao WHERE original.
+function scopeWhere(idParam, cidParam) {
+  return `id = ${idParam} AND (company_id = ${cidParam} OR (
+    is_group_shared = true
+    AND company_id = (
+      SELECT billing_owner_company_id FROM companies
+      WHERE id = ${cidParam}
+        AND billing_owner_company_id IS NOT NULL
+        AND billing_owner_company_id != ${cidParam}
+    )
+  ))`;
 }
 
 // GET /
@@ -166,7 +199,14 @@ router.patch('/:pid', async (req, res) => {
     const decrement = parseInt(req.body.stock_qty_decrement);
     if (!decrement || decrement <= 0) return res.status(400).json({ error: 'stock_qty_decrement deve ser positivo' });
     try {
-      const result = await db.query('UPDATE products SET stock_qty = GREATEST(0, stock_qty - $1), updated_at = NOW() WHERE id = $2 AND company_id = $3 RETURNING *', [decrement, pid, cid]);
+      // FIX (08/05/2026): scopeWhere permite decrementar estoque de produto
+      // shared a partir da subsidiária — venda na filial reduz estoque do
+      // produto que está fisicamente no DB sob company_id=matriz.
+      const result = await db.query(
+        `UPDATE products SET stock_qty = GREATEST(0, stock_qty - $1), updated_at = NOW()
+         WHERE ${scopeWhere('$2', '$3')} RETURNING *`,
+        [decrement, pid, cid]
+      );
       if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
       return res.json(result.rows[0]);
     } catch (err) { console.error('[products] decrement error:', err.message); return res.status(500).json({ error: 'Erro ao decrementar estoque' }); }
@@ -187,7 +227,14 @@ router.patch('/:pid', async (req, res) => {
   if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   updates.push('updated_at = NOW()'); values.push(pid, cid);
   try {
-    const result = await db.query(`UPDATE products SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = $${idx+1} RETURNING *`, values);
+    // FIX (08/05/2026): scopeWhere mira tanto produto próprio quanto
+    // group-shared do billing_owner (migration 100). Antes: apenas
+    // `id = $idx AND company_id = $idx+1` — subsidiária recebia 404
+    // ao editar qualquer campo de um produto shared (price, name, etc).
+    const result = await db.query(
+      `UPDATE products SET ${updates.join(', ')} WHERE ${scopeWhere(`$${idx}`, `$${idx+1}`)} RETURNING *`,
+      values
+    );
     if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     res.json(result.rows[0]);
   } catch (err) { console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' }); }
@@ -197,7 +244,12 @@ router.patch('/:pid', async (req, res) => {
 router.delete('/:pid', async (req, res) => {
   const { id: cid, pid } = req.params;
   try {
-    const result = await db.query('DELETE FROM products WHERE id = $1 AND company_id = $2 RETURNING id, name', [pid, cid]);
+    // FIX (08/05/2026): scopeWhere — subsidiária pode arquivar/deletar
+    // produto group-shared do billing_owner. Mesmo motivo do PATCH.
+    const result = await db.query(
+      `DELETE FROM products WHERE ${scopeWhere('$1', '$2')} RETURNING id, name`,
+      [pid, cid]
+    );
     if (!result || !result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     res.json({ deleted: true, id: pid, name: result.rows[0].name });
   } catch (err) {
@@ -206,7 +258,10 @@ router.delete('/:pid', async (req, res) => {
         await db.query('UPDATE sale_items SET product_id = NULL WHERE product_id = $1', [pid]);
         await db.query('UPDATE barber_stock_movements SET product_id = NULL WHERE product_id = $1', [pid]);
         await db.query('UPDATE stock_movements SET product_id = NULL WHERE product_id = $1', [pid]);
-        const retry = await db.query('DELETE FROM products WHERE id = $1 AND company_id = $2 RETURNING id, name', [pid, cid]);
+        const retry = await db.query(
+          `DELETE FROM products WHERE ${scopeWhere('$1', '$2')} RETURNING id, name`,
+          [pid, cid]
+        );
         if (retry && retry.rows.length) return res.json({ deleted: true, id: pid, name: retry.rows[0].name });
         return res.status(404).json({ error: 'Produto nao encontrado' });
       } catch (retryErr) {
