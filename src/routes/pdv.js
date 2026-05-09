@@ -28,6 +28,18 @@
 //   billing_owner_company_id sem criar pool separado.
 // FIX 07/05/2026: DELETE /sale — JOIN products no SELECT sale_items para
 //   obter stock_company_id sem round-trip por item (compat. com testes).
+// CRITICAL FIX 09/05/2026 (divergencia Davi 08/05):
+//   POST /sale agora SEMPRE cria sale_payments — antes só rodava para
+//   payments.length > 1, deixando 96% das vendas single-payment sem rows.
+//   Isso fazia caixaService cair no fallback de transactions e
+//   classificar tudo como total_outros. Agora:
+//     - payments[] presente: 1 row por entry (exceto crediário, que
+//       continua só em customer_credit_transactions);
+//     - sem payments[]: 1 row sintetica com payment_method + cashAmount;
+//     - sessao_id é resolvido por lookup da sessão aberta no momento
+//       do INSERT, vinculando a venda ao caixa correto.
+//   A ordem dos blocos foi reorganizada para que cashAmount seja
+//   calculado antes do INSERT de sale_payments.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -63,14 +75,12 @@ router.get('/scan/:code', async (req, res) => {
   const raw = decodeURIComponent(req.params.code || '').trim();
   if (!raw) return res.status(400).json({ error: 'code obrigatorio', match: 'none' });
 
-  // Monta lista de candidates sem duplicatas
   const candidates = new Set([raw]);
   if (/^\d{12}$/.test(raw))                            candidates.add('0' + raw);
   if (/^\d{13}$/.test(raw) && raw.startsWith('0'))    candidates.add(raw.slice(1));
   const alts = [...candidates];
 
   try {
-    // 1. Busca em products (inclui shared do billing owner)
     const { rows: prods } = await db.query(
       `SELECT p.id, p.name, p.price, p.cost_price, p.barcode, p.stock_qty, p.has_variants,
               p.category, p.image_url, p.sku, p.company_id AS stock_company_id
@@ -104,7 +114,6 @@ router.get('/scan/:code', async (req, res) => {
       });
     }
 
-    // 2. Busca em product_variants (inclui shared do billing owner)
     const { rows: vars } = await db.query(
       `SELECT pv.id AS variant_id, pv.price_override, pv.sku_suffix, pv.stock_qty AS variant_stock,
               p.id, p.name, p.price, p.barcode, p.image_url, p.company_id AS stock_company_id
@@ -176,10 +185,9 @@ router.post('/sale', async (req, res) => {
 
       let productName = item.product_name_snapshot || '';
       let costPrice   = 0;
-      let stockCompanyId = req.params.id; // fallback: assume produto próprio
+      let stockCompanyId = req.params.id;
 
       if (item.product_id) {
-        // FEAT migration 100: busca produto considerando shared do billing owner
         const { rows: p } = await client.query(
           `SELECT p.name, p.cost_price, p.stock_qty, p.company_id AS stock_company_id
            FROM products p
@@ -193,7 +201,6 @@ router.post('/sale', async (req, res) => {
           costPrice    = parseFloat(p[0].cost_price || 0);
           stockCompanyId = p[0].stock_company_id;
 
-          // FIX 22/04: validar estoque da variante quando variant_id presente
           let stockAvailable = parseFloat(p[0].stock_qty);
           let stockLabel = p[0].name;
           if (item.variant_id) {
@@ -255,11 +262,9 @@ router.post('/sale', async (req, res) => {
       if (!empCheck.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' }); }
     }
 
-    // Crediário anônimo: sem customer_id não lança no ledger de crédito — o valor
-    // inteiro vai pro financeiro como receita normal. Com customer_id, o crédito
-    // fica fora do financeiro e entra em customer_credit_transactions.
     const rawCreditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
     const creditAmount = (rawCreditAmount > 0 && customer_id) ? rawCreditAmount : 0;
+    const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
 
     const { rows: sales } = await client.query(
       `INSERT INTO sales
@@ -293,7 +298,6 @@ router.post('/sale', async (req, res) => {
       );
 
       if (item.product_id) {
-        // FEAT migration 100: usa company_id real do produto para mover estoque
         if (item.variant_id) {
           await client.query(
             `UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2`,
@@ -309,17 +313,6 @@ router.post('/sale', async (req, res) => {
           `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
            VALUES ($1,$2,'out',$3,$4,'sale','Venda PDV') ON CONFLICT DO NOTHING`,
           [item.product_id, item.stock_company_id, item.quantity, sale.id]
-        );
-      }
-    }
-
-    // FIX 06/05/2026: frontend envia p.value (campo PaymentEntry), nao p.amount.
-    // Usando p.value ?? p.amount para retrocompatibilidade.
-    if (payments?.length > 1) {
-      for (const p of payments) {
-        await client.query(
-          `INSERT INTO sale_payments (sale_id,company_id,method,amount) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
-          [sale.id, req.params.id, p.method, p.value ?? p.amount]
         );
       }
     }
@@ -361,7 +354,47 @@ router.post('/sale', async (req, res) => {
       );
     }
 
-    const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
+    // ──────────────────────────────────────────────────────────────
+    // 09/05/2026 CRITICAL FIX: sale_payments SEMPRE é criado.
+    // Antes, o INSERT só rodava em vendas multi-payment, deixando 96%
+    // das vendas single-payment órfãs e contabilizadas como total_outros
+    // no relatório de fechamento (zerando pix/cartão/débito/dinheiro).
+    //
+    // Política atual:
+    //   - payments[] presente: cria 1 row por entry (excluindo crediário).
+    //   - sem payments[]: cria 1 row sintética com payment_method + cashAmount.
+    //   - sessao_id resolvido pela sessão aberta no momento do INSERT.
+    //   - Crediário NUNCA vira sale_payment (segue só em customer_credit_transactions).
+    // ──────────────────────────────────────────────────────────────
+    const { rows: openSessao } = await client.query(
+      `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
+      [req.params.id]
+    );
+    const activeSessaoId = openSessao[0]?.id || null;
+
+    if (Array.isArray(payments) && payments.length > 0) {
+      for (const p of payments) {
+        const m = (p.method || '').toLowerCase();
+        if (m === 'crediario') continue;
+        const amt = parseFloat(p.value ?? p.amount ?? 0);
+        if (amt <= 0) continue;
+        await client.query(
+          `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
+           VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+          [sale.id, req.params.id, p.method, amt, activeSessaoId]
+        );
+      }
+    } else if (cashAmount > 0) {
+      const fallbackMethod = (payment_method || 'dinheiro').toLowerCase();
+      if (fallbackMethod !== 'crediario') {
+        await client.query(
+          `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
+           VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+          [sale.id, req.params.id, fallbackMethod, cashAmount, activeSessaoId]
+        );
+      }
+    }
+
     if (cashAmount > 0) {
       const itemsSummary = productNames.slice(0, 3).join(', ') + (productNames.length > 3 ? ` +${productNames.length - 3}` : '');
       let payLabel = payment_method || 'dinheiro';
@@ -529,7 +562,6 @@ router.delete('/sale/:saleId', async (req, res) => {
     const sale = rows[0];
     if (sale.status === 'cancelled') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Esta venda ja foi cancelada' }); }
 
-    // FEAT migration 100: JOIN products para obter stock_company_id sem round-trip por item.
     const { rows: items } = await client.query(
       `SELECT si.product_id, si.variant_id, si.quantity, si.product_name_snapshot,
               COALESCE(p.company_id, $2) AS stock_company_id
@@ -595,9 +627,6 @@ router.delete('/sale/:saleId', async (req, res) => {
 });
 
 // ── POST /companies/:id/pdv/troca ────────────────────────────
-// Troca Option B: cria sale(type='troca'), restaura estoque dos itens
-// devolvidos, desconta estoque dos novos, registra financeiro se net > 0.
-// FEAT migration 100: usa company_id real do produto para mover estoque.
 router.post('/troca', async (req, res) => {
   const {
     original_sale_id,
@@ -618,7 +647,6 @@ router.post('/troca', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // 1. Valida venda original
     const { rows: origRows } = await client.query(
       `SELECT id, status, company_id FROM sales WHERE id=$1 AND company_id=$2`,
       [original_sale_id, req.params.id]
@@ -632,14 +660,12 @@ router.post('/troca', async (req, res) => {
       return res.status(409).json({ error: 'Nao e possivel trocar itens de uma venda cancelada' });
     }
 
-    // 2. Carrega itens da venda original para validacao
     const { rows: origItems } = await client.query(
       `SELECT product_id, variant_id, quantity, unit_price, product_name_snapshot
        FROM sale_items WHERE sale_id=$1`,
       [original_sale_id]
     );
 
-    // 3. Valida itens devolvidos (qty nao pode exceder o original)
     for (const ret of returned_items) {
       if (!ret.product_id) {
         await client.query('ROLLBACK');
@@ -663,7 +689,6 @@ router.post('/troca', async (req, res) => {
       }
     }
 
-    // 4. Calcula valores
     const returnedValue = returned_items.reduce(
       (acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0
     );
@@ -673,10 +698,8 @@ router.post('/troca', async (req, res) => {
     const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
     const saleTotal = parseFloat(newValue.toFixed(2));
 
-    // 5. Restaura estoque dos itens devolvidos
     for (const ret of returned_items) {
       const qty = parseFloat(ret.quantity);
-      // FEAT migration 100: company_id real do produto
       const { rows: pInfo } = await client.query('SELECT company_id FROM products WHERE id=$1', [ret.product_id]);
       const stockCompanyId = pInfo[0]?.company_id || req.params.id;
       if (ret.variant_id) {
@@ -697,7 +720,6 @@ router.post('/troca', async (req, res) => {
       );
     }
 
-    // 6. Valida e desconta estoque dos novos itens
     for (const item of new_items) {
       if (!item.product_id) continue;
       const qty = parseFloat(item.quantity);
@@ -719,7 +741,6 @@ router.post('/troca', async (req, res) => {
           trocaStockCompanyId = vr[0].stock_company_id || req.params.id;
         }
       } else {
-        // FEAT migration 100: group fallback
         const { rows: pr } = await client.query(
           `SELECT p.stock_qty, p.company_id AS stock_company_id
            FROM products p
@@ -754,11 +775,9 @@ router.post('/troca', async (req, res) => {
           [qty, item.product_id, trocaStockCompanyId]
         );
       }
-      // Armazena stockCompanyId no item para uso posterior
       item._stock_company_id = trocaStockCompanyId;
     }
 
-    // 7. Cria o registro de venda da troca
     const { rows: trocaSales } = await client.query(
       `INSERT INTO sales
          (company_id, customer_id, seller_id, employee_id, seller_name,
@@ -780,7 +799,6 @@ router.post('/troca', async (req, res) => {
     );
     const trocaSale = trocaSales[0];
 
-    // 8. Insere sale_items para novos itens
     for (const item of new_items) {
       const qty = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unit_price);
@@ -789,7 +807,6 @@ router.post('/troca', async (req, res) => {
       let costPrice = 0;
       let productName = item.product_name_snapshot || '';
       if (item.product_id) {
-        // FEAT migration 100: group fallback para nome/custo
         const { rows: pr } = await client.query(
           `SELECT p.name, p.cost_price
            FROM products p
@@ -828,7 +845,6 @@ router.post('/troca', async (req, res) => {
       }
     }
 
-    // 9. Insere troca_returned_items
     for (const ret of returned_items) {
       await client.query(
         `INSERT INTO troca_returned_items
@@ -847,7 +863,6 @@ router.post('/troca', async (req, res) => {
       );
     }
 
-    // 10. Se net > 0, registra diferenca no financeiro
     if (netAmount > 0) {
       await client.query(
         `INSERT INTO transactions
@@ -867,7 +882,6 @@ router.post('/troca', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Monta resposta
     const { rows: respNewItems } = await db.query(
       `SELECT si.*, COALESCE(p.name, si.product_name_snapshot) AS product_name
        FROM sale_items si LEFT JOIN products p ON p.id=si.product_id
