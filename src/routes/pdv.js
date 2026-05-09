@@ -50,6 +50,11 @@
 //   Idempotency keys distintas (-return / -sale) pra cancelamento
 //   granular e auditoria limpa. Funciona inclusive em troca par-a-par
 //   (net=0). Net<0 (devolver dinheiro ao cliente) ignorado por ora.
+// HOTFIX 09/05/2026 (troca caixa): POST /troca agora cria sale_payments
+//   para a nova venda da troca (1 row com payment_method + saleTotal +
+//   sessao_id da sessão aberta). Sem isso, a troca-venda não entrava no
+//   caixa fechado mesmo após o fix do /sale. Identificado na divergência
+//   Davi 09/05 (R$ 224,98 da troca ficou fora do caixa).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -880,6 +885,35 @@ router.post('/troca', async (req, res) => {
           ret.product_name_snapshot || null,
         ]
       );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // 09/05/2026 HOTFIX: sale_payments para a nova venda da troca.
+    // Sem isso a troca-venda fica fora do caixa fechado (caixaService
+    // só conta sale_payments + transactions não-PDV em total_outros).
+    // Lookup da sessão aberta + INSERT seguindo a mesma política do
+    // POST /sale. Crediário NÃO vira sale_payment (consistente com /sale).
+    // ──────────────────────────────────────────────────────────────
+    let trocaSessaoId = null;
+    try {
+      const sRes = await client.query(
+        `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
+        [req.params.id]
+      );
+      trocaSessaoId = sRes?.rows?.[0]?.id || null;
+    } catch (sErr) {
+      // best-effort — sale_payment fica sem sessao_id (caixa cai no fallback de período)
+    }
+
+    if (saleTotal > 0) {
+      const trocaPayMethod = (payment_method || 'dinheiro').toLowerCase();
+      if (trocaPayMethod !== 'crediario') {
+        await client.query(
+          `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
+           VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+          [trocaSale.id, req.params.id, trocaPayMethod, saleTotal, trocaSessaoId]
+        );
+      }
     }
 
     // 09/05/2026: troca lança 2 transactions distintas para auditoria
