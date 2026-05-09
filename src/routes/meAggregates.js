@@ -23,6 +23,11 @@
 //   `breakdown` com array por empresa (pra UI mostrar split).
 // - Mutations (POST/PATCH/DELETE) NAO existem em /me/* — usuario
 //   precisa trocar pra empresa especifica antes de criar/editar.
+//
+// 09/05/2026 (fonte unica vendas): /sales/analytics agora deriva
+//   total_revenue de SALES (mesma fonte do /dashboard salesToday).
+//   Antes vinha de transactions confirmed, divergindo do KPI top do
+//   Painel — Eryca Finesse viu 7651 vs 7247 na mesma tela.
 // ============================================================
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
@@ -778,14 +783,11 @@ router.get('/sales', async (req, res) => {
 // ──────────────────────────────────────────────────────────
 // GET /me/sales/analytics — Onda 2.6 (polish final)
 //
-// Replica src/services/salesAnalytics.js mas usando company_id = ANY($1).
-// Mantem a MESMA shape do per-company endpoint pra UI nao precisar
-// adaptacoes profundas — apenas hook ramifica e endpoint troca.
-//
-// Nota sobre fonte de receita (mesma decisao de salesAnalytics.js):
-// - total_revenue vem de TRANSACTIONS (income confirmed, regime caixa).
-// - Demais metricas operacionais vem de SALES (PDV).
-// - Mesma fonte que Painel/Financeiro/DRE — garante consistencia.
+// 09/05/2026 (fonte unica vendas): total_revenue agora deriva de
+// SALES.total_amount (mesma fonte que /me/dashboard salesToday e que
+// /me/sales stats.revenue). Antes vinha de transactions confirmed,
+// causando divergencia visivel entre KPI top do Painel e o card
+// Analytics no MESMO Painel (Eryca Finesse 09/05: 7651 vs 7247).
 //
 // Query params:
 //   - period: 'today' | 'yesterday' | 'week' | 'month' | 'year' | 'custom'
@@ -830,27 +832,26 @@ router.get('/sales/analytics', async (req, res) => {
 
     const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
     const spCol = `(created_at ${SP})`;
-    const txDateCol = `COALESCE(due_date, (created_at ${SP})::date)`;
 
     const formats = {
-      day:   { sales: `${spCol}::date`,                tx: `${txDateCol}` },
-      week:  { sales: `DATE_TRUNC('week',  ${spCol})`, tx: `DATE_TRUNC('week',  ${txDateCol})` },
-      month: { sales: `DATE_TRUNC('month', ${spCol})`, tx: `DATE_TRUNC('month', ${txDateCol})` },
+      day:   `${spCol}::date`,
+      week:  `DATE_TRUNC('week',  ${spCol})`,
+      month: `DATE_TRUNC('month', ${spCol})`,
     };
     const fmt = formats[groupBy] || formats.day;
 
     const [
-      salesSummaryRes,
-      txSummaryRes,
-      salesSeriesRes,
-      txSeriesRes,
+      summaryRes,
+      seriesRes,
       topProductsRes,
       topEmployeesRes,
       byPaymentRes,
     ] = await Promise.all([
+      // 09/05/2026: TUDO de sales agora — fonte unica.
       db.query(
         `SELECT
-           COUNT(*)::int                                                                                AS total_sales,
+           COUNT(*) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int                AS total_sales,
+           COALESCE(SUM(total_amount) FILTER (WHERE COALESCE(status,'completed') != 'cancelled'), 0) AS total_revenue,
            COALESCE(SUM(discount_amount) FILTER (WHERE COALESCE(status,'completed') != 'cancelled'), 0) AS total_discounts,
            COUNT(DISTINCT customer_id) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int  AS unique_customers,
            COUNT(DISTINCT (created_at ${SP})::date) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int AS active_days
@@ -862,34 +863,16 @@ router.get('/sales/analytics', async (req, res) => {
       ),
 
       db.query(
-        `SELECT COALESCE(SUM(amount), 0) AS total_revenue
-         FROM transactions
-         WHERE company_id = ANY($1)
-           AND type = 'income' AND status = 'confirmed'
-           AND COALESCE(due_date, (created_at ${SP})::date) >= $2::date
-           AND COALESCE(due_date, (created_at ${SP})::date) <  $3::date`,
-        [companyIds, startDate, endDate]
-      ),
-
-      db.query(
-        `SELECT ${fmt.sales} AS period, COUNT(*)::int AS total_sales
+        `SELECT ${fmt} AS period,
+                COUNT(*)::int                  AS total_sales,
+                COALESCE(SUM(total_amount), 0) AS total_revenue
          FROM sales
          WHERE company_id = ANY($1)
            AND COALESCE(status, 'completed') != 'cancelled'
            AND ${spCol} >= $2::timestamp
            AND ${spCol} <  $3::timestamp
-         GROUP BY 1`,
-        [companyIds, startDate, endDate]
-      ),
-
-      db.query(
-        `SELECT ${fmt.tx} AS period, COALESCE(SUM(amount), 0) AS total_revenue
-         FROM transactions
-         WHERE company_id = ANY($1)
-           AND type = 'income' AND status = 'confirmed'
-           AND ${txDateCol} >= $2::date
-           AND ${txDateCol} <  $3::date
-         GROUP BY 1`,
+         GROUP BY 1
+         ORDER BY 1`,
         [companyIds, startDate, endDate]
       ),
 
@@ -947,35 +930,13 @@ router.get('/sales/analytics', async (req, res) => {
       ),
     ]);
 
-    const salesSum = salesSummaryRes.rows[0] || {};
-    const txSum = txSummaryRes.rows[0] || {};
+    const sumRow = summaryRes.rows[0] || {};
 
-    const totalRevenue = parseFloat(txSum.total_revenue) || 0;
-    const totalSales   = parseInt(salesSum.total_sales)  || 0;
+    const totalRevenue = parseFloat(sumRow.total_revenue) || 0;
+    const totalSales   = parseInt(sumRow.total_sales)     || 0;
     const avgTicket    = totalSales > 0
       ? parseFloat((totalRevenue / totalSales).toFixed(2))
       : 0;
-
-    // Merge series por chave de periodo
-    const merged = new Map();
-    salesSeriesRes.rows.forEach(r => {
-      const k = r.period instanceof Date ? r.period.toISOString() : String(r.period);
-      merged.set(k, { period: r.period, total_sales: r.total_sales, total_revenue: 0 });
-    });
-    txSeriesRes.rows.forEach(r => {
-      const k = r.period instanceof Date ? r.period.toISOString() : String(r.period);
-      if (merged.has(k)) {
-        merged.get(k).total_revenue = parseFloat(r.total_revenue);
-      } else {
-        merged.set(k, { period: r.period, total_sales: 0, total_revenue: parseFloat(r.total_revenue) });
-      }
-    });
-
-    const series = Array.from(merged.values()).sort((a, b) => {
-      const ka = a.period instanceof Date ? a.period.getTime() : String(a.period);
-      const kb = b.period instanceof Date ? b.period.getTime() : String(b.period);
-      return ka < kb ? -1 : ka > kb ? 1 : 0;
-    });
 
     res.json({
       period: { start: startDate, end: endDate, label: period },
@@ -983,11 +944,15 @@ router.get('/sales/analytics', async (req, res) => {
         total_sales:      totalSales,
         total_revenue:    totalRevenue,
         avg_ticket:       avgTicket,
-        total_discounts:  parseFloat(salesSum.total_discounts)  || 0,
-        unique_customers: parseInt(salesSum.unique_customers)   || 0,
-        active_days:      parseInt(salesSum.active_days)        || 0,
+        total_discounts:  parseFloat(sumRow.total_discounts)  || 0,
+        unique_customers: parseInt(sumRow.unique_customers)   || 0,
+        active_days:      parseInt(sumRow.active_days)        || 0,
       },
-      series,
+      series: seriesRes.rows.map(r => ({
+        period: r.period,
+        total_sales: r.total_sales,
+        total_revenue: parseFloat(r.total_revenue) || 0,
+      })),
       top_products: topProductsRes.rows.map(r => ({
         id:            r.id,
         name:          r.name,
