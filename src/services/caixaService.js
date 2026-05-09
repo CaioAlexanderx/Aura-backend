@@ -9,13 +9,20 @@
 //   houver vinculo; cai pro user.full_name caso contrario.
 // - fechar() agora retorna metricas extras (sales_count,
 //   new_customers_count, sessao_label, closed_at) usadas pelo PDF de
-//   fechamento do aura-app. As metricas sao best-effort: erro retorna
-//   zero/null em vez de quebrar o fechamento.
+//   fechamento do aura-app.
 //
 // 08/05/2026 (hotfix):
 // - abrir() agora valida employeeId contra a tabela employees antes do
 //   INSERT. Previne FK violation caixa_sessoes_opened_by_employee_id_fkey
 //   quando o front envia user.id (UUID auth) no lugar do employees.id.
+//
+// 09/05/2026 (CRITICAL FIX divergencia Davi 08/05):
+// - calcularTotais agora EXCLUI transactions com idempotency_key começando
+//   por 'pdv-sale-' ou 'pdv-troca-'. Antes, essas transactions (criadas
+//   pelo proprio PDV em paralelo aos sale_payments) eram somadas em
+//   total_outros, causando double-counting cada vez que uma venda
+//   multi-payment gerava ambos os registros. total_outros agora reflete
+//   apenas receitas verdadeiramente extras (income manual no Financeiro).
 // ============================================================
 
 const pool = require('../config/database');
@@ -81,6 +88,10 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
     [companyId, sessaoId, openedAt, until]
   );
 
+  // 09/05/2026 FIX: exclui transactions criadas pelo PDV (já contabilizadas
+  // em sale_payments). O filtro NOT LIKE 'pdv-sale-%'/'pdv-troca-%' deixa
+  // total_outros refletir apenas receitas verdadeiramente extras (income
+  // manual lançado no Financeiro fora do fluxo PDV).
   const { rows: txRows } = await pool.query(
     `SELECT COALESCE(SUM(amount), 0)::numeric(12,2) AS total
      FROM transactions
@@ -88,7 +99,14 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
        AND type = 'income'
        AND status = 'confirmed'
        AND paid_at >= $2
-       AND paid_at < $3`,
+       AND paid_at < $3
+       AND (
+         idempotency_key IS NULL
+         OR (
+           idempotency_key NOT LIKE 'pdv-sale-%'
+           AND idempotency_key NOT LIKE 'pdv-troca-%'
+         )
+       )`,
     [companyId, openedAt, until]
   );
 
