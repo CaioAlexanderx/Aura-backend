@@ -10,6 +10,11 @@
 // Escopo: por (company_id atual + customer_id) — saldo e por loja, mesmo
 // que a lista de clientes do owner seja consolidada multi-CNPJ.
 //
+// FEAT 09/05/2026 (toggle crediario): rotas /balances, /customer/:cid e
+// /customer/:cid/payment agora exigem pdv_settings.crediario_enabled=true.
+// Companies sem crediario habilitado recebem 403 CREDIARIO_DISABLED. Frontend
+// usa esse codigo pra mostrar mensagem amigavel direcionando para Configuracoes.
+//
 // FEAT 09/05/2026 (crediário Opção A — competência separada):
 // POST /payment agora liquida em FIFO as transactions "Crediário - A
 // Receber" pendentes do cliente (idempotency_key='pdv-credit-receivable-{saleId}'),
@@ -25,12 +30,34 @@
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 
+// 09/05/2026 (toggle): bloqueia rotas se crediário não estiver habilitado
+// no companies.pdv_settings.crediario_enabled. Espelha caixaService.assertCaixaEnabled.
+async function assertCrediarioEnabled(companyId) {
+  const { rows } = await db.query(
+    `SELECT pdv_settings->>'crediario_enabled' AS enabled FROM companies WHERE id = $1`,
+    [companyId]
+  );
+  if (!rows.length) {
+    const err = new Error('Empresa nao encontrada');
+    err.status = 404;
+    throw err;
+  }
+  if (rows[0].enabled !== 'true') {
+    const err = new Error('Modulo de crediario nao esta habilitado. Ative em Configuracoes > PDV > Politicas do Caixa.');
+    err.status = 403;
+    err.code = 'CREDIARIO_DISABLED';
+    throw err;
+  }
+}
+
 // GET /companies/:id/credit/balances?only_open=true&q=texto
 router.get('/balances', async (req, res) => {
   const onlyOpen = req.query.only_open !== 'false'; // default true
   const q = req.query.q ? String(req.query.q).trim() : '';
 
   try {
+    await assertCrediarioEnabled(req.params.id);
+
     const conditions = ['cb.company_id = $1'];
     const params = [req.params.id];
     let i = 2;
@@ -77,6 +104,8 @@ router.get('/balances', async (req, res) => {
       customers_open: totals.customers_open,
     });
   } catch (err) {
+    if (err.status === 403) return res.status(403).json({ error: err.message, code: err.code });
+    if (err.status === 404) return res.status(404).json({ error: err.message });
     console.error('[credit] balances error:', err.message);
     res.status(500).json({ error: 'Erro ao listar saldos de crediario' });
   }
@@ -85,6 +114,7 @@ router.get('/balances', async (req, res) => {
 // GET /companies/:id/credit/customer/:cid
 router.get('/customer/:cid', async (req, res) => {
   try {
+    await assertCrediarioEnabled(req.params.id);
     const { rows: cust } = await db.query(
       `SELECT id, name, phone, cpf_cnpj
          FROM customers
@@ -127,6 +157,8 @@ router.get('/customer/:cid', async (req, res) => {
       })),
     });
   } catch (err) {
+    if (err.status === 403) return res.status(403).json({ error: err.message, code: err.code });
+    if (err.status === 404) return res.status(404).json({ error: err.message });
     console.error('[credit] customer detail error:', err.message);
     res.status(500).json({ error: 'Erro ao buscar historico do cliente' });
   }
@@ -146,6 +178,13 @@ router.post('/customer/:cid/payment', async (req, res) => {
 
   if (!amount || amount <= 0) {
     return res.status(400).json({ error: 'amount > 0 obrigatorio' });
+  }
+
+  // 09/05/2026 (toggle crediario): valida feature antes de abrir transaction
+  try {
+    await assertCrediarioEnabled(req.params.id);
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message, code: err.code });
   }
 
   const client = await db.connect();
