@@ -43,6 +43,13 @@
 // HOTFIX 09/05/2026: lookup de caixa_sessoes envolto em try/catch.
 //   Necessario pra (a) tolerar schemas legados sem o modulo de caixa,
 //   (b) suportar testes que mockam client.query e esgotam o stack.
+// FEAT 09/05/2026 (troca v2): POST /troca agora cria 2 transactions
+//   distintas em vez de 1 pelo netAmount.
+//     - 'Troca - Devolução' (expense, valor devolvido)
+//     - 'Troca - Venda' (income, valor da nova venda)
+//   Idempotency keys distintas (-return / -sale) pra cancelamento
+//   granular e auditoria limpa. Funciona inclusive em troca par-a-par
+//   (net=0). Net<0 (devolver dinheiro ao cliente) ignorado por ora.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -875,19 +882,49 @@ router.post('/troca', async (req, res) => {
       );
     }
 
-    if (netAmount > 0) {
+    // 09/05/2026: troca lança 2 transactions distintas para auditoria
+    // contábil limpa: uma expense (devolução do valor original) e uma
+    // income (nova venda). Categorias dedicadas pra dashboards/DRE
+    // poderem filtrar/ignorar trocas conforme regra do app.
+    // Idempotency keys distintas (-return / -sale) permitem cancelamento
+    // granular. Sempre criamos as duas mesmo quando net=0 (par-a-par)
+    // pra refletir a movimentação real. Caso net<0 (diferença a devolver
+    // ao cliente) não é tratado nesta versão.
+    const trocaNamesSummary = (new_items || [])
+      .map(n => n.product_name_snapshot || '')
+      .filter(Boolean)
+      .slice(0, 2)
+      .join(', ') || 'itens';
+
+    if (returnedValue > 0) {
       await client.query(
         `INSERT INTO transactions
            (company_id, type, status, amount, description, category,
             due_date, paid_at, created_by, idempotency_key)
-         VALUES ($1,'income','confirmed',$2,$3,'Vendas',${SP_DATE_NOW},NOW(),$4,$5)
+         VALUES ($1,'expense','confirmed',$2,$3,'Troca - Devolução',${SP_DATE_NOW},NOW(),$4,$5)
          ON CONFLICT (idempotency_key) DO NOTHING`,
         [
           req.params.id,
-          netAmount,
-          `Troca PDV — diferenca a receber (${payment_method || 'dinheiro'})`,
+          parseFloat(returnedValue.toFixed(2)),
+          `Troca PDV — devolução referente a venda ${original_sale_id}`,
           req.user?.id || null,
-          'pdv-troca-' + trocaSale.id,
+          'pdv-troca-' + trocaSale.id + '-return',
+        ]
+      );
+    }
+    if (newValue > 0) {
+      await client.query(
+        `INSERT INTO transactions
+           (company_id, type, status, amount, description, category,
+            due_date, paid_at, created_by, idempotency_key)
+         VALUES ($1,'income','confirmed',$2,$3,'Troca - Venda',${SP_DATE_NOW},NOW(),$4,$5)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        [
+          req.params.id,
+          parseFloat(newValue.toFixed(2)),
+          `Troca PDV — nova venda (${trocaNamesSummary})`,
+          req.user?.id || null,
+          'pdv-troca-' + trocaSale.id + '-sale',
         ]
       );
     }
