@@ -23,6 +23,12 @@
 //   total_outros, causando double-counting cada vez que uma venda
 //   multi-payment gerava ambos os registros. total_outros agora reflete
 //   apenas receitas verdadeiramente extras (income manual no Financeiro).
+//
+// 09/05/2026 (Opção A crediário):
+// - calcularTotais também exclui 'pdv-credit-receivable-%'. Quando o
+//   recebimento crediário é processado via /credit/customer/:cid/payment,
+//   ele cria sale_payment + confirma a transaction A Receber. Sem o
+//   filtro, o caixa contaria o valor 2× (uma via método, uma via outros).
 // ============================================================
 
 const pool = require('../config/database');
@@ -89,9 +95,16 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
   );
 
   // 09/05/2026 FIX: exclui transactions criadas pelo PDV (já contabilizadas
-  // em sale_payments). O filtro NOT LIKE 'pdv-sale-%'/'pdv-troca-%' deixa
-  // total_outros refletir apenas receitas verdadeiramente extras (income
-  // manual lançado no Financeiro fora do fluxo PDV).
+  // em sale_payments). O filtro NOT LIKE 'pdv-sale-%'/'pdv-troca-%'/'pdv-credit-receivable-%'
+  // deixa total_outros refletir apenas receitas verdadeiramente extras
+  // (income manual lançado no Financeiro fora do fluxo PDV).
+  //
+  // 09/05/2026 (Opção A crediário): adicionado pdv-credit-receivable-* ao
+  // filtro. Quando uma transaction "Crediário - A Receber" é confirmada
+  // pelo POST /credit/customer/:cid/payment, paralelamente é criado um
+  // sale_payment apontando para a sale original com a sessao_id ativa.
+  // Sem este filtro, o caixa fechado contaria o recebimento DUAS vezes
+  // (uma via sale_payments por método, outra via total_outros).
   const { rows: txRows } = await pool.query(
     `SELECT COALESCE(SUM(amount), 0)::numeric(12,2) AS total
      FROM transactions
@@ -105,6 +118,7 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
          OR (
            idempotency_key NOT LIKE 'pdv-sale-%'
            AND idempotency_key NOT LIKE 'pdv-troca-%'
+           AND idempotency_key NOT LIKE 'pdv-credit-receivable-%'
          )
        )`,
     [companyId, openedAt, until]

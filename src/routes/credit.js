@@ -9,6 +9,18 @@
 // view customer_credit_balances. NAO integra com Financeiro/transactions.
 // Escopo: por (company_id atual + customer_id) — saldo e por loja, mesmo
 // que a lista de clientes do owner seja consolidada multi-CNPJ.
+//
+// FEAT 09/05/2026 (crediário Opção A — competência separada):
+// POST /payment agora liquida em FIFO as transactions "Crediário - A
+// Receber" pendentes do cliente (idempotency_key='pdv-credit-receivable-{saleId}'),
+// marcando status=confirmed + paid_at=NOW e ajustando o valor caso o
+// pagamento seja parcial (split em duas transactions: uma confirmada
+// com o valor pago + uma pendente com o saldo). Em paralelo, cria
+// sale_payments na sessao de caixa ativa apontando para a sale_id
+// original da venda crediario (com method=payment_method), garantindo
+// que o caixa fisico contabilize o recebimento por metodo (dinheiro/
+// pix/cartao) na data correta. Sem caixa aberto, sale_payment fica com
+// sessao_id=NULL e o caixaService cai no fallback de periodo.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -122,6 +134,11 @@ router.get('/customer/:cid', async (req, res) => {
 
 // POST /companies/:id/credit/customer/:cid/payment
 // body: { amount, payment_method?, notes? }
+//
+// 09/05/2026: alem de criar customer_credit_transactions credit (legado),
+// liquida as transactions "Crediario - A Receber" pendentes (FIFO) do
+// cliente, marcando-as como confirmed + criando sale_payments na sessao
+// de caixa ativa. Tudo em uma unica transaction SQL para atomicidade.
 router.post('/customer/:cid/payment', async (req, res) => {
   const amount = parseFloat(req.body?.amount || 0);
   const method = req.body?.payment_method ? String(req.body.payment_method).trim() : null;
@@ -131,20 +148,158 @@ router.post('/customer/:cid/payment', async (req, res) => {
     return res.status(400).json({ error: 'amount > 0 obrigatorio' });
   }
 
+  const client = await db.connect();
   try {
-    const { rows: cust } = await db.query(
+    await client.query('BEGIN');
+
+    const { rows: cust } = await client.query(
       `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
       [req.params.cid, req.params.id]
     );
-    if (!cust.length) return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+    if (!cust.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+    }
 
-    const { rows: tx } = await db.query(
+    // 1) ledger legado — registra o pagamento no customer_credit_transactions
+    const { rows: tx } = await client.query(
       `INSERT INTO customer_credit_transactions
          (company_id, customer_id, sale_id, type, amount, payment_method, notes, created_by)
        VALUES ($1, $2, NULL, 'payment', $3, $4, $5, $6)
        RETURNING *`,
       [req.params.id, req.params.cid, amount, method, notes, req.user?.id || null]
     );
+
+    // 2) Lookup da sessao de caixa ativa (best-effort)
+    let activeSessaoId = null;
+    try {
+      const sessRes = await client.query(
+        `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
+        [req.params.id]
+      );
+      activeSessaoId = sessRes?.rows?.[0]?.id || null;
+    } catch (sessErr) {
+      // sem caixa habilitado — sale_payment fica sem sessao (cai no fallback)
+    }
+
+    // 3) FIFO liquidacao das transactions "Crediario - A Receber" pendentes
+    //    do cliente. Match feito pelo idempotency_key 'pdv-credit-receivable-{saleId}'
+    //    JOIN com sales para filtrar por customer_id.
+    const fifoMethod = (method || 'dinheiro').toLowerCase();
+    const settledTransactions = [];
+    let remaining = amount;
+
+    const { rows: pendingTxs } = await client.query(
+      `SELECT t.id, t.amount, t.idempotency_key, s.id AS sale_id
+       FROM transactions t
+       JOIN sales s ON ('pdv-credit-receivable-' || s.id::text) = t.idempotency_key
+       WHERE t.company_id = $1
+         AND t.category = 'Crediário - A Receber'
+         AND t.status = 'pending'
+         AND s.customer_id = $2
+         AND COALESCE(s.status, 'active') != 'cancelled'
+       ORDER BY t.created_at ASC
+       LIMIT 100`,
+      [req.params.id, req.params.cid]
+    );
+
+    for (const pt of pendingTxs) {
+      if (remaining <= 0.005) break;
+      const ptAmount = parseFloat(pt.amount);
+
+      if (ptAmount <= remaining + 0.005) {
+        // Liquida totalmente esta transaction
+        await client.query(
+          `UPDATE transactions
+             SET status = 'confirmed',
+                 paid_at = NOW(),
+                 payment_method = $1,
+                 category = 'Crediário - Recebido',
+                 updated_at = NOW()
+           WHERE id = $2`,
+          [fifoMethod, pt.id]
+        );
+        // sale_payment apontando para a sale original
+        await client.query(
+          `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT DO NOTHING`,
+          [pt.sale_id, req.params.id, fifoMethod, ptAmount, activeSessaoId]
+        );
+        settledTransactions.push({ id: pt.id, sale_id: pt.sale_id, amount: ptAmount, partial: false });
+        remaining = parseFloat((remaining - ptAmount).toFixed(2));
+      } else {
+        // Pagamento parcial — split em duas transactions:
+        //   (a) confirmada com o valor pago (mantem idempotency_key original)
+        //   (b) nova pendente com o saldo (idempotency_key '-rest-{ts}')
+        const paidNow = parseFloat(remaining.toFixed(2));
+        const restAmt = parseFloat((ptAmount - paidNow).toFixed(2));
+
+        await client.query(
+          `UPDATE transactions
+             SET status = 'confirmed',
+                 paid_at = NOW(),
+                 payment_method = $1,
+                 amount = $2,
+                 category = 'Crediário - Recebido (parcial)',
+                 updated_at = NOW()
+           WHERE id = $3`,
+          [fifoMethod, paidNow, pt.id]
+        );
+        await client.query(
+          `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT DO NOTHING`,
+          [pt.sale_id, req.params.id, fifoMethod, paidNow, activeSessaoId]
+        );
+
+        // Cria a nova A Receber para o saldo restante
+        const restKey = pt.idempotency_key + '-rest-' + Date.now();
+        await client.query(
+          `INSERT INTO transactions
+             (company_id, type, status, amount, description, category,
+              due_date, paid_at, created_by, idempotency_key)
+           VALUES ($1, 'income', 'pending', $2, $3, 'Crediário - A Receber',
+                   (NOW() AT TIME ZONE 'America/Sao_Paulo')::date, NULL, $4, $5)
+           ON CONFLICT (idempotency_key) DO NOTHING`,
+          [
+            req.params.id,
+            restAmt,
+            `Crediário - saldo venda ${pt.sale_id} (parcial)`,
+            req.user?.id || null,
+            restKey,
+          ]
+        );
+
+        settledTransactions.push({ id: pt.id, sale_id: pt.sale_id, amount: paidNow, partial: true, rest: restAmt });
+        remaining = 0;
+      }
+    }
+
+    // 4) Sobra (pagamento maior que A Receber pendentes) — registra como
+    //    transaction confirmada generica para o caixa nao perder a entrada.
+    //    Pode ser zero se o cliente ainda tem debit no ledger legado sem
+    //    A Receber correspondente (vendas crediario antigas pre-Opção A).
+    if (remaining > 0.005) {
+      await client.query(
+        `INSERT INTO transactions
+           (company_id, type, status, amount, description, category,
+            due_date, paid_at, created_by, idempotency_key, payment_method)
+         VALUES ($1, 'income', 'confirmed', $2, $3, 'Crediário - Recebido',
+                 (NOW() AT TIME ZONE 'America/Sao_Paulo')::date, NOW(), $4, $5, $6)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        [
+          req.params.id,
+          parseFloat(remaining.toFixed(2)),
+          `Recebimento crediário - cliente ${req.params.cid} (saldo legado)`,
+          req.user?.id || null,
+          'credit-payment-' + tx[0].id + '-legacy',
+          fifoMethod,
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
 
     const { rows: b } = await db.query(
       `SELECT balance FROM customer_credit_balances
@@ -162,10 +317,15 @@ router.post('/customer/:cid/payment', async (req, res) => {
         created_at: tx[0].created_at,
       },
       new_balance: parseFloat(b[0]?.balance || 0),
+      settled: settledTransactions,
+      legacy_amount: remaining > 0.005 ? parseFloat(remaining.toFixed(2)) : 0,
     });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('[credit] payment error:', err.message);
     res.status(500).json({ error: 'Erro ao registrar pagamento' });
+  } finally {
+    client.release();
   }
 });
 

@@ -55,6 +55,15 @@
 //   sessao_id da sessão aberta). Sem isso, a troca-venda não entrava no
 //   caixa fechado mesmo após o fix do /sale. Identificado na divergência
 //   Davi 09/05 (R$ 224,98 da troca ficou fora do caixa).
+// FEAT 09/05/2026 (crediário Opção A — competência separada):
+//   Crediário com customer_id agora cria transaction "Crediário - A Receber"
+//   (status=pending, paid_at=NULL, idempotency_key=pdv-credit-receivable-{saleId}).
+//   Não conta no caixa físico até ser confirmada pelo recebimento via
+//   POST /credit/customer/:cid/payment, que faz FIFO marcando a transaction
+//   como confirmed + cria sale_payment na sessão ativa do dia. Crediário
+//   anônimo (sem customer_id) continua virando venda dinheiro (creditAmount=0).
+//   DELETE /sale também apaga a transaction A Receber pendente da venda
+//   cancelada para manter o ledger consistente.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -367,6 +376,33 @@ router.post('/sale', async (req, res) => {
           req.user?.id || null,
         ]
       );
+
+      // ──────────────────────────────────────────────────────────────
+      // 09/05/2026 FEAT (crediário Opção A — competência separada):
+      // Crediário entra no Financeiro como "A Receber" (status=pending,
+      // paid_at=NULL). Não conta no caixa físico (filtro paid_at do
+      // caixaService deixa de fora). Quando o cliente paga via
+      // POST /credit/customer/:cid/payment, esta transaction é
+      // confirmada (status=confirmed, paid_at=NOW) e um sale_payment
+      // é criado FIFO apontando para a sessão de caixa ativa do dia
+      // do pagamento — assim o caixa físico contabiliza por método
+      // (dinheiro/pix/cartão) na data do recebimento.
+      // ──────────────────────────────────────────────────────────────
+      await client.query(
+        `INSERT INTO transactions
+           (company_id, type, status, amount, description, category,
+            due_date, paid_at, created_by, idempotency_key)
+         VALUES ($1, 'income', 'pending', $2, $3, 'Crediário - A Receber',
+                 ${SP_DATE_NOW}, NULL, $4, $5)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        [
+          req.params.id,
+          creditAmount,
+          `Crediário - venda ${sale.id} (${productNames.slice(0, 2).join(', ') || 'venda'})`,
+          req.user?.id || null,
+          'pdv-credit-receivable-' + sale.id,
+        ]
+      );
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -635,6 +671,9 @@ router.delete('/sale/:saleId', async (req, res) => {
     );
 
     await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-sale-' + req.params.saleId, req.params.id]);
+    // 09/05/2026: cancelar tambem a transaction "Crediario - A Receber" pendente
+    // se ainda nao foi quitada (pdv-credit-receivable-*).
+    await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-credit-receivable-' + req.params.saleId, req.params.id]);
     await client.query(
       `UPDATE sales SET status='cancelled', cancelled_at=NOW(), cancelled_by=$1,
          notes=CONCAT(COALESCE(notes,''),' [CANCELADA]'), updated_at=NOW() WHERE id=$2`,
