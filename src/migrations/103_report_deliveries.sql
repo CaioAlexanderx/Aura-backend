@@ -1,1 +1,26 @@
-LS0gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09Ci0tIE1pZ3JhdGlvbiAxMDMgwrcgUmVwb3J0IERlbGl2ZXJpZXMKLS0gUmVnaXN0cmEgY2FkYSBlbnRyZWdhIGRlIHJlbGF0w7NyaW8gKHNlbWFuYWwvbWVuc2FsKS4KLS0gVXNhZG8gcGFyYSBpZGVtcG90w6puY2lhIChldml0YXIgcmVlbnZpbykgZSBhdWRpdG9yaWEuCi0tID09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQoKQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMgcmVwb3J0X2RlbGl2ZXJpZXMgKAogIGlkICAgICAgICAgICAgU0VSSUFMIFBSSU1BUlkgS0VZLAogIGNvbXBhbnlfaWQgICAgSU5URUdFUiBOT1QgTlVMTCBSRUZFUkVOQ0VTIGNvbXBhbmllcyhpZCkgT04gREVMRVRFIENBU0NBREUsCiAgcmVwb3J0X3R5cGUgICBWQVJDSEFSKDEwKSBOT1QgTlVMTCBDSEVDSyAocmVwb3J0X3R5cGUgSU4gKCd3ZWVrbHknLCAnbW9udGhseScpKSwKICBwZXJpb2Rfc3RhcnQgIERBVEUgTk9UIE5VTEwsCiAgc3RhdHVzICAgICAgICBWQVJDSEFSKDIwKSBOT1QgTlVMTCBERUZBVUxUICdwZW5kaW5nJwogICAgICAgICAgICAgICAgICBDSEVDSyAoc3RhdHVzIElOICgncGVuZGluZycsICdzZW50JywgJ2ZhaWxlZCcpKSwKICByZXNlbmRfaWQgICAgIFZBUkNIQVIoMTAwKSwKICBhdHRlbXB0cyAgICAgIElOVEVHRVIgTk9UIE5VTEwgREVGQVVMVCAwLAogIGxhc3RfZXJyb3IgICAgVEVYVCwKICBzZW50X2F0ICAgICAgIFRJTUVTVEFNUFRaLAogIGNyZWF0ZWRfYXQgICAgVElNRVNUQU1QVFogTk9UIE5VTEwgREVGQVVMVCBOT1coKQopOwoKQ1JFQVRFIElOREVYIElGIE5PVCBFWElTVFMgaWR4X3JlcG9ydF9kZWxpdmVyaWVzX2NvbXBhbnlfdHlwZV9wZXJpb2QKICBPTiByZXBvcnRfZGVsaXZlcmllcyAoY29tcGFueV9pZCwgcmVwb3J0X3R5cGUsIHBlcmlvZF9zdGFydCk7CgpDUkVBVEUgSU5ERVggSUYgTk9UIEVYSVNUUyBpZHhfcmVwb3J0X2RlbGl2ZXJpZXNfc3RhdHVzCiAgT04gcmVwb3J0X2RlbGl2ZXJpZXMgKHN0YXR1cykKICBXSEVSRSBzdGF0dXMgIT0gJ3NlbnQnOwo=
+-- ========================================================================
+-- Migration 103 · Report Deliveries
+-- Registra cada entrega de relatorio (semanal/mensal).
+-- Usado para idempotencia (evitar reenvio) e auditoria.
+-- ========================================================================
+
+CREATE TABLE IF NOT EXISTS report_deliveries (
+  id             SERIAL PRIMARY KEY,
+  company_id     UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  report_type    VARCHAR(10) NOT NULL CHECK (report_type IN ('weekly', 'monthly')),
+  period_start   DATE NOT NULL,
+  status         VARCHAR(20) NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending', 'sent', 'failed')),
+  resend_id      VARCHAR(100),
+  attempts       INTEGER NOT NULL DEFAULT 0,
+  last_error     TEXT,
+  sent_at        TIMESTAMPTZ,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_report_deliveries_company_type_period
+  ON report_deliveries (company_id, report_type, period_start);
+
+CREATE INDEX IF NOT EXISTS idx_report_deliveries_status
+  ON report_deliveries (status)
+  WHERE status != 'sent';
