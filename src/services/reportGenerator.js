@@ -36,12 +36,12 @@ function getPrevPeriod(period, type) {
 }
 
 const MONTHS_SHORT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
-const WEEKDAYS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+const WEEKDAYS = ['Domingo', 'Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado'];
 
 function formatPeriodLabel(period) {
   const [sy, sm, sd] = period.startDate.split('-').map(Number);
   const [ey, em, ed] = period.endDate.split('-').map(Number);
-  // endDate é exclusive, subtrair 1 dia para exibição
+  // endDate e exclusive, subtrair 1 dia para exibicao
   const endDisplay = new Date(Date.UTC(ey, em - 1, ed - 1));
   const edDay = endDisplay.getUTCDate();
   const edMonth = MONTHS_SHORT[endDisplay.getUTCMonth()];
@@ -69,21 +69,21 @@ async function updateDelivery(id, status, errorMsg = null) {
 }
 
 // ------------------------------------------------------------
-// Função principal
+// Funcao principal
 // ------------------------------------------------------------
 
 async function generateReport(companyId, type, periodOverride = null) {
-  // 1. Resolver período
+  // 1. Resolver periodo
   const period = periodOverride || resolvePeriodForReport(type);
   // period = { startDate: 'YYYY-MM-DD', endDate: 'YYYY-MM-DD' }
 
-  // 2. Verificar idempotência
+  // 2. Verificar idempotencia
   const { rows: existing } = await db.query(
     `SELECT id FROM report_deliveries WHERE company_id=$1 AND report_type=$2 AND period_start=$3 AND status='sent' LIMIT 1`,
     [companyId, type, period.startDate]
   );
   if (existing.length > 0) {
-    console.log(`[reportGenerator] já enviado: company=${companyId} type=${type} period=${period.startDate}`);
+    console.log(`[reportGenerator] ja enviado: company=${companyId} type=${type} period=${period.startDate}`);
     return { skipped: true, reason: 'already_sent' };
   }
 
@@ -96,8 +96,10 @@ async function generateReport(companyId, type, periodOverride = null) {
   const deliveryId = delivery.id;
 
   // 4. Buscar dados da empresa
+  // companies nao tem coluna "name" — usa trade_name / legal_name
   const { rows: [company] } = await db.query(
-    `SELECT id, name, email, plan, logo_url FROM companies WHERE id = $1 AND is_active = true`,
+    `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan, logo_url
+     FROM companies WHERE id = $1 AND is_active = true`,
     [companyId]
   );
   if (!company || !company.email) {
@@ -105,7 +107,7 @@ async function generateReport(companyId, type, periodOverride = null) {
     return { skipped: true, reason: 'no_email' };
   }
 
-  // 5. Calcular período anterior e buscar dados em paralelo
+  // 5. Calcular periodo anterior e buscar dados em paralelo
   const prevPeriod = getPrevPeriod(period, type);
 
   const [salesCurrent, salesPrev, staleProducts, dormantCustomers, healthHistory] = await Promise.all([
@@ -139,10 +141,9 @@ async function generateReport(companyId, type, periodOverride = null) {
     customers_dir:   curr.unique_customers >= prev.unique_customers ? 'up' : 'down',
   };
 
-  // 7. Montar dailyRevenue (série diária, garantir 7 dias)
-  const DAYS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+  // 7. Montar dailyRevenue (serie diaria, garantir 7 dias)
+  const DAYS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sab'];
 
-  // Gerar mapa de datas esperadas entre startDate e endDate (exclusive)
   const expectedDates = [];
   let cursor = period.startDate;
   while (cursor < period.endDate) {
@@ -150,7 +151,6 @@ async function generateReport(companyId, type, periodOverride = null) {
     cursor = addDays(cursor, 1);
   }
 
-  // Indexar série por data
   const seriesMap = {};
   (salesCurrent.series || []).forEach(s => {
     const dateKey = s.period.slice(0, 10);
@@ -166,7 +166,6 @@ async function generateReport(companyId, type, periodOverride = null) {
     };
   });
 
-  // Marcar melhor dia
   if (dailyRevenue.length) {
     const maxIdx = dailyRevenue.reduce((mi, d, i, arr) => d.value > arr[mi].value ? i : mi, 0);
     dailyRevenue[maxIdx].is_best = true;
@@ -185,10 +184,10 @@ async function generateReport(companyId, type, periodOverride = null) {
   const totalRev = salesCurrent.summary.total_revenue || 1;
   const PAYMENT_LABELS = {
     pix:       'Pix',
-    credit:    'Cartão de Crédito',
-    debit:     'Cartão de Débito',
+    credit:    'Cartao de Credito',
+    debit:     'Cartao de Debito',
     cash:      'Dinheiro',
-    crediario: 'Crediário',
+    crediario: 'Crediario',
   };
   const payments = (salesCurrent.by_payment || []).slice(0, 6).map(p => ({
     name: PAYMENT_LABELS[p.method] || p.method,
@@ -216,13 +215,13 @@ async function generateReport(companyId, type, periodOverride = null) {
     const p = staleProducts[0];
     wowInsight = {
       icon_type: 'box',
-      text: `<b>${p.name}</b> está parado há <span class="num">${p.days_idle || '14+'} dias</span> sem venda. Verifique o ponto de pedido.`,
+      text: `<b>${p.name}</b> esta parado ha <span class="num">${p.days_idle || '14+'} dias</span> sem venda. Verifique o ponto de pedido.`,
     };
   } else if (dormantCustomers && dormantCustomers.topDormant && dormantCustomers.topDormant.length > 0) {
     const c = dormantCustomers.topDormant[0];
     wowInsight = {
       icon_type: 'user',
-      text: `<b>${c.full_name}</b> não aparece há <span class="num">${c.days_dormant} dias</span>. Considere uma mensagem de retorno.`,
+      text: `<b>${c.full_name}</b> nao aparece ha <span class="num">${c.days_dormant} dias</span>. Considere uma mensagem de retorno.`,
     };
   }
 
@@ -231,7 +230,7 @@ async function generateReport(companyId, type, periodOverride = null) {
   const html = buildWeeklyReportHtml({
     company: { name: company.name, logo_url: company.logo_url },
     period:  { label: periodLabel, edition: null, sent_at: formatSentAt() },
-    health:  { score: 71, label: 'Atenção', delta: 0, delta_dir: 'neutral' },
+    health:  { score: 71, label: 'Atencao', delta: 0, delta_dir: 'neutral' },
     kpis,
     dailyRevenue,
     topProducts,
@@ -241,9 +240,9 @@ async function generateReport(companyId, type, periodOverride = null) {
     plan: company.plan || 'essencial',
   });
 
-  // 13. Salvar snapshot de health (período mensal)
-  const snapshotPeriod = period.startDate.slice(0, 8) + '01'; // primeiro dia do mês
-  await saveHealthSnapshot(companyId, 71, 'Atenção', snapshotPeriod, {}).catch(e => {
+  // 13. Salvar snapshot de health (periodo mensal)
+  const snapshotPeriod = period.startDate.slice(0, 8) + '01';
+  await saveHealthSnapshot(companyId, 71, 'Atencao', snapshotPeriod, {}).catch(e => {
     console.warn('[reportGenerator] saveHealthSnapshot falhou:', e.message);
   });
 
