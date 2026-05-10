@@ -58,6 +58,10 @@ function startServer() {
     console.log('   Env:     ' + env.NODE_ENV);
     console.log('   Release: ' + (env.GIT_SHA || 'local'));
     console.log('   Health:  http://localhost:' + env.PORT + '/health\n');
+
+    // Iniciar scheduler de relatórios
+    const { initReportScheduler } = require('./jobs/reportScheduler');
+    initReportScheduler();
   });
 }
 
