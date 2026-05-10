@@ -230,4 +230,92 @@ router.get('/clients', ...adminOnly, asyncHandler(async (req, res) => {
   });
 }));
 
+// ── Relatórios: disparo manual ────────────────────────────────
+
+// Middleware de auth admin simples por ADMIN_SECRET (sem session de usuário)
+function adminSecretAuth(req, res, next) {
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ error: 'ADMIN_SECRET não configurado' });
+    }
+    return next();
+  }
+  const provided = req.headers['x-admin-secret'];
+  if (provided !== secret) {
+    return res.status(401).json({ error: 'Não autorizado' });
+  }
+  next();
+}
+
+// POST /admin/reports/trigger
+// Body: { type: 'weekly' | 'monthly', company_id?: number }
+router.post('/reports/trigger', adminSecretAuth, async (req, res) => {
+  const { type = 'weekly', company_id } = req.body;
+  if (!['weekly', 'monthly'].includes(type)) {
+    return res.status(400).json({ error: 'type deve ser weekly ou monthly' });
+  }
+
+  const start = Date.now();
+  try {
+    const { generateReport, updateDelivery } = require('../services/reportGenerator');
+    const { sendWeeklyReport } = require('../services/mailer');
+    const db = require('../config/database');
+
+    // Se company_id específico, processar só ele. Senão, buscar todas.
+    let companies;
+    if (company_id) {
+      const { rows } = await db.query(
+        `SELECT id, name, email, plan FROM companies WHERE id = $1 AND is_active = true AND email IS NOT NULL`,
+        [company_id]
+      );
+      companies = rows;
+    } else {
+      const { rows } = await db.query(
+        `SELECT id, name, email, plan FROM companies WHERE is_active = true AND email IS NOT NULL AND email != '' LIMIT 100`
+      );
+      companies = rows;
+    }
+
+    if (companies.length === 0) {
+      return res.status(404).json({ error: 'Nenhuma empresa encontrada' });
+    }
+
+    const results = [];
+    for (const co of companies) {
+      try {
+        const result = await generateReport(co.id, type);
+        if (result.skipped) {
+          results.push({ company_id: co.id, name: co.name, status: 'skipped', reason: result.reason });
+          continue;
+        }
+        // Enviar email
+        const emailResult = await sendWeeklyReport(result.company, result.kpis, result.html);
+        // Marcar como enviado
+        await updateDelivery(result.deliveryId, 'sent');
+        results.push({
+          company_id: co.id,
+          name: co.name,
+          status: 'sent',
+          resend_id: emailResult?.id,
+        });
+        console.log(`[admin/reports/trigger] sent company=${co.id} type=${type} in ${Date.now()-start}ms`);
+      } catch (err) {
+        console.error(`[admin/reports/trigger] error company=${co.id}:`, err.message);
+        results.push({ company_id: co.id, name: co.name, status: 'error', error: err.message });
+      }
+    }
+
+    res.json({
+      type,
+      total: companies.length,
+      duration_ms: Date.now() - start,
+      results,
+    });
+  } catch (err) {
+    console.error('[admin/reports/trigger] fatal:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
