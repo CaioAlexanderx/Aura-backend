@@ -210,6 +210,7 @@ async function generateReport(companyId, type, periodOverride = null) {
   const narratives = await generateWeeklyNarratives(reportData);
 
   // 11. Montar WOW insight
+  // Nota: dormantCustomers.topDormant retorna coluna "name" (nao full_name)
   let wowInsight = null;
   if (staleProducts && staleProducts.length > 0) {
     const p = staleProducts[0];
@@ -221,7 +222,7 @@ async function generateReport(companyId, type, periodOverride = null) {
     const c = dormantCustomers.topDormant[0];
     wowInsight = {
       icon_type: 'user',
-      text: `<b>${c.full_name}</b> nao aparece ha <span class="num">${c.days_dormant} dias</span>. Considere uma mensagem de retorno.`,
+      text: `<b>${c.name}</b> nao aparece ha <span class="num">${c.days_dormant} dias</span>. Considere uma mensagem de retorno.`,
     };
   }
 
