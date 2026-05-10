@@ -1,1 +1,192 @@
-Ly8gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09Ci8vIEFVUkEuIOKAlCBSZXBvcnQgRGF0YSBRdWVyaWVzCi8vIFF1ZXJpZXMgYXV4aWxpYXJlcyBleGNsdXNpdmFzIHBhcmEgbyBzaXN0ZW1hIGRlIHJlbGF0b3Jpb3MKLy8gYXV0b21hdGljb3MgKHNlbWFuYWwgLyBtZW5zYWwpLgovLwovLyBUb2RhcyBhcyBkYXRhcyBlbSBCUlQgKFVUQy0zIG1hbnVhbCwgc2VtIElDVSDigJQgUmFpbHdheSkuCi8vID09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQoKJ3VzZSBzdHJpY3QnOwoKY29uc3QgZGIgPSByZXF1aXJlKCcuLi9jb25maWcvZGF0YWJhc2UnKTsKCi8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQovLyBIZWxwZXJzIEJSVCAocmVwbGljYWRvIGRlIHNhbGVzQW5hbHl0aWNzLmpzIC0gVVRDLTMgbWFudWFsIHNlbSBJQ1UpCi8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQoKZnVuY3Rpb24gdG9kYXlTUCgpIHsKICB2YXIgZCA9IG5ldyBEYXRlKERhdGUubm93KCkgLSAzICogMzYwMDAwMCk7CiAgcmV0dXJuIGQudG9JU09TdHJpbmcoKS5zbGljZSgwLCAxMCk7Cn0KCmZ1bmN0aW9uIGFkZERheXNTUChkYXRlU3RyLCBuKSB7CiAgdmFyIHBhcnRzID0gZGF0ZVN0ci5zcGxpdCgnLScpOwogIHZhciB5ID0gcGFyc2VJbnQocGFydHNbMF0pLCBtID0gcGFyc2VJbnQocGFydHNbMV0pIC0gMSwgZGF5ID0gcGFyc2VJbnQocGFydHNbMl0pOwogIHZhciBkdCA9IG5ldyBEYXRlKERhdGUuVVRDKHksIG0sIGRheSArIG4pKTsKICByZXR1cm4gZHQudG9JU09TdHJpbmcoKS5zbGljZSgwLCAxMCk7Cn0KCi8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQovLyAxLiByZXNvbHZlUGVyaW9kRm9yUmVwb3J0KHR5cGUpCi8vIFJldG9ybmEgeyBzdGFydERhdGUsIGVuZERhdGUgfSBlbSAnWVlZWS1NTS1ERCcgKEJSVCkKLy8gICAnd2Vla2x5Jzogc2VnLWRvbSBkYSBzZW1hbmEgcGFzc2FkYQovLyAgICdtb250aGx5JzogbWVzIGFudGVyaW9yIGNvbXBsZXRvCi8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQoKZnVuY3Rpb24gcmVzb2x2ZVBlcmlvZEZvclJlcG9ydCh0eXBlKSB7CiAgaWYgKHR5cGUgPT09ICd3ZWVrbHknKSB7CiAgICB2YXIgdG9kYXkgPSB0b2RheVNQKCk7CiAgICAvLyBVVEMgZGF5OiAwPVN1biwgMT1Nb24sIC4uLiA2PVNhdAogICAgLy8gQ29udmVydCB0bzogMD1Nb24sIDY9U3VuCiAgICB2YXIgdXRjRGF5ID0gbmV3IERhdGUodG9kYXkgKyAnVDAwOjAwOjAwWicpLmdldFVUQ0RheSgpOwogICAgdmFyIGRheU9mV2VlayA9ICh1dGNEYXkgKyA2KSAlIDc7IC8vIDA9TW9uLCA2PVN1bgoKICAgIC8vIGRheXNUb0xhc3RNb25kYXkgPSBkYXlPZldlZWsgKyA3IChnbyBiYWNrIG9uZSBmdWxsIHdlZWsgZXh0cmEpCiAgICB2YXIgZGF5c1RvTGFzdE1vbmRheSA9IGRheU9mV2VlayArIDc7CgogICAgdmFyIHN0YXJ0RGF0ZSA9IGFkZERheXNTUCh0b2RheSwgLWRheXNUb0xhc3RNb25kYXkpOyAvLyBzZWcgcGFzc2FkYQogICAgdmFyIGVuZERhdGUgPSBhZGREYXlzU1AodG9kYXksIC1kYXlPZldlZWspOyAgICAgICAgICAvLyBzZWcgZGVzdGEgc2VtYW5hIChhYmVydG8pCgogICAgcmV0dXJuIHsgc3RhcnREYXRlLCBlbmREYXRlIH07CiAgfQoKICBpZiAodHlwZSA9PT0gJ21vbnRobHknKSB7CiAgICB2YXIgdG9kYXlTdHIgPSB0b2RheVNQKCk7CiAgICB2YXIgcGFydHMgPSB0b2RheVN0ci5zcGxpdCgnLScpOwogICAgdmFyIHllYXIgPSBwYXJzZUludChwYXJ0c1swXSk7CiAgICB2YXIgbW9udGggPSBwYXJzZUludChwYXJ0c1sxXSk7IC8vIDEtMTIKCiAgICAvLyBEaWEgMSBkbyBtZXMgYXR1YWwKICAgIHZhciBjdXJyZW50TW9udGhTdGFydCA9IHllYXIgKyAnLScgKyBTdHJpbmcobW9udGgpLnBhZFN0YXJ0KDIsICcwJykgKyAnLTAxJzsKCiAgICAvLyBEaWEgMSBkbyBtZXMgYW50ZXJpb3IKICAgIHZhciBwcmV2WWVhciA9IG1vbnRoID09PSAxID8geWVhciAtIDEgOiB5ZWFyOwogICAgdmFyIHByZXZNb250aCA9IG1vbnRoID09PSAxID8gMTIgOiBtb250aCAtIDE7CiAgICB2YXIgcHJldk1vbnRoU3RhcnQgPSBwcmV2WWVhciArICctJyArIFN0cmluZyhwcmV2TW9udGgpLnBhZFN0YXJ0KDIsICcwJykgKyAnLTAxJzsKCiAgICByZXR1cm4geyBzdGFydERhdGU6IHByZXZNb250aFN0YXJ0LCBlbmREYXRlOiBjdXJyZW50TW9udGhTdGFydCB9OwogIH0KCiAgdGhyb3cgbmV3IEVycm9yKGByZXNvbHZlUGVyaW9kRm9yUmVwb3J0OiB0eXBlIGRlc2NvbmhlY2lkbyAiJHt0eXBlfSJgKTsKfQoKLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCi8vIDIuIGZldGNoU3RhbGVQcm9kdWN0cyhjb21wYW55SWQsIGRheXMgPSAxNCkKLy8gUmV0b3JuYSBhdGUgMyBwcm9kdXRvcyBlbSBlc3RvcXVlIHNlbSB2ZW5kYSBub3MgdWx0aW1vcyBgZGF5c2AgZGlhcwovLyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KCmFzeW5jIGZ1bmN0aW9uIGZldGNoU3RhbGVQcm9kdWN0cyhjb21wYW55SWQsIGRheXMgPSAxNCkgewogIGNvbnN0IHNxbCA9IGAKICBTRUxFQ1QKICAgIHAuaWQsIHAubmFtZSwgcC5jYXRlZ29yeSwgcC5zdG9ja19xdWFudGl0eSwKICAgIE1BWChzLmNyZWF0ZWRfYXQgQVQgVElNRSBaT05FICdBbWVyaWNhL1Nhb19QYXVsbycpIEFTIGxhc3Rfc2FsZV9hdCwKICAgIEVYVFJBQ1QoREFZIEZST00gTk9XKCkgLSBNQVgocy5jcmVhdGVkX2F0KSk6OmludCBBUyBkYXlzX2lkbGUKICBGUk9NIHByb2R1Y3RzIHAKICBMRUZUIEpPSU4gc2FsZV9pdGVtcyBzaSBPTiBzaS5wcm9kdWN0X2lkID0gcC5pZAogIExFRlQgSk9JTiBzYWxlcyBzIE9OIHMuaWQgPSBzaS5zYWxlX2lkCiAgICBBTkQgQ09BTEVTQ0Uocy5zdGF0dXMsICdjb21wbGV0ZWQnKSAhPSAnY2FuY2VsbGVkJwogIFdIRVJFIHAuY29tcGFueV9pZCA9ICQxCiAgICBBTkQgcC5zdG9ja19xdWFudGl0eSA+IDAKICAgIEFORCBwLmlzX2FjdGl2ZSA9IHRydWUKICBHUk9VUCBCWSBwLmlkLCBwLm5hbWUsIHAuY2F0ZWdvcnksIHAuc3RvY2tfcXVhbnRpdHkKICBIQVZJTkcgTUFYKHMuY3JlYXRlZF9hdCkgPCBOT1coKSAtICgkMiB8fCAnIGRheXMnKTo6SU5URVJWQUwKICAgICAgT1IgTUFYKHMuY3JlYXRlZF9hdCkgSVMgTlVMTAogIE9SREVSIEJZIGRheXNfaWRsZSBERVNDIE5VTExTIEZJUlNUCiAgTElNSVQgMwogIGA7CiAgY29uc3QgcmVzdWx0ID0gYXdhaXQgZGIucXVlcnkoc3FsLCBbY29tcGFueUlkLCBTdHJpbmcoZGF5cyldKTsKICByZXR1cm4gcmVzdWx0LnJvd3M7Cn0KCi8vIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQovLyAzLiBmZXRjaERvcm1hbnRDdXN0b21lcnMoY29tcGFueUlkKQovLyBSZXRvcm5hIHsgY291bnQsIHRvcERvcm1hbnRbXSB9IC0gY2xpZW50ZXMgc3VtaWRvcyBoYSBtYWlzIGRlIDMwIGRpYXMKLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCgphc3luYyBmdW5jdGlvbiBmZXRjaERvcm1hbnRDdXN0b21lcnMoY29tcGFueUlkKSB7CiAgY29uc3QgY291bnRTcWwgPSBgCiAgICBTRUxFQ1QgQ09VTlQoKik6OmludCBBUyBkb3JtYW50X2NvdW50CiAgICBGUk9NIGN1c3RvbWVycwogICAgV0hFUkUgY29tcGFueV9pZCA9ICQxCiAgICAgIEFORCBsYXN0X3B1cmNoYXNlX2F0IDwgTk9XKCkgLSBJTlRFUlZBTCAnMzAgZGF5cycKICAgICAgQU5EIGxhc3RfcHVyY2hhc2VfYXQgSVMgTk9UIE5VTEwKICBgOwogIGNvbnN0IHRvcFNxbCA9IGAKICBTRUxFQ1QKICAgIGlkLCBmdWxsX25hbWUsIHRvdGFsX3NwZW50LCBsYXN0X3B1cmNoYXNlX2F0LAogICAgRVhUUkFDVChEQVkgRlJPTSBOT1coKSAtIGxhc3RfcHVyY2hhc2VfYXQpOjppbnQgQVMgZGF5c19kb3JtYW50CiAgRlJPTSBjdXN0b21lcnMKICBXSEVSRSBjb21wYW55X2lkID0gJDEKICAgIEFORCBsYXN0X3B1cmNoYXNlX2F0IDwgTk9XKCkgLSBJTlRFUlZBTCAnMzAgZGF5cycKICAgIEFORCBsYXN0X3B1cmNoYXNlX2F0IElTIE5PVCBOVUxMCiAgT1JERVIgQlkgdG90YWxfc3BlbnQgREVTQyBOVUxMUyBMQVNUCiAgTElNSVQgMwogIGA7CgogIGNvbnN0IFtjb3VudFJlcywgdG9wUmVzXSA9IGF3YWl0IFByb21pc2UuYWxsKFsKICAgIGRiLnF1ZXJ5KGNvdW50U3FsLCBbY29tcGFueUlkXSksCiAgICBkYi5xdWVyeSh0b3BTcWwsIFtjb21wYW55SWRdKSwKICBdKTsKCiAgcmV0dXJuIHsKICAgIGNvdW50OiBjb3VudFJlcy5yb3dzWzBdLmRvcm1hbnRfY291bnQsCiAgICB0b3BEb3JtYW50OiB0b3BSZXMucm93cywKICB9Owp9CgovLyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KLy8gNC4gZmV0Y2hIZWFsdGhIaXN0b3J5KGNvbXBhbnlJZCkKLy8gUmV0b3JuYSB1bHRpbW9zIDYgc25hcHNob3RzIGRlIGNvbXBhbnlfaGVhbHRoX3NuYXBzaG90cwovLyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KCmFzeW5jIGZ1bmN0aW9uIGZldGNoSGVhbHRoSGlzdG9yeShjb21wYW55SWQpIHsKICBjb25zdCBzcWwgPSBgCiAgICBTRUxFQ1QKICAgICAgcGVyaW9kLCBzY29yZSwgbGFiZWwsCiAgICAgIGRyaXZlcl9tYXJnZW0sIGRyaXZlcl9ydW53YXksIGRyaXZlcl9jcmVzY2ltZW50bywgZHJpdmVyX3RpY2tldAogICAgRlJPTSBjb21wYW55X2hlYWx0aF9zbmFwc2hvdHMKICAgIFdIRVJFIGNvbXBhbnlfaWQgPSAkMQogICAgT1JERVIgQlkgcGVyaW9kIERFU0MKICAgIExJTUlUIDYKICBgOwogIGNvbnN0IHJlc3VsdCA9IGF3YWl0IGRiLnF1ZXJ5KHNxbCwgW2NvbXBhbnlJZF0pOwogIHJldHVybiByZXN1bHQucm93czsKfQoKLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCi8vIDUuIHNhdmVIZWFsdGhTbmFwc2hvdChjb21wYW55SWQsIHNjb3JlLCBsYWJlbCwgcGVyaW9kLCBkcml2ZXJzKQovLyBVcHNlcnQgZW0gY29tcGFueV9oZWFsdGhfc25hcHNob3RzIChwZXJpb2QgPSAxbyBkaWEgZG8gbWVzIGF0dWFsKQovLyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KCmFzeW5jIGZ1bmN0aW9uIHNhdmVIZWFsdGhTbmFwc2hvdChjb21wYW55SWQsIHNjb3JlLCBsYWJlbCwgcGVyaW9kLCBkcml2ZXJzID0ge30pIHsKICAvLyBwZXJpb2QgZGVmYXVsdDogcHJpbWVpcm8gZGlhIGRvIG1lcyBhdHVhbCBlbSBCUlQKICBpZiAoIXBlcmlvZCkgewogICAgdmFyIHRvZGF5U3RyID0gdG9kYXlTUCgpOwogICAgdmFyIHBhcnRzID0gdG9kYXlTdHIuc3BsaXQoJy0nKTsKICAgIHBlcmlvZCA9IHBhcnRzWzBdICsgJy0nICsgcGFydHNbMV0gKyAnLTAxJzsKICB9CgogIGNvbnN0IHsKICAgIGRyaXZlcl9tYXJnZW0gPSBudWxsLAogICAgZHJpdmVyX3J1bndheSA9IG51bGwsCiAgICBkcml2ZXJfY3Jlc2NpbWVudG8gPSBudWxsLAogICAgZHJpdmVyX3RpY2tldCA9IG51bGwsCiAgfSA9IGRyaXZlcnM7CgogIGNvbnN0IHNxbCA9IGAKICAgIElOU0VSVCBJTlRPIGNvbXBhbnlfaGVhbHRoX3NuYXBzaG90cwogICAgICAoY29tcGFueV9pZCwgcGVyaW9kLCBzY29yZSwgbGFiZWwsIGRyaXZlcl9tYXJnZW0sIGRyaXZlcl9ydW53YXksIGRyaXZlcl9jcmVzY2ltZW50bywgZHJpdmVyX3RpY2tldCkKICAgIFZBTFVFUyAoJDEsICQyLCAkMywgJDQsICQ1LCAkNiwgJDcsICQ4KQogICAgT04gQ09ORkxJQ1QgKGNvbXBhbnlfaWQsIHBlcmlvZCkgRE8gVVBEQVRFCiAgICAgIFNFVAogICAgICAgIHNjb3JlICAgICAgICAgICAgICAgID0gRVhDTFVERUQuc2NvcmUsCiAgICAgICAgbGFiZWwgICAgICAgICAgICAgICAgPSBFWENMVURFRC5sYWJlbCwKICAgICAgICBkcml2ZXJfbWFyZ2VtICAgICAgICA9IEVYQ0xVREVELmRyaXZlcl9tYXJnZW0sCiAgICAgICAgZHJpdmVyX3J1bndheSAgICAgICAgPSBFWENMVURFRC5kcml2ZXJfcnVud2F5LAogICAgICAgIGRyaXZlcl9jcmVzY2ltZW50byAgID0gRVhDTFVERUQuZHJpdmVyX2NyZXNjaW1lbnRvLAogICAgICAgIGRyaXZlcl90aWNrZXQgICAgICAgID0gRVhDTFVERUQuZHJpdmVyX3RpY2tldAogIGA7CgogIGF3YWl0IGRiLnF1ZXJ5KHNxbCwgWwogICAgY29tcGFueUlkLAogICAgcGVyaW9kLAogICAgc2NvcmUsCiAgICBsYWJlbCwKICAgIGRyaXZlcl9tYXJnZW0sCiAgICBkcml2ZXJfcnVud2F5LAogICAgZHJpdmVyX2NyZXNjaW1lbnRvLAogICAgZHJpdmVyX3RpY2tldCwKICBdKTsKfQoKLy8gLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tCgptb2R1bGUuZXhwb3J0cyA9IHsKICByZXNvbHZlUGVyaW9kRm9yUmVwb3J0LAogIGZldGNoU3RhbGVQcm9kdWN0cywKICBmZXRjaERvcm1hbnRDdXN0b21lcnMsCiAgZmV0Y2hIZWFsdGhIaXN0b3J5LAogIHNhdmVIZWFsdGhTbmFwc2hvdCwKfTsK
+// ========================================================================
+// AURA. — Report Data Queries
+// Queries auxiliares exclusivas para o sistema de relatorios
+// automaticos (semanal / mensal).
+//
+// Todas as datas em BRT (UTC-3 manual, sem ICU — Railway).
+// ========================================================================
+
+'use strict';
+
+const db = require('../config/database');
+
+// ------------------------------------------------------------------------
+// Helpers BRT (replicado de salesAnalytics.js - UTC-3 manual sem ICU)
+// ------------------------------------------------------------------------
+
+function todaySP() {
+  var d = new Date(Date.now() - 3 * 3600000);
+  return d.toISOString().slice(0, 10);
+}
+
+function addDaysSP(dateStr, n) {
+  var parts = dateStr.split('-');
+  var y = parseInt(parts[0]), m = parseInt(parts[1]) - 1, day = parseInt(parts[2]);
+  var dt = new Date(Date.UTC(y, m, day + n));
+  return dt.toISOString().slice(0, 10);
+}
+
+// ------------------------------------------------------------------------
+// 1. resolvePeriodForReport(type)
+// Retorna { startDate, endDate } em 'YYYY-MM-DD' (BRT)
+//   'weekly': seg-dom da semana passada
+//   'monthly': mes anterior completo
+// ------------------------------------------------------------------------
+
+function resolvePeriodForReport(type) {
+  if (type === 'weekly') {
+    var today = todaySP();
+    var utcDay = new Date(today + 'T00:00:00Z').getUTCDay();
+    var dayOfWeek = (utcDay + 6) % 7; // 0=Mon, 6=Sun
+    var daysToLastMonday = dayOfWeek + 7;
+    var startDate = addDaysSP(today, -daysToLastMonday);
+    var endDate = addDaysSP(today, -dayOfWeek);
+    return { startDate, endDate };
+  }
+
+  if (type === 'monthly') {
+    var todayStr = todaySP();
+    var parts = todayStr.split('-');
+    var year = parseInt(parts[0]);
+    var month = parseInt(parts[1]);
+    var currentMonthStart = year + '-' + String(month).padStart(2, '0') + '-01';
+    var prevYear = month === 1 ? year - 1 : year;
+    var prevMonth = month === 1 ? 12 : month - 1;
+    var prevMonthStart = prevYear + '-' + String(prevMonth).padStart(2, '0') + '-01';
+    return { startDate: prevMonthStart, endDate: currentMonthStart };
+  }
+
+  throw new Error(`resolvePeriodForReport: type desconhecido "${type}"`);
+}
+
+// ------------------------------------------------------------------------
+// 2. fetchStaleProducts(companyId, days = 14)
+// Retorna ate 3 produtos em estoque sem venda nos ultimos `days` dias
+// ------------------------------------------------------------------------
+
+async function fetchStaleProducts(companyId, days = 14) {
+  const sql = `
+  SELECT
+    p.id, p.name, p.category, p.stock_quantity,
+    MAX(s.created_at AT TIME ZONE 'America/Sao_Paulo') AS last_sale_at,
+    EXTRACT(DAY FROM NOW() - MAX(s.created_at))::int AS days_idle
+  FROM products p
+  LEFT JOIN sale_items si ON si.product_id = p.id
+  LEFT JOIN sales s ON s.id = si.sale_id
+    AND COALESCE(s.status, 'completed') != 'cancelled'
+  WHERE p.company_id = $1
+    AND p.stock_quantity > 0
+    AND p.is_active = true
+  GROUP BY p.id, p.name, p.category, p.stock_quantity
+  HAVING MAX(s.created_at) < NOW() - ($2 || ' days')::INTERVAL
+      OR MAX(s.created_at) IS NULL
+  ORDER BY days_idle DESC NULLS FIRST
+  LIMIT 3
+  `;
+  const result = await db.query(sql, [companyId, String(days)]);
+  return result.rows;
+}
+
+// ------------------------------------------------------------------------
+// 3. fetchDormantCustomers(companyId)
+// Retorna { count, topDormant[] } - clientes sumidos ha mais de 30 dias
+// ------------------------------------------------------------------------
+
+async function fetchDormantCustomers(companyId) {
+  const countSql = `
+    SELECT COUNT(*)::int AS dormant_count
+    FROM customers
+    WHERE company_id = $1
+      AND last_purchase_at < NOW() - INTERVAL '30 days'
+      AND last_purchase_at IS NOT NULL
+  `;
+  const topSql = `
+  SELECT
+    id, full_name, total_spent, last_purchase_at,
+    EXTRACT(DAY FROM NOW() - last_purchase_at)::int AS days_dormant
+  FROM customers
+  WHERE company_id = $1
+    AND last_purchase_at < NOW() - INTERVAL '30 days'
+    AND last_purchase_at IS NOT NULL
+  ORDER BY total_spent DESC NULLS LAST
+  LIMIT 3
+  `;
+
+  const [countRes, topRes] = await Promise.all([
+    db.query(countSql, [companyId]),
+    db.query(topSql, [companyId]),
+  ]);
+
+  return {
+    count: countRes.rows[0].dormant_count,
+    topDormant: topRes.rows,
+  };
+}
+
+// ------------------------------------------------------------------------
+// 4. fetchHealthHistory(companyId)
+// Retorna ultimos 6 snapshots de company_health_snapshots
+// ------------------------------------------------------------------------
+
+async function fetchHealthHistory(companyId) {
+  const sql = `
+    SELECT
+      period, score, label,
+      driver_margem, driver_runway, driver_crescimento, driver_ticket
+    FROM company_health_snapshots
+    WHERE company_id = $1
+    ORDER BY period DESC
+    LIMIT 6
+  `;
+  const result = await db.query(sql, [companyId]);
+  return result.rows;
+}
+
+// ------------------------------------------------------------------------
+// 5. saveHealthSnapshot(companyId, score, label, period, drivers)
+// Upsert em company_health_snapshots (period = 1o dia do mes atual)
+// ------------------------------------------------------------------------
+
+async function saveHealthSnapshot(companyId, score, label, period, drivers = {}) {
+  if (!period) {
+    var todayStr = todaySP();
+    var parts = todayStr.split('-');
+    period = parts[0] + '-' + parts[1] + '-01';
+  }
+
+  const {
+    driver_margem = null,
+    driver_runway = null,
+    driver_crescimento = null,
+    driver_ticket = null,
+  } = drivers;
+
+  const sql = `
+    INSERT INTO company_health_snapshots
+      (company_id, period, score, label, driver_margem, driver_runway, driver_crescimento, driver_ticket)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    ON CONFLICT (company_id, period) DO UPDATE
+      SET
+        score              = EXCLUDED.score,
+        label              = EXCLUDED.label,
+        driver_margem      = EXCLUDED.driver_margem,
+        driver_runway      = EXCLUDED.driver_runway,
+        driver_crescimento = EXCLUDED.driver_crescimento,
+        driver_ticket      = EXCLUDED.driver_ticket
+  `;
+
+  await db.query(sql, [
+    companyId, period, score, label,
+    driver_margem, driver_runway, driver_crescimento, driver_ticket,
+  ]);
+}
+
+// ------------------------------------------------------------------------
+
+module.exports = {
+  resolvePeriodForReport,
+  fetchStaleProducts,
+  fetchDormantCustomers,
+  fetchHealthHistory,
+  saveHealthSnapshot,
+};
