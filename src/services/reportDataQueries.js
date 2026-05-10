@@ -62,12 +62,13 @@ function resolvePeriodForReport(type) {
 // ------------------------------------------------------------------------
 // 2. fetchStaleProducts(companyId, days = 14)
 // Retorna ate 3 produtos em estoque sem venda nos ultimos `days` dias
+// Nota: coluna de estoque e stock_qty (nao stock_quantity)
 // ------------------------------------------------------------------------
 
 async function fetchStaleProducts(companyId, days = 14) {
   const sql = `
   SELECT
-    p.id, p.name, p.category, p.stock_quantity,
+    p.id, p.name, p.category, p.stock_qty,
     MAX(s.created_at AT TIME ZONE 'America/Sao_Paulo') AS last_sale_at,
     EXTRACT(DAY FROM NOW() - MAX(s.created_at))::int AS days_idle
   FROM products p
@@ -75,9 +76,9 @@ async function fetchStaleProducts(companyId, days = 14) {
   LEFT JOIN sales s ON s.id = si.sale_id
     AND COALESCE(s.status, 'completed') != 'cancelled'
   WHERE p.company_id = $1
-    AND p.stock_quantity > 0
+    AND p.stock_qty > 0
     AND p.is_active = true
-  GROUP BY p.id, p.name, p.category, p.stock_quantity
+  GROUP BY p.id, p.name, p.category, p.stock_qty
   HAVING MAX(s.created_at) < NOW() - ($2 || ' days')::INTERVAL
       OR MAX(s.created_at) IS NULL
   ORDER BY days_idle DESC NULLS FIRST
