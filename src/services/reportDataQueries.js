@@ -91,6 +91,7 @@ async function fetchStaleProducts(companyId, days = 14) {
 // ------------------------------------------------------------------------
 // 3. fetchDormantCustomers(companyId)
 // Retorna { count, topDormant[] } - clientes sumidos ha mais de 30 dias
+// Nota: coluna e name (nao full_name)
 // ------------------------------------------------------------------------
 
 async function fetchDormantCustomers(companyId) {
@@ -103,7 +104,7 @@ async function fetchDormantCustomers(companyId) {
   `;
   const topSql = `
   SELECT
-    id, full_name, total_spent, last_purchase_at,
+    id, name, total_spent, last_purchase_at,
     EXTRACT(DAY FROM NOW() - last_purchase_at)::int AS days_dormant
   FROM customers
   WHERE company_id = $1
