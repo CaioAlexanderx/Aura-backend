@@ -318,4 +318,52 @@ router.post('/reports/trigger', adminSecretAuth, async (req, res) => {
   }
 });
 
+// GET /admin/reports/preview/:company_id?type=weekly
+// Gera o relatório e devolve o HTML direto no browser — sem enviar email.
+// Acesso: mesma auth por X-Admin-Secret (via query param ?secret= para facilitar abertura no browser)
+router.get('/reports/preview/:company_id', async (req, res) => {
+  // Auth: aceitar X-Admin-Secret header OU query param ?secret=
+  const secret = process.env.ADMIN_SECRET;
+  if (secret) {
+    const provided = req.headers['x-admin-secret'] || req.query.secret;
+    if (provided !== secret) {
+      return res.status(401).send('<h3>401 — Não autorizado. Passe ?secret=SEU_ADMIN_SECRET na URL.</h3>');
+    }
+  } else if (process.env.NODE_ENV === 'production') {
+    return res.status(403).send('<h3>403 — ADMIN_SECRET não configurado.</h3>');
+  }
+
+  const { company_id } = req.params;
+  const { type = 'weekly' } = req.query;
+
+  if (!['weekly', 'monthly'].includes(type)) {
+    return res.status(400).send('<h3>400 — type deve ser weekly ou monthly</h3>');
+  }
+
+  try {
+    const { generateReport, updateDelivery } = require('../services/reportGenerator');
+    const db = require('../config/database');
+
+    const result = await generateReport(company_id, type);
+
+    if (result.skipped) {
+      return res.status(200).send(`<h3>Relatório pulado: ${result.reason}</h3>`);
+    }
+
+    // Limpar o delivery pending criado (preview não conta como envio)
+    await db.query(
+      `DELETE FROM report_deliveries WHERE id = $1 AND status = 'pending'`,
+      [result.deliveryId]
+    ).catch(() => {}); // silencioso
+
+    // Devolver HTML diretamente
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(result.html);
+
+  } catch (err) {
+    console.error('[admin/reports/preview] error:', err.message);
+    res.status(500).send(`<h3>Erro ao gerar preview: ${err.message}</h3><pre>${err.stack}</pre>`);
+  }
+});
+
 module.exports = router;
