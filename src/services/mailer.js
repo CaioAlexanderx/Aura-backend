@@ -281,6 +281,60 @@ async function sendOrderStatusEmail(to, { order_number, customer_name, status, s
   });
 }
 
+// -- Template: relatório semanal automático --
+async function sendWeeklyReport(company, kpis, htmlBody) {
+  function fmtR(v) {
+    const n = Math.round(v * 100) / 100;
+    const [int, dec] = n.toFixed(2).split('.');
+    return 'R$ ' + int.replace(/\B(?=(\d{3})+(?!\d))/g, '.') + (dec === '00' ? '' : ',' + dec);
+  }
+
+  // Email de notificação minimalista (seguro em qualquer cliente de email)
+  const notificationHtml = emailLayout(`
+    <p style="font-size:15px;color:#e2e8f0;margin:0 0 6px;">Seu relatório semanal chegou!</p>
+    <p style="font-size:13px;color:#94a3b8;line-height:22px;margin:0 0 20px;">
+      Aqui está o resumo de desempenho de <strong style="color:#e2e8f0;">${company.name}</strong> desta semana.
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+      <tr>
+        <td style="padding:10px 0;border-bottom:1px solid #1e293b;">
+          <span style="font-size:11px;color:#64748b;letter-spacing:0.8px;text-transform:uppercase;">Receita</span>
+          <p style="margin:4px 0 0;font-size:18px;font-weight:700;color:#c4b5fd;">${fmtR(kpis.revenue)}</p>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:10px 0;border-bottom:1px solid #1e293b;">
+          <span style="font-size:11px;color:#64748b;letter-spacing:0.8px;text-transform:uppercase;">Vendas</span>
+          <p style="margin:4px 0 0;font-size:18px;font-weight:700;color:#e2e8f0;">${kpis.sales}</p>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:10px 0;">
+          <span style="font-size:11px;color:#64748b;letter-spacing:0.8px;text-transform:uppercase;">Ticket médio</span>
+          <p style="margin:4px 0 0;font-size:18px;font-weight:700;color:#e2e8f0;">${fmtR(kpis.avg_ticket)}</p>
+        </td>
+      </tr>
+    </table>
+    <p style="font-size:12px;color:#64748b;text-align:center;margin:0 0 20px;">
+      O relatório completo com gráficos e análises está logo abaixo deste e-mail.
+    </p>
+  `);
+
+  // Montar HTML final: notificação + relatório completo juntos
+  const fullHtml = notificationHtml.replace('</body>', `
+    <div style="max-width:960px;margin:0 auto;padding:0 20px 60px;">
+      ${htmlBody}
+    </div>
+  </body>`);
+
+  return sendMail({
+    to: company.email,
+    subject: `Relatório semanal — ${company.name}`,
+    text: `Aura. — Relatório semanal de ${company.name}. Receita: ${fmtR(kpis.revenue)} | Vendas: ${kpis.sales} | Ticket médio: ${fmtR(kpis.avg_ticket)}`,
+    html: fullHtml,
+  });
+}
+
 module.exports = {
   sendVerificationEmail,
   sendVerificationLinkEmail,
@@ -288,4 +342,5 @@ module.exports = {
   sendInviteEmail,
   sendOrderConfirmationEmail,
   sendOrderStatusEmail,
+  sendWeeklyReport,
 };
