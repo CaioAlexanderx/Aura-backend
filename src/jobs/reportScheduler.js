@@ -13,7 +13,7 @@ function nowBRT() {
 
 async function getEligibleCompanies() {
   const { rows } = await db.query(
-    `SELECT id, name, email, plan
+    `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan
      FROM companies
      WHERE is_active = true
        AND email IS NOT NULL
