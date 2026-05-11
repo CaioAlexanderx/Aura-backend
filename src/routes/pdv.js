@@ -50,6 +50,20 @@
 //   Idempotency keys distintas (-return / -sale) pra cancelamento
 //   granular e auditoria limpa. Funciona inclusive em troca par-a-par
 //   (net=0). Net<0 (devolver dinheiro ao cliente) ignorado por ora.
+// HOTFIX 09/05/2026 (troca caixa): POST /troca agora cria sale_payments
+//   para a nova venda da troca (1 row com payment_method + saleTotal +
+//   sessao_id da sessão aberta). Sem isso, a troca-venda não entrava no
+//   caixa fechado mesmo após o fix do /sale. Identificado na divergência
+//   Davi 09/05 (R$ 224,98 da troca ficou fora do caixa).
+// FEAT 09/05/2026 (crediário Opção A — competência separada):
+//   Crediário com customer_id agora cria transaction "Crediário - A Receber"
+//   (status=pending, paid_at=NULL, idempotency_key=pdv-credit-receivable-{saleId}).
+//   Não conta no caixa físico até ser confirmada pelo recebimento via
+//   POST /credit/customer/:cid/payment, que faz FIFO marcando a transaction
+//   como confirmed + cria sale_payment na sessão ativa do dia. Crediário
+//   anônimo (sem customer_id) continua virando venda dinheiro (creditAmount=0).
+//   DELETE /sale também apaga a transaction A Receber pendente da venda
+//   cancelada para manter o ledger consistente.
 // FEAT 09/05/2026 (troca fiscal Onda 1): POST /troca aceita
 //   nfce_strategy='cancel_reissue'. Quando enviado:
 //     1) localiza NFC-e autorizada da venda original (<24h);
@@ -372,24 +386,24 @@ router.post('/sale', async (req, res) => {
           req.user?.id || null,
         ]
       );
+
+      await client.query(
+        `INSERT INTO transactions
+           (company_id, type, status, amount, description, category,
+            due_date, paid_at, created_by, idempotency_key)
+         VALUES ($1, 'income', 'pending', $2, $3, 'Crediário - A Receber',
+                 ${SP_DATE_NOW}, NULL, $4, $5)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        [
+          req.params.id,
+          creditAmount,
+          `Crediário - venda ${sale.id} (${productNames.slice(0, 2).join(', ') || 'venda'})`,
+          req.user?.id || null,
+          'pdv-credit-receivable-' + sale.id,
+        ]
+      );
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // 09/05/2026 CRITICAL FIX: sale_payments SEMPRE é criado.
-    // Antes, o INSERT só rodava em vendas multi-payment, deixando 96%
-    // das vendas single-payment órfãs e contabilizadas como total_outros
-    // no relatório de fechamento (zerando pix/cartão/débito/dinheiro).
-    //
-    // Política atual:
-    //   - payments[] presente: cria 1 row por entry (excluindo crediário).
-    //   - sem payments[]: cria 1 row sintética com payment_method + cashAmount.
-    //   - sessao_id resolvido pela sessão aberta no momento do INSERT.
-    //   - Crediário NUNCA vira sale_payment (segue só em customer_credit_transactions).
-    // ──────────────────────────────────────────────────────────────
-    // Best-effort: tolera tabelas ausentes (schemas antigos sem caixa)
-    // e qualquer erro de query — sessao_id fica NULL e o caixaService
-    // cai no fallback de período. Tambem cobre testes com mocks que
-    // retornam undefined ao esgotar mockResolvedValueOnce.
     let activeSessaoId = null;
     try {
       const sessRes = await client.query(
@@ -398,7 +412,7 @@ router.post('/sale', async (req, res) => {
       );
       activeSessaoId = sessRes?.rows?.[0]?.id || null;
     } catch (sessErr) {
-      // segue silenciosamente — sale_payments fica sem vinculo direto
+      // segue silenciosamente
     }
 
     if (Array.isArray(payments) && payments.length > 0) {
@@ -640,6 +654,7 @@ router.delete('/sale/:saleId', async (req, res) => {
     );
 
     await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-sale-' + req.params.saleId, req.params.id]);
+    await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-credit-receivable-' + req.params.saleId, req.params.id]);
     await client.query(
       `UPDATE sales SET status='cancelled', cancelled_at=NOW(), cancelled_by=$1,
          notes=CONCAT(COALESCE(notes,''),' [CANCELADA]'), updated_at=NOW() WHERE id=$2`,
@@ -892,14 +907,28 @@ router.post('/troca', async (req, res) => {
       );
     }
 
-    // 09/05/2026: troca lança 2 transactions distintas para auditoria
-    // contábil limpa: uma expense (devolução do valor original) e uma
-    // income (nova venda). Categorias dedicadas pra dashboards/DRE
-    // poderem filtrar/ignorar trocas conforme regra do app.
-    // Idempotency keys distintas (-return / -sale) permitem cancelamento
-    // granular. Sempre criamos as duas mesmo quando net=0 (par-a-par)
-    // pra refletir a movimentação real. Caso net<0 (diferença a devolver
-    // ao cliente) não é tratado nesta versão.
+    let trocaSessaoId = null;
+    try {
+      const sRes = await client.query(
+        `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
+        [req.params.id]
+      );
+      trocaSessaoId = sRes?.rows?.[0]?.id || null;
+    } catch (sErr) {
+      // best-effort
+    }
+
+    if (saleTotal > 0) {
+      const trocaPayMethod = (payment_method || 'dinheiro').toLowerCase();
+      if (trocaPayMethod !== 'crediario') {
+        await client.query(
+          `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
+           VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+          [trocaSale.id, req.params.id, trocaPayMethod, saleTotal, trocaSessaoId]
+        );
+      }
+    }
+
     const trocaNamesSummary = (new_items || [])
       .map(n => n.product_name_snapshot || '')
       .filter(Boolean)
@@ -941,15 +970,11 @@ router.post('/troca', async (req, res) => {
 
     // ──────────────────────────────────────────────────────────────
     // 09/05/2026 — Troca fiscal Onda 1: cancel + reissue
-    // ──────────────────────────────────────────────────────────────
     // Quando nfce_strategy='cancel_reissue', cancela a NFC-e original
     // (que precisa estar autorizada e ter <24h) e prepara o terreno
     // para que a nova NFC-e seja emitida pelo SaleComplete (auto-emit)
     // ou por chamada manual ao POST /nfce/emit usando trocaSale.id.
-    //
-    // Validações fail-fast: se algo invalida, ROLLBACK da troca inteira
-    // — preserva atomicidade. Cancelamento SEFAZ é irreversível, por
-    // isso fazemos como última operação pre-COMMIT.
+    // ──────────────────────────────────────────────────────────────
     let nfceFiscalResult = { strategy: 'none' };
     const nfceStrategy = (req.body.nfce_strategy || 'none').toLowerCase();
 
@@ -998,7 +1023,6 @@ router.post('/troca', async (req, res) => {
         }
       }
 
-      // Marca a NFC-e original como cancelada localmente
       await client.query(
         `UPDATE nfce_emissions
             SET status        = 'cancelada',
@@ -1011,7 +1035,6 @@ router.post('/troca', async (req, res) => {
         ]
       );
 
-      // Persiste rastreio fiscal na nova sale (a troca)
       await client.query(
         `UPDATE sales
             SET nfce_strategy        = $1,
@@ -1028,7 +1051,6 @@ router.post('/troca', async (req, res) => {
         original_age_hours: Math.round(ageHours * 10) / 10,
       };
     } else if (nfceStrategy !== 'none') {
-      // strategy informada mas não suportada (devolucao_55 ainda não)
       await client.query('ROLLBACK');
       return res.status(400).json({
         error: 'nfce_strategy desconhecida ou ainda não suportada: ' + nfceStrategy,
