@@ -59,6 +59,9 @@ router.use('/webhooks/instagram', require('./webhookInstagram')); // Hub Social 
 // Storefront publico
 router.use('/storefront', require('./storefront'));
 
+// Relatorios publicos (acessados via token JWT enviado no email semanal)
+router.use('/reports', require('./publicReports'));
+
 // Rotas publicas
 router.use('/reviews',           publicReviewsRouter);
 router.use('/dental',            require('./dentalSign'));
