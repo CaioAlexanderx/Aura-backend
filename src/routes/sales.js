@@ -9,6 +9,11 @@
 // Vinculo com transactions: cada sale tem uma tx no financeiro com
 // idempotency_key = 'pdv-sale-{sale_uuid}'. O endpoint de listagem
 // retorna transaction_id pra UI poder abrir o TransactionModal direto.
+//
+// 11/05/2026 — Fix bug auditoria caixa: cancel agora deleta também
+// os sale_payments da venda. Antes, payments residuais inflavam o
+// total do fechamento de caixa (caso Davi Villa Branca 10/05: 2 vendas
+// canceladas mantinham R$299,98 em payments).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -253,6 +258,8 @@ router.patch('/:sale_id', asyncHandler(async (req, res) => {
 //      financeiro e dos relatorios. Sales-based dashboards ja filtram por
 //      status='cancelled', mas o transactions ainda alimenta o financeiro,
 //      por isso precisa sair tambem.
+//   4. Remove sale_payments — sem isso o fechamento de caixa inflava o
+//      total. Fix do bug Davi Villa Branca 10/05/2026.
 //
 // NAO criamos espelho expense/devolucao: o codigo antigo fazia
 // UPDATE amount=0 + INSERT expense, o que (a) violava CHECK (amount > 0)
@@ -328,6 +335,20 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       txRemoved = true;
     }
 
+    // 6. Remove sale_payments (FIX 11/05/2026)
+    //    Sem isso, o card "Fechamentos de Caixa" e o snapshot do fechamento
+    //    de caixa atual inflam o total — payments de vendas canceladas
+    //    continuavam sendo somados. Detectado na auditoria SQL Davi Villa
+    //    Branca 10/05 (2 vendas canceladas, R$299,98 residuais).
+    const paymentsDel = await client.query(
+      'DELETE FROM sale_payments WHERE sale_id = $1 RETURNING id, amount',
+      [saleId]
+    );
+    const paymentsRemoved = paymentsDel.rows.length;
+    const paymentsAmount = paymentsDel.rows.reduce(function(acc, r) {
+      return acc + parseFloat(r.amount || 0);
+    }, 0);
+
     await client.query('COMMIT');
     res.json({
       ok: true,
@@ -338,6 +359,8 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       mirror_created: false,
       tx_removed: txRemoved,
       items_returned: itemsRes.rows.length,
+      payments_removed: paymentsRemoved,
+      payments_amount: paymentsAmount,
     });
   } catch (err) {
     await client.query('ROLLBACK');
