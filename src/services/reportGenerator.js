@@ -1,6 +1,6 @@
 // ============================================================
 // AURA. — Report Generator (Orquestrador)
-// Coordena: dados → narrativas → HTML → snapshot → log.
+// Coordena: dados -> narrativas -> HTML -> snapshot -> log.
 // Chamado pelo scheduler (cron) ou pela rota admin de disparo.
 //
 // Convencao de periodo (depois de 11/05/2026):
@@ -8,6 +8,18 @@
 //   period.endDate   = sabado (inclusivo)
 //   getSalesAnalytics recebe end_date = endDate e adiciona +1 internamente
 //   loop de dias: cursor <= period.endDate
+//
+// EXPORTACOES:
+//   buildReportData(companyId, type, periodOverride?)
+//     -> JSON puro com kpis, dailyRevenue, topProducts, payments,
+//        priorities, narratives, wowInsight, heatmapData, etc.
+//     Usado pela rota publica /reports/weekly/:token (sem delivery,
+//     sem snapshot, sem HTML).
+//   generateReport(companyId, type, periodOverride?)
+//     -> orquestra buildReportData + delivery + token + HTML + snapshot.
+//     Usado pelo scheduler (cron) e rota admin de disparo.
+//   updateDelivery(id, status, errorMsg?)
+//     -> atualiza report_deliveries.
 // ============================================================
 
 const db = require('../config/database');
@@ -22,6 +34,7 @@ const {
 } = require('./reportDataQueries');
 const { generateWeeklyNarratives, selectPriorities } = require('./narrativeGenerator');
 const { buildWeeklyReportHtml } = require('../templates/weeklyReport');
+const { signWeeklyReportToken } = require('../utils/reportToken');
 
 // ------------------------------------------------------------
 // Helpers de data
@@ -57,11 +70,11 @@ function getPrevPeriod(period, type) {
 }
 
 const MONTHS_SHORT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
-const WEEKDAYS = ['Domingo', 'Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado'];
+const WEEKDAYS     = ['Domingo', 'Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado'];
 
-// endDate e agora INCLUSIVO — sem subtrair 1 dia
+// endDate INCLUSIVO
 function formatPeriodLabel(period) {
-  const [sy, sm, sd] = period.startDate.split('-').map(Number);
+  const [, sm, sd]  = period.startDate.split('-').map(Number);
   const [ey, em, ed] = period.endDate.split('-').map(Number);
   return `${sd} ${MONTHS_SHORT[sm - 1]} — ${ed} ${MONTHS_SHORT[em - 1]} · ${ey}`;
 }
@@ -69,8 +82,8 @@ function formatPeriodLabel(period) {
 function formatSentAt() {
   const now = new Date(Date.now() - 3 * 3600000); // BRT
   const dow = WEEKDAYS[now.getUTCDay()];
-  const d = now.getUTCDate();
-  const m = MONTHS_SHORT[now.getUTCMonth()];
+  const d   = now.getUTCDate();
+  const m   = MONTHS_SHORT[now.getUTCMonth()];
   return `${dow}, ${d} ${m} · ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
 }
 
@@ -94,48 +107,25 @@ async function updateDelivery(id, status, errorMsg = null) {
 }
 
 // ------------------------------------------------------------
-// Funcao principal
+// buildReportData
+// Extrai os dados puros do relatorio (sem delivery, snapshot, HTML).
+// Reutilizada pela rota publica /reports/weekly/:token.
 // ------------------------------------------------------------
 
-async function generateReport(companyId, type, periodOverride = null) {
+async function buildReportData(companyId, type, periodOverride = null) {
   // 1. Resolver periodo
   const period = periodOverride || resolvePeriodForReport(type);
-  // period.startDate = segunda (inclusivo)
-  // period.endDate   = sabado (inclusivo)
 
-  // 2. Verificar idempotencia
-  const { rows: existing } = await db.query(
-    `SELECT id FROM report_deliveries WHERE company_id=$1 AND report_type=$2 AND period_start=$3 AND status='sent' LIMIT 1`,
-    [companyId, type, period.startDate]
-  );
-  if (existing.length > 0) {
-    console.log(`[reportGenerator] ja enviado: company=${companyId} type=${type} period=${period.startDate}`);
-    return { skipped: true, reason: 'already_sent' };
-  }
-
-  // 3. Inserir delivery como 'pending'
-  const { rows: [delivery] } = await db.query(
-    `INSERT INTO report_deliveries (company_id, report_type, period_start, status)
-     VALUES ($1, $2, $3, 'pending') RETURNING id`,
-    [companyId, type, period.startDate]
-  );
-  const deliveryId = delivery.id;
-
-  // 4. Buscar dados da empresa
+  // 2. Buscar dados da empresa
   const { rows: [company] } = await db.query(
     `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan, logo_url
      FROM companies WHERE id = $1 AND is_active = true`,
     [companyId]
   );
-  if (!company || !company.email) {
-    await updateDelivery(deliveryId, 'failed', 'empresa sem email');
-    return { skipped: true, reason: 'no_email' };
-  }
+  if (!company) throw new Error('Empresa nao encontrada ou inativa');
 
-  // 5. Buscar dados em paralelo
-  // getSalesAnalytics trata end_date como inclusivo e adiciona +1 internamente
+  // 3. Buscar dados em paralelo
   const prevPeriod = getPrevPeriod(period, type);
-
   const [salesCurrent, salesPrev, staleProducts, dormantCustomers, healthHistory, heatmapData] = await Promise.all([
     getSalesAnalytics(companyId, { period: 'custom', start_date: period.startDate,    end_date: period.endDate }),
     getSalesAnalytics(companyId, { period: 'custom', start_date: prevPeriod.startDate, end_date: prevPeriod.endDate }),
@@ -145,7 +135,7 @@ async function generateReport(companyId, type, periodOverride = null) {
     fetchSalesHeatmap(companyId, period.startDate, period.endDate),
   ]);
 
-  // 6. Montar KPIs
+  // 4. Montar KPIs
   const curr = salesCurrent.summary;
   const prev = salesPrev.summary;
 
@@ -154,7 +144,7 @@ async function generateReport(companyId, type, periodOverride = null) {
     return parseFloat(((a - b) / b * 100).toFixed(1));
   }
 
-  // Health score fixo em 71 por enquanto (será calculado dinamicamente na fase 2)
+  // Health score fixo em 71 por enquanto (sera calculado dinamicamente na fase 2)
   const HEALTH_SCORE = 71;
 
   const kpis = {
@@ -172,7 +162,7 @@ async function generateReport(companyId, type, periodOverride = null) {
     health_score:    HEALTH_SCORE,
   };
 
-  // 7. Montar dailyRevenue (seg–sab = 6 dias, cursor <= endDate)
+  // 5. Montar dailyRevenue (seg-sab = 6 dias, cursor <= endDate)
   const DAYS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sab'];
   const expectedDates = [];
   let cursor = period.startDate;
@@ -189,9 +179,10 @@ async function generateReport(companyId, type, periodOverride = null) {
   const dailyRevenue = expectedDates.map(dateStr => {
     const dow = new Date(dateStr + 'T00:00:00Z').getUTCDay();
     return {
-      day:      DAYS[dow],
-      value:    seriesMap[dateStr] || 0,
-      is_best:  false,
+      day:     DAYS[dow],
+      date:    dateStr,
+      value:   seriesMap[dateStr] || 0,
+      is_best: false,
     };
   });
 
@@ -200,7 +191,7 @@ async function generateReport(companyId, type, periodOverride = null) {
     dailyRevenue[maxIdx].is_best = true;
   }
 
-  // 8. Top produtos (top 5)
+  // 6. Top produtos (top 5)
   const topProducts = (salesCurrent.top_products || []).slice(0, 5).map((p, i) => ({
     rank:     i + 1,
     name:     p.name,
@@ -209,7 +200,7 @@ async function generateReport(companyId, type, periodOverride = null) {
     qty:      Math.round(p.total_qty),
   }));
 
-  // 9. Pagamentos
+  // 7. Pagamentos
   const totalRev = salesCurrent.summary.total_revenue || 1;
   const PAYMENT_LABELS = {
     pix:       'Pix',
@@ -223,8 +214,8 @@ async function generateReport(companyId, type, periodOverride = null) {
     pct:  parseFloat(((p.total_revenue / totalRev) * 100).toFixed(1)),
   }));
 
-  // 10. Prioridades
-  const reportData = {
+  // 8. Prioridades
+  const reportDataForPriorities = {
     health: { score: HEALTH_SCORE },
     kpis,
     dailyRevenue,
@@ -233,16 +224,16 @@ async function generateReport(companyId, type, periodOverride = null) {
     staleProducts,
     dormantCustomers,
   };
-  const priorities = selectPriorities(reportData);
+  const priorities = selectPriorities(reportDataForPriorities);
 
-  // 11. Narrativas Haiku (com fallback automatico em generateWeeklyNarratives)
-  const narratives = await generateWeeklyNarratives(reportData).catch(() => ({
+  // 9. Narrativas Haiku (com fallback automatico em generateWeeklyNarratives)
+  const narratives = await generateWeeklyNarratives(reportDataForPriorities).catch(() => ({
     revenue:  'Monitore a evolucao diaria do faturamento para identificar padroes.',
     products: 'Priorize os produtos com maior giro para garantir disponibilidade.',
     payments: 'Diversifique os metodos de pagamento para reduzir dependencia.',
   }));
 
-  // 12. WOW insight
+  // 10. WOW insight
   let wowInsight = null;
   if (staleProducts && staleProducts.length > 0) {
     const p = staleProducts[0];
@@ -258,40 +249,117 @@ async function generateReport(companyId, type, periodOverride = null) {
     };
   }
 
-  // 13. Construir HTML
-  const periodLabel = formatPeriodLabel(period);
-  const edition     = calcEdition(period.startDate);
-
-  const html = buildWeeklyReportHtml({
-    company:  { name: company.name, logo_url: company.logo_url },
-    period:   { label: periodLabel, edition, sent_at: formatSentAt() },
-    health:   { score: HEALTH_SCORE, label: 'Atencao', delta: 0, delta_dir: 'neutral' },
+  return {
+    company,
+    period,
+    periodLabel: formatPeriodLabel(period),
+    edition:     calcEdition(period.startDate),
+    sentAt:      formatSentAt(),
+    health:      { score: HEALTH_SCORE, label: 'Atencao', delta: 0, delta_dir: 'neutral' },
     kpis,
     dailyRevenue,
     topProducts,
     payments,
-    priorities:   priorities.map((p, i) => ({ num: i + 1, ...p })),
+    priorities:  priorities.map((p, i) => ({ num: i + 1, ...p })),
     wowInsight,
     narratives,
     heatmapData,
-    plan:     company.plan || 'essencial',
-  });
-
-  // 14. Salvar snapshot de health
-  const snapshotPeriod = period.startDate.slice(0, 8) + '01';
-  await saveHealthSnapshot(companyId, HEALTH_SCORE, 'Atencao', snapshotPeriod, {}).catch(e => {
-    console.warn('[reportGenerator] saveHealthSnapshot falhou:', e.message);
-  });
-
-  // 15. Retornar resultado
-  return {
-    skipped: false,
-    deliveryId,
-    company,
-    period,
-    kpis,
-    html,
+    healthHistory,
+    staleProducts,
+    dormantCustomers,
   };
 }
 
-module.exports = { generateReport, updateDelivery };
+// ------------------------------------------------------------
+// generateReport
+// Orquestrador completo: idempotency + delivery + dados + token + HTML + snapshot.
+// Chamado pelo cron e rota admin de disparo manual.
+// ------------------------------------------------------------
+
+async function generateReport(companyId, type, periodOverride = null) {
+  // 1. Resolver periodo (idempotency key)
+  const period = periodOverride || resolvePeriodForReport(type);
+
+  // 2. Verificar idempotencia
+  const { rows: existing } = await db.query(
+    `SELECT id FROM report_deliveries WHERE company_id=$1 AND report_type=$2 AND period_start=$3 AND status='sent' LIMIT 1`,
+    [companyId, type, period.startDate]
+  );
+  if (existing.length > 0) {
+    console.log(`[reportGenerator] ja enviado: company=${companyId} type=${type} period=${period.startDate}`);
+    return { skipped: true, reason: 'already_sent' };
+  }
+
+  // 3. Verificar existencia + email antes de inserir delivery
+  const { rows: [coCheck] } = await db.query(
+    `SELECT email FROM companies WHERE id = $1 AND is_active = true`,
+    [companyId]
+  );
+  if (!coCheck || !coCheck.email) {
+    return { skipped: true, reason: 'no_email' };
+  }
+
+  // 4. Inserir delivery como 'pending'
+  const { rows: [delivery] } = await db.query(
+    `INSERT INTO report_deliveries (company_id, report_type, period_start, status)
+     VALUES ($1, $2, $3, 'pending') RETURNING id`,
+    [companyId, type, period.startDate]
+  );
+  const deliveryId = delivery.id;
+
+  // 5. Montar dados completos (queries + narrativas)
+  const data = await buildReportData(companyId, type, period);
+
+  // 6. Gerar token assinado (30d) e URL do relatorio web
+  let reportUrl = null;
+  try {
+    const token = signWeeklyReportToken({
+      company_id:   companyId,
+      period_start: period.startDate,
+      period_end:   period.endDate,
+    });
+    const appUrl = process.env.APP_URL || 'https://app.getaura.com.br';
+    reportUrl = `${appUrl}/relatorios/semanal/${token}`;
+  } catch (err) {
+    // Falha em assinar token nao deve quebrar o envio do email — fallback para painel generico
+    console.warn('[reportGenerator] signWeeklyReportToken falhou:', err.message);
+    reportUrl = process.env.APP_URL || 'https://app.getaura.com.br';
+  }
+
+  // 7. Construir HTML (rich body — mantido para futuro PDF/anexo;
+  //    o email atual usa template simples em mailer.sendWeeklyReport)
+  const html = buildWeeklyReportHtml({
+    company:      { name: data.company.name, logo_url: data.company.logo_url },
+    period:       { label: data.periodLabel, edition: data.edition, sent_at: data.sentAt },
+    health:       data.health,
+    kpis:         data.kpis,
+    dailyRevenue: data.dailyRevenue,
+    topProducts:  data.topProducts,
+    payments:     data.payments,
+    priorities:   data.priorities,
+    wowInsight:   data.wowInsight,
+    narratives:   data.narratives,
+    heatmapData:  data.heatmapData,
+    plan:         data.company.plan || 'essencial',
+    reportUrl,
+  });
+
+  // 8. Salvar snapshot de health
+  const snapshotPeriod = period.startDate.slice(0, 8) + '01';
+  await saveHealthSnapshot(companyId, data.health.score, data.health.label, snapshotPeriod, {}).catch(e => {
+    console.warn('[reportGenerator] saveHealthSnapshot falhou:', e.message);
+  });
+
+  // 9. Retornar resultado
+  return {
+    skipped:    false,
+    deliveryId,
+    company:    data.company,
+    period,
+    kpis:       data.kpis,
+    html,
+    reportUrl,
+  };
+}
+
+module.exports = { generateReport, buildReportData, updateDelivery };
