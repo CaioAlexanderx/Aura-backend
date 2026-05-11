@@ -131,7 +131,7 @@ router.patch('/team/:mid', ...adminOnly, asyncHandler(async (req, res) => {
   if (notes !== undefined) { fields.push(`notes=$${idx++}`); values.push(notes); }
   if (!fields.length) throw new AppError('Nenhum campo para atualizar', 400);
   fields.push('updated_at=NOW()'); values.push(mid);
-  const { rows } = await pool.query(`UPDATE aura_team_members SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`, values);
+  const { rows } = await pool.query(`UPDATE aura_team_ements SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`, values);
   if (!rows.length) throw new AppError('Membro não encontrado', 404);
   res.json({ member: rows[0] });
 }));
@@ -249,9 +249,9 @@ function adminSecretAuth(req, res, next) {
 }
 
 // POST /admin/reports/trigger
-// Body: { type: 'weekly' | 'monthly', company_id?: number }
+// Body: { type: 'weekly' | 'monthly', company_id?: string, to_email?: string }
 router.post('/reports/trigger', adminSecretAuth, async (req, res) => {
-  const { type = 'weekly', company_id } = req.body;
+  const { type = 'weekly', company_id, to_email } = req.body;
   if (!['weekly', 'monthly'].includes(type)) {
     return res.status(400).json({ error: 'type deve ser weekly ou monthly' });
   }
@@ -289,8 +289,9 @@ router.post('/reports/trigger', adminSecretAuth, async (req, res) => {
           results.push({ company_id: co.id, name: co.name, status: 'skipped', reason: result.reason });
           continue;
         }
-        // Enviar email
-        const emailResult = await sendWeeklyReport(result.company, result.kpis, result.html);
+        // Enviar email (to_email sobrescreve destinatário — apenas para testes)
+        const companyForSend = to_email ? { ...result.company, email: to_email } : result.company;
+        const emailResult = await sendWeeklyReport(companyForSend, result.kpis, result.html);
         // Marcar como enviado
         await updateDelivery(result.deliveryId, 'sent');
         results.push({
