@@ -20,6 +20,15 @@ function addDays(dateStr, n) {
   return dt.toISOString().slice(0, 10);
 }
 
+// toDateKey: normaliza qualquer valor vindo do pg (Date obj ou string)
+// para 'YYYY-MM-DD'. pg retorna colunas ::date como string na maioria
+// dos ambientes, mas pode retornar Date dependendo da versao/config.
+function toDateKey(val) {
+  if (!val) return '';
+  if (val instanceof Date) return val.toISOString().slice(0, 10);
+  return String(val).slice(0, 10);
+}
+
 function getPrevPeriod(period, type) {
   if (type === 'weekly') {
     return {
@@ -55,6 +64,15 @@ function formatSentAt() {
   const d = now.getUTCDate();
   const m = MONTHS_SHORT[now.getUTCMonth()];
   return `${dow}, ${d} ${m} · ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
+}
+
+// Numero sequencial da edicao: semanas desde 2025-01-06 (primeira seg do ano)
+function calcEdition(startDate) {
+  const ref = new Date('2025-01-06T00:00:00Z');
+  const start = new Date(startDate + 'T00:00:00Z');
+  const diffMs = start - ref;
+  const week = Math.floor(diffMs / (7 * 24 * 3600 * 1000)) + 1;
+  return week > 0 ? week : 1;
 }
 
 // ------------------------------------------------------------
@@ -122,9 +140,9 @@ async function generateReport(companyId, type, periodOverride = null) {
   const curr = salesCurrent.summary;
   const prev = salesPrev.summary;
 
-  function pctChange(curr, prev) {
-    if (!prev || prev === 0) return 0;
-    return parseFloat(((curr - prev) / prev * 100).toFixed(1));
+  function pctChange(a, b) {
+    if (!b || b === 0) return 0;
+    return parseFloat(((a - b) / b * 100).toFixed(1));
   }
 
   const kpis = {
@@ -151,9 +169,10 @@ async function generateReport(companyId, type, periodOverride = null) {
     cursor = addDays(cursor, 1);
   }
 
+  // toDateKey normaliza s.period seja string ou objeto Date
   const seriesMap = {};
   (salesCurrent.series || []).forEach(s => {
-    const dateKey = s.period.slice(0, 10);
+    const dateKey = toDateKey(s.period);
     seriesMap[dateKey] = s.total_revenue;
   });
 
@@ -184,8 +203,8 @@ async function generateReport(companyId, type, periodOverride = null) {
   const totalRev = salesCurrent.summary.total_revenue || 1;
   const PAYMENT_LABELS = {
     pix:       'Pix',
-    credit:    'Cartao de Credito',
-    debit:     'Cartao de Debito',
+    credit:    'Cartao Cred.',
+    debit:     'Cartao Deb.',
     cash:      'Dinheiro',
     crediario: 'Crediario',
   };
@@ -207,16 +226,18 @@ async function generateReport(companyId, type, periodOverride = null) {
   const priorities = selectPriorities(reportData);
 
   // Narrativas Haiku (com fallback interno em generateWeeklyNarratives)
-  const narratives = await generateWeeklyNarratives(reportData);
+  await generateWeeklyNarratives(reportData).catch(e => {
+    console.warn('[reportGenerator] narrativas falharam (nao critico):', e.message);
+  });
 
   // 11. Montar WOW insight
-  // Nota: dormantCustomers.topDormant retorna coluna "name" (nao full_name)
+  // dormantCustomers.topDormant retorna coluna "name" (nao full_name)
   let wowInsight = null;
   if (staleProducts && staleProducts.length > 0) {
     const p = staleProducts[0];
     wowInsight = {
       icon_type: 'box',
-      text: `<b>${p.name}</b> esta parado ha <span class="num">${p.days_idle || '14+'} dias</span> sem venda. Verifique o ponto de pedido.`,
+      text: `<b>${p.name}</b> esta parado ha <span class="num">${p.days_idle != null ? p.days_idle : '14+'} dias</span> sem venda. Verifique o ponto de pedido.`,
     };
   } else if (dormantCustomers && dormantCustomers.topDormant && dormantCustomers.topDormant.length > 0) {
     const c = dormantCustomers.topDormant[0];
@@ -228,9 +249,10 @@ async function generateReport(companyId, type, periodOverride = null) {
 
   // 12. Construir HTML
   const periodLabel = formatPeriodLabel(period);
+  const edition = calcEdition(period.startDate);
   const html = buildWeeklyReportHtml({
     company: { name: company.name, logo_url: company.logo_url },
-    period:  { label: periodLabel, edition: null, sent_at: formatSentAt() },
+    period:  { label: periodLabel, edition, sent_at: formatSentAt() },
     health:  { score: 71, label: 'Atencao', delta: 0, delta_dir: 'neutral' },
     kpis,
     dailyRevenue,
