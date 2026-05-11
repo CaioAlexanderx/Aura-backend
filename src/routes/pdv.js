@@ -10,69 +10,28 @@
 //   Em split (payments[]), so o valor 'crediario' fica fora do Financeiro;
 //   o resto vira receita normal. Cancelar venda apaga os debits (sale_id FK).
 // FEAT 06/05/2026: GET /scan/:code — lookup normalizado por barcode.
-//   Trata EAN-12 (UPC-A) vs EAN-13: tenta exato, depois +0 na frente,
-//   depois sem o zero-líder. Cobre produtos E variantes.
 // FIX 06/05/2026: split payments — frontend envia p.value (não p.amount).
-//   calcCreditAmount e INSERT sale_payments agora leem p.value ?? p.amount.
 // FIX 07/05/2026: crediário anônimo — cliente não é mais obrigatório.
-//   Sem customer_id: creditAmount = 0, venda entra inteira no financeiro.
-//   Com customer_id: comportamento original (ledger de crédito).
 // FEAT 07/05/2026: POST /pdv/troca — Troca Option B.
-//   Cria sales(type='troca', exchange_of_sale_id), sale_items para novos
-//   itens, troca_returned_items para itens devolvidos. Restaura estoque dos
-//   devolvidos, desconta dos novos. Se net > 0 cria transaction no financeiro.
-//   Migration 101 adiciona coluna type + exchange_of_sale_id + tabela troca_returned_items.
 // FEAT 07/05/2026: Group Stock Visibility (migration 100).
-//   scan, POST /sale, DELETE /sale e POST /troca usam company_id real do
-//   produto para mover estoque — subsidiárias vendem do catálogo do
-//   billing_owner_company_id sem criar pool separado.
-// FIX 07/05/2026: DELETE /sale — JOIN products no SELECT sale_items para
-//   obter stock_company_id sem round-trip por item (compat. com testes).
-// CRITICAL FIX 09/05/2026 (divergencia Davi 08/05):
-//   POST /sale agora SEMPRE cria sale_payments — antes só rodava para
-//   payments.length > 1, deixando 96% das vendas single-payment sem rows.
-//   Isso fazia caixaService cair no fallback de transactions e
-//   classificar tudo como total_outros. Agora:
-//     - payments[] presente: 1 row por entry (exceto crediário, que
-//       continua só em customer_credit_transactions);
-//     - sem payments[]: 1 row sintetica com payment_method + cashAmount;
-//     - sessao_id é resolvido por lookup da sessão aberta no momento
-//       do INSERT, vinculando a venda ao caixa correto.
-//   A ordem dos blocos foi reorganizada para que cashAmount seja
-//   calculado antes do INSERT de sale_payments.
+// CRITICAL FIX 09/05/2026: POST /sale sempre cria sale_payments.
 // HOTFIX 09/05/2026: lookup de caixa_sessoes envolto em try/catch.
-//   Necessario pra (a) tolerar schemas legados sem o modulo de caixa,
-//   (b) suportar testes que mockam client.query e esgotam o stack.
-// FEAT 09/05/2026 (troca v2): POST /troca agora cria 2 transactions
-//   distintas em vez de 1 pelo netAmount.
-//     - 'Troca - Devolução' (expense, valor devolvido)
-//     - 'Troca - Venda' (income, valor da nova venda)
-//   Idempotency keys distintas (-return / -sale) pra cancelamento
-//   granular e auditoria limpa. Funciona inclusive em troca par-a-par
-//   (net=0). Net<0 (devolver dinheiro ao cliente) ignorado por ora.
-// HOTFIX 09/05/2026 (troca caixa): POST /troca agora cria sale_payments
-//   para a nova venda da troca (1 row com payment_method + saleTotal +
-//   sessao_id da sessão aberta). Sem isso, a troca-venda não entrava no
-//   caixa fechado mesmo após o fix do /sale. Identificado na divergência
-//   Davi 09/05 (R$ 224,98 da troca ficou fora do caixa).
-// FEAT 09/05/2026 (crediário Opção A — competência separada):
-//   Crediário com customer_id agora cria transaction "Crediário - A Receber"
-//   (status=pending, paid_at=NULL, idempotency_key=pdv-credit-receivable-{saleId}).
-//   Não conta no caixa físico até ser confirmada pelo recebimento via
-//   POST /credit/customer/:cid/payment, que faz FIFO marcando a transaction
-//   como confirmed + cria sale_payment na sessão ativa do dia. Crediário
-//   anônimo (sem customer_id) continua virando venda dinheiro (creditAmount=0).
-//   DELETE /sale também apaga a transaction A Receber pendente da venda
-//   cancelada para manter o ledger consistente.
-// FEAT 11/05/2026 (troca fiscal Onda 1): POST /troca aceita
-//   nfce_strategy='cancel_reissue'. Quando enviado:
-//     1) localiza NFC-e autorizada da venda original (<24h);
-//     2) chama nuvemfiscal.cancelNfce — abort se SEFAZ rejeitar;
-//     3) marca nfce_emissions local como cancelada;
-//     4) persiste sales.nfce_strategy/original_chave/devolucao_chave.
-//   A NFC-e da nova venda fica a cargo do SaleComplete (auto_emit_nfce)
-//   ou de chamada manual ao POST /nfce/emit. Estratégia 'devolucao_55'
-//   (NF-e modelo 55) virá na Onda 2. Default 'none' = comportamento legado.
+// FEAT 09/05/2026 (troca v2): POST /troca cria 2 transactions distintas.
+// HOTFIX 09/05/2026 (troca caixa): POST /troca cria sale_payments.
+// FEAT 09/05/2026 (crediário Opção A — competência separada).
+// FEAT 11/05/2026 (troca fiscal Onda 1): nfce_strategy='cancel_reissue'.
+// FEAT 11/05/2026 (troca sale_payments split — modelo definitivo):
+//   POST /troca passa a criar 2 sale_payments para a venda-troca:
+//     1) -returnedValue (devolução do produto original)
+//     2) +netAmount    (diferença efetivamente paga pelo cliente)
+//   Net no caixa = netAmount (= o que cliente passou na maquininha).
+//   A devolução compensa o sale_payment original da venda devolvida,
+//   fazendo o caixa refletir faturamento líquido (vendas + trocas
+//   − devoluções). Antes contava o valor cheio da troca-venda, inflando
+//   o caixa pelo valor do produto que foi devolvido. Detectado na
+//   reconciliação Davi 09/05 (R$ 5.087,67 confirmado pelo lojista).
+//   Migration 107 dropou UNIQUE (sale_id, method) que bloqueava o
+//   modelo (devolução e diferença usam o MESMO method).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -83,10 +42,6 @@ const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 const SP_DATE_COL = (col) => `(${col} AT TIME ZONE 'America/Sao_Paulo')::date`;
 
-// Calcula quanto da venda foi no crediario (split-aware).
-// Retorna [creditAmount, payLabelForFinanceiro] — payLabel exclui 'crediario'
-// pra descricao da transaction nao mentir.
-// FIX 06/05/2026: frontend envia p.value (PaymentEntry), nao p.amount.
 function calcCreditAmount({ payment_method, payments, totalAmount }) {
   if (Array.isArray(payments) && payments.length > 0) {
     let credit = 0;
@@ -915,13 +870,43 @@ router.post('/troca', async (req, res) => {
       // best-effort
     }
 
-    if (saleTotal > 0) {
-      const trocaPayMethod = (payment_method || 'dinheiro').toLowerCase();
-      if (trocaPayMethod !== 'crediario') {
+    // ──────────────────────────────────────────────────────────────
+    // 11/05/2026 (modelo definitivo): TROCA SALE_PAYMENTS SPLIT
+    // ──────────────────────────────────────────────────────────────
+    // Cria 2 sale_payments para a venda-troca (similar a split-payment
+    // com modalidades, mas com sinais opostos):
+    //   1) -returnedValue (devolução do produto original)
+    //   2) +netAmount     (diferença efetivamente paga pelo cliente)
+    //
+    // Net no caixa = netAmount = exatamente o que o cliente passou na
+    // maquininha. A devolução compensa o sale_payment original da venda
+    // que foi devolvida → o caixa do dia passa a refletir faturamento
+    // líquido (vendas + trocas − devoluções), não o "volume bruto".
+    //
+    // Antes: 1 sale_payment com saleTotal (valor cheio do produto novo)
+    // — inflava o caixa porque tanto a venda original (devolvida) quanto
+    // a troca-venda contavam o valor cheio do mesmo produto trocado.
+    //
+    // Migration 107 dropou UNIQUE (sale_id, method) que bloqueava este
+    // modelo (devolução e diferença usam o MESMO method).
+    //
+    // Crediário: não cria sale_payment (consistente com /sale).
+    // Net<0 (cliente recebe troco): não suportado ainda (sale_payment
+    // de diferença vira 0; só a devolução é registrada).
+    const trocaPayMethod = (payment_method || 'dinheiro').toLowerCase();
+    if (trocaPayMethod !== 'crediario') {
+      if (returnedValue > 0) {
         await client.query(
           `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
            VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
-          [trocaSale.id, req.params.id, trocaPayMethod, saleTotal, trocaSessaoId]
+          [trocaSale.id, req.params.id, trocaPayMethod, -parseFloat(returnedValue.toFixed(2)), trocaSessaoId]
+        );
+      }
+      if (netAmount > 0) {
+        await client.query(
+          `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
+           VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+          [trocaSale.id, req.params.id, trocaPayMethod, netAmount, trocaSessaoId]
         );
       }
     }
@@ -967,10 +952,6 @@ router.post('/troca', async (req, res) => {
 
     // ──────────────────────────────────────────────────────────────
     // 11/05/2026 — Troca fiscal Onda 1: cancel + reissue
-    // Quando nfce_strategy='cancel_reissue', cancela a NFC-e original
-    // (que precisa estar autorizada e ter <24h) e prepara o terreno
-    // para que a nova NFC-e seja emitida pelo SaleComplete (auto-emit)
-    // ou por chamada manual ao POST /nfce/emit usando trocaSale.id.
     // ──────────────────────────────────────────────────────────────
     let nfceFiscalResult = { strategy: 'none' };
     const nfceStrategy = (req.body.nfce_strategy || 'none').toLowerCase();
