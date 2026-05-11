@@ -154,6 +154,9 @@ async function generateReport(companyId, type, periodOverride = null) {
     return parseFloat(((a - b) / b * 100).toFixed(1));
   }
 
+  // Health score fixo em 71 por enquanto (será calculado dinamicamente na fase 2)
+  const HEALTH_SCORE = 71;
+
   const kpis = {
     revenue:         curr.total_revenue,
     revenue_delta:   pctChange(curr.total_revenue, prev.total_revenue),
@@ -166,6 +169,7 @@ async function generateReport(companyId, type, periodOverride = null) {
     new_customers:   curr.unique_customers,
     customers_delta: curr.unique_customers - (prev.unique_customers || 0),
     customers_dir:   curr.unique_customers >= prev.unique_customers ? 'up' : 'down',
+    health_score:    HEALTH_SCORE,
   };
 
   // 7. Montar dailyRevenue (seg–sab = 6 dias, cursor <= endDate)
@@ -221,7 +225,7 @@ async function generateReport(companyId, type, periodOverride = null) {
 
   // 10. Prioridades
   const reportData = {
-    health: { score: 71 },
+    health: { score: HEALTH_SCORE },
     kpis,
     dailyRevenue,
     topProducts,
@@ -261,7 +265,7 @@ async function generateReport(companyId, type, periodOverride = null) {
   const html = buildWeeklyReportHtml({
     company:  { name: company.name, logo_url: company.logo_url },
     period:   { label: periodLabel, edition, sent_at: formatSentAt() },
-    health:   { score: 71, label: 'Atencao', delta: 0, delta_dir: 'neutral' },
+    health:   { score: HEALTH_SCORE, label: 'Atencao', delta: 0, delta_dir: 'neutral' },
     kpis,
     dailyRevenue,
     topProducts,
@@ -275,7 +279,7 @@ async function generateReport(companyId, type, periodOverride = null) {
 
   // 14. Salvar snapshot de health
   const snapshotPeriod = period.startDate.slice(0, 8) + '01';
-  await saveHealthSnapshot(companyId, 71, 'Atencao', snapshotPeriod, {}).catch(e => {
+  await saveHealthSnapshot(companyId, HEALTH_SCORE, 'Atencao', snapshotPeriod, {}).catch(e => {
     console.warn('[reportGenerator] saveHealthSnapshot falhou:', e.message);
   });
 
