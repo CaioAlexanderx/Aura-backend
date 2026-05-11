@@ -131,7 +131,7 @@ router.patch('/team/:mid', ...adminOnly, asyncHandler(async (req, res) => {
   if (notes !== undefined) { fields.push(`notes=$${idx++}`); values.push(notes); }
   if (!fields.length) throw new AppError('Nenhum campo para atualizar', 400);
   fields.push('updated_at=NOW()'); values.push(mid);
-  const { rows } = await pool.query(`UPDATE aura_team_ements SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`, values);
+  const { rows } = await pool.query(`UPDATE aura_team_members SET ${fields.join(', ')} WHERE id=$${idx} RETURNING *`, values);
   if (!rows.length) throw new AppError('Membro não encontrado', 404);
   res.json({ member: rows[0] });
 }));
@@ -266,13 +266,15 @@ router.post('/reports/trigger', adminSecretAuth, async (req, res) => {
     let companies;
     if (company_id) {
       const { rows } = await db.query(
-        `SELECT id, name, email, plan FROM companies WHERE id = $1 AND is_active = true AND email IS NOT NULL`,
+        `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan
+         FROM companies WHERE id = $1 AND is_active = true AND email IS NOT NULL`,
         [company_id]
       );
       companies = rows;
     } else {
       const { rows } = await db.query(
-        `SELECT id, name, email, plan FROM companies WHERE is_active = true AND email IS NOT NULL AND email != '' LIMIT 100`
+        `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan
+         FROM companies WHERE is_active = true AND email IS NOT NULL AND email != '' LIMIT 100`
       );
       companies = rows;
     }
@@ -342,7 +344,7 @@ router.get('/reports/preview/:company_id', async (req, res) => {
   }
 
   try {
-    const { generateReport, updateDelivery } = require('../services/reportGenerator');
+    const { generateReport } = require('../services/reportGenerator');
     const db = require('../config/database');
 
     const result = await generateReport(company_id, type);
