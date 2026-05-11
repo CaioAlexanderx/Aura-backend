@@ -5,7 +5,7 @@
 //
 // Convencao de datas:
 //   resolvePeriodForReport retorna { startDate, endDate } onde
-//   endDate e INCLUSIVO (ultimo dia do periodo, ex: sabado).
+//   endDate e INCLUSIVO (ultimo dia do periodo = sabado).
 //   reportGenerator.js usa cursor <= endDate no loop de dias e
 //   passa end_date = endDate direto para getSalesAnalytics (que
 //   adiciona +1 internamente — trata como inclusivo).
@@ -36,32 +36,34 @@ function addDaysSP(dateStr, n) {
 // ------------------------------------------------------------------------
 // 1. resolvePeriodForReport(type)
 // Retorna { startDate, endDate } em 'YYYY-MM-DD' (BRT)
-//   'weekly': seg–sab da semana passada completa (domingo excluido)
+//   'weekly': seg-sab da semana mais recente concluida (domingo excluido)
 //             endDate = ultimo SABADO (inclusivo)
-//   'monthly': mes anterior completo
 //
 // Formula para 'weekly':
-//   dayOfWeek: 0=seg, 1=ter, ..., 5=sab, 6=dom
-//   startDate = today - (dayOfWeek + 7)   → ultima segunda
-//   endDate   = today - (dayOfWeek + 2)   → ultimo sabado (inclusivo)
+//   utcDay: 0=dom, 1=seg, ..., 6=sab (getUTCDay padrao)
+//   daysSinceSat = (utcDay + 1) % 7   → 0 se hoje=sab, 1 se dom, 2 se seg...
+//   endDate   = hoje - daysSinceSat    → ultimo sabado (inclusivo)
+//   startDate = endDate - 5            → segunda daquela semana
 //
-//   Verificacao para todos os dias:
-//     seg(0): start=-7, end=-2 ✓
-//     ter(1): start=-8, end=-3 ✓
-//     qua(2): start=-9, end=-4 ✓
-//     qui(3): start=-10, end=-5 ✓
-//     sex(4): start=-11, end=-6 ✓
-//     sab(5): start=-12, end=-7 ✓
-//     dom(6): start=-13, end=-8 ✓  (usa semana ja completa)
+//   Verificacao:
+//     dom(0): daysSinceSat=1 → end=ontem(sab), start=end-5 ✓
+//     seg(1): daysSinceSat=2 → end=ante-ontem(sab), start=end-5 ✓
+//     ter(2): daysSinceSat=3 → end=sab passado, start=end-5 ✓
+//     sab(6): daysSinceSat=0 → end=hoje(sab), start=end-5 ✓
+//
+//   Exemplo com hoje = dom 10/05/2026:
+//     daysSinceSat = 1
+//     endDate   = 09/05 (sab) ✓
+//     startDate = 04/05 (seg) ✓
 // ------------------------------------------------------------------------
 
 function resolvePeriodForReport(type) {
   if (type === 'weekly') {
     var today = todaySP();
-    var utcDay = new Date(today + 'T00:00:00Z').getUTCDay(); // 0=dom, 1=seg...
-    var dayOfWeek = (utcDay + 6) % 7; // 0=seg, 6=dom
-    var startDate = addDaysSP(today, -(dayOfWeek + 7));
-    var endDate   = addDaysSP(today, -(dayOfWeek + 2)); // sabado, inclusivo
+    var utcDay = new Date(today + 'T00:00:00Z').getUTCDay(); // 0=dom, 1=seg, ..., 6=sab
+    var daysSinceSat = (utcDay + 1) % 7; // 0 se hoje=sab, 1 se dom, 2 se seg...
+    var endDate   = addDaysSP(today, -daysSinceSat); // ultimo sabado (inclusivo)
+    var startDate = addDaysSP(endDate, -5);           // segunda daquela semana
     return { startDate, endDate };
   }
 
@@ -73,8 +75,6 @@ function resolvePeriodForReport(type) {
     var prevYear = month === 1 ? year - 1 : year;
     var prevMonth = month === 1 ? 12 : month - 1;
     var prevMonthStart = prevYear + '-' + String(prevMonth).padStart(2, '0') + '-01';
-    var currentMonthStart = year + '-' + String(month).padStart(2, '0') + '-01';
-    // Para mensal, endDate = ultimo dia do mes anterior (dia antes de currentMonthStart)
     var lastDay = new Date(Date.UTC(year, month - 1, 0));
     var endDate = prevYear + '-' + String(prevMonth).padStart(2, '0') + '-' + String(lastDay.getUTCDate()).padStart(2, '0');
     return { startDate: prevMonthStart, endDate };
@@ -151,7 +151,6 @@ async function fetchDormantCustomers(companyId) {
 
 // ------------------------------------------------------------------------
 // 4. fetchHealthHistory(companyId)
-// Retorna ultimos 6 snapshots de company_health_snapshots
 // ------------------------------------------------------------------------
 
 async function fetchHealthHistory(companyId) {
@@ -171,12 +170,10 @@ async function fetchHealthHistory(companyId) {
 // ------------------------------------------------------------------------
 // 5. fetchSalesHeatmap(companyId, startDate, endDateInclusive)
 // Retorna linhas { dow, hour, sale_count, revenue } para o periodo
-// dow: 1=seg, 2=ter, ..., 6=sab (0=dom excluido)
-// Usado para montar o heatmap de movimentacao hora x dia
+// dow: 1=seg, 2=ter, ..., 6=sab (domingo=0 excluido)
 // ------------------------------------------------------------------------
 
 async function fetchSalesHeatmap(companyId, startDate, endDateInclusive) {
-  // Converter endDate inclusivo para exclusivo para a query SQL
   var parts = endDateInclusive.split('-');
   var y = parseInt(parts[0]), m = parseInt(parts[1]) - 1, d = parseInt(parts[2]);
   var endExclusive = new Date(Date.UTC(y, m, d + 1)).toISOString().slice(0, 10);
