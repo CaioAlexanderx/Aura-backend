@@ -3,6 +3,13 @@
 // Queries auxiliares exclusivas para o sistema de relatorios
 // automaticos (semanal / mensal).
 //
+// Convencao de datas:
+//   resolvePeriodForReport retorna { startDate, endDate } onde
+//   endDate e INCLUSIVO (ultimo dia do periodo, ex: sabado).
+//   reportGenerator.js usa cursor <= endDate no loop de dias e
+//   passa end_date = endDate direto para getSalesAnalytics (que
+//   adiciona +1 internamente — trata como inclusivo).
+//
 // Todas as datas em BRT (UTC-3 manual, sem ICU — Railway).
 // ========================================================================
 
@@ -11,7 +18,7 @@
 const db = require('../config/database');
 
 // ------------------------------------------------------------------------
-// Helpers BRT (replicado de salesAnalytics.js - UTC-3 manual sem ICU)
+// Helpers BRT
 // ------------------------------------------------------------------------
 
 function todaySP() {
@@ -29,18 +36,32 @@ function addDaysSP(dateStr, n) {
 // ------------------------------------------------------------------------
 // 1. resolvePeriodForReport(type)
 // Retorna { startDate, endDate } em 'YYYY-MM-DD' (BRT)
-//   'weekly': seg-dom da semana passada
+//   'weekly': seg–sab da semana passada completa (domingo excluido)
+//             endDate = ultimo SABADO (inclusivo)
 //   'monthly': mes anterior completo
+//
+// Formula para 'weekly':
+//   dayOfWeek: 0=seg, 1=ter, ..., 5=sab, 6=dom
+//   startDate = today - (dayOfWeek + 7)   → ultima segunda
+//   endDate   = today - (dayOfWeek + 2)   → ultimo sabado (inclusivo)
+//
+//   Verificacao para todos os dias:
+//     seg(0): start=-7, end=-2 ✓
+//     ter(1): start=-8, end=-3 ✓
+//     qua(2): start=-9, end=-4 ✓
+//     qui(3): start=-10, end=-5 ✓
+//     sex(4): start=-11, end=-6 ✓
+//     sab(5): start=-12, end=-7 ✓
+//     dom(6): start=-13, end=-8 ✓  (usa semana ja completa)
 // ------------------------------------------------------------------------
 
 function resolvePeriodForReport(type) {
   if (type === 'weekly') {
     var today = todaySP();
-    var utcDay = new Date(today + 'T00:00:00Z').getUTCDay();
-    var dayOfWeek = (utcDay + 6) % 7; // 0=Mon, 6=Sun
-    var daysToLastMonday = dayOfWeek + 7;
-    var startDate = addDaysSP(today, -daysToLastMonday);
-    var endDate = addDaysSP(today, -dayOfWeek);
+    var utcDay = new Date(today + 'T00:00:00Z').getUTCDay(); // 0=dom, 1=seg...
+    var dayOfWeek = (utcDay + 6) % 7; // 0=seg, 6=dom
+    var startDate = addDaysSP(today, -(dayOfWeek + 7));
+    var endDate   = addDaysSP(today, -(dayOfWeek + 2)); // sabado, inclusivo
     return { startDate, endDate };
   }
 
@@ -49,20 +70,23 @@ function resolvePeriodForReport(type) {
     var parts = todayStr.split('-');
     var year = parseInt(parts[0]);
     var month = parseInt(parts[1]);
-    var currentMonthStart = year + '-' + String(month).padStart(2, '0') + '-01';
     var prevYear = month === 1 ? year - 1 : year;
     var prevMonth = month === 1 ? 12 : month - 1;
     var prevMonthStart = prevYear + '-' + String(prevMonth).padStart(2, '0') + '-01';
-    return { startDate: prevMonthStart, endDate: currentMonthStart };
+    var currentMonthStart = year + '-' + String(month).padStart(2, '0') + '-01';
+    // Para mensal, endDate = ultimo dia do mes anterior (dia antes de currentMonthStart)
+    var lastDay = new Date(Date.UTC(year, month - 1, 0));
+    var endDate = prevYear + '-' + String(prevMonth).padStart(2, '0') + '-' + String(lastDay.getUTCDate()).padStart(2, '0');
+    return { startDate: prevMonthStart, endDate };
   }
 
-  throw new Error(`resolvePeriodForReport: type desconhecido "${type}"`);
+  throw new Error('resolvePeriodForReport: type desconhecido "' + type + '"');
 }
 
 // ------------------------------------------------------------------------
 // 2. fetchStaleProducts(companyId, days = 14)
 // Retorna ate 3 produtos em estoque sem venda nos ultimos `days` dias
-// Nota: coluna de estoque e stock_qty (nao stock_quantity)
+// Nota: coluna de estoque = stock_qty
 // ------------------------------------------------------------------------
 
 async function fetchStaleProducts(companyId, days = 14) {
@@ -90,8 +114,8 @@ async function fetchStaleProducts(companyId, days = 14) {
 
 // ------------------------------------------------------------------------
 // 3. fetchDormantCustomers(companyId)
-// Retorna { count, topDormant[] } - clientes sumidos ha mais de 30 dias
-// Nota: coluna e name (nao full_name)
+// Retorna { count, topDormant[] } — clientes sumidos ha mais de 30 dias
+// Nota: coluna = name (nao full_name)
 // ------------------------------------------------------------------------
 
 async function fetchDormantCustomers(companyId) {
@@ -145,8 +169,39 @@ async function fetchHealthHistory(companyId) {
 }
 
 // ------------------------------------------------------------------------
-// 5. saveHealthSnapshot(companyId, score, label, period, drivers)
-// Upsert em company_health_snapshots (period = 1o dia do mes atual)
+// 5. fetchSalesHeatmap(companyId, startDate, endDateInclusive)
+// Retorna linhas { dow, hour, sale_count, revenue } para o periodo
+// dow: 1=seg, 2=ter, ..., 6=sab (0=dom excluido)
+// Usado para montar o heatmap de movimentacao hora x dia
+// ------------------------------------------------------------------------
+
+async function fetchSalesHeatmap(companyId, startDate, endDateInclusive) {
+  // Converter endDate inclusivo para exclusivo para a query SQL
+  var parts = endDateInclusive.split('-');
+  var y = parseInt(parts[0]), m = parseInt(parts[1]) - 1, d = parseInt(parts[2]);
+  var endExclusive = new Date(Date.UTC(y, m, d + 1)).toISOString().slice(0, 10);
+
+  const sql = `
+    SELECT
+      EXTRACT(DOW FROM created_at AT TIME ZONE 'America/Sao_Paulo')::int AS dow,
+      EXTRACT(HOUR FROM created_at AT TIME ZONE 'America/Sao_Paulo')::int AS hour,
+      COUNT(*)::int AS sale_count,
+      COALESCE(SUM(total_amount), 0) AS revenue
+    FROM sales
+    WHERE company_id = $1
+      AND COALESCE(status, 'completed') != 'cancelled'
+      AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= $2::timestamp
+      AND (created_at AT TIME ZONE 'America/Sao_Paulo') <  $3::timestamp
+      AND EXTRACT(DOW FROM created_at AT TIME ZONE 'America/Sao_Paulo') != 0
+    GROUP BY dow, hour
+    ORDER BY dow, hour
+  `;
+  const result = await db.query(sql, [companyId, startDate, endExclusive]);
+  return result.rows;
+}
+
+// ------------------------------------------------------------------------
+// 6. saveHealthSnapshot(companyId, score, label, period, drivers)
 // ------------------------------------------------------------------------
 
 async function saveHealthSnapshot(companyId, score, label, period, drivers = {}) {
@@ -190,5 +245,6 @@ module.exports = {
   fetchStaleProducts,
   fetchDormantCustomers,
   fetchHealthHistory,
+  fetchSalesHeatmap,
   saveHealthSnapshot,
 };
