@@ -81,8 +81,9 @@ function buildSectionPrompt(section, data, maxSentences) {
       const worst = dailyRevenue && dailyRevenue.length
         ? dailyRevenue.reduce((a, b) => (b.value < a.value ? b : a))
         : null;
-      const total = kpis && kpis.revenue_total != null
-        ? `R$${fmtBRL(kpis.revenue_total)}`
+      // kpis.revenue é o campo correto (não revenue_total)
+      const total = kpis && kpis.revenue != null
+        ? `R$${fmtBRL(kpis.revenue)}`
         : 'valor não disponível';
       return (
         `Escreva ${maxSentences} frase${maxSentences !== 1 ? 's' : ''} sobre o faturamento da semana. ` +
@@ -203,8 +204,8 @@ function selectPriorities({ health, kpis, dailyRevenue, staleProducts, dormantCu
     const p = staleProducts[0];
     candidates.push({
       weight: 5000,
-      action: `Reforçar estoque de <b>${p.name}</b> antes de <b>${bestDay(dailyRevenue)}</b>.`,
-      impact: `Foi o produto mais vendido — risco de ruptura`,
+      action: `Movimentar <b>${p.name}</b> — parado há <b>${p.days_idle != null ? p.days_idle : '14+'} dias</b> sem venda.`,
+      impact: `Crie uma promoção ou reposicione no PDV para girar o estoque`,
       cta_label: 'Ver estoque',
       cta_url: 'https://app.getaura.com.br/estoque',
     });
@@ -255,20 +256,18 @@ function selectPriorities({ health, kpis, dailyRevenue, staleProducts, dormantCu
 // generateWeeklyNarratives — ponto de entrada principal
 // ---------------------------------------------------------------------------
 async function generateWeeklyNarratives(reportData) {
-  const { health, kpis, dailyRevenue, topProducts, payments, priorities, wowInsight } = reportData;
+  const { kpis, dailyRevenue, topProducts, payments } = reportData;
 
-  const [revenueNarr, productsNarr, paymentsNarr, prioritiesResult] = await Promise.all([
+  const [revenueNarr, productsNarr, paymentsNarr] = await Promise.all([
     limit(() => generateSection('faturamento_semanal', { dailyRevenue, kpis }, 2)),
     limit(() => generateSection('top_produtos', { topProducts }, 1)),
     limit(() => generateSection('formas_pagamento', { payments }, 1)),
-    limit(() => Promise.resolve(selectPriorities(reportData))),
   ]);
 
   return {
     revenue: revenueNarr,
     products: productsNarr,
     payments: paymentsNarr,
-    priorities: prioritiesResult, // array de 1-3 prioridades selecionadas
   };
 }
 
