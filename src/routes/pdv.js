@@ -64,9 +64,19 @@
 //   anônimo (sem customer_id) continua virando venda dinheiro (creditAmount=0).
 //   DELETE /sale também apaga a transaction A Receber pendente da venda
 //   cancelada para manter o ledger consistente.
+// FEAT 11/05/2026 (troca fiscal Onda 1): POST /troca aceita
+//   nfce_strategy='cancel_reissue'. Quando enviado:
+//     1) localiza NFC-e autorizada da venda original (<24h);
+//     2) chama nuvemfiscal.cancelNfce — abort se SEFAZ rejeitar;
+//     3) marca nfce_emissions local como cancelada;
+//     4) persiste sales.nfce_strategy/original_chave/devolucao_chave.
+//   A NFC-e da nova venda fica a cargo do SaleComplete (auto_emit_nfce)
+//   ou de chamada manual ao POST /nfce/emit. Estratégia 'devolucao_55'
+//   (NF-e modelo 55) virá na Onda 2. Default 'none' = comportamento legado.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
+const nuvemfiscal = require('../services/nuvemfiscal');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 
@@ -92,9 +102,6 @@ function calcCreditAmount({ payment_method, payments, totalAmount }) {
 }
 
 // ── GET /companies/:id/pdv/scan/:code ────────────────────────
-// Lookup de produto por codigo de barras com normalizacao EAN-12↔13.
-// FEAT (migration 100): busca também em produtos do billing_owner_company_id
-// onde is_group_shared = true.
 router.get('/scan/:code', async (req, res) => {
   const raw = decodeURIComponent(req.params.code || '').trim();
   if (!raw) return res.status(400).json({ error: 'code obrigatorio', match: 'none' });
@@ -377,17 +384,6 @@ router.post('/sale', async (req, res) => {
         ]
       );
 
-      // ──────────────────────────────────────────────────────────────
-      // 09/05/2026 FEAT (crediário Opção A — competência separada):
-      // Crediário entra no Financeiro como "A Receber" (status=pending,
-      // paid_at=NULL). Não conta no caixa físico (filtro paid_at do
-      // caixaService deixa de fora). Quando o cliente paga via
-      // POST /credit/customer/:cid/payment, esta transaction é
-      // confirmada (status=confirmed, paid_at=NOW) e um sale_payment
-      // é criado FIFO apontando para a sessão de caixa ativa do dia
-      // do pagamento — assim o caixa físico contabiliza por método
-      // (dinheiro/pix/cartão) na data do recebimento.
-      // ──────────────────────────────────────────────────────────────
       await client.query(
         `INSERT INTO transactions
            (company_id, type, status, amount, description, category,
@@ -405,22 +401,6 @@ router.post('/sale', async (req, res) => {
       );
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // 09/05/2026 CRITICAL FIX: sale_payments SEMPRE é criado.
-    // Antes, o INSERT só rodava em vendas multi-payment, deixando 96%
-    // das vendas single-payment órfãs e contabilizadas como total_outros
-    // no relatório de fechamento (zerando pix/cartão/débito/dinheiro).
-    //
-    // Política atual:
-    //   - payments[] presente: cria 1 row por entry (excluindo crediário).
-    //   - sem payments[]: cria 1 row sintética com payment_method + cashAmount.
-    //   - sessao_id resolvido pela sessão aberta no momento do INSERT.
-    //   - Crediário NUNCA vira sale_payment (segue só em customer_credit_transactions).
-    // ──────────────────────────────────────────────────────────────
-    // Best-effort: tolera tabelas ausentes (schemas antigos sem caixa)
-    // e qualquer erro de query — sessao_id fica NULL e o caixaService
-    // cai no fallback de período. Tambem cobre testes com mocks que
-    // retornam undefined ao esgotar mockResolvedValueOnce.
     let activeSessaoId = null;
     try {
       const sessRes = await client.query(
@@ -429,7 +409,7 @@ router.post('/sale', async (req, res) => {
       );
       activeSessaoId = sessRes?.rows?.[0]?.id || null;
     } catch (sessErr) {
-      // segue silenciosamente — sale_payments fica sem vinculo direto
+      // best-effort
     }
 
     if (Array.isArray(payments) && payments.length > 0) {
@@ -671,8 +651,6 @@ router.delete('/sale/:saleId', async (req, res) => {
     );
 
     await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-sale-' + req.params.saleId, req.params.id]);
-    // 09/05/2026: cancelar tambem a transaction "Crediario - A Receber" pendente
-    // se ainda nao foi quitada (pdv-credit-receivable-*).
     await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-credit-receivable-' + req.params.saleId, req.params.id]);
     await client.query(
       `UPDATE sales SET status='cancelled', cancelled_at=NOW(), cancelled_by=$1,
@@ -926,13 +904,6 @@ router.post('/troca', async (req, res) => {
       );
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // 09/05/2026 HOTFIX: sale_payments para a nova venda da troca.
-    // Sem isso a troca-venda fica fora do caixa fechado (caixaService
-    // só conta sale_payments + transactions não-PDV em total_outros).
-    // Lookup da sessão aberta + INSERT seguindo a mesma política do
-    // POST /sale. Crediário NÃO vira sale_payment (consistente com /sale).
-    // ──────────────────────────────────────────────────────────────
     let trocaSessaoId = null;
     try {
       const sRes = await client.query(
@@ -941,7 +912,7 @@ router.post('/troca', async (req, res) => {
       );
       trocaSessaoId = sRes?.rows?.[0]?.id || null;
     } catch (sErr) {
-      // best-effort — sale_payment fica sem sessao_id (caixa cai no fallback de período)
+      // best-effort
     }
 
     if (saleTotal > 0) {
@@ -955,14 +926,6 @@ router.post('/troca', async (req, res) => {
       }
     }
 
-    // 09/05/2026: troca lança 2 transactions distintas para auditoria
-    // contábil limpa: uma expense (devolução do valor original) e uma
-    // income (nova venda). Categorias dedicadas pra dashboards/DRE
-    // poderem filtrar/ignorar trocas conforme regra do app.
-    // Idempotency keys distintas (-return / -sale) permitem cancelamento
-    // granular. Sempre criamos as duas mesmo quando net=0 (par-a-par)
-    // pra refletir a movimentação real. Caso net<0 (diferença a devolver
-    // ao cliente) não é tratado nesta versão.
     const trocaNamesSummary = (new_items || [])
       .map(n => n.product_name_snapshot || '')
       .filter(Boolean)
@@ -1002,6 +965,95 @@ router.post('/troca', async (req, res) => {
       );
     }
 
+    // ──────────────────────────────────────────────────────────────
+    // 11/05/2026 — Troca fiscal Onda 1: cancel + reissue
+    // Quando nfce_strategy='cancel_reissue', cancela a NFC-e original
+    // (que precisa estar autorizada e ter <24h) e prepara o terreno
+    // para que a nova NFC-e seja emitida pelo SaleComplete (auto-emit)
+    // ou por chamada manual ao POST /nfce/emit usando trocaSale.id.
+    // ──────────────────────────────────────────────────────────────
+    let nfceFiscalResult = { strategy: 'none' };
+    const nfceStrategy = (req.body.nfce_strategy || 'none').toLowerCase();
+
+    if (nfceStrategy === 'cancel_reissue') {
+      const { rows: origNfceList } = await client.query(
+        `SELECT id, nuvemfiscal_id, chave_acesso, authorized_at, status, numero
+           FROM nfce_emissions
+          WHERE sale_id = $1 AND tipo = 'nfce' AND status = 'autorizada'
+          ORDER BY created_at DESC LIMIT 1`,
+        [original_sale_id]
+      );
+      if (!origNfceList.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Estratégia cancel_reissue requer NFC-e autorizada na venda original.',
+        });
+      }
+      const orig = origNfceList[0];
+
+      const ageHours = orig.authorized_at
+        ? (Date.now() - new Date(orig.authorized_at).getTime()) / 3600000
+        : 9999;
+      if (ageHours >= 24) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'NFC-e original tem mais de 24 horas — use a estratégia devolucao_55 (NF-e modelo 55).',
+          original_chave: orig.chave_acesso,
+          authorized_at: orig.authorized_at,
+          age_hours: Math.round(ageHours * 10) / 10,
+        });
+      }
+
+      if (orig.nuvemfiscal_id) {
+        try {
+          await nuvemfiscal.cancelNfce(
+            orig.nuvemfiscal_id,
+            `Troca de mercadoria - emissao de nova NFC-e pela venda substituta (sale ${trocaSale.id.slice(0, 8)})`
+          );
+        } catch (sefazErr) {
+          await client.query('ROLLBACK');
+          console.error('[PDV troca fiscal] SEFAZ cancel error:', sefazErr.message);
+          return res.status(502).json({
+            error: 'SEFAZ rejeitou cancelamento da NFC-e original: ' + sefazErr.message,
+            sefaz_payload: sefazErr.payload || null,
+          });
+        }
+      }
+
+      await client.query(
+        `UPDATE nfce_emissions
+            SET status        = 'cancelada',
+                cancelled_at  = NOW(),
+                cancel_reason = $1
+          WHERE id = $2`,
+        [
+          'Troca de mercadoria - sale_troca=' + trocaSale.id,
+          orig.id,
+        ]
+      );
+
+      await client.query(
+        `UPDATE sales
+            SET nfce_strategy        = $1,
+                nfce_original_chave  = $2,
+                nfce_devolucao_chave = $2
+          WHERE id = $3`,
+        ['cancel_reissue', orig.chave_acesso, trocaSale.id]
+      );
+
+      nfceFiscalResult = {
+        strategy: 'cancel_reissue',
+        original_chave_cancelada: orig.chave_acesso,
+        original_numero: orig.numero,
+        original_age_hours: Math.round(ageHours * 10) / 10,
+      };
+    } else if (nfceStrategy !== 'none') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'nfce_strategy desconhecida ou ainda não suportada: ' + nfceStrategy,
+      });
+    }
+
     await client.query('COMMIT');
 
     const { rows: respNewItems } = await db.query(
@@ -1024,6 +1076,7 @@ router.post('/troca', async (req, res) => {
       net_amount: netAmount,
       returned_value: parseFloat(returnedValue.toFixed(2)),
       new_value: parseFloat(newValue.toFixed(2)),
+      nfce: nfceFiscalResult,
       receipt_url: `/companies/${req.params.id}/print/receipt/${trocaSale.id}`,
     });
   } catch (e) {
