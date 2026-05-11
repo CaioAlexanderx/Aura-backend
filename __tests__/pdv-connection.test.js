@@ -25,6 +25,11 @@ app.use('/companies/:id/pdv', pdvRouter);
 
 const CID = 'comp-1', CUST = 'cust-1', EMP = 'emp-1', PROD = 'prod-1', SALE = 'sale-1';
 
+// Helper: mock padrao para assertCaixaOpenOrAllowed (PR Aura-backend#56).
+// Retorna caixa_enabled=false → helper aprova sem checar sessoes.
+// Usar logo apos o BEGIN em cada teste de POST /sale e POST /troca.
+const CAIXA_DISABLED_MOCK = { rows: [{ pdv_settings: { caixa_enabled: false } }] };
+
 beforeEach(() => { jest.clearAllMocks(); mockClient.query.mockReset(); db.query.mockReset(); });
 
 describe('PDV → Cliente → Funcionário', () => {
@@ -33,6 +38,7 @@ describe('PDV → Cliente → Funcionário', () => {
     it('cria venda e atualiza métricas do cliente e funcionário', async () => {
       mockClient.query
         .mockResolvedValueOnce({}) // BEGIN
+        .mockResolvedValueOnce(CAIXA_DISABLED_MOCK) // assertCaixaOpenOrAllowed: caixa_enabled=false
         .mockResolvedValueOnce({ rows: [{ name: 'Corte', cost_price: 10, stock_qty: 50 }] })
         .mockResolvedValueOnce({ rows: [{ id: EMP }] }) // employee check
         .mockResolvedValueOnce({ rows: [{ id: SALE, total_amount: 70, employee_id: EMP, customer_id: CUST }] })
@@ -59,6 +65,7 @@ describe('PDV → Cliente → Funcionário', () => {
     it('cria venda sem cliente/funcionário (ambos opcionais)', async () => {
       mockClient.query
         .mockResolvedValueOnce({}) // BEGIN
+        .mockResolvedValueOnce(CAIXA_DISABLED_MOCK) // assertCaixaOpenOrAllowed: caixa_enabled=false
         .mockResolvedValueOnce({ rows: [{ name: 'X', cost_price: 5, stock_qty: 10 }] })
         .mockResolvedValueOnce({ rows: [{ id: SALE, total_amount: 50, employee_id: null, customer_id: null }] })
         .mockResolvedValueOnce({}).mockResolvedValueOnce({}).mockResolvedValueOnce({})
@@ -78,6 +85,7 @@ describe('PDV → Cliente → Funcionário', () => {
     it('rejeita employee_id inválido', async () => {
       mockClient.query
         .mockResolvedValueOnce({}) // BEGIN
+        .mockResolvedValueOnce(CAIXA_DISABLED_MOCK) // assertCaixaOpenOrAllowed: caixa_enabled=false
         .mockResolvedValueOnce({ rows: [{ name: 'P', cost_price: 5, stock_qty: 10 }] })
         .mockResolvedValueOnce({ rows: [] }) // employee NOT found
         .mockResolvedValueOnce({}); // ROLLBACK
