@@ -3,10 +3,10 @@
 // Dispara relatorios automaticos: semanal (seg 8h) e mensal (dia 1, 8h).
 // Verifica a cada minuto se e hora de disparar.
 //
-// 11/05/2026: agora agrupa empresas por owner_id e gera UM relatorio
-// consolidado por owner com siblings. Empresas standalone seguem como
-// envio individual. Recipient usa companies.report_email_override ||
-// companies.email.
+// 11/05/2026 v3: filtro por companies.weekly_report_enabled = true
+// (allowlist explicita, migration 105). Grupos por owner_id continuam
+// gerando relatorio consolidado quando ids.length > 1.
+// Recipient = companies.report_email_override || companies.email.
 // ============================================================
 
 const db = require('../config/database');
@@ -24,6 +24,7 @@ async function getEligibleOwnerGroups() {
             report_email_override IS NOT NULL AS has_override
        FROM companies
       WHERE is_active = true
+        AND weekly_report_enabled = true
         AND COALESCE(report_email_override, email) IS NOT NULL
         AND COALESCE(report_email_override, email) != ''
       ORDER BY owner_id NULLS LAST, is_primary DESC NULLS LAST, created_at ASC
@@ -51,7 +52,7 @@ async function getEligibleOwnerGroups() {
 }
 
 async function triggerWeeklyReports() {
-  console.log('[reportScheduler] iniciando relatorios semanais (grupo-by-owner)...');
+  console.log('[reportScheduler] iniciando relatorios semanais (allowlist + group-by-owner)...');
   const start = Date.now();
   let sent = 0, skipped = 0, errors = 0;
 
@@ -64,7 +65,7 @@ async function triggerWeeklyReports() {
     const { sendWeeklyReport } = require('../services/mailer');
 
     const groups = await getEligibleOwnerGroups();
-    console.log(`[reportScheduler] ${groups.length} grupo(s) elegivel(eis) para envio.`);
+    console.log(`[reportScheduler] ${groups.length} grupo(s) elegivel(eis) para envio (weekly_report_enabled=true).`);
 
     for (const g of groups) {
       const ids = g.all.map(c => c.id);
