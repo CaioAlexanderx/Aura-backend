@@ -7,8 +7,6 @@
 // FIX 22/04: validacao de estoque variant-aware (Fase C gap)
 // FEAT 05/05/2026: pagamento 'crediario' — cria debit em
 //   customer_credit_transactions e NAO entra no Financeiro/transactions.
-//   Em split (payments[]), so o valor 'crediario' fica fora do Financeiro;
-//   o resto vira receita normal. Cancelar venda apaga os debits (sale_id FK).
 // FEAT 06/05/2026: GET /scan/:code — lookup normalizado por barcode.
 // FIX 06/05/2026: split payments — frontend envia p.value (não p.amount).
 // FIX 07/05/2026: crediário anônimo — cliente não é mais obrigatório.
@@ -20,18 +18,15 @@
 // HOTFIX 09/05/2026 (troca caixa): POST /troca cria sale_payments.
 // FEAT 09/05/2026 (crediário Opção A — competência separada).
 // FEAT 11/05/2026 (troca fiscal Onda 1): nfce_strategy='cancel_reissue'.
-// FEAT 11/05/2026 (troca sale_payments split — modelo definitivo):
-//   POST /troca passa a criar 2 sale_payments para a venda-troca:
-//     1) -returnedValue (devolução do produto original)
-//     2) +netAmount    (diferença efetivamente paga pelo cliente)
-//   Net no caixa = netAmount (= o que cliente passou na maquininha).
-//   A devolução compensa o sale_payment original da venda devolvida,
-//   fazendo o caixa refletir faturamento líquido (vendas + trocas
-//   − devoluções). Antes contava o valor cheio da troca-venda, inflando
-//   o caixa pelo valor do produto que foi devolvido. Detectado na
-//   reconciliação Davi 09/05 (R$ 5.087,67 confirmado pelo lojista).
-//   Migration 107 dropou UNIQUE (sale_id, method) que bloqueava o
-//   modelo (devolução e diferença usam o MESMO method).
+// FEAT 11/05/2026 (troca sale_payments split — modelo definitivo).
+// CRITICAL FIX 11/05/2026 (caixa required block — defesa backend):
+//   POST /sale e POST /troca agora bloqueiam com 409 quando o toggle
+//   pdv_settings.caixa_enabled=true E não existe caixa_sessoes 'aberta'.
+//   Antes a validação só existia no frontend (handleFinalize), e bugs
+//   de cache/race-condition deixavam vendas passar. Agora é defesa em
+//   profundidade — frontend continua bloqueando + backend trava também.
+//   Helper assertCaixaOpenOrAllowed fail-open em erro (try/catch) pra
+//   não quebrar empresas em schemas legados.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -54,6 +49,43 @@ function calcCreditAmount({ payment_method, payments, totalAmount }) {
   }
   if ((payment_method || '').toLowerCase() === 'crediario') return totalAmount;
   return 0;
+}
+
+// ──────────────────────────────────────────────────────────────
+// 11/05/2026 — Defesa backend: bloqueia operação se caixa fechado.
+// Quando companies.pdv_settings.caixa_enabled = true E não existe
+// caixa_sessoes com status='aberta' pra essa empresa, retorna 409.
+// Roda dentro da transaction (client.query) pra usar o mesmo BEGIN.
+// Fail-open em erro inesperado (companies/caixa_sessoes ausentes em
+// schemas legados não devem bloquear vendas).
+// ──────────────────────────────────────────────────────────────
+async function assertCaixaOpenOrAllowed(client, companyId) {
+  try {
+    const { rows: cfgRows } = await client.query(
+      `SELECT pdv_settings FROM companies WHERE id = $1`,
+      [companyId]
+    );
+    const caixaRequired = !!(cfgRows[0]?.pdv_settings?.caixa_enabled);
+    if (!caixaRequired) return { ok: true };
+
+    const { rows: sessoes } = await client.query(
+      `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
+      [companyId]
+    );
+    if (sessoes.length > 0) return { ok: true };
+
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        error: 'Abra o caixa antes de finalizar a venda. Ou desabilite a exigência em Configurações > PDV > Políticas do Caixa.',
+        code: 'CAIXA_REQUIRED',
+      },
+    };
+  } catch (e) {
+    console.warn('[PDV] assertCaixaOpenOrAllowed fail-open:', e.message);
+    return { ok: true };
+  }
 }
 
 // ── GET /companies/:id/pdv/scan/:code ────────────────────────
@@ -158,6 +190,20 @@ router.post('/sale', async (req, res) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+
+    // ──────────────────────────────────────────────────────────
+    // CRITICAL 11/05/2026: bloqueia se caixa fechado quando
+    // pdv_settings.caixa_enabled=true. Vendas retroativas
+    // (sale_date informado) NÃO sao bloqueadas — operador pode
+    // estar regularizando movimentação antiga fora do horario.
+    // ──────────────────────────────────────────────────────────
+    if (!sale_date) {
+      const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
+      if (!caixaCheck.ok) {
+        await client.query('ROLLBACK');
+        return res.status(caixaCheck.status).json(caixaCheck.body);
+      }
+    }
 
     let subtotal = 0;
     const enrichedItems = [];
@@ -643,6 +689,17 @@ router.post('/troca', async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // ──────────────────────────────────────────────────────────
+    // CRITICAL 11/05/2026: bloqueia troca se caixa fechado quando
+    // pdv_settings.caixa_enabled=true. Troca também é "venda" do
+    // ponto de vista operacional (gera receita/movimento no caixa).
+    // ──────────────────────────────────────────────────────────
+    const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
+    if (!caixaCheck.ok) {
+      await client.query('ROLLBACK');
+      return res.status(caixaCheck.status).json(caixaCheck.body);
+    }
+
     const { rows: origRows } = await client.query(
       `SELECT id, status, company_id FROM sales WHERE id=$1 AND company_id=$2`,
       [original_sale_id, req.params.id]
@@ -870,29 +927,6 @@ router.post('/troca', async (req, res) => {
       // best-effort
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // 11/05/2026 (modelo definitivo): TROCA SALE_PAYMENTS SPLIT
-    // ──────────────────────────────────────────────────────────────
-    // Cria 2 sale_payments para a venda-troca (similar a split-payment
-    // com modalidades, mas com sinais opostos):
-    //   1) -returnedValue (devolução do produto original)
-    //   2) +netAmount     (diferença efetivamente paga pelo cliente)
-    //
-    // Net no caixa = netAmount = exatamente o que o cliente passou na
-    // maquininha. A devolução compensa o sale_payment original da venda
-    // que foi devolvida → o caixa do dia passa a refletir faturamento
-    // líquido (vendas + trocas − devoluções), não o "volume bruto".
-    //
-    // Antes: 1 sale_payment com saleTotal (valor cheio do produto novo)
-    // — inflava o caixa porque tanto a venda original (devolvida) quanto
-    // a troca-venda contavam o valor cheio do mesmo produto trocado.
-    //
-    // Migration 107 dropou UNIQUE (sale_id, method) que bloqueava este
-    // modelo (devolução e diferença usam o MESMO method).
-    //
-    // Crediário: não cria sale_payment (consistente com /sale).
-    // Net<0 (cliente recebe troco): não suportado ainda (sale_payment
-    // de diferença vira 0; só a devolução é registrada).
     const trocaPayMethod = (payment_method || 'dinheiro').toLowerCase();
     if (trocaPayMethod !== 'crediario') {
       if (returnedValue > 0) {
@@ -950,9 +984,6 @@ router.post('/troca', async (req, res) => {
       );
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // 11/05/2026 — Troca fiscal Onda 1: cancel + reissue
-    // ──────────────────────────────────────────────────────────────
     let nfceFiscalResult = { strategy: 'none' };
     const nfceStrategy = (req.body.nfce_strategy || 'none').toLowerCase();
 
