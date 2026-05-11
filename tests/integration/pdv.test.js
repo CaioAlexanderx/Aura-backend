@@ -4,6 +4,10 @@
 //
 // 07/05/2026: /summary virou Promise.all com 2 queries (vendas + trocas)
 // via pdv-summary-patch.js. Teste atualizado pra mockar ambas.
+//
+// 11/05/2026: PR #56 introduziu assertCaixaOpenOrAllowed que faz query
+// SELECT pdv_settings logo apos BEGIN. Mocks de POST /sale precisam
+// incluir CAIXA_DISABLED_MOCK pra nao desalinhar a sequencia.
 // ============================================================
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
@@ -21,6 +25,11 @@ const auth   = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', pla
 
 const mockProduct = { id:'p1', name:'Produto Teste', price:25.00, stock_qty:10, cost_price:10 };
 const mockSale    = { id:'sale1', total_amount:25.00, payment_method:'pix', status:'confirmed', created_at: new Date().toISOString() };
+
+// PR #56: assertCaixaOpenOrAllowed faz query SELECT pdv_settings logo
+// apos BEGIN. Caixa_enabled=false faz o helper retornar ok sem consumir
+// o segundo slot (SELECT caixa_sessoes).
+const CAIXA_DISABLED_MOCK = { rows: [{ pdv_settings: { caixa_enabled: false } }] };
 
 // Helper: monta cliente transacional mockado
 function mockClient(queryResults = []) {
@@ -63,9 +72,10 @@ describe('POST /companies/:id/pdv/sale — validações de entrada', () => {
 
 describe('POST /companies/:id/pdv/sale — venda atômica', () => {
   test('201 — venda criada (produto sem rastrear estoque)', async () => {
-    // Produto sem product_id — não faz query de produto, só BEGIN, INSERT sale, INSERT item, COMMIT
+    // Produto sem product_id — não faz query de produto, só BEGIN + caixa_check + INSERT sale + INSERT item + COMMIT
     const client = mockClient([
       { rows: [] },                           // BEGIN
+      CAIXA_DISABLED_MOCK,                    // assertCaixaOpenOrAllowed: caixa_enabled=false
       { rows: [mockSale] },                   // INSERT sale
       { rows: [{ id:'si1' }] },               // INSERT sale_item
       { rows: [] },                           // COMMIT
@@ -92,6 +102,7 @@ describe('POST /companies/:id/pdv/sale — venda atômica', () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     const client = mockClient([
       { rows: [] },                                                           // BEGIN
+      CAIXA_DISABLED_MOCK,                                                    // assertCaixaOpenOrAllowed
       { rows: [{ name:'Produto', cost_price:10, stock_qty: '0' }] },         // SELECT produto (estoque 0)
       { rows: [] },                                                           // ROLLBACK
     ]);
