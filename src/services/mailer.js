@@ -340,7 +340,7 @@ async function sendWeeklyReport(company, kpis, htmlBody) { // eslint-disable-lin
 
   return sendMail({
     to: company.email,
-    subject: `Relat&oacute;rio semanal — ${company.name}`,
+    subject: `Relatório semanal — ${company.name}`,
     text: `Aura. — Relatorio semanal de ${company.name}. Receita: R$ ${kpis.revenue} | Vendas: ${kpis.sales} | Ticket medio: R$ ${kpis.avg_ticket} | Saude: ${kpis.health_score}/100`,
     html,
   });
