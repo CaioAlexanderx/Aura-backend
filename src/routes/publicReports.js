@@ -1,17 +1,13 @@
 // ============================================================
 // AURA. — Public Reports Routes
-// Rotas publicas (sem auth) para acessar relatorios via token
-// JWT enviado por email. CORS aberto (similar ao /storefront).
+// Rotas publicas (sem auth) para acessar relatorios via token JWT.
 //
 // GET /api/v1/reports/weekly/:token
-//   -> 200 { company, period, kpis, daily_revenue, top_products, ... }
-//   -> 401 { error, code: 'invalid' }
-//   -> 410 { error, code: 'expired' }
-//   -> 404 { error, code: 'company_not_found' }
+//   -> 200 single ou consolidado (multi-CNPJ via claim 'cids')
+//   -> 401 invalid | 410 expired | 404 not found
 //
-// GET /api/v1/reports/admin/test-weekly?token=...&q=finesse  [TEMPORARIO]
-//   -> Endpoint de smoke test para o go-live da segunda 12/05/2026.
-//   -> Gerado para validar Finesse (cliente Eryca). REMOVER apos validacao.
+// GET /api/v1/reports/admin/test-weekly?token=...&q=...  [TEMPORARIO]
+//   Agrupa resultados por owner_id; cada grupo gera 1 link consolidado.
 // ============================================================
 
 const express = require('express');
@@ -19,10 +15,8 @@ const router  = express.Router();
 
 const db = require('../config/database');
 const { verifyWeeklyReportToken, signWeeklyReportToken } = require('../utils/reportToken');
-const { buildReportData }         = require('../services/reportGenerator');
-const { resolvePeriodForReport }  = require('../services/reportDataQueries');
-
-// ─── Rota publica principal (acessada pelo email) ────────────
+const { buildReportData, buildConsolidatedReportData }   = require('../services/reportGenerator');
+const { resolvePeriodForReport }                         = require('../services/reportDataQueries');
 
 router.get('/weekly/:token', async (req, res) => {
   const { token } = req.params;
@@ -40,9 +34,11 @@ router.get('/weekly/:token', async (req, res) => {
 
   try {
     const period = { startDate: v.period_start, endDate: v.period_end };
-    const data = await buildReportData(v.company_id, 'weekly', period);
 
-    // Gating por plano (espelha o template do email).
+    const data = v.consolidated
+      ? await buildConsolidatedReportData(v.company_ids, 'weekly', period)
+      : await buildReportData(v.company_id, 'weekly', period);
+
     const plan = data.company.plan || 'essencial';
     const showHeatmap          = plan !== 'essencial';
     const showDormantCustomers = plan !== 'essencial';
@@ -50,9 +46,11 @@ router.get('/weekly/:token', async (req, res) => {
 
     return res.json({
       company: {
-        name:     data.company.name,
+        name:           data.company.name,
         plan,
-        logo_url: data.company.logo_url || null,
+        logo_url:       data.company.logo_url || null,
+        consolidated:   !!data.company.consolidated,
+        unit_count:     data.company.unit_count || (v.consolidated ? v.company_ids.length : 1),
       },
       period: {
         start_date: period.startDate,
@@ -72,6 +70,7 @@ router.get('/weekly/:token', async (req, res) => {
       heatmap:        showHeatmap          ? data.heatmapData      : null,
       dormant:        showDormantCustomers ? data.dormantCustomers : null,
       stale_products: data.staleProducts,
+      breakdown:      data.breakdown || null,
       gating: {
         plan,
         show_heatmap: showHeatmap,
@@ -88,12 +87,7 @@ router.get('/weekly/:token', async (req, res) => {
   }
 });
 
-// ─── Smoke-test endpoint TEMPORARIO ──────────────────────────
-// Gera URL assinada (JWT 30d) para empresas que casam com ?q=, faz probe
-// interno da rota publica e retorna estrutura + KPIs. Gated por token.
-//
-// REMOVER apos a validacao do go-live de segunda 12/05/2026.
-// Idealmente sera removido junto com o fallback hardcoded abaixo.
+// ─── Admin smoke-test endpoint (TEMPORARIO) ──────────────────
 
 const _TEST_TOKEN_FALLBACK = 'aura-admin-2026-relatorios';
 function _getExpectedTestToken() {
@@ -112,16 +106,52 @@ router.get('/admin/test-weekly', async (req, res) => {
   }
 
   try {
-    const { rows: companies } = await db.query(`
-      SELECT id, COALESCE(trade_name, legal_name) AS name, plan, email, is_active, created_at
+    const { rows: matches } = await db.query(`
+      SELECT id, owner_id, is_primary, created_at,
+             COALESCE(trade_name, legal_name) AS name,
+             plan, email,
+             COALESCE(report_email_override, email) AS recipient,
+             is_active
       FROM companies
       WHERE (LOWER(trade_name) LIKE $1 OR LOWER(legal_name) LIKE $1)
       ORDER BY is_active DESC, created_at ASC
-      LIMIT 10
+      LIMIT 20
     `, [`%${q}%`]);
 
-    if (companies.length === 0) {
+    if (matches.length === 0) {
       return res.status(404).json({ error: `Nenhuma empresa encontrada para q='${q}'` });
+    }
+
+    const ownerIds = [...new Set(matches.filter(m => m.owner_id).map(m => m.owner_id))];
+    let allByOwner = new Map();
+    if (ownerIds.length > 0) {
+      const { rows: siblings } = await db.query(`
+        SELECT id, owner_id, is_primary, created_at,
+               COALESCE(trade_name, legal_name) AS name,
+               plan, email,
+               COALESCE(report_email_override, email) AS recipient,
+               is_active
+        FROM companies
+        WHERE owner_id = ANY($1) AND is_active = true
+        ORDER BY owner_id, is_primary DESC NULLS LAST, created_at ASC
+      `, [ownerIds]);
+      siblings.forEach(s => {
+        if (!allByOwner.has(s.owner_id)) allByOwner.set(s.owner_id, []);
+        allByOwner.get(s.owner_id).push(s);
+      });
+    }
+
+    const seenOwner = new Set();
+    const groups = [];
+    for (const m of matches) {
+      if (m.owner_id && allByOwner.has(m.owner_id)) {
+        if (seenOwner.has(m.owner_id)) continue;
+        seenOwner.add(m.owner_id);
+        const members = allByOwner.get(m.owner_id);
+        groups.push({ owner_id: m.owner_id, primary: members.find(x => x.is_primary) || members[0], all: members });
+      } else {
+        groups.push({ owner_id: null, primary: m, all: [m] });
+      }
     }
 
     const period = resolvePeriodForReport('weekly');
@@ -129,12 +159,21 @@ router.get('/admin/test-weekly', async (req, res) => {
     const apiBase = `${req.protocol}://${req.get('host')}/api/v1`;
 
     const results = [];
-    for (const co of companies) {
-      const tk = signWeeklyReportToken({
-        company_id: co.id,
-        period_start: period.startDate,
-        period_end: period.endDate,
-      });
+    for (const g of groups) {
+      const ids = g.all.map(c => c.id);
+      const consolidated = ids.length > 1;
+      let tk;
+      try {
+        tk = signWeeklyReportToken({
+          company_id:   g.primary.id,
+          company_ids:  consolidated ? ids : null,
+          period_start: period.startDate,
+          period_end:   period.endDate,
+        });
+      } catch (err) {
+        results.push({ error: err.message, group_primary: g.primary.name });
+        continue;
+      }
       const webUrl = `${appUrl}/relatorios/semanal/${tk}`;
       const apiUrl = `${apiBase}/reports/weekly/${tk}`;
 
@@ -146,36 +185,35 @@ router.get('/admin/test-weekly', async (req, res) => {
           status: r.status,
           ok: r.ok,
           company: body?.company?.name,
+          consolidated: body?.company?.consolidated,
+          unit_count: body?.company?.unit_count,
           plan: body?.gating?.plan,
           period: body?.period?.label,
           kpis: body?.kpis ? {
-            revenue:      body.kpis.revenue,
-            revenue_dir:  body.kpis.revenue_dir,
-            sales:        body.kpis.sales,
-            active_days:  body.kpis.active_days,
-            avg_ticket:   body.kpis.avg_ticket,
-            ticket_dir:   body.kpis.ticket_dir,
+            revenue: body.kpis.revenue,
+            revenue_dir: body.kpis.revenue_dir,
+            sales: body.kpis.sales,
+            avg_ticket: body.kpis.avg_ticket,
             health_score: body.kpis.health_score,
           } : null,
+          breakdown: body?.breakdown || null,
           sections: {
-            daily_revenue:  Array.isArray(body?.daily_revenue)  ? body.daily_revenue.length  : 0,
-            top_products:   Array.isArray(body?.top_products)   ? body.top_products.length   : 0,
-            payments:       Array.isArray(body?.payments)       ? body.payments.length       : 0,
-            priorities:     Array.isArray(body?.priorities)     ? body.priorities.length     : 0,
-            heatmap:        Array.isArray(body?.heatmap)        ? body.heatmap.length        : (body?.heatmap === null ? 'gated' : 0),
-            dormant:        body?.dormant?.topDormant ? body.dormant.topDormant.length : (body?.dormant === null ? 'gated' : 0),
-            stale_products: Array.isArray(body?.stale_products) ? body.stale_products.length : 0,
-            wow_insight:    body?.wow_insight ? 'present' : 'absent',
-            narratives:     body?.narratives ? Object.keys(body.narratives).length : 0,
+            daily_revenue: Array.isArray(body?.daily_revenue) ? body.daily_revenue.length : 0,
+            top_products:  Array.isArray(body?.top_products)  ? body.top_products.length  : 0,
+            payments:      Array.isArray(body?.payments)      ? body.payments.length      : 0,
+            priorities:    Array.isArray(body?.priorities)    ? body.priorities.length    : 0,
           },
-          gating: body?.gating,
         };
       } catch (err) {
         probe = { error: err.message };
       }
 
       results.push({
-        company: { id: co.id, name: co.name, plan: co.plan, email: co.email, is_active: co.is_active },
+        owner_id: g.owner_id,
+        consolidated,
+        unit_count: ids.length,
+        primary: { id: g.primary.id, name: g.primary.name, plan: g.primary.plan, recipient: g.primary.recipient },
+        all: g.all.map(c => ({ id: c.id, name: c.name, is_primary: c.is_primary, recipient: c.recipient })),
         urls: { web: webUrl, api: apiUrl },
         probe,
       });

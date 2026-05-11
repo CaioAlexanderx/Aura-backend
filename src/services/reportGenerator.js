@@ -1,25 +1,13 @@
 // ============================================================
 // AURA. — Report Generator (Orquestrador)
 // Coordena: dados -> narrativas -> HTML -> snapshot -> log.
-// Chamado pelo scheduler (cron) ou pela rota admin de disparo.
-//
-// Convencao de periodo (depois de 11/05/2026):
-//   period.startDate = segunda (inclusivo)
-//   period.endDate   = sabado (inclusivo)
-//   getSalesAnalytics recebe end_date = endDate e adiciona +1 internamente
-//   loop de dias: cursor <= period.endDate
 //
 // EXPORTACOES:
 //   buildReportData(companyId, type, periodOverride?)
-//     -> JSON puro com kpis, dailyRevenue, topProducts, payments,
-//        priorities, narratives, wowInsight, heatmapData, etc.
-//     Usado pela rota publica /reports/weekly/:token (sem delivery,
-//     sem snapshot, sem HTML).
+//   buildConsolidatedReportData(companyIds, type, periodOverride?)
 //   generateReport(companyId, type, periodOverride?)
-//     -> orquestra buildReportData + delivery + token + HTML + snapshot.
-//     Usado pelo scheduler (cron) e rota admin de disparo.
+//   generateConsolidatedReport(companyIds, primaryId, type, periodOverride?)
 //   updateDelivery(id, status, errorMsg?)
-//     -> atualiza report_deliveries.
 // ============================================================
 
 const db = require('../config/database');
@@ -36,17 +24,12 @@ const { generateWeeklyNarratives, selectPriorities } = require('./narrativeGener
 const { buildWeeklyReportHtml } = require('../templates/weeklyReport');
 const { signWeeklyReportToken } = require('../utils/reportToken');
 
-// ------------------------------------------------------------
-// Helpers de data
-// ------------------------------------------------------------
-
 function addDays(dateStr, n) {
   const [y, mo, d] = dateStr.split('-').map(Number);
   const dt = new Date(Date.UTC(y, mo - 1, d + n));
   return dt.toISOString().slice(0, 10);
 }
 
-// toDateKey: normaliza qualquer valor pg (Date obj ou string) para 'YYYY-MM-DD'
 function toDateKey(val) {
   if (!val) return '';
   if (val instanceof Date) return val.toISOString().slice(0, 10);
@@ -72,7 +55,6 @@ function getPrevPeriod(period, type) {
 const MONTHS_SHORT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 const WEEKDAYS     = ['Domingo', 'Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado'];
 
-// endDate INCLUSIVO
 function formatPeriodLabel(period) {
   const [, sm, sd]  = period.startDate.split('-').map(Number);
   const [ey, em, ed] = period.endDate.split('-').map(Number);
@@ -80,24 +62,19 @@ function formatPeriodLabel(period) {
 }
 
 function formatSentAt() {
-  const now = new Date(Date.now() - 3 * 3600000); // BRT
+  const now = new Date(Date.now() - 3 * 3600000);
   const dow = WEEKDAYS[now.getUTCDay()];
   const d   = now.getUTCDate();
   const m   = MONTHS_SHORT[now.getUTCMonth()];
   return `${dow}, ${d} ${m} · ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
 }
 
-// Numero sequencial da edicao: semanas desde 2025-01-06 (1a seg)
 function calcEdition(startDate) {
   const ref   = new Date('2025-01-06T00:00:00Z');
   const start = new Date(startDate + 'T00:00:00Z');
   const week  = Math.floor((start - ref) / (7 * 24 * 3600 * 1000)) + 1;
   return week > 0 ? week : 1;
 }
-
-// ------------------------------------------------------------
-// Helper: atualizar registro de entrega
-// ------------------------------------------------------------
 
 async function updateDelivery(id, status, errorMsg = null) {
   await db.query(
@@ -106,25 +83,16 @@ async function updateDelivery(id, status, errorMsg = null) {
   ).catch(e => console.error('[reportGenerator] updateDelivery error:', e.message));
 }
 
-// ------------------------------------------------------------
-// buildReportData
-// Extrai os dados puros do relatorio (sem delivery, snapshot, HTML).
-// Reutilizada pela rota publica /reports/weekly/:token.
-// ------------------------------------------------------------
-
 async function buildReportData(companyId, type, periodOverride = null) {
-  // 1. Resolver periodo
   const period = periodOverride || resolvePeriodForReport(type);
 
-  // 2. Buscar dados da empresa
   const { rows: [company] } = await db.query(
-    `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan, logo_url
+    `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan, logo_url, is_primary, owner_id
      FROM companies WHERE id = $1 AND is_active = true`,
     [companyId]
   );
   if (!company) throw new Error('Empresa nao encontrada ou inativa');
 
-  // 3. Buscar dados em paralelo
   const prevPeriod = getPrevPeriod(period, type);
   const [salesCurrent, salesPrev, staleProducts, dormantCustomers, healthHistory, heatmapData] = await Promise.all([
     getSalesAnalytics(companyId, { period: 'custom', start_date: period.startDate,    end_date: period.endDate }),
@@ -135,7 +103,6 @@ async function buildReportData(companyId, type, periodOverride = null) {
     fetchSalesHeatmap(companyId, period.startDate, period.endDate),
   ]);
 
-  // 4. Montar KPIs
   const curr = salesCurrent.summary;
   const prev = salesPrev.summary;
 
@@ -144,7 +111,6 @@ async function buildReportData(companyId, type, periodOverride = null) {
     return parseFloat(((a - b) / b * 100).toFixed(1));
   }
 
-  // Health score fixo em 71 por enquanto (sera calculado dinamicamente na fase 2)
   const HEALTH_SCORE = 71;
 
   const kpis = {
@@ -162,7 +128,10 @@ async function buildReportData(companyId, type, periodOverride = null) {
     health_score:    HEALTH_SCORE,
   };
 
-  // 5. Montar dailyRevenue (seg-sab = 6 dias, cursor <= endDate)
+  kpis._prev_revenue   = prev.total_revenue || 0;
+  kpis._prev_sales     = prev.total_sales || 0;
+  kpis._prev_customers = prev.unique_customers || 0;
+
   const DAYS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sab'];
   const expectedDates = [];
   let cursor = period.startDate;
@@ -191,7 +160,6 @@ async function buildReportData(companyId, type, periodOverride = null) {
     dailyRevenue[maxIdx].is_best = true;
   }
 
-  // 6. Top produtos (top 5)
   const topProducts = (salesCurrent.top_products || []).slice(0, 5).map((p, i) => ({
     rank:     i + 1,
     name:     p.name,
@@ -200,7 +168,6 @@ async function buildReportData(companyId, type, periodOverride = null) {
     qty:      Math.round(p.total_qty),
   }));
 
-  // 7. Pagamentos
   const totalRev = salesCurrent.summary.total_revenue || 1;
   const PAYMENT_LABELS = {
     pix:       'Pix',
@@ -212,9 +179,9 @@ async function buildReportData(companyId, type, periodOverride = null) {
   const payments = (salesCurrent.by_payment || []).slice(0, 6).map(p => ({
     name: PAYMENT_LABELS[p.method] || p.method,
     pct:  parseFloat(((p.total_revenue / totalRev) * 100).toFixed(1)),
+    _revenue: p.total_revenue,
   }));
 
-  // 8. Prioridades
   const reportDataForPriorities = {
     health: { score: HEALTH_SCORE },
     kpis,
@@ -226,14 +193,12 @@ async function buildReportData(companyId, type, periodOverride = null) {
   };
   const priorities = selectPriorities(reportDataForPriorities);
 
-  // 9. Narrativas Haiku (com fallback automatico em generateWeeklyNarratives)
   const narratives = await generateWeeklyNarratives(reportDataForPriorities).catch(() => ({
     revenue:  'Monitore a evolucao diaria do faturamento para identificar padroes.',
     products: 'Priorize os produtos com maior giro para garantir disponibilidade.',
     payments: 'Diversifique os metodos de pagamento para reduzir dependencia.',
   }));
 
-  // 10. WOW insight
   let wowInsight = null;
   if (staleProducts && staleProducts.length > 0) {
     const p = staleProducts[0];
@@ -270,17 +235,197 @@ async function buildReportData(companyId, type, periodOverride = null) {
   };
 }
 
-// ------------------------------------------------------------
-// generateReport
-// Orquestrador completo: idempotency + delivery + dados + token + HTML + snapshot.
-// Chamado pelo cron e rota admin de disparo manual.
-// ------------------------------------------------------------
+async function buildConsolidatedReportData(companyIds, type, periodOverride = null) {
+  if (!Array.isArray(companyIds) || companyIds.length === 0) {
+    throw new Error('buildConsolidatedReportData: companyIds vazio');
+  }
+  if (companyIds.length === 1) {
+    return buildReportData(companyIds[0], type, periodOverride);
+  }
+
+  const period = periodOverride || resolvePeriodForReport(type);
+  const perCompany = await Promise.all(
+    companyIds.map(id => buildReportData(id, type, period))
+  );
+
+  const primary = perCompany.find(r => r.company.is_primary) || perCompany[0];
+  const N = perCompany.length;
+
+  const totalRev          = perCompany.reduce((s, r) => s + (r.kpis.revenue || 0), 0);
+  const totalSales        = perCompany.reduce((s, r) => s + (r.kpis.sales || 0), 0);
+  const totalNewCustomers = perCompany.reduce((s, r) => s + (r.kpis.new_customers || 0), 0);
+  const totalPrevRev      = perCompany.reduce((s, r) => s + (r.kpis._prev_revenue || 0), 0);
+  const totalPrevSales    = perCompany.reduce((s, r) => s + (r.kpis._prev_sales || 0), 0);
+  const totalPrevCusts    = perCompany.reduce((s, r) => s + (r.kpis._prev_customers || 0), 0);
+  const activeDays        = Math.max(...perCompany.map(r => r.kpis.active_days || 0));
+  const avgTicket         = totalSales > 0 ? totalRev / totalSales : 0;
+  const avgTicketPrev     = totalPrevSales > 0 ? totalPrevRev / totalPrevSales : 0;
+
+  function pct(a, b) {
+    if (!b || b === 0) return 0;
+    return parseFloat(((a - b) / b * 100).toFixed(1));
+  }
+
+  const HEALTH_SCORE = 71;
+  const kpis = {
+    revenue:         totalRev,
+    revenue_delta:   pct(totalRev, totalPrevRev),
+    revenue_dir:     totalRev >= totalPrevRev ? 'up' : 'down',
+    sales:           totalSales,
+    active_days:     activeDays,
+    avg_ticket:      parseFloat(avgTicket.toFixed(2)),
+    ticket_delta:    pct(avgTicket, avgTicketPrev),
+    ticket_dir:      avgTicket >= avgTicketPrev ? 'up' : 'down',
+    new_customers:   totalNewCustomers,
+    customers_delta: totalNewCustomers - totalPrevCusts,
+    customers_dir:   totalNewCustomers >= totalPrevCusts ? 'up' : 'down',
+    health_score:    HEALTH_SCORE,
+  };
+
+  const dailyRevenue = primary.dailyRevenue.map((d, i) => ({
+    day:     d.day,
+    date:    d.date,
+    value:   perCompany.reduce((s, r) => s + (r.dailyRevenue[i]?.value || 0), 0),
+    is_best: false,
+  }));
+  if (dailyRevenue.length) {
+    const maxIdx = dailyRevenue.reduce((mi, d, i, arr) => d.value > arr[mi].value ? i : mi, 0);
+    dailyRevenue[maxIdx].is_best = true;
+  }
+
+  const prodMap = new Map();
+  perCompany.forEach(r => {
+    (r.topProducts || []).forEach(p => {
+      const key = `${p.name}|${p.category || ''}`;
+      const ex = prodMap.get(key) || { name: p.name, category: p.category || 'Geral', revenue: 0, qty: 0 };
+      ex.revenue += p.revenue || 0;
+      ex.qty     += p.qty || 0;
+      prodMap.set(key, ex);
+    });
+  });
+  const topProducts = Array.from(prodMap.values())
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 5)
+    .map((p, i) => ({ ...p, rank: i + 1 }));
+
+  const payMap = new Map();
+  perCompany.forEach(r => {
+    (r.payments || []).forEach(p => {
+      const rev = p._revenue != null ? p._revenue : ((p.pct / 100) * (r.kpis.revenue || 0));
+      const ex = payMap.get(p.name) || { name: p.name, revenue: 0 };
+      ex.revenue += rev;
+      payMap.set(p.name, ex);
+    });
+  });
+  const payments = Array.from(payMap.values())
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 6)
+    .map(p => ({
+      name: p.name,
+      pct:  totalRev > 0 ? parseFloat(((p.revenue / totalRev) * 100).toFixed(1)) : 0,
+    }));
+
+  const heatMap = new Map();
+  perCompany.forEach(r => {
+    (r.heatmapData || []).forEach(c => {
+      const key = `${c.dow}-${c.hour}`;
+      const ex = heatMap.get(key) || { dow: c.dow, hour: c.hour, sale_count: 0, revenue: 0 };
+      ex.sale_count += parseInt(c.sale_count) || 0;
+      ex.revenue    += parseFloat(c.revenue)   || 0;
+      heatMap.set(key, ex);
+    });
+  });
+  const heatmapData = Array.from(heatMap.values()).sort((a, b) => a.dow - b.dow || a.hour - b.hour);
+
+  const staleAll = perCompany.flatMap(r => (r.staleProducts || []).map(p => ({
+    ...p,
+    _from_company: r.company.name,
+  })));
+  staleAll.sort((a, b) => (b.days_idle || 0) - (a.days_idle || 0));
+  const staleProducts = staleAll.slice(0, 3);
+
+  const anyDormant = perCompany.some(r => r.dormantCustomers != null);
+  const dormantCustomers = anyDormant ? {
+    count: perCompany.reduce((s, r) => s + (r.dormantCustomers?.count || 0), 0),
+    topDormant: perCompany
+      .flatMap(r => r.dormantCustomers?.topDormant || [])
+      .sort((a, b) => (b.total_spent || 0) - (a.total_spent || 0))
+      .slice(0, 3),
+  } : null;
+
+  const reportDataAgg = {
+    health: { score: HEALTH_SCORE },
+    kpis,
+    dailyRevenue,
+    topProducts,
+    payments,
+    staleProducts,
+    dormantCustomers,
+  };
+  const priorities = selectPriorities(reportDataAgg);
+  const narratives = await generateWeeklyNarratives(reportDataAgg).catch(() => ({
+    revenue:  'Monitore a evolucao diaria do faturamento consolidado para identificar padroes.',
+    products: 'Priorize os produtos com maior giro nas duas unidades.',
+    payments: 'Compare a distribuicao de pagamentos entre as unidades.',
+  }));
+
+  let wowInsight = null;
+  if (staleProducts && staleProducts.length > 0) {
+    const p = staleProducts[0];
+    wowInsight = {
+      icon_type: 'box',
+      text: `<b>${p.name}</b> esta parado ha <span class="num">${p.days_idle != null ? p.days_idle : '14+'} dias</span> em <b>${p._from_company || 'uma das unidades'}</b>. Crie uma promocao ou reposicione.`,
+    };
+  } else if (dormantCustomers && dormantCustomers.topDormant && dormantCustomers.topDormant.length > 0) {
+    const c = dormantCustomers.topDormant[0];
+    wowInsight = {
+      icon_type: 'user',
+      text: `<b>${c.name}</b> nao aparece ha <span class="num">${c.days_dormant} dias</span>. Gastou R$${Math.round(c.total_spent || 0).toLocaleString('pt-BR')} no historico — vale uma mensagem de retorno.`,
+    };
+  }
+
+  delete kpis._prev_revenue;
+  delete kpis._prev_sales;
+  delete kpis._prev_customers;
+
+  const companyName = primary.company.name;
+  const consolidatedName = `${companyName} (${N} unidades)`;
+
+  return {
+    company: {
+      ...primary.company,
+      name: consolidatedName,
+      consolidated: true,
+      unit_count: N,
+    },
+    period,
+    periodLabel: formatPeriodLabel(period),
+    edition:     calcEdition(period.startDate),
+    sentAt:      formatSentAt(),
+    health:      { score: HEALTH_SCORE, label: 'Atencao', delta: 0, delta_dir: 'neutral' },
+    kpis,
+    dailyRevenue,
+    topProducts,
+    payments,
+    priorities:  priorities.map((p, i) => ({ num: i + 1, ...p })),
+    wowInsight,
+    narratives,
+    heatmapData,
+    staleProducts,
+    dormantCustomers,
+    breakdown: perCompany.map(r => ({
+      company_id:   r.company.id,
+      company_name: r.company.name,
+      revenue:      r.kpis.revenue,
+      sales:        r.kpis.sales,
+      avg_ticket:   r.kpis.avg_ticket,
+    })),
+  };
+}
 
 async function generateReport(companyId, type, periodOverride = null) {
-  // 1. Resolver periodo (idempotency key)
   const period = periodOverride || resolvePeriodForReport(type);
 
-  // 2. Verificar idempotencia
   const { rows: existing } = await db.query(
     `SELECT id FROM report_deliveries WHERE company_id=$1 AND report_type=$2 AND period_start=$3 AND status='sent' LIMIT 1`,
     [companyId, type, period.startDate]
@@ -290,16 +435,14 @@ async function generateReport(companyId, type, periodOverride = null) {
     return { skipped: true, reason: 'already_sent' };
   }
 
-  // 3. Verificar existencia + email antes de inserir delivery
   const { rows: [coCheck] } = await db.query(
-    `SELECT email FROM companies WHERE id = $1 AND is_active = true`,
+    `SELECT COALESCE(report_email_override, email) AS recipient FROM companies WHERE id = $1 AND is_active = true`,
     [companyId]
   );
-  if (!coCheck || !coCheck.email) {
+  if (!coCheck || !coCheck.recipient) {
     return { skipped: true, reason: 'no_email' };
   }
 
-  // 4. Inserir delivery como 'pending'
   const { rows: [delivery] } = await db.query(
     `INSERT INTO report_deliveries (company_id, report_type, period_start, status)
      VALUES ($1, $2, $3, 'pending') RETURNING id`,
@@ -307,10 +450,8 @@ async function generateReport(companyId, type, periodOverride = null) {
   );
   const deliveryId = delivery.id;
 
-  // 5. Montar dados completos (queries + narrativas)
   const data = await buildReportData(companyId, type, period);
 
-  // 6. Gerar token assinado (30d) e URL do relatorio web
   let reportUrl = null;
   try {
     const token = signWeeklyReportToken({
@@ -321,13 +462,10 @@ async function generateReport(companyId, type, periodOverride = null) {
     const appUrl = process.env.APP_URL || 'https://app.getaura.com.br';
     reportUrl = `${appUrl}/relatorios/semanal/${token}`;
   } catch (err) {
-    // Falha em assinar token nao deve quebrar o envio do email — fallback para painel generico
     console.warn('[reportGenerator] signWeeklyReportToken falhou:', err.message);
     reportUrl = process.env.APP_URL || 'https://app.getaura.com.br';
   }
 
-  // 7. Construir HTML (rich body — mantido para futuro PDF/anexo;
-  //    o email atual usa template simples em mailer.sendWeeklyReport)
   const html = buildWeeklyReportHtml({
     company:      { name: data.company.name, logo_url: data.company.logo_url },
     period:       { label: data.periodLabel, edition: data.edition, sent_at: data.sentAt },
@@ -344,17 +482,15 @@ async function generateReport(companyId, type, periodOverride = null) {
     reportUrl,
   });
 
-  // 8. Salvar snapshot de health
   const snapshotPeriod = period.startDate.slice(0, 8) + '01';
   await saveHealthSnapshot(companyId, data.health.score, data.health.label, snapshotPeriod, {}).catch(e => {
     console.warn('[reportGenerator] saveHealthSnapshot falhou:', e.message);
   });
 
-  // 9. Retornar resultado
   return {
     skipped:    false,
     deliveryId,
-    company:    data.company,
+    company:    { ...data.company, recipient_email: coCheck.recipient },
     period,
     kpis:       data.kpis,
     html,
@@ -362,4 +498,94 @@ async function generateReport(companyId, type, periodOverride = null) {
   };
 }
 
-module.exports = { generateReport, buildReportData, updateDelivery };
+async function generateConsolidatedReport(companyIds, primaryId, type, periodOverride = null) {
+  if (!Array.isArray(companyIds) || companyIds.length === 0) {
+    throw new Error('generateConsolidatedReport: companyIds vazio');
+  }
+  if (companyIds.length === 1) {
+    return generateReport(companyIds[0], type, periodOverride);
+  }
+
+  const period = periodOverride || resolvePeriodForReport(type);
+  const sub = primaryId || companyIds[0];
+
+  const { rows: existing } = await db.query(
+    `SELECT id FROM report_deliveries WHERE company_id=$1 AND report_type=$2 AND period_start=$3 AND status='sent' LIMIT 1`,
+    [sub, type, period.startDate]
+  );
+  if (existing.length > 0) {
+    console.log(`[reportGenerator] (consolidado) ja enviado: primary=${sub} period=${period.startDate}`);
+    return { skipped: true, reason: 'already_sent' };
+  }
+
+  const { rows: [coCheck] } = await db.query(
+    `SELECT COALESCE(report_email_override, email) AS recipient FROM companies WHERE id = $1 AND is_active = true`,
+    [sub]
+  );
+  if (!coCheck || !coCheck.recipient) {
+    return { skipped: true, reason: 'no_email' };
+  }
+
+  const { rows: [delivery] } = await db.query(
+    `INSERT INTO report_deliveries (company_id, report_type, period_start, status)
+     VALUES ($1, $2, $3, 'pending') RETURNING id`,
+    [sub, type, period.startDate]
+  );
+  const deliveryId = delivery.id;
+
+  const data = await buildConsolidatedReportData(companyIds, type, period);
+
+  let reportUrl = null;
+  try {
+    const token = signWeeklyReportToken({
+      company_id:   sub,
+      company_ids:  companyIds,
+      period_start: period.startDate,
+      period_end:   period.endDate,
+    });
+    const appUrl = process.env.APP_URL || 'https://app.getaura.com.br';
+    reportUrl = `${appUrl}/relatorios/semanal/${token}`;
+  } catch (err) {
+    console.warn('[reportGenerator] signWeeklyReportToken (consolidado) falhou:', err.message);
+    reportUrl = process.env.APP_URL || 'https://app.getaura.com.br';
+  }
+
+  const html = buildWeeklyReportHtml({
+    company:      { name: data.company.name, logo_url: data.company.logo_url },
+    period:       { label: data.periodLabel, edition: data.edition, sent_at: data.sentAt },
+    health:       data.health,
+    kpis:         data.kpis,
+    dailyRevenue: data.dailyRevenue,
+    topProducts:  data.topProducts,
+    payments:     data.payments,
+    priorities:   data.priorities,
+    wowInsight:   data.wowInsight,
+    narratives:   data.narratives,
+    heatmapData:  data.heatmapData,
+    plan:         data.company.plan || 'essencial',
+    reportUrl,
+  });
+
+  const snapshotPeriod = period.startDate.slice(0, 8) + '01';
+  await saveHealthSnapshot(sub, data.health.score, data.health.label, snapshotPeriod, {}).catch(e => {
+    console.warn('[reportGenerator] saveHealthSnapshot (consolidado) falhou:', e.message);
+  });
+
+  return {
+    skipped:    false,
+    deliveryId,
+    company:    { ...data.company, recipient_email: coCheck.recipient },
+    period,
+    kpis:       data.kpis,
+    html,
+    reportUrl,
+  };
+}
+
+module.exports = {
+  generateReport,
+  generateConsolidatedReport,
+  buildReportData,
+  buildConsolidatedReportData,
+  updateDelivery,
+};
