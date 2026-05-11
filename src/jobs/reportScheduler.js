@@ -37,7 +37,9 @@ async function triggerWeeklyReports() {
       try {
         const result = await generateReport(co.id, 'weekly');
         if (result.skipped) { skipped++; continue; }
-        await sendWeeklyReport(result.company, result.kpis, result.html);
+        // sendWeeklyReport agora recebe a URL do relatorio web (com token JWT 30d).
+        // O htmlBody rico (result.html) fica disponivel para futuro PDF/anexo.
+        await sendWeeklyReport(result.company, result.kpis, result.reportUrl);
         await updateDelivery(result.deliveryId, 'sent');
         sent++;
         console.log(`[reportScheduler] sent company=${co.id} (${co.name})`);

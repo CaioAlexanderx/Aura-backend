@@ -283,16 +283,17 @@ async function sendOrderStatusEmail(to, { order_number, customer_name, status, s
 
 // -- Template: relatório semanal automático --
 // O email é o card de notificação com as métricas-chave.
-// O relatório completo (gráficos, heatmap, insights) é gerado pelo htmlBody
-// mas NÃO é embutido no email — clientes de email não suportam CSS complexo.
-// O htmlBody é recebido mas não utilizado aqui; fica disponível para futuro
-// envio como anexo PDF ou link de visualização hospedada.
-async function sendWeeklyReport(company, kpis, htmlBody) { // eslint-disable-line no-unused-vars
+// O relatório completo (gráficos, heatmap, insights, narrativas) vive na
+// pagina web /relatorios/semanal/<token> — o link no botão "Ver painel completo"
+// abre essa pagina, que renderiza dados frescos via /api/v1/reports/weekly/:token.
+async function sendWeeklyReport(company, kpis, reportUrl) {
   function fmtR(v) {
     const n = Math.round(v * 100) / 100;
     const [int, dec] = n.toFixed(2).split('.');
     return 'R$&nbsp;' + int.replace(/\B(?=(\d{3})+(?!\d))/g, '.') + (dec === '00' ? '' : ',' + dec);
   }
+
+  const url = reportUrl || 'https://app.getaura.com.br';
 
   const html = emailLayout(`
     <p style="font-size:15px;color:#e2e8f0;margin:0 0 6px;">Seu relat&oacute;rio semanal chegou!</p>
@@ -329,19 +330,20 @@ async function sendWeeklyReport(company, kpis, htmlBody) { // eslint-disable-lin
 
     <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
       <tr><td align="center">
-        <a href="https://app.getaura.com.br" style="display:inline-block;background:#7c3aed;color:#fff;font-size:14px;font-weight:700;padding:14px 32px;border-radius:12px;text-decoration:none;">Ver painel completo &rarr;</a>
+        <a href="${url}" style="display:inline-block;background:#7c3aed;color:#fff;font-size:14px;font-weight:700;padding:14px 32px;border-radius:12px;text-decoration:none;">Ver relat&oacute;rio completo &rarr;</a>
       </td></tr>
     </table>
 
     <p style="font-size:11px;color:#475569;text-align:center;margin:0;">
-      Relat&oacute;rio gerado automaticamente toda segunda-feira &agrave;s 8h.
+      Relat&oacute;rio gerado automaticamente toda segunda-feira &agrave;s 8h.<br>
+      O link expira em 30 dias.
     </p>
   `);
 
   return sendMail({
     to: company.email,
     subject: `Relatório semanal — ${company.name}`,
-    text: `Aura. — Relatorio semanal de ${company.name}. Receita: R$ ${kpis.revenue} | Vendas: ${kpis.sales} | Ticket medio: R$ ${kpis.avg_ticket} | Saude: ${kpis.health_score}/100`,
+    text: `Aura. — Relatorio semanal de ${company.name}. Receita: R$ ${kpis.revenue} | Vendas: ${kpis.sales} | Ticket medio: R$ ${kpis.avg_ticket} | Saude: ${kpis.health_score}/100\n\nVer relatorio completo: ${url}`,
     html,
   });
 }

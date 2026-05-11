@@ -15,7 +15,7 @@ const app = express();
 // Railway/Cloudflare run behind a reverse proxy
 app.set('trust proxy', 1);
 
-// ── Sentry ────────────────────────────────────────────────────
+// ── Sentry ─────────────────────────────────────────
 initSentry();
 app.use(Sentry.Handlers.requestHandler());
 
@@ -52,12 +52,7 @@ app.use(helmet({
 
 app.disable('x-powered-by');
 
-// ── CORS aberto pra storefront publico ───────────────────────
-// Registrado ANTES do cors() global pra interceptar o preflight OPTIONS
-// (cors() global trata OPTIONS internamente e sem isso meu router
-// middleware nunca rodaria). Vitrine eh publica, sem cookies — Allow-Origin: *
-// eh seguro e necessario porque a loja pode ser servida em qualquer dominio
-// (loja.getaura.com.br, custom domain do lojista, embed em iframe etc).
+// ── CORS aberto pra storefront publico ─────────────────────
 app.use('/api/v1/storefront', function(req, res, next) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -68,7 +63,19 @@ app.use('/api/v1/storefront', function(req, res, next) {
   next();
 });
 
-// ── CORS global (rotas autenticadas) ─────────────────────────
+// ── CORS aberto pra rotas publicas de relatorios (acessadas via token JWT) ──
+// Mesmo padrao do storefront: link no email pode ser aberto em qualquer
+// dominio/cliente, e nao precisamos de cookies (autenticacao por token na URL).
+app.use('/api/v1/reports', function(req, res, next) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID');
+  res.setHeader('Access-Control-Max-Age', '600');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// ── CORS global (rotas autenticadas) ──────────────────────
 app.use(cors({
   origin: env.ALLOWED_ORIGINS === '*' ? '*' : allowedOrigins,
   credentials: true,
@@ -83,7 +90,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(sentryContext);
 
-// ── Rate limiting ────────────────────────────────────────────
+// ── Rate limiting ───────────────────────────────────
 
 const authLimiter = rateLimit({
   windowMs:  15 * 60 * 1000,
@@ -114,7 +121,7 @@ const globalLimiter = rateLimit({
 
 app.use('/api/v1', globalLimiter);
 
-// ── Health checks ────────────────────────────────────────────
+// ── Health checks ───────────────────────────────────
 app.get('/health', function(req, res) {
   res.json({
     status:    'ok',
@@ -277,7 +284,7 @@ app.get('/', function(req, res) {
   res.json({ name: 'Aura. API', version: env.GIT_SHA || '1.0.0', status: 'online' });
 });
 
-// ── Rotas da API ─────────────────────────────────────────────
+// ── Rotas da API ────────────────────────────────────
 const apiRouter = require('./routes/index');
 apiRouter.use('/auth/login',           authLimiter);
 apiRouter.use('/auth/register',        authLimiter);
@@ -285,7 +292,7 @@ apiRouter.use('/auth/forgot-password', authLimiter);
 apiRouter.use('/onboarding/cnpj-lookup', cnpjLimiter);
 app.use('/api/v1', apiRouter);
 
-// ── Error handlers ───────────────────────────────────────────
+// ── Error handlers ──────────────────────────────────
 app.use(sentryError);
 app.use(Sentry.Handlers.errorHandler());
 
