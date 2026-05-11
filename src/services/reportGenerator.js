@@ -2,11 +2,24 @@
 // AURA. — Report Generator (Orquestrador)
 // Coordena: dados → narrativas → HTML → snapshot → log.
 // Chamado pelo scheduler (cron) ou pela rota admin de disparo.
+//
+// Convencao de periodo (depois de 11/05/2026):
+//   period.startDate = segunda (inclusivo)
+//   period.endDate   = sabado (inclusivo)
+//   getSalesAnalytics recebe end_date = endDate e adiciona +1 internamente
+//   loop de dias: cursor <= period.endDate
 // ============================================================
 
 const db = require('../config/database');
 const { getSalesAnalytics } = require('./salesAnalytics');
-const { resolvePeriodForReport, fetchStaleProducts, fetchDormantCustomers, fetchHealthHistory, saveHealthSnapshot } = require('./reportDataQueries');
+const {
+  resolvePeriodForReport,
+  fetchStaleProducts,
+  fetchDormantCustomers,
+  fetchHealthHistory,
+  fetchSalesHeatmap,
+  saveHealthSnapshot,
+} = require('./reportDataQueries');
 const { generateWeeklyNarratives, selectPriorities } = require('./narrativeGenerator');
 const { buildWeeklyReportHtml } = require('../templates/weeklyReport');
 
@@ -20,9 +33,7 @@ function addDays(dateStr, n) {
   return dt.toISOString().slice(0, 10);
 }
 
-// toDateKey: normaliza qualquer valor vindo do pg (Date obj ou string)
-// para 'YYYY-MM-DD'. pg retorna colunas ::date como string na maioria
-// dos ambientes, mas pode retornar Date dependendo da versao/config.
+// toDateKey: normaliza qualquer valor pg (Date obj ou string) para 'YYYY-MM-DD'
 function toDateKey(val) {
   if (!val) return '';
   if (val instanceof Date) return val.toISOString().slice(0, 10);
@@ -36,26 +47,23 @@ function getPrevPeriod(period, type) {
       endDate:   addDays(period.endDate,   -7),
     };
   }
-  // monthly
   const [y, m] = period.startDate.split('-').map(Number);
   const prevM = m === 1 ? 12 : m - 1;
   const prevY = m === 1 ? y - 1 : y;
+  const daysInPrevMonth = new Date(Date.UTC(y, m - 1, 0)).getUTCDate();
   const prevStart = `${prevY}-${String(prevM).padStart(2, '0')}-01`;
-  return { startDate: prevStart, endDate: period.startDate };
+  const prevEnd   = `${prevY}-${String(prevM).padStart(2, '0')}-${String(daysInPrevMonth).padStart(2, '0')}`;
+  return { startDate: prevStart, endDate: prevEnd };
 }
 
 const MONTHS_SHORT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 const WEEKDAYS = ['Domingo', 'Segunda', 'Terca', 'Quarta', 'Quinta', 'Sexta', 'Sabado'];
 
+// endDate e agora INCLUSIVO — sem subtrair 1 dia
 function formatPeriodLabel(period) {
   const [sy, sm, sd] = period.startDate.split('-').map(Number);
   const [ey, em, ed] = period.endDate.split('-').map(Number);
-  // endDate e exclusive, subtrair 1 dia para exibicao
-  const endDisplay = new Date(Date.UTC(ey, em - 1, ed - 1));
-  const edDay = endDisplay.getUTCDate();
-  const edMonth = MONTHS_SHORT[endDisplay.getUTCMonth()];
-  const edYear = endDisplay.getUTCFullYear();
-  return `${sd} ${MONTHS_SHORT[sm - 1]} — ${edDay} ${edMonth} · ${edYear}`;
+  return `${sd} ${MONTHS_SHORT[sm - 1]} — ${ed} ${MONTHS_SHORT[em - 1]} · ${ey}`;
 }
 
 function formatSentAt() {
@@ -66,12 +74,11 @@ function formatSentAt() {
   return `${dow}, ${d} ${m} · ${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
 }
 
-// Numero sequencial da edicao: semanas desde 2025-01-06 (primeira seg do ano)
+// Numero sequencial da edicao: semanas desde 2025-01-06 (1a seg)
 function calcEdition(startDate) {
-  const ref = new Date('2025-01-06T00:00:00Z');
+  const ref   = new Date('2025-01-06T00:00:00Z');
   const start = new Date(startDate + 'T00:00:00Z');
-  const diffMs = start - ref;
-  const week = Math.floor(diffMs / (7 * 24 * 3600 * 1000)) + 1;
+  const week  = Math.floor((start - ref) / (7 * 24 * 3600 * 1000)) + 1;
   return week > 0 ? week : 1;
 }
 
@@ -93,7 +100,8 @@ async function updateDelivery(id, status, errorMsg = null) {
 async function generateReport(companyId, type, periodOverride = null) {
   // 1. Resolver periodo
   const period = periodOverride || resolvePeriodForReport(type);
-  // period = { startDate: 'YYYY-MM-DD', endDate: 'YYYY-MM-DD' }
+  // period.startDate = segunda (inclusivo)
+  // period.endDate   = sabado (inclusivo)
 
   // 2. Verificar idempotencia
   const { rows: existing } = await db.query(
@@ -114,7 +122,6 @@ async function generateReport(companyId, type, periodOverride = null) {
   const deliveryId = delivery.id;
 
   // 4. Buscar dados da empresa
-  // companies nao tem coluna "name" — usa trade_name / legal_name
   const { rows: [company] } = await db.query(
     `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan, logo_url
      FROM companies WHERE id = $1 AND is_active = true`,
@@ -125,15 +132,17 @@ async function generateReport(companyId, type, periodOverride = null) {
     return { skipped: true, reason: 'no_email' };
   }
 
-  // 5. Calcular periodo anterior e buscar dados em paralelo
+  // 5. Buscar dados em paralelo
+  // getSalesAnalytics trata end_date como inclusivo e adiciona +1 internamente
   const prevPeriod = getPrevPeriod(period, type);
 
-  const [salesCurrent, salesPrev, staleProducts, dormantCustomers, healthHistory] = await Promise.all([
-    getSalesAnalytics(companyId, { period: 'custom', start_date: period.startDate, end_date: period.endDate }),
+  const [salesCurrent, salesPrev, staleProducts, dormantCustomers, healthHistory, heatmapData] = await Promise.all([
+    getSalesAnalytics(companyId, { period: 'custom', start_date: period.startDate,    end_date: period.endDate }),
     getSalesAnalytics(companyId, { period: 'custom', start_date: prevPeriod.startDate, end_date: prevPeriod.endDate }),
     fetchStaleProducts(companyId, 14),
     company.plan !== 'essencial' ? fetchDormantCustomers(companyId) : Promise.resolve(null),
     fetchHealthHistory(companyId),
+    fetchSalesHeatmap(companyId, period.startDate, period.endDate),
   ]);
 
   // 6. Montar KPIs
@@ -159,29 +168,26 @@ async function generateReport(companyId, type, periodOverride = null) {
     customers_dir:   curr.unique_customers >= prev.unique_customers ? 'up' : 'down',
   };
 
-  // 7. Montar dailyRevenue (serie diaria, garantir 7 dias)
+  // 7. Montar dailyRevenue (seg–sab = 6 dias, cursor <= endDate)
   const DAYS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sab'];
-
   const expectedDates = [];
   let cursor = period.startDate;
-  while (cursor < period.endDate) {
+  while (cursor <= period.endDate) {
     expectedDates.push(cursor);
     cursor = addDays(cursor, 1);
   }
 
-  // toDateKey normaliza s.period seja string ou objeto Date
   const seriesMap = {};
   (salesCurrent.series || []).forEach(s => {
-    const dateKey = toDateKey(s.period);
-    seriesMap[dateKey] = s.total_revenue;
+    seriesMap[toDateKey(s.period)] = s.total_revenue;
   });
 
   const dailyRevenue = expectedDates.map(dateStr => {
     const dow = new Date(dateStr + 'T00:00:00Z').getUTCDay();
     return {
-      day: DAYS[dow],
-      value: seriesMap[dateStr] || 0,
-      is_best: false,
+      day:      DAYS[dow],
+      value:    seriesMap[dateStr] || 0,
+      is_best:  false,
     };
   });
 
@@ -190,16 +196,16 @@ async function generateReport(companyId, type, periodOverride = null) {
     dailyRevenue[maxIdx].is_best = true;
   }
 
-  // 8. Montar topProducts (top 5)
+  // 8. Top produtos (top 5)
   const topProducts = (salesCurrent.top_products || []).slice(0, 5).map((p, i) => ({
-    rank: i + 1,
-    name: p.name,
+    rank:     i + 1,
+    name:     p.name,
     category: p.category || 'Geral',
-    revenue: p.total_revenue,
-    qty: Math.round(p.total_qty),
+    revenue:  p.total_revenue,
+    qty:      Math.round(p.total_qty),
   }));
 
-  // 9. Montar payments
+  // 9. Pagamentos
   const totalRev = salesCurrent.summary.total_revenue || 1;
   const PAYMENT_LABELS = {
     pix:       'Pix',
@@ -210,10 +216,10 @@ async function generateReport(companyId, type, periodOverride = null) {
   };
   const payments = (salesCurrent.by_payment || []).slice(0, 6).map(p => ({
     name: PAYMENT_LABELS[p.method] || p.method,
-    pct: parseFloat(((p.total_revenue / totalRev) * 100).toFixed(1)),
+    pct:  parseFloat(((p.total_revenue / totalRev) * 100).toFixed(1)),
   }));
 
-  // 10. Selecionar prioridades e gerar narrativas
+  // 10. Prioridades
   const reportData = {
     health: { score: 71 },
     kpis,
@@ -225,51 +231,55 @@ async function generateReport(companyId, type, periodOverride = null) {
   };
   const priorities = selectPriorities(reportData);
 
-  // Narrativas Haiku (com fallback interno em generateWeeklyNarratives)
-  await generateWeeklyNarratives(reportData).catch(e => {
-    console.warn('[reportGenerator] narrativas falharam (nao critico):', e.message);
-  });
+  // 11. Narrativas Haiku (com fallback automatico em generateWeeklyNarratives)
+  const narratives = await generateWeeklyNarratives(reportData).catch(() => ({
+    revenue:  'Monitore a evolucao diaria do faturamento para identificar padroes.',
+    products: 'Priorize os produtos com maior giro para garantir disponibilidade.',
+    payments: 'Diversifique os metodos de pagamento para reduzir dependencia.',
+  }));
 
-  // 11. Montar WOW insight
-  // dormantCustomers.topDormant retorna coluna "name" (nao full_name)
+  // 12. WOW insight
   let wowInsight = null;
   if (staleProducts && staleProducts.length > 0) {
     const p = staleProducts[0];
     wowInsight = {
       icon_type: 'box',
-      text: `<b>${p.name}</b> esta parado ha <span class="num">${p.days_idle != null ? p.days_idle : '14+'} dias</span> sem venda. Verifique o ponto de pedido.`,
+      text: `<b>${p.name}</b> esta parado ha <span class="num">${p.days_idle != null ? p.days_idle : '14+'} dias</span> sem venda. Crie uma promocao ou reposicione no PDV.`,
     };
   } else if (dormantCustomers && dormantCustomers.topDormant && dormantCustomers.topDormant.length > 0) {
     const c = dormantCustomers.topDormant[0];
     wowInsight = {
       icon_type: 'user',
-      text: `<b>${c.name}</b> nao aparece ha <span class="num">${c.days_dormant} dias</span>. Considere uma mensagem de retorno.`,
+      text: `<b>${c.name}</b> nao aparece ha <span class="num">${c.days_dormant} dias</span>. Gastou R$${Math.round(c.total_spent || 0).toLocaleString('pt-BR')} no historico — vale uma mensagem de retorno.`,
     };
   }
 
-  // 12. Construir HTML
+  // 13. Construir HTML
   const periodLabel = formatPeriodLabel(period);
-  const edition = calcEdition(period.startDate);
+  const edition     = calcEdition(period.startDate);
+
   const html = buildWeeklyReportHtml({
-    company: { name: company.name, logo_url: company.logo_url },
-    period:  { label: periodLabel, edition, sent_at: formatSentAt() },
-    health:  { score: 71, label: 'Atencao', delta: 0, delta_dir: 'neutral' },
+    company:  { name: company.name, logo_url: company.logo_url },
+    period:   { label: periodLabel, edition, sent_at: formatSentAt() },
+    health:   { score: 71, label: 'Atencao', delta: 0, delta_dir: 'neutral' },
     kpis,
     dailyRevenue,
     topProducts,
     payments,
-    priorities: priorities.map((p, i) => ({ num: i + 1, ...p })),
+    priorities:   priorities.map((p, i) => ({ num: i + 1, ...p })),
     wowInsight,
-    plan: company.plan || 'essencial',
+    narratives,
+    heatmapData,
+    plan:     company.plan || 'essencial',
   });
 
-  // 13. Salvar snapshot de health (periodo mensal)
+  // 14. Salvar snapshot de health
   const snapshotPeriod = period.startDate.slice(0, 8) + '01';
   await saveHealthSnapshot(companyId, 71, 'Atencao', snapshotPeriod, {}).catch(e => {
     console.warn('[reportGenerator] saveHealthSnapshot falhou:', e.message);
   });
 
-  // 14. Retornar resultado para o caller (scheduler ou rota admin)
+  // 15. Retornar resultado
   return {
     skipped: false,
     deliveryId,
