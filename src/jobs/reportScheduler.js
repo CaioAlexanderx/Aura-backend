@@ -2,50 +2,100 @@
 // AURA. — Report Scheduler
 // Dispara relatorios automaticos: semanal (seg 8h) e mensal (dia 1, 8h).
 // Verifica a cada minuto se e hora de disparar.
+//
+// 11/05/2026: agora agrupa empresas por owner_id e gera UM relatorio
+// consolidado por owner com siblings. Empresas standalone seguem como
+// envio individual. Recipient usa companies.report_email_override ||
+// companies.email.
 // ============================================================
 
 const db = require('../config/database');
 
-// Hora BRT = UTC - 3 (sem horario de verao desde 2019)
 function nowBRT() {
   return new Date(Date.now() - 3 * 3600000);
 }
 
-async function getEligibleCompanies() {
+async function getEligibleOwnerGroups() {
   const { rows } = await db.query(
-    `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan
-     FROM companies
-     WHERE is_active = true
-       AND email IS NOT NULL
-       AND email != ''
-     LIMIT 500`
+    `SELECT id, owner_id, is_primary, created_at,
+            COALESCE(trade_name, legal_name) AS name,
+            email, plan,
+            COALESCE(report_email_override, email) AS recipient_email,
+            report_email_override IS NOT NULL AS has_override
+       FROM companies
+      WHERE is_active = true
+        AND COALESCE(report_email_override, email) IS NOT NULL
+        AND COALESCE(report_email_override, email) != ''
+      ORDER BY owner_id NULLS LAST, is_primary DESC NULLS LAST, created_at ASC
+      LIMIT 1000`
   );
-  return rows;
+
+  const groups = new Map();
+  for (const r of rows) {
+    const key = r.owner_id || `solo:${r.id}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+
+  const result = [];
+  for (const members of groups.values()) {
+    const primary = members.find(m => m.is_primary) || members[0];
+    result.push({
+      owner_id:  primary.owner_id,
+      primary,
+      all:       members,
+      recipient: primary.recipient_email,
+    });
+  }
+  return result;
 }
 
 async function triggerWeeklyReports() {
-  console.log('[reportScheduler] iniciando relatorios semanais...');
+  console.log('[reportScheduler] iniciando relatorios semanais (grupo-by-owner)...');
   const start = Date.now();
   let sent = 0, skipped = 0, errors = 0;
 
   try {
-    const { generateReport, updateDelivery } = require('../services/reportGenerator');
+    const {
+      generateReport,
+      generateConsolidatedReport,
+      updateDelivery,
+    } = require('../services/reportGenerator');
     const { sendWeeklyReport } = require('../services/mailer');
-    const companies = await getEligibleCompanies();
 
-    for (const co of companies) {
+    const groups = await getEligibleOwnerGroups();
+    console.log(`[reportScheduler] ${groups.length} grupo(s) elegivel(eis) para envio.`);
+
+    for (const g of groups) {
+      const ids = g.all.map(c => c.id);
+      const consolidated = ids.length > 1;
+      const label = consolidated
+        ? `${g.primary.name} (+${ids.length - 1} unid.)`
+        : g.primary.name;
+
       try {
-        const result = await generateReport(co.id, 'weekly');
-        if (result.skipped) { skipped++; continue; }
-        // sendWeeklyReport agora recebe a URL do relatorio web (com token JWT 30d).
-        // O htmlBody rico (result.html) fica disponivel para futuro PDF/anexo.
-        await sendWeeklyReport(result.company, result.kpis, result.reportUrl);
+        const result = consolidated
+          ? await generateConsolidatedReport(ids, g.primary.id, 'weekly')
+          : await generateReport(g.primary.id, 'weekly');
+
+        if (result.skipped) {
+          skipped++;
+          console.log(`[reportScheduler] skipped (${result.reason}): ${label}`);
+          continue;
+        }
+
+        const sendCompany = {
+          ...result.company,
+          email: result.company.recipient_email || g.recipient,
+          name:  result.company.name || label,
+        };
+        await sendWeeklyReport(sendCompany, result.kpis, result.reportUrl);
         await updateDelivery(result.deliveryId, 'sent');
         sent++;
-        console.log(`[reportScheduler] sent company=${co.id} (${co.name})`);
+        console.log(`[reportScheduler] sent ${consolidated ? '[CONS]' : '[SINGLE]'} -> ${sendCompany.email}: ${label}`);
       } catch (err) {
         errors++;
-        console.error(`[reportScheduler] error company=${co.id}:`, err.message);
+        console.error(`[reportScheduler] error em ${label}:`, err.message);
       }
     }
   } catch (err) {
@@ -55,30 +105,24 @@ async function triggerWeeklyReports() {
   console.log(`[reportScheduler] semanal concluido em ${Date.now()-start}ms — sent=${sent} skipped=${skipped} errors=${errors}`);
 }
 
-// Verifica a cada minuto se e hora de disparar
-// Segunda-feira (dow=1) as 8h BRT → envio semanal
-// Dia 1 de cada mes as 8h BRT → envio mensal
 let _lastWeeklyDate = null;
 let _lastMonthlyDate = null;
 
 function tick() {
   const now = nowBRT();
-  const dow = now.getUTCDay();      // 0=dom, 1=seg
-  const dom = now.getUTCDate();     // dia do mes
-  const hour = now.getUTCHours();   // hora BRT
+  const dow = now.getUTCDay();
+  const dom = now.getUTCDate();
+  const hour = now.getUTCHours();
   const min = now.getUTCMinutes();
   const dateStr = now.toISOString().slice(0, 10);
 
-  // Semanal: toda segunda as 8h (minuto 0-5 para tolerar atrasos de boot)
   if (dow === 1 && hour === 8 && min < 5 && _lastWeeklyDate !== dateStr) {
     _lastWeeklyDate = dateStr;
     triggerWeeklyReports().catch(e => console.error('[reportScheduler] weekly crash:', e.message));
   }
 
-  // Mensal: dia 1 as 8h
   if (dom === 1 && hour === 8 && min < 5 && _lastMonthlyDate !== dateStr) {
     _lastMonthlyDate = dateStr;
-    // TODO: triggerMonthlyReports() quando mensal for implementado
     console.log('[reportScheduler] mensal pendente de implementacao');
   }
 }
@@ -86,8 +130,8 @@ function tick() {
 let _interval = null;
 
 function initReportScheduler() {
-  if (_interval) return; // ja iniciado
-  _interval = setInterval(tick, 60 * 1000); // verificar a cada minuto
+  if (_interval) return;
+  _interval = setInterval(tick, 60 * 1000);
   console.log('[reportScheduler] iniciado — verificando a cada minuto (seg 8h BRT = relatorio semanal)');
 }
 
@@ -95,4 +139,9 @@ function stopReportScheduler() {
   if (_interval) { clearInterval(_interval); _interval = null; }
 }
 
-module.exports = { initReportScheduler, stopReportScheduler, triggerWeeklyReports };
+module.exports = {
+  initReportScheduler,
+  stopReportScheduler,
+  triggerWeeklyReports,
+  getEligibleOwnerGroups,
+};
