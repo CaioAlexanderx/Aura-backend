@@ -69,13 +69,21 @@ router.use('/modules', require('./modules'));
 router.use('/billing', require('./billing'));
 router.use('/support', require('./support'));
 
+// 11/05/2026 -- Clientes basico movido pro Essencial.
+// Decisao de produto: cadastro de cliente e commodity (Bling/Tiny/etc
+// oferecem no plano de entrada). Limite por plano controlado em customers.js:
+//   essencial = 1.000
+//   negocio   = 5.000
+//   expansao  = ilimitado
+// CRM avancado (ranking/retencao/birthdays/crediario) continua Negocio+.
+router.use('/customers', require('./customers'));
+
 // -- NEGOCIO+ --
 
-router.use('/customers', requirePlan('negocio', 'expansao'), require('./customers'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
-// Crediario (fiado) por cliente — gate igual /customers porque depende
+// Crediario (fiado) por cliente -- gate igual /customers porque depende
 // da existencia do CRUD de cliente. Saldo via view, sem integracao com
 // Financeiro/contas a receber. Migration 099.
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
