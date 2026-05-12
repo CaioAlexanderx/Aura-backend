@@ -16,6 +16,12 @@
 //   Body: { count: number, reason?: string }
 //   Atualiza companies.extra_seats_granted (migration 110) + grava em
 //   admin_audit_log (action='set_extra_seats').
+//
+// 12/05/2026 (noite — fix Gestao Aura vazia):
+//   Defensivo pre-migration. SELECT principal de /clients-360 NAO referencia
+//   extra_seats_granted; segunda query opcional via extraSeats helper traz
+//   o campo se a coluna existir. Sem isso, app subir antes da migration
+//   aplicar fazia /clients-360 explodir 42703 → Gestao Aura zerada.
 // ============================================================
 
 const router = require('express').Router();
@@ -23,6 +29,7 @@ const pool = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
+const { getExtraSeatsMap, setExtraSeatsForCompany } = require('../services/extraSeats');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -126,13 +133,17 @@ router.get('/clients/:cid/activity', ...adminOnly, asyncHandler(async (req, res)
 }));
 
 // ── GET /admin/clients (enhanced — inclui health score + vertical) ─
+// 12/05/2026 (noite): SELECT principal NAO referencia mais
+// extra_seats_granted — campo vem de query separada via helper
+// extraSeats.getExtraSeatsMap, que captura 42703 silenciosamente
+// se a migration 110 ainda nao rodou. Sem isso, app subia antes
+// da migration aplicar e Gestao Aura mostrava 0 clientes.
 router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(`
     SELECT c.id, c.trade_name, c.legal_name, c.plan, c.is_active,
        c.billing_status, c.billing_cycle, c.module_overrides,
        c.created_at, c.last_active_at, c.tax_regime, c.trial_ends_at,
        c.vertical_active, c.vertical_enabled_at, c.suggested_vertical,
-       COALESCE(c.extra_seats_granted, 0) AS extra_seats_granted,
        u.email AS owner_email, u.full_name AS owner_name,
        h.score AS health_score, h.risk_level, h.activity_score, h.usage_score, h.payment_score, h.adoption_score,
        (SELECT COUNT(*) FROM transactions WHERE company_id=c.id) AS tx_count,
@@ -145,6 +156,10 @@ router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
     ORDER BY h.score ASC NULLS LAST, c.created_at DESC
   `);
 
+  // Defensivo: pega extra_seats_granted via helper opcional.
+  // Pre-migration → mapa vazio → todos default 0.
+  const seatsMap = await getExtraSeatsMap(rows.map(r => r.id));
+
   res.json({
     total: rows.length,
     clients: rows.map(r => ({
@@ -154,7 +169,7 @@ router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
       cust_count: parseInt(r.cust_count || 0),
       total_revenue: parseFloat(r.total_revenue || 0),
       health_score: r.health_score ? parseInt(r.health_score) : null,
-      extra_seats_granted: parseInt(r.extra_seats_granted || 0),
+      extra_seats_granted: seatsMap.get(r.id) || 0,
     })),
   });
 }));
@@ -269,6 +284,11 @@ router.patch('/clients/:cid/extend-trial', ...adminOnly, asyncHandler(async (req
 // 12/05/2026: define count absoluto de seats extras pagos pelo cliente
 // (R$19/seat acima do plano). Body: { count: int >= 0, reason?: string }.
 // Atualiza companies.extra_seats_granted + audit log.
+//
+// 12/05/2026 (noite): usa setExtraSeatsForCompany do helper extraSeats
+// que captura 42703 e devolve erro 503 com mensagem clara em vez de
+// 500 generico. Garante que Gestao Aura mostra "rode a migration"
+// em vez de simplesmente falhar mudo.
 router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req, res) => {
   const { cid } = req.params;
   const { count, reason } = req.body || {};
@@ -277,27 +297,28 @@ router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req,
     throw new AppError('count deve ser inteiro entre 0 e 100', 400);
   }
 
-  const { rows: current } = await pool.query(
-    'SELECT COALESCE(extra_seats_granted, 0) AS extra_seats_granted, plan FROM companies WHERE id = $1',
-    [cid]
-  );
-  if (!current.length) throw new AppError('Empresa nao encontrada', 404);
+  // Confirma empresa existe + pega o plano pra audit log
+  const { rows: comp } = await pool.query('SELECT plan FROM companies WHERE id = $1', [cid]);
+  if (!comp.length) throw new AppError('Empresa nao encontrada', 404);
 
-  const previous = parseInt(current[0].extra_seats_granted, 10) || 0;
+  let result;
+  try {
+    result = await setExtraSeatsForCompany(cid, n);
+  } catch (err) {
+    if (err.code === 'MIGRATION_PENDING') {
+      throw new AppError(err.message, 503);
+    }
+    throw err;
+  }
 
   // No-op se nao mudou — economia + nao polui audit
-  if (previous === n) {
+  if (result.previous === n) {
     return res.json({
       extra_seats_granted: n,
-      previous_extra_seats_granted: previous,
+      previous_extra_seats_granted: result.previous,
       changed: false,
     });
   }
-
-  await pool.query(
-    `UPDATE companies SET extra_seats_granted = $1, updated_at = NOW() WHERE id = $2`,
-    [n, cid]
-  );
 
   // Audit log generico action=set_extra_seats. Payload preserva before/after
   // e o delta facilita queries do tipo "quantos seats foram concedidos esse mes".
@@ -308,10 +329,10 @@ router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req,
       req.user.id,
       cid,
       JSON.stringify({
-        previous_count: previous,
+        previous_count: result.previous,
         new_count: n,
-        delta: n - previous,
-        plan: current[0].plan,
+        delta: n - result.previous,
+        plan: comp[0].plan,
       }),
       reason && typeof reason === 'string' ? reason.trim() : null,
     ]
@@ -319,7 +340,7 @@ router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req,
 
   res.json({
     extra_seats_granted: n,
-    previous_extra_seats_granted: previous,
+    previous_extra_seats_granted: result.previous,
     changed: true,
   });
 }));
