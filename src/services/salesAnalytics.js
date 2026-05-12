@@ -1,6 +1,13 @@
 // ============================================================
 // AURA. — Servico de Analytics de Vendas (BE-01)
 //
+// REVISAO 11/05/2026 (trocas inflando analytics):
+//   total_revenue, series e by_payment agora excluem s.type='troca'.
+//   Trocas tem total_amount = newValue (produto novo) e nao netAmount
+//   real. Mesmo fix de /dashboard salesToday, /me/dashboard e
+//   /pdv/summary. top_products e top_employees ficam sem filtro
+//   (preservam atribuicao de itens reais e credito de vendedora).
+//
 // REVISAO 09/05/2026 (Eryca Finesse — fonte unica de vendas):
 //   total_revenue agora vem de SALES.total_amount (status != cancelled),
 //   no mesmo periodo. Isso ALINHA com o KPI "Vendas hoje" do Painel
@@ -74,12 +81,14 @@ async function getSalesAnalytics(companyId, options = {}) {
  * Resumo do periodo.
  * 09/05/2026: total_revenue vem de SALES (mesma fonte do KPI top do Painel).
  * Demais metricas: SALES (operacional do PDV).
+ * 11/05/2026: exclui type='troca' (newValue infla total_revenue).
  */
 async function getSummary(companyId, startDate, endDate) {
   const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
 
   // Tudo de sales — fonte unica. Filtra por created_at SP no periodo.
   // status != cancelled para nao contar venda cancelada como faturamento.
+  // type != troca para nao inflar com newValue de trocas.
   const { rows } = await db.query(`
     SELECT
       COUNT(*)::int                                                                                AS total_sales_all,
@@ -90,6 +99,7 @@ async function getSummary(companyId, startDate, endDate) {
       COUNT(DISTINCT (created_at ${SP})::date) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int AS active_days
     FROM sales
     WHERE company_id = $1
+      AND COALESCE(type, 'sale') = 'sale'
       AND (created_at ${SP}) >= $2::timestamp
       AND (created_at ${SP}) <  $3::timestamp
   `, [companyId, startDate, endDate]);
@@ -116,6 +126,7 @@ async function getSummary(companyId, startDate, endDate) {
  * Serie temporal — TUDO de sales agora.
  * total_sales: contagem por periodo.
  * total_revenue: SOMA de sales.total_amount por periodo.
+ * 11/05/2026: exclui type='troca'.
  */
 async function getTimeSeries(companyId, startDate, endDate, groupBy) {
   const SP    = `AT TIME ZONE 'America/Sao_Paulo'`;
@@ -137,6 +148,7 @@ async function getTimeSeries(companyId, startDate, endDate, groupBy) {
     FROM sales
     WHERE company_id = $1
       AND COALESCE(status, 'completed') != 'cancelled'
+      AND COALESCE(type, 'sale') = 'sale'
       AND ${spCol} >= $2::timestamp
       AND ${spCol} <  $3::timestamp
     GROUP BY 1
@@ -152,6 +164,8 @@ async function getTimeSeries(companyId, startDate, endDate, groupBy) {
 
 /**
  * Top 10 produtos mais vendidos — sale_items JOIN sales.
+ * Mantido SEM filtro de type — produtos reais vendidos em troca
+ * continuam contando como saida fisica de estoque.
  */
 async function getTopProducts(companyId, startDate, endDate) {
   const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
@@ -188,6 +202,8 @@ async function getTopProducts(companyId, startDate, endDate) {
 
 /**
  * Ranking de funcionarios por vendas no periodo — sales.
+ * Mantido sem filtro de type — vendedora que atendeu uma troca
+ * continua recebendo credito da operacao.
  */
 async function getTopEmployees(companyId, startDate, endDate) {
   const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
@@ -222,6 +238,7 @@ async function getTopEmployees(companyId, startDate, endDate) {
 
 /**
  * Vendas por metodo de pagamento — sales.
+ * 11/05/2026: exclui type='troca'.
  */
 async function getByPaymentMethod(companyId, startDate, endDate) {
   const SP = `AT TIME ZONE 'America/Sao_Paulo'`;
@@ -234,6 +251,7 @@ async function getByPaymentMethod(companyId, startDate, endDate) {
     FROM sales
     WHERE company_id = $1
       AND COALESCE(status, 'completed') != 'cancelled'
+      AND COALESCE(type, 'sale') = 'sale'
       AND (created_at ${SP}) >= $2::timestamp
       AND (created_at ${SP}) <  $3::timestamp
     GROUP BY payment_method
