@@ -23,6 +23,12 @@
 //   A tabela 'sales' contem entradas invalidas/de-teste que inflam o
 //   total. Continua usada apenas para contagem (salesCountMonth, salesToday,
 //   avgTicket) e para o card de Vendas (que mantem semantica operacional).
+//
+// 11/05/2026 — Fix bug Eryca Finesse (salesToday inflado por trocas):
+//   today_total e month_count agora excluem s.type='troca'.
+//   Trocas tem total_amount = newValue (valor do produto novo), nao o
+//   netAmount efetivamente recebido. Somar isso inflava o KPI "Vendas
+//   hoje" do Painel. Mesmo fix ja aplicado em /pdv/summary (07/05 PR #41).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -36,6 +42,8 @@ router.get('/', async (req, res) => {
       // 1. Contagem de vendas do mes e de hoje — sem somar valor.
       //    Sales filtra por created_at SP (eventos instantaneos do PDV).
       //    O valor financeiro vem de transactions (cashInflow), nao de sales.
+      //    11/05/2026: exclui type='troca' (mesmo fix do /pdv/summary 07/05).
+      //    Trocas tem total_amount = newValue inflando o KPI "Vendas hoje".
       db.query(
         `SELECT
            COUNT(*)::int AS month_count,
@@ -44,6 +52,7 @@ router.get('/', async (req, res) => {
          FROM sales
          WHERE company_id = $1
            AND COALESCE(status, 'completed') != 'cancelled'
+           AND COALESCE(type, 'sale') = 'sale'
            AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))
            AND (created_at AT TIME ZONE 'America/Sao_Paulo') < date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '1 month'`,
         [cid]
