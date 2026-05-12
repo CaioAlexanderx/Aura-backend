@@ -17,6 +17,10 @@
 //   seats_used, at_limit, monthly_cost (so cobra acessos ACIMA do plano).
 //   /billing usa COUNT direto (1 DB call) — nao precisa da lista completa.
 //   /unified usa listMembersUnified para deduplicar usuarios entre CNPJs.
+// 12/05/2026 (extra seats manual):
+//   loadEffectiveBilling retorna {plan, extra_seats_granted}. summarizeSeats
+//   passa a receber o terceiro arg pra expandir o limite. Gestao Aura
+//   controla via PATCH /admin/clients/:cid/extra-seats (adminClients360.js).
 // ============================================================
 
 const express = require('express');
@@ -33,24 +37,27 @@ const { sendInviteEmail } = require('../services/mailer');
 const { logAction, listAudit, diffPermissions } = require('../services/memberAudit');
 const { summarizeSeats, SEAT_PRICE_BRL } = require('../services/memberSeats');
 
-// Carrega plano efetivo da empresa (fallback essencial). billing_owner_company_id
-// puxa o plano do "dono" no caso de CNPJs irmaos. Se a coluna nao existir
-// (esquema antigo), cai pra plano da propria company.
-async function loadEffectivePlan(companyId) {
+// Carrega plano efetivo + extra_seats_granted do billing_owner.
+// billing_owner_company_id puxa do "dono" no caso de CNPJs irmaos.
+// 12/05/2026: extra_seats_granted vem da migration 110.
+async function loadEffectiveBilling(companyId) {
   try {
     const { rows } = await db.query(`
       WITH owner AS (
         SELECT COALESCE(billing_owner_company_id, id) AS oid
         FROM companies WHERE id = $1
       )
-      SELECT c.plan
+      SELECT c.plan, COALESCE(c.extra_seats_granted, 0) AS extra_seats_granted
       FROM companies c
       JOIN owner ON c.id = owner.oid
     `, [companyId]);
-    return (rows[0]?.plan || 'essencial').toLowerCase();
+    return {
+      plan: (rows[0]?.plan || 'essencial').toLowerCase(),
+      extra_seats_granted: parseInt(rows[0]?.extra_seats_granted, 10) || 0,
+    };
   } catch (err) {
-    console.error('[members] loadEffectivePlan failed:', err.message);
-    return 'essencial';
+    console.error('[members] loadEffectiveBilling failed:', err.message);
+    return { plan: 'essencial', extra_seats_granted: 0 };
   }
 }
 
@@ -58,8 +65,8 @@ async function loadEffectivePlan(companyId) {
 router.get('/unified', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const result = await listMembersUnified(req.params.id);
-    const plan   = await loadEffectivePlan(req.params.id);
-    const seats  = summarizeSeats(plan, result.members);
+    const billing = await loadEffectiveBilling(req.params.id);
+    const seats  = summarizeSeats(billing.plan, result.members, billing.extra_seats_granted);
 
     const activeCount  = result.members.filter(m => m.status === 'active' && m.is_active).length;
     const pendingCount = result.members.filter(m => m.status === 'pending').length;
@@ -77,6 +84,8 @@ router.get('/unified', requireAuth, requireCompanyAccess(), async (req, res) => 
       seats_used:         seats.seats_used,
       seats_remaining:    seats.seats_remaining,
       extra_seats:        seats.extra_seats,
+      // 12/05/2026: seats extras pagos manualmente (Gestao Aura)
+      extra_seats_granted: seats.extra_seats_granted,
       extra_seat_price:   seats.extra_seat_price,
       at_limit:           seats.at_limit,
       over_limit:         seats.over_limit,
@@ -93,13 +102,13 @@ router.get('/unified', requireAuth, requireCompanyAccess(), async (req, res) => 
 router.get('/', requireAuth, requireCompanyAccess(), async (req, res) => {
   try {
     const members = await listMembers(req.params.id);
-    const plan    = await loadEffectivePlan(req.params.id);
+    const billing = await loadEffectiveBilling(req.params.id);
     // Adapta lista single-company pro shape esperado por summarizeSeats
     const summarizable = members.map(m => ({
       status:    m.status,
       is_active: m.is_active,
     }));
-    const seats = summarizeSeats(plan, summarizable);
+    const seats = summarizeSeats(billing.plan, summarizable, billing.extra_seats_granted);
     const activeCount = members.filter(m => m.status === 'active' && m.is_active).length;
     res.json({
       total:        members.length,
@@ -111,6 +120,7 @@ router.get('/', requireAuth, requireCompanyAccess(), async (req, res) => {
       seats_used:       seats.seats_used,
       seats_remaining:  seats.seats_remaining,
       extra_seats:      seats.extra_seats,
+      extra_seats_granted: seats.extra_seats_granted,
       extra_seat_price: seats.extra_seat_price,
       at_limit:         seats.at_limit,
       over_limit:       seats.over_limit,
@@ -407,13 +417,13 @@ router.get('/billing', requireAuth, requireCompanyAccess(), async (req, res) => 
       [req.params.id]
     );
     const seatsUsed = parseInt(rows[0]?.total || '0', 10);
-    const plan  = await loadEffectivePlan(req.params.id);
+    const billing = await loadEffectiveBilling(req.params.id);
 
     // Array sintetico compativel com summarizeSeats (so precisa do tamanho)
     const synthetic = Array.from({ length: seatsUsed }, function() {
       return { status: 'active', is_active: true };
     });
-    const seats = summarizeSeats(plan, synthetic);
+    const seats = summarizeSeats(billing.plan, synthetic, billing.extra_seats_granted);
 
     res.json({
       plan:             seats.plan,
@@ -421,6 +431,7 @@ router.get('/billing', requireAuth, requireCompanyAccess(), async (req, res) => 
       seats_used:       seats.seats_used,
       seats_remaining:  seats.seats_remaining,
       extra_seats:      seats.extra_seats,
+      extra_seats_granted: seats.extra_seats_granted,
       price_per_member: SEAT_PRICE_BRL,
       monthly_total:    seats.monthly_cost,
       at_limit:         seats.at_limit,
