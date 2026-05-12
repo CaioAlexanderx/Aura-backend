@@ -10,30 +10,53 @@
 //
 // Solucao: helper que tenta a query e captura 42703 silenciosamente,
 // retornando default 0. Cache module-level flag pra evitar tentar
-// e falhar de novo em cada request — uma vez detectada a ausencia,
-// pula direto pro default ate o restart do process.
+// e falhar de novo em cada request.
 //
-// Quando a migration for aplicada, Railway eventualmente reinicia
-// (deploy novo ou restart manual) e o cache reseta — proximo
-// request detecta a coluna e passa a usa-la.
+// 12/05/2026 (tarde): cache TIME-BASED. Antes era permanente — se
+// virasse false uma vez, ficava false ate restart. Bug: cliente
+// aplicou migration via MCP sem restart, cache continuou false e
+// backend continuou devolvendo 0 mesmo com a coluna existindo.
+// Agora cache de "ausente" expira em 60s e a query e re-tentada
+// automaticamente. Cache de "existe" nao expira (uma vez true,
+// fica true ate restart).
 // ============================================================
 
 const pool = require('../config/database');
 
-// Flag em memoria. null = nao testado, true = coluna existe,
-// false = nao existe (cache de falha 42P01).
+// Estado do cache:
+//   null = nao testado, ainda vai tentar
+//   true = coluna existe (cache permanente ate restart)
+//   false = coluna nao existe (cache temporario, expira em CACHE_MISS_TTL)
 let _columnExistsCache = null;
+let _columnMissingAt = 0; // timestamp da ultima vez que detectou ausencia
+const CACHE_MISS_TTL_MS = 60 * 1000; // 60s — retentar apos esse tempo
+
+function _isCacheStale() {
+  return _columnExistsCache === false && (Date.now() - _columnMissingAt) >= CACHE_MISS_TTL_MS;
+}
+
+function _markColumnMissing() {
+  _columnExistsCache = false;
+  _columnMissingAt = Date.now();
+}
+
+function _markColumnExists() {
+  _columnExistsCache = true;
+  _columnMissingAt = 0;
+}
 
 /**
  * Retorna Map<companyId, extra_seats_granted_count> para a lista informada.
  * Se a coluna nao existe (pre-migration), retorna Map vazio — caller usa
- * default 0 pra cada cliente.
+ * default 0 pra cada cliente. Cache expira em 60s pra detectar quando a
+ * migration roda sem precisar de restart.
  *
  * @param {string[]} companyIds — array de UUIDs
  * @returns {Promise<Map<string, number>>}
  */
 async function getExtraSeatsMap(companyIds) {
-  if (_columnExistsCache === false) return new Map();
+  // Pula query se cache diz que coluna nao existe E ainda esta fresco
+  if (_columnExistsCache === false && !_isCacheStale()) return new Map();
   if (!Array.isArray(companyIds) || companyIds.length === 0) return new Map();
 
   try {
@@ -41,7 +64,7 @@ async function getExtraSeatsMap(companyIds) {
       'SELECT id, COALESCE(extra_seats_granted, 0) AS extra_seats_granted FROM companies WHERE id = ANY($1::uuid[])',
       [companyIds]
     );
-    _columnExistsCache = true;
+    _markColumnExists();
     const map = new Map();
     for (const r of rows) {
       map.set(r.id, parseInt(r.extra_seats_granted, 10) || 0);
@@ -49,10 +72,8 @@ async function getExtraSeatsMap(companyIds) {
     return map;
   } catch (err) {
     if (err.code === '42703') {
-      // Coluna nao existe — migration 110 ainda nao aplicada.
-      // Log uma vez (cache vira false e nao vamos mais tentar) e devolve vazio.
-      console.warn('[extraSeats] companies.extra_seats_granted ainda nao existe (migration 110 pendente). Defaulting to 0.');
-      _columnExistsCache = false;
+      console.warn('[extraSeats] companies.extra_seats_granted ainda nao existe (migration 110 pendente). Tentando de novo em 60s.');
+      _markColumnMissing();
       return new Map();
     }
     throw err;
@@ -86,11 +107,11 @@ async function setExtraSeatsForCompany(companyId, count) {
       'UPDATE companies SET extra_seats_granted = $1, updated_at = NOW() WHERE id = $2',
       [count, companyId]
     );
-    _columnExistsCache = true;
+    _markColumnExists();
     return { previous, current: count };
   } catch (err) {
     if (err.code === '42703') {
-      _columnExistsCache = false;
+      _markColumnMissing();
       const e = new Error('Coluna companies.extra_seats_granted ainda nao existe. Rode a migration 110 no Supabase Console antes de usar essa feature.');
       e.code = 'MIGRATION_PENDING';
       e.status = 503;
@@ -101,10 +122,12 @@ async function setExtraSeatsForCompany(companyId, count) {
 }
 
 /**
- * Reseta o cache. Util pra testes; em producao reseta apenas no restart.
+ * Reseta o cache manualmente. Util pra testes; em producao o cache
+ * de "ausente" ja expira em 60s automaticamente.
  */
 function _resetCache() {
   _columnExistsCache = null;
+  _columnMissingAt = 0;
 }
 
 module.exports = {
