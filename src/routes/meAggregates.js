@@ -28,6 +28,16 @@
 //   total_revenue de SALES (mesma fonte do /dashboard salesToday).
 //   Antes vinha de transactions confirmed, divergindo do KPI top do
 //   Painel — Eryca Finesse viu 7651 vs 7247 na mesma tela.
+//
+// 11/05/2026 (fix trocas inflando salesToday/analytics):
+//   - breakdownSalesRes em /me/dashboard agora exclui type='troca'.
+//   - summaryRes, seriesRes, byPaymentRes em /me/sales/analytics
+//     tambem excluem type='troca'.
+//   Trocas tem total_amount = newValue (produto novo) e nao
+//   netAmount real. Mesmo fix aplicado em /dashboard (dashboard.js)
+//   e ja estava em /pdv/summary (PR #41 07/05).
+//   top_products e top_employees mantidos sem filtro: itens reais
+//   vendidos e seller real continuam contando.
 // ============================================================
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
@@ -184,6 +194,8 @@ router.get('/dashboard', async (req, res) => {
         [companyIds]
       ).catch(() => ({ rows: [{ cnt: 0 }] })),
 
+      // 11/05/2026: exclui type='troca' (mesmo fix do dashboard.js per-company).
+      // Trocas tem total_amount = newValue inflando salesToday consolidado.
       db.query(
         `SELECT company_id,
                 COUNT(*)::int AS month_count,
@@ -192,6 +204,7 @@ router.get('/dashboard', async (req, res) => {
            FROM sales
           WHERE company_id = ANY($1)
             AND COALESCE(status, 'completed') != 'cancelled'
+            AND COALESCE(type, 'sale') = 'sale'
             AND (created_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))
             AND (created_at AT TIME ZONE 'America/Sao_Paulo') <  date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '1 month'
           GROUP BY company_id`,
@@ -789,6 +802,11 @@ router.get('/sales', async (req, res) => {
 // causando divergencia visivel entre KPI top do Painel e o card
 // Analytics no MESMO Painel (Eryca Finesse 09/05: 7651 vs 7247).
 //
+// 11/05/2026: exclui type='troca' em summary/series/by_payment.
+// Trocas tem total_amount = newValue inflando analytics. Mesmo fix
+// do /me/dashboard. top_products/top_employees mantidos sem filtro
+// (itens reais vendidos e seller real ainda contam).
+//
 // Query params:
 //   - period: 'today' | 'yesterday' | 'week' | 'month' | 'year' | 'custom'
 //   - group_by: 'day' | 'week' | 'month'
@@ -840,6 +858,13 @@ router.get('/sales/analytics', async (req, res) => {
     };
     const fmt = formats[groupBy] || formats.day;
 
+    // 11/05/2026: filtro de troca centralizado. Aplicado em summary,
+    // series e by_payment (todas agregadoras de receita). NAO aplicado
+    // em top_products/top_employees (preserva atribuicao de itens reais
+    // e credito de vendedora mesmo em trocas).
+    const NO_TROCA = `AND COALESCE(type, 'sale') = 'sale'`;
+    const NO_TROCA_S = `AND COALESCE(s.type, 'sale') = 'sale'`;
+
     const [
       summaryRes,
       seriesRes,
@@ -847,7 +872,6 @@ router.get('/sales/analytics', async (req, res) => {
       topEmployeesRes,
       byPaymentRes,
     ] = await Promise.all([
-      // 09/05/2026: TUDO de sales agora — fonte unica.
       db.query(
         `SELECT
            COUNT(*) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int                AS total_sales,
@@ -857,6 +881,7 @@ router.get('/sales/analytics', async (req, res) => {
            COUNT(DISTINCT (created_at ${SP})::date) FILTER (WHERE COALESCE(status,'completed') != 'cancelled')::int AS active_days
          FROM sales
          WHERE company_id = ANY($1)
+           ${NO_TROCA}
            AND (created_at ${SP}) >= $2::timestamp
            AND (created_at ${SP}) <  $3::timestamp`,
         [companyIds, startDate, endDate]
@@ -869,6 +894,7 @@ router.get('/sales/analytics', async (req, res) => {
          FROM sales
          WHERE company_id = ANY($1)
            AND COALESCE(status, 'completed') != 'cancelled'
+           ${NO_TROCA}
            AND ${spCol} >= $2::timestamp
            AND ${spCol} <  $3::timestamp
          GROUP BY 1
@@ -922,6 +948,7 @@ router.get('/sales/analytics', async (req, res) => {
          FROM sales
          WHERE company_id = ANY($1)
            AND COALESCE(status, 'completed') != 'cancelled'
+           ${NO_TROCA}
            AND (created_at ${SP}) >= $2::timestamp
            AND (created_at ${SP}) <  $3::timestamp
          GROUP BY payment_method
