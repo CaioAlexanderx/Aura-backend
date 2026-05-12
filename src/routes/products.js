@@ -25,6 +25,10 @@
 //     - Migration 102 backfill em produtos existentes.
 //     - group_root(empresa) = billing_owner se subsidiária, senão a própria
 //       empresa. Empresas com mesmo group_root estão no mesmo grupo.
+// FIX (12/05/2026): DELETE retry chain nullifica FKs antes de re-deletar
+//   mas explodia em 42P01 quando o deployment nao tinha a migration de
+//   barbershop (caso Eryca/Finesse — varejo puro). safeNullProductRef
+//   ignora 42P01 e segue o resto da cadeia.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -83,6 +87,36 @@ function listVisibilityWhere(cidParam) {
       )
     )
   ))`;
+}
+
+// ─── safeNullProductRef ──────────────────────────────────
+//
+// 12/05/2026: helper pro retry de DELETE quando ha FK violation
+// (23503). Cada deployment so tem as tabelas das migrations que
+// rodaram nele — barber_stock_movements so existe se a vertical
+// barbershop foi aplicada. Tentar UPDATE em tabela inexistente
+// explode 42P01 e quebra a cadeia inteira do retry.
+//
+// `tableName` E HARDCODED neste arquivo (whitelist de tabelas
+// internas conhecidas), nunca vem de user input — SEM risco
+// de SQL injection.
+async function safeNullProductRef(tableName, productId) {
+  try {
+    await db.query(
+      `UPDATE ${tableName} SET product_id = NULL WHERE product_id = $1`,
+      [productId]
+    );
+  } catch (err) {
+    // 42P01 = undefined_table. Acontece quando a migration que cria
+    // essa tabela nao rodou nesse deployment (ex: barbershop em
+    // cliente de varejo puro). Ignora e segue a cadeia.
+    if (err.code === '42P01') {
+      console.log('[products] safeNull: tabela', tableName, 'nao existe nesse deployment, pulando');
+      return;
+    }
+    // Outras falhas (permissao, sintaxe, deadlock) sobem.
+    throw err;
+  }
 }
 
 // ─── GET / ──────────────────────────────────
@@ -262,9 +296,13 @@ router.delete('/:pid', async (req, res) => {
   } catch (err) {
     if (err.code === '23503') {
       try {
-        await db.query('UPDATE sale_items SET product_id = NULL WHERE product_id = $1', [pid]);
-        await db.query('UPDATE barber_stock_movements SET product_id = NULL WHERE product_id = $1', [pid]);
-        await db.query('UPDATE stock_movements SET product_id = NULL WHERE product_id = $1', [pid]);
+        // 12/05/2026: safeNullProductRef ignora 42P01 pra deployments que
+        // nao tem todas as tabelas (ex: Finesse sem barbershop). Sem isso,
+        // a primeira tabela ausente quebrava a cadeia inteira e o produto
+        // nao deletava mesmo com sale_items/stock_movements ja nulificados.
+        await safeNullProductRef('sale_items', pid);
+        await safeNullProductRef('barber_stock_movements', pid);
+        await safeNullProductRef('stock_movements', pid);
         const retry = await db.query(
           `DELETE FROM products WHERE ${visibilityWhere('$1', '$2')} RETURNING id, name`,
           [pid, cid]
