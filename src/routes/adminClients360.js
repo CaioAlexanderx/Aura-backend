@@ -1,9 +1,15 @@
 // ============================================================
 // AURA. — Central de Comando: Client 360° (Sprint 2)
 //
-// GET /admin/clients/:cid/health   — Health score breakdown
-// GET /admin/clients/:cid/activity — Uso por modulo + ultimas acoes
-// GET /admin/clients/:cid/billing  — Faturas e status de pagamento
+// GET   /admin/clients/:cid/health   — Health score breakdown
+// GET   /admin/clients/:cid/activity — Uso por modulo + ultimas acoes
+// GET   /admin/clients/:cid/billing  — Faturas e status de pagamento
+//
+// 12/05/2026: Onda 1 Gestao Aura v2
+// GET   /admin/clients/:cid/notes        — CRM basico
+// POST  /admin/clients/:cid/notes        — criar nota (body: { body })
+// PATCH /admin/clients/:cid/extend-trial — estende trial N dias + audit
+// GET   /admin/audit-log                 — listar acoes administrativas
 // ============================================================
 
 const router = require('express').Router();
@@ -143,6 +149,139 @@ router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
       health_score: r.health_score ? parseInt(r.health_score) : null,
     })),
   });
+}));
+
+// ============================================================
+// 12/05/2026 — Onda 1 Gestao Aura v2
+// Notas CRM + Extender trial + Audit log
+// ============================================================
+
+// ── GET /admin/clients/:cid/notes — lista notas internas ────────
+router.get('/clients/:cid/notes', ...adminOnly, asyncHandler(async (req, res) => {
+  const { cid } = req.params;
+  const { rows } = await pool.query(
+    `SELECT n.id, n.body, n.created_at,
+            n.author_user_id, u.full_name AS author_name, u.email AS author_email
+     FROM company_admin_notes n
+     LEFT JOIN users u ON u.id = n.author_user_id
+     WHERE n.company_id = $1
+     ORDER BY n.created_at DESC
+     LIMIT 200`,
+    [cid]
+  );
+  res.json({ notes: rows });
+}));
+
+// ── POST /admin/clients/:cid/notes — cria nota (body: { body }) ──
+router.post('/clients/:cid/notes', ...adminOnly, asyncHandler(async (req, res) => {
+  const { cid } = req.params;
+  const { body } = req.body || {};
+  if (!body || typeof body !== 'string' || !body.trim()) {
+    throw new AppError('body e obrigatorio', 400);
+  }
+  // Sanity: empresa existe?
+  const { rows: exists } = await pool.query('SELECT id FROM companies WHERE id = $1', [cid]);
+  if (!exists.length) throw new AppError('Empresa nao encontrada', 404);
+
+  const { rows } = await pool.query(
+    `INSERT INTO company_admin_notes (company_id, author_user_id, body)
+     VALUES ($1, $2, $3)
+     RETURNING id, body, created_at, author_user_id`,
+    [cid, req.user.id, body.trim()]
+  );
+
+  // Hidrata com nome/email do autor pra a UI exibir direto sem segunda chamada
+  const { rows: authorRows } = await pool.query(
+    'SELECT full_name, email FROM users WHERE id = $1',
+    [req.user.id]
+  );
+  res.status(201).json({
+    note: {
+      ...rows[0],
+      author_name: authorRows[0]?.full_name || null,
+      author_email: authorRows[0]?.email || null,
+    },
+  });
+}));
+
+// ── PATCH /admin/clients/:cid/extend-trial — estende trial ──────
+// Body: { days: number, reason?: string }
+// Se trial_ends_at no futuro → soma N dias. Se vencido/null → conta de hoje.
+router.patch('/clients/:cid/extend-trial', ...adminOnly, asyncHandler(async (req, res) => {
+  const { cid } = req.params;
+  const { days, reason } = req.body || {};
+  const n = parseInt(days, 10);
+  if (!isFinite(n) || n <= 0 || n > 365) {
+    throw new AppError('days deve ser inteiro entre 1 e 365', 400);
+  }
+
+  const { rows: current } = await pool.query(
+    'SELECT trial_ends_at, billing_status FROM companies WHERE id = $1',
+    [cid]
+  );
+  if (!current.length) throw new AppError('Empresa nao encontrada', 404);
+
+  const now = new Date();
+  const previousEnds = current[0].trial_ends_at ? new Date(current[0].trial_ends_at) : null;
+  // Se trial ja vencido (ou nunca teve), conta a partir de hoje;
+  // se ativo, soma ao final atual.
+  const base = previousEnds && previousEnds > now ? previousEnds : now;
+  const newEnds = new Date(base.getTime() + n * 24 * 60 * 60 * 1000);
+
+  await pool.query(
+    `UPDATE companies SET trial_ends_at = $1, updated_at = NOW() WHERE id = $2`,
+    [newEnds, cid]
+  );
+
+  // Audit log — staff_user_id + payload before/after + reason livre
+  await pool.query(
+    `INSERT INTO admin_audit_log (staff_user_id, company_id, action, payload, reason)
+     VALUES ($1, $2, 'extend_trial', $3, $4)`,
+    [
+      req.user.id,
+      cid,
+      JSON.stringify({
+        days_added: n,
+        previous_trial_ends_at: previousEnds ? previousEnds.toISOString() : null,
+        new_trial_ends_at: newEnds.toISOString(),
+        billing_status: current[0].billing_status,
+      }),
+      reason && typeof reason === 'string' ? reason.trim() : null,
+    ]
+  );
+
+  res.json({
+    trial_ends_at: newEnds.toISOString(),
+    previous_trial_ends_at: previousEnds ? previousEnds.toISOString() : null,
+    days_added: n,
+  });
+}));
+
+// ── GET /admin/audit-log — lista acoes administrativas ──────────
+// Query: ?company_id=&action=&limit=
+router.get('/audit-log', ...adminOnly, asyncHandler(async (req, res) => {
+  const { company_id, action, limit } = req.query;
+  const lim = Math.min(parseInt(limit, 10) || 50, 200);
+  const conds = [];
+  const params = [];
+  if (company_id) { params.push(company_id); conds.push(`a.company_id = $${params.length}`); }
+  if (action)     { params.push(action);     conds.push(`a.action = $${params.length}`); }
+  const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+  params.push(lim);
+  const { rows } = await pool.query(
+    `SELECT a.id, a.action, a.payload, a.reason, a.created_at,
+            a.company_id, a.staff_user_id,
+            u.full_name AS staff_name, u.email AS staff_email,
+            c.trade_name AS company_trade_name, c.legal_name AS company_legal_name
+     FROM admin_audit_log a
+     LEFT JOIN users u ON u.id = a.staff_user_id
+     LEFT JOIN companies c ON c.id = a.company_id
+     ${where}
+     ORDER BY a.created_at DESC
+     LIMIT $${params.length}`,
+    params
+  );
+  res.json({ logs: rows });
 }));
 
 module.exports = router;
