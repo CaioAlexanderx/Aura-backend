@@ -21,6 +21,11 @@
 //   loadEffectiveBilling retorna {plan, extra_seats_granted}. summarizeSeats
 //   passa a receber o terceiro arg pra expandir o limite. Gestao Aura
 //   controla via PATCH /admin/clients/:cid/extra-seats (adminClients360.js).
+// 12/05/2026 (noite — fix pre-migration):
+//   loadEffectiveBilling split em 2 queries — plano (sempre confiavel) +
+//   extra_seats (opcional via helper extraSeats). Sem isso, app subir
+//   antes da migration 110 quebrava /members/* pra todo cliente (default
+//   essencial mesmo pra Negocio/Expansao).
 // ============================================================
 
 const express = require('express');
@@ -36,29 +41,51 @@ const {
 const { sendInviteEmail } = require('../services/mailer');
 const { logAction, listAudit, diffPermissions } = require('../services/memberAudit');
 const { summarizeSeats, SEAT_PRICE_BRL } = require('../services/memberSeats');
+const { getExtraSeatsForCompany } = require('../services/extraSeats');
 
 // Carrega plano efetivo + extra_seats_granted do billing_owner.
 // billing_owner_company_id puxa do "dono" no caso de CNPJs irmaos.
-// 12/05/2026: extra_seats_granted vem da migration 110.
+//
+// 12/05/2026 (noite): SPLIT em 2 queries pra ficar defensivo pre-migration.
+//   1. Query principal: pega o billing_owner_id + plan. SEMPRE funciona.
+//   2. Query opcional via helper: extra_seats_granted (com fallback 0
+//      se a coluna nao existir).
+// Antes era query unica que, se falhasse com 42703, mascarava o plano
+// como 'essencial' default — quebrando gating pra Negocio/Expansao.
 async function loadEffectiveBilling(companyId) {
+  let plan = 'essencial';
+  let billingOwnerId = companyId;
+
   try {
     const { rows } = await db.query(`
       WITH owner AS (
         SELECT COALESCE(billing_owner_company_id, id) AS oid
         FROM companies WHERE id = $1
       )
-      SELECT c.plan, COALESCE(c.extra_seats_granted, 0) AS extra_seats_granted
+      SELECT c.id, c.plan
       FROM companies c
       JOIN owner ON c.id = owner.oid
     `, [companyId]);
-    return {
-      plan: (rows[0]?.plan || 'essencial').toLowerCase(),
-      extra_seats_granted: parseInt(rows[0]?.extra_seats_granted, 10) || 0,
-    };
+    if (rows[0]) {
+      plan = (rows[0].plan || 'essencial').toLowerCase();
+      billingOwnerId = rows[0].id;
+    }
   } catch (err) {
-    console.error('[members] loadEffectiveBilling failed:', err.message);
-    return { plan: 'essencial', extra_seats_granted: 0 };
+    // So cai aqui em erro fundamental (DB down, schema corrompido). Loga
+    // o motivo e devolve default conservador — diferente da query antiga
+    // onde 42703 (coluna nova ausente) mascarava o plano correto.
+    console.error('[members] loadEffectiveBilling plan query failed:', err.message);
   }
+
+  // Extra seats: helper resolve 42703 silenciosamente (pre-migration → 0).
+  let extra_seats_granted = 0;
+  try {
+    extra_seats_granted = await getExtraSeatsForCompany(billingOwnerId);
+  } catch (err) {
+    console.error('[members] loadEffectiveBilling extra_seats query failed:', err.message);
+  }
+
+  return { plan, extra_seats_granted };
 }
 
 // GET /companies/:id/members/unified
