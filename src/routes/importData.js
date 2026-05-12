@@ -9,6 +9,12 @@
 //   3. Bulk INSERT em chunks de 100 com ON CONFLICT DO NOTHING
 // Isso reduz de ~4.000 queries individuais para ~14 queries
 // numa importacao de 1.200 produtos, eliminando o timeout.
+//
+// 11/05/2026: cap do customers/import baixado de 2000 -> 1000
+// para alinhar com o limite do plano Essencial (clientes basico
+// movido pro Essencial em 11/05). Importacao continua aberta
+// para todos os planos. Negocio/Expansao tem cap de 1000 por
+// batch tambem -- multiplos batches sao suportados via batch_id.
 // ============================================================
 
 const express = require('express');
@@ -59,7 +65,7 @@ function suggestMapping(headers, fieldDefs) {
   const map = {};
   for (const header of headers) {
     const normalized = header.toLowerCase().trim()
-      .normalize('NFD').replace(/[̀-ͯ]/g, '');
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     for (const [field, aliases] of Object.entries(fieldDefs)) {
       if (aliases.some(a => normalized === a || normalized.startsWith(a + ' ') || normalized.startsWith(a + '(') || normalized.endsWith(' ' + a) || (a.length >= 4 && normalized.includes(a)))) {
         if (!map[header]) map[header] = field;
@@ -110,6 +116,9 @@ function applyMap(row, columnMap) {
 }
 
 // ─── POST /customers/import ───────────────────────────────────
+// 11/05/2026: cap reduzido pra 1000 (alinha com limite Essencial).
+// Aberto pra todos os planos -- Essencial usa pra migrar de outra
+// plataforma; Negocio/Expansao usa em batches sucessivos.
 
 router.post('/customers/import', requireAuth, async (req, res) => {
   const companyId = req.params.id;
@@ -118,8 +127,11 @@ router.post('/customers/import', requireAuth, async (req, res) => {
   if (!Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ error: 'Campo rows é obrigatório e deve ser um array não-vazio' });
   }
-  if (rows.length > 2000) {
-    return res.status(400).json({ error: 'Máximo de 2.000 clientes por importação' });
+  if (rows.length > 1000) {
+    return res.status(400).json({
+      error: 'Máximo de 1.000 clientes por importação. Divida em batches menores se precisar importar mais.',
+      max_per_batch: 1000,
+    });
   }
 
   const headers = Object.keys(rows[0]);
