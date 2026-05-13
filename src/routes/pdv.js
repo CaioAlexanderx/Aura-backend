@@ -22,11 +22,26 @@
 // CRITICAL FIX 11/05/2026 (caixa required block — defesa backend):
 //   POST /sale e POST /troca agora bloqueiam com 409 quando o toggle
 //   pdv_settings.caixa_enabled=true E não existe caixa_sessoes 'aberta'.
-//   Antes a validação só existia no frontend (handleFinalize), e bugs
-//   de cache/race-condition deixavam vendas passar. Agora é defesa em
-//   profundidade — frontend continua bloqueando + backend trava também.
-//   Helper assertCaixaOpenOrAllowed fail-open em erro (try/catch) pra
-//   não quebrar empresas em schemas legados.
+// FEAT 12/05/2026 (TROCA CROSS-FILIAL — migration 111 — pedido Davi):
+//   POST /troca aceita original_sale_id de qualquer filial do mesmo
+//   group_root (billing_owner_company_id). Desenho:
+//     - sale.company_id = CNPJ origem da venda (Filial 1).
+//     - sale.seller_id  = vendedor original (em cross-filial); em
+//       same-filial preserva req.user.id pra nao quebrar ranking.
+//     - sale.exchange_seller_id / exchange_employee_id = quem
+//       atendeu a troca presencialmente (Filial 2).
+//     - sale_payments.company_id = req.params.id (Filial 2 fisica)
+//       diverge POR DESIGN de sale.company_id pra conciliacao de
+//       maquininha bater.
+//     - transactions.company_id = saleCompanyId (origem) — DRE da
+//       Filial 1 mostra devolucao + nova venda.
+//     - NFC-e cancel_reissue funciona naturalmente (mesmo CNPJ).
+//   Defesa pre-migration (armadilha_schema_pre_migration): INSERT
+//   com fallback se exchange_* nao existir; bloqueia cross-filial
+//   nesse caso pra evitar dados parciais.
+//   GET /sales-for-troca: novo endpoint pra UI listar vendas do
+//   group_root elegiveis pra troca.
+//   Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -53,11 +68,6 @@ function calcCreditAmount({ payment_method, payments, totalAmount }) {
 
 // ──────────────────────────────────────────────────────────────
 // 11/05/2026 — Defesa backend: bloqueia operação se caixa fechado.
-// Quando companies.pdv_settings.caixa_enabled = true E não existe
-// caixa_sessoes com status='aberta' pra essa empresa, retorna 409.
-// Roda dentro da transaction (client.query) pra usar o mesmo BEGIN.
-// Fail-open em erro inesperado (companies/caixa_sessoes ausentes em
-// schemas legados não devem bloquear vendas).
 // ──────────────────────────────────────────────────────────────
 async function assertCaixaOpenOrAllowed(client, companyId) {
   try {
@@ -86,6 +96,35 @@ async function assertCaixaOpenOrAllowed(client, companyId) {
     console.warn('[PDV] assertCaixaOpenOrAllowed fail-open:', e.message);
     return { ok: true };
   }
+}
+
+// ──────────────────────────────────────────────────────────────
+// 12/05/2026 (troca cross-filial) — cache module-level pra checar se
+// migration 111 ja foi aplicada (exchange_seller_id + exchange_employee_id).
+// Padrao armadilha_schema_pre_migration: backend nao roda migrations
+// no boot, entao o codigo defensivo evita 500 se a coluna nao existe.
+// Cache expira em 60s pra auto-detectar quando a migration roda em prod.
+// ──────────────────────────────────────────────────────────────
+let _exchangeColsCheckedAt = 0;
+let _exchangeColsAvailable = null; // null=desconhecido, true|false=cache
+async function hasExchangeCols(client) {
+  const now = Date.now();
+  if (_exchangeColsAvailable !== null && (now - _exchangeColsCheckedAt) < 60000) {
+    return _exchangeColsAvailable;
+  }
+  try {
+    const r = await client.query(
+      `SELECT COUNT(*) AS n FROM information_schema.columns
+        WHERE table_name = 'sales'
+          AND column_name IN ('exchange_seller_id','exchange_employee_id')`
+    );
+    _exchangeColsAvailable = parseInt(r.rows[0]?.n || '0', 10) === 2;
+  } catch (e) {
+    console.warn('[PDV troca] hasExchangeCols probe falhou:', e.message);
+    _exchangeColsAvailable = false;
+  }
+  _exchangeColsCheckedAt = now;
+  return _exchangeColsAvailable;
 }
 
 // ── GET /companies/:id/pdv/scan/:code ────────────────────────
@@ -191,12 +230,6 @@ router.post('/sale', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // ──────────────────────────────────────────────────────────
-    // CRITICAL 11/05/2026: bloqueia se caixa fechado quando
-    // pdv_settings.caixa_enabled=true. Vendas retroativas
-    // (sale_date informado) NÃO sao bloqueadas — operador pode
-    // estar regularizando movimentação antiga fora do horario.
-    // ──────────────────────────────────────────────────────────
     if (!sale_date) {
       const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
       if (!caixaCheck.ok) {
@@ -669,6 +702,9 @@ router.delete('/sale/:saleId', async (req, res) => {
 });
 
 // ── POST /companies/:id/pdv/troca ────────────────────────────
+// CROSS-FILIAL (12/05/2026 — migration 111 — pedido Davi):
+// Veja header do arquivo pra desenho completo.
+// Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md
 router.post('/troca', async (req, res) => {
   const {
     original_sale_id,
@@ -689,33 +725,71 @@ router.post('/troca', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // ──────────────────────────────────────────────────────────
-    // CRITICAL 11/05/2026: bloqueia troca se caixa fechado quando
-    // pdv_settings.caixa_enabled=true. Troca também é "venda" do
-    // ponto de vista operacional (gera receita/movimento no caixa).
-    // ──────────────────────────────────────────────────────────
+    // Caixa físico (Filial 2) tem que estar aberto - operação acontece lá.
     const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
     if (!caixaCheck.ok) {
       await client.query('ROLLBACK');
       return res.status(caixaCheck.status).json(caixaCheck.body);
     }
 
+    // Lookup venda original via group_root bidirecional (padrão migration
+    // 102 + memória armadilha_group_shared_write_path). Aceita venda de
+    // qualquer filial cujo group_root coincida com o de req.params.id.
     const { rows: origRows } = await client.query(
-      `SELECT id, status, company_id FROM sales WHERE id=$1 AND company_id=$2`,
+      `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id
+         FROM sales s
+         JOIN companies c ON c.id = $2
+        WHERE s.id = $1
+          AND (
+            s.company_id = $2
+            OR EXISTS (
+              SELECT 1 FROM companies c2
+               WHERE c2.id = s.company_id
+                 AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)
+                   = COALESCE(NULLIF(c.billing_owner_company_id, c.id), c.id)
+            )
+          )`,
       [original_sale_id, req.params.id]
     );
     if (!origRows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Venda original nao encontrada' });
+      return res.status(404).json({ error: 'Venda original nao encontrada (mesma empresa ou grupo)' });
     }
     if (origRows[0].status === 'cancelled') {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Nao e possivel trocar itens de uma venda cancelada' });
     }
 
+    const originSale = origRows[0];
+    const isCrossFilial = originSale.company_id !== req.params.id;
+
+    // sale.company_id = origem; sale_payments.company_id = req.params.id (físico)
+    const saleCompanyId = originSale.company_id;
+
+    // seller_id: em cross-filial puxa do original (D2). Em same-filial preserva
+    // comportamento atual (req.user.id) pra não regredir ranking existente.
+    const trocaSellerId   = isCrossFilial ? originSale.seller_id : (req.user?.id || null);
+    const trocaEmployeeId = isCrossFilial ? originSale.employee_id : (employee_id || null);
+    // Vendedor/funcionário que efetivamente atendeu a troca presencialmente.
+    // NULL em same-filial; quem atendeu já vai em seller_id/employee_id.
+    const exchangeSellerId   = isCrossFilial ? (req.user?.id || null) : null;
+    const exchangeEmployeeId = isCrossFilial ? (employee_id || null) : null;
+
+    // Checa se migration 111 está aplicada — se não, e for cross-filial,
+    // bloqueia pra evitar perder o vendedor da Filial 2.
+    const exchColsOk = await hasExchangeCols(client);
+    if (isCrossFilial && !exchColsOk) {
+      await client.query('ROLLBACK');
+      console.error('[PDV troca] cross-filial bloqueado: migration 111 ainda nao aplicada');
+      return res.status(503).json({
+        error: 'Troca cross-filial indisponível: migration 111 ainda não aplicada no banco. Avise o admin.',
+        code: 'MIGRATION_111_PENDING',
+      });
+    }
+
     const { rows: origItems } = await client.query(
       `SELECT product_id, variant_id, quantity, unit_price, product_name_snapshot
-       FROM sale_items WHERE sale_id=$1`,
+         FROM sale_items WHERE sale_id=$1`,
       [original_sale_id]
     );
 
@@ -751,6 +825,7 @@ router.post('/troca', async (req, res) => {
     const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
     const saleTotal = parseFloat(newValue.toFixed(2));
 
+    // Devolução — entrada no estoque do dono fiscal (product.company_id).
     for (const ret of returned_items) {
       const qty = parseFloat(ret.quantity);
       const { rows: pInfo } = await client.query('SELECT company_id FROM products WHERE id=$1', [ret.product_id]);
@@ -768,11 +843,12 @@ router.post('/troca', async (req, res) => {
       }
       await client.query(
         `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
-         VALUES ($1,$2,'in',$3,$4,'troca','Troca — devolucao') ON CONFLICT DO NOTHING`,
+         VALUES ($1,$2,'in',$3,$4,'troca','Troca - devolucao') ON CONFLICT DO NOTHING`,
         [ret.product_id, stockCompanyId, qty, original_sale_id]
       );
     }
 
+    // Novos itens — saída do estoque do dono fiscal (lookup com is_group_shared).
     for (const item of new_items) {
       if (!item.product_id) continue;
       const qty = parseFloat(item.quantity);
@@ -783,9 +859,9 @@ router.post('/troca', async (req, res) => {
       if (item.variant_id) {
         const { rows: vr } = await client.query(
           `SELECT pv.stock_qty, pv.sku_suffix, p.company_id AS stock_company_id
-           FROM product_variants pv
-           JOIN products p ON p.id = pv.product_id
-           WHERE pv.id=$1 AND pv.product_id=$2`,
+             FROM product_variants pv
+             JOIN products p ON p.id = pv.product_id
+            WHERE pv.id=$1 AND pv.product_id=$2`,
           [item.variant_id, item.product_id]
         );
         if (vr.length) {
@@ -796,10 +872,10 @@ router.post('/troca', async (req, res) => {
       } else {
         const { rows: pr } = await client.query(
           `SELECT p.stock_qty, p.company_id AS stock_company_id
-           FROM products p
-           JOIN companies c ON c.id = $2
-           WHERE p.id = $1
-             AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
+             FROM products p
+             JOIN companies c ON c.id = $2
+            WHERE p.id = $1
+              AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
           [item.product_id, req.params.id]
         );
         if (pr.length) {
@@ -831,25 +907,53 @@ router.post('/troca', async (req, res) => {
       item._stock_company_id = trocaStockCompanyId;
     }
 
-    const { rows: trocaSales } = await client.query(
-      `INSERT INTO sales
-         (company_id, customer_id, seller_id, employee_id, seller_name,
-          total_amount, discount_amount, payment_method, notes,
-          status, type, exchange_of_sale_id)
-       VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'completed','troca',$9)
-       RETURNING *`,
-      [
-        req.params.id,
-        customer_id || null,
-        req.user?.id || null,
-        employee_id || null,
-        seller_name || null,
-        saleTotal,
-        payment_method || 'dinheiro',
-        `Troca referente a venda ${original_sale_id}`,
-        original_sale_id,
-      ]
-    );
+    // INSERT sale — company_id = origem (D1); exchange_* preenchido só em cross-filial.
+    // Defesa pre-migration (cross-filial bloqueado acima caso colunas faltem);
+    // em same-filial mantém fallback sem exchange_* pra não exigir migration imediata.
+    let trocaSales;
+    if (exchColsOk) {
+      const result = await client.query(
+        `INSERT INTO sales
+           (company_id, customer_id, seller_id, employee_id, seller_name,
+            exchange_seller_id, exchange_employee_id,
+            total_amount, discount_amount, payment_method, notes,
+            status, type, exchange_of_sale_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,'completed','troca',$11)
+         RETURNING *`,
+        [
+          saleCompanyId,
+          customer_id || null,
+          trocaSellerId,
+          trocaEmployeeId,
+          seller_name || null,
+          exchangeSellerId,
+          exchangeEmployeeId,
+          saleTotal,
+          payment_method || 'dinheiro',
+          `Troca referente a venda ${original_sale_id}`,
+          original_sale_id,
+        ]
+      );
+      trocaSales = result.rows;
+    } else {
+      // Migration 111 pendente — same-filial só. Já bloqueamos cross-filial acima.
+      const fallback = await client.query(
+        `INSERT INTO sales
+           (company_id, customer_id, seller_id, employee_id, seller_name,
+            total_amount, discount_amount, payment_method, notes,
+            status, type, exchange_of_sale_id)
+         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'completed','troca',$9)
+         RETURNING *`,
+        [
+          saleCompanyId, customer_id || null, trocaSellerId, trocaEmployeeId,
+          seller_name || null, saleTotal,
+          payment_method || 'dinheiro',
+          `Troca referente a venda ${original_sale_id}`,
+          original_sale_id,
+        ]
+      );
+      trocaSales = fallback.rows;
+    }
     const trocaSale = trocaSales[0];
 
     for (const item of new_items) {
@@ -862,10 +966,10 @@ router.post('/troca', async (req, res) => {
       if (item.product_id) {
         const { rows: pr } = await client.query(
           `SELECT p.name, p.cost_price
-           FROM products p
-           JOIN companies c ON c.id = $2
-           WHERE p.id = $1
-             AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
+             FROM products p
+             JOIN companies c ON c.id = $2
+            WHERE p.id = $1
+              AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
           [item.product_id, req.params.id]
         );
         if (pr.length) {
@@ -892,7 +996,7 @@ router.post('/troca', async (req, res) => {
         const mvCompanyId = item._stock_company_id || req.params.id;
         await client.query(
           `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
-           VALUES ($1,$2,'out',$3,$4,'troca','Troca — saida novo item') ON CONFLICT DO NOTHING`,
+           VALUES ($1,$2,'out',$3,$4,'troca','Troca - saida novo item') ON CONFLICT DO NOTHING`,
           [item.product_id, mvCompanyId, qty, trocaSale.id]
         );
       }
@@ -916,6 +1020,9 @@ router.post('/troca', async (req, res) => {
       );
     }
 
+    // sale_payments.company_id = req.params.id (Filial 2 física) — POR DESIGN (D3).
+    // Maquininha está cadastrada no CNPJ da Filial 2; TEF deposita lá.
+    // Em same-filial coincide com saleCompanyId (sem efeito colateral).
     let trocaSessaoId = null;
     try {
       const sRes = await client.query(
@@ -951,6 +1058,7 @@ router.post('/troca', async (req, res) => {
       .slice(0, 2)
       .join(', ') || 'itens';
 
+    // transactions.company_id = saleCompanyId (origem) — DRE consistente.
     if (returnedValue > 0) {
       await client.query(
         `INSERT INTO transactions
@@ -959,7 +1067,7 @@ router.post('/troca', async (req, res) => {
          VALUES ($1,'expense','confirmed',$2,$3,'Troca - Devolução',${SP_DATE_NOW},NOW(),$4,$5)
          ON CONFLICT (idempotency_key) DO NOTHING`,
         [
-          req.params.id,
+          saleCompanyId,
           parseFloat(returnedValue.toFixed(2)),
           `Troca PDV — devolução referente a venda ${original_sale_id}`,
           req.user?.id || null,
@@ -975,7 +1083,7 @@ router.post('/troca', async (req, res) => {
          VALUES ($1,'income','confirmed',$2,$3,'Troca - Venda',${SP_DATE_NOW},NOW(),$4,$5)
          ON CONFLICT (idempotency_key) DO NOTHING`,
         [
-          req.params.id,
+          saleCompanyId,
           parseFloat(newValue.toFixed(2)),
           `Troca PDV — nova venda (${trocaNamesSummary})`,
           req.user?.id || null,
@@ -984,6 +1092,8 @@ router.post('/troca', async (req, res) => {
       );
     }
 
+    // NFC-e cancel_reissue — funciona naturalmente em same-filial e cross-filial
+    // (mesmo CNPJ, pois sale.company_id agora coincide com o CNPJ da NFC-e original).
     let nfceFiscalResult = { strategy: 'none' };
     const nfceStrategy = (req.body.nfce_strategy || 'none').toLowerCase();
 
@@ -1088,6 +1198,9 @@ router.post('/troca', async (req, res) => {
       net_amount: netAmount,
       returned_value: parseFloat(returnedValue.toFixed(2)),
       new_value: parseFloat(newValue.toFixed(2)),
+      cross_filial: isCrossFilial,
+      origin_company_id: saleCompanyId,
+      physical_company_id: req.params.id,
       nfce: nfceFiscalResult,
       receipt_url: `/companies/${req.params.id}/print/receipt/${trocaSale.id}`,
     });
@@ -1096,6 +1209,96 @@ router.post('/troca', async (req, res) => {
     console.error('[PDV] Erro ao registrar troca:', e.message);
     res.status(500).json({ error: 'Erro ao registrar troca' });
   } finally { client.release(); }
+});
+
+// ── GET /companies/:id/pdv/sales-for-troca ─────────────────────
+// 12/05/2026 (troca cross-filial) — lista vendas do mesmo group_root
+// elegíveis pra serem usadas como venda original numa troca. UI do
+// PDV chama isso quando o operador abre o modal de troca e busca
+// por CPF/nome do cliente ou produto.
+//
+// Query:
+//   q           — texto livre (customer_name, cpf_cnpj, seller_name, item snapshot)
+//   customer_id — filtra por cliente específico
+//   days        — janela em dias (default 90)
+//   limit       — default 50
+//
+// Resposta inclui flag is_cross_filial pra UI exibir badge da filial.
+// Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md
+// ──────────────────────────────────────────────────────────────
+router.get('/sales-for-troca', async (req, res) => {
+  const { q, customer_id, days = 90, limit = 50 } = req.query;
+  const winDays = Math.max(1, Math.min(parseInt(days, 10) || 90, 365));
+  const lim = Math.max(1, Math.min(parseInt(limit, 10) || 50, 200));
+
+  const cond = [
+    "s.status != 'cancelled'",
+    "COALESCE(s.type,'sale') = 'sale'", // só vendas normais — não listar trocas anteriores como base
+    `s.created_at >= NOW() - INTERVAL '${winDays} days'`,
+    `(
+       s.company_id = $1
+       OR EXISTS (
+         SELECT 1 FROM companies c2
+          WHERE c2.id = s.company_id
+            AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)
+              = COALESCE(NULLIF((SELECT billing_owner_company_id FROM companies WHERE id=$1), $1), $1)
+       )
+     )`,
+  ];
+  const vals = [req.params.id];
+  let i = 2;
+
+  if (customer_id) {
+    cond.push(`s.customer_id = $${i++}`);
+    vals.push(customer_id);
+  }
+
+  if (q && String(q).trim()) {
+    const like = `%${String(q).trim()}%`;
+    cond.push(`(
+      LOWER(COALESCE(cust.name,'')) LIKE LOWER($${i})
+      OR LOWER(COALESCE(cust.cpf_cnpj,'')) LIKE LOWER($${i})
+      OR LOWER(COALESCE(s.seller_name,'')) LIKE LOWER($${i})
+      OR EXISTS (
+        SELECT 1 FROM sale_items si2
+         WHERE si2.sale_id = s.id
+           AND LOWER(COALESCE(si2.product_name_snapshot,'')) LIKE LOWER($${i})
+      )
+    )`);
+    vals.push(like);
+    i++;
+  }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT s.id, s.total_amount, s.payment_method, s.status, s.created_at,
+              s.company_id, comp.name AS company_name,
+              s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
+              s.seller_id, s.seller_name,
+              (s.company_id != $1) AS is_cross_filial,
+              COUNT(si.id) AS item_count,
+              COALESCE(json_agg(json_build_object(
+                'product_id', si.product_id,
+                'variant_id', si.variant_id,
+                'product_name_snapshot', si.product_name_snapshot,
+                'quantity', si.quantity,
+                'unit_price', si.unit_price
+              )) FILTER (WHERE si.id IS NOT NULL), '[]'::json) AS items
+         FROM sales s
+         LEFT JOIN companies comp ON comp.id = s.company_id
+         LEFT JOIN customers cust ON cust.id = s.customer_id
+         LEFT JOIN sale_items si  ON si.sale_id = s.id
+        WHERE ${cond.join(' AND ')}
+        GROUP BY s.id, comp.name, cust.name, cust.cpf_cnpj
+        ORDER BY s.created_at DESC
+        LIMIT ${lim}`,
+      vals
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error('[PDV] Erro ao buscar vendas pra troca:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar vendas elegiveis pra troca' });
+  }
 });
 
 module.exports = router;
