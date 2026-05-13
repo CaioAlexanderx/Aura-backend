@@ -331,12 +331,21 @@ router.post('/sale', async (req, res) => {
     const creditAmount = (rawCreditAmount > 0 && customer_id) ? rawCreditAmount : 0;
     const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
 
+    // TIMEZONE FIX 13/05/2026: venda retroativa (sale_date presente) seta
+    // created_at para meia-noite SP do dia informado (sale_date::date + 3h UTC).
+    // Sem sale_date o DB usa NOW() normalmente (venda ao vivo).
     const { rows: sales } = await client.query(
-      `INSERT INTO sales
-         (company_id, customer_id, seller_id, employee_id, seller_name, total_amount, discount_amount,
-          payment_method, notes, coupon_id, coupon_code, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'completed')
-       RETURNING *`,
+      sale_date
+        ? `INSERT INTO sales
+             (company_id, customer_id, seller_id, employee_id, seller_name, total_amount, discount_amount,
+              payment_method, notes, coupon_id, coupon_code, status, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'completed', $12::date + INTERVAL '3 hours')
+           RETURNING *`
+        : `INSERT INTO sales
+             (company_id, customer_id, seller_id, employee_id, seller_name, total_amount, discount_amount,
+              payment_method, notes, coupon_id, coupon_code, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'completed')
+           RETURNING *`,
       [
         req.params.id, customer_id || null,
         seller_id || req.user?.id || null,
@@ -345,6 +354,7 @@ router.post('/sale', async (req, res) => {
         totalAmount, discountAmt,
         payment_method || (payments?.[0]?.method) || 'dinheiro',
         notes || null, couponId, couponCodeUsed,
+        ...(sale_date ? [sale_date] : []),
       ]
     );
     const sale = sales[0];

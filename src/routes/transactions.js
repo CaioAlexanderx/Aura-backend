@@ -17,6 +17,12 @@
 // FIX DESPESAS 27/04 (mantido): filtro de data padronizado entre listing
 // e summary. due_date eh date (nao timestamp), entao COALESCE com
 // (created_at AT TIME ZONE SP)::date retorna sempre date.
+//
+// TIMEZONE FIX 13/05/2026: PATCH /:txId agora sincroniza due_date ->
+// sales.created_at quando a transacao esta vinculada a uma venda PDV
+// (idempotency_key = 'pdv-sale-*'). Permite corrigir a data de uma
+// venda pelo modal "Editar lancamento" sem precisar de endpoint separado.
+// Formula: due_date::date + INTERVAL '3 hours' = meia-noite SP (UTC-3).
 // ============================================================
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
@@ -239,6 +245,14 @@ router.patch('/:txId', async function(req, res) {
         saleUpdates.push('seller_id = $' + (saleIdx++)); saleValues.push(req.body.employee_id);
         saleUpdates.push('employee_id = $' + (saleIdx++)); saleValues.push(req.body.employee_id);
         saleUpdates.push('seller_name = $' + (saleIdx++)); saleValues.push(req.body.employee_name);
+      }
+      // TIMEZONE FIX 13/05/2026: sincroniza due_date -> sales.created_at (meia-noite SP).
+      // Permite corrigir a data de uma venda PDV pelo modal "Editar lancamento".
+      // date::date + INTERVAL '3 hours' = 03:00 UTC = meia-noite America/Sao_Paulo (UTC-3 fixo).
+      if (req.body.due_date !== undefined && req.body.due_date) {
+        saleUpdates.push("created_at = ($" + saleIdx + "::date + INTERVAL '3 hours')");
+        saleValues.push(req.body.due_date);
+        saleIdx++;
       }
       if (saleUpdates.length > 0) {
         saleUpdates.push('updated_at = NOW()'); saleValues.push(saleId, cid);
