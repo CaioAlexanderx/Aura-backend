@@ -1,7 +1,9 @@
 // ============================================================
 // QA — Testes: Customers CRUD + Plan Limits
 // Cobertura: P1 (limites por plano), editar cliente (P0-2)
-// NOTA: /customers requer requirePlan('negocio','expansao')
+// NOTA: plano essencial tem acesso a clientes (limite 1000).
+// requirePlan foi removido de customers.js em 13/05/2026 —
+// o gate é só no POST via getPlanLimit.
 //
 // MULTICNPJ Onda 2.3 (03/05/2026): customers.js chama
 // getOwnerScopedCompanyIds() antes de cada handler — isso consume
@@ -26,22 +28,22 @@ const authEssencial = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'clien
 const authNegocio   = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', plan:'negocio'   }, SECRET, { expiresIn:'1h' })}` };
 const authExpansao  = { Authorization: `Bearer ${jwt.sign({ id:'u1', role:'client', plan:'expansao'  }, SECRET, { expiresIn:'1h' })}` };
 
-// -- Plano essencial bloqueado pelo requirePlan ---------------
-// Nao chega em getOwnerScopedCompanyIds (bloqueado antes pelo requirePlan)
-describe('GET /companies/:id/customers -- plano essencial bloqueado', () => {
-  test('403 -- plano essencial nao tem acesso a clientes (requer negocio+)', async () => {
+// -- GET /customers -- plan limits ----------------------------
+describe('GET /companies/:id/customers -- plan limits', () => {
+  test('plan essencial: limit = 1000', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // requireCompanyAccess
+    db.query.mockResolvedValueOnce({ rows: [{ id: cid }] });        // getOwnerScopedCompanyIds
+    db.query.mockResolvedValueOnce({ rows: [{ total: '10' }] });    // COUNT
+    db.query.mockResolvedValueOnce({ rows: [] });                    // data list
 
     const res = await request(app)
       .get(`/api/v1/companies/${cid}/customers`)
       .set(authEssencial);
 
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    expect(res.body.plan_limit).toBe(1000);
   });
-});
 
-// -- GET /customers -- plan limits ----------------------------
-describe('GET /companies/:id/customers -- plan limits', () => {
   test('plan negocio: limit = 5000', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // requireCompanyAccess
     db.query.mockResolvedValueOnce({ rows: [{ id: cid }] });        // getOwnerScopedCompanyIds
@@ -100,6 +102,21 @@ describe('POST /companies/:id/customers -- plan limit enforcement', () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toMatch(/Limite/);
     expect(res.body.limit).toBe(5000);
+  });
+
+  test('403 -- bloqueia criacao no limite do plano (essencial=1000)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // requireCompanyAccess
+    db.query.mockResolvedValueOnce({ rows: [{ id: cid }] });        // getOwnerScopedCompanyIds
+    db.query.mockResolvedValueOnce({ rows: [{ total: '1000' }] });  // COUNT
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/customers`)
+      .set(authEssencial)
+      .send({ name: 'Cliente Extra' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/Limite/);
+    expect(res.body.limit).toBe(1000);
   });
 
   test('201 -- expansao cria cliente com 9999 existentes', async () => {
