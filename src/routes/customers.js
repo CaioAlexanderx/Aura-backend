@@ -14,23 +14,17 @@
 // com a view customer_credit_balances. Crediario e por (customer_id,
 // company_id), entao cada cliente exibe o saldo da sua propria loja.
 //
-// 12/05/2026: gate de plano via requirePlan('negocio','expansao',
-// 'personalizado'). Modulo "clientes" e Negocio+ — plan essencial
-// NAO acessa o CRUD (retorna 403 antes de qualquer query). Test
-// tests/integration/customers.test.js exigia esse comportamento.
+// 13/05/2026: removido gate global requirePlan('negocio'+) que
+// bloqueava TODAS as rotas (inclusive GET) para o plano Essencial.
+// O plano Essencial tem limite de 1000 clientes, ja aplicado no
+// POST via getPlanLimit. GET de listagem nunca deve ser bloqueado
+// (armadilha_plan_limit_listagem). requirePlan era overly broad.
 //
 // Justificativa em src/utils/ownerScope.js.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
-const { requirePlan } = require('../middleware/auth');
 const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
-
-// 12/05/2026: gate plano negocio+ aplicado a TODAS as rotas de customers.
-// Roda apos requireCompanyAccess (montado em nivel mais alto). Plano
-// essencial recebe 403 antes de hit no banco — alinha com o modulo
-// "clientes" no MODULE_PLAN_MAP (negocio+).
-router.use(requirePlan('negocio', 'expansao', 'personalizado'));
 
 function getPlanLimit(plan) {
   switch ((plan || '').toLowerCase()) {
