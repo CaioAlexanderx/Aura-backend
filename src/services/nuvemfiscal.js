@@ -15,6 +15,20 @@
 // - Workaround PIX: tPag=17 mapeia automaticamente para tPag=99 + xPag="PIX"
 //   pra contornar Rejeição 391 disparada erroneamente pela SEFAZ-SP em
 //   produção (problema confirmado via diagnóstico, NF-e válido pelo schema).
+//
+// 12/05/2026 (Fase C — NF-e/55 devolução — DRAFT, aguarda contador):
+// - buildIde aceita tpNF (0=entrada / 1=saída) e finNFe (1=normal /
+//   2=complementar / 3=ajuste / 4=devolução). Default 1/1 preserva
+//   comportamento atual em qualquer chamada existente.
+// - emitNfe propaga esses params + monta `NFref: [{ refNFe }]` quando
+//   nfeData.refNFe é fornecido. Necessário pra devolução referenciar
+//   a NFC-e/55 original (chave 44 dígitos).
+// - Nova função `emitNfeDevolucao(company, params)`: helper específico
+//   pra NF-e/55 de devolução de venda (tpNF=0 + finNFe=4 + refNFe +
+//   CFOP default 1.202). Usado quando NFC-e original passou da janela
+//   de 24h de cancelamento (cancel_reissue rejeita).
+// - NÃO ligado em pdv.js — precisa alinhamento com contador do cliente
+//   (CFOP, natOp, ICMS Simples) + teste em homologação SEFAZ.
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -112,17 +126,8 @@ function validateTpag(method) {
   return VALID_TPAG.has(t) ? t : '99';
 }
 
-// tPag que exigem o bloco `card` (NfeSefazCard) em TDetPag.
-// SEFAZ NF-e 4.00: tPag=03 (crédito) e 04 (débito) → card obrigatório,
-// senão Rejeição 391. tpIntegra=2 (TEF não-integrado) torna CNPJ/tBand/cAut
-// opcionais. Ver: nuvem-fiscal/nuvemfiscal-sdk-php NfeSefazDetPag.php
 const CARD_TPAG = new Set(['03', '04']);
 
-// xPag: descrição amigável de cada tPag (max 60 chars no schema NF-e 4.00).
-// Schema W21-A só PERMITE xPag quando tPag=99 (Outros). Pra qualquer outro
-// tPag, enviar xPag dispara cStat=442 ("Descrição do pagamento não
-// permitida"). Por isso só usamos abaixo quando tPag === '99'.
-// Mantemos o mapa completo pra eventuais usos em logs/UI.
 const TPAG_DESCRIPTIONS = {
   '01': 'Dinheiro',
   '02': 'Cheque',
@@ -262,17 +267,6 @@ function buildICMSTot(det) {
   };
 }
 
-// buildPag: aceita 2 shapes pra retrocompat.
-//   - Array (novo, multi-pagamento): [{ method, value, change?, indPag? }, ...]
-//   - Objeto único (legado): { method, change } — vPag = totalFallback
-// Em ambos, soma de change vira vTroco.
-// Para tPag 03 (crédito) e 04 (débito), inclui card.tpIntegra=2 (não-integrado)
-// conforme exigência SEFAZ NF-e 4.00 — evita Rejeição 391.
-// IMPORTANTE: a propriedade JSON é `card`, NÃO `cartao` (confirmado em
-// NfeSefazDetPag.php do SDK oficial).
-// xPag: incluído apenas pra tPag=99 (regra schema W21-A; outros tPag → 442).
-// Workaround PIX: tPag=17 mapeia pra tPag=99 + xPag="PIX" pra contornar
-// Rejeição 391 que SEFAZ-SP dispara erroneamente pra PIX em produção.
 function buildPag(payments, totalFallback) {
   const round = (n) => Math.round(n * 100) / 100;
   let list;
@@ -292,14 +286,6 @@ function buildPag(payments, totalFallback) {
   const detPag = list.map(p => {
     let tPag = validateTpag(p.method);
 
-    // Workaround Davi (mai/2026): SEFAZ-SP rejeita 391 com tPag=17 (PIX) em
-    // produção, mesmo com body schema-válido. Confirmado via Railway log +
-    // Nuvem Fiscal diagnóstico (referencias nfce-c1dba40f / nfce-c6d7ea35).
-    // Concorrentes do mercado declaram PIX como tPag=01 (Dinheiro) ou tPag=99.
-    // Optamos por 99+xPag="PIX" pra preservar a info do método real no XML.
-    // Sem impacto fiscal pra Simples Nacional (DAS é sobre faturamento total).
-    // Quando SEFAZ-SP/Nuvem Fiscal corrigirem o 391 spurious, basta remover
-    // este bloco — o schema oficial aceita tPag=17 nativo.
     let xPagOverride = null;
     if (tPag === '17') {
       tPag = '99';
@@ -311,13 +297,9 @@ function buildPag(payments, totalFallback) {
       tPag,
       vPag: round(Number(p.value || 0)),
     };
-    // xPag: schema NF-e 4.00 (regra W21-A) só permite quando tPag=99.
-    // Outros tPag rejeitam com cStat=442 ("Descrição do pagamento não permitida").
     if (tPag === '99') {
       entry.xPag = xPagOverride || TPAG_DESCRIPTIONS['99'];
     }
-    // SEFAZ exige bloco card (NfeSefazCard) para crédito (03) e débito (04).
-    // tpIntegra=2: TEF não-integrado — CNPJ/tBand/cAut são opcionais.
     if (CARD_TPAG.has(tPag)) {
       entry.card = { tpIntegra: 2 };
     }
@@ -328,7 +310,11 @@ function buildPag(payments, totalFallback) {
   return { detPag, vTroco: round(vTroco) };
 }
 
-function buildIde({ company, mod, serie, nNF, tpAmb, tpImp, indFinal, indPres, idDest, natOp, verProc }) {
+// buildIde — 12/05/2026: aceita tpNF e finNFe opcionais.
+//   tpNF:  0=entrada, 1=saída (default 1 = saída, preserva comportamento)
+//   finNFe: 1=normal, 2=complementar, 3=ajuste, 4=devolução (default 1)
+// Necessário pra suportar NF-e/55 de devolução (Fase C troca >24h).
+function buildIde({ company, mod, serie, nNF, tpAmb, tpImp, indFinal, indPres, idDest, natOp, verProc, tpNF, finNFe }) {
   const dh = isoBR();
   const cUF = ufToCodigo(company.address_state);
   const ano2 = dh.slice(2, 4);
@@ -344,21 +330,19 @@ function buildIde({ company, mod, serie, nNF, tpAmb, tpImp, indFinal, indPres, i
     serie: Number(serie),
     nNF: Number(nNF),
     dhEmi: dh,
-    tpNF: 1,
+    tpNF: tpNF === undefined ? 1 : Number(tpNF),
     idDest: idDest || 1,
     cMunFG: company.ibge_code || '',
     tpImp, tpEmis,
     cDV: Number(cDV),
     tpAmb,
-    finNFe: 1,
+    finNFe: finNFe || 1,
     indFinal, indPres,
     procEmi: 0,
     verProc: verProc || 'Aura/1.0',
   };
 }
 
-// Helper: resolve o input de pagamento(s) a partir de nfceData/nfeData.
-// Prefere nfeData.payments (array novo) → objeto legado { payment_method, payment_change }.
 function resolvePagInput(data) {
   if (Array.isArray(data.payments) && data.payments.length) return data.payments;
   return {
@@ -406,10 +390,6 @@ async function emitNfce(company, nfceData) {
 
   if (!body.infNFe.dest) delete body.infNFe.dest;
 
-  // Diagnóstico: log do bloco de pagamento que está saindo daqui pra
-  // Nuvem Fiscal. Ajuda a investigar Rejeição 391 (PIX) — caso ainda
-  // ocorra após o fix card/cartao, vamos saber se o tPag está chegando
-  // como esperado (17 pra PIX) ou se há corrupção em algum lugar.
   console.log('[nuvemfiscal] emitNfce body.infNFe.pag:', JSON.stringify(body.infNFe.pag, null, 2));
 
   return nuvemRequest('POST', '/nfce', body);
@@ -422,6 +402,9 @@ async function cancelNfce(nfceId, justificativa) {
   });
 }
 
+// emitNfe — 12/05/2026: propaga tpNF / finNFe pra buildIde e monta NFref
+// quando nfeData.refNFe é fornecido. Default segue saída + normal pra
+// retrocompat com chamadas existentes.
 async function emitNfe(company, nfeData) {
   const tpAmb = NUVEM_URL.includes('sandbox') ? 2 : 1;
   const crt   = company.tax_regime === 'mei' ? 4 :
@@ -463,6 +446,9 @@ async function emitNfe(company, nfeData) {
         serie: nfeData.serie || 1,
         nNF: nfeData.numero || 1,
         tpAmb, tpImp: 1,
+        // 12/05/2026 (Fase C): tpNF + finNFe propagados.
+        tpNF: nfeData.tpNF,
+        finNFe: nfeData.finNFe,
         indFinal: nfeData.indFinal === undefined ? 1 : nfeData.indFinal,
         indPres: nfeData.indPres === undefined ? 1 : nfeData.indPres,
         idDest: nfeData.idDest || 1,
@@ -477,6 +463,19 @@ async function emitNfe(company, nfeData) {
     },
   };
 
+  // 12/05/2026 (Fase C): refêrencia a documento prévio (devolução requer).
+  // refNFe = chave 44 dígitos da NFC-e/NF-e original. Schema NF-e 4.00
+  // aceita até 500 refs em `NFref[]`, mas pra devolução de venda
+  // varejista usamos uma só (a NFC-e do cliente).
+  if (nfeData.refNFe) {
+    const cleanRef = String(nfeData.refNFe).replace(/\D/g, '');
+    if (cleanRef.length === 44) {
+      body.infNFe.NFref = [{ refNFe: cleanRef }];
+    } else {
+      console.warn('[nuvemfiscal] emitNfe: refNFe ignorada — esperado 44 dígitos, recebido', cleanRef.length);
+    }
+  }
+
   return nuvemRequest('POST', '/nfe', body);
 }
 
@@ -484,6 +483,94 @@ async function queryNfe(nfeId)              { return nuvemRequest('GET',  `/nfe/
 async function cancelNfe(nfeId, justificativa) {
   return nuvemRequest('POST', `/nfe/${nfeId}/cancelamento`, {
     justificativa: justificativa || 'Cancelamento solicitado pelo emissor',
+  });
+}
+
+// ============================================================
+// emitNfeDevolucao — 12/05/2026 (Fase C, DRAFT — aguarda contador)
+//
+// Orquestra NF-e modelo 55 de devolução de venda. Usado quando NFC-e
+// original passou da janela de 24h de cancelamento (cancel_reissue
+// rejeitado pela SEFAZ). A loja emite NF-e/55 de ENTRADA referenciando
+// a NFC-e original, registrando fiscalmente o retorno da mercadoria.
+//
+// Defaults (PENDENTE VALIDAÇÃO CONTADOR):
+//   tpNF=0 (entrada — loja recebe de volta)
+//   finNFe=4 (devolução)
+//   CFOP=1.202 (devolução de venda de mercadoria recebida de terceiros,
+//               mesma UF, varejo). Caller pode override via item.cfop.
+//   natureza_operacao="Devolução de mercadoria"
+//
+// O caller é responsável por:
+//   1. Validar que a chave da NFC-e original é válida (44 dígitos,
+//      mesmo CNPJ que emite a devolução)
+//   2. Capturar dados do cliente (CPF + endereço, exigidos pra NF-e/55)
+//   3. Inserir registro em `nfce_emissions` com tipo='nfe',
+//      finalidade=4, ref_chave_nfe=originalChave
+//   4. Sequenciamento de numero da NF-e/55 (série/numero) — pode
+//      compartilhar série com NFC-e ou usar série separada (preferível)
+//
+// Bloqueado pra produção até:
+//   - Contador do cliente confirmar CFOP e natOp pra cenário Davi
+//   - Teste end-to-end em ambiente homologação SEFAZ
+//   - Decisão sobre tratamento ICMS Simples (CSOSN apropriado vs CST)
+// ============================================================
+async function emitNfeDevolucao(company, params) {
+  const {
+    originalChave,        // string 44 dígitos — chave da NFC-e original
+    items,                // array de items pra devolução
+    customer,             // { cpf, cnpj, name, email, address, ... }
+    serie,
+    numero,
+    reference,
+    natureza_operacao,
+    cfop,                 // override do CFOP default (1.202)
+  } = params || {};
+
+  const cleanChave = String(originalChave || '').replace(/\D/g, '');
+  if (cleanChave.length !== 44) {
+    throw new Error('emitNfeDevolucao: originalChave deve ter 44 dígitos (chave de acesso NFC-e/NF-e)');
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error('emitNfeDevolucao: items obrigatórios');
+  }
+  if (!customer || !customer.cpf && !customer.cnpj) {
+    throw new Error('emitNfeDevolucao: customer.cpf ou customer.cnpj obrigatório');
+  }
+
+  // Default CFOP pra devolução de venda mesma UF varejo. CONFIRMAR CONTADOR.
+  const cfopDefault = cfop || '1202';
+  const enrichedItems = items.map(item => ({
+    ...item,
+    cfop: item.cfop || cfopDefault,
+  }));
+
+  return emitNfe(company, {
+    reference: reference || `nfe-devolucao-${Date.now()}`,
+    serie: serie || 1,
+    numero: numero || 1,
+    natureza_operacao: natureza_operacao || 'Devolução de mercadoria',
+    tpNF: 0,            // entrada
+    finNFe: 4,          // devolução
+    refNFe: cleanChave, // referencia a NFC-e original
+    indFinal: 1,
+    indPres: 1,
+    idDest: 1,          // operação interna (mesma UF). Override se cliente em outro estado.
+    items: enrichedItems,
+    recipient_cpf: customer.cpf,
+    recipient_cnpj: customer.cnpj,
+    recipient_name: customer.name,
+    recipient_email: customer.email,
+    recipient_address: customer.address,
+    recipient_number: customer.number,
+    recipient_neighborhood: customer.neighborhood,
+    recipient_ibge: customer.ibge,
+    recipient_city: customer.city,
+    recipient_state: customer.state,
+    recipient_zip: customer.zip,
+    observacoes:
+      'Devolução de mercadoria referente à NFC-e chave ' + cleanChave +
+      (params.notes ? '. ' + params.notes : ''),
   });
 }
 
@@ -495,7 +582,7 @@ async function emitNfse(company, nfseData) {
     tomador: {
       cpf_cnpj: (nfseData.recipient_cnpj || nfseData.recipient_cpf || '').replace(/\D/g, '') || undefined,
       nome_razao_social: nfseData.recipient_name || 'Consumidor',
-      email: nfeData.recipient_email || undefined,
+      email: nfseData.recipient_email || undefined,
     },
     servico: {
       discriminacao: nfseData.description || 'Servico prestado',
@@ -521,5 +608,7 @@ module.exports = {
   registerCompany, uploadCertificate,
   emitNfce, queryNfce, cancelNfce,
   emitNfe,  queryNfe,  cancelNfe,
+  // 12/05/2026 (Fase C — DRAFT): helper pra NF-e/55 devolução.
+  emitNfeDevolucao,
   emitNfse, queryNfse, cancelNfse,
 };
