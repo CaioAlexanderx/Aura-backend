@@ -78,6 +78,17 @@ router.use('/support', require('./support'));
 // CRM avancado (ranking/retencao/birthdays/crediario) continua Negocio+.
 router.use('/customers', require('./customers'));
 
+// 12/05/2026 -- PLAN-02: Employees CRUD basico movido pro Essencial.
+// Decisao de produto: cadastro de "vendedor" (nome+cargo) e commodity
+// pra atribuir vendas no PDV. CPF, admissao, salario, PIS sao opcionais
+// no schema -- so exigidos pela UI da Folha (Negocio+). Limite por plano:
+//   essencial = 3 funcionarios ativos
+//   negocio   = 50
+//   expansao  = ilimitado
+// Folha de pagamento real (calculo, holerite, comissao, ranking, eSocial)
+// continua Negocio+ via mounts especificos abaixo.
+router.use('/employees', require('./employees'));
+
 // -- NEGOCIO+ --
 
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
@@ -88,7 +99,9 @@ router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require
 // Financeiro/contas a receber. Migration 099.
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
 router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'));
-router.use('/employees', requirePlan('negocio', 'expansao'), require('./employees'));
+// Folha real: payslip por email, ranking de vendas, comissao -- Negocio+.
+// CRUD de employees (acima) ja e Essencial; estes endpoints sao o
+// 'processamento financeiro recorrente' que justifica o upgrade.
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
 router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
