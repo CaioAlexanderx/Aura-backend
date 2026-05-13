@@ -42,10 +42,23 @@
 //   GET /sales-for-troca: novo endpoint pra UI listar vendas do
 //   group_root elegiveis pra troca.
 //   Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md
+// FEAT 12/05/2026 (FASE C — NF-e modelo 55 devolucao — contador OK):
+//   POST /pdv/troca aceita nfce_strategy='devolucao_55' quando NFC-e
+//   original tem >24h (fora da janela de cancel_reissue). Emite NF-e/55
+//   de entrada (tpNF=0, finNFe=4) referenciando a NFC-e original via
+//   refNFe. CFOP=1.202 e CSOSN=102 (confirmado contador Davi 12/05/2026
+//   pra Simples Nacional, varejo, mesma UF SP).
+//   Body extra obrigatorio: customer_address { street, number?,
+//   neighborhood, ibge, city, state, zip }. customers table nao
+//   armazena endereco — frontend coleta no momento da troca.
+//   NAO cancela a NFC-e original (impossivel >24h) — registra a
+//   devolucao via refNFe na NF-e/55.
+//   Logica completa: src/services/trocaDevolucao55.js
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const nuvemfiscal = require('../services/nuvemfiscal');
+const trocaDevolucao55 = require('../services/trocaDevolucao55');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 
@@ -106,7 +119,7 @@ async function assertCaixaOpenOrAllowed(client, companyId) {
 // Cache expira em 60s pra auto-detectar quando a migration roda em prod.
 // ──────────────────────────────────────────────────────────────
 let _exchangeColsCheckedAt = 0;
-let _exchangeColsAvailable = null; // null=desconhecido, true|false=cache
+let _exchangeColsAvailable = null;
 async function hasExchangeCols(client) {
   const now = Date.now();
   if (_exchangeColsAvailable !== null && (now - _exchangeColsCheckedAt) < 60000) {
@@ -714,6 +727,9 @@ router.post('/troca', async (req, res) => {
     customer_id,
     employee_id,
     seller_name,
+    // 12/05/2026 (Fase C): endereco do cliente pra NF-e/55 devolucao.
+    // Backend obriga quando nfce_strategy='devolucao_55'.
+    customer_address,
   } = req.body;
 
   if (!original_sale_id)
@@ -733,8 +749,7 @@ router.post('/troca', async (req, res) => {
     }
 
     // Lookup venda original via group_root bidirecional (padrão migration
-    // 102 + memória armadilha_group_shared_write_path). Aceita venda de
-    // qualquer filial cujo group_root coincida com o de req.params.id.
+    // 102 + memória armadilha_group_shared_write_path).
     const { rows: origRows } = await client.query(
       `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id
          FROM sales s
@@ -762,21 +777,13 @@ router.post('/troca', async (req, res) => {
 
     const originSale = origRows[0];
     const isCrossFilial = originSale.company_id !== req.params.id;
-
-    // sale.company_id = origem; sale_payments.company_id = req.params.id (físico)
     const saleCompanyId = originSale.company_id;
 
-    // seller_id: em cross-filial puxa do original (D2). Em same-filial preserva
-    // comportamento atual (req.user.id) pra não regredir ranking existente.
     const trocaSellerId   = isCrossFilial ? originSale.seller_id : (req.user?.id || null);
     const trocaEmployeeId = isCrossFilial ? originSale.employee_id : (employee_id || null);
-    // Vendedor/funcionário que efetivamente atendeu a troca presencialmente.
-    // NULL em same-filial; quem atendeu já vai em seller_id/employee_id.
     const exchangeSellerId   = isCrossFilial ? (req.user?.id || null) : null;
     const exchangeEmployeeId = isCrossFilial ? (employee_id || null) : null;
 
-    // Checa se migration 111 está aplicada — se não, e for cross-filial,
-    // bloqueia pra evitar perder o vendedor da Filial 2.
     const exchColsOk = await hasExchangeCols(client);
     if (isCrossFilial && !exchColsOk) {
       await client.query('ROLLBACK');
@@ -825,7 +832,6 @@ router.post('/troca', async (req, res) => {
     const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
     const saleTotal = parseFloat(newValue.toFixed(2));
 
-    // Devolução — entrada no estoque do dono fiscal (product.company_id).
     for (const ret of returned_items) {
       const qty = parseFloat(ret.quantity);
       const { rows: pInfo } = await client.query('SELECT company_id FROM products WHERE id=$1', [ret.product_id]);
@@ -848,7 +854,6 @@ router.post('/troca', async (req, res) => {
       );
     }
 
-    // Novos itens — saída do estoque do dono fiscal (lookup com is_group_shared).
     for (const item of new_items) {
       if (!item.product_id) continue;
       const qty = parseFloat(item.quantity);
@@ -907,9 +912,6 @@ router.post('/troca', async (req, res) => {
       item._stock_company_id = trocaStockCompanyId;
     }
 
-    // INSERT sale — company_id = origem (D1); exchange_* preenchido só em cross-filial.
-    // Defesa pre-migration (cross-filial bloqueado acima caso colunas faltem);
-    // em same-filial mantém fallback sem exchange_* pra não exigir migration imediata.
     let trocaSales;
     if (exchColsOk) {
       const result = await client.query(
@@ -936,7 +938,6 @@ router.post('/troca', async (req, res) => {
       );
       trocaSales = result.rows;
     } else {
-      // Migration 111 pendente — same-filial só. Já bloqueamos cross-filial acima.
       const fallback = await client.query(
         `INSERT INTO sales
            (company_id, customer_id, seller_id, employee_id, seller_name,
@@ -1020,9 +1021,6 @@ router.post('/troca', async (req, res) => {
       );
     }
 
-    // sale_payments.company_id = req.params.id (Filial 2 física) — POR DESIGN (D3).
-    // Maquininha está cadastrada no CNPJ da Filial 2; TEF deposita lá.
-    // Em same-filial coincide com saleCompanyId (sem efeito colateral).
     let trocaSessaoId = null;
     try {
       const sRes = await client.query(
@@ -1058,7 +1056,6 @@ router.post('/troca', async (req, res) => {
       .slice(0, 2)
       .join(', ') || 'itens';
 
-    // transactions.company_id = saleCompanyId (origem) — DRE consistente.
     if (returnedValue > 0) {
       await client.query(
         `INSERT INTO transactions
@@ -1092,8 +1089,6 @@ router.post('/troca', async (req, res) => {
       );
     }
 
-    // NFC-e cancel_reissue — funciona naturalmente em same-filial e cross-filial
-    // (mesmo CNPJ, pois sale.company_id agora coincide com o CNPJ da NFC-e original).
     let nfceFiscalResult = { strategy: 'none' };
     const nfceStrategy = (req.body.nfce_strategy || 'none').toLowerCase();
 
@@ -1169,6 +1164,28 @@ router.post('/troca', async (req, res) => {
         original_numero: orig.numero,
         original_age_hours: Math.round(ageHours * 10) / 10,
       };
+    } else if (nfceStrategy === 'devolucao_55') {
+      // Fase C (12/05/2026, contador Davi OK): NF-e modelo 55 de
+      // devolução pra trocas com NFC-e original >24h.
+      // Logica completa esta em src/services/trocaDevolucao55.js.
+      try {
+        nfceFiscalResult = await trocaDevolucao55.handle(client, {
+          saleCompanyId,
+          originalSaleId: original_sale_id,
+          trocaSaleId: trocaSale.id,
+          returnedItems: returned_items,
+          returnedValue,
+          customerAddress: customer_address,
+          notes: req.body.notes,
+          userId: req.user && req.user.id,
+        });
+      } catch (e) {
+        if (e && e.isDevolucao55Error) {
+          await client.query('ROLLBACK');
+          return res.status(e.status).json(e.body);
+        }
+        throw e;
+      }
     } else if (nfceStrategy !== 'none') {
       await client.query('ROLLBACK');
       return res.status(400).json({
@@ -1213,17 +1230,7 @@ router.post('/troca', async (req, res) => {
 
 // ── GET /companies/:id/pdv/sales-for-troca ─────────────────────
 // 12/05/2026 (troca cross-filial) — lista vendas do mesmo group_root
-// elegíveis pra serem usadas como venda original numa troca. UI do
-// PDV chama isso quando o operador abre o modal de troca e busca
-// por CPF/nome do cliente ou produto.
-//
-// Query:
-//   q           — texto livre (customer_name, cpf_cnpj, seller_name, item snapshot)
-//   customer_id — filtra por cliente específico
-//   days        — janela em dias (default 90)
-//   limit       — default 50
-//
-// Resposta inclui flag is_cross_filial pra UI exibir badge da filial.
+// elegíveis pra serem usadas como venda original numa troca.
 // Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md
 // ──────────────────────────────────────────────────────────────
 router.get('/sales-for-troca', async (req, res) => {
@@ -1233,7 +1240,7 @@ router.get('/sales-for-troca', async (req, res) => {
 
   const cond = [
     "s.status != 'cancelled'",
-    "COALESCE(s.type,'sale') = 'sale'", // só vendas normais — não listar trocas anteriores como base
+    "COALESCE(s.type,'sale') = 'sale'",
     `s.created_at >= NOW() - INTERVAL '${winDays} days'`,
     `(
        s.company_id = $1
