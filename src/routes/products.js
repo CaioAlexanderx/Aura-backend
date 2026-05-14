@@ -29,6 +29,10 @@
 //   mas explodia em 42P01 quando o deployment nao tinha a migration de
 //   barbershop (caso Eryca/Finesse — varejo puro). safeNullProductRef
 //   ignora 42P01 e segue o resto da cadeia.
+// REFACTOR (14/05/2026): visibilityWhere/listVisibilityWhere passam a ser
+//   EXPORTADOS via properties no module.exports (router). productImage.js
+//   consome — antes ele tinha o filtro ingenuo company_id=$2 e dava 404
+//   em produto shared visto da subsidiaria.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -62,6 +66,8 @@ function sanitizeNcm(raw) {
 //
 // Pra empresa standalone (sem grupo), a lista de empresas-do-grupo
 // contém só ela mesma → visibilidade idêntica ao caso single-company.
+//
+// 14/05/2026: exportada pra productImage.js consumir.
 function visibilityWhere(idParam, cidParam) {
   return `id = ${idParam} AND (company_id = ${cidParam} OR (
     is_group_shared = true
@@ -320,3 +326,9 @@ router.delete('/:pid', async (req, res) => {
 });
 
 module.exports = router;
+// 14/05/2026: helpers de visibilidade exportados para reuso (productImage.js).
+// Router continua sendo o default export (require('./products') retorna o
+// router). Adicionar properties em function-object e seguro — Express
+// Router e funcao + objeto, app.use() ignora properties extras.
+module.exports.visibilityWhere = visibilityWhere;
+module.exports.listVisibilityWhere = listVisibilityWhere;
