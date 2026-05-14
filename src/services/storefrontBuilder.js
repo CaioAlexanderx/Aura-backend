@@ -1,6 +1,10 @@
 // ============================================================
 // AURA. — Storefront Builder Service
 // Monta o objeto de dados da loja (produtos, variantes, config)
+//
+// FIX (14/05/2026): queries de produtos usavam company_id=$1 direto,
+// bloqueando produtos is_group_shared do outro CNPJ do grupo.
+// Agora usa listVisibilityWhere bidirecional idêntico ao products.js.
 // ============================================================
 'use strict';
 
@@ -15,6 +19,21 @@ function parseFeaturedIds(raw) {
   return [];
 }
 
+// Mesma lógica de products.js — bidirecional via group_root.
+// cidParam é o placeholder posicional já montado (ex: '$1').
+function listVisibilityWhere(cidParam) {
+  return `(company_id = ${cidParam} OR (
+    is_group_shared = true
+    AND company_id IN (
+      SELECT id FROM companies
+      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
+        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
+        FROM companies WHERE id = ${cidParam}
+      )
+    )
+  ))`;
+}
+
 async function buildStorefront(config) {
   const cid = config.company_id;
   let products = [];
@@ -23,14 +42,20 @@ async function buildStorefront(config) {
   if (featuredIds.length > 0) {
     const { rows } = await db.query(
       `SELECT id, name, description, price, image_url, category, stock_qty
-       FROM products WHERE company_id = $1 AND id::text = ANY($2) AND is_active IS NOT FALSE
-       ORDER BY name`, [cid, featuredIds]);
+       FROM products
+       WHERE ${listVisibilityWhere('$1')} AND id::text = ANY($2) AND is_active IS NOT FALSE
+       ORDER BY name`,
+      [cid, featuredIds]
+    );
     products = rows;
   } else {
     const { rows } = await db.query(
       `SELECT id, name, description, price, image_url, category, stock_qty
-       FROM products WHERE company_id = $1 AND is_active IS NOT FALSE
-       ORDER BY created_at DESC LIMIT 50`, [cid]);
+       FROM products
+       WHERE ${listVisibilityWhere('$1')} AND is_active IS NOT FALSE
+       ORDER BY created_at DESC LIMIT 50`,
+      [cid]
+    );
     products = rows;
   }
 
@@ -70,7 +95,6 @@ async function buildStorefront(config) {
     `SELECT trade_name, legal_name, logo_url FROM companies WHERE id = $1`, [cid]);
   const company = companies[0] || {};
 
-  // Tem Pix configurado? (sem expor a chave em si — usada server-side pra gerar BR Code)
   const hasPix = !!(config.pix_key && String(config.pix_key).trim());
   const payOnDeliveryEnabled = !!config.pay_on_delivery_enabled;
 
@@ -96,7 +120,6 @@ async function buildStorefront(config) {
       pickup_enabled:   config.pickup_enabled   !== false,
       delivery_enabled: config.delivery_enabled || false,
       delivery_fee:     parseFloat(config.delivery_fee) || 0,
-      // Metodos de pagamento disponiveis pra essa loja
       has_pix:                  hasPix,
       pay_on_delivery_enabled:  payOnDeliveryEnabled,
     },
