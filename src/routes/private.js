@@ -98,6 +98,10 @@ router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require
 // da existencia do CRUD de cliente. Saldo via view, sem integracao com
 // Financeiro/contas a receber. Migration 099.
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
+// Crediario parcelado -- vendas a prazo com score interno, regua de cobanca
+// automatica e dashboard de inadimplencia. Migrations 115-118.
+// 14/05/2026: montado no mesmo prefixo /credit para compartilhar gate de plano.
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInstallments'));
 router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'));
 // Folha real: payslip por email, ranking de vendas, comissao -- Negocio+.
 // CRUD de employees (acima) ja e Essencial; estes endpoints sao o
