@@ -6,6 +6,12 @@
 // POST /storefront/:slug/order/:oid/upload-proof — Cliente envia comprovante de Pix
 // POST /storefront/:slug/order/:oid/mark-as-paid — Cliente avisa que pagou
 // GET  /storefront/:slug/order/:oid          — Poll status do pedido
+//
+// FIX (14/05/2026): query de validação de produtos no pedido usava
+// company_id=$2 direto — produtos is_group_shared do outro CNPJ do grupo
+// (ex: matriz Davi) eram rejeitados com "Produto não encontrado" mesmo
+// aparecendo corretamente na vitrine. Agora usa listVisibilityWhere
+// idêntico ao storefrontBuilder/products.js.
 // ============================================================
 'use strict';
 
@@ -49,6 +55,20 @@ function validateCnpj(d) {
   for (let i = 0; i < 13; i++) s += parseInt(d[i]) * w2[i];
   r = s % 11; r = r < 2 ? 0 : 11 - r;
   return r === parseInt(d[13]);
+}
+
+// Visibilidade bidirecional de grupo — cidParam é placeholder posicional (ex: '$2')
+function listVisibilityWhere(cidParam) {
+  return `(company_id = ${cidParam} OR (
+    is_group_shared = true
+    AND company_id IN (
+      SELECT id FROM companies
+      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
+        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
+        FROM companies WHERE id = ${cidParam}
+      )
+    )
+  ))`;
 }
 
 // CORS aberto pra vitrine publica
@@ -189,11 +209,15 @@ router.post('/:slug/order', async (req, res) => {
       return res.status(400).json({ error: 'Esta loja nao aceita pagamento na entrega' });
     }
 
+    // FIX: usa listVisibilityWhere para enxergar produtos shared do grupo.
+    // $1 = productIds (array), $2 = cid da loja.
     const productIds = items.map(i => i.product_id);
     const { rows: products } = await db.query(
       `SELECT id, name, price, stock_qty, image_url, is_active
-       FROM products WHERE id::text = ANY($1) AND company_id = $2`,
-      [productIds.map(String), cid]);
+       FROM products
+       WHERE id::text = ANY($1) AND ${listVisibilityWhere('$2')}`,
+      [productIds.map(String), cid]
+    );
     const productMap = Object.fromEntries(products.map(p => [p.id, p]));
 
     const variantIds = items.map(i => i.variant_id).filter(Boolean);
