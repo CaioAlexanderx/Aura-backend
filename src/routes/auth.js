@@ -20,6 +20,13 @@
 // resolveDefaultContext nao ver e o user cair em modo single-company
 // com a primary em vez de consolidated. Agora robusto a essa falha
 // estrutural (que tambem foi corrigida em userCompanies.js POST).
+//
+// FIX 2026-05-13 (extra_seats_granted): shapeCompany + queries do
+// /me e resolveDefaultContext agora expoem extra_seats_granted via
+// COALESCE (default 0). Permite frontend usar como fallback do gate
+// de Equipe quando /members/billing falhar ou cache stale. Caso
+// Maria/Encanto Presentes: essencial + 1 extra_seat pago via Gestao
+// Aura mas EquipeGate seguia visivel porque fallback so testava plan.
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -68,6 +75,11 @@ async function storeRefreshToken(userId, refreshToken, req) {
 // FIX 2026-05-03: query agora usa WHERE (c.owner_id OR cm.user_id) — permissive.
 // Antes usava INNER JOIN company_members, perdendo empresas onde o owner nao
 // tinha row em company_members (caso bug do POST /me/companies que nao inseria).
+//
+// FIX 2026-05-13: SELECT inclui extra_seats_granted (COALESCE com 0 pra cobrir
+// caso pre-migration 110). Necessario pra shapeCompany expor o campo no JWT
+// flow e o frontend ter fallback do gate de Equipe quando /members/billing
+// falhar.
 async function resolveDefaultContext(userId, dbConn) {
   const conn = dbConn || db;
   const { rows } = await conn.query(
@@ -75,6 +87,7 @@ async function resolveDefaultContext(userId, dbConn) {
             c.id, c.legal_name, c.plan, c.onboarding_step,
             c.trial_ends_at, c.module_overrides, c.billing_status,
             c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
+            COALESCE(c.extra_seats_granted, 0) AS extra_seats_granted,
             c.is_primary, c.created_at,
             CASE
               WHEN c.owner_id = $1 THEN 'owner'
@@ -141,6 +154,10 @@ function shapeCompany(company, fallbackMemberRole) {
     ai_enabled: !!(company.ai_enabled),
     ai_consent_at: company.ai_consent_at || null,
     member_role: company.member_role || fallbackMemberRole || 'owner',
+    // FIX 2026-05-13: extra_seats_granted exposto pro frontend usar como
+    // fallback do gate de Equipe quando /members/billing falha ou cache stale.
+    // Default 0 se a query nao selecionou (compat com chamadas antigas).
+    extra_seats_granted: parseInt(company.extra_seats_granted || 0, 10) || 0,
   };
 }
 
@@ -185,7 +202,7 @@ router.post('/register', async (req, res) => {
       const cleanCnpj = cnpj.replace(/\D/g, '');
       if (cleanCnpj.length === 14 || cleanCnpj.length === 11) {
         const { rows: existingCompanies } = await client.query(
-          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, ai_enabled, ai_consent_at FROM companies WHERE cnpj = $1',
+          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, ai_enabled, ai_consent_at, COALESCE(extra_seats_granted, 0) AS extra_seats_granted FROM companies WHERE cnpj = $1',
           [cleanCnpj]
         );
         if (existingCompanies.length > 0) {
@@ -202,7 +219,7 @@ router.post('/register', async (req, res) => {
       isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
       const { rows: [newCompany] } = await client.query(
-        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, ai_enabled, ai_consent_at',
+        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, ai_enabled, ai_consent_at, COALESCE(extra_seats_granted, 0) AS extra_seats_granted',
         [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null]
       );
       company = newCompany;
@@ -251,6 +268,8 @@ router.post('/register', async (req, res) => {
         ai_enabled: !!(company.ai_enabled),
         ai_consent_at: company.ai_consent_at || null,
         member_role: memberRole,
+        // FIX 2026-05-13: expoe extra_seats_granted no register tambem (consistencia com /me).
+        extra_seats_granted: parseInt(company.extra_seats_granted || 0, 10) || 0,
       } : null,
       consolidated_view: false,
       company_count: company ? 1 : 0,
@@ -371,6 +390,9 @@ router.post('/logout', async (req, res) => {
 //
 // FIX 2026-05-03: company_count agora usa query permissive (OR c.owner_id)
 // pra contar empresas mesmo se faltar entry em company_members.
+//
+// FIX 2026-05-13: SELECT inclui extra_seats_granted (COALESCE 0) pra
+// frontend ter fallback do EquipeGate quando /members/billing falhar.
 router.post('/me', requireAuth, async (req, res) => {
   try {
     const { rows: uRows } = await db.query(
@@ -390,6 +412,7 @@ router.post('/me', requireAuth, async (req, res) => {
         `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
                 c.trial_ends_at, c.module_overrides, c.billing_status,
                 c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
+                COALESCE(c.extra_seats_granted, 0) AS extra_seats_granted,
                 CASE
                   WHEN c.owner_id = $1 THEN 'owner'
                   ELSE COALESCE(cm.role_label, 'member')
