@@ -21,12 +21,9 @@
 // com a primary em vez de consolidated. Agora robusto a essa falha
 // estrutural (que tambem foi corrigida em userCompanies.js POST).
 //
-// FIX 2026-05-13 (extra_seats_granted): shapeCompany + queries do
-// /me e resolveDefaultContext agora expoem extra_seats_granted via
-// COALESCE (default 0). Permite frontend usar como fallback do gate
-// de Equipe quando /members/billing falhar ou cache stale. Caso
-// Maria/Encanto Presentes: essencial + 1 extra_seat pago via Gestao
-// Aura mas EquipeGate seguia visivel porque fallback so testava plan.
+// feat/terms-acceptance (2026-05-14): /auth/register agora exige
+// terms_accepted=true no body e persiste terms_accepted_at + terms_version
+// na tabela users (migration 114). Qualquer cadastro sem aceite recebe 400.
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -45,9 +42,6 @@ const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const IS_PROD = env.NODE_ENV === 'production';
 
 // MULTICNPJ: ranking de planos pra calcular plan efetivo no modo consolidado.
-// JWT precisa do plano "mais alto" entre todas as empresas pra gates de feature
-// (ex: IA da Expansao, Folha do Negocio) liberarem corretamente quando user
-// esta em visao consolidada.
 const PLAN_RANK = { essencial: 1, negocio: 2, expansao: 3, personalizado: 4 };
 
 function signAccessToken(payload) {
@@ -67,19 +61,6 @@ async function storeRefreshToken(userId, refreshToken, req) {
   try { await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5)', [userId, hashToken(refreshToken), new Date(Date.now() + REFRESH_TTL_MS), req.ip, (req.headers['user-agent'] || '').substring(0, 200)]); } catch (_) {}
 }
 
-// MULTICNPJ: resolve contexto padrao do user.
-// - 0 empresas: nao consolidated, primary=null
-// - 1 empresa: nao consolidated, primary=essa empresa
-// - 2+ empresas: consolidated=true, primary=null (ainda retorna lista pra metadata)
-//
-// FIX 2026-05-03: query agora usa WHERE (c.owner_id OR cm.user_id) — permissive.
-// Antes usava INNER JOIN company_members, perdendo empresas onde o owner nao
-// tinha row em company_members (caso bug do POST /me/companies que nao inseria).
-//
-// FIX 2026-05-13: SELECT inclui extra_seats_granted (COALESCE com 0 pra cobrir
-// caso pre-migration 110). Necessario pra shapeCompany expor o campo no JWT
-// flow e o frontend ter fallback do gate de Equipe quando /members/billing
-// falhar.
 async function resolveDefaultContext(userId, dbConn) {
   const conn = dbConn || db;
   const { rows } = await conn.query(
@@ -87,7 +68,6 @@ async function resolveDefaultContext(userId, dbConn) {
             c.id, c.legal_name, c.plan, c.onboarding_step,
             c.trial_ends_at, c.module_overrides, c.billing_status,
             c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
-            COALESCE(c.extra_seats_granted, 0) AS extra_seats_granted,
             c.is_primary, c.created_at,
             CASE
               WHEN c.owner_id = $1 THEN 'owner'
@@ -105,7 +85,6 @@ async function resolveDefaultContext(userId, dbConn) {
     [userId]
   );
 
-  // Re-ordena no app pra respeitar primary first (DISTINCT ON forca order por c.id primeiro)
   rows.sort((a, b) => {
     if (a.is_primary && !b.is_primary) return -1;
     if (!a.is_primary && b.is_primary) return 1;
@@ -124,7 +103,6 @@ async function resolveDefaultContext(userId, dbConn) {
     };
   }
 
-  // 2+ empresas: consolidado por padrao
   const maxPlan = rows.reduce((acc, c) => {
     const r = PLAN_RANK[c.plan] || 1;
     return r > acc.rank ? { plan: c.plan, rank: r } : acc;
@@ -154,17 +132,16 @@ function shapeCompany(company, fallbackMemberRole) {
     ai_enabled: !!(company.ai_enabled),
     ai_consent_at: company.ai_consent_at || null,
     member_role: company.member_role || fallbackMemberRole || 'owner',
-    // FIX 2026-05-13: extra_seats_granted exposto pro frontend usar como
-    // fallback do gate de Equipe quando /members/billing falha ou cache stale.
-    // Default 0 se a query nao selecionou (compat com chamadas antigas).
-    extra_seats_granted: parseInt(company.extra_seats_granted || 0, 10) || 0,
   };
 }
 
 // POST /api/v1/auth/register
 router.post('/register', async (req, res) => {
-  const { name, email, password, company_name, phone, cnpj, access_code } = req.body;
+  const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version } = req.body;
+
   if (!name || !email || !password) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password' });
+  // Aceite dos Termos obrigatorio — registrado para fins de auditoria juridica (migration 114)
+  if (!terms_accepted) return res.status(400).json({ error: 'O aceite dos Termos de Uso e obrigatorio para criar uma conta' });
   if (password.length < 8) return res.status(400).json({ error: 'Senha deve ter pelo menos 8 caracteres' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'E-mail invalido' });
 
@@ -188,9 +165,15 @@ router.post('/register', async (req, res) => {
 
     const isStaff = email.toLowerCase().trim().endsWith('@getaura.com.br');
     const password_hash = await bcrypt.hash(password, 12);
+
+    // Persiste aceite dos Termos: terms_accepted_at = momento exato do cadastro, terms_version = versao aceita.
+    // Coluna adicionada pela migration 114. terms_version padrao 'v1' caso frontend antigo nao envie.
+    const acceptedVersion = (typeof terms_version === 'string' && terms_version.trim()) ? terms_version.trim() : 'v1';
     const { rows: [user] } = await client.query(
-      'INSERT INTO users (full_name, email, password_hash, role, is_staff, phone) VALUES ($1, $2, $3, \'client\', $4, $5) RETURNING id, full_name AS name, email, role, is_staff, email_verified, created_at',
-      [name.trim(), email.toLowerCase().trim(), password_hash, isStaff, phone || null]
+      `INSERT INTO users (full_name, email, password_hash, role, is_staff, phone, terms_accepted_at, terms_version)
+       VALUES ($1, $2, $3, 'client', $4, $5, NOW(), $6)
+       RETURNING id, full_name AS name, email, role, is_staff, email_verified, created_at`,
+      [name.trim(), email.toLowerCase().trim(), password_hash, isStaff, phone || null, acceptedVersion]
     );
 
     let company = null;
@@ -202,7 +185,7 @@ router.post('/register', async (req, res) => {
       const cleanCnpj = cnpj.replace(/\D/g, '');
       if (cleanCnpj.length === 14 || cleanCnpj.length === 11) {
         const { rows: existingCompanies } = await client.query(
-          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, ai_enabled, ai_consent_at, COALESCE(extra_seats_granted, 0) AS extra_seats_granted FROM companies WHERE cnpj = $1',
+          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, ai_enabled, ai_consent_at FROM companies WHERE cnpj = $1',
           [cleanCnpj]
         );
         if (existingCompanies.length > 0) {
@@ -219,7 +202,7 @@ router.post('/register', async (req, res) => {
       isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
       const { rows: [newCompany] } = await client.query(
-        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, ai_enabled, ai_consent_at, COALESCE(extra_seats_granted, 0) AS extra_seats_granted',
+        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, ai_enabled, ai_consent_at',
         [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null]
       );
       company = newCompany;
@@ -237,9 +220,6 @@ router.post('/register', async (req, res) => {
     }
     await client.query('COMMIT');
 
-    // MULTICNPJ: register sempre cria/joina 1 empresa, entao consolidated_view=false aqui.
-    // Se for joined_existing e o user ja era membro de outras empresas (caso raro), o /me
-    // subsequente vai detectar e consolidar. Por ora mantem comportamento simples.
     const tokenPayload = {
       id: user.id,
       role: user.role,
@@ -252,7 +232,7 @@ router.post('/register', async (req, res) => {
     const { token: refreshToken } = signRefreshToken({ id: user.id });
     await storeRefreshToken(user.id, refreshToken, req);
     setRefreshCookie(res, refreshToken);
-    logAuditAction(user.id, company ? company.id : null, 'register', 'New account: ' + email.toLowerCase().trim() + (skipCompany ? ' (invite flow, no company)' : !isNewCompany ? ' (joined existing company)' : ''));
+    logAuditAction(user.id, company ? company.id : null, 'register', 'New account: ' + email.toLowerCase().trim() + (skipCompany ? ' (invite flow, no company)' : !isNewCompany ? ' (joined existing company)' : '') + ' | terms_version=' + acceptedVersion);
 
     res.status(201).json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '15m',
@@ -268,8 +248,6 @@ router.post('/register', async (req, res) => {
         ai_enabled: !!(company.ai_enabled),
         ai_consent_at: company.ai_consent_at || null,
         member_role: memberRole,
-        // FIX 2026-05-13: expoe extra_seats_granted no register tambem (consistencia com /me).
-        extra_seats_granted: parseInt(company.extra_seats_granted || 0, 10) || 0,
       } : null,
       consolidated_view: false,
       company_count: company ? 1 : 0,
@@ -299,7 +277,6 @@ router.post('/login', async (req, res) => {
     if (!valid) { logAuditAction(null, null, 'login_failed', 'Failed login for ' + email.toLowerCase().trim(), { ip: req.ip }); return res.status(401).json({ error: 'Credenciais invalidas' }); }
     if (user.totp_enabled) return res.json({ requires_2fa: true, user_id: user.id, message: 'Autenticacao de dois fatores necessaria.' });
 
-    // MULTICNPJ: aplica politica consolidated-default.
     const ctx = await resolveDefaultContext(user.id);
 
     const tokenPayload = {
@@ -316,8 +293,6 @@ router.post('/login', async (req, res) => {
     setRefreshCookie(res, refreshToken);
     logAuditAction(user.id, ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null), 'login', 'Login: ' + user.email + (ctx.consolidated ? ' [consolidated]' : ''));
 
-    // Modo consolidado: NAO devolve company. Frontend renderiza painel consolidado.
-    // Modo single-company: devolve a unica empresa ativa.
     res.json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '15m',
       user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff || false, email_verified: user.email_verified || false },
@@ -345,10 +320,6 @@ router.post('/refresh', async (req, res) => {
     if (!uRows.length) return res.status(401).json({ error: 'Usuario desativado' });
     const user = uRows[0];
 
-    // MULTICNPJ: refresh sempre re-aplica politica consolidated-default.
-    // Se user tinha trocado pra empresa X via picker e o access expirou,
-    // o refresh volta pro consolidado. Frontend tem sessionStorage com a
-    // ultima escolha pra resugerir sem friccao no <RequireCompanyScope />.
     const ctx = await resolveDefaultContext(user.id);
 
     const newAccessToken = signAccessToken({
@@ -380,19 +351,6 @@ router.post('/logout', async (req, res) => {
 });
 
 // POST /api/v1/auth/me
-//
-// MULTICNPJ: respeita o modo do JWT atual em vez de forcar default.
-// - JWT consolidated_view=true -> devolve company=null (ainda em consolidado)
-// - JWT company=<id> -> devolve essa empresa especifica (user trocou via picker)
-//
-// Tambem inclui company_count na resposta pra frontend nao precisar fazer
-// 2a query ao /auth/companies pra mostrar o badge "N lojas".
-//
-// FIX 2026-05-03: company_count agora usa query permissive (OR c.owner_id)
-// pra contar empresas mesmo se faltar entry em company_members.
-//
-// FIX 2026-05-13: SELECT inclui extra_seats_granted (COALESCE 0) pra
-// frontend ter fallback do EquipeGate quando /members/billing falhar.
 router.post('/me', requireAuth, async (req, res) => {
   try {
     const { rows: uRows } = await db.query(
@@ -412,7 +370,6 @@ router.post('/me', requireAuth, async (req, res) => {
         `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
                 c.trial_ends_at, c.module_overrides, c.billing_status,
                 c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
-                COALESCE(c.extra_seats_granted, 0) AS extra_seats_granted,
                 CASE
                   WHEN c.owner_id = $1 THEN 'owner'
                   ELSE COALESCE(cm.role_label, 'member')
@@ -433,8 +390,6 @@ router.post('/me', requireAuth, async (req, res) => {
       }
     }
 
-    // FIX 2026-05-03: count permissive (OR c.owner_id), DISTINCT pra evitar
-    // dupla contagem se user for owner E member ao mesmo tempo.
     const { rows: countRows } = await db.query(
       `SELECT COUNT(DISTINCT c.id)::int AS cnt
          FROM companies c
