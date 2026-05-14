@@ -2,6 +2,7 @@
 // QA — Testes de Integração: Auth (B-04)
 // Updated: plan field removed from register body (plan comes from access_code)
 // Fix: accent-free assertions to match backend responses
+// Fix: add terms_accepted:true to payloads that test other validations
 // ============================================================
 const request = require('supertest');
 
@@ -19,16 +20,23 @@ describe('POST /api/v1/auth/register', () => {
     expect(res.body.error).toMatch(/obrigat/);
   });
 
+  test('400 — termos não aceitos', async () => {
+    const res = await request(app).post('/api/v1/auth/register')
+      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Termos/);
+  });
+
   test('400 — senha curta', async () => {
     const res = await request(app).post('/api/v1/auth/register')
-      .send({ name: 'João', email: 'a@b.com', password: '123', company_name: 'Loja' });
+      .send({ name: 'João', email: 'a@b.com', password: '123', company_name: 'Loja', terms_accepted: true });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/8 caracteres/);
   });
 
   test('400 — e-mail inválido', async () => {
     const res = await request(app).post('/api/v1/auth/register')
-      .send({ name: 'João', email: 'invalido', password: 'senha1234', company_name: 'Loja' });
+      .send({ name: 'João', email: 'invalido', password: 'senha1234', company_name: 'Loja', terms_accepted: true });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/E-mail inv/);
   });
@@ -45,7 +53,7 @@ describe('POST /api/v1/auth/register', () => {
     db.connect.mockResolvedValueOnce(mockClient);
 
     const res = await request(app).post('/api/v1/auth/register')
-      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja', access_code: 'INVALID-CODE' });
+      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja', access_code: 'INVALID-CODE', terms_accepted: true });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/odigo/);
   });
@@ -64,7 +72,7 @@ describe('POST /api/v1/auth/register', () => {
     db.connect.mockResolvedValueOnce(mockClient);
 
     const res = await request(app).post('/api/v1/auth/register')
-      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja' });
+      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja', terms_accepted: true });
 
     expect(res.status).toBe(201);
     expect(res.body.token).toBeDefined();
@@ -83,7 +91,7 @@ describe('POST /api/v1/auth/register', () => {
     db.connect.mockResolvedValueOnce(mockClient);
 
     const res = await request(app).post('/api/v1/auth/register')
-      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja' });
+      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja', terms_accepted: true });
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/ja cadastrado/);
   });
