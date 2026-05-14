@@ -54,6 +54,8 @@
 //   NAO cancela a NFC-e original (impossivel >24h) — registra a
 //   devolucao via refNFe na NF-e/55.
 //   Logica completa: src/services/trocaDevolucao55.js
+// HOTFIX 14/05/2026: GET /sales-for-troca usava comp.name (companies
+//   só tem trade_name/legal_name). Troca pra COALESCE(trade_name, legal_name).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -1241,6 +1243,7 @@ router.post('/troca', async (req, res) => {
 // ── GET /companies/:id/pdv/sales-for-troca ─────────────────────
 // 12/05/2026 (troca cross-filial) — lista vendas do mesmo group_root
 // elegíveis pra serem usadas como venda original numa troca.
+// HOTFIX 14/05/2026: companies só tem trade_name/legal_name, NÃO `name`.
 // Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md
 // ──────────────────────────────────────────────────────────────
 router.get('/sales-for-troca', async (req, res) => {
@@ -1289,7 +1292,7 @@ router.get('/sales-for-troca', async (req, res) => {
   try {
     const { rows } = await db.query(
       `SELECT s.id, s.total_amount, s.payment_method, s.status, s.created_at,
-              s.company_id, comp.name AS company_name,
+              s.company_id, COALESCE(comp.trade_name, comp.legal_name) AS company_name,
               s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
               s.seller_id, s.seller_name,
               (s.company_id != $1) AS is_cross_filial,
@@ -1306,7 +1309,7 @@ router.get('/sales-for-troca', async (req, res) => {
          LEFT JOIN customers cust ON cust.id = s.customer_id
          LEFT JOIN sale_items si  ON si.sale_id = s.id
         WHERE ${cond.join(' AND ')}
-        GROUP BY s.id, comp.name, cust.name, cust.cpf_cnpj
+        GROUP BY s.id, comp.trade_name, comp.legal_name, cust.name, cust.cpf_cnpj
         ORDER BY s.created_at DESC
         LIMIT ${lim}`,
       vals
