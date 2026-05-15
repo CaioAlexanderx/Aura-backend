@@ -5,6 +5,10 @@
 // FIX (14/05/2026): queries de produtos usavam company_id=$1 direto,
 // bloqueando produtos is_group_shared do outro CNPJ do grupo.
 // Agora usa listVisibilityWhere bidirecional idêntico ao products.js.
+//
+// v2 (15/05/2026): expõe accent_color, dark_mode, font_family,
+// card_style, banners[], announcement_bar pro template novo.
+// Cai em fallbacks pra empresas pré-migration 115.
 // ============================================================
 'use strict';
 
@@ -19,8 +23,38 @@ function parseFeaturedIds(raw) {
   return [];
 }
 
-// Mesma lógica de products.js — bidirecional via group_root.
-// cidParam é o placeholder posicional já montado (ex: '$1').
+function parseBanners(raw, fallbackCover, fallbackTagline, fallbackDesc) {
+  let arr = [];
+  if (Array.isArray(raw)) arr = raw;
+  else if (typeof raw === 'string') {
+    try { const p = JSON.parse(raw); if (Array.isArray(p)) arr = p; } catch {}
+  }
+  // Backfill em runtime: se nenhum banner mas tem cover, monta 1 default.
+  if (!arr.length && (fallbackCover || fallbackTagline)) {
+    arr = [{
+      kicker: '',
+      headline: fallbackTagline || 'Bem-vindo à nossa loja',
+      body: fallbackDesc || '',
+      cta: 'Ver produtos',
+      tone: 'split',
+      tint: 'brand',
+      image_url: fallbackCover || null,
+      enabled: true,
+    }];
+  }
+  // Sanitiza + filtra desativados + limita a 3
+  return arr.slice(0, 3).map((b) => ({
+    kicker:    typeof b?.kicker === 'string'    ? b.kicker    : '',
+    headline:  typeof b?.headline === 'string'  ? b.headline  : '',
+    body:      typeof b?.body === 'string'      ? b.body      : '',
+    cta:       typeof b?.cta === 'string'       ? b.cta       : '',
+    tone:      ['split','editorial','centered'].includes(b?.tone) ? b.tone : 'split',
+    tint:      ['brand','accent'].includes(b?.tint) ? b.tint : 'brand',
+    image_url: typeof b?.image_url === 'string' && b.image_url ? b.image_url : null,
+    enabled:   b?.enabled !== false,
+  })).filter((b) => b.enabled && (b.headline || b.image_url || b.body || b.kicker));
+}
+
 function listVisibilityWhere(cidParam) {
   return `(company_id = ${cidParam} OR (
     is_group_shared = true
@@ -59,7 +93,6 @@ async function buildStorefront(config) {
     products = rows;
   }
 
-  // Busca variantes de todos os produtos
   let variantsByProduct = {};
   if (products.length > 0) {
     const productIds = products.map(p => p.id);
@@ -98,14 +131,27 @@ async function buildStorefront(config) {
   const hasPix = !!(config.pix_key && String(config.pix_key).trim());
   const payOnDeliveryEnabled = !!config.pay_on_delivery_enabled;
 
+  const banners = parseBanners(
+    config.banners,
+    config.cover_url,
+    config.tagline,
+    config.description
+  );
+
   return {
     site: {
       name:          config.site_name || company.trade_name || company.legal_name || 'Loja',
       tagline:       config.tagline       || '',
       description:   config.description   || '',
       primary_color: config.primary_color || '#7c3aed',
+      accent_color:  config.accent_color  || config.secondary_color || '#a78bfa',
+      dark_mode:     !!config.dark_mode,
+      font_family:   config.font_family   || 'classic',
+      card_style:    config.card_style    || 'editorial',
+      announcement_bar: config.announcement_bar || '',
       logo_url:      config.logo_url  || company.logo_url || null,
       cover_url:     config.cover_url || null,
+      banners,
     },
     contact: {
       phone:     config.phone     || '',
