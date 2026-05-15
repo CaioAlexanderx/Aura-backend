@@ -2,17 +2,22 @@
 // AURA. — Storefront Builder Service
 // Monta o objeto de dados da loja (produtos, variantes, config)
 //
-// FIX (14/05/2026): queries de produtos usavam company_id=$1 direto,
-// bloqueando produtos is_group_shared do outro CNPJ do grupo.
-// Agora usa listVisibilityWhere bidirecional idêntico ao products.js.
-//
 // v2 (15/05/2026): expõe accent_color, dark_mode, font_family,
-// card_style, banners[], announcement_bar pro template novo.
-// Cai em fallbacks pra empresas pré-migration 115.
+// card_style, banners[], announcement_bar, service_cards[] pro template novo.
+// Cai em fallbacks pra empresas pré-migration 115/116.
 // ============================================================
 'use strict';
 
 const db = require('../config/database');
+
+const DEFAULT_SERVICE_CARDS = [
+  { icon: 'truck',   title: 'Entrega rápida',      body: 'Confirmação no WhatsApp', enabled: true },
+  { icon: 'pkg',     title: 'Embalagem cuidadosa', body: 'Pronta pra presentear',   enabled: true },
+  { icon: 'shield',  title: 'Pagamento seguro',    body: 'Pix e demais opções',     enabled: true },
+  { icon: 'sparkle', title: 'Curadoria editada',   body: 'Produtos selecionados',   enabled: true },
+];
+
+const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
 function parseFeaturedIds(raw) {
   if (!raw) return [];
@@ -29,20 +34,14 @@ function parseBanners(raw, fallbackCover, fallbackTagline, fallbackDesc) {
   else if (typeof raw === 'string') {
     try { const p = JSON.parse(raw); if (Array.isArray(p)) arr = p; } catch {}
   }
-  // Backfill em runtime: se nenhum banner mas tem cover, monta 1 default.
   if (!arr.length && (fallbackCover || fallbackTagline)) {
     arr = [{
-      kicker: '',
-      headline: fallbackTagline || 'Bem-vindo à nossa loja',
-      body: fallbackDesc || '',
-      cta: 'Ver produtos',
-      tone: 'split',
-      tint: 'brand',
-      image_url: fallbackCover || null,
-      enabled: true,
+      kicker: '', headline: fallbackTagline || 'Bem-vindo à nossa loja',
+      body: fallbackDesc || '', cta: 'Ver produtos',
+      tone: 'split', tint: 'brand',
+      image_url: fallbackCover || null, enabled: true,
     }];
   }
-  // Sanitiza + filtra desativados + limita a 3
   return arr.slice(0, 3).map((b) => ({
     kicker:    typeof b?.kicker === 'string'    ? b.kicker    : '',
     headline:  typeof b?.headline === 'string'  ? b.headline  : '',
@@ -53,6 +52,22 @@ function parseBanners(raw, fallbackCover, fallbackTagline, fallbackDesc) {
     image_url: typeof b?.image_url === 'string' && b.image_url ? b.image_url : null,
     enabled:   b?.enabled !== false,
   })).filter((b) => b.enabled && (b.headline || b.image_url || b.body || b.kicker));
+}
+
+function parseServiceCards(raw) {
+  let arr = [];
+  if (Array.isArray(raw)) arr = raw;
+  else if (typeof raw === 'string') {
+    try { const p = JSON.parse(raw); if (Array.isArray(p)) arr = p; } catch {}
+  }
+  // Backfill: array vazio cai nos defaults (pra lojas pré-migration 116)
+  if (!arr.length) arr = DEFAULT_SERVICE_CARDS;
+  return arr.slice(0, 4).map((c) => ({
+    icon:    ALLOWED_ICONS.includes(c?.icon) ? c.icon : 'sparkle',
+    title:   typeof c?.title === 'string' ? c.title : '',
+    body:    typeof c?.body  === 'string' ? c.body  : '',
+    enabled: c?.enabled !== false,
+  })).filter((c) => c.enabled && (c.title || c.body));
 }
 
 function listVisibilityWhere(cidParam) {
@@ -115,11 +130,10 @@ async function buildStorefront(config) {
     for (const v of variantRows) {
       if (!variantsByProduct[v.product_id]) variantsByProduct[v.product_id] = [];
       variantsByProduct[v.product_id].push({
-        id:             v.id,
-        sku_suffix:     v.sku_suffix,
+        id: v.id, sku_suffix: v.sku_suffix,
         price_override: v.price_override !== null ? parseFloat(v.price_override) : null,
-        stock_qty:      parseFloat(v.stock_qty),
-        values:         v.values || [],
+        stock_qty: parseFloat(v.stock_qty),
+        values: v.values || [],
       });
     }
   }
@@ -131,12 +145,8 @@ async function buildStorefront(config) {
   const hasPix = !!(config.pix_key && String(config.pix_key).trim());
   const payOnDeliveryEnabled = !!config.pay_on_delivery_enabled;
 
-  const banners = parseBanners(
-    config.banners,
-    config.cover_url,
-    config.tagline,
-    config.description
-  );
+  const banners = parseBanners(config.banners, config.cover_url, config.tagline, config.description);
+  const serviceCards = parseServiceCards(config.service_cards);
 
   return {
     site: {
@@ -152,6 +162,7 @@ async function buildStorefront(config) {
       logo_url:      config.logo_url  || company.logo_url || null,
       cover_url:     config.cover_url || null,
       banners,
+      service_cards: serviceCards,
     },
     contact: {
       phone:     config.phone     || '',
@@ -172,19 +183,12 @@ async function buildStorefront(config) {
     products: products.map(p => {
       const pvariants = variantsByProduct[p.id] || [];
       const hasVariants = pvariants.length > 0;
-      const inStock = hasVariants
-        ? pvariants.some(v => v.stock_qty > 0)
-        : p.stock_qty > 0;
+      const inStock = hasVariants ? pvariants.some(v => v.stock_qty > 0) : p.stock_qty > 0;
       return {
-        id:          p.id,
-        name:        p.name,
-        description: p.description,
-        price:       config.show_prices !== false ? parseFloat(p.price) : null,
-        image_url:   p.image_url,
-        category:    p.category,
-        stock_qty:   p.stock_qty,
-        in_stock:    inStock,
-        variants:    pvariants,
+        id: p.id, name: p.name, description: p.description,
+        price: config.show_prices !== false ? parseFloat(p.price) : null,
+        image_url: p.image_url, category: p.category,
+        stock_qty: p.stock_qty, in_stock: inStock, variants: pvariants,
       };
     }),
     total_products: products.length,
