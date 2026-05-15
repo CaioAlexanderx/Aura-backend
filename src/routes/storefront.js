@@ -12,6 +12,10 @@
 // (ex: matriz Davi) eram rejeitados com "Produto não encontrado" mesmo
 // aparecendo corretamente na vitrine. Agora usa listVisibilityWhere
 // idêntico ao storefrontBuilder/products.js.
+//
+// v2 (15/05/2026): CSP liberou Google Fonts pra storefront v2 carregar
+// Instrument Serif + DM Sans + Fraunces + DM Mono. img-src também aceita
+// qualquer https pra cobrir banners customizados servidos de URLs externas.
 // ============================================================
 'use strict';
 
@@ -84,15 +88,16 @@ router.use((req, res, next) => {
 const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
   || 'https://aura-backend-production-f805.up.railway.app';
 
-// CSP + viacep.com.br pra autocomplete CEP
+// CSP v2 — adiciona Google Fonts (style + font) e amplia img-src pra https.
+// viacep.com.br pra autocomplete CEP. qrserver.com pra QR Pix.
 const STOREFRONT_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
   "script-src-attr 'unsafe-inline'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https://r2.getaura.com.br https://pub-f21f233f50d1412abc93a05bbdffd0d3.r2.dev https://api.qrserver.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "img-src 'self' data: blob: https:",
   "connect-src 'self' https://cloudflareinsights.com https://viacep.com.br " + STOREFRONT_API_BASE,
-  "font-src 'self'",
+  "font-src 'self' data: https://fonts.gstatic.com",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -209,8 +214,6 @@ router.post('/:slug/order', async (req, res) => {
       return res.status(400).json({ error: 'Esta loja nao aceita pagamento na entrega' });
     }
 
-    // FIX: usa listVisibilityWhere para enxergar produtos shared do grupo.
-    // $1 = productIds (array), $2 = cid da loja.
     const productIds = items.map(i => i.product_id);
     const { rows: products } = await db.query(
       `SELECT id, name, price, stock_qty, image_url, is_active
