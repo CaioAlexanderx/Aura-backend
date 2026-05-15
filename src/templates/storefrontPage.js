@@ -5,9 +5,9 @@
 //
 // v2 (15/05/2026):
 //  • passa accent_color, dark_mode, font_family ao CSS builder
-//  • passa banners[] + announcement_bar ao HTML builder
+//  • passa banners[] + announcement_bar + service_cards[] ao HTML builder
 //  • aplica classes no <body>: sf-dark, card-style-{editorial|minimal|image-heavy}
-//  • injeta JS pequeno pra auto-rotação do banner-stage e scrollToProducts
+//  • injeta JS pra auto-rotação do banner-stage e scrollToProducts
 // ============================================================
 const buildStyles   = require('./storefrontStyles');
 const buildHtmlBody = require('./storefrontHtml');
@@ -34,15 +34,20 @@ function buildStorefrontPage(data, slug) {
   const whatsNum = (data.contact?.whatsapp || '').replace(/\D/g, '');
   const addrText = escHtml(data.contact?.address || '');
 
-  // Sanitiza banners (escape de XSS — já vem do builder mas reforça)
+  // banners e service_cards — escape de XSS reforçado
   const banners = (site.banners || []).map((b) => ({
-    kicker:    escHtml(b.kicker || ''),
-    headline:  escHtml(b.headline || ''),
-    body:      escHtml(b.body || ''),
-    cta:       escHtml(b.cta || ''),
-    tone:      b.tone || 'split',
-    tint:      b.tint || 'brand',
+    kicker: escHtml(b.kicker || ''),
+    headline: escHtml(b.headline || ''),
+    body: escHtml(b.body || ''),
+    cta: escHtml(b.cta || ''),
+    tone: b.tone || 'split',
+    tint: b.tint || 'brand',
     image_url: b.image_url ? escHtml(b.image_url) : null,
+  }));
+  const serviceCards = (site.service_cards || []).map((c) => ({
+    icon: c.icon || 'sparkle',
+    title: escHtml(c.title || ''),
+    body: escHtml(c.body || ''),
   }));
 
   const storeData = JSON.stringify({
@@ -72,22 +77,19 @@ function buildStorefrontPage(data, slug) {
   const css    = buildStyles(primary, accent, dark, font);
   const body   = buildHtmlBody({
     siteName, tagline, logoInTopbar, logoInHero, contactBar,
-    addrText, coverUrl, announcementBar, banners,
+    addrText, coverUrl, announcementBar, banners, serviceCards,
   });
   const script = buildScript(storeData, escJs(slug), API_BASE);
 
-  // body classes que cascateiam tokens via storefrontStyles
   const bodyClasses = [
     dark ? 'sf-dark' : 'sf-light',
     `card-style-${cardStyle}`,
     `font-${font}`,
   ].join(' ');
 
-  // Mini JS auxiliar inline (carrossel + scroll-to-products)
   const inlineHelpers = `
 <script>
 (function(){
-  // ── banner carousel ───────────────────────────────────────────
   var slides = document.querySelectorAll('#bannerStage .banner-slide');
   var dots = document.querySelectorAll('#bannerDots .banner-dot');
   var idx = 0, timer = null, paused = false;
@@ -105,7 +107,6 @@ function buildStorefrontPage(data, slug) {
     stage.addEventListener('mouseleave', function(){ paused = false; });
     restart();
   }
-  // ── scroll to products ────────────────────────────────────────
   window.scrollToProducts = function(){
     var el = document.getElementById('productsAnchor');
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
