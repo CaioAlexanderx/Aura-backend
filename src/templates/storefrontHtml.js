@@ -1,24 +1,44 @@
 // AURA. — HTML body da vitrine pública v2
 // buildHtmlBody({
 //   siteName, tagline, logoInTopbar, logoInHero, contactBar,
-//   addrText, coverUrl, announcementBar, banners[]
+//   addrText, coverUrl, announcementBar, banners[], serviceCards[]
 // }) → string HTML
 //
-// banners[] = [{ kicker, headline, body, cta, tone, tint, image_url }]
-// Quando banners[] tem ao menos 1 item, renderiza banner stage (carrossel).
-// Quando vazio, cai em hero legacy (hero-section.has-cover/no-cover).
+// banners[]      = [{ kicker, headline, body, cta, tone, tint, image_url }]
+// serviceCards[] = [{ icon, title, body }] — strip de benefícios na home
 //
-// O JS de auto-rotação fica em storefrontPage.js (injetado inline), pra
-// não precisar mexer em parts/*.
+// O JS de auto-rotação fica em storefrontPage.js (injetado inline).
 function buildHtmlBody({
   siteName, tagline, logoInTopbar, logoInHero, contactBar,
-  addrText, coverUrl, announcementBar, banners,
+  addrText, coverUrl, announcementBar, banners, serviceCards,
 }) {
   banners = Array.isArray(banners) ? banners : [];
+  serviceCards = Array.isArray(serviceCards) ? serviceCards : [];
   const hasBanners = banners.length > 0;
   const hasCover = !!coverUrl;
   const heroSectionClass = hasCover ? 'hero-section has-cover' : 'hero-section no-cover';
   const coverStyle = hasCover ? ` style="background-image:url('${coverUrl}')"` : '';
+
+  // Icon set (mesmos paths que parts/products.js usa). Stroke=currentColor.
+  const ICONS = {
+    truck:   '<path d="M3 16V6h12v10M15 9h4l2 4v3h-6"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/>',
+    pkg:     '<path d="M3 7v10l9 4 9-4V7l-9-4-9 4z"/><path d="M3 7l9 4 9-4M12 11v10"/>',
+    shield:  '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6l-8-3z"/>',
+    sparkle: '<path d="m12 3 2.6 5.6 6 .8-4.4 4.2 1.1 6L12 16.8 6.7 19.6l1.1-6-4.4-4.2 6-.8L12 3z"/>',
+    leaf:    '<path d="M21 3c-7 0-13 4-13 12v6M21 3c0 7-4 13-12 13"/>',
+    heart:   '<path d="M12 20s-7-4.5-7-10a4 4 0 017-2.7A4 4 0 0119 10c0 5.5-7 10-7 10z"/>',
+    star:    '<path d="m12 3 2.6 5.6 6 .8-4.4 4.2 1.1 6L12 16.8 6.7 19.6l1.1-6-4.4-4.2 6-.8L12 3z"/>',
+    pix:     '<path d="m12 3 9 9-9 9-9-9 9-9z"/><path d="M9 12h6M12 9v6"/>',
+    card:    '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M3 10h18M7 15h2"/>',
+    receipt: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3z"/><path d="M9 8h6M9 12h6M9 16h4"/>',
+    bag:     '<path d="M5 7h14l-1 13H6L5 7z"/><path d="M9 7V5a3 3 0 016 0v2"/>',
+    user:    '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/>',
+  };
+  function svgFor(name) {
+    const paths = ICONS[name] || ICONS.sparkle;
+    return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+  }
+  function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
   // Banner slides
   const slidesHtml = banners.map((b, i) => {
@@ -49,7 +69,6 @@ function buildHtmlBody({
         </div>
       </div>`;
     }
-    // split (default)
     return `<div class="banner-slide tint-${tint} ${i===0?'active':''}" data-tone="split">
       <div class="${bgClass}"${bgStyle}></div>
       <div class="banner-slide-content">
@@ -101,6 +120,18 @@ function buildHtmlBody({
     ? `<div class="announcement-bar">${announcementBar}</div>`
     : '';
 
+  // Service strip dinâmica — só renderiza se houver ao menos 1 card habilitado
+  const serviceStrip = serviceCards.length > 0 ? `
+<section class="service-strip">
+${serviceCards.map((c) => `  <div class="service-card">
+    <div class="service-card-icon">${svgFor(c.icon)}</div>
+    <div>
+      <div class="service-card-title">${escHtml(c.title)}</div>
+      ${c.body ? `<div class="service-card-body">${escHtml(c.body)}</div>` : ''}
+    </div>
+  </div>`).join('\n')}
+</section>` : '';
+
   return `${announcementHtml}
 <header class="topbar">
   <a class="topbar-brand" href="#" onclick="return false">
@@ -140,36 +171,7 @@ ${heroLegacy}
   <div class="products-grid" id="productsGrid"></div>
 </section>
 
-<section class="service-strip">
-  <div class="service-card">
-    <div class="service-card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 16V6h12v10M15 9h4l2 4v3h-6"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/></svg></div>
-    <div>
-      <div class="service-card-title">Entrega rápida</div>
-      <div class="service-card-body">Confirmação no WhatsApp</div>
-    </div>
-  </div>
-  <div class="service-card">
-    <div class="service-card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7v10l9 4 9-4V7l-9-4-9 4z"/><path d="M3 7l9 4 9-4M12 11v10"/></svg></div>
-    <div>
-      <div class="service-card-title">Embalagem cuidadosa</div>
-      <div class="service-card-body">Pronta pra presentear</div>
-    </div>
-  </div>
-  <div class="service-card">
-    <div class="service-card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6l-8-3z"/></svg></div>
-    <div>
-      <div class="service-card-title">Pagamento seguro</div>
-      <div class="service-card-body">Pix e demais opções</div>
-    </div>
-  </div>
-  <div class="service-card">
-    <div class="service-card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m12 3 2.6 5.6 6 .8-4.4 4.2 1.1 6L12 16.8 6.7 19.6l1.1-6-4.4-4.2 6-.8L12 3z"/></svg></div>
-    <div>
-      <div class="service-card-title">Curadoria editada</div>
-      <div class="service-card-body">Produtos selecionados</div>
-    </div>
-  </div>
-</section>
+${serviceStrip}
 
 ${contactBar}
 
