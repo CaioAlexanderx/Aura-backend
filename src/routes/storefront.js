@@ -13,9 +13,10 @@
 // aparecendo corretamente na vitrine. Agora usa listVisibilityWhere
 // idêntico ao storefrontBuilder/products.js.
 //
-// v2 (15/05/2026): CSP liberou Google Fonts pra storefront v2 carregar
-// Instrument Serif + DM Sans + Fraunces + DM Mono. img-src também aceita
-// qualquer https pra cobrir banners customizados servidos de URLs externas.
+// v2 (15/05/2026): CSP liberou Google Fonts. img-src aceita https.
+// frame-ancestors * pra permitir embed em iframe (preview do admin).
+// Sem isso, helmet default X-Frame-Options bloqueia e o iframe vira
+// chrome-error://chromewebdata/.
 // ============================================================
 'use strict';
 
@@ -28,7 +29,6 @@ const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 
-// ── Validador CPF/CNPJ (mod 11) ──────────────────────────────
 function validateCpfCnpj(raw) {
   if (!raw) return null;
   const d = String(raw).replace(/\D/g, '');
@@ -61,7 +61,6 @@ function validateCnpj(d) {
   return r === parseInt(d[13]);
 }
 
-// Visibilidade bidirecional de grupo — cidParam é placeholder posicional (ex: '$2')
 function listVisibilityWhere(cidParam) {
   return `(company_id = ${cidParam} OR (
     is_group_shared = true
@@ -88,8 +87,9 @@ router.use((req, res, next) => {
 const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
   || 'https://aura-backend-production-f805.up.railway.app';
 
-// CSP v2 — adiciona Google Fonts (style + font) e amplia img-src pra https.
-// viacep.com.br pra autocomplete CEP. qrserver.com pra QR Pix.
+// CSP v2 — frame-ancestors * permite que QUALQUER página embute a vitrine em
+// iframe (preview do admin em app.getaura.com.br, e qualquer parceiro que
+// queira incorporar). É público de qualquer forma.
 const STOREFRONT_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
@@ -98,6 +98,7 @@ const STOREFRONT_CSP = [
   "img-src 'self' data: blob: https:",
   "connect-src 'self' https://cloudflareinsights.com https://viacep.com.br " + STOREFRONT_API_BASE,
   "font-src 'self' data: https://fonts.gstatic.com",
+  "frame-ancestors *",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -122,10 +123,17 @@ router.get('/:slug/page', async (req, res) => {
     const { rows } = await db.query(
       `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]);
     if (!rows.length) {
-      return res.status(404).send('<html><body><h1>Loja nao encontrada</h1></body></html>');
+      // Aplica os mesmos headers de embed pra que a página de 404 também rode em iframe
+      res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
+      res.removeHeader('X-Frame-Options');
+      return res.status(404).send('<html><body style="font-family:sans-serif;padding:40px;text-align:center;"><h1>Loja não encontrada</h1><p>Verifique o link ou peça ao lojista pra publicar a loja.</p></body></html>');
     }
     const data = await buildStorefront(rows[0]);
     res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
+    // helmet pode setar X-Frame-Options:SAMEORIGIN globalmente — força remover
+    // pra que frame-ancestors * tenha efeito (X-Frame-Options vence se ambos
+    // existirem em browsers antigos).
+    res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(buildStorefrontPage(data, slug));
   } catch (err) {
@@ -378,8 +386,7 @@ router.post('/:slug/order', async (req, res) => {
     }
 
     notify.notifyNewOrder({
-      order,
-      total,
+      order, total,
       pix_payload: pixData ? pixData.payload : null,
       config,
     }).catch(err => console.error('[notify] new order error:', err.message));
@@ -412,11 +419,7 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const { oid } = req.params;
   const { content, content_type } = req.body || {};
-
-  if (!content) {
-    return res.status(400).json({ error: 'content (base64) obrigatorio' });
-  }
-
+  if (!content) return res.status(400).json({ error: 'content (base64) obrigatorio' });
   try {
     const { rows } = await db.query(`
       SELECT o.id, o.company_id, o.status, o.payment_method
@@ -426,20 +429,17 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
     `, [oid, slug]);
     if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
     const order = rows[0];
-
     if (order.payment_method !== 'pix') {
       return res.status(400).json({ error: 'Comprovante so se aplica a pagamentos Pix' });
     }
     if (order.status === 'cancelled' || order.status === 'delivered') {
       return res.status(409).json({ error: `Pedido ja finalizado (${order.status})` });
     }
-
     const mime = (content_type || 'image/jpeg').toLowerCase();
     let ext = 'jpg';
     if (mime.includes('png')) ext = 'png';
     else if (mime.includes('webp')) ext = 'webp';
     else if (mime.includes('pdf')) ext = 'pdf';
-
     const key = `${order.company_id}/orders/${oid}/proof.${ext}`;
     const result = await uploadToR2(key, content, mime);
     if (!result.success) {
@@ -447,15 +447,9 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
       return res.status(500).json({ error: 'Erro ao salvar comprovante' });
     }
     const url = result.mock ? result.url : `${result.url}?v=${Date.now()}`;
-
     await db.query(`
-      UPDATE digital_orders SET
-        payment_proof_url = $1,
-        payment_proof_uploaded_at = NOW(),
-        updated_at = NOW()
-      WHERE id = $2
+      UPDATE digital_orders SET payment_proof_url = $1, payment_proof_uploaded_at = NOW(), updated_at = NOW() WHERE id = $2
     `, [url, oid]);
-
     res.json({ payment_proof_url: url, key: result.key });
   } catch (err) {
     console.error('[storefront] upload-proof error:', err.message);
@@ -466,7 +460,6 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
 router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const { oid } = req.params;
-
   try {
     const { rows } = await db.query(`
       SELECT o.id, o.status, o.company_id, o.customer_name, o.order_number, o.payment_method
@@ -476,7 +469,6 @@ router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
     `, [oid, slug]);
     if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
     const order = rows[0];
-
     if (order.payment_method !== 'pix') {
       return res.status(400).json({ error: 'Apenas pedidos Pix precisam ser marcados como pagos' });
     }
@@ -484,23 +476,10 @@ router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
       return res.json({ status: 'awaiting_approval', message: 'Ja registrado.' });
     }
     if (order.status !== 'pending_payment') {
-      return res.status(409).json({
-        error: `Pedido nao pode ser marcado (status atual: ${order.status})`,
-      });
+      return res.status(409).json({ error: `Pedido nao pode ser marcado (status atual: ${order.status})` });
     }
-
-    await db.query(`
-      UPDATE digital_orders SET
-        status = 'awaiting_approval',
-        updated_at = NOW()
-      WHERE id = $1
-    `, [oid]);
-
-    res.json({
-      status: 'awaiting_approval',
-      message: 'Aguardando confirmacao do lojista. Voce sera avisado por WhatsApp.',
-    });
-
+    await db.query(`UPDATE digital_orders SET status = 'awaiting_approval', updated_at = NOW() WHERE id = $1`, [oid]);
+    res.json({ status: 'awaiting_approval', message: 'Aguardando confirmacao do lojista. Voce sera avisado por WhatsApp.' });
     if (typeof notify.notifyPaymentMarkedByCustomer === 'function') {
       notify.notifyPaymentMarkedByCustomer({ order })
         .catch(err => console.error('[notify] mark-as-paid error:', err.message));
