@@ -6,12 +6,9 @@
 // POST /companies/:id/digital-channel/upload-image?type=logo|banner|banner_0|banner_1|banner_2
 // POST /companies/:id/digital-channel/setup-pix       (legado Asaas)
 //
-// Migration 088: PUT agora aceita pix_key, pix_key_type, pix_holder_name,
-// pix_holder_city — chave Pix manual do lojista, sem subconta Asaas.
-// Migration 089: PUT tambem aceita pay_on_delivery_enabled.
 // Migration 115: v2 redesign — accent_color, dark_mode, font_family,
-// card_style, banners[] JSONB, announcement_bar. Upload aceita banner_N
-// (0..2) salvando em ${cid}/canal/banner_N.${ext} e populando banners[N].image_url.
+// card_style, banners[] JSONB, announcement_bar.
+// Migration 116: service_cards[] JSONB (4 cards na strip de benefícios).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -19,14 +16,23 @@ const { requireRole } = require('../middleware/auth');
 const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
 const { validatePixKey } = require('../services/staticPixService');
 
+const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
+
 const DEFAULT_BANNERS = [
   { kicker: '', headline: 'Bem-vindo à nossa loja', body: 'Curadoria editada, pensada pra durar.', cta: 'Ver produtos', tone: 'split', tint: 'brand', image_url: null, enabled: true },
+];
+
+const DEFAULT_SERVICE_CARDS = [
+  { icon: 'truck',   title: 'Entrega rápida',      body: 'Confirmação no WhatsApp', enabled: true },
+  { icon: 'pkg',     title: 'Embalagem cuidadosa', body: 'Pronta pra presentear',   enabled: true },
+  { icon: 'shield',  title: 'Pagamento seguro',    body: 'Pix e demais opções',     enabled: true },
+  { icon: 'sparkle', title: 'Curadoria editada',   body: 'Produtos selecionados',   enabled: true },
 ];
 
 const DEFAULT_CONFIG = {
   site_name: null, tagline: '', primary_color: '#7c3aed', secondary_color: '#a78bfa',
   accent_color: '#a78bfa', dark_mode: false, font_family: 'classic', card_style: 'editorial',
-  banners: DEFAULT_BANNERS, announcement_bar: '',
+  banners: DEFAULT_BANNERS, announcement_bar: '', service_cards: DEFAULT_SERVICE_CARDS,
   logo_url: null, cover_url: null, description: '', address: '', phone: '', whatsapp: '',
   instagram: '', google_maps_url: '',
   pix_key: null, pix_key_type: null, pix_holder_name: null, pix_holder_city: null,
@@ -58,8 +64,6 @@ function generateSlug(name) {
     .substring(0, 80);
 }
 
-// Schema-pre-migration safety (armadilha_schema_pre_migration):
-// boot do Railway pode pegar deploy parcial — fingers/cache pra colunas v2.
 let _v2ColumnsCache = null;
 async function hasV2Columns() {
   if (_v2ColumnsCache !== null) return _v2ColumnsCache;
@@ -67,14 +71,13 @@ async function hasV2Columns() {
     const { rows } = await db.query(`
       SELECT column_name FROM information_schema.columns
        WHERE table_name = 'digital_channel_config'
-         AND column_name IN ('accent_color','dark_mode','font_family','card_style','banners','announcement_bar')
+         AND column_name IN ('accent_color','dark_mode','font_family','card_style','banners','announcement_bar','service_cards')
     `);
-    _v2ColumnsCache = rows.length === 6;
+    _v2ColumnsCache = rows.length === 7;
   } catch { _v2ColumnsCache = false; }
   return _v2ColumnsCache;
 }
 
-// GET /companies/:id/digital-channel
 router.get('/', async (req, res) => {
   const cid = req.params.id;
   try {
@@ -95,12 +98,12 @@ router.get('/', async (req, res) => {
     const config = rows[0];
     res.json({
       ...config,
-      // v2 defaults aplicados em runtime (não quebram leituras pré-migration)
       accent_color: config.accent_color || config.secondary_color || DEFAULT_CONFIG.accent_color,
       dark_mode: config.dark_mode ?? false,
       font_family: config.font_family || 'classic',
       card_style: config.card_style || 'editorial',
       banners: Array.isArray(config.banners) && config.banners.length ? config.banners : DEFAULT_BANNERS,
+      service_cards: Array.isArray(config.service_cards) && config.service_cards.length ? config.service_cards : DEFAULT_SERVICE_CARDS,
       announcement_bar: config.announcement_bar || '',
       business_hours: config.business_hours || DEFAULT_CONFIG.business_hours,
       featured_product_ids: config.featured_product_ids || [],
@@ -117,7 +120,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Validador defensivo de banners (rejeita payloads malformados sem 500)
 function sanitizeBanners(input) {
   if (!Array.isArray(input)) return null;
   return input.slice(0, 3).map((b) => ({
@@ -132,7 +134,16 @@ function sanitizeBanners(input) {
   }));
 }
 
-// PUT /companies/:id/digital-channel
+function sanitizeServiceCards(input) {
+  if (!Array.isArray(input)) return null;
+  return input.slice(0, 4).map((c) => ({
+    icon:    ALLOWED_ICONS.includes(c?.icon) ? c.icon : 'sparkle',
+    title:   typeof c?.title === 'string' ? c.title.slice(0, 60) : '',
+    body:    typeof c?.body  === 'string' ? c.body.slice(0, 120) : '',
+    enabled: c?.enabled !== false,
+  }));
+}
+
 router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
   const {
@@ -146,7 +157,6 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     pay_on_delivery_enabled,
   } = req.body;
 
-  // Validações leves
   if (pix_key && String(pix_key).trim()) {
     const v = validatePixKey(pix_key, pix_key_type);
     if (!v.valid) return res.status(400).json({ error: 'Chave Pix invalida: ' + v.error });
@@ -161,6 +171,10 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const banners = req.body.banners !== undefined ? sanitizeBanners(req.body.banners) : undefined;
   if (req.body.banners !== undefined && banners === null) {
     return res.status(400).json({ error: 'banners deve ser um array' });
+  }
+  const serviceCards = req.body.service_cards !== undefined ? sanitizeServiceCards(req.body.service_cards) : undefined;
+  if (req.body.service_cards !== undefined && serviceCards === null) {
+    return res.status(400).json({ error: 'service_cards deve ser um array' });
   }
 
   let slug = req.body.slug || null;
@@ -179,7 +193,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       const { rows } = await db.query(`
         INSERT INTO digital_channel_config (
           company_id, site_name, tagline, primary_color, secondary_color,
-          accent_color, dark_mode, font_family, card_style, announcement_bar, banners,
+          accent_color, dark_mode, font_family, card_style, announcement_bar, banners, service_cards,
           logo_url, cover_url, description, address, phone, whatsapp,
           instagram, google_maps_url, business_hours, featured_product_ids,
           show_prices, show_stock, delivery_enabled, delivery_fee,
@@ -188,10 +202,11 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
           pay_on_delivery_enabled
         ) VALUES (
           $1, $2, $3, $4, $5,
-          $6, COALESCE($7, false), COALESCE($8, 'classic'), COALESCE($9, 'editorial'), $10, COALESCE($11::jsonb, '[]'::jsonb),
-          $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
-          $22, $23, $24, $25, $26, $27, $28, $29,
-          $30, $31, $32, $33, COALESCE($34, false)
+          $6, COALESCE($7, false), COALESCE($8, 'classic'), COALESCE($9, 'editorial'), $10,
+          COALESCE($11::jsonb, '[]'::jsonb), COALESCE($12::jsonb, '[]'::jsonb),
+          $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
+          $23, $24, $25, $26, $27, $28, $29, $30,
+          $31, $32, $33, $34, COALESCE($35, false)
         )
         ON CONFLICT (company_id) DO UPDATE SET
           site_name = COALESCE($2, digital_channel_config.site_name),
@@ -204,29 +219,30 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
           card_style = COALESCE($9, digital_channel_config.card_style),
           announcement_bar = COALESCE($10, digital_channel_config.announcement_bar),
           banners = COALESCE($11::jsonb, digital_channel_config.banners),
-          logo_url = COALESCE($12, digital_channel_config.logo_url),
-          cover_url = COALESCE($13, digital_channel_config.cover_url),
-          description = COALESCE($14, digital_channel_config.description),
-          address = COALESCE($15, digital_channel_config.address),
-          phone = COALESCE($16, digital_channel_config.phone),
-          whatsapp = COALESCE($17, digital_channel_config.whatsapp),
-          instagram = COALESCE($18, digital_channel_config.instagram),
-          google_maps_url = COALESCE($19, digital_channel_config.google_maps_url),
-          business_hours = COALESCE($20, digital_channel_config.business_hours),
-          featured_product_ids = COALESCE($21, digital_channel_config.featured_product_ids),
-          show_prices = COALESCE($22, digital_channel_config.show_prices),
-          show_stock = COALESCE($23, digital_channel_config.show_stock),
-          delivery_enabled = COALESCE($24, digital_channel_config.delivery_enabled),
-          delivery_fee = COALESCE($25, digital_channel_config.delivery_fee),
-          delivery_radius_km = COALESCE($26, digital_channel_config.delivery_radius_km),
-          pickup_enabled = COALESCE($27, digital_channel_config.pickup_enabled),
-          is_published = COALESCE($28, digital_channel_config.is_published),
-          slug = COALESCE($29, digital_channel_config.slug),
-          pix_key = COALESCE($30, digital_channel_config.pix_key),
-          pix_key_type = COALESCE($31, digital_channel_config.pix_key_type),
-          pix_holder_name = COALESCE($32, digital_channel_config.pix_holder_name),
-          pix_holder_city = COALESCE($33, digital_channel_config.pix_holder_city),
-          pay_on_delivery_enabled = COALESCE($34, digital_channel_config.pay_on_delivery_enabled),
+          service_cards = COALESCE($12::jsonb, digital_channel_config.service_cards),
+          logo_url = COALESCE($13, digital_channel_config.logo_url),
+          cover_url = COALESCE($14, digital_channel_config.cover_url),
+          description = COALESCE($15, digital_channel_config.description),
+          address = COALESCE($16, digital_channel_config.address),
+          phone = COALESCE($17, digital_channel_config.phone),
+          whatsapp = COALESCE($18, digital_channel_config.whatsapp),
+          instagram = COALESCE($19, digital_channel_config.instagram),
+          google_maps_url = COALESCE($20, digital_channel_config.google_maps_url),
+          business_hours = COALESCE($21, digital_channel_config.business_hours),
+          featured_product_ids = COALESCE($22, digital_channel_config.featured_product_ids),
+          show_prices = COALESCE($23, digital_channel_config.show_prices),
+          show_stock = COALESCE($24, digital_channel_config.show_stock),
+          delivery_enabled = COALESCE($25, digital_channel_config.delivery_enabled),
+          delivery_fee = COALESCE($26, digital_channel_config.delivery_fee),
+          delivery_radius_km = COALESCE($27, digital_channel_config.delivery_radius_km),
+          pickup_enabled = COALESCE($28, digital_channel_config.pickup_enabled),
+          is_published = COALESCE($29, digital_channel_config.is_published),
+          slug = COALESCE($30, digital_channel_config.slug),
+          pix_key = COALESCE($31, digital_channel_config.pix_key),
+          pix_key_type = COALESCE($32, digital_channel_config.pix_key_type),
+          pix_holder_name = COALESCE($33, digital_channel_config.pix_holder_name),
+          pix_holder_city = COALESCE($34, digital_channel_config.pix_holder_city),
+          pay_on_delivery_enabled = COALESCE($35, digital_channel_config.pay_on_delivery_enabled),
           updated_at = NOW()
         RETURNING *
       `, [
@@ -236,6 +252,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         font_family || null, card_style || null,
         announcement_bar === undefined ? null : (announcement_bar || ''),
         banners !== undefined ? JSON.stringify(banners) : null,
+        serviceCards !== undefined ? JSON.stringify(serviceCards) : null,
         logo_url || null, cover_url || null,
         description || null, address || null, phone || null, whatsapp || null,
         instagram || null, google_maps_url || null,
@@ -255,7 +272,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       });
     }
 
-    // Fallback pré-migration 115: salva sem campos v2 (loja antiga)
+    // Fallback pré-migration 115/116
     const { rows } = await db.query(`
       INSERT INTO digital_channel_config (
         company_id, site_name, tagline, primary_color, secondary_color,
@@ -328,21 +345,17 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   }
 });
 
-// POST /companies/:id/digital-channel/request-domain
 router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
   const { domain, plan } = req.body;
-
   if (!domain || !domain.includes('.')) {
     return res.status(400).json({ error: 'Informe um dominio valido (ex: meunegocio.com.br)' });
   }
   if (!['1year', '2years'].includes(plan)) {
     return res.status(400).json({ error: 'Plano deve ser 1year ou 2years' });
   }
-
   const pricing = { '1year': 80, '2years': 152 };
   const cleanDomain = domain.toLowerCase().trim();
-
   try {
     const { rows: existing } = await db.query(
       `SELECT company_id FROM digital_channel_config WHERE custom_domain = $1`, [cleanDomain]
@@ -350,18 +363,14 @@ router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async 
     if (existing.length > 0 && existing[0].company_id !== cid) {
       return res.status(409).json({ error: 'Este dominio ja esta em uso por outra empresa.' });
     }
-
     await db.query(`
       UPDATE digital_channel_config SET
-        custom_domain = $1,
-        custom_domain_status = 'pending_dns',
-        custom_domain_plan = $2,
-        custom_domain_price = $3,
+        custom_domain = $1, custom_domain_status = 'pending_dns',
+        custom_domain_plan = $2, custom_domain_price = $3,
         custom_domain_expires_at = NOW() + INTERVAL '${plan === '2years' ? '2 years' : '1 year'}',
         updated_at = NOW()
       WHERE company_id = $4
     `, [cleanDomain, plan, pricing[plan], cid]);
-
     res.json({
       domain: cleanDomain, plan, price: pricing[plan], status: 'pending_dns',
       message: 'Solicitacao de dominio registrada. A equipe Aura vai configurar o DNS em ate 48h uteis.',
@@ -372,40 +381,30 @@ router.post('/request-domain', requireRole('client', 'analyst', 'admin'), async 
   }
 });
 
-// POST /companies/:id/digital-channel/upload-image?type=logo|banner|banner_0|banner_1|banner_2
-// banner_N (N=0..2) salva em ${cid}/canal/banner_N.${ext} e popula banners[N].image_url
-// banner (legado/cover) continua salvando em cover_url.
 router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
   const { type } = req.query;
   const { content, content_type } = req.body;
-
   const bannerMatch = /^banner_([0-2])$/.exec(type || '');
   const isBannerN = !!bannerMatch;
   const bannerIdx = isBannerN ? parseInt(bannerMatch[1], 10) : -1;
   const isLogo = type === 'logo';
   const isCover = type === 'banner';
-
   if (!isLogo && !isCover && !isBannerN) {
     return res.status(400).json({ error: 'type deve ser logo|banner|banner_0|banner_1|banner_2' });
   }
-  if (!content) {
-    return res.status(400).json({ error: 'content (base64) obrigatorio' });
-  }
-
+  if (!content) return res.status(400).json({ error: 'content (base64) obrigatorio' });
   try {
     const mime = content_type || 'image/jpeg';
     const ext  = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
     const keyName = isLogo ? 'logo' : isCover ? 'banner' : `banner_${bannerIdx}`;
     const key = `${cid}/canal/${keyName}.${ext}`;
-
     const result = await uploadToR2(key, content, mime);
     if (!result.success) {
       console.error('[canal-upload] R2 error:', result.error);
       return res.status(500).json({ error: 'Erro no upload da imagem' });
     }
     const url = result.mock ? result.url : `${result.url}?v=${Date.now()}`;
-
     if (isLogo) {
       await db.query(`
         INSERT INTO digital_channel_config (company_id, logo_url) VALUES ($1, $2)
@@ -420,26 +419,19 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
       `, [cid, url]);
       return res.json({ cover_url: url, key: result.key });
     }
-    // banner_N: atualizar banners[N].image_url. JSONB jsonb_set é seguro.
     const v2 = await hasV2Columns();
-    if (!v2) {
-      return res.status(409).json({ error: 'Schema v2 ainda não aplicado. Aguarde a migração.' });
-    }
-    // Garante row existente
+    if (!v2) return res.status(409).json({ error: 'Schema v2 ainda não aplicado. Aguarde a migração.' });
     await db.query(`
       INSERT INTO digital_channel_config (company_id) VALUES ($1)
       ON CONFLICT (company_id) DO NOTHING
     `, [cid]);
-    // Garante array com pelo menos N+1 entradas
     await db.query(`
       UPDATE digital_channel_config SET banners = (
-        CASE
-          WHEN jsonb_array_length(banners) > $2 THEN banners
-          ELSE banners || jsonb_build_array(jsonb_build_object('kicker','','headline','','body','','cta','','tone','split','tint','brand','image_url',null,'enabled',true))
+        CASE WHEN jsonb_array_length(banners) > $2 THEN banners
+        ELSE banners || jsonb_build_array(jsonb_build_object('kicker','','headline','','body','','cta','','tone','split','tint','brand','image_url',null,'enabled',true))
         END
       ) WHERE company_id = $1
     `, [cid, bannerIdx]);
-    // Loop defensivo (pode precisar de várias iterações até cobrir N)
     for (let i = 0; i < 3; i++) {
       const { rows } = await db.query(`SELECT jsonb_array_length(banners) AS n FROM digital_channel_config WHERE company_id = $1`, [cid]);
       if (rows[0]?.n > bannerIdx) break;
@@ -462,21 +454,17 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
   }
 });
 
-// DELETE /companies/:id/digital-channel/upload-image?type=logo|banner|banner_N
 router.delete('/upload-image', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
   const { type } = req.query;
-
   const bannerMatch = /^banner_([0-2])$/.exec(type || '');
   const isBannerN = !!bannerMatch;
   const bannerIdx = isBannerN ? parseInt(bannerMatch[1], 10) : -1;
   const isLogo = type === 'logo';
   const isCover = type === 'banner';
-
   if (!isLogo && !isCover && !isBannerN) {
     return res.status(400).json({ error: 'type deve ser logo|banner|banner_0|banner_1|banner_2' });
   }
-
   try {
     const keyName = isLogo ? 'logo' : isCover ? 'banner' : `banner_${bannerIdx}`;
     for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
@@ -510,72 +498,46 @@ router.delete('/upload-image', requireRole('client', 'analyst', 'admin'), async 
   }
 });
 
-// ============================================================
-// POST /companies/:id/digital-channel/setup-pix  (LEGADO via Asaas)
-// Mantido pra retrocompat com lojistas que ja tem subconta. Novos
-// fluxos usam pix_key direto via PUT /digital-channel.
-// ============================================================
 router.post('/setup-pix', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
   const { name, email, cpf_cnpj, mobile_phone, company_type = 'MEI', birth_date } = req.body;
-
   if (!name || !email || !cpf_cnpj || !mobile_phone) {
     return res.status(400).json({ error: 'Nome, e-mail, CPF/CNPJ e celular sao obrigatorios' });
   }
-
   if ((company_type === 'INDIVIDUAL' || company_type === 'MEI') && !birth_date) {
     return res.status(400).json({ error: 'Data de nascimento e obrigatoria para CPF/MEI' });
   }
   if (birth_date && !/^\d{4}-\d{2}-\d{2}$/.test(birth_date)) {
     return res.status(400).json({ error: 'Data de nascimento deve estar no formato AAAA-MM-DD' });
   }
-
-  const ASAAS_BASE = (process.env.ASAAS_API_URL || 'https://api.asaas.com/api/v3')
-    .replace(/\/api\/v3\/?$/, '');
+  const ASAAS_BASE = (process.env.ASAAS_API_URL || 'https://api.asaas.com/api/v3').replace(/\/api\/v3\/?$/, '');
   const ASAAS_MASTER_KEY = process.env.ASAAS_API_KEY;
-
   if (!ASAAS_MASTER_KEY) {
-    console.error('[setup-pix] ASAAS_API_KEY nao configurada no servidor');
     return res.status(503).json({ error: 'Integracao Pix nao configurada no servidor. Contate o suporte.' });
   }
-
   try {
     const cleanCpfCnpj = cpf_cnpj.replace(/\D/g, '');
     const cleanPhone   = mobile_phone.replace(/\D/g, '');
-
     const resp = await fetch(`${ASAAS_BASE}/v3/accounts`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'access_token': ASAAS_MASTER_KEY,
-        'User-Agent': 'Aura-Backend/1.0',
-      },
+      headers: { 'Content-Type': 'application/json', 'access_token': ASAAS_MASTER_KEY, 'User-Agent': 'Aura-Backend/1.0' },
       body: JSON.stringify({
-        name, email, loginEmail: email,
-        cpfCnpj: cleanCpfCnpj, mobilePhone: cleanPhone,
+        name, email, loginEmail: email, cpfCnpj: cleanCpfCnpj, mobilePhone: cleanPhone,
         companyType: company_type, birthDate: birth_date || undefined,
-        incomeValue: 1000, address: 'Rua Principal', addressNumber: '1',
-        province: 'Centro', postalCode: '01310100',
+        incomeValue: 1000, address: 'Rua Principal', addressNumber: '1', province: 'Centro', postalCode: '01310100',
       }),
     });
-
     const data = await resp.json();
-
     if (!resp.ok) {
-      console.error('[setup-pix] Asaas error:', JSON.stringify(data));
-      const errMsg = (data.errors && data.errors[0] && data.errors[0].description)
-        || data.message || 'Erro ao criar conta de pagamentos';
+      const errMsg = (data.errors && data.errors[0] && data.errors[0].description) || data.message || 'Erro ao criar conta de pagamentos';
       return res.status(400).json({ error: errMsg });
     }
-
-    const subcontaId    = data.walletId || data.id;
+    const subcontaId = data.walletId || data.id;
     const subcontaToken = data.apiKey;
-
     await db.query(
       `UPDATE companies SET asaas_subconta_id = $1, asaas_subconta_token = $2, updated_at = NOW() WHERE id = $3`,
       [subcontaId, subcontaToken, cid]
     );
-
     res.json({ success: true, message: 'Pix ativado com sucesso! Ja pode receber pagamentos.' });
   } catch (err) {
     console.error('[setup-pix] error:', err.message);
