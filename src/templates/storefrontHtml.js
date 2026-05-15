@@ -1,34 +1,90 @@
-// AURA. — HTML body da vitrine pública
-// buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar, addrText, coverUrl }) → string HTML
-function buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar, addrText, coverUrl }) {
+// AURA. — HTML body da vitrine pública v2
+// buildHtmlBody({
+//   siteName, tagline, logoInTopbar, logoInHero, contactBar,
+//   addrText, coverUrl, announcementBar, banners[]
+// }) → string HTML
+//
+// banners[] = [{ kicker, headline, body, cta, tone, tint, image_url }]
+// Quando banners[] tem ao menos 1 item, renderiza banner stage (carrossel).
+// Quando vazio, cai em hero legacy (hero-section.has-cover/no-cover).
+//
+// O JS de auto-rotação fica em storefrontPage.js (injetado inline), pra
+// não precisar mexer em parts/*.
+function buildHtmlBody({
+  siteName, tagline, logoInTopbar, logoInHero, contactBar,
+  addrText, coverUrl, announcementBar, banners,
+}) {
+  banners = Array.isArray(banners) ? banners : [];
+  const hasBanners = banners.length > 0;
   const hasCover = !!coverUrl;
   const heroSectionClass = hasCover ? 'hero-section has-cover' : 'hero-section no-cover';
   const coverStyle = hasCover ? ` style="background-image:url('${coverUrl}')"` : '';
-  return `<header class="topbar">
-  <a class="topbar-brand" href="#" onclick="return false">
-    <div class="topbar-logo">${logoInTopbar}</div>
-    <span class="topbar-name">${siteName}</span>
-  </a>
-  <div class="topbar-right">
-    <div class="search-pill" onclick="toggleSearch()">
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <span>Buscar</span>
-    </div>
-    <div class="cart-btn" onclick="openCart()">
-      <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
-      <div class="cart-badge" id="cartBadge">0</div>
-    </div>
-  </div>
-</header>
 
-<div class="search-bar-wrap" id="searchBar">
-  <div class="search-bar">
-    <svg width="16" height="16" fill="none" stroke="#888" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-    <input type="text" placeholder="Buscar produtos..." id="searchInput" oninput="filterProducts()" autocomplete="off">
-    <span style="cursor:pointer;color:#888;font-size:22px;line-height:1;" onclick="toggleSearch()">×</span>
-  </div>
-</div>
+  // Banner slides
+  const slidesHtml = banners.map((b, i) => {
+    const tone = b.tone || 'split';
+    const tint = b.tint || 'brand';
+    const bgStyle = b.image_url ? ` style="background-image:url('${b.image_url}')"` : '';
+    const bgClass = b.image_url ? 'banner-slide-bg with-image' : 'banner-slide-bg';
+    const kicker  = b.kicker   ? `<div class="banner-kicker">${b.kicker}</div>` : '';
+    const headline = b.headline ? `<h2 class="banner-headline">${b.headline}</h2>` : '';
+    const body    = b.body     ? `<p class="banner-body">${b.body}</p>` : '';
+    const cta     = b.cta      ? `<button class="banner-cta" onclick="scrollToProducts()">${b.cta}</button>` : '';
 
+    if (tone === 'editorial') {
+      const word = b.headline || siteName;
+      return `<div class="banner-slide tint-${tint} ${i===0?'active':''}" data-tone="editorial">
+        <div class="${bgClass}"${bgStyle}></div>
+        <div class="banner-slide-content">
+          <div class="banner-editorial-word">${word}</div>
+          <div class="banner-text">${kicker}${body}${cta}</div>
+        </div>
+      </div>`;
+    }
+    if (tone === 'centered') {
+      return `<div class="banner-slide tint-${tint} ${i===0?'active':''}" data-tone="centered">
+        <div class="${bgClass}"${bgStyle}></div>
+        <div class="banner-slide-content">
+          <div class="banner-text">${kicker}${headline}${body}${cta}</div>
+        </div>
+      </div>`;
+    }
+    // split (default)
+    return `<div class="banner-slide tint-${tint} ${i===0?'active':''}" data-tone="split">
+      <div class="${bgClass}"${bgStyle}></div>
+      <div class="banner-slide-content">
+        <div class="banner-text">${kicker}${headline}${body}${cta}</div>
+        <div class="banner-art">
+          <svg viewBox="0 0 200 200" class="banner-art-shape" preserveAspectRatio="xMidYMid meet">
+            <defs>
+              <linearGradient id="bg${i}" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="var(--sf-brand)" stop-opacity="0.35"/>
+                <stop offset="1" stop-color="var(--sf-accent)" stop-opacity="0.2"/>
+              </linearGradient>
+            </defs>
+            <circle cx="100" cy="100" r="80" fill="url(#bg${i})"/>
+            <circle cx="100" cy="100" r="40" fill="none" stroke="var(--sf-brand)" stroke-opacity="0.3" stroke-width="0.5"/>
+          </svg>
+        </div>
+      </div>
+    </div>`;
+  }).join('\n');
+
+  const dotsHtml = banners.length > 1
+    ? `<div class="banner-dots" id="bannerDots">
+        ${banners.map((_, i) => `<button class="banner-dot ${i===0?'active':''}" data-idx="${i}" onclick="goBanner(${i})"></button>`).join('')}
+      </div>`
+    : '';
+
+  const bannerStage = hasBanners ? `
+<section class="banner-stage" id="bannerStage">
+  <div class="banner-frame">
+    ${slidesHtml}
+    ${dotsHtml}
+  </div>
+</section>` : '';
+
+  const heroLegacy = hasBanners ? '' : `
 <section class="${heroSectionClass}">
   <div class="hero-cover"${coverStyle}></div>
   <div class="hero-card">
@@ -39,11 +95,44 @@ function buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar
       <div class="hero-card-pills" id="heroPills"></div>
     </div>
   </div>
-</section>
+</section>`;
+
+  const announcementHtml = announcementBar
+    ? `<div class="announcement-bar">${announcementBar}</div>`
+    : '';
+
+  return `${announcementHtml}
+<header class="topbar">
+  <a class="topbar-brand" href="#" onclick="return false">
+    <div class="topbar-logo">${logoInTopbar}</div>
+    <span class="topbar-name">${siteName}</span>
+  </a>
+  <div class="topbar-right">
+    <div class="search-pill" onclick="toggleSearch()">
+      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <span>Buscar</span>
+    </div>
+    <div class="cart-btn" onclick="openCart()">
+      <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M5 7h14l-1 13H6L5 7z"/><path d="M9 7V5a3 3 0 016 0v2"/></svg>
+      <div class="cart-badge" id="cartBadge">0</div>
+    </div>
+  </div>
+</header>
+
+<div class="search-bar-wrap" id="searchBar">
+  <div class="search-bar">
+    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="opacity:.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+    <input type="text" placeholder="Buscar produtos..." id="searchInput" oninput="filterProducts()" autocomplete="off">
+    <span style="cursor:pointer;opacity:.5;font-size:20px;line-height:1;" onclick="toggleSearch()">×</span>
+  </div>
+</div>
+
+${bannerStage}
+${heroLegacy}
 
 <div class="cats-wrap" id="catsWrap"></div>
 
-<section class="products-section">
+<section class="products-section" id="productsAnchor">
   <div class="products-header">
     <h2 id="catTitle">Todos os produtos</h2>
     <span class="products-count" id="prodCount"></span>
@@ -51,22 +140,67 @@ function buildHtmlBody({ siteName, tagline, logoInTopbar, logoInHero, contactBar
   <div class="products-grid" id="productsGrid"></div>
 </section>
 
+<section class="service-strip">
+  <div class="service-card">
+    <div class="service-card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 16V6h12v10M15 9h4l2 4v3h-6"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/></svg></div>
+    <div>
+      <div class="service-card-title">Entrega rápida</div>
+      <div class="service-card-body">Confirmação no WhatsApp</div>
+    </div>
+  </div>
+  <div class="service-card">
+    <div class="service-card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7v10l9 4 9-4V7l-9-4-9 4z"/><path d="M3 7l9 4 9-4M12 11v10"/></svg></div>
+    <div>
+      <div class="service-card-title">Embalagem cuidadosa</div>
+      <div class="service-card-body">Pronta pra presentear</div>
+    </div>
+  </div>
+  <div class="service-card">
+    <div class="service-card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6l-8-3z"/></svg></div>
+    <div>
+      <div class="service-card-title">Pagamento seguro</div>
+      <div class="service-card-body">Pix e demais opções</div>
+    </div>
+  </div>
+  <div class="service-card">
+    <div class="service-card-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m12 3 2.6 5.6 6 .8-4.4 4.2 1.1 6L12 16.8 6.7 19.6l1.1-6-4.4-4.2 6-.8L12 3z"/></svg></div>
+    <div>
+      <div class="service-card-title">Curadoria editada</div>
+      <div class="service-card-body">Produtos selecionados</div>
+    </div>
+  </div>
+</section>
+
 ${contactBar}
 
 <footer class="site-footer">
-  <div><strong>${siteName}</strong>${addrText ? `<br>${addrText}` : ''}</div>
-  <div class="powered">Criado com <a href="https://getaura.com.br" target="_blank">Aura</a></div>
+  <div class="site-footer-inner">
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:18px;margin-bottom:24px;">
+      <div>
+        <div style="font-family:inherit;font-size:22px;color:var(--sf-ink);margin-bottom:6px;" class="serif">${siteName}</div>
+        ${addrText ? `<div style="font-size:13px;color:var(--sf-ink-2);max-width:380px;">${addrText}</div>` : ''}
+      </div>
+      <div class="powered">
+        <span style="font-size:11px;color:var(--sf-ink-3);">Loja desenvolvida com</span>
+        <span class="brand">Aura<span class="brand-dot">.</span></span>
+      </div>
+    </div>
+    <div class="site-footer-bottom">
+      <span>© ${new Date().getFullYear()} ${siteName}</span>
+      <a href="https://getaura.com.br" target="_blank" style="color:inherit;text-decoration:none;">Quero uma loja como essa</a>
+    </div>
+  </div>
 </footer>
 
 <div class="cart-overlay" id="cartOverlay" onclick="closeCart()"></div>
 <div class="cart-drawer" id="cartDrawer">
-  <div class="cart-header"><span class="cart-title">Carrinho</span><div class="cart-close" onclick="closeCart()">×</div></div>
+  <div class="cart-header"><span class="cart-title">Sacola</span><div class="cart-close" onclick="closeCart()">×</div></div>
   <div class="cart-items" id="cartItems"></div>
   <div class="cart-footer" id="cartFooter" style="display:none">
     <div class="cart-summary-row"><span>Subtotal</span><span id="cartSubtotal">R$ 0,00</span></div>
     <div class="cart-summary-row"><span id="deliveryLabel">Entrega</span><span id="deliveryVal">—</span></div>
     <div class="cart-summary-row total"><span>Total</span><span id="cartTotal">R$ 0,00</span></div>
-    <button class="checkout-btn" onclick="openCheckout()">Finalizar pedido →</button>
+    <button class="checkout-btn" onclick="openCheckout()">Finalizar compra →</button>
   </div>
 </div>
 
@@ -82,9 +216,9 @@ ${contactBar}
     </div>
     <div class="steps-bar">
       <div class="step"><div class="step-dot active" id="dot1">1</div><div class="step-label active" id="lbl1">Dados</div></div>
-      <div style="flex:1;height:1px;background:var(--border);"></div>
+      <div style="flex:0 0 36px;height:1px;background:var(--sf-border-2);"></div>
       <div class="step"><div class="step-dot" id="dot2">2</div><div class="step-label" id="lbl2">Entrega</div></div>
-      <div style="flex:1;height:1px;background:var(--border);"></div>
+      <div style="flex:0 0 36px;height:1px;background:var(--sf-border-2);"></div>
       <div class="step"><div class="step-dot" id="dot3">3</div><div class="step-label" id="lbl3">Pagamento</div></div>
     </div>
     <div class="checkout-body" id="checkoutBody"></div>
