@@ -1,69 +1,17 @@
 // ============================================================
 // AURA. -- PDV-01: Caixa de Vendas Touch
 // Venda atomica: sale + items + estoque + metricas + cupom + financeiro
-// TIMEZONE FIX: Todas as datas em SP (America/Sao_Paulo), nao UTC.
-// FIX: Cancel restores stock + sets status='cancelled' + stock_movements
-// FEAT: seller_name — nome da vendedora salvo direto (plano Essencial)
-// FIX 22/04: validacao de estoque variant-aware (Fase C gap)
-// FEAT 05/05/2026: pagamento 'crediario' — cria debit em
-//   customer_credit_transactions e NAO entra no Financeiro/transactions.
-// FEAT 06/05/2026: GET /scan/:code — lookup normalizado por barcode.
-// FIX 06/05/2026: split payments — frontend envia p.value (não p.amount).
-// FIX 07/05/2026: crediário anônimo — cliente não é mais obrigatório.
-// FEAT 07/05/2026: POST /pdv/troca — Troca Option B.
-// FEAT 07/05/2026: Group Stock Visibility (migration 100).
-// CRITICAL FIX 09/05/2026: POST /sale sempre cria sale_payments.
-// HOTFIX 09/05/2026: lookup de caixa_sessoes envolto em try/catch.
-// FEAT 09/05/2026 (troca v2): POST /troca cria 2 transactions distintas.
-// HOTFIX 09/05/2026 (troca caixa): POST /troca cria sale_payments.
-// FEAT 09/05/2026 (crediário Opção A — competência separada).
-// FEAT 11/05/2026 (troca fiscal Onda 1): nfce_strategy='cancel_reissue'.
-// FEAT 11/05/2026 (troca sale_payments split — modelo definitivo).
-// CRITICAL FIX 11/05/2026 (caixa required block — defesa backend):
-//   POST /sale e POST /troca agora bloqueiam com 409 quando o toggle
-//   pdv_settings.caixa_enabled=true E não existe caixa_sessoes 'aberta'.
-// FEAT 12/05/2026 (TROCA CROSS-FILIAL — migration 111 — pedido Davi):
-//   POST /troca aceita original_sale_id de qualquer filial do mesmo
-//   group_root (billing_owner_company_id). Desenho:
-//     - sale.company_id = CNPJ origem da venda (Filial 1).
-//     - sale.seller_id  = vendedor original (em cross-filial); em
-//       same-filial preserva req.user.id pra nao quebrar ranking.
-//     - sale.exchange_seller_id / exchange_employee_id = quem
-//       atendeu a troca presencialmente (Filial 2).
-//     - sale_payments.company_id = req.params.id (Filial 2 fisica)
-//       diverge POR DESIGN de sale.company_id pra conciliacao de
-//       maquininha bater.
-//     - transactions.company_id = saleCompanyId (origem) — DRE da
-//       Filial 1 mostra devolucao + nova venda.
-//     - NFC-e cancel_reissue funciona naturalmente (mesmo CNPJ).
-//   Defesa pre-migration (armadilha_schema_pre_migration): INSERT
-//   com fallback se exchange_* nao existir; bloqueia cross-filial
-//   nesse caso pra evitar dados parciais.
-//   GET /sales-for-troca: novo endpoint pra UI listar vendas do
-//   group_root elegiveis pra troca.
-//   Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md
-// FEAT 12/05/2026 (FASE C — NF-e modelo 55 devolucao — contador OK):
-//   POST /pdv/troca aceita nfce_strategy='devolucao_55' quando NFC-e
-//   original tem >24h (fora da janela de cancel_reissue). Emite NF-e/55
-//   de entrada (tpNF=0, finNFe=4) referenciando a NFC-e original via
-//   refNFe. CFOP=1.202 e CSOSN=102 (confirmado contador Davi 12/05/2026
-//   pra Simples Nacional, varejo, mesma UF SP).
-//   Body extra obrigatorio: customer_address { street, number?,
-//   neighborhood, ibge, city, state, zip }. customers table nao
-//   armazena endereco — frontend coleta no momento da troca.
-//   NAO cancela a NFC-e original (impossivel >24h) — registra a
-//   devolucao via refNFe na NF-e/55.
-//   Logica completa: src/services/trocaDevolucao55.js
-// HOTFIX 14/05/2026: GET /sales-for-troca usava comp.name (companies
-//   só tem trade_name/legal_name). Troca pra COALESCE(trade_name, legal_name).
+// 17/05/2026 (TROCA v2): POST /troca detecta body.original_sale_ids
+//   (array) e delega a trocaV2.handle. v1 (escalar) mantido intacto.
+//   Doc: Aura/AUDITORIA_TROCA_PDV_2026-05-17.docx
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const nuvemfiscal = require('../services/nuvemfiscal');
 const trocaDevolucao55 = require('../services/trocaDevolucao55');
+const trocaV2 = require('../services/trocaV2');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
-
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 const SP_DATE_COL = (col) => `(${col} AT TIME ZONE 'America/Sao_Paulo')::date`;
 
@@ -81,29 +29,22 @@ function calcCreditAmount({ payment_method, payments, totalAmount }) {
   return 0;
 }
 
-// ──────────────────────────────────────────────────────────────
-// 11/05/2026 — Defesa backend: bloqueia operação se caixa fechado.
-// ──────────────────────────────────────────────────────────────
 async function assertCaixaOpenOrAllowed(client, companyId) {
   try {
     const { rows: cfgRows } = await client.query(
-      `SELECT pdv_settings FROM companies WHERE id = $1`,
-      [companyId]
+      `SELECT pdv_settings FROM companies WHERE id = $1`, [companyId]
     );
     const caixaRequired = !!(cfgRows[0]?.pdv_settings?.caixa_enabled);
     if (!caixaRequired) return { ok: true };
-
     const { rows: sessoes } = await client.query(
       `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
       [companyId]
     );
     if (sessoes.length > 0) return { ok: true };
-
     return {
-      ok: false,
-      status: 409,
+      ok: false, status: 409,
       body: {
-        error: 'Abra o caixa antes de finalizar a venda. Ou desabilite a exigência em Configurações > PDV > Políticas do Caixa.',
+        error: 'Abra o caixa antes de finalizar a venda.',
         code: 'CAIXA_REQUIRED',
       },
     };
@@ -113,45 +54,32 @@ async function assertCaixaOpenOrAllowed(client, companyId) {
   }
 }
 
-// ──────────────────────────────────────────────────────────────
-// 12/05/2026 (troca cross-filial) — cache module-level pra checar se
-// migration 111 ja foi aplicada (exchange_seller_id + exchange_employee_id).
-// Padrao armadilha_schema_pre_migration: backend nao roda migrations
-// no boot, entao o codigo defensivo evita 500 se a coluna nao existe.
-// Cache expira em 60s pra auto-detectar quando a migration roda em prod.
-// ──────────────────────────────────────────────────────────────
 let _exchangeColsCheckedAt = 0;
 let _exchangeColsAvailable = null;
 async function hasExchangeCols(client) {
   const now = Date.now();
-  if (_exchangeColsAvailable !== null && (now - _exchangeColsCheckedAt) < 60000) {
-    return _exchangeColsAvailable;
-  }
+  if (_exchangeColsAvailable !== null && (now - _exchangeColsCheckedAt) < 60000) return _exchangeColsAvailable;
   try {
     const r = await client.query(
       `SELECT COUNT(*) AS n FROM information_schema.columns
-        WHERE table_name = 'sales'
-          AND column_name IN ('exchange_seller_id','exchange_employee_id')`
+        WHERE table_name = 'sales' AND column_name IN ('exchange_seller_id','exchange_employee_id')`
     );
     _exchangeColsAvailable = parseInt(r.rows[0]?.n || '0', 10) === 2;
   } catch (e) {
-    console.warn('[PDV troca] hasExchangeCols probe falhou:', e.message);
     _exchangeColsAvailable = false;
   }
   _exchangeColsCheckedAt = now;
   return _exchangeColsAvailable;
 }
 
-// ── GET /companies/:id/pdv/scan/:code ────────────────────────
+// ===== GET /scan/:code =====
 router.get('/scan/:code', async (req, res) => {
   const raw = decodeURIComponent(req.params.code || '').trim();
   if (!raw) return res.status(400).json({ error: 'code obrigatorio', match: 'none' });
-
   const candidates = new Set([raw]);
-  if (/^\d{12}$/.test(raw))                            candidates.add('0' + raw);
-  if (/^\d{13}$/.test(raw) && raw.startsWith('0'))    candidates.add(raw.slice(1));
+  if (/^\d{12}$/.test(raw)) candidates.add('0' + raw);
+  if (/^\d{13}$/.test(raw) && raw.startsWith('0')) candidates.add(raw.slice(1));
   const alts = [...candidates];
-
   try {
     const { rows: prods } = await db.query(
       `SELECT p.id, p.name, p.price, p.cost_price, p.barcode, p.stock_qty, p.has_variants,
@@ -159,33 +87,23 @@ router.get('/scan/:code', async (req, res) => {
        FROM products p
        JOIN companies c ON c.id = $1
        WHERE (p.company_id = $1 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))
-         AND p.barcode = ANY($2::text[])
-         AND p.is_active = true
+         AND p.barcode = ANY($2::text[]) AND p.is_active = true
        LIMIT 1`,
       [req.params.id, alts]
     );
-
     if (prods.length) {
       const p = prods[0];
       return res.json({
-        match: 'exact',
-        source: 'barcode',
+        match: 'exact', source: 'barcode',
         product: {
-          id:          p.id,
-          name:        p.name,
-          price:       parseFloat(p.price) || 0,
-          cost_price:  parseFloat(p.cost_price) || 0,
-          barcode:     p.barcode,
-          stock_qty:   parseInt(p.stock_qty) || 0,
-          has_variants: p.has_variants || false,
-          category:    p.category,
-          image_url:   p.image_url,
-          sku:         p.sku,
+          id: p.id, name: p.name, price: parseFloat(p.price) || 0,
+          cost_price: parseFloat(p.cost_price) || 0, barcode: p.barcode,
+          stock_qty: parseInt(p.stock_qty) || 0, has_variants: p.has_variants || false,
+          category: p.category, image_url: p.image_url, sku: p.sku,
           stock_company_id: p.stock_company_id,
         },
       });
     }
-
     const { rows: vars } = await db.query(
       `SELECT pv.id AS variant_id, pv.price_override, pv.sku_suffix, pv.stock_qty AS variant_stock,
               p.id, p.name, p.price, p.barcode, p.image_url, p.company_id AS stock_company_id
@@ -193,58 +111,42 @@ router.get('/scan/:code', async (req, res) => {
        JOIN products p ON p.id = pv.product_id
        JOIN companies c ON c.id = $1
        WHERE (p.company_id = $1 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))
-         AND pv.barcode = ANY($2::text[])
-         AND pv.is_active = true
-         AND p.is_active = true
+         AND pv.barcode = ANY($2::text[]) AND pv.is_active = true AND p.is_active = true
        LIMIT 1`,
       [req.params.id, alts]
     );
-
     if (vars.length) {
       const v = vars[0];
       return res.json({
-        match: 'exact',
-        source: 'variant_barcode',
+        match: 'exact', source: 'variant_barcode',
         product: {
-          id:        v.id,
-          name:      v.name,
-          price:     parseFloat(v.price) || 0,
-          barcode:   v.barcode,
-          image_url: v.image_url,
-          sku_suffix: v.sku_suffix,
+          id: v.id, name: v.name, price: parseFloat(v.price) || 0,
+          barcode: v.barcode, image_url: v.image_url, sku_suffix: v.sku_suffix,
           stock_company_id: v.stock_company_id,
         },
-        variant_id:      v.variant_id,
+        variant_id: v.variant_id,
         effective_price: parseFloat(v.price_override) || parseFloat(v.price) || 0,
       });
     }
-
-    return res.json({
-      match: 'none',
-      message: 'Nenhum produto encontrado para este codigo de barras',
-    });
+    return res.json({ match: 'none', message: 'Nenhum produto encontrado' });
   } catch (e) {
     console.error('[PDV] scan error:', e.message);
-    res.status(500).json({ error: 'Erro ao buscar produto por codigo de barras', match: 'none' });
+    res.status(500).json({ error: 'Erro ao buscar produto', match: 'none' });
   }
 });
 
-// POST /companies/:id/pdv/sale
+// ===== POST /sale (v1 inalterado) =====
 router.post('/sale', async (req, res) => {
   const {
     items, customer_id, employee_id, payment_method,
-    discount_amount, discount_pct, coupon_code,
-    notes, seller_id, payments,
+    discount_amount, discount_pct, coupon_code, notes, seller_id, payments,
     sale_date, seller_name,
   } = req.body;
-
-  if (!items?.length)
-    return res.status(400).json({ error: 'items obrigatorio' });
+  if (!items?.length) return res.status(400).json({ error: 'items obrigatorio' });
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
-
     if (!sale_date) {
       const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
       if (!caixaCheck.ok) {
@@ -252,35 +154,29 @@ router.post('/sale', async (req, res) => {
         return res.status(caixaCheck.status).json(caixaCheck.body);
       }
     }
-
     let subtotal = 0;
     const enrichedItems = [];
     const productNames = [];
-
     for (const item of items) {
-      const qty       = parseFloat(item.quantity);
+      const qty = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unit_price);
       const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
       subtotal += lineTotal;
-
       let productName = item.product_name_snapshot || '';
-      let costPrice   = 0;
+      let costPrice = 0;
       let stockCompanyId = req.params.id;
-
       if (item.product_id) {
         const { rows: p } = await client.query(
           `SELECT p.name, p.cost_price, p.stock_qty, p.company_id AS stock_company_id
-           FROM products p
-           JOIN companies c ON c.id = $2
+           FROM products p JOIN companies c ON c.id = $2
            WHERE p.id = $1
              AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
           [item.product_id, req.params.id]
         );
         if (p.length) {
-          productName  = productName || p[0].name;
-          costPrice    = parseFloat(p[0].cost_price || 0);
+          productName = productName || p[0].name;
+          costPrice = parseFloat(p[0].cost_price || 0);
           stockCompanyId = p[0].stock_company_id;
-
           let stockAvailable = parseFloat(p[0].stock_qty);
           let stockLabel = p[0].name;
           if (item.variant_id) {
@@ -293,13 +189,11 @@ router.post('/sale', async (req, res) => {
               stockLabel = p[0].name + (v[0].sku_suffix ? ` (${v[0].sku_suffix})` : ' (variante)');
             }
           }
-
           if (!sale_date && stockAvailable < qty) {
             await client.query('ROLLBACK');
             return res.status(409).json({
               error: `Estoque insuficiente para "${stockLabel}". Disponivel: ${stockAvailable}`,
-              product_id: item.product_id,
-              variant_id: item.variant_id || null,
+              product_id: item.product_id, variant_id: item.variant_id || null,
             });
           }
         }
@@ -307,11 +201,9 @@ router.post('/sale', async (req, res) => {
       productNames.push(productName);
       enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, line_total: lineTotal, stock_company_id: stockCompanyId });
     }
-
     let discountAmt = 0;
     let couponId = null;
     let couponCodeUsed = null;
-
     if (coupon_code) {
       const upperCode = String(coupon_code).toUpperCase().trim();
       const { rows: coupons } = await client.query(
@@ -334,21 +226,15 @@ router.post('/sale', async (req, res) => {
       discountAmt = parseFloat((subtotal * parseFloat(discount_pct) / 100).toFixed(2));
     }
     const totalAmount = parseFloat((subtotal - discountAmt).toFixed(2));
-
     if (employee_id) {
       const { rows: empCheck } = await client.query(
         `SELECT id FROM employees WHERE id=$1 AND company_id=$2`, [employee_id, req.params.id]
       );
       if (!empCheck.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' }); }
     }
-
     const rawCreditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
     const creditAmount = (rawCreditAmount > 0 && customer_id) ? rawCreditAmount : 0;
     const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
-
-    // TIMEZONE FIX 13/05/2026: venda retroativa (sale_date presente) seta
-    // created_at para meia-noite SP do dia informado (sale_date::date + 3h UTC).
-    // Sem sale_date o DB usa NOW() normalmente (venda ao vivo).
     const { rows: sales } = await client.query(
       sale_date
         ? `INSERT INTO sales
@@ -364,8 +250,7 @@ router.post('/sale', async (req, res) => {
       [
         req.params.id, customer_id || null,
         seller_id || req.user?.id || null,
-        employee_id || null,
-        seller_name || null,
+        employee_id || null, seller_name || null,
         totalAmount, discountAmt,
         payment_method || (payments?.[0]?.method) || 'dinheiro',
         notes || null, couponId, couponCodeUsed,
@@ -373,7 +258,6 @@ router.post('/sale', async (req, res) => {
       ]
     );
     const sale = sales[0];
-
     for (const item of enrichedItems) {
       await client.query(
         `INSERT INTO sale_items
@@ -386,7 +270,6 @@ router.post('/sale', async (req, res) => {
           item.item_discount || 0, item.line_total, item.product_name_snapshot,
         ]
       );
-
       if (item.product_id) {
         if (item.variant_id) {
           await client.query(
@@ -406,7 +289,6 @@ router.post('/sale', async (req, res) => {
         );
       }
     }
-
     if (customer_id) {
       await client.query(
         `UPDATE customers SET total_purchases=total_purchases+1, total_spent=total_spent+$1,
@@ -415,7 +297,6 @@ router.post('/sale', async (req, res) => {
         [totalAmount, customer_id, req.params.id]
       );
     }
-
     if (employee_id) {
       await client.query(
         `UPDATE employees SET total_sales=COALESCE(total_sales,0)+1, total_revenue=COALESCE(total_revenue,0)+$1, updated_at=NOW()
@@ -423,43 +304,30 @@ router.post('/sale', async (req, res) => {
         [totalAmount, employee_id, req.params.id]
       );
     }
-
     if (couponId) {
       await client.query(
-        `UPDATE coupons SET current_uses=current_uses+1, updated_at=NOW() WHERE id=$1`,
-        [couponId]
+        `UPDATE coupons SET current_uses=current_uses+1, updated_at=NOW() WHERE id=$1`, [couponId]
       );
     }
-
     if (creditAmount > 0) {
       await client.query(
         `INSERT INTO customer_credit_transactions
            (company_id, customer_id, sale_id, type, amount, notes, created_by)
          VALUES ($1, $2, $3, 'debit', $4, $5, $6)`,
-        [
-          req.params.id, customer_id, sale.id, creditAmount,
-          `Venda no crediario (${productNames.slice(0, 2).join(', ') || 'Venda'})`,
-          req.user?.id || null,
-        ]
+        [req.params.id, customer_id, sale.id, creditAmount,
+         `Venda no crediario (${productNames.slice(0, 2).join(', ') || 'Venda'})`,
+         req.user?.id || null]
       );
-
       await client.query(
         `INSERT INTO transactions
-           (company_id, type, status, amount, description, category,
-            due_date, paid_at, created_by, idempotency_key)
-         VALUES ($1, 'income', 'pending', $2, $3, 'Crediário - A Receber',
-                 ${SP_DATE_NOW}, NULL, $4, $5)
+           (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
+         VALUES ($1, 'income', 'pending', $2, $3, 'Crediario - A Receber', ${SP_DATE_NOW}, NULL, $4, $5)
          ON CONFLICT (idempotency_key) DO NOTHING`,
-        [
-          req.params.id,
-          creditAmount,
-          `Crediário - venda ${sale.id} (${productNames.slice(0, 2).join(', ') || 'venda'})`,
-          req.user?.id || null,
-          'pdv-credit-receivable-' + sale.id,
-        ]
+        [req.params.id, creditAmount,
+         `Crediario - venda ${sale.id}`, req.user?.id || null,
+         'pdv-credit-receivable-' + sale.id]
       );
     }
-
     let activeSessaoId = null;
     try {
       const sessRes = await client.query(
@@ -467,10 +335,7 @@ router.post('/sale', async (req, res) => {
         [req.params.id]
       );
       activeSessaoId = sessRes?.rows?.[0]?.id || null;
-    } catch (sessErr) {
-      // best-effort
-    }
-
+    } catch (sessErr) {}
     if (Array.isArray(payments) && payments.length > 0) {
       for (const p of payments) {
         const m = (p.method || '').toLowerCase();
@@ -493,9 +358,8 @@ router.post('/sale', async (req, res) => {
         );
       }
     }
-
     if (cashAmount > 0) {
-      const itemsSummary = productNames.slice(0, 3).join(', ') + (productNames.length > 3 ? ` +${productNames.length - 3}` : '');
+      const itemsSummary = productNames.slice(0, 3).join(', ');
       let payLabel = payment_method || 'dinheiro';
       if (Array.isArray(payments) && payments.length > 0) {
         const nonCredit = payments.find(p => (p.method || '').toLowerCase() !== 'crediario');
@@ -507,7 +371,6 @@ router.post('/sale', async (req, res) => {
       const dueDateExpr = sale_date ? `$6::date` : SP_DATE_NOW;
       const txParams = [req.params.id, cashAmount, txDesc, req.user?.id || null, 'pdv-sale-' + sale.id];
       if (sale_date) txParams.push(sale_date);
-
       await client.query(
         `INSERT INTO transactions
            (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
@@ -516,27 +379,19 @@ router.post('/sale', async (req, res) => {
         txParams
       );
     }
-
     await client.query('COMMIT');
-
     const { rows: saleItems } = await db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si
        LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`, [sale.id]
     );
-
     let creditInfo = null;
     if (creditAmount > 0) {
       const { rows: bal } = await db.query(
-        `SELECT balance FROM customer_credit_balances
-          WHERE customer_id=$1 AND company_id=$2`,
+        `SELECT balance FROM customer_credit_balances WHERE customer_id=$1 AND company_id=$2`,
         [customer_id, req.params.id]
       );
-      creditInfo = {
-        debited: creditAmount,
-        new_balance: parseFloat(bal[0]?.balance || 0),
-      };
+      creditInfo = { debited: creditAmount, new_balance: parseFloat(bal[0]?.balance || 0) };
     }
-
     res.status(201).json({
       sale: { ...sale, items: saleItems },
       coupon_applied: couponCodeUsed ? { code: couponCodeUsed, discount: discountAmt } : null,
@@ -550,7 +405,7 @@ router.post('/sale', async (req, res) => {
   } finally { client.release(); }
 });
 
-// GET /companies/:id/pdv/sale/:saleId
+// ===== GET routes =====
 router.get('/sale/:saleId', async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -568,40 +423,46 @@ router.get('/sale/:saleId', async (req, res) => {
     );
     res.json({ ...rows[0], items });
   } catch (e) {
-    console.error('[PDV] Erro ao buscar venda:', e.message);
     res.status(500).json({ error: 'Erro ao buscar venda' });
   }
 });
 
-// GET /companies/:id/pdv/sales — exclui canceladas por padrao
 router.get('/sales', async (req, res) => {
-  const { date, limit = 50, offset = 0, include_cancelled } = req.query;
+  const { date, limit = 50, offset = 0, include_cancelled, product_barcode, date_from, date_to, status } = req.query;
   const cond = ['s.company_id=$1'];
   const vals = [req.params.id];
   let i = 2;
   if (date) { cond.push(`${SP_DATE_COL('s.created_at')}=$${i++}`); vals.push(date); }
-  if (!include_cancelled) { cond.push("s.status != 'cancelled'"); }
+  if (date_from) { cond.push(`s.created_at >= $${i++}`); vals.push(date_from); }
+  if (date_to) { cond.push(`s.created_at <= $${i++}`); vals.push(date_to); }
+  if (status === 'active') cond.push("s.status != 'cancelled'");
+  else if (!include_cancelled) cond.push("s.status != 'cancelled'");
+  if (product_barcode) {
+    cond.push(`EXISTS (SELECT 1 FROM sale_items si2 JOIN products p2 ON p2.id = si2.product_id
+      WHERE si2.sale_id = s.id AND p2.barcode = $${i})`);
+    vals.push(product_barcode);
+    i++;
+  }
   try {
     const { rows } = await db.query(
       `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.coupon_code, s.status,
               s.seller_name, s.created_at,
-              u.full_name AS user_seller_name, c.name AS customer_name, e.name AS employee_name,
-              COUNT(si.id) AS item_count
+              u.full_name AS user_seller_name, c.name AS customer_name, c.cpf_cnpj AS cpf_cnpj,
+              e.name AS employee_name,
+              COUNT(si.id) AS items_count
        FROM sales s LEFT JOIN users u ON u.id=s.seller_id LEFT JOIN customers c ON c.id=s.customer_id
        LEFT JOIN employees e ON e.id=s.employee_id
        LEFT JOIN sale_items si ON si.sale_id=s.id
-       WHERE ${cond.join(' AND ')} GROUP BY s.id, u.full_name, c.name, e.name
+       WHERE ${cond.join(' AND ')} GROUP BY s.id, u.full_name, c.name, c.cpf_cnpj, e.name
        ORDER BY s.created_at DESC LIMIT $${i} OFFSET $${i+1}`,
       [...vals, limit, offset]
     );
-    res.json(rows);
+    res.json({ sales: rows });
   } catch (e) {
-    console.error('[PDV] Erro ao listar vendas:', e.message);
     res.status(500).json({ error: 'Erro ao listar vendas' });
   }
 });
 
-// GET /companies/:id/pdv/summary — exclui canceladas
 router.get('/summary', async (req, res) => {
   const date = req.query.date
     || new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
@@ -613,17 +474,16 @@ router.get('/summary', async (req, res) => {
               json_object_agg(payment_method, cnt) AS by_payment_method
        FROM (SELECT s.total_amount, s.discount_amount, s.payment_method,
                     COUNT(*) OVER (PARTITION BY s.payment_method) AS cnt
-             FROM sales s WHERE s.company_id=$1 AND ${SP_DATE_COL('s.created_at')}=$2 AND s.status != 'cancelled') sub`,
+             FROM sales s WHERE s.company_id=$1 AND ${SP_DATE_COL('s.created_at')}=$2
+               AND s.status != 'cancelled') sub`,
       [req.params.id, date]
     );
     res.json({ date, ...rows[0] });
   } catch (e) {
-    console.error('[PDV] Erro ao buscar resumo:', e.message);
-    res.status(500).json({ error: 'Erro ao buscar resumo do caixa' });
+    res.status(500).json({ error: 'Erro ao buscar resumo' });
   }
 });
 
-// GET /companies/:id/pdv/employee-ranking — exclui canceladas
 router.get('/employee-ranking', async (req, res) => {
   const { period = '30d' } = req.query;
   const days = period === '7d' ? 7 : period === '90d' ? 90 : 30;
@@ -643,12 +503,10 @@ router.get('/employee-ranking', async (req, res) => {
     );
     res.json({ period, employees: rows });
   } catch (e) {
-    console.error('[PDV] Erro ao buscar ranking:', e.message);
-    res.status(500).json({ error: 'Erro ao buscar ranking de funcionarios' });
+    res.status(500).json({ error: 'Erro ao buscar ranking' });
   }
 });
 
-// DELETE /companies/:id/pdv/sale/:saleId — CANCELAR VENDA
 router.delete('/sale/:saleId', async (req, res) => {
   const client = await db.connect();
   try {
@@ -660,13 +518,10 @@ router.delete('/sale/:saleId', async (req, res) => {
     if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda nao encontrada' }); }
     const sale = rows[0];
     if (sale.status === 'cancelled') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Esta venda ja foi cancelada' }); }
-
     const { rows: items } = await client.query(
       `SELECT si.product_id, si.variant_id, si.quantity, si.product_name_snapshot,
               COALESCE(p.company_id, $2) AS stock_company_id
-       FROM sale_items si
-       LEFT JOIN products p ON p.id = si.product_id
-       WHERE si.sale_id=$1`,
+       FROM sale_items si LEFT JOIN products p ON p.id = si.product_id WHERE si.sale_id=$1`,
       [req.params.saleId, req.params.id]
     );
     for (const item of items) {
@@ -681,10 +536,9 @@ router.delete('/sale/:saleId', async (req, res) => {
       await client.query(
         `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
          VALUES ($1,$2,'in',$3,$4,'sale_cancel',$5)`,
-        [item.product_id, stockCompanyId, qty, req.params.saleId, 'Cancelamento venda - ' + (item.product_name_snapshot || 'Produto')]
+        [item.product_id, stockCompanyId, qty, req.params.saleId, 'Cancelamento - ' + (item.product_name_snapshot || 'Produto')]
       );
     }
-
     if (sale.customer_id) {
       await client.query(
         `UPDATE customers SET total_purchases=GREATEST(0,total_purchases-1), total_spent=GREATEST(0,total_spent-$1), updated_at=NOW()
@@ -702,13 +556,10 @@ router.delete('/sale/:saleId', async (req, res) => {
     if (sale.coupon_id) {
       await client.query(`UPDATE coupons SET current_uses=GREATEST(0,current_uses-1), updated_at=NOW() WHERE id=$1`, [sale.coupon_id]);
     }
-
     await client.query(
-      `DELETE FROM customer_credit_transactions
-        WHERE sale_id = $1 AND company_id = $2 AND type = 'debit'`,
+      `DELETE FROM customer_credit_transactions WHERE sale_id = $1 AND company_id = $2 AND type = 'debit'`,
       [req.params.saleId, req.params.id]
     );
-
     await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-sale-' + req.params.saleId, req.params.id]);
     await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-credit-receivable-' + req.params.saleId, req.params.id]);
     await client.query(
@@ -716,148 +567,88 @@ router.delete('/sale/:saleId', async (req, res) => {
          notes=CONCAT(COALESCE(notes,''),' [CANCELADA]'), updated_at=NOW() WHERE id=$2`,
       [req.user?.id || null, req.params.saleId]
     );
-
     await client.query('COMMIT');
     res.json({ ok: true, cancelled: req.params.saleId, items_restored: items.filter(i => i.product_id).length, amount_reversed: parseFloat(sale.total_amount) });
   } catch (e) {
     await client.query('ROLLBACK');
-    console.error('[PDV] Erro ao cancelar venda:', e.message);
     res.status(500).json({ error: 'Erro ao cancelar venda' });
   } finally { client.release(); }
 });
 
-// ── POST /companies/:id/pdv/troca ────────────────────────────
-// CROSS-FILIAL (12/05/2026 — migration 111 — pedido Davi):
-// Veja header do arquivo pra desenho completo.
-// Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md
+// ===== POST /troca — DETECCAO DUAL v1/v2 + handler v1 =====
 router.post('/troca', async (req, res) => {
+  // v2 detection (multi-venda + splits + payouts)
+  if (Array.isArray(req.body && req.body.original_sale_ids)) {
+    return trocaV2.handle(req, res);
+  }
+  // v1 path (legado — original_sale_id escalar)
   const {
-    original_sale_id,
-    returned_items = [],
-    new_items = [],
-    payment_method,
-    customer_id,
-    employee_id,
-    seller_name,
-    // 12/05/2026 (Fase C): endereco do cliente pra NF-e/55 devolucao.
-    // Backend obriga quando nfce_strategy='devolucao_55'.
-    customer_address,
+    original_sale_id, returned_items = [], new_items = [],
+    payment_method, customer_id, employee_id, seller_name, customer_address,
   } = req.body;
-
-  if (!original_sale_id)
-    return res.status(400).json({ error: 'original_sale_id obrigatorio' });
+  if (!original_sale_id) return res.status(400).json({ error: 'original_sale_id obrigatorio' });
   if (!returned_items.length && !new_items.length)
     return res.status(400).json({ error: 'Informe ao menos um item devolvido ou novo' });
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
-
-    // Caixa físico (Filial 2) tem que estar aberto - operação acontece lá.
     const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
     if (!caixaCheck.ok) {
       await client.query('ROLLBACK');
       return res.status(caixaCheck.status).json(caixaCheck.body);
     }
-
-    // Lookup venda original via group_root bidirecional (padrão migration
-    // 102 + memória armadilha_group_shared_write_path).
     const { rows: origRows } = await client.query(
       `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id
-         FROM sales s
-         JOIN companies c ON c.id = $2
+         FROM sales s JOIN companies c ON c.id = $2
         WHERE s.id = $1
-          AND (
-            s.company_id = $2
-            OR EXISTS (
-              SELECT 1 FROM companies c2
-               WHERE c2.id = s.company_id
-                 AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)
-                   = COALESCE(NULLIF(c.billing_owner_company_id, c.id), c.id)
-            )
-          )`,
+          AND (s.company_id = $2 OR EXISTS (
+            SELECT 1 FROM companies c2
+             WHERE c2.id = s.company_id
+               AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)
+                 = COALESCE(NULLIF(c.billing_owner_company_id, c.id), c.id)))`,
       [original_sale_id, req.params.id]
     );
-    if (!origRows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Venda original nao encontrada (mesma empresa ou grupo)' });
-    }
-    if (origRows[0].status === 'cancelled') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Nao e possivel trocar itens de uma venda cancelada' });
-    }
-
+    if (!origRows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda original nao encontrada' }); }
+    if (origRows[0].status === 'cancelled') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Venda cancelada' }); }
     const originSale = origRows[0];
     const isCrossFilial = originSale.company_id !== req.params.id;
     const saleCompanyId = originSale.company_id;
-
-    const trocaSellerId   = isCrossFilial ? originSale.seller_id : (req.user?.id || null);
+    const trocaSellerId = isCrossFilial ? originSale.seller_id : (req.user?.id || null);
     const trocaEmployeeId = isCrossFilial ? originSale.employee_id : (employee_id || null);
-    const exchangeSellerId   = isCrossFilial ? (req.user?.id || null) : null;
+    const exchangeSellerId = isCrossFilial ? (req.user?.id || null) : null;
     const exchangeEmployeeId = isCrossFilial ? (employee_id || null) : null;
-
     const exchColsOk = await hasExchangeCols(client);
     if (isCrossFilial && !exchColsOk) {
       await client.query('ROLLBACK');
-      console.error('[PDV troca] cross-filial bloqueado: migration 111 ainda nao aplicada');
-      return res.status(503).json({
-        error: 'Troca cross-filial indisponível: migration 111 ainda não aplicada no banco. Avise o admin.',
-        code: 'MIGRATION_111_PENDING',
-      });
+      return res.status(503).json({ error: 'Troca cross-filial: migration 111 nao aplicada', code: 'MIGRATION_111_PENDING' });
     }
-
     const { rows: origItems } = await client.query(
       `SELECT product_id, variant_id, quantity, unit_price, product_name_snapshot
-         FROM sale_items WHERE sale_id=$1`,
-      [original_sale_id]
+         FROM sale_items WHERE sale_id=$1`, [original_sale_id]
     );
-
     for (const ret of returned_items) {
-      if (!ret.product_id) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Cada item devolvido precisa de product_id' });
-      }
-      const origItem = origItems.find(
-        o => o.product_id === ret.product_id &&
-             (ret.variant_id ? o.variant_id === ret.variant_id : !o.variant_id)
-      );
-      if (!origItem) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({
-          error: `Produto ${ret.product_name_snapshot || ret.product_id} nao encontrado na venda original`,
-        });
-      }
+      if (!ret.product_id) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'product_id obrigatorio' }); }
+      const origItem = origItems.find(o => o.product_id === ret.product_id &&
+        (ret.variant_id ? o.variant_id === ret.variant_id : !o.variant_id));
+      if (!origItem) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Produto nao encontrado na venda original` }); }
       if (parseFloat(ret.quantity) > parseFloat(origItem.quantity)) {
         await client.query('ROLLBACK');
-        return res.status(400).json({
-          error: `Quantidade devolvida (${ret.quantity}) excede a original (${origItem.quantity}) para "${origItem.product_name_snapshot || ret.product_id}"`,
-        });
+        return res.status(400).json({ error: `Quantidade excede a original` });
       }
     }
-
-    const returnedValue = returned_items.reduce(
-      (acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0
-    );
-    const newValue = new_items.reduce(
-      (acc, n) => acc + parseFloat(n.quantity) * parseFloat(n.unit_price), 0
-    );
+    const returnedValue = returned_items.reduce((acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0);
+    const newValue = new_items.reduce((acc, n) => acc + parseFloat(n.quantity) * parseFloat(n.unit_price), 0);
     const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
     const saleTotal = parseFloat(newValue.toFixed(2));
-
     for (const ret of returned_items) {
       const qty = parseFloat(ret.quantity);
       const { rows: pInfo } = await client.query('SELECT company_id FROM products WHERE id=$1', [ret.product_id]);
       const stockCompanyId = pInfo[0]?.company_id || req.params.id;
       if (ret.variant_id) {
-        await client.query(
-          `UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`,
-          [qty, ret.variant_id]
-        );
+        await client.query(`UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`, [qty, ret.variant_id]);
       } else {
-        await client.query(
-          `UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`,
-          [qty, ret.product_id, stockCompanyId]
-        );
+        await client.query(`UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`, [qty, ret.product_id, stockCompanyId]);
       }
       await client.query(
         `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
@@ -865,146 +656,83 @@ router.post('/troca', async (req, res) => {
         [ret.product_id, stockCompanyId, qty, original_sale_id]
       );
     }
-
     for (const item of new_items) {
       if (!item.product_id) continue;
       const qty = parseFloat(item.quantity);
-      let stockAvailable;
-      let stockLabel = item.product_name_snapshot || item.product_id;
-      let trocaStockCompanyId = req.params.id;
-
+      let stockAvailable; let stockLabel = item.product_name_snapshot || item.product_id; let trocaStockCompanyId = req.params.id;
       if (item.variant_id) {
         const { rows: vr } = await client.query(
           `SELECT pv.stock_qty, pv.sku_suffix, p.company_id AS stock_company_id
-             FROM product_variants pv
-             JOIN products p ON p.id = pv.product_id
+             FROM product_variants pv JOIN products p ON p.id = pv.product_id
             WHERE pv.id=$1 AND pv.product_id=$2`,
           [item.variant_id, item.product_id]
         );
-        if (vr.length) {
-          stockAvailable = parseFloat(vr[0].stock_qty);
-          stockLabel += vr[0].sku_suffix ? ` (${vr[0].sku_suffix})` : ' (variante)';
-          trocaStockCompanyId = vr[0].stock_company_id || req.params.id;
-        }
+        if (vr.length) { stockAvailable = parseFloat(vr[0].stock_qty); trocaStockCompanyId = vr[0].stock_company_id || req.params.id; }
       } else {
         const { rows: pr } = await client.query(
           `SELECT p.stock_qty, p.company_id AS stock_company_id
-             FROM products p
-             JOIN companies c ON c.id = $2
+             FROM products p JOIN companies c ON c.id = $2
             WHERE p.id = $1
               AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
           [item.product_id, req.params.id]
         );
-        if (pr.length) {
-          stockAvailable = parseFloat(pr[0].stock_qty);
-          trocaStockCompanyId = pr[0].stock_company_id || req.params.id;
-        }
+        if (pr.length) { stockAvailable = parseFloat(pr[0].stock_qty); trocaStockCompanyId = pr[0].stock_company_id || req.params.id; }
       }
-
       if (stockAvailable !== undefined && stockAvailable < qty) {
         await client.query('ROLLBACK');
-        return res.status(409).json({
-          error: `Estoque insuficiente para "${stockLabel}". Disponivel: ${stockAvailable}`,
-          product_id: item.product_id,
-          variant_id: item.variant_id || null,
-        });
+        return res.status(409).json({ error: `Estoque insuficiente para "${stockLabel}"` });
       }
-
       if (item.variant_id) {
-        await client.query(
-          `UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2`,
-          [qty, item.variant_id]
-        );
+        await client.query(`UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2`, [qty, item.variant_id]);
       } else {
-        await client.query(
-          `UPDATE products SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2 AND company_id=$3`,
-          [qty, item.product_id, trocaStockCompanyId]
-        );
+        await client.query(`UPDATE products SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2 AND company_id=$3`, [qty, item.product_id, trocaStockCompanyId]);
       }
       item._stock_company_id = trocaStockCompanyId;
     }
-
     let trocaSales;
     if (exchColsOk) {
       const result = await client.query(
         `INSERT INTO sales
            (company_id, customer_id, seller_id, employee_id, seller_name,
             exchange_seller_id, exchange_employee_id,
-            total_amount, discount_amount, payment_method, notes,
-            status, type, exchange_of_sale_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,'completed','troca',$11)
-         RETURNING *`,
-        [
-          saleCompanyId,
-          customer_id || null,
-          trocaSellerId,
-          trocaEmployeeId,
-          seller_name || null,
-          exchangeSellerId,
-          exchangeEmployeeId,
-          saleTotal,
-          payment_method || 'dinheiro',
-          `Troca referente a venda ${original_sale_id}`,
-          original_sale_id,
-        ]
+            total_amount, discount_amount, payment_method, notes, status, type, exchange_of_sale_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,'completed','troca',$11) RETURNING *`,
+        [saleCompanyId, customer_id || null, trocaSellerId, trocaEmployeeId, seller_name || null,
+         exchangeSellerId, exchangeEmployeeId, saleTotal, payment_method || 'dinheiro',
+         `Troca de venda ${original_sale_id}`, original_sale_id]
       );
       trocaSales = result.rows;
     } else {
       const fallback = await client.query(
         `INSERT INTO sales
            (company_id, customer_id, seller_id, employee_id, seller_name,
-            total_amount, discount_amount, payment_method, notes,
-            status, type, exchange_of_sale_id)
-         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'completed','troca',$9)
-         RETURNING *`,
-        [
-          saleCompanyId, customer_id || null, trocaSellerId, trocaEmployeeId,
-          seller_name || null, saleTotal,
-          payment_method || 'dinheiro',
-          `Troca referente a venda ${original_sale_id}`,
-          original_sale_id,
-        ]
+            total_amount, discount_amount, payment_method, notes, status, type, exchange_of_sale_id)
+         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'completed','troca',$9) RETURNING *`,
+        [saleCompanyId, customer_id || null, trocaSellerId, trocaEmployeeId, seller_name || null,
+         saleTotal, payment_method || 'dinheiro',
+         `Troca de venda ${original_sale_id}`, original_sale_id]
       );
       trocaSales = fallback.rows;
     }
     const trocaSale = trocaSales[0];
-
     for (const item of new_items) {
       const qty = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unit_price);
       const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
-
-      let costPrice = 0;
-      let productName = item.product_name_snapshot || '';
+      let costPrice = 0; let productName = item.product_name_snapshot || '';
       if (item.product_id) {
         const { rows: pr } = await client.query(
-          `SELECT p.name, p.cost_price
-             FROM products p
-             JOIN companies c ON c.id = $2
-            WHERE p.id = $1
-              AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
+          `SELECT p.name, p.cost_price FROM products p JOIN companies c ON c.id = $2
+            WHERE p.id = $1 AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
           [item.product_id, req.params.id]
         );
-        if (pr.length) {
-          productName = productName || pr[0].name;
-          costPrice = parseFloat(pr[0].cost_price || 0);
-        }
+        if (pr.length) { productName = productName || pr[0].name; costPrice = parseFloat(pr[0].cost_price || 0); }
       }
-
       await client.query(
-        `INSERT INTO sale_items
-           (sale_id, product_id, variant_id, quantity, unit_price,
-            unit_cost, discount, total_price, product_name_snapshot)
+        `INSERT INTO sale_items (sale_id, product_id, variant_id, quantity, unit_price, unit_cost, discount, total_price, product_name_snapshot)
          VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8)`,
-        [
-          trocaSale.id,
-          item.product_id || null,
-          item.variant_id || null,
-          qty, unitPrice, costPrice, lineTotal,
-          productName,
-        ]
+        [trocaSale.id, item.product_id || null, item.variant_id || null, qty, unitPrice, costPrice, lineTotal, productName]
       );
-
       if (item.product_id) {
         const mvCompanyId = item._stock_company_id || req.params.id;
         await client.query(
@@ -1014,36 +742,19 @@ router.post('/troca', async (req, res) => {
         );
       }
     }
-
     for (const ret of returned_items) {
       await client.query(
-        `INSERT INTO troca_returned_items
-           (troca_sale_id, original_sale_id, product_id, variant_id,
-            quantity, unit_price, product_name_snapshot)
+        `INSERT INTO troca_returned_items (troca_sale_id, original_sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot)
          VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [
-          trocaSale.id,
-          original_sale_id,
-          ret.product_id || null,
-          ret.variant_id || null,
-          parseFloat(ret.quantity),
-          parseFloat(ret.unit_price),
-          ret.product_name_snapshot || null,
-        ]
+        [trocaSale.id, original_sale_id, ret.product_id || null, ret.variant_id || null,
+         parseFloat(ret.quantity), parseFloat(ret.unit_price), ret.product_name_snapshot || null]
       );
     }
-
     let trocaSessaoId = null;
     try {
-      const sRes = await client.query(
-        `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
-        [req.params.id]
-      );
+      const sRes = await client.query(`SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`, [req.params.id]);
       trocaSessaoId = sRes?.rows?.[0]?.id || null;
-    } catch (sErr) {
-      // best-effort
-    }
-
+    } catch (sErr) {}
     const trocaPayMethod = (payment_method || 'dinheiro').toLowerCase();
     if (trocaPayMethod !== 'crediario') {
       if (returnedValue > 0) {
@@ -1061,49 +772,28 @@ router.post('/troca', async (req, res) => {
         );
       }
     }
-
-    const trocaNamesSummary = (new_items || [])
-      .map(n => n.product_name_snapshot || '')
-      .filter(Boolean)
-      .slice(0, 2)
-      .join(', ') || 'itens';
-
     if (returnedValue > 0) {
       await client.query(
-        `INSERT INTO transactions
-           (company_id, type, status, amount, description, category,
-            due_date, paid_at, created_by, idempotency_key)
-         VALUES ($1,'expense','confirmed',$2,$3,'Troca - Devolução',${SP_DATE_NOW},NOW(),$4,$5)
+        `INSERT INTO transactions (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
+         VALUES ($1,'expense','confirmed',$2,$3,'Troca - Devolucao',${SP_DATE_NOW},NOW(),$4,$5)
          ON CONFLICT (idempotency_key) DO NOTHING`,
-        [
-          saleCompanyId,
-          parseFloat(returnedValue.toFixed(2)),
-          `Troca PDV — devolução referente a venda ${original_sale_id}`,
-          req.user?.id || null,
-          'pdv-troca-' + trocaSale.id + '-return',
-        ]
+        [saleCompanyId, parseFloat(returnedValue.toFixed(2)),
+         `Troca PDV - devolucao venda ${original_sale_id}`, req.user?.id || null,
+         'pdv-troca-' + trocaSale.id + '-return']
       );
     }
     if (newValue > 0) {
       await client.query(
-        `INSERT INTO transactions
-           (company_id, type, status, amount, description, category,
-            due_date, paid_at, created_by, idempotency_key)
+        `INSERT INTO transactions (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
          VALUES ($1,'income','confirmed',$2,$3,'Troca - Venda',${SP_DATE_NOW},NOW(),$4,$5)
          ON CONFLICT (idempotency_key) DO NOTHING`,
-        [
-          saleCompanyId,
-          parseFloat(newValue.toFixed(2)),
-          `Troca PDV — nova venda (${trocaNamesSummary})`,
-          req.user?.id || null,
-          'pdv-troca-' + trocaSale.id + '-sale',
-        ]
+        [saleCompanyId, parseFloat(newValue.toFixed(2)),
+         `Troca PDV - nova venda`, req.user?.id || null,
+         'pdv-troca-' + trocaSale.id + '-sale']
       );
     }
-
     let nfceFiscalResult = { strategy: 'none' };
     const nfceStrategy = (req.body.nfce_strategy || 'none').toLowerCase();
-
     if (nfceStrategy === 'cancel_reissue') {
       const { rows: origNfceList } = await client.query(
         `SELECT id, nuvemfiscal_id, chave_acesso, authorized_at, status, numero
@@ -1114,82 +804,37 @@ router.post('/troca', async (req, res) => {
       );
       if (!origNfceList.length) {
         await client.query('ROLLBACK');
-        return res.status(409).json({
-          error: 'Estratégia cancel_reissue requer NFC-e autorizada na venda original.',
-        });
+        return res.status(409).json({ error: 'cancel_reissue requer NFC-e autorizada' });
       }
       const orig = origNfceList[0];
-
-      const ageHours = orig.authorized_at
-        ? (Date.now() - new Date(orig.authorized_at).getTime()) / 3600000
-        : 9999;
+      const ageHours = orig.authorized_at ? (Date.now() - new Date(orig.authorized_at).getTime()) / 3600000 : 9999;
       if (ageHours >= 24) {
         await client.query('ROLLBACK');
-        return res.status(409).json({
-          error: 'NFC-e original tem mais de 24 horas — use a estratégia devolucao_55 (NF-e modelo 55).',
-          original_chave: orig.chave_acesso,
-          authorized_at: orig.authorized_at,
-          age_hours: Math.round(ageHours * 10) / 10,
-        });
+        return res.status(409).json({ error: 'NFC-e >24h - use devolucao_55', age_hours: Math.round(ageHours * 10) / 10 });
       }
-
       if (orig.nuvemfiscal_id) {
         try {
-          await nuvemfiscal.cancelNfce(
-            orig.nuvemfiscal_id,
-            `Troca de mercadoria - emissao de nova NFC-e pela venda substituta (sale ${trocaSale.id.slice(0, 8)})`
-          );
+          await nuvemfiscal.cancelNfce(orig.nuvemfiscal_id, `Troca - sale ${trocaSale.id.slice(0, 8)}`);
         } catch (sefazErr) {
           await client.query('ROLLBACK');
-          console.error('[PDV troca fiscal] SEFAZ cancel error:', sefazErr.message);
-          return res.status(502).json({
-            error: 'SEFAZ rejeitou cancelamento da NFC-e original: ' + sefazErr.message,
-            sefaz_payload: sefazErr.payload || null,
-          });
+          return res.status(502).json({ error: 'SEFAZ rejeitou cancel: ' + sefazErr.message });
         }
       }
-
       await client.query(
-        `UPDATE nfce_emissions
-            SET status        = 'cancelada',
-                cancelled_at  = NOW(),
-                cancel_reason = $1
-          WHERE id = $2`,
-        [
-          'Troca de mercadoria - sale_troca=' + trocaSale.id,
-          orig.id,
-        ]
+        `UPDATE nfce_emissions SET status = 'cancelada', cancelled_at = NOW(), cancel_reason = $1 WHERE id = $2`,
+        ['Troca - sale_troca=' + trocaSale.id, orig.id]
       );
-
       await client.query(
-        `UPDATE sales
-            SET nfce_strategy        = $1,
-                nfce_original_chave  = $2,
-                nfce_devolucao_chave = $2
-          WHERE id = $3`,
+        `UPDATE sales SET nfce_strategy = $1, nfce_original_chave = $2, nfce_devolucao_chave = $2 WHERE id = $3`,
         ['cancel_reissue', orig.chave_acesso, trocaSale.id]
       );
-
-      nfceFiscalResult = {
-        strategy: 'cancel_reissue',
-        original_chave_cancelada: orig.chave_acesso,
-        original_numero: orig.numero,
-        original_age_hours: Math.round(ageHours * 10) / 10,
-      };
+      nfceFiscalResult = { strategy: 'cancel_reissue', original_chave_cancelada: orig.chave_acesso, original_numero: orig.numero, original_age_hours: Math.round(ageHours * 10) / 10 };
     } else if (nfceStrategy === 'devolucao_55') {
-      // Fase C (12/05/2026, contador Davi OK): NF-e modelo 55 de
-      // devolução pra trocas com NFC-e original >24h.
-      // Logica completa esta em src/services/trocaDevolucao55.js.
       try {
         nfceFiscalResult = await trocaDevolucao55.handle(client, {
-          saleCompanyId,
-          originalSaleId: original_sale_id,
-          trocaSaleId: trocaSale.id,
-          returnedItems: returned_items,
-          returnedValue,
-          customerAddress: customer_address,
-          notes: req.body.notes,
-          userId: req.user && req.user.id,
+          saleCompanyId, originalSaleId: original_sale_id, trocaSaleId: trocaSale.id,
+          returnedItems: returned_items, returnedValue, customerAddress: customer_address,
+          notes: req.body.notes, userId: req.user && req.user.id,
         });
       } catch (e) {
         if (e && e.isDevolucao55Error) {
@@ -1200,30 +845,22 @@ router.post('/troca', async (req, res) => {
       }
     } else if (nfceStrategy !== 'none') {
       await client.query('ROLLBACK');
-      return res.status(400).json({
-        error: 'nfce_strategy desconhecida ou ainda não suportada: ' + nfceStrategy,
-      });
+      return res.status(400).json({ error: 'nfce_strategy desconhecida: ' + nfceStrategy });
     }
-
     await client.query('COMMIT');
-
     const { rows: respNewItems } = await db.query(
       `SELECT si.*, COALESCE(p.name, si.product_name_snapshot) AS product_name
-       FROM sale_items si LEFT JOIN products p ON p.id=si.product_id
-       WHERE si.sale_id=$1`,
+       FROM sale_items si LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`,
       [trocaSale.id]
     );
     const { rows: respRetItems } = await db.query(
       `SELECT tri.*, COALESCE(p.name, tri.product_name_snapshot) AS product_name
-       FROM troca_returned_items tri LEFT JOIN products p ON p.id=tri.product_id
-       WHERE tri.troca_sale_id=$1`,
+       FROM troca_returned_items tri LEFT JOIN products p ON p.id=tri.product_id WHERE tri.troca_sale_id=$1`,
       [trocaSale.id]
     );
-
     res.status(201).json({
       sale: { ...trocaSale, items: respNewItems },
-      returned_items: respRetItems,
-      new_items: respNewItems,
+      returned_items: respRetItems, new_items: respNewItems,
       net_amount: netAmount,
       returned_value: parseFloat(returnedValue.toFixed(2)),
       new_value: parseFloat(newValue.toFixed(2)),
@@ -1240,55 +877,47 @@ router.post('/troca', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ── GET /companies/:id/pdv/sales-for-troca ─────────────────────
-// 12/05/2026 (troca cross-filial) — lista vendas do mesmo group_root
-// elegíveis pra serem usadas como venda original numa troca.
-// HOTFIX 14/05/2026: companies só tem trade_name/legal_name, NÃO `name`.
-// Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md
-// ──────────────────────────────────────────────────────────────
+// ===== GET /sales-for-troca (com novos filtros 17/05) =====
 router.get('/sales-for-troca', async (req, res) => {
-  const { q, customer_id, days = 90, limit = 50 } = req.query;
+  const { q, customer_id, order_number, nfce_chave, days = 90, limit = 50 } = req.query;
   const winDays = Math.max(1, Math.min(parseInt(days, 10) || 90, 365));
   const lim = Math.max(1, Math.min(parseInt(limit, 10) || 50, 200));
-
   const cond = [
     "s.status != 'cancelled'",
     "COALESCE(s.type,'sale') = 'sale'",
     `s.created_at >= NOW() - INTERVAL '${winDays} days'`,
-    `(
-       s.company_id = $1
-       OR EXISTS (
-         SELECT 1 FROM companies c2
-          WHERE c2.id = s.company_id
-            AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)
-              = COALESCE(NULLIF((SELECT billing_owner_company_id FROM companies WHERE id=$1), $1), $1)
-       )
-     )`,
+    `(s.company_id = $1 OR EXISTS (
+       SELECT 1 FROM companies c2
+        WHERE c2.id = s.company_id
+          AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)
+            = COALESCE(NULLIF((SELECT billing_owner_company_id FROM companies WHERE id=$1), $1), $1)))`,
   ];
   const vals = [req.params.id];
   let i = 2;
-
-  if (customer_id) {
-    cond.push(`s.customer_id = $${i++}`);
-    vals.push(customer_id);
+  if (customer_id) { cond.push(`s.customer_id = $${i++}`); vals.push(customer_id); }
+  // 17/05/2026 (troca v2): filtro por nfce_chave junta nfce_emissions
+  let nfceJoin = '';
+  if (nfce_chave && String(nfce_chave).trim()) {
+    nfceJoin = `JOIN nfce_emissions ne ON ne.sale_id = s.id AND ne.tipo='nfce' AND ne.status='autorizada'`;
+    cond.push(`ne.chave_acesso = $${i++}`);
+    vals.push(String(nfce_chave).trim());
   }
-
+  // 17/05/2026 (troca v2): filtro por numero do pedido — usa sales.id como prefix match (UUID slice).
+  // Quando sales tiver coluna 'number' dedicada no futuro, troca para igualdade direta.
+  if (order_number && String(order_number).trim()) {
+    const num = String(order_number).trim().replace(/^[#vV-]+/, '');
+    cond.push(`s.id::text ILIKE $${i++}`);
+    vals.push('%' + num + '%');
+  }
   if (q && String(q).trim()) {
     const like = `%${String(q).trim()}%`;
-    cond.push(`(
-      LOWER(COALESCE(cust.name,'')) LIKE LOWER($${i})
+    cond.push(`(LOWER(COALESCE(cust.name,'')) LIKE LOWER($${i})
       OR LOWER(COALESCE(cust.cpf_cnpj,'')) LIKE LOWER($${i})
       OR LOWER(COALESCE(s.seller_name,'')) LIKE LOWER($${i})
-      OR EXISTS (
-        SELECT 1 FROM sale_items si2
-         WHERE si2.sale_id = s.id
-           AND LOWER(COALESCE(si2.product_name_snapshot,'')) LIKE LOWER($${i})
-      )
-    )`);
-    vals.push(like);
-    i++;
+      OR EXISTS (SELECT 1 FROM sale_items si2 WHERE si2.sale_id = s.id
+        AND LOWER(COALESCE(si2.product_name_snapshot,'')) LIKE LOWER($${i})))`);
+    vals.push(like); i++;
   }
-
   try {
     const { rows } = await db.query(
       `SELECT s.id, s.total_amount, s.payment_method, s.status, s.created_at,
@@ -1298,26 +927,25 @@ router.get('/sales-for-troca', async (req, res) => {
               (s.company_id != $1) AS is_cross_filial,
               COUNT(si.id) AS item_count,
               COALESCE(json_agg(json_build_object(
-                'product_id', si.product_id,
-                'variant_id', si.variant_id,
+                'product_id', si.product_id, 'variant_id', si.variant_id,
                 'product_name_snapshot', si.product_name_snapshot,
-                'quantity', si.quantity,
-                'unit_price', si.unit_price
+                'quantity', si.quantity, 'unit_price', si.unit_price,
+                'original_sale_item_id', si.id
               )) FILTER (WHERE si.id IS NOT NULL), '[]'::json) AS items
          FROM sales s
+         ${nfceJoin}
          LEFT JOIN companies comp ON comp.id = s.company_id
          LEFT JOIN customers cust ON cust.id = s.customer_id
          LEFT JOIN sale_items si  ON si.sale_id = s.id
         WHERE ${cond.join(' AND ')}
         GROUP BY s.id, comp.trade_name, comp.legal_name, cust.name, cust.cpf_cnpj
-        ORDER BY s.created_at DESC
-        LIMIT ${lim}`,
+        ORDER BY s.created_at DESC LIMIT ${lim}`,
       vals
     );
     res.json(rows);
   } catch (e) {
-    console.error('[PDV] Erro ao buscar vendas pra troca:', e.message);
-    res.status(500).json({ error: 'Erro ao buscar vendas elegiveis pra troca' });
+    console.error('[PDV] Erro ao buscar vendas para troca:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar vendas elegiveis' });
   }
 });
 
