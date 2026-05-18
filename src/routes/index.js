@@ -50,6 +50,7 @@ router.use('/admin', require('./adminClients360'));
 router.use('/admin', require('./adminRevenue'));
 router.use('/admin', require('./adminOps'));
 router.use('/admin', require('./adminGrowth'));
+router.use('/admin', require('./adminAgent')); // Vendedor IA Aura (Fase 0+)
 
 // Webhooks (publicos, validacao interna)
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
