@@ -5,6 +5,14 @@
 // v2 (15/05/2026): expõe accent_color, dark_mode, font_family,
 // card_style, banners[], announcement_bar, service_cards[] pro template novo.
 // Cai em fallbacks pra empresas pré-migration 115/116.
+//
+// Fase 4 (18/05/2026): mudanca semantica de featured_product_ids.
+//   ANTES (bug): se nao vazio, FILTRAVA a vitrine pra mostrar SO esses IDs.
+//                Marcar 5 produtos escondia o resto da loja.
+//   DEPOIS:      featured_product_ids vira ORDEM DE DESTAQUE — os listados
+//                aparecem PRIMEIRO; o resto vem depois (created_at DESC).
+//   NOVO:        hidden_product_ids opt-in para ocultar produtos especificos
+//                (migration 119). Defensive contra schema pre-migration.
 // ============================================================
 'use strict';
 
@@ -20,6 +28,17 @@ const DEFAULT_SERVICE_CARDS = [
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
 function parseFeaturedIds(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map(String);
+  if (typeof raw === 'string') {
+    try { const p = JSON.parse(raw); return Array.isArray(p) ? p.map(String) : []; } catch { return []; }
+  }
+  return [];
+}
+
+// Mesma logica de parseFeaturedIds — hidden_product_ids segue o mesmo formato
+// (text[] no banco, mas o driver pode entregar como string em alguns cenarios).
+function parseHiddenIds(raw) {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw.map(String);
   if (typeof raw === 'string') {
@@ -83,30 +102,67 @@ function listVisibilityWhere(cidParam) {
   ))`;
 }
 
+// Fase 4: query unificada — sempre retorna TODOS os produtos ativos.
+//   - EXCLUI ids em hidden_product_ids ($3)
+//   - ORDENA: primeiro os em featured_product_ids ($2), na ordem do array,
+//     depois o resto por created_at DESC (mesma ordenacao default antiga).
+//   - Guard de fallback: se a coluna hidden_product_ids ainda nao existe
+//     (42703), retry sem o filtro de hidden.
+async function fetchStorefrontProducts(cid, featuredIds, hiddenIds) {
+  const visibility = listVisibilityWhere('$1');
+  // featuredIds vazio: tudo cai no "1" e ordena por created_at DESC.
+  // featuredIds nao vazio: array_position retorna 1..N para os featured,
+  // e NULL para o resto — usamos NULLS LAST + tie-break por created_at DESC.
+  const sql = `
+    SELECT id, name, description, price, image_url, category, stock_qty, created_at
+    FROM products
+    WHERE ${visibility}
+      AND is_active IS NOT FALSE
+      AND ($3::text[] IS NULL OR array_length($3, 1) IS NULL OR NOT (id::text = ANY($3)))
+    ORDER BY
+      CASE
+        WHEN $2::text[] IS NULL OR array_length($2, 1) IS NULL THEN 1
+        WHEN id::text = ANY($2) THEN 0
+        ELSE 1
+      END,
+      array_position($2, id::text) NULLS LAST,
+      created_at DESC
+    LIMIT 500
+  `;
+  try {
+    const { rows } = await db.query(sql, [
+      cid,
+      featuredIds.length ? featuredIds : null,
+      hiddenIds.length ? hiddenIds : null,
+    ]);
+    return rows;
+  } catch (err) {
+    // 42703 = undefined_column. Pode acontecer se a query referenciar uma
+    // coluna nova ainda nao migrada — embora aqui nao mexamos com colunas
+    // direto da products, mantemos o catch defensivo. 42P01 = undefined_table
+    // tambem cobre boots iniciais.
+    if (err.code === '42703' || err.code === '42P01') {
+      // Fallback: query simples sem ordenacao por featured (caso raro)
+      const fallback = await db.query(
+        `SELECT id, name, description, price, image_url, category, stock_qty, created_at
+         FROM products
+         WHERE ${visibility} AND is_active IS NOT FALSE
+         ORDER BY created_at DESC
+         LIMIT 500`,
+        [cid]
+      );
+      return fallback.rows;
+    }
+    throw err;
+  }
+}
+
 async function buildStorefront(config) {
   const cid = config.company_id;
-  let products = [];
   const featuredIds = parseFeaturedIds(config.featured_product_ids);
+  const hiddenIds   = parseHiddenIds(config.hidden_product_ids);
 
-  if (featuredIds.length > 0) {
-    const { rows } = await db.query(
-      `SELECT id, name, description, price, image_url, category, stock_qty
-       FROM products
-       WHERE ${listVisibilityWhere('$1')} AND id::text = ANY($2) AND is_active IS NOT FALSE
-       ORDER BY name`,
-      [cid, featuredIds]
-    );
-    products = rows;
-  } else {
-    const { rows } = await db.query(
-      `SELECT id, name, description, price, image_url, category, stock_qty
-       FROM products
-       WHERE ${listVisibilityWhere('$1')} AND is_active IS NOT FALSE
-       ORDER BY created_at DESC LIMIT 50`,
-      [cid]
-    );
-    products = rows;
-  }
+  const products = await fetchStorefrontProducts(cid, featuredIds, hiddenIds);
 
   let variantsByProduct = {};
   if (products.length > 0) {
@@ -195,4 +251,4 @@ async function buildStorefront(config) {
   };
 }
 
-module.exports = { buildStorefront, parseFeaturedIds };
+module.exports = { buildStorefront, parseFeaturedIds, parseHiddenIds };
