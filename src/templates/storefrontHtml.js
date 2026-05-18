@@ -16,6 +16,10 @@
 // Cada slide do carrossel mantém sua própria caption (auto-rotation continua).
 // Lojas com banner text-only (sem image_url) seguem em split/editorial/
 // centered como antes — esses modos foram desenhados pra texto protagonista.
+//
+// v3.1 (18/05/2026 — Fase 3 PR A):
+// Search agora é inline na topbar — botão lupa expande input sobrepondo
+// o nome da loja (.topbar.searching). Sem .search-bar-wrap sticky abaixo.
 function buildHtmlBody({
   siteName, tagline, logoInTopbar, logoInHero, contactBar,
   addrText, coverUrl, announcementBar, banners, serviceCards,
@@ -156,31 +160,29 @@ ${serviceCards.map((c) => `  <div class="service-card">
   </div>`).join('\n')}
 </section>` : '';
 
+  // Topbar — search agora é inline (Fase 3 PR A). Botão lupa expande input
+  // sobre .topbar-brand quando .topbar ganha classe .searching.
   return `${announcementHtml}
-<header class="topbar">
+<header class="topbar" id="topbar">
   <a class="topbar-brand" href="#" onclick="return false">
     <div class="topbar-logo">${logoInTopbar}</div>
     <span class="topbar-name">${siteName}</span>
   </a>
+  <div class="topbar-search-inline" id="topbarSearchInline">
+    <svg class="topbar-search-icon" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+    <input type="text" placeholder="Buscar produtos..." id="searchInput" oninput="filterProducts()" onblur="searchBlur()" autocomplete="off">
+    <button class="topbar-search-close" type="button" onclick="toggleSearch()" aria-label="Fechar busca">×</button>
+  </div>
   <div class="topbar-right">
-    <div class="search-pill" onclick="toggleSearch()">
-      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <span>Buscar</span>
-    </div>
+    <button class="search-btn" type="button" onclick="toggleSearch()" aria-label="Buscar produtos">
+      <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+    </button>
     <div class="cart-btn" onclick="openCart()">
       <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M5 7h14l-1 13H6L5 7z"/><path d="M9 7V5a3 3 0 016 0v2"/></svg>
       <div class="cart-badge" id="cartBadge">0</div>
     </div>
   </div>
 </header>
-
-<div class="search-bar-wrap" id="searchBar">
-  <div class="search-bar">
-    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="opacity:.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-    <input type="text" placeholder="Buscar produtos..." id="searchInput" oninput="filterProducts()" autocomplete="off">
-    <span style="cursor:pointer;opacity:.5;font-size:20px;line-height:1;" onclick="toggleSearch()">×</span>
-  </div>
-</div>
 
 ${bannerStage}
 ${heroLegacy}
