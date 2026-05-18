@@ -6,13 +6,15 @@
 // card_style, banners[], announcement_bar, service_cards[] pro template novo.
 // Cai em fallbacks pra empresas pré-migration 115/116.
 //
-// Fase 4 (18/05/2026): mudanca semantica de featured_product_ids.
-//   ANTES (bug): se nao vazio, FILTRAVA a vitrine pra mostrar SO esses IDs.
-//                Marcar 5 produtos escondia o resto da loja.
-//   DEPOIS:      featured_product_ids vira ORDEM DE DESTAQUE — os listados
-//                aparecem PRIMEIRO; o resto vem depois (created_at DESC).
-//   NOVO:        hidden_product_ids opt-in para ocultar produtos especificos
-//                (migration 119). Defensive contra schema pre-migration.
+// Fase 4 (18/05/2026): tentou trocar semantica de featured_product_ids
+//   para "ordem de destaque" + adicionou hidden_product_ids para opt-out.
+//
+// Fase 4.1 (18/05/2026 — ROLLBACK): voltou ao modelo simples original.
+//   featured_product_ids[] eh INCLUSION list:
+//     - Vazio  => mostra TODOS os produtos ativos (default).
+//     - Cheio  => mostra SO os listados, na ordem do array.
+//   hidden_product_ids fica DORMENTE — parseHiddenIds segue exportado para
+//   nao quebrar imports externos, mas e ignorado no storefront publico.
 // ============================================================
 'use strict';
 
@@ -36,8 +38,8 @@ function parseFeaturedIds(raw) {
   return [];
 }
 
-// Mesma logica de parseFeaturedIds — hidden_product_ids segue o mesmo formato
-// (text[] no banco, mas o driver pode entregar como string em alguns cenarios).
+// Mantido por back-compat (quem importa o módulo ainda consegue parsear o campo
+// se quiser). Mas o storefront NÃO usa mais hidden_product_ids — coluna dormente.
 function parseHiddenIds(raw) {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw.map(String);
@@ -102,59 +104,41 @@ function listVisibilityWhere(cidParam) {
   ))`;
 }
 
-// Fase 4: query unificada — sempre retorna TODOS os produtos ativos.
-//   - EXCLUI ids em hidden_product_ids ($3)
-//   - ORDENA: primeiro os em featured_product_ids ($2), na ordem do array,
-//     depois o resto por created_at DESC (mesma ordenacao default antiga).
-//   - Guard de fallback: se a coluna hidden_product_ids ainda nao existe
-//     (42703), retry sem o filtro de hidden.
-async function fetchStorefrontProducts(cid, featuredIds, hiddenIds) {
+// Fase 4.1 (rollback): featured_product_ids volta a ser INCLUSION list.
+//   - featuredIds.length === 0  => SELECT todos os produtos ativos,
+//                                  ORDER BY created_at DESC, LIMIT 500.
+//   - featuredIds.length > 0    => SELECT apenas os IDs em featured,
+//                                  ORDER BY array_position(featured, id::text).
+//   hiddenIds e IGNORADO (back-compat na assinatura).
+async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
   const visibility = listVisibilityWhere('$1');
-  // featuredIds vazio: tudo cai no "1" e ordena por created_at DESC.
-  // featuredIds nao vazio: array_position retorna 1..N para os featured,
-  // e NULL para o resto — usamos NULLS LAST + tie-break por created_at DESC.
+
+  if (featuredIds && featuredIds.length > 0) {
+    // Modo curadoria: somente IDs em featured_product_ids, na ordem do array.
+    const sql = `
+      SELECT id, name, description, price, image_url, category, stock_qty, created_at
+      FROM products
+      WHERE ${visibility}
+        AND is_active IS NOT FALSE
+        AND id::text = ANY($2)
+      ORDER BY array_position($2, id::text)
+      LIMIT 500
+    `;
+    const { rows } = await db.query(sql, [cid, featuredIds]);
+    return rows;
+  }
+
+  // Modo padrão: todos os produtos ativos, mais recentes primeiro.
   const sql = `
     SELECT id, name, description, price, image_url, category, stock_qty, created_at
     FROM products
     WHERE ${visibility}
       AND is_active IS NOT FALSE
-      AND ($3::text[] IS NULL OR array_length($3, 1) IS NULL OR NOT (id::text = ANY($3)))
-    ORDER BY
-      CASE
-        WHEN $2::text[] IS NULL OR array_length($2, 1) IS NULL THEN 1
-        WHEN id::text = ANY($2) THEN 0
-        ELSE 1
-      END,
-      array_position($2, id::text) NULLS LAST,
-      created_at DESC
+    ORDER BY created_at DESC
     LIMIT 500
   `;
-  try {
-    const { rows } = await db.query(sql, [
-      cid,
-      featuredIds.length ? featuredIds : null,
-      hiddenIds.length ? hiddenIds : null,
-    ]);
-    return rows;
-  } catch (err) {
-    // 42703 = undefined_column. Pode acontecer se a query referenciar uma
-    // coluna nova ainda nao migrada — embora aqui nao mexamos com colunas
-    // direto da products, mantemos o catch defensivo. 42P01 = undefined_table
-    // tambem cobre boots iniciais.
-    if (err.code === '42703' || err.code === '42P01') {
-      // Fallback: query simples sem ordenacao por featured (caso raro)
-      const fallback = await db.query(
-        `SELECT id, name, description, price, image_url, category, stock_qty, created_at
-         FROM products
-         WHERE ${visibility} AND is_active IS NOT FALSE
-         ORDER BY created_at DESC
-         LIMIT 500`,
-        [cid]
-      );
-      return fallback.rows;
-    }
-    throw err;
-  }
+  const { rows } = await db.query(sql, [cid]);
+  return rows;
 }
 
 async function buildStorefront(config) {
@@ -162,6 +146,7 @@ async function buildStorefront(config) {
   const featuredIds = parseFeaturedIds(config.featured_product_ids);
   const hiddenIds   = parseHiddenIds(config.hidden_product_ids);
 
+  // hiddenIds ignorado no rollback Fase 4.1 — argumento mantido por back-compat
   const products = await fetchStorefrontProducts(cid, featuredIds, hiddenIds);
 
   let variantsByProduct = {};
