@@ -7,6 +7,10 @@
 // as classes que parts/cart.js, checkout.js, pix.js, products.js, product_detail.js
 // referenciam — só redesenha visual. Adiciona classes novas para announcement
 // bar, banner carousel, 3 card styles e dark mode.
+//
+// v3 (18/05/2026): adiciona data-tone="image-clean" — quando o slide tem
+// image_url, imagem ocupa o topo full-bleed e headline+body+CTA aparecem
+// em caption band branca abaixo, sem overlay competindo com a arte.
 function buildStyles(primary, accent, dark, font) {
   primary = primary || '#7c3aed';
   accent  = accent  || primary;
@@ -175,6 +179,30 @@ h1,h2,h3,h4,.serif{font-family:${fontSerif};font-weight:400;letter-spacing:-0.4p
 .banner-dots{position:absolute;left:0;right:0;bottom:16px;display:flex;justify-content:center;gap:8px;z-index:3;}
 .banner-dot{width:8px;height:8px;border-radius:4px;border:none;cursor:pointer;background:color-mix(in oklab,var(--sf-ink) 30%,transparent);transition:all .4s cubic-bezier(.4,0,.2,1);padding:0;}
 .banner-dot.active{width:28px;background:var(--sf-ink);}
+
+/* ============================================================
+   Image-clean banner — v3 (18/05/2026)
+   Quando o slide tem image_url, imagem fica full-bleed no topo do
+   slide e headline+body+CTA aparecem em caption band branca abaixo.
+   Sem overlay, sem scrim, sem SVG decorativo competindo.
+   ============================================================ */
+.banner-slide[data-tone="image-clean"]{display:flex;flex-direction:column;background:var(--sf-bg-card);}
+.banner-slide[data-tone="image-clean"] .banner-slide-bg{position:relative;inset:auto;flex:1 1 auto;min-height:0;}
+.banner-slide[data-tone="image-clean"] .banner-slide-bg.with-image::after{display:none;}
+.banner-slide[data-tone="image-clean"] .banner-caption-band{flex:0 0 auto;padding:18px clamp(20px,3%,32px);display:flex;align-items:center;justify-content:space-between;gap:20px;background:var(--sf-bg-card);border-top:1px solid var(--sf-border);}
+.banner-slide[data-tone="image-clean"] .banner-caption-text{flex:1;min-width:0;}
+.banner-slide[data-tone="image-clean"] .banner-caption-text .banner-headline{font-size:clamp(20px,2.4vw,26px);margin:0 0 4px;line-height:1.18;max-width:none;letter-spacing:-0.3px;}
+.banner-slide[data-tone="image-clean"] .banner-caption-text .banner-body{font-size:13px;margin:0;max-width:560px;}
+.banner-slide[data-tone="image-clean"] .banner-cta{flex-shrink:0;}
+@media(max-width:600px){
+  .banner-slide[data-tone="image-clean"] .banner-caption-band{flex-direction:column;align-items:flex-start;padding:14px 16px;gap:12px;}
+  .banner-slide[data-tone="image-clean"] .banner-cta{align-self:flex-start;}
+  .banner-slide[data-tone="image-clean"] .banner-caption-text .banner-headline{font-size:18px;}
+}
+/* dots no canto sup-direito da imagem (longe da caption band) quando image-clean estiver em uso */
+.banner-frame:has(.banner-slide[data-tone="image-clean"]) .banner-dots{top:16px;bottom:auto;left:auto;right:16px;width:auto;justify-content:flex-end;}
+.banner-frame:has(.banner-slide[data-tone="image-clean"]) .banner-dot{background:rgba(255,255,255,0.55);}
+.banner-frame:has(.banner-slide[data-tone="image-clean"]) .banner-dot.active{background:#fff;}
 
 /* ============================================================
    Legacy hero (compat com getStorefrontPage que ainda renderiza
