@@ -8,6 +8,10 @@
 //  • passa banners[] + announcement_bar + service_cards[] ao HTML builder
 //  • aplica classes no <body>: sf-dark, card-style-{editorial|minimal|image-heavy}
 //  • injeta JS pra auto-rotação do banner-stage e scrollToProducts
+//
+// v3 (18/05/2026 — Fase 3 PR A):
+//  • banner_rotation_seconds (3–15s, default 7s) lido de site.banner_rotation_seconds
+//  • touchstart/touchend no stage pausa rotação (espelha mouseenter/leave)
 // ============================================================
 const buildStyles   = require('./storefrontStyles');
 const buildHtmlBody = require('./storefrontHtml');
@@ -33,6 +37,14 @@ function buildStorefrontPage(data, slug) {
   const announcementBar = site.announcement_bar ? escHtml(site.announcement_bar) : '';
   const whatsNum = (data.contact?.whatsapp || '').replace(/\D/g, '');
   const addrText = escHtml(data.contact?.address || '');
+
+  // Banner rotation — site.banner_rotation_seconds em [3, 15], default 7s.
+  // Valores fora do range ou inválidos caem no default. Convertemos pra ms
+  // pra passar pro setInterval no script inline.
+  const rotSec = parseInt(site.banner_rotation_seconds, 10);
+  const rotateMs = (Number.isFinite(rotSec) && rotSec >= 3 && rotSec <= 15)
+    ? rotSec * 1000
+    : 7000;
 
   // banners e service_cards — escape de XSS reforçado
   const banners = (site.banners || []).map((b) => ({
@@ -90,6 +102,7 @@ function buildStorefrontPage(data, slug) {
   const inlineHelpers = `
 <script>
 (function(){
+  var ROTATE_MS = ${rotateMs};
   var slides = document.querySelectorAll('#bannerStage .banner-slide');
   var dots = document.querySelectorAll('#bannerDots .banner-dot');
   var idx = 0, timer = null, paused = false;
@@ -100,11 +113,15 @@ function buildStorefrontPage(data, slug) {
   }
   window.goBanner = function(n){ show(n); restart(); };
   function tick(){ if (!paused) show(idx + 1); }
-  function restart(){ if (timer) clearInterval(timer); timer = setInterval(tick, 5500); }
+  function restart(){ if (timer) clearInterval(timer); timer = setInterval(tick, ROTATE_MS); }
   var stage = document.getElementById('bannerStage');
   if (stage && slides.length > 1){
     stage.addEventListener('mouseenter', function(){ paused = true; });
     stage.addEventListener('mouseleave', function(){ paused = false; });
+    // Touch: pausa enquanto o usuário interage (swipe/tap) e retoma ao soltar.
+    stage.addEventListener('touchstart', function(){ paused = true; }, { passive: true });
+    stage.addEventListener('touchend',   function(){ paused = false; }, { passive: true });
+    stage.addEventListener('touchcancel',function(){ paused = false; }, { passive: true });
     restart();
   }
   window.scrollToProducts = function(){

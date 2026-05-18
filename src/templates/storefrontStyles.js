@@ -11,6 +11,11 @@
 // v3 (18/05/2026): adiciona data-tone="image-clean" — quando o slide tem
 // image_url, imagem ocupa o topo full-bleed e headline+body+CTA aparecem
 // em caption band branca abaixo, sem overlay competindo com a arte.
+//
+// v3.1 (18/05/2026 — Fase 3 PR A): search inline na topbar —
+// .topbar-search-inline expande quando .topbar.searching, sobrepondo
+// .topbar-brand. Remove .search-pill / .search-bar-wrap sticky antigos
+// (conflitavam com .cats-wrap no mesmo top:64px).
 function buildStyles(primary, accent, dark, font) {
   primary = primary || '#7c3aed';
   accent  = accent  || primary;
@@ -119,14 +124,29 @@ h1,h2,h3,h4,.serif{font-family:${fontSerif};font-weight:400;letter-spacing:-0.4p
 /* ============================================================
    TOPBAR / HEADER
    ============================================================ */
-.topbar{position:sticky;top:0;z-index:100;background:color-mix(in oklab,var(--sf-bg) 92%,transparent);backdrop-filter:saturate(180%) blur(12px);-webkit-backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--sf-border);padding:0 20px;height:64px;display:flex;align-items:center;justify-content:space-between;gap:12px;}
-.topbar-brand{display:flex;align-items:center;gap:12px;text-decoration:none;}
+.topbar{position:sticky;top:0;z-index:100;background:color-mix(in oklab,var(--sf-bg) 92%,transparent);backdrop-filter:saturate(180%) blur(12px);-webkit-backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--sf-border);padding:0 20px;height:64px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;}
+.topbar-brand{display:flex;align-items:center;gap:12px;text-decoration:none;flex:0 1 auto;min-width:0;transition:opacity .2s ease;}
 .topbar-logo{width:40px;height:40px;border-radius:10px;background:var(--sf-brand);display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;font-weight:400;font-family:${fontSerif};flex-shrink:0;overflow:hidden;box-shadow:inset 0 0 0 1px color-mix(in oklab,var(--sf-brand) 40%,transparent);}
 .topbar-logo img{width:100%;height:100%;object-fit:cover;}
-.topbar-name{font-size:18px;font-weight:400;font-family:${fontSerif};letter-spacing:-0.3px;color:var(--sf-ink);}
-.topbar-right{display:flex;align-items:center;gap:10px;}
-.search-pill{display:flex;align-items:center;gap:8px;background:var(--sf-bg-2);border:1px solid transparent;border-radius:999px;padding:8px 14px;font-size:13px;color:var(--sf-ink-3);cursor:pointer;transition:all .2s;min-width:130px;}
-.search-pill:hover{border-color:var(--sf-border-2);color:var(--sf-ink-2);}
+.topbar-name{font-size:18px;font-weight:400;font-family:${fontSerif};letter-spacing:-0.3px;color:var(--sf-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.topbar-right{display:flex;align-items:center;gap:10px;flex-shrink:0;transition:opacity .2s ease;}
+
+/* Search button (icon-only, na .topbar-right) */
+.search-btn{position:relative;width:42px;height:42px;border-radius:999px;background:transparent;border:1px solid var(--sf-border);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;color:var(--sf-ink);padding:0;font-family:inherit;}
+.search-btn:hover{background:var(--sf-brand-wash);border-color:var(--sf-border-2);}
+
+/* Search inline — input expandido sobrepondo o nome da loja quando .searching */
+.topbar-search-inline{position:absolute;left:20px;right:20px;top:11px;height:42px;display:none;align-items:center;gap:10px;background:var(--sf-bg-card);border:1px solid var(--sf-border-2);border-radius:999px;padding:0 14px 0 16px;opacity:0;transform:translateY(-4px);transition:opacity .2s ease, transform .2s ease;z-index:2;}
+.topbar-search-inline .topbar-search-icon{flex-shrink:0;opacity:.55;color:var(--sf-ink);}
+.topbar-search-inline input{flex:1;border:none;outline:none;font-size:14px;color:var(--sf-ink);background:transparent;font-family:${fontSans};height:100%;min-width:0;}
+.topbar-search-inline input::placeholder{color:var(--sf-ink-3);}
+.topbar-search-close{flex-shrink:0;width:26px;height:26px;border-radius:999px;border:none;background:transparent;color:var(--sf-ink-2);font-size:20px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;font-family:inherit;}
+.topbar-search-close:hover{background:var(--sf-brand-wash);color:var(--sf-ink);}
+
+.topbar.searching .topbar-search-inline{display:flex;opacity:1;transform:translateY(0);}
+.topbar.searching .topbar-brand,
+.topbar.searching .topbar-right{opacity:0;pointer-events:none;}
+
 .cart-btn{position:relative;width:42px;height:42px;border-radius:999px;background:transparent;border:1px solid var(--sf-border);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;color:var(--sf-ink);}
 .cart-btn:hover{background:var(--sf-brand-wash);border-color:var(--sf-border-2);}
 .cart-badge{position:absolute;top:-2px;right:-2px;background:var(--sf-accent);color:#fff;width:18px;height:18px;border-radius:50%;font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid var(--sf-bg);font-family:${fontMono};}
@@ -254,11 +274,6 @@ h1,h2,h3,h4,.serif{font-family:${fontSerif};font-weight:400;letter-spacing:-0.4p
 .cat-chip{white-space:nowrap;padding:8px 16px;border-radius:999px;font-size:12px;font-weight:500;background:transparent;border:1px solid var(--sf-border-2);color:var(--sf-ink);cursor:pointer;transition:all .18s;flex-shrink:0;margin-bottom:10px;font-family:${fontSans};}
 .cat-chip:hover{background:var(--sf-brand-wash);}
 .cat-chip.active{background:var(--sf-brand-wash);border-color:var(--sf-brand);color:var(--sf-brand-ink);font-weight:600;}
-
-.search-bar-wrap{padding:10px 20px;display:none;position:sticky;top:64px;z-index:49;background:var(--sf-bg);}
-.search-bar-wrap.open{display:block;}
-.search-bar{display:flex;align-items:center;gap:10px;background:var(--sf-bg-card);border:1px solid var(--sf-border-2);border-radius:999px;padding:10px 18px;}
-.search-bar input{flex:1;border:none;outline:none;font-size:14px;color:var(--sf-ink);background:transparent;font-family:${fontSans};}
 
 /* ============================================================
    Products grid + card styles
