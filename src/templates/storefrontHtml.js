@@ -8,6 +8,14 @@
 // serviceCards[] = [{ icon, title, body }] — strip de benefícios na home
 //
 // O JS de auto-rotação fica em storefrontPage.js (injetado inline).
+//
+// v3 (18/05/2026): quando b.image_url é setado, renderiza variante
+// "image-clean" independente do tone — só bg image + CTA flutuante,
+// sem kicker/headline/body overlay nem SVG decorativo. Imagem fica
+// protagonista; o lojista que sobe arte pronta (com copy + branding
+// embutidos) não vê mais texto duplicado disputando com a imagem.
+// Lojas com banner text-only (sem image_url) seguem em split/editorial/
+// centered como antes.
 function buildHtmlBody({
   siteName, tagline, logoInTopbar, logoInHero, contactBar,
   addrText, coverUrl, announcementBar, banners, serviceCards,
@@ -50,6 +58,16 @@ function buildHtmlBody({
     const headline = b.headline ? `<h2 class="banner-headline">${b.headline}</h2>` : '';
     const body    = b.body     ? `<p class="banner-body">${b.body}</p>` : '';
     const cta     = b.cta      ? `<button class="banner-cta" onclick="scrollToProducts()">${b.cta}</button>` : '';
+
+    // v3: image-clean — quando há image_url, banner é só imagem + CTA flutuante.
+    // Kicker/headline/body do banner ficam suprimidos (a arte do lojista é
+    // desenhada pra falar sozinha). Mantém auto-rotation e dots normais.
+    if (b.image_url) {
+      return `<div class="banner-slide tint-${tint} ${i===0?'active':''}" data-tone="image-clean">
+        <div class="${bgClass}"${bgStyle}></div>
+        ${cta ? `<div class="banner-cta-wrap">${cta}</div>` : ''}
+      </div>`;
+    }
 
     if (tone === 'editorial') {
       const word = b.headline || siteName;
