@@ -11,7 +11,7 @@
 // card_style, banners[] JSONB, announcement_bar.
 // Migration 116: service_cards[] JSONB (4 cards na strip de benefícios).
 // Migration 119: hidden_product_ids text[] + nova semantica de featured_product_ids
-//                (vira ordem de destaque, nao filtra mais a vitrine).
+//                (vira ordem de destaque, nao filtra mais a vitrine). featured continua jsonb.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -156,6 +156,18 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Normaliza qualquer formato (text[], jsonb array, ja-parseado) pra array
+// de strings JS. Espelha parseFeaturedIds do storefrontBuilder.
+function toStringIdArray(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map(String);
+  if (typeof raw === 'string') {
+    try { const p = JSON.parse(raw); return Array.isArray(p) ? p.map(String) : []; }
+    catch { return []; }
+  }
+  return [];
+}
+
 // ============================================================
 // GET /companies/:id/digital-channel/products
 // Lista produtos ativos da empresa COM estado de featured/hidden,
@@ -177,13 +189,9 @@ router.get('/products', requireRole('client', 'analyst', 'admin'), async (req, r
         [cid]
       );
       if (cfgRows.length) {
-        featuredIds = Array.isArray(cfgRows[0].featured_product_ids)
-          ? cfgRows[0].featured_product_ids.map(String)
-          : [];
+        featuredIds = toStringIdArray(cfgRows[0].featured_product_ids);
         if (hasHidden) {
-          hiddenIds = Array.isArray(cfgRows[0].hidden_product_ids)
-            ? cfgRows[0].hidden_product_ids.map(String)
-            : [];
+          hiddenIds = toStringIdArray(cfgRows[0].hidden_product_ids);
         }
       }
     } catch (e) {
@@ -304,8 +312,9 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     return res.status(400).json({ error: 'service_cards deve ser um array' });
   }
 
-  // Fase 4: featured_product_ids e hidden_product_ids — sanitizar pra
-  // array de strings. Se cliente nao mandar, mantemos undefined (COALESCE).
+  // Fase 4: featured_product_ids e hidden_product_ids — sanitizar para
+  // array de strings. featured_product_ids persiste como JSONB (column type
+  // legado, nao mudou); hidden_product_ids persiste como text[] (migration 119).
   let featuredProductIdsSan;
   if (featured_product_ids !== undefined) {
     featuredProductIdsSan = sanitizeProductIdArray(featured_product_ids);
@@ -333,11 +342,12 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const v2 = await hasV2Columns();
   const hasHidden = await hasHiddenColumn();
 
-  // featured_product_ids agora persiste como text[] (mesmo formato do
-  // hidden_product_ids da migration 119). Aceita tambem JSON pra
-  // retrocompat caso a coluna ainda esteja como jsonb em alguma instancia.
-  const featuredArrParam = featuredProductIdsSan !== undefined
-    ? featuredProductIdsSan
+  // Parametros:
+  //  - featured: JSON.stringify (column jsonb, mantem o formato historico)
+  //  - hidden:   array JS direto (column text[] via migration 119);
+  //              pg-node serializa JS array como Postgres text[].
+  const featuredJsonParam = featuredProductIdsSan !== undefined
+    ? JSON.stringify(featuredProductIdsSan)
     : null;
   const hiddenArrParam = hiddenProductIdsSan !== undefined
     ? hiddenProductIdsSan
@@ -345,9 +355,9 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
 
   try {
     if (v2) {
-      // Monta INSERT/UPSERT com hidden_product_ids opcional:
-      // se a coluna existe, incluimos no SQL; senao, ignoramos
-      // (a UI pode estar adiantada e mandar o campo antes da migration rodar).
+      // Monta INSERT/UPSERT com hidden_product_ids opcional: se a coluna
+      // existe, incluimos no SQL ($36); senao, ignoramos (a UI pode estar
+      // adiantada e mandar o campo antes da migration 119 rodar em prod).
       const hiddenInsertCol     = hasHidden ? ', hidden_product_ids' : '';
       const hiddenInsertVal     = hasHidden ? ', COALESCE($36::text[], \'{}\')' : '';
       const hiddenUpdateClause  = hasHidden
@@ -366,7 +376,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         description || null, address || null, phone || null, whatsapp || null,
         instagram || null, google_maps_url || null,
         business_hours ? JSON.stringify(business_hours) : null,
-        featuredArrParam,
+        featuredJsonParam,
         show_prices ?? null, show_stock ?? null, delivery_enabled ?? null,
         delivery_fee ?? null, delivery_radius_km ?? null,
         pickup_enabled ?? null, is_published ?? null, slug,
@@ -389,8 +399,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
           $1, $2, $3, $4, $5,
           $6, COALESCE($7, false), COALESCE($8, 'classic'), COALESCE($9, 'editorial'), $10,
           COALESCE($11::jsonb, '[]'::jsonb), COALESCE($12::jsonb, '[]'::jsonb),
-          $13, $14, $15, $16, $17, $18, $19, $20, $21,
-          COALESCE($22::text[], '{}'),
+          $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
           $23, $24, $25, $26, $27, $28, $29, $30,
           $31, $32, $33, $34, COALESCE($35, false)${hiddenInsertVal}
         )
@@ -415,7 +424,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
           instagram = COALESCE($19, digital_channel_config.instagram),
           google_maps_url = COALESCE($20, digital_channel_config.google_maps_url),
           business_hours = COALESCE($21, digital_channel_config.business_hours),
-          featured_product_ids = COALESCE($22::text[], digital_channel_config.featured_product_ids),
+          featured_product_ids = COALESCE($22, digital_channel_config.featured_product_ids),
           show_prices = COALESCE($23, digital_channel_config.show_prices),
           show_stock = COALESCE($24, digital_channel_config.show_stock),
           delivery_enabled = COALESCE($25, digital_channel_config.delivery_enabled),
@@ -452,7 +461,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         pay_on_delivery_enabled
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        $14, COALESCE($15::text[], '{}'), $16, $17, $18, $19, $20, $21, $22, $23,
+        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
         $24, $25, $26, $27, COALESCE($28, false)
       )
       ON CONFLICT (company_id) DO UPDATE SET
@@ -469,7 +478,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         instagram = COALESCE($12, digital_channel_config.instagram),
         google_maps_url = COALESCE($13, digital_channel_config.google_maps_url),
         business_hours = COALESCE($14, digital_channel_config.business_hours),
-        featured_product_ids = COALESCE($15::text[], digital_channel_config.featured_product_ids),
+        featured_product_ids = COALESCE($15, digital_channel_config.featured_product_ids),
         show_prices = COALESCE($16, digital_channel_config.show_prices),
         show_stock = COALESCE($17, digital_channel_config.show_stock),
         delivery_enabled = COALESCE($18, digital_channel_config.delivery_enabled),
@@ -491,7 +500,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       description || null, address || null, phone || null, whatsapp || null,
       instagram || null, google_maps_url || null,
       business_hours ? JSON.stringify(business_hours) : null,
-      featuredArrParam,
+      featuredJsonParam,
       show_prices ?? null, show_stock ?? null, delivery_enabled ?? null,
       delivery_fee ?? null, delivery_radius_km ?? null,
       pickup_enabled ?? null, is_published ?? null, slug,
@@ -510,7 +519,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     }
     // 42703 = coluna inexistente. Pode acontecer se hidden_product_ids
     // foi setado mas migration 119 ainda nao rodou. Invalida cache pra
-    // re-checar no proximo request e tenta de novo SEM o campo opcional.
+    // re-checar no proximo request e responde 503 sugerindo retry.
     if (err.code === '42703' && err.message?.includes('hidden_product_ids')) {
       _hiddenColumnCache = false;
       return res.status(503).json({
