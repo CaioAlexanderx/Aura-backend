@@ -35,6 +35,9 @@ router.use('/me', require('./meAggregates'));
 // Financeiro v2 — Insights consolidados multi-CNPJ (04/05/2026).
 // Agrega health score, runway e biggest lever de TODAS as empresas do usuario.
 router.use('/me/financeiro', require('./financeiroInsights').meRouter);
+// Financeiro Fase A (19/05/2026): comparativo consolidado multi-CNPJ.
+// Retorna series diarias alinhadas (atual + comparativo) pra grafico sobreposto.
+router.use('/me/financeiro', require('./financeiroComparative').meRouter);
 
 // Rotas privadas por empresa
 router.use('/companies/:id', privateCompaniesRouter);
