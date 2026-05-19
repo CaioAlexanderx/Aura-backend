@@ -4,6 +4,7 @@
 // FOOD-04: Delivery própria + notificação WhatsApp
 // FOOD-04c: Baixa de estoque automática ao entregar
 // FOOD-04d: Avaliação pós-entrega via WhatsApp
+// FOOD-08 (Fase 2): Gerenciar opened_at da mesa (set/clear sessão)
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -173,7 +174,6 @@ router.post('/', guard, async (req, res) => {
           customer_name, customer_phone, delivery_address, payment_method } = req.body;
   if (!items?.length) return res.status(400).json({ error: 'items obrigatório' });
 
-  // SEC-02: usar db.connect() (não db.pool.connect())
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -218,11 +218,25 @@ router.post('/', guard, async (req, res) => {
       );
     }
 
+    // FOOD-08 (Fase 2): marca mesa como occupied + abre sessão (opened_at) se NULL.
+    // Defensivo: se migration 119 ainda não rodou, fallback para só status.
     if (table_id) {
-      await client.query(
-        `UPDATE food_tables SET status='occupied' WHERE id=$1 AND company_id=$2`,
-        [table_id, req.params.id]
-      );
+      try {
+        await client.query(
+          `UPDATE food_tables
+           SET status='occupied',
+               opened_at=COALESCE(opened_at, NOW())
+           WHERE id=$1 AND company_id=$2`,
+          [table_id, req.params.id]
+        );
+      } catch (eOpen) {
+        if (eOpen.code === '42703') {
+          await client.query(
+            `UPDATE food_tables SET status='occupied' WHERE id=$1 AND company_id=$2`,
+            [table_id, req.params.id]
+          );
+        } else { throw eOpen; }
+      }
     }
     await client.query(
       `INSERT INTO food_kds_events (order_id, company_id, to_status) VALUES ($1,$2,'pending')`,
@@ -240,7 +254,6 @@ router.post('/', guard, async (req, res) => {
 // PATCH /:oid/status — KDS + baixa de estoque automática ao entregar
 router.patch('/:oid/status', guard, async (req, res) => {
   const { status, note } = req.body;
-  // SEC-02: usar db.connect() (não db.pool.connect())
   const client = await db.connect();
   try {
     const { rows } = await client.query(
@@ -276,7 +289,7 @@ router.patch('/:oid/status', guard, async (req, res) => {
       [req.params.oid, req.params.id, current, status, req.user?.id||null, note||null]
     );
 
-    // ── Liberar mesa ──────────────────────────────────────────
+    // Liberar mesa quando todos os pedidos da mesa vão pra delivered/cancelled
     if (['delivered','cancelled'].includes(status) && updated[0].table_id) {
       const { rows: others } = await client.query(
         `SELECT id FROM food_orders
@@ -284,11 +297,25 @@ router.patch('/:oid/status', guard, async (req, res) => {
         [updated[0].table_id, req.params.oid]
       );
       if (!others.length) {
-        await client.query(`UPDATE food_tables SET status='free' WHERE id=$1`, [updated[0].table_id]);
+        // FOOD-08 (Fase 2): libera mesa + fecha sessão (opened_at=NULL).
+        // Defensivo: fallback se migration 119 ainda não rodou.
+        try {
+          await client.query(
+            `UPDATE food_tables SET status='free', opened_at=NULL WHERE id=$1`,
+            [updated[0].table_id]
+          );
+        } catch (eClose) {
+          if (eClose.code === '42703') {
+            await client.query(
+              `UPDATE food_tables SET status='free' WHERE id=$1`,
+              [updated[0].table_id]
+            );
+          } else { throw eClose; }
+        }
       }
     }
 
-    // ── FOOD-04c: Baixa de estoque automática ao entregar ─────
+    // FOOD-04c: Baixa de estoque automática ao entregar
     if (status === 'delivered' && order.items?.length) {
       for (const orderItem of order.items) {
         if (!orderItem.item_id) continue;
@@ -320,7 +347,7 @@ router.patch('/:oid/status', guard, async (req, res) => {
 
     await client.query('COMMIT');
 
-    // ── FOOD-04d: WhatsApp — notificação + link de avaliação ──
+    // FOOD-04d: WhatsApp
     notifyWhatsApp(updated[0]).catch(() => {});
     if (status === 'delivered') {
       sendReviewLink(updated[0], req.params.id).catch(() => {});
