@@ -29,6 +29,13 @@
 //   mas explodia em 42P01 quando o deployment nao tinha a migration de
 //   barbershop (caso Eryca/Finesse — varejo puro). safeNullProductRef
 //   ignora 42P01 e segue o resto da cadeia.
+// FEAT (19/05/2026): suporte a variantes no GET. variants_stock_total
+//   agrega SUM(product_variants.stock_qty) e variant_barcodes lista
+//   ARRAY_AGG dos barcodes das variants ativas. Search WHERE estendido
+//   pra match em pv.barcode (bipando variant encontra o pai).
+//   Necessario depois da migration que move estoque do pai pras variants
+//   (zera products.stock_qty do pai). Sem isso o KPI "Unidades totais"
+//   subnotifica e o lowStock infla.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -137,14 +144,47 @@ router.get('/', async (req, res) => {
     const params = [cid];
 
     if (category) { where += ` AND category = $${params.length + 1}`; params.push(category); }
-    if (search)   { where += ` AND (name ILIKE $${params.length + 1} OR sku ILIKE $${params.length + 1} OR barcode ILIKE $${params.length + 1})`; params.push(`%${search}%`); }
+    if (search) {
+      // 19/05/2026: busca tambem em variant.barcode — usuario bipa o
+      // barcode da variante e queremos encontrar o pai. Sem isso, depois
+      // da migration que move barcode pras variants, o pai com barcode=NULL
+      // some da busca por codigo de barras.
+      where += ` AND (
+        name ILIKE $${params.length + 1}
+        OR sku ILIKE $${params.length + 1}
+        OR barcode ILIKE $${params.length + 1}
+        OR EXISTS (
+          SELECT 1 FROM product_variants pv
+          WHERE pv.product_id = products.id
+            AND pv.is_active = true
+            AND pv.barcode ILIKE $${params.length + 1}
+        )
+      )`;
+      params.push(`%${search}%`);
+    }
 
     const countRes = await db.query(`SELECT COUNT(*) AS total FROM products ${where}`, params);
     const dataRes = await db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
               is_active, is_group_shared, company_id, created_at,
-              (SELECT EXISTS(SELECT 1 FROM product_variants pv WHERE pv.product_id = products.id AND pv.is_active = true)) AS has_variants
+              (SELECT EXISTS(SELECT 1 FROM product_variants pv WHERE pv.product_id = products.id AND pv.is_active = true)) AS has_variants,
+              -- 19/05/2026: SUM do estoque das variants ativas pra alimentar UI/KPIs
+              -- depois que a migration zera products.stock_qty do pai.
+              COALESCE(
+                (SELECT SUM(pv.stock_qty) FROM product_variants pv
+                 WHERE pv.product_id = products.id AND pv.is_active = true),
+                0
+              ) AS variants_stock_total,
+              -- ARRAY dos barcodes das variants ativas — frontend usa pra
+              -- scanner local achar o pai bipando barcode de variant.
+              COALESCE(
+                (SELECT array_agg(pv.barcode) FROM product_variants pv
+                 WHERE pv.product_id = products.id
+                   AND pv.is_active = true
+                   AND pv.barcode IS NOT NULL),
+                ARRAY[]::TEXT[]
+              ) AS variant_barcodes
        FROM products ${where} ORDER BY name ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
     );
@@ -163,6 +203,9 @@ router.get('/', async (req, res) => {
       stock_company_id: r.company_id,
       created_at: r.created_at,
       has_variants: r.has_variants || false,
+      // 19/05/2026: novos campos pra UI lidar com variants
+      variants_stock_total: parseInt(r.variants_stock_total) || 0,
+      variant_barcodes: Array.isArray(r.variant_barcodes) ? r.variant_barcodes : [],
     }));
 
     res.json({ products, total: parseInt(countRes.rows[0]?.total) || 0, limit, offset, plan_limit: planLimit });
