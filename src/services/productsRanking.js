@@ -4,6 +4,10 @@
 //      sales IN the period appear (was LEFT JOIN = all-time data)
 // FIX 2: queries usam AT TIME ZONE 'America/Sao_Paulo' para
 //      consistencia com salesAnalytics.js (era created_at direto = UTC)
+// FIX 3 (19/05/2026): campo por produto renomeado de `curve` -> `abc`
+//      para casar com a leitura do frontend (AbcCurveCard lia p.abc e
+//      caia sempre no fallback 'C'). curve_summary preservado no topo
+//      da resposta por compatibilidade.
 // ============================================================
 
 const db = require('../config/database');
@@ -14,8 +18,8 @@ function classifyABC(products, totalRevenue) {
   return products.map(product => {
     accumulated += product.total_revenue;
     const pct = totalRevenue > 0 ? (accumulated / totalRevenue) * 100 : 0;
-    const curve = pct <= 80 ? 'A' : pct <= 95 ? 'B' : 'C';
-    return { ...product, accumulated_pct: parseFloat(pct.toFixed(1)), curve };
+    const abc = pct <= 80 ? 'A' : pct <= 95 ? 'B' : 'C';
+    return { ...product, accumulated_pct: parseFloat(pct.toFixed(1)), abc };
   });
 }
 
@@ -84,9 +88,9 @@ async function getProductsRanking(companyId, options = {}) {
       total_revenue:  parseFloat(totalRevenue.toFixed(2)),
     },
     curve_summary: {
-      A: ranked.filter(p => p.curve === 'A').length,
-      B: ranked.filter(p => p.curve === 'B').length,
-      C: ranked.filter(p => p.curve === 'C').length,
+      A: ranked.filter(p => p.abc === 'A').length,
+      B: ranked.filter(p => p.abc === 'B').length,
+      C: ranked.filter(p => p.abc === 'C').length,
     },
     products: ranked,
   };
