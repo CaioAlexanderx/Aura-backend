@@ -24,6 +24,9 @@ router.use('/bank', require('./bankReconciliation'));
 // Financeiro v2: Insights agregados (Health Score / Runway / Biggest Lever).
 // Onda 1 (04/05/2026) calcula client-side; este endpoint enriquece com dados do server.
 router.use('/financeiro', require('./financeiroInsights').companyRouter);
+// Financeiro Fase A (19/05/2026): comparativo (mes-vs-anterior, YoY, custom).
+// Retorna series diarias alinhadas pra plotar grafico sobreposto na Visao Geral.
+router.use('/financeiro', require('./financeiroComparative').companyRouter);
 // FIX 07/05/2026: exclui type='troca' do revenue + expoe trocas_count/trocas_net_received
 // + adiciona s.type e s.exchange_of_sale_id na listagem /sales
 router.use('/pdv', require('./pdv-summary-patch'));
