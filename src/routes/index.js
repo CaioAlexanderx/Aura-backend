@@ -47,6 +47,8 @@ router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminAccessCodes'));
 router.use('/admin', require('./adminPlan'));
 router.use('/admin', require('./adminVertical'));
+// Fase B1 benchmark (19/05/2026): sub-segmentacao manual via Gestao Aura.
+router.use('/admin', require('./adminSubVertical'));
 router.use('/admin', require('./adminSupport'));
 router.use('/admin', require('./adminMetrics'));
 router.use('/admin', require('./adminClients360'));
