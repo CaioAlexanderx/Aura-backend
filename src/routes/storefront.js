@@ -17,6 +17,10 @@
 // frame-ancestors * pra permitir embed em iframe (preview do admin).
 // Sem isso, helmet default X-Frame-Options bloqueia e o iframe vira
 // chrome-error://chromewebdata/.
+//
+// MP Fase 1 (20/05/2026): Pix automático via Mercado Pago.
+// Se a empresa tiver gateway MP configurado, usa createMpPixPayment.
+// Se MP falhar, cai no fallback generatePix (Asaas/estático).
 // ============================================================
 'use strict';
 
@@ -28,6 +32,7 @@ const { buildStorefront } = require('../services/storefrontBuilder');
 const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
+const { createMpPixPayment } = require('../services/mpService');
 
 function validateCpfCnpj(raw) {
   if (!raw) return null;
@@ -167,6 +172,17 @@ router.post('/:slug/order', async (req, res) => {
     const config = configs[0];
     const cid = config.company_id;
 
+    // MP Fase 1 (20/05/2026): detecta gateway MP da empresa
+    let mpGateway = null;
+    try {
+      const { rows: gws } = await db.query(
+        `SELECT access_token FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
+        [cid]
+      );
+      mpGateway = gws[0] || null;
+    } catch (_) { /* tabela pode não existir em deployment antigo */ }
+    const hasMpGateway = !!mpGateway;
+
     const dtype = delivery_type || 'pickup';
     if (dtype === 'delivery' && !config.delivery_enabled) {
       return res.status(400).json({ error: 'Entrega nao disponivel nesta loja' });
@@ -203,7 +219,8 @@ router.post('/:slug/order', async (req, res) => {
       }
     }
 
-    const hasPix = !!(config.pix_key && String(config.pix_key).trim());
+    // hasPix: true se tem chave Pix estática OU gateway MP
+    const hasPix = !!(config.pix_key && String(config.pix_key).trim()) || hasMpGateway;
     const hasOnDelivery = !!config.pay_on_delivery_enabled;
     let pmethod = (payment_method || '').toLowerCase().trim();
     if (!pmethod) {
@@ -370,18 +387,52 @@ router.post('/:slug/order', async (req, res) => {
       client.release();
     }
 
+    // ---- Geração do Pix ----
+    // Prioridade: MP automático → fallback Asaas/estático
     let pixData = null;
     if (pmethod === 'pix') {
-      pixData = await generatePix({ order, company_id: cid, total });
-      if (pixData) {
-        await db.query(`
-          UPDATE digital_orders SET
-            asaas_payment_id     = $1,
-            asaas_pix_qrcode     = $2,
-            asaas_pix_payload    = $3,
-            asaas_pix_expires_at = $4
-          WHERE id = $5
-        `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
+      if (hasMpGateway) {
+        try {
+          pixData = await createMpPixPayment({
+            accessToken:   mpGateway.access_token,
+            total,
+            orderId:       order.id,
+            orderNumber:   order.order_number,
+            customerEmail: customer_email || null,
+            description:   `Pedido #${order.order_number}`,
+          });
+          // Persiste o ID do pagamento MP para o webhook cruzar depois
+          await db.query(
+            `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
+            [pixData.payment_id, order.id]
+          );
+        } catch (mpErr) {
+          console.error('[storefront] MP Pix error, fallback to static Pix:', mpErr.message);
+          // Fallback: usa Pix estático (Asaas / chave manual)
+          pixData = await generatePix({ order, company_id: cid, total });
+          if (pixData) {
+            await db.query(`
+              UPDATE digital_orders SET
+                asaas_payment_id     = $1,
+                asaas_pix_qrcode     = $2,
+                asaas_pix_payload    = $3,
+                asaas_pix_expires_at = $4
+              WHERE id = $5
+            `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
+          }
+        }
+      } else {
+        pixData = await generatePix({ order, company_id: cid, total });
+        if (pixData) {
+          await db.query(`
+            UPDATE digital_orders SET
+              asaas_payment_id     = $1,
+              asaas_pix_qrcode     = $2,
+              asaas_pix_payload    = $3,
+              asaas_pix_expires_at = $4
+            WHERE id = $5
+          `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
+        }
       }
     }
 

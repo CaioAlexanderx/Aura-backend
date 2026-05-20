@@ -60,6 +60,7 @@ router.use('/admin', require('./adminGrowth'));
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
 router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
 router.use('/webhooks/instagram', require('./webhookInstagram')); // Hub Social P11 S3
+router.use('/webhooks/mp',        require('./webhookMp'));        // MP Fase 1 (20/05/2026)
 
 // Storefront publico
 router.use('/storefront', require('./storefront'));
