@@ -55,6 +55,8 @@ router.use('/admin', require('./adminClients360'));
 router.use('/admin', require('./adminRevenue'));
 router.use('/admin', require('./adminOps'));
 router.use('/admin', require('./adminGrowth'));
+// CRM comercial (20/05/2026): leads pre-venda (prospects / importacao Google Maps)
+router.use('/admin/leads', require('./adminLeads'));
 
 // Webhooks (publicos, validacao interna)
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
