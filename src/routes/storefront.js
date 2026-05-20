@@ -2,6 +2,7 @@
 // AURA. — Storefront Público (sem auth)
 // GET  /storefront/:slug                     — JSON API
 // GET  /storefront/:slug/page                — HTML renderizado (vitrine pública)
+// GET  /storefront/:slug/shipping-quote      — Calcula frete por CEP (Fase 5b)
 // POST /storefront/:slug/order               — Cria pedido (Pix manual ou na entrega)
 // POST /storefront/:slug/order/:oid/upload-proof — Cliente envia comprovante de Pix
 // POST /storefront/:slug/order/:oid/mark-as-paid — Cliente avisa que pagou
@@ -21,6 +22,11 @@
 // MP Fase 1 (20/05/2026): Pix automático via Mercado Pago.
 // Se a empresa tiver gateway MP configurado, usa createMpPixPayment.
 // Se MP falhar, cai no fallback generatePix (Asaas/estático).
+//
+// Fase 5b (20/05/2026): endpoint /shipping-quote + calculo server-side
+// do delivery_fee no POST /order quando cliente passa CEP. Suporta
+// modo flat, modo distance (haversine via BrasilAPI), frete gratis
+// acima de valor minimo.
 // ============================================================
 'use strict';
 
@@ -33,6 +39,7 @@ const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment } = require('../services/mpService');
+const { calculateShippingQuote } = require('../services/shippingQuote');
 
 function validateCpfCnpj(raw) {
   if (!raw) return null;
@@ -95,13 +102,16 @@ const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
 // CSP v2 — frame-ancestors * permite que QUALQUER página embute a vitrine em
 // iframe (preview do admin em app.getaura.com.br, e qualquer parceiro que
 // queira incorporar). É público de qualquer forma.
+//
+// Fase 5b: brasilapi.com.br liberada em connect-src (defesa em profundidade —
+// o backend faz a chamada, mas reservamos pra fallback client-side futuro).
 const STOREFRONT_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
   "script-src-attr 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "img-src 'self' data: blob: https:",
-  "connect-src 'self' https://cloudflareinsights.com https://viacep.com.br " + STOREFRONT_API_BASE,
+  "connect-src 'self' https://cloudflareinsights.com https://viacep.com.br https://brasilapi.com.br " + STOREFRONT_API_BASE,
   "font-src 'self' data: https://fonts.gstatic.com",
   "frame-ancestors *",
   "object-src 'none'",
@@ -147,6 +157,42 @@ router.get('/:slug/page', async (req, res) => {
   }
 });
 
+// ============================================================
+// GET /storefront/:slug/shipping-quote?cep=12345678&subtotal=150
+// (Fase 5b)
+// Calcula o frete para o CEP do cliente. Sempre retorna 200 com payload
+// estruturado (mesmo em erro logico de "fora da area" — fee=null + error).
+// ============================================================
+router.get('/:slug/shipping-quote', async (req, res) => {
+  try {
+    const slug = req.params.slug.toLowerCase().trim();
+    const { rows } = await db.query(
+      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`,
+      [slug]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Loja nao encontrada' });
+    const config = rows[0];
+
+    if (!config.delivery_enabled) {
+      return res.status(400).json({ error: 'Loja nao faz entregas' });
+    }
+
+    const cep = String(req.query.cep || '').trim();
+    if (!cep) return res.status(400).json({ error: 'cep obrigatorio' });
+
+    const subtotal = parseFloat(req.query.subtotal) || 0;
+    if (subtotal < 0) {
+      return res.status(400).json({ error: 'subtotal invalido' });
+    }
+
+    const quote = await calculateShippingQuote(config, cep, subtotal);
+    res.json(quote);
+  } catch (err) {
+    console.error('shipping-quote error:', err);
+    res.status(500).json({ error: 'Erro ao calcular frete' });
+  }
+});
+
 router.post('/:slug/order', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const {
@@ -156,6 +202,7 @@ router.post('/:slug/order', async (req, res) => {
     request_nfce, customer_cpf_cnpj,
     address_zip, address_street, address_number, address_complement,
     address_neighborhood, address_city, address_state,
+    expected_delivery_fee,
   } = req.body;
 
   if (!customer_name || !customer_phone) {
@@ -324,7 +371,45 @@ router.post('/:slug/order', async (req, res) => {
       });
     }
 
-    const delivery_fee = dtype === 'delivery' ? (parseFloat(config.delivery_fee) || 0) : 0;
+    // ============================================================
+    // Fase 5b: calculo dinamico de delivery_fee.
+    // - Se delivery e cliente passou address_zip: usa shippingQuote
+    //   (modo flat respeitado, modo distance geocodifica + haversine,
+    //    frete gratis quando subtotal >= delivery_free_above_amount)
+    // - Anti-tampering: se body.expected_delivery_fee veio, valida
+    //   tolerancia de 0.01 entre o computado e o esperado pelo cliente.
+    // - Sem CEP (retirada ou cliente nao informou): fallback comportamento
+    //   anterior (delivery_fee fixo se delivery, 0 se retirada).
+    // ============================================================
+    let delivery_fee = 0;
+    let shippingMeta = null;
+    if (dtype === 'delivery') {
+      if (address_zip) {
+        const cleanZip = String(address_zip).replace(/\D/g, '');
+        const quote = await calculateShippingQuote(config, cleanZip, subtotal);
+        shippingMeta = quote;
+        if (quote.error && quote.fee == null) {
+          return res.status(400).json({
+            error: quote.error,
+            distance_km: quote.distance_km,
+          });
+        }
+        delivery_fee = parseFloat(quote.fee) || 0;
+
+        if (expected_delivery_fee != null && expected_delivery_fee !== '') {
+          const expected = parseFloat(expected_delivery_fee);
+          if (Number.isFinite(expected) && Math.abs(expected - delivery_fee) > 0.01) {
+            return res.status(409).json({
+              error: 'Valor de frete desatualizado. Atualize a pagina e tente de novo.',
+              server_fee: delivery_fee,
+              client_fee: expected,
+            });
+          }
+        }
+      } else {
+        delivery_fee = parseFloat(config.delivery_fee) || 0;
+      }
+    }
     const total = subtotal + delivery_fee;
 
     const initialStatus = pmethod === 'on_delivery' ? 'confirmed' : 'pending_payment';
@@ -451,8 +536,11 @@ router.post('/:slug/order', async (req, res) => {
       order_id:       order.id,
       order_number:   order.order_number,
       total,
+      delivery_fee,
+      subtotal,
       status:         initialStatus,
       payment_method: pmethod,
+      shipping:       shippingMeta,
       pix: pixData ? {
         qrcode:     pixData.qrcode,
         payload:    pixData.payload,
