@@ -15,6 +15,9 @@
 //     - Cheio  => mostra SO os listados, na ordem do array.
 //   hidden_product_ids fica DORMENTE — parseHiddenIds segue exportado para
 //   nao quebrar imports externos, mas e ignorado no storefront publico.
+//
+// fix (20/05/2026): variantes ordenadas por tamanho numérico ASC (menor → maior).
+//   Usa split_part(sku_suffix, '/', 1) para lidar com ranges tipo "25/26".
 // ============================================================
 'use strict';
 
@@ -166,7 +169,9 @@ async function buildStorefront(config) {
       LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
       WHERE pv.product_id = ANY($1::uuid[]) AND pv.is_active = true
       GROUP BY pv.id
-      ORDER BY pv.created_at
+      ORDER BY
+        CAST(NULLIF(regexp_replace(split_part(pv.sku_suffix, '/', 1), '[^0-9]', '', 'g'), '') AS numeric) NULLS LAST,
+        pv.sku_suffix ASC
     `, [productIds]);
     for (const v of variantRows) {
       if (!variantsByProduct[v.product_id]) variantsByProduct[v.product_id] = [];
