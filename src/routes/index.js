@@ -77,6 +77,10 @@ router.use('/barber/book',       require('./barberBooking'));
 router.use('/onboarding',        onboardingRouter);
 router.use('/food/table',        require('./foodWaiter'));
 router.use('/food/schedule',     require('./foodSchedule'));
+// FOOD-10 (Fase 5): rotas publicas extras (POST de pedido pelo slug + zonas).
+// Montado ANTES de '/food' principal porque tem rotas mais especificas
+// (/menu/public/:slug/order, /zones) que nao conflitam com food.js.
+router.use('/food',              require('./foodPublic'));
 router.use('/food',              require('./food'));
 
 module.exports = router;
