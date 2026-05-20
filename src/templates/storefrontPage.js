@@ -12,6 +12,9 @@
 // v3 (18/05/2026 — Fase 3 PR A):
 //  • banner_rotation_seconds (3–15s, default 7s) lido de site.banner_rotation_seconds
 //  • touchstart/touchend no stage pausa rotação (espelha mouseenter/leave)
+//
+// Fase 5 (20/05/2026):
+//  • passa is_open_now + next_open_text pro buildHtmlBody (badge topbar)
 // ============================================================
 const buildStyles   = require('./storefrontStyles');
 const buildHtmlBody = require('./storefrontHtml');
@@ -37,6 +40,11 @@ function buildStorefrontPage(data, slug) {
   const announcementBar = site.announcement_bar ? escHtml(site.announcement_bar) : '';
   const whatsNum = (data.contact?.whatsapp || '').replace(/\D/g, '');
   const addrText = escHtml(data.contact?.address || '');
+
+  // Fase 5: open state. Quando o builder nao computou (config sem
+  // business_hours), is_open_now vem undefined e o template skipa o badge.
+  const isOpenNow = (typeof site.is_open_now === 'boolean') ? site.is_open_now : undefined;
+  const nextOpenText = site.next_open_text || '';
 
   // Banner rotation — site.banner_rotation_seconds em [3, 15], default 7s.
   // Valores fora do range ou inválidos caem no default. Convertemos pra ms
@@ -90,6 +98,7 @@ function buildStorefrontPage(data, slug) {
   const body   = buildHtmlBody({
     siteName, tagline, logoInTopbar, logoInHero, contactBar,
     addrText, coverUrl, announcementBar, banners, serviceCards,
+    isOpenNow, nextOpenText,
   });
   const script = buildScript(storeData, escJs(slug), API_BASE);
 

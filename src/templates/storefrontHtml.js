@@ -1,7 +1,8 @@
 // AURA. — HTML body da vitrine pública v2
 // buildHtmlBody({
 //   siteName, tagline, logoInTopbar, logoInHero, contactBar,
-//   addrText, coverUrl, announcementBar, banners[], serviceCards[]
+//   addrText, coverUrl, announcementBar, banners[], serviceCards[],
+//   isOpenNow, nextOpenText
 // }) → string HTML
 //
 // banners[]      = [{ kicker, headline, body, cta, tone, tint, image_url }]
@@ -20,9 +21,13 @@
 // v3.1 (18/05/2026 — Fase 3 PR A):
 // Search agora é inline na topbar — botão lupa expande input sobrepondo
 // o nome da loja (.topbar.searching). Sem .search-bar-wrap sticky abaixo.
+//
+// Fase 5 (20/05/2026): badge Aberta/Fechada ao lado do nome da loja.
+// Verde quando is_open_now=true; cinza com next_open_text quando false.
 function buildHtmlBody({
   siteName, tagline, logoInTopbar, logoInHero, contactBar,
   addrText, coverUrl, announcementBar, banners, serviceCards,
+  isOpenNow, nextOpenText,
 }) {
   banners = Array.isArray(banners) ? banners : [];
   serviceCards = Array.isArray(serviceCards) ? serviceCards : [];
@@ -51,6 +56,18 @@ function buildHtmlBody({
     return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
   }
   function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  // Fase 5: badge Aberta/Fechada
+  // Mostra apenas se isOpenNow foi passado explicitamente (true/false).
+  // Quando undefined (build sem business_hours), nao renderiza.
+  let openBadgeHtml = '';
+  if (typeof isOpenNow === 'boolean') {
+    const cls = isOpenNow ? 'open-badge is-open' : 'open-badge is-closed';
+    const label = isOpenNow
+      ? 'Aberta'
+      : ('Fechada' + (nextOpenText ? ` · ${escHtml(nextOpenText)}` : ''));
+    openBadgeHtml = `<span class="${cls}"><span class="open-badge-dot"></span><span class="open-badge-text">${label}</span></span>`;
+  }
 
   // Banner slides
   const slidesHtml = banners.map((b, i) => {
@@ -166,7 +183,10 @@ ${serviceCards.map((c) => `  <div class="service-card">
 <header class="topbar" id="topbar">
   <a class="topbar-brand" href="#" onclick="return false">
     <div class="topbar-logo">${logoInTopbar}</div>
-    <span class="topbar-name">${siteName}</span>
+    <div class="topbar-brand-text">
+      <span class="topbar-name">${siteName}</span>
+      ${openBadgeHtml}
+    </div>
   </a>
   <div class="topbar-search-inline" id="topbarSearchInline">
     <svg class="topbar-search-icon" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>

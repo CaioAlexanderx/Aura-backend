@@ -1,6 +1,14 @@
 // AURA. -- storefront/parts/checkout.js
 // Checkout 3 steps: open/close/back/next, renderCheckoutStep, selectDelivery, submitOrder.
 // Coleta: nome, fone, email, [opcional CPF/CNPJ pra NFCe], endereco estruturado (delivery).
+//
+// Fase 5 (20/05/2026):
+//  • pickup option mostra pickup_eta_text e pickup_address quando setados
+//  • delivery option mostra delivery_eta_text quando setado
+//  • quando delivery_pricing_mode=distance, CEP do cliente dispara
+//    GET /shipping-quote (debounce 800ms ou blur) e atualiza fee + alerta
+//  • erro "Fora da area" desabilita botao Continuar e mostra mensagem
+//  • submitOrder envia expected_delivery_fee pra anti-tampering server-side
 'use strict';
 
 module.exports = `
@@ -10,16 +18,16 @@ function checkoutBack(){if(checkoutStep>1&&checkoutStep<3){checkoutStep--;render
 
 // Validador CPF/CNPJ mod 11 (mesmo algoritmo do backend)
 function validateCpfCnpjFront(raw){
-  var d=String(raw||'').replace(/\\D/g,'');
+  var d=String(raw||'').replace(/\\\\D/g,'');
   if(d.length===11){
-    if(/^(\\d)\\1{10}$/.test(d)) return false;
+    if(/^(\\\\d)\\\\1{10}$/.test(d)) return false;
     var s=0;for(var i=0;i<9;i++) s+=parseInt(d[i])*(10-i);
     var r=(s*10)%11;if(r===10)r=0;if(r!==parseInt(d[9])) return false;
     s=0;for(var i=0;i<10;i++) s+=parseInt(d[i])*(11-i);
     r=(s*10)%11;if(r===10)r=0;return r===parseInt(d[10]);
   }
   if(d.length===14){
-    if(/^(\\d)\\1{13}$/.test(d)) return false;
+    if(/^(\\\\d)\\\\1{13}$/.test(d)) return false;
     var w1=[5,4,3,2,9,8,7,6,5,4,3,2],w2=[6,5,4,3,2,9,8,7,6,5,4,3,2];
     var s=0;for(var i=0;i<12;i++) s+=parseInt(d[i])*w1[i];
     var r=s%11;r=r<2?0:11-r;if(r!==parseInt(d[12])) return false;
@@ -32,7 +40,7 @@ function validateCpfCnpjFront(raw){
 // ViaCEP autocomplete: chamado quando CEP completa 8 digitos
 function fetchCep(){
   var inp=document.getElementById('inp_cep');if(!inp) return;
-  var cep=String(inp.value||'').replace(/\\D/g,'');
+  var cep=String(inp.value||'').replace(/\\\\D/g,'');
   if(cep.length!==8) return;
   var label=document.getElementById('cepStatus');
   if(label) label.textContent='Buscando...';
@@ -50,8 +58,87 @@ function fetchCep(){
       var uf=document.getElementById('inp_state');if(uf) uf.value=(d.uf||'').toUpperCase();
       if(label) label.textContent='✓ Endereco preenchido';
       var num=document.getElementById('inp_number');if(num) num.focus();
+      // Fase 5: tenta cotar frete sempre que o CEP for valido (independente
+      // do modo — backend resolve flat vs distance).
+      fetchShippingQuote();
     })
     .catch(function(){if(label) label.textContent='Erro ao buscar CEP';});
+}
+
+// Fase 5: estado da cotacao de frete (atualizada sob demanda)
+var shippingQuote=null;
+var shippingOutOfArea=false;
+var shippingFetchTimer=null;
+
+// Calcula frete server-side. Chamado a cada CEP novo ou no blur do input.
+function fetchShippingQuote(){
+  var inp=document.getElementById('inp_cep');if(!inp) return;
+  var cep=String(inp.value||'').replace(/\\\\D/g,'');
+  if(cep.length!==8){ return; }
+  var sub=getSubtotal();
+  var statusEl=document.getElementById('shippingQuoteStatus');
+  if(statusEl){
+    statusEl.className='shipping-quote-status';
+    statusEl.textContent='Calculando frete...';
+  }
+  fetch(API_BASE + '/api/v1/storefront/'+SLUG+'/shipping-quote?cep='+cep+'&subtotal='+encodeURIComponent(sub))
+    .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
+    .then(function(res){
+      if(!res.ok){
+        if(statusEl){
+          statusEl.className='shipping-quote-status error';
+          statusEl.textContent=res.data.error||'Erro ao calcular frete';
+        }
+        return;
+      }
+      var q=res.data;
+      shippingQuote=q;
+      // Erro logico: fora da area de entrega
+      if(q.error && q.fee==null){
+        shippingOutOfArea=true;
+        if(statusEl){
+          statusEl.className='shipping-quote-status error';
+          statusEl.textContent=q.error+(q.distance_km?' ('+q.distance_km+' km)':'');
+        }
+        // Desabilita botao Continuar
+        var btn=document.getElementById('nextBtn');
+        if(btn){ btn.disabled=true; }
+        return;
+      }
+      shippingOutOfArea=false;
+      var btn=document.getElementById('nextBtn');
+      if(btn){ btn.disabled=false; }
+      if(statusEl){
+        if(q.free_shipping){
+          statusEl.className='shipping-quote-status free';
+          statusEl.textContent='✓ Frete gratis'+(q.eta?' · '+q.eta:'');
+        } else if(q.mode==='distance'){
+          statusEl.className='shipping-quote-status';
+          statusEl.textContent='Frete '+fmt(q.fee)+(q.distance_km?' · '+q.distance_km+' km':'')+(q.eta?' · '+q.eta:'');
+        } else {
+          statusEl.className='shipping-quote-status';
+          statusEl.textContent='Frete '+fmt(q.fee)+(q.eta?' · '+q.eta:'')+(q.alert?' · '+q.alert:'');
+        }
+      }
+      // Atualiza linhas Entrega/Total no resumo
+      refreshOrderSummaryWithQuote();
+    })
+    .catch(function(){
+      if(statusEl){
+        statusEl.className='shipping-quote-status error';
+        statusEl.textContent='Erro de conexao ao calcular frete';
+      }
+    });
+}
+
+function refreshOrderSummaryWithQuote(){
+  var sub=getSubtotal();
+  var fee=getFee();
+  document.querySelectorAll('.summary-row').forEach(function(r){
+    var spans=r.querySelectorAll('span');
+    if(spans[0]&&spans[0].textContent==='Entrega') spans[1].textContent=fee?fmt(fee):'Grátis';
+    if(r.classList.contains('total')&&spans[0]&&spans[0].textContent==='Total') spans[1].textContent=fmt(sub+fee);
+  });
 }
 
 function checkoutNext(){
@@ -67,7 +154,7 @@ function checkoutNext(){
       if(!cpfCnpj){showToast('Informe seu CPF/CNPJ pra NFCe');return;}
       if(!validateCpfCnpjFront(cpfCnpj)){showToast('CPF/CNPJ invalido');return;}
     }
-    customerData={name:name,phone:phone,email:email||null,request_nfce:!!requestNfce,customer_cpf_cnpj:cpfCnpj?cpfCnpj.replace(/\\D/g,''):null};
+    customerData={name:name,phone:phone,email:email||null,request_nfce:!!requestNfce,customer_cpf_cnpj:cpfCnpj?cpfCnpj.replace(/\\\\D/g,''):null};
     checkoutStep=2;renderCheckoutStep();
   }else if(checkoutStep===2){
     if(selectedDelivery==='delivery'){
@@ -81,9 +168,12 @@ function checkoutNext(){
       if(!cep||!street||!num||!bairro||!city||!uf){
         showToast('Preencha endereco completo (CEP, rua, numero, bairro, cidade, UF)');return;
       }
-      if(String(cep).replace(/\\D/g,'').length!==8){showToast('CEP invalido');return;}
+      if(String(cep).replace(/\\\\D/g,'').length!==8){showToast('CEP invalido');return;}
       if(uf.length!==2){showToast('UF invalida (2 letras)');return;}
-      customerData.address_zip=cep.replace(/\\D/g,'');
+      if(shippingOutOfArea){
+        showToast('Fora da area de entrega. Verifique o CEP ou escolha retirada.');return;
+      }
+      customerData.address_zip=cep.replace(/\\\\D/g,'');
       customerData.address_street=street;
       customerData.address_number=num;
       customerData.address_complement=compl||null;
@@ -156,11 +246,14 @@ function renderCheckoutStep(){
     if(ch) ch.addEventListener('change',toggleNfceCheckbox);
   }else if(s===2){
     var pickupOk=SETTINGS.pickup_enabled!==false,deliveryOk=SETTINGS.delivery_enabled===true,fee2=parseFloat(SETTINGS.delivery_fee)||0;
+    var pickupEta=SETTINGS.pickup_eta_text||'';
+    var deliveryEta=SETTINGS.delivery_eta_text||'';
+    var pickupAddr=(CONTACT && CONTACT.pickup_address) || (CONTACT && CONTACT.address) || 'Na loja';
     var addrHtml=selectedDelivery==='delivery'?renderAddressForm():'';
     body.innerHTML='<p style="font-size:12px;color:var(--text-3);margin-bottom:16px;">Como deseja receber?</p>'
       +'<div class="delivery-opts">'
-      +(pickupOk?'<div class="delivery-opt'+(selectedDelivery==="pickup"?" active":"")+'" id="opt_pickup"><div class="delivery-opt-radio"></div><div class="delivery-opt-icon">🏪</div><div class="delivery-opt-info"><div class="delivery-opt-name">Retirada no local</div><div class="delivery-opt-detail">'+(CONTACT.address||'Na loja')+'</div></div><div class="delivery-opt-price">Grátis</div></div>':'')
-      +(deliveryOk?'<div class="delivery-opt'+(selectedDelivery==="delivery"?" active":"")+'" id="opt_delivery"><div class="delivery-opt-radio"></div><div class="delivery-opt-icon">🚚</div><div class="delivery-opt-info"><div class="delivery-opt-name">Entrega a domicílio</div><div class="delivery-opt-detail">Conforme disponibilidade</div></div><div class="delivery-opt-price">'+(fee2?fmt(fee2):'Grátis')+'</div></div>':'')
+      +(pickupOk?'<div class="delivery-opt'+(selectedDelivery==="pickup"?" active":"")+'" id="opt_pickup"><div class="delivery-opt-radio"></div><div class="delivery-opt-icon">🏪</div><div class="delivery-opt-info"><div class="delivery-opt-name">Retirada no local</div><div class="delivery-opt-detail">'+esc(pickupAddr)+'</div>'+(pickupEta?'<div class="delivery-opt-eta">'+esc(pickupEta)+'</div>':'')+'</div><div class="delivery-opt-price">Grátis</div></div>':'')
+      +(deliveryOk?'<div class="delivery-opt'+(selectedDelivery==="delivery"?" active":"")+'" id="opt_delivery"><div class="delivery-opt-radio"></div><div class="delivery-opt-icon">🚚</div><div class="delivery-opt-info"><div class="delivery-opt-name">Entrega a domicílio</div><div class="delivery-opt-detail">'+(SETTINGS.delivery_pricing_mode==='distance'?'Frete calculado por distancia':'Conforme disponibilidade')+'</div>'+(deliveryEta?'<div class="delivery-opt-eta">'+esc(deliveryEta)+'</div>':'')+'</div><div class="delivery-opt-price">'+(fee2?fmt(fee2):'Grátis')+'</div></div>':'')
       +'</div>'+addrHtml
       +'<div class="order-summary"><div class="summary-row"><span>Subtotal</span><span>'+fmt(sub)+'</span></div>'
       +'<div class="summary-row"><span>Entrega</span><span>'+(fee?fmt(fee):'Grátis')+'</span></div>'
@@ -169,6 +262,15 @@ function renderCheckoutStep(){
     if(op) op.addEventListener('click',function(){selectDelivery('pickup');});
     if(od) od.addEventListener('click',function(){selectDelivery('delivery');});
     bindAddressFormEvents();
+    // Fase 5: se delivery preselected e ja temos CEP, recota
+    if(selectedDelivery==='delivery'){
+      var existingZip=customerData.address_zip||'';
+      if(existingZip && existingZip.length===8){
+        var inp=document.getElementById('inp_cep');
+        if(inp){ inp.value=existingZip; }
+        fetchShippingQuote();
+      }
+    }
   }else if(s===3){
     var hasPix=!!SETTINGS.has_pix, hasOd=!!SETTINGS.pay_on_delivery_enabled;
     if(!customerData.payment_method && hasPix && hasOd){
@@ -192,7 +294,7 @@ function renderCheckoutStep(){
         +'<div class="confirm-desc">Pedido <strong>#'+esc(currentOrder.order_number)+'</strong>. Você pagará '+fmt(currentOrder.total)+' na entrega.</div>'
         +(selectedDelivery==='delivery'
           ?'<p style="font-size:12px;color:var(--text-3);max-width:300px;margin:8px auto;">Aguarde nosso contato pra combinar a entrega.</p>'
-          :'<p style="font-size:12px;color:var(--text-3);max-width:300px;margin:8px auto;">Vá retirar na loja: '+esc(CONTACT.address||'')+'</p>')
+          :'<p style="font-size:12px;color:var(--text-3);max-width:300px;margin:8px auto;">Vá retirar na loja: '+esc((CONTACT && CONTACT.pickup_address) || (CONTACT && CONTACT.address) || '')+'</p>')
         +'</div>';
       btn.textContent='Concluir';
       btn.className='next-btn green';
@@ -242,6 +344,7 @@ function renderCheckoutStep(){
 // Renderiza form estruturado de endereco (CEP+ViaCEP, rua, num, bairro, cidade, UF)
 function renderAddressForm(){
   var d=customerData;
+  var quoteRow='<div id="shippingQuoteStatus" class="shipping-quote-status" style="display:'+(SETTINGS.delivery_pricing_mode==='distance'?'flex':'none')+';">Digite o CEP pra calcular o frete</div>';
   return '<div class="address-form" style="background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:12px;margin-top:12px;">'
     +'<div class="field-row">'
     +'<div class="field-group" style="flex:0 0 130px;"><label class="field-label">CEP *</label>'
@@ -250,6 +353,7 @@ function renderAddressForm(){
     +'<div class="field-group" style="flex:1;"><label class="field-label">Rua *</label>'
     +'<input class="field-input" type="text" id="inp_street" placeholder="Rua/Avenida" value="'+(d.address_street||'')+'"></div>'
     +'</div>'
+    +quoteRow
     +'<div class="field-row">'
     +'<div class="field-group" style="flex:0 0 100px;"><label class="field-label">Nº *</label>'
     +'<input class="field-input" type="text" id="inp_number" placeholder="123" value="'+(d.address_number||'')+'"></div>'
@@ -270,11 +374,16 @@ function renderAddressForm(){
 function bindAddressFormEvents(){
   var cep=document.getElementById('inp_cep');
   if(cep){
-    cep.addEventListener('blur',fetchCep);
+    cep.addEventListener('blur',function(){ fetchCep(); });
     cep.addEventListener('input',function(){
-      var v=this.value.replace(/\\D/g,'').slice(0,8);
+      var v=this.value.replace(/\\\\D/g,'').slice(0,8);
       this.value=v.length>5?v.slice(0,5)+'-'+v.slice(5):v;
-      if(v.length===8) fetchCep();
+      if(v.length===8){
+        fetchCep();
+        // debounce extra do quote pra evitar dupla chamada com fetchCep
+        if(shippingFetchTimer) clearTimeout(shippingFetchTimer);
+        shippingFetchTimer=setTimeout(fetchShippingQuote, 800);
+      }
     });
   }
   var st=document.getElementById('inp_state');
@@ -283,6 +392,8 @@ function bindAddressFormEvents(){
 
 function selectDelivery(type){
   selectedDelivery=type;
+  // Reset state da cotacao ao alternar
+  if(type==='pickup'){ shippingOutOfArea=false; }
   var op=document.getElementById('opt_pickup'),od=document.getElementById('opt_delivery');
   if(op) op.classList.toggle('active',type==='pickup');
   if(od) od.classList.toggle('active',type==='delivery');
@@ -307,6 +418,11 @@ function submitOrder(){
   var btn=document.getElementById('nextBtn');
   btn.disabled=true;btn.textContent='Criando pedido...';
   var items=Object.values(cart).map(function(i){return{product_id:i.product_id,variant_id:i.variant_id||null,quantity:i.qty};});
+  // Fase 5: anti-tampering — envia fee que o cliente esta vendo
+  var expectedFee=null;
+  if(selectedDelivery==='delivery' && shippingQuote && shippingQuote.fee!=null){
+    expectedFee=shippingQuote.fee;
+  }
   var body={
     customer_name:customerData.name,
     customer_phone:customerData.phone,
@@ -323,6 +439,7 @@ function submitOrder(){
     address_neighborhood:customerData.address_neighborhood||null,
     address_city:customerData.address_city||null,
     address_state:customerData.address_state||null,
+    expected_delivery_fee:expectedFee,
   };
   fetch(API_BASE + '/api/v1/storefront/'+SLUG+'/order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
   .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})

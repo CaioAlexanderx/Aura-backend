@@ -12,12 +12,17 @@
 // Migration 116: service_cards[] JSONB (4 cards na strip de benefícios).
 // Migration 119: hidden_product_ids text[] + nova semantica de featured_product_ids
 //                (vira ordem de destaque, nao filtra mais a vitrine). featured continua jsonb.
+// Migration 120 (Fase 5 — 20/05/2026): pickup_address, pickup_eta_text,
+//                delivery_eta_text, origin_zip, origin_lat, origin_lng,
+//                delivery_pricing_mode (flat|distance), delivery_distance_tiers (jsonb),
+//                delivery_free_above_amount.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
 const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
 const { validatePixKey } = require('../services/staticPixService');
+const { geocodeCep, normalizeCep } = require('../services/cepGeocoding');
 
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
@@ -54,6 +59,11 @@ const DEFAULT_CONFIG = {
   pickup_enabled: true, is_published: false, slug: null,
   custom_domain: null, custom_domain_status: 'none',
   custom_domain_plan: null, custom_domain_expires_at: null, custom_domain_price: null,
+  // Fase 5 (migration 120)
+  pickup_address: null, pickup_eta_text: null, delivery_eta_text: null,
+  origin_zip: null, origin_lat: null, origin_lng: null,
+  delivery_pricing_mode: 'flat', delivery_distance_tiers: [],
+  delivery_free_above_amount: null,
 };
 
 const STOREFRONT_BASE = process.env.STOREFRONT_BASE_URL || 'https://loja.getaura.com.br';
@@ -97,6 +107,22 @@ async function hasHiddenColumn() {
     _hiddenColumnCache = rows.length === 1;
   } catch { _hiddenColumnCache = false; }
   return _hiddenColumnCache;
+}
+
+// Cache da existencia das colunas Fase 5 (migration 120). Defensivo:
+// se a migration nao rodou, o UPDATE Fase 5 vira no-op silencioso.
+let _fase5ColumnsCache = null;
+async function hasFase5Columns() {
+  if (_fase5ColumnsCache !== null) return _fase5ColumnsCache;
+  try {
+    const { rows } = await db.query(`
+      SELECT column_name FROM information_schema.columns
+       WHERE table_name = 'digital_channel_config'
+         AND column_name IN ('pickup_address','pickup_eta_text','delivery_eta_text','origin_zip','origin_lat','origin_lng','delivery_pricing_mode','delivery_distance_tiers','delivery_free_above_amount')
+    `);
+    _fase5ColumnsCache = rows.length === 9;
+  } catch { _fase5ColumnsCache = false; }
+  return _fase5ColumnsCache;
 }
 
 // Visibility canonica de products (alinhada com storefrontBuilder/products.js)
@@ -143,6 +169,22 @@ router.get('/', async (req, res) => {
       business_hours: config.business_hours || DEFAULT_CONFIG.business_hours,
       featured_product_ids: config.featured_product_ids || [],
       hidden_product_ids: config.hidden_product_ids || [],
+      // Fase 5 (migration 120) — fallback null/default quando colunas inexistem
+      pickup_address:        config.pickup_address ?? null,
+      pickup_eta_text:       config.pickup_eta_text ?? null,
+      delivery_eta_text:     config.delivery_eta_text ?? null,
+      origin_zip:            config.origin_zip ?? null,
+      origin_lat:            config.origin_lat != null ? parseFloat(config.origin_lat) : null,
+      origin_lng:            config.origin_lng != null ? parseFloat(config.origin_lng) : null,
+      delivery_pricing_mode: config.delivery_pricing_mode || 'flat',
+      delivery_distance_tiers: Array.isArray(config.delivery_distance_tiers)
+        ? config.delivery_distance_tiers
+        : (typeof config.delivery_distance_tiers === 'string'
+            ? (() => { try { const p = JSON.parse(config.delivery_distance_tiers); return Array.isArray(p) ? p : []; } catch { return []; } })()
+            : []),
+      delivery_free_above_amount: config.delivery_free_above_amount != null
+        ? parseFloat(config.delivery_free_above_amount)
+        : null,
       exists: true,
       storefront_url: config.slug ? `${STOREFRONT_BASE}/${config.slug}` : null,
       domain_pricing: { '1year': 80, '2years': 152 },
@@ -279,6 +321,25 @@ function sanitizeProductIdArray(input) {
   return out;
 }
 
+// Fase 5: sanitiza array de tiers de distancia.
+// Schema esperado: [{ max_km: number>0, fee: number>=0 }]
+// Retorna array ordenado por max_km ASC, max 3 items.
+// null indica input invalido (nao-array); [] e valido (significa "sem tiers").
+function sanitizeDistanceTiers(input) {
+  if (!Array.isArray(input)) return null;
+  const cleaned = [];
+  for (const raw of input.slice(0, 3)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const max_km = parseFloat(raw.max_km);
+    const fee    = parseFloat(raw.fee);
+    if (!Number.isFinite(max_km) || max_km <= 0) continue;
+    if (!Number.isFinite(fee) || fee < 0) continue;
+    cleaned.push({ max_km, fee });
+  }
+  cleaned.sort((a, b) => a.max_km - b.max_km);
+  return cleaned;
+}
+
 router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
   const {
@@ -290,6 +351,10 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     delivery_radius_km, pickup_enabled, is_published,
     pix_key, pix_key_type, pix_holder_name, pix_holder_city,
     pay_on_delivery_enabled,
+    // Fase 5
+    pickup_address, pickup_eta_text, delivery_eta_text,
+    origin_zip, delivery_pricing_mode, delivery_distance_tiers,
+    delivery_free_above_amount,
   } = req.body;
 
   if (pix_key && String(pix_key).trim()) {
@@ -330,6 +395,74 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     }
   }
 
+  // ============================================================
+  // Fase 5 (migration 120): sanitiza campos novos de entrega
+  // ============================================================
+  let pickupAddressSan;
+  if (pickup_address !== undefined) {
+    pickupAddressSan = pickup_address === null
+      ? null
+      : (typeof pickup_address === 'string' ? pickup_address.trim().slice(0, 500) : '');
+  }
+  let pickupEtaSan;
+  if (pickup_eta_text !== undefined) {
+    pickupEtaSan = pickup_eta_text === null
+      ? null
+      : (typeof pickup_eta_text === 'string' ? pickup_eta_text.trim().slice(0, 100) : '');
+  }
+  let deliveryEtaSan;
+  if (delivery_eta_text !== undefined) {
+    deliveryEtaSan = delivery_eta_text === null
+      ? null
+      : (typeof delivery_eta_text === 'string' ? delivery_eta_text.trim().slice(0, 100) : '');
+  }
+
+  // origin_zip: 8 digitos (rejeita formato invalido com 400)
+  let originZipSan;
+  if (origin_zip !== undefined) {
+    if (origin_zip === null || origin_zip === '') {
+      originZipSan = null;
+    } else {
+      const norm = normalizeCep(origin_zip);
+      if (!norm) {
+        return res.status(400).json({ error: 'origin_zip deve ter 8 digitos' });
+      }
+      originZipSan = norm;
+    }
+  }
+
+  // delivery_pricing_mode: 'flat' | 'distance'
+  let pricingModeSan;
+  if (delivery_pricing_mode !== undefined) {
+    if (!['flat', 'distance'].includes(delivery_pricing_mode)) {
+      return res.status(400).json({ error: 'delivery_pricing_mode deve ser flat ou distance' });
+    }
+    pricingModeSan = delivery_pricing_mode;
+  }
+
+  // delivery_distance_tiers: array de { max_km, fee }, max 3 items
+  let tiersSan;
+  if (delivery_distance_tiers !== undefined) {
+    tiersSan = sanitizeDistanceTiers(delivery_distance_tiers);
+    if (tiersSan === null) {
+      return res.status(400).json({ error: 'delivery_distance_tiers deve ser um array' });
+    }
+  }
+
+  // delivery_free_above_amount: number>=0 ou null
+  let freeAboveSan;
+  if (delivery_free_above_amount !== undefined) {
+    if (delivery_free_above_amount === null || delivery_free_above_amount === '') {
+      freeAboveSan = null;
+    } else {
+      const n = parseFloat(delivery_free_above_amount);
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({ error: 'delivery_free_above_amount deve ser numero >= 0' });
+      }
+      freeAboveSan = n;
+    }
+  }
+
   let slug = req.body.slug || null;
   if (!slug && site_name) {
     slug = generateSlug(site_name);
@@ -341,6 +474,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
 
   const v2 = await hasV2Columns();
   const hasHidden = await hasHiddenColumn();
+  const hasFase5 = await hasFase5Columns();
 
   // Parametros:
   //  - featured: JSON.stringify (column jsonb, mantem o formato historico)
@@ -354,6 +488,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     : null;
 
   try {
+    let savedConfig;
     if (v2) {
       // Monta INSERT/UPSERT com hidden_product_ids opcional: se a coluna
       // existe, incluimos no SQL ($36); senao, ignoramos (a UI pode estar
@@ -442,76 +577,147 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
         RETURNING *
       `, params);
 
-      return res.json({
-        config: rows[0],
-        saved: true,
-        storefront_url: rows[0].slug ? `${STOREFRONT_BASE}/${rows[0].slug}` : null,
-      });
+      savedConfig = rows[0];
+    } else {
+      // Fallback pré-migration 115/116
+      const { rows } = await db.query(`
+        INSERT INTO digital_channel_config (
+          company_id, site_name, tagline, primary_color, secondary_color,
+          logo_url, cover_url, description, address, phone, whatsapp,
+          instagram, google_maps_url, business_hours, featured_product_ids,
+          show_prices, show_stock, delivery_enabled, delivery_fee,
+          delivery_radius_km, pickup_enabled, is_published, slug,
+          pix_key, pix_key_type, pix_holder_name, pix_holder_city,
+          pay_on_delivery_enabled
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+          $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+          $24, $25, $26, $27, COALESCE($28, false)
+        )
+        ON CONFLICT (company_id) DO UPDATE SET
+          site_name = COALESCE($2, digital_channel_config.site_name),
+          tagline = COALESCE($3, digital_channel_config.tagline),
+          primary_color = COALESCE($4, digital_channel_config.primary_color),
+          secondary_color = COALESCE($5, digital_channel_config.secondary_color),
+          logo_url = COALESCE($6, digital_channel_config.logo_url),
+          cover_url = COALESCE($7, digital_channel_config.cover_url),
+          description = COALESCE($8, digital_channel_config.description),
+          address = COALESCE($9, digital_channel_config.address),
+          phone = COALESCE($10, digital_channel_config.phone),
+          whatsapp = COALESCE($11, digital_channel_config.whatsapp),
+          instagram = COALESCE($12, digital_channel_config.instagram),
+          google_maps_url = COALESCE($13, digital_channel_config.google_maps_url),
+          business_hours = COALESCE($14, digital_channel_config.business_hours),
+          featured_product_ids = COALESCE($15, digital_channel_config.featured_product_ids),
+          show_prices = COALESCE($16, digital_channel_config.show_prices),
+          show_stock = COALESCE($17, digital_channel_config.show_stock),
+          delivery_enabled = COALESCE($18, digital_channel_config.delivery_enabled),
+          delivery_fee = COALESCE($19, digital_channel_config.delivery_fee),
+          delivery_radius_km = COALESCE($20, digital_channel_config.delivery_radius_km),
+          pickup_enabled = COALESCE($21, digital_channel_config.pickup_enabled),
+          is_published = COALESCE($22, digital_channel_config.is_published),
+          slug = COALESCE($23, digital_channel_config.slug),
+          pix_key = COALESCE($24, digital_channel_config.pix_key),
+          pix_key_type = COALESCE($25, digital_channel_config.pix_key_type),
+          pix_holder_name = COALESCE($26, digital_channel_config.pix_holder_name),
+          pix_holder_city = COALESCE($27, digital_channel_config.pix_holder_city),
+          pay_on_delivery_enabled = COALESCE($28, digital_channel_config.pay_on_delivery_enabled),
+          updated_at = NOW()
+        RETURNING *
+      `, [
+        cid, site_name || null, tagline || null, primary_color || null,
+        secondary_color || null, logo_url || null, cover_url || null,
+        description || null, address || null, phone || null, whatsapp || null,
+        instagram || null, google_maps_url || null,
+        business_hours ? JSON.stringify(business_hours) : null,
+        featuredJsonParam,
+        show_prices ?? null, show_stock ?? null, delivery_enabled ?? null,
+        delivery_fee ?? null, delivery_radius_km ?? null,
+        pickup_enabled ?? null, is_published ?? null, slug,
+        pix_key || null, pix_key_type || null, pix_holder_name || null, pix_holder_city || null,
+        pay_on_delivery_enabled ?? null,
+      ]);
+
+      savedConfig = rows[0];
     }
 
-    // Fallback pré-migration 115/116
-    const { rows } = await db.query(`
-      INSERT INTO digital_channel_config (
-        company_id, site_name, tagline, primary_color, secondary_color,
-        logo_url, cover_url, description, address, phone, whatsapp,
-        instagram, google_maps_url, business_hours, featured_product_ids,
-        show_prices, show_stock, delivery_enabled, delivery_fee,
-        delivery_radius_km, pickup_enabled, is_published, slug,
-        pix_key, pix_key_type, pix_holder_name, pix_holder_city,
-        pay_on_delivery_enabled
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-        $24, $25, $26, $27, COALESCE($28, false)
-      )
-      ON CONFLICT (company_id) DO UPDATE SET
-        site_name = COALESCE($2, digital_channel_config.site_name),
-        tagline = COALESCE($3, digital_channel_config.tagline),
-        primary_color = COALESCE($4, digital_channel_config.primary_color),
-        secondary_color = COALESCE($5, digital_channel_config.secondary_color),
-        logo_url = COALESCE($6, digital_channel_config.logo_url),
-        cover_url = COALESCE($7, digital_channel_config.cover_url),
-        description = COALESCE($8, digital_channel_config.description),
-        address = COALESCE($9, digital_channel_config.address),
-        phone = COALESCE($10, digital_channel_config.phone),
-        whatsapp = COALESCE($11, digital_channel_config.whatsapp),
-        instagram = COALESCE($12, digital_channel_config.instagram),
-        google_maps_url = COALESCE($13, digital_channel_config.google_maps_url),
-        business_hours = COALESCE($14, digital_channel_config.business_hours),
-        featured_product_ids = COALESCE($15, digital_channel_config.featured_product_ids),
-        show_prices = COALESCE($16, digital_channel_config.show_prices),
-        show_stock = COALESCE($17, digital_channel_config.show_stock),
-        delivery_enabled = COALESCE($18, digital_channel_config.delivery_enabled),
-        delivery_fee = COALESCE($19, digital_channel_config.delivery_fee),
-        delivery_radius_km = COALESCE($20, digital_channel_config.delivery_radius_km),
-        pickup_enabled = COALESCE($21, digital_channel_config.pickup_enabled),
-        is_published = COALESCE($22, digital_channel_config.is_published),
-        slug = COALESCE($23, digital_channel_config.slug),
-        pix_key = COALESCE($24, digital_channel_config.pix_key),
-        pix_key_type = COALESCE($25, digital_channel_config.pix_key_type),
-        pix_holder_name = COALESCE($26, digital_channel_config.pix_holder_name),
-        pix_holder_city = COALESCE($27, digital_channel_config.pix_holder_city),
-        pay_on_delivery_enabled = COALESCE($28, digital_channel_config.pay_on_delivery_enabled),
-        updated_at = NOW()
-      RETURNING *
-    `, [
-      cid, site_name || null, tagline || null, primary_color || null,
-      secondary_color || null, logo_url || null, cover_url || null,
-      description || null, address || null, phone || null, whatsapp || null,
-      instagram || null, google_maps_url || null,
-      business_hours ? JSON.stringify(business_hours) : null,
-      featuredJsonParam,
-      show_prices ?? null, show_stock ?? null, delivery_enabled ?? null,
-      delivery_fee ?? null, delivery_radius_km ?? null,
-      pickup_enabled ?? null, is_published ?? null, slug,
-      pix_key || null, pix_key_type || null, pix_holder_name || null, pix_holder_city || null,
-      pay_on_delivery_enabled ?? null,
-    ]);
+    // ============================================================
+    // Fase 5 (migration 120): UPDATE separado pros campos novos.
+    // Defensivo — se a migration nao rodou, hasFase5 e false e
+    // pulamos o UPDATE silenciosamente.
+    //
+    // Geocoding: se origin_zip mudou (ou foi setado), chama BrasilAPI v2
+    // e atualiza origin_lat/lng. Erro de geocoding NAO bloqueia o save
+    // (lat/lng ficam null se a API falhar).
+    // ============================================================
+    if (hasFase5) {
+      const fase5Sets = [];
+      const fase5Params = [];
+      let pIdx = 1;
+      function pushSet(col, val) {
+        fase5Params.push(val);
+        fase5Sets.push(`${col} = $${pIdx++}`);
+      }
 
-    res.json({
-      config: rows[0],
+      if (pickupAddressSan !== undefined) pushSet('pickup_address', pickupAddressSan);
+      if (pickupEtaSan !== undefined) pushSet('pickup_eta_text', pickupEtaSan);
+      if (deliveryEtaSan !== undefined) pushSet('delivery_eta_text', deliveryEtaSan);
+      if (pricingModeSan !== undefined) pushSet('delivery_pricing_mode', pricingModeSan);
+      if (tiersSan !== undefined) {
+        fase5Params.push(JSON.stringify(tiersSan));
+        fase5Sets.push(`delivery_distance_tiers = $${pIdx++}::jsonb`);
+      }
+      if (freeAboveSan !== undefined) pushSet('delivery_free_above_amount', freeAboveSan);
+
+      // Geocoding so quando origin_zip foi explicitamente passado E mudou
+      if (originZipSan !== undefined) {
+        const prevZip = savedConfig.origin_zip || null;
+        pushSet('origin_zip', originZipSan);
+
+        const zipChanged = originZipSan !== prevZip;
+        if (zipChanged) {
+          let lat = null, lng = null;
+          if (originZipSan) {
+            try {
+              const geo = await geocodeCep(originZipSan);
+              if (geo) { lat = geo.lat; lng = geo.lng; }
+            } catch (geoErr) {
+              console.error('[canal-fase5] geocode error:', geoErr.message);
+              // Nao bloqueia — lat/lng ficam null
+            }
+          }
+          pushSet('origin_lat', lat);
+          pushSet('origin_lng', lng);
+        }
+      }
+
+      if (fase5Sets.length > 0) {
+        fase5Params.push(cid);
+        try {
+          const { rows: updated } = await db.query(
+            `UPDATE digital_channel_config
+             SET ${fase5Sets.join(', ')}, updated_at = NOW()
+             WHERE company_id = $${pIdx}
+             RETURNING *`,
+            fase5Params
+          );
+          if (updated.length) savedConfig = updated[0];
+        } catch (e) {
+          // 42703 = coluna inexistente, invalida cache pra re-checar
+          if (e.code === '42703') {
+            _fase5ColumnsCache = null;
+            console.error('[canal-fase5] schema mismatch, ignoring fase5 fields:', e.message);
+          } else {
+            throw e;
+          }
+        }
+      }
+    }
+
+    return res.json({
+      config: savedConfig,
       saved: true,
-      storefront_url: rows[0].slug ? `${STOREFRONT_BASE}/${rows[0].slug}` : null,
+      storefront_url: savedConfig.slug ? `${STOREFRONT_BASE}/${savedConfig.slug}` : null,
     });
   } catch (err) {
     if (err.code === '23505' && err.constraint?.includes('slug')) {

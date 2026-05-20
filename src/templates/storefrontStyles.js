@@ -16,6 +16,10 @@
 // .topbar-search-inline expande quando .topbar.searching, sobrepondo
 // .topbar-brand. Remove .search-pill / .search-bar-wrap sticky antigos
 // (conflitavam com .cats-wrap no mesmo top:64px).
+//
+// Fase 5 (20/05/2026): badge Aberta/Fechada na topbar (.open-badge).
+// .topbar-brand-text wrappa nome + badge em coluna pra acomodar a linha
+// extra. Mobile esconde o texto next_open mantendo so "Fechada".
 function buildStyles(primary, accent, dark, font) {
   primary = primary || '#7c3aed';
   accent  = accent  || primary;
@@ -128,8 +132,26 @@ h1,h2,h3,h4,.serif{font-family:${fontSerif};font-weight:400;letter-spacing:-0.4p
 .topbar-brand{display:flex;align-items:center;gap:12px;text-decoration:none;flex:0 1 auto;min-width:0;transition:opacity .2s ease;}
 .topbar-logo{width:40px;height:40px;border-radius:10px;background:var(--sf-brand);display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;font-weight:400;font-family:${fontSerif};flex-shrink:0;overflow:hidden;box-shadow:inset 0 0 0 1px color-mix(in oklab,var(--sf-brand) 40%,transparent);}
 .topbar-logo img{width:100%;height:100%;object-fit:cover;}
-.topbar-name{font-size:18px;font-weight:400;font-family:${fontSerif};letter-spacing:-0.3px;color:var(--sf-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.topbar-brand-text{display:flex;flex-direction:column;align-items:flex-start;min-width:0;gap:2px;line-height:1.05;}
+.topbar-name{font-size:18px;font-weight:400;font-family:${fontSerif};letter-spacing:-0.3px;color:var(--sf-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
 .topbar-right{display:flex;align-items:center;gap:10px;flex-shrink:0;transition:opacity .2s ease;}
+
+/* Open/Closed badge — Fase 5 */
+.open-badge{display:inline-flex;align-items:center;gap:5px;font-family:${fontSans};font-size:10.5px;font-weight:600;letter-spacing:.2px;line-height:1;padding:3px 9px 3px 8px;border-radius:999px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid transparent;}
+.open-badge-dot{width:6px;height:6px;border-radius:999px;flex-shrink:0;}
+.open-badge-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
+.open-badge.is-open{background:color-mix(in oklab,#10b981 14%,transparent);color:#0d8a63;border-color:color-mix(in oklab,#10b981 26%,transparent);}
+.open-badge.is-open .open-badge-dot{background:#10b981;box-shadow:0 0 0 3px color-mix(in oklab,#10b981 18%,transparent);}
+.open-badge.is-closed{background:color-mix(in oklab,var(--sf-ink) 6%,transparent);color:var(--sf-ink-2);border-color:var(--sf-border);}
+.open-badge.is-closed .open-badge-dot{background:var(--sf-ink-3);}
+body.sf-dark .open-badge.is-open{color:#5fd5a8;}
+body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
+@media(max-width:480px){
+  .open-badge{font-size:10px;padding:2px 8px;max-width:180px;}
+}
+@media(max-width:360px){
+  .open-badge{display:none;}
+}
 
 /* Search button (icon-only, na .topbar-right) */
 .search-btn{position:relative;width:42px;height:42px;border-radius:999px;background:transparent;border:1px solid var(--sf-border);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;color:var(--sf-ink);padding:0;font-family:inherit;}
@@ -372,6 +394,7 @@ body.card-style-image-heavy .product-name{font-size:16px;margin-bottom:4px;}
 .delivery-opts{display:flex;flex-direction:column;gap:10px;margin-bottom:18px;}
 .delivery-opt{display:flex;align-items:center;gap:14px;padding:16px 18px;border-radius:12px;border:1px solid var(--sf-border-2);background:transparent;cursor:pointer;transition:all .18s;}
 .delivery-opt.active{border-color:var(--sf-brand);background:var(--sf-brand-wash);}
+.delivery-opt.disabled{opacity:.55;cursor:not-allowed;}
 .delivery-opt-radio{width:18px;height:18px;border-radius:999px;border:2px solid var(--sf-border-2);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
 .delivery-opt.active .delivery-opt-radio{border-color:var(--sf-brand);background:var(--sf-brand);}
 .delivery-opt.active .delivery-opt-radio::after{content:'';width:6px;height:6px;background:#fff;border-radius:999px;}
@@ -380,6 +403,10 @@ body.card-style-image-heavy .product-name{font-size:16px;margin-bottom:4px;}
 .delivery-opt-name{font-size:14px;font-weight:600;}
 .delivery-opt-detail{font-size:12px;color:var(--sf-ink-2);margin-top:2px;}
 .delivery-opt-price{font-family:${fontMono};font-size:14px;font-weight:500;color:var(--sf-ink);flex-shrink:0;}
+.delivery-opt-eta{display:inline-block;font-size:11px;color:var(--sf-brand-ink);font-weight:600;margin-top:3px;}
+.shipping-quote-status{margin:10px 0 4px;padding:10px 12px;border-radius:10px;background:var(--sf-brand-wash-2);font-size:12px;color:var(--sf-ink-2);display:flex;align-items:center;gap:8px;}
+.shipping-quote-status.error{background:color-mix(in oklab,#ef4444 10%,transparent);color:#b91c1c;}
+.shipping-quote-status.free{background:color-mix(in oklab,#10b981 12%,transparent);color:#0d8a63;}
 
 /* Pix */
 .pix-box{background:var(--sf-brand-wash-2);border:1px solid var(--sf-border);border-radius:14px;padding:22px;text-align:center;}
