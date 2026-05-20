@@ -116,6 +116,9 @@ router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appoi
 router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
 router.use('/digital-channel/orders', requirePlan('negocio', 'expansao'), require('./digitalOrders'));
 router.use('/digital-channel/asaas', requirePlan('negocio', 'expansao'), require('./asaasSubconta'));
+// MP Fase 0 (20/05/2026): credenciais de gateway por empresa.
+// Fases 1-2 adicionarao Pix automatico e cartao sem alterar este mount.
+router.use('/payment-gateways', requirePlan('negocio', 'expansao'), require('./paymentGateways'));
 router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
 router.use('/whatsapp', requirePlan('negocio', 'expansao'), require('./whatsappRoutes'));
 router.use('/ai/insights', requirePlan('negocio', 'expansao'), require('./aiInsights'));
