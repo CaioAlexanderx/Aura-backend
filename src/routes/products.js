@@ -39,6 +39,11 @@
 // FEAT (21/05/2026): merge_suggestion no POST — detecta produtos sem
 //   variantes com mesmo nome base (strip de sufixo de tamanho) e retorna
 //   { nome_base, count } junto com o produto criado. Não bloqueia a criação.
+// FIX (21/05/2026): GET filtra is_active = true — produtos filhos de
+//   variante (desativados no merge) não aparecem mais no Estoque/PDV.
+//   Sem esse filtro, "Beira Rio Mule Napa Camel - 37" (is_active=false)
+//   aparecia na lista com stock=0, causando "estoque baixo" no PDV quando
+//   Davi clicava nele ao invés do pai com variantes.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -143,7 +148,10 @@ router.get('/', async (req, res) => {
   const search = req.query.search;
 
   try {
-    let where = `WHERE ${listVisibilityWhere('$1')}`;
+    // FIX (21/05/2026): is_active = true filtra produtos desativados (filhos
+    // de variante) — sem isso aparecem na lista com stock=0 causando
+    // "estoque baixo" no PDV quando o usuário clica no filho ao invés do pai.
+    let where = `WHERE is_active = true AND ${listVisibilityWhere('$1')}`;
     const params = [cid];
 
     if (category) { where += ` AND category = $${params.length + 1}`; params.push(category); }
