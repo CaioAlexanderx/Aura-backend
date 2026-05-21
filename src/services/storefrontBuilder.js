@@ -30,6 +30,10 @@
 // Fase 2 (21/05/2026):
 //   • Consulta companies_payment_gateways para expor has_card (gateway MP).
 //   • has_pix agora inclui gateway MP (Pix automático) além da chave estática.
+//
+// Migration 121 (21/05/2026):
+//   • has_card respeita config.card_enabled (toggle independente das credenciais).
+//     Default true — lojas existentes mantêm comportamento.
 // ============================================================
 'use strict';
 
@@ -44,7 +48,6 @@ const DEFAULT_SERVICE_CARDS = [
 
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
-// Mapa dia-da-semana -> chave usada em business_hours
 const WEEK_KEYS = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sab'];
 const WEEK_LABELS = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
 
@@ -57,8 +60,6 @@ function parseFeaturedIds(raw) {
   return [];
 }
 
-// Mantido por back-compat (quem importa o módulo ainda consegue parsear o campo
-// se quiser). Mas o storefront NÃO usa mais hidden_product_ids — coluna dormente.
 function parseHiddenIds(raw) {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw.map(String);
@@ -100,7 +101,6 @@ function parseServiceCards(raw) {
   else if (typeof raw === 'string') {
     try { const p = JSON.parse(raw); if (Array.isArray(p)) arr = p; } catch {}
   }
-  // Backfill: array vazio cai nos defaults (pra lojas pré-migration 116)
   if (!arr.length) arr = DEFAULT_SERVICE_CARDS;
   return arr.slice(0, 4).map((c) => ({
     icon:    ALLOWED_ICONS.includes(c?.icon) ? c.icon : 'sparkle',
@@ -119,9 +119,6 @@ function parseBusinessHours(raw) {
   return obj;
 }
 
-// Retorna { hour, minute, dayIndex } em America/Sao_Paulo (UTC-3 fixo,
-// nao ha DST no Brasil desde 2019). Usamos Intl.DateTimeFormat pra evitar
-// drift de offset caso o ambiente decida mudar isso no futuro.
 function getNowInSaoPaulo() {
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Sao_Paulo',
@@ -136,7 +133,6 @@ function getNowInSaoPaulo() {
 
   const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
   const dayIndex = dayMap[map.weekday] ?? 0;
-  // hour pode vir "24" em alguns engines quando 00:00 — normaliza
   let hour = parseInt(map.hour, 10);
   if (hour === 24) hour = 0;
   const minute = parseInt(map.minute, 10);
@@ -153,13 +149,6 @@ function parseHHMM(str) {
   return h * 60 + mn;
 }
 
-/**
- * Computa is_open_now (bool) e next_open_text (string) a partir do
- * business_hours config e horario atual em SP.
- *
- * next_open_text: vazio quando aberta; "Abre Segunda às 09:00" quando
- * fechada e existe proxima abertura nos proximos 7 dias.
- */
 function computeOpenState(businessHours) {
   const hours = parseBusinessHours(businessHours);
   if (!hours || !Object.keys(hours).length) {
@@ -180,8 +169,6 @@ function computeOpenState(businessHours) {
     }
   }
 
-  // Procura proxima abertura nos proximos 7 dias (inclui hoje se ainda nao
-  // chegou ao open_time)
   for (let i = 0; i < 7; i++) {
     const checkIdx = (dayIndex + i) % 7;
     const key = WEEK_KEYS[checkIdx];
@@ -221,17 +208,10 @@ function listVisibilityWhere(cidParam) {
   ))`;
 }
 
-// Fase 4.1 (rollback): featured_product_ids volta a ser INCLUSION list.
-//   - featuredIds.length === 0  => SELECT todos os produtos ativos,
-//                                  ORDER BY created_at DESC, LIMIT 500.
-//   - featuredIds.length > 0    => SELECT apenas os IDs em featured,
-//                                  ORDER BY array_position(featured, id::text).
-//   hiddenIds e IGNORADO (back-compat na assinatura).
 async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
   const visibility = listVisibilityWhere('$1');
 
   if (featuredIds && featuredIds.length > 0) {
-    // Modo curadoria: somente IDs em featured_product_ids, na ordem do array.
     const sql = `
       SELECT id, name, description, price, image_url, category, stock_qty, created_at
       FROM products
@@ -245,7 +225,6 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
     return rows;
   }
 
-  // Modo padrão: todos os produtos ativos, mais recentes primeiro.
   const sql = `
     SELECT id, name, description, price, image_url, category, stock_qty, created_at
     FROM products
@@ -263,7 +242,6 @@ async function buildStorefront(config) {
   const featuredIds = parseFeaturedIds(config.featured_product_ids);
   const hiddenIds   = parseHiddenIds(config.hidden_product_ids);
 
-  // hiddenIds ignorado no rollback Fase 4.1 — argumento mantido por back-compat
   const products = await fetchStorefrontProducts(cid, featuredIds, hiddenIds);
 
   let variantsByProduct = {};
@@ -314,12 +292,13 @@ async function buildStorefront(config) {
 
   const hasStaticPix = !!(config.pix_key && String(config.pix_key).trim());
   const hasPix = hasStaticPix || hasMpGateway;
+  // Migration 121: card_enabled toggle (default true se coluna não existe)
+  const cardEnabled = config.card_enabled !== false;
   const payOnDeliveryEnabled = !!config.pay_on_delivery_enabled;
 
   const banners = parseBanners(config.banners, config.cover_url, config.tagline, config.description);
   const serviceCards = parseServiceCards(config.service_cards);
 
-  // Fase 5: business_hours + open state
   const businessHours = parseBusinessHours(config.business_hours);
   const { is_open_now, next_open_text } = computeOpenState(businessHours);
 
@@ -338,7 +317,6 @@ async function buildStorefront(config) {
       cover_url:     config.cover_url || null,
       banners,
       service_cards: serviceCards,
-      // Fase 5: open state computado pra UI mostrar badge na topbar
       is_open_now,
       next_open_text,
     },
@@ -347,7 +325,6 @@ async function buildStorefront(config) {
       whatsapp:  config.whatsapp  || '',
       instagram: config.instagram || '',
       address:   config.address   || '',
-      // Fase 5: endereco de retirada (pode ser diferente do address principal)
       pickup_address: config.pickup_address || null,
     },
     business_hours: businessHours,
@@ -358,9 +335,9 @@ async function buildStorefront(config) {
       delivery_enabled: config.delivery_enabled || false,
       delivery_fee:     parseFloat(config.delivery_fee) || 0,
       has_pix:                  hasPix,
-      has_card:                 hasMpGateway,
+      // Migration 121: has_card respeita card_enabled toggle
+      has_card:                 hasMpGateway && cardEnabled,
       pay_on_delivery_enabled:  payOnDeliveryEnabled,
-      // Fase 5: ETAs e meta de entrega (NAO expõe distance_tiers — sensivel)
       pickup_eta_text:   config.pickup_eta_text   || null,
       delivery_eta_text: config.delivery_eta_text || null,
       delivery_pricing_mode: config.delivery_pricing_mode || 'flat',
