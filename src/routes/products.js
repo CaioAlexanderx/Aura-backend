@@ -36,6 +36,9 @@
 //   Necessario depois da migration que move estoque do pai pras variants
 //   (zera products.stock_qty do pai). Sem isso o KPI "Unidades totais"
 //   subnotifica e o lowStock infla.
+// FEAT (21/05/2026): merge_suggestion no POST — detecta produtos sem
+//   variantes com mesmo nome base (strip de sufixo de tamanho) e retorna
+//   { nome_base, count } junto com o produto criado. Não bloqueia a criação.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -273,14 +276,48 @@ router.post('/', async (req, res) => {
 
   try {
     const result = await db.query(
-      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared)\n       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
       [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
        parseFloat(price)||0, parseFloat(cost_price)||0, parseInt(stock_qty)||0, parseInt(min_stock)||0,
        parseInt(stock_max)||0, unit||'un', color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
        size ? String(size).slice(0,100) : null, sanitizeNcm(ncm), isGroupShared]
     );
-    res.status(201).json(result.rows[0]);
+
+    // Detectar sugestão de merge: verifica se existem outros produtos sem variantes
+    // com o mesmo nome base (após strip do sufixo de tamanho) na mesma empresa.
+    // Não bloqueia a criação — erro silencioso.
+    let merge_suggestion = null;
+    try {
+      const nomeTrimmed = String(name).trim();
+      const nomeBase = nomeTrimmed
+        .replace(/\s*-\s*\d{2,3}(\/\d{2,3})?$/, '')
+        .replace(/\s\d{2,3}(\/\d{2,3})?$/, '')
+        .trim();
+      // Só sugere se o nome foi modificado (tinha sufixo de tamanho)
+      if (nomeBase.toLowerCase() !== nomeTrimmed.toLowerCase()) {
+        const nomeNorm = nomeBase.toLowerCase().replace(/\s+/g, ' ');
+        const { rows: similar } = await db.query(
+          `SELECT COUNT(*) AS cnt FROM products
+           WHERE company_id = $1
+             AND is_active = true
+             AND id != $2
+             AND NOT EXISTS (SELECT 1 FROM product_variants WHERE product_id = products.id)
+             AND lower(trim(regexp_replace(
+                   regexp_replace(
+                     regexp_replace(name, '\\s*-\\s*\\d{2,3}(/\\d{2,3})?$', ''),
+                     '\\s\\d{2,3}(/\\d{2,3})?$', ''
+                   ), '\\s+', ' ', 'g'
+                 ))) = $3`,
+          [cid, result.rows[0].id, nomeNorm]
+        );
+        const cnt = parseInt(similar[0]?.cnt) || 0;
+        if (cnt >= 1) {
+          merge_suggestion = { nome_base: nomeBase, count: cnt + 1 };
+        }
+      }
+    } catch (_) { /* não bloqueia a criação */ }
+
+    res.status(201).json({ ...result.rows[0], merge_suggestion });
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
 });
 
