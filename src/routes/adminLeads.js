@@ -1,6 +1,7 @@
 // ============================================================
 // AURA. - CRM Comercial - Leads (prospects pre-venda)
 // Fase 4: dynamic_score, expected_plan/mrr, batch, cadence apply, rotten
+// Fase 5 (21/05): filtros stale_days, recent_hours, status_in/status_not_in
 // ============================================================
 
 const express = require('express');
@@ -23,38 +24,86 @@ const EDITABLE_FIELDS = [
   'expected_plan','expected_mrr','cadence_name','cadence_day','rotten_since',
 ];
 
-// ============================================================
-// GET /admin/leads - lista + filtros completos + pipeline
-// ============================================================
-router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
+// ── Helper: extrai conditions/params a partir do filter object ────────
+// Usado tanto em GET /admin/leads quanto em GET /admin/lead-views (count).
+function buildLeadFilterConditions(filters) {
   const {
     status, city, category, followup_due, has_phone,
     min_rating, no_contact, search,
     min_score, expected_plan, is_rotten,
-    limit = 200, offset = 0,
-  } = req.query;
+    status_in, status_not_in, stale_days, recent_hours,
+  } = filters || {};
 
   const conditions = [];
   const params = [];
   let idx = 1;
 
-  if (status)                  { conditions.push(`l.status = $${idx++}`);                                                    params.push(status); }
-  if (city)                    { conditions.push(`l.city ILIKE $${idx++}`);                                                  params.push(`%${city}%`); }
-  if (category)                { conditions.push(`l.category ILIKE $${idx++}`);                                              params.push(`%${category}%`); }
-  if (followup_due === 'true') { conditions.push(`l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW()`);          }
-  if (has_phone === 'true')    { conditions.push(`l.phone IS NOT NULL AND l.phone != ''`);                                   }
-  if (min_rating)              { conditions.push(`l.google_rating >= $${idx++}`);                                            params.push(parseFloat(min_rating)); }
-  if (min_score)               { conditions.push(`l.dynamic_score >= $${idx++}`);                                            params.push(parseInt(min_score)); }
-  if (expected_plan)           { conditions.push(`l.expected_plan = $${idx++}`);                                             params.push(expected_plan); }
-  if (is_rotten === 'true')    { conditions.push(`l.rotten_since IS NOT NULL`);                                              }
-  if (is_rotten === 'false')   { conditions.push(`l.rotten_since IS NULL`);                                                  }
-  if (no_contact === 'true')   { conditions.push(`l.status = 'new' AND NOT EXISTS (SELECT 1 FROM lead_interactions li WHERE li.lead_id = l.id)`); }
+  if (status)                  { conditions.push(`l.status = $${idx++}`); params.push(status); }
+  if (city)                    { conditions.push(`l.city ILIKE $${idx++}`); params.push(`%${city}%`); }
+  if (category)                { conditions.push(`l.category ILIKE $${idx++}`); params.push(`%${category}%`); }
+  if (followup_due === 'true' || followup_due === true) {
+    conditions.push(`l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW()`);
+  }
+  if (has_phone === 'true' || has_phone === true) {
+    conditions.push(`l.phone IS NOT NULL AND l.phone != ''`);
+  }
+  if (min_rating)              { conditions.push(`l.google_rating >= $${idx++}`); params.push(parseFloat(min_rating)); }
+  if (min_score)               { conditions.push(`l.dynamic_score >= $${idx++}`); params.push(parseInt(min_score)); }
+  if (expected_plan)           { conditions.push(`l.expected_plan = $${idx++}`); params.push(expected_plan); }
+  if (is_rotten === 'true' || is_rotten === true)   { conditions.push(`l.rotten_since IS NOT NULL`); }
+  if (is_rotten === 'false' || is_rotten === false) { conditions.push(`l.rotten_since IS NULL`); }
+  if (no_contact === 'true' || no_contact === true) {
+    conditions.push(`l.status = 'new' AND NOT EXISTS (SELECT 1 FROM lead_interactions li WHERE li.lead_id = l.id)`);
+  }
+
+  // ── Fase 5: filtros novos ─────────────────────────────────────────
+  if (status_in) {
+    const arr = String(status_in).split(',').map(s => s.trim()).filter(s => VALID_STATUSES.includes(s));
+    if (arr.length) {
+      conditions.push(`l.status = ANY($${idx++}::text[])`);
+      params.push(arr);
+    }
+  }
+  if (status_not_in) {
+    const arr = String(status_not_in).split(',').map(s => s.trim()).filter(s => VALID_STATUSES.includes(s));
+    if (arr.length) {
+      conditions.push(`l.status <> ALL($${idx++}::text[])`);
+      params.push(arr);
+    }
+  }
+  if (stale_days) {
+    const days = parseInt(stale_days);
+    if (!isNaN(days) && days > 0) {
+      conditions.push(`(l.last_activity_at IS NULL OR l.last_activity_at < NOW() - ($${idx++}::int * INTERVAL '1 day'))`);
+      params.push(days);
+    }
+  }
+  if (recent_hours) {
+    const hours = parseInt(recent_hours);
+    if (!isNaN(hours) && hours > 0) {
+      conditions.push(`l.created_at > NOW() - ($${idx++}::int * INTERVAL '1 hour')`);
+      params.push(hours);
+    }
+  }
+
   if (search) {
     conditions.push(`(l.name ILIKE $${idx} OR l.phone ILIKE $${idx + 1} OR l.address ILIKE $${idx + 2})`);
     params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     idx += 3;
   }
 
+  return { conditions, params, idx };
+}
+
+module.exports.buildLeadFilterConditions = buildLeadFilterConditions;
+
+// ============================================================
+// GET /admin/leads - lista + filtros completos + pipeline
+// ============================================================
+router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
+  const { limit = 200, offset = 0 } = req.query;
+  const { conditions, params, idx: startIdx } = buildLeadFilterConditions(req.query);
+  let idx = startIdx;
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
   const { rows } = await pool.query(
@@ -320,6 +369,69 @@ router.post('/mark-rotten', ...adminOnly, asyncHandler(async (req, res) => {
 }));
 
 // ============================================================
+// GET /admin/leads/queue - Fila do dia priorizada
+// ============================================================
+router.get('/queue', ...adminOnly, asyncHandler(async (req, res) => {
+  const limit = parseInt(req.query.limit) || 50;
+
+  const { rows } = await pool.query(
+    `SELECT l.*,
+            COUNT(i.id)::int  AS interaction_count,
+            MAX(i.created_at) AS last_interaction_at,
+            (l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW()) AS followup_overdue,
+            CASE
+              WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 100
+              WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 80
+              WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 60
+              WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 40
+              ELSE 0
+            END AS priority_score,
+            CASE
+              WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 'followup_overdue'
+              WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 'funnel_stalled'
+              WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 'hot_cold'
+              WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 'new_lead'
+              ELSE 'other'
+            END AS priority_reason
+     FROM sales_leads l
+     LEFT JOIN lead_interactions i ON i.lead_id = l.id
+     WHERE l.status NOT IN ('converted','lost')
+       AND l.rotten_since IS NULL
+     GROUP BY l.id
+     HAVING (
+       (l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW())
+       OR (l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days'))
+       OR (l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days'))
+       OR (l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours')
+     )
+     ORDER BY
+       (CASE
+         WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 100
+         WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 80
+         WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 60
+         WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 40
+         ELSE 0
+       END) DESC,
+       l.dynamic_score DESC NULLS LAST,
+       l.next_followup_at ASC NULLS LAST
+     LIMIT $1`,
+    [limit]
+  );
+
+  // Summary por reason
+  const byReason = rows.reduce((acc, r) => {
+    acc[r.priority_reason] = (acc[r.priority_reason] || 0) + 1;
+    return acc;
+  }, {});
+
+  res.json({
+    total: rows.length,
+    by_reason: byReason,
+    leads: rows,
+  });
+}));
+
+// ============================================================
 // GET /admin/leads/:id - detalhe + interactions
 // ============================================================
 router.get('/:id', ...adminOnly, asyncHandler(async (req, res) => {
@@ -558,3 +670,4 @@ router.get('/:id/interactions', ...adminOnly, asyncHandler(async (req, res) => {
 }));
 
 module.exports = router;
+module.exports.buildLeadFilterConditions = buildLeadFilterConditions;
