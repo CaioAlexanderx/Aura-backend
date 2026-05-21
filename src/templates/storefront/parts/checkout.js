@@ -106,10 +106,22 @@ function maskCpfCnpjFront(v){
   return v.slice(0,2)+'.'+v.slice(2,5)+'.'+v.slice(5,8)+'/'+v.slice(8,12)+'-'+v.slice(12);
 }
 
-// Validação simples de email (não exaustiva — só pega erros óbvios)
+// Validação simples de email SEM regex (evita interação template-literal x escape).
+// Regra: existe exatamente 1 @ no meio (não na borda), e existe pelo menos 1 .
+// após o @ que não seja o último char.
 function isValidEmailFront(s){
   if(!s) return true; // email é opcional
-  return /^[^\\\\s@]+@[^\\\\s@]+\\\\.[^\\\\s@]+$/.test(String(s).trim());
+  var t=String(s).trim();
+  if(t.length<5) return false;
+  var at=t.indexOf('@');
+  if(at<=0) return false; // sem @ ou @ no início
+  if(at!==t.lastIndexOf('@')) return false; // mais de um @
+  if(at===t.length-1) return false; // @ no final
+  var dot=t.indexOf('.', at+1);
+  if(dot===-1) return false; // sem . depois do @
+  if(dot===t.length-1) return false; // . no final
+  if(dot===at+1) return false; // .@ seguidos (yahoo@.com)
+  return true;
 }
 
 // localStorage helpers — chave por SLUG pra suportar múltiplas lojas no mesmo browser
