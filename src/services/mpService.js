@@ -62,11 +62,29 @@ async function createMpPixPayment({ accessToken, total, orderId, orderNumber, cu
 }
 
 /**
+ * sanitizeStatementDescriptor — MP limita a 13 chars, A-Z/0-9/espaço.
+ * Remove acentos via NFD, força uppercase, trunca em 13.
+ * Fallback 'AURA' quando entrada vazia/limpa fica vazia.
+ */
+function sanitizeStatementDescriptor(name) {
+  if (!name) return 'AURA';
+  const cleaned = String(name)
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9 ]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 13);
+  return cleaned || 'AURA';
+}
+
+/**
  * createMpPreference — Cria preferência CheckoutPro (cartão, boleto, etc.)
  * Retorna { preference_id, init_point, sandbox_init_point } ou lança erro.
  *
- * Fase 2 (21/05/2026): usado para pagamento com cartão via hosted checkout.
- * O lojista configurou max 3 parcelas sem juros para o consumidor no painel MP.
+ * Fase 2 (21/05/2026): hosted checkout via redirect. 3 parcelas sem juros.
+ * Patch (21/05/2026): aceita payerCpf (CPF/CNPJ apenas dígitos) e storeName
+ *   (nome da loja exibido na fatura do cartão do cliente).
  */
 async function createMpPreference({
   accessToken,
@@ -74,6 +92,8 @@ async function createMpPreference({
   orderNumber,
   orderItems,         // array de { product_id, product_name, unit_price, quantity }
   customerEmail,
+  payerCpf,           // string opcional, CPF (11d) ou CNPJ (14d)
+  storeName,          // string opcional, nome da loja → statement_descriptor
   notificationUrl,
   backUrlSuccess,
   backUrlFailure,
@@ -92,7 +112,7 @@ async function createMpPreference({
       default_installments: 1,
     },
     external_reference: orderId,
-    statement_descriptor: 'AURA',
+    statement_descriptor: sanitizeStatementDescriptor(storeName),
     back_urls: {
       success: backUrlSuccess || '',
       failure: backUrlFailure || '',
@@ -101,7 +121,21 @@ async function createMpPreference({
     auto_return: 'approved',
   };
 
-  if (customerEmail) preference.payer = { email: customerEmail };
+  // Payer: email + identification (CPF/CNPJ).
+  // MP recusa pagamentos em algumas bandeiras (Elo, Hipercard, Amex) quando
+  // identification está ausente. Best-effort: só envia se cliente forneceu.
+  const payer = {};
+  if (customerEmail) payer.email = customerEmail;
+  if (payerCpf) {
+    const digits = String(payerCpf).replace(/\D/g, '');
+    if (digits.length === 11) {
+      payer.identification = { type: 'CPF', number: digits };
+    } else if (digits.length === 14) {
+      payer.identification = { type: 'CNPJ', number: digits };
+    }
+  }
+  if (Object.keys(payer).length > 0) preference.payer = payer;
+
   if (notificationUrl) preference.notification_url = notificationUrl;
 
   const body = JSON.stringify(preference);
@@ -167,4 +201,4 @@ async function getMpPayment({ accessToken, paymentId }) {
   return result.body;
 }
 
-module.exports = { createMpPixPayment, createMpPreference, getMpPayment };
+module.exports = { createMpPixPayment, createMpPreference, getMpPayment, sanitizeStatementDescriptor };

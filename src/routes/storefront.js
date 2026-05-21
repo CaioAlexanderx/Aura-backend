@@ -31,6 +31,10 @@
 // MP Fase 2 (21/05/2026): CheckoutPro para pagamento com cartão.
 // payment_method=card cria preferência MP e retorna init_point para
 // redirect do cliente ao hosted checkout do MP.
+//
+// Patch (21/05/2026): JOIN companies pra obter trade_name; passa cpfNorm
+// + company_display_name à createMpPreference. Reduz recusa de cartão
+// (payer.identification) e exibe nome da loja na fatura do cliente.
 // ============================================================
 'use strict';
 
@@ -217,8 +221,13 @@ router.post('/:slug/order', async (req, res) => {
   }
 
   try {
+    // Patch (21/05/2026): JOIN companies pra obter trade_name (statement_descriptor MP).
+    // companies NAO tem coluna `name` — usar COALESCE(trade_name, legal_name).
     const { rows: configs } = await db.query(
-      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]);
+      `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name
+       FROM digital_channel_config dcc
+       JOIN companies c ON c.id = dcc.company_id
+       WHERE dcc.slug = $1 AND dcc.is_published = true`, [slug]);
     if (!configs.length) return res.status(404).json({ error: 'Loja nao encontrada' });
     const config = configs[0];
     const cid = config.company_id;
@@ -532,6 +541,7 @@ router.post('/:slug/order', async (req, res) => {
     // ---- Geração da Preferência CheckoutPro (cartão) ----
     // Fase 2 (21/05/2026): cria preferência no MP e retorna init_point.
     // O frontend redireciona o cliente para a hosted checkout do MP.
+    // Patch (21/05/2026): passa payerCpf (cpfNorm) e storeName (trade_name).
     let cardData = null;
     if (pmethod === 'card') {
       try {
@@ -542,6 +552,8 @@ router.post('/:slug/order', async (req, res) => {
           orderNumber:     order.order_number,
           orderItems,
           customerEmail:   customer_email || null,
+          payerCpf:        cpfNorm || null,
+          storeName:       config.company_display_name || null,
           notificationUrl: `${STOREFRONT_API_BASE}/api/v1/webhooks/mp`,
           backUrlSuccess:  `${backBase}?order_id=${order.id}&payment=approved`,
           backUrlFailure:  `${backBase}?order_id=${order.id}&payment=failed`,
