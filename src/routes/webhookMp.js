@@ -6,6 +6,11 @@
 // Respondemos 200 imediatamente (MP espera < 500ms) e processamos async.
 // Verificamos o status real via GET /v1/payments/:id antes de confirmar
 // (nunca confiar somente no payload do webhook).
+//
+// Fase 2 (21/05/2026): fallback por external_reference para pagamentos
+// CheckoutPro (cartão). Quando mp_payment_id não tem match (cartão nunca
+// armazenou o payment_id antes da confirmação), buscamos o pagamento no MP,
+// extraímos external_reference (= order.id) e fazemos o match pelo UUID.
 // ============================================================
 'use strict';
 
@@ -25,7 +30,7 @@ router.post('/', async (req, res) => {
     // Só nos interessa notificação de pagamento
     if (!paymentId || action !== 'payment.updated') return;
 
-    // 1. Encontrar o pedido pelo mp_payment_id
+    // 1. Tenta encontrar o pedido pelo mp_payment_id (Pix MP: salvo na criação)
     const { rows: orders } = await db.query(
       `SELECT id, company_id, status
        FROM digital_orders
@@ -33,13 +38,69 @@ router.post('/', async (req, res) => {
        LIMIT 1`,
       [paymentId]
     );
-    if (!orders.length) return;
 
-    const order = orders[0];
+    let order = orders[0] || null;
+
+    // 2. Fallback para CheckoutPro (cartão): payment_id não foi salvo antes.
+    //    Buscamos o pagamento entre todos os gateways MP e usamos
+    //    external_reference (= order UUID) para localizar o pedido.
+    if (!order) {
+      let allGatewayRows = [];
+      try {
+        const { rows } = await db.query(
+          `SELECT access_token FROM companies_payment_gateways WHERE gateway = 'mercadopago' LIMIT 50`
+        );
+        allGatewayRows = rows;
+      } catch (_) { /* tabela pode não existir */ }
+
+      let payment = null;
+      for (const gw of allGatewayRows) {
+        try {
+          const p = await getMpPayment({ accessToken: gw.access_token, paymentId });
+          if (p && p.id) { payment = p; break; }
+        } catch (_) { /* tenta próximo gateway */ }
+      }
+
+      if (!payment || !payment.external_reference) return;
+
+      // external_reference é o order.id (UUID)
+      const { rows: ordersByRef } = await db.query(
+        `SELECT id, company_id, status
+         FROM digital_orders
+         WHERE id::text = $1
+         LIMIT 1`,
+        [String(payment.external_reference)]
+      );
+      if (!ordersByRef.length) return;
+
+      order = ordersByRef[0];
+      if (order.status !== 'pending_payment') return;
+      if (payment.status !== 'approved') return;
+
+      // Salva payment_id para futuros webhooks não repetirem a busca completa
+      await db.query(
+        `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
+        [paymentId, order.id]
+      );
+
+      const { rowCount } = await db.query(
+        `UPDATE digital_orders
+         SET status         = 'confirmed',
+             payment_status = 'paid',
+             confirmed_at   = NOW(),
+             updated_at     = NOW()
+         WHERE id = $1 AND status = 'pending_payment'`,
+        [order.id]
+      );
+      if (rowCount > 0) await onOrderConfirmed(order.id);
+      return;
+    }
+
+    // Fluxo original: match por mp_payment_id (Pix MP)
     // Idempotência: só processa se ainda está aguardando pagamento
     if (order.status !== 'pending_payment') return;
 
-    // 2. Buscar access_token da empresa
+    // 3. Buscar access_token da empresa
     const { rows: gateways } = await db.query(
       `SELECT access_token
        FROM companies_payment_gateways
@@ -49,14 +110,14 @@ router.post('/', async (req, res) => {
     );
     if (!gateways.length) return;
 
-    // 3. Verificar status real no MP (segurança — nunca confiar só no webhook)
+    // 4. Verificar status real no MP (segurança — nunca confiar só no webhook)
     const payment = await getMpPayment({
       accessToken: gateways[0].access_token,
       paymentId,
     });
     if (payment?.status !== 'approved') return;
 
-    // 4. Confirmar pedido (UPDATE com condição garante idempotência)
+    // 5. Confirmar pedido (UPDATE com condição garante idempotência)
     const { rowCount } = await db.query(
       `UPDATE digital_orders
        SET status         = 'confirmed',
