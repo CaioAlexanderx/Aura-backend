@@ -19,10 +19,40 @@
 //  • localStorage dedup — pra cliente que abre 2 abas, volta pela back_url
 //    do MP, ou clica 2x no submitOrder. Chave: aura_pending_order_{SLUG}.
 //    Setado no submit success, lido antes do submit, limpo no checkout success.
+//
+// 21/05 (Davi pediu polish): máscaras nos inputs phone/CPF-CNPJ, validação
+//   email no blur, e localStorage `aura_customer_{SLUG}` lembra nome/fone/
+//   email/CPF/endereço pra cliente que retorna não redigitar tudo.
+//   ViaCEP + máscara de CEP/UF já existiam.
 'use strict';
 
 module.exports = `
-function openCheckout(){closeCart();checkoutStep=1;selectedDelivery=SETTINGS.pickup_enabled!==false?'pickup':'delivery';renderCheckoutStep();document.getElementById('checkoutOverlay').classList.add('open');document.body.style.overflow='hidden';}
+function openCheckout(){
+  // Pré-preenche customerData com dados salvos (se houver) pra não redigitar
+  var saved=loadSavedCustomer();
+  if(saved){
+    customerData=Object.assign({}, customerData, {
+      name: saved.name||'',
+      phone: saved.phone||'',
+      email: saved.email||'',
+      customer_cpf_cnpj: saved.customer_cpf_cnpj||'',
+      request_nfce: !!saved.request_nfce,
+      address_zip: saved.address_zip||'',
+      address_street: saved.address_street||'',
+      address_number: saved.address_number||'',
+      address_complement: saved.address_complement||'',
+      address_neighborhood: saved.address_neighborhood||'',
+      address_city: saved.address_city||'',
+      address_state: saved.address_state||'',
+    });
+  }
+  closeCart();
+  checkoutStep=1;
+  selectedDelivery=SETTINGS.pickup_enabled!==false?'pickup':'delivery';
+  renderCheckoutStep();
+  document.getElementById('checkoutOverlay').classList.add('open');
+  document.body.style.overflow='hidden';
+}
 function closeCheckout(){clearInterval(pollInterval);clearInterval(timerInterval);document.getElementById('checkoutOverlay').classList.remove('open');document.body.style.overflow='';
 // Limpa pendência se checkout foi concluído (cliente fechou após paymentMarked ou success)
 try {
@@ -52,6 +82,67 @@ function validateCpfCnpjFront(raw){
     r=s%11;r=r<2?0:11-r;return r===parseInt(d[13]);
   }
   return false;
+}
+
+// Máscara phone: (99) 9999-9999 ou (99) 99999-9999 (detecta 10/11 dígitos)
+function maskPhoneFront(v){
+  v=String(v||'').replace(/\\\\D/g,'').slice(0,11);
+  if(v.length===0) return '';
+  if(v.length<=2) return '('+v;
+  if(v.length<=6) return '('+v.slice(0,2)+') '+v.slice(2);
+  if(v.length<=10) return '('+v.slice(0,2)+') '+v.slice(2,6)+'-'+v.slice(6);
+  return '('+v.slice(0,2)+') '+v.slice(2,7)+'-'+v.slice(7);
+}
+
+// Máscara CPF (000.000.000-00) ou CNPJ (00.000.000/0000-00) automática
+function maskCpfCnpjFront(v){
+  v=String(v||'').replace(/\\\\D/g,'').slice(0,14);
+  if(v.length<=11){
+    if(v.length<=3) return v;
+    if(v.length<=6) return v.slice(0,3)+'.'+v.slice(3);
+    if(v.length<=9) return v.slice(0,3)+'.'+v.slice(3,6)+'.'+v.slice(6);
+    return v.slice(0,3)+'.'+v.slice(3,6)+'.'+v.slice(6,9)+'-'+v.slice(9);
+  }
+  return v.slice(0,2)+'.'+v.slice(2,5)+'.'+v.slice(5,8)+'/'+v.slice(8,12)+'-'+v.slice(12);
+}
+
+// Validação simples de email (não exaustiva — só pega erros óbvios)
+function isValidEmailFront(s){
+  if(!s) return true; // email é opcional
+  return /^[^\\\\s@]+@[^\\\\s@]+\\\\.[^\\\\s@]+$/.test(String(s).trim());
+}
+
+// localStorage helpers — chave por SLUG pra suportar múltiplas lojas no mesmo browser
+function loadSavedCustomer(){
+  try{
+    var raw=window.localStorage&&window.localStorage.getItem('aura_customer_'+SLUG);
+    if(!raw) return null;
+    var d=JSON.parse(raw);
+    // descarta se mais antigo que 90 dias (dados de endereço podem ter mudado)
+    if(d.ts && (Date.now()-d.ts)>90*24*60*60*1000) return null;
+    return d;
+  }catch(_){ return null; }
+}
+function saveCustomerToLocalStorage(){
+  try{
+    if(!window.localStorage) return;
+    var data={
+      ts: Date.now(),
+      name: customerData.name||'',
+      phone: customerData.phone||'',
+      email: customerData.email||'',
+      customer_cpf_cnpj: customerData.customer_cpf_cnpj||'',
+      request_nfce: !!customerData.request_nfce,
+      address_zip: customerData.address_zip||'',
+      address_street: customerData.address_street||'',
+      address_number: customerData.address_number||'',
+      address_complement: customerData.address_complement||'',
+      address_neighborhood: customerData.address_neighborhood||'',
+      address_city: customerData.address_city||'',
+      address_state: customerData.address_state||'',
+    };
+    window.localStorage.setItem('aura_customer_'+SLUG, JSON.stringify(data));
+  }catch(_){}
 }
 
 // ViaCEP autocomplete: chamado quando CEP completa 8 digitos
@@ -164,6 +255,9 @@ function checkoutNext(){
     var phone=document.getElementById('inp_phone')?document.getElementById('inp_phone').value.trim():'';
     var email=document.getElementById('inp_email')?document.getElementById('inp_email').value.trim():'';
     if(!name||!phone){showToast('Preencha nome e telefone');return;}
+    var phoneDigits=phone.replace(/\\\\D/g,'');
+    if(phoneDigits.length<10){showToast('Telefone incompleto. Use DDD + número (ex: 11 99999-0000)');return;}
+    if(email && !isValidEmailFront(email)){showToast('E-mail inválido. Verifique e tente de novo.');return;}
     var nfceCheck=document.getElementById('inp_nfce_check');
     var requestNfce=nfceCheck && nfceCheck.checked;
     var cpfCnpj=document.getElementById('inp_cpf')?document.getElementById('inp_cpf').value.trim():'';
@@ -263,6 +357,36 @@ function renderCheckoutStep(){
       +'<p style="margin-top:6px;font-size:11px;color:var(--text-3);line-height:1.4;">Sera emitida NFC-e nominal apos confirmacao do pedido.</p>'
       +'</div>'
       +'</div>';
+    // Máscara phone (auto-detecta 10/11 dígitos)
+    var phoneEl=document.getElementById('inp_phone');
+    if(phoneEl){
+      if(phoneEl.value) phoneEl.value=maskPhoneFront(phoneEl.value);
+      phoneEl.addEventListener('input',function(){ this.value=maskPhoneFront(this.value); });
+    }
+    // Máscara CPF/CNPJ
+    var cpfEl=document.getElementById('inp_cpf');
+    if(cpfEl){
+      if(cpfEl.value) cpfEl.value=maskCpfCnpjFront(cpfEl.value);
+      cpfEl.addEventListener('input',function(){ this.value=maskCpfCnpjFront(this.value); });
+    }
+    // Validação email no blur
+    var emailEl=document.getElementById('inp_email');
+    if(emailEl){
+      emailEl.addEventListener('blur',function(){
+        var v=this.value.trim();
+        if(v && !isValidEmailFront(v)){
+          this.style.borderColor='#dc2626';
+          showToast('E-mail inválido. Exemplo: nome@email.com');
+        } else {
+          this.style.borderColor='';
+        }
+      });
+    }
+    // Auto-trim no nome
+    var nameEl=document.getElementById('inp_name');
+    if(nameEl){
+      nameEl.addEventListener('blur',function(){ this.value=this.value.trim(); });
+    }
     var ch=document.getElementById('inp_nfce_check');
     if(ch) ch.addEventListener('change',toggleNfceCheckbox);
   }else if(s===2){
@@ -505,6 +629,7 @@ function submitOrder(){
   .then(function(res){
     if(!res.ok){showToast(res.data.error||'Erro ao criar pedido');btn.disabled=false;btn.textContent='Ir para pagamento';return;}
     currentOrder=res.data; paymentMarked=false;
+    saveCustomerToLocalStorage();
     // Migration 121: salva pedido em andamento pro dedup
     try {
       window.localStorage && window.localStorage.setItem('aura_pending_order_'+SLUG, JSON.stringify({
