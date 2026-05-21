@@ -5,6 +5,7 @@
 // PATCH  /companies/:id/digital-channel/orders/:oid/status
 // POST   /companies/:id/digital-channel/orders/:oid/approve-payment
 // POST   /companies/:id/digital-channel/orders/:oid/reject-payment
+// DELETE /companies/:id/digital-channel/orders/:oid    (21/05/2026)
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -38,7 +39,7 @@ router.get('/', async (req, res) => {
         o.status, o.payment_status, o.payment_method, o.notes,
         o.payment_proof_url, o.payment_proof_uploaded_at,
         o.confirmed_at, o.delivered_at, o.cancelled_at, o.created_at,
-        o.customer_id, o.transaction_id,
+        o.customer_id, o.transaction_id, o.stock_deducted, o.nfce_id,
         COUNT(i.id)::int AS item_count
       FROM digital_orders o
       LEFT JOIN digital_order_items i ON i.order_id = o.id
@@ -145,14 +146,11 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
 
     res.json({ order: updated[0], updated: true });
 
-    // Se a transicao foi pra 'confirmed', dispara hook de confirmacao
-    // (estoque + cliente + financeiro). Idempotente — pode rodar varias vezes.
     if (status === 'confirmed' && current !== 'confirmed') {
       onOrderConfirmed(oid)
         .catch(err => console.error('[orders] onOrderConfirmed error (status patch):', err.message));
     }
 
-    // Notificações ao cliente (fire-and-forget)
     notify.notifyStatusChange(updated[0])
       .catch(err => console.error('[notify] status change error:', err.message));
 
@@ -164,7 +162,6 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
 
 // ============================================================
 // POST /:oid/approve-payment — Lojista aprova pedido aguardando aprovacao
-// (uso tipico: cliente marcou Pix como pago, lojista confirmou no extrato)
 // ============================================================
 router.post('/:oid/approve-payment', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const { id: cid, oid } = req.params;
@@ -193,8 +190,6 @@ router.post('/:oid/approve-payment', requireRole('client', 'analyst', 'admin'), 
 
     res.json({ order: updated[0], approved: true });
 
-    // Hook de confirmacao: baixa de estoque + cria/linka cliente + lancamento financeiro.
-    // Fire-and-forget (resposta ja foi enviada). Idempotente.
     onOrderConfirmed(oid)
       .catch(err => console.error('[orders] onOrderConfirmed error (approve-payment):', err.message));
 
@@ -209,7 +204,6 @@ router.post('/:oid/approve-payment', requireRole('client', 'analyst', 'admin'), 
 
 // ============================================================
 // POST /:oid/reject-payment — Lojista rejeita pedido (cancelled)
-// Body opcional: { reason: string }
 // ============================================================
 router.post('/:oid/reject-payment', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const { id: cid, oid } = req.params;
@@ -250,6 +244,75 @@ router.post('/:oid/reject-payment', requireRole('client', 'analyst', 'admin'), a
   } catch (err) {
     console.error('[orders] reject-payment error:', err.message);
     res.status(500).json({ error: 'Erro ao rejeitar pedido' });
+  }
+});
+
+// ============================================================
+// DELETE /:oid — Exclui pedido permanentemente (apagar pedidos teste/órfãos).
+//
+// Davi reclamou (21/05/2026) que não conseguia apagar pedidos teste — backend
+// só tinha cancel (muda status mas mantém na lista). Esta rota apaga DE FATO.
+//
+// Proteções (qualquer falha → 409 com mensagem específica):
+//   1. Status deve ser cancelled OU pending_payment (jamais confirmados+).
+//   2. transaction_id IS NULL — sem lançamento financeiro vinculado.
+//   3. stock_deducted = false — sem baixa de estoque.
+//   4. confirmed_at IS NULL — nunca foi confirmado (mesmo que tenha voltado a cancelled).
+//   5. nfce_id IS NULL — sem nota fiscal emitida.
+//
+// digital_order_items é limpo automaticamente via ON DELETE CASCADE
+// (digital_order_items_order_id_fkey).
+//
+// Permissão: client OR admin (analyst NÃO pode — ação destrutiva).
+// ============================================================
+router.delete('/:oid', requireRole('client', 'admin'), async (req, res) => {
+  const { id: cid, oid } = req.params;
+  try {
+    const { rows } = await db.query(
+      `SELECT id, status, transaction_id, stock_deducted, confirmed_at, nfce_id, order_number
+       FROM digital_orders WHERE id = $1 AND company_id = $2`,
+      [oid, cid]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
+    const order = rows[0];
+
+    if (!['cancelled', 'pending_payment'].includes(order.status)) {
+      return res.status(409).json({
+        error: `Pedido não pode ser excluído (status atual: ${order.status}). Cancele o pedido primeiro.`,
+      });
+    }
+    if (order.transaction_id) {
+      return res.status(409).json({
+        error: 'Pedido tem lançamento financeiro vinculado. Exclua o lançamento no Financeiro antes.',
+      });
+    }
+    if (order.stock_deducted) {
+      return res.status(409).json({
+        error: 'Pedido já deu baixa no estoque. Use cancelamento (que devolve o estoque) em vez de excluir.',
+      });
+    }
+    if (order.confirmed_at) {
+      return res.status(409).json({
+        error: 'Pedido foi confirmado em algum momento. Não pode ser excluído — mantenha como cancelado pro histórico.',
+      });
+    }
+    if (order.nfce_id) {
+      return res.status(409).json({
+        error: 'Pedido tem NFC-e emitida. Cancele a nota antes de excluir.',
+      });
+    }
+
+    const { rowCount } = await db.query(
+      `DELETE FROM digital_orders WHERE id = $1 AND company_id = $2`,
+      [oid, cid]
+    );
+    if (rowCount === 0) return res.status(404).json({ error: 'Pedido nao encontrado' });
+
+    console.log(`[orders] deleted #${order.order_number} (${oid}) for company ${cid}`);
+    res.json({ deleted: true, order_number: order.order_number });
+  } catch (err) {
+    console.error('[orders] delete error:', err.message);
+    res.status(500).json({ error: 'Erro ao excluir pedido' });
   }
 });
 
