@@ -57,6 +57,9 @@ router.use('/admin', require('./adminOps'));
 router.use('/admin', require('./adminGrowth'));
 // CRM comercial (20/05/2026): leads pre-venda (prospects / importacao Google Maps)
 router.use('/admin/leads', require('./adminLeads'));
+// CRM Fase 1 (21/05/2026): cadencias e metas mensais
+router.use('/admin/cadences',   require('./adminCadences'));
+router.use('/admin/lead-goals', require('./adminLeadGoals'));
 
 // Webhooks (publicos, validacao interna)
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
