@@ -6,7 +6,7 @@
 // cor x tamanho forma o estoque por combinacao. Preco unico do pai.
 //
 // Shape da API:
-//   GET  -> { colors: [{hex, name}], sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, mode: 'none'|'color'|'size'|'matrix' }
+//   GET  -> { colors: [{hex, name}], sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, barcodes: {"#FF0000|P": "7891234567890", ...}, mode: 'none'|'color'|'size'|'matrix' }
 //   PUT  -> recebe mesmo shape, reescreve variantes (soft-delete antigas)
 //
 // Schema preservado: usa product_variants + product_variant_values
@@ -20,6 +20,9 @@
 // com color/size proprios do pai, limpamos color=NULL e size=NULL do
 // pai pra evitar dupla exibicao no VariantPickerModal e loop de
 // banner-amarelo no editor (ver comentario no UPDATE final).
+//
+// 21/05/2026: GET expoe barcodes por combinacao (paralelo ao matrix).
+// PUT aceita barcodes e persiste em product_variants.barcode no INSERT.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -65,10 +68,11 @@ router.get('/:pid/variations', async (req, res) => {
       [pid]
     );
 
-    // Decompoe variantes em cores, tamanhos e matriz
+    // Decompoe variantes em cores, tamanhos, matriz e barcodes
     const colorsMap = new Map();   // hex -> name
     const sizesSet = new Set();
     const matrix = {};
+    const barcodes = {};   // matrixKey -> barcode (21/05/2026)
 
     for (const v of variantRows) {
       const attrs = v.attributes || [];
@@ -88,7 +92,9 @@ router.get('/:pid/variations', async (req, res) => {
       }
       if (colorHex) colorsMap.set(colorHex, colorName || null);
       if (sizeValue) sizesSet.add(sizeValue);
-      matrix[buildMatrixKey(colorHex, sizeValue)] = parseInt(v.stock_qty) || 0;
+      const key = buildMatrixKey(colorHex, sizeValue);
+      matrix[key] = parseInt(v.stock_qty) || 0;
+      if (v.barcode) barcodes[key] = v.barcode;   // 21/05/2026: expoe barcode por combinacao
     }
 
     const colors = Array.from(colorsMap.entries()).map(([hex, name]) => ({ hex, name }));
@@ -105,6 +111,7 @@ router.get('/:pid/variations', async (req, res) => {
       colors,
       sizes,
       matrix,
+      barcodes,   // 21/05/2026
       mode,
       total_variants: variantRows.length,
     });
@@ -115,11 +122,12 @@ router.get('/:pid/variations', async (req, res) => {
 });
 
 // PUT /companies/:id/products/:pid/variations
-// Body: { colors: [{hex, name?}], sizes: ["P","M"], matrix: {"hex|size": stock, ...} }
+// Body: { colors: [{hex, name?}], sizes: ["P","M"], matrix: {"hex|size": stock, ...}, barcodes: {"hex|size": "ean", ...} }
 // Reescreve todas as variantes: soft-delete as ativas + cria novas.
 router.put('/:pid/variations', async (req, res) => {
   const { id: cid, pid } = req.params;
-  const { colors = [], sizes = [], matrix = {} } = req.body || {};
+  // 21/05/2026: barcodes adicionado ao body (opcional, padrao vazio)
+  const { colors = [], sizes = [], matrix = {}, barcodes = {} } = req.body || {};
 
   // Validacoes
   if (!Array.isArray(colors) || !Array.isArray(sizes)) {
@@ -202,12 +210,14 @@ router.put('/:pid/variations', async (req, res) => {
     const created = [];
     for (const combo of combinations) {
       const skuSuffix = skuSuffixFromAttrs(combo.colorHex, combo.colorName, combo.sizeValue);
+      // 21/05/2026: persiste barcode por combinacao (lookup na chave matrixKey)
+      const barcodeVal = barcodes[buildMatrixKey(combo.colorHex, combo.sizeValue)] || null;
 
-      // Cria variante
+      // Cria variante (inclui barcode se fornecido)
       const { rows: variantRow } = await client.query(
-        `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, is_active)
-         VALUES ($1, $2, $3, true) RETURNING id`,
-        [pid, skuSuffix || null, combo.stock]
+        `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, barcode, is_active)
+         VALUES ($1, $2, $3, $4, true) RETURNING id`,
+        [pid, skuSuffix || null, combo.stock, barcodeVal]
       );
       const variantId = variantRow[0].id;
 
