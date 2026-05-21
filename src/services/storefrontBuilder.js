@@ -7,7 +7,7 @@
 // Cai em fallbacks pra empresas pré-migration 115/116.
 //
 // Fase 4 (18/05/2026): tentou trocar semantica de featured_product_ids
-//   para "ordem de destaque" + adicionou hidden_product_ids para opt-out.
+//   para “ordm de destaque” + adicionou hidden_product_ids para opt-out.
 //
 // Fase 4.1 (18/05/2026 — ROLLBACK): voltou ao modelo simples original.
 //   featured_product_ids[] eh INCLUSION list:
@@ -26,6 +26,10 @@
 //   • NAO expõe delivery_distance_tiers (so via /shipping-quote).
 //   • Adiciona is_open_now (bool) e next_open_text (string),
 //     computados em timezone America/Sao_Paulo.
+//
+// Fase 2 (21/05/2026):
+//   • Consulta companies_payment_gateways para expor has_card (gateway MP).
+//   • has_pix agora inclui gateway MP (Pix automático) além da chave estática.
 // ============================================================
 'use strict';
 
@@ -298,7 +302,18 @@ async function buildStorefront(config) {
     `SELECT trade_name, legal_name, logo_url FROM companies WHERE id = $1`, [cid]);
   const company = companies[0] || {};
 
-  const hasPix = !!(config.pix_key && String(config.pix_key).trim());
+  // Fase 2 (21/05/2026): detecta gateway MP para expor has_card e corrigir has_pix
+  let hasMpGateway = false;
+  try {
+    const { rows: gws } = await db.query(
+      `SELECT id FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
+      [cid]
+    );
+    hasMpGateway = gws.length > 0;
+  } catch (_) { /* tabela pode não existir em deployment antigo */ }
+
+  const hasStaticPix = !!(config.pix_key && String(config.pix_key).trim());
+  const hasPix = hasStaticPix || hasMpGateway;
   const payOnDeliveryEnabled = !!config.pay_on_delivery_enabled;
 
   const banners = parseBanners(config.banners, config.cover_url, config.tagline, config.description);
@@ -343,6 +358,7 @@ async function buildStorefront(config) {
       delivery_enabled: config.delivery_enabled || false,
       delivery_fee:     parseFloat(config.delivery_fee) || 0,
       has_pix:                  hasPix,
+      has_card:                 hasMpGateway,
       pay_on_delivery_enabled:  payOnDeliveryEnabled,
       // Fase 5: ETAs e meta de entrega (NAO expõe distance_tiers — sensivel)
       pickup_eta_text:   config.pickup_eta_text   || null,

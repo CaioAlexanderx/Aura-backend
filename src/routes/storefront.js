@@ -3,7 +3,7 @@
 // GET  /storefront/:slug                     — JSON API
 // GET  /storefront/:slug/page                — HTML renderizado (vitrine pública)
 // GET  /storefront/:slug/shipping-quote      — Calcula frete por CEP (Fase 5b)
-// POST /storefront/:slug/order               — Cria pedido (Pix manual ou na entrega)
+// POST /storefront/:slug/order               — Cria pedido (Pix, cartão, ou na entrega)
 // POST /storefront/:slug/order/:oid/upload-proof — Cliente envia comprovante de Pix
 // POST /storefront/:slug/order/:oid/mark-as-paid — Cliente avisa que pagou
 // GET  /storefront/:slug/order/:oid          — Poll status do pedido
@@ -27,6 +27,10 @@
 // do delivery_fee no POST /order quando cliente passa CEP. Suporta
 // modo flat, modo distance (haversine via BrasilAPI), frete gratis
 // acima de valor minimo.
+//
+// MP Fase 2 (21/05/2026): CheckoutPro para pagamento com cartão.
+// payment_method=card cria preferência MP e retorna init_point para
+// redirect do cliente ao hosted checkout do MP.
 // ============================================================
 'use strict';
 
@@ -38,7 +42,7 @@ const { buildStorefront } = require('../services/storefrontBuilder');
 const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
-const { createMpPixPayment } = require('../services/mpService');
+const { createMpPixPayment, createMpPreference } = require('../services/mpService');
 const { calculateShippingQuote } = require('../services/shippingQuote');
 
 function validateCpfCnpj(raw) {
@@ -223,12 +227,13 @@ router.post('/:slug/order', async (req, res) => {
     let mpGateway = null;
     try {
       const { rows: gws } = await db.query(
-        `SELECT access_token FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
+        `SELECT access_token, public_key FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
         [cid]
       );
       mpGateway = gws[0] || null;
     } catch (_) { /* tabela pode não existir em deployment antigo */ }
     const hasMpGateway = !!mpGateway;
+    const hasCard = hasMpGateway;
 
     const dtype = delivery_type || 'pickup';
     if (dtype === 'delivery' && !config.delivery_enabled) {
@@ -271,16 +276,19 @@ router.post('/:slug/order', async (req, res) => {
     const hasOnDelivery = !!config.pay_on_delivery_enabled;
     let pmethod = (payment_method || '').toLowerCase().trim();
     if (!pmethod) {
-      pmethod = hasPix ? 'pix' : (hasOnDelivery ? 'on_delivery' : null);
+      pmethod = hasPix ? 'pix' : (hasCard ? 'card' : (hasOnDelivery ? 'on_delivery' : null));
     }
     if (!pmethod) {
       return res.status(400).json({ error: 'Esta loja nao aceita pagamentos no momento' });
     }
-    if (pmethod !== 'pix' && pmethod !== 'on_delivery') {
-      return res.status(400).json({ error: 'payment_method invalido. Use pix ou on_delivery' });
+    if (pmethod !== 'pix' && pmethod !== 'on_delivery' && pmethod !== 'card') {
+      return res.status(400).json({ error: 'payment_method invalido. Use pix, card ou on_delivery' });
     }
     if (pmethod === 'pix' && !hasPix) {
       return res.status(400).json({ error: 'Esta loja nao aceita Pix' });
+    }
+    if (pmethod === 'card' && !hasCard) {
+      return res.status(400).json({ error: 'Esta loja nao aceita pagamento com cartao' });
     }
     if (pmethod === 'on_delivery' && !hasOnDelivery) {
       return res.status(400).json({ error: 'Esta loja nao aceita pagamento na entrega' });
@@ -521,6 +529,30 @@ router.post('/:slug/order', async (req, res) => {
       }
     }
 
+    // ---- Geração da Preferência CheckoutPro (cartão) ----
+    // Fase 2 (21/05/2026): cria preferência no MP e retorna init_point.
+    // O frontend redireciona o cliente para a hosted checkout do MP.
+    let cardData = null;
+    if (pmethod === 'card') {
+      try {
+        const backBase = `${STOREFRONT_API_BASE}/storefront/${slug}/page`;
+        cardData = await createMpPreference({
+          accessToken:     mpGateway.access_token,
+          orderId:         order.id,
+          orderNumber:     order.order_number,
+          orderItems,
+          customerEmail:   customer_email || null,
+          notificationUrl: `${STOREFRONT_API_BASE}/api/v1/webhooks/mp`,
+          backUrlSuccess:  `${backBase}?order_id=${order.id}&payment=approved`,
+          backUrlFailure:  `${backBase}?order_id=${order.id}&payment=failed`,
+          backUrlPending:  `${backBase}?order_id=${order.id}&payment=pending`,
+        });
+      } catch (mpErr) {
+        console.error('[storefront] MP Preference error:', mpErr.message);
+        return res.status(500).json({ error: 'Erro ao criar preferencia de pagamento. Tente novamente.' });
+      }
+    }
+
     notify.notifyNewOrder({
       order, total,
       pix_payload: pixData ? pixData.payload : null,
@@ -546,6 +578,10 @@ router.post('/:slug/order', async (req, res) => {
         payload:    pixData.payload,
         expires_at: pixData.expires_at,
         mode:       pixData.mode || null,
+      } : null,
+      card: cardData ? {
+        init_point:    cardData.init_point,
+        preference_id: cardData.preference_id,
       } : null,
     });
   } catch (err) {

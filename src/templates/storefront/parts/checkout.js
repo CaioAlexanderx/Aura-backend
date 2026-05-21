@@ -9,6 +9,11 @@
 //    GET /shipping-quote (debounce 800ms ou blur) e atualiza fee + alerta
 //  • erro "Fora da area" desabilita botao Continuar e mostra mensagem
 //  • submitOrder envia expected_delivery_fee pra anti-tampering server-side
+//
+// Fase 2 CheckoutPro (21/05/2026):
+//  • has_card=SETTINGS.has_card habilita opcao "Pagar com Cartão"
+//  • submitOrder: se payment_method=card, redireciona para card.init_point
+//  • checkoutNext step 3: card fecha checkout (redirect ja aconteceu)
 'use strict';
 
 module.exports = `
@@ -181,12 +186,15 @@ function checkoutNext(){
       customerData.address_city=city;
       customerData.address_state=uf.toUpperCase();
     }
-    var hasPix=!!SETTINGS.has_pix, hasOd=!!SETTINGS.pay_on_delivery_enabled;
-    if(hasPix && hasOd){
+    var hasPix=!!SETTINGS.has_pix, hasOd=!!SETTINGS.pay_on_delivery_enabled, hasCard=!!SETTINGS.has_card;
+    var nMethods=(hasPix?1:0)+(hasOd?1:0)+(hasCard?1:0);
+    if(nMethods>1){
       customerData.payment_method=null;
       checkoutStep=3; renderCheckoutStep();
     } else if(hasPix){
       customerData.payment_method='pix'; submitOrder();
+    } else if(hasCard){
+      customerData.payment_method='card'; submitOrder();
     } else if(hasOd){
       customerData.payment_method='on_delivery'; submitOrder();
     } else {
@@ -195,6 +203,7 @@ function checkoutNext(){
   }else if(checkoutStep===3){
     var pm=customerData.payment_method;
     if(pm==='on_delivery'){ closeCheckout(); cart={}; updateCartUI(); renderProducts(); return; }
+    if(pm==='card'){ closeCheckout(); cart={}; updateCartUI(); renderProducts(); return; }
     if(pm==='pix' && currentOrder){
       if(paymentMarked){ closeCheckout(); cart={}; updateCartUI(); renderProducts(); return; }
       markAsPaid();
@@ -272,15 +281,20 @@ function renderCheckoutStep(){
       }
     }
   }else if(s===3){
-    var hasPix=!!SETTINGS.has_pix, hasOd=!!SETTINGS.pay_on_delivery_enabled;
-    if(!customerData.payment_method && hasPix && hasOd){
+    var hasPix=!!SETTINGS.has_pix, hasOd=!!SETTINGS.pay_on_delivery_enabled, hasCard=!!SETTINGS.has_card;
+    var nMethods=(hasPix?1:0)+(hasOd?1:0)+(hasCard?1:0);
+    if(!customerData.payment_method && nMethods>1){
+      var opts='';
+      if(hasPix) opts+='<div class="delivery-opt" id="opt_pix_method" style="cursor:pointer;"><div style="background:#32BCAD;border-radius:6px;padding:6px 10px;color:#fff;font-size:11px;font-weight:800;flex-shrink:0;">PIX</div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar com Pix agora</div><div class="delivery-opt-detail">Você paga, a loja confirma o pagamento.</div></div><span style="color:var(--primary);font-size:18px;">→</span></div>';
+      if(hasCard) opts+='<div class="delivery-opt" id="opt_card_method" style="cursor:pointer;"><div style="background:#5C6BC0;border-radius:6px;padding:6px 10px;color:#fff;font-size:11px;font-weight:800;flex-shrink:0;">CARTÃO</div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar com Cartão</div><div class="delivery-opt-detail">Até 3x sem juros. Você será redirecionado para pagar.</div></div><span style="color:var(--primary);font-size:18px;">→</span></div>';
+      if(hasOd) opts+='<div class="delivery-opt" id="opt_od_method" style="cursor:pointer;"><div style="font-size:24px;flex-shrink:0;">💵</div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar na entrega</div><div class="delivery-opt-detail">Combine com a loja: dinheiro, cartão, etc.</div></div><span style="color:var(--primary);font-size:18px;">→</span></div>';
       body.innerHTML='<p style="font-size:13px;color:var(--text-2);margin-bottom:16px;">Como você quer pagar?</p>'
-        +'<div class="delivery-opts">'
-        +'<div class="delivery-opt" id="opt_pix_method" style="cursor:pointer;"><div style="background:#32BCAD;border-radius:6px;padding:6px 10px;color:#fff;font-size:11px;font-weight:800;flex-shrink:0;">PIX</div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar com Pix agora</div><div class="delivery-opt-detail">Você paga, anexa o comprovante, a loja confirma.</div></div><span style="color:var(--primary);font-size:18px;">→</span></div>'
-        +'<div class="delivery-opt" id="opt_od_method" style="cursor:pointer;"><div style="font-size:24px;flex-shrink:0;">💵</div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar na entrega</div><div class="delivery-opt-detail">Combine com a loja: dinheiro, cartão, etc.</div></div><span style="color:var(--primary);font-size:18px;">→</span></div>'
-        +'</div>';
-      var ep=document.getElementById('opt_pix_method'),eod=document.getElementById('opt_od_method');
+        +'<div class="delivery-opts">'+opts+'</div>';
+      var ep=document.getElementById('opt_pix_method');
+      var ecard=document.getElementById('opt_card_method');
+      var eod=document.getElementById('opt_od_method');
       if(ep) ep.addEventListener('click',function(){chooseMethod('pix');});
+      if(ecard) ecard.addEventListener('click',function(){chooseMethod('card');});
       if(eod) eod.addEventListener('click',function(){chooseMethod('on_delivery');});
       btn.style.display='none';
       return;
@@ -445,7 +459,9 @@ function submitOrder(){
   .then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d};});})
   .then(function(res){
     if(!res.ok){showToast(res.data.error||'Erro ao criar pedido');btn.disabled=false;btn.textContent='Ir para pagamento';return;}
-    currentOrder=res.data; paymentMarked=false; checkoutStep=3; renderCheckoutStep();
+    currentOrder=res.data; paymentMarked=false;
+    if(currentOrder.payment_method==='card' && currentOrder.card && currentOrder.card.init_point){ window.location.href=currentOrder.card.init_point; return; }
+    checkoutStep=3; renderCheckoutStep();
   })
   .catch(function(){showToast('Erro de conexão. Tente novamente.');btn.disabled=false;btn.textContent='Ir para pagamento';});
 }
