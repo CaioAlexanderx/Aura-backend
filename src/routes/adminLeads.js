@@ -2,6 +2,8 @@
 // AURA. - CRM Comercial - Leads (prospects pre-venda)
 // Fase 4: dynamic_score, expected_plan/mrr, batch, cadence apply, rotten
 // Fase 5 (21/05): filtros stale_days, recent_hours, status_in/status_not_in
+// Fase 5.1 (21/05): GET /queue agora aceita TODOS os filtros + GET /leads
+//                   retorna pipeline_filtered (sem perder o pipeline global)
 // ============================================================
 
 const express = require('express');
@@ -25,7 +27,8 @@ const EDITABLE_FIELDS = [
 ];
 
 // ── Helper: extrai conditions/params a partir do filter object ────────
-// Usado tanto em GET /admin/leads quanto em GET /admin/lead-views (count).
+// Usado tanto em GET /admin/leads quanto em GET /admin/lead-views (count)
+// quanto em GET /admin/leads/queue (Fase 5.1: filtros aplicaveis a queue).
 function buildLeadFilterConditions(filters) {
   const {
     status, city, category, followup_due, has_phone,
@@ -97,8 +100,32 @@ function buildLeadFilterConditions(filters) {
 
 module.exports.buildLeadFilterConditions = buildLeadFilterConditions;
 
+// ── Helper: pipeline FILTRADO (sem o filtro status, pra mostrar a quebra
+//    do mesmo conjunto filtrado por OUTRAS dimensoes em cada status). ──
+async function buildPipelineFiltered(filters) {
+  // Remove status/status_in/status_not_in pra ver TODOS os status do conjunto filtrado
+  const cleanedFilters = { ...filters };
+  delete cleanedFilters.status;
+  delete cleanedFilters.status_in;
+  delete cleanedFilters.status_not_in;
+
+  const { conditions, params } = buildLeadFilterConditions(cleanedFilters);
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+
+  const { rows: counts } = await pool.query(
+    `SELECT l.status, COUNT(*) AS total, COALESCE(SUM(l.expected_mrr),0) AS potential_mrr
+     FROM sales_leads l ${where} GROUP BY l.status`,
+    params
+  );
+  const pipeline = Object.fromEntries(VALID_STATUSES.map(s => [s, { count: 0, potential_mrr: 0 }]));
+  counts.forEach(r => {
+    pipeline[r.status] = { count: parseInt(r.total), potential_mrr: parseFloat(r.potential_mrr) };
+  });
+  return pipeline;
+}
+
 // ============================================================
-// GET /admin/leads - lista + filtros completos + pipeline
+// GET /admin/leads - lista + filtros completos + pipeline (global e filtrado)
 // ============================================================
 router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
   const { limit = 200, offset = 0 } = req.query;
@@ -133,7 +160,7 @@ router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
     [...params, parseInt(limit), parseInt(offset)]
   );
 
-  // Pipeline + valor potencial (sum de expected_mrr)
+  // Pipeline GLOBAL (base inteira, sem filtros) - mantido pra retrocompat
   const { rows: counts } = await pool.query(
     `SELECT status, COUNT(*) AS total, COALESCE(SUM(expected_mrr),0) AS potential_mrr
      FROM sales_leads GROUP BY status`
@@ -143,7 +170,17 @@ router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
     pipeline[r.status] = { count: parseInt(r.total), potential_mrr: parseFloat(r.potential_mrr) };
   });
 
-  res.json({ total: rows.length, pipeline, leads: rows });
+  // Pipeline FILTRADO (Fase 5.1): ignora apenas o filtro de status pra mostrar
+  // a quebra do conjunto filtrado por OUTRAS dimensoes em cada status.
+  // Ex: filtrei por city=Jacarei, vejo quantos sao new/contacted/etc DESSA cidade.
+  const pipelineFiltered = await buildPipelineFiltered(req.query);
+
+  res.json({
+    total: rows.length,
+    pipeline,           // base inteira
+    pipeline_filtered: pipelineFiltered,  // respeitando filtros (menos status)
+    leads: rows,
+  });
 }));
 
 // ============================================================
@@ -214,28 +251,16 @@ router.get('/stats', ...adminOnly, asyncHandler(async (req, res) => {
 // GET /admin/leads/export - CSV
 // ============================================================
 router.get('/export', ...adminOnly, asyncHandler(async (req, res) => {
-  const { status, city, category, has_phone, min_rating, search, expected_plan } = req.query;
-
-  const conditions = [];
-  const params = [];
-  let idx = 1;
-
-  if (status)               { conditions.push(`status = $${idx++}`);                          params.push(status); }
-  if (city)                 { conditions.push(`city ILIKE $${idx++}`);                        params.push(`%${city}%`); }
-  if (category)             { conditions.push(`category ILIKE $${idx++}`);                    params.push(`%${category}%`); }
-  if (has_phone === 'true') { conditions.push(`phone IS NOT NULL AND phone != ''`);            }
-  if (min_rating)           { conditions.push(`google_rating >= $${idx++}`);                  params.push(parseFloat(min_rating)); }
-  if (expected_plan)        { conditions.push(`expected_plan = $${idx++}`);                    params.push(expected_plan); }
-  if (search)               { conditions.push(`(name ILIKE $${idx} OR phone ILIKE $${idx + 1})`); params.push(`%${search}%`, `%${search}%`); idx += 2; }
-
+  // Fase 5.1: usa buildLeadFilterConditions pra reaproveitar todos os filtros
+  const { conditions, params } = buildLeadFilterConditions(req.query);
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
   const { rows } = await pool.query(
-    `SELECT name, phone, city, category, address, website,
-            google_rating, google_reviews, status, source,
-            expected_plan, expected_mrr, dynamic_score,
-            last_contact_at, next_followup_at, rotten_since, created_at
-     FROM sales_leads ${where} ORDER BY dynamic_score DESC NULLS LAST, google_rating DESC NULLS LAST`,
+    `SELECT l.name, l.phone, l.city, l.category, l.address, l.website,
+            l.google_rating, l.google_reviews, l.status, l.source,
+            l.expected_plan, l.expected_mrr, l.dynamic_score,
+            l.last_contact_at, l.next_followup_at, l.rotten_since, l.created_at
+     FROM sales_leads l ${where} ORDER BY l.dynamic_score DESC NULLS LAST, l.google_rating DESC NULLS LAST`,
     params
   );
 
@@ -370,52 +395,61 @@ router.post('/mark-rotten', ...adminOnly, asyncHandler(async (req, res) => {
 
 // ============================================================
 // GET /admin/leads/queue - Fila do dia priorizada
+// Fase 5.1: aceita TODOS os filtros padrao (city, category, status_in, etc).
+// A logica de priorizacao roda DEPOIS de aplicar os filtros — entao Caio pode
+// fazer "fila so de Jacarei" ou "fila so de odontologia".
+//
+// Comportamento sutil: o filtro is_rotten=false e status_not_in=converted,lost
+// SAO ENFORCED IMPLICITAMENTE (queue ignora rotten e ja-vendidos por design).
+// Filtros do usuario sao ADITIVOS (AND).
 // ============================================================
 router.get('/queue', ...adminOnly, asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
+  const { conditions, params, idx: startIdx } = buildLeadFilterConditions(req.query);
+  let idx = startIdx;
+
+  // Enforces SEMPRE: nao mostra rotten/converted/lost na fila
+  const baseConditions = [
+    `l.status NOT IN ('converted','lost')`,
+    `l.rotten_since IS NULL`,
+    ...conditions,
+  ];
+  const where = 'WHERE ' + baseConditions.join(' AND ');
+
+  // Expressao de priorizacao reutilizada em 3 lugares (SELECT/HAVING/ORDER BY)
+  const priorityExpr = `CASE
+    WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 100
+    WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 80
+    WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 60
+    WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 40
+    ELSE 0
+  END`;
+
+  const reasonExpr = `CASE
+    WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 'followup_overdue'
+    WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 'funnel_stalled'
+    WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 'hot_cold'
+    WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 'new_lead'
+    ELSE 'other'
+  END`;
 
   const { rows } = await pool.query(
     `SELECT l.*,
             COUNT(i.id)::int  AS interaction_count,
             MAX(i.created_at) AS last_interaction_at,
             (l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW()) AS followup_overdue,
-            CASE
-              WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 100
-              WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 80
-              WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 60
-              WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 40
-              ELSE 0
-            END AS priority_score,
-            CASE
-              WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 'followup_overdue'
-              WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 'funnel_stalled'
-              WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 'hot_cold'
-              WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 'new_lead'
-              ELSE 'other'
-            END AS priority_reason
+            ${priorityExpr} AS priority_score,
+            ${reasonExpr}   AS priority_reason
      FROM sales_leads l
      LEFT JOIN lead_interactions i ON i.lead_id = l.id
-     WHERE l.status NOT IN ('converted','lost')
-       AND l.rotten_since IS NULL
+     ${where}
      GROUP BY l.id
-     HAVING (
-       (l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW())
-       OR (l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days'))
-       OR (l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days'))
-       OR (l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours')
-     )
-     ORDER BY
-       (CASE
-         WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 100
-         WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 80
-         WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 60
-         WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 40
-         ELSE 0
-       END) DESC,
-       l.dynamic_score DESC NULLS LAST,
-       l.next_followup_at ASC NULLS LAST
-     LIMIT $1`,
-    [limit]
+     HAVING ${priorityExpr.replace(/CASE/g, 'CASE').trim()} > 0
+     ORDER BY ${priorityExpr} DESC,
+              l.dynamic_score DESC NULLS LAST,
+              l.next_followup_at ASC NULLS LAST
+     LIMIT $${idx}`,
+    [...params, limit]
   );
 
   // Summary por reason
@@ -557,7 +591,6 @@ router.post('/:id/apply-cadence', ...adminOnly, asyncHandler(async (req, res) =>
   const { cadence_name, start_day = 0 } = req.body;
   if (!cadence_name) throw new AppError('cadence_name obrigatorio', 400);
 
-  // Verifica se cadencia existe
   const { rows: cadRows } = await pool.query(
     `SELECT id, name, steps FROM lead_cadences WHERE name = $1 AND is_active = TRUE`,
     [cadence_name]
@@ -567,7 +600,6 @@ router.post('/:id/apply-cadence', ...adminOnly, asyncHandler(async (req, res) =>
   const cadence = cadRows[0];
   const steps = Array.isArray(cadence.steps) ? cadence.steps : [];
 
-  // Proximo step apos start_day
   const nextStep = steps.find(s => Number(s.day) >= Number(start_day));
   const nextFollowupAt = nextStep
     ? new Date(Date.now() + Number(nextStep.day) * 24 * 60 * 60 * 1000)
@@ -612,7 +644,6 @@ router.post('/:id/interactions', ...adminOnly, asyncHandler(async (req, res) => 
     [req.params.id, req.user?.id || null, authorName, body, channel || null]
   );
 
-  // trigger AFTER INSERT ja setou last_activity_at e limpou rotten_since
   const updateFields = [];
   const updateValues = [];
   let uIdx = 1;
@@ -620,7 +651,6 @@ router.post('/:id/interactions', ...adminOnly, asyncHandler(async (req, res) => 
   if (new_status)       { updateFields.push(`status=$${uIdx++}`);            updateValues.push(new_status); }
   if (next_followup_at) { updateFields.push(`next_followup_at=$${uIdx++}`);  updateValues.push(next_followup_at); }
 
-  // Avanca cadencia se solicitado e lead esta em uma
   if (advance_cadence && leadRows[0].cadence_name) {
     const lead = leadRows[0];
     const { rows: cadRows } = await pool.query(
@@ -636,7 +666,6 @@ router.post('/:id/interactions', ...adminOnly, asyncHandler(async (req, res) => 
         updateFields.push(`cadence_day=$${uIdx++}`);   updateValues.push(Number(nextStep.day));
         updateFields.push(`next_followup_at=$${uIdx++}`); updateValues.push(nextFollowup);
       } else {
-        // cadencia terminou
         updateFields.push(`cadence_name=NULL, cadence_day=0`);
       }
     }
