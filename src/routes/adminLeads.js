@@ -1,6 +1,6 @@
 // ============================================================
-// AURA. — CRM Comercial — Leads (prospects pre-venda)
-// Fase 3: filtros completos + stats de conversao + export CSV
+// AURA. - CRM Comercial - Leads (prospects pre-venda)
+// Fase 4: dynamic_score, expected_plan/mrr, batch, cadence apply, rotten
 // ============================================================
 
 const express = require('express');
@@ -14,14 +14,23 @@ const adminOnly = [requireAuth, requireRole('admin')];
 
 const VALID_STATUSES = ['new', 'contacted', 'responded', 'interested', 'demo', 'converted', 'lost'];
 const VALID_CHANNELS = ['whatsapp', 'ligacao', 'email', 'visita', 'sem_resposta', 'outro'];
+const VALID_PLANS    = ['essencial', 'negocio', 'expansao'];
 
-// ── GET /admin/leads ─────────────────────────────────────────
-// Filtros: status, city, category, followup_due, has_phone,
-//          min_rating, no_contact, search, limit, offset
+// Whitelist editavel via PATCH e BATCH
+const EDITABLE_FIELDS = [
+  'name','phone','city','category','address','website',
+  'status','lost_reason','next_followup_at','converted_company_id',
+  'expected_plan','expected_mrr','cadence_name','cadence_day','rotten_since',
+];
+
+// ============================================================
+// GET /admin/leads - lista + filtros completos + pipeline
+// ============================================================
 router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
   const {
     status, city, category, followup_due, has_phone,
     min_rating, no_contact, search,
+    min_score, expected_plan, is_rotten,
     limit = 200, offset = 0,
   } = req.query;
 
@@ -29,14 +38,17 @@ router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
   const params = [];
   let idx = 1;
 
-  if (status)                { conditions.push(`l.status = $${idx++}`);                                                      params.push(status); }
-  if (city)                  { conditions.push(`l.city ILIKE $${idx++}`);                                                    params.push(`%${city}%`); }
-  if (category)              { conditions.push(`l.category ILIKE $${idx++}`);                                                params.push(`%${category}%`); }
+  if (status)                  { conditions.push(`l.status = $${idx++}`);                                                    params.push(status); }
+  if (city)                    { conditions.push(`l.city ILIKE $${idx++}`);                                                  params.push(`%${city}%`); }
+  if (category)                { conditions.push(`l.category ILIKE $${idx++}`);                                              params.push(`%${category}%`); }
   if (followup_due === 'true') { conditions.push(`l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW()`);          }
-  if (has_phone === 'true')  { conditions.push(`l.phone IS NOT NULL AND l.phone != ''`);                                     }
-  if (min_rating)            { conditions.push(`l.google_rating >= $${idx++}`);                                              params.push(parseFloat(min_rating)); }
-  // no_contact: status = 'new' E nenhuma interacao registrada ainda
-  if (no_contact === 'true') { conditions.push(`l.status = 'new' AND NOT EXISTS (SELECT 1 FROM lead_interactions li WHERE li.lead_id = l.id)`); }
+  if (has_phone === 'true')    { conditions.push(`l.phone IS NOT NULL AND l.phone != ''`);                                   }
+  if (min_rating)              { conditions.push(`l.google_rating >= $${idx++}`);                                            params.push(parseFloat(min_rating)); }
+  if (min_score)               { conditions.push(`l.dynamic_score >= $${idx++}`);                                            params.push(parseInt(min_score)); }
+  if (expected_plan)           { conditions.push(`l.expected_plan = $${idx++}`);                                             params.push(expected_plan); }
+  if (is_rotten === 'true')    { conditions.push(`l.rotten_since IS NOT NULL`);                                              }
+  if (is_rotten === 'false')   { conditions.push(`l.rotten_since IS NULL`);                                                  }
+  if (no_contact === 'true')   { conditions.push(`l.status = 'new' AND NOT EXISTS (SELECT 1 FROM lead_interactions li WHERE li.lead_id = l.id)`); }
   if (search) {
     conditions.push(`(l.name ILIKE $${idx} OR l.phone ILIKE $${idx + 1} OR l.address ILIKE $${idx + 2})`);
     params.push(`%${search}%`, `%${search}%`, `%${search}%`);
@@ -47,17 +59,16 @@ router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
 
   const { rows } = await pool.query(
     `SELECT l.*,
-            COUNT(i.id)::int           AS interaction_count,
-            MAX(i.created_at)          AS last_interaction_at,
-            -- flag follow-up vencido para highlight no FE
+            COUNT(i.id)::int  AS interaction_count,
+            MAX(i.created_at) AS last_interaction_at,
             (l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW()) AS followup_overdue
      FROM sales_leads l
      LEFT JOIN lead_interactions i ON i.lead_id = l.id
      ${where}
      GROUP BY l.id
      ORDER BY
-       -- prioridade: follow-up vencido primeiro
        (l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW()) DESC,
+       l.dynamic_score DESC NULLS LAST,
        CASE l.status
          WHEN 'demo'        THEN 1
          WHEN 'interested'  THEN 2
@@ -68,24 +79,27 @@ router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
          WHEN 'lost'        THEN 7
        END,
        l.next_followup_at ASC NULLS LAST,
-       l.google_rating DESC NULLS LAST,
        l.updated_at DESC
      LIMIT $${idx++} OFFSET $${idx++}`,
     [...params, parseInt(limit), parseInt(offset)]
   );
 
-  // Pipeline: totais por status (sem filtros — visao geral)
+  // Pipeline + valor potencial (sum de expected_mrr)
   const { rows: counts } = await pool.query(
-    `SELECT status, COUNT(*) AS total FROM sales_leads GROUP BY status`
+    `SELECT status, COUNT(*) AS total, COALESCE(SUM(expected_mrr),0) AS potential_mrr
+     FROM sales_leads GROUP BY status`
   );
-  const pipeline = Object.fromEntries(VALID_STATUSES.map(s => [s, 0]));
-  counts.forEach(r => { pipeline[r.status] = parseInt(r.total); });
+  const pipeline = Object.fromEntries(VALID_STATUSES.map(s => [s, { count: 0, potential_mrr: 0 }]));
+  counts.forEach(r => {
+    pipeline[r.status] = { count: parseInt(r.total), potential_mrr: parseFloat(r.potential_mrr) };
+  });
 
   res.json({ total: rows.length, pipeline, leads: rows });
 }));
 
-// ── GET /admin/leads/meta ─────────────────────────────────────
-// Cidades, categorias e stats agregadas para os filtros do FE
+// ============================================================
+// GET /admin/leads/meta - cidades, categorias e stats
+// ============================================================
 router.get('/meta', ...adminOnly, asyncHandler(async (req, res) => {
   const [citiesRes, categoriesRes, statsRes] = await Promise.all([
     pool.query(`SELECT DISTINCT city, COUNT(*) as total FROM sales_leads WHERE city IS NOT NULL AND city != '' GROUP BY city ORDER BY total DESC`),
@@ -95,6 +109,8 @@ router.get('/meta', ...adminOnly, asyncHandler(async (req, res) => {
         COUNT(*) FILTER (WHERE phone IS NOT NULL AND phone != '')::int AS with_phone,
         COUNT(*) FILTER (WHERE google_rating >= 4)::int                AS high_rated,
         COUNT(*) FILTER (WHERE next_followup_at <= NOW())::int         AS followup_overdue,
+        COUNT(*) FILTER (WHERE rotten_since IS NOT NULL)::int           AS rotten_total,
+        COUNT(*) FILTER (WHERE dynamic_score >= 50)::int                AS hot_total,
         COUNT(*) FILTER (WHERE status = 'new' AND NOT EXISTS (
           SELECT 1 FROM lead_interactions li WHERE li.lead_id = sales_leads.id
         ))::int AS never_contacted,
@@ -110,26 +126,30 @@ router.get('/meta', ...adminOnly, asyncHandler(async (req, res) => {
   });
 }));
 
-// ── GET /admin/leads/stats ────────────────────────────────────
-// Funil de conversao com taxas para o Pipeline view
+// ============================================================
+// GET /admin/leads/stats - funil + taxas + MRR potencial
+// ============================================================
 router.get('/stats', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(`
     SELECT
-      COUNT(*)::int                                                         AS total,
-      COUNT(*) FILTER (WHERE status != 'new')::int                         AS contacted_total,
+      COUNT(*)::int                                                                       AS total,
+      COUNT(*) FILTER (WHERE status != 'new')::int                                        AS contacted_total,
       COUNT(*) FILTER (WHERE status IN ('responded','interested','demo','converted'))::int AS responded_total,
       COUNT(*) FILTER (WHERE status IN ('interested','demo','converted'))::int             AS interested_total,
-      COUNT(*) FILTER (WHERE status IN ('demo','converted'))::int           AS demo_total,
-      COUNT(*) FILTER (WHERE status = 'converted')::int                    AS converted_total,
-      COUNT(*) FILTER (WHERE status = 'lost')::int                         AS lost_total,
-      COUNT(*) FILTER (WHERE phone IS NOT NULL AND phone != '')::int        AS with_phone,
-      ROUND(AVG(google_rating) FILTER (WHERE google_rating IS NOT NULL), 1) AS avg_rating,
-      COUNT(*) FILTER (WHERE next_followup_at IS NOT NULL AND next_followup_at <= NOW())::int AS overdue
+      COUNT(*) FILTER (WHERE status IN ('demo','converted'))::int                          AS demo_total,
+      COUNT(*) FILTER (WHERE status = 'converted')::int                                    AS converted_total,
+      COUNT(*) FILTER (WHERE status = 'lost')::int                                         AS lost_total,
+      COUNT(*) FILTER (WHERE phone IS NOT NULL AND phone != '')::int                       AS with_phone,
+      ROUND(AVG(google_rating) FILTER (WHERE google_rating IS NOT NULL), 1)                AS avg_rating,
+      COUNT(*) FILTER (WHERE next_followup_at IS NOT NULL AND next_followup_at <= NOW())::int AS overdue,
+      COALESCE(SUM(expected_mrr) FILTER (WHERE status IN ('interested','demo')), 0)::numeric  AS pipeline_mrr,
+      COALESCE(SUM(expected_mrr) FILTER (WHERE status = 'converted'), 0)::numeric            AS won_mrr,
+      AVG(dynamic_score)::int                                                             AS avg_score
     FROM sales_leads
   `);
 
   const s = rows[0];
-  const total = s.total || 1; // evitar divisao por zero
+  const total = s.total || 1;
 
   res.json({
     ...s,
@@ -141,10 +161,11 @@ router.get('/stats', ...adminOnly, asyncHandler(async (req, res) => {
   });
 }));
 
-// ── GET /admin/leads/export ───────────────────────────────────
-// Exporta CSV do filtro atual
+// ============================================================
+// GET /admin/leads/export - CSV
+// ============================================================
 router.get('/export', ...adminOnly, asyncHandler(async (req, res) => {
-  const { status, city, category, has_phone, min_rating, search } = req.query;
+  const { status, city, category, has_phone, min_rating, search, expected_plan } = req.query;
 
   const conditions = [];
   const params = [];
@@ -155,6 +176,7 @@ router.get('/export', ...adminOnly, asyncHandler(async (req, res) => {
   if (category)             { conditions.push(`category ILIKE $${idx++}`);                    params.push(`%${category}%`); }
   if (has_phone === 'true') { conditions.push(`phone IS NOT NULL AND phone != ''`);            }
   if (min_rating)           { conditions.push(`google_rating >= $${idx++}`);                  params.push(parseFloat(min_rating)); }
+  if (expected_plan)        { conditions.push(`expected_plan = $${idx++}`);                    params.push(expected_plan); }
   if (search)               { conditions.push(`(name ILIKE $${idx} OR phone ILIKE $${idx + 1})`); params.push(`%${search}%`, `%${search}%`); idx += 2; }
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
@@ -162,35 +184,144 @@ router.get('/export', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT name, phone, city, category, address, website,
             google_rating, google_reviews, status, source,
-            last_contact_at, next_followup_at, created_at
-     FROM sales_leads ${where} ORDER BY status, google_rating DESC NULLS LAST`,
+            expected_plan, expected_mrr, dynamic_score,
+            last_contact_at, next_followup_at, rotten_since, created_at
+     FROM sales_leads ${where} ORDER BY dynamic_score DESC NULLS LAST, google_rating DESC NULLS LAST`,
     params
   );
 
-  // Gerar CSV
-  const header = ['nome','telefone','cidade','categoria','endereco','site','nota_google','num_avaliacoes','status','fonte','ultimo_contato','proximo_followup','cadastrado_em'];
+  const header = ['nome','telefone','cidade','categoria','endereco','site','nota_google','num_avaliacoes','status','fonte','plano_esperado','mrr_esperado','score','ultimo_contato','proximo_followup','rotten_desde','cadastrado_em'];
   const escape = (v) => {
     if (v === null || v === undefined) return '';
     const s = String(v);
     return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
   };
+  const fmt = (d) => d ? new Date(d).toLocaleDateString('pt-BR') : '';
   const lines = [
     header.join(','),
     ...rows.map(r => [
       r.name, r.phone, r.city, r.category, r.address, r.website,
       r.google_rating, r.google_reviews, r.status, r.source,
-      r.last_contact_at ? new Date(r.last_contact_at).toLocaleDateString('pt-BR') : '',
-      r.next_followup_at ? new Date(r.next_followup_at).toLocaleDateString('pt-BR') : '',
-      r.created_at ? new Date(r.created_at).toLocaleDateString('pt-BR') : '',
+      r.expected_plan, r.expected_mrr, r.dynamic_score,
+      fmt(r.last_contact_at), fmt(r.next_followup_at), fmt(r.rotten_since), fmt(r.created_at),
     ].map(escape).join(',')),
   ];
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="leads_${new Date().toISOString().slice(0,10)}.csv"`);
-  res.send('\uFEFF' + lines.join('\r\n')); // BOM para Excel abrir com acentos
+  res.send('\uFEFF' + lines.join('\r\n'));
 }));
 
-// ── GET /admin/leads/:id ──────────────────────────────────────
+// ============================================================
+// POST /admin/leads/batch - acoes em massa
+// body: { ids: [...], action: 'update_status'|'assign_cadence'|'set_expected_plan'|'delete'|'mark_rotten', payload: {...} }
+// ============================================================
+router.post('/batch', ...adminOnly, asyncHandler(async (req, res) => {
+  const { ids, action, payload = {} } = req.body;
+  if (!Array.isArray(ids) || !ids.length) throw new AppError('ids deve ser array nao vazio', 400);
+  if (ids.length > 500) throw new AppError('Maximo 500 leads por batch', 400);
+
+  let affected = 0;
+
+  switch (action) {
+    case 'update_status': {
+      if (!VALID_STATUSES.includes(payload.status))
+        throw new AppError(`status invalido. Use: ${VALID_STATUSES.join(', ')}`, 400);
+      const { rowCount } = await pool.query(
+        `UPDATE sales_leads
+         SET status = $1, last_contact_at = CASE WHEN $1 != 'new' THEN NOW() ELSE last_contact_at END
+         WHERE id = ANY($2::uuid[])`,
+        [payload.status, ids]
+      );
+      affected = rowCount;
+      break;
+    }
+    case 'set_expected_plan': {
+      if (payload.expected_plan && !VALID_PLANS.includes(payload.expected_plan))
+        throw new AppError(`expected_plan invalido. Use: ${VALID_PLANS.join(', ')}`, 400);
+      const { rowCount } = await pool.query(
+        `UPDATE sales_leads SET expected_plan = $1, expected_mrr = $2 WHERE id = ANY($3::uuid[])`,
+        [payload.expected_plan || null, payload.expected_mrr || null, ids]
+      );
+      affected = rowCount;
+      break;
+    }
+    case 'assign_cadence': {
+      if (!payload.cadence_name) throw new AppError('cadence_name obrigatorio', 400);
+      const { rowCount } = await pool.query(
+        `UPDATE sales_leads SET cadence_name = $1, cadence_day = 0, next_followup_at = NOW() WHERE id = ANY($2::uuid[])`,
+        [payload.cadence_name, ids]
+      );
+      affected = rowCount;
+      break;
+    }
+    case 'mark_rotten': {
+      const { rowCount } = await pool.query(
+        `UPDATE sales_leads SET rotten_since = NOW() WHERE id = ANY($1::uuid[]) AND rotten_since IS NULL`,
+        [ids]
+      );
+      affected = rowCount;
+      break;
+    }
+    case 'unmark_rotten': {
+      const { rowCount } = await pool.query(
+        `UPDATE sales_leads SET rotten_since = NULL WHERE id = ANY($1::uuid[])`,
+        [ids]
+      );
+      affected = rowCount;
+      break;
+    }
+    case 'set_followup': {
+      if (!payload.next_followup_at) throw new AppError('next_followup_at obrigatorio', 400);
+      const { rowCount } = await pool.query(
+        `UPDATE sales_leads SET next_followup_at = $1 WHERE id = ANY($2::uuid[])`,
+        [payload.next_followup_at, ids]
+      );
+      affected = rowCount;
+      break;
+    }
+    case 'delete': {
+      const { rowCount } = await pool.query(
+        `DELETE FROM sales_leads WHERE id = ANY($1::uuid[])`,
+        [ids]
+      );
+      affected = rowCount;
+      break;
+    }
+    default:
+      throw new AppError(`Acao invalida. Use: update_status, set_expected_plan, assign_cadence, mark_rotten, unmark_rotten, set_followup, delete`, 400);
+  }
+
+  res.json({ action, affected, total: ids.length });
+}));
+
+// ============================================================
+// POST /admin/leads/recompute-scores - recalcula dynamic_score em massa
+// ============================================================
+router.post('/recompute-scores', ...adminOnly, asyncHandler(async (req, res) => {
+  const { rowCount } = await pool.query(`
+    UPDATE sales_leads
+    SET dynamic_score = compute_lead_score_from_fields(
+      status, expected_plan, google_rating, google_reviews,
+      last_activity_at, rotten_since, phone
+    )
+  `);
+  res.json({ recomputed: rowCount });
+}));
+
+// ============================================================
+// POST /admin/leads/mark-rotten - aplica rotten flag em massa via funcao SQL
+// body: { threshold_days?: number (default 14) }
+// ============================================================
+router.post('/mark-rotten', ...adminOnly, asyncHandler(async (req, res) => {
+  const threshold = parseInt(req.body?.threshold_days) || 14;
+  const { rows } = await pool.query(`SELECT mark_rotten_leads($1) AS affected`, [threshold]);
+  res.json({ threshold_days: threshold, affected: rows[0].affected });
+}));
+
+// ============================================================
+// GET /admin/leads/:id - detalhe + interactions
+// ============================================================
 router.get('/:id', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM sales_leads WHERE id = $1`, [req.params.id]);
   if (!rows.length) throw new AppError('Lead nao encontrado', 404);
@@ -202,21 +333,30 @@ router.get('/:id', ...adminOnly, asyncHandler(async (req, res) => {
   res.json({ lead: rows[0], interactions });
 }));
 
-// ── POST /admin/leads ─────────────────────────────────────────
+// ============================================================
+// POST /admin/leads - criar manual
+// ============================================================
 router.post('/', ...adminOnly, asyncHandler(async (req, res) => {
-  const { name, phone, city, category, address, website, google_rating, google_reviews, source = 'manual' } = req.body;
+  const {
+    name, phone, city, category, address, website, google_rating, google_reviews,
+    source = 'manual', expected_plan, expected_mrr,
+  } = req.body;
   if (!name) throw new AppError('name e obrigatorio', 400);
+  if (expected_plan && !VALID_PLANS.includes(expected_plan))
+    throw new AppError(`expected_plan invalido. Use: ${VALID_PLANS.join(', ')}`, 400);
 
   const { rows } = await pool.query(
-    `INSERT INTO sales_leads (name, phone, city, category, address, website, google_rating, google_reviews, source)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+    `INSERT INTO sales_leads (name, phone, city, category, address, website, google_rating, google_reviews, source, expected_plan, expected_mrr)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
     [name, phone || null, city || null, category || null, address || null, website || null,
-     google_rating || null, google_reviews || null, source]
+     google_rating || null, google_reviews || null, source, expected_plan || null, expected_mrr || null]
   );
   res.status(201).json({ lead: rows[0] });
 }));
 
-// ── POST /admin/leads/import ──────────────────────────────────
+// ============================================================
+// POST /admin/leads/import - bulk via array (Google Maps scraping)
+// ============================================================
 router.post('/import', ...adminOnly, asyncHandler(async (req, res) => {
   const { leads } = req.body;
   if (!Array.isArray(leads) || !leads.length) throw new AppError('leads deve ser um array nao vazio', 400);
@@ -257,15 +397,18 @@ router.post('/import', ...adminOnly, asyncHandler(async (req, res) => {
   res.status(201).json({ inserted, skipped, total: leads.length });
 }));
 
-// ── PATCH /admin/leads/:id ────────────────────────────────────
+// ============================================================
+// PATCH /admin/leads/:id - editar campos
+// ============================================================
 router.patch('/:id', ...adminOnly, asyncHandler(async (req, res) => {
-  const allowed = ['name','phone','city','category','address','website','status','lost_reason','next_followup_at','converted_company_id'];
   const fields = []; const values = []; let idx = 1;
 
-  for (const key of allowed) {
+  for (const key of EDITABLE_FIELDS) {
     if (req.body[key] !== undefined) {
       if (key === 'status' && !VALID_STATUSES.includes(req.body[key]))
         throw new AppError(`status invalido. Use: ${VALID_STATUSES.join(', ')}`, 400);
+      if (key === 'expected_plan' && req.body[key] && !VALID_PLANS.includes(req.body[key]))
+        throw new AppError(`expected_plan invalido. Use: ${VALID_PLANS.join(', ')}`, 400);
       fields.push(`${key}=$${idx++}`);
       values.push(req.body[key]);
     }
@@ -285,23 +428,68 @@ router.patch('/:id', ...adminOnly, asyncHandler(async (req, res) => {
   res.json({ lead: rows[0] });
 }));
 
-// ── DELETE /admin/leads/:id ───────────────────────────────────
+// ============================================================
+// DELETE /admin/leads/:id
+// ============================================================
 router.delete('/:id', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(`DELETE FROM sales_leads WHERE id=$1 RETURNING id`, [req.params.id]);
   if (!rows.length) throw new AppError('Lead nao encontrado', 404);
   res.json({ message: 'Lead removido' });
 }));
 
-// ── POST /admin/leads/:id/interactions ───────────────────────
+// ============================================================
+// POST /admin/leads/:id/apply-cadence - aplicar cadencia a um lead
+// body: { cadence_name: string, start_day?: number (default 0) }
+// ============================================================
+router.post('/:id/apply-cadence', ...adminOnly, asyncHandler(async (req, res) => {
+  const { cadence_name, start_day = 0 } = req.body;
+  if (!cadence_name) throw new AppError('cadence_name obrigatorio', 400);
+
+  // Verifica se cadencia existe
+  const { rows: cadRows } = await pool.query(
+    `SELECT id, name, steps FROM lead_cadences WHERE name = $1 AND is_active = TRUE`,
+    [cadence_name]
+  );
+  if (!cadRows.length) throw new AppError(`Cadencia "${cadence_name}" nao encontrada ou inativa`, 404);
+
+  const cadence = cadRows[0];
+  const steps = Array.isArray(cadence.steps) ? cadence.steps : [];
+
+  // Proximo step apos start_day
+  const nextStep = steps.find(s => Number(s.day) >= Number(start_day));
+  const nextFollowupAt = nextStep
+    ? new Date(Date.now() + Number(nextStep.day) * 24 * 60 * 60 * 1000)
+    : null;
+
+  const { rows } = await pool.query(
+    `UPDATE sales_leads
+     SET cadence_name = $1, cadence_day = $2, next_followup_at = $3
+     WHERE id = $4 RETURNING *`,
+    [cadence_name, start_day, nextFollowupAt, req.params.id]
+  );
+  if (!rows.length) throw new AppError('Lead nao encontrado', 404);
+
+  res.json({
+    lead: rows[0],
+    cadence: { name: cadence.name, total_steps: steps.length, next_step: nextStep },
+  });
+}));
+
+// ============================================================
+// POST /admin/leads/:id/interactions - registrar contato
+// ============================================================
 router.post('/:id/interactions', ...adminOnly, asyncHandler(async (req, res) => {
-  const { body, channel, new_status, next_followup_at } = req.body;
+  const { body, channel, new_status, next_followup_at, advance_cadence } = req.body;
   if (!body) throw new AppError('body (texto) e obrigatorio', 400);
   if (channel && !VALID_CHANNELS.includes(channel))
     throw new AppError(`channel invalido. Use: ${VALID_CHANNELS.join(', ')}`, 400);
   if (new_status && !VALID_STATUSES.includes(new_status))
     throw new AppError(`status invalido. Use: ${VALID_STATUSES.join(', ')}`, 400);
 
-  const { rows: leadRows } = await pool.query(`SELECT id FROM sales_leads WHERE id=$1`, [req.params.id]);
+  const { rows: leadRows } = await pool.query(
+    `SELECT id, cadence_name, cadence_day FROM sales_leads WHERE id=$1`,
+    [req.params.id]
+  );
   if (!leadRows.length) throw new AppError('Lead nao encontrado', 404);
 
   const authorName = req.user?.full_name || req.user?.email || 'Staff';
@@ -312,23 +500,55 @@ router.post('/:id/interactions', ...adminOnly, asyncHandler(async (req, res) => 
     [req.params.id, req.user?.id || null, authorName, body, channel || null]
   );
 
-  const updateFields = ['last_contact_at=NOW()'];
+  // trigger AFTER INSERT ja setou last_activity_at e limpou rotten_since
+  const updateFields = [];
   const updateValues = [];
   let uIdx = 1;
 
   if (new_status)       { updateFields.push(`status=$${uIdx++}`);            updateValues.push(new_status); }
   if (next_followup_at) { updateFields.push(`next_followup_at=$${uIdx++}`);  updateValues.push(next_followup_at); }
 
-  updateValues.push(req.params.id);
-  const { rows: updatedLead } = await pool.query(
-    `UPDATE sales_leads SET ${updateFields.join(',')} WHERE id=$${uIdx} RETURNING *`,
-    updateValues
-  );
+  // Avanca cadencia se solicitado e lead esta em uma
+  if (advance_cadence && leadRows[0].cadence_name) {
+    const lead = leadRows[0];
+    const { rows: cadRows } = await pool.query(
+      `SELECT steps FROM lead_cadences WHERE name = $1`,
+      [lead.cadence_name]
+    );
+    if (cadRows.length) {
+      const steps = Array.isArray(cadRows[0].steps) ? cadRows[0].steps : [];
+      const currentIdx = steps.findIndex(s => Number(s.day) === Number(lead.cadence_day));
+      const nextStep = steps[currentIdx + 1];
+      if (nextStep) {
+        const nextFollowup = new Date(Date.now() + (Number(nextStep.day) - Number(lead.cadence_day)) * 24 * 60 * 60 * 1000);
+        updateFields.push(`cadence_day=$${uIdx++}`);   updateValues.push(Number(nextStep.day));
+        updateFields.push(`next_followup_at=$${uIdx++}`); updateValues.push(nextFollowup);
+      } else {
+        // cadencia terminou
+        updateFields.push(`cadence_name=NULL, cadence_day=0`);
+      }
+    }
+  }
 
-  res.status(201).json({ interaction: intRows[0], lead: updatedLead[0] });
+  let updatedLead = leadRows[0];
+  if (updateFields.length) {
+    updateValues.push(req.params.id);
+    const { rows: ur } = await pool.query(
+      `UPDATE sales_leads SET ${updateFields.join(',')} WHERE id=$${uIdx} RETURNING *`,
+      updateValues
+    );
+    updatedLead = ur[0];
+  } else {
+    const { rows: ur } = await pool.query(`SELECT * FROM sales_leads WHERE id=$1`, [req.params.id]);
+    updatedLead = ur[0];
+  }
+
+  res.status(201).json({ interaction: intRows[0], lead: updatedLead });
 }));
 
-// ── GET /admin/leads/:id/interactions ────────────────────────
+// ============================================================
+// GET /admin/leads/:id/interactions - timeline
+// ============================================================
 router.get('/:id/interactions', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT * FROM lead_interactions WHERE lead_id=$1 ORDER BY created_at DESC`,
