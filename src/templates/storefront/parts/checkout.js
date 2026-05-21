@@ -14,11 +14,23 @@
 //  • has_card=SETTINGS.has_card habilita opcao "Pagar com Cartão"
 //  • submitOrder: se payment_method=card, redireciona para card.init_point
 //  • checkoutNext step 3: card fecha checkout (redirect ja aconteceu)
+//
+// Migration 121 (21/05/2026):
+//  • localStorage dedup — pra cliente que abre 2 abas, volta pela back_url
+//    do MP, ou clica 2x no submitOrder. Chave: aura_pending_order_{SLUG}.
+//    Setado no submit success, lido antes do submit, limpo no checkout success.
 'use strict';
 
 module.exports = `
 function openCheckout(){closeCart();checkoutStep=1;selectedDelivery=SETTINGS.pickup_enabled!==false?'pickup':'delivery';renderCheckoutStep();document.getElementById('checkoutOverlay').classList.add('open');document.body.style.overflow='hidden';}
-function closeCheckout(){clearInterval(pollInterval);clearInterval(timerInterval);document.getElementById('checkoutOverlay').classList.remove('open');document.body.style.overflow='';}
+function closeCheckout(){clearInterval(pollInterval);clearInterval(timerInterval);document.getElementById('checkoutOverlay').classList.remove('open');document.body.style.overflow='';
+// Limpa pendência se checkout foi concluído (cliente fechou após paymentMarked ou success)
+try {
+  if(paymentMarked || (currentOrder && currentOrder.payment_method==='on_delivery')){
+    window.localStorage && window.localStorage.removeItem('aura_pending_order_'+SLUG);
+  }
+} catch(_) {}
+}
 function checkoutBack(){if(checkoutStep>1&&checkoutStep<3){checkoutStep--;renderCheckoutStep();}else closeCheckout();}
 
 // Validador CPF/CNPJ mod 11 (mesmo algoritmo do backend)
@@ -429,6 +441,39 @@ function selectDelivery(type){
 }
 
 function submitOrder(){
+  // Migration 121: dedup — checa se já existe pedido em andamento
+  // criado nos últimos 10min (localStorage). Evita duplicação por
+  // duplo-clique, abrir 2 abas, ou voltar pela back_url do MP.
+  try {
+    var pendingKey='aura_pending_order_'+SLUG;
+    var raw=window.localStorage&&window.localStorage.getItem(pendingKey);
+    if(raw){
+      var p=JSON.parse(raw);
+      var ageMs=Date.now()-(p.ts||0);
+      if(p.id && ageMs<10*60*1000){
+        // Pedido recente — confirma com cliente se quer continuar com ele
+        var msg='Voce ja tem um pedido em andamento (#'+(p.order_number||'?')+'). Continuar com ele em vez de criar novo?';
+        if(window.confirm && window.confirm(msg)){
+          // Re-fetch order pra retomar fluxo
+          fetch(API_BASE + '/api/v1/storefront/'+SLUG+'/order/'+p.id)
+            .then(function(r){return r.json();})
+            .then(function(o){
+              if(o && o.id){
+                currentOrder=Object.assign({},o,{pix:p.pix||null,card:p.card||null,payment_method:o.payment_method});
+                if(currentOrder.payment_method==='card' && p.card && p.card.init_point){ window.location.href=p.card.init_point; return; }
+                checkoutStep=3; renderCheckoutStep();
+              }
+            })
+            .catch(function(){});
+          return;
+        }
+        // Cliente escolheu novo pedido — limpa flag
+        window.localStorage.removeItem(pendingKey);
+      } else if(ageMs>=10*60*1000){
+        window.localStorage.removeItem(pendingKey);
+      }
+    }
+  } catch(_) {}
   var btn=document.getElementById('nextBtn');
   btn.disabled=true;btn.textContent='Criando pedido...';
   var items=Object.values(cart).map(function(i){return{product_id:i.product_id,variant_id:i.variant_id||null,quantity:i.qty};});
@@ -460,6 +505,17 @@ function submitOrder(){
   .then(function(res){
     if(!res.ok){showToast(res.data.error||'Erro ao criar pedido');btn.disabled=false;btn.textContent='Ir para pagamento';return;}
     currentOrder=res.data; paymentMarked=false;
+    // Migration 121: salva pedido em andamento pro dedup
+    try {
+      window.localStorage && window.localStorage.setItem('aura_pending_order_'+SLUG, JSON.stringify({
+        id: currentOrder.order_id,
+        order_number: currentOrder.order_number,
+        ts: Date.now(),
+        payment_method: currentOrder.payment_method,
+        pix: currentOrder.pix||null,
+        card: currentOrder.card||null,
+      }));
+    } catch(_) {}
     if(currentOrder.payment_method==='card' && currentOrder.card && currentOrder.card.init_point){ window.location.href=currentOrder.card.init_point; return; }
     checkoutStep=3; renderCheckoutStep();
   })

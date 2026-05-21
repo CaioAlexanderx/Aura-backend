@@ -56,7 +56,9 @@ const DEFAULT_CONFIG = {
   },
   featured_product_ids: [], hidden_product_ids: [], show_prices: true, show_stock: false,
   delivery_enabled: false, delivery_fee: 0, delivery_radius_km: 5,
-  pickup_enabled: true, is_published: false, slug: null,
+  pickup_enabled: true,
+  card_enabled: true, // Migration 121
+  is_published: false, slug: null,
   custom_domain: null, custom_domain_status: 'none',
   custom_domain_plan: null, custom_domain_expires_at: null, custom_domain_price: null,
   // Fase 5 (migration 120)
@@ -351,6 +353,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     delivery_radius_km, pickup_enabled, is_published,
     pix_key, pix_key_type, pix_holder_name, pix_holder_city,
     pay_on_delivery_enabled,
+    card_enabled,
     // Fase 5
     pickup_address, pickup_eta_text, delivery_eta_text,
     origin_zip, delivery_pricing_mode, delivery_distance_tiers,
@@ -710,6 +713,32 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
           } else {
             throw e;
           }
+        }
+      }
+    }
+
+    // ============================================================
+    // Migration 121 (21/05/2026): card_enabled toggle.
+    // Separate UPDATE pra não mexer no UPSERT principal — mesma estratégia
+    // da Fase 5. Defensivo: ignora silenciosamente se a migration 121 não
+    // rodou (42703).
+    // ============================================================
+    if (card_enabled !== undefined) {
+      try {
+        const cardEnabledBool = !!card_enabled;
+        const { rows: updated } = await db.query(
+          `UPDATE digital_channel_config
+             SET card_enabled = $1, updated_at = NOW()
+           WHERE company_id = $2
+           RETURNING *`,
+          [cardEnabledBool, cid]
+        );
+        if (updated.length) savedConfig = updated[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          console.error('[canal-card-enabled] coluna card_enabled inexistente — skip:', e.message);
+        } else {
+          throw e;
         }
       }
     }
