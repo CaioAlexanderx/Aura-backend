@@ -8,33 +8,15 @@
 // POST /storefront/:slug/order/:oid/mark-as-paid — Cliente avisa que pagou
 // GET  /storefront/:slug/order/:oid          — Poll status do pedido
 //
-// FIX (14/05/2026): query de validação de produtos no pedido usava
-// company_id=$2 direto — produtos is_group_shared do outro CNPJ do grupo
-// (ex: matriz Davi) eram rejeitados com "Produto não encontrado" mesmo
-// aparecendo corretamente na vitrine. Agora usa listVisibilityWhere
-// idêntico ao storefrontBuilder/products.js.
-//
-// v2 (15/05/2026): CSP liberou Google Fonts. img-src aceita https.
-// frame-ancestors * pra permitir embed em iframe (preview do admin).
-// Sem isso, helmet default X-Frame-Options bloqueia e o iframe vira
-// chrome-error://chromewebdata/.
-//
-// MP Fase 1 (20/05/2026): Pix automático via Mercado Pago.
-// Se a empresa tiver gateway MP configurado, usa createMpPixPayment.
-// Se MP falhar, cai no fallback generatePix (Asaas/estático).
-//
-// Fase 5b (20/05/2026): endpoint /shipping-quote + calculo server-side
-// do delivery_fee no POST /order quando cliente passa CEP. Suporta
-// modo flat, modo distance (haversine via BrasilAPI), frete gratis
-// acima de valor minimo.
-//
 // MP Fase 2 (21/05/2026): CheckoutPro para pagamento com cartão.
 // payment_method=card cria preferência MP e retorna init_point para
 // redirect do cliente ao hosted checkout do MP.
 //
 // Patch (21/05/2026): JOIN companies pra obter trade_name; passa cpfNorm
-// + company_display_name à createMpPreference. Reduz recusa de cartão
-// (payer.identification) e exibe nome da loja na fatura do cliente.
+// + company_display_name à createMpPreference.
+//
+// Migration 121 (21/05/2026): hasCard respeita config.card_enabled.
+// Lojista pode pausar cartão sem deletar credenciais MP.
 // ============================================================
 'use strict';
 
@@ -94,7 +76,6 @@ function listVisibilityWhere(cidParam) {
   ))`;
 }
 
-// CORS aberto pra vitrine publica
 router.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -107,12 +88,6 @@ router.use((req, res, next) => {
 const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
   || 'https://aura-backend-production-f805.up.railway.app';
 
-// CSP v2 — frame-ancestors * permite que QUALQUER página embute a vitrine em
-// iframe (preview do admin em app.getaura.com.br, e qualquer parceiro que
-// queira incorporar). É público de qualquer forma.
-//
-// Fase 5b: brasilapi.com.br liberada em connect-src (defesa em profundidade —
-// o backend faz a chamada, mas reservamos pra fallback client-side futuro).
 const STOREFRONT_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
@@ -146,16 +121,12 @@ router.get('/:slug/page', async (req, res) => {
     const { rows } = await db.query(
       `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]);
     if (!rows.length) {
-      // Aplica os mesmos headers de embed pra que a página de 404 também rode em iframe
       res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
       res.removeHeader('X-Frame-Options');
       return res.status(404).send('<html><body style="font-family:sans-serif;padding:40px;text-align:center;"><h1>Loja não encontrada</h1><p>Verifique o link ou peça ao lojista pra publicar a loja.</p></body></html>');
     }
     const data = await buildStorefront(rows[0]);
     res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
-    // helmet pode setar X-Frame-Options:SAMEORIGIN globalmente — força remover
-    // pra que frame-ancestors * tenha efeito (X-Frame-Options vence se ambos
-    // existirem em browsers antigos).
     res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(buildStorefrontPage(data, slug));
@@ -165,12 +136,6 @@ router.get('/:slug/page', async (req, res) => {
   }
 });
 
-// ============================================================
-// GET /storefront/:slug/shipping-quote?cep=12345678&subtotal=150
-// (Fase 5b)
-// Calcula o frete para o CEP do cliente. Sempre retorna 200 com payload
-// estruturado (mesmo em erro logico de "fora da area" — fee=null + error).
-// ============================================================
 router.get('/:slug/shipping-quote', async (req, res) => {
   try {
     const slug = req.params.slug.toLowerCase().trim();
@@ -222,7 +187,6 @@ router.post('/:slug/order', async (req, res) => {
 
   try {
     // Patch (21/05/2026): JOIN companies pra obter trade_name (statement_descriptor MP).
-    // companies NAO tem coluna `name` — usar COALESCE(trade_name, legal_name).
     const { rows: configs } = await db.query(
       `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name
        FROM digital_channel_config dcc
@@ -242,7 +206,10 @@ router.post('/:slug/order', async (req, res) => {
       mpGateway = gws[0] || null;
     } catch (_) { /* tabela pode não existir em deployment antigo */ }
     const hasMpGateway = !!mpGateway;
-    const hasCard = hasMpGateway;
+    // Migration 121 (21/05/2026): hasCard respeita card_enabled toggle.
+    // Default true quando coluna não existe (pré-migration) ou não foi setada.
+    const cardEnabled = config.card_enabled !== false;
+    const hasCard = hasMpGateway && cardEnabled;
 
     const dtype = delivery_type || 'pickup';
     if (dtype === 'delivery' && !config.delivery_enabled) {
@@ -280,7 +247,6 @@ router.post('/:slug/order', async (req, res) => {
       }
     }
 
-    // hasPix: true se tem chave Pix estática OU gateway MP
     const hasPix = !!(config.pix_key && String(config.pix_key).trim()) || hasMpGateway;
     const hasOnDelivery = !!config.pay_on_delivery_enabled;
     let pmethod = (payment_method || '').toLowerCase().trim();
@@ -297,7 +263,11 @@ router.post('/:slug/order', async (req, res) => {
       return res.status(400).json({ error: 'Esta loja nao aceita Pix' });
     }
     if (pmethod === 'card' && !hasCard) {
-      return res.status(400).json({ error: 'Esta loja nao aceita pagamento com cartao' });
+      // Mensagem distinta quando gateway existe mas está pausado vs não configurado
+      const msg = hasMpGateway
+        ? 'Pagamento com cartão está temporariamente desativado pela loja. Use Pix ou pague na entrega.'
+        : 'Esta loja nao aceita pagamento com cartao';
+      return res.status(400).json({ error: msg });
     }
     if (pmethod === 'on_delivery' && !hasOnDelivery) {
       return res.status(400).json({ error: 'Esta loja nao aceita pagamento na entrega' });
@@ -388,16 +358,6 @@ router.post('/:slug/order', async (req, res) => {
       });
     }
 
-    // ============================================================
-    // Fase 5b: calculo dinamico de delivery_fee.
-    // - Se delivery e cliente passou address_zip: usa shippingQuote
-    //   (modo flat respeitado, modo distance geocodifica + haversine,
-    //    frete gratis quando subtotal >= delivery_free_above_amount)
-    // - Anti-tampering: se body.expected_delivery_fee veio, valida
-    //   tolerancia de 0.01 entre o computado e o esperado pelo cliente.
-    // - Sem CEP (retirada ou cliente nao informou): fallback comportamento
-    //   anterior (delivery_fee fixo se delivery, 0 se retirada).
-    // ============================================================
     let delivery_fee = 0;
     let shippingMeta = null;
     if (dtype === 'delivery') {
@@ -489,8 +449,6 @@ router.post('/:slug/order', async (req, res) => {
       client.release();
     }
 
-    // ---- Geração do Pix ----
-    // Prioridade: MP automático → fallback Asaas/estático
     let pixData = null;
     if (pmethod === 'pix') {
       if (hasMpGateway) {
@@ -503,14 +461,12 @@ router.post('/:slug/order', async (req, res) => {
             customerEmail: customer_email || null,
             description:   `Pedido #${order.order_number}`,
           });
-          // Persiste o ID do pagamento MP para o webhook cruzar depois
           await db.query(
             `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
             [pixData.payment_id, order.id]
           );
         } catch (mpErr) {
           console.error('[storefront] MP Pix error, fallback to static Pix:', mpErr.message);
-          // Fallback: usa Pix estático (Asaas / chave manual)
           pixData = await generatePix({ order, company_id: cid, total });
           if (pixData) {
             await db.query(`
@@ -538,10 +494,7 @@ router.post('/:slug/order', async (req, res) => {
       }
     }
 
-    // ---- Geração da Preferência CheckoutPro (cartão) ----
-    // Fase 2 (21/05/2026): cria preferência no MP e retorna init_point.
-    // O frontend redireciona o cliente para a hosted checkout do MP.
-    // Patch (21/05/2026): passa payerCpf (cpfNorm) e storeName (trade_name).
+    // Fase 2 (21/05/2026): cria preferência CheckoutPro com payerCpf + storeName.
     let cardData = null;
     if (pmethod === 'card') {
       try {
