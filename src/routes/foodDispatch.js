@@ -1,1 +1,148 @@
-Ly8gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQovLyBBVVJBLiAtIE0gw7NkdWxvIEZvb2QgU2VydmljZQovLyBGT09ELTA4IChGYXNlIDgpOiBQYWluZWwgZGUgRGVzcGFjaG8gKE1vdG9ib3lzKQovLyBNb250YWRvIGVtIC9jb21wYW5pZXMvOmlkL2Zvb2QvZGlzcGF0Y2gvKgovLwovLyBHRVQgIC9ib2FyZCAgICAgICAgICAgICAtIGFncmVnYWRvIHJlYWR5K2luUm91dGUrZGVsaXZlcmVycwovLyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09Ci8vCi8vIE5vdGFzOgovLyAgIC0gcmVxdWlyZUF1dGggKyByZXF1aXJlQ29tcGFueUFjY2VzcyBhcGxpY2Fkb3MgZW0gcHJpdmF0ZS5qcy4KLy8gICAtIENvbGd1bmFzIG5vdmFzIChkaXNwYXRjaGVkX2F0LCBwaW5fdmVyaWZpZWRfYXQpIHPDo28gZGVmZW5zaXZhcwovLyAgICAgdmlhIGNhY2hlIG1vZHVsZS1sZXZlbCArIHRyYXRhbWVudG8gNDI3MDM7IGV4aWdlIG1pZ3JhdGlvbiAxMjcKLy8gICAgIGFwbGljYWRhIHZpYSBTdXBhYmFzZSBNQ1AgYW50ZXMgZG8gbWVyZ2UuCgpjb25zdCByb3V0ZXIgPSByZXF1aXJlKCdleHByZXNzJykuUm91dGVyKHsgbWVyZ2VQYXJhbXM6IHRydWUgfSk7CmNvbnN0IGRiICAgICA9IHJlcXVpcmUoJy4uL2NvbmZpZy9kYXRhYmFzZScpOwpjb25zdCB7IHJlcXVpcmVQbGFuIH0gPSByZXF1aXJlKCcuLi9taWRkbGV3YXJlL2F1dGgnKTsKCmNvbnN0IGd1YXJkID0gW3JlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyldOwoKLy8gQ2FjaGUgbW9kdWxlLWxldmVsIHByYSBjb2x1bmFzIGRhIG1pZ3JhdGlvbiAxMjcgKGFybWFkaWxoYV9zY2hlbWFfcHJlX21pZ3JhdGlvbikuCi8vIE9wdGltaXN0aWM6IGFzc3VtZSB0cnVlOyB2aXJhIGZhbHNlIG5hIHByaW1laXJhIHZleiBxdWUgNDI3MDMgZXN0b3VyYXIuCmxldCBIQVNfRElTUEFUQ0hFRF9BVF9DT0wgPSB0cnVlOwpsZXQgSEFTX0RFTElWRVJFUl9QSU5fQ09MID0gdHJ1ZTsKbGV0IEhBU19MQVNUX1BBWU9VVF9DT0wgID0gdHJ1ZTsKCi8vID09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KLy8gR0VUIC9ib2FyZCAtIGFncmVnYWRvIGRhIHRlbGEgZGUgZGVzcGFjaG8KLy8gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQpyb3V0ZXIuZ2V0KCcvYm9hcmQnLCBndWFyZCwgYXN5bmMgKHJlcSwgcmVzKSA9PiB7CiAgY29uc3QgY29tcGFueUlkID0gcmVxLnBhcmFtcy5pZDsKCiAgLy8gMSBSZWFkeSAtIHBlZGlkb3MgcHJvbnRvcyBhZ3VhcmRhbmRvIG1vdG9ib3kKICBjb25zdCByZWFkeVNxbCA9IGAKICAgIFNFTEVDVCBmby5pZCwgZm8uY3VzdG9tZXJfbmFtZSwgZm8uZGVsaXZlcnlfYWRkcmVzcyBBUyBjdXN0b21lcl9hZGRyZXNzLAogICAgICAgICAgIGZvLnRvdGFsIEFTIHRvdGFsX2Ftb3VudCwgZm8uY3JlYXRlZF9hdCwgZm8ucmVhZHlfYXQsCiAgICAgICAgICAgRVhUUkFDVChFUE9DSCBGUk9NIChOT1coKSAtIENPQUxFU0NFKGZvLnJlYWR5X2F0LCBmby5jb25maXJtZWRfYXQsIGZvLmNyZWF0ZWRfYXQpKSAvIDYwIEFTIHdhaXRpbmdfbWluLAogICAgICAgICAgIENPQUxFU0NFKChTRUxFQ1QgU1RSSU5HX0FHRyhmb2kuaXRlbV9uYW1lLCAnLCAnIE9SREVSIEJZIGZvaS5pZCkKICAgICAgICAgICAgICAgICAgICBGUk9NIGZvb2Rfb3JkZXJfaXRlbXMgZm9pIFdIRVJFIGZvaS5vcmRlcl9pZCA9IGZvLmlkKSwgJycpIEFTIGl0ZW1zX3N1bW1hcnkKICAgIEZST00gZm9vZF9vcmRlcnMgZm8KICAgIFdIRVJFIGZvLmNvbXBhbnlfaWQgPSAkMQogICAgICBBTkQgZm8uc3RhdHVzID0gJ3JlYWR5JwogICAgICBBTkQgZm8uY2hhbm5lbCBJTiAoJ2RlbGl2ZXJ5X3Byb3ByaW8nLCAnd2hhdHNhcHAnLCAnb25saW5lJykKICAgICAgQU5EIGZvLmRlbGl2ZXJlcl9pZCBJUyBOVUxMCiAgICBPUkRFUiBCWSBmby5yZWFkeV9hdCBBU0MgTlVMTFMgTEFTVCwgZm8uY3JlYXRlZF9hdCBBU0MKICAgIExJTUlUIDUwYDsKCiAgLy8gMiBJbiBSb3V0ZSAtIHBlZGlkb3MgZGVzcGFjaGFkb3MgZSBhaW5kYSBuw6NvIGVudHJlZ3Vlcy4KICAvLyBVc2EgZGlzcGF0Y2hlZF9hdCBzZSBleGlzdGUgKEhBU19ESVNQQVRDSEVEX0FUX0NPTCksIHNlbsOjbyBmYWxsYmFjawogIC8vIHByYSBzdGF0dXM9J3JlYWR5JyBjb20gZGVsaXZlcmVyX2lkIE5PVCBOVUxMLgogIGNvbnN0IGluUm91dGVTcWxXaXRoRGlzcGF0Y2hlZCA9IGAKICAgIFNFTEVDVCBmby5pZCwgZm8uZGVsaXZlcmVyX2lkLCBmZC5uYW1lIEFTIGRlbGl2ZXJlcl9uYW1lLAogICAgICAgICAgIGZvLmN1c3RvbWVyX25hbWUsIGZvLmRlbGl2ZXJ5X2FkZHJlc3MgQVMgY3VzdG9tZXJfYWRkcmVzcywKICAgICAgICAgICBmby50b3RhbCBBUyB0b3RhbF9hbW91bnQsCiAgICAgICAgICAgZm8uZGlzcGF0Y2hlZF9hdCwgZm8uZXN0aW1hdGVkX3JlYWR5X2F0IEFTIGV0YV9taW4sCiAgICAgICAgICAgRVhUUkFDVChFUE9DSCBGUk9NIChOT1coKSAtIGZvLmRpc3BhdGNoZWRfYXQpKSAvIDYwIEFTIHJvdXRlX21pbgogICAgRlJPTSBmb29kX29yZGVycyBmbwogICAgTEVGVCBKT0lOIGZvb2RfZGVsaXZlcmVycyBmZCBPTiBmZC5pZCA9IGZvLmRlbGl2ZXJlcl9pZAogICAgV0hFUkUgZm8uY29tcGFueV9pZCA9ICQxCiAgICAgIEFORCBmby5kaXNwYXRjaGVkX2F0IElTIE5PVCBOVUxMCiAgICAgIEFORCBmby5kZWxpdmVyZWRfYXQgSVMgTlVMTAogICAgICBBTkQgZm8uc3RhdHVzIE5PVCBJTiAoJ2RlbGl2ZXJlZCcsICdjYW5jZWxsZWQnKQogICAgT1JERVIgQlkgZm8uZGlzcGF0Y2hlZF9hdCBBU0MKICAgIExJTUlUIDUwYDsKCiAgY29uc3QgaW5Sb3V0ZVNxbEZhbGxiYWNrID0gYAogICAgU0VMRUNUIGZvLmlkLCBmby5kZWxpdmVyZXJfaWQsIGZkLm5hbWUgQVMgZGVsaXZlcmVyX25hbWUsCiAgICAgICAgICAgZm8uY3VzdG9tZXJfbmFtZSwgZm8uZGVsaXZlcnlfYWRkcmVzcyBBUyBjdXN0b21lcl9hZGRyZXNzLAogICAgICAgICAgIGZvLnRvdGFsIEFTIHRvdGFsX2Ftb3VudCwKICAgICAgICAgICBOVUxMOjp0aW1lc3RhbXB0eiBBUyBkaXNwYXRjaGVkX2F0LAogICAgICAgICAgIGZvLmVzdGltYXRlZF9yZWFkeV9hdCBBUyBldGFfbWluLAogICAgICAgICAgIDA6Om51bWVyaWMgQVMgcm91dGVfbWluCiAgICBGUk9NIGZvb2Rfb3JkZXJzIGZvCiAgICBMRUZUIEpPSU4gZm9vZF9kZWxpdmVyZXJzIGZkIE9OIGZkLmlkID0gZm8uZGVsaXZlcmVyX2lkCiAgICBXSEVSRSBmby5jb21wYW55X2lkID0gJDEKICAgICAgQU5EIGZvLmRlbGl2ZXJlcl9pZCBJUyBOT1QgTlVMTAogICAgICBBTkQgZm8uc3RhdHVzID0gJ3JlYWR5JwogICAgT1JERVIgQlkgZm8uY3JlYXRlZF9hdCBBU0MKICAgIExJTUlUIDUwYDsKCiAgLy8gMyBEZWxpdmVyZXJzIC0gZW50cmVnYWRvcmVzIGF0aXZvcyArIHN0YXRzIGRvIGRpYS4KICAvLyBjdXJyZW50X29yZGVyc19jb3VudCA9IHJvdGFzIGFiZXJ0YXMKICAvLyB0b2RheV9kZWxpdmVyaWVzX2NvdW50ICsgdG9kYXlfY29tbWlzc2lvbiA9IGRlbGl2ZXJlZCBob2plCiAgY29uc3QgZGVsaXZlcmVyc1NxbCA9IGAKICAgIFNFTEVDVAogICAgICBmZC5pZCwgZmQubmFtZSwgZmQucGhvbmUsIGZkLnZlaGljbGVfdHlwZSwKICAgICAgZmQuY29tbWlzc2lvbl9tb2RlLCBmZC5jb21taXNzaW9uX3BjdCwgZmQuY29tbWlzc2lvbl9maXhlZCwKICAgICAgQ09BTEVTQ0UoKAogICAgICAgIFNFTEVDVCBDT1VOVCgqKSBGUk9NIGZvb2Rfb3JkZXJzIGZvCiAgICAgICAgIFdIRVJFIGZvLmRlbGl2ZXJlcl9pZCA9IGZkLmlkCiAgICAgICAgICAgQU5EIGZvLmNvbXBhbnlfaWQgPSAkMQogICAgICAgICAgIEFORCBmby5kZWxpdmVyZWRfYXQgSVMgTlVMTAogICAgICAgICAgIEFORCBmby5zdGF0dXMgTk9UIElOICgnZGVsaXZlcmVkJywgJ2NhbmNlbGxlZCcpCiAgICAgICksIDApIEFTIGN1cnJlbnRfb3JkZXJzX2NvdW50LAogICAgICBDT0FMRVNDRSgoCiAgICAgICAgU0VMRUNUIENPVU5UKCopIEZST00gZm9vZF9vcmRlcnMgZm8KICAgICAgICAgV0hFUkUgZm8uZGVsaXZlcmVyX2lkID0gZmQuaWQKICAgICAgICAgICBBTkQgZm8uY29tcGFueV9pZCA9ICQxCiAgICAgICAgICAgQU5EIGZvLnN0YXR1cyA9ICdkZWxpdmVyZWQnCiAgICAgICAgICAgQU5EIGZvLmRlbGl2ZXJlZF9hdDo6ZGF0ZSA9IE5PVygpOjpkYXRlCiAgICAgICksIDApIEFTIHRvZGF5X2RlbGl2ZXJpZXNfY291bnQsCiAgICAgIENPQUxFU0NFKCgKICAgICAgICBTRUxFQ1QgU1VNKGZvLmRlbGl2ZXJlcl9jb21taXNzaW9uKSBGUk9NIGZvb2Rfb3JkZXJzIGZvCiAgICAgICAgIFdIRVJFIGZvLmRlbGl2ZXJlcl9pZCA9IGZkLmlkCiAgICAgICAgICAgQU5EIGZvLmNvbXBhbnlfaWQgPSAkMQogICAgICAgICAgIEFORCBmby5zdGF0dXMgPSAnZGVsaXZlcmVkJwogICAgICAgICAgIEFORCBmby5kZWxpdmVyZWRfYXQ6OmRhdGUgPSBOT1coKTo6ZGF0ZQogICAgICApLCAwKSBBUyB0b2RheV9jb21taXNzaW9uCiAgICBGUk9NIGZvb2RfZGVsaXZlcmVycyBmZAogICAgV0hFUkUgZmQuY29tcGFueV9pZCA9ICQxIEFORCBmZC5pc19hY3RpdmUgPSBUUlVFCiAgICBPUkRFUiBCWSBmZC5uYW1lYDsKCiAgdHJ5IHsKICAgIC8vIEluLXJvdXRlOiB0ZW50YSBzcWwgY29tIGRpc3BhdGNoZWRfYXQ7IGNhaSBubyBmYWxsYmFjayBzZSBjb2x1bmEgYXVzZW50ZS4KICAgIGNvbnN0IGluUm91dGVQcm9taXNlID0gKGFzeW5jICgpID0+IHsKICAgICAgaWYgKEhBU19ESVNQQVRDSEVEX0FUX0NPTCkgewogICAgICAgIHRyeSB7CiAgICAgICAgICByZXR1cm4gKGF3YWl0IGRiLnF1ZXJ5KGluUm91dGVTcWxXaXRoRGlzcGF0Y2hlZCwgW2NvbXBhbnlJZF0pKS5yb3dzOwogICAgICAgIH0gY2F0Y2ggKGUpIHsKICAgICAgICAgIGlmIChlPy5jb2RlID09PSAnNDI3MDMnKSB7CiAgICAgICAgICAgIEhBU19ESVNQQVRDSEVEX0FUX0NPTCA9IGZhbHNlOwogICAgICAgICAgICBjb25zb2xlLndhcm4oJ1tmb29kL2Rpc3BhdGNoL2JvYXJkXSBkaXNwYXRjaGVkX2F0IGF1c2VudGUgLSB1c2FuZG8gZmFsbGJhY2siKTsKICAgICAgICAgICAgcmV0dXJuIChhd2FpdCBkYi5xdWVyeShpblJvdXRlU3FsRmFsbGJhY2ssIFtjb21wYW55SWRdKSkucm93czsKICAgICAgICAgIH0KICAgICAgICAgIHRocm93IGU7CiAgICAgICAgfQogICAgICB9CiAgICAgIHJldHVybiAoYXdhaXQgZGIucXVlcnkoaW5Sb3V0ZVNxbEZhbGxiYWNrLCBbY29tcGFueUlkXSkpLnJvd3M7CiAgICB9KSgpOwoKICAgIGNvbnN0IFtyZWFkeUFyciwgaW5Sb3V0ZUFyciwgZGVsaXZlcmVyc0Fycl0gPSBhd2FpdCBQcm9taXNlLmFsbChbCiAgICAgIGRiLnF1ZXJ5KHJlYWR5U3FsLCAgICAgICBbY29tcGFueUlkXSkudGhlbihyID0+IHIucm93cyksCiAgICAgIGluUm91dGVQcm9taXNlLAogICAgICBkYi5xdWVyeShkZWxpdmVyZXJzU3FsLCBbY29tcGFueUlkXSkudGhlbihyID0+IHIucm93cyksCiAgICBdKTsKCiAgICByZXMuanNvbih7CiAgICAgIHJlYWR5OiByZWFkeUFyciwKICAgICAgaW5Sb3V0ZTogaW5Sb3V0ZUFyciwKICAgICAgZGVsaXZlcmVyczogZGVsaXZlcmVyc0FyciwKICAgIH0pOwogIH0gY2F0Y2ggKGUpIHsKICAgIGNvbnNvbGUuZXJyb3IoJ1tmb29kL2Rpc3BhdGNoL2JvYXJkXSBFcnJvOicsIGUubWVzc2FnZSk7CiAgICByZXMuc3RhdHVzKDUwMCkuanNvbih7IGVycm9yOiAnRXJybyBhbyBidXNjYXIgYm9hcmQgZGUgZGVzcGFjaG8nIH0pOwogIH0KfSk7Cgptb2R1bGUuZXhwb3J0cyA9IHJvdXRlcjsK
+// =======================================================
+// AURA. - M ódulo Food Service
+// FOOD-08 (Fase 8): Painel de Despacho (Motoboys)
+// Montado em /companies/:id/food/dispatch/*
+//
+// GET  /board             - agregado ready+inRoute+deliverers
+// ==========================================================
+//
+// Notas:
+//   - requireAuth + requireCompanyAccess aplicados em private.js.
+//   - Colgunas novas (dispatched_at, pin_verified_at) são defensivas
+//     via cache module-level + tratamento 42703; exige migration 127
+//     aplicada via Supabase MCP antes do merge.
+
+const router = require('express').Router({ mergeParams: true });
+const db     = require('../config/database');
+const { requirePlan } = require('../middleware/auth');
+
+const guard = [requirePlan('negocio', 'expansao')];
+
+// Cache module-level pra colunas da migration 127 (armadilha_schema_pre_migration).
+// Optimistic: assume true; vira false na primeira vez que 42703 estourar.
+let HAS_DISPATCHED_AT_COL = true;
+let HAS_DELIVERER_PIN_COL = true;
+let HAS_LAST_PAYOUT_COL  = true;
+
+// ==========================================================
+// GET /board - agregado da tela de despacho
+// ==========================================================
+router.get('/board', guard, async (req, res) => {
+  const companyId = req.params.id;
+
+  // 1 Ready - pedidos prontos aguardando motoboy
+  const readySql = `
+    SELECT fo.id, fo.customer_name, fo.delivery_address AS customer_address,
+           fo.total AS total_amount, fo.created_at, fo.ready_at,
+           EXTRACT(EPOCH FROM (NOW() - COALESCE(fo.ready_at, fo.confirmed_at, fo.created_at))) / 60 AS waiting_min,
+           COALESCE((SELECT STRING_AGG(foi.item_name, ', ' ORDER BY foi.id)
+                    FROM food_order_items foi WHERE foi.order_id = fo.id), '') AS items_summary
+    FROM food_orders fo
+    WHERE fo.company_id = $1
+      AND fo.status = 'ready'
+      AND fo.channel IN ('delivery_proprio', 'whatsapp', 'online')
+      AND fo.deliverer_id IS NULL
+    ORDER BY fo.ready_at ASC NULLS LAST, fo.created_at ASC
+    LIMIT 50`;
+
+  // 2 In Route - pedidos despachados e ainda não entregues.
+  // Usa dispatched_at se existe (HAS_DISPATCHED_AT_COL), senão fallback
+  // pra status='ready' com deliverer_id NOT NULL.
+  const inRouteSqlWithDispatched = `
+    SELECT fo.id, fo.deliverer_id, fd.name AS deliverer_name,
+           fo.customer_name, fo.delivery_address AS customer_address,
+           fo.total AS total_amount,
+           fo.dispatched_at, fo.estimated_ready_at AS eta_min,
+           EXTRACT(EPOCH FROM (NOW() - fo.dispatched_at)) / 60 AS route_min
+    FROM food_orders fo
+    LEFT JOIN food_deliverers fd ON fd.id = fo.deliverer_id
+    WHERE fo.company_id = $1
+      AND fo.dispatched_at IS NOT NULL
+      AND fo.delivered_at IS NULL
+      AND fo.status NOT IN ('delivered', 'cancelled')
+    ORDER BY fo.dispatched_at ASC
+    LIMIT 50`;
+
+  const inRouteSqlFallback = `
+    SELECT fo.id, fo.deliverer_id, fd.name AS deliverer_name,
+           fo.customer_name, fo.delivery_address AS customer_address,
+           fo.total AS total_amount,
+           NULL::timestamptz AS dispatched_at,
+           fo.estimated_ready_at AS eta_min,
+           0::numeric AS route_min
+    FROM food_orders fo
+    LEFT JOIN food_deliverers fd ON fd.id = fo.deliverer_id
+    WHERE fo.company_id = $1
+      AND fo.deliverer_id IS NOT NULL
+      AND fo.status = 'ready'
+    ORDER BY fo.created_at ASC
+    LIMIT 50`;
+
+  // 3 Deliverers - entregadores ativos + stats do dia.
+  // current_orders_count = rotas abertas
+  // today_deliveries_count + today_commission = delivered hoje
+  const deliverersSql = `
+    SELECT
+      fd.id, fd.name, fd.phone, fd.vehicle_type,
+      fd.commission_mode, fd.commission_pct, fd.commission_fixed,
+      COALESCE((
+        SELECT COUNT(*) FROM food_orders fo
+         WHERE fo.deliverer_id = fd.id
+           AND fo.company_id = $1
+           AND fo.delivered_at IS NULL
+           AND fo.status NOT IN ('delivered', 'cancelled')
+      ), 0) AS current_orders_count,
+      COALESCE((
+        SELECT COUNT(*) FROM food_orders fo
+         WHERE fo.deliverer_id = fd.id
+           AND fo.company_id = $1
+           AND fo.status = 'delivered'
+           AND fo.delivered_at::date = NOW()::date
+      ), 0) AS today_deliveries_count,
+      COALESCE((
+        SELECT SUM(fo.deliverer_commission) FROM food_orders fo
+         WHERE fo.deliverer_id = fd.id
+           AND fo.company_id = $1
+           AND fo.status = 'delivered'
+           AND fo.delivered_at::date = NOW()::date
+      ), 0) AS today_commission
+    FROM food_deliverers fd
+    WHERE fd.company_id = $1 AND fd.is_active = TRUE
+    ORDER BY fd.name`;
+
+  try {
+    // In-route: tenta sql com dispatched_at; cai no fallback se coluna ausente.
+    const inRoutePromise = (async () => {
+      if (HAS_DISPATCHED_AT_COL) {
+        try {
+          return (await db.query(inRouteSqlWithDispatched, [companyId])).rows;
+        } catch (e) {
+          if (e?.code === '42703') {
+            HAS_DISPATCHED_AT_COL = false;
+            console.warn('[food/dispatch/board] dispatched_at ausente - usando fallback');
+            return (await db.query(inRouteSqlFallback, [companyId])).rows;
+          }
+          throw e;
+        }
+      }
+      return (await db.query(inRouteSqlFallback, [companyId])).rows;
+    })();
+
+    const [readyArr, inRouteArr, deliverersArr] = await Promise.all([
+      db.query(readySql,       [companyId]).then(r => r.rows),
+      inRoutePromise,
+      db.query(deliverersSql, [companyId]).then(r => r.rows),
+    ]);
+
+    res.json({
+      ready: readyArr,
+      inRoute: inRouteArr,
+      deliverers: deliverersArr,
+    });
+  } catch (e) {
+    console.error('[food/dispatch/board] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar board de despacho' });
+  }
+});
+
+module.exports = router;
