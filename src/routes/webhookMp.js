@@ -23,6 +23,10 @@
 //
 // Bonus: HMAC válido resolve qual gateway processou o pagamento, evitando
 // a varredura O(N) do fallback CheckoutPro.
+//
+// fix (22/05/2026): chama notifyPaymentConfirmed após onOrderConfirmed
+// para enviar e-mail de confirmação ao cliente (Pix MP e Cartão).
+// SELECT de digital_orders inclui order_number, customer_name, customer_email.
 // ============================================================
 'use strict';
 
@@ -31,6 +35,7 @@ const router               = require('express').Router();
 const db                   = require('../config/database');
 const { getMpPayment }     = require('../services/mpService');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
+const notify               = require('../services/digitalOrderNotifications');
 
 // Parse "ts=1704908010,v1=618c85345248..." → { ts, v1 } ou null.
 function parseMpSignatureHeader(header) {
@@ -117,7 +122,7 @@ router.post('/', async (req, res) => {
 
     // ===== 1. Tenta encontrar pedido pelo mp_payment_id (Pix MP) =====
     const { rows: ordersByPaymentId } = await db.query(
-      `SELECT id, company_id, status
+      `SELECT id, company_id, status, order_number, customer_name, customer_email
        FROM digital_orders
        WHERE mp_payment_id = $1
        LIMIT 1`,
@@ -141,7 +146,7 @@ router.post('/', async (req, res) => {
       if (!payment || !payment.external_reference) return;
 
       const { rows: ordersByRef } = await db.query(
-        `SELECT id, company_id, status
+        `SELECT id, company_id, status, order_number, customer_name, customer_email
          FROM digital_orders
          WHERE id::text = $1
          LIMIT 1`,
@@ -168,7 +173,12 @@ router.post('/', async (req, res) => {
          WHERE id = $1 AND status = 'pending_payment'`,
         [order.id]
       );
-      if (rowCount > 0) await onOrderConfirmed(order.id);
+      if (rowCount > 0) {
+        await onOrderConfirmed(order.id);
+        // Notifica cliente por e-mail que o pagamento (cartão) foi confirmado
+        notify.notifyPaymentConfirmed({ order })
+          .catch(err => console.error('[webhookMp] notifyPaymentConfirmed (card) error:', err.message));
+      }
       return;
     }
 
@@ -204,6 +214,9 @@ router.post('/', async (req, res) => {
     if (rowCount === 0) return; // outra instância já confirmou
 
     await onOrderConfirmed(order.id);
+    // Notifica cliente por e-mail que o pagamento (Pix MP) foi confirmado
+    notify.notifyPaymentConfirmed({ order })
+      .catch(err => console.error('[webhookMp] notifyPaymentConfirmed (pix) error:', err.message));
   } catch (err) {
     console.error('[webhookMp] error:', err.message);
   }
