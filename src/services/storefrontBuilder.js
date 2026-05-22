@@ -7,7 +7,7 @@
 // Cai em fallbacks pra empresas pré-migration 115/116.
 //
 // Fase 4 (18/05/2026): tentou trocar semantica de featured_product_ids
-//   para “ordm de destaque” + adicionou hidden_product_ids para opt-out.
+//   para "ordm de destaque" + adicionou hidden_product_ids para opt-out.
 //
 // Fase 4.1 (18/05/2026 — ROLLBACK): voltou ao modelo simples original.
 //   featured_product_ids[] eh INCLUSION list:
@@ -34,6 +34,10 @@
 // Migration 121 (21/05/2026):
 //   • has_card respeita config.card_enabled (toggle independente das credenciais).
 //     Default true — lojas existentes mantêm comportamento.
+//
+// (22/05/2026): expõe storefront_url — custom domain quando ativo,
+//   senão https://loja.getaura.com.br/<slug>. Consumido pelo aura-app
+//   (TabMeuSite) para exibir o link correto ao operador.
 // ============================================================
 'use strict';
 
@@ -357,6 +361,11 @@ async function buildStorefront(config) {
       };
     }),
     total_products: products.length,
+    // URL canônica da loja — custom domain quando ativo, senão loja.getaura.com.br/slug.
+    // Consumida pelo aura-app (TabMeuSite) para exibir o link correto ao operador.
+    storefront_url: (config.custom_domain && config.custom_domain_status === 'active')
+      ? `https://${config.custom_domain}`
+      : `https://loja.getaura.com.br/${config.slug}`,
   };
 }
 
