@@ -151,8 +151,16 @@ router.use('/dental/documents',     requirePlan('negocio', 'expansao'), require(
 router.use('/dental/transcribe',    requirePlan('negocio', 'expansao'), require('./dentalTranscription'));
 router.use('/dental/supplies',      requirePlan('negocio', 'expansao'), require('./dentalSupplies'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
+// Fase 8 (22/05/2026): foodOrdersDispatch.js intercepta /food/orders/* ANTES do
+// foodOrders.js -- monta POST /:oid/dispatch novo e middleware PATCH /:oid/status
+// que valida PIN antes de marcar delivered. Restante das rotas /food/orders/*
+// continua servido pelo foodOrders.js logo abaixo.
+router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrdersDispatch'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
 router.use('/food/deliverers', requirePlan('negocio', 'expansao'), require('./foodDeliverers'));
+// Fase 8 (22/05/2026): painel de despacho agregado. ready + inRoute + deliverers
+// com stats do dia. Acompanha PIN entregador (migration 127).
+router.use('/food/dispatch', requirePlan('negocio', 'expansao'), require('./foodDispatch'));
 router.use('/food/reports', requirePlan('negocio', 'expansao'), require('./foodReports'));
 router.use('/food/ifood', requirePlan('negocio', 'expansao'), require('./foodIfood'));
 router.use('/food/waiter', requirePlan('negocio', 'expansao'), require('./foodWaiter'));
