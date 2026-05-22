@@ -13,8 +13,8 @@
 // erro 42703 (coluna inexistente) cai em fallback graceful retornando lista vazia
 // + migration_pending: 128. Cache module-level evita repetir o probe.
 
-const express = require("express");
-const db = require("../db");
+const express = require('express');
+const db = require('../config/database');
 const router = express.Router({ mergeParams: true });
 
 // Cache module-level pros campos da migration 128.
@@ -23,7 +23,7 @@ let HAS_HUB_COLS = true;
 let HAS_DIGITAL_ORDERS = true;
 
 function markMissing(err) {
-  if (err && err.code === "42703") {
+  if (err && err.code === '42703') {
     HAS_HUB_COLS = false;
     return true;
   }
@@ -37,15 +37,15 @@ function markMissing(err) {
 //               status=csv  (pending,accepted,preparing,ready,dispatched,...)
 //               limit=int   (default 100, max 500)
 // ---------------------------------------------------------------------------
-router.get("/orders", async (req, res) => {
+router.get('/orders', async (req, res) => {
   const companyId = req.params.id;
-  const channels = (req.query.channels || "").split(",").filter(Boolean);
-  const statuses = (req.query.status || "").split(",").filter(Boolean);
-  const limit = Math.min(parseInt(req.query.limit || "100", 10), 500);
+  const channels = (req.query.channels || '').split(',').filter(Boolean);
+  const statuses = (req.query.status || '').split(',').filter(Boolean);
+  const limit = Math.min(parseInt(req.query.limit || '100', 10), 500);
 
   try {
     const params = [companyId];
-    let whereCh = "";
+    let whereCh = '';
     if (channels.length && HAS_HUB_COLS) {
       params.push(channels);
       whereCh = `AND (fo.external_channel = ANY($${params.length}) OR fo.channel = ANY($${params.length}))`;
@@ -53,7 +53,7 @@ router.get("/orders", async (req, res) => {
       params.push(channels);
       whereCh = `AND fo.channel = ANY($${params.length})`;
     }
-    let whereSt = "";
+    let whereSt = '';
     if (statuses.length) {
       params.push(statuses);
       whereSt = `AND fo.status = ANY($${params.length})`;
@@ -103,11 +103,11 @@ router.get("/orders", async (req, res) => {
       foodRows = r.rows;
     } catch (e) {
       if (markMissing(e)) {
-        console.warn("[food/hub/orders] migration 128 nao aplicada, retry sem novas colunas");
+        console.warn('[food/hub/orders] migration 128 nao aplicada, retry sem novas colunas');
         // Recursao simples: refaz sem hub cols
         const sql2 = sql
-          .replace(/fo\.external_channel, fo\.external_order_id, fo\.channel_metadata, fo\.auto_accepted_at,/, "NULL::TEXT AS external_channel, NULL::TEXT AS external_order_id, NULL::JSONB AS channel_metadata, NULL::TIMESTAMPTZ AS auto_accepted_at,")
-          .replace(/AND \(fo\.external_channel = ANY\(\$\d+\) OR fo\.channel = ANY\(\$\d+\)\)/, "");
+          .replace(/fo\.external_channel, fo\.external_order_id, fo\.channel_metadata, fo\.auto_accepted_at,/, 'NULL::TEXT AS external_channel, NULL::TEXT AS external_order_id, NULL::JSONB AS channel_metadata, NULL::TIMESTAMPTZ AS auto_accepted_at,')
+          .replace(/AND \(fo\.external_channel = ANY\(\$\d+\) OR fo\.channel = ANY\(\$\d+\)\)/, '');
         const r2 = await db.query(sql2, params);
         foodRows = r2.rows;
       } else {
@@ -131,8 +131,8 @@ router.get("/orders", async (req, res) => {
         digital = dr.rows.map((o) => ({
           id: o.id,
           status: o.status,
-          channel: "canal_digital",
-          external_channel: "canal_digital",
+          channel: 'canal_digital',
+          external_channel: 'canal_digital',
           total_amount: o.total_amount,
           created_at: o.created_at,
           customer_name: o.customer_name,
@@ -140,10 +140,10 @@ router.get("/orders", async (req, res) => {
           customer_address: null,
           items: o.items_json || [],
           nfce_emission_id: null,
-          source: "digital_orders",
+          source: 'digital_orders',
         }));
       } catch (e) {
-        if (e.code === "42P01") {
+        if (e.code === '42P01') {
           HAS_DIGITAL_ORDERS = false;
         } else {
           throw e;
@@ -153,7 +153,7 @@ router.get("/orders", async (req, res) => {
 
     res.json({
       orders: [
-        ...foodRows.map((o) => ({ ...o, source: "food_orders" })),
+        ...foodRows.map((o) => ({ ...o, source: 'food_orders' })),
         ...digital,
       ],
       total: foodRows.length + digital.length,
@@ -161,13 +161,13 @@ router.get("/orders", async (req, res) => {
       ...(HAS_HUB_COLS ? {} : { migration_pending: 128 }),
     });
   } catch (err) {
-    if (err && err.code === "42703") {
-      console.warn("[food/hub/orders] migration 128 nao aplicada, fallback");
+    if (err && err.code === '42703') {
+      console.warn('[food/hub/orders] migration 128 nao aplicada, fallback');
       HAS_HUB_COLS = false;
       return res.json({ orders: [], total: 0, filters: { channels, statuses }, migration_pending: 128 });
     }
-    console.error("[food/hub/orders]", err);
-    res.status(500).json({ error: "Erro ao carregar Hub" });
+    console.error('[food/hub/orders]', err);
+    res.status(500).json({ error: 'Erro ao carregar Hub' });
   }
 });
 
@@ -175,7 +175,7 @@ router.get("/orders", async (req, res) => {
 // GET /companies/:id/food/hub/stats
 // KPIs do dia (pedidos, faturamento, prep medio, em rota) pro KPI strip.
 // ---------------------------------------------------------------------------
-router.get("/stats", async (req, res) => {
+router.get('/stats', async (req, res) => {
   const companyId = req.params.id;
   try {
     const today = new Date();
@@ -217,7 +217,7 @@ router.get("/stats", async (req, res) => {
       in_route: parseInt(rota.rows[0].in_route, 10),
     });
   } catch (err) {
-    if (err && err.code === "42703") {
+    if (err && err.code === '42703') {
       return res.json({
         today_orders: 0,
         open_orders: 0,
@@ -227,8 +227,8 @@ router.get("/stats", async (req, res) => {
         migration_pending: 128,
       });
     }
-    console.error("[food/hub/stats]", err);
-    res.status(500).json({ error: "Erro stats Hub" });
+    console.error('[food/hub/stats]', err);
+    res.status(500).json({ error: 'Erro stats Hub' });
   }
 });
 
@@ -238,7 +238,7 @@ router.get("/stats", async (req, res) => {
 // iFood + 99food: connected:false / connection_status:'pending_approval'
 // ate aprovacao API real -- swap quando test store passar.
 // ---------------------------------------------------------------------------
-router.get("/channels", async (req, res) => {
+router.get('/channels', async (req, res) => {
   const companyId = req.params.id;
   try {
     const today = new Date();
@@ -246,8 +246,8 @@ router.get("/channels", async (req, res) => {
 
     // Tenta com external_channel; se 42703, fallback so com fo.channel.
     let groupExpr = HAS_HUB_COLS
-      ? "COALESCE(external_channel, channel)"
-      : "channel";
+      ? 'COALESCE(external_channel, channel)'
+      : 'channel';
 
     let channelCounts;
     try {
@@ -263,7 +263,7 @@ router.get("/channels", async (req, res) => {
       );
     } catch (e) {
       if (markMissing(e)) {
-        groupExpr = "channel";
+        groupExpr = 'channel';
         channelCounts = await db.query(
           `SELECT
              channel AS ch,
@@ -288,7 +288,7 @@ router.get("/channels", async (req, res) => {
         );
         digitalCount = parseInt(dr.rows[0].count, 10);
       } catch (e) {
-        if (e.code === "42P01") {
+        if (e.code === '42P01') {
           HAS_DIGITAL_ORDERS = false;
         } else {
           throw e;
@@ -302,52 +302,52 @@ router.get("/channels", async (req, res) => {
     res.json({
       channels: [
         {
-          key: "presencial",
-          label: "Presencial",
+          key: 'presencial',
+          label: 'Presencial',
           connected: true,
-          count_today: pick("presencial", "count_today"),
-          count_open: pick("presencial", "count_open"),
+          count_today: pick('presencial', 'count_today'),
+          count_open: pick('presencial', 'count_open'),
         },
         {
-          key: "canal_digital",
-          label: "Canal Digital",
+          key: 'canal_digital',
+          label: 'Canal Digital',
           connected: true,
           count_today: digitalCount,
           count_open: 0,
         },
         {
-          key: "ifood",
-          label: "iFood",
+          key: 'ifood',
+          label: 'iFood',
           connected: false,
-          connection_status: "pending_approval",
-          count_today: pick("ifood", "count_today"),
-          count_open: pick("ifood", "count_open"),
+          connection_status: 'pending_approval',
+          count_today: pick('ifood', 'count_today'),
+          count_open: pick('ifood', 'count_open'),
         },
         {
-          key: "99food",
-          label: "99Food",
+          key: '99food',
+          label: '99Food',
           connected: false,
-          connection_status: "pending_approval",
-          count_today: pick("99food", "count_today"),
-          count_open: pick("99food", "count_open"),
+          connection_status: 'pending_approval',
+          count_today: pick('99food', 'count_today'),
+          count_open: pick('99food', 'count_open'),
         },
         {
-          key: "whatsapp",
-          label: "WhatsApp",
+          key: 'whatsapp',
+          label: 'WhatsApp',
           connected: false,
-          connection_status: "hub_social_needed",
-          count_today: pick("whatsapp", "count_today"),
-          count_open: pick("whatsapp", "count_open"),
+          connection_status: 'hub_social_needed',
+          count_today: pick('whatsapp', 'count_today'),
+          count_open: pick('whatsapp', 'count_open'),
         },
       ],
       ...(HAS_HUB_COLS ? {} : { migration_pending: 128 }),
     });
   } catch (err) {
-    if (err && err.code === "42703") {
+    if (err && err.code === '42703') {
       return res.json({ channels: [], migration_pending: 128 });
     }
-    console.error("[food/hub/channels]", err);
-    res.status(500).json({ error: "Erro channels Hub" });
+    console.error('[food/hub/channels]', err);
+    res.status(500).json({ error: 'Erro channels Hub' });
   }
 });
 
