@@ -7,6 +7,10 @@
 // FOOD-08 (Fase 2): Gerenciar opened_at da mesa (set/clear sessão)
 // FOOD-07 (Fase 7): POST /:oid/close-and-emit — fecha mesa, cria sale +
 //   sale_payments, opcionalmente emite NFC-e. Idempotente.
+// FOOD-08 (Fase 8): KDS retorna address_summary em delivery_proprio (concatenado
+//   do delivery_address JSONB) pra mostrar endereco no card. Outras mudancas
+//   de Fase 8 (POST /dispatch, middleware PIN no PATCH /status) ficam em
+//   foodOrdersDispatch.js, montado ANTES deste em private.js.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -86,6 +90,9 @@ router.get('/', guard, async (req, res) => {
   }
 });
 
+// FOOD-08 (Fase 8): address_summary computado no SQL pra delivery_proprio.
+// Concatena street/number/district/city quando presentes em delivery_address
+// JSONB. JSONB ->> retorna NULL se chave ausente; concat_ws ignora NULLs.
 router.get('/kds', guard, async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -94,6 +101,17 @@ router.get('/kds', guard, async (req, res) => {
          fo.estimated_ready_at,
          fd.name AS deliverer_name,
          EXTRACT(EPOCH FROM (NOW() - fo.confirmed_at))/60 AS waiting_minutes,
+         CASE WHEN fo.channel = 'delivery_proprio'
+              THEN NULLIF(TRIM(BOTH ', ' FROM concat_ws(', ',
+                     concat_ws(' ',
+                       NULLIF(fo.delivery_address->>'street', ''),
+                       NULLIF(fo.delivery_address->>'number', '')
+                     ),
+                     NULLIF(fo.delivery_address->>'district', ''),
+                     NULLIF(fo.delivery_address->>'city', '')
+                   )), '')
+              ELSE NULL
+         END AS address_summary,
          json_agg(foi.* ORDER BY foi.id) AS items
        FROM food_orders fo
        LEFT JOIN food_tables ft ON ft.id = fo.table_id
@@ -333,6 +351,9 @@ router.post('/', guard, async (req, res) => {
 });
 
 // PATCH /:oid/status — KDS + baixa de estoque automática ao entregar
+// FOOD-08 (Fase 8): foodOrdersDispatch.js (montado ANTES) intercepta esta
+// rota quando status='delivered' e valida PIN do entregador antes de seguir.
+// Aqui nada mudou.
 router.patch('/:oid/status', guard, async (req, res) => {
   const { status, note } = req.body;
   const client = await db.connect();
