@@ -17,6 +17,9 @@
 //
 // Migration 121 (21/05/2026): hasCard respeita config.card_enabled.
 // Lojista pode pausar cartão sem deletar credenciais MP.
+//
+// Custom domain (22/05/2026): back_urls usam custom_domain quando configurado
+// e active; corrigido prefixo /api/v1/ que faltava no backBase.
 // ============================================================
 'use strict';
 
@@ -494,11 +497,15 @@ router.post('/:slug/order', async (req, res) => {
       }
     }
 
-    // Fase 2 (21/05/2026): cria preferência CheckoutPro com payerCpf + storeName.
+    // Custom domain (22/05/2026): usa custom_domain como base da back_url quando configurado.
+    // Fix: prefixo /api/v1/ estava faltando no fallback Railway.
     let cardData = null;
     if (pmethod === 'card') {
       try {
-        const backBase = `${STOREFRONT_API_BASE}/storefront/${slug}/page`;
+        const hasCustomDomain = config.custom_domain && config.custom_domain_status === 'active';
+        const backBase = hasCustomDomain
+          ? `https://${config.custom_domain}`
+          : `${STOREFRONT_API_BASE}/api/v1/storefront/${slug}/page`;
         cardData = await createMpPreference({
           accessToken:     mpGateway.access_token,
           orderId:         order.id,
