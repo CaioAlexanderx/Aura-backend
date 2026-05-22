@@ -1,1 +1,251 @@
-Ly8gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09Ci8vIEFVUkEuIC0gTW9kdWxvIEZvb2QgU2VydmljZQovLyBGT09ELTA4IChGYXNlIDgpOiBEaXNwYXRjaCBkZSBtb3RvYm95ICsgUElOIGVudHJlZ2Fkb3IKLy8KLy8gRXN0ZSBhcnF1aXZvIGVoIG1vbnRhZG8gZW0gL2NvbXBhbmllcy86aWQvZm9vZC9vcmRlcnMvKiBBTlRFUyBkbwovLyBmb29kT3JkZXJzLmpzIChlbSBwcml2YXRlLmpzKSwgcHJhIGludGVyY2VwdGFyOgovLyAgIC0gUE9TVCAgIC86b2lkL2Rpc3BhdGNoICAgICAtIG5vdm86IGF0cmlidWkgZW50cmVnYWRvciArIGdlcmEgUElOCi8vICAgLSBQQVRDSCAgLzpvaWQvc3RhdHVzICAgICAgIC0gbWlkZGxld2FyZSBxdWUgdmFsaWRhIFBJTiBhbnRlcyBkZSBkZWxpdmVyZWQKLy8KLy8gRGVtYWlzIHJvdGFzIGRlIC9mb29kL29yZGVycyBjb250aW51YW0gc2VydmlkYXMgcGVsbyBmb29kT3JkZXJzLmpzLgovLwovLyBBcm1hZGlsaGFzOgovLyAgIC0gY2FjaGUgbW9kdWxlLWxldmVsIHByYXMgMiBjb2x1bmFzIG5vdmFzIChtaWdyYXRpb24gMTI3KTogSEFTX0RFTElWRVJFUl9QSU5fQ09MLAovLyAgICAgSEFTX1BJTl9WRVJJRklFRF9BVF9DT0wuIE9wdGltaXN0aWM7IHZpcmEgZmFsc2UgZW0gNDI3MDMuCi8vICAgLSBQQVRDSCBzdGF0dXMgZGVsaXZlcmVkIFNFTSBwaW4gZW0gcGVkaWRvIGNvbSBkZWxpdmVyZXJfcGluIC0+IDQyMiBQSU5fUkVRVUlSRUQuCi8vICAgLSBQQVRDSCBjb20gcGluX3ZlcmlmaWVkX2F0IGphIHNldGFkbyAtPiBwcm9zc2VndWUgKGlkZW1wb3RlbnRlKS4KLy8gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09CmNvbnN0IHJvdXRlciA9IHJlcXVpcmUoJ2V4cHJlc3MnKS5Sb3V0ZXIoeyBtZXJnZVBhcmFtczogdHJ1ZSB9KTsKY29uc3QgZGIgICAgID0gcmVxdWlyZSgnLi4vY29uZmlnL2RhdGFiYXNlJyk7CmNvbnN0IHsgcmVxdWlyZVBsYW4gfSA9IHJlcXVpcmUoJy4uL21pZGRsZXdhcmUvYXV0aCcpOwoKY29uc3QgZ3VhcmQgPSBbcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKV07CgovLyBDYWNoZSBtb2R1bGUtbGV2ZWwgKGFybWFkaWxoYV9zY2hlbWFfcHJlX21pZ3JhdGlvbikuCmxldCBIQVNfREVMSVZFUkVSX1BJTl9DT0wgICAgPSB0cnVlOwpsZXQgSEFTX1BJTl9WRVJJRklFRF9BVF9DT0wgID0gdHJ1ZTsKCi8vIEdlcmEgUElOIG51bWVyaWNvIGRlIDQgZGlnaXRvcyAoMTAwMC05OTk5KS4KZnVuY3Rpb24gZ2VuZXJhdGVQaW4oKSB7CiAgcmV0dXJuIFN0cmluZyhNYXRoLmZsb29yKDEwMDAgKyBNYXRoLnJhbmRvbSgpICogOTAwMCkpOwp9CgovLyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0KLy8gUE9TVCAvOm9pZC9kaXNwYXRjaCAtIGF0cmlidWkgZW50cmVnYWRvciArIGdlcmEgUElOCi8vID09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQovLyBCb2R5OiB7IGRlbGl2ZXJlcl9pZCwgcGluPyB9Ci8vIFZhbGlkYWNvZXM6Ci8vICAgLSBwZWRpZG8gcGVydGVuY2UgYSBjb21wYW55Ci8vICAgLSBwZWRpZG8gc3RhdHVzPSdyZWFkeScgKHNvIGRlc3BhY2hhIG8gcXVlIGphIHNhaXUgZG8gS0RTKQovLyAgIC0gZGVsaXZlcmVyX2lkIGV4aXN0ZSBFIGlzX2FjdGl2ZT10cnVlCi8vIFVwZGF0ZSB0cmFuc2FjaW9uYWw6Ci8vICAgLSBmb29kX29yZGVycy5kZWxpdmVyZXJfaWQsIGRlbGl2ZXJlcl9waW4sIGRpc3BhdGNoZWRfYXQsIGRlbGl2ZXJlcl9jb21taXNzaW9uCi8vICAgLSBJTlNFUlQgZW0gZm9vZF9kaXNwYXRjaF9sb2cgKGFzc2lnbmVkKQovLyBSZXRvcm5hOiB7IG9yZGVyX2lkLCBkZWxpdmVyZXJfcGluLCBkaXNwYXRjaGVkX2F0IH0KLy8gUElOIHJldG9ybmFkbyBVTUEgVU5JQ0EgVkVaIHBybyBnYXJjb20gbW9zdHJhciBhbyBtb3RvYm95Lgpyb3V0ZXIucG9zdCgnLzpvaWQvZGlzcGF0Y2gnLCBndWFyZCwgYXN5bmMgKHJlcSwgcmVzKSA9PiB7CiAgY29uc3QgeyBkZWxpdmVyZXJfaWQsIHBpbjogcmVxdWVzdGVkUGluIH0gPSByZXEuYm9keSB8fCB7fTsKICBpZiAoIWRlbGl2ZXJlcl9pZCkgcmV0dXJuIHJlcy5zdGF0dXMoNDAwKS5qc29uKHsgZXJyb3I6ICdkZWxpdmVyZXJfaWQgb2JyaWdhdG9yaW8nIH0pOwoKICAvLyBWYWxpZGEgcGluIGVudmlhZG86IDQgZGlnaXRvcyBudW1lcmljb3MuIFNlIGludmFsaWRvLCBnZXJhIG5vdm8uCiAgbGV0IHBpbiA9IHJlcXVlc3RlZFBpbiAmJiAvXlxkezR9JC8udGVzdChTdHJpbmcocmVxdWVzdGVkUGluKSkKICAgID8gU3RyaW5nKHJlcXVlc3RlZFBpbikKICAgIDogZ2VuZXJhdGVQaW4oKTsKCiAgY29uc3QgY2xpZW50ID0gYXdhaXQgZGIuY29ubmVjdCgpOwogIHRyeSB7CiAgICBhd2FpdCBjbGllbnQucXVlcnkoJ0JFR0lOJyk7CgogICAgY29uc3QgeyByb3dzOiBvcmRlcnMgfSA9IGF3YWl0IGNsaWVudC5xdWVyeSgKICAgICAgYFNFTEVDVCBpZCwgc3RhdHVzLCBkZWxpdmVyeV9mZWUsIGRlbGl2ZXJlcl9pZCBBUyBwcmV2X2RlbGl2ZXJlcl9pZAogICAgICAgRlJPTSBmb29kX29yZGVycwogICAgICAgV0hFUkUgaWQ9JDEgQU5EIGNvbXBhbnlfaWQ9JDIKICAgICAgIEZPUiBVUERBVEVgLAogICAgICBbcmVxLnBhcmFtcy5vaWQsIHJlcS5wYXJhbXMuaWRdCiAgICApOwogICAgaWYgKCFvcmRlcnMubGVuZ3RoKSB7CiAgICAgIGF3YWl0IGNsaWVudC5xdWVyeSgnUk9MTEJBQ0snKTsKICAgICAgcmV0dXJuIHJlcy5zdGF0dXMoNDA0KS5qc29uKHsgZXJyb3I6ICdQZWRpZG8gbmFvIGVuY29udHJhZG8nIH0pOwogICAgfQogICAgY29uc3Qgb3JkZXIgPSBvcmRlcnNbMF07CiAgICBpZiAob3JkZXIuc3RhdHVzICE9PSAncmVhZHknKSB7CiAgICAgIGF3YWl0IGNsaWVudC5xdWVyeSgnUk9MTEJBQ0snKTsKICAgICAgcmV0dXJuIHJlcy5zdGF0dXMoNDAwKS5qc29uKHsKICAgICAgICBlcnJvcjogYFBlZGlkbyBjb20gc3RhdHVzICcke29yZGVyLnN0YXR1c30nIG5hbyBwb2RlIHNlciBkZXNwYWNoYWRvIChhcGVuYXMgJ3JlYWR5JylgLAogICAgICAgIGNvZGU6ICdJTlZBTElEX1NUQVRVU19GT1JfRElTUEFUQ0gnLAogICAgICB9KTsKICAgIH0KCiAgICBjb25zdCB7IHJvd3M6IGRlbGl2ZXJlcnMgfSA9IGF3YWl0IGNsaWVudC5xdWVyeSgKICAgICAgYFNFTEVDVCBpZCwgbmFtZSwgY29tbWlzc2lvbl9tb2RlLCBjb21taXNzaW9uX3BjdCwgY29tbWlzc2lvbl9maXhlZAogICAgICAgRlJPTSBmb29kX2RlbGl2ZXJlcnMgV0hFUkUgaWQ9JDEgQU5EIGNvbXBhbnlfaWQ9JDIgQU5EIGlzX2FjdGl2ZT1UUlVFYCwKICAgICAgW2RlbGl2ZXJlcl9pZCwgcmVxLnBhcmFtcy5pZF0KICAgICk7CiAgICBpZiAoIWRlbGl2ZXJlcnMubGVuZ3RoKSB7CiAgICAgIGF3YWl0IGNsaWVudC5xdWVyeSgnUk9MTEJBQ0snKTsKICAgICAgcmV0dXJuIHJlcy5zdGF0dXMoNDA0KS5qc29uKHsgZXJyb3I6ICdFbnRyZWdhZG9yIG5hbyBlbmNvbnRyYWRvIG91IGluYXRpdm8nIH0pOwogICAgfQogICAgY29uc3QgZGVsaXZlcmVyID0gZGVsaXZlcmVyc1swXTsKCiAgICAvLyBDYWxjdWxhIGNvbWlzc2FvIGRvIGVudHJlZ2Fkb3IuCiAgICBsZXQgY29tbWlzc2lvbiA9IDA7CiAgICBpZiAoZGVsaXZlcmVyLmNvbW1pc3Npb25fbW9kZSA9PT0gJ3BjdCcpIHsKICAgICAgY29tbWlzc2lvbiA9IHBhcnNlRmxvYXQoKChvcmRlci5kZWxpdmVyeV9mZWUgfHwgMCkgKiAoZGVsaXZlcmVyLmNvbW1pc3Npb25fcGN0IHx8IDApIC8gMTAwKS50b0ZpeGVkKDIpKTsKICAgIH0gZWxzZSB7CiAgICAgIGNvbW1pc3Npb24gPSBwYXJzZUZsb2F0KGRlbGl2ZXJlci5jb21taXNzaW9uX2ZpeGVkIHx8IDApOwogICAgfQoKICAgIC8vIExvZyBkYSBzdWJzdGl0dWljYW8gc2UgamEgdGluaGEgdW0gZW50cmVnYWRvci4KICAgIGlmIChvcmRlci5wcmV2X2RlbGl2ZXJlcl9pZCAmJiBvcmRlci5wcmV2X2RlbGl2ZXJlcl9pZCAhPT0gZGVsaXZlcmVyX2lkKSB7CiAgICAgIGF3YWl0IGNsaWVudC5xdWVyeSgKICAgICAgICBgSU5TRVJUIElOVE8gZm9vZF9kaXNwYXRjaF9sb2cgKG9yZGVyX2lkLCBjb21wYW55X2lkLCBkZWxpdmVyZXJfaWQsIGNvbW1pc3Npb25fY2FsYywgYWN0aW9uLCBub3RlKQogICAgICAgICBWQUxVRVMgKCQxLCQyLCQzLDAsJ3VuYXNzaWduZWQnLCdTdWJzdGl0dWlkbyBwb3Igbm92byBlbnRyZWdhZG9yIHZpYSAvZGlzcGF0Y2gnKWAsCiAgICAgICAgW3JlcS5wYXJhbXMub2lkLCByZXEucGFyYW1zLmlkLCBvcmRlci5wcmV2X2RlbGl2ZXJlcl9pZF0KICAgICAgKTsKICAgIH0KCiAgICAvLyBVcGRhdGUgZG8gcGVkaWRvLiBUZW50YSBjb20gZGVsaXZlcmVyX3BpbjsgY2FpIHByYSBzZW0gZW0gNDI3MDMuCiAgICBsZXQgdXBkYXRlU3FsID0gYFVQREFURSBmb29kX29yZGVycwogICAgICAgU0VUIGRlbGl2ZXJlcl9pZD0kMSwgZGVsaXZlcmVyX2NvbW1pc3Npb249JDIsCiAgICAgICAgICAgZGlzcGF0Y2hlZF9hdD1DT0FMRVNDRShkaXNwYXRjaGVkX2F0LCBOT1coKSksIHVwZGF0ZWRfYXQ9Tk9XKClgOwogICAgbGV0IHVwZGF0ZVBhcmFtcyA9IFtkZWxpdmVyZXJfaWQsIGNvbW1pc3Npb25dOwoKICAgIGlmIChIQVNfREVMSVZFUkVSX1BJTl9DT0wpIHsKICAgICAgdHJ5IHsKICAgICAgICB1cGRhdGVTcWwgPSBgVVBEQVRFIGZvb2Rfb3JkZXJzCiAgICAgICAgICAgU0VUIGRlbGl2ZXJlcl9pZD0kMSwgZGVsaXZlcmVyX2NvbW1pc3Npb249JDIsIGRlbGl2ZXJlcl9waW49JDMsCiAgICAgICAgICAgICAgIGRpc3BhdGNoZWRfYXQ9Q09BTEVTQ0UoZGlzcGF0Y2hlZF9hdCwgTk9XKCkpLCB1cGRhdGVkX2F0PU5PVygpCiAgICAgICAgICAgV0hFUkUgaWQ9JDQgQU5EIGNvbXBhbnlfaWQ9JDUgUkVUVVJOSU5HICpgOwogICAgICAgIHVwZGF0ZVBhcmFtcyA9IFtkZWxpdmVyZXJfaWQsIGNvbW1pc3Npb24sIHBpbiwgcmVxLnBhcmFtcy5vaWQsIHJlcS5wYXJhbXMuaWRdOwogICAgICAgIGF3YWl0IGNsaWVudC5xdWVyeSh1cGRhdGVTcWwsIHVwZGF0ZVBhcmFtcyk7CiAgICAgIH0gY2F0Y2ggKGVVcGQpIHsKICAgICAgICBpZiAoZVVwZC5jb2RlID09PSAnNDI3MDMnKSB7CiAgICAgICAgICBIQVNfREVMSVZFUkVSX1BJTl9DT0wgPSBmYWxzZTsKICAgICAgICAgIGNvbnNvbGUud2FybignW2Zvb2QvZGlzcGF0Y2hdIGRlbGl2ZXJlcl9waW4gYXVzZW50ZSAobWlncmF0aW9uIDEyNyBwZW5kZW50ZSkgLSBkaXNwYXRjaCBzZW0gUElOJyk7CiAgICAgICAgICBhd2FpdCBjbGllbnQucXVlcnkoCiAgICAgICAgICAgIGBVUERBVEUgZm9vZF9vcmRlcnMKICAgICAgICAgICAgICAgU0VUIGRlbGl2ZXJlcl9pZD0kMSwgZGVsaXZlcmVyX2NvbW1pc3Npb249JDIsCiAgICAgICAgICAgICAgICAgICBkaXNwYXRjaGVkX2F0PUNPQUxFU0NFKGRpc3BhdGNoZWRfYXQsIE5PVygpKSwgdXBkYXRlZF9hdD1OT1coKQogICAgICAgICAgICAgV0hFUkUgaWQ9JDMgQU5EIGNvbXBhbnlfaWQ9JDRgLAogICAgICAgICAgICBbZGVsaXZlcmVyX2lkLCBjb21taXNzaW9uLCByZXEucGFyYW1zLm9pZCwgcmVxLnBhcmFtcy5pZF0KICAgICAgICAgICk7CiAgICAgICAgICBwaW4gPSBudWxsOwogICAgICAgIH0gZWxzZSB7CiAgICAgICAgICB0aHJvdyBlVXBkOwogICAgICAgIH0KICAgICAgfQogICAgfSBlbHNlIHsKICAgICAgYXdhaXQgY2xpZW50LnF1ZXJ5KAogICAgICAgIGBVUERBVEUgZm9vZF9vcmRlcnMKICAgICAgICAgICBTRVQgZGVsaXZlcmVyX2lkPSQxLCBkZWxpdmVyZXJfY29tbWlzc2lvbj0kMiwKICAgICAgICAgICAgICAgZGlzcGF0Y2hlZF9hdD1DT0FMRVNDRShkaXNwYXRjaGVkX2F0LCBOT1coKSksIHVwZGF0ZWRfYXQ9Tk9XKCkKICAgICAgICAgV0hFUkUgaWQ9JDMgQU5EIGNvbXBhbnlfaWQ9JDRgLAogICAgICAgIFtkZWxpdmVyZXJfaWQsIGNvbW1pc3Npb24sIHJlcS5wYXJhbXMub2lkLCByZXEucGFyYW1zLmlkXQogICAgICApOwogICAgICBwaW4gPSBudWxsOwogICAgfQoKICAgIGF3YWl0IGNsaWVudC5xdWVyeSgKICAgICAgYElOU0VSVCBJTlRPIGZvb2RfZGlzcGF0Y2hfbG9nIChvcmRlcl9pZCwgY29tcGFueV9pZCwgZGVsaXZlcmVyX2lkLCBjb21taXNzaW9uX2NhbGMsIGFjdGlvbiwgbm90ZSkKICAgICAgIFZBTFVFUyAoJDEsJDIsJDMsJDQsJ2Fzc2lnbmVkJywkNSlgLAogICAgICBbcmVxLnBhcmFtcy5vaWQsIHJlcS5wYXJhbXMuaWQsIGRlbGl2ZXJlcl9pZCwgY29tbWlzc2lvbiwgJ0Rlc3BhY2hvIHZpYSAvZm9vZC9vcmRlcnMvOm9pZC9kaXNwYXRjaCddCiAgICApOwoKICAgIGF3YWl0IGNsaWVudC5xdWVyeSgnQ09NTUlUJyk7CiAgICByZXMuanNvbih7CiAgICAgIG9yZGVyX2lkOiByZXEucGFyYW1zLm9pZCwKICAgICAgZGVsaXZlcmVyX2lkLAogICAgICBkZWxpdmVyZXJfbmFtZTogZGVsaXZlcmVyLm5hbWUsCiAgICAgIGRlbGl2ZXJlcl9waW46IHBpbiwKICAgICAgY29tbWlzc2lvbl9jYWxjOiBjb21taXNzaW9uLAogICAgICBkaXNwYXRjaGVkX2F0OiBuZXcgRGF0ZSgpLnRvSVNPU3RyaW5nKCksCiAgICB9KTsKICB9IGNhdGNoIChlKSB7CiAgICBhd2FpdCBjbGllbnQucXVlcnkoJ1JPTExCQUNLJyk7CiAgICBjb25zb2xlLmVycm9yKCdbZm9vZC9vcmRlcnMvZGlzcGF0Y2hdIEVycm86JywgZS5tZXNzYWdlKTsKICAgIHJlcy5zdGF0dXMoNTAwKS5qc29uKHsgZXJyb3I6ICdFcnJvIGFvIGRlc3BhY2hhciBwZWRpZG8nLCBkZXRhaWw6IGUubWVzc2FnZSB9KTsKICB9IGZpbmFsbHkgewogICAgY2xpZW50LnJlbGVhc2UoKTsKICB9Cn0pOwoKLy8gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09Ci8vIFBBVENIIC86b2lkL3N0YXR1cyAtIG1pZGRsZXdhcmU6IHZhbGlkYSBQSU4gYW50ZXMgZGUgJ2RlbGl2ZXJlZCcKLy8gPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09Ci8vIFNlIGEgdHJhbnNpY2FvIGZvciBwcmEgJ2RlbGl2ZXJlZCcgZSBvIHBlZGlkbyB0ZW0gZGVsaXZlcmVyX3BpbiBzZXRhZG86Ci8vICAgLSBzZSBwaW5fdmVyaWZpZWRfYXQgSkEgc2V0YWRvIC0+IHByb3NzZWd1ZSAobmV4dCkKLy8gICAtIHNlIGJvZHkucGluIGJhdGVyIGNvbSBkZWxpdmVyZXJfcGluIC0+IHNldGEgcGluX3ZlcmlmaWVkX2F0LCBwcm9zc2VndWUKLy8gICAtIHNlbmFvIC0+IDQyMiBQSU5fUkVRVUlSRUQKLy8gQ2FzbyBjb250cmFyaW8gKHNlbSBwaW4gbm8gcGVkaWRvLCBvdSBzdGF0dXMgIT0gZGVsaXZlcmVkKSAtPiBwcm9zc2VndWUuCi8vCi8vIEltcG9ydGFudGU6IGNoYW1hIG5leHQoKSBwcmEgZGVpeGFyIG8gZm9vZE9yZGVycy5qcyBmYXplciBvIHJlc3RvIChiYWl4YQovLyBkZSBlc3RvcXVlLCBsaWJlcmFyIG1lc2EsIFdoYXRzQXBwLCBldGMpLiBOQU8gZHVwbGljYSBuYWRhLgpyb3V0ZXIucGF0Y2goJy86b2lkL3N0YXR1cycsIGd1YXJkLCBhc3luYyAocmVxLCByZXMsIG5leHQpID0+IHsKICB0cnkgewogICAgY29uc3QgeyBzdGF0dXMsIHBpbjogcmVxdWVzdFBpbiB9ID0gcmVxLmJvZHkgfHwge307CiAgICBpZiAoc3RhdHVzICE9PSAnZGVsaXZlcmVkJykgcmV0dXJuIG5leHQoKTsKCiAgICAvLyBTZSBjb2x1bmEgbmFvIGV4aXN0ZSBhaW5kYSwgc2VndWUgc2VtIHZhbGlkYXIgKGRlZmVuc2l2bykuCiAgICBpZiAoIUhBU19ERUxJVkVSRVJfUElOX0NPTCAmJiAhSEFTX1BJTl9WRVJJRklFRF9BVF9DT0wpIHJldHVybiBuZXh0KCk7CgogICAgLy8gU0VMRUNUIHBpbiBhdHVhbCArIHZlcmlmaWNhZG8uCiAgICBsZXQgcGluUm93ID0gbnVsbDsKICAgIHRyeSB7CiAgICAgIGNvbnN0IHsgcm93cyB9ID0gYXdhaXQgZGIucXVlcnkoCiAgICAgICAgYFNFTEVDVCBkZWxpdmVyZXJfcGluLCBwaW5fdmVyaWZpZWRfYXQKICAgICAgICAgRlJPTSBmb29kX29yZGVycyBXSEVSRSBpZD0kMSBBTkQgY29tcGFueV9pZD0kMmAsCiAgICAgICAgW3JlcS5wYXJhbXMub2lkLCByZXEucGFyYW1zLmlkXQogICAgICApOwogICAgICBpZiAoIXJvd3MubGVuZ3RoKSByZXR1cm4gcmVzLnN0YXR1cyg0MDQpLmpzb24oeyBlcnJvcjogJ1BlZGlkbyBuYW8gZW5jb250cmFkbycgfSk7CiAgICAgIHBpblJvdyA9IHJvd3NbMF07CiAgICB9IGNhdGNoIChlU2VsKSB7CiAgICAgIGlmIChlU2VsLmNvZGUgPT09ICc0MjcwMycpIHsKICAgICAgICBIQVNfREVMSVZFUkVSX1BJTl9DT0wgPSBmYWxzZTsKICAgICAgICBIQVNfUElOX1ZFUklGSUVEX0FUX0NPTCA9IGZhbHNlOwogICAgICAgIGNvbnNvbGUud2FybignW2Zvb2Qvb3JkZXJzL3N0YXR1c10gY29sdW5hcyBQSU4gYXVzZW50ZXMgKG1pZ3JhdGlvbiAxMjcgcGVuZGVudGUpIC0gYnlwYXNzJyk7CiAgICAgICAgcmV0dXJuIG5leHQoKTsKICAgICAgfQogICAgICB0aHJvdyBlU2VsOwogICAgfQoKICAgIC8vIFBlZGlkbyBzZW0gUElOIC0+IG5hbyBleGlnZSAoZm9pIGRlc3BhY2hhZG8gYW50ZXMgZGEgbWlncmF0aW9uIG91IHNlbSBtb3RvYm95KS4KICAgIGlmICghcGluUm93LmRlbGl2ZXJlcl9waW4pIHJldHVybiBuZXh0KCk7CgogICAgLy8gUElOIGphIHZlcmlmaWNhZG8gYW50ZXJpb3JtZW50ZSAtPiBuYW8gcmUtZXhpZ2UuCiAgICBpZiAocGluUm93LnBpbl92ZXJpZmllZF9hdCkgcmV0dXJuIG5leHQoKTsKCiAgICAvLyBQSU4gbmVjZXNzYXJpbzogdmFsaWRhIG1hdGNoCiAgICBjb25zdCBzdWJtaXR0ZWQgPSByZXF1ZXN0UGluID8gU3RyaW5nKHJlcXVlc3RQaW4pLnRyaW0oKSA6IG51bGw7CiAgICBpZiAoIXN1Ym1pdHRlZCkgewogICAgICByZXR1cm4gcmVzLnN0YXR1cyg0MjIpLmpzb24oewogICAgICAgIGVycm9yOiAnUElOIGRvIGVudHJlZ2Fkb3IgbmVjZXNzYXJpbycsCiAgICAgICAgY29kZTogJ1BJTl9SRVFVSVJFRCcsCiAgICAgIH0pOwogICAgfQogICAgaWYgKHN1Ym1pdHRlZCAhPT0gcGluUm93LmRlbGl2ZXJlcl9waW4pIHsKICAgICAgcmV0dXJuIHJlcy5zdGF0dXMoNDIyKS5qc29uKHsKICAgICAgICBlcnJvcjogJ1BJTiBkbyBlbnRyZWdhZG9yIGluY29ycmV0bycsCiAgICAgICAgY29kZTogJ1BJTl9JTlZBTElEJywKICAgICAgfSk7CiAgICB9CgogICAgLy8gTWF0Y2ggLSBtYXJjYSB2ZXJpZmljYWRvIGUgc2VndWUuCiAgICB0cnkgewogICAgICBhd2FpdCBkYi5xdWVyeSgKICAgICAgICBgVVBEQVRFIGZvb2Rfb3JkZXJzIFNFVCBwaW5fdmVyaWZpZWRfYXQ9Tk9XKCkgV0hFUkUgaWQ9JDEgQU5EIGNvbXBhbnlfaWQ9JDJgLAogICAgICAgIFtyZXEucGFyYW1zLm9pZCwgcmVxLnBhcmFtcy5pZF0KICAgICAgKTsKICAgIH0gY2F0Y2ggKGVVcGQpIHsKICAgICAgaWYgKGVVcGQuY29kZSA9PT0gJzQyNzAzJykgewogICAgICAgIEhBU19QSU5fVkVSSUZJRURfQVRfQ09MID0gZmFsc2U7CiAgICAgICAgY29uc29sZS53YXJuKCdbZm9vZC9vcmRlcnMvc3RhdHVzXSBwaW5fdmVyaWZpZWRfYXQgYXVzZW50ZSAtIGJ5cGFzcyBtYXJjYXInKTsKICAgICAgfSBlbHNlIHRocm93IGVVcGQ7CiAgICB9CiAgICByZXR1cm4gbmV4dCgpOwogIH0gY2F0Y2ggKGUpIHsKICAgIGNvbnNvbGUuZXJyb3IoJ1tmb29kL29yZGVycy9zdGF0dXMgUElOIG1pZGRsZXdhcmVdIEVycm86JywgZS5tZXNzYWdlKTsKICAgIHJlcy5zdGF0dXMoNTAwKS5qc29uKHsgZXJyb3I6ICdFcnJvIGFvIHZhbGlkYXIgUElOJywgZGV0YWlsOiBlLm1lc3NhZ2UgfSk7CiAgfQp9KTsKCm1vZHVsZS5leHBvcnRzID0gcm91dGVyOwo=
+// ============================================================
+// AURA. - Modulo Food Service
+// FOOD-08 (Fase 8): Dispatch de motoboy + PIN entregador
+//
+// Este arquivo eh montado em /companies/:id/food/orders/* ANTES do
+// foodOrders.js (em private.js), pra interceptar:
+//   - POST   /:oid/dispatch     - novo: atribui entregador + gera PIN
+//   - PATCH  /:oid/status       - middleware que valida PIN antes de delivered
+//
+// Demais rotas de /food/orders continuam servidas pelo foodOrders.js.
+//
+// Armadilhas:
+//   - cache module-level pras 2 colunas novas (migration 127): HAS_DELIVERER_PIN_COL,
+//     HAS_PIN_VERIFIED_AT_COL. Optimistic; vira false em 42703.
+//   - PATCH status delivered SEM pin em pedido com deliverer_pin -> 422 PIN_REQUIRED.
+//   - PATCH com pin_verified_at ja setado -> prossegue (idempotente).
+// ============================================================
+const router = require('express').Router({ mergeParams: true });
+const db     = require('../config/database');
+const { requirePlan } = require('../middleware/auth');
+
+const guard = [requirePlan('negocio', 'expansao')];
+
+// Cache module-level (armadilha_schema_pre_migration).
+let HAS_DELIVERER_PIN_COL    = true;
+let HAS_PIN_VERIFIED_AT_COL  = true;
+
+// Gera PIN numerico de 4 digitos (1000-9999).
+function generatePin() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+// ============================================================
+// POST /:oid/dispatch - atribui entregador + gera PIN
+// ============================================================
+// Body: { deliverer_id, pin? }
+// Validacoes:
+//   - pedido pertence a company
+//   - pedido status='ready' (so despacha o que ja saiu do KDS)
+//   - deliverer_id existe E is_active=true
+// Update transacional:
+//   - food_orders.deliverer_id, deliverer_pin, dispatched_at, deliverer_commission
+//   - INSERT em food_dispatch_log (assigned)
+// Retorna: { order_id, deliverer_pin, dispatched_at }
+// PIN retornado UMA UNICA VEZ pro garcom mostrar ao motoboy.
+router.post('/:oid/dispatch', guard, async (req, res) => {
+  const { deliverer_id, pin: requestedPin } = req.body || {};
+  if (!deliverer_id) return res.status(400).json({ error: 'deliverer_id obrigatorio' });
+
+  // Valida pin enviado: 4 digitos numericos. Se invalido, gera novo.
+  let pin = requestedPin && /^\d{4}$/.test(String(requestedPin))
+    ? String(requestedPin)
+    : generatePin();
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: orders } = await client.query(
+      `SELECT id, status, delivery_fee, deliverer_id AS prev_deliverer_id
+       FROM food_orders
+       WHERE id=$1 AND company_id=$2
+       FOR UPDATE`,
+      [req.params.oid, req.params.id]
+    );
+    if (!orders.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Pedido nao encontrado' });
+    }
+    const order = orders[0];
+    if (order.status !== 'ready') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: `Pedido com status '${order.status}' nao pode ser despachado (apenas 'ready')`,
+        code: 'INVALID_STATUS_FOR_DISPATCH',
+      });
+    }
+
+    const { rows: deliverers } = await client.query(
+      `SELECT id, name, commission_mode, commission_pct, commission_fixed
+       FROM food_deliverers WHERE id=$1 AND company_id=$2 AND is_active=TRUE`,
+      [deliverer_id, req.params.id]
+    );
+    if (!deliverers.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Entregador nao encontrado ou inativo' });
+    }
+    const deliverer = deliverers[0];
+
+    // Calcula comissao do entregador.
+    let commission = 0;
+    if (deliverer.commission_mode === 'pct') {
+      commission = parseFloat(((order.delivery_fee || 0) * (deliverer.commission_pct || 0) / 100).toFixed(2));
+    } else {
+      commission = parseFloat(deliverer.commission_fixed || 0);
+    }
+
+    // Log da substituicao se ja tinha um entregador.
+    if (order.prev_deliverer_id && order.prev_deliverer_id !== deliverer_id) {
+      await client.query(
+        `INSERT INTO food_dispatch_log (order_id, company_id, deliverer_id, commission_calc, action, note)
+         VALUES ($1,$2,$3,0,'unassigned','Substituido por novo entregador via /dispatch')`,
+        [req.params.oid, req.params.id, order.prev_deliverer_id]
+      );
+    }
+
+    // Update do pedido. Tenta com deliverer_pin; cai pra sem em 42703.
+    let updateSql = `UPDATE food_orders
+       SET deliverer_id=$1, deliverer_commission=$2,
+           dispatched_at=COALESCE(dispatched_at, NOW()), updated_at=NOW()`;
+    let updateParams = [deliverer_id, commission];
+
+    if (HAS_DELIVERER_PIN_COL) {
+      try {
+        updateSql = `UPDATE food_orders
+           SET deliverer_id=$1, deliverer_commission=$2, deliverer_pin=$3,
+               dispatched_at=COALESCE(dispatched_at, NOW()), updated_at=NOW()
+           WHERE id=$4 AND company_id=$5 RETURNING *`;
+        updateParams = [deliverer_id, commission, pin, req.params.oid, req.params.id];
+        await client.query(updateSql, updateParams);
+      } catch (eUpd) {
+        if (eUpd.code === '42703') {
+          HAS_DELIVERER_PIN_COL = false;
+          console.warn('[food/dispatch] deliverer_pin ausente (migration 127 pendente) - dispatch sem PIN');
+          await client.query(
+            `UPDATE food_orders
+               SET deliverer_id=$1, deliverer_commission=$2,
+                   dispatched_at=COALESCE(dispatched_at, NOW()), updated_at=NOW()
+             WHERE id=$3 AND company_id=$4`,
+            [deliverer_id, commission, req.params.oid, req.params.id]
+          );
+          pin = null;
+        } else {
+          throw eUpd;
+        }
+      }
+    } else {
+      await client.query(
+        `UPDATE food_orders
+           SET deliverer_id=$1, deliverer_commission=$2,
+               dispatched_at=COALESCE(dispatched_at, NOW()), updated_at=NOW()
+         WHERE id=$3 AND company_id=$4`,
+        [deliverer_id, commission, req.params.oid, req.params.id]
+      );
+      pin = null;
+    }
+
+    await client.query(
+      `INSERT INTO food_dispatch_log (order_id, company_id, deliverer_id, commission_calc, action, note)
+       VALUES ($1,$2,$3,$4,'assigned',$5)`,
+      [req.params.oid, req.params.id, deliverer_id, commission, 'Despacho via /food/orders/:oid/dispatch']
+    );
+
+    await client.query('COMMIT');
+    res.json({
+      order_id: req.params.oid,
+      deliverer_id,
+      deliverer_name: deliverer.name,
+      deliverer_pin: pin,
+      commission_calc: commission,
+      dispatched_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('[food/orders/dispatch] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao despachar pedido', detail: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// ============================================================
+// PATCH /:oid/status - middleware: valida PIN antes de 'delivered'
+// ============================================================
+// Se a transicao for pra 'delivered' e o pedido tem deliverer_pin setado:
+//   - se pin_verified_at JA setado -> prossegue (next)
+//   - se body.pin bater com deliverer_pin -> seta pin_verified_at, prossegue
+//   - senao -> 422 PIN_REQUIRED
+// Caso contrario (sem pin no pedido, ou status != delivered) -> prossegue.
+//
+// Importante: chama next() pra deixar o foodOrders.js fazer o resto (baixa
+// de estoque, liberar mesa, WhatsApp, etc). NAO duplica nada.
+router.patch('/:oid/status', guard, async (req, res, next) => {
+  try {
+    const { status, pin: requestPin } = req.body || {};
+    if (status !== 'delivered') return next();
+
+    // Se coluna nao existe ainda, segue sem validar (defensivo).
+    if (!HAS_DELIVERER_PIN_COL && !HAS_PIN_VERIFIED_AT_COL) return next();
+
+    // SELECT pin atual + verificado.
+    let pinRow = null;
+    try {
+      const { rows } = await db.query(
+        `SELECT deliverer_pin, pin_verified_at
+         FROM food_orders WHERE id=$1 AND company_id=$2`,
+        [req.params.oid, req.params.id]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
+      pinRow = rows[0];
+    } catch (eSel) {
+      if (eSel.code === '42703') {
+        HAS_DELIVERER_PIN_COL = false;
+        HAS_PIN_VERIFIED_AT_COL = false;
+        console.warn('[food/orders/status] colunas PIN ausentes (migration 127 pendente) - bypass');
+        return next();
+      }
+      throw eSel;
+    }
+
+    // Pedido sem PIN -> nao exige (foi despachado antes da migration ou sem motoboy).
+    if (!pinRow.deliverer_pin) return next();
+
+    // PIN ja verificado anteriormente -> nao re-exige.
+    if (pinRow.pin_verified_at) return next();
+
+    // PIN necessario: valida match
+    const submitted = requestPin ? String(requestPin).trim() : null;
+    if (!submitted) {
+      return res.status(422).json({
+        error: 'PIN do entregador necessario',
+        code: 'PIN_REQUIRED',
+      });
+    }
+    if (submitted !== pinRow.deliverer_pin) {
+      return res.status(422).json({
+        error: 'PIN do entregador incorreto',
+        code: 'PIN_INVALID',
+      });
+    }
+
+    // Match - marca verificado e segue.
+    try {
+      await db.query(
+        `UPDATE food_orders SET pin_verified_at=NOW() WHERE id=$1 AND company_id=$2`,
+        [req.params.oid, req.params.id]
+      );
+    } catch (eUpd) {
+      if (eUpd.code === '42703') {
+        HAS_PIN_VERIFIED_AT_COL = false;
+        console.warn('[food/orders/status] pin_verified_at ausente - bypass marcar');
+      } else throw eUpd;
+    }
+    return next();
+  } catch (e) {
+    console.error('[food/orders/status PIN middleware] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao validar PIN', detail: e.message });
+  }
+});
+
+module.exports = router;
