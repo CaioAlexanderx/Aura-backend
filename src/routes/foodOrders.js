@@ -15,6 +15,10 @@ const { buildWhatsAppMsg, notifyWhatsApp, sendReviewLink } = require('../service
 // SEC-02: requirePlan recebe strings separadas, NÃO array
 const guard = [requirePlan('negocio', 'expansao')];
 
+// B11 — Cache module-level pro hasOpenedAt (armadilha_schema_pre_migration).
+// Optimistic: assume true; vira false na primeira vez que 42703 estourar.
+let HAS_OPENED_AT_COL = true;
+
 const notFound = (res, e='Pedido') => res.status(404).json({ error: `${e} não encontrado` });
 const ORDER_TRANSITIONS = {
   pending:   ['confirmed','cancelled'],
@@ -177,12 +181,58 @@ router.post('/', guard, async (req, res) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+
+    // B7 — Backend valida unit_price via lookup (não confia no body).
+    // Carrega items + variations referenciados e re-calcula o preço real.
+    const itemIds = items.map(i => i.item_id).filter(Boolean);
+    let dbItemsById = new Map();
+    if (itemIds.length) {
+      const { rows: dbItems } = await client.query(
+        `SELECT id, name, price FROM food_items
+         WHERE company_id=$1 AND id = ANY($2::uuid[])`,
+        [req.params.id, itemIds]
+      );
+      dbItemsById = new Map(dbItems.map(it => [it.id, it]));
+    }
+    const variationIds = items.map(i => i.variation_id).filter(Boolean);
+    let variationsById = new Map();
+    if (variationIds.length) {
+      const { rows: dbVars } = await client.query(
+        `SELECT id, name, price_delta FROM food_item_variations
+         WHERE company_id=$1 AND id = ANY($2::uuid[])`,
+        [req.params.id, variationIds]
+      );
+      variationsById = new Map(dbVars.map(v => [v.id, v]));
+    }
+
     let subtotal = 0;
     const enrichedItems = items.map(item => {
-      const lineTotal = parseFloat(item.unit_price) * item.quantity;
+      // Se item_id foi enviado e existe no DB, usa o preço de la (B7).
+      const dbItem = item.item_id ? dbItemsById.get(item.item_id) : null;
+      const variation = item.variation_id ? variationsById.get(item.variation_id) : null;
+      let realUnitPrice;
+      if (dbItem) {
+        realUnitPrice = parseFloat(dbItem.price) + parseFloat(variation?.price_delta || 0);
+        // Warning se diverge do body em >1 centavo.
+        if (item.unit_price !== undefined &&
+            Math.abs(parseFloat(item.unit_price) - realUnitPrice) > 0.01) {
+          console.warn(`[food/order] unit_price divergente — item ${item.item_id}: body=${item.unit_price} real=${realUnitPrice}`);
+        }
+      } else {
+        // Item sem item_id (texto livre) — confia no body como fallback.
+        realUnitPrice = parseFloat(item.unit_price || 0);
+      }
+      const lineTotal = realUnitPrice * item.quantity;
       subtotal += lineTotal;
-      return { ...item, total_price: lineTotal };
+      return {
+        ...item,
+        item_name:      item.item_name || dbItem?.name,
+        variation_name: item.variation_name || variation?.name || null,
+        unit_price:     realUnitPrice,
+        total_price:    lineTotal,
+      };
     });
+
     const delivery_fee = req.body.delivery_fee || 0;
     const discount     = req.body.discount     || 0;
     const total = subtotal + parseFloat(delivery_fee) - parseFloat(discount);
@@ -219,23 +269,31 @@ router.post('/', guard, async (req, res) => {
     }
 
     // FOOD-08 (Fase 2): marca mesa como occupied + abre sessão (opened_at) se NULL.
-    // Defensivo: se migration 119 ainda não rodou, fallback para só status.
+    // B11: cache module-level HAS_OPENED_AT_COL evita try/catch toda request.
     if (table_id) {
-      try {
-        await client.query(
-          `UPDATE food_tables
-           SET status='occupied',
-               opened_at=COALESCE(opened_at, NOW())
-           WHERE id=$1 AND company_id=$2`,
-          [table_id, req.params.id]
-        );
-      } catch (eOpen) {
-        if (eOpen.code === '42703') {
+      if (HAS_OPENED_AT_COL) {
+        try {
           await client.query(
-            `UPDATE food_tables SET status='occupied' WHERE id=$1 AND company_id=$2`,
+            `UPDATE food_tables
+             SET status='occupied',
+                 opened_at=COALESCE(opened_at, NOW())
+             WHERE id=$1 AND company_id=$2`,
             [table_id, req.params.id]
           );
-        } else { throw eOpen; }
+        } catch (eOpen) {
+          if (eOpen.code === '42703') {
+            HAS_OPENED_AT_COL = false;
+            await client.query(
+              `UPDATE food_tables SET status='occupied' WHERE id=$1 AND company_id=$2`,
+              [table_id, req.params.id]
+            );
+          } else { throw eOpen; }
+        }
+      } else {
+        await client.query(
+          `UPDATE food_tables SET status='occupied' WHERE id=$1 AND company_id=$2`,
+          [table_id, req.params.id]
+        );
       }
     }
     await client.query(
@@ -298,24 +356,34 @@ router.patch('/:oid/status', guard, async (req, res) => {
       );
       if (!others.length) {
         // FOOD-08 (Fase 2): libera mesa + fecha sessão (opened_at=NULL).
-        // Defensivo: fallback se migration 119 ainda não rodou.
-        try {
-          await client.query(
-            `UPDATE food_tables SET status='free', opened_at=NULL WHERE id=$1`,
-            [updated[0].table_id]
-          );
-        } catch (eClose) {
-          if (eClose.code === '42703') {
+        // B11: cache HAS_OPENED_AT_COL.
+        if (HAS_OPENED_AT_COL) {
+          try {
             await client.query(
-              `UPDATE food_tables SET status='free' WHERE id=$1`,
+              `UPDATE food_tables SET status='free', opened_at=NULL WHERE id=$1`,
               [updated[0].table_id]
             );
-          } else { throw eClose; }
+          } catch (eClose) {
+            if (eClose.code === '42703') {
+              HAS_OPENED_AT_COL = false;
+              await client.query(
+                `UPDATE food_tables SET status='free' WHERE id=$1`,
+                [updated[0].table_id]
+              );
+            } else { throw eClose; }
+          }
+        } else {
+          await client.query(
+            `UPDATE food_tables SET status='free' WHERE id=$1`,
+            [updated[0].table_id]
+          );
         }
       }
     }
 
     // FOOD-04c: Baixa de estoque automática ao entregar
+    // B5: SELECT FOR UPDATE no produto para evitar race condition; se produto
+    // foi deletado, loga e pula (não falha a entrega).
     if (status === 'delivered' && order.items?.length) {
       for (const orderItem of order.items) {
         if (!orderItem.item_id) continue;
@@ -327,6 +395,18 @@ router.patch('/:oid/status', guard, async (req, res) => {
         );
         for (const recipe of recipes) {
           const totalDeduct = recipe.unit_qty * orderItem.quantity;
+
+          // B5 — lock the product row antes do UPDATE.
+          const { rows: lockedProducts } = await client.query(
+            `SELECT id, stock_quantity FROM products
+             WHERE id=$1 AND company_id=$2 FOR UPDATE`,
+            [recipe.product_id, req.params.id]
+          );
+          if (!lockedProducts.length) {
+            console.warn(`[food/order/status] Produto ${recipe.product_id} não encontrado/deletado — pulando baixa.`);
+            continue;
+          }
+
           await client.query(
             `UPDATE products
              SET stock_quantity = GREATEST(0, stock_quantity - $1),
