@@ -20,6 +20,27 @@ function calcCommission(deliverer, deliveryFee) {
   return parseFloat(deliverer.commission_fixed || 0);
 }
 
+// B9 — valida commission_mode e commission_pct em POST/PATCH.
+function validateCommission(body) {
+  if (body.commission_mode !== undefined &&
+      !['pct', 'fixed'].includes(body.commission_mode)) {
+    return 'commission_mode deve ser "pct" ou "fixed"';
+  }
+  if (body.commission_pct !== undefined && body.commission_pct !== null) {
+    const pct = Number(body.commission_pct);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      return 'commission_pct deve ser número entre 0 e 100';
+    }
+  }
+  if (body.commission_fixed !== undefined && body.commission_fixed !== null) {
+    const fixed = Number(body.commission_fixed);
+    if (!Number.isFinite(fixed) || fixed < 0) {
+      return 'commission_fixed deve ser número >= 0';
+    }
+  }
+  return null;
+}
+
 // ============================================================
 // CRUD DE ENTREGADORES
 // ============================================================
@@ -61,6 +82,9 @@ router.post('/', guard, async (req, res) => {
     commission_pct, commission_fixed, commission_mode, notes
   } = req.body;
   if (!name) return res.status(400).json({ error: 'name obrigatório' });
+  // B9 — valida commission_*
+  const cErr = validateCommission(req.body);
+  if (cErr) return res.status(400).json({ error: cErr });
   try {
     const { rows } = await db.query(
       `INSERT INTO food_deliverers
@@ -84,6 +108,9 @@ router.post('/', guard, async (req, res) => {
 });
 
 router.patch('/:did', guard, async (req, res) => {
+  // B9 — valida commission_* também no PATCH.
+  const cErr = validateCommission(req.body);
+  if (cErr) return res.status(400).json({ error: cErr });
   const fields = [
     'name','phone','vehicle_type','vehicle_plate',
     'commission_pct','commission_fixed','commission_mode',
