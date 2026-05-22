@@ -27,9 +27,14 @@ function fmtDate(d) {
     day:'2-digit', month:'2-digit', year:'numeric',
     hour:'2-digit', minute:'2-digit' });
 }
+// Nome de exibição da empresa — companies não tem coluna 'name' (memory companies_sem_coluna_name).
+function companyDisplayName(company) {
+  return company.trade_name || company.legal_name || 'Estabelecimento';
+}
 
 // ── NFC-e payload para parceiro emissor (NFE.io / Focus NFe) ─
 function buildNfcePayload(order, items, company) {
+  const displayName = companyDisplayName(company);
   return {
     naturezaOperacao:     'VENDA AO CONSUMIDOR',
     dataEmissao:          new Date().toISOString(),
@@ -40,8 +45,8 @@ function buildNfcePayload(order, items, company) {
     presencaComprador:    order.channel === 'presencial' ? 'operacao_presencial' : 'internet',
     emitente: {
       cnpj:              company.tax_id   || '',
-      razaoSocial:       company.legal_name || company.name,
-      nomeFantasia:      company.name,
+      razaoSocial:       company.legal_name || displayName,
+      nomeFantasia:      displayName,
       endereco: {
         logradouro:      company.address_street   || '',
         numero:          company.address_number    || 'S/N',
@@ -103,6 +108,7 @@ function _mapPayment(method) {
 function buildThermalHtml(order, items, company, type) {
   const isComanda = type === 'comanda';
   const isCupom   = type === 'cupom';
+  const displayName = companyDisplayName(company);
 
   const itemsHtml = items.map(item => {
     const addonList = (() => {
@@ -159,7 +165,7 @@ ${itemsHtml}
   @media print { body { margin:0 } button { display:none } }
 </style>
 </head><body>
-<h1>${company.name || 'Estabelecimento'}</h1>
+<h1>${displayName}</h1>
 <div class="center" style="font-size:10px">
   ${company.tax_id ? `CNPJ: ${company.tax_id}` : 'CNPJ: aguardando aprovação'}<br>
   ${[company.address_street, company.address_number, company.address_city].filter(Boolean).join(', ')}
@@ -202,8 +208,12 @@ async function _fetchOrderData(orderId, companyId) {
   const { rows: items } = await db.query(
     `SELECT * FROM food_order_items WHERE order_id=$1 ORDER BY id`, [orderId]
   );
+  // SELECT explicito — companies NAO tem coluna 'name'; usa trade_name/legal_name.
   const { rows: companies } = await db.query(
-    `SELECT * FROM companies WHERE id=$1`, [companyId]
+    `SELECT id, tax_id, trade_name, legal_name,
+            address_street, address_number, address_district,
+            address_city, address_state, address_zip
+     FROM companies WHERE id=$1`, [companyId]
   );
   return { order: orders[0], items, company: companies[0] || {} };
 }
