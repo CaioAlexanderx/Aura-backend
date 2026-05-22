@@ -21,9 +21,9 @@
 // Custom domain (22/05/2026): back_urls usam custom_domain quando configurado
 // e active; corrigido prefixo /api/v1/ que faltava no backBase.
 //
-// fix (22/05/2026): notifyNewOrder recebe send_customer_email=true apenas para
-// on_delivery (pedido já nasce confirmed). Pix e Cartão recebem e-mail
-// somente após confirmação de pagamento via notifyPaymentConfirmed.
+// fix (22/05/2026): notifyPaymentConfirmed chamado diretamente para on_delivery
+// (pedido já nasce confirmed). notifyNewOrder removido — era no-op.
+// Pix/Cartão recebem notificações apenas após confirmação via webhook MP ou approve-payment.
 // ============================================================
 'use strict';
 
@@ -529,18 +529,13 @@ router.post('/:slug/order', async (req, res) => {
       }
     }
 
-    // fix (22/05/2026): send_customer_email=true apenas para on_delivery.
-    // Pix/Cartão recebem e-mail depois, via notifyPaymentConfirmed (webhook ou approve-payment).
-    notify.notifyNewOrder({
-      order, total,
-      pix_payload: pixData ? pixData.payload : null,
-      config,
-      send_customer_email: initialStatus === 'confirmed',
-    }).catch(err => console.error('[notify] new order error:', err.message));
-
+    // on_delivery: pedido nasce confirmed → notifica lojista + cliente imediatamente.
+    // Pix/Cartão: sem notificações aqui — webhook MP ou approve-payment chamam notifyPaymentConfirmed.
     if (initialStatus === 'confirmed') {
       onOrderConfirmed(order.id)
         .catch(err => console.error('[storefront] onOrderConfirmed error:', err.message));
+      notify.notifyPaymentConfirmed({ order })
+        .catch(err => console.error('[storefront] notifyPaymentConfirmed error:', err.message));
     }
 
     res.status(201).json({
