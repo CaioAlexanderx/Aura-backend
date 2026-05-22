@@ -1,23 +1,29 @@
 // ============================================================
 // Custom Domain Middleware
-// Mapeia o Host header para o slug da loja correspondente e
-// reescreve req.url para /api/v1/storefront/:slug/...
+// Dois modos de roteamento por Host header:
 //
-// Fluxo:
-//   www.davicalcados2.com.br/           → /api/v1/storefront/davi-calcados-villa-branca/page
-//   www.davicalcados2.com.br/shipping-quote?cep=... → /api/v1/storefront/.../shipping-quote?cep=...
-//   www.davicalcados2.com.br/order      → /api/v1/storefront/.../order
+// 1. loja.getaura.com.br/<slug> (URL padrão Aura — zero config por cliente)
+//    loja.getaura.com.br/davi-calcados-villa-branca         → vitrine HTML
+//    loja.getaura.com.br/davi-calcados-villa-branca/order   → cria pedido
+//    loja.getaura.com.br/davi-calcados-villa-branca/shipping-quote → frete
 //
-// Cache em memória com TTL de 5 minutos para evitar query a cada request.
+// 2. Domínio próprio do cliente (custom_domain no digital_channel_config)
+//    www.davicalcados2.com.br/           → vitrine HTML da loja configurada
+//    www.davicalcados2.com.br/order      → cria pedido
+//
+// Cache em memória com TTL 5 min para o modo custom domain (evita DB por request).
 // ============================================================
 'use strict';
 
 const db = require('../config/database');
 
-// Hosts proprietários que nunca passam pelo lookup de custom domain
+// Host canônico da vitrine pública Aura
+const LOJA_HOST = 'loja.getaura.com.br';
+
+// Hosts proprietários que pulam o lookup de custom domain
 const OWNED_HOST_SUFFIXES = [
   'railway.app',
-  'getaura.com.br',
+  'getaura.com.br', // cobre *.getaura.com.br — LOJA_HOST é tratado antes
   'localhost',
   '127.0.0.1',
 ];
@@ -53,45 +59,66 @@ function invalidateCustomDomainCache(hostname) {
   if (hostname) _cache.delete(hostname);
 }
 
+/** Reescreve req.url e seta CORS. Não chama next() — caller faz isso. */
+function rewriteToStorefront(req, res, slug, subPath, query) {
+  if (!subPath) {
+    req.url = `/api/v1/storefront/${slug}/page${query}`;
+  } else {
+    req.url = `/api/v1/storefront/${slug}/${subPath}${query}`;
+  }
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID');
+  res.setHeader('Access-Control-Max-Age', '600');
+}
+
 async function customDomainMiddleware(req, res, next) {
   try {
-    const hostname = req.hostname; // trust proxy já configurado — valor correto
+    const hostname = req.hostname; // trust proxy já configurado
 
-    // Ignora rotas da API, health checks e hosts proprietários
-    if (
-      !hostname ||
-      req.url.startsWith('/api/') ||
-      req.url.startsWith('/health') ||
-      OWNED_HOST_SUFFIXES.some(s => hostname === s || hostname.endsWith('.' + s))
-    ) {
+    // Sempre ignora rotas internas da API e health checks
+    if (!hostname || req.url.startsWith('/api/') || req.url.startsWith('/health')) {
       return next();
     }
 
+    // ── Modo 1: loja.getaura.com.br/<slug>/... ──────────────────────────
+    // Tratado ANTES do bloco owned hosts (que cobriria *.getaura.com.br).
+    if (hostname === LOJA_HOST) {
+      const qIdx    = req.url.indexOf('?');
+      const path    = qIdx >= 0 ? req.url.slice(0, qIdx) : req.url;
+      const query   = qIdx >= 0 ? req.url.slice(qIdx) : '';
+      const segments = path.split('/').filter(Boolean); // remove strings vazias
+
+      // Raiz sem slug → deixa cair no handler normal (pode ser landing page futura)
+      if (!segments.length) return next();
+
+      const slug    = segments[0];
+      const subPath = segments.slice(1).join('/');
+
+      rewriteToStorefront(req, res, slug, subPath, query);
+      if (req.method === 'OPTIONS') return res.sendStatus(204);
+      return next();
+    }
+
+    // ── Hosts proprietários — sem lookup ────────────────────────────────
+    if (OWNED_HOST_SUFFIXES.some(s => hostname === s || hostname.endsWith('.' + s))) {
+      return next();
+    }
+
+    // ── Modo 2: domínio próprio do cliente (lookup no DB) ───────────────
     const slug = await resolveSlugByDomain(hostname);
     if (!slug) return next();
 
-    // Reescreve URL preservando query string
-    const qIdx  = req.url.indexOf('?');
-    const path  = qIdx >= 0 ? req.url.slice(0, qIdx) : req.url;
-    const query = qIdx >= 0 ? req.url.slice(qIdx) : '';
-    const cleanPath = path.replace(/\/+$/, '') || ''; // remove trailing slash
+    const qIdx     = req.url.indexOf('?');
+    const path     = qIdx >= 0 ? req.url.slice(0, qIdx) : req.url;
+    const query    = qIdx >= 0 ? req.url.slice(qIdx) : '';
+    const cleanPath = path.replace(/\/+$/, '') || '';
+    const subPath  = cleanPath === '' || cleanPath === '/' ? '' : cleanPath.slice(1); // remove leading /
 
-    if (cleanPath === '' || cleanPath === '/') {
-      // Raiz → página HTML da vitrine
-      req.url = `/api/v1/storefront/${slug}/page${query}`;
-    } else {
-      // Sub-rotas: /shipping-quote, /order, /order/:oid, etc.
-      req.url = `/api/v1/storefront/${slug}${cleanPath}${query}`;
-    }
-
-    // CORS para requisições vindas do domínio customizado
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Request-ID');
-    res.setHeader('Access-Control-Max-Age', '600');
+    rewriteToStorefront(req, res, slug, subPath, query);
     if (req.method === 'OPTIONS') return res.sendStatus(204);
-
     next();
+
   } catch (err) {
     console.error('[customDomain] middleware error:', err.message);
     next(); // fail open
