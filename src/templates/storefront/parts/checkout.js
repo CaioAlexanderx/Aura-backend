@@ -65,16 +65,16 @@ function checkoutBack(){if(checkoutStep>1&&checkoutStep<3){checkoutStep--;render
 
 // Validador CPF/CNPJ mod 11 (mesmo algoritmo do backend)
 function validateCpfCnpjFront(raw){
-  var d=String(raw||'').replace(/\\\\D/g,'');
+  var d=String(raw||'').replace(/\\D/g,'');
   if(d.length===11){
-    if(/^(\\\\d)\\\\1{10}$/.test(d)) return false;
+    if(/^(\\d)\\1{10}$/.test(d)) return false;
     var s=0;for(var i=0;i<9;i++) s+=parseInt(d[i])*(10-i);
     var r=(s*10)%11;if(r===10)r=0;if(r!==parseInt(d[9])) return false;
     s=0;for(var i=0;i<10;i++) s+=parseInt(d[i])*(11-i);
     r=(s*10)%11;if(r===10)r=0;return r===parseInt(d[10]);
   }
   if(d.length===14){
-    if(/^(\\\\d)\\\\1{13}$/.test(d)) return false;
+    if(/^(\\d)\\1{13}$/.test(d)) return false;
     var w1=[5,4,3,2,9,8,7,6,5,4,3,2],w2=[6,5,4,3,2,9,8,7,6,5,4,3,2];
     var s=0;for(var i=0;i<12;i++) s+=parseInt(d[i])*w1[i];
     var r=s%11;r=r<2?0:11-r;if(r!==parseInt(d[12])) return false;
@@ -86,7 +86,7 @@ function validateCpfCnpjFront(raw){
 
 // Máscara phone: (99) 9999-9999 ou (99) 99999-9999 (detecta 10/11 dígitos)
 function maskPhoneFront(v){
-  v=String(v||'').replace(/\\\\D/g,'').slice(0,11);
+  v=String(v||'').replace(/\\D/g,'').slice(0,11);
   if(v.length===0) return '';
   if(v.length<=2) return '('+v;
   if(v.length<=6) return '('+v.slice(0,2)+') '+v.slice(2);
@@ -96,7 +96,7 @@ function maskPhoneFront(v){
 
 // Máscara CPF (000.000.000-00) ou CNPJ (00.000.000/0000-00) automática
 function maskCpfCnpjFront(v){
-  v=String(v||'').replace(/\\\\D/g,'').slice(0,14);
+  v=String(v||'').replace(/\\D/g,'').slice(0,14);
   if(v.length<=11){
     if(v.length<=3) return v;
     if(v.length<=6) return v.slice(0,3)+'.'+v.slice(3);
@@ -160,7 +160,7 @@ function saveCustomerToLocalStorage(){
 // ViaCEP autocomplete: chamado quando CEP completa 8 digitos
 function fetchCep(){
   var inp=document.getElementById('inp_cep');if(!inp) return;
-  var cep=String(inp.value||'').replace(/\\\\D/g,'');
+  var cep=String(inp.value||'').replace(/\\D/g,'');
   if(cep.length!==8) return;
   var label=document.getElementById('cepStatus');
   if(label) label.textContent='Buscando...';
@@ -193,7 +193,7 @@ var shippingFetchTimer=null;
 // Calcula frete server-side. Chamado a cada CEP novo ou no blur do input.
 function fetchShippingQuote(){
   var inp=document.getElementById('inp_cep');if(!inp) return;
-  var cep=String(inp.value||'').replace(/\\\\D/g,'');
+  var cep=String(inp.value||'').replace(/\\D/g,'');
   if(cep.length!==8){ return; }
   var sub=getSubtotal();
   var statusEl=document.getElementById('shippingQuoteStatus');
@@ -267,7 +267,7 @@ function checkoutNext(){
     var phone=document.getElementById('inp_phone')?document.getElementById('inp_phone').value.trim():'';
     var email=document.getElementById('inp_email')?document.getElementById('inp_email').value.trim():'';
     if(!name||!phone){showToast('Preencha nome e telefone');return;}
-    var phoneDigits=phone.replace(/\\\\D/g,'');
+    var phoneDigits=phone.replace(/\\D/g,'');
     if(phoneDigits.length<10){showToast('Telefone incompleto. Use DDD + número (ex: 11 99999-0000)');return;}
     if(email && !isValidEmailFront(email)){showToast('E-mail inválido. Verifique e tente de novo.');return;}
     var nfceCheck=document.getElementById('inp_nfce_check');
@@ -277,7 +277,7 @@ function checkoutNext(){
       if(!cpfCnpj){showToast('Informe seu CPF/CNPJ pra NFCe');return;}
       if(!validateCpfCnpjFront(cpfCnpj)){showToast('CPF/CNPJ invalido');return;}
     }
-    customerData={name:name,phone:phone,email:email||null,request_nfce:!!requestNfce,customer_cpf_cnpj:cpfCnpj?cpfCnpj.replace(/\\\\D/g,''):null};
+    customerData={name:name,phone:phone,email:email||null,request_nfce:!!requestNfce,customer_cpf_cnpj:cpfCnpj?cpfCnpj.replace(/\\D/g,''):null};
     checkoutStep=2;renderCheckoutStep();
   }else if(checkoutStep===2){
     if(selectedDelivery==='delivery'){
@@ -291,12 +291,12 @@ function checkoutNext(){
       if(!cep||!street||!num||!bairro||!city||!uf){
         showToast('Preencha endereco completo (CEP, rua, numero, bairro, cidade, UF)');return;
       }
-      if(String(cep).replace(/\\\\D/g,'').length!==8){showToast('CEP invalido');return;}
+      if(String(cep).replace(/\\D/g,'').length!==8){showToast('CEP invalido');return;}
       if(uf.length!==2){showToast('UF invalida (2 letras)');return;}
       if(shippingOutOfArea){
         showToast('Fora da area de entrega. Verifique o CEP ou escolha retirada.');return;
       }
-      customerData.address_zip=cep.replace(/\\\\D/g,'');
+      customerData.address_zip=cep.replace(/\\D/g,'');
       customerData.address_street=street;
       customerData.address_number=num;
       customerData.address_complement=compl||null;
@@ -538,7 +538,7 @@ function bindAddressFormEvents(){
   if(cep){
     cep.addEventListener('blur',function(){ fetchCep(); });
     cep.addEventListener('input',function(){
-      var v=this.value.replace(/\\\\D/g,'').slice(0,8);
+      var v=this.value.replace(/\\D/g,'').slice(0,8);
       this.value=v.length>5?v.slice(0,5)+'-'+v.slice(5):v;
       if(v.length===8){
         fetchCep();
