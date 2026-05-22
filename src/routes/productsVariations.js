@@ -23,10 +23,43 @@
 //
 // 21/05/2026: GET expoe barcodes por combinacao (paralelo ao matrix).
 // PUT aceita barcodes e persiste em product_variants.barcode no INSERT.
+//
+// 22/05/2026: GET e PUT usam visibilityWhere para casos multi-CNPJ
+// (produto shared visto por subsidiaria). Bug Davi: editava produto
+// shared logado na Villa Branca, GET caia em 404 com o filtro naive
+// company_id=$cid → frontend mostrava mode='none' falso → user nao
+// via variantes nem conseguia ajustar estoque. Mesma armadilha que
+// o PR #77 corrigiu pra productImage.js (memoria
+// armadilha_visibility_leaks_rotas_produto).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+
+// ─── Visibilidade de grupo (BIDIRECIONAL) ────────────────
+//
+// Copia da funcao canonica em src/routes/products.js. Replicada
+// aqui (em vez de importada) para evitar dependencia entre routers.
+// Se a logica do canonico mudar (raro — produto-membership e padrao
+// estavel desde 08/05/2026), atualizar ambos.
+//
+// Regra: produto P visivel para empresa X se
+//   P.company_id = X
+//   OU (P.is_group_shared E group_root(P.company_id) = group_root(X))
+//
+// SQL: COALESCE(NULLIF(billing_owner_company_id, id), id) = group_root.
+function visibilityWhere(idParam, cidParam) {
+  return `id = ${idParam} AND (company_id = ${cidParam} OR (
+    is_group_shared = true
+    AND company_id IN (
+      SELECT id FROM companies
+      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
+        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
+        FROM companies WHERE id = ${cidParam}
+      )
+    )
+  ))`;
+}
 
 // Helpers
 function buildMatrixKey(colorHex, sizeValue) {
@@ -46,9 +79,11 @@ function skuSuffixFromAttrs(colorHex, colorName, sizeValue) {
 router.get('/:pid/variations', async (req, res) => {
   const { id: cid, pid } = req.params;
   try {
-    // Valida que o produto existe e pertence a empresa
+    // 22/05/2026: visibilityWhere em vez de "id=$1 AND company_id=$2"
+    // pra que subsidiarias do grupo enxerguem variantes de produtos
+    // shared do billing_owner (bug Davi Villa Branca).
     const { rows: prodRows } = await db.query(
-      'SELECT id, name, stock_qty FROM products WHERE id = $1 AND company_id = $2',
+      `SELECT id, name, stock_qty FROM products WHERE ${visibilityWhere('$1', '$2')}`,
       [pid, cid]
     );
     if (!prodRows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
@@ -151,9 +186,12 @@ router.put('/:pid/variations', async (req, res) => {
     // Valida produto + captura color/size proprios atuais (necessario pra
     // detectar migracao do estoque do pai pra variante e limpar os campos
     // depois — evita dupla exibicao no VariantPickerModal e loop de banner
-    // amarelo no editor)
+    // amarelo no editor).
+    //
+    // 22/05/2026: visibilityWhere em vez de "id=$1 AND company_id=$2"
+    // (mesmo motivo do GET — subsidiarias precisam editar produtos shared).
     const { rows: prodRows } = await client.query(
-      'SELECT id, color, size FROM products WHERE id = $1 AND company_id = $2',
+      `SELECT id, color, size FROM products WHERE ${visibilityWhere('$1', '$2')}`,
       [pid, cid]
     );
     if (!prodRows.length) {
