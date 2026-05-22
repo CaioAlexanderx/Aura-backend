@@ -83,8 +83,11 @@ router.use('/dental/book',       require('./dentalBooking'));
 router.use('/dental-portal',     require('./dentalPortalPublic'));
 router.use('/barber/book',       require('./barberBooking'));
 router.use('/onboarding',        onboardingRouter);
-router.use('/food/table',        require('./foodWaiter'));
-router.use('/food/schedule',     require('./foodSchedule'));
+// FOOD polish pre-Fase 7 (21/05/2026): mount publico usa router proprio
+// (foodWaiterPublic / foodSchedulePublic). O router autenticado
+// (./foodWaiter, ./foodSchedule) e montado em /companies/:id/food/* em private.js.
+router.use('/food/table',        require('./foodWaiterPublic'));
+router.use('/food/schedule',     require('./foodSchedulePublic'));
 // FOOD-10 (Fase 5): rotas publicas extras (POST de pedido pelo slug + zonas).
 // Montado ANTES de '/food' principal porque tem rotas mais especificas
 // (/menu/public/:slug/order, /zones) que nao conflitam com food.js.
