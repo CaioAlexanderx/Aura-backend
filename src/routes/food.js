@@ -55,6 +55,7 @@ router.get('/menu', guardFood, async (req, res) => {
   }
 });
 
+// B6 — rota PUBLICA: SELECT explicito SEM cost_price.
 router.get('/menu/public/:slug', async (req, res) => {
   try {
     const { rows: menus } = await db.query(
@@ -67,12 +68,23 @@ router.get('/menu/public/:slug', async (req, res) => {
     const menu = menus[0];
 
     const { rows: categories } = await db.query(
-      `SELECT * FROM food_categories WHERE menu_id=$1 AND is_active=TRUE ORDER BY sort_order`, [menu.id]
+      `SELECT id, menu_id, company_id, name, sort_order, is_active
+       FROM food_categories WHERE menu_id=$1 AND is_active=TRUE ORDER BY sort_order`,
+      [menu.id]
     );
+    // B6: SELECT explicito sem cost_price; agg de variations/addons tambem sem cost.
     const { rows: items } = await db.query(
-      `SELECT fi.*,
-        COALESCE(json_agg(DISTINCT fiv.*) FILTER (WHERE fiv.id IS NOT NULL), '[]') AS variations,
-        COALESCE(json_agg(DISTINCT fa.*)  FILTER (WHERE fa.id IS NOT NULL),  '[]') AS addons
+      `SELECT
+         fi.id, fi.company_id, fi.category_id, fi.name, fi.description, fi.price,
+         fi.photo_url, fi.preparation_time_min, fi.serves, fi.tags, fi.sort_order,
+         fi.is_active, fi.is_available,
+         COALESCE(json_agg(DISTINCT jsonb_build_object(
+           'id', fiv.id, 'name', fiv.name, 'price_delta', fiv.price_delta,
+           'is_required', fiv.is_required, 'sort_order', fiv.sort_order
+         )) FILTER (WHERE fiv.id IS NOT NULL), '[]') AS variations,
+         COALESCE(json_agg(DISTINCT jsonb_build_object(
+           'id', fa.id, 'name', fa.name, 'price', fa.price, 'max_qty', fa.max_qty
+         )) FILTER (WHERE fa.id IS NOT NULL),  '[]') AS addons
        FROM food_items fi
        LEFT JOIN food_item_variations fiv ON fiv.item_id=fi.id AND fiv.is_active=TRUE
        LEFT JOIN food_addons fa ON fa.item_id=fi.id AND fa.is_active=TRUE
@@ -143,12 +155,26 @@ router.patch('/categories/:cid', guardFood, async (req, res) => {
 router.post('/items', guardFood, async (req, res) => {
   const { category_id, name, description, price, photo_url, preparation_time_min, serves, tags, sort_order } = req.body;
   if (!name || price == null) return res.status(400).json({ error: 'name e price obrigatórios' });
+  // B10 — validações explícitas no POST /items.
+  const priceNum = Number(price);
+  if (!Number.isFinite(priceNum) || priceNum < 0) {
+    return res.status(400).json({ error: 'price deve ser número >= 0' });
+  }
+  if (preparation_time_min !== undefined && preparation_time_min !== null) {
+    const prepNum = Number(preparation_time_min);
+    if (!Number.isFinite(prepNum) || prepNum < 0 || prepNum > 240) {
+      return res.status(400).json({ error: 'preparation_time_min deve ser número entre 0 e 240' });
+    }
+  }
+  if (tags !== undefined && tags !== null && !Array.isArray(tags)) {
+    return res.status(400).json({ error: 'tags deve ser um array' });
+  }
   try {
     const { rows } = await db.query(
       `INSERT INTO food_items
          (company_id, category_id, name, description, price, photo_url, preparation_time_min, serves, tags, sort_order)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [req.params.id, category_id||null, name, description||null, price,
+      [req.params.id, category_id||null, name, description||null, priceNum,
        photo_url||null, preparation_time_min||null, serves||1, tags||null, sort_order||0]
     );
     res.status(201).json(rows[0]);
@@ -161,6 +187,22 @@ router.post('/items', guardFood, async (req, res) => {
 router.patch('/items/:iid', guardFood, async (req, res) => {
   const fields = ['category_id','name','description','price','photo_url',
                   'is_active','is_available','preparation_time_min','serves','tags','sort_order'];
+  // B10 — valida também no PATCH (mesma regra).
+  if (req.body.price !== undefined) {
+    const priceNum = Number(req.body.price);
+    if (!Number.isFinite(priceNum) || priceNum < 0) {
+      return res.status(400).json({ error: 'price deve ser número >= 0' });
+    }
+  }
+  if (req.body.preparation_time_min !== undefined && req.body.preparation_time_min !== null) {
+    const prepNum = Number(req.body.preparation_time_min);
+    if (!Number.isFinite(prepNum) || prepNum < 0 || prepNum > 240) {
+      return res.status(400).json({ error: 'preparation_time_min deve ser número entre 0 e 240' });
+    }
+  }
+  if (req.body.tags !== undefined && req.body.tags !== null && !Array.isArray(req.body.tags)) {
+    return res.status(400).json({ error: 'tags deve ser um array' });
+  }
   const updates = [];
   const vals = [];
   let idx = 1;
