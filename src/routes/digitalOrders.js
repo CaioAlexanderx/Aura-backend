@@ -6,6 +6,9 @@
 // POST   /companies/:id/digital-channel/orders/:oid/approve-payment
 // POST   /companies/:id/digital-channel/orders/:oid/reject-payment
 // DELETE /companies/:id/digital-channel/orders/:oid    (21/05/2026)
+//
+// fix (22/05/2026): approve-payment chama notifyPaymentConfirmed para
+// enviar e-mail de confirmação ao cliente após aprovação manual do Pix.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -167,7 +170,8 @@ router.post('/:oid/approve-payment', requireRole('client', 'analyst', 'admin'), 
   const { id: cid, oid } = req.params;
   try {
     const { rows } = await db.query(
-      `SELECT id, status, payment_method FROM digital_orders WHERE id = $1 AND company_id = $2`,
+      `SELECT id, status, payment_method, order_number, customer_name, customer_email, company_id
+       FROM digital_orders WHERE id = $1 AND company_id = $2`,
       [oid, cid]
     );
     if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
@@ -192,6 +196,10 @@ router.post('/:oid/approve-payment', requireRole('client', 'analyst', 'admin'), 
 
     onOrderConfirmed(oid)
       .catch(err => console.error('[orders] onOrderConfirmed error (approve-payment):', err.message));
+
+    // Notifica cliente por e-mail que o pagamento foi aprovado pelo lojista
+    notify.notifyPaymentConfirmed({ order })
+      .catch(err => console.error('[notify] approve-payment confirmed email error:', err.message));
 
     notify.notifyStatusChange(updated[0])
       .catch(err => console.error('[notify] approve-payment error:', err.message));
@@ -243,7 +251,7 @@ router.post('/:oid/reject-payment', requireRole('client', 'analyst', 'admin'), a
 
   } catch (err) {
     console.error('[orders] reject-payment error:', err.message);
-    res.status(500).json({ error: 'Erro ao rejeitar pedido' });
+    res.status(500).json({ error: 'Erro ao rejeitar pagamento' });
   }
 });
 
