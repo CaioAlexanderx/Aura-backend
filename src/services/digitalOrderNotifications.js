@@ -3,11 +3,16 @@
 //
 // Eventos cobertes:
 //   notifyNewOrder(...)       — novo pedido criado na storefront
-//   notifyPaymentConfirmed(.) — Pix confirmado pelo webhook Asaas
+//   notifyPaymentConfirmed(.) — pagamento confirmado (Pix/Cartão)
 //   notifyStatusChange(...)   — admin avança status do pedido
 //
 // Push: Expo Push API (ExponentPushToken)
 // Email: via mailer.js (Resend / SMTP / dev fallback)
+//
+// fix (22/05/2026): notifyNewOrder agora aceita `send_customer_email`
+//   (default false). Chamador de on_delivery passa true; Pix e Cartão
+//   passam false — email vai só após confirmação de pagamento via
+//   notifyPaymentConfirmed (webhook MP ou approve-payment manual).
 // ============================================================
 const db = require('../config/database');
 const { sendOrderConfirmationEmail, sendOrderStatusEmail } = require('./mailer');
@@ -87,19 +92,25 @@ async function getStoreName(company_id) {
 // ---- Eventos públicos ----
 
 /**
- * Notifica lojista (push) e cliente (e-mail) após novo pedido.
+ * Notifica lojista (push) quando novo pedido é criado.
+ * E-mail ao cliente SÓ é enviado quando `send_customer_email = true`,
+ * ou seja, apenas para pedidos que nascem já confirmados (on_delivery).
+ * Para Pix e Cartão, o e-mail vai após confirmação de pagamento via
+ * notifyPaymentConfirmed().
+ *
  * @param {object} options
- * @param {object} options.order  - objeto digital_orders (retornado pelo INSERT)
- * @param {number} options.total  - total do pedido
- * @param {string} [options.pix_payload] - payload Pix copia-e-cola
- * @param {object} [options.config] - digital_channel_config da loja
+ * @param {object} options.order              - objeto digital_orders
+ * @param {number} options.total              - total do pedido
+ * @param {string} [options.pix_payload]      - payload Pix copia-e-cola
+ * @param {object} [options.config]           - digital_channel_config da loja
+ * @param {boolean} [options.send_customer_email=false] - envia e-mail ao cliente?
  */
-async function notifyNewOrder({ order, total, pix_payload, config }) {
+async function notifyNewOrder({ order, total, pix_payload, config, send_customer_email = false }) {
   const company_id = order.company_id;
   const store_name = config?.site_name || await getStoreName(company_id);
   const deliveryLabel = order.delivery_type === 'delivery' ? '🚚 Entrega' : '🏪 Retirada';
 
-  // Push ao lojista
+  // Push ao lojista — sempre, independente do método de pagamento
   const tokens = await getOwnerPushTokens(company_id);
   await sendExpoPush(
     tokens,
@@ -108,8 +119,9 @@ async function notifyNewOrder({ order, total, pix_payload, config }) {
     { type: 'new_digital_order', order_id: order.id, order_number: order.order_number }
   );
 
-  // E-mail ao cliente
-  if (order.customer_email) {
+  // E-mail ao cliente — apenas quando pagamento já está confirmado (on_delivery).
+  // Pix e Cartão recebem e-mail via notifyPaymentConfirmed(), não aqui.
+  if (send_customer_email && order.customer_email) {
     await sendOrderConfirmationEmail(order.customer_email, {
       order_number:   order.order_number,
       customer_name:  order.customer_name,
@@ -123,7 +135,8 @@ async function notifyNewOrder({ order, total, pix_payload, config }) {
 }
 
 /**
- * Chamada pelo webhook Asaas quando PAYMENT_CONFIRMED.
+ * Chamada quando pagamento é confirmado: webhook MP (Pix/Cartão) ou
+ * approve-payment manual pelo lojista.
  * Notifica lojista (push) e cliente (e-mail de "pedido confirmado").
  */
 async function notifyPaymentConfirmed({ order }) {
@@ -135,7 +148,7 @@ async function notifyPaymentConfirmed({ order }) {
   await sendExpoPush(
     tokens,
     `✅ Pagamento confirmado!`,
-    `Pedido #${order.order_number} · ${order.customer_name} pagou via Pix`,
+    `Pedido #${order.order_number} · ${order.customer_name} pagou`,
     { type: 'order_payment_confirmed', order_id: order.id, order_number: order.order_number }
   );
 
