@@ -1,1 +1,170 @@
-Y29uc3QgZXhwcmVzcyA9IHJlcXVpcmUoJ2V4cHJlc3MnKTsKY29uc3QgeyByZXF1aXJlQXV0aCwgcmVxdWlyZUNvbXBhbnlBY2Nlc3MsIHJlcXVpcmVQbGFuIH0gPSByZXF1aXJlKCcuLi9taWRkbGV3YXJlL2F1dGgnKTsKCmNvbnN0IHJvdXRlciA9IGV4cHJlc3MuUm91dGVyKHsgbWVyZ2VQYXJhbXM6IHRydWUgfSk7Cgpyb3V0ZXIudXNlKHJlcXVpcmVBdXRoKTsKcm91dGVyLnVzZShyZXF1aXJlQ29tcGFueUFjY2VzcygpKTsKCi8vIC0tIEVTU0VOQ0lBTCAodG9kb3Mgb3MgcGxhbm9zKSAtLQoKcm91dGVyLnVzZSgnLycsIHJlcXVpcmUoJy4vY29tcGFueScpKTsKcm91dGVyLnVzZSgnL2Rhc2hib2FyZCcsIHJlcXVpcmUoJy4vZGFzaGJvYXJkJykpOwpyb3V0ZXIudXNlKCcvZGFzaGJvYXJkL3NwYXJrbGluZScsIHJlcXVpcmUoJy4vZGFzaGJvYXJkU3BhcmtsaW5lJykpOwpyb3V0ZXIudXNlKCcvdHJhbnNhY3Rpb25zJywgcmVxdWlyZSgnLi90cmFuc2FjdGlvbnMnKSk7CnJvdXRlci51c2UoJy90cmFuc2FjdGlvbnMnLCByZXF1aXJlKCcuL3RyYW5zYWN0aW9uc0JhdGNoJykpOwpyb3V0ZXIudXNlKCcvdHJhbnNhY3Rpb25zL2NhdGVnb3JpemUnLCByZXF1aXJlKCcuL2NhdGVnb3JpemUnKSk7CnJvdXRlci51c2UoJy90cmFuc2FjdGlvbnMnLCByZXF1aXJlKCcuL2NhdGVnb3JpemUnKSk7CnJvdXRlci51c2UoJy8nLCByZXF1aXJlKCcuL3RyYW5zYWN0aW9uU2FsZScpKTsKcm91dGVyLnVzZSgnL3Byb2xhYm9yZScsIHJlcXVpcmUoJy4vcHJvbGFib3JlJykpOwpyb3V0ZXIudXNlKCcvZHJlJywgcmVxdWlyZSgnLi9kcmUnKSk7CnJvdXRlci51c2UoJy9maW5hbmNpYWwvaGlzdG9yeScsIHJlcXVpcmUoJy4vZmluYW5jaWFsSGlzdG9yeScpKTsKcm91dGVyLnVzZSgnL2ZpbmFuY2lhbC9hbmFseXNpcycsIHJlcXVpcmUoJy4vZmluYW5jaWFsQW5hbHlzaXMnKSk7CnJvdXRlci51c2UoJy9iYW5rJywgcmVxdWlyZSgnLi9iYW5rUmVjb25jaWxpYXRpb24nKSk7Ci8vIEZpbmFuY2Vpcm8gdjI6IEluc2lnaHRzIGFncmVnYWRvcyAoSGVhbHRoIFNjb3JlIC8gUnVud2F5IC8gQmlnZ2VzdCBMZXZlcikuCi8vIE9uZGEgMSAoMDQvMDUvMjAyNikgY2FsY3VsYSBjbGllbnQtc2lkZTsgZXN0ZSBlbmRwb2ludCBlbnJpcXVlY2UgY29tIGRhZG9zIGRvIHNlcnZlci4Kcm91dGVyLnVzZSgnL2ZpbmFuY2Vpcm8nLCByZXF1aXJlKCcuL2ZpbmFuY2Vpcm9JbnNpZ2h0cycpLmNvbXBhbnlSb3V0ZXIpOwovLyBGaW5hbmNlaXJvIEZhc2UgQSAoMTkvMDUvMjAyNik6IGNvbXBhcmF0aXZvIChtZXMtdnMtYW50ZXJpb3IsIFlvWSwgY3VzdG9tKS4KLy8gUmV0b3JuYSBzZXJpZXMgZGlhcmlhcyBhbGluaGFkYXMgcHJhIHBsb3RhciBncmFmaWNvIHNvYnJlcG9zdG8gbmEgVmlzYW8gR2VyYWwuCnJvdXRlci51c2UoJy9maW5hbmNlaXJvJywgcmVxdWlyZSgnLi9maW5hbmNlaXJvQ29tcGFyYXRpdmUnKS5jb21wYW55Um91dGVyKTsKLy8gRklYIDA3LzA1LzIwMjY6IGV4Y2x1aSB0eXBlPSd0cm9jYScgZG8gcmV2ZW51ZSArIGV4cG9lIHRyb2Nhc19jb3VudC90cm9jYXNfbmV0X3JlY2VpdmVkCi8vICsgYWRpY2lvbmEgcy50eXBlIGUgcy5leGNoYW5nZV9vZl9zYWxlX2lkIG5hIGxpc3RhZ2VtIC9zYWxlcwpyb3V0ZXIudXNlKCcvcGR2JywgcmVxdWlyZSgnLi9wZHYtc3VtbWFyeS1wYXRjaCcpKTsKcm91dGVyLnVzZSgnL3BkdicsIHJlcXVpcmUoJy4vc2Nhbm5lcicpKTsKcm91dGVyLnVzZSgnL3BkdicsIHJlcXVpcmUoJy4vcGR2JykpOwpyb3V0ZXIudXNlKCcvJywgcmVxdWlyZSgnLi9wZHZTZXR0aW5ncycpKTsKcm91dGVyLnVzZSgnL2NhaXhhJywgcmVxdWlyZSgnLi9jYWl4YScpKTsKcm91dGVyLnVzZSgnL3Byb2R1Y3RzJywgcmVxdWlyZSgnLi9wcm9kdWN0c0R1cGxpY2F0ZXMnKSk7CnJvdXRlci51c2UoJy9wcm9kdWN0cycsIHJlcXVpcmUoJy4vcHJvZHVjdHNCYXRjaCcpKTsKcm91dGVyLnVzZSgnL3Byb2R1Y3RzJywgcmVxdWlyZSgnLi9wcm9kdWN0c1ZhcmlhdGlvbnMnKSk7CnJvdXRlci51c2UoJy9wcm9kdWN0cycsIHJlcXVpcmUoJy4vcHJvZHVjdHMnKSk7CnJvdXRlci51c2UoJy9wcm9kdWN0cycsIHJlcXVpcmUoJy4vcHJvZHVjdHNSYW5raW5nJykpOwpyb3V0ZXIudXNlKCcvcHJvZHVjdHMnLCByZXF1aXJlKCcuL3Byb2R1Y3RJbWFnZScpKTsKcm91dGVyLnVzZSgnL3Byb2R1Y3RzJywgcmVxdWlyZSgnLi9iYXJjb2RlJykpOwpyb3V0ZXIudXNlKCcvcHJvZHVjdHMnLCByZXF1aXJlKCcuL2xhYmVscycpKTsKLy8gMDcvMDUvMjAyNjogSW1wb3J0YWNhbyBkZSBEQU5GRSBQREYgdmlhIElBLiBHYXRlIGRlIHBsYW5vIGRlbnRybyBkYSByb3RhCi8vIChOZWdvY2lvID0gNTAvbWVzLCBFeHBhbnNhbyA9IGlsaW1pdGFkbykuCnJvdXRlci51c2UoJy9wcm9kdWN0cycsIHJlcXVpcmUoJy4vZGFuZmVJbXBvcnQnKSk7CnJvdXRlci51c2UoJy9wcm9kdWN0cy86cGlkL3ZhcmlhbnRzJywgcmVxdWlyZSgnLi92YXJpYW50cycpKTsKcm91dGVyLnVzZSgnL3Byb2R1Y3QtY2F0ZWdvcmllcycsIHJlcXVpcmUoJy4vcHJvZHVjdENhdGVnb3JpZXMnKSk7Ci8vIE0tU1RPQ0tMSU5LIE1TTC0wMi8wMzogdmluY3VsYSBwcm9kdXRvcyBlbnRyZSBDTlBKcyBkbyBtZXNtbyBvd25lci4KLy8gTW9udGEgbyBjb21wYW55Um91dGVyIG5vIHJvb3QgcG9ycXVlIGVsZSB0ZW0gcm90YXMgL3Byb2R1Y3RzLzpwaWQvbWFzdGVyLXNrdQovLyAobWVyZ2VQYXJhbXMgcGVnYSBvIDppZCBkYSBlbXByZXNhIHBhaSBkbyBwcml2YXRlLmpzKS4Kcm91dGVyLnVzZSgnLycsIHJlcXVpcmUoJy4vcHJvZHVjdExpbmtzJykuY29tcGFueVJvdXRlcik7CnJvdXRlci51c2UoJy9jb3Vwb25zJywgcmVxdWlyZSgnLi9jb3Vwb25zJykpOwpyb3V0ZXIudXNlKCcvbmZjZScsIHJlcXVpcmUoJy4vbmZjZScpKTsKcm91dGVyLnVzZSgnL25mZScsIHJlcXVpcmUoJy4vbmZlJykpOwpyb3V0ZXIudXNlKCcvbmZzZScsIHJlcXVpcmUoJy4vbmZzZScpKTsKcm91dGVyLnVzZSgnL3N0b3JhZ2UnLCByZXF1aXJlKCcuL3N0b3JhZ2UnKSk7CnJvdXRlci51c2UoJy9vYmxpZ2F0aW9ucycsIHJlcXVpcmUoJy4vZmlzY2FsT2JsaWdhdGlvbnMnKSk7CnJvdXRlci51c2UoJy9vYmxpZ2F0aW9ucycsIHJlcXVpcmUoJy4vZmlzY2FsUGRmJykpOwpyb3V0ZXIudXNlKCcvJywgcmVxdWlyZSgnLi9vYmxpZ2F0aW9uc1JlcG9ydCcpKTsgLy8gUFIzODogUE9TVCAvb2JsaWdhdGlvbnMvOmNvZGUvcmVwb3J0CnJvdXRlci51c2UoJy9ndWlkZXMnLCByZXF1aXJlKCcuL2d1aWRlcycpKTsKcm91dGVyLnVzZSgnL2NoZWNrbGlzdCcsIHJlcXVpcmUoJy4vY2hlY2tsaXN0JykuY2hlY2tsaXN0Um91dGVyKTsKcm91dGVyLnVzZSgnL29uYm9hcmRpbmcnLCByZXF1aXJlKCcuL29uYm9hcmRpbmcnKSk7CnJvdXRlci51c2UoJy9leHBvcnQnLCByZXF1aXJlKCcuL2V4cG9ydFJlcG9ydHMnKSk7CnJvdXRlci51c2UoJy8nLCByZXF1aXJlKCcuL2ltcG9ydERhdGEnKSk7CnJvdXRlci51c2UoJy9wcmludCcsIHJlcXVpcmUoJy4vcHJpbnQnKSk7CnJvdXRlci51c2UoJy9zYWxlcy9hbmFseXRpY3MnLCByZXF1aXJlKCcuL3NhbGVzQW5hbHl0aWNzJykpOwpyb3V0ZXIudXNlKCcvc2FsZXMnLCByZXF1aXJlKCcuL3NhbGVzJykpOwpyb3V0ZXIudXNlKCcvcmV2aWV3cycsIHJlcXVpcmUoJy4vcmV2aWV3cycpLnJldmlld3NSb3V0ZXIpOwpyb3V0ZXIudXNlKCcvbW9kdWxlcycsIHJlcXVpcmUoJy4vbW9kdWxlcycpKTsKcm91dGVyLnVzZSgnL2JpbGxpbmcnLCByZXF1aXJlKCcuL2JpbGxpbmcnKSk7CnJvdXRlci51c2UoJy9zdXBwb3J0JywgcmVxdWlyZSgnLi9zdXBwb3J0JykpOwoKLy8gMTEvMDUvMjAyNiAtLSBDbGllbnRlcyBiYXNpY28gbW92aWRvIHBybyBFc3NlbmNpYWwuCi8vIERlY2lzYW8gZGUgcHJvZHV0bzogY2FkYXN0cm8gZGUgY2xpZW50ZSBlIGNvbW1vZGl0eSAoQmxpbmcvVGlueS9ldGMKLy8gb2ZlcmVjZW0gbm8gcGxhbm8gZGUgZW50cmFkYSkuIExpbWl0ZSBwb3IgcGxhbm8gY29udHJvbGFkbyBlbSBjdXN0b21lcnMuanM6Ci8vICAgZXNzZW5jaWFsID0gMS4wMDAKLy8gICBuZWdvY2lvICAgPSA1LjAwMAovLyAgIGV4cGFuc2FvICA9IGlsaW1pdGFkbwovLyBDUk0gYXZhbmNhZG8gKHJhbmtpbmcvcmV0ZW5jYW8vYmlydGhkYXlzL2NyZWRpYXJpbykgY29udGludWEgTmVnb2NpbysuCnJvdXRlci51c2UoJy9jdXN0b21lcnMnLCByZXF1aXJlKCcuL2N1c3RvbWVycycpKTsKCi8vIDEyLzA1LzIwMjYgLS0gUExBTi0wMjogRW1wbG95ZWVzIENSVUQgYmFzaWNvIG1vdmlkbyBwcm8gRXNzZW5jaWFsLgovLyBEZWNpc2FvIGRlIHByb2R1dG86IGNhZGFzdHJvIGRlICJ2ZW5kZWRvciIgKG5vbWUrY2FyZ28pIGUgY29tbW9kaXR5Ci8vIHByYSBhdHJpYnVpciB2ZW5kYXMgbm8gUERWLiBDUEYsIGFkbWlzc2FvLCBzYWxhcmlvLCBQSVMgc2FvIG9wY2lvbmFpcwovLyBubyBzY2hlbWEgLS0gc28gZXhpZ2lkb3MgcGVsYSBVSSBkYSBGb2xoYSAoTmVnb2NpbyspLiBMaW1pdGUgcG9yIHBsYW5vOgovLyAgIGVzc2VuY2lhbCA9IDMgZnVuY2lvbmFyaW9zIGF0aXZvcwovLyAgIG5lZ29jaW8gICA9IDUwCi8vICAgZXhwYW5zYW8gID0gaWxpbWl0YWRvCi8vIEZvbGhhIGRlIHBhZ2FtZW50byByZWFsIChjYWxjdWxvLCBob2xlcml0ZSwgY29taXNzYW8sIHJhbmtpbmcsIGVTb2NpYWwpCi8vIGNvbnRpbnVhIE5lZ29jaW8rIHZpYSBtb3VudHMgZXNwZWNpZmljb3MgYWJhaXhvLgpyb3V0ZXIudXNlKCcvZW1wbG95ZWVzJywgcmVxdWlyZSgnLi9lbXBsb3llZXMnKSk7CgovLyAtLSBORUdPQ0lPKyAtLQoKcm91dGVyLnVzZSgnL2N1c3RvbWVycycsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vY3JtJykpOwpyb3V0ZXIudXNlKCcvY3VzdG9tZXJzJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9yZXRlbnRpb24nKSk7CnJvdXRlci51c2UoJy9jdXN0b21lcnMvcmFua2luZy1sdHYnLCByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2N1c3RvbWVyUmFua2luZycpKTsKLy8gQ3JlZGlhcmlvIChmaWFkbykgcG9yIGNsaWVudGUgLS0gZ2F0ZSBpZ3VhbCAvY3VzdG9tZXJzIHBvcnF1ZSBkZXBlbmRlCi8vIGRhIGV4aXN0ZW5jaWEgZG8gQ1JVRCBkZSBjbGllbnRlLiBTYWxkbyB2aWEgdmlldywgc2VtIGludGVncmFjYW8gY29tCi8vIEZpbmFuY2Vpcm8vY29udGFzIGEgcmVjZWJlci4gTWlncmF0aW9uIDA5OS4Kcm91dGVyLnVzZSgnL2NyZWRpdCcsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vY3JlZGl0JykpOwovLyBDcmVkaWFyaW8gcGFyY2VsYWRvIC0tIHZlbmRhcyBhIHByYXpvIGNvbSBzY29yZSBpbnRlcm5vLCByZWd1YSBkZSBjb2JhbmNhCi8vIGF1dG9tYXRpY2EgZSBkYXNoYm9hcmQgZGUgaW5hZGltcGxlbmNpYS4gTWlncmF0aW9ucyAxMTUtMTE4LgovLyAxNC8wNS8yMDI2OiBtb250YWRvIG5vIG1lc21vIHByZWZpeG8gL2NyZWRpdCBwYXJhIGNvbXBhcnRpbGhhciBnYXRlIGRlIHBsYW5vLgpyb3V0ZXIudXNlKCcvY3JlZGl0JywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9jcmVkaXRJbnN0YWxsbWVudHMnKSk7CnJvdXRlci51c2UoJy9iaXJ0aGRheScsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vYmlydGhkYXknKSk7Ci8vIEZvbGhhIHJlYWw6IHBheXNsaXAgcG9yIGVtYWlsLCByYW5raW5nIGRlIHZlbmRhcywgY29taXNzYW8gLS0gTmVnb2NpbysuCi8vIENSVUQgZGUgZW1wbG95ZWVzIChhY2ltYSkgamEgZSBFc3NlbmNpYWw7IGVzdGVzIGVuZHBvaW50cyBzYW8gbwovLyAncHJvY2Vzc2FtZW50byBmaW5hbmNlaXJvIHJlY29ycmVudGUnIHF1ZSBqdXN0aWZpY2EgbyB1cGdyYWRlLgpyb3V0ZXIudXNlKCcvZW1wbG95ZWVzJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9wYXlzbGlwRW1haWwnKSk7CnJvdXRlci51c2UoJy9lbXBsb3llZXMvcmFua2luZycsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vZW1wbG95ZWVzUmFua2luZycpKTsKcm91dGVyLnVzZSgnL2VtcGxveWVlcycsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vY29tbWlzc2lvbicpKTsKcm91dGVyLnVzZSgnL2FwcG9pbnRtZW50cycsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vYXBwb2ludG1lbnRzJykpOwpyb3V0ZXIudXNlKCcvZGlnaXRhbC1jaGFubmVsJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9kaWdpdGFsQ2hhbm5lbCcpKTsKcm91dGVyLnVzZSgnL2RpZ2l0YWwtY2hhbm5lbC9vcmRlcnMnLCByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2RpZ2l0YWxPcmRlcnMnKSk7CnJvdXRlci51c2UoJy9kaWdpdGFsLWNoYW5uZWwvYXNhYXMnLCByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2FzYWFzU3ViY29udGEnKSk7Ci8vIE1QIEZhc2UgMCAoMjAvMDUvMjAyNik6IGNyZWRlbmNpYWlzIGRlIGdhdGV3YXkgcG9yIGVtcHJlc2EuCi8vIEZhc2VzIDEtMiBhZGljaW9uYXJhbyBQaXggYXV0b21hdGljbyBlIGNhcnRhbyBzZW0gYWx0ZXJhciBlc3RlIG1vdW50Lgpyb3V0ZXIudXNlKCcvcGF5bWVudC1nYXRld2F5cycsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vcGF5bWVudEdhdGV3YXlzJykpOwpyb3V0ZXIudXNlKCcvbWVtYmVycycsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vbWVtYmVycycpKTsKcm91dGVyLnVzZSgnL3doYXRzYXBwJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi93aGF0c2FwcFJvdXRlcycpKTsKcm91dGVyLnVzZSgnL2FpL2luc2lnaHRzJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9haUluc2lnaHRzJykpOwpyb3V0ZXIudXNlKCcvYmFyYmVyc2hvcCcsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vYmFyYmVyc2hvcCcpKTsKcm91dGVyLnVzZSgnL2JhcmJlcnNob3AnLCByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2JhcmJlclRpZXIzJykpOwpyb3V0ZXIudXNlKCcvc2Fsb24tcGFydG5lcnMnLCByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL3NhbG9uUGFydG5lcicpKTsKcm91dGVyLnVzZSgnL21hcmtldHBsYWNlcycsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vbWFya2V0cGxhY2UnKSk7CnJvdXRlci51c2UoJy9lc29jaWFsJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9lc29jaWFsJykpOwoKLy8gLS0gRVhQQU5TQU8gLS0KCnJvdXRlci51c2UoJy9haScsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vYWlDaGF0JykpOwpyb3V0ZXIudXNlKCcvY2FzaGZsb3cnLCByZXF1aXJlUGxhbignZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9jYXNoRmxvd1Byb2plY3Rpb24nKSk7CnJvdXRlci51c2UoJy9nb2FscycsIHJlcXVpcmVQbGFuKCdleHBhbnNhbycpLCByZXF1aXJlKCcuL3NhbGVzR29hbHMnKSk7CnJvdXRlci51c2UoJy9tYXJnaW4nLCByZXF1aXJlUGxhbignZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9wcm9kdWN0TWFyZ2luJykpOwpyb3V0ZXIudXNlKCcvZHJlLXNpbXBsZXMnLCByZXF1aXJlUGxhbignZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9kcmVTaW1wbGVzJykpOwpyb3V0ZXIudXNlKCcvYWxlcnRzJywgcmVxdWlyZVBsYW4oJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vc21hcnRBbGVydHMnKSk7CnJvdXRlci51c2UoJy9yZWFjdGl2YXRpb24nLCByZXF1aXJlUGxhbignZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9jdXN0b21lclJlYWN0aXZhdGlvbicpKTsKcm91dGVyLnVzZSgnL2RlbnRhbCcsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vZGVudGFsJykpOwpyb3V0ZXIudXNlKCcvZGVudGFsJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9kZW50YWxEYXNoYm9hcmQnKSk7CnJvdXRlci51c2UoJy9kZW50YWwnLCByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2RlbnRhbEZ1bm5lbCcpKTsKcm91dGVyLnVzZSgnL2RlbnRhbCcsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vZGVudGFsQmlsbGluZycpKTsKcm91dGVyLnVzZSgnL2RlbnRhbCcsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vZGVudGFsUmVwYXNzZScpKTsKcm91dGVyLnVzZSgnL2RlbnRhbCcsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vZGVudGFsUG9ydGFsJykpOwpyb3V0ZXIudXNlKCcvZGVudGFsJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9kZW50YWxBdXRvbWF0aW9uJykpOwpyb3V0ZXIudXNlKCcvZGVudGFsJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9kZW50YWxUaXNzUmV0ZW50aW9ucycpKTsgLy8gUFI0MCBTcHJpbnQgQgpyb3V0ZXIudXNlKCcvZGVudGFsL2ltcGxhbnRzJywgICAgICByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2RlbnRhbEltcGxhbnRzJykpOwpyb3V0ZXIudXNlKCcvZGVudGFsL29ydGhvJywgICAgICAgICByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2RlbnRhbE9ydGhvJykpOwpyb3V0ZXIudXNlKCcvZGVudGFsL2RvY3VtZW50cycsICAgICByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2RlbnRhbERvY3VtZW50cycpKTsKcm91dGVyLnVzZSgnL2RlbnRhbC90cmFuc2NyaWJlJywgICAgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9kZW50YWxUcmFuc2NyaXB0aW9uJykpOwpyb3V0ZXIudXNlKCcvZGVudGFsL3N1cHBsaWVzJywgICAgICByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2RlbnRhbFN1cHBsaWVzJykpOwpyb3V0ZXIudXNlKCcvZm9vZCcsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vZm9vZCcpKTsKcm91dGVyLnVzZSgnL2Zvb2Qvb3JkZXJzJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9mb29kT3JkZXJzJykpOwpyb3V0ZXIudXNlKCcvZm9vZC9kZWxpdmVyZXJzJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9mb29kRGVsaXZlcmVycycpKTsKLy8gRmFzZSA4ICgyMi8wNS8yMDI2KTogcGFpbmVsIGRlIGRlc3BhY2hvIGFncmVnYWRvLiByZWFkeSArIGluUm91dGUgKyBkZWxpdmVyZXJzCi8vIGNvbSBzdGF0cyBkbyBkaWEuIEFjb21wYW5oYSBQSU4gZW50cmVnYWRvciAobWlncmF0aW9uIDEyNykuCnJvdXRlci51c2UoJy9mb29kL2Rpc3BhdGNoJywgcmVxdWlyZVBsYW4oJ25lZ29jaW8nLCAnZXhwYW5zYW8nKSwgcmVxdWlyZSgnLi9mb29kRGlzcGF0Y2gnKSk7CnJvdXRlci51c2UoJy9mb29kL3JlcG9ydHMnLCByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2Zvb2RSZXBvcnRzJykpOwpyb3V0ZXIudXNlKCcvZm9vZC9pZm9vZCcsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vZm9vZElmb29kJykpOwpyb3V0ZXIudXNlKCcvZm9vZC93YWl0ZXInLCByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2Zvb2RXYWl0ZXInKSk7CnJvdXRlci51c2UoJy9mb29kL25mY2UnLCByZXF1aXJlUGxhbignbmVnb2NpbycsICdleHBhbnNhbycpLCByZXF1aXJlKCcuL2Zvb2ROZmNlJykpOwpyb3V0ZXIudXNlKCcvZm9vZC9zY2hlZHVsZScsIHJlcXVpcmVQbGFuKCduZWdvY2lvJywgJ2V4cGFuc2FvJyksIHJlcXVpcmUoJy4vZm9vZFNjaGVkdWxlJykpOwoKbW9kdWxlLmV4cG9ydHMgPSByb3V0ZXI7Cg==
+const express = require('express');
+const { requireAuth, requireCompanyAccess, requirePlan } = require('../middleware/auth');
+
+const router = express.Router({ mergeParams: true });
+
+router.use(requireAuth);
+router.use(requireCompanyAccess());
+
+// -- ESSENCIAL (todos os planos) --
+
+router.use('/', require('./company'));
+router.use('/dashboard', require('./dashboard'));
+router.use('/dashboard/sparkline', require('./dashboardSparkline'));
+router.use('/transactions', require('./transactions'));
+router.use('/transactions', require('./transactionsBatch'));
+router.use('/transactions/categorize', require('./categorize'));
+router.use('/transactions', require('./categorize'));
+router.use('/', require('./transactionSale'));
+router.use('/prolabore', require('./prolabore'));
+router.use('/dre', require('./dre'));
+router.use('/financial/history', require('./financialHistory'));
+router.use('/financial/analysis', require('./financialAnalysis'));
+router.use('/bank', require('./bankReconciliation'));
+// Financeiro v2: Insights agregados (Health Score / Runway / Biggest Lever).
+// Onda 1 (04/05/2026) calcula client-side; este endpoint enriquece com dados do server.
+router.use('/financeiro', require('./financeiroInsights').companyRouter);
+// Financeiro Fase A (19/05/2026): comparativo (mes-vs-anterior, YoY, custom).
+// Retorna series diarias alinhadas pra plotar grafico sobreposto na Visao Geral.
+router.use('/financeiro', require('./financeiroComparative').companyRouter);
+// FIX 07/05/2026: exclui type='troca' do revenue + expoe trocas_count/trocas_net_received
+// + adiciona s.type e s.exchange_of_sale_id na listagem /sales
+router.use('/pdv', require('./pdv-summary-patch'));
+router.use('/pdv', require('./scanner'));
+router.use('/pdv', require('./pdv'));
+router.use('/', require('./pdvSettings'));
+router.use('/caixa', require('./caixa'));
+router.use('/products', require('./productsDuplicates'));
+router.use('/products', require('./productsBatch'));
+router.use('/products', require('./productsVariations'));
+router.use('/products', require('./products'));
+router.use('/products', require('./productsRanking'));
+router.use('/products', require('./productImage'));
+router.use('/products', require('./barcode'));
+router.use('/products', require('./labels'));
+// 07/05/2026: Importacao de DANFE PDF via IA. Gate de plano dentro da rota
+// (Negocio = 50/mes, Expansao = ilimitado).
+router.use('/products', require('./danfeImport'));
+router.use('/products/:pid/variants', require('./variants'));
+router.use('/product-categories', require('./productCategories'));
+// M-STOCKLINK MSL-02/03: vincula produtos entre CNPJs do mesmo owner.
+// Monta o companyRouter no root porque ele tem rotas /products/:pid/master-sku
+// (mergeParams pega o :id da empresa pai do private.js).
+router.use('/', require('./productLinks').companyRouter);
+router.use('/coupons', require('./coupons'));
+router.use('/nfce', require('./nfce'));
+router.use('/nfe', require('./nfe'));
+router.use('/nfse', require('./nfse'));
+router.use('/storage', require('./storage'));
+router.use('/obligations', require('./fiscalObligations'));
+router.use('/obligations', require('./fiscalPdf'));
+router.use('/', require('./obligationsReport')); // PR38: POST /obligations/:code/report
+router.use('/guides', require('./guides'));
+router.use('/checklist', require('./checklist').checklistRouter);
+router.use('/onboarding', require('./onboarding'));
+router.use('/export', require('./exportReports'));
+router.use('/', require('./importData'));
+router.use('/print', require('./print'));
+router.use('/sales/analytics', require('./salesAnalytics'));
+router.use('/sales', require('./sales'));
+router.use('/reviews', require('./reviews').reviewsRouter);
+router.use('/modules', require('./modules'));
+router.use('/billing', require('./billing'));
+router.use('/support', require('./support'));
+
+// 11/05/2026 -- Clientes basico movido pro Essencial.
+// Decisao de produto: cadastro de cliente e commodity (Bling/Tiny/etc
+// oferecem no plano de entrada). Limite por plano controlado em customers.js:
+//   essencial = 1.000
+//   negocio   = 5.000
+//   expansao  = ilimitado
+// CRM avancado (ranking/retencao/birthdays/crediario) continua Negocio+.
+router.use('/customers', require('./customers'));
+
+// 12/05/2026 -- PLAN-02: Employees CRUD basico movido pro Essencial.
+// Decisao de produto: cadastro de "vendedor" (nome+cargo) e commodity
+// pra atribuir vendas no PDV. CPF, admissao, salario, PIS sao opcionais
+// no schema -- so exigidos pela UI da Folha (Negocio+). Limite por plano:
+//   essencial = 3 funcionarios ativos
+//   negocio   = 50
+//   expansao  = ilimitado
+// Folha de pagamento real (calculo, holerite, comissao, ranking, eSocial)
+// continua Negocio+ via mounts especificos abaixo.
+router.use('/employees', require('./employees'));
+
+// -- NEGOCIO+ --
+
+router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
+router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
+router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
+// Crediario (fiado) por cliente -- gate igual /customers porque depende
+// da existencia do CRUD de cliente. Saldo via view, sem integracao com
+// Financeiro/contas a receber. Migration 099.
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
+// Crediario parcelado -- vendas a prazo com score interno, regua de cobanca
+// automatica e dashboard de inadimplencia. Migrations 115-118.
+// 14/05/2026: montado no mesmo prefixo /credit para compartilhar gate de plano.
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInstallments'));
+router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'));
+// Folha real: payslip por email, ranking de vendas, comissao -- Negocio+.
+// CRUD de employees (acima) ja e Essencial; estes endpoints sao o
+// 'processamento financeiro recorrente' que justifica o upgrade.
+router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
+router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
+router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
+router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appointments'));
+router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
+router.use('/digital-channel/orders', requirePlan('negocio', 'expansao'), require('./digitalOrders'));
+router.use('/digital-channel/asaas', requirePlan('negocio', 'expansao'), require('./asaasSubconta'));
+// MP Fase 0 (20/05/2026): credenciais de gateway por empresa.
+// Fases 1-2 adicionarao Pix automatico e cartao sem alterar este mount.
+router.use('/payment-gateways', requirePlan('negocio', 'expansao'), require('./paymentGateways'));
+router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
+router.use('/whatsapp', requirePlan('negocio', 'expansao'), require('./whatsappRoutes'));
+router.use('/ai/insights', requirePlan('negocio', 'expansao'), require('./aiInsights'));
+router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
+router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3'));
+router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
+router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplace'));
+router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
+
+// -- EXPANSAO --
+
+router.use('/ai', requirePlan('negocio', 'expansao'), require('./aiChat'));
+router.use('/cashflow', requirePlan('expansao'), require('./cashFlowProjection'));
+router.use('/goals', requirePlan('expansao'), require('./salesGoals'));
+router.use('/margin', requirePlan('expansao'), require('./productMargin'));
+router.use('/dre-simples', requirePlan('expansao'), require('./dreSimples'));
+router.use('/alerts', requirePlan('expansao'), require('./smartAlerts'));
+router.use('/reactivation', requirePlan('expansao'), require('./customerReactivation'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalDashboard'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalFunnel'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalBilling'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalRepasse'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalPortal'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalAutomation'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalTissRetentions')); // PR40 Sprint B
+router.use('/dental/implants',      requirePlan('negocio', 'expansao'), require('./dentalImplants'));
+router.use('/dental/ortho',         requirePlan('negocio', 'expansao'), require('./dentalOrtho'));
+router.use('/dental/documents',     requirePlan('negocio', 'expansao'), require('./dentalDocuments'));
+router.use('/dental/transcribe',    requirePlan('negocio', 'expansao'), require('./dentalTranscription'));
+router.use('/dental/supplies',      requirePlan('negocio', 'expansao'), require('./dentalSupplies'));
+router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
+// Fase 8 (22/05/2026): foodOrdersDispatch.js intercepta /food/orders/* ANTES do
+// foodOrders.js -- monta POST /:oid/dispatch novo e middleware PATCH /:oid/status
+// que valida PIN antes de marcar delivered. Restante das rotas /food/orders/*
+// continua servido pelo foodOrders.js logo abaixo.
+router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrdersDispatch'));
+router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
+router.use('/food/deliverers', requirePlan('negocio', 'expansao'), require('./foodDeliverers'));
+// Fase 8 (22/05/2026): painel de despacho agregado. ready + inRoute + deliverers
+// com stats do dia. Acompanha PIN entregador (migration 127).
+router.use('/food/dispatch', requirePlan('negocio', 'expansao'), require('./foodDispatch'));
+router.use('/food/reports', requirePlan('negocio', 'expansao'), require('./foodReports'));
+router.use('/food/ifood', requirePlan('negocio', 'expansao'), require('./foodIfood'));
+router.use('/food/waiter', requirePlan('negocio', 'expansao'), require('./foodWaiter'));
+router.use('/food/nfce', requirePlan('negocio', 'expansao'), require('./foodNfce'));
+router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./foodSchedule'));
+
+module.exports = router;
