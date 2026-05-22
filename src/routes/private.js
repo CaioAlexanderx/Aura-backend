@@ -166,5 +166,11 @@ router.use('/food/ifood', requirePlan('negocio', 'expansao'), require('./foodIfo
 router.use('/food/waiter', requirePlan('negocio', 'expansao'), require('./foodWaiter'));
 router.use('/food/nfce', requirePlan('negocio', 'expansao'), require('./foodNfce'));
 router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./foodSchedule'));
+// Fase 10 (22/05/2026): Hub de Pedidos -- agregador multi-canal.
+// food_orders + digital_orders unificados em /food/hub/orders, KPIs em /stats,
+// estado de conexoes em /channels. iFood/99food em modo stub aguardando aprovacao
+// API; quando aprovar, webhook insere food_orders com external_channel='ifood'
+// e Hub passa a listar automaticamente. Migration 128.
+router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub'));
 
 module.exports = router;
