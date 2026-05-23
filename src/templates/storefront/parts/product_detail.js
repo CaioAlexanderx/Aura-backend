@@ -1,5 +1,12 @@
 // AURA. -- storefront/parts/product_detail.js
 // showDetail() — modal do produto com selecao de variantes.
+//
+// 23/05/2026: imagem principal troca ao selecionar variante.
+// Comportamento estilo Zara/Renner: clicar na cor (chip swatch)
+// substitui SO a foto principal pela image_url da variante
+// (se houver). Fallback pra image_url do pai. Galeria nao existe
+// (so 1 imagem hero), logo "galeria inalterada" significa apenas
+// nao introduzir galeria nova. Migration 129 (product_variants.image_url).
 'use strict';
 
 module.exports = `
@@ -11,8 +18,15 @@ module.exports = `
 function showDetail(id){
   var p=PROD_MAP[id];if(!p)return;
   var hasVar=productHasVariants(p);
-  var imgH=p.image_url?'<img src="'+esc(p.image_url)+'" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:var(--r);">'
-    :'<div style="font-size:64px;font-weight:800;color:var(--primary);">'+esc((p.name||'?')[0].toUpperCase())+'</div>';
+
+  // 23/05/2026: helper parametrizado pra renderizar imagem hero.
+  // Aceita uma URL especifica ou cai no fallback do produto pai.
+  function imgHtml(url){
+    if(url){
+      return '<img src="'+esc(url)+'" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:var(--r);">';
+    }
+    return '<div style="font-size:64px;font-weight:800;color:var(--primary);">'+esc((p.name||'?')[0].toUpperCase())+'</div>';
+  }
 
   // Estado local da seleção de variante
   var attrs={}; // attribute -> [valores únicos]
@@ -40,6 +54,22 @@ function showDetail(id){
         if(selected[vals[j].attribute]!==vals[j].value){match=false;break;}
       }
       if(match) return v;
+    }
+    return null;
+  }
+
+  // 23/05/2026: helper pra escolher imagem atual. Quando selecionada uma
+  // variante com image_url, mostra a foto dela. Caso contrario, mostra a
+  // foto do pai. Quando o pai nao tem foto mas alguma variante tem,
+  // mostra a primeira variante com foto como fallback (mesma logica
+  // da vitrine em products.js — coerencia visual entre as duas telas).
+  function currentImageUrl(){
+    if(selectedVariant && selectedVariant.image_url) return selectedVariant.image_url;
+    if(p.image_url) return p.image_url;
+    if(p.variants && p.variants.length){
+      for(var i=0;i<p.variants.length;i++){
+        if(p.variants[i].image_url) return p.variants[i].image_url;
+      }
     }
     return null;
   }
@@ -112,9 +142,12 @@ function showDetail(id){
   }
 
   var ov=document.createElement('div');ov.className='checkout-overlay open';
+  // 23/05/2026: container da imagem ganha id="dImage" pra ser
+  // atualizado dinamicamente no rerenderVariants (troca de foto
+  // ao clicar em cor com image_url propria).
   ov.innerHTML='<div class="checkout-sheet" style="max-width:420px;"><div class="checkout-head"><div class="checkout-back" id="dClose">←</div><div class="checkout-head-info"><div class="checkout-title">'+esc(p.name)+'</div><div class="checkout-subtitle">'+(p.category||'Produto')+'</div></div><div class="cart-close" id="dCloseX">×</div></div>'
     +'<div class="checkout-body" id="dBody">'
-    +'<div style="width:100%;aspect-ratio:1;background:var(--primary-light);border-radius:var(--r);display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:20px;">'+imgH+'</div>'
+    +'<div id="dImage" style="width:100%;aspect-ratio:1;background:var(--primary-light);border-radius:var(--r);display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:20px;">'+imgHtml(currentImageUrl())+'</div>'
     +'<div id="dPriceWrap">'+priceHtml()+'</div>'
     +(p.description?'<p style="font-size:13px;color:var(--text-2);line-height:1.6;margin-bottom:16px;">'+esc(p.description)+'</p>':'')
     +'<div id="dVariants">'+variantsBox()+'</div>'
@@ -131,6 +164,11 @@ function showDetail(id){
     ov.querySelector('#dVariants').innerHTML=variantsBox();
     ov.querySelector('#dPriceWrap').innerHTML=priceHtml();
     ov.querySelector('#dStock').innerHTML=stockMsg();
+    // 23/05/2026: atualiza imagem hero quando a variante selecionada
+    // mudou. currentImageUrl() retorna image_url da variante se
+    // existir, senao do pai (selector troca SO a imagem principal —
+    // nao introduz galeria, comportamento Zara/Renner).
+    ov.querySelector('#dImage').innerHTML=imgHtml(currentImageUrl());
     var btn=ov.querySelector('#dAddBtn');
     btn.textContent=btnLabel();
     var disabled=btnDisabled()||(selectedVariant&&selectedVariant.stock_qty<=0);
