@@ -38,6 +38,12 @@
 // (22/05/2026): expõe storefront_url — custom domain quando ativo,
 //   senão https://loja.getaura.com.br/<slug>. Consumido pelo aura-app
 //   (TabMeuSite) para exibir o link correto ao operador.
+//
+// (23/05/2026): variantes expõem image_url. Template (products.js)
+//   usa primeira variante com imagem como fallback quando produto pai
+//   nao tem image_url; template (product_detail.js) troca a imagem
+//   principal quando o usuario seleciona uma cor com imagem propria.
+//   Migration 129 adicionou product_variants.image_url.
 // ============================================================
 'use strict';
 
@@ -251,9 +257,12 @@ async function buildStorefront(config) {
   let variantsByProduct = {};
   if (products.length > 0) {
     const productIds = products.map(p => p.id);
+    // 23/05/2026: inclui pv.image_url no SELECT (Migration 129).
+    // Template usa pra trocar foto principal ao selecionar variante e
+    // pra fallback no card da vitrine quando produto pai nao tem foto.
     const { rows: variantRows } = await db.query(`
       SELECT pv.id, pv.product_id, pv.sku_suffix,
-             pv.price_override, pv.stock_qty, pv.is_active,
+             pv.price_override, pv.stock_qty, pv.is_active, pv.image_url,
              COALESCE(
                json_agg(
                  json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
@@ -275,6 +284,7 @@ async function buildStorefront(config) {
         id: v.id, sku_suffix: v.sku_suffix,
         price_override: v.price_override !== null ? parseFloat(v.price_override) : null,
         stock_qty: parseFloat(v.stock_qty),
+        image_url: v.image_url || null,   // 23/05/2026
         values: v.values || [],
       });
     }
