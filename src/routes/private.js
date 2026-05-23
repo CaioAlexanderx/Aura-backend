@@ -40,6 +40,10 @@ router.use('/products', require('./productsVariations'));
 router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
 router.use('/products', require('./productImage'));
+// 23/05/2026: foto por variante de produto (POST/DELETE /:pid/variant-image).
+// Identifica variante por combinacao (color_hex/size_value) em vez de id,
+// pra sobreviver ao soft-delete+INSERT do PUT /variations (auto-save).
+router.use('/products', require('./variantImage'));
 router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 // 07/05/2026: Importacao de DANFE PDF via IA. Gate de plano dentro da rota
