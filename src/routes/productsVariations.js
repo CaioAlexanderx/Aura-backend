@@ -6,7 +6,7 @@
 // cor x tamanho forma o estoque por combinacao. Preco unico do pai.
 //
 // Shape da API:
-//   GET  -> { colors: [{hex, name}], sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, barcodes: {"#FF0000|P": "7891234567890", ...}, mode: 'none'|'color'|'size'|'matrix' }
+//   GET  -> { colors: [{hex, name}], sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, barcodes: {"#FF0000|P": "7891234567890", ...}, images: {"#FF0000|P": "https://..."}, mode: 'none'|'color'|'size'|'matrix' }
 //   PUT  -> recebe mesmo shape, reescreve variantes (soft-delete antigas)
 //
 // Schema preservado: usa product_variants + product_variant_values
@@ -31,6 +31,13 @@
 // via variantes nem conseguia ajustar estoque. Mesma armadilha que
 // o PR #77 corrigiu pra productImage.js (memoria
 // armadilha_visibility_leaks_rotas_produto).
+//
+// 23/05/2026: GET expoe `images` map (matrixKey -> image_url) das
+// variantes ativas. PUT preserva image_url no soft-delete + INSERT:
+// antes do soft-delete, snapshota mapa (color,size) -> image_url;
+// apos INSERT, reaplica image_url nas variantes recriadas com a
+// mesma combinacao. Sem esse rewrite, qualquer auto-save (que dispara
+// a cada blur) limpava as fotos. Migration 129 (image_url TEXT).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -75,6 +82,19 @@ function skuSuffixFromAttrs(colorHex, colorName, sizeValue) {
   return parts.join('-');
 }
 
+// 23/05/2026: Extrai a combinacao (color_hex, size_value) de um array
+// de attributes vindo do GET. Usado tanto pelo GET (expor images map)
+// quanto pelo PUT (snapshot pra preservar fotos no rewrite).
+function extractAttrs(attributes) {
+  let colorHex = null, sizeValue = null;
+  for (const a of attributes || []) {
+    const name = String(a.attribute || '').toLowerCase();
+    if (name === 'cor' || name === 'color') colorHex = a.value;
+    else if (name === 'tamanho' || name === 'size') sizeValue = a.value;
+  }
+  return { colorHex, sizeValue };
+}
+
 // GET /companies/:id/products/:pid/variations
 router.get('/:pid/variations', async (req, res) => {
   const { id: cid, pid } = req.params;
@@ -88,9 +108,9 @@ router.get('/:pid/variations', async (req, res) => {
     );
     if (!prodRows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
 
-    // Busca variantes ativas + atributos
+    // Busca variantes ativas + atributos (23/05/2026: inclui image_url)
     const { rows: variantRows } = await db.query(
-      `SELECT pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode,
+      `SELECT pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode, pv.image_url,
         COALESCE(json_agg(
           json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
           ORDER BY pvv.attribute_name
@@ -98,38 +118,32 @@ router.get('/:pid/variations', async (req, res) => {
        FROM product_variants pv
        LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
        WHERE pv.product_id = $1 AND pv.is_active = true
-       GROUP BY pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode
+       GROUP BY pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode, pv.image_url
        ORDER BY pv.created_at ASC`,
       [pid]
     );
 
-    // Decompoe variantes em cores, tamanhos, matriz e barcodes
+    // Decompoe variantes em cores, tamanhos, matriz, barcodes e images (23/05/2026)
     const colorsMap = new Map();   // hex -> name
     const sizesSet = new Set();
     const matrix = {};
     const barcodes = {};   // matrixKey -> barcode (21/05/2026)
+    const images = {};     // matrixKey -> image_url (23/05/2026)
 
     for (const v of variantRows) {
-      const attrs = v.attributes || [];
-      let colorHex = null, colorName = null, sizeValue = null;
-      for (const a of attrs) {
-        const attrName = String(a.attribute || '').toLowerCase();
-        if (attrName === 'cor' || attrName === 'color') {
-          colorHex = a.value;
-          // Tenta extrair nome do sku_suffix (VERMELHO-P -> VERMELHO)
-          if (v.sku_suffix) {
-            const first = v.sku_suffix.split('-')[0];
-            if (first && !/^[0-9A-F]{6}$/i.test(first)) colorName = first;
-          }
-        } else if (attrName === 'tamanho' || attrName === 'size') {
-          sizeValue = a.value;
-        }
+      const { colorHex, sizeValue } = extractAttrs(v.attributes);
+      let colorName = null;
+      if (colorHex && v.sku_suffix) {
+        // Tenta extrair nome do sku_suffix (VERMELHO-P -> VERMELHO)
+        const first = v.sku_suffix.split('-')[0];
+        if (first && !/^[0-9A-F]{6}$/i.test(first)) colorName = first;
       }
       if (colorHex) colorsMap.set(colorHex, colorName || null);
       if (sizeValue) sizesSet.add(sizeValue);
       const key = buildMatrixKey(colorHex, sizeValue);
       matrix[key] = parseInt(v.stock_qty) || 0;
-      if (v.barcode) barcodes[key] = v.barcode;   // 21/05/2026: expoe barcode por combinacao
+      if (v.barcode) barcodes[key] = v.barcode;
+      if (v.image_url) images[key] = v.image_url;   // 23/05/2026
     }
 
     const colors = Array.from(colorsMap.entries()).map(([hex, name]) => ({ hex, name }));
@@ -146,7 +160,8 @@ router.get('/:pid/variations', async (req, res) => {
       colors,
       sizes,
       matrix,
-      barcodes,   // 21/05/2026
+      barcodes,
+      images,   // 23/05/2026: foto por combinacao
       mode,
       total_variants: variantRows.length,
     });
@@ -202,6 +217,30 @@ router.put('/:pid/variations', async (req, res) => {
     const parentColor = prodRows[0].color || null;
     const parentSize  = prodRows[0].size  || null;
 
+    // 23/05/2026: snapshot do mapa (color, size) -> image_url ANTES
+    // do soft-delete. Necessario porque o INSERT cria variantes com
+    // ids novos; sem isso, qualquer auto-save apagaria as fotos.
+    // Chave: buildMatrixKey(colorHex, sizeValue) (mesma do GET output).
+    const { rows: prevVariants } = await client.query(
+      `SELECT pv.image_url,
+         COALESCE(json_agg(
+           json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
+           ORDER BY pvv.attribute_name
+         ) FILTER (WHERE pvv.id IS NOT NULL), '[]'::json) AS attributes
+       FROM product_variants pv
+       LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
+       WHERE pv.product_id = $1 AND pv.is_active = true AND pv.image_url IS NOT NULL
+       GROUP BY pv.id, pv.image_url`,
+      [pid]
+    );
+    const imageByCombo = new Map();   // matrixKey -> image_url
+    for (const row of prevVariants) {
+      const { colorHex, sizeValue } = extractAttrs(row.attributes);
+      // Normaliza hex pra uppercase (consistencia com inputs do PUT)
+      const normHex = colorHex ? String(colorHex).toUpperCase() : null;
+      imageByCombo.set(buildMatrixKey(normHex, sizeValue), row.image_url);
+    }
+
     // Soft-delete variantes ativas atuais (preserva sale_items FK)
     await client.query(
       'UPDATE product_variants SET is_active = false, updated_at = NOW() WHERE product_id = $1 AND is_active = true',
@@ -251,11 +290,15 @@ router.put('/:pid/variations', async (req, res) => {
       // 21/05/2026: persiste barcode por combinacao (lookup na chave matrixKey)
       const barcodeVal = barcodes[buildMatrixKey(combo.colorHex, combo.sizeValue)] || null;
 
-      // Cria variante (inclui barcode se fornecido)
+      // 23/05/2026: recupera image_url snapshotada (lookup com hex normalizado)
+      const normHex = combo.colorHex ? String(combo.colorHex).toUpperCase() : null;
+      const imageVal = imageByCombo.get(buildMatrixKey(normHex, combo.sizeValue)) || null;
+
+      // Cria variante (inclui barcode e image_url se houver)
       const { rows: variantRow } = await client.query(
-        `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, barcode, is_active)
-         VALUES ($1, $2, $3, $4, true) RETURNING id`,
-        [pid, skuSuffix || null, combo.stock, barcodeVal]
+        `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, barcode, image_url, is_active)
+         VALUES ($1, $2, $3, $4, $5, true) RETURNING id`,
+        [pid, skuSuffix || null, combo.stock, barcodeVal, imageVal]
       );
       const variantId = variantRow[0].id;
 
