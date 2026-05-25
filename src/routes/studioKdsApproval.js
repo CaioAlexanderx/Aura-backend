@@ -2,7 +2,9 @@
 // AURA Studio · Rotas autenticadas Fase 4 (KDS) + Fase 5 (request approval)
 // Arquivo separado pra não inflar studio.js.
 // Mount em private.js sob mesmo prefixo /studio.
-// Migration 130 (studio_production_status) + Migration 132 (approval_links).
+// Migration 130 (studio_production_status) + 132 (approval_links) + 25/05
+// (studio_kds_unified_view_and_trigger — view studio_orders unindo
+//  digital_orders + sales personalizaveis).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -11,15 +13,16 @@ const db      = require('../config/database');
 const { markStudioOnboarding } = require('../utils/studioOnboarding');
 
 // ═══════════════════════════════════════════════════════════
-// FASE 4: KDS de Produção
+// FASE 4: KDS de Produção (atualizado 25/05 — KDS unificado)
 // ═══════════════════════════════════════════════════════════
 
 const VALID_PRODUCTION_STATUS = ['pending_art', 'approved', 'in_production', 'ready', 'delivered'];
 
+// ─── GET /orders — lista da view studio_orders (digital + pdv) ────
 router.get('/orders', async function(req, res) {
   const { status, days = 30, limit = 200 } = req.query;
   const params = [req.params.id];
-  let where = `o.company_id = $1 AND o.vertical = 'studio'`;
+  let where = `o.company_id = $1`;
   if (status && VALID_PRODUCTION_STATUS.includes(String(status))) {
     params.push(status);
     where += ` AND o.studio_production_status = $${params.length}`;
@@ -32,14 +35,24 @@ router.get('/orders', async function(req, res) {
       `SELECT o.id, o.created_at, o.total_amount, o.status,
               o.studio_production_status,
               o.customer_name, o.customer_phone,
-              COALESCE(o.customer_data->>'name', o.customer_name) AS display_name,
-              (SELECT COUNT(*) FROM digital_order_items oi WHERE oi.order_id = o.id) AS item_count,
+              o.display_name,
+              o.source,
+              o.digital_order_id,
+              o.pdv_sale_id,
+              -- item_count condicional por fonte
+              CASE
+                WHEN o.source = 'digital' THEN
+                  (SELECT COUNT(*) FROM digital_order_items oi WHERE oi.order_id = o.digital_order_id)
+                ELSE
+                  (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = o.pdv_sale_id)
+              END AS item_count,
+              -- approvals so existem pra fonte digital
               (SELECT MIN(image_url) FROM studio_approval_links a
-                WHERE a.order_id = o.id AND a.status = 'pending'
+                WHERE a.order_id = o.digital_order_id AND a.status = 'pending'
                 ORDER BY a.created_at DESC LIMIT 1) AS pending_approval_url,
               (SELECT COUNT(*) FROM studio_approval_links a
-                WHERE a.order_id = o.id) AS approval_count
-         FROM digital_orders o
+                WHERE a.order_id = o.digital_order_id) AS approval_count
+         FROM studio_orders o
         WHERE ${where}
         ORDER BY o.created_at DESC
         LIMIT $${params.length + 1}`,
@@ -52,36 +65,62 @@ router.get('/orders', async function(req, res) {
   }
 });
 
+// ─── GET /orders/:oid — detalhe source-aware ──────────────────────
 router.get('/orders/:oid', async function(req, res) {
   try {
-    const orderRes = await db.query(
-      `SELECT o.*, COALESCE(o.customer_data->>'name', o.customer_name) AS display_name
-         FROM digital_orders o
-        WHERE o.id = $1 AND o.company_id = $2 LIMIT 1`,
+    // 1. Detecta source via view
+    const headRes = await db.query(
+      `SELECT * FROM studio_orders
+        WHERE id = $1 AND company_id = $2
+        LIMIT 1`,
       [req.params.oid, req.params.id]
     );
-    if (!orderRes.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
+    if (!headRes.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
+    const head = headRes.rows[0];
 
-    const itemsRes = await db.query(
-      `SELECT id, product_id, product_name, quantity, unit_price, customization
-         FROM digital_order_items
-        WHERE order_id = $1
-        ORDER BY id`,
-      [req.params.oid]
-    );
+    // 2. Items da tabela correta
+    let items = [];
+    if (head.source === 'digital') {
+      const r = await db.query(
+        `SELECT id, product_id, product_name, quantity, unit_price, customization
+           FROM digital_order_items
+          WHERE order_id = $1
+          ORDER BY id`,
+        [head.digital_order_id]
+      );
+      items = r.rows;
+    } else {
+      // source = 'pdv' — sale_items (ainda sem customization até PDV Studio nativo)
+      const r = await db.query(
+        `SELECT si.id, si.product_id, p.name AS product_name,
+                si.quantity, si.unit_price,
+                NULL::jsonb AS customization
+           FROM sale_items si
+           LEFT JOIN products p ON p.id = si.product_id
+          WHERE si.sale_id = $1
+          ORDER BY si.id`,
+        [head.pdv_sale_id]
+      );
+      items = r.rows;
+    }
 
-    const approvalsRes = await db.query(
-      `SELECT id, token, status, mockup_url, response_note, expires_at, responded_at, created_at
-         FROM studio_approval_links
-        WHERE order_id = $1
-        ORDER BY created_at DESC`,
-      [req.params.oid]
-    );
+    // 3. Approvals só existem pra source digital
+    let approvals = [];
+    if (head.source === 'digital') {
+      const r = await db.query(
+        `SELECT id, token, status, mockup_url, response_note, expires_at, responded_at, created_at
+           FROM studio_approval_links
+          WHERE order_id = $1
+          ORDER BY created_at DESC`,
+        [head.digital_order_id]
+      );
+      approvals = r.rows;
+    }
 
     res.json({
-      order: orderRes.rows[0],
-      items: itemsRes.rows,
-      approvals: approvalsRes.rows,
+      order: head,
+      items,
+      approvals,
     });
   } catch (err) {
     console.error('[studio/orders/:oid]', err.message);
@@ -89,21 +128,49 @@ router.get('/orders/:oid', async function(req, res) {
   }
 });
 
+// ─── PATCH /orders/:oid/production-status — source-aware update ───
 router.patch('/orders/:oid/production-status', async function(req, res) {
   const { status } = req.body;
   if (!VALID_PRODUCTION_STATUS.includes(status)) {
     return res.status(400).json({ error: `status inválido (use: ${VALID_PRODUCTION_STATUS.join(', ')})` });
   }
   try {
-    const r = await db.query(
-      `UPDATE digital_orders
-          SET studio_production_status = $1, updated_at = NOW()
-        WHERE id = $2 AND company_id = $3 AND vertical = 'studio'
-        RETURNING id, studio_production_status`,
-      [status, req.params.oid, req.params.id]
+    // 1. Detecta source via view
+    const headRes = await db.query(
+      `SELECT source, digital_order_id, pdv_sale_id
+         FROM studio_orders
+        WHERE id = $1 AND company_id = $2
+        LIMIT 1`,
+      [req.params.oid, req.params.id]
     );
-    if (!r.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
-    res.json(r.rows[0]);
+    if (!headRes.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
+    const head = headRes.rows[0];
+
+    // 2. Update na tabela correta
+    let updated;
+    if (head.source === 'digital') {
+      const r = await db.query(
+        `UPDATE digital_orders
+            SET studio_production_status = $1, updated_at = NOW()
+          WHERE id = $2 AND company_id = $3 AND vertical = 'studio'
+          RETURNING id, studio_production_status`,
+        [status, head.digital_order_id, req.params.id]
+      );
+      updated = r.rows[0];
+    } else {
+      // source = 'pdv'
+      const r = await db.query(
+        `UPDATE sales
+            SET studio_production_status = $1, updated_at = NOW()
+          WHERE id = $2 AND company_id = $3
+          RETURNING id, studio_production_status`,
+        [status, head.pdv_sale_id, req.params.id]
+      );
+      updated = r.rows[0];
+    }
+
+    if (!updated) return res.status(404).json({ error: 'Pedido não encontrado pra atualizar' });
+    res.json({ ...updated, source: head.source });
   } catch (err) {
     console.error('[studio/orders/production-status]', err.message);
     res.status(500).json({ error: 'Erro ao atualizar status' });
@@ -112,6 +179,9 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
 
 // ═══════════════════════════════════════════════════════════
 // FASE 5: Request approval (wa.me)
+// SO funciona pra source='digital' — pra venda PDV o cliente esta presente,
+// nao precisa de fluxo de aprovacao remota. Quando PDV Studio nativo (E1)
+// for implementado, considerar extender approval pra source=pdv.
 // ═══════════════════════════════════════════════════════════
 
 function generateToken() {
@@ -132,6 +202,20 @@ router.post('/orders/:oid/approval', async function(req, res) {
     return res.status(400).json({ error: 'mockup_url obrigatório (URL pública do mockup)' });
   }
 
+  // Resolve source primeiro — approval só funciona pra digital
+  const headRes = await db.query(
+    `SELECT source, digital_order_id FROM studio_orders
+      WHERE id = $1 AND company_id = $2 LIMIT 1`,
+    [req.params.oid, req.params.id]
+  );
+  if (!headRes.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
+  if (headRes.rows[0].source !== 'digital') {
+    return res.status(400).json({
+      error: 'Aprovação remota só disponível pra pedidos do Canal Digital. Pra venda PDV, mostre o mockup ao cliente presencialmente.',
+    });
+  }
+  const digitalOrderId = headRes.rows[0].digital_order_id;
+
   const orderRes = await db.query(
     `SELECT o.id, o.customer_name, o.customer_phone,
             COALESCE(o.customer_data->>'name', o.customer_name) AS display_name,
@@ -140,9 +224,9 @@ router.post('/orders/:oid/approval', async function(req, res) {
        LEFT JOIN companies c ON c.id = o.company_id
       WHERE o.id = $1 AND o.company_id = $2 AND o.vertical = 'studio'
       LIMIT 1`,
-    [req.params.oid, req.params.id]
+    [digitalOrderId, req.params.id]
   );
-  if (!orderRes.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
+  if (!orderRes.rows.length) return res.status(404).json({ error: 'Pedido digital não encontrado' });
   const order = orderRes.rows[0];
 
   const phone = customer_phone || order.customer_phone || '';
@@ -172,7 +256,7 @@ router.post('/orders/:oid/approval', async function(req, res) {
           customer_phone, expires_at, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' days')::interval, $8)
        RETURNING id, token, mockup_url, status, expires_at, created_at`,
-      [req.params.id, req.params.oid, token, mockup_url, messageText,
+      [req.params.id, digitalOrderId, token, mockup_url, messageText,
        phone || null, String(expiresInDays), req.user?.id || null]
     );
 
@@ -183,7 +267,6 @@ router.post('/orders/:oid/approval', async function(req, res) {
       [r.rows[0].id, mockup_url, 'Mockup inicial enviado pra aprovação']
     );
 
-    // Onboarding: gerou primeira aprovação via WhatsApp
     markStudioOnboarding(db, req.params.id, 'wa');
 
     res.status(201).json({
@@ -200,6 +283,15 @@ router.post('/orders/:oid/approval', async function(req, res) {
 
 router.get('/orders/:oid/approval', async function(req, res) {
   try {
+    // Resolve digital_order_id via view (source-aware mas approval só digital)
+    const headRes = await db.query(
+      `SELECT source, digital_order_id FROM studio_orders
+        WHERE id = $1 AND company_id = $2 LIMIT 1`,
+      [req.params.oid, req.params.id]
+    );
+    if (!headRes.rows.length || headRes.rows[0].source !== 'digital') {
+      return res.json({ approvals: [] });
+    }
     const r = await db.query(
       `SELECT a.*,
               (SELECT json_agg(json_build_object(
@@ -213,7 +305,7 @@ router.get('/orders/:oid/approval', async function(req, res) {
          FROM studio_approval_links a
         WHERE a.order_id = $1 AND a.company_id = $2
         ORDER BY a.created_at DESC`,
-      [req.params.oid, req.params.id]
+      [headRes.rows[0].digital_order_id, req.params.id]
     );
     res.json({ approvals: r.rows });
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar aprovações' }); }
