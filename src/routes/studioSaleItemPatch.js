@@ -1,10 +1,13 @@
 // ============================================================
-// AURA Studio - PATCH sale_items.customization (Sub-onda E)
+// AURA Studio - PATCH sale_items.customization + GET /studio/products
 //
 // Endpoint isolado em /companies/:id/studio/sale-items/:sale_item_id/customization
 // pra evitar mexer no pdv.js (45kb). Frontend PDV Studio fecha venda
 // via /pdv/sale (sem customization) e depois faz PATCH em cada item
 // personalizavel.
+//
+// Tambem expoe GET /studio/products que a rota generica /products
+// nao retorna (faltam campos is_personalizable + customization_config).
 //
 // Trigger SQL trg_sales_studio_status (migration studio_kds_unified_view_and_trigger)
 // detecta produto is_personalizable em sale_items e seta
@@ -15,6 +18,68 @@
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
+
+// Visibility canonica (mesma de products.js)
+function listVisibilityWhere(cidParam) {
+  return `(company_id = ${cidParam} OR (
+    is_group_shared = true
+    AND company_id IN (
+      SELECT id FROM companies
+      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
+        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
+        FROM companies WHERE id = ${cidParam}
+      )
+    )
+  ))`;
+}
+
+// GET /companies/:id/studio/products
+// Lista produtos is_personalizable=true com customization_config + price + image_url.
+// Reusado pelo PDV Studio nativo (E1 frontend).
+router.get('/products', async (req, res) => {
+  const cid = req.params.id;
+  const search = (req.query.search || '').trim();
+  const limit = Math.min(parseInt(req.query.limit) || 200, 500);
+  try {
+    const params = [cid];
+    let where = `WHERE is_active IS NOT FALSE
+                   AND is_personalizable = true
+                   AND customization_config IS NOT NULL
+                   AND ${listVisibilityWhere('$1')}`;
+    if (search) {
+      params.push(`%${search}%`);
+      where += ` AND (name ILIKE $${params.length} OR category ILIKE $${params.length})`;
+    }
+    params.push(limit);
+    const { rows } = await db.query(
+      `SELECT id, name, description, price, image_url, category, stock_qty,
+              is_personalizable, customization_config, company_id, created_at
+         FROM products
+         ${where}
+        ORDER BY name ASC
+        LIMIT $${params.length}`,
+      params
+    );
+    res.json({
+      products: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        description: r.description || null,
+        price: parseFloat(r.price) || 0,
+        image_url: r.image_url || null,
+        category: r.category || null,
+        stock_qty: parseFloat(r.stock_qty) || 0,
+        is_personalizable: !!r.is_personalizable,
+        customization_config: r.customization_config,
+        stock_company_id: r.company_id,
+      })),
+      count: rows.length,
+    });
+  } catch (err) {
+    console.error('[studio/products] list error:', err.message);
+    res.status(500).json({ error: 'Erro ao listar produtos personalizaveis' });
+  }
+});
 
 // PATCH /companies/:id/studio/sale-items/:sale_item_id/customization
 router.patch('/sale-items/:sale_item_id/customization', async (req, res) => {
@@ -52,7 +117,7 @@ router.patch('/sale-items/:sale_item_id/customization', async (req, res) => {
     });
   } catch (err) {
     if (err && err.code === '42703') {
-      // Coluna customization nao existe — migration studio_sale_items_customization
+      // Coluna customization nao existe - migration studio_sale_items_customization
       // nao rodou ainda. Retorna 503 pro frontend evitar bloquear o fluxo.
       console.error('[studio/sale-items] coluna customization inexistente:', err.message);
       return res.status(503).json({
