@@ -395,52 +395,54 @@ router.post('/mark-rotten', ...adminOnly, asyncHandler(async (req, res) => {
 // SAO ENFORCED IMPLICITAMENTE (queue ignora rotten e ja-vendidos por design).
 // Filtros do usuario sao ADITIVOS (AND).
 //
-// QUEUE_PRIORITY (atualizado 25/05 — hotfix fila vazia):
-//   100 followup_overdue   — proximo_followup ja passou
-//    80 funnel_stalled     — demo/interessado parado >= 3d
-//    60 hot_cold           — score >= 50 sem atividade >= 7d
-//    40 new_lead           — importado nas ultimas 24h
-//    30 needs_contact      — contactado/respondeu mas sem followup nem atividade >= 5d
-//    20 cold               — status='new' SEM nenhuma interacao (ja passou as 24h)
-//    10 baseline           — qualquer outro lead elegivel
+// QUEUE_PRIORITY v2 (25/05 — fila limpa, progresso preservado entre sessoes):
+//   Filtro base exclui contacted/responded sem followup agendado.
+//   So entra: status='new' + followup vencido + demo/interested estagnado.
 //
-// Sem o baseline (antes era ELSE 0), a fila ficava vazia em steady-state.
-// 2805 leads no banco -> 0 na fila. Bug reportado 25/05.
+//   100 followup_overdue   — proximo_followup ja passou (qualquer status)
+//    80 funnel_stalled     — demo/interessado parado >= 3d
+//    60 hot_cold           — score >= 50 e status='new'
+//    40 new_lead           — importado nas ultimas 24h
+//    10 other              — demais leads novos
 // ============================================================
 router.get('/queue', ...adminOnly, asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   const { conditions, params, idx: startIdx } = buildLeadFilterConditions(req.query);
   let idx = startIdx;
 
-  // Enforces SEMPRE: nao mostra rotten/converted/lost na fila
+  // Enforces SEMPRE: nao mostra rotten/converted/lost na fila.
+  // v2 (25/05): exclui leads ja triados (contacted/responded sem followup)
+  // para que o progresso entre sessoes seja preservado. So entra na fila:
+  //   - status='new' (nunca contactado)
+  //   - followup vencido (qualquer status)
+  //   - demo/interested estagnado >= 3d
   const baseConditions = [
     `l.status NOT IN ('converted','lost')`,
     `l.rotten_since IS NULL`,
+    `(
+      l.status = 'new'
+      OR (l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW())
+      OR (l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days'))
+    )`,
     ...conditions,
   ];
   const where = 'WHERE ' + baseConditions.join(' AND ');
 
   // Expressao de priorizacao reutilizada em SELECT/ORDER BY.
-  // ELSE 10 (era 0) garante que TODO lead elegivel entra na fila — antes
-  // o HAVING > 0 zerava qualquer lead que nao casasse com as 4 regras top.
   const priorityExpr = `CASE
     WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 100
     WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 80
-    WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 60
+    WHEN l.dynamic_score >= 50 AND l.status = 'new' THEN 60
     WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 40
-    WHEN l.status IN ('contacted','responded') AND l.next_followup_at IS NULL AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '5 days') THEN 30
-    WHEN l.status = 'new' AND NOT EXISTS (SELECT 1 FROM lead_interactions li2 WHERE li2.lead_id = l.id) THEN 20
     ELSE 10
   END`;
 
   const reasonExpr = `CASE
     WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 'followup_overdue'
     WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 'funnel_stalled'
-    WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 'hot_cold'
+    WHEN l.dynamic_score >= 50 AND l.status = 'new' THEN 'hot_cold'
     WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 'new_lead'
-    WHEN l.status IN ('contacted','responded') AND l.next_followup_at IS NULL AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '5 days') THEN 'needs_contact'
-    WHEN l.status = 'new' AND NOT EXISTS (SELECT 1 FROM lead_interactions li2 WHERE li2.lead_id = l.id) THEN 'cold'
-    ELSE 'other'
+    ELSE 'cold'
   END`;
 
   const { rows } = await pool.query(
