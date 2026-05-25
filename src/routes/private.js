@@ -83,6 +83,8 @@ router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbers
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3'));
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
 router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplace'));
+// Core ML/Shopee F1.B + F2.B (25/05/2026): OAuth auth-url/authorize/refresh/revoke
+router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplaceAuth'));
 router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
 
 router.use('/ai', requirePlan('negocio', 'expansao'), require('./aiChat'));
