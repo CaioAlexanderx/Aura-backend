@@ -177,4 +177,11 @@ router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./food
 // e Hub passa a listar automaticamente. Migration 128.
 router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub'));
 
+// Aura Studio (24/05/2026): vertical novo de personalizados.
+// Piloto Sheid Mania. Plano Expansão+. Migration 130.
+// Fase 0: GET /studio/health (sentinel).
+// Fase 1: GET/PUT /studio/products/:pid/customization-config + POST /personalize.
+// Doc: Projects/Aura/BACKLOG_AURA_STUDIO.md
+router.use('/studio', requirePlan('expansao'), require('./studio'));
+
 module.exports = router;
