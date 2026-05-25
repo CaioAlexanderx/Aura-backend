@@ -1,14 +1,14 @@
 // ============================================================
 // AURA Studio · Rotas autenticadas Fase 4 (KDS) + Fase 5 (request approval)
-// Arquivo separado pra não inflar studio.js (já com 24KB).
-// Mount em private.js sob mesmo prefixo /studio (Express agrupa).
-//
+// Arquivo separado pra não inflar studio.js.
+// Mount em private.js sob mesmo prefixo /studio.
 // Migration 130 (studio_production_status) + Migration 132 (approval_links).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const crypto  = require('crypto');
 const db      = require('../config/database');
+const { markStudioOnboarding } = require('../utils/studioOnboarding');
 
 // ═══════════════════════════════════════════════════════════
 // FASE 4: KDS de Produção
@@ -16,7 +16,6 @@ const db      = require('../config/database');
 
 const VALID_PRODUCTION_STATUS = ['pending_art', 'approved', 'in_production', 'ready', 'delivered'];
 
-// GET /studio/orders — lista pedidos vertical=studio com filtros
 router.get('/orders', async function(req, res) {
   const { status, days = 30, limit = 200 } = req.query;
   const params = [req.params.id];
@@ -53,7 +52,6 @@ router.get('/orders', async function(req, res) {
   }
 });
 
-// GET /studio/orders/:oid — detalhe (items + customizations + approvals)
 router.get('/orders/:oid', async function(req, res) {
   try {
     const orderRes = await db.query(
@@ -91,7 +89,6 @@ router.get('/orders/:oid', async function(req, res) {
   }
 });
 
-// PATCH /studio/orders/:oid/production-status — drag entre colunas
 router.patch('/orders/:oid/production-status', async function(req, res) {
   const { status } = req.body;
   if (!VALID_PRODUCTION_STATUS.includes(status)) {
@@ -118,7 +115,6 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
 // ═══════════════════════════════════════════════════════════
 
 function generateToken() {
-  // 24 bytes base64-url = 32 chars URL-safe, sem caracteres especiais
   return crypto.randomBytes(24).toString('base64')
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
@@ -126,20 +122,16 @@ function generateToken() {
 function buildWaMeLink(phone, text) {
   const digits = String(phone || '').replace(/\D/g, '');
   if (!digits) return null;
-  // Brasil = adiciona 55 se não tiver
   const fullDigits = digits.length === 10 || digits.length === 11 ? '55' + digits : digits;
   return `https://wa.me/${fullDigits}?text=${encodeURIComponent(text)}`;
 }
 
-// POST /studio/orders/:oid/approval — cria link público + monta wa.me
-// body: { mockup_url, customer_phone?, custom_message?, expires_in_days? }
 router.post('/orders/:oid/approval', async function(req, res) {
   const { mockup_url, customer_phone, custom_message, expires_in_days } = req.body;
   if (!mockup_url || !/^https?:\/\//.test(mockup_url)) {
     return res.status(400).json({ error: 'mockup_url obrigatório (URL pública do mockup)' });
   }
 
-  // Valida pedido existe e é do Studio
   const orderRes = await db.query(
     `SELECT o.id, o.customer_name, o.customer_phone,
             COALESCE(o.customer_data->>'name', o.customer_name) AS display_name,
@@ -157,7 +149,6 @@ router.post('/orders/:oid/approval', async function(req, res) {
   const customerFirstName = (order.display_name || 'cliente').split(' ')[0];
   const shopName = order.trade_name || order.legal_name || 'nossa loja';
 
-  // Gera token único (até 5 tentativas em caso de colisão extremamente improvável)
   let token = null;
   for (let i = 0; i < 5; i++) {
     const candidate = generateToken();
@@ -166,7 +157,6 @@ router.post('/orders/:oid/approval', async function(req, res) {
   }
   if (!token) return res.status(500).json({ error: 'Não foi possível gerar token' });
 
-  // Monta texto da mensagem (cliente pode customizar)
   const expiresInDays = Math.min(Math.max(parseInt(expires_in_days) || 7, 1), 30);
   const approvalUrl = `${process.env.APP_PUBLIC_URL || ''}/aprovacao/${token}`;
   const defaultMsg =
@@ -186,13 +176,15 @@ router.post('/orders/:oid/approval', async function(req, res) {
        phone || null, String(expiresInDays), req.user?.id || null]
     );
 
-    // Cria revisão inicial (revision_number=1, criada pela loja)
     await db.query(
       `INSERT INTO studio_approval_revisions
          (approval_id, revision_number, mockup_url, note, created_by_type)
        VALUES ($1, 1, $2, $3, 'shop')`,
       [r.rows[0].id, mockup_url, 'Mockup inicial enviado pra aprovação']
     );
+
+    // Onboarding: gerou primeira aprovação via WhatsApp
+    markStudioOnboarding(db, req.params.id, 'wa');
 
     res.status(201).json({
       ...r.rows[0],
@@ -206,7 +198,6 @@ router.post('/orders/:oid/approval', async function(req, res) {
   }
 });
 
-// GET /studio/orders/:oid/approval — histórico de aprovações do pedido
 router.get('/orders/:oid/approval', async function(req, res) {
   try {
     const r = await db.query(
@@ -228,7 +219,6 @@ router.get('/orders/:oid/approval', async function(req, res) {
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar aprovações' }); }
 });
 
-// POST /studio/approval/:approvalId/cancel — invalida link (marca expired)
 router.post('/approval/:approvalId/cancel', async function(req, res) {
   try {
     const r = await db.query(
