@@ -1,10 +1,11 @@
 // ============================================================
-// AURA Studio — rotas do vertical (Fase 0 + 1 + 2 + 3)
-// Atualizado 25/05/2026 (item #2 do follow-up UX/UI)
+// AURA Studio — rotas do vertical (Fase 0 + 1 + 2 + 3 + Nivel 1)
+// Atualizado 25/05/2026 — Nivel 1 sub-onda A (settings + metrics + sla)
 //
 // Fase 0+1: /health, /products/:pid/customization-config, /personalize
 // Fase 2  : /gallery/* (categorias + templates + vinculação)
 // Fase 3  : /inputs/* + /compositions/* (BOM + custo + margem)
+// Nivel 1 : /settings, /metrics, /sla/estimate (25/05/2026)
 //
 // Persistência de onboarding (markStudioOnboarding) gravada em
 // companies.studio_settings.onboarding.{key} nos pontos-chave.
@@ -100,7 +101,6 @@ router.put('/products/:pid/customization-config', async function(req, res) {
       [JSON.stringify(cfg), req.params.pid, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Produto não encontrado' });
-    // Onboarding: marcou primeiro produto personalizável
     markStudioOnboarding(db, req.params.id, 'product');
     res.json({
       product_id: r.rows[0].id, name: r.rows[0].name,
@@ -128,7 +128,6 @@ router.post('/products/:pid/personalize', async function(req, res) {
 // FASE 2: Galeria de templates
 // ═══════════════════════════════════════════════════════════
 
-// ─── Categorias ─────────────────────────────────────────────
 router.get('/gallery/categories', async function(req, res) {
   try {
     const r = await db.query(
@@ -195,7 +194,6 @@ router.delete('/gallery/categories/:cid', async function(req, res) {
   } catch (err) { res.status(500).json({ error: 'Erro ao excluir categoria' }); }
 });
 
-// ─── Templates ──────────────────────────────────────────────
 router.get('/gallery/templates', async function(req, res) {
   const { category_id, tag, limit = 200 } = req.query;
   const params = [req.params.id];
@@ -230,7 +228,6 @@ router.post('/gallery/templates', async function(req, res) {
       [req.params.id, category_id || null, String(name).trim(), description || null,
        image_url, thumb_url || null, tagsArr, req.user?.id || null]
     );
-    // Onboarding: subiu primeiro template
     markStudioOnboarding(db, req.params.id, 'gallery');
     res.status(201).json(r.rows[0]);
   } catch (err) {
@@ -279,7 +276,6 @@ router.delete('/gallery/templates/:tid', async function(req, res) {
   } catch (err) { res.status(500).json({ error: 'Erro ao excluir template' }); }
 });
 
-// ─── Vinculação produto ↔ template ──────────────────────────
 router.get('/gallery/by-product/:pid', async function(req, res) {
   try {
     const r = await db.query(
@@ -339,7 +335,6 @@ router.delete('/gallery/products/:pid/templates/:tid', async function(req, res) 
 // FASE 3: Insumos + Composições
 // ═══════════════════════════════════════════════════════════
 
-// ─── Insumos (matéria-prima) ────────────────────────────────
 router.get('/inputs', async function(req, res) {
   try {
     const r = await db.query(
@@ -427,7 +422,6 @@ router.delete('/inputs/:iid', async function(req, res) {
   } catch (err) { res.status(500).json({ error: 'Erro ao excluir insumo' }); }
 });
 
-// ─── Composições (BOM) ──────────────────────────────────────
 router.get('/compositions/by-product/:pid', async function(req, res) {
   try {
     const compRes = await db.query(
@@ -534,6 +528,224 @@ router.get('/compositions/summary', async function(req, res) {
     );
     res.json({ compositions: r.rows, count: r.rows.length });
   } catch (err) { res.status(500).json({ error: 'Erro ao listar composições' }); }
+});
+
+// ═══════════════════════════════════════════════════════════
+// NIVEL 1 (25/05/2026) — Settings + Metrics + SLA Estimate
+// ═══════════════════════════════════════════════════════════
+
+// Whitelist de chaves graváveis em studio_settings (evita escrita acidental
+// de chaves estranhas). Apenas as listadas aqui são aceitas via PATCH.
+const ALLOWED_STUDIO_SETTINGS = [
+  'default_sla_days',            // int — prazo padrão de produção (dias úteis)
+  'production_capacity_per_day', // int — capacidade diária pra calcular fila
+  'approval_wa_phone',           // string — WhatsApp da loja (link wa.me)
+  'approval_template_message',   // string — template da mensagem de aprovação
+  'ncm_defaults',                // jsonb — { 'caneca': 'XXXXX', 'camiseta': ... }
+];
+
+// ─── GET /studio/settings ───────────────────────────────────
+// Devolve o JSONB studio_settings inteiro (defaults aplicados no cliente).
+router.get('/settings', async function(req, res) {
+  try {
+    const r = await db.query(
+      `SELECT COALESCE(studio_settings, '{}'::jsonb) AS settings
+         FROM companies WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Empresa não encontrada' });
+    res.json({ settings: r.rows[0].settings });
+  } catch (err) {
+    console.error('[studio/settings:GET]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar configurações' });
+  }
+});
+
+// ─── PATCH /studio/settings ─────────────────────────────────
+// Merge no JSONB. Apenas chaves de ALLOWED_STUDIO_SETTINGS são aceitas.
+router.patch('/settings', async function(req, res) {
+  const patch = req.body || {};
+  const filtered = {};
+  for (const k of ALLOWED_STUDIO_SETTINGS) {
+    if (patch[k] !== undefined) filtered[k] = patch[k];
+  }
+  if (Object.keys(filtered).length === 0) {
+    return res.status(400).json({ error: 'nada pra atualizar (chaves permitidas: ' + ALLOWED_STUDIO_SETTINGS.join(', ') + ')' });
+  }
+  try {
+    const r = await db.query(
+      `UPDATE companies
+          SET studio_settings = COALESCE(studio_settings, '{}'::jsonb) || $1::jsonb,
+              updated_at = NOW()
+        WHERE id = $2
+        RETURNING COALESCE(studio_settings, '{}'::jsonb) AS settings`,
+      [JSON.stringify(filtered), req.params.id]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Empresa não encontrada' });
+    // Onboarding hooks
+    if (filtered.approval_wa_phone) markStudioOnboarding(db, req.params.id, 'wa');
+    if (filtered.default_sla_days)  markStudioOnboarding(db, req.params.id, 'sla');
+    res.json({ settings: r.rows[0].settings });
+  } catch (err) {
+    console.error('[studio/settings:PATCH]', err.message);
+    res.status(500).json({ error: 'Erro ao salvar configurações' });
+  }
+});
+
+// ─── GET /studio/metrics ────────────────────────────────────
+// KPIs pra home do Studio. Query param ?days=N (default 7, max 90).
+router.get('/metrics', async function(req, res) {
+  const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 90);
+  try {
+    // 1. KDS atual — distribuição por status de produção
+    const kdsRes = await db.query(
+      `SELECT studio_production_status, COUNT(*)::int AS cnt
+         FROM studio_orders
+        WHERE company_id = $1
+          AND studio_production_status IS NOT NULL
+        GROUP BY studio_production_status`,
+      [req.params.id]
+    );
+    const kdsByStatus = {};
+    for (const r of kdsRes.rows) kdsByStatus[r.studio_production_status] = r.cnt;
+
+    // 2. Prontos hoje (entregues/marcados como ready hoje)
+    const prontosHojeRes = await db.query(
+      `SELECT COUNT(*)::int AS cnt
+         FROM studio_orders
+        WHERE company_id = $1
+          AND studio_production_status = 'ready'
+          AND updated_at::date = CURRENT_DATE`,
+      [req.params.id]
+    );
+
+    // 3. Vendas Studio dos últimos N dias (defensivo: sales.status pode não existir)
+    let vendasTotal = 0;
+    let pedidosCount = 0;
+    try {
+      const vendasRes = await db.query(
+        `SELECT COALESCE(SUM(s.total_amount), 0)::float AS total,
+                COUNT(DISTINCT so.id)::int AS pedidos
+           FROM studio_orders so
+           JOIN sales s ON s.id = so.sale_id
+          WHERE so.company_id = $1
+            AND s.created_at >= NOW() - ($2 || ' days')::interval
+            AND COALESCE(s.status, 'completed') != 'cancelled'`,
+        [req.params.id, String(days)]
+      );
+      vendasTotal = parseFloat(vendasRes.rows[0]?.total || 0);
+      pedidosCount = parseInt(vendasRes.rows[0]?.pedidos || 0);
+    } catch (_) { /* tabela ou coluna pode não existir em ambientes parciais */ }
+
+    // 4. Margem média via view studio_compositions_summary
+    let margemMedia = null;
+    try {
+      const margemRes = await db.query(
+        `SELECT AVG(margin_pct)::float AS avg_margin
+           FROM studio_compositions_summary
+          WHERE company_id = $1 AND margin_pct IS NOT NULL`,
+        [req.params.id]
+      );
+      margemMedia = margemRes.rows[0]?.avg_margin != null
+        ? parseFloat(margemRes.rows[0].avg_margin) : null;
+    } catch (_) { /* view pode não existir */ }
+
+    // 5. Tempo médio produção (em dias úteis aproximados) — para pedidos ready/delivered últimos 30d
+    let tempoMedio = null;
+    try {
+      const tempoRes = await db.query(
+        `SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 86400.0)::float AS avg_days
+           FROM studio_orders
+          WHERE company_id = $1
+            AND studio_production_status IN ('ready', 'delivered')
+            AND created_at >= NOW() - INTERVAL '30 days'`,
+        [req.params.id]
+      );
+      tempoMedio = tempoRes.rows[0]?.avg_days != null
+        ? parseFloat(tempoRes.rows[0].avg_days) : null;
+    } catch (_) {}
+
+    // 6. Top 5 produtos por receita no período
+    let topProdutos = [];
+    try {
+      const topRes = await db.query(
+        `SELECT si.product_id, p.name AS product_name,
+                SUM(si.quantity)::int AS qty,
+                SUM(si.quantity * si.unit_price)::float AS receita
+           FROM sale_items si
+           JOIN sales s            ON s.id = si.sale_id
+           JOIN studio_orders so   ON so.sale_id = s.id
+           LEFT JOIN products p    ON p.id = si.product_id
+          WHERE s.company_id = $1
+            AND s.created_at >= NOW() - ($2 || ' days')::interval
+            AND COALESCE(s.status, 'completed') != 'cancelled'
+          GROUP BY si.product_id, p.name
+          ORDER BY receita DESC NULLS LAST
+          LIMIT 5`,
+        [req.params.id, String(days)]
+      );
+      topProdutos = topRes.rows;
+    } catch (_) {}
+
+    res.json({
+      em_producao:        kdsByStatus.in_production || 0,
+      aguardando_arte:    (kdsByStatus.pending_art || 0) + (kdsByStatus.changes_requested || 0),
+      aprovados:          kdsByStatus.approved || 0,
+      prontos_hoje:       parseInt(prontosHojeRes.rows[0]?.cnt || 0),
+      vendas_periodo:     vendasTotal,
+      pedidos_periodo:    pedidosCount,
+      margem_media_pct:   margemMedia,
+      tempo_medio_dias:   tempoMedio,
+      top_produtos:       topProdutos,
+      period_days:        days,
+      computed_at:        new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[studio/metrics]', err.message);
+    res.status(500).json({ error: 'Erro ao calcular métricas' });
+  }
+});
+
+// ─── GET /studio/sla/estimate ───────────────────────────────
+// Prazo dinâmico = base + ceil(fila atual / capacidade diária).
+// Query param ?products=id1,id2 (opcional — pra futuro recorte por produto)
+router.get('/sla/estimate', async function(req, res) {
+  const productIds = (req.query.products || '').split(',').map((s) => s.trim()).filter(Boolean);
+  try {
+    const ssRes = await db.query(
+      `SELECT COALESCE((studio_settings->>'default_sla_days')::int, 3)              AS sla_days,
+              COALESCE((studio_settings->>'production_capacity_per_day')::int, 10)  AS capacity
+         FROM companies WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!ssRes.rows.length) return res.status(404).json({ error: 'Empresa não encontrada' });
+    const slaDays  = ssRes.rows[0].sla_days;
+    const capacity = Math.max(ssRes.rows[0].capacity, 1);
+
+    const queueRes = await db.query(
+      `SELECT COUNT(*)::int AS qty
+         FROM studio_orders
+        WHERE company_id = $1
+          AND studio_production_status IN ('pending_art', 'approved', 'in_production')`,
+      [req.params.id]
+    );
+    const queueQty = parseInt(queueRes.rows[0]?.qty || 0);
+
+    const queueDays = Math.ceil(queueQty / capacity);
+    const estimateDays = slaDays + queueDays;
+
+    res.json({
+      sla_base_days:        slaDays,
+      queue_qty:            queueQty,
+      capacity_per_day:     capacity,
+      queue_added_days:     queueDays,
+      total_estimate_days:  estimateDays,
+      requested_products:   productIds.length,
+    });
+  } catch (err) {
+    console.error('[studio/sla/estimate]', err.message);
+    res.status(500).json({ error: 'Erro ao estimar prazo' });
+  }
 });
 
 module.exports = router;
