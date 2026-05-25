@@ -119,14 +119,16 @@ router.use('/food/nfce', requirePlan('negocio', 'expansao'), require('./foodNfce
 router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./foodSchedule'));
 router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub'));
 
-// Aura Studio (Expansão+) — todos os arquivos compartilham o mesmo prefixo /studio.
-// Migrations 130 / 131 / 132 / 133 / 134 + studio_sale_items_customization (25/05).
-router.use('/studio', requirePlan('expansao'), require('./studio'));                  // F0+1+2+3 (+ onboarding hooks 25/05)
-router.use('/studio', requirePlan('expansao'), require('./studioKdsApproval'));       // F4+5 (+ onboarding hook 25/05)
-router.use('/studio', requirePlan('expansao'), require('./studioBulkHub'));           // F6+7 (25/05)
-router.use('/studio', requirePlan('expansao'), require('./studioUpload'));            // upload mockup (25/05)
-router.use('/studio', requirePlan('expansao'), require('./studioBulkConvert'));       // evento → digital_orders (25/05)
-router.use('/studio', requirePlan('expansao'), require('./studioSaleItemPatch'));     // E1: PATCH sale_items.customization (25/05)
-router.use('/studio', requirePlan('expansao'), require('./studioMarketplaceListing')); // S-1: ML/Shopee payload Studio-aware (25/05)
+// Aura Studio (25/05/2026): gate de plano REMOVIDO — Studio acessivel em todos
+// os planos. Antes era requirePlan('expansao') mas o vertical eh contratado
+// independente do plano (lojista cadastrado como vertical=studio entra direto).
+// Migrations 130 / 131 / 132 / 133 / 134 + studio_sale_items_customization.
+router.use('/studio', require('./studio'));                  // F0+1+2+3 (+ onboarding hooks 25/05)
+router.use('/studio', require('./studioKdsApproval'));       // F4+5 (+ onboarding hook 25/05)
+router.use('/studio', require('./studioBulkHub'));           // F6+7 (25/05)
+router.use('/studio', require('./studioUpload'));            // upload mockup (25/05)
+router.use('/studio', require('./studioBulkConvert'));       // evento → digital_orders (25/05)
+router.use('/studio', require('./studioSaleItemPatch'));     // E1: PATCH sale_items.customization (25/05)
+router.use('/studio', require('./studioMarketplaceListing')); // S-1: ML/Shopee payload Studio-aware (25/05)
 
 module.exports = router;
