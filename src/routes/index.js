@@ -56,6 +56,12 @@ router.use('/webhooks/mp',        require('./webhookMp'));
 // Publicos, sem signature validation real (depende do core OAuth).
 router.use('/webhooks', require('./webhookMarketplaceStub'));
 
+// Core ML/Shopee F1.B + F2.B (25/05/2026):
+// Callback publico OAuth — recebe redirect do ML/Shopee depois que o lojista
+// autorizou. GET /api/v1/marketplaces/:platform/callback?code=XXX&state=YYY
+// (sem auth — usa state com companyId).
+router.use('/marketplaces', require('./marketplaceAuthPublic'));
+
 // Aura Studio Nivel 1 Sub-onda D (25/05/2026):
 // Storefront publico Studio. Montado ANTES de /storefront pra que rotas
 // /storefront/:slug/studio/* sejam capturadas por studioStorefront e nao
