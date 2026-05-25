@@ -11,7 +11,18 @@
 //   finNFe = 4     (devolução)
 //   refNFe = chave 44 dígitos da NFC-e original
 //
+// 25/05/2026 (Polish v3 — auditoria atrito):
+//   - Removida validação NFCE_ORIGINAL_ANONIMA — anônima é caso suportado;
+//     basta colocar "Consumidor não identificado" em infAdFisco.
+//   - Removida validação CUSTOMER_ADDRESS_REQUIRED — SEFAZ FAQ MG #7
+//     define que dest da NF-e 55 de devolução é o PRÓPRIO EMITENTE; o
+//     endereço do cliente NÃO é exigido (e nem cabe — não há campo dest).
+//     Dados do cliente vão em infAdFisco como texto livre.
+//   - Parâmetro customerAddress fica aceito por compat retroativa,
+//     mas é ignorado. Frontend pode parar de enviar.
+//
 // Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md (Fase C)
+// Memory: [[nfe55-devolucao-dest-proprio-emitente]]
 // ============================================================
 
 const nuvemfiscal = require('./nuvemfiscal');
@@ -38,8 +49,8 @@ async function handle(client, {
   trocaSaleId,           // UUID da troca (sales row já criada)
   returnedItems,         // array original do req.body
   returnedValue,         // soma de returned_items (qty*unit_price)
-  customerAddress,       // { street, number?, neighborhood, ibge, city, state, zip }
-  notes,                 // observação livre pra infCpl
+  customerAddress,       // 25/05/2026: ACEITO por compat mas IGNORADO
+  notes,                 // observação livre — vira motivo em infAdFisco
   userId,                // req.user?.id (emitted_by)
 }) {
   // 1. Busca NFC-e original autorizada (qualquer idade — strategy é
@@ -58,34 +69,11 @@ async function handle(client, {
   }
   const orig = origNfceList[0];
 
-  // 2. CPF do cliente — vem da NFC-e original (SEFAZ ja validou)
-  if (!orig.customer_cpf) {
-    throw new TrocaDevolucao55Error(400, {
-      error: 'devolucao_55 requer CPF cadastrado na NFC-e original (anonima nao suporta).',
-      code: 'NFCE_ORIGINAL_ANONIMA',
-    });
-  }
+  // 25/05/2026: SEFAZ FAQ MG #7 define dest = próprio emitente. CPF do
+  // cliente é opcional — entra em infAdFisco texto livre se conhecido.
+  // NFC-e anônima é caso suportado (consumidor não identificado).
 
-  // 3. Endereco do cliente — NF-e/55 exige endereco cheio do destinatario.
-  //    customers table hoje so guarda { name, cpf_cnpj, email, phone,
-  //    address_number } — frontend coleta no momento da troca.
-  const addr = customerAddress || {};
-  const missing = [];
-  if (!addr.street)       missing.push('street');
-  if (!addr.neighborhood) missing.push('neighborhood');
-  if (!addr.city)         missing.push('city');
-  if (!addr.state)        missing.push('state');
-  if (!addr.zip)          missing.push('zip');
-  if (!addr.ibge)         missing.push('ibge');
-  if (missing.length) {
-    throw new TrocaDevolucao55Error(400, {
-      error: 'devolucao_55 requer endereco completo do cliente. Faltando: ' + missing.join(', '),
-      code: 'CUSTOMER_ADDRESS_REQUIRED',
-      missing_fields: missing,
-    });
-  }
-
-  // 4. Proximo numero da serie 1 NF-e/55 desta company
+  // 2. Próximo numero da serie 1 NF-e/55 desta company
   const { rows: nfeSeq } = await client.query(
     `SELECT COALESCE(MAX(numero), 0) + 1 AS next_numero
        FROM nfce_emissions
@@ -94,7 +82,7 @@ async function handle(client, {
   );
   const nextNumero = parseInt(nfeSeq[0] && nfeSeq[0].next_numero, 10) || 1;
 
-  // 5. Dados da empresa pra emissao
+  // 3. Dados da empresa pra emissao
   const { rows: companyRows } = await client.query(
     `SELECT * FROM companies WHERE id = $1`,
     [saleCompanyId]
@@ -106,39 +94,34 @@ async function handle(client, {
   }
   const company = companyRows[0];
 
-  // 6. Items da devolucao a partir de returned_items
+  // 4. Items da devolucao a partir de returned_items
   const devolucaoItems = (returnedItems || []).map((ret, idx) => ({
     code: ret.product_id || ('item-' + (idx + 1)),
     name: ret.product_name_snapshot || ('Item ' + (idx + 1)),
     quantity: parseFloat(ret.quantity),
     price: parseFloat(ret.unit_price),
-    cfop: '1202', // contador Davi 12/05/2026
+    cfop: '1202', // contador OK 12/05/2026 — imutável
     ncm: ret.ncm || '00000000',
     unit: 'UN',
   }));
 
-  // 7. Emite NF-e/55 de devolucao via Nuvem Fiscal
+  // 5. consumerInfo pra infAdFisco texto livre. Todos opcionais.
+  const consumerInfo = {
+    name: orig.customer_name || null,
+    cpf: orig.customer_cpf || null,
+    motivo: notes || 'Troca',
+  };
+
+  // 6. Emite NF-e/55 de devolucao via Nuvem Fiscal (dest = própria loja)
   let nfeResult;
   try {
     nfeResult = await nuvemfiscal.emitNfeDevolucao(company, {
       originalChave: orig.chave_acesso,
       items: devolucaoItems,
-      customer: {
-        cpf: orig.customer_cpf,
-        name: orig.customer_name || 'Cliente',
-        address: addr.street,
-        number: addr.number || 'S/N',
-        neighborhood: addr.neighborhood,
-        ibge: addr.ibge,
-        city: addr.city,
-        state: addr.state,
-        zip: addr.zip,
-      },
+      consumerInfo,
       serie: 1,
       numero: nextNumero,
-      natureza_operacao: 'Devolucao de mercadoria',
-      cfop: '1202',
-      notes: notes || null,
+      reference: `troca-${trocaSaleId}`,
     });
   } catch (sefazErr) {
     console.error('[trocaDevolucao55] SEFAZ error:', sefazErr.message);
@@ -152,7 +135,7 @@ async function handle(client, {
   const nuvemId        = (nfeResult && nfeResult.id) || null;
   const nfeStatus      = (nfeResult && nfeResult.status) || 'processando';
 
-  // 8. Insere registro em nfce_emissions (tipo='nfe', finalidade=4)
+  // 7. Insere registro em nfce_emissions (tipo='nfe', finalidade=4)
   await client.query(
     `INSERT INTO nfce_emissions
        (company_id, sale_id, numero, serie, chave_acesso, tipo, finalidade,
@@ -176,7 +159,7 @@ async function handle(client, {
     ]
   );
 
-  // 9. Marca a trocaSale com strategy + chaves
+  // 8. Marca a trocaSale com strategy + chaves
   await client.query(
     `UPDATE sales
         SET nfce_strategy        = $1,
