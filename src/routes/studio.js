@@ -1,20 +1,21 @@
 // ============================================================
 // AURA Studio — rotas do vertical (Fase 0 + 1 + 2 + 3)
-// Atualizado 24/05/2026
+// Atualizado 25/05/2026 (item #2 do follow-up UX/UI)
 //
 // Fase 0+1: /health, /products/:pid/customization-config, /personalize
 // Fase 2  : /gallery/* (categorias + templates + vinculação)
 // Fase 3  : /inputs/* + /compositions/* (BOM + custo + margem)
 //
+// Persistência de onboarding (markStudioOnboarding) gravada em
+// companies.studio_settings.onboarding.{key} nos pontos-chave.
+//
 // Gate de plano (requirePlan('expansao')) aplicado no mount em
 // src/routes/private.js. Não duplicar aqui.
-//
-// Doc: Projects/Aura/BACKLOG_AURA_STUDIO.md
-// Memory: plano_aura_studio_vertical_24mai2026
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
+const { markStudioOnboarding } = require('../utils/studioOnboarding');
 
 // ─── Schema customization_config (Fase 1) ───────────────────
 const VALID_FIELD_TYPES = ['text', 'image', 'template', 'color', 'option'];
@@ -99,6 +100,8 @@ router.put('/products/:pid/customization-config', async function(req, res) {
       [JSON.stringify(cfg), req.params.pid, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Produto não encontrado' });
+    // Onboarding: marcou primeiro produto personalizável
+    markStudioOnboarding(db, req.params.id, 'product');
     res.json({
       product_id: r.rows[0].id, name: r.rows[0].name,
       is_personalizable: r.rows[0].is_personalizable,
@@ -116,6 +119,7 @@ router.post('/products/:pid/personalize', async function(req, res) {
       [enabled, req.params.pid, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Produto não encontrado' });
+    if (enabled) markStudioOnboarding(db, req.params.id, 'product');
     res.json(r.rows[0]);
   } catch (err) { res.status(500).json({ error: 'Erro ao alterar produto' }); }
 });
@@ -226,6 +230,8 @@ router.post('/gallery/templates', async function(req, res) {
       [req.params.id, category_id || null, String(name).trim(), description || null,
        image_url, thumb_url || null, tagsArr, req.user?.id || null]
     );
+    // Onboarding: subiu primeiro template
+    markStudioOnboarding(db, req.params.id, 'gallery');
     res.status(201).json(r.rows[0]);
   } catch (err) {
     console.error('[studio/gallery/templates:POST]', err.message);
@@ -274,9 +280,6 @@ router.delete('/gallery/templates/:tid', async function(req, res) {
 });
 
 // ─── Vinculação produto ↔ template ──────────────────────────
-// Lista todos os templates aplicáveis a um produto:
-// - vinculados especificamente a ele (product_id = pid)
-// - globais (product_id IS NULL)
 router.get('/gallery/by-product/:pid', async function(req, res) {
   try {
     const r = await db.query(
@@ -425,7 +428,6 @@ router.delete('/inputs/:iid', async function(req, res) {
 });
 
 // ─── Composições (BOM) ──────────────────────────────────────
-// GET: lista itens + summary (custo + margem) de 1 produto
 router.get('/compositions/by-product/:pid', async function(req, res) {
   try {
     const compRes = await db.query(
@@ -464,8 +466,6 @@ router.get('/compositions/by-product/:pid', async function(req, res) {
   }
 });
 
-// PUT: upsert da composição inteira (substitui items por completo)
-// body: { notes?, items: [{ input_id, qty_per_unit, notes?, sort_order? }] }
 router.put('/compositions/by-product/:pid', async function(req, res) {
   const { notes, items } = req.body;
   if (!Array.isArray(items)) return res.status(400).json({ error: 'items deve ser array' });
@@ -478,7 +478,6 @@ router.put('/compositions/by-product/:pid', async function(req, res) {
   try {
     await client.query('BEGIN');
 
-    // Upsert da composição
     const compRes = await client.query(
       `INSERT INTO studio_compositions (company_id, product_id, notes)
        VALUES ($1, $2, $3)
@@ -489,10 +488,8 @@ router.put('/compositions/by-product/:pid', async function(req, res) {
     );
     const compId = compRes.rows[0].id;
 
-    // Limpa itens antigos
     await client.query(`DELETE FROM studio_composition_items WHERE composition_id = $1`, [compId]);
 
-    // Insere itens novos
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       await client.query(
@@ -507,7 +504,6 @@ router.put('/compositions/by-product/:pid', async function(req, res) {
 
     await client.query('COMMIT');
 
-    // Retorna composição atualizada com summary
     const summary = await db.query(
       `SELECT total_cost, margin_pct FROM studio_compositions_summary WHERE composition_id = $1`,
       [compId]
@@ -526,7 +522,6 @@ router.put('/compositions/by-product/:pid', async function(req, res) {
   }
 });
 
-// GET: agregado de todas composições (custo + margem por produto)
 router.get('/compositions/summary', async function(req, res) {
   try {
     const r = await db.query(

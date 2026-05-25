@@ -2,14 +2,12 @@
 // AURA. — Admin: setar/limpar companies.sub_vertical
 // PATCH /admin/clients/:cid/sub-vertical
 //
-// Fase B1 do benchmark de mercado (Fase B redesign Financeiro):
-// sub_vertical foi adicionado em companies pra resolver o saco-de-gatos
-// do varejo (vertical_active=NULL agrupa calcados, moda, perfumaria...).
-//
 // Whitelist por vertical principal:
 //   varejo (vertical=NULL): calcados, moda, perfumaria, acessorios,
 //     presentes, papelaria, eletronicos, brinquedos, casa, esportes,
 //     outros
+//   studio: canecas, camisetas, tazas, brindes_corporativos, copos,
+//     squeezes, almofadas, bolsas, chaveiros, outros (item #6, 25/05)
 //   odonto / barber / food / etc: livre (NULL = nao sub-segmenta)
 //
 // NAO adiciona cobranca de addon — sub-vertical e atributo descritivo
@@ -31,6 +29,10 @@ const SUB_VERTICALS_BY_VERTICAL = {
     'papelaria', 'eletronicos', 'brinquedos', 'casa', 'esportes',
     'outros',
   ],
+  studio: [
+    'canecas', 'camisetas', 'tazas', 'brindes_corporativos',
+    'copos', 'squeezes', 'almofadas', 'bolsas', 'chaveiros', 'outros',
+  ],
   // Outras verticais: sub_vertical e livre por enquanto. Frontend mostra
   // input livre. Se eventualmente curarmos uma whitelist por vertical
   // (ex: odonto -> 'clinica_geral', 'implantes', 'ortodontia'), adiciona aqui.
@@ -39,8 +41,13 @@ const SUB_VERTICALS_BY_VERTICAL = {
 // Helper: valida sub_vertical contra whitelist da vertical
 function isValidSubVertical(vertical, subVertical) {
   if (subVertical === null) return true; // sempre permite limpar
-  const whitelist = SUB_VERTICALS_BY_VERTICAL[vertical === null ? null : 'null']; // varejo
-  if (!whitelist) return true; // outras verticais: aceita qualquer string
+  const verticalKey = vertical === null ? null : (SUB_VERTICALS_BY_VERTICAL[vertical] ? vertical : null);
+  // Se vertical não tem whitelist, varejo (null) é fallback
+  if (verticalKey === null && vertical !== null && !SUB_VERTICALS_BY_VERTICAL[vertical]) {
+    return true; // outras verticais: aceita qualquer string
+  }
+  const whitelist = SUB_VERTICALS_BY_VERTICAL[verticalKey];
+  if (!whitelist) return true;
   return whitelist.includes(subVertical);
 }
 
@@ -49,7 +56,7 @@ router.get('/sub-verticals/options', ...adminOnly, asyncHandler(async (req, res)
   res.json({
     by_vertical: {
       null: SUB_VERTICALS_BY_VERTICAL[null] || [],
-      // pra outras verticais retorna [] (frontend usa input livre)
+      studio: SUB_VERTICALS_BY_VERTICAL.studio || [],
       odonto: [],
       barber: [],
       food: [],
@@ -78,7 +85,7 @@ router.patch('/clients/:cid/sub-vertical', ...adminOnly, asyncHandler(async (req
   const company = existing[0];
 
   if (!isValidSubVertical(company.vertical_active, subVertical)) {
-    const allowed = SUB_VERTICALS_BY_VERTICAL[company.vertical_active === null ? null : 'null'];
+    const allowed = SUB_VERTICALS_BY_VERTICAL[company.vertical_active === null ? null : company.vertical_active];
     throw new AppError(
       'sub_vertical invalida pra vertical=' + (company.vertical_active || 'varejo') +
       '. Opcoes: ' + (allowed ? allowed.join(', ') : 'qualquer string'),
