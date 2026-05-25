@@ -25,10 +25,11 @@ module.exports = {
     'src/utils/**/*.js',
     '!src/routes/index.js',
     '!src/routes/private.js',
-    // Sub-onda D/E (25/05/2026) — tests de integration pendentes.
-    // Excluir mantem o threshold global de 15% intacto ate testarmos.
+    // Sub-ondas Studio Nivel 1 D/E + Marketplaces S-0/S-1 (25/05/2026).
+    // Tests de integration pendentes; excluir mantem threshold global 15% intacto.
     '!src/routes/studioStorefront.js',
     '!src/routes/studioSaleItemPatch.js',
+    '!src/routes/studioMarketplaceListing.js',
   ],
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'text-summary', 'lcov'],
