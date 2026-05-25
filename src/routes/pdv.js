@@ -4,6 +4,9 @@
 // 17/05/2026 (TROCA v2): POST /troca detecta body.original_sale_ids
 //   (array) e delega a trocaV2.handle. v1 (escalar) mantido intacto.
 //   Doc: Aura/AUDITORIA_TROCA_PDV_2026-05-17.docx
+// 25/05/2026 (Polish v3): GET /pdv/sales-by-product-barcode pra
+//   Step1Search barcode-first da Troca. Bipa item -> puxa vendas
+//   recentes do grupo que contem aquele produto/variant.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -946,6 +949,94 @@ router.get('/sales-for-troca', async (req, res) => {
   } catch (e) {
     console.error('[PDV] Erro ao buscar vendas para troca:', e.message);
     res.status(500).json({ error: 'Erro ao buscar vendas elegiveis' });
+  }
+});
+
+// ============================================================
+// GET /pdv/sales-by-product-barcode  — 25/05/2026 (Troca barcode-first)
+//
+// Quando o operador bipa o codigo de barras do item a ser devolvido,
+// frontend chama esse endpoint pra puxar as vendas recentes do grupo
+// que contem aquele produto/variant. Mesmo shape de resposta do
+// /sales-for-troca (array de SaleForTroca) pra reaproveitar o
+// componente Step1Search.
+//
+// Query:
+//   barcode  obrigatorio  — match em products.barcode + product_variants.barcode
+//   days     default 90   — janela de busca (max 365)
+//   limit    default 50   — max resultados (max 200)
+//
+// Cross-filial: scopa todas as filiais do mesmo group_root (igual ao
+// /sales-for-troca). is_cross_filial sinaliza pra UI.
+// ============================================================
+router.get('/sales-by-product-barcode', async (req, res) => {
+  const { barcode, days = 90, limit = 50 } = req.query;
+  const raw = String(barcode || '').trim();
+  if (!raw) {
+    return res.status(400).json({ error: 'barcode obrigatorio' });
+  }
+  const winDays = Math.max(1, Math.min(parseInt(days, 10) || 90, 365));
+  const lim = Math.max(1, Math.min(parseInt(limit, 10) || 50, 200));
+
+  // Mesma logica de variantes EAN-13/EAN-12 usada em /scan/:code
+  const candidates = new Set([raw]);
+  if (/^\d{12}$/.test(raw)) candidates.add('0' + raw);
+  if (/^\d{13}$/.test(raw) && raw.startsWith('0')) candidates.add(raw.slice(1));
+  const alts = [...candidates];
+
+  try {
+    const { rows } = await db.query(
+      `WITH matched_products AS (
+         SELECT p.id AS product_id, NULL::uuid AS variant_id
+           FROM products p
+          WHERE p.barcode = ANY($2::text[])
+         UNION ALL
+         SELECT pv.product_id, pv.id AS variant_id
+           FROM product_variants pv
+          WHERE pv.barcode = ANY($2::text[])
+       ),
+       eligible_sales AS (
+         SELECT DISTINCT s.id
+           FROM sales s
+           JOIN sale_items si ON si.sale_id = s.id
+           JOIN matched_products mp
+             ON mp.product_id = si.product_id
+            AND (mp.variant_id IS NULL OR mp.variant_id = si.variant_id)
+          WHERE s.status != 'cancelled'
+            AND COALESCE(s.type, 'sale') = 'sale'
+            AND s.created_at >= NOW() - INTERVAL '${winDays} days'
+            AND (s.company_id = $1 OR EXISTS (
+              SELECT 1 FROM companies c2
+               WHERE c2.id = s.company_id
+                 AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)
+                   = COALESCE(NULLIF((SELECT billing_owner_company_id FROM companies WHERE id=$1), $1), $1)))
+       )
+       SELECT s.id, s.total_amount, s.payment_method, s.status, s.created_at,
+              s.company_id, COALESCE(comp.trade_name, comp.legal_name) AS company_name,
+              s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
+              s.seller_id, s.seller_name,
+              (s.company_id != $1) AS is_cross_filial,
+              COUNT(si.id) AS item_count,
+              COALESCE(json_agg(json_build_object(
+                'product_id', si.product_id, 'variant_id', si.variant_id,
+                'product_name_snapshot', si.product_name_snapshot,
+                'quantity', si.quantity, 'unit_price', si.unit_price,
+                'original_sale_item_id', si.id
+              )) FILTER (WHERE si.id IS NOT NULL), '[]'::json) AS items
+         FROM sales s
+         JOIN eligible_sales es ON es.id = s.id
+         LEFT JOIN companies comp ON comp.id = s.company_id
+         LEFT JOIN customers cust ON cust.id = s.customer_id
+         LEFT JOIN sale_items si  ON si.sale_id = s.id
+        GROUP BY s.id, comp.trade_name, comp.legal_name, cust.name, cust.cpf_cnpj
+        ORDER BY s.created_at DESC
+        LIMIT ${lim}`,
+      [req.params.id, alts]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error('[PDV] Erro em sales-by-product-barcode:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar vendas por barcode' });
   }
 });
 
