@@ -6,8 +6,6 @@ const router = express.Router({ mergeParams: true });
 router.use(requireAuth);
 router.use(requireCompanyAccess());
 
-// -- ESSENCIAL (todos os planos) --
-
 router.use('/', require('./company'));
 router.use('/dashboard', require('./dashboard'));
 router.use('/dashboard/sparkline', require('./dashboardSparkline'));
@@ -64,8 +62,6 @@ router.use('/support', require('./support'));
 router.use('/customers', require('./customers'));
 router.use('/employees', require('./employees'));
 
-// -- NEGOCIO+ --
-
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
@@ -88,8 +84,6 @@ router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberT
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
 router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplace'));
 router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
-
-// -- EXPANSAO --
 
 router.use('/ai', requirePlan('negocio', 'expansao'), require('./aiChat'));
 router.use('/cashflow', requirePlan('expansao'), require('./cashFlowProjection'));
@@ -123,12 +117,10 @@ router.use('/food/nfce', requirePlan('negocio', 'expansao'), require('./foodNfce
 router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./foodSchedule'));
 router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub'));
 
-// Aura Studio: vertical novo de personalizados. Plano Expansão+.
-// F0: /health  ·  F1: /products/:pid/customization-config + /personalize
-// F2: /gallery/*  ·  F3: /inputs + /compositions  (migrations 130, 131)
-router.use('/studio', requirePlan('expansao'), require('./studio'));
-// F4 KDS + F5 request approval (migration 132, 25/05/2026).
-// Mesmo prefixo /studio — Express agrupa por path, sem colisão de rotas.
-router.use('/studio', requirePlan('expansao'), require('./studioKdsApproval'));
+// Aura Studio (Expansão+) — todos os arquivos compartilham o mesmo prefixo /studio.
+// Migrations 130 / 131 / 132 / 133.
+router.use('/studio', requirePlan('expansao'), require('./studio'));            // F0+1+2+3
+router.use('/studio', requirePlan('expansao'), require('./studioKdsApproval')); // F4+5
+router.use('/studio', requirePlan('expansao'), require('./studioBulkHub'));     // F6+7 (25/05)
 
 module.exports = router;
