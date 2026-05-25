@@ -7,6 +7,8 @@
 // 25/05/2026 (Polish v3): GET /pdv/sales-by-product-barcode pra
 //   Step1Search barcode-first da Troca. Bipa item -> puxa vendas
 //   recentes do grupo que contem aquele produto/variant.
+// 25/05/2026 (fix sem-NFC-e): sales-for-troca + sales-by-product-barcode
+//   expoem has_nfce (boolean) pra frontend decidir inferFiscalStrategy.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -881,6 +883,7 @@ router.post('/troca', async (req, res) => {
 });
 
 // ===== GET /sales-for-troca (com novos filtros 17/05) =====
+// 25/05/2026 (fix sem-NFC-e): retorna has_nfce pra frontend decidir fiscal.
 router.get('/sales-for-troca', async (req, res) => {
   const { q, customer_id, order_number, nfce_chave, days = 90, limit = 50 } = req.query;
   const winDays = Math.max(1, Math.min(parseInt(days, 10) || 90, 365));
@@ -898,15 +901,12 @@ router.get('/sales-for-troca', async (req, res) => {
   const vals = [req.params.id];
   let i = 2;
   if (customer_id) { cond.push(`s.customer_id = $${i++}`); vals.push(customer_id); }
-  // 17/05/2026 (troca v2): filtro por nfce_chave junta nfce_emissions
   let nfceJoin = '';
   if (nfce_chave && String(nfce_chave).trim()) {
     nfceJoin = `JOIN nfce_emissions ne ON ne.sale_id = s.id AND ne.tipo='nfce' AND ne.status='autorizada'`;
     cond.push(`ne.chave_acesso = $${i++}`);
     vals.push(String(nfce_chave).trim());
   }
-  // 17/05/2026 (troca v2): filtro por numero do pedido — usa sales.id como prefix match (UUID slice).
-  // Quando sales tiver coluna 'number' dedicada no futuro, troca para igualdade direta.
   if (order_number && String(order_number).trim()) {
     const num = String(order_number).trim().replace(/^[#vV-]+/, '');
     cond.push(`s.id::text ILIKE $${i++}`);
@@ -928,6 +928,12 @@ router.get('/sales-for-troca', async (req, res) => {
               s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
               s.seller_id, s.seller_name,
               (s.company_id != $1) AS is_cross_filial,
+              EXISTS (
+                SELECT 1 FROM nfce_emissions nf
+                 WHERE nf.sale_id = s.id
+                   AND nf.tipo = 'nfce'
+                   AND nf.status = 'autorizada'
+              ) AS has_nfce,
               COUNT(si.id) AS item_count,
               COALESCE(json_agg(json_build_object(
                 'product_id', si.product_id, 'variant_id', si.variant_id,
@@ -961,13 +967,7 @@ router.get('/sales-for-troca', async (req, res) => {
 // /sales-for-troca (array de SaleForTroca) pra reaproveitar o
 // componente Step1Search.
 //
-// Query:
-//   barcode  obrigatorio  — match em products.barcode + product_variants.barcode
-//   days     default 90   — janela de busca (max 365)
-//   limit    default 50   — max resultados (max 200)
-//
-// Cross-filial: scopa todas as filiais do mesmo group_root (igual ao
-// /sales-for-troca). is_cross_filial sinaliza pra UI.
+// 25/05/2026 (fix sem-NFC-e): retorna has_nfce pra frontend decidir fiscal.
 // ============================================================
 router.get('/sales-by-product-barcode', async (req, res) => {
   const { barcode, days = 90, limit = 50 } = req.query;
@@ -978,7 +978,6 @@ router.get('/sales-by-product-barcode', async (req, res) => {
   const winDays = Math.max(1, Math.min(parseInt(days, 10) || 90, 365));
   const lim = Math.max(1, Math.min(parseInt(limit, 10) || 50, 200));
 
-  // Mesma logica de variantes EAN-13/EAN-12 usada em /scan/:code
   const candidates = new Set([raw]);
   if (/^\d{12}$/.test(raw)) candidates.add('0' + raw);
   if (/^\d{13}$/.test(raw) && raw.startsWith('0')) candidates.add(raw.slice(1));
@@ -1016,6 +1015,12 @@ router.get('/sales-by-product-barcode', async (req, res) => {
               s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
               s.seller_id, s.seller_name,
               (s.company_id != $1) AS is_cross_filial,
+              EXISTS (
+                SELECT 1 FROM nfce_emissions nf
+                 WHERE nf.sale_id = s.id
+                   AND nf.tipo = 'nfce'
+                   AND nf.status = 'autorizada'
+              ) AS has_nfce,
               COUNT(si.id) AS item_count,
               COALESCE(json_agg(json_build_object(
                 'product_id', si.product_id, 'variant_id', si.variant_id,

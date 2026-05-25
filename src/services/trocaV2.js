@@ -9,7 +9,13 @@
 // Doc: Aura/AUDITORIA_TROCA_PDV_2026-05-17.docx (Fases 1+2+4)
 // 17/05/2026 (PR Aura-backend dev/troca-v2-backend-2026-05-17)
 //
-// Decisões importantes:
+// 25/05/2026 (fix sem-NFC-e):
+//   - Removido bloco needsDevolucao55 → CUSTOMER_ADDRESS_REQUIRED.
+//     Esquecido no polish PR #118 (foi removido em trocaDevolucao55.js).
+//     SEFAZ FAQ MG #7 — dest da NF-e 55 devolução varejo é o próprio
+//     emitente; não exige endereço do cliente.
+//
+// Decisoes importantes:
 //   1. Fiscal ANTES do commit SQL — cancelamento SEFAZ pode falhar e
 //      precisamos reverter. Cancelamentos ja confirmados pela SEFAZ
 //      antes do erro ficam em cancelledForUndo[] e a gente tenta
@@ -36,7 +42,6 @@ class TrocaV2Error extends Error {
   }
 }
 
-// ─── Caixa check (copia de pdv.js — refactor futuro pra util) ──
 async function assertCaixaOpenOrAllowed(client, companyId) {
   try {
     const { rows: cfgRows } = await client.query(
@@ -75,9 +80,6 @@ async function getActiveSessaoId(client, companyId) {
   } catch (_) { return null; }
 }
 
-// ─── Lookup origin sales (group-aware) ────────────────────────
-// Retorna metadata + items + NFC-e info (chave, idade, nuvemfiscal_id)
-// pra cada original_sale_id.
 async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
   if (!Array.isArray(originalSaleIds) || originalSaleIds.length === 0) {
     throw new TrocaV2Error(400, { error: 'original_sale_ids[] obrigatorio (array nao vazio)' });
@@ -117,7 +119,6 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
     });
   }
 
-  // sale_items por venda — usados em validateItems
   const itemsResp = await client.query(
     `SELECT id, sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot
        FROM sale_items WHERE sale_id IN (${placeholders})`,
@@ -129,7 +130,6 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
     itemsBySale.get(it.sale_id).push(it);
   }
 
-  // NFC-e mais recente autorizada por venda original (pra decidir per_origin)
   const nfceResp = await client.query(
     `SELECT DISTINCT ON (sale_id) sale_id, id, nuvemfiscal_id, chave_acesso, authorized_at, numero, status
        FROM nfce_emissions
@@ -150,7 +150,6 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
   return enriched;
 }
 
-// ─── Validate returned_items (dupla-devolucao + ownership) ─────
 async function validateReturnedItems(client, originSales, returnedItems) {
   if (!Array.isArray(returnedItems)) {
     throw new TrocaV2Error(400, { error: 'returned_items deve ser array' });
@@ -158,7 +157,6 @@ async function validateReturnedItems(client, originSales, returnedItems) {
   const originIdSet = new Set(originSales.map((s) => s.id));
   const itemsBySale = new Map(originSales.map((s) => [s.id, s.items]));
 
-  // Agrupa returned por original_sale_item_id pra check de dupla-devolucao
   const requestedByItem = new Map();
 
   for (const ret of returnedItems) {
@@ -197,10 +195,8 @@ async function validateReturnedItems(client, originSales, returnedItems) {
     );
   }
 
-  // Dupla-devolucao: somar quantidades JA devolvidas em trocas anteriores
-  // (status != 'cancelled') e verificar que (anterior + agora) <= original.
   const itemIds = Array.from(requestedByItem.keys());
-  if (itemIds.length === 0) return; // sem returned_items, ok
+  if (itemIds.length === 0) return;
 
   const placeholders = itemIds.map((_, i) => `$${i + 1}`).join(',');
   const { rows: prev } = await client.query(
@@ -217,13 +213,10 @@ async function validateReturnedItems(client, originSales, returnedItems) {
   for (const ret of returnedItems) {
     const qty = parseFloat(ret.quantity);
     const already = alreadyByItem.get(ret.original_sale_item_id) || 0;
-    // origItem.quantity ja foi validado acima
     const saleItems = itemsBySale.get(ret.original_sale_id) || [];
     const origItem = saleItems.find((i) => i.id === ret.original_sale_item_id);
     const origQty = parseFloat(origItem.quantity);
     const stillAvailable = origQty - already;
-    // Aviso: requestedByItem agrupa multiplos returned_items mesmo item.
-    // O loop ja somou e a checagem usa o total agrupado.
     const totalNow = requestedByItem.get(ret.original_sale_item_id) || 0;
     if (totalNow > stillAvailable + 0.0001) {
       throw new TrocaV2Error(409, {
@@ -238,7 +231,6 @@ async function validateReturnedItems(client, originSales, returnedItems) {
   }
 }
 
-// ─── Compute totals + validate splits ──────────────────────────
 function computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits }) {
   const returnedValue = (returned_items || []).reduce(
     (acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0
@@ -272,7 +264,6 @@ function computeAndValidateTotals({ returned_items, new_items, payment_splits, r
       });
     }
   }
-  // netAmount === 0: sem split obrigatorio
 
   return {
     returnedValue: parseFloat(returnedValue.toFixed(2)),
@@ -282,8 +273,6 @@ function computeAndValidateTotals({ returned_items, new_items, payment_splits, r
   };
 }
 
-// ─── Decide fiscal strategy per origin ─────────────────────────
-// Retorna Map<originalSaleId, 'cancel_reissue' | 'devolucao_55' | 'none'>
 function decideFiscalPerOrigin(originSales, returnedItems, requestedStrategy) {
   const strategyMap = new Map();
   if (requestedStrategy === 'none') {
@@ -300,7 +289,6 @@ function decideFiscalPerOrigin(originSales, returnedItems, requestedStrategy) {
       continue;
     }
     if (requestedStrategy === 'cancel_reissue') {
-      // forca cancel_reissue mesmo que >24h — backend valida e rejeita
       strategyMap.set(s.id, 'cancel_reissue');
       continue;
     }
@@ -308,9 +296,7 @@ function decideFiscalPerOrigin(originSales, returnedItems, requestedStrategy) {
       strategyMap.set(s.id, 'devolucao_55');
       continue;
     }
-    // per_origin (default): decide automaticamente
     if (!s.nfce) {
-      // sem NFC-e autorizada — nao tem o que cancelar e nao tem chave pra refNFe
       strategyMap.set(s.id, 'none');
       continue;
     }
@@ -323,11 +309,6 @@ function decideFiscalPerOrigin(originSales, returnedItems, requestedStrategy) {
   return strategyMap;
 }
 
-// ─── Cancel NFCes (PRE-COMMIT) ─────────────────────────────────
-// Cancela todas as NFC-es das vendas marcadas como cancel_reissue.
-// Retorna lista [{originalSaleId, origNfceRow}] das que foram canceladas
-// na SEFAZ — caso ROLLBACK SQL aconteca depois, caller tenta destornar
-// via undoCancellations() (best-effort).
 async function preCancelNfces(originSales, strategyMap) {
   const cancelled = [];
   for (const s of originSales) {
@@ -338,8 +319,6 @@ async function preCancelNfces(originSales, strategyMap) {
       ? (Date.now() - new Date(s.nfce.authorized_at).getTime()) / 3600000
       : 9999;
     if (ageHours >= 24) {
-      // Cliente forcou cancel_reissue mas a janela passou — nao temos como
-      // cancelar. Sugerir devolucao_55 via error explicito.
       throw new TrocaV2Error(409, {
         error: `NFC-e da venda ${s.id} tem ${Math.round(ageHours)}h (>24h). Use nfce_strategy='devolucao_55' ou 'per_origin'.`,
         original_sale_id: s.id,
@@ -360,17 +339,13 @@ async function preCancelNfces(originSales, strategyMap) {
         error: 'SEFAZ rejeitou cancelamento da NFC-e original: ' + sefazErr.message,
         original_sale_id: s.id,
         sefaz_payload: sefazErr.payload || null,
-        cancelled_so_far: cancelled.map((c) => c.originalSaleId), // pra caller saber
+        cancelled_so_far: cancelled.map((c) => c.originalSaleId),
       });
     }
   }
   return cancelled;
 }
 
-// ─── Undo cancellations (best-effort) ──────────────────────────
-// Chamado em catch quando o SQL transaction da pau APOS pre-cancel.
-// Tenta destornar as cancelaments via Nuvem Fiscal. Pode falhar — nesse
-// caso log e segue (NFC-e fica cancelada e operador precisa reemitir manualmente).
 async function undoCancellations(cancelled) {
   for (const c of cancelled) {
     try {
@@ -386,9 +361,7 @@ async function undoCancellations(cancelled) {
   }
 }
 
-// ─── Adjust stock ──────────────────────────────────────────────
 async function adjustStock(client, returnedItems, newItems, currentCompanyId, trocaSaleId) {
-  // Devolvidos → stock IN (volta pro estoque da company de origem)
   for (const ret of returnedItems) {
     const qty = parseFloat(ret.quantity);
     if (!ret.product_id) continue;
@@ -415,7 +388,6 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
     );
   }
 
-  // Novos → stock OUT (sai do estoque da company fisica = currentCompanyId)
   for (const item of newItems) {
     if (!item.product_id) continue;
     const qty = parseFloat(item.quantity);
@@ -477,13 +449,8 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
   }
 }
 
-// ─── Sale_payments split (pagamento da diferenca) ──────────────
-// Cria 1 linha negativa de -returnedValue + 1 linha positiva por
-// payment_split. Mantem o padrao do v1 mas particiona o positivo.
 async function insertSalePayments(client, trocaSaleId, companyId, sessaoId, totals, paymentSplits, refundSplits) {
-  // Linha negativa: returnedValue (mantida pra caixa nao perder)
   if (totals.returnedValue > 0) {
-    // Method: se ha refund_splits, usa o primeiro. Senao, fallback dinheiro.
     const negativeMethod = (refundSplits && refundSplits[0]?.method) || (paymentSplits && paymentSplits[0]?.method) || 'dinheiro';
     const normalized = normalizeMethodForSalePayments(negativeMethod);
     await client.query(
@@ -492,7 +459,6 @@ async function insertSalePayments(client, trocaSaleId, companyId, sessaoId, tota
       [trocaSaleId, companyId, normalized, -parseFloat(totals.returnedValue.toFixed(2)), sessaoId]
     );
   }
-  // Linhas positivas: 1 por payment_split
   for (const p of (paymentSplits || [])) {
     if (parseFloat(p.amount) <= 0) continue;
     const normalized = normalizeMethodForSalePayments(p.method);
@@ -505,8 +471,6 @@ async function insertSalePayments(client, trocaSaleId, companyId, sessaoId, tota
 }
 
 function normalizeMethodForSalePayments(method) {
-  // sale_payments.method aceita: dinheiro, pix, cartao, debito, crediario etc
-  // Frontend v2 manda: dinheiro, pix, cartao_credito, cartao_debito, cartao_estorno
   if (!method) return 'dinheiro';
   const m = String(method).toLowerCase();
   if (m === 'cartao_credito') return 'cartao';
@@ -516,10 +480,6 @@ function normalizeMethodForSalePayments(method) {
   return m;
 }
 
-// ─── Troca_payouts + customer_credit_transactions ──────────────
-// Quando netAmount < 0, registra refund_splits em troca_payouts.
-// Para method=crediario_credito, ALEM disso grava customer_credit_transactions
-// com type='payment' (saldo NEGATIVO = credito a favor do cliente).
 async function insertTrocaPayouts(client, trocaSaleId, companyId, sessaoId, customerId, refundSplits, userId) {
   if (!refundSplits || !refundSplits.length) return [];
   const inserted = [];
@@ -565,7 +525,6 @@ async function insertTrocaPayouts(client, trocaSaleId, companyId, sessaoId, cust
   return inserted;
 }
 
-// ─── Aggregate transactions (income + expense) ─────────────────
 async function insertAggregateTransactions(client, trocaSaleId, primaryCompanyId, totals, originalSaleIds, userId) {
   const summary = originalSaleIds.length === 1
     ? `Troca PDV — venda ${originalSaleIds[0].slice(0, 8)}`
@@ -605,7 +564,6 @@ async function insertAggregateTransactions(client, trocaSaleId, primaryCompanyId
   }
 }
 
-// ─── Main handler ──────────────────────────────────────────────
 async function handle(req, res) {
   const {
     original_sale_ids,
@@ -625,7 +583,6 @@ async function handle(req, res) {
   try {
     await client.query('BEGIN');
 
-    // 1. Caixa aberto
     const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
     if (!caixaCheck.ok) {
       await client.query('ROLLBACK');
@@ -633,51 +590,25 @@ async function handle(req, res) {
     }
     const sessaoId = caixaCheck.sessaoId || (await getActiveSessaoId(client, req.params.id));
 
-    // 2. Lookup vendas originais
     const originSales = await lookupOriginSales(client, req.params.id, original_sale_ids);
 
-    // 3. Validar returned_items (ownership + dupla-devolucao)
     await validateReturnedItems(client, originSales, returned_items);
 
-    // 4. Calcular totais + validar splits
     const totals = computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits });
 
-    // 5. Decidir estrategia fiscal por origem
     const strategyMap = decideFiscalPerOrigin(originSales, returned_items, nfce_strategy);
 
-    // 6. Validar pre-condicoes da devolucao_55
-    const needsDevolucao55 = Array.from(strategyMap.values()).some((s) => s === 'devolucao_55');
-    if (needsDevolucao55) {
-      // valida endereço
-      const addr = customer_address || {};
-      const missing = [];
-      if (!addr.street) missing.push('street');
-      if (!addr.neighborhood) missing.push('neighborhood');
-      if (!addr.city) missing.push('city');
-      if (!addr.state) missing.push('state');
-      if (!addr.zip) missing.push('zip');
-      if (!addr.ibge) missing.push('ibge');
-      if (missing.length) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({
-          error: 'devolucao_55 exige endereco completo do cliente',
-          code: 'CUSTOMER_ADDRESS_REQUIRED',
-          missing_fields: missing,
-        });
-      }
-    }
+    // 25/05/2026 (fix sem-NFC-e): bloco needsDevolucao55 → CUSTOMER_ADDRESS_REQUIRED
+    // removido. SEFAZ FAQ MG #7 — NF-e 55 devolução varejo tem dest = próprio
+    // emitente; endereço do cliente não é exigido. customer_address vai
+    // ignorado (trocaDevolucao55.handle aceita por compat mas ignora).
 
-    // 7. PRE-COMMIT FISCAL: cancela NFC-es das vendas marcadas como cancel_reissue.
-    //    Se falha aqui, ROLLBACK ainda preserva tudo no banco.
     preCancelled = await preCancelNfces(originSales, strategyMap);
 
-    // 8. Determina company "primaria" da troca (onde a sale_row vai)
-    //    Padrão: primeira venda original (mesmo grupo); pra cross-filial, mantem origem.
     const primarySale = originSales[0];
     const saleCompanyId = primarySale.company_id;
     const isCrossFilial = originSales.some((s) => s.is_cross_filial);
 
-    // 9. Verificar se a tabela sales tem exchange_seller_id (migration 111)
     const { rows: colCheck } = await client.query(
       `SELECT COUNT(*) AS n FROM information_schema.columns
         WHERE table_name = 'sales' AND column_name IN ('exchange_seller_id','exchange_employee_id')`
@@ -696,7 +627,6 @@ async function handle(req, res) {
       });
     }
 
-    // 10. Criar sales row da troca (type='troca', exchange_of_sale_id = primeira original)
     let trocaSaleRow;
     if (hasExchangeCols) {
       const r = await client.query(
@@ -742,7 +672,6 @@ async function handle(req, res) {
       trocaSaleRow = r.rows[0];
     }
 
-    // 11. Inserir new_items em sale_items
     for (const item of new_items) {
       const qty = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unit_price);
@@ -778,7 +707,6 @@ async function handle(req, res) {
       );
     }
 
-    // 12. Inserir troca_returned_items (uma por linha, com original_sale_item_id v2)
     for (const ret of returned_items) {
       await client.query(
         `INSERT INTO troca_returned_items
@@ -798,28 +726,23 @@ async function handle(req, res) {
       );
     }
 
-    // 13. Estoque (in + out)
     await adjustStock(client, returned_items, new_items, req.params.id, trocaSaleRow.id);
 
-    // 14. sale_payments split
     await insertSalePayments(
       client, trocaSaleRow.id, req.params.id, sessaoId,
       totals, payment_splits, refund_splits
     );
 
-    // 15. troca_payouts (+ customer_credit_transactions se crediario_credito)
     const payoutsInserted = await insertTrocaPayouts(
       client, trocaSaleRow.id, req.params.id, sessaoId,
       customer_id || originSales[0]?.customer_id || null,
       refund_splits, req.user?.id
     );
 
-    // 16. transactions agregadas
     await insertAggregateTransactions(
       client, trocaSaleRow.id, saleCompanyId, totals, original_sale_ids, req.user?.id
     );
 
-    // 17. Marcar NFC-es originais canceladas + atualizar trocaSale.nfce_strategy
     for (const c of preCancelled) {
       await client.query(
         `UPDATE nfce_emissions
@@ -830,8 +753,6 @@ async function handle(req, res) {
       );
     }
 
-    // 18. POST-COMMIT FISCAL: emit NF-e 55 pra cada venda marcada
-    //     como devolucao_55. Sao chamadas individuais por origem.
     const fiscalResults = [];
     for (const s of originSales) {
       const strat = strategyMap.get(s.id);
@@ -855,7 +776,7 @@ async function handle(req, res) {
       } catch (e) {
         if (e && e.isDevolucao55Error) {
           await client.query('ROLLBACK');
-          await undoCancellations(preCancelled); // best-effort
+          await undoCancellations(preCancelled);
           return res.status(e.status).json({
             ...e.body,
             failed_for_sale_id: s.id,
@@ -874,7 +795,6 @@ async function handle(req, res) {
 
     await client.query('COMMIT');
 
-    // 19. Response
     const { rows: respNewItems } = await db.query(
       `SELECT si.*, COALESCE(p.name, si.product_name_snapshot) AS product_name
          FROM sale_items si LEFT JOIN products p ON p.id=si.product_id
@@ -920,7 +840,6 @@ async function handle(req, res) {
 module.exports = {
   handle,
   TrocaV2Error,
-  // Exposto pra testes
   _internal: {
     computeAndValidateTotals,
     decideFiscalPerOrigin,
