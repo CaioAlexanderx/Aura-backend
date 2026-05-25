@@ -122,5 +122,6 @@ router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub')
 router.use('/studio', requirePlan('expansao'), require('./studio'));            // F0+1+2+3
 router.use('/studio', requirePlan('expansao'), require('./studioKdsApproval')); // F4+5
 router.use('/studio', requirePlan('expansao'), require('./studioBulkHub'));     // F6+7 (25/05)
+router.use('/studio', requirePlan('expansao'), require('./studioUpload'));      // upload mockup (25/05)
 
 module.exports = router;
