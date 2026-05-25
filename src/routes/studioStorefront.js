@@ -3,8 +3,14 @@
 // GET  /storefront/:slug/studio/products  — lista produtos personalizaveis
 // POST /storefront/:slug/studio/order     — cria pedido Studio
 // GET  /storefront/:slug/studio/order/:oid — poll status do pedido
+// POST /storefront/:slug/studio/upload    — upload de imagem (cliente envia foto)
 //
 // Nivel 1 Sub-onda D (25/05/2026)
+// 25/05/2026 (Loja Digital Studio fechamento):
+//   + price_delta de option/color somado ao effectivePrice
+//   + revisions policy exposta em products + poll (max_revisions_included,
+//     extra_revision_price, revision_policy_text)
+//   + upload R2 publico pro cliente enviar foto direto da pagina
 //
 // Fluxo:
 //  1. Cliente entra em loja.getaura.com.br/:slug/studio
@@ -34,6 +40,7 @@ const notify              = require('../services/digitalOrderNotifications');
 const { generatePix }     = require('../services/pixService');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
+const { uploadToR2 }      = require('../utils/r2Storage');
 
 function validateCpfCnpj(raw) {
   if (!raw) return null;
@@ -81,6 +88,38 @@ function listVisibilityWhere(cidParam) {
   ))`;
 }
 
+// ────────────────────────────────────────────────────────────
+// computeChoicesDelta — soma price_delta de campos do tipo
+// 'option' / 'color' baseado nos valores selecionados em
+// `customization`. Inclusivo: aceita value scalar ou array.
+//
+// Exemplo cfg.fields[i].config.choices = [
+//   { value: 'p', label: 'Pequeno', price_delta: 0 },
+//   { value: 'g', label: 'Grande',  price_delta: 5.00 }
+// ]
+// Se customization[fieldId] === 'g' → soma 5.00
+// ────────────────────────────────────────────────────────────
+function computeChoicesDelta(cfg, customization) {
+  if (!cfg || !Array.isArray(cfg.fields) || !customization) return 0;
+  let delta = 0;
+  for (const f of cfg.fields) {
+    if (f.type !== 'option' && f.type !== 'color') continue;
+    const choices = f.config?.choices;
+    if (!Array.isArray(choices) || choices.length === 0) continue;
+    const selected = customization[f.id];
+    if (selected == null) continue;
+    // Suporta scalar ou array (multi-select futuro)
+    const sels = Array.isArray(selected) ? selected : [selected];
+    for (const s of sels) {
+      const c = choices.find(ch => ch.value === s || ch.label === s);
+      if (c && typeof c.price_delta === 'number' && !isNaN(c.price_delta)) {
+        delta += c.price_delta;
+      }
+    }
+  }
+  return delta;
+}
+
 // CORS publico — mesma config do storefront.js
 router.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -94,16 +133,23 @@ router.use((req, res, next) => {
 const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
   || 'https://aura-backend-production-f805.up.railway.app';
 
+// Limites de upload (cliente envia foto pra personalizar)
+const UPLOAD_MAX_BYTES = 15 * 1024 * 1024; // 15MB
+const UPLOAD_ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp']);
+
 // ────────────────────────────────────────────────────────────
 // GET /storefront/:slug/studio/products
 // Lista produtos da loja onde is_personalizable=true, com
 // customization_config + templates vinculados + estimativa SLA.
+// + revisions policy (max_revisions_included, extra_revision_price,
+//   revision_policy_text) pra cliente ver antes de comprar.
 // ────────────────────────────────────────────────────────────
 router.get('/:slug/studio/products', async (req, res) => {
   try {
     const slug = req.params.slug.toLowerCase().trim();
     const { rows: configs } = await db.query(
-      `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name
+      `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name,
+              COALESCE(c.studio_settings, '{}'::jsonb) AS studio_settings
          FROM digital_channel_config dcc
          JOIN companies c ON c.id = dcc.company_id
         WHERE dcc.slug = $1 AND dcc.is_published = true`,
@@ -112,6 +158,7 @@ router.get('/:slug/studio/products', async (req, res) => {
     if (!configs.length) return res.status(404).json({ error: 'Loja nao encontrada' });
     const config = configs[0];
     const cid = config.company_id;
+    const ss = config.studio_settings || {};
 
     // Lista produtos personalizaveis (respeita visibility canonica)
     const visibility = listVisibilityWhere('$1');
@@ -128,6 +175,15 @@ router.get('/:slug/studio/products', async (req, res) => {
       [cid]
     );
 
+    // Revisions policy — exposta sempre (default null/0 = sem limite/preco)
+    const revisions = {
+      max_included: ss.max_revisions_included != null
+        ? parseInt(ss.max_revisions_included) : 0,
+      extra_price: ss.extra_revision_price != null
+        ? parseFloat(ss.extra_revision_price) : 0,
+      policy_text: ss.revision_policy_text || null,
+    };
+
     if (!products.length) {
       return res.json({
         site: {
@@ -138,6 +194,7 @@ router.get('/:slug/studio/products', async (req, res) => {
         },
         products: [],
         sla: { sla_base_days: 3, queue_qty: 0, total_estimate_days: 3 },
+        revisions,
         total_products: 0,
       });
     }
@@ -172,19 +229,11 @@ router.get('/:slug/studio/products', async (req, res) => {
     } catch (_) { /* tabela pode nao existir em deploy antigo */ }
 
     // SLA estimate dinamico: base + ceil(fila / capacidade)
-    let slaBaseDays = 3, capacity = 10;
-    try {
-      const ssRes = await db.query(
-        `SELECT COALESCE((studio_settings->>'default_sla_days')::int, 3)              AS sla_days,
-                COALESCE((studio_settings->>'production_capacity_per_day')::int, 10)  AS capacity
-           FROM companies WHERE id = $1`,
-        [cid]
-      );
-      if (ssRes.rows.length) {
-        slaBaseDays = ssRes.rows[0].sla_days;
-        capacity = Math.max(ssRes.rows[0].capacity, 1);
-      }
-    } catch (_) {}
+    const slaBaseDays = ss.default_sla_days != null ? parseInt(ss.default_sla_days) : 3;
+    const capacity = Math.max(
+      ss.production_capacity_per_day != null ? parseInt(ss.production_capacity_per_day) : 10,
+      1
+    );
 
     let queueQty = 0;
     try {
@@ -246,6 +295,7 @@ router.get('/:slug/studio/products', async (req, res) => {
         queue_added_days: queueDays,
         total_estimate_days: slaTotal,
       },
+      revisions,
       payment: {
         has_pix: hasPix,
         has_card: hasCard,
@@ -280,10 +330,87 @@ function validateCustomizationValues(config, values) {
 }
 
 // ────────────────────────────────────────────────────────────
+// POST /storefront/:slug/studio/upload
+// Upload publico de imagem (cliente envia foto direto da pagina).
+// Sem auth — protegido por slug + tamanho/tipo + key isolada por company.
+// Body: { content_base64, content_type, filename? }
+// ────────────────────────────────────────────────────────────
+router.post('/:slug/studio/upload', async (req, res) => {
+  try {
+    const slug = req.params.slug.toLowerCase().trim();
+    const { content_base64, content_type, filename } = req.body || {};
+
+    if (!content_base64 || typeof content_base64 !== 'string') {
+      return res.status(400).json({ error: 'content_base64 obrigatorio' });
+    }
+    if (!content_type || !UPLOAD_ALLOWED_TYPES.has(String(content_type).toLowerCase())) {
+      return res.status(400).json({
+        error: 'content_type invalido. Aceitos: ' + Array.from(UPLOAD_ALLOWED_TYPES).join(', ')
+      });
+    }
+
+    // Resolve cid pelo slug
+    const { rows: configs } = await db.query(
+      `SELECT company_id FROM digital_channel_config
+        WHERE slug = $1 AND is_published = true LIMIT 1`,
+      [slug]
+    );
+    if (!configs.length) return res.status(404).json({ error: 'Loja nao encontrada' });
+    const cid = configs[0].company_id;
+
+    // Decodifica base64 + valida tamanho
+    let buf;
+    try {
+      // Aceita data URL (data:image/png;base64,...) ou base64 puro
+      const b64 = content_base64.includes(',')
+        ? content_base64.split(',')[1]
+        : content_base64;
+      buf = Buffer.from(b64, 'base64');
+    } catch (e) {
+      return res.status(400).json({ error: 'content_base64 invalido' });
+    }
+    if (buf.length === 0) {
+      return res.status(400).json({ error: 'arquivo vazio' });
+    }
+    if (buf.length > UPLOAD_MAX_BYTES) {
+      return res.status(413).json({
+        error: `arquivo muito grande (max ${UPLOAD_MAX_BYTES / (1024*1024)}MB)`
+      });
+    }
+
+    // Key isolada por company pra evitar colisao entre lojas
+    const ext = String(content_type).split('/').pop().replace('jpeg', 'jpg');
+    const ts = Date.now();
+    const rand = Math.random().toString(36).slice(2, 10);
+    const key = `studio/storefront/${cid}/${ts}-${rand}.${ext}`;
+
+    const r = await uploadToR2(key, buf, content_type);
+    if (!r?.success) {
+      console.error('[studio-storefront/upload] uploadToR2 falhou', r);
+      return res.status(500).json({ error: 'Erro ao salvar arquivo' });
+    }
+
+    res.json({
+      ok: true,
+      url: r.url,
+      key: r.key,
+      content_type,
+      size_bytes: buf.length,
+    });
+  } catch (err) {
+    console.error('[studio-storefront/upload] error:', err);
+    res.status(500).json({ error: 'Erro ao processar upload' });
+  }
+});
+
+// ────────────────────────────────────────────────────────────
 // POST /storefront/:slug/studio/order
 // Cria pedido Studio (digital_orders + digital_order_items
 //  com customization JSONB). Marca vertical='studio' e
 //  studio_production_status='pending_art' automaticamente.
+//
+// effectivePrice = product.price + soma(price_delta das choices
+//   selecionadas em customization.option/color)
 // ────────────────────────────────────────────────────────────
 router.post('/:slug/studio/order', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
@@ -401,7 +528,10 @@ router.post('/:slug/studio/order', async (req, res) => {
         return res.status(400).json({ error: `Personalizacao de "${p.name}": ${valErr}` });
       }
 
-      const effectivePrice = parseFloat(p.price);
+      // Aplica price_delta das choices selecionadas (option/color)
+      const basePrice = parseFloat(p.price);
+      const choicesDelta = computeChoicesDelta(cfg, item.customization);
+      const effectivePrice = basePrice + choicesDelta;
       const itemSubtotal = effectivePrice * qty;
       subtotal += itemSubtotal;
       hasStudioItem = true;
@@ -414,6 +544,9 @@ router.post('/:slug/studio/order', async (req, res) => {
         quantity:      qty,
         subtotal:      itemSubtotal,
         customization: item.customization || null,
+        // metadata auxiliar (nao persistida — so resposta)
+        _base_price: basePrice,
+        _choices_delta: choicesDelta,
       });
     }
 
@@ -602,20 +735,38 @@ router.post('/:slug/studio/order', async (req, res) => {
 
 // ────────────────────────────────────────────────────────────
 // GET /storefront/:slug/studio/order/:oid
-// Poll de status do pedido Studio (cliente acompanha)
+// Poll de status do pedido Studio (cliente acompanha).
+// Inclui revisions policy pra cliente ver no estagio "sent".
 // ────────────────────────────────────────────────────────────
 router.get('/:slug/studio/order/:oid', async (req, res) => {
   try {
     const { rows } = await db.query(`
       SELECT o.id, o.order_number, o.status, o.payment_status, o.payment_method,
              o.total, o.delivery_type, o.studio_production_status,
-             o.asaas_pix_expires_at, o.confirmed_at, o.delivered_at, o.cancelled_at
+             o.asaas_pix_expires_at, o.confirmed_at, o.delivered_at, o.cancelled_at,
+             COALESCE(c.studio_settings, '{}'::jsonb) AS studio_settings,
+             COALESCE(c.trade_name, c.legal_name) AS shop_name
         FROM digital_orders o
         JOIN digital_channel_config dcc ON dcc.company_id = o.company_id
+        JOIN companies c ON c.id = o.company_id
        WHERE o.id = $1 AND dcc.slug = $2 AND o.vertical = 'studio'
     `, [req.params.oid, req.params.slug.toLowerCase().trim()]);
     if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
-    res.json(rows[0]);
+    const row = rows[0];
+    const ss = row.studio_settings || {};
+    const { studio_settings, ...rest } = row;
+    res.json({
+      ...rest,
+      revisions: {
+        max_included: ss.max_revisions_included != null
+          ? parseInt(ss.max_revisions_included) : 0,
+        extra_price: ss.extra_revision_price != null
+          ? parseFloat(ss.extra_revision_price) : 0,
+        policy_text: ss.revision_policy_text || null,
+      },
+      sla_days: ss.default_sla_days != null ? parseInt(ss.default_sla_days) : 3,
+      shop_wa_phone: ss.approval_wa_phone || null,
+    });
   } catch (err) {
     console.error('[studio-storefront] poll error:', err);
     res.status(500).json({ error: 'Erro ao buscar pedido' });
