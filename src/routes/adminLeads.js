@@ -4,6 +4,8 @@
 // Fase 5 (21/05): filtros stale_days, recent_hours, status_in/status_not_in
 // Fase 5.1 (21/05): GET /queue agora aceita TODOS os filtros + GET /leads
 //                   retorna pipeline_filtered (sem perder o pipeline global)
+// Hotfix 25/05: fila estava vazia pra 2805 leads — adiciona buckets
+//               needs_contact / cold + baseline ELSE 10 (ver QUEUE_PRIORITY).
 // ============================================================
 
 const express = require('express');
@@ -27,8 +29,6 @@ const EDITABLE_FIELDS = [
 ];
 
 // ── Helper: extrai conditions/params a partir do filter object ────────
-// Usado tanto em GET /admin/leads quanto em GET /admin/lead-views (count)
-// quanto em GET /admin/leads/queue (Fase 5.1: filtros aplicaveis a queue).
 function buildLeadFilterConditions(filters) {
   const {
     status, city, category, followup_due, has_phone,
@@ -103,7 +103,6 @@ module.exports.buildLeadFilterConditions = buildLeadFilterConditions;
 // ── Helper: pipeline FILTRADO (sem o filtro status, pra mostrar a quebra
 //    do mesmo conjunto filtrado por OUTRAS dimensoes em cada status). ──
 async function buildPipelineFiltered(filters) {
-  // Remove status/status_in/status_not_in pra ver TODOS os status do conjunto filtrado
   const cleanedFilters = { ...filters };
   delete cleanedFilters.status;
   delete cleanedFilters.status_in;
@@ -160,7 +159,6 @@ router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
     [...params, parseInt(limit), parseInt(offset)]
   );
 
-  // Pipeline GLOBAL (base inteira, sem filtros) - mantido pra retrocompat
   const { rows: counts } = await pool.query(
     `SELECT status, COUNT(*) AS total, COALESCE(SUM(expected_mrr),0) AS potential_mrr
      FROM sales_leads GROUP BY status`
@@ -170,15 +168,12 @@ router.get('/', ...adminOnly, asyncHandler(async (req, res) => {
     pipeline[r.status] = { count: parseInt(r.total), potential_mrr: parseFloat(r.potential_mrr) };
   });
 
-  // Pipeline FILTRADO (Fase 5.1): ignora apenas o filtro de status pra mostrar
-  // a quebra do conjunto filtrado por OUTRAS dimensoes em cada status.
-  // Ex: filtrei por city=Jacarei, vejo quantos sao new/contacted/etc DESSA cidade.
   const pipelineFiltered = await buildPipelineFiltered(req.query);
 
   res.json({
     total: rows.length,
-    pipeline,           // base inteira
-    pipeline_filtered: pipelineFiltered,  // respeitando filtros (menos status)
+    pipeline,
+    pipeline_filtered: pipelineFiltered,
     leads: rows,
   });
 }));
@@ -251,7 +246,6 @@ router.get('/stats', ...adminOnly, asyncHandler(async (req, res) => {
 // GET /admin/leads/export - CSV
 // ============================================================
 router.get('/export', ...adminOnly, asyncHandler(async (req, res) => {
-  // Fase 5.1: usa buildLeadFilterConditions pra reaproveitar todos os filtros
   const { conditions, params } = buildLeadFilterConditions(req.query);
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
@@ -283,12 +277,11 @@ router.get('/export', ...adminOnly, asyncHandler(async (req, res) => {
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="leads_${new Date().toISOString().slice(0,10)}.csv"`);
-  res.send('\uFEFF' + lines.join('\r\n'));
+  res.send('﻿' + lines.join('\r\n'));
 }));
 
 // ============================================================
 // POST /admin/leads/batch - acoes em massa
-// body: { ids: [...], action: 'update_status'|'assign_cadence'|'set_expected_plan'|'delete'|'mark_rotten', payload: {...} }
 // ============================================================
 router.post('/batch', ...adminOnly, asyncHandler(async (req, res) => {
   const { ids, action, payload = {} } = req.body;
@@ -385,7 +378,6 @@ router.post('/recompute-scores', ...adminOnly, asyncHandler(async (req, res) => 
 
 // ============================================================
 // POST /admin/leads/mark-rotten - aplica rotten flag em massa via funcao SQL
-// body: { threshold_days?: number (default 14) }
 // ============================================================
 router.post('/mark-rotten', ...adminOnly, asyncHandler(async (req, res) => {
   const threshold = parseInt(req.body?.threshold_days) || 14;
@@ -402,6 +394,18 @@ router.post('/mark-rotten', ...adminOnly, asyncHandler(async (req, res) => {
 // Comportamento sutil: o filtro is_rotten=false e status_not_in=converted,lost
 // SAO ENFORCED IMPLICITAMENTE (queue ignora rotten e ja-vendidos por design).
 // Filtros do usuario sao ADITIVOS (AND).
+//
+// QUEUE_PRIORITY (atualizado 25/05 — hotfix fila vazia):
+//   100 followup_overdue   — proximo_followup ja passou
+//    80 funnel_stalled     — demo/interessado parado >= 3d
+//    60 hot_cold           — score >= 50 sem atividade >= 7d
+//    40 new_lead           — importado nas ultimas 24h
+//    30 needs_contact      — contactado/respondeu mas sem followup nem atividade >= 5d
+//    20 cold               — status='new' SEM nenhuma interacao (ja passou as 24h)
+//    10 baseline           — qualquer outro lead elegivel
+//
+// Sem o baseline (antes era ELSE 0), a fila ficava vazia em steady-state.
+// 2805 leads no banco -> 0 na fila. Bug reportado 25/05.
 // ============================================================
 router.get('/queue', ...adminOnly, asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
@@ -416,13 +420,17 @@ router.get('/queue', ...adminOnly, asyncHandler(async (req, res) => {
   ];
   const where = 'WHERE ' + baseConditions.join(' AND ');
 
-  // Expressao de priorizacao reutilizada em 3 lugares (SELECT/HAVING/ORDER BY)
+  // Expressao de priorizacao reutilizada em SELECT/ORDER BY.
+  // ELSE 10 (era 0) garante que TODO lead elegivel entra na fila — antes
+  // o HAVING > 0 zerava qualquer lead que nao casasse com as 4 regras top.
   const priorityExpr = `CASE
     WHEN l.next_followup_at IS NOT NULL AND l.next_followup_at <= NOW() THEN 100
     WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 80
     WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 60
     WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 40
-    ELSE 0
+    WHEN l.status IN ('contacted','responded') AND l.next_followup_at IS NULL AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '5 days') THEN 30
+    WHEN l.status = 'new' AND NOT EXISTS (SELECT 1 FROM lead_interactions li2 WHERE li2.lead_id = l.id) THEN 20
+    ELSE 10
   END`;
 
   const reasonExpr = `CASE
@@ -430,6 +438,8 @@ router.get('/queue', ...adminOnly, asyncHandler(async (req, res) => {
     WHEN l.status IN ('demo','interested') AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '3 days') THEN 'funnel_stalled'
     WHEN l.dynamic_score >= 50 AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '7 days') THEN 'hot_cold'
     WHEN l.status = 'new' AND l.created_at > NOW() - INTERVAL '24 hours' THEN 'new_lead'
+    WHEN l.status IN ('contacted','responded') AND l.next_followup_at IS NULL AND (l.last_activity_at IS NULL OR l.last_activity_at < NOW() - INTERVAL '5 days') THEN 'needs_contact'
+    WHEN l.status = 'new' AND NOT EXISTS (SELECT 1 FROM lead_interactions li2 WHERE li2.lead_id = l.id) THEN 'cold'
     ELSE 'other'
   END`;
 
@@ -444,10 +454,10 @@ router.get('/queue', ...adminOnly, asyncHandler(async (req, res) => {
      LEFT JOIN lead_interactions i ON i.lead_id = l.id
      ${where}
      GROUP BY l.id
-     HAVING ${priorityExpr.replace(/CASE/g, 'CASE').trim()} > 0
      ORDER BY ${priorityExpr} DESC,
               l.dynamic_score DESC NULLS LAST,
-              l.next_followup_at ASC NULLS LAST
+              l.next_followup_at ASC NULLS LAST,
+              l.created_at DESC
      LIMIT $${idx}`,
     [...params, limit]
   );
@@ -585,7 +595,6 @@ router.delete('/:id', ...adminOnly, asyncHandler(async (req, res) => {
 
 // ============================================================
 // POST /admin/leads/:id/apply-cadence - aplicar cadencia a um lead
-// body: { cadence_name: string, start_day?: number (default 0) }
 // ============================================================
 router.post('/:id/apply-cadence', ...adminOnly, asyncHandler(async (req, res) => {
   const { cadence_name, start_day = 0 } = req.body;
