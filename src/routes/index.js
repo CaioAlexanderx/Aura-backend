@@ -51,6 +51,11 @@ router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
 router.use('/webhooks/instagram', require('./webhookInstagram'));
 router.use('/webhooks/mp',        require('./webhookMp'));
 
+// Aura Studio Nivel 1 Sub-onda D (25/05/2026):
+// Storefront publico Studio. Montado ANTES de /storefront pra que rotas
+// /storefront/:slug/studio/* sejam capturadas por studioStorefront e nao
+// caiam no catch-all GET /:slug do storefront principal.
+router.use('/storefront', require('./studioStorefront'));
 router.use('/storefront', require('./storefront'));
 router.use('/reports', require('./publicReports'));
 
