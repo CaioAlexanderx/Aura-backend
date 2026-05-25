@@ -7,11 +7,14 @@
 // Fase 3  : /inputs/* + /compositions/* (BOM + custo + margem)
 // Nivel 1 : /settings, /metrics, /sla/estimate (25/05/2026)
 //
+// IMPORTANTE: pedidos Studio são armazenados em `digital_orders`
+// com `vertical = 'studio'` (NÃO existe tabela studio_orders).
+// View studio_hub_kpis já agrega KPIs comuns.
+//
 // Persistência de onboarding (markStudioOnboarding) gravada em
 // companies.studio_settings.onboarding.{key} nos pontos-chave.
 //
-// Gate de plano (requirePlan('expansao')) aplicado no mount em
-// src/routes/private.js. Não duplicar aqui.
+// Gate de plano (requirePlan) aplicado no mount em src/routes/private.js.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -532,10 +535,11 @@ router.get('/compositions/summary', async function(req, res) {
 
 // ═══════════════════════════════════════════════════════════
 // NIVEL 1 (25/05/2026) — Settings + Metrics + SLA Estimate
+//
+// Fonte canonica: digital_orders WHERE vertical='studio'
+// View pronta: studio_hub_kpis (agregados de digital_orders)
 // ═══════════════════════════════════════════════════════════
 
-// Whitelist de chaves graváveis em studio_settings (evita escrita acidental
-// de chaves estranhas). Apenas as listadas aqui são aceitas via PATCH.
 const ALLOWED_STUDIO_SETTINGS = [
   'default_sla_days',            // int — prazo padrão de produção (dias úteis)
   'production_capacity_per_day', // int — capacidade diária pra calcular fila
@@ -545,7 +549,6 @@ const ALLOWED_STUDIO_SETTINGS = [
 ];
 
 // ─── GET /studio/settings ───────────────────────────────────
-// Devolve o JSONB studio_settings inteiro (defaults aplicados no cliente).
 router.get('/settings', async function(req, res) {
   try {
     const r = await db.query(
@@ -562,7 +565,6 @@ router.get('/settings', async function(req, res) {
 });
 
 // ─── PATCH /studio/settings ─────────────────────────────────
-// Merge no JSONB. Apenas chaves de ALLOWED_STUDIO_SETTINGS são aceitas.
 router.patch('/settings', async function(req, res) {
   const patch = req.body || {};
   const filtered = {};
@@ -582,7 +584,6 @@ router.patch('/settings', async function(req, res) {
       [JSON.stringify(filtered), req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Empresa não encontrada' });
-    // Onboarding hooks
     if (filtered.approval_wa_phone) markStudioOnboarding(db, req.params.id, 'wa');
     if (filtered.default_sla_days)  markStudioOnboarding(db, req.params.id, 'sla');
     res.json({ settings: r.rows[0].settings });
@@ -593,110 +594,93 @@ router.patch('/settings', async function(req, res) {
 });
 
 // ─── GET /studio/metrics ────────────────────────────────────
-// KPIs pra home do Studio. Query param ?days=N (default 7, max 90).
+// Usa view studio_hub_kpis (agregada de digital_orders WHERE vertical=studio)
+// + queries diretas pra dados configuraveis por periodo.
 router.get('/metrics', async function(req, res) {
   const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 90);
   try {
-    // 1. KDS atual — distribuição por status de produção
-    const kdsRes = await db.query(
-      `SELECT studio_production_status, COUNT(*)::int AS cnt
-         FROM studio_orders
-        WHERE company_id = $1
-          AND studio_production_status IS NOT NULL
-        GROUP BY studio_production_status`,
+    // 1. KPIs principais via view (em_producao, aguardando_arte, etc)
+    const kpiRes = await db.query(
+      `SELECT * FROM studio_hub_kpis WHERE company_id = $1 LIMIT 1`,
       [req.params.id]
     );
-    const kdsByStatus = {};
-    for (const r of kdsRes.rows) kdsByStatus[r.studio_production_status] = r.cnt;
+    const k = kpiRes.rows[0] || {};
 
-    // 2. Prontos hoje (entregues/marcados como ready hoje)
-    const prontosHojeRes = await db.query(
-      `SELECT COUNT(*)::int AS cnt
-         FROM studio_orders
-        WHERE company_id = $1
-          AND studio_production_status = 'ready'
-          AND updated_at::date = CURRENT_DATE`,
-      [req.params.id]
-    );
-
-    // 3. Vendas Studio dos últimos N dias (defensivo: sales.status pode não existir)
-    let vendasTotal = 0;
-    let pedidosCount = 0;
+    // 2. Prontos hoje (filtro especifico que a view nao tem)
+    let prontosHoje = 0;
     try {
-      const vendasRes = await db.query(
-        `SELECT COALESCE(SUM(s.total_amount), 0)::float AS total,
-                COUNT(DISTINCT so.id)::int AS pedidos
-           FROM studio_orders so
-           JOIN sales s ON s.id = so.sale_id
-          WHERE so.company_id = $1
-            AND s.created_at >= NOW() - ($2 || ' days')::interval
-            AND COALESCE(s.status, 'completed') != 'cancelled'`,
+      const phRes = await db.query(
+        `SELECT COUNT(*)::int AS cnt
+           FROM digital_orders
+          WHERE company_id = $1 AND vertical = 'studio'
+            AND studio_production_status = 'ready'
+            AND updated_at::date = CURRENT_DATE`,
+        [req.params.id]
+      );
+      prontosHoje = parseInt(phRes.rows[0]?.cnt || 0);
+    } catch (_) {}
+
+    // 3. Vendas no periodo configuravel (view so agrega 7d/today)
+    let vendasTotal = 0, pedidosCount = 0;
+    try {
+      const vRes = await db.query(
+        `SELECT COALESCE(SUM(total), 0)::float AS total,
+                COUNT(*)::int AS pedidos
+           FROM digital_orders
+          WHERE company_id = $1 AND vertical = 'studio'
+            AND created_at >= NOW() - ($2 || ' days')::interval
+            AND COALESCE(status, 'completed') != 'cancelled'`,
         [req.params.id, String(days)]
       );
-      vendasTotal = parseFloat(vendasRes.rows[0]?.total || 0);
-      pedidosCount = parseInt(vendasRes.rows[0]?.pedidos || 0);
-    } catch (_) { /* tabela ou coluna pode não existir em ambientes parciais */ }
+      vendasTotal = parseFloat(vRes.rows[0]?.total || 0);
+      pedidosCount = parseInt(vRes.rows[0]?.pedidos || 0);
+    } catch (_) {}
 
-    // 4. Margem média via view studio_compositions_summary
+    // 4. Margem media via view studio_compositions_summary
     let margemMedia = null;
     try {
-      const margemRes = await db.query(
+      const mRes = await db.query(
         `SELECT AVG(margin_pct)::float AS avg_margin
            FROM studio_compositions_summary
           WHERE company_id = $1 AND margin_pct IS NOT NULL`,
         [req.params.id]
       );
-      margemMedia = margemRes.rows[0]?.avg_margin != null
-        ? parseFloat(margemRes.rows[0].avg_margin) : null;
-    } catch (_) { /* view pode não existir */ }
+      margemMedia = mRes.rows[0]?.avg_margin != null
+        ? parseFloat(mRes.rows[0].avg_margin) : null;
+    } catch (_) {}
 
-    // 5. Tempo médio produção (em dias úteis aproximados) — para pedidos ready/delivered últimos 30d
+    // 5. Tempo medio producao (em dias) — created_at -> updated_at para ready/delivered
     let tempoMedio = null;
     try {
-      const tempoRes = await db.query(
+      const tRes = await db.query(
         `SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 86400.0)::float AS avg_days
-           FROM studio_orders
-          WHERE company_id = $1
+           FROM digital_orders
+          WHERE company_id = $1 AND vertical = 'studio'
             AND studio_production_status IN ('ready', 'delivered')
             AND created_at >= NOW() - INTERVAL '30 days'`,
         [req.params.id]
       );
-      tempoMedio = tempoRes.rows[0]?.avg_days != null
-        ? parseFloat(tempoRes.rows[0].avg_days) : null;
-    } catch (_) {}
-
-    // 6. Top 5 produtos por receita no período
-    let topProdutos = [];
-    try {
-      const topRes = await db.query(
-        `SELECT si.product_id, p.name AS product_name,
-                SUM(si.quantity)::int AS qty,
-                SUM(si.quantity * si.unit_price)::float AS receita
-           FROM sale_items si
-           JOIN sales s            ON s.id = si.sale_id
-           JOIN studio_orders so   ON so.sale_id = s.id
-           LEFT JOIN products p    ON p.id = si.product_id
-          WHERE s.company_id = $1
-            AND s.created_at >= NOW() - ($2 || ' days')::interval
-            AND COALESCE(s.status, 'completed') != 'cancelled'
-          GROUP BY si.product_id, p.name
-          ORDER BY receita DESC NULLS LAST
-          LIMIT 5`,
-        [req.params.id, String(days)]
-      );
-      topProdutos = topRes.rows;
+      tempoMedio = tRes.rows[0]?.avg_days != null
+        ? parseFloat(tRes.rows[0].avg_days) : null;
     } catch (_) {}
 
     res.json({
-      em_producao:        kdsByStatus.in_production || 0,
-      aguardando_arte:    (kdsByStatus.pending_art || 0) + (kdsByStatus.changes_requested || 0),
-      aprovados:          kdsByStatus.approved || 0,
-      prontos_hoje:       parseInt(prontosHojeRes.rows[0]?.cnt || 0),
+      em_producao:        parseInt(k.in_production_count || 0),
+      aguardando_arte:    parseInt(k.pending_art_count || 0),
+      aprovados:          parseInt(k.approved_count || 0),
+      ready_total:        parseInt(k.ready_count || 0),
+      prontos_hoje:       prontosHoje,
       vendas_periodo:     vendasTotal,
       pedidos_periodo:    pedidosCount,
+      revenue_today:      parseFloat(k.revenue_today || 0),
+      revenue_7d:         parseFloat(k.revenue_7d || 0),
+      orders_7d:          parseInt(k.orders_7d || 0),
+      orders_today:       parseInt(k.orders_today || 0),
+      delivered_7d:       parseInt(k.delivered_7d || 0),
+      overdue_count:      parseInt(k.overdue_count || 0),
+      total_orders:       parseInt(k.total_orders || 0),
       margem_media_pct:   margemMedia,
       tempo_medio_dias:   tempoMedio,
-      top_produtos:       topProdutos,
       period_days:        days,
       computed_at:        new Date().toISOString(),
     });
@@ -708,7 +692,7 @@ router.get('/metrics', async function(req, res) {
 
 // ─── GET /studio/sla/estimate ───────────────────────────────
 // Prazo dinâmico = base + ceil(fila atual / capacidade diária).
-// Query param ?products=id1,id2 (opcional — pra futuro recorte por produto)
+// Fila = digital_orders Studio em status (pending_art, approved, in_production)
 router.get('/sla/estimate', async function(req, res) {
   const productIds = (req.query.products || '').split(',').map((s) => s.trim()).filter(Boolean);
   try {
@@ -722,14 +706,17 @@ router.get('/sla/estimate', async function(req, res) {
     const slaDays  = ssRes.rows[0].sla_days;
     const capacity = Math.max(ssRes.rows[0].capacity, 1);
 
-    const queueRes = await db.query(
-      `SELECT COUNT(*)::int AS qty
-         FROM studio_orders
-        WHERE company_id = $1
-          AND studio_production_status IN ('pending_art', 'approved', 'in_production')`,
-      [req.params.id]
-    );
-    const queueQty = parseInt(queueRes.rows[0]?.qty || 0);
+    let queueQty = 0;
+    try {
+      const queueRes = await db.query(
+        `SELECT COUNT(*)::int AS qty
+           FROM digital_orders
+          WHERE company_id = $1 AND vertical = 'studio'
+            AND studio_production_status IN ('pending_art', 'approved', 'in_production')`,
+        [req.params.id]
+      );
+      queueQty = parseInt(queueRes.rows[0]?.qty || 0);
+    } catch (_) {}
 
     const queueDays = Math.ceil(queueQty / capacity);
     const estimateDays = slaDays + queueDays;
