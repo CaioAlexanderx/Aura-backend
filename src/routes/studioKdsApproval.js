@@ -5,6 +5,8 @@
 // Migration 130 (studio_production_status) + 132 (approval_links) + 25/05
 // (studio_kds_unified_view_and_trigger — view studio_orders unindo
 //  digital_orders + sales personalizaveis).
+// 25/05/2026 S-2.5: view tambem une marketplace_orders. PATCH production-status
+//   ganha branch source='marketplace' (atualiza studio_production_status_override).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -13,12 +15,21 @@ const db      = require('../config/database');
 const { markStudioOnboarding } = require('../utils/studioOnboarding');
 
 // ═══════════════════════════════════════════════════════════
-// FASE 4: KDS de Produção (atualizado 25/05 — KDS unificado)
+// FASE 4: KDS de Produção (atualizado 25/05 — KDS unificado + S-2.5)
 // ═══════════════════════════════════════════════════════════
 
-const VALID_PRODUCTION_STATUS = ['pending_art', 'approved', 'in_production', 'ready', 'delivered'];
+// S-0 + S-2.5: awaiting_customization eh status valido + cancelled
+const VALID_PRODUCTION_STATUS = [
+  'awaiting_customization',
+  'pending_art',
+  'approved',
+  'in_production',
+  'ready',
+  'delivered',
+  'cancelled',
+];
 
-// ─── GET /orders — lista da view studio_orders (digital + pdv) ────
+// ─── GET /orders — lista da view studio_orders (digital + pdv + marketplace) ────
 router.get('/orders', async function(req, res) {
   const { status, days = 30, limit = 200 } = req.query;
   const params = [req.params.id];
@@ -39,12 +50,22 @@ router.get('/orders', async function(req, res) {
               o.source,
               o.digital_order_id,
               o.pdv_sale_id,
+              o.marketplace_order_id,
+              o.marketplace_platform,
+              o.customization_collected_at,
               -- item_count condicional por fonte
               CASE
                 WHEN o.source = 'digital' THEN
                   (SELECT COUNT(*) FROM digital_order_items oi WHERE oi.order_id = o.digital_order_id)
-                ELSE
+                WHEN o.source = 'pdv' THEN
                   (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = o.pdv_sale_id)
+                WHEN o.source = 'marketplace' THEN
+                  (SELECT CASE
+                    WHEN mo.items IS NULL THEN 0
+                    WHEN jsonb_typeof(mo.items) = 'array' THEN jsonb_array_length(mo.items)
+                    ELSE 0
+                  END FROM marketplace_orders mo WHERE mo.id = o.marketplace_order_id)
+                ELSE 0
               END AS item_count,
               -- approvals so existem pra fonte digital
               (SELECT MIN(image_url) FROM studio_approval_links a
@@ -68,7 +89,6 @@ router.get('/orders', async function(req, res) {
 // ─── GET /orders/:oid — detalhe source-aware ──────────────────────
 router.get('/orders/:oid', async function(req, res) {
   try {
-    // 1. Detecta source via view
     const headRes = await db.query(
       `SELECT * FROM studio_orders
         WHERE id = $1 AND company_id = $2
@@ -78,7 +98,7 @@ router.get('/orders/:oid', async function(req, res) {
     if (!headRes.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
     const head = headRes.rows[0];
 
-    // 2. Items da tabela correta
+    // Items da tabela correta (source-aware)
     let items = [];
     if (head.source === 'digital') {
       const r = await db.query(
@@ -89,12 +109,11 @@ router.get('/orders/:oid', async function(req, res) {
         [head.digital_order_id]
       );
       items = r.rows;
-    } else {
-      // source = 'pdv' — sale_items (ainda sem customization até PDV Studio nativo)
+    } else if (head.source === 'pdv') {
       const r = await db.query(
         `SELECT si.id, si.product_id, p.name AS product_name,
                 si.quantity, si.unit_price,
-                NULL::jsonb AS customization
+                si.customization
            FROM sale_items si
            LEFT JOIN products p ON p.id = si.product_id
           WHERE si.sale_id = $1
@@ -102,9 +121,28 @@ router.get('/orders/:oid', async function(req, res) {
         [head.pdv_sale_id]
       );
       items = r.rows;
+    } else if (head.source === 'marketplace') {
+      // Items vem do JSONB marketplace_orders.items + customization_data
+      const r = await db.query(
+        `SELECT items, customization_data
+           FROM marketplace_orders WHERE id = $1`,
+        [head.marketplace_order_id]
+      );
+      const row = r.rows[0];
+      const rawItems = Array.isArray(row?.items) ? row.items : [];
+      const custData = row?.customization_data || {};
+      items = rawItems.map((it, idx) => ({
+        id: `${head.marketplace_order_id}-${idx}`,
+        product_id: it.product_id || null,
+        product_name: it.product_name || null,
+        quantity: it.quantity || 1,
+        unit_price: it.unit_price || 0,
+        // customization: pega do customization_data[product_id] (shape S-2)
+        customization: it.product_id ? (custData[it.product_id] || null) : null,
+      }));
     }
 
-    // 3. Approvals só existem pra source digital
+    // Approvals só existem pra source digital
     let approvals = [];
     if (head.source === 'digital') {
       const r = await db.query(
@@ -135,9 +173,8 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
     return res.status(400).json({ error: `status inválido (use: ${VALID_PRODUCTION_STATUS.join(', ')})` });
   }
   try {
-    // 1. Detecta source via view
     const headRes = await db.query(
-      `SELECT source, digital_order_id, pdv_sale_id
+      `SELECT source, digital_order_id, pdv_sale_id, marketplace_order_id, customization_collected_at
          FROM studio_orders
         WHERE id = $1 AND company_id = $2
         LIMIT 1`,
@@ -146,7 +183,6 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
     if (!headRes.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
     const head = headRes.rows[0];
 
-    // 2. Update na tabela correta
     let updated;
     if (head.source === 'digital') {
       const r = await db.query(
@@ -157,14 +193,40 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
         [status, head.digital_order_id, req.params.id]
       );
       updated = r.rows[0];
-    } else {
-      // source = 'pdv'
+    } else if (head.source === 'pdv') {
       const r = await db.query(
         `UPDATE sales
             SET studio_production_status = $1, updated_at = NOW()
           WHERE id = $2 AND company_id = $3
           RETURNING id, studio_production_status`,
         [status, head.pdv_sale_id, req.params.id]
+      );
+      updated = r.rows[0];
+    } else if (head.source === 'marketplace') {
+      // S-2.5: pedido marketplace usa studio_production_status_override.
+      // Validacao: nao deixa voltar pra awaiting_customization se ja coletou.
+      if (status === 'awaiting_customization' && head.customization_collected_at) {
+        return res.status(400).json({
+          error: 'Personalização já foi coletada; não dá pra voltar pra awaiting_customization. Use o modal Coletar Personalização pra editar a personalização.',
+        });
+      }
+      // Mapeia status logico -> status interno marketplace_orders.status
+      const statusMap = {
+        approved:      'separando',
+        in_production: 'separando',
+        ready:         'enviado',
+        delivered:     'entregue',
+        cancelled:     'cancelado',
+      };
+      const mktStatus = statusMap[status] || null;
+      const r = await db.query(
+        `UPDATE marketplace_orders
+            SET studio_production_status_override = $1,
+                ${mktStatus ? `status = '${mktStatus}', ` : ''}
+                updated_at = NOW()
+          WHERE id = $2 AND company_id = $3 AND vertical = 'studio'
+          RETURNING id, studio_production_status_override AS studio_production_status`,
+        [status === 'awaiting_customization' ? null : status, head.marketplace_order_id, req.params.id]
       );
       updated = r.rows[0];
     }
@@ -180,8 +242,9 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
 // ═══════════════════════════════════════════════════════════
 // FASE 5: Request approval (wa.me)
 // SO funciona pra source='digital' — pra venda PDV o cliente esta presente,
-// nao precisa de fluxo de aprovacao remota. Quando PDV Studio nativo (E1)
-// for implementado, considerar extender approval pra source=pdv.
+// nao precisa de fluxo de aprovacao remota. Pra source='marketplace', a
+// aprovacao acontece via WhatsApp manual fora do sistema (lojista usa o
+// chat do marketplace).
 // ═══════════════════════════════════════════════════════════
 
 function generateToken() {
@@ -202,7 +265,6 @@ router.post('/orders/:oid/approval', async function(req, res) {
     return res.status(400).json({ error: 'mockup_url obrigatório (URL pública do mockup)' });
   }
 
-  // Resolve source primeiro — approval só funciona pra digital
   const headRes = await db.query(
     `SELECT source, digital_order_id FROM studio_orders
       WHERE id = $1 AND company_id = $2 LIMIT 1`,
@@ -211,7 +273,7 @@ router.post('/orders/:oid/approval', async function(req, res) {
   if (!headRes.rows.length) return res.status(404).json({ error: 'Pedido não encontrado' });
   if (headRes.rows[0].source !== 'digital') {
     return res.status(400).json({
-      error: 'Aprovação remota só disponível pra pedidos do Canal Digital. Pra venda PDV, mostre o mockup ao cliente presencialmente.',
+      error: 'Aprovação remota só disponível pra pedidos do Canal Digital. Pra venda PDV mostre o mockup presencialmente; pra marketplace use o chat da plataforma.',
     });
   }
   const digitalOrderId = headRes.rows[0].digital_order_id;
@@ -283,7 +345,6 @@ router.post('/orders/:oid/approval', async function(req, res) {
 
 router.get('/orders/:oid/approval', async function(req, res) {
   try {
-    // Resolve digital_order_id via view (source-aware mas approval só digital)
     const headRes = await db.query(
       `SELECT source, digital_order_id FROM studio_orders
         WHERE id = $1 AND company_id = $2 LIMIT 1`,
