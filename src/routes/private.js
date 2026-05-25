@@ -21,14 +21,8 @@ router.use('/dre', require('./dre'));
 router.use('/financial/history', require('./financialHistory'));
 router.use('/financial/analysis', require('./financialAnalysis'));
 router.use('/bank', require('./bankReconciliation'));
-// Financeiro v2: Insights agregados (Health Score / Runway / Biggest Lever).
-// Onda 1 (04/05/2026) calcula client-side; este endpoint enriquece com dados do server.
 router.use('/financeiro', require('./financeiroInsights').companyRouter);
-// Financeiro Fase A (19/05/2026): comparativo (mes-vs-anterior, YoY, custom).
-// Retorna series diarias alinhadas pra plotar grafico sobreposto na Visao Geral.
 router.use('/financeiro', require('./financeiroComparative').companyRouter);
-// FIX 07/05/2026: exclui type='troca' do revenue + expoe trocas_count/trocas_net_received
-// + adiciona s.type e s.exchange_of_sale_id na listagem /sales
 router.use('/pdv', require('./pdv-summary-patch'));
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
@@ -40,20 +34,12 @@ router.use('/products', require('./productsVariations'));
 router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
 router.use('/products', require('./productImage'));
-// 23/05/2026: foto por variante de produto (POST/DELETE /:pid/variant-image).
-// Identifica variante por combinacao (color_hex/size_value) em vez de id,
-// pra sobreviver ao soft-delete+INSERT do PUT /variations (auto-save).
 router.use('/products', require('./variantImage'));
 router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
-// 07/05/2026: Importacao de DANFE PDF via IA. Gate de plano dentro da rota
-// (Negocio = 50/mes, Expansao = ilimitado).
 router.use('/products', require('./danfeImport'));
 router.use('/products/:pid/variants', require('./variants'));
 router.use('/product-categories', require('./productCategories'));
-// M-STOCKLINK MSL-02/03: vincula produtos entre CNPJs do mesmo owner.
-// Monta o companyRouter no root porque ele tem rotas /products/:pid/master-sku
-// (mergeParams pega o :id da empresa pai do private.js).
 router.use('/', require('./productLinks').companyRouter);
 router.use('/coupons', require('./coupons'));
 router.use('/nfce', require('./nfce'));
@@ -62,7 +48,7 @@ router.use('/nfse', require('./nfse'));
 router.use('/storage', require('./storage'));
 router.use('/obligations', require('./fiscalObligations'));
 router.use('/obligations', require('./fiscalPdf'));
-router.use('/', require('./obligationsReport')); // PR38: POST /obligations/:code/report
+router.use('/', require('./obligationsReport'));
 router.use('/guides', require('./guides'));
 router.use('/checklist', require('./checklist').checklistRouter);
 router.use('/onboarding', require('./onboarding'));
@@ -75,25 +61,7 @@ router.use('/reviews', require('./reviews').reviewsRouter);
 router.use('/modules', require('./modules'));
 router.use('/billing', require('./billing'));
 router.use('/support', require('./support'));
-
-// 11/05/2026 -- Clientes basico movido pro Essencial.
-// Decisao de produto: cadastro de cliente e commodity (Bling/Tiny/etc
-// oferecem no plano de entrada). Limite por plano controlado em customers.js:
-//   essencial = 1.000
-//   negocio   = 5.000
-//   expansao  = ilimitado
-// CRM avancado (ranking/retencao/birthdays/crediario) continua Negocio+.
 router.use('/customers', require('./customers'));
-
-// 12/05/2026 -- PLAN-02: Employees CRUD basico movido pro Essencial.
-// Decisao de produto: cadastro de "vendedor" (nome+cargo) e commodity
-// pra atribuir vendas no PDV. CPF, admissao, salario, PIS sao opcionais
-// no schema -- so exigidos pela UI da Folha (Negocio+). Limite por plano:
-//   essencial = 3 funcionarios ativos
-//   negocio   = 50
-//   expansao  = ilimitado
-// Folha de pagamento real (calculo, holerite, comissao, ranking, eSocial)
-// continua Negocio+ via mounts especificos abaixo.
 router.use('/employees', require('./employees'));
 
 // -- NEGOCIO+ --
@@ -101,18 +69,9 @@ router.use('/employees', require('./employees'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
-// Crediario (fiado) por cliente -- gate igual /customers porque depende
-// da existencia do CRUD de cliente. Saldo via view, sem integracao com
-// Financeiro/contas a receber. Migration 099.
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
-// Crediario parcelado -- vendas a prazo com score interno, regua de cobanca
-// automatica e dashboard de inadimplencia. Migrations 115-118.
-// 14/05/2026: montado no mesmo prefixo /credit para compartilhar gate de plano.
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInstallments'));
 router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'));
-// Folha real: payslip por email, ranking de vendas, comissao -- Negocio+.
-// CRUD de employees (acima) ja e Essencial; estes endpoints sao o
-// 'processamento financeiro recorrente' que justifica o upgrade.
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
 router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
@@ -120,8 +79,6 @@ router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appoi
 router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
 router.use('/digital-channel/orders', requirePlan('negocio', 'expansao'), require('./digitalOrders'));
 router.use('/digital-channel/asaas', requirePlan('negocio', 'expansao'), require('./asaasSubconta'));
-// MP Fase 0 (20/05/2026): credenciais de gateway por empresa.
-// Fases 1-2 adicionarao Pix automatico e cartao sem alterar este mount.
 router.use('/payment-gateways', requirePlan('negocio', 'expansao'), require('./paymentGateways'));
 router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
 router.use('/whatsapp', requirePlan('negocio', 'expansao'), require('./whatsappRoutes'));
@@ -148,40 +105,30 @@ router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalBilli
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalRepasse'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalPortal'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalAutomation'));
-router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalTissRetentions')); // PR40 Sprint B
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalTissRetentions'));
 router.use('/dental/implants',      requirePlan('negocio', 'expansao'), require('./dentalImplants'));
 router.use('/dental/ortho',         requirePlan('negocio', 'expansao'), require('./dentalOrtho'));
 router.use('/dental/documents',     requirePlan('negocio', 'expansao'), require('./dentalDocuments'));
 router.use('/dental/transcribe',    requirePlan('negocio', 'expansao'), require('./dentalTranscription'));
 router.use('/dental/supplies',      requirePlan('negocio', 'expansao'), require('./dentalSupplies'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
-// Fase 8 (22/05/2026): foodOrdersDispatch.js intercepta /food/orders/* ANTES do
-// foodOrders.js -- monta POST /:oid/dispatch novo e middleware PATCH /:oid/status
-// que valida PIN antes de marcar delivered. Restante das rotas /food/orders/*
-// continua servido pelo foodOrders.js logo abaixo.
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrdersDispatch'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
 router.use('/food/deliverers', requirePlan('negocio', 'expansao'), require('./foodDeliverers'));
-// Fase 8 (22/05/2026): painel de despacho agregado. ready + inRoute + deliverers
-// com stats do dia. Acompanha PIN entregador (migration 127).
 router.use('/food/dispatch', requirePlan('negocio', 'expansao'), require('./foodDispatch'));
 router.use('/food/reports', requirePlan('negocio', 'expansao'), require('./foodReports'));
 router.use('/food/ifood', requirePlan('negocio', 'expansao'), require('./foodIfood'));
 router.use('/food/waiter', requirePlan('negocio', 'expansao'), require('./foodWaiter'));
 router.use('/food/nfce', requirePlan('negocio', 'expansao'), require('./foodNfce'));
 router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./foodSchedule'));
-// Fase 10 (22/05/2026): Hub de Pedidos -- agregador multi-canal.
-// food_orders + digital_orders unificados em /food/hub/orders, KPIs em /stats,
-// estado de conexoes em /channels. iFood/99food em modo stub aguardando aprovacao
-// API; quando aprovar, webhook insere food_orders com external_channel='ifood'
-// e Hub passa a listar automaticamente. Migration 128.
 router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub'));
 
-// Aura Studio (24/05/2026): vertical novo de personalizados.
-// Piloto Sheid Mania. Plano Expansão+. Migration 130.
-// Fase 0: GET /studio/health (sentinel).
-// Fase 1: GET/PUT /studio/products/:pid/customization-config + POST /personalize.
-// Doc: Projects/Aura/BACKLOG_AURA_STUDIO.md
+// Aura Studio: vertical novo de personalizados. Plano Expansão+.
+// F0: /health  ·  F1: /products/:pid/customization-config + /personalize
+// F2: /gallery/*  ·  F3: /inputs + /compositions  (migrations 130, 131)
 router.use('/studio', requirePlan('expansao'), require('./studio'));
+// F4 KDS + F5 request approval (migration 132, 25/05/2026).
+// Mesmo prefixo /studio — Express agrupa por path, sem colisão de rotas.
+router.use('/studio', requirePlan('expansao'), require('./studioKdsApproval'));
 
 module.exports = router;
