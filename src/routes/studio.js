@@ -541,11 +541,16 @@ router.get('/compositions/summary', async function(req, res) {
 // ═══════════════════════════════════════════════════════════
 
 const ALLOWED_STUDIO_SETTINGS = [
-  'default_sla_days',            // int — prazo padrão de produção (dias úteis)
-  'production_capacity_per_day', // int — capacidade diária pra calcular fila
-  'approval_wa_phone',           // string — WhatsApp da loja (link wa.me)
-  'approval_template_message',   // string — template da mensagem de aprovação
-  'ncm_defaults',                // jsonb — { 'caneca': 'XXXXX', 'camiseta': ... }
+  'default_sla_days',             // int — prazo padrão de produção (dias úteis)
+  'production_capacity_per_day',  // int — capacidade diária pra calcular fila
+  'approval_wa_phone',            // string — WhatsApp da loja (link wa.me)
+  'approval_template_message',    // string — template da mensagem de aprovação
+  'ncm_defaults',                 // jsonb — { 'caneca': 'XXXXX', 'camiseta': ... }
+  'marketplace_handling_days',    // int — prazo de handling ML/Shopee (S-1)
+  // Política de revisões/edições da arte (Loja Digital Studio 25/05/2026)
+  'max_revisions_included',       // int — qtas revisões grátis o cliente tem (0 = ilimitado)
+  'extra_revision_price',         // float — preço cobrado por revisão extra
+  'revision_policy_text',         // string — texto exibido pro cliente sobre a política
 ];
 
 // ─── GET /studio/settings ───────────────────────────────────
