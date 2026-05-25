@@ -51,6 +51,11 @@ router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
 router.use('/webhooks/instagram', require('./webhookInstagram'));
 router.use('/webhooks/mp',        require('./webhookMp'));
 
+// Aura Studio Sub-onda Marketplaces S-3 (25/05/2026):
+// Webhooks stub ML + Shopee. Mesmo router, 2 endpoints (/mercadolivre + /shopee).
+// Publicos, sem signature validation real (depende do core OAuth).
+router.use('/webhooks', require('./webhookMarketplaceStub'));
+
 // Aura Studio Nivel 1 Sub-onda D (25/05/2026):
 // Storefront publico Studio. Montado ANTES de /storefront pra que rotas
 // /storefront/:slug/studio/* sejam capturadas por studioStorefront e nao
