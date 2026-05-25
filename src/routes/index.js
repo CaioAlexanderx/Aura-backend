@@ -9,45 +9,31 @@ const { publicReviewsRouter } = require('./reviews');
 const onboardingRouter        = require('./onboarding');
 const accessCodesRouter       = require('./accessCodes');
 const verificationRouter      = require('./verification');
-const { userRouter: productLinksUserRouter } = require('./productLinks'); // M-STOCKLINK MSL-04
+const { userRouter: productLinksUserRouter } = require('./productLinks');
 
-// Autenticacao (publica)
 router.use('/auth', require('./auth'));
 router.use('/auth', require('./passwordReset'));
 router.use('/auth', accessCodesRouter);
 router.use('/auth', verificationRouter);
 router.use('/auth', require('./myPermissions'));
 router.use('/auth', require('./sidebarLayout'));
-router.use('/auth', require('./authSwitchCompany')); // Multi-CNPJ M1-03
+router.use('/auth', require('./authSwitchCompany'));
 
-// Referrals (autenticada)
 router.use('/referrals', accessCodesRouter);
-
-// Convites publicos (aceite sem company access)
 router.use('/invite', require('./invitePublic'));
 
-// Multi-CNPJ M1-02: endpoints user-level (lista/cria empresas adicionais)
 router.use('/me/companies', require('./userCompanies'));
-// M-STOCKLINK MSL-04: produtos agregados (nao precisa :id, view consolidada)
 router.use('/me', productLinksUserRouter);
-// Multi-CNPJ Sessao 2: endpoints /me/* consolidados (Onda 2.1+)
 router.use('/me', require('./meAggregates'));
-// Financeiro v2 — Insights consolidados multi-CNPJ (04/05/2026).
-// Agrega health score, runway e biggest lever de TODAS as empresas do usuario.
 router.use('/me/financeiro', require('./financeiroInsights').meRouter);
-// Financeiro Fase A (19/05/2026): comparativo consolidado multi-CNPJ.
-// Retorna series diarias alinhadas (atual + comparativo) pra grafico sobreposto.
 router.use('/me/financeiro', require('./financeiroComparative').meRouter);
 
-// Rotas privadas por empresa
 router.use('/companies/:id', privateCompaniesRouter);
 
-// Admin — Central de Comando
 router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminAccessCodes'));
 router.use('/admin', require('./adminPlan'));
 router.use('/admin', require('./adminVertical'));
-// Fase B1 benchmark (19/05/2026): sub-segmentacao manual via Gestao Aura.
 router.use('/admin', require('./adminSubVertical'));
 router.use('/admin', require('./adminSupport'));
 router.use('/admin', require('./adminMetrics'));
@@ -55,43 +41,34 @@ router.use('/admin', require('./adminClients360'));
 router.use('/admin', require('./adminRevenue'));
 router.use('/admin', require('./adminOps'));
 router.use('/admin', require('./adminGrowth'));
-// CRM comercial (20/05/2026): leads pre-venda (prospects / importacao Google Maps)
 router.use('/admin/leads', require('./adminLeads'));
-// CRM Fase 1 (21/05/2026): cadencias e metas mensais
 router.use('/admin/cadences',   require('./adminCadences'));
 router.use('/admin/lead-goals', require('./adminLeadGoals'));
-// CRM Fase 5 (21/05/2026): saved views (lentes pre-configuradas + custom)
 router.use('/admin/lead-views', require('./adminLeadViews'));
 
-// Webhooks (publicos, validacao interna)
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
 router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
-router.use('/webhooks/instagram', require('./webhookInstagram')); // Hub Social P11 S3
-router.use('/webhooks/mp',        require('./webhookMp'));        // MP Fase 1 (20/05/2026)
+router.use('/webhooks/instagram', require('./webhookInstagram'));
+router.use('/webhooks/mp',        require('./webhookMp'));
 
-// Storefront publico
 router.use('/storefront', require('./storefront'));
-
-// Relatorios publicos (acessados via token JWT enviado no email semanal)
 router.use('/reports', require('./publicReports'));
 
-// Rotas publicas
 router.use('/reviews',           publicReviewsRouter);
 router.use('/dental',            require('./dentalSign'));
-router.use('/dental/consent',    require('./dentalConsentPublic')); // W2-04: TCLE pad publico
+router.use('/dental/consent',    require('./dentalConsentPublic'));
 router.use('/dental/book',       require('./dentalBooking'));
 router.use('/dental-portal',     require('./dentalPortalPublic'));
 router.use('/barber/book',       require('./barberBooking'));
 router.use('/onboarding',        onboardingRouter);
-// FOOD polish pre-Fase 7 (21/05/2026): mount publico usa router proprio
-// (foodWaiterPublic / foodSchedulePublic). O router autenticado
-// (./foodWaiter, ./foodSchedule) e montado em /companies/:id/food/* em private.js.
 router.use('/food/table',        require('./foodWaiterPublic'));
 router.use('/food/schedule',     require('./foodSchedulePublic'));
-// FOOD-10 (Fase 5): rotas publicas extras (POST de pedido pelo slug + zonas).
-// Montado ANTES de '/food' principal porque tem rotas mais especificas
-// (/menu/public/:slug/order, /zones) que nao conflitam com food.js.
 router.use('/food',              require('./foodPublic'));
 router.use('/food',              require('./food'));
+
+// Aura Studio Fase 5: aprovação pública de arte via wa.me.
+// Sem auth — cliente recebe link wa.me e abre /aprovacao/:token no navegador.
+// Migration 132. PR Aura-backend#112.
+router.use('/aprovacao',         require('./studioApprovalPublic'));
 
 module.exports = router;
