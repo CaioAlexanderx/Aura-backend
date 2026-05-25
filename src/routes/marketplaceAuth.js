@@ -15,6 +15,43 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { getAdapter, SUPPORTED_PLATFORMS } = require('../marketplaces/registry');
 
+// ─── GET /companies/:id/marketplaces/connections ───
+// Lista todas as conexoes ativas (todas plataformas).
+// Usado pela UI de Marketplaces Studio pra mostrar status de cada uma.
+router.get('/connections', async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, platform, store_id, store_name, status, scope,
+              token_expires, created_at, updated_at,
+              CASE
+                WHEN token_expires IS NULL THEN NULL
+                WHEN token_expires < NOW() THEN 'expired'
+                WHEN token_expires < NOW() + INTERVAL '24 hours' THEN 'expiring'
+                ELSE 'fresh'
+              END AS token_state
+         FROM marketplace_connections
+        WHERE company_id = $1 AND status = 'ativo'
+        ORDER BY platform, created_at DESC`,
+      [req.params.id]
+    );
+    // Map por platform pra UI facilmente saber se cada uma esta conectada
+    const byPlatform = {};
+    for (const p of SUPPORTED_PLATFORMS) byPlatform[p] = null;
+    for (const r of rows) {
+      // pega a conexao mais recente por plataforma
+      if (!byPlatform[r.platform]) byPlatform[r.platform] = r;
+    }
+    res.json({
+      connections: rows,
+      by_platform: byPlatform,
+      supported_platforms: SUPPORTED_PLATFORMS,
+    });
+  } catch (err) {
+    console.error('[marketplaces/connections] ' + err.message);
+    res.status(500).json({ error: 'Erro ao listar conexoes' });
+  }
+});
+
 // ─── GET /companies/:id/marketplaces/:platform/auth-url ───
 // Devolve URL OAuth pro frontend abrir em popup/redirect.
 router.get('/:platform/auth-url', async (req, res) => {
