@@ -1,6 +1,7 @@
 // ============================================================
 // AURA Studio — rotas do vertical (Fase 0 + 1 + 2 + 3 + Nivel 1 + Fase 10A)
 // Atualizado 26/05/2026 — Fase 10A: IA Haiku sugere templates pro produto
+//                       + Issue 2: qty_multiplier_by_option em compositions
 //
 // Fase 0+1: /health, /products/:pid/customization-config, /personalize
 // Fase 2  : /gallery/* (categorias + templates + vinculação)
@@ -41,6 +42,36 @@ function validateCustomizationConfig(cfg) {
     if (!f.type || !VALID_FIELD_TYPES.includes(f.type)) return `fields[${i}].type inválido`;
     if (!f.label || typeof f.label !== 'string') return `fields[${i}].label obrigatório`;
     if (typeof f.required !== 'boolean') return `fields[${i}].required deve ser boolean`;
+  }
+  return null;
+}
+
+// ─── Validador defensivo de qty_multiplier_by_option (Issue 2) ──
+// Shape esperado: { fieldId: { valueA: numero, valueB: numero, ... }, ... }
+// Retorna string com mensagem de erro, ou null se ok.
+// NULL/undefined são válidos (multiplier opcional — comportamento atual).
+function validateQtyMultiplier(m) {
+  if (m === null || m === undefined) return null;
+  if (typeof m !== 'object' || Array.isArray(m)) {
+    return 'qty_multiplier_by_option deve ser objeto';
+  }
+  for (const fieldId of Object.keys(m)) {
+    if (typeof fieldId !== 'string' || !fieldId.trim()) {
+      return 'qty_multiplier_by_option: chave de fieldId inválida';
+    }
+    const inner = m[fieldId];
+    if (!inner || typeof inner !== 'object' || Array.isArray(inner)) {
+      return `qty_multiplier_by_option["${fieldId}"] deve ser objeto`;
+    }
+    for (const optValue of Object.keys(inner)) {
+      if (typeof optValue !== 'string') {
+        return `qty_multiplier_by_option["${fieldId}"]: chave de valor inválida`;
+      }
+      const mult = inner[optValue];
+      if (typeof mult !== 'number' || !isFinite(mult) || mult < 0) {
+        return `qty_multiplier_by_option["${fieldId}"]["${optValue}"] deve ser número >= 0`;
+      }
+    }
   }
   return null;
 }
@@ -470,6 +501,11 @@ router.put('/compositions/by-product/:pid', async function(req, res) {
   for (const it of items) {
     if (!it.input_id) return res.status(400).json({ error: 'cada item precisa de input_id' });
     if (!(parseFloat(it.qty_per_unit) > 0)) return res.status(400).json({ error: 'qty_per_unit > 0 obrigatório' });
+    // Issue 2: valida shape do multiplier por variante (opcional — NULL = qty fixa)
+    if (it.qty_multiplier_by_option !== undefined && it.qty_multiplier_by_option !== null) {
+      const mErr = validateQtyMultiplier(it.qty_multiplier_by_option);
+      if (mErr) return res.status(400).json({ error: mErr });
+    }
   }
 
   const client = await db.connect();
@@ -490,13 +526,22 @@ router.put('/compositions/by-product/:pid', async function(req, res) {
 
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
+      const multiplier = it.qty_multiplier_by_option
+        && typeof it.qty_multiplier_by_option === 'object'
+        && !Array.isArray(it.qty_multiplier_by_option)
+        && Object.keys(it.qty_multiplier_by_option).length > 0
+        ? JSON.stringify(it.qty_multiplier_by_option)
+        : null;
       await client.query(
         `INSERT INTO studio_composition_items
-           (composition_id, input_id, qty_per_unit, notes, sort_order)
-         VALUES ($1, $2, $3, $4, $5)
+           (composition_id, input_id, qty_per_unit, notes, sort_order, qty_multiplier_by_option)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (composition_id, input_id) DO UPDATE
-           SET qty_per_unit = EXCLUDED.qty_per_unit, notes = EXCLUDED.notes`,
-        [compId, it.input_id, parseFloat(it.qty_per_unit), it.notes || null, it.sort_order != null ? parseInt(it.sort_order) : i]
+           SET qty_per_unit = EXCLUDED.qty_per_unit,
+               notes = EXCLUDED.notes,
+               qty_multiplier_by_option = EXCLUDED.qty_multiplier_by_option`,
+        [compId, it.input_id, parseFloat(it.qty_per_unit), it.notes || null,
+         it.sort_order != null ? parseInt(it.sort_order) : i, multiplier]
       );
     }
 
