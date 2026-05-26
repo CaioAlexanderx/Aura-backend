@@ -1,11 +1,12 @@
 // ============================================================
-// AURA Studio — rotas do vertical (Fase 0 + 1 + 2 + 3 + Nivel 1)
-// Atualizado 25/05/2026 — Nivel 1 sub-onda A (settings + metrics + sla)
+// AURA Studio — rotas do vertical (Fase 0 + 1 + 2 + 3 + Nivel 1 + Fase 10A)
+// Atualizado 26/05/2026 — Fase 10A: IA Haiku sugere templates pro produto
 //
 // Fase 0+1: /health, /products/:pid/customization-config, /personalize
 // Fase 2  : /gallery/* (categorias + templates + vinculação)
 // Fase 3  : /inputs/* + /compositions/* (BOM + custo + margem)
 // Nivel 1 : /settings, /metrics, /sla/estimate (25/05/2026)
+// Fase 10A: /products/:pid/suggest-templates (IA Haiku, 26/05/2026)
 //
 // IMPORTANTE: pedidos Studio são armazenados em `digital_orders`
 // com `vertical = 'studio'` (NÃO existe tabela studio_orders).
@@ -737,6 +738,126 @@ router.get('/sla/estimate', async function(req, res) {
   } catch (err) {
     console.error('[studio/sla/estimate]', err.message);
     res.status(500).json({ error: 'Erro ao estimar prazo' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════
+// FASE 10A (26/05/2026) — IA Haiku sugere templates pro produto
+//
+// Usa claudeClient.callClaude com Haiku 4.5 pra ranquear ate 5
+// templates da galeria por match com nome+descricao+categoria do
+// produto. Fallback simples por overlap de palavras se IA falhar.
+// ═══════════════════════════════════════════════════════════
+
+// ─── POST /studio/products/:pid/suggest-templates ───────────
+router.post('/products/:pid/suggest-templates', async function(req, res) {
+  try {
+    // 1. Busca produto
+    const prodRes = await db.query(
+      `SELECT id, name, description, category, customization_config
+         FROM products WHERE id = $1 AND company_id = $2 LIMIT 1`,
+      [req.params.pid, req.params.id]
+    );
+    if (!prodRes.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
+    const product = prodRes.rows[0];
+
+    // 2. Busca galeria ativa da loja (limit 100 pra nao estourar tokens)
+    const tplRes = await db.query(
+      `SELECT t.id, t.name, t.description, t.tags, t.category_id,
+              tc.name AS category_name
+         FROM studio_templates t
+         LEFT JOIN studio_template_categories tc ON tc.id = t.category_id
+        WHERE t.company_id = $1 AND t.is_active = true
+        ORDER BY t.use_count DESC
+        LIMIT 100`,
+      [req.params.id]
+    );
+    if (tplRes.rows.length === 0) {
+      return res.json({
+        suggestions: [],
+        message: 'Cadastre templates na galeria pra receber sugestoes.',
+      });
+    }
+
+    // Fallback determinístico: overlap de palavras simples (> 3 chars).
+    function fallbackRank() {
+      const productWords = (product.name + ' ' + (product.description || ''))
+        .toLowerCase().split(/\s+/);
+      return tplRes.rows.map((t) => {
+        const tplWords = (t.name + ' ' + (t.tags || []).join(' '))
+          .toLowerCase().split(/\s+/);
+        const overlap = productWords.filter((w) => w.length > 3 && tplWords.includes(w)).length;
+        return {
+          template_id: t.id,
+          reason: `Palavras em comum: ${overlap}`,
+          score: Math.min(50 + overlap * 10, 95),
+        };
+      }).filter((r) => r.score >= 60)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+    }
+
+    // 3. Monta prompt pro Haiku
+    const productInfo = `Nome: ${product.name}\nDescricao: ${product.description || 'sem descricao'}\nCategoria: ${product.category || 'geral'}`;
+    const templatesInfo = tplRes.rows.map((t, i) =>
+      `[${i + 1}] id=${t.id}, nome="${t.name}", categoria="${t.category_name || 'geral'}", tags=[${(t.tags || []).join(', ')}]`
+    ).join('\n');
+
+    const prompt = `Voce eh um curador de arte pra loja de personalizados. Analise o produto abaixo e escolha ATE 5 templates da galeria que combinam melhor.
+
+PRODUTO:
+${productInfo}
+
+GALERIA (${tplRes.rows.length} templates disponiveis):
+${templatesInfo}
+
+Responda em JSON puro (sem markdown) com estrutura:
+{"suggestions":[{"template_id":"uuid","reason":"frase curta explicando o match","score":85}]}
+
+Score 0-100. Ordenar por score desc. Maximo 5. Se nenhum template combina bem, retorne lista vazia.`;
+
+    // 4. Chama Haiku via claudeClient compartilhado
+    let claudeClient;
+    try {
+      claudeClient = require('../services/claudeClient');
+    } catch (importErr) {
+      console.warn('[studio/suggest-templates] claudeClient indisponivel, usando fallback');
+      return res.json({ suggestions: fallbackRank(), fallback: true, reason: 'service_missing' });
+    }
+
+    let aiText;
+    try {
+      const aiRes = await claudeClient.callClaude({
+        messages: [{ role: 'user', content: prompt }],
+        model: 'claude-haiku-4-5',
+        maxTokens: 800,
+      });
+      aiText = aiRes.text;
+    } catch (callErr) {
+      console.warn('[studio/suggest-templates] callClaude falhou:', callErr.message);
+      return res.json({ suggestions: fallbackRank(), fallback: true, reason: 'ai_error' });
+    }
+
+    // 5. Parse JSON da resposta IA (helper ja trata fences + texto extra)
+    let parsed;
+    try {
+      parsed = claudeClient.parseJsonResponse(aiText);
+    } catch (parseErr) {
+      console.error('[studio/suggest-templates] parse JSON falhou:', (aiText || '').slice(0, 200));
+      return res.json({ suggestions: fallbackRank(), fallback: true, reason: 'parse_error' });
+    }
+
+    // Validar template_id contra galeria (IA pode alucinar UUID)
+    const validIds = new Set(tplRes.rows.map((t) => t.id));
+    const suggestions = (parsed.suggestions || [])
+      .filter((s) => s && validIds.has(s.template_id))
+      .slice(0, 5);
+
+    res.json({ suggestions, ai_powered: true });
+
+  } catch (err) {
+    console.error('[studio/suggest-templates]', err.message);
+    res.status(500).json({ error: 'Erro ao gerar sugestoes' });
   }
 });
 
