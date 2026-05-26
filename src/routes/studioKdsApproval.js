@@ -10,6 +10,9 @@
 // 26/05/2026: GET /orders defensivo — query simplificada com fallback gracioso
 //   pra evitar 500 quando colunas/views faltam em deploys parciais (Settings
 //   Studio reload dispara essa rota; bug em prod 26/05).
+// 26/05/2026 (segundo fix): subselect de approval estava usando MIN(image_url)
+//   — coluna real e mockup_url. MIN() agregado tambem era redundante com
+//   LIMIT 1. Trocado por SELECT mockup_url puro com LIMIT 1.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -79,7 +82,7 @@ router.get('/orders', async function(req, res) {
                   END FROM marketplace_orders mo WHERE mo.id = o.marketplace_order_id)
                 ELSE 0
               END AS item_count,
-              (SELECT MIN(image_url) FROM studio_approval_links a
+              (SELECT a.mockup_url FROM studio_approval_links a
                 WHERE a.order_id = o.digital_order_id AND a.status = 'pending'
                 ORDER BY a.created_at DESC LIMIT 1) AS pending_approval_url,
               (SELECT COUNT(*) FROM studio_approval_links a
