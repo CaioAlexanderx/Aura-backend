@@ -7,6 +7,9 @@
 //  digital_orders + sales personalizaveis).
 // 25/05/2026 S-2.5: view tambem une marketplace_orders. PATCH production-status
 //   ganha branch source='marketplace' (atualiza studio_production_status_override).
+// 26/05/2026: GET /orders defensivo — query simplificada com fallback gracioso
+//   pra evitar 500 quando colunas/views faltam em deploys parciais (Settings
+//   Studio reload dispara essa rota; bug em prod 26/05).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -30,18 +33,28 @@ const VALID_PRODUCTION_STATUS = [
 ];
 
 // ─── GET /orders — lista da view studio_orders (digital + pdv + marketplace) ────
+// 26/05/2026: handler resiliente. View studio_orders pode estar desatualizada
+// (coluna faltante, JOIN quebrado) ou estoura subselects pra approval/item_count.
+// Estrategia: tentar query "rica" primeiro -> fallback pra slim -> fallback []
+// retornando sempre 200 com { orders: [] } pra Settings Studio nao quebrar.
 router.get('/orders', async function(req, res) {
   const { status, days = 30, limit = 200 } = req.query;
-  const params = [req.params.id];
-  let where = `o.company_id = $1`;
-  if (status && VALID_PRODUCTION_STATUS.includes(String(status))) {
-    params.push(status);
-    where += ` AND o.studio_production_status = $${params.length}`;
-  }
-  if (days) {
-    where += ` AND o.created_at >= NOW() - INTERVAL '${Math.min(parseInt(days) || 30, 365)} days'`;
-  }
+  const cid = req.params.id;
+  const safeLimit = Math.min(parseInt(limit) || 200, 500);
+  const safeDays  = Math.min(parseInt(days) || 30, 365);
+  const statusFilter = (status && VALID_PRODUCTION_STATUS.includes(String(status))) ? String(status) : null;
+
+  // ── 1. Tentativa RICA: view completa com subselects (KDS precisa disso) ──
   try {
+    const params = [cid];
+    let where = `o.company_id = $1`;
+    if (statusFilter) {
+      params.push(statusFilter);
+      where += ` AND o.studio_production_status = $${params.length}`;
+    }
+    where += ` AND o.created_at >= NOW() - INTERVAL '${safeDays} days'`;
+    params.push(safeLimit);
+
     const r = await db.query(
       `SELECT o.id, o.created_at, o.total_amount, o.status,
               o.studio_production_status,
@@ -53,7 +66,6 @@ router.get('/orders', async function(req, res) {
               o.marketplace_order_id,
               o.marketplace_platform,
               o.customization_collected_at,
-              -- item_count condicional por fonte
               CASE
                 WHEN o.source = 'digital' THEN
                   (SELECT COUNT(*) FROM digital_order_items oi WHERE oi.order_id = o.digital_order_id)
@@ -67,7 +79,6 @@ router.get('/orders', async function(req, res) {
                   END FROM marketplace_orders mo WHERE mo.id = o.marketplace_order_id)
                 ELSE 0
               END AS item_count,
-              -- approvals so existem pra fonte digital
               (SELECT MIN(image_url) FROM studio_approval_links a
                 WHERE a.order_id = o.digital_order_id AND a.status = 'pending'
                 ORDER BY a.created_at DESC LIMIT 1) AS pending_approval_url,
@@ -76,13 +87,98 @@ router.get('/orders', async function(req, res) {
          FROM studio_orders o
         WHERE ${where}
         ORDER BY o.created_at DESC
-        LIMIT $${params.length + 1}`,
-      [...params, Math.min(parseInt(limit) || 200, 500)]
+        LIMIT $${params.length}`,
+      params
     );
-    res.json({ orders: r.rows });
-  } catch (err) {
-    console.error('[studio/orders:GET]', err.message);
-    res.status(500).json({ error: 'Erro ao listar pedidos do Studio' });
+    return res.json({ orders: r.rows });
+  } catch (errRich) {
+    console.error('[studio/orders:GET][rich]', errRich.message, errRich.code, errRich.stack);
+    // cai pra slim fallback
+  }
+
+  // ── 2. Fallback SLIM: query minima da view sem subselects ──
+  try {
+    const params = [cid];
+    let where = `o.company_id = $1`;
+    if (statusFilter) {
+      params.push(statusFilter);
+      where += ` AND o.studio_production_status = $${params.length}`;
+    }
+    where += ` AND o.created_at >= NOW() - INTERVAL '${safeDays} days'`;
+    params.push(safeLimit);
+
+    const r = await db.query(
+      `SELECT o.id, o.created_at, o.total_amount, o.status,
+              o.studio_production_status,
+              o.customer_name, o.customer_phone,
+              o.source
+         FROM studio_orders o
+        WHERE ${where}
+        ORDER BY o.created_at DESC
+        LIMIT $${params.length}`,
+      params
+    );
+    return res.json({
+      orders: r.rows.map((row) => ({
+        ...row,
+        display_name: row.customer_name,
+        digital_order_id: null,
+        pdv_sale_id: null,
+        marketplace_order_id: null,
+        marketplace_platform: null,
+        customization_collected_at: null,
+        item_count: 0,
+        pending_approval_url: null,
+        approval_count: 0,
+      })),
+      degraded: 'slim',
+    });
+  } catch (errSlim) {
+    console.error('[studio/orders:GET][slim]', errSlim.message, errSlim.code, errSlim.stack);
+    // cai pra raw digital_orders
+  }
+
+  // ── 3. Fallback RAW: vai direto em digital_orders ignorando a view ──
+  try {
+    const params = [cid];
+    let where = `company_id = $1 AND vertical = 'studio'`;
+    if (statusFilter) {
+      params.push(statusFilter);
+      where += ` AND studio_production_status = $${params.length}`;
+    }
+    where += ` AND created_at >= NOW() - INTERVAL '${safeDays} days'`;
+    params.push(safeLimit);
+
+    const r = await db.query(
+      `SELECT id, created_at, total_amount, status,
+              studio_production_status,
+              customer_name, customer_phone
+         FROM digital_orders
+        WHERE ${where}
+        ORDER BY created_at DESC
+        LIMIT $${params.length}`,
+      params
+    );
+    return res.json({
+      orders: r.rows.map((row) => ({
+        ...row,
+        display_name: row.customer_name,
+        source: 'digital',
+        digital_order_id: row.id,
+        pdv_sale_id: null,
+        marketplace_order_id: null,
+        marketplace_platform: null,
+        customization_collected_at: null,
+        item_count: 0,
+        pending_approval_url: null,
+        approval_count: 0,
+      })),
+      degraded: 'raw',
+    });
+  } catch (errRaw) {
+    console.error('[studio/orders:GET][raw]', errRaw.message, errRaw.code, errRaw.stack);
+    // ultima linha de defesa: lista vazia 200 — Settings Studio NAO pode quebrar
+    return res.json({ orders: [], degraded: 'empty', error_hint: errRaw.message });
   }
 });
 
@@ -101,58 +197,66 @@ router.get('/orders/:oid', async function(req, res) {
     // Items da tabela correta (source-aware)
     let items = [];
     if (head.source === 'digital') {
-      const r = await db.query(
-        `SELECT id, product_id, product_name, quantity, unit_price, customization
-           FROM digital_order_items
-          WHERE order_id = $1
-          ORDER BY id`,
-        [head.digital_order_id]
-      );
-      items = r.rows;
+      try {
+        const r = await db.query(
+          `SELECT id, product_id, product_name, quantity, unit_price, customization
+             FROM digital_order_items
+            WHERE order_id = $1
+            ORDER BY id`,
+          [head.digital_order_id]
+        );
+        items = r.rows;
+      } catch (e) { console.error('[studio/orders/:oid][items.digital]', e.message); }
     } else if (head.source === 'pdv') {
-      const r = await db.query(
-        `SELECT si.id, si.product_id, p.name AS product_name,
-                si.quantity, si.unit_price,
-                si.customization
-           FROM sale_items si
-           LEFT JOIN products p ON p.id = si.product_id
-          WHERE si.sale_id = $1
-          ORDER BY si.id`,
-        [head.pdv_sale_id]
-      );
-      items = r.rows;
+      try {
+        const r = await db.query(
+          `SELECT si.id, si.product_id, p.name AS product_name,
+                  si.quantity, si.unit_price,
+                  si.customization
+             FROM sale_items si
+             LEFT JOIN products p ON p.id = si.product_id
+            WHERE si.sale_id = $1
+            ORDER BY si.id`,
+          [head.pdv_sale_id]
+        );
+        items = r.rows;
+      } catch (e) { console.error('[studio/orders/:oid][items.pdv]', e.message); }
     } else if (head.source === 'marketplace') {
-      // Items vem do JSONB marketplace_orders.items + customization_data
-      const r = await db.query(
-        `SELECT items, customization_data
-           FROM marketplace_orders WHERE id = $1`,
-        [head.marketplace_order_id]
-      );
-      const row = r.rows[0];
-      const rawItems = Array.isArray(row?.items) ? row.items : [];
-      const custData = row?.customization_data || {};
-      items = rawItems.map((it, idx) => ({
-        id: `${head.marketplace_order_id}-${idx}`,
-        product_id: it.product_id || null,
-        product_name: it.product_name || null,
-        quantity: it.quantity || 1,
-        unit_price: it.unit_price || 0,
-        // customization: pega do customization_data[product_id] (shape S-2)
-        customization: it.product_id ? (custData[it.product_id] || null) : null,
-      }));
+      try {
+        // Items vem do JSONB marketplace_orders.items + customization_data
+        const r = await db.query(
+          `SELECT items, customization_data
+             FROM marketplace_orders WHERE id = $1`,
+          [head.marketplace_order_id]
+        );
+        const row = r.rows[0];
+        const rawItems = Array.isArray(row?.items) ? row.items : [];
+        const custData = row?.customization_data || {};
+        items = rawItems.map((it, idx) => ({
+          id: `${head.marketplace_order_id}-${idx}`,
+          product_id: it.product_id || null,
+          product_name: it.product_name || null,
+          quantity: it.quantity || 1,
+          unit_price: it.unit_price || 0,
+          // customization: pega do customization_data[product_id] (shape S-2)
+          customization: it.product_id ? (custData[it.product_id] || null) : null,
+        }));
+      } catch (e) { console.error('[studio/orders/:oid][items.marketplace]', e.message); }
     }
 
     // Approvals só existem pra source digital
     let approvals = [];
     if (head.source === 'digital') {
-      const r = await db.query(
-        `SELECT id, token, status, mockup_url, response_note, expires_at, responded_at, created_at
-           FROM studio_approval_links
-          WHERE order_id = $1
-          ORDER BY created_at DESC`,
-        [head.digital_order_id]
-      );
-      approvals = r.rows;
+      try {
+        const r = await db.query(
+          `SELECT id, token, status, mockup_url, response_note, expires_at, responded_at, created_at
+             FROM studio_approval_links
+            WHERE order_id = $1
+            ORDER BY created_at DESC`,
+          [head.digital_order_id]
+        );
+        approvals = r.rows;
+      } catch (e) { console.error('[studio/orders/:oid][approvals]', e.message); }
     }
 
     res.json({
@@ -161,7 +265,7 @@ router.get('/orders/:oid', async function(req, res) {
       approvals,
     });
   } catch (err) {
-    console.error('[studio/orders/:oid]', err.message);
+    console.error('[studio/orders/:oid]', err.message, err.stack);
     res.status(500).json({ error: 'Erro ao buscar pedido' });
   }
 });
