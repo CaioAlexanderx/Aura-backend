@@ -1,30 +1,13 @@
 // ============================================================
 // AURA. — services/trocaV2.js
-// Handler do contrato v2 do POST /pdv/troca:
-//   - original_sale_ids[] (multi-venda)
-//   - returned_items[] com original_sale_id + original_sale_item_id (dupla-devolucao check)
-//   - payment_splits[] / refund_splits[] (multi-metodo)
-//   - nfce_strategy: cancel_reissue | devolucao_55 | per_origin | none
+// Handler do contrato v2 do POST /pdv/troca.
+// Doc: Aura/AUDITORIA_TROCA_PDV_2026-05-17.docx
 //
-// Doc: Aura/AUDITORIA_TROCA_PDV_2026-05-17.docx (Fases 1+2+4)
-// 17/05/2026 (PR Aura-backend dev/troca-v2-backend-2026-05-17)
-//
-// 25/05/2026 (fix sem-NFC-e):
-//   - Removido bloco needsDevolucao55 → CUSTOMER_ADDRESS_REQUIRED.
-//     Esquecido no polish PR #118 (foi removido em trocaDevolucao55.js).
-//     SEFAZ FAQ MG #7 — dest da NF-e 55 devolução varejo é o próprio
-//     emitente; não exige endereço do cliente.
-//
-// Decisoes importantes:
-//   1. Fiscal ANTES do commit SQL — cancelamento SEFAZ pode falhar e
-//      precisamos reverter. Cancelamentos ja confirmados pela SEFAZ
-//      antes do erro ficam em cancelledForUndo[] e a gente tenta
-//      destornar via API (best-effort).
-//   2. per_origin: para cada original_sale_id, decide individualmente
-//      cancel_reissue (NFC-e <24h) vs devolucao_55 (>=24h ou sem NFC-e).
-//   3. Compat estrita com v1: este handler so e chamado quando body
-//      tem original_sale_ids (array). Caso contrario, pdv.js mantem
-//      o caminho v1 antigo.
+// 25/05/2026 (fix sem-NFC-e): removido bloco needsDevolucao55 →
+//   CUSTOMER_ADDRESS_REQUIRED. SEFAZ FAQ MG #7 — dest NF-e 55
+//   devolução varejo é o próprio emitente.
+// 26/05/2026 (fix customer_phone): response inclui customer_phone
+//   no sale pra Step5Success habilitar botão WhatsApp do NfceActions.
 // ============================================================
 
 const db = require('../config/database');
@@ -59,10 +42,7 @@ async function assertCaixaOpenOrAllowed(client, companyId) {
     return {
       ok: false,
       status: 409,
-      body: {
-        error: 'Abra o caixa antes de registrar a troca.',
-        code: 'CAIXA_REQUIRED',
-      },
+      body: { error: 'Abra o caixa antes de registrar a troca.', code: 'CAIXA_REQUIRED' },
     };
   } catch (e) {
     console.warn('[trocaV2] assertCaixaOpenOrAllowed fail-open:', e.message);
@@ -80,6 +60,17 @@ async function getActiveSessaoId(client, companyId) {
   } catch (_) { return null; }
 }
 
+async function fetchCustomerPhone(customerId) {
+  if (!customerId) return null;
+  try {
+    const { rows } = await db.query(
+      `SELECT phone FROM customers WHERE id = $1`,
+      [customerId]
+    );
+    return rows[0]?.phone || null;
+  } catch (_) { return null; }
+}
+
 async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
   if (!Array.isArray(originalSaleIds) || originalSaleIds.length === 0) {
     throw new TrocaV2Error(400, { error: 'original_sale_ids[] obrigatorio (array nao vazio)' });
@@ -87,7 +78,7 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
 
   const placeholders = originalSaleIds.map((_, i) => `$${i + 2}`).join(',');
   const { rows: salesRows } = await client.query(
-    `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id, s.created_at, s.total_amount
+    `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id, s.created_at, s.total_amount, s.customer_id
        FROM sales s
        JOIN companies c ON c.id = $1
       WHERE s.id IN (${placeholders})
@@ -160,39 +151,20 @@ async function validateReturnedItems(client, originSales, returnedItems) {
   const requestedByItem = new Map();
 
   for (const ret of returnedItems) {
-    if (!ret.original_sale_id) {
-      throw new TrocaV2Error(400, { error: 'returned_item.original_sale_id obrigatorio em todas as linhas' });
-    }
+    if (!ret.original_sale_id) throw new TrocaV2Error(400, { error: 'returned_item.original_sale_id obrigatorio em todas as linhas' });
     if (!originIdSet.has(ret.original_sale_id)) {
-      throw new TrocaV2Error(400, {
-        error: `returned_item aponta pra original_sale_id ${ret.original_sale_id} que nao esta em original_sale_ids[]`,
-      });
+      throw new TrocaV2Error(400, { error: `returned_item aponta pra original_sale_id ${ret.original_sale_id} que nao esta em original_sale_ids[]` });
     }
-    if (!ret.original_sale_item_id) {
-      throw new TrocaV2Error(400, {
-        error: 'returned_item.original_sale_item_id obrigatorio (sale_items.id da linha original)',
-      });
-    }
+    if (!ret.original_sale_item_id) throw new TrocaV2Error(400, { error: 'returned_item.original_sale_item_id obrigatorio (sale_items.id da linha original)' });
     const saleItems = itemsBySale.get(ret.original_sale_id) || [];
     const origItem = saleItems.find((i) => i.id === ret.original_sale_item_id);
-    if (!origItem) {
-      throw new TrocaV2Error(400, {
-        error: `sale_items.${ret.original_sale_item_id} nao pertence a venda ${ret.original_sale_id}`,
-      });
-    }
+    if (!origItem) throw new TrocaV2Error(400, { error: `sale_items.${ret.original_sale_item_id} nao pertence a venda ${ret.original_sale_id}` });
     const qty = parseFloat(ret.quantity);
-    if (!qty || qty <= 0) {
-      throw new TrocaV2Error(400, { error: 'returned_item.quantity deve ser > 0' });
-    }
+    if (!qty || qty <= 0) throw new TrocaV2Error(400, { error: 'returned_item.quantity deve ser > 0' });
     if (qty > parseFloat(origItem.quantity)) {
-      throw new TrocaV2Error(400, {
-        error: `quantity ${qty} excede a quantidade original ${origItem.quantity} de "${origItem.product_name_snapshot}"`,
-      });
+      throw new TrocaV2Error(400, { error: `quantity ${qty} excede a quantidade original ${origItem.quantity} de "${origItem.product_name_snapshot}"` });
     }
-    requestedByItem.set(
-      ret.original_sale_item_id,
-      (requestedByItem.get(ret.original_sale_item_id) || 0) + qty
-    );
+    requestedByItem.set(ret.original_sale_item_id, (requestedByItem.get(ret.original_sale_item_id) || 0) + qty);
   }
 
   const itemIds = Array.from(requestedByItem.keys());
@@ -232,12 +204,8 @@ async function validateReturnedItems(client, originSales, returnedItems) {
 }
 
 function computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits }) {
-  const returnedValue = (returned_items || []).reduce(
-    (acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0
-  );
-  const newValue = (new_items || []).reduce(
-    (acc, n) => acc + parseFloat(n.quantity) * parseFloat(n.unit_price), 0
-  );
+  const returnedValue = (returned_items || []).reduce((acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0);
+  const newValue = (new_items || []).reduce((acc, n) => acc + parseFloat(n.quantity) * parseFloat(n.unit_price), 0);
   const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
 
   if ((returned_items || []).length === 0 && (new_items || []).length === 0) {
@@ -249,8 +217,7 @@ function computeAndValidateTotals({ returned_items, new_items, payment_splits, r
     if (Math.abs(total - netAmount) > 0.01) {
       throw new TrocaV2Error(400, {
         error: `Soma dos payment_splits (${total.toFixed(2)}) nao bate com diferenca a pagar (${netAmount.toFixed(2)})`,
-        expected: netAmount,
-        received: parseFloat(total.toFixed(2)),
+        expected: netAmount, received: parseFloat(total.toFixed(2)),
       });
     }
   } else if (netAmount < -0.005) {
@@ -259,8 +226,7 @@ function computeAndValidateTotals({ returned_items, new_items, payment_splits, r
     if (Math.abs(total - target) > 0.01) {
       throw new TrocaV2Error(400, {
         error: `Soma dos refund_splits (${total.toFixed(2)}) nao bate com saldo a devolver (${target.toFixed(2)})`,
-        expected: target,
-        received: parseFloat(total.toFixed(2)),
+        expected: target, received: parseFloat(total.toFixed(2)),
       });
     }
   }
@@ -279,33 +245,18 @@ function decideFiscalPerOrigin(originSales, returnedItems, requestedStrategy) {
     for (const s of originSales) strategyMap.set(s.id, 'none');
     return strategyMap;
   }
-
   const involvedIds = new Set((returnedItems || []).map((r) => r.original_sale_id));
   const now = Date.now();
-
   for (const s of originSales) {
-    if (!involvedIds.has(s.id)) {
-      strategyMap.set(s.id, 'none');
-      continue;
-    }
-    if (requestedStrategy === 'cancel_reissue') {
-      strategyMap.set(s.id, 'cancel_reissue');
-      continue;
-    }
-    if (requestedStrategy === 'devolucao_55') {
-      strategyMap.set(s.id, 'devolucao_55');
-      continue;
-    }
-    if (!s.nfce) {
-      strategyMap.set(s.id, 'none');
-      continue;
-    }
+    if (!involvedIds.has(s.id)) { strategyMap.set(s.id, 'none'); continue; }
+    if (requestedStrategy === 'cancel_reissue') { strategyMap.set(s.id, 'cancel_reissue'); continue; }
+    if (requestedStrategy === 'devolucao_55') { strategyMap.set(s.id, 'devolucao_55'); continue; }
+    if (!s.nfce) { strategyMap.set(s.id, 'none'); continue; }
     const ageHours = s.nfce.authorized_at
       ? (now - new Date(s.nfce.authorized_at).getTime()) / 3600000
       : 9999;
     strategyMap.set(s.id, ageHours < 24 ? 'cancel_reissue' : 'devolucao_55');
   }
-
   return strategyMap;
 }
 
@@ -328,17 +279,13 @@ async function preCancelNfces(originSales, strategyMap) {
     }
 
     try {
-      await nuvemfiscal.cancelNfce(
-        s.nfce.nuvemfiscal_id,
-        `Troca de mercadoria — emissao de nova NFC-e (troca v2)`
-      );
+      await nuvemfiscal.cancelNfce(s.nfce.nuvemfiscal_id, `Troca de mercadoria — emissao de nova NFC-e (troca v2)`);
       cancelled.push({ originalSaleId: s.id, origNfce: s.nfce });
     } catch (sefazErr) {
       console.error('[trocaV2] SEFAZ cancel error:', sefazErr.message);
       throw new TrocaV2Error(502, {
         error: 'SEFAZ rejeitou cancelamento da NFC-e original: ' + sefazErr.message,
-        original_sale_id: s.id,
-        sefaz_payload: sefazErr.payload || null,
+        original_sale_id: s.id, sefaz_payload: sefazErr.payload || null,
         cancelled_so_far: cancelled.map((c) => c.originalSaleId),
       });
     }
@@ -353,7 +300,7 @@ async function undoCancellations(cancelled) {
         await nuvemfiscal.uncancelNfce(c.origNfce.nuvemfiscal_id);
         console.log('[trocaV2] undo cancel OK', c.originalSaleId);
       } else {
-        console.warn('[trocaV2] nuvemfiscal.uncancelNfce nao implementado — NFC-e fica cancelada:', c.originalSaleId);
+        console.warn('[trocaV2] nuvemfiscal.uncancelNfce nao implementado:', c.originalSaleId);
       }
     } catch (e) {
       console.error('[trocaV2] undo cancel failed:', c.originalSaleId, e.message);
@@ -365,21 +312,12 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
   for (const ret of returnedItems) {
     const qty = parseFloat(ret.quantity);
     if (!ret.product_id) continue;
-    const { rows: pInfo } = await client.query(
-      'SELECT company_id FROM products WHERE id=$1',
-      [ret.product_id]
-    );
+    const { rows: pInfo } = await client.query('SELECT company_id FROM products WHERE id=$1', [ret.product_id]);
     const stockCompanyId = pInfo[0]?.company_id || currentCompanyId;
     if (ret.variant_id) {
-      await client.query(
-        `UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`,
-        [qty, ret.variant_id]
-      );
+      await client.query(`UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`, [qty, ret.variant_id]);
     } else {
-      await client.query(
-        `UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`,
-        [qty, ret.product_id, stockCompanyId]
-      );
+      await client.query(`UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`, [qty, ret.product_id, stockCompanyId]);
     }
     await client.query(
       `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
@@ -398,8 +336,7 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
     if (item.variant_id) {
       const { rows: vr } = await client.query(
         `SELECT pv.stock_qty, pv.sku_suffix, p.company_id AS stock_company_id
-           FROM product_variants pv
-           JOIN products p ON p.id = pv.product_id
+           FROM product_variants pv JOIN products p ON p.id = pv.product_id
           WHERE pv.id=$1 AND pv.product_id=$2`,
         [item.variant_id, item.product_id]
       );
@@ -411,10 +348,8 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
     } else {
       const { rows: pr } = await client.query(
         `SELECT p.stock_qty, p.company_id AS stock_company_id
-           FROM products p
-           JOIN companies c ON c.id = $2
-          WHERE p.id = $1
-            AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
+           FROM products p JOIN companies c ON c.id = $2
+          WHERE p.id = $1 AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
         [item.product_id, currentCompanyId]
       );
       if (pr.length) {
@@ -426,20 +361,13 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
     if (stockAvailable !== undefined && stockAvailable < qty) {
       throw new TrocaV2Error(409, {
         error: `Estoque insuficiente para "${stockLabel}". Disponivel: ${stockAvailable}`,
-        product_id: item.product_id,
-        variant_id: item.variant_id || null,
+        product_id: item.product_id, variant_id: item.variant_id || null,
       });
     }
     if (item.variant_id) {
-      await client.query(
-        `UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2`,
-        [qty, item.variant_id]
-      );
+      await client.query(`UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2`, [qty, item.variant_id]);
     } else {
-      await client.query(
-        `UPDATE products SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2 AND company_id=$3`,
-        [qty, item.product_id, stockCompanyId]
-      );
+      await client.query(`UPDATE products SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2 AND company_id=$3`, [qty, item.product_id, stockCompanyId]);
     }
     await client.query(
       `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
@@ -483,42 +411,27 @@ function normalizeMethodForSalePayments(method) {
 async function insertTrocaPayouts(client, trocaSaleId, companyId, sessaoId, customerId, refundSplits, userId) {
   if (!refundSplits || !refundSplits.length) return [];
   const inserted = [];
-
   for (const r of refundSplits) {
     if (parseFloat(r.amount) <= 0) continue;
     const amount = parseFloat(parseFloat(r.amount).toFixed(2));
-
     let creditTxId = null;
     if (r.method === 'crediario_credito') {
-      if (!customerId) {
-        throw new TrocaV2Error(400, {
-          error: 'crediario_credito exige customer_id (cliente cadastrado)',
-        });
-      }
+      if (!customerId) throw new TrocaV2Error(400, { error: 'crediario_credito exige customer_id (cliente cadastrado)' });
       const { rows: txRows } = await client.query(
         `INSERT INTO customer_credit_transactions
            (company_id, customer_id, sale_id, type, amount, payment_method, notes, created_by)
          VALUES ($1, $2, $3, 'payment', $4, 'crediario_credito', $5, $6)
          RETURNING id`,
-        [
-          companyId, customerId, trocaSaleId, amount,
-          `Credito de troca (sale ${trocaSaleId.slice(0, 8)})`,
-          userId || null,
-        ]
+        [companyId, customerId, trocaSaleId, amount, `Credito de troca (sale ${trocaSaleId.slice(0, 8)})`, userId || null]
       );
       creditTxId = txRows[0]?.id || null;
     }
-
     const { rows: poRows } = await client.query(
       `INSERT INTO troca_payouts
          (troca_sale_id, company_id, customer_id, method, amount, sessao_id,
           credit_transaction_id, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       RETURNING id`,
-      [
-        trocaSaleId, companyId, customerId || null, r.method, amount, sessaoId,
-        creditTxId, r.notes || null, userId || null,
-      ]
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [trocaSaleId, companyId, customerId || null, r.method, amount, sessaoId, creditTxId, r.notes || null, userId || null]
     );
     inserted.push({ id: poRows[0].id, method: r.method, amount, credit_transaction_id: creditTxId });
   }
@@ -529,51 +442,31 @@ async function insertAggregateTransactions(client, trocaSaleId, primaryCompanyId
   const summary = originalSaleIds.length === 1
     ? `Troca PDV — venda ${originalSaleIds[0].slice(0, 8)}`
     : `Troca PDV — ${originalSaleIds.length} vendas originais`;
-
   if (totals.returnedValue > 0) {
     await client.query(
       `INSERT INTO transactions
-         (company_id, type, status, amount, description, category,
-          due_date, paid_at, created_by, idempotency_key)
+         (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
        VALUES ($1,'expense','confirmed',$2,$3,'Troca - Devolução',${SP_DATE_NOW},NOW(),$4,$5)
        ON CONFLICT (idempotency_key) DO NOTHING`,
-      [
-        primaryCompanyId,
-        parseFloat(totals.returnedValue.toFixed(2)),
-        summary,
-        userId || null,
-        'pdv-troca-v2-' + trocaSaleId + '-return',
-      ]
+      [primaryCompanyId, parseFloat(totals.returnedValue.toFixed(2)), summary, userId || null, 'pdv-troca-v2-' + trocaSaleId + '-return']
     );
   }
   if (totals.newValue > 0) {
     await client.query(
       `INSERT INTO transactions
-         (company_id, type, status, amount, description, category,
-          due_date, paid_at, created_by, idempotency_key)
+         (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
        VALUES ($1,'income','confirmed',$2,$3,'Troca - Venda',${SP_DATE_NOW},NOW(),$4,$5)
        ON CONFLICT (idempotency_key) DO NOTHING`,
-      [
-        primaryCompanyId,
-        parseFloat(totals.newValue.toFixed(2)),
-        summary,
-        userId || null,
-        'pdv-troca-v2-' + trocaSaleId + '-sale',
-      ]
+      [primaryCompanyId, parseFloat(totals.newValue.toFixed(2)), summary, userId || null, 'pdv-troca-v2-' + trocaSaleId + '-sale']
     );
   }
 }
 
 async function handle(req, res) {
   const {
-    original_sale_ids,
-    returned_items = [],
-    new_items = [],
-    payment_splits = [],
-    refund_splits = [],
-    customer_id,
-    employee_id,
-    seller_name,
+    original_sale_ids, returned_items = [], new_items = [],
+    payment_splits = [], refund_splits = [],
+    customer_id, employee_id, seller_name,
     nfce_strategy = 'per_origin',
     customer_address,
   } = req.body || {};
@@ -584,24 +477,13 @@ async function handle(req, res) {
     await client.query('BEGIN');
 
     const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
-    if (!caixaCheck.ok) {
-      await client.query('ROLLBACK');
-      return res.status(caixaCheck.status).json(caixaCheck.body);
-    }
+    if (!caixaCheck.ok) { await client.query('ROLLBACK'); return res.status(caixaCheck.status).json(caixaCheck.body); }
     const sessaoId = caixaCheck.sessaoId || (await getActiveSessaoId(client, req.params.id));
 
     const originSales = await lookupOriginSales(client, req.params.id, original_sale_ids);
-
     await validateReturnedItems(client, originSales, returned_items);
-
     const totals = computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits });
-
     const strategyMap = decideFiscalPerOrigin(originSales, returned_items, nfce_strategy);
-
-    // 25/05/2026 (fix sem-NFC-e): bloco needsDevolucao55 → CUSTOMER_ADDRESS_REQUIRED
-    // removido. SEFAZ FAQ MG #7 — NF-e 55 devolução varejo tem dest = próprio
-    // emitente; endereço do cliente não é exigido. customer_address vai
-    // ignorado (trocaDevolucao55.handle aceita por compat mas ignora).
 
     preCancelled = await preCancelNfces(originSales, strategyMap);
 
@@ -621,11 +503,10 @@ async function handle(req, res) {
 
     if (isCrossFilial && !hasExchangeCols) {
       await client.query('ROLLBACK');
-      return res.status(503).json({
-        error: 'Troca cross-filial v2 indisponivel: migration 111 nao aplicada',
-        code: 'MIGRATION_111_PENDING',
-      });
+      return res.status(503).json({ error: 'Troca cross-filial v2 indisponivel: migration 111 nao aplicada', code: 'MIGRATION_111_PENDING' });
     }
+
+    const effectiveCustomerId = customer_id || primarySale?.customer_id || null;
 
     let trocaSaleRow;
     if (hasExchangeCols) {
@@ -635,13 +516,10 @@ async function handle(req, res) {
             exchange_seller_id, exchange_employee_id,
             total_amount, discount_amount, payment_method, notes,
             status, type, exchange_of_sale_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,'completed','troca',$11)
-         RETURNING *`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,'completed','troca',$11) RETURNING *`,
         [
-          saleCompanyId,
-          customer_id || primarySale && (originSales[0]?.customer_id) || null,
-          trocaSellerId, trocaEmployeeId,
-          seller_name || null,
+          saleCompanyId, effectiveCustomerId,
+          trocaSellerId, trocaEmployeeId, seller_name || null,
           exchangeSellerId, exchangeEmployeeId,
           totals.saleTotal,
           (payment_splits[0]?.method || refund_splits[0]?.method || 'dinheiro'),
@@ -656,13 +534,10 @@ async function handle(req, res) {
            (company_id, customer_id, seller_id, employee_id, seller_name,
             total_amount, discount_amount, payment_method, notes,
             status, type, exchange_of_sale_id)
-         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'completed','troca',$9)
-         RETURNING *`,
+         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'completed','troca',$9) RETURNING *`,
         [
-          saleCompanyId,
-          customer_id || null,
-          trocaSellerId, trocaEmployeeId,
-          seller_name || null,
+          saleCompanyId, effectiveCustomerId,
+          trocaSellerId, trocaEmployeeId, seller_name || null,
           totals.saleTotal,
           (payment_splits[0]?.method || refund_splits[0]?.method || 'dinheiro'),
           `Troca v2 — ${original_sale_ids.length} venda(s) original(is)`,
@@ -681,29 +556,17 @@ async function handle(req, res) {
       if (item.product_id) {
         const { rows: pr } = await client.query(
           `SELECT p.name, p.cost_price
-             FROM products p
-             JOIN companies c ON c.id = $2
-            WHERE p.id = $1
-              AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
+             FROM products p JOIN companies c ON c.id = $2
+            WHERE p.id = $1 AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
           [item.product_id, req.params.id]
         );
-        if (pr.length) {
-          productName = productName || pr[0].name;
-          costPrice = parseFloat(pr[0].cost_price || 0);
-        }
+        if (pr.length) { productName = productName || pr[0].name; costPrice = parseFloat(pr[0].cost_price || 0); }
       }
       await client.query(
         `INSERT INTO sale_items
-           (sale_id, product_id, variant_id, quantity, unit_price,
-            unit_cost, discount, total_price, product_name_snapshot)
+           (sale_id, product_id, variant_id, quantity, unit_price, unit_cost, discount, total_price, product_name_snapshot)
          VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8)`,
-        [
-          trocaSaleRow.id,
-          item.product_id || null,
-          item.variant_id || null,
-          qty, unitPrice, costPrice, lineTotal,
-          productName,
-        ]
+        [trocaSaleRow.id, item.product_id || null, item.variant_id || null, qty, unitPrice, costPrice, lineTotal, productName]
       );
     }
 
@@ -713,42 +576,18 @@ async function handle(req, res) {
            (troca_sale_id, original_sale_id, original_sale_item_id,
             product_id, variant_id, quantity, unit_price, product_name_snapshot)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [
-          trocaSaleRow.id,
-          ret.original_sale_id,
-          ret.original_sale_item_id,
-          ret.product_id || null,
-          ret.variant_id || null,
-          parseFloat(ret.quantity),
-          parseFloat(ret.unit_price),
-          ret.product_name_snapshot || null,
-        ]
+        [trocaSaleRow.id, ret.original_sale_id, ret.original_sale_item_id, ret.product_id || null, ret.variant_id || null, parseFloat(ret.quantity), parseFloat(ret.unit_price), ret.product_name_snapshot || null]
       );
     }
 
     await adjustStock(client, returned_items, new_items, req.params.id, trocaSaleRow.id);
-
-    await insertSalePayments(
-      client, trocaSaleRow.id, req.params.id, sessaoId,
-      totals, payment_splits, refund_splits
-    );
-
-    const payoutsInserted = await insertTrocaPayouts(
-      client, trocaSaleRow.id, req.params.id, sessaoId,
-      customer_id || originSales[0]?.customer_id || null,
-      refund_splits, req.user?.id
-    );
-
-    await insertAggregateTransactions(
-      client, trocaSaleRow.id, saleCompanyId, totals, original_sale_ids, req.user?.id
-    );
+    await insertSalePayments(client, trocaSaleRow.id, req.params.id, sessaoId, totals, payment_splits, refund_splits);
+    const payoutsInserted = await insertTrocaPayouts(client, trocaSaleRow.id, req.params.id, sessaoId, effectiveCustomerId, refund_splits, req.user?.id);
+    await insertAggregateTransactions(client, trocaSaleRow.id, saleCompanyId, totals, original_sale_ids, req.user?.id);
 
     for (const c of preCancelled) {
       await client.query(
-        `UPDATE nfce_emissions
-            SET status = 'cancelada', cancelled_at = NOW(),
-                cancel_reason = $1
-          WHERE id = $2`,
+        `UPDATE nfce_emissions SET status = 'cancelada', cancelled_at = NOW(), cancel_reason = $1 WHERE id = $2`,
         ['Troca v2 — cancel_reissue sale_troca=' + trocaSaleRow.id, c.origNfce.id]
       );
     }
@@ -758,37 +597,26 @@ async function handle(req, res) {
       const strat = strategyMap.get(s.id);
       if (strat !== 'devolucao_55') continue;
       const itemsForThis = returned_items.filter((r) => r.original_sale_id === s.id);
-      const valueForThis = itemsForThis.reduce(
-        (acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0
-      );
+      const valueForThis = itemsForThis.reduce((acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0);
       try {
         const result = await trocaDevolucao55.handle(client, {
-          saleCompanyId: s.company_id,
-          originalSaleId: s.id,
-          trocaSaleId: trocaSaleRow.id,
-          returnedItems: itemsForThis,
-          returnedValue: valueForThis,
-          customerAddress: customer_address,
-          notes: req.body.notes,
-          userId: req.user?.id,
+          saleCompanyId: s.company_id, originalSaleId: s.id, trocaSaleId: trocaSaleRow.id,
+          returnedItems: itemsForThis, returnedValue: valueForThis,
+          customerAddress: customer_address, notes: req.body.notes, userId: req.user?.id,
         });
         fiscalResults.push({ original_sale_id: s.id, ...result });
       } catch (e) {
         if (e && e.isDevolucao55Error) {
           await client.query('ROLLBACK');
           await undoCancellations(preCancelled);
-          return res.status(e.status).json({
-            ...e.body,
-            failed_for_sale_id: s.id,
-          });
+          return res.status(e.status).json({ ...e.body, failed_for_sale_id: s.id });
         }
         throw e;
       }
     }
     for (const c of preCancelled) {
       fiscalResults.push({
-        original_sale_id: c.originalSaleId,
-        strategy: 'cancel_reissue',
+        original_sale_id: c.originalSaleId, strategy: 'cancel_reissue',
         original_chave_cancelada: c.origNfce.chave_acesso,
       });
     }
@@ -798,25 +626,26 @@ async function handle(req, res) {
     const { rows: respNewItems } = await db.query(
       `SELECT si.*, COALESCE(p.name, si.product_name_snapshot) AS product_name
          FROM sale_items si LEFT JOIN products p ON p.id=si.product_id
-        WHERE si.sale_id=$1`,
-      [trocaSaleRow.id]
+        WHERE si.sale_id=$1`, [trocaSaleRow.id]
     );
     const { rows: respRetItems } = await db.query(
       `SELECT tri.*, COALESCE(p.name, tri.product_name_snapshot) AS product_name
          FROM troca_returned_items tri LEFT JOIN products p ON p.id=tri.product_id
-        WHERE tri.troca_sale_id=$1`,
-      [trocaSaleRow.id]
+        WHERE tri.troca_sale_id=$1`, [trocaSaleRow.id]
     );
+
+    // 26/05/2026: enriquecer trocaSale com customer_phone pra Step5Success
+    const respCustomerPhone = await fetchCustomerPhone(trocaSaleRow.customer_id);
 
     return res.status(201).json({
       version: 'v2',
-      sale: { ...trocaSaleRow, items: respNewItems },
-      returned_items: respRetItems,
-      new_items: respNewItems,
+      sale: { ...trocaSaleRow, items: respNewItems, customer_phone: respCustomerPhone },
+      returned_items: respRetItems, new_items: respNewItems,
       net_amount: totals.netAmount,
       returned_value: totals.returnedValue,
       new_value: totals.newValue,
       cross_filial: isCrossFilial,
+      origin_company_id: saleCompanyId,
       origin_company_ids: Array.from(new Set(originSales.map((s) => s.company_id))),
       physical_company_id: req.params.id,
       payouts: payoutsInserted,
@@ -827,9 +656,7 @@ async function handle(req, res) {
   } catch (err) {
     await client.query('ROLLBACK');
     if (preCancelled.length) await undoCancellations(preCancelled);
-    if (err.isTrocaV2Error) {
-      return res.status(err.status).json(err.body);
-    }
+    if (err.isTrocaV2Error) return res.status(err.status).json(err.body);
     console.error('[trocaV2] internal error:', err);
     return res.status(500).json({ error: 'Erro interno na troca v2' });
   } finally {
@@ -838,11 +665,6 @@ async function handle(req, res) {
 }
 
 module.exports = {
-  handle,
-  TrocaV2Error,
-  _internal: {
-    computeAndValidateTotals,
-    decideFiscalPerOrigin,
-    normalizeMethodForSalePayments,
-  },
+  handle, TrocaV2Error,
+  _internal: { computeAndValidateTotals, decideFiscalPerOrigin, normalizeMethodForSalePayments },
 };

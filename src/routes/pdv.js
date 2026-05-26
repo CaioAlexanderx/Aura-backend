@@ -9,6 +9,8 @@
 //   recentes do grupo que contem aquele produto/variant.
 // 25/05/2026 (fix sem-NFC-e): sales-for-troca + sales-by-product-barcode
 //   expoem has_nfce (boolean) pra frontend decidir inferFiscalStrategy.
+// 26/05/2026 (fix customer_phone): POST /troca v1 retorna customer_phone
+//   no response (LEFT JOIN customers) pra Step5Success habilitar WhatsApp.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -75,6 +77,21 @@ async function hasExchangeCols(client) {
   }
   _exchangeColsCheckedAt = now;
   return _exchangeColsAvailable;
+}
+
+// 26/05/2026: helper pra enriquecer trocaSale com customer_phone (do customers).
+// Usado pelos handlers v1 e v2 (importado por trocaV2 tambem).
+async function fetchCustomerPhone(customerId) {
+  if (!customerId) return null;
+  try {
+    const { rows } = await db.query(
+      `SELECT phone FROM customers WHERE id = $1`,
+      [customerId]
+    );
+    return rows[0]?.phone || null;
+  } catch (_) {
+    return null;
+  }
 }
 
 // ===== GET /scan/:code =====
@@ -582,11 +599,9 @@ router.delete('/sale/:saleId', async (req, res) => {
 
 // ===== POST /troca — DETECCAO DUAL v1/v2 + handler v1 =====
 router.post('/troca', async (req, res) => {
-  // v2 detection (multi-venda + splits + payouts)
   if (Array.isArray(req.body && req.body.original_sale_ids)) {
     return trocaV2.handle(req, res);
   }
-  // v1 path (legado — original_sale_id escalar)
   const {
     original_sale_id, returned_items = [], new_items = [],
     payment_method, customer_id, employee_id, seller_name, customer_address,
@@ -604,7 +619,7 @@ router.post('/troca', async (req, res) => {
       return res.status(caixaCheck.status).json(caixaCheck.body);
     }
     const { rows: origRows } = await client.query(
-      `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id
+      `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id, s.customer_id
          FROM sales s JOIN companies c ON c.id = $2
         WHERE s.id = $1
           AND (s.company_id = $2 OR EXISTS (
@@ -702,7 +717,7 @@ router.post('/troca', async (req, res) => {
             exchange_seller_id, exchange_employee_id,
             total_amount, discount_amount, payment_method, notes, status, type, exchange_of_sale_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,'completed','troca',$11) RETURNING *`,
-        [saleCompanyId, customer_id || null, trocaSellerId, trocaEmployeeId, seller_name || null,
+        [saleCompanyId, customer_id || originSale.customer_id || null, trocaSellerId, trocaEmployeeId, seller_name || null,
          exchangeSellerId, exchangeEmployeeId, saleTotal, payment_method || 'dinheiro',
          `Troca de venda ${original_sale_id}`, original_sale_id]
       );
@@ -713,7 +728,7 @@ router.post('/troca', async (req, res) => {
            (company_id, customer_id, seller_id, employee_id, seller_name,
             total_amount, discount_amount, payment_method, notes, status, type, exchange_of_sale_id)
          VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'completed','troca',$9) RETURNING *`,
-        [saleCompanyId, customer_id || null, trocaSellerId, trocaEmployeeId, seller_name || null,
+        [saleCompanyId, customer_id || originSale.customer_id || null, trocaSellerId, trocaEmployeeId, seller_name || null,
          saleTotal, payment_method || 'dinheiro',
          `Troca de venda ${original_sale_id}`, original_sale_id]
       );
@@ -863,8 +878,11 @@ router.post('/troca', async (req, res) => {
        FROM troca_returned_items tri LEFT JOIN products p ON p.id=tri.product_id WHERE tri.troca_sale_id=$1`,
       [trocaSale.id]
     );
+    // 26/05/2026: enriquecer trocaSale com customer_phone pra Step5Success
+    // habilitar botão WhatsApp do NfceActions sem fetch adicional.
+    const respCustomerPhone = await fetchCustomerPhone(trocaSale.customer_id);
     res.status(201).json({
-      sale: { ...trocaSale, items: respNewItems },
+      sale: { ...trocaSale, items: respNewItems, customer_phone: respCustomerPhone },
       returned_items: respRetItems, new_items: respNewItems,
       net_amount: netAmount,
       returned_value: parseFloat(returnedValue.toFixed(2)),
@@ -882,7 +900,7 @@ router.post('/troca', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ===== GET /sales-for-troca (com novos filtros 17/05) =====
+// ===== GET /sales-for-troca =====
 // 25/05/2026 (fix sem-NFC-e): retorna has_nfce pra frontend decidir fiscal.
 router.get('/sales-for-troca', async (req, res) => {
   const { q, customer_id, order_number, nfce_chave, days = 90, limit = 50 } = req.query;
@@ -959,15 +977,7 @@ router.get('/sales-for-troca', async (req, res) => {
 });
 
 // ============================================================
-// GET /pdv/sales-by-product-barcode  — 25/05/2026 (Troca barcode-first)
-//
-// Quando o operador bipa o codigo de barras do item a ser devolvido,
-// frontend chama esse endpoint pra puxar as vendas recentes do grupo
-// que contem aquele produto/variant. Mesmo shape de resposta do
-// /sales-for-troca (array de SaleForTroca) pra reaproveitar o
-// componente Step1Search.
-//
-// 25/05/2026 (fix sem-NFC-e): retorna has_nfce pra frontend decidir fiscal.
+// GET /pdv/sales-by-product-barcode
 // ============================================================
 router.get('/sales-by-product-barcode', async (req, res) => {
   const { barcode, days = 90, limit = 50 } = req.query;
@@ -1045,4 +1055,6 @@ router.get('/sales-by-product-barcode', async (req, res) => {
   }
 });
 
+// Export pra trocaV2 reusar.
 module.exports = router;
+module.exports.fetchCustomerPhone = fetchCustomerPhone;
