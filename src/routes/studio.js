@@ -597,6 +597,8 @@ const ALLOWED_STUDIO_SETTINGS = [
   'max_revisions_included',       // int — qtas revisões grátis o cliente tem (0 = ilimitado)
   'extra_revision_price',         // float — preço cobrado por revisão extra
   'revision_policy_text',         // string — texto exibido pro cliente sobre a política
+  // Fase 5 onboarding (useStudioOnboarding hook grava walkthrough_seen aqui)
+  'onboarding',                   // jsonb — { walkthrough_seen: bool, product: bool, gallery: bool, sla: bool, wa: bool }
 ];
 
 // ─── GET /studio/settings ───────────────────────────────────
@@ -623,6 +625,8 @@ router.patch('/settings', async function(req, res) {
     if (patch[k] !== undefined) filtered[k] = patch[k];
   }
   if (Object.keys(filtered).length === 0) {
+    // Log explícito pra Railway: agentes futuros podem rastrear chave nova faltando
+    console.warn('[studio/settings:PATCH] 400 — body sem chaves permitidas:', Object.keys(patch).join(', '), '| permitidas:', ALLOWED_STUDIO_SETTINGS.join(', '));
     return res.status(400).json({ error: 'nada pra atualizar (chaves permitidas: ' + ALLOWED_STUDIO_SETTINGS.join(', ') + ')' });
   }
   try {
