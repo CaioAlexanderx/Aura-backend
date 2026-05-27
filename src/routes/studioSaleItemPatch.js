@@ -14,6 +14,10 @@
 // sales.studio_production_status='pending_art' automaticamente.
 //
 // 25/05/2026 - Sub-onda E do Nivel 1 Studio
+// 27/05/2026 - query param include_non_personalizable pra /studio/estoque
+//              listar tudo (Personalizáveis + Não personalizáveis). Default
+//              continua filtrando is_personalizable=true (PDV Studio + tela
+//              personalizáveis sem mudança).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -34,18 +38,30 @@ function listVisibilityWhere(cidParam) {
 }
 
 // GET /companies/:id/studio/products
-// Lista produtos is_personalizable=true com customization_config + price + image_url.
-// Reusado pelo PDV Studio nativo (E1 frontend).
+// Default: lista APENAS produtos is_personalizable=true com customization_config
+//          (usado pelo PDV Studio e tela personalizáveis).
+// Com ?include_non_personalizable=true: lista TODOS os produtos visíveis
+//          (usado pela tela master /studio/estoque pra cobrir os 3 filtros).
 router.get('/products', async (req, res) => {
   const cid = req.params.id;
   const search = (req.query.search || '').trim();
   const limit = Math.min(parseInt(req.query.limit) || 200, 500);
+  const includeAll = req.query.include_non_personalizable === 'true'
+                  || req.query.include_non_personalizable === '1';
   try {
     const params = [cid];
-    let where = `WHERE is_active IS NOT FALSE
-                   AND is_personalizable = true
-                   AND customization_config IS NOT NULL
-                   AND ${listVisibilityWhere('$1')}`;
+    let where;
+    if (includeAll) {
+      // /studio/estoque: catálogo completo (todos os produtos visíveis)
+      where = `WHERE is_active IS NOT FALSE
+                 AND ${listVisibilityWhere('$1')}`;
+    } else {
+      // Default histórico: PDV Studio + tela personalizáveis (só personalizáveis)
+      where = `WHERE is_active IS NOT FALSE
+                 AND is_personalizable = true
+                 AND customization_config IS NOT NULL
+                 AND ${listVisibilityWhere('$1')}`;
+    }
     if (search) {
       params.push(`%${search}%`);
       where += ` AND (name ILIKE $${params.length} OR category ILIKE $${params.length})`;
@@ -74,6 +90,7 @@ router.get('/products', async (req, res) => {
         stock_company_id: r.company_id,
       })),
       count: rows.length,
+      include_non_personalizable: includeAll,
     });
   } catch (err) {
     console.error('[studio/products] list error:', err.message);
