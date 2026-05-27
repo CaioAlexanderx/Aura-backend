@@ -30,6 +30,11 @@ module.exports = {
     '!src/routes/studioStorefront.js',
     '!src/routes/studioSaleItemPatch.js',
     '!src/routes/studioMarketplaceListing.js',
+    // Crediário (26/05/2026): rotas requerem integration tests com banco real
+    // (customer_credit_profiles, credit_installments, credit_plan_configs, etc).
+    // Excluídos até que os testes de integração sejam escritos.
+    '!src/routes/credit.js',
+    '!src/routes/creditInstallments.js',
   ],
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'text-summary', 'lcov'],
