@@ -23,6 +23,8 @@
 //
 // 26/05/2026 — Painel Studio inicial
 // 26/05/2026 — Refator pra transactions (espelhar Financeiro)
+// 27/05/2026 — Fix shape: alinhar funil_aprovacao + vendas_dia.value
+//              com tipos PainelData / PainelFunilStage do studioApi.ts
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -48,6 +50,10 @@ function productsVisibilityWhere(cidParam) {
 function pct(numer, denom) {
   if (!denom || denom <= 0) return null;
   return Math.round(((numer - denom) / denom) * 100);
+}
+
+function stagePct(count, total) {
+  return total > 0 ? Math.round((count / total) * 100) : 0;
 }
 
 function safeDays(input) {
@@ -83,21 +89,26 @@ router.get('/painel', async function(req, res) {
   const days = safeDays(req.query.days);
 
   // Zeros default — qualquer subquery que falhar mantem esses defaults.
+  // Shape identico ao tipo PainelData em studioApi.ts (frontend).
   const out = {
     period_days: days,
     computed_at: new Date().toISOString(),
     kpis: {
-      vendas_dia: { total: 0, qty: 0, ticket: 0, delta_pct: null },
-      ticket_medio: { value: 0, qty_periodo: 0, total_periodo: 0, delta_pct: null },
-      lucro_liquido_mes: {
-        value: 0, receita_mes: 0, despesa_mes: 0, margem_pct: null, delta_pct: null,
-      },
+      vendas_dia:        { value: 0, delta_pct: null, sub_label: null },
+      ticket_medio:      { value: 0, delta_pct: null, sub_label: null },
+      lucro_liquido_mes: { value: 0, receita_mes: 0, despesa_mes: 0, margem_pct: null, delta_pct: null },
     },
     faturamento_serie: [],
+    faturamento_total: 0,
     top_produtos: [],
     funil_aprovacao: {
-      total: 0, pending: 0, approved: 0, changes_requested: 0, expired: 0,
-      conversion_first_try_pct: null, avg_response_minutes: null,
+      pendentes:  { count: 0, pct: 0 },
+      aprovados:  { count: 0, pct: 0 },
+      alteracoes: { count: 0, pct: 0 },
+      expirados:  { count: 0, pct: 0 },
+      total_enviados: 0,
+      aprovacao_primeira_pct: null,
+      tempo_medio_resposta_min: null,
     },
   };
 
@@ -125,14 +136,13 @@ router.get('/painel', async function(req, res) {
       [cid]
     );
     const row = r.rows[0] || {};
-    const hojeTotal = parseFloat(row.hoje_total) || 0;
-    const hojeQty   = parseInt(row.hoje_qty) || 0;
-    const ontemTotal = parseFloat(row.ontem_total) || 0;
+    const hojeTotal  = parseFloat(row.hoje_total)  || 0;
+    const hojeQty    = parseInt(row.hoje_qty)       || 0;
+    const ontemTotal = parseFloat(row.ontem_total)  || 0;
     out.kpis.vendas_dia = {
-      total:     hojeTotal,
-      qty:       hojeQty,
-      ticket:    hojeQty > 0 ? Math.round((hojeTotal / hojeQty) * 100) / 100 : 0,
+      value:     Math.round(hojeTotal * 100) / 100,
       delta_pct: pct(hojeTotal, ontemTotal),
+      sub_label: null,
     };
   } catch (err) {
     console.error('[studio/painel][vendas_dia]', err.message);
@@ -163,17 +173,16 @@ router.get('/painel', async function(req, res) {
       [days, cid]
     );
     const row = r.rows[0] || {};
-    const atualTotal = parseFloat(row.atual_total) || 0;
-    const atualQty   = parseInt(row.atual_qty) || 0;
-    const prevTotal  = parseFloat(row.prev_total) || 0;
-    const prevQty    = parseInt(row.prev_qty) || 0;
+    const atualTotal  = parseFloat(row.atual_total) || 0;
+    const atualQty    = parseInt(row.atual_qty)     || 0;
+    const prevTotal   = parseFloat(row.prev_total)  || 0;
+    const prevQty     = parseInt(row.prev_qty)      || 0;
     const atualTicket = atualQty > 0 ? atualTotal / atualQty : 0;
     const prevTicket  = prevQty  > 0 ? prevTotal  / prevQty  : 0;
     out.kpis.ticket_medio = {
-      value:         Math.round(atualTicket * 100) / 100,
-      qty_periodo:   atualQty,
-      total_periodo: Math.round(atualTotal * 100) / 100,
-      delta_pct:     pct(atualTicket, prevTicket),
+      value:     Math.round(atualTicket * 100) / 100,
+      delta_pct: pct(atualTicket, prevTicket),
+      sub_label: null,
     };
   } catch (err) {
     console.error('[studio/painel][ticket_medio]', err.message);
@@ -254,6 +263,10 @@ router.get('/painel', async function(req, res) {
       qty:      parseInt(row.qty) || 0,
       is_today: row.date_iso === today,
     }));
+    // Total do periodo (soma da serie)
+    out.faturamento_total = Math.round(
+      out.faturamento_serie.reduce((sum, p) => sum + p.value, 0) * 100
+    ) / 100;
   } catch (err) {
     console.error('[studio/painel][faturamento_serie]', err.message);
   }
@@ -309,6 +322,8 @@ router.get('/painel', async function(req, res) {
   }
 
   // ─── 6. Funil de aprovacao ───────────────────────────────
+  // Shape de retorno: identico a PainelData.funil_aprovacao (studioApi.ts)
+  // pendentes/aprovados/alteracoes/expirados: { count, pct } (PainelFunilStage)
   try {
     const r = await db.query(
       `SELECT
@@ -326,16 +341,19 @@ router.get('/painel', async function(req, res) {
       [cid, String(days)]
     );
     const row = r.rows[0] || {};
-    const total = parseInt(row.total) || 0;
-    const approved = parseInt(row.approved) || 0;
+    const total          = parseInt(row.total)             || 0;
+    const pendingCount   = parseInt(row.pending)           || 0;
+    const approvedCount  = parseInt(row.approved)          || 0;
+    const changesCount   = parseInt(row.changes_requested) || 0;
+    const expiredCount   = parseInt(row.expired)           || 0;
     out.funil_aprovacao = {
-      total,
-      pending:           parseInt(row.pending) || 0,
-      approved,
-      changes_requested: parseInt(row.changes_requested) || 0,
-      expired:           parseInt(row.expired) || 0,
-      conversion_first_try_pct: total > 0 ? Math.round((approved / total) * 100) : null,
-      avg_response_minutes:     row.avg_response_minutes != null
+      pendentes:  { count: pendingCount,  pct: stagePct(pendingCount, total)  },
+      aprovados:  { count: approvedCount, pct: stagePct(approvedCount, total) },
+      alteracoes: { count: changesCount,  pct: stagePct(changesCount, total)  },
+      expirados:  { count: expiredCount,  pct: stagePct(expiredCount, total)  },
+      total_enviados:           total,
+      aprovacao_primeira_pct:   total > 0 ? Math.round((approvedCount / total) * 100) : null,
+      tempo_medio_resposta_min: row.avg_response_minutes != null
         ? Math.round(parseFloat(row.avg_response_minutes))
         : null,
     };
