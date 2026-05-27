@@ -3,6 +3,13 @@
 // Auth: OAuth 2.0 client_credentials
 // Docs: https://dev.nuvemfiscal.com.br/docs/api
 //
+// 27/05/2026 (hotfix endereço defensivo):
+// - Helper safeAddrField aplica fallback quando company.address_*
+//   está vazio/curto. Aplicado em xLgr (rua) e xBairro. Schema
+//   NF-e 4.00 exige min 2 chars; cadastros incompletos quebravam
+//   NF-e 55 devolução (xBairro/xLgr precisam aparecer em
+//   enderEmit + enderDest quando dest = próprio emitente).
+//
 // 27/05/2026 (log detalhado de erro fiscal):
 // - nuvemRequest extrai erros[]/errors[] de forma robusta e enriquece
 //   msg com "(campo: X)". Expoe err.erros pro caller inspecionar.
@@ -55,11 +62,6 @@ async function getToken() {
   return _token;
 }
 
-// 27/05/2026: extrai array de erros do payload da Nuvem Fiscal.
-// A API retorna em formatos diferentes dependendo do endpoint:
-//   - data.erros[] (NF-e 55 validation: { campo, mensagem })
-//   - data.errors[] (alguns endpoints novos: { field, message })
-//   - data.error.errors[] (envelope alternativo)
 function extractErros(data) {
   if (Array.isArray(data?.erros)) return data.erros;
   if (Array.isArray(data?.errors)) return data.errors;
@@ -205,6 +207,25 @@ async function uploadCertificate(cnpj, certificateBase64, password) {
   });
 }
 
+// 27/05/2026 (hotfix endereço defensivo):
+// Helper pra campos de endereço que SEFAZ exige min N chars. Quando
+// company.address_X vem vazio ou muito curto, aplica fallback + warning
+// console com identificação da company pra operador corrigir cadastro.
+//
+// Aplicado em xLgr e xBairro (campos comuns vazios em cadastros legados).
+// NÃO aplicado em xMun, cMun (IBGE), CEP, UF — esses se inválidos
+// invalidam a NF inteira; melhor falhar do que mascarar com fallback.
+function safeAddrField(value, minLen, fallback, fieldName, companyCnpj) {
+  const v = String(value || '').trim();
+  if (v.length >= minLen) return v;
+  console.warn(
+    `[nuvemfiscal] cadastro company ${companyCnpj || '?'} sem ${fieldName} ` +
+    `(valor atual: "${v}", min: ${minLen} chars). Usando fallback "${fallback}". ` +
+    `Atualize o cadastro em Gestão Aura → Empresa pra remover esse warning.`
+  );
+  return fallback;
+}
+
 function buildEmit(company) {
   const cnpj = (company.cnpj || '').replace(/\D/g, '');
   return {
@@ -212,9 +233,9 @@ function buildEmit(company) {
     xNome: company.legal_name || company.trade_name || company.name || 'Emitente',
     xFant: company.trade_name || company.name || undefined,
     enderEmit: {
-      xLgr: company.address_street || '',
-      nro: company.address_number || 'S/N',
-      xBairro: company.address_neighborhood || '',
+      xLgr: safeAddrField(company.address_street, 2, 'Nao informado', 'address_street', cnpj),
+      nro: String(company.address_number || 'S/N').trim() || 'S/N',
+      xBairro: safeAddrField(company.address_neighborhood, 2, 'Centro', 'address_neighborhood', cnpj),
       cMun: company.ibge_code || '',
       xMun: company.address_city || '',
       UF: (company.address_state || 'SP').toUpperCase(),
@@ -514,9 +535,6 @@ async function emitNfe(company, nfeData) {
 
   if (!body.infNFe.infAdic) delete body.infNFe.infAdic;
 
-  // 27/05/2026: log de debug pra NF-e modelo 55 com refNFe (devolução).
-  // Volumetria baixa (só devoluções) e crucial pra debugar rejeições
-  // "Validation failed" do payload Nuvem Fiscal.
   if (nfeData.refNFe) {
     try {
       console.log('[nuvemfiscal] emitNfe NF-55 devolução body:', JSON.stringify(body, null, 2));
@@ -611,7 +629,7 @@ module.exports = {
   getToken, nuvemRequest, ufToCodigo,
   isoBR, generateCNF, calcDvChaveAcesso, buildAccessKey44, validateTpag,
   buildEmit, buildDest, buildSelfDest, buildDet, buildICMSTot, buildPag, buildIde,
-  buildInfAdic, resolvePagInput, extractErros,
+  buildInfAdic, resolvePagInput, extractErros, safeAddrField,
   registerCompany, uploadCertificate,
   emitNfce, queryNfce, cancelNfce,
   emitNfe,  queryNfe,  cancelNfe,
