@@ -2,6 +2,7 @@
 // AURA Studio — rotas do vertical (Fase 0 + 1 + 2 + 3 + Nivel 1 + Fase 10A)
 // Atualizado 26/05/2026 — Fase 10A: IA Haiku sugere templates pro produto
 //                       + Issue 2: qty_multiplier_by_option em compositions
+//                       + Verso: has_back + back_print_area + field.side
 //
 // Fase 0+1: /health, /products/:pid/customization-config, /personalize
 // Fase 2  : /gallery/* (categorias + templates + vinculação)
@@ -23,9 +24,10 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { markStudioOnboarding } = require('../utils/studioOnboarding');
 
-// ─── Schema customization_config (Fase 1) ───────────────────
+// ─── Schema customization_config (Fase 1 + Verso 26/05/2026) ─
 const VALID_FIELD_TYPES = ['text', 'image', 'template', 'color', 'option'];
 const VALID_POSITIONS   = ['center', 'left', 'right'];
+const VALID_SIDES       = ['front', 'back'];
 
 function validateCustomizationConfig(cfg) {
   if (!cfg || typeof cfg !== 'object') return 'config obrigatório';
@@ -34,6 +36,35 @@ function validateCustomizationConfig(cfg) {
   if (typeof pa.width_cm !== 'number' || pa.width_cm <= 0) return 'print_area.width_cm inválido';
   if (typeof pa.height_cm !== 'number' || pa.height_cm <= 0) return 'print_area.height_cm inválido';
   if (pa.position && !VALID_POSITIONS.includes(pa.position)) return 'print_area.position inválido (center/left/right)';
+
+  // ─── Verso (frente/verso) — opcional, backwards-compatible ─
+  if (cfg.has_back !== undefined && typeof cfg.has_back !== 'boolean') {
+    return 'has_back deve ser boolean';
+  }
+  if (cfg.has_back === true) {
+    if (!cfg.back_print_area || typeof cfg.back_print_area !== 'object') {
+      return 'back_print_area obrigatório quando has_back=true';
+    }
+    const bpa = cfg.back_print_area;
+    if (typeof bpa.width_cm !== 'number' || !isFinite(bpa.width_cm) || bpa.width_cm <= 0) {
+      return 'back_print_area.width_cm inválido';
+    }
+    if (typeof bpa.height_cm !== 'number' || !isFinite(bpa.height_cm) || bpa.height_cm <= 0) {
+      return 'back_print_area.height_cm inválido';
+    }
+    if (bpa.position !== undefined && !VALID_POSITIONS.includes(bpa.position)) {
+      return 'back_print_area.position inválido (center/left/right)';
+    }
+  }
+  if (cfg.back_charge_enabled !== undefined && typeof cfg.back_charge_enabled !== 'boolean') {
+    return 'back_charge_enabled deve ser boolean';
+  }
+  if (cfg.back_charge_enabled === true) {
+    if (typeof cfg.back_price_delta !== 'number' || !isFinite(cfg.back_price_delta) || cfg.back_price_delta <= 0) {
+      return 'back_price_delta deve ser número > 0 quando back_charge_enabled=true';
+    }
+  }
+
   if (!Array.isArray(cfg.fields)) return 'fields deve ser array';
   if (cfg.fields.length === 0) return 'pelo menos 1 field obrigatório';
   if (cfg.fields.length > 12) return 'máximo 12 fields por produto';
@@ -42,6 +73,15 @@ function validateCustomizationConfig(cfg) {
     if (!f.type || !VALID_FIELD_TYPES.includes(f.type)) return `fields[${i}].type inválido`;
     if (!f.label || typeof f.label !== 'string') return `fields[${i}].label obrigatório`;
     if (typeof f.required !== 'boolean') return `fields[${i}].required deve ser boolean`;
+    // ─── side opcional, default 'front' — valida shape + consistência ─
+    if (f.side !== undefined) {
+      if (!VALID_SIDES.includes(f.side)) {
+        return `fields[${i}].side inválido (front/back)`;
+      }
+      if (f.side === 'back' && cfg.has_back !== true) {
+        return `fields[${i}].side='back' requer has_back=true`;
+      }
+    }
   }
   return null;
 }
