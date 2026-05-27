@@ -11,6 +11,8 @@
 //   + revisions policy exposta em products + poll (max_revisions_included,
 //     extra_revision_price, revision_policy_text)
 //   + upload R2 publico pro cliente enviar foto direto da pagina
+// 26/05/2026 (Verso):
+//   + back_price_delta somado ao subtotal quando customization.has_back_selected
 //
 // Fluxo:
 //  1. Cliente entra em loja.getaura.com.br/:slug/studio
@@ -118,6 +120,21 @@ function computeChoicesDelta(cfg, customization) {
     }
   }
   return delta;
+}
+
+// ────────────────────────────────────────────────────────────
+// computeBackDelta — retorna o valor cobrado pelo verso quando
+// o cliente marca `customization.has_back_selected = true` E o
+// produto tem cfg.has_back=true E cfg.back_charge_enabled=true.
+// Retorna 0 em qualquer outro cenário (backwards-compatible).
+// ────────────────────────────────────────────────────────────
+function computeBackDelta(cfg, customization) {
+  if (!cfg || cfg.has_back !== true) return 0;
+  if (cfg.back_charge_enabled !== true) return 0;
+  if (!customization || customization.has_back_selected !== true) return 0;
+  const v = cfg.back_price_delta;
+  if (typeof v !== 'number' || !isFinite(v) || v <= 0) return 0;
+  return v;
 }
 
 // CORS publico — mesma config do storefront.js
@@ -410,7 +427,8 @@ router.post('/:slug/studio/upload', async (req, res) => {
 //  studio_production_status='pending_art' automaticamente.
 //
 // effectivePrice = product.price + soma(price_delta das choices
-//   selecionadas em customization.option/color)
+//   selecionadas em customization.option/color) + back_delta
+//   (quando customization.has_back_selected e cfg.back_charge_enabled)
 // ────────────────────────────────────────────────────────────
 router.post('/:slug/studio/order', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
@@ -509,6 +527,7 @@ router.post('/:slug/studio/order', async (req, res) => {
     const orderItems = [];
     let subtotal = 0;
     let hasStudioItem = false;
+    let totalBackDeltaAdded = 0; // rastreabilidade pro log
 
     for (const item of items) {
       const p = productMap[item.product_id];
@@ -531,7 +550,16 @@ router.post('/:slug/studio/order', async (req, res) => {
       // Aplica price_delta das choices selecionadas (option/color)
       const basePrice = parseFloat(p.price);
       const choicesDelta = computeChoicesDelta(cfg, item.customization);
-      const effectivePrice = basePrice + choicesDelta;
+
+      // Verso (frente/verso) — soma back_price_delta quando cliente marcou
+      const backDelta = computeBackDelta(cfg, item.customization);
+      if (backDelta > 0) {
+        const itemBackTotal = backDelta * qty;
+        totalBackDeltaAdded += itemBackTotal;
+        console.log(`[studio/storefront/order] back delta aplicado em "${p.name}": R$${backDelta.toFixed(2)} x ${qty} = R$${itemBackTotal.toFixed(2)}`);
+      }
+
+      const effectivePrice = basePrice + choicesDelta + backDelta;
       const itemSubtotal = effectivePrice * qty;
       subtotal += itemSubtotal;
       hasStudioItem = true;
@@ -547,11 +575,16 @@ router.post('/:slug/studio/order', async (req, res) => {
         // metadata auxiliar (nao persistida — so resposta)
         _base_price: basePrice,
         _choices_delta: choicesDelta,
+        _back_delta: backDelta,
       });
     }
 
     if (!hasStudioItem) {
       return res.status(400).json({ error: 'Pedido Studio precisa de ao menos 1 produto personalizavel' });
+    }
+
+    if (totalBackDeltaAdded > 0) {
+      console.log(`[studio/storefront/order] total back_delta somado ao subtotal: R$${totalBackDeltaAdded.toFixed(2)}`);
     }
 
     // Frete: Studio cobra delivery_fee fixo (sem distancia complexa por enquanto;
