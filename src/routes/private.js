@@ -124,6 +124,7 @@ router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub')
 // independente do plano (lojista cadastrado como vertical=studio entra direto).
 // Migrations 130 / 131 / 132 / 133 / 134 + studio_sale_items_customization.
 router.use('/studio', require('./studio'));                  // F0+1+2+3 (+ onboarding hooks 25/05)
+router.use('/studio', require('./studioPainel'));            // Painel agregado /painel?days=N (26/05)
 router.use('/studio', require('./studioKdsApproval'));       // F4+5 (+ onboarding hook 25/05)
 router.use('/studio', require('./studioBulkHub'));           // F6+7 (25/05)
 router.use('/studio', require('./studioUpload'));            // upload mockup (25/05)
