@@ -183,11 +183,11 @@ function buildWhatsAppMessage(template, params = {}) {
           dueDate = '', installmentNum = '', totalInstallments = '',
           pixLink = '', daysLate = '' } = params;
   const templates = {
-    lembrete:     `Olá, ${customerName}! 👋 Lembrete amigável: a parcela ${installmentNum}/${totalInstallments} de R$ ${amount} vence em *${dueDate}*. Pague via PIX: ${pixLink} — *${storeName}*`,
-    confirmacao:  `Olá, ${customerName}! Amanhã vence sua parcela ${installmentNum}/${totalInstallments} de R$ ${amount}. PIX rápido: ${pixLink} — *${storeName}*`,
-    vencimento:   `${customerName}, a parcela ${installmentNum}/${totalInstallments} de R$ ${amount} vence *hoje*. Evite juros: ${pixLink} — *${storeName}*`,
-    atraso_1:     `${customerName}, sua parcela ${installmentNum}/${totalInstallments} de R$ ${amount} está *${daysLate} dias* em atraso. Regularize agora: ${pixLink} — *${storeName}*`,
-    atraso_2:     `${customerName}, identificamos débito de R$ ${amount} com *${daysLate} dias* de atraso. Acesse ${pixLink} ou entre em contato. — *${storeName}*`,
+    lembrete:     `Olá, ${customerName}! 👋 Lembrete amigável: a parcela ${installmentNum}/${totalInstallments} de R$ ${amount} vence em *${dueDate}*. Pague via PIX: ${pixLink} — *${storeName}*`,
+    confirmacao:  `Olá, ${customerName}! Amanhã vence sua parcela ${installmentNum}/${totalInstallments} de R$ ${amount}. PIX rápido: ${pixLink} — *${storeName}*`,
+    vencimento:   `${customerName}, a parcela ${installmentNum}/${totalInstallments} de R$ ${amount} vence *hoje*. Evite juros: ${pixLink} — *${storeName}*`,
+    atraso_1:     `${customerName}, sua parcela ${installmentNum}/${totalInstallments} de R$ ${amount} está *${daysLate} dias* em atraso. Regularize agora: ${pixLink} — *${storeName}*`,
+    atraso_2:     `${customerName}, identificamos débito de R$ ${amount} com *${daysLate} dias* de atraso. Acesse ${pixLink} ou entre em contato. — *${storeName}*`,
     bloqueio:     `${customerName}, seu crédito em *${storeName}* foi suspenso por inadimplência. Regularize: ${pixLink} ou fale com a loja.`,
   };
   return templates[template] || templates.lembrete;
@@ -195,18 +195,28 @@ function buildWhatsAppMessage(template, params = {}) {
 
 // ─────────────────────────────────────────────
 // Middleware: assertCrediarioEnabled
+// FIX 26/05/2026: usa pdv_settings->>'crediario_enabled' via SQL (retorna
+// sempre text) em vez de ler o JSONB inteiro e comparar com ===false.
+// Alinha comportamento com credit.js e elimina o bug em que módulo ficava
+// aberto quando crediario_enabled era undefined/null no JSONB.
 // ─────────────────────────────────────────────
 
 async function assertCrediarioEnabled(req, res, next) {
   try {
     const companyId = req.params.id;
     const result = await pool.query(
-      `SELECT pdv_settings FROM companies WHERE id = $1`,
+      `SELECT pdv_settings->>'crediario_enabled' AS enabled FROM companies WHERE id = $1`,
       [companyId]
     );
-    const settings = result.rows[0]?.pdv_settings || {};
-    if (settings.crediario_enabled === false) {
-      return res.status(403).json({ error: 'Crediário não habilitado para esta empresa.' });
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Empresa não encontrada.' });
+    }
+    const enabled = result.rows[0]?.enabled;
+    if (enabled !== 'true') {
+      return res.status(403).json({
+        error: 'Crediário não habilitado para esta empresa. Ative em Configurações > PDV > Políticas do Caixa.',
+        code: 'CREDIARIO_DISABLED',
+      });
     }
     next();
   } catch (err) {
@@ -322,6 +332,12 @@ router.patch('/customers/:cid/block', async (req, res) => {
 // ─────────────────────────────────────────────
 // POST /credit/installments — criar venda parcelada
 // Body: { customer_id, sale_id, total_amount, installments, first_due_date }
+//
+// FIX 26/05/2026: removidas validações de SCORE_TOO_LOW e LIMIT_EXCEEDED.
+// Score é informativo e não bloqueia operações. Limite de crédito fora do
+// escopo desta fase — será reintroduzido de forma opcional (fácil edição
+// manual) em fase posterior. Único bloqueio que permanece: CUSTOMER_BLOCKED
+// (bloqueio manual explícito pelo lojista).
 // ─────────────────────────────────────────────
 
 router.post('/installments', async (req, res) => {
@@ -344,29 +360,15 @@ router.post('/installments', async (req, res) => {
     const config = await getOrCreatePlanConfig(client, companyId);
     const profile = await getOrCreateProfile(client, companyId, customer_id);
 
-    // validações de limite e score
-    if (config && config.require_score_min && parseInt(profile?.credit_score) < parseInt(config.require_score_min)) {
-      await client.query('ROLLBACK');
-      return res.status(422).json({
-        error: `Score insuficiente (${profile.credit_score}). Mínimo: ${config.require_score_min}.`,
-        code: 'SCORE_TOO_LOW',
-      });
-    }
+    // Único bloqueio mantido: cliente com bloqueio manual explícito
     if (profile?.status === 'blocked') {
       await client.query('ROLLBACK');
-      return res.status(422).json({ error: 'Cliente com crédito bloqueado.', code: 'CUSTOMER_BLOCKED' });
+      return res.status(422).json({
+        error: `Cliente com crédito bloqueado. Motivo: ${profile.blocked_reason || 'Bloqueio manual'}.`,
+        code: 'CUSTOMER_BLOCKED',
+      });
     }
-    if (config && profile) {
-      const available = parseFloat(profile.credit_limit) - parseFloat(profile.credit_used);
-      if (total > available) {
-        await client.query('ROLLBACK');
-        return res.status(422).json({
-          error: `Limite insuficiente. Disponível: R$${available.toFixed(2)}.`,
-          code: 'LIMIT_EXCEEDED',
-          available,
-        });
-      }
-    }
+
     if (config && n > parseInt(config.max_installments)) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: `Máximo de ${config.max_installments} parcelas configurado.` });
