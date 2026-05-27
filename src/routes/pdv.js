@@ -11,6 +11,9 @@
 //   expoem has_nfce (boolean) pra frontend decidir inferFiscalStrategy.
 // 26/05/2026 (fix customer_phone): POST /troca v1 retorna customer_phone
 //   no response (LEFT JOIN customers) pra Step5Success habilitar WhatsApp.
+// 26/05/2026 (crediario fase 1): POST /sale cria credit_installments
+//   inline quando payment_method='crediario' e installments>1.
+//   Bloco BEST-EFFORT: erro nele nao reverte a venda.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -402,6 +405,119 @@ router.post('/sale', async (req, res) => {
       );
     }
     await client.query('COMMIT');
+
+    // ── Crediário parcelado: cria credit_installments quando installments > 1
+    // Executado FORA da transaction principal — erro aqui NAO reverte a venda.
+    // Requer: payment_method='crediario', installments>1, customer_id presente.
+    const reqInstallments = parseInt(req.body?.installments || 1);
+    if (
+      (payment_method || '').toLowerCase() === 'crediario' &&
+      reqInstallments > 1 &&
+      customer_id
+    ) {
+      const n = Math.min(reqInstallments, 36);
+      const firstDueDate = req.body?.first_due_date || (() => {
+        const d = new Date();
+        d.setMonth(d.getMonth() + 1);
+        return d.toISOString().split('T')[0];
+      })();
+
+      try {
+        const ciClient = await db.connect();
+        try {
+          await ciClient.query('BEGIN');
+
+          // getOrCreateProfile defensivo (42P01 = tabela inexistente, 42703 = coluna inexistente)
+          try {
+            await ciClient.query(
+              `INSERT INTO customer_credit_profiles
+                 (company_id, customer_id, credit_limit, credit_score, status)
+               VALUES ($1, $2, 0, 500, 'active')
+               ON CONFLICT (company_id, customer_id) DO UPDATE SET updated_at = NOW()`,
+              [req.params.id, customer_id]
+            );
+          } catch (e) { if (e.code !== '42P01' && e.code !== '42703') throw e; }
+
+          // getOrCreatePlanConfig defensivo
+          let maxInstallments = 12;
+          try {
+            const cfgRes = await ciClient.query(
+              `INSERT INTO credit_plan_configs (company_id) VALUES ($1)
+               ON CONFLICT (company_id) DO UPDATE SET updated_at = NOW()
+               RETURNING max_installments`,
+              [req.params.id]
+            );
+            maxInstallments = parseInt(cfgRes.rows[0]?.max_installments) || 12;
+          } catch (e) { if (e.code !== '42P01' && e.code !== '42703') throw e; }
+
+          const finalN = Math.min(n, maxInstallments);
+          const baseAmount = Math.floor((totalAmount / finalN) * 100) / 100;
+          const remainder  = Math.round((totalAmount - baseAmount * finalN) * 100) / 100;
+
+          for (let i = 1; i <= finalN; i++) {
+            const amt = i === finalN ? baseAmount + remainder : baseAmount;
+            const dueDate = new Date(firstDueDate);
+            dueDate.setMonth(dueDate.getMonth() + (i - 1));
+            const dueDateStr = dueDate.toISOString().split('T')[0];
+
+            // Insere com pix_link temporario, depois atualiza com o id real
+            const ins = await ciClient.query(
+              `INSERT INTO credit_installments
+                 (company_id, sale_id, customer_id, installment_number, total_installments,
+                  amount_due, due_date, status, pix_link)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+               RETURNING id`,
+              [req.params.id, sale.id, customer_id, i, finalN, amt, dueDateStr,
+               `https://pagar.getaura.com.br/parcela/tmp`]
+            );
+            const iid = ins.rows[0].id;
+            const pixShort = iid.replace(/-/g, '').slice(0, 12);
+            await ciClient.query(
+              `UPDATE credit_installments SET pix_link = $2 WHERE id = $1`,
+              [iid, `https://pagar.getaura.com.br/parcela/${pixShort}`]
+            );
+          }
+
+          // Marcar venda como parcelada (colunas da migration 118)
+          try {
+            await ciClient.query(
+              `UPDATE sales SET is_installment = true, total_installments = $2,
+                 credit_plan_snapshot = $3
+               WHERE id = $1 AND company_id = $4`,
+              [sale.id, finalN,
+               JSON.stringify({ installments: finalN, total_amount: totalAmount }),
+               req.params.id]
+            );
+          } catch (e) { if (e.code !== '42703' && e.code !== '42P01') throw e; }
+
+          // Atualizar credit_used do perfil
+          try {
+            await ciClient.query(
+              `UPDATE customer_credit_profiles
+                 SET credit_used = COALESCE((
+                   SELECT SUM(amount_due - amount_paid) FROM credit_installments
+                   WHERE company_id = $1 AND customer_id = $2 AND status IN ('pending','overdue')
+                 ), 0), updated_at = NOW()
+               WHERE company_id = $1 AND customer_id = $2`,
+              [req.params.id, customer_id]
+            );
+          } catch (e) { if (e.code !== '42P01' && e.code !== '42703') throw e; }
+
+          await ciClient.query('COMMIT');
+          console.log(`[PDV] crediario: criadas ${finalN} parcelas para venda ${sale.id}`);
+        } catch (ciErr) {
+          await ciClient.query('ROLLBACK');
+          console.error('[PDV/sale] crediario installments error (non-fatal):', ciErr.message);
+          // Nao relanca — a venda ja foi registrada com sucesso
+        } finally {
+          ciClient.release();
+        }
+      } catch (poolErr) {
+        console.error('[PDV/sale] crediario pool error (non-fatal):', poolErr.message);
+      }
+    }
+    // ── fim bloco crediario parcelado ──
+
     const { rows: saleItems } = await db.query(
       `SELECT si.*, p.name AS product_name FROM sale_items si
        LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`, [sale.id]
