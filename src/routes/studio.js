@@ -272,7 +272,7 @@ router.delete('/gallery/categories/:cid', async function(req, res) {
 router.get('/gallery/templates', async function(req, res) {
   const { category_id, tag, limit = 200 } = req.query;
   const params = [req.params.id];
-  let where = 'company_id = $1 AND is_active = true';
+  let where = 't.company_id = $1 AND t.is_active = true';
   if (category_id) { params.push(category_id); where += ` AND category_id = $${params.length}`; }
   if (tag)         { params.push(tag);         where += ` AND $${params.length} = ANY(tags)`; }
   try {
