@@ -1,34 +1,22 @@
 // ============================================================
 // AURA. — services/trocaDevolucao55.js
-// Helper de orquestração da NF-e modelo 55 de devolução de venda,
-// extraído pra fora de pdv.js pra manter o handler do POST /troca enxuto.
+// Helper de orquestração da NF-e modelo 55 de devolução de venda.
 //
-// 12/05/2026 (Fase C — contador Davi OK):
-//   CFOP   = 1.202 (devolução venda, mesma UF SP, varejo)
-//   CSOSN  = 102   (Simples Nacional sem permissão de crédito)
-//   Serie  = 1     (próximo numero calculado por company_id + tipo='nfe')
-//   tpNF   = 0     (entrada — loja recebe a mercadoria de volta)
-//   finNFe = 4     (devolução)
-//   refNFe = chave 44 dígitos da NFC-e original
+// 27/05/2026 (log detalhado): catch do emit agora console.error
+// estruturado com message, status, payload completo, array erros, e
+// contexto da troca (company_id, chave original, número, valor).
 //
-// 25/05/2026 (Polish v3 — auditoria atrito):
-//   - Removida validação NFCE_ORIGINAL_ANONIMA — anônima é caso suportado;
-//     basta colocar "Consumidor não identificado" em infAdFisco.
-//   - Removida validação CUSTOMER_ADDRESS_REQUIRED — SEFAZ FAQ MG #7
-//     define que dest da NF-e 55 de devolução é o PRÓPRIO EMITENTE; o
-//     endereço do cliente NÃO é exigido (e nem cabe — não há campo dest).
-//     Dados do cliente vão em infAdFisco como texto livre.
-//   - Parâmetro customerAddress fica aceito por compat retroativa,
-//     mas é ignorado. Frontend pode parar de enviar.
+// 25/05/2026 (Polish v3): removidas validações NFCE_ORIGINAL_ANONIMA
+// e CUSTOMER_ADDRESS_REQUIRED. dest = próprio emitente (SEFAZ FAQ MG #7).
 //
-// Doc: Aura/BACKLOG_TROCA_CROSS_FILIAL.md (Fase C)
+// 12/05/2026 (Fase C): CFOP 1.202 + CSOSN 102 + tpNF=0 + finNFe=4 +
+// refNFe. Contador OK.
+//
 // Memory: [[nfe55-devolucao-dest-proprio-emitente]]
 // ============================================================
 
 const nuvemfiscal = require('./nuvemfiscal');
 
-// HttpError — sinaliza pro caller (pdv.js) qual status + body devolver.
-// pdv.js intercepta isso após o ROLLBACK e responde adequado.
 class TrocaDevolucao55Error extends Error {
   constructor(status, body) {
     super(body && body.error ? body.error : 'devolucao_55 error');
@@ -38,23 +26,17 @@ class TrocaDevolucao55Error extends Error {
   }
 }
 
-// handle(client, params) → nfceFiscalResult
-//
-// Lança TrocaDevolucao55Error quando deve retornar 4xx/5xx ao usuário.
-// Lança Error normal pra outros erros (caller faz 500).
-// SE retornar, o client.query('COMMIT') ainda precisa ser chamado pelo caller.
 async function handle(client, {
-  saleCompanyId,         // CNPJ origem da venda (Filial 1) — emit NF-e/55
-  originalSaleId,        // UUID da venda original
-  trocaSaleId,           // UUID da troca (sales row já criada)
-  returnedItems,         // array original do req.body
-  returnedValue,         // soma de returned_items (qty*unit_price)
-  customerAddress,       // 25/05/2026: ACEITO por compat mas IGNORADO
-  notes,                 // observação livre — vira motivo em infAdFisco
-  userId,                // req.user?.id (emitted_by)
+  saleCompanyId,
+  originalSaleId,
+  trocaSaleId,
+  returnedItems,
+  returnedValue,
+  customerAddress,       // ACEITO por compat mas IGNORADO
+  notes,
+  userId,
 }) {
-  // 1. Busca NFC-e original autorizada (qualquer idade — strategy é
-  //    justamente pra >24h)
+  // 1. Busca NFC-e original autorizada
   const { rows: origNfceList } = await client.query(
     `SELECT id, chave_acesso, numero, customer_cpf, customer_name, authorized_at
        FROM nfce_emissions
@@ -69,11 +51,7 @@ async function handle(client, {
   }
   const orig = origNfceList[0];
 
-  // 25/05/2026: SEFAZ FAQ MG #7 define dest = próprio emitente. CPF do
-  // cliente é opcional — entra em infAdFisco texto livre se conhecido.
-  // NFC-e anônima é caso suportado (consumidor não identificado).
-
-  // 2. Próximo numero da serie 1 NF-e/55 desta company
+  // 2. Próximo numero da serie 1 NF-e/55
   const { rows: nfeSeq } = await client.query(
     `SELECT COALESCE(MAX(numero), 0) + 1 AS next_numero
        FROM nfce_emissions
@@ -82,37 +60,35 @@ async function handle(client, {
   );
   const nextNumero = parseInt(nfeSeq[0] && nfeSeq[0].next_numero, 10) || 1;
 
-  // 3. Dados da empresa pra emissao
+  // 3. Dados da empresa
   const { rows: companyRows } = await client.query(
     `SELECT * FROM companies WHERE id = $1`,
     [saleCompanyId]
   );
   if (!companyRows.length) {
-    throw new TrocaDevolucao55Error(500, {
-      error: 'Empresa de origem nao encontrada',
-    });
+    throw new TrocaDevolucao55Error(500, { error: 'Empresa de origem nao encontrada' });
   }
   const company = companyRows[0];
 
-  // 4. Items da devolucao a partir de returned_items
+  // 4. Items da devolução
   const devolucaoItems = (returnedItems || []).map((ret, idx) => ({
     code: ret.product_id || ('item-' + (idx + 1)),
     name: ret.product_name_snapshot || ('Item ' + (idx + 1)),
     quantity: parseFloat(ret.quantity),
     price: parseFloat(ret.unit_price),
-    cfop: '1202', // contador OK 12/05/2026 — imutável
+    cfop: '1202',
     ncm: ret.ncm || '00000000',
     unit: 'UN',
   }));
 
-  // 5. consumerInfo pra infAdFisco texto livre. Todos opcionais.
+  // 5. consumerInfo (todos opcionais)
   const consumerInfo = {
     name: orig.customer_name || null,
     cpf: orig.customer_cpf || null,
     motivo: notes || 'Troca',
   };
 
-  // 6. Emite NF-e/55 de devolucao via Nuvem Fiscal (dest = própria loja)
+  // 6. Emite NF-e/55 via Nuvem Fiscal
   let nfeResult;
   try {
     nfeResult = await nuvemfiscal.emitNfeDevolucao(company, {
@@ -124,10 +100,37 @@ async function handle(client, {
       reference: `troca-${trocaSaleId}`,
     });
   } catch (sefazErr) {
-    console.error('[trocaDevolucao55] SEFAZ error:', sefazErr.message);
+    // 27/05/2026: log estruturado com tudo que precisa pra debugar
+    // rejeições "Validation failed" da Nuvem Fiscal.
+    let payloadStr = null;
+    try { payloadStr = JSON.stringify(sefazErr.payload, null, 2); } catch (_) {}
+    console.error('[trocaDevolucao55] SEFAZ error:', {
+      message: sefazErr.message,
+      status: sefazErr.status,
+      erros: sefazErr.erros || [],
+      context: {
+        company_id: saleCompanyId,
+        company_cnpj: company.cnpj,
+        company_uf: company.address_state,
+        company_ie: company.inscricao_estadual,
+        company_ibge: company.ibge_code,
+        company_crt: company.tax_regime,
+        original_chave: orig.chave_acesso,
+        original_numero: orig.numero,
+        original_authorized_at: orig.authorized_at,
+        troca_sale_id: trocaSaleId,
+        nfe55_numero: nextNumero,
+        total_devolucao: parseFloat(returnedValue.toFixed(2)),
+        items_count: devolucaoItems.length,
+      },
+    });
+    if (payloadStr) {
+      console.error('[trocaDevolucao55] SEFAZ payload completo:', payloadStr);
+    }
     throw new TrocaDevolucao55Error(502, {
       error: 'SEFAZ rejeitou NF-e modelo 55 de devolucao: ' + sefazErr.message,
       sefaz_payload: sefazErr.payload || null,
+      erros: sefazErr.erros || [],
     });
   }
 
@@ -135,7 +138,7 @@ async function handle(client, {
   const nuvemId        = (nfeResult && nfeResult.id) || null;
   const nfeStatus      = (nfeResult && nfeResult.status) || 'processando';
 
-  // 7. Insere registro em nfce_emissions (tipo='nfe', finalidade=4)
+  // 7. Insere registro em nfce_emissions
   await client.query(
     `INSERT INTO nfce_emissions
        (company_id, sale_id, numero, serie, chave_acesso, tipo, finalidade,
