@@ -3,46 +3,29 @@
 // Auth: OAuth 2.0 client_credentials
 // Docs: https://dev.nuvemfiscal.com.br/docs/api
 //
-// Mai/2026 (foundation):
-// - buildPag agora aceita array de pagamentos (multi-pagamento NFC-e)
-//   ou objeto único legado { method, change }. Ambos coexistem.
-// - buildPag inclui card.tpIntegra=2 para tPag 03/04 (crédito/débito)
-//   evitando Rejeição 391 do SEFAZ (dados do cartão obrigatórios).
-//   Atenção: a propriedade JSON é `card` (confirmado em
-//   nuvem-fiscal/nuvemfiscal-sdk-php NfeSefazDetPag.php), NÃO `cartao`.
-// - buildPag adiciona xPag SOMENTE para tPag=99 (Outros), conforme regra
-//   W21-A do schema NF-e 4.00. Outros tPag rejeitam com cStat=442.
-// - Workaround PIX: tPag=17 mapeia automaticamente para tPag=99 + xPag="PIX"
-//   pra contornar Rejeição 391 disparada erroneamente pela SEFAZ-SP em
-//   produção (problema confirmado via diagnóstico, NF-e válido pelo schema).
-//
-// 12/05/2026 (Fase C — NF-e/55 devolução):
-// - buildIde aceita tpNF (0=entrada / 1=saída) e finNFe (1=normal /
-//   2=complementar / 3=ajuste / 4=devolução). Default 1/1 preserva
-//   comportamento atual em qualquer chamada existente.
-// - emitNfe propaga esses params + monta `NFref: [{ refNFe }]` quando
-//   nfeData.refNFe é fornecido. Necessário pra devolução referenciar
-//   a NFC-e/55 original (chave 44 dígitos).
-// - Helper emitNfeDevolucao(company, params) — NF-e/55 de entrada,
-//   tpNF=0 + finNFe=4 + refNFe + CFOP 1.202.
-//
-// 25/05/2026 (Polish v3 — auditoria atrito):
-// - emitNfe aceita nfeData.infAdFisco; popula infNFe.infAdic.infAdFisco
-//   além de infCpl. Necessário pra NF-e 55 de devolução de venda a
-//   consumidor final (SEFAZ exige dados do cliente em infAdFisco texto
-//   livre — FAQ SEFAZ-MG NFC-e item 7, regra nacional NT 2018.005).
-// - emitNfeDevolucao reescrita: dest = PRÓPRIO EMITENTE (a loja). Schema
-//   NF-e 4.00 aceita dest.CNPJ == emit.CNPJ; enderDest = enderEmit.
-//   Dados do consumidor vão em infAdFisco texto livre (nome, CPF se
-//   conhecido, motivo). Anônima (sem CPF) é caso suportado.
-//   CSOSN 102 (default buildDet) e CFOP 1.202 mantidos — contador OK.
+// 27/05/2026 (log detalhado de erro fiscal):
+// - nuvemRequest extrai erros[]/errors[] de forma robusta e enriquece
+//   msg com "(campo: X)". Expoe err.erros pro caller inspecionar.
+// - emitNfe loga body completo quando refNFe presente (NF-e 55
+//   devolução) — debug do payload no Railway.
 //
 // 26/05/2026 (hotfix NFref):
 // - NFref vai em body.infNFe.ide.NFref (dentro de ide), NÃO em
-//   body.infNFe.NFref (que era o anterior — bug). Schema NF-e 4.00:
-//   NFref é child de TIde, não de TInfNFe. Nuvem Fiscal rejeitava com
-//   "Property NFref does not refer to a known property in type
-//   Nfe.Sefaz.DTO.TInfNFe" — Davi reportou 26/05 travando troca >24h.
+//   body.infNFe.NFref. Schema NF-e 4.00: NFref é child de TIde.
+//
+// 25/05/2026 (Polish v3 — auditoria atrito):
+// - emitNfe aceita nfeData.infAdFisco; popula infNFe.infAdic.infAdFisco.
+// - emitNfeDevolucao: dest = PRÓPRIO EMITENTE (a loja).
+//   CSOSN 102 (default buildDet) e CFOP 1.202 mantidos — contador OK.
+//
+// 12/05/2026 (Fase C — NF-e/55 devolução):
+// - buildIde aceita tpNF (0=entrada / 1=saída) e finNFe (1=normal /
+//   2=complementar / 3=ajuste / 4=devolução).
+// - emitNfe propaga esses params + monta NFref quando nfeData.refNFe.
+// - emitNfeDevolucao(company, params): tpNF=0 + finNFe=4 + refNFe + CFOP 1.202.
+//
+// Mai/2026 (foundation): buildPag multi-pagamento, card.tpIntegra=2,
+// xPag só pra tPag=99, workaround PIX (tPag=17 → 99+xPag=PIX).
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -72,6 +55,19 @@ async function getToken() {
   return _token;
 }
 
+// 27/05/2026: extrai array de erros do payload da Nuvem Fiscal.
+// A API retorna em formatos diferentes dependendo do endpoint:
+//   - data.erros[] (NF-e 55 validation: { campo, mensagem })
+//   - data.errors[] (alguns endpoints novos: { field, message })
+//   - data.error.errors[] (envelope alternativo)
+function extractErros(data) {
+  if (Array.isArray(data?.erros)) return data.erros;
+  if (Array.isArray(data?.errors)) return data.errors;
+  if (Array.isArray(data?.error?.errors)) return data.error.errors;
+  if (Array.isArray(data?.error?.erros)) return data.error.erros;
+  return [];
+}
+
 async function nuvemRequest(method, path, body) {
   const token = await getToken();
   const opts = {
@@ -82,11 +78,23 @@ async function nuvemRequest(method, path, body) {
   const resp = await fetch(`${NUVEM_URL}${path}`, opts);
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    const msg = data?.error?.message || data?.mensagem || data?.message ||
-                data?.erros?.[0]?.mensagem || `Nuvem Fiscal error ${resp.status}`;
+    const erros = extractErros(data);
+    const firstErro = erros[0];
+    const erroDetail = firstErro && (firstErro.mensagem || firstErro.message || firstErro.descricao || firstErro.detail);
+    const erroCampo  = firstErro && (firstErro.campo || firstErro.field || firstErro.property);
+
+    let msg = data?.error?.message || data?.mensagem || data?.message ||
+              erroDetail || `Nuvem Fiscal error ${resp.status}`;
+    if (erroCampo && erroDetail && !String(msg).includes(erroCampo)) {
+      msg = `${msg} (campo: ${erroCampo})`;
+    } else if (erros.length > 1) {
+      msg = `${msg} (+${erros.length - 1} outros erros)`;
+    }
+
     const err = new Error(msg);
     err.status = resp.status;
     err.payload = data;
+    err.erros = erros;
     throw err;
   }
   return data;
@@ -233,9 +241,6 @@ function buildDest({ cpf, cnpj, name, email }) {
   return dest;
 }
 
-// 25/05/2026: dest = própria loja (SEFAZ FAQ MG #7 — devolução varejo).
-// Construído a partir de buildEmit pra garantir consistência total
-// (mesmo CNPJ, mesmo endereço). Schema NF-e 4.00 aceita dest == emit.
 function buildSelfDest(company) {
   const emit = buildEmit(company);
   return {
@@ -375,9 +380,6 @@ function resolvePagInput(data) {
   };
 }
 
-// Monta infAdic com infCpl (livre) e/ou infAdFisco (interesse do fisco).
-// SEFAZ trata os dois como texto livre até ~2000 chars cada. NF-e 55 de
-// devolução exige infAdFisco com dados do consumidor (FAQ SEFAZ-MG #7).
 function buildInfAdic({ observacoes, infAdFisco }) {
   const infAdic = {};
   if (observacoes) infAdic.infCpl = String(observacoes).slice(0, 5000);
@@ -437,15 +439,6 @@ async function cancelNfce(nfceId, justificativa) {
   });
 }
 
-// emitNfe — 12/05/2026: propaga tpNF / finNFe pra buildIde e monta NFref
-// quando nfeData.refNFe é fornecido. Default segue saída + normal pra
-// retrocompat com chamadas existentes.
-//
-// 25/05/2026: aceita nfeData.selfDest (boolean) — quando true, dest =
-// próprio emitente (NF-e 55 devolução varejo, SEFAZ FAQ MG #7).
-// Também aceita nfeData.infAdFisco — vai pra infNFe.infAdic.infAdFisco.
-//
-// 26/05/2026 (hotfix): NFref vai em ide.NFref, NÃO em infNFe.NFref.
 async function emitNfe(company, nfeData) {
   const tpAmb = NUVEM_URL.includes('sandbox') ? 2 : 1;
   const crt   = company.tax_regime === 'mei' ? 4 :
@@ -457,8 +450,6 @@ async function emitNfe(company, nfeData) {
 
   let dest;
   if (nfeData.selfDest) {
-    // 25/05/2026: NF-e 55 devolução varejo a consumidor final —
-    // destinatário = a própria loja emitente.
     dest = buildSelfDest(company);
   } else {
     dest = buildDest({
@@ -497,11 +488,6 @@ async function emitNfe(company, nfeData) {
     natOp: nfeData.natureza_operacao || 'Venda',
   });
 
-  // 26/05/2026 (hotfix): NFref pertence a TIde (dentro de ide), não a
-  // TInfNFe. Schema NF-e 4.00: <infNFe><ide><NFref><refNFe>...</refNFe>
-  // </NFref></ide></infNFe>. Nuvem Fiscal rejeitava o payload anterior
-  // com "Property NFref does not refer to a known property in type
-  // Nfe.Sefaz.DTO.TInfNFe" — bug travando trocas devolucao_55 do Davi.
   if (nfeData.refNFe) {
     const cleanRef = String(nfeData.refNFe).replace(/\D/g, '');
     if (cleanRef.length === 44) {
@@ -528,6 +514,15 @@ async function emitNfe(company, nfeData) {
 
   if (!body.infNFe.infAdic) delete body.infNFe.infAdic;
 
+  // 27/05/2026: log de debug pra NF-e modelo 55 com refNFe (devolução).
+  // Volumetria baixa (só devoluções) e crucial pra debugar rejeições
+  // "Validation failed" do payload Nuvem Fiscal.
+  if (nfeData.refNFe) {
+    try {
+      console.log('[nuvemfiscal] emitNfe NF-55 devolução body:', JSON.stringify(body, null, 2));
+    } catch (_) {}
+  }
+
   return nuvemRequest('POST', '/nfe', body);
 }
 
@@ -538,29 +533,11 @@ async function cancelNfe(nfeId, justificativa) {
   });
 }
 
-// ============================================================
-// emitNfeDevolucao — NF-e modelo 55 de devolução de venda varejo
-//
-// Fonte: FAQ SEFAZ-MG NFC-e item 7 (regra nacional NT 2018.005 / MOC NF-e).
-//
-// Em devolução de venda feita a consumidor final via NFC-e:
-//   - dest = PRÓPRIO EMITENTE (mesma loja, mesmo CNPJ)
-//   - natOp = literal "devolução de mercadoria adquirida por não contribuinte"
-//   - refNFe = chave 44 dígitos da NFC-e original
-//   - CFOP = 1.202 (devolução de venda mesma UF — contador OK)
-//   - CSOSN = 102 (Simples Nacional sem permissão de crédito — default buildDet)
-//   - tpNF = 0 (entrada), finNFe = 4 (devolução)
-//   - Dados do consumidor (nome, CPF, motivo) vão em infAdFisco texto livre,
-//     todos opcionais. NFC-e anônima (sem CPF) é caso suportado.
-//
-// Histórico: até 24/05/2026 essa função exigia CPF e endereço completo
-// do cliente — atrito artificial que não vinha da SEFAZ. Removido.
-// ============================================================
 async function emitNfeDevolucao(company, params) {
   const {
-    originalChave,    // string 44 dígitos — chave da NFC-e original
-    items,            // array de items pra devolução
-    consumerInfo,     // { name?, cpf?, motivo? } — tudo opcional
+    originalChave,
+    items,
+    consumerInfo,
     serie,
     numero,
     reference,
@@ -574,14 +551,11 @@ async function emitNfeDevolucao(company, params) {
     throw new Error('emitNfeDevolucao: items obrigatórios');
   }
 
-  // CFOP 1.202 default — contador confirmou 12/05/2026, não alterar.
   const enrichedItems = items.map(item => ({
     ...item,
     cfop: item.cfop || '1202',
   }));
 
-  // infAdFisco: SEFAZ exige dados do consumidor em texto livre quando
-  // dest = próprio emitente. Anônima (sem CPF) é OK.
   const consumerName = consumerInfo?.name || 'Consumidor não identificado';
   const consumerCpf = consumerInfo?.cpf ? ` (CPF ${consumerInfo.cpf})` : '';
   const motivo = consumerInfo?.motivo || 'Troca';
@@ -595,14 +569,14 @@ async function emitNfeDevolucao(company, params) {
     serie: serie || 1,
     numero: numero || 1,
     natureza_operacao: 'devolução de mercadoria adquirida por não contribuinte',
-    tpNF: 0,            // entrada
-    finNFe: 4,          // devolução
-    refNFe: cleanChave, // referência à NFC-e original
+    tpNF: 0,
+    finNFe: 4,
+    refNFe: cleanChave,
     indFinal: 1,
     indPres: 1,
-    idDest: 1,          // operação interna
+    idDest: 1,
     items: enrichedItems,
-    selfDest: true,     // dest = própria loja (SEFAZ FAQ MG #7)
+    selfDest: true,
     infAdFisco,
   });
 }
@@ -637,7 +611,7 @@ module.exports = {
   getToken, nuvemRequest, ufToCodigo,
   isoBR, generateCNF, calcDvChaveAcesso, buildAccessKey44, validateTpag,
   buildEmit, buildDest, buildSelfDest, buildDet, buildICMSTot, buildPag, buildIde,
-  buildInfAdic, resolvePagInput,
+  buildInfAdic, resolvePagInput, extractErros,
   registerCompany, uploadCertificate,
   emitNfce, queryNfce, cancelNfce,
   emitNfe,  queryNfe,  cancelNfe,
