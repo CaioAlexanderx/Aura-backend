@@ -36,6 +36,13 @@
 //   Dados do consumidor vão em infAdFisco texto livre (nome, CPF se
 //   conhecido, motivo). Anônima (sem CPF) é caso suportado.
 //   CSOSN 102 (default buildDet) e CFOP 1.202 mantidos — contador OK.
+//
+// 26/05/2026 (hotfix NFref):
+// - NFref vai em body.infNFe.ide.NFref (dentro de ide), NÃO em
+//   body.infNFe.NFref (que era o anterior — bug). Schema NF-e 4.00:
+//   NFref é child de TIde, não de TInfNFe. Nuvem Fiscal rejeitava com
+//   "Property NFref does not refer to a known property in type
+//   Nfe.Sefaz.DTO.TInfNFe" — Davi reportou 26/05 travando troca >24h.
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -437,6 +444,8 @@ async function cancelNfce(nfceId, justificativa) {
 // 25/05/2026: aceita nfeData.selfDest (boolean) — quando true, dest =
 // próprio emitente (NF-e 55 devolução varejo, SEFAZ FAQ MG #7).
 // Também aceita nfeData.infAdFisco — vai pra infNFe.infAdic.infAdFisco.
+//
+// 26/05/2026 (hotfix): NFref vai em ide.NFref, NÃO em infNFe.NFref.
 async function emitNfe(company, nfeData) {
   const tpAmb = NUVEM_URL.includes('sandbox') ? 2 : 1;
   const crt   = company.tax_regime === 'mei' ? 4 :
@@ -475,23 +484,39 @@ async function emitNfe(company, nfeData) {
     }
   }
 
+  const ide = buildIde({
+    company, mod: 55,
+    serie: nfeData.serie || 1,
+    nNF: nfeData.numero || 1,
+    tpAmb, tpImp: 1,
+    tpNF: nfeData.tpNF,
+    finNFe: nfeData.finNFe,
+    indFinal: nfeData.indFinal === undefined ? 1 : nfeData.indFinal,
+    indPres: nfeData.indPres === undefined ? 1 : nfeData.indPres,
+    idDest: nfeData.idDest || 1,
+    natOp: nfeData.natureza_operacao || 'Venda',
+  });
+
+  // 26/05/2026 (hotfix): NFref pertence a TIde (dentro de ide), não a
+  // TInfNFe. Schema NF-e 4.00: <infNFe><ide><NFref><refNFe>...</refNFe>
+  // </NFref></ide></infNFe>. Nuvem Fiscal rejeitava o payload anterior
+  // com "Property NFref does not refer to a known property in type
+  // Nfe.Sefaz.DTO.TInfNFe" — bug travando trocas devolucao_55 do Davi.
+  if (nfeData.refNFe) {
+    const cleanRef = String(nfeData.refNFe).replace(/\D/g, '');
+    if (cleanRef.length === 44) {
+      ide.NFref = [{ refNFe: cleanRef }];
+    } else {
+      console.warn('[nuvemfiscal] emitNfe: refNFe ignorada — esperado 44 dígitos, recebido', cleanRef.length);
+    }
+  }
+
   const body = {
     ambiente: tpAmb === 2 ? 'homologacao' : 'producao',
     referencia: nfeData.reference || `nfe-${Date.now()}`,
     infNFe: {
       versao: '4.00',
-      ide: buildIde({
-        company, mod: 55,
-        serie: nfeData.serie || 1,
-        nNF: nfeData.numero || 1,
-        tpAmb, tpImp: 1,
-        tpNF: nfeData.tpNF,
-        finNFe: nfeData.finNFe,
-        indFinal: nfeData.indFinal === undefined ? 1 : nfeData.indFinal,
-        indPres: nfeData.indPres === undefined ? 1 : nfeData.indPres,
-        idDest: nfeData.idDest || 1,
-        natOp: nfeData.natureza_operacao || 'Venda',
-      }),
+      ide,
       emit: buildEmit(company),
       dest, det,
       total: { ICMSTot: total },
@@ -502,15 +527,6 @@ async function emitNfe(company, nfeData) {
   };
 
   if (!body.infNFe.infAdic) delete body.infNFe.infAdic;
-
-  if (nfeData.refNFe) {
-    const cleanRef = String(nfeData.refNFe).replace(/\D/g, '');
-    if (cleanRef.length === 44) {
-      body.infNFe.NFref = [{ refNFe: cleanRef }];
-    } else {
-      console.warn('[nuvemfiscal] emitNfe: refNFe ignorada — esperado 44 dígitos, recebido', cleanRef.length);
-    }
-  }
 
   return nuvemRequest('POST', '/nfe', body);
 }
