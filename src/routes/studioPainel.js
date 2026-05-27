@@ -9,17 +9,20 @@
 // (mesma estrategia defensiva de studioKdsApproval.js GET /orders).
 //
 // Fontes:
-// - studio_orders (view 25/05 unindo digital + pdv + marketplace) — vendas,
-//   faturamento, ticket, top produtos
-// - studio_compositions_summary — custo de insumos por produto (lucro bruto)
-// - studio_approval_links — funil de aprovacao
+// - transactions (canonica do Financeiro — espelha receita/despesa).
+//   KPIs financeiros (vendas_dia, ticket_medio, lucro_liquido_mes,
+//   faturamento_serie) usam status='confirmed' em regime caixa, mesma
+//   logica de /gestao/financeiro e dashboard.js. Filtro de periodo
+//   canonico: COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date).
+// - sale_items + digital_order_items — detalhe de produtos pro Top 5.
+// - studio_approval_links — funil de aprovacao.
 //
-// Visibility: cada empresa ve APENAS SEUS pedidos (company_id = req.params.id),
-// porque studio_orders view ja filtra digital_orders/sales/marketplace_orders
-// por company_id e nao tem is_group_shared. Top produtos JOIN com products
-// usa visibilidade canonica (matriz + sub-filial via billing_owner_company_id).
+// Visibility: cada empresa ve APENAS SUAS transactions/items (company_id =
+// req.params.id). Top produtos JOIN com products usa visibilidade canonica
+// (matriz + sub-filial via billing_owner_company_id).
 //
 // 26/05/2026 — Painel Studio inicial
+// 26/05/2026 — Refator pra transactions (espelhar Financeiro)
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -86,8 +89,8 @@ router.get('/painel', async function(req, res) {
     kpis: {
       vendas_dia: { total: 0, qty: 0, ticket: 0, delta_pct: null },
       ticket_medio: { value: 0, qty_periodo: 0, total_periodo: 0, delta_pct: null },
-      lucro_bruto_mes: {
-        value: 0, margem_pct: null, custo_insumos: 0, receita_mes: 0, delta_pct: null,
+      lucro_liquido_mes: {
+        value: 0, receita_mes: 0, despesa_mes: 0, margem_pct: null, delta_pct: null,
       },
     },
     faturamento_serie: [],
@@ -99,17 +102,26 @@ router.get('/painel', async function(req, res) {
   };
 
   // ─── 1. KPI Vendas Dia (hoje vs ontem) ────────────────────
-  // Usa studio_orders view (unifica digital + pdv + marketplace).
+  // Fonte canonica: transactions income confirmed.
+  // Periodo por COALESCE(due_date, created_at AT TZ SP) — mesma logica do Financeiro.
   try {
     const r = await db.query(
       `SELECT
-         COALESCE(SUM(CASE WHEN created_at::date = CURRENT_DATE THEN total_amount ELSE 0 END), 0)::float AS hoje_total,
-         COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE)::int                                   AS hoje_qty,
-         COALESCE(SUM(CASE WHEN created_at::date = CURRENT_DATE - INTERVAL '1 day' THEN total_amount ELSE 0 END), 0)::float AS ontem_total
-       FROM studio_orders
+         COALESCE(SUM(amount) FILTER (
+           WHERE type='income' AND status='confirmed'
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) = CURRENT_DATE
+         ), 0)::float AS hoje_total,
+         COUNT(*) FILTER (
+           WHERE type='income' AND status='confirmed'
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) = CURRENT_DATE
+         )::int AS hoje_qty,
+         COALESCE(SUM(amount) FILTER (
+           WHERE type='income' AND status='confirmed'
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) = CURRENT_DATE - INTERVAL '1 day'
+         ), 0)::float AS ontem_total
+       FROM transactions
        WHERE company_id = $1
-         AND created_at::date >= CURRENT_DATE - INTERVAL '1 day'
-         AND COALESCE(status, 'completed') NOT IN ('cancelled', 'cancelado')`,
+         AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= CURRENT_DATE - INTERVAL '1 day'`,
       [cid]
     );
     const row = r.rows[0] || {};
@@ -127,21 +139,28 @@ router.get('/painel', async function(req, res) {
   }
 
   // ─── 2. KPI Ticket Medio (periodo atual vs periodo anterior do mesmo tamanho) ─
+  // Fonte canonica: transactions income confirmed. Janela = days (inclusive hoje).
   try {
     const r = await db.query(
       `SELECT
-         COALESCE(SUM(CASE WHEN created_at >= NOW() - ($1 || ' days')::interval THEN total_amount ELSE 0 END), 0)::float AS atual_total,
-         COUNT(*) FILTER (WHERE created_at >= NOW() - ($1 || ' days')::interval)::int                                     AS atual_qty,
-         COALESCE(SUM(CASE WHEN created_at >= NOW() - (($1::int * 2) || ' days')::interval
-                            AND created_at <  NOW() - ($1 || ' days')::interval
-                       THEN total_amount ELSE 0 END), 0)::float AS prev_total,
-         COUNT(*) FILTER (WHERE created_at >= NOW() - (($1::int * 2) || ' days')::interval
-                            AND created_at <  NOW() - ($1 || ' days')::interval)::int AS prev_qty
-       FROM studio_orders
+         COALESCE(SUM(amount) FILTER (
+           WHERE COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day'
+         ), 0)::float AS atual_total,
+         COUNT(*) FILTER (
+           WHERE COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day'
+         )::int AS atual_qty,
+         COALESCE(SUM(amount) FILTER (
+           WHERE COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= CURRENT_DATE - ($1::int * 2 - 1) * INTERVAL '1 day'
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <  CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day'
+         ), 0)::float AS prev_total,
+         COUNT(*) FILTER (
+           WHERE COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= CURRENT_DATE - ($1::int * 2 - 1) * INTERVAL '1 day'
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <  CURRENT_DATE - ($1::int - 1) * INTERVAL '1 day'
+         )::int AS prev_qty
+       FROM transactions
        WHERE company_id = $2
-         AND created_at >= NOW() - (($1::int * 2) || ' days')::interval
-         AND COALESCE(status, 'completed') NOT IN ('cancelled', 'cancelado')`,
-      [String(days), cid]
+         AND type='income' AND status='confirmed'`,
+      [days, cid]
     );
     const row = r.rows[0] || {};
     const atualTotal = parseFloat(row.atual_total) || 0;
@@ -160,118 +179,69 @@ router.get('/painel', async function(req, res) {
     console.error('[studio/painel][ticket_medio]', err.message);
   }
 
-  // ─── 3. KPI Lucro Bruto Mes (receita - custo de insumos consumidos) ──
-  // Receita: studio_orders no mes corrente
-  // Custo: SUM(qty_vendida * composition_summary.total_cost) por produto
-  // Produtos sem composicao -> custo=0 (lucro=receita desse produto)
-  // Comparativo: mes anterior (lucro vs lucro)
+  // ─── 3. KPI Lucro Liquido Mes (receita - despesa, ambas confirmed) ──
+  // Fonte canonica: transactions. Receita = income confirmed do mes,
+  // Despesa = expense confirmed do mes. Comparativo: mes anterior (lucro vs lucro).
+  // Margem = lucro / receita * 100 (null se receita=0).
   try {
-    // 3a. Receita mes atual + mes anterior
-    const rec = await db.query(
+    const r = await db.query(
       `SELECT
-         COALESCE(SUM(CASE WHEN created_at >= DATE_TRUNC('month', CURRENT_DATE) THEN total_amount ELSE 0 END), 0)::float AS receita_atual,
-         COALESCE(SUM(CASE WHEN created_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
-                            AND created_at <  DATE_TRUNC('month', CURRENT_DATE)
-                       THEN total_amount ELSE 0 END), 0)::float AS receita_prev
-       FROM studio_orders
-       WHERE company_id = $1
-         AND created_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
-         AND COALESCE(status, 'completed') NOT IN ('cancelled', 'cancelado')`,
+         COALESCE(SUM(amount) FILTER (
+           WHERE type='income'  AND status='confirmed'
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= DATE_TRUNC('month', CURRENT_DATE)
+         ), 0)::float AS receita_atual,
+         COALESCE(SUM(amount) FILTER (
+           WHERE type='expense' AND status='confirmed'
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= DATE_TRUNC('month', CURRENT_DATE)
+         ), 0)::float AS despesa_atual,
+         COALESCE(SUM(amount) FILTER (
+           WHERE type='income'  AND status='confirmed'
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <  DATE_TRUNC('month', CURRENT_DATE)
+         ), 0)::float AS receita_prev,
+         COALESCE(SUM(amount) FILTER (
+           WHERE type='expense' AND status='confirmed'
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+             AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <  DATE_TRUNC('month', CURRENT_DATE)
+         ), 0)::float AS despesa_prev
+       FROM transactions
+       WHERE company_id = $1`,
       [cid]
     );
-    const receitaAtual = parseFloat(rec.rows[0]?.receita_atual) || 0;
-    const receitaPrev  = parseFloat(rec.rows[0]?.receita_prev)  || 0;
+    const row = r.rows[0] || {};
+    const receitaAtual = parseFloat(row.receita_atual) || 0;
+    const despesaAtual = parseFloat(row.despesa_atual) || 0;
+    const receitaPrev  = parseFloat(row.receita_prev)  || 0;
+    const despesaPrev  = parseFloat(row.despesa_prev)  || 0;
 
-    // 3b. Custo insumos mes atual + mes anterior
-    // Soma quantidade vendida * total_cost da composicao do produto.
-    // Fonte: digital_order_items + sale_items (cobre os 2 canais com tabelas).
-    // Marketplace items vivem em JSONB, ignorado por enquanto (raro pra Studio).
-    let custoAtual = 0, custoPrev = 0;
-    try {
-      const cAtual = await db.query(
-        `SELECT COALESCE(SUM(consumo), 0)::float AS custo
-           FROM (
-             SELECT (oi.quantity * COALESCE(s.total_cost, 0)) AS consumo
-               FROM digital_order_items oi
-               JOIN digital_orders d ON d.id = oi.order_id
-               LEFT JOIN studio_compositions_summary s ON s.product_id = oi.product_id AND s.company_id = d.company_id
-              WHERE d.company_id = $1
-                AND d.vertical = 'studio'
-                AND d.created_at >= DATE_TRUNC('month', CURRENT_DATE)
-                AND COALESCE(d.status, 'completed') NOT IN ('cancelled', 'cancelado')
-             UNION ALL
-             SELECT (si.quantity * COALESCE(s.total_cost, 0)) AS consumo
-               FROM sale_items si
-               JOIN sales sa ON sa.id = si.sale_id
-               LEFT JOIN studio_compositions_summary s ON s.product_id = si.product_id AND s.company_id = sa.company_id
-              WHERE sa.company_id = $1
-                AND sa.studio_production_status IS NOT NULL
-                AND sa.created_at >= DATE_TRUNC('month', CURRENT_DATE)
-                AND COALESCE(sa.status, 'completed') NOT IN ('cancelled', 'cancelado')
-           ) t`,
-        [cid]
-      );
-      custoAtual = parseFloat(cAtual.rows[0]?.custo) || 0;
-    } catch (e) {
-      console.error('[studio/painel][custo_atual]', e.message);
-    }
-    try {
-      const cPrev = await db.query(
-        `SELECT COALESCE(SUM(consumo), 0)::float AS custo
-           FROM (
-             SELECT (oi.quantity * COALESCE(s.total_cost, 0)) AS consumo
-               FROM digital_order_items oi
-               JOIN digital_orders d ON d.id = oi.order_id
-               LEFT JOIN studio_compositions_summary s ON s.product_id = oi.product_id AND s.company_id = d.company_id
-              WHERE d.company_id = $1
-                AND d.vertical = 'studio'
-                AND d.created_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
-                AND d.created_at <  DATE_TRUNC('month', CURRENT_DATE)
-                AND COALESCE(d.status, 'completed') NOT IN ('cancelled', 'cancelado')
-             UNION ALL
-             SELECT (si.quantity * COALESCE(s.total_cost, 0)) AS consumo
-               FROM sale_items si
-               JOIN sales sa ON sa.id = si.sale_id
-               LEFT JOIN studio_compositions_summary s ON s.product_id = si.product_id AND s.company_id = sa.company_id
-              WHERE sa.company_id = $1
-                AND sa.studio_production_status IS NOT NULL
-                AND sa.created_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
-                AND sa.created_at <  DATE_TRUNC('month', CURRENT_DATE)
-                AND COALESCE(sa.status, 'completed') NOT IN ('cancelled', 'cancelado')
-           ) t`,
-        [cid]
-      );
-      custoPrev = parseFloat(cPrev.rows[0]?.custo) || 0;
-    } catch (e) {
-      console.error('[studio/painel][custo_prev]', e.message);
-    }
-
-    const lucroAtual = receitaAtual - custoAtual;
-    const lucroPrev  = receitaPrev  - custoPrev;
+    const lucroAtual = receitaAtual - despesaAtual;
+    const lucroPrev  = receitaPrev  - despesaPrev;
     const margemPct  = receitaAtual > 0 ? Math.round((lucroAtual / receitaAtual) * 100) : null;
 
-    out.kpis.lucro_bruto_mes = {
-      value:         Math.round(lucroAtual * 100) / 100,
-      margem_pct:    margemPct,
-      custo_insumos: Math.round(custoAtual * 100) / 100,
-      receita_mes:   Math.round(receitaAtual * 100) / 100,
-      delta_pct:     pct(lucroAtual, lucroPrev),
+    out.kpis.lucro_liquido_mes = {
+      value:       Math.round(lucroAtual * 100) / 100,
+      receita_mes: Math.round(receitaAtual * 100) / 100,
+      despesa_mes: Math.round(despesaAtual * 100) / 100,
+      margem_pct:  margemPct,
+      delta_pct:   pct(lucroAtual, lucroPrev),
     };
   } catch (err) {
-    console.error('[studio/painel][lucro_bruto_mes]', err.message);
+    console.error('[studio/painel][lucro_liquido_mes]', err.message);
   }
 
   // ─── 4. Faturamento Serie (N pontos: hoje no fim) ────────
+  // Fonte canonica: transactions income confirmed agrupado por data competencia
+  // (COALESCE due_date, created_at SP), mesma logica do Financeiro.
   try {
     const r = await db.query(
       `SELECT to_char(d::date, 'YYYY-MM-DD') AS date_iso,
-              COALESCE(SUM(o.total_amount), 0)::float AS value,
-              COUNT(o.id)::int AS qty
+              COALESCE(SUM(t.amount), 0)::float AS value,
+              COUNT(t.id)::int AS qty
          FROM generate_series(CURRENT_DATE - (($1::int - 1) || ' days')::interval, CURRENT_DATE, INTERVAL '1 day') d
-         LEFT JOIN studio_orders o
-                ON o.company_id = $2
-               AND o.created_at::date = d::date
-               AND COALESCE(o.status, 'completed') NOT IN ('cancelled', 'cancelado')
+         LEFT JOIN transactions t
+                ON t.company_id = $2
+               AND t.type='income' AND t.status='confirmed'
+               AND COALESCE(t.due_date, (t.created_at AT TIME ZONE 'America/Sao_Paulo')::date) = d::date
         GROUP BY d
         ORDER BY d ASC`,
       [String(days), cid]
@@ -291,7 +261,8 @@ router.get('/painel', async function(req, res) {
   // ─── 5. Top 5 produtos (revenue desc) ────────────────────
   // Soma quantity/revenue de digital_order_items + sale_items no periodo,
   // JOIN com products pra pegar nome (com visibility canonica pro caso de
-  // produto compartilhado matriz).
+  // produto compartilhado matriz). Fallback gracioso: se vier vazio,
+  // mantem [] (frontend tem empty state).
   try {
     const r = await db.query(
       `WITH itens AS (
