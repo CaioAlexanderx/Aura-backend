@@ -311,7 +311,7 @@ describe('creditLedger.cancelCreditSale', () => {
     // DELETE debit
     const deleteDebitCall = client.query.mock.calls[1];
     expect(deleteDebitCall[0]).toMatch(/DELETE FROM customer_credit_transactions/i);
-    expect(deleteDebitCall[0]).toMatch(/type='debit'/i);
+    expect(deleteDebitCall[0]).toMatch(/type\s*=\s*'debit'/i);
 
     // DELETE A Receber
     const deleteARCall = client.query.mock.calls[2];
@@ -322,7 +322,7 @@ describe('creditLedger.cancelCreditSale', () => {
     const cancelInstCall = client.query.mock.calls[4];
     expect(cancelInstCall[0]).toMatch(/UPDATE credit_installments/i);
     expect(cancelInstCall[0]).toMatch(/cancelled/i);
-    expect(cancelInstCall[0]).toMatch(/covered_amount=0/i);
+    expect(cancelInstCall[0]).toMatch(/covered_amount\s*=\s*0/i);
   });
 
   test('funciona sem customer_id (venda sem cliente)', async () => {
