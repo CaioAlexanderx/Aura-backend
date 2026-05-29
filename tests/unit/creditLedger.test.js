@@ -9,8 +9,16 @@
 //
 // Regras:
 //   - resetAllMocks no beforeEach (nao clearAllMocks)
-//   - Mock client = objeto com .query jest.fn()
-//   - pool.query mockado via jest.setup.js (database mock)
+//   - Mock client = objeto com .query jest.fn() sequencial
+//   - pool.query mockado via jest.setup.js (database mock global)
+//
+// NOTA pool.query + .catch():
+//   getCustomerCreditPreview usa pool.query(profiles).catch(() => ...).
+//   Apos resetAllMocks(), pool.query eh jest.fn() sem implementacao e
+//   retorna undefined. Chamar .catch() em undefined lanca TypeError
+//   sincronico antes do Promise.all, quebrando o teste.
+//   Solucao: beforeEach do describe de preview seta
+//   pool.query.mockResolvedValue({ rows: [] }) como fallback seguro.
 // ============================================================
 
 const pool = require('../../src/config/database');
@@ -85,7 +93,7 @@ describe('creditLedger.createCreditSale', () => {
       { rows: [] },           // UPDATE pix_link 2
       { rows: [instRow3] },   // INSERT installment 3
       { rows: [] },           // UPDATE pix_link 3
-      { rows: [] },           // UPDATE sales (is_installment) -- pode 42703
+      { rows: [] },           // UPDATE sales (is_installment)
       { rows: [] },           // UPDATE customer_credit_profiles (credit_used)
     ]);
 
@@ -150,31 +158,15 @@ describe('creditLedger.applyPayment', () => {
     ];
     const balRow = { balance: '0.00' };
 
+    // Parcela fica 'paid' (covered_amount 100 >= amount_due 100) -> recalculateScore chamado
     const client = makeMockClient([
-      { rows: [txRow] },        // INSERT payment ledger
-      { rows: pendingAR },      // SELECT pending A Receber
-      { rows: [] },             // UPDATE transactions (confirmed)
-      { rows: [] },             // INSERT sale_payments
-      { rows: pendingInst },    // SELECT credit_installments FOR UPDATE
-      { rows: [] },             // UPDATE credit_installments covered_amount
-      { rows: [] },             // UPDATE customer_credit_profiles (score nao chamado se nao 'paid')
-      { rows: [] },             // UPDATE credit_used
-      { rows: [balRow] },       // SELECT balance
-    ]);
-
-    // Injeta mock de _recalculateScore para evitar chamadas extras se parcela fica 'paid'
-    // A parcela ficara 'paid' (covered_amount 100 >= amount_due 100)
-    // Entao recalculateScore sera chamado -- adicionar mock para essa chamada
-    // Vamos simplificar usando makeMockClient com mais responses
-    const txRow2 = { id: 'tx-pay-01', type: 'payment', amount: '100.00' };
-    const client2 = makeMockClient([
-      { rows: [txRow2] },
+      { rows: [txRow] },
       { rows: pendingAR },
-      { rows: [] },
-      { rows: [] },
+      { rows: [] },  // UPDATE transactions (confirmed)
+      { rows: [] },  // INSERT sale_payments
       { rows: pendingInst },
-      { rows: [] },
-      // recalculateScore (parcela ficou 'paid'): 2 queries
+      { rows: [] },  // UPDATE credit_installments covered_amount
+      // recalculateScore: 2 queries
       { rows: [{ total_paid_count: '1', total_paid_on_time: '1', avg_days_late: '0', total_purchases: '100' }] },
       { rows: [{ months: '1' }] },
       { rows: [] }, // UPDATE score
@@ -182,7 +174,7 @@ describe('creditLedger.applyPayment', () => {
       { rows: [balRow] },
     ]);
 
-    const result = await creditLedger.applyPayment(client2, {
+    const result = await creditLedger.applyPayment(client, {
       companyId: COMPANY_ID, customerId: CUSTOMER_ID,
       amount: 100, method: 'pix',
     });
@@ -248,10 +240,9 @@ describe('creditLedger.applyPayment', () => {
       { rows: pendingAR },
       { rows: [] },  // UPDATE transactions (total)
       { rows: [] },  // INSERT sale_payments
-      // remaining = 100 -- insere legacy
-      { rows: [] },  // INSERT Recebido legacy
+      { rows: [] },  // INSERT Recebido legacy (remaining=100)
       { rows: [] },  // SELECT installments FOR UPDATE (vazio)
-      // sem recalculateScore (nenhuma parcela coberta)
+      // sem recalculateScore
       { rows: [] },  // UPDATE credit_used
       { rows: [balRow] },
     ]);
@@ -401,7 +392,15 @@ describe('422 CREDIARIO_REQUIRES_CUSTOMER', () => {
 });
 
 describe('creditLedger.getCustomerCreditPreview', () => {
-  beforeEach(() => { jest.resetAllMocks(); });
+  beforeEach(() => {
+    jest.resetAllMocks();
+    // IMPORTANTE: pool.query retorna `undefined` apos resetAllMocks (jest.fn() default).
+    // getCustomerCreditPreview chama pool.query(profiles).catch(...) -- se o resultado
+    // for undefined, .catch() lanca TypeError sincronico antes do Promise.all.
+    // Setamos mockResolvedValue como fallback seguro para todas as chamadas sem
+    // implementacao especifica.
+    pool.query.mockResolvedValue({ rows: [] });
+  });
 
   test('retorna preview com dados do cliente', async () => {
     pool.query
@@ -431,6 +430,10 @@ describe('creditLedger.getCustomerCreditPreview', () => {
   });
 
   test('retorna defaults quando tabelas nao existem (42P01)', async () => {
+    // mockRejectedValueOnce sobrepoe o mockResolvedValue do beforeEach para a 1a chamada.
+    // Chamadas 2 e 3 usam o mockResolvedValue({ rows: [] }) como fallback -- retornam
+    // Promises validas, permitindo que o .catch() do profiles seja chamado sem TypeError.
+    // Promise.all rejeita com o erro 42P01 da chamada 1, o catch o trata e retorna defaults.
     const err = Object.assign(new Error('table not found'), { code: '42P01' });
     pool.query.mockRejectedValueOnce(err);
 
