@@ -21,6 +21,13 @@
 // 29/05/2026 (fix 42P18): placeholders separados ($1-based) para
 //   sale_items e nfce_emissions em lookupOriginSales — $1 orfao
 //   causava "could not determine data type of parameter $1".
+// 29/05/2026 (fix splits NAO-bloqueante): a divergencia entre payment_splits
+//   e o valor liquido da troca NAO bloqueia mais a operacao. computeAndValidate
+//   Totals agora RECONCILIA os splits (deriva do metodo unico legado quando
+//   vazios, ajusta quando nao batem) e so loga aviso. Causa do bug Davi:
+//   o adapter v1 (pdv.js) mandava payment_method_legacy mas nao payment_splits,
+//   e a validacao rodava ANTES da derivacao do split -> 400 "Soma dos
+//   payment_splits (0.00) nao bate com diferenca a pagar".
 // ============================================================
 
 const db = require('../config/database');
@@ -220,7 +227,43 @@ async function validateReturnedItems(client, originSales, returnedItems) {
   }
 }
 
-function computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits }) {
+// Ajusta uma lista de splits para somar exatamente `target`, preservando ao
+// maximo os splits informados. Se somam menos, acrescenta um split de ajuste
+// com fallbackMethod; se somam mais, reduz a partir do ultimo ate bater.
+// Helper puro (sem efeitos colaterais) — usado por computeAndValidateTotals.
+function balanceSplits(splits, target, fallbackMethod) {
+  const round = (n) => parseFloat(parseFloat(n || 0).toFixed(2));
+  const list = (splits || []).map((p) => ({
+    method: p.method || fallbackMethod,
+    amount: round(p.amount),
+    notes: p.notes,
+  }));
+  const total = round(list.reduce((s, p) => s + p.amount, 0));
+  const delta = round(target - total);
+  if (Math.abs(delta) <= 0.01) return list;
+  if (delta > 0) {
+    // Falta valor — acrescenta split de ajuste com o metodo de fallback.
+    list.push({ method: fallbackMethod, amount: delta });
+    return list;
+  }
+  // Sobra valor — reduz do ultimo split pro primeiro ate bater no target.
+  let excess = round(-delta);
+  for (let i = list.length - 1; i >= 0 && excess > 0.005; i--) {
+    const take = Math.min(list[i].amount, excess);
+    list[i].amount = round(list[i].amount - take);
+    excess = round(excess - take);
+  }
+  return list.filter((p) => p.amount > 0.005);
+}
+
+// Calcula os totais da troca e RECONCILIA os splits de pagamento/estorno.
+// IMPORTANTE: a divergencia entre splits e valor liquido NUNCA bloqueia a
+// troca. Quando os splits vem vazios (cliente v1/legado, que so manda o metodo
+// unico via legacyMethod) ou nao batem, derivamos/ajustamos automaticamente.
+// O split serve apenas para registrar a forma de pagamento no caixa — uma
+// divergencia de UI/cliente legado nao pode impedir o lojista de concluir.
+// Retorna tambem paymentSplits/refundSplits ja normalizados e somando certo.
+function computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits, legacyMethod }) {
   const returnedValue = (returned_items || []).reduce((acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0);
   const newValue = (new_items || []).reduce((acc, n) => acc + parseFloat(n.quantity) * parseFloat(n.unit_price), 0);
   const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
@@ -229,23 +272,35 @@ function computeAndValidateTotals({ returned_items, new_items, payment_splits, r
     throw new TrocaV2Error(400, { error: 'Informe pelo menos um returned_item ou new_item' });
   }
 
+  const fallbackMethod = legacyMethod || 'dinheiro';
+  let paymentSplits = Array.isArray(payment_splits) ? payment_splits.filter((p) => p && parseFloat(p.amount) > 0) : [];
+  let refundSplits = Array.isArray(refund_splits) ? refund_splits.filter((p) => p && parseFloat(p.amount) > 0) : [];
+  const sum = (arr) => parseFloat(arr.reduce((s, p) => s + parseFloat(p.amount || 0), 0).toFixed(2));
+
   if (netAmount > 0.005) {
-    const total = (payment_splits || []).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
-    if (Math.abs(total - netAmount) > 0.01) {
-      throw new TrocaV2Error(400, {
-        error: `Soma dos payment_splits (${total.toFixed(2)}) nao bate com diferenca a pagar (${netAmount.toFixed(2)})`,
-        expected: netAmount, received: parseFloat(total.toFixed(2)),
-      });
+    // Cliente paga a diferenca — garante que paymentSplits some exatamente netAmount.
+    const target = netAmount;
+    if (paymentSplits.length === 0) {
+      paymentSplits = [{ method: fallbackMethod, amount: target }];
+    } else if (Math.abs(sum(paymentSplits) - target) > 0.01) {
+      console.warn(`[trocaV2] payment_splits (${sum(paymentSplits).toFixed(2)}) != diferenca a pagar (${target.toFixed(2)}) — auto-ajustado (nao bloqueante)`);
+      paymentSplits = balanceSplits(paymentSplits, target, fallbackMethod);
     }
+    refundSplits = [];
   } else if (netAmount < -0.005) {
-    const total = (refund_splits || []).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
-    const target = Math.abs(netAmount);
-    if (Math.abs(total - target) > 0.01) {
-      throw new TrocaV2Error(400, {
-        error: `Soma dos refund_splits (${total.toFixed(2)}) nao bate com saldo a devolver (${target.toFixed(2)})`,
-        expected: target, received: parseFloat(total.toFixed(2)),
-      });
+    // Loja devolve saldo ao cliente — garante que refundSplits some |netAmount|.
+    const target = parseFloat(Math.abs(netAmount).toFixed(2));
+    if (refundSplits.length === 0) {
+      refundSplits = [{ method: fallbackMethod, amount: target }];
+    } else if (Math.abs(sum(refundSplits) - target) > 0.01) {
+      console.warn(`[trocaV2] refund_splits (${sum(refundSplits).toFixed(2)}) != saldo a devolver (${target.toFixed(2)}) — auto-ajustado (nao bloqueante)`);
+      refundSplits = balanceSplits(refundSplits, target, fallbackMethod);
     }
+    paymentSplits = [];
+  } else {
+    // Troca par-a-par (netAmount ~ 0): sem pagamento nem estorno.
+    paymentSplits = [];
+    refundSplits = [];
   }
 
   return {
@@ -253,6 +308,8 @@ function computeAndValidateTotals({ returned_items, new_items, payment_splits, r
     newValue: parseFloat(newValue.toFixed(2)),
     netAmount,
     saleTotal: parseFloat(newValue.toFixed(2)),
+    paymentSplits,
+    refundSplits,
   };
 }
 
@@ -602,7 +659,14 @@ async function handle(req, res) {
 
     const originSales = await lookupOriginSales(client, companyId, original_sale_ids);
     await validateReturnedItems(client, originSales, returned_items);
-    const totals = computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits });
+    // Reconciliacao de splits NAO bloqueante: deriva do metodo unico legado
+    // (payment_method_legacy / payment_method) quando os splits vem vazios e
+    // auto-ajusta quando nao batem. Resolve o bug Davi (adapter v1 mandava
+    // payment_method_legacy mas nenhum split -> 400 antes da derivacao).
+    const legacyMethod = (req.body && (req.body.payment_method_legacy || req.body.payment_method)) || 'dinheiro';
+    const totals = computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits, legacyMethod });
+    const _paymentSplits = totals.paymentSplits;
+    const _refundSplits = totals.refundSplits;
     const strategyMap = decideFiscalPerOrigin(originSales, returned_items, nfce_strategy);
 
     preCancelled = await preCancelNfces(originSales, strategyMap);
@@ -627,6 +691,7 @@ async function handle(req, res) {
     }
 
     const effectiveCustomerId = customer_id || primarySale?.customer_id || null;
+    const trocaPaymentMethod = (_paymentSplits[0]?.method || _refundSplits[0]?.method || 'dinheiro');
 
     let trocaSaleRow;
     if (hasExchangeCols) {
@@ -642,7 +707,7 @@ async function handle(req, res) {
           trocaSellerId, trocaEmployeeId, seller_name || null,
           exchangeSellerId, exchangeEmployeeId,
           totals.saleTotal,
-          (payment_splits[0]?.method || refund_splits[0]?.method || 'dinheiro'),
+          trocaPaymentMethod,
           `Troca v2 — ${original_sale_ids.length} venda(s) original(is)`,
           original_sale_ids[0],
         ]
@@ -659,7 +724,7 @@ async function handle(req, res) {
           saleCompanyId, effectiveCustomerId,
           trocaSellerId, trocaEmployeeId, seller_name || null,
           totals.saleTotal,
-          (payment_splits[0]?.method || refund_splits[0]?.method || 'dinheiro'),
+          trocaPaymentMethod,
           `Troca v2 — ${original_sale_ids.length} venda(s) original(is)`,
           original_sale_ids[0],
         ]
@@ -702,21 +767,6 @@ async function handle(req, res) {
 
     // ── B) Lock de estoque atomico (dentro da transacao) ──
     await adjustStock(client, returned_items, new_items, companyId, trocaSaleRow.id);
-
-    // ── Compat v1 adaptado: derivar split do metodo unico se nao veio split ──
-    let _paymentSplits = payment_splits;
-    let _refundSplits = refund_splits;
-    if (req.body && req.body.payment_method_legacy) {
-      const m = req.body.payment_method_legacy;
-      if ((!Array.isArray(_paymentSplits) || !_paymentSplits.length)
-       && (!Array.isArray(_refundSplits) || !_refundSplits.length)) {
-        if (totals.netAmount > 0.005) {
-          _paymentSplits = [{ method: m, amount: totals.netAmount }];
-        } else if (totals.netAmount < -0.005) {
-          _refundSplits = [{ method: m, amount: Math.abs(totals.netAmount) }];
-        }
-      }
-    }
 
     await insertSalePayments(client, trocaSaleRow.id, companyId, sessaoId, totals, _paymentSplits, _refundSplits);
     const payoutsInserted = await insertTrocaPayouts(client, trocaSaleRow.id, companyId, sessaoId, effectiveCustomerId, _refundSplits, req.user?.id);
@@ -922,5 +972,5 @@ module.exports = {
   handle,
   reemitirEmissao,
   TrocaV2Error,
-  _internal: { computeAndValidateTotals, decideFiscalPerOrigin, normalizeMethodForSalePayments },
+  _internal: { computeAndValidateTotals, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments },
 };
