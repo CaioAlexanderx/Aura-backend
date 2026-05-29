@@ -25,6 +25,9 @@ let _mode = 'autorizada';
 const FAKE_CHAVE_NFCE = '35260529123456789012650010000000011234567890';
 const FAKE_CHAVE_NFE  = '35260529123456789012550010000000011234567891';
 
+// Alias simples usado nos testes que so checam chave_acesso generica
+const FAKE_CHAVE = FAKE_CHAVE_NFE;
+
 const _makeTimeoutErr = () =>
   Object.assign(new Error('SEFAZ timeout'), { code: 'ETIMEDOUT' });
 
@@ -106,18 +109,18 @@ function _implQueryNfe(nfeId) {
 
 // ----------  jest.fn() — call history gerenciada pelo jest  ----------
 
-const emitNfce        = jest.fn();
-const emitNfe         = jest.fn();
+const emitNfce         = jest.fn();
+const emitNfe          = jest.fn();
 const emitNfeDevolucao = jest.fn();
-const cancelNfce      = jest.fn();
-const cancelNfe       = jest.fn();
-const queryNfce       = jest.fn();
-const queryNfe        = jest.fn();
+const cancelNfce       = jest.fn();
+const cancelNfe        = jest.fn();
+const queryNfce        = jest.fn();
+const queryNfe         = jest.fn();
 
 // ----------  NFS-e (stub passthrough)  ----------
 
 const emitNfse  = jest.fn(async () => ({ id: `nfse_stub_${Date.now()}`, status: 'autorizado' }));
-const queryNfse  = jest.fn(async (id) => ({ id, status: 'autorizado' }));
+const queryNfse = jest.fn(async (id) => ({ id, status: 'autorizado' }));
 const cancelNfse = jest.fn(async (id) => ({ success: true, id, status: 'cancelado' }));
 
 // ----------  helpers utilitarios (passthrough dos originais)  ----------
@@ -220,7 +223,7 @@ module.exports = {
   // Controle do stub
   __setMode, __reset, __getMode,
   // Constantes de chave fake
-  FAKE_CHAVE_NFCE, FAKE_CHAVE_NFE,
+  FAKE_CHAVE, FAKE_CHAVE_NFCE, FAKE_CHAVE_NFE,
   // Emissao
   emitNfce, emitNfe, emitNfeDevolucao,
   // Cancelamento
