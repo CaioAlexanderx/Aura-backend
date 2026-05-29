@@ -67,6 +67,10 @@ router.use('/customers', requirePlan('negocio', 'expansao'), require('./retentio
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInstallments'));
+// F2-2B (29/05/2026): preview 360 + quick-customer
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditPreview'));
+// F2-2D (29/05/2026): a receber crediario no Financeiro
+router.use('/financial', requirePlan('negocio', 'expansao'), require('./financialReceivables'));
 router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
 router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
@@ -83,7 +87,6 @@ router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbers
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3'));
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
 router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplace'));
-// Core ML/Shopee F1.B + F2.B (25/05/2026): OAuth auth-url/authorize/refresh/revoke
 router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplaceAuth'));
 router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
 
@@ -102,11 +105,11 @@ router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalRepas
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalPortal'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalAutomation'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalTissRetentions'));
-router.use('/dental/implants',      requirePlan('negocio', 'expansao'), require('./dentalImplants'));
-router.use('/dental/ortho',         requirePlan('negocio', 'expansao'), require('./dentalOrtho'));
-router.use('/dental/documents',     requirePlan('negocio', 'expansao'), require('./dentalDocuments'));
-router.use('/dental/transcribe',    requirePlan('negocio', 'expansao'), require('./dentalTranscription'));
-router.use('/dental/supplies',      requirePlan('negocio', 'expansao'), require('./dentalSupplies'));
+router.use('/dental/implants',   requirePlan('negocio', 'expansao'), require('./dentalImplants'));
+router.use('/dental/ortho',      requirePlan('negocio', 'expansao'), require('./dentalOrtho'));
+router.use('/dental/documents',  requirePlan('negocio', 'expansao'), require('./dentalDocuments'));
+router.use('/dental/transcribe', requirePlan('negocio', 'expansao'), require('./dentalTranscription'));
+router.use('/dental/supplies',   requirePlan('negocio', 'expansao'), require('./dentalSupplies'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrdersDispatch'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
@@ -119,17 +122,14 @@ router.use('/food/nfce', requirePlan('negocio', 'expansao'), require('./foodNfce
 router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./foodSchedule'));
 router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub'));
 
-// Aura Studio (25/05/2026): gate de plano REMOVIDO — Studio acessivel em todos
-// os planos. Antes era requirePlan('expansao') mas o vertical eh contratado
-// independente do plano (lojista cadastrado como vertical=studio entra direto).
-// Migrations 130 / 131 / 132 / 133 / 134 + studio_sale_items_customization.
-router.use('/studio', require('./studio'));                  // F0+1+2+3 (+ onboarding hooks 25/05)
-router.use('/studio', require('./studioPainel'));            // Painel agregado /painel?days=N (26/05)
-router.use('/studio', require('./studioKdsApproval'));       // F4+5 (+ onboarding hook 25/05)
-router.use('/studio', require('./studioBulkHub'));           // F6+7 (25/05)
-router.use('/studio', require('./studioUpload'));            // upload mockup (25/05)
-router.use('/studio', require('./studioBulkConvert'));       // evento → digital_orders (25/05)
-router.use('/studio', require('./studioSaleItemPatch'));     // E1: PATCH sale_items.customization (25/05)
-router.use('/studio', require('./studioMarketplaceListing')); // S-1: ML/Shopee payload Studio-aware (25/05)
+// Aura Studio: gate de plano REMOVIDO -- Studio acessivel em todos os planos.
+router.use('/studio', require('./studio'));
+router.use('/studio', require('./studioPainel'));
+router.use('/studio', require('./studioKdsApproval'));
+router.use('/studio', require('./studioBulkHub'));
+router.use('/studio', require('./studioUpload'));
+router.use('/studio', require('./studioBulkConvert'));
+router.use('/studio', require('./studioSaleItemPatch'));
+router.use('/studio', require('./studioMarketplaceListing'));
 
 module.exports = router;
