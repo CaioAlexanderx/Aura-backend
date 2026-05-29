@@ -13,6 +13,9 @@
  *   'autorizada' (default) — todas as emissoes retornam sucesso
  *   'rejeitada'            — emissoes lancam erro SEFAZ_REJECT (422)
  *   'timeout'              — emissoes lancam ETIMEDOUT
+ *
+ * IMPORTANTE: __reset() re-anexa as implementations via mockImplementation()
+ * para sobreviver a jest.resetAllMocks() chamado em setupFiscalStub().
  */
 
 'use strict';
@@ -33,13 +36,8 @@ const _makeRejectErr = (msg, sefaz_code) =>
     erros: [{ mensagem: msg || 'Rejeicao SEFAZ', codigo: sefaz_code || '562' }],
   });
 
-// Helpers de controle — chamar nos testes
-const __setMode = (mode) => { _mode = mode; };
-const __reset   = () => { _mode = 'autorizada'; };
-const __getMode = () => _mode;
-
 // Resposta padrao de emissao bem-sucedida (NFC-e)
-function _okNfce(payload) {
+function _okNfce() {
   return {
     id: `nfce_stub_${Date.now()}`,
     status: 'autorizado',
@@ -51,7 +49,7 @@ function _okNfce(payload) {
 }
 
 // Resposta padrao de emissao bem-sucedida (NF-e / devolucao)
-function _okNfe(payload) {
+function _okNfe() {
   return {
     id: `nfe_stub_${Date.now()}`,
     status: 'autorizado',
@@ -62,65 +60,69 @@ function _okNfe(payload) {
   };
 }
 
-// ----------  emissoes  ----------
+// ----------  implementations separadas das jest.fn() ----------
+// Estas funcoes sobrevivem ao jest.resetAllMocks() pois sao closures
+// normais. __reset() re-anexa cada uma via mockImplementation().
 
-const emitNfce = jest.fn(async (company, nfceData) => {
-  if (_mode === 'timeout')   throw _makeTimeoutErr();
-  if (_mode === 'rejeitada') throw _makeRejectErr('NFC-e rejeitada pelo SEFAZ 562', '562');
-  return _okNfce(nfceData);
-});
+function _implEmitNfce(company, nfceData) {
+  if (_mode === 'timeout')   return Promise.reject(_makeTimeoutErr());
+  if (_mode === 'rejeitada') return Promise.reject(_makeRejectErr('NFC-e rejeitada pelo SEFAZ 562', '562'));
+  return Promise.resolve(_okNfce());
+}
 
-const emitNfe = jest.fn(async (company, nfeData) => {
-  if (_mode === 'timeout')   throw _makeTimeoutErr();
-  if (_mode === 'rejeitada') throw _makeRejectErr('NF-e rejeitada pelo SEFAZ 562', '562');
-  return _okNfe(nfeData);
-});
+function _implEmitNfe(company, nfeData) {
+  if (_mode === 'timeout')   return Promise.reject(_makeTimeoutErr());
+  if (_mode === 'rejeitada') return Promise.reject(_makeRejectErr('NF-e rejeitada pelo SEFAZ 562', '562'));
+  return Promise.resolve(_okNfe());
+}
 
-const emitNfeDevolucao = jest.fn(async (company, params) => {
-  if (_mode === 'timeout')   throw _makeTimeoutErr();
-  if (_mode === 'rejeitada') throw _makeRejectErr('Rejeicao SEFAZ 562 — devolucao invalida', '562');
-  return _okNfe(params);
-});
+function _implEmitNfeDevolucao(company, params) {
+  if (_mode === 'timeout')   return Promise.reject(_makeTimeoutErr());
+  if (_mode === 'rejeitada') return Promise.reject(_makeRejectErr('Rejeicao SEFAZ 562 — devolucao invalida', '562'));
+  return Promise.resolve(_okNfe());
+}
 
-// ----------  cancelamentos  ----------
+function _implCancelNfce(nfceId, justificativa) {
+  if (_mode === 'timeout')   return Promise.reject(_makeTimeoutErr());
+  if (_mode === 'rejeitada') return Promise.reject(_makeRejectErr('NFC-e nao pode ser cancelada', 'CANCEL_REJECT'));
+  return Promise.resolve({ success: true, id: nfceId, status: 'cancelado' });
+}
 
-const cancelNfce = jest.fn(async (nfceId, justificativa) => {
-  if (_mode === 'timeout')   throw _makeTimeoutErr();
-  if (_mode === 'rejeitada') throw _makeRejectErr('NFC-e nao pode ser cancelada', 'CANCEL_REJECT');
-  return { success: true, id: nfceId, status: 'cancelado' };
-});
+function _implCancelNfe(nfeId, justificativa) {
+  if (_mode === 'timeout')   return Promise.reject(_makeTimeoutErr());
+  if (_mode === 'rejeitada') return Promise.reject(_makeRejectErr('NF-e nao pode ser cancelada', 'CANCEL_REJECT'));
+  return Promise.resolve({ success: true, id: nfeId, status: 'cancelado' });
+}
 
-const cancelNfe = jest.fn(async (nfeId, justificativa) => {
-  if (_mode === 'timeout')   throw _makeTimeoutErr();
-  if (_mode === 'rejeitada') throw _makeRejectErr('NF-e nao pode ser cancelada', 'CANCEL_REJECT');
-  return { success: true, id: nfeId, status: 'cancelado' };
-});
+function _implQueryNfce(nfceId) {
+  if (_mode === 'timeout') return Promise.reject(_makeTimeoutErr());
+  return Promise.resolve({ id: nfceId, status: 'autorizado', chave_acesso: FAKE_CHAVE_NFCE });
+}
 
-// ----------  consultas  ----------
+function _implQueryNfe(nfeId) {
+  if (_mode === 'timeout') return Promise.reject(_makeTimeoutErr());
+  return Promise.resolve({ id: nfeId, status: 'autorizado', chave_acesso: FAKE_CHAVE_NFE });
+}
 
-const queryNfce = jest.fn(async (nfceId) => {
-  if (_mode === 'timeout') throw _makeTimeoutErr();
-  return { id: nfceId, status: 'autorizado', chave_acesso: FAKE_CHAVE_NFCE };
-});
+// ----------  jest.fn() — call history gerenciada pelo jest  ----------
 
-const queryNfe = jest.fn(async (nfeId) => {
-  if (_mode === 'timeout') throw _makeTimeoutErr();
-  return { id: nfeId, status: 'autorizado', chave_acesso: FAKE_CHAVE_NFE };
-});
+const emitNfce        = jest.fn();
+const emitNfe         = jest.fn();
+const emitNfeDevolucao = jest.fn();
+const cancelNfce      = jest.fn();
+const cancelNfe       = jest.fn();
+const queryNfce       = jest.fn();
+const queryNfe        = jest.fn();
 
 // ----------  NFS-e (stub passthrough)  ----------
 
-const emitNfse = jest.fn(async () => ({
-  id: `nfse_stub_${Date.now()}`, status: 'autorizado',
-}));
+const emitNfse  = jest.fn(async () => ({ id: `nfse_stub_${Date.now()}`, status: 'autorizado' }));
 const queryNfse  = jest.fn(async (id) => ({ id, status: 'autorizado' }));
 const cancelNfse = jest.fn(async (id) => ({ success: true, id, status: 'cancelado' }));
 
 // ----------  helpers utilitarios (passthrough dos originais)  ----------
-// Exportados para que testes que precisam chamar buildPag, buildDet etc.
-// direto possam usar o stub sem implicacoes de rede.
 
-const registerCompany  = jest.fn(async () => ({}));
+const registerCompany   = jest.fn(async () => ({}));
 const uploadCertificate = jest.fn(async () => ({}));
 const fetchNuvemEmpresa = jest.fn(async () => null);
 const clearEmpresaCache = jest.fn(() => {});
@@ -130,7 +132,6 @@ const clearEmpresaCache = jest.fn(() => {});
 let _real = null;
 function _getRealNf() {
   if (!_real) {
-    // Salva envs para evitar throw em getToken durante o require
     const prevId  = process.env.NUVEM_FISCAL_CLIENT_ID;
     const prevSec = process.env.NUVEM_FISCAL_CLIENT_SECRET;
     process.env.NUVEM_FISCAL_CLIENT_ID     = process.env.NUVEM_FISCAL_CLIENT_ID     || 'stub_id';
@@ -142,25 +143,22 @@ function _getRealNf() {
   return _real;
 }
 
-// Proxies para helpers puros (sem I/O)
-const isoBR            = (...a) => _getRealNf().isoBR(...a);
-const generateCNF      = (...a) => _getRealNf().generateCNF(...a);
-const calcDvChaveAcesso= (...a) => _getRealNf().calcDvChaveAcesso(...a);
-const buildAccessKey44 = (...a) => _getRealNf().buildAccessKey44(...a);
-const validateTpag     = (...a) => _getRealNf().validateTpag(...a);
-const buildDet         = (...a) => _getRealNf().buildDet(...a);
-const buildICMSTot     = (...a) => _getRealNf().buildICMSTot(...a);
-const buildPag         = (...a) => _getRealNf().buildPag(...a);
-const buildInfAdic     = (...a) => _getRealNf().buildInfAdic(...a);
-const resolvePagInput  = (...a) => _getRealNf().resolvePagInput(...a);
-const extractErros     = (...a) => _getRealNf().extractErros(...a);
-const ufToCodigo       = (...a) => _getRealNf().ufToCodigo(...a);
-const buildDest        = (...a) => _getRealNf().buildDest(...a);
+const isoBR             = (...a) => _getRealNf().isoBR(...a);
+const generateCNF       = (...a) => _getRealNf().generateCNF(...a);
+const calcDvChaveAcesso = (...a) => _getRealNf().calcDvChaveAcesso(...a);
+const buildAccessKey44  = (...a) => _getRealNf().buildAccessKey44(...a);
+const validateTpag      = (...a) => _getRealNf().validateTpag(...a);
+const buildDet          = (...a) => _getRealNf().buildDet(...a);
+const buildICMSTot      = (...a) => _getRealNf().buildICMSTot(...a);
+const buildPag          = (...a) => _getRealNf().buildPag(...a);
+const buildInfAdic      = (...a) => _getRealNf().buildInfAdic(...a);
+const resolvePagInput   = (...a) => _getRealNf().resolvePagInput(...a);
+const extractErros      = (...a) => _getRealNf().extractErros(...a);
+const ufToCodigo        = (...a) => _getRealNf().ufToCodigo(...a);
+const buildDest         = (...a) => _getRealNf().buildDest(...a);
 const mergeCompanyWithNuvem = (...a) => _getRealNf().mergeCompanyWithNuvem(...a);
-const safeAddrField    = (...a) => _getRealNf().safeAddrField(...a);
+const safeAddrField     = (...a) => _getRealNf().safeAddrField(...a);
 
-// buildEmit / buildSelfDest / buildIde sao async e dependem de rede —
-// no stub retornam estrutura minima sem chamada externa.
 const buildEmit = jest.fn(async (company) => ({
   CNPJ: String(company.cnpj || '').replace(/\D/g, '').padEnd(14, '0').slice(0, 14),
   xNome: company.legal_name || company.trade_name || 'Emitente Stub',
@@ -191,9 +189,32 @@ const buildSelfDest = jest.fn(async (company) => {
 
 const buildIde = jest.fn((opts) => _getRealNf().buildIde(opts));
 
-// getToken e nuvemRequest nunca devem ser chamados no stub (nao ha rede)
 const getToken     = jest.fn(async () => 'stub_fake_token');
 const nuvemRequest = jest.fn(async () => { throw new Error('nuvemRequest nao deve ser chamado no stub — use emitNfce/emitNfe/etc.'); });
+
+// ----------  Controle do stub  ----------
+
+const __setMode = (mode) => { _mode = mode; };
+const __getMode = () => _mode;
+
+/**
+ * __reset: restaura _mode para 'autorizada' E re-anexa as implementations
+ * em cada jest.fn(). Deve ser chamado DEPOIS de jest.resetAllMocks() no
+ * beforeEach (ver setupFiscalStub em fiscalStubHelper).
+ */
+const __reset = () => {
+  _mode = 'autorizada';
+  emitNfce.mockImplementation(_implEmitNfce);
+  emitNfe.mockImplementation(_implEmitNfe);
+  emitNfeDevolucao.mockImplementation(_implEmitNfeDevolucao);
+  cancelNfce.mockImplementation(_implCancelNfce);
+  cancelNfe.mockImplementation(_implCancelNfe);
+  queryNfce.mockImplementation(_implQueryNfce);
+  queryNfe.mockImplementation(_implQueryNfe);
+};
+
+// Inicializar implementations imediatamente (antes do primeiro beforeEach)
+__reset();
 
 module.exports = {
   // Controle do stub
