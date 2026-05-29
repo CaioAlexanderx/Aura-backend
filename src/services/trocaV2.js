@@ -18,6 +18,9 @@
 //   movida para DENTRO da transacao; fecha race condition de duplo-clique.
 // 29/05/2026 (C6.1): reemitirEmissao exportada para endpoint de reemissao
 //   manual POST /companies/:id/troca/:trocaSaleId/reemitir-fiscal.
+// 29/05/2026 (fix 42P18): placeholders separados ($1-based) para
+//   sale_items e nfce_emissions em lookupOriginSales — $1 orfao
+//   causava "could not determine data type of parameter $1".
 // ============================================================
 
 const db = require('../config/database');
@@ -86,6 +89,7 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
     throw new TrocaV2Error(400, { error: 'original_sale_ids[] obrigatorio (array nao vazio)' });
   }
 
+  // Placeholders para a query principal (usa $1 = currentCompanyId)
   const placeholders = originalSaleIds.map((_, i) => `$${i + 2}`).join(',');
   const { rows: salesRows } = await client.query(
     `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id, s.created_at, s.total_amount, s.customer_id
@@ -120,10 +124,13 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
     });
   }
 
+  // Placeholders $1-based para queries que NAO usam currentCompanyId
+  const idPlaceholders = originalSaleIds.map((_, i) => `$${i + 1}`).join(',');
+
   const itemsResp = await client.query(
     `SELECT id, sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot
-       FROM sale_items WHERE sale_id IN (${placeholders})`,
-    [currentCompanyId, ...originalSaleIds]
+       FROM sale_items WHERE sale_id IN (${idPlaceholders})`,
+    originalSaleIds
   );
   const itemsBySale = new Map();
   for (const it of itemsResp.rows) {
@@ -134,9 +141,9 @@ async function lookupOriginSales(client, currentCompanyId, originalSaleIds) {
   const nfceResp = await client.query(
     `SELECT DISTINCT ON (sale_id) sale_id, id, nuvemfiscal_id, chave_acesso, authorized_at, numero, status
        FROM nfce_emissions
-      WHERE sale_id IN (${placeholders}) AND tipo = 'nfce' AND status = 'autorizada'
+      WHERE sale_id IN (${idPlaceholders}) AND tipo = 'nfce' AND status = 'autorizada'
       ORDER BY sale_id, created_at DESC`,
-    [currentCompanyId, ...originalSaleIds]
+    originalSaleIds
   );
   const nfceBySale = new Map();
   for (const n of nfceResp.rows) nfceBySale.set(n.sale_id, n);
