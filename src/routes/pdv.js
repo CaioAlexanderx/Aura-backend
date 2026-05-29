@@ -17,8 +17,6 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
-const nuvemfiscal = require('../services/nuvemfiscal');
-const trocaDevolucao55 = require('../services/trocaDevolucao55');
 const trocaV2 = require('../services/trocaV2');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
@@ -406,7 +404,7 @@ router.post('/sale', async (req, res) => {
     }
     await client.query('COMMIT');
 
-    // ── Crediário parcelado: cria credit_installments quando installments > 1
+    // ── Crediario parcelado: cria credit_installments quando installments > 1
     // Executado FORA da transaction principal — erro aqui NAO reverte a venda.
     // Requer: payment_method='crediario', installments>1, customer_id presente.
     const reqInstallments = parseInt(req.body?.installments || 1);
@@ -713,312 +711,54 @@ router.delete('/sale/:saleId', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ===== POST /troca — DETECCAO DUAL v1/v2 + handler v1 =====
-// 29/05/2026 (fase1): idempotency_key e INSUFFICIENT_STOCK tratados em v2/v1
+// ===== POST /troca — sempre delega ao v2 (v1 aposentado em 29/05/2026) =====
+// O handler v1 antigo dava ROLLBACK na troca por falha fiscal e cancelava
+// NFC-e dentro da transacao. O v2 ja desacopla SEFAZ do COMMIT e aceita
+// uma unica venda. Aqui normalizamos o payload escalar (v1) para o shape v2.
 router.post('/troca', async (req, res) => {
-  if (Array.isArray(req.body && req.body.original_sale_ids)) {
+  const b = req.body || {};
+
+  // Caminho v2 nativo (frontend novo manda original_sale_ids[] + original_sale_item_id)
+  if (Array.isArray(b.original_sale_ids)) {
     return trocaV2.handle(req, res);
   }
-  const {
-    original_sale_id, returned_items = [], new_items = [],
-    payment_method, customer_id, employee_id, seller_name, customer_address,
-  } = req.body;
-  console.warn('[troca] fallback v1 — venda sem original_sale_item_id', { companyId: req.params.id });
-  if (!original_sale_id) return res.status(400).json({ error: 'original_sale_id obrigatorio' });
-  if (!returned_items.length && !new_items.length)
-    return res.status(400).json({ error: 'Informe ao menos um item devolvido ou novo' });
 
-  const client = await db.connect();
-  try {
-    await client.query('BEGIN');
-    const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
-    if (!caixaCheck.ok) {
-      await client.query('ROLLBACK');
-      return res.status(caixaCheck.status).json(caixaCheck.body);
-    }
-    const { rows: origRows } = await client.query(
-      `SELECT s.id, s.status, s.company_id, s.seller_id, s.employee_id, s.customer_id
-         FROM sales s JOIN companies c ON c.id = $2
-        WHERE s.id = $1
-          AND (s.company_id = $2 OR EXISTS (
-            SELECT 1 FROM companies c2
-             WHERE c2.id = s.company_id
-               AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)
-                 = COALESCE(NULLIF(c.billing_owner_company_id, c.id), c.id)))`,
-      [original_sale_id, req.params.id]
-    );
-    if (!origRows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Venda original nao encontrada' }); }
-    if (origRows[0].status === 'cancelled') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Venda cancelada' }); }
-    const originSale = origRows[0];
-    const isCrossFilial = originSale.company_id !== req.params.id;
-    const saleCompanyId = originSale.company_id;
-    const trocaSellerId = isCrossFilial ? originSale.seller_id : (req.user?.id || null);
-    const trocaEmployeeId = isCrossFilial ? originSale.employee_id : (employee_id || null);
-    const exchangeSellerId = isCrossFilial ? (req.user?.id || null) : null;
-    const exchangeEmployeeId = isCrossFilial ? (employee_id || null) : null;
-    const exchColsOk = await hasExchangeCols(client);
-    if (isCrossFilial && !exchColsOk) {
-      await client.query('ROLLBACK');
-      return res.status(503).json({ error: 'Troca cross-filial: migration 111 nao aplicada', code: 'MIGRATION_111_PENDING' });
-    }
-    const { rows: origItems } = await client.query(
-      `SELECT product_id, variant_id, quantity, unit_price, product_name_snapshot
-         FROM sale_items WHERE sale_id=$1`, [original_sale_id]
-    );
-    for (const ret of returned_items) {
-      if (!ret.product_id) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'product_id obrigatorio' }); }
-      const origItem = origItems.find(o => o.product_id === ret.product_id &&
-        (ret.variant_id ? o.variant_id === ret.variant_id : !o.variant_id));
-      if (!origItem) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Produto nao encontrado na venda original` }); }
-      if (parseFloat(ret.quantity) > parseFloat(origItem.quantity)) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: `Quantidade excede a original` });
-      }
-    }
-    const returnedValue = returned_items.reduce((acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0);
-    const newValue = new_items.reduce((acc, n) => acc + parseFloat(n.quantity) * parseFloat(n.unit_price), 0);
-    const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
-    const saleTotal = parseFloat(newValue.toFixed(2));
-    for (const ret of returned_items) {
-      const qty = parseFloat(ret.quantity);
-      const { rows: pInfo } = await client.query('SELECT company_id FROM products WHERE id=$1', [ret.product_id]);
-      const stockCompanyId = pInfo[0]?.company_id || req.params.id;
-      if (ret.variant_id) {
-        await client.query(`UPDATE product_variants SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2`, [qty, ret.variant_id]);
-      } else {
-        await client.query(`UPDATE products SET stock_qty=stock_qty+$1, updated_at=NOW() WHERE id=$2 AND company_id=$3`, [qty, ret.product_id, stockCompanyId]);
-      }
-      await client.query(
-        `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
-         VALUES ($1,$2,'in',$3,$4,'troca','Troca - devolucao') ON CONFLICT DO NOTHING`,
-        [ret.product_id, stockCompanyId, qty, original_sale_id]
-      );
-    }
-    for (const item of new_items) {
-      if (!item.product_id) continue;
-      const qty = parseFloat(item.quantity);
-      let stockAvailable; let stockLabel = item.product_name_snapshot || item.product_id; let trocaStockCompanyId = req.params.id;
-      if (item.variant_id) {
-        const { rows: vr } = await client.query(
-          `SELECT pv.stock_qty, pv.sku_suffix, p.company_id AS stock_company_id
-             FROM product_variants pv JOIN products p ON p.id = pv.product_id
-            WHERE pv.id=$1 AND pv.product_id=$2`,
-          [item.variant_id, item.product_id]
-        );
-        if (vr.length) { stockAvailable = parseFloat(vr[0].stock_qty); trocaStockCompanyId = vr[0].stock_company_id || req.params.id; }
-      } else {
-        const { rows: pr } = await client.query(
-          `SELECT p.stock_qty, p.company_id AS stock_company_id
-             FROM products p JOIN companies c ON c.id = $2
-            WHERE p.id = $1
-              AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
-          [item.product_id, req.params.id]
-        );
-        if (pr.length) { stockAvailable = parseFloat(pr[0].stock_qty); trocaStockCompanyId = pr[0].stock_company_id || req.params.id; }
-      }
-      if (stockAvailable !== undefined && stockAvailable < qty) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: `Estoque insuficiente para "${stockLabel}"` });
-      }
-      if (item.variant_id) {
-        await client.query(`UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2`, [qty, item.variant_id]);
-      } else {
-        await client.query(`UPDATE products SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2 AND company_id=$3`, [qty, item.product_id, trocaStockCompanyId]);
-      }
-      item._stock_company_id = trocaStockCompanyId;
-    }
-    let trocaSales;
-    if (exchColsOk) {
-      const result = await client.query(
-        `INSERT INTO sales
-           (company_id, customer_id, seller_id, employee_id, seller_name,
-            exchange_seller_id, exchange_employee_id,
-            total_amount, discount_amount, payment_method, notes, status, type, exchange_of_sale_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,'completed','troca',$11) RETURNING *`,
-        [saleCompanyId, customer_id || originSale.customer_id || null, trocaSellerId, trocaEmployeeId, seller_name || null,
-         exchangeSellerId, exchangeEmployeeId, saleTotal, payment_method || 'dinheiro',
-         `Troca de venda ${original_sale_id}`, original_sale_id]
-      );
-      trocaSales = result.rows;
-    } else {
-      const fallback = await client.query(
-        `INSERT INTO sales
-           (company_id, customer_id, seller_id, employee_id, seller_name,
-            total_amount, discount_amount, payment_method, notes, status, type, exchange_of_sale_id)
-         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'completed','troca',$9) RETURNING *`,
-        [saleCompanyId, customer_id || originSale.customer_id || null, trocaSellerId, trocaEmployeeId, seller_name || null,
-         saleTotal, payment_method || 'dinheiro',
-         `Troca de venda ${original_sale_id}`, original_sale_id]
-      );
-      trocaSales = fallback.rows;
-    }
-    const trocaSale = trocaSales[0];
-    for (const item of new_items) {
-      const qty = parseFloat(item.quantity);
-      const unitPrice = parseFloat(item.unit_price);
-      const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
-      let costPrice = 0; let productName = item.product_name_snapshot || '';
-      if (item.product_id) {
-        const { rows: pr } = await client.query(
-          `SELECT p.name, p.cost_price FROM products p JOIN companies c ON c.id = $2
-            WHERE p.id = $1 AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
-          [item.product_id, req.params.id]
-        );
-        if (pr.length) { productName = productName || pr[0].name; costPrice = parseFloat(pr[0].cost_price || 0); }
-      }
-      await client.query(
-        `INSERT INTO sale_items (sale_id, product_id, variant_id, quantity, unit_price, unit_cost, discount, total_price, product_name_snapshot)
-         VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8)`,
-        [trocaSale.id, item.product_id || null, item.variant_id || null, qty, unitPrice, costPrice, lineTotal, productName]
-      );
-      if (item.product_id) {
-        const mvCompanyId = item._stock_company_id || req.params.id;
-        await client.query(
-          `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
-           VALUES ($1,$2,'out',$3,$4,'troca','Troca - saida novo item') ON CONFLICT DO NOTHING`,
-          [item.product_id, mvCompanyId, qty, trocaSale.id]
-        );
-      }
-    }
-    for (const ret of returned_items) {
-      await client.query(
-        `INSERT INTO troca_returned_items (troca_sale_id, original_sale_id, product_id, variant_id, quantity, unit_price, product_name_snapshot)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [trocaSale.id, original_sale_id, ret.product_id || null, ret.variant_id || null,
-         parseFloat(ret.quantity), parseFloat(ret.unit_price), ret.product_name_snapshot || null]
-      );
-    }
-    let trocaSessaoId = null;
-    try {
-      const sRes = await client.query(`SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`, [req.params.id]);
-      trocaSessaoId = sRes?.rows?.[0]?.id || null;
-    } catch (sErr) {}
-    const trocaPayMethod = (payment_method || 'dinheiro').toLowerCase();
-    if (trocaPayMethod !== 'crediario') {
-      if (returnedValue > 0) {
-        await client.query(
-          `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
-           VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
-          [trocaSale.id, req.params.id, trocaPayMethod, -parseFloat(returnedValue.toFixed(2)), trocaSessaoId]
-        );
-      }
-      if (netAmount > 0) {
-        await client.query(
-          `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
-           VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
-          [trocaSale.id, req.params.id, trocaPayMethod, netAmount, trocaSessaoId]
-        );
-      }
-    }
-    if (returnedValue > 0) {
-      await client.query(
-        `INSERT INTO transactions (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
-         VALUES ($1,'expense','confirmed',$2,$3,'Troca - Devolucao',${SP_DATE_NOW},NOW(),$4,$5)
-         ON CONFLICT (idempotency_key) DO NOTHING`,
-        [saleCompanyId, parseFloat(returnedValue.toFixed(2)),
-         `Troca PDV - devolucao venda ${original_sale_id}`, req.user?.id || null,
-         'pdv-troca-' + trocaSale.id + '-return']
-      );
-    }
-    if (newValue > 0) {
-      await client.query(
-        `INSERT INTO transactions (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
-         VALUES ($1,'income','confirmed',$2,$3,'Troca - Venda',${SP_DATE_NOW},NOW(),$4,$5)
-         ON CONFLICT (idempotency_key) DO NOTHING`,
-        [saleCompanyId, parseFloat(newValue.toFixed(2)),
-         `Troca PDV - nova venda`, req.user?.id || null,
-         'pdv-troca-' + trocaSale.id + '-sale']
-      );
-    }
-    let nfceFiscalResult = { strategy: 'none' };
-    const nfceStrategy = (req.body.nfce_strategy || 'none').toLowerCase();
-    if (nfceStrategy === 'cancel_reissue') {
-      const { rows: origNfceList } = await client.query(
-        `SELECT id, nuvemfiscal_id, chave_acesso, authorized_at, status, numero
-           FROM nfce_emissions
-          WHERE sale_id = $1 AND tipo = 'nfce' AND status = 'autorizada'
-          ORDER BY created_at DESC LIMIT 1`,
-        [original_sale_id]
-      );
-      if (!origNfceList.length) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'cancel_reissue requer NFC-e autorizada' });
-      }
-      const orig = origNfceList[0];
-      const ageHours = orig.authorized_at ? (Date.now() - new Date(orig.authorized_at).getTime()) / 3600000 : 9999;
-      if (ageHours >= 24) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'NFC-e >24h - use devolucao_55', age_hours: Math.round(ageHours * 10) / 10 });
-      }
-      if (orig.nuvemfiscal_id) {
-        try {
-          await nuvemfiscal.cancelNfce(orig.nuvemfiscal_id, `Troca - sale ${trocaSale.id.slice(0, 8)}`);
-        } catch (sefazErr) {
-          await client.query('ROLLBACK');
-          return res.status(502).json({ error: 'SEFAZ rejeitou cancel: ' + sefazErr.message });
-        }
-      }
-      await client.query(
-        `UPDATE nfce_emissions SET status = 'cancelada', cancelled_at = NOW(), cancel_reason = $1 WHERE id = $2`,
-        ['Troca - sale_troca=' + trocaSale.id, orig.id]
-      );
-      await client.query(
-        `UPDATE sales SET nfce_strategy = $1, nfce_original_chave = $2, nfce_devolucao_chave = $2 WHERE id = $3`,
-        ['cancel_reissue', orig.chave_acesso, trocaSale.id]
-      );
-      nfceFiscalResult = { strategy: 'cancel_reissue', original_chave_cancelada: orig.chave_acesso, original_numero: orig.numero, original_age_hours: Math.round(ageHours * 10) / 10 };
-    } else if (nfceStrategy === 'devolucao_55') {
-      try {
-        nfceFiscalResult = await trocaDevolucao55.handle(client, {
-          saleCompanyId, originalSaleId: original_sale_id, trocaSaleId: trocaSale.id,
-          returnedItems: returned_items, returnedValue, customerAddress: customer_address,
-          notes: req.body.notes, userId: req.user && req.user.id,
-        });
-      } catch (e) {
-        if (e && e.isDevolucao55Error) {
-          await client.query('ROLLBACK');
-          return res.status(e.status).json(e.body);
-        }
-        throw e;
-      }
-    } else if (nfceStrategy !== 'none') {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'nfce_strategy desconhecida: ' + nfceStrategy });
-    }
-    await client.query('COMMIT');
-    const { rows: respNewItems } = await db.query(
-      `SELECT si.*, COALESCE(p.name, si.product_name_snapshot) AS product_name
-       FROM sale_items si LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`,
-      [trocaSale.id]
-    );
-    const { rows: respRetItems } = await db.query(
-      `SELECT tri.*, COALESCE(p.name, tri.product_name_snapshot) AS product_name
-       FROM troca_returned_items tri LEFT JOIN products p ON p.id=tri.product_id WHERE tri.troca_sale_id=$1`,
-      [trocaSale.id]
-    );
-    // 26/05/2026: enriquecer trocaSale com customer_phone pra Step5Success
-    // habilitar botao WhatsApp do NfceActions sem fetch adicional.
-    const respCustomerPhone = await fetchCustomerPhone(trocaSale.customer_id);
-    res.status(201).json({
-      sale: { ...trocaSale, items: respNewItems, customer_phone: respCustomerPhone },
-      returned_items: respRetItems, new_items: respNewItems,
-      net_amount: netAmount,
-      returned_value: parseFloat(returnedValue.toFixed(2)),
-      new_value: parseFloat(newValue.toFixed(2)),
-      cross_filial: isCrossFilial,
-      origin_company_id: saleCompanyId,
-      physical_company_id: req.params.id,
-      nfce: nfceFiscalResult,
-      receipt_url: `/companies/${req.params.id}/print/receipt/${trocaSale.id}`,
+  // Compat v1: payload escalar antigo -> adapta para v2.
+  if (!b.original_sale_id) {
+    return res.status(400).json({ error: 'original_sale_id obrigatorio' });
+  }
+  const returned = Array.isArray(b.returned_items) ? b.returned_items : [];
+  const missingItemId = returned.some((r) => !r.original_sale_item_id);
+  if (missingItemId) {
+    return res.status(422).json({
+      error: 'Troca por venda legada sem identificacao de item. Atualize o app.',
+      code: 'LEGACY_RETURN_NEEDS_ITEM_ID',
     });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    if (e.code === 'INSUFFICIENT_STOCK' || (e.message && e.message.startsWith('INSUFFICIENT_STOCK'))) {
-      return res.status(409).json({ error: 'Estoque insuficiente para concluir a troca.' });
-    }
-    console.error('[PDV] Erro ao registrar troca:', e.message);
-    res.status(500).json({ error: 'Erro ao registrar troca' });
-  } finally { client.release(); }
+  }
+
+  console.warn('[troca] payload v1 adaptado para v2', { companyId: req.params.id, sale: b.original_sale_id });
+
+  req.body = {
+    original_sale_ids: [b.original_sale_id],
+    returned_items: returned.map((r) => ({
+      original_sale_id: b.original_sale_id,
+      original_sale_item_id: r.original_sale_item_id,
+      product_id: r.product_id,
+      variant_id: r.variant_id || null,
+      quantity: r.quantity,
+      unit_price: r.unit_price,
+      product_name_snapshot: r.product_name_snapshot,
+    })),
+    new_items: Array.isArray(b.new_items) ? b.new_items : [],
+    payment_method_legacy: b.payment_method || 'dinheiro',
+    customer_id: b.customer_id,
+    employee_id: b.employee_id,
+    seller_name: b.seller_name,
+    nfce_strategy: b.nfce_strategy || 'none',
+    customer_address: b.customer_address,
+    idempotency_key: b.idempotency_key,
+  };
+  return trocaV2.handle(req, res);
 });
 
 // ===== GET /sales-for-troca =====

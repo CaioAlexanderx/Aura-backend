@@ -14,6 +14,8 @@
 //   - SEFAZ desacoplado do COMMIT: INSERT pendente dentro da tx,
 //     chamada real pos-COMMIT, falha grava last_error/retry_count
 //   - Shape fiscal.per_origin[] canonico para o frontend
+// 29/05/2026 (C2): advisory lock pg_advisory_xact_lock + idempotencia
+//   movida para DENTRO da transacao; fecha race condition de duplo-clique.
 // ============================================================
 
 const db = require('../config/database');
@@ -491,31 +493,33 @@ async function handle(req, res) {
 
   const companyId = req.params.id;
 
-  // ── A) Idempotencia de request (antes de abrir transacao) ──
-  if (idempotency_key) {
-    try {
-      await db.query(
-        `INSERT INTO troca_idempotency (idempotency_key, company_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-        [idempotency_key, companyId]
-      );
-      const { rows: idempRows } = await db.query(
-        `SELECT troca_sale_id FROM troca_idempotency WHERE idempotency_key=$1 AND company_id=$2 AND troca_sale_id IS NOT NULL`,
-        [idempotency_key, companyId]
-      );
-      if (idempRows.length > 0) {
-        const { rows: [s] } = await db.query(`SELECT * FROM sales WHERE id=$1`, [idempRows[0].troca_sale_id]);
-        return res.status(200).json({ success: true, troca: s, idempotent_hit: true, fiscal: { per_origin: [] } });
-      }
-    } catch (idempErr) {
-      // Tabela pode nao existir ainda (migration pendente) — fail-open
-      console.warn('[trocaV2] idempotency check fail-open:', idempErr.message);
-    }
-  }
-
   const client = await db.connect();
   let preCancelled = [];
   try {
     await client.query('BEGIN');
+
+    // ── A) Idempotencia + advisory lock DENTRO da transacao (C2: fecha race condition) ──
+    if (idempotency_key) {
+      try {
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [idempotency_key]);
+        await client.query(
+          'INSERT INTO troca_idempotency (idempotency_key, company_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [idempotency_key, companyId]
+        );
+        const { rows: idempRows } = await client.query(
+          'SELECT troca_sale_id FROM troca_idempotency WHERE idempotency_key=$1 AND company_id=$2 AND troca_sale_id IS NOT NULL',
+          [idempotency_key, companyId]
+        );
+        if (idempRows.length > 0) {
+          await client.query('ROLLBACK');
+          const { rows: [s] } = await db.query('SELECT * FROM sales WHERE id=$1', [idempRows[0].troca_sale_id]);
+          return res.json({ success: true, troca: s, idempotent_hit: true, fiscal: { per_origin: [] } });
+        }
+      } catch (idempErr) {
+        // Tabela pode nao existir ainda (migration pendente) — fail-open
+        console.warn('[trocaV2] idempotency check fail-open:', idempErr.message);
+      }
+    }
 
     const caixaCheck = await assertCaixaOpenOrAllowed(client, companyId);
     if (!caixaCheck.ok) { await client.query('ROLLBACK'); return res.status(caixaCheck.status).json(caixaCheck.body); }
@@ -623,8 +627,24 @@ async function handle(req, res) {
 
     // ── B) Lock de estoque atomico (dentro da transacao) ──
     await adjustStock(client, returned_items, new_items, companyId, trocaSaleRow.id);
-    await insertSalePayments(client, trocaSaleRow.id, companyId, sessaoId, totals, payment_splits, refund_splits);
-    const payoutsInserted = await insertTrocaPayouts(client, trocaSaleRow.id, companyId, sessaoId, effectiveCustomerId, refund_splits, req.user?.id);
+
+    // ── Compat v1 adaptado: derivar split do metodo unico se nao veio split ──
+    let _paymentSplits = payment_splits;
+    let _refundSplits = refund_splits;
+    if (req.body && req.body.payment_method_legacy) {
+      const m = req.body.payment_method_legacy;
+      if ((!Array.isArray(_paymentSplits) || !_paymentSplits.length)
+       && (!Array.isArray(_refundSplits) || !_refundSplits.length)) {
+        if (totals.netAmount > 0.005) {
+          _paymentSplits = [{ method: m, amount: totals.netAmount }];
+        } else if (totals.netAmount < -0.005) {
+          _refundSplits = [{ method: m, amount: Math.abs(totals.netAmount) }];
+        }
+      }
+    }
+
+    await insertSalePayments(client, trocaSaleRow.id, companyId, sessaoId, totals, _paymentSplits, _refundSplits);
+    const payoutsInserted = await insertTrocaPayouts(client, trocaSaleRow.id, companyId, sessaoId, effectiveCustomerId, _refundSplits, req.user?.id);
     await insertAggregateTransactions(client, trocaSaleRow.id, saleCompanyId, totals, original_sale_ids, req.user?.id);
 
     for (const c of preCancelled) {
@@ -682,19 +702,19 @@ async function handle(req, res) {
       });
     }
 
-    await client.query('COMMIT');
-
-    // ── D) Gravar troca_sale_id na idempotencia pos-commit ──
+    // ── Gravar troca_sale_id na idempotencia antes do COMMIT ──
     if (idempotency_key) {
       try {
-        await db.query(
-          `UPDATE troca_idempotency SET troca_sale_id=$1 WHERE idempotency_key=$2`,
+        await client.query(
+          'UPDATE troca_idempotency SET troca_sale_id=$1 WHERE idempotency_key=$2',
           [trocaSaleRow.id, idempotency_key]
         );
       } catch (idempUpdErr) {
         console.warn('[trocaV2] idempotency update fail-soft:', idempUpdErr.message);
       }
     }
+
+    await client.query('COMMIT');
 
     // ── C cont.) Chamar SEFAZ pos-COMMIT para devolucao_55 ──
     const fiscalResults = [];
