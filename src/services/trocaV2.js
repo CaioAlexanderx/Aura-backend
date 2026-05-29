@@ -16,6 +16,8 @@
 //   - Shape fiscal.per_origin[] canonico para o frontend
 // 29/05/2026 (C2): advisory lock pg_advisory_xact_lock + idempotencia
 //   movida para DENTRO da transacao; fecha race condition de duplo-clique.
+// 29/05/2026 (C6.1): reemitirEmissao exportada para endpoint de reemissao
+//   manual POST /companies/:id/troca/:trocaSaleId/reemitir-fiscal.
 // ============================================================
 
 const db = require('../config/database');
@@ -481,6 +483,72 @@ async function insertAggregateTransactions(client, trocaSaleId, primaryCompanyId
   }
 }
 
+/**
+ * Reemite uma entrada de nfce_emissions que esta em falha/pendente.
+ * Suporta apenas strategy='devolucao_55' (cancel_reissue nao gera row pendente).
+ * Reutilizado pelo endpoint POST /companies/:id/troca/:trocaSaleId/reemitir-fiscal
+ * e pode ser chamado por workers de retry futuros.
+ *
+ * O origin_sale_id e extraido do campo notes com o padrao "devolucao_55 origem={uuid}".
+ * Parametros adicionais (returnedItems, returnedValue, customerAddress) sao
+ * relidos do banco a partir da troca_sale_id + origin_sale_id.
+ *
+ * @param {object} emission - linha de nfce_emissions: { id, company_id, sale_id, tipo, notes }
+ * @returns {{ status: 'autorizada'|'falha'|'none', chave_acesso: string|null, origin_sale_id: string|null, error: string|null }}
+ */
+async function reemitirEmissao(emission) {
+  // Extrair origin_sale_id do campo notes: "devolucao_55 origem={uuid}"
+  const match = String(emission.notes || '').match(/origem=([a-f0-9-]{36})/i);
+  const originSaleId = match ? match[1] : null;
+
+  if (emission.tipo !== 'nfe_devolucao' || !originSaleId) {
+    return { status: 'none', chave_acesso: null, origin_sale_id: originSaleId, error: null };
+  }
+
+  const trocaSaleId = emission.sale_id;
+  const saleCompanyId = emission.company_id;
+
+  // Reler itens devolvidos desta origem a partir do banco
+  let returnedItems = [];
+  let returnedValue = 0;
+  try {
+    const { rows: retRows } = await db.query(
+      `SELECT product_id, variant_id, quantity, unit_price, product_name_snapshot
+         FROM troca_returned_items
+        WHERE troca_sale_id = $1 AND original_sale_id = $2`,
+      [trocaSaleId, originSaleId]
+    );
+    returnedItems = retRows;
+    returnedValue = retRows.reduce((acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0);
+  } catch (e) {
+    console.warn('[trocaV2.reemitirEmissao] erro ao reler returned_items (non-fatal):', e.message);
+  }
+
+  try {
+    const result = await trocaDevolucao55.handle(null, {
+      saleCompanyId,
+      originalSaleId: originSaleId,
+      trocaSaleId,
+      returnedItems,
+      returnedValue,
+      customerAddress: null,
+      notes: null,
+      userId: null,
+    });
+    await db.query(
+      `UPDATE nfce_emissions SET status='autorizada', chave_acesso=$1, last_error=NULL, updated_at=NOW() WHERE id=$2`,
+      [result.chave_acesso || null, emission.id]
+    );
+    return { status: 'autorizada', chave_acesso: result.chave_acesso || null, origin_sale_id: originSaleId, error: null };
+  } catch (err) {
+    await db.query(
+      `UPDATE nfce_emissions SET status='falha', last_error=$1, retry_count=retry_count+1, next_retry_at=NOW()+INTERVAL '5 minutes', updated_at=NOW() WHERE id=$2`,
+      [err.message, emission.id]
+    );
+    return { status: 'falha', chave_acesso: null, origin_sale_id: originSaleId, error: err.message };
+  }
+}
+
 async function handle(req, res) {
   const {
     original_sale_ids, returned_items = [], new_items = [],
@@ -844,6 +912,8 @@ async function handle(req, res) {
 }
 
 module.exports = {
-  handle, TrocaV2Error,
+  handle,
+  reemitirEmissao,
+  TrocaV2Error,
   _internal: { computeAndValidateTotals, decideFiscalPerOrigin, normalizeMethodForSalePayments },
 };

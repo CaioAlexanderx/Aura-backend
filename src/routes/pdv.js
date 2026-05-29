@@ -14,6 +14,8 @@
 // 26/05/2026 (crediario fase 1): POST /sale cria credit_installments
 //   inline quando payment_method='crediario' e installments>1.
 //   Bloco BEST-EFFORT: erro nele nao reverte a venda.
+// 29/05/2026 (C6.1): POST /:id/troca/:trocaSaleId/reemitir-fiscal
+//   reemite notas com status falha/pendente (idempotente para autorizadas).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -761,6 +763,49 @@ router.post('/troca', async (req, res) => {
   return trocaV2.handle(req, res);
 });
 
+// ============================================================
+// POST /:id/troca/:trocaSaleId/reemitir-fiscal
+// Reemite notas fiscais com status falha/pendente de uma troca.
+// Idempotente: emissoes 'autorizada' sao ignoradas (sem risco de duplicar nota).
+// Suporta apenas strategy=devolucao_55 (cancel_reissue nao gera row pendente).
+// ============================================================
+router.post('/troca/:trocaSaleId/reemitir-fiscal', async (req, res) => {
+  const { trocaSaleId } = req.params;
+  try {
+    const { rows: emissions } = await db.query(
+      `SELECT id, company_id, sale_id, tipo, status, notes
+         FROM nfce_emissions
+        WHERE sale_id = $1
+          AND tipo = 'nfe_devolucao'
+          AND status IN ('falha', 'pendente')
+        ORDER BY created_at`,
+      [trocaSaleId]
+    );
+    if (!emissions.length) {
+      return res.json({
+        success: true,
+        fiscal: { per_origin: [] },
+        message: 'Nenhuma emissao pendente ou com falha.',
+      });
+    }
+    const perOrigin = [];
+    for (const em of emissions) {
+      const r = await trocaV2.reemitirEmissao(em);
+      perOrigin.push({
+        origin_sale_id: r.origin_sale_id,
+        strategy: 'devolucao_55',
+        status: r.status,
+        chave_acesso: r.chave_acesso,
+        error: r.error,
+      });
+    }
+    return res.json({ success: true, fiscal: { per_origin: perOrigin } });
+  } catch (e) {
+    console.error('[PDV] reemitir-fiscal error:', e.message);
+    return res.status(500).json({ error: 'Erro ao reemitir notas fiscais' });
+  }
+});
+
 // ===== GET /sales-for-troca =====
 // 25/05/2026 (fix sem-NFC-e): retorna has_nfce pra frontend decidir fiscal.
 router.get('/sales-for-troca', async (req, res) => {
@@ -902,7 +947,7 @@ router.get('/sales-by-product-barcode', async (req, res) => {
          FROM sales s
          JOIN eligible_sales es ON es.id = s.id
          LEFT JOIN companies comp ON comp.id = s.company_id
-         LEFT JOIN customers cust ON cust.id = s.customer_id
+         LEFT JOIN customers cust ON cust.id = s.company_id
          LEFT JOIN sale_items si  ON si.sale_id = s.id
         GROUP BY s.id, comp.trade_name, comp.legal_name, cust.name, cust.cpf_cnpj
         ORDER BY s.created_at DESC
