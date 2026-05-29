@@ -947,7 +947,7 @@ router.get('/sales-by-product-barcode', async (req, res) => {
          FROM sales s
          JOIN eligible_sales es ON es.id = s.id
          LEFT JOIN companies comp ON comp.id = s.company_id
-         LEFT JOIN customers cust ON cust.id = s.company_id
+         LEFT JOIN customers cust ON cust.id = s.customer_id
          LEFT JOIN sale_items si  ON si.sale_id = s.id
         GROUP BY s.id, comp.trade_name, comp.legal_name, cust.name, cust.cpf_cnpj
         ORDER BY s.created_at DESC
