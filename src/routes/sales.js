@@ -18,6 +18,10 @@
 // 11/05/2026 — Filtro product_barcode: GET /sales aceita ?product_barcode=XXX
 // e filtra vendas com item cujo produto/variant tenha esse barcode.
 // Cliente principal: TrocaModal (lojista bipa produto pra achar venda original).
+//
+// 29/05/2026 — Listagem expõe s.type (sale/troca) pra UI marcar "Troca".
+// A troca SEMPRE apareceu na listagem (sem filtro de type), mas vinha sem
+// rótulo. Os agregados de receita seguem em outras rotas que filtram troca.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -109,6 +113,7 @@ router.get('/', asyncHandler(async (req, res) => {
   // Listagem com customer/seller denormalized + items_count + transaction_id
   const listQuery =
     'SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status, ' +
+    "       COALESCE(s.type, 'sale') AS type, " +
     '       s.cancelled_at, s.created_at, ' +
     '       s.customer_id, c.name AS customer_name, ' +
     '       s.seller_id, COALESCE(s.seller_name, e.name) AS seller_name, s.employee_id, ' +
@@ -148,6 +153,7 @@ router.get('/', asyncHandler(async (req, res) => {
         discount_amount: parseFloat(r.discount_amount || 0),
         payment_method: r.payment_method,
         status: r.status || 'completed',
+        type: r.type || 'sale',
         cancelled_at: r.cancelled_at,
         created_at: r.created_at,
         customer: r.customer_id ? { id: r.customer_id, name: r.customer_name } : null,
@@ -202,6 +208,7 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       discount_amount: parseFloat(sale.discount_amount || 0),
       payment_method: sale.payment_method,
       status: sale.status || 'completed',
+      type: sale.type || 'sale',
       cancelled_at: sale.cancelled_at,
       created_at: sale.created_at,
       notes: sale.notes,
@@ -309,7 +316,7 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
 
     await client.query(
       "UPDATE sales SET status = 'cancelled', cancelled_at = NOW(), cancelled_by = $1, updated_at = NOW(), " +
-      "                notes = COALESCE(notes, '') || CASE WHEN $2::text != '' THEN E'\\nCancelada: ' || $2::text ELSE '' END " +
+      "                notes = COALESCE(notes, '') || CASE WHEN $2::text != '' THEN E'\\\\nCancelada: ' || $2::text ELSE '' END " +
       'WHERE id = $3',
       [req.user && req.user.id ? req.user.id : null, reason, saleId]
     );
