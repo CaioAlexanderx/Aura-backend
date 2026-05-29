@@ -714,6 +714,7 @@ router.delete('/sale/:saleId', async (req, res) => {
 });
 
 // ===== POST /troca — DETECCAO DUAL v1/v2 + handler v1 =====
+// 29/05/2026 (fase1): idempotency_key e INSUFFICIENT_STOCK tratados em v2/v1
 router.post('/troca', async (req, res) => {
   if (Array.isArray(req.body && req.body.original_sale_ids)) {
     return trocaV2.handle(req, res);
@@ -722,6 +723,7 @@ router.post('/troca', async (req, res) => {
     original_sale_id, returned_items = [], new_items = [],
     payment_method, customer_id, employee_id, seller_name, customer_address,
   } = req.body;
+  console.warn('[troca] fallback v1 — venda sem original_sale_item_id', { companyId: req.params.id });
   if (!original_sale_id) return res.status(400).json({ error: 'original_sale_id obrigatorio' });
   if (!returned_items.length && !new_items.length)
     return res.status(400).json({ error: 'Informe ao menos um item devolvido ou novo' });
@@ -995,7 +997,7 @@ router.post('/troca', async (req, res) => {
       [trocaSale.id]
     );
     // 26/05/2026: enriquecer trocaSale com customer_phone pra Step5Success
-    // habilitar botão WhatsApp do NfceActions sem fetch adicional.
+    // habilitar botao WhatsApp do NfceActions sem fetch adicional.
     const respCustomerPhone = await fetchCustomerPhone(trocaSale.customer_id);
     res.status(201).json({
       sale: { ...trocaSale, items: respNewItems, customer_phone: respCustomerPhone },
@@ -1011,6 +1013,9 @@ router.post('/troca', async (req, res) => {
     });
   } catch (e) {
     await client.query('ROLLBACK');
+    if (e.code === 'INSUFFICIENT_STOCK' || (e.message && e.message.startsWith('INSUFFICIENT_STOCK'))) {
+      return res.status(409).json({ error: 'Estoque insuficiente para concluir a troca.' });
+    }
     console.error('[PDV] Erro ao registrar troca:', e.message);
     res.status(500).json({ error: 'Erro ao registrar troca' });
   } finally { client.release(); }
