@@ -41,26 +41,45 @@ describe('troca — caminhos criticos', () => {
       ).toThrow();
     });
 
-    it('lanca erro quando payment_splits nao cobre o netAmount positivo', () => {
-      expect(() =>
-        computeAndValidateTotals({
-          returned_items: [{ quantity: 1, unit_price: 50 }],
-          new_items:      [{ quantity: 1, unit_price: 100 }],
-          payment_splits: [{ method: 'dinheiro', amount: 10 }], // deveria ser 50
-          refund_splits:  [],
-        })
-      ).toThrow(/payment_splits/);
+    // ATENCAO: a divergencia de payment_splits NAO bloqueia mais a troca (fix #126).
+    // computeAndValidateTotals reconcilia os splits (auto-ajusta/deriva) em vez de
+    // lancar 400. Era o bug do Davi: adapter v1 mandava metodo unico, sem splits.
+    it('NAO bloqueia quando payment_splits nao cobre o netAmount positivo — reconcilia ao total', () => {
+      const totals = computeAndValidateTotals({
+        returned_items: [{ quantity: 1, unit_price: 50 }],
+        new_items:      [{ quantity: 1, unit_price: 100 }],
+        payment_splits: [{ method: 'dinheiro', amount: 10 }], // insuficiente (deveria 50)
+        refund_splits:  [],
+      });
+      const totalPay = totals.paymentSplits.reduce((s, p) => s + p.amount, 0);
+      expect(totals.netAmount).toBe(50);
+      expect(Number(totalPay.toFixed(2))).toBe(50); // auto-ajustado, sem throw
+      expect(totals.refundSplits).toEqual([]);
     });
 
-    it('lanca erro quando refund_splits nao cobre o netAmount negativo', () => {
-      expect(() =>
-        computeAndValidateTotals({
-          returned_items: [{ quantity: 1, unit_price: 100 }],
-          new_items:      [{ quantity: 1, unit_price: 50 }],
-          payment_splits: [],
-          refund_splits:  [{ method: 'dinheiro', amount: 1 }], // deveria ser 50
-        })
-      ).toThrow(/refund_splits/);
+    it('NAO bloqueia quando refund_splits nao cobre o netAmount negativo — reconcilia ao saldo', () => {
+      const totals = computeAndValidateTotals({
+        returned_items: [{ quantity: 1, unit_price: 100 }],
+        new_items:      [{ quantity: 1, unit_price: 50 }],
+        payment_splits: [],
+        refund_splits:  [{ method: 'dinheiro', amount: 1 }], // insuficiente (deveria 50)
+      });
+      const totalRefund = totals.refundSplits.reduce((s, p) => s + p.amount, 0);
+      expect(totals.netAmount).toBe(-50);
+      expect(Number(totalRefund.toFixed(2))).toBe(50); // auto-ajustado, sem throw
+      expect(totals.paymentSplits).toEqual([]);
+    });
+
+    it('deriva split do metodo legado quando payment_splits vem vazio (adapter v1 — regressao Davi)', () => {
+      const totals = computeAndValidateTotals({
+        returned_items: [],
+        new_items:      [{ quantity: 1, unit_price: 10 }],
+        payment_splits: [],
+        refund_splits:  [],
+        legacyMethod:   'cartao_credito',
+      });
+      expect(totals.netAmount).toBe(10);
+      expect(totals.paymentSplits).toEqual([{ method: 'cartao_credito', amount: 10 }]);
     });
 
     it('aceita payload zerado (troca simples sem diferenca)', () => {
