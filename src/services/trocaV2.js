@@ -3,11 +3,17 @@
 // Handler do contrato v2 do POST /pdv/troca.
 // Doc: Aura/AUDITORIA_TROCA_PDV_2026-05-17.docx
 //
-// 25/05/2026 (fix sem-NFC-e): removido bloco needsDevolucao55 →
+// 25/05/2026 (fix sem-NFC-e): removido bloco needsDevolucao55 ->
 //   CUSTOMER_ADDRESS_REQUIRED. SEFAZ FAQ MG #7 — dest NF-e 55
-//   devolução varejo é o próprio emitente.
+//   devolucao varejo e o proprio emitente.
 // 26/05/2026 (fix customer_phone): response inclui customer_phone
-//   no sale pra Step5Success habilitar botão WhatsApp do NfceActions.
+//   no sale pra Step5Success habilitar botao WhatsApp do NfceActions.
+// 29/05/2026 (fase1-refactor):
+//   - Idempotencia via troca_idempotency (antes do BEGIN)
+//   - Lock atomico de estoque (UPDATE ... WHERE stock_qty >= qty RETURNING)
+//   - SEFAZ desacoplado do COMMIT: INSERT pendente dentro da tx,
+//     chamada real pos-COMMIT, falha grava last_error/retry_count
+//   - Shape fiscal.per_origin[] canonico para o frontend
 // ============================================================
 
 const db = require('../config/database');
@@ -309,6 +315,7 @@ async function undoCancellations(cancelled) {
 }
 
 async function adjustStock(client, returnedItems, newItems, currentCompanyId, trocaSaleId) {
+  // Devolver estoque dos itens retornados (incremento simples — produto volta ao estoque)
   for (const ret of returnedItems) {
     const qty = parseFloat(ret.quantity);
     if (!ret.product_id) continue;
@@ -326,48 +333,58 @@ async function adjustStock(client, returnedItems, newItems, currentCompanyId, tr
     );
   }
 
+  // Decrementar estoque dos novos itens — lock atomico
   for (const item of newItems) {
     if (!item.product_id) continue;
     const qty = parseFloat(item.quantity);
-    let stockAvailable;
     let stockLabel = item.product_name_snapshot || item.product_id;
     let stockCompanyId = currentCompanyId;
 
     if (item.variant_id) {
+      // Busca stock_company_id sem decrementar ainda
       const { rows: vr } = await client.query(
-        `SELECT pv.stock_qty, pv.sku_suffix, p.company_id AS stock_company_id
+        `SELECT p.company_id AS stock_company_id, pv.sku_suffix
            FROM product_variants pv JOIN products p ON p.id = pv.product_id
           WHERE pv.id=$1 AND pv.product_id=$2`,
         [item.variant_id, item.product_id]
       );
       if (vr.length) {
-        stockAvailable = parseFloat(vr[0].stock_qty);
         stockLabel += vr[0].sku_suffix ? ` (${vr[0].sku_suffix})` : ' (variante)';
         stockCompanyId = vr[0].stock_company_id || currentCompanyId;
       }
+      // Lock atomico
+      const { rows: stkRows } = await client.query(
+        `UPDATE product_variants SET stock_qty = stock_qty - $1, updated_at = NOW()
+         WHERE id = $2 AND stock_qty >= $1 RETURNING stock_qty`,
+        [qty, item.variant_id]
+      );
+      if (!stkRows.length) {
+        throw Object.assign(
+          new Error(`INSUFFICIENT_STOCK:${item.product_id}:${item.variant_id}`),
+          { code: 'INSUFFICIENT_STOCK', product_id: item.product_id, variant_id: item.variant_id }
+        );
+      }
     } else {
+      // Busca stock_company_id
       const { rows: pr } = await client.query(
-        `SELECT p.stock_qty, p.company_id AS stock_company_id
+        `SELECT p.company_id AS stock_company_id
            FROM products p JOIN companies c ON c.id = $2
           WHERE p.id = $1 AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
         [item.product_id, currentCompanyId]
       );
-      if (pr.length) {
-        stockAvailable = parseFloat(pr[0].stock_qty);
-        stockCompanyId = pr[0].stock_company_id || currentCompanyId;
+      if (pr.length) stockCompanyId = pr[0].stock_company_id || currentCompanyId;
+      // Lock atomico
+      const { rows: stkRows } = await client.query(
+        `UPDATE products SET stock_qty = stock_qty - $1, updated_at = NOW()
+         WHERE id = $2 AND company_id = $3 AND stock_qty >= $1 RETURNING stock_qty`,
+        [qty, item.product_id, stockCompanyId]
+      );
+      if (!stkRows.length) {
+        throw Object.assign(
+          new Error(`INSUFFICIENT_STOCK:${item.product_id}`),
+          { code: 'INSUFFICIENT_STOCK', product_id: item.product_id, variant_id: null }
+        );
       }
-    }
-
-    if (stockAvailable !== undefined && stockAvailable < qty) {
-      throw new TrocaV2Error(409, {
-        error: `Estoque insuficiente para "${stockLabel}". Disponivel: ${stockAvailable}`,
-        product_id: item.product_id, variant_id: item.variant_id || null,
-      });
-    }
-    if (item.variant_id) {
-      await client.query(`UPDATE product_variants SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2`, [qty, item.variant_id]);
-    } else {
-      await client.query(`UPDATE products SET stock_qty=GREATEST(0,stock_qty-$1), updated_at=NOW() WHERE id=$2 AND company_id=$3`, [qty, item.product_id, stockCompanyId]);
     }
     await client.query(
       `INSERT INTO stock_movements (product_id,company_id,type,quantity,reference_id,reference_type,notes)
@@ -446,7 +463,7 @@ async function insertAggregateTransactions(client, trocaSaleId, primaryCompanyId
     await client.query(
       `INSERT INTO transactions
          (company_id, type, status, amount, description, category, due_date, paid_at, created_by, idempotency_key)
-       VALUES ($1,'expense','confirmed',$2,$3,'Troca - Devolução',${SP_DATE_NOW},NOW(),$4,$5)
+       VALUES ($1,'expense','confirmed',$2,$3,'Troca - Devolucao',${SP_DATE_NOW},NOW(),$4,$5)
        ON CONFLICT (idempotency_key) DO NOTHING`,
       [primaryCompanyId, parseFloat(totals.returnedValue.toFixed(2)), summary, userId || null, 'pdv-troca-v2-' + trocaSaleId + '-return']
     );
@@ -469,18 +486,42 @@ async function handle(req, res) {
     customer_id, employee_id, seller_name,
     nfce_strategy = 'per_origin',
     customer_address,
+    idempotency_key,
   } = req.body || {};
+
+  const companyId = req.params.id;
+
+  // ── A) Idempotencia de request (antes de abrir transacao) ──
+  if (idempotency_key) {
+    try {
+      await db.query(
+        `INSERT INTO troca_idempotency (idempotency_key, company_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [idempotency_key, companyId]
+      );
+      const { rows: idempRows } = await db.query(
+        `SELECT troca_sale_id FROM troca_idempotency WHERE idempotency_key=$1 AND company_id=$2 AND troca_sale_id IS NOT NULL`,
+        [idempotency_key, companyId]
+      );
+      if (idempRows.length > 0) {
+        const { rows: [s] } = await db.query(`SELECT * FROM sales WHERE id=$1`, [idempRows[0].troca_sale_id]);
+        return res.status(200).json({ success: true, troca: s, idempotent_hit: true, fiscal: { per_origin: [] } });
+      }
+    } catch (idempErr) {
+      // Tabela pode nao existir ainda (migration pendente) — fail-open
+      console.warn('[trocaV2] idempotency check fail-open:', idempErr.message);
+    }
+  }
 
   const client = await db.connect();
   let preCancelled = [];
   try {
     await client.query('BEGIN');
 
-    const caixaCheck = await assertCaixaOpenOrAllowed(client, req.params.id);
+    const caixaCheck = await assertCaixaOpenOrAllowed(client, companyId);
     if (!caixaCheck.ok) { await client.query('ROLLBACK'); return res.status(caixaCheck.status).json(caixaCheck.body); }
-    const sessaoId = caixaCheck.sessaoId || (await getActiveSessaoId(client, req.params.id));
+    const sessaoId = caixaCheck.sessaoId || (await getActiveSessaoId(client, companyId));
 
-    const originSales = await lookupOriginSales(client, req.params.id, original_sale_ids);
+    const originSales = await lookupOriginSales(client, companyId, original_sale_ids);
     await validateReturnedItems(client, originSales, returned_items);
     const totals = computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits });
     const strategyMap = decideFiscalPerOrigin(originSales, returned_items, nfce_strategy);
@@ -558,7 +599,7 @@ async function handle(req, res) {
           `SELECT p.name, p.cost_price
              FROM products p JOIN companies c ON c.id = $2
             WHERE p.id = $1 AND (p.company_id = $2 OR (p.company_id = c.billing_owner_company_id AND p.is_group_shared = true))`,
-          [item.product_id, req.params.id]
+          [item.product_id, companyId]
         );
         if (pr.length) { productName = productName || pr[0].name; costPrice = parseFloat(pr[0].cost_price || 0); }
       }
@@ -580,9 +621,10 @@ async function handle(req, res) {
       );
     }
 
-    await adjustStock(client, returned_items, new_items, req.params.id, trocaSaleRow.id);
-    await insertSalePayments(client, trocaSaleRow.id, req.params.id, sessaoId, totals, payment_splits, refund_splits);
-    const payoutsInserted = await insertTrocaPayouts(client, trocaSaleRow.id, req.params.id, sessaoId, effectiveCustomerId, refund_splits, req.user?.id);
+    // ── B) Lock de estoque atomico (dentro da transacao) ──
+    await adjustStock(client, returned_items, new_items, companyId, trocaSaleRow.id);
+    await insertSalePayments(client, trocaSaleRow.id, companyId, sessaoId, totals, payment_splits, refund_splits);
+    const payoutsInserted = await insertTrocaPayouts(client, trocaSaleRow.id, companyId, sessaoId, effectiveCustomerId, refund_splits, req.user?.id);
     await insertAggregateTransactions(client, trocaSaleRow.id, saleCompanyId, totals, original_sale_ids, req.user?.id);
 
     for (const c of preCancelled) {
@@ -592,36 +634,140 @@ async function handle(req, res) {
       );
     }
 
-    const fiscalResults = [];
+    // ── C) Desacoplar SEFAZ do COMMIT:
+    //    Para cada origem com devolucao_55, INSERT nfce_emissions pendente DENTRO da tx,
+    //    chamada real SEFAZ vai ocorrer pos-COMMIT.
+    const pendingEmissions = [];
+
     for (const s of originSales) {
       const strat = strategyMap.get(s.id);
       if (strat !== 'devolucao_55') continue;
       const itemsForThis = returned_items.filter((r) => r.original_sale_id === s.id);
       const valueForThis = itemsForThis.reduce((acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0);
+
+      // INSERT pendente — referencia suficiente para o worker de retry tambem
+      let emissionId = null;
       try {
-        const result = await trocaDevolucao55.handle(client, {
-          saleCompanyId: s.company_id, originalSaleId: s.id, trocaSaleId: trocaSaleRow.id,
-          returnedItems: itemsForThis, returnedValue: valueForThis,
-          customerAddress: customer_address, notes: req.body.notes, userId: req.user?.id,
-        });
-        fiscalResults.push({ original_sale_id: s.id, ...result });
-      } catch (e) {
-        if (e && e.isDevolucao55Error) {
-          await client.query('ROLLBACK');
-          await undoCancellations(preCancelled);
-          return res.status(e.status).json({ ...e.body, failed_for_sale_id: s.id });
-        }
-        throw e;
+        const { rows: emRows } = await client.query(
+          `INSERT INTO nfce_emissions
+             (company_id, sale_id, tipo, status, notes)
+           VALUES ($1, $2, 'nfe_devolucao', 'pendente', $3)
+           RETURNING id`,
+          [s.company_id, trocaSaleRow.id, `devolucao_55 origem=${s.id}`]
+        );
+        emissionId = emRows[0]?.id || null;
+      } catch (insErr) {
+        console.warn('[trocaV2] insert pendente emission failed (non-fatal):', insErr.message);
       }
+
+      pendingEmissions.push({
+        emission_id: emissionId,
+        origin_sale_id: s.id,
+        strategy: 'devolucao_55',
+        saleCompanyId: s.company_id,
+        trocaSaleId: trocaSaleRow.id,
+        returnedItems: itemsForThis,
+        returnedValue: valueForThis,
+      });
     }
+
+    // cancel_reissue ja tratado acima (cancelamento pre-commit) — registrar no resultado
     for (const c of preCancelled) {
-      fiscalResults.push({
-        original_sale_id: c.originalSaleId, strategy: 'cancel_reissue',
+      pendingEmissions.push({
+        emission_id: null,
+        origin_sale_id: c.originalSaleId,
+        strategy: 'cancel_reissue',
         original_chave_cancelada: c.origNfce.chave_acesso,
+        saleCompanyId: null,
       });
     }
 
     await client.query('COMMIT');
+
+    // ── D) Gravar troca_sale_id na idempotencia pos-commit ──
+    if (idempotency_key) {
+      try {
+        await db.query(
+          `UPDATE troca_idempotency SET troca_sale_id=$1 WHERE idempotency_key=$2`,
+          [trocaSaleRow.id, idempotency_key]
+        );
+      } catch (idempUpdErr) {
+        console.warn('[trocaV2] idempotency update fail-soft:', idempUpdErr.message);
+      }
+    }
+
+    // ── C cont.) Chamar SEFAZ pos-COMMIT para devolucao_55 ──
+    const fiscalResults = [];
+
+    for (const emission of pendingEmissions) {
+      if (emission.strategy === 'cancel_reissue') {
+        fiscalResults.push({
+          origin_sale_id: emission.origin_sale_id,
+          strategy: 'cancel_reissue',
+          status: 'autorizada',
+          chave_acesso: emission.original_chave_cancelada || null,
+          error: null,
+        });
+        continue;
+      }
+
+      if (emission.strategy === 'devolucao_55') {
+        try {
+          const result = await trocaDevolucao55.handle(null, {
+            saleCompanyId: emission.saleCompanyId,
+            originalSaleId: emission.origin_sale_id,
+            trocaSaleId: emission.trocaSaleId,
+            returnedItems: emission.returnedItems,
+            returnedValue: emission.returnedValue,
+            customerAddress: customer_address,
+            notes: req.body.notes,
+            userId: req.user?.id,
+          });
+          if (emission.emission_id) {
+            await db.query(
+              `UPDATE nfce_emissions SET status='autorizada', chave_acesso=$1, updated_at=NOW() WHERE id=$2`,
+              [result.chave_acesso || null, emission.emission_id]
+            );
+          }
+          fiscalResults.push({
+            origin_sale_id: emission.origin_sale_id,
+            strategy: 'devolucao_55',
+            status: 'autorizada',
+            chave_acesso: result.chave_acesso || null,
+            error: null,
+          });
+        } catch (err) {
+          if (emission.emission_id) {
+            await db.query(
+              `UPDATE nfce_emissions SET status='falha', last_error=$1, retry_count=retry_count+1, next_retry_at=NOW()+INTERVAL '5 minutes' WHERE id=$2`,
+              [err.message, emission.emission_id]
+            );
+          }
+          fiscalResults.push({
+            origin_sale_id: emission.origin_sale_id,
+            strategy: 'devolucao_55',
+            status: 'falha',
+            chave_acesso: null,
+            error: err.message,
+          });
+        }
+        continue;
+      }
+    }
+
+    // Origens sem emissao fiscal
+    for (const s of originSales) {
+      const strat = strategyMap.get(s.id);
+      if (strat === 'none') {
+        fiscalResults.push({
+          origin_sale_id: s.id,
+          strategy: 'none',
+          status: 'none',
+          chave_acesso: null,
+          error: null,
+        });
+      }
+    }
 
     const { rows: respNewItems } = await db.query(
       `SELECT si.*, COALESCE(p.name, si.product_name_snapshot) AS product_name
@@ -634,9 +780,9 @@ async function handle(req, res) {
         WHERE tri.troca_sale_id=$1`, [trocaSaleRow.id]
     );
 
-    // 26/05/2026: enriquecer trocaSale com customer_phone pra Step5Success
     const respCustomerPhone = await fetchCustomerPhone(trocaSaleRow.customer_id);
 
+    // ── E) Shape de retorno canonico ──
     return res.status(201).json({
       version: 'v2',
       sale: { ...trocaSaleRow, items: respNewItems, customer_phone: respCustomerPhone },
@@ -647,16 +793,29 @@ async function handle(req, res) {
       cross_filial: isCrossFilial,
       origin_company_id: saleCompanyId,
       origin_company_ids: Array.from(new Set(originSales.map((s) => s.company_id))),
-      physical_company_id: req.params.id,
+      physical_company_id: companyId,
       payouts: payoutsInserted,
-      fiscal: { strategy: nfce_strategy, per_origin: fiscalResults },
+      fiscal: {
+        strategy: nfce_strategy,
+        per_origin: fiscalResults,
+        // Cada item: { origin_sale_id, strategy, status ('autorizada'|'pendente'|'falha'|'none'), chave_acesso, error }
+      },
       original_sale_ids,
-      receipt_url: `/companies/${req.params.id}/print/receipt/${trocaSaleRow.id}`,
+      receipt_url: `/companies/${companyId}/print/receipt/${trocaSaleRow.id}`,
     });
   } catch (err) {
-    await client.query('ROLLBACK');
+    try { await client.query('ROLLBACK'); } catch (_) {}
     if (preCancelled.length) await undoCancellations(preCancelled);
     if (err.isTrocaV2Error) return res.status(err.status).json(err.body);
+    // ── B) Estoque insuficiente — codigo padrao para pdv.js capturar ──
+    if (err.code === 'INSUFFICIENT_STOCK' || (err.message && err.message.startsWith('INSUFFICIENT_STOCK'))) {
+      return res.status(409).json({
+        error: 'Estoque insuficiente para concluir a troca.',
+        code: 'INSUFFICIENT_STOCK',
+        product_id: err.product_id || null,
+        variant_id: err.variant_id || null,
+      });
+    }
     console.error('[trocaV2] internal error:', err);
     return res.status(500).json({ error: 'Erro interno na troca v2' });
   } finally {
