@@ -12,9 +12,14 @@
 // 12/05/2026 (Fase C): CFOP 1.202 + CSOSN 102 + tpNF=0 + finNFe=4 +
 // refNFe. Contador OK.
 //
+// 29/05/2026 (fix null-client): handle() agora aceita client=null
+// (chamada pós-COMMIT em trocaV2) — usa pool db como fallback.
+// Antes explodia com "Cannot read properties of null (reading 'query')".
+//
 // Memory: [[nfe55-devolucao-dest-proprio-emitente]]
 // ============================================================
 
+const db = require('../config/database');
 const nuvemfiscal = require('./nuvemfiscal');
 
 class TrocaDevolucao55Error extends Error {
@@ -36,8 +41,11 @@ async function handle(client, {
   notes,
   userId,
 }) {
+  // Suporta client=null (chamada pós-COMMIT): fallback para pool db.
+  const q = (sql, params) => (client || db).query(sql, params);
+
   // 1. Busca NFC-e original autorizada
-  const { rows: origNfceList } = await client.query(
+  const { rows: origNfceList } = await q(
     `SELECT id, chave_acesso, numero, customer_cpf, customer_name, authorized_at
        FROM nfce_emissions
       WHERE sale_id = $1 AND tipo = 'nfce' AND status = 'autorizada'
@@ -52,7 +60,7 @@ async function handle(client, {
   const orig = origNfceList[0];
 
   // 2. Próximo numero da serie 1 NF-e/55
-  const { rows: nfeSeq } = await client.query(
+  const { rows: nfeSeq } = await q(
     `SELECT COALESCE(MAX(numero), 0) + 1 AS next_numero
        FROM nfce_emissions
       WHERE company_id = $1 AND tipo = 'nfe' AND COALESCE(serie, 1) = 1`,
@@ -61,7 +69,7 @@ async function handle(client, {
   const nextNumero = parseInt(nfeSeq[0] && nfeSeq[0].next_numero, 10) || 1;
 
   // 3. Dados da empresa
-  const { rows: companyRows } = await client.query(
+  const { rows: companyRows } = await q(
     `SELECT * FROM companies WHERE id = $1`,
     [saleCompanyId]
   );
@@ -139,7 +147,7 @@ async function handle(client, {
   const nfeStatus      = (nfeResult && nfeResult.status) || 'processando';
 
   // 7. Insere registro em nfce_emissions
-  await client.query(
+  await q(
     `INSERT INTO nfce_emissions
        (company_id, sale_id, numero, serie, chave_acesso, tipo, finalidade,
         ref_chave_nfe, status, nuvemfiscal_id, customer_cpf, customer_name,
@@ -163,7 +171,7 @@ async function handle(client, {
   );
 
   // 8. Marca a trocaSale com strategy + chaves
-  await client.query(
+  await q(
     `UPDATE sales
         SET nfce_strategy        = $1,
             nfce_original_chave  = $2,
