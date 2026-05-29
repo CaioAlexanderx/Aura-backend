@@ -16,6 +16,8 @@
 //   Bloco BEST-EFFORT: erro nele nao reverte a venda.
 // 29/05/2026 (C6.1): POST /:id/troca/:trocaSaleId/reemitir-fiscal
 //   reemite notas com status falha/pendente (idempotente para autorizadas).
+// 29/05/2026 (fix v1 adapter): adapter v1 resolve original_sale_item_id
+//   automaticamente via banco (product_id + sale_id) — sem 422 em clientes legados.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -720,29 +722,48 @@ router.delete('/sale/:saleId', async (req, res) => {
 router.post('/troca', async (req, res) => {
   const b = req.body || {};
 
-  // Caminho v2 nativo (frontend novo manda original_sale_ids[] + original_sale_item_id)
+  // Caminho v2 nativo
   if (Array.isArray(b.original_sale_ids)) {
     return trocaV2.handle(req, res);
   }
 
-  // Compat v1: payload escalar antigo -> adapta para v2.
   if (!b.original_sale_id) {
     return res.status(400).json({ error: 'original_sale_id obrigatorio' });
   }
-  const returned = Array.isArray(b.returned_items) ? b.returned_items : [];
-  const missingItemId = returned.some((r) => !r.original_sale_item_id);
-  if (missingItemId) {
-    return res.status(422).json({
-      error: 'Troca por venda legada sem identificacao de item. Atualize o app.',
-      code: 'LEGACY_RETURN_NEEDS_ITEM_ID',
-    });
-  }
 
-  console.warn('[troca] payload v1 adaptado para v2', { companyId: req.params.id, sale: b.original_sale_id });
+  const returned = Array.isArray(b.returned_items) ? b.returned_items : [];
+
+  // Resolver original_sale_item_id automaticamente para clientes v1 que nao mandam o campo.
+  // Busca o primeiro sale_item matching (product_id + variant_id) na venda original.
+  const resolvedReturned = await Promise.all(
+    returned.map(async (r) => {
+      if (r.original_sale_item_id) return r;
+      try {
+        const { rows } = await db.query(
+          `SELECT id FROM sale_items
+           WHERE sale_id = $1
+             AND product_id = $2
+             AND ($3::uuid IS NULL OR variant_id = $3)
+           ORDER BY id
+           LIMIT 1`,
+          [b.original_sale_id, r.product_id, r.variant_id || null]
+        );
+        return { ...r, original_sale_item_id: rows[0]?.id || null };
+      } catch (_) {
+        return { ...r, original_sale_item_id: null };
+      }
+    })
+  );
+
+  console.warn('[troca] payload v1 adaptado para v2', {
+    companyId: req.params.id,
+    sale: b.original_sale_id,
+    resolvedItemIds: resolvedReturned.map((r) => r.original_sale_item_id),
+  });
 
   req.body = {
     original_sale_ids: [b.original_sale_id],
-    returned_items: returned.map((r) => ({
+    returned_items: resolvedReturned.map((r) => ({
       original_sale_id: b.original_sale_id,
       original_sale_item_id: r.original_sale_item_id,
       product_id: r.product_id,
