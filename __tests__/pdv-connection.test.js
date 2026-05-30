@@ -1,6 +1,11 @@
 // ============================================================
 // AURA. — Test: PDV → Cliente → Funcionário connection
 // ============================================================
+// 29/05/2026: metricas do cliente (total_purchases/total_spent) deixaram de
+// ser atualizadas por UPDATE manual no pdv.js -- agora sao mantidas pelo
+// trigger trg_sale_update_customer (migration 137), fonte unica. Os testes
+// abaixo passaram a verificar a AUSENCIA do UPDATE customers no pdv.js.
+// As metricas de FUNCIONARIO (employees) continuam no codigo do pdv.js.
 
 jest.mock('../src/config/database');
 const db = require('../src/config/database');
@@ -35,7 +40,7 @@ beforeEach(() => { jest.clearAllMocks(); mockClient.query.mockReset(); db.query.
 describe('PDV → Cliente → Funcionário', () => {
 
   describe('POST /sale com customer_id + employee_id', () => {
-    it('cria venda e atualiza métricas do cliente e funcionário', async () => {
+    it('cria venda e atualiza metrica do funcionario (cliente via trigger 137)', async () => {
       mockClient.query
         .mockResolvedValueOnce({}) // BEGIN
         .mockResolvedValueOnce(CAIXA_DISABLED_MOCK) // assertCaixaOpenOrAllowed: caixa_enabled=false
@@ -45,8 +50,7 @@ describe('PDV → Cliente → Funcionário', () => {
         .mockResolvedValueOnce({}) // sale_item
         .mockResolvedValueOnce({}) // stock
         .mockResolvedValueOnce({}) // movement
-        .mockResolvedValueOnce({}) // customer update
-        .mockResolvedValueOnce({}) // employee update
+        .mockResolvedValueOnce({}) // employee update (cliente NAO faz mais UPDATE manual)
         .mockResolvedValueOnce({}); // COMMIT
       db.query.mockResolvedValueOnce({ rows: [{ id: 'i1', product_name: 'Corte' }] });
 
@@ -58,7 +62,10 @@ describe('PDV → Cliente → Funcionário', () => {
       expect(res.body.sale.employee_id).toBe(EMP);
       expect(res.body.sale.customer_id).toBe(CUST);
       const calls = mockClient.query.mock.calls.map(c => typeof c[0] === 'string' ? c[0] : '');
-      expect(calls.some(c => c.includes('UPDATE customers SET total_purchases'))).toBe(true);
+      // Metrica do cliente e mantida pelo trigger trg_sale_update_customer (migration 137),
+      // por isso o pdv.js NAO deve mais conter UPDATE customers.
+      expect(calls.some(c => c.includes('UPDATE customers SET total_purchases'))).toBe(false);
+      // Metrica do funcionario continua no codigo do pdv.js.
       expect(calls.some(c => c.includes('UPDATE employees SET total_sales'))).toBe(true);
     });
 
@@ -100,14 +107,19 @@ describe('PDV → Cliente → Funcionário', () => {
   });
 
   describe('DELETE /sale/:saleId (cancelamento)', () => {
-    it('reverte métricas do cliente e funcionário', async () => {
+    it('reverte metrica do funcionario (cliente via trigger 137)', async () => {
       mockClient.query
         .mockResolvedValueOnce({}) // BEGIN
         .mockResolvedValueOnce({ rows: [{ id: SALE, customer_id: CUST, employee_id: EMP, total_amount: 70 }] })
         .mockResolvedValueOnce({ rows: [{ product_id: PROD, variant_id: null, quantity: 1 }] })
-        .mockResolvedValueOnce({}) // stock revert
-        .mockResolvedValueOnce({}) // customer revert
-        .mockResolvedValueOnce({}) // employee revert
+        .mockResolvedValueOnce({}) // stock revert (UPDATE products)
+        .mockResolvedValueOnce({}) // INSERT stock_movements
+        .mockResolvedValueOnce({}) // employee revert (cliente NAO faz mais UPDATE manual)
+        .mockResolvedValueOnce({}) // delete credit debit
+        .mockResolvedValueOnce({}) // delete tx pdv-sale
+        .mockResolvedValueOnce({}) // delete tx pdv-credit-receivable
+        .mockResolvedValueOnce({}) // cancel credit_installments
+        .mockResolvedValueOnce({}) // update credit_profiles
         .mockResolvedValueOnce({}) // mark cancelled
         .mockResolvedValueOnce({}); // COMMIT
 
@@ -116,7 +128,10 @@ describe('PDV → Cliente → Funcionário', () => {
       expect(res.status).toBe(200);
       expect(res.body.cancelled).toBe(SALE);
       const calls = mockClient.query.mock.calls.map(c => typeof c[0] === 'string' ? c[0] : '');
-      expect(calls.some(c => c.includes('UPDATE customers') && c.includes('GREATEST'))).toBe(true);
+      // Metrica do cliente e recalculada pelo trigger 137 ao mudar status -> cancelled.
+      // pdv.js NAO deve mais conter UPDATE customers no cancelamento.
+      expect(calls.some(c => c.includes('UPDATE customers') && c.includes('GREATEST'))).toBe(false);
+      // Metrica do funcionario continua revertida no codigo.
       expect(calls.some(c => c.includes('UPDATE employees') && c.includes('GREATEST'))).toBe(true);
     });
   });
