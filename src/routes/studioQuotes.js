@@ -9,6 +9,9 @@
 // DELETE /studio/quotes/:qid                  → {deleted:true} (só draft)
 // POST   /studio/quotes/:qid/send             → StudioQuoteCreated {quote_url, wa_me_link}
 // POST   /studio/quotes/:qid/convert          → {order_id, quote} (idempotente)
+//
+// M2 (30/05/2026): convert auto-cria marco de sinal em studio_payments
+// quando deposit_amount > 0 (fecha o loop orçamento→sinal sem passo manual).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -95,7 +98,6 @@ router.post('/quotes', async function(req, res) {
   const estimated_cost = calcEstimatedCost(items);
   const vDays = Math.max(1, parseInt(validity_days) || 7);
 
-  // Calcula deposit_amount se deposit_pct fornecido
   let depPct    = deposit_pct    != null ? parseFloat(deposit_pct) : null;
   let depAmount = deposit_amount != null ? parseFloat(deposit_amount) : null;
   if (depPct != null && depAmount == null) {
@@ -208,7 +210,6 @@ router.patch('/quotes/:qid', async function(req, res) {
     try {
       await client.query('BEGIN');
 
-      // Recalcula totais se items fornecidos
       let subtotal = parseFloat(q.subtotal);
       let disc     = parseFloat(q.discount);
       let total    = parseFloat(q.total);
@@ -221,7 +222,6 @@ router.patch('/quotes/:qid', async function(req, res) {
         total    = t.total;
         estCost  = calcEstimatedCost(items);
 
-        // Substitui itens
         await client.query('DELETE FROM studio_quote_items WHERE quote_id = $1', [qid]);
         for (let i = 0; i < items.length; i++) {
           const it = items[i];
@@ -244,12 +244,10 @@ router.patch('/quotes/:qid', async function(req, res) {
           );
         }
       } else if (discount != null) {
-        // Só ajuste de desconto sem mudar itens
         disc  = Math.max(0, parseFloat(discount));
         total = Math.max(0, subtotal - disc);
       }
 
-      // deposit
       let depPct    = deposit_pct    !== undefined ? (deposit_pct    != null ? parseFloat(deposit_pct)    : null) : q.deposit_pct;
       let depAmount = deposit_amount !== undefined ? (deposit_amount != null ? parseFloat(deposit_amount) : null) : q.deposit_amount;
       if (depPct != null && deposit_amount === undefined) {
@@ -335,7 +333,6 @@ router.post('/quotes/:qid/send', async function(req, res) {
       return res.status(400).json({ error: `Não é possível enviar orçamento com status '${quote.status}'` });
     }
 
-    // Gera token único
     let token = null;
     for (let i = 0; i < 5; i++) {
       const candidate = crypto.randomBytes(32).toString('hex');
@@ -365,7 +362,6 @@ router.post('/quotes/:qid/send', async function(req, res) {
     const appUrl = process.env.APP_URL || 'https://app.getaura.com.br';
     const quoteUrl = `${appUrl}/orcamento/${token}`;
 
-    // Monta wa.me se approval_wa_phone configurado
     let waMeLink = null;
     const settings = quote.studio_settings || {};
     const waPhone  = settings.approval_wa_phone;
@@ -384,8 +380,8 @@ router.post('/quotes/:qid/send', async function(req, res) {
 });
 
 // ─── POST /quotes/:qid/convert ───────────────────────────────
-// Cria digital_order vertical='studio' + itens. Idempotente: se
-// order_id já preenchido, retorna o pedido existente sem re-inserir.
+// Cria digital_order vertical='studio' + itens. Idempotente.
+// M2: auto-cria marco de sinal em studio_payments se deposit_amount > 0.
 router.post('/quotes/:qid/convert', async function(req, res) {
   const cid = req.params.id;
   const qid = req.params.qid;
@@ -400,10 +396,6 @@ router.post('/quotes/:qid/convert', async function(req, res) {
 
     // Idempotente: já convertido
     if (quote.order_id) {
-      const ordRes = await db.query(
-        `SELECT id FROM digital_orders WHERE id = $1 LIMIT 1`,
-        [quote.order_id]
-      );
       return res.json({ order_id: quote.order_id, quote });
     }
 
@@ -413,7 +405,6 @@ router.post('/quotes/:qid/convert', async function(req, res) {
       });
     }
 
-    // Busca itens do orçamento
     const iRes = await db.query(
       `SELECT * FROM studio_quote_items WHERE quote_id = $1 ORDER BY sort_order, created_at`,
       [qid]
@@ -425,7 +416,6 @@ router.post('/quotes/:qid/convert', async function(req, res) {
       await client.query('BEGIN');
 
       // Cria digital_order
-      // Colunas NOT NULL conhecidas: company_id, status, total_amount (ver studioKdsApproval.js)
       const ordRes = await client.query(
         `INSERT INTO digital_orders
            (company_id, vertical, status, studio_production_status,
@@ -462,6 +452,21 @@ router.post('/quotes/:qid/convert', async function(req, res) {
             it.customization || null,
           ]
         );
+      }
+
+      // M2: Auto-cria marco de sinal quando deposit_amount estava definido.
+      // Fecha o loop orçamento → sinal sem passo manual depois da conversão.
+      // try/catch isolado: não trava a conversão se studio_payments não existir.
+      if (quote.deposit_amount && parseFloat(quote.deposit_amount) > 0) {
+        try {
+          await client.query(
+            `INSERT INTO studio_payments (company_id, order_id, kind, amount, status)
+             VALUES ($1, $2, 'deposit', $3, 'pending')`,
+            [cid, orderId, parseFloat(quote.deposit_amount)]
+          );
+        } catch (payErr) {
+          console.warn('[studio/quotes/convert][payment-auto-create]', payErr.message, payErr.code);
+        }
       }
 
       // Marca orçamento como convertido
