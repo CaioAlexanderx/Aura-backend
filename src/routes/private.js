@@ -131,5 +131,9 @@ router.use('/studio', require('./studioUpload'));
 router.use('/studio', require('./studioBulkConvert'));
 router.use('/studio', require('./studioSaleItemPatch'));
 router.use('/studio', require('./studioMarketplaceListing'));
+// Camada 1 — Orçamento + Precificação + Pagamentos (30/05/2026)
+router.use('/studio', require('./studioQuotes'));    // Fase A: Orçamento como entidade
+router.use('/studio', require('./studioPricing'));   // Fase B: Motor de precificação
+router.use('/studio', require('./studioPayments'));  // Fase C: Sinal / pagamento parcial
 
 module.exports = router;

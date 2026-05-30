@@ -87,4 +87,9 @@ router.use('/food',              require('./food'));
 // Migration 132. PR Aura-backend#112.
 router.use('/aprovacao',         require('./studioApprovalPublic'));
 
+// Studio Camada 1 Fase A (30/05/2026): aceite público do orçamento via link.
+// Sem auth — cliente recebe link e abre /orcamento/:token no navegador.
+// Migration 138. Espelha a mecânica de /aprovacao.
+router.use('/orcamento',         require('./studioQuotePublic'));
+
 module.exports = router;
