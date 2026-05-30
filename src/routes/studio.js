@@ -18,6 +18,9 @@
 // companies.studio_settings.onboarding.{key} nos pontos-chave.
 //
 // Gate de plano (requirePlan) aplicado no mount em src/routes/private.js.
+//
+// 30/05/2026 (Camada 1 P1): require_deposit_for_production adicionado ao
+// whitelist de settings — permite FE salvar via PATCH /studio/settings.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -37,7 +40,6 @@ function validateCustomizationConfig(cfg) {
   if (typeof pa.height_cm !== 'number' || pa.height_cm <= 0) return 'print_area.height_cm inválido';
   if (pa.position && !VALID_POSITIONS.includes(pa.position)) return 'print_area.position inválido (center/left/right)';
 
-  // ─── Verso (frente/verso) — opcional, backwards-compatible ─
   if (cfg.has_back !== undefined && typeof cfg.has_back !== 'boolean') {
     return 'has_back deve ser boolean';
   }
@@ -73,7 +75,6 @@ function validateCustomizationConfig(cfg) {
     if (!f.type || !VALID_FIELD_TYPES.includes(f.type)) return `fields[${i}].type inválido`;
     if (!f.label || typeof f.label !== 'string') return `fields[${i}].label obrigatório`;
     if (typeof f.required !== 'boolean') return `fields[${i}].required deve ser boolean`;
-    // ─── side opcional, default 'front' — valida shape + consistência ─
     if (f.side !== undefined) {
       if (!VALID_SIDES.includes(f.side)) {
         return `fields[${i}].side inválido (front/back)`;
@@ -86,10 +87,6 @@ function validateCustomizationConfig(cfg) {
   return null;
 }
 
-// ─── Validador defensivo de qty_multiplier_by_option (Issue 2) ──
-// Shape esperado: { fieldId: { valueA: numero, valueB: numero, ... }, ... }
-// Retorna string com mensagem de erro, ou null se ok.
-// NULL/undefined são válidos (multiplier opcional — comportamento atual).
 function validateQtyMultiplier(m) {
   if (m === null || m === undefined) return null;
   if (typeof m !== 'object' || Array.isArray(m)) {
@@ -541,7 +538,6 @@ router.put('/compositions/by-product/:pid', async function(req, res) {
   for (const it of items) {
     if (!it.input_id) return res.status(400).json({ error: 'cada item precisa de input_id' });
     if (!(parseFloat(it.qty_per_unit) > 0)) return res.status(400).json({ error: 'qty_per_unit > 0 obrigatório' });
-    // Issue 2: valida shape do multiplier por variante (opcional — NULL = qty fixa)
     if (it.qty_multiplier_by_option !== undefined && it.qty_multiplier_by_option !== null) {
       const mErr = validateQtyMultiplier(it.qty_multiplier_by_option);
       if (mErr) return res.status(400).json({ error: mErr });
@@ -621,9 +617,6 @@ router.get('/compositions/summary', async function(req, res) {
 
 // ═══════════════════════════════════════════════════════════
 // NIVEL 1 (25/05/2026) — Settings + Metrics + SLA Estimate
-//
-// Fonte canonica: digital_orders WHERE vertical='studio'
-// View pronta: studio_hub_kpis (agregados de digital_orders)
 // ═══════════════════════════════════════════════════════════
 
 const ALLOWED_STUDIO_SETTINGS = [
@@ -637,11 +630,12 @@ const ALLOWED_STUDIO_SETTINGS = [
   'max_revisions_included',       // int — qtas revisões grátis o cliente tem (0 = ilimitado)
   'extra_revision_price',         // float — preço cobrado por revisão extra
   'revision_policy_text',         // string — texto exibido pro cliente sobre a política
-  // Fase 5 onboarding (useStudioOnboarding hook grava walkthrough_seen aqui)
+  // Fase 5 onboarding
   'onboarding',                   // jsonb — { walkthrough_seen: bool, product: bool, gallery: bool, sla: bool, wa: bool }
+  // Camada 1: gate de produção por sinal (opt-in, default false — zero quebra pra quem já opera)
+  'require_deposit_for_production',  // boolean — exige deposit_paid=true antes de in_production
 ];
 
-// ─── GET /studio/settings ───────────────────────────────────
 router.get('/settings', async function(req, res) {
   try {
     const r = await db.query(
@@ -657,7 +651,6 @@ router.get('/settings', async function(req, res) {
   }
 });
 
-// ─── PATCH /studio/settings ─────────────────────────────────
 router.patch('/settings', async function(req, res) {
   const patch = req.body || {};
   const filtered = {};
@@ -665,7 +658,6 @@ router.patch('/settings', async function(req, res) {
     if (patch[k] !== undefined) filtered[k] = patch[k];
   }
   if (Object.keys(filtered).length === 0) {
-    // Log explícito pra Railway: agentes futuros podem rastrear chave nova faltando
     console.warn('[studio/settings:PATCH] 400 — body sem chaves permitidas:', Object.keys(patch).join(', '), '| permitidas:', ALLOWED_STUDIO_SETTINGS.join(', '));
     return res.status(400).json({ error: 'nada pra atualizar (chaves permitidas: ' + ALLOWED_STUDIO_SETTINGS.join(', ') + ')' });
   }
@@ -688,20 +680,15 @@ router.patch('/settings', async function(req, res) {
   }
 });
 
-// ─── GET /studio/metrics ────────────────────────────────────
-// Usa view studio_hub_kpis (agregada de digital_orders WHERE vertical=studio)
-// + queries diretas pra dados configuraveis por periodo.
 router.get('/metrics', async function(req, res) {
   const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 90);
   try {
-    // 1. KPIs principais via view (em_producao, aguardando_arte, etc)
     const kpiRes = await db.query(
       `SELECT * FROM studio_hub_kpis WHERE company_id = $1 LIMIT 1`,
       [req.params.id]
     );
     const k = kpiRes.rows[0] || {};
 
-    // 2. Prontos hoje (filtro especifico que a view nao tem)
     let prontosHoje = 0;
     try {
       const phRes = await db.query(
@@ -715,7 +702,6 @@ router.get('/metrics', async function(req, res) {
       prontosHoje = parseInt(phRes.rows[0]?.cnt || 0);
     } catch (_) {}
 
-    // 3. Vendas no periodo configuravel (view so agrega 7d/today)
     let vendasTotal = 0, pedidosCount = 0;
     try {
       const vRes = await db.query(
@@ -731,7 +717,6 @@ router.get('/metrics', async function(req, res) {
       pedidosCount = parseInt(vRes.rows[0]?.pedidos || 0);
     } catch (_) {}
 
-    // 4. Margem media via view studio_compositions_summary
     let margemMedia = null;
     try {
       const mRes = await db.query(
@@ -744,7 +729,6 @@ router.get('/metrics', async function(req, res) {
         ? parseFloat(mRes.rows[0].avg_margin) : null;
     } catch (_) {}
 
-    // 5. Tempo medio producao (em dias) — created_at -> updated_at para ready/delivered
     let tempoMedio = null;
     try {
       const tRes = await db.query(
@@ -785,9 +769,6 @@ router.get('/metrics', async function(req, res) {
   }
 });
 
-// ─── GET /studio/sla/estimate ───────────────────────────────
-// Prazo dinâmico = base + ceil(fila atual / capacidade diária).
-// Fila = digital_orders Studio em status (pending_art, approved, in_production)
 router.get('/sla/estimate', async function(req, res) {
   const productIds = (req.query.products || '').split(',').map((s) => s.trim()).filter(Boolean);
   try {
@@ -832,16 +813,10 @@ router.get('/sla/estimate', async function(req, res) {
 
 // ═══════════════════════════════════════════════════════════
 // FASE 10A (26/05/2026) — IA Haiku sugere templates pro produto
-//
-// Usa claudeClient.callClaude com Haiku 4.5 pra ranquear ate 5
-// templates da galeria por match com nome+descricao+categoria do
-// produto. Fallback simples por overlap de palavras se IA falhar.
 // ═══════════════════════════════════════════════════════════
 
-// ─── POST /studio/products/:pid/suggest-templates ───────────
 router.post('/products/:pid/suggest-templates', async function(req, res) {
   try {
-    // 1. Busca produto
     const prodRes = await db.query(
       `SELECT id, name, description, category, customization_config
          FROM products WHERE id = $1 AND company_id = $2 LIMIT 1`,
@@ -850,7 +825,6 @@ router.post('/products/:pid/suggest-templates', async function(req, res) {
     if (!prodRes.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     const product = prodRes.rows[0];
 
-    // 2. Busca galeria ativa da loja (limit 100 pra nao estourar tokens)
     const tplRes = await db.query(
       `SELECT t.id, t.name, t.description, t.tags, t.category_id,
               tc.name AS category_name
@@ -868,7 +842,6 @@ router.post('/products/:pid/suggest-templates', async function(req, res) {
       });
     }
 
-    // Fallback determinístico: overlap de palavras simples (> 3 chars).
     function fallbackRank() {
       const productWords = (product.name + ' ' + (product.description || ''))
         .toLowerCase().split(/\s+/);
@@ -886,26 +859,13 @@ router.post('/products/:pid/suggest-templates', async function(req, res) {
         .slice(0, 5);
     }
 
-    // 3. Monta prompt pro Haiku
     const productInfo = `Nome: ${product.name}\nDescricao: ${product.description || 'sem descricao'}\nCategoria: ${product.category || 'geral'}`;
     const templatesInfo = tplRes.rows.map((t, i) =>
       `[${i + 1}] id=${t.id}, nome="${t.name}", categoria="${t.category_name || 'geral'}", tags=[${(t.tags || []).join(', ')}]`
     ).join('\n');
 
-    const prompt = `Voce eh um curador de arte pra loja de personalizados. Analise o produto abaixo e escolha ATE 5 templates da galeria que combinam melhor.
+    const prompt = `Voce eh um curador de arte pra loja de personalizados. Analise o produto abaixo e escolha ATE 5 templates da galeria que combinam melhor.\n\nPRODUTO:\n${productInfo}\n\nGALERIA (${tplRes.rows.length} templates disponiveis):\n${templatesInfo}\n\nResponda em JSON puro (sem markdown) com estrutura:\n{"suggestions":[{"template_id":"uuid","reason":"frase curta explicando o match","score":85}]}\n\nScore 0-100. Ordenar por score desc. Maximo 5. Se nenhum template combina bem, retorne lista vazia.`;
 
-PRODUTO:
-${productInfo}
-
-GALERIA (${tplRes.rows.length} templates disponiveis):
-${templatesInfo}
-
-Responda em JSON puro (sem markdown) com estrutura:
-{"suggestions":[{"template_id":"uuid","reason":"frase curta explicando o match","score":85}]}
-
-Score 0-100. Ordenar por score desc. Maximo 5. Se nenhum template combina bem, retorne lista vazia.`;
-
-    // 4. Chama Haiku via claudeClient compartilhado
     let claudeClient;
     try {
       claudeClient = require('../services/claudeClient');
@@ -927,7 +887,6 @@ Score 0-100. Ordenar por score desc. Maximo 5. Se nenhum template combina bem, r
       return res.json({ suggestions: fallbackRank(), fallback: true, reason: 'ai_error' });
     }
 
-    // 5. Parse JSON da resposta IA (helper ja trata fences + texto extra)
     let parsed;
     try {
       parsed = claudeClient.parseJsonResponse(aiText);
@@ -936,7 +895,6 @@ Score 0-100. Ordenar por score desc. Maximo 5. Se nenhum template combina bem, r
       return res.json({ suggestions: fallbackRank(), fallback: true, reason: 'parse_error' });
     }
 
-    // Validar template_id contra galeria (IA pode alucinar UUID)
     const validIds = new Set(tplRes.rows.map((t) => t.id));
     const suggestions = (parsed.suggestions || [])
       .filter((s) => s && validIds.has(s.template_id))
