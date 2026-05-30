@@ -8,6 +8,11 @@
 //   - 422 CREDIARIO_REQUIRES_CUSTOMER quando crediario sem customer_id.
 //   - createCreditSale chamado DENTRO da transacao principal (atomico).
 //   - DELETE /sale cancela credit_installments via UPDATE.
+// 29/05/2026 (fix double-count metricas cliente):
+//   - Removido UPDATE customers manual (venda e cancelamento). A metrica
+//     total_purchases/total_spent agora e mantida UNICAMENTE pelo trigger
+//     trg_sale_update_customer (migration 137), que recalcula via COUNT/SUM
+//     ignorando canceladas. O UPDATE manual duplicava (trigger + codigo).
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -271,14 +276,9 @@ router.post('/sale', async (req, res) => {
         );
       }
     }
-    if (customer_id) {
-      await client.query(
-        `UPDATE customers SET total_purchases=total_purchases+1, total_spent=total_spent+$1,
-           last_purchase_at=NOW(), first_purchase_at=COALESCE(first_purchase_at,NOW()), updated_at=NOW()
-         WHERE id=$2 AND company_id=$3`,
-        [totalAmount, customer_id, req.params.id]
-      );
-    }
+    // NOTA (29/05/2026): metricas do cliente (total_purchases/total_spent) sao
+    // mantidas pelo trigger trg_sale_update_customer (migration 137). NAO fazer
+    // UPDATE customers aqui -- duplicaria a contagem (trigger + codigo = 2x).
     if (employee_id) {
       await client.query(
         `UPDATE employees SET total_sales=COALESCE(total_sales,0)+1,
@@ -512,14 +512,10 @@ router.delete('/sale/:saleId', async (req, res) => {
         [item.product_id, stockCompanyId, qty, req.params.saleId, 'Cancelamento - '+(item.product_name_snapshot||'Produto')]
       );
     }
-    if (sale.customer_id) {
-      await client.query(
-        `UPDATE customers SET total_purchases=GREATEST(0,total_purchases-1),
-           total_spent=GREATEST(0,total_spent-$1), updated_at=NOW()
-         WHERE id=$2 AND company_id=$3`,
-        [sale.total_amount, sale.customer_id, req.params.id]
-      );
-    }
+    // NOTA (29/05/2026): metricas do cliente sao recalculadas pelo trigger
+    // trg_sale_update_customer (migration 137) ao mudar status para cancelled.
+    // NAO fazer UPDATE customers manual aqui -- o trigger ja cuida (e o UPDATE
+    // manual duplicava/dessincronizava a contagem).
     if (sale.employee_id) {
       await client.query(
         `UPDATE employees SET total_sales=GREATEST(0,COALESCE(total_sales,0)-1),
