@@ -2,7 +2,12 @@
 // QA — Testes de Integração: Auth (B-04)
 // Updated: plan field removed from register body (plan comes from access_code)
 // Fix: accent-free assertions to match backend responses
-// Fix: add terms_accepted:true to payloads that test other validations
+// Fix (2026-05-14): terms_accepted:true adicionado nos payloads de registro
+//   pois migration 114 tornou aceite dos Termos obrigatório antes das demais
+//   validações. Sem o campo, todos os testes de /register recebiam 400 com
+//   "O aceite dos Termos de Uso e obrigatorio..." em vez do erro esperado.
+// Fix (PR #76): adicionado teste explícito '400 — termos não aceitos' pra
+//   cobrir o novo gate do registro (delta restante após rebase).
 // ============================================================
 const request = require('supertest');
 
