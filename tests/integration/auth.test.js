@@ -23,6 +23,14 @@ describe('POST /api/v1/auth/register', () => {
     expect(res.body.error).toMatch(/obrigat/);
   });
 
+  test('400 — termos não aceitos', async () => {
+    // PR #76: cobre o novo gate de aceite obrigatório dos Termos (migration 114).
+    const res = await request(app).post('/api/v1/auth/register')
+      .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Termos/);
+  });
+
   test('400 — senha curta', async () => {
     const res = await request(app).post('/api/v1/auth/register')
       .send({ name: 'João', email: 'a@b.com', password: '123', company_name: 'Loja', terms_accepted: true });
