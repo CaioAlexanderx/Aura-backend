@@ -6,8 +6,6 @@
 //   pois migration 114 tornou aceite dos Termos obrigatório antes das demais
 //   validações. Sem o campo, todos os testes de /register recebiam 400 com
 //   "O aceite dos Termos de Uso e obrigatorio..." em vez do erro esperado.
-// Fix (PR #76): adicionado teste explícito '400 — termos não aceitos' pra
-//   cobrir o novo gate do registro (delta restante após rebase).
 // ============================================================
 const request = require('supertest');
 
@@ -26,6 +24,7 @@ describe('POST /api/v1/auth/register', () => {
   });
 
   test('400 — termos não aceitos', async () => {
+    // PR #76: cobre o novo gate de aceite obrigatório dos Termos (migration 114).
     const res = await request(app).post('/api/v1/auth/register')
       .send({ name: 'João', email: 'a@b.com', password: 'senha1234', company_name: 'Loja' });
     expect(res.status).toBe(400);
