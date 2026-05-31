@@ -38,6 +38,12 @@
 //   e ja estava em /pdv/summary (PR #41 07/05).
 //   top_products e top_employees mantidos sem filtro: itens reais
 //   vendidos e seller real continuam contando.
+//
+// 29/05/2026 (type na listagem): /me/sales expoe COALESCE(s.type,'sale')
+//   AS type pra UI consolidada marcar "Troca" (igual ao per-company
+//   /companies/:id/sales). A troca SEMPRE apareceu na listagem (sem
+//   filtro de type); so faltava o campo no retorno. Agregados de receita
+//   seguem excluindo troca (analytics/dashboard) — sem mudanca.
 // ============================================================
 const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
@@ -686,6 +692,7 @@ router.get('/sales', async (req, res) => {
 
     const listRes = await db.query(
       `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status,
+              COALESCE(s.type, 'sale') AS type,
               s.cancelled_at, s.created_at,
               s.customer_id, c.name AS customer_name,
               s.seller_id, COALESCE(s.seller_name, e.name) AS seller_name, s.employee_id,
@@ -760,6 +767,7 @@ router.get('/sales', async (req, res) => {
         discount_amount: parseFloat(r.discount_amount || 0),
         payment_method: r.payment_method,
         status: r.status || 'completed',
+        type: r.type || 'sale',
         cancelled_at: r.cancelled_at,
         created_at: r.created_at,
         customer: r.customer_id ? { id: r.customer_id, name: r.customer_name } : null,

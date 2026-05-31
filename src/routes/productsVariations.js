@@ -6,7 +6,7 @@
 // cor x tamanho forma o estoque por combinacao. Preco unico do pai.
 //
 // Shape da API:
-//   GET  -> { colors: [{hex, name}], sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, mode: 'none'|'color'|'size'|'matrix' }
+//   GET  -> { colors: [{hex, name}], sizes: ["P","M"], matrix: {"#FF0000|P": 5, ...}, barcodes: {"#FF0000|P": "7891234567890", ...}, images: {"#FF0000|P": "https://..."}, mode: 'none'|'color'|'size'|'matrix' }
 //   PUT  -> recebe mesmo shape, reescreve variantes (soft-delete antigas)
 //
 // Schema preservado: usa product_variants + product_variant_values
@@ -20,10 +20,53 @@
 // com color/size proprios do pai, limpamos color=NULL e size=NULL do
 // pai pra evitar dupla exibicao no VariantPickerModal e loop de
 // banner-amarelo no editor (ver comentario no UPDATE final).
+//
+// 21/05/2026: GET expoe barcodes por combinacao (paralelo ao matrix).
+// PUT aceita barcodes e persiste em product_variants.barcode no INSERT.
+//
+// 22/05/2026: GET e PUT usam visibilityWhere para casos multi-CNPJ
+// (produto shared visto por subsidiaria). Bug Davi: editava produto
+// shared logado na Villa Branca, GET caia em 404 com o filtro naive
+// company_id=$cid → frontend mostrava mode='none' falso → user nao
+// via variantes nem conseguia ajustar estoque. Mesma armadilha que
+// o PR #77 corrigiu pra productImage.js (memoria
+// armadilha_visibility_leaks_rotas_produto).
+//
+// 23/05/2026: GET expoe `images` map (matrixKey -> image_url) das
+// variantes ativas. PUT preserva image_url no soft-delete + INSERT:
+// antes do soft-delete, snapshota mapa (color,size) -> image_url;
+// apos INSERT, reaplica image_url nas variantes recriadas com a
+// mesma combinacao. Sem esse rewrite, qualquer auto-save (que dispara
+// a cada blur) limpava as fotos. Migration 129 (image_url TEXT).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+
+// ─── Visibilidade de grupo (BIDIRECIONAL) ────────────────
+//
+// Copia da funcao canonica em src/routes/products.js. Replicada
+// aqui (em vez de importada) para evitar dependencia entre routers.
+// Se a logica do canonico mudar (raro — produto-membership e padrao
+// estavel desde 08/05/2026), atualizar ambos.
+//
+// Regra: produto P visivel para empresa X se
+//   P.company_id = X
+//   OU (P.is_group_shared E group_root(P.company_id) = group_root(X))
+//
+// SQL: COALESCE(NULLIF(billing_owner_company_id, id), id) = group_root.
+function visibilityWhere(idParam, cidParam) {
+  return `id = ${idParam} AND (company_id = ${cidParam} OR (
+    is_group_shared = true
+    AND company_id IN (
+      SELECT id FROM companies
+      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
+        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
+        FROM companies WHERE id = ${cidParam}
+      )
+    )
+  ))`;
+}
 
 // Helpers
 function buildMatrixKey(colorHex, sizeValue) {
@@ -39,20 +82,35 @@ function skuSuffixFromAttrs(colorHex, colorName, sizeValue) {
   return parts.join('-');
 }
 
+// 23/05/2026: Extrai a combinacao (color_hex, size_value) de um array
+// de attributes vindo do GET. Usado tanto pelo GET (expor images map)
+// quanto pelo PUT (snapshot pra preservar fotos no rewrite).
+function extractAttrs(attributes) {
+  let colorHex = null, sizeValue = null;
+  for (const a of attributes || []) {
+    const name = String(a.attribute || '').toLowerCase();
+    if (name === 'cor' || name === 'color') colorHex = a.value;
+    else if (name === 'tamanho' || name === 'size') sizeValue = a.value;
+  }
+  return { colorHex, sizeValue };
+}
+
 // GET /companies/:id/products/:pid/variations
 router.get('/:pid/variations', async (req, res) => {
   const { id: cid, pid } = req.params;
   try {
-    // Valida que o produto existe e pertence a empresa
+    // 22/05/2026: visibilityWhere em vez de "id=$1 AND company_id=$2"
+    // pra que subsidiarias do grupo enxerguem variantes de produtos
+    // shared do billing_owner (bug Davi Villa Branca).
     const { rows: prodRows } = await db.query(
-      'SELECT id, name, stock_qty FROM products WHERE id = $1 AND company_id = $2',
+      `SELECT id, name, stock_qty FROM products WHERE ${visibilityWhere('$1', '$2')}`,
       [pid, cid]
     );
     if (!prodRows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
 
-    // Busca variantes ativas + atributos
+    // Busca variantes ativas + atributos (23/05/2026: inclui image_url)
     const { rows: variantRows } = await db.query(
-      `SELECT pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode,
+      `SELECT pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode, pv.image_url,
         COALESCE(json_agg(
           json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
           ORDER BY pvv.attribute_name
@@ -60,35 +118,32 @@ router.get('/:pid/variations', async (req, res) => {
        FROM product_variants pv
        LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
        WHERE pv.product_id = $1 AND pv.is_active = true
-       GROUP BY pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode
+       GROUP BY pv.id, pv.sku_suffix, pv.stock_qty, pv.barcode, pv.image_url
        ORDER BY pv.created_at ASC`,
       [pid]
     );
 
-    // Decompoe variantes em cores, tamanhos e matriz
+    // Decompoe variantes em cores, tamanhos, matriz, barcodes e images (23/05/2026)
     const colorsMap = new Map();   // hex -> name
     const sizesSet = new Set();
     const matrix = {};
+    const barcodes = {};   // matrixKey -> barcode (21/05/2026)
+    const images = {};     // matrixKey -> image_url (23/05/2026)
 
     for (const v of variantRows) {
-      const attrs = v.attributes || [];
-      let colorHex = null, colorName = null, sizeValue = null;
-      for (const a of attrs) {
-        const attrName = String(a.attribute || '').toLowerCase();
-        if (attrName === 'cor' || attrName === 'color') {
-          colorHex = a.value;
-          // Tenta extrair nome do sku_suffix (VERMELHO-P -> VERMELHO)
-          if (v.sku_suffix) {
-            const first = v.sku_suffix.split('-')[0];
-            if (first && !/^[0-9A-F]{6}$/i.test(first)) colorName = first;
-          }
-        } else if (attrName === 'tamanho' || attrName === 'size') {
-          sizeValue = a.value;
-        }
+      const { colorHex, sizeValue } = extractAttrs(v.attributes);
+      let colorName = null;
+      if (colorHex && v.sku_suffix) {
+        // Tenta extrair nome do sku_suffix (VERMELHO-P -> VERMELHO)
+        const first = v.sku_suffix.split('-')[0];
+        if (first && !/^[0-9A-F]{6}$/i.test(first)) colorName = first;
       }
       if (colorHex) colorsMap.set(colorHex, colorName || null);
       if (sizeValue) sizesSet.add(sizeValue);
-      matrix[buildMatrixKey(colorHex, sizeValue)] = parseInt(v.stock_qty) || 0;
+      const key = buildMatrixKey(colorHex, sizeValue);
+      matrix[key] = parseInt(v.stock_qty) || 0;
+      if (v.barcode) barcodes[key] = v.barcode;
+      if (v.image_url) images[key] = v.image_url;   // 23/05/2026
     }
 
     const colors = Array.from(colorsMap.entries()).map(([hex, name]) => ({ hex, name }));
@@ -105,6 +160,8 @@ router.get('/:pid/variations', async (req, res) => {
       colors,
       sizes,
       matrix,
+      barcodes,
+      images,   // 23/05/2026: foto por combinacao
       mode,
       total_variants: variantRows.length,
     });
@@ -115,11 +172,12 @@ router.get('/:pid/variations', async (req, res) => {
 });
 
 // PUT /companies/:id/products/:pid/variations
-// Body: { colors: [{hex, name?}], sizes: ["P","M"], matrix: {"hex|size": stock, ...} }
+// Body: { colors: [{hex, name?}], sizes: ["P","M"], matrix: {"hex|size": stock, ...}, barcodes: {"hex|size": "ean", ...} }
 // Reescreve todas as variantes: soft-delete as ativas + cria novas.
 router.put('/:pid/variations', async (req, res) => {
   const { id: cid, pid } = req.params;
-  const { colors = [], sizes = [], matrix = {} } = req.body || {};
+  // 21/05/2026: barcodes adicionado ao body (opcional, padrao vazio)
+  const { colors = [], sizes = [], matrix = {}, barcodes = {} } = req.body || {};
 
   // Validacoes
   if (!Array.isArray(colors) || !Array.isArray(sizes)) {
@@ -143,9 +201,12 @@ router.put('/:pid/variations', async (req, res) => {
     // Valida produto + captura color/size proprios atuais (necessario pra
     // detectar migracao do estoque do pai pra variante e limpar os campos
     // depois — evita dupla exibicao no VariantPickerModal e loop de banner
-    // amarelo no editor)
+    // amarelo no editor).
+    //
+    // 22/05/2026: visibilityWhere em vez de "id=$1 AND company_id=$2"
+    // (mesmo motivo do GET — subsidiarias precisam editar produtos shared).
     const { rows: prodRows } = await client.query(
-      'SELECT id, color, size FROM products WHERE id = $1 AND company_id = $2',
+      `SELECT id, color, size FROM products WHERE ${visibilityWhere('$1', '$2')}`,
       [pid, cid]
     );
     if (!prodRows.length) {
@@ -155,6 +216,30 @@ router.put('/:pid/variations', async (req, res) => {
     }
     const parentColor = prodRows[0].color || null;
     const parentSize  = prodRows[0].size  || null;
+
+    // 23/05/2026: snapshot do mapa (color, size) -> image_url ANTES
+    // do soft-delete. Necessario porque o INSERT cria variantes com
+    // ids novos; sem isso, qualquer auto-save apagaria as fotos.
+    // Chave: buildMatrixKey(colorHex, sizeValue) (mesma do GET output).
+    const { rows: prevVariants } = await client.query(
+      `SELECT pv.image_url,
+         COALESCE(json_agg(
+           json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
+           ORDER BY pvv.attribute_name
+         ) FILTER (WHERE pvv.id IS NOT NULL), '[]'::json) AS attributes
+       FROM product_variants pv
+       LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
+       WHERE pv.product_id = $1 AND pv.is_active = true AND pv.image_url IS NOT NULL
+       GROUP BY pv.id, pv.image_url`,
+      [pid]
+    );
+    const imageByCombo = new Map();   // matrixKey -> image_url
+    for (const row of prevVariants) {
+      const { colorHex, sizeValue } = extractAttrs(row.attributes);
+      // Normaliza hex pra uppercase (consistencia com inputs do PUT)
+      const normHex = colorHex ? String(colorHex).toUpperCase() : null;
+      imageByCombo.set(buildMatrixKey(normHex, sizeValue), row.image_url);
+    }
 
     // Soft-delete variantes ativas atuais (preserva sale_items FK)
     await client.query(
@@ -202,12 +287,18 @@ router.put('/:pid/variations', async (req, res) => {
     const created = [];
     for (const combo of combinations) {
       const skuSuffix = skuSuffixFromAttrs(combo.colorHex, combo.colorName, combo.sizeValue);
+      // 21/05/2026: persiste barcode por combinacao (lookup na chave matrixKey)
+      const barcodeVal = barcodes[buildMatrixKey(combo.colorHex, combo.sizeValue)] || null;
 
-      // Cria variante
+      // 23/05/2026: recupera image_url snapshotada (lookup com hex normalizado)
+      const normHex = combo.colorHex ? String(combo.colorHex).toUpperCase() : null;
+      const imageVal = imageByCombo.get(buildMatrixKey(normHex, combo.sizeValue)) || null;
+
+      // Cria variante (inclui barcode e image_url se houver)
       const { rows: variantRow } = await client.query(
-        `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, is_active)
-         VALUES ($1, $2, $3, true) RETURNING id`,
-        [pid, skuSuffix || null, combo.stock]
+        `INSERT INTO product_variants (product_id, sku_suffix, stock_qty, barcode, image_url, is_active)
+         VALUES ($1, $2, $3, $4, $5, true) RETURNING id`,
+        [pid, skuSuffix || null, combo.stock, barcodeVal, imageVal]
       );
       const variantId = variantRow[0].id;
 

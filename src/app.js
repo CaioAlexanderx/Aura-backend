@@ -8,6 +8,7 @@ const rateLimit    = require('express-rate-limit');
 const { Sentry, initSentry } = require('./config/sentry');
 const { sentryContext, sentryError } = require('./middleware/sentryContext');
 const { validateRuntimeEnv } = require('./config/env');
+const { customDomainMiddleware } = require('./middleware/customDomain');
 
 const env = validateRuntimeEnv();
 const app = express();
@@ -18,6 +19,11 @@ app.set('trust proxy', 1);
 // ── Sentry ─────────────────────────────────────────
 initSentry();
 app.use(Sentry.Handlers.requestHandler());
+
+// ── Custom domain → storefront rewrite (antes do CORS e rotas) ─────────
+// Mapeia Host headers de domínios customizados (ex: www.davicalcados2.com.br)
+// para a rota interna /api/v1/storefront/:slug/page antes do roteamento normal.
+app.use(customDomainMiddleware);
 
 // ── BE-REV-14: Security headers (Helmet + CSP) ─────────
 const allowedOrigins = env.ALLOWED_ORIGINS === '*'

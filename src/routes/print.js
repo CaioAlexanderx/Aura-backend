@@ -1,11 +1,16 @@
 // ============================================================
 // AURA. — Impressao de Cupom via window.print() (INF-04 + PDV-01)
 // P0 #6 FIX: seller_name now shows employee name (cashier), not owner
+// 29/05/2026: GET /danfe/devolucao/:saleId — baixa o PDF do DANFE da
+//   NF-e (modelo 55) de devolucao emitida pra troca, via Nuvem Fiscal.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
+const nuvemfiscal = require('../services/nuvemfiscal');
+
+const NUVEM_URL = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
 
 function fmt(v) { return parseFloat(v || 0).toFixed(2); }
 
@@ -183,6 +188,57 @@ router.get('/receipt/:saleId/a4', requireAuth, async (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(receiptHTML({ ...data, options: { autoprint: false, width80: false } }));
   } catch (err) { console.error('[print] a4 error:', err.message); res.status(500).json({ error: 'Erro ao gerar cupom' }); }
+});
+
+// ============================================================
+// GET /print/danfe/devolucao/:saleId
+// Baixa o PDF do DANFE da NF-e (modelo 55) de devolucao emitida para a
+// troca cujo sale_id = :saleId. Localiza a emissao autorizada com
+// nuvemfiscal_id em nfce_emissions e baixa o PDF na Nuvem Fiscal.
+//
+// requireAuth: o frontend chama via fetch autenticado + blob (mesmo
+// padrao de NfceActions), entao o Bearer chega no header normalmente.
+// ============================================================
+router.get('/danfe/devolucao/:saleId', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT nuvemfiscal_id, chave_acesso, status, tipo
+         FROM nfce_emissions
+        WHERE sale_id = $1 AND company_id = $2
+          AND tipo IN ('nfe', 'nfe_devolucao')
+          AND nuvemfiscal_id IS NOT NULL
+        ORDER BY (status = 'autorizada') DESC, created_at DESC
+        LIMIT 1`,
+      [req.params.saleId, req.params.id]
+    );
+    const em = rows[0];
+    if (!em || !em.nuvemfiscal_id) {
+      return res.status(404).json({
+        error: 'NF-e de devolucao ainda nao autorizada para esta troca. Reemita a nota antes de imprimir o DANFE.',
+        code: 'NFE_DEVOLUCAO_NOT_FOUND',
+      });
+    }
+
+    const token = await nuvemfiscal.getToken();
+    const nfResp = await fetch(`${NUVEM_URL}/nfe/${em.nuvemfiscal_id}/pdf`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/pdf' },
+    });
+    if (!nfResp.ok) {
+      const detail = await nfResp.text().catch(() => '');
+      console.error('[print] danfe devolucao Nuvem Fiscal error:', nfResp.status, String(detail).slice(0, 300));
+      return res.status(502).json({
+        error: 'Nao foi possivel obter o DANFE na Nuvem Fiscal.',
+        status: nfResp.status,
+      });
+    }
+    const arrayBuf = await nfResp.arrayBuffer();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="danfe-devolucao-${req.params.saleId}.pdf"`);
+    res.send(Buffer.from(arrayBuf));
+  } catch (err) {
+    console.error('[print] danfe devolucao error:', err.message);
+    res.status(500).json({ error: 'Erro ao gerar DANFE de devolucao' });
+  }
 });
 
 module.exports = router;

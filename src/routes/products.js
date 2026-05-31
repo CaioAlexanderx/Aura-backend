@@ -29,6 +29,21 @@
 //   mas explodia em 42P01 quando o deployment nao tinha a migration de
 //   barbershop (caso Eryca/Finesse — varejo puro). safeNullProductRef
 //   ignora 42P01 e segue o resto da cadeia.
+// FEAT (19/05/2026): suporte a variantes no GET. variants_stock_total
+//   agrega SUM(product_variants.stock_qty) e variant_barcodes lista
+//   ARRAY_AGG dos barcodes das variants ativas. Search WHERE estendido
+//   pra match em pv.barcode (bipando variant encontra o pai).
+//   Necessario depois da migration que move estoque do pai pras variants
+//   (zera products.stock_qty do pai). Sem isso o KPI "Unidades totais"
+//   subnotifica e o lowStock infla.
+// FEAT (21/05/2026): merge_suggestion no POST — detecta produtos sem
+//   variantes com mesmo nome base (strip de sufixo de tamanho) e retorna
+//   { nome_base, count } junto com o produto criado. Não bloqueia a criação.
+// FIX (21/05/2026): GET filtra is_active = true — produtos filhos de
+//   variante (desativados no merge) não aparecem mais no Estoque/PDV.
+//   Sem esse filtro, "Beira Rio Mule Napa Camel - 37" (is_active=false)
+//   aparecia na lista com stock=0, causando "estoque baixo" no PDV quando
+//   Davi clicava nele ao invés do pai com variantes.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -133,18 +148,54 @@ router.get('/', async (req, res) => {
   const search = req.query.search;
 
   try {
-    let where = `WHERE ${listVisibilityWhere('$1')}`;
+    // FIX (21/05/2026): is_active = true filtra produtos desativados (filhos
+    // de variante) — sem isso aparecem na lista com stock=0 causando
+    // "estoque baixo" no PDV quando o usuário clica no filho ao invés do pai.
+    let where = `WHERE is_active = true AND ${listVisibilityWhere('$1')}`;
     const params = [cid];
 
     if (category) { where += ` AND category = $${params.length + 1}`; params.push(category); }
-    if (search)   { where += ` AND (name ILIKE $${params.length + 1} OR sku ILIKE $${params.length + 1} OR barcode ILIKE $${params.length + 1})`; params.push(`%${search}%`); }
+    if (search) {
+      // 19/05/2026: busca tambem em variant.barcode — usuario bipa o
+      // barcode da variante e queremos encontrar o pai. Sem isso, depois
+      // da migration que move barcode pras variants, o pai com barcode=NULL
+      // some da busca por codigo de barras.
+      where += ` AND (
+        name ILIKE $${params.length + 1}
+        OR sku ILIKE $${params.length + 1}
+        OR barcode ILIKE $${params.length + 1}
+        OR EXISTS (
+          SELECT 1 FROM product_variants pv
+          WHERE pv.product_id = products.id
+            AND pv.is_active = true
+            AND pv.barcode ILIKE $${params.length + 1}
+        )
+      )`;
+      params.push(`%${search}%`);
+    }
 
     const countRes = await db.query(`SELECT COUNT(*) AS total FROM products ${where}`, params);
     const dataRes = await db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
               is_active, is_group_shared, company_id, created_at,
-              (SELECT EXISTS(SELECT 1 FROM product_variants pv WHERE pv.product_id = products.id AND pv.is_active = true)) AS has_variants
+              (SELECT EXISTS(SELECT 1 FROM product_variants pv WHERE pv.product_id = products.id AND pv.is_active = true)) AS has_variants,
+              -- 19/05/2026: SUM do estoque das variants ativas pra alimentar UI/KPIs
+              -- depois que a migration zera products.stock_qty do pai.
+              COALESCE(
+                (SELECT SUM(pv.stock_qty) FROM product_variants pv
+                 WHERE pv.product_id = products.id AND pv.is_active = true),
+                0
+              ) AS variants_stock_total,
+              -- ARRAY dos barcodes das variants ativas — frontend usa pra
+              -- scanner local achar o pai bipando barcode de variant.
+              COALESCE(
+                (SELECT array_agg(pv.barcode) FROM product_variants pv
+                 WHERE pv.product_id = products.id
+                   AND pv.is_active = true
+                   AND pv.barcode IS NOT NULL),
+                ARRAY[]::TEXT[]
+              ) AS variant_barcodes
        FROM products ${where} ORDER BY name ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
     );
@@ -163,6 +214,9 @@ router.get('/', async (req, res) => {
       stock_company_id: r.company_id,
       created_at: r.created_at,
       has_variants: r.has_variants || false,
+      // 19/05/2026: novos campos pra UI lidar com variants
+      variants_stock_total: parseInt(r.variants_stock_total) || 0,
+      variant_barcodes: Array.isArray(r.variant_barcodes) ? r.variant_barcodes : [],
     }));
 
     res.json({ products, total: parseInt(countRes.rows[0]?.total) || 0, limit, offset, plan_limit: planLimit });
@@ -230,14 +284,48 @@ router.post('/', async (req, res) => {
 
   try {
     const result = await db.query(
-      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared)\n       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
       [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
        parseFloat(price)||0, parseFloat(cost_price)||0, parseInt(stock_qty)||0, parseInt(min_stock)||0,
        parseInt(stock_max)||0, unit||'un', color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
        size ? String(size).slice(0,100) : null, sanitizeNcm(ncm), isGroupShared]
     );
-    res.status(201).json(result.rows[0]);
+
+    // Detectar sugestão de merge: verifica se existem outros produtos sem variantes
+    // com o mesmo nome base (após strip do sufixo de tamanho) na mesma empresa.
+    // Não bloqueia a criação — erro silencioso.
+    let merge_suggestion = null;
+    try {
+      const nomeTrimmed = String(name).trim();
+      const nomeBase = nomeTrimmed
+        .replace(/\s*-\s*\d{2,3}(\/\d{2,3})?$/, '')
+        .replace(/\s\d{2,3}(\/\d{2,3})?$/, '')
+        .trim();
+      // Só sugere se o nome foi modificado (tinha sufixo de tamanho)
+      if (nomeBase.toLowerCase() !== nomeTrimmed.toLowerCase()) {
+        const nomeNorm = nomeBase.toLowerCase().replace(/\s+/g, ' ');
+        const { rows: similar } = await db.query(
+          `SELECT COUNT(*) AS cnt FROM products
+           WHERE company_id = $1
+             AND is_active = true
+             AND id != $2
+             AND NOT EXISTS (SELECT 1 FROM product_variants WHERE product_id = products.id)
+             AND lower(trim(regexp_replace(
+                   regexp_replace(
+                     regexp_replace(name, '\\s*-\\s*\\d{2,3}(/\\d{2,3})?$', ''),
+                     '\\s\\d{2,3}(/\\d{2,3})?$', ''
+                   ), '\\s+', ' ', 'g'
+                 ))) = $3`,
+          [cid, result.rows[0].id, nomeNorm]
+        );
+        const cnt = parseInt(similar[0]?.cnt) || 0;
+        if (cnt >= 1) {
+          merge_suggestion = { nome_base: nomeBase, count: cnt + 1 };
+        }
+      }
+    } catch (_) { /* não bloqueia a criação */ }
+
+    res.status(201).json({ ...result.rows[0], merge_suggestion });
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
 });
 

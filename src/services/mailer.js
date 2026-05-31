@@ -196,7 +196,7 @@ async function sendInviteEmail(to, inviteUrl, companyName, role, inviterName) {
   });
 }
 
-// -- Template: confirmação de pedido Canal Digital --
+// -- Template: confirmação de pedido Canal Digital (cliente) --
 async function sendOrderConfirmationEmail(to, opts) {
   const { order_number, customer_name, total, pix_payload, pix_expires_at, delivery_type, store_name, items } = opts;
   const firstName     = customer_name ? customer_name.split(' ')[0] : '';
@@ -245,7 +245,7 @@ async function sendOrderConfirmationEmail(to, opts) {
   });
 }
 
-// -- Template: atualização de status do pedido Canal Digital --
+// -- Template: atualização de status do pedido Canal Digital (cliente) --
 async function sendOrderStatusEmail(to, { order_number, customer_name, status, store_name }) {
   const firstName = customer_name ? customer_name.split(' ')[0] : '';
   const STATUS_INFO = {
@@ -281,11 +281,70 @@ async function sendOrderStatusEmail(to, { order_number, customer_name, status, s
   });
 }
 
+// -- Template: novo pedido confirmado (lojista) --
+// Enviado ao lojista após pagamento confirmado (Pix, Cartão ou Na Entrega).
+async function sendOwnerNewOrderEmail(to, opts) {
+  const { order_number, customer_name, customer_phone, total, delivery_type, store_name, payment_method } = opts;
+  const fmtR = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
+  const deliveryLabel = delivery_type === 'delivery' ? '🚚 Entrega' : '🏪 Retirada na loja';
+  const paymentLabel  = payment_method === 'pix' ? 'Pix' :
+                        payment_method === 'card' ? 'Cart&atilde;o' : 'Na entrega';
+
+  const phone = customer_phone ? customer_phone.replace(/\D/g, '') : null;
+  const whatsappLink = phone
+    ? `<a href="https://wa.me/55${phone}" style="color:#7c3aed;text-decoration:none;">Chamar no WhatsApp</a>`
+    : '';
+
+  const html = emailLayout(`
+    <p style="font-size:15px;color:#e2e8f0;margin:0 0 4px;">📦 Novo pedido confirmado!</p>
+    <p style="font-size:13px;color:#94a3b8;margin:0 0 20px;">
+      Um novo pedido chegou na sua loja <strong style="color:#e2e8f0;">${store_name}</strong>.
+    </p>
+
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#0c0d18;border:1px solid #1e293b;border-radius:14px;margin:0 0 20px;">
+      <tr>
+        <td style="padding:18px 20px;">
+          <p style="margin:0 0 12px;font-size:20px;font-weight:800;color:#c4b5fd;">Pedido #${order_number}</p>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding:5px 0;font-size:12px;color:#64748b;width:100px;">Cliente</td>
+              <td style="padding:5px 0;font-size:13px;color:#e2e8f0;font-weight:600;">${customer_name}</td>
+            </tr>
+            <tr>
+              <td style="padding:5px 0;font-size:12px;color:#64748b;">Total</td>
+              <td style="padding:5px 0;font-size:15px;color:#7c3aed;font-weight:700;">${fmtR(total)}</td>
+            </tr>
+            <tr>
+              <td style="padding:5px 0;font-size:12px;color:#64748b;">Modalidade</td>
+              <td style="padding:5px 0;font-size:13px;color:#e2e8f0;">${deliveryLabel}</td>
+            </tr>
+            <tr>
+              <td style="padding:5px 0;font-size:12px;color:#64748b;">Pagamento</td>
+              <td style="padding:5px 0;font-size:13px;color:#34d399;font-weight:600;">${paymentLabel} ✓</td>
+            </tr>
+            ${phone ? `<tr>
+              <td style="padding:5px 0;font-size:12px;color:#64748b;">Contato</td>
+              <td style="padding:5px 0;font-size:13px;color:#e2e8f0;">${whatsappLink}</td>
+            </tr>` : ''}
+          </table>
+        </td>
+      </tr>
+    </table>
+
+    <p style="font-size:12px;color:#64748b;text-align:center;margin:0;">
+      Acesse o app Aura para gerenciar o pedido e avanc&oacute; o status conforme o andamento.
+    </p>
+  `);
+
+  return sendMail({
+    to,
+    subject: `📦 Pedido #${order_number} confirmado — ${store_name}`,
+    text: `Novo pedido #${order_number} confirmado em ${store_name}. Cliente: ${customer_name}. Total: ${fmtR(total)}. Pagamento: ${paymentLabel}. Acesse o app Aura para gerenciar.`,
+    html,
+  });
+}
+
 // -- Template: relatório semanal automático --
-// O email é o card de notificação com as métricas-chave.
-// O relatório completo (gráficos, heatmap, insights, narrativas) vive na
-// pagina web /relatorios/semanal/<token> — o link no botão "Ver painel completo"
-// abre essa pagina, que renderiza dados frescos via /api/v1/reports/weekly/:token.
 async function sendWeeklyReport(company, kpis, reportUrl) {
   function fmtR(v) {
     const n = Math.round(v * 100) / 100;
@@ -355,5 +414,6 @@ module.exports = {
   sendInviteEmail,
   sendOrderConfirmationEmail,
   sendOrderStatusEmail,
+  sendOwnerNewOrderEmail,
   sendWeeklyReport,
 };

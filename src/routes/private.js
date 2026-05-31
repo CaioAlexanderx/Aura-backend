@@ -6,8 +6,6 @@ const router = express.Router({ mergeParams: true });
 router.use(requireAuth);
 router.use(requireCompanyAccess());
 
-// -- ESSENCIAL (todos os planos) --
-
 router.use('/', require('./company'));
 router.use('/dashboard', require('./dashboard'));
 router.use('/dashboard/sparkline', require('./dashboardSparkline'));
@@ -21,11 +19,8 @@ router.use('/dre', require('./dre'));
 router.use('/financial/history', require('./financialHistory'));
 router.use('/financial/analysis', require('./financialAnalysis'));
 router.use('/bank', require('./bankReconciliation'));
-// Financeiro v2: Insights agregados (Health Score / Runway / Biggest Lever).
-// Onda 1 (04/05/2026) calcula client-side; este endpoint enriquece com dados do server.
 router.use('/financeiro', require('./financeiroInsights').companyRouter);
-// FIX 07/05/2026: exclui type='troca' do revenue + expoe trocas_count/trocas_net_received
-// + adiciona s.type e s.exchange_of_sale_id na listagem /sales
+router.use('/financeiro', require('./financeiroComparative').companyRouter);
 router.use('/pdv', require('./pdv-summary-patch'));
 router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
@@ -37,16 +32,12 @@ router.use('/products', require('./productsVariations'));
 router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
 router.use('/products', require('./productImage'));
+router.use('/products', require('./variantImage'));
 router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
-// 07/05/2026: Importacao de DANFE PDF via IA. Gate de plano dentro da rota
-// (Negocio = 50/mes, Expansao = ilimitado).
 router.use('/products', require('./danfeImport'));
 router.use('/products/:pid/variants', require('./variants'));
 router.use('/product-categories', require('./productCategories'));
-// M-STOCKLINK MSL-02/03: vincula produtos entre CNPJs do mesmo owner.
-// Monta o companyRouter no root porque ele tem rotas /products/:pid/master-sku
-// (mergeParams pega o :id da empresa pai do private.js).
 router.use('/', require('./productLinks').companyRouter);
 router.use('/coupons', require('./coupons'));
 router.use('/nfce', require('./nfce'));
@@ -55,7 +46,7 @@ router.use('/nfse', require('./nfse'));
 router.use('/storage', require('./storage'));
 router.use('/obligations', require('./fiscalObligations'));
 router.use('/obligations', require('./fiscalPdf'));
-router.use('/', require('./obligationsReport')); // PR38: POST /obligations/:code/report
+router.use('/', require('./obligationsReport'));
 router.use('/guides', require('./guides'));
 router.use('/checklist', require('./checklist').checklistRouter);
 router.use('/onboarding', require('./onboarding'));
@@ -68,40 +59,19 @@ router.use('/reviews', require('./reviews').reviewsRouter);
 router.use('/modules', require('./modules'));
 router.use('/billing', require('./billing'));
 router.use('/support', require('./support'));
-
-// 11/05/2026 -- Clientes basico movido pro Essencial.
-// Decisao de produto: cadastro de cliente e commodity (Bling/Tiny/etc
-// oferecem no plano de entrada). Limite por plano controlado em customers.js:
-//   essencial = 1.000
-//   negocio   = 5.000
-//   expansao  = ilimitado
-// CRM avancado (ranking/retencao/birthdays/crediario) continua Negocio+.
 router.use('/customers', require('./customers'));
-
-// 12/05/2026 -- PLAN-02: Employees CRUD basico movido pro Essencial.
-// Decisao de produto: cadastro de "vendedor" (nome+cargo) e commodity
-// pra atribuir vendas no PDV. CPF, admissao, salario, PIS sao opcionais
-// no schema -- so exigidos pela UI da Folha (Negocio+). Limite por plano:
-//   essencial = 3 funcionarios ativos
-//   negocio   = 50
-//   expansao  = ilimitado
-// Folha de pagamento real (calculo, holerite, comissao, ranking, eSocial)
-// continua Negocio+ via mounts especificos abaixo.
 router.use('/employees', require('./employees'));
-
-// -- NEGOCIO+ --
 
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
-// Crediario (fiado) por cliente -- gate igual /customers porque depende
-// da existencia do CRUD de cliente. Saldo via view, sem integracao com
-// Financeiro/contas a receber. Migration 099.
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInstallments'));
+// F2-2B (29/05/2026): preview 360 + quick-customer
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditPreview'));
+// F2-2D (29/05/2026): a receber crediario no Financeiro
+router.use('/financial', requirePlan('negocio', 'expansao'), require('./financialReceivables'));
 router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'));
-// Folha real: payslip por email, ranking de vendas, comissao -- Negocio+.
-// CRUD de employees (acima) ja e Essencial; estes endpoints sao o
-// 'processamento financeiro recorrente' que justifica o upgrade.
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
 router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
@@ -109,6 +79,7 @@ router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appoi
 router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
 router.use('/digital-channel/orders', requirePlan('negocio', 'expansao'), require('./digitalOrders'));
 router.use('/digital-channel/asaas', requirePlan('negocio', 'expansao'), require('./asaasSubconta'));
+router.use('/payment-gateways', requirePlan('negocio', 'expansao'), require('./paymentGateways'));
 router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
 router.use('/whatsapp', requirePlan('negocio', 'expansao'), require('./whatsappRoutes'));
 router.use('/ai/insights', requirePlan('negocio', 'expansao'), require('./aiInsights'));
@@ -116,9 +87,8 @@ router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbers
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3'));
 router.use('/salon-partners', requirePlan('negocio', 'expansao'), require('./salonPartner'));
 router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplace'));
+router.use('/marketplaces', requirePlan('negocio', 'expansao'), require('./marketplaceAuth'));
 router.use('/esocial', requirePlan('negocio', 'expansao'), require('./esocial'));
-
-// -- EXPANSAO --
 
 router.use('/ai', requirePlan('negocio', 'expansao'), require('./aiChat'));
 router.use('/cashflow', requirePlan('expansao'), require('./cashFlowProjection'));
@@ -134,19 +104,36 @@ router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalBilli
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalRepasse'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalPortal'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalAutomation'));
-router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalTissRetentions')); // PR40 Sprint B
-router.use('/dental/implants',      requirePlan('negocio', 'expansao'), require('./dentalImplants'));
-router.use('/dental/ortho',         requirePlan('negocio', 'expansao'), require('./dentalOrtho'));
-router.use('/dental/documents',     requirePlan('negocio', 'expansao'), require('./dentalDocuments'));
-router.use('/dental/transcribe',    requirePlan('negocio', 'expansao'), require('./dentalTranscription'));
-router.use('/dental/supplies',      requirePlan('negocio', 'expansao'), require('./dentalSupplies'));
+router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalTissRetentions'));
+router.use('/dental/implants',   requirePlan('negocio', 'expansao'), require('./dentalImplants'));
+router.use('/dental/ortho',      requirePlan('negocio', 'expansao'), require('./dentalOrtho'));
+router.use('/dental/documents',  requirePlan('negocio', 'expansao'), require('./dentalDocuments'));
+router.use('/dental/transcribe', requirePlan('negocio', 'expansao'), require('./dentalTranscription'));
+router.use('/dental/supplies',   requirePlan('negocio', 'expansao'), require('./dentalSupplies'));
 router.use('/food', requirePlan('negocio', 'expansao'), require('./food'));
+router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrdersDispatch'));
 router.use('/food/orders', requirePlan('negocio', 'expansao'), require('./foodOrders'));
 router.use('/food/deliverers', requirePlan('negocio', 'expansao'), require('./foodDeliverers'));
+router.use('/food/dispatch', requirePlan('negocio', 'expansao'), require('./foodDispatch'));
 router.use('/food/reports', requirePlan('negocio', 'expansao'), require('./foodReports'));
 router.use('/food/ifood', requirePlan('negocio', 'expansao'), require('./foodIfood'));
 router.use('/food/waiter', requirePlan('negocio', 'expansao'), require('./foodWaiter'));
 router.use('/food/nfce', requirePlan('negocio', 'expansao'), require('./foodNfce'));
 router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./foodSchedule'));
+router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub'));
+
+// Aura Studio: gate de plano REMOVIDO -- Studio acessivel em todos os planos.
+router.use('/studio', require('./studio'));
+router.use('/studio', require('./studioPainel'));
+router.use('/studio', require('./studioKdsApproval'));
+router.use('/studio', require('./studioBulkHub'));
+router.use('/studio', require('./studioUpload'));
+router.use('/studio', require('./studioBulkConvert'));
+router.use('/studio', require('./studioSaleItemPatch'));
+router.use('/studio', require('./studioMarketplaceListing'));
+// Camada 1 — Orçamento + Precificação + Pagamentos (30/05/2026)
+router.use('/studio', require('./studioQuotes'));    // Fase A: Orçamento como entidade
+router.use('/studio', require('./studioPricing'));   // Fase B: Motor de precificação
+router.use('/studio', require('./studioPayments'));  // Fase C: Sinal / pagamento parcial
 
 module.exports = router;

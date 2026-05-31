@@ -3,32 +3,32 @@
 // Auth: OAuth 2.0 client_credentials
 // Docs: https://dev.nuvemfiscal.com.br/docs/api
 //
-// Mai/2026 (foundation):
-// - buildPag agora aceita array de pagamentos (multi-pagamento NFC-e)
-//   ou objeto único legado { method, change }. Ambos coexistem.
-// - buildPag inclui card.tpIntegra=2 para tPag 03/04 (crédito/débito)
-//   evitando Rejeição 391 do SEFAZ (dados do cartão obrigatórios).
-//   Atenção: a propriedade JSON é `card` (confirmado em
-//   nuvem-fiscal/nuvemfiscal-sdk-php NfeSefazDetPag.php), NÃO `cartao`.
-// - buildPag adiciona xPag SOMENTE para tPag=99 (Outros), conforme regra
-//   W21-A do schema NF-e 4.00. Outros tPag rejeitam com cStat=442.
-// - Workaround PIX: tPag=17 mapeia automaticamente para tPag=99 + xPag="PIX"
-//   pra contornar Rejeição 391 disparada erroneamente pela SEFAZ-SP em
-//   produção (problema confirmado via diagnóstico, NF-e válido pelo schema).
+// 27/05/2026 (buildEmit via Nuvem Fiscal — caminho A):
+// - fetchNuvemEmpresa(cnpj) com cache 5min puxa cadastro fiscal
+//   completo (endereço, IE, IM, razão) direto da Nuvem Fiscal,
+//   que é fonte da verdade. Banco do Aura (tabela companies) só
+//   fornece tax_regime e fallback.
+// - buildEmit, buildSelfDest viram ASYNC. emitNfce, emitNfe ajustados.
+// - Caio confirmou que edita cadastro direto na Nuvem Fiscal;
+//   nosso banco fica defasado em campos como address_neighborhood.
 //
-// 12/05/2026 (Fase C — NF-e/55 devolução — DRAFT, aguarda contador):
-// - buildIde aceita tpNF (0=entrada / 1=saída) e finNFe (1=normal /
-//   2=complementar / 3=ajuste / 4=devolução). Default 1/1 preserva
-//   comportamento atual em qualquer chamada existente.
-// - emitNfe propaga esses params + monta `NFref: [{ refNFe }]` quando
-//   nfeData.refNFe é fornecido. Necessário pra devolução referenciar
-//   a NFC-e/55 original (chave 44 dígitos).
-// - Nova função `emitNfeDevolucao(company, params)`: helper específico
-//   pra NF-e/55 de devolução de venda (tpNF=0 + finNFe=4 + refNFe +
-//   CFOP default 1.202). Usado quando NFC-e original passou da janela
-//   de 24h de cancelamento (cancel_reissue rejeita).
-// - NÃO ligado em pdv.js — precisa alinhamento com contador do cliente
-//   (CFOP, natOp, ICMS Simples) + teste em homologação SEFAZ.
+// 27/05/2026 (hotfix endereço defensivo): safeAddrField fallback
+// quando company.address_* vazio/curto. Aplicado em xLgr e xBairro.
+//
+// 27/05/2026 (log detalhado de erro fiscal): nuvemRequest extrai
+// erros[]/errors[] e enriquece msg; emitNfe loga body NF-e 55.
+//
+// 26/05/2026 (hotfix NFref): NFref vai em ide.NFref (TIde), não em
+// infNFe.NFref (TInfNFe).
+//
+// 25/05/2026 (Polish v3): emitNfeDevolucao com dest = próprio emitente
+// (SEFAZ FAQ MG #7). CSOSN 102 + CFOP 1.202 imutáveis.
+//
+// 12/05/2026 (Fase C): emitNfeDevolucao(company, params) com tpNF=0 +
+// finNFe=4 + refNFe + CFOP 1.202.
+//
+// Mai/2026 (foundation): buildPag multi-pagamento, card.tpIntegra=2,
+// xPag só pra tPag=99, workaround PIX (tPag=17 → 99+xPag=PIX).
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -58,6 +58,14 @@ async function getToken() {
   return _token;
 }
 
+function extractErros(data) {
+  if (Array.isArray(data?.erros)) return data.erros;
+  if (Array.isArray(data?.errors)) return data.errors;
+  if (Array.isArray(data?.error?.errors)) return data.error.errors;
+  if (Array.isArray(data?.error?.erros)) return data.error.erros;
+  return [];
+}
+
 async function nuvemRequest(method, path, body) {
   const token = await getToken();
   const opts = {
@@ -68,14 +76,90 @@ async function nuvemRequest(method, path, body) {
   const resp = await fetch(`${NUVEM_URL}${path}`, opts);
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    const msg = data?.error?.message || data?.mensagem || data?.message ||
-                data?.erros?.[0]?.mensagem || `Nuvem Fiscal error ${resp.status}`;
+    const erros = extractErros(data);
+    const firstErro = erros[0];
+    const erroDetail = firstErro && (firstErro.mensagem || firstErro.message || firstErro.descricao || firstErro.detail);
+    const erroCampo  = firstErro && (firstErro.campo || firstErro.field || firstErro.property);
+
+    let msg = data?.error?.message || data?.mensagem || data?.message ||
+              erroDetail || `Nuvem Fiscal error ${resp.status}`;
+    if (erroCampo && erroDetail && !String(msg).includes(erroCampo)) {
+      msg = `${msg} (campo: ${erroCampo})`;
+    } else if (erros.length > 1) {
+      msg = `${msg} (+${erros.length - 1} outros erros)`;
+    }
+
     const err = new Error(msg);
     err.status = resp.status;
     err.payload = data;
+    err.erros = erros;
     throw err;
   }
   return data;
+}
+
+// ============================================================
+// 27/05/2026 — Cadastro fiscal via Nuvem Fiscal (caminho A)
+// ============================================================
+// Cache module-level com TTL pra reduzir overhead nas emissões.
+// Pra forçar refresh após edição na Nuvem Fiscal: clearEmpresaCache(cnpj).
+const _empresaCache = new Map();
+const EMPRESA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+
+async function fetchNuvemEmpresa(cnpj) {
+  const cleanCnpj = String(cnpj || '').replace(/\D/g, '');
+  if (cleanCnpj.length !== 14 && cleanCnpj.length !== 11) return null;
+
+  const cached = _empresaCache.get(cleanCnpj);
+  if (cached && Date.now() < cached.expiresAt) return cached.data;
+
+  try {
+    const data = await nuvemRequest('GET', `/empresas/${cleanCnpj}`);
+    if (data && data.cpf_cnpj) {
+      _empresaCache.set(cleanCnpj, { data, expiresAt: Date.now() + EMPRESA_CACHE_TTL_MS });
+      return data;
+    }
+    return null;
+  } catch (e) {
+    console.warn(`[nuvemfiscal] fetchNuvemEmpresa(${cleanCnpj}) falhou (${e.status || '?'}): ${e.message}. Fallback pro banco Aura.`);
+    // Cache negativo curto (1min) pra não bombardear API em CNPJs ainda não cadastrados
+    _empresaCache.set(cleanCnpj, { data: null, expiresAt: Date.now() + 60 * 1000 });
+    return null;
+  }
+}
+
+function clearEmpresaCache(cnpj) {
+  if (!cnpj) {
+    _empresaCache.clear();
+    return;
+  }
+  const cleanCnpj = String(cnpj).replace(/\D/g, '');
+  _empresaCache.delete(cleanCnpj);
+}
+
+// Merge company (banco Aura) com cadastro fiscal da Nuvem Fiscal.
+// Prioriza Nuvem em campos fiscais (endereço, IE, IM, razão).
+// Mantém Aura pra campos operacionais (id, tax_regime, billing_*).
+function mergeCompanyWithNuvem(company, nuvem) {
+  if (!nuvem) return company;
+  const end = nuvem.endereco || {};
+  return {
+    ...company,
+    cnpj: nuvem.cpf_cnpj || company.cnpj,
+    legal_name: nuvem.nome_razao_social || company.legal_name,
+    trade_name: nuvem.nome_fantasia || company.trade_name,
+    inscricao_estadual: nuvem.inscricao_estadual || company.inscricao_estadual,
+    inscricao_municipal: nuvem.inscricao_municipal || company.inscricao_municipal,
+    email: nuvem.email || company.email,
+    phone: nuvem.fone || company.phone,
+    address_street: end.logradouro || company.address_street,
+    address_number: end.numero || company.address_number,
+    address_neighborhood: end.bairro || company.address_neighborhood,
+    ibge_code: end.codigo_municipio || company.ibge_code,
+    address_city: end.cidade || company.address_city,
+    address_state: end.uf || company.address_state,
+    address_zip: end.cep || company.address_zip,
+  };
 }
 
 const UF_CUF = {
@@ -183,28 +267,48 @@ async function uploadCertificate(cnpj, certificateBase64, password) {
   });
 }
 
-function buildEmit(company) {
-  const cnpj = (company.cnpj || '').replace(/\D/g, '');
+// Helper defensivo pra campos de endereço que ainda venham vazios mesmo
+// após merge com Nuvem Fiscal (caso muito raro, mas cobre).
+function safeAddrField(value, minLen, fallback, fieldName, companyCnpj) {
+  const v = String(value || '').trim();
+  if (v.length >= minLen) return v;
+  console.warn(
+    `[nuvemfiscal] cadastro company ${companyCnpj || '?'} sem ${fieldName} ` +
+    `(valor atual: "${v}", min: ${minLen} chars). Usando fallback "${fallback}". ` +
+    `Verifique se o cadastro na Nuvem Fiscal está completo.`
+  );
+  return fallback;
+}
+
+// 27/05/2026: buildEmit agora é ASYNC. Busca cadastro fiscal da Nuvem
+// Fiscal (com cache 5min) e mescla com company do banco Aura, priorizando
+// dados fiscais da Nuvem. Banco Aura é fallback se Nuvem indisponível.
+async function buildEmit(company) {
+  const cnpjRaw = String(company.cnpj || '').replace(/\D/g, '');
+  const nuvem = cnpjRaw ? await fetchNuvemEmpresa(cnpjRaw) : null;
+  const eff = mergeCompanyWithNuvem(company, nuvem);
+
+  const cnpj = (eff.cnpj || '').replace(/\D/g, '');
   return {
     CNPJ: cnpj,
-    xNome: company.legal_name || company.trade_name || company.name || 'Emitente',
-    xFant: company.trade_name || company.name || undefined,
+    xNome: eff.legal_name || eff.trade_name || eff.name || 'Emitente',
+    xFant: eff.trade_name || eff.name || undefined,
     enderEmit: {
-      xLgr: company.address_street || '',
-      nro: company.address_number || 'S/N',
-      xBairro: company.address_neighborhood || '',
-      cMun: company.ibge_code || '',
-      xMun: company.address_city || '',
-      UF: (company.address_state || 'SP').toUpperCase(),
-      CEP: (company.address_zip || '').replace(/\D/g, ''),
+      xLgr: safeAddrField(eff.address_street, 2, 'Nao informado', 'address_street', cnpj),
+      nro: String(eff.address_number || 'S/N').trim() || 'S/N',
+      xBairro: safeAddrField(eff.address_neighborhood, 2, 'Centro', 'address_neighborhood', cnpj),
+      cMun: eff.ibge_code || '',
+      xMun: eff.address_city || '',
+      UF: (eff.address_state || 'SP').toUpperCase(),
+      CEP: (eff.address_zip || '').replace(/\D/g, ''),
       cPais: '1058',
       xPais: 'Brasil',
-      fone: (company.phone || '').replace(/\D/g, '') || undefined,
+      fone: (eff.phone || '').replace(/\D/g, '') || undefined,
     },
-    IE: company.inscricao_estadual || undefined,
-    IM: company.inscricao_municipal || undefined,
-    CRT: company.tax_regime === 'mei' ? 4 :
-         company.tax_regime === 'lucro_presumido' || company.tax_regime === 'lucro_real' ? 3 : 1,
+    IE: eff.inscricao_estadual || undefined,
+    IM: eff.inscricao_municipal || undefined,
+    CRT: eff.tax_regime === 'mei' ? 4 :
+         eff.tax_regime === 'lucro_presumido' || eff.tax_regime === 'lucro_real' ? 3 : 1,
   };
 }
 
@@ -217,6 +321,18 @@ function buildDest({ cpf, cnpj, name, email }) {
   else dest.CPF = cpfClean;
   if (email) dest.email = email;
   return dest;
+}
+
+// 27/05/2026: buildSelfDest agora é ASYNC (chama await buildEmit).
+async function buildSelfDest(company) {
+  const emit = await buildEmit(company);
+  return {
+    CNPJ: emit.CNPJ,
+    xNome: emit.xNome,
+    indIEDest: emit.IE ? 1 : 9,
+    IE: emit.IE,
+    enderDest: { ...emit.enderEmit },
+  };
 }
 
 function buildDet(items, opts = {}) {
@@ -310,10 +426,6 @@ function buildPag(payments, totalFallback) {
   return { detPag, vTroco: round(vTroco) };
 }
 
-// buildIde — 12/05/2026: aceita tpNF e finNFe opcionais.
-//   tpNF:  0=entrada, 1=saída (default 1 = saída, preserva comportamento)
-//   finNFe: 1=normal, 2=complementar, 3=ajuste, 4=devolução (default 1)
-// Necessário pra suportar NF-e/55 de devolução (Fase C troca >24h).
 function buildIde({ company, mod, serie, nNF, tpAmb, tpImp, indFinal, indPres, idDest, natOp, verProc, tpNF, finNFe }) {
   const dh = isoBR();
   const cUF = ufToCodigo(company.address_state);
@@ -351,14 +463,30 @@ function resolvePagInput(data) {
   };
 }
 
+function buildInfAdic({ observacoes, infAdFisco }) {
+  const infAdic = {};
+  if (observacoes) infAdic.infCpl = String(observacoes).slice(0, 5000);
+  if (infAdFisco) infAdic.infAdFisco = String(infAdFisco).slice(0, 2000);
+  return Object.keys(infAdic).length ? infAdic : undefined;
+}
+
 async function emitNfce(company, nfceData) {
   const tpAmb = NUVEM_URL.includes('sandbox') ? 2 : 1;
-  const crt = company.tax_regime === 'mei' ? 4 :
-              company.tax_regime === 'lucro_presumido' || company.tax_regime === 'lucro_real' ? 3 : 1;
+
+  // 27/05/2026: buscar Nuvem ANTES de tudo pra também usar tax_regime
+  // efetivo (e tudo derivado dele) consistente com o que vai pro emit.
+  const cnpjRaw = String(company.cnpj || '').replace(/\D/g, '');
+  const nuvem = cnpjRaw ? await fetchNuvemEmpresa(cnpjRaw) : null;
+  const effective = mergeCompanyWithNuvem(company, nuvem);
+
+  const crt = effective.tax_regime === 'mei' ? 4 :
+              effective.tax_regime === 'lucro_presumido' || effective.tax_regime === 'lucro_real' ? 3 : 1;
 
   const det = buildDet(nfceData.items || [], { crt });
   const total = buildICMSTot(det);
   const totalValue = nfceData.total_value !== undefined ? Number(nfceData.total_value) : total.vNF;
+
+  const emit = await buildEmit(effective);
 
   const body = {
     ambiente: tpAmb === 2 ? 'homologacao' : 'producao',
@@ -366,14 +494,14 @@ async function emitNfce(company, nfceData) {
     infNFe: {
       versao: '4.00',
       ide: buildIde({
-        company, mod: 65,
+        company: effective, mod: 65,
         serie: nfceData.serie || 1,
         nNF: nfceData.numero || 1,
         tpAmb, tpImp: 4,
         indFinal: 1, indPres: 1, idDest: 1,
         natOp: nfceData.natureza_operacao || 'Venda ao consumidor',
       }),
-      emit: buildEmit(company),
+      emit,
       dest: buildDest({
         cpf: nfceData.recipient_cpf,
         cnpj: nfceData.recipient_cnpj,
@@ -384,11 +512,12 @@ async function emitNfce(company, nfceData) {
       total: { ICMSTot: total },
       transp: { modFrete: 9 },
       pag: buildPag(resolvePagInput(nfceData), totalValue),
-      infAdic: nfceData.observacoes ? { infCpl: String(nfceData.observacoes).slice(0, 5000) } : undefined,
+      infAdic: buildInfAdic({ observacoes: nfceData.observacoes, infAdFisco: nfceData.infAdFisco }),
     },
   };
 
   if (!body.infNFe.dest) delete body.infNFe.dest;
+  if (!body.infNFe.infAdic) delete body.infNFe.infAdic;
 
   console.log('[nuvemfiscal] emitNfce body.infNFe.pag:', JSON.stringify(body.infNFe.pag, null, 2));
 
@@ -402,78 +531,94 @@ async function cancelNfce(nfceId, justificativa) {
   });
 }
 
-// emitNfe — 12/05/2026: propaga tpNF / finNFe pra buildIde e monta NFref
-// quando nfeData.refNFe é fornecido. Default segue saída + normal pra
-// retrocompat com chamadas existentes.
 async function emitNfe(company, nfeData) {
   const tpAmb = NUVEM_URL.includes('sandbox') ? 2 : 1;
-  const crt   = company.tax_regime === 'mei' ? 4 :
-                company.tax_regime === 'lucro_presumido' || company.tax_regime === 'lucro_real' ? 3 : 1;
+
+  // 27/05/2026: buscar Nuvem ANTES pra usar dados consistentes em todo
+  // o body (emit, dest=self, ide.cMunFG, etc).
+  const cnpjRaw = String(company.cnpj || '').replace(/\D/g, '');
+  const nuvem = cnpjRaw ? await fetchNuvemEmpresa(cnpjRaw) : null;
+  const effective = mergeCompanyWithNuvem(company, nuvem);
+
+  const crt   = effective.tax_regime === 'mei' ? 4 :
+                effective.tax_regime === 'lucro_presumido' || effective.tax_regime === 'lucro_real' ? 3 : 1;
 
   const det = buildDet(nfeData.items || [], { crt });
   const total = buildICMSTot(det);
   const totalValue = nfeData.total_value !== undefined ? Number(nfeData.total_value) : total.vNF;
 
-  const dest = buildDest({
-    cpf:   nfeData.recipient_cpf,
-    cnpj:  nfeData.recipient_cnpj,
-    name:  nfeData.recipient_name,
-    email: nfeData.recipient_email,
-  });
-  if (!dest) throw new Error('NF-e (modelo 55) exige CPF ou CNPJ do destinatário');
+  let dest;
+  if (nfeData.selfDest) {
+    dest = await buildSelfDest(effective);
+  } else {
+    dest = buildDest({
+      cpf:   nfeData.recipient_cpf,
+      cnpj:  nfeData.recipient_cnpj,
+      name:  nfeData.recipient_name,
+      email: nfeData.recipient_email,
+    });
+    if (!dest) throw new Error('NF-e (modelo 55) exige CPF ou CNPJ do destinatário');
 
-  if (nfeData.recipient_zip) {
-    dest.enderDest = {
-      xLgr: nfeData.recipient_address      || '',
-      nro:  nfeData.recipient_number       || 'S/N',
-      xBairro: nfeData.recipient_neighborhood || '',
-      cMun: nfeData.recipient_ibge   || '',
-      xMun: nfeData.recipient_city   || '',
-      UF:   (nfeData.recipient_state || 'SP').toUpperCase(),
-      CEP:  (nfeData.recipient_zip || '').replace(/\D/g, ''),
-      cPais: '1058',
-      xPais: 'Brasil',
-    };
+    if (nfeData.recipient_zip) {
+      dest.enderDest = {
+        xLgr: nfeData.recipient_address      || '',
+        nro:  nfeData.recipient_number       || 'S/N',
+        xBairro: nfeData.recipient_neighborhood || '',
+        cMun: nfeData.recipient_ibge   || '',
+        xMun: nfeData.recipient_city   || '',
+        UF:   (nfeData.recipient_state || 'SP').toUpperCase(),
+        CEP:  (nfeData.recipient_zip || '').replace(/\D/g, ''),
+        cPais: '1058',
+        xPais: 'Brasil',
+      };
+    }
   }
+
+  const ide = buildIde({
+    company: effective, mod: 55,
+    serie: nfeData.serie || 1,
+    nNF: nfeData.numero || 1,
+    tpAmb, tpImp: 1,
+    tpNF: nfeData.tpNF,
+    finNFe: nfeData.finNFe,
+    indFinal: nfeData.indFinal === undefined ? 1 : nfeData.indFinal,
+    indPres: nfeData.indPres === undefined ? 1 : nfeData.indPres,
+    idDest: nfeData.idDest || 1,
+    natOp: nfeData.natureza_operacao || 'Venda',
+  });
+
+  if (nfeData.refNFe) {
+    const cleanRef = String(nfeData.refNFe).replace(/\D/g, '');
+    if (cleanRef.length === 44) {
+      ide.NFref = [{ refNFe: cleanRef }];
+    } else {
+      console.warn('[nuvemfiscal] emitNfe: refNFe ignorada — esperado 44 dígitos, recebido', cleanRef.length);
+    }
+  }
+
+  const emit = await buildEmit(effective);
 
   const body = {
     ambiente: tpAmb === 2 ? 'homologacao' : 'producao',
     referencia: nfeData.reference || `nfe-${Date.now()}`,
     infNFe: {
       versao: '4.00',
-      ide: buildIde({
-        company, mod: 55,
-        serie: nfeData.serie || 1,
-        nNF: nfeData.numero || 1,
-        tpAmb, tpImp: 1,
-        // 12/05/2026 (Fase C): tpNF + finNFe propagados.
-        tpNF: nfeData.tpNF,
-        finNFe: nfeData.finNFe,
-        indFinal: nfeData.indFinal === undefined ? 1 : nfeData.indFinal,
-        indPres: nfeData.indPres === undefined ? 1 : nfeData.indPres,
-        idDest: nfeData.idDest || 1,
-        natOp: nfeData.natureza_operacao || 'Venda',
-      }),
-      emit: buildEmit(company),
+      ide,
+      emit,
       dest, det,
       total: { ICMSTot: total },
       transp: { modFrete: 9 },
       pag: buildPag(resolvePagInput(nfeData), totalValue),
-      infAdic: nfeData.observacoes ? { infCpl: String(nfeData.observacoes).slice(0, 5000) } : undefined,
+      infAdic: buildInfAdic({ observacoes: nfeData.observacoes, infAdFisco: nfeData.infAdFisco }),
     },
   };
 
-  // 12/05/2026 (Fase C): refêrencia a documento prévio (devolução requer).
-  // refNFe = chave 44 dígitos da NFC-e/NF-e original. Schema NF-e 4.00
-  // aceita até 500 refs em `NFref[]`, mas pra devolução de venda
-  // varejista usamos uma só (a NFC-e do cliente).
+  if (!body.infNFe.infAdic) delete body.infNFe.infAdic;
+
   if (nfeData.refNFe) {
-    const cleanRef = String(nfeData.refNFe).replace(/\D/g, '');
-    if (cleanRef.length === 44) {
-      body.infNFe.NFref = [{ refNFe: cleanRef }];
-    } else {
-      console.warn('[nuvemfiscal] emitNfe: refNFe ignorada — esperado 44 dígitos, recebido', cleanRef.length);
-    }
+    try {
+      console.log('[nuvemfiscal] emitNfe NF-55 devolução body:', JSON.stringify(body, null, 2));
+    } catch (_) {}
   }
 
   return nuvemRequest('POST', '/nfe', body);
@@ -486,45 +631,14 @@ async function cancelNfe(nfeId, justificativa) {
   });
 }
 
-// ============================================================
-// emitNfeDevolucao — 12/05/2026 (Fase C, DRAFT — aguarda contador)
-//
-// Orquestra NF-e modelo 55 de devolução de venda. Usado quando NFC-e
-// original passou da janela de 24h de cancelamento (cancel_reissue
-// rejeitado pela SEFAZ). A loja emite NF-e/55 de ENTRADA referenciando
-// a NFC-e original, registrando fiscalmente o retorno da mercadoria.
-//
-// Defaults (PENDENTE VALIDAÇÃO CONTADOR):
-//   tpNF=0 (entrada — loja recebe de volta)
-//   finNFe=4 (devolução)
-//   CFOP=1.202 (devolução de venda de mercadoria recebida de terceiros,
-//               mesma UF, varejo). Caller pode override via item.cfop.
-//   natureza_operacao="Devolução de mercadoria"
-//
-// O caller é responsável por:
-//   1. Validar que a chave da NFC-e original é válida (44 dígitos,
-//      mesmo CNPJ que emite a devolução)
-//   2. Capturar dados do cliente (CPF + endereço, exigidos pra NF-e/55)
-//   3. Inserir registro em `nfce_emissions` com tipo='nfe',
-//      finalidade=4, ref_chave_nfe=originalChave
-//   4. Sequenciamento de numero da NF-e/55 (série/numero) — pode
-//      compartilhar série com NFC-e ou usar série separada (preferível)
-//
-// Bloqueado pra produção até:
-//   - Contador do cliente confirmar CFOP e natOp pra cenário Davi
-//   - Teste end-to-end em ambiente homologação SEFAZ
-//   - Decisão sobre tratamento ICMS Simples (CSOSN apropriado vs CST)
-// ============================================================
 async function emitNfeDevolucao(company, params) {
   const {
-    originalChave,        // string 44 dígitos — chave da NFC-e original
-    items,                // array de items pra devolução
-    customer,             // { cpf, cnpj, name, email, address, ... }
+    originalChave,
+    items,
+    consumerInfo,
     serie,
     numero,
     reference,
-    natureza_operacao,
-    cfop,                 // override do CFOP default (1.202)
   } = params || {};
 
   const cleanChave = String(originalChave || '').replace(/\D/g, '');
@@ -534,43 +648,34 @@ async function emitNfeDevolucao(company, params) {
   if (!Array.isArray(items) || items.length === 0) {
     throw new Error('emitNfeDevolucao: items obrigatórios');
   }
-  if (!customer || !customer.cpf && !customer.cnpj) {
-    throw new Error('emitNfeDevolucao: customer.cpf ou customer.cnpj obrigatório');
-  }
 
-  // Default CFOP pra devolução de venda mesma UF varejo. CONFIRMAR CONTADOR.
-  const cfopDefault = cfop || '1202';
   const enrichedItems = items.map(item => ({
     ...item,
-    cfop: item.cfop || cfopDefault,
+    cfop: item.cfop || '1202',
   }));
+
+  const consumerName = consumerInfo?.name || 'Consumidor não identificado';
+  const consumerCpf = consumerInfo?.cpf ? ` (CPF ${consumerInfo.cpf})` : '';
+  const motivo = consumerInfo?.motivo || 'Troca';
+  const infAdFisco =
+    `Devolução de mercadoria referente à NFC-e chave ${cleanChave}. ` +
+    `Consumidor: ${consumerName}${consumerCpf}. ` +
+    `Motivo: ${motivo}.`;
 
   return emitNfe(company, {
     reference: reference || `nfe-devolucao-${Date.now()}`,
     serie: serie || 1,
     numero: numero || 1,
-    natureza_operacao: natureza_operacao || 'Devolução de mercadoria',
-    tpNF: 0,            // entrada
-    finNFe: 4,          // devolução
-    refNFe: cleanChave, // referencia a NFC-e original
+    natureza_operacao: 'devolução de mercadoria adquirida por não contribuinte',
+    tpNF: 0,
+    finNFe: 4,
+    refNFe: cleanChave,
     indFinal: 1,
     indPres: 1,
-    idDest: 1,          // operação interna (mesma UF). Override se cliente em outro estado.
+    idDest: 1,
     items: enrichedItems,
-    recipient_cpf: customer.cpf,
-    recipient_cnpj: customer.cnpj,
-    recipient_name: customer.name,
-    recipient_email: customer.email,
-    recipient_address: customer.address,
-    recipient_number: customer.number,
-    recipient_neighborhood: customer.neighborhood,
-    recipient_ibge: customer.ibge,
-    recipient_city: customer.city,
-    recipient_state: customer.state,
-    recipient_zip: customer.zip,
-    observacoes:
-      'Devolução de mercadoria referente à NFC-e chave ' + cleanChave +
-      (params.notes ? '. ' + params.notes : ''),
+    selfDest: true,
+    infAdFisco,
   });
 }
 
@@ -603,12 +708,12 @@ async function cancelNfse(nfseId, justificativa) {
 module.exports = {
   getToken, nuvemRequest, ufToCodigo,
   isoBR, generateCNF, calcDvChaveAcesso, buildAccessKey44, validateTpag,
-  buildEmit, buildDest, buildDet, buildICMSTot, buildPag, buildIde,
-  resolvePagInput,
+  buildEmit, buildDest, buildSelfDest, buildDet, buildICMSTot, buildPag, buildIde,
+  buildInfAdic, resolvePagInput, extractErros, safeAddrField,
+  fetchNuvemEmpresa, clearEmpresaCache, mergeCompanyWithNuvem,
   registerCompany, uploadCertificate,
   emitNfce, queryNfce, cancelNfce,
   emitNfe,  queryNfe,  cancelNfe,
-  // 12/05/2026 (Fase C — DRAFT): helper pra NF-e/55 devolução.
   emitNfeDevolucao,
   emitNfse, queryNfse, cancelNfse,
 };

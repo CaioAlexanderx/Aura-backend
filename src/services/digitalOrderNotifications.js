@@ -1,16 +1,24 @@
 // ============================================================
 // AURA. — Canal Digital: Notificações de Pedidos
 //
-// Eventos cobertes:
-//   notifyNewOrder(...)       — novo pedido criado na storefront
-//   notifyPaymentConfirmed(.) — Pix confirmado pelo webhook Asaas
-//   notifyStatusChange(...)   — admin avança status do pedido
+// Eventos cobertos:
+//   notifyPaymentConfirmed(.) — pagamento confirmado (Pix/Cartão/Na Entrega)
+//                               → push ao lojista + email ao lojista + email ao cliente
+//   notifyStatusChange(...)   — admin avança status (preparing/ready/delivered/cancelled)
+//                               → email ao cliente
+//
+// notifyNewOrder() está mantida por compatibilidade de assinatura mas é
+// intencionalmente no-op para Pix e Cartão. Apenas on_delivery chama
+// notifyPaymentConfirmed diretamente (pedido já nasce confirmado).
 //
 // Push: Expo Push API (ExponentPushToken)
 // Email: via mailer.js (Resend / SMTP / dev fallback)
 // ============================================================
 const db = require('../config/database');
-const { sendOrderConfirmationEmail, sendOrderStatusEmail } = require('./mailer');
+const {
+  sendOrderStatusEmail,
+  sendOwnerNewOrderEmail,
+} = require('./mailer');
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 
@@ -44,6 +52,22 @@ async function getOwnerPushTokens(company_id) {
   } catch (_) {}
 
   return [];
+}
+
+async function getOwnerEmails(company_id) {
+  try {
+    const { rows } = await db.query(`
+      SELECT DISTINCT u.email
+      FROM users u
+      JOIN company_members cm ON cm.user_id = u.id
+      WHERE cm.company_id = $1
+        AND u.email IS NOT NULL
+        AND u.email <> ''
+    `, [company_id]);
+    return rows.map(r => r.email);
+  } catch (_) {
+    return [];
+  }
 }
 
 async function sendExpoPush(tokens, title, body, data) {
@@ -87,75 +111,61 @@ async function getStoreName(company_id) {
 // ---- Eventos públicos ----
 
 /**
- * Notifica lojista (push) e cliente (e-mail) após novo pedido.
- * @param {object} options
- * @param {object} options.order  - objeto digital_orders (retornado pelo INSERT)
- * @param {number} options.total  - total do pedido
- * @param {string} [options.pix_payload] - payload Pix copia-e-cola
- * @param {object} [options.config] - digital_channel_config da loja
- */
-async function notifyNewOrder({ order, total, pix_payload, config }) {
-  const company_id = order.company_id;
-  const store_name = config?.site_name || await getStoreName(company_id);
-  const deliveryLabel = order.delivery_type === 'delivery' ? '🚚 Entrega' : '🏪 Retirada';
-
-  // Push ao lojista
-  const tokens = await getOwnerPushTokens(company_id);
-  await sendExpoPush(
-    tokens,
-    `📦 Novo pedido #${order.order_number}`,
-    `${order.customer_name} · ${fmt(total)} · ${deliveryLabel}`,
-    { type: 'new_digital_order', order_id: order.id, order_number: order.order_number }
-  );
-
-  // E-mail ao cliente
-  if (order.customer_email) {
-    await sendOrderConfirmationEmail(order.customer_email, {
-      order_number:   order.order_number,
-      customer_name:  order.customer_name,
-      total,
-      pix_payload:    pix_payload || null,
-      pix_expires_at: order.asaas_pix_expires_at || null,
-      delivery_type:  order.delivery_type,
-      store_name,
-    }).catch(err => console.error('[notify] confirmation email error:', err.message));
-  }
-}
-
-/**
- * Chamada pelo webhook Asaas quando PAYMENT_CONFIRMED.
- * Notifica lojista (push) e cliente (e-mail de "pedido confirmado").
+ * Chamada quando pagamento é confirmado: webhook MP (Pix/Cartão),
+ * approve-payment manual ou pedido on_delivery (já nasce confirmado).
+ *
+ * Dispara 3 notificações em paralelo:
+ *   1. Push ao lojista  — "📦 Novo pedido #X confirmado!"
+ *   2. E-mail ao lojista — template com resumo do pedido
+ *   3. E-mail ao cliente — "Pedido confirmado ✅"
  */
 async function notifyPaymentConfirmed({ order }) {
   const company_id = order.company_id;
   const store_name = await getStoreName(company_id);
 
-  // Push ao lojista: pagamento recebido
+  const deliveryLabel = order.delivery_type === 'delivery' ? '🚚 Entrega' : '🏪 Retirada';
+  const paymentLabel  = order.payment_method === 'pix'         ? 'Pix' :
+                        order.payment_method === 'card'        ? 'Cartão' : 'Na entrega';
+
+  // 1. Push ao lojista
   const tokens = await getOwnerPushTokens(company_id);
   await sendExpoPush(
     tokens,
-    `✅ Pagamento confirmado!`,
-    `Pedido #${order.order_number} · ${order.customer_name} pagou via Pix`,
+    `📦 Pedido #${order.order_number} confirmado!`,
+    `${order.customer_name} · ${fmt(order.total)} · ${paymentLabel} · ${deliveryLabel}`,
     { type: 'order_payment_confirmed', order_id: order.id, order_number: order.order_number }
   );
 
-  // E-mail ao cliente: pedido confirmado
+  // 2. E-mail ao lojista
+  const ownerEmails = await getOwnerEmails(company_id);
+  await Promise.all(ownerEmails.map(email =>
+    sendOwnerNewOrderEmail(email, {
+      order_number:    order.order_number,
+      customer_name:   order.customer_name,
+      customer_phone:  order.customer_phone,
+      total:           order.total,
+      delivery_type:   order.delivery_type,
+      store_name,
+      payment_method:  order.payment_method,
+    }).catch(err => console.error('[notify] owner email error:', err.message))
+  ));
+
+  // 3. E-mail ao cliente
   if (order.customer_email) {
     await sendOrderStatusEmail(order.customer_email, {
       order_number:  order.order_number,
       customer_name: order.customer_name,
       status:        'confirmed',
       store_name,
-    }).catch(err => console.error('[notify] payment confirmed email error:', err.message));
+    }).catch(err => console.error('[notify] customer confirmed email error:', err.message));
   }
 }
 
 /**
  * Chamada quando admin atualiza status via PATCH /orders/:oid/status.
- * Notifica o cliente por e-mail.
+ * Notifica o cliente por e-mail para os status que fazem sentido notificar.
  */
 async function notifyStatusChange(order) {
-  // Apenas status que têm sentido notificar o cliente
   const CUSTOMER_NOTIFY_STATUSES = ['preparing', 'ready', 'delivered', 'cancelled'];
   if (!CUSTOMER_NOTIFY_STATUSES.includes(order.status)) return;
   if (!order.customer_email) return;
@@ -167,6 +177,15 @@ async function notifyStatusChange(order) {
     status:        order.status,
     store_name,
   }).catch(err => console.error('[notify] status email error:', err.message));
+}
+
+/**
+ * Mantida por compatibilidade — intencionalmente no-op para Pix e Cartão.
+ * Para on_delivery, storefront.js chama notifyPaymentConfirmed diretamente.
+ * @deprecated Não adicionar nova lógica aqui.
+ */
+async function notifyNewOrder() {
+  // No-op. Notificações movidas para notifyPaymentConfirmed().
 }
 
 module.exports = { notifyNewOrder, notifyPaymentConfirmed, notifyStatusChange };

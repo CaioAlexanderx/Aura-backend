@@ -58,6 +58,7 @@ jobs:
           done
 
       - name: Create Sentry release
+        continue-on-error: true
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
@@ -67,7 +68,7 @@ jobs:
             npm install -g @sentry/cli
             VERSION="aura-backend@$(git rev-parse --short HEAD)"
             sentry-cli releases new "$VERSION"
-            sentry-cli releases set-commits "$VERSION" --auto --ignore-missing
+            sentry-cli releases set-commits "$VERSION" --auto --ignore-missing || echo "set-commits falhou (API Sentry instavel) — ignorando"
             sentry-cli releases finalize "$VERSION"
             sentry-cli releases deploys "$VERSION" new -e production
             echo "Sentry release criada: $VERSION"

@@ -9,6 +9,35 @@ const { requirePlan } = require('../middleware/auth');
 // Nota: requireAuth + requireCompanyAccess já aplicados em private.js
 const guard = [requirePlan('negocio', 'expansao')];
 
+// B8 — limites para evitar DoS / OOM.
+const MAX_CSV_BYTES = 2 * 1024 * 1024; // 2MB
+const MAX_CSV_ROWS  = 5000;
+
+// B8 — Detecta encoding e decodifica para UTF-8.
+// Usa iconv-lite quando string vem com Latin-1; UTF-8 puro fica como esta.
+function decodeCsvToUtf8(input) {
+  if (Buffer.isBuffer(input)) {
+    // BOM UTF-8 -> ja e utf-8
+    if (input.length >= 3 && input[0] === 0xEF && input[1] === 0xBB && input[2] === 0xBF) {
+      return input.slice(3).toString('utf8');
+    }
+    // Heuristica: se aparecem bytes >= 0x80 mas falha em utf-8, tenta latin-1.
+    const asUtf8 = input.toString('utf8');
+    if (asUtf8.includes('�')) {
+      try {
+        const iconv = require('iconv-lite');
+        return iconv.decode(input, 'latin1');
+      } catch (_) { /* fallback */ }
+    }
+    return asUtf8;
+  }
+  // Ja e string — verifica BOM.
+  if (typeof input === 'string' && input.charCodeAt(0) === 0xFEFF) {
+    return input.slice(1);
+  }
+  return input;
+}
+
 // ── MAPEAMENTO iFood → Aura ──────────────────────────────────
 const IFOOD_STATUS_MAP = {
   PLACED:               'pending',
@@ -115,11 +144,26 @@ router.post('/import', guard, async (req, res) => {
   const { csv } = req.body;
   if (!csv) return res.status(400).json({ error: 'Campo csv obrigatório no body' });
 
+  // B8 — limite de tamanho.
+  const csvByteLen = Buffer.byteLength(typeof csv === 'string' ? csv : String(csv), 'utf8');
+  if (csvByteLen > MAX_CSV_BYTES) {
+    return res.status(413).json({ error: 'CSV maior que 2MB — divida o arquivo' });
+  }
+
+  // B8 — decode encoding.
+  let csvDecoded;
+  try { csvDecoded = decodeCsvToUtf8(csv); }
+  catch (e) { return res.status(400).json({ error: 'Erro ao decodificar CSV (encoding invalido)' }); }
+
   let parsed;
-  try { parsed = parseIfoodCSV(csv); }
+  try { parsed = parseIfoodCSV(csvDecoded); }
   catch (e) { return res.status(400).json({ error: 'Erro ao ler CSV. Verifique o formato.' }); }
 
   if (!parsed.length) return res.status(400).json({ error: 'Nenhum pedido encontrado no CSV' });
+  // B8 — limite de linhas (apos parse).
+  if (parsed.length > MAX_CSV_ROWS) {
+    return res.status(413).json({ error: `Mais de ${MAX_CSV_ROWS} linhas — divida o arquivo` });
+  }
 
   const batchId  = require('crypto').randomUUID();
   const results  = { imported: 0, skipped: 0, errors: [] };
@@ -161,7 +205,12 @@ router.post('/import', guard, async (req, res) => {
         }
         results.imported++;
       } catch (rowErr) {
-        results.errors.push({ line: order._line, external_id: order.external_id, error: 'Erro ao importar linha' });
+        // B8 — reporta erro real, nao mensagem generica.
+        results.errors.push({
+          line: order._line,
+          external_id: order.external_id,
+          message: rowErr.message,
+        });
       }
     }
 
@@ -232,7 +281,7 @@ router.get('/template', guard, (_req, res) => {
   ].join('\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="modelo-ifood-aura.csv"');
-  res.send('\uFEFF' + csv);
+  res.send('﻿' + csv);
 });
 
 module.exports = router;

@@ -1,6 +1,8 @@
 // ============================================================
 // AURA. — Gestão de Motoboys / Entregadores
 // FOOD-04b: CRUD entregadores, despacho, comissão, histórico
+// FOOD-08 (Fase 8 — 22/05/2026): /commission-report (payout-aware),
+//   PATCH /:did/payout, alias /:did/history (= /:did/log).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -8,6 +10,10 @@ const { requirePlan } = require('../middleware/auth');
 
 // Nota: requireAuth + requireCompanyAccess já aplicados em private.js
 const guard = [requirePlan('negocio', 'expansao')];
+
+// Cache module-level pro last_payout_at (migration 127 / armadilha_schema_pre_migration).
+// Optimistic: assume true; vira false em 42703 (coluna ausente).
+let HAS_LAST_PAYOUT_COL = true;
 
 // ── helpers ──────────────────────────────────────────────────
 const notFound = (res, e = 'Registro') =>
@@ -18,6 +24,27 @@ function calcCommission(deliverer, deliveryFee) {
     return parseFloat(((deliveryFee || 0) * deliverer.commission_pct / 100).toFixed(2));
   }
   return parseFloat(deliverer.commission_fixed || 0);
+}
+
+// B9 — valida commission_mode e commission_pct em POST/PATCH.
+function validateCommission(body) {
+  if (body.commission_mode !== undefined &&
+      !['pct', 'fixed'].includes(body.commission_mode)) {
+    return 'commission_mode deve ser "pct" ou "fixed"';
+  }
+  if (body.commission_pct !== undefined && body.commission_pct !== null) {
+    const pct = Number(body.commission_pct);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      return 'commission_pct deve ser número entre 0 e 100';
+    }
+  }
+  if (body.commission_fixed !== undefined && body.commission_fixed !== null) {
+    const fixed = Number(body.commission_fixed);
+    if (!Number.isFinite(fixed) || fixed < 0) {
+      return 'commission_fixed deve ser número >= 0';
+    }
+  }
+  return null;
 }
 
 // ============================================================
@@ -61,6 +88,9 @@ router.post('/', guard, async (req, res) => {
     commission_pct, commission_fixed, commission_mode, notes
   } = req.body;
   if (!name) return res.status(400).json({ error: 'name obrigatório' });
+  // B9 — valida commission_*
+  const cErr = validateCommission(req.body);
+  if (cErr) return res.status(400).json({ error: cErr });
   try {
     const { rows } = await db.query(
       `INSERT INTO food_deliverers
@@ -84,6 +114,9 @@ router.post('/', guard, async (req, res) => {
 });
 
 router.patch('/:did', guard, async (req, res) => {
+  // B9 — valida commission_* também no PATCH.
+  const cErr = validateCommission(req.body);
+  if (cErr) return res.status(400).json({ error: cErr });
   const fields = [
     'name','phone','vehicle_type','vehicle_plate',
     'commission_pct','commission_fixed','commission_mode',
@@ -348,6 +381,239 @@ router.get('/:did/log', guard, async (req, res) => {
   } catch (e) {
     console.error('[food/deliverers/log] Erro:', e.message);
     res.status(500).json({ error: 'Erro ao buscar histórico de despachos' });
+  }
+});
+
+// ============================================================
+// FOOD-08 (Fase 8) — Commission Report (payout-aware) + Payout + History
+// ============================================================
+
+// GET /:did/commission-report?from=&to=
+// Diferente do /:did/commission (legacy): retorna lista de orders + totals
+// + payout block (last_payout_at + unpaid_total). Front usa pra tela
+// MotoboyDrawer aba Comissao.
+router.get('/:did/commission-report', guard, async (req, res) => {
+  const { from, to } = req.query;
+  const now = new Date();
+  const defaultFrom = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
+  const dateFrom = from ? new Date(from) : defaultFrom;
+  const dateTo   = to   ? new Date(to)   : now;
+  if (isNaN(dateFrom.getTime()) || isNaN(dateTo.getTime())) {
+    return res.status(400).json({ error: 'from/to devem ser ISO dates válidas' });
+  }
+  const fromIso = dateFrom.toISOString();
+  const toIso   = dateTo.toISOString();
+
+  try {
+    // 1) Deliverer + last_payout_at (defensivo).
+    let delivRow;
+    if (HAS_LAST_PAYOUT_COL) {
+      try {
+        const { rows } = await db.query(
+          `SELECT id, name, commission_mode, commission_pct, commission_fixed, last_payout_at
+           FROM food_deliverers WHERE id=$1 AND company_id=$2`,
+          [req.params.did, req.params.id]
+        );
+        if (!rows.length) return notFound(res, 'Entregador');
+        delivRow = rows[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_LAST_PAYOUT_COL = false;
+          console.warn('[food/deliverers/commission-report] last_payout_at ausente (migration 127 pendente)');
+        } else throw e;
+      }
+    }
+    if (!delivRow) {
+      const { rows } = await db.query(
+        `SELECT id, name, commission_mode, commission_pct, commission_fixed
+         FROM food_deliverers WHERE id=$1 AND company_id=$2`,
+        [req.params.did, req.params.id]
+      );
+      if (!rows.length) return notFound(res, 'Entregador');
+      delivRow = { ...rows[0], last_payout_at: null };
+    }
+
+    // 2) Orders no período. Re-calcula commission_amount via CASE
+    // pra honrar mudanca de regime (pct vs fixed) mesmo se o campo
+    // deliverer_commission persistido estiver desatualizado.
+    const { rows: ordersRows } = await db.query(
+      `SELECT fo.id AS order_id, fo.delivered_at, fo.total AS total_amount,
+              fo.deliverer_commission AS commission_persisted,
+              CASE WHEN fd.commission_mode='pct'
+                   THEN ROUND((fo.delivery_fee * COALESCE(fd.commission_pct,0) / 100.0)::NUMERIC, 2)
+                   ELSE COALESCE(fd.commission_fixed, 0)
+              END AS commission_amount
+       FROM food_orders fo
+       JOIN food_deliverers fd ON fd.id = fo.deliverer_id
+       WHERE fo.company_id=$1 AND fo.deliverer_id=$2
+         AND fo.delivered_at IS NOT NULL
+         AND fo.delivered_at BETWEEN $3 AND $4
+         AND fo.status='delivered'
+       ORDER BY fo.delivered_at DESC`,
+      [req.params.id, req.params.did, fromIso, toIso]
+    );
+
+    // 3) Totals
+    let ordersCount   = 0;
+    let totalDelivered= 0;
+    let totalCommission = 0;
+    for (const r of ordersRows) {
+      ordersCount   += 1;
+      totalDelivered+= parseFloat(r.total_amount || 0);
+      // Prefere persisted se nao-nulo, senao usa recalculo.
+      const c = r.commission_persisted != null
+        ? parseFloat(r.commission_persisted)
+        : parseFloat(r.commission_amount || 0);
+      totalCommission += c;
+    }
+
+    // 4) Unpaid: comissoes em deliveries com delivered_at > last_payout_at
+    // (ou todas se last_payout_at IS NULL). Calculado fora do filtro
+    // from/to: representa saldo absoluto pendente, nao do periodo.
+    let unpaidTotal = 0;
+    let unpaidCount = 0;
+    const lastPayout = delivRow.last_payout_at;
+    if (HAS_LAST_PAYOUT_COL) {
+      try {
+        const unpaidSql = lastPayout
+          ? `SELECT COUNT(*) AS cnt, COALESCE(SUM(
+               CASE WHEN fd.commission_mode='pct'
+                    THEN (fo.delivery_fee * COALESCE(fd.commission_pct,0) / 100.0)
+                    ELSE COALESCE(fd.commission_fixed, 0)
+               END
+             ), 0) AS sum
+             FROM food_orders fo
+             JOIN food_deliverers fd ON fd.id=fo.deliverer_id
+             WHERE fo.company_id=$1 AND fo.deliverer_id=$2
+               AND fo.delivered_at IS NOT NULL
+               AND fo.delivered_at > $3
+               AND fo.status='delivered'`
+          : `SELECT COUNT(*) AS cnt, COALESCE(SUM(
+               CASE WHEN fd.commission_mode='pct'
+                    THEN (fo.delivery_fee * COALESCE(fd.commission_pct,0) / 100.0)
+                    ELSE COALESCE(fd.commission_fixed, 0)
+               END
+             ), 0) AS sum
+             FROM food_orders fo
+             JOIN food_deliverers fd ON fd.id=fo.deliverer_id
+             WHERE fo.company_id=$1 AND fo.deliverer_id=$2
+               AND fo.delivered_at IS NOT NULL
+               AND fo.status='delivered'`;
+        const unpaidParams = lastPayout
+          ? [req.params.id, req.params.did, lastPayout]
+          : [req.params.id, req.params.did];
+        const { rows: unpaidRows } = await db.query(unpaidSql, unpaidParams);
+        if (unpaidRows.length) {
+          unpaidCount = parseInt(unpaidRows[0].cnt || 0, 10);
+          unpaidTotal = parseFloat(unpaidRows[0].sum || 0);
+        }
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_LAST_PAYOUT_COL = false;
+          console.warn('[food/deliverers/commission-report] last_payout_at ausente — payout=null');
+        } else throw e;
+      }
+    }
+
+    res.json({
+      deliverer: {
+        id: delivRow.id,
+        name: delivRow.name,
+        commission_mode: delivRow.commission_mode,
+        commission_pct: delivRow.commission_pct,
+        commission_fixed: delivRow.commission_fixed,
+      },
+      period: { from: fromIso, to: toIso },
+      orders: ordersRows.map(r => ({
+        order_id: r.order_id,
+        delivered_at: r.delivered_at,
+        total_amount: parseFloat(r.total_amount || 0),
+        commission_amount: r.commission_persisted != null
+          ? parseFloat(r.commission_persisted)
+          : parseFloat(r.commission_amount || 0),
+      })),
+      totals: {
+        orders_count: ordersCount,
+        total_delivered: parseFloat(totalDelivered.toFixed(2)),
+        total_commission: parseFloat(totalCommission.toFixed(2)),
+      },
+      payout: HAS_LAST_PAYOUT_COL
+        ? {
+            last_payout_at: lastPayout || null,
+            unpaid_count: unpaidCount,
+            unpaid_total: parseFloat(unpaidTotal.toFixed(2)),
+          }
+        : null,
+    });
+  } catch (e) {
+    console.error('[food/deliverers/commission-report] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao gerar relatorio de comissao' });
+  }
+});
+
+// PATCH /:did/payout
+// Body: { until?: ISO date }   default: NOW()
+// Marca last_payout_at e retorna deliverer atualizado.
+router.patch('/:did/payout', guard, async (req, res) => {
+  if (!HAS_LAST_PAYOUT_COL) {
+    return res.status(503).json({
+      error: 'Coluna last_payout_at ausente — aplique migration 127 antes',
+      code: 'MIGRATION_PENDING',
+    });
+  }
+  const { until } = req.body || {};
+  let untilDate = null;
+  if (until) {
+    untilDate = new Date(until);
+    if (isNaN(untilDate.getTime())) {
+      return res.status(400).json({ error: 'until deve ser ISO date valida' });
+    }
+  }
+  try {
+    const { rows } = await db.query(
+      `UPDATE food_deliverers
+         SET last_payout_at = $1, updated_at = NOW()
+       WHERE id=$2 AND company_id=$3 RETURNING *`,
+      [untilDate || new Date(), req.params.did, req.params.id]
+    );
+    if (!rows.length) return notFound(res, 'Entregador');
+    res.json(rows[0]);
+  } catch (e) {
+    if (e.code === '42703') {
+      HAS_LAST_PAYOUT_COL = false;
+      return res.status(503).json({
+        error: 'Coluna last_payout_at ausente — aplique migration 127 antes',
+        code: 'MIGRATION_PENDING',
+      });
+    }
+    console.error('[food/deliverers/payout] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao marcar payout' });
+  }
+});
+
+// GET /:did/history — alias semantico de /:did/log
+// Front usa /history na aba Historico do MotoboyDrawer (Fase 8).
+// Estrutura: itens do food_dispatch_log (assigned/unassigned) + dados do pedido.
+router.get('/:did/history', guard, async (req, res) => {
+  const { limit = 50, offset = 0 } = req.query;
+  try {
+    const { rows } = await db.query(
+      `SELECT dl.id, dl.order_id, dl.deliverer_id, dl.commission_calc, dl.action,
+              dl.note, dl.created_at,
+              fo.customer_name, fo.total AS order_total, fo.status AS order_status,
+              fo.delivered_at
+       FROM food_dispatch_log dl
+       LEFT JOIN food_orders fo ON fo.id = dl.order_id
+       WHERE dl.company_id = $1
+         AND (dl.deliverer_id = $2)
+       ORDER BY dl.created_at DESC
+       LIMIT $3 OFFSET $4`,
+      [req.params.id, req.params.did, limit, offset]
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error('[food/deliverers/history] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar historico do entregador' });
   }
 });
 

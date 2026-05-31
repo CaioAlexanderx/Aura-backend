@@ -2,6 +2,8 @@
 // AURA. — Módulo Food Service
 // FOOD-01: Cardápio + variações + adicionais + fotos
 // FOOD-02: Ficha técnica com custo automático
+// FOOD-08 (Fase 2): Comanda agregada por mesa
+// FOOD-09 (Fase 2): Reservas de mesa
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -10,7 +12,7 @@ const { requirePlan } = require('../middleware/auth');
 // Nota: requireAuth + requireCompanyAccess já aplicados em private.js
 const guardFood = [requirePlan('negocio', 'expansao')];
 
-// ── helpers ──────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────
 const notFound = (res, entity = 'Item') => res.status(404).json({ error: `${entity} não encontrado` });
 const ownedBy  = async (table, id, companyId) => {
   const { rows } = await db.query(`SELECT id FROM ${table} WHERE id=$1 AND company_id=$2`, [id, companyId]);
@@ -53,6 +55,7 @@ router.get('/menu', guardFood, async (req, res) => {
   }
 });
 
+// B6 — rota PUBLICA: SELECT explicito SEM cost_price.
 router.get('/menu/public/:slug', async (req, res) => {
   try {
     const { rows: menus } = await db.query(
@@ -65,12 +68,23 @@ router.get('/menu/public/:slug', async (req, res) => {
     const menu = menus[0];
 
     const { rows: categories } = await db.query(
-      `SELECT * FROM food_categories WHERE menu_id=$1 AND is_active=TRUE ORDER BY sort_order`, [menu.id]
+      `SELECT id, menu_id, company_id, name, sort_order, is_active
+       FROM food_categories WHERE menu_id=$1 AND is_active=TRUE ORDER BY sort_order`,
+      [menu.id]
     );
+    // B6: SELECT explicito sem cost_price; agg de variations/addons tambem sem cost.
     const { rows: items } = await db.query(
-      `SELECT fi.*,
-        COALESCE(json_agg(DISTINCT fiv.*) FILTER (WHERE fiv.id IS NOT NULL), '[]') AS variations,
-        COALESCE(json_agg(DISTINCT fa.*)  FILTER (WHERE fa.id IS NOT NULL),  '[]') AS addons
+      `SELECT
+         fi.id, fi.company_id, fi.category_id, fi.name, fi.description, fi.price,
+         fi.photo_url, fi.preparation_time_min, fi.serves, fi.tags, fi.sort_order,
+         fi.is_active, fi.is_available,
+         COALESCE(json_agg(DISTINCT jsonb_build_object(
+           'id', fiv.id, 'name', fiv.name, 'price_delta', fiv.price_delta,
+           'is_required', fiv.is_required, 'sort_order', fiv.sort_order
+         )) FILTER (WHERE fiv.id IS NOT NULL), '[]') AS variations,
+         COALESCE(json_agg(DISTINCT jsonb_build_object(
+           'id', fa.id, 'name', fa.name, 'price', fa.price, 'max_qty', fa.max_qty
+         )) FILTER (WHERE fa.id IS NOT NULL),  '[]') AS addons
        FROM food_items fi
        LEFT JOIN food_item_variations fiv ON fiv.item_id=fi.id AND fiv.is_active=TRUE
        LEFT JOIN food_addons fa ON fa.item_id=fi.id AND fa.is_active=TRUE
@@ -104,7 +118,7 @@ router.post('/menu', guardFood, async (req, res) => {
   }
 });
 
-// ── CATEGORIAS ───────────────────────────────────────────────
+// ── CATEGORIAS ────────────────────────────────────
 router.post('/categories', guardFood, async (req, res) => {
   const { menu_id, name, sort_order } = req.body;
   if (!menu_id || !name) return res.status(400).json({ error: 'menu_id e name obrigatórios' });
@@ -137,16 +151,30 @@ router.patch('/categories/:cid', guardFood, async (req, res) => {
   }
 });
 
-// ── ITENS ─────────────────────────────────────────────────────
+// ── ITENS ──────────────────────────────────────────
 router.post('/items', guardFood, async (req, res) => {
   const { category_id, name, description, price, photo_url, preparation_time_min, serves, tags, sort_order } = req.body;
   if (!name || price == null) return res.status(400).json({ error: 'name e price obrigatórios' });
+  // B10 — validações explícitas no POST /items.
+  const priceNum = Number(price);
+  if (!Number.isFinite(priceNum) || priceNum < 0) {
+    return res.status(400).json({ error: 'price deve ser número >= 0' });
+  }
+  if (preparation_time_min !== undefined && preparation_time_min !== null) {
+    const prepNum = Number(preparation_time_min);
+    if (!Number.isFinite(prepNum) || prepNum < 0 || prepNum > 240) {
+      return res.status(400).json({ error: 'preparation_time_min deve ser número entre 0 e 240' });
+    }
+  }
+  if (tags !== undefined && tags !== null && !Array.isArray(tags)) {
+    return res.status(400).json({ error: 'tags deve ser um array' });
+  }
   try {
     const { rows } = await db.query(
       `INSERT INTO food_items
          (company_id, category_id, name, description, price, photo_url, preparation_time_min, serves, tags, sort_order)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [req.params.id, category_id||null, name, description||null, price,
+      [req.params.id, category_id||null, name, description||null, priceNum,
        photo_url||null, preparation_time_min||null, serves||1, tags||null, sort_order||0]
     );
     res.status(201).json(rows[0]);
@@ -159,6 +187,22 @@ router.post('/items', guardFood, async (req, res) => {
 router.patch('/items/:iid', guardFood, async (req, res) => {
   const fields = ['category_id','name','description','price','photo_url',
                   'is_active','is_available','preparation_time_min','serves','tags','sort_order'];
+  // B10 — valida também no PATCH (mesma regra).
+  if (req.body.price !== undefined) {
+    const priceNum = Number(req.body.price);
+    if (!Number.isFinite(priceNum) || priceNum < 0) {
+      return res.status(400).json({ error: 'price deve ser número >= 0' });
+    }
+  }
+  if (req.body.preparation_time_min !== undefined && req.body.preparation_time_min !== null) {
+    const prepNum = Number(req.body.preparation_time_min);
+    if (!Number.isFinite(prepNum) || prepNum < 0 || prepNum > 240) {
+      return res.status(400).json({ error: 'preparation_time_min deve ser número entre 0 e 240' });
+    }
+  }
+  if (req.body.tags !== undefined && req.body.tags !== null && !Array.isArray(req.body.tags)) {
+    return res.status(400).json({ error: 'tags deve ser um array' });
+  }
   const updates = [];
   const vals = [];
   let idx = 1;
@@ -191,7 +235,7 @@ router.delete('/items/:iid', guardFood, async (req, res) => {
   }
 });
 
-// ── VARIAÇÕES ────────────────────────────────────────────────
+// ── VARIAÇÕES ──────────────────────────────────────
 router.post('/items/:iid/variations', guardFood, async (req, res) => {
   const { name, price_delta, is_required, sort_order } = req.body;
   if (!name) return res.status(400).json({ error: 'name obrigatório' });
@@ -221,7 +265,7 @@ router.delete('/items/:iid/variations/:vid', guardFood, async (req, res) => {
   }
 });
 
-// ── ADICIONAIS ───────────────────────────────────────────────
+// ── ADICIONAIS ────────────────────────────────────
 router.post('/addons', guardFood, async (req, res) => {
   const { item_id, name, price, max_qty } = req.body;
   if (!name) return res.status(400).json({ error: 'name obrigatório' });
@@ -238,7 +282,7 @@ router.post('/addons', guardFood, async (req, res) => {
   }
 });
 
-// ── MESAS ────────────────────────────────────────────────────
+// ── MESAS ──────────────────────────────────────────
 router.get('/tables', guardFood, async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -281,6 +325,135 @@ router.patch('/tables/:tid/status', guardFood, async (req, res) => {
   } catch (e) {
     console.error('[food/tables] Erro ao atualizar:', e.message);
     res.status(500).json({ error: 'Erro ao atualizar mesa' });
+  }
+});
+
+// FOOD-08 (Fase 2): PATCH /tables/:tid — edita number/seats/qr (generaliza /status)
+router.patch('/tables/:tid', guardFood, async (req, res) => {
+  const { number, seats, qr_code_url } = req.body;
+  const updates = [];
+  const vals = [];
+  let i = 1;
+  if (number !== undefined)      { updates.push(`number=$${i++}`);      vals.push(number); }
+  if (seats !== undefined)       { updates.push(`seats=$${i++}`);       vals.push(seats); }
+  if (qr_code_url !== undefined) { updates.push(`qr_code_url=$${i++}`); vals.push(qr_code_url); }
+  if (!updates.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  vals.push(req.params.tid, req.params.id);
+  try {
+    const { rows } = await db.query(
+      `UPDATE food_tables SET ${updates.join(',')} WHERE id=$${i} AND company_id=$${i+1} RETURNING *`,
+      vals
+    );
+    if (!rows.length) return notFound(res, 'Mesa');
+    res.json(rows[0]);
+  } catch (e) {
+    if (e.code === '23505') {
+      return res.status(409).json({ error: 'Já existe outra mesa com esse número' });
+    }
+    console.error('[food/tables/patch] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao atualizar mesa' });
+  }
+});
+
+// FOOD-08 (Fase 2): DELETE /tables/:tid — hard delete; 409 se há pedidos ativos
+router.delete('/tables/:tid', guardFood, async (req, res) => {
+  try {
+    const { rows: orderCount } = await db.query(
+      `SELECT COUNT(*) AS c FROM food_orders
+       WHERE table_id=$1 AND status NOT IN ('cancelled')`,
+      [req.params.tid]
+    );
+    if (parseInt(orderCount[0].c, 10) > 0) {
+      return res.status(409).json({ error: 'Mesa tem pedidos associados. Cancele ou finalize antes.' });
+    }
+    const { rowCount } = await db.query(
+      `DELETE FROM food_tables WHERE id=$1 AND company_id=$2`,
+      [req.params.tid, req.params.id]
+    );
+    if (!rowCount) return notFound(res, 'Mesa');
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[food/tables/delete] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao remover mesa' });
+  }
+});
+
+// FOOD-08 (Fase 2): COMANDA AGREGADA POR MESA
+router.get('/tables/:tid/comanda', guardFood, async (req, res) => {
+  const cid = req.params.id;
+  const tid = req.params.tid;
+  try {
+    // 1. mesa
+    const { rows: tables } = await db.query(
+      `SELECT * FROM food_tables WHERE id=$1 AND company_id=$2`, [tid, cid]
+    );
+    if (!tables.length) return notFound(res, 'Mesa');
+    const table = tables[0];
+
+    // 2. service_fee_pct from companies.pdv_settings
+    const { rows: comp } = await db.query(
+      `SELECT COALESCE((pdv_settings->>'service_fee_pct')::numeric, 10) AS pct
+       FROM companies WHERE id=$1`, [cid]
+    );
+    const serviceFeePct = parseFloat(comp[0]?.pct || 10);
+
+    // 3. orders da sessão atual (filtra por opened_at se houver)
+    let orderWhere = `fo.table_id=$1 AND fo.company_id=$2 AND fo.status != 'cancelled'`;
+    const orderVals = [tid, cid];
+    if (table.opened_at) {
+      orderWhere += ` AND fo.created_at >= $3`;
+      orderVals.push(table.opened_at);
+    }
+    const { rows: orders } = await db.query(
+      `SELECT fo.*,
+        COALESCE(json_agg(foi.* ORDER BY foi.id) FILTER (WHERE foi.id IS NOT NULL), '[]') AS items
+       FROM food_orders fo
+       LEFT JOIN food_order_items foi ON foi.order_id=fo.id
+       WHERE ${orderWhere}
+       GROUP BY fo.id
+       ORDER BY fo.created_at ASC`,
+      orderVals
+    );
+
+    const subtotalOpen      = orders.reduce((s,o) => s + parseFloat(o.subtotal||0), 0);
+    const discountTotal     = orders.reduce((s,o) => s + parseFloat(o.discount||0), 0);
+    const serviceFeeAmount  = subtotalOpen * serviceFeePct / 100;
+    const totalOpen         = subtotalOpen + serviceFeeAmount - discountTotal;
+    const activeCount       = orders.filter(o => !['delivered','cancelled'].includes(o.status)).length;
+    const deliveredCount    = orders.filter(o => o.status === 'delivered').length;
+    const durationMin       = table.opened_at
+      ? Math.round((Date.now() - new Date(table.opened_at).getTime()) / 60000)
+      : null;
+
+    // 4. chamada de garçom pendente (mais recente)
+    const { rows: calls } = await db.query(
+      `SELECT id, reason, created_at FROM food_waiter_calls
+       WHERE table_id=$1 AND company_id=$2 AND status='pending'
+       ORDER BY created_at DESC LIMIT 1`,
+      [tid, cid]
+    );
+
+    res.json({
+      table,
+      orders,
+      subtotal_open:          parseFloat(subtotalOpen.toFixed(2)),
+      discount_total:         parseFloat(discountTotal.toFixed(2)),
+      service_fee_pct:        serviceFeePct,
+      service_fee_amount:     parseFloat(serviceFeeAmount.toFixed(2)),
+      total_open:             parseFloat(totalOpen.toFixed(2)),
+      opened_at:              table.opened_at,
+      duration_min:           durationMin,
+      active_orders_count:    activeCount,
+      delivered_orders_count: deliveredCount,
+      waiter_call:            calls[0] || null,
+    });
+  } catch (e) {
+    // 42703 = coluna opened_at não existe (migration 119 pendente)
+    if (e.code === '42703') {
+      return res.status(503).json({ error: 'Funcionalidade aguardando aplicação da migration 119' });
+    }
+    console.error('[food/tables/comanda] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar comanda da mesa' });
   }
 });
 
@@ -408,7 +581,7 @@ router.get('/recipes/summary', guardFood, async (req, res) => {
   }
 });
 
-// ── ZONAS DE ENTREGA ─────────────────────────────────────────
+// ── ZONAS DE ENTREGA ──────────────────────────────────
 router.get('/delivery/zones', guardFood, async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -434,6 +607,116 @@ router.post('/delivery/zones', guardFood, async (req, res) => {
   } catch (e) {
     console.error('[food/delivery/zones] Erro ao criar:', e.message);
     res.status(500).json({ error: 'Erro ao criar zona de entrega' });
+  }
+});
+
+// ============================================================
+// FOOD-09 (Fase 2) — RESERVAS DE MESA
+// ============================================================
+
+router.get('/reservations', guardFood, async (req, res) => {
+  const { date, status, table_id } = req.query;
+  const conds = ['fr.company_id=$1'];
+  const vals  = [req.params.id];
+  let i = 2;
+  if (date)     { conds.push(`fr.reservation_at::date=$${i++}::date`); vals.push(date); }
+  if (status)   { conds.push(`fr.status=$${i++}`);                     vals.push(status); }
+  if (table_id) { conds.push(`fr.table_id=$${i++}`);                   vals.push(table_id); }
+  try {
+    const { rows } = await db.query(
+      `SELECT fr.*, ft.number AS table_number, ft.seats AS table_seats
+       FROM food_reservations fr
+       LEFT JOIN food_tables ft ON ft.id=fr.table_id
+       WHERE ${conds.join(' AND ')}
+       ORDER BY fr.reservation_at ASC LIMIT 200`,
+      vals
+    );
+    res.json(rows);
+  } catch (e) {
+    if (e.code === '42P01') {
+      return res.status(503).json({ error: 'Funcionalidade aguardando aplicação da migration 119' });
+    }
+    console.error('[food/reservations] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao buscar reservas' });
+  }
+});
+
+router.post('/reservations', guardFood, async (req, res) => {
+  const { table_id, customer_id, customer_name, customer_phone,
+          party_size, reservation_at, duration_min, notes } = req.body;
+  if (!customer_name || !reservation_at)
+    return res.status(400).json({ error: 'customer_name e reservation_at obrigatórios' });
+  try {
+    const { rows } = await db.query(
+      `INSERT INTO food_reservations
+         (company_id, table_id, customer_id, customer_name, customer_phone,
+          party_size, reservation_at, duration_min, notes, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING *`,
+      [req.params.id, table_id||null, customer_id||null, customer_name,
+       customer_phone||null, party_size||2, reservation_at, duration_min||90,
+       notes||null, req.user?.id||null]
+    );
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    if (e.code === '42P01') {
+      return res.status(503).json({ error: 'Funcionalidade aguardando aplicação da migration 119' });
+    }
+    console.error('[food/reservations/post] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao criar reserva' });
+  }
+});
+
+router.patch('/reservations/:rid', guardFood, async (req, res) => {
+  const fields = ['table_id','customer_name','customer_phone','party_size',
+                  'reservation_at','duration_min','status','notes','cancelled_reason'];
+  const updates = [];
+  const vals = [];
+  let i = 1;
+  fields.forEach(f => {
+    if (req.body[f] !== undefined) { updates.push(`${f}=$${i++}`); vals.push(req.body[f]); }
+  });
+  if (!updates.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+
+  // timestamps automáticos por status
+  if (req.body.status === 'cancelled') updates.push(`cancelled_at=NOW()`);
+  if (req.body.status === 'checked_in') updates.push(`checked_in_at=NOW()`);
+  updates.push(`updated_at=NOW()`);
+  vals.push(req.params.rid, req.params.id);
+
+  try {
+    const { rows } = await db.query(
+      `UPDATE food_reservations SET ${updates.join(',')}
+       WHERE id=$${i} AND company_id=$${i+1} RETURNING *`,
+      vals
+    );
+    if (!rows.length) return notFound(res, 'Reserva');
+    res.json(rows[0]);
+  } catch (e) {
+    if (e.code === '42P01') {
+      return res.status(503).json({ error: 'Funcionalidade aguardando aplicação da migration 119' });
+    }
+    console.error('[food/reservations/patch] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao atualizar reserva' });
+  }
+});
+
+router.delete('/reservations/:rid', guardFood, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `UPDATE food_reservations
+       SET status='cancelled', cancelled_at=NOW(), updated_at=NOW()
+       WHERE id=$1 AND company_id=$2 RETURNING *`,
+      [req.params.rid, req.params.id]
+    );
+    if (!rows.length) return notFound(res, 'Reserva');
+    res.json({ ok: true });
+  } catch (e) {
+    if (e.code === '42P01') {
+      return res.status(503).json({ error: 'Funcionalidade aguardando aplicação da migration 119' });
+    }
+    console.error('[food/reservations/delete] Erro:', e.message);
+    res.status(500).json({ error: 'Erro ao cancelar reserva' });
   }
 });
 

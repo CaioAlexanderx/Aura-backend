@@ -9,69 +9,87 @@ const { publicReviewsRouter } = require('./reviews');
 const onboardingRouter        = require('./onboarding');
 const accessCodesRouter       = require('./accessCodes');
 const verificationRouter      = require('./verification');
-const { userRouter: productLinksUserRouter } = require('./productLinks'); // M-STOCKLINK MSL-04
+const { userRouter: productLinksUserRouter } = require('./productLinks');
 
-// Autenticacao (publica)
 router.use('/auth', require('./auth'));
 router.use('/auth', require('./passwordReset'));
 router.use('/auth', accessCodesRouter);
 router.use('/auth', verificationRouter);
 router.use('/auth', require('./myPermissions'));
 router.use('/auth', require('./sidebarLayout'));
-router.use('/auth', require('./authSwitchCompany')); // Multi-CNPJ M1-03
+router.use('/auth', require('./authSwitchCompany'));
 
-// Referrals (autenticada)
 router.use('/referrals', accessCodesRouter);
-
-// Convites publicos (aceite sem company access)
 router.use('/invite', require('./invitePublic'));
 
-// Multi-CNPJ M1-02: endpoints user-level (lista/cria empresas adicionais)
 router.use('/me/companies', require('./userCompanies'));
-// M-STOCKLINK MSL-04: produtos agregados (nao precisa :id, view consolidada)
 router.use('/me', productLinksUserRouter);
-// Multi-CNPJ Sessao 2: endpoints /me/* consolidados (Onda 2.1+)
 router.use('/me', require('./meAggregates'));
-// Financeiro v2 — Insights consolidados multi-CNPJ (04/05/2026).
-// Agrega health score, runway e biggest lever de TODAS as empresas do usuario.
 router.use('/me/financeiro', require('./financeiroInsights').meRouter);
+router.use('/me/financeiro', require('./financeiroComparative').meRouter);
 
-// Rotas privadas por empresa
 router.use('/companies/:id', privateCompaniesRouter);
 
-// Admin — Central de Comando
 router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminAccessCodes'));
 router.use('/admin', require('./adminPlan'));
 router.use('/admin', require('./adminVertical'));
+router.use('/admin', require('./adminSubVertical'));
 router.use('/admin', require('./adminSupport'));
 router.use('/admin', require('./adminMetrics'));
 router.use('/admin', require('./adminClients360'));
 router.use('/admin', require('./adminRevenue'));
 router.use('/admin', require('./adminOps'));
 router.use('/admin', require('./adminGrowth'));
+router.use('/admin/leads', require('./adminLeads'));
+router.use('/admin/cadences',   require('./adminCadences'));
+router.use('/admin/lead-goals', require('./adminLeadGoals'));
+router.use('/admin/lead-views', require('./adminLeadViews'));
 
-// Webhooks (publicos, validacao interna)
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
 router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
-router.use('/webhooks/instagram', require('./webhookInstagram')); // Hub Social P11 S3
+router.use('/webhooks/instagram', require('./webhookInstagram'));
+router.use('/webhooks/mp',        require('./webhookMp'));
 
-// Storefront publico
+// Aura Studio Sub-onda Marketplaces S-3 (25/05/2026):
+// Webhooks stub ML + Shopee. Mesmo router, 2 endpoints (/mercadolivre + /shopee).
+// Publicos, sem signature validation real (depende do core OAuth).
+router.use('/webhooks', require('./webhookMarketplaceStub'));
+
+// Core ML/Shopee F1.B + F2.B (25/05/2026):
+// Callback publico OAuth — recebe redirect do ML/Shopee depois que o lojista
+// autorizou. GET /api/v1/marketplaces/:platform/callback?code=XXX&state=YYY
+// (sem auth — usa state com companyId).
+router.use('/marketplaces', require('./marketplaceAuthPublic'));
+
+// Aura Studio Nivel 1 Sub-onda D (25/05/2026):
+// Storefront publico Studio. Montado ANTES de /storefront pra que rotas
+// /storefront/:slug/studio/* sejam capturadas por studioStorefront e nao
+// caiam no catch-all GET /:slug do storefront principal.
+router.use('/storefront', require('./studioStorefront'));
 router.use('/storefront', require('./storefront'));
-
-// Relatorios publicos (acessados via token JWT enviado no email semanal)
 router.use('/reports', require('./publicReports'));
 
-// Rotas publicas
 router.use('/reviews',           publicReviewsRouter);
 router.use('/dental',            require('./dentalSign'));
-router.use('/dental/consent',    require('./dentalConsentPublic')); // W2-04: TCLE pad publico
+router.use('/dental/consent',    require('./dentalConsentPublic'));
 router.use('/dental/book',       require('./dentalBooking'));
 router.use('/dental-portal',     require('./dentalPortalPublic'));
 router.use('/barber/book',       require('./barberBooking'));
 router.use('/onboarding',        onboardingRouter);
-router.use('/food/table',        require('./foodWaiter'));
-router.use('/food/schedule',     require('./foodSchedule'));
+router.use('/food/table',        require('./foodWaiterPublic'));
+router.use('/food/schedule',     require('./foodSchedulePublic'));
+router.use('/food',              require('./foodPublic'));
 router.use('/food',              require('./food'));
+
+// Aura Studio Fase 5: aprovação pública de arte via wa.me.
+// Sem auth — cliente recebe link wa.me e abre /aprovacao/:token no navegador.
+// Migration 132. PR Aura-backend#112.
+router.use('/aprovacao',         require('./studioApprovalPublic'));
+
+// Studio Camada 1 Fase A (30/05/2026): aceite público do orçamento via link.
+// Sem auth — cliente recebe link e abre /orcamento/:token no navegador.
+// Migration 138. Espelha a mecânica de /aprovacao.
+router.use('/orcamento',         require('./studioQuotePublic'));
 
 module.exports = router;

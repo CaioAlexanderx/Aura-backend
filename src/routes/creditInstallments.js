@@ -1,0 +1,574 @@
+/**
+ * creditInstallments.js
+ * Crediario parcelado -- vendas a prazo, score interno, regua de cobranca, dashboard inadimplencia.
+ *
+ * F1 (29/05/2026):
+ *   - PATCH /installments/:iid/pay delega a creditLedger.applyPayment (fonte unica)
+ *   - Removido stub 501 + conflito de params :id/:iid
+ *   - CURRENT_DATE substituido por (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+ *   - KPIs do dashboard usam (amount_due - covered_amount) em vez de (amount_due - amount_paid)
+ *   - updateCreditUsed usa saldo do ledger (nao soma de installments)
+ */
+
+const express = require('express');
+const pool = require('../config/database');
+const creditLedger = require('../services/creditLedger');
+
+const router = express.Router({ mergeParams: true });
+
+const SP_DATE = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
+
+// ───────────────────────────────────────────────
+function buildPixLink(id) {
+  const short = id.replace(/-/g, '').slice(0, 12);
+  return `https://pagar.getaura.com.br/parcela/${short}`;
+}
+
+function buildWhatsAppMessage(template, params = {}) {
+  const { customerName = 'Cliente', storeName = 'Loja', amount = '0,00',
+          dueDate = '', installmentNum = '', totalInstallments = '',
+          pixLink = '', daysLate = '' } = params;
+  const templates = {
+    lembrete:    `Ola, ${customerName}! Lembrete: a parcela ${installmentNum}/${totalInstallments} de R$ ${amount} vence em *${dueDate}*. Pague via PIX: ${pixLink} -- *${storeName}*`,
+    confirmacao: `Ola, ${customerName}! Amanha vence sua parcela ${installmentNum}/${totalInstallments} de R$ ${amount}. PIX rapido: ${pixLink} -- *${storeName}*`,
+    vencimento:  `${customerName}, a parcela ${installmentNum}/${totalInstallments} de R$ ${amount} vence *hoje*. Evite juros: ${pixLink} -- *${storeName}*`,
+    atraso_1:    `${customerName}, sua parcela ${installmentNum}/${totalInstallments} de R$ ${amount} esta *${daysLate} dias* em atraso. Regularize agora: ${pixLink} -- *${storeName}*`,
+    atraso_2:    `${customerName}, identificamos debito de R$ ${amount} com *${daysLate} dias* de atraso. Acesse ${pixLink} ou entre em contato. -- *${storeName}*`,
+    bloqueio:    `${customerName}, seu credito em *${storeName}* foi suspenso por inadimplencia. Regularize: ${pixLink} ou fale com a loja.`,
+  };
+  return templates[template] || templates.lembrete;
+}
+
+// ───────────────────────────────────────────────
+async function assertCrediarioEnabled(req, res, next) {
+  try {
+    const result = await pool.query(
+      `SELECT pdv_settings->>'crediario_enabled' AS enabled FROM companies WHERE id = $1`,
+      [req.params.id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Empresa nao encontrada.' });
+    if (result.rows[0]?.enabled !== 'true') {
+      return res.status(403).json({
+        error: 'Crediario nao habilitado. Ative em Configuracoes > PDV > Politicas do Caixa.',
+        code: 'CREDIARIO_DISABLED',
+      });
+    }
+    next();
+  } catch (err) { next(err); }
+}
+
+router.use(assertCrediarioEnabled);
+
+// ─── GET /credit/customers/:cid/profile ──────────────────────────────
+router.get('/customers/:cid/profile', async (req, res) => {
+  const companyId  = req.params.id;
+  const customerId = req.params.cid;
+  const client = await pool.connect();
+  try {
+    const profile = await creditLedger._getOrCreateProfile(client, companyId, customerId);
+    if (!profile) return res.json({ score: 500, label: 'regular', credit_limit: 0, credit_used: 0, status: 'active' });
+    const config = await creditLedger._getOrCreatePlanConfig(client, companyId);
+    const installments = await client.query(
+      `SELECT id, installment_number, total_installments, amount_due, covered_amount,
+              due_date, status, pix_link, late_fee, late_interest, collection_stage
+       FROM credit_installments
+       WHERE company_id = $1 AND customer_id = $2 AND status IN ('pending','overdue')
+       ORDER BY due_date ASC`,
+      [companyId, customerId]
+    );
+    res.json({
+      ...profile,
+      label: require('../services/creditLedger')._recalculateScore ? profile.credit_score : profile.credit_score,
+      config,
+      open_installments: installments.rows.map(i => ({
+        ...i,
+        remaining: parseFloat((parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)).toFixed(2)),
+      })),
+    });
+  } catch (err) {
+    console.error('GET /credit/customers/:cid/profile', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ─── PUT /credit/customers/:cid/limit ────────────────────────────────
+router.put('/customers/:cid/limit', async (req, res) => {
+  const companyId  = req.params.id;
+  const customerId = req.params.cid;
+  const { credit_limit } = req.body;
+  if (credit_limit === undefined || isNaN(parseFloat(credit_limit))) {
+    return res.status(400).json({ error: 'credit_limit e obrigatorio e deve ser numerico.' });
+  }
+  const client = await pool.connect();
+  try {
+    await creditLedger._getOrCreateProfile(client, companyId, customerId);
+    const r = await client.query(
+      `UPDATE customer_credit_profiles
+         SET credit_limit = $3, updated_at = NOW()
+       WHERE company_id = $1 AND customer_id = $2 RETURNING *`,
+      [companyId, customerId, parseFloat(credit_limit)]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('PUT /credit/customers/:cid/limit', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ─── PATCH /credit/customers/:cid/block ─────────────────────────────
+router.patch('/customers/:cid/block', async (req, res) => {
+  const companyId  = req.params.id;
+  const customerId = req.params.cid;
+  const { action, reason } = req.body;
+  if (!['block', 'unblock'].includes(action)) {
+    return res.status(400).json({ error: 'action deve ser "block" ou "unblock".' });
+  }
+  const client = await pool.connect();
+  try {
+    const r = await client.query(
+      `UPDATE customer_credit_profiles
+         SET status = $3, blocked_reason = $4, updated_at = NOW()
+       WHERE company_id = $1 AND customer_id = $2 RETURNING *`,
+      [companyId, customerId,
+       action === 'block' ? 'blocked' : 'active',
+       action === 'block' ? (reason || 'Bloqueio manual') : null]
+    );
+    if (!r.rows.length) return res.status(404).json({ error: 'Perfil nao encontrado.' });
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('PATCH /credit/customers/:cid/block', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ─── GET/PUT /credit/plan-config (F2-2A: juros de financiamento) ──────
+router.get('/plan-config', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const config = await creditLedger._getOrCreatePlanConfig(client, req.params.id);
+    res.json(config || {});
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+router.put('/plan-config', async (req, res) => {
+  const { max_installments, min_installment_value, interest_rate,
+          late_fee_rate, late_interest_daily, auto_block_days } = req.body;
+  const client = await pool.connect();
+  try {
+    const r = await client.query(
+      `INSERT INTO credit_plan_configs (company_id, max_installments, min_installment_value,
+         interest_rate, late_fee_rate, late_interest_daily, auto_block_days)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (company_id) DO UPDATE SET
+         max_installments      = COALESCE($2, credit_plan_configs.max_installments),
+         min_installment_value = COALESCE($3, credit_plan_configs.min_installment_value),
+         interest_rate         = COALESCE($4, credit_plan_configs.interest_rate),
+         late_fee_rate         = COALESCE($5, credit_plan_configs.late_fee_rate),
+         late_interest_daily   = COALESCE($6, credit_plan_configs.late_interest_daily),
+         auto_block_days       = COALESCE($7, credit_plan_configs.auto_block_days),
+         updated_at            = NOW()
+       RETURNING *`,
+      [req.params.id,
+       max_installments || null, min_installment_value || null, interest_rate !== undefined ? interest_rate : null,
+       late_fee_rate || null, late_interest_daily || null, auto_block_days || null]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ─── POST /credit/installments ─────────────────────────────────────────
+router.post('/installments', async (req, res) => {
+  const companyId = req.params.id;
+  const { customer_id, sale_id, total_amount, installments, first_due_date } = req.body;
+  if (!customer_id || !total_amount || !installments || !first_due_date) {
+    return res.status(400).json({ error: 'customer_id, total_amount, installments e first_due_date sao obrigatorios.' });
+  }
+  const n = parseInt(installments);
+  const total = parseFloat(total_amount);
+  if (isNaN(n) || n < 1 || n > 36) return res.status(400).json({ error: 'installments deve ser entre 1 e 36.' });
+  if (isNaN(total) || total <= 0)   return res.status(400).json({ error: 'total_amount invalido.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const profile = await creditLedger._getOrCreateProfile(client, companyId, customer_id);
+    if (profile?.status === 'blocked') {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        error: `Cliente com credito bloqueado. Motivo: ${profile.blocked_reason || 'Bloqueio manual'}.`,
+        code: 'CUSTOMER_BLOCKED',
+      });
+    }
+    const config = await creditLedger._getOrCreatePlanConfig(client, companyId);
+    if (config && n > parseInt(config.max_installments)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `Maximo de ${config.max_installments} parcelas configurado.` });
+    }
+
+    const effectiveRate = parseFloat(config?.interest_rate) || 0;
+    const totalWithInterest = effectiveRate > 0
+      ? parseFloat((total * (1 + effectiveRate * n)).toFixed(2))
+      : total;
+    const baseAmount = Math.floor((totalWithInterest / n) * 100) / 100;
+    const remainder  = Math.round((totalWithInterest - baseAmount * n) * 100) / 100;
+
+    const createdInstallments = [];
+    for (let i = 1; i <= n; i++) {
+      const amount  = i === n ? baseAmount + remainder : baseAmount;
+      const dueDate = new Date(first_due_date);
+      dueDate.setMonth(dueDate.getMonth() + (i - 1));
+      const dueDateStr = dueDate.toISOString().split('T')[0];
+      const ins = await client.query(
+        `INSERT INTO credit_installments
+           (company_id, sale_id, customer_id, installment_number, total_installments,
+            amount_due, due_date, status, pix_link, covered_amount)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,0) RETURNING *`,
+        [companyId, sale_id || null, customer_id, i, n, amount, dueDateStr,
+         `https://pagar.getaura.com.br/parcela/tmp`]
+      );
+      const row = ins.rows[0];
+      await client.query(`UPDATE credit_installments SET pix_link=$2 WHERE id=$1`,
+        [row.id, buildPixLink(row.id)]);
+      createdInstallments.push({ ...row, pix_link: buildPixLink(row.id) });
+    }
+    if (sale_id) {
+      try {
+        await client.query(
+          `UPDATE sales SET is_installment=true, total_installments=$2, credit_plan_snapshot=$3
+           WHERE id=$1 AND company_id=$4`,
+          [sale_id, n, JSON.stringify({ installments: n, total_amount: total, interest_rate: effectiveRate }), companyId]
+        );
+      } catch (e) { if (e.code !== '42703' && e.code !== '42P01') throw e; }
+    }
+    await creditLedger._updateCreditUsed(client, companyId, customer_id);
+    await client.query('COMMIT');
+    res.status(201).json({ installments: createdInstallments });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('POST /credit/installments', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ─── GET /credit/installments ─────────────────────────────────────────────
+router.get('/installments', async (req, res) => {
+  const companyId = req.params.id;
+  const { customer_id, status, page = 1, limit = 50 } = req.query;
+  const offset = (parseInt(page) - 1) * parseInt(limit);
+  let where = 'WHERE ci.company_id = $1';
+  const vals = [companyId];
+  let idx = 2;
+  if (customer_id) { where += ` AND ci.customer_id = $${idx++}`; vals.push(customer_id); }
+  if (status)      { where += ` AND ci.status = $${idx++}`;       vals.push(status); }
+  try {
+    // Marcar overdue com timezone correto
+    await pool.query(
+      `UPDATE credit_installments SET status='overdue'
+       WHERE company_id=$1 AND status='pending' AND due_date < ${SP_DATE}`,
+      [companyId]
+    );
+    const r = await pool.query(
+      `SELECT ci.*,
+              (ci.amount_due - ci.covered_amount) AS remaining_amount,
+              COALESCE(c.name, c.phone) AS customer_name,
+              c.phone AS customer_phone
+       FROM credit_installments ci
+       LEFT JOIN customers c ON c.id=ci.customer_id AND c.company_id=ci.company_id
+       ${where}
+       ORDER BY ci.due_date ASC
+       LIMIT $${idx} OFFSET $${idx+1}`,
+      [...vals, parseInt(limit), offset]
+    );
+    const count = await pool.query(`SELECT COUNT(*) FROM credit_installments ci ${where}`, vals);
+    res.json({ data: r.rows, total: parseInt(count.rows[0].count), page: parseInt(page), limit: parseInt(limit) });
+  } catch (err) {
+    console.error('GET /credit/installments', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── PATCH /credit/installments/:iid/pay ────────────────────────────
+// F1 (29/05/2026): delega a creditLedger.applyPayment.
+// Valor default = amount_due - covered_amount (saldo descoberto da parcela).
+router.patch('/installments/:iid/pay', async (req, res) => {
+  const companyId     = req.params.id;
+  const installmentId = req.params.iid;
+  const { amount_paid, payment_method } = req.body || {};
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const cur = await client.query(
+      `SELECT * FROM credit_installments WHERE id=$1 AND company_id=$2 FOR UPDATE`,
+      [installmentId, companyId]
+    );
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Parcela nao encontrada.' });
+    }
+    const ins = cur.rows[0];
+    if (ins.status === 'paid')      { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Parcela ja paga.' }); }
+    if (ins.status === 'cancelled') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Parcela cancelada.' }); }
+
+    let activeSessaoId = null;
+    try {
+      const sessRes = await pool.query(
+        `SELECT id FROM caixa_sessoes WHERE company_id=$1 AND status='aberta' LIMIT 1`,
+        [companyId]
+      );
+      activeSessaoId = sessRes?.rows?.[0]?.id || null;
+    } catch (_) {}
+
+    // Valor a pagar: fornecido ou saldo descoberto da parcela
+    const uncovered = Math.max(0, parseFloat(ins.amount_due) - parseFloat(ins.covered_amount || 0));
+    const payAmount = amount_paid !== undefined ? parseFloat(amount_paid) : uncovered;
+    if (payAmount <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Valor de pagamento deve ser > 0.' });
+    }
+
+    const result = await creditLedger.applyPayment(client, {
+      companyId,
+      customerId: ins.customer_id,
+      amount:     payAmount,
+      method:     payment_method || 'dinheiro',
+      sessaoId:   activeSessaoId,
+      createdBy:  req.user?.id || null,
+    });
+
+    await client.query('COMMIT');
+
+    const { rows: updated } = await pool.query(
+      `SELECT * FROM credit_installments WHERE id=$1`, [installmentId]
+    );
+    res.json({
+      ...updated[0],
+      remaining:   Math.max(0, parseFloat(updated[0].amount_due) - parseFloat(updated[0].covered_amount || 0)),
+      new_balance: result.new_balance,
+      settled:     result.settled_receivables,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('PATCH /credit/installments/:iid/pay', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ─── PATCH /credit/installments/:iid/cancel ─────────────────────────
+router.patch('/installments/:iid/cancel', async (req, res) => {
+  const companyId     = req.params.id;
+  const installmentId = req.params.iid;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const r = await client.query(
+      `UPDATE credit_installments
+         SET status='cancelled', updated_at=NOW()
+       WHERE id=$1 AND company_id=$2 AND status IN ('pending','overdue')
+       RETURNING *`,
+      [installmentId, companyId]
+    );
+    if (!r.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Parcela nao encontrada ou nao pode ser cancelada.' });
+    }
+    await creditLedger._updateCreditUsed(client, companyId, r.rows[0].customer_id);
+    await client.query('COMMIT');
+    res.json(r.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('PATCH /credit/installments/:iid/cancel', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ─── GET /credit/dashboard ───────────────────────────────────────────────
+router.get('/dashboard', async (req, res) => {
+  const companyId = req.params.id;
+  try {
+    // Marcar overdue (timezone correto)
+    await pool.query(
+      `UPDATE credit_installments SET status='overdue'
+       WHERE company_id=$1 AND status='pending' AND due_date < ${SP_DATE}`,
+      [companyId]
+    );
+
+    const kpis = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status IN ('pending','overdue'))                                     AS total_open_count,
+         COALESCE(SUM(amount_due - covered_amount) FILTER (WHERE status IN ('pending','overdue')), 0) AS total_open_amount,
+         COUNT(*) FILTER (WHERE status='overdue')                                                     AS overdue_count,
+         COALESCE(SUM(amount_due - covered_amount) FILTER (WHERE status='overdue'), 0)               AS overdue_amount,
+         COUNT(*) FILTER (WHERE status='overdue'
+           AND due_date < ${SP_DATE} - 30)                                                           AS critical_count,
+         COALESCE(SUM(amount_due - covered_amount) FILTER (
+           WHERE status='overdue' AND due_date < ${SP_DATE} - 30), 0)                                AS critical_amount,
+         COUNT(DISTINCT customer_id) FILTER (WHERE status='overdue')                                 AS defaulting_customers,
+         COUNT(*) FILTER (WHERE status='paid'
+           AND DATE_TRUNC('month', paid_at AT TIME ZONE 'America/Sao_Paulo')
+             = DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Sao_Paulo'))                          AS paid_this_month_count,
+         COALESCE(SUM(covered_amount) FILTER (WHERE status='paid'
+           AND DATE_TRUNC('month', paid_at AT TIME ZONE 'America/Sao_Paulo')
+             = DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Sao_Paulo')), 0)                      AS paid_this_month_amount
+       FROM credit_installments WHERE company_id=$1`,
+      [companyId]
+    );
+
+    const top = await pool.query(
+      `SELECT
+         ci.customer_id,
+         COALESCE(c.name, c.phone) AS customer_name, c.phone,
+         COUNT(*) AS overdue_count,
+         SUM(ci.amount_due - ci.covered_amount) AS total_overdue,
+         MIN(ci.due_date) AS oldest_due_date,
+         MAX(ci.collection_stage) AS collection_stage,
+         ccp.credit_score, ccp.status AS credit_status
+       FROM credit_installments ci
+       LEFT JOIN customers c ON c.id=ci.customer_id AND c.company_id=ci.company_id
+       LEFT JOIN customer_credit_profiles ccp
+         ON ccp.customer_id=ci.customer_id AND ccp.company_id=ci.company_id
+       WHERE ci.company_id=$1 AND ci.status='overdue'
+       GROUP BY ci.customer_id, c.name, c.phone, ccp.credit_score, ccp.status
+       ORDER BY total_overdue DESC LIMIT 20`,
+      [companyId]
+    );
+
+    res.json({ kpis: kpis.rows[0], top_defaulters: top.rows });
+  } catch (err) {
+    console.error('GET /credit/dashboard', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /credit/dashboard/aging ────────────────────────────────────────
+router.get('/dashboard/aging', async (req, res) => {
+  const companyId = req.params.id;
+  try {
+    const r = await pool.query(
+      `SELECT
+         CASE
+           WHEN due_date >= ${SP_DATE}      THEN 'a_vencer'
+           WHEN due_date >= ${SP_DATE} - 30 THEN '1_30_dias'
+           WHEN due_date >= ${SP_DATE} - 60 THEN '31_60_dias'
+           WHEN due_date >= ${SP_DATE} - 90 THEN '61_90_dias'
+           ELSE                                  'acima_90'
+         END AS faixa,
+         COUNT(*) AS count,
+         COALESCE(SUM(amount_due - covered_amount), 0) AS amount
+       FROM credit_installments
+       WHERE company_id=$1 AND status IN ('pending','overdue')
+       GROUP BY faixa ORDER BY faixa`,
+      [companyId]
+    );
+    res.json(r.rows);
+  } catch (err) {
+    console.error('GET /credit/dashboard/aging', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── collection/rules + collection/trigger (inalterados) ──────────────
+router.get('/collection/rules', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    let r;
+    try {
+      r = await client.query(`SELECT * FROM credit_collection_rules WHERE company_id=$1`, [req.params.id]);
+    } catch (e) {
+      if (e.code === '42P01') return res.json({ rules: [], enabled: false });
+      throw e;
+    }
+    if (!r.rows.length) {
+      const ins = await client.query(
+        `INSERT INTO credit_collection_rules (company_id) VALUES ($1)
+         ON CONFLICT (company_id) DO UPDATE SET updated_at=NOW() RETURNING *`,
+        [req.params.id]
+      );
+      return res.json(ins.rows[0]);
+    }
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('GET /credit/collection/rules', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+router.put('/collection/rules', async (req, res) => {
+  const { enabled, whatsapp_connected, rules } = req.body;
+  const client = await pool.connect();
+  try {
+    const r = await client.query(
+      `INSERT INTO credit_collection_rules (company_id, enabled, whatsapp_connected, rules)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (company_id) DO UPDATE SET
+         enabled=$2, whatsapp_connected=$3, rules=$4, updated_at=NOW()
+       RETURNING *`,
+      [req.params.id,
+       enabled !== undefined ? enabled : true,
+       whatsapp_connected !== undefined ? whatsapp_connected : false,
+       rules ? JSON.stringify(rules) : null]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    if (err.code === '42P01') return res.status(503).json({ error: 'Tabela de regua ainda nao disponivel.' });
+    console.error('PUT /credit/collection/rules', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+router.post('/collection/trigger/:iid', async (req, res) => {
+  const companyId     = req.params.id;
+  const installmentId = req.params.iid;
+  const { template = 'atraso_1', channel = 'whatsapp' } = req.body;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const ins = await client.query(
+      `SELECT ci.*, COALESCE(c.name, c.phone) AS customer_name, c.phone,
+              COALESCE(co.trade_name, co.legal_name) AS store_name
+       FROM credit_installments ci
+       LEFT JOIN customers c ON c.id=ci.customer_id AND c.company_id=ci.company_id
+       LEFT JOIN companies co ON co.id=ci.company_id
+       WHERE ci.id=$1 AND ci.company_id=$2`,
+      [installmentId, companyId]
+    );
+    if (!ins.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Parcela nao encontrada.' }); }
+    const row = ins.rows[0];
+    const daysLate = Math.max(0, Math.floor((Date.now() - new Date(row.due_date)) / 86400000));
+    const message = buildWhatsAppMessage(template, {
+      customerName:      row.customer_name,
+      storeName:         row.store_name || 'Loja',
+      amount:            parseFloat(row.amount_due).toFixed(2).replace('.', ','),
+      dueDate:           new Date(row.due_date).toLocaleDateString('pt-BR'),
+      installmentNum:    row.installment_number,
+      totalInstallments: row.total_installments,
+      pixLink:           row.pix_link || buildPixLink(row.id),
+      daysLate:          String(daysLate),
+    });
+    try {
+      await client.query(
+        `INSERT INTO credit_collection_events
+           (installment_id, channel, template, days_relative, status, message_preview)
+         VALUES ($1,$2,$3,$4,'sent',$5)`,
+        [installmentId, channel, template, daysLate, message.slice(0, 300)]
+      );
+      await client.query(
+        `UPDATE credit_installments SET collection_stage=collection_stage+1, updated_at=NOW() WHERE id=$1`,
+        [installmentId]
+      );
+    } catch (e) { if (e.code !== '42P01' && e.code !== '42703') throw e; }
+    await client.query('COMMIT');
+    res.json({ success: true, installment_id: installmentId, channel, template, message, phone: row.phone, days_late: daysLate });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('POST /credit/collection/trigger/:iid', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+module.exports = router;

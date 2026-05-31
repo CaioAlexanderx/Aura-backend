@@ -2,10 +2,28 @@
 // AURA. — Storefront Público (sem auth)
 // GET  /storefront/:slug                     — JSON API
 // GET  /storefront/:slug/page                — HTML renderizado (vitrine pública)
-// POST /storefront/:slug/order               — Cria pedido (Pix manual ou na entrega)
+// GET  /storefront/:slug/shipping-quote      — Calcula frete por CEP (Fase 5b)
+// POST /storefront/:slug/order               — Cria pedido (Pix, cartão, ou na entrega)
 // POST /storefront/:slug/order/:oid/upload-proof — Cliente envia comprovante de Pix
 // POST /storefront/:slug/order/:oid/mark-as-paid — Cliente avisa que pagou
 // GET  /storefront/:slug/order/:oid          — Poll status do pedido
+//
+// MP Fase 2 (21/05/2026): CheckoutPro para pagamento com cartão.
+// payment_method=card cria preferência MP e retorna init_point para
+// redirect do cliente ao hosted checkout do MP.
+//
+// Patch (21/05/2026): JOIN companies pra obter trade_name; passa cpfNorm
+// + company_display_name à createMpPreference.
+//
+// Migration 121 (21/05/2026): hasCard respeita config.card_enabled.
+// Lojista pode pausar cartão sem deletar credenciais MP.
+//
+// Custom domain (22/05/2026): back_urls usam custom_domain quando configurado
+// e active; corrigido prefixo /api/v1/ que faltava no backBase.
+//
+// fix (22/05/2026): notifyPaymentConfirmed chamado diretamente para on_delivery
+// (pedido já nasce confirmed). notifyNewOrder removido — era no-op.
+// Pix/Cartão recebem notificações apenas após confirmação via webhook MP ou approve-payment.
 // ============================================================
 'use strict';
 
@@ -17,8 +35,9 @@ const { buildStorefront } = require('../services/storefrontBuilder');
 const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
+const { createMpPixPayment, createMpPreference } = require('../services/mpService');
+const { calculateShippingQuote } = require('../services/shippingQuote');
 
-// ── Validador CPF/CNPJ (mod 11) ──────────────────────────────
 function validateCpfCnpj(raw) {
   if (!raw) return null;
   const d = String(raw).replace(/\D/g, '');
@@ -51,7 +70,19 @@ function validateCnpj(d) {
   return r === parseInt(d[13]);
 }
 
-// CORS aberto pra vitrine publica
+function listVisibilityWhere(cidParam) {
+  return `(company_id = ${cidParam} OR (
+    is_group_shared = true
+    AND company_id IN (
+      SELECT id FROM companies
+      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
+        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
+        FROM companies WHERE id = ${cidParam}
+      )
+    )
+  ))`;
+}
+
 router.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -64,15 +95,15 @@ router.use((req, res, next) => {
 const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
   || 'https://aura-backend-production-f805.up.railway.app';
 
-// CSP + viacep.com.br pra autocomplete CEP
 const STOREFRONT_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
   "script-src-attr 'unsafe-inline'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https://r2.getaura.com.br https://pub-f21f233f50d1412abc93a05bbdffd0d3.r2.dev https://api.qrserver.com",
-  "connect-src 'self' https://cloudflareinsights.com https://viacep.com.br " + STOREFRONT_API_BASE,
-  "font-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "img-src 'self' data: blob: https:",
+  "connect-src 'self' https://cloudflareinsights.com https://viacep.com.br https://brasilapi.com.br " + STOREFRONT_API_BASE,
+  "font-src 'self' data: https://fonts.gstatic.com",
+  "frame-ancestors *",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -97,15 +128,48 @@ router.get('/:slug/page', async (req, res) => {
     const { rows } = await db.query(
       `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]);
     if (!rows.length) {
-      return res.status(404).send('<html><body><h1>Loja nao encontrada</h1></body></html>');
+      res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
+      res.removeHeader('X-Frame-Options');
+      return res.status(404).send('<html><body style="font-family:sans-serif;padding:40px;text-align:center;"><h1>Loja não encontrada</h1><p>Verifique o link ou peça ao lojista pra publicar a loja.</p></body></html>');
     }
     const data = await buildStorefront(rows[0]);
     res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
+    res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(buildStorefrontPage(data, slug));
   } catch (err) {
     console.error('storefront page error:', err);
     res.status(500).send('<html><body><h1>Erro ao carregar loja</h1></body></html>');
+  }
+});
+
+router.get('/:slug/shipping-quote', async (req, res) => {
+  try {
+    const slug = req.params.slug.toLowerCase().trim();
+    const { rows } = await db.query(
+      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`,
+      [slug]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Loja nao encontrada' });
+    const config = rows[0];
+
+    if (!config.delivery_enabled) {
+      return res.status(400).json({ error: 'Loja nao faz entregas' });
+    }
+
+    const cep = String(req.query.cep || '').trim();
+    if (!cep) return res.status(400).json({ error: 'cep obrigatorio' });
+
+    const subtotal = parseFloat(req.query.subtotal) || 0;
+    if (subtotal < 0) {
+      return res.status(400).json({ error: 'subtotal invalido' });
+    }
+
+    const quote = await calculateShippingQuote(config, cep, subtotal);
+    res.json(quote);
+  } catch (err) {
+    console.error('shipping-quote error:', err);
+    res.status(500).json({ error: 'Erro ao calcular frete' });
   }
 });
 
@@ -118,6 +182,7 @@ router.post('/:slug/order', async (req, res) => {
     request_nfce, customer_cpf_cnpj,
     address_zip, address_street, address_number, address_complement,
     address_neighborhood, address_city, address_state,
+    expected_delivery_fee,
   } = req.body;
 
   if (!customer_name || !customer_phone) {
@@ -128,11 +193,30 @@ router.post('/:slug/order', async (req, res) => {
   }
 
   try {
+    // Patch (21/05/2026): JOIN companies pra obter trade_name (statement_descriptor MP).
     const { rows: configs } = await db.query(
-      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]);
+      `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name
+       FROM digital_channel_config dcc
+       JOIN companies c ON c.id = dcc.company_id
+       WHERE dcc.slug = $1 AND dcc.is_published = true`, [slug]);
     if (!configs.length) return res.status(404).json({ error: 'Loja nao encontrada' });
     const config = configs[0];
     const cid = config.company_id;
+
+    // MP Fase 1 (20/05/2026): detecta gateway MP da empresa
+    let mpGateway = null;
+    try {
+      const { rows: gws } = await db.query(
+        `SELECT access_token, public_key FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
+        [cid]
+      );
+      mpGateway = gws[0] || null;
+    } catch (_) { /* tabela pode não existir em deployment antigo */ }
+    const hasMpGateway = !!mpGateway;
+    // Migration 121 (21/05/2026): hasCard respeita card_enabled toggle.
+    // Default true quando coluna não existe (pré-migration) ou não foi setada.
+    const cardEnabled = config.card_enabled !== false;
+    const hasCard = hasMpGateway && cardEnabled;
 
     const dtype = delivery_type || 'pickup';
     if (dtype === 'delivery' && !config.delivery_enabled) {
@@ -170,20 +254,27 @@ router.post('/:slug/order', async (req, res) => {
       }
     }
 
-    const hasPix = !!(config.pix_key && String(config.pix_key).trim());
+    const hasPix = !!(config.pix_key && String(config.pix_key).trim()) || hasMpGateway;
     const hasOnDelivery = !!config.pay_on_delivery_enabled;
     let pmethod = (payment_method || '').toLowerCase().trim();
     if (!pmethod) {
-      pmethod = hasPix ? 'pix' : (hasOnDelivery ? 'on_delivery' : null);
+      pmethod = hasPix ? 'pix' : (hasCard ? 'card' : (hasOnDelivery ? 'on_delivery' : null));
     }
     if (!pmethod) {
       return res.status(400).json({ error: 'Esta loja nao aceita pagamentos no momento' });
     }
-    if (pmethod !== 'pix' && pmethod !== 'on_delivery') {
-      return res.status(400).json({ error: 'payment_method invalido. Use pix ou on_delivery' });
+    if (pmethod !== 'pix' && pmethod !== 'on_delivery' && pmethod !== 'card') {
+      return res.status(400).json({ error: 'payment_method invalido. Use pix, card ou on_delivery' });
     }
     if (pmethod === 'pix' && !hasPix) {
       return res.status(400).json({ error: 'Esta loja nao aceita Pix' });
+    }
+    if (pmethod === 'card' && !hasCard) {
+      // Mensagem distinta quando gateway existe mas está pausado vs não configurado
+      const msg = hasMpGateway
+        ? 'Pagamento com cartão está temporariamente desativado pela loja. Use Pix ou pague na entrega.'
+        : 'Esta loja nao aceita pagamento com cartao';
+      return res.status(400).json({ error: msg });
     }
     if (pmethod === 'on_delivery' && !hasOnDelivery) {
       return res.status(400).json({ error: 'Esta loja nao aceita pagamento na entrega' });
@@ -192,8 +283,10 @@ router.post('/:slug/order', async (req, res) => {
     const productIds = items.map(i => i.product_id);
     const { rows: products } = await db.query(
       `SELECT id, name, price, stock_qty, image_url, is_active
-       FROM products WHERE id::text = ANY($1) AND company_id = $2`,
-      [productIds.map(String), cid]);
+       FROM products
+       WHERE id::text = ANY($1) AND ${listVisibilityWhere('$2')}`,
+      [productIds.map(String), cid]
+    );
     const productMap = Object.fromEntries(products.map(p => [p.id, p]));
 
     const variantIds = items.map(i => i.variant_id).filter(Boolean);
@@ -272,7 +365,35 @@ router.post('/:slug/order', async (req, res) => {
       });
     }
 
-    const delivery_fee = dtype === 'delivery' ? (parseFloat(config.delivery_fee) || 0) : 0;
+    let delivery_fee = 0;
+    let shippingMeta = null;
+    if (dtype === 'delivery') {
+      if (address_zip) {
+        const cleanZip = String(address_zip).replace(/\D/g, '');
+        const quote = await calculateShippingQuote(config, cleanZip, subtotal);
+        shippingMeta = quote;
+        if (quote.error && quote.fee == null) {
+          return res.status(400).json({
+            error: quote.error,
+            distance_km: quote.distance_km,
+          });
+        }
+        delivery_fee = parseFloat(quote.fee) || 0;
+
+        if (expected_delivery_fee != null && expected_delivery_fee !== '') {
+          const expected = parseFloat(expected_delivery_fee);
+          if (Number.isFinite(expected) && Math.abs(expected - delivery_fee) > 0.01) {
+            return res.status(409).json({
+              error: 'Valor de frete desatualizado. Atualize a pagina e tente de novo.',
+              server_fee: delivery_fee,
+              client_fee: expected,
+            });
+          }
+        }
+      } else {
+        delivery_fee = parseFloat(config.delivery_fee) || 0;
+      }
+    }
     const total = subtotal + delivery_fee;
 
     const initialStatus = pmethod === 'on_delivery' ? 'confirmed' : 'pending_payment';
@@ -337,42 +458,104 @@ router.post('/:slug/order', async (req, res) => {
 
     let pixData = null;
     if (pmethod === 'pix') {
-      pixData = await generatePix({ order, company_id: cid, total });
-      if (pixData) {
-        await db.query(`
-          UPDATE digital_orders SET
-            asaas_payment_id     = $1,
-            asaas_pix_qrcode     = $2,
-            asaas_pix_payload    = $3,
-            asaas_pix_expires_at = $4
-          WHERE id = $5
-        `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
+      if (hasMpGateway) {
+        try {
+          pixData = await createMpPixPayment({
+            accessToken:   mpGateway.access_token,
+            total,
+            orderId:       order.id,
+            orderNumber:   order.order_number,
+            customerEmail: customer_email || null,
+            description:   `Pedido #${order.order_number}`,
+          });
+          await db.query(
+            `UPDATE digital_orders SET mp_payment_id = $1, updated_at = NOW() WHERE id = $2`,
+            [pixData.payment_id, order.id]
+          );
+        } catch (mpErr) {
+          console.error('[storefront] MP Pix error, fallback to static Pix:', mpErr.message);
+          pixData = await generatePix({ order, company_id: cid, total });
+          if (pixData) {
+            await db.query(`
+              UPDATE digital_orders SET
+                asaas_payment_id     = $1,
+                asaas_pix_qrcode     = $2,
+                asaas_pix_payload    = $3,
+                asaas_pix_expires_at = $4
+              WHERE id = $5
+            `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
+          }
+        }
+      } else {
+        pixData = await generatePix({ order, company_id: cid, total });
+        if (pixData) {
+          await db.query(`
+            UPDATE digital_orders SET
+              asaas_payment_id     = $1,
+              asaas_pix_qrcode     = $2,
+              asaas_pix_payload    = $3,
+              asaas_pix_expires_at = $4
+            WHERE id = $5
+          `, [pixData.payment_id, pixData.qrcode, pixData.payload, pixData.expires_at, order.id]);
+        }
       }
     }
 
-    notify.notifyNewOrder({
-      order,
-      total,
-      pix_payload: pixData ? pixData.payload : null,
-      config,
-    }).catch(err => console.error('[notify] new order error:', err.message));
+    // Custom domain (22/05/2026): usa custom_domain como base da back_url quando configurado.
+    // Fix: prefixo /api/v1/ estava faltando no fallback Railway.
+    let cardData = null;
+    if (pmethod === 'card') {
+      try {
+        const hasCustomDomain = config.custom_domain && config.custom_domain_status === 'active';
+        const backBase = hasCustomDomain
+          ? `https://${config.custom_domain}`
+          : `${STOREFRONT_API_BASE}/api/v1/storefront/${slug}/page`;
+        cardData = await createMpPreference({
+          accessToken:     mpGateway.access_token,
+          orderId:         order.id,
+          orderNumber:     order.order_number,
+          orderItems,
+          customerEmail:   customer_email || null,
+          payerCpf:        cpfNorm || null,
+          storeName:       config.company_display_name || null,
+          notificationUrl: `${STOREFRONT_API_BASE}/api/v1/webhooks/mp`,
+          backUrlSuccess:  `${backBase}?order_id=${order.id}&payment=approved`,
+          backUrlFailure:  `${backBase}?order_id=${order.id}&payment=failed`,
+          backUrlPending:  `${backBase}?order_id=${order.id}&payment=pending`,
+        });
+      } catch (mpErr) {
+        console.error('[storefront] MP Preference error:', mpErr.message);
+        return res.status(500).json({ error: 'Erro ao criar preferencia de pagamento. Tente novamente.' });
+      }
+    }
 
+    // on_delivery: pedido nasce confirmed → notifica lojista + cliente imediatamente.
+    // Pix/Cartão: sem notificações aqui — webhook MP ou approve-payment chamam notifyPaymentConfirmed.
     if (initialStatus === 'confirmed') {
       onOrderConfirmed(order.id)
         .catch(err => console.error('[storefront] onOrderConfirmed error:', err.message));
+      notify.notifyPaymentConfirmed({ order })
+        .catch(err => console.error('[storefront] notifyPaymentConfirmed error:', err.message));
     }
 
     res.status(201).json({
       order_id:       order.id,
       order_number:   order.order_number,
       total,
+      delivery_fee,
+      subtotal,
       status:         initialStatus,
       payment_method: pmethod,
+      shipping:       shippingMeta,
       pix: pixData ? {
         qrcode:     pixData.qrcode,
         payload:    pixData.payload,
         expires_at: pixData.expires_at,
         mode:       pixData.mode || null,
+      } : null,
+      card: cardData ? {
+        init_point:    cardData.init_point,
+        preference_id: cardData.preference_id,
       } : null,
     });
   } catch (err) {
@@ -385,11 +568,7 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const { oid } = req.params;
   const { content, content_type } = req.body || {};
-
-  if (!content) {
-    return res.status(400).json({ error: 'content (base64) obrigatorio' });
-  }
-
+  if (!content) return res.status(400).json({ error: 'content (base64) obrigatorio' });
   try {
     const { rows } = await db.query(`
       SELECT o.id, o.company_id, o.status, o.payment_method
@@ -399,20 +578,17 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
     `, [oid, slug]);
     if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
     const order = rows[0];
-
     if (order.payment_method !== 'pix') {
       return res.status(400).json({ error: 'Comprovante so se aplica a pagamentos Pix' });
     }
     if (order.status === 'cancelled' || order.status === 'delivered') {
       return res.status(409).json({ error: `Pedido ja finalizado (${order.status})` });
     }
-
     const mime = (content_type || 'image/jpeg').toLowerCase();
     let ext = 'jpg';
     if (mime.includes('png')) ext = 'png';
     else if (mime.includes('webp')) ext = 'webp';
     else if (mime.includes('pdf')) ext = 'pdf';
-
     const key = `${order.company_id}/orders/${oid}/proof.${ext}`;
     const result = await uploadToR2(key, content, mime);
     if (!result.success) {
@@ -420,15 +596,9 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
       return res.status(500).json({ error: 'Erro ao salvar comprovante' });
     }
     const url = result.mock ? result.url : `${result.url}?v=${Date.now()}`;
-
     await db.query(`
-      UPDATE digital_orders SET
-        payment_proof_url = $1,
-        payment_proof_uploaded_at = NOW(),
-        updated_at = NOW()
-      WHERE id = $2
+      UPDATE digital_orders SET payment_proof_url = $1, payment_proof_uploaded_at = NOW(), updated_at = NOW() WHERE id = $2
     `, [url, oid]);
-
     res.json({ payment_proof_url: url, key: result.key });
   } catch (err) {
     console.error('[storefront] upload-proof error:', err.message);
@@ -439,7 +609,6 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
 router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const { oid } = req.params;
-
   try {
     const { rows } = await db.query(`
       SELECT o.id, o.status, o.company_id, o.customer_name, o.order_number, o.payment_method
@@ -449,7 +618,6 @@ router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
     `, [oid, slug]);
     if (!rows.length) return res.status(404).json({ error: 'Pedido nao encontrado' });
     const order = rows[0];
-
     if (order.payment_method !== 'pix') {
       return res.status(400).json({ error: 'Apenas pedidos Pix precisam ser marcados como pagos' });
     }
@@ -457,23 +625,10 @@ router.post('/:slug/order/:oid/mark-as-paid', async (req, res) => {
       return res.json({ status: 'awaiting_approval', message: 'Ja registrado.' });
     }
     if (order.status !== 'pending_payment') {
-      return res.status(409).json({
-        error: `Pedido nao pode ser marcado (status atual: ${order.status})`,
-      });
+      return res.status(409).json({ error: `Pedido nao pode ser marcado (status atual: ${order.status})` });
     }
-
-    await db.query(`
-      UPDATE digital_orders SET
-        status = 'awaiting_approval',
-        updated_at = NOW()
-      WHERE id = $1
-    `, [oid]);
-
-    res.json({
-      status: 'awaiting_approval',
-      message: 'Aguardando confirmacao do lojista. Voce sera avisado por WhatsApp.',
-    });
-
+    await db.query(`UPDATE digital_orders SET status = 'awaiting_approval', updated_at = NOW() WHERE id = $1`, [oid]);
+    res.json({ status: 'awaiting_approval', message: 'Aguardando confirmacao do lojista. Voce sera avisado por WhatsApp.' });
     if (typeof notify.notifyPaymentMarkedByCustomer === 'function') {
       notify.notifyPaymentMarkedByCustomer({ order })
         .catch(err => console.error('[notify] mark-as-paid error:', err.message));

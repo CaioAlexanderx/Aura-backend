@@ -36,7 +36,7 @@ const { logAuditAction } = require('../middleware/auditLog');
 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
-const ACCESS_TTL  = '15m';
+const ACCESS_TTL  = '1h';
 const REFRESH_TTL = '7d';
 const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const IS_PROD = env.NODE_ENV === 'production';
@@ -235,7 +235,7 @@ router.post('/register', async (req, res) => {
     logAuditAction(user.id, company ? company.id : null, 'register', 'New account: ' + email.toLowerCase().trim() + (skipCompany ? ' (invite flow, no company)' : !isNewCompany ? ' (joined existing company)' : '') + ' | terms_version=' + acceptedVersion);
 
     res.status(201).json({
-      token: accessToken, refresh_token: refreshToken, token_expires_in: '15m',
+      token: accessToken, refresh_token: refreshToken, token_expires_in: '1h',
       user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff, email_verified: user.email_verified || false },
       company: company ? {
         ...company,
@@ -294,7 +294,7 @@ router.post('/login', async (req, res) => {
     logAuditAction(user.id, ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null), 'login', 'Login: ' + user.email + (ctx.consolidated ? ' [consolidated]' : ''));
 
     res.json({
-      token: accessToken, refresh_token: refreshToken, token_expires_in: '15m',
+      token: accessToken, refresh_token: refreshToken, token_expires_in: '1h',
       user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff || false, email_verified: user.email_verified || false },
       company: ctx.consolidated ? null : shapeCompany(ctx.primary, ctx.primary?.member_role),
       consolidated_view: ctx.consolidated,
@@ -332,7 +332,7 @@ router.post('/refresh', async (req, res) => {
     });
     res.json({
       token: newAccessToken,
-      token_expires_in: '15m',
+      token_expires_in: '1h',
       consolidated_view: ctx.consolidated,
     });
   } catch (err) {

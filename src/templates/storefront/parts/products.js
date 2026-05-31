@@ -1,5 +1,10 @@
 // AURA. -- storefront/parts/products.js
 // renderProducts() — grid de produtos com filtro por categoria/busca.
+//
+// 23/05/2026: layout do card preservado (mesmo aspect/posicionamento)
+// mas a foto exibida cai pra primeira variante com image_url quando
+// o produto pai nao tem image_url. Isso evita placeholders 'A' em
+// catalogos onde o lojista so subiu foto por cor/tamanho.
 'use strict';
 
 module.exports = `
@@ -18,7 +23,16 @@ function renderProducts(){
   grid.innerHTML=filtered.map(function(p){
     var qty=getProductCartQty(p.id);
     var hasVar=productHasVariants(p);
-    var imgH=p.image_url?'<img src="'+esc(p.image_url)+'" alt="" style="width:100%;height:100%;object-fit:cover;">'
+    // 23/05/2026: fallback foto. Se produto pai nao tem image_url,
+    // procura a primeira variante com image_url (Array.find).
+    // Mantem placeholder (letter) so quando nem pai nem variante tem foto.
+    var displayImg=p.image_url;
+    if(!displayImg && p.variants && p.variants.length){
+      for(var vi=0;vi<p.variants.length;vi++){
+        if(p.variants[vi].image_url){displayImg=p.variants[vi].image_url;break;}
+      }
+    }
+    var imgH=displayImg?'<img src="'+esc(displayImg)+'" alt="" style="width:100%;height:100%;object-fit:cover;">'
       :'<div style="font-size:32px;font-weight:800;color:var(--primary);">'+esc((p.name||'?')[0].toUpperCase())+'</div>';
     var priceH=(SETTINGS.show_prices!==false&&p.price!=null)?'<div class="product-price">'+fmt(p.price)+'</div>':'';
     var actionH;
