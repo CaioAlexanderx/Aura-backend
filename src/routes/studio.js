@@ -21,6 +21,7 @@
 //
 // 30/05/2026 (Camada 1 P1): require_deposit_for_production adicionado ao
 // whitelist de settings — permite FE salvar via PATCH /studio/settings.
+// 01/06/2026: guide_dismissed adicionado ao whitelist (bug fix).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -634,6 +635,8 @@ const ALLOWED_STUDIO_SETTINGS = [
   'onboarding',                   // jsonb — { walkthrough_seen: bool, product: bool, gallery: bool, sla: bool, wa: bool }
   // Camada 1: gate de produção por sinal (opt-in, default false — zero quebra pra quem já opera)
   'require_deposit_for_production',  // boolean — exige deposit_paid=true antes de in_production
+  // UX: guia da home Studio (dismissível pelo usuário — bug fix 01/06/2026)
+  'guide_dismissed',              // boolean — oculta o guide card após o usuário fechar
 ];
 
 router.get('/settings', async function(req, res) {
