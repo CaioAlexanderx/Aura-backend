@@ -38,6 +38,17 @@
 // apos INSERT, reaplica image_url nas variantes recriadas com a
 // mesma combinacao. Sem esse rewrite, qualquer auto-save (que dispara
 // a cada blur) limpava as fotos. Migration 129 (image_url TEXT).
+//
+// 01/06/2026 (FIX corrida auto-save): o PUT agora adquire
+// pg_advisory_xact_lock por produto logo apos o BEGIN. O auto-save do
+// editor (debounce 400ms + onBlur flush) disparava PUTs concorrentes do
+// MESMO produto; como cada PUT faz soft-delete-de-todas + insert-de-todas,
+// dois saves simultaneos deixavam MULTIPLAS variantes ativas pro mesmo
+// (cor,tamanho) e zeravam estoque. Foi a causa da corrupcao do catalogo
+// Davi (206 grupos com variantes duplicadas + 636 produtos com stock_qty
+// divergente das variantes, limpos via data fix em 01/06). O advisory lock
+// serializa os saves por produto e fecha a corrida. O lock e liberado
+// automaticamente no COMMIT/ROLLBACK da transacao.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -197,6 +208,14 @@ router.put('/:pid/variations', async (req, res) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+
+    // 01/06/2026: serializa PUTs concorrentes do MESMO produto. O auto-save
+    // do editor (debounce 400ms + onBlur flush) disparava saves simultaneos;
+    // como cada PUT faz soft-delete-de-todas + insert-de-todas, a corrida
+    // deixava variantes ativas duplicadas pro mesmo (cor,tamanho) e zerava
+    // estoque (corrupcao do catalogo Davi). hashtext($1) -> int4 estavel por
+    // product_id; o lock e transaction-scoped (liberado no COMMIT/ROLLBACK).
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['pvariations:' + pid]);
 
     // Valida produto + captura color/size proprios atuais (necessario pra
     // detectar migracao do estoque do pai pra variante e limpar os campos
