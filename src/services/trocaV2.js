@@ -37,6 +37,10 @@
 //   nfce_emissions sem `notes`, `numero` NOT NULL e `tipo` varchar(10)
 //   (corrigido pela migration 142). O SAVEPOINT isola a falha: ela reverte
 //   so o passo opcional, e a troca persiste.
+// 01/06/2026 (fix status fiscal real): o pos-COMMIT da devolucao_55 reflete
+//   o status REAL retornado por trocaDevolucao55 (autorizada/rejeitada/
+//   processando) + grava last_error; antes forcava 'autorizada' fixo e usava
+//   result.chave_acesso (inexistente -> era devolucao_chave).
 // ============================================================
 
 const db = require('../config/database');
@@ -903,18 +907,26 @@ async function handle(req, res) {
             notes: req.body.notes,
             userId: req.user?.id,
           });
+          // 01/06/2026: reflete o status REAL retornado (autorizada/rejeitada/
+          // processando) — antes gravava 'autorizada' fixo mesmo quando a SEFAZ
+          // rejeitava, e usava result.chave_acesso (inexistente; o campo e
+          // devolucao_chave). Agora grava status + last_error tambem na row
+          // pendente, consistente com a row 'nfe' do trocaDevolucao55.
+          const devStatus = result.status || 'processando';
+          const devChave = result.devolucao_chave || result.chave_acesso || null;
           if (emission.emission_id) {
             await db.query(
-              `UPDATE nfce_emissions SET status='autorizada', chave_acesso=$1, updated_at=NOW() WHERE id=$2`,
-              [result.chave_acesso || null, emission.emission_id]
+              `UPDATE nfce_emissions SET status=$1, chave_acesso=COALESCE($2, chave_acesso),
+                  last_error=$3, updated_at=NOW() WHERE id=$4`,
+              [devStatus, devChave, result.error_message || null, emission.emission_id]
             );
           }
           fiscalResults.push({
             origin_sale_id: emission.origin_sale_id,
             strategy: 'devolucao_55',
-            status: 'autorizada',
-            chave_acesso: result.chave_acesso || null,
-            error: null,
+            status: devStatus,
+            chave_acesso: devChave,
+            error: result.error_message || null,
           });
         } catch (err) {
           if (emission.emission_id) {
