@@ -249,4 +249,178 @@ router.delete('/transaction/:txid', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────
+// GET /customers/search?q=
+// Busca clientes da empresa por nome, telefone ou CPF/CNPJ.
+// Retorna até 20 resultados. Mínimo 2 caracteres.
+// ─────────────────────────────────────────────────────────────────────────
+router.get('/customers/search', async (req, res) => {
+  const q = req.query.q ? String(req.query.q).trim() : '';
+  if (!q || q.length < 2) return res.json({ customers: [] });
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, phone, cpf_cnpj
+         FROM customers
+        WHERE company_id = $1
+          AND (name ILIKE $2 OR phone ILIKE $2 OR cpf_cnpj ILIKE $2)
+        ORDER BY name ASC
+        LIMIT 20`,
+      [req.params.id, `%${q}%`]
+    );
+    res.json({ customers: rows });
+  } catch (err) {
+    console.error('[credit] customers/search error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar clientes' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST /manual-entry
+// Cria lançamento de débito manual no crediário (sem venda vinculada).
+// Aceita cliente existente (customer_id) ou criação inline (new_customer).
+// Cria agenda de parcelas em credit_installments com juros simples opcionais.
+// ─────────────────────────────────────────────────────────────────────────
+router.post('/manual-entry', async (req, res) => {
+  const companyId = req.params.id;
+  const {
+    customer_id,
+    new_customer,
+    amount,
+    installments = 1,
+    interest_rate,
+    first_due_date,
+    description,
+  } = req.body || {};
+
+  const total = parseFloat(amount);
+  const n     = parseInt(installments) || 1;
+
+  if (!total || total <= 0)
+    return res.status(400).json({ error: 'amount inválido' });
+  if (n < 1 || n > 36)
+    return res.status(400).json({ error: 'installments deve ser entre 1 e 36' });
+  if (!customer_id && !new_customer?.name)
+    return res.status(400).json({ error: 'Informe customer_id ou new_customer.name' });
+  if (!customer_id && !new_customer?.phone)
+    return res.status(400).json({ error: 'Telefone do cliente é obrigatório' });
+
+  try {
+    await assertCrediarioEnabled(companyId);
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Resolve customer
+    let custId = customer_id || null;
+    if (!custId) {
+      const phoneClean = String(new_customer.phone).trim();
+      const { rows: existing } = await client.query(
+        `SELECT id FROM customers WHERE company_id = $1 AND phone = $2 LIMIT 1`,
+        [companyId, phoneClean]
+      );
+      if (existing.length) {
+        custId = existing[0].id;
+      } else {
+        const { rows: created } = await client.query(
+          `INSERT INTO customers (company_id, name, phone)
+           VALUES ($1, $2, $3) RETURNING id`,
+          [companyId, String(new_customer.name).trim(), phoneClean]
+        );
+        custId = created[0].id;
+      }
+    }
+
+    const { rows: custRows } = await client.query(
+      `SELECT id, name FROM customers WHERE id = $1 AND company_id = $2`,
+      [custId, companyId]
+    );
+    if (!custRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Cliente não encontrado nesta empresa' });
+    }
+
+    // 2. Create debit transaction (source = 'manual')
+    const notes = description ? String(description).trim() : 'Lançamento manual';
+    const { rows: txRows } = await client.query(
+      `INSERT INTO customer_credit_transactions
+         (company_id, customer_id, type, amount, notes, source, created_by)
+       VALUES ($1, $2, 'debit', $3, $4, 'manual', $5) RETURNING *`,
+      [companyId, custId, total, notes, req.user?.id || null]
+    );
+    const transaction = txRows[0];
+
+    // 3. Create installments schedule (juros simples)
+    const config        = await creditLedger._getOrCreatePlanConfig(client, companyId);
+    const effectiveRate =
+      interest_rate !== undefined && interest_rate !== null
+        ? parseFloat(interest_rate)
+        : (parseFloat(config?.interest_rate) || 0);
+
+    const totalWithInterest =
+      effectiveRate > 0
+        ? parseFloat((total * (1 + effectiveRate * n)).toFixed(2))
+        : total;
+    const baseAmount = Math.floor((totalWithInterest / n) * 100) / 100;
+    const remainder  = Math.round((totalWithInterest - baseAmount * n) * 100) / 100;
+
+    const firstDue = first_due_date || (() => {
+      const d = new Date();
+      d.setMonth(d.getMonth() + 1);
+      return d.toISOString().split('T')[0];
+    })();
+
+    const createdInstallments = [];
+    for (let i = 1; i <= n; i++) {
+      const instAmount = i === n ? baseAmount + remainder : baseAmount;
+      const dueDate    = new Date(firstDue);
+      dueDate.setMonth(dueDate.getMonth() + (i - 1));
+      const dueDateStr = dueDate.toISOString().split('T')[0];
+
+      const ins = await client.query(
+        `INSERT INTO credit_installments
+           (company_id, sale_id, customer_id, installment_number, total_installments,
+            amount_due, due_date, status, pix_link, covered_amount)
+         VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0) RETURNING *`,
+        [companyId, custId, i, n, instAmount, dueDateStr,
+         'https://pagar.getaura.com.br/parcela/tmp']
+      );
+      const row     = ins.rows[0];
+      const pixLink = `https://pagar.getaura.com.br/parcela/${row.id.replace(/-/g, '').slice(0, 12)}`;
+      await client.query(`UPDATE credit_installments SET pix_link = $2 WHERE id = $1`, [row.id, pixLink]);
+      createdInstallments.push({ ...row, pix_link: pixLink });
+    }
+
+    // 4. Update credit used
+    await creditLedger._updateCreditUsed(client, companyId, custId);
+
+    await client.query('COMMIT');
+
+    const { rows: balRows } = await db.query(
+      `SELECT balance FROM customer_credit_balances WHERE customer_id = $1 AND company_id = $2`,
+      [custId, companyId]
+    );
+
+    res.status(201).json({
+      customer:     custRows[0],
+      transaction:  { ...transaction, amount: parseFloat(transaction.amount) },
+      installments: createdInstallments.map(r => ({
+        ...r,
+        amount_due:     parseFloat(r.amount_due),
+        covered_amount: parseFloat(r.covered_amount || 0),
+      })),
+      new_balance: parseFloat(balRows[0]?.balance || 0),
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[credit] manual-entry error:', err.message);
+    res.status(500).json({ error: 'Erro ao criar lançamento manual' });
+  } finally {
+    client.release();
+  }
+});
+
 module.exports = router;
