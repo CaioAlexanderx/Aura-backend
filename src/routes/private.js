@@ -9,6 +9,7 @@ router.use(requireCompanyAccess());
 router.use('/', require('./company'));
 router.use('/dashboard', require('./dashboard'));
 router.use('/dashboard/sparkline', require('./dashboardSparkline'));
+router.use('/commercial-dates', require('./commercialDates'));
 router.use('/transactions', require('./transactions'));
 router.use('/transactions', require('./transactionsBatch'));
 router.use('/transactions/categorize', require('./categorize'));
