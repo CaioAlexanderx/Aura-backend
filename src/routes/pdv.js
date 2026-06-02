@@ -13,6 +13,10 @@
 //     total_purchases/total_spent agora e mantida UNICAMENTE pelo trigger
 //     trg_sale_update_customer (migration 137), que recalcula via COUNT/SUM
 //     ignorando canceladas. O UPDATE manual duplicava (trigger + codigo).
+// 02/06/2026 (reemitir-fiscal): filtro de status inclui 'rejeitada'/'erro'
+//   alem de 'falha'/'pendente'. O placeholder nfe_devolucao vira 'rejeitada'
+//   pos-COMMIT quando a SEFAZ rejeita (trocaV2 grava result.status), entao
+//   sem isso o botao de reprocessar nunca pegava uma nota rejeitada.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -614,7 +618,7 @@ router.post('/troca/:trocaSaleId/reemitir-fiscal', async (req, res) => {
     const { rows: emissions } = await db.query(
       `SELECT id, company_id, sale_id, tipo, status, notes
          FROM nfce_emissions
-        WHERE sale_id=$1 AND tipo='nfe_devolucao' AND status IN ('falha','pendente')
+        WHERE sale_id=$1 AND tipo='nfe_devolucao' AND status IN ('falha','pendente','rejeitada','erro')
         ORDER BY created_at`,
       [trocaSaleId]
     );
