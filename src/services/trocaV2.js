@@ -28,6 +28,15 @@
 //   o adapter v1 (pdv.js) mandava payment_method_legacy mas nao payment_splits,
 //   e a validacao rodava ANTES da derivacao do split -> 400 "Soma dos
 //   payment_splits (0.00) nao bate com diferenca a pagar".
+// 01/06/2026 (fix tx poison): TODA query best-effort DENTRO da transacao
+//   (insert de emissao pendente, idempotencia) agora roda sob SAVEPOINT.
+//   Um erro num desses INSERT/UPDATE abortava a transacao inteira do Postgres;
+//   o catch "non-fatal" era ilusao — o COMMIT seguinte virava ROLLBACK e a
+//   troca toda (sale + estoque + pagamentos) sumia silenciosamente, com o
+//   frontend recebendo "sucesso" + DANFE 404. Causa concreta: schema da
+//   nfce_emissions sem `notes`, `numero` NOT NULL e `tipo` varchar(10)
+//   (corrigido pela migration 142). O SAVEPOINT isola a falha: ela reverte
+//   so o passo opcional, e a troca persiste.
 // ============================================================
 
 const db = require('../config/database');
@@ -42,6 +51,25 @@ class TrocaV2Error extends Error {
     this.status = status;
     this.body = body;
     this.isTrocaV2Error = true;
+  }
+}
+
+// Executa uma query "best-effort" DENTRO da transacao sob um SAVEPOINT.
+// Se a query falhar, reverte SO ate o savepoint (sem abortar a transacao
+// inteira) e retorna null. Use para passos opcionais cujo erro NAO deve
+// derrubar a operacao principal. Sem isso, qualquer erro envenena a tx e o
+// COMMIT vira ROLLBACK (caso Davi 01/06).
+async function bestEffort(client, label, fn) {
+  const sp = 'sp_' + label;
+  try {
+    await client.query('SAVEPOINT ' + sp);
+    const result = await fn();
+    await client.query('RELEASE SAVEPOINT ' + sp);
+    return result;
+  } catch (err) {
+    try { await client.query('ROLLBACK TO SAVEPOINT ' + sp); } catch (_) {}
+    console.warn('[trocaV2] best-effort "' + label + '" falhou (non-fatal):', err.message);
+    return null;
   }
 }
 
@@ -631,25 +659,30 @@ async function handle(req, res) {
     await client.query('BEGIN');
 
     // ── A) Idempotencia + advisory lock DENTRO da transacao (C2: fecha race condition) ──
+    // O advisory lock e seguro (nao falha). O acesso a troca_idempotency roda sob
+    // SAVEPOINT (bestEffort) pra que um erro nessa tabela NAO aborte a transacao
+    // inteira da troca (fix tx-poison 01/06).
     if (idempotency_key) {
       try {
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [idempotency_key]);
+      } catch (lockErr) {
+        console.warn('[trocaV2] advisory lock fail-open:', lockErr.message);
+      }
+      const idempRows = await bestEffort(client, 'idem_check', async () => {
         await client.query(
           'INSERT INTO troca_idempotency (idempotency_key, company_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
           [idempotency_key, companyId]
         );
-        const { rows: idempRows } = await client.query(
+        const r = await client.query(
           'SELECT troca_sale_id FROM troca_idempotency WHERE idempotency_key=$1 AND company_id=$2 AND troca_sale_id IS NOT NULL',
           [idempotency_key, companyId]
         );
-        if (idempRows.length > 0) {
-          await client.query('ROLLBACK');
-          const { rows: [s] } = await db.query('SELECT * FROM sales WHERE id=$1', [idempRows[0].troca_sale_id]);
-          return res.json({ success: true, troca: s, idempotent_hit: true, fiscal: { per_origin: [] } });
-        }
-      } catch (idempErr) {
-        // Tabela pode nao existir ainda (migration pendente) — fail-open
-        console.warn('[trocaV2] idempotency check fail-open:', idempErr.message);
+        return r.rows;
+      });
+      if (idempRows && idempRows.length > 0) {
+        await client.query('ROLLBACK');
+        const { rows: [s] } = await db.query('SELECT * FROM sales WHERE id=$1', [idempRows[0].troca_sale_id]);
+        return res.json({ success: true, troca: s, idempotent_hit: true, fiscal: { per_origin: [] } });
       }
     }
 
@@ -790,20 +823,23 @@ async function handle(req, res) {
       const itemsForThis = returned_items.filter((r) => r.original_sale_id === s.id);
       const valueForThis = itemsForThis.reduce((acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0);
 
-      // INSERT pendente — referencia suficiente para o worker de retry tambem
-      let emissionId = null;
-      try {
-        const { rows: emRows } = await client.query(
+      // INSERT pendente — referencia suficiente para o worker de retry tambem.
+      // SOB SAVEPOINT (bestEffort): um drift de schema na nfce_emissions (ex: o
+      // bug do Davi 01/06 — coluna `notes` inexistente / `numero` NOT NULL /
+      // `tipo` varchar(10), corrigido na migration 142) NAO pode abortar a
+      // transacao inteira da troca. Sem isso, a tx ficava poisoned e o COMMIT
+      // virava ROLLBACK silencioso (troca toda perdida).
+      const emRows = await bestEffort(client, 'emission_pendente', async () => {
+        const r = await client.query(
           `INSERT INTO nfce_emissions
              (company_id, sale_id, tipo, status, notes)
            VALUES ($1, $2, 'nfe_devolucao', 'pendente', $3)
            RETURNING id`,
           [s.company_id, trocaSaleRow.id, `devolucao_55 origem=${s.id}`]
         );
-        emissionId = emRows[0]?.id || null;
-      } catch (insErr) {
-        console.warn('[trocaV2] insert pendente emission failed (non-fatal):', insErr.message);
-      }
+        return r.rows;
+      });
+      const emissionId = (emRows && emRows[0]?.id) || null;
 
       pendingEmissions.push({
         emission_id: emissionId,
@@ -827,16 +863,15 @@ async function handle(req, res) {
       });
     }
 
-    // ── Gravar troca_sale_id na idempotencia antes do COMMIT ──
+    // ── Gravar troca_sale_id na idempotencia antes do COMMIT (sob SAVEPOINT) ──
     if (idempotency_key) {
-      try {
+      await bestEffort(client, 'idem_update', async () => {
         await client.query(
           'UPDATE troca_idempotency SET troca_sale_id=$1 WHERE idempotency_key=$2',
           [trocaSaleRow.id, idempotency_key]
         );
-      } catch (idempUpdErr) {
-        console.warn('[trocaV2] idempotency update fail-soft:', idempUpdErr.message);
-      }
+        return true;
+      });
     }
 
     await client.query('COMMIT');
@@ -972,5 +1007,5 @@ module.exports = {
   handle,
   reemitirEmissao,
   TrocaV2Error,
-  _internal: { computeAndValidateTotals, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments },
+  _internal: { computeAndValidateTotals, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort },
 };
