@@ -2,7 +2,7 @@
 // AURA. — Listagem e detalhes de vendas (Item 3 Eryca)
 //
 // GET    /companies/:id/sales              -> lista paginada + stats agregados
-// GET    /companies/:id/sales/:sale_id     -> detalhes completos + items (+ troca breakdown)
+// GET    /companies/:id/sales/:sale_id     -> detalhes completos + items (+ troca breakdown + fiscal)
 // PATCH  /companies/:id/sales/:sale_id     -> atualiza seller da venda
 // POST   /companies/:id/sales/:sale_id/cancel  -> cancela venda inteira (troca-aware)
 //
@@ -20,6 +20,11 @@
 //     (estorno/crédito) e limpa as NF-e de devolução nao autorizadas (avisa
 //     as autorizadas pra cancelamento manual na SEFAZ). Antes o cancel só
 //     repunha os itens novos + apagava sale_payments (deixava resíduo).
+//
+// 02/06/2026 (b) — GET /:sale_id devolve bloco `fiscal`: emissoes
+//   nfce_emissions da venda (tipo nfce / nfe / nfe_devolucao) com status,
+//   numero, chave, pdf/qr/url_consulta e error_message. Alimenta a seção
+//   de Nota Fiscal no detalhe (botao Emitir NFC-e / Reprocessar NF-e).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -263,6 +268,36 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
     };
   }
 
+  // 02/06/2026 (b): bloco `fiscal` — emissoes da venda (NFC-e 65 / NF-e 55 devolucao).
+  // Defensivo (schema pre-migration): nfce_emissions/colunas podem faltar em deploy antigo.
+  let fiscal = [];
+  try {
+    const fRes = await pool.query(
+      'SELECT id, tipo, status, numero, serie, chave_acesso, pdf_url, qr_code, ' +
+      '       url_consulta, error_message, created_at, authorized_at ' +
+      'FROM nfce_emissions WHERE sale_id = $1 AND company_id = $2 ORDER BY created_at DESC',
+      [saleId, companyId]
+    );
+    fiscal = fRes.rows.map(function(r) {
+      return {
+        id: r.id,
+        tipo: r.tipo,
+        status: r.status,
+        numero: r.numero,
+        serie: r.serie,
+        chave_acesso: r.chave_acesso,
+        pdf_url: r.pdf_url,
+        qr_code: r.qr_code,
+        url_consulta: r.url_consulta,
+        error_message: r.error_message,
+        created_at: r.created_at,
+        authorized_at: r.authorized_at,
+      };
+    });
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+  }
+
   res.json({
     sale: {
       id: sale.id,
@@ -291,6 +326,7 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
     },
     items: items,
     troca: troca,
+    fiscal: fiscal,
   });
 }));
 
