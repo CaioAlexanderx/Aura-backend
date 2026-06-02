@@ -2,26 +2,24 @@
 // AURA. — Listagem e detalhes de vendas (Item 3 Eryca)
 //
 // GET    /companies/:id/sales              -> lista paginada + stats agregados
-// GET    /companies/:id/sales/:sale_id     -> detalhes completos + items
+// GET    /companies/:id/sales/:sale_id     -> detalhes completos + items (+ troca breakdown)
 // PATCH  /companies/:id/sales/:sale_id     -> atualiza seller da venda
-// POST   /companies/:id/sales/:sale_id/cancel  -> cancela venda inteira
+// POST   /companies/:id/sales/:sale_id/cancel  -> cancela venda inteira (troca-aware)
 //
-// Vinculo com transactions: cada sale tem uma tx no financeiro com
-// idempotency_key = 'pdv-sale-{sale_uuid}'. O endpoint de listagem
-// retorna transaction_id pra UI poder abrir o TransactionModal direto.
+// 11/05/2026 — cancel deleta sale_payments (auditoria caixa).
+// 29/05/2026 — Listagem expõe s.type (sale/troca).
 //
-// 11/05/2026 — Fix bug auditoria caixa: cancel agora deleta também
-// os sale_payments da venda. Antes, payments residuais inflavam o
-// total do fechamento de caixa (caso Davi Villa Branca 10/05: 2 vendas
-// canceladas mantinham R$299,98 em payments).
-//
-// 11/05/2026 — Filtro product_barcode: GET /sales aceita ?product_barcode=XXX
-// e filtra vendas com item cujo produto/variant tenha esse barcode.
-// Cliente principal: TrocaModal (lojista bipa produto pra achar venda original).
-//
-// 29/05/2026 — Listagem expõe s.type (sale/troca) pra UI marcar "Troca".
-// A troca SEMPRE apareceu na listagem (sem filtro de type), mas vinha sem
-// rótulo. Os agregados de receita seguem em outras rotas que filtram troca.
+// 02/06/2026 — Troca em Vendas:
+//   - GET /:sale_id devolve bloco `troca` quando type='troca':
+//     returned_items, returned_value, new_value, net_amount, payments,
+//     exchange_of_sale_id. (Antes só mostrava os itens novos como faturados.)
+//   - Lista expõe net_amount/returned_value; receita agregada conta troca
+//     pelo LÍQUIDO (novos - devolvidos), nao pelo valor cheio.
+//   - POST /:sale_id/cancel agora reverte troca POR COMPLETO: re-baixa os
+//     itens devolvidos, apaga as transações pdv-troca-v2-*, reverte payouts
+//     (estorno/crédito) e limpa as NF-e de devolução nao autorizadas (avisa
+//     as autorizadas pra cancelamento manual na SEFAZ). Antes o cancel só
+//     repunha os itens novos + apagava sale_payments (deixava resíduo).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -30,7 +28,6 @@ const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 
 // Constroi clausula WHERE dinamica baseada nos filtros recebidos.
-// Retorna { conds, vals } pra concatenar nas queries de count/list/stats.
 function buildWhere(companyId, filters) {
   const conds = ['s.company_id = $1'];
   const vals = [companyId];
@@ -48,7 +45,7 @@ function buildWhere(companyId, filters) {
     conds.push("COALESCE(s.status, 'completed') != 'cancelled'");
   } else if (filters.status === 'cancelled') {
     conds.push("s.status = 'cancelled'");
-  } // 'all' ou undefined = sem filtro
+  }
 
   if (filters.seller_id) {
     conds.push('(s.seller_id = $' + i + ' OR s.employee_id = $' + i + ')');
@@ -65,11 +62,6 @@ function buildWhere(companyId, filters) {
     i++;
   }
 
-  // 11/05/2026: filtro por codigo de barras do produto.
-  // Lista vendas que contem um sale_item cujo product.barcode OU
-  // product_variant.barcode bate com o codigo informado.
-  // Cliente principal: TrocaModal (bipa o item devolvido pelo cliente
-  // pra achar a venda original mesmo sem saber a data exata).
   if (filters.product_barcode) {
     conds.push(
       'EXISTS (' +
@@ -101,7 +93,6 @@ router.get('/', asyncHandler(async (req, res) => {
   const limitNum = Math.min(parseInt(limit) || 50, 200);
   const offsetNum = parseInt(offset) || 0;
 
-  // Count total (pra paginacao)
   const countQuery =
     'SELECT COUNT(*)::int AS total FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
@@ -110,14 +101,16 @@ router.get('/', asyncHandler(async (req, res) => {
   const { rows: countRows } = await pool.query(countQuery, vals);
   const total = countRows[0].total;
 
-  // Listagem com customer/seller denormalized + items_count + transaction_id
+  // 02/06/2026: lista expoe net_amount/returned_value pra troca (lista mostra liquido).
+  // net = total_amount (novos) - SUM(troca_returned_items) quando type='troca'.
   const listQuery =
     'SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status, ' +
-    "       COALESCE(s.type, 'sale') AS type, " +
+    "       COALESCE(s.type, 'sale') AS type, s.exchange_of_sale_id, " +
     '       s.cancelled_at, s.created_at, ' +
     '       s.customer_id, c.name AS customer_name, ' +
     '       s.seller_id, COALESCE(s.seller_name, e.name) AS seller_name, s.employee_id, ' +
     '       (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS items_count, ' +
+    '       (SELECT COALESCE(SUM(tri.quantity * tri.unit_price), 0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) AS returned_value, ' +
     "       (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS transaction_id " +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
@@ -127,14 +120,19 @@ router.get('/', asyncHandler(async (req, res) => {
     'LIMIT $' + (vals.length + 1) + ' OFFSET $' + (vals.length + 2);
   const { rows } = await pool.query(listQuery, [...vals, limitNum, offsetNum]);
 
-  // Stats agregados pro periodo (sem paginacao, mesmo filtro)
+  // Stats agregados: receita conta troca pelo LIQUIDO (novos - devolvidos),
+  // venda normal pelo total_amount. (Antes somava total_amount cheio da troca.)
   const statsQuery =
     'SELECT ' +
     '  COUNT(*)::int AS total_sales, ' +
     "  COUNT(*) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled')::int AS active_sales, " +
     "  COUNT(*) FILTER (WHERE s.status = 'cancelled')::int AS cancelled_sales, " +
-    "  COALESCE(SUM(s.total_amount) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled'), 0)::numeric AS revenue, " +
-    "  COALESCE(AVG(s.total_amount) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled'), 0)::numeric AS avg_ticket " +
+    "  COALESCE(SUM( " +
+    "    CASE WHEN COALESCE(s.type,'sale') = 'troca' " +
+    "         THEN s.total_amount - (SELECT COALESCE(SUM(tri.quantity*tri.unit_price),0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) " +
+    "         ELSE s.total_amount END " +
+    "  ) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled'), 0)::numeric AS revenue, " +
+    "  COALESCE(AVG(s.total_amount) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled' AND COALESCE(s.type,'sale')='sale'), 0)::numeric AS avg_ticket " +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
@@ -147,13 +145,21 @@ router.get('/', asyncHandler(async (req, res) => {
     limit: limitNum,
     offset: offsetNum,
     sales: rows.map(function(r) {
+      const type = r.type || 'sale';
+      const newValue = parseFloat(r.total_amount);
+      const returnedValue = parseFloat(r.returned_value || 0);
+      const isTroca = type === 'troca';
       return {
         id: r.id,
-        total_amount: parseFloat(r.total_amount),
+        total_amount: newValue,
         discount_amount: parseFloat(r.discount_amount || 0),
         payment_method: r.payment_method,
         status: r.status || 'completed',
-        type: r.type || 'sale',
+        type: type,
+        exchange_of_sale_id: r.exchange_of_sale_id || null,
+        // troca: liquido = novos - devolvidos; venda normal: net = total
+        returned_value: isTroca ? returnedValue : 0,
+        net_amount: isTroca ? parseFloat((newValue - returnedValue).toFixed(2)) : newValue,
         cancelled_at: r.cancelled_at,
         created_at: r.created_at,
         customer: r.customer_id ? { id: r.customer_id, name: r.customer_name } : null,
@@ -201,6 +207,62 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
     [saleId]
   );
 
+  const items = itemsRes.rows.map(function(r) {
+    return {
+      id: r.id,
+      product_id: r.product_id,
+      variant_id: r.variant_id,
+      quantity: parseFloat(r.quantity),
+      unit_price: parseFloat(r.unit_price),
+      discount: parseFloat(r.discount || 0),
+      total_price: parseFloat(r.total_price),
+      product_name: r.product_name || r.product_name_snapshot || 'Item',
+      image_url: r.image_url,
+    };
+  });
+
+  // 02/06/2026: bloco `troca` quando type='troca' — lado devolvido + liquido + pagamentos.
+  let troca = null;
+  if ((sale.type || 'sale') === 'troca') {
+    const retRes = await pool.query(
+      'SELECT tri.product_id, tri.variant_id, tri.quantity, tri.unit_price, ' +
+      '       tri.product_name_snapshot, tri.original_sale_id, ' +
+      '       p.name AS product_name, p.image_url ' +
+      'FROM troca_returned_items tri ' +
+      'LEFT JOIN products p ON p.id = tri.product_id ' +
+      'WHERE tri.troca_sale_id = $1 ORDER BY tri.id',
+      [saleId]
+    );
+    const payRes = await pool.query(
+      'SELECT method, amount FROM sale_payments WHERE sale_id = $1 ORDER BY id',
+      [saleId]
+    );
+    const returnedValue = retRes.rows.reduce(function(acc, r) {
+      return acc + parseFloat(r.quantity) * parseFloat(r.unit_price);
+    }, 0);
+    const newValue = items.reduce(function(acc, r) { return acc + r.total_price; }, 0);
+    troca = {
+      exchange_of_sale_id: sale.exchange_of_sale_id || null,
+      returned_value: parseFloat(returnedValue.toFixed(2)),
+      new_value: parseFloat(newValue.toFixed(2)),
+      net_amount: parseFloat((newValue - returnedValue).toFixed(2)),
+      returned_items: retRes.rows.map(function(r) {
+        return {
+          product_id: r.product_id,
+          variant_id: r.variant_id,
+          quantity: parseFloat(r.quantity),
+          unit_price: parseFloat(r.unit_price),
+          product_name: r.product_name || r.product_name_snapshot || 'Item',
+          image_url: r.image_url,
+          original_sale_id: r.original_sale_id,
+        };
+      }),
+      payments: payRes.rows.map(function(r) {
+        return { method: r.method, amount: parseFloat(r.amount) };
+      }),
+    };
+  }
+
   res.json({
     sale: {
       id: sale.id,
@@ -209,6 +271,7 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       payment_method: sale.payment_method,
       status: sale.status || 'completed',
       type: sale.type || 'sale',
+      exchange_of_sale_id: sale.exchange_of_sale_id || null,
       cancelled_at: sale.cancelled_at,
       created_at: sale.created_at,
       notes: sale.notes,
@@ -226,19 +289,8 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       id: sale.seller_id || sale.employee_id,
       name: sale.seller_name_eff,
     },
-    items: itemsRes.rows.map(function(r) {
-      return {
-        id: r.id,
-        product_id: r.product_id,
-        variant_id: r.variant_id,
-        quantity: parseFloat(r.quantity),
-        unit_price: parseFloat(r.unit_price),
-        discount: parseFloat(r.discount || 0),
-        total_price: parseFloat(r.total_price),
-        product_name: r.product_name || r.product_name_snapshot || 'Item',
-        image_url: r.image_url,
-      };
-    }),
+    items: items,
+    troca: troca,
   });
 }));
 
@@ -274,7 +326,7 @@ router.patch('/:sale_id', asyncHandler(async (req, res) => {
   res.json({ ok: true, sale_id: saleId, seller_id: resolvedSellerId, seller_name: sellerName });
 }));
 
-// POST /companies/:id/sales/:sale_id/cancel
+// POST /companies/:id/sales/:sale_id/cancel  (troca-aware)
 router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
@@ -285,19 +337,20 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
     await client.query('BEGIN');
 
     const saleRes = await client.query(
-      'SELECT id, total_amount, status FROM sales WHERE id = $1 AND company_id = $2 FOR UPDATE',
+      "SELECT id, total_amount, status, COALESCE(type,'sale') AS type FROM sales WHERE id = $1 AND company_id = $2 FOR UPDATE",
       [saleId, companyId]
     );
     if (!saleRes.rows.length) throw new AppError('Venda nao encontrada', 404);
     if (saleRes.rows[0].status === 'cancelled') {
       throw new AppError('Venda ja esta cancelada', 400);
     }
+    const isTroca = saleRes.rows[0].type === 'troca';
 
+    // Repoe estoque dos itens da venda (na troca = itens NOVOS levados)
     const itemsRes = await client.query(
       'SELECT si.product_id, si.variant_id, si.quantity FROM sale_items si WHERE si.sale_id = $1',
       [saleId]
     );
-
     for (let idx = 0; idx < itemsRes.rows.length; idx++) {
       const item = itemsRes.rows[idx];
       const qty = parseFloat(item.quantity);
@@ -321,20 +374,16 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       [req.user && req.user.id ? req.user.id : null, reason, saleId]
     );
 
+    // Transacao da venda normal
     const txRes = await client.query(
       'SELECT id, amount FROM transactions WHERE idempotency_key = $1 AND company_id = $2',
       ['pdv-sale-' + saleId, companyId]
     );
-
     let refundedAmount = 0;
     let txRemoved = false;
-
     if (txRes.rows.length) {
       refundedAmount = parseFloat(txRes.rows[0].amount);
-      await client.query(
-        'DELETE FROM transactions WHERE id = $1',
-        [txRes.rows[0].id]
-      );
+      await client.query('DELETE FROM transactions WHERE id = $1', [txRes.rows[0].id]);
       txRemoved = true;
     }
 
@@ -347,16 +396,99 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       return acc + parseFloat(r.amount || 0);
     }, 0);
 
+    // ── Troca: reversao adicional (o cancel generico nao desfaz a troca) ──
+    let trocaReturnedDecremented = 0;
+    let trocaTxRemoved = 0;
+    let payoutsReversed = 0;
+    const fiscalWarnings = [];
+    if (isTroca) {
+      // 1) Re-baixa os itens DEVOLVIDOS (a troca tinha somado de volta ao estoque)
+      const retRows = await client.query(
+        'SELECT product_id, variant_id, quantity FROM troca_returned_items WHERE troca_sale_id = $1',
+        [saleId]
+      );
+      for (let k = 0; k < retRows.rows.length; k++) {
+        const ri = retRows.rows[k];
+        const rq = parseFloat(ri.quantity);
+        if (ri.variant_id) {
+          await client.query(
+            'UPDATE product_variants SET stock_qty = GREATEST(0, COALESCE(stock_qty,0) - $1), updated_at = NOW() WHERE id = $2',
+            [rq, ri.variant_id]
+          );
+        } else if (ri.product_id) {
+          await client.query(
+            'UPDATE products SET stock_qty = GREATEST(0, COALESCE(stock_qty,0) - $1), updated_at = NOW() WHERE id = $2',
+            [rq, ri.product_id]
+          );
+        }
+        if (ri.product_id) {
+          await client.query(
+            'INSERT INTO stock_movements (product_id, company_id, type, quantity, reference_id, reference_type, notes) ' +
+            "VALUES ($1, $2, 'out', $3, $4, 'troca_cancel', 'Cancelamento de troca - retira item devolvido') ON CONFLICT DO NOTHING",
+            [ri.product_id, companyId, rq, saleId]
+          );
+        }
+        trocaReturnedDecremented++;
+      }
+
+      // 2) Remove as transacoes da troca (financeiro)
+      const trocaTxDel = await client.query(
+        'DELETE FROM transactions WHERE company_id = $1 AND idempotency_key IN ($2, $3) RETURNING id',
+        [companyId, 'pdv-troca-v2-' + saleId + '-sale', 'pdv-troca-v2-' + saleId + '-return']
+      );
+      trocaTxRemoved = trocaTxDel.rows.length;
+
+      // 3) Reverte payouts (estorno/credito) da troca
+      try {
+        const poRows = await client.query(
+          'SELECT id, credit_transaction_id FROM troca_payouts WHERE troca_sale_id = $1',
+          [saleId]
+        );
+        for (let k = 0; k < poRows.rows.length; k++) {
+          const cid = poRows.rows[k].credit_transaction_id;
+          if (cid) {
+            await client.query('DELETE FROM customer_credit_transactions WHERE id = $1', [cid]);
+          }
+        }
+        const poDel = await client.query('DELETE FROM troca_payouts WHERE troca_sale_id = $1 RETURNING id', [saleId]);
+        payoutsReversed = poDel.rows.length;
+      } catch (e) {
+        if (e.code !== '42P01') throw e;
+      }
+
+      // 4) NF-e da devolucao: apaga as NAO autorizadas; avisa as autorizadas
+      try {
+        const autRows = await client.query(
+          "SELECT numero, chave_acesso FROM nfce_emissions WHERE sale_id = $1 AND tipo IN ('nfe','nfe_devolucao') AND status = 'autorizada'",
+          [saleId]
+        );
+        for (let k = 0; k < autRows.rows.length; k++) {
+          fiscalWarnings.push('NF-e ' + (autRows.rows[k].numero || '?') + ' de devolucao autorizada — cancelar na SEFAZ: ' + (autRows.rows[k].chave_acesso || ''));
+        }
+        await client.query(
+          "DELETE FROM nfce_emissions WHERE sale_id = $1 AND tipo IN ('nfe','nfe_devolucao') AND status <> 'autorizada'",
+          [saleId]
+        );
+      } catch (e) {
+        if (e.code !== '42P01' && e.code !== '42703') throw e;
+      }
+    }
+
     await client.query('COMMIT');
     res.json({
       ok: true,
       sale_id: saleId,
+      type: saleRes.rows[0].type,
       refunded_amount: refundedAmount,
       mirror_created: false,
       tx_removed: txRemoved,
       items_returned: itemsRes.rows.length,
       payments_removed: paymentsRemoved,
       payments_amount: paymentsAmount,
+      troca_returned_decremented: trocaReturnedDecremented,
+      troca_tx_removed: trocaTxRemoved,
+      payouts_reversed: payoutsReversed,
+      fiscal_warnings: fiscalWarnings,
     });
   } catch (err) {
     await client.query('ROLLBACK');
