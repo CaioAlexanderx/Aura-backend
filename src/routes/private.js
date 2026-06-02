@@ -135,5 +135,7 @@ router.use('/studio', require('./studioMarketplaceListing'));
 router.use('/studio', require('./studioQuotes'));    // Fase A: Orçamento como entidade
 router.use('/studio', require('./studioPricing'));   // Fase B: Motor de precificação
 router.use('/studio', require('./studioPayments'));  // Fase C: Sinal / pagamento parcial
+// Agente B (02/06/2026): status de onboarding derivado (read-only, sem migration)
+router.use('/studio', require('./studioOnboardingStatus'));
 
 module.exports = router;
