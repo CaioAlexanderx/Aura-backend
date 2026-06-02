@@ -3,32 +3,20 @@
 // Auth: OAuth 2.0 client_credentials
 // Docs: https://dev.nuvemfiscal.com.br/docs/api
 //
+// 01/06/2026 (fix Rejeicao 871): NF-e 55 de devolucao agora manda
+// Forma de Pagamento = 'Sem Pagamento' (tPag=90, vPag=0). Antes ia o
+// metodo real (tPag=01 Dinheiro com valor) e a SEFAZ rejeitava
+// (Rejeicao 871). emitNfe aceita nfeData.semPagamento; emitNfeDevolucao
+// passa true.
+//
 // 27/05/2026 (buildEmit via Nuvem Fiscal — caminho A):
-// - fetchNuvemEmpresa(cnpj) com cache 5min puxa cadastro fiscal
-//   completo (endereço, IE, IM, razão) direto da Nuvem Fiscal,
-//   que é fonte da verdade. Banco do Aura (tabela companies) só
-//   fornece tax_regime e fallback.
-// - buildEmit, buildSelfDest viram ASYNC. emitNfce, emitNfe ajustados.
-// - Caio confirmou que edita cadastro direto na Nuvem Fiscal;
-//   nosso banco fica defasado em campos como address_neighborhood.
-//
-// 27/05/2026 (hotfix endereço defensivo): safeAddrField fallback
-// quando company.address_* vazio/curto. Aplicado em xLgr e xBairro.
-//
-// 27/05/2026 (log detalhado de erro fiscal): nuvemRequest extrai
-// erros[]/errors[] e enriquece msg; emitNfe loga body NF-e 55.
-//
-// 26/05/2026 (hotfix NFref): NFref vai em ide.NFref (TIde), não em
-// infNFe.NFref (TInfNFe).
-//
-// 25/05/2026 (Polish v3): emitNfeDevolucao com dest = próprio emitente
-// (SEFAZ FAQ MG #7). CSOSN 102 + CFOP 1.202 imutáveis.
-//
-// 12/05/2026 (Fase C): emitNfeDevolucao(company, params) com tpNF=0 +
-// finNFe=4 + refNFe + CFOP 1.202.
-//
-// Mai/2026 (foundation): buildPag multi-pagamento, card.tpIntegra=2,
-// xPag só pra tPag=99, workaround PIX (tPag=17 → 99+xPag=PIX).
+// - fetchNuvemEmpresa(cnpj) com cache 5min puxa cadastro fiscal completo.
+// - buildEmit, buildSelfDest viram ASYNC.
+// - 27/05 hotfix endereco defensivo (safeAddrField).
+// - 27/05 log detalhado de erro fiscal.
+// 26/05/2026: NFref vai em ide.NFref (TIde).
+// 25/05/2026: emitNfeDevolucao com dest = proprio emitente.
+// 12/05/2026: emitNfeDevolucao(company, params) com tpNF=0 + finNFe=4.
 // ============================================================
 
 const NUVEM_URL    = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
@@ -98,13 +86,8 @@ async function nuvemRequest(method, path, body) {
   return data;
 }
 
-// ============================================================
-// 27/05/2026 — Cadastro fiscal via Nuvem Fiscal (caminho A)
-// ============================================================
-// Cache module-level com TTL pra reduzir overhead nas emissões.
-// Pra forçar refresh após edição na Nuvem Fiscal: clearEmpresaCache(cnpj).
 const _empresaCache = new Map();
-const EMPRESA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+const EMPRESA_CACHE_TTL_MS = 5 * 60 * 1000;
 
 async function fetchNuvemEmpresa(cnpj) {
   const cleanCnpj = String(cnpj || '').replace(/\D/g, '');
@@ -122,7 +105,6 @@ async function fetchNuvemEmpresa(cnpj) {
     return null;
   } catch (e) {
     console.warn(`[nuvemfiscal] fetchNuvemEmpresa(${cleanCnpj}) falhou (${e.status || '?'}): ${e.message}. Fallback pro banco Aura.`);
-    // Cache negativo curto (1min) pra não bombardear API em CNPJs ainda não cadastrados
     _empresaCache.set(cleanCnpj, { data: null, expiresAt: Date.now() + 60 * 1000 });
     return null;
   }
@@ -137,9 +119,6 @@ function clearEmpresaCache(cnpj) {
   _empresaCache.delete(cleanCnpj);
 }
 
-// Merge company (banco Aura) com cadastro fiscal da Nuvem Fiscal.
-// Prioriza Nuvem em campos fiscais (endereço, IE, IM, razão).
-// Mantém Aura pra campos operacionais (id, tax_regime, billing_*).
 function mergeCompanyWithNuvem(company, nuvem) {
   if (!nuvem) return company;
   const end = nuvem.endereco || {};
@@ -222,8 +201,6 @@ const TPAG_DESCRIPTIONS = {
   '11': 'Vale Refeição',
   '12': 'Vale Presente',
   '13': 'Vale Combustível',
-  '15': 'Boleto Bancário',
-  '16': 'Depósito Bancário',
   '17': 'PIX',
   '18': 'Transferência bancária',
   '19': 'Programa de fidelidade',
@@ -267,8 +244,6 @@ async function uploadCertificate(cnpj, certificateBase64, password) {
   });
 }
 
-// Helper defensivo pra campos de endereço que ainda venham vazios mesmo
-// após merge com Nuvem Fiscal (caso muito raro, mas cobre).
 function safeAddrField(value, minLen, fallback, fieldName, companyCnpj) {
   const v = String(value || '').trim();
   if (v.length >= minLen) return v;
@@ -280,9 +255,6 @@ function safeAddrField(value, minLen, fallback, fieldName, companyCnpj) {
   return fallback;
 }
 
-// 27/05/2026: buildEmit agora é ASYNC. Busca cadastro fiscal da Nuvem
-// Fiscal (com cache 5min) e mescla com company do banco Aura, priorizando
-// dados fiscais da Nuvem. Banco Aura é fallback se Nuvem indisponível.
 async function buildEmit(company) {
   const cnpjRaw = String(company.cnpj || '').replace(/\D/g, '');
   const nuvem = cnpjRaw ? await fetchNuvemEmpresa(cnpjRaw) : null;
@@ -323,7 +295,6 @@ function buildDest({ cpf, cnpj, name, email }) {
   return dest;
 }
 
-// 27/05/2026: buildSelfDest agora é ASYNC (chama await buildEmit).
 async function buildSelfDest(company) {
   const emit = await buildEmit(company);
   return {
@@ -473,8 +444,6 @@ function buildInfAdic({ observacoes, infAdFisco }) {
 async function emitNfce(company, nfceData) {
   const tpAmb = NUVEM_URL.includes('sandbox') ? 2 : 1;
 
-  // 27/05/2026: buscar Nuvem ANTES de tudo pra também usar tax_regime
-  // efetivo (e tudo derivado dele) consistente com o que vai pro emit.
   const cnpjRaw = String(company.cnpj || '').replace(/\D/g, '');
   const nuvem = cnpjRaw ? await fetchNuvemEmpresa(cnpjRaw) : null;
   const effective = mergeCompanyWithNuvem(company, nuvem);
@@ -534,8 +503,6 @@ async function cancelNfce(nfceId, justificativa) {
 async function emitNfe(company, nfeData) {
   const tpAmb = NUVEM_URL.includes('sandbox') ? 2 : 1;
 
-  // 27/05/2026: buscar Nuvem ANTES pra usar dados consistentes em todo
-  // o body (emit, dest=self, ide.cMunFG, etc).
   const cnpjRaw = String(company.cnpj || '').replace(/\D/g, '');
   const nuvem = cnpjRaw ? await fetchNuvemEmpresa(cnpjRaw) : null;
   const effective = mergeCompanyWithNuvem(company, nuvem);
@@ -598,6 +565,13 @@ async function emitNfe(company, nfeData) {
 
   const emit = await buildEmit(effective);
 
+  // 01/06/2026 (fix Rejeicao 871): em devolucao (e outras operacoes sem
+  // pagamento), a SEFAZ exige Forma de Pagamento = 'Sem Pagamento' (tPag=90,
+  // vPag=0). nfeData.semPagamento forca isso; caso contrario monta normal.
+  const pag = nfeData.semPagamento
+    ? { detPag: [{ tPag: '90', vPag: 0 }] }
+    : buildPag(resolvePagInput(nfeData), totalValue);
+
   const body = {
     ambiente: tpAmb === 2 ? 'homologacao' : 'producao',
     referencia: nfeData.reference || `nfe-${Date.now()}`,
@@ -608,7 +582,7 @@ async function emitNfe(company, nfeData) {
       dest, det,
       total: { ICMSTot: total },
       transp: { modFrete: 9 },
-      pag: buildPag(resolvePagInput(nfeData), totalValue),
+      pag,
       infAdic: buildInfAdic({ observacoes: nfeData.observacoes, infAdFisco: nfeData.infAdFisco }),
     },
   };
@@ -675,6 +649,7 @@ async function emitNfeDevolucao(company, params) {
     idDest: 1,
     items: enrichedItems,
     selfDest: true,
+    semPagamento: true,
     infAdFisco,
   });
 }
