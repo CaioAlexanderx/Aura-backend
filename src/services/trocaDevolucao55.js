@@ -16,6 +16,13 @@
 // (chamada pós-COMMIT em trocaV2) — usa pool db como fallback.
 // Antes explodia com "Cannot read properties of null (reading 'query')".
 //
+// 01/06/2026 (fix NCM): os itens da devolução agora puxam o NCM e o
+// barcode REAIS do produto (tabela products) pelo product_id. Antes
+// usavam só `ret.ncm || '00000000'`, mas o payload da troca nao carrega
+// ncm -> ia '00000000' -> SEFAZ rejeitava a NF-e 55 (Rejeição 778: NCM
+// inexistente na TIPI). Caso Davi 01/06: NF-e 55 nº1 status 'rejeitado'
+// com item NCM '00000000', enquanto o produto tinha NCM 64039190.
+//
 // Memory: [[nfe55-devolucao-dest-proprio-emitente]]
 // ============================================================
 
@@ -29,6 +36,12 @@ class TrocaDevolucao55Error extends Error {
     this.body = body;
     this.isDevolucao55Error = true;
   }
+}
+
+// NCM valido = 8 digitos e diferente de '00000000'. SEFAZ rejeita o resto.
+function validNcm(n) {
+  const s = String(n || '').replace(/\D/g, '');
+  return (s.length === 8 && s !== '00000000') ? s : null;
 }
 
 async function handle(client, {
@@ -78,16 +91,50 @@ async function handle(client, {
   }
   const company = companyRows[0];
 
-  // 4. Items da devolução
-  const devolucaoItems = (returnedItems || []).map((ret, idx) => ({
-    code: ret.product_id || ('item-' + (idx + 1)),
-    name: ret.product_name_snapshot || ('Item ' + (idx + 1)),
-    quantity: parseFloat(ret.quantity),
-    price: parseFloat(ret.unit_price),
-    cfop: '1202',
-    ncm: ret.ncm || '00000000',
-    unit: 'UN',
-  }));
+  // 3b. (01/06/2026) Resolve NCM + barcode REAIS dos produtos devolvidos.
+  // O payload da troca nao carrega ncm/barcode; sem isso a NF-e 55 ia com
+  // NCM '00000000' e a SEFAZ rejeitava (Rejeição 778). Buscamos por product_id.
+  const productIds = [...new Set((returnedItems || []).map((r) => r.product_id).filter(Boolean))];
+  const ncmByProduct = new Map();
+  const barcodeByProduct = new Map();
+  if (productIds.length) {
+    const ph = productIds.map((_, i) => `$${i + 1}`).join(',');
+    const { rows: prodRows } = await q(
+      `SELECT id, ncm, barcode FROM products WHERE id IN (${ph})`,
+      productIds
+    );
+    for (const p of prodRows) {
+      ncmByProduct.set(p.id, p.ncm);
+      barcodeByProduct.set(p.id, p.barcode);
+    }
+  }
+
+  // 4. Items da devolução (NCM/barcode reais; fallback só em ultimo caso)
+  const devolucaoItems = (returnedItems || []).map((ret, idx) => {
+    const ncm = validNcm(ret.ncm) || validNcm(ncmByProduct.get(ret.product_id)) || '00000000';
+    const barcode = ret.barcode || barcodeByProduct.get(ret.product_id) || null;
+    return {
+      code: ret.product_id || ('item-' + (idx + 1)),
+      name: ret.product_name_snapshot || ('Item ' + (idx + 1)),
+      quantity: parseFloat(ret.quantity),
+      price: parseFloat(ret.unit_price),
+      cfop: '1202',
+      ncm,
+      barcode,
+      unit: 'UN',
+    };
+  });
+
+  // 4b. Aviso defensivo: se algum item ainda ficou sem NCM valido, a SEFAZ
+  // vai rejeitar — logamos pra ficar evidente (produto sem NCM no cadastro).
+  const semNcm = devolucaoItems.filter((it) => it.ncm === '00000000');
+  if (semNcm.length) {
+    console.warn(
+      '[trocaDevolucao55] ' + semNcm.length + ' item(ns) sem NCM valido na NF-e 55 ' +
+      '(troca ' + trocaSaleId + '): ' + semNcm.map((i) => i.code).join(', ') +
+      '. SEFAZ vai rejeitar — cadastre o NCM do produto.'
+    );
+  }
 
   // 5. consumerInfo (todos opcionais)
   const consumerInfo = {
