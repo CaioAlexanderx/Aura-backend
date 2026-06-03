@@ -3,7 +3,7 @@
 // GET  /storefront/:slug/studio/products  — lista produtos personalizaveis
 // POST /storefront/:slug/studio/order     — cria pedido Studio
 // GET  /storefront/:slug/studio/order/:oid — poll status do pedido
-// POST /storefront/:slug/studio/upload    — upload de imagem (cliente envia foto)
+// POST /storefront/:slug/studio/upload    — upload de imagem/pdf (cliente envia foto)
 //
 // Nivel 1 Sub-onda D (25/05/2026)
 // 25/05/2026 (Loja Digital Studio fechamento):
@@ -13,6 +13,9 @@
 //   + upload R2 publico pro cliente enviar foto direto da pagina
 // 26/05/2026 (Verso):
 //   + back_price_delta somado ao subtotal quando customization.has_back_selected
+// 03/06/2026 (Guia de medidas):
+//   + UPLOAD_ALLOWED_TYPES agora aceita application/pdf (arte/gabarito do cliente)
+//   + customization_config devolvido inteiro em GET /products (size_guide flui)
 //
 // Fluxo:
 //  1. Cliente entra em loja.getaura.com.br/:slug/studio
@@ -150,9 +153,15 @@ router.use((req, res, next) => {
 const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
   || 'https://aura-backend-production-f805.up.railway.app';
 
-// Limites de upload (cliente envia foto pra personalizar)
+// Limites de upload (cliente envia foto/pdf pra personalizar)
 const UPLOAD_MAX_BYTES = 15 * 1024 * 1024; // 15MB
-const UPLOAD_ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/webp']);
+const UPLOAD_ALLOWED_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/jpg',
+  'image/webp',
+  'application/pdf',
+]);
 
 // ────────────────────────────────────────────────────────────
 // GET /storefront/:slug/studio/products
@@ -160,6 +169,8 @@ const UPLOAD_ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'i
 // customization_config + templates vinculados + estimativa SLA.
 // + revisions policy (max_revisions_included, extra_revision_price,
 //   revision_policy_text) pra cliente ver antes de comprar.
+// customization_config e devolvido INTEIRO (p.customization_config);
+// campos como size_guide gravados dentro dele fluem automaticamente.
 // ────────────────────────────────────────────────────────────
 router.get('/:slug/studio/products', async (req, res) => {
   try {
@@ -348,9 +359,11 @@ function validateCustomizationValues(config, values) {
 
 // ────────────────────────────────────────────────────────────
 // POST /storefront/:slug/studio/upload
-// Upload publico de imagem (cliente envia foto direto da pagina).
+// Upload publico de imagem ou PDF (cliente envia foto/gabarito direto da pagina).
 // Sem auth — protegido por slug + tamanho/tipo + key isolada por company.
 // Body: { content_base64, content_type, filename? }
+// Tipos aceitos: image/png, image/jpeg, image/jpg, image/webp, application/pdf
+// Para application/pdf: split('/').pop() retorna 'pdf' — ext correta automaticamente.
 // ────────────────────────────────────────────────────────────
 router.post('/:slug/studio/upload', async (req, res) => {
   try {
@@ -396,6 +409,7 @@ router.post('/:slug/studio/upload', async (req, res) => {
     }
 
     // Key isolada por company pra evitar colisao entre lojas
+    // Para application/pdf: split('/').pop() retorna 'pdf' corretamente
     const ext = String(content_type).split('/').pop().replace('jpeg', 'jpg');
     const ts = Date.now();
     const rand = Math.random().toString(36).slice(2, 10);
