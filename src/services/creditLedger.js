@@ -429,14 +429,18 @@ async function applyPayment(client, {
     const newCovered = Math.round((currentCovered + coverNow) * 100) / 100;
     const newStatus  = newCovered >= amountDue - 0.005 ? 'paid' : inst.status;
 
+    // FIX (03/06/2026): nao reusar $4 em "status = $4" e "CASE WHEN $4 = 'paid'"
+    // -- o Postgres deduzia tipos conflitantes para o mesmo parametro e
+    // estourava "inconsistent types deduced for parameter $4" (500 no /pay).
+    // O CASE agora usa um booleano dedicado ($5).
     await client.query(
       `UPDATE credit_installments
          SET covered_amount = $3,
              status         = $4,
-             paid_at        = CASE WHEN $4 = 'paid' THEN NOW() ELSE paid_at END,
+             paid_at        = CASE WHEN $5 THEN NOW() ELSE paid_at END,
              updated_at     = NOW()
        WHERE id = $1 AND company_id = $2`,
-      [inst.id, companyId, newCovered, newStatus]
+      [inst.id, companyId, newCovered, newStatus, newStatus === 'paid']
     );
 
     coveredInstallments.push({ id: inst.id, covered: coverNow, status: newStatus });
