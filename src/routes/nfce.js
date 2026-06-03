@@ -9,6 +9,15 @@
 // - paymentCode mapeia 'crediario' → '05' (Credito Loja, tPag 05).
 //   Correcao 29/05/2026: era '01' (Dinheiro), incorreto fiscalmente.
 //   indPag=1 (a prazo) propagado automaticamente para crediario nos payments[].
+//
+// 02/06/2026 (#3 corrida de numeracao): /emit reserva o numero de forma
+//   ATOMICA (UPDATE nfce_config ... RETURNING) antes de transmitir, em vez de
+//   ler next_number e so incrementar pos-SEFAZ. Sem isso, duas emissoes
+//   concorrentes pegavam o MESMO numero e a SEFAZ rejeitava por duplicidade.
+//   Retransmissao da MESMA venda (apos corrigir rejeicao) reusa o numero ja
+//   reservado — so nota autorizada/denegada consome numero. (Consequencia
+//   aceita: nota abandonada apos rejeicao vira gap de numeracao, resolvivel
+//   por inutilizacao na SEFAZ.)
 // ============================================================
 
 const express = require('express');
@@ -196,7 +205,30 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     const paymentsErr = validatePayments(payments, totalNfce);
     if (paymentsErr) return res.status(400).json(paymentsErr);
 
-    const numeroNF = config.next_number;
+    // ── #3 (02/06/2026): reserva ATOMICA do numero ANTES de transmitir ──
+    // Retransmissao da MESMA venda+tipo apos rejeicao reusa o numero ja
+    // reservado (so nota autorizada/denegada consome numero na SEFAZ).
+    let numeroNF = null;
+    if (sale_id) {
+      const { rows: prevRej } = await db.query(
+        `SELECT numero FROM nfce_emissions
+          WHERE company_id=$1 AND sale_id=$2 AND tipo=$3 AND numero IS NOT NULL
+            AND status IN ('rejeitada','erro')
+          ORDER BY created_at DESC LIMIT 1`,
+        [req.params.id, sale_id, tipo]
+      );
+      if (prevRej.length && prevRej[0].numero != null) numeroNF = parseInt(prevRej[0].numero, 10);
+    }
+    if (numeroNF == null) {
+      // Incremento atomico: o row-lock de nfce_config serializa concorrentes,
+      // entao cada emissao concorrente recebe um numero distinto.
+      const { rows: rsv } = await db.query(
+        `UPDATE nfce_config SET next_number = next_number + 1, updated_at=NOW()
+          WHERE company_id=$1 RETURNING (next_number - 1) AS numero`,
+        [req.params.id]
+      );
+      numeroNF = (rsv[0] && rsv[0].numero != null) ? parseInt(rsv[0].numero, 10) : config.next_number;
+    }
     const serieNF  = config.serie_nfce;
 
     const now = new Date();
@@ -230,7 +262,6 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       prov.protocolo = 'HOMOLOG-' + String(numeroNF).padStart(6,'0');
       finalStatus = 'autorizada';
       await db.query(`UPDATE nfce_emissions SET status='autorizada', protocolo=$1, authorized_at=NOW() WHERE id=$2`, [prov.protocolo, emission.id]);
-      await db.query('UPDATE nfce_config SET next_number=next_number+1, updated_at=NOW() WHERE company_id=$1', [req.params.id]);
     } else {
       try {
         const productIds = items.map(i => i.product_id).filter(id => typeof id==='string' && id.length>0);
@@ -319,10 +350,6 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
            prov.xmlUrl, prov.pdfUrl, prov.qrCode, prov.urlConsulta, emission.id,
            authorizedAt, errorMessage]
         );
-
-        if (finalStatus !== 'rejeitada') {
-          await db.query('UPDATE nfce_config SET next_number=next_number+1, updated_at=NOW() WHERE company_id=$1', [req.params.id]);
-        }
 
       } catch (apiErr) {
         console.error('[nfce] Nuvem Fiscal emit error:', apiErr.message, apiErr.payload||'');
