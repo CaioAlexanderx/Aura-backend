@@ -499,19 +499,21 @@ router.get('/collection/rules', async (req, res) => {
 });
 
 router.put('/collection/rules', async (req, res) => {
-  const { enabled, whatsapp_connected, rules } = req.body;
+  const { enabled, whatsapp_connected, rules, pix_key } = req.body;
   const client = await pool.connect();
   try {
     const r = await client.query(
-      `INSERT INTO credit_collection_rules (company_id, enabled, whatsapp_connected, rules)
-       VALUES ($1,$2,$3,$4)
+      `INSERT INTO credit_collection_rules (company_id, enabled, whatsapp_connected, rules, pix_key)
+       VALUES ($1,$2,$3,$4,$5)
        ON CONFLICT (company_id) DO UPDATE SET
-         enabled=$2, whatsapp_connected=$3, rules=$4, updated_at=NOW()
+         enabled=$2, whatsapp_connected=$3, rules=$4,
+         pix_key=COALESCE($5, credit_collection_rules.pix_key), updated_at=NOW()
        RETURNING *`,
       [req.params.id,
        enabled !== undefined ? enabled : true,
        whatsapp_connected !== undefined ? whatsapp_connected : false,
-       rules ? JSON.stringify(rules) : null]
+       rules ? JSON.stringify(rules) : null,
+       pix_key !== undefined ? String(pix_key).trim() : null]
     );
     res.json(r.rows[0]);
   } catch (err) {
