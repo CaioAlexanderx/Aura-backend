@@ -169,7 +169,12 @@ router.post('/sale', async (req, res) => {
     for (const item of items) {
       const qty = parseFloat(item.quantity);
       const unitPrice = parseFloat(item.unit_price);
-      const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
+      // Desconto por item (lapis do PDV): unit_price mantem o preco de tabela
+      // do estoque e item_discount (total da linha) traz a diferenca. O total
+      // da linha desconta o item_discount, sem nunca ficar negativo.
+      const grossLine = parseFloat((qty * unitPrice).toFixed(2));
+      const itemDiscount = Math.min(Math.max(parseFloat(item.item_discount || 0), 0), grossLine);
+      const lineTotal = parseFloat((grossLine - itemDiscount).toFixed(2));
       subtotal += lineTotal;
       let productName = item.product_name_snapshot || '';
       let costPrice = 0;
@@ -208,7 +213,7 @@ router.post('/sale', async (req, res) => {
         }
       }
       productNames.push(productName);
-      enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, line_total: lineTotal, stock_company_id: stockCompanyId });
+      enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, item_discount: itemDiscount, line_total: lineTotal, stock_company_id: stockCompanyId });
     }
     let discountAmt = 0;
     let couponId = null;
