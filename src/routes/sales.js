@@ -25,6 +25,9 @@
 //   nfce_emissions da venda (tipo nfce / nfe / nfe_devolucao) com status,
 //   numero, chave, pdf/qr/url_consulta e error_message. Alimenta a seção
 //   de Nota Fiscal no detalhe (botao Emitir NFC-e / Reprocessar NF-e).
+//   Filtra SO por sale_id (uuid unico) — nao por company_id — senao troca
+//   cross-filial (emissao gravada na empresa de ORIGEM, venda na empresa
+//   FISICA) apareceria sem nota no detalhe.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -269,14 +272,17 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   }
 
   // 02/06/2026 (b): bloco `fiscal` — emissoes da venda (NFC-e 65 / NF-e 55 devolucao).
+  // Filtra SO por sale_id (uuid unico). NAO por company_id: numa troca cross-filial
+  // a emissao e gravada na empresa de ORIGEM, enquanto a venda da troca pertence a
+  // empresa FISICA — com filtro de company_id o detalhe mostraria "sem nota".
   // Defensivo (schema pre-migration): nfce_emissions/colunas podem faltar em deploy antigo.
   let fiscal = [];
   try {
     const fRes = await pool.query(
       'SELECT id, tipo, status, numero, serie, chave_acesso, pdf_url, qr_code, ' +
       '       url_consulta, error_message, created_at, authorized_at ' +
-      'FROM nfce_emissions WHERE sale_id = $1 AND company_id = $2 ORDER BY created_at DESC',
-      [saleId, companyId]
+      'FROM nfce_emissions WHERE sale_id = $1 ORDER BY created_at DESC',
+      [saleId]
     );
     fiscal = fRes.rows.map(function(r) {
       return {
