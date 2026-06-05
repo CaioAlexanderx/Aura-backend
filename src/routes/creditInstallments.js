@@ -2,18 +2,13 @@
  * creditInstallments.js
  * Crediario parcelado -- vendas a prazo, score interno, regua de cobranca, dashboard inadimplencia.
  *
- * F1 (29/05/2026):
- *   - PATCH /installments/:iid/pay delega a creditLedger.applyPayment (fonte unica)
- *   - Removido stub 501 + conflito de params :id/:iid
- *   - CURRENT_DATE substituido por (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
- *   - KPIs do dashboard usam (amount_due - covered_amount) em vez de (amount_due - amount_paid)
- *   - updateCreditUsed usa saldo do ledger (nao soma de installments)
- *
- * Hub F1 (05/06/2026):
- *   - PUT /plan-config persiste period_unit/period_count/require_score_min;
- *     aceita 0 (desligar juros/multa) -- juros sempre opt-in, lojista decide.
- *   - POST /installments gera parcelas conforme periodicidade (semanal/quinzenal/
- *     mensal/personalizado) via creditLedger.resolvePeriod + dueDateForIndex.
+ * F1 (29/05/2026): applyPayment unificado no ledger.
+ * Hub F1 (05/06/2026): PUT /plan-config com period_unit/period_count.
+ * F2 (05/06/2026):
+ *   - PUT /customers/:cid/terms -- persiste overrides de termos por cliente
+ *   - GET /customers/:cid/profile -- adiciona campo `terms: { overrides, effective }`
+ * F3 (05/06/2026):
+ *   - POST /installments aceita account_id para vincular parcelas a um carne
  */
 
 const express = require('express');
@@ -24,11 +19,8 @@ const router = express.Router({ mergeParams: true });
 
 const SP_DATE = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
-// Normaliza valor de config: undefined/null/'' -> null (mantem valor atual via
-// COALESCE); 0 e demais numeros passam (permite DESLIGAR juros/multa com 0).
 const nz = (v) => (v === undefined || v === null || v === '') ? null : v;
 
-// ───────────────────────────────────────────────
 function buildPixLink(id) {
   const short = id.replace(/-/g, '').slice(0, 12);
   return `https://pagar.getaura.com.br/parcela/${short}`;
@@ -49,7 +41,6 @@ function buildWhatsAppMessage(template, params = {}) {
   return templates[template] || templates.lembrete;
 }
 
-// ───────────────────────────────────────────────
 async function assertCrediarioEnabled(req, res, next) {
   try {
     const result = await pool.query(
@@ -69,14 +60,15 @@ async function assertCrediarioEnabled(req, res, next) {
 
 router.use(assertCrediarioEnabled);
 
-// ─── GET /credit/customers/:cid/profile ──────────────────────────────
+// ─── GET /credit/customers/:cid/profile ──────────────────────────────────
+// F2: adiciona campo `terms: { overrides, effective }` ao perfil.
 router.get('/customers/:cid/profile', async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
   const client = await pool.connect();
   try {
     const profile = await creditLedger._getOrCreateProfile(client, companyId, customerId);
-    if (!profile) return res.json({ score: 500, label: 'regular', credit_limit: 0, credit_used: 0, status: 'active' });
+    if (!profile) return res.json({ score: 500, label: 'regular', credit_limit: 0, credit_used: 0, status: 'active', terms: { overrides: {}, effective: {} } });
     const config = await creditLedger._getOrCreatePlanConfig(client, companyId);
     const installments = await client.query(
       `SELECT id, installment_number, total_installments, amount_due, covered_amount,
@@ -86,10 +78,14 @@ router.get('/customers/:cid/profile', async (req, res) => {
        ORDER BY due_date ASC`,
       [companyId, customerId]
     );
+
+    // F2: termos resolvidos
+    const terms = creditLedger.resolveTerms(profile, config);
+
     res.json({
       ...profile,
-      label: require('../services/creditLedger')._recalculateScore ? profile.credit_score : profile.credit_score,
       config,
+      terms,
       open_installments: installments.rows.map(i => ({
         ...i,
         remaining: parseFloat((parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)).toFixed(2)),
@@ -101,7 +97,93 @@ router.get('/customers/:cid/profile', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── PUT /credit/customers/:cid/limit ────────────────────────────────
+// ─── PUT /credit/customers/:cid/terms (F2) ────────────────────────────────
+// Persiste overrides de termos por cliente. null limpa o override (volta ao padrao da loja).
+router.put('/customers/:cid/terms', async (req, res) => {
+  const companyId  = req.params.id;
+  const customerId = req.params.cid;
+  const {
+    interest_rate,
+    max_installments,
+    period_unit,
+    period_count,
+    due_day,
+    late_fee_rate,
+    late_interest_daily,
+  } = req.body || {};
+
+  // Valida period_unit se fornecido (nao null)
+  if (period_unit !== undefined && period_unit !== null &&
+      !['day', 'week', 'month'].includes(period_unit)) {
+    return res.status(400).json({ error: 'period_unit deve ser day, week ou month' });
+  }
+
+  const client = await pool.connect();
+  try {
+    // Garante que perfil existe
+    await creditLedger._getOrCreateProfile(client, companyId, customerId);
+
+    // Monta SET dinamico apenas para os campos enviados no body
+    // Se o campo vier como null -> NULL (limpa override)
+    // Se o campo nao vier -> nao altera (COALESCE com valor atual)
+    const setClauses = [];
+    const params = [companyId, customerId];
+    let idx = 3;
+
+    const fieldMap = {
+      interest_rate:       'term_interest_rate',
+      max_installments:    'term_max_installments',
+      period_unit:         'term_period_unit',
+      period_count:        'term_period_count',
+      due_day:             'term_due_day',
+      late_fee_rate:       'term_late_fee_rate',
+      late_interest_daily: 'term_late_interest_daily',
+    };
+
+    for (const [bodyField, dbCol] of Object.entries(fieldMap)) {
+      if (req.body && bodyField in req.body) {
+        setClauses.push(`${dbCol} = $${idx}`);
+        params.push(req.body[bodyField] === null ? null : req.body[bodyField]);
+        idx++;
+      }
+    }
+
+    if (!setClauses.length) {
+      return res.status(400).json({ error: 'Nenhum campo de termo fornecido' });
+    }
+    setClauses.push('updated_at = NOW()');
+
+    let r;
+    try {
+      r = await client.query(
+        `UPDATE customer_credit_profiles
+           SET ${setClauses.join(', ')}
+         WHERE company_id = $1 AND customer_id = $2
+         RETURNING *`,
+        params
+      );
+    } catch (e) {
+      if (e.code === '42703') {
+        // Colunas term_* ainda nao existem (deploy parcial)
+        return res.status(503).json({ error: 'Colunas de termos ainda nao disponiveis. Aguarde o deploy completo.' });
+      }
+      throw e;
+    }
+
+    if (!r.rows.length) return res.status(404).json({ error: 'Perfil nao encontrado' });
+
+    const profile = r.rows[0];
+    const config = await creditLedger._getOrCreatePlanConfig(client, companyId);
+    const terms = creditLedger.resolveTerms(profile, config);
+
+    res.json({ ...profile, terms });
+  } catch (err) {
+    console.error('PUT /credit/customers/:cid/terms', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ─── PUT /credit/customers/:cid/limit ─────────────────────────────────────
 router.put('/customers/:cid/limit', async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
@@ -125,7 +207,7 @@ router.put('/customers/:cid/limit', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── PATCH /credit/customers/:cid/block ─────────────────────────────
+// ─── PATCH /credit/customers/:cid/block ──────────────────────────────────
 router.patch('/customers/:cid/block', async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
@@ -151,7 +233,7 @@ router.patch('/customers/:cid/block', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── GET/PUT /credit/plan-config ─────────────────────────────────────
+// ─── GET/PUT /credit/plan-config ───────────────────────────────────────────
 router.get('/plan-config', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -166,7 +248,6 @@ router.put('/plan-config', async (req, res) => {
   const { max_installments, min_installment_value, interest_rate,
           late_fee_rate, late_interest_daily, auto_block_days,
           require_score_min, period_unit, period_count } = req.body;
-  // period_unit so aceita valores validos (senao deixa NULL -> mantem atual)
   const safeUnit = ['day', 'week', 'month'].includes(period_unit) ? period_unit : null;
   const client = await pool.connect();
   try {
@@ -198,11 +279,12 @@ router.put('/plan-config', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── POST /credit/installments ─────────────────────────────────────────
+// ─── POST /credit/installments ───────────────────────────────────────────────
+// F3: aceita account_id para vincular parcelas ao carne
 router.post('/installments', async (req, res) => {
   const companyId = req.params.id;
   const { customer_id, sale_id, total_amount, installments, first_due_date,
-          period_unit, period_count } = req.body;
+          period_unit, period_count, account_id } = req.body;
   if (!customer_id || !total_amount || !installments || !first_due_date) {
     return res.status(400).json({ error: 'customer_id, total_amount, installments e first_due_date sao obrigatorios.' });
   }
@@ -240,15 +322,30 @@ router.post('/installments', async (req, res) => {
     for (let i = 1; i <= n; i++) {
       const amount     = i === n ? baseAmount + remainder : baseAmount;
       const dueDateStr = creditLedger.dueDateForIndex(first_due_date, period.unit, period.count, i - 1);
-      const ins = await client.query(
-        `INSERT INTO credit_installments
-           (company_id, sale_id, customer_id, installment_number, total_installments,
-            amount_due, due_date, status, pix_link, covered_amount)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,0) RETURNING *`,
-        [companyId, sale_id || null, customer_id, i, n, amount, dueDateStr,
-         `https://pagar.getaura.com.br/parcela/tmp`]
-      );
-      const row = ins.rows[0];
+      let row;
+      try {
+        const ins = await client.query(
+          `INSERT INTO credit_installments
+             (company_id, sale_id, customer_id, installment_number, total_installments,
+              amount_due, due_date, status, pix_link, covered_amount, account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,0,$9) RETURNING *`,
+          [companyId, sale_id || null, customer_id, i, n, amount, dueDateStr,
+           'https://pagar.getaura.com.br/parcela/tmp', account_id || null]
+        );
+        row = ins.rows[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          const ins = await client.query(
+            `INSERT INTO credit_installments
+               (company_id, sale_id, customer_id, installment_number, total_installments,
+                amount_due, due_date, status, pix_link, covered_amount)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,0) RETURNING *`,
+            [companyId, sale_id || null, customer_id, i, n, amount, dueDateStr,
+             'https://pagar.getaura.com.br/parcela/tmp']
+          );
+          row = ins.rows[0];
+        } else throw e;
+      }
       await client.query(`UPDATE credit_installments SET pix_link=$2 WHERE id=$1`,
         [row.id, buildPixLink(row.id)]);
       createdInstallments.push({ ...row, pix_link: buildPixLink(row.id) });
@@ -273,7 +370,7 @@ router.post('/installments', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── GET /credit/installments ─────────────────────────────────────────────
+// ─── GET /credit/installments ────────────────────────────────────────────────────
 router.get('/installments', async (req, res) => {
   const companyId = req.params.id;
   const { customer_id, status, page = 1, limit = 50 } = req.query;
@@ -284,7 +381,6 @@ router.get('/installments', async (req, res) => {
   if (customer_id) { where += ` AND ci.customer_id = $${idx++}`; vals.push(customer_id); }
   if (status)      { where += ` AND ci.status = $${idx++}`;       vals.push(status); }
   try {
-    // Marcar overdue com timezone correto
     await pool.query(
       `UPDATE credit_installments SET status='overdue'
        WHERE company_id=$1 AND status='pending' AND due_date < ${SP_DATE}`,
@@ -310,9 +406,7 @@ router.get('/installments', async (req, res) => {
   }
 });
 
-// ─── PATCH /credit/installments/:iid/pay ────────────────────────────
-// F1 (29/05/2026): delega a creditLedger.applyPayment.
-// Valor default = amount_due - covered_amount (saldo descoberto da parcela).
+// ─── PATCH /credit/installments/:iid/pay ────────────────────────────────────────
 router.patch('/installments/:iid/pay', async (req, res) => {
   const companyId     = req.params.id;
   const installmentId = req.params.iid;
@@ -343,7 +437,6 @@ router.patch('/installments/:iid/pay', async (req, res) => {
       activeSessaoId = sessRes?.rows?.[0]?.id || null;
     } catch (_) {}
 
-    // Valor a pagar: fornecido ou saldo descoberto da parcela
     const uncovered = Math.max(0, parseFloat(ins.amount_due) - parseFloat(ins.covered_amount || 0));
     const payAmount = amount_paid !== undefined ? parseFloat(amount_paid) : uncovered;
     if (payAmount <= 0) {
@@ -358,6 +451,7 @@ router.patch('/installments/:iid/pay', async (req, res) => {
       method:     payment_method || 'dinheiro',
       sessaoId:   activeSessaoId,
       createdBy:  req.user?.id || null,
+      accountId:  ins.account_id || null,
     });
 
     await client.query('COMMIT');
@@ -378,7 +472,7 @@ router.patch('/installments/:iid/pay', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── PATCH /credit/installments/:iid/cancel ─────────────────────────
+// ─── PATCH /credit/installments/:iid/cancel ─────────────────────────────────────
 router.patch('/installments/:iid/cancel', async (req, res) => {
   const companyId     = req.params.id;
   const installmentId = req.params.iid;
@@ -406,11 +500,10 @@ router.patch('/installments/:iid/cancel', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── GET /credit/dashboard ───────────────────────────────────────────────
+// ─── GET /credit/dashboard ────────────────────────────────────────────────────────
 router.get('/dashboard', async (req, res) => {
   const companyId = req.params.id;
   try {
-    // Marcar overdue (timezone correto)
     await pool.query(
       `UPDATE credit_installments SET status='overdue'
        WHERE company_id=$1 AND status='pending' AND due_date < ${SP_DATE}`,
@@ -464,7 +557,7 @@ router.get('/dashboard', async (req, res) => {
   }
 });
 
-// ─── GET /credit/dashboard/aging ────────────────────────────────────────
+// ─── GET /credit/dashboard/aging ──────────────────────────────────────────────────
 router.get('/dashboard/aging', async (req, res) => {
   const companyId = req.params.id;
   try {
@@ -491,7 +584,7 @@ router.get('/dashboard/aging', async (req, res) => {
   }
 });
 
-// ─── collection/rules + collection/trigger (inalterados) ──────────────
+// ─── collection/rules + collection/trigger (inalterados) ───────────────────────────
 router.get('/collection/rules', async (req, res) => {
   const client = await pool.connect();
   try {
