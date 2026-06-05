@@ -8,6 +8,12 @@
  *   - CURRENT_DATE substituido por (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
  *   - KPIs do dashboard usam (amount_due - covered_amount) em vez de (amount_due - amount_paid)
  *   - updateCreditUsed usa saldo do ledger (nao soma de installments)
+ *
+ * Hub F1 (05/06/2026):
+ *   - PUT /plan-config persiste period_unit/period_count/require_score_min;
+ *     aceita 0 (desligar juros/multa) -- juros sempre opt-in, lojista decide.
+ *   - POST /installments gera parcelas conforme periodicidade (semanal/quinzenal/
+ *     mensal/personalizado) via creditLedger.resolvePeriod + dueDateForIndex.
  */
 
 const express = require('express');
@@ -17,6 +23,10 @@ const creditLedger = require('../services/creditLedger');
 const router = express.Router({ mergeParams: true });
 
 const SP_DATE = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
+
+// Normaliza valor de config: undefined/null/'' -> null (mantem valor atual via
+// COALESCE); 0 e demais numeros passam (permite DESLIGAR juros/multa com 0).
+const nz = (v) => (v === undefined || v === null || v === '') ? null : v;
 
 // ───────────────────────────────────────────────
 function buildPixLink(id) {
@@ -141,7 +151,7 @@ router.patch('/customers/:cid/block', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── GET/PUT /credit/plan-config (F2-2A: juros de financiamento) ──────
+// ─── GET/PUT /credit/plan-config ─────────────────────────────────────
 router.get('/plan-config', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -154,13 +164,17 @@ router.get('/plan-config', async (req, res) => {
 
 router.put('/plan-config', async (req, res) => {
   const { max_installments, min_installment_value, interest_rate,
-          late_fee_rate, late_interest_daily, auto_block_days } = req.body;
+          late_fee_rate, late_interest_daily, auto_block_days,
+          require_score_min, period_unit, period_count } = req.body;
+  // period_unit so aceita valores validos (senao deixa NULL -> mantem atual)
+  const safeUnit = ['day', 'week', 'month'].includes(period_unit) ? period_unit : null;
   const client = await pool.connect();
   try {
     const r = await client.query(
       `INSERT INTO credit_plan_configs (company_id, max_installments, min_installment_value,
-         interest_rate, late_fee_rate, late_interest_daily, auto_block_days)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
+         interest_rate, late_fee_rate, late_interest_daily, auto_block_days,
+         require_score_min, period_unit, period_count)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'month'),COALESCE($10,1))
        ON CONFLICT (company_id) DO UPDATE SET
          max_installments      = COALESCE($2, credit_plan_configs.max_installments),
          min_installment_value = COALESCE($3, credit_plan_configs.min_installment_value),
@@ -168,11 +182,15 @@ router.put('/plan-config', async (req, res) => {
          late_fee_rate         = COALESCE($5, credit_plan_configs.late_fee_rate),
          late_interest_daily   = COALESCE($6, credit_plan_configs.late_interest_daily),
          auto_block_days       = COALESCE($7, credit_plan_configs.auto_block_days),
+         require_score_min     = COALESCE($8, credit_plan_configs.require_score_min),
+         period_unit           = COALESCE($9, credit_plan_configs.period_unit),
+         period_count          = COALESCE($10, credit_plan_configs.period_count),
          updated_at            = NOW()
        RETURNING *`,
       [req.params.id,
-       max_installments || null, min_installment_value || null, interest_rate !== undefined ? interest_rate : null,
-       late_fee_rate || null, late_interest_daily || null, auto_block_days || null]
+       nz(max_installments), nz(min_installment_value), nz(interest_rate),
+       nz(late_fee_rate), nz(late_interest_daily), nz(auto_block_days),
+       nz(require_score_min), safeUnit, nz(period_count)]
     );
     res.json(r.rows[0]);
   } catch (err) {
@@ -183,7 +201,8 @@ router.put('/plan-config', async (req, res) => {
 // ─── POST /credit/installments ─────────────────────────────────────────
 router.post('/installments', async (req, res) => {
   const companyId = req.params.id;
-  const { customer_id, sale_id, total_amount, installments, first_due_date } = req.body;
+  const { customer_id, sale_id, total_amount, installments, first_due_date,
+          period_unit, period_count } = req.body;
   if (!customer_id || !total_amount || !installments || !first_due_date) {
     return res.status(400).json({ error: 'customer_id, total_amount, installments e first_due_date sao obrigatorios.' });
   }
@@ -209,6 +228,7 @@ router.post('/installments', async (req, res) => {
       return res.status(400).json({ error: `Maximo de ${config.max_installments} parcelas configurado.` });
     }
 
+    const period = creditLedger.resolvePeriod(period_unit, period_count, config);
     const effectiveRate = parseFloat(config?.interest_rate) || 0;
     const totalWithInterest = effectiveRate > 0
       ? parseFloat((total * (1 + effectiveRate * n)).toFixed(2))
@@ -218,10 +238,8 @@ router.post('/installments', async (req, res) => {
 
     const createdInstallments = [];
     for (let i = 1; i <= n; i++) {
-      const amount  = i === n ? baseAmount + remainder : baseAmount;
-      const dueDate = new Date(first_due_date);
-      dueDate.setMonth(dueDate.getMonth() + (i - 1));
-      const dueDateStr = dueDate.toISOString().split('T')[0];
+      const amount     = i === n ? baseAmount + remainder : baseAmount;
+      const dueDateStr = creditLedger.dueDateForIndex(first_due_date, period.unit, period.count, i - 1);
       const ins = await client.query(
         `INSERT INTO credit_installments
            (company_id, sale_id, customer_id, installment_number, total_installments,
@@ -240,7 +258,8 @@ router.post('/installments', async (req, res) => {
         await client.query(
           `UPDATE sales SET is_installment=true, total_installments=$2, credit_plan_snapshot=$3
            WHERE id=$1 AND company_id=$4`,
-          [sale_id, n, JSON.stringify({ installments: n, total_amount: total, interest_rate: effectiveRate }), companyId]
+          [sale_id, n, JSON.stringify({ installments: n, total_amount: total, interest_rate: effectiveRate,
+                                        period_unit: period.unit, period_count: period.count }), companyId]
         );
       } catch (e) { if (e.code !== '42703' && e.code !== '42P01') throw e; }
     }

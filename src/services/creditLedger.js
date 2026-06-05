@@ -24,6 +24,30 @@ const SP_DATE_COL = (col) => `(${col} AT TIME ZONE 'America/Sao_Paulo')::date`;
 const BACKDATE_TS = (p) =>
   `COALESCE((${p}::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW())`;
 
+// ─── periodicidade de pagamento ───────────────────────────────
+// Resolve a periodicidade efetiva: opts -> config do plano -> mensal (default).
+// unit ∈ {'day','week','month'}; count >= 1. Semanal = week×1, quinzenal = week×2,
+// mensal = month×1, personalizado = day×N.
+function resolvePeriod(unit, count, config) {
+  let u = unit || config?.period_unit || 'month';
+  if (!['day', 'week', 'month'].includes(u)) u = 'month';
+  let c = parseInt(count != null ? count : (config?.period_count != null ? config.period_count : 1), 10);
+  if (!Number.isFinite(c) || c < 1 || c > 365) c = 1;
+  return { unit: u, count: c };
+}
+
+// Calcula a data de vencimento da parcela `idx` (0-based) a partir do
+// primeiro vencimento, somando idx períodos. Mês usa setMonth (mantém o
+// comportamento legado); semana/dia somam dias.
+function dueDateForIndex(firstDueStr, unit, count, idx) {
+  const d = new Date(firstDueStr);
+  const step = (parseInt(count, 10) || 1) * idx;
+  if (unit === 'week') d.setDate(d.getDate() + 7 * step);
+  else if (unit === 'day') d.setDate(d.getDate() + step);
+  else d.setMonth(d.getMonth() + step);
+  return d.toISOString().split('T')[0];
+}
+
 // ─── helpers internos ─────────────────────────────────────────
 
 function buildPixLink(id) {
@@ -165,13 +189,17 @@ async function _recalculateScore(client, companyId, customerId) {
  *
  * @param {pg.PoolClient} client
  * @param {{ companyId, customerId, saleId, amount, installments?,
- *           firstDueDate?, interestRate?, productNames?, createdBy? }} opts
+ *           firstDueDate?, interestRate?, productNames?, createdBy?,
+ *           periodUnit?, periodCount? }} opts
+ *   periodUnit/periodCount: periodicidade das parcelas. Default vem da
+ *   config do plano (e cai em mensal). Não muda nada se não informado.
  * @returns {{ debited: row, schedule: [] }}
  */
 async function createCreditSale(client, {
   companyId, customerId, saleId, amount,
   installments = 1, firstDueDate = null,
   interestRate = 0, productNames = [], createdBy = null,
+  periodUnit = null, periodCount = null,
 }) {
   // 1. Ledger: debit
   const { rows: debitRows } = await client.query(
@@ -213,6 +241,7 @@ async function createCreditSale(client, {
       ? parseFloat(interestRate)
       : parseFloat(config?.interest_rate) || 0;
     const n = Math.min(parseInt(installments), maxN, 36);
+    const period = resolvePeriod(periodUnit, periodCount, config);
 
     const due1 = firstDueDate || (() => {
       const d = new Date();
@@ -229,10 +258,8 @@ async function createCreditSale(client, {
     const remainder  = Math.round((totalWithInterest - baseAmount * n) * 100) / 100;
 
     for (let i = 1; i <= n; i++) {
-      const amt      = i === n ? baseAmount + remainder : baseAmount;
-      const dueDate  = new Date(due1);
-      dueDate.setMonth(dueDate.getMonth() + (i - 1));
-      const dueDateStr = dueDate.toISOString().split('T')[0];
+      const amt        = i === n ? baseAmount + remainder : baseAmount;
+      const dueDateStr = dueDateForIndex(due1, period.unit, period.count, i - 1);
 
       const { rows: insRows } = await client.query(
         `INSERT INTO credit_installments
@@ -259,7 +286,8 @@ async function createCreditSale(client, {
                credit_plan_snapshot = $3
          WHERE id = $1 AND company_id = $4`,
         [saleId, n,
-         JSON.stringify({ installments: n, total_amount: amount, interest_rate: effectiveRate }),
+         JSON.stringify({ installments: n, total_amount: amount, interest_rate: effectiveRate,
+                          period_unit: period.unit, period_count: period.count }),
          companyId]
       );
     } catch (e) {
@@ -602,4 +630,6 @@ module.exports = {
   _updateCreditUsed,
   _getOrCreateProfile,
   _getOrCreatePlanConfig,
+  resolvePeriod,
+  dueDateForIndex,
 };

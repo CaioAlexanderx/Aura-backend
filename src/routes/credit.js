@@ -295,7 +295,8 @@ router.get('/customers/search', async (req, res) => {
 // Cria lançamento de débito manual no crediário (sem venda vinculada).
 // Aceita cliente existente (customer_id) ou criação inline (new_customer).
 // Cria agenda de parcelas em credit_installments com juros simples opcionais.
-// 05/06/2026: aceita entry_date (YYYY-MM-DD) para lançamento retroativo.
+// 05/06/2026: aceita entry_date (YYYY-MM-DD) para lançamento retroativo e
+//             period_unit/period_count para periodicidade (semanal/quinzenal/etc).
 // ─────────────────────────────────────────────────────────────────────────
 router.post('/manual-entry', async (req, res) => {
   const companyId = req.params.id;
@@ -308,6 +309,8 @@ router.post('/manual-entry', async (req, res) => {
     first_due_date,
     description,
     entry_date,
+    period_unit,
+    period_count,
   } = req.body || {};
 
   const total = parseFloat(amount);
@@ -375,8 +378,9 @@ router.post('/manual-entry', async (req, res) => {
     );
     const transaction = txRows[0];
 
-    // 3. Create installments schedule (juros simples)
+    // 3. Create installments schedule (juros simples + periodicidade configurável)
     const config        = await creditLedger._getOrCreatePlanConfig(client, companyId);
+    const period        = creditLedger.resolvePeriod(period_unit, period_count, config);
     const effectiveRate =
       interest_rate !== undefined && interest_rate !== null
         ? parseFloat(interest_rate)
@@ -398,9 +402,7 @@ router.post('/manual-entry', async (req, res) => {
     const createdInstallments = [];
     for (let i = 1; i <= n; i++) {
       const instAmount = i === n ? baseAmount + remainder : baseAmount;
-      const dueDate    = new Date(firstDue);
-      dueDate.setMonth(dueDate.getMonth() + (i - 1));
-      const dueDateStr = dueDate.toISOString().split('T')[0];
+      const dueDateStr = creditLedger.dueDateForIndex(firstDue, period.unit, period.count, i - 1);
 
       const ins = await client.query(
         `INSERT INTO credit_installments
