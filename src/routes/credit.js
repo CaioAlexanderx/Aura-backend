@@ -3,11 +3,14 @@
 // GET    /companies/:id/credit/balances
 // GET    /companies/:id/credit/customer/:cid
 // POST   /companies/:id/credit/customer/:cid/payment
+// POST   /companies/:id/credit/customer/:cid/accounts   (F3)
 // DELETE /companies/:id/credit/transaction/:txid
+// POST   /companies/:id/credit/manual-entry
 //
-// F1 (29/05/2026): POST /payment delega inteiramente a
-// creditLedger.applyPayment. Logica FIFO movida para o servico
-// unificado. Interface de resposta mantida para compatibilidade.
+// F2 (05/06/2026): PUT /customers/:cid/terms -- termos por cliente
+// F3 (05/06/2026): POST /customer/:cid/accounts -- multiplos carnes
+//                  GET  /customer/:cid agora retorna campo `accounts`
+//                  POST /customer/:cid/payment aceita account_id / allocations
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -31,10 +34,6 @@ async function assertCrediarioEnabled(companyId) {
   }
 }
 
-// Normaliza uma data de registro retroativo (recebimento/lancamento).
-// Aceita apenas 'YYYY-MM-DD' estritamente ANTERIOR a hoje (America/Sao_Paulo).
-// Retorna a string normalizada ou null (hoje/futuro/invalido -> usa NOW() no
-// servico, preservando o comportamento padrao).
 function normalizeBackdate(raw) {
   if (!raw) return null;
   const s = String(raw).trim();
@@ -96,6 +95,8 @@ router.get('/balances', async (req, res) => {
 });
 
 // GET /customer/:cid
+// F3: adiciona campo `accounts` com lista de carnes e saldo por carne.
+// Todos os campos pre-existentes sao mantidos intactos.
 router.get('/customer/:cid', async (req, res) => {
   try {
     await assertCrediarioEnabled(req.params.id);
@@ -120,7 +121,6 @@ router.get('/customer/:cid', async (req, res) => {
       [req.params.cid, req.params.id]
     );
 
-    // Parcelas abertas com covered_amount
     const { rows: installments } = await db.query(
       `SELECT id, installment_number, total_installments,
               amount_due, covered_amount, due_date, status, late_fee, late_interest
@@ -131,12 +131,93 @@ router.get('/customer/:cid', async (req, res) => {
       [req.params.cid, req.params.id]
     ).catch(() => ({ rows: [] }));
 
+    // F3: carnes do cliente (defensivo: tabela pode nao existir ainda)
+    let accounts = [];
+    try {
+      const today = `(NOW() AT TIME ZONE 'America/Sao_Paulo')::date`;
+
+      // Carnes cadastrados
+      const { rows: accRows } = await db.query(
+        `SELECT id, name, status,
+                terms_snapshot->>'period_unit'  AS period_unit,
+                terms_snapshot->>'period_count' AS period_count
+           FROM credit_accounts
+          WHERE company_id = $1 AND customer_id = $2
+          ORDER BY created_at ASC`,
+        [req.params.id, req.params.cid]
+      );
+
+      // Saldo + proxima parcela por carne (inclui legado account_id IS NULL)
+      const { rows: accBalRows } = await db.query(
+        `SELECT
+           cct.account_id,
+           COALESCE(SUM(CASE WHEN cct.type='debit' THEN cct.amount ELSE 0 END)
+             - SUM(CASE WHEN cct.type='payment' THEN cct.amount ELSE 0 END), 0) AS balance,
+           COUNT(ci.id) FILTER (WHERE ci.status IN ('pending','overdue'))        AS open_count,
+           MIN(ci.due_date) FILTER (WHERE ci.status IN ('pending','overdue'))    AS next_due_date,
+           BOOL_OR(ci.due_date < ${today} AND ci.status IN ('pending','overdue')) AS overdue
+         FROM customer_credit_transactions cct
+         LEFT JOIN credit_installments ci
+           ON ci.company_id = cct.company_id
+           AND ci.customer_id = cct.customer_id
+           AND (ci.account_id = cct.account_id OR (ci.account_id IS NULL AND cct.account_id IS NULL))
+         WHERE cct.company_id = $1 AND cct.customer_id = $2
+         GROUP BY cct.account_id`,
+        [req.params.id, req.params.cid]
+      );
+
+      // Mapa account_id -> balances
+      const balMap = {};
+      for (const r of accBalRows) {
+        balMap[r.account_id ?? '__legacy__'] = r;
+      }
+
+      // Montar lista: carnes cadastrados
+      for (const acc of accRows) {
+        const bdata = balMap[acc.id] || {};
+        accounts.push({
+          id:           acc.id,
+          name:         acc.name,
+          status:       acc.status,
+          balance:      parseFloat(bdata.balance || 0),
+          open_count:   parseInt(bdata.open_count || 0),
+          next_due_date: bdata.next_due_date ? String(bdata.next_due_date).split('T')[0] : null,
+          overdue:      bdata.overdue || false,
+          period_unit:  acc.period_unit || null,
+          period_count: acc.period_count ? parseInt(acc.period_count) : null,
+        });
+      }
+
+      // Conta geral (legado: transacoes sem account_id)
+      const legacyBal = balMap['__legacy__'];
+      if (legacyBal && parseFloat(legacyBal.balance) !== 0) {
+        accounts.unshift({
+          id:           null,
+          name:         'Conta geral',
+          status:       'open',
+          balance:      parseFloat(legacyBal.balance),
+          open_count:   parseInt(legacyBal.open_count || 0),
+          next_due_date: legacyBal.next_due_date ? String(legacyBal.next_due_date).split('T')[0] : null,
+          overdue:      legacyBal.overdue || false,
+          period_unit:  null,
+          period_count: null,
+        });
+      }
+    } catch (accErr) {
+      // 42P01 = credit_accounts nao existe ainda; 42703 = account_id nao existe
+      if (accErr.code !== '42P01' && accErr.code !== '42703') {
+        console.error('[credit] accounts fetch error:', accErr.message);
+      }
+      accounts = [];
+    }
+
     res.json({
       customer:          cust[0],
       balance:           parseFloat(b.balance) || 0,
       total_debited:     parseFloat(b.total_debited) || 0,
       total_paid:        parseFloat(b.total_paid) || 0,
       last_activity_at:  b.last_activity_at || null,
+      accounts,
       transactions: txs.map(t => ({
         id: t.id, sale_id: t.sale_id, type: t.type,
         amount: parseFloat(t.amount), payment_method: t.payment_method,
@@ -163,17 +244,88 @@ router.get('/customer/:cid', async (req, res) => {
   }
 });
 
+// POST /customer/:cid/accounts (F3)
+// Cria um novo carne para o cliente.
+router.post('/customer/:cid/accounts', async (req, res) => {
+  const companyId  = req.params.id;
+  const customerId = req.params.cid;
+  const {
+    name,
+    interest_rate,
+    period_unit,
+    period_count,
+    due_day,
+    max_installments,
+    late_fee_rate,
+    late_interest_daily,
+  } = req.body || {};
+
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ error: 'name e obrigatorio' });
+  }
+
+  try {
+    await assertCrediarioEnabled(companyId);
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+
+  // Verificar cliente
+  const { rows: custRows } = await db.query(
+    `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
+    [customerId, companyId]
+  );
+  if (!custRows.length) return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+
+  // Montar terms_snapshot apenas com campos fornecidos
+  const termsSnapshot = {};
+  if (interest_rate      !== undefined) termsSnapshot.interest_rate       = parseFloat(interest_rate) || 0;
+  if (period_unit        !== undefined) termsSnapshot.period_unit          = period_unit;
+  if (period_count       !== undefined) termsSnapshot.period_count         = parseInt(period_count) || 1;
+  if (due_day            !== undefined) termsSnapshot.due_day              = parseInt(due_day) || null;
+  if (max_installments   !== undefined) termsSnapshot.max_installments     = parseInt(max_installments) || 12;
+  if (late_fee_rate      !== undefined) termsSnapshot.late_fee_rate        = parseFloat(late_fee_rate) || 0;
+  if (late_interest_daily !== undefined) termsSnapshot.late_interest_daily = parseFloat(late_interest_daily) || 0;
+
+  try {
+    const { rows } = await db.query(
+      `INSERT INTO credit_accounts
+         (company_id, customer_id, name, status, terms_snapshot)
+       VALUES ($1, $2, $3, 'open', $4)
+       RETURNING *`,
+      [companyId, customerId, String(name).trim(), Object.keys(termsSnapshot).length ? JSON.stringify(termsSnapshot) : null]
+    );
+    return res.status(201).json({ account: rows[0] });
+  } catch (err) {
+    if (err.code === '42P01') return res.status(503).json({ error: 'Tabela credit_accounts ainda nao disponivel. Aguarde o deploy completo.' });
+    console.error('[credit] create account error:', err.message);
+    return res.status(500).json({ error: 'Erro ao criar carne' });
+  }
+});
+
 // POST /customer/:cid/payment
-// F1 (29/05/2026): delega inteiramente a creditLedger.applyPayment.
-// FIFO liquidacao + covered_amount + sale_payments tudo atomico no servico.
+// F3: aceita account_id (FIFO escopo) OU allocations [{account_id, amount}]
 // 05/06/2026: aceita paid_at (YYYY-MM-DD) para recebimento retroativo.
 router.post('/customer/:cid/payment', async (req, res) => {
-  const amount = parseFloat(req.body?.amount || 0);
-  const method = req.body?.payment_method ? String(req.body.payment_method).trim() : null;
-  const notes  = req.body?.notes ? String(req.body.notes).trim() : null;
-  const paidAt = normalizeBackdate(req.body?.paid_at);
+  const amount      = parseFloat(req.body?.amount || 0);
+  const method      = req.body?.payment_method ? String(req.body.payment_method).trim() : null;
+  const notes       = req.body?.notes ? String(req.body.notes).trim() : null;
+  const paidAt      = normalizeBackdate(req.body?.paid_at);
+  const accountId   = req.body?.account_id || null;
+  const allocations = Array.isArray(req.body?.allocations) ? req.body.allocations : null;
 
-  if (!amount || amount <= 0) {
+  // Validar allocations se fornecidas
+  if (allocations) {
+    if (!allocations.length) return res.status(400).json({ error: 'allocations nao pode ser array vazio' });
+    const total = allocations.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+    if (Math.abs(total - amount) > 0.01 && amount > 0) {
+      return res.status(400).json({ error: `Soma das allocations (${total.toFixed(2)}) deve ser igual a amount (${amount.toFixed(2)})` });
+    }
+    for (const a of allocations) {
+      if (!a.account_id && a.account_id !== null) return res.status(400).json({ error: 'Cada allocation precisa de account_id (uuid ou null para Conta geral)' });
+      if (!parseFloat(a.amount) || parseFloat(a.amount) <= 0) return res.status(400).json({ error: 'Cada allocation precisa de amount > 0' });
+    }
+  } else if (!amount || amount <= 0) {
     return res.status(400).json({ error: 'amount > 0 obrigatorio' });
   }
 
@@ -205,6 +357,52 @@ router.post('/customer/:cid/payment', async (req, res) => {
       activeSessaoId = sessRes?.rows?.[0]?.id || null;
     } catch (_) {}
 
+    // Modo allocations: chama applyPayment uma vez por alocacao
+    if (allocations) {
+      const allResults = [];
+      for (const alloc of allocations) {
+        const result = await creditLedger.applyPayment(client, {
+          companyId:  req.params.id,
+          customerId: req.params.cid,
+          amount:     parseFloat(alloc.amount),
+          method,
+          sessaoId:   activeSessaoId,
+          createdBy:  req.user?.id || null,
+          paidAt,
+          accountId:  alloc.account_id || null,
+        });
+        allResults.push({ account_id: alloc.account_id || null, amount: parseFloat(alloc.amount), result });
+      }
+
+      await client.query('COMMIT');
+
+      // Retorna novo saldo consolidado
+      const { rows: balRows } = await db.query(
+        `SELECT COALESCE(balance, 0) AS balance FROM customer_credit_balances
+         WHERE customer_id = $1 AND company_id = $2`,
+        [req.params.cid, req.params.id]
+      );
+
+      return res.status(201).json({
+        mode: 'allocations',
+        allocations: allResults.map(r => ({
+          account_id: r.account_id,
+          amount: r.amount,
+          transaction: r.result.transaction ? {
+            id: r.result.transaction.id,
+            type: r.result.transaction.type,
+            amount: parseFloat(r.result.transaction.amount),
+            payment_method: r.result.transaction.payment_method,
+            created_at: r.result.transaction.created_at,
+          } : null,
+          settled: r.result.settled_receivables,
+        })),
+        new_balance: parseFloat(balRows[0]?.balance || 0),
+        notes,
+      });
+    }
+
+    // Modo simples (account_id ou global)
     const result = await creditLedger.applyPayment(client, {
       companyId:  req.params.id,
       customerId: req.params.cid,
@@ -213,11 +411,14 @@ router.post('/customer/:cid/payment', async (req, res) => {
       sessaoId:   activeSessaoId,
       createdBy:  req.user?.id || null,
       paidAt,
+      accountId,
     });
 
     await client.query('COMMIT');
 
     res.status(201).json({
+      mode: accountId ? 'account' : 'global',
+      account_id: accountId || null,
       transaction: result.transaction ? {
         id:             result.transaction.id,
         type:           result.transaction.type,
@@ -265,11 +466,7 @@ router.delete('/transaction/:txid', async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────
 // GET /customers/search?q=
-// Busca clientes da empresa por nome, telefone ou CPF/CNPJ.
-// Retorna até 20 resultados. Mínimo 2 caracteres.
-// ─────────────────────────────────────────────────────────────────────────
 router.get('/customers/search', async (req, res) => {
   const q = req.query.q ? String(req.query.q).trim() : '';
   if (!q || q.length < 2) return res.json({ customers: [] });
@@ -290,14 +487,10 @@ router.get('/customers/search', async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────
 // POST /manual-entry
-// Cria lançamento de débito manual no crediário (sem venda vinculada).
-// Aceita cliente existente (customer_id) ou criação inline (new_customer).
-// Cria agenda de parcelas em credit_installments com juros simples opcionais.
-// 05/06/2026: aceita entry_date (YYYY-MM-DD) para lançamento retroativo e
-//             period_unit/period_count para periodicidade (semanal/quinzenal/etc).
-// ─────────────────────────────────────────────────────────────────────────
+// F3: aceita account_id (anexa ao carne) OU new_account_name (cria carne e usa).
+// F2: se carne tem terms_snapshot, usa como defaults de juros/periodicidade.
+// 05/06/2026: aceita entry_date e period_unit/period_count.
 router.post('/manual-entry', async (req, res) => {
   const companyId = req.params.id;
   const {
@@ -311,6 +504,8 @@ router.post('/manual-entry', async (req, res) => {
     entry_date,
     period_unit,
     period_count,
+    account_id,
+    new_account_name,
   } = req.body || {};
 
   const total = parseFloat(amount);
@@ -318,13 +513,13 @@ router.post('/manual-entry', async (req, res) => {
   const entryDate = normalizeBackdate(entry_date);
 
   if (!total || total <= 0)
-    return res.status(400).json({ error: 'amount inválido' });
+    return res.status(400).json({ error: 'amount invalido' });
   if (n < 1 || n > 36)
     return res.status(400).json({ error: 'installments deve ser entre 1 e 36' });
   if (!customer_id && !new_customer?.name)
     return res.status(400).json({ error: 'Informe customer_id ou new_customer.name' });
   if (!customer_id && !new_customer?.phone)
-    return res.status(400).json({ error: 'Telefone do cliente é obrigatório' });
+    return res.status(400).json({ error: 'Telefone do cliente e obrigatorio' });
 
   try {
     await assertCrediarioEnabled(companyId);
@@ -362,34 +557,85 @@ router.post('/manual-entry', async (req, res) => {
     );
     if (!custRows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Cliente não encontrado nesta empresa' });
+      return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
     }
 
-    // 2. Create debit transaction (source = 'manual')
-    // created_at backdatado quando entry_date for uma data passada (lançamento retroativo).
-    const notes = description ? String(description).trim() : 'Lançamento manual';
-    const { rows: txRows } = await client.query(
-      `INSERT INTO customer_credit_transactions
-         (company_id, customer_id, type, amount, notes, source, created_by, created_at)
-       VALUES ($1, $2, 'debit', $3, $4, 'manual', $5,
-               COALESCE(($6::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW()))
-       RETURNING *`,
-      [companyId, custId, total, notes, req.user?.id || null, entryDate]
-    );
-    const transaction = txRows[0];
+    // 2. F3: resolve account_id
+    let resolvedAccountId = account_id || null;
+    let accountTerms = null;
 
-    // 3. Create installments schedule (juros simples + periodicidade configurável)
-    const config        = await creditLedger._getOrCreatePlanConfig(client, companyId);
-    const period        = creditLedger.resolvePeriod(period_unit, period_count, config);
+    if (!resolvedAccountId && new_account_name) {
+      // Criar novo carne inline
+      try {
+        const { rows: newAccRows } = await client.query(
+          `INSERT INTO credit_accounts (company_id, customer_id, name, status)
+           VALUES ($1, $2, $3, 'open') RETURNING id`,
+          [companyId, custId, String(new_account_name).trim()]
+        );
+        resolvedAccountId = newAccRows[0].id;
+      } catch (e) {
+        if (e.code === '42P01') {
+          // tabela ainda nao existe -- ignora, usa Conta geral
+          resolvedAccountId = null;
+        } else throw e;
+      }
+    }
+
+    if (resolvedAccountId) {
+      try {
+        const { rows: accRows } = await client.query(
+          `SELECT terms_snapshot FROM credit_accounts WHERE id = $1 AND company_id = $2`,
+          [resolvedAccountId, companyId]
+        );
+        accountTerms = accRows[0]?.terms_snapshot || null;
+      } catch (e) {
+        if (e.code !== '42P01' && e.code !== '42703') throw e;
+      }
+    }
+
+    // 3. Create debit transaction
+    const notes = description ? String(description).trim() : 'Lancamento manual';
+    let transaction;
+    try {
+      const { rows: txRows } = await client.query(
+        `INSERT INTO customer_credit_transactions
+           (company_id, customer_id, type, amount, notes, source, created_by, created_at, account_id)
+         VALUES ($1, $2, 'debit', $3, $4, 'manual', $5,
+                 COALESCE(($6::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW()), $7)
+         RETURNING *`,
+        [companyId, custId, total, notes, req.user?.id || null, entryDate, resolvedAccountId]
+      );
+      transaction = txRows[0];
+    } catch (e) {
+      if (e.code === '42703') {
+        const { rows: txRows } = await client.query(
+          `INSERT INTO customer_credit_transactions
+             (company_id, customer_id, type, amount, notes, source, created_by, created_at)
+           VALUES ($1, $2, 'debit', $3, $4, 'manual', $5,
+                   COALESCE(($6::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW()))
+           RETURNING *`,
+          [companyId, custId, total, notes, req.user?.id || null, entryDate]
+        );
+        transaction = txRows[0];
+        resolvedAccountId = null;
+      } else throw e;
+    }
+
+    // 4. Resolve termos: valor explicito > carne (terms_snapshot) > config loja > default
+    const config  = await creditLedger._getOrCreatePlanConfig(client, companyId);
+    const period  = creditLedger.resolvePeriod(
+      period_unit  || accountTerms?.period_unit,
+      period_count || accountTerms?.period_count,
+      config
+    );
     const effectiveRate =
       interest_rate !== undefined && interest_rate !== null
         ? parseFloat(interest_rate)
-        : (parseFloat(config?.interest_rate) || 0);
+        : parseFloat(accountTerms?.interest_rate != null ? accountTerms.interest_rate : config?.interest_rate) || 0;
 
-    const totalWithInterest =
-      effectiveRate > 0
-        ? parseFloat((total * (1 + effectiveRate * n)).toFixed(2))
-        : total;
+    const totalWithInterest = effectiveRate > 0
+      ? parseFloat((total * (1 + effectiveRate * n)).toFixed(2))
+      : total;
     const baseAmount = Math.floor((totalWithInterest / n) * 100) / 100;
     const remainder  = Math.round((totalWithInterest - baseAmount * n) * 100) / 100;
 
@@ -399,28 +645,42 @@ router.post('/manual-entry', async (req, res) => {
       return d.toISOString().split('T')[0];
     })();
 
+    // 5. Criar parcelas
     const createdInstallments = [];
     for (let i = 1; i <= n; i++) {
       const instAmount = i === n ? baseAmount + remainder : baseAmount;
       const dueDateStr = creditLedger.dueDateForIndex(firstDue, period.unit, period.count, i - 1);
 
-      const ins = await client.query(
-        `INSERT INTO credit_installments
-           (company_id, sale_id, customer_id, installment_number, total_installments,
-            amount_due, due_date, status, pix_link, covered_amount)
-         VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0) RETURNING *`,
-        [companyId, custId, i, n, instAmount, dueDateStr,
-         'https://pagar.getaura.com.br/parcela/tmp']
-      );
-      const row     = ins.rows[0];
+      let row;
+      try {
+        const ins = await client.query(
+          `INSERT INTO credit_installments
+             (company_id, sale_id, customer_id, installment_number, total_installments,
+              amount_due, due_date, status, pix_link, covered_amount, account_id)
+           VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0, $8) RETURNING *`,
+          [companyId, custId, i, n, instAmount, dueDateStr,
+           'https://pagar.getaura.com.br/parcela/tmp', resolvedAccountId]
+        );
+        row = ins.rows[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          const ins = await client.query(
+            `INSERT INTO credit_installments
+               (company_id, sale_id, customer_id, installment_number, total_installments,
+                amount_due, due_date, status, pix_link, covered_amount)
+             VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0) RETURNING *`,
+            [companyId, custId, i, n, instAmount, dueDateStr,
+             'https://pagar.getaura.com.br/parcela/tmp']
+          );
+          row = ins.rows[0];
+        } else throw e;
+      }
       const pixLink = `https://pagar.getaura.com.br/parcela/${row.id.replace(/-/g, '').slice(0, 12)}`;
       await client.query(`UPDATE credit_installments SET pix_link = $2 WHERE id = $1`, [row.id, pixLink]);
       createdInstallments.push({ ...row, pix_link: pixLink });
     }
 
-    // 4. Update credit used
     await creditLedger._updateCreditUsed(client, companyId, custId);
-
     await client.query('COMMIT');
 
     const { rows: balRows } = await db.query(
@@ -431,6 +691,7 @@ router.post('/manual-entry', async (req, res) => {
     res.status(201).json({
       customer:     custRows[0],
       transaction:  { ...transaction, amount: parseFloat(transaction.amount) },
+      account_id:   resolvedAccountId || null,
       installments: createdInstallments.map(r => ({
         ...r,
         amount_due:     parseFloat(r.amount_due),
@@ -441,7 +702,7 @@ router.post('/manual-entry', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[credit] manual-entry error:', err.message);
-    res.status(500).json({ error: 'Erro ao criar lançamento manual' });
+    res.status(500).json({ error: 'Erro ao criar lancamento manual' });
   } finally {
     client.release();
   }
