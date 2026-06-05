@@ -17,6 +17,13 @@ const pool = require('../config/database');
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 const SP_DATE_COL = (col) => `(${col} AT TIME ZONE 'America/Sao_Paulo')::date`;
 
+// Expr SQL p/ backdate: converte o param (YYYY-MM-DD) num timestamptz ao
+// meio-dia em America/Sao_Paulo. Se o param for NULL, cai em NOW() -- ou seja,
+// o comportamento atual fica intacto quando nenhuma data retroativa eh enviada.
+// O meio-dia evita que a virada de fuso jogue o registro pro dia anterior/seguinte.
+const BACKDATE_TS = (p) =>
+  `COALESCE((${p}::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW())`;
+
 // ─── helpers internos ─────────────────────────────────────────
 
 function buildPixLink(id) {
@@ -271,23 +278,26 @@ async function createCreditSale(client, {
  *
  * @param {pg.PoolClient} client
  * @param {{ companyId, customerId, amount, method?, sessaoId?,
- *           createdBy?, idempotencyKey? }} opts
+ *           createdBy?, idempotencyKey?, paidAt? }} opts
+ *   paidAt: 'YYYY-MM-DD' (data do recebimento, para registro retroativo) ou null.
+ *           Quando null, usa NOW() em todas as gravacoes (comportamento padrao).
  * @returns {{ new_balance, settled_receivables[], covered_installments[], transaction, legacy_amount }}
  */
 async function applyPayment(client, {
   companyId, customerId, amount, method = null,
   sessaoId = null, createdBy = null, idempotencyKey = null,
+  paidAt = null,
 }) {
   // 1. Ledger: payment (idempotente se idempotencyKey fornecida)
   let txRow;
   if (idempotencyKey) {
     const { rows } = await client.query(
       `INSERT INTO customer_credit_transactions
-         (company_id, customer_id, type, amount, payment_method, created_by, idempotency_key)
-       VALUES ($1, $2, 'payment', $3, $4, $5, $6)
+         (company_id, customer_id, type, amount, payment_method, created_by, idempotency_key, created_at)
+       VALUES ($1, $2, 'payment', $3, $4, $5, $6, ${BACKDATE_TS('$7')})
        ON CONFLICT (idempotency_key) DO NOTHING
        RETURNING *`,
-      [companyId, customerId, amount, method, createdBy, idempotencyKey]
+      [companyId, customerId, amount, method, createdBy, idempotencyKey, paidAt]
     );
     if (!rows.length) {
       const { rows: ex } = await client.query(
@@ -301,10 +311,10 @@ async function applyPayment(client, {
   } else {
     const { rows } = await client.query(
       `INSERT INTO customer_credit_transactions
-         (company_id, customer_id, type, amount, payment_method, created_by)
-       VALUES ($1, $2, 'payment', $3, $4, $5)
+         (company_id, customer_id, type, amount, payment_method, created_by, created_at)
+       VALUES ($1, $2, 'payment', $3, $4, $5, ${BACKDATE_TS('$6')})
        RETURNING *`,
-      [companyId, customerId, amount, method, createdBy]
+      [companyId, customerId, amount, method, createdBy, paidAt]
     );
     txRow = rows[0];
   }
@@ -335,15 +345,15 @@ async function applyPayment(client, {
     if (ptAmount <= remaining + 0.005) {
       await client.query(
         `UPDATE transactions
-           SET status = 'confirmed', paid_at = NOW(), payment_method = $1,
+           SET status = 'confirmed', paid_at = ${BACKDATE_TS('$3')}, payment_method = $1,
                category = 'Crediario - Recebido', updated_at = NOW()
          WHERE id = $2`,
-        [fifoMethod, pt.id]
+        [fifoMethod, pt.id, paidAt]
       );
       await client.query(
-        `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
-         VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
-        [pt.sale_id, companyId, fifoMethod, ptAmount, sessaoId]
+        `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, ${BACKDATE_TS('$6')}) ON CONFLICT DO NOTHING`,
+        [pt.sale_id, companyId, fifoMethod, ptAmount, sessaoId, paidAt]
       );
       settledReceivables.push({ id: pt.id, sale_id: pt.sale_id, amount: ptAmount, partial: false });
       remaining = parseFloat((remaining - ptAmount).toFixed(2));
@@ -353,15 +363,15 @@ async function applyPayment(client, {
 
       await client.query(
         `UPDATE transactions
-           SET status = 'confirmed', paid_at = NOW(), payment_method = $1,
+           SET status = 'confirmed', paid_at = ${BACKDATE_TS('$4')}, payment_method = $1,
                amount = $2, category = 'Crediario - Recebido (parcial)', updated_at = NOW()
          WHERE id = $3`,
-        [fifoMethod, paidNow, pt.id]
+        [fifoMethod, paidNow, pt.id, paidAt]
       );
       await client.query(
-        `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id)
-         VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
-        [pt.sale_id, companyId, fifoMethod, paidNow, sessaoId]
+        `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, ${BACKDATE_TS('$6')}) ON CONFLICT DO NOTHING`,
+        [pt.sale_id, companyId, fifoMethod, paidNow, sessaoId, paidAt]
       );
 
       const restKey = pt.idempotency_key + '-rest-' + Date.now();
@@ -391,7 +401,7 @@ async function applyPayment(client, {
          (company_id, type, status, amount, description, category,
           due_date, paid_at, created_by, idempotency_key, payment_method)
        VALUES ($1, 'income', 'confirmed', $2, $3, 'Crediario - Recebido',
-               ${SP_DATE_NOW}, NOW(), $4, $5, $6)
+               COALESCE($7::date, ${SP_DATE_NOW}), ${BACKDATE_TS('$7')}, $4, $5, $6)
        ON CONFLICT (idempotency_key) DO NOTHING`,
       [
         companyId,
@@ -400,6 +410,7 @@ async function applyPayment(client, {
         createdBy,
         'credit-payment-' + txRow.id + '-legacy',
         fifoMethod,
+        paidAt,
       ]
     );
   }
@@ -432,15 +443,15 @@ async function applyPayment(client, {
     // FIX (03/06/2026): nao reusar $4 em "status = $4" e "CASE WHEN $4 = 'paid'"
     // -- o Postgres deduzia tipos conflitantes para o mesmo parametro e
     // estourava "inconsistent types deduced for parameter $4" (500 no /pay).
-    // O CASE agora usa um booleano dedicado ($5).
+    // O CASE agora usa um booleano dedicado ($5). paid_at backdatado via $6.
     await client.query(
       `UPDATE credit_installments
          SET covered_amount = $3,
              status         = $4,
-             paid_at        = CASE WHEN $5 THEN NOW() ELSE paid_at END,
+             paid_at        = CASE WHEN $5 THEN ${BACKDATE_TS('$6')} ELSE paid_at END,
              updated_at     = NOW()
        WHERE id = $1 AND company_id = $2`,
-      [inst.id, companyId, newCovered, newStatus, newStatus === 'paid']
+      [inst.id, companyId, newCovered, newStatus, newStatus === 'paid', paidAt]
     );
 
     coveredInstallments.push({ id: inst.id, covered: coverNow, status: newStatus });

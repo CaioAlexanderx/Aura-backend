@@ -31,6 +31,19 @@ async function assertCrediarioEnabled(companyId) {
   }
 }
 
+// Normaliza uma data de registro retroativo (recebimento/lancamento).
+// Aceita apenas 'YYYY-MM-DD' estritamente ANTERIOR a hoje (America/Sao_Paulo).
+// Retorna a string normalizada ou null (hoje/futuro/invalido -> usa NOW() no
+// servico, preservando o comportamento padrao).
+function normalizeBackdate(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const todaySp = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+  if (s >= todaySp) return null;
+  return s;
+}
+
 // GET /balances
 router.get('/balances', async (req, res) => {
   const onlyOpen = req.query.only_open !== 'false';
@@ -153,10 +166,12 @@ router.get('/customer/:cid', async (req, res) => {
 // POST /customer/:cid/payment
 // F1 (29/05/2026): delega inteiramente a creditLedger.applyPayment.
 // FIFO liquidacao + covered_amount + sale_payments tudo atomico no servico.
+// 05/06/2026: aceita paid_at (YYYY-MM-DD) para recebimento retroativo.
 router.post('/customer/:cid/payment', async (req, res) => {
   const amount = parseFloat(req.body?.amount || 0);
   const method = req.body?.payment_method ? String(req.body.payment_method).trim() : null;
   const notes  = req.body?.notes ? String(req.body.notes).trim() : null;
+  const paidAt = normalizeBackdate(req.body?.paid_at);
 
   if (!amount || amount <= 0) {
     return res.status(400).json({ error: 'amount > 0 obrigatorio' });
@@ -197,6 +212,7 @@ router.post('/customer/:cid/payment', async (req, res) => {
       method,
       sessaoId:   activeSessaoId,
       createdBy:  req.user?.id || null,
+      paidAt,
     });
 
     await client.query('COMMIT');
@@ -279,6 +295,7 @@ router.get('/customers/search', async (req, res) => {
 // Cria lançamento de débito manual no crediário (sem venda vinculada).
 // Aceita cliente existente (customer_id) ou criação inline (new_customer).
 // Cria agenda de parcelas em credit_installments com juros simples opcionais.
+// 05/06/2026: aceita entry_date (YYYY-MM-DD) para lançamento retroativo.
 // ─────────────────────────────────────────────────────────────────────────
 router.post('/manual-entry', async (req, res) => {
   const companyId = req.params.id;
@@ -290,10 +307,12 @@ router.post('/manual-entry', async (req, res) => {
     interest_rate,
     first_due_date,
     description,
+    entry_date,
   } = req.body || {};
 
   const total = parseFloat(amount);
   const n     = parseInt(installments) || 1;
+  const entryDate = normalizeBackdate(entry_date);
 
   if (!total || total <= 0)
     return res.status(400).json({ error: 'amount inválido' });
@@ -344,12 +363,15 @@ router.post('/manual-entry', async (req, res) => {
     }
 
     // 2. Create debit transaction (source = 'manual')
+    // created_at backdatado quando entry_date for uma data passada (lançamento retroativo).
     const notes = description ? String(description).trim() : 'Lançamento manual';
     const { rows: txRows } = await client.query(
       `INSERT INTO customer_credit_transactions
-         (company_id, customer_id, type, amount, notes, source, created_by)
-       VALUES ($1, $2, 'debit', $3, $4, 'manual', $5) RETURNING *`,
-      [companyId, custId, total, notes, req.user?.id || null]
+         (company_id, customer_id, type, amount, notes, source, created_by, created_at)
+       VALUES ($1, $2, 'debit', $3, $4, 'manual', $5,
+               COALESCE(($6::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW()))
+       RETURNING *`,
+      [companyId, custId, total, notes, req.user?.id || null, entryDate]
     );
     const transaction = txRows[0];
 
