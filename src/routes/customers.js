@@ -20,6 +20,12 @@
 // POST via getPlanLimit. GET de listagem nunca deve ser bloqueado
 // (armadilha_plan_limit_listagem). requirePlan era overly broad.
 //
+// 06/06/2026: adicionado parseBirthDate para aceitar tanto
+// dd/mm/yyyy (formato do DateInput do app) quanto yyyy-mm-dd,
+// validar e retornar null se invalido. Evita o erro Postgres
+// "date/time field value out of range" quando o FE enviava
+// valores como "1984-95-97" (conversao mal-feita de dd/mm/yyyy).
+//
 // Justificativa em src/utils/ownerScope.js.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
@@ -33,6 +39,41 @@ function getPlanLimit(plan) {
     case 'negocio':       return 5000;
     default:              return 1000; // essencial / trial / unknown
   }
+}
+
+/**
+ * Normaliza birth_date para yyyy-mm-dd antes de mandar ao Postgres.
+ * Aceita:
+ *   - dd/mm/yyyy  (formato do DateInput do app)
+ *   - yyyy-mm-dd  (ISO, ja correto)
+ * Retorna null se vazio, invalido ou fora de range razoavel.
+ */
+function parseBirthDate(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+
+  let year, month, day;
+
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
+    // dd/mm/yyyy
+    [day, month, year] = s.split('/').map(Number);
+  } else if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    // yyyy-mm-dd
+    [year, month, day] = s.split('-').map(Number);
+  } else {
+    return null;
+  }
+
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > 31) return null;
+  if (year < 1900 || year > new Date().getFullYear()) return null;
+
+  // Validacao real da data (ex: 31/02 seria invalido)
+  const d = new Date(year, month - 1, day);
+  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return null;
+
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 // GET / -- list customers (owner-scoped: todas as empresas do owner)
@@ -137,7 +178,7 @@ router.post('/', async (req, res) => {
     console.error('[customers] count check error:', err.message);
   }
 
-  const finalBirthDate = birth_date || birthday || null;
+  const finalBirthDate = parseBirthDate(birth_date || birthday);
   const finalInstagram = instagram_handle || instagram || null;
 
   try {
@@ -167,8 +208,11 @@ router.patch('/:cid', async (req, res) => {
 
   for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
     if (req.body[bodyKey] !== undefined && !seen.has(dbCol)) {
+      let val = req.body[bodyKey];
+      // Sanitiza datas antes de mandar ao Postgres
+      if (dbCol === 'birth_date') val = parseBirthDate(val);
       updates.push(`${dbCol} = $${idx}`);
-      values.push(req.body[bodyKey]);
+      values.push(val);
       idx++; seen.add(dbCol);
     }
   }
