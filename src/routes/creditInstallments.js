@@ -9,6 +9,8 @@
  *   - GET /customers/:cid/profile -- adiciona campo `terms: { overrides, effective }`
  * F3 (05/06/2026):
  *   - POST /installments aceita account_id para vincular parcelas a um carne
+ * F3.1 (06/06/2026):
+ *   - PATCH /installments/:id/due-date -- edita vencimento com cascata nas parcelas seguintes
  */
 
 const express = require('express');
@@ -502,6 +504,123 @@ router.patch('/installments/:iid/cancel', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('PATCH /credit/installments/:iid/cancel', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ─── PATCH /credit/installments/:iid/due-date ────────────────────────────────────
+// F3.1: edita a data de vencimento de uma parcela com cascata nas parcelas seguintes
+// do mesmo cliente+empresa que estejam pendentes/atrasadas.
+router.patch('/installments/:iid/due-date', async (req, res) => {
+  const companyId     = req.params.id;
+  const installmentId = req.params.iid;
+  const { due_date } = req.body || {};
+
+  // Validacao: due_date obrigatorio e deve ser uma data valida (YYYY-MM-DD ou ISO)
+  if (!due_date) {
+    return res.status(400).json({ error: 'due_date e obrigatorio.' });
+  }
+  const newDate = new Date(due_date);
+  if (isNaN(newDate.getTime())) {
+    return res.status(400).json({ error: 'due_date invalido. Use o formato YYYY-MM-DD.' });
+  }
+  // Normaliza para YYYY-MM-DD ignorando horario
+  const newDateStr = due_date.slice(0, 10);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Busca a parcela garantindo que pertence a empresa e pode ser alterada
+    const cur = await client.query(
+      `SELECT * FROM credit_installments
+       WHERE id=$1 AND company_id=$2 AND status IN ('pending','overdue')
+       FOR UPDATE`,
+      [installmentId, companyId]
+    );
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Parcela nao encontrada ou nao pode ser editada (status invalido).' });
+    }
+    const installment = cur.rows[0];
+    const oldDateStr  = installment.due_date instanceof Date
+      ? installment.due_date.toISOString().slice(0, 10)
+      : String(installment.due_date).slice(0, 10);
+
+    // Calcula delta em dias (pode ser negativo para antecipar)
+    const oldMs   = new Date(oldDateStr).getTime();
+    const newMs   = new Date(newDateStr).getTime();
+    const deltaDays = Math.round((newMs - oldMs) / 86400000);
+
+    // Atualiza a parcela selecionada
+    await client.query(
+      `UPDATE credit_installments
+         SET due_date=$1, updated_at=NOW()
+       WHERE id=$2`,
+      [newDateStr, installmentId]
+    );
+    let updatedCount = 1;
+
+    // Cascata: atualiza parcelas seguintes do mesmo cliente+empresa
+    // Usa installment_number se disponivel, caso contrario due_date > old_due_date
+    const hasInstallmentNumber = installment.installment_number !== null &&
+                                  installment.installment_number !== undefined;
+    if (deltaDays !== 0) {
+      let cascadeResult;
+      if (hasInstallmentNumber) {
+        cascadeResult = await client.query(
+          `UPDATE credit_installments
+             SET due_date = due_date + ($1 * INTERVAL '1 day'), updated_at = NOW()
+           WHERE company_id=$2
+             AND customer_id=$3
+             AND id != $4
+             AND status IN ('pending','overdue')
+             AND installment_number > $5`,
+          [deltaDays, companyId, installment.customer_id, installmentId,
+           installment.installment_number]
+        );
+      } else {
+        cascadeResult = await client.query(
+          `UPDATE credit_installments
+             SET due_date = due_date + ($1 * INTERVAL '1 day'), updated_at = NOW()
+           WHERE company_id=$2
+             AND customer_id=$3
+             AND id != $4
+             AND status IN ('pending','overdue')
+             AND due_date > $5`,
+          [deltaDays, companyId, installment.customer_id, installmentId, oldDateStr]
+        );
+      }
+      updatedCount += cascadeResult.rowCount || 0;
+    }
+
+    // Ajuste de status apos alterar datas:
+    // pending com due_date passada -> overdue
+    await client.query(
+      `UPDATE credit_installments
+         SET status='overdue', updated_at=NOW()
+       WHERE company_id=$1
+         AND customer_id=$2
+         AND status='pending'
+         AND due_date < ${SP_DATE}`,
+      [companyId, installment.customer_id]
+    );
+    // overdue com due_date futura -> pending
+    await client.query(
+      `UPDATE credit_installments
+         SET status='pending', updated_at=NOW()
+       WHERE company_id=$1
+         AND customer_id=$2
+         AND status='overdue'
+         AND due_date >= ${SP_DATE}`,
+      [companyId, installment.customer_id]
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, updated_count: updatedCount });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('PATCH /credit/installments/:iid/due-date', err.message);
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
 });
