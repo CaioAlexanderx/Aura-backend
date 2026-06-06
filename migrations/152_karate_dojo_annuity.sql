@@ -51,6 +51,8 @@ CREATE INDEX IF NOT EXISTS idx_karate_annuity_dojo
 CREATE INDEX IF NOT EXISTS idx_karate_annuity_federation
   ON karate_dojo_annuity_history(federation_id, status);
 
+ALTER TABLE karate_dojo_annuity_history ENABLE ROW LEVEL SECURITY;
+
 -- ============================================================
 -- FIM DA MIGRATION 152
 -- ============================================================

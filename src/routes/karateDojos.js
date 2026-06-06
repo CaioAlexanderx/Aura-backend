@@ -52,6 +52,53 @@ router.get('/', ...guards.read(), async (req, res) => {
 
     const where = `WHERE ${conditions.join(' AND ')}`;
 
+    if (status) {
+      // Status is computed in JS (rolling-period logic cannot be pushed to SQL
+      // without a PL/pgSQL function). When ?status= is requested we must fetch
+      // the full filtered set to compute correct total, then slice for the page.
+      // NOTE: this is acceptable because status-filtered queries are typically
+      // dashboard-scoped and the result set per federation is bounded (~hundreds).
+      // A future optimisation would be to materialise dojo_status in a VIEW or
+      // computed column and filter in SQL.
+      const allRes = await db.query(
+        `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.region, c.fpkt_affiliation_id,
+                c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
+                c.address, c.phone, c.email, c.is_active, c.karate_logo_url,
+                COUNT(cu.id) AS practitioner_count
+         FROM companies c
+         LEFT JOIN customers cu ON cu.dojo_id = c.id
+         ${where}
+         GROUP BY c.id
+         ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
+        params
+      );
+
+      const allDojosWithStatus = allRes.rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        cnpj: r.cnpj || null,
+        sensei_cpf: r.sensei_cpf || null,
+        region: r.region || null,
+        fpkt_affiliation_id: r.fpkt_affiliation_id || null,
+        affiliation_model: r.affiliation_model || null,
+        affiliation_since: r.affiliation_since || null,
+        dojo_founded_year: r.dojo_founded_year || null,
+        address: r.address || null,
+        phone: r.phone || null,
+        email: r.email || null,
+        karate_logo_url: r.karate_logo_url || null,
+        status: computeDojoStatus(r.affiliation_model, r.affiliation_since, r.is_active),
+        practitioner_count: parseInt(r.practitioner_count, 10) || 0,
+      }));
+
+      const filtered = allDojosWithStatus.filter(d => d.status === status);
+      const total = filtered.length;
+      const data  = filtered.slice(offset, offset + pageSize);
+
+      return res.json({ page, page_size: pageSize, total, data });
+    }
+
+    // No status filter — use SQL-level COUNT + paginated fetch (fast path)
     const countRes = await db.query(
       `SELECT COUNT(*) AS total FROM companies c ${where}`,
       params
@@ -59,7 +106,7 @@ router.get('/', ...guards.read(), async (req, res) => {
     const total = parseInt(countRes.rows[0].total, 10);
 
     const dataRes = await db.query(
-      `SELECT c.id, c.name, c.cnpj, c.region, c.fpkt_affiliation_id,
+      `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.region, c.fpkt_affiliation_id,
               c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
               c.address, c.phone, c.email, c.is_active, c.karate_logo_url,
               COUNT(cu.id) AS practitioner_count
@@ -76,6 +123,7 @@ router.get('/', ...guards.read(), async (req, res) => {
       id: r.id,
       name: r.name,
       cnpj: r.cnpj || null,
+      sensei_cpf: r.sensei_cpf || null,
       region: r.region || null,
       fpkt_affiliation_id: r.fpkt_affiliation_id || null,
       affiliation_model: r.affiliation_model || null,
@@ -89,17 +137,7 @@ router.get('/', ...guards.read(), async (req, res) => {
       practitioner_count: parseInt(r.practitioner_count, 10) || 0,
     }));
 
-    // Filtro de status é aplicado após computar (não há coluna status no DB)
-    const filtered = status
-      ? dojos.filter(d => d.status === status)
-      : dojos;
-
-    res.json({
-      page,
-      page_size: pageSize,
-      total: status ? filtered.length : total,
-      data: filtered,
-    });
+    res.json({ page, page_size: pageSize, total, data: dojos });
   } catch (err) {
     console.error('[karateDojos] list error:', err.message);
     res.status(500).json({ error: 'Erro ao listar dojôs' });
@@ -143,15 +181,16 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
 
     const insertRes = await client.query(
       `INSERT INTO companies
-         (name, cnpj, region, fpkt_affiliation_id, affiliation_model, affiliation_since,
-          dojo_founded_year, address, phone, email, federation_id,
+         (name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
+          affiliation_since, dojo_founded_year, address, phone, email, federation_id,
           vertical, is_active, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'karate_dojo', true, NOW(), NOW())
-       RETURNING id, name, cnpj, region, fpkt_affiliation_id, affiliation_model,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'karate_dojo', true, NOW(), NOW())
+       RETURNING id, name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
                  affiliation_since, dojo_founded_year, address, phone, email, is_active`,
       [
         String(name).trim(),
         cnpj || null,
+        sensei_cpf || null,
         region || null,
         fpktId,
         affiliation_model,
@@ -171,7 +210,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       id: dojo.id,
       name: dojo.name,
       cnpj: dojo.cnpj || null,
-      sensei_cpf: sensei_cpf || null,
+      sensei_cpf: dojo.sensei_cpf || null,
       region: dojo.region || null,
       fpkt_affiliation_id: dojo.fpkt_affiliation_id,
       affiliation_model: dojo.affiliation_model,
@@ -198,7 +237,7 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
 
   try {
     const dojoRes = await db.query(
-      `SELECT c.id, c.name, c.cnpj, c.region, c.fpkt_affiliation_id,
+      `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.region, c.fpkt_affiliation_id,
               c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
               c.address, c.phone, c.email, c.is_active, c.karate_logo_url,
               COUNT(cu.id) AS practitioner_count
@@ -259,6 +298,7 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
       id: d.id,
       name: d.name,
       cnpj: d.cnpj || null,
+      sensei_cpf: d.sensei_cpf || null,
       region: d.region || null,
       fpkt_affiliation_id: d.fpkt_affiliation_id || null,
       affiliation_model: d.affiliation_model || null,
@@ -286,6 +326,7 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
   const fieldMap = {
     name: 'name',
     cnpj: 'cnpj',
+    sensei_cpf: 'sensei_cpf',
     region: 'region',
     affiliation_model: 'affiliation_model',
     affiliation_since: 'affiliation_since',
@@ -320,7 +361,7 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       `UPDATE companies
        SET ${updates.join(', ')}
        WHERE id = $${idx} AND federation_id = $${idx + 1} AND vertical = 'karate_dojo'
-       RETURNING id, name, cnpj, region, fpkt_affiliation_id, affiliation_model,
+       RETURNING id, name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
                  affiliation_since, dojo_founded_year, address, phone, email, is_active`,
       values
     );
@@ -334,6 +375,7 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       id: d.id,
       name: d.name,
       cnpj: d.cnpj || null,
+      sensei_cpf: d.sensei_cpf || null,
       region: d.region || null,
       fpkt_affiliation_id: d.fpkt_affiliation_id || null,
       affiliation_model: d.affiliation_model || null,
