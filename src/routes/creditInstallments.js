@@ -386,6 +386,12 @@ router.get('/installments', async (req, res) => {
        WHERE company_id=$1 AND status='pending' AND due_date < ${SP_DATE}`,
       [companyId]
     );
+    // Reverte status invalido: parcelas com due_date futura nunca devem ser overdue
+    await pool.query(
+      `UPDATE credit_installments SET status='pending'
+       WHERE company_id=$1 AND status='overdue' AND due_date >= ${SP_DATE}`,
+      [companyId]
+    );
     const r = await pool.query(
       `SELECT ci.*,
               (ci.amount_due - ci.covered_amount) AS remaining_amount,
@@ -507,6 +513,12 @@ router.get('/dashboard', async (req, res) => {
     await pool.query(
       `UPDATE credit_installments SET status='overdue'
        WHERE company_id=$1 AND status='pending' AND due_date < ${SP_DATE}`,
+      [companyId]
+    );
+    // Reverte status invalido: parcelas com due_date futura nunca devem ser overdue
+    await pool.query(
+      `UPDATE credit_installments SET status='pending'
+       WHERE company_id=$1 AND status='overdue' AND due_date >= ${SP_DATE}`,
       [companyId]
     );
 
