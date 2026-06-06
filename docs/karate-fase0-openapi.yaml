@@ -1,0 +1,472 @@
+openapi: 3.1.0
+info:
+  title: Aura Karatê — API Fase 0 (Fundação + Cadastros)
+  version: "0.1.0"
+  description: >
+    Contrato congelado da Wave 0. Backend (Sonnet-1) e Frontend (Sonnet-2)
+    trabalham contra este contrato em paralelo (mock server) sem se bloquear.
+    Todas as rotas (exceto /setup) exigem Bearer JWT e passam por
+    requireCompanyAccess no :federationId. Acesso ao banco é mediado pelo
+    backend (service_role); RLS está habilitado sem policies por design.
+servers:
+  - url: https://api.getaura.com.br
+    description: produção (Railway)
+  - url: http://localhost:3000
+    description: dev / mock
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Federação
+  - name: Dojôs
+  - name: Praticantes
+  - name: Dashboard
+
+paths:
+  /karate/federation/setup:
+    post:
+      tags: [Federação]
+      summary: Cria a empresa-federação e semeia os 12 critérios FPKT
+      description: >
+        Cria company com vertical=karate_federation e, na mesma transação,
+        chama karate_seed_fpkt_requirements(novo_id). Idempotente por slug.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FederationSetupInput' }
+      responses:
+        '201':
+          description: Federação criada + 12 critérios semeados
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Federation' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /federation/{federationId}/dashboard:
+    get:
+      tags: [Dashboard]
+      summary: KPIs consolidados da federação
+      parameters: [ { $ref: '#/components/parameters/federationId' } ]
+      responses:
+        '200':
+          description: KPIs + widgets
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardPayload' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /federation/{federationId}/belt-distribution:
+    get:
+      tags: [Dashboard]
+      summary: Distribuição de praticantes por faixa (donut)
+      parameters: [ { $ref: '#/components/parameters/federationId' } ]
+      responses:
+        '200':
+          description: contagem por belt_level
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BeltDistributionItem' }
+
+  /federation/{federationId}/dojos:
+    get:
+      tags: [Dojôs]
+      summary: Lista de dojôs com filtros e paginação
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { name: region, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/DojoStatus' } }
+        - { name: affiliation_model, in: query, schema: { $ref: '#/components/schemas/AffiliationModel' } }
+        - { name: q, in: query, schema: { type: string }, description: busca por nome ou FPKT-ID }
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/pageSize' }
+      responses:
+        '200':
+          description: página de dojôs
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Dojo' }
+    post:
+      tags: [Dojôs]
+      summary: Cadastra novo dojô (FPKT-ID sequencial automático)
+      parameters: [ { $ref: '#/components/parameters/federationId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DojoInput' }
+      responses:
+        '201':
+          description: criado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dojo' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /federation/{federationId}/dojos/{dojoId}:
+    get:
+      tags: [Dojôs]
+      summary: Detalhe do dojô + equipe técnica + histórico de anuidades
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { $ref: '#/components/parameters/dojoId' }
+      responses:
+        '200':
+          description: detalhe
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DojoDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Dojôs]
+      summary: Edita dados do dojô
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { $ref: '#/components/parameters/dojoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DojoInput' }
+      responses:
+        '200':
+          description: atualizado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dojo' }
+
+  /federation/{federationId}/practitioners:
+    get:
+      tags: [Praticantes]
+      summary: Lista de praticantes com filtros avançados
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { name: dojo_id, in: query, schema: { type: string, format: uuid } }
+        - { name: belt_level, in: query, schema: { type: string } }
+        - { name: affiliation_status, in: query, schema: { $ref: '#/components/schemas/AffiliationStatus' } }
+        - { name: role, in: query, schema: { type: string, enum: [arbiter, instructor, examiner] } }
+        - { name: q, in: query, schema: { type: string }, description: busca por nome, CPF ou FPKT-A }
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/pageSize' }
+      responses:
+        '200':
+          description: página de praticantes
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/PractitionerListItem' }
+    post:
+      tags: [Praticantes]
+      summary: Cadastra praticante (gera FPKT-A-NNNNN)
+      parameters: [ { $ref: '#/components/parameters/federationId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PractitionerInput' }
+      responses:
+        '201':
+          description: criado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Practitioner' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /federation/{federationId}/practitioners/{practitionerId}:
+    get:
+      tags: [Praticantes]
+      summary: Ficha do praticante + trajetória de faixas
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { $ref: '#/components/parameters/practitionerId' }
+      responses:
+        '200':
+          description: detalhe + trajetória
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PractitionerDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /federation/{federationId}/practitioners/import:
+    post:
+      tags: [Praticantes]
+      summary: Importação em lote via CSV (preview + commit)
+      description: >
+        Fluxo em 2 passos. mode=preview valida e devolve linhas + erros sem
+        gravar. mode=commit grava. Históricos entram com belt_schema=legacy.
+      parameters: [ { $ref: '#/components/parameters/federationId' } ]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+                mode: { type: string, enum: [preview, commit], default: preview }
+                column_map: { type: string, description: JSON de mapeamento coluna→campo }
+      responses:
+        '200':
+          description: resultado do preview ou do commit
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResult' }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+
+  parameters:
+    federationId: { name: federationId, in: path, required: true, schema: { type: string, format: uuid } }
+    dojoId: { name: dojoId, in: path, required: true, schema: { type: string, format: uuid } }
+    practitionerId: { name: practitionerId, in: path, required: true, schema: { type: string, format: uuid } }
+    page: { name: page, in: query, schema: { type: integer, default: 1, minimum: 1 } }
+    pageSize: { name: pageSize, in: query, schema: { type: integer, default: 25, maximum: 200 } }
+
+  responses:
+    Forbidden:
+      description: Permissão insuficiente
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Não encontrado
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Conflict:
+      description: Conflito (recurso já existe)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    ValidationError:
+      description: Erro de validação
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  schemas:
+    DojoStatus:
+      type: string
+      enum: [active, expiring, overdue, defaulting, suspended]
+    AffiliationModel:
+      type: string
+      enum: [annual, biannual, quarterly]
+    AffiliationStatus:
+      type: string
+      enum: [active, pending, inactive]
+    BeltSchema:
+      type: string
+      enum: [legacy, fpkt_shotokan]
+
+    FederationSetupInput:
+      type: object
+      required: [name, slug]
+      properties:
+        name: { type: string, example: Federação Paulista de Karatê Tradicional }
+        slug: { type: string, example: fpkt }
+        logo_url: { type: string, nullable: true }
+
+    Federation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        vertical: { type: string, const: karate_federation }
+        requirements_seeded: { type: integer, example: 12 }
+
+    DojoInput:
+      type: object
+      required: [name, affiliation_model]
+      properties:
+        name: { type: string }
+        cnpj: { type: string, nullable: true, description: "nullable: dojôs informais usam CPF do sensei" }
+        sensei_cpf: { type: string, nullable: true }
+        region: { type: string }
+        affiliation_model: { $ref: '#/components/schemas/AffiliationModel' }
+        affiliation_since: { type: string, format: date }
+        dojo_founded_year: { type: integer, nullable: true }
+        address: { type: string, nullable: true }
+        phone: { type: string, nullable: true }
+        email: { type: string, format: email, nullable: true }
+
+    Dojo:
+      allOf:
+        - $ref: '#/components/schemas/DojoInput'
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            fpkt_affiliation_id: { type: string, example: FPKT-014 }
+            status: { $ref: '#/components/schemas/DojoStatus' }
+            practitioner_count: { type: integer }
+
+    DojoDetail:
+      allOf:
+        - $ref: '#/components/schemas/Dojo'
+        - type: object
+          properties:
+            technical_team:
+              type: array
+              items:
+                type: object
+                properties:
+                  practitioner_id: { type: string, format: uuid }
+                  name: { type: string }
+                  belt_level: { type: string }
+                  roles: { type: array, items: { type: string } }
+            annuity_history:
+              type: array
+              items:
+                type: object
+                properties:
+                  reference_period: { type: string }
+                  amount: { type: number }
+                  paid_at: { type: string, format: date, nullable: true }
+                  status: { $ref: '#/components/schemas/DojoStatus' }
+
+    PractitionerInput:
+      type: object
+      required: [full_name, dojo_id]
+      properties:
+        full_name: { type: string }
+        cpf: { type: string, nullable: true }
+        rg: { type: string, nullable: true }
+        birth_date: { type: string, format: date }
+        email: { type: string, format: email, nullable: true }
+        phone: { type: string, nullable: true }
+        dojo_id: { type: string, format: uuid }
+        is_student: { type: boolean, default: true }
+        parent_guardian_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "obrigatório se menor de idade (LGPD Art. 14)"
+        is_arbiter: { type: boolean, default: false }
+        is_instructor: { type: boolean, default: false }
+        is_examiner: { type: boolean, default: false }
+        photo_url: { type: string, nullable: true }
+
+    Practitioner:
+      allOf:
+        - $ref: '#/components/schemas/PractitionerInput'
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            karate_registration_number: { type: string, example: FPKT-A-00427 }
+            affiliation_status: { $ref: '#/components/schemas/AffiliationStatus' }
+            current_belt:
+              type: object
+              nullable: true
+              properties:
+                belt_level: { type: string }
+                belt_name: { type: string }
+                current_since: { type: string, format: date }
+
+    PractitionerListItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        full_name: { type: string }
+        karate_registration_number: { type: string }
+        dojo_name: { type: string }
+        belt_name: { type: string, nullable: true }
+        affiliation_status: { $ref: '#/components/schemas/AffiliationStatus' }
+
+    PractitionerDetail:
+      allOf:
+        - $ref: '#/components/schemas/Practitioner'
+        - type: object
+          properties:
+            belt_history:
+              type: array
+              items: { $ref: '#/components/schemas/BeltHistoryEntry' }
+
+    BeltHistoryEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        belt_level: { type: string, example: 4kyu }
+        belt_name: { type: string, example: Azul Escuro }
+        belt_schema: { $ref: '#/components/schemas/BeltSchema' }
+        graduated_at: { type: string, format: date }
+        is_legacy: { type: boolean, description: "true → badge 'Histórico' na UI" }
+        exam_id: { type: string, format: uuid, nullable: true }
+
+    BeltDistributionItem:
+      type: object
+      properties:
+        belt_level: { type: string }
+        belt_name: { type: string }
+        count: { type: integer }
+
+    DashboardPayload:
+      type: object
+      properties:
+        kpis:
+          type: object
+          properties:
+            dojo_count: { type: integer }
+            practitioner_count: { type: integer }
+            revenue_ytd: { type: number }
+            overdue_rate: { type: number, description: "0..1" }
+        upcoming_events:
+          type: array
+          items:
+            type: object
+            properties:
+              title: { type: string }
+              date: { type: string, format: date }
+              location: { type: string }
+              registered_count: { type: integer }
+        overdue_dojos:
+          type: array
+          items:
+            type: object
+            properties:
+              dojo_id: { type: string, format: uuid }
+              name: { type: string }
+              amount: { type: number }
+              days_overdue: { type: integer }
+        belt_distribution:
+          type: array
+          items: { $ref: '#/components/schemas/BeltDistributionItem' }
+
+    ImportResult:
+      type: object
+      properties:
+        mode: { type: string, enum: [preview, commit] }
+        total_rows: { type: integer }
+        valid_rows: { type: integer }
+        committed: { type: integer }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              row: { type: integer }
+              field: { type: string }
+              message: { type: string }
+
+    Paginated:
+      type: object
+      properties:
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        code: { type: string, nullable: true }
+        details: { type: object, nullable: true }
