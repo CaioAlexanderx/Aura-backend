@@ -92,4 +92,20 @@ router.use('/aprovacao',         require('./studioApprovalPublic'));
 // Migration 138. Espelha a mecânica de /aprovacao.
 router.use('/orcamento',         require('./studioQuotePublic'));
 
+// ── AURA KARATÊ — Track A (backend cadastros) ───────────────
+// POST /karate/federation/setup (sem escopo de empresa, auth only)
+// GET  /federation/:id/dashboard
+// GET  /federation/:id/belt-distribution
+router.use('/karate', require('./karateFederation'));
+
+// Praticantes: /import DEVE vir ANTES de /:practitionerId
+// para que a string literal 'import' não seja capturada como UUID.
+// Ambos montados sob /federation/:id/practitioners
+router.use('/federation/:id/practitioners/import', require('./karateImport'));
+router.use('/federation/:id/practitioners',        require('./karatePractitioners'));
+router.use('/federation/:id/dojos',                require('./karateDojos'));
+// dashboard e belt-distribution são expostos pelo karateFederation router
+// mas precisam do param :id, então também montamos aqui:
+router.use('/federation/:id', require('./karateFederation'));
+
 module.exports = router;
