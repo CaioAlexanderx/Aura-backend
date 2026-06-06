@@ -89,23 +89,18 @@ function computeDojoStatus(affiliation_model, affiliation_since, is_active) {
   if (affiliation_model === 'biannual') periodMonths = 6;
   else if (affiliation_model === 'quarterly') periodMonths = 3;
 
-  // Avança o since por períodos completos até ultrapassar agora
-  let dueDate = new Date(since);
-  while (dueDate <= now) {
-    dueDate = new Date(dueDate);
-    dueDate.setMonth(dueDate.getMonth() + periodMonths);
-  }
+  // Vencimento = afiliação + UM período (sem auto-renovação).
+  // Se já passou e não houve renovação, escala overdue→defaulting→suspended.
+  const dueDate = new Date(since);
+  dueDate.setMonth(dueDate.getMonth() + periodMonths);
 
-  const daysUntilDue = Math.round((dueDate - now) / (1000 * 60 * 60 * 24));
+  const dayMs = 1000 * 60 * 60 * 24;
+  const daysUntilDue = Math.round((dueDate - now) / dayMs);
 
   if (daysUntilDue > 60) return 'active';
   if (daysUntilDue > 0)  return 'expiring';
 
-  // Vencido — daysUntilDue <= 0 (dueDate é a próxima, subtrair 1 período = vencimento real)
-  const realDue = new Date(dueDate);
-  realDue.setMonth(realDue.getMonth() - periodMonths);
-  const daysOverdue = Math.round((now - realDue) / (1000 * 60 * 60 * 24));
-
+  const daysOverdue = Math.round((now - dueDate) / dayMs);
   if (daysOverdue <= 90)  return 'overdue';
   if (daysOverdue <= 180) return 'defaulting';
   return 'suspended';

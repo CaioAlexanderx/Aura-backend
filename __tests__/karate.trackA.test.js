@@ -203,11 +203,11 @@ describe('POST /federation/:id/dojos (criar dojô)', () => {
     db.connect.mockResolvedValue(mockClient);
 
     mockClient.query
-      .mockResolvedValueOnce({})                     // BEGIN
-      .mockResolvedValueOnce({ rows: [] })            // advisory lock
+      .mockResolvedValueOnce({})                          // BEGIN
       .mockResolvedValueOnce({ rows: [{ id: FED_ID }] }) // verifica federação
-      .mockResolvedValueOnce({ rows: [] })            // MAX fpkt_affiliation_id (nenhum)
-      .mockResolvedValueOnce({                        // INSERT company
+      .mockResolvedValueOnce({ rows: [] })               // advisory lock
+      .mockResolvedValueOnce({ rows: [] })               // MAX fpkt_affiliation_id (nenhum)
+      .mockResolvedValueOnce({                            // INSERT company
         rows: [{
           id: 'dojo-uuid-001',
           name: 'Dojô São Paulo',
@@ -342,9 +342,9 @@ describe('POST /federation/:id/practitioners (criar praticante)', () => {
 
     mockClient.query
       .mockResolvedValueOnce({})                            // BEGIN
-      .mockResolvedValueOnce({ rows: [] })                  // advisory lock pract
       .mockResolvedValueOnce({ rows: [{ id: FED_ID }] })   // verifica federação
       .mockResolvedValueOnce({ rows: [{ id: DOJO_ID }] })  // verifica dojô
+      .mockResolvedValueOnce({ rows: [] })                  // advisory lock pract
       .mockResolvedValueOnce({ rows: [] })                  // MAX registration_number
       .mockResolvedValueOnce({                              // INSERT customer
         rows: [{
