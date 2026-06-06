@@ -17,6 +17,9 @@
 //   alem de 'falha'/'pendente'. O placeholder nfe_devolucao vira 'rejeitada'
 //   pos-COMMIT quando a SEFAZ rejeita (trocaV2 grava result.status), entao
 //   sem isso o botao de reprocessar nunca pegava uma nota rejeitada.
+// 06/06/2026 (fix split-payment-gap): Guard pos-insert detecta splits
+//   incompletos (SPLIT_GAP) e loga para investigacao. Backfill aplicado
+//   para 4 vendas historicas Davi Calcados (27/05-05/06/2026).
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -344,6 +347,26 @@ router.post('/sale', async (req, res) => {
            VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
           [sale.id, req.params.id, fallbackMethod, cashAmount, activeSessaoId]
         );
+      }
+    }
+    // Guard (06/06/2026): detecta splits onde um ou mais pagamentos nao foram
+    // gravados em sale_payments. Se SPLIT_GAP aparecer nos logs, investigar
+    // formato do payload `payments` enviado pelo frontend.
+    // Ref: backfill de 4 ocorrencias historicas aplicado em 06/06/2026.
+    if (cashAmount > 0 && Array.isArray(payments) && payments.length > 1) {
+      try {
+        const { rows: _payRows } = await client.query(
+          `SELECT COALESCE(SUM(amount),0)::numeric AS total FROM sale_payments WHERE sale_id=$1`,
+          [sale.id]
+        );
+        const _payTotal = parseFloat(_payRows[0]?.total || '0');
+        const _payGap   = parseFloat((cashAmount - _payTotal).toFixed(2));
+        if (_payGap > 0.01) {
+          console.error('[PDV] SPLIT_GAP sale_id=%s company=%s expected=%.2f got=%.2f gap=%.2f payments=%j',
+            sale.id, req.params.id, cashAmount, _payTotal, _payGap, payments);
+        }
+      } catch (_gapErr) {
+        console.warn('[PDV] gap-check non-fatal:', _gapErr.message);
       }
     }
     if (cashAmount > 0) {
