@@ -135,4 +135,36 @@ router.use('/federation/:id/financial', require('./karateExpenses'));
 router.use('/federation/:id/financial', require('./karateFees'));
 router.use('/federation/:id/financial', require('./karateFinancial'));
 
+// ── AURA KARATÊ — Track C (backend exames + certificados) ───
+// Ordem de montagem:
+//   1. karateRequirements: /belt-requirements (literal, sem param)
+//   2. karateExams:        /belt-exams (literal, sem param)
+//   3. karateCourses:      /courses (literal, sem param)
+//   4. karateCertificates: /certificates/:candidateId (param)
+//   (practitioners eligibility está dentro de karateExams)
+//
+// GET  /federation/:id/belt-requirements
+// PUT  /federation/:id/belt-requirements          (adminOnly)
+// GET  /federation/:id/belt-exams
+// POST /federation/:id/belt-exams
+// GET  /federation/:id/belt-exams/:examId
+// PATCH /federation/:id/belt-exams/:examId
+// GET  /federation/:id/belt-exams/:examId/examiners
+// POST /federation/:id/belt-exams/:examId/examiners
+// POST /federation/:id/belt-exams/:examId/candidates         (201 + eligibility, FPKT #1)
+// PATCH /federation/:id/belt-exams/:examId/candidates/:cId  (examResults RBAC)
+// POST /federation/:id/belt-exams/:examId/candidates/:cId/correction
+// POST /federation/:id/belt-exams/:examId/close             (NÃO emite cert, FPKT #3)
+// GET  /federation/:id/practitioners/:pId/eligibility/:belt  (só aviso)
+// GET  /federation/:id/courses
+// POST /federation/:id/courses
+// GET  /federation/:id/courses/:eventId
+// POST /federation/:id/courses/:eventId/enroll
+// POST /federation/:id/certificates/:candidateId/issue       (sob demanda, FPKT #3)
+// GET  /federation/:id/certificates/:candidateId
+router.use('/federation/:id', require('./karateRequirements'));
+router.use('/federation/:id', require('./karateExams'));
+router.use('/federation/:id', require('./karateCourses'));
+router.use('/federation/:id', require('./karateCertificates'));
+
 module.exports = router;
