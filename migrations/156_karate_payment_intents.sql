@@ -1,16 +1,18 @@
 -- ============================================================
 -- Migration 156: karate_payment_intents
--- Track B — Track de pagamentos de anuidade karatê
+-- Track B — intents de pagamento PIX de anuidades karatê
 --
 -- Decisão de persistência:
---   Usamos tabela dedicada em vez de reutilizar transactions+idempotency_key
+--   Tabela dedicada em vez de reutilizar transactions+idempotency_key
 --   porque o intent PIX tem ciclo de vida próprio (pending→paid|expired)
 --   independente do status da transaction. Permite múltiplos intents para
 --   uma mesma cobrança (ex: QR expirado, admin gera novo), mantendo
 --   idempotência na transaction pelo idempotency_key existente.
 --
--- RLS: habilitado. Acesso via service_role (backend) apenas.
---   Adicione políticas específicas se o frontend precisar de acesso direto.
+-- RLS: habilitado (padrão do projeto = RLS on, sem policies; o acesso é
+--   100% mediado pelo backend via service_role, que bypassa RLS). Não
+--   criamos POLICY aqui porque o role service_role não existe no Postgres
+--   do CI (é específico do Supabase) e a policy não é necessária.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS karate_payment_intents (
@@ -54,30 +56,14 @@ CREATE INDEX IF NOT EXISTS idx_karate_payment_intents_transaction
 CREATE INDEX IF NOT EXISTS idx_karate_payment_intents_status
   ON karate_payment_intents(status);
 
--- RLS
+-- RLS (sem policies — acesso via service_role no backend)
 ALTER TABLE karate_payment_intents ENABLE ROW LEVEL SECURITY;
 
--- Política permissiva para service_role (backend usa service_role)
--- O frontend NÃO acessa diretamente; exposto apenas via API backend.
-CREATE POLICY "service_role full access"
-  ON karate_payment_intents
-  FOR ALL
-  TO service_role
-  USING (true)
-  WITH CHECK (true);
-
--- Trigger: atualiza updated_at automaticamente
-CREATE OR REPLACE FUNCTION update_karate_payment_intents_updated_at()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
-BEGIN
-  NEW.updated_at = NOW();
-  RETURN NEW;
-END;
-$$;
-
+-- Trigger: atualiza updated_at automaticamente (reusa função existente,
+-- já com search_path pinado — ver migrations anteriores).
 CREATE TRIGGER trg_karate_payment_intents_updated_at
   BEFORE UPDATE ON karate_payment_intents
-  FOR EACH ROW EXECUTE FUNCTION update_karate_payment_intents_updated_at();
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- Comentários
 COMMENT ON TABLE karate_payment_intents IS
