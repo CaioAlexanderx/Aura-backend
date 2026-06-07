@@ -1,0 +1,57 @@
+openapi: 3.1.0
+info:
+  title: Aura Karatê — API Fase 2 (Graduações + Exames)
+  version: "0.1.0"
+  description: >
+    Contrato congelado da Wave 0 da Fase 2 (Track C). Backend (Sonnet-1) e
+    Frontend (Sonnet-2) trabalham em paralelo contra este contrato.
+    Tabelas: karate_belt_exams + karate_belt_exam_candidates (157), trigger
+    karate_on_exam_approved → karate_belt_history (158), karate_exam_examiners
+    (159), karate_events + karate_event_enrollments (160). Critérios:
+    karate_belt_requirements (150). RBAC: exames = guards.staffWrite;
+    lançar resultado = guards.examResults.
+    NOTA: este é o contrato de referência; o Track C pode refinar shapes
+    conforme implementa (mantendo os paths sob /federation/{federationId}).
+servers:
+  - url: https://api.getaura.com.br
+  - url: http://localhost:3000
+security:
+  - bearerAuth: []
+paths:
+  /federation/{federationId}/belt-exams:
+    get: { summary: Lista de exames, responses: { '200': { description: ok } } }
+    post: { summary: Cria exame, responses: { '201': { description: criado } } }
+  /federation/{federationId}/belt-exams/{examId}:
+    get: { summary: Detalhe (banca + candidatos), responses: { '200': { description: ok } } }
+    patch: { summary: Edita exame, responses: { '200': { description: ok } } }
+  /federation/{federationId}/belt-exams/{examId}/examiners:
+    get: { summary: Lista banca, responses: { '200': { description: ok } } }
+    post: { summary: Adiciona examinador, responses: { '201': { description: criado } } }
+  /federation/{federationId}/belt-exams/{examId}/candidates:
+    post: { summary: Inscreve candidato (valida elegibilidade), responses: { '201': { description: inscrito }, '422': { description: criterio nao atendido } } }
+  /federation/{federationId}/belt-exams/{examId}/candidates/{candidateId}:
+    patch: { summary: Lança resultado (approved dispara trigger → historico), responses: { '200': { description: ok } } }
+  /federation/{federationId}/belt-exams/{examId}/close:
+    post: { summary: Fecha exame + gera certificados dos aprovados, responses: { '200': { description: ok } } }
+  /federation/{federationId}/practitioners/{practitionerId}/eligibility/{targetBelt}:
+    get: { summary: Checa elegibilidade p/ uma graduação, responses: { '200': { description: ok } } }
+  /federation/{federationId}/belt-requirements:
+    get: { summary: Critérios vigentes, responses: { '200': { description: ok } } }
+    put: { summary: Atualiza critérios, responses: { '200': { description: ok } } }
+  /federation/{federationId}/courses:
+    get: { summary: Lista cursos, responses: { '200': { description: ok } } }
+    post: { summary: Cria curso/seminário, responses: { '201': { description: criado } } }
+  /federation/{federationId}/courses/{eventId}/enroll:
+    post: { summary: Inscreve praticante em curso, responses: { '201': { description: inscrito } } }
+  /federation/{federationId}/certificates/{candidateId}:
+    get: { summary: Certificado (PDF/URL) do aprovado, responses: { '200': { description: ok }, '404': { description: nao encontrado } } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+# Schemas detalhados (Exam, Candidate, EligibilityResult, Requirement,
+# CourseEvent, Certificate, etc.) estão na versão completa em
+# outputs/karate-fase2-openapi.yaml e devem ser seguidos pelo Track C:
+#  - EligibilityResult.checks[]: { criterion(min_months|required_kata|required_kumite|min_courses), ok, required, actual, hard_block }
+#  - CandidateStatus: registered|confirmed|checked_in|approved|rejected|absent
+#  - ExamType: kyu_regional|dan_estadual|dan_nacional
+#  - Candidate.target_belt + target_belt_name + belt_schema alimentam o trigger 158
