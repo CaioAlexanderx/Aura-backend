@@ -99,11 +99,16 @@ router.post('/federation/setup', requireAuth, async (req, res) => {
 });
 
 // ── GET /federation/:id/dashboard ──────────────────────────
+// overdue_dojos e kpis.overdue_rate derivam da tabela karate_dojo_annuity_history
+// (migration 152) em vez do heurístico affiliation_since.
+// Uma única query de agregação faz o JOIN dojô × anuidade do período corrente,
+// evitando N+1 e stubs de amount/days_overdue.
 router.get('/dashboard', ...guards.read(), async (req, res) => {
   const federationId = req.params.id;
+  const currentYear = new Date().getFullYear().toString();
 
   try {
-    // KPIs principais
+    // ── 1. KPIs principais (paralelo) ────────────────────────
     const [dojoRes, practRes, revenueRes] = await Promise.all([
       db.query(
         `SELECT COUNT(*) AS dojo_count FROM companies
@@ -132,50 +137,75 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
     const practCount = parseInt(practRes.rows[0].practitioner_count, 10);
     const revenueYtd = parseFloat(revenueRes.rows[0].revenue_ytd) || 0;
 
-    // overdue_rate: percentual de dojôs com status overdue/defaulting/suspended
-    // Calculado app-side usando affiliation_since + affiliation_model
-    const dojoStatusRes = await db.query(
-      `SELECT affiliation_model, affiliation_since, is_active
-       FROM companies
-       WHERE federation_id = $1 AND vertical = 'karate_dojo'`,
-      [federationId]
+    // ── 2. Status de anuidade dos dojôs (tabela karate_dojo_annuity_history) ──
+    // Para cada dojô da federação, busca o registro de anuidade do período
+    // corrente (ou o mais recente) em uma única query de agregação com DISTINCT ON.
+    // O status e days_overdue são derivados em SQL seguindo a mesma lógica de
+    // computeAnnuityStatus() de karateFinanceService.js:
+    //   paid       → status = 'paid'
+    //   due        → due_date >= hoje
+    //   overdue    → vencida há <= 90 dias
+    //   defaulting → vencida há 91–180 dias
+    //   suspended  → vencida há > 180 dias OU sem registro de anuidade
+    const annuityRes = await db.query(
+      `WITH latest_annuity AS (
+         SELECT DISTINCT ON (h.dojo_id)
+           h.dojo_id,
+           h.amount,
+           h.due_date,
+           h.status AS raw_status,
+           GREATEST(0, EXTRACT(DAY FROM (NOW() - h.due_date))::int) AS days_since_due
+         FROM karate_dojo_annuity_history h
+         JOIN companies c ON c.id = h.dojo_id
+           AND c.federation_id = $1
+           AND c.vertical = 'karate_dojo'
+         ORDER BY
+           h.dojo_id,
+           CASE WHEN h.reference_period = $2 THEN 0 ELSE 1 END,
+           h.reference_period DESC
+       )
+       SELECT
+         c.id                  AS dojo_id,
+         c.name,
+         la.amount,
+         la.due_date,
+         la.days_since_due,
+         CASE
+           WHEN la.dojo_id IS NULL                          THEN 'suspended'
+           WHEN la.raw_status = 'paid'                      THEN 'paid'
+           WHEN la.due_date IS NULL                         THEN 'suspended'
+           WHEN la.due_date >= NOW()                        THEN 'due'
+           WHEN la.days_since_due <= 90                     THEN 'overdue'
+           WHEN la.days_since_due <= 180                    THEN 'defaulting'
+           ELSE                                                  'suspended'
+         END                   AS annuity_status
+       FROM companies c
+       LEFT JOIN latest_annuity la ON la.dojo_id = c.id
+       WHERE c.federation_id = $1
+         AND c.vertical = 'karate_dojo'`,
+      [federationId, currentYear]
     );
 
-    const { computeDojoStatus } = require('../services/karateService');
-    const allDojos = dojoStatusRes.rows;
-    const overdueDojos = allDojos.filter(d => {
-      const s = computeDojoStatus(d.affiliation_model, d.affiliation_since, d.is_active);
-      return ['overdue', 'defaulting', 'suspended'].includes(s);
-    });
+    const allDojos = annuityRes.rows;
+    const OVERDUE_STATUSES = ['overdue', 'defaulting', 'suspended'];
+
+    const overdueDojosDetail = allDojos
+      .filter(d => OVERDUE_STATUSES.includes(d.annuity_status))
+      .map(d => ({
+        dojo_id:      d.dojo_id,
+        name:         d.name,
+        amount:       parseFloat(d.amount) || 0,
+        days_overdue: parseInt(d.days_since_due, 10) || 0,
+      }));
+
     const overdueRate = allDojos.length > 0
-      ? parseFloat((overdueDojos.length / allDojos.length).toFixed(4))
+      ? parseFloat((overdueDojosDetail.length / allDojos.length).toFixed(4))
       : 0;
 
     // Upcoming events (stub — events table a implementar na Fase 2)
     const upcomingEvents = [];
 
-    // Overdue dojos (detalhados)
-    const overdueDojoDetailRes = await db.query(
-      `SELECT id AS dojo_id, name, affiliation_model, affiliation_since, is_active
-       FROM companies
-       WHERE federation_id = $1 AND vertical = 'karate_dojo'`,
-      [federationId]
-    );
-
-    const overdueDojosDetail = overdueDojoDetailRes.rows
-      .map(d => ({
-        ...d,
-        _status: computeDojoStatus(d.affiliation_model, d.affiliation_since, d.is_active),
-      }))
-      .filter(d => ['overdue', 'defaulting', 'suspended'].includes(d._status))
-      .map(d => ({
-        dojo_id: d.dojo_id,
-        name: d.name,
-        amount: 0,       // valor de cobrança a implementar quando tabela annuity for populada
-        days_overdue: 0, // igualmente stub — requer tabela de pagamentos de anuidades
-      }));
-
-    // Belt distribution (inline — mesma lógica do endpoint dedicado)
+    // ── 3. Distribuição de faixas ────────────────────────────
     const beltRes = await db.query(
       `SELECT cb.belt_level, cb.belt_name, COUNT(*) AS count
        FROM karate_current_belt cb
@@ -188,19 +218,19 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
 
     const beltDistribution = beltRes.rows.map(r => ({
       belt_level: r.belt_level,
-      belt_name: r.belt_name,
-      count: parseInt(r.count, 10),
+      belt_name:  r.belt_name,
+      count:      parseInt(r.count, 10),
     }));
 
     res.json({
       kpis: {
-        dojo_count: dojoCount,
+        dojo_count:        dojoCount,
         practitioner_count: practCount,
-        revenue_ytd: revenueYtd,
-        overdue_rate: overdueRate,
+        revenue_ytd:       revenueYtd,
+        overdue_rate:      overdueRate,
       },
-      upcoming_events: upcomingEvents,
-      overdue_dojos: overdueDojosDetail,
+      upcoming_events:  upcomingEvents,
+      overdue_dojos:    overdueDojosDetail,
       belt_distribution: beltDistribution,
     });
   } catch (err) {
@@ -226,8 +256,8 @@ router.get('/belt-distribution', ...guards.read(), async (req, res) => {
 
     res.json(rows.map(r => ({
       belt_level: r.belt_level,
-      belt_name: r.belt_name,
-      count: parseInt(r.count, 10),
+      belt_name:  r.belt_name,
+      count:      parseInt(r.count, 10),
     })));
   } catch (err) {
     console.error('[karateFederation] belt-distribution error:', err.message);
