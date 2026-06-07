@@ -16,6 +16,16 @@ jest.mock('../src/config/database');
 
 const db = require('../src/config/database');
 
+// Module-scope afterEach: drains mockResolvedValueOnce queues after every
+// test so that early-return (422) tests don't leave stale resolved values
+// that bleed into the next test's db.query consumers.
+// mockReset() clears the queued implementations (clearAllMocks does NOT).
+// Each describe's own beforeEach re-establishes its mocks before the next test.
+afterEach(() => {
+  if (typeof db.query.mockReset === 'function') db.query.mockReset();
+  if (typeof db.connect.mockReset === 'function') db.connect.mockReset();
+});
+
 // ── Lógica pura (sem DB) ───────────────────────────────────────
 describe('karateFinanceService — computeAnnuityStatus', () => {
   const { computeAnnuityStatus } = require('../src/services/karateFinanceService');
@@ -453,7 +463,7 @@ describe('POST /federation/:id/financial/expenses', () => {
         id: 'exp-uuid-001',
         category: 'expense_cost',
         amount: 250.00,
-        description: 'Aluguel gîmnásio',
+        description: 'Aluguel gîmnásio',
         due_date: null,
         reference_type: null,
         reference_id: null,
