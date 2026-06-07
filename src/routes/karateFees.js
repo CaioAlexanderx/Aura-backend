@@ -17,7 +17,7 @@ const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 
 // GET /financial/fees
-router.get('/', ...guards.adminOnly(), async (req, res) => {
+router.get('/fees', ...guards.adminOnly(), async (req, res) => {
   const federationId = req.params.id;
 
   try {
@@ -48,7 +48,7 @@ router.get('/', ...guards.adminOnly(), async (req, res) => {
 // PUT /financial/fees
 // Body: { effective_from: '2027-01-01', fees: [{ fee_type, size_tier, amount }] }
 // Append-only: insere nova vigência. Não deleta nem atualiza registros anteriores.
-router.put('/', ...guards.adminOnly(), async (req, res) => {
+router.put('/fees', ...guards.adminOnly(), async (req, res) => {
   const federationId = req.params.id;
   const { effective_from, fees } = req.body;
 
