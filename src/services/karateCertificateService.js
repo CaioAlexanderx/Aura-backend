@@ -14,11 +14,6 @@ const db = require('../config/database');
  * issueCertificate({ federation_id, candidate_id, exam_id, issued_by })
  * Gera (ou enfileira geração de) certificado para um candidato aprovado.
  * Retorna { certificate_id, status, url }
- *
- * Estruturado para produção:
- *   - Se R2/S3 + sharp disponíveis: gera PDF e faz upload, retorna URL real
- *   - Caso contrário: registra com status='pending' e URL mock
- *     (worker assíncrono geraria em seguida)
  */
 async function issueCertificate({ federation_id, candidate_id, exam_id, issued_by }) {
   // Busca dados do candidato aprovado
@@ -29,9 +24,9 @@ async function issueCertificate({ federation_id, candidate_id, exam_id, issued_b
        ec.status      AS candidate_status,
        ec.target_belt,
        ec.exam_id,
-       COALESCE(cu.full_name, cu.name) AS student_name,
+       cu.name        AS student_name,
        cu.karate_registration_number,
-       be.exam_date,
+       be.event_date,
        be.location,
        be.federation_id
      FROM karate_belt_exam_candidates ec
@@ -117,8 +112,6 @@ async function issueCertificate({ federation_id, candidate_id, exam_id, issued_b
  */
 function generateCertificateUrl({ cand, federation_id }) {
   // TODO produção: usar sharp/PDFKit + R2 upload
-  // Estrutura de URL para produção:
-  // `https://cdn.getaura.com.br/certificates/${federation_id}/${cand.exam_id}/${cand.student_id}.pdf`
   return `https://cdn.getaura.com.br/certificates/${federation_id}/${cand.exam_id}/${cand.student_id}.pdf`;
 }
 
