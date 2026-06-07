@@ -1,0 +1,442 @@
+openapi: 3.1.0
+info:
+  title: Aura Karatê — API Fase 1 (Financeiro + Anuidades)
+  version: "0.1.0"
+  description: >
+    Contrato congelado da Wave 0 da Fase 1 (Track B). Backend (Sonnet-1) e
+    Frontend (Sonnet-2) trabalham em paralelo contra este contrato.
+    Convenções herdadas da Fase 0: Bearer JWT, requireCompanyAccess no
+    :federationId, acesso mediado pelo backend (service_role). Pagamentos
+    via Asaas (reusar webhookAsaas + idempotency_key de transactions);
+    NFS-e via nfse.js. Tabelas: karate_annual_fees (154),
+    karate_dojo_annuity_history (152), transactions ext (155).
+servers:
+  - url: https://api.getaura.com.br
+  - url: http://localhost:3000
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Visão Geral
+  - name: Anuidades Dojô
+  - name: Anuidades CPF
+  - name: Tabela de Anuidades
+  - name: Saídas
+  - name: NFS-e
+  - name: Inadimplência
+
+paths:
+  /federation/{federationId}/financial/overview:
+    get:
+      tags: [Visão Geral]
+      summary: DRE + fluxo de caixa
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: DRE por competência + fluxo de caixa + projeção
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FinancialOverview' }
+
+  /federation/{federationId}/financial/annuities/dojos:
+    get:
+      tags: [Anuidades Dojô]
+      summary: Anuidades de dojôs com status
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/AnnuityStatus' } }
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/pageSize' }
+      responses:
+        '200':
+          description: página de anuidades por dojô
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/DojoAnnuity' } }
+
+  /federation/{federationId}/financial/annuities/dojos/{dojoId}/charge:
+    post:
+      tags: [Anuidades Dojô]
+      summary: Lança cobrança de anuidade (gera transaction + due_date)
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { $ref: '#/components/parameters/dojoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChargeInput' }
+      responses:
+        '201':
+          description: cobrança lançada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DojoAnnuity' }
+
+  /federation/{federationId}/financial/annuities/dojos/{dojoId}/pay:
+    post:
+      tags: [Anuidades Dojô]
+      summary: Registra pagamento (Asaas/Pix) e dispara NFS-e
+      description: Idempotente via idempotency_key. Reconcilia a transaction e emite NFS-e.
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { $ref: '#/components/parameters/dojoId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentInput' }
+      responses:
+        '200':
+          description: pagamento registrado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /federation/{federationId}/financial/annuities/cpf:
+    get:
+      tags: [Anuidades CPF]
+      summary: Anuidades individuais de praticantes
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/AnnuityStatus' } }
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/pageSize' }
+      responses:
+        '200':
+          description: página de anuidades CPF
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/CpfAnnuity' } }
+
+  /federation/{federationId}/financial/annuities/cpf/{practitionerId}/pay:
+    post:
+      tags: [Anuidades CPF]
+      summary: Registra pagamento de anuidade CPF
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { $ref: '#/components/parameters/practitionerId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentInput' }
+      responses:
+        '200':
+          description: pagamento registrado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentResult' }
+
+  /federation/{federationId}/financial/fees:
+    get:
+      tags: [Tabela de Anuidades]
+      summary: Tabela de anuidades vigente (por porte + CPF)
+      parameters: [ { $ref: '#/components/parameters/federationId' } ]
+      responses:
+        '200':
+          description: valores vigentes
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AnnualFee' } }
+    put:
+      tags: [Tabela de Anuidades]
+      summary: Atualiza a tabela (cria nova vigência = reajuste, append-only)
+      parameters: [ { $ref: '#/components/parameters/federationId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                effective_from: { type: string, format: date }
+                fees: { type: array, items: { $ref: '#/components/schemas/AnnualFeeInput' } }
+      responses:
+        '200':
+          description: nova vigência registrada
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AnnualFee' } }
+
+  /federation/{federationId}/financial/expenses:
+    get:
+      tags: [Saídas]
+      summary: Lista de saídas (despesas)
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/pageSize' }
+      responses:
+        '200':
+          description: página de saídas
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/Expense' } }
+    post:
+      tags: [Saídas]
+      summary: Lança uma saída
+      parameters: [ { $ref: '#/components/parameters/federationId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExpenseInput' }
+      responses:
+        '201':
+          description: criada
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Expense' }
+
+  /federation/{federationId}/financial/nfse:
+    get:
+      tags: [NFS-e]
+      summary: Notas fiscais emitidas
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/pageSize' }
+      responses:
+        '200':
+          description: página de NFS-e
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Paginated'
+                  - type: object
+                    properties:
+                      data: { type: array, items: { $ref: '#/components/schemas/NfseItem' } }
+
+  /federation/{federationId}/financial/overdue:
+    get:
+      tags: [Inadimplência]
+      summary: Inadimplentes (dojôs + CPF) com valor e dias de atraso
+      parameters: [ { $ref: '#/components/parameters/federationId' } ]
+      responses:
+        '200':
+          description: lista de inadimplentes
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/OverdueItem' } }
+
+  /federation/{federationId}/financial/overdue/{targetId}/remind:
+    post:
+      tags: [Inadimplência]
+      summary: Dispara cobrança (WhatsApp/e-mail) — régua completa fica na Fase 6
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { name: targetId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                channel: { type: string, enum: [whatsapp, email] }
+                target_type: { type: string, enum: [dojo, cpf] }
+      responses:
+        '202':
+          description: cobrança enfileirada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued: { type: boolean }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    federationId: { name: federationId, in: path, required: true, schema: { type: string, format: uuid } }
+    dojoId: { name: dojoId, in: path, required: true, schema: { type: string, format: uuid } }
+    practitionerId: { name: practitionerId, in: path, required: true, schema: { type: string, format: uuid } }
+    page: { name: page, in: query, schema: { type: integer, default: 1, minimum: 1 } }
+    pageSize: { name: pageSize, in: query, schema: { type: integer, default: 25, maximum: 200 } }
+  responses:
+    Conflict:
+      description: Conflito (ex.: pagamento já registrado)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+  schemas:
+    AnnuityStatus:
+      type: string
+      enum: [paid, due, overdue, defaulting, suspended]
+    SizeTier:
+      type: string
+      enum: [up_to_40, '41_90', '91_150', over_150]
+      description: porte do dojô por nº de praticantes
+
+    AnnualFeeInput:
+      type: object
+      required: [fee_type, amount]
+      properties:
+        fee_type: { type: string, enum: [dojo, cpf] }
+        size_tier: { $ref: '#/components/schemas/SizeTier' }
+        amount: { type: number }
+    AnnualFee:
+      allOf:
+        - $ref: '#/components/schemas/AnnualFeeInput'
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            effective_from: { type: string, format: date }
+
+    ChargeInput:
+      type: object
+      required: [amount, due_date, reference_period]
+      properties:
+        amount: { type: number }
+        due_date: { type: string, format: date }
+        reference_period: { type: string, example: "2026" }
+
+    PaymentInput:
+      type: object
+      required: [amount, method]
+      properties:
+        amount: { type: number }
+        method: { type: string, enum: [pix, boleto, cartao, dinheiro, transferencia] }
+        paid_at: { type: string, format: date }
+        idempotency_key: { type: string, description: "evita duplo lançamento (Asaas reenvia eventos)" }
+        emit_nfse: { type: boolean, default: true }
+
+    PaymentResult:
+      type: object
+      properties:
+        transaction_id: { type: string, format: uuid }
+        status: { type: string, enum: [paid] }
+        nfse_id: { type: string, format: uuid, nullable: true }
+        idempotent_hit: { type: boolean }
+
+    DojoAnnuity:
+      type: object
+      properties:
+        dojo_id: { type: string, format: uuid }
+        dojo_name: { type: string }
+        fpkt_affiliation_id: { type: string }
+        size_tier: { $ref: '#/components/schemas/SizeTier' }
+        amount: { type: number }
+        reference_period: { type: string }
+        due_date: { type: string, format: date, nullable: true }
+        paid_at: { type: string, format: date, nullable: true }
+        status: { $ref: '#/components/schemas/AnnuityStatus' }
+        days_overdue: { type: integer }
+        nfse_id: { type: string, format: uuid, nullable: true }
+
+    CpfAnnuity:
+      type: object
+      properties:
+        practitioner_id: { type: string, format: uuid }
+        full_name: { type: string }
+        karate_registration_number: { type: string }
+        amount: { type: number }
+        reference_period: { type: string }
+        due_date: { type: string, format: date, nullable: true }
+        paid_at: { type: string, format: date, nullable: true }
+        status: { $ref: '#/components/schemas/AnnuityStatus' }
+
+    Expense:
+      allOf:
+        - $ref: '#/components/schemas/ExpenseInput'
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            created_at: { type: string, format: date-time }
+    ExpenseInput:
+      type: object
+      required: [amount, category, description]
+      properties:
+        amount: { type: number }
+        category:
+          type: string
+          enum: [expense_cost, expense_repasse, expense_certificate, expense_award, expense_other]
+        description: { type: string }
+        due_date: { type: string, format: date }
+        reference_type: { type: string, nullable: true }
+        reference_id: { type: string, format: uuid, nullable: true }
+
+    NfseItem:
+      type: object
+      properties:
+        nfse_id: { type: string, format: uuid }
+        transaction_id: { type: string, format: uuid }
+        number: { type: string, nullable: true }
+        amount: { type: number }
+        status: { type: string, enum: [pending, issued, error, cancelled] }
+        issued_at: { type: string, format: date-time, nullable: true }
+
+    OverdueItem:
+      type: object
+      properties:
+        target_type: { type: string, enum: [dojo, cpf] }
+        target_id: { type: string, format: uuid }
+        name: { type: string }
+        amount: { type: number }
+        days_overdue: { type: integer }
+        status: { $ref: '#/components/schemas/AnnuityStatus' }
+        last_reminder_at: { type: string, format: date-time, nullable: true }
+
+    FinancialOverview:
+      type: object
+      properties:
+        period: { type: object, properties: { from: { type: string, format: date }, to: { type: string, format: date } } }
+        dre:
+          type: object
+          properties:
+            revenue:
+              type: array
+              items: { type: object, properties: { category: { type: string }, amount: { type: number } } }
+            expenses:
+              type: array
+              items: { type: object, properties: { category: { type: string }, amount: { type: number } } }
+            net: { type: number }
+        cashflow:
+          type: array
+          items:
+            type: object
+            properties:
+              month: { type: string, example: "2026-03" }
+              inflow: { type: number }
+              outflow: { type: number }
+              balance: { type: number }
+        projected_receivables:
+          type: array
+          items:
+            type: object
+            properties:
+              due_date: { type: string, format: date }
+              amount: { type: number }
+
+    Paginated:
+      type: object
+      properties:
+        page: { type: integer }
+        page_size: { type: integer }
+        total: { type: integer }
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        code: { type: string, nullable: true }
