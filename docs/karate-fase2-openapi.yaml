@@ -1,0 +1,65 @@
+openapi: 3.1.0
+info:
+  title: Aura Karatê — API Fase 2 (Graduações + Exames)
+  version: "0.2.0"
+  description: >
+    Contrato congelado da Wave 0 da Fase 2 (Track C). Backend (Sonnet-1) e
+    Frontend (Sonnet-2) trabalham em paralelo contra este contrato.
+    Tabelas: karate_belt_exams + karate_belt_exam_candidates (157), trigger
+    karate_on_exam_approved → karate_belt_history (158), karate_exam_examiners
+    (159), karate_events + karate_event_enrollments (160). Critérios:
+    karate_belt_requirements (150/161). RBAC: exames = guards.staffWrite;
+    lançar resultado = guards.examResults.
+    DECISÕES FPKT (v0.2.0):
+      1) Elegibilidade é SEMPRE apenas AVISO — a inscrição NUNCA é bloqueada
+         por critério; o resultado da checagem vem anexado (warnings) e o admin
+         decide. (is_hard_block sempre false.)
+      2) Critérios de graduação são PROVISÓRIOS (campo confirmed=false) até a
+         federação confirmar; totalmente editáveis (mudança ~anual). UI sinaliza.
+      3) Certificado é SOB DEMANDA: o dojô envia a aprovação do praticante e a
+         federação solicita a emissão (POST .../certificates/:candidateId/issue).
+         Fechar o exame NÃO gera certificados automaticamente.
+servers:
+  - url: https://api.getaura.com.br
+  - url: http://localhost:3000
+security:
+  - bearerAuth: []
+paths:
+  /federation/{federationId}/belt-exams:
+    get: { summary: Lista de exames, responses: { '200': { description: ok } } }
+    post: { summary: Cria exame, responses: { '201': { description: criado } } }
+  /federation/{federationId}/belt-exams/{examId}:
+    get: { summary: Detalhe (banca + candidatos), responses: { '200': { description: ok } } }
+    patch: { summary: Edita exame, responses: { '200': { description: ok } } }
+  /federation/{federationId}/belt-exams/{examId}/examiners:
+    get: { summary: Lista banca, responses: { '200': { description: ok } } }
+    post: { summary: Adiciona examinador, responses: { '201': { description: criado } } }
+  /federation/{federationId}/belt-exams/{examId}/candidates:
+    post: { summary: 'Inscreve candidato — SEMPRE 201; anexa eligibility (warnings), nunca bloqueia', responses: { '201': { description: inscrito (com eligibility) } } }
+  /federation/{federationId}/belt-exams/{examId}/candidates/{candidateId}:
+    patch: { summary: 'Lança resultado (approved dispara trigger → historico). RBAC examResults', responses: { '200': { description: ok } } }
+  /federation/{federationId}/belt-exams/{examId}/close:
+    post: { summary: 'Fecha exame e consolida resultados (gera historico dos aprovados). NÃO emite certificados', responses: { '200': { description: ok } } }
+  /federation/{federationId}/practitioners/{practitionerId}/eligibility/{targetBelt}:
+    get: { summary: 'Checa elegibilidade (informativo — nunca bloqueia)', responses: { '200': { description: ok } } }
+  /federation/{federationId}/belt-requirements:
+    get: { summary: 'Critérios vigentes (inclui confirmed=true/false)', responses: { '200': { description: ok } } }
+    put: { summary: 'Atualiza critérios (admin) — pode marcar confirmed', responses: { '200': { description: ok } } }
+  /federation/{federationId}/courses:
+    get: { summary: Lista cursos, responses: { '200': { description: ok } } }
+    post: { summary: Cria curso/seminário, responses: { '201': { description: criado } } }
+  /federation/{federationId}/courses/{eventId}/enroll:
+    post: { summary: Inscreve praticante em curso, responses: { '201': { description: inscrito } } }
+  /federation/{federationId}/certificates/{candidateId}/issue:
+    post: { summary: 'Solicita emissão do certificado (sob demanda, após aprovação enviada pelo dojô)', responses: { '201': { description: 'emitido/enfileirado' } } }
+  /federation/{federationId}/certificates/{candidateId}:
+    get: { summary: Certificado (PDF/URL) do aprovado, responses: { '200': { description: ok }, '404': { description: nao encontrado } } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+# Schemas detalhados (Exam, Candidate, EligibilityResult, Requirement{confirmed},
+# CourseEvent, Certificate, etc.) na versão completa em outputs/karate-fase2-openapi.yaml.
+#  - EligibilityResult.checks[]: { criterion, ok, required, actual } — SEM hard_block (sempre aviso)
+#  - Candidate.eligibility anexada na resposta de inscrição (nunca 422 por elegibilidade)
+#  - Requirement.confirmed (bool): provisório enquanto false
+#  - Certificate.status: pending|generated|sent|error — emissão sob demanda via /issue
