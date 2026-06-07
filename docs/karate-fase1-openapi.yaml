@@ -1,15 +1,18 @@
 openapi: 3.1.0
 info:
   title: Aura Karatê — API Fase 1 (Financeiro + Anuidades)
-  version: "0.1.0"
+  version: "0.2.0"
   description: >
-    Contrato congelado da Wave 0 da Fase 1 (Track B). Backend (Sonnet-1) e
+    Contrato da Wave 0 da Fase 1 (Track B). Backend (Sonnet-1) e
     Frontend (Sonnet-2) trabalham em paralelo contra este contrato.
     Convenções herdadas da Fase 0: Bearer JWT, requireCompanyAccess no
-    :federationId, acesso mediado pelo backend (service_role). Pagamentos
-    via Asaas (reusar webhookAsaas + idempotency_key de transactions);
+    :federationId, acesso mediado pelo backend (service_role).
+    Pagamentos MVP = PIX estático (BR Code local, sem webhook);
+    confirmação manual pelo admin. Provider Asaas plugável via env
+    KARATE_PAYMENT_PROVIDER=asaas (não ativo no MVP).
     NFS-e via nfse.js. Tabelas: karate_annual_fees (154),
-    karate_dojo_annuity_history (152), transactions ext (155).
+    karate_dojo_annuity_history (152), transactions ext (155),
+    karate_payment_intents (156).
 servers:
   - url: https://api.getaura.com.br
   - url: http://localhost:3000
@@ -21,6 +24,7 @@ tags:
   - name: Visão Geral
   - name: Anuidades Dojô
   - name: Anuidades CPF
+  - name: Pagamentos PIX
   - name: Tabela de Anuidades
   - name: Saídas
   - name: NFS-e
@@ -45,7 +49,7 @@ paths:
   /federation/{federationId}/financial/annuities/dojos:
     get:
       tags: [Anuidades Dojô]
-      summary: Anuidades de dojôs com status
+      summary: Anuidades de dojôs com status (derivado de karate_dojo_annuity_history)
       parameters:
         - { $ref: '#/components/parameters/federationId' }
         - { name: status, in: query, schema: { $ref: '#/components/schemas/AnnuityStatus' } }
@@ -66,7 +70,10 @@ paths:
   /federation/{federationId}/financial/annuities/dojos/{dojoId}/charge:
     post:
       tags: [Anuidades Dojô]
-      summary: Lança cobrança de anuidade (gera transaction + due_date)
+      summary: Lança cobrança de anuidade (gera transaction pending + registro em karate_dojo_annuity_history)
+      description: >
+        Idempotente por (dojoId, reference_period) via advisory lock.
+        Retorna 409 se já existe cobrança para o período.
       parameters:
         - { $ref: '#/components/parameters/federationId' }
         - { $ref: '#/components/parameters/dojoId' }
@@ -81,12 +88,17 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/DojoAnnuity' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
-  /federation/{federationId}/financial/annuities/dojos/{dojoId}/pay:
+  /federation/{federationId}/financial/annuities/dojos/{dojoId}/pix:
     post:
       tags: [Anuidades Dojô]
-      summary: Registra pagamento (Asaas/Pix) e dispara NFS-e
-      description: Idempotente via idempotency_key. Reconcilia a transaction e emite NFS-e.
+      summary: Cria PIX intent para a cobrança de anuidade do dojô
+      description: >
+        MVP: gera BR Code estático (payload EMV) via staticPixService.
+        Retorna payload (para o frontend gerar QR) + intent_id para polling.
+        Se já existe intent pending para a cobrança, retorna o existente.
+        Provider Asaas plugável via env KARATE_PAYMENT_PROVIDER=asaas.
       parameters:
         - { $ref: '#/components/parameters/federationId' }
         - { $ref: '#/components/parameters/dojoId' }
@@ -94,10 +106,71 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/PaymentInput' }
+            schema:
+              type: object
+              required: [annuity_history_id]
+              properties:
+                annuity_history_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: PIX intent criado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PixIntent' }
+        '200':
+          description: intent existente retornado (idempotência)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PixIntent' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /federation/{federationId}/financial/payments/{intentId}/status:
+    get:
+      tags: [Pagamentos PIX]
+      summary: Consulta status do PIX intent (polling)
+      description: >
+        Para static_brcode: status permanece 'pending' até admin confirmar.
+        Para Asaas: consulta o provider em tempo real.
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { name: intentId, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         '200':
-          description: pagamento registrado
+          description: status atual
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  intent_id: { type: string, format: uuid }
+                  payment_intent_id: { type: string }
+                  provider: { type: string }
+                  status: { type: string, enum: [pending, paid, expired] }
+                  expires_at: { type: string, format: date-time, nullable: true }
+                  paid_at: { type: string, format: date-time, nullable: true }
+
+  /federation/{federationId}/financial/payments/{intentId}/confirm:
+    post:
+      tags: [Pagamentos PIX]
+      summary: Confirma pagamento (admin manual ou webhook futuro do provider)
+      description: >
+        Reconcilia: atualiza karate_payment_intents + karate_dojo_annuity_history
+        + transactions (status=paid). Emite NFS-e quando emit_nfse=true.
+        Idempotente: retorna 409 com idempotent_hit=true se já confirmado.
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { name: intentId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                paid_at: { type: string, format: date-time, description: "default: now()" }
+                emit_nfse: { type: boolean, default: true }
+      responses:
+        '200':
+          description: pagamento confirmado
           content:
             application/json:
               schema: { $ref: '#/components/schemas/PaymentResult' }
@@ -124,10 +197,10 @@ paths:
                     properties:
                       data: { type: array, items: { $ref: '#/components/schemas/CpfAnnuity' } }
 
-  /federation/{federationId}/financial/annuities/cpf/{practitionerId}/pay:
+  /federation/{federationId}/financial/annuities/cpf/{practitionerId}/charge:
     post:
       tags: [Anuidades CPF]
-      summary: Registra pagamento de anuidade CPF
+      summary: Lança cobrança de anuidade CPF
       parameters:
         - { $ref: '#/components/parameters/federationId' }
         - { $ref: '#/components/parameters/practitionerId' }
@@ -135,13 +208,36 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/PaymentInput' }
+            schema: { $ref: '#/components/schemas/ChargeInput' }
       responses:
-        '200':
-          description: pagamento registrado
+        '201':
+          description: cobrança lançada
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/PaymentResult' }
+              schema: { $ref: '#/components/schemas/CpfAnnuity' }
+
+  /federation/{federationId}/financial/annuities/cpf/{practitionerId}/pix:
+    post:
+      tags: [Anuidades CPF]
+      summary: Cria PIX intent para anuidade CPF
+      parameters:
+        - { $ref: '#/components/parameters/federationId' }
+        - { $ref: '#/components/parameters/practitionerId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction_id]
+              properties:
+                transaction_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: PIX intent criado
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PixIntent' }
 
   /federation/{federationId}/financial/fees:
     get:
@@ -157,6 +253,9 @@ paths:
     put:
       tags: [Tabela de Anuidades]
       summary: Atualiza a tabela (cria nova vigência = reajuste, append-only)
+      description: >-
+        Nunca sobrescreve registros anteriores. Cada PUT insere nova vigência.
+        Vigente = registro com effective_from mais recente <= hoje.
       parameters: [ { $ref: '#/components/parameters/federationId' } ]
       requestBody:
         required: true
@@ -164,6 +263,7 @@ paths:
           application/json:
             schema:
               type: object
+              required: [effective_from, fees]
               properties:
                 effective_from: { type: string, format: date }
                 fees: { type: array, items: { $ref: '#/components/schemas/AnnualFeeInput' } }
@@ -236,7 +336,7 @@ paths:
       parameters: [ { $ref: '#/components/parameters/federationId' } ]
       responses:
         '200':
-          description: lista de inadimplentes
+          description: lista de inadimplentes ordenada por dias_overdue desc
           content:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/OverdueItem' } }
@@ -254,6 +354,7 @@ paths:
           application/json:
             schema:
               type: object
+              required: [channel, target_type]
               properties:
                 channel: { type: string, enum: [whatsapp, email] }
                 target_type: { type: string, enum: [dojo, cpf] }
@@ -312,21 +413,25 @@ components:
         due_date: { type: string, format: date }
         reference_period: { type: string, example: "2026" }
 
-    PaymentInput:
+    PixIntent:
       type: object
-      required: [amount, method]
       properties:
-        amount: { type: number }
-        method: { type: string, enum: [pix, boleto, cartao, dinheiro, transferencia] }
-        paid_at: { type: string, format: date }
-        idempotency_key: { type: string, description: "evita duplo lançamento (Asaas reenvia eventos)" }
-        emit_nfse: { type: boolean, default: true }
+        intent_id: { type: string, format: uuid }
+        payment_intent_id: { type: string, description: "ID externo do provider" }
+        payload: { type: string, description: "BR Code EMV (static_brcode) ou null" }
+        qr_image: { type: string, nullable: true, description: "base64 QR image (Asaas) ou null" }
+        status: { type: string, enum: [pending, paid, expired] }
+        expires_at: { type: string, format: date-time, nullable: true }
+        provider: { type: string, enum: [static_brcode, asaas] }
+        _warn: { type: string, nullable: true, description: "aviso se PIX não configurado (fallback mock)" }
 
     PaymentResult:
       type: object
       properties:
-        transaction_id: { type: string, format: uuid }
+        intent_id: { type: string, format: uuid }
+        transaction_id: { type: string, format: uuid, nullable: true }
         status: { type: string, enum: [paid] }
+        paid_at: { type: string, format: date-time }
         nfse_id: { type: string, format: uuid, nullable: true }
         idempotent_hit: { type: boolean }
 
@@ -336,7 +441,6 @@ components:
         dojo_id: { type: string, format: uuid }
         dojo_name: { type: string }
         fpkt_affiliation_id: { type: string }
-        size_tier: { $ref: '#/components/schemas/SizeTier' }
         amount: { type: number }
         reference_period: { type: string }
         due_date: { type: string, format: date, nullable: true }
@@ -344,6 +448,8 @@ components:
         status: { $ref: '#/components/schemas/AnnuityStatus' }
         days_overdue: { type: integer }
         nfse_id: { type: string, format: uuid, nullable: true }
+        transaction_id: { type: string, format: uuid, nullable: true }
+        annuity_history_id: { type: string, format: uuid, nullable: true }
 
     CpfAnnuity:
       type: object
@@ -363,6 +469,7 @@ components:
         - type: object
           properties:
             id: { type: string, format: uuid }
+            status: { type: string }
             created_at: { type: string, format: date-time }
     ExpenseInput:
       type: object

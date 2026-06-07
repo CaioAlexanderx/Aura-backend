@@ -1,0 +1,492 @@
+// ============================================================
+// AURA KARATÊ — Testes unitários Track B (backend financeiro + anuidades)
+//
+// Cobertura:
+//   1. karateFinanceService.computeAnnuityStatus — lógica pura
+//   2. karateFees GET/PUT — tabela de anuidades append-only
+//   3. karateAnnuities charge → pix → confirm (status paid + NFS-e)
+//   4. Status de dojô a partir de anuidades (annuity_history)
+//
+// IMPORTANTE: a ordem dos mocks DEVE bater com a ordem real das queries
+// do handler (BEGIN → checagens → advisory lock → INSERT → COMMIT).
+// ============================================================
+'use strict';
+
+jest.mock('../src/config/database');
+
+const db = require('../src/config/database');
+
+// ── Lógica pura (sem DB) ───────────────────────────────────────
+describe('karateFinanceService — computeAnnuityStatus', () => {
+  const { computeAnnuityStatus } = require('../src/services/karateFinanceService');
+
+  it('retorna suspended quando annuity é null (sem cobrança)', () => {
+    expect(computeAnnuityStatus(null)).toBe('suspended');
+  });
+
+  it('retorna paid quando status=paid', () => {
+    expect(computeAnnuityStatus({ status: 'paid', due_date: '2026-03-01' })).toBe('paid');
+  });
+
+  it('retorna due quando due_date é futuro e status != paid', () => {
+    const future = new Date();
+    future.setDate(future.getDate() + 30);
+    expect(computeAnnuityStatus({ status: 'pending', due_date: future.toISOString().split('T')[0] })).toBe('due');
+  });
+
+  it('retorna overdue quando vencida há <= 90 dias', () => {
+    const past = new Date();
+    past.setDate(past.getDate() - 45);
+    expect(computeAnnuityStatus({ status: 'pending', due_date: past.toISOString().split('T')[0] })).toBe('overdue');
+  });
+
+  it('retorna defaulting quando vencida há 91–180 dias', () => {
+    const past = new Date();
+    past.setDate(past.getDate() - 120);
+    expect(computeAnnuityStatus({ status: 'pending', due_date: past.toISOString().split('T')[0] })).toBe('defaulting');
+  });
+
+  it('retorna suspended quando vencida há > 180 dias', () => {
+    const past = new Date();
+    past.setDate(past.getDate() - 200);
+    expect(computeAnnuityStatus({ status: 'pending', due_date: past.toISOString().split('T')[0] })).toBe('suspended');
+  });
+
+  it('retorna suspended quando due_date é null e status != paid', () => {
+    expect(computeAnnuityStatus({ status: 'pending', due_date: null })).toBe('suspended');
+  });
+});
+
+// ── Testes HTTP ──────────────────────────────────────────────────────
+const express = require('express');
+const request = require('supertest');
+const jwt     = require('jsonwebtoken');
+
+const makeToken = (overrides) => jwt.sign(
+  Object.assign({ id: 'user-test-uuid', role: 'admin', plan: 'expansao' }, overrides || {}),
+  'aura-test-secret-2026',
+  { expiresIn: '1h' }
+);
+const adminToken = makeToken();
+
+const FED_ID  = 'fed-uuid-001';
+const DOJO_ID = 'dojo-uuid-001';
+const HIST_ID = 'hist-uuid-001';
+const TX_ID   = 'tx-uuid-001';
+const INTENT_ID = 'intent-uuid-001';
+
+function buildApp() {
+  const app = express();
+  app.use(express.json());
+  app.use('/federation/:id/financial', require('../src/routes/karateAnnuities'));
+  app.use('/federation/:id/financial', require('../src/routes/karateExpenses'));
+  app.use('/federation/:id/financial', require('../src/routes/karateFees'));
+  app.use('/federation/:id/financial', require('../src/routes/karateFinancial'));
+  return app;
+}
+
+// ── Suite: GET /financial/fees ────────────────────────────────────
+describe('GET /federation/:id/financial/fees', () => {
+  let app;
+  beforeAll(() => { app = buildApp(); });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.query.mockResolvedValueOnce({
+      rows: [
+        { id: 'fee-1', fee_type: 'dojo', size_tier: 'up_to_40', amount: 500.00, effective_from: '2026-01-01' },
+        { id: 'fee-2', fee_type: 'cpf',  size_tier: null,        amount: 120.00, effective_from: '2026-01-01' },
+      ],
+    });
+  });
+
+  it('retorna tabela vigente com amount como float', (done) => {
+    request(app)
+      .get('/federation/' + FED_ID + '/financial/fees')
+      .set('Authorization', 'Bearer ' + adminToken)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(Array.isArray(res.body)).toBe(true);
+        expect(res.body[0].fee_type).toBe('dojo');
+        expect(typeof res.body[0].amount).toBe('number');
+        done();
+      });
+  });
+});
+
+// ── Suite: PUT /financial/fees ───────────────────────────────────
+describe('PUT /federation/:id/financial/fees (nova vigência)', () => {
+  let app;
+  beforeAll(() => { app = buildApp(); });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    const mockClient = { query: jest.fn(), release: jest.fn() };
+    db.connect.mockResolvedValue(mockClient);
+
+    // Ordem: BEGIN → verifica federação → INSERT fee_1 → INSERT fee_2 → COMMIT
+    mockClient.query
+      .mockResolvedValueOnce({})  // BEGIN
+      .mockResolvedValueOnce({    // SELECT federação
+        rows: [{ id: FED_ID }],
+      })
+      .mockResolvedValueOnce({    // INSERT fee dojo
+        rows: [{ id: 'fee-new-1', fee_type: 'dojo', size_tier: 'up_to_40', amount: 600.00, effective_from: '2027-01-01' }],
+      })
+      .mockResolvedValueOnce({    // INSERT fee cpf
+        rows: [{ id: 'fee-new-2', fee_type: 'cpf', size_tier: null, amount: 150.00, effective_from: '2027-01-01' }],
+      })
+      .mockResolvedValueOnce({});  // COMMIT
+  });
+
+  it('cria nova vigência append-only e retorna os novos registros', (done) => {
+    request(app)
+      .put('/federation/' + FED_ID + '/financial/fees')
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({
+        effective_from: '2027-01-01',
+        fees: [
+          { fee_type: 'dojo', size_tier: 'up_to_40', amount: 600 },
+          { fee_type: 'cpf', amount: 150 },
+        ],
+      })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(Array.isArray(res.body)).toBe(true);
+        expect(res.body).toHaveLength(2);
+        expect(res.body[0].effective_from).toBe('2027-01-01');
+        done();
+      });
+  });
+
+  it('retorna 422 sem effective_from', (done) => {
+    request(app)
+      .put('/federation/' + FED_ID + '/financial/fees')
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ fees: [{ fee_type: 'dojo', amount: 600 }] })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        done();
+      });
+  });
+
+  it('retorna 422 com fee_type invalido', (done) => {
+    request(app)
+      .put('/federation/' + FED_ID + '/financial/fees')
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({
+        effective_from: '2027-01-01',
+        fees: [{ fee_type: 'invalido', amount: 100 }],
+      })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        done();
+      });
+  });
+});
+
+// ── Suite: charge → pix → confirm ───────────────────────────────
+describe('POST charge → pix → confirm (dojô anuidade)', () => {
+  let app;
+  beforeAll(() => { app = buildApp(); });
+
+  // ── charge ──
+  describe('POST /annuities/dojos/:dojoId/charge', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      const mockClient = { query: jest.fn(), release: jest.fn() };
+      db.connect.mockResolvedValue(mockClient);
+
+      // Ordem: BEGIN → verifica dojô → advisory lock → checa existing → INSERT tx → INSERT hist → COMMIT
+      mockClient.query
+        .mockResolvedValueOnce({})   // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [] })  // advisory lock
+        .mockResolvedValueOnce({ rows: [] })  // check existing annuity_history
+        .mockResolvedValueOnce({ rows: [{ id: TX_ID }] })  // INSERT transaction
+        .mockResolvedValueOnce({              // INSERT karate_dojo_annuity_history
+          rows: [{
+            id: HIST_ID,
+            dojo_id: DOJO_ID,
+            reference_period: '2026',
+            amount: 500.00,
+            due_date: '2026-12-31',
+            status: 'pending',
+            paid_at: null,
+          }],
+        })
+        .mockResolvedValueOnce({});  // COMMIT
+    });
+
+    it('cria cobrança e retorna status=due', (done) => {
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ amount: 500, due_date: '2026-12-31', reference_period: '2026' })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(201);
+          expect(res.body.status).toBe('due');
+          expect(res.body.dojo_id).toBe(DOJO_ID);
+          expect(res.body.transaction_id).toBe(TX_ID);
+          expect(res.body.annuity_history_id).toBe(HIST_ID);
+          done();
+        });
+    });
+
+    it('retorna 422 sem amount', (done) => {
+      jest.clearAllMocks();
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ due_date: '2026-12-31', reference_period: '2026' })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(422);
+          done();
+        });
+    });
+  });
+
+  // ── pix ──
+  describe('POST /annuities/dojos/:dojoId/pix', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      // Sem db.connect: pix usa db.query
+      // Ordem: busca annuity_history → busca existing intents → busca pix_config → INSERT intent
+      db.query
+        .mockResolvedValueOnce({  // busca annuity + dojo_name
+          rows: [{
+            id: HIST_ID,
+            dojo_id: DOJO_ID,
+            reference_period: '2026',
+            amount: 500.00,
+            due_date: '2026-12-31',
+            status: 'pending',
+            transaction_id: TX_ID,
+            dojo_name: 'Dojô SP',
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [] })  // busca existing pending intents
+        .mockResolvedValueOnce({ rows: [] })  // fetchFederationPixConfig (nenhuma config)
+        .mockResolvedValueOnce({              // INSERT karate_payment_intents
+          rows: [{ id: INTENT_ID }],
+        });
+    });
+
+    it('cria PIX intent e retorna payload (mock quando sem config)', (done) => {
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/pix')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ annuity_history_id: HIST_ID })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(201);
+          expect(res.body.intent_id).toBe(INTENT_ID);
+          expect(res.body.payload).toBeTruthy();
+          expect(res.body.provider).toBe('static_brcode');
+          done();
+        });
+    });
+
+    it('retorna 422 sem annuity_history_id', (done) => {
+      jest.clearAllMocks();
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/pix')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({})
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(422);
+          done();
+        });
+    });
+  });
+
+  // ── confirm ──
+  describe('POST /financial/payments/:intentId/confirm', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+      const mockClient = { query: jest.fn(), release: jest.fn() };
+      db.connect.mockResolvedValue(mockClient);
+
+      // Ordem: BEGIN → busca intent+annuity → UPDATE intent → UPDATE annuity_history
+      //         → UPDATE transaction → SELECT nfe_id → INSERT nfse → UPDATE tx nfe_id → COMMIT
+      mockClient.query
+        .mockResolvedValueOnce({})  // BEGIN
+        .mockResolvedValueOnce({    // SELECT intent JOIN annuity_history
+          rows: [{
+            id: INTENT_ID,
+            payment_intent_id: 'static-dojo-xxx-2026',
+            provider: 'static_brcode',
+            status: 'pending',
+            annuity_history_id: HIST_ID,
+            transaction_id: TX_ID,
+            dojo_id: DOJO_ID,
+            reference_period: '2026',
+            annuity_amount: 500.00,
+            annuity_status: 'pending',
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [] })  // UPDATE intent status=paid
+        .mockResolvedValueOnce({ rows: [] })  // UPDATE annuity_history status=paid
+        .mockResolvedValueOnce({ rows: [] })  // UPDATE transaction status=paid
+        .mockResolvedValueOnce({ rows: [{ nfe_id: null }] })  // SELECT nfe_id
+        .mockResolvedValueOnce({ rows: [{ id: 'nfse-uuid-001' }] })  // INSERT nfse
+        .mockResolvedValueOnce({ rows: [] })  // UPDATE transaction nfe_id
+        .mockResolvedValueOnce({});  // COMMIT
+    });
+
+    it('confirma pagamento, retorna status=paid e nfse_id', (done) => {
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/payments/' + INTENT_ID + '/confirm')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ emit_nfse: true })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(200);
+          expect(res.body.status).toBe('paid');
+          expect(res.body.nfse_id).toBe('nfse-uuid-001');
+          expect(res.body.idempotent_hit).toBe(false);
+          done();
+        });
+    });
+
+    it('retorna 409 quando intent já está paid', (done) => {
+      jest.clearAllMocks();
+      const mockClient = { query: jest.fn(), release: jest.fn() };
+      db.connect.mockResolvedValue(mockClient);
+
+      mockClient.query
+        .mockResolvedValueOnce({})  // BEGIN
+        .mockResolvedValueOnce({    // SELECT intent (já pago)
+          rows: [{
+            id: INTENT_ID,
+            status: 'paid',
+            annuity_history_id: HIST_ID,
+            transaction_id: TX_ID,
+          }],
+        })
+        .mockResolvedValueOnce({});  // ROLLBACK
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/payments/' + INTENT_ID + '/confirm')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({})
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(409);
+          expect(res.body.idempotent_hit).toBe(true);
+          done();
+        });
+    });
+  });
+});
+
+// ── Suite: status do dojô via anuidades (annuity_history) ──────────
+describe('getDojoAnnuityStatus (via DB mock)', () => {
+  const { getDojoAnnuityStatus } = require('../src/services/karateFinanceService');
+
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  it('retorna status=paid quando anuidade está paga', async () => {
+    db.query.mockResolvedValueOnce({
+      rows: [{
+        id: HIST_ID,
+        dojo_id: DOJO_ID,
+        reference_period: '2026',
+        amount: 500,
+        due_date: '2026-12-31',
+        paid_at: '2026-03-01',
+        status: 'paid',
+        transaction_id: TX_ID,
+      }],
+    });
+    const result = await getDojoAnnuityStatus(DOJO_ID, '2026');
+    expect(result.status).toBe('paid');
+    expect(result.days_overdue).toBe(0);
+    expect(result.amount).toBe(500);
+  });
+
+  it('retorna status=overdue quando anuidade vencida há 45 dias', async () => {
+    const past = new Date();
+    past.setDate(past.getDate() - 45);
+    db.query.mockResolvedValueOnce({
+      rows: [{
+        id: HIST_ID,
+        dojo_id: DOJO_ID,
+        reference_period: '2026',
+        amount: 500,
+        due_date: past.toISOString().split('T')[0],
+        paid_at: null,
+        status: 'pending',
+        transaction_id: TX_ID,
+      }],
+    });
+    const result = await getDojoAnnuityStatus(DOJO_ID, '2026');
+    expect(result.status).toBe('overdue');
+    expect(result.days_overdue).toBeGreaterThanOrEqual(44);
+    expect(result.days_overdue).toBeLessThanOrEqual(46);
+  });
+
+  it('retorna status=suspended quando não há cobrança', async () => {
+    db.query.mockResolvedValueOnce({ rows: [] });
+    const result = await getDojoAnnuityStatus(DOJO_ID, '2026');
+    expect(result.status).toBe('suspended');
+    expect(result.amount).toBe(0);
+  });
+});
+
+// ── Suite: POST /financial/expenses ─────────────────────────────
+describe('POST /federation/:id/financial/expenses', () => {
+  let app;
+  beforeAll(() => { app = buildApp(); });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.query.mockResolvedValueOnce({
+      rows: [{
+        id: 'exp-uuid-001',
+        category: 'expense_cost',
+        amount: 250.00,
+        description: 'Aluguel gîmnásio',
+        due_date: null,
+        reference_type: null,
+        reference_id: null,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      }],
+    });
+  });
+
+  it('cria saída e retorna 201', (done) => {
+    request(app)
+      .post('/federation/' + FED_ID + '/financial/expenses')
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ amount: 250, category: 'expense_cost', description: 'Aluguel gimnásio' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        expect(res.body.category).toBe('expense_cost');
+        expect(typeof res.body.amount).toBe('number');
+        done();
+      });
+  });
+
+  it('retorna 422 com category inválida', (done) => {
+    jest.clearAllMocks();
+    request(app)
+      .post('/federation/' + FED_ID + '/financial/expenses')
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ amount: 100, category: 'invalida', description: 'teste' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        done();
+      });
+  });
+});
