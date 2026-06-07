@@ -108,4 +108,31 @@ router.use('/federation/:id/dojos',                require('./karateDojos'));
 // mas precisam do param :id, então também montamos aqui:
 router.use('/federation/:id', require('./karateFederation'));
 
+// ── AURA KARATÊ — Track B (backend financeiro + anuidades) ──
+// Guard: adminOnly() em todas as rotas financeiras (RBAC §7.3)
+//
+// Ordem de montagem: rotas com path literal (/annuities, /fees, /overdue, /expenses, /payments)
+// ANTES do router de financial/overview (que usa apenas /overview).
+// Evita que :id capture strings literais.
+//
+// GET  /federation/:id/financial/overview
+// GET  /federation/:id/financial/annuities/dojos
+// POST /federation/:id/financial/annuities/dojos/:dojoId/charge
+// POST /federation/:id/financial/annuities/dojos/:dojoId/pix
+// GET  /federation/:id/financial/payments/:intentId/status
+// POST /federation/:id/financial/payments/:intentId/confirm
+// GET  /federation/:id/financial/annuities/cpf
+// POST /federation/:id/financial/annuities/cpf/:practitionerId/charge
+// POST /federation/:id/financial/annuities/cpf/:practitionerId/pix
+// GET  /federation/:id/financial/fees
+// PUT  /federation/:id/financial/fees
+// GET  /federation/:id/financial/expenses
+// POST /federation/:id/financial/expenses
+// GET  /federation/:id/financial/overdue
+// POST /federation/:id/financial/overdue/:targetId/remind
+router.use('/federation/:id/financial', require('./karateAnnuities'));
+router.use('/federation/:id/financial', require('./karateExpenses'));
+router.use('/federation/:id/financial', require('./karateFees'));
+router.use('/federation/:id/financial', require('./karateFinancial'));
+
 module.exports = router;
