@@ -346,8 +346,8 @@ async function createCreditSale(client, {
   // 3. Agenda de parcelas (installments > 1)
   const schedule = [];
   if (installments > 1) {
-    await _getOrCreateProfile(client, companyId, customerId);
-    const config = await _getOrCreatePlanConfig(client, companyId);
+    // Hub F1.4: reusa profile/config ja carregados no topo (evita queries duplicadas).
+    const config = _config;
 
     // F3: se accountId aponta para um carne com terms_snapshot, usar como defaults
     let accountTerms = null;

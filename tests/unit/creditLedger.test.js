@@ -50,6 +50,8 @@ describe('creditLedger.createCreditSale', () => {
       company_id: COMPANY_ID, customer_id: CUSTOMER_ID, sale_id: SALE_ID,
     };
     const client = makeMockClient([
+      { rows: [{ id: 'prof-00', status: 'active' }] }, // _getOrCreateProfile (topo)
+      { rows: [{ id: 'conf-00', max_installments: 12 }] }, // _getOrCreatePlanConfig (topo)
       { rows: [debitRow] }, // INSERT customer_credit_transactions debit
       { rows: [] },         // INSERT transactions A Receber
     ]);
@@ -61,15 +63,15 @@ describe('creditLedger.createCreditSale', () => {
 
     expect(result.debited).toEqual(debitRow);
     expect(result.schedule).toHaveLength(0);
-    expect(client.query).toHaveBeenCalledTimes(2);
+    expect(client.query).toHaveBeenCalledTimes(4);
 
     // Verifica que o debit foi inserido corretamente
-    const debitCall = client.query.mock.calls[0];
+    const debitCall = client.query.mock.calls[2];
     expect(debitCall[0]).toMatch(/INSERT INTO customer_credit_transactions/i);
     expect(debitCall[1]).toEqual(expect.arrayContaining([COMPANY_ID, CUSTOMER_ID, SALE_ID, 100]));
 
     // Verifica A Receber
-    const arCall = client.query.mock.calls[1];
+    const arCall = client.query.mock.calls[3];
     expect(arCall[0]).toMatch(/Crediario - A Receber/i);
     expect(arCall[1]).toEqual(expect.arrayContaining(['pdv-credit-receivable-' + SALE_ID]));
   });
@@ -83,10 +85,10 @@ describe('creditLedger.createCreditSale', () => {
     const instRow3   = { id: 'inst-03' };
 
     const client = makeMockClient([
+      { rows: [profileRow] }, // _getOrCreateProfile (topo)
+      { rows: [configRow] },  // _getOrCreatePlanConfig (topo)
       { rows: [debitRow] },   // INSERT debit
       { rows: [] },           // INSERT A Receber
-      { rows: [profileRow] }, // getOrCreateProfile
-      { rows: [configRow] },  // getOrCreatePlanConfig
       { rows: [instRow1] },   // INSERT installment 1
       { rows: [] },           // UPDATE pix_link 1
       { rows: [instRow2] },   // INSERT installment 2
@@ -122,10 +124,10 @@ describe('creditLedger.createCreditSale', () => {
     const instRow2   = { id: 'inst-b' };
 
     const client = makeMockClient([
-      { rows: [debitRow] },
-      { rows: [] },
       { rows: [profileRow] },
       { rows: [configRow] },
+      { rows: [debitRow] },
+      { rows: [] },
       { rows: [instRow1] }, { rows: [] },
       { rows: [instRow2] }, { rows: [] },
       { rows: [] }, { rows: [] },
