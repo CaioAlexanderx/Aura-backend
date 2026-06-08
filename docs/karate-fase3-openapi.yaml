@@ -1,14 +1,14 @@
 openapi: 3.1.0
 info:
   title: Aura Karatê — API Fase 3 (Carteirinha Digital + Portal do Praticante)
-  version: "0.3.2"
+  version: "0.3.3"
   description: >
     Contrato congelado da Wave 0 da Fase 3 (Track D). Backend e Frontend
-    trabalham em paralelo contra este contrato. Migrations 164 + 165.
+    trabalham em paralelo contra este contrato. Migrations 164 + 165 + 166.
     NOTA: a migration 163 foi consumida por 163_credit_phase1_version_schema;
-    a numeração karatê seguiu para 164/165.
+    a numeração karatê seguiu para 164/165/166.
 
-    DECISÕES (v0.3.2 — pós-aprovação dos mocks DESIGN-14/15/16/17):
+    DECISÕES (pós-aprovação dos mocks DESIGN-14/15/16/17):
       1) Carteirinha é DATA-ONLY: o app NÃO gera imagem/PDF. As rotas processam
          o pedido e devolvem os DADOS; a arte (frente/verso, QR) é renderizada
          na camada de design/frontend (DESIGN-14, APROVADO). QR aponta para
@@ -24,6 +24,8 @@ info:
          (federação, cpf, código).
       4) Inscrição pública: exames e cursos reais (lookup por CPF + PIX);
          COMPETIÇÕES são stub 501 (inscrição feita pela academia junto à federação).
+      5) SEM "faixa pretendida" na inscrição (Caio 08/06): o praticante não escolhe
+         a graduação; a federação/banca define depois. target_belt opcional (mig. 166).
 servers:
   - url: https://api.getaura.com.br
   - url: http://localhost:3000
@@ -86,7 +88,7 @@ paths:
       summary: 'Dados do evento para inscrição (exame/curso) + capacity{max,filled} (vagas). Competição → 404 (Track E)'
       responses: { '200': { description: ok }, '404': { description: não encontrado }, '409': { description: encerradas } }
     post:
-      summary: 'Submete inscrição: lookup por CPF + PIX (exame/curso reais). Competição → 501 stub'
+      summary: 'Submete inscrição: lookup por CPF + PIX (exame/curso reais; SEM faixa pretendida). Competição → 501 stub'
       responses:
         '201': { description: 'inscrição registrada (+ payment PIX quando há taxa)' }
         '404': { description: praticante não localizado }
@@ -94,7 +96,7 @@ paths:
         '501': { description: 'competição ainda não suportada (Track E)' }
   /public/karate/{slug}/inscricao/{eventId}/lookup:
     post:
-      summary: 'Localiza praticante por CPF (passo cpf→faixa): retorna faixa atual + already_enrolled, SEM efetivar'
+      summary: 'Localiza praticante por CPF (passo cpf→confirma): retorna faixa atual + already_enrolled, SEM efetivar'
       responses: { '200': { description: 'found, already_enrolled, practitioner{current_belt, current_belt_name}' }, '404': { description: 'praticante não localizado' }, '409': { description: encerradas }, '501': { description: 'competição (Track E)' } }
 components:
   securitySchemes:

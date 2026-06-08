@@ -339,7 +339,7 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
         fee_amount: ev.fee_amount,
         capacity,
       },
-      requires: ev.kind === 'exam' ? ['cpf', 'target_belt'] : ['cpf'],
+      requires: ['cpf'],
     });
   } catch (err) {
     console.error('[karatePublic] inscricao GET error:', err.message);
@@ -348,9 +348,9 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
 });
 
 // ── POST /:slug/inscricao/:eventId/lookup — localizar praticante por CPF ──
-// Passo intermediário do wizard (cpf → faixa): retorna a faixa atual + se já
-// está inscrito, SEM efetivar a inscrição. Erros espelham o mock: 404 (não
-// localizado), 409 (encerrado), 501 (competição).
+// Passo intermediário do wizard (cpf → confirma): retorna a faixa atual + se já
+// está inscrito, SEM efetivar a inscrição. Erros: 404 (não localizado),
+// 409 (encerrado), 501 (competição).
 router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
   const { cpf } = req.body || {};
   try {
@@ -402,7 +402,7 @@ router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
       },
       event: {
         id: ev.id, name: ev.name, kind: ev.kind, fee_amount: ev.fee_amount,
-        requires: ev.kind === 'exam' ? ['target_belt'] : [],
+        requires: [],
       },
     });
   } catch (err) {
@@ -415,7 +415,7 @@ router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
 // Exame: insere candidato (status enrolled). Curso: enrollment.
 // Competição: 501 (stub, depende da Track E). PIX via karatePaymentProvider.
 router.post('/:slug/inscricao/:eventId', async (req, res) => {
-  const { cpf, target_belt } = req.body || {};
+  const { cpf } = req.body || {};
   try {
     const fed = await resolveFederation(req.params.slug);
     if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
@@ -447,10 +447,7 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
       );
 
       if (ev.kind === 'exam') {
-        if (!target_belt) {
-          await client.query('ROLLBACK');
-          return res.status(422).json({ error: 'target_belt é obrigatório para exame', code: 'VALIDATION_ERROR' });
-        }
+        // Faixa pretendida removida (decisao Caio 08/06): a federacao/banca define depois.
         const dup = await client.query(
           `SELECT id, status FROM karate_belt_exam_candidates WHERE exam_id = $1 AND student_id = $2 LIMIT 1`,
           [ev.id, student.id]
@@ -460,10 +457,10 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
           return res.status(409).json({ error: 'Você já está inscrito neste exame', code: 'CONFLICT', candidate_id: dup.rows[0].id });
         }
         const ins = await client.query(
-          `INSERT INTO karate_belt_exam_candidates (exam_id, student_id, target_belt, status, fee_paid, created_at, updated_at)
-           VALUES ($1,$2,$3,'enrolled', false, NOW(), NOW())
+          `INSERT INTO karate_belt_exam_candidates (exam_id, student_id, status, fee_paid, created_at, updated_at)
+           VALUES ($1,$2,'enrolled', false, NOW(), NOW())
            RETURNING id`,
-          [ev.id, student.id, target_belt]
+          [ev.id, student.id]
         );
         inscription = { type: 'exam', id: ins.rows[0].id };
       } else {
