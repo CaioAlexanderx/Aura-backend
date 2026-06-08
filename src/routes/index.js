@@ -92,6 +92,19 @@ router.use('/aprovacao',         require('./studioApprovalPublic'));
 // Migration 138. Espelha a mecânica de /aprovacao.
 router.use('/orcamento',         require('./studioQuotePublic'));
 
+// ── AURA KARATÊ — Track D (público: carteirinha verify + portal + inscrição) ──
+// SEM auth de empresa. Auth própria por token/OTP. Migration 164.
+//   GET  /public/karate/verify/:token                 — verify carteirinha (mínimo/LGPD)
+//   GET  /public/karate/portal/me                     — portal autenticado (OTP→JWT)
+//   POST /public/karate/portal/opt-in                 — opt-in portal público (não menores)
+//   POST /public/karate/:slug/portal/request-otp      — solicita OTP (genérico)
+//   POST /public/karate/:slug/portal/verify-otp       — valida OTP → token de portal
+//   GET  /public/karate/:slug/p/:publicToken          — portal público (reduzido)
+//   GET  /public/karate/:slug/events                  — agenda pública
+//   GET  /public/karate/:slug/inscricao/:eventId      — dados p/ inscrição
+//   POST /public/karate/:slug/inscricao/:eventId      — inscrição (exame/curso real; competição 501)
+router.use('/public/karate', require('./karatePublic'));
+
 // ── AURA KARATÊ — Track A (backend cadastros) ───────────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
@@ -109,62 +122,23 @@ router.use('/federation/:id/dojos',                require('./karateDojos'));
 router.use('/federation/:id', require('./karateFederation'));
 
 // ── AURA KARATÊ — Track B (backend financeiro + anuidades) ──
-// Guard: adminOnly() em todas as rotas financeiras (RBAC §7.3)
-//
-// Ordem de montagem: rotas com path literal (/annuities, /fees, /overdue, /expenses, /payments)
-// ANTES do router de financial/overview (que usa apenas /overview).
-// Evita que :id capture strings literais.
-//
-// GET  /federation/:id/financial/overview
-// GET  /federation/:id/financial/annuities/dojos
-// POST /federation/:id/financial/annuities/dojos/:dojoId/charge
-// POST /federation/:id/financial/annuities/dojos/:dojoId/pix
-// GET  /federation/:id/financial/payments/:intentId/status
-// POST /federation/:id/financial/payments/:intentId/confirm
-// GET  /federation/:id/financial/annuities/cpf
-// POST /federation/:id/financial/annuities/cpf/:practitionerId/charge
-// POST /federation/:id/financial/annuities/cpf/:practitionerId/pix
-// GET  /federation/:id/financial/fees
-// PUT  /federation/:id/financial/fees
-// GET  /federation/:id/financial/expenses
-// POST /federation/:id/financial/expenses
-// GET  /federation/:id/financial/overdue
-// POST /federation/:id/financial/overdue/:targetId/remind
 router.use('/federation/:id/financial', require('./karateAnnuities'));
 router.use('/federation/:id/financial', require('./karateExpenses'));
 router.use('/federation/:id/financial', require('./karateFees'));
 router.use('/federation/:id/financial', require('./karateFinancial'));
 
 // ── AURA KARATÊ — Track C (backend exames + certificados) ───
-// Ordem de montagem:
-//   1. karateRequirements: /belt-requirements (literal, sem param)
-//   2. karateExams:        /belt-exams (literal, sem param)
-//   3. karateCourses:      /courses (literal, sem param)
-//   4. karateCertificates: /certificates/:candidateId (param)
-//   (practitioners eligibility está dentro de karateExams)
-//
-// GET  /federation/:id/belt-requirements
-// PUT  /federation/:id/belt-requirements          (adminOnly)
-// GET  /federation/:id/belt-exams
-// POST /federation/:id/belt-exams
-// GET  /federation/:id/belt-exams/:examId
-// PATCH /federation/:id/belt-exams/:examId
-// GET  /federation/:id/belt-exams/:examId/examiners
-// POST /federation/:id/belt-exams/:examId/examiners
-// POST /federation/:id/belt-exams/:examId/candidates         (201 + eligibility, FPKT #1)
-// PATCH /federation/:id/belt-exams/:examId/candidates/:cId  (examResults RBAC)
-// POST /federation/:id/belt-exams/:examId/candidates/:cId/correction
-// POST /federation/:id/belt-exams/:examId/close             (NÃO emite cert, FPKT #3)
-// GET  /federation/:id/practitioners/:pId/eligibility/:belt  (só aviso)
-// GET  /federation/:id/courses
-// POST /federation/:id/courses
-// GET  /federation/:id/courses/:eventId
-// POST /federation/:id/courses/:eventId/enroll
-// POST /federation/:id/certificates/:candidateId/issue       (sob demanda, FPKT #3)
-// GET  /federation/:id/certificates/:candidateId
 router.use('/federation/:id', require('./karateRequirements'));
 router.use('/federation/:id', require('./karateExams'));
 router.use('/federation/:id', require('./karateCourses'));
 router.use('/federation/:id', require('./karateCertificates'));
+
+// ── AURA KARATÊ — Track D (admin: carteirinha digital) ──────
+// Migration 164. Somente DADOS (sem geração de imagem no app).
+//   POST /federation/:id/practitioners/:practitionerId/issue-card  (staffWrite)
+//   GET  /federation/:id/practitioners/:practitionerId/card        (read)
+//   GET  /federation/:id/cards                                     (read)
+//   POST /federation/:id/cards/issue-batch                         (adminOnly)
+router.use('/federation/:id', require('./karateCards'));
 
 module.exports = router;
