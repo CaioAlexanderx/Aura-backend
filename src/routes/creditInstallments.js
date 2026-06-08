@@ -14,6 +14,11 @@
  * Hub F1.4 (07/06/2026):
  *   - GET /customers/:cid/profile: score_label, available_limit, account_id nas parcelas abertas
  *   - GET /plan-config + PUT /plan-config: score_warn_min (defensivo 42703)
+ * Hub F1.4.1 (07/06/2026):
+ *   - GET /customers/:cid/profile: score_warning (aviso nao-impeditivo)
+ *   - POST /installments: warnings[] (SCORE_BELOW_MIN) sem bloquear.
+ *     REGRA: score NUNCA bloqueia. Unico impeditivo e o bloqueio MANUAL
+ *     (status === 'blocked' -> 422 CUSTOMER_BLOCKED), ja existente.
  */
 
 const express = require('express');
@@ -68,6 +73,7 @@ router.use(assertCrediarioEnabled);
 // ─── GET /credit/customers/:cid/profile ──────────────────────────────────
 // F2: adiciona campo `terms: { overrides, effective }` ao perfil.
 // Hub F1.4: score_label, available_limit, account_id nas parcelas abertas.
+// Hub F1.4.1: score_warning (aviso nao-impeditivo).
 router.get('/customers/:cid/profile', async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
@@ -117,6 +123,8 @@ router.get('/customers/:cid/profile', async (req, res) => {
     res.json({
       ...profile,
       score_label:     creditLedger.scoreLabel(creditScore),
+      // Hub F1.4.1: aviso nao-impeditivo. null = sem aviso.
+      score_warning:   creditLedger.scoreWarning(creditScore, config),
       available_limit: availableLimit,
       config,
       terms,
@@ -369,6 +377,8 @@ router.put('/plan-config', async (req, res) => {
 
 // ─── POST /credit/installments ───────────────────────────────────────────────
 // F3: aceita account_id para vincular parcelas ao carne
+// Hub F1.4.1: aviso de score NAO-impeditivo (warnings[]). UNICO impeditivo
+//             continua sendo o bloqueio MANUAL (status === 'blocked' -> 422).
 router.post('/installments', async (req, res) => {
   const companyId = req.params.id;
   const { customer_id, sale_id, total_amount, installments, first_due_date,
@@ -385,6 +395,7 @@ router.post('/installments', async (req, res) => {
   try {
     await client.query('BEGIN');
     const profile = await creditLedger._getOrCreateProfile(client, companyId, customer_id);
+    // UNICO impeditivo: bloqueio MANUAL do cliente.
     if (profile?.status === 'blocked') {
       await client.query('ROLLBACK');
       return res.status(422).json({
@@ -397,6 +408,12 @@ router.post('/installments', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: `Maximo de ${config.max_installments} parcelas configurado.` });
     }
+
+    // Aviso de score NAO-impeditivo. NUNCA retorna erro por score.
+    const scoreWarn = creditLedger.scoreWarning(parseInt(profile?.credit_score, 10) || 500, config);
+    const warnings = scoreWarn
+      ? [{ code: 'SCORE_BELOW_MIN', threshold: scoreWarn.threshold, actual: scoreWarn.actual }]
+      : [];
 
     const period = creditLedger.resolvePeriod(period_unit, period_count, config);
     const effectiveRate = parseFloat(config?.interest_rate) || 0;
@@ -450,7 +467,7 @@ router.post('/installments', async (req, res) => {
     }
     await creditLedger._updateCreditUsed(client, companyId, customer_id);
     await client.query('COMMIT');
-    res.status(201).json({ installments: createdInstallments });
+    res.status(201).json({ installments: createdInstallments, warnings });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('POST /credit/installments', err.message);
