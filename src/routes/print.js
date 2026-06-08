@@ -3,12 +3,15 @@
 // P0 #6 FIX: seller_name now shows employee name (cashier), not owner
 // 29/05/2026: GET /danfe/devolucao/:saleId — baixa o PDF do DANFE da
 //   NF-e (modelo 55) de devolucao emitida pra troca, via Nuvem Fiscal.
+// 07/06/2026: GET /print/credit/:cid/carne — carnê/extrato imprimível
+//   do crediário do cliente (agrupado por carnê + Pix estático manual).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const nuvemfiscal = require('../services/nuvemfiscal');
+const { buildStaticBrCode, validatePixKey } = require('../services/staticPixService');
 
 const NUVEM_URL = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
 
@@ -238,6 +241,305 @@ router.get('/danfe/devolucao/:saleId', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[print] danfe devolucao error:', err.message);
     res.status(500).json({ error: 'Erro ao gerar DANFE de devolucao' });
+  }
+});
+
+// ============================================================
+// GET /print/credit/:cid/carne
+// Gera HTML imprimível do carnê/extrato de crediário do cliente,
+// agrupado por carnê (credit_accounts), com bloco Pix estático manual
+// se a loja tiver pix_key em digital_channel_config.
+//
+// requireAuth: frontend deve chamar via fetch com Authorization header
+// e renderizar via document.write (mesmo padrão das outras rotas /print/*).
+// ============================================================
+router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
+  const companyId  = req.params.id;
+  const customerId = req.params.cid;
+
+  try {
+    // 1. Dados da empresa (companies NÃO tem coluna `name`)
+    const { rows: companyRows } = await db.query(
+      `SELECT COALESCE(trade_name, legal_name) AS display_name,
+              legal_name, trade_name, cnpj, phone,
+              address_city, address_state
+         FROM companies WHERE id = $1`,
+      [companyId]
+    );
+    if (!companyRows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
+    const company = companyRows[0];
+
+    // 2. Dados do cliente
+    const { rows: custRows } = await db.query(
+      `SELECT id, name, phone, cpf_cnpj FROM customers WHERE id = $1 AND company_id = $2`,
+      [customerId, companyId]
+    );
+    if (!custRows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
+    const customer = custRows[0];
+
+    // 3. Saldo total em aberto (view customer_credit_balances)
+    let totalBalance = 0;
+    try {
+      const { rows: balRows } = await db.query(
+        `SELECT COALESCE(balance, 0) AS balance
+           FROM customer_credit_balances
+          WHERE customer_id = $1 AND company_id = $2`,
+        [customerId, companyId]
+      );
+      totalBalance = parseFloat(balRows[0]?.balance || 0);
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/carne] balance warn:', e.message);
+    }
+
+    // 4. Parcelas (todas, não só em aberto) para montar o cronograma
+    let allInstallments = [];
+    try {
+      const r = await db.query(
+        `SELECT id, installment_number, total_installments,
+                amount_due, covered_amount, due_date, status, account_id
+           FROM credit_installments
+          WHERE customer_id = $1 AND company_id = $2
+          ORDER BY due_date ASC`,
+        [customerId, companyId]
+      );
+      allInstallments = r.rows;
+    } catch (instErr) {
+      if (instErr.code === '42703') {
+        // account_id ainda não existe — fallback sem a coluna
+        try {
+          const r = await db.query(
+            `SELECT id, installment_number, total_installments,
+                    amount_due, covered_amount, due_date, status
+               FROM credit_installments
+              WHERE customer_id = $1 AND company_id = $2
+              ORDER BY due_date ASC`,
+            [customerId, companyId]
+          );
+          allInstallments = r.rows.map(i => ({ ...i, account_id: null }));
+        } catch (_) {}
+      } else if (instErr.code !== '42P01') {
+        console.warn('[print/carne] installments warn:', instErr.message);
+      }
+    }
+
+    // 5. Carnês cadastrados
+    let accounts = [];
+    try {
+      const { rows: accRows } = await db.query(
+        `SELECT id, name, status FROM credit_accounts
+          WHERE company_id = $1 AND customer_id = $2
+          ORDER BY created_at ASC`,
+        [companyId, customerId]
+      );
+      accounts = accRows;
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/carne] accounts warn:', e.message);
+    }
+
+    // 6. Chave Pix da loja (digital_channel_config)
+    let pixPayload = null;
+    try {
+      const { rows: cfgRows } = await db.query(
+        `SELECT pix_key, pix_key_type, pix_holder_name, pix_holder_city, site_name, address
+           FROM digital_channel_config WHERE company_id = $1`,
+        [companyId]
+      );
+      const cfg = cfgRows[0];
+      if (cfg && cfg.pix_key && String(cfg.pix_key).trim()) {
+        const validation = validatePixKey(cfg.pix_key, cfg.pix_key_type);
+        if (validation.valid) {
+          let city = cfg.pix_holder_city;
+          if (!city && cfg.address) {
+            const parts = String(cfg.address).split(',').map(s => s.trim());
+            city = parts[parts.length - 2] || parts[parts.length - 1] || '';
+          }
+          // Se saldo > 0 inclui o valor; senão gera sem valor fixo (comprador digita)
+          pixPayload = buildStaticBrCode({
+            pixKey:          validation.normalized,
+            amount:          totalBalance > 0 ? totalBalance : undefined,
+            beneficiaryName: cfg.pix_holder_name || cfg.site_name || company.display_name || 'AURA NEGOCIO',
+            beneficiaryCity: city || company.address_city || 'BRASIL',
+            txid:            `CRED${customerId.replace(/-/g, '').slice(0, 20)}`,
+          });
+        }
+      }
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/carne] pix warn:', e.message);
+    }
+
+    // 7. Montar grupos de parcelas por carnê
+    // Agrupa: account_id null → "Sem carnê"
+    const accountMap = {};
+    for (const acc of accounts) accountMap[acc.id] = acc;
+
+    const groups = {}; // key: account_id ou '__none__'
+    for (const inst of allInstallments) {
+      const key = inst.account_id || '__none__';
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(inst);
+    }
+
+    // Ordem: carnês cadastrados primeiro, depois "Sem carnê"
+    const orderedKeys = [
+      ...accounts.map(a => a.id),
+      ...(groups['__none__'] ? ['__none__'] : []),
+    ].filter(k => groups[k]);
+
+    function statusLabel(s) {
+      if (s === 'paid') return '<span style="color:#166534">Paga</span>';
+      if (s === 'overdue') return '<span style="color:#991b1b;font-weight:bold">Atrasada</span>';
+      return '<span style="color:#1e40af">Pendente</span>';
+    }
+
+    function fmtDate(d) {
+      if (!d) return '—';
+      const dt = new Date(d);
+      return dt.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+    }
+
+    let accountsHTML = '';
+    if (orderedKeys.length === 0) {
+      accountsHTML = '<p style="color:#666;font-size:12px">Nenhuma parcela registrada.</p>';
+    } else {
+      for (const key of orderedKeys) {
+        const instList = groups[key] || [];
+        const acc = key === '__none__' ? null : accountMap[key];
+        const accName = acc ? acc.name : 'Sem carnê';
+        const accStatus = acc ? acc.status : null;
+        const accBalance = instList
+          .filter(i => i.status !== 'paid')
+          .reduce((s, i) => s + Math.max(0, parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)), 0);
+
+        const rowsHTML = instList.map(inst => {
+          const remaining = Math.max(0, parseFloat(inst.amount_due) - parseFloat(inst.covered_amount || 0));
+          return `<tr>
+            <td style="padding:3px 4px">${inst.installment_number}/${inst.total_installments}</td>
+            <td style="padding:3px 4px">${fmtDate(inst.due_date)}</td>
+            <td style="padding:3px 4px;text-align:right">R$${fmt(inst.amount_due)}</td>
+            <td style="padding:3px 4px;text-align:right">${inst.status !== 'paid' ? `R$${fmt(remaining)}` : '—'}</td>
+            <td style="padding:3px 4px;text-align:center">${statusLabel(inst.status)}</td>
+          </tr>`;
+        }).join('');
+
+        accountsHTML += `
+          <div style="margin-bottom:16px">
+            <div style="font-weight:bold;font-size:13px;margin-bottom:4px">
+              ${accName}${accStatus === 'closed' ? ' <span style="font-size:10px;color:#666">(encerrado)</span>' : ''}
+            </div>
+            <table style="width:100%;border-collapse:collapse;font-size:11px">
+              <thead>
+                <tr style="border-bottom:1px solid #333">
+                  <th style="text-align:left;padding:3px 4px">Parcela</th>
+                  <th style="text-align:left;padding:3px 4px">Vencimento</th>
+                  <th style="text-align:right;padding:3px 4px">Valor</th>
+                  <th style="text-align:right;padding:3px 4px">Restante</th>
+                  <th style="text-align:center;padding:3px 4px">Status</th>
+                </tr>
+              </thead>
+              <tbody>${rowsHTML}</tbody>
+            </table>
+            <div style="text-align:right;font-size:11px;margin-top:4px;color:#444">
+              Saldo em aberto: <strong>R$${fmt(accBalance)}</strong>
+            </div>
+          </div>`;
+      }
+    }
+
+    // 8. Bloco Pix
+    let pixHTML = '';
+    if (pixPayload) {
+      const balLabel = totalBalance > 0 ? ` — R$ ${fmt(totalBalance)}` : '';
+      pixHTML = `
+        <div style="border:1px solid #000;padding:10px;margin-top:12px;page-break-inside:avoid">
+          <div style="font-weight:bold;font-size:13px;margin-bottom:6px">Pagar via Pix${balLabel}</div>
+          <div style="font-size:10px;margin-bottom:6px;color:#444">
+            Copie o codigo abaixo ou escaneie o QR Code com o app do seu banco.
+          </div>
+          <div style="font-family:'Courier New',monospace;font-size:9px;word-break:break-all;
+                      background:#f5f5f5;padding:6px;border:1px solid #ccc;margin-bottom:8px;
+                      user-select:all">${pixPayload}</div>
+          <div style="text-align:center">
+            <div id="carne-qr"></div>
+          </div>
+          <div style="font-size:9px;color:#666;margin-top:6px;text-align:center">
+            Pagamento confirmado manualmente pela loja.
+          </div>
+        </div>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+        <script>
+          (function() {
+            var el = document.getElementById('carne-qr');
+            if (el && typeof QRCode !== 'undefined') {
+              new QRCode(el, { text: ${JSON.stringify(pixPayload)}, width: 120, height: 120,
+                correctLevel: QRCode.CorrectLevel.M });
+            }
+          })();
+        </script>`;
+    } else {
+      pixHTML = `
+        <div style="border:1px dashed #999;padding:8px;margin-top:12px;font-size:10px;color:#666;text-align:center">
+          Pagamento confirmado manualmente pela loja. Nenhuma chave Pix configurada.
+        </div>`;
+    }
+
+    // 9. Montar HTML final
+    const printDate = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Carne - ${company.display_name}</title>
+  <style>
+    @page { margin: 10mm 12mm; size: A4; }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Courier New',monospace; font-size:12px; color:#000; max-width:700px; margin:0 auto; }
+    .center { text-align:center; }
+    .bold { font-weight:bold; }
+    .divider { border-top:1px dashed #000; margin:8px 0; }
+    .company-name { font-size:18px; font-weight:bold; }
+    .section-title { font-size:14px; font-weight:bold; border-bottom:2px solid #000; padding-bottom:3px; margin-bottom:8px; }
+    @media print { body { -webkit-print-color-adjust:exact; print-color-adjust:exact; } button { display:none !important; } }
+  </style>
+</head>
+<body>
+  <div class="center" style="margin-bottom:8px">
+    <div class="company-name">${company.display_name}</div>
+    ${company.cnpj ? `<div>CNPJ: ${company.cnpj}</div>` : ''}
+    ${company.phone ? `<div>Tel: ${company.phone}</div>` : ''}
+    ${company.address_city ? `<div>${company.address_city}${company.address_state ? ' - ' + company.address_state : ''}</div>` : ''}
+  </div>
+  <div class="divider"></div>
+  <div class="center bold" style="font-size:15px;margin-bottom:4px">CARNE / EXTRATO DE CREDIARIO</div>
+  <div style="font-size:10px;text-align:center;margin-bottom:8px">Emitido em: ${printDate}</div>
+  <div class="divider"></div>
+  <div style="margin-bottom:8px">
+    <div><strong>Cliente:</strong> ${customer.name}</div>
+    ${customer.phone ? `<div><strong>Telefone:</strong> ${customer.phone}</div>` : ''}
+    ${customer.cpf_cnpj ? `<div><strong>CPF/CNPJ:</strong> ${customer.cpf_cnpj}</div>` : ''}
+  </div>
+  <div class="divider"></div>
+  <div class="section-title">Cronograma de Parcelas</div>
+  ${accountsHTML}
+  <div class="divider"></div>
+  <div style="text-align:right;font-size:13px;font-weight:bold;margin-bottom:8px">
+    SALDO TOTAL EM ABERTO: R$${fmt(totalBalance)}
+  </div>
+  ${pixHTML}
+  <div class="divider"></div>
+  <div style="font-size:9px;text-align:center;margin-top:6px;color:#666">
+    ${company.display_name} &mdash; Powered by Aura. &mdash; getaura.com.br
+  </div>
+  <br>
+  <button onclick="window.print()" style="width:100%;padding:10px;cursor:pointer;font-size:14px">Imprimir</button>
+  <script>window.onload = function() { window.print(); };</script>
+</body>
+</html>`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    console.error('[print] carne error:', err.message);
+    res.status(500).json({ error: 'Erro ao gerar carne de crediario' });
   }
 });
 
