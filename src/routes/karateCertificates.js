@@ -60,9 +60,9 @@ router.get('/certificates/:candidateId', ...guards.read(), async (req, res) => {
          kc.id, kc.federation_id, kc.exam_id, kc.candidate_id,
          kc.student_id, kc.target_belt, kc.certificate_url,
          kc.status, kc.issued_by, kc.issued_at, kc.created_at,
-         COALESCE(cu.full_name, cu.name) AS student_name,
+         cu.name AS student_name,
          cu.karate_registration_number,
-         be.exam_date
+         be.event_date
        FROM karate_certificates kc
        JOIN customers cu ON cu.id = kc.student_id
        JOIN karate_belt_exams be ON be.id = kc.exam_id
@@ -89,7 +89,7 @@ router.get('/certificates/:candidateId', ...guards.read(), async (req, res) => {
       student_name: cert.student_name,
       karate_registration_number: cert.karate_registration_number || null,
       target_belt: cert.target_belt,
-      exam_date: cert.exam_date,
+      event_date: cert.event_date,
       certificate_url: cert.certificate_url,
       status: cert.status,
       issued_by: cert.issued_by || null,

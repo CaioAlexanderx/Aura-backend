@@ -56,7 +56,8 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
       n++;
     }
     if (year) {
-      conditions.push(`EXTRACT(YEAR FROM be.exam_date) = $${n}`);
+      // karate_belt_exams uses event_date (not exam_date)
+      conditions.push(`EXTRACT(YEAR FROM be.event_date) = $${n}`);
       params.push(parseInt(year, 10));
       n++;
     }
@@ -71,8 +72,8 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
 
     const dataRes = await db.query(
       `SELECT
-         be.id, be.federation_id, be.dojo_id, be.exam_date, be.location,
-         be.status, be.notes, be.created_at,
+         be.id, be.federation_id, be.event_date, be.location,
+         be.status, be.created_at,
          COUNT(DISTINCT ec.id) AS candidate_count,
          COUNT(DISTINCT ee.id) AS examiner_count
        FROM karate_belt_exams be
@@ -80,7 +81,7 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
        LEFT JOIN karate_exam_examiners ee ON ee.exam_id = be.id
        ${where}
        GROUP BY be.id
-       ORDER BY be.exam_date DESC
+       ORDER BY be.event_date DESC
        LIMIT $${n} OFFSET $${n + 1}`,
       [...params, pageSize, offset]
     );
@@ -88,11 +89,9 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
     const data = dataRes.rows.map(r => ({
       id: r.id,
       federation_id: r.federation_id,
-      dojo_id: r.dojo_id || null,
-      exam_date: r.exam_date,
+      event_date: r.event_date,
       location: r.location || null,
       status: r.status,
-      notes: r.notes || null,
       candidate_count: parseInt(r.candidate_count, 10),
       examiner_count: parseInt(r.examiner_count, 10),
       created_at: r.created_at,
@@ -108,30 +107,45 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
 // ── POST /belt-exams ────────────────────────────────────────
 router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
   const federationId = req.params.id;
-  const { dojo_id, exam_date, location, notes } = req.body;
+  // karate_belt_exams: id, federation_id, exam_type, name, event_date, location,
+  //                    max_candidates, fee_amount, status, created_by, created_at, updated_at
+  const { exam_type, name, event_date, location, max_candidates, fee_amount } = req.body;
 
-  if (!exam_date) {
-    return res.status(422).json({ error: 'exam_date é obrigatório', code: 'VALIDATION_ERROR' });
+  if (!event_date) {
+    return res.status(422).json({ error: 'event_date é obrigatório', code: 'VALIDATION_ERROR' });
   }
 
   try {
     const insertRes = await db.query(
       `INSERT INTO karate_belt_exams
-         (federation_id, dojo_id, exam_date, location, status, notes, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, 'scheduled', $5, NOW(), NOW())
-       RETURNING id, federation_id, dojo_id, exam_date, location, status, notes, created_at`,
-      [federationId, dojo_id || null, exam_date, location || null, notes || null]
+         (federation_id, exam_type, name, event_date, location, max_candidates, fee_amount,
+          status, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'scheduled', $8, NOW(), NOW())
+       RETURNING id, federation_id, exam_type, name, event_date, location,
+                 max_candidates, fee_amount, status, created_at`,
+      [
+        federationId,
+        exam_type || null,
+        name || null,
+        event_date,
+        location || null,
+        max_candidates ? parseInt(max_candidates, 10) : null,
+        fee_amount ? parseFloat(fee_amount) : null,
+        req.user?.id || null,
+      ]
     );
 
     const exam = insertRes.rows[0];
     res.status(201).json({
       id: exam.id,
       federation_id: exam.federation_id,
-      dojo_id: exam.dojo_id || null,
-      exam_date: exam.exam_date,
+      exam_type: exam.exam_type || null,
+      name: exam.name || null,
+      event_date: exam.event_date,
       location: exam.location || null,
+      max_candidates: exam.max_candidates || null,
+      fee_amount: exam.fee_amount || null,
       status: exam.status,
-      notes: exam.notes || null,
       candidate_count: 0,
       examiner_count: 0,
       created_at: exam.created_at,
@@ -148,7 +162,8 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
 
   try {
     const examRes = await db.query(
-      `SELECT id, federation_id, dojo_id, exam_date, location, status, notes, created_at, updated_at
+      `SELECT id, federation_id, exam_type, name, event_date, location,
+              max_candidates, fee_amount, status, created_at, updated_at
        FROM karate_belt_exams
        WHERE id = $1 AND federation_id = $2
        LIMIT 1`,
@@ -161,22 +176,24 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
 
     const exam = examRes.rows[0];
 
-    // Banca
+    // Banca — karate_exam_examiners: id, exam_id, examiner_id, role, dan_level, confirmed, created_at
     const examinerRes = await db.query(
-      `SELECT ee.id, ee.student_id, ee.role,
-              COALESCE(cu.full_name, cu.name) AS name,
+      `SELECT ee.id, ee.examiner_id AS student_id, ee.role, ee.dan_level, ee.confirmed,
+              cu.name,
               cu.karate_registration_number
        FROM karate_exam_examiners ee
-       JOIN customers cu ON cu.id = ee.student_id
+       JOIN customers cu ON cu.id = ee.examiner_id
        WHERE ee.exam_id = $1`,
       [examId]
     );
 
-    // Candidatos
+    // Candidatos — karate_belt_exam_candidates: id, exam_id, student_id, current_belt,
+    //   target_belt, target_belt_name, belt_schema, status, result_notes, fee_paid,
+    //   created_at, updated_at
     const candidateRes = await db.query(
-      `SELECT ec.id, ec.student_id, ec.target_belt, ec.status,
-              ec.result_notes, ec.enrolled_at, ec.result_at,
-              COALESCE(cu.full_name, cu.name) AS student_name,
+      `SELECT ec.id, ec.student_id, ec.target_belt, ec.target_belt_name,
+              ec.current_belt, ec.status, ec.result_notes, ec.created_at,
+              cu.name AS student_name,
               cu.karate_registration_number,
               cb.belt_level AS current_belt_level,
               cb.belt_name  AS current_belt_name
@@ -185,18 +202,20 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
        LEFT JOIN karate_current_belt cb
          ON cb.student_id = ec.student_id AND cb.federation_id = $2
        WHERE ec.exam_id = $1
-       ORDER BY ec.enrolled_at ASC`,
+       ORDER BY ec.created_at ASC`,
       [examId, federationId]
     );
 
     res.json({
       id: exam.id,
       federation_id: exam.federation_id,
-      dojo_id: exam.dojo_id || null,
-      exam_date: exam.exam_date,
+      exam_type: exam.exam_type || null,
+      name: exam.name || null,
+      event_date: exam.event_date,
       location: exam.location || null,
+      max_candidates: exam.max_candidates || null,
+      fee_amount: exam.fee_amount || null,
       status: exam.status,
-      notes: exam.notes || null,
       created_at: exam.created_at,
       updated_at: exam.updated_at,
       examiners: examinerRes.rows.map(e => ({
@@ -205,6 +224,8 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
         name: e.name,
         karate_registration_number: e.karate_registration_number || null,
         role: e.role || null,
+        dan_level: e.dan_level || null,
+        confirmed: e.confirmed,
       })),
       candidates: candidateRes.rows.map(c => ({
         id: c.id,
@@ -214,10 +235,10 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
         current_belt_level: c.current_belt_level || null,
         current_belt_name: c.current_belt_name || null,
         target_belt: c.target_belt,
+        target_belt_name: c.target_belt_name || null,
         status: c.status,
         result_notes: c.result_notes || null,
-        enrolled_at: c.enrolled_at,
-        result_at: c.result_at || null,
+        created_at: c.created_at,
       })),
     });
   } catch (err) {
@@ -230,7 +251,9 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
 router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, examId } = req.params;
 
-  const ALLOWED = ['exam_date', 'location', 'notes', 'dojo_id'];
+  // karate_belt_exams editable columns: event_date, location, name, exam_type,
+  //   max_candidates, fee_amount (dojo_id and notes do NOT exist)
+  const ALLOWED = ['event_date', 'location', 'name', 'exam_type', 'max_candidates', 'fee_amount'];
   const updates = [];
   const values = [];
   let idx = 1;
@@ -269,7 +292,8 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
       `UPDATE karate_belt_exams
        SET ${updates.join(', ')}
        WHERE id = $${idx} AND federation_id = $${idx + 1}
-       RETURNING id, federation_id, dojo_id, exam_date, location, status, notes, updated_at`,
+       RETURNING id, federation_id, exam_type, name, event_date, location,
+                 max_candidates, fee_amount, status, updated_at`,
       values
     );
 
@@ -281,11 +305,13 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
     res.json({
       id: exam.id,
       federation_id: exam.federation_id,
-      dojo_id: exam.dojo_id || null,
-      exam_date: exam.exam_date,
+      exam_type: exam.exam_type || null,
+      name: exam.name || null,
+      event_date: exam.event_date,
       location: exam.location || null,
+      max_candidates: exam.max_candidates || null,
+      fee_amount: exam.fee_amount || null,
       status: exam.status,
-      notes: exam.notes || null,
       updated_at: exam.updated_at,
     });
   } catch (err) {
@@ -308,14 +334,16 @@ router.get('/belt-exams/:examId/examiners', ...guards.read(), async (req, res) =
       return res.status(404).json({ error: 'Exame não encontrado', code: 'NOT_FOUND' });
     }
 
+    // karate_exam_examiners: id, exam_id, examiner_id, role, dan_level, confirmed, created_at
     const { rows } = await db.query(
-      `SELECT ee.id, ee.student_id, ee.role, ee.added_at,
-              COALESCE(cu.full_name, cu.name) AS name,
+      `SELECT ee.id, ee.examiner_id AS student_id, ee.role, ee.dan_level,
+              ee.confirmed, ee.created_at,
+              cu.name,
               cu.karate_registration_number
        FROM karate_exam_examiners ee
-       JOIN customers cu ON cu.id = ee.student_id
+       JOIN customers cu ON cu.id = ee.examiner_id
        WHERE ee.exam_id = $1
-       ORDER BY ee.added_at ASC`,
+       ORDER BY ee.created_at ASC`,
       [examId]
     );
 
@@ -325,7 +353,9 @@ router.get('/belt-exams/:examId/examiners', ...guards.read(), async (req, res) =
       name: e.name,
       karate_registration_number: e.karate_registration_number || null,
       role: e.role || null,
-      added_at: e.added_at,
+      dan_level: e.dan_level || null,
+      confirmed: e.confirmed,
+      created_at: e.created_at,
     })));
   } catch (err) {
     console.error('[karateExams] examiners list error:', err.message);
@@ -352,9 +382,9 @@ router.post('/belt-exams/:examId/examiners', ...guards.staffWrite(), async (req,
       return res.status(404).json({ error: 'Exame não encontrado', code: 'NOT_FOUND' });
     }
 
-    // Verifica praticante
+    // Verifica praticante — customers.name (not full_name)
     const studentCheck = await db.query(
-      `SELECT id, COALESCE(full_name, name) AS name, karate_registration_number
+      `SELECT id, name, karate_registration_number
        FROM customers WHERE id = $1 AND federation_id = $2 LIMIT 1`,
       [student_id, federationId]
     );
@@ -362,11 +392,12 @@ router.post('/belt-exams/:examId/examiners', ...guards.staffWrite(), async (req,
       return res.status(404).json({ error: 'Praticante não encontrado', code: 'NOT_FOUND' });
     }
 
+    // karate_exam_examiners: id, exam_id, examiner_id, role, dan_level, confirmed, created_at
     const insertRes = await db.query(
-      `INSERT INTO karate_exam_examiners (exam_id, student_id, role, added_at)
+      `INSERT INTO karate_exam_examiners (exam_id, examiner_id, role, created_at)
        VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (exam_id, student_id) DO UPDATE SET role = EXCLUDED.role
-       RETURNING id, exam_id, student_id, role, added_at`,
+       ON CONFLICT (exam_id, examiner_id) DO UPDATE SET role = EXCLUDED.role
+       RETURNING id, exam_id, examiner_id, role, created_at`,
       [examId, student_id, role || null]
     );
 
@@ -375,11 +406,11 @@ router.post('/belt-exams/:examId/examiners', ...guards.staffWrite(), async (req,
     res.status(201).json({
       id: e.id,
       exam_id: e.exam_id,
-      student_id: e.student_id,
+      student_id: e.examiner_id,
       name: s.name,
       karate_registration_number: s.karate_registration_number || null,
       role: e.role || null,
-      added_at: e.added_at,
+      created_at: e.created_at,
     });
   } catch (err) {
     console.error('[karateExams] add examiner error:', err.message);
@@ -445,12 +476,14 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
       });
     }
 
-    // Insere candidato
+    // Insere candidato — karate_belt_exam_candidates: id, exam_id, student_id,
+    //   current_belt, target_belt, target_belt_name, belt_schema, status,
+    //   result_notes, fee_paid, created_at, updated_at
     const insertRes = await client.query(
       `INSERT INTO karate_belt_exam_candidates
-         (exam_id, student_id, target_belt, status, enrolled_at)
-       VALUES ($1, $2, $3, 'enrolled', NOW())
-       RETURNING id, exam_id, student_id, target_belt, status, enrolled_at`,
+         (exam_id, student_id, target_belt, status, created_at, updated_at)
+       VALUES ($1, $2, $3, 'enrolled', NOW(), NOW())
+       RETURNING id, exam_id, student_id, target_belt, status, created_at`,
       [examId, student_id, target_belt]
     );
 
@@ -481,7 +514,7 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
       student_id: cand.student_id,
       target_belt: cand.target_belt,
       status: cand.status,
-      enrolled_at: cand.enrolled_at,
+      created_at: cand.created_at,
       eligibility, // FPKT #1: aviso anexado, nunca 422 por critério
     });
   } catch (err) {
@@ -535,11 +568,12 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
 
     // Atualiza status — trigger karate_on_exam_approved é disparado
     // automaticamente pelo banco quando status = 'approved'
+    // karate_belt_exam_candidates has no result_at column — use updated_at
     const updRes = await db.query(
       `UPDATE karate_belt_exam_candidates
-       SET status = $1, result_notes = $2, result_at = NOW(), updated_at = NOW()
+       SET status = $1, result_notes = $2, updated_at = NOW()
        WHERE id = $3
-       RETURNING id, exam_id, student_id, target_belt, status, result_notes, result_at`,
+       RETURNING id, exam_id, student_id, target_belt, status, result_notes, updated_at`,
       [status, result_notes || null, candidateId]
     );
 
@@ -551,7 +585,7 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
       target_belt: updated.target_belt,
       status: updated.status,
       result_notes: updated.result_notes || null,
-      result_at: updated.result_at,
+      result_at: updated.updated_at,
       _note: status === 'approved'
         ? 'Trigger karate_on_exam_approved inseriu histórico de faixa (imutável)'
         : undefined,
@@ -610,8 +644,8 @@ router.post(
       // (karate_belt_history é imutável — não alteramos o histórico existente)
       await client.query(
         `INSERT INTO karate_belt_exam_candidates
-           (exam_id, student_id, target_belt, status, result_notes, enrolled_at)
-         VALUES ($1, $2, $3, 'correction_pending', $4, NOW())`,
+           (exam_id, student_id, target_belt, status, result_notes, created_at, updated_at)
+         VALUES ($1, $2, $3, 'correction_pending', $4, NOW(), NOW())`,
         [
           examId,
           cand.student_id,

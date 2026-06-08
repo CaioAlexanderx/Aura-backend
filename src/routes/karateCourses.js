@@ -2,11 +2,20 @@
 // AURA KARATÊ — Cursos e Seminários (Track C)
 // Tabela: karate_events (migration 160, event_type='course'|'seminar')
 //
+// Schema real karate_events:
+//   id, federation_id, event_type, name, event_date, location,
+//   hours, fee_amount, status, created_at, updated_at
+//   (NOT: title, workload_hours, instructor, max_participants, description)
+//
+// Schema real karate_event_enrollments:
+//   id, event_id, student_id, dojo_id, hours_completed,
+//   status, fee_paid, created_at
+//   (NOT: enrolled_at, attended_at)
+//
 // GET  /courses                    — lista cursos/seminários
 // POST /courses                    — cria curso/seminário
 // GET  /courses/:eventId           — detalhe
 // POST /courses/:eventId/enroll    — inscreve praticante
-//                                   (carga horária registrada em metadata)
 //
 // RBAC: staffWrite para criar; read para consultar.
 // ============================================================
@@ -48,12 +57,13 @@ router.get('/courses', ...guards.read(), async (req, res) => {
     );
     const total = parseInt(countRes.rows[0].total, 10);
 
+    // karate_events: name (not title), hours (not workload_hours)
+    // no instructor, max_participants, description columns
     const dataRes = await db.query(
       `SELECT
-         ev.id, ev.federation_id, ev.event_type, ev.title,
-         ev.event_date, ev.location, ev.workload_hours,
-         ev.instructor, ev.max_participants, ev.status,
-         ev.description, ev.created_at,
+         ev.id, ev.federation_id, ev.event_type, ev.name,
+         ev.event_date, ev.location, ev.hours,
+         ev.fee_amount, ev.status, ev.created_at,
          COUNT(ee.id) AS enrollment_count
        FROM karate_events ev
        LEFT JOIN karate_event_enrollments ee ON ee.event_id = ev.id
@@ -68,14 +78,12 @@ router.get('/courses', ...guards.read(), async (req, res) => {
       id: r.id,
       federation_id: r.federation_id,
       event_type: r.event_type,
-      title: r.title,
+      name: r.name,
       event_date: r.event_date,
       location: r.location || null,
-      workload_hours: r.workload_hours ? parseFloat(r.workload_hours) : null,
-      instructor: r.instructor || null,
-      max_participants: r.max_participants || null,
+      hours: r.hours ? parseFloat(r.hours) : null,
+      fee_amount: r.fee_amount ? parseFloat(r.fee_amount) : null,
       status: r.status,
-      description: r.description || null,
       enrollment_count: parseInt(r.enrollment_count, 10),
       created_at: r.created_at,
     }));
@@ -90,15 +98,16 @@ router.get('/courses', ...guards.read(), async (req, res) => {
 // ── POST /courses ───────────────────────────────────────────
 router.post('/courses', ...guards.staffWrite(), async (req, res) => {
   const federationId = req.params.id;
+  // karate_events columns: name (not title), hours (not workload_hours)
+  // no instructor, max_participants, description
   const {
     event_type = 'course',
-    title, event_date, location,
-    workload_hours, instructor,
-    max_participants, description,
+    name, event_date, location,
+    hours, fee_amount,
   } = req.body;
 
-  if (!title || !String(title).trim()) {
-    return res.status(422).json({ error: 'title é obrigatório', code: 'VALIDATION_ERROR' });
+  if (!name || !String(name).trim()) {
+    return res.status(422).json({ error: 'name é obrigatório', code: 'VALIDATION_ERROR' });
   }
   if (!event_date) {
     return res.status(422).json({ error: 'event_date é obrigatório', code: 'VALIDATION_ERROR' });
@@ -114,22 +123,20 @@ router.post('/courses', ...guards.staffWrite(), async (req, res) => {
   try {
     const insertRes = await db.query(
       `INSERT INTO karate_events
-         (federation_id, event_type, title, event_date, location,
-          workload_hours, instructor, max_participants, status, description,
+         (federation_id, event_type, name, event_date, location,
+          hours, fee_amount, status,
           created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', $9, NOW(), NOW())
-       RETURNING id, federation_id, event_type, title, event_date, location,
-                 workload_hours, instructor, max_participants, status, description, created_at`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', NOW(), NOW())
+       RETURNING id, federation_id, event_type, name, event_date, location,
+                 hours, fee_amount, status, created_at`,
       [
         federationId,
         event_type,
-        String(title).trim(),
+        String(name).trim(),
         event_date,
         location || null,
-        workload_hours ? parseFloat(workload_hours) : null,
-        instructor || null,
-        max_participants ? parseInt(max_participants, 10) : null,
-        description || null,
+        hours ? parseFloat(hours) : null,
+        fee_amount ? parseFloat(fee_amount) : null,
       ]
     );
 
@@ -138,14 +145,12 @@ router.post('/courses', ...guards.staffWrite(), async (req, res) => {
       id: ev.id,
       federation_id: ev.federation_id,
       event_type: ev.event_type,
-      title: ev.title,
+      name: ev.name,
       event_date: ev.event_date,
       location: ev.location || null,
-      workload_hours: ev.workload_hours ? parseFloat(ev.workload_hours) : null,
-      instructor: ev.instructor || null,
-      max_participants: ev.max_participants || null,
+      hours: ev.hours ? parseFloat(ev.hours) : null,
+      fee_amount: ev.fee_amount ? parseFloat(ev.fee_amount) : null,
       status: ev.status,
-      description: ev.description || null,
       enrollment_count: 0,
       created_at: ev.created_at,
     });
@@ -161,10 +166,9 @@ router.get('/courses/:eventId', ...guards.read(), async (req, res) => {
 
   try {
     const evRes = await db.query(
-      `SELECT ev.id, ev.federation_id, ev.event_type, ev.title,
-              ev.event_date, ev.location, ev.workload_hours,
-              ev.instructor, ev.max_participants, ev.status,
-              ev.description, ev.created_at,
+      `SELECT ev.id, ev.federation_id, ev.event_type, ev.name,
+              ev.event_date, ev.location, ev.hours,
+              ev.fee_amount, ev.status, ev.created_at,
               COUNT(ee.id) AS enrollment_count
        FROM karate_events ev
        LEFT JOIN karate_event_enrollments ee ON ee.event_id = ev.id
@@ -179,15 +183,18 @@ router.get('/courses/:eventId', ...guards.read(), async (req, res) => {
 
     const ev = evRes.rows[0];
 
-    // Lista de inscritos
+    // Lista de inscritos — karate_event_enrollments:
+    //   id, event_id, student_id, dojo_id, hours_completed, status, fee_paid, created_at
+    //   (NOT enrolled_at, NOT attended_at)
     const enrollRes = await db.query(
-      `SELECT ee.id, ee.student_id, ee.status, ee.enrolled_at, ee.attended_at,
-              COALESCE(cu.full_name, cu.name) AS student_name,
+      `SELECT ee.id, ee.student_id, ee.status, ee.hours_completed,
+              ee.fee_paid, ee.created_at,
+              cu.name AS student_name,
               cu.karate_registration_number
        FROM karate_event_enrollments ee
        JOIN customers cu ON cu.id = ee.student_id
        WHERE ee.event_id = $1
-       ORDER BY ee.enrolled_at ASC`,
+       ORDER BY ee.created_at ASC`,
       [eventId]
     );
 
@@ -195,14 +202,12 @@ router.get('/courses/:eventId', ...guards.read(), async (req, res) => {
       id: ev.id,
       federation_id: ev.federation_id,
       event_type: ev.event_type,
-      title: ev.title,
+      name: ev.name,
       event_date: ev.event_date,
       location: ev.location || null,
-      workload_hours: ev.workload_hours ? parseFloat(ev.workload_hours) : null,
-      instructor: ev.instructor || null,
-      max_participants: ev.max_participants || null,
+      hours: ev.hours ? parseFloat(ev.hours) : null,
+      fee_amount: ev.fee_amount ? parseFloat(ev.fee_amount) : null,
       status: ev.status,
-      description: ev.description || null,
       enrollment_count: parseInt(ev.enrollment_count, 10),
       created_at: ev.created_at,
       enrollments: enrollRes.rows.map(e => ({
@@ -211,8 +216,9 @@ router.get('/courses/:eventId', ...guards.read(), async (req, res) => {
         student_name: e.student_name,
         karate_registration_number: e.karate_registration_number || null,
         status: e.status,
-        enrolled_at: e.enrolled_at,
-        attended_at: e.attended_at || null,
+        hours_completed: e.hours_completed ? parseFloat(e.hours_completed) : null,
+        fee_paid: e.fee_paid || false,
+        created_at: e.created_at,
       })),
     });
   } catch (err) {
@@ -222,7 +228,8 @@ router.get('/courses/:eventId', ...guards.read(), async (req, res) => {
 });
 
 // ── POST /courses/:eventId/enroll ───────────────────────────
-// Inscreve praticante no curso. Registra carga horária via event.workload_hours.
+// Inscreve praticante no curso. Carga horária registrada em
+// karate_event_enrollments.hours_completed (preenchida ao concluir).
 router.post('/courses/:eventId/enroll', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, eventId } = req.params;
   const { student_id } = req.body;
@@ -232,9 +239,9 @@ router.post('/courses/:eventId/enroll', ...guards.staffWrite(), async (req, res)
   }
 
   try {
-    // Verifica evento
+    // Verifica evento — karate_events: hours (not workload_hours)
     const evRes = await db.query(
-      `SELECT id, status, max_participants, workload_hours
+      `SELECT id, status, hours
        FROM karate_events WHERE id = $1 AND federation_id = $2 LIMIT 1`,
       [eventId, federationId]
     );
@@ -249,9 +256,9 @@ router.post('/courses/:eventId/enroll', ...guards.staffWrite(), async (req, res)
       });
     }
 
-    // Verifica praticante
+    // Verifica praticante — customers.name (not full_name)
     const stuRes = await db.query(
-      `SELECT id, COALESCE(full_name, name) AS name
+      `SELECT id, name
        FROM customers WHERE id = $1 AND federation_id = $2 LIMIT 1`,
       [student_id, federationId]
     );
@@ -259,30 +266,15 @@ router.post('/courses/:eventId/enroll', ...guards.staffWrite(), async (req, res)
       return res.status(404).json({ error: 'Praticante não encontrado', code: 'NOT_FOUND' });
     }
 
-    // Verifica vagas
-    if (ev.max_participants) {
-      const countRes = await db.query(
-        `SELECT COUNT(*) AS cnt FROM karate_event_enrollments WHERE event_id = $1`,
-        [eventId]
-      );
-      const cnt = parseInt(countRes.rows[0].cnt, 10);
-      if (cnt >= ev.max_participants) {
-        return res.status(409).json({
-          error: 'Evento sem vagas disponíveis',
-          code: 'FULL',
-          max_participants: ev.max_participants,
-          enrolled: cnt,
-        });
-      }
-    }
-
     // Insere inscrição (idempotente via ON CONFLICT)
+    // karate_event_enrollments: id, event_id, student_id, dojo_id, hours_completed,
+    //   status, fee_paid, created_at
     const insertRes = await db.query(
       `INSERT INTO karate_event_enrollments
-         (event_id, student_id, status, enrolled_at)
+         (event_id, student_id, status, created_at)
        VALUES ($1, $2, 'enrolled', NOW())
        ON CONFLICT (event_id, student_id) DO NOTHING
-       RETURNING id, event_id, student_id, status, enrolled_at`,
+       RETURNING id, event_id, student_id, status, created_at`,
       [eventId, student_id]
     );
 
@@ -300,8 +292,8 @@ router.post('/courses/:eventId/enroll', ...guards.staffWrite(), async (req, res)
       student_id: enroll.student_id,
       student_name: stuRes.rows[0].name,
       status: enroll.status,
-      enrolled_at: enroll.enrolled_at,
-      workload_hours: ev.workload_hours ? parseFloat(ev.workload_hours) : null,
+      created_at: enroll.created_at,
+      hours: ev.hours ? parseFloat(ev.hours) : null,
     });
   } catch (err) {
     console.error('[karateCourses] enroll error:', err.message);

@@ -65,16 +65,19 @@ describe('POST /federation/:id/belt-exams (criar exame)', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    // INSERT retorna exame criado
+    // INSERT retorna exame criado — using real schema columns:
+    // event_date (not exam_date), no dojo_id/notes
     db.query.mockResolvedValueOnce({
       rows: [{
         id: EXAM_ID,
         federation_id: FED_ID,
-        dojo_id: null,
-        exam_date: '2026-09-15',
+        exam_type: null,
+        name: null,
+        event_date: '2026-09-15',
         location: 'Ginásio Central',
+        max_candidates: null,
+        fee_amount: null,
         status: 'scheduled',
-        notes: null,
         created_at: new Date().toISOString(),
       }],
     });
@@ -84,7 +87,7 @@ describe('POST /federation/:id/belt-exams (criar exame)', () => {
     request(app)
       .post('/federation/' + FED_ID + '/belt-exams')
       .set('Authorization', 'Bearer ' + adminToken)
-      .send({ exam_date: '2026-09-15', location: 'Ginásio Central' })
+      .send({ event_date: '2026-09-15', location: 'Ginásio Central' })
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(201);
@@ -92,11 +95,13 @@ describe('POST /federation/:id/belt-exams (criar exame)', () => {
         expect(res.body.status).toBe('scheduled');
         expect(res.body.candidate_count).toBe(0);
         expect(res.body.examiner_count).toBe(0);
+        // Real schema: event_date (not exam_date)
+        expect(res.body.event_date).toBe('2026-09-15');
         done();
       });
   });
 
-  it('retorna 422 sem exam_date', (done) => {
+  it('retorna 422 sem event_date', (done) => {
     jest.clearAllMocks();
     request(app)
       .post('/federation/' + FED_ID + '/belt-exams')
@@ -105,7 +110,7 @@ describe('POST /federation/:id/belt-exams (criar exame)', () => {
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(422);
-        expect(res.body.error).toMatch(/exam_date/);
+        expect(res.body.error).toMatch(/event_date/);
         done();
       });
   });
@@ -123,6 +128,7 @@ describe('POST /belt-exams/:examId/candidates — elegibilidade é só AVISO', (
     db.connect.mockResolvedValue(mockClient);
 
     // Ordem: BEGIN → verifica exame → advisory lock → checa dup → INSERT → COMMIT
+    // INSERT returns created_at (not enrolled_at — not in real schema)
     mockClient.query
       .mockResolvedValueOnce({})                         // BEGIN
       .mockResolvedValueOnce({                           // SELECT exame (existe, status=scheduled)
@@ -137,7 +143,7 @@ describe('POST /belt-exams/:examId/candidates — elegibilidade é só AVISO', (
           student_id: STUDENT_ID,
           target_belt: 5,
           status: 'enrolled',
-          enrolled_at: new Date().toISOString(),
+          created_at: new Date().toISOString(), // real schema: created_at (not enrolled_at)
         }],
       })
       .mockResolvedValueOnce({});                        // COMMIT
@@ -149,7 +155,7 @@ describe('POST /belt-exams/:examId/candidates — elegibilidade é só AVISO', (
       is_hard_block: false,  // sempre false!
       checks: [
         {
-          criterion: 'min_months_in_current_belt',
+          criterion: 'min_months',  // real schema criterion name
           ok: false,
           required: 12,
           actual: 3,
@@ -157,7 +163,7 @@ describe('POST /belt-exams/:examId/candidates — elegibilidade é só AVISO', (
           confirmed: false,  // critério provisório
         },
       ],
-      warnings: ['Critério "min_months_in_current_belt" não atendido: esperado 12 meses, atual 3'],
+      warnings: ['Critério "min_months" não atendido: esperado 12 meses, atual 3'],
     });
   });
 
@@ -172,12 +178,14 @@ describe('POST /belt-exams/:examId/candidates — elegibilidade é só AVISO', (
         expect(res.status).toBe(201);
         expect(res.body.id).toBe(CANDIDATE_ID);
         expect(res.body.status).toBe('enrolled');
+        // Response uses created_at (real schema)
+        expect(res.body.created_at).toBeTruthy();
         // Elegibilidade anexada como aviso
         expect(res.body.eligibility).toBeDefined();
         expect(res.body.eligibility.eligible).toBe(false);
         expect(res.body.eligibility.is_hard_block).toBe(false); // NUNCA bloqueia
         expect(Array.isArray(res.body.eligibility.checks)).toBe(true);
-        expect(res.body.eligibility.checks[0].criterion).toBe('min_months_in_current_belt');
+        expect(res.body.eligibility.checks[0].criterion).toBe('min_months'); // real schema
         expect(res.body.eligibility.checks[0].confirmed).toBe(false); // critério provisório (FPKT #2)
         done();
       });
@@ -219,6 +227,7 @@ describe('PATCH /belt-exams/:examId/candidates/:candidateId (lançar resultado)'
   beforeEach(() => {
     jest.clearAllMocks();
     // Ordem: SELECT candidato → UPDATE (dispara trigger)
+    // updated_at used as result_at (no result_at column in real schema)
     db.query
       .mockResolvedValueOnce({   // SELECT candidato + exame
         rows: [{
@@ -236,7 +245,7 @@ describe('PATCH /belt-exams/:examId/candidates/:candidateId (lançar resultado)'
           target_belt: 5,
           status: 'approved',
           result_notes: 'Excelente desempenho',
-          result_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(), // real schema: updated_at (not result_at)
         }],
       });
   });
@@ -250,6 +259,7 @@ describe('PATCH /belt-exams/:examId/candidates/:candidateId (lançar resultado)'
         if (err) return done(err);
         expect(res.status).toBe(200);
         expect(res.body.status).toBe('approved');
+        // result_at is aliased from updated_at in the response
         expect(res.body.result_at).toBeTruthy();
         // Nota sobre o trigger
         expect(res.body._note).toMatch(/trigger karate_on_exam_approved/i);
@@ -419,6 +429,8 @@ describe('POST /certificates/:candidateId/issue (emissão sob demanda)', () => {
 });
 
 // ── Suite 6: GET /belt-requirements (critérios com confirmed) ─
+// Schema real: from_belt, to_belt, min_months, required_kata,
+//   required_kumite, min_courses, confirmed (NOT target_belt_level/criterion/etc.)
 describe('GET /federation/:id/belt-requirements (FPKT #2 — confirmed exposto)', () => {
   let app;
   beforeAll(() => { app = buildApp(); });
@@ -430,14 +442,17 @@ describe('GET /federation/:id/belt-requirements (FPKT #2 — confirmed exposto)'
         {
           id: 'req-1',
           federation_id: FED_ID,
-          target_belt_level: 5,
-          target_belt_name: 'Amarela',
-          criterion: 'min_months_in_current_belt',
-          required_value: '12',
-          unit: 'meses',
-          description: 'Mínimo 12 meses na faixa atual',
+          from_belt: 4,
+          to_belt: 5,
+          belt_schema: 'fpkt',
+          min_months: 12,
+          required_kata: ['Heian Shodan'],
+          required_kumite: null,
+          min_courses: null,
+          notes: 'Mínimo 12 meses na faixa atual',
+          is_hard_block: false,
           confirmed: false,  // FPKT #2: provisório
-          sort_order: 1,
+          confirmed_at: null,
           is_active: true,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -445,14 +460,17 @@ describe('GET /federation/:id/belt-requirements (FPKT #2 — confirmed exposto)'
         {
           id: 'req-2',
           federation_id: FED_ID,
-          target_belt_level: 5,
-          target_belt_name: 'Amarela',
-          criterion: 'min_trainings',
-          required_value: '30',
-          unit: 'treinos',
-          description: 'Mínimo 30 treinos',
+          from_belt: 4,
+          to_belt: 5,
+          belt_schema: 'fpkt',
+          min_months: null,
+          required_kata: [],
+          required_kumite: null,
+          min_courses: 30,
+          notes: 'Mínimo 30 cursos',
+          is_hard_block: false,
           confirmed: true,   // confirmado
-          sort_order: 2,
+          confirmed_at: new Date().toISOString(),
           is_active: true,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -461,7 +479,7 @@ describe('GET /federation/:id/belt-requirements (FPKT #2 — confirmed exposto)'
     });
   });
 
-  it('retorna critérios com campo confirmed (FPKT #2)', (done) => {
+  it('retorna critérios com campo confirmed (FPKT #2) usando schema real', (done) => {
     request(app)
       .get('/federation/' + FED_ID + '/belt-requirements')
       .set('Authorization', 'Bearer ' + adminToken)
@@ -473,6 +491,11 @@ describe('GET /federation/:id/belt-requirements (FPKT #2 — confirmed exposto)'
         expect(res.body[1].confirmed).toBe(true);   // confirmado
         // FPKT #2: confirmed é exposto
         expect(res.body[0]).toHaveProperty('confirmed');
+        // Real schema fields present
+        expect(res.body[0]).toHaveProperty('from_belt');
+        expect(res.body[0]).toHaveProperty('to_belt');
+        expect(res.body[0]).toHaveProperty('min_months');
+        expect(res.body[0]).toHaveProperty('required_kata');
         done();
       });
   });

@@ -8,6 +8,13 @@
 //   - GET expõe confirmed
 //   - PUT permite editar confirmed e os valores
 //
+// Schema real (migração 147-162):
+//   karate_belt_requirements:
+//     id, federation_id, from_belt, to_belt, belt_schema,
+//     min_months, required_kata (text[]), required_kumite,
+//     min_courses, notes, is_hard_block, is_active,
+//     confirmed, confirmed_at, created_at, updated_at
+//
 // GET /belt-requirements               — lista critérios vigentes
 // PUT /belt-requirements               — atualiza critérios (adminOnly)
 // ============================================================
@@ -20,19 +27,20 @@ const { guards } = require('../config/karateRoles');
 // ── GET /belt-requirements ──────────────────────────────────
 router.get('/belt-requirements', ...guards.read(), async (req, res) => {
   const federationId = req.params.id;
-  const { target_belt, confirmed } = req.query;
+  // Filter by target belt (to_belt in schema)
+  const { to_belt, confirmed } = req.query;
 
   try {
     const conditions = ['federation_id = $1', 'is_active = true'];
     const params = [federationId];
     let n = 2;
 
-    if (target_belt !== undefined) {
-      conditions.push(`target_belt_level = $${n}`);
-      params.push(parseInt(target_belt, 10));
+    if (to_belt !== undefined) {
+      conditions.push(`to_belt = $${n}`);
+      params.push(parseInt(to_belt, 10));
       n++;
     }
-    // Filtro por confirmed (opcional)
+    // Filtro por confirmed (opcional) — FPKT #2
     if (confirmed === 'true' || confirmed === 'false') {
       conditions.push(`confirmed = $${n}`);
       params.push(confirmed === 'true');
@@ -41,27 +49,31 @@ router.get('/belt-requirements', ...guards.read(), async (req, res) => {
 
     const { rows } = await db.query(
       `SELECT
-         id, federation_id, target_belt_level, target_belt_name,
-         criterion, required_value, unit, description,
+         id, federation_id, from_belt, to_belt, belt_schema,
+         min_months, required_kata, required_kumite, min_courses,
+         notes, is_hard_block,
          confirmed,        -- FPKT #2: expõe status provisório
-         sort_order, is_active, created_at, updated_at
+         confirmed_at, is_active, created_at, updated_at
        FROM karate_belt_requirements
        WHERE ${conditions.join(' AND ')}
-       ORDER BY target_belt_level ASC, sort_order ASC, criterion ASC`,
+       ORDER BY to_belt ASC, from_belt ASC`,
       params
     );
 
     res.json(rows.map(r => ({
       id: r.id,
       federation_id: r.federation_id,
-      target_belt_level: r.target_belt_level,
-      target_belt_name: r.target_belt_name || null,
-      criterion: r.criterion,
-      required_value: r.required_value,
-      unit: r.unit || null,
-      description: r.description || null,
+      from_belt: r.from_belt,
+      to_belt: r.to_belt,
+      belt_schema: r.belt_schema || null,
+      min_months: r.min_months || null,
+      required_kata: r.required_kata || [],
+      required_kumite: r.required_kumite || null,
+      min_courses: r.min_courses || null,
+      notes: r.notes || null,
+      is_hard_block: r.is_hard_block,
       confirmed: r.confirmed,          // FPKT #2: provisório enquanto false
-      sort_order: r.sort_order || null,
+      confirmed_at: r.confirmed_at || null,
       is_active: r.is_active,
       created_at: r.created_at,
       updated_at: r.updated_at,
@@ -94,7 +106,10 @@ router.put('/belt-requirements', ...guards.adminOnly(), async (req, res) => {
     const updated = [];
 
     for (const req_item of requirements) {
-      const { id, required_value, unit, description, confirmed, sort_order } = req_item;
+      // Editable columns per schema: min_months, required_kata, required_kumite,
+      // min_courses, notes, is_hard_block, confirmed, is_active
+      const { id, min_months, required_kata, required_kumite, min_courses,
+              notes, is_hard_block, confirmed, is_active } = req_item;
 
       if (!id) {
         await client.query('ROLLBACK');
@@ -108,19 +123,34 @@ router.put('/belt-requirements', ...guards.adminOnly(), async (req, res) => {
       const values = [];
       let idx = 1;
 
-      if (required_value !== undefined) {
-        updates.push(`required_value = $${idx}`);
-        values.push(String(required_value));
+      if (min_months !== undefined) {
+        updates.push(`min_months = $${idx}`);
+        values.push(parseInt(min_months, 10));
         idx++;
       }
-      if (unit !== undefined) {
-        updates.push(`unit = $${idx}`);
-        values.push(unit);
+      if (required_kata !== undefined) {
+        updates.push(`required_kata = $${idx}`);
+        values.push(required_kata); // text[]
         idx++;
       }
-      if (description !== undefined) {
-        updates.push(`description = $${idx}`);
-        values.push(description);
+      if (required_kumite !== undefined) {
+        updates.push(`required_kumite = $${idx}`);
+        values.push(required_kumite);
+        idx++;
+      }
+      if (min_courses !== undefined) {
+        updates.push(`min_courses = $${idx}`);
+        values.push(parseInt(min_courses, 10));
+        idx++;
+      }
+      if (notes !== undefined) {
+        updates.push(`notes = $${idx}`);
+        values.push(notes);
+        idx++;
+      }
+      if (is_hard_block !== undefined) {
+        updates.push(`is_hard_block = $${idx}`);
+        values.push(Boolean(is_hard_block));
         idx++;
       }
       if (confirmed !== undefined) {
@@ -128,10 +158,14 @@ router.put('/belt-requirements', ...guards.adminOnly(), async (req, res) => {
         updates.push(`confirmed = $${idx}`);
         values.push(Boolean(confirmed));
         idx++;
+        // Also set confirmed_at when confirming
+        if (Boolean(confirmed)) {
+          updates.push(`confirmed_at = NOW()`);
+        }
       }
-      if (sort_order !== undefined) {
-        updates.push(`sort_order = $${idx}`);
-        values.push(parseInt(sort_order, 10));
+      if (is_active !== undefined) {
+        updates.push(`is_active = $${idx}`);
+        values.push(Boolean(is_active));
         idx++;
       }
 
@@ -145,9 +179,9 @@ router.put('/belt-requirements', ...guards.adminOnly(), async (req, res) => {
          SET ${updates.join(', ')}
          WHERE id = $${idx} AND federation_id = $${idx + 1}
          RETURNING
-           id, federation_id, target_belt_level, target_belt_name,
-           criterion, required_value, unit, description,
-           confirmed, sort_order, is_active, updated_at`,
+           id, federation_id, from_belt, to_belt, belt_schema,
+           min_months, required_kata, required_kumite, min_courses,
+           notes, is_hard_block, confirmed, confirmed_at, is_active, updated_at`,
         values
       );
 
@@ -161,14 +195,17 @@ router.put('/belt-requirements', ...guards.adminOnly(), async (req, res) => {
     res.json(updated.map(r => ({
       id: r.id,
       federation_id: r.federation_id,
-      target_belt_level: r.target_belt_level,
-      target_belt_name: r.target_belt_name || null,
-      criterion: r.criterion,
-      required_value: r.required_value,
-      unit: r.unit || null,
-      description: r.description || null,
+      from_belt: r.from_belt,
+      to_belt: r.to_belt,
+      belt_schema: r.belt_schema || null,
+      min_months: r.min_months || null,
+      required_kata: r.required_kata || [],
+      required_kumite: r.required_kumite || null,
+      min_courses: r.min_courses || null,
+      notes: r.notes || null,
+      is_hard_block: r.is_hard_block,
       confirmed: r.confirmed, // FPKT #2
-      sort_order: r.sort_order || null,
+      confirmed_at: r.confirmed_at || null,
       is_active: r.is_active,
       updated_at: r.updated_at,
     })));
