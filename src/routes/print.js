@@ -110,7 +110,7 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
       ? `<tr class="discount-row"><td>Desconto</td><td style="text-align:right">-R$${fmt(sale.discount_amount)}</td></tr>` : ''}
     <tr class="total-row"><td>TOTAL</td><td style="text-align:right">R$${fmt(sale.total_amount)}</td></tr>
     ${paymentsHTML}
-    ${change ? `<tr><td>Troco</td><td style="text-align:right">${change}</td></tr>` : ''}
+    ${change ? `<tr><td>Troco</td><td style="text-align:right">R$${change}</td></tr>` : ''}
   </table>
   ${pixSection}
   <div class="divider"></div>
