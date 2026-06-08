@@ -422,7 +422,9 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
 
   test('(c) idempotencia: replay (ON CONFLICT) NAO materializa encargos de novo', async () => {
     // INSERT do payment via idempotencyKey retorna vazio => isNewPayment=false.
-    // Mesmo com config ON, o ramo de encargos NAO roda.
+    // Mesmo com config ON, o ramo de encargos NAO roda. O FIFO de principal segue
+    // o comportamento pre-existente (no replay nao ha A Receber pendente -> o
+    // remanescente vira INSERT legacy com ON CONFLICT DO NOTHING = no-op).
     const existingTx = { id: 'tx-replay', type: 'payment', amount: '50.00' };
     const balRow = { balance: '50.00' };
 
@@ -430,9 +432,10 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
       { rows: [] },           // 0 INSERT payment ON CONFLICT DO NOTHING (replay => 0 linhas)
       { rows: [existingTx] }, // 1 SELECT existing tx
       { rows: [] },           // 2 SELECT A Receber (FIFO principal direto, sem encargos)
-      { rows: [] },           // 3 SELECT installments FOR UPDATE
-      { rows: [] },           // 4 UPDATE credit_used
-      { rows: [balRow] },     // 5 SELECT balance
+      { rows: [] },           // 3 INSERT legacy Recebido (remaining=50, ON CONFLICT no-op)
+      { rows: [] },           // 4 SELECT installments FOR UPDATE
+      { rows: [] },           // 5 UPDATE credit_used
+      { rows: [balRow] },     // 6 SELECT balance
     ]);
 
     const result = await creditLedger.applyPayment(client, {
@@ -445,8 +448,10 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
 
     expect(result.charges_paid).toBe(0);
     expect(result.charges_detail).toEqual([]);
-    // 6 queries: nenhuma de encargos, e o SELECT existing tx aconteceu (replay).
-    expect(client.query).toHaveBeenCalledTimes(6);
+    // 7 queries: INSERT(0) + SELECT existing(1) + SELECT AR(2) + legacy(3) +
+    // SELECT installments(4) + UPDATE credit_used(5) + SELECT balance(6).
+    // NENHUMA de encargos.
+    expect(client.query).toHaveBeenCalledTimes(7);
     const anyEncargos = client.query.mock.calls.some(c => /Crediario - Encargos/i.test(c[0] || ''));
     expect(anyEncargos).toBe(false);
     const selectedExisting = client.query.mock.calls.some(c => /SELECT \* FROM customer_credit_transactions WHERE idempotency_key/i.test(c[0] || ''));
