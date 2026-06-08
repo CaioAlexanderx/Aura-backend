@@ -11,6 +11,7 @@
 // F3 (05/06/2026): POST /customer/:cid/accounts -- multiplos carnes
 //                  GET  /customer/:cid agora retorna campo `accounts`
 //                  POST /customer/:cid/payment aceita account_id / allocations
+// Hub F1.4 (07/06/2026): open_installments inclui account_id
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -96,6 +97,7 @@ router.get('/balances', async (req, res) => {
 
 // GET /customer/:cid
 // F3: adiciona campo `accounts` com lista de carnes e saldo por carne.
+// Hub F1.4: open_installments inclui account_id (defensivo 42703).
 // Todos os campos pre-existentes sao mantidos intactos.
 router.get('/customer/:cid', async (req, res) => {
   try {
@@ -121,15 +123,36 @@ router.get('/customer/:cid', async (req, res) => {
       [req.params.cid, req.params.id]
     );
 
-    const { rows: installments } = await db.query(
-      `SELECT id, installment_number, total_installments,
-              amount_due, covered_amount, due_date, status, late_fee, late_interest
-         FROM credit_installments
-        WHERE customer_id = $1 AND company_id = $2
-          AND status IN ('pending','overdue')
-        ORDER BY due_date ASC`,
-      [req.params.cid, req.params.id]
-    ).catch(() => ({ rows: [] }));
+    // Hub F1.4: inclui account_id nas parcelas abertas (defensivo: 42703 se coluna ainda nao existe)
+    let installmentRows = [];
+    try {
+      const r = await db.query(
+        `SELECT id, installment_number, total_installments,
+                amount_due, covered_amount, due_date, status, late_fee, late_interest, account_id
+           FROM credit_installments
+          WHERE customer_id = $1 AND company_id = $2
+            AND status IN ('pending','overdue')
+          ORDER BY due_date ASC`,
+        [req.params.cid, req.params.id]
+      );
+      installmentRows = r.rows;
+    } catch (instErr) {
+      if (instErr.code === '42703') {
+        // account_id ainda nao existe — fallback sem a coluna
+        const r = await db.query(
+          `SELECT id, installment_number, total_installments,
+                  amount_due, covered_amount, due_date, status, late_fee, late_interest
+             FROM credit_installments
+            WHERE customer_id = $1 AND company_id = $2
+              AND status IN ('pending','overdue')
+            ORDER BY due_date ASC`,
+          [req.params.cid, req.params.id]
+        ).catch(() => ({ rows: [] }));
+        installmentRows = r.rows;
+      } else if (instErr.code === '42P01') {
+        installmentRows = [];
+      } else throw instErr;
+    }
 
     // F3: carnes do cliente (defensivo: tabela pode nao existir ainda)
     let accounts = [];
@@ -223,7 +246,7 @@ router.get('/customer/:cid', async (req, res) => {
         amount: parseFloat(t.amount), payment_method: t.payment_method,
         notes: t.notes, created_at: t.created_at,
       })),
-      open_installments: installments.map(i => ({
+      open_installments: installmentRows.map(i => ({
         id: i.id,
         installment_number:  i.installment_number,
         total_installments:  i.total_installments,
@@ -234,6 +257,7 @@ router.get('/customer/:cid', async (req, res) => {
         status:              i.status,
         late_fee:            parseFloat(i.late_fee || 0),
         late_interest:       parseFloat(i.late_interest || 0),
+        account_id:          i.account_id || null,
       })),
     });
   } catch (err) {

@@ -11,6 +11,9 @@
  *   - POST /installments aceita account_id para vincular parcelas a um carne
  * F3.1 (06/06/2026):
  *   - PATCH /installments/:id/due-date -- edita vencimento com cascata nas parcelas seguintes
+ * Hub F1.4 (07/06/2026):
+ *   - GET /customers/:cid/profile: score_label, available_limit, account_id nas parcelas abertas
+ *   - GET /plan-config + PUT /plan-config: score_warn_min (defensivo 42703)
  */
 
 const express = require('express');
@@ -64,6 +67,7 @@ router.use(assertCrediarioEnabled);
 
 // ─── GET /credit/customers/:cid/profile ──────────────────────────────────
 // F2: adiciona campo `terms: { overrides, effective }` ao perfil.
+// Hub F1.4: score_label, available_limit, account_id nas parcelas abertas.
 router.get('/customers/:cid/profile', async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
@@ -72,24 +76,53 @@ router.get('/customers/:cid/profile', async (req, res) => {
     const profile = await creditLedger._getOrCreateProfile(client, companyId, customerId);
     if (!profile) return res.json({ score: 500, label: 'regular', credit_limit: 0, credit_used: 0, status: 'active', terms: { overrides: {}, effective: {} } });
     const config = await creditLedger._getOrCreatePlanConfig(client, companyId);
-    const installments = await client.query(
-      `SELECT id, installment_number, total_installments, amount_due, covered_amount,
-              due_date, status, pix_link, late_fee, late_interest, collection_stage
-       FROM credit_installments
-       WHERE company_id = $1 AND customer_id = $2 AND status IN ('pending','overdue')
-       ORDER BY due_date ASC`,
-      [companyId, customerId]
-    );
+
+    // account_id: coluna adicionada na migration 163. SELECT defensivo via RETURNING * e coluna pode nao estar no pg client antigo;
+    // usar try/catch individual para manter retrocompatibilidade.
+    let installmentRows = [];
+    try {
+      const r = await client.query(
+        `SELECT id, installment_number, total_installments, amount_due, covered_amount,
+                due_date, status, pix_link, late_fee, late_interest, collection_stage, account_id
+         FROM credit_installments
+         WHERE company_id = $1 AND customer_id = $2 AND status IN ('pending','overdue')
+         ORDER BY due_date ASC`,
+        [companyId, customerId]
+      );
+      installmentRows = r.rows;
+    } catch (e) {
+      if (e.code === '42703') {
+        // account_id ainda nao existe (deploy parcial) — fallback sem a coluna
+        const r = await client.query(
+          `SELECT id, installment_number, total_installments, amount_due, covered_amount,
+                  due_date, status, pix_link, late_fee, late_interest, collection_stage
+           FROM credit_installments
+           WHERE company_id = $1 AND customer_id = $2 AND status IN ('pending','overdue')
+           ORDER BY due_date ASC`,
+          [companyId, customerId]
+        );
+        installmentRows = r.rows;
+      } else throw e;
+    }
 
     // F2: termos resolvidos
     const terms = creditLedger.resolveTerms(profile, config);
 
+    // Hub F1.4: score_label e available_limit
+    const creditScore = parseInt(profile.credit_score) || 500;
+    const creditLimit = Number(profile.credit_limit || 0);
+    const creditUsed  = Number(profile.credit_used  || 0);
+    const availableLimit = Math.max(creditLimit - creditUsed, 0);
+
     res.json({
       ...profile,
+      score_label:     creditLedger.scoreLabel(creditScore),
+      available_limit: availableLimit,
       config,
       terms,
-      open_installments: installments.rows.map(i => ({
+      open_installments: installmentRows.map(i => ({
         ...i,
+        account_id: i.account_id || null,
         remaining: parseFloat((parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)).toFixed(2)),
       })),
     });
@@ -99,7 +132,7 @@ router.get('/customers/:cid/profile', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── PUT /credit/customers/:cid/terms (F2) ────────────────────────────────
+// ─── PUT /credit/customers/:cid/terms (F2) ────────────────────────────────────
 // Persiste overrides de termos por cliente. null limpa o override (volta ao padrao da loja).
 router.put('/customers/:cid/terms', async (req, res) => {
   const companyId  = req.params.id;
@@ -236,45 +269,98 @@ router.patch('/customers/:cid/block', async (req, res) => {
 });
 
 // ─── GET/PUT /credit/plan-config ───────────────────────────────────────────
+// Hub F1.4: GET tambem retorna score_warn_min (via RETURNING *; defensivo se coluna faltar).
 router.get('/plan-config', async (req, res) => {
   const client = await pool.connect();
   try {
-    const config = await creditLedger._getOrCreatePlanConfig(client, req.params.id);
+    // _getOrCreatePlanConfig usa RETURNING * — se score_warn_min existir, vem automaticamente.
+    // Se a coluna nao existir ainda (42703), retorna config sem ela.
+    let config;
+    try {
+      config = await creditLedger._getOrCreatePlanConfig(client, req.params.id);
+    } catch (e) {
+      if (e.code === '42703') {
+        // fallback: busca sem a coluna nova
+        const r = await client.query(
+          `INSERT INTO credit_plan_configs (company_id)
+           VALUES ($1)
+           ON CONFLICT (company_id) DO UPDATE SET updated_at = NOW()
+           RETURNING id, company_id, max_installments, min_installment_value,
+                     interest_rate, late_fee_rate, late_interest_daily,
+                     auto_block_days, require_score_min, period_unit, period_count, updated_at`,
+          [req.params.id]
+        );
+        config = r.rows[0] || null;
+      } else throw e;
+    }
     res.json(config || {});
   } catch (err) {
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
 });
 
+// Hub F1.4: PUT tambem aceita score_warn_min. Padrao defensivo identico ao existente:
+// se a coluna 42703, ignora graciosamente (nao bloqueia o save dos outros campos).
 router.put('/plan-config', async (req, res) => {
   const { max_installments, min_installment_value, interest_rate,
           late_fee_rate, late_interest_daily, auto_block_days,
-          require_score_min, period_unit, period_count } = req.body;
+          require_score_min, period_unit, period_count, score_warn_min } = req.body;
   const safeUnit = ['day', 'week', 'month'].includes(period_unit) ? period_unit : null;
   const client = await pool.connect();
   try {
-    const r = await client.query(
-      `INSERT INTO credit_plan_configs (company_id, max_installments, min_installment_value,
-         interest_rate, late_fee_rate, late_interest_daily, auto_block_days,
-         require_score_min, period_unit, period_count)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'month'),COALESCE($10,1))
-       ON CONFLICT (company_id) DO UPDATE SET
-         max_installments      = COALESCE($2, credit_plan_configs.max_installments),
-         min_installment_value = COALESCE($3, credit_plan_configs.min_installment_value),
-         interest_rate         = COALESCE($4, credit_plan_configs.interest_rate),
-         late_fee_rate         = COALESCE($5, credit_plan_configs.late_fee_rate),
-         late_interest_daily   = COALESCE($6, credit_plan_configs.late_interest_daily),
-         auto_block_days       = COALESCE($7, credit_plan_configs.auto_block_days),
-         require_score_min     = COALESCE($8, credit_plan_configs.require_score_min),
-         period_unit           = COALESCE($9, credit_plan_configs.period_unit),
-         period_count          = COALESCE($10, credit_plan_configs.period_count),
-         updated_at            = NOW()
-       RETURNING *`,
-      [req.params.id,
-       nz(max_installments), nz(min_installment_value), nz(interest_rate),
-       nz(late_fee_rate), nz(late_interest_daily), nz(auto_block_days),
-       nz(require_score_min), safeUnit, nz(period_count)]
-    );
+    // Tenta salvar com score_warn_min
+    let r;
+    try {
+      r = await client.query(
+        `INSERT INTO credit_plan_configs (company_id, max_installments, min_installment_value,
+           interest_rate, late_fee_rate, late_interest_daily, auto_block_days,
+           require_score_min, period_unit, period_count, score_warn_min)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'month'),COALESCE($10,1),$11)
+         ON CONFLICT (company_id) DO UPDATE SET
+           max_installments      = COALESCE($2, credit_plan_configs.max_installments),
+           min_installment_value = COALESCE($3, credit_plan_configs.min_installment_value),
+           interest_rate         = COALESCE($4, credit_plan_configs.interest_rate),
+           late_fee_rate         = COALESCE($5, credit_plan_configs.late_fee_rate),
+           late_interest_daily   = COALESCE($6, credit_plan_configs.late_interest_daily),
+           auto_block_days       = COALESCE($7, credit_plan_configs.auto_block_days),
+           require_score_min     = COALESCE($8, credit_plan_configs.require_score_min),
+           period_unit           = COALESCE($9, credit_plan_configs.period_unit),
+           period_count          = COALESCE($10, credit_plan_configs.period_count),
+           score_warn_min        = COALESCE($11, credit_plan_configs.score_warn_min),
+           updated_at            = NOW()
+         RETURNING *`,
+        [req.params.id,
+         nz(max_installments), nz(min_installment_value), nz(interest_rate),
+         nz(late_fee_rate), nz(late_interest_daily), nz(auto_block_days),
+         nz(require_score_min), safeUnit, nz(period_count), nz(score_warn_min)]
+      );
+    } catch (e) {
+      if (e.code === '42703') {
+        // score_warn_min ainda nao existe (deploy parcial) -- salva sem ela
+        r = await client.query(
+          `INSERT INTO credit_plan_configs (company_id, max_installments, min_installment_value,
+             interest_rate, late_fee_rate, late_interest_daily, auto_block_days,
+             require_score_min, period_unit, period_count)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'month'),COALESCE($10,1))
+           ON CONFLICT (company_id) DO UPDATE SET
+             max_installments      = COALESCE($2, credit_plan_configs.max_installments),
+             min_installment_value = COALESCE($3, credit_plan_configs.min_installment_value),
+             interest_rate         = COALESCE($4, credit_plan_configs.interest_rate),
+             late_fee_rate         = COALESCE($5, credit_plan_configs.late_fee_rate),
+             late_interest_daily   = COALESCE($6, credit_plan_configs.late_interest_daily),
+             auto_block_days       = COALESCE($7, credit_plan_configs.auto_block_days),
+             require_score_min     = COALESCE($8, credit_plan_configs.require_score_min),
+             period_unit           = COALESCE($9, credit_plan_configs.period_unit),
+             period_count          = COALESCE($10, credit_plan_configs.period_count),
+             updated_at            = NOW()
+           RETURNING *`,
+          [req.params.id,
+           nz(max_installments), nz(min_installment_value), nz(interest_rate),
+           nz(late_fee_rate), nz(late_interest_daily), nz(auto_block_days),
+           nz(require_score_min), safeUnit, nz(period_count)]
+        );
+      } else throw e;
+    }
     res.json(r.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
