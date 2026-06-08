@@ -10,41 +10,23 @@
 const db = require('../config/database');
 
 // ── Status de anuidade (derivado de karate_dojo_annuity_history) ─
-// Regra:
-//   'paid'       → existe registro pago para o período corrente (status=paid)
-//   'due'        → existe cobrança pendente com due_date >= hoje
-//   'overdue'    → cobrança pendente com due_date vencida há <= 90 dias
-//   'defaulting' → vencida há 91–180 dias
-//   'suspended'  → vencida há > 180 dias ou nenhuma cobrança + afiliação antiga
 function computeAnnuityStatus(latestAnnuity) {
   if (!latestAnnuity) return 'suspended';
-
-  // Se existe registro com status explícito
   if (latestAnnuity.status === 'paid') return 'paid';
-
   const dueDate = latestAnnuity.due_date ? new Date(latestAnnuity.due_date) : null;
   if (!dueDate) return 'suspended';
-
   const now = new Date();
   const dayMs = 1000 * 60 * 60 * 24;
   const daysUntilDue = Math.round((dueDate - now) / dayMs);
-
   if (daysUntilDue > 0)  return 'due';
-
   const daysOverdue = Math.abs(daysUntilDue);
   if (daysOverdue <= 90)  return 'overdue';
   if (daysOverdue <= 180) return 'defaulting';
   return 'suspended';
 }
 
-/**
- * Busca o status atual de anuidade de um dojô pela tabela karate_dojo_annuity_history.
- * Retorna { status, amount, days_overdue, due_date, paid_at, reference_period }.
- */
 async function getDojoAnnuityStatus(dojoId, referenceYear) {
   const year = referenceYear || new Date().getFullYear().toString();
-
-  // Prioridade: registro do ano corrente; senão, o mais recente
   const { rows } = await db.query(
     `SELECT id, dojo_id, reference_period, amount, due_date, paid_at, status, transaction_id
      FROM karate_dojo_annuity_history
@@ -55,16 +37,13 @@ async function getDojoAnnuityStatus(dojoId, referenceYear) {
      LIMIT 1`,
     [dojoId, year]
   );
-
   const annuity = rows[0] || null;
   const status = computeAnnuityStatus(annuity);
-
   const daysOverdue = (() => {
     if (!annuity || !annuity.due_date || status === 'paid' || status === 'due') return 0;
     const dayMs = 1000 * 60 * 60 * 24;
     return Math.max(0, Math.round((new Date() - new Date(annuity.due_date)) / dayMs));
   })();
-
   return {
     annuity_id: annuity?.id || null,
     status,
@@ -78,16 +57,39 @@ async function getDojoAnnuityStatus(dojoId, referenceYear) {
 }
 
 /**
- * Calcula DRE simplificado para o período.
- * Receitas: transactions com type='income', company_id=federationId, status='paid'.
- * Despesas: transactions com type='expense', company_id=federationId.
+ * getPractitionerAnnuityStatus — situação da anuidade CPF de um praticante,
+ * derivada de transactions (category='annuity_cpf', reference_type='customer').
+ * Usada pela verificação pública da carteirinha.
+ *   situacao: 'valida' | 'vencida'
+ *   validade: data de referência (due_date) ou null
+ * Sem cobrança lançada => 'valida' (não penaliza quem a federação ainda não cobrou).
  */
+async function getPractitionerAnnuityStatus(studentId, federationId) {
+  const { rows } = await db.query(
+    `SELECT due_date, status, paid_at
+     FROM transactions
+     WHERE federation_id = $1
+       AND reference_type = 'customer'
+       AND reference_id = $2::text
+       AND category = 'annuity_cpf'
+     ORDER BY due_date DESC NULLS LAST
+     LIMIT 1`,
+    [federationId, studentId]
+  );
+  const a = rows[0];
+  if (!a) return { situacao: 'valida', validade: null, has_charge: false };
+  if (a.status === 'paid') return { situacao: 'valida', validade: a.due_date || null, paid_at: a.paid_at || null, has_charge: true };
+  if (a.due_date && new Date(a.due_date) < new Date()) {
+    return { situacao: 'vencida', validade: a.due_date, has_charge: true };
+  }
+  return { situacao: 'valida', validade: a.due_date || null, has_charge: true };
+}
+
 async function calcDre(federationId, from, to) {
   const params = [federationId];
   let dateFilter = '';
   if (from) { params.push(from); dateFilter += ` AND due_date >= $${params.length}`; }
   if (to)   { params.push(to);   dateFilter += ` AND due_date <= $${params.length}`; }
-
   const { rows: revenueRows } = await db.query(
     `SELECT category, COALESCE(SUM(amount), 0) AS amount
      FROM transactions
@@ -96,7 +98,6 @@ async function calcDre(federationId, from, to) {
      ORDER BY amount DESC`,
     params
   );
-
   const { rows: expenseRows } = await db.query(
     `SELECT category, COALESCE(SUM(amount), 0) AS amount
      FROM transactions
@@ -105,10 +106,8 @@ async function calcDre(federationId, from, to) {
      ORDER BY amount DESC`,
     params
   );
-
   const totalRevenue = revenueRows.reduce((s, r) => s + parseFloat(r.amount), 0);
   const totalExpense = expenseRows.reduce((s, r) => s + parseFloat(r.amount), 0);
-
   return {
     revenue: revenueRows.map(r => ({ category: r.category, amount: parseFloat(r.amount) })),
     expenses: expenseRows.map(r => ({ category: r.category, amount: parseFloat(r.amount) })),
@@ -116,15 +115,11 @@ async function calcDre(federationId, from, to) {
   };
 }
 
-/**
- * Calcula fluxo de caixa mensal para o período.
- */
 async function calcCashflow(federationId, from, to) {
   const params = [federationId];
   let dateFilter = '';
   if (from) { params.push(from); dateFilter += ` AND due_date >= $${params.length}`; }
   if (to)   { params.push(to);   dateFilter += ` AND due_date <= $${params.length}`; }
-
   const { rows } = await db.query(
     `SELECT
        TO_CHAR(DATE_TRUNC('month', due_date), 'YYYY-MM') AS month,
@@ -136,7 +131,6 @@ async function calcCashflow(federationId, from, to) {
      ORDER BY 1`,
     params
   );
-
   return rows.map(r => ({
     month: r.month,
     inflow: parseFloat(r.inflow),
@@ -145,9 +139,6 @@ async function calcCashflow(federationId, from, to) {
   }));
 }
 
-/**
- * Projeção de recebíveis (cobranças pendentes com due_date futuro).
- */
 async function calcProjectedReceivables(federationId) {
   const { rows } = await db.query(
     `SELECT due_date, COALESCE(SUM(amount), 0) AS amount
@@ -167,6 +158,7 @@ async function calcProjectedReceivables(federationId) {
 module.exports = {
   computeAnnuityStatus,
   getDojoAnnuityStatus,
+  getPractitionerAnnuityStatus,
   calcDre,
   calcCashflow,
   calcProjectedReceivables,

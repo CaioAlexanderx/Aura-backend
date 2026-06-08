@@ -23,6 +23,9 @@ try { paymentProvider = require('../services/karatePaymentProvider'); } catch (_
 
 const onlyDigits = (s) => String(s || '').replace(/\D/g, '');
 
+// Copy do 501 (competição não é inscrita por este fluxo público)
+const COMP_MSG = 'Competições não são inscritas por este fluxo. A inscrição é feita pela sua academia junto à federação, com chaveamento por categoria e peso.';
+
 async function resolveFederation(slugOrId) {
   let fedId = null;
   const r = await db.query(
@@ -286,7 +289,7 @@ router.get('/:slug/events', async (req, res) => {
 async function resolveEvent(fedId, eventId) {
   if (!/^[0-9a-fA-F-]{36}$/.test(eventId)) return null;
   const ex = await db.query(
-    `SELECT id, name, exam_type, event_date, location, fee_amount, status, 'exam' AS kind
+    `SELECT id, name, exam_type, event_date, location, fee_amount, max_candidates, status, 'exam' AS kind
      FROM karate_belt_exams WHERE id = $1 AND federation_id = $2 LIMIT 1`,
     [eventId, fedId]
   );
@@ -316,6 +319,17 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
     if (['done', 'cancelled', 'closed'].includes(ev.status)) {
       return res.status(409).json({ error: 'Inscrições encerradas para este evento', code: 'CLOSED' });
     }
+
+    // Vagas (apenas exames têm max_candidates; cursos não têm capacidade modelada)
+    let capacity = null;
+    if (ev.kind === 'exam') {
+      const cap = await db.query(
+        `SELECT COUNT(*)::int AS filled FROM karate_belt_exam_candidates WHERE exam_id = $1`,
+        [ev.id]
+      );
+      capacity = { max: ev.max_candidates || null, filled: cap.rows[0].filled };
+    }
+
     res.json({
       federation: { name: fed.name, logo: fed.logo },
       event: {
@@ -323,12 +337,77 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
         type: ev.exam_type || ev.event_type || null,
         event_date: ev.event_date, location: ev.location,
         fee_amount: ev.fee_amount,
+        capacity,
       },
       requires: ev.kind === 'exam' ? ['cpf', 'target_belt'] : ['cpf'],
     });
   } catch (err) {
     console.error('[karatePublic] inscricao GET error:', err.message);
     res.status(500).json({ error: 'Erro ao carregar inscrição' });
+  }
+});
+
+// ── POST /:slug/inscricao/:eventId/lookup — localizar praticante por CPF ──
+// Passo intermediário do wizard (cpf → faixa): retorna a faixa atual + se já
+// está inscrito, SEM efetivar a inscrição. Erros espelham o mock: 404 (não
+// localizado), 409 (encerrado), 501 (competição).
+router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
+  const { cpf } = req.body || {};
+  try {
+    const fed = await resolveFederation(req.params.slug);
+    if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
+    const ev = await resolveEvent(fed.id, req.params.eventId);
+    if (!ev) return res.status(501).json({ error: COMP_MSG, code: 'NOT_IMPLEMENTED' });
+    if (['done', 'cancelled', 'closed'].includes(ev.status)) {
+      return res.status(409).json({ error: 'Inscrições encerradas', code: 'CLOSED' });
+    }
+
+    const student = await portalAuth._findPractitionerByCpf(fed.id, cpf);
+    if (!student) {
+      return res.status(404).json({
+        error: 'Cadastro não localizado nesta federação. Procure seu dojô ou a secretaria.',
+        code: 'PRACTITIONER_NOT_FOUND',
+      });
+    }
+
+    const cb = await db.query(
+      `SELECT belt_level, belt_name FROM karate_current_belt
+       WHERE student_id = $1 AND federation_id = $2 LIMIT 1`,
+      [student.id, fed.id]
+    );
+
+    let already = false;
+    if (ev.kind === 'exam') {
+      const d = await db.query(
+        `SELECT id FROM karate_belt_exam_candidates WHERE exam_id = $1 AND student_id = $2 LIMIT 1`,
+        [ev.id, student.id]
+      );
+      already = d.rows.length > 0;
+    } else {
+      const d = await db.query(
+        `SELECT id FROM karate_event_enrollments WHERE event_id = $1 AND student_id = $2 LIMIT 1`,
+        [ev.id, student.id]
+      );
+      already = d.rows.length > 0;
+    }
+
+    res.json({
+      found: true,
+      already_enrolled: already,
+      practitioner: {
+        id: student.id,
+        name: student.name,
+        current_belt: cb.rows[0]?.belt_level || null,
+        current_belt_name: cb.rows[0]?.belt_name || null,
+      },
+      event: {
+        id: ev.id, name: ev.name, kind: ev.kind, fee_amount: ev.fee_amount,
+        requires: ev.kind === 'exam' ? ['target_belt'] : [],
+      },
+    });
+  } catch (err) {
+    console.error('[karatePublic] lookup error:', err.message);
+    res.status(500).json({ error: 'Erro na consulta' });
   }
 });
 
@@ -343,10 +422,7 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
 
     const ev = await resolveEvent(fed.id, req.params.eventId);
     if (!ev) {
-      return res.status(501).json({
-        error: 'Inscrição online para este tipo de evento ainda não disponível (ex.: competições — Track E).',
-        code: 'NOT_IMPLEMENTED',
-      });
+      return res.status(501).json({ error: COMP_MSG, code: 'NOT_IMPLEMENTED' });
     }
     if (['done', 'cancelled', 'closed'].includes(ev.status)) {
       return res.status(409).json({ error: 'Inscrições encerradas', code: 'CLOSED' });
