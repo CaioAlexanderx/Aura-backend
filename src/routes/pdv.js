@@ -17,6 +17,10 @@
 //   alem de 'falha'/'pendente'. O placeholder nfe_devolucao vira 'rejeitada'
 //   pos-COMMIT quando a SEFAZ rejeita (trocaV2 grava result.status), entao
 //   sem isso o botao de reprocessar nunca pegava uma nota rejeitada.
+// 07/06/2026 (crediario Hub F1.4.1):
+//   - createCreditSale agora barra bloqueio MANUAL (status=blocked) lancando
+//     erro 422; POST /sale propaga 422 { code:CUSTOMER_BLOCKED, reason } em vez
+//     de 500. Score NUNCA bloqueia: aviso sai em credit.warnings[].
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -303,8 +307,12 @@ router.post('/sale', async (req, res) => {
     // F1 (29/05/2026): crediario atomico DENTRO da transacao principal.
     // createCreditSale grava debit + A Receber + agenda parcelas (se installments>1).
     // Erro aqui REVERTE a venda (comportamento correto).
+    // Hub F1.4.1: createCreditSale barra bloqueio MANUAL (status=blocked) lancando
+    //   erro com .statusCode=422 / .code='CUSTOMER_BLOCKED' -> propagado abaixo no
+    //   catch. Score NUNCA bloqueia: vira creditSaleResult.warnings[].
+    let creditSaleResult = null;
     if (creditAmount > 0) {
-      await createCreditSale(client, {
+      creditSaleResult = await createCreditSale(client, {
         companyId:    req.params.id,
         customerId:   customer_id,
         saleId:       sale.id,
@@ -379,7 +387,12 @@ router.post('/sale', async (req, res) => {
         `SELECT balance FROM customer_credit_balances WHERE customer_id=$1 AND company_id=$2`,
         [customer_id, req.params.id]
       );
-      creditInfo = { debited: creditAmount, new_balance: parseFloat(bal[0]?.balance || 0) };
+      creditInfo = {
+        debited: creditAmount,
+        new_balance: parseFloat(bal[0]?.balance || 0),
+        // Hub F1.4.1: aviso de score NAO-impeditivo (vazio quando nao ha aviso).
+        warnings: creditSaleResult?.warnings || [],
+      };
     }
     res.status(201).json({
       sale: { ...sale, items: saleItems },
@@ -389,6 +402,15 @@ router.post('/sale', async (req, res) => {
     });
   } catch (e) {
     await client.query('ROLLBACK');
+    // Hub F1.4.1: bloqueio MANUAL e o UNICO impeditivo. createCreditSale lanca
+    // erro com .statusCode=422 / .code='CUSTOMER_BLOCKED' -> propaga 422 (nao 500).
+    if (e && e.statusCode === 422 && e.code === 'CUSTOMER_BLOCKED') {
+      return res.status(422).json({
+        error: e.message,
+        code: 'CUSTOMER_BLOCKED',
+        reason: e.reason || null,
+      });
+    }
     console.error('[PDV] Erro ao registrar venda:', e.message);
     res.status(500).json({ error: 'Erro ao registrar venda' });
   } finally { client.release(); }

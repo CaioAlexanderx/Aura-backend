@@ -6,12 +6,17 @@
 // atomica. getCustomerCreditPreview usa pool diretamente.
 //
 // API publica:
-//   createCreditSale(client, opts)  -> { debited, schedule[] }
+//   createCreditSale(client, opts)  -> { debited, schedule[], warnings[] }
 //   applyPayment(client, opts)      -> { new_balance, settled_receivables[], covered_installments[], transaction }
 //   cancelCreditSale(client, opts)  -> { ok }
 //   getCustomerCreditPreview(companyId, customerId) -> preview
 //   resolveTerms(profile, config)   -> termos efetivos (F2)
 //   scoreLabel(score)               -> string (exportado p/ reuso em rotas)
+//   scoreWarning(score, config)     -> aviso nao-impeditivo (Hub F1.4)
+//
+// REGRA DE NEGOCIO (imutavel): score baixo NUNCA bloqueia a venda.
+// Score so gera AVISO ao lojista. O UNICO impeditivo e o bloqueio
+// MANUAL do cliente (profile.status === 'blocked').
 // =============================================================
 
 const pool = require('../config/database');
@@ -102,6 +107,23 @@ function scoreLabel(score) {
   if (score >= 450) return 'regular';
   if (score >= 300) return 'restrito';
   return 'bloqueado';
+}
+
+// ─── Hub F1.4: scoreWarning ───────────────────────────────────
+// Aviso NAO-impeditivo. Retorna objeto se o score do cliente esta abaixo
+// do limiar configurado em credit_plan_configs.score_warn_min; senao null.
+// score_warn_min null/0 = sem aviso. Defensivo: config pode nao ter o campo
+// (deploy parcial / 42703 tratado a montante => config sem a coluna).
+//
+// IMPORTANTE: este helper SO gera aviso. NUNCA bloqueia uma venda/parcela.
+// O unico impeditivo do crediario e o bloqueio MANUAL (status === 'blocked').
+function scoreWarning(score, config) {
+  const min = parseInt(config?.score_warn_min, 10) || 0;
+  const s   = parseInt(score, 10);
+  if (min > 0 && Number.isFinite(s) && s < min) {
+    return { below_min: true, threshold: min, actual: s };
+  }
+  return null;
 }
 
 async function _getOrCreateProfile(client, companyId, customerId) {
@@ -231,7 +253,11 @@ async function _recalculateScore(client, companyId, customerId) {
  *           firstDueDate?, interestRate?, productNames?, createdBy?,
  *           periodUnit?, periodCount?, accountId? }} opts
  *   accountId (F3): vincula ao carne especifico. NULL = Conta geral.
- * @returns {{ debited: row, schedule: [] }}
+ * @returns {{ debited: row, schedule: [], warnings: [] }}
+ *
+ * REGRA: bloqueio MANUAL (status === 'blocked') e o UNICO impeditivo —
+ * lanca Error com .statusCode=422 / .code='CUSTOMER_BLOCKED' p/ o chamador
+ * traduzir. Score baixo NUNCA bloqueia: vira apenas warnings[] no retorno.
  */
 async function createCreditSale(client, {
   companyId, customerId, saleId, amount,
@@ -240,6 +266,36 @@ async function createCreditSale(client, {
   periodUnit = null, periodCount = null,
   accountId = null,
 }) {
+  // 0. Bloqueio manual (UNICO impeditivo) + aviso de score (NAO-impeditivo).
+  //    Carrega profile/config de forma defensiva (tabela/coluna podem faltar
+  //    em deploy parcial — nesse caso seguimos sem bloqueio nem aviso).
+  let _profile = null;
+  let _config  = null;
+  try {
+    _profile = await _getOrCreateProfile(client, companyId, customerId);
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+  }
+  if (_profile?.status === 'blocked') {
+    const err = new Error(
+      `Cliente com credito bloqueado. Motivo: ${_profile.blocked_reason || 'Bloqueio manual'}.`
+    );
+    err.statusCode = 422;
+    err.code       = 'CUSTOMER_BLOCKED';
+    err.reason     = _profile.blocked_reason || 'Bloqueio manual';
+    throw err;
+  }
+  try {
+    _config = await _getOrCreatePlanConfig(client, companyId);
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+  }
+  const _warn = scoreWarning(parseInt(_profile?.credit_score, 10) || 500, _config);
+  // Score NUNCA bloqueia: apenas anexa aviso ao retorno de sucesso.
+  const warnings = _warn
+    ? [{ code: 'SCORE_BELOW_MIN', threshold: _warn.threshold, actual: _warn.actual }]
+    : [];
+
   // 1. Ledger: debit (com account_id defensivo)
   let debitRows;
   try {
@@ -386,7 +442,7 @@ async function createCreditSale(client, {
     await _updateCreditUsed(client, companyId, customerId);
   }
 
-  return { debited: debitRows[0], schedule };
+  return { debited: debitRows[0], schedule, warnings };
 }
 
 /**
@@ -749,7 +805,7 @@ async function cancelCreditSale(client, { companyId, saleId }) {
 async function getCustomerCreditPreview(companyId, customerId) {
   const today = `(NOW() AT TIME ZONE 'America/Sao_Paulo')::date`;
   try {
-    const [balRes, profileRes, instRes] = await Promise.all([
+    const [balRes, profileRes, instRes, configRes] = await Promise.all([
       pool.query(
         `SELECT COALESCE(balance, 0) AS balance
          FROM customer_credit_balances
@@ -771,11 +827,16 @@ async function getCustomerCreditPreview(companyId, customerId) {
            AND status IN ('pending', 'overdue')`,
         [companyId, customerId]
       ),
+      pool.query(
+        `SELECT score_warn_min FROM credit_plan_configs WHERE company_id = $1`,
+        [companyId]
+      ).catch(() => ({ rows: [] })),
     ]);
 
     const balance    = parseFloat(balRes.rows[0]?.balance || 0);
     const profile    = profileRes.rows[0] || {};
     const inst       = instRes.rows[0] || {};
+    const config     = configRes.rows[0] || {};
     const score      = parseInt(profile.credit_score) || 500;
     const limit      = parseFloat(profile.credit_limit) || 0;
     const over_limit = limit > 0 && balance >= limit;
@@ -787,6 +848,7 @@ async function getCustomerCreditPreview(companyId, customerId) {
       next_due_date:           inst.next_due_date || null,
       score,
       score_label:             scoreLabel(score),
+      score_warning:           scoreWarning(score, config),
       credit_limit:            limit,
       credit_used:             parseFloat(profile.credit_used) || balance,
       over_limit,
@@ -798,6 +860,7 @@ async function getCustomerCreditPreview(companyId, customerId) {
       return {
         balance: 0, open_installments_count: 0, overdue_count: 0,
         next_due_date: null, score: 500, score_label: 'regular',
+        score_warning: null,
         credit_limit: 0, credit_used: 0, over_limit: false,
         status: 'active', blocked_reason: null,
       };
@@ -813,6 +876,7 @@ module.exports = {
   getCustomerCreditPreview,
   resolveTerms,
   scoreLabel,
+  scoreWarning,
   // helpers exportados para compatibilidade interna
   _recalculateScore,
   _updateCreditUsed,
