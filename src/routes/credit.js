@@ -14,6 +14,10 @@
 // Hub F1.4 (07/06/2026): open_installments inclui account_id
 // F2 PR1 (08/06/2026): GET /customer/:cid enriquece open_installments com
 //                  encargos lazy (mora/multa) + total_due. config/profile 1x.
+// F2 PR2 (08/06/2026): POST /customer/:cid/payment carrega config/profile e
+//                  os passa ao applyPayment para MATERIALIZAR encargos
+//                  (encargos primeiro -> principal). Resposta expoe charges_paid.
+//                  Defensivo 42703/42P01 -> config/profile undefined => OFF.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -44,6 +48,33 @@ function normalizeBackdate(raw) {
   const todaySp = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
   if (s >= todaySp) return null;
   return s;
+}
+
+// F2 PR2: carrega config (credit_plan_configs) + profile (customer_credit_profiles)
+// do cliente de forma defensiva. Usados pelo applyPayment p/ MATERIALIZAR encargos.
+// Em deploy parcial (42703/42P01) -> retorna undefined, e applyPayment cai no
+// comportamento OFF (charges_paid: 0, zero queries novas).
+async function loadLateChargesContext(client, companyId, customerId) {
+  let config = undefined;
+  let profile = undefined;
+  try {
+    const cfg = await client.query(`SELECT * FROM credit_plan_configs WHERE company_id = $1`, [companyId]);
+    config = cfg.rows[0] || undefined;
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+    config = undefined;
+  }
+  try {
+    const prof = await client.query(
+      `SELECT * FROM customer_credit_profiles WHERE company_id = $1 AND customer_id = $2`,
+      [companyId, customerId]
+    );
+    profile = prof.rows[0] || undefined;
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+    profile = undefined;
+  }
+  return { config, profile };
 }
 
 // GET /balances
@@ -358,6 +389,9 @@ router.post('/customer/:cid/accounts', async (req, res) => {
 // POST /customer/:cid/payment
 // F3: aceita account_id (FIFO escopo) OU allocations [{account_id, amount}]
 // 05/06/2026: aceita paid_at (YYYY-MM-DD) para recebimento retroativo.
+// F2 PR2: carrega config/profile do cliente e os passa ao applyPayment, que
+//   MATERIALIZA encargos (mora/multa) ANTES do principal quando
+//   config.late_charges_enabled === true. Resposta expoe charges_paid.
 router.post('/customer/:cid/payment', async (req, res) => {
   const amount      = parseFloat(req.body?.amount || 0);
   const method      = req.body?.payment_method ? String(req.body.payment_method).trim() : null;
@@ -409,9 +443,15 @@ router.post('/customer/:cid/payment', async (req, res) => {
       activeSessaoId = sessRes?.rows?.[0]?.id || null;
     } catch (_) {}
 
+    // F2 PR2: carrega config + profile (defensivo). applyPayment usa para
+    // materializar encargos quando late_charges_enabled === true.
+    const { config: lateConfig, profile: lateProfile } =
+      await loadLateChargesContext(client, req.params.id, req.params.cid);
+
     // Modo allocations: chama applyPayment uma vez por alocacao
     if (allocations) {
       const allResults = [];
+      let totalChargesPaid = 0;
       for (const alloc of allocations) {
         const result = await creditLedger.applyPayment(client, {
           companyId:  req.params.id,
@@ -422,7 +462,10 @@ router.post('/customer/:cid/payment', async (req, res) => {
           createdBy:  req.user?.id || null,
           paidAt,
           accountId:  alloc.account_id || null,
+          config:     lateConfig,
+          profile:    lateProfile,
         });
+        totalChargesPaid += result.charges_paid || 0;
         allResults.push({ account_id: alloc.account_id || null, amount: parseFloat(alloc.amount), result });
       }
 
@@ -448,8 +491,10 @@ router.post('/customer/:cid/payment', async (req, res) => {
             created_at: r.result.transaction.created_at,
           } : null,
           settled: r.result.settled_receivables,
+          charges_paid: r.result.charges_paid || 0,
         })),
         new_balance: parseFloat(balRows[0]?.balance || 0),
+        charges_paid: parseFloat(totalChargesPaid.toFixed(2)),
         notes,
       });
     }
@@ -464,6 +509,8 @@ router.post('/customer/:cid/payment', async (req, res) => {
       createdBy:  req.user?.id || null,
       paidAt,
       accountId,
+      config:     lateConfig,
+      profile:    lateProfile,
     });
 
     await client.query('COMMIT');
@@ -482,6 +529,8 @@ router.post('/customer/:cid/payment', async (req, res) => {
       new_balance:   result.new_balance,
       settled:       result.settled_receivables,
       legacy_amount: result.legacy_amount || 0,
+      charges_paid:  result.charges_paid || 0,
+      charges_detail: result.charges_detail || [],
     });
   } catch (err) {
     await client.query('ROLLBACK');
