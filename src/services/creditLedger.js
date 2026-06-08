@@ -11,6 +11,7 @@
 //   cancelCreditSale(client, opts)  -> { ok }
 //   getCustomerCreditPreview(companyId, customerId) -> preview
 //   resolveTerms(profile, config)   -> termos efetivos (F2)
+//   scoreLabel(score)               -> string (exportado p/ reuso em rotas)
 // =============================================================
 
 const pool = require('../config/database');
@@ -94,6 +95,7 @@ function buildPixLink(id) {
   return `https://pagar.getaura.com.br/parcela/${short}`;
 }
 
+// Exportado para reuso nas rotas (GET /customers/:cid/profile, preview PDV).
 function scoreLabel(score) {
   if (score >= 800) return 'premium';
   if (score >= 650) return 'bom';
@@ -810,6 +812,7 @@ module.exports = {
   cancelCreditSale,
   getCustomerCreditPreview,
   resolveTerms,
+  scoreLabel,
   // helpers exportados para compatibilidade interna
   _recalculateScore,
   _updateCreditUsed,
