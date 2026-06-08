@@ -5,11 +5,13 @@
 //   - "Apenas processar o pedido e trazer as informações para a Federação."
 //   - Aqui criamos/renovamos o REGISTRO da carteirinha (dados + verify_token)
 //     e expomos os DADOS. A renderização visual (frente/verso, QR) é da
-//     camada de design/frontend (DESIGN-14, repassado ao Caio).
+//     camada de design/frontend (DESIGN-14, aprovado).
 //
 // LGPD (§0.4 U1): o verify público devolve o MÍNIMO. Menores → ainda menos.
 //   O verify_token é opaco e sua utilidade EXPIRA junto com a carteirinha
 //   (status != 'active' ou valid_until vencido ⇒ resposta "inativa").
+//   birth_date e cpf SÓ aparecem no contexto AUTENTICADO/admin (getCurrentCard),
+//   NUNCA no verify público.
 // ============================================================
 'use strict';
 
@@ -139,6 +141,7 @@ async function issueCard({ federation_id, student_id, issued_by, validity_months
         federation_id: c.federation_id,
         student_id: c.student_id,
         student_name: p.name,
+        birth_date: p.birth_date,   // contexto autenticado/admin (NUNCA no verify publico)
         card_number: c.card_number,
         belt: c.belt_snapshot,
         belt_name: c.belt_name_snapshot,
@@ -160,10 +163,11 @@ async function issueCard({ federation_id, student_id, issued_by, validity_months
   }
 }
 
-/** getCurrentCard — carteirinha mais recente do praticante (visão admin/interna). */
+/** getCurrentCard — carteirinha mais recente do praticante (visão admin/interna/holder).
+ *  Inclui birth_date + cpf (contexto AUTENTICADO) para a arte aprovada da carteirinha. */
 async function getCurrentCard({ federation_id, student_id }) {
   const r = await db.query(
-    `SELECT kc.*, cu.name AS student_name
+    `SELECT kc.*, cu.name AS student_name, cu.birth_date, cu.cpf_cnpj
      FROM karate_membership_cards kc
      JOIN customers cu ON cu.id = kc.student_id
      WHERE kc.student_id = $1 AND kc.federation_id = $2
@@ -178,6 +182,8 @@ async function getCurrentCard({ federation_id, student_id }) {
     federation_id: c.federation_id,
     student_id: c.student_id,
     student_name: c.student_name,
+    birth_date: c.birth_date,   // contexto autenticado/admin (NUNCA no verify publico)
+    cpf: c.cpf_cnpj || null,    // contexto autenticado/admin (NUNCA no verify publico)
     card_number: c.card_number,
     belt: c.belt_snapshot,
     belt_name: c.belt_name_snapshot,
