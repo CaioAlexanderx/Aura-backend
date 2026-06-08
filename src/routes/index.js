@@ -105,7 +105,14 @@ router.use('/orcamento',         require('./studioQuotePublic'));
 //   POST /public/karate/:slug/inscricao/:eventId      — inscrição (exame/curso real; competição 501)
 router.use('/public/karate', require('./karatePublic'));
 
-// ── AURA KARATÊ — Track A (backend cadastros) ───────────────
+// ── AURA KARATÊ — Track E (público: ranking embeddável) ──
+// Router separado (mantém karatePublic.js intacto). Migrations 168 + 169.
+//   GET /public/karate/:slug/seasons                  — temporadas/categorias
+//   GET /public/karate/:slug/ranking?season=&category=— ranking (widget)
+//   GET /public/karate/:slug/ranking/:season/:category— atalho REST (iframe)
+router.use('/public/karate', require('./karatePublicRanking'));
+
+// ── AURA KARATÊ — Track A (backend cadastros) ──────────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
 // GET  /federation/:id/belt-distribution
@@ -140,5 +147,13 @@ router.use('/federation/:id', require('./karateCertificates'));
 //   GET  /federation/:id/cards                                     (read)
 //   POST /federation/:id/cards/issue-batch                         (adminOnly)
 router.use('/federation/:id', require('./karateCards'));
+
+// ── AURA KARATÊ — Track E (admin: competições + ranking) ────
+// Migrations 168 + 169. Contrato docs/karate-fase4-openapi.yaml.
+//   GET/POST  /federation/:id/competitions
+//   GET/PATCH /federation/:id/competitions/:cid (+ /close)
+//   .../categories, .../entries (inscrição + resultado), .../ranking
+//   GET       /federation/:id/rankings (temporada, via view)
+router.use('/federation/:id', require('./karateCompetitions'));
 
 module.exports = router;

@@ -1,0 +1,113 @@
+openapi: 3.1.0
+info:
+  title: Aura Karatê — API Fase 4 (Competições + Ranking) — Track E
+  version: "0.4.0"
+  description: >
+    Contrato da Track E (Competições + Ranking). Backend e Frontend trabalham
+    em paralelo contra este contrato. Migrations 168 + 169.
+
+    DECISÕES:
+      1) Compatibilidade de categoria (idade/faixa/sexo) na inscrição é SOMENTE
+         AVISO (category_fit), nunca bloqueia — mesma filosofia do Track C
+         (FPKT #1). is_hard_block sempre false.
+      2) Inscrição em competição é feita pela federação/academia (admin), NÃO
+         pelo fluxo público por CPF (decisão Track D #4). O público só CONSOME
+         o ranking embeddável.
+      3) Ranking é VIEW comum (karate_competition_ranking_season), sempre fresca,
+         agregando entries com resultado. Sem tabela denormalizada nem REFRESH.
+      4) Capacidade (max_entries) é aviso → lista de espera é decisão da federação;
+         a inscrição não é recusada por lotação.
+servers:
+  - url: https://api.getaura.com.br
+  - url: http://localhost:3000
+paths:
+  /federation/{id}/competitions:
+    get:
+      summary: Lista competições (filtros season, status; paginado). RBAC read
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: '{page, page_size, total, data[]}' } }
+    post:
+      summary: Cria competição (status=draft). RBAC staffWrite
+      security: [{ bearerAuth: [] }]
+      responses: { '201': { description: criada }, '422': { description: validação } }
+  /federation/{id}/competitions/{cid}:
+    get:
+      summary: Detalhe + categorias + contadores. RBAC read
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: ok }, '404': { description: não encontrada } }
+    patch:
+      summary: 'Edita competição (status só draft/open/closed/cancelled; concluir via /close). RBAC staffWrite'
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: ok }, '404': { description: não encontrada } }
+  /federation/{id}/competitions/{cid}/close:
+    post:
+      summary: Conclui competição (status→done). RBAC staffWrite
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: concluída }, '409': { description: já concluída/cancelada } }
+  /federation/{id}/competitions/{cid}/categories:
+    get:
+      summary: Lista categorias da competição. RBAC read
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: ok } }
+    post:
+      summary: 'Cria categoria (modality, faixa etária, belt_min/max, sex, peso, max_entries, fee). RBAC staffWrite'
+      security: [{ bearerAuth: [] }]
+      responses: { '201': { description: criada }, '422': { description: validação } }
+  /federation/{id}/competitions/{cid}/categories/{catId}:
+    patch:
+      summary: Edita categoria. RBAC staffWrite
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: ok }, '404': { description: não encontrada } }
+  /federation/{id}/competitions/{cid}/entries:
+    get:
+      summary: Lista inscritos (filtro category_id). RBAC read
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: ok } }
+    post:
+      summary: 'Inscreve atleta. SEMPRE 201 + category_fit (aviso idade/faixa/sexo; nunca bloqueia). RBAC staffWrite'
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201': { description: 'inscrito (+ category_fit + capacity)' }
+        '404': { description: competição/categoria/praticante não encontrado }
+        '409': { description: 'já inscrito na categoria / competição done|cancelled' }
+        '422': { description: validação }
+  /federation/{id}/competitions/{cid}/entries/{eid}:
+    patch:
+      summary: 'Lança resultado (placement, points_awarded, status, result_notes). RBAC staffWrite'
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: ok }, '404': { description: não encontrada }, '422': { description: validação } }
+  /federation/{id}/competitions/{cid}/ranking:
+    get:
+      summary: 'Ranking do torneio agrupado por categoria. RBAC read'
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: '{competition_id, season, categories[]}' } }
+  /federation/{id}/rankings:
+    get:
+      summary: 'Ranking acumulado da temporada por categoria (view). Query: season, category. RBAC read'
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: '{season, category, ranking[]}' } }
+  /public/karate/{slug}/seasons:
+    get:
+      summary: Temporadas e categorias disponíveis no ranking público
+      responses: { '200': { description: '{federation, seasons[]}' } }
+  /public/karate/{slug}/ranking:
+    get:
+      summary: 'Ranking público embeddável (query season, category). Sempre fresco.'
+      responses: { '200': { description: '{federation, season, category, ranking[]}' } }
+  /public/karate/{slug}/ranking/{season}/{category}:
+    get:
+      summary: Atalho REST do ranking público (path params, para iframe)
+      responses: { '200': { description: ok }, '400': { description: season inválida } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+# Schemas:
+# Competition{ id, federation_id, name, season, event_date, location, circuit_round,
+#   fee_amount, status[draft|open|closed|done|cancelled], category_count, entry_count }
+# Category{ id, competition_id, name, modality[kata|kumite|kihon_ippon|team_kata|team_kumite],
+#   min_age, max_age, belt_min, belt_max, sex[M|F|mixed], weight_class, max_entries, fee_amount, entry_count }
+# Entry{ id, category_id, student_id, student_name, dojo_id, dojo_name, status, fee_paid,
+#   placement, points_awarded, result_notes }
+# CategoryFit{ fits, is_hard_block:false, checks[{criterion[age|belt|sex], ok, required, actual, unit}], warnings[] }
+# RankingRow{ category, student_id, student_name, karate_registration_number, dojo_name,
+#   total_points, gold, silver, bronze, events_participated }
