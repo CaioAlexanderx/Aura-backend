@@ -5,17 +5,17 @@
 //   - "Apenas processar o pedido e trazer as informações para a Federação."
 //   - Aqui criamos/renovamos o REGISTRO da carteirinha (dados + verify_token)
 //     e expomos os DADOS. A renderização visual (frente/verso, QR) é da
-//     camada de design/frontend (DESIGN-14, aprovado 08/06).
+//     camada de design/frontend (DESIGN-14, aprovado).
 //
-// LGPD (§0.4 U1): o verify público devolve o MÍNIMO. Menores → ainda menos.
-//   O verify_token é opaco. A carteirinha NÃO tem validade por tempo
-//   (decisão Caio 08/06): status = active | revoked; sem 'expired'.
-//   birth_date e cpf SÓ no contexto AUTENTICADO/admin, NUNCA no verify público.
+// LGPD (§0.4 U1): o verify público devolve o MÍNIMO. Menores → nome reduzido +
+//   foto oculta (registro permanece). Carteirinha SEM validade por tempo; a
+//   verificação reflete a anuidade CPF (ver verifyByToken).
 // ============================================================
 'use strict';
 
 const crypto = require('crypto');
 const db = require('../config/database');
+const { getPractitionerAnnuityStatus } = require('./karateFinanceService');
 
 
 function genVerifyToken() {
@@ -35,6 +35,14 @@ function computeIsMinor(birthDate) {
 
 function firstName(name) {
   return name ? String(name).trim().split(/\s+/)[0] : null;
+}
+
+// Nome reduzido p/ menores no verify publico: "Primeiro S." (1o nome + inicial do 2o)
+function reducedName(name) {
+  if (!name) return null;
+  const parts = String(name).trim().split(/\s+/);
+  if (parts.length === 1) return parts[0];
+  return `${parts[0]} ${parts[1][0]}.`;
 }
 
 // Carrega o praticante + faixa atual + dojô (snapshots no momento da emissão)
@@ -201,19 +209,31 @@ function effectiveStatus(card) {
 
 /**
  * verifyByToken — DADOS MÍNIMOS para a página pública de verificação (LGPD).
- * Nunca expõe CPF, data de nascimento, contato ou trajetória.
- * Menores: apenas primeiro nome + faixa + dojô.
+ * Nunca expõe CPF, data de nascimento, contato ou histórico de graduações.
+ * Menores: nome reduzido ("Primeiro S.") + foto oculta (frontend); o nº de
+ * registro permanece visível (decisão FPKT — é o identificador público).
+ *
+ * Situação (status): 'valida' | 'vencida' | 'revogada'
+ *   - 'revogada' quando a carteirinha foi revogada pela federação.
+ *   - senão deriva da ANUIDADE CPF (vencida = anuidade em atraso); validade = due_date.
+ * Faixa exibida é a ATUAL (karate_current_belt), com fallback ao snapshot do cartão.
  */
 async function verifyByToken(token) {
   if (!token || !/^[a-f0-9]{16,64}$/i.test(token)) return null;
   const r = await db.query(
-    `SELECT kc.card_number, kc.belt_snapshot, kc.belt_name_snapshot,
-            kc.dojo_name_snapshot, kc.is_minor, kc.valid_until, kc.status,
+    `SELECT kc.card_number, kc.is_minor, kc.status AS card_status,
+            kc.student_id, kc.federation_id,
+            kc.dojo_name_snapshot,
             cu.name AS student_name,
+            COALESCE(cb.belt_level, kc.belt_snapshot)      AS belt,
+            COALESCE(cb.belt_name,  kc.belt_name_snapshot) AS belt_name,
+            cb.current_since AS belt_since,
             COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
             COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
      FROM karate_membership_cards kc
      JOIN customers cu ON cu.id = kc.student_id
+     LEFT JOIN karate_current_belt cb
+       ON cb.student_id = kc.student_id AND cb.federation_id = kc.federation_id
      LEFT JOIN companies fed ON fed.id = kc.federation_id
      WHERE kc.verify_token = $1
      LIMIT 1`,
@@ -221,14 +241,26 @@ async function verifyByToken(token) {
   );
   if (!r.rows.length) return null;
   const c = r.rows[0];
-  const status = effectiveStatus(c);
-  const valid = status === 'active';
 
-  // Base mínima comum
+  // Situação: revogada (cartão) tem prioridade; senão anuidade CPF
+  let situacao = 'valida';
+  let validade = null;
+  if (c.card_status === 'revoked') {
+    situacao = 'revogada';
+  } else {
+    const ann = await getPractitionerAnnuityStatus(c.student_id, c.federation_id);
+    situacao = ann.situacao;      // 'valida' | 'vencida'
+    validade = ann.validade;      // due_date ou null
+  }
+  const valid = situacao === 'valida';
+
   const base = {
     valid,
-    status,
-    belt_name: c.belt_name_snapshot || null,
+    status: situacao,             // 'valida' | 'vencida' | 'revogada'
+    validade,                     // referência da anuidade (due_date) ou null
+    belt: c.belt || null,         // nível (ex.: '2dan')
+    belt_name: c.belt_name || null,
+    belt_since: c.belt_since || null,
     dojo_name: c.dojo_name_snapshot || null,
     federation_name: c.federation_name || null,
     federation_logo: c.federation_logo || null,
@@ -236,8 +268,8 @@ async function verifyByToken(token) {
   };
 
   if (c.is_minor) {
-    // LGPD Art. 14 — dado reduzido para menores
-    return { ...base, display_name: firstName(c.student_name), card_number: null };
+    // LGPD Art. 14 — nome reduzido + foto oculta (frontend); registro permanece
+    return { ...base, display_name: reducedName(c.student_name), card_number: c.card_number || null };
   }
   return { ...base, display_name: c.student_name, card_number: c.card_number || null };
 }
