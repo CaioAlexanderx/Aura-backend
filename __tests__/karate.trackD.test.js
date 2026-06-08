@@ -2,7 +2,7 @@
 // AURA KARATÊ — Testes unitários Track D (Carteirinha + Portal)
 // Cobertura mínima:
 //   1. Carteirinha: emissão (POST issue-card) processa dados
-//   2. Verify público: dados mínimos; MENORES reduzidos (LGPD)
+//   2. Verify público: dados mínimos; status por anuidade; menores reduzidos
 //   3. effectiveStatus: active|revoked (carteirinha SEM validade por tempo)
 //   4. Portal: token type:'portal' roundtrip; verify rejeita token alheio
 //   5. Portal verify-otp: 404 quando federação não encontrada
@@ -59,11 +59,19 @@ describe('karateCardService — effectiveStatus (sem validade por tempo)', () =>
   });
 });
 
-// ── Verify público (LGPD) ────────────────────────────────────
+// ── Verify público (LGPD + anuidade) ──────────────────────
 describe('karateCardService — verifyByToken', () => {
   const TOKEN = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'; // 32 hex
 
   beforeEach(() => jest.clearAllMocks());
+
+  // helper: monta a linha do cartão (1a query do verify)
+  const cardRow = (over = {}) => ({
+    card_number: 'FPKT-A-00001', is_minor: false, card_status: 'active',
+    student_id: 'stu-1', federation_id: 'fed-1', dojo_name_snapshot: 'Dojô X',
+    student_name: 'Maria Souza', belt: '1dan', belt_name: 'Preta',
+    belt_since: '2024-03-12', federation_name: 'FPKT', federation_logo: null, ...over,
+  });
 
   it('token malformado → null (sem consultar DB)', async () => {
     const r = await cardService.verifyByToken('not a token!');
@@ -71,32 +79,50 @@ describe('karateCardService — verifyByToken', () => {
     expect(db.query).not.toHaveBeenCalled();
   });
 
-  it('menor → display_name é só primeiro nome e card_number null', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{
-      card_number: 'FPKT-A-00001', belt_snapshot: '3kyu', belt_name_snapshot: 'Marrom',
-      dojo_name_snapshot: 'Dojô X', is_minor: true, status: 'active',
-      student_name: 'João Pedro Silva', federation_name: 'FPKT', federation_logo: null,
-    }] });
+  it('adulto em dia → válido, nome completo, faixa e card_number', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [cardRow()] })   // cartão
+      .mockResolvedValueOnce({ rows: [] });           // anuidade: sem cobrança → valida
     const r = await cardService.verifyByToken(TOKEN);
+    expect(r.status).toBe('valida');
     expect(r.valid).toBe(true);
-    expect(r.display_name).toBe('João');
-    expect(r.card_number).toBeNull();
-    expect(r.belt_name).toBe('Marrom');
+    expect(r.display_name).toBe('Maria Souza');
+    expect(r.card_number).toBe('FPKT-A-00001');
+    expect(r.belt).toBe('1dan');
+    expect(r.belt_since).toBe('2024-03-12');
   });
 
-  it('adulto → nome completo e card_number presente', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{
-      card_number: 'FPKT-A-00002', belt_snapshot: '1dan', belt_name_snapshot: 'Preta',
-      dojo_name_snapshot: 'Dojô Y', is_minor: false, status: 'active',
-      student_name: 'Maria Souza', federation_name: 'FPKT', federation_logo: null,
-    }] });
+  it('menor → nome reduzido "Primeiro S." mantendo o registro', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [cardRow({ is_minor: true, student_name: 'João Pedro Silva' })] })
+      .mockResolvedValueOnce({ rows: [] });
     const r = await cardService.verifyByToken(TOKEN);
-    expect(r.display_name).toBe('Maria Souza');
-    expect(r.card_number).toBe('FPKT-A-00002');
+    expect(r.is_minor).toBe(true);
+    expect(r.display_name).toBe('João P.');
+    expect(r.card_number).toBe('FPKT-A-00001'); // registro permanece visível
+  });
+
+  it('anuidade vencida → status vencida + validade', async () => {
+    const past = '2025-03-12';
+    db.query
+      .mockResolvedValueOnce({ rows: [cardRow()] })
+      .mockResolvedValueOnce({ rows: [{ due_date: past, status: 'pending', paid_at: null }] });
+    const r = await cardService.verifyByToken(TOKEN);
+    expect(r.status).toBe('vencida');
+    expect(r.valid).toBe(false);
+    expect(r.validade).toBe(past);
+  });
+
+  it('carteirinha revogada → status revogada (sem consultar anuidade)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [cardRow({ card_status: 'revoked' })] });
+    const r = await cardService.verifyByToken(TOKEN);
+    expect(r.status).toBe('revogada');
+    expect(r.valid).toBe(false);
+    expect(db.query).toHaveBeenCalledTimes(1); // não consulta anuidade
   });
 });
 
-// ── Token de portal ──────────────────────────────────────────
+// ── Token de portal ─────────────────────────────────────────
 describe('karatePortalAuthService — token de portal', () => {
   it('sign → verify roundtrip preserva ids', () => {
     const t = portalAuth.signPortalToken({ practitionerId: 'p1', federationId: 'f1' });

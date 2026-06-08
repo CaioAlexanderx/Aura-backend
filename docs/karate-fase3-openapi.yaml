@@ -1,27 +1,29 @@
 openapi: 3.1.0
 info:
   title: Aura Karatê — API Fase 3 (Carteirinha Digital + Portal do Praticante)
-  version: "0.3.1"
+  version: "0.3.2"
   description: >
     Contrato congelado da Wave 0 da Fase 3 (Track D). Backend e Frontend
     trabalham em paralelo contra este contrato. Migrations 164 + 165.
     NOTA: a migration 163 foi consumida por 163_credit_phase1_version_schema;
     a numeração karatê seguiu para 164/165.
 
-    DECISÕES (v0.3.1):
+    DECISÕES (v0.3.2 — pós-aprovação dos mocks DESIGN-14/15/16/17):
       1) Carteirinha é DATA-ONLY: o app NÃO gera imagem/PDF. As rotas processam
          o pedido e devolvem os DADOS; a arte (frente/verso, QR) é renderizada
-         na camada de design/frontend (DESIGN-14, APROVADO 08/06).
-      1b) Carteirinha SEM validade por tempo (Caio 08/06): status = active|revoked;
-          não há 'expired' por vencimento; valid_until deixou de ser usado.
-      2) Privacidade do portal (§0.4 U1): portal completo é AUTENTICADO por
-         padrão (OTP → JWT type:'portal', 30 min). Verify público da carteirinha
-         devolve MÍNIMO (menores: ainda menos; sem CPF/nascimento). Portal público
-         compartilhável só com opt-in explícito e dados reduzidos; MENORES nunca.
-      3) Anti-enumeração (U2): request-otp SEMPRE responde genérico; verify-otp
-         valida por (federação, cpf, código).
-      4) Inscrição pública: exames e cursos são reais (lookup por CPF + PIX);
-         COMPETIÇÕES são stub 501 até a Track E existir.
+         na camada de design/frontend (DESIGN-14, APROVADO). QR aponta para
+         /karate/verify/<verify_token>.
+      1b) Carteirinha SEM validade por tempo: o cartão não expira. A VERIFICAÇÃO
+          pública, porém, reflete a situação do registro: status=valida|vencida|
+          revogada, onde 'vencida' = anuidade CPF em atraso (validade=due_date).
+      2) Privacidade (§0.4 U1): portal completo AUTENTICADO por OTP → JWT
+         type:'portal' (30 min). Verify público com dados MÍNIMOS; menores com
+         nome reduzido + foto oculta (registro permanece visível). Portal público
+         compartilhável só com opt-in; MENORES nunca.
+      3) Anti-enumeração (U2): request-otp SEMPRE genérico; verify-otp valida por
+         (federação, cpf, código).
+      4) Inscrição pública: exames e cursos reais (lookup por CPF + PIX);
+         COMPETIÇÕES são stub 501 (inscrição feita pela academia junto à federação).
 servers:
   - url: https://api.getaura.com.br
   - url: http://localhost:3000
@@ -51,8 +53,8 @@ paths:
   # ── Público (sem auth de empresa) — /public/karate ──────────
   /public/karate/verify/{token}:
     get:
-      summary: 'Verificação pública da carteirinha (DADOS MÍNIMOS / LGPD; menores reduzidos; SEM validade por tempo)'
-      responses: { '200': { description: 'valid, status, display_name, belt_name, dojo_name' }, '404': { description: não encontrada } }
+      summary: 'Verificação pública da carteirinha (DADOS MÍNIMOS / LGPD; menores: nome reduzido + foto oculta, registro permanece)'
+      responses: { '200': { description: 'status=valida|vencida|revogada (vencida=anuidade CPF em atraso; validade=due_date); display_name, belt, belt_name, belt_since, dojo_name' }, '404': { description: não encontrada } }
   /public/karate/portal/me:
     get:
       summary: 'Portal AUTENTICADO do praticante (trajetória, exames, certificados, carteirinha)'
@@ -81,7 +83,7 @@ paths:
       responses: { '200': { description: 'ok {federation, events[]}' } }
   /public/karate/{slug}/inscricao/{eventId}:
     get:
-      summary: 'Dados do evento para inscrição (exame/curso). Competição → 404 (Track E)'
+      summary: 'Dados do evento para inscrição (exame/curso) + capacity{max,filled} (vagas). Competição → 404 (Track E)'
       responses: { '200': { description: ok }, '404': { description: não encontrado }, '409': { description: encerradas } }
     post:
       summary: 'Submete inscrição: lookup por CPF + PIX (exame/curso reais). Competição → 501 stub'
@@ -90,12 +92,17 @@ paths:
         '404': { description: praticante não localizado }
         '409': { description: 'já inscrito / encerradas' }
         '501': { description: 'competição ainda não suportada (Track E)' }
+  /public/karate/{slug}/inscricao/{eventId}/lookup:
+    post:
+      summary: 'Localiza praticante por CPF (passo cpf→faixa): retorna faixa atual + already_enrolled, SEM efetivar'
+      responses: { '200': { description: 'found, already_enrolled, practitioner{current_belt, current_belt_name}' }, '404': { description: 'praticante não localizado' }, '409': { description: encerradas }, '501': { description: 'competição (Track E)' } }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
     portalToken: { type: http, scheme: bearer, bearerFormat: 'JWT (type=portal)' }
 # Schemas: MembershipCard{ card_number, belt, belt_name, dojo_name, photo_url,
 #   is_minor, verify_token, status[active|revoked], birth_date?, cpf? (autenticado) }
-# VerifyResult{ valid, status, display_name, belt_name, dojo_name,
-#   federation_name, federation_logo, is_minor, card_number? }  // SEM CPF/nascimento/validade
+# VerifyResult{ valid, status[valida|vencida|revogada], validade?, display_name,
+#   belt, belt_name, belt_since, dojo_name, federation_name, federation_logo,
+#   is_minor, card_number }  // SEM CPF/nascimento; menor → display_name reduzido
 # PortalMe{ practitioner, belt_history[], exams[], certificates[], card, public_portal }
