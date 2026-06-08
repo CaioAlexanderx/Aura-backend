@@ -489,7 +489,7 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
     const { rows } = await db.query(
       `SELECT
          cu.id AS practitioner_id,
-         COALESCE(cu.full_name, cu.name) AS full_name,
+         cu.name AS full_name,
          cu.karate_registration_number,
          t.id AS transaction_id,
          t.amount,
@@ -568,7 +568,7 @@ router.post('/annuities/cpf/:practitionerId/charge', ...guards.adminOnly(), asyn
     await client.query('BEGIN');
 
     const practRes = await client.query(
-      `SELECT id, COALESCE(full_name, name) AS full_name, cpf_cnpj
+      `SELECT id, name AS full_name, cpf_cnpj
        FROM customers WHERE id = $1 AND federation_id = $2 LIMIT 1`,
       [practitionerId, federationId]
     );
@@ -643,7 +643,7 @@ router.post('/annuities/cpf/:practitionerId/pix', ...guards.adminOnly(), async (
 
   try {
     const { rows: txRows } = await db.query(
-      `SELECT t.*, cu.full_name AS pract_name
+      `SELECT t.*, cu.name AS pract_name
        FROM transactions t
        JOIN customers cu ON cu.id = $2
        WHERE t.id = $1 AND t.federation_id = $3 AND t.reference_id = $2::text
