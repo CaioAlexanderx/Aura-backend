@@ -316,20 +316,23 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
   };
 
   test('(a) enabled + parcela vencida: abate encargos primeiro, depois principal', async () => {
-    // due 2026-01-01, paidAt 2026-02-01 => 31 dias de atraso, 28 cobrados (carencia 3).
-    // principalRemaining=100 => multa=2.00, mora=round2(100*0.01/30*28)=0.93, total=2.93.
+    // due 2026-01-01, paidAt '2026-02-01'. O engine normaliza a data efetiva para o
+    // dia-calendario em America/Sao_Paulo (UTC-3): new Date('2026-02-01') = 00:00Z =>
+    // 2026-01-31 em SP. Logo daysOverdue = 30, daysCharged = 30-3 = 27.
+    // principalRemaining = 100 => multa = 100*0.02 = 2.00;
+    // mora = round2(100*(0.01/30)*27) = round2(0.90) = 0.90; total = 2.90.
     const txRow = { id: 'tx-charge-01', type: 'payment', amount: '50.00' };
     const openInst = [
       { id: 'inst-c1', sale_id: SALE_ID, amount_due: '100.00', covered_amount: '0', status: 'overdue', due_date: '2026-01-01' },
     ];
-    // amount 50: chargesPaid=2.93, principalAmount=47.07. AR de 100 => parcial.
+    // amount 50: chargesPaid = 2.90, principalAmount = 47.10. AR de 100 => parcial.
     const pendingAR = [
       { id: 'ar-c1', amount: '100.00', idempotency_key: 'pdv-credit-receivable-' + SALE_ID, sale_id: SALE_ID },
     ];
     const fifoInst = [
       { id: 'inst-c1', amount_due: '100.00', covered_amount: '0', status: 'overdue', due_date: '2026-01-01' },
     ];
-    const balRow = { balance: '52.93' };
+    const balRow = { balance: '52.90' };
 
     const client = makeMockClient([
       { rows: [txRow] },     // 0 INSERT payment (novo)
@@ -338,11 +341,11 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
       { rows: [] },          // 3 UPDATE credit_installments (stamp late_fee/late_interest)
       { rows: [] },          // 4 INSERT sale_payments (encargos no caixa)
       { rows: pendingAR },   // 5 SELECT A Receber pendentes (FIFO principal)
-      { rows: [] },          // 6 UPDATE transactions (parcial: principal 47.07 < AR 100)
+      { rows: [] },          // 6 UPDATE transactions (parcial: principal 47.10 < AR 100)
       { rows: [] },          // 7 INSERT sale_payments (principal)
       { rows: [] },          // 8 INSERT rest A Receber
       { rows: fifoInst },    // 9 SELECT installments FOR UPDATE
-      { rows: [] },          // 10 UPDATE covered_amount (parcial, segue pending)
+      { rows: [] },          // 10 UPDATE covered_amount (parcial, segue overdue)
       { rows: [] },          // 11 UPDATE credit_used
       { rows: [balRow] },    // 12 SELECT balance
     ]);
@@ -355,25 +358,25 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
       profile: null,
     });
 
-    // charges_paid esperado: 2.93 (multa 2.00 + mora 0.93)
-    expect(result.charges_paid).toBeCloseTo(2.93, 2);
+    // charges_paid esperado: 2.90 (multa 2.00 + mora 0.90)
+    expect(result.charges_paid).toBeCloseTo(2.90, 2);
     expect(result.charges_detail).toHaveLength(1);
     expect(result.charges_detail[0].installment_id).toBe('inst-c1');
     expect(result.charges_detail[0].late_fee).toBeCloseTo(2.0, 2);
-    expect(result.charges_detail[0].late_interest).toBeCloseTo(0.93, 2);
+    expect(result.charges_detail[0].late_interest).toBeCloseTo(0.90, 2);
 
     // Transacao 'Crediario - Encargos' inserida com o valor dos encargos.
     const encargosCall = client.query.mock.calls[2];
     expect(encargosCall[0]).toMatch(/Crediario - Encargos/i);
     expect(encargosCall[0]).toMatch(/confirmed/i);
-    expect(encargosCall[1][1]).toBeCloseTo(2.93, 2);          // amount = chargesPaid
+    expect(encargosCall[1][1]).toBeCloseTo(2.90, 2);          // amount = chargesPaid
     expect(encargosCall[1]).toContain('credit-charges-' + txRow.id); // idempotency_key
 
-    // O principal aplicado e (amount - encargos) = 47.07: o UPDATE parcial da AR
-    // recebeu paidNow ~47.07.
+    // O principal aplicado e (amount - encargos) = 47.10: o UPDATE parcial da AR
+    // recebeu paidNow ~47.10.
     const arUpdateCall = client.query.mock.calls[6];
     expect(arUpdateCall[0]).toMatch(/UPDATE transactions/i);
-    expect(parseFloat(arUpdateCall[1][1])).toBeCloseTo(47.07, 2); // paidNow (principal)
+    expect(parseFloat(arUpdateCall[1][1])).toBeCloseTo(47.10, 2); // paidNow (principal)
   });
 
   test('(b) OFF (config sem flag): charges_paid 0 e ZERO queries de encargos', async () => {
