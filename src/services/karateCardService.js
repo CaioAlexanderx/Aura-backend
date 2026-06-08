@@ -5,20 +5,18 @@
 //   - "Apenas processar o pedido e trazer as informações para a Federação."
 //   - Aqui criamos/renovamos o REGISTRO da carteirinha (dados + verify_token)
 //     e expomos os DADOS. A renderização visual (frente/verso, QR) é da
-//     camada de design/frontend (DESIGN-14, aprovado).
+//     camada de design/frontend (DESIGN-14, aprovado 08/06).
 //
 // LGPD (§0.4 U1): o verify público devolve o MÍNIMO. Menores → ainda menos.
-//   O verify_token é opaco e sua utilidade EXPIRA junto com a carteirinha
-//   (status != 'active' ou valid_until vencido ⇒ resposta "inativa").
-//   birth_date e cpf SÓ aparecem no contexto AUTENTICADO/admin (getCurrentCard),
-//   NUNCA no verify público.
+//   O verify_token é opaco. A carteirinha NÃO tem validade por tempo
+//   (decisão Caio 08/06): status = active | revoked; sem 'expired'.
+//   birth_date e cpf SÓ no contexto AUTENTICADO/admin, NUNCA no verify público.
 // ============================================================
 'use strict';
 
 const crypto = require('crypto');
 const db = require('../config/database');
 
-const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
 function genVerifyToken() {
   return crypto.randomBytes(16).toString('hex'); // 32 chars opacos
@@ -64,7 +62,7 @@ async function _loadPractitionerSnapshot(client, federationId, studentId) {
  * Renovar expira a carteirinha 'active' anterior e cria uma nova.
  * Retorna { card, warnings, renewed }.
  */
-async function issueCard({ federation_id, student_id, issued_by, validity_months }) {
+async function issueCard({ federation_id, student_id, issued_by }) {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -101,8 +99,8 @@ async function issueCard({ federation_id, student_id, issued_by, validity_months
     );
     const renewed = prev.rows.length > 0;
 
-    const months = Number(validity_months) > 0 ? Number(validity_months) : 12;
-    const validUntil = new Date(Date.now() + (months / 12) * ONE_YEAR_MS).toISOString();
+    // Carteirinha SEM validade por tempo (decisao Caio 08/06): valid_until fica NULL.
+    const validUntil = null;
     const isMinor = computeIsMinor(p.birth_date);
     const token = genVerifyToken();
 
@@ -141,7 +139,6 @@ async function issueCard({ federation_id, student_id, issued_by, validity_months
         federation_id: c.federation_id,
         student_id: c.student_id,
         student_name: p.name,
-        birth_date: p.birth_date,   // contexto autenticado/admin (NUNCA no verify publico)
         card_number: c.card_number,
         belt: c.belt_snapshot,
         belt_name: c.belt_name_snapshot,
@@ -150,7 +147,6 @@ async function issueCard({ federation_id, student_id, issued_by, validity_months
         photo_url: c.photo_url_snapshot,
         is_minor: c.is_minor,
         issued_at: c.issued_at,
-        valid_until: c.valid_until,
         verify_token: c.verify_token,
         status: c.status,
       },
@@ -192,22 +188,21 @@ async function getCurrentCard({ federation_id, student_id }) {
     photo_url: c.photo_url_snapshot,
     is_minor: c.is_minor,
     issued_at: c.issued_at,
-    valid_until: c.valid_until,
     verify_token: c.verify_token,
     status: effectiveStatus(c),
   };
 }
 
 function effectiveStatus(card) {
-  if (card.status !== 'active') return card.status;
-  if (card.valid_until && new Date(card.valid_until).getTime() < Date.now()) return 'expired';
-  return 'active';
+  // Carteirinha SEM validade por tempo: status reflete apenas o estado armazenado
+  // (active | revoked). Nao ha 'expired' por vencimento.
+  return card.status;
 }
 
 /**
  * verifyByToken — DADOS MÍNIMOS para a página pública de verificação (LGPD).
  * Nunca expõe CPF, data de nascimento, contato ou trajetória.
- * Menores: apenas primeiro nome + faixa + dojô + validade.
+ * Menores: apenas primeiro nome + faixa + dojô.
  */
 async function verifyByToken(token) {
   if (!token || !/^[a-f0-9]{16,64}$/i.test(token)) return null;
@@ -235,7 +230,6 @@ async function verifyByToken(token) {
     status,
     belt_name: c.belt_name_snapshot || null,
     dojo_name: c.dojo_name_snapshot || null,
-    valid_until: c.valid_until,
     federation_name: c.federation_name || null,
     federation_logo: c.federation_logo || null,
     is_minor: c.is_minor,
@@ -281,7 +275,6 @@ async function listCards({ federation_id, status, page = 1, pageSize = 25 }) {
       belt_name: c.belt_name_snapshot,
       dojo_name: c.dojo_name_snapshot,
       is_minor: c.is_minor,
-      valid_until: c.valid_until,
       status: effectiveStatus(c),
       issued_at: c.issued_at,
     })),
@@ -303,7 +296,6 @@ async function issueBatch({ federation_id, issued_by, only_missing = true }) {
        ${only_missing ? `AND NOT EXISTS (
          SELECT 1 FROM karate_membership_cards kc
          WHERE kc.student_id = cu.id AND kc.status = 'active'
-           AND (kc.valid_until IS NULL OR kc.valid_until > NOW())
        )` : ''}`,
     [federation_id]
   );

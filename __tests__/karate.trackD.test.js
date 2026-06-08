@@ -3,7 +3,7 @@
 // Cobertura mínima:
 //   1. Carteirinha: emissão (POST issue-card) processa dados
 //   2. Verify público: dados mínimos; MENORES reduzidos (LGPD)
-//   3. effectiveStatus: expira quando valid_until vencido
+//   3. effectiveStatus: active|revoked (carteirinha SEM validade por tempo)
 //   4. Portal: token type:'portal' roundtrip; verify rejeita token alheio
 //   5. Portal verify-otp: 404 quando federação não encontrada
 //
@@ -35,7 +35,7 @@ function buildApp() {
   return app;
 }
 
-// ── Lógica pura ─────────────────────────────────────
+// ── Lógica pura ──────────────────────────────────────────────
 describe('karateCardService — computeIsMinor', () => {
   it('detecta menor de idade', () => {
     const d = new Date(); d.setFullYear(d.getFullYear() - 10);
@@ -50,24 +50,18 @@ describe('karateCardService — computeIsMinor', () => {
   });
 });
 
-describe('karateCardService — effectiveStatus', () => {
-  const future = new Date(Date.now() + 1e10).toISOString();
-  const past   = new Date(Date.now() - 1e10).toISOString();
-  it('active dentro da validade', () => {
-    expect(cardService.effectiveStatus({ status: 'active', valid_until: future })).toBe('active');
-  });
-  it('active vencida → expired', () => {
-    expect(cardService.effectiveStatus({ status: 'active', valid_until: past })).toBe('expired');
+describe('karateCardService — effectiveStatus (sem validade por tempo)', () => {
+  it('active permanece active', () => {
+    expect(cardService.effectiveStatus({ status: 'active' })).toBe('active');
   });
   it('revoked permanece revoked', () => {
-    expect(cardService.effectiveStatus({ status: 'revoked', valid_until: future })).toBe('revoked');
+    expect(cardService.effectiveStatus({ status: 'revoked' })).toBe('revoked');
   });
 });
 
-// ── Verify público (LGPD) ───────────────────────────
+// ── Verify público (LGPD) ────────────────────────────────────
 describe('karateCardService — verifyByToken', () => {
   const TOKEN = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'; // 32 hex
-  const future = new Date(Date.now() + 1e10).toISOString();
 
   beforeEach(() => jest.clearAllMocks());
 
@@ -80,7 +74,7 @@ describe('karateCardService — verifyByToken', () => {
   it('menor → display_name é só primeiro nome e card_number null', async () => {
     db.query.mockResolvedValueOnce({ rows: [{
       card_number: 'FPKT-A-00001', belt_snapshot: '3kyu', belt_name_snapshot: 'Marrom',
-      dojo_name_snapshot: 'Dojô X', is_minor: true, valid_until: future, status: 'active',
+      dojo_name_snapshot: 'Dojô X', is_minor: true, status: 'active',
       student_name: 'João Pedro Silva', federation_name: 'FPKT', federation_logo: null,
     }] });
     const r = await cardService.verifyByToken(TOKEN);
@@ -93,7 +87,7 @@ describe('karateCardService — verifyByToken', () => {
   it('adulto → nome completo e card_number presente', async () => {
     db.query.mockResolvedValueOnce({ rows: [{
       card_number: 'FPKT-A-00002', belt_snapshot: '1dan', belt_name_snapshot: 'Preta',
-      dojo_name_snapshot: 'Dojô Y', is_minor: false, valid_until: future, status: 'active',
+      dojo_name_snapshot: 'Dojô Y', is_minor: false, status: 'active',
       student_name: 'Maria Souza', federation_name: 'FPKT', federation_logo: null,
     }] });
     const r = await cardService.verifyByToken(TOKEN);
@@ -102,7 +96,7 @@ describe('karateCardService — verifyByToken', () => {
   });
 });
 
-// ── Token de portal ──────────────────────────────
+// ── Token de portal ──────────────────────────────────────────
 describe('karatePortalAuthService — token de portal', () => {
   it('sign → verify roundtrip preserva ids', () => {
     const t = portalAuth.signPortalToken({ practitionerId: 'p1', federationId: 'f1' });
@@ -118,7 +112,7 @@ describe('karatePortalAuthService — token de portal', () => {
   });
 });
 
-// ── Rotas HTTP ────────────────────────────────
+// ── Rotas HTTP ───────────────────────────────────────────────
 describe('POST /federation/:id/practitioners/:pid/issue-card', () => {
   const FED = 'fed-uuid-001';
   const PRAC = 'prac-uuid-001';
@@ -143,7 +137,6 @@ describe('POST /federation/:id/practitioners/:pid/issue-card', () => {
         belt_snapshot: '1dan', belt_name_snapshot: 'Preta', dojo_id: 'dojo-1',
         dojo_name_snapshot: 'Dojô X', photo_url_snapshot: null, is_minor: false,
         issued_at: new Date().toISOString(),
-        valid_until: new Date(Date.now() + 1e10).toISOString(),
         verify_token: 'a1b2c3d4e5f60718293a4b5c6d7e8f90', status: 'active',
       }] })
       .mockResolvedValueOnce({});                                // COMMIT

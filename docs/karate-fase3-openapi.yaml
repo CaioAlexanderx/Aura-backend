@@ -1,22 +1,23 @@
 openapi: 3.1.0
 info:
   title: Aura Karatê — API Fase 3 (Carteirinha Digital + Portal do Praticante)
-  version: "0.3.0"
+  version: "0.3.1"
   description: >
     Contrato congelado da Wave 0 da Fase 3 (Track D). Backend e Frontend
-    trabalham em paralelo contra este contrato. Migration 164
-    (karate_membership_cards, karate_practitioner_portal, karate_portal_otps).
+    trabalham em paralelo contra este contrato. Migrations 164 + 165.
     NOTA: a migration 163 foi consumida por 163_credit_phase1_version_schema;
-    a numeração karatê seguiu para 164.
+    a numeração karatê seguiu para 164/165.
 
-    DECISÕES (v0.3.0):
+    DECISÕES (v0.3.1):
       1) Carteirinha é DATA-ONLY: o app NÃO gera imagem/PDF. As rotas processam
          o pedido e devolvem os DADOS; a arte (frente/verso, QR) é renderizada
-         na camada de design/frontend (DESIGN-14, repassado ao Caio).
+         na camada de design/frontend (DESIGN-14, APROVADO 08/06).
+      1b) Carteirinha SEM validade por tempo (Caio 08/06): status = active|revoked;
+          não há 'expired' por vencimento; valid_until deixou de ser usado.
       2) Privacidade do portal (§0.4 U1): portal completo é AUTENTICADO por
          padrão (OTP → JWT type:'portal', 30 min). Verify público da carteirinha
-         devolve MÍNIMO (menores: ainda menos). Portal público compartilhável só
-         com opt-in explícito e dados reduzidos; MENORES nunca públicos.
+         devolve MÍNIMO (menores: ainda menos; sem CPF/nascimento). Portal público
+         compartilhável só com opt-in explícito e dados reduzidos; MENORES nunca.
       3) Anti-enumeração (U2): request-otp SEMPRE responde genérico; verify-otp
          valida por (federação, cpf, código).
       4) Inscrição pública: exames e cursos são reais (lookup por CPF + PIX);
@@ -25,14 +26,15 @@ servers:
   - url: https://api.getaura.com.br
   - url: http://localhost:3000
 paths:
+  # ── Admin (autenticado, RBAC de federação) ──────────────────
   /federation/{federationId}/practitioners/{practitionerId}/issue-card:
     post:
       summary: 'Emite/renova carteirinha (somente dados; renovar expira a anterior). RBAC staffWrite'
       security: [{ bearerAuth: [] }]
-      responses: { '201': { description: 'emitida (dados + verify_token + warnings)' }, '404': { description: praticante nao encontrado } }
+      responses: { '201': { description: 'emitida (dados + verify_token + warnings; inclui birth_date+cpf p/ a arte)' }, '404': { description: praticante não encontrado } }
   /federation/{federationId}/practitioners/{practitionerId}/card:
     get:
-      summary: Carteirinha atual do praticante (interno). RBAC read
+      summary: Carteirinha atual do praticante (interno; inclui birth_date+cpf). RBAC read
       security: [{ bearerAuth: [] }]
       responses: { '200': { description: ok }, '404': { description: sem carteirinha } }
   /federation/{federationId}/cards:
@@ -42,51 +44,58 @@ paths:
       responses: { '200': { description: ok } }
   /federation/{federationId}/cards/issue-batch:
     post:
-      summary: 'Emite/renova em lote (only_missing=true por padrao). RBAC adminOnly'
+      summary: 'Emite/renova em lote (only_missing=true por padrão). RBAC adminOnly'
       security: [{ bearerAuth: [] }]
       responses: { '201': { description: 'resumo {eligible, issued, errors[]}' } }
+
+  # ── Público (sem auth de empresa) — /public/karate ──────────
   /public/karate/verify/{token}:
     get:
-      summary: 'Verificacao publica da carteirinha (DADOS MINIMOS / LGPD; menores reduzidos)'
-      responses: { '200': { description: 'valid, status, display_name, belt_name, dojo_name, valid_until' }, '404': { description: nao encontrada } }
+      summary: 'Verificação pública da carteirinha (DADOS MÍNIMOS / LGPD; menores reduzidos; SEM validade por tempo)'
+      responses: { '200': { description: 'valid, status, display_name, belt_name, dojo_name' }, '404': { description: não encontrada } }
   /public/karate/portal/me:
     get:
-      summary: 'Portal AUTENTICADO do praticante (trajetoria, exames, certificados, carteirinha)'
+      summary: 'Portal AUTENTICADO do praticante (trajetória, exames, certificados, carteirinha)'
       security: [{ portalToken: [] }]
-      responses: { '200': { description: ok }, '401': { description: token de portal ausente/invalido } }
+      responses: { '200': { description: ok }, '401': { description: token de portal ausente/inválido } }
   /public/karate/portal/opt-in:
     post:
-      summary: 'Liga/desliga portal publico compartilhavel (menores bloqueados). Autenticado'
+      summary: 'Liga/desliga portal público compartilhável (menores bloqueados). Autenticado'
       security: [{ portalToken: [] }]
       responses: { '200': { description: 'ok (public_token quando ligado)' }, '403': { description: menor bloqueado } }
   /public/karate/{slug}/portal/request-otp:
     post:
-      summary: 'Solicita OTP por CPF (resposta SEMPRE generica — anti-enumeracao)'
-      responses: { '200': { description: 'generico {ok, message, channel_hint?}' } }
+      summary: 'Solicita OTP por CPF (resposta SEMPRE genérica — anti-enumeração)'
+      responses: { '200': { description: 'genérico {ok, message, channel_hint?}' } }
   /public/karate/{slug}/portal/verify-otp:
     post:
-      summary: 'Valida OTP (federacao+cpf+codigo) → token de portal'
-      responses: { '200': { description: 'ok {token, expires_in, practitioner}' }, '401': { description: invalido/expirado } }
+      summary: 'Valida OTP (federação+cpf+código) → token de portal'
+      responses: { '200': { description: 'ok {token, expires_in, practitioner}' }, '401': { description: inválido/expirado } }
   /public/karate/{slug}/p/{publicToken}:
     get:
-      summary: 'Portal publico compartilhavel (reduzido; so com opt-in; nunca menores)'
-      responses: { '200': { description: ok }, '404': { description: indisponivel } }
+      summary: 'Portal público compartilhável (reduzido; só com opt-in; nunca menores)'
+      responses: { '200': { description: ok }, '404': { description: indisponível } }
   /public/karate/{slug}/events:
     get:
-      summary: 'Agenda publica (exames + cursos abertos). Competicoes entram com Track E'
+      summary: 'Agenda pública (exames + cursos abertos). Competições entram com Track E'
       responses: { '200': { description: 'ok {federation, events[]}' } }
   /public/karate/{slug}/inscricao/{eventId}:
     get:
-      summary: 'Dados do evento para inscricao (exame/curso). Competicao → 404 (Track E)'
-      responses: { '200': { description: ok }, '404': { description: nao encontrado }, '409': { description: encerradas } }
+      summary: 'Dados do evento para inscrição (exame/curso). Competição → 404 (Track E)'
+      responses: { '200': { description: ok }, '404': { description: não encontrado }, '409': { description: encerradas } }
     post:
-      summary: 'Submete inscricao: lookup por CPF + PIX (exame/curso reais). Competicao → 501 stub'
+      summary: 'Submete inscrição: lookup por CPF + PIX (exame/curso reais). Competição → 501 stub'
       responses:
-        '201': { description: 'inscricao registrada (+ payment PIX quando ha taxa)' }
-        '404': { description: praticante nao localizado }
-        '409': { description: 'ja inscrito / encerradas' }
-        '501': { description: 'competicao ainda nao suportada (Track E)' }
+        '201': { description: 'inscrição registrada (+ payment PIX quando há taxa)' }
+        '404': { description: praticante não localizado }
+        '409': { description: 'já inscrito / encerradas' }
+        '501': { description: 'competição ainda não suportada (Track E)' }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
     portalToken: { type: http, scheme: bearer, bearerFormat: 'JWT (type=portal)' }
+# Schemas: MembershipCard{ card_number, belt, belt_name, dojo_name, photo_url,
+#   is_minor, verify_token, status[active|revoked], birth_date?, cpf? (autenticado) }
+# VerifyResult{ valid, status, display_name, belt_name, dojo_name,
+#   federation_name, federation_logo, is_minor, card_number? }  // SEM CPF/nascimento/validade
+# PortalMe{ practitioner, belt_history[], exams[], certificates[], card, public_portal }
