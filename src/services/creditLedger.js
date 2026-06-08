@@ -542,19 +542,34 @@ async function createCreditSale(client, {
  * @param {pg.PoolClient} client
  * @param {{ companyId, customerId, amount, method?, sessaoId?,
  *           createdBy?, idempotencyKey?, paidAt?,
- *           accountId? }} opts
+ *           accountId?, config?, profile? }} opts
  *   accountId (F3): quando fornecido, FIFO escopo ao carne.
  *                   NULL/undefined = comportamento atual (FIFO global).
- * @returns {{ new_balance, settled_receivables[], covered_installments[], transaction, legacy_amount }}
+ *   config/profile (F2 PR2): OPCIONAIS. Quando config.late_charges_enabled === true
+ *                   E o pagamento e novo (nao replay idempotente), MATERIALIZA os
+ *                   encargos (mora/multa) ANTES do principal: encargos viram
+ *                   transacao income confirmada no Financeiro, sao stampados nas
+ *                   parcelas (late_fee/late_interest) e refletidos em sale_payments.
+ *                   O restante (principalAmount) segue o FIFO de principal EXISTENTE.
+ *                   Quando config ausente/OFF => ZERO queries novas, comportamento
+ *                   identico ao anterior (charges_paid: 0).
+ * @returns {{ new_balance, settled_receivables[], covered_installments[], transaction,
+ *             legacy_amount, charges_paid, charges_detail[] }}
  */
 async function applyPayment(client, {
   companyId, customerId, amount, method = null,
   sessaoId = null, createdBy = null, idempotencyKey = null,
   paidAt = null,
   accountId = null,
+  config = undefined,
+  profile = undefined,
 }) {
   // 1. Ledger: payment
+  // isNewPayment: true quando o INSERT do payment efetivamente inseriu uma linha
+  // (NAO em replay idempotente via ON CONFLICT DO NOTHING). So materializamos
+  // encargos quando o pagamento e novo, garantindo idempotencia.
   let txRow;
+  let isNewPayment = true;
   if (idempotencyKey) {
     let r;
     try {
@@ -579,6 +594,7 @@ async function applyPayment(client, {
       } else throw err;
     }
     if (!r.rows.length) {
+      isNewPayment = false; // replay idempotente: pagamento ja existia
       const { rows: ex } = await client.query(
         `SELECT * FROM customer_credit_transactions WHERE idempotency_key = $1`,
         [idempotencyKey]
@@ -611,11 +627,148 @@ async function applyPayment(client, {
     txRow = r.rows[0];
   }
 
+  // ─── F2 PR2: MATERIALIZACAO DE ENCARGOS (mora/multa) ─────────────────
+  // GATED: so executa quando config.late_charges_enabled === true E o pagamento
+  // e novo (isNewPayment). Caso contrario NENHUMA query nova roda e o
+  // comportamento e EXATAMENTE o atual (principalAmount === amount).
+  //
+  // Ordem (decisao do dono, imutavel): ENCARGOS PRIMEIRO, depois principal.
+  // Invariante: encargos NUNCA viram customer_credit_transactions 'debit', logo
+  // o saldo de principal (customer_credit_balances) NUNCA e inflado por encargos.
+  const fifoMethodForCharges = (method || 'dinheiro').toLowerCase();
+  let chargesPaid     = 0;
+  const chargesDetail = [];
+  let principalAmount = amount;
+
+  if (config && config.late_charges_enabled === true && isNewPayment) {
+    // 1.1. Parcelas em aberto (pending/overdue), oldest-first.
+    //      Escopo por carne quando accountId fornecido (mesma regra do FIFO).
+    let chargeInstQuery;
+    let chargeInstParams;
+    if (accountId) {
+      chargeInstQuery = `
+        SELECT id, sale_id, amount_due, covered_amount, status, due_date
+        FROM credit_installments
+        WHERE company_id = $1 AND customer_id = $2
+          AND account_id = $3
+          AND status IN ('pending', 'overdue')
+        ORDER BY due_date ASC`;
+      chargeInstParams = [companyId, customerId, accountId];
+    } else {
+      chargeInstQuery = `
+        SELECT id, sale_id, amount_due, covered_amount, status, due_date
+        FROM credit_installments
+        WHERE company_id = $1 AND customer_id = $2
+          AND status IN ('pending', 'overdue')
+        ORDER BY due_date ASC`;
+      chargeInstParams = [companyId, customerId];
+    }
+
+    let openInst = [];
+    try {
+      const r = await client.query(chargeInstQuery, chargeInstParams);
+      openInst = r.rows;
+    } catch (err) {
+      if (err.code === '42703') {
+        const r = await client.query(
+          `SELECT id, sale_id, amount_due, covered_amount, status, due_date
+           FROM credit_installments
+           WHERE company_id = $1 AND customer_id = $2
+             AND status IN ('pending', 'overdue')
+           ORDER BY due_date ASC`,
+          [companyId, customerId]
+        );
+        openInst = r.rows;
+      } else throw err;
+    }
+
+    // 1.2. Encargos por parcela (engine puro, principal RESTANTE no momento).
+    //      Calculado ANTES do FIFO de principal (que roda depois com principalAmount).
+    const terms = resolveTerms(profile || null, config);
+    const perInst = openInst.map((inst) => {
+      const lc = computeLateCharges(inst, terms, config, paidAt || new Date());
+      return { inst, lc };
+    });
+    const totalCharges = round2(perInst.reduce((sum, p) => sum + (p.lc.charges_total || 0), 0));
+
+    // 1.3. chargesPaid = min(amount, totalCharges).
+    chargesPaid = round2(Math.min(amount, totalCharges));
+
+    if (chargesPaid > 0) {
+      // 1.4. UMA transacao income confirmada (Financeiro) — sem cron.
+      //      idempotency_key derivado do txRow.id evita duplicar em retry.
+      await client.query(
+        `INSERT INTO transactions
+           (company_id, type, status, amount, description, category,
+            due_date, paid_at, created_by, idempotency_key, payment_method)
+         VALUES ($1, 'income', 'confirmed', $2, $3, 'Crediario - Encargos (mora/multa)',
+                 COALESCE($6::date, ${SP_DATE_NOW}), ${BACKDATE_TS('$6')}, $4, $5, $7)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        [
+          companyId,
+          chargesPaid,
+          `Encargos crediario - cliente ${customerId}`,
+          createdBy,
+          'credit-charges-' + txRow.id,
+          paidAt,
+          fifoMethodForCharges,
+        ]
+      );
+
+      // 1.5. Aloca chargesPaid as parcelas oldest-first. Para cada parcela,
+      //      porcao = min(restante, charges_total da parcela). Stampa late_fee
+      //      depois late_interest, consumindo a porcao (parcial => proporcional
+      //      por consumo: multa primeiro, mora com o que sobrar). Reflete o
+      //      dinheiro no caixa via sale_payments.
+      let remainingCharges = chargesPaid;
+      for (const { inst, lc } of perInst) {
+        if (remainingCharges <= 0.005) break;
+        const instCharges = round2(lc.charges_total || 0);
+        if (instCharges <= 0.005) continue;
+
+        const portion = round2(Math.min(remainingCharges, instCharges));
+
+        // Stampa late_fee primeiro, late_interest com o restante da porcao.
+        const stampFee      = round2(Math.min(portion, lc.late_fee || 0));
+        const stampInterest = round2(Math.max(0, portion - stampFee));
+
+        try {
+          await client.query(
+            `UPDATE credit_installments
+               SET late_fee      = COALESCE(late_fee, 0) + $3,
+                   late_interest = COALESCE(late_interest, 0) + $4,
+                   updated_at    = NOW()
+             WHERE id = $1 AND company_id = $2`,
+            [inst.id, companyId, stampFee, stampInterest]
+          );
+        } catch (err) {
+          // late_fee/late_interest podem nao existir em deploy parcial.
+          if (err.code !== '42703' && err.code !== '42P01') throw err;
+        }
+
+        // Reflete o dinheiro de encargos no caixa.
+        if (inst.sale_id) {
+          await client.query(
+            `INSERT INTO sale_payments (sale_id, company_id, method, amount, sessao_id, created_at)
+             VALUES ($1, $2, $3, $4, $5, ${BACKDATE_TS('$6')}) ON CONFLICT DO NOTHING`,
+            [inst.sale_id, companyId, fifoMethodForCharges, portion, sessaoId, paidAt]
+          );
+        }
+
+        chargesDetail.push({ installment_id: inst.id, late_fee: stampFee, late_interest: stampInterest });
+        remainingCharges = round2(remainingCharges - portion);
+      }
+    }
+
+    // 1.6. Principal e o que sobra apos os encargos.
+    principalAmount = round2(amount - chargesPaid);
+  }
+
   // 2. FIFO liquidacao das transactions 'A Receber' pendentes
   // Se accountId fornecido: filtra por carne via JOIN com customer_credit_transactions
   const fifoMethod = (method || 'dinheiro').toLowerCase();
   const settledReceivables = [];
-  let remaining = amount;
+  let remaining = principalAmount;
 
   // Para FIFO escopo por carne, precisamos do sale_id das transacoes do carne
   // O filtro de carne e feito via account_id na customer_credit_transactions (debit)
@@ -755,7 +908,7 @@ async function applyPayment(client, {
 
   // 3. FIFO covered_amount nas credit_installments (escopo por carne se accountId)
   const coveredInstallments = [];
-  let toAllocate = amount;
+  let toAllocate = principalAmount;
 
   let instQuery;
   let instParams;
@@ -842,6 +995,8 @@ async function applyPayment(client, {
     covered_installments: coveredInstallments,
     transaction:          txRow,
     legacy_amount:        remaining > 0.005 ? parseFloat(remaining.toFixed(2)) : 0,
+    charges_paid:         chargesPaid,
+    charges_detail:       chargesDetail,
   };
 }
 
