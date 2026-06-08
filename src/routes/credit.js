@@ -12,6 +12,8 @@
 //                  GET  /customer/:cid agora retorna campo `accounts`
 //                  POST /customer/:cid/payment aceita account_id / allocations
 // Hub F1.4 (07/06/2026): open_installments inclui account_id
+// F2 PR1 (08/06/2026): GET /customer/:cid enriquece open_installments com
+//                  encargos lazy (mora/multa) + total_due. config/profile 1x.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -98,6 +100,7 @@ router.get('/balances', async (req, res) => {
 // GET /customer/:cid
 // F3: adiciona campo `accounts` com lista de carnes e saldo por carne.
 // Hub F1.4: open_installments inclui account_id (defensivo 42703).
+// F2 PR1: open_installments inclui encargos lazy (mora/multa) + total_due.
 // Todos os campos pre-existentes sao mantidos intactos.
 router.get('/customer/:cid', async (req, res) => {
   try {
@@ -153,6 +156,22 @@ router.get('/customer/:cid', async (req, res) => {
         installmentRows = [];
       } else throw instErr;
     }
+
+    // F2 PR1: carrega config + profile do cliente 1x p/ o engine de encargos lazy.
+    let lateConfig = null;
+    try {
+      const cfg = await db.query(`SELECT * FROM credit_plan_configs WHERE company_id = $1`, [req.params.id]);
+      lateConfig = cfg.rows[0] || null;
+    } catch (_) { lateConfig = null; }
+    let lateProfile = null;
+    try {
+      const prof = await db.query(
+        `SELECT * FROM customer_credit_profiles WHERE company_id = $1 AND customer_id = $2`,
+        [req.params.id, req.params.cid]
+      );
+      lateProfile = prof.rows[0] || null;
+    } catch (_) { lateProfile = null; }
+    const lateTerms = creditLedger.resolveTerms(lateProfile, lateConfig);
 
     // F3: carnes do cliente (defensivo: tabela pode nao existir ainda)
     let accounts = [];
@@ -246,19 +265,28 @@ router.get('/customer/:cid', async (req, res) => {
         amount: parseFloat(t.amount), payment_method: t.payment_method,
         notes: t.notes, created_at: t.created_at,
       })),
-      open_installments: installmentRows.map(i => ({
-        id: i.id,
-        installment_number:  i.installment_number,
-        total_installments:  i.total_installments,
-        amount_due:          parseFloat(i.amount_due),
-        covered_amount:      parseFloat(i.covered_amount || 0),
-        remaining:           parseFloat((parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)).toFixed(2)),
-        due_date:            i.due_date,
-        status:              i.status,
-        late_fee:            parseFloat(i.late_fee || 0),
-        late_interest:       parseFloat(i.late_interest || 0),
-        account_id:          i.account_id || null,
-      })),
+      // F2 PR1: encargos lazy (mora/multa) por parcela. Zero se capability OFF.
+      open_installments: installmentRows.map(i => {
+        const remaining = parseFloat((parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)).toFixed(2));
+        const lc = creditLedger.computeLateCharges(i, lateTerms, lateConfig);
+        return {
+          id: i.id,
+          installment_number:  i.installment_number,
+          total_installments:  i.total_installments,
+          amount_due:          parseFloat(i.amount_due),
+          covered_amount:      parseFloat(i.covered_amount || 0),
+          remaining,
+          due_date:            i.due_date,
+          status:              i.status,
+          late_fee:            lc.late_fee,
+          late_interest:       lc.late_interest,
+          charges_total:       lc.charges_total,
+          days_overdue:        lc.days_overdue,
+          days_charged:        lc.days_charged,
+          total_due:           parseFloat((remaining + lc.charges_total).toFixed(2)),
+          account_id:          i.account_id || null,
+        };
+      }),
     });
   } catch (err) {
     if (err.status === 403) return res.status(403).json({ error: err.message, code: err.code });

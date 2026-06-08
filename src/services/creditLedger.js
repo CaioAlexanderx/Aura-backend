@@ -13,6 +13,7 @@
 //   resolveTerms(profile, config)   -> termos efetivos (F2)
 //   scoreLabel(score)               -> string (exportado p/ reuso em rotas)
 //   scoreWarning(score, config)     -> aviso nao-impeditivo (Hub F1.4)
+//   computeLateCharges(installment, terms, config, asOf) -> encargos lazy (F2 PR1)
 //
 // REGRA DE NEGOCIO (imutavel): score baixo NUNCA bloqueia a venda.
 // Score so gera AVISO ao lojista. O UNICO impeditivo e o bloqueio
@@ -28,6 +29,13 @@ const SP_DATE_COL = (col) => `(${col} AT TIME ZONE 'America/Sao_Paulo')::date`;
 // meio-dia em America/Sao_Paulo. Se o param for NULL, cai em NOW().
 const BACKDATE_TS = (p) =>
   `COALESCE((${p}::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW())`;
+
+// ─── F2 PR1: tetos CDC (imutaveis) ────────────────────────────
+// Multa unica <= 2% do principal; mora <= 1% ao mes (linear),
+// expressa ao dia como 0.01/30 (~0.00033333). Acima do teto na
+// ESCRITA -> rejeitar (422). Na LEITURA o engine sempre clampa.
+const LATE_FEE_MAX            = 0.02;       // multa unica maxima
+const LATE_INTEREST_DAILY_MAX = 0.01 / 30;  // mora diaria maxima (1% a.m.)
 
 // ─── periodicidade de pagamento ───────────────────────────────
 function resolvePeriod(unit, count, config) {
@@ -91,6 +99,88 @@ function resolveTerms(profile, config) {
   };
 
   return { effective, overrides };
+}
+
+// ─── F2 PR1: computeLateCharges (engine puro, lazy) ───────────
+// Calcula mora/multa de UMA parcela SEM persistir nada.
+//
+// Contrato:
+//   installment: { amount_due, covered_amount, due_date (DATE), status }
+//   terms:       resultado de resolveTerms(profile, config). Se null/undefined,
+//                resolve internamente com resolveTerms(null, config). Aceita
+//                tambem um objeto raw { late_fee_rate, late_interest_daily }.
+//   config:      credit_plan_configs (precisa de late_charges_enabled, late_grace_days).
+//   asOf:        Date|string|undefined. Default = agora; a data efetiva e
+//                sempre normalizada para o dia-calendario em America/Sao_Paulo.
+//
+// Regras (decisoes do dono, imutaveis):
+//   - Capability OPT-IN: se !config.late_charges_enabled -> tudo zero.
+//   - So parcelas 'pending'/'overdue' geram encargo (paid/cancelled -> zero).
+//   - principalRemaining = max(0, amount_due - covered_amount). <=0 -> zero.
+//   - Carencia (late_grace_days, default 3): dias tolerados sem encargo.
+//   - daysCharged = max(0, daysOverdue - grace). Dentro da carencia -> zero.
+//   - Mora SIMPLES/LINEAR sobre daysCharged; multa UNICA sobre o principal.
+//   - TETO CDC sempre aplicado: feeRate<=2%, dailyRate<=1%a.m. (0.01/30).
+//   - Defensivo: nunca lanca; em duvida retorna zeros.
+//
+// Retorna: { late_fee, late_interest, days_overdue, days_charged, charges_total }
+function round2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+function computeLateCharges(installment, terms, config, asOf) {
+  const ZERO = { late_fee: 0, late_interest: 0, days_overdue: 0, days_charged: 0, charges_total: 0 };
+  try {
+    if (!config || config.late_charges_enabled !== true) return { ...ZERO };
+
+    const status = installment?.status;
+    if (status !== 'pending' && status !== 'overdue') return { ...ZERO };
+
+    const amountDue = Number(installment?.amount_due) || 0;
+    const covered   = Number(installment?.covered_amount) || 0;
+    const principalRemaining = Math.max(0, amountDue - covered);
+    if (principalRemaining <= 0) return { ...ZERO };
+
+    // due_date (DATE) -> 'YYYY-MM-DD'. node-pg entrega DATE como objeto Date.
+    const dd = installment?.due_date;
+    const dueYmd = dd instanceof Date ? dd.toISOString().slice(0, 10) : String(dd || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dueYmd)) return { ...ZERO };
+
+    // "hoje" (ou asOf) no dia-calendario de America/Sao_Paulo.
+    const ref = asOf instanceof Date ? asOf : (asOf ? new Date(asOf) : new Date());
+    if (isNaN(ref.getTime())) return { ...ZERO };
+    const todayYmd = ref.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+
+    const daysOverdue = Math.max(
+      0,
+      Math.round((Date.parse(todayYmd + 'T00:00:00Z') - Date.parse(dueYmd + 'T00:00:00Z')) / 86400000)
+    );
+
+    const grace = Number(config.late_grace_days ?? 3);
+    const daysCharged = Math.max(0, daysOverdue - (Number.isFinite(grace) ? grace : 3));
+    if (daysCharged <= 0) {
+      return { late_fee: 0, late_interest: 0, days_overdue: daysOverdue, days_charged: 0, charges_total: 0 };
+    }
+
+    // Rates efetivas: aceita terms resolvido (.effective), raw, ou resolve aqui.
+    const resolved = terms && terms.effective
+      ? terms.effective
+      : (terms && (terms.late_fee_rate != null || terms.late_interest_daily != null))
+        ? terms
+        : resolveTerms(null, config).effective;
+
+    // TETO CDC (sempre clampado na leitura).
+    const feeRate   = Math.min(Number(resolved.late_fee_rate) || 0, LATE_FEE_MAX);
+    const dailyRate = Math.min(Number(resolved.late_interest_daily) || 0, LATE_INTEREST_DAILY_MAX);
+
+    const late_fee      = round2(principalRemaining * feeRate);                 // multa unica
+    const late_interest = round2(principalRemaining * dailyRate * daysCharged); // mora linear
+    const charges_total = round2(late_fee + late_interest);
+
+    return { late_fee, late_interest, days_overdue: daysOverdue, days_charged: daysCharged, charges_total };
+  } catch (_) {
+    return { late_fee: 0, late_interest: 0, days_overdue: 0, days_charged: 0, charges_total: 0 };
+  }
 }
 
 // ─── helpers internos ─────────────────────────────────────────
@@ -801,11 +891,13 @@ async function cancelCreditSale(client, { companyId, saleId }) {
 
 /**
  * getCustomerCreditPreview — preview para PDV (pool direto).
+ * F2 PR1: agrega total_late_charges (encargos lazy das parcelas em aberto).
+ *         Zero quando late_charges_enabled = false. Defensivo a 42703/42P01.
  */
 async function getCustomerCreditPreview(companyId, customerId) {
   const today = `(NOW() AT TIME ZONE 'America/Sao_Paulo')::date`;
   try {
-    const [balRes, profileRes, instRes, configRes] = await Promise.all([
+    const [balRes, profileRes, instRes, configRes, overdueRes] = await Promise.all([
       pool.query(
         `SELECT COALESCE(balance, 0) AS balance
          FROM customer_credit_balances
@@ -813,7 +905,8 @@ async function getCustomerCreditPreview(companyId, customerId) {
         [companyId, customerId]
       ),
       pool.query(
-        `SELECT credit_score, credit_limit, credit_used, status, blocked_reason
+        `SELECT credit_score, credit_limit, credit_used, status, blocked_reason,
+                term_late_fee_rate, term_late_interest_daily
          FROM customer_credit_profiles
          WHERE company_id = $1 AND customer_id = $2`,
         [companyId, customerId]
@@ -828,8 +921,17 @@ async function getCustomerCreditPreview(companyId, customerId) {
         [companyId, customerId]
       ),
       pool.query(
-        `SELECT score_warn_min FROM credit_plan_configs WHERE company_id = $1`,
+        `SELECT score_warn_min, late_charges_enabled, late_grace_days,
+                late_fee_rate, late_interest_daily
+         FROM credit_plan_configs WHERE company_id = $1`,
         [companyId]
+      ).catch(() => ({ rows: [] })),
+      pool.query(
+        `SELECT amount_due, covered_amount, due_date, status
+         FROM credit_installments
+         WHERE company_id = $1 AND customer_id = $2
+           AND status IN ('pending', 'overdue')`,
+        [companyId, customerId]
       ).catch(() => ({ rows: [] })),
     ]);
 
@@ -840,6 +942,18 @@ async function getCustomerCreditPreview(companyId, customerId) {
     const score      = parseInt(profile.credit_score) || 500;
     const limit      = parseFloat(profile.credit_limit) || 0;
     const over_limit = limit > 0 && balance >= limit;
+
+    // F2 PR1: encargos lazy agregados (sempre 0 se capability OFF).
+    let total_late_charges = 0;
+    try {
+      const terms = resolveTerms(profile, config);
+      total_late_charges = round2(
+        (overdueRes.rows || []).reduce(
+          (sum, r) => sum + (computeLateCharges(r, terms, config).charges_total || 0),
+          0
+        )
+      );
+    } catch (_) { total_late_charges = 0; }
 
     return {
       balance,
@@ -854,6 +968,7 @@ async function getCustomerCreditPreview(companyId, customerId) {
       over_limit,
       status:                  profile.status || 'active',
       blocked_reason:          profile.blocked_reason || null,
+      total_late_charges,
     };
   } catch (err) {
     if (err.code === '42P01' || err.code === '42703') {
@@ -863,6 +978,7 @@ async function getCustomerCreditPreview(companyId, customerId) {
         score_warning: null,
         credit_limit: 0, credit_used: 0, over_limit: false,
         status: 'active', blocked_reason: null,
+        total_late_charges: 0,
       };
     }
     throw err;
@@ -877,6 +993,11 @@ module.exports = {
   resolveTerms,
   scoreLabel,
   scoreWarning,
+  // F2 PR1: engine de encargos + tetos CDC
+  computeLateCharges,
+  round2,
+  LATE_FEE_MAX,
+  LATE_INTEREST_DAILY_MAX,
   // helpers exportados para compatibilidade interna
   _recalculateScore,
   _updateCreditUsed,

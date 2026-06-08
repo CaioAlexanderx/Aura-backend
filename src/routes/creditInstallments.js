@@ -19,6 +19,14 @@
  *   - POST /installments: warnings[] (SCORE_BELOW_MIN) sem bloquear.
  *     REGRA: score NUNCA bloqueia. Unico impeditivo e o bloqueio MANUAL
  *     (status === 'blocked' -> 422 CUSTOMER_BLOCKED), ja existente.
+ * F2 PR1 (08/06/2026): encargos (mora/multa) — motor de leitura + tetos CDC.
+ *   - PUT /plan-config: persiste late_charges_enabled + late_grace_days e
+ *     valida TETO CDC (late_fee_rate <= 2%, late_interest_daily <= 1% a.m.).
+ *   - PUT /customers/:cid/terms: mesma validacao de teto nos overrides.
+ *   - GET /customers/:cid/profile + GET /installments: enriquecem parcelas
+ *     abertas com late_fee/late_interest/charges_total/days_overdue/days_charged/total_due
+ *     calculados lazy (sem persistir). Zero quando late_charges_enabled=false.
+ *   - applyPayment (materializacao) NAO e tocado aqui — vem no PR2.
  */
 
 const express = require('express');
@@ -30,6 +38,10 @@ const router = express.Router({ mergeParams: true });
 const SP_DATE = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
 const nz = (v) => (v === undefined || v === null || v === '') ? null : v;
+
+// F2 PR1: epsilon p/ comparacao de teto (evita falso-positivo por float).
+const CAP_EPS = 1e-9;
+const aboveCap = (v, cap) => v != null && v !== '' && Number(v) > cap + CAP_EPS;
 
 function buildPixLink(id) {
   const short = id.replace(/-/g, '').slice(0, 12);
@@ -74,6 +86,7 @@ router.use(assertCrediarioEnabled);
 // F2: adiciona campo `terms: { overrides, effective }` ao perfil.
 // Hub F1.4: score_label, available_limit, account_id nas parcelas abertas.
 // Hub F1.4.1: score_warning (aviso nao-impeditivo).
+// F2 PR1: parcelas abertas enriquecidas com encargos lazy (mora/multa) + total_due.
 router.get('/customers/:cid/profile', async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
@@ -111,7 +124,7 @@ router.get('/customers/:cid/profile', async (req, res) => {
       } else throw e;
     }
 
-    // F2: termos resolvidos
+    // F2: termos resolvidos (reutilizados pelo engine de encargos abaixo)
     const terms = creditLedger.resolveTerms(profile, config);
 
     // Hub F1.4: score_label e available_limit
@@ -128,11 +141,22 @@ router.get('/customers/:cid/profile', async (req, res) => {
       available_limit: availableLimit,
       config,
       terms,
-      open_installments: installmentRows.map(i => ({
-        ...i,
-        account_id: i.account_id || null,
-        remaining: parseFloat((parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)).toFixed(2)),
-      })),
+      // F2 PR1: encargos lazy (mora/multa) por parcela. Zero se capability OFF.
+      open_installments: installmentRows.map(i => {
+        const remaining = parseFloat((parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)).toFixed(2));
+        const lc = creditLedger.computeLateCharges(i, terms, config);
+        return {
+          ...i,
+          account_id:    i.account_id || null,
+          remaining,
+          late_fee:      lc.late_fee,
+          late_interest: lc.late_interest,
+          charges_total: lc.charges_total,
+          days_overdue:  lc.days_overdue,
+          days_charged:  lc.days_charged,
+          total_due:     parseFloat((remaining + lc.charges_total).toFixed(2)),
+        };
+      }),
     });
   } catch (err) {
     console.error('GET /credit/customers/:cid/profile', err.message);
@@ -142,6 +166,7 @@ router.get('/customers/:cid/profile', async (req, res) => {
 
 // ─── PUT /credit/customers/:cid/terms (F2) ────────────────────────────────────
 // Persiste overrides de termos por cliente. null limpa o override (volta ao padrao da loja).
+// F2 PR1: valida TETO CDC para late_fee_rate / late_interest_daily.
 router.put('/customers/:cid/terms', async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
@@ -159,6 +184,14 @@ router.put('/customers/:cid/terms', async (req, res) => {
   if (period_unit !== undefined && period_unit !== null &&
       !['day', 'week', 'month'].includes(period_unit)) {
     return res.status(400).json({ error: 'period_unit deve ser day, week ou month' });
+  }
+
+  // F2 PR1: teto CDC (imutavel). Acima do teto -> 422 (override nao pode furar o teto).
+  if (aboveCap(late_fee_rate, creditLedger.LATE_FEE_MAX)) {
+    return res.status(422).json({ code: 'LATE_FEE_ABOVE_CAP', max: creditLedger.LATE_FEE_MAX });
+  }
+  if (aboveCap(late_interest_daily, creditLedger.LATE_INTEREST_DAILY_MAX)) {
+    return res.status(422).json({ code: 'LATE_INTEREST_ABOVE_CAP', max: creditLedger.LATE_INTEREST_DAILY_MAX });
   }
 
   const client = await pool.connect();
@@ -278,17 +311,18 @@ router.patch('/customers/:cid/block', async (req, res) => {
 
 // ─── GET/PUT /credit/plan-config ───────────────────────────────────────────
 // Hub F1.4: GET tambem retorna score_warn_min (via RETURNING *; defensivo se coluna faltar).
+// F2 PR1: GET retorna late_charges_enabled + late_grace_days (via RETURNING *).
 router.get('/plan-config', async (req, res) => {
   const client = await pool.connect();
   try {
-    // _getOrCreatePlanConfig usa RETURNING * — se score_warn_min existir, vem automaticamente.
+    // _getOrCreatePlanConfig usa RETURNING * — se as colunas novas existirem, vem automaticamente.
     // Se a coluna nao existir ainda (42703), retorna config sem ela.
     let config;
     try {
       config = await creditLedger._getOrCreatePlanConfig(client, req.params.id);
     } catch (e) {
       if (e.code === '42703') {
-        // fallback: busca sem a coluna nova
+        // fallback: busca sem as colunas novas
         const r = await client.query(
           `INSERT INTO credit_plan_configs (company_id)
            VALUES ($1)
@@ -309,21 +343,35 @@ router.get('/plan-config', async (req, res) => {
 
 // Hub F1.4: PUT tambem aceita score_warn_min. Padrao defensivo identico ao existente:
 // se a coluna 42703, ignora graciosamente (nao bloqueia o save dos outros campos).
+// F2 PR1: aceita/persiste late_charges_enabled + late_grace_days e valida TETO CDC
+//         (late_fee_rate <= 2%, late_interest_daily <= 1% a.m.). Acima -> 422.
 router.put('/plan-config', async (req, res) => {
   const { max_installments, min_installment_value, interest_rate,
           late_fee_rate, late_interest_daily, auto_block_days,
-          require_score_min, period_unit, period_count, score_warn_min } = req.body;
+          require_score_min, period_unit, period_count, score_warn_min,
+          late_charges_enabled, late_grace_days } = req.body;
   const safeUnit = ['day', 'week', 'month'].includes(period_unit) ? period_unit : null;
+
+  // F2 PR1: teto CDC (imutavel). Acima do teto -> 422 (a loja nao pode furar o teto).
+  if (aboveCap(late_fee_rate, creditLedger.LATE_FEE_MAX)) {
+    return res.status(422).json({ code: 'LATE_FEE_ABOVE_CAP', max: creditLedger.LATE_FEE_MAX });
+  }
+  if (aboveCap(late_interest_daily, creditLedger.LATE_INTEREST_DAILY_MAX)) {
+    return res.status(422).json({ code: 'LATE_INTEREST_ABOVE_CAP', max: creditLedger.LATE_INTEREST_DAILY_MAX });
+  }
+
   const client = await pool.connect();
   try {
-    // Tenta salvar com score_warn_min
+    // Tenta salvar com score_warn_min + late_charges_enabled + late_grace_days
     let r;
     try {
       r = await client.query(
         `INSERT INTO credit_plan_configs (company_id, max_installments, min_installment_value,
            interest_rate, late_fee_rate, late_interest_daily, auto_block_days,
-           require_score_min, period_unit, period_count, score_warn_min)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'month'),COALESCE($10,1),$11)
+           require_score_min, period_unit, period_count, score_warn_min,
+           late_charges_enabled, late_grace_days)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'month'),COALESCE($10,1),$11,
+                 COALESCE($12,false),COALESCE($13,3))
          ON CONFLICT (company_id) DO UPDATE SET
            max_installments      = COALESCE($2, credit_plan_configs.max_installments),
            min_installment_value = COALESCE($3, credit_plan_configs.min_installment_value),
@@ -335,16 +383,19 @@ router.put('/plan-config', async (req, res) => {
            period_unit           = COALESCE($9, credit_plan_configs.period_unit),
            period_count          = COALESCE($10, credit_plan_configs.period_count),
            score_warn_min        = COALESCE($11, credit_plan_configs.score_warn_min),
+           late_charges_enabled  = COALESCE($12, credit_plan_configs.late_charges_enabled),
+           late_grace_days       = COALESCE($13, credit_plan_configs.late_grace_days),
            updated_at            = NOW()
          RETURNING *`,
         [req.params.id,
          nz(max_installments), nz(min_installment_value), nz(interest_rate),
          nz(late_fee_rate), nz(late_interest_daily), nz(auto_block_days),
-         nz(require_score_min), safeUnit, nz(period_count), nz(score_warn_min)]
+         nz(require_score_min), safeUnit, nz(period_count), nz(score_warn_min),
+         nz(late_charges_enabled), nz(late_grace_days)]
       );
     } catch (e) {
       if (e.code === '42703') {
-        // score_warn_min ainda nao existe (deploy parcial) -- salva sem ela
+        // Alguma coluna nova ainda nao existe (deploy parcial) -- salva com o set antigo
         r = await client.query(
           `INSERT INTO credit_plan_configs (company_id, max_installments, min_installment_value,
              interest_rate, late_fee_rate, late_interest_daily, auto_block_days,
@@ -476,6 +527,8 @@ router.post('/installments', async (req, res) => {
 });
 
 // ─── GET /credit/installments ────────────────────────────────────────────────────
+// F2 PR1: cada parcela e enriquecida com encargos lazy (mora/multa) + total_due.
+//         config (e profile, se customer_id no filtro) sao carregados 1x por request.
 router.get('/installments', async (req, res) => {
   const companyId = req.params.id;
   const { customer_id, status, page = 1, limit = 50 } = req.query;
@@ -510,7 +563,41 @@ router.get('/installments', async (req, res) => {
       [...vals, parseInt(limit), offset]
     );
     const count = await pool.query(`SELECT COUNT(*) FROM credit_installments ci ${where}`, vals);
-    res.json({ data: r.rows, total: parseInt(count.rows[0].count), page: parseInt(page), limit: parseInt(limit) });
+
+    // F2 PR1: carrega config 1x (e profile do cliente filtrado, se houver) e
+    // enriquece cada linha com encargos lazy. resolveTerms reaproveitado p/ todas.
+    let lateConfig = null;
+    try {
+      const cfg = await pool.query(`SELECT * FROM credit_plan_configs WHERE company_id=$1`, [companyId]);
+      lateConfig = cfg.rows[0] || null;
+    } catch (_) { lateConfig = null; }
+    let lateProfile = null;
+    if (customer_id) {
+      try {
+        const prof = await pool.query(
+          `SELECT * FROM customer_credit_profiles WHERE company_id=$1 AND customer_id=$2`,
+          [companyId, customer_id]
+        );
+        lateProfile = prof.rows[0] || null;
+      } catch (_) { lateProfile = null; }
+    }
+    const lateTerms = creditLedger.resolveTerms(lateProfile, lateConfig);
+
+    const data = r.rows.map(row => {
+      const remaining = parseFloat((parseFloat(row.amount_due) - parseFloat(row.covered_amount || 0)).toFixed(2));
+      const lc = creditLedger.computeLateCharges(row, lateTerms, lateConfig);
+      return {
+        ...row,
+        late_fee:      lc.late_fee,
+        late_interest: lc.late_interest,
+        charges_total: lc.charges_total,
+        days_overdue:  lc.days_overdue,
+        days_charged:  lc.days_charged,
+        total_due:     parseFloat((remaining + lc.charges_total).toFixed(2)),
+      };
+    });
+
+    res.json({ data, total: parseInt(count.rows[0].count), page: parseInt(page), limit: parseInt(limit) });
   } catch (err) {
     console.error('GET /credit/installments', err.message);
     res.status(500).json({ error: err.message });
