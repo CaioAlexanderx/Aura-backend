@@ -22,6 +22,10 @@ router.use('/auth', require('./authSwitchCompany'));
 router.use('/referrals', accessCodesRouter);
 router.use('/invite', require('./invitePublic'));
 
+// ── Leads públicos do site (getaura.com.br via Cloudflare Worker) ──
+// POST /api/v1/public/leads -> sales_leads (source='site') -> ProspecaoAdmin
+router.use('/public/leads', require('./leadsPublic'));
+
 router.use('/me/companies', require('./userCompanies'));
 router.use('/me', productLinksUserRouter);
 router.use('/me', require('./meAggregates'));

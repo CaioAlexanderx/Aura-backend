@@ -57,6 +57,9 @@ function validateRuntimeEnv() {
     HEALTH_SECRET:   getOptionalEnv('HEALTH_SECRET', ''),
     ALLOWED_ORIGINS: allowedOrigins || '*',
     JWT_EXPIRES_IN:  getOptionalEnv('JWT_EXPIRES_IN', '7d'),
+    // Token compartilhado com o Cloudflare Worker do site (getaura.com.br)
+    // para o endpoint publico POST /api/v1/public/leads. Definir no Railway.
+    SITE_LEADS_TOKEN: getOptionalEnv('SITE_LEADS_TOKEN', ''),
   };
 }
 
