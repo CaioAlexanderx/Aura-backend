@@ -1,0 +1,82 @@
+openapi: 3.1.0
+info:
+  title: Aura Karatê — API Fase 5 (Conectividade Dojô) — Track F · FUNDAÇÃO
+  version: "0.5.0"
+  description: >
+    Fundação da conectividade Federação ↔ Dojô (3 vias). Migrations 170 + 171.
+    Esqueleto: estado de conexão + handshake/aprovação + token de sync + log de
+    eventos + webhook stub (Via 1). A aplicação real do payload de sync e o
+    adaptador Via 2 por CPF chegam depois.
+
+    VIAS: native (Via 1), adapter (Via 2), manual (Via 3).
+    SEGURANÇA: federation_sync_token só aparece em claro 1x (approve/rotate);
+    persistimos hash sha256 + prefixo. Webhook autentica por hash (timing-safe).
+servers:
+  - url: https://api.getaura.com.br
+  - url: http://localhost:3000
+paths:
+  /federation/{id}/connections:
+    get:
+      summary: Lista conexões (filtros via, status) + counts. RBAC read
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: '{counts, data[]}' } }
+    post:
+      summary: 'Inicia conexão (native|adapter|manual). manual nasce connected; demais pending. RBAC staffWrite'
+      security: [{ bearerAuth: [] }]
+      responses: { '201': { description: criada }, '404': { description: dojô não encontrado }, '422': { description: validação } }
+  /federation/{id}/connections/requests:
+    get:
+      summary: Inbox de solicitações pendentes. RBAC read
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: ok } }
+  /federation/{id}/connections/{connId}:
+    get:
+      summary: Detalhe + 10 eventos recentes. RBAC read
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: ok }, '404': { description: não encontrada } }
+    patch:
+      summary: Edita notes/via. RBAC staffWrite
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: ok }, '404': { description: não encontrada } }
+  /federation/{id}/connections/{connId}/approve:
+    post:
+      summary: 'Aprova handshake → connected. native/adapter geram sync_token (CLARO 1x). RBAC adminOnly'
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: 'ok (+ sync_token)' }, '409': { description: já ativa } }
+  /federation/{id}/connections/{connId}/reject:
+    post:
+      summary: Recusa/revoga. RBAC adminOnly
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: revoked }, '404': { description: não encontrada } }
+  /federation/{id}/connections/{connId}/rotate-token:
+    post:
+      summary: 'Rotaciona o sync_token (native/adapter). RBAC adminOnly'
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: 'ok (+ sync_token)' }, '409': { description: 'via manual não usa token' } }
+  /federation/{id}/connections/{connId}/events:
+    get:
+      summary: Log de eventos (paginado). RBAC read
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: '{page, page_size, total, data[]}' } }
+  /federation/{id}/connections/{connId}/events/{eventId}/reprocess:
+    post:
+      summary: 'Marca evento em falha como reprocessado (stub). RBAC staffWrite'
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: reprocessed }, '409': { description: não está em falha } }
+  /webhooks/karate-sync/{connId}:
+    post:
+      summary: 'Webhook de sync do dojô (Via 1). Autentica por X-Sync-Token (hash). Registra evento (pending).'
+      responses:
+        '202': { description: 'aceito {ok, event_id}' }
+        '401': { description: token inválido }
+        '403': { description: conexão inativa }
+        '404': { description: conexão não encontrada }
+        '422': { description: event_type inválido }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+# Connection{ id, federation_id, dojo_id, dojo_name, fpkt_affiliation_id,
+#   via[native|adapter|manual], status[pending|connected|suspended|revoked|error],
+#   sync_token_masked, token_rotated_at, connected_at, last_sync_at, last_sync_status,
+#   adapter_cpf_matched, adapter_cpf_pending, notes }
+# SyncEvent{ id, direction[dojo_to_fed|fed_to_dojo], event_type, status[ok|failed|reprocessed|pending], error, created_at }
