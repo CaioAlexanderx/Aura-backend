@@ -5,6 +5,7 @@
 //   GET   /connections                       — lista (filtros via/status) + counts
 //   GET   /connections/requests              — solicitações pendentes (inbox)
 //   POST  /connections                       — inicia conexão (staffWrite)
+//   POST  /connections/sync/run              — catch-up assíncrono (drena fila) (staffWrite)
 //   GET   /connections/:connId               — detalhe + eventos recentes
 //   PATCH /connections/:connId               — edita notes/via (staffWrite)
 //   POST  /connections/:connId/approve       — aprova handshake (adminOnly)
@@ -27,6 +28,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { generateSyncToken, maskToken } = require('../services/karateSyncService');
+const { runFederationSync } = require('../services/karateSyncEngine');
 
 const VIAS = ['native', 'manual'];
 
@@ -135,6 +137,21 @@ router.post('/connections', ...guards.staffWrite(), async (req, res) => {
   } catch (err) {
     console.error('[karateConnections] create error:', err.message);
     res.status(500).json({ error: 'Erro ao iniciar conexão', detail: err.message });
+  }
+});
+
+// ── POST /connections/sync/run ──────────────────────────
+// Catch-up assíncrono: processa a fila de eventos que o dojô empilhou e
+// sinaliza dojôs que ficaram quietos. Chamado quando a federação abre o
+// sistema (pull). Não exige o dojô online ao mesmo tempo.
+router.post('/connections/sync/run', ...guards.staffWrite(), async (req, res) => {
+  const federationId = req.params.id;
+  try {
+    const summary = await runFederationSync(federationId);
+    res.json(summary);
+  } catch (err) {
+    console.error('[karateConnections] sync run error:', err.message);
+    res.status(500).json({ error: 'Erro ao processar a fila de sincronização' });
   }
 });
 
