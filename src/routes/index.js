@@ -51,6 +51,12 @@ router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
 router.use('/webhooks/instagram', require('./webhookInstagram'));
 router.use('/webhooks/mp',        require('./webhookMp'));
 
+// ── AURA KARATÊ — Track F (público: webhook de sync do dojô / Via 1) ──
+// Sem auth de empresa. Autentica por federation_sync_token (header
+// X-Sync-Token, comparado por hash). Migrations 170 + 171.
+//   POST /webhooks/karate-sync/:connId  — registra evento de sync (pending)
+router.use('/webhooks/karate-sync', require('./karateSyncWebhook'));
+
 // Aura Studio Sub-onda Marketplaces S-3 (25/05/2026):
 // Webhooks stub ML + Shopee. Mesmo router, 2 endpoints (/mercadolivre + /shopee).
 // Publicos, sem signature validation real (depende do core OAuth).
@@ -155,5 +161,13 @@ router.use('/federation/:id', require('./karateCards'));
 //   .../categories, .../entries (inscrição + resultado), .../ranking
 //   GET       /federation/:id/rankings (temporada, via view)
 router.use('/federation/:id', require('./karateCompetitions'));
+
+// ── AURA KARATÊ — Track F (admin: conectividade dojô / Fase 5) ──
+// Migrations 170 + 171. Contrato docs/karate-fase5-openapi.yaml.
+//   GET/POST /federation/:id/connections (+ /requests)
+//   GET/PATCH /federation/:id/connections/:connId
+//   POST .../approve, .../reject, .../rotate-token
+//   GET  .../events  + POST .../events/:eventId/reprocess
+router.use('/federation/:id', require('./karateConnections'));
 
 module.exports = router;
