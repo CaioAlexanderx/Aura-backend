@@ -70,6 +70,34 @@ const KARATE_FEATURES = Object.freeze({
   WHATSAPP_RULES:  'karate_whatsapp_rules',
 });
 
+// ── Track G (acesso real): contexto karatê derivado da company ──────
+// Função PURA (sem DB). Recebe a row de company já carregada em
+// resolveDefaultContext / /auth/me / /auth/register e devolve o
+// federationId real + o papel karatê normalizado.
+//
+// Espera os campos: { id, vertical_active, federation_id, member_role }.
+//
+//  - federação (vertical_active='karate_federation') → federation_id = company.id
+//  - dojô       (vertical_active='karate_dojo')       → federation_id = company.federation_id (pai)
+//  - outro vertical                                   → { null, null }
+//  - member_role 'owner' vira federation_admin (federação) / dojo_owner (dojô);
+//    demais papéis vêm crus de company_members.role_label.
+function resolveKarateContext(company) {
+  const empty = { federation_id: null, karate_role: null };
+  if (!company) return empty;
+  const v = company.vertical_active;
+  if (v !== 'karate_federation' && v !== 'karate_dojo') return empty;
+  const isFederation = v === 'karate_federation';
+  const federation_id = isFederation
+    ? (company.id || null)
+    : (company.federation_id || null);
+  const raw = company.member_role || 'owner';
+  const karate_role = raw === 'owner'
+    ? (isFederation ? KARATE_ROLES.FEDERATION_ADMIN : KARATE_ROLES.DOJO_OWNER)
+    : raw;
+  return { federation_id, karate_role };
+}
+
 module.exports = {
   KARATE_ROLES,
   GROUPS,
@@ -77,6 +105,7 @@ module.exports = {
   requireFederation,
   requireFeature, // reexport para conveniência nas rotas
   KARATE_FEATURES,
+  resolveKarateContext,
 };
 
 // ── Exemplo de uso numa rota (src/routes/karateDojos.js) ────
