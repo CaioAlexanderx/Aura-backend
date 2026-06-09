@@ -8,7 +8,7 @@ const { validateRuntimeEnv } = require('./config/env');
 const env = validateRuntimeEnv();
 const server = http.createServer(app);
 
-// ── Handlers globais de erro ────────────────────────────────
+// ── Handlers globais de erro ───────────────────────────────
 // Previnem que o processo morra silenciosamente em producao
 // O erro e logado e o Railway/Sentry captura para diagnostico
 
@@ -23,7 +23,7 @@ process.on('uncaughtException', function(err) {
   process.exit(1);
 });
 
-// ── WebSocket: roteamento por path ──────────────────────────
+// ── WebSocket: roteamento por path ───────────────────────
 // upgrade tem que rotear pra wss diferente conforme o path.
 // /ws/sign/:token    -> dentalWs.js     (W1-04, appointment signing)
 // /ws/consent/:token -> dentalConsentWs.js (W2-04, TCLE signing)
@@ -51,7 +51,7 @@ server.on('upgrade', function(request, socket, head) {
 
 console.log('[WS] Configurado em /ws/sign/:token (appointments) e /ws/consent/:token (TCLE)');
 
-// ── Start ───────────────────────────────────────────────────
+// ── Start ────────────────────────────────────────
 function startServer() {
   server.listen(env.PORT, '0.0.0.0', function() {
     console.log('\n Aura. API — porta ' + env.PORT);
@@ -62,6 +62,10 @@ function startServer() {
     // Iniciar scheduler de relatórios
     const { initReportScheduler } = require('./jobs/reportScheduler');
     initReportScheduler();
+
+    // Track I: régua de lembrete de anuidade karatê (diário 9h BRT)
+    const { initAnnuityReminderScheduler } = require('./jobs/annuityReminderScheduler');
+    initAnnuityReminderScheduler();
   });
 }
 
