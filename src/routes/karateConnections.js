@@ -8,7 +8,7 @@
 //   GET   /connections/:connId               — detalhe + eventos recentes
 //   PATCH /connections/:connId               — edita notes/via (staffWrite)
 //   POST  /connections/:connId/approve       — aprova handshake (adminOnly)
-//                                              native/adapter → gera token (1x)
+//                                              native → gera token (1x)
 //   POST  /connections/:connId/reject        — recusa/revoga (adminOnly)
 //   POST  /connections/:connId/rotate-token  — rotaciona token (adminOnly)
 //   GET   /connections/:connId/events        — log de sync (paginado)
@@ -16,6 +16,10 @@
 //
 // SEGURANÇA: o federation_sync_token só aparece em CLARO na resposta de
 // approve/rotate (uma vez). Persistimos apenas hash + prefixo.
+//
+// VIAS (revisado 09/06): native (Via 1, Aura Karatê Dojô) e manual (Via 2,
+// sem sistema — gerido pela FPKT). A antiga Via 2 (adaptador Aura Negócio)
+// foi removida: o dojô nunca usa outra vertical além do Aura Karatê.
 // ============================================================
 'use strict';
 
@@ -24,7 +28,7 @@ const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { generateSyncToken, maskToken } = require('../services/karateSyncService');
 
-const VIAS = ['native', 'adapter', 'manual'];
+const VIAS = ['native', 'manual'];
 
 function shapeConnection(r) {
   return {
@@ -40,8 +44,6 @@ function shapeConnection(r) {
     connected_at: r.connected_at || null,
     last_sync_at: r.last_sync_at || null,
     last_sync_status: r.last_sync_status || null,
-    adapter_cpf_matched: r.adapter_cpf_matched != null ? r.adapter_cpf_matched : null,
-    adapter_cpf_pending: r.adapter_cpf_pending != null ? r.adapter_cpf_pending : null,
     notes: r.notes || null,
     created_at: r.created_at,
     updated_at: r.updated_at,
@@ -111,9 +113,11 @@ router.post('/connections', ...guards.staffWrite(), async (req, res) => {
   }
 
   try {
+    // dojô precisa existir
     const dojo = await db.query(`SELECT id FROM companies WHERE id = $1 LIMIT 1`, [dojo_id]);
     if (!dojo.rows.length) return res.status(404).json({ error: 'Dojô não encontrado', code: 'NOT_FOUND' });
 
+    // Via 2 (manual) já nasce conectada (a FPKT gere direto). Native fica pendente.
     const status = via === 'manual' ? 'connected' : 'pending';
     const connectedAt = via === 'manual' ? 'NOW()' : 'NULL';
 
@@ -193,9 +197,9 @@ router.patch('/connections/:connId', ...guards.staffWrite(), async (req, res) =>
   }
 });
 
-// helper: aprova/rotaciona — gera token p/ native|adapter, registra handshake
+// helper: aprova/rotaciona — gera token p/ native, registra handshake
 async function issueToken(federationId, conn, isRotation) {
-  const needsToken = conn.via === 'native' || conn.via === 'adapter';
+  const needsToken = conn.via === 'native';
   let plaintext = null;
   const client = await db.connect();
   try {
@@ -255,7 +259,7 @@ router.post('/connections/:connId/approve', ...guards.adminOnly(), async (req, r
       sync_token: token, // CLARO — exibido uma única vez (null p/ via manual)
       _note: token
         ? 'Guarde o token agora — ele não será exibido novamente.'
-        : 'Conexão manual ativada (Via 3 não usa token).',
+        : 'Conexão manual ativada (Via 2 não usa token).',
     });
   } catch (err) {
     console.error('[karateConnections] approve error:', err.message);
@@ -288,7 +292,7 @@ router.post('/connections/:connId/rotate-token', ...guards.adminOnly(), async (r
     const conn = await findConnection(federationId, connId);
     if (!conn) return res.status(404).json({ error: 'Conexão não encontrada', code: 'NOT_FOUND' });
     if (conn.via === 'manual') {
-      return res.status(409).json({ error: 'Conexão manual (Via 3) não usa token', code: 'CONFLICT' });
+      return res.status(409).json({ error: 'Conexão manual (Via 2) não usa token', code: 'CONFLICT' });
     }
     conn._approver = req.user?.id || null;
     const token = await issueToken(federationId, conn, true);
