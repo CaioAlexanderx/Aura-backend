@@ -220,60 +220,75 @@ router.get('/customer/:cid', async (req, res) => {
         [req.params.id, req.params.cid]
       );
 
-      // Saldo + proxima parcela por carne (inclui legado account_id IS NULL)
-      const { rows: accBalRows } = await db.query(
-        `SELECT
-           cct.account_id,
-           COALESCE(SUM(CASE WHEN cct.type='debit' THEN cct.amount ELSE 0 END)
-             - SUM(CASE WHEN cct.type='payment' THEN cct.amount ELSE 0 END), 0) AS balance,
-           COUNT(ci.id) FILTER (WHERE ci.status IN ('pending','overdue'))        AS open_count,
-           MIN(ci.due_date) FILTER (WHERE ci.status IN ('pending','overdue'))    AS next_due_date,
-           BOOL_OR(ci.due_date < ${today} AND ci.status IN ('pending','overdue')) AS overdue
-         FROM customer_credit_transactions cct
-         LEFT JOIN credit_installments ci
-           ON ci.company_id = cct.company_id
-           AND ci.customer_id = cct.customer_id
-           AND (ci.account_id = cct.account_id OR (ci.account_id IS NULL AND cct.account_id IS NULL))
-         WHERE cct.company_id = $1 AND cct.customer_id = $2
-         GROUP BY cct.account_id`,
+      // FIX: saldo por carne -- SÓ transações (sem JOIN com parcelas para evitar fan-out).
+      // 1 débito de R$500 + 5 parcelas no JOIN antigo contava 500×5 = R$2.500 (errado).
+      const { rows: balRows } = await db.query(
+        `SELECT account_id,
+                COALESCE(SUM(CASE WHEN type='debit' THEN amount ELSE 0 END)
+                       - SUM(CASE WHEN type='payment' THEN amount ELSE 0 END), 0) AS balance
+           FROM customer_credit_transactions
+          WHERE company_id = $1 AND customer_id = $2
+          GROUP BY account_id`,
         [req.params.id, req.params.cid]
       );
 
-      // Mapa account_id -> balances
+      // Métricas de parcelas por carnê -- SÓ credit_installments (sem JOIN com transações).
+      const { rows: instRows } = await db.query(
+        `SELECT account_id,
+                COUNT(*) FILTER (WHERE status IN ('pending','overdue'))               AS open_count,
+                MIN(due_date) FILTER (WHERE status IN ('pending','overdue'))          AS next_due_date,
+                BOOL_OR(due_date < ${today} AND status IN ('pending','overdue'))      AS overdue
+           FROM credit_installments
+          WHERE company_id = $1 AND customer_id = $2
+          GROUP BY account_id`,
+        [req.params.id, req.params.cid]
+      );
+
+      // Dois mapas separados por account_id
       const balMap = {};
-      for (const r of accBalRows) {
-        balMap[r.account_id ?? '__legacy__'] = r;
+      for (const r of balRows) {
+        balMap[r.account_id ?? '__legacy__'] = { balance: r.balance };
+      }
+      const instMap = {};
+      for (const r of instRows) {
+        instMap[r.account_id ?? '__legacy__'] = {
+          open_count:    r.open_count,
+          next_due_date: r.next_due_date,
+          overdue:       r.overdue,
+        };
       }
 
       // Montar lista: carnes cadastrados
       for (const acc of accRows) {
-        const bdata = balMap[acc.id] || {};
+        const bd = balMap[acc.id] || {};
+        const id = instMap[acc.id] || {};
         accounts.push({
-          id:           acc.id,
-          name:         acc.name,
-          status:       acc.status,
-          balance:      parseFloat(bdata.balance || 0),
-          open_count:   parseInt(bdata.open_count || 0),
-          next_due_date: bdata.next_due_date ? String(bdata.next_due_date).split('T')[0] : null,
-          overdue:      bdata.overdue || false,
-          period_unit:  acc.period_unit || null,
-          period_count: acc.period_count ? parseInt(acc.period_count) : null,
+          id:            acc.id,
+          name:          acc.name,
+          status:        acc.status,
+          balance:       parseFloat(bd.balance || 0),
+          open_count:    parseInt(id.open_count || 0),
+          next_due_date: id.next_due_date ? String(id.next_due_date).split('T')[0] : null,
+          overdue:       id.overdue || false,
+          period_unit:   acc.period_unit || null,
+          period_count:  acc.period_count ? parseInt(acc.period_count) : null,
         });
       }
 
       // Conta geral (legado: transacoes sem account_id)
-      const legacyBal = balMap['__legacy__'];
+      const legacyBal  = balMap['__legacy__'];
+      const legacyInst = instMap['__legacy__'];
       if (legacyBal && parseFloat(legacyBal.balance) !== 0) {
         accounts.unshift({
-          id:           null,
-          name:         'Conta geral',
-          status:       'open',
-          balance:      parseFloat(legacyBal.balance),
-          open_count:   parseInt(legacyBal.open_count || 0),
-          next_due_date: legacyBal.next_due_date ? String(legacyBal.next_due_date).split('T')[0] : null,
-          overdue:      legacyBal.overdue || false,
-          period_unit:  null,
-          period_count: null,
+          id:            null,
+          name:          'Conta geral',
+          status:        'open',
+          balance:       parseFloat(legacyBal.balance),
+          open_count:    parseInt(legacyInst?.open_count || 0),
+          next_due_date: legacyInst?.next_due_date ? String(legacyInst.next_due_date).split('T')[0] : null,
+          overdue:       legacyInst?.overdue || false,
+          period_unit:   null,
+          period_count:  null,
         });
       }
     } catch (accErr) {
