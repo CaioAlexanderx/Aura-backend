@@ -28,6 +28,7 @@ const { logAuditAction }           = require('../middleware/auditLog');
 const nuvemfiscal                  = require('../services/nuvemfiscal');
 const sefazSp                      = require('../services/sefazSp');
 const rejectionCatalog             = require('../services/sefazSp/rejectionCatalog');
+const taxEngine                    = require('../services/sefazSp/taxEngine');
 const { buildDanfeNfceHtml }       = require('../utils/buildDanfeNfceHtml');
 
 const INSTRUCOES_NOTA = {
@@ -271,27 +272,41 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       try {
         const productIds = items.map(i => i.product_id).filter(id => typeof id==='string' && id.length>0);
         const ncmByProductId = new Map();
+        const taxProfileByProductId = new Map(); // S3.2
         if (productIds.length > 0) {
           const { rows: prodRows } = await db.query(
-            `SELECT id, ncm FROM products WHERE id=ANY($1::uuid[]) AND company_id=$2`,
+            `SELECT id, ncm, tax_profile FROM products WHERE id=ANY($1::uuid[]) AND company_id=$2`,
             [productIds, req.params.id]
           );
           for (const p of prodRows) {
             const n = (p.ncm||'').trim();
             if (n && n !== '00000000') ncmByProductId.set(p.id, n);
+            if (p.tax_profile) taxProfileByProductId.set(p.id, p.tax_profile);
           }
         }
 
+        const crtCompany = company.tax_regime === 'mei' ? 4
+          : (company.tax_regime === 'lucro_presumido' || company.tax_regime === 'lucro_real') ? 3 : 1;
         const nfItems = items.map(i => {
           const ncmFromItem = (i.ncm && String(i.ncm).trim()!=='00000000') ? String(i.ncm).trim() : null;
           const ncmFromDb   = ncmByProductId.get(i.product_id);
-          return {
+          const base = {
             code: String(i.product_id||i.code||''), name: i.product_name||i.name||'',
             description: i.description||i.product_name||i.name||'',
             ncm: ncmFromItem||ncmFromDb||'00000000', cfop: i.cfop||'5102', unit: i.unit||'UN',
             quantity: Number(i.quantity||1), price: Number(i.unit_price||i.price||0),
+            discount: Number(i.discount)||0,
             barcode: i.barcode||undefined,
           };
+          // S3.2: motor tributário só no caminho próprio (gateway intocado)
+          if (useSefazSp) {
+            const tax = taxEngine.resolveItemTax({
+              taxProfile: taxProfileByProductId.get(i.product_id), crt: crtCompany,
+            });
+            base.csosn = tax.csosn; base.orig = tax.orig;
+            base.pisCst = tax.pisCst; base.cofinsCst = tax.cofinsCst;
+          }
+          return base;
         });
 
         // F4 (29/05/2026): crediario = indPag 1 (a prazo) automaticamente.
@@ -317,7 +332,7 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
         };
         let provResult;
         if (useSefazSp) {
-          provResult = await sefazSp.emitNfce(company, emitPayload, { db, config });
+          provResult = await sefazSp.emitNfce(company, emitPayload, { db, config, allowContingency: true });
         } else {
           const emitFn = tipo==='nfe' ? nuvemfiscal.emitNfe : nuvemfiscal.emitNfce;
           provResult = await emitFn(company, emitPayload);
@@ -367,16 +382,29 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
           await db.query(`UPDATE nfce_emissions SET rejection_code=$1 WHERE id=$2`, [String(prov.cStat).slice(0,8), emission.id]);
         }
 
-        // S1.6: extras da emissão própria (migration 173)
+        // S1.6/S3.1: extras da emissão própria (migrations 173/175)
         if (useSefazSp) {
           await db.query(
             `UPDATE nfce_emissions SET xml_signed=$1, tp_emis=$2,
-                rejection_code=$3, transmitted_at=CASE WHEN $4 THEN NOW() ELSE transmitted_at END
+                rejection_code=$3, transmitted_at=CASE WHEN $4 THEN NOW() ELSE transmitted_at END,
+                contingency_at=COALESCE($6, contingency_at)
               WHERE id=$5`,
             [provResult.xml_signed || null, provResult.tp_emis || 1,
              finalStatus==='rejeitada' ? (prov.cStat || null) : null,
-             finalStatus==='autorizada', emission.id]
+             finalStatus==='autorizada', emission.id,
+             provResult.contingency_at || null]
           );
+          // S3.1: contingência entra na fila de retransmissão (prazo legal)
+          if (provResult.status === 'contingencia') {
+            const deadlineH = parseInt(process.env.NFCE_CONTINGENCY_DEADLINE_H || '24', 10);
+            await db.query(
+              `INSERT INTO nfce_pending_transmission (company_id, emission_id, deadline_at)
+               VALUES ($1, $2, NOW() + ($3 || ' hours')::interval)
+               ON CONFLICT (emission_id) DO NOTHING`,
+              [req.params.id, emission.id, deadlineH]
+            );
+            console.log(`[nfce] contingência: nota ${numeroNF} enfileirada (prazo ${deadlineH}h)`);
+          }
         }
 
       } catch (apiErr) {
@@ -397,7 +425,8 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       pdf_url: prov.pdfUrl||final[0].pdf_url, xml_url: prov.xmlUrl||final[0].xml_url,
       qr_code: prov.qrCode||final[0].qr_code, url_consulta: prov.urlConsulta||final[0].url_consulta,
       motivo: prov.motivo||null, cStat: prov.cStat||null,
-      rejeicao_amigavel: amigavel });
+      rejeicao_amigavel: amigavel,
+      contingencia: prov.status === 'contingencia' });
 
   } catch (err) {
     console.error('nfce emit error:', err);
@@ -462,8 +491,9 @@ router.get('/:nfceId/danfe-termica', requireAuth, async (req, res) => {
     const { rows: emissions } = await db.query('SELECT * FROM nfce_emissions WHERE id=$1 AND company_id=$2', [nfceId, cid]);
     if (!emissions.length) return res.status(404).type('text/plain').send('Nota nao encontrada');
     const emission = emissions[0];
-    if (emission.status !== 'autorizada') {
-      return res.status(409).type('text/plain').send(`DANFE so pode ser impressa quando autorizada. Status: ${emission.status}`);
+    const isContingenciaPendente = Number(emission.tp_emis) === 9 && emission.status === 'processando';
+    if (emission.status !== 'autorizada' && !isContingenciaPendente) {
+      return res.status(409).type('text/plain').send(`DANFE so pode ser impressa quando autorizada (ou em contingencia pendente). Status: ${emission.status}`);
     }
     const { rows: companies } = await db.query(
       `SELECT id, cnpj, legal_name, trade_name, inscricao_estadual,
@@ -668,6 +698,52 @@ router.post('/inutilizar', requireAuth, requireRole('client','analyst','admin'),
   } catch (err) {
     console.error('[nfce] inutilizar error:', err.message);
     res.status(502).json({ error: 'Erro ao inutilizar faixa: ' + err.message });
+  }
+});
+
+// ── S3.3: telemetria da emissão (página NFe / S4.1) ──
+router.get('/telemetry/resumo', requireAuth, async (req, res) => {
+  try {
+    const cid = req.params.id;
+    const { rows: [m] } = await db.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE created_at >= NOW()-INTERVAL '30 days')::int AS emitidas_30d,
+         COUNT(*) FILTER (WHERE status='autorizada' AND created_at >= NOW()-INTERVAL '30 days')::int AS autorizadas_30d,
+         COUNT(*) FILTER (WHERE status='rejeitada' AND created_at >= NOW()-INTERVAL '30 days')::int AS rejeitadas_30d,
+         COUNT(*) FILTER (WHERE tp_emis=9 AND created_at >= NOW()-INTERVAL '1 day')::int AS contingencias_24h,
+         COUNT(*) FILTER (WHERE tp_emis=9 AND created_at >= NOW()-INTERVAL '30 days')::int AS contingencias_30d,
+         COALESCE(AVG(EXTRACT(EPOCH FROM (authorized_at - created_at)) * 1000)
+           FILTER (WHERE status='autorizada' AND tp_emis=1 AND authorized_at IS NOT NULL
+                   AND created_at >= NOW()-INTERVAL '7 days'), 0)::int AS latencia_media_ms_7d
+       FROM nfce_emissions WHERE company_id=$1`, [cid]);
+
+    const { rows: [fila] } = await db.query(
+      `SELECT COUNT(*) FILTER (WHERE status='pending')::int AS pendentes,
+              COUNT(*) FILTER (WHERE status='rejected')::int AS rejeitadas_tardias,
+              COUNT(*) FILTER (WHERE status='expired')::int AS expiradas,
+              MIN(deadline_at) FILTER (WHERE status='pending') AS proximo_prazo
+         FROM nfce_pending_transmission WHERE company_id=$1`, [cid]);
+
+    const { rows: certs } = await db.query(
+      `SELECT subject_cn, not_after,
+              EXTRACT(DAY FROM (not_after - NOW()))::int AS dias_pra_vencer
+         FROM company_certificates WHERE company_id=$1`, [cid]);
+
+    const taxa = m.emitidas_30d > 0 ? Math.round((m.autorizadas_30d / m.emitidas_30d) * 1000) / 10 : null;
+    res.json({
+      emissao: { ...m, taxa_autorizacao_30d_pct: taxa, baseline_gateway_pct: 88 },
+      fila_contingencia: fila,
+      certificado: certs[0] ? {
+        subject_cn: certs[0].subject_cn, not_after: certs[0].not_after,
+        dias_pra_vencer: certs[0].dias_pra_vencer,
+        alerta: certs[0].dias_pra_vencer <= 7 ? 'critical'
+          : certs[0].dias_pra_vencer <= 15 ? 'warning'
+          : certs[0].dias_pra_vencer <= 30 ? 'info' : null,
+      } : null,
+    });
+  } catch (err) {
+    console.error('[nfce] telemetry error:', err.message);
+    res.status(500).json({ error: 'Erro ao calcular telemetria' });
   }
 });
 

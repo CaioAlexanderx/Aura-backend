@@ -22,8 +22,17 @@ const { loadCertificate } = require('./certStore');
 const { buildQrCodeUrl, buildInfNfeSupl } = require('./qrcode');
 const soap = require('./soapClient');
 const eventos = require('./eventos');
+const contingency = require('./contingency');
 const { getEndpoints } = require('./endpoints');
 const { decryptString } = require('../../utils/secretCrypto');
+
+const { isoBR: soapIsoNow } = require('../nuvemfiscal');
+
+function totalParaQr(nfceData) {
+  if (nfceData.total_value !== undefined) return Number(nfceData.total_value);
+  return (nfceData.items || []).reduce((s, it) =>
+    s + Math.round(Number(it.quantity || 1) * Number(it.price || 0) * 100) / 100 - (Number(it.discount) || 0), 0);
+}
 
 function resolveTpAmb(config) {
   return config.ambiente === 'producao' ? 1 : 2;
@@ -70,6 +79,49 @@ async function emitNfce(company, nfceData, ctx) {
     signedInfNfeXml: built.infNfeXml, infNfeSuplXml, signatureXml,
   });
 
+  // S3.1: contingência offline. PDV nunca trava — detector offline pula a
+  // SEFAZ; falha de transporte na hora cai pra tpEmis=9 na mesma requisição.
+  const allowContingency = ctx.allowContingency === true;
+
+  function emitContingency() {
+    const dhCont = soapIsoNow();
+    const builtC = buildInfNfe(company, nfceData, {
+      tpAmb, tpEmis: 9, dhCont, xJust: contingency.XJUST_DEFAULT,
+    });
+    const sigC = signInfNfe(builtC.infNfeXml, {
+      keyPem: cert.keyPem, certDerBase64: cert.certDerBase64,
+    });
+    const digVal = (sigC.signatureXml.match(/<DigestValue>([^<]+)<\/DigestValue>/) || [])[1];
+    const qrC = buildQrCodeUrl({
+      chave: builtC.chave, tpAmb, cscId: config.csc_id, cscToken,
+      qrCodeBase: endpoints.qrCodeBase,
+      tpEmis: 9, dhEmi: builtC.dhEmi, vNF: totalParaQr(nfceData), digVal,
+    });
+    const nfeXmlC = composeNfe({
+      signedInfNfeXml: builtC.infNfeXml,
+      infNfeSuplXml: buildInfNfeSupl({ qrCodeUrl: qrC, urlConsulta: endpoints.urlConsulta }),
+      signatureXml: sigC.signatureXml,
+    });
+    return {
+      id: null,
+      status: 'contingencia',
+      chave_acesso: builtC.chave,
+      protocolo: null,
+      codigo_status: null,
+      motivo_status: 'Emitida em contingência offline (tpEmis=9) — transmissão pendente',
+      qr_code: qrC,
+      url_consulta: endpoints.urlConsulta,
+      xml_signed: nfeXmlC,
+      tp_emis: 9,
+      contingency_at: dhCont,
+      provider: 'sefaz_sp',
+    };
+  }
+
+  if (allowContingency && contingency.isLikelyOffline(tpAmb)) {
+    return emitContingency();
+  }
+
   // 5. transmite (síncrono). Ambíguo → consulta por chave, nunca renumera.
   let result;
   try {
@@ -77,8 +129,10 @@ async function emitNfce(company, nfceData, ctx) {
       signedNfeXml: nfeXml, idLote: String(nfceData.numero), tpAmb, endpoints,
       pfx, passphrase: password, transport: ctx.transport,
     });
+    contingency.recordSuccess(tpAmb);
   } catch (err) {
     if (err instanceof soap.SefazTransportError && err.ambiguous) {
+      contingency.recordFailure(tpAmb);
       let consulta;
       try {
         consulta = await soap.consultarChave({
@@ -86,14 +140,22 @@ async function emitNfce(company, nfceData, ctx) {
           pfx, passphrase: password, transport: ctx.transport,
         });
       } catch (_) {
-        throw err; // consulta também falhou: mantém o erro ambíguo original
+        // consulta TAMBÉM falhou: SEFAZ realmente fora
+        contingency.recordFailure(tpAmb);
+        if (allowContingency) return emitContingency();
+        throw err; // mantém o erro ambíguo original
       }
+      contingency.recordSuccess(tpAmb); // consulta respondeu
       if (consulta.autorizada) {
         result = {
           cStat: consulta.cStat, xMotivo: consulta.xMotivo,
           protocolo: consulta.protocolo, chNFe: built.chave,
           autorizada: true, rejeitada: false,
         };
+      } else if (allowContingency) {
+        // autorização caída mas consulta de pé (pane parcial): caixa não
+        // espera — contingência. A tentativa não consta (217): sem duplicidade.
+        return emitContingency();
       } else {
         // não consta na base: seguro reprocessar depois com o MESMO número
         err.message += ' (consulta pós-timeout: cStat ' + consulta.cStat + ' — nota não autorizada; reprocessar com o mesmo número)';

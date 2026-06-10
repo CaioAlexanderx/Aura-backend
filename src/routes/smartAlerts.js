@@ -25,6 +25,33 @@ router.get('/', requireAuth, async function(req, res) {
       alerts.push({ type: 'cashflow_tight', severity: 'warning', title: 'Caixa apertado', message: 'A margem do caixa esta abaixo de 20% das despesas. Reserva de seguranca insuficiente.', data: { net: netCash, margin_pct: parseFloat(cashflow.expense_30d) > 0 ? Math.round(netCash / parseFloat(cashflow.expense_30d) * 100) : 0 } });
     }
 
+    // 1b. NFC-e própria (S3.3): certificado A1 vencendo + contingências
+    try {
+      var cert = (await db.query(
+        "SELECT subject_cn, not_after, EXTRACT(DAY FROM (not_after - NOW()))::int AS dias" +
+        " FROM company_certificates WHERE company_id=$1", [cid])).rows[0];
+      if (cert && cert.dias <= 30) {
+        var sev = cert.dias <= 7 ? 'critical' : cert.dias <= 15 ? 'warning' : 'info';
+        alerts.push({ type: 'nfce_cert_expiring', severity: sev, title: 'Certificado A1 vence em ' + cert.dias + ' dia(s)', message: 'O certificado digital da emissao de NFC-e vence em ' + new Date(cert.not_after).toLocaleDateString('pt-BR') + '. Sem ele o caixa para de emitir nota. Renove e reenvie em Configuracoes > Nota Fiscal.', data: { dias: cert.dias, not_after: cert.not_after } });
+      }
+    } catch (_) {}
+    try {
+      var ctg = (await db.query(
+        "SELECT COUNT(*) FILTER (WHERE status='pending')::int AS pendentes," +
+        " COUNT(*) FILTER (WHERE status='rejected')::int AS rejeitadas," +
+        " COUNT(*) FILTER (WHERE status='expired')::int AS expiradas" +
+        " FROM nfce_pending_transmission WHERE company_id=$1", [cid])).rows[0];
+      if (ctg && ctg.rejeitadas > 0) {
+        alerts.push({ type: 'nfce_contingencia_rejeitada', severity: 'critical', title: ctg.rejeitadas + ' nota(s) de contingencia REJEITADA(S) apos a venda', message: 'Vendas feitas em contingencia foram rejeitadas pela SEFAZ na retransmissao. Exigem regularizacao — veja o motivo na pagina de Notas Fiscais e acione seu contador.', data: { rejeitadas: ctg.rejeitadas } });
+      }
+      if (ctg && ctg.expiradas > 0) {
+        alerts.push({ type: 'nfce_contingencia_expirada', severity: 'critical', title: ctg.expiradas + ' contingencia(s) fora do prazo legal', message: 'Notas emitidas em contingencia nao foram transmitidas dentro do prazo. Acione seu contador para regularizacao.', data: { expiradas: ctg.expiradas } });
+      }
+      if (ctg && ctg.pendentes > 0) {
+        alerts.push({ type: 'nfce_contingencia_pendente', severity: 'warning', title: ctg.pendentes + ' nota(s) aguardando retransmissao', message: 'Vendas emitidas em contingencia (SEFAZ instavel) aguardam transmissao automatica. Nenhuma acao necessaria por enquanto.', data: { pendentes: ctg.pendentes } });
+      }
+    } catch (_) {}
+
     // 2. Revenue drop — last 7 days vs previous 7 days
     var weekComp = (await db.query(
       "SELECT" +

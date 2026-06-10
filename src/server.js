@@ -64,6 +64,8 @@ function startServer() {
     initReportScheduler();
     const { initNfceRefreshJob } = require('./jobs/nfceRefreshJob');
     initNfceRefreshJob();
+    const { initNfceContingencyJob } = require('./jobs/nfceContingencyJob');
+    initNfceContingencyJob();
   });
 }
 

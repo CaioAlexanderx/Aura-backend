@@ -164,11 +164,22 @@ function buildDetXml(items, { crt }) {
     const ean = (item.barcode && /^\d{8,14}$/.test(onlyDigits(item.barcode)))
       ? onlyDigits(item.barcode) : 'SEM GTIN';
 
-    const icms = isSimples
-      ? '<ICMS><ICMSSN102>' + tag('orig', '0') + tag('CSOSN', '102') + '</ICMSSN102></ICMS>'
-      : '<ICMS><ICMS00>' + tag('orig', '0') + tag('CST', '00') + tag('modBC', '3')
+    // S3.2: CSOSN por item (taxEngine resolve via products.tax_profile).
+    // Grupos do XSD: 102/103/300/400→ICMSSN102 · 500→ICMSSN500 · 900→ICMSSN900.
+    let icms;
+    if (isSimples) {
+      const csosn = String(item.csosn || '102');
+      const orig = String(item.orig || '0');
+      const group = ['102', '103', '300', '400'].includes(csosn) ? 'ICMSSN102'
+        : csosn === '500' ? 'ICMSSN500'
+        : csosn === '900' ? 'ICMSSN900' : null;
+      if (!group) throw new Error(`xmlBuilder: CSOSN não suportado no item ${i + 1} (${csosn})`);
+      icms = `<ICMS><${group}>` + tag('orig', orig) + tag('CSOSN', csosn) + `</${group}></ICMS>`;
+    } else {
+      icms = '<ICMS><ICMS00>' + tag('orig', '0') + tag('CST', '00') + tag('modBC', '3')
         + tag('vBC', fmt2(total)) + tag('pICMS', '0.00') + tag('vICMS', '0.00')
         + '</ICMS00></ICMS>';
+    }
 
     return `<det nItem="${i + 1}">`
       + '<prod>'
@@ -190,11 +201,25 @@ function buildDetXml(items, { crt }) {
       + '</prod>'
       + '<imposto>'
       + icms
-      + '<PIS><PISNT>' + tag('CST', '07') + '</PISNT></PIS>'
-      + '<COFINS><COFINSNT>' + tag('CST', '07') + '</COFINSNT></COFINS>'
+      + buildPisCofinsXml('PIS', item.pisCst)
+      + buildPisCofinsXml('COFINS', item.cofinsCst)
       + '</imposto>'
       + '</det>';
   }).join('');
+}
+
+/** PIS/COFINS varejo: CST 07 → grupo NT; demais (49/99) → grupo Outr zerado. */
+function buildPisCofinsXml(tributo, cst) {
+  const c = String(cst || '07');
+  const low = tributo === 'PIS' ? 'PIS' : 'COFINS';
+  if (c === '07') {
+    return `<${low}><${low}NT>` + tag('CST', '07') + `</${low}NT></${low}>`;
+  }
+  const aliqTag = tributo === 'PIS' ? 'pPIS' : 'pCOFINS';
+  const valTag = tributo === 'PIS' ? 'vPIS' : 'vCOFINS';
+  return `<${low}><${low}Outr>` + tag('CST', c)
+    + tag('vBC', '0.00') + tag(aliqTag, '0.00') + tag(valTag, '0.00')
+    + `</${low}Outr></${low}>`;
 }
 
 function buildTotalXml(items) {
@@ -341,7 +366,7 @@ function composeNfe({ signedInfNfeXml, infNfeSuplXml, signatureXml }) {
 module.exports = {
   buildInfNfe, composeNfe,
   // exporta blocos p/ teste unitário
-  buildIdeXml, buildEmitXml, buildDestXml, buildDetXml, buildTotalXml,
+  buildIdeXml, buildEmitXml, buildDestXml, buildDetXml, buildTotalXml, buildPisCofinsXml,
   buildPagXml, buildInfAdicXml,
   esc, fmt2, fmtQty, fmtUnit,
   XML_HEADER, NFE_NS, HOMOLOG_DEST_XNOME,
