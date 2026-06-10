@@ -170,7 +170,12 @@ function buildDanfeNfceHtml({ emission, company }) {
   // QR principal: usa o qr_code da Nuvem Fiscal se disponível (URL completa
   // com chave + hash CSC), senão fallback pra chave de acesso.
   const qrText = emission.qr_code || chave || consultaUrl;
-  const isHomologacao = String(protocolo).startsWith('HOMOLOG-');
+  // Homolog: fake do gateway (HOMOLOG-) OU emissão própria em tpAmb=2
+  // (QR aponta pro endpoint de homologação da SEFAZ-SP).
+  const isHomologacao = String(protocolo).startsWith('HOMOLOG-')
+    || /homologacao\./.test(String(emission.qr_code || ''));
+  // S2.3: contingência offline (tpEmis=9) — dizeres + duas vias.
+  const isContingencia = Number(emission.tp_emis) === 9;
 
   // Logo: se company.logo_url, usa <img>; senão fallback pra iniciais (2 letras)
   const logoHtml = company.logo_url
@@ -261,6 +266,8 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '.consumidor{font-size:7.5pt;line-height:1.3}';
   // Aviso homologação
   html += '.homolog-warn{text-align:center;border:2px dashed #dc2626;padding:1.5mm;font-size:7.5pt;font-weight:700;color:#dc2626;margin:1mm 0}';
+  html += '.conting-warn{text-align:center;border:2px solid #000;padding:1.5mm;font-size:7.5pt;font-weight:800;margin:1mm 0}';
+  html += '.via-label{text-align:center;font-size:6.5pt;font-weight:700;letter-spacing:0.5pt;text-transform:uppercase;margin-bottom:1mm}';
   // Marca Aura discreta (só texto, sem QR)
   html += '.aura-mark{text-align:center;margin-top:2.5mm;padding-top:1.5mm;border-top:1px dotted #888;font-size:5.5pt;color:#666;font-style:italic;letter-spacing:0.3pt}';
   html += '</style></head><body>';
@@ -271,98 +278,108 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '<button onclick="window.print()">Imprimir</button>';
   html += '</div>';
 
-  // ========== PÁGINA ==========
-  html += '<div class="page">';
+  // ========== PÁGINA (1 ou 2 vias) ==========
+  let page = '';
 
   // Aviso homologação (se aplicável)
   if (isHomologacao) {
-    html += '<div class="homolog-warn">EMITIDA EM AMBIENTE DE HOMOLOGAÇÃO<br>SEM VALOR FISCAL</div>';
+    page += '<div class="homolog-warn">EMITIDA EM AMBIENTE DE HOMOLOGAÇÃO<br>SEM VALOR FISCAL</div>';
   }
 
   // ===== Header: logo à esquerda + dados empresa =====
-  html += '<div class="header">';
-  html += logoHtml;
-  html += '<div class="empresa-info">';
-  html += `<div class="nome">${escapeHtml(empresaNome)}</div>`;
-  html += '<div class="info">';
-  html += `CNPJ ${cnpj}`;
-  if (ie) html += `<br>IE ${escapeHtml(ie)}`;
-  if (enderecoLinha1) html += `<br>${escapeHtml(enderecoLinha1)}`;
-  if (enderecoLinha2) html += ` — ${escapeHtml(enderecoLinha2)}`;
-  if (enderecoLinha3 || cep) html += `<br>${escapeHtml(enderecoLinha3)}${cep ? ' · ' + escapeHtml(cep) : ''}`;
-  html += '</div>';
-  html += '</div>';
-  html += '</div>';
+  page += '<div class="header">';
+  page += logoHtml;
+  page += '<div class="empresa-info">';
+  page += `<div class="nome">${escapeHtml(empresaNome)}</div>`;
+  page += '<div class="info">';
+  page += `CNPJ ${cnpj}`;
+  if (ie) page += `<br>IE ${escapeHtml(ie)}`;
+  if (enderecoLinha1) page += `<br>${escapeHtml(enderecoLinha1)}`;
+  if (enderecoLinha2) page += ` — ${escapeHtml(enderecoLinha2)}`;
+  if (enderecoLinha3 || cep) page += `<br>${escapeHtml(enderecoLinha3)}${cep ? ' · ' + escapeHtml(cep) : ''}`;
+  page += '</div>';
+  page += '</div>';
+  page += '</div>';
 
-  html += '<div class="divider"></div>';
+  page += '<div class="divider"></div>';
 
   // Título DANFE
-  html += '<div class="titulo">DANFE NFC-e</div>';
-  html += '<div class="subtitulo">Documento Auxiliar da NF-e ao Consumidor<br>Não permite aproveitamento de crédito de ICMS</div>';
+  page += '<div class="titulo">DANFE NFC-e</div>';
+  page += '<div class="subtitulo">Documento Auxiliar da NF-e ao Consumidor<br>Não permite aproveitamento de crédito de ICMS</div>';
 
-  html += '<div class="divider"></div>';
+  page += '<div class="divider"></div>';
 
   // Itens
-  html += '<div class="section-label">Itens</div>';
-  html += itemsHtml;
+  page += '<div class="section-label">Itens</div>';
+  page += itemsHtml;
 
-  html += '<div class="divider"></div>';
+  page += '<div class="divider"></div>';
 
   // Totais
-  html += `<div class="row"><span>Qtd. itens</span><span>${totalQty}</span></div>`;
+  page += `<div class="row"><span>Qtd. itens</span><span>${totalQty}</span></div>`;
   if (totalDiscount > 0) {
-    html += `<div class="row"><span>Subtotal</span><span>R$ ${formatBRL(totalProducts)}</span></div>`;
-    html += `<div class="row"><span>Desconto</span><span>− R$ ${formatBRL(totalDiscount)}</span></div>`;
+    page += `<div class="row"><span>Subtotal</span><span>R$ ${formatBRL(totalProducts)}</span></div>`;
+    page += `<div class="row"><span>Desconto</span><span>− R$ ${formatBRL(totalDiscount)}</span></div>`;
   }
-  html += `<div class="row total-row"><span>VALOR TOTAL</span><span>R$ ${formatBRL(totalNfce)}</span></div>`;
+  page += `<div class="row total-row"><span>VALOR TOTAL</span><span>R$ ${formatBRL(totalNfce)}</span></div>`;
 
-  html += '<div class="divider"></div>';
+  page += '<div class="divider"></div>';
 
   // Pagamentos
-  html += '<div class="section-label">Forma de Pagamento</div>';
-  html += paymentsHtml;
+  page += '<div class="section-label">Forma de Pagamento</div>';
+  page += paymentsHtml;
   // Tributos aproximados (Lei 12.741) — placeholder neutro
-  html += '<div class="row small mt1"><span>Trib. aprox. (Lei 12.741)</span><span>conforme NCM</span></div>';
+  page += '<div class="row small mt1"><span>Trib. aprox. (Lei 12.741)</span><span>conforme NCM</span></div>';
 
-  html += '<div class="divider"></div>';
+  page += '<div class="divider"></div>';
 
   // Consumidor
-  html += '<div class="section-label">Consumidor</div>';
+  page += '<div class="section-label">Consumidor</div>';
   if (cpfNota || nomeCliente) {
-    html += '<div class="consumidor">';
-    if (cpfNota) html += `CPF ${escapeHtml(cpfNota)}`;
-    if (cpfNota && nomeCliente) html += '<br>';
-    if (nomeCliente) html += `${escapeHtml(nomeCliente)}`;
-    html += '</div>';
+    page += '<div class="consumidor">';
+    if (cpfNota) page += `CPF ${escapeHtml(cpfNota)}`;
+    if (cpfNota && nomeCliente) page += '<br>';
+    if (nomeCliente) page += `${escapeHtml(nomeCliente)}`;
+    page += '</div>';
   } else {
-    html += '<div class="consumidor">Consumidor não identificado</div>';
+    page += '<div class="consumidor">Consumidor não identificado</div>';
   }
 
-  html += '<div class="divider"></div>';
+  page += '<div class="divider"></div>';
 
   // Info NFC-e
-  html += '<div class="section-label">Info NFC-e</div>';
-  html += `<div class="small">NFC-e nº <b>${escapeHtml(String(numero))}</b> · Série ${escapeHtml(String(serie))}<br>`;
-  html += `Emitida em ${escapeHtml(dataEmissao)}</div>`;
-  if (protocolo && !isHomologacao) {
-    html += `<div class="protocol mt1">Protocolo de Autorização<br>${escapeHtml(protocolo)}</div>`;
+  page += '<div class="section-label">Info NFC-e</div>';
+  page += `<div class="small">NFC-e nº <b>${escapeHtml(String(numero))}</b> · Série ${escapeHtml(String(serie))}<br>`;
+  page += `Emitida em ${escapeHtml(dataEmissao)}</div>`;
+  if (protocolo && !String(protocolo).startsWith('HOMOLOG-')) {
+    page += `<div class="protocol mt1">Protocolo de Autorização<br>${escapeHtml(protocolo)}</div>`;
   }
 
-  html += '<div class="divider"></div>';
+  page += '<div class="divider"></div>';
 
   // Chave acesso
-  html += '<div class="section-label center">Chave de Acesso</div>';
-  html += `<div class="chave">${escapeHtml(chaveFmt)}</div>`;
+  page += '<div class="section-label center">Chave de Acesso</div>';
+  page += `<div class="chave">${escapeHtml(chaveFmt)}</div>`;
 
   // QR único (SEFAZ) 28mm
-  html += `<div class="qr-wrap"><img src="${escapeHtml(qrImageUrl(qrText, 200))}" alt="QR NFC-e"></div>`;
-  html += '<div class="consulta tiny">Consulte pela chave em<br>';
-  html += `<b>${escapeHtml(consultaUrl.replace(/^https?:\/\//, ''))}</b></div>`;
+  page += `<div class="qr-wrap"><img src="${escapeHtml(qrImageUrl(qrText, 200))}" alt="QR NFC-e"></div>`;
+  page += '<div class="consulta tiny">Consulte pela chave em<br>';
+  page += `<b>${escapeHtml(consultaUrl.replace(/^https?:\/\//, ''))}</b></div>`;
 
   // ===== Marca Aura discreta (só texto) =====
-  html += '<div class="aura-mark">gerado por Aura · getaura.com.br</div>';
+  page += '<div class="aura-mark">gerado por Aura · getaura.com.br</div>';
 
-  html += '</div>'; // /page
+
+  const contingBanner = '<div class="conting-warn">EMITIDA EM CONTINGÊNCIA'
+    + (protocolo ? '' : '<br>Pendente de autorização da SEFAZ')
+    + '</div>';
+  if (isContingencia) {
+    // Contingência offline: DUAS vias obrigatórias (consumidor + estabelecimento)
+    html += '<div class="page">' + contingBanner + '<div class="via-label">Via do Consumidor</div>' + page + '</div>';
+    html += '<div class="page">' + contingBanner + '<div class="via-label">Via do Estabelecimento</div>' + page + '</div>';
+  } else {
+    html += '<div class="page"><div class="via-label">Via do Consumidor</div>' + page + '</div>';
+  }
 
   // Script: dispara print() depois que TODAS as imagens carregaram.
   html += '<script>';
