@@ -62,6 +62,8 @@ function startServer() {
     // Iniciar scheduler de relatórios
     const { initReportScheduler } = require('./jobs/reportScheduler');
     initReportScheduler();
+    const { initNfceRefreshJob } = require('./jobs/nfceRefreshJob');
+    initNfceRefreshJob();
   });
 }
 

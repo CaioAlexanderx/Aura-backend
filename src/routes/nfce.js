@@ -580,6 +580,61 @@ router.post('/:nfceId/cancel', requireAuth, requireRole('client','analyst','admi
   } catch (err) { res.status(500).json({ error: 'Erro ao cancelar nota' }); }
 });
 
+// ── S2.4: refresh manual (consulta situação na origem) ──
+router.post('/:nfceId/refresh', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query('SELECT * FROM nfce_emissions WHERE id=$1 AND company_id=$2', [req.params.nfceId, req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Nota não encontrada' });
+    let emission = rows[0];
+
+    if (emission.xml_signed) {
+      // Emissão própria: consulta por chave na SEFAZ-SP
+      const { rows: cfgs } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
+      if (!cfgs.length) return res.status(400).json({ error: 'Config NFC-e não encontrada' });
+      try {
+        const r = await sefazSp.queryNfce({
+          chave: emission.chave_acesso, config: cfgs[0], db, companyId: req.params.id,
+        });
+        if (r.status === 'autorizado' && emission.status !== 'autorizada') {
+          await db.query(
+            `UPDATE nfce_emissions SET status='autorizada', protocolo=COALESCE($1, protocolo),
+                authorized_at=COALESCE(authorized_at, NOW()), transmitted_at=COALESCE(transmitted_at, NOW()),
+                refresh_attempts=refresh_attempts+1, last_refresh_at=NOW() WHERE id=$2`,
+            [r.protocolo, emission.id]
+          );
+        } else {
+          await db.query(`UPDATE nfce_emissions SET refresh_attempts=refresh_attempts+1, last_refresh_at=NOW() WHERE id=$1`, [emission.id]);
+        }
+        const refreshed = await db.query('SELECT * FROM nfce_emissions WHERE id=$1', [emission.id]);
+        return res.json({ emission: refreshed.rows[0], consulta: { cStat: r.codigo_status, motivo: r.motivo_status } });
+      } catch (apiErr) {
+        return res.status(502).json({ error: 'SEFAZ-SP indisponível pra consulta: ' + apiErr.message, emission });
+      }
+    }
+
+    // Gateway: mesma lógica best-effort do GET /:nfceId
+    if (emission.status === 'processando' && emission.nuvemfiscal_id) {
+      try {
+        const queryFn = emission.tipo==='nfe' ? nuvemfiscal.queryNfe : nuvemfiscal.queryNfce;
+        const provResult = await queryFn(emission.nuvemfiscal_id);
+        const prov = extractProvFields(provResult);
+        if (prov.status==='autorizado'||prov.status==='autorizada') {
+          await db.query(
+            `UPDATE nfce_emissions SET status='autorizada',
+                chave_acesso=COALESCE($1,chave_acesso), protocolo=COALESCE($2,protocolo),
+                xml_url=COALESCE($3,xml_url), pdf_url=COALESCE($4,pdf_url),
+                qr_code=COALESCE($5,qr_code), authorized_at=COALESCE(authorized_at, NOW()) WHERE id=$6`,
+            [prov.chaveAcesso, prov.protocolo, prov.xmlUrl, prov.pdfUrl, prov.qrCode, emission.id]
+          );
+          const refreshed = await db.query('SELECT * FROM nfce_emissions WHERE id=$1', [emission.id]);
+          emission = refreshed.rows[0];
+        }
+      } catch (e) { /* best-effort */ }
+    }
+    res.json({ emission });
+  } catch (err) { res.status(500).json({ error: 'Erro ao atualizar nota' }); }
+});
+
 // ── S2.1: inutilização de faixa (emissão própria) ──
 // Pros números reservados e abandonados (gap após rejeição não retransmitida).
 router.post('/inutilizar', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
