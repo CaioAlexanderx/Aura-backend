@@ -26,6 +26,7 @@ const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { logAuditAction }           = require('../middleware/auditLog');
 const nuvemfiscal                  = require('../services/nuvemfiscal');
+const sefazSp                      = require('../services/sefazSp');
 const { buildDanfeNfceHtml }       = require('../utils/buildDanfeNfceHtml');
 
 const INSTRUCOES_NOTA = {
@@ -258,7 +259,10 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     let finalStatus = 'processando';
     let prov = {};
 
-    if (config.ambiente === 'homologacao' && process.env.NUVEM_FISCAL_FORCE !== 'true') {
+    // S1.6: emissão PRÓPRIA (SEFAZ-SP) — só NFC-e (65); NF-e (55) segue no gateway.
+    const useSefazSp = config.provider === 'sefaz_sp' && tipo === 'nfce';
+
+    if (config.ambiente === 'homologacao' && !useSefazSp && process.env.NUVEM_FISCAL_FORCE !== 'true') {
       prov.protocolo = 'HOMOLOG-' + String(numeroNF).padStart(6,'0');
       finalStatus = 'autorizada';
       await db.query(`UPDATE nfce_emissions SET status='autorizada', protocolo=$1, authorized_at=NOW() WHERE id=$2`, [prov.protocolo, emission.id]);
@@ -302,15 +306,21 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
             }))
           : undefined;
 
-        const emitFn = tipo==='nfe' ? nuvemfiscal.emitNfe : nuvemfiscal.emitNfce;
-        const provResult = await emitFn(company, {
+        const emitPayload = {
           items: nfItems, total_value: totalNfce, payments: nfPayments,
           payment_method: paymentCode(payment_method), payment_change,
           recipient_cpf: customer_cpf, recipient_cnpj, recipient_name: customer_name,
           recipient_email: customer_email,
           serie: serieNF, numero: numeroNF, observacoes,
           reference: `${tipo}-${emission.id}`,
-        });
+        };
+        let provResult;
+        if (useSefazSp) {
+          provResult = await sefazSp.emitNfce(company, emitPayload, { db, config });
+        } else {
+          const emitFn = tipo==='nfe' ? nuvemfiscal.emitNfe : nuvemfiscal.emitNfce;
+          provResult = await emitFn(company, emitPayload);
+        }
 
         console.log('[nfce] provResult (POST):', JSON.stringify(provResult, null, 2));
         prov = extractProvFields(provResult);
@@ -351,10 +361,23 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
            authorizedAt, errorMessage]
         );
 
+        // S1.6: extras da emissão própria (migration 173)
+        if (useSefazSp) {
+          await db.query(
+            `UPDATE nfce_emissions SET xml_signed=$1, tp_emis=$2,
+                rejection_code=$3, transmitted_at=CASE WHEN $4 THEN NOW() ELSE transmitted_at END
+              WHERE id=$5`,
+            [provResult.xml_signed || null, provResult.tp_emis || 1,
+             finalStatus==='rejeitada' ? (prov.cStat || null) : null,
+             finalStatus==='autorizada', emission.id]
+          );
+        }
+
       } catch (apiErr) {
-        console.error('[nfce] Nuvem Fiscal emit error:', apiErr.message, apiErr.payload||'');
+        const providerLabel = useSefazSp ? 'SEFAZ-SP' : 'Nuvem Fiscal';
+        console.error(`[nfce] ${providerLabel} emit error:`, apiErr.message, apiErr.payload||'');
         await db.query(`UPDATE nfce_emissions SET status='erro', error_message=$1 WHERE id=$2`, [apiErr.message, emission.id]);
-        return res.status(502).json({ error: 'Erro ao transmitir nota para Nuvem Fiscal: '+apiErr.message, payload: apiErr.payload||null, nfce_id: emission.id });
+        return res.status(502).json({ error: `Erro ao transmitir nota para ${providerLabel}: `+apiErr.message, payload: apiErr.payload||null, nfce_id: emission.id });
       }
     }
 
@@ -477,6 +500,15 @@ router.post('/:nfceId/cancel', requireAuth, requireRole('client','analyst','admi
   const { reason } = req.body;
   if (!reason || reason.length < 15) return res.status(400).json({ error: 'Motivo do cancelamento exige ao menos 15 caracteres (regra SEFAZ)' });
   try {
+    // S1.6: nota emitida pela emissão própria não pode ser "cancelada" só
+    // localmente — o evento NFeRecepcaoEvento4 chega na S2.1. Bloqueia.
+    const { rows: own } = await db.query(
+      `SELECT 1 FROM nfce_emissions WHERE id=$1 AND company_id=$2 AND xml_signed IS NOT NULL`,
+      [req.params.nfceId, req.params.id]
+    );
+    if (own.length) {
+      return res.status(501).json({ error: 'Cancelamento de nota da emissão própria (SEFAZ-SP) ainda não disponível — chega na próxima atualização. A nota permanece autorizada.' });
+    }
     const { rows } = await db.query(
       `UPDATE nfce_emissions SET status='cancelada', cancel_reason=$1, cancelled_at=NOW()
         WHERE id=$2 AND company_id=$3 AND status='autorizada' RETURNING *`,
