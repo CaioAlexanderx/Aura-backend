@@ -21,6 +21,7 @@ const { openPfx, assertValidity } = require('./pfx');
 const { loadCertificate } = require('./certStore');
 const { buildQrCodeUrl, buildInfNfeSupl } = require('./qrcode');
 const soap = require('./soapClient');
+const eventos = require('./eventos');
 const { getEndpoints } = require('./endpoints');
 const { decryptString } = require('../../utils/secretCrypto');
 
@@ -145,6 +146,40 @@ async function statusServico({ config, db, companyId, transport }) {
   return soap.statusServico({ tpAmb, endpoints, pfx, passphrase: password, transport });
 }
 
-// cancelNfce/inutilizar chegam na S2.1 (NFeRecepcaoEvento4/NFeInutilizacao4)
+/**
+ * S2.1 — Cancelamento via evento 110111 (NFeRecepcaoEvento4).
+ * Sucesso: cStat 135/136; 573 (duplicidade) = idempotente.
+ */
+async function cancelNfce({ db, config, companyId, chave, protocolo, justificativa, transport }) {
+  const tpAmb = resolveTpAmb(config);
+  const endpoints = getEndpoints(config.uf || 'SP', tpAmb);
+  const { pfx, password } = await loadCertificate(db, companyId);
+  const cert = openPfx(pfx, password);
+  const cnpj = String(chave).slice(6, 20); // CNPJ do emitente embutido na chave
+  return eventos.cancelarNfce({
+    chave, cnpj, tpAmb, protocolo, justificativa, endpoints,
+    cert: { keyPem: cert.keyPem, certDerBase64: cert.certDerBase64 },
+    pfx, passphrase: password, transport,
+  });
+}
 
-module.exports = { emitNfce, queryNfce, statusServico, resolveTpAmb, resolveCscToken };
+/**
+ * S2.1 — Inutilização de faixa (NFeInutilizacao4). Sucesso: cStat 102.
+ * Usar pros números reservados e abandonados (gap de numeração).
+ */
+async function inutilizarFaixa({ db, config, companyId, cnpj, serie, nIni, nFin, justificativa, ano2, transport }) {
+  const tpAmb = resolveTpAmb(config);
+  const endpoints = getEndpoints(config.uf || 'SP', tpAmb);
+  const { pfx, password } = await loadCertificate(db, companyId);
+  const cert = openPfx(pfx, password);
+  return eventos.inutilizar({
+    tpAmb, ano2, cnpj, serie, nIni, nFin, justificativa, endpoints,
+    cert: { keyPem: cert.keyPem, certDerBase64: cert.certDerBase64 },
+    pfx, passphrase: password, transport,
+  });
+}
+
+module.exports = {
+  emitNfce, queryNfce, statusServico, cancelNfce, inutilizarFaixa,
+  resolveTpAmb, resolveCscToken,
+};

@@ -500,14 +500,46 @@ router.post('/:nfceId/cancel', requireAuth, requireRole('client','analyst','admi
   const { reason } = req.body;
   if (!reason || reason.length < 15) return res.status(400).json({ error: 'Motivo do cancelamento exige ao menos 15 caracteres (regra SEFAZ)' });
   try {
-    // S1.6: nota emitida pela emissão própria não pode ser "cancelada" só
-    // localmente — o evento NFeRecepcaoEvento4 chega na S2.1. Bloqueia.
-    const { rows: own } = await db.query(
-      `SELECT 1 FROM nfce_emissions WHERE id=$1 AND company_id=$2 AND xml_signed IS NOT NULL`,
+    // S2.1: nota da emissão própria cancela via evento 110111 na SEFAZ-SP
+    // ANTES de marcar local — nada de cancelamento só-local.
+    const { rows: ownRows } = await db.query(
+      `SELECT * FROM nfce_emissions WHERE id=$1 AND company_id=$2 AND xml_signed IS NOT NULL`,
       [req.params.nfceId, req.params.id]
     );
-    if (own.length) {
-      return res.status(501).json({ error: 'Cancelamento de nota da emissão própria (SEFAZ-SP) ainda não disponível — chega na próxima atualização. A nota permanece autorizada.' });
+    if (ownRows.length) {
+      const own = ownRows[0];
+      if (own.status === 'cancelada') return res.json({ nfce: own, idempotent: true });
+      if (own.status !== 'autorizada') {
+        return res.status(400).json({ error: `Nota não pode ser cancelada (status: ${own.status})` });
+      }
+      // Prazo legal de cancelamento da NFC-e em SP (default 30min —
+      // ⚠️ confirmar no MOC SP vigente; ajustável via env).
+      const deadlineMin = parseInt(process.env.NFCE_CANCEL_DEADLINE_MIN || '30', 10);
+      const ageMin = own.authorized_at ? (Date.now() - new Date(own.authorized_at).getTime()) / 60000 : null;
+      if (ageMin !== null && ageMin > deadlineMin) {
+        return res.status(400).json({ error: `Prazo de cancelamento expirado (${deadlineMin} min após a autorização, regra SEFAZ-SP). Fale com seu contador sobre regularização.` });
+      }
+      const { rows: cfgRows } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
+      if (!cfgRows.length) return res.status(400).json({ error: 'Config NFC-e não encontrada' });
+      try {
+        const ev = await sefazSp.cancelNfce({
+          db, config: cfgRows[0], companyId: req.params.id,
+          chave: own.chave_acesso, protocolo: own.protocolo, justificativa: reason,
+        });
+        if (!ev.sucesso) {
+          return res.status(422).json({ error: `SEFAZ-SP recusou o cancelamento: [${ev.cStat}] ${ev.xMotivo || ''}`, cStat: ev.cStat });
+        }
+        const { rows: upd } = await db.query(
+          `UPDATE nfce_emissions SET status='cancelada', cancel_reason=$1, cancelled_at=NOW() WHERE id=$2 RETURNING *`,
+          [reason, own.id]
+        );
+        logAuditAction(req.user.id, req.params.id, 'nfce_cancelled',
+          `NFC-e no ${own.numero} cancelada na SEFAZ-SP (evento ${ev.protocoloEvento || ev.cStat}): ${reason}`);
+        return res.json({ nfce: upd[0], evento: { cStat: ev.cStat, protocolo: ev.protocoloEvento, ja_cancelada: ev.jaCancelada || false } });
+      } catch (apiErr) {
+        console.error('[nfce] SEFAZ-SP cancel error:', apiErr.message);
+        return res.status(502).json({ error: 'Erro ao cancelar na SEFAZ-SP: ' + apiErr.message });
+      }
     }
     const { rows } = await db.query(
       `UPDATE nfce_emissions SET status='cancelada', cancel_reason=$1, cancelled_at=NOW()
@@ -529,6 +561,42 @@ router.post('/:nfceId/cancel', requireAuth, requireRole('client','analyst','admi
     logAuditAction(req.user.id, req.params.id, 'nfce_cancelled', `${(emission.tipo||'nfce').toUpperCase()} no ${emission.numero} cancelada: ${reason}`);
     res.json({ nfce: emission });
   } catch (err) { res.status(500).json({ error: 'Erro ao cancelar nota' }); }
+});
+
+// ── S2.1: inutilização de faixa (emissão própria) ──
+// Pros números reservados e abandonados (gap após rejeição não retransmitida).
+router.post('/inutilizar', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
+  const { serie, numero_inicial, numero_final, justificativa, ano } = req.body;
+  if (!justificativa || String(justificativa).trim().length < 15) {
+    return res.status(400).json({ error: 'Justificativa exige ao menos 15 caracteres (regra SEFAZ)' });
+  }
+  try {
+    const { rows: configs } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
+    if (!configs.length) return res.status(400).json({ error: 'Config NFC-e não encontrada' });
+    const config = configs[0];
+    if (config.provider !== 'sefaz_sp') {
+      return res.status(400).json({ error: 'Inutilização direta disponível apenas na emissão própria (provider sefaz_sp).' });
+    }
+    const { rows: companies } = await db.query('SELECT cnpj FROM companies WHERE id=$1', [req.params.id]);
+    if (!companies.length || !companies[0].cnpj) return res.status(400).json({ error: 'CNPJ da empresa não cadastrado' });
+
+    const r = await sefazSp.inutilizarFaixa({
+      db, config, companyId: req.params.id,
+      cnpj: companies[0].cnpj,
+      serie: serie || config.serie_nfce,
+      nIni: numero_inicial, nFin: numero_final,
+      justificativa, ano2: ano ? String(ano).slice(-2) : undefined,
+    });
+    if (!r.sucesso) {
+      return res.status(422).json({ error: `SEFAZ-SP recusou a inutilização: [${r.cStat}] ${r.xMotivo || ''}`, cStat: r.cStat });
+    }
+    logAuditAction(req.user.id, req.params.id, 'nfce_inutilizada',
+      `Faixa ${numero_inicial}-${numero_final} série ${serie || config.serie_nfce} inutilizada (protocolo ${r.protocolo || r.cStat})`);
+    res.json({ inutilizacao: { cStat: r.cStat, protocolo: r.protocolo, faixa: [numero_inicial, numero_final] } });
+  } catch (err) {
+    console.error('[nfce] inutilizar error:', err.message);
+    res.status(502).json({ error: 'Erro ao inutilizar faixa: ' + err.message });
+  }
 });
 
 module.exports = router;
