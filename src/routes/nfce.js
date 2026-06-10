@@ -27,6 +27,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { logAuditAction }           = require('../middleware/auditLog');
 const nuvemfiscal                  = require('../services/nuvemfiscal');
 const sefazSp                      = require('../services/sefazSp');
+const rejectionCatalog             = require('../services/sefazSp/rejectionCatalog');
 const { buildDanfeNfceHtml }       = require('../utils/buildDanfeNfceHtml');
 
 const INSTRUCOES_NOTA = {
@@ -361,6 +362,11 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
            authorizedAt, errorMessage]
         );
 
+        // S2.2: rejection_code é provider-agnóstico (catálogo amigável)
+        if (finalStatus === 'rejeitada' && prov.cStat) {
+          await db.query(`UPDATE nfce_emissions SET rejection_code=$1 WHERE id=$2`, [String(prov.cStat).slice(0,8), emission.id]);
+        }
+
         // S1.6: extras da emissão própria (migration 173)
         if (useSefazSp) {
           await db.query(
@@ -384,10 +390,14 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     const { rows: final } = await db.query('SELECT * FROM nfce_emissions WHERE id=$1', [emission.id]);
     logAuditAction(req.user.id, req.params.id, 'nfce_emitted', `${tipo.toUpperCase()} no ${numeroNF} emitida -- R$ ${totalNfce}`);
 
+    const amigavel = finalStatus === 'rejeitada'
+      ? rejectionCatalog.lookup(prov.cStat, prov.motivo)
+      : null;
     res.status(201).json({ nfce: final[0], tipo,
       pdf_url: prov.pdfUrl||final[0].pdf_url, xml_url: prov.xmlUrl||final[0].xml_url,
       qr_code: prov.qrCode||final[0].qr_code, url_consulta: prov.urlConsulta||final[0].url_consulta,
-      motivo: prov.motivo||null, cStat: prov.cStat||null });
+      motivo: prov.motivo||null, cStat: prov.cStat||null,
+      rejeicao_amigavel: amigavel });
 
   } catch (err) {
     console.error('nfce emit error:', err);
@@ -404,14 +414,21 @@ router.get('/', requireAuth, async (req, res) => {
     if (tipo)   { params.push(tipo);   where += ` AND tipo=$${params.length}`; }
     if (start)  { params.push(start);  where += ` AND created_at>=$${params.length}`; }
     if (end)    { params.push(end);    where += ` AND created_at<=$${params.length}`; }
-    const { rows } = await db.query(
+    const { rows: rawRows } = await db.query(
       `SELECT id, numero, serie, tipo, chave_acesso, protocolo, status,
               customer_cpf, customer_name, total_nfce, payment_method,
               xml_url, pdf_url, qr_code, url_consulta,
-              authorized_at, cancelled_at, created_at, error_message
+              authorized_at, cancelled_at, created_at, error_message,
+              rejection_code, tp_emis
          FROM nfce_emissions ${where} ORDER BY numero DESC LIMIT 100`,
       params
     );
+    // S2.2: motivo amigável (catálogo) pra rejeitadas/erro
+    const rows = rawRows.map(r => {
+      if (r.status !== 'rejeitada' && r.status !== 'erro') return r;
+      const code = r.rejection_code || rejectionCatalog.cStatFromErrorMessage(r.error_message);
+      return { ...r, rejeicao_amigavel: rejectionCatalog.lookup(code, r.error_message) };
+    });
     const { rows: stats } = await db.query(
       `SELECT COUNT(*)::int AS total,
               COUNT(*) FILTER (WHERE status='autorizada')::int AS authorized,
