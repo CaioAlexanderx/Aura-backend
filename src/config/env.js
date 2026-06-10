@@ -36,6 +36,16 @@ function validateRuntimeEnv() {
     );
   }
 
+  // NFC-e emissao propria (SEFAZ-SP): chave-mestra AES-256-GCM dos segredos
+  // fiscais (certificado A1, senha do .pfx, CSC token). Opcional enquanto
+  // nenhuma empresa usa provider 'sefaz_sp', mas se definida tem que ser
+  // valida (64 hex = 32 bytes). Falha no boot > falha silenciosa no caixa.
+  // Gerar: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  const certMasterKey = getOptionalEnv('CERT_MASTER_KEY', '');
+  if (certMasterKey && !/^[0-9a-fA-F]{64}$/.test(certMasterKey)) {
+    throw new Error('CERT_MASTER_KEY invalida: esperado 64 caracteres hex (32 bytes).');
+  }
+
   return {
     NODE_ENV:        nodeEnv,
     PORT:            getOptionalEnv('PORT', '3000'),
@@ -60,6 +70,7 @@ function validateRuntimeEnv() {
     // Token compartilhado com o Cloudflare Worker do site (getaura.com.br)
     // para o endpoint publico POST /api/v1/public/leads. Definir no Railway.
     SITE_LEADS_TOKEN: getOptionalEnv('SITE_LEADS_TOKEN', ''),
+    CERT_MASTER_KEY:  certMasterKey,
   };
 }
 
