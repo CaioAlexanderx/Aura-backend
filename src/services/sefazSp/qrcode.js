@@ -55,7 +55,14 @@ function buildQrCodeUrl(p) {
     const dia = String(p.dhEmi).slice(8, 10);             // DD do dhEmi
     if (!/^\d{2}$/.test(dia)) throw new Error('qrcode: dhEmi inválido');
     const vNF = Number(p.vNF).toFixed(2);
-    const digValHex = Buffer.from(String(p.digVal), 'base64').toString('hex').toUpperCase();
+    // digVal = DigestValue (base64, 28 chars p/ SHA-1) convertido pra HEX
+    // DA PRÓPRIA STRING base64 (XSD PL_010c: [A-Fa-f0-9]{56}) — não dos
+    // bytes decodificados.
+    const digValStr = String(p.digVal).trim();
+    if (digValStr.length !== 28) {
+      throw new Error('qrcode: digVal deve ser o DigestValue base64 da assinatura (28 chars)');
+    }
+    const digValHex = Buffer.from(digValStr, 'ascii').toString('hex').toUpperCase();
     semHash = [p.chave, QR_VERSION, tpAmb, dia, vNF, digValHex, idCsc].join('|');
   } else {
     semHash = [p.chave, QR_VERSION, tpAmb, idCsc].join('|');

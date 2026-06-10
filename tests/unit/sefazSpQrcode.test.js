@@ -44,11 +44,12 @@ describe('sefazSp/qrcode — QR v2 emissão normal', () => {
 });
 
 describe('sefazSp/qrcode — QR v2 contingência offline', () => {
+  const DIGVAL = crypto.createHash('sha1').update('xml-assinado').digest('base64'); // 28 chars
   const CONT = {
     ...BASE, tpEmis: 9,
     dhEmi: '2026-06-10T10:00:00-03:00',
     vNF: 549.96,
-    digVal: Buffer.from('digest-fake').toString('base64'),
+    digVal: DIGVAL,
   };
 
   test('formato p = chave|2|tpAmb|dia|vNF|digValHex|idCSC|hash', () => {
@@ -57,7 +58,9 @@ describe('sefazSp/qrcode — QR v2 contingência offline', () => {
     expect(parts.length).toBe(8);
     expect(parts[3]).toBe('10');                      // dia do dhEmi
     expect(parts[4]).toBe('549.96');                  // vNF 2 casas
-    expect(parts[5]).toBe(Buffer.from('digest-fake').toString('hex').toUpperCase());
+    // hex da STRING base64 (56 chars), conforme XSD PL_010c
+    expect(parts[5]).toBe(Buffer.from(DIGVAL, 'ascii').toString('hex').toUpperCase());
+    expect(parts[5]).toMatch(/^[0-9A-F]{56}$/);
     expect(parts[6]).toBe('1');
     expect(parts[7]).toMatch(/^[0-9A-F]{40}$/);
   });
