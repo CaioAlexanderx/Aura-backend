@@ -5,6 +5,9 @@
 //   NF-e (modelo 55) de devolucao emitida pra troca, via Nuvem Fiscal.
 // 07/06/2026: GET /print/credit/:cid/carne — carnê/extrato imprimível
 //   do crediário do cliente (agrupado por carnê + Pix estático manual).
+// 11/06/2026: GET /print/credit/receipts/:transactionId — recibo de
+//   pagamento de crediário (B5): empresa, cliente, encargos, saldo,
+//   crédito a favor + texto WhatsApp.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -421,7 +424,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       for (const key of orderedKeys) {
         const instList = groups[key] || [];
         const acc = key === '__none__' ? null : accountMap[key];
-        const accName = acc ? acc.name : 'Sem carnê';
+        const accName = acc ? acc.name : 'Sem carne';
         const accStatus = acc ? acc.status : null;
         const accBalance = instList
           .filter(i => i.status !== 'paid')
@@ -459,7 +462,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
             <td style="padding:3px 4px">${inst.installment_number}/${inst.total_installments}</td>
             <td style="padding:3px 4px">${fmtDate(inst.due_date)}</td>
             <td style="padding:3px 4px;text-align:right">R$${fmt(inst.amount_due)}</td>
-            <td style="padding:3px 4px;text-align:right">${inst.status !== 'paid' ? `R$${fmt(remaining)}` : '—'}</td>
+            <td style="padding:3px 4px;text-align:right">${inst.status !== 'paid' ? 'R$' + fmt(remaining) : '—'}</td>
             <td style="padding:3px 4px;text-align:center">${statusLabel(inst.status)}</td>
           </tr>${pixRow}`;
         }).join('');
@@ -553,9 +556,9 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 <body>
   <div class="center" style="margin-bottom:8px">
     <div class="company-name">${company.display_name}</div>
-    ${company.cnpj ? `<div>CNPJ: ${company.cnpj}</div>` : ''}
-    ${company.phone ? `<div>Tel: ${company.phone}</div>` : ''}
-    ${company.address_city ? `<div>${company.address_city}${company.address_state ? ' - ' + company.address_state : ''}</div>` : ''}
+    ${company.cnpj ? '<div>CNPJ: ' + company.cnpj + '</div>' : ''}
+    ${company.phone ? '<div>Tel: ' + company.phone + '</div>' : ''}
+    ${company.address_city ? '<div>' + company.address_city + (company.address_state ? ' - ' + company.address_state : '') + '</div>' : ''}
   </div>
   <div class="divider"></div>
   <div class="center bold" style="font-size:15px;margin-bottom:4px">CARNE / EXTRATO DE CREDIARIO</div>
@@ -563,8 +566,8 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   <div class="divider"></div>
   <div style="margin-bottom:8px">
     <div><strong>Cliente:</strong> ${customer.name}</div>
-    ${customer.phone ? `<div><strong>Telefone:</strong> ${customer.phone}</div>` : ''}
-    ${customer.cpf_cnpj ? `<div><strong>CPF/CNPJ:</strong> ${customer.cpf_cnpj}</div>` : ''}
+    ${customer.phone ? '<div><strong>Telefone:</strong> ' + customer.phone + '</div>' : ''}
+    ${customer.cpf_cnpj ? '<div><strong>CPF/CNPJ:</strong> ' + customer.cpf_cnpj + '</div>' : ''}
   </div>
   <div class="divider"></div>
   <div class="section-title">Cronograma de Parcelas</div>
@@ -594,6 +597,192 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[print] carne error:', err.message);
     res.status(500).json({ error: 'Erro ao gerar carne de crediario' });
+  }
+});
+
+// ============================================================
+// GET /print/credit/receipts/:transactionId  (B5)
+// Recibo de pagamento de crediário — HTML imprimível.
+//
+// Fonte: customer_credit_transactions WHERE id=:transactionId
+//        AND company_id=:id AND type='payment'.
+// Encargos: transactions WHERE idempotency_key='credit-charges-<txId>'
+//           (defensivo a 42703/42P01 — campo opcional).
+// Saldo: customer_credit_balances.balance (defensivo).
+// Crédito a favor: balance < 0 → exibe valor absoluto.
+//
+// Frontend chama via fetch + Authorization header + document.write
+// (mesmo padrão /print/credit/:cid/carne).
+// ============================================================
+router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
+  const companyId     = req.params.id;
+  const transactionId = req.params.transactionId;
+
+  try {
+    // 1. Dados da empresa
+    const { rows: companyRows } = await db.query(
+      `SELECT COALESCE(trade_name, legal_name) AS display_name,
+              cnpj, phone, address_city, address_state
+         FROM companies WHERE id = $1`,
+      [companyId]
+    );
+    if (!companyRows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
+    const company = companyRows[0];
+
+    // 2. Transação de pagamento
+    const { rows: txRows } = await db.query(
+      `SELECT id, customer_id, amount, payment_method, created_at, account_id
+         FROM customer_credit_transactions
+        WHERE id = $1 AND company_id = $2 AND type = 'payment'`,
+      [transactionId, companyId]
+    );
+    if (!txRows.length) return res.status(404).json({ error: 'Transacao nao encontrada' });
+    const tx = txRows[0];
+
+    // 3. Cliente
+    const { rows: custRows } = await db.query(
+      `SELECT name, phone, cpf_cnpj FROM customers WHERE id = $1 AND company_id = $2`,
+      [tx.customer_id, companyId]
+    );
+    const customer = custRows[0] || { name: 'Cliente', phone: null, cpf_cnpj: null };
+
+    // 4. Encargos vinculados (mora/multa) — opcional, defensivo
+    let chargesAmount = 0;
+    try {
+      const { rows: chRows } = await db.query(
+        `SELECT amount FROM transactions
+          WHERE idempotency_key = $1
+            AND company_id = $2
+            AND category LIKE 'Crediario - Encargos%'
+          LIMIT 1`,
+        ['credit-charges-' + transactionId, companyId]
+      );
+      if (chRows.length) chargesAmount = Math.abs(parseFloat(chRows[0].amount || 0));
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] charges warn:', e.message);
+    }
+
+    // 5. Saldo restante após pagamento — defensivo
+    let balance = null;
+    try {
+      const { rows: balRows } = await db.query(
+        `SELECT COALESCE(balance, 0) AS balance
+           FROM customer_credit_balances
+          WHERE customer_id = $1 AND company_id = $2`,
+        [tx.customer_id, companyId]
+      );
+      if (balRows.length) balance = parseFloat(balRows[0].balance);
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] balance warn:', e.message);
+    }
+
+    // 6. Montar HTML
+    const payDate = new Date(tx.created_at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const amountPaid = parseFloat(tx.amount || 0);
+
+    const payMethodLabel = _payLabel(tx.payment_method || 'outro');
+
+    const chargesRow = chargesAmount > 0
+      ? '<tr><td style="padding:3px 0;color:#666">Encargos (mora/multa)</td>' +
+        '<td style="text-align:right;padding:3px 0;color:#666">R$' + fmt(chargesAmount) + '</td></tr>'
+      : '';
+
+    let balanceRow = '';
+    if (balance !== null) {
+      if (balance < 0) {
+        balanceRow =
+          '<tr><td style="padding:3px 0;color:#166534;font-weight:bold">Credito a favor</td>' +
+          '<td style="text-align:right;padding:3px 0;color:#166534;font-weight:bold">R$' + fmt(Math.abs(balance)) + '</td></tr>';
+      } else {
+        balanceRow =
+          '<tr><td style="padding:3px 0">Saldo restante</td>' +
+          '<td style="text-align:right;padding:3px 0">R$' + fmt(balance) + '</td></tr>';
+      }
+    }
+
+    // Bloco WhatsApp (texto pré-formatado — trivial pois é só concatenar)
+    const waLines = [
+      '*Recibo de Pagamento — Crediario*',
+      company.display_name,
+      '',
+      'Cliente: ' + customer.name,
+      'Data: ' + payDate,
+      'Valor pago: R$' + fmt(amountPaid),
+      'Metodo: ' + payMethodLabel,
+    ];
+    if (chargesAmount > 0) waLines.push('Encargos: R$' + fmt(chargesAmount));
+    if (balance !== null) {
+      if (balance < 0) {
+        waLines.push('Credito a favor: R$' + fmt(Math.abs(balance)));
+      } else {
+        waLines.push('Saldo restante: R$' + fmt(balance));
+      }
+    }
+    waLines.push('', 'Powered by Aura. - getaura.com.br');
+    const waText = waLines.join('\n');
+
+    const html = '<!DOCTYPE html>\n' +
+      '<html lang="pt-BR">\n' +
+      '<head>\n' +
+      '  <meta charset="UTF-8">\n' +
+      '  <title>Recibo Crediario - ' + company.display_name + '</title>\n' +
+      '  <style>\n' +
+      '    @page { margin: 10mm 12mm; size: A4; }\n' +
+      '    * { margin:0; padding:0; box-sizing:border-box; }\n' +
+      '    body { font-family:\'Courier New\',monospace; font-size:12px; color:#000; max-width:500px; margin:0 auto; }\n' +
+      '    .center { text-align:center; }\n' +
+      '    .bold { font-weight:bold; }\n' +
+      '    .divider { border-top:1px dashed #000; margin:8px 0; }\n' +
+      '    .company-name { font-size:16px; font-weight:bold; }\n' +
+      '    table { width:100%; border-collapse:collapse; }\n' +
+      '    td { vertical-align:top; font-size:12px; }\n' +
+      '    .total-row td { font-weight:bold; font-size:14px; border-top:2px solid #000; padding-top:5px; }\n' +
+      '    .footer { font-size:9px; text-align:center; margin-top:8px; color:#666; }\n' +
+      '    .wa-block { background:#f0fdf4; border:1px solid #86efac; border-radius:4px; padding:10px; margin-top:12px; }\n' +
+      '    .wa-block textarea { width:100%; font-family:monospace; font-size:11px; border:none; background:transparent; resize:none; outline:none; }\n' +
+      '    @media print { body { -webkit-print-color-adjust:exact; print-color-adjust:exact; } button, .wa-block { display:none !important; } }\n' +
+      '  </style>\n' +
+      '</head>\n' +
+      '<body>\n' +
+      '  <div class="center" style="margin-bottom:8px">\n' +
+      '    <div class="company-name">' + company.display_name + '</div>\n' +
+      (company.cnpj ? '    <div>CNPJ: ' + company.cnpj + '</div>\n' : '') +
+      (company.phone ? '    <div>Tel: ' + company.phone + '</div>\n' : '') +
+      (company.address_city ? '    <div>' + company.address_city + (company.address_state ? ' - ' + company.address_state : '') + '</div>\n' : '') +
+      '  </div>\n' +
+      '  <div class="divider"></div>\n' +
+      '  <div class="center bold" style="font-size:14px;margin-bottom:4px">RECIBO DE PAGAMENTO — CREDIARIO</div>\n' +
+      '  <div class="divider"></div>\n' +
+      '  <div style="margin-bottom:8px">\n' +
+      '    <div><strong>Cliente:</strong> ' + customer.name + '</div>\n' +
+      (customer.phone ? '    <div><strong>Telefone:</strong> ' + customer.phone + '</div>\n' : '') +
+      (customer.cpf_cnpj ? '    <div><strong>CPF/CNPJ:</strong> ' + customer.cpf_cnpj + '</div>\n' : '') +
+      '  </div>\n' +
+      '  <div class="divider"></div>\n' +
+      '  <table>\n' +
+      '    <tr><td style="padding:3px 0">Data</td><td style="text-align:right;padding:3px 0">' + payDate + '</td></tr>\n' +
+      '    <tr><td style="padding:3px 0">Metodo</td><td style="text-align:right;padding:3px 0">' + payMethodLabel + '</td></tr>\n' +
+      chargesRow +
+      '    <tr class="total-row"><td>Valor pago</td><td style="text-align:right">R$' + fmt(amountPaid) + '</td></tr>\n' +
+      balanceRow +
+      '  </table>\n' +
+      '  <div class="divider"></div>\n' +
+      '  <div class="footer">Powered by Aura. - getaura.com.br</div>\n' +
+      '  <br>\n' +
+      '  <button onclick="window.print()" style="width:100%;padding:10px;cursor:pointer;font-size:14px">Imprimir</button>\n' +
+      '  <div class="wa-block" style="margin-top:12px">\n' +
+      '    <div style="font-size:11px;font-weight:bold;margin-bottom:6px;color:#166534">Texto para WhatsApp</div>\n' +
+      '    <textarea rows="' + waLines.length + '" readonly onclick="this.select()">' + waText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</textarea>\n' +
+      '  </div>\n' +
+      '  <script>window.onload = function() { window.print(); };</script>\n' +
+      '</body>\n' +
+      '</html>';
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    console.error('[print] recibo crediario error:', err.message);
+    res.status(500).json({ error: 'Erro ao gerar recibo de crediario' });
   }
 });
 
