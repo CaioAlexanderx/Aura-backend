@@ -504,8 +504,8 @@ async function applyPayment(client, {
         AND s.customer_id = $2
         AND COALESCE(s.status, 'active') != 'cancelled'
       ORDER BY t.created_at ASC
-      FOR UPDATE OF t
-      LIMIT 100`;
+      LIMIT 100
+      FOR UPDATE OF t`;
     pendingTxsParams = [companyId, customerId, accountId];
   } else {
     pendingTxsQuery = `
@@ -518,8 +518,8 @@ async function applyPayment(client, {
         AND s.customer_id = $2
         AND COALESCE(s.status, 'active') != 'cancelled'
       ORDER BY t.created_at ASC
-      FOR UPDATE OF t
-      LIMIT 100`;
+      LIMIT 100
+      FOR UPDATE OF t`;
     pendingTxsParams = [companyId, customerId];
   }
 
@@ -540,8 +540,8 @@ async function applyPayment(client, {
            AND s.customer_id = $2
            AND COALESCE(s.status, 'active') != 'cancelled'
          ORDER BY t.created_at ASC
-         FOR UPDATE OF t
-         LIMIT 100`,
+         LIMIT 100
+         FOR UPDATE OF t`,
         [companyId, customerId]
       );
       pendingTxs = r.rows;
