@@ -100,11 +100,19 @@ async function resolvePixSetup(companyId) {
 // B2: config + profile p/ engine de encargos lazy (defensivo 42703/42P01).
 // Mesma conta usada no GET /customers/:cid/profile.
 async function loadLateContext(companyId, customerId) {
+  // So 42703/42P01 (deploy parcial) sao fallback silencioso; qualquer outro
+  // erro (ex.: transiente de banco) e logado p/ nao passar despercebido,
+  // mas segue com config/profile null (nao derruba a rota).
   let config = null;
   try {
     const cfg = await pool.query(`SELECT * FROM credit_plan_configs WHERE company_id = $1`, [companyId]);
     config = cfg.rows[0] || null;
-  } catch (_) { config = null; }
+  } catch (err) {
+    if (err.code !== '42703' && err.code !== '42P01') {
+      console.warn('[credit/pix] loadLateContext falhou:', err.message);
+    }
+    config = null;
+  }
   let profile = null;
   if (customerId) {
     try {
@@ -113,7 +121,12 @@ async function loadLateContext(companyId, customerId) {
         [companyId, customerId]
       );
       profile = prof.rows[0] || null;
-    } catch (_) { profile = null; }
+    } catch (err) {
+      if (err.code !== '42703' && err.code !== '42P01') {
+        console.warn('[credit/pix] loadLateContext falhou:', err.message);
+      }
+      profile = null;
+    }
   }
   return { config, profile };
 }
