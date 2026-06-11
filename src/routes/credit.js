@@ -7,6 +7,8 @@
 // DELETE /companies/:id/credit/transaction/:txid
 // POST   /companies/:id/credit/manual-entry
 // GET    /companies/:id/credit/customers/:cid/history    (B1)
+// GET    /companies/:id/credit/customers/:cid/payments/preview (B3)
+// POST   /companies/:id/credit/customers/:cid/payments         (B3)
 //
 // F2 (05/06/2026): PUT /customers/:cid/terms -- termos por cliente
 // F3 (05/06/2026): POST /customer/:cid/accounts -- multiplos carnes
@@ -25,6 +27,10 @@
 // B2 (11/06/2026): manual-entry NAO grava mais link fake pagar.getaura.com.br;
 //                  pix_link fica NULL e o Pix real (EMV) e gerado on-demand
 //                  via GET /credit/installments/:iid/pix.
+// B3 (11/06/2026): GET  /customers/:cid/payments/preview -- dry-run, zero escrita.
+//                  POST /customers/:cid/payments         -- aplica de verdade,
+//                  aceita Idempotency-Key. Shape identico ao preview.
+//                  Overpay => credit_generated (NAO rejeita). Defensivo 42703/42P01.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -82,6 +88,129 @@ async function loadLateChargesContext(client, companyId, customerId) {
     profile = undefined;
   }
   return { config, profile };
+}
+
+// ============================================================
+// B3: computePaymentPlan -- funcao PURA (zero efeito colateral).
+//
+// Recebe as parcelas abertas e calcula a distribuicao planejada
+// seguindo EXATAMENTE a mesma ordem que o applyPayment usa:
+//   1. Encargos por parcela (FIFO oldest-first) ate esgotar amount;
+//   2. Principal FIFO oldest-first (o que sobrar apos encargos);
+//   3. Excedente => credit_generated (saldo negativo = credito).
+//
+// Params:
+//   openInstallments -- linhas da credit_installments abertas,
+//                       ordenadas por due_date ASC (ja com account_id
+//                       filtrado quando fornecido pelo chamador).
+//   opts.amount      -- valor recebido (positivo).
+//   opts.config      -- credit_plan_configs row (pode ser undefined => OFF).
+//   opts.profile     -- customer_credit_profiles row (pode ser undefined).
+//   opts.paidAt      -- YYYY-MM-DD ou null (para asOf dos encargos).
+//
+// Retorna o shape canonico B3:
+//   { applied: [...], new_balance, credit_generated }
+// "new_balance" aqui e o saldo ATUAL mais o pagamento (uma estimativa
+// read-only baseada no saldo da view); o valor real pos-commit e
+// retornado pelo applyPayment.
+// ============================================================
+function computePaymentPlan(openInstallments, currentBalance, opts) {
+  const { amount, config, profile, paidAt } = opts;
+  const round2 = creditLedger.round2;
+  const computeLateCharges = creditLedger.computeLateCharges;
+  const resolveTerms = creditLedger.resolveTerms;
+
+  const terms = resolveTerms(profile || null, config || null);
+
+  // -- Fase 1: Encargos FIFO oldest-first ------------------------------------
+  let remaining = amount;
+  const chargesPerInst = openInstallments.map((inst) => {
+    const lc = computeLateCharges(inst, terms, config || null, paidAt ? new Date(paidAt + 'T12:00:00') : new Date());
+    return { inst, lc };
+  });
+
+  // Encargos so sao consumidos quando config.late_charges_enabled === true
+  const chargesEnabled = config && config.late_charges_enabled === true;
+  const chargesAllocated = {}; // installment_id -> { late_fee_paid, late_interest_paid }
+
+  if (chargesEnabled) {
+    for (const { inst, lc } of chargesPerInst) {
+      if (remaining <= 0.005) break;
+      const instCharges = round2(lc.charges_total || 0);
+      if (instCharges <= 0.005) continue;
+
+      const portion     = round2(Math.min(remaining, instCharges));
+      const stampFee    = round2(Math.min(portion, lc.late_fee || 0));
+      const stampIntr   = round2(Math.max(0, portion - stampFee));
+
+      chargesAllocated[inst.id] = { charges_paid: portion, late_fee_paid: stampFee, late_interest_paid: stampIntr };
+      remaining = round2(remaining - portion);
+    }
+  }
+
+  // -- Fase 2: Principal FIFO oldest-first -----------------------------------
+  const principalAmount = remaining; // o que sobrou apos encargos
+  let toAllocate = principalAmount;
+
+  const applied = [];
+  for (const inst of openInstallments) {
+    const currentCovered = parseFloat(inst.covered_amount) || 0;
+    const amountDue      = parseFloat(inst.amount_due) || 0;
+    const uncovered      = round2(amountDue - currentCovered);
+    const chargesEntry   = chargesAllocated[inst.id] || { charges_paid: 0, late_fee_paid: 0, late_interest_paid: 0 };
+
+    // Mesmo que nao tenha principal a alocar, se houve encargos nesta parcela
+    // ela aparece no applied.
+    if (toAllocate <= 0.005 && chargesEntry.charges_paid <= 0.005) continue;
+    if (uncovered <= 0.005 && chargesEntry.charges_paid <= 0.005) continue;
+
+    let principalPaid = 0;
+    if (toAllocate > 0.005 && uncovered > 0.005) {
+      principalPaid = round2(Math.min(toAllocate, uncovered));
+      toAllocate    = round2(toAllocate - principalPaid);
+    }
+
+    const newCovered   = round2(currentCovered + principalPaid);
+    const statusAfter  = newCovered >= amountDue - 0.005 ? 'paid' : inst.status;
+
+    applied.push({
+      installment_id: inst.id,
+      account_id:     inst.account_id || null,
+      number:         inst.installment_number || null,
+      charges_paid:   round2(chargesEntry.charges_paid),
+      principal_paid: principalPaid,
+      status_after:   statusAfter,
+    });
+  }
+
+  // Parcelas com encargos que nao foram incluidas acima (sem uncovered mas com encargos)
+  for (const [instId, chargesEntry] of Object.entries(chargesAllocated)) {
+    if (!applied.find(a => a.installment_id === instId)) {
+      const inst = openInstallments.find(i => i.id === instId);
+      if (inst) {
+        applied.push({
+          installment_id: inst.id,
+          account_id:     inst.account_id || null,
+          number:         inst.installment_number || null,
+          charges_paid:   round2(chargesEntry.charges_paid),
+          principal_paid: 0,
+          status_after:   inst.status,
+        });
+      }
+    }
+  }
+
+  // -- Fase 3: Excedente => credit_generated ---------------------------------
+  // O excedente e o principal que sobrou apos quitar todas as parcelas abertas.
+  const creditGenerated = round2(Math.max(0, toAllocate));
+
+  // new_balance estimado: saldo atual menos o pagamento todo (encargos nao
+  // alteram o principal balance da view, mas o applyPayment materializa a
+  // transacao de encargos como 'confirmed' separada). Para o preview,
+  // o new_balance reflete a reducao de principal:
+  const newBalance = round2(currentBalance - amount);
+
+  return { applied, new_balance: newBalance, credit_generated: creditGenerated };
 }
 
 // GET /balances
@@ -825,6 +954,318 @@ router.get('/customers/:cid/history', async (req, res) => {
     if (err.status === 404) return res.status(404).json({ error: err.message });
     console.error('[credit] history error:', err.message);
     res.status(500).json({ error: 'Erro ao buscar historico do cliente' });
+  }
+});
+
+// ============================================================
+// B3 (11/06/2026): GET /customers/:cid/payments/preview
+//
+// Dry-run ZERO escrita. Retorna a distribuicao planejada para um
+// pagamento de valor livre, usando o mesmo engine (computePaymentPlan)
+// que o POST usa antes de chamar applyPayment.
+//
+// Query params:
+//   amount     -- obrigatorio, > 0
+//   account_id -- opcional, UUID do carne (escopo FIFO)
+//   paid_at    -- opcional, YYYY-MM-DD < hoje (retroativo)
+//
+// Shape de resposta:
+//   {
+//     applied: [{ installment_id, account_id, number,
+//                 charges_paid, principal_paid, status_after }],
+//     new_balance: N,
+//     credit_generated: N
+//   }
+// ============================================================
+router.get('/customers/:cid/payments/preview', async (req, res) => {
+  const companyId  = req.params.id;
+  const customerId = req.params.cid;
+
+  const amount = parseFloat(req.query.amount);
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: 'amount > 0 obrigatorio' });
+  }
+  const accountId = req.query.account_id || null;
+  const paidAt    = normalizeBackdate(req.query.paid_at);
+
+  try {
+    await assertCrediarioEnabled(companyId);
+
+    // Verifica cliente
+    const { rows: custRows } = await db.query(
+      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
+      [customerId, companyId]
+    );
+    if (!custRows.length) return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+
+    // Saldo atual (read-only)
+    let currentBalance = 0;
+    try {
+      const { rows: balRows } = await db.query(
+        `SELECT COALESCE(balance, 0) AS balance FROM customer_credit_balances
+         WHERE customer_id = $1 AND company_id = $2`,
+        [customerId, companyId]
+      );
+      currentBalance = parseFloat(balRows[0]?.balance || 0);
+    } catch (_) {}
+
+    // Parcelas abertas (read-only), filtradas por account_id se fornecido.
+    // Defensivo 42703 (account_id pode nao existir em deploy parcial).
+    let openInstallments = [];
+    try {
+      let instQuery;
+      let instParams;
+      if (accountId) {
+        instQuery = `
+          SELECT id, installment_number, total_installments,
+                 amount_due, covered_amount, due_date, status, account_id
+            FROM credit_installments
+           WHERE company_id = $1 AND customer_id = $2
+             AND account_id = $3
+             AND status IN ('pending', 'overdue')
+           ORDER BY due_date ASC`;
+        instParams = [companyId, customerId, accountId];
+      } else {
+        instQuery = `
+          SELECT id, installment_number, total_installments,
+                 amount_due, covered_amount, due_date, status, account_id
+            FROM credit_installments
+           WHERE company_id = $1 AND customer_id = $2
+             AND status IN ('pending', 'overdue')
+           ORDER BY due_date ASC`;
+        instParams = [companyId, customerId];
+      }
+      const { rows } = await db.query(instQuery, instParams);
+      openInstallments = rows;
+    } catch (e) {
+      if (e.code === '42703') {
+        // account_id ainda nao existe: FIFO global sem filtro de carne
+        const { rows } = await db.query(
+          `SELECT id, installment_number, total_installments,
+                  amount_due, covered_amount, due_date, status
+             FROM credit_installments
+            WHERE company_id = $1 AND customer_id = $2
+              AND status IN ('pending', 'overdue')
+            ORDER BY due_date ASC`,
+          [companyId, customerId]
+        );
+        openInstallments = rows;
+      } else if (e.code === '42P01') {
+        openInstallments = [];
+      } else throw e;
+    }
+
+    // Config + profile (defensivo, mesmo padrao do loadLateChargesContext)
+    let lateConfig = undefined;
+    let lateProfile = undefined;
+    try {
+      const cfg = await db.query(`SELECT * FROM credit_plan_configs WHERE company_id = $1`, [companyId]);
+      lateConfig = cfg.rows[0] || undefined;
+    } catch (e) {
+      if (e.code !== '42703' && e.code !== '42P01') throw e;
+    }
+    try {
+      const prof = await db.query(
+        `SELECT * FROM customer_credit_profiles WHERE company_id = $1 AND customer_id = $2`,
+        [companyId, customerId]
+      );
+      lateProfile = prof.rows[0] || undefined;
+    } catch (e) {
+      if (e.code !== '42703' && e.code !== '42P01') throw e;
+    }
+
+    const plan = computePaymentPlan(openInstallments, currentBalance, {
+      amount,
+      config:  lateConfig,
+      profile: lateProfile,
+      paidAt,
+    });
+
+    return res.json(plan);
+  } catch (err) {
+    if (err.status === 403) return res.status(403).json({ error: err.message, code: err.code });
+    if (err.status === 404) return res.status(404).json({ error: err.message });
+    console.error('[credit] payment preview error:', err.message);
+    return res.status(500).json({ error: 'Erro ao calcular preview de pagamento' });
+  }
+});
+
+// ============================================================
+// B3 (11/06/2026): POST /customers/:cid/payments
+//
+// Aplica o pagamento de valor livre. Usa applyPayment (logica
+// identica ao POST /customer/:cid/payment) e mapeia o retorno
+// para o shape canonico B3 (mesmo do preview).
+//
+// Body: { amount, account_id?, method, paid_at? }
+// Header opcional: Idempotency-Key (repassado ao applyPayment)
+//
+// Idempotencia: Idempotency-Key e repassada ao applyPayment como
+// idempotencyKey. ON CONFLICT DO NOTHING garante que um retry de
+// rede nao aplique o pagamento duas vezes.
+//
+// Overpay: nao e rejeitado. O excedente de principal (apos quitar
+// todas as parcelas abertas) gera credit_generated > 0, que equivale
+// a um saldo negativo no ledger (credito a favor do cliente).
+//
+// Shape de resposta (identico ao preview):
+//   {
+//     applied: [{ installment_id, account_id, number,
+//                 charges_paid, principal_paid, status_after }],
+//     new_balance: N,
+//     credit_generated: N
+//   }
+// ============================================================
+router.post('/customers/:cid/payments', async (req, res) => {
+  const companyId  = req.params.id;
+  const customerId = req.params.cid;
+
+  const amount    = parseFloat(req.body?.amount || 0);
+  const method    = req.body?.method ? String(req.body.method).trim() : null;
+  const accountId = req.body?.account_id || null;
+  const paidAt    = normalizeBackdate(req.body?.paid_at);
+  // Idempotency-Key do header (case-insensitive)
+  const idempotencyKey = req.headers['idempotency-key']
+    ? String(req.headers['idempotency-key']).trim()
+    : null;
+
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: 'amount > 0 obrigatorio' });
+  }
+
+  try {
+    await assertCrediarioEnabled(companyId);
+  } catch (err) {
+    return res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Verifica cliente
+    const { rows: cust } = await client.query(
+      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
+      [customerId, companyId]
+    );
+    if (!cust.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+    }
+
+    // Sessao de caixa aberta (best-effort)
+    let activeSessaoId = null;
+    try {
+      const sessRes = await client.query(
+        `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
+        [companyId]
+      );
+      activeSessaoId = sessRes?.rows?.[0]?.id || null;
+    } catch (_) {}
+
+    // Config + profile (defensivo)
+    const { config: lateConfig, profile: lateProfile } =
+      await loadLateChargesContext(client, companyId, customerId);
+
+    // Aplica o pagamento via applyPayment (logica canonica)
+    const result = await creditLedger.applyPayment(client, {
+      companyId,
+      customerId,
+      amount,
+      method,
+      sessaoId:      activeSessaoId,
+      createdBy:     req.user?.id || null,
+      paidAt,
+      accountId,
+      config:        lateConfig,
+      profile:       lateProfile,
+      idempotencyKey,
+    });
+
+    await client.query('COMMIT');
+
+    // Monta o shape canonico B3 a partir do resultado do applyPayment.
+    //
+    // Garantia preview === aplicacao:
+    //   O applyPayment faz FIFO por due_date ASC (encargos primeiro, depois
+    //   principal) identico ao computePaymentPlan. O mapeamento abaixo reconstroi
+    //   o campo `applied` a partir de covered_installments (principal) e
+    //   charges_detail (encargos), fundindo pelo installment_id.
+    //
+    // Estrutura interna do applyPayment:
+    //   result.covered_installments: [{ id, covered, status }]
+    //   result.charges_detail:       [{ installment_id, late_fee, late_interest }]
+    //   result.legacy_amount:        excedente de principal (overpay)
+
+    // Mapa de encargos por installment_id
+    const chargesMap = {};
+    for (const cd of (result.charges_detail || [])) {
+      chargesMap[cd.installment_id] = cd;
+    }
+
+    // Mapa de covered por installment id
+    const coveredMap = {};
+    for (const ci of (result.covered_installments || [])) {
+      coveredMap[ci.id] = ci;
+    }
+
+    // Uniao de installment_ids que aparecem em qualquer dos dois mapas
+    const allInstIds = new Set([
+      ...Object.keys(chargesMap),
+      ...Object.keys(coveredMap),
+    ]);
+
+    // Para montar number e account_id precisamos de um mini-lookup.
+    // Aproveitamos os dados ja retornados (charges_detail e covered_installments
+    // nao incluem esses campos). Fazemos um SELECT defensivo read-only.
+    let instMeta = {};
+    if (allInstIds.size > 0) {
+      try {
+        const { rows: metaRows } = await db.query(
+          `SELECT id, installment_number, account_id
+             FROM credit_installments
+            WHERE id = ANY($1::uuid[]) AND company_id = $2`,
+          [[...allInstIds], companyId]
+        );
+        for (const r of metaRows) {
+          instMeta[r.id] = { number: r.installment_number, account_id: r.account_id || null };
+        }
+      } catch (e) {
+        if (e.code !== '42703' && e.code !== '42P01') throw e;
+        // Defensivo: sem metadados de parcela, campos ficam null
+      }
+    }
+
+    const applied = [...allInstIds].map(instId => {
+      const cd  = chargesMap[instId]  || {};
+      const ci  = coveredMap[instId]  || {};
+      const meta = instMeta[instId]   || {};
+      const chargesPaid  = creditLedger.round2((cd.late_fee || 0) + (cd.late_interest || 0));
+      const principalPaid = creditLedger.round2(ci.covered || 0);
+      return {
+        installment_id: instId,
+        account_id:     meta.account_id || null,
+        number:         meta.number || null,
+        charges_paid:   chargesPaid,
+        principal_paid: principalPaid,
+        status_after:   ci.status || null,
+      };
+    });
+
+    // credit_generated = excedente de principal (legacy_amount)
+    const creditGenerated = creditLedger.round2(result.legacy_amount || 0);
+
+    return res.status(201).json({
+      applied,
+      new_balance:      result.new_balance,
+      credit_generated: creditGenerated,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[credit] payments post error:', err.message);
+    return res.status(500).json({ error: 'Erro ao registrar pagamento' });
+  } finally {
+    client.release();
   }
 });
 
