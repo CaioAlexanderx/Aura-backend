@@ -308,7 +308,7 @@ router.get('/customer/:cid', async (req, res) => {
       installmentRows = r.rows;
     } catch (instErr) {
       if (instErr.code === '42703') {
-        // account_id ainda nao existe — fallback sem a coluna
+        // account_id ainda nao existe -- fallback sem a coluna
         const r = await db.query(
           `SELECT id, installment_number, total_installments,
                   amount_due, covered_amount, due_date, status, late_fee, late_interest
@@ -356,8 +356,8 @@ router.get('/customer/:cid', async (req, res) => {
         [req.params.id, req.params.cid]
       );
 
-      // FIX: saldo por carne -- SÓ transações (sem JOIN com parcelas para evitar fan-out).
-      // 1 débito de R$500 + 5 parcelas no JOIN antigo contava 500×5 = R$2.500 (errado).
+      // FIX: saldo por carne -- SO transacoes (sem JOIN com parcelas para evitar fan-out).
+      // 1 debito de R$500 + 5 parcelas no JOIN antigo contava 500x5 = R$2.500 (errado).
       const { rows: balRows } = await db.query(
         `SELECT account_id,
                 COALESCE(SUM(CASE WHEN type='debit' THEN amount ELSE 0 END)
@@ -368,7 +368,7 @@ router.get('/customer/:cid', async (req, res) => {
         [req.params.id, req.params.cid]
       );
 
-      // Métricas de parcelas por carnê -- SÓ credit_installments (sem JOIN com transações).
+      // Metricas de parcelas por carne -- SO credit_installments (sem JOIN com transacoes).
       const { rows: instRows } = await db.query(
         `SELECT account_id,
                 COUNT(*) FILTER (WHERE status IN ('pending','overdue'))               AS open_count,
@@ -746,11 +746,12 @@ router.get('/customers/search', async (req, res) => {
 // Query params:
 //   limit  -- default 30, max 100
 //   cursor -- opaco: base64 de `created_at|id` (do ultimo evento da pagina)
-//   types  -- csv opcional de: purchase, manual_debit, payment, exchange_credit
+//   types  -- csv opcional de: purchase, manual_debit, payment, exchange_credit, refund
 //
 // Mapeamento customer_credit_transactions -> evento:
 //   debit   + sale_id        -> purchase        (items: join sale_items)
 //   debit   sem sale_id      -> manual_debit
+//   refund                   -> refund           (A4-BE: tipo proprio)
 //   payment + crediario_credito -> exchange_credit (credito vindo de troca)
 //   payment (demais)         -> payment         (payment: { method })
 //
@@ -762,13 +763,14 @@ router.get('/customers/search', async (req, res) => {
 //   42703 account_id (migration 163) / source (migration 144) /
 //   product_name_snapshot em sale_items; 42P01 sale_items ausente -> sem itens.
 // ============================================================
-const HISTORY_EVENT_TYPES = ['purchase', 'manual_debit', 'payment', 'exchange_credit'];
+const HISTORY_EVENT_TYPES = ['purchase', 'manual_debit', 'payment', 'exchange_credit', 'refund'];
 
 const HISTORY_TYPE_SQL = {
   purchase:        `(t.type = 'debit' AND t.sale_id IS NOT NULL)`,
   manual_debit:    `(t.type = 'debit' AND t.sale_id IS NULL)`,
   exchange_credit: `(t.type = 'payment' AND t.payment_method = 'crediario_credito')`,
   payment:         `(t.type = 'payment' AND t.payment_method IS DISTINCT FROM 'crediario_credito')`,
+  refund:          `(t.type = 'refund')`,
 };
 
 // Cache module-level de colunas opcionais (evita repetir try/catch por request)
@@ -926,6 +928,8 @@ router.get('/customers/:cid/history', async (req, res) => {
       let eventType;
       if (r.type === 'debit') {
         eventType = r.sale_id ? 'purchase' : 'manual_debit';
+      } else if (r.type === 'refund') {
+        eventType = 'refund';
       } else {
         eventType = r.payment_method === 'crediario_credito' ? 'exchange_credit' : 'payment';
       }
@@ -1456,7 +1460,7 @@ router.post('/manual-entry', async (req, res) => {
           row = ins.rows[0];
         } else throw e;
       }
-      // B2: sem pix_link fake — o campo fica NULL; o Pix real (EMV copia-e-cola)
+      // B2: sem pix_link fake -- o campo fica NULL; o Pix real (EMV copia-e-cola)
       // e gerado on-demand via GET /credit/installments/:iid/pix.
       createdInstallments.push(row);
     }
