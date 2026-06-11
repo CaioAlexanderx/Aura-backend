@@ -27,11 +27,19 @@
  *     abertas com late_fee/late_interest/charges_total/days_overdue/days_charged/total_due
  *     calculados lazy (sem persistir). Zero quando late_charges_enabled=false.
  *   - applyPayment (materializacao) NAO e tocado aqui — vem no PR2.
+ * B2 (11/06/2026): Pix EMV real (copia-e-cola) no crediario.
+ *   - GET /installments/:iid/pix — payload EMV da parcela (remaining + encargos do dia).
+ *   - GET /customers/:cid/pix?amount=N — payload EMV de valor livre (sem cap por saldo).
+ *   - POST /collection/trigger/:iid: mensagem usa o Pix copia-e-cola REAL
+ *     (fallback: pix_link legado gravado na parcela).
+ *   - Link fake pagar.getaura.com.br APOSENTADO: parcelas novas gravam pix_link NULL;
+ *     o QR e gerado no FRONTEND a partir do payload (react-native-qrcode-svg).
  */
 
 const express = require('express');
 const pool = require('../config/database');
 const creditLedger = require('../services/creditLedger');
+const { buildStaticBrCode, validatePixKey, sanitizeTxid } = require('../services/staticPixService');
 
 const router = express.Router({ mergeParams: true });
 
@@ -43,9 +51,84 @@ const nz = (v) => (v === undefined || v === null || v === '') ? null : v;
 const CAP_EPS = 1e-9;
 const aboveCap = (v, cap) => v != null && v !== '' && Number(v) > cap + CAP_EPS;
 
-function buildPixLink(id) {
-  const short = id.replace(/-/g, '').slice(0, 12);
-  return `https://pagar.getaura.com.br/parcela/${short}`;
+// ─── B2: Pix EMV real (copia-e-cola) ──────────────────────────────────────
+// Chave Pix da loja: MESMO lookup do carne imprimivel (print.js /credit/:cid/carne)
+// — digital_channel_config + fallbacks de nome/cidade em companies.
+// Retorna null se nao ha chave configurada/valida (caller decide o erro).
+async function resolvePixSetup(companyId) {
+  let cfg = null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT pix_key, pix_key_type, pix_holder_name, pix_holder_city, site_name, address
+         FROM digital_channel_config WHERE company_id = $1`,
+      [companyId]
+    );
+    cfg = rows[0] || null;
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    return null;
+  }
+  if (!cfg || !cfg.pix_key || !String(cfg.pix_key).trim()) return null;
+  const validation = validatePixKey(cfg.pix_key, cfg.pix_key_type);
+  if (!validation.valid) return null;
+
+  // companies NAO tem coluna `name` — COALESCE(trade_name, legal_name)
+  let company = {};
+  try {
+    const { rows } = await pool.query(
+      `SELECT COALESCE(trade_name, legal_name) AS display_name, address_city
+         FROM companies WHERE id = $1`,
+      [companyId]
+    );
+    company = rows[0] || {};
+  } catch (_) { company = {}; }
+
+  let city = cfg.pix_holder_city;
+  if (!city && cfg.address) {
+    const parts = String(cfg.address).split(',').map(s => s.trim());
+    city = parts[parts.length - 2] || parts[parts.length - 1] || '';
+  }
+
+  return {
+    pixKey:  validation.normalized,
+    keyType: cfg.pix_key_type || null,
+    name:    cfg.pix_holder_name || cfg.site_name || company.display_name || 'AURA NEGOCIO',
+    city:    city || company.address_city || 'BRASIL',
+  };
+}
+
+// B2: config + profile p/ engine de encargos lazy (defensivo 42703/42P01).
+// Mesma conta usada no GET /customers/:cid/profile.
+async function loadLateContext(companyId, customerId) {
+  // So 42703/42P01 (deploy parcial) sao fallback silencioso; qualquer outro
+  // erro (ex.: transiente de banco) e logado p/ nao passar despercebido,
+  // mas segue com config/profile null (nao derruba a rota).
+  let config = null;
+  try {
+    const cfg = await pool.query(`SELECT * FROM credit_plan_configs WHERE company_id = $1`, [companyId]);
+    config = cfg.rows[0] || null;
+  } catch (err) {
+    if (err.code !== '42703' && err.code !== '42P01') {
+      console.warn('[credit/pix] loadLateContext falhou:', err.message);
+    }
+    config = null;
+  }
+  let profile = null;
+  if (customerId) {
+    try {
+      const prof = await pool.query(
+        `SELECT * FROM customer_credit_profiles WHERE company_id = $1 AND customer_id = $2`,
+        [companyId, customerId]
+      );
+      profile = prof.rows[0] || null;
+    } catch (err) {
+      if (err.code !== '42703' && err.code !== '42P01') {
+        console.warn('[credit/pix] loadLateContext falhou:', err.message);
+      }
+      profile = null;
+    }
+  }
+  return { config, profile };
 }
 
 function buildWhatsAppMessage(template, params = {}) {
@@ -162,6 +245,53 @@ router.get('/customers/:cid/profile', async (req, res) => {
     console.error('GET /credit/customers/:cid/profile', err.message);
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
+});
+
+// ─── GET /credit/customers/:cid/pix?amount=N (B2) ─────────────────────────
+// Payload EMV (Pix copia-e-cola) de VALOR LIVRE.
+// Sem cap por saldo: pagamento acima do devido vira credito em conta
+// (decisao de produto). QR e gerado no FRONTEND a partir do payload.
+router.get('/customers/:cid/pix', async (req, res) => {
+  const companyId  = req.params.id;
+  const customerId = req.params.cid;
+  const amount = Number(req.query.amount);
+  if (!isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: 'amount deve ser um numero maior que zero.' });
+  }
+  try {
+    const { rows: custRows } = await pool.query(
+      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
+      [customerId, companyId]
+    );
+    if (!custRows.length) return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa.' });
+
+    const pix = await resolvePixSetup(companyId);
+    if (!pix) {
+      return res.status(422).json({
+        error: 'Chave Pix nao configurada. Configure em Canal Digital > Pagamentos.',
+        code:  'PIX_KEY_MISSING',
+      });
+    }
+
+    const txid = sanitizeTxid('CREDL' + String(customerId).replace(/-/g, ''));
+    const emv = buildStaticBrCode({
+      pixKey:          pix.pixKey,
+      amount:          creditLedger.round2(amount),
+      beneficiaryName: pix.name,
+      beneficiaryCity: pix.city,
+      txid,
+    });
+
+    res.json({
+      emv,
+      amount:        creditLedger.round2(amount),
+      key_type:      pix.keyType,
+      merchant_name: pix.name,
+    });
+  } catch (err) {
+    console.error('GET /credit/customers/:cid/pix', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── PUT /credit/customers/:cid/terms (F2) ────────────────────────────────────
@@ -430,6 +560,8 @@ router.put('/plan-config', async (req, res) => {
 // F3: aceita account_id para vincular parcelas ao carne
 // Hub F1.4.1: aviso de score NAO-impeditivo (warnings[]). UNICO impeditivo
 //             continua sendo o bloqueio MANUAL (status === 'blocked' -> 422).
+// B2: pix_link fake aposentado — parcelas novas gravam NULL; o Pix real (EMV)
+//     e gerado on-demand via GET /installments/:iid/pix.
 router.post('/installments', async (req, res) => {
   const companyId = req.params.id;
   const { customer_id, sale_id, total_amount, installments, first_due_date,
@@ -483,10 +615,9 @@ router.post('/installments', async (req, res) => {
         const ins = await client.query(
           `INSERT INTO credit_installments
              (company_id, sale_id, customer_id, installment_number, total_installments,
-              amount_due, due_date, status, pix_link, covered_amount, account_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,0,$9) RETURNING *`,
-          [companyId, sale_id || null, customer_id, i, n, amount, dueDateStr,
-           'https://pagar.getaura.com.br/parcela/tmp', account_id || null]
+              amount_due, due_date, status, covered_amount, account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',0,$8) RETURNING *`,
+          [companyId, sale_id || null, customer_id, i, n, amount, dueDateStr, account_id || null]
         );
         row = ins.rows[0];
       } catch (e) {
@@ -494,17 +625,15 @@ router.post('/installments', async (req, res) => {
           const ins = await client.query(
             `INSERT INTO credit_installments
                (company_id, sale_id, customer_id, installment_number, total_installments,
-                amount_due, due_date, status, pix_link, covered_amount)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,0) RETURNING *`,
-            [companyId, sale_id || null, customer_id, i, n, amount, dueDateStr,
-             'https://pagar.getaura.com.br/parcela/tmp']
+                amount_due, due_date, status, covered_amount)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',0) RETURNING *`,
+            [companyId, sale_id || null, customer_id, i, n, amount, dueDateStr]
           );
           row = ins.rows[0];
         } else throw e;
       }
-      await client.query(`UPDATE credit_installments SET pix_link=$2 WHERE id=$1`,
-        [row.id, buildPixLink(row.id)]);
-      createdInstallments.push({ ...row, pix_link: buildPixLink(row.id) });
+      // B2: sem UPDATE de pix_link — o campo fica NULL (link fake aposentado).
+      createdInstallments.push(row);
     }
     if (sale_id) {
       try {
@@ -600,6 +729,75 @@ router.get('/installments', async (req, res) => {
     res.json({ data, total: parseInt(count.rows[0].count), page: parseInt(page), limit: parseInt(limit) });
   } catch (err) {
     console.error('GET /credit/installments', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /credit/installments/:iid/pix (B2) ────────────────────────────────────
+// Payload EMV (Pix copia-e-cola) da parcela. Valor devido HOJE:
+// remaining + encargos lazy (mesma conta do GET /customers/:cid/profile).
+// Encargos OFF (late_charges_enabled=false) => so remaining.
+// QR e gerado no FRONTEND a partir do payload (react-native-qrcode-svg).
+router.get('/installments/:iid/pix', async (req, res) => {
+  const companyId     = req.params.id;
+  const installmentId = req.params.iid;
+  try {
+    const { rows } = await pool.query(
+      `SELECT ci.*, COALESCE(c.name, c.phone) AS customer_name
+         FROM credit_installments ci
+         LEFT JOIN customers c ON c.id = ci.customer_id AND c.company_id = ci.company_id
+        WHERE ci.id = $1 AND ci.company_id = $2`,
+      [installmentId, companyId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Parcela nao encontrada.' });
+    const inst = rows[0];
+    if (inst.status === 'paid') {
+      return res.status(409).json({ error: 'Parcela ja paga.', code: 'INSTALLMENT_PAID' });
+    }
+    if (inst.status === 'cancelled') {
+      return res.status(409).json({ error: 'Parcela cancelada.', code: 'INSTALLMENT_CANCELLED' });
+    }
+
+    const { config, profile } = await loadLateContext(companyId, inst.customer_id);
+    const terms = creditLedger.resolveTerms(profile, config);
+    const remaining = parseFloat((parseFloat(inst.amount_due) - parseFloat(inst.covered_amount || 0)).toFixed(2));
+    const lc = creditLedger.computeLateCharges(inst, terms, config);
+    const amount = parseFloat((remaining + lc.charges_total).toFixed(2));
+    if (amount <= 0) {
+      return res.status(409).json({ error: 'Parcela sem valor em aberto.', code: 'NOTHING_DUE' });
+    }
+
+    const pix = await resolvePixSetup(companyId);
+    if (!pix) {
+      return res.status(422).json({
+        error: 'Chave Pix nao configurada. Configure em Canal Digital > Pagamentos.',
+        code:  'PIX_KEY_MISSING',
+      });
+    }
+
+    const txid = sanitizeTxid('CRED' + String(installmentId).replace(/-/g, ''));
+    const emv = buildStaticBrCode({
+      pixKey:          pix.pixKey,
+      amount,
+      beneficiaryName: pix.name,
+      beneficiaryCity: pix.city,
+      txid,
+    });
+
+    res.json({
+      emv,
+      amount,
+      key_type:      pix.keyType,
+      merchant_name: pix.name,
+      installment: {
+        id:         inst.id,
+        number:     inst.installment_number,
+        due_date:   inst.due_date,
+        account_id: inst.account_id || null,
+      },
+    });
+  } catch (err) {
+    console.error('GET /credit/installments/:iid/pix', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -905,7 +1103,7 @@ router.get('/dashboard/aging', async (req, res) => {
   }
 });
 
-// ─── collection/rules + collection/trigger (inalterados) ───────────────────────────
+// ─── collection/rules + collection/trigger ───────────────────────────────────────
 router.get('/collection/rules', async (req, res) => {
   const client = await pool.connect();
   try {
@@ -956,6 +1154,9 @@ router.put('/collection/rules', async (req, res) => {
   } finally { client.release(); }
 });
 
+// B2: a mensagem de cobranca agora carrega o Pix copia-e-cola REAL (EMV),
+// com o valor devido HOJE (remaining + encargos lazy). Fallback: pix_link
+// legado gravado na parcela (parcelas novas nao gravam mais).
 router.post('/collection/trigger/:iid', async (req, res) => {
   const companyId     = req.params.id;
   const installmentId = req.params.iid;
@@ -975,6 +1176,27 @@ router.post('/collection/trigger/:iid', async (req, res) => {
     if (!ins.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Parcela nao encontrada.' }); }
     const row = ins.rows[0];
     const daysLate = Math.max(0, Math.floor((Date.now() - new Date(row.due_date)) / 86400000));
+
+    // B2: Pix copia-e-cola real (defensivo: qualquer falha => fallback legado).
+    let pixCopiaECola = '';
+    try {
+      const { config, profile } = await loadLateContext(companyId, row.customer_id);
+      const terms = creditLedger.resolveTerms(profile, config);
+      const remaining = parseFloat((parseFloat(row.amount_due) - parseFloat(row.covered_amount || 0)).toFixed(2));
+      const lc = creditLedger.computeLateCharges(row, terms, config);
+      const totalDue = parseFloat((remaining + lc.charges_total).toFixed(2));
+      const pix = await resolvePixSetup(companyId);
+      if (pix && totalDue > 0) {
+        pixCopiaECola = buildStaticBrCode({
+          pixKey:          pix.pixKey,
+          amount:          totalDue,
+          beneficiaryName: pix.name,
+          beneficiaryCity: pix.city,
+          txid:            sanitizeTxid('CRED' + String(installmentId).replace(/-/g, '')),
+        });
+      }
+    } catch (_) { pixCopiaECola = ''; }
+
     const message = buildWhatsAppMessage(template, {
       customerName:      row.customer_name,
       storeName:         row.store_name || 'Loja',
@@ -982,7 +1204,7 @@ router.post('/collection/trigger/:iid', async (req, res) => {
       dueDate:           new Date(row.due_date).toLocaleDateString('pt-BR'),
       installmentNum:    row.installment_number,
       totalInstallments: row.total_installments,
-      pixLink:           row.pix_link || buildPixLink(row.id),
+      pixLink:           pixCopiaECola || row.pix_link || '',
       daysLate:          String(daysLate),
     });
     try {
@@ -998,7 +1220,7 @@ router.post('/collection/trigger/:iid', async (req, res) => {
       );
     } catch (e) { if (e.code !== '42P01' && e.code !== '42703') throw e; }
     await client.query('COMMIT');
-    res.json({ success: true, installment_id: installmentId, channel, template, message, phone: row.phone, days_late: daysLate });
+    res.json({ success: true, installment_id: installmentId, channel, template, message, pix_copia_cola: pixCopiaECola || null, phone: row.phone, days_late: daysLate });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('POST /credit/collection/trigger/:iid', err.message);

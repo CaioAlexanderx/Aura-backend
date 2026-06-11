@@ -90,12 +90,9 @@ describe('creditLedger.createCreditSale', () => {
       { rows: [configRow] },  // _getOrCreatePlanConfig (topo)
       { rows: [debitRow] },   // INSERT debit
       { rows: [] },           // INSERT A Receber
-      { rows: [instRow1] },   // INSERT installment 1
-      { rows: [] },           // UPDATE pix_link 1
+      { rows: [instRow1] },   // INSERT installment 1 (B2: sem UPDATE pix_link)
       { rows: [instRow2] },   // INSERT installment 2
-      { rows: [] },           // UPDATE pix_link 2
       { rows: [instRow3] },   // INSERT installment 3
-      { rows: [] },           // UPDATE pix_link 3
       { rows: [] },           // UPDATE sales (is_installment)
       { rows: [] },           // UPDATE customer_credit_profiles (credit_used)
     ]);
@@ -129,8 +126,8 @@ describe('creditLedger.createCreditSale', () => {
       { rows: [configRow] },
       { rows: [debitRow] },
       { rows: [] },
-      { rows: [instRow1] }, { rows: [] },
-      { rows: [instRow2] }, { rows: [] },
+      { rows: [instRow1] }, // (B2: sem UPDATE pix_link)
+      { rows: [instRow2] },
       { rows: [] }, { rows: [] },
     ]);
 
