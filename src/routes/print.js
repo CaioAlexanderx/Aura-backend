@@ -252,6 +252,13 @@ router.get('/danfe/devolucao/:saleId', requireAuth, async (req, res) => {
 //
 // requireAuth: frontend deve chamar via fetch com Authorization header
 // e renderizar via document.write (mesmo padrão das outras rotas /print/*).
+//
+// 3T3 (11/06/2026): cada parcela EM ABERTO ganha Pix copia-e-cola + QR
+//   POR PARCELA, reusando buildStaticBrCode (mesmo gerador do B2). O valor
+//   do Pix da parcela e o PRINCIPAL restante (amount_due - covered_amount);
+//   encargos lazy (mora/multa) NAO entram no papel pois mudam diariamente —
+//   uma nota fixa avisa que atrasos sao calculados no pagamento. As somas
+//   impressas batem com customer_credit_balances (sem encargos).
 // ============================================================
 router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   const companyId  = req.params.id;
@@ -336,8 +343,10 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/carne] accounts warn:', e.message);
     }
 
-    // 6. Chave Pix da loja (digital_channel_config)
-    let pixPayload = null;
+    // 6. Chave Pix da loja (digital_channel_config). Captura pixSetup p/ reuso
+    //    no bloco global E nos blocos por parcela (3T3).
+    let pixSetup = null;   // { pixKey, name, city }
+    let pixPayload = null; // bloco global (saldo total)
     try {
       const { rows: cfgRows } = await db.query(
         `SELECT pix_key, pix_key_type, pix_holder_name, pix_holder_city, site_name, address
@@ -353,12 +362,17 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
             const parts = String(cfg.address).split(',').map(s => s.trim());
             city = parts[parts.length - 2] || parts[parts.length - 1] || '';
           }
+          pixSetup = {
+            pixKey: validation.normalized,
+            name:   cfg.pix_holder_name || cfg.site_name || company.display_name || 'AURA NEGOCIO',
+            city:   city || company.address_city || 'BRASIL',
+          };
           // Se saldo > 0 inclui o valor; senão gera sem valor fixo (comprador digita)
           pixPayload = buildStaticBrCode({
-            pixKey:          validation.normalized,
+            pixKey:          pixSetup.pixKey,
             amount:          totalBalance > 0 ? totalBalance : undefined,
-            beneficiaryName: cfg.pix_holder_name || cfg.site_name || company.display_name || 'AURA NEGOCIO',
-            beneficiaryCity: city || company.address_city || 'BRASIL',
+            beneficiaryName: pixSetup.name,
+            beneficiaryCity: pixSetup.city,
             txid:            `CRED${customerId.replace(/-/g, '').slice(0, 20)}`,
           });
         }
@@ -397,6 +411,9 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       return dt.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
     }
 
+    // 3T3: coleta os QRs (global + por parcela) p/ renderizar 1x no fim do body.
+    const pixQrJobs = [];
+
     let accountsHTML = '';
     if (orderedKeys.length === 0) {
       accountsHTML = '<p style="color:#666;font-size:12px">Nenhuma parcela registrada.</p>';
@@ -412,13 +429,39 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 
         const rowsHTML = instList.map(inst => {
           const remaining = Math.max(0, parseFloat(inst.amount_due) - parseFloat(inst.covered_amount || 0));
+
+          // 3T3: Pix por parcela (so em aberto, com valor de PRINCIPAL restante).
+          let pixRow = '';
+          if (pixSetup && inst.status !== 'paid' && remaining > 0.005) {
+            const instPix = buildStaticBrCode({
+              pixKey:          pixSetup.pixKey,
+              amount:          remaining,
+              beneficiaryName: pixSetup.name,
+              beneficiaryCity: pixSetup.city,
+              txid:            `CRED${String(inst.id).replace(/-/g, '').slice(0, 20)}`,
+            });
+            const qrId = 'qr-' + String(inst.id).replace(/-/g, '');
+            pixQrJobs.push({ id: qrId, payload: instPix });
+            pixRow = `<tr><td colspan="5" style="padding:2px 4px 10px">
+              <div style="border:1px solid #ccc;background:#fafafa;padding:6px;page-break-inside:avoid">
+                <div style="font-size:10px;font-weight:bold;margin-bottom:3px">
+                  Pix da parcela ${inst.installment_number}/${inst.total_installments} — R$${fmt(remaining)}
+                </div>
+                <div style="font-family:'Courier New',monospace;font-size:8px;word-break:break-all;
+                            background:#fff;border:1px solid #ddd;padding:4px;margin-bottom:5px;
+                            user-select:all">${instPix}</div>
+                <div id="${qrId}" style="text-align:center"></div>
+              </div>
+            </td></tr>`;
+          }
+
           return `<tr>
             <td style="padding:3px 4px">${inst.installment_number}/${inst.total_installments}</td>
             <td style="padding:3px 4px">${fmtDate(inst.due_date)}</td>
             <td style="padding:3px 4px;text-align:right">R$${fmt(inst.amount_due)}</td>
             <td style="padding:3px 4px;text-align:right">${inst.status !== 'paid' ? `R$${fmt(remaining)}` : '—'}</td>
             <td style="padding:3px 4px;text-align:center">${statusLabel(inst.status)}</td>
-          </tr>`;
+          </tr>${pixRow}`;
         }).join('');
 
         accountsHTML += `
@@ -445,13 +488,14 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       }
     }
 
-    // 8. Bloco Pix
+    // 8. Bloco Pix global (pagar tudo de uma vez)
     let pixHTML = '';
     if (pixPayload) {
+      pixQrJobs.push({ id: 'carne-qr', payload: pixPayload });
       const balLabel = totalBalance > 0 ? ` — R$ ${fmt(totalBalance)}` : '';
       pixHTML = `
         <div style="border:1px solid #000;padding:10px;margin-top:12px;page-break-inside:avoid">
-          <div style="font-weight:bold;font-size:13px;margin-bottom:6px">Pagar via Pix${balLabel}</div>
+          <div style="font-weight:bold;font-size:13px;margin-bottom:6px">Pagar tudo de uma vez via Pix${balLabel}</div>
           <div style="font-size:10px;margin-bottom:6px;color:#444">
             Copie o codigo abaixo ou escaneie o QR Code com o app do seu banco.
           </div>
@@ -464,23 +508,28 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
           <div style="font-size:9px;color:#666;margin-top:6px;text-align:center">
             Pagamento confirmado manualmente pela loja.
           </div>
-        </div>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-        <script>
-          (function() {
-            var el = document.getElementById('carne-qr');
-            if (el && typeof QRCode !== 'undefined') {
-              new QRCode(el, { text: ${JSON.stringify(pixPayload)}, width: 120, height: 120,
-                correctLevel: QRCode.CorrectLevel.M });
-            }
-          })();
-        </script>`;
+        </div>`;
     } else {
       pixHTML = `
         <div style="border:1px dashed #999;padding:8px;margin-top:12px;font-size:10px;color:#666;text-align:center">
           Pagamento confirmado manualmente pela loja. Nenhuma chave Pix configurada.
         </div>`;
     }
+
+    // 3T3: script unico que renderiza todos os QRs (global + por parcela).
+    const qrScript = pixQrJobs.length
+      ? `<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+         <script>
+           (function() {
+             var jobs = ${JSON.stringify(pixQrJobs)};
+             if (typeof QRCode === 'undefined') return;
+             jobs.forEach(function(j) {
+               var el = document.getElementById(j.id);
+               if (el) new QRCode(el, { text: j.payload, width: 116, height: 116, correctLevel: QRCode.CorrectLevel.M });
+             });
+           })();
+         </script>`
+      : '';
 
     // 9. Montar HTML final
     const printDate = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
@@ -519,6 +568,10 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   </div>
   <div class="divider"></div>
   <div class="section-title">Cronograma de Parcelas</div>
+  <div style="font-size:10px;color:#444;margin-bottom:10px">
+    Os valores exibidos sao de <strong>principal</strong>. Parcelas em atraso estao sujeitas a
+    multa e mora, calculadas no momento do pagamento.
+  </div>
   ${accountsHTML}
   <div class="divider"></div>
   <div style="text-align:right;font-size:13px;font-weight:bold;margin-bottom:8px">
@@ -531,7 +584,8 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   </div>
   <br>
   <button onclick="window.print()" style="width:100%;padding:10px;cursor:pointer;font-size:14px">Imprimir</button>
-  <script>window.onload = function() { window.print(); };</script>
+  ${qrScript}
+  <script>window.onload = function() { setTimeout(function(){ window.print(); }, 350); };</script>
 </body>
 </html>`;
 
