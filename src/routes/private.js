@@ -68,6 +68,8 @@ router.use('/customers', requirePlan('negocio', 'expansao'), require('./retentio
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInstallments'));
+// B4 (11/06/2026): devolucao de venda no crediario -- POST /credit/sales/:saleId/refund
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditRefund'));
 // F2-2B (29/05/2026): preview 360 + quick-customer
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditPreview'));
 // F2-2D (29/05/2026): a receber crediario no Financeiro
