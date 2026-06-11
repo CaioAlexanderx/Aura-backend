@@ -20,6 +20,16 @@ const NUVEM_URL = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfisc
 
 function fmt(v) { return parseFloat(v || 0).toFixed(2); }
 
+// A1-BE: sanitize all user-controlled values before embedding in HTML
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function receiptHTML({ company, sale, items, payments, options = {} }) {
   const { autoprint = false, width80 = true } = options;
   const date = new Date(sale.created_at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
@@ -470,7 +480,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
         accountsHTML += `
           <div style="margin-bottom:16px">
             <div style="font-weight:bold;font-size:13px;margin-bottom:4px">
-              ${accName}${accStatus === 'closed' ? ' <span style="font-size:10px;color:#666">(encerrado)</span>' : ''}
+              ${esc(accName)}${accStatus === 'closed' ? ' <span style="font-size:10px;color:#666">(encerrado)</span>' : ''}
             </div>
             <table style="width:100%;border-collapse:collapse;font-size:11px">
               <thead>
@@ -540,7 +550,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>Carne - ${company.display_name}</title>
+  <title>Carne - ${esc(company.display_name)}</title>
   <style>
     @page { margin: 10mm 12mm; size: A4; }
     * { margin:0; padding:0; box-sizing:border-box; }
@@ -555,19 +565,19 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 </head>
 <body>
   <div class="center" style="margin-bottom:8px">
-    <div class="company-name">${company.display_name}</div>
+    <div class="company-name">${esc(company.display_name)}</div>
     ${company.cnpj ? '<div>CNPJ: ' + company.cnpj + '</div>' : ''}
-    ${company.phone ? '<div>Tel: ' + company.phone + '</div>' : ''}
-    ${company.address_city ? '<div>' + company.address_city + (company.address_state ? ' - ' + company.address_state : '') + '</div>' : ''}
+    ${company.phone ? '<div>Tel: ' + esc(company.phone) + '</div>' : ''}
+    ${company.address_city ? '<div>' + esc(company.address_city) + (company.address_state ? ' - ' + esc(company.address_state) : '') + '</div>' : ''}
   </div>
   <div class="divider"></div>
   <div class="center bold" style="font-size:15px;margin-bottom:4px">CARNE / EXTRATO DE CREDIARIO</div>
   <div style="font-size:10px;text-align:center;margin-bottom:8px">Emitido em: ${printDate}</div>
   <div class="divider"></div>
   <div style="margin-bottom:8px">
-    <div><strong>Cliente:</strong> ${customer.name}</div>
-    ${customer.phone ? '<div><strong>Telefone:</strong> ' + customer.phone + '</div>' : ''}
-    ${customer.cpf_cnpj ? '<div><strong>CPF/CNPJ:</strong> ' + customer.cpf_cnpj + '</div>' : ''}
+    <div><strong>Cliente:</strong> ${esc(customer.name)}</div>
+    ${customer.phone ? '<div><strong>Telefone:</strong> ' + esc(customer.phone) + '</div>' : ''}
+    ${customer.cpf_cnpj ? '<div><strong>CPF/CNPJ:</strong> ' + esc(customer.cpf_cnpj) + '</div>' : ''}
   </div>
   <div class="divider"></div>
   <div class="section-title">Cronograma de Parcelas</div>
@@ -583,7 +593,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   ${pixHTML}
   <div class="divider"></div>
   <div style="font-size:9px;text-align:center;margin-top:6px;color:#666">
-    ${company.display_name} &mdash; Powered by Aura. &mdash; getaura.com.br
+    ${esc(company.display_name)} &mdash; Powered by Aura. &mdash; getaura.com.br
   </div>
   <br>
   <button onclick="window.print()" style="width:100%;padding:10px;cursor:pointer;font-size:14px">Imprimir</button>
@@ -725,7 +735,7 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       '<html lang="pt-BR">\n' +
       '<head>\n' +
       '  <meta charset="UTF-8">\n' +
-      '  <title>Recibo Crediario - ' + company.display_name + '</title>\n' +
+      '  <title>Recibo Crediario - ' + esc(company.display_name) + '</title>\n' +
       '  <style>\n' +
       '    @page { margin: 10mm 12mm; size: A4; }\n' +
       '    * { margin:0; padding:0; box-sizing:border-box; }\n' +
@@ -745,18 +755,18 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       '</head>\n' +
       '<body>\n' +
       '  <div class="center" style="margin-bottom:8px">\n' +
-      '    <div class="company-name">' + company.display_name + '</div>\n' +
+      '    <div class="company-name">' + esc(company.display_name) + '</div>\n' +
       (company.cnpj ? '    <div>CNPJ: ' + company.cnpj + '</div>\n' : '') +
-      (company.phone ? '    <div>Tel: ' + company.phone + '</div>\n' : '') +
-      (company.address_city ? '    <div>' + company.address_city + (company.address_state ? ' - ' + company.address_state : '') + '</div>\n' : '') +
+      (company.phone ? '    <div>Tel: ' + esc(company.phone) + '</div>\n' : '') +
+      (company.address_city ? '    <div>' + esc(company.address_city) + (company.address_state ? ' - ' + esc(company.address_state) : '') + '</div>\n' : '') +
       '  </div>\n' +
       '  <div class="divider"></div>\n' +
       '  <div class="center bold" style="font-size:14px;margin-bottom:4px">RECIBO DE PAGAMENTO — CREDIARIO</div>\n' +
       '  <div class="divider"></div>\n' +
       '  <div style="margin-bottom:8px">\n' +
-      '    <div><strong>Cliente:</strong> ' + customer.name + '</div>\n' +
-      (customer.phone ? '    <div><strong>Telefone:</strong> ' + customer.phone + '</div>\n' : '') +
-      (customer.cpf_cnpj ? '    <div><strong>CPF/CNPJ:</strong> ' + customer.cpf_cnpj + '</div>\n' : '') +
+      '    <div><strong>Cliente:</strong> ' + esc(customer.name) + '</div>\n' +
+      (customer.phone ? '    <div><strong>Telefone:</strong> ' + esc(customer.phone) + '</div>\n' : '') +
+      (customer.cpf_cnpj ? '    <div><strong>CPF/CNPJ:</strong> ' + esc(customer.cpf_cnpj) + '</div>\n' : '') +
       '  </div>\n' +
       '  <div class="divider"></div>\n' +
       '  <table>\n' +
