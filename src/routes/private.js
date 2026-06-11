@@ -66,6 +66,9 @@ router.use('/employees', require('./employees'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
+// Decomposicao credit.js (passo 1, 11/06/2026): /balances isolado, montado ANTES de ./credit
+// para atender GET /credit/balances com a flag de atraso calculada por data (relato #1).
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditBalances'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInstallments'));
 // B4 (11/06/2026): devolucao de venda no crediario -- POST /credit/sales/:saleId/refund
