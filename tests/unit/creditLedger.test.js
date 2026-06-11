@@ -7,19 +7,6 @@
 //   applyPayment       -- total, parcial, split, > A Receber (legacy)
 //   applyPayment (F2)  -- encargos materializados (gated, OFF, idempotencia)
 //   cancelCreditSale   -- reverte debit + AR + installments
-//
-// Regras:
-//   - resetAllMocks no beforeEach (nao clearAllMocks)
-//   - Mock client = objeto com .query jest.fn() sequencial
-//   - pool.query mockado via jest.setup.js (database mock global)
-//
-// NOTA pool.query + .catch():
-//   getCustomerCreditPreview usa pool.query(profiles).catch(() => ...).
-//   Apos resetAllMocks(), pool.query eh jest.fn() sem implementacao e
-//   retorna undefined. Chamar .catch() em undefined lanca TypeError
-//   sincronico antes do Promise.all, quebrando o teste.
-//   Solucao: beforeEach do describe de preview seta
-//   pool.query.mockResolvedValue({ rows: [] }) como fallback seguro.
 // ============================================================
 
 const pool = require('../../src/config/database');
@@ -66,12 +53,10 @@ describe('creditLedger.createCreditSale', () => {
     expect(result.schedule).toHaveLength(0);
     expect(client.query).toHaveBeenCalledTimes(4);
 
-    // Verifica que o debit foi inserido corretamente
     const debitCall = client.query.mock.calls[2];
     expect(debitCall[0]).toMatch(/INSERT INTO customer_credit_transactions/i);
     expect(debitCall[1]).toEqual(expect.arrayContaining([COMPANY_ID, CUSTOMER_ID, SALE_ID, 100]));
 
-    // Verifica A Receber
     const arCall = client.query.mock.calls[3];
     expect(arCall[0]).toMatch(/Crediario - A Receber/i);
     expect(arCall[1]).toEqual(expect.arrayContaining(['pdv-credit-receivable-' + SALE_ID]));
@@ -108,7 +93,6 @@ describe('creditLedger.createCreditSale', () => {
     expect(result.schedule[0].installment_number).toBe(1);
     expect(result.schedule[2].installment_number).toBe(3);
 
-    // Verifica que covered_amount=0 no INSERT
     const inst1Call = client.query.mock.calls[4];
     expect(inst1Call[0]).toMatch(/INSERT INTO credit_installments/i);
     expect(inst1Call[0]).toMatch(/covered_amount/i);
@@ -137,8 +121,6 @@ describe('creditLedger.createCreditSale', () => {
       installments: 2, interestRate: 0.02, firstDueDate: '2026-07-01',
     });
 
-    // Com juros simples: total = 100 * (1 + 0.02*2) = 104
-    // Cada parcela = 52.00
     const inst1Insert = client.query.mock.calls[4];
     const amt = inst1Insert[1][5]; // 6o parametro = amount_due
     expect(parseFloat(amt)).toBeCloseTo(52, 1);
@@ -158,7 +140,6 @@ describe('creditLedger.applyPayment', () => {
     ];
     const balRow = { balance: '0.00' };
 
-    // Parcela fica 'paid' (covered_amount 100 >= amount_due 100) -> recalculateScore chamado
     const client = makeMockClient([
       { rows: [txRow] },
       { rows: pendingAR },
@@ -166,7 +147,6 @@ describe('creditLedger.applyPayment', () => {
       { rows: [] },  // INSERT sale_payments
       { rows: pendingInst },
       { rows: [] },  // UPDATE credit_installments covered_amount
-      // recalculateScore: 2 queries
       { rows: [{ total_paid_count: '1', total_paid_on_time: '1', avg_days_late: '0', total_purchases: '100' }] },
       { rows: [{ months: '1' }] },
       { rows: [] }, // UPDATE score
@@ -205,7 +185,6 @@ describe('creditLedger.applyPayment', () => {
       { rows: [] },  // INSERT rest A Receber
       { rows: pendingInst },
       { rows: [] },  // UPDATE covered_amount (50, status stays 'pending')
-      // sem recalculateScore (parcela nao ficou 'paid')
       { rows: [] },  // UPDATE credit_used
       { rows: [balRow] },
     ]);
@@ -222,7 +201,6 @@ describe('creditLedger.applyPayment', () => {
     expect(result.covered_installments[0].status).toBe('pending');
     expect(result.new_balance).toBe(50);
 
-    // Verifica que o split criou nova A Receber
     const splitCall = client.query.mock.calls[4];
     expect(splitCall[0]).toMatch(/Crediario - A Receber/i);
     expect(splitCall[1][1]).toBeCloseTo(50, 2);
@@ -242,7 +220,6 @@ describe('creditLedger.applyPayment', () => {
       { rows: [] },  // INSERT sale_payments
       { rows: [] },  // INSERT Recebido legacy (remaining=100)
       { rows: [] },  // SELECT installments FOR UPDATE (vazio)
-      // sem recalculateScore
       { rows: [] },  // UPDATE credit_used
       { rows: [balRow] },
     ]);
@@ -256,7 +233,6 @@ describe('creditLedger.applyPayment', () => {
     expect(result.settled_receivables[0].partial).toBe(false);
     expect(result.legacy_amount).toBe(100);
 
-    // Verifica insercao do legacy
     const legacyCall = client.query.mock.calls[4];
     expect(legacyCall[0]).toMatch(/Crediario - Recebido/i);
     expect(legacyCall[0]).toMatch(/confirmed/i);
@@ -280,7 +256,6 @@ describe('creditLedger.applyPayment', () => {
       idempotencyKey: 'test-key-001',
     });
 
-    // Primeira query deve usar ON CONFLICT (idempotency_key)
     const insertCall = client.query.mock.calls[0];
     expect(insertCall[0]).toMatch(/ON CONFLICT \(idempotency_key\)/i);
     expect(insertCall[1]).toContain('test-key-001');
@@ -289,22 +264,10 @@ describe('creditLedger.applyPayment', () => {
 
 // ============================================================
 // F2 PR2: MATERIALIZACAO de encargos (mora/multa) no recebimento.
-//
-// Arquitetura GATED: a materializacao SO roda quando
-// opts.config.late_charges_enabled === true E o pagamento e novo
-// (isNewPayment, ou seja NAO replay idempotente). Caso contrario o
-// comportamento e EXATAMENTE o atual (charges_paid: 0, zero queries
-// novas) — exatamente por isso TODOS os testes acima de applyPayment
-// (que NAO passam config) seguem com a mesma sequencia de mocks.
-//
-// Ordem (imutavel): ENCARGOS PRIMEIRO -> principal.
-// Invariante: encargos NUNCA viram customer_credit_transactions 'debit',
-// logo o saldo de principal nunca e inflado por encargos.
 // ============================================================
 describe('creditLedger.applyPayment — encargos (F2)', () => {
   beforeEach(() => { jest.resetAllMocks(); });
 
-  // Config com encargos LIGADOS. Tetos CDC: multa<=2%, mora<=1% a.m. (0.01/30/dia).
   const ENABLED_CONFIG = {
     late_charges_enabled: true,
     late_grace_days: 3,
@@ -313,16 +276,10 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
   };
 
   test('(a) enabled + parcela vencida: abate encargos primeiro, depois principal', async () => {
-    // due 2026-01-01, paidAt '2026-02-01'. O engine normaliza a data efetiva para o
-    // dia-calendario em America/Sao_Paulo (UTC-3): new Date('2026-02-01') = 00:00Z =>
-    // 2026-01-31 em SP. Logo daysOverdue = 30, daysCharged = 30-3 = 27.
-    // principalRemaining = 100 => multa = 100*0.02 = 2.00;
-    // mora = round2(100*(0.01/30)*27) = round2(0.90) = 0.90; total = 2.90.
     const txRow = { id: 'tx-charge-01', type: 'payment', amount: '50.00' };
     const openInst = [
       { id: 'inst-c1', sale_id: SALE_ID, amount_due: '100.00', covered_amount: '0', status: 'overdue', due_date: '2026-01-01' },
     ];
-    // amount 50: chargesPaid = 2.90, principalAmount = 47.10. AR de 100 => parcial.
     const pendingAR = [
       { id: 'ar-c1', amount: '100.00', idempotency_key: 'pdv-credit-receivable-' + SALE_ID, sale_id: SALE_ID },
     ];
@@ -338,11 +295,11 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
       { rows: [] },          // 3 UPDATE credit_installments (stamp late_fee/late_interest)
       { rows: [] },          // 4 INSERT sale_payments (encargos no caixa)
       { rows: pendingAR },   // 5 SELECT A Receber pendentes (FIFO principal)
-      { rows: [] },          // 6 UPDATE transactions (parcial: principal 47.10 < AR 100)
+      { rows: [] },          // 6 UPDATE transactions (parcial)
       { rows: [] },          // 7 INSERT sale_payments (principal)
       { rows: [] },          // 8 INSERT rest A Receber
       { rows: fifoInst },    // 9 SELECT installments FOR UPDATE
-      { rows: [] },          // 10 UPDATE covered_amount (parcial, segue overdue)
+      { rows: [] },          // 10 UPDATE covered_amount
       { rows: [] },          // 11 UPDATE credit_used
       { rows: [balRow] },    // 12 SELECT balance
     ]);
@@ -355,29 +312,24 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
       profile: null,
     });
 
-    // charges_paid esperado: 2.90 (multa 2.00 + mora 0.90)
     expect(result.charges_paid).toBeCloseTo(2.90, 2);
     expect(result.charges_detail).toHaveLength(1);
     expect(result.charges_detail[0].installment_id).toBe('inst-c1');
     expect(result.charges_detail[0].late_fee).toBeCloseTo(2.0, 2);
     expect(result.charges_detail[0].late_interest).toBeCloseTo(0.90, 2);
 
-    // Transacao 'Crediario - Encargos' inserida com o valor dos encargos.
     const encargosCall = client.query.mock.calls[2];
     expect(encargosCall[0]).toMatch(/Crediario - Encargos/i);
     expect(encargosCall[0]).toMatch(/confirmed/i);
-    expect(encargosCall[1][1]).toBeCloseTo(2.90, 2);          // amount = chargesPaid
-    expect(encargosCall[1]).toContain('credit-charges-' + txRow.id); // idempotency_key
+    expect(encargosCall[1][1]).toBeCloseTo(2.90, 2);
+    expect(encargosCall[1]).toContain('credit-charges-' + txRow.id);
 
-    // O principal aplicado e (amount - encargos) = 47.10: o UPDATE parcial da AR
-    // recebeu paidNow ~47.10.
     const arUpdateCall = client.query.mock.calls[6];
     expect(arUpdateCall[0]).toMatch(/UPDATE transactions/i);
-    expect(parseFloat(arUpdateCall[1][1])).toBeCloseTo(47.10, 2); // paidNow (principal)
+    expect(parseFloat(arUpdateCall[1][1])).toBeCloseTo(47.10, 2);
   });
 
   test('(b) OFF (config sem flag): charges_paid 0 e ZERO queries de encargos', async () => {
-    // Mesma sequencia EXATA do teste "pagamento parcial" acima (sem ramo de encargos).
     const txRow = { id: 'tx-off-01', type: 'payment', amount: '50.00' };
     const pendingAR = [
       { id: 'ar-off', amount: '100.00', idempotency_key: 'pdv-credit-receivable-off', sale_id: 'sale-off' },
@@ -389,7 +341,7 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
 
     const client = makeMockClient([
       { rows: [txRow] },     // 0 INSERT payment
-      { rows: pendingAR },   // 1 SELECT A Receber (NAO ha SELECT de encargos antes)
+      { rows: pendingAR },   // 1 SELECT A Receber
       { rows: [] },          // 2 UPDATE transactions (parcial)
       { rows: [] },          // 3 INSERT sale_payments
       { rows: [] },          // 4 INSERT rest A Receber
@@ -402,55 +354,57 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
     const result = await creditLedger.applyPayment(client, {
       companyId: COMPANY_ID, customerId: CUSTOMER_ID,
       amount: 50, method: 'dinheiro',
-      config: {}, // sem late_charges_enabled => OFF
+      config: {},
       profile: null,
     });
 
     expect(result.charges_paid).toBe(0);
     expect(result.charges_detail).toEqual([]);
-    // Sequencia identica ao comportamento atual (9 queries, nenhuma de encargos).
     expect(client.query).toHaveBeenCalledTimes(9);
     const anyEncargos = client.query.mock.calls.some(c => /Crediario - Encargos/i.test(c[0] || ''));
     expect(anyEncargos).toBe(false);
-    // O principal aplicado e o amount cheio (50): UPDATE parcial recebeu ~50.
     const arUpdateCall = client.query.mock.calls[2];
     expect(parseFloat(arUpdateCall[1][1])).toBeCloseTo(50, 2);
   });
 
-  test('(c) idempotencia: replay (ON CONFLICT) NAO materializa encargos de novo', async () => {
-    // INSERT do payment via idempotencyKey retorna vazio => isNewPayment=false.
-    // Mesmo com config ON, o ramo de encargos NAO roda. O FIFO de principal segue
-    // o comportamento pre-existente (no replay nao ha A Receber pendente -> o
-    // remanescente vira INSERT legacy com ON CONFLICT DO NOTHING = no-op).
+  test('(c) idempotencia: replay (ON CONFLICT) e NO-OP — nao materializa encargos nem re-roda o FIFO', async () => {
+    // C1-BE (auditoria 11/06): no replay idempotente o INSERT do payment retorna
+    // vazio (isNewPayment=false). A funcao agora retorna um resultado NO-OP
+    // reconstruido ANTES do FIFO — antes ela re-executava todo o FIFO (covered_amount
+    // dobrado, sale_payments duplicado, receita 2x). Sequencia: INSERT(0) +
+    // SELECT existing(1) + SELECT balance(2) e RETORNA. Nenhuma escrita.
     const existingTx = { id: 'tx-replay', type: 'payment', amount: '50.00' };
     const balRow = { balance: '50.00' };
 
     const client = makeMockClient([
       { rows: [] },           // 0 INSERT payment ON CONFLICT DO NOTHING (replay => 0 linhas)
       { rows: [existingTx] }, // 1 SELECT existing tx
-      { rows: [] },           // 2 SELECT A Receber (FIFO principal direto, sem encargos)
-      { rows: [] },           // 3 INSERT legacy Recebido (remaining=50, ON CONFLICT no-op)
-      { rows: [] },           // 4 SELECT installments FOR UPDATE
-      { rows: [] },           // 5 UPDATE credit_used
-      { rows: [balRow] },     // 6 SELECT balance
+      { rows: [balRow] },     // 2 SELECT balance (early return no-op)
     ]);
 
     const result = await creditLedger.applyPayment(client, {
       companyId: COMPANY_ID, customerId: CUSTOMER_ID,
       amount: 50, method: 'pix',
       idempotencyKey: 'replay-key-001',
-      config: ENABLED_CONFIG, // ON, mas replay nao materializa
+      config: ENABLED_CONFIG, // ON, mas replay e no-op
       profile: null,
     });
 
     expect(result.charges_paid).toBe(0);
     expect(result.charges_detail).toEqual([]);
-    // 7 queries: INSERT(0) + SELECT existing(1) + SELECT AR(2) + legacy(3) +
-    // SELECT installments(4) + UPDATE credit_used(5) + SELECT balance(6).
-    // NENHUMA de encargos.
-    expect(client.query).toHaveBeenCalledTimes(7);
+    expect(result.replayed).toBe(true);
+    expect(result.settled_receivables).toEqual([]);
+    expect(result.covered_installments).toEqual([]);
+    expect(result.new_balance).toBe(50);
+
+    // NO-OP: exatamente 3 queries (INSERT + SELECT existing + SELECT balance).
+    expect(client.query).toHaveBeenCalledTimes(3);
     const anyEncargos = client.query.mock.calls.some(c => /Crediario - Encargos/i.test(c[0] || ''));
     expect(anyEncargos).toBe(false);
+    const anyFifoWrite = client.query.mock.calls.some(c =>
+      /UPDATE credit_installments|INSERT INTO sale_payments|UPDATE transactions|INSERT INTO transactions/i.test(c[0] || '')
+    );
+    expect(anyFifoWrite).toBe(false);
     const selectedExisting = client.query.mock.calls.some(c => /SELECT \* FROM customer_credit_transactions WHERE idempotency_key/i.test(c[0] || ''));
     expect(selectedExisting).toBe(true);
   });
@@ -477,17 +431,14 @@ describe('creditLedger.cancelCreditSale', () => {
     expect(result.ok).toBe(true);
     expect(client.query).toHaveBeenCalledTimes(6);
 
-    // DELETE debit
     const deleteDebitCall = client.query.mock.calls[1];
     expect(deleteDebitCall[0]).toMatch(/DELETE FROM customer_credit_transactions/i);
     expect(deleteDebitCall[0]).toMatch(/type\s*=\s*'debit'/i);
 
-    // DELETE A Receber
     const deleteARCall = client.query.mock.calls[2];
     expect(deleteARCall[0]).toMatch(/DELETE FROM transactions/i);
     expect(deleteARCall[1]).toContain('pdv-credit-receivable-' + SALE_ID);
 
-    // UPDATE credit_installments (cancel)
     const cancelInstCall = client.query.mock.calls[4];
     expect(cancelInstCall[0]).toMatch(/UPDATE credit_installments/i);
     expect(cancelInstCall[0]).toMatch(/cancelled/i);
@@ -501,7 +452,6 @@ describe('creditLedger.cancelCreditSale', () => {
       { rows: [] }, // DELETE AR
       { rows: [] }, // DELETE splits
       { rows: [] }, // UPDATE installments
-      // sem UPDATE credit_used (customer_id null)
     ]);
 
     const result = await creditLedger.cancelCreditSale(client, {
@@ -509,7 +459,6 @@ describe('creditLedger.cancelCreditSale', () => {
     });
 
     expect(result.ok).toBe(true);
-    // Nao deve chamar UPDATE credit_used
     const calls = client.query.mock.calls.map(c => c[0]);
     const creditUsedCall = calls.find(q => typeof q === 'string' && q.includes('credit_used'));
     expect(creditUsedCall).toBeUndefined();
@@ -517,8 +466,6 @@ describe('creditLedger.cancelCreditSale', () => {
 });
 
 describe('422 CREDIARIO_REQUIRES_CUSTOMER', () => {
-  // Testa a logica de deteccao no pdv.js (sem precisar subir o servidor)
-  // A logica e: isCrediario && !customer_id => 422
   test('detecta crediario em payment_method', () => {
     const payment_method = 'crediario';
     const customer_id = null;
@@ -563,11 +510,6 @@ describe('422 CREDIARIO_REQUIRES_CUSTOMER', () => {
 describe('creditLedger.getCustomerCreditPreview', () => {
   beforeEach(() => {
     jest.resetAllMocks();
-    // IMPORTANTE: pool.query retorna `undefined` apos resetAllMocks (jest.fn() default).
-    // getCustomerCreditPreview chama pool.query(profiles).catch(...) -- se o resultado
-    // for undefined, .catch() lanca TypeError sincronico antes do Promise.all.
-    // Setamos mockResolvedValue como fallback seguro para todas as chamadas sem
-    // implementacao especifica.
     pool.query.mockResolvedValue({ rows: [] });
   });
 
@@ -583,7 +525,7 @@ describe('creditLedger.getCustomerCreditPreview', () => {
     expect(preview.score).toBe(720);
     expect(preview.score_label).toBe('bom');
     expect(preview.open_installments_count).toBe(2);
-    expect(preview.over_limit).toBe(false); // 150 < 500
+    expect(preview.over_limit).toBe(false);
     expect(preview.status).toBe('active');
   });
 
@@ -599,10 +541,6 @@ describe('creditLedger.getCustomerCreditPreview', () => {
   });
 
   test('retorna defaults quando tabelas nao existem (42P01)', async () => {
-    // mockRejectedValueOnce sobrepoe o mockResolvedValue do beforeEach para a 1a chamada.
-    // Chamadas 2 e 3 usam o mockResolvedValue({ rows: [] }) como fallback -- retornam
-    // Promises validas, permitindo que o .catch() do profiles seja chamado sem TypeError.
-    // Promise.all rejeita com o erro 42P01 da chamada 1, o catch o trata e retorna defaults.
     const err = Object.assign(new Error('table not found'), { code: '42P01' });
     pool.query.mockRejectedValueOnce(err);
 
