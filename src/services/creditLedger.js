@@ -18,6 +18,11 @@
 // REGRA DE NEGOCIO (imutavel): score baixo NUNCA bloqueia a venda.
 // Score so gera AVISO ao lojista. O UNICO impeditivo e o bloqueio
 // MANUAL do cliente (profile.status === 'blocked').
+//
+// B2 (11/06/2026): link fake pagar.getaura.com.br APOSENTADO. Parcelas
+// novas gravam pix_link NULL; o Pix real (EMV copia-e-cola) e gerado
+// on-demand nas rotas GET /credit/installments/:iid/pix e
+// GET /credit/customers/:cid/pix (staticPixService.buildStaticBrCode).
 // =============================================================
 
 const pool = require('../config/database');
@@ -30,14 +35,14 @@ const SP_DATE_COL = (col) => `(${col} AT TIME ZONE 'America/Sao_Paulo')::date`;
 const BACKDATE_TS = (p) =>
   `COALESCE((${p}::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW())`;
 
-// ─── F2 PR1: tetos CDC (imutaveis) ────────────────────────────
+// ─── F2 PR1: tetos CDC (imutaveis) ────────────────────────
 // Multa unica <= 2% do principal; mora <= 1% ao mes (linear),
 // expressa ao dia como 0.01/30 (~0.00033333). Acima do teto na
 // ESCRITA -> rejeitar (422). Na LEITURA o engine sempre clampa.
 const LATE_FEE_MAX            = 0.02;       // multa unica maxima
 const LATE_INTEREST_DAILY_MAX = 0.01 / 30;  // mora diaria maxima (1% a.m.)
 
-// ─── periodicidade de pagamento ───────────────────────────────
+// ─── periodicidade de pagamento ────────────────────────────
 function resolvePeriod(unit, count, config) {
   let u = unit || config?.period_unit || 'month';
   if (!['day', 'week', 'month'].includes(u)) u = 'month';
@@ -55,7 +60,7 @@ function dueDateForIndex(firstDueStr, unit, count, idx) {
   return d.toISOString().split('T')[0];
 }
 
-// ─── F2: resolveTerms ─────────────────────────────────────────
+// ─── F2: resolveTerms ─────────────────────────────────────
 // Retorna termos efetivos com precedencia:
 //   override do cliente (term_*) ?? config da loja ?? default hardcoded
 // Juros e sempre opt-in: null/0 = sem juros.
@@ -183,12 +188,7 @@ function computeLateCharges(installment, terms, config, asOf) {
   }
 }
 
-// ─── helpers internos ─────────────────────────────────────────
-
-function buildPixLink(id) {
-  const short = id.replace(/-/g, '').slice(0, 12);
-  return `https://pagar.getaura.com.br/parcela/${short}`;
-}
+// ─── helpers internos ─────────────────────────────────────
 
 // Exportado para reuso nas rotas (GET /customers/:cid/profile, preview PDV).
 function scoreLabel(score) {
@@ -199,7 +199,7 @@ function scoreLabel(score) {
   return 'bloqueado';
 }
 
-// ─── Hub F1.4: scoreWarning ───────────────────────────────────
+// ─── Hub F1.4: scoreWarning ───────────────────────────────
 // Aviso NAO-impeditivo. Retorna objeto se o score do cliente esta abaixo
 // do limiar configurado em credit_plan_configs.score_warn_min; senao null.
 // score_warn_min null/0 = sem aviso. Defensivo: config pode nao ter o campo
@@ -332,7 +332,7 @@ async function _recalculateScore(client, companyId, customerId) {
   }
 }
 
-// ─── API publica ───────────────────────────────────────────────
+// ─── API publica ──────────────────────────────────────────
 
 /**
  * createCreditSale — grava debit + A Receber + agenda parcelas.
@@ -486,9 +486,8 @@ async function createCreditSale(client, {
         const { rows: insRows } = await client.query(
           `INSERT INTO credit_installments
              (company_id, sale_id, customer_id, installment_number, total_installments,
-              amount_due, due_date, status, pix_link, covered_amount, account_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending',
-                   'https://pagar.getaura.com.br/parcela/tmp', 0, $8)
+              amount_due, due_date, status, covered_amount, account_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0, $8)
            RETURNING id`,
           [companyId, saleId, customerId, i, n, amt, dueDateStr, accountId]
         );
@@ -498,19 +497,16 @@ async function createCreditSale(client, {
           const { rows: insRows } = await client.query(
             `INSERT INTO credit_installments
                (company_id, sale_id, customer_id, installment_number, total_installments,
-                amount_due, due_date, status, pix_link, covered_amount)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending',
-                     'https://pagar.getaura.com.br/parcela/tmp', 0)
+                amount_due, due_date, status, covered_amount)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0)
              RETURNING id`,
             [companyId, saleId, customerId, i, n, amt, dueDateStr]
           );
           iid = insRows[0].id;
         } else throw err;
       }
-      await client.query(
-        `UPDATE credit_installments SET pix_link = $2 WHERE id = $1`,
-        [iid, buildPixLink(iid)]
-      );
+      // B2: sem UPDATE de pix_link — o campo fica NULL (link fake aposentado).
+      // O Pix real (EMV) e gerado on-demand via GET /credit/installments/:iid/pix.
       schedule.push({ id: iid, installment_number: i, amount_due: amt, due_date: dueDateStr });
     }
 
@@ -627,7 +623,7 @@ async function applyPayment(client, {
     txRow = r.rows[0];
   }
 
-  // ─── F2 PR2: MATERIALIZACAO DE ENCARGOS (mora/multa) ─────────────────
+  // ─── F2 PR2: MATERIALIZACAO DE ENCARGOS (mora/multa) ─────────────────────
   // GATED: so executa quando config.late_charges_enabled === true E o pagamento
   // e novo (isNewPayment). Caso contrario NENHUMA query nova roda e o
   // comportamento e EXATAMENTE o atual (principalAmount === amount).
