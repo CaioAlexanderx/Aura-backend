@@ -6,6 +6,7 @@
 // POST   /companies/:id/credit/customer/:cid/accounts   (F3)
 // DELETE /companies/:id/credit/transaction/:txid
 // POST   /companies/:id/credit/manual-entry
+// GET    /companies/:id/credit/customers/:cid/history    (B1)
 //
 // F2 (05/06/2026): PUT /customers/:cid/terms -- termos por cliente
 // F3 (05/06/2026): POST /customer/:cid/accounts -- multiplos carnes
@@ -18,6 +19,9 @@
 //                  os passa ao applyPayment para MATERIALIZAR encargos
 //                  (encargos primeiro -> principal). Resposta expoe charges_paid.
 //                  Defensivo 42703/42P01 -> config/profile undefined => OFF.
+// B1 (11/06/2026): GET /customers/:cid/history -- timeline de eventos do
+//                  cliente (compras com itens, pagamentos, creditos de troca,
+//                  debitos manuais) com paginacao por cursor.
 // B2 (11/06/2026): manual-entry NAO grava mais link fake pagar.getaura.com.br;
 //                  pix_link fica NULL e o Pix real (EMV) e gerado on-demand
 //                  via GET /credit/installments/:iid/pix.
@@ -603,6 +607,224 @@ router.get('/customers/search', async (req, res) => {
   } catch (err) {
     console.error('[credit] customers/search error:', err.message);
     res.status(500).json({ error: 'Erro ao buscar clientes' });
+  }
+});
+
+// ============================================================
+// B1 (11/06/2026): GET /customers/:cid/history
+// Timeline de eventos do cliente de crediario, paginada por cursor.
+//
+// Query params:
+//   limit  -- default 30, max 100
+//   cursor -- opaco: base64 de `created_at|id` (do ultimo evento da pagina)
+//   types  -- csv opcional de: purchase, manual_debit, payment, exchange_credit
+//
+// Mapeamento customer_credit_transactions -> evento:
+//   debit   + sale_id        -> purchase        (items: join sale_items)
+//   debit   sem sale_id      -> manual_debit
+//   payment + crediario_credito -> exchange_credit (credito vindo de troca)
+//   payment (demais)         -> payment         (payment: { method })
+//
+// amount com sinal: debito positivo, pagamento/credito negativo.
+// Ordem estavel: created_at DESC, id DESC (cursor sobre o mesmo par).
+// NOTA: distribuicao por parcela de pagamentos antigos NAO e reconstituivel
+//       a partir do ledger atual -- `distribution` fica fora deste endpoint.
+// Defensivo (padrao do repo, cache module-level):
+//   42703 account_id (migration 163) / source (migration 144) /
+//   product_name_snapshot em sale_items; 42P01 sale_items ausente -> sem itens.
+// ============================================================
+const HISTORY_EVENT_TYPES = ['purchase', 'manual_debit', 'payment', 'exchange_credit'];
+
+const HISTORY_TYPE_SQL = {
+  purchase:        `(t.type = 'debit' AND t.sale_id IS NOT NULL)`,
+  manual_debit:    `(t.type = 'debit' AND t.sale_id IS NULL)`,
+  exchange_credit: `(t.type = 'payment' AND t.payment_method = 'crediario_credito')`,
+  payment:         `(t.type = 'payment' AND t.payment_method IS DISTINCT FROM 'crediario_credito')`,
+};
+
+// Cache module-level de colunas opcionais (evita repetir try/catch por request)
+const historyTxCols = { account_id: true, source: true };
+let historySaleItemsHasSnapshot = true;
+
+function decodeHistoryCursor(raw) {
+  try {
+    const decoded = Buffer.from(String(raw), 'base64').toString('utf8');
+    const sep = decoded.lastIndexOf('|');
+    if (sep <= 0) return null;
+    const createdAt = decoded.slice(0, sep);
+    const id = decoded.slice(sep + 1);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
+    if (Number.isNaN(Date.parse(createdAt))) return null;
+    return { createdAt, id };
+  } catch (_) {
+    return null;
+  }
+}
+
+function encodeHistoryCursor(row) {
+  const ts = row.created_at instanceof Date
+    ? row.created_at.toISOString()
+    : new Date(row.created_at).toISOString();
+  return Buffer.from(`${ts}|${row.id}`, 'utf8').toString('base64');
+}
+
+async function fetchHistoryTransactions(conditions, params, limitPlusOne) {
+  const optional = [];
+  if (historyTxCols.account_id) optional.push('t.account_id');
+  if (historyTxCols.source)     optional.push('t.source');
+  const cols = ['t.id', 't.sale_id', 't.type', 't.amount', 't.payment_method', 't.notes', 't.created_at']
+    .concat(optional)
+    .join(', ');
+  try {
+    const { rows } = await db.query(
+      `SELECT ${cols}
+         FROM customer_credit_transactions t
+        WHERE ${conditions.join(' AND ')}
+        ORDER BY t.created_at DESC, t.id DESC
+        LIMIT ${limitPlusOne}`,
+      params
+    );
+    return rows;
+  } catch (e) {
+    if (e.code === '42703' && historyTxCols.account_id) {
+      historyTxCols.account_id = false; // migration 163 ainda nao aplicada
+      return fetchHistoryTransactions(conditions, params, limitPlusOne);
+    }
+    if (e.code === '42703' && historyTxCols.source) {
+      historyTxCols.source = false; // migration 144 ainda nao aplicada
+      return fetchHistoryTransactions(conditions, params, limitPlusOne);
+    }
+    throw e;
+  }
+}
+
+// Itens das vendas (eventos purchase). LEFT JOIN products preserva produtos
+// deletados; nome preferencial e o snapshot gravado na venda.
+async function fetchHistoryItems(companyId, saleIds) {
+  if (!saleIds.length) return {};
+  const nameExpr = historySaleItemsHasSnapshot
+    ? `COALESCE(NULLIF(TRIM(si.product_name_snapshot), ''), p.name, 'Produto removido')`
+    : `COALESCE(p.name, 'Produto removido')`;
+  try {
+    const { rows } = await db.query(
+      `SELECT si.sale_id,
+              ${nameExpr} AS product_name,
+              si.quantity, si.unit_price, si.total_price
+         FROM sale_items si
+         JOIN sales s ON s.id = si.sale_id AND s.company_id = $1
+         LEFT JOIN products p ON p.id = si.product_id
+        WHERE si.sale_id = ANY($2::uuid[])
+        ORDER BY si.sale_id`,
+      [companyId, saleIds]
+    );
+    const map = {};
+    for (const r of rows) {
+      (map[r.sale_id] = map[r.sale_id] || []).push({
+        product_name: r.product_name,
+        quantity:     parseFloat(r.quantity) || 0,
+        unit_price:   parseFloat(r.unit_price) || 0,
+        total:        parseFloat(r.total_price) || 0,
+      });
+    }
+    return map;
+  } catch (e) {
+    if (e.code === '42703' && historySaleItemsHasSnapshot) {
+      historySaleItemsHasSnapshot = false;
+      return fetchHistoryItems(companyId, saleIds);
+    }
+    if (e.code === '42P01') return {}; // deployment parcial: timeline segue sem itens
+    throw e;
+  }
+}
+
+router.get('/customers/:cid/history', async (req, res) => {
+  const companyId  = req.params.id;
+  const customerId = req.params.cid;
+  try {
+    await assertCrediarioEnabled(companyId);
+
+    let limit = parseInt(req.query.limit, 10);
+    if (!Number.isFinite(limit) || limit < 1) limit = 30;
+    if (limit > 100) limit = 100;
+
+    let cursor = null;
+    if (req.query.cursor) {
+      cursor = decodeHistoryCursor(req.query.cursor);
+      if (!cursor) return res.status(400).json({ error: 'cursor invalido' });
+    }
+
+    let requestedTypes = null;
+    if (req.query.types) {
+      requestedTypes = String(req.query.types).split(',').map(s => s.trim()).filter(Boolean);
+      const invalid = requestedTypes.filter(t => !HISTORY_EVENT_TYPES.includes(t));
+      if (invalid.length) {
+        return res.status(400).json({
+          error: `types invalido(s): ${invalid.join(', ')}. Validos: ${HISTORY_EVENT_TYPES.join(', ')}`,
+        });
+      }
+      if (!requestedTypes.length) requestedTypes = null;
+    }
+
+    const { rows: cust } = await db.query(
+      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
+      [customerId, companyId]
+    );
+    if (!cust.length) return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+
+    const conditions = ['t.company_id = $1', 't.customer_id = $2'];
+    const params = [companyId, customerId];
+    let i = 3;
+    if (cursor) {
+      conditions.push(`(t.created_at, t.id) < ($${i}::timestamptz, $${i + 1}::uuid)`);
+      params.push(cursor.createdAt, cursor.id);
+      i += 2;
+    }
+    if (requestedTypes) {
+      conditions.push(`(${requestedTypes.map(t => HISTORY_TYPE_SQL[t]).join(' OR ')})`);
+    }
+
+    const rows = await fetchHistoryTransactions(conditions, params, limit + 1);
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
+
+    const purchaseSaleIds = [...new Set(
+      page.filter(r => r.type === 'debit' && r.sale_id).map(r => r.sale_id)
+    )];
+    const itemsBySale = await fetchHistoryItems(companyId, purchaseSaleIds);
+
+    const events = page.map(r => {
+      const amount = parseFloat(r.amount) || 0;
+      let eventType;
+      if (r.type === 'debit') {
+        eventType = r.sale_id ? 'purchase' : 'manual_debit';
+      } else {
+        eventType = r.payment_method === 'crediario_credito' ? 'exchange_credit' : 'payment';
+      }
+      const meta = {};
+      if (r.source !== undefined && r.source !== null) meta.source = r.source;
+      if (r.notes) meta.notes = r.notes;
+      return {
+        id:          r.id,
+        type:        eventType,
+        occurred_at: r.created_at,
+        amount:      r.type === 'debit' ? amount : parseFloat((-amount).toFixed(2)),
+        sale_id:     r.sale_id || null,
+        account_id:  r.account_id || null,
+        items:       eventType === 'purchase' ? (itemsBySale[r.sale_id] || []) : null,
+        payment:     eventType === 'payment' ? { method: r.payment_method || null } : null,
+        meta,
+      };
+    });
+
+    res.json({
+      events,
+      next_cursor: hasMore ? encodeHistoryCursor(page[page.length - 1]) : null,
+    });
+  } catch (err) {
+    if (err.status === 403) return res.status(403).json({ error: err.message, code: err.code });
+    if (err.status === 404) return res.status(404).json({ error: err.message });
+    console.error('[credit] history error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar historico do cliente' });
   }
 });
 
