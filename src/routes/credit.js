@@ -22,6 +22,9 @@
 // B1 (11/06/2026): GET /customers/:cid/history -- timeline de eventos do
 //                  cliente (compras com itens, pagamentos, creditos de troca,
 //                  debitos manuais) com paginacao por cursor.
+// B2 (11/06/2026): manual-entry NAO grava mais link fake pagar.getaura.com.br;
+//                  pix_link fica NULL e o Pix real (EMV) e gerado on-demand
+//                  via GET /credit/installments/:iid/pix.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -829,6 +832,7 @@ router.get('/customers/:cid/history', async (req, res) => {
 // F3: aceita account_id (anexa ao carne) OU new_account_name (cria carne e usa).
 // F2: se carne tem terms_snapshot, usa como defaults de juros/periodicidade.
 // 05/06/2026: aceita entry_date e period_unit/period_count.
+// B2: pix_link fica NULL (link fake aposentado); Pix real e on-demand.
 router.post('/manual-entry', async (req, res) => {
   const companyId = req.params.id;
   const {
@@ -996,8 +1000,7 @@ router.post('/manual-entry', async (req, res) => {
              (company_id, sale_id, customer_id, installment_number, total_installments,
               amount_due, due_date, status, pix_link, covered_amount, account_id)
            VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0, $8) RETURNING *`,
-          [companyId, custId, i, n, instAmount, dueDateStr,
-           'https://pagar.getaura.com.br/parcela/tmp', resolvedAccountId]
+          [companyId, custId, i, n, instAmount, dueDateStr, null, resolvedAccountId]
         );
         row = ins.rows[0];
       } catch (e) {
@@ -1007,15 +1010,14 @@ router.post('/manual-entry', async (req, res) => {
                (company_id, sale_id, customer_id, installment_number, total_installments,
                 amount_due, due_date, status, pix_link, covered_amount)
              VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0) RETURNING *`,
-            [companyId, custId, i, n, instAmount, dueDateStr,
-             'https://pagar.getaura.com.br/parcela/tmp']
+            [companyId, custId, i, n, instAmount, dueDateStr, null]
           );
           row = ins.rows[0];
         } else throw e;
       }
-      const pixLink = `https://pagar.getaura.com.br/parcela/${row.id.replace(/-/g, '').slice(0, 12)}`;
-      await client.query(`UPDATE credit_installments SET pix_link = $2 WHERE id = $1`, [row.id, pixLink]);
-      createdInstallments.push({ ...row, pix_link: pixLink });
+      // B2: sem pix_link fake — o campo fica NULL; o Pix real (EMV copia-e-cola)
+      // e gerado on-demand via GET /credit/installments/:iid/pix.
+      createdInstallments.push(row);
     }
 
     await creditLedger._updateCreditUsed(client, companyId, custId);
