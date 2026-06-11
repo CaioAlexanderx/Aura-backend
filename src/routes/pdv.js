@@ -21,6 +21,10 @@
 //   - createCreditSale agora barra bloqueio MANUAL (status=blocked) lancando
 //     erro 422; POST /sale propaga 422 { code:CUSTOMER_BLOCKED, reason } em vez
 //     de 500. Score NUNCA bloqueia: aviso sai em credit.warnings[].
+// 11/06/2026 (auditoria C2-BE):
+//   - DELETE /sale agora reverte o crediario via cancelCreditSale (remove os
+//     -rest- de pagamento parcial, antes orfaos). O bloco inline so cuidava da
+//     A Receber com a key exata.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -558,32 +562,14 @@ router.delete('/sale/:saleId', async (req, res) => {
     if (sale.coupon_id) {
       await client.query(`UPDATE coupons SET current_uses=GREATEST(0,current_uses-1),updated_at=NOW() WHERE id=$1`, [sale.coupon_id]);
     }
-    // Reverte crediario: debit + A Receber
-    await client.query(
-      `DELETE FROM customer_credit_transactions WHERE sale_id=$1 AND company_id=$2 AND type='debit'`,
-      [req.params.saleId, req.params.id]
-    );
+    // Reverte a parte de caixa (venda a vista): transacao pdv-sale-<id>.
     await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-sale-'+req.params.saleId, req.params.id]);
-    await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-credit-receivable-'+req.params.saleId, req.params.id]);
-    // F1 (29/05/2026): cancela credit_installments + atualiza credit_used
+    // C2-BE (auditoria 11/06): reverte o crediario via cancelCreditSale, que
+    // remove o debit, a A Receber exata, OS -rest- de pagamento parcial (antes
+    // orfaos como "A Receber" eterno), cancela as parcelas e recalcula credit_used.
+    // Defensivo a deploy parcial (42P01/42703).
     try {
-      await client.query(
-        `UPDATE credit_installments
-           SET status='cancelled', covered_amount=0, updated_at=NOW()
-         WHERE sale_id=$1 AND company_id=$2 AND status IN ('pending','overdue')`,
-        [req.params.saleId, req.params.id]
-      );
-      if (sale.customer_id) {
-        await client.query(
-          `UPDATE customer_credit_profiles
-             SET credit_used=COALESCE((
-               SELECT GREATEST(0,balance) FROM customer_credit_balances
-               WHERE company_id=$1 AND customer_id=$2
-             ),0), updated_at=NOW()
-           WHERE company_id=$1 AND customer_id=$2`,
-          [req.params.id, sale.customer_id]
-        );
-      }
+      await cancelCreditSale(client, { companyId: req.params.id, saleId: req.params.saleId });
     } catch (e) {
       if (e.code !== '42P01' && e.code !== '42703') throw e;
     }

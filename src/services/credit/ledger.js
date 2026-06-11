@@ -320,6 +320,29 @@ async function applyPayment(client, {
     txRow = r.rows[0];
   }
 
+  // ─── C1-BE (auditoria 11/06): REPLAY IDEMPOTENTE E NO-OP ────────────────────
+  // Quando isNewPayment=false o pagamento JA foi aplicado na 1a chamada. Seguir
+  // daqui re-executaria o FIFO (covered_amount dobrado, sale_payments duplicado,
+  // receita 2x no caixa). Retorna o resultado reconstruido (saldo atual + a
+  // transacao existente), sem nenhuma escrita.
+  if (!isNewPayment) {
+    const { rows: balRows } = await client.query(
+      `SELECT balance FROM customer_credit_balances
+       WHERE customer_id = $1 AND company_id = $2`,
+      [customerId, companyId]
+    );
+    return {
+      new_balance:          parseFloat(balRows[0]?.balance || 0),
+      settled_receivables:  [],
+      covered_installments: [],
+      transaction:          txRow,
+      legacy_amount:        0,
+      charges_paid:         0,
+      charges_detail:       [],
+      replayed:             true,
+    };
+  }
+
   // ─── F2 PR2: MATERIALIZACAO DE ENCARGOS (mora/multa) ────────────────────────
   // GATED: so executa quando config.late_charges_enabled === true E o pagamento
   // e novo (isNewPayment). Caso contrario NENHUMA query nova roda e o
