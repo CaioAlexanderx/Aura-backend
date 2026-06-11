@@ -76,7 +76,7 @@ async function createCreditSale(client, {
 }) {
   // 0. Bloqueio manual (UNICO impeditivo) + aviso de score (NAO-impeditivo).
   //    Carrega profile/config de forma defensiva (tabela/coluna podem faltar
-  //    em deploy parcial — nesse caso seguimos sem bloqueio nem aviso).
+  //    em deploy parcial -- nesse caso seguimos sem bloqueio nem aviso).
   let _profile = null;
   let _config  = null;
   try {
@@ -223,7 +223,7 @@ async function createCreditSale(client, {
           iid = insRows[0].id;
         } else throw err;
       }
-      // B2: sem UPDATE de pix_link — o campo fica NULL (link fake aposentado).
+      // B2: sem UPDATE de pix_link -- o campo fica NULL (link fake aposentado).
       // O Pix real (EMV) e gerado on-demand via GET /credit/installments/:iid/pix.
       schedule.push({ id: iid, installment_number: i, amount_due: amt, due_date: dueDateStr });
     }
@@ -320,7 +320,7 @@ async function applyPayment(client, {
     txRow = r.rows[0];
   }
 
-  // ─── C1-BE (auditoria 11/06): REPLAY IDEMPOTENTE E NO-OP ────────────────────
+  // --- C1-BE (auditoria 11/06): REPLAY IDEMPOTENTE E NO-OP ---
   // Quando isNewPayment=false o pagamento JA foi aplicado na 1a chamada. Seguir
   // daqui re-executaria o FIFO (covered_amount dobrado, sale_payments duplicado,
   // receita 2x no caixa). Retorna o resultado reconstruido (saldo atual + a
@@ -343,7 +343,7 @@ async function applyPayment(client, {
     };
   }
 
-  // ─── F2 PR2: MATERIALIZACAO DE ENCARGOS (mora/multa) ────────────────────────
+  // --- F2 PR2: MATERIALIZACAO DE ENCARGOS (mora/multa) ---
   // GATED: so executa quando config.late_charges_enabled === true E o pagamento
   // e novo (isNewPayment). Caso contrario NENHUMA query nova roda e o
   // comportamento e EXATAMENTE o atual (principalAmount === amount).
@@ -411,7 +411,7 @@ async function applyPayment(client, {
     chargesPaid = round2(Math.min(amount, totalCharges));
 
     if (chargesPaid > 0) {
-      // 1.4. UMA transacao income confirmada (Financeiro) — sem cron.
+      // 1.4. UMA transacao income confirmada (Financeiro) -- sem cron.
       //      idempotency_key derivado do txRow.id evita duplicar em retry.
       await client.query(
         `INSERT INTO transactions
@@ -504,6 +504,7 @@ async function applyPayment(client, {
         AND s.customer_id = $2
         AND COALESCE(s.status, 'active') != 'cancelled'
       ORDER BY t.created_at ASC
+      FOR UPDATE OF t
       LIMIT 100`;
     pendingTxsParams = [companyId, customerId, accountId];
   } else {
@@ -517,6 +518,7 @@ async function applyPayment(client, {
         AND s.customer_id = $2
         AND COALESCE(s.status, 'active') != 'cancelled'
       ORDER BY t.created_at ASC
+      FOR UPDATE OF t
       LIMIT 100`;
     pendingTxsParams = [companyId, customerId];
   }
@@ -538,6 +540,7 @@ async function applyPayment(client, {
            AND s.customer_id = $2
            AND COALESCE(s.status, 'active') != 'cancelled'
          ORDER BY t.created_at ASC
+         FOR UPDATE OF t
          LIMIT 100`,
         [companyId, customerId]
       );
