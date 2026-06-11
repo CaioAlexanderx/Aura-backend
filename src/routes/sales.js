@@ -28,12 +28,20 @@
 //   Filtra SO por sale_id (uuid unico) — nao por company_id — senao troca
 //   cross-filial (emissao gravada na empresa de ORIGEM, venda na empresa
 //   FISICA) apareceria sem nota no detalhe.
+//
+// 11/06/2026 — cancel de venda no CREDIARIO reverte o crediario (relato #3):
+//   o cancel generico so apagava pdv-sale-<id> + sale_payments e tratava troca;
+//   uma venda fiada tem debit no ledger + 'A Receber' (pdv-credit-receivable-<id>)
+//   + credit_installments que ficavam de pe. Agora, quando a venda tem debit de
+//   crediario, chamamos creditLedger.cancelCreditSale (apaga debit + A Receber +
+//   splits + cancela parcelas + recalcula credit_used).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
 const pool = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
+const creditLedger = require('../services/creditLedger');
 
 // Constroi clausula WHERE dinamica baseada nos filtros recebidos.
 function buildWhere(companyId, filters) {
@@ -411,7 +419,7 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
 
     await client.query(
       "UPDATE sales SET status = 'cancelled', cancelled_at = NOW(), cancelled_by = $1, updated_at = NOW(), " +
-      "                notes = COALESCE(notes, '') || CASE WHEN $2::text != '' THEN E'\\\\nCancelada: ' || $2::text ELSE '' END " +
+      "                notes = COALESCE(notes, '') || CASE WHEN $2::text != '' THEN E'\\nCancelada: ' || $2::text ELSE '' END " +
       'WHERE id = $3',
       [req.user && req.user.id ? req.user.id : null, reason, saleId]
     );
@@ -437,6 +445,27 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
     const paymentsAmount = paymentsDel.rows.reduce(function(acc, r) {
       return acc + parseFloat(r.amount || 0);
     }, 0);
+
+    // ── Crediario: reverte debito + A Receber + parcelas (relato #3) ──
+    // O cancel generico (acima) so apaga pdv-sale-<id> (venda a vista) +
+    // sale_payments. Uma venda no CREDIARIO tem, em vez disso, um 'debit' no
+    // ledger + 'A Receber' (pdv-credit-receivable-<id> + splits) + credit_installments.
+    // Sem isso, o saldo/parcelas do cliente ficavam de pe apos o cancelamento.
+    // cancelCreditSale apaga debit + A Receber + splits, cancela as parcelas e
+    // recalcula credit_used. Defensivo a schema pre-migration (42P01/42703).
+    let creditReversed = false;
+    try {
+      const credRes = await client.query(
+        "SELECT 1 FROM customer_credit_transactions WHERE sale_id = $1 AND company_id = $2 AND type = 'debit' LIMIT 1",
+        [saleId, companyId]
+      );
+      if (credRes.rows.length) {
+        await creditLedger.cancelCreditSale(client, { companyId: companyId, saleId: saleId });
+        creditReversed = true;
+      }
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
 
     // ── Troca: reversao adicional (o cancel generico nao desfaz a troca) ──
     let trocaReturnedDecremented = 0;
@@ -524,6 +553,7 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       refunded_amount: refundedAmount,
       mirror_created: false,
       tx_removed: txRemoved,
+      credit_reversed: creditReversed,
       items_returned: itemsRes.rows.length,
       payments_removed: paymentsRemoved,
       payments_amount: paymentsAmount,
