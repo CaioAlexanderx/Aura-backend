@@ -436,7 +436,25 @@ router.get('/sale/:saleId', async (req, res) => {
        FROM sale_items si LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`,
       [req.params.saleId]
     );
-    res.json({ ...rows[0], items });
+    // Auditoria 12/06: refunded_quantity por item -- fonte: troca_returned_items
+    // (mesma guarda anti-dupla-devolucao do motor de devolucao B4 e da troca),
+    // ignorando trocas/devolucoes canceladas. Defensivo 42P01 (deploy parcial).
+    const refundedByItem = {};
+    try {
+      const { rows: refRows } = await db.query(
+        `SELECT tri.original_sale_item_id, COALESCE(SUM(tri.quantity),0) AS refunded
+           FROM troca_returned_items tri
+           JOIN sales ts ON ts.id = tri.troca_sale_id
+          WHERE tri.original_sale_id = $1
+            AND COALESCE(ts.status,'completed') != 'cancelled'
+          GROUP BY tri.original_sale_item_id`,
+        [req.params.saleId]
+      );
+      for (const r of refRows) refundedByItem[r.original_sale_item_id] = parseFloat(r.refunded) || 0;
+    } catch (refErr) {
+      if (refErr.code !== '42P01' && refErr.code !== '42703') throw refErr;
+    }
+    res.json({ ...rows[0], items: items.map(it => ({ ...it, refunded_quantity: refundedByItem[it.id] || 0 })) });
   } catch (e) { res.status(500).json({ error: 'Erro ao buscar venda' }); }
 });
 
