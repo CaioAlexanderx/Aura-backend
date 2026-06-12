@@ -242,9 +242,11 @@ async function createCreditSale(client, {
     } catch (e) {
       if (e.code !== '42703' && e.code !== '42P01') throw e;
     }
-
-    await _updateCreditUsed(client, companyId, customerId);
   }
+
+  // M1 (auditoria 12/06): credit_used atualizado no caminho COMUM -- venda 1x
+  // (sem agenda de parcelas) tambem conta; antes so installments > 1 atualizava.
+  await _updateCreditUsed(client, companyId, customerId);
 
   return { debited: debitRows[0], schedule, warnings };
 }
@@ -400,9 +402,12 @@ async function applyPayment(client, {
 
     // 1.2. Encargos por parcela (engine puro, principal RESTANTE no momento).
     //      Calculado ANTES do FIFO de principal (que roda depois com principalAmount).
+    //      A2 (auditoria 12/06): paidAt string vira Date ao MEIO-DIA local --
+    //      new Date('YYYY-MM-DD') seria meia-noite UTC = dia ANTERIOR em
+    //      America/Sao_Paulo, divergindo do preview (computePaymentPlan).
     const terms = resolveTerms(profile || null, config);
     const perInst = openInst.map((inst) => {
-      const lc = computeLateCharges(inst, terms, config, paidAt || new Date());
+      const lc = computeLateCharges(inst, terms, config, paidAt ? new Date(paidAt + 'T12:00:00') : new Date());
       return { inst, lc };
     });
     const totalCharges = round2(perInst.reduce((sum, p) => sum + (p.lc.charges_total || 0), 0));
