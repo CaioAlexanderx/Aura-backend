@@ -256,8 +256,10 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
     if (uncovered <= 0.005) continue;
 
     if (rem >= uncovered - 0.005) {
+      // M2 (auditoria 12/06): covered_amount = 0 ao cancelar, alinhado com
+      // cancelCreditSale -- parcela cancelada nao deve reter cobertura.
       await client.query(
-        `UPDATE credit_installments SET status='cancelled', updated_at=NOW() WHERE id=$1 AND company_id=$2`,
+        `UPDATE credit_installments SET status='cancelled', covered_amount=0, updated_at=NOW() WHERE id=$1 AND company_id=$2`,
         [inst.id, saleCompanyId]
       );
       rem = round2(rem - uncovered);
@@ -276,15 +278,43 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
 
   // 9. Reduz best-effort o "A Receber" pendente da venda (Financeiro nao
   //    superestimar). Nao-fatal: falha aqui nao desfaz a devolucao.
+  //    M3 (auditoria 12/06): alem da key exata, consome tambem os receivables
+  //    PARCIAIS ('pdv-credit-receivable-<saleId>-rest-...', criados pelo
+  //    applyPayment em pagamento parcial) -- mesma tecnica do cancelCreditSale.
+  //    Ordem: principal primeiro, depois os '-rest-' (created_at ASC), sem
+  //    nunca deixar valor negativo; consumo total => DELETE (pending).
   try {
-    await client.query(
-      `UPDATE transactions
-          SET amount = GREATEST(0, amount - $1), updated_at = NOW()
-        WHERE company_id = $2
-          AND idempotency_key = $3
-          AND status = 'pending'`,
-      [refundValue, saleCompanyId, 'pdv-credit-receivable-' + saleId]
+    let toReduce = refundValue;
+    const mainKey = 'pdv-credit-receivable-' + saleId;
+    const { rows: recvRows } = await client.query(
+      `SELECT id, amount, idempotency_key FROM transactions
+        WHERE company_id = $1
+          AND (idempotency_key = $2 OR idempotency_key LIKE $3)
+          AND status = 'pending'
+        ORDER BY (idempotency_key = $2) DESC, created_at ASC
+        FOR UPDATE`,
+      [saleCompanyId, mainKey, mainKey + '-%']
     );
+    for (const recv of recvRows) {
+      if (toReduce <= 0.005) break;
+      const recvAmount = parseFloat(recv.amount) || 0;
+      if (recvAmount <= 0.005) continue;
+      const cut = round2(Math.min(recvAmount, toReduce));
+      if (cut >= recvAmount - 0.005) {
+        await client.query(
+          `DELETE FROM transactions WHERE id = $1 AND company_id = $2 AND status = 'pending'`,
+          [recv.id, saleCompanyId]
+        );
+      } else {
+        await client.query(
+          `UPDATE transactions
+              SET amount = GREATEST(0, amount - $1), updated_at = NOW()
+            WHERE id = $2 AND company_id = $3`,
+          [cut, recv.id, saleCompanyId]
+        );
+      }
+      toReduce = round2(toReduce - cut);
+    }
   } catch (e) {
     console.warn('[credit/refund] reduce A Receber (non-fatal):', e.message);
   }
