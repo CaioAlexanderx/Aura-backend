@@ -550,6 +550,11 @@ router.post('/customer/:cid/payment', async (req, res) => {
   const paidAt      = normalizeBackdate(req.body?.paid_at);
   const accountId   = req.body?.account_id || null;
   const allocations = Array.isArray(req.body?.allocations) ? req.body.allocations : null;
+  // Auditoria 12/06: Idempotency-Key (mesma leitura da rota B3) -- retry de
+  // rede nao aplica o pagamento duas vezes (ON CONFLICT DO NOTHING no ledger).
+  const idempotencyKey = req.headers['idempotency-key']
+    ? String(req.headers['idempotency-key']).trim()
+    : null;
 
   // Validar allocations se fornecidas
   if (allocations) {
@@ -603,7 +608,12 @@ router.post('/customer/:cid/payment', async (req, res) => {
     if (allocations) {
       const allResults = [];
       let totalChargesPaid = 0;
+      let allocIndex = 0;
       for (const alloc of allocations) {
+        // Idempotency-Key sufixada por alocacao: a MESMA key em 2 applyPayment
+        // viraria replay no-op da segunda alocacao (ON CONFLICT na key).
+        const allocKey = idempotencyKey ? `${idempotencyKey}-alloc-${allocIndex}` : null;
+        allocIndex++;
         const result = await creditLedger.applyPayment(client, {
           companyId:  req.params.id,
           customerId: req.params.cid,
@@ -615,6 +625,7 @@ router.post('/customer/:cid/payment', async (req, res) => {
           accountId:  alloc.account_id || null,
           config:     lateConfig,
           profile:    lateProfile,
+          idempotencyKey: allocKey,
         });
         totalChargesPaid += result.charges_paid || 0;
         allResults.push({ account_id: alloc.account_id || null, amount: parseFloat(alloc.amount), result });
@@ -662,6 +673,7 @@ router.post('/customer/:cid/payment', async (req, res) => {
       accountId,
       config:     lateConfig,
       profile:    lateProfile,
+      idempotencyKey,
     });
 
     await client.query('COMMIT');
