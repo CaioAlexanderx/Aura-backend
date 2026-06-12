@@ -51,7 +51,7 @@ const nz = (v) => (v === undefined || v === null || v === '') ? null : v;
 const CAP_EPS = 1e-9;
 const aboveCap = (v, cap) => v != null && v !== '' && Number(v) > cap + CAP_EPS;
 
-// ─── B2: Pix EMV real (copia-e-cola) ──────────────────────────────────────
+// ─── B2: Pix EMV real (copia-e-cola) ────────────────────────────────────
 // Chave Pix da loja: MESMO lookup do carne imprimivel (print.js /credit/:cid/carne)
 // — digital_channel_config + fallbacks de nome/cidade em companies.
 // Retorna null se nao ha chave configurada/valida (caller decide o erro).
@@ -294,7 +294,7 @@ router.get('/customers/:cid/pix', async (req, res) => {
   }
 });
 
-// ─── PUT /credit/customers/:cid/terms (F2) ────────────────────────────────────
+// ─── PUT /credit/customers/:cid/terms (F2) ──────────────────────────────────────
 // Persiste overrides de termos por cliente. null limpa o override (volta ao padrao da loja).
 // F2 PR1: valida TETO CDC para late_fee_rate / late_interest_daily.
 router.put('/customers/:cid/terms', async (req, res) => {
@@ -389,7 +389,7 @@ router.put('/customers/:cid/terms', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── PUT /credit/customers/:cid/limit ─────────────────────────────────────
+// ─── PUT /credit/customers/:cid/limit ─────────────────────────────────
 router.put('/customers/:cid/limit', async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
@@ -413,7 +413,7 @@ router.put('/customers/:cid/limit', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── PATCH /credit/customers/:cid/block ──────────────────────────────────
+// ─── PATCH /credit/customers/:cid/block ────────────────────────────────
 router.patch('/customers/:cid/block', async (req, res) => {
   const companyId  = req.params.id;
   const customerId = req.params.cid;
@@ -439,7 +439,7 @@ router.patch('/customers/:cid/block', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── GET/PUT /credit/plan-config ───────────────────────────────────────────
+// ─── GET/PUT /credit/plan-config ───────────────────────────────────────
 // Hub F1.4: GET tambem retorna score_warn_min (via RETURNING *; defensivo se coluna faltar).
 // F2 PR1: GET retorna late_charges_enabled + late_grace_days (via RETURNING *).
 router.get('/plan-config', async (req, res) => {
@@ -556,7 +556,7 @@ router.put('/plan-config', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── POST /credit/installments ───────────────────────────────────────────────
+// ─── POST /credit/installments ───────────────────────────────────────────
 // F3: aceita account_id para vincular parcelas ao carne
 // Hub F1.4.1: aviso de score NAO-impeditivo (warnings[]). UNICO impeditivo
 //             continua sendo o bloqueio MANUAL (status === 'blocked' -> 422).
@@ -655,7 +655,7 @@ router.post('/installments', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── GET /credit/installments ────────────────────────────────────────────────────
+// ─── GET /credit/installments ──────────────────────────────────────────────
 // F2 PR1: cada parcela e enriquecida com encargos lazy (mora/multa) + total_due.
 //         config (e profile, se customer_id no filtro) sao carregados 1x por request.
 router.get('/installments', async (req, res) => {
@@ -733,7 +733,7 @@ router.get('/installments', async (req, res) => {
   }
 });
 
-// ─── GET /credit/installments/:iid/pix (B2) ────────────────────────────────────
+// ─── GET /credit/installments/:iid/pix (B2) ──────────────────────────────────
 // Payload EMV (Pix copia-e-cola) da parcela. Valor devido HOJE:
 // remaining + encargos lazy (mesma conta do GET /customers/:cid/profile).
 // Encargos OFF (late_charges_enabled=false) => so remaining.
@@ -802,7 +802,7 @@ router.get('/installments/:iid/pix', async (req, res) => {
   }
 });
 
-// ─── PATCH /credit/installments/:iid/pay ────────────────────────────────────────
+// ─── PATCH /credit/installments/:iid/pay ────────────────────────────────────
 router.patch('/installments/:iid/pay', async (req, res) => {
   const companyId     = req.params.id;
   const installmentId = req.params.iid;
@@ -855,11 +855,23 @@ router.patch('/installments/:iid/pay', async (req, res) => {
     const { rows: updated } = await pool.query(
       `SELECT * FROM credit_installments WHERE id=$1`, [installmentId]
     );
+    // M4 (auditoria 12/06): expoe o breakdown REAL do applyPayment. O FIFO e
+    // oldest-first, entao a parcela clicada pode NAO ser a coberta -- `applied`
+    // lista as parcelas efetivamente afetadas e `applied_to_requested` diz se
+    // a parcela da URL recebeu cobertura. Campos pre-existentes intactos.
+    const appliedList = (result.covered_installments || []).map(c => ({
+      installment_id: c.id,
+      covered:        c.covered,
+      status:         c.status,
+    }));
     res.json({
       ...updated[0],
       remaining:   Math.max(0, parseFloat(updated[0].amount_due) - parseFloat(updated[0].covered_amount || 0)),
       new_balance: result.new_balance,
       settled:     result.settled_receivables,
+      applied:              appliedList,
+      applied_to_requested: appliedList.some(a => String(a.installment_id) === String(installmentId)),
+      charges_paid:         result.charges_paid || 0,
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -868,7 +880,7 @@ router.patch('/installments/:iid/pay', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── PATCH /credit/installments/:iid/cancel ─────────────────────────────────────
+// ─── PATCH /credit/installments/:iid/cancel ─────────────────────────────────
 router.patch('/installments/:iid/cancel', async (req, res) => {
   const companyId     = req.params.id;
   const installmentId = req.params.iid;
@@ -1013,7 +1025,7 @@ router.patch('/installments/:iid/due-date', async (req, res) => {
   } finally { client.release(); }
 });
 
-// ─── GET /credit/dashboard ────────────────────────────────────────────────────────
+// ─── GET /credit/dashboard ────────────────────────────────────────────────
 router.get('/dashboard', async (req, res) => {
   const companyId = req.params.id;
   try {
@@ -1069,14 +1081,35 @@ router.get('/dashboard', async (req, res) => {
       [companyId]
     );
 
-    res.json({ kpis: kpis.rows[0], top_defaulters: top.rows });
+    // Auditoria 12/06: carteira REAL do ledger (view customer_credit_balances,
+    // em reais -- mesma unidade do total_open de GET /credit/balances). Os KPIs
+    // acima cobrem so credit_installments; vendas 1x sem agenda de parcelas nao
+    // aparecem la. Campos NOVOS, sem alterar os existentes. Defensivo 42P01/42703.
+    let portfolio = { portfolio_open_amount: 0, customers_with_balance: 0 };
+    try {
+      const p = await pool.query(
+        `SELECT COALESCE(SUM(balance) FILTER (WHERE balance > 0), 0) AS portfolio_open_amount,
+                COUNT(*) FILTER (WHERE balance > 0)                  AS customers_with_balance
+           FROM customer_credit_balances
+          WHERE company_id = $1`,
+        [companyId]
+      );
+      portfolio = {
+        portfolio_open_amount:  parseFloat(p.rows[0]?.portfolio_open_amount || 0),
+        customers_with_balance: parseInt(p.rows[0]?.customers_with_balance || 0, 10),
+      };
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+
+    res.json({ kpis: { ...kpis.rows[0], ...portfolio }, top_defaulters: top.rows });
   } catch (err) {
     console.error('GET /credit/dashboard', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── GET /credit/dashboard/aging ──────────────────────────────────────────────────
+// ─── GET /credit/dashboard/aging ────────────────────────────────────────────────
 router.get('/dashboard/aging', async (req, res) => {
   const companyId = req.params.id;
   try {
@@ -1103,7 +1136,7 @@ router.get('/dashboard/aging', async (req, res) => {
   }
 });
 
-// ─── collection/rules + collection/trigger ───────────────────────────────────────
+// ─── collection/rules + collection/trigger ───────────────────────────────────
 router.get('/collection/rules', async (req, res) => {
   const client = await pool.connect();
   try {
