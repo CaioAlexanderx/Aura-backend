@@ -86,7 +86,7 @@ app.use(cors({
   origin: env.ALLOWED_ORIGINS === '*' ? '*' : allowedOrigins,
   credentials: true,
   methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Idempotency-Key'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Idempotency-Key', 'Idempotency-Key'],
   exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
   maxAge:         600,
 }));
@@ -235,7 +235,7 @@ app.get('/health/r2', async function(req, res) {
       message: 'Faltam env vars R2_ACCOUNT_ID, R2_ACCESS_KEY_ID ou R2_SECRET_ACCESS_KEY',
       checks,
     });
-  }
+    }
 
   const r2 = require('./utils/r2Storage');
   const testKey = '_healthcheck/' + Date.now() + '.txt';
