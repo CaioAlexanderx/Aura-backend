@@ -154,6 +154,7 @@ describe('applyUnify', () => {
     //  0: SELECT parcelas abertas FOR UPDATE => 2 abertas
     //  1: UPDATE cancelled (replaced_installment_ids)
     //  2..4: INSERT credit_installments x3 (uma por parcela)
+    // saldo 100 (2x50) + nova 50 = total 150, 3x50 -> 3 INSERTs.
     const openRows = [
       { id: 'inst-old-1', amount_due: '50.00', covered_amount: '0.00' },
       { id: 'inst-old-2', amount_due: '50.00', covered_amount: '0.00' },
@@ -171,8 +172,8 @@ describe('applyUnify', () => {
       companyId:    COMPANY_ID,
       customerId:   CUSTOMER_ID,
       accountId:    null,
-      newAmount:    100,     // saldo 100 + nova 100 = total 200, 4x50
-      installments: 4,
+      newAmount:    50,      // saldo 100 + nova 50 = total 150, 3x50
+      installments: 3,
       firstDueDate: '2026-07-01',
       interestRate: 0,
       saleId:       SALE_ID,
@@ -180,10 +181,10 @@ describe('applyUnify', () => {
 
     // Plano
     expect(result.open_remaining).toBeCloseTo(100, 2);
-    expect(result.new_amount).toBeCloseTo(100, 2);
-    expect(result.total).toBeCloseTo(200, 2);
-    expect(result.installments_count).toBe(4);
-    expect(result.schedule).toHaveLength(4);
+    expect(result.new_amount).toBeCloseTo(50, 2);
+    expect(result.total).toBeCloseTo(150, 2);
+    expect(result.installments_count).toBe(3);
+    expect(result.schedule).toHaveLength(3);
     expect(result.replaced_installment_ids).toEqual(['inst-old-1', 'inst-old-2']);
     expect(result.applied_installment_ids).toEqual(insertedIds);
 
@@ -209,7 +210,7 @@ describe('applyUnify', () => {
     expect(insertParams[1]).toBe(SALE_ID);                  // $2 = sale_id
     expect(insertParams[2]).toBe(CUSTOMER_ID);              // $3 = customer_id
     expect(insertParams[3]).toBe(1);                        // $4 = installment_number
-    expect(insertParams[4]).toBe(4);                        // $5 = total_installments
+    expect(insertParams[4]).toBe(3);                        // $5 = total_installments
   });
 
   test('(b) sem parcelas abertas (open vazio): so insere as N novas, nao roda UPDATE', async () => {
