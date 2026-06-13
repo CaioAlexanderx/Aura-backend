@@ -7,6 +7,7 @@ const pool = require('../../config/database');
 const { resolvePeriod, dueDateForIndex, resolveTerms, round2 } = require('./terms');
 const { computeLateCharges } = require('./lateCharges');
 const { scoreLabel, scoreWarning, _recalculateScore } = require('./score');
+const { computeUnifyPlan } = require('./unify');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 
@@ -856,6 +857,132 @@ async function getCustomerCreditPreview(companyId, customerId) {
   }
 }
 
+// =============================================================
+// applyUnify (Item 3, 13/06/2026)
+// Cancela as parcelas abertas do carne alvo e insere o novo schedule
+// unificado (saldo em aberto + nova compra + juros sobre a nova).
+//
+// FRONTEIRA: esta funcao SO reescreve o SCHEDULE de credit_installments.
+// O lancamento de debito (customer_credit_transactions) e o A Receber
+// (transactions) da nova compra SAO CRIADOS pelo fluxo normal de venda
+// (createCreditSale ou PDV). O FE chama POST /unify APOS registrar a
+// venda, passando o sale_id opcional para rastrear as novas parcelas.
+// =============================================================
+async function applyUnify(client, {
+  companyId,
+  customerId,
+  accountId = null,
+  newAmount,
+  installments,
+  firstDueDate = null,
+  periodUnit = null,
+  periodCount = null,
+  interestRate = 0,
+  saleId = null,
+}) {
+  // 1. Carrega parcelas abertas do carne alvo FOR UPDATE (lock otimista).
+  //    Escopo: account_id = valor OU account_id IS NULL (carne geral).
+  let openRows;
+  try {
+    if (accountId) {
+      const r = await client.query(
+        `SELECT id, amount_due, covered_amount
+         FROM credit_installments
+         WHERE company_id = $1 AND customer_id = $2
+           AND account_id = $3
+           AND status IN ('pending', 'overdue')
+         ORDER BY due_date ASC
+         FOR UPDATE`,
+        [companyId, customerId, accountId]
+      );
+      openRows = r.rows;
+    } else {
+      const r = await client.query(
+        `SELECT id, amount_due, covered_amount
+         FROM credit_installments
+         WHERE company_id = $1 AND customer_id = $2
+           AND account_id IS NULL
+           AND status IN ('pending', 'overdue')
+         ORDER BY due_date ASC
+         FOR UPDATE`,
+        [companyId, customerId]
+      );
+      openRows = r.rows;
+    }
+  } catch (err) {
+    if (err.code === '42703') {
+      // account_id nao existe ainda: FIFO global do cliente
+      const r = await client.query(
+        `SELECT id, amount_due, covered_amount
+         FROM credit_installments
+         WHERE company_id = $1 AND customer_id = $2
+           AND status IN ('pending', 'overdue')
+         ORDER BY due_date ASC
+         FOR UPDATE`,
+        [companyId, customerId]
+      );
+      openRows = r.rows;
+    } else throw err;
+  }
+
+  // 2. Motor puro: calcula o novo schedule (determinista, sem I/O).
+  const plan = computeUnifyPlan({
+    openInstallments: openRows,
+    newAmount,
+    installments,
+    interestRate,
+    firstDueDate,
+    periodUnit,
+    periodCount,
+  });
+
+  // 3. Cancela as parcelas substituidas (preserva covered_amount -- historico).
+  if (plan.replaced_installment_ids.length > 0) {
+    await client.query(
+      `UPDATE credit_installments
+         SET status = 'cancelled', updated_at = NOW()
+       WHERE id = ANY($1) AND company_id = $2`,
+      [plan.replaced_installment_ids, companyId]
+    );
+  }
+
+  // 4. Insere as N novas parcelas do schedule unificado.
+  //    Espelha o INSERT de createCreditSale (com fallback 42703 sem account_id).
+  const appliedIds = [];
+  for (const slot of plan.schedule) {
+    let iid;
+    try {
+      const { rows: insRows } = await client.query(
+        `INSERT INTO credit_installments
+           (company_id, sale_id, customer_id, installment_number, total_installments,
+            amount_due, due_date, status, covered_amount, account_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0, $8)
+         RETURNING id`,
+        [companyId, saleId, customerId, slot.number, plan.installments_count,
+         slot.amount_due, slot.due_date, accountId]
+      );
+      iid = insRows[0].id;
+    } catch (err) {
+      if (err.code === '42703') {
+        // account_id ainda nao existe: fallback sem coluna
+        const { rows: insRows } = await client.query(
+          `INSERT INTO credit_installments
+             (company_id, sale_id, customer_id, installment_number, total_installments,
+              amount_due, due_date, status, covered_amount)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0)
+           RETURNING id`,
+          [companyId, saleId, customerId, slot.number, plan.installments_count,
+           slot.amount_due, slot.due_date]
+        );
+        iid = insRows[0].id;
+      } else throw err;
+    }
+    appliedIds.push(iid);
+  }
+
+  return { ...plan, applied_installment_ids: appliedIds };
+}
+
 module.exports = {
   _getOrCreateProfile,
   _getOrCreatePlanConfig,
@@ -864,4 +991,5 @@ module.exports = {
   applyPayment,
   cancelCreditSale,
   getCustomerCreditPreview,
+  applyUnify,
 };
