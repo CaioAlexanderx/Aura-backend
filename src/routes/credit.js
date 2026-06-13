@@ -1198,8 +1198,6 @@ router.post('/customers/:cid/payments', async (req, res) => {
       idempotencyKey,
     });
 
-    await client.query('COMMIT');
-
     // Monta o shape canonico B3 a partir do resultado do applyPayment.
     //
     // Garantia preview === aplicacao:
@@ -1232,12 +1230,13 @@ router.post('/customers/:cid/payments', async (req, res) => {
     ]);
 
     // Para montar number e account_id precisamos de um mini-lookup.
-    // Aproveitamos os dados ja retornados (charges_detail e covered_installments
-    // nao incluem esses campos). Fazemos um SELECT defensivo read-only.
+    // M6 fix (13/06): SELECT via client.query DENTRO da transacao (antes do
+    // COMMIT) -- evita 500 pos-commit quando qualquer erro diferente de
+    // 42703/42P01 ocorre na busca (pagamento ja commitado mas cliente recebia 500).
     let instMeta = {};
     if (allInstIds.size > 0) {
       try {
-        const { rows: metaRows } = await db.query(
+        const { rows: metaRows } = await client.query(
           `SELECT id, installment_number, account_id
              FROM credit_installments
             WHERE id = ANY($1::uuid[]) AND company_id = $2`,
@@ -1251,6 +1250,8 @@ router.post('/customers/:cid/payments', async (req, res) => {
         // Defensivo: sem metadados de parcela, campos ficam null
       }
     }
+
+    await client.query('COMMIT');
 
     const applied = [...allInstIds].map(instId => {
       const cd  = chargesMap[instId]  || {};
