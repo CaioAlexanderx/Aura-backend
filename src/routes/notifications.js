@@ -5,9 +5,8 @@
 // POST /companies/:id/notifications/read-all-banners      — marca todos como lidos
 //
 // Criado: 13/06/2026
-// Estratégia: banners persistidos em app_notifications;
-//   avisos de pedido computados on-the-fly por query (últimas 24h).
-//   Sem trigger de insert — compatível com polling de 30s sem overhead.
+// Fix    13/06/2026: companies.plan é enum plan_type; target_plan é TEXT.
+//   Postgres recusa "text = plan_type" sem cast explícito → plan::text.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -17,6 +16,8 @@ router.get('/', async (req, res) => {
   const cid = req.params.id;
   try {
     // 1. Banners ativos não lidos por esta empresa
+    // Nota: companies.plan é do tipo plan_type (enum); fazemos cast ::text
+    // para comparar com a coluna target_plan TEXT da app_notifications.
     const { rows: banners } = await db.query(`
       SELECT n.id, n.type, n.title, n.body, n.html_content,
              n.cta_label, n.cta_url, n.cta_route, n.created_at
@@ -25,7 +26,7 @@ router.get('/', async (req, res) => {
         AND (n.expires_at IS NULL OR n.expires_at > NOW())
         AND (n.target_company_id IS NULL OR n.target_company_id = $1)
         AND (n.target_plan IS NULL OR n.target_plan = (
-              SELECT plan FROM companies WHERE id = $1 LIMIT 1
+              SELECT plan::text FROM companies WHERE id = $1 LIMIT 1
             ))
         AND NOT EXISTS (
           SELECT 1 FROM notification_reads r
