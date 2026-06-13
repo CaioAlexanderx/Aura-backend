@@ -32,4 +32,7 @@ module.exports = {
   _getOrCreatePlanConfig:   ledger._getOrCreatePlanConfig,
   resolvePeriod:            terms.resolvePeriod,
   dueDateForIndex:          terms.dueDateForIndex,
+  // Item 3 (13/06/2026): unificacao de carne
+  computeUnifyPlan:         require('./credit/unify').computeUnifyPlan,
+  applyUnify:               ledger.applyUnify,
 };
