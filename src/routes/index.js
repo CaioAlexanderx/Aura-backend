@@ -45,6 +45,8 @@ router.use('/admin', require('./adminClients360'));
 router.use('/admin', require('./adminRevenue'));
 router.use('/admin', require('./adminOps'));
 router.use('/admin', require('./adminGrowth'));
+// Endomarketing banners (13/06/2026): CRUD admin de banners de notificação
+router.use('/admin', require('./adminNotifications'));
 router.use('/admin/leads', require('./adminLeads'));
 router.use('/admin/cadences',   require('./adminCadences'));
 router.use('/admin/lead-goals', require('./adminLeadGoals'));
