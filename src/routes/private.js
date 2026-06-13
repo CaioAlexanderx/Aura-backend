@@ -62,6 +62,8 @@ router.use('/billing', require('./billing'));
 router.use('/support', require('./support'));
 router.use('/customers', require('./customers'));
 router.use('/employees', require('./employees'));
+// Notificações do app (endomarketing banners + avisos de pedido) — sem gate de plano
+router.use('/notifications', require('./notifications'));
 
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
