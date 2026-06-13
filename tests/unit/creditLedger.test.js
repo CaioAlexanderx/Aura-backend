@@ -42,6 +42,7 @@ describe('creditLedger.createCreditSale', () => {
       { rows: [{ id: 'conf-00', max_installments: 12 }] }, // _getOrCreatePlanConfig (topo)
       { rows: [debitRow] }, // INSERT customer_credit_transactions debit
       { rows: [] },         // INSERT transactions A Receber
+      { rows: [] },         // UPDATE customer_credit_profiles (credit_used) -- M1 12/06: 1x tambem atualiza
     ]);
 
     const result = await creditLedger.createCreditSale(client, {
@@ -51,7 +52,7 @@ describe('creditLedger.createCreditSale', () => {
 
     expect(result.debited).toEqual(debitRow);
     expect(result.schedule).toHaveLength(0);
-    expect(client.query).toHaveBeenCalledTimes(4);
+    expect(client.query).toHaveBeenCalledTimes(5);
 
     const debitCall = client.query.mock.calls[2];
     expect(debitCall[0]).toMatch(/INSERT INTO customer_credit_transactions/i);
@@ -286,7 +287,7 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
     const fifoInst = [
       { id: 'inst-c1', amount_due: '100.00', covered_amount: '0', status: 'overdue', due_date: '2026-01-01' },
     ];
-    const balRow = { balance: '52.90' };
+    const balRow = { balance: '52.93' };
 
     const client = makeMockClient([
       { rows: [txRow] },     // 0 INSERT payment (novo)
@@ -312,21 +313,24 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
       profile: null,
     });
 
-    expect(result.charges_paid).toBeCloseTo(2.90, 2);
+    // A2 (auditoria 12/06): paidAt -> meio-dia local evita o off-by-one de TZ.
+    // 01/02 vs vencimento 01/01 = 31 dias corridos; 28 cobrados apos carencia 3.
+    // late_fee = 100 * 2% = 2.00 ; late_interest = 100 * (0.01/30) * 28 = 0.93.
+    expect(result.charges_paid).toBeCloseTo(2.93, 2);
     expect(result.charges_detail).toHaveLength(1);
     expect(result.charges_detail[0].installment_id).toBe('inst-c1');
     expect(result.charges_detail[0].late_fee).toBeCloseTo(2.0, 2);
-    expect(result.charges_detail[0].late_interest).toBeCloseTo(0.90, 2);
+    expect(result.charges_detail[0].late_interest).toBeCloseTo(0.93, 2);
 
     const encargosCall = client.query.mock.calls[2];
     expect(encargosCall[0]).toMatch(/Crediario - Encargos/i);
     expect(encargosCall[0]).toMatch(/confirmed/i);
-    expect(encargosCall[1][1]).toBeCloseTo(2.90, 2);
+    expect(encargosCall[1][1]).toBeCloseTo(2.93, 2);
     expect(encargosCall[1]).toContain('credit-charges-' + txRow.id);
 
     const arUpdateCall = client.query.mock.calls[6];
     expect(arUpdateCall[0]).toMatch(/UPDATE transactions/i);
-    expect(parseFloat(arUpdateCall[1][1])).toBeCloseTo(47.10, 2);
+    expect(parseFloat(arUpdateCall[1][1])).toBeCloseTo(47.07, 2);
   });
 
   test('(b) OFF (config sem flag): charges_paid 0 e ZERO queries de encargos', async () => {
