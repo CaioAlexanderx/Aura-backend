@@ -124,7 +124,7 @@ router.use('/public/karate', require('./karatePublic'));
 //   GET /public/karate/:slug/ranking/:season/:category— atalho REST (iframe)
 router.use('/public/karate', require('./karatePublicRanking'));
 
-// ── AURA KARATÊ — Track A (backend cadastros) ────────────────────
+// ── AURA KARATÊ — Track A (backend cadastros) ──────────────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
 // GET  /federation/:id/belt-distribution
@@ -145,16 +145,14 @@ router.use('/federation/:id/financial', require('./karateAnnuities'));
 router.use('/federation/:id/financial', require('./karateExpenses'));
 router.use('/federation/:id/financial', require('./karateFees'));
 router.use('/federation/:id/financial', require('./karateFinancial'));
-// Track P: NFS-e para anuidades de dojô (reusa nuvemfiscal + nfe_documents)
-router.use('/federation/:id/financial', require('./karateNfse'));
 
-// ── AURA KARATÊ — Track C (backend exames + certificados) ──────────
+// ── AURA KARATÊ — Track C (backend exames + certificados) ───
 router.use('/federation/:id', require('./karateRequirements'));
 router.use('/federation/:id', require('./karateExams'));
 router.use('/federation/:id', require('./karateCourses'));
 router.use('/federation/:id', require('./karateCertificates'));
 
-// ── AURA KARATÊ — Track D (admin: carteirinha digital) ────────────
+// ── AURA KARATÊ — Track D (admin: carteirinha digital) ──────
 // Migration 164. Somente DADOS (sem geração de imagem no app).
 //   POST /federation/:id/practitioners/:practitionerId/issue-card  (staffWrite)
 //   GET  /federation/:id/practitioners/:practitionerId/card        (read)
@@ -162,7 +160,7 @@ router.use('/federation/:id', require('./karateCertificates'));
 //   POST /federation/:id/cards/issue-batch                         (adminOnly)
 router.use('/federation/:id', require('./karateCards'));
 
-// ── AURA KARATÊ — Track E (admin: competições + ranking) ──────────
+// ── AURA KARATÊ — Track E (admin: competições + ranking) ────
 // Migrations 168 + 169. Contrato docs/karate-fase4-openapi.yaml.
 //   GET/POST  /federation/:id/competitions
 //   GET/PATCH /federation/:id/competitions/:cid (+ /close)
@@ -178,11 +176,23 @@ router.use('/federation/:id', require('./karateCompetitions'));
 //   GET  .../events  + POST .../events/:eventId/reprocess
 router.use('/federation/:id', require('./karateConnections'));
 
+// ── AURA KARATÊ — Track K (sync real: aplicação idempotente da fila) ──
+// Migration 179. Consumidor de karate_sync_events: aplica practitioner/
+// attendance/annuity à federação (dedupe em karate_sync_applied).
+//   POST /federation/:id/sync/apply   (adminOnly) — drena+aplica a fila
+router.use('/federation/:id', require('./karateSyncApply'));
+
 // ── AURA KARATÊ — Track I (régua de lembrete de anuidade + logs) ──
 // Migrations 174 + 175. Provider Resend (karateMailer) + motor de régua.
 //   GET/PUT /federation/:id/reminder-config   (read / adminOnly)
 //   GET     /federation/:id/reminder-log        (read)
 //   POST    /federation/:id/reminders/run       (adminOnly, disparo manual)
 router.use('/federation/:id', require('./karateReminders'));
+
+// ── AURA KARATÊ — Track N (transferência de praticante entre dojôs) ──
+// Migration 180 (karate_practitioner_transfers, append-only/imutável).
+//   GET  /federation/:id/practitioners/:practitionerId/transfers  (read)
+//   POST /federation/:id/practitioners/:practitionerId/transfer    (staffWrite)
+router.use('/federation/:id', require('./karateTransfers'));
 
 module.exports = router;
