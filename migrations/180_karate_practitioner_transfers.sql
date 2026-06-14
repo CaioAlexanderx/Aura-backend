@@ -23,8 +23,10 @@ CREATE TABLE IF NOT EXISTS karate_practitioner_transfers (
   -- Dojô de origem (pode ser NULL se o praticante ainda não tinha dojô)
   origin_dojo_id      UUID REFERENCES companies(id) ON DELETE SET NULL,
 
-  -- Dojô de destino (obrigatório)
-  destination_dojo_id UUID NOT NULL REFERENCES companies(id) ON DELETE SET NULL,
+  -- Dojô de destino (obrigatório). RESTRICT: coluna é NOT NULL, então SET NULL
+  -- violaria a constraint ao excluir o dojô; o histórico é imutável e mantém o
+  -- vínculo (o snapshot do nome cobre o caso de rename).
+  destination_dojo_id UUID NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
 
   -- Snapshot dos nomes no momento da transferência (resiliente a rename/exclusão)
   origin_dojo_name      TEXT,
