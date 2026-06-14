@@ -176,4 +176,11 @@ router.use('/federation/:id', require('./karateCompetitions'));
 //   GET  .../events  + POST .../events/:eventId/reprocess
 router.use('/federation/:id', require('./karateConnections'));
 
+// ── AURA KARATÊ — Track I (régua de lembrete de anuidade + logs) ──
+// Migrations 174 + 175. Provider Resend (karateMailer) + motor de régua.
+//   GET/PUT /federation/:id/reminder-config   (read / adminOnly)
+//   GET     /federation/:id/reminder-log        (read)
+//   POST    /federation/:id/reminders/run       (adminOnly, disparo manual)
+router.use('/federation/:id', require('./karateReminders'));
+
 module.exports = router;
