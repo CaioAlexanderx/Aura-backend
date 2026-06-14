@@ -1,13 +1,18 @@
 // ============================================================
-// AURA KARATÊ — E-mails (Track I)
+// AURA KARATÊ — E-mails (Track I · DESIGN-30)
 // Envia via Resend (mesmo provider do mailer core), porém ISOLADO do
-// src/services/mailer.js para não arriscar os e-mails transacionais
-// (verificação, reset de senha, pedidos). Mesmo RESEND_API_KEY e domínio
-// verificado (getaura.com.br).
+// src/services/mailer.js para não arriscar os e-mails transacionais.
 //
-// sendKarateEmail(...) é a INTERFACE que Track J (certificados) e Track L
-// (relatórios) reusam. O layout abaixo é um DEFAULT funcional (Shoji claro)
-// até a DESIGN-30 aprovada — ver BRIEF_DESIGN_30_EMAILS_KARATE.md.
+// sendKarateEmail(to, opts) é a INTERFACE genérica que Track J (certificados)
+// e Track L (relatórios) reusam. O layout aplica a paleta Shoji claro
+// aprovada em DESIGN-30: papel #f4f1ea, card branco, vermelho #b02a2a.
+//
+// Campos do layout compartilhado (via opts):
+//   federationName      — nome textual da federação (fallback "Federação")
+//   federationLogoUrl   — companies.karate_logo_url; cai para ícone Aura se ausente
+//   federationWhatsapp  — companies.wa_phone_display; bloco wa.me só se presente
+//   ctaUrl              — URL do botão CTA; omitido = sem botão
+//   ctaLabel            — rótulo do botão (default "Abrir")
 // ============================================================
 'use strict';
 
@@ -41,64 +46,178 @@ async function sendRaw(opts) {
   return data;
 }
 
-// Layout default (Shoji claro). DESIGN-30 substitui depois.
+// ── Layout DESIGN-30 (Shoji claro) ───────────────────────────
+// Paleta: papel #f4f1ea · card #fff · borda #e6e0d4 · vermelho #b02a2a
+// Estrutura em table, CSS 100% inline, max-width 480 px.
+//
+// opts:
+//   federationName      — nome da federação (texto)
+//   federationLogoUrl   — URL da logo (companies.karate_logo_url); opcional
+//   federationWhatsapp  — número WA (companies.wa_phone_display); opcional
 function layout(content, opts) {
-  const fed = (opts && opts.federationName) || 'Federação';
+  const o = opts || {};
+  const fed = o.federationName || 'Federação';
+
+  // ── Header: logo da federação OU ícone Aura Karatê ──────
+  const headerBlock = o.federationLogoUrl
+    ? `<img src="${_esc(o.federationLogoUrl)}" width="64" height="64"
+           alt="${_esc(fed)}"
+           style="display:block;border-radius:14px;object-fit:contain;background:#f4f1ea;" />`
+    : `<img src="${ICON_URL}" width="48" height="48"
+           alt="Aura Karatê"
+           style="display:block;border-radius:12px;" />`;
+
+  // ── Footer: wa.me só quando número disponível ────────────
+  const waBlock = o.federationWhatsapp
+    ? `<tr><td align="center" style="padding:0 32px 18px 32px;">
+        <a href="https://wa.me/${_digitsOnly(o.federationWhatsapp)}"
+           style="display:inline-block;font-size:12px;font-weight:700;color:#25d366;text-decoration:none;border:1px solid #25d366;border-radius:8px;padding:7px 18px;">
+          &#128222;&nbsp;Falar com a federação
+        </a>
+      </td></tr>`
+    : '';
+
   return `<!DOCTYPE html>
 <html lang="pt-BR">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aura Karatê</title></head>
 <body style="margin:0;padding:0;background:#f4f1ea;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f1ea;padding:40px 20px;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background:#f4f1ea;padding:40px 16px;">
     <tr><td align="center">
-      <table width="480" cellpadding="0" cellspacing="0" style="max-width:480px;width:100%;background:#ffffff;border:1px solid #e6e0d4;border-radius:18px;overflow:hidden;">
-        <tr><td style="height:4px;background:#b02a2a;"></td></tr>
+
+      <!-- Card principal -->
+      <table width="480" cellpadding="0" cellspacing="0" border="0"
+             style="max-width:480px;width:100%;background:#ffffff;
+                    border:1px solid #e6e0d4;border-radius:18px;overflow:hidden;">
+
+        <!-- Barra vermelha topo -->
+        <tr><td height="4" style="background:#b02a2a;font-size:0;line-height:0;">&nbsp;</td></tr>
+
+        <!-- Header: logo / ícone + nome federação -->
         <tr><td align="center" style="padding:28px 32px 0 32px;">
-          <img src="${ICON_URL}" width="48" height="48" alt="Aura Karatê" style="display:block;border-radius:12px;" />
-          <p style="margin:10px 0 0;font-size:13px;font-weight:800;color:#1c1917;letter-spacing:0.3px;">Aura Karatê</p>
-          <p style="margin:2px 0 0;font-size:11px;color:#78716c;">${fed}</p>
+          ${headerBlock}
+          <p style="margin:10px 0 0;font-size:13px;font-weight:800;color:#1c1917;
+                    letter-spacing:0.3px;">Aura Karatê</p>
+          <p style="margin:2px 0 0;font-size:11px;color:#78716c;">${_esc(fed)}</p>
         </td></tr>
-        <tr><td style="padding:22px 32px 30px 32px;">${content}</td></tr>
-        <tr><td style="padding:0 32px 26px 32px;border-top:1px solid #eee7da;">
-          <p style="margin:18px 0 0;font-size:11px;color:#a8a29e;text-align:center;line-height:18px;">
-            Enviado por Aura Karatê &middot; <a href="https://getaura.com.br" style="color:#b02a2a;text-decoration:none;">getaura.com.br</a>
-          </p>
+
+        <!-- Divisor sutil -->
+        <tr><td style="padding:20px 32px 0 32px;">
+          <div style="height:1px;background:#f0ebe3;"></div>
         </td></tr>
+
+        <!-- Corpo do e-mail -->
+        <tr><td style="padding:22px 32px 28px 32px;">${content}</td></tr>
+
+        <!-- Botão wa.me (condicional) -->
+        ${waBlock}
+
+        <!-- Rodapé -->
+        <tr><td style="padding:0 32px 24px 32px;border-top:1px solid #eee7da;">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr><td align="center" style="padding-top:18px;">
+              <!-- Wordmark Aura Karatê minimalista -->
+              <img src="${ICON_URL}" width="22" height="22" alt=""
+                   style="display:inline-block;vertical-align:middle;border-radius:5px;opacity:0.55;" />
+              <span style="font-size:11px;color:#a8a29e;vertical-align:middle;margin-left:6px;">
+                Aura Karatê &middot;
+                <a href="https://getaura.com.br"
+                   style="color:#b02a2a;text-decoration:none;">getaura.com.br</a>
+              </span>
+            </td></tr>
+          </table>
+        </td></tr>
+
       </table>
+      <!-- /Card -->
+
     </td></tr>
   </table>
 </body>
 </html>`;
 }
 
+// Escapa caracteres HTML perigosos em strings interpoladas no template.
+function _esc(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// Remove tudo que não é dígito (para montar a URL wa.me).
+function _digitsOnly(s) {
+  return String(s || '').replace(/\D/g, '');
+}
+
 function fmtBRL(v) {
   const n = Number(v || 0);
-  return 'R$ ' + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.').replace(/\.(?=\d{2}$)/, ',').replace(/,(\d{3})/g, '.$1');
+  return 'R$ ' + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
 function fmtDateBR(d) {
   try { return new Date(d).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
   catch (_) { return String(d); }
 }
 
-// Interface genérica karatê (J e L reusam). Monta heading + corpo + CTA.
+// ── Interface genérica karatê (Track J e L reusam) ───────────
+// Monta heading + corpo + CTA e delega ao layout() compartilhado.
+//
+// opts:
+//   subject, heading, bodyHtml, text    — conteúdo do e-mail
+//   ctaUrl, ctaLabel                    — botão (omitir = sem botão)
+//   federationName                      — nome da federação
+//   federationLogoUrl                   — companies.karate_logo_url
+//   federationWhatsapp                  — companies.wa_phone_display
+//   from                                — remetente override
 async function sendKarateEmail(to, opts) {
   const o = opts || {};
+
   const cta = o.ctaUrl
-    ? `<table width="100%" cellpadding="0" cellspacing="0" style="margin:22px 0 6px;"><tr><td align="center">
-        <a href="${o.ctaUrl}" style="display:inline-block;background:#b02a2a;color:#fff;font-size:14px;font-weight:700;padding:13px 30px;border-radius:10px;text-decoration:none;">${o.ctaLabel || 'Abrir'}</a>
-      </td></tr></table>`
+    ? `<table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="margin:22px 0 6px;">
+        <tr><td align="center">
+          <a href="${_esc(o.ctaUrl)}"
+             style="display:inline-block;background:#b02a2a;color:#ffffff;
+                    font-size:14px;font-weight:700;padding:13px 32px;
+                    border-radius:10px;text-decoration:none;
+                    letter-spacing:0.2px;">
+            ${_esc(o.ctaLabel || 'Abrir')}
+          </a>
+        </td></tr>
+      </table>`
     : '';
+
   const heading = o.heading
-    ? `<p style="font-size:16px;font-weight:800;color:#1c1917;margin:0 0 10px;">${o.heading}</p>`
+    ? `<p style="font-size:17px;font-weight:800;color:#1c1917;margin:0 0 12px;
+                 line-height:24px;">${_esc(o.heading)}</p>`
     : '';
-  const html = layout(`${heading}${o.bodyHtml || ''}${cta}`, { federationName: o.federationName });
-  return sendRaw({ to, from: o.from, subject: o.subject, html, text: o.text || stripHtml(`${o.heading || ''} ${o.bodyHtml || ''} ${o.ctaUrl || ''}`) });
+
+  const body = `${heading}${o.bodyHtml || ''}${cta}`;
+
+  const html = layout(body, {
+    federationName:    o.federationName,
+    federationLogoUrl: o.federationLogoUrl,
+    federationWhatsapp: o.federationWhatsapp,
+  });
+
+  return sendRaw({
+    to,
+    from: o.from,
+    subject: o.subject,
+    html,
+    text: o.text || _stripHtml(`${o.heading || ''} ${o.bodyHtml || ''} ${o.ctaUrl || ''}`),
+  });
 }
 
-function stripHtml(s) {
+function _stripHtml(s) {
   return String(s || '').replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Template: lembrete/cobrança de anuidade de dojô (régua).
+// ── Template: lembrete/cobrança de anuidade de dojô ──────────
+// Chamado pelo karateReminderRunner com:
+//   { dojoName, amount, dueDate, referencePeriod, ruleCode, offset,
+//     federationName, federationLogoUrl, federationWhatsapp, ctaUrl }
+//
+// ctaUrl: URL da página de pagamento Pix do dojô, passada pelo runner
+// (data.ctaUrl). Se ausente, nenhum botão é renderizado.
 async function sendKarateAnnuityReminderEmail(to, data) {
   const d = data || {};
   const overdue = (d.offset || 0) > 0;
@@ -107,23 +226,32 @@ async function sendKarateAnnuityReminderEmail(to, data) {
     ? `venceu em <strong>${fmtDateBR(d.dueDate)}</strong>`
     : `vence em <strong>${fmtDateBR(d.dueDate)}</strong>`;
   const periodo = d.referencePeriod ? ` referente a ${d.referencePeriod}` : '';
+
   const bodyHtml = `
-    <p style="font-size:14px;color:#44403c;line-height:22px;margin:0 0 14px;">Olá${d.dojoName ? ', ' + d.dojoName : ''}!</p>
     <p style="font-size:14px;color:#44403c;line-height:22px;margin:0 0 14px;">
-      A anuidade${periodo} no valor de <strong>${fmtBRL(d.amount)}</strong> ${quando}.
+      Olá${d.dojoName ? ', ' + _esc(d.dojoName) : ''}!
+    </p>
+    <p style="font-size:14px;color:#44403c;line-height:22px;margin:0 0 14px;">
+      A anuidade${periodo} no valor de
+      <strong style="color:#1c1917;">${fmtBRL(d.amount)}</strong>
+      ${quando}.
     </p>
     <p style="font-size:13px;color:#78716c;line-height:21px;margin:0;">
-      Para manter o dojô em dia com a federação, faça o pagamento e registre o comprovante.
+      Para manter o dojô em dia com a federação, realize o pagamento
+      e registre o comprovante assim que possível.
     </p>`;
+
   return sendKarateEmail(to, {
     subject: overdue
       ? `Anuidade vencida — ${fmtBRL(d.amount)}`
       : `Lembrete: anuidade de ${fmtBRL(d.amount)} a vencer`,
     heading,
     bodyHtml,
-    ctaLabel: d.ctaUrl ? (d.ctaLabel || 'Ver anuidade') : undefined,
-    ctaUrl: d.ctaUrl,
-    federationName: d.federationName,
+    ctaUrl:   d.ctaUrl   || undefined,
+    ctaLabel: d.ctaLabel || (d.ctaUrl ? 'Pagar anuidade' : undefined),
+    federationName:     d.federationName,
+    federationLogoUrl:  d.federationLogoUrl,
+    federationWhatsapp: d.federationWhatsapp,
   });
 }
 
