@@ -28,12 +28,31 @@ async function getEnabledConfigs() {
   }
 }
 
-async function getFederationName(fedId) {
+// Retorna metadados da federação necessários ao layout DESIGN-30:
+//   name             — COALESCE(trade_name, legal_name) ou "Federação"
+//   karate_logo_url  — URL da logo (companies.karate_logo_url); null se ausente
+//   wa_phone_display — número WhatsApp (companies.wa_phone_display); null se ausente
+async function getFederationMeta(fedId) {
   try {
     const { rows } = await db.query(
-      `SELECT COALESCE(trade_name, legal_name) AS name FROM companies WHERE id = $1`, [fedId]);
-    return rows[0]?.name || 'Federação';
-  } catch (_) { return 'Federação'; }
+      `SELECT
+         COALESCE(trade_name, legal_name) AS name,
+         karate_logo_url,
+         wa_phone_display
+       FROM companies
+       WHERE id = $1
+       LIMIT 1`,
+      [fedId]
+    );
+    if (!rows.length) return { name: 'Federação', karate_logo_url: null, wa_phone_display: null };
+    return {
+      name:             rows[0].name             || 'Federação',
+      karate_logo_url:  rows[0].karate_logo_url  || null,
+      wa_phone_display: rows[0].wa_phone_display  || null,
+    };
+  } catch (_) {
+    return { name: 'Federação', karate_logo_url: null, wa_phone_display: null };
+  }
 }
 
 // Anuidades de dojô em aberto (não pagas, com vencimento) de uma federação.
@@ -101,7 +120,8 @@ async function runForFederation(cfg, today) {
   }
   if (!annuities.length) return { sent, skipped, failed, total: 0 };
 
-  const federationName = await getFederationName(fedId);
+  // Busca metadados da federação (nome + logo + WhatsApp) uma vez por lote.
+  const fedMeta = await getFederationMeta(fedId);
 
   for (const a of annuities) {
     const sentCodes = await getSentCodes(a.id, channel);
@@ -121,9 +141,23 @@ async function runForFederation(cfg, today) {
     }
     try {
       const res = await karateMailer.sendKarateAnnuityReminderEmail(recipient, {
-        dojoName: a.dojo_name, amount: a.amount, dueDate: a.due_date,
-        referencePeriod: a.reference_period, ruleCode: due.code, offset: due.offset,
-        federationName,
+        dojoName:           a.dojo_name,
+        amount:             a.amount,
+        dueDate:            a.due_date,
+        referencePeriod:    a.reference_period,
+        ruleCode:           due.code,
+        offset:             due.offset,
+        // ── DESIGN-30: metadados da federação ──────────────
+        federationName:     fedMeta.name,
+        federationLogoUrl:  fedMeta.karate_logo_url,   // companies.karate_logo_url
+        federationWhatsapp: fedMeta.wa_phone_display,   // companies.wa_phone_display
+        // ctaUrl: página de pagamento Pix do dojô.
+        // A rota backend POST /financial/annuities/dojos/:dojoId/pix existe,
+        // mas não há página frontend pública de pagamento Pix para o dojô ainda.
+        // Quando essa página for criada (Track ?), passar a URL aqui:
+        //   ctaUrl: `https://app.getaura.com.br/karate/pagar/${a.id}` (exemplo)
+        // Por ora, ctaUrl fica undefined → nenhum botão é renderizado.
+        ctaUrl: undefined,
       });
       await logSend({ federationId: fedId, annuityId: a.id, dojoId: a.dojo_id, channel,
         recipient, ruleCode: due.code, status: 'sent', providerId: res && res.id });
