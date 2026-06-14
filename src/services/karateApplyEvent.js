@@ -388,12 +388,24 @@ async function recordAttendance(client, ev, data) {
 // Marca a cobrança do período como paga (se existir). Não cria cobrança do
 // nada (a cobrança nasce na federação, Track B). Se ainda não houver
 // cobrança, segue (settled=false) — idempotente.
+//
+// IMPORTANTE (fix B1): a liquidação é dirigida por `paid_at`, NÃO por
+// status='paid'. A migration 152 define
+//   status ... CHECK (status IN ('active','expiring','overdue','defaulting','suspended'))
+// — 'paid' NÃO está na lista, então `SET status='paid'` estourava 23514
+// (check_violation) em todo match real. A liquidação canônica (GET
+// /annuities/dojos, POST /confirm) e a régua de lembretes
+// (karateReminderEngine.computeReminder: para quando `paidAt || status==='paid'`)
+// tratam `paid_at IS NOT NULL` como "pago". Setamos SOMENTE paid_at (status
+// intocado, sempre dentro do CHECK) e guardamos `paid_at IS NULL` para
+// no-op idempotente quando já liquidado — o que também faz o filtro
+// `paid_at IS NULL AND status <> 'paid'` (getOpenAnnuities) excluir a linha.
 async function settleAnnuity(client, ev, data) {
   const paidAt = data.paid_at || new Date().toISOString();
   const upd = await client.query(
     `UPDATE karate_dojo_annuity_history
-       SET status = 'paid', paid_at = COALESCE(paid_at, $3), updated_at = NOW()
-     WHERE dojo_id = $1 AND reference_period = $2 AND status <> 'paid'
+       SET paid_at = COALESCE(paid_at, $3), updated_at = NOW()
+     WHERE dojo_id = $1 AND reference_period = $2 AND paid_at IS NULL
      RETURNING id`,
     [ev.dojo_id, data.reference_period, paidAt]
   );
