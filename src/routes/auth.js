@@ -33,6 +33,7 @@ const db      = require('../config/database');
 const { validateRuntimeEnv } = require('../config/env');
 const { requireAuth } = require('../middleware/auth');
 const { logAuditAction } = require('../middleware/auditLog');
+const { sendSelfServeSignupNotification } = require('../services/mailer');
 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -137,7 +138,8 @@ function shapeCompany(company, fallbackMemberRole) {
 
 // POST /api/v1/auth/register
 router.post('/register', async (req, res) => {
-  const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version } = req.body;
+  const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version, self_serve } = req.body;
+  const isSelfServe = (self_serve === true || self_serve === 'true');
 
   if (!name || !email || !password) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password' });
   // Aceite dos Termos obrigatorio — registrado para fins de auditoria juridica (migration 114)
@@ -161,6 +163,12 @@ router.post('/register', async (req, res) => {
       if (ac.expires_at && new Date(ac.expires_at) < new Date()) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Codigo expirado' }); }
       plan = ac.plan || 'essencial'; trialDays = ac.trial_days || 0; discountPct = ac.discount_pct || 0; codeType = ac.type; codeId = ac.id; referrerId = ac.referrer_id;
       await client.query('UPDATE access_codes SET uses = uses + 1, updated_at = NOW() WHERE id = $1', [ac.id]);
+    }
+
+    // Cadastro self-service (site /comecar e app /cadastro): sem codigo de acesso,
+    // trial padrao Negocio 7 dias. Cadastros internos (sem a flag) seguem essencial.
+    if (!access_code && isSelfServe) {
+      plan = 'negocio'; trialDays = 7; codeType = 'self_serve';
     }
 
     const isStaff = email.toLowerCase().trim().endsWith('@getaura.com.br');
@@ -202,8 +210,8 @@ router.post('/register', async (req, res) => {
       isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
       const { rows: [newCompany] } = await client.query(
-        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, ai_enabled, ai_consent_at',
-        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null]
+        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6, $7) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, ai_enabled, ai_consent_at',
+        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null]
       );
       company = newCompany;
     }
@@ -219,6 +227,20 @@ router.post('/register', async (req, res) => {
       await client.query('INSERT INTO referrals (referrer_id, referred_user_id, referred_email, code, status, completed_at) VALUES ($1, $2, $3, $4, \'completed\', NOW())', [referrerId, user.id, email.toLowerCase().trim(), access_code.toUpperCase().trim()]);
     }
     await client.query('COMMIT');
+
+    // E-mail de follow-up pra CS quando uma conta self-service e criada (best-effort, nao bloqueia).
+    if (isNewCompany && trialDays > 0 && (isSelfServe || codeType === 'trial')) {
+      sendSelfServeSignupNotification({
+        name: user.name,
+        companyName: company.trade_name || company.legal_name,
+        email: user.email,
+        phone: phone || null,
+        cnpj: cnpj || null,
+        plan: company.plan,
+        trialDays,
+        trialEndsAt: company.trial_ends_at,
+      }).catch((e) => console.error('[register] self-serve notify email falhou:', e.message));
+    }
 
     const tokenPayload = {
       id: user.id,
