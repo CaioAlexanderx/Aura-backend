@@ -176,6 +176,12 @@ router.use('/federation/:id', require('./karateCompetitions'));
 //   GET  .../events  + POST .../events/:eventId/reprocess
 router.use('/federation/:id', require('./karateConnections'));
 
+// ── AURA KARATÊ — Track K (sync real: aplicação idempotente da fila) ──
+// Migration 179. Consumidor de karate_sync_events: aplica practitioner/
+// attendance/annuity à federação (dedupe em karate_sync_applied).
+//   POST /federation/:id/sync/apply   (adminOnly) — drena+aplica a fila
+router.use('/federation/:id', require('./karateSyncApply'));
+
 // ── AURA KARATÊ — Track I (régua de lembrete de anuidade + logs) ──
 // Migrations 174 + 175. Provider Resend (karateMailer) + motor de régua.
 //   GET/PUT /federation/:id/reminder-config   (read / adminOnly)

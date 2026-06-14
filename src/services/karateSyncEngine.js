@@ -9,10 +9,11 @@
 //     POST /federation/:id/connections/sync/run), e um varredor leve marca
 //     dojôs que ficaram quietos demais (vira o aviso proativo da UI).
 //
-// LIGHT: a aplicação real de cada tipo de evento (criar praticante, registrar
-// frequência, etc.) é um ponto de plug em applyEvent() — por ora os eventos
-// são RECONHECIDOS (drena a fila + mantém a saúde fresca), que já alimenta a
-// tela "Conexão do dojô". A re-tentativa leve e o flag de "caiu" já operam.
+// Track K (14/06): a aplicação real de cada tipo de evento saiu do stub e
+// passou a delegar para o motor consumidor idempotente
+// (src/services/karateApplyEvent.js). applyEvent abaixo é só o adaptador
+// que traduz o resultado do consumidor para o contrato {ok, ack} que este
+// motor LIGHT já esperava — sem mudar a lógica de fila/re-tentativa/saúde.
 // ============================================================
 'use strict';
 
@@ -32,17 +33,28 @@ function isStale(lastSyncAtISO, hours, now) {
 }
 
 /**
- * Aplica um evento da fila. LIGHT: reconhece (ack) e drena.
- * A aplicação real por tipo pluga aqui (um case por event_type).
+ * Aplica um evento da fila. Track K: delega ao consumidor idempotente.
+ * Traduz o resultado rico do consumidor para o contrato {ok, ack} deste
+ * motor:
+ *   - consumidor.ok=true            → { ok:true, ack:true }  (drena)
+ *   - consumidor.deferred (schema   → { ok:true, ack:true }  (não estoura
+ *       da Track K ausente)             attempts antes da migration 179;
+ *                                       o re-processo aplica quando ela vier)
+ *   - consumidor.ok=false           → { ok:false, error }    (re-tenta)
+ *
+ * Mantido lazy o require para não acoplar o boot da Track F à Track K.
  */
 async function applyEvent(client, ev) {
-  switch (ev.event_type) {
-    // case 'practitioner_added': ...  (futuro: upsert customer)
-    // case 'attendance':        ...  (futuro: registrar frequência)
-    // case 'annuity_paid':      ...  (futuro: conciliar anuidade)
-    default:
-      return { ok: true, ack: true };
+  let consumer;
+  try {
+    consumer = require('./karateApplyEvent');
+  } catch (_) {
+    return { ok: true, ack: true }; // consumidor ausente: comportamento LIGHT antigo
   }
+  const out = await consumer.applyEvent(client, ev);
+  if (out.deferred) return { ok: true, ack: true };
+  if (out.ok) return { ok: true, ack: true, applied: !!out.applied, kind: out.kind };
+  return { ok: false, error: out.error || 'falha ao aplicar' };
 }
 
 /** Processa a fila de UMA federação (chamado no "pull" quando ela abre). */
