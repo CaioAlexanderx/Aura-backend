@@ -186,14 +186,23 @@ describe('applyEvent — aplicação idempotente', () => {
   beforeEach(() => jest.clearAllMocks());
 
   it('practitioner novo: reivindica dedupe + INSERT customers + tag', async () => {
-    // queries: 0 claim(INSERT applied→retorna id) | 1 SELECT por cpf (vazio=novo)
-    //          2 nextRegistration(SELECT max) | 3 INSERT customers | 4 tag UPDATE
+    // nextPractitionerRegistrationNumber emite 2 queries:
+    //   1) SELECT pg_advisory_xact_lock(…)   — advisory lock
+    //   2) SELECT karate_registration_number … — busca o máximo existente
+    // Sequência completa (6 queries):
+    //   0: INSERT karate_sync_applied … ON CONFLICT DO NOTHING RETURNING id  (claimApplied)
+    //   1: SELECT customers WHERE cpf …                                       (upsertPractitioner — CPF lookup)
+    //   2: SELECT pg_advisory_xact_lock(…)                                    (nextPractitionerRegistrationNumber)
+    //   3: SELECT karate_registration_number FROM customers …                 (nextPractitionerRegistrationNumber)
+    //   4: INSERT INTO customers … RETURNING id                               (upsertPractitioner — INSERT)
+    //   5: UPDATE karate_sync_applied SET target_table …                      (tagApplied)
     const client = makeMockClient([
-      { rows: [{ id: 'applied-1' }] },   // claimApplied → claimed
-      { rows: [] },                      // SELECT customer por cpf → não existe
-      { rows: [] },                      // nextPractitionerRegistrationNumber: max
-      { rows: [{ id: 'cust-1' }] },      // INSERT customers
-      { rows: [] },                      // tagApplied UPDATE
+      { rows: [{ id: 'applied-1' }] },   // 0: claimApplied → claimed
+      { rows: [] },                      // 1: SELECT customer por cpf → não existe
+      { rows: [] },                      // 2: advisory lock (nextPractitionerRegistrationNumber)
+      { rows: [] },                      // 3: SELECT max registration number → nenhum, usa 1
+      { rows: [{ id: 'cust-1' }] },      // 4: INSERT customers RETURNING id
+      { rows: [] },                      // 5: tagApplied UPDATE
     ]);
     const res = await applyEvent(client, ev({
       event_type: 'practitioner_added',
