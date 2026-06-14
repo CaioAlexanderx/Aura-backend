@@ -124,7 +124,7 @@ router.use('/public/karate', require('./karatePublic'));
 //   GET /public/karate/:slug/ranking/:season/:category— atalho REST (iframe)
 router.use('/public/karate', require('./karatePublicRanking'));
 
-// ── AURA KARATÊ — Track A (backend cadastros) ──────────────
+// ── AURA KARATÊ — Track A (backend cadastros) ──────────────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
 // GET  /federation/:id/belt-distribution
@@ -188,5 +188,11 @@ router.use('/federation/:id', require('./karateSyncApply'));
 //   GET     /federation/:id/reminder-log        (read)
 //   POST    /federation/:id/reminders/run       (adminOnly, disparo manual)
 router.use('/federation/:id', require('./karateReminders'));
+
+// ── AURA KARATÊ — Track N (transferência de praticante entre dojôs) ──
+// Migration 180 (karate_practitioner_transfers, append-only/imutável).
+//   GET  /federation/:id/practitioners/:practitionerId/transfers  (read)
+//   POST /federation/:id/practitioners/:practitionerId/transfer    (staffWrite)
+router.use('/federation/:id', require('./karateTransfers'));
 
 module.exports = router;
