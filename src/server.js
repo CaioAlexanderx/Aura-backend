@@ -62,6 +62,10 @@ function startServer() {
     // Iniciar scheduler de relatórios
     const { initReportScheduler } = require('./jobs/reportScheduler');
     initReportScheduler();
+
+    // Track I: régua de lembrete de anuidade karatê (diário 9h BRT)
+    const { initAnnuityReminderScheduler } = require('./jobs/annuityReminderScheduler');
+    initAnnuityReminderScheduler();
   });
 }
 
