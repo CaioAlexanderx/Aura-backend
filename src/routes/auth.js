@@ -24,6 +24,13 @@
 // feat/terms-acceptance (2026-05-14): /auth/register agora exige
 // terms_accepted=true no body e persiste terms_accepted_at + terms_version
 // na tabela users (migration 114). Qualquer cadastro sem aceite recebe 400.
+//
+// Track G (2026-06-09): acesso real karate. resolveKarateContext deriva
+// federation_id (federacao=company.id; dojo=company.federation_id) e
+// karate_role (owner->federation_admin/dojo_owner; demais role_label crus)
+// a partir da company primaria. Exposto no JWT (login/refresh/register) e
+// no objeto company de /login, /me e /register. Sem migration: a coluna
+// companies.federation_id ja existe. requireCompanyAccess inalterado.
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -34,6 +41,7 @@ const { validateRuntimeEnv } = require('../config/env');
 const { requireAuth } = require('../middleware/auth');
 const { logAuditAction } = require('../middleware/auditLog');
 const { sendSelfServeSignupNotification } = require('../services/mailer');
+const { resolveKarateContext } = require('../config/karateRoles');
 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -69,6 +77,7 @@ async function resolveDefaultContext(userId, dbConn) {
             c.id, c.legal_name, c.plan, c.onboarding_step,
             c.trial_ends_at, c.module_overrides, c.billing_status,
             c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
+            c.federation_id,
             c.is_primary, c.created_at,
             CASE
               WHEN c.owner_id = $1 THEN 'owner'
@@ -119,6 +128,10 @@ async function resolveDefaultContext(userId, dbConn) {
 
 function shapeCompany(company, fallbackMemberRole) {
   if (!company) return null;
+  const member_role = company.member_role || fallbackMemberRole || 'owner';
+  // Track G (acesso real): federation_id + karate_role derivados da company.
+  // null fora de karate; federacao->id proprio, dojo->federation_id (pai).
+  const karate = resolveKarateContext({ ...company, member_role });
   return {
     id: company.id,
     name: company.legal_name || company.name || company.trade_name,
@@ -132,7 +145,9 @@ function shapeCompany(company, fallbackMemberRole) {
     vertical_active: company.vertical_active || null,
     ai_enabled: !!(company.ai_enabled),
     ai_consent_at: company.ai_consent_at || null,
-    member_role: company.member_role || fallbackMemberRole || 'owner',
+    member_role,
+    federation_id: karate.federation_id,
+    karate_role: karate.karate_role,
   };
 }
 
@@ -193,7 +208,7 @@ router.post('/register', async (req, res) => {
       const cleanCnpj = cnpj.replace(/\D/g, '');
       if (cleanCnpj.length === 14 || cleanCnpj.length === 11) {
         const { rows: existingCompanies } = await client.query(
-          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, ai_enabled, ai_consent_at FROM companies WHERE cnpj = $1',
+          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, ai_enabled, ai_consent_at, federation_id FROM companies WHERE cnpj = $1',
           [cleanCnpj]
         );
         if (existingCompanies.length > 0) {
@@ -210,7 +225,7 @@ router.post('/register', async (req, res) => {
       isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
       const { rows: [newCompany] } = await client.query(
-        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6, $7) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, ai_enabled, ai_consent_at',
+        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6, $7) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, ai_enabled, ai_consent_at, federation_id',
         [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null]
       );
       company = newCompany;
@@ -242,6 +257,8 @@ router.post('/register', async (req, res) => {
       }).catch((e) => console.error('[register] self-serve notify email falhou:', e.message));
     }
 
+    // Track G: contexto karate da company recem-resolvida (member_role local).
+    const karateCtx = resolveKarateContext(company ? { ...company, member_role: memberRole } : null);
     const tokenPayload = {
       id: user.id,
       role: user.role,
@@ -249,6 +266,8 @@ router.post('/register', async (req, res) => {
       company: company ? company.id : null,
       is_staff: user.is_staff,
       consolidated_view: false,
+      federation_id: karateCtx.federation_id,
+      karate_role: karateCtx.karate_role,
     };
     const accessToken = signAccessToken(tokenPayload);
     const { token: refreshToken } = signRefreshToken({ id: user.id });
@@ -270,6 +289,8 @@ router.post('/register', async (req, res) => {
         ai_enabled: !!(company.ai_enabled),
         ai_consent_at: company.ai_consent_at || null,
         member_role: memberRole,
+        federation_id: karateCtx.federation_id,
+        karate_role: karateCtx.karate_role,
       } : null,
       consolidated_view: false,
       company_count: company ? 1 : 0,
@@ -300,6 +321,8 @@ router.post('/login', async (req, res) => {
     if (user.totp_enabled) return res.json({ requires_2fa: true, user_id: user.id, message: 'Autenticacao de dois fatores necessaria.' });
 
     const ctx = await resolveDefaultContext(user.id);
+    // Track G: contexto karate da primary (null em modo consolidado, alinhado com company=null).
+    const karateCtx = ctx.consolidated ? { federation_id: null, karate_role: null } : resolveKarateContext(ctx.primary);
 
     const tokenPayload = {
       id: user.id,
@@ -308,6 +331,8 @@ router.post('/login', async (req, res) => {
       company: ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null),
       is_staff: user.is_staff || false,
       consolidated_view: ctx.consolidated,
+      federation_id: karateCtx.federation_id,
+      karate_role: karateCtx.karate_role,
     };
     const accessToken = signAccessToken(tokenPayload);
     const { token: refreshToken } = signRefreshToken({ id: user.id });
@@ -343,6 +368,8 @@ router.post('/refresh', async (req, res) => {
     const user = uRows[0];
 
     const ctx = await resolveDefaultContext(user.id);
+    // Track G: re-resolve contexto karate a cada refresh (TTL 1h mantem fresco).
+    const karateCtx = ctx.consolidated ? { federation_id: null, karate_role: null } : resolveKarateContext(ctx.primary);
 
     const newAccessToken = signAccessToken({
       id: user.id,
@@ -351,6 +378,8 @@ router.post('/refresh', async (req, res) => {
       company: ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null),
       is_staff: user.is_staff || false,
       consolidated_view: ctx.consolidated,
+      federation_id: karateCtx.federation_id,
+      karate_role: karateCtx.karate_role,
     });
     res.json({
       token: newAccessToken,
@@ -392,6 +421,7 @@ router.post('/me', requireAuth, async (req, res) => {
         `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
                 c.trial_ends_at, c.module_overrides, c.billing_status,
                 c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
+                c.federation_id,
                 CASE
                   WHEN c.owner_id = $1 THEN 'owner'
                   ELSE COALESCE(cm.role_label, 'member')
