@@ -16,19 +16,24 @@
 // Guards: adminOnly() em todas as rotas (RBAC §7.3).
 // Idempotência via transactions.idempotency_key.
 // Status do dojô deriva de karate_dojo_annuity_history (migration 152).
+// NFS-e: usa nfe_documents + fiscal.emitNfse (mesma tabela/serviço de nfe.js).
+//        Emissão dedicada disponível em karateNfse.js.
 // ============================================================
 'use strict';
 
 const router  = require('express').Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const db      = require('../config/database');
+const fiscal  = require('../services/nuvemfiscal');
 const { guards } = require('../config/karateRoles');
 const { getDojoAnnuityStatus, computeAnnuityStatus } = require('../services/karateFinanceService');
 const { createPixCharge, getStatus: providerGetStatus } = require('../services/karatePaymentProvider');
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────
+const DOJO_ANNUITIES = true; // eslint-disable-line
+// ────────────────────────────────────────────────────────────────
 // DOJO ANNUITIES
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────
 
 // GET /financial/annuities/dojos
 router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
@@ -353,7 +358,8 @@ router.get('/payments/:intentId/status', ...guards.adminOnly(), async (req, res)
 
 // POST /financial/payments/:intentId/confirm
 // Admin confirma pagamento manualmente (ou webhook futuro chama este endpoint).
-// Reconcilia transaction (status=paid) + atualiza annuity_history + emite NFS-e.
+// Reconcilia transaction (status=paid) + atualiza annuity_history.
+// NFS-e: emite via nfe_documents + fiscal.emitNfse (best-effort, não bloqueia confirm).
 router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, res) => {
   const { id: federationId, intentId } = req.params;
   const { paid_at, emit_nfse = true } = req.body;
@@ -365,7 +371,7 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
     // Busca intent
     const intentRes = await client.query(
       `SELECT kpi.*, kdah.dojo_id, kdah.reference_period, kdah.amount AS annuity_amount,
-              kdah.status AS annuity_status
+              kdah.status AS annuity_status, kdah.id AS annuity_history_id
        FROM karate_payment_intents kpi
        JOIN karate_dojo_annuity_history kdah ON kdah.id = kpi.annuity_history_id
        WHERE kpi.id = $1 AND kpi.federation_id = $2
@@ -400,7 +406,6 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
     );
 
     // Reconcilia transaction
-    let nfseId = null;
     if (intent.transaction_id) {
       await client.query(
         `UPDATE transactions
@@ -408,58 +413,111 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
          WHERE id = $2`,
         [paidAt, intent.transaction_id]
       );
-
-      // Emite NFS-e se solicitado
-      if (emit_nfse) {
-        try {
-          // Verifica se já tem nfse_id
-          const txRes = await client.query(
-            `SELECT nfe_id FROM transactions WHERE id = $1`, [intent.transaction_id]
-          );
-          if (!txRes.rows[0]?.nfe_id) {
-            // NFS-e: insere registro pendente (provider chamado assincronamente)
-            const nfseInsert = await client.query(
-              `INSERT INTO nfse
-                 (company_id, payment_id, source_type, status,
-                  service_amount, service_description,
-                  recipient_name, recipient_doc,
-                  rps_number, rps_serie, provider, created_at)
-               SELECT
-                 t.company_id, t.id, 'karate_annuity', 'pendente',
-                 t.amount, t.description,
-                 co.name, COALESCE(co.cnpj, 'nao-informado'),
-                 nfse_next_rps(t.company_id), '1', 'mock', NOW()
-               FROM transactions t
-               JOIN companies co ON co.id = (SELECT dojo_id FROM karate_dojo_annuity_history WHERE transaction_id = t.id LIMIT 1)
-               WHERE t.id = $1
-               RETURNING id`,
-              [intent.transaction_id]
-            );
-            if (nfseInsert.rows.length) {
-              nfseId = nfseInsert.rows[0].id;
-              await client.query(
-                `UPDATE transactions SET nfe_id = $1 WHERE id = $2`,
-                [nfseId, intent.transaction_id]
-              );
-            }
-          } else {
-            nfseId = txRes.rows[0].nfe_id;
-          }
-        } catch (nfseErr) {
-          // NFS-e é best-effort: não bloqueia confirmação
-          console.warn('[karateAnnuities] nfse insert failed (best-effort):', nfseErr.message);
-        }
-      }
     }
 
     await client.query('COMMIT');
+
+    // ── NFS-e: best-effort após commit (não bloqueia confirm se falhar) ──
+    let nfseRef = null;
+    if (emit_nfse && intent.transaction_id && intent.dojo_id) {
+      try {
+        // Busca dados fiscais da federação (prestador)
+        const fedRes = await db.query(
+          `SELECT id, legal_name, trade_name, name, cnpj, email, phone,
+                  inscricao_municipal, focus_company_id, certificate_uploaded, tax_regime,
+                  address_street, address_number, address_neighborhood,
+                  address_city, address_state, address_zip, ibge_code, inscricao_estadual
+           FROM companies WHERE id = $1 LIMIT 1`,
+          [federationId]
+        );
+        const dojoRes = await db.query(
+          `SELECT name, cnpj FROM companies WHERE id = $1 LIMIT 1`,
+          [intent.dojo_id]
+        );
+
+        if (fedRes.rows.length && fedRes.rows[0].cnpj && fedRes.rows[0].inscricao_municipal) {
+          const federation = fedRes.rows[0];
+          const dojoName = dojoRes.rows[0]?.name || 'Dojô';
+          const dojoCnpj = (dojoRes.rows[0]?.cnpj || '').replace(/\D/g, '');
+          const serviceDesc = `Anuidade Dojô ${dojoName} — ${intent.reference_period}`;
+          const serviceValue = parseFloat(intent.annuity_amount);
+          const refCode = `nfse-karate-${(intent.annuity_history_id || '').slice(0, 8)}-${Date.now()}`;
+
+          // Verifica idempotência: já existe NFS-e para este annuity_history_id?
+          const existingRef = await db.query(
+            `SELECT ref FROM nfe_documents
+             WHERE company_id = $1 AND type = 'nfse'
+               AND payload::jsonb ->> 'annuity_history_id' = $2
+             LIMIT 1`,
+            [federationId, intent.annuity_history_id]
+          ).catch(() => ({ rows: [] }));
+
+          if (!existingRef.rows.length) {
+            // Insere pendente
+            await db.query(
+              `INSERT INTO nfe_documents
+                 (company_id, ref, type, status, recipient_cnpj, recipient_name,
+                  description, service_code, value, iss_rate, payload)
+               VALUES ($1,$2,'nfse','pending',$3,$4,$5,$6,$7,$8,$9)`,
+              [
+                federationId, refCode, dojoCnpj, dojoName, serviceDesc, '', serviceValue, 2,
+                JSON.stringify({
+                  source: 'karate_annuity',
+                  annuity_history_id: intent.annuity_history_id,
+                  dojo_id: intent.dojo_id,
+                  federation_id: federationId,
+                  transaction_id: intent.transaction_id,
+                  reference_period: intent.reference_period,
+                }),
+              ]
+            );
+            nfseRef = refCode;
+
+            // Emite via Nuvem Fiscal (best-effort)
+            try {
+              const result = await fiscal.emitNfse(federation, {
+                recipient_cnpj: dojoCnpj || undefined,
+                recipient_name: dojoName,
+                description: serviceDesc,
+                service_code: '',
+                value: serviceValue,
+                iss_rate: 2,
+              });
+              const nfseStatus = result.status === 'autorizado' ? 'authorized'
+                               : result.status === 'rejeitado'  ? 'error' : 'processing';
+              await db.query(
+                `UPDATE nfe_documents
+                    SET status=$1, focus_id=$2, number=$3, xml_url=$4, pdf_url=$5,
+                        error_message=$6,
+                        issued_at=CASE WHEN $1='authorized' THEN NOW() ELSE NULL END,
+                        updated_at=NOW()
+                  WHERE ref=$7`,
+                [nfseStatus, result.id||null, result.numero||null,
+                 result.link_xml||null, result.link_pdf||null, result.mensagem||null, refCode]
+              ).catch(() => {});
+            } catch (fiscalErr) {
+              await db.query(
+                `UPDATE nfe_documents SET status='error', error_message=$1 WHERE ref=$2`,
+                [fiscalErr.message, refCode]
+              ).catch(() => {});
+              console.warn('[karateAnnuities] nfse emit failed (best-effort):', fiscalErr.message);
+            }
+          } else {
+            nfseRef = existingRef.rows[0].ref;
+          }
+        }
+      } catch (nfseErr) {
+        // NFS-e é best-effort: não bloqueia confirmação
+        console.warn('[karateAnnuities] nfse block failed (best-effort):', nfseErr.message);
+      }
+    }
 
     res.json({
       intent_id: intentId,
       transaction_id: intent.transaction_id,
       status: 'paid',
       paid_at: paidAt,
-      nfse_id: nfseId,
+      nfse_ref: nfseRef,
       idempotent_hit: false,
     });
   } catch (err) {
@@ -471,9 +529,9 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
   }
 });
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────
 // CPF ANNUITIES
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────
 
 // GET /financial/annuities/cpf
 router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {

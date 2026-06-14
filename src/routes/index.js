@@ -145,6 +145,8 @@ router.use('/federation/:id/financial', require('./karateAnnuities'));
 router.use('/federation/:id/financial', require('./karateExpenses'));
 router.use('/federation/:id/financial', require('./karateFees'));
 router.use('/federation/:id/financial', require('./karateFinancial'));
+// Track P: NFS-e para anuidades de dojô (reusa nuvemfiscal + nfe_documents)
+router.use('/federation/:id/financial', require('./karateNfse'));
 
 // ── AURA KARATÊ — Track C (backend exames + certificados) ───
 router.use('/federation/:id', require('./karateRequirements'));

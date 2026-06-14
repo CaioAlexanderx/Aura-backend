@@ -13,8 +13,10 @@
 'use strict';
 
 jest.mock('../src/config/database');
+jest.mock('../src/services/nuvemfiscal');
 
-const db = require('../src/config/database');
+const db     = require('../src/config/database');
+const fiscal = require('../src/services/nuvemfiscal');
 
 // Module-scope afterEach: drains mockResolvedValueOnce queues after every
 // test so that early-return (422) tests don't leave stale resolved values
@@ -79,10 +81,10 @@ const makeToken = (overrides) => jwt.sign(
 );
 const adminToken = makeToken();
 
-const FED_ID  = 'fed-uuid-001';
-const DOJO_ID = 'dojo-uuid-001';
-const HIST_ID = 'hist-uuid-001';
-const TX_ID   = 'tx-uuid-001';
+const FED_ID    = 'fed-uuid-001';
+const DOJO_ID   = 'dojo-uuid-001';
+const HIST_ID   = 'hist-uuid-001';
+const TX_ID     = 'tx-uuid-001';
 const INTENT_ID = 'intent-uuid-001';
 
 function buildApp() {
@@ -319,39 +321,80 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
 
   // ── confirm ──
   describe('POST /financial/payments/:intentId/confirm', () => {
+    // Shared intent row returned by the SELECT inside the transaction.
+    // cnpj + inscricao_municipal must be present for the NFS-e block to run.
+    const INTENT_ROW = {
+      id: INTENT_ID,
+      payment_intent_id: 'static-dojo-xxx-2026',
+      provider: 'static_brcode',
+      status: 'pending',
+      annuity_history_id: HIST_ID,
+      transaction_id: TX_ID,
+      dojo_id: DOJO_ID,
+      reference_period: '2026',
+      annuity_amount: 500.00,
+      annuity_status: 'pending',
+    };
+
+    // Federation row with cnpj + inscricao_municipal so the NFS-e block fires.
+    const FED_ROW = {
+      id: FED_ID,
+      name: 'Federação SP',
+      legal_name: 'Federação SP Ltda',
+      cnpj: '12345678000100',
+      inscricao_municipal: '123456',
+      email: 'fed@example.com',
+      phone: '11999999999',
+      focus_company_id: null,
+      certificate_uploaded: false,
+      tax_regime: 'simples',
+      address_street: 'Rua Teste',
+      address_number: '1',
+      address_neighborhood: 'Centro',
+      address_city: 'São Paulo',
+      address_state: 'SP',
+      address_zip: '01310100',
+      ibge_code: '3550308',
+    };
+
+    // Dojo row for the NFS-e block (tomador)
+    const DOJO_ROW = { name: 'Dojô SP', cnpj: '98765432000100' };
+
     beforeEach(() => {
       jest.clearAllMocks();
+
+      // fiscal.emitNfse: simulates Nuvem Fiscal returning authorized status
+      fiscal.emitNfse = jest.fn().mockResolvedValue({
+        status: 'autorizado',
+        id: 'nfse-focus-001',
+        numero: '42',
+        link_pdf: null,
+        link_xml: null,
+        mensagem: null,
+      });
+
+      // client.query mocks — handles the DB transaction (BEGIN … COMMIT)
       const mockClient = { query: jest.fn(), release: jest.fn() };
       db.connect.mockResolvedValue(mockClient);
 
-      // Ordem: BEGIN → busca intent+annuity → UPDATE intent → UPDATE annuity_history
-      //         → UPDATE transaction → SELECT nfe_id → INSERT nfse → UPDATE tx nfe_id → COMMIT
       mockClient.query
-        .mockResolvedValueOnce({})  // BEGIN
-        .mockResolvedValueOnce({    // SELECT intent JOIN annuity_history
-          rows: [{
-            id: INTENT_ID,
-            payment_intent_id: 'static-dojo-xxx-2026',
-            provider: 'static_brcode',
-            status: 'pending',
-            annuity_history_id: HIST_ID,
-            transaction_id: TX_ID,
-            dojo_id: DOJO_ID,
-            reference_period: '2026',
-            annuity_amount: 500.00,
-            annuity_status: 'pending',
-          }],
-        })
-        .mockResolvedValueOnce({ rows: [] })  // UPDATE intent status=paid
-        .mockResolvedValueOnce({ rows: [] })  // UPDATE annuity_history status=paid
-        .mockResolvedValueOnce({ rows: [] })  // UPDATE transaction status=paid
-        .mockResolvedValueOnce({ rows: [{ nfe_id: null }] })  // SELECT nfe_id
-        .mockResolvedValueOnce({ rows: [{ id: 'nfse-uuid-001' }] })  // INSERT nfse
-        .mockResolvedValueOnce({ rows: [] })  // UPDATE transaction nfe_id
-        .mockResolvedValueOnce({});  // COMMIT
+        .mockResolvedValueOnce({})                      // BEGIN
+        .mockResolvedValueOnce({ rows: [INTENT_ROW] })  // SELECT intent JOIN annuity_history
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE intent status=paid
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE annuity_history status=paid
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE transaction status=paid
+        .mockResolvedValueOnce({});                      // COMMIT
+
+      // db.query mocks — handles the best-effort NFS-e block (post-COMMIT)
+      db.query
+        .mockResolvedValueOnce({ rows: [FED_ROW] })   // SELECT companies (federation fiscal data)
+        .mockResolvedValueOnce({ rows: [DOJO_ROW] })  // SELECT companies (dojo name + cnpj)
+        .mockResolvedValueOnce({ rows: [] })           // SELECT nfe_documents idempotency check
+        .mockResolvedValueOnce({ rows: [] })           // INSERT nfe_documents (pending)
+        .mockResolvedValueOnce({ rows: [] });          // UPDATE nfe_documents (after fiscal.emitNfse)
     });
 
-    it('confirma pagamento, retorna status=paid e nfse_id', (done) => {
+    it('confirma pagamento, retorna status=paid e nfse_ref', (done) => {
       request(app)
         .post('/federation/' + FED_ID + '/financial/payments/' + INTENT_ID + '/confirm')
         .set('Authorization', 'Bearer ' + adminToken)
@@ -360,7 +403,36 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
           if (err) return done(err);
           expect(res.status).toBe(200);
           expect(res.body.status).toBe('paid');
-          expect(res.body.nfse_id).toBe('nfse-uuid-001');
+          // nfse_ref is a generated code like "nfse-karate-<8chars>-<timestamp>"
+          expect(res.body.nfse_ref).toMatch(/^nfse-karate-/);
+          expect(res.body.idempotent_hit).toBe(false);
+          done();
+        });
+    });
+
+    it('confirma pagamento e retorna status=paid mesmo sem emissão NFS-e (emit_nfse=false)', (done) => {
+      // No NFS-e block runs, so no extra db.query calls needed — reset to empty
+      jest.clearAllMocks();
+      const mockClient2 = { query: jest.fn(), release: jest.fn() };
+      db.connect.mockResolvedValue(mockClient2);
+
+      mockClient2.query
+        .mockResolvedValueOnce({})                      // BEGIN
+        .mockResolvedValueOnce({ rows: [INTENT_ROW] })  // SELECT intent JOIN annuity_history
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE intent status=paid
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE annuity_history status=paid
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE transaction status=paid
+        .mockResolvedValueOnce({});                      // COMMIT
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/payments/' + INTENT_ID + '/confirm')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ emit_nfse: false })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(200);
+          expect(res.body.status).toBe('paid');
+          expect(res.body.nfse_ref).toBeNull();
           expect(res.body.idempotent_hit).toBe(false);
           done();
         });
