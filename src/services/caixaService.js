@@ -29,6 +29,16 @@
 //   recebimento crediário é processado via /credit/customer/:cid/payment,
 //   ele cria sale_payment + confirma a transaction A Receber. Sem o
 //   filtro, o caixa contaria o valor 2× (uma via método, uma via outros).
+//
+// 13/06/2026 (contabilizar venda no crediário):
+// - calcularTotais agora soma as VENDAS no crediário no bucket `fiado`.
+//   A venda no crediário não gera sale_payments (vira "A Receber"), então
+//   nunca aparecia no caixa. Lemos os débitos de venda
+//   (customer_credit_transactions type='debit' com sale_id) na janela da
+//   sessão. Entra no total_geral mas NÃO no dinheiro_esperado (não houve
+//   entrada de caixa). Quando o cliente paga depois, o recebimento gera
+//   sale_payments (dinheiro/pix) na sessão daquele dia — contabilizado lá,
+//   sem dupla contagem (o débito fica preso à sessão da venda).
 // ============================================================
 
 const pool = require('../config/database');
@@ -124,12 +134,40 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
     [companyId, openedAt, until]
   );
 
+  // 13/06/2026: VENDA no crediário entra no fechamento como linha `fiado`.
+  // A venda no crediário não gera sale_payments (vira "A Receber" pendente),
+  // então lemos os débitos de venda do ledger de crédito
+  // (customer_credit_transactions type='debit' com sale_id) na janela da
+  // sessão. NÃO afeta o dinheiro_esperado (fechar() só usa totais.dinheiro).
+  // Sem dupla contagem: quando o cliente paga depois, o recebimento gera
+  // sale_payments (dinheiro/pix) na sessão daquele dia — o débito permanece
+  // na sessão da venda. Defensivo a deploy parcial (42P01/42703).
+  let fiadoVendas = 0;
+  try {
+    const { rows: fiadoRows } = await pool.query(
+      `SELECT COALESCE(SUM(cct.amount), 0)::numeric(12,2) AS total
+         FROM customer_credit_transactions cct
+         JOIN sales s ON s.id = cct.sale_id
+        WHERE cct.company_id = $1
+          AND cct.type = 'debit'
+          AND cct.sale_id IS NOT NULL
+          AND cct.created_at >= $2
+          AND cct.created_at < $3
+          AND COALESCE(s.status, 'active') <> 'cancelled'`,
+      [companyId, openedAt, until]
+    );
+    fiadoVendas = parseFloat(fiadoRows[0]?.total || 0);
+  } catch (err) {
+    if (err.code !== '42P01' && err.code !== '42703') throw err;
+    fiadoVendas = 0;
+  }
+
   const totais = {
     pix:            0,
     cartao_debito:  0,
     cartao_credito: 0,
     dinheiro:       0,
-    fiado:          0,
+    fiado:          fiadoVendas,
     outros:         parseFloat(txRows[0]?.total || 0),
   };
 
