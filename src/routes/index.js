@@ -148,10 +148,23 @@ router.use('/federation/:id/financial', require('./karateFinancial'));
 // Track P: NFS-e para anuidades de dojô (reusa nuvemfiscal + nfe_documents)
 router.use('/federation/:id/financial', require('./karateNfse'));
 
-// ── AURA KARATÊ — Track C (backend exames + certificados) ───
+// ── AURA KARATÊ — Track C (backend exames + cursos) ─────────
+// (certificados Track J montado separadamente abaixo)
 router.use('/federation/:id', require('./karateRequirements'));
 router.use('/federation/:id', require('./karateExams'));
 router.use('/federation/:id', require('./karateCourses'));
+
+// ── AURA KARATÊ — Track J (certificados: fluxo de pedido) ───
+// Substitui o fluxo Track C de emissão sob demanda.
+// Migration 182: karate_certificate_orders + karate_certificate_order_history.
+// Defensive 42P01: safe to merge antes da migration ser aplicada.
+//   POST   /federation/:id/certificate-orders
+//   GET    /federation/:id/certificate-orders/mine
+//   GET    /federation/:id/certificate-orders
+//   GET    /federation/:id/certificate-orders/:orderId
+//   PATCH  /federation/:id/certificate-orders/:orderId/status
+//   POST   /federation/:id/certificate-orders/batch-status
+//   POST   /federation/:id/certificate-orders/:orderId/refuse
 router.use('/federation/:id', require('./karateCertificates'));
 
 // ── AURA KARATÊ — Track D (admin: carteirinha digital) ──────
@@ -197,18 +210,13 @@ router.use('/federation/:id', require('./karateReminders'));
 //   POST /federation/:id/practitioners/:practitionerId/transfer    (staffWrite)
 router.use('/federation/:id', require('./karateTransfers'));
 
-// ── AURA KARATÊ — Track M (chaves / brackets) ──
-// Migration 183 (karate_brackets, karate_bracket_matches, karate_kata_scores).
-// Kumite: bracket eliminatório (generate/lock/get/advance).
-// Kata: apuração por bateria (scores, generate-order, advance para final).
-//   POST /federation/:id/competitions/:cid/categories/:catId/bracket/generate
-//   POST /federation/:id/competitions/:cid/categories/:catId/bracket/lock
-//   GET  /federation/:id/competitions/:cid/categories/:catId/bracket
-//   POST /federation/:id/competitions/:cid/categories/:catId/bracket/advance
-//   GET  /federation/:id/competitions/:cid/categories/:catId/kata-scores
-//   PUT  /federation/:id/competitions/:cid/categories/:catId/kata-scores
-//   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/generate-order
-//   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/advance
-router.use('/federation/:id', require('./karateBrackets'));
+// ── AURA KARATÊ — Track H (configurações da federação) ──────────
+// Migration 181 (inscricao_municipal + regime_tributario em companies).
+//   GET/POST   /federation/:id/settings/members          — equipe FPKT
+//   PATCH      /federation/:id/settings/members/:mid/role
+//   DELETE     /federation/:id/settings/members/:mid
+//   GET/PUT    /federation/:id/settings/flags             — feature flags karatê
+//   GET/PUT    /federation/:id/settings/identity          — identidade + fiscal
+router.use('/federation/:id', require('./karateSettings'));
 
 module.exports = router;
