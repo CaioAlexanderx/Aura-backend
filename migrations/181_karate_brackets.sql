@@ -1,0 +1,16 @@
+-- ============================================================
+-- MIGRATION 181 — TOMBSTONE (no-op)
+--
+-- This file is intentionally empty / no-op.
+--
+-- The karate_brackets schema was originally drafted here as migration 181,
+-- but migration 181 is already claimed by Track H:
+--   migrations/181_karate_federation_settings.sql
+--
+-- The definitive karate_brackets migration is:
+--   migrations/183_karate_brackets.sql
+--   (uses gen_random_uuid(), has UNIQUE (bracket_id, bracket_kind, round, slot))
+--
+-- DO NOT add any DDL here. This file exists only so the migration runner
+-- does not skip sequence 181 and does not collide with Track H.
+-- ============================================================

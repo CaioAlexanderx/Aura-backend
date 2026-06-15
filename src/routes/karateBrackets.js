@@ -1,0 +1,744 @@
+// ============================================================
+// AURA KARATÊ — Track M: Rotas de Chaves / Brackets
+// Montado em /federation/:id (igual aos demais tracks do Karatê).
+//
+// Kumite (bracket eliminatório):
+//   POST   /competitions/:cid/categories/:catId/bracket/generate  — gera/regenera (draft)
+//   POST   /competitions/:cid/categories/:catId/bracket/lock      — trava (official)
+//   GET    /competitions/:cid/categories/:catId/bracket           — lê bracket
+//   POST   /competitions/:cid/categories/:catId/bracket/advance   — avança vencedor
+//
+// Kata (por bateria):
+//   GET    /competitions/:cid/categories/:catId/kata-scores       — lê notas
+//   PUT    /competitions/:cid/categories/:catId/kata-scores       — salva nota
+//   POST   /competitions/:cid/categories/:catId/kata-scores/generate-order — sorteia ordem
+//   POST   /competitions/:cid/categories/:catId/kata-scores/advance — avança eliminatória→final
+// ============================================================
+'use strict';
+
+const router = require('express').Router({ mergeParams: true });
+const db = require('../config/database');
+const { guards } = require('../config/karateRoles');
+const {
+  generateKumiteBracket,
+  advanceWinner,
+  generateKataOrder,
+  stateToMatchRows,
+  rowsToState,
+} = require('../services/karateBracket');
+
+// ── helper: find competition (scoped to federation) ──────────────
+async function findComp(client, federationId, cid) {
+  const r = await client.query(
+    `SELECT id, status FROM karate_competitions WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+    [cid, federationId]
+  );
+  return r.rows[0] || null;
+}
+
+// ── helper: find category (scoped to competition) ────────────────
+async function findCat(client, cid, catId) {
+  const r = await client.query(
+    `SELECT id, modality FROM karate_competition_categories WHERE id = $1 AND competition_id = $2 LIMIT 1`,
+    [catId, cid]
+  );
+  return r.rows[0] || null;
+}
+
+// ── helper: load entries for a category ─────────────────────────
+async function loadEntries(client, catId, federationId) {
+  const r = await client.query(
+    `SELECT e.id, e.student_id, e.dojo_id,
+            cu.name AS student_name,
+            COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+     FROM karate_competition_entries e
+     JOIN customers cu ON cu.id = e.student_id
+     LEFT JOIN companies dj ON dj.id = e.dojo_id
+     WHERE e.category_id = $1
+       AND e.status NOT IN ('withdrawn')
+     ORDER BY e.created_at ASC`,
+    [catId]
+  );
+  return r.rows.map(r => ({
+    id: r.id,
+    student_id: r.student_id,
+    dojo_id: r.dojo_id,
+    dojo: r.dojo_name,
+    student_name: r.student_name,
+  }));
+}
+
+// ── helper: load bracket + matches ──────────────────────────────
+async function loadBracket(client, catId) {
+  let bracketRow = null;
+  let matchRows = [];
+  try {
+    const br = await client.query(
+      `SELECT * FROM karate_brackets WHERE category_id = $1 LIMIT 1`,
+      [catId]
+    );
+    if (br.rows.length) {
+      bracketRow = br.rows[0];
+      const mr = await client.query(
+        `SELECT * FROM karate_bracket_matches WHERE bracket_id = $1 ORDER BY round ASC, slot ASC`,
+        [bracketRow.id]
+      );
+      matchRows = mr.rows;
+    }
+  } catch (e) {
+    if (e.code === '42P01') return { bracketRow: null, matchRows: [] }; // table not yet created
+    throw e;
+  }
+  return { bracketRow, matchRows };
+}
+
+// ── helper: upsert bracket matches ──────────────────────────────
+async function upsertMatches(client, bracketId, matchRowsData) {
+  // Delete old matches and re-insert (simpler than diff)
+  await client.query(`DELETE FROM karate_bracket_matches WHERE bracket_id = $1`, [bracketId]);
+  for (const m of matchRowsData) {
+    await client.query(
+      `INSERT INTO karate_bracket_matches
+         (bracket_id, round, slot, bracket_kind, aka_entry_id, shiro_entry_id, winner_entry_id, is_bye)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [m.bracket_id, m.round, m.slot, m.bracket_kind,
+       m.aka_entry_id || null, m.shiro_entry_id || null, m.winner_entry_id || null, m.is_bye]
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// POST /competitions/:cid/categories/:catId/bracket/generate
+// Gera ou regenera a chave (draft). Pode ser chamado múltiplas vezes.
+// Body: { method, separateSameDojo, thirdPlace, seed }
+// ═══════════════════════════════════════════════════════════════
+router.post(
+  '/competitions/:cid/categories/:catId/bracket/generate',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const { method = 'ranking', separateSameDojo = false, thirdPlace = false, seed } = req.body;
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' }); }
+
+      const cat = await findCat(client, cid, catId);
+      if (!cat) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' }); }
+
+      // Kata: handle separately — generate presentation order only
+      const isKata = ['kata', 'team_kata'].includes(cat.modality);
+
+      const athletes = await loadEntries(client, catId, federationId);
+      if (athletes.length < 2) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ error: 'Mínimo de 2 atletas inscritos para gerar chave', code: 'VALIDATION_ERROR' });
+      }
+
+      const drawSeed = seed !== undefined ? String(seed) : String(Date.now());
+      const options = { method, separateSameDojo: !!separateSameDojo, thirdPlace: !!thirdPlace };
+
+      // Upsert bracket row
+      let bracketId;
+      try {
+        const br = await client.query(
+          `INSERT INTO karate_brackets (competition_id, category_id, modality, status, draw_seed, options, created_by)
+           VALUES ($1,$2,$3,'draft',$4,$5,$6)
+           ON CONFLICT (competition_id, category_id)
+           DO UPDATE SET status='draft', draw_seed=$4, options=$5, updated_at=NOW()
+           RETURNING id`,
+          [cid, catId, cat.modality, drawSeed, JSON.stringify(options),
+           req.user?.id || null]
+        );
+        bracketId = br.rows[0].id;
+      } catch (e) {
+        if (e.code === '42P01') {
+          await client.query('ROLLBACK');
+          return res.status(503).json({ error: 'Migration 183 não aplicada ainda', code: 'SCHEMA_PENDING' });
+        }
+        throw e;
+      }
+
+      if (isKata) {
+        // For kata: generate presentation order + reset scores
+        const ordered = generateKataOrder(athletes, drawSeed);
+        try {
+          await client.query(`DELETE FROM karate_kata_scores WHERE bracket_id = $1`, [bracketId]);
+          for (let i = 0; i < ordered.length; i++) {
+            await client.query(
+              `INSERT INTO karate_kata_scores (bracket_id, entry_id, phase, presentation_order)
+               VALUES ($1,$2,'eliminatoria',$3)`,
+              [bracketId, ordered[i].id, i + 1]
+            );
+          }
+        } catch (e) {
+          if (e.code === '42P01') {
+            await client.query('ROLLBACK');
+            return res.status(503).json({ error: 'Migration 183 não aplicada ainda', code: 'SCHEMA_PENDING' });
+          }
+          throw e;
+        }
+
+        await client.query('COMMIT');
+        return res.json({
+          bracket_id: bracketId,
+          modality: cat.modality,
+          status: 'draft',
+          seed: drawSeed,
+          options,
+          athletes_count: athletes.length,
+          presentation_order: ordered.map((a, i) => ({ entry_id: a.id, student_name: a.student_name, order: i + 1 })),
+        });
+      }
+
+      // Kumite: generate bracket
+      let state;
+      try {
+        state = generateKumiteBracket(athletes, {
+          method,
+          separateSameDojo: !!separateSameDojo,
+          thirdPlace: !!thirdPlace,
+          seed: drawSeed,
+        });
+      } catch (err) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ error: err.message, code: 'VALIDATION_ERROR' });
+      }
+
+      const matchRows = stateToMatchRows(bracketId, state);
+      await upsertMatches(client, bracketId, matchRows);
+
+      await client.query('COMMIT');
+
+      // Count clashes
+      let sameDojoClashes = 0;
+      for (const m of state.rounds[0]) {
+        if (m.akaId && m.shiroId && m.akaId !== 'bye' && m.shiroId !== 'bye') {
+          const aA = athletes.find(a => a.id === m.akaId);
+          const aB = athletes.find(a => a.id === m.shiroId);
+          if (aA && aB && aA.dojo_id && aA.dojo_id === aB.dojo_id) sameDojoClashes++;
+        }
+      }
+
+      res.json({
+        bracket_id: bracketId,
+        modality: cat.modality,
+        status: 'draft',
+        seed: drawSeed,
+        options,
+        athletes_count: athletes.length,
+        bye_count: state.byeCount,
+        same_dojo_clashes: sameDojoClashes,
+        third_place: !!thirdPlace,
+        rounds_count: state.rounds.length,
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] generate error:', err.message);
+      res.status(500).json({ error: 'Erro ao gerar chave', detail: err.message });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// POST /competitions/:cid/categories/:catId/bracket/lock
+// Trava a chave (status draft→locked). Libera lançamento de resultados.
+// ═══════════════════════════════════════════════════════════════
+router.post(
+  '/competitions/:cid/categories/:catId/bracket/lock',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
+
+      let row;
+      try {
+        const br = await client.query(
+          `UPDATE karate_brackets SET status='locked', updated_at=NOW()
+           WHERE category_id = $1 AND status='draft'
+           RETURNING id, status, modality, options`,
+          [catId]
+        );
+        row = br.rows[0];
+      } catch (e) {
+        if (e.code === '42P01') { await client.query('ROLLBACK'); return res.status(503).json({ error: 'Migration 183 não aplicada', code: 'SCHEMA_PENDING' }); }
+        throw e;
+      }
+
+      if (!row) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Chave não encontrada ou já travada', code: 'CONFLICT' });
+      }
+
+      await client.query('COMMIT');
+      res.json({ bracket_id: row.id, status: 'locked', modality: row.modality, message: 'Chave travada. Lançamento de resultados liberado.' });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] lock error:', err.message);
+      res.status(500).json({ error: 'Erro ao travar chave' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// GET /competitions/:cid/categories/:catId/bracket
+// Retorna o bracket completo (draft ou locked).
+// ═══════════════════════════════════════════════════════════════
+router.get(
+  '/competitions/:cid/categories/:catId/bracket',
+  ...guards.read(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const client = await db.connect();
+    try {
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) return res.status(404).json({ error: 'Competição não encontrada' });
+
+      const athletes = await loadEntries(client, catId, federationId);
+      const { bracketRow, matchRows } = await loadBracket(client, catId);
+
+      if (!bracketRow) {
+        return res.json({ status: 'not_generated', athletes_count: athletes.length, bracket: null });
+      }
+
+      // For kata: return scores instead
+      const isKata = ['kata', 'team_kata'].includes(bracketRow.modality);
+      if (isKata) {
+        let scores = [];
+        try {
+          const sc = await client.query(
+            `SELECT ks.*, e.student_id,
+                    cu.name AS student_name,
+                    COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+             FROM karate_kata_scores ks
+             JOIN karate_competition_entries e ON e.id = ks.entry_id
+             JOIN customers cu ON cu.id = e.student_id
+             LEFT JOIN companies dj ON dj.id = e.dojo_id
+             WHERE ks.bracket_id = $1
+             ORDER BY ks.phase ASC, ks.presentation_order ASC NULLS LAST, ks.nota DESC NULLS LAST`,
+            [bracketRow.id]
+          );
+          scores = sc.rows;
+        } catch (e) {
+          if (e.code !== '42P01') throw e;
+        }
+        return res.json({
+          bracket_id: bracketRow.id,
+          status: bracketRow.status,
+          modality: bracketRow.modality,
+          seed: bracketRow.draw_seed,
+          options: bracketRow.options,
+          athletes_count: athletes.length,
+          kata_scores: scores.map(s => ({
+            entry_id: s.entry_id,
+            student_name: s.student_name,
+            dojo_name: s.dojo_name,
+            phase: s.phase,
+            nota: s.nota !== null ? parseFloat(s.nota) : null,
+            presentation_order: s.presentation_order,
+            advances: s.advances,
+          })),
+        });
+      }
+
+      // Kumite: reconstruct state
+      const state = rowsToState(matchRows, bracketRow, athletes);
+
+      // Build serializable rounds
+      const athleteMap = {};
+      for (const a of athletes) athleteMap[a.id] = a;
+
+      const serializeMatch = (m) => ({
+        id: m.id,
+        round: m.round,
+        slot: m.slot,
+        aka: m.akaId && m.akaId !== 'bye' && m.akaId !== null ? {
+          entry_id: m.akaId,
+          student_name: athleteMap[m.akaId]?.student_name || null,
+          dojo_name: athleteMap[m.akaId]?.dojo || null,
+        } : (m.akaId === 'bye' ? 'bye' : null),
+        shiro: m.shiroId && m.shiroId !== 'bye' && m.shiroId !== null ? {
+          entry_id: m.shiroId,
+          student_name: athleteMap[m.shiroId]?.student_name || null,
+          dojo_name: athleteMap[m.shiroId]?.dojo || null,
+        } : (m.shiroId === 'bye' ? 'bye' : null),
+        winner_entry_id: m.winnerId,
+        is_bye: m.isBye,
+      });
+
+      const rounds = state.rounds.map(r => r.map(serializeMatch));
+      const third = state.thirdPlaceMatch ? serializeMatch({
+        ...state.thirdPlaceMatch, round: state.rounds.length, slot: 0, isBye: false,
+      }) : null;
+
+      const lastRound = state.rounds[state.rounds.length - 1];
+      const champion = lastRound?.[0]?.winnerId
+        ? { entry_id: lastRound[0].winnerId, student_name: athleteMap[lastRound[0].winnerId]?.student_name || null }
+        : null;
+
+      res.json({
+        bracket_id: bracketRow.id,
+        status: bracketRow.status,
+        modality: bracketRow.modality,
+        seed: bracketRow.draw_seed,
+        options: bracketRow.options,
+        athletes_count: athletes.length,
+        bye_count: state.byeCount,
+        rounds,
+        third_place_match: third,
+        champion,
+      });
+    } catch (err) {
+      console.error('[karateBrackets] get error:', err.message);
+      res.status(500).json({ error: 'Erro ao carregar chave' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// POST /competitions/:cid/categories/:catId/bracket/advance
+// Lança vencedor de uma partida e propaga pelo bracket.
+// Body: { match_id, winner_entry_id }
+// Requires: bracket status = 'locked'
+// ═══════════════════════════════════════════════════════════════
+router.post(
+  '/competitions/:cid/categories/:catId/bracket/advance',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const { match_id: matchId, winner_entry_id: winnerId } = req.body;
+
+    if (!matchId || !winnerId) {
+      return res.status(422).json({ error: 'match_id e winner_entry_id são obrigatórios', code: 'VALIDATION_ERROR' });
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
+
+      const athletes = await loadEntries(client, catId, federationId);
+      const { bracketRow, matchRows } = await loadBracket(client, catId);
+
+      if (!bracketRow) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Chave não gerada ainda', code: 'NOT_FOUND' });
+      }
+      if (bracketRow.status !== 'locked') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Chave deve estar travada para lançar resultados', code: 'CONFLICT' });
+      }
+
+      const state = rowsToState(matchRows, bracketRow, athletes);
+
+      let newState;
+      try {
+        newState = advanceWinner(state, matchId, winnerId);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ error: err.message, code: 'VALIDATION_ERROR' });
+      }
+
+      const newMatchRows = stateToMatchRows(bracketRow.id, newState);
+      await upsertMatches(client, bracketRow.id, newMatchRows);
+
+      await client.query('COMMIT');
+
+      const lastRound = newState.rounds[newState.rounds.length - 1];
+      const champion = lastRound?.[0]?.winnerId || null;
+
+      res.json({
+        match_id: matchId,
+        winner_entry_id: winnerId,
+        champion_entry_id: champion,
+        third_place_match: newState.thirdPlaceMatch ? {
+          aka_entry_id: newState.thirdPlaceMatch.akaId,
+          shiro_entry_id: newState.thirdPlaceMatch.shiroId,
+          winner_entry_id: newState.thirdPlaceMatch.winnerId,
+        } : null,
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] advance error:', err.message);
+      res.status(500).json({ error: 'Erro ao avançar vencedor' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// GET /competitions/:cid/categories/:catId/kata-scores
+// Lê notas da kata (ambas as fases).
+// ═══════════════════════════════════════════════════════════════
+router.get(
+  '/competitions/:cid/categories/:catId/kata-scores',
+  ...guards.read(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const client = await db.connect();
+    try {
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) return res.status(404).json({ error: 'Competição não encontrada' });
+
+      let rows = [];
+      try {
+        const r = await client.query(
+          `SELECT ks.entry_id, ks.phase, ks.nota, ks.presentation_order, ks.advances,
+                  cu.name AS student_name,
+                  COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+           FROM karate_kata_scores ks
+           JOIN karate_brackets kb ON kb.id = ks.bracket_id
+           JOIN karate_competition_entries e ON e.id = ks.entry_id
+           JOIN customers cu ON cu.id = e.student_id
+           LEFT JOIN companies dj ON dj.id = e.dojo_id
+           WHERE kb.category_id = $1
+           ORDER BY ks.phase ASC, ks.presentation_order ASC NULLS LAST, ks.nota DESC NULLS LAST`,
+          [catId]
+        );
+        rows = r.rows;
+      } catch (e) {
+        if (e.code !== '42P01') throw e;
+      }
+
+      res.json(rows.map(r => ({
+        entry_id: r.entry_id,
+        student_name: r.student_name,
+        dojo_name: r.dojo_name,
+        phase: r.phase,
+        nota: r.nota !== null ? parseFloat(r.nota) : null,
+        presentation_order: r.presentation_order,
+        advances: r.advances,
+      })));
+    } catch (err) {
+      console.error('[karateBrackets] kata-scores get error:', err.message);
+      res.status(500).json({ error: 'Erro ao carregar notas' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// PUT /competitions/:cid/categories/:catId/kata-scores
+// Salva nota de um atleta numa fase.
+// Body: { entry_id, phase, nota }
+// ═══════════════════════════════════════════════════════════════
+router.put(
+  '/competitions/:cid/categories/:catId/kata-scores',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const { entry_id: entryId, phase, nota } = req.body;
+
+    if (!entryId || !phase || nota === undefined || nota === null) {
+      return res.status(422).json({ error: 'entry_id, phase e nota são obrigatórios', code: 'VALIDATION_ERROR' });
+    }
+    if (!['eliminatoria', 'final'].includes(phase)) {
+      return res.status(422).json({ error: 'phase deve ser eliminatoria ou final', code: 'VALIDATION_ERROR' });
+    }
+    const notaNum = parseFloat(nota);
+    if (isNaN(notaNum) || notaNum < 0 || notaNum > 30) {
+      return res.status(422).json({ error: 'nota deve ser número entre 0 e 30', code: 'VALIDATION_ERROR' });
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
+
+      const { bracketRow } = await loadBracket(client, catId);
+      if (!bracketRow) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave não gerada ainda' }); }
+      if (bracketRow.status !== 'locked') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave deve estar travada para lançar notas', code: 'CONFLICT' }); }
+
+      let updated;
+      try {
+        const r = await client.query(
+          `UPDATE karate_kata_scores SET nota=$1, updated_at=NOW()
+           WHERE bracket_id=$2 AND entry_id=$3 AND phase=$4
+           RETURNING entry_id, phase, nota, presentation_order, advances`,
+          [notaNum, bracketRow.id, entryId, phase]
+        );
+        if (!r.rows.length) {
+          // Insert if missing (can happen for 'final' phase created on advance)
+          const ins = await client.query(
+            `INSERT INTO karate_kata_scores (bracket_id, entry_id, phase, nota)
+             VALUES ($1,$2,$3,$4)
+             ON CONFLICT (bracket_id, entry_id, phase) DO UPDATE SET nota=$4, updated_at=NOW()
+             RETURNING entry_id, phase, nota, presentation_order, advances`,
+            [bracketRow.id, entryId, phase, notaNum]
+          );
+          updated = ins.rows[0];
+        } else {
+          updated = r.rows[0];
+        }
+      } catch (e) {
+        if (e.code === '42P01') { await client.query('ROLLBACK'); return res.status(503).json({ error: 'Migration 183 não aplicada' }); }
+        throw e;
+      }
+
+      await client.query('COMMIT');
+      res.json({ entry_id: updated.entry_id, phase: updated.phase, nota: parseFloat(updated.nota), updated_at: new Date().toISOString() });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] kata-score put error:', err.message);
+      res.status(500).json({ error: 'Erro ao salvar nota' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// POST /competitions/:cid/categories/:catId/kata-scores/generate-order
+// Sorteia ordem de apresentação da eliminatória.
+// ═══════════════════════════════════════════════════════════════
+router.post(
+  '/competitions/:cid/categories/:catId/kata-scores/generate-order',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const { seed } = req.body;
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
+
+      const athletes = await loadEntries(client, catId, federationId);
+      if (athletes.length < 2) { await client.query('ROLLBACK'); return res.status(422).json({ error: 'Mínimo de 2 atletas' }); }
+
+      const drawSeed = seed !== undefined ? String(seed) : String(Date.now());
+      const ordered = generateKataOrder(athletes, drawSeed);
+
+      const { bracketRow } = await loadBracket(client, catId);
+      if (!bracketRow) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Gere o bracket da categoria antes de sortear a ordem' }); }
+
+      try {
+        for (let i = 0; i < ordered.length; i++) {
+          await client.query(
+            `UPDATE karate_kata_scores SET presentation_order=$1, updated_at=NOW()
+             WHERE bracket_id=$2 AND entry_id=$3 AND phase='eliminatoria'`,
+            [i + 1, bracketRow.id, ordered[i].id]
+          );
+        }
+      } catch (e) {
+        if (e.code === '42P01') { await client.query('ROLLBACK'); return res.status(503).json({ error: 'Migration 183 não aplicada' }); }
+        throw e;
+      }
+
+      await client.query('COMMIT');
+      res.json({
+        seed: drawSeed,
+        presentation_order: ordered.map((a, i) => ({ entry_id: a.id, student_name: a.student_name, order: i + 1 })),
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] generate-order error:', err.message);
+      res.status(500).json({ error: 'Erro ao sortear ordem' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// POST /competitions/:cid/categories/:catId/kata-scores/advance
+// Avança os N melhores da eliminatória para a final.
+// Body: { advance_count } — default 8
+// ═══════════════════════════════════════════════════════════════
+router.post(
+  '/competitions/:cid/categories/:catId/kata-scores/advance',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const advanceCount = parseInt(req.body.advance_count, 10) || 8;
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
+
+      const { bracketRow } = await loadBracket(client, catId);
+      if (!bracketRow) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave não gerada' }); }
+      if (bracketRow.status !== 'locked') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave deve estar travada' }); }
+
+      // Get eliminatória scores sorted by nota DESC
+      let elimRows;
+      try {
+        const r = await client.query(
+          `SELECT entry_id, nota FROM karate_kata_scores
+           WHERE bracket_id=$1 AND phase='eliminatoria'
+           ORDER BY nota DESC NULLS LAST`,
+          [bracketRow.id]
+        );
+        elimRows = r.rows;
+      } catch (e) {
+        if (e.code === '42P01') { await client.query('ROLLBACK'); return res.status(503).json({ error: 'Migration 183 não aplicada' }); }
+        throw e;
+      }
+
+      if (elimRows.some(r => r.nota === null)) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ error: 'Todos os atletas devem ter nota da eliminatória antes de avançar', code: 'VALIDATION_ERROR' });
+      }
+
+      const n = Math.min(advanceCount, elimRows.length);
+      const advancing = elimRows.slice(0, n);
+      const eliminated = elimRows.slice(n);
+
+      // Mark advances
+      for (const row of advancing) {
+        await client.query(
+          `UPDATE karate_kata_scores SET advances=true WHERE bracket_id=$1 AND entry_id=$2 AND phase='eliminatoria'`,
+          [bracketRow.id, row.entry_id]
+        );
+        // Create final score row
+        await client.query(
+          `INSERT INTO karate_kata_scores (bracket_id, entry_id, phase)
+           VALUES ($1,$2,'final')
+           ON CONFLICT (bracket_id, entry_id, phase) DO NOTHING`,
+          [bracketRow.id, row.entry_id]
+        );
+      }
+      for (const row of eliminated) {
+        await client.query(
+          `UPDATE karate_kata_scores SET advances=false WHERE bracket_id=$1 AND entry_id=$2 AND phase='eliminatoria'`,
+          [bracketRow.id, row.entry_id]
+        );
+      }
+
+      await client.query('COMMIT');
+      res.json({
+        advanced: n,
+        eliminated: elimRows.length - n,
+        advancing_entry_ids: advancing.map(r => r.entry_id),
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] kata advance error:', err.message);
+      res.status(500).json({ error: 'Erro ao avançar atletas' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+module.exports = router;
