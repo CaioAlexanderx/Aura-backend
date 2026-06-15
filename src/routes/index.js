@@ -148,10 +148,23 @@ router.use('/federation/:id/financial', require('./karateFinancial'));
 // Track P: NFS-e para anuidades de dojô (reusa nuvemfiscal + nfe_documents)
 router.use('/federation/:id/financial', require('./karateNfse'));
 
-// ── AURA KARATÊ — Track C (backend exames + certificados) ───
+// ── AURA KARATÊ — Track C (backend exames + cursos) ─────────
+// (certificados Track J montado separadamente abaixo)
 router.use('/federation/:id', require('./karateRequirements'));
 router.use('/federation/:id', require('./karateExams'));
 router.use('/federation/:id', require('./karateCourses'));
+
+// ── AURA KARATÊ — Track J (certificados: fluxo de pedido) ───
+// Substitui o fluxo Track C de emissão sob demanda.
+// Migration 182: karate_certificate_orders + karate_certificate_order_history.
+// Defensive 42P01: safe to merge antes da migration ser aplicada.
+//   POST   /federation/:id/certificate-orders
+//   GET    /federation/:id/certificate-orders/mine
+//   GET    /federation/:id/certificate-orders
+//   GET    /federation/:id/certificate-orders/:orderId
+//   PATCH  /federation/:id/certificate-orders/:orderId/status
+//   POST   /federation/:id/certificate-orders/batch-status
+//   POST   /federation/:id/certificate-orders/:orderId/refuse
 router.use('/federation/:id', require('./karateCertificates'));
 
 // ── AURA KARATÊ — Track D (admin: carteirinha digital) ──────

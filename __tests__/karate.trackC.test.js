@@ -5,8 +5,12 @@
 //   1. Criar exame → 201
 //   2. Inscrever candidato inelegível → 201 + eligibility (FPKT #1)
 //   3. Aprovar candidato → trigger insere histórico (status='approved')
-//   4. Fechar exame → sem certificado (FPKT #3)
-//   5. Emitir certificado sob demanda → 201
+//   4. Fechar exame → sem certificado automático (FPKT #3)
+//   5. GET /belt-requirements com campo confirmed (FPKT #2)
+//
+// NOTA: emissão de certificado sob demanda (issueCertificate) foi removida
+// no Track J — o fluxo agora é pedido/workflow (createOrder, advanceStatus).
+// Ver __tests__/karate.trackJ.test.js para cobertura do novo fluxo.
 //
 // IMPORTANTE sobre mocks Jest:
 //   - Ordem dos mocks = ordem real das queries (BEGIN→checagens→lock→INSERT→COMMIT)
@@ -21,7 +25,6 @@ jest.mock('../src/services/karateCertificateService');
 
 const db = require('../src/config/database');
 const { checkEligibility } = require('../src/services/karateExamService');
-const { issueCertificate } = require('../src/services/karateCertificateService');
 
 // Module-scope afterEach: drena mockResolvedValueOnce queues após cada teste.
 // mockReset() limpa implementações enfileiradas (clearAllMocks NÃO faz isso).
@@ -45,7 +48,6 @@ const FED_ID       = 'fed-uuid-001';
 const EXAM_ID      = 'exam-uuid-001';
 const STUDENT_ID   = 'student-uuid-001';
 const CANDIDATE_ID = 'cand-uuid-001';
-const CERT_ID      = 'cert-uuid-001';
 
 function buildApp() {
   const app = express();
@@ -357,78 +359,7 @@ describe('POST /belt-exams/:examId/close (fechar sem certificado)', () => {
   });
 });
 
-// ── Suite 5: Emitir Certificado Sob Demanda (FPKT #3) ────────
-describe('POST /certificates/:candidateId/issue (emissão sob demanda)', () => {
-  let app;
-  beforeAll(() => { app = buildApp(); });
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    // Mock issueCertificate retorna sucesso
-    issueCertificate.mockResolvedValue({
-      certificate_id: CERT_ID,
-      status: 'generated',
-      url: 'https://cdn.getaura.com.br/certificates/' + FED_ID + '/' + EXAM_ID + '/' + STUDENT_ID + '.pdf',
-      idempotent_hit: false,
-    });
-  });
-
-  it('emite certificado sob demanda e retorna 201 (FPKT #3)', (done) => {
-    request(app)
-      .post('/federation/' + FED_ID + '/certificates/' + CANDIDATE_ID + '/issue')
-      .set('Authorization', 'Bearer ' + adminToken)
-      .send({})
-      .end((err, res) => {
-        if (err) return done(err);
-        // FPKT #3: sob demanda, não automático
-        expect(res.status).toBe(201);
-        expect(res.body.certificate_id).toBe(CERT_ID);
-        expect(res.body.status).toBe('generated');
-        expect(res.body.url).toMatch(/\.pdf$/);
-        expect(res.body.idempotent_hit).toBe(false);
-        // Nota sobre emissão sob demanda
-        expect(res.body._note).toMatch(/sob demanda/i);
-        done();
-      });
-  });
-
-  it('retorna 409 quando candidato não aprovado', (done) => {
-    jest.clearAllMocks();
-    const notApprovedErr = new Error('Certificado só pode ser emitido para candidatos aprovados');
-    notApprovedErr.code = 'NOT_APPROVED';
-    issueCertificate.mockRejectedValue(notApprovedErr);
-
-    request(app)
-      .post('/federation/' + FED_ID + '/certificates/' + CANDIDATE_ID + '/issue')
-      .set('Authorization', 'Bearer ' + adminToken)
-      .send({})
-      .end((err, res) => {
-        if (err) return done(err);
-        expect(res.status).toBe(409);
-        expect(res.body.code).toBe('NOT_APPROVED');
-        done();
-      });
-  });
-
-  it('retorna 404 quando candidato não encontrado', (done) => {
-    jest.clearAllMocks();
-    const notFoundErr = new Error('Candidato não encontrado');
-    notFoundErr.code = 'NOT_FOUND';
-    issueCertificate.mockRejectedValue(notFoundErr);
-
-    request(app)
-      .post('/federation/' + FED_ID + '/certificates/' + CANDIDATE_ID + '/issue')
-      .set('Authorization', 'Bearer ' + adminToken)
-      .send({})
-      .end((err, res) => {
-        if (err) return done(err);
-        expect(res.status).toBe(404);
-        done();
-      });
-  });
-});
-
-// ── Suite 6: GET /belt-requirements (critérios com confirmed) ─
+// ── Suite 5: GET /belt-requirements (critérios com confirmed) ─
 // Schema real: from_belt, to_belt, min_months, required_kata,
 //   required_kumite, min_courses, confirmed (NOT target_belt_level/criterion/etc.)
 describe('GET /federation/:id/belt-requirements (FPKT #2 — confirmed exposto)', () => {
