@@ -197,4 +197,18 @@ router.use('/federation/:id', require('./karateReminders'));
 //   POST /federation/:id/practitioners/:practitionerId/transfer    (staffWrite)
 router.use('/federation/:id', require('./karateTransfers'));
 
+// ── AURA KARATÊ — Track M (chaves / brackets) ──
+// Migration 183 (karate_brackets, karate_bracket_matches, karate_kata_scores).
+// Kumite: bracket eliminatório (generate/lock/get/advance).
+// Kata: apuração por bateria (scores, generate-order, advance para final).
+//   POST /federation/:id/competitions/:cid/categories/:catId/bracket/generate
+//   POST /federation/:id/competitions/:cid/categories/:catId/bracket/lock
+//   GET  /federation/:id/competitions/:cid/categories/:catId/bracket
+//   POST /federation/:id/competitions/:cid/categories/:catId/bracket/advance
+//   GET  /federation/:id/competitions/:cid/categories/:catId/kata-scores
+//   PUT  /federation/:id/competitions/:cid/categories/:catId/kata-scores
+//   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/generate-order
+//   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/advance
+router.use('/federation/:id', require('./karateBrackets'));
+
 module.exports = router;
