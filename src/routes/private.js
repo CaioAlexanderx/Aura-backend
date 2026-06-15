@@ -132,20 +132,24 @@ router.use('/food/nfce', requirePlan('negocio', 'expansao'), require('./foodNfce
 router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./foodSchedule'));
 router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub'));
 
-// Aura Studio: gate de plano REMOVIDO -- Studio acessivel em todos os planos.
-router.use('/studio', require('./studio'));
-router.use('/studio', require('./studioPainel'));
-router.use('/studio', require('./studioKdsApproval'));
-router.use('/studio', require('./studioBulkHub'));
-router.use('/studio', require('./studioUpload'));
-router.use('/studio', require('./studioBulkConvert'));
-router.use('/studio', require('./studioSaleItemPatch'));
-router.use('/studio', require('./studioMarketplaceListing'));
+// Aura Studio: vertical contratada, gateada por plano (negocio+expansao) como
+// os demais verticais. Gate restaurado em 10/06/2026 (Onda 1 -- 1.2, decisao
+// Caio); requirePlan ja era o padrao de food/dental/etc. O toggle
+// pdv_settings.studio_enabled + module_overrides seguem como gate de UI no
+// aura-app; aqui o gate de API e por plano, igual aos outros verticais.
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studio'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPainel'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioKdsApproval'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioBulkHub'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioUpload'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioBulkConvert'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioSaleItemPatch'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioMarketplaceListing'));
 // Camada 1 — Orçamento + Precificação + Pagamentos (30/05/2026)
-router.use('/studio', require('./studioQuotes'));    // Fase A: Orçamento como entidade
-router.use('/studio', require('./studioPricing'));   // Fase B: Motor de precificação
-router.use('/studio', require('./studioPayments'));  // Fase C: Sinal / pagamento parcial
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioQuotes'));    // Fase A: Orçamento como entidade
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPricing'));   // Fase B: Motor de precificação
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPayments'));  // Fase C: Sinal / pagamento parcial
 // Agente B (02/06/2026): status de onboarding derivado (read-only, sem migration)
-router.use('/studio', require('./studioOnboardingStatus'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioOnboardingStatus'));
 
 module.exports = router;
