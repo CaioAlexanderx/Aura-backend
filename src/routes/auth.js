@@ -31,6 +31,14 @@
 // a partir da company primaria. Exposto no JWT (login/refresh/register) e
 // no objeto company de /login, /me e /register. Sem migration: a coluna
 // companies.federation_id ja existe. requireCompanyAccess inalterado.
+//
+// FIX 2026-06-15: /me e /login agora expoem extra_seats_granted no objeto
+// company (via getExtraSeatsForCompany, defensivo a 42703 -> 0). Era a
+// metade que faltou do fix de 13/05: o gate de Equipe (configuracoes.tsx)
+// usa company.extra_seats_granted como fallback pra liberar a gestao de
+// acessos no Essencial quando ha acesso extra pago. Sem o campo, o
+// fallback ficava sempre 0 e o cliente via "A partir do plano Negocio"
+// apesar do acesso pago (caso Encanto). Nao toca os SELECTs criticos.
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -42,6 +50,7 @@ const { requireAuth } = require('../middleware/auth');
 const { logAuditAction } = require('../middleware/auditLog');
 const { sendSelfServeSignupNotification } = require('../services/mailer');
 const { resolveKarateContext } = require('../config/karateRoles');
+const { getExtraSeatsForCompany } = require('../services/extraSeats');
 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -68,6 +77,15 @@ function setRefreshCookie(res, refreshToken) {
 function clearRefreshCookie(res) { res.clearCookie('aura_refresh', { path: '/api/v1/auth' }); }
 async function storeRefreshToken(userId, refreshToken, req) {
   try { await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5)', [userId, hashToken(refreshToken), new Date(Date.now() + REFRESH_TTL_MS), req.ip, (req.headers['user-agent'] || '').substring(0, 200)]); } catch (_) {}
+}
+
+// 15/06/2026: anexa extra_seats_granted ao objeto company ja moldado.
+// Helper defensivo (captura 42703 pre-migration -> 0). Nunca lanca.
+async function withExtraSeats(shaped, companyId) {
+  if (!shaped || !companyId) return shaped;
+  let extra = 0;
+  try { extra = await getExtraSeatsForCompany(companyId); } catch (_) { extra = 0; }
+  return { ...shaped, extra_seats_granted: extra };
 }
 
 async function resolveDefaultContext(userId, dbConn) {
@@ -289,6 +307,8 @@ router.post('/register', async (req, res) => {
         ai_enabled: !!(company.ai_enabled),
         ai_consent_at: company.ai_consent_at || null,
         member_role: memberRole,
+        // Empresa recem-criada/associada: 0 acessos extras (consistencia de shape).
+        extra_seats_granted: 0,
         federation_id: karateCtx.federation_id,
         karate_role: karateCtx.karate_role,
       } : null,
@@ -340,10 +360,15 @@ router.post('/login', async (req, res) => {
     setRefreshCookie(res, refreshToken);
     logAuditAction(user.id, ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null), 'login', 'Login: ' + user.email + (ctx.consolidated ? ' [consolidated]' : ''));
 
+    // 15/06/2026: anexa extra_seats_granted ao company (fallback do gate de Equipe).
+    const companyOut = ctx.consolidated
+      ? null
+      : await withExtraSeats(shapeCompany(ctx.primary, ctx.primary?.member_role), ctx.primary ? ctx.primary.id : null);
+
     res.json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '1h',
       user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff || false, email_verified: user.email_verified || false },
-      company: ctx.consolidated ? null : shapeCompany(ctx.primary, ctx.primary?.member_role),
+      company: companyOut,
       consolidated_view: ctx.consolidated,
       company_count: ctx.count,
     });
@@ -456,9 +481,14 @@ router.post('/me', requireAuth, async (req, res) => {
     );
     const companyCount = countRows[0]?.cnt || 0;
 
+    // 15/06/2026: anexa extra_seats_granted ao company (fallback do gate de Equipe).
+    const companyOut = company
+      ? await withExtraSeats(shapeCompany(company, memberRole), company.id)
+      : null;
+
     res.json({
       user: { id: u.id, name: u.name, email: u.email, role: u.role, is_staff: u.is_staff || false, totp_enabled: u.totp_enabled || false, email_verified: u.email_verified || false },
-      company: company ? shapeCompany(company, memberRole) : null,
+      company: companyOut,
       consolidated_view: jwtConsolidated,
       company_count: companyCount,
     });
