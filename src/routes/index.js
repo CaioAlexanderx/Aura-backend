@@ -197,4 +197,13 @@ router.use('/federation/:id', require('./karateReminders'));
 //   POST /federation/:id/practitioners/:practitionerId/transfer    (staffWrite)
 router.use('/federation/:id', require('./karateTransfers'));
 
+// ── AURA KARATÊ — Track H (configurações da federação) ──────────
+// Migration 181 (inscricao_municipal + regime_tributario em companies).
+//   GET/POST   /federation/:id/settings/members          — equipe FPKT
+//   PATCH      /federation/:id/settings/members/:mid/role
+//   DELETE     /federation/:id/settings/members/:mid
+//   GET/PUT    /federation/:id/settings/flags             — feature flags karatê
+//   GET/PUT    /federation/:id/settings/identity          — identidade + fiscal
+router.use('/federation/:id', require('./karateSettings'));
+
 module.exports = router;
