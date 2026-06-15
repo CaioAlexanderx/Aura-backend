@@ -12,51 +12,23 @@
 //              próximas mensalidades a partir do mês seguinte. Status active só
 //              quando primeira cobrança CONFIRMED/RECEIVED.
 // PRICING 21/04: Negocio 199->169.90, Expansao 299->269.90
+// 15/06/2026: acessos extras (R$19/seat) agora entram no value cobrado
+//             (plano + 19*extra_seats_granted), tanto na 1a cobrança quanto
+//             na subscription recorrente. Cálculo em services/billingPricing.
+//             asaas()/PLANS/getPlanValue movidos pra services compartilhados.
 // ============================================================
 
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
-
-const ASAAS_URL = process.env.ASAAS_URL || 'https://api.asaas.com/v3';
-const ASAAS_KEY = process.env.ASAAS_API_KEY;
-
-async function asaas(method, path, body) {
-  if (!ASAAS_KEY) throw new Error('ASAAS_API_KEY nao configurada');
-  const opts = {
-    method,
-    headers: { 'Content-Type': 'application/json', 'access_token': ASAAS_KEY },
-  };
-  if (body) opts.body = JSON.stringify(body);
-  const resp = await fetch(ASAAS_URL + path, opts);
-  const data = await resp.json();
-  if (!resp.ok) throw new Error(data.errors?.[0]?.description || 'Asaas error ' + resp.status);
-  return data;
-}
-
-const PLANS = {
-  essencial: { name: 'Aura Essencial', monthly: 89 },
-  negocio:   { name: 'Aura Negocio',   monthly: 169.90 },
-  expansao:  { name: 'Aura Expansao',  monthly: 269.90 },
-};
-
-// 2 meses grátis: paga 10, leva 12 — aplica tanto no Pix quanto no Cartão
-const ANNUAL_DISCOUNT = 1 / 6;
-
-function getPlanValue(plan, cycle, billingType) {
-  const cfg = PLANS[plan];
-  if (!cfg) return null;
-  if (cycle === 'annual') {
-    if (billingType === 'PIX') {
-      // Pix anual: pagamento único à vista com desconto de 2 meses
-      return Math.round(cfg.monthly * 12 * (1 - ANNUAL_DISCOUNT) * 100) / 100;
-    }
-    // Cartão anual: assinatura mensal com valor descontado + endDate em 12 meses
-    return Math.round(cfg.monthly * (1 - ANNUAL_DISCOUNT) * 100) / 100;
-  }
-  return cfg.monthly;
-}
+const { asaas } = require('../services/asaasClient');
+const {
+  PLANS,
+  ANNUAL_DISCOUNT,
+  getPlanValue,
+  getTotalValue,
+} = require('../services/billingPricing');
 
 async function ensureAsaasCustomer(company, user) {
   if (company.asaas_customer_id) return company.asaas_customer_id;
@@ -209,8 +181,9 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     return res.status(400).json({ error: 'credit_card_token obrigatorio para cartao' });
   }
 
-  const value = getPlanValue(plan, cycle, billing_type);
-  if (!value) return res.status(400).json({ error: 'Erro ao calcular valor' });
+  // Validacao de valor do plano (sem seats ainda — seats dependem da empresa).
+  const planValue = getPlanValue(plan, cycle, billing_type);
+  if (planValue === null) return res.status(400).json({ error: 'Erro ao calcular valor' });
 
   try {
     const { rows: companies } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
@@ -221,6 +194,13 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     const user = users[0];
 
     const customerId = await ensureAsaasCustomer(company, user);
+
+    // 15/06/2026: acessos extras pagos (R$19/seat) entram no valor cobrado.
+    // Cliente sem seat extra → extraSeats=0 → value identico ao de antes.
+    // Coluna pode nao existir pre-migration 110 → undefined → 0 (seguro).
+    const extraSeats = parseInt(company.extra_seats_granted, 10) || 0;
+    const value = getTotalValue(plan, cycle, billing_type, extraSeats);
+    const seatsSuffix = extraSeats > 0 ? ' + ' + extraSeats + ' acesso(s) extra' : '';
 
     if (company.asaas_subscription_id) {
       try { await asaas('DELETE', '/subscriptions/' + company.asaas_subscription_id); } catch {}
@@ -241,7 +221,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         billingType: 'PIX',
         value: value,
         dueDate: tomorrowStr,
-        description: PLANS[plan].name + ' - Anual (Pix a vista)',
+        description: PLANS[plan].name + ' - Anual (Pix a vista)' + seatsSuffix,
         externalReference: company.id,
       });
 
@@ -255,6 +235,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
 
       return res.status(201).json({
         payment_id: payment.id, plan: plan, cycle: 'annual', value: value, billing_type: 'PIX',
+        extra_seats: extraSeats,
         pix_qr_code: pixData?.encodedImage || null,
         pix_copy_paste: pixData?.payload || null,
         pix_expiration: pixData?.expirationDate || null,
@@ -277,7 +258,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         address: credit_card_holder_address || undefined,
       } : undefined;
 
-      console.log('[BILLING] Cobranca imediata cartao — company=' + company.id + ' value=' + value + ' cycle=' + cycle);
+      console.log('[BILLING] Cobranca imediata cartao — company=' + company.id + ' value=' + value + ' cycle=' + cycle + ' seats=' + extraSeats);
 
       // 1. Cobrar primeira mensalidade AGORA (captura sincrona via cartao)
       let firstPayment;
@@ -287,7 +268,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           billingType: 'CREDIT_CARD',
           value: value,
           dueDate: todayStr,
-          description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual - 1ª mensalidade)' : ''),
+          description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual - 1ª mensalidade)' : '') + seatsSuffix,
           externalReference: company.id,
           creditCardToken: credit_card_token,
         };
@@ -336,7 +317,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         nextDueDate: subStartStr,
         cycle: 'MONTHLY',
         endDate: subscriptionEndDate,
-        description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : ''),
+        description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : '') + seatsSuffix,
         externalReference: company.id,
         creditCardToken: credit_card_token,
       };
@@ -360,6 +341,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           subscription_id: null,
           payment_status: firstPayment.status,
           plan, cycle, value, billing_type: 'CREDIT_CARD',
+          extra_seats: extraSeats,
           confirmed: isPaid,
           warning: 'Primeira mensalidade capturada com sucesso, mas falha ao agendar recorrência. Suporte foi notificado para reconciliação manual.',
         });
@@ -383,6 +365,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         payment_id: firstPayment.id,
         subscription_id: subscription.id,
         plan, cycle, value, billing_type: 'CREDIT_CARD',
+        extra_seats: extraSeats,
         payment_status: firstPayment.status,
         next_due_date: subscription.nextDueDate,
         confirmed: isPaid,
@@ -403,7 +386,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       nextDueDate: tomorrowStr,
       cycle: 'MONTHLY',
       endDate: cycle === 'annual' ? end_date : undefined,
-      description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : ''),
+      description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : '') + seatsSuffix,
       externalReference: company.id,
     };
 
@@ -425,6 +408,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     const response = {
       subscription_id: subscription.id,
       plan, cycle, value, billing_type: 'PIX',
+      extra_seats: extraSeats,
       next_due_date: subscription.nextDueDate,
       pix_qr_code: pixData?.encodedImage || null,
       pix_copy_paste: pixData?.payload || null,
