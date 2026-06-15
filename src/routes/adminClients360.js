@@ -22,6 +22,11 @@
 //   extra_seats_granted; segunda query opcional via extraSeats helper traz
 //   o campo se a coluna existir. Sem isso, app subir antes da migration
 //   aplicar fazia /clients-360 explodir 42703 → Gestao Aura zerada.
+//
+// 15/06/2026: ao conceder/ajustar extra-seats, sincroniza o valor da
+//   assinatura no Asaas (plano + 19xseats) via seatSubscription. Assim o
+//   acesso extra passa a ser cobrado automaticamente no cartao, como a
+//   assinatura — sem refazer checkout. Best-effort (billing_sync no response).
 // ============================================================
 
 const router = require('express').Router();
@@ -30,6 +35,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const { getExtraSeatsMap, setExtraSeatsForCompany } = require('../services/extraSeats');
+const { syncSubscriptionSeatValue } = require('../services/seatSubscription');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -289,6 +295,11 @@ router.patch('/clients/:cid/extend-trial', ...adminOnly, asyncHandler(async (req
 // que captura 42703 e devolve erro 503 com mensagem clara em vez de
 // 500 generico. Garante que Gestao Aura mostra "rode a migration"
 // em vez de simplesmente falhar mudo.
+//
+// 15/06/2026: apos mudar o count, sincroniza o valor da assinatura no
+// Asaas (plano + 19xseats) via syncSubscriptionSeatValue — assim o
+// acesso extra passa a ser cobrado automaticamente no cartao. Best-effort:
+// o resultado vai em billing_sync no response e no audit; nunca derruba o PATCH.
 router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req, res) => {
   const { cid } = req.params;
   const { count, reason } = req.body || {};
@@ -297,8 +308,11 @@ router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req,
     throw new AppError('count deve ser inteiro entre 0 e 100', 400);
   }
 
-  // Confirma empresa existe + pega o plano pra audit log
-  const { rows: comp } = await pool.query('SELECT plan FROM companies WHERE id = $1', [cid]);
+  // Confirma empresa existe + pega plano/ciclo/assinatura pra audit + sync
+  const { rows: comp } = await pool.query(
+    'SELECT plan, billing_cycle, billing_status, asaas_subscription_id FROM companies WHERE id = $1',
+    [cid]
+  );
   if (!comp.length) throw new AppError('Empresa nao encontrada', 404);
 
   let result;
@@ -320,6 +334,17 @@ router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req,
     });
   }
 
+  // 15/06/2026: sincroniza a assinatura recorrente no Asaas com o novo count.
+  // Best-effort — nunca lanca (syncSubscriptionSeatValue ja e blindado).
+  const billingSync = await syncSubscriptionSeatValue({
+    id: cid,
+    plan: comp[0].plan,
+    billing_cycle: comp[0].billing_cycle,
+    billing_status: comp[0].billing_status,
+    asaas_subscription_id: comp[0].asaas_subscription_id,
+    extra_seats_granted: n,
+  });
+
   // Audit log generico action=set_extra_seats. Payload preserva before/after
   // e o delta facilita queries do tipo "quantos seats foram concedidos esse mes".
   await pool.query(
@@ -333,6 +358,7 @@ router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req,
         new_count: n,
         delta: n - result.previous,
         plan: comp[0].plan,
+        billing_sync: billingSync,
       }),
       reason && typeof reason === 'string' ? reason.trim() : null,
     ]
@@ -342,6 +368,7 @@ router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req,
     extra_seats_granted: n,
     previous_extra_seats_granted: result.previous,
     changed: true,
+    billing_sync: billingSync,
   });
 }));
 
