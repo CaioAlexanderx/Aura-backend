@@ -117,7 +117,7 @@ router.use('/orcamento',         require('./studioQuotePublic'));
 //   POST /public/karate/:slug/inscricao/:eventId      — inscrição (exame/curso real; competição 501)
 router.use('/public/karate', require('./karatePublic'));
 
-// ── AURA KARATÊ — Track E (público: ranking embeddável) ──
+// ── AURA KARATÊ — Track E (público: ranking embellável) ──
 // Router separado (mantém karatePublic.js intacto). Migrations 168 + 169.
 //   GET /public/karate/:slug/seasons                  — temporadas/categorias
 //   GET /public/karate/:slug/ranking?season=&category=— ranking (widget)
@@ -148,13 +148,13 @@ router.use('/federation/:id/financial', require('./karateFinancial'));
 // Track P: NFS-e para anuidades de dojô (reusa nuvemfiscal + nfe_documents)
 router.use('/federation/:id/financial', require('./karateNfse'));
 
-// ── AURA KARATÊ — Track C (backend exames + cursos) ─────────
+// ── AURA KARATÊ — Track C (backend exames + cursos) ─────────────
 // (certificados Track J montado separadamente abaixo)
 router.use('/federation/:id', require('./karateRequirements'));
 router.use('/federation/:id', require('./karateExams'));
 router.use('/federation/:id', require('./karateCourses'));
 
-// ── AURA KARATÊ — Track J (certificados: fluxo de pedido) ───
+// ── AURA KARATÊ — Track J (certificados: fluxo de pedido) ─────────
 // Substitui o fluxo Track C de emissão sob demanda.
 // Migration 182: karate_certificate_orders + karate_certificate_order_history.
 // Defensive 42P01: safe to merge antes da migration ser aplicada.
@@ -167,7 +167,7 @@ router.use('/federation/:id', require('./karateCourses'));
 //   POST   /federation/:id/certificate-orders/:orderId/refuse
 router.use('/federation/:id', require('./karateCertificates'));
 
-// ── AURA KARATÊ — Track D (admin: carteirinha digital) ──────
+// ── AURA KARATÊ — Track D (admin: carteirinha digital) ──────────
 // Migration 164. Somente DADOS (sem geração de imagem no app).
 //   POST /federation/:id/practitioners/:practitionerId/issue-card  (staffWrite)
 //   GET  /federation/:id/practitioners/:practitionerId/card        (read)
@@ -175,7 +175,7 @@ router.use('/federation/:id', require('./karateCertificates'));
 //   POST /federation/:id/cards/issue-batch                         (adminOnly)
 router.use('/federation/:id', require('./karateCards'));
 
-// ── AURA KARATÊ — Track E (admin: competições + ranking) ────
+// ── AURA KARATÊ — Track E (admin: competições + ranking) ────────
 // Migrations 168 + 169. Contrato docs/karate-fase4-openapi.yaml.
 //   GET/POST  /federation/:id/competitions
 //   GET/PATCH /federation/:id/competitions/:cid (+ /close)
@@ -210,7 +210,7 @@ router.use('/federation/:id', require('./karateReminders'));
 //   POST /federation/:id/practitioners/:practitionerId/transfer    (staffWrite)
 router.use('/federation/:id', require('./karateTransfers'));
 
-// ── AURA KARATÊ — Track H (configurações da federação) ──────────
+// ── AURA KARATÊ — Track H (configurações da federação) ───────────
 // Migration 181 (inscricao_municipal + regime_tributario em companies).
 //   GET/POST   /federation/:id/settings/members          — equipe FPKT
 //   PATCH      /federation/:id/settings/members/:mid/role
@@ -232,5 +232,22 @@ router.use('/federation/:id', require('./karateSettings'));
 //   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/generate-order
 //   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/advance
 router.use('/federation/:id', require('./karateBrackets'));
+
+// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────────────
+// Sem migration (totalmente derivado de tabelas existentes).
+// Guards federation_admin/staff/viewer para leitura; adminOnly para /report/send.
+//   GET  /federation/:id/network-health/summary
+//   GET  /federation/:id/network-health/afiliacao
+//   GET  /federation/:id/network-health/renovacao
+//   GET  /federation/:id/network-health/cobertura
+//   GET  /federation/:id/network-health/inadimplencia
+//   GET  /federation/:id/network-health/projecao-receita
+//   GET  /federation/:id/network-health/dormencia
+//   GET  /federation/:id/network-health/concentracao
+//   GET  /federation/:id/network-health/graduacoes
+//   GET  /federation/:id/network-health/relacao-faixas
+//   POST /federation/:id/network-health/report/send
+// Todos os GET: ?export=csv retorna arquivo CSV.
+router.use('/federation/:id/network-health', require('./karateNetworkHealth'));
 
 module.exports = router;

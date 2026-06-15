@@ -1,0 +1,997 @@
+// ============================================================
+// AURA KARATÊ — Track L: Saúde da Rede
+// Montado em /federation/:id/network-health/*
+//
+// Indicadores institucionais derivados de dados que a FEDERAÇÃO
+// possui (afiliações, anuidades, exames, competições, geografia).
+// SEM métricas internas de dojô (churn de praticante, presença).
+//
+// Endpoints:
+//   GET  /summary          — KPI band (5 números) + todos indicadores
+//   GET  /afiliacao        — dojôs afiliados + evolução anual
+//   GET  /renovacao        — taxa de renovação no período
+//   GET  /cobertura        — densidade por região administrativa SP
+//   GET  /inadimplencia    — status anuidades de dojô
+//   GET  /projecao-receita — receita projetada por mês de vencimento
+//   GET  /dormencia        — dojôs ativos × dormentes (sem exam/comp na season)
+//   GET  /concentracao     — concentração top-5 dojôs (praticantes + receita)
+//   GET  /graduacoes       — exames Kyu→Dan registrados (mensal)
+//   GET  /relacao-faixas   — distribuição atual de atletas por faixa
+//   POST /report/send      — compõe e envia relatório periódico por e-mail (adminOnly)
+//
+// Todos os GET aceitam ?export=csv para download.
+// Guards: FEDERATION_READ para leitura; adminOnly para report/send.
+// Defensive 42P01: safe to deploy antes de qualquer nova migration.
+// Não requer migration — tudo derivado de tabelas existentes.
+// ============================================================
+'use strict';
+
+const router = require('express').Router({ mergeParams: true });
+const db = require('../config/database');
+const { guards } = require('../config/karateRoles');
+const { sendKarateEmail } = require('../services/karateMailer');
+
+// ── helpers ────────────────────────────────────────────────────
+
+function safeQuery(sql, params) {
+  return db.query(sql, params).catch((err) => {
+    // 42P01 = table undefined → return empty gracefully
+    if (err.code === '42P01') return { rows: [] };
+    throw err;
+  });
+}
+
+function currentSeason() {
+  return new Date().getFullYear();
+}
+
+function fmtBRL(v) {
+  const n = Number(v || 0);
+  return 'R$ ' + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+
+// Regiões administrativas do estado de SP usadas no heatmap.
+// col/row drive a posição no grid 5x4 do mockup.
+const SP_REGIONS = [
+  { regiao: 'Capital — São Paulo',               short: 'Capital',     col: 4, row: 3 },
+  { regiao: 'Grande SP — ABC / Osasco / Guarulhos', short: 'Grande SP',  col: 5, row: 3 },
+  { regiao: 'Campinas',                           short: 'Campinas',    col: 4, row: 2 },
+  { regiao: 'Vale do Paraíba',                    short: 'Vale',        col: 5, row: 2 },
+  { regiao: 'Sorocaba',                           short: 'Sorocaba',    col: 3, row: 3 },
+  { regiao: 'Baixada Santista',                   short: 'Baixada',     col: 4, row: 4 },
+  { regiao: 'Ribeirão Preto',                     short: 'Ribeirão',    col: 3, row: 1 },
+  { regiao: 'Bauru',                              short: 'Bauru',       col: 2, row: 2 },
+  { regiao: 'Litoral Norte',                      short: 'Litoral N.',  col: 5, row: 4 },
+  { regiao: 'Marília',                            short: 'Marília',     col: 1, row: 3 },
+  { regiao: 'Pres. Prudente',                     short: 'P. Prudente', col: 1, row: 2 },
+  { regiao: 'Barretos',                           short: 'Barretos',    col: 2, row: 1 },
+  { regiao: 'Franca',                             short: 'Franca',      col: 4, row: 1 },
+  { regiao: 'Araraquara — Central',               short: 'Central',     col: 3, row: 2 },
+];
+
+// Municipalities count per region (reference, static — no IBGE table dependency).
+const SP_MUN_TOTAL = {
+  'Capital — São Paulo': 1,
+  'Grande SP — ABC / Osasco / Guarulhos': 39,
+  'Campinas': 90,
+  'Vale do Paraíba': 39,
+  'Sorocaba': 79,
+  'Baixada Santista': 9,
+  'Ribeirão Preto': 25,
+  'Bauru': 39,
+  'Litoral Norte': 4,
+  'Marília': 51,
+  'Pres. Prudente': 53,
+  'Barretos': 18,
+  'Franca': 23,
+  'Araraquara — Central': 32,
+};
+
+// Build CSV string from cols + rows.
+function buildCsv(cols, rows) {
+  const esc = (v) => {
+    const s = String(v == null ? '' : v);
+    return /["\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const head = cols.map((c) => esc(c.label)).join(';');
+  const body = rows.map((r) => cols.map((c) => esc(r[c.key])).join(';')).join('\r\n');
+  return '﻿' + head + '\r\n' + body;
+}
+
+function sendCsv(res, filename, cols, rows) {
+  const csv = buildCsv(cols, rows);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="saude-rede_${filename}.csv"`);
+  res.send(csv);
+}
+
+// ── Afiliação da rede ─────────────────────────────────────────
+// Deriva de companies (karate_dojo) + karate_dojo_annuity_history.
+// Conta dojôs por season_year para evolução anual.
+router.get('/afiliacao', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  const exportCsv = req.query.export === 'csv';
+  try {
+    // Dojôs afiliados ativos (vertical_active = karate_dojo, federation_id = fedId)
+    const dojosRes = await safeQuery(
+      `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name,
+              c.city, c.karate_region,
+              c.created_at::date AS affiliated_since
+       FROM companies c
+       WHERE c.federation_id = $1
+         AND c.vertical_active = 'karate_dojo'
+         AND c.is_active = true
+       ORDER BY c.created_at ASC`,
+      [fedId]
+    );
+    const dojos = dojosRes.rows;
+
+    // Evolução anual: conta dojôs afiliados em cada ano (por created_at)
+    const yearlyRes = await safeQuery(
+      `SELECT EXTRACT(YEAR FROM c.created_at)::int AS ano, COUNT(*)::int AS new_affiliations
+       FROM companies c
+       WHERE c.federation_id = $1
+         AND c.vertical_active = 'karate_dojo'
+       GROUP BY ano
+       ORDER BY ano ASC`,
+      [fedId]
+    );
+
+    // Anuidades do ano corrente para detectar renovações
+    const season = currentSeason();
+    const annuityRes = await safeQuery(
+      `SELECT dojo_id, status, paid_at
+       FROM karate_dojo_annuity_history
+       WHERE federation_id = $1
+         AND season_year = $2`,
+      [fedId, season]
+    );
+    const annuityBydojo = {};
+    for (const r of annuityRes.rows) annuityBydojo[r.dojo_id] = r;
+
+    const totalNow = dojos.length;
+    const novas = dojos.filter((d) => {
+      const y = new Date(d.affiliated_since).getFullYear();
+      return y === season;
+    }).length;
+
+    // Não renovaram: anuidade da season pendente/overdue
+    const naoRenov = annuityRes.rows.filter((a) =>
+      ['pending', 'overdue'].includes(a.status)
+    ).length;
+
+    if (exportCsv) {
+      const cols = [
+        { key: 'name', label: 'Dojô' },
+        { key: 'city', label: 'Cidade' },
+        { key: 'karate_region', label: 'Região' },
+        { key: 'affiliated_since', label: 'Afiliado desde' },
+        { key: 'annuity_status', label: 'Anuidade' },
+      ];
+      const rows = dojos.map((d) => ({
+        name: d.name,
+        city: d.city || '',
+        karate_region: d.karate_region || '',
+        affiliated_since: d.affiliated_since ? String(d.affiliated_since).slice(0, 10) : '',
+        annuity_status: annuityBydojo[d.id] ? annuityBydojo[d.id].status : 'sem registro',
+      }));
+      return sendCsv(res, 'afiliacao', cols, rows);
+    }
+
+    res.json({
+      season,
+      total_now: totalNow,
+      novas_affiliacoes: novas,
+      nao_renovaram: naoRenov,
+      yearly: yearlyRes.rows,
+      dojos: dojos.map((d) => ({
+        id: d.id,
+        name: d.name,
+        city: d.city || null,
+        region: d.karate_region || null,
+        affiliated_since: d.affiliated_since ? String(d.affiliated_since).slice(0, 10) : null,
+        annuity_status: annuityBydojo[d.id] ? annuityBydojo[d.id].status : null,
+      })),
+    });
+  } catch (err) {
+    console.error('[networkHealth] afiliacao error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar afiliação' });
+  }
+});
+
+// ── Taxa de renovação ─────────────────────────────────────────
+// % de dojôs cuja anuidade venceu no período que renovaram (paid).
+router.get('/renovacao', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  const season = parseInt(req.query.season) || currentSeason();
+  try {
+    const r = await safeQuery(
+      `SELECT
+         COUNT(*)                                            AS total_due,
+         COUNT(*) FILTER (WHERE status = 'paid')            AS renewed,
+         COUNT(*) FILTER (WHERE status IN ('pending','overdue')) AS not_renewed
+       FROM karate_dojo_annuity_history
+       WHERE federation_id = $1 AND season_year = $2`,
+      [fedId, season]
+    );
+    const row = r.rows[0] || {};
+    const totalDue = parseInt(row.total_due || 0, 10);
+    const renewed = parseInt(row.renewed || 0, 10);
+    const notRenewed = parseInt(row.not_renewed || 0, 10);
+    const rate = totalDue > 0 ? Number((renewed / totalDue * 100).toFixed(1)) : null;
+
+    res.json({ season, total_due: totalDue, renewed, not_renewed: notRenewed, renewal_rate_pct: rate });
+  } catch (err) {
+    console.error('[networkHealth] renovacao error:', err.message);
+    res.status(500).json({ error: 'Erro ao calcular taxa de renovação' });
+  }
+});
+
+// ── Cobertura geográfica ──────────────────────────────────────
+// Agrupa dojôs por karate_region; mapeia para o grid de regiões de SP.
+router.get('/cobertura', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  const exportCsv = req.query.export === 'csv';
+  try {
+    const r = await safeQuery(
+      `SELECT c.karate_region,
+              COUNT(*)::int AS dojos,
+              COUNT(DISTINCT c.city) AS mun_covered,
+              COUNT(cu.id)::int AS practitioners
+       FROM companies c
+       LEFT JOIN customers cu ON cu.dojo_id = c.id AND cu.federation_id = $1
+       WHERE c.federation_id = $1
+         AND c.vertical_active = 'karate_dojo'
+         AND c.is_active = true
+       GROUP BY c.karate_region`,
+      [fedId]
+    );
+
+    const byRegion = {};
+    for (const row of r.rows) {
+      if (row.karate_region) byRegion[row.karate_region] = row;
+    }
+
+    const regions = SP_REGIONS.map((reg) => {
+      const data = byRegion[reg.regiao] || { dojos: 0, mun_covered: 0, practitioners: 0 };
+      return {
+        regiao: reg.regiao,
+        short: reg.short,
+        col: reg.col,
+        row: reg.row,
+        dojos: parseInt(data.dojos || 0, 10),
+        mun_covered: parseInt(data.mun_covered || 0, 10),
+        mun_total: SP_MUN_TOTAL[reg.regiao] || 0,
+        practitioners: parseInt(data.practitioners || 0, 10),
+      };
+    });
+
+    const gaps = regions.filter((r) => r.dojos === 0);
+    const totalMunGap = gaps.reduce((s, r) => s + r.mun_total, 0);
+
+    if (exportCsv) {
+      const cols = [
+        { key: 'regiao', label: 'Região' },
+        { key: 'dojos', label: 'Dojôs' },
+        { key: 'mun_covered', label: 'Mun. c/ dojô' },
+        { key: 'mun_total', label: 'Mun. na região' },
+        { key: 'practitioners', label: 'Praticantes' },
+        { key: 'situacao', label: 'Situação' },
+      ];
+      const rows = regions.map((r) => ({
+        ...r,
+        situacao: r.dojos === 0 ? 'Sem dojô' : r.dojos < 3 ? 'Cobertura baixa' : 'Coberta',
+      }));
+      return sendCsv(res, 'cobertura', cols, rows);
+    }
+
+    res.json({
+      regions,
+      gap_count: gaps.length,
+      gap_mun_total: totalMunGap,
+      gap_names: gaps.map((g) => g.short).join(', '),
+    });
+  } catch (err) {
+    console.error('[networkHealth] cobertura error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar cobertura' });
+  }
+});
+
+// ── Inadimplência da rede ─────────────────────────────────────
+// Status das anuidades de afiliação dos dojôs (em dia / vencendo / vencido).
+router.get('/inadimplencia', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  const season = parseInt(req.query.season) || currentSeason();
+  const exportCsv = req.query.export === 'csv';
+  try {
+    const r = await safeQuery(
+      `SELECT h.dojo_id,
+              COALESCE(c.trade_name, c.legal_name) AS dojo_name,
+              c.city,
+              h.due_date, h.amount, h.status, h.paid_at
+       FROM karate_dojo_annuity_history h
+       JOIN companies c ON c.id = h.dojo_id
+       WHERE h.federation_id = $1 AND h.season_year = $2
+       ORDER BY
+         CASE h.status WHEN 'overdue' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+         h.due_date ASC`,
+      [fedId, season]
+    );
+
+    const rows = r.rows;
+    const total = rows.length;
+    const emDia = rows.filter((r) => r.status === 'paid').length;
+    const vencendo = rows.filter((r) => {
+      if (r.status !== 'pending') return false;
+      const diff = r.due_date ? (new Date(r.due_date) - new Date()) / 86400000 : 999;
+      return diff >= 0 && diff <= 7;
+    }).length;
+    const vencido = rows.filter((r) => r.status === 'overdue').length;
+    const inadPct = total > 0 ? Number((vencido / total * 100).toFixed(1)) : 0;
+
+    if (exportCsv) {
+      const cols = [
+        { key: 'dojo_name', label: 'Dojô' },
+        { key: 'city', label: 'Cidade' },
+        { key: 'due_date', label: 'Vencimento' },
+        { key: 'amount', label: 'Valor' },
+        { key: 'status', label: 'Status' },
+      ];
+      const csvRows = rows.map((r) => ({
+        dojo_name: r.dojo_name,
+        city: r.city || '',
+        due_date: r.due_date ? String(r.due_date).slice(0, 10) : '',
+        amount: fmtBRL(r.amount),
+        status: r.status,
+      }));
+      return sendCsv(res, 'inadimplencia', cols, csvRows);
+    }
+
+    res.json({
+      season,
+      total,
+      em_dia: emDia,
+      vencendo,
+      vencido,
+      inad_pct: inadPct,
+      rows: rows.map((r) => ({
+        dojo_id: r.dojo_id,
+        dojo_name: r.dojo_name,
+        city: r.city || null,
+        due_date: r.due_date ? String(r.due_date).slice(0, 10) : null,
+        amount: Number(r.amount || 0),
+        status: r.status,
+        paid_at: r.paid_at ? String(r.paid_at).slice(0, 10) : null,
+      })),
+    });
+  } catch (err) {
+    console.error('[networkHealth] inadimplencia error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar inadimplência' });
+  }
+});
+
+// ── Projeção de receita ───────────────────────────────────────
+// Agrupa anuidades por mês de vencimento (próximos 8 meses).
+// kind: 'real' (already paid) | 'proj' (pending/future)
+router.get('/projecao-receita', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  const exportCsv = req.query.export === 'csv';
+  const months = parseInt(req.query.months) || 8;
+  try {
+    const r = await safeQuery(
+      `SELECT
+         DATE_TRUNC('month', due_date)        AS month_start,
+         SUM(amount)                          AS total,
+         SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END) AS realized,
+         SUM(CASE WHEN status != 'paid' THEN amount ELSE 0 END) AS projected,
+         COUNT(*)::int                        AS annuities
+       FROM karate_dojo_annuity_history
+       WHERE federation_id = $1
+         AND due_date >= CURRENT_DATE - INTERVAL '1 month'
+         AND due_date <  CURRENT_DATE + ($2 * INTERVAL '1 month')
+       GROUP BY month_start
+       ORDER BY month_start ASC`,
+      [fedId, months]
+    );
+
+    const data = r.rows.map((row) => {
+      const d = new Date(row.month_start);
+      const mes = d.toLocaleString('pt-BR', { month: 'short' }).replace('.', '');
+      const ano = String(d.getFullYear()).slice(2);
+      return {
+        month: String(row.month_start).slice(0, 7),
+        mes,
+        ano,
+        total: Number(row.total || 0),
+        realized: Number(row.realized || 0),
+        projected: Number(row.projected || 0),
+        annuities: row.annuities,
+        kind: Number(row.realized || 0) > 0 && Number(row.projected || 0) === 0 ? 'real' : 'proj',
+      };
+    });
+
+    const totalProj = data.reduce((s, d) => s + d.projected, 0);
+    const totalReal = data.reduce((s, d) => s + d.realized, 0);
+
+    if (exportCsv) {
+      const cols = [
+        { key: 'month', label: 'Mês de vencimento' },
+        { key: 'annuities', label: 'Anuidades vencendo' },
+        { key: 'realized_fmt', label: 'Realizado' },
+        { key: 'projected_fmt', label: 'Projetado' },
+        { key: 'total_fmt', label: 'Total' },
+      ];
+      const csvRows = data.map((d) => ({
+        month: d.month,
+        annuities: d.annuities,
+        realized_fmt: fmtBRL(d.realized),
+        projected_fmt: fmtBRL(d.projected),
+        total_fmt: fmtBRL(d.total),
+      }));
+      return sendCsv(res, 'projecao-receita', cols, csvRows);
+    }
+
+    res.json({
+      months,
+      total_realized: totalReal,
+      total_projected: totalProj,
+      data,
+    });
+  } catch (err) {
+    console.error('[networkHealth] projecao-receita error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar projeção de receita' });
+  }
+});
+
+// ── Dojô ativo × dormente ─────────────────────────────────────
+// Dojô ativo na season: registrou >= 1 exame OU >= 1 inscrição em competição.
+// Dojô dormente: nenhuma dessas ações.
+router.get('/dormencia', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  const season = parseInt(req.query.season) || currentSeason();
+  const exportCsv = req.query.export === 'csv';
+  try {
+    // Todos os dojôs afiliados
+    const dojosRes = await safeQuery(
+      `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name, c.city, c.karate_region
+       FROM companies c
+       WHERE c.federation_id = $1
+         AND c.vertical_active = 'karate_dojo'
+         AND c.is_active = true`,
+      [fedId]
+    );
+
+    // Dojôs que tiveram pelo menos um exam result na season
+    const examRes = await safeQuery(
+      `SELECT DISTINCT dojo_id FROM karate_belt_history
+       WHERE federation_id = $1
+         AND EXTRACT(YEAR FROM exam_date)::int = $2`,
+      [fedId, season]
+    );
+    const examActive = new Set(examRes.rows.map((r) => r.dojo_id));
+
+    // Dojôs que tiveram pelo menos uma inscrição em competição na season
+    const compRes = await safeQuery(
+      `SELECT DISTINCT e.dojo_id
+       FROM karate_competition_entries e
+       JOIN karate_competitions c ON c.id = e.competition_id
+       WHERE c.federation_id = $1 AND c.season = $2
+         AND e.dojo_id IS NOT NULL`,
+      [fedId, season]
+    );
+    const compActive = new Set(compRes.rows.map((r) => r.dojo_id));
+
+    const result = dojosRes.rows.map((d) => {
+      const hasExam = examActive.has(d.id);
+      const hasComp = compActive.has(d.id);
+      return {
+        id: d.id,
+        name: d.name,
+        city: d.city || null,
+        region: d.karate_region || null,
+        has_exam: hasExam,
+        has_comp: hasComp,
+        active: hasExam || hasComp,
+      };
+    });
+
+    const total = result.length;
+    const ativos = result.filter((d) => d.active).length;
+    const dormentes = total - ativos;
+
+    if (exportCsv) {
+      const cols = [
+        { key: 'name', label: 'Dojô' },
+        { key: 'city', label: 'Cidade' },
+        { key: 'region', label: 'Região' },
+        { key: 'has_exam', label: 'Exame na season' },
+        { key: 'has_comp', label: 'Comp. na season' },
+        { key: 'active', label: 'Ativo' },
+      ];
+      const csvRows = result.map((d) => ({
+        ...d,
+        has_exam: d.has_exam ? 'Sim' : 'Não',
+        has_comp: d.has_comp ? 'Sim' : 'Não',
+        active: d.active ? 'Ativo' : 'Dormente',
+      }));
+      return sendCsv(res, 'dormencia', cols, csvRows);
+    }
+
+    res.json({
+      season,
+      total,
+      ativos,
+      dormentes,
+      pct_ativos: total > 0 ? Number((ativos / total * 100).toFixed(1)) : null,
+      dojos: result,
+    });
+  } catch (err) {
+    console.error('[networkHealth] dormencia error:', err.message);
+    res.status(500).json({ error: 'Erro ao calcular dormência' });
+  }
+});
+
+// ── Concentração ──────────────────────────────────────────────
+// Share dos top-5 dojôs em praticantes e receita de anuidade.
+router.get('/concentracao', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  const season = parseInt(req.query.season) || currentSeason();
+  const exportCsv = req.query.export === 'csv';
+  try {
+    // Praticantes por dojô
+    const practRes = await safeQuery(
+      `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name,
+              COUNT(cu.id)::int AS practitioners
+       FROM companies c
+       LEFT JOIN customers cu ON cu.dojo_id = c.id AND cu.federation_id = $1
+       WHERE c.federation_id = $1
+         AND c.vertical_active = 'karate_dojo'
+         AND c.is_active = true
+       GROUP BY c.id, c.trade_name, c.legal_name
+       ORDER BY practitioners DESC`,
+      [fedId]
+    );
+
+    // Receita de anuidade por dojô (season)
+    const revRes = await safeQuery(
+      `SELECT dojo_id, SUM(amount) AS revenue
+       FROM karate_dojo_annuity_history
+       WHERE federation_id = $1 AND season_year = $2 AND status = 'paid'
+       GROUP BY dojo_id`,
+      [fedId, season]
+    );
+    const revByDojo = {};
+    for (const r of revRes.rows) revByDojo[r.dojo_id] = Number(r.revenue || 0);
+
+    const dojos = practRes.rows.map((d) => ({
+      id: d.id,
+      name: d.name,
+      practitioners: d.practitioners,
+      revenue: revByDojo[d.id] || 0,
+    }));
+
+    const totalPract = dojos.reduce((s, d) => s + d.practitioners, 0);
+    const totalRev = dojos.reduce((s, d) => s + d.revenue, 0);
+    const top5 = dojos.slice(0, 5);
+    const top5Pract = top5.reduce((s, d) => s + d.practitioners, 0);
+    const top5Rev = top5.reduce((s, d) => s + d.revenue, 0);
+
+    if (exportCsv) {
+      const cols = [
+        { key: 'name', label: 'Dojô' },
+        { key: 'practitioners', label: 'Praticantes' },
+        { key: 'pct_pract', label: '% praticantes' },
+        { key: 'revenue_fmt', label: 'Receita anuidade' },
+        { key: 'pct_rev', label: '% receita' },
+      ];
+      const csvRows = dojos.map((d) => ({
+        name: d.name,
+        practitioners: d.practitioners,
+        pct_pract: totalPract > 0 ? (d.practitioners / totalPract * 100).toFixed(1) + '%' : '0%',
+        revenue_fmt: fmtBRL(d.revenue),
+        pct_rev: totalRev > 0 ? (d.revenue / totalRev * 100).toFixed(1) + '%' : '0%',
+      }));
+      return sendCsv(res, 'concentracao', cols, csvRows);
+    }
+
+    res.json({
+      season,
+      total_dojos: dojos.length,
+      total_practitioners: totalPract,
+      total_revenue: totalRev,
+      top5_pct_practitioners: totalPract > 0 ? Number((top5Pract / totalPract * 100).toFixed(1)) : null,
+      top5_pct_revenue: totalRev > 0 ? Number((top5Rev / totalRev * 100).toFixed(1)) : null,
+      top5,
+      all: dojos,
+    });
+  } catch (err) {
+    console.error('[networkHealth] concentracao error:', err.message);
+    res.status(500).json({ error: 'Erro ao calcular concentração' });
+  }
+});
+
+// ── Graduações registradas ────────────────────────────────────
+// Exames Kyu→Dan registrados na federação, agrupados por mês.
+router.get('/graduacoes', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  const months = parseInt(req.query.months) || 8;
+  const exportCsv = req.query.export === 'csv';
+  try {
+    // Mensal
+    const monthRes = await safeQuery(
+      `SELECT
+         DATE_TRUNC('month', exam_date) AS month_start,
+         COUNT(*) FILTER (WHERE new_belt_level NOT LIKE '%dan%') AS kyu_count,
+         COUNT(*) FILTER (WHERE new_belt_level LIKE '%dan%') AS dan_count,
+         COUNT(*)::int AS total
+       FROM karate_belt_history
+       WHERE federation_id = $1
+         AND exam_date >= CURRENT_DATE - ($2 * INTERVAL '1 month')
+       GROUP BY month_start
+       ORDER BY month_start ASC`,
+      [fedId, months]
+    );
+
+    // Lista detalhada
+    const listRes = await safeQuery(
+      `SELECT bh.id, bh.exam_date, bh.student_id,
+              cu.name AS student_name,
+              COALESCE(dj.trade_name, dj.legal_name) AS dojo_name,
+              bh.old_belt_level, bh.new_belt_level,
+              bh.examiner_name
+       FROM karate_belt_history bh
+       JOIN customers cu ON cu.id = bh.student_id
+       LEFT JOIN companies dj ON dj.id = cu.dojo_id
+       WHERE bh.federation_id = $1
+         AND bh.exam_date >= CURRENT_DATE - ($2 * INTERVAL '1 month')
+       ORDER BY bh.exam_date DESC`,
+      [fedId, months]
+    );
+
+    const months_data = monthRes.rows.map((r) => {
+      const d = new Date(r.month_start);
+      return {
+        month: String(r.month_start).slice(0, 7),
+        mes: d.toLocaleString('pt-BR', { month: 'short' }).replace('.', ''),
+        ano: String(d.getFullYear()).slice(2),
+        kyu: parseInt(r.kyu_count || 0, 10),
+        dan: parseInt(r.dan_count || 0, 10),
+        total: parseInt(r.total || 0, 10),
+      };
+    });
+
+    const gradKyu = months_data.reduce((s, m) => s + m.kyu, 0);
+    const gradDan = months_data.reduce((s, m) => s + m.dan, 0);
+
+    if (exportCsv) {
+      const cols = [
+        { key: 'exam_date', label: 'Data' },
+        { key: 'dojo_name', label: 'Dojô' },
+        { key: 'student_name', label: 'Candidato' },
+        { key: 'old_belt_level', label: 'De' },
+        { key: 'new_belt_level', label: 'Para' },
+        { key: 'examiner_name', label: 'Banca' },
+      ];
+      const csvRows = listRes.rows.map((r) => ({
+        exam_date: r.exam_date ? String(r.exam_date).slice(0, 10) : '',
+        dojo_name: r.dojo_name || '',
+        student_name: r.student_name || '',
+        old_belt_level: r.old_belt_level || '',
+        new_belt_level: r.new_belt_level || '',
+        examiner_name: r.examiner_name || '',
+      }));
+      return sendCsv(res, 'graduacoes-registradas', cols, csvRows);
+    }
+
+    res.json({
+      months,
+      total: gradKyu + gradDan,
+      kyu: gradKyu,
+      dan: gradDan,
+      monthly: months_data,
+      list: listRes.rows.map((r) => ({
+        id: r.id,
+        exam_date: r.exam_date ? String(r.exam_date).slice(0, 10) : null,
+        student_id: r.student_id,
+        student_name: r.student_name,
+        dojo_name: r.dojo_name || null,
+        from_belt: r.old_belt_level || null,
+        to_belt: r.new_belt_level || null,
+        examiner: r.examiner_name || null,
+      })),
+    });
+  } catch (err) {
+    console.error('[networkHealth] graduacoes error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar graduações' });
+  }
+});
+
+// ── Relação de faixas (snapshot/pirâmide) ─────────────────────
+// Distribuição atual de atletas por faixa em toda a rede.
+// Caveat explícito: snapshot, não funil de coorte.
+router.get('/relacao-faixas', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  const exportCsv = req.query.export === 'csv';
+  try {
+    const r = await safeQuery(
+      `SELECT cb.belt_level, cb.belt_name,
+              COUNT(*)::int AS count
+       FROM karate_current_belt cb
+       WHERE cb.federation_id = $1
+       GROUP BY cb.belt_level, cb.belt_name
+       ORDER BY cb.belt_level ASC`,
+      [fedId]
+    );
+
+    // Agrupa em buckets conforme mockup
+    const rows = r.rows;
+    const total = rows.reduce((s, r) => s + r.count, 0);
+
+    // Bucket definitions matching the mockup pyramid
+    const BUCKETS = [
+      { faixa: 'Kyu iniciante',      long: '9º–7º Kyu · iniciante',     keys: ['branca','amarela','laranja'] },
+      { faixa: 'Kyu intermediário',  long: '6º–4º Kyu · intermediário', keys: ['verde','azul_claro','roxo'] },
+      { faixa: 'Kyu avançado',       long: '3º–1º Kyu · avançado',      keys: ['azul_escuro','marrom'] },
+      { faixa: '1º Dan',             long: '1º Dan · faixa preta',      keys: ['1dan'] },
+      { faixa: '2º Dan ou acima',    long: '2º Dan ou acima',           keys: ['2dan','3dan','4dan','5dan','6dan','7dan','8dan','9dan'] },
+    ];
+
+    const beltMap = {};
+    for (const r of rows) beltMap[r.belt_level] = r.count;
+
+    const buckets = BUCKETS.map((b) => {
+      const n = b.keys.reduce((s, k) => s + (beltMap[k] || 0), 0);
+      return { faixa: b.faixa, long: b.long, n, pct: total > 0 ? Number((n / total * 100).toFixed(1)) : 0 };
+    });
+
+    const danN = buckets.filter((b) => b.faixa.includes('Dan')).reduce((s, b) => s + b.n, 0);
+    const kyuN = total - danN;
+    const danPct = total > 0 ? Number((danN / total * 100).toFixed(1)) : 0;
+
+    if (exportCsv) {
+      const cols = [
+        { key: 'long', label: 'Faixa de graduação' },
+        { key: 'n', label: 'Praticantes' },
+        { key: 'pct', label: '% do total' },
+      ];
+      const csvRows = buckets.map((b) => ({ ...b, pct: b.pct + '%' }));
+      return sendCsv(res, 'relacao-faixas', cols, csvRows);
+    }
+
+    res.json({
+      total,
+      kyu: kyuN,
+      dan: danN,
+      dan_pct: danPct,
+      buckets,
+      raw: rows,
+      _note: 'Snapshot da distribuição atual — não é um funil de coorte.',
+    });
+  } catch (err) {
+    console.error('[networkHealth] relacao-faixas error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar relação de faixas' });
+  }
+});
+
+// ── Sumário (KPI band + todos indicadores agregados) ──────────
+// Um único endpoint para o painel carregar os 5 KPIs do topo.
+router.get('/summary', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  const season = parseInt(req.query.season) || currentSeason();
+  try {
+    // 1. Dojôs afiliados
+    const dojosRes = await safeQuery(
+      `SELECT COUNT(*)::int AS total FROM companies
+       WHERE federation_id = $1 AND vertical_active = 'karate_dojo' AND is_active = true`,
+      [fedId]
+    );
+    const dojoCount = parseInt(dojosRes.rows[0]?.total || 0, 10);
+
+    // 2. Praticantes registrados
+    const practRes = await safeQuery(
+      `SELECT COUNT(*)::int AS total FROM customers
+       WHERE federation_id = $1`,
+      [fedId]
+    );
+    const practCount = parseInt(practRes.rows[0]?.total || 0, 10);
+
+    // 3. Inadimplência %
+    const inadRes = await safeQuery(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE status = 'overdue')::int AS vencido
+       FROM karate_dojo_annuity_history
+       WHERE federation_id = $1 AND season_year = $2`,
+      [fedId, season]
+    );
+    const inadTotal = parseInt(inadRes.rows[0]?.total || 0, 10);
+    const inadVencido = parseInt(inadRes.rows[0]?.vencido || 0, 10);
+    const inadPct = inadTotal > 0 ? Number((inadVencido / inadTotal * 100).toFixed(1)) : 0;
+
+    // 4. Graduações nos últimos 8 meses
+    const gradRes = await safeQuery(
+      `SELECT COUNT(*)::int AS total FROM karate_belt_history
+       WHERE federation_id = $1
+         AND exam_date >= CURRENT_DATE - INTERVAL '8 months'`,
+      [fedId]
+    );
+    const gradTotal = parseInt(gradRes.rows[0]?.total || 0, 10);
+
+    // 5. Receita projetada próximos 90 dias
+    const projRes = await safeQuery(
+      `SELECT COALESCE(SUM(amount), 0) AS total
+       FROM karate_dojo_annuity_history
+       WHERE federation_id = $1
+         AND due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days'
+         AND status != 'paid'`,
+      [fedId]
+    );
+    const projTotal = Number(projRes.rows[0]?.total || 0);
+
+    res.json({
+      season,
+      kpis: [
+        { key: 'dojos', label: 'Dojôs afiliados', value: dojoCount, unit: '' },
+        { key: 'praticantes', label: 'Praticantes registrados', value: practCount, unit: '' },
+        { key: 'inadimplencia', label: 'Inadimplência', value: inadPct, unit: '%' },
+        { key: 'graduacoes', label: 'Graduações · 8 meses', value: gradTotal, unit: '' },
+        { key: 'receita_proj_90d', label: 'Receita proj. · 90 d', value: projTotal, unit: 'BRL' },
+      ],
+    });
+  } catch (err) {
+    console.error('[networkHealth] summary error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar sumário' });
+  }
+});
+
+// ── Relatório periódico (DESIGN-28) ──────────────────────────
+// Compõe um resumo da rede e envia por e-mail ao admin da federação.
+// POST /report/send — trigger manual; scheduler pode chamar o mesmo handler.
+router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
+  const fedId = req.params.id;
+  const season = parseInt(req.query.season) || currentSeason();
+  try {
+    // Fetch federation info
+    const fedRes = await db.query(
+      `SELECT COALESCE(trade_name, legal_name) AS name,
+              email, karate_logo_url, wa_phone_display
+       FROM companies WHERE id = $1 LIMIT 1`,
+      [fedId]
+    );
+    if (!fedRes.rows.length) {
+      return res.status(404).json({ error: 'Federação não encontrada' });
+    }
+    const fed = fedRes.rows[0];
+    const toEmail = req.body.to || fed.email;
+    if (!toEmail) {
+      return res.status(422).json({ error: 'Nenhum e-mail de destino. Passe { to: "email@..." } no body.' });
+    }
+
+    // Gather summary data (re-uses safe queries)
+    const [dojosRes, inadRes, gradRes, dormRes] = await Promise.all([
+      safeQuery(
+        `SELECT COUNT(*)::int AS total FROM companies
+         WHERE federation_id = $1 AND vertical_active = 'karate_dojo' AND is_active = true`,
+        [fedId]
+      ),
+      safeQuery(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE status = 'overdue')::int AS vencido,
+                COUNT(*) FILTER (WHERE status = 'paid')::int AS paid
+         FROM karate_dojo_annuity_history
+         WHERE federation_id = $1 AND season_year = $2`,
+        [fedId, season]
+      ),
+      safeQuery(
+        `SELECT COUNT(*)::int AS total FROM karate_belt_history
+         WHERE federation_id = $1
+           AND exam_date >= CURRENT_DATE - INTERVAL '30 days'`,
+        [fedId]
+      ),
+      safeQuery(
+        `SELECT
+           COUNT(DISTINCT cu.dojo_id) FILTER (
+             WHERE EXISTS (
+               SELECT 1 FROM karate_belt_history bh
+               WHERE bh.federation_id = $1
+                 AND bh.student_id = cu.id
+                 AND EXTRACT(YEAR FROM bh.exam_date)::int = $2
+             ) OR EXISTS (
+               SELECT 1 FROM karate_competition_entries e
+               JOIN karate_competitions kc ON kc.id = e.competition_id
+               WHERE kc.federation_id = $1 AND kc.season = $2
+                 AND e.student_id = cu.id
+             )
+           )::int AS active_dojos
+         FROM customers cu
+         WHERE cu.federation_id = $1`,
+        [fedId, season]
+      ),
+    ]);
+
+    const dojoCount = parseInt(dojosRes.rows[0]?.total || 0, 10);
+    const inadTotal = parseInt(inadRes.rows[0]?.total || 0, 10);
+    const inadVencido = parseInt(inadRes.rows[0]?.vencido || 0, 10);
+    const inadPaid = parseInt(inadRes.rows[0]?.paid || 0, 10);
+    const renewalPct = inadTotal > 0 ? Math.round(inadPaid / inadTotal * 100) : null;
+    const inadPct = inadTotal > 0 ? Math.round(inadVencido / inadTotal * 100) : null;
+    const gradLast30 = parseInt(gradRes.rows[0]?.total || 0, 10);
+    const activeDojos = parseInt(dormRes.rows[0]?.active_dojos || 0, 10);
+    const dormenteDojos = dojoCount - activeDojos;
+
+    const fedName = fed.name || 'Federação';
+    const dateStr = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric', timeZone: 'America/Sao_Paulo' });
+
+    const bodyHtml = `
+      <p style="font-size:14px;color:#44403c;line-height:22px;margin:0 0 18px;">
+        Relatório de Saúde da Rede · Temporada ${season} · ${dateStr}
+      </p>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="border-collapse:collapse;margin-bottom:18px;">
+        <tr>
+          <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:13px;color:#44403c;">
+            Dojôs afiliados
+          </td>
+          <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:14px;font-weight:700;color:#1c1917;text-align:right;">
+            ${dojoCount}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:13px;color:#44403c;">
+            Taxa de renovação (${season})
+          </td>
+          <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:14px;font-weight:700;color:#15803d;text-align:right;">
+            ${renewalPct !== null ? renewalPct + '%' : '—'}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:13px;color:#44403c;">
+            Inadimplência (${season})
+          </td>
+          <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:14px;font-weight:700;color:${inadVencido > 0 ? '#b02a2a' : '#15803d'};text-align:right;">
+            ${inadPct !== null ? inadPct + '%' : '—'}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:13px;color:#44403c;">
+            Dojôs dormentes (${season})
+          </td>
+          <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:14px;font-weight:700;color:${dormenteDojos > 0 ? '#b45309' : '#15803d'};text-align:right;">
+            ${dormenteDojos}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:13px;color:#44403c;">
+            Graduações registradas (últimos 30 d)
+          </td>
+          <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:14px;font-weight:700;color:#1c1917;text-align:right;">
+            ${gradLast30}
+          </td>
+        </tr>
+      </table>
+      <p style="font-size:12px;color:#78716c;line-height:18px;margin:0;">
+        Acesse o painel completo em Aura Karatê para detalhes por indicador e exportação CSV.
+      </p>`;
+
+    await sendKarateEmail(toEmail, {
+      subject: `Saúde da Rede ${fedName} · ${dateStr}`,
+      heading: `Saúde da Rede — ${fedName}`,
+      bodyHtml,
+      federationName: fedName,
+      federationLogoUrl: fed.karate_logo_url || null,
+      federationWhatsapp: fed.wa_phone_display || null,
+    });
+
+    res.json({
+      sent: true,
+      to: toEmail,
+      season,
+      summary: { dojoCount, renewalPct, inadPct, dormenteDojos, gradLast30 },
+    });
+  } catch (err) {
+    console.error('[networkHealth] report/send error:', err.message);
+    res.status(500).json({ error: 'Erro ao enviar relatório', detail: err.message });
+  }
+});
+
+module.exports = router;
