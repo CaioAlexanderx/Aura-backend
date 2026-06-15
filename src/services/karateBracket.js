@@ -110,7 +110,9 @@ function buildSlots(athletes, method, rng) {
 // Try to separate athletes from same dojo in round 1 via swaps.
 // Strategy: for each pair in round 1 that shares dojo, try swapping
 // one athlete with someone in another pair that doesn't create a clash.
-function separateSameDojo(slots, athletes) {
+// NOTE: named separateSameDojoSlots to avoid shadowing the boolean option
+// of the same name destructured inside generateKumiteBracket.
+function separateSameDojoSlots(slots, athletes) {
   const dojoMap = {};
   for (const a of athletes) dojoMap[a.id] = a.dojo_id || a.dojo || null;
   const n = slots.length; // always even (power of 2)
@@ -218,7 +220,7 @@ function generateKumiteBracket(athletes, opts = {}) {
   let slots = buildSlots(athletes, method, rng);
 
   if (separateSameDojo) {
-    slots = separateSameDojo(slots, athletes);
+    slots = separateSameDojoSlots(slots, athletes);
   }
 
   const rounds = buildRounds(slots);

@@ -217,6 +217,30 @@ describe('generateKumiteBracket — separateSameDojo', () => {
     // This should not throw and return a valid state
     expect(state.rounds[0]).toHaveLength(2);
   });
+
+  // ── BLOCKER 1 crash-path regression ──────────────────────────
+  // Before the fix, separateSameDojo (boolean) shadowed the module-level
+  // helper function of the same name, so the call inside
+  // generateKumiteBracket would throw:
+  //   TypeError: separateSameDojo is not a function
+  // This test exercises the exact code path that crashed.
+  test('separateSameDojo:true with same-dojo athletes — no TypeError and bracket is advanceable', () => {
+    // 4 athletes all from the same dojo: the swap logic will run and the
+    // renamed helper (separateSameDojoSlots) must be invoked without error.
+    const athletes = mkAthletes(4, () => 'singleDojo');
+    // generateKumiteBracket must not throw:
+    let state;
+    expect(() => {
+      state = generateKumiteBracket(athletes, { separateSameDojo: true, seed: 'crash-regression' });
+    }).not.toThrow();
+    // The returned bracket must be a valid BracketState with at least round 0
+    expect(state.rounds[0].length).toBeGreaterThan(0);
+    // Advance all matches to confirm advanceWinner works on this bracket
+    state = advanceAll(state);
+    const champ = getChampion(state);
+    expect(champ).not.toBeNull();
+    expect(athletes.map(a => a.id)).toContain(champ);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────
