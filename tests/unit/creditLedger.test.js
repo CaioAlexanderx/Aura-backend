@@ -219,6 +219,7 @@ describe('creditLedger.applyPayment', () => {
       { rows: pendingAR },
       { rows: [] },  // UPDATE transactions (total)
       { rows: [] },  // INSERT sale_payments
+      { rows: [{ name: 'Cliente Teste' }] }, // SELECT name (getWho — lazy, ramo legado)
       { rows: [] },  // INSERT Recebido legacy (remaining=100)
       { rows: [] },  // SELECT installments FOR UPDATE (vazio)
       { rows: [] },  // UPDATE credit_used
@@ -234,9 +235,11 @@ describe('creditLedger.applyPayment', () => {
     expect(result.settled_receivables[0].partial).toBe(false);
     expect(result.legacy_amount).toBe(100);
 
-    const legacyCall = client.query.mock.calls[4];
+    const legacyCall = client.query.mock.calls[5];
     expect(legacyCall[0]).toMatch(/Crediario - Recebido/i);
     expect(legacyCall[0]).toMatch(/confirmed/i);
+    // descricao agora usa o NOME do cliente (item 5), sem uuid nem "saldo legado".
+    expect(legacyCall[1]).toContain('Recebimento crediario - Cliente Teste');
   });
 
   test('idempotencyKey: usa ON CONFLICT DO NOTHING', async () => {
@@ -292,17 +295,18 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
     const client = makeMockClient([
       { rows: [txRow] },     // 0 INSERT payment (novo)
       { rows: openInst },    // 1 SELECT parcelas abertas (engine de encargos)
-      { rows: [] },          // 2 INSERT transactions 'Encargos'
-      { rows: [] },          // 3 UPDATE credit_installments (stamp late_fee/late_interest)
-      { rows: [] },          // 4 INSERT sale_payments (encargos no caixa)
-      { rows: pendingAR },   // 5 SELECT A Receber pendentes (FIFO principal)
-      { rows: [] },          // 6 UPDATE transactions (parcial)
-      { rows: [] },          // 7 INSERT sale_payments (principal)
-      { rows: [] },          // 8 INSERT rest A Receber
-      { rows: fifoInst },    // 9 SELECT installments FOR UPDATE
-      { rows: [] },          // 10 UPDATE covered_amount
-      { rows: [] },          // 11 UPDATE credit_used
-      { rows: [balRow] },    // 12 SELECT balance
+      { rows: [{ name: 'Cliente Teste' }] }, // 2 SELECT name (getWho — lazy, ramo encargos)
+      { rows: [] },          // 3 INSERT transactions 'Encargos'
+      { rows: [] },          // 4 UPDATE credit_installments (stamp late_fee/late_interest)
+      { rows: [] },          // 5 INSERT sale_payments (encargos no caixa)
+      { rows: pendingAR },   // 6 SELECT A Receber pendentes (FIFO principal)
+      { rows: [] },          // 7 UPDATE transactions (parcial)
+      { rows: [] },          // 8 INSERT sale_payments (principal)
+      { rows: [] },          // 9 INSERT rest A Receber
+      { rows: fifoInst },    // 10 SELECT installments FOR UPDATE
+      { rows: [] },          // 11 UPDATE covered_amount
+      { rows: [] },          // 12 UPDATE credit_used
+      { rows: [balRow] },    // 13 SELECT balance
     ]);
 
     const result = await creditLedger.applyPayment(client, {
@@ -322,13 +326,13 @@ describe('creditLedger.applyPayment — encargos (F2)', () => {
     expect(result.charges_detail[0].late_fee).toBeCloseTo(2.0, 2);
     expect(result.charges_detail[0].late_interest).toBeCloseTo(0.93, 2);
 
-    const encargosCall = client.query.mock.calls[2];
+    const encargosCall = client.query.mock.calls[3];
     expect(encargosCall[0]).toMatch(/Crediario - Encargos/i);
     expect(encargosCall[0]).toMatch(/confirmed/i);
     expect(encargosCall[1][1]).toBeCloseTo(2.93, 2);
     expect(encargosCall[1]).toContain('credit-charges-' + txRow.id);
 
-    const arUpdateCall = client.query.mock.calls[6];
+    const arUpdateCall = client.query.mock.calls[7];
     expect(arUpdateCall[0]).toMatch(/UPDATE transactions/i);
     expect(parseFloat(arUpdateCall[1][1])).toBeCloseTo(47.07, 2);
   });
