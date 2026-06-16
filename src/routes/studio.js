@@ -22,6 +22,9 @@
 // 30/05/2026 (Camada 1 P1): require_deposit_for_production adicionado ao
 // whitelist de settings — permite FE salvar via PATCH /studio/settings.
 // 01/06/2026: guide_dismissed adicionado ao whitelist (bug fix).
+// 10/06/2026 (Onda 0 · 0.5): pix_key adicionado ao whitelist de settings —
+//   o charge-link de sinal (studioPayments.js) LÊ studio_settings->>'pix_key',
+//   mas o PATCH dropava a chave. Fix de inconsistência, sem migration.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -637,6 +640,10 @@ const ALLOWED_STUDIO_SETTINGS = [
   'require_deposit_for_production',  // boolean — exige deposit_paid=true antes de in_production
   // UX: guia da home Studio (dismissível pelo usuário — bug fix 01/06/2026)
   'guide_dismissed',              // boolean — oculta o guide card após o usuário fechar
+  // Camada 1 Fase C: chave Pix do lojista — o charge-link de sinal LÊ daqui
+  // (studio_settings->>'pix_key'). Sem isto o PATCH dropava a chave e o link
+  // de cobrança degradava pro fallback "entre em contato". (Onda 0 · 0.5)
+  'pix_key',                      // string — chave Pix da empresa (sinal/charge-link)
 ];
 
 router.get('/settings', async function(req, res) {
