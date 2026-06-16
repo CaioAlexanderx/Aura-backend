@@ -77,6 +77,8 @@ router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInsta
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditRefund'));
 // Item 3 (13/06/2026): unificacao de carne -- GET+POST /credit/customers/:cid/accounts/:accountId/unify
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditUnify'));
+// Item 2 (16/06/2026): renegociacao de parcelas -- GET+POST /credit/customers/:cid/accounts/:accountId/reschedule
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditReschedule'));
 // F2-2B (29/05/2026): preview 360 + quick-customer
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditPreview'));
 // F2-2D (29/05/2026): a receber crediario no Financeiro
