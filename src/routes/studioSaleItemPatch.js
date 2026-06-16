@@ -18,6 +18,8 @@
 //              listar tudo (Personalizáveis + Não personalizáveis). Default
 //              continua filtrando is_personalizable=true (PDV Studio + tela
 //              personalizáveis sem mudança).
+// 16/06/2026 - studio_storefront_visible exposto na lista pro toggle de
+//              visibilidade na Loja Virtual (configurador do produto).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -69,7 +71,8 @@ router.get('/products', async (req, res) => {
     params.push(limit);
     const { rows } = await db.query(
       `SELECT id, name, description, price, image_url, category, stock_qty,
-              is_personalizable, customization_config, company_id, created_at
+              is_personalizable, customization_config, company_id, created_at,
+              studio_storefront_visible
          FROM products
          ${where}
         ORDER BY name ASC
@@ -87,6 +90,7 @@ router.get('/products', async (req, res) => {
         stock_qty: parseFloat(r.stock_qty) || 0,
         is_personalizable: !!r.is_personalizable,
         customization_config: r.customization_config,
+        studio_storefront_visible: r.studio_storefront_visible !== false,
         stock_company_id: r.company_id,
       })),
       count: rows.length,
