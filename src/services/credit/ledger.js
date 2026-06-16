@@ -348,17 +348,24 @@ async function applyPayment(client, {
 
   // --- Comunicacao clara no Financeiro (16/06, feedback Caio) ---
   // As descricoes dos lancamentos usam o NOME do cliente -- o lojista nao
-  // decodifica UUID. Lookup defensivo: cai no id curto se a query falhar.
-  // A DATA do pagamento ja vai no paid_at da transacao (coluna do Financeiro).
-  let _custName = null;
-  try {
-    const { rows: _cn } = await client.query(
-      `SELECT name FROM customers WHERE id = $1 AND company_id = $2`,
-      [customerId, companyId]
-    );
-    _custName = _cn[0]?.name || null;
-  } catch (_) {}
-  const _who = _custName || ('cliente ' + String(customerId).slice(0, 8));
+  // decodifica UUID. LAZY + memoizado: so consulta o customers QUANDO uma
+  // descricao com nome e efetivamente emitida (encargos / "Recebido" legado).
+  // Assim o caminho comum (liquidacao casada de A Receber) nao ganha query
+  // nova. Cai no id curto se a query falhar. A DATA ja vai no paid_at.
+  let _whoCache;
+  async function getWho() {
+    if (_whoCache !== undefined) return _whoCache;
+    let nm = null;
+    try {
+      const { rows: _cn } = await client.query(
+        `SELECT name FROM customers WHERE id = $1 AND company_id = $2`,
+        [customerId, companyId]
+      );
+      nm = _cn[0]?.name || null;
+    } catch (_) {}
+    _whoCache = nm || ('cliente ' + String(customerId).slice(0, 8));
+    return _whoCache;
+  }
 
   // --- F2 PR2: MATERIALIZACAO DE ENCARGOS (mora/multa) ---
   // GATED: so executa quando config.late_charges_enabled === true E o pagamento
@@ -443,7 +450,7 @@ async function applyPayment(client, {
         [
           companyId,
           chargesPaid,
-          `Encargos crediario - ${_who}`,
+          `Encargos crediario - ${await getWho()}`,
           createdBy,
           'credit-charges-' + txRow.id,
           paidAt,
@@ -636,7 +643,7 @@ async function applyPayment(client, {
       [
         companyId,
         parseFloat(remaining.toFixed(2)),
-        `Recebimento crediario - ${_who}`,
+        `Recebimento crediario - ${await getWho()}`,
         createdBy,
         'credit-payment-' + txRow.id + '-legacy',
         fifoMethod,
