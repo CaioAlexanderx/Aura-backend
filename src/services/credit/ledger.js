@@ -346,6 +346,20 @@ async function applyPayment(client, {
     };
   }
 
+  // --- Comunicacao clara no Financeiro (16/06, feedback Caio) ---
+  // As descricoes dos lancamentos usam o NOME do cliente -- o lojista nao
+  // decodifica UUID. Lookup defensivo: cai no id curto se a query falhar.
+  // A DATA do pagamento ja vai no paid_at da transacao (coluna do Financeiro).
+  let _custName = null;
+  try {
+    const { rows: _cn } = await client.query(
+      `SELECT name FROM customers WHERE id = $1 AND company_id = $2`,
+      [customerId, companyId]
+    );
+    _custName = _cn[0]?.name || null;
+  } catch (_) {}
+  const _who = _custName || ('cliente ' + String(customerId).slice(0, 8));
+
   // --- F2 PR2: MATERIALIZACAO DE ENCARGOS (mora/multa) ---
   // GATED: so executa quando config.late_charges_enabled === true E o pagamento
   // e novo (isNewPayment). Caso contrario NENHUMA query nova roda e o
@@ -429,7 +443,7 @@ async function applyPayment(client, {
         [
           companyId,
           chargesPaid,
-          `Encargos crediario - cliente ${customerId}`,
+          `Encargos crediario - ${_who}`,
           createdBy,
           'credit-charges-' + txRow.id,
           paidAt,
@@ -622,7 +636,7 @@ async function applyPayment(client, {
       [
         companyId,
         parseFloat(remaining.toFixed(2)),
-        `Recebimento crediario - cliente ${customerId} (saldo legado)`,
+        `Recebimento crediario - ${_who}`,
         createdBy,
         'credit-payment-' + txRow.id + '-legacy',
         fifoMethod,
