@@ -94,7 +94,7 @@ async function resolveDefaultContext(userId, dbConn) {
     `SELECT DISTINCT ON (c.id)
             c.id, c.legal_name, c.plan, c.onboarding_step,
             c.trial_ends_at, c.module_overrides, c.billing_status,
-            c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
+            c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
             c.federation_id,
             c.is_primary, c.created_at,
             CASE
@@ -161,6 +161,7 @@ function shapeCompany(company, fallbackMemberRole) {
     billing_status: company.billing_status || null,
     access_code_used: !!(company.access_code_used),
     vertical_active: company.vertical_active || null,
+    vertical: company.vertical || null,
     ai_enabled: !!(company.ai_enabled),
     ai_consent_at: company.ai_consent_at || null,
     member_role,
@@ -226,7 +227,7 @@ router.post('/register', async (req, res) => {
       const cleanCnpj = cnpj.replace(/\D/g, '');
       if (cleanCnpj.length === 14 || cleanCnpj.length === 11) {
         const { rows: existingCompanies } = await client.query(
-          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, ai_enabled, ai_consent_at, federation_id FROM companies WHERE cnpj = $1',
+          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id FROM companies WHERE cnpj = $1',
           [cleanCnpj]
         );
         if (existingCompanies.length > 0) {
@@ -243,7 +244,7 @@ router.post('/register', async (req, res) => {
       isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
       const { rows: [newCompany] } = await client.query(
-        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6, $7) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, ai_enabled, ai_consent_at, federation_id',
+        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6, $7) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id',
         [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null]
       );
       company = newCompany;
@@ -445,7 +446,7 @@ router.post('/me', requireAuth, async (req, res) => {
       const { rows: cRows } = await db.query(
         `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
                 c.trial_ends_at, c.module_overrides, c.billing_status,
-                c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
+                c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
                 c.federation_id,
                 CASE
                   WHEN c.owner_id = $1 THEN 'owner'
