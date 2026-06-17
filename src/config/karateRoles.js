@@ -75,17 +75,20 @@ const KARATE_FEATURES = Object.freeze({
 // resolveDefaultContext / /auth/me / /auth/register e devolve o
 // federationId real + o papel karatê normalizado.
 //
-// Espera os campos: { id, vertical_active, federation_id, member_role }.
+// Espera os campos: { id, vertical, federation_id, member_role }.
 //
-//  - federação (vertical_active='karate_federation') → federation_id = company.id
-//  - dojô       (vertical_active='karate_dojo')       → federation_id = company.federation_id (pai)
-//  - outro vertical                                   → { null, null }
+//  - federação (vertical='karate_federation') → federation_id = company.id
+//  - dojô       (vertical='karate_dojo')       → federation_id = company.federation_id (pai)
+//  - outro vertical                            → { null, null }
 //  - member_role 'owner' vira federation_admin (federação) / dojo_owner (dojô);
 //    demais papéis vêm crus de company_members.role_label.
+//
+// Canônico = companies.vertical (migration 147). Mantém fallback para
+// vertical_active por retrocompatibilidade (callers/tests antigos).
 function resolveKarateContext(company) {
   const empty = { federation_id: null, karate_role: null };
   if (!company) return empty;
-  const v = company.vertical_active;
+  const v = company.vertical || company.vertical_active;
   if (v !== 'karate_federation' && v !== 'karate_dojo') return empty;
   const isFederation = v === 'karate_federation';
   const federation_id = isFederation

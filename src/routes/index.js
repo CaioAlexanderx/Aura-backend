@@ -38,6 +38,7 @@ router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminAccessCodes'));
 router.use('/admin', require('./adminPlan'));
 router.use('/admin', require('./adminVertical'));
+router.use('/admin', require('./adminKarate'));
 router.use('/admin', require('./adminSubVertical'));
 router.use('/admin', require('./adminSupport'));
 router.use('/admin', require('./adminMetrics'));
