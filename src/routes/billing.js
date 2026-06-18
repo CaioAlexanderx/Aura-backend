@@ -12,10 +12,13 @@
 //              próximas mensalidades a partir do mês seguinte. Status active só
 //              quando primeira cobrança CONFIRMED/RECEIVED.
 // PRICING 21/04: Negocio 199->169.90, Expansao 299->269.90
+// PRICING 18/06: Negocio 169.90->169, Expansao 269.90->269 (alinhado a /planos)
 // 15/06/2026: acessos extras (R$19/seat) agora entram no value cobrado
 //             (plano + 19*extra_seats_granted), tanto na 1a cobrança quanto
 //             na subscription recorrente. Cálculo em services/billingPricing.
 //             asaas()/PLANS/getPlanValue movidos pra services compartilhados.
+// 18/06/2026: PIX anual agora é subscription MONTHLY com endDate=12 meses
+//             (valor mensal descontado). Bloco 'Pix a vista' removido.
 // ============================================================
 
 const express = require('express');
@@ -213,36 +216,6 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     const tomorrowStr = tomorrow.toISOString().split('T')[0];
 
     // ════════════════════════════════════════════════════════════════
-    // PIX Annual: single upfront payment (mantido)
-    // ════════════════════════════════════════════════════════════════
-    if (billing_type === 'PIX' && cycle === 'annual') {
-      const payment = await asaas('POST', '/payments', {
-        customer: customerId,
-        billingType: 'PIX',
-        value: value,
-        dueDate: tomorrowStr,
-        description: PLANS[plan].name + ' - Anual (Pix a vista)' + seatsSuffix,
-        externalReference: company.id,
-      });
-
-      let pixData = null;
-      try { pixData = await asaas('GET', '/payments/' + payment.id + '/pixQrCode'); } catch {}
-
-      await db.query(
-        'UPDATE companies SET plan=$1, billing_cycle=\'annual\', billing_status=\'pending\', asaas_pending_payment_id=$2, updated_at=NOW() WHERE id=$3',
-        [plan, payment.id, company.id]
-      );
-
-      return res.status(201).json({
-        payment_id: payment.id, plan: plan, cycle: 'annual', value: value, billing_type: 'PIX',
-        extra_seats: extraSeats,
-        pix_qr_code: pixData?.encodedImage || null,
-        pix_copy_paste: pixData?.payload || null,
-        pix_expiration: pixData?.expirationDate || null,
-      });
-    }
-
-    // ════════════════════════════════════════════════════════════════
     // CREDIT_CARD: cobrar PRIMEIRO MÊS imediato + criar subscription
     // pra recorrência a partir do mês seguinte. Só marca billing_status=
     // 'active' se a primeira cobrança vier CONFIRMED/RECEIVED do Asaas.
@@ -376,8 +349,10 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     }
 
     // ════════════════════════════════════════════════════════════════
-    // PIX Monthly: subscription com nextDueDate=amanhã (cliente paga
-    // o Pix gerado, webhook ativa quando confirma). Mantido como estava.
+    // PIX (mensal ou anual): subscription MONTHLY com nextDueDate=amanhã.
+    // Para anual: endDate limita a 12 mensalidades; valor ja vem descontado
+    // de billingPricing.applyCycle (ex: Negocio = R$140,83/mes).
+    // Cliente paga o Pix gerado; webhook ativa quando confirma.
     // ════════════════════════════════════════════════════════════════
     const subscriptionBody = {
       customer: customerId,
@@ -464,6 +439,8 @@ router.post('/generate-pix/:paymentId', requireAuth, async (req, res) => {
 });
 
 // GET /billing/plans
+// Expõe valores mensais e anuais para uso pelo frontend e terceiros.
+// annual_total = custo total pago ao longo dos 12 meses (informativo).
 router.get('/plans', async (req, res) => {
   const plans = Object.entries(PLANS).map(function(entry) {
     var key = entry[0];
@@ -472,7 +449,7 @@ router.get('/plans', async (req, res) => {
     return {
       key: key, name: cfg.name, monthly: cfg.monthly,
       annual_monthly: annualMonthly,
-      annual_pix_total: Math.round(cfg.monthly * 12 * (1 - ANNUAL_DISCOUNT) * 100) / 100,
+      annual_total: Math.round(annualMonthly * 12 * 100) / 100,
       annual_discount: Math.round(ANNUAL_DISCOUNT * 100) + '%',
     };
   });

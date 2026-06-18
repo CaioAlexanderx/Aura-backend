@@ -9,10 +9,15 @@
 // Regra de acessos extras: R$19/mes por seat acima do plano
 // (SEAT_PRICE_BRL em memberSeats). O seat segue o MESMO tratamento de
 // ciclo do plano:
-//   - mensal           → R$19 cheio por mes
-//   - anual no cartao   → R$19 com o mesmo desconto mensal do plano
-//                         (assinatura mensal descontada, 2 meses gratis)
-//   - anual no Pix      → R$19 x 12 com desconto (cobranca unica a vista)
+//   - mensal               → R$19 cheio por mes
+//   - anual (PIX ou cartao) → R$19 com desconto mensal (2 meses gratis)
+//                             (assinatura mensal descontada, endDate 12 meses)
+//
+// 18/06/2026: precos alinhados a tabela app.getaura.com.br/planos
+//   Negocio 169.90→169, Expansao 269.90→269 (valores sem centavos).
+//   PIX anual unificado com cartao anual: assinatura mensal descontada,
+//   endDate 12 meses controla duracao. Branch 'Pix a vista' removida.
+//   Negocio anual: 169 × (5/6) = R$140,83/mes ✓
 //
 // getPlanValue() reproduz EXATAMENTE o comportamento que existia em
 // billing.js (validado por teste). getTotalValue() = plano + seats.
@@ -22,8 +27,8 @@ const { SEAT_PRICE_BRL } = require('./memberSeats');
 
 const PLANS = {
   essencial: { name: 'Aura Essencial', monthly: 89 },
-  negocio:   { name: 'Aura Negocio',   monthly: 169.90 },
-  expansao:  { name: 'Aura Expansao',  monthly: 269.90 },
+  negocio:   { name: 'Aura Negocio',   monthly: 169 },
+  expansao:  { name: 'Aura Expansao',  monthly: 269 },
 };
 
 // 2 meses gratis: paga 10, leva 12 — aplica no Pix e no Cartao
@@ -34,13 +39,10 @@ function round2(v) {
 }
 
 // Aplica a matematica de ciclo a um valor MENSAL base (plano ou seats).
+// Anual sempre cobra mensalmente com valor descontado (PIX e cartao iguais).
+// O endDate em 12 meses controla a duracao da assinatura no Asaas.
 function applyCycle(monthlyAmount, cycle, billingType) {
   if (cycle === 'annual') {
-    if (billingType === 'PIX') {
-      // Pix anual: pagamento unico a vista com desconto de 2 meses
-      return round2(monthlyAmount * 12 * (1 - ANNUAL_DISCOUNT));
-    }
-    // Cartao anual: assinatura mensal com valor descontado + endDate em 12 meses
     return round2(monthlyAmount * (1 - ANNUAL_DISCOUNT));
   }
   return round2(monthlyAmount);
