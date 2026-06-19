@@ -137,9 +137,21 @@ router.use('/karate', require('./karateFederation'));
 router.use('/federation/:id/practitioners/import', require('./karateImport'));
 router.use('/federation/:id/practitioners',        require('./karatePractitioners'));
 router.use('/federation/:id/dojos',                require('./karateDojos'));
+// Keystone (Canal B): gestão do link fixo do dojô pela federação.
+// Montado ao lado de karateDojos (paths /:dojoId/portal-access não colidem).
+router.use('/federation/:id/dojos',                require('./karateDojoAccess'));
 // dashboard e belt-distribution são expostos pelo karateFederation router
 // mas precisam do param :id, então também montamos aqui:
 router.use('/federation/:id', require('./karateFederation'));
+
+// ── AURA KARATÊ — Keystone do dojô (Canal B / portal SEM Aura) ──
+// Migration 186. Auth = Guard B (link fixo), NÃO JWT de empresa.
+//   GET  /federation/:id/dojo/me            — dados do próprio dojô
+//   GET  /federation/:id/dojo/practitioners — lista nominal read-only
+//   GET  /federation/:id/dojo/annuity       — status + histórico de anuidade
+//   POST /federation/:id/dojo/annuity/pix   — PIX self-service da anuidade
+//   GET  /federation/:id/dojo/certificates  — status dos próprios certificados
+router.use('/federation/:id/dojo', require('./karateDojoPortal'));
 
 // ── AURA KARATÊ — Track B (backend financeiro + anuidades) ──
 router.use('/federation/:id/financial', require('./karateAnnuities'));
