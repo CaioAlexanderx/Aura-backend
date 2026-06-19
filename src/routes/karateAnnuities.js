@@ -405,6 +405,34 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
       [paidAt, intent.annuity_history_id]
     );
 
+    // ── Hook de ativação de filiação (idempotente, migration 186) ──
+    // Se esta anuidade era a 1ª de uma filiação aguardando pagamento, a
+    // confirmação ATIVA o dojô (is_active=true + affiliation_since) e fecha a
+    // solicitação. Defensivo 42P01: se a tabela ainda não existe, o confirm
+    // de anuidade comum segue normalmente.
+    try {
+      const aff = await client.query(
+        `UPDATE karate_affiliation_requests
+            SET status = 'activated', activated_at = NOW(), updated_at = NOW()
+          WHERE federation_id = $1 AND dojo_id = $2
+            AND annuity_history_id = $3 AND status = 'awaiting_payment'
+          RETURNING dojo_id`,
+        [federationId, intent.dojo_id, intent.annuity_history_id]
+      );
+      if (aff.rows.length) {
+        await client.query(
+          `UPDATE companies
+              SET is_active = true,
+                  affiliation_since = COALESCE(affiliation_since, CURRENT_DATE),
+                  updated_at = NOW()
+            WHERE id = $1 AND vertical = 'karate_dojo'`,
+          [intent.dojo_id]
+        );
+      }
+    } catch (e) {
+      if (e.code !== '42P01') throw e;
+    }
+
     // Reconcilia transaction
     if (intent.transaction_id) {
       await client.query(

@@ -118,6 +118,11 @@ router.use('/orcamento',         require('./studioQuotePublic'));
 //   POST /public/karate/:slug/inscricao/:eventId      — inscrição (exame/curso real; competição 501)
 router.use('/public/karate', require('./karatePublic'));
 
+// Solicitação de filiação self-service (microsite). Router separado (mantém
+// karatePublic.js intacto). Migration 186.
+//   POST /public/karate/:slug/affiliation-request
+router.use('/public/karate', require('./karateAffiliationsPublic'));
+
 // ── AURA KARATÊ — Track E (público: ranking embellável) ──
 // Router separado (mantém karatePublic.js intacto). Migrations 168 + 169.
 //   GET /public/karate/:slug/seasons                  — temporadas/categorias
@@ -152,6 +157,15 @@ router.use('/federation/:id', require('./karateFederation'));
 //   POST /federation/:id/dojo/annuity/pix   — PIX self-service da anuidade
 //   GET  /federation/:id/dojo/certificates  — status dos próprios certificados
 router.use('/federation/:id/dojo', require('./karateDojoPortal'));
+
+// ── AURA KARATÊ — Filiação de dojô (pré-aceite antes do pagamento) ──
+// Migration 186. A SOLICITAÇÃO é pública (karateAffiliationsPublic, abaixo);
+// aqui ficam a avaliação/aprovação/recusa pela federação.
+//   GET  /federation/:id/affiliation-requests            (read)
+//   GET  /federation/:id/affiliation-requests/:reqId     (read)
+//   POST /federation/:id/affiliation-requests/:reqId/approve (adminOnly)
+//   POST /federation/:id/affiliation-requests/:reqId/reject  (adminOnly)
+router.use('/federation/:id', require('./karateAffiliations'));
 
 // ── AURA KARATÊ — Track B (backend financeiro + anuidades) ──
 router.use('/federation/:id/financial', require('./karateAnnuities'));
