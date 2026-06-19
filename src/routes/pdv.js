@@ -25,6 +25,12 @@
 //   - DELETE /sale agora reverte o crediario via cancelCreditSale (remove os
 //     -rest- de pagamento parcial, antes orfaos). O bloco inline so cuidava da
 //     A Receber com a key exata.
+// 19/06/2026 (troca-de-troca):
+//   - sales-for-troca e sales-by-product-barcode deixam de exigir
+//     type='sale': uma troca nao-cancelada agora e origem elegivel (cliente
+//     troca de novo um item recebido numa troca anterior). O motor trocaV2
+//     ja aceita origem type='troca'. Ambos expoem origin_type/is_troca_origin
+//     pra UI avisar antes de confirmar.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -667,12 +673,15 @@ router.post('/troca/:trocaSaleId/reemitir-fiscal', async (req, res) => {
 });
 
 // ===== GET /sales-for-troca =====
+// 19/06/2026: removido o filtro type='sale' -> uma troca nao-cancelada agora e
+// origem elegivel (cliente troca de novo um item recebido em troca anterior).
+// origin_type/is_troca_origin alimentam o aviso na UI.
 router.get('/sales-for-troca', async (req, res) => {
   const { q, customer_id, order_number, nfce_chave, days=90, limit=50 } = req.query;
   const winDays = Math.max(1, Math.min(parseInt(days,10)||90, 365));
   const lim = Math.max(1, Math.min(parseInt(limit,10)||50, 200));
   const cond = [
-    "s.status!='cancelled'", "COALESCE(s.type,'sale')='sale'",
+    "s.status!='cancelled'",
     `s.created_at>=NOW()-INTERVAL '${winDays} days'`,
     `(s.company_id=$1 OR EXISTS (
        SELECT 1 FROM companies c2 WHERE c2.id=s.company_id
@@ -707,6 +716,8 @@ router.get('/sales-for-troca', async (req, res) => {
               s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
               s.seller_id, s.seller_name,
               (s.company_id!=$1) AS is_cross_filial,
+              COALESCE(s.type,'sale') AS origin_type,
+              (COALESCE(s.type,'sale')='troca') AS is_troca_origin,
               EXISTS (SELECT 1 FROM nfce_emissions nf WHERE nf.sale_id=s.id AND nf.tipo='nfce' AND nf.status='autorizada') AS has_nfce,
               COUNT(si.id) AS item_count,
               COALESCE(json_agg(json_build_object(
@@ -732,6 +743,8 @@ router.get('/sales-for-troca', async (req, res) => {
 });
 
 // ===== GET /sales-by-product-barcode =====
+// 19/06/2026: removido o filtro type='sale' no eligible_sales -> trocas nao-
+// canceladas tambem elegiveis. origin_type/is_troca_origin alimentam o aviso.
 router.get('/sales-by-product-barcode', async (req, res) => {
   const { barcode, days=90, limit=50 } = req.query;
   const raw = String(barcode||'').trim();
@@ -756,7 +769,7 @@ router.get('/sales-by-product-barcode', async (req, res) => {
          JOIN sale_items si ON si.sale_id=s.id
          JOIN matched_products mp ON mp.product_id=si.product_id
            AND (mp.variant_id IS NULL OR mp.variant_id=si.variant_id)
-         WHERE s.status!='cancelled' AND COALESCE(s.type,'sale')='sale'
+         WHERE s.status!='cancelled'
            AND s.created_at>=NOW()-INTERVAL '${winDays} days'
            AND (s.company_id=$1 OR EXISTS (
              SELECT 1 FROM companies c2 WHERE c2.id=s.company_id
@@ -767,6 +780,8 @@ router.get('/sales-by-product-barcode', async (req, res) => {
               s.company_id, COALESCE(comp.trade_name,comp.legal_name) AS company_name,
               s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
               s.seller_id, s.seller_name, (s.company_id!=$1) AS is_cross_filial,
+              COALESCE(s.type,'sale') AS origin_type,
+              (COALESCE(s.type,'sale')='troca') AS is_troca_origin,
               EXISTS (SELECT 1 FROM nfce_emissions nf WHERE nf.sale_id=s.id AND nf.tipo='nfce' AND nf.status='autorizada') AS has_nfce,
               COUNT(si.id) AS item_count,
               COALESCE(json_agg(json_build_object(
