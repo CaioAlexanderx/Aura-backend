@@ -36,17 +36,10 @@
 //   crediario, chamamos creditLedger.cancelCreditSale (apaga debit + A Receber +
 //   splits + cancela parcelas + recalcula credit_used).
 //
-// 19/06/2026 — VISIBILIDADE DE GRUPO (cross-CNPJ) na listagem/detalhe:
-//   Premissa Davi: comprou na Villa Branca, precisa enxergar/atender na Matriz.
-//   A troca (pdv.js) ja era group-aware; aqui a pagina Vendas passa a ser tambem.
-//   - buildWhere({ groupScope }) replica a clausula group_root (billing_owner)
-//     ja usada em products.js / pdv.js.
-//   - LISTAGEM + COUNT: groupScope=true (ve vendas do grupo). Expoe
-//     company_id / company_name / is_cross_filial por linha.
-//   - STATS (revenue/avg_ticket/contagens): groupScope=false (POR EMPRESA),
-//     pra nao duplicar receita entre CNPJs do grupo.
-//   - GET /:sale_id: leitura group-aware (abrir venda cross-filial pela lista).
-//     PATCH/cancel seguem company-scoped (muta so no proprio CNPJ).
+// 19/06/2026 — REVERT do #221: a pagina Vendas volta a ser POR EMPRESA.
+//   Cada CNPJ ve apenas suas proprias vendas aqui. A visibilidade cross-CNPJ
+//   fica SOMENTE no sistema de trocas (pdv.js sales-for-troca /
+//   sales-by-product-barcode), que ja era group-aware.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -55,23 +48,9 @@ const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const creditLedger = require('../services/creditLedger');
 
-// Clausula de visibilidade de grupo (bidirecional via group_root). Espelha
-// products.js (listVisibilityWhere) e os lookups de troca em pdv.js. Usa apenas
-// $1 (= companyId) — sem novos parametros — entao os `vals` continuam iguais
-// entre a versao group e a company-only.
-const GROUP_SCOPE_SQL =
-  '(s.company_id = $1 OR EXISTS (' +
-  '  SELECT 1 FROM companies c2' +
-  '   WHERE c2.id = s.company_id' +
-  '     AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)' +
-  '       = COALESCE(NULLIF((SELECT billing_owner_company_id FROM companies WHERE id = $1), $1), $1)' +
-  '))';
-
 // Constroi clausula WHERE dinamica baseada nos filtros recebidos.
-// opts.groupScope=true -> ve vendas de todo o grupo de billing; senao so a empresa.
-function buildWhere(companyId, filters, opts) {
-  const groupScope = !!(opts && opts.groupScope);
-  const conds = [groupScope ? GROUP_SCOPE_SQL : 's.company_id = $1'];
+function buildWhere(companyId, filters) {
+  const conds = ['s.company_id = $1'];
   const vals = [companyId];
   let i = 2;
 
@@ -130,10 +109,7 @@ router.get('/', asyncHandler(async (req, res) => {
   } = req.query;
 
   const filters = { date_from, date_to, status, seller_id, customer_id, q, product_barcode };
-  // Listagem/contagem: visibilidade de grupo (cross-CNPJ).
-  const grp = buildWhere(companyId, filters, { groupScope: true });
-  // Stats: POR EMPRESA (nao duplica receita entre CNPJs do grupo).
-  const own = buildWhere(companyId, filters, { groupScope: false });
+  const { conds, vals } = buildWhere(companyId, filters);
 
   const limitNum = Math.min(parseInt(limit) || 50, 200);
   const offsetNum = parseInt(offset) || 0;
@@ -142,36 +118,31 @@ router.get('/', asyncHandler(async (req, res) => {
     'SELECT COUNT(*)::int AS total FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
-    'WHERE ' + grp.conds;
-  const { rows: countRows } = await pool.query(countQuery, grp.vals);
+    'WHERE ' + conds;
+  const { rows: countRows } = await pool.query(countQuery, vals);
   const total = countRows[0].total;
 
   // 02/06/2026: lista expoe net_amount/returned_value pra troca (lista mostra liquido).
   // net = total_amount (novos) - SUM(troca_returned_items) quando type='troca'.
-  // 19/06/2026: expoe company_id/company_name/is_cross_filial (visibilidade de grupo).
   const listQuery =
     'SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status, ' +
     "       COALESCE(s.type, 'sale') AS type, s.exchange_of_sale_id, " +
     '       s.cancelled_at, s.created_at, ' +
     '       s.customer_id, c.name AS customer_name, ' +
     '       s.seller_id, COALESCE(s.seller_name, e.name) AS seller_name, s.employee_id, ' +
-    '       s.company_id, COALESCE(comp.trade_name, comp.legal_name) AS company_name, ' +
-    '       (s.company_id != $1) AS is_cross_filial, ' +
     '       (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS items_count, ' +
     '       (SELECT COALESCE(SUM(tri.quantity * tri.unit_price), 0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) AS returned_value, ' +
     "       (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS transaction_id " +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
-    'LEFT JOIN companies comp ON comp.id = s.company_id ' +
-    'WHERE ' + grp.conds + ' ' +
+    'WHERE ' + conds + ' ' +
     'ORDER BY s.created_at DESC ' +
-    'LIMIT $' + (grp.vals.length + 1) + ' OFFSET $' + (grp.vals.length + 2);
-  const { rows } = await pool.query(listQuery, [...grp.vals, limitNum, offsetNum]);
+    'LIMIT $' + (vals.length + 1) + ' OFFSET $' + (vals.length + 2);
+  const { rows } = await pool.query(listQuery, [...vals, limitNum, offsetNum]);
 
   // Stats agregados: receita conta troca pelo LIQUIDO (novos - devolvidos),
   // venda normal pelo total_amount. (Antes somava total_amount cheio da troca.)
-  // 19/06/2026: usa `own` (POR EMPRESA) — nao group — pra nao duplicar receita.
   const statsQuery =
     'SELECT ' +
     '  COUNT(*)::int AS total_sales, ' +
@@ -186,8 +157,8 @@ router.get('/', asyncHandler(async (req, res) => {
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
-    'WHERE ' + own.conds;
-  const { rows: statsRows } = await pool.query(statsQuery, own.vals);
+    'WHERE ' + conds;
+  const { rows: statsRows } = await pool.query(statsQuery, vals);
   const stats = statsRows[0];
 
   res.json({
@@ -216,10 +187,6 @@ router.get('/', asyncHandler(async (req, res) => {
         seller: { id: r.seller_id || r.employee_id || null, name: r.seller_name || null },
         items_count: r.items_count,
         transaction_id: r.transaction_id,
-        // 19/06/2026: origem da venda (visibilidade de grupo)
-        company_id: r.company_id,
-        company_name: r.company_name || null,
-        is_cross_filial: r.is_cross_filial === true,
       };
     }),
     stats: {
@@ -233,7 +200,6 @@ router.get('/', asyncHandler(async (req, res) => {
 }));
 
 // GET /companies/:id/sales/:sale_id
-// 19/06/2026: leitura group-aware — abrir uma venda cross-filial a partir da lista.
 router.get('/:sale_id', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
@@ -241,19 +207,11 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   const saleRes = await pool.query(
     'SELECT s.*, c.name AS customer_name, c.phone AS customer_phone, c.email AS customer_email, ' +
     '       COALESCE(s.seller_name, e.name) AS seller_name_eff, ' +
-    '       COALESCE(comp.trade_name, comp.legal_name) AS company_name, ' +
-    '       (s.company_id != $2) AS is_cross_filial, ' +
     "       (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS transaction_id " +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
-    'LEFT JOIN companies comp ON comp.id = s.company_id ' +
-    'WHERE s.id = $1 AND (' +
-    '  s.company_id = $2 OR EXISTS (' +
-    '    SELECT 1 FROM companies c2 WHERE c2.id = s.company_id' +
-    '      AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)' +
-    '        = COALESCE(NULLIF((SELECT billing_owner_company_id FROM companies WHERE id = $2), $2), $2)' +
-    '  ))',
+    'WHERE s.id = $1 AND s.company_id = $2',
     [saleId, companyId]
   );
   if (!saleRes.rows.length) throw new AppError('Venda nao encontrada', 404);
@@ -374,10 +332,6 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       cash_tendered: sale.cash_tendered ? parseFloat(sale.cash_tendered) : null,
       coupon_code: sale.coupon_code,
       transaction_id: sale.transaction_id,
-      // 19/06/2026: origem (visibilidade de grupo)
-      company_id: sale.company_id,
-      company_name: sale.company_name || null,
-      is_cross_filial: sale.is_cross_filial === true,
     },
     customer: sale.customer_id ? {
       id: sale.customer_id,
@@ -396,7 +350,6 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
 }));
 
 // PATCH /companies/:id/sales/:sale_id
-// Mutacao segue company-scoped: so edita venda do proprio CNPJ.
 router.patch('/:sale_id', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
@@ -429,7 +382,6 @@ router.patch('/:sale_id', asyncHandler(async (req, res) => {
 }));
 
 // POST /companies/:id/sales/:sale_id/cancel  (troca-aware)
-// Mutacao segue company-scoped: so cancela venda do proprio CNPJ.
 router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
