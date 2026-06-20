@@ -123,6 +123,14 @@ router.use('/public/karate', require('./karatePublic'));
 //   POST /public/karate/:slug/affiliation-request
 router.use('/public/karate', require('./karateAffiliationsPublic'));
 
+// Portal do dojô SEM Aura (Canal B / link fixo), MOUNT TOKEN-ONLY: o microsite
+// só tem o slug + o token (não conhece o federation_id). O mesmo router de
+// /federation/:id/dojo é remontado aqui sem :id — Guard B (requireDojoPortal)
+// já escopa por token; requireDojoOfFederation vira no-op (sem :id na rota).
+//   GET  /public/karate/dojo/me · /practitioners · /annuity · /certificates
+//   POST /public/karate/dojo/annuity/pix
+router.use('/public/karate/dojo', require('./karateDojoPortal'));
+
 // ── AURA KARATÊ — Track E (público: ranking embellável) ──
 // Router separado (mantém karatePublic.js intacto). Migrations 168 + 169.
 //   GET /public/karate/:slug/seasons                  — temporadas/categorias
