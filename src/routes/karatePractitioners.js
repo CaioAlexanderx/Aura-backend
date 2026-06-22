@@ -1,11 +1,16 @@
 // ============================================================
 // AURA KARATÊ — Rotas de Praticantes (Track A)
-// GET  /federation/:id/practitioners
-// POST /federation/:id/practitioners
-// GET  /federation/:id/practitioners/:practitionerId
+// GET   /federation/:id/practitioners
+// POST  /federation/:id/practitioners
+// GET   /federation/:id/practitioners/:practitionerId
+// PATCH /federation/:id/practitioners/:practitionerId   (edição da ficha)
 //
 // Nota: /practitioners/import é registrado ANTES deste router no index.js
 // para que 'import' não seja capturado como :practitionerId.
+//
+// 22/06/2026: endereço passou a ser persistido (colunas já existiam em
+// customers; a rota não gravava) + PATCH de edição da ficha. Faixa NÃO entra
+// aqui (vive em karate_belt_history, append-only/imutável).
 // ============================================================
 'use strict';
 
@@ -13,6 +18,9 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { nextPractitionerRegistrationNumber } = require('../services/karateService');
+
+// Campos de endereço da ficha (colunas em customers).
+const ADDRESS_COLS = ['street', 'number', 'complement', 'neighborhood', 'city', 'state', 'zip_code'];
 
 // ── GET /federation/:id/practitioners ──────────────────────
 router.get('/', ...guards.read(), async (req, res) => {
@@ -112,6 +120,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     dojo_id, is_student, parent_guardian_id,
     is_arbiter, is_instructor, is_examiner,
     photo_url,
+    street, number, complement, neighborhood, city, state, zip_code,
   } = req.body;
 
   if (!full_name || !String(full_name).trim()) {
@@ -145,7 +154,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       return res.status(422).json({ error: 'dojo_id não pertence a esta federação', code: 'VALIDATION_ERROR' });
     }
 
-    // Gera número de registro FPKT-A-NNNNN
+    // Gera número de registro (NNNNN-D, continuando a sequência da federação)
     const regNumber = await nextPractitionerRegistrationNumber(client, federationId);
 
     const insertRes = await client.query(
@@ -154,12 +163,15 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
           is_student, parent_guardian_id, federation_id, dojo_id,
           is_arbiter, is_instructor, is_examiner,
           karate_photo_url, karate_registration_number,
+          street, number, complement, neighborhood, city, state, zip_code,
           is_active, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, true, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+               $17, $18, $19, $20, $21, $22, $23, true, NOW(), NOW())
        RETURNING id, name, cpf_cnpj, rg, birth_date, email, phone,
                  is_student, parent_guardian_id, federation_id, dojo_id,
                  is_arbiter, is_instructor, is_examiner,
-                 karate_photo_url, karate_registration_number, is_active`,
+                 karate_photo_url, karate_registration_number, is_active,
+                 street, number, complement, neighborhood, city, state, zip_code`,
       [
         federationId,                        // company_id = federação (owner do registro)
         String(full_name).trim(),
@@ -177,35 +189,118 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
         is_examiner === true,
         photo_url || null,
         regNumber,
+        street || null,
+        number || null,
+        complement || null,
+        neighborhood || null,
+        city || null,
+        state || null,
+        zip_code || null,
       ]
     );
 
     await client.query('COMMIT');
 
     const p = insertRes.rows[0];
-    res.status(201).json({
-      id: p.id,
-      full_name: p.name,
-      cpf: p.cpf_cnpj || null,
-      rg: p.rg || null,
-      birth_date: p.birth_date || null,
-      email: p.email || null,
-      phone: p.phone || null,
-      dojo_id: p.dojo_id,
-      is_student: p.is_student,
-      parent_guardian_id: p.parent_guardian_id || null,
-      is_arbiter: p.is_arbiter,
-      is_instructor: p.is_instructor,
-      is_examiner: p.is_examiner,
-      photo_url: p.karate_photo_url || null,
-      karate_registration_number: p.karate_registration_number,
-      affiliation_status: 'active',
-      current_belt: null, // recém criado, sem faixa ainda
-    });
+    res.status(201).json(shapePractitioner(p));
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[karatePractitioners] create error:', err.message);
     res.status(500).json({ error: 'Erro ao cadastrar praticante', detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// ── PATCH /federation/:id/practitioners/:practitionerId ─────
+// Edita a ficha do praticante. Faixa NÃO entra aqui (karate_belt_history).
+router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, practitionerId } = req.params;
+  const b = req.body || {};
+
+  // Campo da ficha → coluna em customers
+  const FIELD_COL = {
+    full_name: 'name', cpf: 'cpf_cnpj', rg: 'rg', birth_date: 'birth_date',
+    email: 'email', phone: 'phone', dojo_id: 'dojo_id',
+    is_student: 'is_student', is_arbiter: 'is_arbiter',
+    is_instructor: 'is_instructor', is_examiner: 'is_examiner',
+    parent_guardian_id: 'parent_guardian_id', photo_url: 'karate_photo_url',
+    street: 'street', number: 'number', complement: 'complement',
+    neighborhood: 'neighborhood', city: 'city', state: 'state', zip_code: 'zip_code',
+  };
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const cur = await client.query(
+      `SELECT id, dojo_id FROM customers WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+      [practitionerId, federationId]
+    );
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Praticante não encontrado', code: 'NOT_FOUND' });
+    }
+
+    if (b.full_name !== undefined && !String(b.full_name).trim()) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: 'full_name não pode ser vazio', code: 'VALIDATION_ERROR' });
+    }
+
+    // Troca de dojô → valida que o novo dojô pertence à federação
+    if (b.dojo_id && b.dojo_id !== cur.rows[0].dojo_id) {
+      const d = await client.query(
+        `SELECT id FROM companies WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo' LIMIT 1`,
+        [b.dojo_id, federationId]
+      );
+      if (!d.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ error: 'dojo_id não pertence a esta federação', code: 'VALIDATION_ERROR' });
+      }
+    }
+
+    const sets = [];
+    const vals = [];
+    let i = 1;
+    for (const [field, col] of Object.entries(FIELD_COL)) {
+      if (b[field] === undefined) continue;
+      let v = b[field];
+      if (field === 'full_name') v = String(v).trim();
+      // string vazia → null (dado ausente é neutro, não erro)
+      if (typeof v === 'string' && v.trim() === '') v = null;
+      sets.push(`${col} = $${i}`); vals.push(v); i++;
+    }
+    if (!sets.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+    }
+    sets.push('updated_at = NOW()');
+    vals.push(practitionerId, federationId);
+
+    await client.query(
+      `UPDATE customers SET ${sets.join(', ')} WHERE id = $${i} AND federation_id = $${i + 1}`,
+      vals
+    );
+    await client.query('COMMIT');
+
+    // Retorna a ficha atualizada (com faixa atual)
+    const out = await db.query(
+      `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date, cu.email, cu.phone,
+              cu.is_student, cu.parent_guardian_id, cu.dojo_id,
+              cu.is_arbiter, cu.is_instructor, cu.is_examiner,
+              cu.karate_photo_url, cu.karate_registration_number, cu.is_active,
+              cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
+              cb.belt_level, cb.belt_name, cb.current_since
+       FROM customers cu
+       LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $2
+       WHERE cu.id = $1 LIMIT 1`,
+      [practitionerId, federationId]
+    );
+    res.json(shapePractitioner(out.rows[0]));
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('[karatePractitioners] update error:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar praticante', detail: err.message });
   } finally {
     client.release();
   }
@@ -217,11 +312,12 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
 
   try {
     const pracRes = await db.query(
-      `SELECT cu.id, cu.name AS full_name, cu.cpf_cnpj, cu.rg, cu.birth_date,
+      `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date,
               cu.email, cu.phone, cu.is_student, cu.parent_guardian_id,
               cu.dojo_id, cu.is_arbiter, cu.is_instructor, cu.is_examiner,
-              cu.karate_photo_url AS photo_url, cu.karate_registration_number,
+              cu.karate_photo_url, cu.karate_registration_number,
               cu.is_active,
+              cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
               cb.belt_level, cb.belt_name, cb.current_since
        FROM customers cu
        LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
@@ -255,34 +351,46 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
       exam_id: r.exam_id || null,
     }));
 
-    res.json({
-      id: p.id,
-      full_name: p.full_name,
-      cpf: p.cpf_cnpj || null,
-      rg: p.rg || null,
-      birth_date: p.birth_date || null,
-      email: p.email || null,
-      phone: p.phone || null,
-      dojo_id: p.dojo_id || null,
-      is_student: p.is_student,
-      parent_guardian_id: p.parent_guardian_id || null,
-      is_arbiter: p.is_arbiter,
-      is_instructor: p.is_instructor,
-      is_examiner: p.is_examiner,
-      photo_url: p.photo_url || null,
-      karate_registration_number: p.karate_registration_number || null,
-      affiliation_status: p.is_active ? 'active' : 'inactive',
-      current_belt: p.belt_level ? {
-        belt_level: p.belt_level,
-        belt_name: p.belt_name,
-        current_since: p.current_since,
-      } : null,
-      belt_history: beltHistory,
-    });
+    res.json({ ...shapePractitioner(p), belt_history: beltHistory });
   } catch (err) {
     console.error('[karatePractitioners] detail error:', err.message);
     res.status(500).json({ error: 'Erro ao carregar praticante' });
   }
 });
+
+// Monta o objeto de resposta do praticante a partir de uma row de customers
+// (aceita a coluna de nome como `name` ou `full_name`).
+function shapePractitioner(p) {
+  return {
+    id: p.id,
+    full_name: p.name || p.full_name,
+    cpf: p.cpf_cnpj || null,
+    rg: p.rg || null,
+    birth_date: p.birth_date || null,
+    email: p.email || null,
+    phone: p.phone || null,
+    dojo_id: p.dojo_id || null,
+    is_student: p.is_student,
+    parent_guardian_id: p.parent_guardian_id || null,
+    is_arbiter: p.is_arbiter,
+    is_instructor: p.is_instructor,
+    is_examiner: p.is_examiner,
+    photo_url: p.karate_photo_url || null,
+    karate_registration_number: p.karate_registration_number || null,
+    affiliation_status: p.is_active ? 'active' : 'inactive',
+    street: p.street || null,
+    number: p.number || null,
+    complement: p.complement || null,
+    neighborhood: p.neighborhood || null,
+    city: p.city || null,
+    state: p.state || null,
+    zip_code: p.zip_code || null,
+    current_belt: p.belt_level ? {
+      belt_level: p.belt_level,
+      belt_name: p.belt_name,
+      current_since: p.current_since,
+    } : null,
+  };
+}
 
 module.exports = router;

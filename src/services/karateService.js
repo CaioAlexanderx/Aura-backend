@@ -38,31 +38,42 @@ async function nextDojoAffiliationId(client, federationId) {
   return `FPKT-${String(nextNum).padStart(3, '0')}`;
 }
 
-// ── Geração de FPKT-A-NNNNN (praticante) ──────────────────
-// Formato: FPKT-A-NNNNN (5 dígitos com zero-padding, ex: FPKT-A-00427)
-// Estratégia: advisory lock por federação + MAX existente.
+// ── Geração do Nº de registro do praticante (NNNNN-D) ──────
+// Formato: <N>-D, continuando a maior numeração já existente na federação.
+//
+// Os dados reais da FPKT usam o padrão NNNNN-D (kyu) e variações por Dan nos
+// faixas-pretas (NNN-Y-SHO, -Y-NI, -Y-SAN). Para gerar o próximo número de um
+// praticante NOVO, pegamos o MAIOR PREFIXO NUMÉRICO entre TODOS os registros
+// da federação (independente do sufixo) e incrementamos, formatando como
+// "<N>-D" — o padrão dominante.
+//
+// (Decisão Caio 22/06.) O gerador antigo "FPKT-A-NNNNN" foi substituído porque
+// o regex /(\d+)$/ não casava com os importados (terminam em letra) e cairia
+// em colisão a partir de 00001.
+//
+// advisory lock por federação garante atomicidade sob concorrência.
 async function nextPractitionerRegistrationNumber(client, federationId) {
   await client.query(
     `SELECT pg_advisory_xact_lock(hashtext($1::text || '-practitioner'))`,
     [federationId]
   );
 
+  // Extrai os dígitos iniciais de cada karate_registration_number e pega o MAX.
+  // regexp_replace(x, '\D.*$', '') → mantém só o prefixo numérico ("21758-D" → "21758").
+  // Filtra para registros que começam com dígito (ignora formatos legados não-numéricos).
   const { rows } = await client.query(
-    `SELECT karate_registration_number
-     FROM customers
-     WHERE federation_id = $1 AND karate_registration_number IS NOT NULL
-     ORDER BY karate_registration_number DESC
-     LIMIT 1`,
+    `SELECT COALESCE(
+              MAX(NULLIF(regexp_replace(karate_registration_number, '\\D.*$', ''), '')::bigint),
+              0
+            ) AS maxnum
+       FROM customers
+      WHERE federation_id = $1
+        AND karate_registration_number ~ '^[0-9]'`,
     [federationId]
   );
 
-  let nextNum = 1;
-  if (rows.length > 0 && rows[0].karate_registration_number) {
-    const match = rows[0].karate_registration_number.match(/(\d+)$/);
-    if (match) nextNum = parseInt(match[1], 10) + 1;
-  }
-
-  return `FPKT-A-${String(nextNum).padStart(5, '0')}`;
+  const next = (parseInt(rows[0].maxnum, 10) || 0) + 1;
+  return `${next}-D`;
 }
 
 // ── Status computado do dojô ────────────────────────────────
