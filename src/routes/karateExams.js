@@ -28,6 +28,10 @@
 // Estorno/correção:
 //   POST /belt-exams/:examId/candidates/:cId/correction
 //     — registro compensatório (karate_belt_history é imutável)
+//
+// NOTA DE COMPAT (22/06): o frontend lê exam.title/exam.exam_date, mas o schema
+// usa name/event_date. Todas as respostas abaixo expõem aliases title/exam_date
+// além dos campos canônicos name/event_date — additive, sem migration.
 // ============================================================
 'use strict';
 
@@ -72,8 +76,8 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
 
     const dataRes = await db.query(
       `SELECT
-         be.id, be.federation_id, be.event_date, be.location,
-         be.status, be.created_at,
+         be.id, be.federation_id, be.name, be.exam_type, be.event_date, be.location,
+         be.max_candidates, be.fee_amount, be.status, be.created_at,
          COUNT(DISTINCT ec.id) AS candidate_count,
          COUNT(DISTINCT ee.id) AS examiner_count
        FROM karate_belt_exams be
@@ -89,8 +93,14 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
     const data = dataRes.rows.map(r => ({
       id: r.id,
       federation_id: r.federation_id,
+      name: r.name || null,
+      title: r.name || null,            // alias compat front
+      exam_type: r.exam_type || null,
       event_date: r.event_date,
+      exam_date: r.event_date,          // alias compat front
       location: r.location || null,
+      max_candidates: r.max_candidates || null,
+      fee_amount: r.fee_amount || null,
       status: r.status,
       candidate_count: parseInt(r.candidate_count, 10),
       examiner_count: parseInt(r.examiner_count, 10),
@@ -141,7 +151,9 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
       federation_id: exam.federation_id,
       exam_type: exam.exam_type || null,
       name: exam.name || null,
+      title: exam.name || null,          // alias compat front
       event_date: exam.event_date,
+      exam_date: exam.event_date,        // alias compat front
       location: exam.location || null,
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
@@ -211,7 +223,9 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
       federation_id: exam.federation_id,
       exam_type: exam.exam_type || null,
       name: exam.name || null,
+      title: exam.name || null,          // alias compat front
       event_date: exam.event_date,
+      exam_date: exam.event_date,        // alias compat front
       location: exam.location || null,
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
@@ -307,7 +321,9 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
       federation_id: exam.federation_id,
       exam_type: exam.exam_type || null,
       name: exam.name || null,
+      title: exam.name || null,          // alias compat front
       event_date: exam.event_date,
+      exam_date: exam.event_date,        // alias compat front
       location: exam.location || null,
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
