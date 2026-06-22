@@ -125,6 +125,11 @@ router.use('/public/karate', require('./karatePublic'));
 //   GET /public/karate/:slug/ranking/:season/:category— atalho REST (iframe)
 router.use('/public/karate', require('./karatePublicRanking'));
 
+// ── AURA KARATÊ — Fase 0 Dojô (Canal B público: OTP do responsável) ──
+// POST /public/karate/:slug/dojo/portal/request-otp
+// POST /public/karate/:slug/dojo/portal/verify-otp
+router.use('/public/karate', require('./karateDojoPublic'));
+
 // ── AURA KARATÊ — Track A (backend cadastros) ──────────────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
@@ -250,5 +255,9 @@ router.use('/federation/:id', require('./karateBrackets'));
 //   POST /federation/:id/network-health/report/send
 // Todos os GET: ?export=csv retorna arquivo CSV.
 router.use('/federation/:id/network-health', require('./karateNetworkHealth'));
+
+// ── AURA KARATÊ — Fase 0 Dojô (Canal A+B autenticado: endpoints /dojo/*) ──
+// GET /federation/:id/dojo/me  — piloto; fases 1-6 adicionam sub-routers
+router.use('/federation/:id', require('./karateDojo'));
 
 module.exports = router;

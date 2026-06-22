@@ -47,6 +47,7 @@ describe('resolveKarateContext — dojô', () => {
     });
     expect(out.federation_id).toBe('fed-1');
     expect(out.karate_role).toBe(KARATE_ROLES.DOJO_OWNER);
+    expect(out.dojo_id).toBe('dojo-9');
   });
 
   it('sensei é preservado e aponta pra federação-pai', () => {
@@ -55,6 +56,7 @@ describe('resolveKarateContext — dojô', () => {
     });
     expect(out.federation_id).toBe('fed-1');
     expect(out.karate_role).toBe(KARATE_ROLES.SENSEI);
+    expect(out.dojo_id).toBe('dojo-9');
   });
 
   it('dojô sem federation_id (órfão) → federation_id null, papel ainda resolve', () => {
@@ -63,26 +65,28 @@ describe('resolveKarateContext — dojô', () => {
     });
     expect(out.federation_id).toBeNull();
     expect(out.karate_role).toBe(KARATE_ROLES.DOJO_OWNER);
+    expect(out.dojo_id).toBe('dojo-9');
   });
 });
 
 describe('resolveKarateContext — fora de karatê / vazio', () => {
   it('vertical não-karatê → tudo null', () => {
     const out = resolveKarateContext({ id: 'c-1', vertical_active: 'odonto', member_role: 'owner' });
-    expect(out).toEqual({ federation_id: null, karate_role: null });
+    expect(out).toEqual({ federation_id: null, karate_role: null, dojo_id: null });
   });
 
   it('vertical_active null → tudo null', () => {
     const out = resolveKarateContext({ id: 'c-1', vertical_active: null, member_role: 'owner' });
-    expect(out).toEqual({ federation_id: null, karate_role: null });
+    expect(out).toEqual({ federation_id: null, karate_role: null, dojo_id: null });
   });
 
   it('company null (modo consolidado) → tudo null', () => {
-    expect(resolveKarateContext(null)).toEqual({ federation_id: null, karate_role: null });
+    expect(resolveKarateContext(null)).toEqual({ federation_id: null, karate_role: null, dojo_id: null });
   });
 
   it('member_role ausente assume owner (federação → admin)', () => {
     const out = resolveKarateContext({ id: 'fed-1', vertical_active: 'karate_federation' });
     expect(out.karate_role).toBe(KARATE_ROLES.FEDERATION_ADMIN);
+    expect(out.dojo_id).toBeNull();
   });
 });
