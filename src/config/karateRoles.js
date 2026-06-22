@@ -11,6 +11,13 @@
 //  - 'practitioner' NÃO é company_member: o praticante é um customer.
 //    O portal do praticante usa auth própria (token/OTP), não estes guards.
 //    Ver requirePractitionerToken (a implementar na Fase 3) — fora daqui.
+//
+// 22/06/2026 — FIX acesso do dono: requireCompanyAccess devolve role='owner'
+//   para quem é owner_id da company (SELECT 'owner' ... WHERE owner_id=$2).
+//   Os grupos abaixo NÃO incluíam 'owner', então a própria conta dona da
+//   federação tomava 403 em /federation/:id/* (Dojôs, Praticantes, etc).
+//   Ficou mascarado enquanto o front era mock; o desmock expôs. 'owner' agora
+//   entra em todos os grupos (dono = acesso pleno ao módulo, = federation_admin).
 // ============================================================
 
 const { requireAuth, requireCompanyAccess, requireFeature } = require('../middleware/auth');
@@ -26,16 +33,22 @@ const KARATE_ROLES = Object.freeze({
   // 'practitioner' é tratado fora deste módulo (auth de portal)
 });
 
+// Papel sintético devolvido por requireCompanyAccess quando o usuário é o
+// owner_id da company (dono da empresa). Dono = acesso pleno ao módulo.
+const OWNER = 'owner';
+
 // ── Grupos de conveniência (quem pode o quê) ────────────────
+// 'owner' (dono da empresa-federação) entra em todos: acesso pleno.
 const GROUPS = Object.freeze({
   // escrita administrativa plena
-  ADMIN_ONLY: [KARATE_ROLES.FEDERATION_ADMIN],
+  ADMIN_ONLY: [OWNER, KARATE_ROLES.FEDERATION_ADMIN],
   // operação: criar/editar cadastros, exames, competições
-  STAFF_WRITE: [KARATE_ROLES.FEDERATION_ADMIN, KARATE_ROLES.FEDERATION_STAFF],
+  STAFF_WRITE: [OWNER, KARATE_ROLES.FEDERATION_ADMIN, KARATE_ROLES.FEDERATION_STAFF],
   // lançar resultados de exame
-  EXAM_RESULTS: [KARATE_ROLES.FEDERATION_ADMIN, KARATE_ROLES.FEDERATION_EXAMINER],
+  EXAM_RESULTS: [OWNER, KARATE_ROLES.FEDERATION_ADMIN, KARATE_ROLES.FEDERATION_EXAMINER],
   // qualquer papel da federação pode ler
   FEDERATION_READ: [
+    OWNER,
     KARATE_ROLES.FEDERATION_ADMIN,
     KARATE_ROLES.FEDERATION_STAFF,
     KARATE_ROLES.FEDERATION_VIEWER,
