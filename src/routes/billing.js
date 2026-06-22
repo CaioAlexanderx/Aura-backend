@@ -19,6 +19,10 @@
 //             asaas()/PLANS/getPlanValue movidos pra services compartilhados.
 // 18/06/2026: PIX anual agora é subscription MONTHLY com endDate=12 meses
 //             (valor mensal descontado). Bloco 'Pix a vista' removido.
+// 22/06/2026: PIX agora tenta PIX AUTOMÁTICO (débito automático recorrente)
+//             primeiro, com fallback síncrono pro PIX comum. Gated por
+//             env PIX_AUTOMATICO_ENABLED (default OFF). Ver services/billingPix.
+//             billing_method registra a via usada (pix_auto/pix_common/card).
 // ============================================================
 
 const express = require('express');
@@ -32,6 +36,7 @@ const {
   getPlanValue,
   getTotalValue,
 } = require('../services/billingPricing');
+const pixAuto = require('../services/billingPix');
 
 async function ensureAsaasCustomer(company, user) {
   if (company.asaas_customer_id) return company.asaas_customer_id;
@@ -59,11 +64,13 @@ router.get('/status', requireAuth, async (req, res) => {
       plan: c.plan || 'essencial',
       billing_status: c.billing_status || (trialActive ? 'trial' : 'inactive'),
       billing_cycle: c.billing_cycle || 'monthly',
+      billing_method: c.billing_method || null,
+      pix_auto_status: c.pix_auto_status || null,
       trial_active: !!trialActive,
       trial_days_left: daysLeft,
       trial_ends_at: c.trial_ends_at || null,
       next_billing_date: c.next_billing_date || null,
-      has_payment_method: !!c.asaas_subscription_id,
+      has_payment_method: !!c.asaas_subscription_id || !!c.asaas_pix_auto_authorization_id,
     });
   } catch (err) {
     console.error('[BILLING] Status error:', err.message);
@@ -305,7 +312,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         console.error('[BILLING] Subscription falhou apos primeira cobranca OK:', subErr.message);
         await db.query(
           `UPDATE companies SET plan=$1, asaas_pending_payment_id=$2, billing_status=$3,
-             billing_cycle=$4, last_payment_date=$5, updated_at=NOW() WHERE id=$6`,
+             billing_cycle=$4, last_payment_date=$5, billing_method='card', updated_at=NOW() WHERE id=$6`,
           [plan, firstPayment.id, isPaid ? 'active' : 'pending', cycle,
            isPaid ? todayStr : null, company.id]
         );
@@ -325,7 +332,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       await db.query(
         `UPDATE companies SET plan=$1, asaas_subscription_id=$2, billing_status=$3,
            billing_cycle=$4, asaas_pending_payment_id=$5, last_payment_date=$6,
-           next_billing_date=$7, updated_at=NOW() WHERE id=$8`,
+           next_billing_date=$7, billing_method='card', updated_at=NOW() WHERE id=$8`,
         [plan, subscription.id, finalStatus, cycle,
          isPaid ? null : firstPayment.id,
          isPaid ? todayStr : null,
@@ -349,10 +356,56 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     }
 
     // ════════════════════════════════════════════════════════════════
-    // PIX (mensal ou anual): subscription MONTHLY com nextDueDate=amanhã.
+    // PIX AUTOMÁTICO (débito automático recorrente) — via preferencial.
+    // Gated por env PIX_AUTOMATICO_ENABLED. O cliente paga UM QR (1ª
+    // mensalidade + consentimento) e os meses seguintes debitam sozinhos.
+    // Com paymentCreationMode=SUBSCRIPTION a Asaas gera as recorrentes.
+    // QUALQUER falha aqui cai no PIX comum abaixo (fallback síncrono) —
+    // seguro por construção: pior caso = comportamento de hoje.
+    // ════════════════════════════════════════════════════════════════
+    if (pixAuto.isPixAutoEnabled()) {
+      try {
+        const description = PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : '') + seatsSuffix;
+        const finishDate = cycle === 'annual' ? end_date : undefined;
+        const auth = await pixAuto.createPixAutoAuthorization({
+          customerId, value, frequency: 'MONTHLY',
+          contractId: company.id, startDate: tomorrowStr, finishDate,
+          description, firstDueDate: tomorrowStr,
+        });
+
+        await db.query(
+          `UPDATE companies SET plan=$1, billing_method='pix_auto',
+             asaas_pix_auto_authorization_id=$2, pix_auto_status='pending',
+             billing_status='pending', billing_cycle=$3, asaas_subscription_id=NULL,
+             next_billing_date=$4, updated_at=NOW() WHERE id=$5`,
+          [plan, auth.id, cycle, tomorrowStr, company.id]
+        );
+
+        console.log('[BILLING] Pix Automatico autorizacao ' + auth.id + ' criada — company=' + company.id + ' value=' + value + ' cycle=' + cycle);
+
+        return res.status(201).json({
+          authorization_id: auth.id,
+          plan, cycle, value, billing_type: 'PIX', billing_method: 'pix_auto',
+          extra_seats: extraSeats,
+          next_due_date: tomorrowStr,
+          recurring_auto: true,
+          pix_qr_code: auth.qr.encodedImage || null,
+          pix_copy_paste: auth.qr.payload || null,
+          pix_expiration: auth.qr.expiration || null,
+          message: 'Pague o PIX para ativar. As próximas mensalidades serão debitadas automaticamente.',
+        });
+      } catch (paErr) {
+        console.warn('[BILLING] Pix Automatico indisponivel — fallback PIX comum:', paErr.message);
+        // segue para o PIX comum abaixo (fallback síncrono)
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // PIX COMUM (mensal ou anual): subscription MONTHLY com nextDueDate=amanhã.
     // Para anual: endDate limita a 12 mensalidades; valor ja vem descontado
     // de billingPricing.applyCycle (ex: Negocio = R$140,83/mes).
     // Cliente paga o Pix gerado; webhook ativa quando confirma.
+    // É também o FALLBACK do Pix Automático.
     // ════════════════════════════════════════════════════════════════
     const subscriptionBody = {
       customer: customerId,
@@ -376,13 +429,13 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     } catch {}
 
     await db.query(
-      'UPDATE companies SET plan=$1, asaas_subscription_id=$2, billing_status=\'pending\', billing_cycle=$3, next_billing_date=$4, updated_at=NOW() WHERE id=$5',
+      'UPDATE companies SET plan=$1, asaas_subscription_id=$2, billing_status=\'pending\', billing_cycle=$3, next_billing_date=$4, billing_method=\'pix_common\', asaas_pix_auto_authorization_id=NULL, pix_auto_status=NULL, updated_at=NOW() WHERE id=$5',
       [plan, subscription.id, cycle, subscription.nextDueDate, company.id]
     );
 
     const response = {
       subscription_id: subscription.id,
-      plan, cycle, value, billing_type: 'PIX',
+      plan, cycle, value, billing_type: 'PIX', billing_method: 'pix_common',
       extra_seats: extraSeats,
       next_due_date: subscription.nextDueDate,
       pix_qr_code: pixData?.encodedImage || null,
