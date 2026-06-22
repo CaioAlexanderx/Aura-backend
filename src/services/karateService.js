@@ -72,7 +72,10 @@ async function nextPractitionerRegistrationNumber(client, federationId) {
     [federationId]
   );
 
-  const next = (parseInt(rows[0].maxnum, 10) || 0) + 1;
+  // Defensivo: em testes o DB é mockado e pode devolver { rows: [] } (sem a
+  // linha do agregado). Em Postgres real MAX retorna sempre 1 linha (maxnum=0
+  // quando vazio, pelo COALESCE), então prod nunca cai no fallback.
+  const next = (parseInt(rows?.[0]?.maxnum, 10) || 0) + 1;
   return `${next}-D`;
 }
 
