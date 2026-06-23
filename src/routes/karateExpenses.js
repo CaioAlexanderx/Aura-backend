@@ -11,6 +11,7 @@
 // NOTA DE SCHEMA (23/06): transactions.status é o enum transaction_status
 // (pending/confirmed/cancelled). "Em aberto/vencido" = status='pending' com
 // due_date no passado. customers tem coluna `name` (não `full_name`).
+// transactions.reference_id é uuid: comparar com customers.id (uuid) sem ::text.
 // (karate_dojo_annuity_history.status é TEXTO e usa 'paid' — mantido.)
 // ============================================================
 'use strict';
@@ -162,7 +163,7 @@ router.get('/overdue', ...guards.adminOnly(), async (req, res) => {
        FROM customers cu
        JOIN transactions t
          ON t.reference_type = 'customer'
-         AND t.reference_id = cu.id::text
+         AND t.reference_id = cu.id
          AND t.category = 'annuity_cpf'
          AND t.federation_id = $1
          AND EXTRACT(YEAR FROM t.due_date) = $2

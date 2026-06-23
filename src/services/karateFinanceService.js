@@ -10,6 +10,7 @@
 // em aberto/recebível = 'pending'. Filtros 'paid'/'due' eram inválidos (500).
 // (karate_dojo_annuity_history.status é TEXTO e usa 'paid'/'pending'/'overdue' —
 // esse é legítimo e NÃO é mexido aqui.)
+// transactions.reference_id é uuid: comparar com uuid cru (sem ::text).
 // ============================================================
 'use strict';
 
@@ -71,6 +72,7 @@ async function getDojoAnnuityStatus(dojoId, referenceYear) {
  * Sem cobrança lançada => 'valida' (não penaliza quem a federação ainda não cobrou).
  *
  * transactions.status é o enum (pending/confirmed/cancelled). "Recebida" = 'confirmed'.
+ * transactions.reference_id é uuid: comparar com studentId (uuid) cru.
  */
 async function getPractitionerAnnuityStatus(studentId, federationId) {
   const { rows } = await db.query(
@@ -78,7 +80,7 @@ async function getPractitionerAnnuityStatus(studentId, federationId) {
      FROM transactions
      WHERE federation_id = $1
        AND reference_type = 'customer'
-       AND reference_id = $2::text
+       AND reference_id = $2
        AND category = 'annuity_cpf'
      ORDER BY due_date DESC NULLS LAST
      LIMIT 1`,
