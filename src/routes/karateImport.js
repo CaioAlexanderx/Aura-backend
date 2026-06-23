@@ -1,7 +1,7 @@
 // ============================================================
 // AURA KARATÊ — Importação em lote de praticantes (Track A)
 // POST /federation/:id/practitioners/import            (CSV legado)
-// POST /federation/:id/practitioners/import/batch-fpkt (JSON: dojôs + alunos + faixas)
+// POST /federation/:id/practitioners/import/batch-fpkt (JSON: dojôs + alunos + faixas + transferências)
 //
 // CSV legado (handler `handler`):
 //   mode=preview → valida e retorna rows+errors sem gravar
@@ -16,6 +16,9 @@
 //   faixas (belt_events[]): trajetória → karate_belt_history (belt_schema='legacy'),
 //     resolve aluno por reg, idempotente via SAVEPOINT + NOT EXISTS
 //     (student_id, belt_level, graduated_at). karate_belt_history é append-only.
+//   transferências (transfers[]): → karate_practitioner_transfers (append-only).
+//     resolve aluno por reg + dojôs por nome; destino NOT NULL (pula se não resolve);
+//     idempotente via SAVEPOINT + NOT EXISTS (practitioner_id, destination_dojo_id, transferred_at).
 //   idempotente por import_batch_id
 // ============================================================
 'use strict';
@@ -257,7 +260,7 @@ const handler = async (req, res) => {
   });
 };
 
-// ── Importação FPKT (dojôs + alunos + faixas) — JSON ────────────────────────
+// ── Importação FPKT (dojôs + alunos + faixas + transferências) — JSON ───────
 // Limpa "vazios reais" da base legada: trim + descarta '', 'XX', 'None', '-'.
 // Dado ausente é neutro (vira null), NÃO erro.
 const cleanCell = (v) => {
@@ -276,13 +279,14 @@ const batchFpktHandler = async (req, res) => {
   const dojos = Array.isArray(body.dojos) ? body.dojos : [];
   const students = Array.isArray(body.students) ? body.students : [];
   const beltEvents = Array.isArray(body.belt_events) ? body.belt_events : [];
+  const transfers = Array.isArray(body.transfers) ? body.transfers : [];
 
-  if (!dojos.length && !students.length && !beltEvents.length) {
-    return res.status(422).json({ error: 'Envie ao menos dojos[], students[] ou belt_events[]', code: 'VALIDATION_ERROR' });
+  if (!dojos.length && !students.length && !beltEvents.length && !transfers.length) {
+    return res.status(422).json({ error: 'Envie ao menos dojos[], students[], belt_events[] ou transfers[]', code: 'VALIDATION_ERROR' });
   }
-  if (dojos.length > 500 || students.length > 2000 || beltEvents.length > 3000) {
+  if (dojos.length > 500 || students.length > 2000 || beltEvents.length > 3000 || transfers.length > 2000) {
     return res.status(422).json({
-      error: 'Lote muito grande (máx 500 dojôs / 2.000 alunos / 3.000 faixas por requisição)',
+      error: 'Lote muito grande (máx 500 dojôs / 2.000 alunos / 3.000 faixas / 2.000 transferências por requisição)',
       code: 'VALIDATION_ERROR',
     });
   }
@@ -293,6 +297,7 @@ const batchFpktHandler = async (req, res) => {
     dojos: { created: 0, updated: 0 },
     students: { created: 0, updated: 0, skipped: 0 },
     belt_events: { inserted: 0, skipped: 0 },
+    transfers: { inserted: 0, skipped: 0 },
     skipped_detail: [],
   };
 
@@ -350,7 +355,7 @@ const batchFpktHandler = async (req, res) => {
       }
     }
 
-    // Mapa nome→id de TODOS os dojôs da federação (resolve alunos entre lotes)
+    // Mapa nome→id de TODOS os dojôs da federação (resolve alunos/transf entre lotes)
     const dojoMapRes = await client.query(
       `SELECT id, lower(name) AS lname FROM companies
        WHERE federation_id = $1 AND vertical = 'karate_dojo'`,
@@ -437,22 +442,27 @@ const batchFpktHandler = async (req, res) => {
       }
     }
 
-    // ── Faixas (belt_events) → karate_belt_history (append-only, belt_schema='legacy') ──
-    // Resolve aluno por karate_registration_number (já podem ter sido criados em lote anterior).
-    // Idempotente: SAVEPOINT por linha + guarda NOT EXISTS (student_id, belt_level, graduated_at).
-    if (beltEvents.length) {
-      const beltRegs = [...new Set(beltEvents.map(e => cleanCell(e.registration_number)).filter(Boolean))];
-      let regMap = new Map();
-      if (beltRegs.length) {
+    // ── reg→id (faixas + transferências) ──
+    // Resolve alunos por karate_registration_number (já podem ter sido criados em lote anterior).
+    let regMap = new Map();
+    if (beltEvents.length || transfers.length) {
+      const regs = [...new Set(
+        [...beltEvents, ...transfers].map(e => cleanCell(e.registration_number)).filter(Boolean)
+      )];
+      if (regs.length) {
         const rm = await client.query(
           `SELECT id, karate_registration_number AS reg
            FROM customers
            WHERE federation_id = $1 AND karate_registration_number = ANY($2::text[])`,
-          [federationId, beltRegs]
+          [federationId, regs]
         );
         regMap = new Map(rm.rows.map(r => [r.reg, r.id]));
       }
+    }
 
+    // ── Faixas (belt_events) → karate_belt_history (append-only, belt_schema='legacy') ──
+    // Idempotente: SAVEPOINT por linha + guarda NOT EXISTS (student_id, belt_level, graduated_at).
+    if (beltEvents.length) {
       for (const ev of beltEvents) {
         const reg = cleanCell(ev.registration_number);
         const beltLevel = cleanCell(ev.belt_level);
@@ -481,6 +491,45 @@ const batchFpktHandler = async (req, res) => {
           // Registro legado torto (ex.: trigger de ordenação) não aborta o lote
           try { await client.query('ROLLBACK TO SAVEPOINT bh'); } catch (_) {}
           summary.belt_events.skipped++;
+        }
+      }
+    }
+
+    // ── Transferências (transfers) → karate_practitioner_transfers (append-only) ──
+    // destino é NOT NULL → pula se o dojô destino não resolve; origem é opcional
+    // (vira origin_dojo_name texto). Idempotente: SAVEPOINT + NOT EXISTS
+    // (practitioner_id, destination_dojo_id, transferred_at).
+    if (transfers.length) {
+      for (const t of transfers) {
+        const reg = cleanCell(t.registration_number);
+        const destName = cleanCell(t.destination_name);
+        const originName = cleanCell(t.origin_name);
+        const transAt = cleanCell(t.transferred_at); // ISO YYYY-MM-DD (normalizado no front)
+        const pid = reg ? regMap.get(reg) : null;
+        const destId = destName ? (dojoMap.get(destName.toLowerCase()) || null) : null;
+        const originId = originName ? (dojoMap.get(originName.toLowerCase()) || null) : null;
+
+        if (!pid || !destId || !transAt) { summary.transfers.skipped++; continue; }
+
+        try {
+          await client.query('SAVEPOINT tr');
+          const r = await client.query(
+            `INSERT INTO karate_practitioner_transfers
+               (practitioner_id, federation_id, origin_dojo_id, destination_dojo_id,
+                origin_dojo_name, destination_dojo_name, transferred_at, initiated_by)
+             SELECT $1, $2, $3, $4, $5, $6, $7::date, $8
+             WHERE NOT EXISTS (
+               SELECT 1 FROM karate_practitioner_transfers
+               WHERE practitioner_id = $1 AND destination_dojo_id = $4 AND transferred_at = $7::date
+             )`,
+            [pid, federationId, originId, destId, originName, destName, transAt, req.user ? req.user.id : null]
+          );
+          await client.query('RELEASE SAVEPOINT tr');
+          if (r.rowCount > 0) summary.transfers.inserted++;
+          else summary.transfers.skipped++; // já existia (idempotente)
+        } catch (e) {
+          try { await client.query('ROLLBACK TO SAVEPOINT tr'); } catch (_) {}
+          summary.transfers.skipped++;
         }
       }
     }
