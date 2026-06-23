@@ -13,6 +13,9 @@
 //   suspended   → vencido há > 180 dias ou is_active=false
 //
 // FPKT-NNN gerado com advisory lock por federação (ver karateService).
+//
+// companies exige owner_id + legal_name (NOT NULL). O dojô pertence a um usuário
+// de SISTEMA (não ao admin da federação — evita o bug de login multi-empresa).
 // ============================================================
 'use strict';
 
@@ -176,15 +179,45 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       return res.status(404).json({ error: 'Federação não encontrada', code: 'NOT_FOUND' });
     }
 
+    // companies.owner_id é NOT NULL. Dojô NÃO pode pertencer ao admin da federação
+    // (faz o login do admin cair em "visão consolidada" por ter >1 empresa). Reusa
+    // o dono de um dojô já existente da federação (usuário de sistema); senão
+    // acha/cria um usuário de sistema dedicado com login travado.
+    let systemOwnerId = null;
+    const ownerRes = await client.query(
+      `SELECT owner_id FROM companies
+       WHERE federation_id = $1 AND vertical = 'karate_dojo' AND owner_id IS NOT NULL
+       LIMIT 1`,
+      [federationId]
+    );
+    if (ownerRes.rows.length) {
+      systemOwnerId = ownerRes.rows[0].owner_id;
+    } else {
+      const sysEmail = `sistema-dojos-${federationId}@getaura.com.br`;
+      const u = await client.query(`SELECT id FROM users WHERE email = $1 LIMIT 1`, [sysEmail]);
+      if (u.rows.length) {
+        systemOwnerId = u.rows[0].id;
+      } else {
+        const c = await client.query(
+          `INSERT INTO users (email, password_hash, full_name)
+           VALUES ($1, '!locked-system-no-login', 'Sistema Dojôs')
+           RETURNING id`,
+          [sysEmail]
+        );
+        systemOwnerId = c.rows[0].id;
+      }
+    }
+
     // Gera FPKT-NNN dentro da transação (com advisory lock)
     const fpktId = await nextDojoAffiliationId(client, federationId);
 
+    // companies exige legal_name + owner_id (NOT NULL). legal_name = name.
     const insertRes = await client.query(
       `INSERT INTO companies
-         (name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
-          affiliation_since, dojo_founded_year, address, phone, email, federation_id,
+         (name, legal_name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
+          affiliation_since, dojo_founded_year, address, phone, email, federation_id, owner_id,
           vertical, is_active, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'karate_dojo', true, NOW(), NOW())
+       VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'karate_dojo', true, NOW(), NOW())
        RETURNING id, name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
                  affiliation_since, dojo_founded_year, address, phone, email, is_active`,
       [
@@ -200,6 +233,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
         phone || null,
         email || null,
         federationId,
+        systemOwnerId,
       ]
     );
 
