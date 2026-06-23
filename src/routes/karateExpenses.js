@@ -7,6 +7,11 @@
 // POST /financial/overdue/:targetId/remind — enfileira cobrança (stub Fase 6)
 //
 // Guard: adminOnly() — financeiro é sensível.
+//
+// NOTA DE SCHEMA (23/06): transactions.status é o enum transaction_status
+// (pending/confirmed/cancelled). "Em aberto/vencido" = status='pending' com
+// due_date no passado. customers tem coluna `name` (não `full_name`).
+// (karate_dojo_annuity_history.status é TEXTO e usa 'paid' — mantido.)
 // ============================================================
 'use strict';
 
@@ -132,7 +137,7 @@ router.get('/overdue', ...guards.adminOnly(), async (req, res) => {
     const dayMs = 1000 * 60 * 60 * 24;
     const now = new Date();
 
-    // Dojôs inadimplentes (via karate_dojo_annuity_history)
+    // Dojôs inadimplentes (via karate_dojo_annuity_history — status TEXTO 'paid')
     const { rows: dojoRows } = await db.query(
       `SELECT
          c.id AS target_id, c.name,
@@ -148,11 +153,11 @@ router.get('/overdue', ...guards.adminOnly(), async (req, res) => {
       [federationId, year]
     );
 
-    // Praticantes inadimplentes (via transactions)
+    // Praticantes inadimplentes (via transactions — enum: em aberto = 'pending')
     const { rows: cpfRows } = await db.query(
       `SELECT
          cu.id AS target_id,
-         COALESCE(cu.full_name, cu.name) AS name,
+         cu.name AS name,
          t.amount, t.due_date, t.status AS tx_status
        FROM customers cu
        JOIN transactions t
@@ -162,7 +167,7 @@ router.get('/overdue', ...guards.adminOnly(), async (req, res) => {
          AND t.federation_id = $1
          AND EXTRACT(YEAR FROM t.due_date) = $2
        WHERE cu.federation_id = $1
-         AND t.status != 'paid'
+         AND t.status = 'pending'
          AND t.due_date < CURRENT_DATE`,
       [federationId, parseInt(year, 10)]
     );

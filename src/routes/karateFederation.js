@@ -122,7 +122,7 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
          WHERE company_id = $1
            AND type = 'income'
            AND EXTRACT(YEAR FROM due_date) = EXTRACT(YEAR FROM NOW())
-           AND status = 'paid'`,
+           AND status = 'confirmed'`,
         [federationId]
       ),
     ]);
