@@ -18,6 +18,10 @@
 // Status do dojô deriva de karate_dojo_annuity_history (migration 152).
 // NFS-e: usa nfe_documents + fiscal.emitNfse (mesma tabela/serviço de nfe.js).
 //        Emissão dedicada disponível em karateNfse.js.
+//
+// NOTA DE SCHEMA (23/06): transactions.status é o enum transaction_status
+// (pending/confirmed/cancelled). "Recebido/pago" = 'confirmed'.
+// (karate_dojo_annuity_history.status é TEXTO e usa 'paid' — mantido.)
 // ============================================================
 'use strict';
 
@@ -240,6 +244,7 @@ router.post('/annuities/dojos/:dojoId/pix', ...guards.adminOnly(), async (req, r
       return res.status(404).json({ error: 'Cobrança não encontrada', code: 'NOT_FOUND' });
     }
     const annuity = rows[0];
+    // annuity.status vem de karate_dojo_annuity_history (TEXTO): 'paid' é legítimo.
     if (annuity.status === 'paid') {
       return res.status(409).json({ error: 'Anuidade já paga', code: 'CONFLICT' });
     }
@@ -358,7 +363,7 @@ router.get('/payments/:intentId/status', ...guards.adminOnly(), async (req, res)
 
 // POST /financial/payments/:intentId/confirm
 // Admin confirma pagamento manualmente (ou webhook futuro chama este endpoint).
-// Reconcilia transaction (status=paid) + atualiza annuity_history.
+// Reconcilia transaction (status=confirmed) + atualiza annuity_history.
 // NFS-e: emite via nfe_documents + fiscal.emitNfse (best-effort, não bloqueia confirm).
 router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, res) => {
   const { id: federationId, intentId } = req.params;
@@ -397,7 +402,7 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
       [paidAt, intentId]
     );
 
-    // Atualiza karate_dojo_annuity_history
+    // Atualiza karate_dojo_annuity_history (coluna status é TEXTO → 'paid')
     await client.query(
       `UPDATE karate_dojo_annuity_history
        SET status = 'paid', paid_at = $1, updated_at = NOW()
@@ -405,11 +410,11 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
       [paidAt, intent.annuity_history_id]
     );
 
-    // Reconcilia transaction
+    // Reconcilia transaction (status é o enum transaction_status → 'confirmed')
     if (intent.transaction_id) {
       await client.query(
         `UPDATE transactions
-         SET status = 'paid', paid_at = $1, updated_at = NOW()
+         SET status = 'confirmed', paid_at = $1, updated_at = NOW()
          WHERE id = $2`,
         [paidAt, intent.transaction_id]
       );
@@ -572,7 +577,8 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
     let enriched = rows.map(r => {
       let annuityStatus = 'due';
       if (!r.transaction_id) annuityStatus = 'suspended';
-      else if (r.tx_status === 'paid') annuityStatus = 'paid';
+      // transactions.status é o enum: recebido = 'confirmed'
+      else if (r.tx_status === 'confirmed' || r.paid_at) annuityStatus = 'paid';
       else if (r.due_date) {
         const daysUntil = Math.round((new Date(r.due_date) - now) / dayMs);
         if (daysUntil >= 0) annuityStatus = 'due';
@@ -712,7 +718,8 @@ router.post('/annuities/cpf/:practitionerId/pix', ...guards.adminOnly(), async (
       return res.status(404).json({ error: 'Cobrança não encontrada', code: 'NOT_FOUND' });
     }
     const tx = txRows[0];
-    if (tx.status === 'paid') {
+    // transactions.status é o enum: pago = 'confirmed'
+    if (tx.status === 'confirmed') {
       return res.status(409).json({ error: 'Anuidade já paga', code: 'CONFLICT' });
     }
 
