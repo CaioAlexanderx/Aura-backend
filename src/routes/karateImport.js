@@ -11,7 +11,9 @@
 // FPKT batch (handler `batchFpktHandler`): importa a planilha consolidada FPKT
 // (abas Academias + Alunos + Histórico) num fluxo só. Body JSON normalizado pelo front.
 //   upsert "completar o que falta" (COALESCE — nunca sobrescreve dado existente)
-//   dojôs:  chave (federation_id, lower(name)); espelha createDojo SEM owner_id
+//   dojôs:  chave (federation_id, lower(name)); pertence a um usuário de SISTEMA
+//           (não ao admin da federação — evita o bug de login multi-empresa).
+//           companies exige owner_id + legal_name (NOT NULL).
 //   alunos: chave (federation_id, karate_registration_number); resolve dojô por nome
 //   faixas (belt_events[]): trajetória → karate_belt_history (belt_schema='legacy'),
 //     resolve aluno por reg, idempotente via SAVEPOINT + NOT EXISTS
@@ -19,7 +21,7 @@
 //   transferências (transfers[]): → karate_practitioner_transfers (append-only).
 //     resolve aluno por reg + dojôs por nome; destino NOT NULL (pula se não resolve);
 //     idempotente via SAVEPOINT + NOT EXISTS (practitioner_id, destination_dojo_id, transferred_at).
-//   idempotente por import_batch_id
+//   idempotente por import_batch_id (uuid)
 // ============================================================
 'use strict';
 
@@ -272,10 +274,14 @@ const cleanCell = (v) => {
   return s;
 };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const batchFpktHandler = async (req, res) => {
   const federationId = req.params.id;
   const body = req.body || {};
-  const importBatchId = body.import_batch_id || uuidv4();
+  // customers.import_batch_id é UUID: só usa o recebido se for uuid válido, senão gera.
+  const importBatchId = (body.import_batch_id && UUID_RE.test(String(body.import_batch_id)))
+    ? body.import_batch_id : uuidv4();
   const dojos = Array.isArray(body.dojos) ? body.dojos : [];
   const students = Array.isArray(body.students) ? body.students : [];
   const beltEvents = Array.isArray(body.belt_events) ? body.belt_events : [];
@@ -313,6 +319,38 @@ const batchFpktHandler = async (req, res) => {
       return res.status(404).json({ error: 'Federação não encontrada', code: 'NOT_FOUND' });
     }
 
+    // ── Usuário de SISTEMA dono dos dojôs (companies.owner_id é NOT NULL) ──
+    // Dojôs NÃO podem pertencer ao admin da federação (faz o login dele cair em
+    // "visão consolidada" por ter >1 empresa). Reusa o dono de um dojô já existente
+    // da federação (o usuário de sistema); senão acha/cria um usuário de sistema
+    // dedicado com login travado. Só necessário se houver dojôs a INSERIR.
+    let systemOwnerId = null;
+    if (dojos.length) {
+      const ex = await client.query(
+        `SELECT owner_id FROM companies
+         WHERE federation_id = $1 AND vertical = 'karate_dojo' AND owner_id IS NOT NULL
+         LIMIT 1`,
+        [federationId]
+      );
+      if (ex.rows.length) {
+        systemOwnerId = ex.rows[0].owner_id;
+      } else {
+        const email = `sistema-dojos-${federationId}@getaura.com.br`;
+        const u = await client.query(`SELECT id FROM users WHERE email = $1 LIMIT 1`, [email]);
+        if (u.rows.length) {
+          systemOwnerId = u.rows[0].id;
+        } else {
+          const c = await client.query(
+            `INSERT INTO users (email, password_hash, full_name)
+             VALUES ($1, '!locked-system-no-login', 'Sistema Dojôs')
+             RETURNING id`,
+            [email]
+          );
+          systemOwnerId = c.rows[0].id;
+        }
+      }
+    }
+
     // ── Dojôs (Academias) ──
     for (const d of dojos) {
       const name = cleanCell(d.name);
@@ -343,13 +381,14 @@ const batchFpktHandler = async (req, res) => {
         );
         summary.dojos.updated++;
       } else {
-        // Espelha createDojo: SEM owner_id (federação enxerga por federation_id)
+        if (!systemOwnerId) continue; // sem dono de sistema não cria (não deveria ocorrer)
+        // companies exige legal_name + owner_id (NOT NULL). Dojô pertence ao sistema.
         await client.query(
           `INSERT INTO companies
-             (name, fpkt_affiliation_id, affiliation_model, address, phone,
-              federation_id, vertical, is_active, created_at, updated_at)
-           VALUES ($1, $2, 'annual', $3, $4, $5, 'karate_dojo', $6, NOW(), NOW())`,
-          [name, fpktId, address, phone, federationId, isActive]
+             (name, legal_name, fpkt_affiliation_id, affiliation_model, address, phone,
+              federation_id, owner_id, vertical, is_active, created_at, updated_at)
+           VALUES ($1, $1, $2, 'annual', $3, $4, $5, $6, 'karate_dojo', $7, NOW(), NOW())`,
+          [name, fpktId, address, phone, federationId, systemOwnerId, isActive]
         );
         summary.dojos.created++;
       }
