@@ -23,6 +23,17 @@
 // Guards: FEDERATION_READ para leitura; adminOnly para report/send.
 // Defensive 42P01: safe to deploy antes de qualquer nova migration.
 // Não requer migration — tudo derivado de tabelas existentes.
+//
+// NOTA DE SCHEMA (23/06): correções de colunas inexistentes que faziam as
+// telas 500 contra uma federação com dados reais:
+//   - companies.karate_region NÃO existe → coluna correta é companies.region
+//   - karate_dojo_annuity_history NÃO tem season_year (nem season) → a "season"
+//     é derivada de due_date via EXTRACT(YEAR FROM due_date)::int
+//   - karate_belt_history NÃO tem exam_date/dojo_id/new_belt_level/old_belt_level/
+//     examiner_name → usa graduated_at; dojo_id vem de customers (student_id);
+//     o histórico guarda só a faixa CONQUISTADA (belt_level/belt_name).
+//   - karate_dojo_annuity_history.status é TEXTO (não o enum transaction_status):
+//     'paid'/'pending'/'overdue' são valores legítimos e foram mantidos.
 // ============================================================
 'use strict';
 
@@ -107,7 +118,7 @@ function sendCsv(res, filename, cols, rows) {
 
 // ── Afiliação da rede ─────────────────────────────────────────
 // Deriva de companies (karate_dojo) + karate_dojo_annuity_history.
-// Conta dojôs por season_year para evolução anual.
+// Conta dojôs por ano de vencimento da anuidade para evolução anual.
 router.get('/afiliacao', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
@@ -115,7 +126,7 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
     // Dojôs afiliados ativos (vertical_active = karate_dojo, federation_id = fedId)
     const dojosRes = await safeQuery(
       `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name,
-              c.city, c.karate_region,
+              c.city, c.region,
               c.created_at::date AS affiliated_since
        FROM companies c
        WHERE c.federation_id = $1
@@ -143,7 +154,7 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
       `SELECT dojo_id, status, paid_at
        FROM karate_dojo_annuity_history
        WHERE federation_id = $1
-         AND season_year = $2`,
+         AND EXTRACT(YEAR FROM due_date)::int = $2`,
       [fedId, season]
     );
     const annuityBydojo = {};
@@ -164,14 +175,14 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
       const cols = [
         { key: 'name', label: 'Dojô' },
         { key: 'city', label: 'Cidade' },
-        { key: 'karate_region', label: 'Região' },
+        { key: 'region', label: 'Região' },
         { key: 'affiliated_since', label: 'Afiliado desde' },
         { key: 'annuity_status', label: 'Anuidade' },
       ];
       const rows = dojos.map((d) => ({
         name: d.name,
         city: d.city || '',
-        karate_region: d.karate_region || '',
+        region: d.region || '',
         affiliated_since: d.affiliated_since ? String(d.affiliated_since).slice(0, 10) : '',
         annuity_status: annuityBydojo[d.id] ? annuityBydojo[d.id].status : 'sem registro',
       }));
@@ -188,7 +199,7 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
         id: d.id,
         name: d.name,
         city: d.city || null,
-        region: d.karate_region || null,
+        region: d.region || null,
         affiliated_since: d.affiliated_since ? String(d.affiliated_since).slice(0, 10) : null,
         annuity_status: annuityBydojo[d.id] ? annuityBydojo[d.id].status : null,
       })),
@@ -211,7 +222,7 @@ router.get('/renovacao', ...guards.read(), async (req, res) => {
          COUNT(*) FILTER (WHERE status = 'paid')            AS renewed,
          COUNT(*) FILTER (WHERE status IN ('pending','overdue')) AS not_renewed
        FROM karate_dojo_annuity_history
-       WHERE federation_id = $1 AND season_year = $2`,
+       WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2`,
       [fedId, season]
     );
     const row = r.rows[0] || {};
@@ -228,13 +239,13 @@ router.get('/renovacao', ...guards.read(), async (req, res) => {
 });
 
 // ── Cobertura geográfica ──────────────────────────────────────
-// Agrupa dojôs por karate_region; mapeia para o grid de regiões de SP.
+// Agrupa dojôs por region; mapeia para o grid de regiões de SP.
 router.get('/cobertura', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
   try {
     const r = await safeQuery(
-      `SELECT c.karate_region,
+      `SELECT c.region,
               COUNT(*)::int AS dojos,
               COUNT(DISTINCT c.city) AS mun_covered,
               COUNT(cu.id)::int AS practitioners
@@ -243,13 +254,13 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
          AND c.is_active = true
-       GROUP BY c.karate_region`,
+       GROUP BY c.region`,
       [fedId]
     );
 
     const byRegion = {};
     for (const row of r.rows) {
-      if (row.karate_region) byRegion[row.karate_region] = row;
+      if (row.region) byRegion[row.region] = row;
     }
 
     const regions = SP_REGIONS.map((reg) => {
@@ -311,7 +322,7 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
               h.due_date, h.amount, h.status, h.paid_at
        FROM karate_dojo_annuity_history h
        JOIN companies c ON c.id = h.dojo_id
-       WHERE h.federation_id = $1 AND h.season_year = $2
+       WHERE h.federation_id = $1 AND EXTRACT(YEAR FROM h.due_date)::int = $2
        ORDER BY
          CASE h.status WHEN 'overdue' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
          h.due_date ASC`,
@@ -453,7 +464,7 @@ router.get('/dormencia', ...guards.read(), async (req, res) => {
   try {
     // Todos os dojôs afiliados
     const dojosRes = await safeQuery(
-      `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name, c.city, c.karate_region
+      `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name, c.city, c.region
        FROM companies c
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
@@ -461,11 +472,16 @@ router.get('/dormencia', ...guards.read(), async (req, res) => {
       [fedId]
     );
 
-    // Dojôs que tiveram pelo menos um exam result na season
+    // Dojôs que tiveram pelo menos uma graduação na season.
+    // karate_belt_history não tem dojo_id nem exam_date → dojo via customers,
+    // data via graduated_at.
     const examRes = await safeQuery(
-      `SELECT DISTINCT dojo_id FROM karate_belt_history
-       WHERE federation_id = $1
-         AND EXTRACT(YEAR FROM exam_date)::int = $2`,
+      `SELECT DISTINCT cu.dojo_id
+       FROM karate_belt_history bh
+       JOIN customers cu ON cu.id = bh.student_id
+       WHERE bh.federation_id = $1
+         AND EXTRACT(YEAR FROM bh.graduated_at)::int = $2
+         AND cu.dojo_id IS NOT NULL`,
       [fedId, season]
     );
     const examActive = new Set(examRes.rows.map((r) => r.dojo_id));
@@ -488,7 +504,7 @@ router.get('/dormencia', ...guards.read(), async (req, res) => {
         id: d.id,
         name: d.name,
         city: d.city || null,
-        region: d.karate_region || null,
+        region: d.region || null,
         has_exam: hasExam,
         has_comp: hasComp,
         active: hasExam || hasComp,
@@ -556,7 +572,7 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
     const revRes = await safeQuery(
       `SELECT dojo_id, SUM(amount) AS revenue
        FROM karate_dojo_annuity_history
-       WHERE federation_id = $1 AND season_year = $2 AND status = 'paid'
+       WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2 AND status = 'paid'
        GROUP BY dojo_id`,
       [fedId, season]
     );
@@ -612,6 +628,8 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
 
 // ── Graduações registradas ────────────────────────────────────
 // Exames Kyu→Dan registrados na federação, agrupados por mês.
+// karate_belt_history guarda só a faixa CONQUISTADA (belt_level/belt_name) e
+// a data em graduated_at; o dojô vem de customers (student_id).
 router.get('/graduacoes', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const months = parseInt(req.query.months) || 8;
@@ -620,13 +638,13 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
     // Mensal
     const monthRes = await safeQuery(
       `SELECT
-         DATE_TRUNC('month', exam_date) AS month_start,
-         COUNT(*) FILTER (WHERE new_belt_level NOT LIKE '%dan%') AS kyu_count,
-         COUNT(*) FILTER (WHERE new_belt_level LIKE '%dan%') AS dan_count,
+         DATE_TRUNC('month', graduated_at) AS month_start,
+         COUNT(*) FILTER (WHERE belt_level NOT LIKE '%dan%') AS kyu_count,
+         COUNT(*) FILTER (WHERE belt_level LIKE '%dan%') AS dan_count,
          COUNT(*)::int AS total
        FROM karate_belt_history
        WHERE federation_id = $1
-         AND exam_date >= CURRENT_DATE - ($2 * INTERVAL '1 month')
+         AND graduated_at >= CURRENT_DATE - ($2 * INTERVAL '1 month')
        GROUP BY month_start
        ORDER BY month_start ASC`,
       [fedId, months]
@@ -634,17 +652,16 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
 
     // Lista detalhada
     const listRes = await safeQuery(
-      `SELECT bh.id, bh.exam_date, bh.student_id,
+      `SELECT bh.id, bh.graduated_at, bh.student_id,
               cu.name AS student_name,
               COALESCE(dj.trade_name, dj.legal_name) AS dojo_name,
-              bh.old_belt_level, bh.new_belt_level,
-              bh.examiner_name
+              bh.belt_level, bh.belt_name
        FROM karate_belt_history bh
        JOIN customers cu ON cu.id = bh.student_id
        LEFT JOIN companies dj ON dj.id = cu.dojo_id
        WHERE bh.federation_id = $1
-         AND bh.exam_date >= CURRENT_DATE - ($2 * INTERVAL '1 month')
-       ORDER BY bh.exam_date DESC`,
+         AND bh.graduated_at >= CURRENT_DATE - ($2 * INTERVAL '1 month')
+       ORDER BY bh.graduated_at DESC`,
       [fedId, months]
     );
 
@@ -665,20 +682,18 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
 
     if (exportCsv) {
       const cols = [
-        { key: 'exam_date', label: 'Data' },
+        { key: 'graduated_at', label: 'Data' },
         { key: 'dojo_name', label: 'Dojô' },
         { key: 'student_name', label: 'Candidato' },
-        { key: 'old_belt_level', label: 'De' },
-        { key: 'new_belt_level', label: 'Para' },
-        { key: 'examiner_name', label: 'Banca' },
+        { key: 'belt_level', label: 'Faixa' },
+        { key: 'belt_name', label: 'Nome da faixa' },
       ];
       const csvRows = listRes.rows.map((r) => ({
-        exam_date: r.exam_date ? String(r.exam_date).slice(0, 10) : '',
+        graduated_at: r.graduated_at ? String(r.graduated_at).slice(0, 10) : '',
         dojo_name: r.dojo_name || '',
         student_name: r.student_name || '',
-        old_belt_level: r.old_belt_level || '',
-        new_belt_level: r.new_belt_level || '',
-        examiner_name: r.examiner_name || '',
+        belt_level: r.belt_level || '',
+        belt_name: r.belt_name || '',
       }));
       return sendCsv(res, 'graduacoes-registradas', cols, csvRows);
     }
@@ -691,13 +706,13 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
       monthly: months_data,
       list: listRes.rows.map((r) => ({
         id: r.id,
-        exam_date: r.exam_date ? String(r.exam_date).slice(0, 10) : null,
+        exam_date: r.graduated_at ? String(r.graduated_at).slice(0, 10) : null,
         student_id: r.student_id,
         student_name: r.student_name,
         dojo_name: r.dojo_name || null,
-        from_belt: r.old_belt_level || null,
-        to_belt: r.new_belt_level || null,
-        examiner: r.examiner_name || null,
+        to_belt: r.belt_level || null,
+        to_belt_name: r.belt_name || null,
+        examiner: null,
       })),
     });
   } catch (err) {
@@ -801,7 +816,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
          COUNT(*)::int AS total,
          COUNT(*) FILTER (WHERE status = 'overdue')::int AS vencido
        FROM karate_dojo_annuity_history
-       WHERE federation_id = $1 AND season_year = $2`,
+       WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2`,
       [fedId, season]
     );
     const inadTotal = parseInt(inadRes.rows[0]?.total || 0, 10);
@@ -812,7 +827,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     const gradRes = await safeQuery(
       `SELECT COUNT(*)::int AS total FROM karate_belt_history
        WHERE federation_id = $1
-         AND exam_date >= CURRENT_DATE - INTERVAL '8 months'`,
+         AND graduated_at >= CURRENT_DATE - INTERVAL '8 months'`,
       [fedId]
     );
     const gradTotal = parseInt(gradRes.rows[0]?.total || 0, 10);
@@ -879,13 +894,13 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
                 COUNT(*) FILTER (WHERE status = 'overdue')::int AS vencido,
                 COUNT(*) FILTER (WHERE status = 'paid')::int AS paid
          FROM karate_dojo_annuity_history
-         WHERE federation_id = $1 AND season_year = $2`,
+         WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2`,
         [fedId, season]
       ),
       safeQuery(
         `SELECT COUNT(*)::int AS total FROM karate_belt_history
          WHERE federation_id = $1
-           AND exam_date >= CURRENT_DATE - INTERVAL '30 days'`,
+           AND graduated_at >= CURRENT_DATE - INTERVAL '30 days'`,
         [fedId]
       ),
       safeQuery(
@@ -895,7 +910,7 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
                SELECT 1 FROM karate_belt_history bh
                WHERE bh.federation_id = $1
                  AND bh.student_id = cu.id
-                 AND EXTRACT(YEAR FROM bh.exam_date)::int = $2
+                 AND EXTRACT(YEAR FROM bh.graduated_at)::int = $2
              ) OR EXISTS (
                SELECT 1 FROM karate_competition_entries e
                JOIN karate_competitions kc ON kc.id = e.competition_id
