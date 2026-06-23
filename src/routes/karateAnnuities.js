@@ -21,6 +21,7 @@
 //
 // NOTA DE SCHEMA (23/06): transactions.status é o enum transaction_status
 // (pending/confirmed/cancelled). "Recebido/pago" = 'confirmed'.
+// transactions.reference_id é uuid: comparar com customers.id (uuid) sem ::text.
 // (karate_dojo_annuity_history.status é TEXTO e usa 'paid' — mantido.)
 // ============================================================
 'use strict';
@@ -562,7 +563,7 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
        FROM customers cu
        LEFT JOIN transactions t
          ON t.reference_type = 'customer'
-         AND t.reference_id = cu.id::text
+         AND t.reference_id = cu.id
          AND t.category = 'annuity_cpf'
          AND EXTRACT(YEAR FROM t.due_date) = $2
          AND t.federation_id = $1
@@ -710,7 +711,7 @@ router.post('/annuities/cpf/:practitionerId/pix', ...guards.adminOnly(), async (
       `SELECT t.*, cu.name AS pract_name
        FROM transactions t
        JOIN customers cu ON cu.id = $2
-       WHERE t.id = $1 AND t.federation_id = $3 AND t.reference_id = $2::text
+       WHERE t.id = $1 AND t.federation_id = $3 AND t.reference_id = $2
        LIMIT 1`,
       [transaction_id, practitionerId, federationId]
     );
