@@ -205,6 +205,7 @@ describe('POST /federation/:id/dojos (criar dojô)', () => {
     mockClient.query
       .mockResolvedValueOnce({})                          // BEGIN
       .mockResolvedValueOnce({ rows: [{ id: FED_ID }] }) // verifica federação
+      .mockResolvedValueOnce({ rows: [{ owner_id: 'sys-owner-uuid' }] }) // resolve owner de sistema (reusa dono de dojô existente)
       .mockResolvedValueOnce({ rows: [] })               // advisory lock
       .mockResolvedValueOnce({ rows: [] })               // MAX fpkt_affiliation_id (nenhum)
       .mockResolvedValueOnce({                            // INSERT company
