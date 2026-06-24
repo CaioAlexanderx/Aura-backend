@@ -26,7 +26,9 @@ types.setTypeParser(1700, (val) => (val === null ? null : parseFloat(val)));
 //   chamada de rede externa — SEFAZ — antes de liberar o client) esgotava o
 //   pool e TRAVAVA o app todo (incidente 23/06). 15 da folga ampla e segue
 //   bem abaixo de max_connections=60 do Postgres.
-// idleTimeoutMillis: 30000  →  conexao ociosa volta pro servidor depois de 30s.
+// idleTimeoutMillis: 60000  →  conexao ociosa volta pro servidor depois de 60s.
+//   ANTES era 30s; subido p/ dar margem ao keep-alive (abaixo) e evitar reciclar
+//   conexao quente entre rajadas.
 // connectionTimeoutMillis: 5000  →  se nao houver client livre em 5s, rejeita
 //   (em vez de pendurar pra sempre).
 // keepAlive: true  →  previne que conexões idle sejam derrubadas silenciosamente
@@ -37,7 +39,7 @@ const pool = new Pool({
   connectionString,
   ssl: { rejectUnauthorized: false },
   max: 15,
-  idleTimeoutMillis: 30000,
+  idleTimeoutMillis: 60000,
   connectionTimeoutMillis: 5000,
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,
@@ -63,5 +65,24 @@ pool.on('error', (err) => {
   // Logamos mas NÃO derrubamos o processo — o Railway já monitora saúde do serviço.
   console.error('Erro inesperado no pool do banco:', err.message, err.code || '');
 });
+
+// ── Keep-alive: mantém >=1 conexão QUENTE ──────────────────────────────────
+// O app roda no Railway (us-west) e o banco no Supabase (sa-east-1, São Paulo).
+// Uma conexão QUENTE faz um SELECT em ~190ms (1 round-trip cross-region); uma
+// conexão FRIA custa ~1.3s (TCP + TLS handshake + setup, tudo cruzando o
+// continente). Sem tráfego por mais que o idleTimeout, a conexão é reciclada e o
+// PRÓXIMO request do usuário paga o cold connect — a latência oscilava entre
+// ~190ms (quente) e >1000ms (fria).
+//
+// Este ping leve a cada 25s (abaixo do idleTimeout de 60s) mantém pelo menos uma
+// conexão recém-usada e quente no pool, então os requests reais quase sempre
+// pegam uma conexão pronta. unref() para não impedir o shutdown do processo.
+const KEEPALIVE_MS = 25000;
+const keepAliveTimer = setInterval(() => {
+  pool.query('SELECT 1').catch((err) =>
+    console.warn('[db] keepalive ping falhou (nao-fatal):', err.message)
+  );
+}, KEEPALIVE_MS);
+if (keepAliveTimer.unref) keepAliveTimer.unref();
 
 module.exports = pool;
