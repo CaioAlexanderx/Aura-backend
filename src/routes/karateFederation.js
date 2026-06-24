@@ -105,10 +105,13 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
 
   try {
     // ── 1. KPIs principais (paralelo) ────────────────────────
+    // dojo_count = TODOS os dojôs da federação (vertical = karate_dojo), sem
+    // filtro de is_active — coerente com a página Dojôs (karateDojos.js), que
+    // conta todos. Dojô inativo continua sendo um dojô filiado da federação.
     const [dojoRes, practRes, revenueRes] = await Promise.all([
       db.query(
         `SELECT COUNT(*) AS dojo_count FROM companies
-         WHERE federation_id = $1 AND vertical = 'karate_dojo' AND is_active = true`,
+         WHERE federation_id = $1 AND vertical = 'karate_dojo'`,
         [federationId]
       ),
       db.query(
@@ -132,6 +135,10 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
     const revenueYtd = parseFloat(revenueRes.rows[0].revenue_ytd) || 0;
 
     // ── 2. Status de anuidade dos dojôs ────────────────────────
+    // Regra: dojô SEM cobrança (sem registro de anuidade, ou registro sem
+    // due_date) é um estado NEUTRO ('no_charge') — ausência de cobrança NÃO é
+    // inadimplência. 'suspended' passa a significar apenas "tinha cobrança e
+    // venceu há mais de 180 dias".
     const annuityRes = await db.query(
       `WITH latest_annuity AS (
          SELECT DISTINCT ON (h.dojo_id)
@@ -156,9 +163,9 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
          la.due_date,
          la.days_since_due,
          CASE
-           WHEN la.dojo_id IS NULL                          THEN 'suspended'
+           WHEN la.dojo_id IS NULL                          THEN 'no_charge'
            WHEN la.raw_status = 'paid'                      THEN 'paid'
-           WHEN la.due_date IS NULL                         THEN 'suspended'
+           WHEN la.due_date IS NULL                         THEN 'no_charge'
            WHEN la.due_date >= NOW()                        THEN 'due'
            WHEN la.days_since_due <= 90                     THEN 'overdue'
            WHEN la.days_since_due <= 180                    THEN 'defaulting'
@@ -173,6 +180,9 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
 
     const allDojos = annuityRes.rows;
     const OVERDUE_STATUSES = ['overdue', 'defaulting', 'suspended'];
+    // Dojô COM cobrança = tem um status de anuidade real (não 'no_charge').
+    // Inadimplência só faz sentido entre os que têm cobrança lançada.
+    const chargedDojos = allDojos.filter(d => d.annuity_status !== 'no_charge');
 
     const overdueDojosDetail = allDojos
       .filter(d => OVERDUE_STATUSES.includes(d.annuity_status))
@@ -183,9 +193,15 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
         days_overdue: parseInt(d.days_since_due, 10) || 0,
       }));
 
-    const overdueRate = allDojos.length > 0
-      ? parseFloat((overdueDojosDetail.length / allDojos.length).toFixed(4))
+    // overdue_rate sobre a base COM cobrança; 0 quando ninguém tem cobrança
+    // (evita divisão por zero e evita contar ausência de cobrança como atraso).
+    const overdueRate = chargedDojos.length > 0
+      ? parseFloat((overdueDojosDetail.length / chargedDojos.length).toFixed(4))
       : 0;
+
+    // C7: teto defensivo na lista de alerta (front pagina/linka o resto).
+    const OVERDUE_CAP = 50;
+    const overdueDojosCapped = overdueDojosDetail.slice(0, OVERDUE_CAP);
 
     // Upcoming events (stub — events table a implementar na Fase 2)
     const upcomingEvents = [];
@@ -302,7 +318,7 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
         overdue_rate:      overdueRate,
       },
       upcoming_events:  upcomingEvents,
-      overdue_dojos:    overdueDojosDetail,
+      overdue_dojos:    overdueDojosCapped,
       belt_distribution: beltDistribution,
       alerts,  // Track P: novo campo aditivo
     });

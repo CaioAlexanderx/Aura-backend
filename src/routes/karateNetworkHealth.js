@@ -24,6 +24,14 @@
 // Defensive 42P01: safe to deploy antes de qualquer nova migration.
 // Não requer migration — tudo derivado de tabelas existentes.
 //
+// NOTA DE COERÊNCIA DE MÉTRICAS (24/06): "Dojôs afiliados" da Saúde usa a
+// BASE TOTAL de dojôs da federação (todos vertical_active = karate_dojo, sem
+// filtro de is_active), igual à página Dojôs e ao Painel. As "novas filiações
+// no ano" continuam disponíveis, mas como métrica SEPARADA (new_affiliations_
+// year), nunca como o número de "afiliados". Inadimplência: dojô SEM cobrança
+// lançada não é inadimplente — o denominador são as anuidades efetivamente
+// lançadas; sem cobranças → inadimplência 0%.
+//
 // NOTA DE SCHEMA (23/06): correções de colunas inexistentes que faziam as
 // telas 500 contra uma federação com dados reais:
 //   - companies.karate_region NÃO existe → coluna correta é companies.region
@@ -123,7 +131,8 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
   try {
-    // Dojôs afiliados ativos (vertical_active = karate_dojo, federation_id = fedId)
+    // BASE TOTAL de dojôs da federação (sem filtro de is_active) — coerente
+    // com a página Dojôs e o Painel. Um dojô inativo continua filiado.
     const dojosRes = await safeQuery(
       `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name,
               c.city, c.region,
@@ -131,7 +140,6 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
        FROM companies c
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
-         AND c.is_active = true
        ORDER BY c.created_at ASC`,
       [fedId]
     );
@@ -161,7 +169,8 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
     for (const r of annuityRes.rows) annuityBydojo[r.dojo_id] = r;
 
     const totalNow = dojos.length;
-    const novas = dojos.filter((d) => {
+    // Novas filiações DO ANO — métrica SEPARADA, nunca confundida com "afiliados".
+    const newAffiliationsYear = dojos.filter((d) => {
       const y = new Date(d.affiliated_since).getFullYear();
       return y === season;
     }).length;
@@ -192,7 +201,10 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
     res.json({
       season,
       total_now: totalNow,
-      novas_affiliacoes: novas,
+      // Campo novo, nomeado sem ambiguidade. Mantém-se novas_affiliacoes como
+      // alias legado pelo mesmo valor para não quebrar o front existente.
+      new_affiliations_year: newAffiliationsYear,
+      novas_affiliacoes: newAffiliationsYear,
       nao_renovaram: naoRenov,
       yearly: yearlyRes.rows,
       dojos: dojos.map((d) => ({
@@ -244,6 +256,7 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
   try {
+    // Base TOTAL de dojôs (sem is_active) — cobertura geográfica da rede inteira.
     const r = await safeQuery(
       `SELECT c.region,
               COUNT(*)::int AS dojos,
@@ -253,7 +266,6 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
        LEFT JOIN customers cu ON cu.dojo_id = c.id AND cu.federation_id = $1
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
-         AND c.is_active = true
        GROUP BY c.region`,
       [fedId]
     );
@@ -310,6 +322,8 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
 
 // ── Inadimplência da rede ─────────────────────────────────────
 // Status das anuidades de afiliação dos dojôs (em dia / vencendo / vencido).
+// REGRA: dojô SEM cobrança lançada não entra na conta — o denominador são as
+// anuidades efetivamente registradas. Sem cobranças → inadimplência 0%.
 router.get('/inadimplencia', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const season = parseInt(req.query.season) || currentSeason();
@@ -338,6 +352,7 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
       return diff >= 0 && diff <= 7;
     }).length;
     const vencido = rows.filter((r) => r.status === 'overdue').length;
+    // total aqui = anuidades lançadas. Sem cobranças → total 0 → inadPct 0.
     const inadPct = total > 0 ? Number((vencido / total * 100).toFixed(1)) : 0;
 
     if (exportCsv) {
@@ -462,13 +477,12 @@ router.get('/dormencia', ...guards.read(), async (req, res) => {
   const season = parseInt(req.query.season) || currentSeason();
   const exportCsv = req.query.export === 'csv';
   try {
-    // Todos os dojôs afiliados
+    // Base TOTAL de dojôs afiliados (sem is_active)
     const dojosRes = await safeQuery(
       `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name, c.city, c.region
        FROM companies c
        WHERE c.federation_id = $1
-         AND c.vertical_active = 'karate_dojo'
-         AND c.is_active = true`,
+         AND c.vertical_active = 'karate_dojo'`,
       [fedId]
     );
 
@@ -554,7 +568,7 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
   const season = parseInt(req.query.season) || currentSeason();
   const exportCsv = req.query.export === 'csv';
   try {
-    // Praticantes por dojô
+    // Praticantes por dojô — base TOTAL de dojôs (sem is_active)
     const practRes = await safeQuery(
       `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name,
               COUNT(cu.id)::int AS practitioners
@@ -562,7 +576,6 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
        LEFT JOIN customers cu ON cu.dojo_id = c.id AND cu.federation_id = $1
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
-         AND c.is_active = true
        GROUP BY c.id, c.trade_name, c.legal_name
        ORDER BY practitioners DESC`,
       [fedId]
@@ -794,13 +807,22 @@ router.get('/summary', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const season = parseInt(req.query.season) || currentSeason();
   try {
-    // 1. Dojôs afiliados
+    // 1. Dojôs afiliados — BASE TOTAL (sem is_active), coerente com Painel/Dojôs.
     const dojosRes = await safeQuery(
       `SELECT COUNT(*)::int AS total FROM companies
-       WHERE federation_id = $1 AND vertical_active = 'karate_dojo' AND is_active = true`,
+       WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
       [fedId]
     );
     const dojoCount = parseInt(dojosRes.rows[0]?.total || 0, 10);
+
+    // 1b. Novas filiações no ano — métrica SEPARADA (não é "afiliados").
+    const newAffRes = await safeQuery(
+      `SELECT COUNT(*)::int AS total FROM companies
+       WHERE federation_id = $1 AND vertical_active = 'karate_dojo'
+         AND EXTRACT(YEAR FROM created_at)::int = $2`,
+      [fedId, season]
+    );
+    const newAffiliationsYear = parseInt(newAffRes.rows[0]?.total || 0, 10);
 
     // 2. Praticantes registrados
     const practRes = await safeQuery(
@@ -810,7 +832,8 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     );
     const practCount = parseInt(practRes.rows[0]?.total || 0, 10);
 
-    // 3. Inadimplência %
+    // 3. Inadimplência % — denominador = anuidades lançadas; dojô sem cobrança
+    //    não entra. Sem cobranças → total 0 → inadPct 0 (não divide por zero).
     const inadRes = await safeQuery(
       `SELECT
          COUNT(*)::int AS total,
@@ -845,6 +868,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
 
     res.json({
       season,
+      new_affiliations_year: newAffiliationsYear,
       kpis: [
         { key: 'dojos', label: 'Dojôs afiliados', value: dojoCount, unit: '' },
         { key: 'praticantes', label: 'Praticantes registrados', value: practCount, unit: '' },
@@ -886,7 +910,7 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
     const [dojosRes, inadRes, gradRes, dormRes] = await Promise.all([
       safeQuery(
         `SELECT COUNT(*)::int AS total FROM companies
-         WHERE federation_id = $1 AND vertical_active = 'karate_dojo' AND is_active = true`,
+         WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
         [fedId]
       ),
       safeQuery(
