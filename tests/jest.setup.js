@@ -9,13 +9,23 @@
 process.env.JWT_SECRET = 'aura-test-secret-2026';
 process.env.NODE_ENV = 'test';
 
-jest.mock('../src/config/database', () => ({
-  query: jest.fn(),
-  connect: jest.fn(() => ({
-    query: jest.fn(),
-    release: jest.fn(),
-  })),
-}));
+// O modulo real (src/config/database.js) exporta o pool + helpers
+// queryRetry (retry curto em erro transitorio de conexao) e isTransientConnError.
+// O mock precisa espelhar essa API: requireCompanyAccess usa db.queryRetry.
+// queryRetry DELEGA ao MESMO jest.fn de query -> preserva a ordem e a contagem
+// dos mockResolvedValueOnce que os testes ja configuram em db.query.
+jest.mock('../src/config/database', () => {
+  const query = jest.fn();
+  return {
+    query,
+    queryRetry: (...args) => query(...args),
+    isTransientConnError: () => false,
+    connect: jest.fn(() => ({
+      query: jest.fn(),
+      release: jest.fn(),
+    })),
+  };
+});
 
 jest.mock('../src/config/sentry', () => ({
   Sentry: {
