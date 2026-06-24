@@ -4,13 +4,17 @@
 // POST  /federation/:id/practitioners
 // GET   /federation/:id/practitioners/:practitionerId
 // PATCH /federation/:id/practitioners/:practitionerId   (edição da ficha)
+// POST  /federation/:id/practitioners/:practitionerId/graduations (graduação manual)
 //
 // Nota: /practitioners/import é registrado ANTES deste router no index.js
 // para que 'import' não seja capturado como :practitionerId.
 //
 // 22/06/2026: endereço passou a ser persistido (colunas já existiam em
-// customers; a rota não gravava) + PATCH de edição da ficha. Faixa NÃO entra
-// aqui (vive em karate_belt_history, append-only/imutável).
+// customers; a rota não gravava) + PATCH de edição da ficha.
+// 23/06/2026: PATCH aceita is_active (status ativo/inativo) + POST de
+// graduação manual em karate_belt_history (append-only; a view
+// karate_current_belt deriva a faixa atual). Faixa NÃO é editável via PATCH
+// (vive no histórico imutável) — registra-se uma nova graduação.
 // ============================================================
 'use strict';
 
@@ -213,7 +217,9 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
 });
 
 // ── PATCH /federation/:id/practitioners/:practitionerId ─────
-// Edita a ficha do praticante. Faixa NÃO entra aqui (karate_belt_history).
+// Edita a ficha do praticante, incluindo o status (is_active).
+// Faixa NÃO entra aqui (karate_belt_history, append-only) — para registrar
+// uma graduação use POST /practitioners/:practitionerId/graduations.
 router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, practitionerId } = req.params;
   const b = req.body || {};
@@ -224,10 +230,14 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     email: 'email', phone: 'phone', dojo_id: 'dojo_id',
     is_student: 'is_student', is_arbiter: 'is_arbiter',
     is_instructor: 'is_instructor', is_examiner: 'is_examiner',
+    is_active: 'is_active', // status ativo/inativo do praticante
     parent_guardian_id: 'parent_guardian_id', photo_url: 'karate_photo_url',
     street: 'street', number: 'number', complement: 'complement',
     neighborhood: 'neighborhood', city: 'city', state: 'state', zip_code: 'zip_code',
   };
+
+  // Campos booleanos: normaliza p/ não virar null no tratamento de string vazia.
+  const BOOL_FIELDS = new Set(['is_student', 'is_arbiter', 'is_instructor', 'is_examiner', 'is_active']);
 
   const client = await db.connect();
   try {
@@ -266,8 +276,12 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
       if (b[field] === undefined) continue;
       let v = b[field];
       if (field === 'full_name') v = String(v).trim();
-      // string vazia → null (dado ausente é neutro, não erro)
-      if (typeof v === 'string' && v.trim() === '') v = null;
+      if (BOOL_FIELDS.has(field)) {
+        v = v === true || v === 'true' || v === 1; // coerção segura p/ boolean
+      } else if (typeof v === 'string' && v.trim() === '') {
+        // string vazia → null (dado ausente é neutro, não erro)
+        v = null;
+      }
       sets.push(`${col} = $${i}`); vals.push(v); i++;
     }
     if (!sets.length) {
@@ -303,6 +317,77 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     res.status(500).json({ error: 'Erro ao atualizar praticante', detail: err.message });
   } finally {
     client.release();
+  }
+});
+
+// ── POST /federation/:id/practitioners/:practitionerId/graduations ──
+// Registra uma graduação MANUAL no histórico de faixas (karate_belt_history).
+// A tabela é append-only/imutável; a view karate_current_belt deriva a faixa
+// atual pelo MAX(graduated_at). Isto é o "editar trajetória" do detalhe:
+// adicionar uma faixa + data, sem alterar registros anteriores.
+//
+// Body: { belt_level (req), belt_name?, belt_schema?, graduated_at? (YYYY-MM-DD), notes? }
+router.post('/:practitionerId/graduations', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, practitionerId } = req.params;
+  const b = req.body || {};
+
+  const beltLevel  = b.belt_level != null ? String(b.belt_level).trim() : '';
+  const beltName   = b.belt_name != null ? String(b.belt_name).trim() : '';
+  const beltSchema = b.belt_schema === 'legacy' ? 'legacy' : 'fpkt_shotokan';
+  const notes      = b.notes != null ? String(b.notes).trim() : null;
+
+  if (!beltLevel && !beltName) {
+    return res.status(422).json({ error: 'Informe belt_level ou belt_name', code: 'VALIDATION_ERROR' });
+  }
+
+  // graduated_at: aceita YYYY-MM-DD; default hoje. Valida formato simples.
+  let graduatedAt = (b.graduated_at != null ? String(b.graduated_at).slice(0, 10) : '') || null;
+  if (graduatedAt && !/^\d{4}-\d{2}-\d{2}$/.test(graduatedAt)) {
+    return res.status(422).json({ error: 'graduated_at deve ser YYYY-MM-DD', code: 'VALIDATION_ERROR' });
+  }
+
+  try {
+    // Praticante pertence à federação?
+    const prac = await db.query(
+      `SELECT id FROM customers WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+      [practitionerId, federationId]
+    );
+    if (!prac.rows.length) {
+      return res.status(404).json({ error: 'Praticante não encontrado', code: 'NOT_FOUND' });
+    }
+
+    const insertRes = await db.query(
+      `INSERT INTO karate_belt_history
+         (student_id, federation_id, belt_level, belt_name, belt_schema,
+          graduated_at, notes, created_by, created_at)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6::date, CURRENT_DATE), $7, $8, NOW())
+       RETURNING id, belt_level, belt_name, belt_schema, graduated_at, exam_id, notes`,
+      [
+        practitionerId,
+        federationId,
+        beltLevel || beltName,         // belt_level NOT NULL
+        beltName || beltLevel,         // belt_name  NOT NULL
+        beltSchema,
+        graduatedAt,
+        notes,
+        req.user?.id || null,
+      ]
+    );
+
+    const r = insertRes.rows[0];
+    res.status(201).json({
+      id: r.id,
+      belt_level: r.belt_level,
+      belt_name: r.belt_name,
+      belt_schema: r.belt_schema,
+      graduated_at: r.graduated_at,
+      is_legacy: r.belt_schema === 'legacy',
+      exam_id: r.exam_id || null,
+      notes: r.notes || null,
+    });
+  } catch (err) {
+    console.error('[karatePractitioners] graduation error:', err.message);
+    res.status(500).json({ error: 'Erro ao registrar graduação', detail: err.message });
   }
 });
 
@@ -377,6 +462,7 @@ function shapePractitioner(p) {
     is_examiner: p.is_examiner,
     photo_url: p.karate_photo_url || null,
     karate_registration_number: p.karate_registration_number || null,
+    is_active: p.is_active,
     affiliation_status: p.is_active ? 'active' : 'inactive',
     street: p.street || null,
     number: p.number || null,
