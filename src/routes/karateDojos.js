@@ -19,9 +19,10 @@
 //
 // Endereço (Fix 5): além do campo `address` (texto livre legado, mantido por
 // compat), o dojô usa as colunas estruturadas address_street/address_number/
-// address_complement/address_neighborhood/address_city/address_state/
-// address_zip — as MESMAS já usadas pela NF-e. Aceitas no POST/PATCH e
-// devolvidas no GET. Se vier só `address` legado, nada quebra.
+// address_complement/address_district/address_city/address_state/address_zip —
+// as MESMAS já usadas pela NF-e. ATENÇÃO: a coluna de bairro em companies é
+// `address_district` (NÃO address_neighborhood). O JSON da API expõe o campo
+// como `address_neighborhood` (bairro) e mapeia <-> address_district.
 // ============================================================
 'use strict';
 
@@ -31,12 +32,13 @@ const { guards } = require('../config/karateRoles');
 const { nextDojoAffiliationId, computeDojoStatus } = require('../services/karateService');
 
 // Colunas de endereço estruturado (compartilhadas com a NF-e).
-// SELECT list reaproveitada em list/detail/insert/update returning.
+// Bairro: coluna real = address_district; expomos como address_neighborhood.
 const ADDRESS_COLS =
   'c.address, c.address_street, c.address_number, c.address_complement, ' +
-  'c.address_neighborhood, c.address_city, c.address_state, c.address_zip';
+  'c.address_district AS address_neighborhood, c.address_city, c.address_state, c.address_zip';
 
 // Monta o bloco de endereço da resposta JSON a partir de uma row.
+// (a row já vem com address_neighborhood por causa do alias acima / RETURNING)
 function addressOut(r) {
   return {
     address: r.address || null,
@@ -240,11 +242,12 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     const fpktId = await nextDojoAffiliationId(client, federationId);
 
     // companies exige legal_name + owner_id (NOT NULL). legal_name = name.
+    // Bairro vai na coluna address_district (companies não tem address_neighborhood).
     const insertRes = await client.query(
       `INSERT INTO companies
          (name, legal_name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
           affiliation_since, dojo_founded_year, address, phone, email,
-          address_street, address_number, address_complement, address_neighborhood,
+          address_street, address_number, address_complement, address_district,
           address_city, address_state, address_zip,
           federation_id, owner_id, vertical, is_active, created_at, updated_at)
        VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
@@ -252,7 +255,8 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
                $19, $20, 'karate_dojo', true, NOW(), NOW())
        RETURNING id, name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
                  affiliation_since, dojo_founded_year, address,
-                 address_street, address_number, address_complement, address_neighborhood,
+                 address_street, address_number, address_complement,
+                 address_district AS address_neighborhood,
                  address_city, address_state, address_zip,
                  phone, email, is_active`,
       [
@@ -411,11 +415,12 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
     phone: 'phone',
     email: 'email',
     karate_logo_url: 'karate_logo_url',
-    // Endereço estruturado (Fix 5) — mesmas colunas da NF-e
+    // Endereço estruturado (Fix 5) — mesmas colunas da NF-e.
+    // bairro (address_neighborhood na API) → coluna real address_district.
     address_street: 'address_street',
     address_number: 'address_number',
     address_complement: 'address_complement',
-    address_neighborhood: 'address_neighborhood',
+    address_neighborhood: 'address_district',
     address_city: 'address_city',
     address_state: 'address_state',
     address_zip: 'address_zip',
@@ -449,7 +454,8 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
        WHERE id = $${idx} AND federation_id = $${idx + 1} AND vertical = 'karate_dojo'
        RETURNING id, name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
                  affiliation_since, dojo_founded_year, address,
-                 address_street, address_number, address_complement, address_neighborhood,
+                 address_street, address_number, address_complement,
+                 address_district AS address_neighborhood,
                  address_city, address_state, address_zip,
                  phone, email, is_active`,
       values
