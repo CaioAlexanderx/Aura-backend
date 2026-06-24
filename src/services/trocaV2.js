@@ -3,6 +3,12 @@
 // Handler do contrato v2 do POST /pdv/troca.
 // Doc: Aura/AUDITORIA_TROCA_PDV_2026-05-17.docx
 //
+// 23/06/2026 (fix travamento de pool): client.release() movido pra LOGO APOS
+//   o COMMIT. Antes o release so ocorria no finally, no fim de tudo — entao a
+//   conexao ficava presa durante a fase pos-COMMIT (chamada SEFAZ sem timeout +
+//   db.query extras). Com pool max baixo, poucas trocas com SEFAZ lenta prendiam
+//   todas as conexoes e travavam o app inteiro. O trabalho pos-commit usa
+//   db.query (pool), nao precisa do client da transacao.
 // 25/05/2026 (fix sem-NFC-e): removido bloco needsDevolucao55 ->
 //   CUSTOMER_ADDRESS_REQUIRED. SEFAZ FAQ MG #7 — dest NF-e 55
 //   devolucao varejo e o proprio emitente.
@@ -658,6 +664,7 @@ async function handle(req, res) {
   const companyId = req.params.id;
 
   const client = await db.connect();
+  let clientReleased = false;
   let preCancelled = [];
   try {
     await client.query('BEGIN');
@@ -880,6 +887,16 @@ async function handle(req, res) {
 
     await client.query('COMMIT');
 
+    // Libera a conexão IMEDIATAMENTE após o COMMIT. Todo o trabalho pós-commit
+    // abaixo (chamadas SEFAZ via trocaDevolucao55 + db.query de atualização e
+    // leitura) usa o POOL (db.query), NÃO este client da transação. Antes o
+    // release só ocorria no finally, no fim de tudo — então a conexão ficava
+    // PRESA durante a chamada à SEFAZ (rede, potencialmente lenta), esgotando o
+    // pool (max) e travando o app inteiro (incidente 23/06). A flag clientReleased
+    // evita double-release no finally e o ROLLBACK em conexão já devolvida.
+    client.release();
+    clientReleased = true;
+
     // ── C cont.) Chamar SEFAZ pos-COMMIT para devolucao_55 ──
     const fiscalResults = [];
 
@@ -996,7 +1013,7 @@ async function handle(req, res) {
       receipt_url: `/companies/${companyId}/print/receipt/${trocaSaleRow.id}`,
     });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
+    if (!clientReleased) { try { await client.query('ROLLBACK'); } catch (_) {} }
     if (preCancelled.length) await undoCancellations(preCancelled);
     if (err.isTrocaV2Error) return res.status(err.status).json(err.body);
     // ── B) Estoque insuficiente — codigo padrao para pdv.js capturar ──
@@ -1011,7 +1028,7 @@ async function handle(req, res) {
     console.error('[trocaV2] internal error:', err);
     return res.status(500).json({ error: 'Erro interno na troca v2' });
   } finally {
-    client.release();
+    if (!clientReleased) client.release();
   }
 }
 
