@@ -40,6 +40,13 @@
 //   Cada CNPJ ve apenas suas proprias vendas aqui. A visibilidade cross-CNPJ
 //   fica SOMENTE no sistema de trocas (pdv.js sales-for-troca /
 //   sales-by-product-barcode), que ja era group-aware.
+//
+// 24/06/2026 — stats NaN-safe: um único numeric 'NaN' (ex.: unit_price de um
+//   returned_item vindo de payload invalido) envenenava o SUM e a receita por
+//   empresa virava NaN -> JSON null -> crash/zero na tela de Vendas. Agora o
+//   SQL usa NULLIF(x,'NaN'::numeric) (uma linha ruim contribui 0, nao zera o
+//   total) e o JS aplica `|| 0` em revenue/avg_ticket/net_amount. Raiz (nao
+//   persistir NaN) tratada no trocaV2.js.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -124,6 +131,7 @@ router.get('/', asyncHandler(async (req, res) => {
 
   // 02/06/2026: lista expoe net_amount/returned_value pra troca (lista mostra liquido).
   // net = total_amount (novos) - SUM(troca_returned_items) quando type='troca'.
+  // 24/06/2026: NULLIF(...,'NaN') no subselect — um numeric 'NaN' nao polui o returned_value.
   const listQuery =
     'SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status, ' +
     "       COALESCE(s.type, 'sale') AS type, s.exchange_of_sale_id, " +
@@ -131,7 +139,7 @@ router.get('/', asyncHandler(async (req, res) => {
     '       s.customer_id, c.name AS customer_name, ' +
     '       s.seller_id, COALESCE(s.seller_name, e.name) AS seller_name, s.employee_id, ' +
     '       (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS items_count, ' +
-    '       (SELECT COALESCE(SUM(tri.quantity * tri.unit_price), 0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) AS returned_value, ' +
+    "       (SELECT COALESCE(SUM(NULLIF(tri.quantity,'NaN'::numeric) * NULLIF(tri.unit_price,'NaN'::numeric)), 0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) AS returned_value, " +
     "       (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS transaction_id " +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
@@ -143,6 +151,9 @@ router.get('/', asyncHandler(async (req, res) => {
 
   // Stats agregados: receita conta troca pelo LIQUIDO (novos - devolvidos),
   // venda normal pelo total_amount. (Antes somava total_amount cheio da troca.)
+  // 24/06/2026: NULLIF(...,'NaN'::numeric) em cada termo — um único valor NaN
+  // (ex.: unit_price corrompido) deixa de envenenar o SUM/AVG inteiro (uma
+  // linha ruim contribui 0/NULL em vez de zerar a receita da empresa toda).
   const statsQuery =
     'SELECT ' +
     '  COUNT(*)::int AS total_sales, ' +
@@ -150,10 +161,10 @@ router.get('/', asyncHandler(async (req, res) => {
     "  COUNT(*) FILTER (WHERE s.status = 'cancelled')::int AS cancelled_sales, " +
     "  COALESCE(SUM( " +
     "    CASE WHEN COALESCE(s.type,'sale') = 'troca' " +
-    "         THEN s.total_amount - (SELECT COALESCE(SUM(tri.quantity*tri.unit_price),0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) " +
-    "         ELSE s.total_amount END " +
+    "         THEN COALESCE(NULLIF(s.total_amount,'NaN'::numeric),0) - (SELECT COALESCE(SUM(NULLIF(tri.quantity,'NaN'::numeric)*NULLIF(tri.unit_price,'NaN'::numeric)),0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) " +
+    "         ELSE COALESCE(NULLIF(s.total_amount,'NaN'::numeric),0) END " +
     "  ) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled'), 0)::numeric AS revenue, " +
-    "  COALESCE(AVG(s.total_amount) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled' AND COALESCE(s.type,'sale')='sale'), 0)::numeric AS avg_ticket " +
+    "  COALESCE(AVG(NULLIF(s.total_amount,'NaN'::numeric)) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled' AND COALESCE(s.type,'sale')='sale'), 0)::numeric AS avg_ticket " +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
@@ -167,13 +178,15 @@ router.get('/', asyncHandler(async (req, res) => {
     offset: offsetNum,
     sales: rows.map(function(r) {
       const type = r.type || 'sale';
-      const newValue = parseFloat(r.total_amount);
-      const returnedValue = parseFloat(r.returned_value || 0);
+      // 24/06/2026: `|| 0` defende contra um total_amount/returned_value NaN
+      // (numeric 'NaN' serializa como string "NaN" -> parseFloat = NaN).
+      const newValue = parseFloat(r.total_amount) || 0;
+      const returnedValue = parseFloat(r.returned_value) || 0;
       const isTroca = type === 'troca';
       return {
         id: r.id,
         total_amount: newValue,
-        discount_amount: parseFloat(r.discount_amount || 0),
+        discount_amount: parseFloat(r.discount_amount || 0) || 0,
         payment_method: r.payment_method,
         status: r.status || 'completed',
         type: type,
@@ -193,8 +206,8 @@ router.get('/', asyncHandler(async (req, res) => {
       total_sales: stats.total_sales,
       active_sales: stats.active_sales,
       cancelled_sales: stats.cancelled_sales,
-      revenue: parseFloat(stats.revenue),
-      avg_ticket: parseFloat(stats.avg_ticket),
+      revenue: parseFloat(stats.revenue) || 0,
+      avg_ticket: parseFloat(stats.avg_ticket) || 0,
     },
   });
 }));
@@ -233,10 +246,10 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       id: r.id,
       product_id: r.product_id,
       variant_id: r.variant_id,
-      quantity: parseFloat(r.quantity),
-      unit_price: parseFloat(r.unit_price),
-      discount: parseFloat(r.discount || 0),
-      total_price: parseFloat(r.total_price),
+      quantity: parseFloat(r.quantity) || 0,
+      unit_price: parseFloat(r.unit_price) || 0,
+      discount: parseFloat(r.discount || 0) || 0,
+      total_price: parseFloat(r.total_price) || 0,
       product_name: r.product_name || r.product_name_snapshot || 'Item',
       image_url: r.image_url,
     };
@@ -259,7 +272,7 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       [saleId]
     );
     const returnedValue = retRes.rows.reduce(function(acc, r) {
-      return acc + parseFloat(r.quantity) * parseFloat(r.unit_price);
+      return acc + (parseFloat(r.quantity) || 0) * (parseFloat(r.unit_price) || 0);
     }, 0);
     const newValue = items.reduce(function(acc, r) { return acc + r.total_price; }, 0);
     troca = {
@@ -271,15 +284,15 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
         return {
           product_id: r.product_id,
           variant_id: r.variant_id,
-          quantity: parseFloat(r.quantity),
-          unit_price: parseFloat(r.unit_price),
+          quantity: parseFloat(r.quantity) || 0,
+          unit_price: parseFloat(r.unit_price) || 0,
           product_name: r.product_name || r.product_name_snapshot || 'Item',
           image_url: r.image_url,
           original_sale_id: r.original_sale_id,
         };
       }),
       payments: payRes.rows.map(function(r) {
-        return { method: r.method, amount: parseFloat(r.amount) };
+        return { method: r.method, amount: parseFloat(r.amount) || 0 };
       }),
     };
   }
@@ -320,8 +333,8 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   res.json({
     sale: {
       id: sale.id,
-      total_amount: parseFloat(sale.total_amount),
-      discount_amount: parseFloat(sale.discount_amount || 0),
+      total_amount: parseFloat(sale.total_amount) || 0,
+      discount_amount: parseFloat(sale.discount_amount || 0) || 0,
       payment_method: sale.payment_method,
       status: sale.status || 'completed',
       type: sale.type || 'sale',
