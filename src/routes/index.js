@@ -141,6 +141,10 @@ router.use('/karate', require('./karateFederation'));
 // Ambos montados sob /federation/:id/practitioners
 router.use('/federation/:id/practitioners/import', require('./karateImport'));
 router.use('/federation/:id/practitioners',        require('./karatePractitioners'));
+// Export de dados do dojô (round-trip com o import). Montado ANTES do router
+// principal de dojos só por clareza; ambos respondem sob /federation/:id/dojos
+// e o caminho /:dojoId/export-data não colide com as rotas de karateDojos.
+router.use('/federation/:id/dojos',                require('./karateExportDojo'));
 router.use('/federation/:id/dojos',                require('./karateDojos'));
 // dashboard e belt-distribution são expostos pelo karateFederation router
 // mas precisam do param :id, então também montamos aqui:
