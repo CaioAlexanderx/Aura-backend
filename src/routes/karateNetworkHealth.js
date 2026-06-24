@@ -32,6 +32,14 @@
 // lançada não é inadimplente — o denominador são as anuidades efetivamente
 // lançadas; sem cobranças → inadimplência 0%.
 //
+// NOTA DE CATEGORIZAÇÃO DE FAIXA (24/06): na "Relação de faixas" o belt_level
+// da faixa preta é 'preta' (o belt_name carrega o grau: 'Preta 1°', 'Preta 2°'…),
+// e NÃO '1dan'/'2dan'. A categorização antiga procurava keys como '1dan' e por
+// isso ~600 pretas caíam em nenhum bucket → Dan aparecia 0. Agora normalizamos
+// acento/caixa do belt_level e roteamos qualquer 'preta' para Dan (1º Dan por
+// padrão; 2º+ quando o grau no belt_name for >= 2). A Vermelha (histórica) NÃO
+// entra nos buckets ativos.
+//
 // NOTA DE SCHEMA (23/06): correções de colunas inexistentes que faziam as
 // telas 500 contra uma federação com dados reais:
 //   - companies.karate_region NÃO existe → coluna correta é companies.region
@@ -67,6 +75,40 @@ function currentSeason() {
 function fmtBRL(v) {
   const n = Number(v || 0);
   return 'R$ ' + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+
+// Normaliza belt_level: minúsculo, sem acento, sem espaços nas bordas.
+// 'Preta', 'PRETA', 'roxa'/'roxo' caem todos no mesmo token.
+function normBelt(level) {
+  return String(level || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+}
+
+// Categoriza uma faixa (belt_level + belt_name) num bucket da pirâmide.
+// belt_level='preta' (qualquer grau) é Dan; o grau vem do belt_name
+// ('Preta 1°' → 1º Dan, 'Preta 2°'+ → 2º Dan ou acima). Tokens '1dan'..'9dan'
+// (caso o schema use esse formato) também são reconhecidos. Vermelha = null
+// (histórica, fora dos buckets ativos).
+function beltBucketKey(level, name) {
+  const b = normBelt(level);
+  if (!b) return null;
+  if (b === 'vermelha' || b === 'vermelho') return null; // histórica, não infla ativos
+  if (b === 'branca' || b === 'amarela' || b === 'laranja') return 'kyu_ini';
+  if (b === 'verde' || b === 'azul_claro' || b === 'azulclaro' || b === 'roxo' || b === 'roxa') return 'kyu_int';
+  if (b === 'azul_escuro' || b === 'azulescuro' || b === 'marrom') return 'kyu_av';
+  // Faixa preta / Dan
+  if (b === 'preta') {
+    const grau = parseInt((String(name || '').match(/(\d+)/) || [])[1], 10);
+    return grau >= 2 ? 'dan2' : 'dan1';
+  }
+  const danMatch = b.match(/^(\d+)\s*dan$/);
+  if (danMatch) {
+    return parseInt(danMatch[1], 10) >= 2 ? 'dan2' : 'dan1';
+  }
+  return null;
 }
 
 // Regiões administrativas do estado de SP usadas no heatmap.
@@ -643,17 +685,23 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
 // Exames Kyu→Dan registrados na federação, agrupados por mês.
 // karate_belt_history guarda só a faixa CONQUISTADA (belt_level/belt_name) e
 // a data em graduated_at; o dojô vem de customers (student_id).
+// Dan = faixa preta (belt_level 'preta', qualquer grau) OU tokens '1dan'..'9dan';
+// o restante é Kyu. Normaliza acento/caixa.
 router.get('/graduacoes', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const months = parseInt(req.query.months) || 8;
   const exportCsv = req.query.export === 'csv';
   try {
-    // Mensal
+    // Mensal. Dan reconhecido por belt_level 'preta' (sem acento) ou '%dan%'.
     const monthRes = await safeQuery(
       `SELECT
          DATE_TRUNC('month', graduated_at) AS month_start,
-         COUNT(*) FILTER (WHERE belt_level NOT LIKE '%dan%') AS kyu_count,
-         COUNT(*) FILTER (WHERE belt_level LIKE '%dan%') AS dan_count,
+         COUNT(*) FILTER (
+           WHERE translate(lower(belt_level), 'áàâãéêíóôõúç', 'aaaaeeiooouc') !~ 'preta|dan'
+         ) AS kyu_count,
+         COUNT(*) FILTER (
+           WHERE translate(lower(belt_level), 'áàâãéêíóôõúç', 'aaaaeeiooouc') ~ 'preta|dan'
+         ) AS dan_count,
          COUNT(*)::int AS total
        FROM karate_belt_history
        WHERE federation_id = $1
@@ -751,29 +799,37 @@ router.get('/relacao-faixas', ...guards.read(), async (req, res) => {
       [fedId]
     );
 
-    // Agrupa em buckets conforme mockup
     const rows = r.rows;
-    const total = rows.reduce((s, r) => s + r.count, 0);
 
-    // Bucket definitions matching the mockup pyramid
+    // Buckets da pirâmide (mockup). A categorização real é feita por
+    // beltBucketKey(belt_level, belt_name): belt_level='preta' (qualquer grau)
+    // conta como Dan (1º Dan por padrão; 2º+ quando o grau no belt_name >= 2),
+    // acento/caixa normalizados. Vermelha (histórica) fica FORA dos buckets.
     const BUCKETS = [
-      { faixa: 'Kyu iniciante',      long: '9º–7º Kyu · iniciante',     keys: ['branca','amarela','laranja'] },
-      { faixa: 'Kyu intermediário',  long: '6º–4º Kyu · intermediário', keys: ['verde','azul_claro','roxo'] },
-      { faixa: 'Kyu avançado',       long: '3º–1º Kyu · avançado',      keys: ['azul_escuro','marrom'] },
-      { faixa: '1º Dan',             long: '1º Dan · faixa preta',      keys: ['1dan'] },
-      { faixa: '2º Dan ou acima',    long: '2º Dan ou acima',           keys: ['2dan','3dan','4dan','5dan','6dan','7dan','8dan','9dan'] },
+      { key: 'kyu_ini', faixa: 'Kyu iniciante',     long: '9º–7º Kyu · iniciante' },
+      { key: 'kyu_int', faixa: 'Kyu intermediário', long: '6º–4º Kyu · intermediário' },
+      { key: 'kyu_av',  faixa: 'Kyu avançado',      long: '3º–1º Kyu · avançado' },
+      { key: 'dan1',    faixa: '1º Dan',            long: '1º Dan · faixa preta' },
+      { key: 'dan2',    faixa: '2º Dan ou acima',   long: '2º Dan ou acima' },
     ];
 
-    const beltMap = {};
-    for (const r of rows) beltMap[r.belt_level] = r.count;
+    const counts = { kyu_ini: 0, kyu_int: 0, kyu_av: 0, dan1: 0, dan2: 0 };
+    // total = só praticantes que caem em algum bucket ativo (Vermelha excluída).
+    let total = 0;
+    for (const row of rows) {
+      const k = beltBucketKey(row.belt_level, row.belt_name);
+      if (!k || !(k in counts)) continue; // Vermelha / faixa desconhecida → fora
+      counts[k] += row.count;
+      total += row.count;
+    }
 
     const buckets = BUCKETS.map((b) => {
-      const n = b.keys.reduce((s, k) => s + (beltMap[k] || 0), 0);
+      const n = counts[b.key] || 0;
       return { faixa: b.faixa, long: b.long, n, pct: total > 0 ? Number((n / total * 100).toFixed(1)) : 0 };
     });
 
-    const danN = buckets.filter((b) => b.faixa.includes('Dan')).reduce((s, b) => s + b.n, 0);
-    const kyuN = total - danN;
+    const danN = counts.dan1 + counts.dan2;
+    const kyuN = counts.kyu_ini + counts.kyu_int + counts.kyu_av;
     const danPct = total > 0 ? Number((danN / total * 100).toFixed(1)) : 0;
 
     if (exportCsv) {
@@ -793,7 +849,7 @@ router.get('/relacao-faixas', ...guards.read(), async (req, res) => {
       dan_pct: danPct,
       buckets,
       raw: rows,
-      _note: 'Snapshot da distribuição atual — não é um funil de coorte.',
+      _note: 'Snapshot da distribuição atual — não é um funil de coorte. Vermelha (histórica) fora dos buckets ativos.',
     });
   } catch (err) {
     console.error('[networkHealth] relacao-faixas error:', err.message);
