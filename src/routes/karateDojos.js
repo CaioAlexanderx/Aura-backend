@@ -16,6 +16,12 @@
 //
 // companies exige owner_id + legal_name (NOT NULL). O dojô pertence a um usuário
 // de SISTEMA (não ao admin da federação — evita o bug de login multi-empresa).
+//
+// Endereço (Fix 5): além do campo `address` (texto livre legado, mantido por
+// compat), o dojô usa as colunas estruturadas address_street/address_number/
+// address_complement/address_neighborhood/address_city/address_state/
+// address_zip — as MESMAS já usadas pela NF-e. Aceitas no POST/PATCH e
+// devolvidas no GET. Se vier só `address` legado, nada quebra.
 // ============================================================
 'use strict';
 
@@ -23,6 +29,26 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { nextDojoAffiliationId, computeDojoStatus } = require('../services/karateService');
+
+// Colunas de endereço estruturado (compartilhadas com a NF-e).
+// SELECT list reaproveitada em list/detail/insert/update returning.
+const ADDRESS_COLS =
+  'c.address, c.address_street, c.address_number, c.address_complement, ' +
+  'c.address_neighborhood, c.address_city, c.address_state, c.address_zip';
+
+// Monta o bloco de endereço da resposta JSON a partir de uma row.
+function addressOut(r) {
+  return {
+    address: r.address || null,
+    address_street: r.address_street || null,
+    address_number: r.address_number || null,
+    address_complement: r.address_complement || null,
+    address_neighborhood: r.address_neighborhood || null,
+    address_city: r.address_city || null,
+    address_state: r.address_state || null,
+    address_zip: r.address_zip || null,
+  };
+}
 
 // ── GET /federation/:id/dojos ───────────────────────────────
 router.get('/', ...guards.read(), async (req, res) => {
@@ -66,7 +92,7 @@ router.get('/', ...guards.read(), async (req, res) => {
       const allRes = await db.query(
         `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.region, c.fpkt_affiliation_id,
                 c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-                c.address, c.phone, c.email, c.is_active, c.karate_logo_url,
+                ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
                 COUNT(cu.id) AS practitioner_count
          FROM companies c
          LEFT JOIN customers cu ON cu.dojo_id = c.id
@@ -86,7 +112,7 @@ router.get('/', ...guards.read(), async (req, res) => {
         affiliation_model: r.affiliation_model || null,
         affiliation_since: r.affiliation_since || null,
         dojo_founded_year: r.dojo_founded_year || null,
-        address: r.address || null,
+        ...addressOut(r),
         phone: r.phone || null,
         email: r.email || null,
         karate_logo_url: r.karate_logo_url || null,
@@ -111,7 +137,7 @@ router.get('/', ...guards.read(), async (req, res) => {
     const dataRes = await db.query(
       `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.region, c.fpkt_affiliation_id,
               c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-              c.address, c.phone, c.email, c.is_active, c.karate_logo_url,
+              ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
               COUNT(cu.id) AS practitioner_count
        FROM companies c
        LEFT JOIN customers cu ON cu.dojo_id = c.id
@@ -132,7 +158,7 @@ router.get('/', ...guards.read(), async (req, res) => {
       affiliation_model: r.affiliation_model || null,
       affiliation_since: r.affiliation_since || null,
       dojo_founded_year: r.dojo_founded_year || null,
-      address: r.address || null,
+      ...addressOut(r),
       phone: r.phone || null,
       email: r.email || null,
       karate_logo_url: r.karate_logo_url || null,
@@ -153,6 +179,8 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
   const {
     name, cnpj, sensei_cpf, region, affiliation_model, affiliation_since,
     dojo_founded_year, address, phone, email,
+    address_street, address_number, address_complement,
+    address_neighborhood, address_city, address_state, address_zip,
   } = req.body;
 
   if (!name || !String(name).trim()) {
@@ -215,11 +243,18 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     const insertRes = await client.query(
       `INSERT INTO companies
          (name, legal_name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
-          affiliation_since, dojo_founded_year, address, phone, email, federation_id, owner_id,
-          vertical, is_active, created_at, updated_at)
-       VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'karate_dojo', true, NOW(), NOW())
+          affiliation_since, dojo_founded_year, address, phone, email,
+          address_street, address_number, address_complement, address_neighborhood,
+          address_city, address_state, address_zip,
+          federation_id, owner_id, vertical, is_active, created_at, updated_at)
+       VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+               $12, $13, $14, $15, $16, $17, $18,
+               $19, $20, 'karate_dojo', true, NOW(), NOW())
        RETURNING id, name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
-                 affiliation_since, dojo_founded_year, address, phone, email, is_active`,
+                 affiliation_since, dojo_founded_year, address,
+                 address_street, address_number, address_complement, address_neighborhood,
+                 address_city, address_state, address_zip,
+                 phone, email, is_active`,
       [
         String(name).trim(),
         cnpj || null,
@@ -232,6 +267,13 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
         address || null,
         phone || null,
         email || null,
+        address_street || null,
+        address_number || null,
+        address_complement || null,
+        address_neighborhood || null,
+        address_city || null,
+        address_state ? String(address_state).toUpperCase().slice(0, 2) : null,
+        address_zip || null,
         federationId,
         systemOwnerId,
       ]
@@ -250,7 +292,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       affiliation_model: dojo.affiliation_model,
       affiliation_since: dojo.affiliation_since || null,
       dojo_founded_year: dojo.dojo_founded_year || null,
-      address: dojo.address || null,
+      ...addressOut(dojo),
       phone: dojo.phone || null,
       email: dojo.email || null,
       status: computeDojoStatus(dojo.affiliation_model, dojo.affiliation_since, dojo.is_active),
@@ -273,7 +315,7 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
     const dojoRes = await db.query(
       `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.region, c.fpkt_affiliation_id,
               c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-              c.address, c.phone, c.email, c.is_active, c.karate_logo_url,
+              ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
               COUNT(cu.id) AS practitioner_count
        FROM companies c
        LEFT JOIN customers cu ON cu.dojo_id = c.id
@@ -338,7 +380,7 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
       affiliation_model: d.affiliation_model || null,
       affiliation_since: d.affiliation_since || null,
       dojo_founded_year: d.dojo_founded_year || null,
-      address: d.address || null,
+      ...addressOut(d),
       phone: d.phone || null,
       email: d.email || null,
       karate_logo_url: d.karate_logo_url || null,
@@ -369,6 +411,14 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
     phone: 'phone',
     email: 'email',
     karate_logo_url: 'karate_logo_url',
+    // Endereço estruturado (Fix 5) — mesmas colunas da NF-e
+    address_street: 'address_street',
+    address_number: 'address_number',
+    address_complement: 'address_complement',
+    address_neighborhood: 'address_neighborhood',
+    address_city: 'address_city',
+    address_state: 'address_state',
+    address_zip: 'address_zip',
   };
 
   const updates = [];
@@ -377,8 +427,10 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
 
   for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
     if (req.body[bodyKey] !== undefined) {
+      let v = req.body[bodyKey];
+      if (bodyKey === 'address_state' && v) v = String(v).toUpperCase().slice(0, 2);
       updates.push(`${dbCol} = $${idx}`);
-      values.push(req.body[bodyKey]);
+      values.push(v);
       idx++;
     }
   }
@@ -396,7 +448,10 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
        SET ${updates.join(', ')}
        WHERE id = $${idx} AND federation_id = $${idx + 1} AND vertical = 'karate_dojo'
        RETURNING id, name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
-                 affiliation_since, dojo_founded_year, address, phone, email, is_active`,
+                 affiliation_since, dojo_founded_year, address,
+                 address_street, address_number, address_complement, address_neighborhood,
+                 address_city, address_state, address_zip,
+                 phone, email, is_active`,
       values
     );
 
@@ -415,7 +470,7 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       affiliation_model: d.affiliation_model || null,
       affiliation_since: d.affiliation_since || null,
       dojo_founded_year: d.dojo_founded_year || null,
-      address: d.address || null,
+      ...addressOut(d),
       phone: d.phone || null,
       email: d.email || null,
       status: computeDojoStatus(d.affiliation_model, d.affiliation_since, d.is_active),
