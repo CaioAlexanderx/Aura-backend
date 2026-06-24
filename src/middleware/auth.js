@@ -8,6 +8,9 @@
 //   (Davi não conseguia abrir a Matriz). Agora a verificação usa db.queryRetry
 //   (1 retry curto em erro transitório de conexão — SELECT idempotente) e, se
 //   ainda assim falhar por conexão, responde 503 (transitório) em vez de 500.
+//   Fallback p/ db.query quando queryRetry não existe (mocks de teste que
+//   substituem o módulo database sem o helper) — chamado como MÉTODO de db p/
+//   preservar o `this` do pool em produção.
 // ============================================================
 const jwt  = require('jsonwebtoken');
 const db   = require('../config/database');
@@ -60,14 +63,19 @@ function requireCompanyAccess(opts = {}) {
     }
     try {
       // SELECT idempotente → seguro repetir em blip de conexão (db.queryRetry).
-      const { rows } = await db.queryRetry(
+      // Fallback p/ db.query quando queryRetry não existe (ex.: mocks de teste
+      // que substituem o módulo database sem o helper). Chamamos como MÉTODO de
+      // db (db.queryRetry(...) / db.query(...)) p/ preservar o `this` do pool.
+      const roleSql =
         `SELECT 'owner' AS role FROM companies WHERE id = $1 AND owner_id = $2
          UNION
          SELECT cm.role_label AS role FROM company_members cm
          WHERE cm.company_id = $1 AND cm.user_id = $2 AND cm.status = 'active' AND cm.is_active = true
-         LIMIT 1`,
-        [companyId, req.user.id]
-      );
+         LIMIT 1`;
+      const roleParams = [companyId, req.user.id];
+      const { rows } = await (typeof db.queryRetry === 'function'
+        ? db.queryRetry(roleSql, roleParams)
+        : db.query(roleSql, roleParams));
       if (!rows.length) {
         return res.status(403).json({ error: 'Acesso negado a esta empresa' });
       }
