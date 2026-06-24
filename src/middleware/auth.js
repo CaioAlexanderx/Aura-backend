@@ -2,6 +2,12 @@
 // AURA. — Middleware de autenticação e autorização
 // SEC-02: Refresh token support
 // FIX: role_label (real schema) instead of role
+// FIX (24/06/2026): requireCompanyAccess roda em TODO request. Quando o socket
+//   app<->banco caía (blip cross-region Railway/Supabase), o erro de conexão
+//   virava 500 "Erro ao verificar acesso" e o app inteiro parecia offline
+//   (Davi não conseguia abrir a Matriz). Agora a verificação usa db.queryRetry
+//   (1 retry curto em erro transitório de conexão — SELECT idempotente) e, se
+//   ainda assim falhar por conexão, responde 503 (transitório) em vez de 500.
 // ============================================================
 const jwt  = require('jsonwebtoken');
 const db   = require('../config/database');
@@ -53,7 +59,8 @@ function requireCompanyAccess(opts = {}) {
       return next();
     }
     try {
-      const { rows } = await db.query(
+      // SELECT idempotente → seguro repetir em blip de conexão (db.queryRetry).
+      const { rows } = await db.queryRetry(
         `SELECT 'owner' AS role FROM companies WHERE id = $1 AND owner_id = $2
          UNION
          SELECT cm.role_label AS role FROM company_members cm
@@ -72,6 +79,14 @@ function requireCompanyAccess(opts = {}) {
       next();
     } catch (err) {
       console.error('requireCompanyAccess error:', err);
+      // Blip de conexão app<->banco: 503 transitório (não 500). O cliente pode
+      // tentar de novo; não é erro de lógica nem permissão.
+      if (db.isTransientConnError && db.isTransientConnError(err)) {
+        return res.status(503).json({
+          error: 'Instabilidade momentânea de conexão. Tente novamente.',
+          code: 'DB_CONN_TRANSIENT',
+        });
+      }
       res.status(500).json({ error: 'Erro ao verificar acesso' });
     }
   };

@@ -85,4 +85,47 @@ const keepAliveTimer = setInterval(() => {
 }, KEEPALIVE_MS);
 if (keepAliveTimer.unref) keepAliveTimer.unref();
 
+// ── queryRetry: retry curto em erro TRANSITÓRIO de conexão ──────────────────
+// O backend (Railway) e o banco (Supabase/São Paulo) cruzam regiões; um blip de
+// rede pode cortar um socket em voo ("Connection terminated unexpectedly") ou
+// estourar o connect ("Connection terminated due to connection timeout"). Sem
+// retry esses erros chegavam crus no requireCompanyAccess (auth.js) e viravam
+// 500 em TODO request — o app inteiro parecia fora do ar pela duração do blip.
+// Na 2ª tentativa o pool descarta o socket morto e abre um novo.
+//
+// IMPORTANTE: usar SÓ em queries IDEMPOTENTES (SELECT, ou writes com ON CONFLICT
+// / idempotency_key). NÃO usar dentro de transação (BEGIN/COMMIT usam
+// client = pool.connect(), não este caminho) — repetir um passo de transação
+// cegamente é inseguro.
+const TRANSIENT_CODES = new Set([
+  'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN',
+  '08000', '08001', '08003', '08004', '08006', '57P01', '57P03',
+]);
+function isTransientConnError(err) {
+  if (!err) return false;
+  if (err.code && TRANSIENT_CODES.has(err.code)) return true;
+  return /connection terminated|terminated unexpectedly|connection timeout|server closed the connection|connection error|read ECONNRESET/i
+    .test(String(err.message || ''));
+}
+async function queryRetry(text, params, { attempts = 2, backoffMs = 200 } = {}) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await pool.query(text, params);
+    } catch (err) {
+      lastErr = err;
+      if (i < attempts - 1 && isTransientConnError(err)) {
+        console.warn(`[db] erro transitorio de conexao, retry ${i + 1}/${attempts - 1}:`, err.message);
+        await new Promise((r) => setTimeout(r, backoffMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
+pool.queryRetry = queryRetry;
+pool.isTransientConnError = isTransientConnError;
+
 module.exports = pool;
