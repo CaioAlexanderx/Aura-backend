@@ -10,6 +10,12 @@
 // LGPD (§0.4 U1): o verify público devolve o MÍNIMO. Menores → nome reduzido +
 //   foto oculta (registro permanece). Carteirinha SEM validade por tempo; a
 //   verificação reflete a anuidade CPF (ver verifyByToken).
+//
+// 25/06/2026 (decisão Caio — liberdade total da federação): revogação de
+//   carteirinha. revokeCard() seta status='revoked' (+ revoked_at se a coluna
+//   existir — migration 191). Idempotente. verifyByToken já trata 'revoked'.
+//   Emitir de novo após revogar gera uma nova carteirinha 'active' (issueCard
+//   só expira a 'active' anterior; 'revoked' fica preservada no histórico).
 // ============================================================
 'use strict';
 
@@ -68,6 +74,8 @@ async function _loadPractitionerSnapshot(client, federationId, studentId) {
 /**
  * issueCard — emite OU renova a carteirinha de um praticante (somente dados).
  * Renovar expira a carteirinha 'active' anterior e cria uma nova.
+ * Carteirinhas 'revoked' NÃO são tocadas (ficam no histórico); emitir após
+ * uma revogação simplesmente cria uma nova carteirinha ativa.
  * Retorna { card, warnings, renewed }.
  */
 async function issueCard({ federation_id, student_id, issued_by }) {
@@ -97,7 +105,8 @@ async function issueCard({ federation_id, student_id, issued_by }) {
       warnings.push('Praticante sem graduação registrada — faixa em branco na carteirinha.');
     }
 
-    // Expira carteirinha ativa anterior (renovação)
+    // Expira carteirinha ativa anterior (renovação). Só a 'active' — uma
+    // carteirinha 'revoked' permanece intacta no histórico.
     const prev = await client.query(
       `UPDATE karate_membership_cards
        SET status = 'expired', updated_at = NOW()
@@ -167,6 +176,78 @@ async function issueCard({ federation_id, student_id, issued_by }) {
   }
 }
 
+/**
+ * revokeCard — revoga a carteirinha ATUAL do praticante (status='revoked').
+ * Decisão Caio (25/06): a federação pode invalidar uma carteirinha emitida.
+ *   - Idempotente: revogar uma carteirinha já 'revoked' devolve ok (revoked).
+ *   - Seta revoked_at se a coluna existir (migration 191); defensivo a 42703
+ *     para ser seguro mergear antes da migration ser aplicada.
+ *   - Não apaga o registro (histórico/verificação pública preservados);
+ *     verifyByToken já retorna situacao='revogada'.
+ *   - Sem carteirinha → NOT_FOUND.
+ * Retorna { card, alreadyRevoked }.
+ */
+async function revokeCard({ federation_id, student_id, revoked_by }) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Carteirinha mais recente do praticante (trava a linha).
+    const cur = await client.query(
+      `SELECT id, status FROM karate_membership_cards
+       WHERE student_id = $1 AND federation_id = $2
+       ORDER BY issued_at DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [student_id, federation_id]
+    );
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      const err = new Error('Praticante sem carteirinha para revogar');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+
+    const card = cur.rows[0];
+    const alreadyRevoked = card.status === 'revoked';
+
+    if (!alreadyRevoked) {
+      // Tenta gravar revoked_at (migration 191). Se a coluna ainda não existe
+      // (42703), faz o update sem ela — comportamento degradado, mas seguro.
+      try {
+        await client.query(
+          `UPDATE karate_membership_cards
+           SET status = 'revoked', revoked_at = NOW(), updated_at = NOW()
+           WHERE id = $1`,
+          [card.id]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          await client.query(
+            `UPDATE karate_membership_cards
+             SET status = 'revoked', updated_at = NOW()
+             WHERE id = $1`,
+            [card.id]
+          );
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Re-lê os dados para devolver a carteirinha já no estado revogado.
+    const refreshed = await getCurrentCard({ federation_id, student_id });
+    return { card: refreshed, alreadyRevoked };
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 /** getCurrentCard — carteirinha mais recente do praticante (visão admin/interna/holder).
  *  Inclui birth_date + cpf (contexto AUTENTICADO) para a arte aprovada da carteirinha. */
 async function getCurrentCard({ federation_id, student_id }) {
@@ -196,6 +277,7 @@ async function getCurrentCard({ federation_id, student_id }) {
     photo_url: c.photo_url_snapshot,
     is_minor: c.is_minor,
     issued_at: c.issued_at,
+    revoked_at: c.revoked_at || null,
     verify_token: c.verify_token,
     status: effectiveStatus(c),
   };
@@ -347,6 +429,7 @@ async function issueBatch({ federation_id, issued_by, only_missing = true }) {
 
 module.exports = {
   issueCard,
+  revokeCard,
   getCurrentCard,
   verifyByToken,
   listCards,
