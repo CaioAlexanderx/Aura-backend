@@ -974,7 +974,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
         { key: 'dojos', label: 'Dojôs afiliados', value: dojoCount, unit: '' },
         { key: 'praticantes', label: 'Praticantes registrados', value: practCount, unit: '' },
         { key: 'inadimplencia', label: 'Inadimplência', value: inadPct, unit: '%' },
-        { key: 'graduacoes', label: 'Graduações · 8 meses', value: gradTotal, unit: '' },
+        { key: 'graduacoes', label: 'Graduações YTD', value: gradTotal, unit: '' },
         { key: 'receita_proj_90d', label: 'Receita proj. · 90 d', value: projTotal, unit: 'BRL' },
       ],
     });
