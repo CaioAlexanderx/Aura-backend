@@ -2,11 +2,13 @@
 // AURA KARATÊ — Rotas de Anuidades (Track B)
 //
 // Anuidades Dojô:
-//   GET  /financial/annuities/dojos                    — lista c/ status
-//   POST /financial/annuities/dojos/:dojoId/charge     — lança cobrança
-//   POST /financial/annuities/dojos/:dojoId/pix        — cria intent PIX
-//   GET  /financial/payments/:intentId/status          — polling de status
-//   POST /financial/payments/:intentId/confirm         — admin marca pago + NFS-e
+//   GET   /financial/annuities/dojos                    — lista c/ status
+//   POST  /financial/annuities/dojos/:dojoId/charge     — lança cobrança
+//   PATCH /financial/annuities/dojos/:dojoId/:annuityId — corrige cobrança NÃO paga
+//   POST  /financial/annuities/dojos/:dojoId/:annuityId/void — estorna/cancela cobrança
+//   POST  /financial/annuities/dojos/:dojoId/pix        — cria intent PIX
+//   GET   /financial/payments/:intentId/status          — polling de status
+//   POST  /financial/payments/:intentId/confirm         — admin marca pago + NFS-e
 //
 // Anuidades CPF:
 //   GET  /financial/annuities/cpf                      — lista praticantes
@@ -23,6 +25,16 @@
 // (pending/confirmed/cancelled). "Recebido/pago" = 'confirmed'.
 // transactions.reference_id é uuid: comparar com customers.id (uuid) sem ::text.
 // (karate_dojo_annuity_history.status é TEXTO e usa 'paid' — mantido.)
+//
+// NOTA DE SCHEMA (25/06 — DOJO-RM): correção/estorno de lançamento de anuidade.
+//   karate_dojo_annuity_history.status é TEXTO e o vocabulário em uso é
+//   'pending'/'paid'/'overdue' (não há 'cancelled' reconhecido por
+//   computeAnnuityStatus). Por isso o VOID APAGA a linha de
+//   karate_dojo_annuity_history (volta ao estado "sem cobrança no período",
+//   recobrável) e CANCELA a transaction conciliada (status='cancelled',
+//   preservando a trilha financeira — a transaction NÃO é apagada).
+//   karate_payment_intents.annuity_history_id é SET NULL → intents pendentes
+//   ficam órfãos mas são marcados 'cancelled' aqui. Operação idempotente.
 // ============================================================
 'use strict';
 
@@ -78,6 +90,7 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
         dojo_id: d.dojo_id,
         dojo_name: d.dojo_name,
         fpkt_affiliation_id: d.fpkt_affiliation_id || null,
+        annuity_id: d.annuity_id || null,
         amount: d.amount ? parseFloat(d.amount) : 0,
         reference_period: d.reference_period || year,
         due_date: d.due_date || null,
@@ -202,6 +215,7 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
       dojo_id: dojoId,
       dojo_name: dojoRes.rows[0].name,
       fpkt_affiliation_id: null,
+      annuity_id: h.id,
       amount: parseFloat(h.amount),
       reference_period: h.reference_period,
       due_date: h.due_date,
@@ -216,6 +230,227 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
     await client.query('ROLLBACK');
     console.error('[karateAnnuities] charge error:', err.message);
     res.status(500).json({ error: 'Erro ao lançar cobrança', detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// PATCH /financial/annuities/dojos/:dojoId/:annuityId
+// 25/06/2026 — DOJO-RM: corrige um lançamento de anuidade AINDA NÃO pago.
+// Campos: amount/value, due_date, reference_period/competência.
+// Se já estiver 'paid', retorna 409 (não editar valor de algo conciliado).
+// Mantém a transaction conciliada em sincronia (amount/due_date/description).
+router.patch('/annuities/dojos/:dojoId/:annuityId', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, dojoId, annuityId } = req.params;
+  const body = req.body || {};
+
+  // Aceita `amount` ou `value` (alias). String vazia → ignora o campo.
+  const rawAmount = body.amount !== undefined ? body.amount : body.value;
+  const rawDueDate = body.due_date;
+  const rawPeriod = body.reference_period !== undefined ? body.reference_period
+                  : (body.competencia !== undefined ? body.competencia : undefined);
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Busca o lançamento (escopo dojô + federação)
+    const histRes = await client.query(
+      `SELECT id, dojo_id, federation_id, reference_period, amount, due_date,
+              status, transaction_id
+       FROM karate_dojo_annuity_history
+       WHERE id = $1 AND dojo_id = $2 AND federation_id = $3
+       LIMIT 1`,
+      [annuityId, dojoId, federationId]
+    );
+    if (!histRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Lançamento não encontrado', code: 'NOT_FOUND' });
+    }
+    const hist = histRes.rows[0];
+
+    // Não editar algo já pago/conciliado.
+    if (hist.status === 'paid') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Lançamento já pago — não é possível editar o valor de algo conciliado. Use estorno (void) se precisar reverter.',
+        code: 'ALREADY_PAID',
+      });
+    }
+
+    // Monta os updates dinâmicos.
+    const sets = [];
+    const vals = [];
+    let i = 1;
+    let newAmount = null;
+    let newDueDate = null;
+    let newPeriod = null;
+
+    if (rawAmount !== undefined && String(rawAmount).trim() !== '') {
+      const amt = Number(rawAmount);
+      if (isNaN(amt) || amt <= 0) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ error: 'amount deve ser > 0', code: 'VALIDATION_ERROR' });
+      }
+      newAmount = amt;
+      sets.push(`amount = $${i}`); vals.push(amt); i++;
+    }
+    if (rawDueDate !== undefined && String(rawDueDate).trim() !== '') {
+      newDueDate = rawDueDate;
+      sets.push(`due_date = $${i}`); vals.push(rawDueDate); i++;
+    }
+    if (rawPeriod !== undefined && String(rawPeriod).trim() !== '') {
+      newPeriod = String(rawPeriod).trim();
+
+      // Evita colidir com outra cobrança do mesmo período no dojô.
+      const dup = await client.query(
+        `SELECT id FROM karate_dojo_annuity_history
+         WHERE dojo_id = $1 AND reference_period = $2 AND id <> $3 LIMIT 1`,
+        [dojoId, newPeriod, annuityId]
+      );
+      if (dup.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Já existe outra cobrança para este dojô no período ' + newPeriod,
+          code: 'CONFLICT',
+        });
+      }
+      sets.push(`reference_period = $${i}`); vals.push(newPeriod); i++;
+    }
+
+    if (sets.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+    }
+
+    sets.push('updated_at = NOW()');
+    vals.push(annuityId);
+
+    const upd = await client.query(
+      `UPDATE karate_dojo_annuity_history
+       SET ${sets.join(', ')}
+       WHERE id = $${i}
+       RETURNING id, dojo_id, reference_period, amount, due_date, status, paid_at, transaction_id`,
+      vals
+    );
+    const h = upd.rows[0];
+
+    // Mantém a transaction conciliada em sincronia (se houver e não estiver cancelada).
+    if (hist.transaction_id) {
+      const txSets = [];
+      const txVals = [];
+      let j = 1;
+      if (newAmount !== null) { txSets.push(`amount = $${j}`); txVals.push(newAmount); j++; }
+      if (newDueDate !== null) { txSets.push(`due_date = $${j}`); txVals.push(newDueDate); j++; }
+      // Atualiza descrição se o período mudou (mantém legível na trilha financeira).
+      if (newPeriod !== null) {
+        const dojoNameRes = await client.query(`SELECT name FROM companies WHERE id = $1 LIMIT 1`, [dojoId]);
+        const dojoName = dojoNameRes.rows[0]?.name || 'Dojô';
+        txSets.push(`description = $${j}`); txVals.push(`Anuidade dojô ${dojoName} — ${newPeriod}`); j++;
+      }
+      if (txSets.length) {
+        txSets.push('updated_at = NOW()');
+        txVals.push(hist.transaction_id);
+        await client.query(
+          `UPDATE transactions SET ${txSets.join(', ')}
+           WHERE id = $${j} AND status <> 'cancelled'`,
+          txVals
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    res.json({
+      annuity_id: h.id,
+      dojo_id: h.dojo_id,
+      reference_period: h.reference_period,
+      amount: h.amount ? parseFloat(h.amount) : 0,
+      due_date: h.due_date,
+      status: h.status,
+      paid_at: h.paid_at || null,
+      transaction_id: h.transaction_id || null,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[karateAnnuities] patch annuity error:', err.message);
+    res.status(500).json({ error: 'Erro ao corrigir lançamento', detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /financial/annuities/dojos/:dojoId/:annuityId/void
+// 25/06/2026 — DOJO-RM: estorna/cancela um lançamento de anuidade.
+//   - Cancela a transaction conciliada (status='cancelled') — NÃO apaga (preserva
+//     a trilha financeira).
+//   - Marca intents PIX pendentes desse lançamento como 'cancelled'.
+//   - APAGA a linha de karate_dojo_annuity_history (volta ao estado "sem cobrança
+//     no período"; status é TEXTO sem 'cancelled' reconhecido — apagar é mais
+//     limpo do que deixar um status fantasma).
+// Idempotente: se o lançamento não existir mais, responde 200 { voided:true,
+// idempotent_hit:true }. Funciona mesmo para lançamentos já pagos (reverte a
+// conciliação), pois a federação tem liberdade de corrigir erros.
+router.post('/annuities/dojos/:dojoId/:annuityId/void', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, dojoId, annuityId } = req.params;
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const histRes = await client.query(
+      `SELECT id, dojo_id, federation_id, reference_period, amount, status, transaction_id
+       FROM karate_dojo_annuity_history
+       WHERE id = $1 AND dojo_id = $2 AND federation_id = $3
+       LIMIT 1`,
+      [annuityId, dojoId, federationId]
+    );
+
+    // Idempotência: lançamento já removido.
+    if (!histRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.json({ voided: true, idempotent_hit: true, annuity_id: annuityId });
+    }
+    const hist = histRes.rows[0];
+
+    // Cancela a transaction conciliada (preserva trilha; não apaga).
+    if (hist.transaction_id) {
+      await client.query(
+        `UPDATE transactions
+         SET status = 'cancelled', updated_at = NOW()
+         WHERE id = $1 AND status <> 'cancelled'`,
+        [hist.transaction_id]
+      );
+    }
+
+    // Cancela intents PIX pendentes desse lançamento (annuity_history_id é SET NULL
+    // ao apagar o histórico → marcamos como cancelados antes para não ficarem
+    // "pending" órfãos eternos).
+    await client.query(
+      `UPDATE karate_payment_intents
+       SET status = 'cancelled', updated_at = NOW()
+       WHERE annuity_history_id = $1 AND status = 'pending'`,
+      [annuityId]
+    );
+
+    // Apaga o lançamento de anuidade.
+    await client.query(`DELETE FROM karate_dojo_annuity_history WHERE id = $1`, [annuityId]);
+
+    await client.query('COMMIT');
+
+    res.json({
+      voided: true,
+      idempotent_hit: false,
+      annuity_id: annuityId,
+      dojo_id: dojoId,
+      reference_period: hist.reference_period,
+      transaction_id: hist.transaction_id || null,
+      transaction_cancelled: !!hist.transaction_id,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[karateAnnuities] void annuity error:', err.message);
+    res.status(500).json({ error: 'Erro ao estornar lançamento', detail: err.message });
   } finally {
     client.release();
   }
