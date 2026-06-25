@@ -32,6 +32,12 @@
 // lançada não é inadimplente — o denominador são as anuidades efetivamente
 // lançadas; sem cobranças → inadimplência 0%.
 //
+// COBERTURA (Item 5, 25/06): a COBERTURA geográfica é a ÚNICA exceção à base
+// total — usa só dojôs CADASTRADOS E ATIVOS (is_active IS NOT FALSE), pois é
+// um retrato da presença real da rede no território. Não mexe em afiliados/
+// inadimplência (coerência #239). As "lacunas de cobertura" (regiões sem dojô)
+// foram REMOVIDAS: não são pendência a corrigir.
+//
 // NOTA DE CATEGORIZAÇÃO DE FAIXA (24/06): na "Relação de faixas" o belt_level
 // da faixa preta é 'preta' (o belt_name carrega o grau: 'Preta 1°', 'Preta 2°'…),
 // e NÃO '1dan'/'2dan'. A categorização antiga procurava keys como '1dan' e por
@@ -298,7 +304,11 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
   try {
-    // Base TOTAL de dojôs (sem is_active) — cobertura geográfica da rede inteira.
+    // Cobertura = dojôs CADASTRADOS E ATIVOS (Item 5). "Ativo" segue o critério
+    // do app (computeDojoStatus): inativo só quando is_active = false. Por isso
+    // is_active IS NOT FALSE (true OU null contam como ativo). NOTA: isto muda
+    // SÓ a base da cobertura; afiliados/inadimplência (coerência #239) seguem
+    // usando a base total em seus próprios endpoints.
     const r = await safeQuery(
       `SELECT c.region,
               COUNT(*)::int AS dojos,
@@ -308,6 +318,7 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
        LEFT JOIN customers cu ON cu.dojo_id = c.id AND cu.federation_id = $1
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
+         AND c.is_active IS NOT FALSE
        GROUP BY c.region`,
       [fedId]
     );
@@ -331,9 +342,6 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
       };
     });
 
-    const gaps = regions.filter((r) => r.dojos === 0);
-    const totalMunGap = gaps.reduce((s, r) => s + r.mun_total, 0);
-
     if (exportCsv) {
       const cols = [
         { key: 'regiao', label: 'Região' },
@@ -350,11 +358,10 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
       return sendCsv(res, 'cobertura', cols, rows);
     }
 
+    // Item 5: "lacunas de cobertura" (regiões sem dojô) removidas — não é
+    // pendência a corrigir; a tela mostra só a densidade dos dojôs ativos.
     res.json({
       regions,
-      gap_count: gaps.length,
-      gap_mun_total: totalMunGap,
-      gap_names: gaps.map((g) => g.short).join(', '),
     });
   } catch (err) {
     console.error('[networkHealth] cobertura error:', err.message);
@@ -939,7 +946,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
   }
 });
 
-// ── Relatório periódico (DESIGN-28) ──────────────────────────
+// ── Relatório periódico ──────────────────────────────────────
 // Compõe um resumo da rede e envia por e-mail ao admin da federação.
 // POST /report/send — trigger manual; scheduler pode chamar o mesmo handler.
 router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
