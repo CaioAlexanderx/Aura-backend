@@ -1,10 +1,13 @@
 // ============================================================
 // AURA KARATÊ — Rotas de Praticantes (Track A)
-// GET   /federation/:id/practitioners
-// POST  /federation/:id/practitioners
-// GET   /federation/:id/practitioners/:practitionerId
-// PATCH /federation/:id/practitioners/:practitionerId   (edição da ficha)
-// POST  /federation/:id/practitioners/:practitionerId/graduations (graduação manual)
+// GET    /federation/:id/practitioners
+// POST   /federation/:id/practitioners
+// GET    /federation/:id/practitioners/:practitionerId
+// PATCH  /federation/:id/practitioners/:practitionerId   (edição da ficha)
+// DELETE /federation/:id/practitioners/:practitionerId   (excluir / cascata)
+// POST   /federation/:id/practitioners/:practitionerId/graduations (graduação manual)
+// PATCH  /federation/:id/practitioners/:practitionerId/graduations/:graduationId
+// DELETE /federation/:id/practitioners/:practitionerId/graduations/:graduationId
 //
 // Nota: /practitioners/import é registrado ANTES deste router no index.js
 // para que 'import' não seja capturado como :practitionerId.
@@ -15,6 +18,13 @@
 // graduação manual em karate_belt_history (append-only; a view
 // karate_current_belt deriva a faixa atual). Faixa NÃO é editável via PATCH
 // (vive no histórico imutável) — registra-se uma nova graduação.
+// 25/06/2026: liberdade total da federação (decisão Caio) —
+//   - DELETE de praticante: soft já existe (PATCH is_active=false); agora há
+//     hard delete com guarda 409 HAS_HISTORY e ?cascade=true (igual a
+//     funcionários/membros/dojô). Sem dependentes → apaga direto.
+//   - Edição/exclusão POR ITEM da trajetória de faixas (karate_belt_history):
+//     PATCH/DELETE em /graduations/:graduationId. A view karate_current_belt
+//     recalcula a faixa atual sozinha (pode ficar sem faixa se apagar a última).
 // ============================================================
 'use strict';
 
@@ -320,6 +330,107 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
   }
 });
 
+// ── DELETE /federation/:id/practitioners/:practitionerId ─────
+// Exclusão DEFINITIVA do praticante (linha de customers). A federação tem os
+// dois caminhos (decisão Caio):
+//   - Desativar (soft): PATCH is_active=false  (não é aqui).
+//   - Excluir definitivamente: este endpoint.
+//
+// Guarda de histórico no mesmo padrão de funcionários/membros/dojô:
+//   - Sem dependentes → hard delete direto → 200 { deleted:true }.
+//   - Com dependentes e SEM ?cascade=true → 409 { code:'HAS_HISTORY', counts }.
+//   - Com dependentes E ?cascade=true → apaga os filhos em transação (faixas,
+//     transferências, carteirinhas) e CANCELA as transactions ligadas ao
+//     praticante (preserva a trilha financeira; não apaga linha de transação),
+//     depois apaga a linha de customers → 200 { deleted:true, cascade:true, counts }.
+//
+// Dependentes detectados:
+//   karate_belt_history (student_id), karate_practitioner_transfers
+//   (practitioner_id), karate_membership_cards (student_id) e transactions
+//   ligadas ao praticante (reference_type='customer' AND reference_id = id).
+router.delete('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, practitionerId } = req.params;
+  const cascade = req.query.cascade === 'true' || req.query.cascade === '1';
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Existência + escopo da federação (trava a linha).
+    const cur = await client.query(
+      `SELECT id, name FROM customers WHERE id = $1 AND federation_id = $2 FOR UPDATE`,
+      [practitionerId, federationId]
+    );
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Praticante não encontrado', code: 'NOT_FOUND' });
+    }
+
+    // Conta dependentes (defensivo a 42P01 nas tabelas karatê opcionais).
+    const counts = { graduations: 0, transfers: 0, cards: 0, transactions: 0 };
+    const safeCount = async (sql, params) => {
+      try { const r = await client.query(sql, params); return parseInt(r.rows[0].c, 10) || 0; }
+      catch (e) { if (e.code === '42P01') return 0; throw e; }
+    };
+    counts.graduations  = await safeCount(`SELECT COUNT(*)::int AS c FROM karate_belt_history WHERE student_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
+    counts.transfers    = await safeCount(`SELECT COUNT(*)::int AS c FROM karate_practitioner_transfers WHERE practitioner_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
+    counts.cards        = await safeCount(`SELECT COUNT(*)::int AS c FROM karate_membership_cards WHERE student_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
+    counts.transactions = await safeCount(`SELECT COUNT(*)::int AS c FROM transactions WHERE reference_type = 'customer' AND reference_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
+
+    const hasHistory = counts.graduations + counts.transfers + counts.cards + counts.transactions > 0;
+
+    if (hasHistory && !cascade) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'HAS_HISTORY',
+        error: 'Este praticante tem histórico vinculado (graduações, transferências, carteirinhas ou cobranças). Desative-o ou confirme a exclusão definitiva em cascata.',
+        counts: { graduations: counts.graduations, transfers: counts.transfers, cards: counts.cards, transactions: counts.transactions },
+      });
+    }
+
+    if (hasHistory && cascade) {
+      // Apaga os filhos antes da linha de customers (ordem segura de FK).
+      const safeExec = async (sql, params) => {
+        try { await client.query(sql, params); }
+        catch (e) { if (e.code !== '42P01') throw e; }
+      };
+      await safeExec(`DELETE FROM karate_belt_history WHERE student_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
+      await safeExec(`DELETE FROM karate_practitioner_transfers WHERE practitioner_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
+      await safeExec(`DELETE FROM karate_membership_cards WHERE student_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
+      // Transactions: NÃO apaga (trilha financeira) — cancela as pendentes/confirmadas.
+      await safeExec(
+        `UPDATE transactions SET status = 'cancelled', updated_at = NOW()
+         WHERE reference_type = 'customer' AND reference_id = $1 AND federation_id = $2 AND status <> 'cancelled'`,
+        [practitionerId, federationId]
+      );
+    }
+
+    await client.query(
+      `DELETE FROM customers WHERE id = $1 AND federation_id = $2`,
+      [practitionerId, federationId]
+    );
+    await client.query('COMMIT');
+
+    if (hasHistory && cascade) {
+      return res.json({ deleted: true, cascade: true, id: practitionerId, name: cur.rows[0].name, counts });
+    }
+    return res.json({ deleted: true, id: practitionerId, name: cur.rows[0].name });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    // FK inesperada → orienta desativar/cascata em vez de quebrar.
+    if (err && err.code === '23503') {
+      return res.status(409).json({
+        code: 'HAS_HISTORY',
+        error: 'Este praticante possui registros vinculados e não pode ser apagado diretamente. Use cascade=true ou desative-o.',
+      });
+    }
+    console.error('[karatePractitioners] delete error:', err.message);
+    res.status(500).json({ error: 'Erro ao excluir praticante', detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 // ── POST /federation/:id/practitioners/:practitionerId/graduations ──
 // Registra uma graduação MANUAL no histórico de faixas (karate_belt_history).
 // A tabela é append-only/imutável; a view karate_current_belt deriva a faixa
@@ -388,6 +499,94 @@ router.post('/:practitionerId/graduations', ...guards.staffWrite(), async (req, 
   } catch (err) {
     console.error('[karatePractitioners] graduation error:', err.message);
     res.status(500).json({ error: 'Erro ao registrar graduação', detail: err.message });
+  }
+});
+
+// ── PATCH /federation/:id/practitioners/:practitionerId/graduations/:graduationId ──
+// Corrige UMA linha do histórico de faixas (karate_belt_history). Campos
+// editáveis: belt_level, belt_name, graduated_at (data). A view
+// karate_current_belt recalcula a faixa atual sozinha após a edição.
+router.patch('/:practitionerId/graduations/:graduationId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, practitionerId, graduationId } = req.params;
+  const b = req.body || {};
+
+  // Monta o SET dinâmico só com os campos enviados (whitelist).
+  const sets = [];
+  const vals = [];
+  let i = 1;
+
+  if (b.belt_level !== undefined) {
+    const v = b.belt_level != null ? String(b.belt_level).trim() : '';
+    if (!v) return res.status(422).json({ error: 'belt_level não pode ser vazio', code: 'VALIDATION_ERROR' });
+    sets.push(`belt_level = $${i}`); vals.push(v); i++;
+  }
+  if (b.belt_name !== undefined) {
+    const v = b.belt_name != null ? String(b.belt_name).trim() : '';
+    if (!v) return res.status(422).json({ error: 'belt_name não pode ser vazio', code: 'VALIDATION_ERROR' });
+    sets.push(`belt_name = $${i}`); vals.push(v); i++;
+  }
+  if (b.graduated_at !== undefined) {
+    const v = b.graduated_at != null ? String(b.graduated_at).slice(0, 10) : '';
+    if (!v || !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      return res.status(422).json({ error: 'graduated_at deve ser YYYY-MM-DD', code: 'VALIDATION_ERROR' });
+    }
+    sets.push(`graduated_at = $${i}::date`); vals.push(v); i++;
+  }
+
+  if (!sets.length) {
+    return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  }
+
+  try {
+    // Escopo: a graduação pertence a ESTE praticante E a ESTA federação.
+    vals.push(graduationId, practitionerId, federationId);
+    const upd = await db.query(
+      `UPDATE karate_belt_history
+          SET ${sets.join(', ')}
+        WHERE id = $${i} AND student_id = $${i + 1} AND federation_id = $${i + 2}
+      RETURNING id, belt_level, belt_name, belt_schema, graduated_at, exam_id, notes`,
+      vals
+    );
+    if (!upd.rows.length) {
+      return res.status(404).json({ error: 'Graduação não encontrada para este praticante', code: 'NOT_FOUND' });
+    }
+    const r = upd.rows[0];
+    res.json({
+      id: r.id,
+      belt_level: r.belt_level,
+      belt_name: r.belt_name,
+      belt_schema: r.belt_schema,
+      graduated_at: r.graduated_at,
+      is_legacy: r.belt_schema === 'legacy',
+      exam_id: r.exam_id || null,
+      notes: r.notes || null,
+    });
+  } catch (err) {
+    console.error('[karatePractitioners] graduation update error:', err.message);
+    res.status(500).json({ error: 'Erro ao editar graduação', detail: err.message });
+  }
+});
+
+// ── DELETE /federation/:id/practitioners/:practitionerId/graduations/:graduationId ──
+// Exclui UMA linha do histórico de faixas. A view karate_current_belt
+// recalcula a faixa atual sozinha; se era a última graduação, o praticante
+// pode ficar sem faixa — comportamento esperado/aceitável.
+router.delete('/:practitionerId/graduations/:graduationId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, practitionerId, graduationId } = req.params;
+  try {
+    const del = await db.query(
+      `DELETE FROM karate_belt_history
+        WHERE id = $1 AND student_id = $2 AND federation_id = $3
+      RETURNING id`,
+      [graduationId, practitionerId, federationId]
+    );
+    if (!del.rows.length) {
+      return res.status(404).json({ error: 'Graduação não encontrada para este praticante', code: 'NOT_FOUND' });
+    }
+    res.json({ deleted: true, id: graduationId });
+  } catch (err) {
+    console.error('[karatePractitioners] graduation delete error:', err.message);
+    res.status(500).json({ error: 'Erro ao excluir graduação', detail: err.message });
   }
 });
 
