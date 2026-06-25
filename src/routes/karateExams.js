@@ -32,6 +32,12 @@
 // NOTA DE COMPAT (22/06): o frontend lê exam.title/exam.exam_date, mas o schema
 // usa name/event_date. Todas as respostas abaixo expõem aliases title/exam_date
 // além dos campos canônicos name/event_date — additive, sem migration.
+//
+// TIPOS DE EVENTO (25/06): exam_type aceita os graus específicos usados pelos
+// dojôs (kyu_regional | dan_estadual | dan_nacional) MAIS os tipos AMPLOS da
+// federação (exame | curso). Tipos amplos NÃO inferem faixa-alvo: o grau (se
+// houver) vem do payload por candidato (target_belt na inscrição), nunca do
+// exam_type. 'curso' é evento sem graduação. Ver migration 192.
 // ============================================================
 'use strict';
 
@@ -40,6 +46,12 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { checkEligibility } = require('../services/karateExamService');
+
+// Tipos de evento aceitos em karate_belt_exams.exam_type (espelha o CHECK da
+// migration 192). Graus específicos (dojô) + tipos amplos (federação).
+// NÃO derivamos faixa-alvo a partir do tipo: a graduação vem do payload por
+// candidato (target_belt). 'curso' é evento sem graduação.
+const VALID_EXAM_TYPES = ['kyu_regional', 'dan_estadual', 'dan_nacional', 'exame', 'curso'];
 
 // ── GET /belt-exams ─────────────────────────────────────────
 router.get('/belt-exams', ...guards.read(), async (req, res) => {
@@ -123,6 +135,19 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
 
   if (!event_date) {
     return res.status(422).json({ error: 'event_date é obrigatório', code: 'VALIDATION_ERROR' });
+  }
+
+  // Whitelist de exam_type (espelha o CHECK da migration 192). Tipo é OPCIONAL —
+  // null é aceito (evento amplo sem classificação). Quando informado, deve ser um
+  // dos valores válidos; caso contrário 422 limpo (em vez de 500 da constraint).
+  // NÃO inferimos faixa-alvo do tipo: para 'exame'/'curso' (amplos) a graduação,
+  // se houver, vem do payload por candidato (target_belt na inscrição). 'curso'
+  // é evento sem graduação.
+  if (exam_type !== undefined && exam_type !== null && !VALID_EXAM_TYPES.includes(exam_type)) {
+    return res.status(422).json({
+      error: `exam_type inválido. Use: ${VALID_EXAM_TYPES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
   }
 
   try {
@@ -268,6 +293,16 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
   // karate_belt_exams editable columns: event_date, location, name, exam_type,
   //   max_candidates, fee_amount (dojo_id and notes do NOT exist)
   const ALLOWED = ['event_date', 'location', 'name', 'exam_type', 'max_candidates', 'fee_amount'];
+
+  // Whitelist de exam_type quando presente (espelha migration 192 / POST).
+  if (req.body.exam_type !== undefined && req.body.exam_type !== null
+      && !VALID_EXAM_TYPES.includes(req.body.exam_type)) {
+    return res.status(422).json({
+      error: `exam_type inválido. Use: ${VALID_EXAM_TYPES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
   const updates = [];
   const values = [];
   let idx = 1;
