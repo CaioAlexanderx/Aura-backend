@@ -47,6 +47,11 @@
 //   o status REAL retornado por trocaDevolucao55 (autorizada/rejeitada/
 //   processando) + grava last_error; antes forcava 'autorizada' fixo e usava
 //   result.chave_acesso (inexistente -> era devolucao_chave).
+// 24/06/2026 (fix NaN -> receita zerada): um unit_price invalido no payload
+//   (parseFloat("") = NaN) era persistido como numeric 'NaN' em
+//   troca_returned_items e envenenava o SUM da receita no relatorio de Vendas
+//   (zerava/quebrava). toFiniteNum() + backfill do preco original em
+//   validateReturnedItems + guarda nos INSERTs e em computeAndValidateTotals.
 // ============================================================
 
 const db = require('../config/database');
@@ -54,6 +59,17 @@ const nuvemfiscal = require('./nuvemfiscal');
 const trocaDevolucao55 = require('./trocaDevolucao55');
 
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
+
+// 24/06/2026: coage para número finito; NaN/Infinity/inválido → fallback.
+// Um valor inválido vindo do payload (ex.: parseFloat("") === NaN) era gravado
+// como numeric 'NaN' em troca_returned_items/sale_items e envenenava o SUM da
+// receita (relatorio de Vendas zerava/quebrava). Usado nos INSERTs e nos
+// cálculos de total; o preço de item devolvido ainda é recuperado da linha
+// original em validateReturnedItems (valor correto, não 0).
+function toFiniteNum(v, fallback = 0) {
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 class TrocaV2Error extends Error {
   constructor(status, body) {
@@ -221,6 +237,11 @@ async function validateReturnedItems(client, originSales, returnedItems) {
     const saleItems = itemsBySale.get(ret.original_sale_id) || [];
     const origItem = saleItems.find((i) => i.id === ret.original_sale_item_id);
     if (!origItem) throw new TrocaV2Error(400, { error: `sale_items.${ret.original_sale_item_id} nao pertence a venda ${ret.original_sale_id}` });
+    // 24/06/2026: payload com unit_price invalido (NaN/vazio) recupera o preco
+    // da linha ORIGINAL — evita persistir numeric 'NaN' (que zera a receita).
+    if (!Number.isFinite(parseFloat(ret.unit_price))) {
+      ret.unit_price = toFiniteNum(origItem.unit_price);
+    }
     const qty = parseFloat(ret.quantity);
     if (!qty || qty <= 0) throw new TrocaV2Error(400, { error: 'returned_item.quantity deve ser > 0' });
     if (qty > parseFloat(origItem.quantity)) {
@@ -302,8 +323,10 @@ function balanceSplits(splits, target, fallbackMethod) {
 // divergencia de UI/cliente legado nao pode impedir o lojista de concluir.
 // Retorna tambem paymentSplits/refundSplits ja normalizados e somando certo.
 function computeAndValidateTotals({ returned_items, new_items, payment_splits, refund_splits, legacyMethod }) {
-  const returnedValue = (returned_items || []).reduce((acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0);
-  const newValue = (new_items || []).reduce((acc, n) => acc + parseFloat(n.quantity) * parseFloat(n.unit_price), 0);
+  // 24/06/2026: toFiniteNum evita que um unit_price/quantity invalido (NaN)
+  // contamine os totais (e, downstream, os numeric persistidos).
+  const returnedValue = (returned_items || []).reduce((acc, r) => acc + toFiniteNum(r.quantity) * toFiniteNum(r.unit_price), 0);
+  const newValue = (new_items || []).reduce((acc, n) => acc + toFiniteNum(n.quantity) * toFiniteNum(n.unit_price), 0);
   const netAmount = parseFloat((newValue - returnedValue).toFixed(2));
 
   if ((returned_items || []).length === 0 && (new_items || []).length === 0) {
@@ -777,8 +800,8 @@ async function handle(req, res) {
     }
 
     for (const item of new_items) {
-      const qty = parseFloat(item.quantity);
-      const unitPrice = parseFloat(item.unit_price);
+      const qty = toFiniteNum(item.quantity);
+      const unitPrice = toFiniteNum(item.unit_price);
       const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
       let costPrice = 0;
       let productName = item.product_name_snapshot || '';
@@ -805,7 +828,7 @@ async function handle(req, res) {
            (troca_sale_id, original_sale_id, original_sale_item_id,
             product_id, variant_id, quantity, unit_price, product_name_snapshot)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [trocaSaleRow.id, ret.original_sale_id, ret.original_sale_item_id, ret.product_id || null, ret.variant_id || null, parseFloat(ret.quantity), parseFloat(ret.unit_price), ret.product_name_snapshot || null]
+        [trocaSaleRow.id, ret.original_sale_id, ret.original_sale_item_id, ret.product_id || null, ret.variant_id || null, toFiniteNum(ret.quantity), toFiniteNum(ret.unit_price), ret.product_name_snapshot || null]
       );
     }
 
@@ -832,7 +855,7 @@ async function handle(req, res) {
       const strat = strategyMap.get(s.id);
       if (strat !== 'devolucao_55') continue;
       const itemsForThis = returned_items.filter((r) => r.original_sale_id === s.id);
-      const valueForThis = itemsForThis.reduce((acc, r) => acc + parseFloat(r.quantity) * parseFloat(r.unit_price), 0);
+      const valueForThis = itemsForThis.reduce((acc, r) => acc + toFiniteNum(r.quantity) * toFiniteNum(r.unit_price), 0);
 
       // INSERT pendente — referencia suficiente para o worker de retry tambem.
       // SOB SAVEPOINT (bestEffort): um drift de schema na nfce_emissions (ex: o
@@ -1036,5 +1059,5 @@ module.exports = {
   handle,
   reemitirEmissao,
   TrocaV2Error,
-  _internal: { computeAndValidateTotals, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort },
+  _internal: { computeAndValidateTotals, balanceSplits, decideFiscalPerOrigin, normalizeMethodForSalePayments, bestEffort, toFiniteNum },
 };
