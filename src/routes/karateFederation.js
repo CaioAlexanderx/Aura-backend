@@ -17,6 +17,45 @@ const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { guards } = require('../config/karateRoles');
 
+// ── Ordenação estável de faixas (hierarquia + grau de Dan) ─────
+// O backend devolve um `rank` numérico por faixa para o FE ordenar de forma
+// estável a lista "Praticantes por graduação". Hierarquia geral:
+//   Branca < Amarela < Laranja < Verde < (Azul) < Roxa < Marrom < Preta(1°→2°→…)
+// belt_level da preta é 'preta' (string) e o grau vem do belt_name
+// ('Preta 1°', 'Preta 2°'…) — por isso ORDER BY belt_level sozinho NÃO separa
+// os Dan. Vermelha (histórica) vai pro fim. Acento/caixa normalizados.
+function normBeltLevel(level) {
+  return String(level || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+}
+
+const BELT_ORDER = {
+  branca: 10,
+  amarela: 20,
+  laranja: 30,
+  verde: 40,
+  azul_claro: 45, azulclaro: 45, 'azul claro': 45,
+  azul: 50,
+  azul_escuro: 55, azulescuro: 55, 'azul escuro': 55,
+  roxa: 60, roxo: 60,
+  marrom: 70,
+  // preta tratada à parte (grau soma ao rank base)
+  vermelha: 900, vermelho: 900, // histórica → fim
+};
+
+function beltRank(level, name) {
+  const b = normBeltLevel(level);
+  if (b === 'preta') {
+    const grau = parseInt((String(name || '').match(/(\d+)/) || [])[1], 10) || 1;
+    return 80 + grau; // 1º Dan=81, 2º Dan=82, …
+  }
+  if (b in BELT_ORDER) return BELT_ORDER[b];
+  return 500; // desconhecida → antes da vermelha, depois das conhecidas
+}
+
 // ── POST /karate/federation/setup ──────────────────────
 router.post('/federation/setup', requireAuth, async (req, res) => {
   const { name, slug, logo_url } = req.body;
@@ -207,6 +246,11 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
     const upcomingEvents = [];
 
     // ── 3. Distribuição de faixas ───────────────────────────
+    // Ordenada por `rank` numérico estável (hierarquia + grau de Dan), calculado
+    // no backend via beltRank(). belt_level da preta é 'preta' (string) e ORDER BY
+    // belt_level sozinho NÃO separaria os Dan — por isso o rank vai no payload e a
+    // lista já sai pré-ordenada. (A distribuição continua incluindo a Vermelha
+    // aqui; quem oculta a Vermelha é o FE.)
     const beltRes = await db.query(
       `SELECT cb.belt_level, cb.belt_name, COUNT(*) AS count
        FROM karate_current_belt cb
@@ -217,11 +261,14 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
       [federationId]
     );
 
-    const beltDistribution = beltRes.rows.map(r => ({
-      belt_level: r.belt_level,
-      belt_name:  r.belt_name,
-      count:      parseInt(r.count, 10),
-    }));
+    const beltDistribution = beltRes.rows
+      .map(r => ({
+        belt_level: r.belt_level,
+        belt_name:  r.belt_name,
+        count:      parseInt(r.count, 10),
+        rank:       beltRank(r.belt_level, r.belt_name),
+      }))
+      .sort((a, b) => a.rank - b.rank);
 
     // ── 4. Track P: Alertas (derivados de dados já existentes) ──
     // Cada alert: { type, severity, title, count, action_path }
@@ -313,7 +360,12 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
     res.json({
       kpis: {
         dojo_count:        dojoCount,
+        // T1: número-destaque = TOTAL real de praticantes da federação
+        // (COUNT(*) customers WHERE federation_id), NÃO a soma das faixas
+        // visíveis. practitioner_count já é esse total; practitioner_total é
+        // um alias explícito para o FE não cair na soma de belt_distribution.
         practitioner_count: practCount,
+        practitioner_total: practCount,
         revenue_ytd:       revenueYtd,
         overdue_rate:      overdueRate,
       },
@@ -343,11 +395,14 @@ router.get('/belt-distribution', ...guards.read(), async (req, res) => {
       [federationId]
     );
 
-    res.json(rows.map(r => ({
-      belt_level: r.belt_level,
-      belt_name:  r.belt_name,
-      count:      parseInt(r.count, 10),
-    })));
+    res.json(rows
+      .map(r => ({
+        belt_level: r.belt_level,
+        belt_name:  r.belt_name,
+        count:      parseInt(r.count, 10),
+        rank:       beltRank(r.belt_level, r.belt_name),
+      }))
+      .sort((a, b) => a.rank - b.rank));
   } catch (err) {
     console.error('[karateFederation] belt-distribution error:', err.message);
     res.status(500).json({ error: 'Erro ao carregar distribuição de faixas' });
