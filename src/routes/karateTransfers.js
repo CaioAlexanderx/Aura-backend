@@ -1,10 +1,14 @@
 // ============================================================
 // AURA KARATÊ — Transferência de praticante entre dojôs (Track N)
 // Montado sob /federation/:id. Guards de karateRoles.
-//   GET  /practitioners/:practitionerId/transfers   (read)
-//        — histórico imutável de transferências do praticante
-//   POST /practitioners/:practitionerId/transfer     (staffWrite)
+//   GET    /practitioners/:practitionerId/transfers                (read)
+//        — histórico de transferências do praticante
+//   POST   /practitioners/:practitionerId/transfer                 (staffWrite)
 //        — transfere o praticante para um dojô de destino (mesma federação)
+//   PATCH  /practitioners/:practitionerId/transfers/:transferId    (staffWrite)
+//        — corrige metadados do registro (motivo, data) — NÃO move dojo_id
+//   DELETE /practitioners/:practitionerId/transfers/:transferId    (staffWrite)
+//        — exclui o registro de transferência — NÃO reverte customers.dojo_id
 //
 // Garantias:
 //   - Transacional: reatribui customers.dojo_id + grava histórico append-only.
@@ -16,6 +20,12 @@
 //     a transferência (enviados após COMMIT).
 //   - Defensivo: a tabela 180 pode não existir ainda (42P01) — seguro mergear
 //     o código antes da migração ser aplicada.
+//
+// 25/06/2026 (decisão Caio — liberdade total da federação): editar/excluir o
+//   registro histórico por item. A edição corrige só os METADADOS (motivo,
+//   data efetiva); NÃO re-executa a movimentação. A exclusão remove o registro
+//   mas NÃO reverte o customers.dojo_id atual (a reversão de dojô se faz via
+//   nova transferência ou editando a ficha do praticante).
 // ============================================================
 'use strict';
 
@@ -203,6 +213,84 @@ router.post('/practitioners/:practitionerId/transfer', ...guards.staffWrite(), a
     return res.status(500).json({ error: 'Erro ao transferir praticante', detail: e.message });
   } finally {
     client.release();
+  }
+});
+
+// ── PATCH corrigir metadados de um registro de transferência ──
+// Corrige SÓ os metadados do registro (reason/motivo, transferred_at/data).
+// NÃO re-executa a movimentação (não toca customers.dojo_id, origin/destination).
+router.patch('/practitioners/:practitionerId/transfers/:transferId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, practitionerId, transferId } = req.params;
+  const b = req.body || {};
+
+  const sets = [];
+  const vals = [];
+  let i = 1;
+
+  if (b.reason !== undefined) {
+    // string vazia/null → limpa o motivo (dado ausente é neutro)
+    const v = (b.reason === null || String(b.reason).trim() === '') ? null : String(b.reason).trim().slice(0, 1000);
+    sets.push(`reason = $${i}`); vals.push(v); i++;
+  }
+  if (b.transferred_at !== undefined) {
+    const v = b.transferred_at != null ? String(b.transferred_at).slice(0, 10) : '';
+    if (!v || !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      return res.status(422).json({ error: 'transferred_at deve ser YYYY-MM-DD', code: 'VALIDATION_ERROR' });
+    }
+    sets.push(`transferred_at = $${i}::date`); vals.push(v); i++;
+  }
+
+  if (!sets.length) {
+    return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  }
+
+  try {
+    // Escopo: o registro pertence a ESTE praticante E a ESTA federação.
+    vals.push(transferId, practitionerId, federationId);
+    const upd = await db.query(
+      `UPDATE karate_practitioner_transfers
+          SET ${sets.join(', ')}
+        WHERE id = $${i} AND practitioner_id = $${i + 1} AND federation_id = $${i + 2}
+      RETURNING id, practitioner_id, origin_dojo_id, destination_dojo_id,
+                origin_dojo_name, destination_dojo_name, reason, transferred_at, created_at`,
+      vals
+    );
+    if (!upd.rows.length) {
+      return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
+    }
+    return res.json(upd.rows[0]);
+  } catch (e) {
+    if (e.code === '42P01') {
+      return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
+    }
+    console.error('[karateTransfers] update error:', e.message);
+    return res.status(500).json({ error: 'Erro ao editar transferência', detail: e.message });
+  }
+});
+
+// ── DELETE excluir um registro de transferência ──
+// Remove a linha do histórico. IMPORTANTE: NÃO reverte o customers.dojo_id
+// atual — apagar o rastro não move o praticante de volta. A reversão de dojô
+// se faz via nova transferência ou editando a ficha do praticante.
+router.delete('/practitioners/:practitionerId/transfers/:transferId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, practitionerId, transferId } = req.params;
+  try {
+    const del = await db.query(
+      `DELETE FROM karate_practitioner_transfers
+        WHERE id = $1 AND practitioner_id = $2 AND federation_id = $3
+      RETURNING id`,
+      [transferId, practitionerId, federationId]
+    );
+    if (!del.rows.length) {
+      return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
+    }
+    return res.json({ deleted: true, id: transferId });
+  } catch (e) {
+    if (e.code === '42P01') {
+      return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
+    }
+    console.error('[karateTransfers] delete error:', e.message);
+    return res.status(500).json({ error: 'Erro ao excluir transferência', detail: e.message });
   }
 });
 
