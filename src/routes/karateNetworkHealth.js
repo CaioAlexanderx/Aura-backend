@@ -32,11 +32,25 @@
 // lançada não é inadimplente — o denominador são as anuidades efetivamente
 // lançadas; sem cobranças → inadimplência 0%.
 //
+// NOTA DE AFILIAÇÃO (25/06): "novas filiações no ano" e a evolução anual contam
+// por companies.affiliation_since (ano de filiação real), null-safe: dojô SEM
+// affiliation_since NÃO entra na contagem e NÃO usa created_at como proxy
+// (created_at é a data da IMPORTAÇÃO da base FPKT, não a data de filiação). Com
+// affiliation_since NULL em toda a base hoje, o indicador mostra 0 — correto; a
+// federação preenche "Filiação desde" na ficha do dojô. O total de filiados
+// (base total de dojôs) é independente disso.
+//
 // COBERTURA (Item 5, 25/06): a COBERTURA geográfica é a ÚNICA exceção à base
 // total — usa só dojôs CADASTRADOS E ATIVOS (is_active IS NOT FALSE), pois é
 // um retrato da presença real da rede no território. Não mexe em afiliados/
 // inadimplência (coerência #239). As "lacunas de cobertura" (regiões sem dojô)
 // foram REMOVIDAS: não são pendência a corrigir.
+//
+// NOTA DE GRADUAÇÕES (25/06): "Graduações Registradas" conta karate_belt_history
+// INDEPENDENTE de exam_id (as graduações importadas têm exam_id NULL e DEVEM
+// aparecer). Janela = YTD (date_trunc('year', CURRENT_DATE) até CURRENT_DATE),
+// excluindo a sentinela graduated_at = '1900-01-01' (backfill) e datas futuras
+// (typos da planilha). Gráfico, tabela e KPI usam a MESMA janela/fonte.
 //
 // NOTA DE CATEGORIZAÇÃO DE FAIXA (24/06): na "Relação de faixas" o belt_level
 // da faixa preta é 'preta' (o belt_name carrega o grau: 'Preta 1°', 'Preta 2°'…),
@@ -174,31 +188,36 @@ function sendCsv(res, filename, cols, rows) {
 
 // ── Afiliação da rede ─────────────────────────────────────────
 // Deriva de companies (karate_dojo) + karate_dojo_annuity_history.
-// Conta dojôs por ano de vencimento da anuidade para evolução anual.
+// Conta dojôs por ano de FILIAÇÃO (affiliation_since) para evolução anual.
 router.get('/afiliacao', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
   try {
     // BASE TOTAL de dojôs da federação (sem filtro de is_active) — coerente
     // com a página Dojôs e o Painel. Um dojô inativo continua filiado.
+    // affiliated_since = companies.affiliation_since (data real de filiação;
+    // pode ser NULL — a importação FPKT não trouxe essa data).
     const dojosRes = await safeQuery(
       `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name,
               c.city, c.region,
-              c.created_at::date AS affiliated_since
+              c.affiliation_since::date AS affiliated_since
        FROM companies c
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
-       ORDER BY c.created_at ASC`,
+       ORDER BY c.affiliation_since ASC NULLS LAST, c.created_at ASC`,
       [fedId]
     );
     const dojos = dojosRes.rows;
 
-    // Evolução anual: conta dojôs afiliados em cada ano (por created_at)
+    // Evolução anual: conta novas filiações por ANO DE FILIAÇÃO (affiliation_since).
+    // Null-safe: dojô sem affiliation_since NÃO entra (não vira ano 0 nem usa
+    // created_at como proxy — created_at é a data da importação, não da filiação).
     const yearlyRes = await safeQuery(
-      `SELECT EXTRACT(YEAR FROM c.created_at)::int AS ano, COUNT(*)::int AS new_affiliations
+      `SELECT EXTRACT(YEAR FROM c.affiliation_since)::int AS ano, COUNT(*)::int AS new_affiliations
        FROM companies c
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
+         AND c.affiliation_since IS NOT NULL
        GROUP BY ano
        ORDER BY ano ASC`,
       [fedId]
@@ -217,8 +236,10 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
     for (const r of annuityRes.rows) annuityBydojo[r.dojo_id] = r;
 
     const totalNow = dojos.length;
-    // Novas filiações DO ANO — métrica SEPARADA, nunca confundida com "afiliados".
+    // Novas filiações DO ANO — por affiliation_since (métrica SEPARADA, nunca
+    // confundida com "afiliados"). Null-safe: dojô sem affiliation_since não conta.
     const newAffiliationsYear = dojos.filter((d) => {
+      if (!d.affiliated_since) return false;
       const y = new Date(d.affiliated_since).getFullYear();
       return y === season;
     }).length;
@@ -694,6 +715,11 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
 // a data em graduated_at; o dojô vem de customers (student_id).
 // Dan = faixa preta (belt_level 'preta', qualquer grau) OU tokens '1dan'..'9dan';
 // o restante é Kyu. Normaliza acento/caixa.
+// JANELA: YTD (1º jan do ano corrente → hoje). Conta INDEPENDENTE de exam_id
+// (graduações importadas têm exam_id NULL e DEVEM aparecer). Exclui a sentinela
+// 1900-01-01 e datas futuras. Gráfico (monthRes), tabela (listRes) e o KPI de
+// /summary usam a MESMA janela/fonte. (`months` mantido por compat de API, mas
+// a janela é YTD; o rótulo "YTD" e i18n de datas são do FE.)
 router.get('/graduacoes', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const months = parseInt(req.query.months) || 8;
@@ -712,13 +738,16 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
          COUNT(*)::int AS total
        FROM karate_belt_history
        WHERE federation_id = $1
-         AND graduated_at >= CURRENT_DATE - ($2 * INTERVAL '1 month')
+         AND graduated_at >= date_trunc('year', CURRENT_DATE)
+         AND graduated_at <= CURRENT_DATE
+         AND graduated_at <> DATE '1900-01-01'
        GROUP BY month_start
        ORDER BY month_start ASC`,
-      [fedId, months]
+      [fedId]
     );
 
-    // Lista detalhada
+    // Lista detalhada — MESMA janela/fonte do gráfico (YTD, sem exam_id filter,
+    // sem sentinela/datas futuras).
     const listRes = await safeQuery(
       `SELECT bh.id, bh.graduated_at, bh.student_id,
               cu.name AS student_name,
@@ -728,9 +757,11 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
        JOIN customers cu ON cu.id = bh.student_id
        LEFT JOIN companies dj ON dj.id = cu.dojo_id
        WHERE bh.federation_id = $1
-         AND bh.graduated_at >= CURRENT_DATE - ($2 * INTERVAL '1 month')
+         AND bh.graduated_at >= date_trunc('year', CURRENT_DATE)
+         AND bh.graduated_at <= CURRENT_DATE
+         AND bh.graduated_at <> DATE '1900-01-01'
        ORDER BY bh.graduated_at DESC`,
-      [fedId, months]
+      [fedId]
     );
 
     const months_data = monthRes.rows.map((r) => {
@@ -878,11 +909,14 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     );
     const dojoCount = parseInt(dojosRes.rows[0]?.total || 0, 10);
 
-    // 1b. Novas filiações no ano — métrica SEPARADA (não é "afiliados").
+    // 1b. Novas filiações no ano — por affiliation_since (métrica SEPARADA, não
+    //     é "afiliados"). Null-safe: dojô sem affiliation_since não conta (NÃO
+    //     usa created_at, que é a data da importação). Todos NULL agora → 0.
     const newAffRes = await safeQuery(
       `SELECT COUNT(*)::int AS total FROM companies
        WHERE federation_id = $1 AND vertical_active = 'karate_dojo'
-         AND EXTRACT(YEAR FROM created_at)::int = $2`,
+         AND affiliation_since IS NOT NULL
+         AND EXTRACT(YEAR FROM affiliation_since)::int = $2`,
       [fedId, season]
     );
     const newAffiliationsYear = parseInt(newAffRes.rows[0]?.total || 0, 10);
@@ -909,11 +943,15 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     const inadVencido = parseInt(inadRes.rows[0]?.vencido || 0, 10);
     const inadPct = inadTotal > 0 ? Number((inadVencido / inadTotal * 100).toFixed(1)) : 0;
 
-    // 4. Graduações nos últimos 8 meses
+    // 4. Graduações no ano (YTD) — independente de exam_id (graduações
+    //    importadas têm exam_id NULL e DEVEM contar). Exclui a sentinela
+    //    1900-01-01 (backfill) e datas futuras (typos da planilha).
     const gradRes = await safeQuery(
       `SELECT COUNT(*)::int AS total FROM karate_belt_history
        WHERE federation_id = $1
-         AND graduated_at >= CURRENT_DATE - INTERVAL '8 months'`,
+         AND graduated_at >= date_trunc('year', CURRENT_DATE)
+         AND graduated_at <= CURRENT_DATE
+         AND graduated_at <> DATE '1900-01-01'`,
       [fedId]
     );
     const gradTotal = parseInt(gradRes.rows[0]?.total || 0, 10);
