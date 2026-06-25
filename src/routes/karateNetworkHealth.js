@@ -172,7 +172,7 @@ const SP_MUN_TOTAL = {
 function buildCsv(cols, rows) {
   const esc = (v) => {
     const s = String(v == null ? '' : v);
-    return /["\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    return /["\\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   };
   const head = cols.map((c) => esc(c.label)).join(';');
   const body = rows.map((r) => cols.map((c) => esc(r[c.key])).join(';')).join('\r\n');
@@ -467,12 +467,16 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
 });
 
 // ── Projeção de receita ───────────────────────────────────────
-// Agrupa anuidades por mês de vencimento (próximos 8 meses).
-// kind: 'real' (already paid) | 'proj' (pending/future)
+// Agrupa anuidades por mês de vencimento do mês corrente até dezembro do ano
+// corrente (inclusive). kind: 'real' (already paid) | 'proj' (pending/future)
 router.get('/projecao-receita', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
-  const months = parseInt(req.query.months) || 8;
+  // Janela: mês atual → dezembro do ano corrente (independe de quantos meses faltam).
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  // Quantos meses na série: de mês atual (0-based) até dezembro (11) inclusive.
+  const monthsInWindow = 12 - now.getMonth(); // ex: junho (5) → 7 meses (jun..dez)
   try {
     const r = await safeQuery(
       `SELECT
@@ -483,11 +487,11 @@ router.get('/projecao-receita', ...guards.read(), async (req, res) => {
          COUNT(*)::int                        AS annuities
        FROM karate_dojo_annuity_history
        WHERE federation_id = $1
-         AND due_date >= CURRENT_DATE - INTERVAL '1 month'
-         AND due_date <  CURRENT_DATE + ($2 * INTERVAL '1 month')
+         AND due_date >= DATE_TRUNC('month', CURRENT_DATE)
+         AND due_date <  MAKE_DATE($2::int, 12, 31) + INTERVAL '1 day'
        GROUP BY month_start
        ORDER BY month_start ASC`,
-      [fedId, months]
+      [fedId, currentYear]
     );
 
     const data = r.rows.map((row) => {
@@ -528,7 +532,7 @@ router.get('/projecao-receita', ...guards.read(), async (req, res) => {
     }
 
     res.json({
-      months,
+      months_in_window: monthsInWindow,
       total_realized: totalReal,
       total_projected: totalProj,
       data,
