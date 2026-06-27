@@ -6,6 +6,8 @@
 //   POST  /financial/annuities/dojos/:dojoId/charge     — lança cobrança
 //   PATCH /financial/annuities/dojos/:dojoId/:annuityId — corrige cobrança NÃO paga
 //   POST  /financial/annuities/dojos/:dojoId/:annuityId/void — estorna/cancela cobrança
+//   POST  /financial/annuities/dojos/:dojoId/:annuityId/pay  — baixa manual de cobrança existente
+//   POST  /financial/annuities/dojos/:dojoId/pay        — lança + baixa em um passo (período já pago)
 //   POST  /financial/annuities/dojos/:dojoId/pix        — cria intent PIX
 //   GET   /financial/payments/:intentId/status          — polling de status
 //   POST  /financial/payments/:intentId/confirm         — admin marca pago + NFS-e
@@ -35,6 +37,13 @@
 //   preservando a trilha financeira — a transaction NÃO é apagada).
 //   karate_payment_intents.annuity_history_id é SET NULL → intents pendentes
 //   ficam órfãos mas são marcados 'cancelled' aqui. Operação idempotente.
+//
+// NOTA (27/06 — BAIXA MANUAL):
+//   POST .../dojos/:dojoId/:annuityId/pay — baixa manual de cobrança existente.
+//   POST .../dojos/:dojoId/pay            — lança período já pago em um passo.
+//   Ambos requerem migration 194 (payment_method TEXT em karate_dojo_annuity_history).
+//   Conciliação de transaction: idêntica ao /confirm (status='confirmed', paid_at).
+//   Idempotente: se a anuidade já está 'paid', retorna 200 sem efeito colateral.
 // ============================================================
 'use strict';
 
@@ -451,6 +460,343 @@ router.post('/annuities/dojos/:dojoId/:annuityId/void', ...guards.adminOnly(), a
     await client.query('ROLLBACK');
     console.error('[karateAnnuities] void annuity error:', err.message);
     res.status(500).json({ error: 'Erro ao estornar lançamento', detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// ────────────────────────────────────────────────────────────────
+// POST /financial/annuities/dojos/:dojoId/:annuityId/pay
+// 27/06/2026 — BAIXA MANUAL de cobrança existente.
+//
+// Registra pagamento manual de uma cobrança que já foi lançada
+// (via /charge ou via UI). Requer migration 194 (payment_method).
+//
+// Body (todos opcionais):
+//   paid_at?         — YYYY-MM-DD (default: hoje)
+//   payment_method?  — 'pix'|'dinheiro'|'transferencia'|'outro' (default: 'pix')
+//   amount?          — valor recebido (default: amount da cobrança)
+//
+// Idempotente: se a anuidade já está 'paid', retorna 200 sem efeito colateral.
+// Conciliação: sets karate_dojo_annuity_history.status='paid' + paid_at +
+//   payment_method; sets transactions.status='confirmed' + paid_at.
+//   Se a cobrança não tem transaction_id (raro), cria uma nova já confirmada.
+// ────────────────────────────────────────────────────────────────
+router.post('/annuities/dojos/:dojoId/:annuityId/pay', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, dojoId, annuityId } = req.params;
+  const {
+    paid_at,
+    payment_method = 'pix',
+    amount: overrideAmount,
+  } = req.body || {};
+
+  const VALID_METHODS = ['pix', 'dinheiro', 'transferencia', 'outro'];
+  if (payment_method && !VALID_METHODS.includes(payment_method)) {
+    return res.status(422).json({
+      error: `payment_method inválido. Valores aceitos: ${VALID_METHODS.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Busca e valida escopo (dojô pertence à federação)
+    const histRes = await client.query(
+      `SELECT h.id, h.dojo_id, h.federation_id, h.reference_period,
+              h.amount, h.due_date, h.status, h.paid_at,
+              h.transaction_id, c.name AS dojo_name
+       FROM karate_dojo_annuity_history h
+       JOIN companies c ON c.id = h.dojo_id
+       WHERE h.id = $1 AND h.dojo_id = $2 AND h.federation_id = $3
+       LIMIT 1`,
+      [annuityId, dojoId, federationId]
+    );
+    if (!histRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Cobrança não encontrada', code: 'NOT_FOUND' });
+    }
+    const hist = histRes.rows[0];
+
+    // Idempotente: já está pago — retorna sem efeito colateral.
+    if (hist.status === 'paid') {
+      await client.query('ROLLBACK');
+      return res.json({
+        annuity_id: hist.id,
+        dojo_id: hist.dojo_id,
+        reference_period: hist.reference_period,
+        amount: parseFloat(hist.amount),
+        paid_at: hist.paid_at,
+        payment_method: hist.payment_method || null,
+        status: 'paid',
+        transaction_id: hist.transaction_id || null,
+        idempotent_hit: true,
+      });
+    }
+
+    // Normaliza paid_at (default: hoje ao meio-dia horário de Brasília)
+    let paidAtValue;
+    if (paid_at) {
+      // Aceita YYYY-MM-DD; converte para timestamp meio-dia SP (UTC-3)
+      paidAtValue = new Date(`${paid_at}T12:00:00-03:00`).toISOString();
+    } else {
+      paidAtValue = new Date().toISOString();
+    }
+
+    // Valor a registrar na transaction (usa override ou amount original)
+    const effectiveAmount = overrideAmount !== undefined
+      ? Number(overrideAmount)
+      : parseFloat(hist.amount);
+
+    if (isNaN(effectiveAmount) || effectiveAmount <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: 'amount deve ser > 0', code: 'VALIDATION_ERROR' });
+    }
+
+    // ── Concilia/cria a transaction ──────────────────────────
+    let transactionId = hist.transaction_id;
+
+    if (transactionId) {
+      // Cobrança já tem transaction: confirma (igual ao /confirm)
+      await client.query(
+        `UPDATE transactions
+         SET status = 'confirmed', paid_at = $1, amount = $2, updated_at = NOW()
+         WHERE id = $3`,
+        [paidAtValue, effectiveAmount, transactionId]
+      );
+    } else {
+      // Sem transaction (schema drift / cobrança antiga): cria uma nova já confirmada
+      const idempotencyKey = `dojo-annuity-manual-pay-${annuityId}`;
+      const txRes = await client.query(
+        `INSERT INTO transactions
+           (company_id, type, category, amount, status, due_date,
+            description, idempotency_key, reference_type, reference_id,
+            federation_id, paid_at, created_at, updated_at)
+         VALUES ($1, 'income', 'annuity_dojo', $2, 'confirmed', $3,
+                 $4, $5, 'karate_dojo', $6,
+                 $7, $8, NOW(), NOW())
+         ON CONFLICT (idempotency_key) DO UPDATE
+           SET status = 'confirmed', paid_at = EXCLUDED.paid_at, updated_at = NOW()
+         RETURNING id`,
+        [
+          federationId,
+          effectiveAmount,
+          hist.due_date,
+          `Anuidade dojô ${hist.dojo_name} — ${hist.reference_period}`,
+          idempotencyKey,
+          dojoId,
+          federationId,
+          paidAtValue,
+        ]
+      );
+      transactionId = txRes.rows[0].id;
+    }
+
+    // ── Atualiza karate_dojo_annuity_history ─────────────────
+    await client.query(
+      `UPDATE karate_dojo_annuity_history
+       SET status = 'paid', paid_at = $1, payment_method = $2,
+           transaction_id = $3, updated_at = NOW()
+       WHERE id = $4`,
+      [paidAtValue, payment_method, transactionId, annuityId]
+    );
+
+    // ── Cancela intents PIX pendentes (não fazem mais sentido) ─
+    await client.query(
+      `UPDATE karate_payment_intents
+       SET status = 'cancelled', updated_at = NOW()
+       WHERE annuity_history_id = $1 AND status = 'pending'`,
+      [annuityId]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      annuity_id: annuityId,
+      dojo_id: dojoId,
+      dojo_name: hist.dojo_name,
+      reference_period: hist.reference_period,
+      amount: effectiveAmount,
+      paid_at: paidAtValue,
+      payment_method,
+      status: 'paid',
+      transaction_id: transactionId,
+      idempotent_hit: false,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[karateAnnuities] pay annuity error:', err.message);
+    res.status(500).json({ error: 'Erro ao registrar pagamento', detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// ────────────────────────────────────────────────────────────────
+// POST /financial/annuities/dojos/:dojoId/pay
+// 27/06/2026 — LANÇAR + BAIXAR em um passo (período já pago).
+//
+// Cria a cobrança e já a marca como 'paid' em um único request,
+// dispensando o ciclo /charge → /pay. Útil para registrar
+// retroativamente pagamentos recebidos por fora (ex: depósito bancário).
+//
+// Body:
+//   reference_period (obrig.) — ex: '2026'
+//   amount           (obrig.) — valor recebido
+//   paid_at?         — YYYY-MM-DD (default: hoje)
+//   due_date?        — YYYY-MM-DD (default: paid_at)
+//   payment_method?  — 'pix'|'dinheiro'|'transferencia'|'outro' (default: 'pix')
+//
+// Idempotente: se já existe cobrança para o período retorna 409 com
+//   { code:'CONFLICT', annuity_id } para que o caller possa redirecionar
+//   para o endpoint /pay (com annuityId) se quiser baixar a existente.
+// Conciliação: transaction criada já com status='confirmed' e paid_at.
+// ────────────────────────────────────────────────────────────────
+router.post('/annuities/dojos/:dojoId/pay', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, dojoId } = req.params;
+  const {
+    reference_period,
+    amount,
+    paid_at,
+    due_date,
+    payment_method = 'pix',
+  } = req.body || {};
+
+  // Validação
+  if (!reference_period || String(reference_period).trim() === '') {
+    return res.status(422).json({ error: 'reference_period obrigatorio', code: 'VALIDATION_ERROR' });
+  }
+  if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+    return res.status(422).json({ error: 'amount obrigatorio e deve ser > 0', code: 'VALIDATION_ERROR' });
+  }
+  const VALID_METHODS = ['pix', 'dinheiro', 'transferencia', 'outro'];
+  if (payment_method && !VALID_METHODS.includes(payment_method)) {
+    return res.status(422).json({
+      error: `payment_method inválido. Valores aceitos: ${VALID_METHODS.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  const period = String(reference_period).trim();
+  const effectiveAmount = Number(amount);
+
+  // Normaliza paid_at
+  let paidAtValue;
+  if (paid_at) {
+    paidAtValue = new Date(`${paid_at}T12:00:00-03:00`).toISOString();
+  } else {
+    paidAtValue = new Date().toISOString();
+  }
+
+  // due_date: usa o informado ou o mesmo dia do paid_at (sem hora)
+  const effectiveDueDate = due_date || (paid_at || new Date().toISOString().slice(0, 10));
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Verifica dojô e escopo
+    const dojoRes = await client.query(
+      `SELECT id, name FROM companies
+       WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo'
+       LIMIT 1`,
+      [dojoId, federationId]
+    );
+    if (!dojoRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Dojô não encontrado', code: 'NOT_FOUND' });
+    }
+    const dojoName = dojoRes.rows[0].name;
+
+    // Advisory lock para evitar duplicata concorrente
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1::text || '-annuity-' || $2::text))`,
+      [dojoId, period]
+    );
+
+    // Verifica se já existe cobrança para o período
+    const existingRes = await client.query(
+      `SELECT id, status FROM karate_dojo_annuity_history
+       WHERE dojo_id = $1 AND reference_period = $2
+       LIMIT 1`,
+      [dojoId, period]
+    );
+    if (existingRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: `Já existe cobrança para este dojô no período ${period}. Use POST .../dojos/${dojoId}/${existingRes.rows[0].id}/pay para baixar a existente.`,
+        code: 'CONFLICT',
+        annuity_id: existingRes.rows[0].id,
+        existing_status: existingRes.rows[0].status,
+      });
+    }
+
+    // Cria transaction já confirmada
+    const idempotencyKey = `dojo-annuity-direct-pay-${dojoId}-${period}`;
+    const txRes = await client.query(
+      `INSERT INTO transactions
+         (company_id, type, category, amount, status, due_date,
+          description, idempotency_key, reference_type, reference_id,
+          federation_id, paid_at, created_at, updated_at)
+       VALUES ($1, 'income', 'annuity_dojo', $2, 'confirmed', $3,
+               $4, $5, 'karate_dojo', $6,
+               $7, $8, NOW(), NOW())
+       ON CONFLICT (idempotency_key) DO UPDATE
+         SET status = 'confirmed', paid_at = EXCLUDED.paid_at, updated_at = NOW()
+       RETURNING id`,
+      [
+        federationId,
+        effectiveAmount,
+        effectiveDueDate,
+        `Anuidade dojô ${dojoName} — ${period}`,
+        idempotencyKey,
+        dojoId,
+        federationId,
+        paidAtValue,
+      ]
+    );
+    const transactionId = txRes.rows[0].id;
+
+    // Insere em karate_dojo_annuity_history já como 'paid'
+    const histRes = await client.query(
+      `INSERT INTO karate_dojo_annuity_history
+         (dojo_id, federation_id, reference_period, amount, due_date,
+          status, paid_at, payment_method, transaction_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, 'paid', $6, $7, $8, NOW())
+       RETURNING id, reference_period, amount, due_date, paid_at`,
+      [
+        dojoId,
+        federationId,
+        period,
+        effectiveAmount,
+        effectiveDueDate,
+        paidAtValue,
+        payment_method,
+        transactionId,
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    const h = histRes.rows[0];
+    res.status(201).json({
+      annuity_id: h.id,
+      dojo_id: dojoId,
+      dojo_name: dojoName,
+      reference_period: h.reference_period,
+      amount: parseFloat(h.amount),
+      due_date: h.due_date,
+      paid_at: h.paid_at,
+      payment_method,
+      status: 'paid',
+      transaction_id: transactionId,
+      idempotent_hit: false,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[karateAnnuities] direct pay error:', err.message);
+    res.status(500).json({ error: 'Erro ao registrar pagamento direto', detail: err.message });
   } finally {
     client.release();
   }
