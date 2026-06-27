@@ -9,6 +9,10 @@
 -- e a foto era persistida na variante "fantasma".
 --
 -- Esta migration:
+--  (0) (defensivo) versiona product_variants.image_url — existia em
+--      prod desde 23/05/2026 (junto com endpoint /variant-image) mas
+--      nunca virou migration. Mesma armadilha de marketplaces.
+--      ADD COLUMN IF NOT EXISTS = no-op em prod, cria no CI.
 --  (1) Adiciona coluna deactivated_reason em product_variants
 --      pra rastreabilidade (NULLable, sem default).
 --  (2) Consolida os 27 grupos do Davi: canonica = mais antiga por
@@ -26,6 +30,11 @@
 -- da existencia de extras nao consolidadas).
 -- ============================================================
 
+-- (0) Versiona coluna fantasma: image_url existia em prod, faltava no CI.
+ALTER TABLE product_variants
+  ADD COLUMN IF NOT EXISTS image_url TEXT;
+
+-- (1) Rastreabilidade da desativacao
 ALTER TABLE product_variants
   ADD COLUMN IF NOT EXISTS deactivated_reason TEXT;
 
@@ -215,3 +224,6 @@ COMMENT ON FUNCTION check_no_active_variant_duplicates() IS
 
 COMMENT ON COLUMN product_variants.deactivated_reason IS
   'Motivo da desativacao (is_active=false). Adicionado em 195 pra rastrear consolidacoes; usar valores curtos snake_case.';
+
+COMMENT ON COLUMN product_variants.image_url IS
+  'URL R2 da foto da variante. Existia em prod desde 23/05/2026 (junto com /variant-image) mas so foi versionada em 195.';
