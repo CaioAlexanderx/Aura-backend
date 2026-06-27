@@ -8,6 +8,7 @@
 // POST   /federation/:id/practitioners/:practitionerId/graduations (graduação manual)
 // PATCH  /federation/:id/practitioners/:practitionerId/graduations/:graduationId
 // DELETE /federation/:id/practitioners/:practitionerId/graduations/:graduationId
+// GET    /federation/:id/practitioners/:practitionerId/courses (P9 — últimos 12 meses)
 //
 // Nota: /practitioners/import é registrado ANTES deste router no index.js
 // para que 'import' não seja capturado como :practitionerId.
@@ -25,6 +26,13 @@
 //   - Edição/exclusão POR ITEM da trajetória de faixas (karate_belt_history):
 //     PATCH/DELETE em /graduations/:graduationId. A view karate_current_belt
 //     recalcula a faixa atual sozinha (pode ficar sem faixa se apagar a última).
+// 27/06/2026: P7 — campos de responsável legal (guardian_*) no POST/PATCH/GET.
+//   Obrigatoriedade para menores validada apenas no FE; BE aceita/retorna.
+//   Depende de migration 195 (ADD COLUMN IF NOT EXISTS em customers).
+// 27/06/2026: P9 — GET detalhe agora inclui last_exam + course_count_last_year.
+//   Tabela de candidatos: karate_belt_exam_candidates (student_id, exam_id).
+//   Data do evento: karate_belt_exams.event_date.
+//   Degrada para null/0 defensivamente a 42P01.
 // ============================================================
 'use strict';
 
@@ -135,6 +143,8 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     is_arbiter, is_instructor, is_examiner,
     photo_url,
     street, number, complement, neighborhood, city, state, zip_code,
+    // P7 — responsável legal
+    guardian_name, guardian_cpf, guardian_phone, guardian_relationship,
   } = req.body;
 
   if (!full_name || !String(full_name).trim()) {
@@ -178,14 +188,18 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
           is_arbiter, is_instructor, is_examiner,
           karate_photo_url, karate_registration_number,
           street, number, complement, neighborhood, city, state, zip_code,
+          guardian_name, guardian_cpf, guardian_phone, guardian_relationship,
           is_active, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-               $17, $18, $19, $20, $21, $22, $23, true, NOW(), NOW())
+               $17, $18, $19, $20, $21, $22, $23,
+               $24, $25, $26, $27,
+               true, NOW(), NOW())
        RETURNING id, name, cpf_cnpj, rg, birth_date, email, phone,
                  is_student, parent_guardian_id, federation_id, dojo_id,
                  is_arbiter, is_instructor, is_examiner,
                  karate_photo_url, karate_registration_number, is_active,
-                 street, number, complement, neighborhood, city, state, zip_code`,
+                 street, number, complement, neighborhood, city, state, zip_code,
+                 guardian_name, guardian_cpf, guardian_phone, guardian_relationship`,
       [
         federationId,                        // company_id = federação (owner do registro)
         String(full_name).trim(),
@@ -210,6 +224,11 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
         city || null,
         state || null,
         zip_code || null,
+        // P7
+        (guardian_name && String(guardian_name).trim()) || null,
+        (guardian_cpf  && String(guardian_cpf).trim())  || null,
+        (guardian_phone && String(guardian_phone).trim()) || null,
+        (guardian_relationship && String(guardian_relationship).trim()) || null,
       ]
     );
 
@@ -244,6 +263,11 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     parent_guardian_id: 'parent_guardian_id', photo_url: 'karate_photo_url',
     street: 'street', number: 'number', complement: 'complement',
     neighborhood: 'neighborhood', city: 'city', state: 'state', zip_code: 'zip_code',
+    // P7 — responsável legal
+    guardian_name: 'guardian_name',
+    guardian_cpf: 'guardian_cpf',
+    guardian_phone: 'guardian_phone',
+    guardian_relationship: 'guardian_relationship',
   };
 
   // Campos booleanos: normaliza p/ não virar null no tratamento de string vazia.
@@ -314,6 +338,7 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
               cu.is_arbiter, cu.is_instructor, cu.is_examiner,
               cu.karate_photo_url, cu.karate_registration_number, cu.is_active,
               cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
+              cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
               cb.belt_level, cb.belt_name, cb.current_since
        FROM customers cu
        LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $2
@@ -591,6 +616,12 @@ router.delete('/:practitionerId/graduations/:graduationId', ...guards.staffWrite
 });
 
 // ── GET /federation/:id/practitioners/:practitionerId ───────
+// P9: inclui last_exam + course_count_last_year.
+//   last_exam: graduação mais recente (karate_belt_history, MAX graduated_at,
+//     excluindo sentinela 1900-01-01 e datas futuras).
+//   course_count_last_year: cursos (exam_type='curso') em que o praticante
+//     participou nos últimos 12 meses via karate_belt_exam_candidates JOIN
+//     karate_belt_exams.event_date. Degrada para 0 a 42P01.
 router.get('/:practitionerId', ...guards.read(), async (req, res) => {
   const { id: federationId, practitionerId } = req.params;
 
@@ -602,6 +633,7 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
               cu.karate_photo_url, cu.karate_registration_number,
               cu.is_active,
               cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
+              cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
               cb.belt_level, cb.belt_name, cb.current_since
        FROM customers cu
        LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
@@ -635,10 +667,128 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
       exam_id: r.exam_id || null,
     }));
 
-    res.json({ ...shapePractitioner(p), belt_history: beltHistory });
+    // P9 — last_exam: graduação mais recente (excluindo sentinela 1900-01-01 e futuro)
+    let lastExam = null;
+    try {
+      const lastExamRes = await db.query(
+        `SELECT kbh.graduated_at AS date,
+                kbh.belt_name,
+                kbe.name AS exam_name,
+                kbe.event_date
+         FROM karate_belt_history kbh
+         LEFT JOIN karate_belt_exams kbe ON kbe.id = kbh.exam_id AND kbe.federation_id = $2
+         WHERE kbh.student_id = $1
+           AND kbh.federation_id = $2
+           AND kbh.graduated_at > '1900-01-01'
+           AND kbh.graduated_at <= CURRENT_DATE
+         ORDER BY kbh.graduated_at DESC
+         LIMIT 1`,
+        [practitionerId, federationId]
+      );
+      if (lastExamRes.rows.length) {
+        const r = lastExamRes.rows[0];
+        lastExam = {
+          date: r.date,
+          belt_name: r.belt_name || null,
+          exam_name: r.exam_name || null,
+          event_date: r.event_date || null,
+        };
+      }
+    } catch (e) {
+      // Degrada graciosamente; 42P01 improvável aqui mas seguro
+      if (e.code !== '42P01') console.error('[karatePractitioners] last_exam error:', e.message);
+      lastExam = null;
+    }
+
+    // P9 — course_count_last_year: cursos dos últimos 12 meses
+    // Tabela: karate_belt_exam_candidates (student_id, exam_id)
+    // JOIN karate_belt_exams (exam_type='curso', event_date >= hoje-1ano)
+    let courseCountLastYear = 0;
+    try {
+      const courseCountRes = await db.query(
+        `SELECT COUNT(DISTINCT ec.exam_id)::int AS cnt
+         FROM karate_belt_exam_candidates ec
+         JOIN karate_belt_exams be
+           ON be.id = ec.exam_id
+          AND be.federation_id = $2
+          AND be.exam_type = 'curso'
+          AND be.event_date >= CURRENT_DATE - INTERVAL '1 year'
+         WHERE ec.student_id = $1`,
+        [practitionerId, federationId]
+      );
+      courseCountLastYear = courseCountRes.rows[0]?.cnt ?? 0;
+    } catch (e) {
+      // 42P01: tabela ainda não existe → degrada para 0
+      if (e.code !== '42P01') console.error('[karatePractitioners] course_count error:', e.message);
+      courseCountLastYear = 0;
+    }
+
+    res.json({
+      ...shapePractitioner(p),
+      belt_history: beltHistory,
+      last_exam: lastExam,
+      course_count_last_year: courseCountLastYear,
+    });
   } catch (err) {
     console.error('[karatePractitioners] detail error:', err.message);
     res.status(500).json({ error: 'Erro ao carregar praticante' });
+  }
+});
+
+// ── GET /federation/:id/practitioners/:practitionerId/courses ──
+// P9 (opcional) — lista de cursos em que o praticante participou nos últimos
+// 12 meses. Usa karate_belt_exam_candidates JOIN karate_belt_exams.
+// Degrada para [] a 42P01 (tabela inexistente).
+router.get('/:practitionerId/courses', ...guards.read(), async (req, res) => {
+  const { id: federationId, practitionerId } = req.params;
+
+  try {
+    // Verifica existência do praticante
+    const prac = await db.query(
+      `SELECT id FROM customers WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+      [practitionerId, federationId]
+    );
+    if (!prac.rows.length) {
+      return res.status(404).json({ error: 'Praticante não encontrado', code: 'NOT_FOUND' });
+    }
+
+    let courses = [];
+    try {
+      const coursesRes = await db.query(
+        `SELECT be.id AS exam_id,
+                be.name,
+                be.event_date,
+                be.location,
+                ec.status AS enrollment_status,
+                ec.created_at AS enrolled_at
+         FROM karate_belt_exam_candidates ec
+         JOIN karate_belt_exams be
+           ON be.id = ec.exam_id
+          AND be.federation_id = $2
+          AND be.exam_type = 'curso'
+          AND be.event_date >= CURRENT_DATE - INTERVAL '1 year'
+         WHERE ec.student_id = $1
+         ORDER BY be.event_date DESC`,
+        [practitionerId, federationId]
+      );
+      courses = coursesRes.rows.map(r => ({
+        exam_id: r.exam_id,
+        name: r.name || null,
+        event_date: r.event_date,
+        location: r.location || null,
+        enrollment_status: r.enrollment_status,
+        enrolled_at: r.enrolled_at,
+      }));
+    } catch (e) {
+      if (e.code !== '42P01') console.error('[karatePractitioners] courses list error:', e.message);
+      // Tabela ausente → retorna lista vazia (degradação)
+      courses = [];
+    }
+
+    res.json({ practitioner_id: practitionerId, count: courses.length, data: courses });
+  } catch (err) {
+    console.error('[karatePractitioners] courses error:', err.message);
+    res.status(500).json({ error: 'Erro ao listar cursos do praticante' });
   }
 });
 
@@ -670,6 +820,11 @@ function shapePractitioner(p) {
     city: p.city || null,
     state: p.state || null,
     zip_code: p.zip_code || null,
+    // P7 — responsável legal
+    guardian_name: p.guardian_name || null,
+    guardian_cpf: p.guardian_cpf || null,
+    guardian_phone: p.guardian_phone || null,
+    guardian_relationship: p.guardian_relationship || null,
     current_belt: p.belt_level ? {
       belt_level: p.belt_level,
       belt_name: p.belt_name,
