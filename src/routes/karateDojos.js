@@ -33,6 +33,13 @@
 //     (FE oferece Suspender via PATCH is_active=false vs Excluir definitivamente).
 //     Com ?cascade=true → hard delete em cascata, em transação, na ordem de FK.
 //     Mesmo formato de resposta usado em employees/members (HAS_HISTORY).
+//
+// 27/06/2026 — migration 193: sensei_name + sensei_practitioner_id.
+//   - PATCH aceita sensei_name (texto, '' → null) e sensei_practitioner_id (uuid, '' → null).
+//   - POST aceita os mesmos campos opcionais.
+//   - GET lista retorna sensei_name e sensei_practitioner_id.
+//   - GET detalhe retorna sensei_name, sensei_practitioner_id e sensei_practitioner_name
+//     (nome atual do praticante vinculado, via LEFT JOIN customers — best-effort).
 // ============================================================
 'use strict';
 
@@ -60,6 +67,24 @@ function addressOut(r) {
     address_state: r.address_state || null,
     address_zip: r.address_zip || null,
   };
+}
+
+// Normaliza string vazia para null (usado em sensei_name).
+function strOrNull(v) {
+  if (v === undefined || v === null) return undefined; // undefined = "não enviado" (não altera no PATCH)
+  const s = String(v).trim();
+  return s === '' ? null : s;
+}
+
+// Normaliza uuid: string vazia ou inválida → null.
+// Aceita apenas o formato 8-4-4-4-12 (hex + hífens). Defensivo: nunca deixa
+// uma string malformada chegar ao Postgres.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function uuidOrNull(v) {
+  if (v === undefined || v === null) return undefined; // undefined = "não enviado"
+  const s = String(v).trim();
+  if (s === '' || !UUID_RE.test(s)) return null;
+  return s;
 }
 
 // ── GET /federation/:id/dojos ───────────────────────────────
@@ -102,7 +127,8 @@ router.get('/', ...guards.read(), async (req, res) => {
       // A future optimisation would be to materialise dojo_status in a VIEW or
       // computed column and filter in SQL.
       const allRes = await db.query(
-        `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.region, c.fpkt_affiliation_id,
+        `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
+                c.region, c.fpkt_affiliation_id,
                 c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
                 ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
                 COUNT(cu.id) AS practitioner_count
@@ -119,6 +145,8 @@ router.get('/', ...guards.read(), async (req, res) => {
         name: r.name,
         cnpj: r.cnpj || null,
         sensei_cpf: r.sensei_cpf || null,
+        sensei_name: r.sensei_name || null,
+        sensei_practitioner_id: r.sensei_practitioner_id || null,
         region: r.region || null,
         fpkt_affiliation_id: r.fpkt_affiliation_id || null,
         affiliation_model: r.affiliation_model || null,
@@ -148,7 +176,8 @@ router.get('/', ...guards.read(), async (req, res) => {
     const total = parseInt(countRes.rows[0].total, 10);
 
     const dataRes = await db.query(
-      `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.region, c.fpkt_affiliation_id,
+      `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
+              c.region, c.fpkt_affiliation_id,
               c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
               ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
               COUNT(cu.id) AS practitioner_count
@@ -166,6 +195,8 @@ router.get('/', ...guards.read(), async (req, res) => {
       name: r.name,
       cnpj: r.cnpj || null,
       sensei_cpf: r.sensei_cpf || null,
+      sensei_name: r.sensei_name || null,
+      sensei_practitioner_id: r.sensei_practitioner_id || null,
       region: r.region || null,
       fpkt_affiliation_id: r.fpkt_affiliation_id || null,
       affiliation_model: r.affiliation_model || null,
@@ -196,6 +227,10 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     address_street, address_number, address_complement,
     address_neighborhood, address_city, address_state, address_zip,
   } = req.body;
+
+  // Novos campos opcionais (migration 193)
+  const senseiName           = strOrNull(req.body.sensei_name);          // undefined se ausente
+  const senseiPractitionerId = uuidOrNull(req.body.sensei_practitioner_id); // undefined se ausente
 
   if (!name || !String(name).trim()) {
     return res.status(422).json({ error: 'Campo name é obrigatório', code: 'VALIDATION_ERROR' });
@@ -257,15 +292,17 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     // Bairro vai na coluna address_district (companies não tem address_neighborhood).
     const insertRes = await client.query(
       `INSERT INTO companies
-         (name, legal_name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
+         (name, legal_name, cnpj, sensei_cpf, sensei_name, sensei_practitioner_id,
+          region, fpkt_affiliation_id, affiliation_model,
           affiliation_since, dojo_founded_year, address, phone, email,
           address_street, address_number, address_complement, address_district,
           address_city, address_state, address_zip,
           federation_id, owner_id, vertical, is_active, created_at, updated_at)
-       VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-               $12, $13, $14, $15, $16, $17, $18,
-               $19, $20, 'karate_dojo', true, NOW(), NOW())
-       RETURNING id, name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
+       VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+               $14, $15, $16, $17, $18, $19, $20,
+               $21, $22, 'karate_dojo', true, NOW(), NOW())
+       RETURNING id, name, cnpj, sensei_cpf, sensei_name, sensei_practitioner_id,
+                 region, fpkt_affiliation_id, affiliation_model,
                  affiliation_since, dojo_founded_year, address,
                  address_street, address_number, address_complement,
                  address_district AS address_neighborhood,
@@ -275,6 +312,8 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
         String(name).trim(),
         cnpj || null,
         sensei_cpf || null,
+        senseiName !== undefined ? senseiName : null,
+        senseiPractitionerId !== undefined ? senseiPractitionerId : null,
         region || null,
         fpktId,
         affiliation_model,
@@ -303,6 +342,8 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       name: dojo.name,
       cnpj: dojo.cnpj || null,
       sensei_cpf: dojo.sensei_cpf || null,
+      sensei_name: dojo.sensei_name || null,
+      sensei_practitioner_id: dojo.sensei_practitioner_id || null,
       region: dojo.region || null,
       fpkt_affiliation_id: dojo.fpkt_affiliation_id,
       affiliation_model: dojo.affiliation_model,
@@ -329,15 +370,21 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
   const { id: federationId, dojoId } = req.params;
 
   try {
+    // LEFT JOIN com customers para trazer o nome atual do praticante vinculado como sensei.
+    // O alias spr é "sensei practitioner row".
     const dojoRes = await db.query(
-      `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.region, c.fpkt_affiliation_id,
+      `SELECT c.id, c.name, c.cnpj, c.sensei_cpf,
+              c.sensei_name, c.sensei_practitioner_id,
+              spr.name AS sensei_practitioner_name,
+              c.region, c.fpkt_affiliation_id,
               c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
               ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
               COUNT(cu.id) AS practitioner_count
        FROM companies c
-       LEFT JOIN customers cu ON cu.dojo_id = c.id
+       LEFT JOIN customers spr ON spr.id = c.sensei_practitioner_id
+       LEFT JOIN customers cu  ON cu.dojo_id = c.id
        WHERE c.id = $1 AND c.federation_id = $2 AND c.vertical = 'karate_dojo'
-       GROUP BY c.id`,
+       GROUP BY c.id, spr.name`,
       [dojoId, federationId]
     );
 
@@ -392,6 +439,9 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
       name: d.name,
       cnpj: d.cnpj || null,
       sensei_cpf: d.sensei_cpf || null,
+      sensei_name: d.sensei_name || null,
+      sensei_practitioner_id: d.sensei_practitioner_id || null,
+      sensei_practitioner_name: d.sensei_practitioner_name || null,
       region: d.region || null,
       fpkt_affiliation_id: d.fpkt_affiliation_id || null,
       affiliation_model: d.affiliation_model || null,
@@ -440,6 +490,8 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
     address_city: 'address_city',
     address_state: 'address_state',
     address_zip: 'address_zip',
+    // migration 193: nome e vínculo do sensei (tratados manualmente abaixo por
+    // precisarem de normalização específica — não entram no fieldMap genérico).
   };
 
   // Coerção boolean segura: aceita true/'true'/1/'1' como true; false/'false'/0/'0'/''/null como false.
@@ -475,6 +527,21 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
     }
   }
 
+  // ── migration 193: sensei_name e sensei_practitioner_id ──
+  // Tratados separadamente do fieldMap genérico para aplicar normalização própria.
+  if (req.body.sensei_name !== undefined) {
+    const v = strOrNull(req.body.sensei_name);
+    updates.push(`sensei_name = $${idx}`);
+    values.push(v);
+    idx++;
+  }
+  if (req.body.sensei_practitioner_id !== undefined) {
+    const v = uuidOrNull(req.body.sensei_practitioner_id);
+    updates.push(`sensei_practitioner_id = $${idx}`);
+    values.push(v);
+    idx++;
+  }
+
   if (updates.length === 0) {
     return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }
@@ -487,7 +554,8 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       `UPDATE companies
        SET ${updates.join(', ')}
        WHERE id = $${idx} AND federation_id = $${idx + 1} AND vertical = 'karate_dojo'
-       RETURNING id, name, cnpj, sensei_cpf, region, fpkt_affiliation_id, affiliation_model,
+       RETURNING id, name, cnpj, sensei_cpf, sensei_name, sensei_practitioner_id,
+                 region, fpkt_affiliation_id, affiliation_model,
                  affiliation_since, dojo_founded_year, address,
                  address_street, address_number, address_complement,
                  address_district AS address_neighborhood,
@@ -506,6 +574,8 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       name: d.name,
       cnpj: d.cnpj || null,
       sensei_cpf: d.sensei_cpf || null,
+      sensei_name: d.sensei_name || null,
+      sensei_practitioner_id: d.sensei_practitioner_id || null,
       region: d.region || null,
       fpkt_affiliation_id: d.fpkt_affiliation_id || null,
       affiliation_model: d.affiliation_model || null,
@@ -551,6 +621,8 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
 //     dojô — portanto NÃO são apagadas. Cancelamos as transactions de anuidade
 //     do dojô (preserva trilha financeira) antes de apagar o annuity_history.
 //   - karate_payment_intents.annuity_history_id → SET NULL (não bloqueia).
+//   - companies.sensei_practitioner_id → ON DELETE SET NULL (migration 193,
+//     não bloqueia a exclusão do dojô).
 router.delete('/:dojoId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, dojoId } = req.params;
   const cascade = String(req.query.cascade || '').toLowerCase() === 'true';
