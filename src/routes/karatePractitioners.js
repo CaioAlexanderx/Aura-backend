@@ -9,6 +9,7 @@
 // PATCH  /federation/:id/practitioners/:practitionerId/graduations/:graduationId
 // DELETE /federation/:id/practitioners/:practitionerId/graduations/:graduationId
 // GET    /federation/:id/practitioners/:practitionerId/courses (P9 — últimos 12 meses)
+// POST   /federation/:id/practitioners/:practitionerId/photo   (upload foto R2)
 //
 // Nota: /practitioners/import é registrado ANTES deste router no index.js
 // para que 'import' não seja capturado como :practitionerId.
@@ -33,6 +34,10 @@
 //   Tabela de candidatos: karate_belt_exam_candidates (student_id, exam_id).
 //   Data do evento: karate_belt_exams.event_date.
 //   Degrada para null/0 defensivamente a 42P01.
+// 28/06/2026: POST /:practitionerId/photo — upload de foto do praticante.
+//   Body JSON: { content: "<base64>", content_type?: "image/jpeg" }.
+//   Mesma convenção de productImage.js / variantImage.js (R2 + base64).
+//   Sem migration — karate_photo_url já existe em customers.
 // ============================================================
 'use strict';
 
@@ -40,6 +45,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { nextPractitionerRegistrationNumber } = require('../services/karateService');
+const { uploadToR2 } = require('../utils/r2Storage');
 
 // Campos de endereço da ficha (colunas em customers).
 const ADDRESS_COLS = ['street', 'number', 'complement', 'neighborhood', 'city', 'state', 'zip_code'];
@@ -789,6 +795,79 @@ router.get('/:practitionerId/courses', ...guards.read(), async (req, res) => {
   } catch (err) {
     console.error('[karatePractitioners] courses error:', err.message);
     res.status(500).json({ error: 'Erro ao listar cursos do praticante' });
+  }
+});
+
+// ── POST /federation/:id/practitioners/:practitionerId/photo ─
+// Upload de foto do praticante. Grava binário no Cloudflare R2 e atualiza
+// customers.karate_photo_url com a URL pública resultante.
+//
+// Body JSON:
+//   content      {string}  Imagem codificada em base64 (obrigatório).
+//   content_type {string?} MIME da imagem. Default: "image/jpeg".
+//                          Aceitos: image/jpeg, image/png, image/webp.
+//
+// Limite de tamanho: 5 MB — herdado de express.json({ limit: '5mb' }) em
+// src/app.js; tentativas acima disso retornam 413 antes de chegar aqui.
+//
+// Padrão idêntico a productImage.js e variantImage.js (JSON + base64 → R2).
+// Sem migration — karate_photo_url já existe na tabela customers.
+//
+// Retorna: { photo_url: string }
+router.post('/:practitionerId/photo', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, practitionerId } = req.params;
+  const { content, content_type } = req.body || {};
+
+  // Validação do payload
+  if (!content || typeof content !== 'string' || !content.trim()) {
+    return res.status(400).json({
+      error: 'Campo content (imagem em base64) é obrigatório',
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  // Mimetypes aceitos — rejeita tipos claramente não-imagem
+  const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+  const mime = ((content_type || 'image/jpeg') + '').toLowerCase().split(';')[0].trim();
+  if (!ALLOWED_TYPES.includes(mime)) {
+    return res.status(400).json({
+      error: 'Tipo de imagem não suportado: ' + mime + '. Use image/jpeg, image/png ou image/webp.',
+      code: 'INVALID_CONTENT_TYPE',
+    });
+  }
+
+  const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+
+  try {
+    // Valida que o praticante pertence à federação
+    const pracRes = await db.query(
+      `SELECT id FROM customers WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+      [practitionerId, federationId]
+    );
+    if (!pracRes.rows.length) {
+      return res.status(404).json({ error: 'Praticante não encontrado', code: 'NOT_FOUND' });
+    }
+
+    // Upload para R2 — mesma convenção de productImage.js / variantImage.js.
+    // uploadToR2 converte a string base64 para Buffer internamente.
+    const key = 'karate/practitioners/' + federationId + '/' + practitionerId + '.' + ext;
+    const result = await uploadToR2(key, content, mime);
+    if (!result.success) {
+      console.error('[karatePractitioners] photo R2 error:', result.error);
+      return res.status(500).json({ error: 'Erro no armazenamento da imagem' });
+    }
+
+    // Grava URL pública no banco
+    await db.query(
+      `UPDATE customers SET karate_photo_url = $1, updated_at = NOW()
+       WHERE id = $2 AND federation_id = $3`,
+      [result.url, practitionerId, federationId]
+    );
+
+    res.json({ photo_url: result.url });
+  } catch (err) {
+    console.error('[karatePractitioners] photo error:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar foto do praticante', detail: err.message });
   }
 });
 
