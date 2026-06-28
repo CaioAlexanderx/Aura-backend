@@ -14,6 +14,7 @@
 // Candidatos (inscrição e resultado):
 //   POST /belt-exams/:examId/candidates       — inscreve candidato
 //                                               SEMPRE 201 + eligibility (FPKT #1)
+//                                               target_belt OPCIONAL p/ exam_type='curso'
 //   PATCH /belt-exams/:examId/candidates/:cId — lança resultado
 //                                               approved→ trigger karate_on_exam_approved
 //                                               RBAC: guards.examResults
@@ -473,6 +474,9 @@ router.post('/belt-exams/:examId/examiners', ...guards.staffWrite(), async (req,
 // FPKT DECISÃO #1: SEMPRE retorna 201, mesmo inelegível.
 // Nunca retorna 422 por critério de elegibilidade.
 // A checagem é INFORMATIVA — retornada em eligibility{} na resposta.
+//
+// CURSO (exam_type='curso'): target_belt é OPCIONAL — cursos não graduam.
+// Para exames normais, target_belt continua obrigatório.
 router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, examId } = req.params;
   const { student_id, target_belt } = req.body;
@@ -480,17 +484,16 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
   if (!student_id) {
     return res.status(422).json({ error: 'student_id é obrigatório', code: 'VALIDATION_ERROR' });
   }
-  if (!target_belt) {
-    return res.status(422).json({ error: 'target_belt é obrigatório', code: 'VALIDATION_ERROR' });
-  }
+  // Nota: NÃO validamos target_belt aqui ainda — precisamos saber o exam_type
+  // antes de decidir se ele é obrigatório.
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
 
-    // Verifica exame
+    // Verifica exame e carrega exam_type para decidir a obrigatoriedade de target_belt
     const examCheck = await client.query(
-      `SELECT id, status FROM karate_belt_exams
+      `SELECT id, status, exam_type FROM karate_belt_exams
        WHERE id = $1 AND federation_id = $2 LIMIT 1`,
       [examId, federationId]
     );
@@ -498,12 +501,22 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Exame não encontrado', code: 'NOT_FOUND' });
     }
-    if (examCheck.rows[0].status === 'done' || examCheck.rows[0].status === 'cancelled') {
+
+    const exam = examCheck.rows[0];
+
+    if (exam.status === 'done' || exam.status === 'cancelled') {
       await client.query('ROLLBACK');
       return res.status(409).json({
-        error: `Exame com status ${examCheck.rows[0].status} não aceita novas inscrições`,
+        error: `Exame com status ${exam.status} não aceita novas inscrições`,
         code: 'CONFLICT',
       });
+    }
+
+    // Cursos não exigem faixa-alvo; exames normais sim.
+    const isCurso = exam.exam_type === 'curso';
+    if (!isCurso && !target_belt) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: 'target_belt é obrigatório para exames de faixa', code: 'VALIDATION_ERROR' });
     }
 
     // Advisory lock para evitar dupla inscrição
@@ -527,7 +540,8 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
       });
     }
 
-    // Insere candidato — karate_belt_exam_candidates: id, exam_id, student_id,
+    // Insere candidato — target_belt é NULL para cursos
+    // karate_belt_exam_candidates: id, exam_id, student_id,
     //   current_belt, target_belt, target_belt_name, belt_schema, status,
     //   result_notes, fee_paid, created_at, updated_at
     const insertRes = await client.query(
@@ -535,27 +549,29 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
          (exam_id, student_id, target_belt, status, created_at, updated_at)
        VALUES ($1, $2, $3, 'enrolled', NOW(), NOW())
        RETURNING id, exam_id, student_id, target_belt, status, created_at`,
-      [examId, student_id, target_belt]
+      [examId, student_id, target_belt || null]
     );
 
     await client.query('COMMIT');
 
     const cand = insertRes.rows[0];
 
-    // FPKT #1: Checa elegibilidade APÓS inscrição (somente aviso, nunca bloqueia)
-    // A checagem usa db direto (fora da transação já fechada)
-    let eligibility = { eligible: true, is_hard_block: false, checks: [], warnings: [] };
-    try {
-      eligibility = await checkEligibility(student_id, target_belt, federationId);
-    } catch (eligErr) {
-      // Falha na checagem não impede a inscrição
-      eligibility = {
-        eligible: null,
-        is_hard_block: false,
-        checks: [],
-        warnings: ['Não foi possível verificar elegibilidade: ' + eligErr.message],
-        error: eligErr.message,
-      };
+    // FPKT #1: Checa elegibilidade APÓS inscrição (somente aviso, nunca bloqueia).
+    // Para cursos não há faixa-alvo — pulamos a checagem de elegibilidade.
+    let eligibility = null;
+    if (!isCurso) {
+      try {
+        eligibility = await checkEligibility(student_id, target_belt, federationId);
+      } catch (eligErr) {
+        // Falha na checagem não impede a inscrição
+        eligibility = {
+          eligible: null,
+          is_hard_block: false,
+          checks: [],
+          warnings: ['Não foi possível verificar elegibilidade: ' + eligErr.message],
+          error: eligErr.message,
+        };
+      }
     }
 
     // SEMPRE 201 — a elegibilidade é só informativa
@@ -566,7 +582,7 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
       target_belt: cand.target_belt,
       status: cand.status,
       created_at: cand.created_at,
-      eligibility, // FPKT #1: aviso anexado, nunca 422 por critério
+      eligibility, // null para cursos; objeto com checks para exames de faixa
     });
   } catch (err) {
     await client.query('ROLLBACK');
