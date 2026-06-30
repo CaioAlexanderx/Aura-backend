@@ -55,15 +55,19 @@ function reducedName(name) {
 async function _loadPractitionerSnapshot(client, federationId, studentId) {
   const r = await client.query(
     `SELECT cu.id, cu.name, cu.karate_registration_number, cu.dojo_id,
-            cu.birth_date,
+            to_char(cu.birth_date, 'YYYY-MM-DD') AS birth_date,
+            cu.cpf_cnpj,
             COALESCE(cu.karate_photo_url, cu.photo_url) AS photo_url,
             cb.belt_level AS belt_snapshot,
             cb.belt_name  AS belt_name_snapshot,
-            COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+            COALESCE(dj.trade_name, dj.legal_name) AS dojo_name,
+            COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
+            COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
      FROM customers cu
      LEFT JOIN karate_current_belt cb
        ON cb.student_id = cu.id AND cb.federation_id = $2
      LEFT JOIN companies dj ON dj.id = cu.dojo_id
+     LEFT JOIN companies fed ON fed.id = $2
      WHERE cu.id = $1 AND cu.federation_id = $2
      LIMIT 1`,
     [studentId, federationId]
@@ -156,6 +160,8 @@ async function issueCard({ federation_id, student_id, issued_by }) {
         federation_id: c.federation_id,
         student_id: c.student_id,
         student_name: p.name,
+        birth_date: p.birth_date || null,   // ja formatado YYYY-MM-DD (tz-safe)
+        cpf: p.cpf_cnpj || null,
         card_number: c.card_number,
         belt: c.belt_snapshot,
         belt_name: c.belt_name_snapshot,
@@ -166,6 +172,8 @@ async function issueCard({ federation_id, student_id, issued_by }) {
         issued_at: c.issued_at,
         verify_token: c.verify_token,
         status: c.status,
+        federation_name: p.federation_name || null,
+        federation_logo: p.federation_logo || null,
       },
     };
   } catch (err) {
@@ -252,9 +260,14 @@ async function revokeCard({ federation_id, student_id, revoked_by }) {
  *  Inclui birth_date + cpf (contexto AUTENTICADO) para a arte aprovada da carteirinha. */
 async function getCurrentCard({ federation_id, student_id }) {
   const r = await db.query(
-    `SELECT kc.*, cu.name AS student_name, cu.birth_date, cu.cpf_cnpj
+    `SELECT kc.*, cu.name AS student_name,
+            to_char(cu.birth_date, 'YYYY-MM-DD') AS birth_date,
+            cu.cpf_cnpj,
+            COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
+            COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
      FROM karate_membership_cards kc
      JOIN customers cu ON cu.id = kc.student_id
+     LEFT JOIN companies fed ON fed.id = kc.federation_id
      WHERE kc.student_id = $1 AND kc.federation_id = $2
      ORDER BY kc.issued_at DESC
      LIMIT 1`,
@@ -267,7 +280,7 @@ async function getCurrentCard({ federation_id, student_id }) {
     federation_id: c.federation_id,
     student_id: c.student_id,
     student_name: c.student_name,
-    birth_date: c.birth_date,   // contexto autenticado/admin (NUNCA no verify publico)
+    birth_date: c.birth_date,   // contexto autenticado/admin (NUNCA no verify publico); ja YYYY-MM-DD (tz-safe)
     cpf: c.cpf_cnpj || null,    // contexto autenticado/admin (NUNCA no verify publico)
     card_number: c.card_number,
     belt: c.belt_snapshot,
@@ -280,6 +293,8 @@ async function getCurrentCard({ federation_id, student_id }) {
     revoked_at: c.revoked_at || null,
     verify_token: c.verify_token,
     status: effectiveStatus(c),
+    federation_name: c.federation_name || null,
+    federation_logo: c.federation_logo || null,
   };
 }
 
@@ -309,7 +324,7 @@ async function verifyByToken(token) {
             cu.name AS student_name,
             COALESCE(cb.belt_level, kc.belt_snapshot)      AS belt,
             COALESCE(cb.belt_name,  kc.belt_name_snapshot) AS belt_name,
-            cb.current_since AS belt_since,
+            to_char(cb.current_since, 'YYYY-MM-DD') AS belt_since,
             COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
             COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
      FROM karate_membership_cards kc
