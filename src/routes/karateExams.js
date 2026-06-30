@@ -156,7 +156,7 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
       `INSERT INTO karate_belt_exams
          (federation_id, exam_type, name, event_date, location, max_candidates, fee_amount,
           status, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'scheduled', $8, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft', $8, NOW(), NOW())
        RETURNING id, federation_id, exam_type, name, event_date, location,
                  max_candidates, fee_amount, status, created_at`,
       [
@@ -190,7 +190,11 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
     });
   } catch (err) {
     console.error('[karateExams] create error:', err.message);
-    res.status(500).json({ error: 'Erro ao criar exame', detail: err.message });
+    // Mensagem de erro deve refletir a entidade certa: este endpoint cria tanto
+    // 'exame' quanto 'curso' (evento amplo) — usa exam_type pra acertar a palavra
+    // em vez de sempre dizer "exame" mesmo quando o usuario estava criando um curso.
+    const entityLabel = exam_type === 'curso' ? 'curso' : 'exame';
+    res.status(500).json({ error: `Erro ao criar ${entityLabel}`, detail: err.message });
   }
 });
 
@@ -318,7 +322,7 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
 
   // Permitir atualizar status apenas para valores válidos não-terminais
   if (req.body.status !== undefined) {
-    const VALID_STATUS = ['scheduled', 'in_progress', 'cancelled'];
+    const VALID_STATUS = ['draft', 'open', 'closed'];
     if (!VALID_STATUS.includes(req.body.status)) {
       return res.status(422).json({
         error: `status inválido. Use: ${VALID_STATUS.join(', ')}. Para fechar use POST /close`,
