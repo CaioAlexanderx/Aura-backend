@@ -1032,7 +1032,7 @@ router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res
     // usado pelo PATCH /belt-exams e pelo frontend.
     const closeRes = await client.query(
       `UPDATE karate_belt_exams
-       SET status = 'closed', updated_at = NOW()
+       SET status = 'done', updated_at = NOW()
        WHERE id = $1
        RETURNING id, status, updated_at`,
       [examId]
