@@ -193,6 +193,12 @@ router.use('/federation/:id', require('./karateCards'));
 //   GET       /federation/:id/rankings (temporada, via view)
 router.use('/federation/:id', require('./karateCompetitions'));
 
+// ── AURA KARATÊ — Track E+ (admin: biblioteca de categorias reutilizáveis) ──
+// Migration 196: karate_competition_category_templates.
+//   GET/POST     /federation/:id/category-templates
+//   PATCH/DELETE /federation/:id/category-templates/:tid
+router.use('/federation/:id', require('./karateCategoryTemplates'));
+
 // ── AURA KARATÊ — Track F (admin: conectividade dojô / Fase 5) ──
 // Migrations 170 + 171. Contrato docs/karate-fase5-openapi.yaml.
 //   GET/POST /federation/:id/connections (+ /requests)
