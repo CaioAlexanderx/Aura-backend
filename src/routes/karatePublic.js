@@ -26,6 +26,11 @@ const onlyDigits = (s) => String(s || '').replace(/\D/g, '');
 // Copy do 501 (competição não é inscrita por este fluxo público)
 const COMP_MSG = 'Competições não são inscritas por este fluxo. A inscrição é feita pela sua academia junto à federação, com chaveamento por categoria e peso.';
 
+// Migration 200 — registration_fields (karate_belt_exams) / registration_responses
+// (karate_belt_exam_candidates / karate_event_enrollments). Cache module-level
+// otimista (armadilha_schema_pre_migration do CLAUDE.md): vira false em 42703.
+let HAS_REGISTRATION_FIELDS_COL = true;
+
 async function resolveFederation(slugOrId) {
   let fedId = null;
   const r = await db.query(
@@ -286,14 +291,36 @@ router.get('/:slug/events', async (req, res) => {
 });
 
 // Resolve um evento (exame ou curso) por id dentro da federação.
+// registration_fields (migration 200) só existe em karate_belt_exams — eventos
+// 'course' (karate_events) sempre voltam registration_fields: [] (sem coluna).
 async function resolveEvent(fedId, eventId) {
   if (!/^[0-9a-fA-F-]{36}$/.test(eventId)) return null;
-  const ex = await db.query(
-    `SELECT id, name, exam_type, event_date, location, fee_amount, max_candidates, status, 'exam' AS kind
-     FROM karate_belt_exams WHERE id = $1 AND federation_id = $2 LIMIT 1`,
-    [eventId, fedId]
-  );
-  if (ex.rows.length) return ex.rows[0];
+
+  if (HAS_REGISTRATION_FIELDS_COL) {
+    try {
+      const ex = await db.query(
+        `SELECT id, name, exam_type, event_date, location, fee_amount, max_candidates, status,
+                registration_fields, 'exam' AS kind
+         FROM karate_belt_exams WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+        [eventId, fedId]
+      );
+      if (ex.rows.length) return ex.rows[0];
+    } catch (e) {
+      if (e.code === '42703') {
+        HAS_REGISTRATION_FIELDS_COL = false;
+        console.warn('[karatePublic] registration_fields ausente em resolveEvent (migration 200 pendente)');
+      } else throw e;
+    }
+  }
+  if (!HAS_REGISTRATION_FIELDS_COL) {
+    const ex = await db.query(
+      `SELECT id, name, exam_type, event_date, location, fee_amount, max_candidates, status, 'exam' AS kind
+       FROM karate_belt_exams WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+      [eventId, fedId]
+    );
+    if (ex.rows.length) return ex.rows[0];
+  }
+
   const co = await db.query(
     `SELECT id, name, event_type, event_date, location, fee_amount, status, 'course' AS kind
      FROM karate_events WHERE id = $1 AND federation_id = $2 LIMIT 1`,
@@ -338,6 +365,7 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
         event_date: ev.event_date, location: ev.location,
         fee_amount: ev.fee_amount,
         capacity,
+        registration_fields: ev.registration_fields || [],
       },
       requires: ['cpf'],
     });
@@ -411,11 +439,28 @@ router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
   }
 });
 
+// Verifica se todo campo obrigatório de registration_fields foi preenchido em
+// `responses` (não vazio/undefined/null). Retorna array de labels faltantes
+// (vazio = tudo ok). `fields` pode ser undefined/[] quando o evento não tem
+// formulário configurável (curso, ou migration 200 ainda não aplicada).
+function missingRequiredFields(fields, responses) {
+  if (!Array.isArray(fields) || fields.length === 0) return [];
+  const r = responses && typeof responses === 'object' ? responses : {};
+  const missing = [];
+  for (const f of fields) {
+    if (!f || !f.required) continue;
+    const v = r[f.key];
+    const isEmpty = v === undefined || v === null || (typeof v === 'string' && v.trim() === '');
+    if (isEmpty) missing.push(f.label || f.key);
+  }
+  return missing;
+}
+
 // ── POST /:slug/inscricao/:eventId — submeter inscrição pública ──
 // Exame: insere candidato (status enrolled). Curso: enrollment.
 // Competição: 501 (stub, depende da Track E). PIX via karatePaymentProvider.
 router.post('/:slug/inscricao/:eventId', async (req, res) => {
-  const { cpf } = req.body || {};
+  const { cpf, responses } = req.body || {};
   try {
     const fed = await resolveFederation(req.params.slug);
     if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
@@ -428,6 +473,17 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
       return res.status(409).json({ error: 'Inscrições encerradas', code: 'CLOSED' });
     }
 
+    // Campos obrigatórios do formulário configurável (migration 200) — só
+    // existe em eventos 'exam'. Curso/sem coluna => registration_fields: [].
+    const missingFields = missingRequiredFields(ev.registration_fields, responses);
+    if (missingFields.length > 0) {
+      return res.status(422).json({
+        error: 'Preencha os campos obrigatórios do formulário de inscrição.',
+        code: 'VALIDATION_ERROR',
+        missingFields,
+      });
+    }
+
     // Lookup do praticante por CPF (precisa estar cadastrado na federação)
     const student = await portalAuth._findPractitionerByCpf(fed.id, cpf);
     if (!student) {
@@ -436,6 +492,8 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
         code: 'PRACTITIONER_NOT_FOUND',
       });
     }
+
+    const responsesJson = JSON.stringify(responses && typeof responses === 'object' ? responses : {});
 
     let inscription;
     const client = await db.connect();
@@ -456,12 +514,31 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
           await client.query('ROLLBACK');
           return res.status(409).json({ error: 'Você já está inscrito neste exame', code: 'CONFLICT', candidate_id: dup.rows[0].id });
         }
-        const ins = await client.query(
-          `INSERT INTO karate_belt_exam_candidates (exam_id, student_id, status, fee_paid, created_at, updated_at)
-           VALUES ($1,$2,'enrolled', false, NOW(), NOW())
-           RETURNING id`,
-          [ev.id, student.id]
-        );
+        let ins;
+        if (HAS_REGISTRATION_FIELDS_COL) {
+          try {
+            ins = await client.query(
+              `INSERT INTO karate_belt_exam_candidates
+                 (exam_id, student_id, status, fee_paid, registration_responses, created_at, updated_at)
+               VALUES ($1,$2,'enrolled', false, $3::jsonb, NOW(), NOW())
+               RETURNING id`,
+              [ev.id, student.id, responsesJson]
+            );
+          } catch (e) {
+            if (e.code === '42703') {
+              HAS_REGISTRATION_FIELDS_COL = false;
+              console.warn('[karatePublic] registration_responses ausente no INSERT candidate (migration 200 pendente)');
+            } else throw e;
+          }
+        }
+        if (!ins) {
+          ins = await client.query(
+            `INSERT INTO karate_belt_exam_candidates (exam_id, student_id, status, fee_paid, created_at, updated_at)
+             VALUES ($1,$2,'enrolled', false, NOW(), NOW())
+             RETURNING id`,
+            [ev.id, student.id]
+          );
+        }
         inscription = { type: 'exam', id: ins.rows[0].id };
       } else {
         const dup = await client.query(
@@ -472,12 +549,31 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
           await client.query('ROLLBACK');
           return res.status(409).json({ error: 'Você já está inscrito neste curso', code: 'CONFLICT', enrollment_id: dup.rows[0].id });
         }
-        const ins = await client.query(
-          `INSERT INTO karate_event_enrollments (event_id, student_id, dojo_id, status, fee_paid, created_at)
-           VALUES ($1,$2,$3,'enrolled', false, NOW())
-           RETURNING id`,
-          [ev.id, student.id, student.dojo_id || null]
-        );
+        let ins;
+        if (HAS_REGISTRATION_FIELDS_COL) {
+          try {
+            ins = await client.query(
+              `INSERT INTO karate_event_enrollments
+                 (event_id, student_id, dojo_id, status, fee_paid, registration_responses, created_at)
+               VALUES ($1,$2,$3,'enrolled', false, $4::jsonb, NOW())
+               RETURNING id`,
+              [ev.id, student.id, student.dojo_id || null, responsesJson]
+            );
+          } catch (e) {
+            if (e.code === '42703') {
+              HAS_REGISTRATION_FIELDS_COL = false;
+              console.warn('[karatePublic] registration_responses ausente no INSERT enrollment (migration 200 pendente)');
+            } else throw e;
+          }
+        }
+        if (!ins) {
+          ins = await client.query(
+            `INSERT INTO karate_event_enrollments (event_id, student_id, dojo_id, status, fee_paid, created_at)
+             VALUES ($1,$2,$3,'enrolled', false, NOW())
+             RETURNING id`,
+            [ev.id, student.id, student.dojo_id || null]
+          );
+        }
         inscription = { type: 'course', id: ins.rows[0].id };
       }
 

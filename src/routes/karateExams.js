@@ -54,6 +54,62 @@ const { checkEligibility } = require('../services/karateExamService');
 // candidato (target_belt). 'curso' é evento sem graduação.
 const VALID_EXAM_TYPES = ['kyu_regional', 'dan_estadual', 'dan_nacional', 'exame', 'curso'];
 
+// Migration 200 — registration_fields (karate_belt_exams) / registration_responses
+// (karate_belt_exam_candidates). Backend sobe antes da migration ser aplicada
+// (armadilha_schema_pre_migration do CLAUDE.md): cache module-level otimista,
+// vira false em 42703 e os SELECTs/INSERTs caem para a forma sem a coluna.
+let HAS_REGISTRATION_FIELDS_COL = true;
+
+const VALID_FIELD_TYPES = ['text', 'number', 'select', 'checkbox', 'date', 'phone'];
+
+/**
+ * Valida o formato de registration_fields recebido no PATCH do exame.
+ * Retorna { ok: true } ou { ok: false, error } com mensagem pronta pro 422.
+ * Formato esperado: array de { key, label, type, required, options? }.
+ */
+function validateRegistrationFields(fields) {
+  if (!Array.isArray(fields)) {
+    return { ok: false, error: 'registration_fields deve ser um array' };
+  }
+  const seenKeys = new Set();
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i];
+    if (!f || typeof f !== 'object' || Array.isArray(f)) {
+      return { ok: false, error: `registration_fields[${i}] deve ser um objeto` };
+    }
+    if (typeof f.key !== 'string' || !f.key.trim()) {
+      return { ok: false, error: `registration_fields[${i}].key é obrigatório (string)` };
+    }
+    if (seenKeys.has(f.key)) {
+      return { ok: false, error: `registration_fields[${i}].key duplicada: "${f.key}"` };
+    }
+    seenKeys.add(f.key);
+    if (typeof f.label !== 'string' || !f.label.trim()) {
+      return { ok: false, error: `registration_fields[${i}].label é obrigatório (string)` };
+    }
+    if (typeof f.type !== 'string' || !VALID_FIELD_TYPES.includes(f.type)) {
+      return { ok: false, error: `registration_fields[${i}].type inválido. Use: ${VALID_FIELD_TYPES.join(', ')}` };
+    }
+    if (f.required !== undefined && typeof f.required !== 'boolean') {
+      return { ok: false, error: `registration_fields[${i}].required deve ser boolean` };
+    }
+    if (f.type === 'select') {
+      if (!Array.isArray(f.options) || f.options.length === 0) {
+        return { ok: false, error: `registration_fields[${i}].options é obrigatório (array) quando type='select'` };
+      }
+      for (const opt of f.options) {
+        const isStr = typeof opt === 'string';
+        const isObj = opt && typeof opt === 'object' && !Array.isArray(opt) && typeof opt.value === 'string';
+        if (!isStr && !isObj) {
+          return { ok: false, error: `registration_fields[${i}].options deve conter strings ou objetos {value,label}` };
+        }
+      }
+    }
+  }
+  return { ok: true };
+}
+
+
 // ── GET /belt-exams ─────────────────────────────────────────
 router.get('/belt-exams', ...guards.read(), async (req, res) => {
   const federationId = req.params.id;
@@ -203,20 +259,41 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
   const { id: federationId, examId } = req.params;
 
   try {
-    const examRes = await db.query(
-      `SELECT id, federation_id, exam_type, name, event_date, location,
-              max_candidates, fee_amount, status, created_at, updated_at
-       FROM karate_belt_exams
-       WHERE id = $1 AND federation_id = $2
-       LIMIT 1`,
-      [examId, federationId]
-    );
-
-    if (!examRes.rows.length) {
-      return res.status(404).json({ error: 'Exame não encontrado', code: 'NOT_FOUND' });
+    let exam;
+    if (HAS_REGISTRATION_FIELDS_COL) {
+      try {
+        const examRes = await db.query(
+          `SELECT id, federation_id, exam_type, name, event_date, location,
+                  max_candidates, fee_amount, status, registration_fields,
+                  created_at, updated_at
+           FROM karate_belt_exams
+           WHERE id = $1 AND federation_id = $2
+           LIMIT 1`,
+          [examId, federationId]
+        );
+        exam = examRes.rows[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_REGISTRATION_FIELDS_COL = false;
+          console.warn('[karateExams] registration_fields ausente (migration 200 pendente)');
+        } else throw e;
+      }
+    }
+    if (exam === undefined) {
+      const examRes = await db.query(
+        `SELECT id, federation_id, exam_type, name, event_date, location,
+                max_candidates, fee_amount, status, created_at, updated_at
+         FROM karate_belt_exams
+         WHERE id = $1 AND federation_id = $2
+         LIMIT 1`,
+        [examId, federationId]
+      );
+      exam = examRes.rows[0];
     }
 
-    const exam = examRes.rows[0];
+    if (!exam) {
+      return res.status(404).json({ error: 'Exame não encontrado', code: 'NOT_FOUND' });
+    }
 
     // Banca — karate_exam_examiners: id, exam_id, examiner_id, role, dan_level, confirmed, created_at
     const examinerRes = await db.query(
@@ -231,22 +308,52 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
 
     // Candidatos — karate_belt_exam_candidates: id, exam_id, student_id, current_belt,
     //   target_belt, target_belt_name, belt_schema, status, result_notes, fee_paid,
-    //   created_at, updated_at
-    const candidateRes = await db.query(
-      `SELECT ec.id, ec.student_id, ec.target_belt, ec.target_belt_name,
-              ec.current_belt, ec.status, ec.result_notes, ec.created_at,
-              cu.name AS student_name,
-              cu.karate_registration_number,
-              cb.belt_level AS current_belt_level,
-              cb.belt_name  AS current_belt_name
-       FROM karate_belt_exam_candidates ec
-       JOIN customers cu ON cu.id = ec.student_id
-       LEFT JOIN karate_current_belt cb
-         ON cb.student_id = ec.student_id AND cb.federation_id = $2
-       WHERE ec.exam_id = $1
-       ORDER BY ec.created_at ASC`,
-      [examId, federationId]
-    );
+    //   registration_responses (migration 200), created_at, updated_at
+    let candidateRows;
+    if (HAS_REGISTRATION_FIELDS_COL) {
+      try {
+        const candidateRes = await db.query(
+          `SELECT ec.id, ec.student_id, ec.target_belt, ec.target_belt_name,
+                  ec.current_belt, ec.status, ec.result_notes, ec.registration_responses,
+                  ec.created_at,
+                  cu.name AS student_name,
+                  cu.karate_registration_number,
+                  cb.belt_level AS current_belt_level,
+                  cb.belt_name  AS current_belt_name
+           FROM karate_belt_exam_candidates ec
+           JOIN customers cu ON cu.id = ec.student_id
+           LEFT JOIN karate_current_belt cb
+             ON cb.student_id = ec.student_id AND cb.federation_id = $2
+           WHERE ec.exam_id = $1
+           ORDER BY ec.created_at ASC`,
+          [examId, federationId]
+        );
+        candidateRows = candidateRes.rows;
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_REGISTRATION_FIELDS_COL = false;
+          console.warn('[karateExams] registration_responses ausente (migration 200 pendente)');
+        } else throw e;
+      }
+    }
+    if (candidateRows === undefined) {
+      const candidateRes = await db.query(
+        `SELECT ec.id, ec.student_id, ec.target_belt, ec.target_belt_name,
+                ec.current_belt, ec.status, ec.result_notes, ec.created_at,
+                cu.name AS student_name,
+                cu.karate_registration_number,
+                cb.belt_level AS current_belt_level,
+                cb.belt_name  AS current_belt_name
+         FROM karate_belt_exam_candidates ec
+         JOIN customers cu ON cu.id = ec.student_id
+         LEFT JOIN karate_current_belt cb
+           ON cb.student_id = ec.student_id AND cb.federation_id = $2
+         WHERE ec.exam_id = $1
+         ORDER BY ec.created_at ASC`,
+        [examId, federationId]
+      );
+      candidateRows = candidateRes.rows;
+    }
 
     res.json({
       id: exam.id,
@@ -260,6 +367,7 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
       status: exam.status,
+      registration_fields: exam.registration_fields || [],
       created_at: exam.created_at,
       updated_at: exam.updated_at,
       examiners: examinerRes.rows.map(e => ({
@@ -271,7 +379,7 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
         dan_level: e.dan_level || null,
         confirmed: e.confirmed,
       })),
-      candidates: candidateRes.rows.map(c => ({
+      candidates: candidateRows.map(c => ({
         id: c.id,
         student_id: c.student_id,
         student_name: c.student_name,
@@ -282,6 +390,7 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
         target_belt_name: c.target_belt_name || null,
         status: c.status,
         result_notes: c.result_notes || null,
+        registration_responses: c.registration_responses || {},
         created_at: c.created_at,
       })),
     });
@@ -306,6 +415,16 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
       error: `exam_type inválido. Use: ${VALID_EXAM_TYPES.join(', ')}`,
       code: 'VALIDATION_ERROR',
     });
+  }
+
+  // registration_fields (migration 200) — array de { key, label, type, required, options? }.
+  // Validação de formato ANTES de tocar o banco; 422 limpo se inválido.
+  const hasRegistrationFields = req.body.registration_fields !== undefined;
+  if (hasRegistrationFields) {
+    const check = validateRegistrationFields(req.body.registration_fields);
+    if (!check.ok) {
+      return res.status(422).json({ error: check.error, code: 'VALIDATION_ERROR' });
+    }
   }
 
   const updates = [];
@@ -334,6 +453,16 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
     idx++;
   }
 
+  // registration_fields entra no SET só se a coluna existir (cache otimista —
+  // vira false em 42703 e a tentativa abaixo cai pro UPDATE sem a coluna).
+  let registrationFieldsIdx = null;
+  if (hasRegistrationFields && HAS_REGISTRATION_FIELDS_COL) {
+    registrationFieldsIdx = idx;
+    updates.push(`registration_fields = $${idx}::jsonb`);
+    values.push(JSON.stringify(req.body.registration_fields));
+    idx++;
+  }
+
   if (updates.length === 0) {
     return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }
@@ -342,14 +471,52 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
   values.push(examId, federationId);
 
   try {
-    const result = await db.query(
-      `UPDATE karate_belt_exams
-       SET ${updates.join(', ')}
-       WHERE id = $${idx} AND federation_id = $${idx + 1}
-       RETURNING id, federation_id, exam_type, name, event_date, location,
-                 max_candidates, fee_amount, status, updated_at`,
-      values
-    );
+    let result;
+    try {
+      result = await db.query(
+        `UPDATE karate_belt_exams
+         SET ${updates.join(', ')}
+         WHERE id = $${idx} AND federation_id = $${idx + 1}
+         RETURNING id, federation_id, exam_type, name, event_date, location,
+                   max_candidates, fee_amount, status,
+                   ${HAS_REGISTRATION_FIELDS_COL ? 'registration_fields,' : ''} updated_at`,
+        values
+      );
+    } catch (e) {
+      if (e.code === '42703' && registrationFieldsIdx !== null) {
+        // Coluna ainda não existe (migration 200 pendente) — refaz sem ela.
+        HAS_REGISTRATION_FIELDS_COL = false;
+        console.warn('[karateExams] registration_fields ausente no PATCH (migration 200 pendente)');
+        // Remonta updates/values sem o campo registration_fields.
+        const updates3 = [];
+        const values3 = [];
+        let idx3 = 1;
+        for (const field of ALLOWED) {
+          if (req.body[field] !== undefined) {
+            updates3.push(`${field} = $${idx3}`);
+            values3.push(req.body[field]);
+            idx3++;
+          }
+        }
+        if (req.body.status !== undefined) {
+          updates3.push(`status = $${idx3}`);
+          values3.push(req.body.status);
+          idx3++;
+        }
+        updates3.push('updated_at = NOW()');
+        values3.push(examId, federationId);
+        result = await db.query(
+          `UPDATE karate_belt_exams
+           SET ${updates3.join(', ')}
+           WHERE id = $${idx3} AND federation_id = $${idx3 + 1}
+           RETURNING id, federation_id, exam_type, name, event_date, location,
+                     max_candidates, fee_amount, status, updated_at`,
+          values3
+        );
+      } else {
+        throw e;
+      }
+    }
 
     if (!result.rows.length) {
       return res.status(404).json({ error: 'Exame não encontrado', code: 'NOT_FOUND' });
@@ -368,6 +535,7 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
       status: exam.status,
+      registration_fields: exam.registration_fields !== undefined ? (exam.registration_fields || []) : undefined,
       updated_at: exam.updated_at,
     });
   } catch (err) {
