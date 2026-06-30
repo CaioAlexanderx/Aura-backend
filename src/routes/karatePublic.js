@@ -290,6 +290,36 @@ router.get('/:slug/events', async (req, res) => {
   }
 });
 
+// ── GET /:slug/eventos — eventos ABERTOS do portal (Bloco B) ──
+// Apenas karate_belt_exams com status='open' (exame/curso/graus reais da
+// federação). Diferente de /:slug/events (agenda ampla, mistura karate_events
+// legada e usa NOT IN done/cancelled): aqui o filtro é estritamente
+// status='open', e a fonte é só karate_belt_exams — para os cards do hub
+// público e o seletor de evento do admin de banners.
+router.get('/:slug/eventos', async (req, res) => {
+  try {
+    const fed = await resolveFederation(req.params.slug);
+    if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
+
+    const rows = await db.query(
+      `SELECT id, name, exam_type, event_date, location, fee_amount
+       FROM karate_belt_exams
+       WHERE federation_id = $1
+         AND status = 'open'
+       ORDER BY event_date ASC NULLS LAST`,
+      [fed.id]
+    );
+
+    res.json({
+      federation: { name: fed.name, logo: fed.logo },
+      events: rows.rows,
+    });
+  } catch (err) {
+    console.error('[karatePublic] eventos error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar eventos abertos' });
+  }
+});
+
 // Resolve um evento (exame ou curso) por id dentro da federação.
 // registration_fields (migration 200) só existe em karate_belt_exams — eventos
 // 'course' (karate_events) sempre voltam registration_fields: [] (sem coluna).

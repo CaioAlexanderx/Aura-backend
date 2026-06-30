@@ -60,6 +60,10 @@ const VALID_EXAM_TYPES = ['kyu_regional', 'dan_estadual', 'dan_nacional', 'exame
 // vira false em 42703 e os SELECTs/INSERTs caem para a forma sem a coluna.
 let HAS_REGISTRATION_FIELDS_COL = true;
 
+// Bloco C — cache module-level otimista p/ certificate_eligible no GET de
+// detalhe (migration 202). Mesmo padrao: comeca true, vira false em 42703.
+let HAS_CERTIFICATE_ELIGIBLE_COL_DETAIL = true;
+
 const VALID_FIELD_TYPES = ['text', 'number', 'select', 'checkbox', 'date', 'phone'];
 
 /**
@@ -312,9 +316,12 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
     let candidateRows;
     if (HAS_REGISTRATION_FIELDS_COL) {
       try {
+        const certEligibleSelect = HAS_CERTIFICATE_ELIGIBLE_COL_DETAIL
+          ? 'ec.certificate_eligible,' : '';
         const candidateRes = await db.query(
           `SELECT ec.id, ec.student_id, ec.target_belt, ec.target_belt_name,
                   ec.current_belt, ec.status, ec.result_notes, ec.registration_responses,
+                  ${certEligibleSelect}
                   ec.created_at,
                   cu.name AS student_name,
                   cu.karate_registration_number,
@@ -331,8 +338,39 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
         candidateRows = candidateRes.rows;
       } catch (e) {
         if (e.code === '42703') {
-          HAS_REGISTRATION_FIELDS_COL = false;
-          console.warn('[karateExams] registration_responses ausente (migration 200 pendente)');
+          if (HAS_CERTIFICATE_ELIGIBLE_COL_DETAIL) {
+            // Pode ser certificate_eligible (migration 202) ou
+            // registration_responses (migration 200) que falta — tenta de
+            // novo só sem certificate_eligible antes de desistir de tudo.
+            HAS_CERTIFICATE_ELIGIBLE_COL_DETAIL = false;
+            try {
+              const retryRes = await db.query(
+                `SELECT ec.id, ec.student_id, ec.target_belt, ec.target_belt_name,
+                        ec.current_belt, ec.status, ec.result_notes, ec.registration_responses,
+                        ec.created_at,
+                        cu.name AS student_name,
+                        cu.karate_registration_number,
+                        cb.belt_level AS current_belt_level,
+                        cb.belt_name  AS current_belt_name
+                 FROM karate_belt_exam_candidates ec
+                 JOIN customers cu ON cu.id = ec.student_id
+                 LEFT JOIN karate_current_belt cb
+                   ON cb.student_id = ec.student_id AND cb.federation_id = $2
+                 WHERE ec.exam_id = $1
+                 ORDER BY ec.created_at ASC`,
+                [examId, federationId]
+              );
+              candidateRows = retryRes.rows;
+            } catch (e2) {
+              if (e2.code === '42703') {
+                HAS_REGISTRATION_FIELDS_COL = false;
+                console.warn('[karateExams] registration_responses ausente (migration 200 pendente)');
+              } else throw e2;
+            }
+          } else {
+            HAS_REGISTRATION_FIELDS_COL = false;
+            console.warn('[karateExams] registration_responses ausente (migration 200 pendente)');
+          }
         } else throw e;
       }
     }
@@ -391,6 +429,10 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
         status: c.status,
         result_notes: c.result_notes || null,
         registration_responses: c.registration_responses || {},
+        // Bloco C — elegibilidade a certificado (migration 202). undefined
+        // quando a coluna ainda nao existe vira false (nunca undefined no
+        // payload, pra nao confundir o front com "indeterminado").
+        certificate_eligible: c.certificate_eligible === true,
         created_at: c.created_at,
       })),
     });
@@ -928,6 +970,12 @@ router.post(
 // Fecha o exame e consolida resultados (status → done).
 // NÃO emite certificados (FPKT #3).
 // Valida que todos os candidatos têm resultado antes de fechar.
+// Bloco C — cache module-level otimista p/ certificate_eligible (migration 202).
+// Backend sobe antes da migration ser aplicada (armadilha_schema_pre_migration
+// do CLAUDE.md): comeca true, vira false em 42703 e o UPDATE de elegibilidade
+// e pulado (best-effort, nao impede o fechamento do exame).
+let HAS_CERTIFICATE_ELIGIBLE_COL = true;
+
 router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, examId } = req.params;
   const { force = false } = req.body;
@@ -937,7 +985,7 @@ router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res
     await client.query('BEGIN');
 
     const examRes = await client.query(
-      `SELECT id, status FROM karate_belt_exams
+      `SELECT id, status, exam_type FROM karate_belt_exams
        WHERE id = $1 AND federation_id = $2 FOR UPDATE`,
       [examId, federationId]
     );
@@ -949,7 +997,11 @@ router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res
 
     const exam = examRes.rows[0];
 
-    if (exam.status === 'done') {
+    // NOTA DE COMPAT: o status terminal historicamente gravado aqui é 'done',
+    // mas o restante do schema (PATCH /belt-exams, frontend) usa 'closed'.
+    // Checamos os dois pra nao deixar reabrir/fechar de novo um exame que já
+    // foi fechado sob o valor antigo.
+    if (exam.status === 'done' || exam.status === 'closed') {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Exame já fechado', code: 'CONFLICT' });
     }
@@ -976,14 +1028,51 @@ router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res
       });
     }
 
-    // Fecha exame
+    // Fecha exame — 'closed' é o valor canônico do enum (draft/open/closed)
+    // usado pelo PATCH /belt-exams e pelo frontend.
     const closeRes = await client.query(
       `UPDATE karate_belt_exams
-       SET status = 'done', updated_at = NOW()
+       SET status = 'closed', updated_at = NOW()
        WHERE id = $1
        RETURNING id, status, updated_at`,
       [examId]
     );
+
+    // Bloco C — marca certificate_eligible:
+    //   curso (exam_type='curso')  -> TODOS os inscritos/participantes
+    //   exame/graus                -> apenas status='approved'
+    // Best-effort: 42703 (migration 202 pendente) não impede o fechamento.
+    // Usa SAVEPOINT porque estamos dentro de uma transação (BEGIN acima) —
+    // um erro de coluna ausente abortaria a transação inteira até o
+    // ROLLBACK explícito; o savepoint isola só esta tentativa.
+    if (HAS_CERTIFICATE_ELIGIBLE_COL) {
+      await client.query('SAVEPOINT cert_eligible');
+      try {
+        const isCurso = exam.exam_type === 'curso';
+        if (isCurso) {
+          await client.query(
+            `UPDATE karate_belt_exam_candidates
+             SET certificate_eligible = true
+             WHERE exam_id = $1`,
+            [examId]
+          );
+        } else {
+          await client.query(
+            `UPDATE karate_belt_exam_candidates
+             SET certificate_eligible = true
+             WHERE exam_id = $1 AND status = 'approved'`,
+            [examId]
+          );
+        }
+        await client.query('RELEASE SAVEPOINT cert_eligible');
+      } catch (e) {
+        await client.query('ROLLBACK TO SAVEPOINT cert_eligible');
+        if (e.code === '42703') {
+          HAS_CERTIFICATE_ELIGIBLE_COL = false;
+          console.warn('[karateExams] certificate_eligible ausente (migration 202 pendente)');
+        } else throw e;
+      }
+    }
 
     // Sumário de resultados
     const summaryRes = await client.query(
