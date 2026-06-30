@@ -593,6 +593,17 @@ router.patch('/:practitionerId/graduations/:graduationId', ...guards.staffWrite(
       notes: r.notes || null,
     });
   } catch (err) {
+    // P0001 = RAISE EXCEPTION sem código explícito. Antes da migration 199
+    // (que remove trg_belt_history_no_update), o trigger de imutabilidade
+    // da migration 149 bloqueia este UPDATE — fallback defensivo até a
+    // migration ser aplicada no ambiente.
+    if (err.code === 'P0001') {
+      console.error('[karatePractitioners] graduation update blocked by legacy immutability trigger (apply migration 199):', err.message);
+      return res.status(503).json({
+        error: 'Edição de graduação indisponível no momento (atualização de banco pendente). Tente novamente em instantes.',
+        code: 'MIGRATION_PENDING',
+      });
+    }
     console.error('[karatePractitioners] graduation update error:', err.message);
     res.status(500).json({ error: 'Erro ao editar graduação', detail: err.message });
   }
@@ -616,6 +627,17 @@ router.delete('/:practitionerId/graduations/:graduationId', ...guards.staffWrite
     }
     res.json({ deleted: true, id: graduationId });
   } catch (err) {
+    // P0001 = RAISE EXCEPTION sem código explícito. Antes da migration 199
+    // (que remove trg_belt_history_no_delete), o trigger de imutabilidade
+    // da migration 149 bloqueia este DELETE — fallback defensivo até a
+    // migration ser aplicada no ambiente.
+    if (err.code === 'P0001') {
+      console.error('[karatePractitioners] graduation delete blocked by legacy immutability trigger (apply migration 199):', err.message);
+      return res.status(503).json({
+        error: 'Exclusão de graduação indisponível no momento (atualização de banco pendente). Tente novamente em instantes.',
+        code: 'MIGRATION_PENDING',
+      });
+    }
     console.error('[karatePractitioners] graduation delete error:', err.message);
     res.status(500).json({ error: 'Erro ao excluir graduação', detail: err.message });
   }
@@ -655,11 +677,18 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
     const p = pracRes.rows[0];
 
     // Histórico de faixas
+    // Tiebreak por created_at: graduated_at sozinho não garante ordem
+    // estável quando duas linhas têm a MESMA data (ex.: duas faixas
+    // importadas com a data-sentinela 1900-01-01, ou data editada via PATCH
+    // para coincidir com outro registro) — sem 2º critério, o Postgres não
+    // garante ordem entre empates e a trajetória pode "embaralhar" entre
+    // requisições. created_at é sempre populado (NOW() no INSERT, tabela é
+    // append-only) e reflete a ordem real de registro.
     const beltHistRes = await db.query(
       `SELECT id, belt_level, belt_name, belt_schema, graduated_at, exam_id
        FROM karate_belt_history
        WHERE student_id = $1 AND federation_id = $2
-       ORDER BY graduated_at ASC`,
+       ORDER BY graduated_at ASC, created_at ASC`,
       [practitionerId, federationId]
     );
 
