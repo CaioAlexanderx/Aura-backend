@@ -307,6 +307,9 @@ describe('POST /belt-exams/:examId/close (fechar sem certificado)', () => {
       .mockResolvedValueOnce({                           // UPDATE status=done
         rows: [{ id: EXAM_ID, status: 'done', updated_at: new Date().toISOString() }],
       })
+      .mockResolvedValueOnce({})                         // SAVEPOINT cert_eligible
+      .mockResolvedValueOnce({ rowCount: 3 })            // UPDATE certificate_eligible
+      .mockResolvedValueOnce({})                         // RELEASE SAVEPOINT
       .mockResolvedValueOnce({                           // SELECT summary
         rows: [
           { status: 'approved', cnt: '3' },

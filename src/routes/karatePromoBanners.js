@@ -168,11 +168,15 @@ router.post(
 router.get('/banners', ...guards.read(), async (req, res) => {
   try {
     const federationId = req.params.federationId || req.params.id;
+    // event_id aponta para karate_belt_exams (eventos reais da federação:
+    // exame/curso/graus) desde a reconciliacao da migration 201 — NAO mais
+    // karate_events (legada). LEFT JOIN para nao quebrar banners sem evento
+    // ou com event_id apontando para um registro ja removido.
     const rows = await db.query(
       `SELECT b.*,
-              e.name AS event_name
+              be.name AS event_name
        FROM karate_promo_banners b
-       LEFT JOIN karate_events e ON e.id = b.event_id
+       LEFT JOIN karate_belt_exams be ON be.id = b.event_id
        WHERE b.federation_id = $1
        ORDER BY b.sort_order ASC, b.created_at DESC`,
       [federationId]
