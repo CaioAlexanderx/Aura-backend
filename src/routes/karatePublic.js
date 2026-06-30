@@ -534,3 +534,151 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
 });
 
 module.exports = router;
+
+// ── POST /:slug/lookup — localizar praticante por CPF, e-mail ou FPKT ──
+// Identificador flexível:
+//   - Só dígitos + comprimento 11 → CPF (regexp_replace para normalizar)
+//   - Contém '@' → e-mail
+//   - Qualquer outro → karate_registration_number (FPKT)
+// Retorna perfil público + faixa atual + inscrições ativas. Read-only.
+router.post('/:slug/lookup', async (req, res) => {
+  const { identifier } = req.body || {};
+  if (!identifier || typeof identifier !== 'string' || !identifier.trim()) {
+    return res.status(422).json({ error: 'Parâmetro `identifier` obrigatório', code: 'VALIDATION_ERROR' });
+  }
+  try {
+    const fed = await resolveFederation(req.params.slug);
+    if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
+
+    const id = identifier.trim();
+
+    // Detectar tipo do identificador
+    let queryText;
+    let queryParam;
+
+    if (id.includes('@')) {
+      // E-mail
+      queryText = `
+        SELECT id, name, email, phone, dojo_id, karate_registration_number
+        FROM customers
+        WHERE federation_id = $1
+          AND lower(email) = lower($2)
+        LIMIT 1`;
+      queryParam = id;
+    } else if (/^\d{11}$/.test(id.replace(/\D/g, '')) && id.replace(/\D/g, '').length === 11) {
+      // CPF — normaliza removendo pontuação antes de comparar
+      const digits = id.replace(/\D/g, '');
+      queryText = `
+        SELECT id, name, email, phone, dojo_id, karate_registration_number
+        FROM customers
+        WHERE federation_id = $1
+          AND regexp_replace(COALESCE(cpf_cnpj,''), '[^0-9]', '', 'g') = $2
+        LIMIT 1`;
+      queryParam = digits;
+    } else {
+      // FPKT (karate_registration_number) — qualquer outro formato
+      queryText = `
+        SELECT id, name, email, phone, dojo_id, karate_registration_number
+        FROM customers
+        WHERE federation_id = $1
+          AND karate_registration_number = $2
+        LIMIT 1`;
+      queryParam = id;
+    }
+
+    const studentRes = await db.query(queryText, [fed.id, queryParam]);
+    if (!studentRes.rows.length) {
+      return res.status(404).json({
+        error: 'Cadastro não localizado nesta federação.',
+        code: 'PRACTITIONER_NOT_FOUND',
+      });
+    }
+
+    const s = studentRes.rows[0];
+
+    // Faixa atual
+    const beltRes = await db.query(
+      `SELECT belt_level, belt_name
+       FROM karate_current_belt
+       WHERE student_id = $1 AND federation_id = $2 LIMIT 1`,
+      [s.id, fed.id]
+    );
+
+    // Inscrições ativas (exames + cursos não finalizados)
+    const examsRes = await db.query(
+      `SELECT ec.id, ec.status, be.id AS event_id, be.name AS event_name,
+              be.event_date, 'exam' AS kind
+       FROM karate_belt_exam_candidates ec
+       JOIN karate_belt_exams be ON be.id = ec.exam_id
+       WHERE ec.student_id = $1 AND be.federation_id = $2
+         AND ec.status NOT IN ('cancelled','rejected')
+         AND be.status NOT IN ('done','cancelled')
+       ORDER BY be.event_date DESC NULLS LAST`,
+      [s.id, fed.id]
+    );
+
+    const coursesRes = await db.query(
+      `SELECT ee.id, ee.status, ke.id AS event_id, ke.name AS event_name,
+              ke.event_date, 'course' AS kind
+       FROM karate_event_enrollments ee
+       JOIN karate_events ke ON ke.id = ee.event_id
+       WHERE ee.student_id = $1 AND ke.federation_id = $2
+         AND ee.status NOT IN ('absent')
+         AND ke.status NOT IN ('done','cancelled','closed')
+       ORDER BY ke.event_date DESC NULLS LAST`,
+      [s.id, fed.id]
+    );
+
+    return res.json({
+      federation: { name: fed.name, logo: fed.logo },
+      practitioner: {
+        id: s.id,
+        name: s.name,
+        karate_registration_number: s.karate_registration_number || null,
+        dojo_id: s.dojo_id || null,
+        current_belt: beltRes.rows[0]?.belt_level || null,
+        current_belt_name: beltRes.rows[0]?.belt_name || null,
+      },
+      active_enrollments: [...examsRes.rows, ...coursesRes.rows],
+    });
+  } catch (err) {
+    console.error('[karatePublic] lookup error:', err.message);
+    return res.status(500).json({ error: 'Erro ao localizar praticante' });
+  }
+});
+
+// ── GET /:slug/banners?placement=hub — banners públicos ativos ──
+// Filtra por federação (via slug), active=true, janela starts_at/ends_at,
+// placement (hub|inscricao|ambos). Sem auth. Ordenados por sort_order ASC.
+router.get('/:slug/banners', async (req, res) => {
+  try {
+    const fed = await resolveFederation(req.params.slug);
+    if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
+
+    const placement = req.query.placement || 'hub';
+    const allowed = ['hub', 'inscricao', 'ambos'];
+    const placementFilter = allowed.includes(placement) ? placement : 'hub';
+
+    // Banners onde placement = filtro solicitado OU = 'ambos'
+    const rows = await db.query(
+      `SELECT id, title, image_url, format, event_id, placement, sort_order
+       FROM karate_promo_banners
+       WHERE federation_id = $1
+         AND active = true
+         AND (starts_at IS NULL OR starts_at <= NOW())
+         AND (ends_at   IS NULL OR ends_at   >= NOW())
+         AND (placement = $2 OR placement = 'ambos')
+       ORDER BY sort_order ASC, created_at DESC`,
+      [fed.id, placementFilter]
+    );
+
+    return res.json({
+      federation: { name: fed.name, logo: fed.logo },
+      banners: rows.rows,
+    });
+  } catch (err) {
+    console.error('[karatePublic] banners GET error:', err.message);
+    return res.status(500).json({ error: 'Erro ao carregar banners' });
+  }
+});
+

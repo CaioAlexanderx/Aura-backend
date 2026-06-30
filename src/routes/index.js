@@ -270,4 +270,15 @@ router.use('/federation/:id/network-health', require('./karateNetworkHealth'));
 // GET /federation/:id/dojo/me  — piloto; fases 1-6 adicionam sub-routers
 router.use('/federation/:id', require('./karateDojo'));
 
+// ── AURA KARATÊ — Track Banner (banners promocionais da federação) ──
+// Migration 198 (karate_promo_banners). Guards staffWrite (POST) + read (GET) + adminOnly (DELETE).
+//   POST   /federation/:id/banners           — upload imagem (multipart ou base64) + cria banner
+//   GET    /federation/:id/banners           — lista banners (admin)
+//   PATCH  /federation/:id/banners/:bannerId — edita metadados
+//   DELETE /federation/:id/banners/:bannerId — remove banner
+// Público (em karatePublic.js):
+//   POST /public/karate/:slug/lookup         — lookup praticante por CPF, e-mail ou FPKT
+//   GET  /public/karate/:slug/banners        — banners ativos (hub/inscricao/ambos)
+router.use('/federation/:id', require('./karatePromoBanners'));
+
 module.exports = router;
