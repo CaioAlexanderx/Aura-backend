@@ -52,7 +52,7 @@ router.get('/practitioners/:practitionerId/transfers', ...guards.read(), async (
               t.reason,
               t.transferred_at,
               t.initiated_by,
-              u.name AS initiated_by_name,
+              COALESCE(u.full_name, u.email) AS initiated_by_name,
               t.created_at
          FROM karate_practitioner_transfers t
          LEFT JOIN companies orig ON orig.id = t.origin_dojo_id
