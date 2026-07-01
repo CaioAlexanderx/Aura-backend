@@ -113,4 +113,95 @@ router.get('/dojo/events', requireDojoAccess, async (req, res) => {
   }
 });
 
+// GET /federation/:id/dojo/practitioners
+// Lista nominal (read-only) dos praticantes do dojô + faixa atual.
+router.get('/dojo/practitioners', requireDojoAccess, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT cu.id AS practitioner_id, cu.name, cu.is_active,
+              cb.belt_level, cb.belt_name
+         FROM customers cu
+         LEFT JOIN karate_current_belt cb
+                ON cb.student_id = cu.id AND cb.federation_id = $1
+        WHERE cu.dojo_id = $2
+        ORDER BY cu.name ASC`,
+      [req.federationId, req.dojoId]
+    );
+    res.json({
+      practitioners: rows.map(r => ({
+        practitioner_id: r.practitioner_id,
+        name: r.name,
+        is_active: r.is_active !== false,
+        belt_level: r.belt_level || null,
+        belt_name: r.belt_name || null,
+      })),
+      count: rows.length,
+    });
+  } catch (err) {
+    console.error('[karateDojo] /dojo/practitioners error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar praticantes' });
+  }
+});
+
+// GET /federation/:id/dojo/annuity
+// Situacao + historico da anuidade do dojo (read-only) + chave PIX da
+// federacao para pagamento. "Pago" = paid_at nao-nulo. Degradacao graceful
+// se a tabela/coluna ainda nao existir.
+router.get('/dojo/annuity', requireDojoAccess, async (req, res) => {
+  try {
+    let history = [];
+    try {
+      const { rows } = await db.query(
+        `SELECT id, reference_period, amount, status, paid_at, due_date
+           FROM karate_dojo_annuity_history
+          WHERE dojo_id = $1 AND federation_id = $2
+          ORDER BY reference_period DESC
+          LIMIT 24`,
+        [req.dojoId, req.federationId]
+      );
+      history = rows;
+    } catch (_) { /* tabela ausente — degradacao graceful */ }
+
+    const pending = history.find(h => !h.paid_at) || null;
+
+    let pix = null;
+    try {
+      const { rows: dcc } = await db.query(
+        `SELECT pix_key, pix_key_type, pix_holder_name
+           FROM digital_channel_config WHERE company_id = $1 LIMIT 1`,
+        [req.federationId]
+      );
+      if (dcc.length && dcc[0].pix_key) {
+        pix = {
+          key: dcc[0].pix_key,
+          key_type: dcc[0].pix_key_type || null,
+          holder_name: dcc[0].pix_holder_name || null,
+        };
+      }
+    } catch (_) { /* pix opcional */ }
+
+    res.json({
+      pending: pending ? {
+        annuity_history_id: pending.id,
+        reference_period: pending.reference_period,
+        amount: pending.amount != null ? Number(pending.amount) : null,
+        status: pending.status,
+        due_date: pending.due_date || null,
+      } : null,
+      history: history.map(h => ({
+        annuity_history_id: h.id,
+        reference_period: h.reference_period,
+        amount: h.amount != null ? Number(h.amount) : null,
+        status: h.status,
+        paid_at: h.paid_at || null,
+        due_date: h.due_date || null,
+      })),
+      pix,
+    });
+  } catch (err) {
+    console.error('[karateDojo] /dojo/annuity error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar anuidade' });
+  }
+});
+
 module.exports = router;
