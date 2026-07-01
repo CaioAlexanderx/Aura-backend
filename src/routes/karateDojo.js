@@ -59,4 +59,58 @@ router.get('/dojo/me', requireDojoAccess, async (req, res) => {
   }
 });
 
+// GET /federation/:id/dojo/events
+// Lista eventos (exames/cursos) ABERTOS da federação — consulta read-only
+// para o painel do sensei. A inscrição é intermediada pela federação.
+router.get('/dojo/events', requireDojoAccess, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, exam_type, event_date, location, fee_amount, status
+         FROM karate_belt_exams
+        WHERE federation_id = $1 AND status = 'open'
+        ORDER BY event_date ASC NULLS LAST
+        LIMIT 50`,
+      [req.federationId]
+    );
+
+    // Contato da federação (best-effort) para o sensei solicitar inscrição.
+    let federation = null;
+    try {
+      const fed = await db.query(
+        `SELECT COALESCE(c.trade_name, c.legal_name) AS name, c.phone,
+                u.email AS email
+           FROM companies c
+           LEFT JOIN users u ON u.id = c.owner_id
+          WHERE c.id = $1
+          LIMIT 1`,
+        [req.federationId]
+      );
+      if (fed.rows.length) {
+        federation = {
+          name: fed.rows[0].name || null,
+          email: fed.rows[0].email || null,
+          phone: fed.rows[0].phone || null,
+        };
+      }
+    } catch (_) { /* contato opcional — degradacao graceful */ }
+
+    res.json({
+      events: rows.map(e => ({
+        id: e.id,
+        name: e.name,
+        exam_type: e.exam_type || 'exame',
+        event_date: e.event_date,
+        location: e.location || null,
+        fee_amount: e.fee_amount != null ? Number(e.fee_amount) : null,
+        status: e.status,
+      })),
+      count: rows.length,
+      federation,
+    });
+  } catch (err) {
+    console.error('[karateDojo] /dojo/events error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar eventos' });
+  }
+});
+
 module.exports = router;
