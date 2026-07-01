@@ -268,7 +268,7 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
       try {
         const examRes = await db.query(
           `SELECT id, federation_id, exam_type, name, event_date, location,
-                  max_candidates, fee_amount, status, registration_fields,
+                  max_candidates, fee_amount, status, description, registration_fields,
                   created_at, updated_at
            FROM karate_belt_exams
            WHERE id = $1 AND federation_id = $2
@@ -286,7 +286,7 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
     if (exam === undefined) {
       const examRes = await db.query(
         `SELECT id, federation_id, exam_type, name, event_date, location,
-                max_candidates, fee_amount, status, created_at, updated_at
+                max_candidates, fee_amount, status, description, created_at, updated_at
          FROM karate_belt_exams
          WHERE id = $1 AND federation_id = $2
          LIMIT 1`,
@@ -405,6 +405,7 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
       status: exam.status,
+      description: exam.description || null,
       registration_fields: exam.registration_fields || [],
       created_at: exam.created_at,
       updated_at: exam.updated_at,
@@ -450,7 +451,7 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
 
   // karate_belt_exams editable columns: event_date, location, name, exam_type,
   //   max_candidates, fee_amount (dojo_id and notes do NOT exist)
-  const ALLOWED = ['event_date', 'location', 'name', 'exam_type', 'max_candidates', 'fee_amount'];
+  const ALLOWED = ['event_date', 'location', 'name', 'exam_type', 'max_candidates', 'fee_amount', 'description'];
 
   // Whitelist de exam_type quando presente (espelha migration 192 / POST).
   if (req.body.exam_type !== undefined && req.body.exam_type !== null
