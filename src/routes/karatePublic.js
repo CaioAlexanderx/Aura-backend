@@ -487,7 +487,9 @@ function missingRequiredFields(fields, responses) {
 }
 
 // ── POST /:slug/inscricao/:eventId — submeter inscrição pública ──
-// Exame: insere candidato (status enrolled). Curso: enrollment.
+// Exame E curso (ambos em karate_belt_exams): insere candidato em
+// karate_belt_exam_candidates com status 'registered' (CHECK: registered|...).
+// karate_events (tabela legada) usa o outro branch com status 'enrolled'.
 // Competição: 501 (stub, depende da Track E). PIX via karatePaymentProvider.
 router.post('/:slug/inscricao/:eventId', async (req, res) => {
   const { cpf, responses } = req.body || {};
@@ -550,7 +552,7 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
             ins = await client.query(
               `INSERT INTO karate_belt_exam_candidates
                  (exam_id, student_id, status, fee_paid, registration_responses, created_at, updated_at)
-               VALUES ($1,$2,'enrolled', false, $3::jsonb, NOW(), NOW())
+               VALUES ($1,$2,'registered', false, $3::jsonb, NOW(), NOW())
                RETURNING id`,
               [ev.id, student.id, responsesJson]
             );
@@ -564,7 +566,7 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
         if (!ins) {
           ins = await client.query(
             `INSERT INTO karate_belt_exam_candidates (exam_id, student_id, status, fee_paid, created_at, updated_at)
-             VALUES ($1,$2,'enrolled', false, NOW(), NOW())
+             VALUES ($1,$2,'registered', false, NOW(), NOW())
              RETURNING id`,
             [ev.id, student.id]
           );
