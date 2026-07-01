@@ -662,9 +662,11 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
               cu.is_active,
               cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
               cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
-              cb.belt_level, cb.belt_name, cb.current_since
+              cb.belt_level, cb.belt_name, cb.current_since,
+              comp.name AS dojo_name
        FROM customers cu
        LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
+       LEFT JOIN companies comp ON comp.id = cu.dojo_id
        WHERE cu.id = $2 AND cu.federation_id = $1
        LIMIT 1`,
       [federationId, practitionerId]
@@ -912,6 +914,7 @@ function shapePractitioner(p) {
     email: p.email || null,
     phone: p.phone || null,
     dojo_id: p.dojo_id || null,
+    dojo_name: p.dojo_name || null,
     is_student: p.is_student,
     parent_guardian_id: p.parent_guardian_id || null,
     is_arbiter: p.is_arbiter,
