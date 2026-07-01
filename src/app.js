@@ -81,6 +81,19 @@ app.use('/api/v1/reports', function(req, res, next) {
   next();
 });
 
+// ── CORS aberto pra portal publico de karate (microsites {slug}.getaura.com.br) ──
+// O portal publico roda em subdominios de federacao (ex.: fpkt.getaura.com.br) e
+// so acessa rotas /public/karate (sem cookies; auth por Bearer quando ha). Mesmo
+// padrao aberto do storefront/reports — libera qualquer origem nessas rotas.
+app.use('/api/v1/public/karate', function(req, res, next) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-ID');
+  res.setHeader('Access-Control-Max-Age', '600');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 // ── CORS global (rotas autenticadas) ──────────────────────
 app.use(cors({
   origin: env.ALLOWED_ORIGINS === '*' ? '*' : allowedOrigins,

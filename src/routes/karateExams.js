@@ -226,7 +226,7 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
         event_date,
         location || null,
         max_candidates ? parseInt(max_candidates, 10) : null,
-        fee_amount ? parseFloat(fee_amount) : null,
+        (fee_amount === '' || fee_amount === undefined || fee_amount === null) ? 0 : parseFloat(fee_amount),
         req.user?.id || null,
       ]
     );
@@ -475,8 +475,15 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
 
   for (const field of ALLOWED) {
     if (req.body[field] !== undefined) {
+      let v = req.body[field];
+      // fee_amount é NOT NULL DEFAULT 0 — nunca gravar NULL/"" (violaria a constraint).
+      if (field === 'fee_amount') {
+        v = (v === '' || v === null) ? 0 : parseFloat(v);
+      } else if (field === 'max_candidates') {
+        v = (v === '' || v === null) ? null : parseInt(v, 10);
+      }
       updates.push(`${field} = $${idx}`);
-      values.push(req.body[field]);
+      values.push(v);
       idx++;
     }
   }
