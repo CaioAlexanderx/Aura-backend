@@ -768,7 +768,7 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
     const insertRes = await client.query(
       `INSERT INTO karate_belt_exam_candidates
          (exam_id, student_id, target_belt, status, created_at, updated_at)
-       VALUES ($1, $2, $3, 'enrolled', NOW(), NOW())
+       VALUES ($1, $2, $3, 'registered', NOW(), NOW())
        RETURNING id, exam_id, student_id, target_belt, status, created_at`,
       [examId, student_id, target_belt || null]
     );
@@ -822,7 +822,7 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
   const { id: federationId, examId, candidateId } = req.params;
   const { status, result_notes } = req.body;
 
-  const VALID_STATUS = ['approved', 'failed', 'absent'];
+  const VALID_STATUS = ['approved', 'rejected', 'absent'];
   if (!status || !VALID_STATUS.includes(status)) {
     return res.status(422).json({
       error: `status deve ser: ${VALID_STATUS.join(', ')}`,
@@ -847,7 +847,7 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
 
     const cand = candRes.rows[0];
 
-    if (cand.current_status !== 'enrolled') {
+    if (cand.current_status !== 'registered') {
       return res.status(409).json({
         error: `Resultado já lançado (status atual: ${cand.current_status})`,
         code: 'CONFLICT',
@@ -900,7 +900,7 @@ router.post(
     if (!reason || !String(reason).trim()) {
       return res.status(422).json({ error: 'reason é obrigatório para correção', code: 'VALIDATION_ERROR' });
     }
-    const VALID_CORRECTED = ['approved', 'failed', 'absent'];
+    const VALID_CORRECTED = ['approved', 'rejected', 'absent'];
     if (corrected_status && !VALID_CORRECTED.includes(corrected_status)) {
       return res.status(422).json({
         error: `corrected_status deve ser: ${VALID_CORRECTED.join(', ')}`,
@@ -1021,7 +1021,7 @@ router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res
     const pendingRes = await client.query(
       `SELECT COUNT(*) AS pending
        FROM karate_belt_exam_candidates
-       WHERE exam_id = $1 AND status = 'enrolled'`,
+       WHERE exam_id = $1 AND status = 'registered'`,
       [examId]
     );
     const pendingCount = parseInt(pendingRes.rows[0].pending, 10);
