@@ -420,7 +420,9 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
       candidates: candidateRows.map(c => ({
         id: c.id,
         student_id: c.student_id,
+        practitioner_id: c.student_id,
         student_name: c.student_name,
+        full_name: c.student_name,
         karate_registration_number: c.karate_registration_number || null,
         current_belt_level: c.current_belt_level || null,
         current_belt_name: c.current_belt_name || null,
