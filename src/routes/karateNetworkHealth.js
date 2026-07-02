@@ -60,6 +60,18 @@
 // padrão; 2º+ quando o grau no belt_name for >= 2). A Vermelha (histórica) NÃO
 // entra nos buckets ativos.
 //
+// NOTA DE PIRÂMIDE POR FAIXA + FILTRO STATUS (02/07): /relacao-faixas passou
+// de 5 buckets grossos (kyu_ini/int/av/dan1/dan2) para ~10 buckets por faixa
+// individual, na ordem canônica do NOVO FPKT Shotokan (Branca, Amarela,
+// Laranja, Verde, Azul Claro, Roxa, Azul Escuro, Marrom, 1º Dan, 2º Dan ou
+// acima). Vermelha continua fora. Marrom ainda é uma linha única (dados sem
+// grau salvo). O campo de resposta continua "buckets" (contrato do front),
+// mas agora cada item é por-faixa. beltBucketKey/counts grossos são mantidos
+// só internamente para os agregados kyu/dan/dan_pct. Endpoint também aceita
+// ?status=all|active|inactive (JOIN customers.is_active), com fallback
+// degradando para 'all' se a coluna não existir (42703). /afiliacao ganhou
+// dojos_ativos/dojos_inativos (companies.is_active, mesmo fallback).
+//
 // NOTA DE SCHEMA (23/06): correções de colunas inexistentes que faziam as
 // telas 500 contra uma federação com dados reais:
 //   - companies.karate_region NÃO existe → coluna correta é companies.region
@@ -120,6 +132,57 @@ function beltBucketKey(level, name) {
   if (b === 'verde' || b === 'azul_claro' || b === 'azulclaro' || b === 'roxo' || b === 'roxa') return 'kyu_int';
   if (b === 'azul_escuro' || b === 'azulescuro' || b === 'marrom') return 'kyu_av';
   // Faixa preta / Dan
+  if (b === 'preta') {
+    const grau = parseInt((String(name || '').match(/(\d+)/) || [])[1], 10);
+    return grau >= 2 ? 'dan2' : 'dan1';
+  }
+  const danMatch = b.match(/^(\d+)\s*dan$/);
+  if (danMatch) {
+    return parseInt(danMatch[1], 10) >= 2 ? 'dan2' : 'dan1';
+  }
+  return null;
+}
+
+// ── Pirâmide por faixa individual (ordem canônica NOVO FPKT Shotokan) ──
+// Ordem da faixa mais baixa ao Dan: Branca, Amarela, Laranja, Verde,
+// Azul Claro, Roxa, Azul Escuro, Marrom, 1º Dan, 2º Dan ou acima.
+// Vermelha (histórica) fica FORA da pirâmide — mesmo critério de
+// beltBucketKey acima.
+// Marrom: os dados atuais NÃO trazem grau (3º/2º/1º kyu marrom) — todas as
+// faixas marrom caem numa única linha "Marrom" por enquanto. NÃO inventamos
+// graus que não existem no schema/dados; a distinção por grau será
+// adicionada quando a federação começar a graduar oficialmente com o grau
+// de marrom salvo em algum campo (hoje karate_current_belt/belt_history não
+// tem essa granularidade para marrom).
+const FAIXA_ORDER = [
+  { slug: 'branca',      long: 'Branca',            ordem: 1 },
+  { slug: 'amarela',     long: 'Amarela',            ordem: 2 },
+  { slug: 'laranja',     long: 'Laranja',            ordem: 3 },
+  { slug: 'verde',       long: 'Verde',              ordem: 4 },
+  { slug: 'azul_claro',  long: 'Azul Claro',         ordem: 5 },
+  { slug: 'roxa',        long: 'Roxa',               ordem: 6 },
+  { slug: 'azul_escuro', long: 'Azul Escuro',        ordem: 7 },
+  { slug: 'marrom',      long: 'Marrom',             ordem: 8 },
+  { slug: 'dan1',        long: '1º Dan',             ordem: 9 },
+  { slug: 'dan2',        long: '2º Dan ou acima',    ordem: 10 },
+];
+
+// Roteia uma faixa (belt_level + belt_name) para o slug da pirâmide
+// granular (FAIXA_ORDER acima). Reusa a mesma normalização de acento/caixa
+// de normBelt. Vermelha = null (histórica, fora da pirâmide). belt_name só
+// é usado para achar o grau da faixa preta (Dan), igual a beltBucketKey.
+function faixaSlugFor(level, name) {
+  const b = normBelt(level);
+  if (!b) return null;
+  if (b === 'vermelha' || b === 'vermelho') return null; // histórica, fora da pirâmide
+  if (b === 'branca') return 'branca';
+  if (b === 'amarela') return 'amarela';
+  if (b === 'laranja') return 'laranja';
+  if (b === 'verde') return 'verde';
+  if (b === 'azul_claro' || b === 'azulclaro') return 'azul_claro';
+  if (b === 'roxo' || b === 'roxa') return 'roxa';
+  if (b === 'azul_escuro' || b === 'azulescuro') return 'azul_escuro';
+  if (b === 'marrom') return 'marrom';
   if (b === 'preta') {
     const grau = parseInt((String(name || '').match(/(\d+)/) || [])[1], 10);
     return grau >= 2 ? 'dan2' : 'dan1';
@@ -223,6 +286,43 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
       [fedId]
     );
 
+    // Dojôs ativos vs. inativos (base TOTAL de dojôs da federação, mesma
+    // WHERE de dojosRes acima). Uma única query com COUNT(*) FILTER cobre os
+    // dois números:
+    //   - dojos_ativos: is_active IS NOT FALSE (true OU null contam como
+    //     ativo — mesmo critério de computeDojoStatus usado em /cobertura)
+    //   - dojos_inativos: is_active = false (só os explicitamente marcados)
+    // Defensivo contra 42703 (coluna is_active ausente antes da migration):
+    // nesse caso não há como distinguir ativo/inativo, então todos os dojôs
+    // da base total contam como "ativos" (mesmo comportamento adotado no
+    // resto do sistema quando is_active não existe) e inativos fica 0.
+    let dojosAtivos = dojos.length;
+    let dojosInativos = 0;
+    try {
+      const statusRes = await db.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE c.is_active IS NOT FALSE)::int AS ativos,
+           COUNT(*) FILTER (WHERE c.is_active = false)::int      AS inativos
+         FROM companies c
+         WHERE c.federation_id = $1
+           AND c.vertical_active = 'karate_dojo'`,
+        [fedId]
+      );
+      const row = statusRes.rows[0] || {};
+      dojosAtivos = parseInt(row.ativos || 0, 10);
+      dojosInativos = parseInt(row.inativos || 0, 10);
+    } catch (err) {
+      if (err.code === '42703') {
+        // companies.is_active ainda não existe (deployment parcial / coluna
+        // não aplicada) — fallback seguro: todos contam como ativos.
+        console.warn('[networkHealth] afiliacao: companies.is_active ausente (42703), fallback ativos=total/inativos=0');
+        dojosAtivos = dojos.length;
+        dojosInativos = 0;
+      } else {
+        throw err;
+      }
+    }
+
     // Anuidades do ano corrente para detectar renovações
     const season = currentSeason();
     const annuityRes = await safeQuery(
@@ -275,6 +375,11 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
       new_affiliations_year: newAffiliationsYear,
       novas_affiliacoes: newAffiliationsYear,
       nao_renovaram: naoRenov,
+      // dojos_ativos/dojos_inativos: contagem de companies (base TOTAL de
+      // dojôs da federação) por status is_active. Ver query acima para o
+      // detalhe dos filtros e o fallback defensivo (42703).
+      dojos_ativos: dojosAtivos,
+      dojos_inativos: dojosInativos,
       yearly: yearlyRes.rows,
       dojos: dojos.map((d) => ({
         id: d.id,
@@ -833,51 +938,95 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
 // ── Relação de faixas (snapshot/pirâmide) ─────────────────────
 // Distribuição atual de atletas por faixa em toda a rede.
 // Caveat explícito: snapshot, não funil de coorte.
+//
+// ?status=all|active|inactive (default 'all' se ausente/valor inválido):
+// filtra os praticantes via JOIN com customers.is_active. Aplicado na MESMA
+// query que alimenta os buckets (não numa query separada), para os buckets
+// e os agregados (total/kyu/dan/dan_pct) sempre refletirem o mesmo filtro.
 router.get('/relacao-faixas', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
+  const status = ['all', 'active', 'inactive'].includes(String(req.query.status))
+    ? String(req.query.status) : 'all';
   try {
-    const r = await safeQuery(
-      `SELECT cb.belt_level, cb.belt_name,
-              COUNT(*)::int AS count
-       FROM karate_current_belt cb
-       WHERE cb.federation_id = $1
-       GROUP BY cb.belt_level, cb.belt_name
-       ORDER BY cb.belt_level ASC`,
-      [fedId]
-    );
+    // statusFilter é montado condicionalmente porque customers.is_active pode
+    // não existir ainda (42703) — nesse caso o catch abaixo refaz a query sem
+    // o filtro (degrada para o comportamento 'all') em vez de quebrar a rota.
+    let statusFilterSql = '';
+    if (status === 'active') statusFilterSql = "AND cu.is_active IS NOT FALSE";
+    else if (status === 'inactive') statusFilterSql = "AND cu.is_active = false";
+
+    async function runQuery(filterSql) {
+      return safeQuery(
+        `SELECT cb.belt_level, cb.belt_name,
+                COUNT(*)::int AS count
+         FROM karate_current_belt cb
+         JOIN customers cu ON cu.id = cb.student_id
+         WHERE cb.federation_id = $1
+           ${filterSql}
+         GROUP BY cb.belt_level, cb.belt_name
+         ORDER BY cb.belt_level ASC`,
+        [fedId]
+      );
+    }
+
+    let r;
+    let effectiveStatus = status;
+    try {
+      r = await runQuery(statusFilterSql);
+    } catch (err) {
+      if (err.code === '42703' && statusFilterSql) {
+        // customers.is_active ausente — degrada para 'all' (sem filtro) em
+        // vez de derrubar a rota.
+        console.warn('[networkHealth] relacao-faixas: customers.is_active ausente (42703), ignorando ?status e usando all');
+        effectiveStatus = 'all';
+        r = await runQuery('');
+      } else {
+        throw err;
+      }
+    }
 
     const rows = r.rows;
 
-    // Buckets da pirâmide (mockup). A categorização real é feita por
-    // beltBucketKey(belt_level, belt_name): belt_level='preta' (qualquer grau)
-    // conta como Dan (1º Dan por padrão; 2º+ quando o grau no belt_name >= 2),
-    // acento/caixa normalizados. Vermelha (histórica) fica FORA dos buckets.
-    const BUCKETS = [
-      { key: 'kyu_ini', faixa: 'Kyu iniciante',     long: '9º–7º Kyu · iniciante' },
-      { key: 'kyu_int', faixa: 'Kyu intermediário', long: '6º–4º Kyu · intermediário' },
-      { key: 'kyu_av',  faixa: 'Kyu avançado',      long: '3º–1º Kyu · avançado' },
-      { key: 'dan1',    faixa: '1º Dan',            long: '1º Dan · faixa preta' },
-      { key: 'dan2',    faixa: '2º Dan ou acima',   long: '2º Dan ou acima' },
-    ];
-
-    const counts = { kyu_ini: 0, kyu_int: 0, kyu_av: 0, dan1: 0, dan2: 0 };
-    // total = só praticantes que caem em algum bucket ativo (Vermelha excluída).
+    // counts por slug granular (FAIXA_ORDER). Vermelha/desconhecida = fora.
+    const counts = {};
+    for (const f of FAIXA_ORDER) counts[f.slug] = 0;
+    // total = só praticantes que caem em alguma faixa da pirâmide (Vermelha excluída).
     let total = 0;
     for (const row of rows) {
-      const k = beltBucketKey(row.belt_level, row.belt_name);
-      if (!k || !(k in counts)) continue; // Vermelha / faixa desconhecida → fora
-      counts[k] += row.count;
+      const slug = faixaSlugFor(row.belt_level, row.belt_name);
+      if (!slug || !(slug in counts)) continue; // Vermelha / faixa desconhecida → fora
+      counts[slug] += row.count;
       total += row.count;
     }
 
-    const buckets = BUCKETS.map((b) => {
-      const n = counts[b.key] || 0;
-      return { faixa: b.faixa, long: b.long, n, pct: total > 0 ? Number((n / total * 100).toFixed(1)) : 0 };
-    });
+    // buckets: um item por faixa individual (~10 linhas), na ordem canônica
+    // FPKT Shotokan (Branca...2º Dan ou acima). Nome do campo continua
+    // "buckets" para não quebrar o contrato com o frontend; "faixa" carrega
+    // o rótulo (mesmo papel que "long" tinha nos 5 buckets grossos antigos).
+    const buckets = FAIXA_ORDER
+      .slice()
+      .sort((a, b) => a.ordem - b.ordem)
+      .map((f) => {
+        const n = counts[f.slug] || 0;
+        return {
+          faixa: f.slug,
+          long: f.long,
+          n,
+          pct: total > 0 ? Number((n / total * 100).toFixed(1)) : 0,
+        };
+      });
 
-    const danN = counts.dan1 + counts.dan2;
-    const kyuN = counts.kyu_ini + counts.kyu_int + counts.kyu_av;
+    // Agregados kyu/dan somando as faixas certas via beltBucketKey (mantido
+    // internamente só para esse fim — os buckets retornados são por-faixa).
+    const bucketCounts = { kyu_ini: 0, kyu_int: 0, kyu_av: 0, dan1: 0, dan2: 0 };
+    for (const row of rows) {
+      const k = beltBucketKey(row.belt_level, row.belt_name);
+      if (!k || !(k in bucketCounts)) continue;
+      bucketCounts[k] += row.count;
+    }
+    const danN = bucketCounts.dan1 + bucketCounts.dan2;
+    const kyuN = bucketCounts.kyu_ini + bucketCounts.kyu_int + bucketCounts.kyu_av;
     const danPct = total > 0 ? Number((danN / total * 100).toFixed(1)) : 0;
 
     if (exportCsv) {
@@ -891,13 +1040,14 @@ router.get('/relacao-faixas', ...guards.read(), async (req, res) => {
     }
 
     res.json({
+      status: effectiveStatus,
       total,
       kyu: kyuN,
       dan: danN,
       dan_pct: danPct,
       buckets,
       raw: rows,
-      _note: 'Snapshot da distribuição atual — não é um funil de coorte. Vermelha (histórica) fora dos buckets ativos.',
+      _note: 'Snapshot da distribuição atual — não é um funil de coorte. Vermelha (histórica) fora da pirâmide. Marrom ainda não distingue grau (dados sem essa granularidade).',
     });
   } catch (err) {
     console.error('[networkHealth] relacao-faixas error:', err.message);
