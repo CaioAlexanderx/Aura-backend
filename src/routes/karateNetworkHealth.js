@@ -997,7 +997,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
       dojo_total: dojoCount,
       new_affiliations_year: newAffiliationsYear,
       kpis: [
-        { key: 'dojos', label: 'Dojôs filiados', value: filiadosEmDia, unit: '' },
+        { key: 'dojos', label: 'Filiados em dia', value: filiadosEmDia, unit: '' },
         { key: 'praticantes', label: 'Praticantes registrados', value: practCount, unit: '' },
         { key: 'inadimplencia', label: 'Inadimplência', value: inadPct, unit: '%' },
         { key: 'graduacoes', label: 'Graduações YTD', value: gradTotal, unit: '' },
