@@ -332,7 +332,7 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
     // usando a base total em seus próprios endpoints.
     const r = await safeQuery(
       `SELECT c.region,
-              COUNT(*)::int AS dojos,
+              COUNT(DISTINCT c.id)::int AS dojos,
               COUNT(DISTINCT c.city) AS mun_covered,
               COUNT(cu.id)::int AS practitioners
        FROM companies c
