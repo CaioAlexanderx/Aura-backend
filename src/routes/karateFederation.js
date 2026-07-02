@@ -144,13 +144,16 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
 
   try {
     // ── 1. KPIs principais (paralelo) ────────────────────────
-    // dojo_count = TODOS os dojôs da federação (vertical = karate_dojo), sem
-    // filtro de is_active — coerente com a página Dojôs (karateDojos.js), que
-    // conta todos. Dojô inativo continua sendo um dojô filiado da federação.
+    // dojo_count = TODOS os dojôs da federação (vertical_active = karate_dojo),
+    // sem filtro de is_active — coerente com a página Dojôs (karateDojos.js) e
+    // Saúde da Rede (karateNetworkHealth.js), que contam todos. Dojô inativo
+    // continua sendo um dojô filiado da federação. `vertical` é o marcador de
+    // identidade permanente; `vertical_active` reflete se o módulo karatê
+    // segue ativo para aquele dojô — é esse último que define a contagem.
     const [dojoRes, practRes, revenueRes] = await Promise.all([
       db.query(
         `SELECT COUNT(*) AS dojo_count FROM companies
-         WHERE federation_id = $1 AND vertical = 'karate_dojo'`,
+         WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
         [federationId]
       ),
       db.query(
@@ -189,7 +192,7 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
          FROM karate_dojo_annuity_history h
          JOIN companies c ON c.id = h.dojo_id
            AND c.federation_id = $1
-           AND c.vertical = 'karate_dojo'
+           AND c.vertical_active = 'karate_dojo'
          ORDER BY
            h.dojo_id,
            CASE WHEN h.reference_period = $2 THEN 0 ELSE 1 END,
@@ -213,7 +216,7 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
        FROM companies c
        LEFT JOIN latest_annuity la ON la.dojo_id = c.id
        WHERE c.federation_id = $1
-         AND c.vertical = 'karate_dojo'`,
+         AND c.vertical_active = 'karate_dojo'`,
       [federationId, currentYear]
     );
 
@@ -432,7 +435,7 @@ router.get('/search', ...guards.read(), async (req, res) => {
          FROM companies c
          LEFT JOIN customers cu ON cu.dojo_id = c.id
          WHERE c.federation_id = $1
-           AND c.vertical = 'karate_dojo'
+           AND c.vertical_active = 'karate_dojo'
            AND (c.name ILIKE $2 OR c.fpkt_affiliation_id ILIKE $2)
          GROUP BY c.id
          ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC

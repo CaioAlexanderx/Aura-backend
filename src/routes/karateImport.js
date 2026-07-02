@@ -397,7 +397,7 @@ const batchFpktHandler = async (req, res) => {
     // Mapa nome→id de TODOS os dojôs da federação (resolve alunos/transf entre lotes)
     const dojoMapRes = await client.query(
       `SELECT id, lower(name) AS lname FROM companies
-       WHERE federation_id = $1 AND vertical = 'karate_dojo'`,
+       WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
       [federationId]
     );
     const dojoMap = new Map(dojoMapRes.rows.map(r => [r.lname, r.id]));

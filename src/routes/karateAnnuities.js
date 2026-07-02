@@ -80,7 +80,7 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
        FROM companies c
        LEFT JOIN karate_dojo_annuity_history h
          ON h.dojo_id = c.id AND h.reference_period = $2
-       WHERE c.federation_id = $1 AND c.vertical = 'karate_dojo'
+       WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
        ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
       [federationId, year]
     );
@@ -1158,7 +1158,11 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
 
     let enriched = rows.map(r => {
       let annuityStatus = 'due';
-      if (!r.transaction_id) annuityStatus = 'suspended';
+      // Sem cobrança lançada (sem transaction_id) é um estado NEUTRO
+      // ('no_charge') — ausência de cobrança NÃO é inadimplência.
+      // 'suspended' passa a significar apenas "tinha cobrança e venceu há
+      // mais de 180 dias" (branch abaixo, com transaction_id presente).
+      if (!r.transaction_id) annuityStatus = 'no_charge';
       // transactions.status é o enum: recebido = 'confirmed'
       else if (r.tx_status === 'confirmed' || r.paid_at) annuityStatus = 'paid';
       else if (r.due_date) {

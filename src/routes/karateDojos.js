@@ -102,7 +102,7 @@ router.get('/', ...guards.read(), async (req, res) => {
   const offset   = (page - 1) * pageSize;
 
   try {
-    const conditions = [`c.federation_id = $1`, `c.vertical = 'karate_dojo'`];
+    const conditions = [`c.federation_id = $1`, `c.vertical_active = 'karate_dojo'`];
     const params = [federationId];
     let n = 2;
 

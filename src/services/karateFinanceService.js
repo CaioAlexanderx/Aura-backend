@@ -17,11 +17,15 @@
 const db = require('../config/database');
 
 // ── Status de anuidade (derivado de karate_dojo_annuity_history) ─
+// Sem cobrança lançada (sem registro, ou registro sem due_date) é um estado
+// NEUTRO ('no_charge') — ausência de cobrança NÃO é inadimplência.
+// 'suspended' passa a significar apenas "tinha cobrança e venceu há mais de
+// 180 dias".
 function computeAnnuityStatus(latestAnnuity) {
-  if (!latestAnnuity) return 'suspended';
+  if (!latestAnnuity) return 'no_charge';
   if (latestAnnuity.status === 'paid') return 'paid';
   const dueDate = latestAnnuity.due_date ? new Date(latestAnnuity.due_date) : null;
-  if (!dueDate) return 'suspended';
+  if (!dueDate) return 'no_charge';
   const now = new Date();
   const dayMs = 1000 * 60 * 60 * 24;
   const daysUntilDue = Math.round((dueDate - now) / dayMs);
