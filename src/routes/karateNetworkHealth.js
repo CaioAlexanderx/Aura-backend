@@ -733,6 +733,7 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
     const monthRes = await safeQuery(
       `SELECT
          DATE_TRUNC('month', graduated_at) AS month_start,
+         TO_CHAR(DATE_TRUNC('month', graduated_at), 'YYYY-MM') AS ym,
          COUNT(*) FILTER (
            WHERE translate(lower(belt_level), 'áàâãéêíóôõúç', 'aaaaeeiooouc') !~ 'preta|dan'
          ) AS kyu_count,
@@ -768,12 +769,17 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
       [fedId]
     );
 
+    // Rótulo do mês derivado da string 'YYYY-MM' (TO_CHAR no SQL), NUNCA de
+    // new Date(month_start) — evita o shift de -1 mês por fuso (01/02 UTC virava
+    // 31/01 local → "jan"). Mesma classe dos bugs -1 dia já corrigidos.
+    const MESES_PT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
     const months_data = monthRes.rows.map((r) => {
-      const d = new Date(r.month_start);
+      const ym = r.ym || String(r.month_start).slice(0, 7);
+      const [yy, mm] = ym.split('-');
       return {
-        month: String(r.month_start).slice(0, 7),
-        mes: d.toLocaleString('pt-BR', { month: 'short' }).replace('.', ''),
-        ano: String(d.getFullYear()).slice(2),
+        month: ym,
+        mes: MESES_PT[parseInt(mm, 10) - 1] || '',
+        ano: String(yy).slice(2),
         kyu: parseInt(r.kyu_count || 0, 10),
         dan: parseInt(r.dan_count || 0, 10),
         total: parseInt(r.total || 0, 10),
