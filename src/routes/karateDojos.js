@@ -7,11 +7,10 @@
 // DELETE /federation/:id/dojos/:dojoId   (soft via PATCH is_active; hard com guarda 409 / cascata)
 //
 // Status computado (ver karateService.computeDojoStatus):
-//   active      → vencimento > 60 dias
-//   expiring    → vencimento em 0–60 dias
-//   overdue     → vencido há até 90 dias
-//   defaulting  → vencido há 90–180 dias
-//   suspended   → vencido há > 180 dias ou is_active=false
+//   active   → is_active !== false
+//   inactive → is_active === false
+// (Decisão 02/07/2026: status do dojô é só is_active; inadimplência de
+// anuidade é métrica separada, ver karateFinanceService/karateFederation.)
 //
 // FPKT-NNN gerado com advisory lock por federação (ver karateService).
 //
@@ -125,13 +124,11 @@ router.get('/', ...guards.read(), async (req, res) => {
     const where = `WHERE ${conditions.join(' AND ')}`;
 
     if (status) {
-      // Status is computed in JS (rolling-period logic cannot be pushed to SQL
-      // without a PL/pgSQL function). When ?status= is requested we must fetch
-      // the full filtered set to compute correct total, then slice for the page.
-      // NOTE: this is acceptable because status-filtered queries are typically
-      // dashboard-scoped and the result set per federation is bounded (~hundreds).
-      // A future optimisation would be to materialise dojo_status in a VIEW or
-      // computed column and filter in SQL.
+      // Status agora é só active/inactive (deriva de is_active — ver
+      // karateService.computeDojoStatus), mas mantemos o filtro em JS após
+      // buscar o conjunto completo, para não duplicar a lógica em SQL.
+      // NOTE: aceitável pois queries filtradas por status são tipicamente
+      // dashboard-scoped e o resultado por federação é limitado (~centenas).
       const allRes = await db.query(
         `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
                 c.region, c.fpkt_affiliation_id,
@@ -404,6 +401,12 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
     // Migration 206 — is_assistant incluído defensivamente (cache
     // module-level otimista: vira false em 42703 e a query cai para a forma
     // sem esta coluna, mesmo padrão de karatePractitioners.js).
+    //
+    // Inclui também o sensei responsável (c.sensei_practitioner_id) via OR no
+    // WHERE, mesmo que ele não tenha nenhuma das flags is_arbiter/is_instructor/
+    // is_examiner/is_assistant — o papel 'sensei' é adicionado em JS logo abaixo.
+    // $3 é sensei_practitioner_id (pode ser null; comparação com null nunca
+    // casa, então é seguro passar sempre).
     let teamRes;
     if (HAS_IS_ASSISTANT_COL) {
       try {
@@ -414,8 +417,9 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
            FROM customers cu
            LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
            WHERE cu.dojo_id = $2
-             AND (cu.is_arbiter = true OR cu.is_instructor = true OR cu.is_examiner = true OR cu.is_assistant = true)`,
-          [federationId, dojoId]
+             AND (cu.is_arbiter = true OR cu.is_instructor = true OR cu.is_examiner = true
+                  OR cu.is_assistant = true OR cu.id = $3)`,
+          [federationId, dojoId, d.sensei_practitioner_id || null]
         );
       } catch (e) {
         if (e.code === '42703') {
@@ -432,8 +436,9 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
          FROM customers cu
          LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
          WHERE cu.dojo_id = $2
-           AND (cu.is_arbiter = true OR cu.is_instructor = true OR cu.is_examiner = true)`,
-        [federationId, dojoId]
+           AND (cu.is_arbiter = true OR cu.is_instructor = true OR cu.is_examiner = true
+                OR cu.id = $3)`,
+        [federationId, dojoId, d.sensei_practitioner_id || null]
       );
     }
 
@@ -446,8 +451,25 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
         ...(r.is_instructor ? ['instructor'] : []),
         ...(r.is_examiner   ? ['examiner']   : []),
         ...(r.is_assistant  ? ['assistant']  : []),
+        ...(r.practitioner_id === d.sensei_practitioner_id ? ['sensei'] : []),
       ],
     }));
+
+    // Defensivo: se o sensei_practitioner_id apontar para um praticante fora
+    // de qualquer condição acima por algum motivo (ex.: row não retornada),
+    // ainda garantimos a presença dele na lista via spr (já carregado no
+    // SELECT principal, LEFT JOIN — best-effort, sem query extra).
+    if (
+      d.sensei_practitioner_id &&
+      !technicalTeam.some(m => m.practitioner_id === d.sensei_practitioner_id)
+    ) {
+      technicalTeam.push({
+        practitioner_id: d.sensei_practitioner_id,
+        name: d.sensei_practitioner_name || d.sensei_name || null,
+        belt_level: null,
+        roles: ['sensei'],
+      });
+    }
 
     // Histórico de anuidades (tabela karate_dojo_annuity_history — migration 152)
     // Se a tabela não existir ainda, retorna array vazio com degradação graceful
