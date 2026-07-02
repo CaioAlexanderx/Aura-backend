@@ -1,11 +1,12 @@
 // ============================================================
-// AURA KARATÊ — Rotas Públicas (Track D / Fase 3)
+// AURA KARATÊ — Rotas Públicas (Track D / Fase 3 + Track E / P0-0.4)
 // Montado em /public/karate (SEM auth de empresa). Auth própria:
 //   - verify de carteirinha: token opaco (dados mínimos / LGPD)
 //   - portal do praticante: OTP → JWT type:'portal' (requirePractitionerToken)
 //   - portal público compartilhável: opt-in + public_token (nunca menores)
-//   - inscrição pública: lookup por CPF + PIX (exame/curso reais;
-//                        competição = stub 501 até a Track E)
+//   - inscrição pública: lookup por CPF + PIX (exame/curso/competição —
+//                        campeonatos 'open' entram na agenda e aceitam
+//                        inscrição por categoria, P0-0.4).
 //
 // Ordem das rotas: caminhos LITERAIS antes dos :slug param.
 // ============================================================
@@ -22,9 +23,6 @@ let paymentProvider = null;
 try { paymentProvider = require('../services/karatePaymentProvider'); } catch (_) {}
 
 const onlyDigits = (s) => String(s || '').replace(/\D/g, '');
-
-// Copy do 501 (competição não é inscrita por este fluxo público)
-const COMP_MSG = 'Competições não são inscritas por este fluxo. A inscrição é feita pela sua academia junto à federação, com chaveamento por categoria e peso.';
 
 // Migration 200 — registration_fields (karate_belt_exams) / registration_responses
 // (karate_belt_exam_candidates / karate_event_enrollments). Cache module-level
@@ -291,18 +289,19 @@ router.get('/:slug/events', async (req, res) => {
 });
 
 // ── GET /:slug/eventos — eventos ABERTOS do portal (Bloco B) ──
-// Apenas karate_belt_exams com status='open' (exame/curso/graus reais da
-// federação). Diferente de /:slug/events (agenda ampla, mistura karate_events
-// legada e usa NOT IN done/cancelled): aqui o filtro é estritamente
-// status='open', e a fonte é só karate_belt_exams — para os cards do hub
-// público e o seletor de evento do admin de banners.
+// karate_belt_exams com status='open' (exame/curso/graus reais da
+// federação) UNION karate_competitions com status='open' (Track E/P0-0.4).
+// Diferente de /:slug/events (agenda ampla, mistura karate_events legada e
+// usa NOT IN done/cancelled): aqui o filtro é estritamente status='open'.
+// kind: 'exam' | 'competition' — o card do hub e a tela de inscrição usam
+// esse campo para decidir o fluxo (registration_fields vs. categorias).
 router.get('/:slug/eventos', async (req, res) => {
   try {
     const fed = await resolveFederation(req.params.slug);
     if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
 
-    const rows = await db.query(
-      `SELECT id, name, exam_type, event_date, location, fee_amount
+    const exams = await db.query(
+      `SELECT id, name, exam_type, event_date, location, fee_amount, 'exam' AS kind
        FROM karate_belt_exams
        WHERE federation_id = $1
          AND status = 'open'
@@ -310,9 +309,31 @@ router.get('/:slug/eventos', async (req, res) => {
       [fed.id]
     );
 
+    let competitions = { rows: [] };
+    try {
+      competitions = await db.query(
+        `SELECT id, name, NULL AS exam_type, event_date, location, fee_amount, 'competition' AS kind
+         FROM karate_competitions
+         WHERE federation_id = $1
+           AND status = 'open'
+         ORDER BY event_date ASC NULLS LAST`,
+        [fed.id]
+      );
+    } catch (e) {
+      if (e.code === '42P01') {
+        console.warn('[karatePublic] karate_competitions ausente em /eventos (deployment parcial)');
+      } else throw e;
+    }
+
+    const events = [...exams.rows, ...competitions.rows].sort((a, b) => {
+      if (!a.event_date) return 1;
+      if (!b.event_date) return -1;
+      return new Date(a.event_date) - new Date(b.event_date);
+    });
+
     res.json({
       federation: { name: fed.name, logo: fed.logo },
-      events: rows.rows,
+      events,
     });
   } catch (err) {
     console.error('[karatePublic] eventos error:', err.message);
@@ -357,10 +378,67 @@ async function resolveEvent(fedId, eventId) {
     [eventId, fedId]
   );
   if (co.rows.length) return co.rows[0];
+
+  // Campeonato (karate_competitions / Track E / P0-0.4). Sem registration_fields
+  // (formulário livre não existe pra competição — a "resposta" é a categoria
+  // escolhida). Código defensivo 42P01: deployment parcial da migration 168/169.
+  try {
+    // karate_competitions NÃO tem coluna description (migration 168) — ao
+    // contrário de karate_belt_exams/karate_events. Não selecionar; a
+    // resposta ao cliente sempre traz description: null pra competição.
+    const comp = await db.query(
+      `SELECT id, name, event_date, location, fee_amount, status, 'competition' AS kind
+       FROM karate_competitions WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+      [eventId, fedId]
+    );
+    if (comp.rows.length) return comp.rows[0];
+  } catch (e) {
+    if (e.code !== '42P01') throw e;
+    console.warn('[karatePublic] karate_competitions ausente em resolveEvent (deployment parcial)');
+  }
+
   return null;
 }
 
+// Busca as categorias de uma competição (id, nome, modalidade, faixa etária,
+// faixa de graduação, sexo, peso) — usadas pelo GET de inscrição e pela
+// tela pública para o praticante escolher em qual categoria se inscrever.
+async function resolveCompetitionCategories(competitionId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT cat.id, cat.name, cat.modality, cat.min_age, cat.max_age,
+              cat.belt_min, cat.belt_max, cat.sex, cat.weight_class,
+              cat.max_entries, cat.fee_amount,
+              COUNT(e.id)::int AS entry_count
+       FROM karate_competition_categories cat
+       LEFT JOIN karate_competition_entries e ON e.category_id = cat.id
+       WHERE cat.competition_id = $1
+       GROUP BY cat.id
+       ORDER BY cat.created_at ASC`,
+      [competitionId]
+    );
+    return rows.map(c => ({
+      id: c.id, name: c.name, modality: c.modality,
+      min_age: c.min_age != null ? c.min_age : null,
+      max_age: c.max_age != null ? c.max_age : null,
+      belt_min: c.belt_min || null, belt_max: c.belt_max || null,
+      sex: c.sex, weight_class: c.weight_class || null,
+      max_entries: c.max_entries != null ? c.max_entries : null,
+      fee_amount: c.fee_amount != null ? c.fee_amount : null,
+      entry_count: c.entry_count,
+    }));
+  } catch (e) {
+    if (e.code === '42P01') {
+      console.warn('[karatePublic] karate_competition_categories ausente (deployment parcial)');
+      return [];
+    }
+    throw e;
+  }
+}
+
 // ── GET /:slug/inscricao/:eventId — dados do evento p/ inscrição ──
+// kind === 'competition': em vez de registration_fields, retorna `categories`
+// (o praticante escolhe uma categoria em vez de preencher formulário livre).
 router.get('/:slug/inscricao/:eventId', async (req, res) => {
   try {
     const fed = await resolveFederation(req.params.slug);
@@ -370,11 +448,31 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
       return res.status(404).json({
         error: 'Evento não encontrado ou inscrição online indisponível.',
         code: 'EVENT_NOT_FOUND',
-        _note: 'Inscrição em competições chega com a Track E.',
       });
     }
     if (['done', 'cancelled', 'closed'].includes(ev.status)) {
       return res.status(409).json({ error: 'Inscrições encerradas para este evento', code: 'CLOSED' });
+    }
+    if (ev.kind === 'competition' && ev.status !== 'open') {
+      return res.status(409).json({ error: 'Inscrições encerradas para esta competição', code: 'CLOSED' });
+    }
+
+    if (ev.kind === 'competition') {
+      const categories = await resolveCompetitionCategories(ev.id);
+      return res.json({
+        federation: { name: fed.name, logo: fed.logo },
+        event: {
+          id: ev.id, name: ev.name, kind: 'competition',
+          type: null,
+          description: ev.description || null,
+          event_date: ev.event_date, location: ev.location,
+          fee_amount: ev.fee_amount,
+          capacity: null,
+          registration_fields: [],
+          categories,
+        },
+        requires: ['cpf', 'category_id'],
+      });
     }
 
     // Vagas (apenas exames têm max_candidates; cursos não têm capacidade modelada)
@@ -409,16 +507,36 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
 // ── POST /:slug/inscricao/:eventId/lookup — localizar praticante por CPF ──
 // Passo intermediário do wizard (cpf → confirma): retorna a faixa atual + se já
 // está inscrito, SEM efetivar a inscrição. Erros: 404 (não localizado),
-// 409 (encerrado), 501 (competição).
+// 409 (encerrado/já inscrito).
+// Competição (kind==='competition'): body precisa de `category_id` (a
+// categoria escolhida pelo praticante) — already_enrolled é avaliado POR
+// CATEGORIA (UNIQUE(category_id, student_id) em karate_competition_entries).
 router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
-  const { cpf } = req.body || {};
+  const { cpf, category_id } = req.body || {};
   try {
     const fed = await resolveFederation(req.params.slug);
     if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
     const ev = await resolveEvent(fed.id, req.params.eventId);
-    if (!ev) return res.status(501).json({ error: COMP_MSG, code: 'NOT_IMPLEMENTED' });
+    if (!ev) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'EVENT_NOT_FOUND' });
+    }
     if (['done', 'cancelled', 'closed'].includes(ev.status)) {
       return res.status(409).json({ error: 'Inscrições encerradas', code: 'CLOSED' });
+    }
+    if (ev.kind === 'competition') {
+      if (ev.status !== 'open') {
+        return res.status(409).json({ error: 'Inscrições encerradas', code: 'CLOSED' });
+      }
+      if (!category_id) {
+        return res.status(422).json({ error: 'category_id é obrigatório', code: 'VALIDATION_ERROR' });
+      }
+      const catCheck = await db.query(
+        `SELECT id FROM karate_competition_categories WHERE id = $1 AND competition_id = $2 LIMIT 1`,
+        [category_id, ev.id]
+      );
+      if (!catCheck.rows.length) {
+        return res.status(404).json({ error: 'Categoria não encontrada nesta competição', code: 'CATEGORY_NOT_FOUND' });
+      }
     }
 
     const student = await portalAuth._findPractitionerByCpf(fed.id, cpf);
@@ -440,6 +558,12 @@ router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
       const d = await db.query(
         `SELECT id FROM karate_belt_exam_candidates WHERE exam_id = $1 AND student_id = $2 LIMIT 1`,
         [ev.id, student.id]
+      );
+      already = d.rows.length > 0;
+    } else if (ev.kind === 'competition') {
+      const d = await db.query(
+        `SELECT id FROM karate_competition_entries WHERE category_id = $1 AND student_id = $2 LIMIT 1`,
+        [category_id, student.id]
       );
       already = d.rows.length > 0;
     } else {
@@ -491,23 +615,45 @@ function missingRequiredFields(fields, responses) {
 // Exame E curso (ambos em karate_belt_exams): insere candidato em
 // karate_belt_exam_candidates com status 'registered' (CHECK: registered|...).
 // karate_events (tabela legada) usa o outro branch com status 'enrolled'.
-// Competição: 501 (stub, depende da Track E). PIX via karatePaymentProvider.
+// Competição (Track E / P0-0.4): body precisa de `category_id`; insere em
+// karate_competition_entries com status 'registered'. Anti-dupla-inscrição
+// por categoria: advisory lock (mesmo padrão do exame) + UNIQUE(category_id,
+// student_id) como rede de segurança (23505 -> 409). PIX via karatePaymentProvider.
 router.post('/:slug/inscricao/:eventId', async (req, res) => {
-  const { cpf, responses } = req.body || {};
+  const { cpf, responses, category_id } = req.body || {};
   try {
     const fed = await resolveFederation(req.params.slug);
     if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
 
     const ev = await resolveEvent(fed.id, req.params.eventId);
     if (!ev) {
-      return res.status(501).json({ error: COMP_MSG, code: 'NOT_IMPLEMENTED' });
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'EVENT_NOT_FOUND' });
     }
     if (['done', 'cancelled', 'closed'].includes(ev.status)) {
       return res.status(409).json({ error: 'Inscrições encerradas', code: 'CLOSED' });
     }
+    if (ev.kind === 'competition' && ev.status !== 'open') {
+      return res.status(409).json({ error: 'Inscrições encerradas', code: 'CLOSED' });
+    }
+
+    let category = null;
+    if (ev.kind === 'competition') {
+      if (!category_id) {
+        return res.status(422).json({ error: 'category_id é obrigatório', code: 'VALIDATION_ERROR' });
+      }
+      const catRes = await db.query(
+        `SELECT id, name, max_entries FROM karate_competition_categories
+         WHERE id = $1 AND competition_id = $2 LIMIT 1`,
+        [category_id, ev.id]
+      );
+      if (!catRes.rows.length) {
+        return res.status(404).json({ error: 'Categoria não encontrada nesta competição', code: 'CATEGORY_NOT_FOUND' });
+      }
+      category = catRes.rows[0];
+    }
 
     // Campos obrigatórios do formulário configurável (migration 200) — só
-    // existe em eventos 'exam'. Curso/sem coluna => registration_fields: [].
+    // existe em eventos 'exam'. Curso/competição => registration_fields: [].
     const missingFields = missingRequiredFields(ev.registration_fields, responses);
     if (missingFields.length > 0) {
       return res.status(422).json({
@@ -532,6 +678,47 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+
+      if (ev.kind === 'competition') {
+        // Mesmo padrão de advisory lock do admin (POST /competitions/:cid/entries),
+        // trocando o namespace pra não colidir com o lock do fluxo admin.
+        await client.query(
+          `SELECT pg_advisory_xact_lock(hashtext($1::text || '-pubcomp-' || $2::text))`,
+          [category_id, student.id]
+        );
+
+        const dup = await client.query(
+          `SELECT id FROM karate_competition_entries WHERE category_id = $1 AND student_id = $2 LIMIT 1`,
+          [category_id, student.id]
+        );
+        if (dup.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: 'Você já está inscrito nesta categoria', code: 'CONFLICT', entry_id: dup.rows[0].id });
+        }
+
+        let ins;
+        try {
+          ins = await client.query(
+            `INSERT INTO karate_competition_entries
+               (competition_id, category_id, student_id, dojo_id, status, fee_paid, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,'registered', false, NOW(), NOW())
+             RETURNING id`,
+            [ev.id, category_id, student.id, student.dojo_id || null]
+          );
+        } catch (e) {
+          if (e.code === '23505') {
+            // Rede de segurança do UNIQUE(category_id, student_id) — corrida
+            // entre o SELECT de dup acima e o INSERT (não deveria acontecer
+            // com o advisory lock, mas cobre qualquer brecha).
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'Você já está inscrito nesta categoria', code: 'CONFLICT' });
+          }
+          throw e;
+        }
+        inscription = { type: 'competition', id: ins.rows[0].id, category_id, category_name: category.name };
+
+        await client.query('COMMIT');
+      } else {
       await client.query(
         `SELECT pg_advisory_xact_lock(hashtext($1::text || '-pubinsc-' || $2::text))`,
         [ev.id, student.id]
@@ -611,6 +798,7 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
       }
 
       await client.query('COMMIT');
+      }
     } catch (e) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       throw e;
@@ -618,15 +806,20 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
       client.release();
     }
 
-    // PIX da taxa (se houver e provider disponível) — best-effort
+    // PIX da taxa (se houver e provider disponível) — best-effort.
+    // Competição: categoria pode sobrescrever a taxa da competição
+    // (fee_amount em karate_competition_categories, quando != null).
     let payment = null;
-    const fee = Number(ev.fee_amount) || 0;
+    const fee = ev.kind === 'competition' && category && category.fee_amount != null
+      ? Number(category.fee_amount) || 0
+      : Number(ev.fee_amount) || 0;
+    const kindLabel = ev.kind === 'exam' ? 'exame' : ev.kind === 'competition' ? 'campeonato' : 'curso';
     if (fee > 0 && paymentProvider && paymentProvider.createPixCharge) {
       try {
         const txid = `insc-${String(inscription.id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 18)}`;
         const charge = await paymentProvider.createPixCharge({
           federationId: fed.id, amount: fee, txid,
-          description: `Inscrição ${ev.kind === 'exam' ? 'exame' : 'curso'} - ${ev.name || ''}`,
+          description: `Inscrição ${kindLabel} - ${ev.name || ''}`,
         });
         await db.query(
           `INSERT INTO karate_payment_intents
