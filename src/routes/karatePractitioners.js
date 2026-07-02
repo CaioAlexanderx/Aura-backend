@@ -60,6 +60,11 @@ const ADDRESS_COLS = ['street', 'number', 'complement', 'neighborhood', 'city', 
 // em karateExams.js.
 let HAS_SEX_AFFILIATION_COLS = true;
 
+// Migration 206 — is_assistant (papel "Auxiliar" do praticante, customers).
+// Mesmo padrao de cache module-level otimista: vira false em 42703 e os
+// SELECTs/INSERTs/UPDATEs caem para a forma sem esta coluna.
+let HAS_IS_ASSISTANT_COL = true;
+
 // Valores aceitos para o campo sex (mesma lista do CHECK customers_sex_check).
 const VALID_SEX_VALUES = ['masculino', 'feminino', 'outro'];
 
@@ -87,7 +92,7 @@ router.get('/', ...guards.read(), async (req, res) => {
       n++;
     }
     if (role) {
-      const roleColMap = { arbiter: 'is_arbiter', instructor: 'is_instructor', examiner: 'is_examiner' };
+      const roleColMap = { arbiter: 'is_arbiter', instructor: 'is_instructor', examiner: 'is_examiner', assistant: 'is_assistant' };
       const col = roleColMap[role];
       if (col) {
         conditions.push(`cu.${col} = true`);
@@ -159,7 +164,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
   const {
     full_name, cpf, rg, birth_date, email, phone,
     dojo_id, is_student, parent_guardian_id,
-    is_arbiter, is_instructor, is_examiner,
+    is_arbiter, is_instructor, is_examiner, is_assistant,
     photo_url,
     street, number, complement, neighborhood, city, state, zip_code,
     // P7 — responsável legal
@@ -248,6 +253,11 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       (guardian_relationship && String(guardian_relationship).trim()) || null,
     ];
 
+    // Migration 206 — is_assistant. Mesma estratégia de SAVEPOINT do bloco
+    // sex/affiliation_since abaixo: tenta com a coluna nova, degrada em 42703.
+    const assistantCols = HAS_IS_ASSISTANT_COL ? `${baseCols}, is_assistant` : baseCols;
+    const assistantReturning = HAS_IS_ASSISTANT_COL ? `${baseReturning}, is_assistant` : baseReturning;
+
     // Migration 205 — sex/affiliation_since. Usa SAVEPOINT porque estamos
     // dentro de uma transação (BEGIN acima) — um erro de coluna ausente
     // abortaria a transação inteira até o ROLLBACK explícito; o savepoint
@@ -256,16 +266,19 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     if (HAS_SEX_AFFILIATION_COLS) {
       await client.query('SAVEPOINT sex_affiliation_insert');
       try {
+        const assistantValPlaceholder = HAS_IS_ASSISTANT_COL ? ', $30' : '';
         insertRes = await client.query(
           `INSERT INTO customers
-             (${baseCols}, sex, affiliation_since, is_active, created_at, updated_at)
+             (${assistantCols}, sex, affiliation_since, is_active, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
                    $17, $18, $19, $20, $21, $22, $23,
                    $24, $25, $26, $27,
-                   $28, $29,
+                   $28, $29${assistantValPlaceholder},
                    true, NOW(), NOW())
-           RETURNING ${baseReturning}, sex, affiliation_since`,
-          [...baseVals, (sex || null), (affiliation_since || null)]
+           RETURNING ${assistantReturning}, sex, affiliation_since`,
+          HAS_IS_ASSISTANT_COL
+            ? [...baseVals, (sex || null), (affiliation_since || null), is_assistant === true]
+            : [...baseVals, (sex || null), (affiliation_since || null)]
         );
         await client.query('RELEASE SAVEPOINT sex_affiliation_insert');
       } catch (e) {
@@ -273,6 +286,30 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
         if (e.code === '42703') {
           HAS_SEX_AFFILIATION_COLS = false;
           console.warn('[karatePractitioners] sex/affiliation_since ausentes (migration 205 pendente)');
+        } else throw e;
+      }
+    }
+    if (insertRes === undefined && HAS_IS_ASSISTANT_COL) {
+      // Migration 206 — is_assistant isolado (sem sex/affiliation_since).
+      await client.query('SAVEPOINT is_assistant_insert');
+      try {
+        insertRes = await client.query(
+          `INSERT INTO customers
+             (${baseCols}, is_assistant, is_active, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                   $17, $18, $19, $20, $21, $22, $23,
+                   $24, $25, $26, $27,
+                   $28,
+                   true, NOW(), NOW())
+           RETURNING ${baseReturning}, is_assistant`,
+          [...baseVals, is_assistant === true]
+        );
+        await client.query('RELEASE SAVEPOINT is_assistant_insert');
+      } catch (e) {
+        await client.query('ROLLBACK TO SAVEPOINT is_assistant_insert');
+        if (e.code === '42703') {
+          HAS_IS_ASSISTANT_COL = false;
+          console.warn('[karatePractitioners] is_assistant ausente (migration 206 pendente)');
         } else throw e;
       }
     }
@@ -332,9 +369,13 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     FIELD_COL.sex = 'sex';
     FIELD_COL.affiliation_since = 'affiliation_since';
   }
+  // Migration 206 — is_assistant, mesmo padrão de cache otimista acima.
+  if (HAS_IS_ASSISTANT_COL) {
+    FIELD_COL.is_assistant = 'is_assistant';
+  }
 
   // Campos booleanos: normaliza p/ não virar null no tratamento de string vazia.
-  const BOOL_FIELDS = new Set(['is_student', 'is_arbiter', 'is_instructor', 'is_examiner', 'is_active']);
+  const BOOL_FIELDS = new Set(['is_student', 'is_arbiter', 'is_instructor', 'is_examiner', 'is_assistant', 'is_active']);
 
   const client = await db.connect();
   try {
@@ -393,12 +434,16 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     sets.push('updated_at = NOW()');
     vals.push(practitionerId, federationId);
 
-    // Migration 205 — se sex/affiliation_since entraram no SET, usa SAVEPOINT
-    // porque estamos dentro de uma transação (BEGIN acima) — um erro de
-    // coluna ausente abortaria a transação inteira até o ROLLBACK explícito;
-    // o savepoint isola só esta tentativa (mesmo padrão de karateExams.js).
+    // Migration 205/206 — se sex/affiliation_since/is_assistant entraram no
+    // SET, usa SAVEPOINT porque estamos dentro de uma transação (BEGIN
+    // acima) — um erro de coluna ausente abortaria a transação inteira até
+    // o ROLLBACK explícito; o savepoint isola só esta tentativa (mesmo
+    // padrão de karateExams.js).
     const updateSql = `UPDATE customers SET ${sets.join(', ')} WHERE id = $${i} AND federation_id = $${i + 1}`;
-    if (HAS_SEX_AFFILIATION_COLS && (b.sex !== undefined || b.affiliation_since !== undefined)) {
+    const NEW_COL_FIELDS = new Set(['sex', 'affiliation_since', 'is_assistant']);
+    const touchesNewCols = (HAS_SEX_AFFILIATION_COLS && (b.sex !== undefined || b.affiliation_since !== undefined))
+      || (HAS_IS_ASSISTANT_COL && b.is_assistant !== undefined);
+    if (touchesNewCols) {
       await client.query('SAVEPOINT sex_affiliation_update');
       try {
         await client.query(updateSql, vals);
@@ -407,13 +452,14 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
         await client.query('ROLLBACK TO SAVEPOINT sex_affiliation_update');
         if (e.code === '42703') {
           HAS_SEX_AFFILIATION_COLS = false;
-          console.warn('[karatePractitioners] sex/affiliation_since ausentes no PATCH (migration 205 pendente)');
+          HAS_IS_ASSISTANT_COL = false;
+          console.warn('[karatePractitioners] sex/affiliation_since/is_assistant ausentes no PATCH (migration 205/206 pendente)');
           // Remonta o SET sem os campos ausentes e refaz.
           const sets2 = [];
           const vals2 = [];
           let i2 = 1;
           for (const [field, col] of Object.entries(FIELD_COL)) {
-            if (field === 'sex' || field === 'affiliation_since') continue;
+            if (NEW_COL_FIELDS.has(field)) continue;
             if (b[field] === undefined) continue;
             let v = b[field];
             if (field === 'full_name') v = String(v).trim();
@@ -425,9 +471,9 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
             sets2.push(`${col} = $${i2}`); vals2.push(v); i2++;
           }
           if (!sets2.length) {
-            // Só havia sex/affiliation_since no body e a coluna não existe.
+            // Só havia sex/affiliation_since/is_assistant no body e a coluna não existe.
             await client.query('ROLLBACK');
-            return res.status(503).json({ error: 'Campos sex/affiliation_since indisponíveis (migration 205 pendente)', code: 'MIGRATION_PENDING' });
+            return res.status(503).json({ error: 'Campos sex/affiliation_since/is_assistant indisponíveis (migration 205/206 pendente)', code: 'MIGRATION_PENDING' });
           }
           sets2.push('updated_at = NOW()');
           vals2.push(practitionerId, federationId);
@@ -447,12 +493,15 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     // sex/affiliation_since defensivamente (cache module-level: cai para a
     // forma sem estas colunas em 42703).
     let out;
+    // Migration 206 — is_assistant incluído defensivamente no SELECT (cache
+    // module-level: cai fora da lista de colunas em 42703).
+    const assistantCol = HAS_IS_ASSISTANT_COL ? ', cu.is_assistant' : '';
     if (HAS_SEX_AFFILIATION_COLS) {
       try {
         out = await db.query(
           `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date, cu.email, cu.phone,
                   cu.is_student, cu.parent_guardian_id, cu.dojo_id,
-                  cu.is_arbiter, cu.is_instructor, cu.is_examiner,
+                  cu.is_arbiter, cu.is_instructor, cu.is_examiner${assistantCol},
                   cu.karate_photo_url, cu.karate_registration_number, cu.is_active,
                   cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
                   cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
@@ -467,6 +516,28 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
         if (e.code === '42703') {
           HAS_SEX_AFFILIATION_COLS = false;
           console.warn('[karatePractitioners] sex/affiliation_since ausentes no SELECT pós-update (migration 205 pendente)');
+        } else throw e;
+      }
+    }
+    if (out === undefined && HAS_IS_ASSISTANT_COL) {
+      try {
+        out = await db.query(
+          `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date, cu.email, cu.phone,
+                  cu.is_student, cu.parent_guardian_id, cu.dojo_id,
+                  cu.is_arbiter, cu.is_instructor, cu.is_examiner, cu.is_assistant,
+                  cu.karate_photo_url, cu.karate_registration_number, cu.is_active,
+                  cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
+                  cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
+                  cb.belt_level, cb.belt_name, cb.current_since
+           FROM customers cu
+           LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $2
+           WHERE cu.id = $1 LIMIT 1`,
+          [practitionerId, federationId]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_IS_ASSISTANT_COL = false;
+          console.warn('[karatePractitioners] is_assistant ausente no SELECT pós-update (migration 206 pendente)');
         } else throw e;
       }
     }
@@ -792,12 +863,15 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
     // module-level otimista: vira false em 42703 e o SELECT cai para a forma
     // sem estas colunas, mesmo padrão de HAS_REGISTRATION_FIELDS_COL).
     let pracRes;
+    // Migration 206 — is_assistant incluído defensivamente no SELECT (cache
+    // module-level: cai fora da lista de colunas em 42703).
+    const assistantCol2 = HAS_IS_ASSISTANT_COL ? ', cu.is_assistant' : '';
     if (HAS_SEX_AFFILIATION_COLS) {
       try {
         pracRes = await db.query(
           `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date,
                   cu.email, cu.phone, cu.is_student, cu.parent_guardian_id,
-                  cu.dojo_id, cu.is_arbiter, cu.is_instructor, cu.is_examiner,
+                  cu.dojo_id, cu.is_arbiter, cu.is_instructor, cu.is_examiner${assistantCol2},
                   cu.karate_photo_url, cu.karate_registration_number,
                   cu.is_active,
                   cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
@@ -816,6 +890,32 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
         if (e.code === '42703') {
           HAS_SEX_AFFILIATION_COLS = false;
           console.warn('[karatePractitioners] sex/affiliation_since ausentes no GET detalhe (migration 205 pendente)');
+        } else throw e;
+      }
+    }
+    if (pracRes === undefined && HAS_IS_ASSISTANT_COL) {
+      try {
+        pracRes = await db.query(
+          `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date,
+                  cu.email, cu.phone, cu.is_student, cu.parent_guardian_id,
+                  cu.dojo_id, cu.is_arbiter, cu.is_instructor, cu.is_examiner, cu.is_assistant,
+                  cu.karate_photo_url, cu.karate_registration_number,
+                  cu.is_active,
+                  cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
+                  cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
+                  cb.belt_level, cb.belt_name, cb.current_since,
+                  comp.name AS dojo_name
+           FROM customers cu
+           LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
+           LEFT JOIN companies comp ON comp.id = cu.dojo_id
+           WHERE cu.id = $2 AND cu.federation_id = $1
+           LIMIT 1`,
+          [federationId, practitionerId]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_IS_ASSISTANT_COL = false;
+          console.warn('[karatePractitioners] is_assistant ausente no GET detalhe (migration 206 pendente)');
         } else throw e;
       }
     }
@@ -1087,6 +1187,9 @@ function shapePractitioner(p) {
     is_arbiter: p.is_arbiter,
     is_instructor: p.is_instructor,
     is_examiner: p.is_examiner,
+    // Migration 206 — is_assistant (undefined quando a coluna ainda não
+    // existe no ambiente; vira false explicitamente na resposta)
+    is_assistant: p.is_assistant !== undefined ? p.is_assistant : false,
     photo_url: p.karate_photo_url || null,
     karate_registration_number: p.karate_registration_number || null,
     is_active: p.is_active,

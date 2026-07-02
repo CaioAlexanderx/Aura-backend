@@ -54,6 +54,12 @@ const ADDRESS_COLS =
   'c.address, c.address_street, c.address_number, c.address_complement, ' +
   'c.address_district AS address_neighborhood, c.address_city, c.address_state, c.address_zip';
 
+// Migration 206 — is_assistant (papel "Auxiliar" do praticante, customers).
+// Backend sobe antes da migration ser aplicada (armadilha_schema_pre_migration
+// do CLAUDE.md): cache module-level otimista, vira false em 42703 e a query
+// de time técnico cai para a forma sem esta coluna.
+let HAS_IS_ASSISTANT_COL = true;
+
 // Monta o bloco de endereço da resposta JSON a partir de uma row.
 // (a row já vem com address_neighborhood por causa do alias acima / RETURNING)
 function addressOut(r) {
@@ -395,16 +401,41 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
     const d = dojoRes.rows[0];
 
     // Time técnico: praticantes com função
-    const teamRes = await db.query(
-      `SELECT cu.id AS practitioner_id, cu.name AS name,
-              cb.belt_level, cb.belt_name,
-              cu.is_arbiter, cu.is_instructor, cu.is_examiner
-       FROM customers cu
-       LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
-       WHERE cu.dojo_id = $2
-         AND (cu.is_arbiter = true OR cu.is_instructor = true OR cu.is_examiner = true)`,
-      [federationId, dojoId]
-    );
+    // Migration 206 — is_assistant incluído defensivamente (cache
+    // module-level otimista: vira false em 42703 e a query cai para a forma
+    // sem esta coluna, mesmo padrão de karatePractitioners.js).
+    let teamRes;
+    if (HAS_IS_ASSISTANT_COL) {
+      try {
+        teamRes = await db.query(
+          `SELECT cu.id AS practitioner_id, cu.name AS name,
+                  cb.belt_level, cb.belt_name,
+                  cu.is_arbiter, cu.is_instructor, cu.is_examiner, cu.is_assistant
+           FROM customers cu
+           LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
+           WHERE cu.dojo_id = $2
+             AND (cu.is_arbiter = true OR cu.is_instructor = true OR cu.is_examiner = true OR cu.is_assistant = true)`,
+          [federationId, dojoId]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_IS_ASSISTANT_COL = false;
+          console.warn('[karateDojos] is_assistant ausente na query de time técnico (migration 206 pendente)');
+        } else throw e;
+      }
+    }
+    if (teamRes === undefined) {
+      teamRes = await db.query(
+        `SELECT cu.id AS practitioner_id, cu.name AS name,
+                cb.belt_level, cb.belt_name,
+                cu.is_arbiter, cu.is_instructor, cu.is_examiner
+         FROM customers cu
+         LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
+         WHERE cu.dojo_id = $2
+           AND (cu.is_arbiter = true OR cu.is_instructor = true OR cu.is_examiner = true)`,
+        [federationId, dojoId]
+      );
+    }
 
     const technicalTeam = teamRes.rows.map(r => ({
       practitioner_id: r.practitioner_id,
@@ -414,6 +445,7 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
         ...(r.is_arbiter    ? ['arbiter']    : []),
         ...(r.is_instructor ? ['instructor'] : []),
         ...(r.is_examiner   ? ['examiner']   : []),
+        ...(r.is_assistant  ? ['assistant']  : []),
       ],
     }));
 
