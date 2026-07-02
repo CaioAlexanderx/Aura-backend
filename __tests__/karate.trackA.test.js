@@ -421,3 +421,106 @@ describe('POST /federation/:id/practitioners (criar praticante)', () => {
       });
   });
 });
+
+// ── Regressão P0 — alinhamento coluna x valor no INSERT com
+// sex/affiliation_since/is_assistant (bug: is_assistant boolean caindo na
+// coluna affiliation_since DATE, gerando "invalid input syntax for type
+// date: false"). Ver src/routes/karatePractitioners.js — bloco
+// HAS_SEX_AFFILIATION_COLS + HAS_IS_ASSISTANT_COL. ──────────────
+describe('POST /federation/:id/practitioners — alinhamento sex/affiliation_since/is_assistant', () => {
+  const FED_ID = 'fed-uuid-001';
+  const DOJO_ID = 'dojo-uuid-001';
+  let app;
+
+  beforeAll(function() { app = buildApp(); });
+
+  it('não envia o boolean is_assistant na posição da coluna DATE affiliation_since', function(done) {
+    const mockClient = { query: jest.fn(), release: jest.fn() };
+    db.connect.mockResolvedValue(mockClient);
+
+    mockClient.query
+      .mockResolvedValueOnce({})                            // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: FED_ID }] })    // verifica federação
+      .mockResolvedValueOnce({ rows: [{ id: DOJO_ID }] })   // verifica dojô
+      .mockResolvedValueOnce({ rows: [] })                   // advisory lock pract
+      .mockResolvedValueOnce({ rows: [] })                   // MAX registration_number
+      .mockResolvedValueOnce({})                             // SAVEPOINT sex_affiliation_insert
+      .mockResolvedValueOnce({                               // INSERT customer
+        rows: [{
+          id: 'prac-uuid-002',
+          name: 'Maria Auxiliar',
+          karate_registration_number: 'FPKT-A-00002',
+          is_active: true,
+          sex: 'feminino',
+          affiliation_since: '2024-01-10',
+          is_assistant: true,
+        }],
+      })
+      .mockResolvedValueOnce({})                             // RELEASE SAVEPOINT sex_affiliation_insert
+      .mockResolvedValueOnce({});                            // COMMIT
+
+    request(app)
+      .post('/federation/' + FED_ID + '/practitioners')
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({
+        full_name: 'Maria Auxiliar',
+        dojo_id: DOJO_ID,
+        sex: 'feminino',
+        affiliation_since: '2024-01-10',
+        is_assistant: true,
+      })
+      .end(function(err, res) {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+
+        // Localiza a chamada de query que faz o INSERT INTO customers com
+        // sex/affiliation_since (a 7a chamada no mock, índice 6).
+        const insertCall = mockClient.query.mock.calls.find(function(call) {
+          return typeof call[0] === 'string' && call[0].indexOf('INSERT INTO customers') !== -1
+            && call[0].indexOf('affiliation_since') !== -1;
+        });
+        expect(insertCall).toBeDefined();
+
+        const sqlText = insertCall[0];
+        const params = insertCall[1];
+
+        // Extrai a lista de colunas entre o primeiro par de parênteses após "customers".
+        const colMatch = sqlText.match(/INSERT INTO customers\s*\(([\s\S]*?)\)\s*VALUES/);
+        expect(colMatch).toBeTruthy();
+        const columns = colMatch[1].split(',').map(function(s) { return s.trim(); });
+
+        const idxAffiliation = columns.indexOf('affiliation_since');
+        const idxSex = columns.indexOf('sex');
+        const idxIsAssistant = columns.indexOf('is_assistant');
+
+        expect(idxAffiliation).toBeGreaterThanOrEqual(0);
+        expect(idxSex).toBeGreaterThanOrEqual(0);
+        expect(idxIsAssistant).toBeGreaterThanOrEqual(0);
+
+        // Invariante central da regressão: o valor posicionalmente alinhado
+        // com a coluna affiliation_since (DATE) não pode ser um boolean —
+        // isso é exatamente o que causava "invalid input syntax for type
+        // date: false" no Postgres.
+        expect(typeof params[idxAffiliation]).not.toBe('boolean');
+
+        // E o valor alinhado com is_assistant deve ser, de fato, o boolean.
+        expect(params[idxIsAssistant]).toBe(true);
+
+        // sex deve ser a string enviada, não o boolean nem a data.
+        expect(params[idxSex]).toBe('feminino');
+        expect(params[idxAffiliation]).toBe('2024-01-10');
+
+        // Contagem de colunas parametrizadas == contagem de params. A lista
+        // "columns" inclui is_active/created_at/updated_at, que na query são
+        // literais (true, NOW(), NOW()) e não recebem placeholder — por isso
+        // comparamos apenas as colunas que de fato são parametrizadas.
+        const literalTrailingCols = ['is_active', 'created_at', 'updated_at'];
+        const parameterizedColumns = columns.filter(function(c) {
+          return literalTrailingCols.indexOf(c) === -1;
+        });
+        expect(params.length).toBe(parameterizedColumns.length);
+
+        done();
+      });
+  });
+});
