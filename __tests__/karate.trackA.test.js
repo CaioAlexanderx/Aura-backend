@@ -17,14 +17,18 @@ jest.mock('../src/config/database');
 const db = require('../src/config/database');
 
 // ── Testes de karateService (lógica pura, sem DB) ────────────
+// (Decisão 02/07/2026): computeDojoStatus passou a derivar SÓ de is_active.
+// Valores possíveis agora são apenas 'active' | 'inactive' — a escala de
+// inadimplência (overdue/defaulting/suspended) saiu desta função e vive só
+// em karateFinanceService.computeAnnuityStatus.
 describe('karateService — computeDojoStatus', () => {
   const { computeDojoStatus } = require('../src/services/karateService');
 
-  it('retorna suspended quando is_active=false independente das datas', () => {
-    expect(computeDojoStatus('annual', '2020-01-01', false)).toBe('suspended');
+  it('retorna inactive quando is_active=false independente das datas', () => {
+    expect(computeDojoStatus('annual', '2020-01-01', false)).toBe('inactive');
   });
 
-  it('retorna active quando afiliação recente (< 60 dias até vencimento)', () => {
+  it('retorna active quando is_active=true independente das datas', () => {
     // Afiliação de ontem → anual → vence daqui a ~364 dias
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
@@ -32,18 +36,22 @@ describe('karateService — computeDojoStatus', () => {
     expect(computeDojoStatus('annual', iso, true)).toBe('active');
   });
 
-  it('retorna status vencido quando afiliação muito antiga', () => {
-    // Afiliado há 3 anos com modelo quarterly (vence a cada 3 meses)
+  it('retorna active mesmo com afiliação muito antiga, desde que is_active=true', () => {
+    // Afiliado há 3 anos com modelo quarterly (vence a cada 3 meses) — datas
+    // vencidas não afetam mais o status do dojô, só is_active importa.
     const old = new Date();
     old.setFullYear(old.getFullYear() - 3);
     const iso = old.toISOString().split('T')[0];
     const status = computeDojoStatus('quarterly', iso, true);
-    // Com quarterly e data antiga suficiente, o dojô está vencido
-    expect(['overdue', 'defaulting', 'suspended']).toContain(status);
+    expect(status).toBe('active');
   });
 
   it('retorna active quando affiliation_since é null', () => {
     expect(computeDojoStatus('annual', null, true)).toBe('active');
+  });
+
+  it('retorna inactive quando is_active=undefined não se aplica (só false desliga)', () => {
+    expect(computeDojoStatus('annual', null, undefined)).toBe('active');
   });
 });
 
@@ -321,7 +329,8 @@ describe('GET /federation/:id/dojos (listar)', () => {
         if (err) return done(err);
         expect(res.status).toBe(200);
         res.body.data.forEach(function(d) {
-          expect(['active', 'expiring', 'overdue', 'defaulting', 'suspended']).toContain(d.status);
+          // (Decisão 02/07/2026) status do dojô agora é só active/inactive.
+          expect(['active', 'inactive']).toContain(d.status);
         });
         done();
       });

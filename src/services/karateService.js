@@ -80,44 +80,20 @@ async function nextPractitionerRegistrationNumber(client, federationId) {
 }
 
 // ── Status computado do dojô ────────────────────────────────
-// Regra documentada:
-//   active      → afiliado, data de vencimento > 60 dias no futuro
-//   expiring    → vencimento entre 0 e 60 dias
-//   overdue     → vencimento há até 90 dias (ainda recuperável)
-//   defaulting  → vencimento há mais de 90 e até 180 dias
-//   suspended   → vencimento há mais de 180 dias ou is_active=false
+// Decisão de produto (02/07/2026): status do dojô é derivado UNICAMENTE de
+// is_active. Antes esta função misturava inadimplência (dias de atraso da
+// afiliação) com o status de ativação, retornando 'suspended' tanto para
+// is_active=false quanto para atraso > 180 dias — os dois conceitos são
+// independentes. Inadimplência de anuidade é métrica separada, calculada a
+// partir de karate_dojo_annuity_history (ver karateFinanceService.computeAnnuityStatus
+// e a query de annuity_status em routes/karateFederation.js) — NÃO tocada aqui.
 //
-// Calcula baseado em affiliation_model + affiliation_since:
-//   annual    → renova anualmente; vence no aniversário anual
-//   biannual  → vence a cada 6 meses
-//   quarterly → vence a cada 3 meses
+// Valores possíveis: 'active' | 'inactive'.
+//   active   → is_active !== false
+//   inactive → is_active === false
 function computeDojoStatus(affiliation_model, affiliation_since, is_active) {
-  if (is_active === false) return 'suspended';
-  if (!affiliation_since) return 'active';
-
-  const since = new Date(affiliation_since);
-  const now = new Date();
-
-  // Calcula a data de próximo vencimento
-  let periodMonths = 12;
-  if (affiliation_model === 'biannual') periodMonths = 6;
-  else if (affiliation_model === 'quarterly') periodMonths = 3;
-
-  // Vencimento = afiliação + UM período (sem auto-renovação).
-  // Se já passou e não houve renovação, escala overdue→defaulting→suspended.
-  const dueDate = new Date(since);
-  dueDate.setMonth(dueDate.getMonth() + periodMonths);
-
-  const dayMs = 1000 * 60 * 60 * 24;
-  const daysUntilDue = Math.round((dueDate - now) / dayMs);
-
-  if (daysUntilDue > 60) return 'active';
-  if (daysUntilDue > 0)  return 'expiring';
-
-  const daysOverdue = Math.round((now - dueDate) / dayMs);
-  if (daysOverdue <= 90)  return 'overdue';
-  if (daysOverdue <= 180) return 'defaulting';
-  return 'suspended';
+  if (is_active === false) return 'inactive';
+  return 'active';
 }
 
 // ── Parser de linha CSV simples ─────────────────────────────
