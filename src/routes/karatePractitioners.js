@@ -41,6 +41,12 @@
 // 02/07/2026: sex + affiliation_since (migration 205) no POST/PATCH/GET
 //   detalhe. Cache module-level otimista (HAS_SEX_AFFILIATION_COLS) —
 //   degrada em 42703 até a migration ser aplicada no ambiente.
+// 02/07/2026: c1 — GET / (list) com `q` agora ordena por relevância
+//   (match exato do nome > começa com q > contém q > só cpf/registro),
+//   empate por nome ASC. Sem `q`, ordenação default (nome ASC) inalterada.
+// 02/07/2026: c6 — GET detalhe: janela de course_count ampliada de 1 para
+//   2 anos. Campo canônico agora é course_count_2y; course_count_last_year
+//   mantido como alias de back-compat (mesmo valor).
 // ============================================================
 'use strict';
 
@@ -124,6 +130,31 @@ router.get('/', ...guards.read(), async (req, res) => {
     );
     const total = parseInt(countRes.rows[0].total, 10);
 
+    // Ordenacao: com `q` presente, ordena por relevancia (match exato do
+    // nome > nome comeca com q > nome contem q > so bateu por cpf/registro),
+    // com empate por nome ASC. Sem `q`, mantem o comportamento default
+    // (nome ASC). O param de relevancia usa o valor CRU de q (sem `%`), por
+    // isso e um push novo -- o param existente da clausula WHERE ja esta
+    // formatado como `%q%` e nao serve para o CASE. Adicionado ao FINAL do
+    // array (antes de LIMIT/OFFSET) para nao deslocar os $N ja usados no
+    // WHERE; LIMIT/OFFSET sao renumerados de acordo.
+    const dataParams = [...params];
+    let orderBy = 'ORDER BY cu.name ASC';
+    if (q) {
+      dataParams.push(q);
+      const qIdx = dataParams.length; // indice ($N) do q cru para o CASE
+      orderBy = `ORDER BY CASE
+                   WHEN lower(cu.name) = lower($${qIdx}) THEN 0
+                   WHEN cu.name ILIKE $${qIdx} || '%' THEN 1
+                   WHEN cu.name ILIKE '%' || $${qIdx} || '%' THEN 2
+                   ELSE 3
+                 END ASC, cu.name ASC`;
+    }
+
+    const limitIdx  = dataParams.length + 1;
+    const offsetIdx = dataParams.length + 2;
+    dataParams.push(pageSize, offset);
+
     const dataRes = await db.query(
       `SELECT cu.id, cu.name AS full_name, cu.karate_registration_number,
               comp.name AS dojo_name,
@@ -132,9 +163,9 @@ router.get('/', ...guards.read(), async (req, res) => {
        LEFT JOIN companies comp ON comp.id = cu.dojo_id
        LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = cu.federation_id
        ${where}
-       ORDER BY cu.name ASC
-       LIMIT $${n} OFFSET $${n + 1}`,
-      [...params, pageSize, offset]
+       ${orderBy}
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      dataParams
     );
 
     const practitioners = dataRes.rows.map(r => ({
@@ -856,12 +887,14 @@ router.delete('/:practitionerId/graduations/:graduationId', ...guards.staffWrite
 });
 
 // ── GET /federation/:id/practitioners/:practitionerId ───────
-// P9: inclui last_exam + course_count_last_year.
+// P9: inclui last_exam + course_count_2y (c6: janela de 2 anos).
 //   last_exam: graduação mais recente (karate_belt_history, MAX graduated_at,
 //     excluindo sentinela 1900-01-01 e datas futuras).
-//   course_count_last_year: cursos (exam_type='curso') em que o praticante
-//     participou nos últimos 12 meses via karate_belt_exam_candidates JOIN
+//   course_count_2y: cursos (exam_type='curso') em que o praticante
+//     participou nos últimos 2 anos via karate_belt_exam_candidates JOIN
 //     karate_belt_exams.event_date. Degrada para 0 a 42P01.
+//     course_count_last_year é mantido no JSON como alias de back-compat
+//     (mesmo valor de course_count_2y).
 router.get('/:practitionerId', ...guards.read(), async (req, res) => {
   const { id: federationId, practitionerId } = req.params;
 
@@ -1011,10 +1044,12 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
       lastExam = null;
     }
 
-    // P9 — course_count_last_year: cursos dos últimos 12 meses
+    // c6 — course_count_2y: cursos dos últimos 2 anos (era 1 ano / P9
+    // original; course_count_last_year é mantido apenas como alias de
+    // compatibilidade, com o MESMO valor de course_count_2y).
     // Tabela: karate_belt_exam_candidates (student_id, exam_id)
-    // JOIN karate_belt_exams (exam_type='curso', event_date >= hoje-1ano)
-    let courseCountLastYear = 0;
+    // JOIN karate_belt_exams (exam_type='curso', event_date >= hoje-2anos)
+    let courseCount2y = 0;
     try {
       const courseCountRes = await db.query(
         `SELECT COUNT(DISTINCT ec.exam_id)::int AS cnt
@@ -1023,22 +1058,26 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
            ON be.id = ec.exam_id
           AND be.federation_id = $2
           AND be.exam_type = 'curso'
-          AND be.event_date >= CURRENT_DATE - INTERVAL '1 year'
+          AND be.event_date >= CURRENT_DATE - INTERVAL '2 years'
          WHERE ec.student_id = $1`,
         [practitionerId, federationId]
       );
-      courseCountLastYear = courseCountRes.rows[0]?.cnt ?? 0;
+      courseCount2y = courseCountRes.rows[0]?.cnt ?? 0;
     } catch (e) {
       // 42P01: tabela ainda não existe → degrada para 0
       if (e.code !== '42P01') console.error('[karatePractitioners] course_count error:', e.message);
-      courseCountLastYear = 0;
+      courseCount2y = 0;
     }
 
     res.json({
       ...shapePractitioner(p),
       belt_history: beltHistory,
       last_exam: lastExam,
-      course_count_last_year: courseCountLastYear,
+      // course_count_2y é o campo canônico (janela de 2 anos, c6).
+      // course_count_last_year mantido como alias de back-compat com o
+      // MESMO valor — nenhum consumidor deve quebrar pela renomeação.
+      course_count_2y: courseCount2y,
+      course_count_last_year: courseCount2y,
     });
   } catch (err) {
     console.error('[karatePractitioners] detail error:', err.message);
