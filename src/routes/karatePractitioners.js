@@ -277,7 +277,14 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
                    true, NOW(), NOW())
            RETURNING ${assistantReturning}, sex, affiliation_since`,
           HAS_IS_ASSISTANT_COL
-            ? [...baseVals, (sex || null), (affiliation_since || null), is_assistant === true]
+            // Ordem de colunas é (${assistantCols}, sex, affiliation_since, ...) e
+            // assistantCols termina em "..., is_assistant" — os params têm que
+            // seguir a MESMA ordem: is_assistant logo após baseVals, depois
+            // sex, depois affiliation_since. Antes o array era
+            // [...baseVals, sex, affiliation_since, is_assistant], o que
+            // jogava o boolean is_assistant na coluna affiliation_since
+            // (DATE) -> "invalid input syntax for type date: false" (P0).
+            ? [...baseVals, is_assistant === true, (sex || null), (affiliation_since || null)]
             : [...baseVals, (sex || null), (affiliation_since || null)]
         );
         await client.query('RELEASE SAVEPOINT sex_affiliation_insert');
