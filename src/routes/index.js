@@ -146,6 +146,12 @@ router.use('/federation/:id/practitioners',        require('./karatePractitioner
 // e o caminho /:dojoId/export-data não colide com as rotas de karateDojos.
 router.use('/federation/:id/dojos',                require('./karateExportDojo'));
 router.use('/federation/:id/dojos',                require('./karateDojos'));
+// Fase 2: anexos (documentos/imagens) para dojô e praticante. Mesmo router
+// montado nas duas bases — ele deduz owner_type ('dojo'/'practitioner') pelo
+// req.baseUrl. Paths /:ownerId/documents não colidem com /:dojoId ou
+// /:practitionerId (formato de path distinto). Migration 207 (karate_documents).
+router.use('/federation/:id/dojos',                require('./karateDocuments'));
+router.use('/federation/:id/practitioners',        require('./karateDocuments'));
 // dashboard e belt-distribution são expostos pelo karateFederation router
 // mas precisam do param :id, então também montamos aqui:
 router.use('/federation/:id', require('./karateFederation'));
