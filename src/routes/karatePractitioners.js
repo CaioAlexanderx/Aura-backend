@@ -38,6 +38,9 @@
 //   Body JSON: { content: "<base64>", content_type?: "image/jpeg" }.
 //   Mesma convenção de productImage.js / variantImage.js (R2 + base64).
 //   Sem migration — karate_photo_url já existe em customers.
+// 02/07/2026: sex + affiliation_since (migration 205) no POST/PATCH/GET
+//   detalhe. Cache module-level otimista (HAS_SEX_AFFILIATION_COLS) —
+//   degrada em 42703 até a migration ser aplicada no ambiente.
 // ============================================================
 'use strict';
 
@@ -49,6 +52,16 @@ const { uploadToR2 } = require('../utils/r2Storage');
 
 // Campos de endereço da ficha (colunas em customers).
 const ADDRESS_COLS = ['street', 'number', 'complement', 'neighborhood', 'city', 'state', 'zip_code'];
+
+// Migration 205 — sex + affiliation_since (customers). Backend sobe antes da
+// migration ser aplicada (armadilha_schema_pre_migration do CLAUDE.md): cache
+// module-level otimista, vira false em 42703 e os SELECTs/INSERTs/UPDATEs
+// caem para a forma sem estas colunas. Mesmo padrão de HAS_REGISTRATION_FIELDS_COL
+// em karateExams.js.
+let HAS_SEX_AFFILIATION_COLS = true;
+
+// Valores aceitos para o campo sex (mesma lista do CHECK customers_sex_check).
+const VALID_SEX_VALUES = ['masculino', 'feminino', 'outro'];
 
 // ── GET /federation/:id/practitioners ──────────────────────
 router.get('/', ...guards.read(), async (req, res) => {
@@ -151,6 +164,8 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     street, number, complement, neighborhood, city, state, zip_code,
     // P7 — responsável legal
     guardian_name, guardian_cpf, guardian_phone, guardian_relationship,
+    // Migration 205 — sexo e data de filiação
+    sex, affiliation_since,
   } = req.body;
 
   if (!full_name || !String(full_name).trim()) {
@@ -158,6 +173,9 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
   }
   if (!dojo_id) {
     return res.status(422).json({ error: 'Campo dojo_id é obrigatório', code: 'VALIDATION_ERROR' });
+  }
+  if (sex !== undefined && sex !== null && sex !== '' && !VALID_SEX_VALUES.includes(sex)) {
+    return res.status(422).json({ error: `sex inválido. Use: ${VALID_SEX_VALUES.join(', ')}`, code: 'VALIDATION_ERROR' });
   }
 
   const client = await db.connect();
@@ -187,56 +205,89 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     // Gera número de registro (NNNNN-D, continuando a sequência da federação)
     const regNumber = await nextPractitionerRegistrationNumber(client, federationId);
 
-    const insertRes = await client.query(
-      `INSERT INTO customers
-         (company_id, name, cpf_cnpj, rg, birth_date, email, phone,
+    const baseCols = `company_id, name, cpf_cnpj, rg, birth_date, email, phone,
           is_student, parent_guardian_id, federation_id, dojo_id,
           is_arbiter, is_instructor, is_examiner,
           karate_photo_url, karate_registration_number,
           street, number, complement, neighborhood, city, state, zip_code,
-          guardian_name, guardian_cpf, guardian_phone, guardian_relationship,
-          is_active, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-               $17, $18, $19, $20, $21, $22, $23,
-               $24, $25, $26, $27,
-               true, NOW(), NOW())
-       RETURNING id, name, cpf_cnpj, rg, birth_date, email, phone,
+          guardian_name, guardian_cpf, guardian_phone, guardian_relationship`;
+    const baseReturning = `id, name, cpf_cnpj, rg, birth_date, email, phone,
                  is_student, parent_guardian_id, federation_id, dojo_id,
                  is_arbiter, is_instructor, is_examiner,
                  karate_photo_url, karate_registration_number, is_active,
                  street, number, complement, neighborhood, city, state, zip_code,
-                 guardian_name, guardian_cpf, guardian_phone, guardian_relationship`,
-      [
-        federationId,                        // company_id = federação (owner do registro)
-        String(full_name).trim(),
-        cpf || null,
-        rg || null,
-        birth_date || null,
-        email || null,
-        phone || null,
-        is_student !== false,                 // default true
-        parent_guardian_id || null,
-        federationId,
-        dojo_id,
-        is_arbiter === true,
-        is_instructor === true,
-        is_examiner === true,
-        photo_url || null,
-        regNumber,
-        street || null,
-        number || null,
-        complement || null,
-        neighborhood || null,
-        city || null,
-        state || null,
-        zip_code || null,
-        // P7
-        (guardian_name && String(guardian_name).trim()) || null,
-        (guardian_cpf  && String(guardian_cpf).trim())  || null,
-        (guardian_phone && String(guardian_phone).trim()) || null,
-        (guardian_relationship && String(guardian_relationship).trim()) || null,
-      ]
-    );
+                 guardian_name, guardian_cpf, guardian_phone, guardian_relationship`;
+    const baseVals = [
+      federationId,                        // company_id = federação (owner do registro)
+      String(full_name).trim(),
+      cpf || null,
+      rg || null,
+      birth_date || null,
+      email || null,
+      phone || null,
+      is_student !== false,                 // default true
+      parent_guardian_id || null,
+      federationId,
+      dojo_id,
+      is_arbiter === true,
+      is_instructor === true,
+      is_examiner === true,
+      photo_url || null,
+      regNumber,
+      street || null,
+      number || null,
+      complement || null,
+      neighborhood || null,
+      city || null,
+      state || null,
+      zip_code || null,
+      // P7
+      (guardian_name && String(guardian_name).trim()) || null,
+      (guardian_cpf  && String(guardian_cpf).trim())  || null,
+      (guardian_phone && String(guardian_phone).trim()) || null,
+      (guardian_relationship && String(guardian_relationship).trim()) || null,
+    ];
+
+    // Migration 205 — sex/affiliation_since. Usa SAVEPOINT porque estamos
+    // dentro de uma transação (BEGIN acima) — um erro de coluna ausente
+    // abortaria a transação inteira até o ROLLBACK explícito; o savepoint
+    // isola só esta tentativa (mesmo padrão de karateExams.js / cert_eligible).
+    let insertRes;
+    if (HAS_SEX_AFFILIATION_COLS) {
+      await client.query('SAVEPOINT sex_affiliation_insert');
+      try {
+        insertRes = await client.query(
+          `INSERT INTO customers
+             (${baseCols}, sex, affiliation_since, is_active, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                   $17, $18, $19, $20, $21, $22, $23,
+                   $24, $25, $26, $27,
+                   $28, $29,
+                   true, NOW(), NOW())
+           RETURNING ${baseReturning}, sex, affiliation_since`,
+          [...baseVals, (sex || null), (affiliation_since || null)]
+        );
+        await client.query('RELEASE SAVEPOINT sex_affiliation_insert');
+      } catch (e) {
+        await client.query('ROLLBACK TO SAVEPOINT sex_affiliation_insert');
+        if (e.code === '42703') {
+          HAS_SEX_AFFILIATION_COLS = false;
+          console.warn('[karatePractitioners] sex/affiliation_since ausentes (migration 205 pendente)');
+        } else throw e;
+      }
+    }
+    if (insertRes === undefined) {
+      insertRes = await client.query(
+        `INSERT INTO customers
+           (${baseCols}, is_active, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                 $17, $18, $19, $20, $21, $22, $23,
+                 $24, $25, $26, $27,
+                 true, NOW(), NOW())
+         RETURNING ${baseReturning}`,
+        baseVals
+      );
+    }
 
     await client.query('COMMIT');
 
@@ -275,6 +326,12 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     guardian_phone: 'guardian_phone',
     guardian_relationship: 'guardian_relationship',
   };
+  // Migration 205 — só entra no SET dinâmico se o cache otimista ainda
+  // acredita que as colunas existem (vira false em 42703 na tentativa abaixo).
+  if (HAS_SEX_AFFILIATION_COLS) {
+    FIELD_COL.sex = 'sex';
+    FIELD_COL.affiliation_since = 'affiliation_since';
+  }
 
   // Campos booleanos: normaliza p/ não virar null no tratamento de string vazia.
   const BOOL_FIELDS = new Set(['is_student', 'is_arbiter', 'is_instructor', 'is_examiner', 'is_active']);
@@ -295,6 +352,11 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     if (b.full_name !== undefined && !String(b.full_name).trim()) {
       await client.query('ROLLBACK');
       return res.status(422).json({ error: 'full_name não pode ser vazio', code: 'VALIDATION_ERROR' });
+    }
+
+    if (b.sex !== undefined && b.sex !== null && b.sex !== '' && !VALID_SEX_VALUES.includes(b.sex)) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: `sex inválido. Use: ${VALID_SEX_VALUES.join(', ')}`, code: 'VALIDATION_ERROR' });
     }
 
     // Troca de dojô → valida que o novo dojô pertence à federação
@@ -331,26 +393,98 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     sets.push('updated_at = NOW()');
     vals.push(practitionerId, federationId);
 
-    await client.query(
-      `UPDATE customers SET ${sets.join(', ')} WHERE id = $${i} AND federation_id = $${i + 1}`,
-      vals
-    );
+    // Migration 205 — se sex/affiliation_since entraram no SET, usa SAVEPOINT
+    // porque estamos dentro de uma transação (BEGIN acima) — um erro de
+    // coluna ausente abortaria a transação inteira até o ROLLBACK explícito;
+    // o savepoint isola só esta tentativa (mesmo padrão de karateExams.js).
+    const updateSql = `UPDATE customers SET ${sets.join(', ')} WHERE id = $${i} AND federation_id = $${i + 1}`;
+    if (HAS_SEX_AFFILIATION_COLS && (b.sex !== undefined || b.affiliation_since !== undefined)) {
+      await client.query('SAVEPOINT sex_affiliation_update');
+      try {
+        await client.query(updateSql, vals);
+        await client.query('RELEASE SAVEPOINT sex_affiliation_update');
+      } catch (e) {
+        await client.query('ROLLBACK TO SAVEPOINT sex_affiliation_update');
+        if (e.code === '42703') {
+          HAS_SEX_AFFILIATION_COLS = false;
+          console.warn('[karatePractitioners] sex/affiliation_since ausentes no PATCH (migration 205 pendente)');
+          // Remonta o SET sem os campos ausentes e refaz.
+          const sets2 = [];
+          const vals2 = [];
+          let i2 = 1;
+          for (const [field, col] of Object.entries(FIELD_COL)) {
+            if (field === 'sex' || field === 'affiliation_since') continue;
+            if (b[field] === undefined) continue;
+            let v = b[field];
+            if (field === 'full_name') v = String(v).trim();
+            if (BOOL_FIELDS.has(field)) {
+              v = v === true || v === 'true' || v === 1;
+            } else if (typeof v === 'string' && v.trim() === '') {
+              v = null;
+            }
+            sets2.push(`${col} = $${i2}`); vals2.push(v); i2++;
+          }
+          if (!sets2.length) {
+            // Só havia sex/affiliation_since no body e a coluna não existe.
+            await client.query('ROLLBACK');
+            return res.status(503).json({ error: 'Campos sex/affiliation_since indisponíveis (migration 205 pendente)', code: 'MIGRATION_PENDING' });
+          }
+          sets2.push('updated_at = NOW()');
+          vals2.push(practitionerId, federationId);
+          await client.query(
+            `UPDATE customers SET ${sets2.join(', ')} WHERE id = $${i2} AND federation_id = $${i2 + 1}`,
+            vals2
+          );
+        } else throw e;
+      }
+    } else {
+      await client.query(updateSql, vals);
+    }
     await client.query('COMMIT');
 
-    // Retorna a ficha atualizada (com faixa atual)
-    const out = await db.query(
-      `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date, cu.email, cu.phone,
-              cu.is_student, cu.parent_guardian_id, cu.dojo_id,
-              cu.is_arbiter, cu.is_instructor, cu.is_examiner,
-              cu.karate_photo_url, cu.karate_registration_number, cu.is_active,
-              cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
-              cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
-              cb.belt_level, cb.belt_name, cb.current_since
-       FROM customers cu
-       LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $2
-       WHERE cu.id = $1 LIMIT 1`,
-      [practitionerId, federationId]
-    );
+    // Retorna a ficha atualizada (com faixa atual). Reusa a mesma lógica de
+    // seleção/serialização do GET de detalhe (shapePractitioner) — inclui
+    // sex/affiliation_since defensivamente (cache module-level: cai para a
+    // forma sem estas colunas em 42703).
+    let out;
+    if (HAS_SEX_AFFILIATION_COLS) {
+      try {
+        out = await db.query(
+          `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date, cu.email, cu.phone,
+                  cu.is_student, cu.parent_guardian_id, cu.dojo_id,
+                  cu.is_arbiter, cu.is_instructor, cu.is_examiner,
+                  cu.karate_photo_url, cu.karate_registration_number, cu.is_active,
+                  cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
+                  cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
+                  cu.sex, cu.affiliation_since,
+                  cb.belt_level, cb.belt_name, cb.current_since
+           FROM customers cu
+           LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $2
+           WHERE cu.id = $1 LIMIT 1`,
+          [practitionerId, federationId]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_SEX_AFFILIATION_COLS = false;
+          console.warn('[karatePractitioners] sex/affiliation_since ausentes no SELECT pós-update (migration 205 pendente)');
+        } else throw e;
+      }
+    }
+    if (out === undefined) {
+      out = await db.query(
+        `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date, cu.email, cu.phone,
+                cu.is_student, cu.parent_guardian_id, cu.dojo_id,
+                cu.is_arbiter, cu.is_instructor, cu.is_examiner,
+                cu.karate_photo_url, cu.karate_registration_number, cu.is_active,
+                cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
+                cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
+                cb.belt_level, cb.belt_name, cb.current_since
+         FROM customers cu
+         LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $2
+         WHERE cu.id = $1 LIMIT 1`,
+        [practitionerId, federationId]
+      );
+    }
     res.json(shapePractitioner(out.rows[0]));
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
@@ -654,23 +788,56 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
   const { id: federationId, practitionerId } = req.params;
 
   try {
-    const pracRes = await db.query(
-      `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date,
-              cu.email, cu.phone, cu.is_student, cu.parent_guardian_id,
-              cu.dojo_id, cu.is_arbiter, cu.is_instructor, cu.is_examiner,
-              cu.karate_photo_url, cu.karate_registration_number,
-              cu.is_active,
-              cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
-              cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
-              cb.belt_level, cb.belt_name, cb.current_since,
-              comp.name AS dojo_name
-       FROM customers cu
-       LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
-       LEFT JOIN companies comp ON comp.id = cu.dojo_id
-       WHERE cu.id = $2 AND cu.federation_id = $1
-       LIMIT 1`,
-      [federationId, practitionerId]
-    );
+    // Migration 205 — sex/affiliation_since incluídos defensivamente (cache
+    // module-level otimista: vira false em 42703 e o SELECT cai para a forma
+    // sem estas colunas, mesmo padrão de HAS_REGISTRATION_FIELDS_COL).
+    let pracRes;
+    if (HAS_SEX_AFFILIATION_COLS) {
+      try {
+        pracRes = await db.query(
+          `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date,
+                  cu.email, cu.phone, cu.is_student, cu.parent_guardian_id,
+                  cu.dojo_id, cu.is_arbiter, cu.is_instructor, cu.is_examiner,
+                  cu.karate_photo_url, cu.karate_registration_number,
+                  cu.is_active,
+                  cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
+                  cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
+                  cu.sex, cu.affiliation_since,
+                  cb.belt_level, cb.belt_name, cb.current_since,
+                  comp.name AS dojo_name
+           FROM customers cu
+           LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
+           LEFT JOIN companies comp ON comp.id = cu.dojo_id
+           WHERE cu.id = $2 AND cu.federation_id = $1
+           LIMIT 1`,
+          [federationId, practitionerId]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_SEX_AFFILIATION_COLS = false;
+          console.warn('[karatePractitioners] sex/affiliation_since ausentes no GET detalhe (migration 205 pendente)');
+        } else throw e;
+      }
+    }
+    if (pracRes === undefined) {
+      pracRes = await db.query(
+        `SELECT cu.id, cu.name, cu.cpf_cnpj, cu.rg, cu.birth_date,
+                cu.email, cu.phone, cu.is_student, cu.parent_guardian_id,
+                cu.dojo_id, cu.is_arbiter, cu.is_instructor, cu.is_examiner,
+                cu.karate_photo_url, cu.karate_registration_number,
+                cu.is_active,
+                cu.street, cu.number, cu.complement, cu.neighborhood, cu.city, cu.state, cu.zip_code,
+                cu.guardian_name, cu.guardian_cpf, cu.guardian_phone, cu.guardian_relationship,
+                cb.belt_level, cb.belt_name, cb.current_since,
+                comp.name AS dojo_name
+         FROM customers cu
+         LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
+         LEFT JOIN companies comp ON comp.id = cu.dojo_id
+         WHERE cu.id = $2 AND cu.federation_id = $1
+         LIMIT 1`,
+        [federationId, practitionerId]
+      );
+    }
 
     if (!pracRes.rows.length) {
       return res.status(404).json({ error: 'Praticante não encontrado', code: 'NOT_FOUND' });
@@ -936,6 +1103,10 @@ function shapePractitioner(p) {
     guardian_cpf: p.guardian_cpf || null,
     guardian_phone: p.guardian_phone || null,
     guardian_relationship: p.guardian_relationship || null,
+    // Migration 205 — sexo e data de filiação (undefined quando a coluna
+    // ainda não existe no ambiente; vira null explicitamente na resposta)
+    sex: p.sex !== undefined ? (p.sex || null) : null,
+    affiliation_since: p.affiliation_since !== undefined ? (p.affiliation_since || null) : null,
     current_belt: p.belt_level ? {
       belt_level: p.belt_level,
       belt_name: p.belt_name,

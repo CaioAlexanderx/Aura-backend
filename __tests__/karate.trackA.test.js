@@ -347,7 +347,8 @@ describe('POST /federation/:id/practitioners (criar praticante)', () => {
       .mockResolvedValueOnce({ rows: [{ id: DOJO_ID }] })  // verifica dojô
       .mockResolvedValueOnce({ rows: [] })                  // advisory lock pract
       .mockResolvedValueOnce({ rows: [] })                  // MAX registration_number
-      .mockResolvedValueOnce({                              // INSERT customer
+      .mockResolvedValueOnce({})                            // SAVEPOINT sex_affiliation_insert
+      .mockResolvedValueOnce({                              // INSERT customer (com sex/affiliation_since)
         rows: [{
           id: 'prac-uuid-001',
           name: 'João Silva',
@@ -366,8 +367,11 @@ describe('POST /federation/:id/practitioners (criar praticante)', () => {
           karate_photo_url: null,
           karate_registration_number: 'FPKT-A-00001',
           is_active: true,
+          sex: null,
+          affiliation_since: null,
         }],
       })
+      .mockResolvedValueOnce({})                            // RELEASE SAVEPOINT sex_affiliation_insert
       .mockResolvedValueOnce({});                           // COMMIT
   });
 
