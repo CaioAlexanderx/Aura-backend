@@ -254,7 +254,7 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
         { key: 'name', label: 'Dojô' },
         { key: 'city', label: 'Cidade' },
         { key: 'region', label: 'Região' },
-        { key: 'affiliated_since', label: 'Afiliado desde' },
+        { key: 'affiliated_since', label: 'Filiado desde' },
         { key: 'annuity_status', label: 'Anuidade' },
       ];
       const rows = dojos.map((d) => ({
@@ -971,11 +971,27 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     );
     const projTotal = Number(projRes.rows[0]?.total || 0);
 
+    // 1c. Dojôs FILIADOS EM DIA — decisão de produto (02/07): o KPI de topo da
+    //     Saúde da Rede conta apenas dojôs com anuidade de filiação PAGA na
+    //     temporada (status='paid'). Difere da base total (dojoCount), que segue
+    //     coerente com Painel/Dojôs. Dojô sem anuidade lançada NÃO é "em dia".
+    const emDiaRes = await safeQuery(
+      `SELECT COUNT(DISTINCT c.id)::int AS total
+         FROM companies c
+         JOIN karate_dojo_annuity_history a ON a.dojo_id = c.id
+        WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
+          AND EXTRACT(YEAR FROM a.due_date)::int = $2
+          AND a.status = 'paid'`,
+      [fedId, season]
+    );
+    const filiadosEmDia = parseInt(emDiaRes.rows[0]?.total || 0, 10);
+
     res.json({
       season,
+      dojo_total: dojoCount,
       new_affiliations_year: newAffiliationsYear,
       kpis: [
-        { key: 'dojos', label: 'Dojôs afiliados', value: dojoCount, unit: '' },
+        { key: 'dojos', label: 'Dojôs filiados', value: filiadosEmDia, unit: '' },
         { key: 'praticantes', label: 'Praticantes registrados', value: practCount, unit: '' },
         { key: 'inadimplencia', label: 'Inadimplência', value: inadPct, unit: '%' },
         { key: 'graduacoes', label: 'Graduações YTD', value: gradTotal, unit: '' },
@@ -1074,7 +1090,7 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
              style="border-collapse:collapse;margin-bottom:18px;">
         <tr>
           <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:13px;color:#44403c;">
-            Dojôs afiliados
+            Dojôs filiados
           </td>
           <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:14px;font-weight:700;color:#1c1917;text-align:right;">
             ${dojoCount}
