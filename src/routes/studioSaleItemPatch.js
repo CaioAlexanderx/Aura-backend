@@ -20,6 +20,9 @@
 //              personalizáveis sem mudança).
 // 16/06/2026 - studio_storefront_visible exposto na lista pro toggle de
 //              visibilidade na Loja Virtual (configurador do produto).
+// 03/07/2026 - visual_template_key exposto (F0 Visual Engine, migration 208):
+//              PDV Studio e configurador usam pra ligar o produto ao template
+//              visual 2D/3D mantido pela Aura.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -72,7 +75,7 @@ router.get('/products', async (req, res) => {
     const { rows } = await db.query(
       `SELECT id, name, description, price, image_url, category, stock_qty,
               is_personalizable, customization_config, company_id, created_at,
-              studio_storefront_visible
+              studio_storefront_visible, visual_template_key
          FROM products
          ${where}
         ORDER BY name ASC
@@ -91,12 +94,65 @@ router.get('/products', async (req, res) => {
         is_personalizable: !!r.is_personalizable,
         customization_config: r.customization_config,
         studio_storefront_visible: r.studio_storefront_visible !== false,
+        visual_template_key: r.visual_template_key || null,
         stock_company_id: r.company_id,
       })),
       count: rows.length,
       include_non_personalizable: includeAll,
     });
   } catch (err) {
+    if (err && err.code === '42703') {
+      // Coluna visual_template_key ainda não existe (migration 208 pendente
+      // neste ambiente) — refaz sem a coluna nova pra não quebrar o PDV.
+      try {
+        const params2 = [cid];
+        let where2;
+        if (includeAll) {
+          where2 = `WHERE is_active IS NOT FALSE AND ${listVisibilityWhere('$1')}`;
+        } else {
+          where2 = `WHERE is_active IS NOT FALSE
+                     AND is_personalizable = true
+                     AND customization_config IS NOT NULL
+                     AND ${listVisibilityWhere('$1')}`;
+        }
+        if (search) {
+          params2.push(`%${search}%`);
+          where2 += ` AND (name ILIKE $${params2.length} OR category ILIKE $${params2.length})`;
+        }
+        params2.push(limit);
+        const { rows } = await db.query(
+          `SELECT id, name, description, price, image_url, category, stock_qty,
+                  is_personalizable, customization_config, company_id, created_at,
+                  studio_storefront_visible
+             FROM products
+             ${where2}
+            ORDER BY name ASC
+            LIMIT $${params2.length}`,
+          params2
+        );
+        return res.json({
+          products: rows.map((r) => ({
+            id: r.id,
+            name: r.name,
+            description: r.description || null,
+            price: parseFloat(r.price) || 0,
+            image_url: r.image_url || null,
+            category: r.category || null,
+            stock_qty: parseFloat(r.stock_qty) || 0,
+            is_personalizable: !!r.is_personalizable,
+            customization_config: r.customization_config,
+            studio_storefront_visible: r.studio_storefront_visible !== false,
+            visual_template_key: null,
+            stock_company_id: r.company_id,
+          })),
+          count: rows.length,
+          include_non_personalizable: includeAll,
+        });
+      } catch (err2) {
+        console.error('[studio/products] list fallback error:', err2.message);
+        return res.status(500).json({ error: 'Erro ao listar produtos personalizaveis' });
+      }
+    }
     console.error('[studio/products] list error:', err.message);
     res.status(500).json({ error: 'Erro ao listar produtos personalizaveis' });
   }
