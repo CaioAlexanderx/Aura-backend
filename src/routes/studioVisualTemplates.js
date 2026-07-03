@@ -13,8 +13,12 @@
 //   - POST /visual-renders             → registra render gerado (content_hash server-side)
 //   - GET  /visual-renders             → lista por sale_item_id | digital_order_item_id
 //
-// Defensivo 42P01 (migration 208 pendente) → 503 MIGRATION_STUDIO_VISUAL_PENDING,
-// mesmo padrão do studioSaleItemPatch.
+// Vínculo produto → template (F4, 03/07/2026):
+//   - GET  /products/:pid/visual-template → template publicado do produto (ou null)
+//   - PUT  /products/:pid/visual-template → lojista vincula/desvincula ({ key | null })
+//
+// Defensivo 42P01/42703 (migrations 208/209 pendentes) → 503
+// MIGRATION_STUDIO_VISUAL_PENDING, mesmo padrão do studioSaleItemPatch.
 //
 // 02/07/2026 — F0 do escopo Visualização 3D/2D (contrato no chat c/ Caio)
 // ============================================================
@@ -78,14 +82,28 @@ function renderHash(templateKey, templateVersion, customization) {
 }
 
 function isMigrationPending(err) {
-  return err && err.code === '42P01';
+  return err && (err.code === '42P01' || err.code === '42703');
 }
 
 function migrationPendingRes(res) {
   return res.status(503).json({
-    error: 'Schema do Visual Engine ainda não aplicado (migration 208). Aguarde alguns minutos.',
+    error: 'Schema do Visual Engine ainda não aplicado (migrations 208/209). Aguarde alguns minutos.',
     code: 'MIGRATION_STUDIO_VISUAL_PENDING',
   });
+}
+
+// Visibility canonica de products (mesma de studioSaleItemPatch/products.js)
+function productVisibilityWhere(pidParam, cidParam) {
+  return `p.id = ${pidParam} AND (p.company_id = ${cidParam} OR (
+    p.is_group_shared = true
+    AND p.company_id IN (
+      SELECT id FROM companies
+      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
+        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
+        FROM companies WHERE id = ${cidParam}
+      )
+    )
+  ))`;
 }
 
 // ── GET /studio/visual-templates ────────────────────────────
@@ -225,6 +243,75 @@ router.put('/visual-templates/:key', requireStaff, async (req, res) => {
     if (isMigrationPending(err)) return migrationPendingRes(res);
     console.error('[studio/visual-templates] update error:', err.message);
     res.status(500).json({ error: 'Erro ao atualizar template visual' });
+  }
+});
+
+// ── GET /studio/products/:pid/visual-template (F4) ───────────
+// Template publicado do produto (visibilidade canônica). null = sem vínculo.
+router.get('/products/:pid/visual-template', async (req, res) => {
+  const cid = req.params.id;
+  try {
+    const { rows } = await db.query(
+      `SELECT p.id AS product_id, p.visual_template_key,
+              t.key, t.name, t.kind, t.version, t.spec
+         FROM products p
+         LEFT JOIN studio_visual_templates t
+           ON t.key = p.visual_template_key AND t.status = 'published'
+        WHERE ${productVisibilityWhere('$1', '$2')}
+        LIMIT 1`,
+      [req.params.pid, cid]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Produto não encontrado' });
+    }
+    const r = rows[0];
+    res.json({
+      product_id: r.product_id,
+      visual_template_key: r.visual_template_key || null,
+      template: r.key ? { key: r.key, name: r.name, kind: r.kind, version: r.version, spec: r.spec } : null,
+    });
+  } catch (err) {
+    if (isMigrationPending(err)) return migrationPendingRes(res);
+    console.error('[studio/products/visual-template] get error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar template do produto' });
+  }
+});
+
+// ── PUT /studio/products/:pid/visual-template (F4) ───────────
+// body: { key: string | null } — lojista vincula produto a um template
+// publicado (ou desvincula com null). Escrita só no produto PRÓPRIO
+// (company_id = cid), espelhando a regra de write path do grupo.
+router.put('/products/:pid/visual-template', async (req, res) => {
+  const cid = req.params.id;
+  const body = req.body || {};
+  const key = body.key === undefined ? undefined : body.key;
+  if (key === undefined || (key !== null && typeof key !== 'string')) {
+    return res.status(400).json({ error: 'Informe { key: string } ou { key: null } para desvincular' });
+  }
+  try {
+    if (key) {
+      const t = await db.query(
+        `SELECT 1 FROM studio_visual_templates WHERE key = $1 AND status = 'published' LIMIT 1`,
+        [key]
+      );
+      if (!t.rows.length) {
+        return res.status(404).json({ error: 'Template visual não encontrado ou não publicado', key });
+      }
+    }
+    const { rows } = await db.query(
+      `UPDATE products SET visual_template_key = $1
+        WHERE id = $2 AND company_id = $3
+        RETURNING id, visual_template_key`,
+      [key, req.params.pid, cid]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Produto não encontrado nesta empresa' });
+    }
+    res.json({ ok: true, product_id: rows[0].id, visual_template_key: rows[0].visual_template_key });
+  } catch (err) {
+    if (isMigrationPending(err)) return migrationPendingRes(res);
+    console.error('[studio/products/visual-template] put error:', err.message);
+    res.status(500).json({ error: 'Erro ao vincular template ao produto' });
   }
 });
 
