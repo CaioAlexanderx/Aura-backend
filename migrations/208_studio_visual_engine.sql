@@ -9,20 +9,24 @@
 --   2. studio_visual_renders   — cada render gerado (preview, HD 2D,
 --      snapshot 3D, vídeo turntable) com snapshot da customização e
 --      content_hash = prova do "foi isso que você aprovou".
---   3. studio_approvals        — aprovação formal com token público
---      (hash), integrada à política de revisões do studio_settings.
---      F2 consome; F0 só cria o schema.
---   4. products.visual_template_key — vínculo produto → template (soft
+--   3. products.visual_template_key — vínculo produto → template (soft
 --      reference por key; sem FK pra não travar CI/seed).
---   5. Quitação da pendência 1.1 do BACKLOG_ENG_STUDIO_PREMIUM:
+--   4. Quitação da pendência 1.1 do BACKLOG_ENG_STUDIO_PREMIUM:
 --      versiona objetos que existiam só em prod — coluna
 --      sale_items.customization, funções/triggers studio de consumo de
 --      insumos e a view studio_orders (guardada por to_regclass: em
 --      banco sem o subsistema marketplaces a view fica deferida, mesmo
 --      comportamento defensivo do código hoje).
 --
+-- NOTA (decisão 03/07): aprovação formal NÃO ganha tabela nova. O Studio
+-- já tem studio_approval_links + studio_approval_revisions (F5, token
+-- público /aprovacao/:token + wa.me + revisões). A F2 do Visual Engine
+-- estende esse sistema (render vinculado ao link de aprovação) em vez de
+-- duplicar. Uma versão anterior desta migration criava studio_approvals;
+-- foi dropada em prod (208b) antes de qualquer uso.
+--
 -- Idempotente: IF NOT EXISTS / CREATE OR REPLACE / guards em DO $$.
--- Aplicar via Supabase MCP antes do merge (padrão da casa).
+-- Aplicada em prod via Supabase MCP em 02/07/2026 (+ 208b em 03/07).
 -- ============================================================
 
 -- ── 1. Templates visuais globais ────────────────────────────
@@ -66,37 +70,16 @@ CREATE INDEX IF NOT EXISTS idx_svr_sale_item
 CREATE INDEX IF NOT EXISTS idx_svr_doi
   ON studio_visual_renders (digital_order_item_id) WHERE digital_order_item_id IS NOT NULL;
 
--- ── 3. Aprovações (schema; fluxo entra na F2) ───────────────
-CREATE TABLE IF NOT EXISTS studio_approvals (
-  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  company_id            UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-  sale_item_id          UUID,
-  digital_order_item_id UUID,
-  render_ids            UUID[] NOT NULL DEFAULT '{}',
-  public_token_hash     TEXT NOT NULL UNIQUE,
-  status                TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','change_requested','expired','cancelled')),
-  revision_number       INTEGER NOT NULL DEFAULT 1,
-  customer_note         TEXT,
-  decided_at            TIMESTAMPTZ,
-  expires_at            TIMESTAMPTZ,
-  created_by            UUID,
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_sap_company
-  ON studio_approvals (company_id, status, created_at DESC);
-
--- ── 4. Vínculo produto → template ───────────────────────────
+-- ── 3. Vínculo produto → template ───────────────────────────
 ALTER TABLE products ADD COLUMN IF NOT EXISTS visual_template_key TEXT;
 
--- ── 5. Quitação pendência 1.1 — versionar objetos de prod ───
+-- ── 4. Quitação pendência 1.1 — versionar objetos de prod ───
 
--- 5a. Coluna sale_items.customization (migration studio_sale_items_customization
+-- 4a. Coluna sale_items.customization (migration studio_sale_items_customization
 --     aplicada direto em prod na Sub-onda E, 25/05/2026)
 ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS customization JSONB;
 
--- 5b. Funções studio (defs extraídas de prod em 02/07/2026)
+-- 4b. Funções studio (defs extraídas de prod em 02/07/2026)
 CREATE OR REPLACE FUNCTION public.fn_sales_studio_production_status()
  RETURNS trigger
  LANGUAGE plpgsql
@@ -232,7 +215,7 @@ BEGIN
 END;
 $function$;
 
--- 5c. Triggers (guardados: só cria se a tabela existe e o trigger não)
+-- 4c. Triggers (guardados: só cria se a tabela existe e o trigger não)
 DO $$
 BEGIN
   IF to_regclass('public.sale_items') IS NOT NULL AND NOT EXISTS (
@@ -279,7 +262,7 @@ EXCEPTION
     RAISE NOTICE 'Triggers studio deferidos (schema incompleto neste ambiente): %', SQLERRM;
 END $$;
 
--- 5d. View studio_orders (def extraída de prod em 02/07/2026).
+-- 4d. View studio_orders (def extraída de prod em 02/07/2026).
 --     Guardada: exige digital_orders, sales, customers e marketplace_orders
 --     (marketplaces ainda não versionado — armadilha conhecida). Em ambiente
 --     sem marketplaces a view fica deferida, igual ao comportamento atual.
