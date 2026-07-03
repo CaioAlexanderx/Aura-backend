@@ -75,6 +75,12 @@ router.use('/webhooks', require('./webhookMarketplaceStub'));
 // (sem auth — usa state com companyId).
 router.use('/marketplaces', require('./marketplaceAuthPublic'));
 
+// Visual Engine F3 (03/07/2026): template visual público pro preview 2D/3D
+// do storefront (products.visual_template_key → studio_visual_templates).
+// Montado ANTES de studioStorefront — rota específica, sem colisão com o
+// catch-all do storefront principal.
+router.use('/storefront', require('./studioStorefrontVisual'));
+
 // Aura Studio Nivel 1 Sub-onda D (25/05/2026):
 // Storefront publico Studio. Montado ANTES de /storefront pra que rotas
 // /storefront/:slug/studio/* sejam capturadas por studioStorefront e nao
@@ -130,7 +136,7 @@ router.use('/public/karate', require('./karatePublicRanking'));
 // POST /public/karate/:slug/dojo/portal/verify-otp
 router.use('/public/karate', require('./karateDojoPublic'));
 
-// ── AURA KARATÊ — Track A (backend cadastros) ──────────────────
+// ── AURA KARATÊ — Track A (backend cadastros) ──────────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
 // GET  /federation/:id/belt-distribution
@@ -255,7 +261,7 @@ router.use('/federation/:id', require('./karateSettings'));
 //   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/advance
 router.use('/federation/:id', require('./karateBrackets'));
 
-// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────────────
+// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────────
 // Sem migration (totalmente derivado de tabelas existentes).
 // Guards federation_admin/staff/viewer para leitura; adminOnly para /report/send.
 //   GET  /federation/:id/network-health/summary

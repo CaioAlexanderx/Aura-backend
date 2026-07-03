@@ -17,6 +17,10 @@
 //   require_deposit_for_production em studio_settings (opt-in, default false).
 //   force:true bypassa o gate e loga. M2: auto-criação do marco de pagamento
 //   no convert está em studioQuotes.js.
+// 03/07/2026 (Visual Engine F2): POST /orders/:oid/approval aceita render_id
+//   (studio_visual_renders.id do render HD gerado pelo motor). Coluna
+//   render_id em studio_approval_links (migration 209); defensivo 42703
+//   refaz INSERT sem a coluna quando a migration ainda não rodou.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -24,9 +28,9 @@ const crypto  = require('crypto');
 const db      = require('../config/database');
 const { markStudioOnboarding } = require('../utils/studioOnboarding');
 
-// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
 // FASE 4: KDS de Produção (atualizado 25/05 — KDS unificado + S-2.5)
-// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
 
 // S-0 + S-2.5: awaiting_customization eh status valido + cancelled
 const VALID_PRODUCTION_STATUS = [
@@ -182,7 +186,7 @@ router.get('/orders', async function(req, res) {
   }
 });
 
-// ─── GET /orders/:oid — detalhe source-aware ──────────────────────
+// ─── GET /orders/:oid — detalhe source-aware ──────────────────
 router.get('/orders/:oid', async function(req, res) {
   try {
     const headRes = await db.query(
@@ -323,7 +327,7 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
         console.warn('[studio/production-status][gate-check-err]', gateErr.message);
       }
     }
-    // ─────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
 
     let updated;
     if (head.source === 'digital') {
@@ -378,9 +382,9 @@ router.patch('/orders/:oid/production-status', async function(req, res) {
   }
 });
 
-// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
 // FASE 5: Request approval (wa.me)
-// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
 
 function generateToken() {
   return crypto.randomBytes(24).toString('base64')
@@ -395,7 +399,7 @@ function buildWaMeLink(phone, text) {
 }
 
 router.post('/orders/:oid/approval', async function(req, res) {
-  const { mockup_url, customer_phone, custom_message, expires_in_days } = req.body;
+  const { mockup_url, customer_phone, custom_message, expires_in_days, render_id } = req.body;
   if (!mockup_url || !/^https?:\/\//.test(mockup_url)) {
     return res.status(400).json({ error: 'mockup_url obrigatório (URL pública do mockup)' });
   }
@@ -447,27 +451,51 @@ router.post('/orders/:oid/approval', async function(req, res) {
   const messageText = (custom_message && String(custom_message).trim()) || defaultMsg;
 
   try {
-    const r = await db.query(
-      `INSERT INTO studio_approval_links
-         (company_id, order_id, token, mockup_url, message_text,
-          customer_phone, expires_at, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' days')::interval, $8)
-       RETURNING id, token, mockup_url, status, expires_at, created_at`,
-      [req.params.id, digitalOrderId, token, mockup_url, messageText,
-       phone || null, String(expiresInDays), req.user?.id || null]
-    );
+    // Visual Engine F2: tenta gravar render_id (migration 209). Se a coluna
+    // ainda não existe neste ambiente, refaz o INSERT sem ela — o link de
+    // aprovação continua funcionando, só sem o vínculo ao render.
+    let inserted;
+    try {
+      const r = await db.query(
+        `INSERT INTO studio_approval_links
+           (company_id, order_id, token, mockup_url, message_text,
+            customer_phone, expires_at, created_by, render_id)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' days')::interval, $8, $9)
+         RETURNING id, token, mockup_url, status, expires_at, created_at, render_id`,
+        [req.params.id, digitalOrderId, token, mockup_url, messageText,
+         phone || null, String(expiresInDays), req.user?.id || null,
+         render_id || null]
+      );
+      inserted = r.rows[0];
+    } catch (insErr) {
+      if (insErr && insErr.code === '42703') {
+        console.warn('[studio/orders/approval:POST] render_id indisponível (migration 209 pendente) — INSERT sem vínculo');
+        const r = await db.query(
+          `INSERT INTO studio_approval_links
+             (company_id, order_id, token, mockup_url, message_text,
+              customer_phone, expires_at, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' days')::interval, $8)
+           RETURNING id, token, mockup_url, status, expires_at, created_at`,
+          [req.params.id, digitalOrderId, token, mockup_url, messageText,
+           phone || null, String(expiresInDays), req.user?.id || null]
+        );
+        inserted = r.rows[0];
+      } else {
+        throw insErr;
+      }
+    }
 
     await db.query(
       `INSERT INTO studio_approval_revisions
          (approval_id, revision_number, mockup_url, note, created_by_type)
        VALUES ($1, 1, $2, $3, 'shop')`,
-      [r.rows[0].id, mockup_url, 'Mockup inicial enviado pra aprovação']
+      [inserted.id, mockup_url, 'Mockup inicial enviado pra aprovação']
     );
 
     markStudioOnboarding(db, req.params.id, 'wa');
 
     res.status(201).json({
-      ...r.rows[0],
+      ...inserted,
       approval_url: approvalUrl,
       wa_me_link: buildWaMeLink(phone, messageText),
       message_text: messageText,
