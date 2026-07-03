@@ -35,7 +35,7 @@ function normalizeProfile(profile) {
 
 router.get('/dashboard', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows: planCounts } = await pool.query(
-    `SELECT plan, COUNT(*) AS total FROM companies WHERE is_active = true GROUP BY plan`
+    `SELECT plan, COUNT(*) AS total FROM companies WHERE is_active = true AND (federation_id IS NULL OR federation_id = id) GROUP BY plan`
   );
   const counts = { essencial: 0, negocio: 0, expansao: 0 };
   planCounts.forEach((r) => { counts[r.plan] = parseInt(r.total, 10); });
@@ -219,6 +219,7 @@ router.get('/clients', ...adminOnly, asyncHandler(async (req, res) => {
     `SELECT c.id, c.trade_name, c.legal_name, c.plan, c.is_active, c.module_overrides,
             c.created_at, u.email AS owner_email, u.full_name AS owner_name
      FROM companies c LEFT JOIN users u ON u.id = c.owner_id
+     WHERE (c.federation_id IS NULL OR c.federation_id = c.id)
      ORDER BY c.created_at DESC`
   );
   res.json({
@@ -274,7 +275,7 @@ router.post('/reports/trigger', adminSecretAuth, async (req, res) => {
     } else {
       const { rows } = await db.query(
         `SELECT id, COALESCE(trade_name, legal_name) AS name, email, plan
-         FROM companies WHERE is_active = true AND email IS NOT NULL AND email != '' LIMIT 100`
+         FROM companies WHERE is_active = true AND email IS NOT NULL AND email != '' AND (federation_id IS NULL OR federation_id = id) LIMIT 100`
       );
       companies = rows;
     }
