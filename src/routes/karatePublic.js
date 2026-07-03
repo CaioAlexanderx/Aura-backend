@@ -511,6 +511,27 @@ async function computeFromPrice(ev) {
 // Busca as categorias de uma competição (id, nome, modalidade, faixa etária,
 // faixa de graduação, sexo, peso) — usadas pelo GET de inscrição e pela
 // tela pública para o praticante escolher em qual categoria se inscrever.
+// Banner do evento (karate_promo_banners escopado por event_id, ativo e dentro
+// da janela). Retorna a URL da imagem ou null. Defensivo p/ tabela/coluna
+// ausente (42P01/42703 — deployment parcial).
+async function resolveEventBannerUrl(eventId) {
+  try {
+    const r = await db.query(
+      `SELECT image_url FROM karate_promo_banners
+        WHERE event_id = $1 AND active = true
+          AND (starts_at IS NULL OR starts_at <= NOW())
+          AND (ends_at   IS NULL OR ends_at   >= NOW())
+        ORDER BY sort_order ASC, created_at DESC
+        LIMIT 1`,
+      [eventId]
+    );
+    return r.rows[0]?.image_url || null;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return null;
+    throw e;
+  }
+}
+
 async function resolveCompetitionCategories(competitionId) {
   try {
     const { rows } = await db.query(
@@ -565,6 +586,7 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
       return res.status(409).json({ error: 'Inscrições encerradas para esta competição', code: 'CLOSED' });
     }
 
+    const banner_url = await resolveEventBannerUrl(ev.id);
     if (ev.kind === 'competition') {
       const categories = await resolveCompetitionCategories(ev.id);
       // A3 — reaproveita as categorias já buscadas (evita 2ª query).
@@ -575,6 +597,7 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
           id: ev.id, name: ev.name, kind: 'competition',
           type: null,
           description: ev.description || null,
+          banner_url,
           event_date: ev.event_date, location: ev.location,
           fee_amount: ev.fee_amount,
           from_price,
@@ -602,6 +625,7 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
         id: ev.id, name: ev.name, kind: ev.kind,
         type: ev.exam_type || ev.event_type || null,
         description: ev.description || null,
+        banner_url,
         event_date: ev.event_date, location: ev.location,
         fee_amount: ev.fee_amount,
         from_price: lowestPositivePrice([ev.fee_amount]),
