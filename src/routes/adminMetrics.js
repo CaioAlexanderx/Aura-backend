@@ -24,7 +24,7 @@ router.get('/metrics/overview', ...adminOnly, asyncHandler(async (req, res) => {
        COUNT(*) FILTER(WHERE billing_status='active') AS paying,
        COUNT(*) FILTER(WHERE billing_status='trial') AS trial,
        COUNT(*) FILTER(WHERE billing_status IN ('pending','overdue')) AS overdue
-     FROM companies WHERE is_active=true GROUP BY plan`
+     FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) GROUP BY plan`
   );
   const counts = { essencial: 0, negocio: 0, expansao: 0, personalizado: 0 };
   const paying = { essencial: 0, negocio: 0, expansao: 0 };
@@ -83,7 +83,7 @@ router.get('/metrics/overview', ...adminOnly, asyncHandler(async (req, res) => {
 
   // Novos clientes este mes
   const { rows: newRows } = await pool.query(
-    `SELECT COUNT(*) AS total FROM companies WHERE is_active=true AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')`
+    `SELECT COUNT(*) AS total FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) AND created_at >= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')`
   );
   const newThisMonth = parseInt(newRows[0]?.total || 0);
 
@@ -138,7 +138,7 @@ router.get('/metrics/mrr-trend', ...adminOnly, asyncHandler(async (req, res) => 
   // Se nao tem snapshots, gera um estimado baseado no estado atual
   if (rows.length === 0) {
     const { rows: planCounts } = await pool.query(
-      `SELECT plan, COUNT(*) FILTER(WHERE billing_status='active') AS paying FROM companies WHERE is_active=true GROUP BY plan`
+      `SELECT plan, COUNT(*) FILTER(WHERE billing_status='active') AS paying FROM companies WHERE is_active=true AND (federation_id IS NULL OR federation_id = id) GROUP BY plan`
     );
     const now = new Date();
     const current = { month: now.toISOString().slice(0,7), essencial: 0, negocio: 0, expansao: 0 };
@@ -168,7 +168,7 @@ router.get('/alerts', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows: trialRows } = await pool.query(
     `SELECT c.id, c.trade_name, c.legal_name, c.trial_ends_at, u.email, u.full_name
      FROM companies c LEFT JOIN users u ON u.id=c.owner_id
-     WHERE c.is_active=true AND c.billing_status='trial'
+     WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND c.billing_status='trial'
        AND c.trial_ends_at IS NOT NULL
        AND c.trial_ends_at <= NOW() + INTERVAL '3 days'
      ORDER BY c.trial_ends_at ASC`
@@ -189,7 +189,7 @@ router.get('/alerts', ...adminOnly, asyncHandler(async (req, res) => {
   const { rows: overdueRows } = await pool.query(
     `SELECT c.id, c.trade_name, c.legal_name, c.plan, c.billing_status, c.next_billing_date, u.email
      FROM companies c LEFT JOIN users u ON u.id=c.owner_id
-     WHERE c.is_active=true AND c.billing_status IN ('pending','overdue')
+     WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND c.billing_status IN ('pending','overdue')
        AND c.plan != 'essencial'
      ORDER BY c.next_billing_date ASC`
   );
@@ -210,7 +210,7 @@ router.get('/alerts', ...adminOnly, asyncHandler(async (req, res) => {
        (SELECT MAX(created_at) FROM transactions WHERE company_id=c.id) AS last_tx,
        c.last_active_at
      FROM companies c LEFT JOIN users u ON u.id=c.owner_id
-     WHERE c.is_active=true AND c.billing_status NOT IN ('trial','cancelled')
+     WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id) AND c.billing_status NOT IN ('trial','cancelled')
      ORDER BY c.created_at`
   );
   inactiveRows.forEach(r => {
@@ -286,7 +286,7 @@ router.post('/health/recalculate', ...adminOnly, asyncHandler(async (req, res) =
     `SELECT c.id, c.plan, c.billing_status, c.last_active_at,
        (SELECT MAX(created_at) FROM transactions WHERE company_id=c.id) AS last_tx,
        (SELECT COUNT(*) FROM transactions WHERE company_id=c.id AND created_at >= NOW() - INTERVAL '30 days') AS tx_30d
-     FROM companies c WHERE c.is_active=true`
+     FROM companies c WHERE c.is_active=true AND (c.federation_id IS NULL OR c.federation_id = c.id)`
   );
 
   let updated = 0;
