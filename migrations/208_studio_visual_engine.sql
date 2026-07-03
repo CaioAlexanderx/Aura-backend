@@ -25,6 +25,12 @@
 -- duplicar. Uma versão anterior desta migration criava studio_approvals;
 -- foi dropada em prod (208b) antes de qualquer uso.
 --
+-- NOTA CI (03/07): a view usa casts ::text nos status — no schema de CI
+-- digital_orders.status é enum digital_order_status e sales.status é
+-- varchar; sem cast o UNION falha (42804). E só criamos a view quando
+-- ela NÃO existe: em prod ela já existe e CREATE OR REPLACE não pode
+-- trocar tipo de coluna de view existente.
+--
 -- Idempotente: IF NOT EXISTS / CREATE OR REPLACE / guards em DO $$.
 -- Aplicada em prod via Supabase MCP em 02/07/2026 (+ 208b em 03/07).
 -- ============================================================
@@ -263,28 +269,30 @@ EXCEPTION
 END $$;
 
 -- 4d. View studio_orders (def extraída de prod em 02/07/2026).
---     Guardada: exige digital_orders, sales, customers e marketplace_orders
---     (marketplaces ainda não versionado — armadilha conhecida). Em ambiente
---     sem marketplaces a view fica deferida, igual ao comportamento atual.
+--     Só cria quando NÃO existe (em prod já existe; CREATE OR REPLACE não
+--     pode trocar tipo de coluna de view). Casts ::text nos status por causa
+--     do drift enum/varchar entre CI e prod. Guardada por to_regclass: sem o
+--     subsistema marketplaces a view fica deferida (comportamento atual).
 DO $$
 BEGIN
-  IF to_regclass('public.digital_orders') IS NOT NULL
+  IF to_regclass('public.studio_orders') IS NULL
+     AND to_regclass('public.digital_orders') IS NOT NULL
      AND to_regclass('public.sales') IS NOT NULL
      AND to_regclass('public.customers') IS NOT NULL
      AND to_regclass('public.marketplace_orders') IS NOT NULL THEN
     BEGIN
       EXECUTE $v$
-CREATE OR REPLACE VIEW studio_orders AS
+CREATE VIEW studio_orders AS
  SELECT d.id,
     d.company_id,
     d.created_at,
     d.updated_at,
     d.total::numeric(12,2) AS total_amount,
-    d.status,
-    d.studio_production_status,
-    d.customer_name,
-    d.customer_phone,
-    COALESCE(d.order_number, 'DO-'::text || "left"(d.id::text, 8)) AS display_name,
+    d.status::text AS status,
+    d.studio_production_status::text AS studio_production_status,
+    d.customer_name::text AS customer_name,
+    d.customer_phone::text AS customer_phone,
+    COALESCE(d.order_number::text, 'DO-'::text || "left"(d.id::text, 8)) AS display_name,
     'digital'::text AS source,
     d.id AS digital_order_id,
     NULL::uuid AS pdv_sale_id,
@@ -293,17 +301,17 @@ CREATE OR REPLACE VIEW studio_orders AS
     NULL::text AS marketplace_platform,
     NULL::timestamp with time zone AS customization_collected_at
    FROM digital_orders d
-  WHERE d.vertical = 'studio'::text
+  WHERE d.vertical::text = 'studio'::text
 UNION ALL
  SELECT s.id,
     s.company_id,
     s.created_at,
     s.updated_at,
     s.total_amount,
-    s.status,
-    s.studio_production_status,
-    cu.name AS customer_name,
-    cu.phone AS customer_phone,
+    s.status::text AS status,
+    s.studio_production_status::text AS studio_production_status,
+    cu.name::text AS customer_name,
+    cu.phone::text AS customer_phone,
     'PDV-'::text || "left"(s.id::text, 8) AS display_name,
     'pdv'::text AS source,
     NULL::uuid AS digital_order_id,
@@ -314,25 +322,25 @@ UNION ALL
     NULL::timestamp with time zone AS customization_collected_at
    FROM sales s
      LEFT JOIN customers cu ON cu.id = s.customer_id
-  WHERE s.studio_production_status IS NOT NULL AND COALESCE(s.status, 'completed'::character varying)::text <> 'cancelled'::text
+  WHERE s.studio_production_status IS NOT NULL AND COALESCE(s.status::text, 'completed') <> 'cancelled'
 UNION ALL
  SELECT mo.id,
     mo.company_id,
     mo.created_at,
     mo.updated_at,
     mo.total::numeric(12,2) AS total_amount,
-    mo.status,
-    COALESCE(mo.studio_production_status_override,
+    mo.status::text AS status,
+    COALESCE(mo.studio_production_status_override::text,
         CASE
             WHEN mo.customization_collected_at IS NULL THEN 'awaiting_customization'::text
             ELSE 'pending_art'::text
         END) AS studio_production_status,
-    mo.customer_name,
+    mo.customer_name::text AS customer_name,
     NULL::text AS customer_phone,
-        CASE mo.platform
-            WHEN 'mercado_livre'::text THEN 'ML-'::text || COALESCE(mo.external_id, "left"(mo.id::text, 8)::character varying)::text
-            WHEN 'shopee'::text THEN 'SHOP-'::text || COALESCE(mo.external_id, "left"(mo.id::text, 8)::character varying)::text
-            ELSE 'MKT-'::text || COALESCE(mo.external_id, "left"(mo.id::text, 8)::character varying)::text
+        CASE mo.platform::text
+            WHEN 'mercado_livre' THEN 'ML-'::text || COALESCE(mo.external_id::text, "left"(mo.id::text, 8))
+            WHEN 'shopee' THEN 'SHOP-'::text || COALESCE(mo.external_id::text, "left"(mo.id::text, 8))
+            ELSE 'MKT-'::text || COALESCE(mo.external_id::text, "left"(mo.id::text, 8))
         END AS display_name,
     'marketplace'::text AS source,
     NULL::uuid AS digital_order_id,
@@ -342,12 +350,14 @@ UNION ALL
     mo.platform::text AS marketplace_platform,
     mo.customization_collected_at
    FROM marketplace_orders mo
-  WHERE mo.vertical = 'studio'::text AND (COALESCE(mo.status, 'novo'::character varying)::text <> ALL (ARRAY['cancelado'::text, 'cancelled'::text]))
+  WHERE mo.vertical::text = 'studio'::text AND (COALESCE(mo.status::text, 'novo') <> ALL (ARRAY['cancelado'::text, 'cancelled'::text]))
 $v$;
     EXCEPTION
-      WHEN undefined_table OR undefined_column THEN
-        RAISE NOTICE 'View studio_orders deferida (schema incompleto neste ambiente): %', SQLERRM;
+      WHEN undefined_table OR undefined_column OR datatype_mismatch OR cannot_coerce THEN
+        RAISE NOTICE 'View studio_orders deferida (schema incompatível neste ambiente): %', SQLERRM;
     END;
+  ELSIF to_regclass('public.studio_orders') IS NOT NULL THEN
+    RAISE NOTICE 'View studio_orders já existe — mantida como está (prod)';
   ELSE
     RAISE NOTICE 'View studio_orders deferida: subsistema marketplaces ausente neste ambiente';
   END IF;
