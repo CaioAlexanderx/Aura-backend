@@ -164,11 +164,21 @@ router.get('/competitions/:cid', ...guards.read(), async (req, res) => {
       [cid]
     );
 
+    // B3 — o header do admin mostrava "0 inscritos": a resposta do detalhe
+    // nunca trouxe um total no nível raiz, só por categoria (categories[].
+    // entry_count). category_count/entry_count agora somam as categorias
+    // desta competição (mesma fonte que a lista de categorias usa), igual ao
+    // que GET /competitions (lista) já calcula via JOIN direto.
+    const category_count = cats.rows.length;
+    const entry_count = cats.rows.reduce((sum, c) => sum + c.entry_count, 0);
+
     res.json({
       id: comp.id, federation_id: comp.federation_id, name: comp.name, season: comp.season,
       event_date: comp.event_date, location: comp.location || null,
       circuit_round: comp.circuit_round != null ? comp.circuit_round : null, fee_amount: comp.fee_amount,
       status: comp.status, created_at: comp.created_at, updated_at: comp.updated_at,
+      category_count,
+      entry_count,
       categories: cats.rows.map(c => ({
         id: c.id, name: c.name, modality: c.modality,
         min_age: c.min_age != null ? c.min_age : null, max_age: c.max_age != null ? c.max_age : null,

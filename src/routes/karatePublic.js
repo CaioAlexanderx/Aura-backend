@@ -47,6 +47,71 @@ async function resolveFederation(slugOrId) {
   return c.rows[0] || null;
 }
 
+// A4 — resolução de praticante por identificador flexível (CPF / e-mail /
+// nº de registro FPKT), MESMA lógica usada por POST /:slug/lookup:
+//   - contém '@'                → e-mail
+//   - só dígitos e 11 dígitos   → CPF (normaliza pontuação)
+//   - qualquer outro formato    → karate_registration_number (FPKT)
+// Compartilhado entre /:slug/lookup (consulta) e o funil de inscrição
+// (/:slug/inscricao/:eventId/lookup e POST /:slug/inscricao/:eventId), que
+// hoje só aceitavam `cpf` puro. Aceita `identifier` (novo) OU `cpf` (compat).
+function detectIdentifierQuery(rawIdentifier) {
+  const id = String(rawIdentifier || '').trim();
+  if (!id) return null;
+
+  if (id.includes('@')) {
+    return {
+      queryText: `
+        SELECT id, name, email, phone, dojo_id, karate_registration_number
+        FROM customers
+        WHERE federation_id = $1
+          AND lower(email) = lower($2)
+        LIMIT 1`,
+      queryParam: id,
+    };
+  }
+
+  const digits = id.replace(/\D/g, '');
+  if (digits.length === 11 && digits === id.replace(/[.\-\s]/g, '')) {
+    return {
+      queryText: `
+        SELECT id, name, email, phone, dojo_id, karate_registration_number
+        FROM customers
+        WHERE federation_id = $1
+          AND regexp_replace(COALESCE(cpf_cnpj,''), '[^0-9]', '', 'g') = $2
+        LIMIT 1`,
+      queryParam: digits,
+    };
+  }
+
+  return {
+    queryText: `
+      SELECT id, name, email, phone, dojo_id, karate_registration_number
+      FROM customers
+      WHERE federation_id = $1
+        AND karate_registration_number = $2
+      LIMIT 1`,
+    queryParam: id,
+  };
+}
+
+// Resolve o praticante aceitando tanto `{ cpf }` (compat, fluxo de inscrição
+// original) quanto `{ identifier }` (novo, CPF/e-mail/FPKT). `cpf` sempre
+// usa o caminho de CPF puro (portalAuth._findPractitionerByCpf); `identifier`
+// detecta o tipo (ver detectIdentifierQuery). Retorna null se nada casar.
+async function resolvePractitionerByIdentifier(federationId, { cpf, identifier } = {}) {
+  if (identifier && String(identifier).trim()) {
+    const q = detectIdentifierQuery(identifier);
+    if (!q) return null;
+    const r = await db.query(q.queryText, [federationId, q.queryParam]);
+    return r.rows[0] || null;
+  }
+  if (cpf) {
+    return portalAuth._findPractitionerByCpf(federationId, cpf);
+  }
+  return null;
+}
+
 // ── GET /verify/:token — verificação pública da carteirinha (mínimo) ──
 router.get('/verify/:token', async (req, res) => {
   try {
@@ -325,11 +390,18 @@ router.get('/:slug/eventos', async (req, res) => {
       } else throw e;
     }
 
-    const events = [...exams.rows, ...competitions.rows].sort((a, b) => {
+    const merged = [...exams.rows, ...competitions.rows].sort((a, b) => {
       if (!a.event_date) return 1;
       if (!b.event_date) return -1;
       return new Date(a.event_date) - new Date(b.event_date);
     });
+
+    // A3 — from_price: menor preço positivo entre fee_amount do evento e (p/
+    // competição) fee_amount das categorias. null = realmente gratuito.
+    const events = await Promise.all(merged.map(async (ev) => ({
+      ...ev,
+      from_price: await computeFromPrice(ev),
+    })));
 
     res.json({
       federation: { name: fed.name, logo: fed.logo },
@@ -400,6 +472,42 @@ async function resolveEvent(fedId, eventId) {
   return null;
 }
 
+// Menor preço positivo entre uma lista de valores (fee_amount de evento +
+// categorias, quando aplicável). Usado para exibir "a partir de R$ X" nos
+// cards de evento/competição em vez de "Gratuito" quando só a categoria tem
+// preço (A3). Retorna null se nenhum valor for > 0 (realmente gratuito).
+function lowestPositivePrice(values) {
+  let min = null;
+  for (const v of values) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) {
+      if (min === null || n < min) min = n;
+    }
+  }
+  return min;
+}
+
+// Calcula from_price (A3) de um evento resolvido (kind exam|course|competition).
+// Competição: considera fee_amount do evento + fee_amount de cada categoria
+// (resolveCompetitionCategories já é defensivo p/ 42P01 -> []). Exam/course:
+// só o fee_amount do próprio evento.
+async function computeFromPrice(ev) {
+  try {
+    if (ev.kind === 'competition') {
+      const categories = await resolveCompetitionCategories(ev.id);
+      const values = [ev.fee_amount, ...categories.map(c => c.fee_amount)];
+      return lowestPositivePrice(values);
+    }
+    return lowestPositivePrice([ev.fee_amount]);
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') {
+      console.warn('[karatePublic] computeFromPrice fallback (tabela/coluna ausente):', e.code);
+      return lowestPositivePrice([ev.fee_amount]);
+    }
+    throw e;
+  }
+}
+
 // Busca as categorias de uma competição (id, nome, modalidade, faixa etária,
 // faixa de graduação, sexo, peso) — usadas pelo GET de inscrição e pela
 // tela pública para o praticante escolher em qual categoria se inscrever.
@@ -459,6 +567,8 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
 
     if (ev.kind === 'competition') {
       const categories = await resolveCompetitionCategories(ev.id);
+      // A3 — reaproveita as categorias já buscadas (evita 2ª query).
+      const from_price = lowestPositivePrice([ev.fee_amount, ...categories.map(c => c.fee_amount)]);
       return res.json({
         federation: { name: fed.name, logo: fed.logo },
         event: {
@@ -467,6 +577,7 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
           description: ev.description || null,
           event_date: ev.event_date, location: ev.location,
           fee_amount: ev.fee_amount,
+          from_price,
           capacity: null,
           registration_fields: [],
           categories,
@@ -493,6 +604,7 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
         description: ev.description || null,
         event_date: ev.event_date, location: ev.location,
         fee_amount: ev.fee_amount,
+        from_price: lowestPositivePrice([ev.fee_amount]),
         capacity,
         registration_fields: ev.registration_fields || [],
       },
@@ -512,7 +624,10 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
 // categoria escolhida pelo praticante) — already_enrolled é avaliado POR
 // CATEGORIA (UNIQUE(category_id, student_id) em karate_competition_entries).
 router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
-  const { cpf, category_id } = req.body || {};
+  const { cpf, identifier, category_id } = req.body || {};
+  if (!cpf && (!identifier || !String(identifier).trim())) {
+    return res.status(422).json({ error: 'Informe cpf ou identifier', code: 'VALIDATION_ERROR' });
+  }
   try {
     const fed = await resolveFederation(req.params.slug);
     if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
@@ -539,7 +654,7 @@ router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
       }
     }
 
-    const student = await portalAuth._findPractitionerByCpf(fed.id, cpf);
+    const student = await resolvePractitionerByIdentifier(fed.id, { cpf, identifier });
     if (!student) {
       return res.status(404).json({
         error: 'Cadastro não localizado nesta federação. Procure seu dojô ou a secretaria.',
@@ -620,7 +735,10 @@ function missingRequiredFields(fields, responses) {
 // por categoria: advisory lock (mesmo padrão do exame) + UNIQUE(category_id,
 // student_id) como rede de segurança (23505 -> 409). PIX via karatePaymentProvider.
 router.post('/:slug/inscricao/:eventId', async (req, res) => {
-  const { cpf, responses, category_id } = req.body || {};
+  const { cpf, identifier, responses, category_id } = req.body || {};
+  if (!cpf && (!identifier || !String(identifier).trim())) {
+    return res.status(422).json({ error: 'Informe cpf ou identifier', code: 'VALIDATION_ERROR' });
+  }
   try {
     const fed = await resolveFederation(req.params.slug);
     if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
@@ -663,8 +781,8 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
       });
     }
 
-    // Lookup do praticante por CPF (precisa estar cadastrado na federação)
-    const student = await portalAuth._findPractitionerByCpf(fed.id, cpf);
+    // Lookup do praticante por CPF/e-mail/FPKT (precisa estar cadastrado na federação)
+    const student = await resolvePractitionerByIdentifier(fed.id, { cpf, identifier });
     if (!student) {
       return res.status(404).json({
         error: 'Cadastro não localizado nesta federação. Procure seu dojô ou a secretaria.',
@@ -855,14 +973,141 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
   }
 });
 
-module.exports = router;
+// BUG A2 (corrigido): `module.exports = router;` estava ANTES das rotas
+// abaixo (POST /:slug/lookup e GET /:slug/banners), tornando-as código morto
+// — nunca registradas no router. Export movido para o fim real do arquivo.
+
+// Busca payment_status (karate_payment_intents) para as inscrições ativas
+// retornadas por /:slug/lookup. karate_payment_intents não tem FK direta pra
+// inscrição (é vinculada por federation_id + criada no momento do PIX) —
+// então casamos pelo txid, que o fluxo de inscrição gera como
+// `insc-<inscriptionId>` (ver POST /:slug/inscricao/:eventId). Código
+// defensivo: 42P01/42703 (tabela/coluna ausente) -> payment_status null p/
+// todos os itens, sem quebrar o lookup.
+async function resolvePaymentStatuses(federationId, inscriptionIds) {
+  const statuses = {};
+  if (!inscriptionIds.length) return statuses;
+  try {
+    const txids = inscriptionIds.map((id) => `insc-${String(id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 18)}`);
+    const { rows } = await db.query(
+      `SELECT payment_intent_id, status
+       FROM karate_payment_intents
+       WHERE federation_id = $1 AND payment_intent_id = ANY($2::text[])`,
+      [federationId, txids]
+    );
+    const byTxid = {};
+    for (const r of rows) byTxid[r.payment_intent_id] = r.status;
+    inscriptionIds.forEach((id, i) => {
+      statuses[id] = byTxid[txids[i]] || null;
+    });
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') {
+      console.warn('[karatePublic] karate_payment_intents ausente/coluna faltando em resolvePaymentStatuses:', e.code);
+      inscriptionIds.forEach((id) => { statuses[id] = null; });
+    } else throw e;
+  }
+  return statuses;
+}
+
+// A2 — inscrições ativas do praticante nesta federação (exame + competição +
+// curso), usadas por POST /:slug/lookup para o praticante ver o que já se
+// inscreveu (fluxo pós-compra/consulta). Cada tabela é buscada com try/catch
+// independente (42P01/42703 -> array vazio) pra não derrubar o lookup inteiro
+// se uma delas ainda não tiver sido migrada (deployment parcial).
+async function resolveActiveRegistrations(fed, studentId) {
+  const items = [];
+
+  try {
+    const { rows } = await db.query(
+      `SELECT ec.id, ec.status, ec.created_at, be.id AS event_id, be.name AS event_name
+       FROM karate_belt_exam_candidates ec
+       JOIN karate_belt_exams be ON be.id = ec.exam_id
+       WHERE ec.student_id = $1 AND be.federation_id = $2
+         AND ec.status NOT IN ('cancelled','rejected')
+       ORDER BY ec.created_at DESC`,
+      [studentId, fed.id]
+    );
+    for (const r of rows) {
+      items.push({
+        kind: 'exam', event_id: r.event_id, event_name: r.event_name,
+        category_name: null, status: r.status,
+        payment_status: null, created_at: r.created_at,
+        _inscriptionId: r.id,
+      });
+    }
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    console.warn('[karatePublic] karate_belt_exam_candidates ausente em resolveActiveRegistrations:', e.code);
+  }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT en.id, en.status, en.created_at, co.id AS event_id, co.name AS event_name,
+              cat.name AS category_name
+       FROM karate_competition_entries en
+       JOIN karate_competitions co ON co.id = en.competition_id
+       JOIN karate_competition_categories cat ON cat.id = en.category_id
+       WHERE en.student_id = $1 AND co.federation_id = $2
+         AND en.status NOT IN ('cancelled','rejected','withdrawn')
+       ORDER BY en.created_at DESC`,
+      [studentId, fed.id]
+    );
+    for (const r of rows) {
+      items.push({
+        kind: 'competition', event_id: r.event_id, event_name: r.event_name,
+        category_name: r.category_name || null, status: r.status,
+        payment_status: null, created_at: r.created_at,
+        _inscriptionId: r.id,
+      });
+    }
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    console.warn('[karatePublic] karate_competition_entries ausente em resolveActiveRegistrations:', e.code);
+  }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT ee.id, ee.status, ee.created_at, ke.id AS event_id, ke.name AS event_name
+       FROM karate_event_enrollments ee
+       JOIN karate_events ke ON ke.id = ee.event_id
+       WHERE ee.student_id = $1 AND ke.federation_id = $2
+         AND ee.status NOT IN ('absent','cancelled')
+       ORDER BY ee.created_at DESC`,
+      [studentId, fed.id]
+    );
+    for (const r of rows) {
+      items.push({
+        kind: 'course', event_id: r.event_id, event_name: r.event_name,
+        category_name: null, status: r.status,
+        payment_status: null, created_at: r.created_at,
+        _inscriptionId: r.id,
+      });
+    }
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    console.warn('[karatePublic] karate_event_enrollments ausente em resolveActiveRegistrations:', e.code);
+  }
+
+  // payment_status best-effort (nunca derruba o lookup)
+  try {
+    const statuses = await resolvePaymentStatuses(fed.id, items.map((i) => i._inscriptionId));
+    for (const item of items) item.payment_status = statuses[item._inscriptionId] || null;
+  } catch (e) {
+    console.warn('[karatePublic] resolvePaymentStatuses falhou em resolveActiveRegistrations:', e.message);
+  }
+
+  items.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  return items.map(({ _inscriptionId, ...rest }) => rest);
+}
 
 // ── POST /:slug/lookup — localizar praticante por CPF, e-mail ou FPKT ──
-// Identificador flexível:
+// Identificador flexível (ver detectIdentifierQuery, compartilhado com o
+// funil de inscrição — A4):
 //   - Só dígitos + comprimento 11 → CPF (regexp_replace para normalizar)
 //   - Contém '@' → e-mail
 //   - Qualquer outro → karate_registration_number (FPKT)
-// Retorna perfil público + faixa atual + inscrições ativas. Read-only.
+// Retorna perfil público + faixa atual + inscrições ativas (`registrations`,
+// A2) + `active_enrollments` (legado, mantido p/ compat). Read-only.
 router.post('/:slug/lookup', async (req, res) => {
   const { identifier } = req.body || {};
   if (!identifier || typeof identifier !== 'string' || !identifier.trim()) {
@@ -872,43 +1117,8 @@ router.post('/:slug/lookup', async (req, res) => {
     const fed = await resolveFederation(req.params.slug);
     if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
 
-    const id = identifier.trim();
-
-    // Detectar tipo do identificador
-    let queryText;
-    let queryParam;
-
-    if (id.includes('@')) {
-      // E-mail
-      queryText = `
-        SELECT id, name, email, phone, dojo_id, karate_registration_number
-        FROM customers
-        WHERE federation_id = $1
-          AND lower(email) = lower($2)
-        LIMIT 1`;
-      queryParam = id;
-    } else if (/^\d{11}$/.test(id.replace(/\D/g, '')) && id.replace(/\D/g, '').length === 11) {
-      // CPF — normaliza removendo pontuação antes de comparar
-      const digits = id.replace(/\D/g, '');
-      queryText = `
-        SELECT id, name, email, phone, dojo_id, karate_registration_number
-        FROM customers
-        WHERE federation_id = $1
-          AND regexp_replace(COALESCE(cpf_cnpj,''), '[^0-9]', '', 'g') = $2
-        LIMIT 1`;
-      queryParam = digits;
-    } else {
-      // FPKT (karate_registration_number) — qualquer outro formato
-      queryText = `
-        SELECT id, name, email, phone, dojo_id, karate_registration_number
-        FROM customers
-        WHERE federation_id = $1
-          AND karate_registration_number = $2
-        LIMIT 1`;
-      queryParam = id;
-    }
-
-    const studentRes = await db.query(queryText, [fed.id, queryParam]);
+    const q = detectIdentifierQuery(identifier);
+    const studentRes = await db.query(q.queryText, [fed.id, q.queryParam]);
     if (!studentRes.rows.length) {
       return res.status(404).json({
         error: 'Cadastro não localizado nesta federação.',
@@ -926,7 +1136,8 @@ router.post('/:slug/lookup', async (req, res) => {
       [s.id, fed.id]
     );
 
-    // Inscrições ativas (exames + cursos não finalizados)
+    // Inscrições ativas (exames + cursos não finalizados) — legado, mantido
+    // pra não quebrar consumidores atuais de active_enrollments.
     const examsRes = await db.query(
       `SELECT ec.id, ec.status, be.id AS event_id, be.name AS event_name,
               be.event_date, 'exam' AS kind
@@ -951,6 +1162,9 @@ router.post('/:slug/lookup', async (req, res) => {
       [s.id, fed.id]
     );
 
+    // A2 — inscrições ativas (exame + competição + curso) com payment_status.
+    const registrations = await resolveActiveRegistrations(fed, s.id);
+
     return res.json({
       federation: { name: fed.name, logo: fed.logo },
       practitioner: {
@@ -962,6 +1176,7 @@ router.post('/:slug/lookup', async (req, res) => {
         current_belt_name: beltRes.rows[0]?.belt_name || null,
       },
       active_enrollments: [...examsRes.rows, ...coursesRes.rows],
+      registrations,
     });
   } catch (err) {
     console.error('[karatePublic] lookup error:', err.message);
@@ -1004,3 +1219,4 @@ router.get('/:slug/banners', async (req, res) => {
   }
 });
 
+module.exports = router;
