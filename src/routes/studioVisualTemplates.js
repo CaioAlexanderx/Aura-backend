@@ -4,9 +4,8 @@
 // Mount em private.js sob /studio (plan-gated negocio+expansao).
 //
 // Templates (studio_visual_templates) são GLOBAIS, mantidos pela Aura:
-//   - GET  /visual-templates            → lojista lê publicados (staff vê tudo c/ ?all=1)
+//   - GET  /visual-templates           → lojista lê publicados (staff vê tudo c/ ?all=1)
 //   - GET  /visual-templates/:key      → spec completa de um template
---
 //   - POST /visual-templates           → staff-only (cria)
 //   - PUT  /visual-templates/:key      → staff-only (edita; spec nova incrementa version)
 //
