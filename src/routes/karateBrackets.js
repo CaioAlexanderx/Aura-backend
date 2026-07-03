@@ -68,6 +68,38 @@ async function loadEntries(client, catId, federationId) {
   }));
 }
 
+// ── helper: inscritos aguardando confirmação de pagamento ───────
+// Conta entries (não-withdrawn) com fee_paid=false SOMENTE quando a
+// categoria é paga (taxa da categoria, senão a taxa do evento > 0). Em
+// categoria gratuita, fee_paid=false não significa "aguardando pagamento",
+// então retorna 0. Defensivo p/ coluna/tabela ausente (42P01/42703 → 0).
+async function countPendingPayment(client, cid, catId) {
+  try {
+    const feeRes = await client.query(
+      `SELECT COALESCE(cat.fee_amount, comp.fee_amount, 0) AS effective_fee
+         FROM karate_competition_categories cat
+         JOIN karate_competitions comp ON comp.id = cat.competition_id
+        WHERE cat.id = $1 AND cat.competition_id = $2
+        LIMIT 1`,
+      [catId, cid]
+    );
+    const effectiveFee = Number(feeRes.rows[0]?.effective_fee) || 0;
+    if (effectiveFee <= 0) return 0;
+    const r = await client.query(
+      `SELECT COUNT(*)::int AS pending
+         FROM karate_competition_entries
+        WHERE category_id = $1
+          AND status NOT IN ('withdrawn')
+          AND fee_paid = false`,
+      [catId]
+    );
+    return r.rows[0]?.pending || 0;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return 0;
+    throw e;
+  }
+}
+
 // ── helper: load bracket + matches ──────────────────────────────
 async function loadBracket(client, catId) {
   let bracketRow = null;
@@ -133,6 +165,7 @@ router.post(
       const isKata = ['kata', 'team_kata'].includes(cat.modality);
 
       const athletes = await loadEntries(client, catId, federationId);
+      const pendingPaymentCount = await countPendingPayment(client, cid, catId);
       if (athletes.length < 2) {
         await client.query('ROLLBACK');
         return res.status(422).json({ error: 'Mínimo de 2 atletas inscritos para gerar chave', code: 'VALIDATION_ERROR' });
@@ -190,6 +223,7 @@ router.post(
           seed: drawSeed,
           options,
           athletes_count: athletes.length,
+          pending_payment_count: pendingPaymentCount,
           presentation_order: ordered.map((a, i) => ({ entry_id: a.id, student_name: a.student_name, order: i + 1 })),
         });
       }
@@ -230,6 +264,7 @@ router.post(
         seed: drawSeed,
         options,
         athletes_count: athletes.length,
+        pending_payment_count: pendingPaymentCount,
         bye_count: state.byeCount,
         same_dojo_clashes: sameDojoClashes,
         third_place: !!thirdPlace,
@@ -306,10 +341,11 @@ router.get(
       if (!comp) return res.status(404).json({ error: 'Competição não encontrada' });
 
       const athletes = await loadEntries(client, catId, federationId);
+      const pendingPaymentCount = await countPendingPayment(client, cid, catId);
       const { bracketRow, matchRows } = await loadBracket(client, catId);
 
       if (!bracketRow) {
-        return res.json({ status: 'not_generated', athletes_count: athletes.length, bracket: null });
+        return res.json({ status: 'not_generated', athletes_count: athletes.length, pending_payment_count: pendingPaymentCount, bracket: null });
       }
 
       // For kata: return scores instead
@@ -340,6 +376,7 @@ router.get(
           seed: bracketRow.draw_seed,
           options: bracketRow.options,
           athletes_count: athletes.length,
+          pending_payment_count: pendingPaymentCount,
           kata_scores: scores.map(s => ({
             entry_id: s.entry_id,
             student_name: s.student_name,
@@ -394,6 +431,7 @@ router.get(
         seed: bracketRow.draw_seed,
         options: bracketRow.options,
         athletes_count: athletes.length,
+        pending_payment_count: pendingPaymentCount,
         bye_count: state.byeCount,
         rounds,
         third_place_match: third,
@@ -433,6 +471,7 @@ router.post(
       if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
 
       const athletes = await loadEntries(client, catId, federationId);
+      const pendingPaymentCount = await countPendingPayment(client, cid, catId);
       const { bracketRow, matchRows } = await loadBracket(client, catId);
 
       if (!bracketRow) {
@@ -622,6 +661,7 @@ router.post(
       if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
 
       const athletes = await loadEntries(client, catId, federationId);
+      const pendingPaymentCount = await countPendingPayment(client, cid, catId);
       if (athletes.length < 2) { await client.query('ROLLBACK'); return res.status(422).json({ error: 'Mínimo de 2 atletas' }); }
 
       const drawSeed = seed !== undefined ? String(seed) : String(Date.now());
