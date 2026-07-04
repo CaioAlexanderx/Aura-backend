@@ -264,13 +264,41 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
       [federationId]
     );
 
-    const beltDistribution = beltRes.rows
+    // Scaffold das faixas KYU canônicas (FPKT Shotokan) — garante que toda
+    // faixa apareça no gráfico "Praticantes por graduação", mesmo com 0
+    // praticantes (ex.: Amarela). Sem isso, o GROUP BY dropa faixas sem
+    // ninguém e a cliente pergunta "cadê a amarela?". Graus Preta (belt_level
+    // 'preta', 1°..7°) e demais faixas fora do scaffold vêm dos dados como estão.
+    const KYU_ORDER = [
+      { belt_level: 'branca',      belt_name: 'Branca' },
+      { belt_level: 'amarela',     belt_name: 'Amarela' },
+      { belt_level: 'laranja',     belt_name: 'Laranja' },
+      { belt_level: 'verde',       belt_name: 'Verde' },
+      { belt_level: 'azul_claro',  belt_name: 'Azul Claro' },
+      { belt_level: 'roxo',        belt_name: 'Roxa' },
+      { belt_level: 'azul_escuro', belt_name: 'Azul Escuro' },
+      { belt_level: 'marrom',      belt_name: 'Marrom' },
+    ];
+    const kyuLevels = new Set(KYU_ORDER.map(k => k.belt_level));
+    const countByLevel = {};
+    for (const r of beltRes.rows) {
+      countByLevel[r.belt_level] = (countByLevel[r.belt_level] || 0) + parseInt(r.count, 10);
+    }
+    const kyuDistribution = KYU_ORDER.map(k => ({
+      belt_level: k.belt_level,
+      belt_name:  k.belt_name,
+      count:      countByLevel[k.belt_level] || 0,
+      rank:       beltRank(k.belt_level, k.belt_name),
+    }));
+    const otherDistribution = beltRes.rows
+      .filter(r => !kyuLevels.has(r.belt_level))
       .map(r => ({
         belt_level: r.belt_level,
         belt_name:  r.belt_name,
         count:      parseInt(r.count, 10),
         rank:       beltRank(r.belt_level, r.belt_name),
-      }))
+      }));
+    const beltDistribution = [...kyuDistribution, ...otherDistribution]
       .sort((a, b) => a.rank - b.rank);
 
     // ── 4. Track P: Alertas (derivados de dados já existentes) ──
