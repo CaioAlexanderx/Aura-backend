@@ -94,8 +94,8 @@ describe('GET /federation/:id/dashboard — overdue via anuidades', () => {
       },
     ]);
     mockBelt([
-      { belt_level: 1, belt_name: 'Branca', count: '8' },
-      { belt_level: 2, belt_name: 'Amarela', count: '7' },
+      { belt_level: 'branca',  belt_name: 'Branca',  count: '8' },
+      { belt_level: 'amarela', belt_name: 'Amarela', count: '7' },
     ]);
 
     const res = await request(app)
@@ -119,9 +119,18 @@ describe('GET /federation/:id/dashboard — overdue via anuidades', () => {
     expect(od.amount).toBe(1200);
     expect(od.days_overdue).toBe(30);
 
-    // belt_distribution
-    expect(res.body.belt_distribution).toHaveLength(2);
+    // belt_distribution: scaffold sempre inclui as 8 faixas kyu canônicas
+    // (Branca..Marrom), preenchendo com 0 as ausentes. As faixas com dados
+    // (Branca=8, Amarela=7) são mescladas por belt_level; as demais vêm com 0.
+    expect(res.body.belt_distribution).toHaveLength(8);
     expect(res.body.belt_distribution[0].belt_name).toBe('Branca');
+    expect(res.body.belt_distribution[0].count).toBe(8);
+    expect(res.body.belt_distribution[1].belt_name).toBe('Amarela');
+    expect(res.body.belt_distribution[1].count).toBe(7);
+    // faixa sem praticante aparece com count 0 (ex.: Laranja)
+    const laranja = res.body.belt_distribution.find((b) => b.belt_name === 'Laranja');
+    expect(laranja).toBeDefined();
+    expect(laranja.count).toBe(0);
 
     // upcoming_events stub permanece
     expect(Array.isArray(res.body.upcoming_events)).toBe(true);
