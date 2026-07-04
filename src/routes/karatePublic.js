@@ -784,7 +784,7 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
         return res.status(422).json({ error: 'category_id é obrigatório', code: 'VALIDATION_ERROR' });
       }
       const catRes = await db.query(
-        `SELECT id, name, max_entries FROM karate_competition_categories
+        `SELECT id, name, max_entries, fee_amount FROM karate_competition_categories
          WHERE id = $1 AND competition_id = $2 LIMIT 1`,
         [category_id, ev.id]
       );
