@@ -5,6 +5,7 @@
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
 var { requireAuth } = require('../middleware/auth');
+var engineBreaker = require('../services/sefazSp/engineBreaker'); // S4.3 breaker
 
 // GET /alerts — scan and return current alerts
 router.get('/', requireAuth, async function(req, res) {
@@ -49,6 +50,24 @@ router.get('/', requireAuth, async function(req, res) {
       }
       if (ctg && ctg.pendentes > 0) {
         alerts.push({ type: 'nfce_contingencia_pendente', severity: 'warning', title: ctg.pendentes + ' nota(s) aguardando retransmissao', message: 'Vendas emitidas em contingencia (SEFAZ instavel) aguardam transmissao automatica. Nenhuma acao necessaria por enquanto.', data: { pendentes: ctg.pendentes } });
+      }
+    } catch (_) {}
+
+    // 1c. NFC-e própria (S4.3): fallback engine→gateway ativo. Breaker aberto
+    // OU >=1 fallback nas ultimas 24h = a emissao propria falhou e caiu no
+    // gateway — sintoma de certificado/CSC/config quebrados. Alerta operacional.
+    try {
+      var fb = (await db.query(
+        "SELECT COUNT(*)::int AS cnt FROM nfce_emissions" +
+        " WHERE company_id=$1 AND fallback_reason IS NOT NULL" +
+        " AND created_at >= NOW()-INTERVAL '1 day'", [cid])).rows[0];
+      var breakerOpen = false;
+      try { breakerOpen = engineBreaker.isOpen(cid); } catch (_) {}
+      if (breakerOpen || (fb && fb.cnt > 0)) {
+        alerts.push({ type: 'nfce_fallback_ativo', severity: 'warning',
+          title: 'Emissao propria com fallback ativo',
+          message: 'A emissao propria de NFC-e (SEFAZ-SP) falhou e as notas estao saindo pelo gateway (Nuvem Fiscal). Verifique o certificado A1 e a configuracao (CSC) em Configuracoes > Nota Fiscal.',
+          data: { fallbacks_24h: (fb && fb.cnt) || 0, breaker_open: breakerOpen } });
       }
     } catch (_) {}
 

@@ -27,6 +27,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { logAuditAction }           = require('../middleware/auditLog');
 const nuvemfiscal                  = require('../services/nuvemfiscal');
 const sefazSp                      = require('../services/sefazSp');
+const engineBreaker                = require('../services/sefazSp/engineBreaker');
 const rejectionCatalog             = require('../services/sefazSp/rejectionCatalog');
 const taxEngine                    = require('../services/sefazSp/taxEngine');
 const { buildDanfeNfceHtml }       = require('../utils/buildDanfeNfceHtml');
@@ -118,33 +119,127 @@ function validatePayments(payments, totalNfce) {
   return null;
 }
 
+// ── S4.2: cache module-level do check "colunas do fallback existem?" ──
+// Migration 176 (serie_sefaz_sp/next_number_sefaz_sp/provider_used/
+// fallback_reason) pode não estar aplicada quando o backend sobe (padrão do
+// CLAUDE.md). Sem as colunas, caímos no comportamento LEGADO: sem fallback,
+// série única do gateway, sem gravar provider_used. Cache pra não repetir o
+// probe a cada request (só reprobiamos se o primeiro probe deu erro).
+let _fallbackColsAvailable = null; // true | false | null(=ainda não checado)
+async function fallbackColsAvailable() {
+  if (_fallbackColsAvailable !== null) return _fallbackColsAvailable;
+  try {
+    await db.query(
+      `SELECT serie_sefaz_sp, next_number_sefaz_sp FROM nfce_config LIMIT 0`
+    );
+    await db.query(
+      `SELECT provider_used, fallback_reason FROM nfce_emissions LIMIT 0`
+    );
+    _fallbackColsAvailable = true;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') {
+      _fallbackColsAvailable = false;
+    } else {
+      // erro transitório (conexão etc): não cacheia, tenta de novo na próxima
+      return false;
+    }
+  }
+  return _fallbackColsAvailable;
+}
+
+// S4.2: grava provider_used/fallback_reason na emissão (defensivo p/ 42703).
+async function persistProviderUsed(emissionId, providerUsed, fallbackReason) {
+  if (!(await fallbackColsAvailable())) return; // migration 176 ausente: no-op
+  try {
+    await db.query(
+      `UPDATE nfce_emissions SET provider_used=$1, fallback_reason=$2 WHERE id=$3`,
+      [providerUsed || null, fallbackReason || null, emissionId]
+    );
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+    _fallbackColsAvailable = false; // corrige cache se o probe mentiu
+  }
+}
+
 router.get('/config', requireAuth, async (req, res) => {
   try {
-    const { rows } = await db.query(
-      `SELECT id, company_id, serie_nfce, next_number, ambiente, uf,
-              inscricao_estadual, is_active, csc_id, auto_emit_nfce
-         FROM nfce_config WHERE company_id=$1`,
-      [req.params.id]
-    );
+    // S4.4: provider + série/contador próprios (defensivo p/ migration 176 ausente)
+    let rows;
+    try {
+      ({ rows } = await db.query(
+        `SELECT id, company_id, serie_nfce, next_number, ambiente, uf,
+                inscricao_estadual, is_active, csc_id, auto_emit_nfce,
+                provider, serie_sefaz_sp, next_number_sefaz_sp
+           FROM nfce_config WHERE company_id=$1`,
+        [req.params.id]
+      ));
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      ({ rows } = await db.query(
+        `SELECT id, company_id, serie_nfce, next_number, ambiente, uf,
+                inscricao_estadual, is_active, csc_id, auto_emit_nfce, provider
+           FROM nfce_config WHERE company_id=$1`,
+        [req.params.id]
+      ));
+    }
     res.json({ config: rows[0] || null, instrucoes: INSTRUCOES_NOTA });
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar config NFC-e' }); }
 });
 
 router.post('/config', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce } = req.body;
+  const { serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce,
+          provider, serie_sefaz_sp } = req.body;
+
+  // S4.4: seletor de provider por empresa. Whitelist restrita (focusnfe não
+  // é ofertável ainda). undefined = não mexe no provider (compat).
+  if (provider !== undefined && provider !== null &&
+      !['nuvemfiscal', 'sefaz_sp'].includes(provider)) {
+    return res.status(400).json({ error: 'provider inválido (use "nuvemfiscal" ou "sefaz_sp")' });
+  }
+  let serieSefazSp = null;
+  if (serie_sefaz_sp !== undefined && serie_sefaz_sp !== null) {
+    const s = parseInt(serie_sefaz_sp, 10);
+    if (!Number.isInteger(s) || s < 1 || s > 999) {
+      return res.status(400).json({ error: 'serie_sefaz_sp inválida (inteiro 1–999)' });
+    }
+    serieSefazSp = s;
+  }
+
   try {
-    const { rows } = await db.query(
-      `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false))
-       ON CONFLICT (company_id) DO UPDATE SET
-         serie_nfce=$2, ambiente=$3, uf=$4, inscricao_estadual=$5,
-         csc_id=$6, csc_token=$7, auto_emit_nfce=COALESCE($8,nfce_config.auto_emit_nfce), updated_at=NOW()
-       RETURNING *`,
-      [req.params.id, serie_nfce||1, ambiente||'homologacao', uf||'SP',
-       inscricao_estadual||null, csc_id||null, csc_token||null,
-       typeof auto_emit_nfce==='boolean' ? auto_emit_nfce : null]
-    );
-    res.json({ config: rows[0] });
+    const providerVal = (provider === undefined) ? null : provider;
+    try {
+      // S4.4: caminho com colunas da migration 176
+      const { rows } = await db.query(
+        `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce, provider, serie_sefaz_sp)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false),COALESCE($9,'nuvemfiscal'),COALESCE($10,2))
+         ON CONFLICT (company_id) DO UPDATE SET
+           serie_nfce=$2, ambiente=$3, uf=$4, inscricao_estadual=$5,
+           csc_id=$6, csc_token=$7, auto_emit_nfce=COALESCE($8,nfce_config.auto_emit_nfce),
+           provider=COALESCE($9,nfce_config.provider),
+           serie_sefaz_sp=COALESCE($10,nfce_config.serie_sefaz_sp), updated_at=NOW()
+         RETURNING *`,
+        [req.params.id, serie_nfce||1, ambiente||'homologacao', uf||'SP',
+         inscricao_estadual||null, csc_id||null, csc_token||null,
+         typeof auto_emit_nfce==='boolean' ? auto_emit_nfce : null,
+         providerVal, serieSefazSp]
+      );
+      return res.json({ config: rows[0] });
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      // Fallback legado (migration 176 não aplicada): sem provider/serie própria
+      const { rows } = await db.query(
+        `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false))
+         ON CONFLICT (company_id) DO UPDATE SET
+           serie_nfce=$2, ambiente=$3, uf=$4, inscricao_estadual=$5,
+           csc_id=$6, csc_token=$7, auto_emit_nfce=COALESCE($8,nfce_config.auto_emit_nfce), updated_at=NOW()
+         RETURNING *`,
+        [req.params.id, serie_nfce||1, ambiente||'homologacao', uf||'SP',
+         inscricao_estadual||null, csc_id||null, csc_token||null,
+         typeof auto_emit_nfce==='boolean' ? auto_emit_nfce : null]
+      );
+      return res.json({ config: rows[0] });
+    }
   } catch (err) { res.status(500).json({ error: 'Erro ao salvar config' }); }
 });
 
@@ -208,9 +303,37 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     const paymentsErr = validatePayments(payments, totalNfce);
     if (paymentsErr) return res.status(400).json(paymentsErr);
 
+    // ── S4.2: seletor de provider + fallback engine→gateway ──────────────
+    // CLASSIFICAÇÃO DE ERROS (regra de ouro):
+    //   • THROW de sefazSp.emitNfce = defeito da NOSSA engine (cert não
+    //     carrega/decripta, CSC ausente, falha de assinatura, bug de XML) →
+    //     registra no breaker e FALLBACK pro gateway na MESMA request.
+    //   • Resultado 'contingencia' = SEFAZ fora do ar → NÃO faz fallback
+    //     (o gateway fala com a MESMA SEFAZ e falharia igual; a contingência
+    //     offline já resolve). Segue o fluxo S3.
+    //   • Resultado 'rejeitado' = SEFAZ respondeu → NÃO faz fallback (é
+    //     problema de dado, o gateway rejeitaria igual) e conta como SUCESSO
+    //     pro breaker (a engine funcionou).
+    //
+    // Numeração: a emissão própria usa SÉRIE/CONTADOR dedicados
+    // (serie_sefaz_sp / next_number_sefaz_sp) pra nunca colidir com o gateway
+    // no fallback. Se as colunas da migration 176 não existirem (42703),
+    // caímos no comportamento LEGADO: sem fallback, série única do gateway.
+    const wantSefazSp = config.provider === 'sefaz_sp' && tipo === 'nfce';
+    const hasFallbackCols = await fallbackColsAvailable();
+    const breakerOpen = wantSefazSp && hasFallbackCols && engineBreaker.isOpen(req.params.id);
+    // useSefazSp = de fato vamos tentar a engine (provider próprio, colunas
+    // presentes E breaker fechado). Breaker aberto → direto ao gateway.
+    let useSefazSp = wantSefazSp && hasFallbackCols && !breakerOpen;
+    let providerUsed = useSefazSp ? 'sefaz_sp' : 'nuvemfiscal';
+    let fallbackReason = breakerOpen ? 'breaker_open' : null;
+
     // ── #3 (02/06/2026): reserva ATOMICA do numero ANTES de transmitir ──
     // Retransmissao da MESMA venda+tipo apos rejeicao reusa o numero ja
     // reservado (so nota autorizada/denegada consome numero na SEFAZ).
+    // S4.2: a coluna de contador depende do provider efetivo.
+    const numCol   = useSefazSp ? 'next_number_sefaz_sp' : 'next_number';
+    let   serieNF  = useSefazSp ? config.serie_sefaz_sp : config.serie_nfce;
     let numeroNF = null;
     if (sale_id) {
       const { rows: prevRej } = await db.query(
@@ -226,22 +349,23 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       // Incremento atomico: o row-lock de nfce_config serializa concorrentes,
       // entao cada emissao concorrente recebe um numero distinto.
       const { rows: rsv } = await db.query(
-        `UPDATE nfce_config SET next_number = next_number + 1, updated_at=NOW()
-          WHERE company_id=$1 RETURNING (next_number - 1) AS numero`,
+        `UPDATE nfce_config SET ${numCol} = ${numCol} + 1, updated_at=NOW()
+          WHERE company_id=$1 RETURNING (${numCol} - 1) AS numero`,
         [req.params.id]
       );
-      numeroNF = (rsv[0] && rsv[0].numero != null) ? parseInt(rsv[0].numero, 10) : config.next_number;
+      numeroNF = (rsv[0] && rsv[0].numero != null) ? parseInt(rsv[0].numero, 10)
+        : (useSefazSp ? (config.next_number_sefaz_sp || 1) : config.next_number);
     }
-    const serieNF  = config.serie_nfce;
 
     const now = new Date();
     const yy = String(now.getFullYear()).slice(2);
     const mm = String(now.getMonth()+1).padStart(2,'0');
     const modelo = tipo==='nfe' ? '55' : '65';
     const cUF = String(nuvemfiscal.ufToCodigo(config.uf||company.address_state)).padStart(2,'0');
-    const chaveAcessoTmp =
-      `${cUF}${yy}${mm}${'0'.repeat(14)}${modelo}${String(serieNF).padStart(3,'0')}` +
-      `${String(numeroNF).padStart(9,'0')}1${'0'.repeat(8)}1`;
+    const buildChaveTmp = (serie, numero) =>
+      `${cUF}${yy}${mm}${'0'.repeat(14)}${modelo}${String(serie).padStart(3,'0')}` +
+      `${String(numero).padStart(9,'0')}1${'0'.repeat(8)}1`;
+    let chaveAcessoTmp = buildChaveTmp(serieNF, numeroNF);
 
     const { rows: created } = await db.query(
       `INSERT INTO nfce_emissions
@@ -261,13 +385,14 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     let finalStatus = 'processando';
     let prov = {};
 
-    // S1.6: emissão PRÓPRIA (SEFAZ-SP) — só NFC-e (65); NF-e (55) segue no gateway.
-    const useSefazSp = config.provider === 'sefaz_sp' && tipo === 'nfce';
+    // useSefazSp já foi decidido acima (provider próprio + colunas + breaker
+    // fechado). S1.6: emissão própria só NFC-e (65); NF-e (55) segue no gateway.
 
     if (config.ambiente === 'homologacao' && !useSefazSp && process.env.NUVEM_FISCAL_FORCE !== 'true') {
       prov.protocolo = 'HOMOLOG-' + String(numeroNF).padStart(6,'0');
       finalStatus = 'autorizada';
       await db.query(`UPDATE nfce_emissions SET status='autorizada', protocolo=$1, authorized_at=NOW() WHERE id=$2`, [prov.protocolo, emission.id]);
+      await persistProviderUsed(emission.id, providerUsed, fallbackReason);
     } else {
       try {
         const productIds = items.map(i => i.product_id).filter(id => typeof id==='string' && id.length>0);
@@ -322,20 +447,63 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
             }))
           : undefined;
 
-        const emitPayload = {
+        const buildEmitPayload = (serie, numero) => ({
           items: nfItems, total_value: totalNfce, payments: nfPayments,
           payment_method: paymentCode(payment_method), payment_change,
           recipient_cpf: customer_cpf, recipient_cnpj, recipient_name: customer_name,
           recipient_email: customer_email,
-          serie: serieNF, numero: numeroNF, observacoes,
+          serie, numero, observacoes,
           reference: `${tipo}-${emission.id}`,
-        };
+        });
+
         let provResult;
         if (useSefazSp) {
-          provResult = await sefazSp.emitNfce(company, emitPayload, { db, config, allowContingency: true });
+          // ── S4.2: tenta a engine própria. THROW = defeito NOSSO → fallback.
+          try {
+            provResult = await sefazSp.emitNfce(
+              company, buildEmitPayload(serieNF, numeroNF),
+              { db, config, allowContingency: true }
+            );
+            // Chegou aqui: engine devolveu resultado (autorizado/rejeitado/
+            // contingencia). Rejeição/autorização = SUCESSO pro breaker; a
+            // contingência NÃO é falha da engine (é SEFAZ fora), então também
+            // NÃO conta como falha — só não conta como sucesso.
+            if (provResult && provResult.status !== 'contingencia') {
+              engineBreaker.recordSuccess(req.params.id);
+            }
+          } catch (engineErr) {
+            // Defeito de infra da nossa engine → registra no breaker e FALLBACK
+            // pro gateway na MESMA request. O número da série própria já
+            // reservado fica QUEIMADO (gap aceitável, resolúvel por inutilização
+            // S2.1). Reservamos um número NOVO da série do GATEWAY.
+            engineBreaker.recordFailure(req.params.id);
+            console.error('[nfce] engine SEFAZ-SP falhou (fallback→gateway):',
+              engineErr.message, engineErr.payload || '');
+
+            useSefazSp = false;
+            providerUsed = 'nuvemfiscal';
+            fallbackReason = ('engine_error: ' + (engineErr.message || 'erro desconhecido')).slice(0, 500);
+
+            // reserva atômica do número do GATEWAY + recalcula série/chave temp
+            const { rows: gRsv } = await db.query(
+              `UPDATE nfce_config SET next_number = next_number + 1, updated_at=NOW()
+                WHERE company_id=$1 RETURNING (next_number - 1) AS numero`,
+              [req.params.id]
+            );
+            numeroNF = (gRsv[0] && gRsv[0].numero != null) ? parseInt(gRsv[0].numero, 10) : config.next_number;
+            serieNF = config.serie_nfce;
+            chaveAcessoTmp = buildChaveTmp(serieNF, numeroNF);
+            await db.query(
+              `UPDATE nfce_emissions SET numero=$1, serie=$2, chave_acesso=$3 WHERE id=$4`,
+              [numeroNF, serieNF, chaveAcessoTmp, emission.id]
+            );
+
+            const emitFn = tipo === 'nfe' ? nuvemfiscal.emitNfe : nuvemfiscal.emitNfce;
+            provResult = await emitFn(company, buildEmitPayload(serieNF, numeroNF));
+          }
         } else {
           const emitFn = tipo==='nfe' ? nuvemfiscal.emitNfe : nuvemfiscal.emitNfce;
-          provResult = await emitFn(company, emitPayload);
+          provResult = await emitFn(company, buildEmitPayload(serieNF, numeroNF));
         }
 
         console.log('[nfce] provResult (POST):', JSON.stringify(provResult, null, 2));
@@ -407,11 +575,22 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
           }
         }
 
+        // S4.2: rastro do provider efetivamente usado + motivo do fallback.
+        // Defensivo p/ migration 176 ausente (comportamento legado).
+        await persistProviderUsed(emission.id, providerUsed, fallbackReason);
+
       } catch (apiErr) {
+        // Chega aqui quando: gateway puro falhou, OU o PRÓPRIO fallback falhou.
+        // Em ambos, providerUsed/fallbackReason já refletem o caminho tomado.
         const providerLabel = useSefazSp ? 'SEFAZ-SP' : 'Nuvem Fiscal';
         console.error(`[nfce] ${providerLabel} emit error:`, apiErr.message, apiErr.payload||'');
         await db.query(`UPDATE nfce_emissions SET status='erro', error_message=$1 WHERE id=$2`, [apiErr.message, emission.id]);
-        return res.status(502).json({ error: `Erro ao transmitir nota para ${providerLabel}: `+apiErr.message, payload: apiErr.payload||null, nfce_id: emission.id });
+        await persistProviderUsed(emission.id, providerUsed, fallbackReason);
+        return res.status(502).json({
+          error: `Erro ao transmitir nota para ${providerLabel}: `+apiErr.message,
+          payload: apiErr.payload||null, nfce_id: emission.id,
+          provider_used: providerUsed, fallback: fallbackReason != null,
+        });
       }
     }
 
@@ -426,7 +605,9 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       qr_code: prov.qrCode||final[0].qr_code, url_consulta: prov.urlConsulta||final[0].url_consulta,
       motivo: prov.motivo||null, cStat: prov.cStat||null,
       rejeicao_amigavel: amigavel,
-      contingencia: prov.status === 'contingencia' });
+      contingencia: prov.status === 'contingencia',
+      // S4.2: transparência do fallback pro frontend
+      provider_used: providerUsed, fallback: fallbackReason != null });
 
   } catch (err) {
     console.error('nfce emit error:', err);
@@ -443,15 +624,30 @@ router.get('/', requireAuth, async (req, res) => {
     if (tipo)   { params.push(tipo);   where += ` AND tipo=$${params.length}`; }
     if (start)  { params.push(start);  where += ` AND created_at>=$${params.length}`; }
     if (end)    { params.push(end);    where += ` AND created_at<=$${params.length}`; }
-    const { rows: rawRows } = await db.query(
-      `SELECT id, numero, serie, tipo, chave_acesso, protocolo, status,
-              customer_cpf, customer_name, total_nfce, payment_method,
-              xml_url, pdf_url, qr_code, url_consulta,
-              authorized_at, cancelled_at, created_at, error_message,
-              rejection_code, tp_emis
-         FROM nfce_emissions ${where} ORDER BY numero DESC LIMIT 100`,
-      params
-    );
+    // S4.4: provider_used/fallback_reason no SELECT (defensivo p/ migration 176)
+    let rawRows;
+    try {
+      ({ rows: rawRows } = await db.query(
+        `SELECT id, numero, serie, tipo, chave_acesso, protocolo, status,
+                customer_cpf, customer_name, total_nfce, payment_method,
+                xml_url, pdf_url, qr_code, url_consulta,
+                authorized_at, cancelled_at, created_at, error_message,
+                rejection_code, tp_emis, provider_used, fallback_reason
+           FROM nfce_emissions ${where} ORDER BY numero DESC LIMIT 100`,
+        params
+      ));
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      ({ rows: rawRows } = await db.query(
+        `SELECT id, numero, serie, tipo, chave_acesso, protocolo, status,
+                customer_cpf, customer_name, total_nfce, payment_method,
+                xml_url, pdf_url, qr_code, url_consulta,
+                authorized_at, cancelled_at, created_at, error_message,
+                rejection_code, tp_emis
+           FROM nfce_emissions ${where} ORDER BY numero DESC LIMIT 100`,
+        params
+      ));
+    }
     // S2.2: motivo amigável (catálogo) pra rejeitadas/erro
     const rows = rawRows.map(r => {
       if (r.status !== 'rejeitada' && r.status !== 'erro') return r;
