@@ -431,6 +431,102 @@ describe('POST /federation/:id/practitioners (criar praticante)', () => {
   });
 });
 
+// ── Suite: matrícula manual (opcional) na criação de praticante ─────────
+// Contrato: karate_registration_number opcional no payload.
+//   - preenchido (trim não-vazio) → usa o valor, valida unicidade antes do
+//     INSERT; se já existir, 409 { error: "Número de matrícula já em uso." }
+//   - ausente/vazio → mantém geração sequencial automática (NNNNN-D)
+describe('POST /federation/:id/practitioners — matrícula manual', () => {
+  const FED_ID = 'fed-uuid-001';
+  const DOJO_ID = 'dojo-uuid-001';
+  let app;
+
+  beforeAll(function() { app = buildApp(); });
+
+  beforeEach(function() {
+    jest.clearAllMocks();
+  });
+
+  it('aceita karate_registration_number manual quando não há duplicidade', function(done) {
+    const mockClient = { query: jest.fn(), release: jest.fn() };
+    db.connect.mockResolvedValue(mockClient);
+
+    mockClient.query
+      .mockResolvedValueOnce({})                            // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: FED_ID }] })   // verifica federação
+      .mockResolvedValueOnce({ rows: [{ id: DOJO_ID }] })  // verifica dojô
+      .mockResolvedValueOnce({ rows: [] })                  // SELECT checagem duplicidade (manual)
+      .mockResolvedValueOnce({})                            // SAVEPOINT sex_affiliation_insert
+      .mockResolvedValueOnce({                              // INSERT customer
+        rows: [{
+          id: 'prac-uuid-002',
+          name: 'Maria Souza',
+          cpf_cnpj: null,
+          rg: null,
+          birth_date: null,
+          email: null,
+          phone: null,
+          is_student: true,
+          parent_guardian_id: null,
+          federation_id: FED_ID,
+          dojo_id: DOJO_ID,
+          is_arbiter: false,
+          is_instructor: false,
+          is_examiner: false,
+          karate_photo_url: null,
+          karate_registration_number: '99999-D',
+          is_active: true,
+          sex: null,
+          affiliation_since: null,
+        }],
+      })
+      .mockResolvedValueOnce({})                            // RELEASE SAVEPOINT
+      .mockResolvedValueOnce({});                           // COMMIT
+
+    request(app)
+      .post('/federation/' + FED_ID + '/practitioners')
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({
+        full_name: 'Maria Souza',
+        dojo_id: DOJO_ID,
+        karate_registration_number: '99999-D',
+      })
+      .end(function(err, res) {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        expect(res.body.karate_registration_number).toBe('99999-D');
+        done();
+      });
+  });
+
+  it('retorna 409 quando karate_registration_number manual já está em uso', function(done) {
+    const mockClient = { query: jest.fn(), release: jest.fn() };
+    db.connect.mockResolvedValue(mockClient);
+
+    mockClient.query
+      .mockResolvedValueOnce({})                            // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: FED_ID }] })   // verifica federação
+      .mockResolvedValueOnce({ rows: [{ id: DOJO_ID }] })  // verifica dojô
+      .mockResolvedValueOnce({ rows: [{ id: 'outro-prac-id' }] }) // SELECT checagem — já existe
+      .mockResolvedValueOnce({});                           // ROLLBACK
+
+    request(app)
+      .post('/federation/' + FED_ID + '/practitioners')
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({
+        full_name: 'Duplicado Silva',
+        dojo_id: DOJO_ID,
+        karate_registration_number: '12345-D',
+      })
+      .end(function(err, res) {
+        if (err) return done(err);
+        expect(res.status).toBe(409);
+        expect(res.body.error).toBe('Número de matrícula já em uso.');
+        done();
+      });
+  });
+});
+
 // ── Regressão P0 — alinhamento coluna x valor no INSERT com
 // sex/affiliation_since/is_assistant (bug: is_assistant boolean caindo na
 // coluna affiliation_since DATE, gerando "invalid input syntax for type

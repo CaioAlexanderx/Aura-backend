@@ -202,6 +202,8 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     guardian_name, guardian_cpf, guardian_phone, guardian_relationship,
     // Migration 205 — sexo e data de filiação
     sex, affiliation_since,
+    // Matrícula manual (opcional) — se ausente/vazia, gera sequencial automático
+    karate_registration_number,
   } = req.body;
 
   if (!full_name || !String(full_name).trim()) {
@@ -238,8 +240,26 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       return res.status(422).json({ error: 'dojo_id não pertence a esta federação', code: 'VALIDATION_ERROR' });
     }
 
-    // Gera número de registro (NNNNN-D, continuando a sequência da federação)
-    const regNumber = await nextPractitionerRegistrationNumber(client, federationId);
+    // Número de registro: manual (informado pelo usuário) OU sequencial automático.
+    // Se vier preenchido (após trim), valida unicidade antes de inserir — 409 se já
+    // existir. Se vier ausente/vazio, mantém o comportamento atual (gera NNNNN-D).
+    const manualRegNumber = karate_registration_number !== undefined && karate_registration_number !== null
+      ? String(karate_registration_number).trim()
+      : '';
+    let regNumber;
+    if (manualRegNumber) {
+      const dupRes = await client.query(
+        `SELECT id FROM customers WHERE karate_registration_number = $1 LIMIT 1`,
+        [manualRegNumber]
+      );
+      if (dupRes.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Número de matrícula já em uso.' });
+      }
+      regNumber = manualRegNumber;
+    } else {
+      regNumber = await nextPractitionerRegistrationNumber(client, federationId);
+    }
 
     const baseCols = `company_id, name, cpf_cnpj, rg, birth_date, email, phone,
           is_student, parent_guardian_id, federation_id, dojo_id,
@@ -370,6 +390,12 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     res.status(201).json(shapePractitioner(p));
   } catch (err) {
     await client.query('ROLLBACK');
+    // Corrida: dois requests concorrentes com a mesma matrícula manual podem
+    // ambos passar pelo SELECT de checagem antes do INSERT — o índice único
+    // idx_customers_karate_reg_number (migration 148) pega isso via 23505.
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Número de matrícula já em uso.' });
+    }
     console.error('[karatePractitioners] create error:', err.message);
     res.status(500).json({ error: 'Erro ao cadastrar praticante', detail: err.message });
   } finally {
