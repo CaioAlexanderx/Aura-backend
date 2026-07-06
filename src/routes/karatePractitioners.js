@@ -418,6 +418,9 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     is_student: 'is_student', is_arbiter: 'is_arbiter',
     is_instructor: 'is_instructor', is_examiner: 'is_examiner',
     is_active: 'is_active', // status ativo/inativo do praticante
+    // Matrícula (nº de registro FPKT) — agora editável na ficha; a unicidade
+    // é validada num pré-check dedicado abaixo (excluindo o próprio praticante).
+    karate_registration_number: 'karate_registration_number',
     parent_guardian_id: 'parent_guardian_id', photo_url: 'karate_photo_url',
     street: 'street', number: 'number', complement: 'complement',
     neighborhood: 'neighborhood', city: 'city', state: 'state', zip_code: 'zip_code',
@@ -474,6 +477,25 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(422).json({ error: 'dojo_id não pertence a esta federação', code: 'VALIDATION_ERROR' });
       }
+    }
+
+    // Matrícula editável: valida unicidade (excluindo o próprio) antes de aplicar.
+    // Vazio não é permitido (a carteirinha depende do número).
+    if (b.karate_registration_number !== undefined) {
+      const reg = String(b.karate_registration_number == null ? '' : b.karate_registration_number).trim();
+      if (!reg) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ error: 'A matrícula não pode ficar vazia.', code: 'VALIDATION_ERROR' });
+      }
+      const dup = await client.query(
+        `SELECT id FROM customers WHERE karate_registration_number = $1 AND id <> $2 LIMIT 1`,
+        [reg, practitionerId]
+      );
+      if (dup.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Número de matrícula já em uso.' });
+      }
+      b.karate_registration_number = reg; // normaliza p/ o SET dinâmico
     }
 
     const sets = [];
@@ -623,6 +645,9 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     res.json(shapePractitioner(out.rows[0]));
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Número de matrícula já em uso.' });
+    }
     console.error('[karatePractitioners] update error:', err.message);
     res.status(500).json({ error: 'Erro ao atualizar praticante', detail: err.message });
   } finally {
