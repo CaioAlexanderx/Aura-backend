@@ -16,6 +16,7 @@
 //   PUT    /competitions/:cid/categories/:catId/kata-scores       — salva nota
 //   POST   /competitions/:cid/categories/:catId/kata-scores/generate-order — sorteia ordem
 //   POST   /competitions/:cid/categories/:catId/kata-scores/advance — avança eliminatória→final
+//   PUT    /competitions/:cid/categories/:catId/kata-scores/order — reordena manualmente (drag-and-drop)
 // ============================================================
 'use strict';
 
@@ -1132,6 +1133,115 @@ router.post(
       await client.query('ROLLBACK');
       console.error('[karateBrackets] kata advance error:', err.message);
       res.status(500).json({ error: 'Erro ao avançar atletas' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// PUT /competitions/:cid/categories/:catId/kata-scores/order
+// Salva reordenação manual (drag-and-drop) da ordem de apresentação
+// de uma fase inteira.
+// Body: { phase: "eliminatoria" | "final", order: [{ entry_id, presentation_order }, ...] }
+// ═══════════════════════════════════════════════════════════════
+router.put(
+  '/competitions/:cid/categories/:catId/kata-scores/order',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const { phase, order } = req.body;
+
+    if (!phase || !['eliminatoria', 'final'].includes(phase)) {
+      return res.status(422).json({ error: 'phase deve ser eliminatoria ou final', code: 'VALIDATION_ERROR' });
+    }
+    if (!Array.isArray(order) || order.length === 0) {
+      return res.status(422).json({ error: 'order é obrigatório e deve ser uma lista', code: 'VALIDATION_ERROR' });
+    }
+    for (const item of order) {
+      if (!item || !item.entry_id || item.presentation_order === undefined || item.presentation_order === null) {
+        return res.status(422).json({ error: 'cada item de order precisa de entry_id e presentation_order', code: 'VALIDATION_ERROR' });
+      }
+      const posNum = parseInt(item.presentation_order, 10);
+      if (isNaN(posNum) || posNum < 1) {
+        return res.status(422).json({ error: 'presentation_order deve ser inteiro positivo', code: 'VALIDATION_ERROR' });
+      }
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
+
+      const { bracketRow } = await loadBracket(client, catId);
+      if (!bracketRow) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave não gerada ainda' }); }
+      if (bracketRow.status !== 'locked') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave deve estar travada para reordenar', code: 'CONFLICT' }); }
+
+      try {
+        // valida que cada entry_id pertence a esse bracket/categoria/fase antes de gravar
+        const entryIds = order.map(o => o.entry_id);
+        const belongCheck = await client.query(
+          `SELECT entry_id FROM karate_kata_scores WHERE bracket_id=$1 AND phase=$2 AND entry_id = ANY($3::uuid[])`,
+          [bracketRow.id, phase, entryIds]
+        );
+        const belongingIds = new Set(belongCheck.rows.map(r => r.entry_id));
+        const invalid = entryIds.filter(id => !belongingIds.has(id));
+        if (invalid.length) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({ error: 'Um ou mais entry_id não pertencem a esta chave/fase', code: 'VALIDATION_ERROR', invalid_entry_ids: invalid });
+        }
+
+        for (const item of order) {
+          const posNum = parseInt(item.presentation_order, 10);
+          await client.query(
+            `UPDATE karate_kata_scores SET presentation_order=$1, updated_at=NOW()
+             WHERE bracket_id=$2 AND entry_id=$3 AND phase=$4`,
+            [posNum, bracketRow.id, item.entry_id, phase]
+          );
+        }
+      } catch (e) {
+        if (e.code === '42703' || e.code === '42P01') {
+          await client.query('ROLLBACK');
+          return res.status(503).json({ error: 'Migration 183 não aplicada' });
+        }
+        throw e;
+      }
+
+      let rows = [];
+      try {
+        const r = await client.query(
+          `SELECT ks.entry_id, ks.phase, ks.nota, ks.presentation_order, ks.advances,
+                  cu.name AS student_name,
+                  COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+           FROM karate_kata_scores ks
+           JOIN karate_brackets kb ON kb.id = ks.bracket_id
+           JOIN karate_competition_entries e ON e.id = ks.entry_id
+           JOIN customers cu ON cu.id = e.student_id
+           LEFT JOIN companies dj ON dj.id = e.dojo_id
+           WHERE kb.category_id = $1 AND ks.phase = $2
+           ORDER BY ks.presentation_order ASC NULLS LAST, ks.nota DESC NULLS LAST`,
+          [catId, phase]
+        );
+        rows = r.rows;
+      } catch (e) {
+        if (e.code !== '42703' && e.code !== '42P01') throw e;
+      }
+
+      await client.query('COMMIT');
+      res.json(rows.map(r => ({
+        entry_id: r.entry_id,
+        student_name: r.student_name,
+        dojo_name: r.dojo_name,
+        phase: r.phase,
+        nota: r.nota !== null ? parseFloat(r.nota) : null,
+        presentation_order: r.presentation_order,
+        advances: r.advances,
+      })));
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] kata-scores order put error:', err.message);
+      res.status(500).json({ error: 'Erro ao salvar ordem' });
     } finally {
       client.release();
     }
