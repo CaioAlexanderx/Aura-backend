@@ -190,6 +190,16 @@ router.get('/portal/me', requirePractitionerToken, async (req, res) => {
       belt_history: history.rows,
       exams: exams.rows,
       certificates: certs.rows,
+      // `card` reaproveita karateCardService.getCurrentCard (mesma função da
+      // rota admin GET /federation/:id/practitioners/:pid/card) — já inclui
+      // student_name, belt, belt_name, card_number, dojo_name, birth_date,
+      // cpf, photo_url, issued_at, verify_token, federation_name,
+      // federation_logo, is_minor, status, revoked_at.
+      // Seguro expor aqui: o praticante autenticou com o próprio CPF via OTP
+      // (req.practitioner vem do JWT type:'portal', requirePractitionerToken).
+      // NUNCA reaproveitar este objeto na rota pública de verify (LGPD) —
+      // ver GET /verify/:token, que usa cards.verifyByToken (dados mínimos:
+      // sem CPF, sem nascimento, sem foto p/ menor).
       card: card || null,
       public_portal: {
         opt_in: portal.rows[0]?.public_opt_in || false,
