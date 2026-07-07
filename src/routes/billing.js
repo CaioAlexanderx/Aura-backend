@@ -87,19 +87,16 @@ router.get('/karate-gate', requireAuth, async (req, res) => {
     const c = rows[0];
     const AMOUNT = 169; // plano Negócio (billingPricing.PLANS.negocio.monthly)
     const now = new Date();
-
-    // Due date efetivo: assinante → próxima cobrança; em trial → fim do trial.
     const dueRaw = c.next_billing_date || c.trial_ends_at || null;
-    const due = dueRaw ? new Date(dueRaw) : null;
 
-    // Bloqueia SÓ no vencimento/atraso (sem avisos prévios):
-    //  - webhook marcou 'overdue'; OU
-    //  - trial acabou e não há assinatura ativa; OU
-    //  - a data de vencimento passou e o status não está 'active'.
-    const overdue = c.billing_status === 'overdue';
-    const trialExpiredNoSub = !c.asaas_subscription_id && c.trial_ends_at && new Date(c.trial_ends_at) <= now;
-    const duePassedUnpaid = !!due && due <= now && c.billing_status !== 'active';
-    const blocked = overdue || trialExpiredNoSub || duePassedUnpaid;
+    // Regra binária, sem avisos prévios: a federação está EM DIA (invisível) só
+    // quando a assinatura está paga (billing_status='active') OU ainda dentro do
+    // trial. Qualquer outro estado — overdue, pending (PIX aguardando), inactive,
+    // trial expirado — BLOQUEIA. (Assim gerar o PIX não desbloqueia antes do
+    // pagamento; o webhook confirma → 'active' → gate some.)
+    const trialActive = c.trial_ends_at && new Date(c.trial_ends_at) > now;
+    const active = c.billing_status === 'active';
+    const blocked = !active && !trialActive;
 
     res.json({
       state: blocked ? 'blocked' : 'ok',
