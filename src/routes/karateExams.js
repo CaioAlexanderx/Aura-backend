@@ -150,7 +150,7 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
     const dataRes = await db.query(
       `SELECT
          be.id, be.federation_id, be.name, be.exam_type, be.event_date, be.location,
-         be.max_candidates, be.fee_amount, be.status, be.created_at,
+         be.max_candidates, be.fee_amount, be.hours, be.status, be.created_at,
          COUNT(DISTINCT ec.id) AS candidate_count,
          COUNT(DISTINCT ee.id) AS examiner_count
        FROM karate_belt_exams be
@@ -174,6 +174,7 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
       location: r.location || null,
       max_candidates: r.max_candidates || null,
       fee_amount: r.fee_amount || null,
+      hours: r.hours ?? null,
       status: r.status,
       candidate_count: parseInt(r.candidate_count, 10),
       examiner_count: parseInt(r.examiner_count, 10),
@@ -192,7 +193,7 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
   const federationId = req.params.id;
   // karate_belt_exams: id, federation_id, exam_type, name, event_date, location,
   //                    max_candidates, fee_amount, status, created_by, created_at, updated_at
-  const { exam_type, name, event_date, location, max_candidates, fee_amount } = req.body;
+  const { exam_type, name, event_date, location, max_candidates, fee_amount, hours } = req.body;
 
   if (!event_date) {
     return res.status(422).json({ error: 'event_date é obrigatório', code: 'VALIDATION_ERROR' });
@@ -214,11 +215,11 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
   try {
     const insertRes = await db.query(
       `INSERT INTO karate_belt_exams
-         (federation_id, exam_type, name, event_date, location, max_candidates, fee_amount,
+         (federation_id, exam_type, name, event_date, location, max_candidates, fee_amount, hours,
           status, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft', $8, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, NOW(), NOW())
        RETURNING id, federation_id, exam_type, name, event_date, location,
-                 max_candidates, fee_amount, status, created_at`,
+                 max_candidates, fee_amount, hours, status, created_at`,
       [
         federationId,
         exam_type || null,
@@ -227,6 +228,7 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
         location || null,
         max_candidates ? parseInt(max_candidates, 10) : null,
         (fee_amount === '' || fee_amount === undefined || fee_amount === null) ? 0 : parseFloat(fee_amount),
+        (hours === '' || hours === undefined || hours === null) ? null : parseInt(hours, 10),
         req.user?.id || null,
       ]
     );
@@ -243,6 +245,7 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
       location: exam.location || null,
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
+      hours: exam.hours ?? null,
       status: exam.status,
       candidate_count: 0,
       examiner_count: 0,
@@ -268,7 +271,7 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
       try {
         const examRes = await db.query(
           `SELECT id, federation_id, exam_type, name, event_date, location,
-                  max_candidates, fee_amount, status, description, registration_fields,
+                  max_candidates, fee_amount, hours, status, description, registration_fields,
                   created_at, updated_at
            FROM karate_belt_exams
            WHERE id = $1 AND federation_id = $2
@@ -286,7 +289,7 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
     if (exam === undefined) {
       const examRes = await db.query(
         `SELECT id, federation_id, exam_type, name, event_date, location,
-                max_candidates, fee_amount, status, description, created_at, updated_at
+                max_candidates, fee_amount, hours, status, description, created_at, updated_at
          FROM karate_belt_exams
          WHERE id = $1 AND federation_id = $2
          LIMIT 1`,
@@ -404,6 +407,7 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
       location: exam.location || null,
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
+      hours: exam.hours ?? null,
       status: exam.status,
       description: exam.description || null,
       registration_fields: exam.registration_fields || [],
@@ -451,7 +455,7 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
 
   // karate_belt_exams editable columns: event_date, location, name, exam_type,
   //   max_candidates, fee_amount (dojo_id and notes do NOT exist)
-  const ALLOWED = ['event_date', 'location', 'name', 'exam_type', 'max_candidates', 'fee_amount', 'description'];
+  const ALLOWED = ['event_date', 'location', 'name', 'exam_type', 'max_candidates', 'fee_amount', 'description', 'hours'];
 
   // Whitelist de exam_type quando presente (espelha migration 192 / POST).
   if (req.body.exam_type !== undefined && req.body.exam_type !== null
@@ -482,7 +486,7 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
       // fee_amount é NOT NULL DEFAULT 0 — nunca gravar NULL/"" (violaria a constraint).
       if (field === 'fee_amount') {
         v = (v === '' || v === null) ? 0 : parseFloat(v);
-      } else if (field === 'max_candidates') {
+      } else if (field === 'max_candidates' || field === 'hours') {
         v = (v === '' || v === null) ? null : parseInt(v, 10);
       }
       updates.push(`${field} = $${idx}`);
@@ -530,7 +534,7 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
          SET ${updates.join(', ')}
          WHERE id = $${idx} AND federation_id = $${idx + 1}
          RETURNING id, federation_id, exam_type, name, event_date, location,
-                   max_candidates, fee_amount, status,
+                   max_candidates, fee_amount, hours, status,
                    ${HAS_REGISTRATION_FIELDS_COL ? 'registration_fields,' : ''} updated_at`,
         values
       );
@@ -562,7 +566,7 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
            SET ${updates3.join(', ')}
            WHERE id = $${idx3} AND federation_id = $${idx3 + 1}
            RETURNING id, federation_id, exam_type, name, event_date, location,
-                     max_candidates, fee_amount, status, updated_at`,
+                     max_candidates, fee_amount, hours, status, updated_at`,
           values3
         );
       } else {
@@ -586,6 +590,7 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
       location: exam.location || null,
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
+      hours: exam.hours ?? null,
       status: exam.status,
       registration_fields: exam.registration_fields !== undefined ? (exam.registration_fields || []) : undefined,
       updated_at: exam.updated_at,
@@ -1133,5 +1138,120 @@ router.get(
     }
   }
 );
+
+
+// ══════════════════════════════════════════════════════════════════
+// Ministrantes do evento (karate_event_instructors — migration 212).
+// ≠ banca de exame (karate_exam_examiners). Nome livre + cargo + imagem
+// de assinatura (usada no certificado, Fase 5). Fundação do modelo de
+// evento canônico. Código defensivo p/ 42P01 (tabela ausente em deploy parcial).
+// ══════════════════════════════════════════════════════════════════
+async function assertExamInFederation(examId, federationId) {
+  const chk = await db.query(
+    `SELECT id FROM karate_belt_exams WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+    [examId, federationId]
+  );
+  return chk.rows.length > 0;
+}
+
+// GET /belt-exams/:examId/instructors
+router.get('/belt-exams/:examId/instructors', ...guards.read(), async (req, res) => {
+  const { id: federationId, examId } = req.params;
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `SELECT id, event_id, name, role, signature_url, sort_order, created_at
+       FROM karate_event_instructors WHERE event_id = $1
+       ORDER BY sort_order ASC, created_at ASC`,
+      [examId]
+    );
+    res.json(rows);
+  } catch (err) {
+    if (err.code === '42P01') return res.json([]); // tabela ausente (migration pendente)
+    console.error('[karateExams] instructors list error:', err.message);
+    res.status(500).json({ error: 'Erro ao listar ministrantes' });
+  }
+});
+
+// POST /belt-exams/:examId/instructors  { name, role?, signature_url?, sort_order? }
+router.post('/belt-exams/:examId/instructors', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId } = req.params;
+  const { name, role, signature_url, sort_order } = req.body;
+  if (!name || !String(name).trim()) {
+    return res.status(422).json({ error: 'name é obrigatório', code: 'VALIDATION_ERROR' });
+  }
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `INSERT INTO karate_event_instructors (event_id, name, role, signature_url, sort_order)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, event_id, name, role, signature_url, sort_order, created_at`,
+      [examId, String(name).trim(), role || null, signature_url || null,
+       (sort_order === '' || sort_order === undefined || sort_order === null) ? 0 : parseInt(sort_order, 10)]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('[karateExams] instructor create error:', err.message);
+    res.status(500).json({ error: 'Erro ao adicionar ministrante', detail: err.message });
+  }
+});
+
+// PATCH /belt-exams/:examId/instructors/:instructorId
+router.patch('/belt-exams/:examId/instructors/:instructorId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId, instructorId } = req.params;
+  const ALLOWED = ['name', 'role', 'signature_url', 'sort_order'];
+  const updates = [];
+  const values = [];
+  let idx = 1;
+  for (const field of ALLOWED) {
+    if (req.body[field] !== undefined) {
+      let v = req.body[field];
+      if (field === 'sort_order') v = (v === '' || v === null) ? 0 : parseInt(v, 10);
+      else if (field === 'name') v = String(v).trim();
+      updates.push(`${field} = $${idx}`); values.push(v); idx++;
+    }
+  }
+  if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  values.push(instructorId, examId);
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `UPDATE karate_event_instructors SET ${updates.join(', ')}
+       WHERE id = $${idx} AND event_id = $${idx + 1}
+       RETURNING id, event_id, name, role, signature_url, sort_order, created_at`,
+      values
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Ministrante não encontrado', code: 'NOT_FOUND' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[karateExams] instructor patch error:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar ministrante', detail: err.message });
+  }
+});
+
+// DELETE /belt-exams/:examId/instructors/:instructorId
+router.delete('/belt-exams/:examId/instructors/:instructorId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId, instructorId } = req.params;
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rowCount } = await db.query(
+      `DELETE FROM karate_event_instructors WHERE id = $1 AND event_id = $2`,
+      [instructorId, examId]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Ministrante não encontrado', code: 'NOT_FOUND' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[karateExams] instructor delete error:', err.message);
+    res.status(500).json({ error: 'Erro ao remover ministrante', detail: err.message });
+  }
+});
 
 module.exports = router;

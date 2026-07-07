@@ -969,16 +969,32 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
     if (fee > 0 && paymentProvider && paymentProvider.createPixCharge) {
       try {
         const txid = `insc-${String(inscription.id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 18)}`;
+        const descr = `Inscrição ${kindLabel} - ${ev.name || ''}`;
         const charge = await paymentProvider.createPixCharge({
-          federationId: fed.id, amount: fee, txid,
-          description: `Inscrição ${kindLabel} - ${ev.name || ''}`,
+          federationId: fed.id, amount: fee, txid, description: descr,
         });
-        await db.query(
-          `INSERT INTO karate_payment_intents
-             (federation_id, provider, payment_intent_id, payload, qr_image, status, expires_at, created_at, updated_at)
-           VALUES ($1,$2,$3,$4,$5,'pending',$6, NOW(), NOW())`,
-          [fed.id, charge.provider, charge.payment_intent_id, charge.payload, charge.qr_image || null, charge.expires_at]
-        );
+        // Ledger agnóstico de provider (migration 213): grava valor + origem
+        // para reconciliação por qualquer provider (BaaS futuro). Fallback
+        // defensivo 42703 mantém o PIX mesmo em deploy parcial (coluna ausente).
+        try {
+          await db.query(
+            `INSERT INTO karate_payment_intents
+               (federation_id, provider, payment_intent_id, payload, qr_image, status, expires_at,
+                amount, source_type, source_id, txid, description, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,'pending',$6, $7,'event_registration',$8,$9,$10, NOW(), NOW())`,
+            [fed.id, charge.provider, charge.payment_intent_id, charge.payload, charge.qr_image || null,
+             charge.expires_at, fee, inscription.id, txid, descr]
+          );
+        } catch (e2) {
+          if (e2.code === '42703') {
+            await db.query(
+              `INSERT INTO karate_payment_intents
+                 (federation_id, provider, payment_intent_id, payload, qr_image, status, expires_at, created_at, updated_at)
+               VALUES ($1,$2,$3,$4,$5,'pending',$6, NOW(), NOW())`,
+              [fed.id, charge.provider, charge.payment_intent_id, charge.payload, charge.qr_image || null, charge.expires_at]
+            );
+          } else throw e2;
+        }
         payment = {
           payment_intent_id: charge.payment_intent_id,
           payload: charge.payload,
