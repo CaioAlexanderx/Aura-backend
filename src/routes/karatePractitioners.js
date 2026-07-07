@@ -54,6 +54,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { nextPractitionerRegistrationNumber } = require('../services/karateService');
+const cards = require('../services/karateCardService');
 const { uploadToR2 } = require('../utils/r2Storage');
 
 // Campos de endereço da ficha (colunas em customers).
@@ -204,6 +205,8 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     sex, affiliation_since,
     // Matrícula manual (opcional) — se ausente/vazia, gera sequencial automático
     karate_registration_number,
+    // Faixa inicial (campo de faixa no cadastro) → semeia a trajetória
+    belt_level, belt_name, belt_schema, graduated_at,
   } = req.body;
 
   if (!full_name || !String(full_name).trim()) {
@@ -384,9 +387,44 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       );
     }
 
+    // Faixa inicial → semeia karate_belt_history (a view karate_current_belt
+    // deriva a faixa atual; a aba Trajetória mostra essa primeira entrada).
+    const initBeltLevel = belt_level != null ? String(belt_level).trim() : '';
+    const initBeltName  = belt_name  != null ? String(belt_name).trim()  : '';
+    const hasInitBelt = !!(initBeltLevel || initBeltName);
+    if (hasInitBelt) {
+      await client.query(
+        `INSERT INTO karate_belt_history
+           (student_id, federation_id, belt_level, belt_name, belt_schema, graduated_at, notes, created_by, created_at)
+         VALUES ($1, $2, $3, $4, $5, COALESCE($6::date, $7::date, CURRENT_DATE), $8, $9, NOW())`,
+        [
+          insertRes.rows[0].id, federationId,
+          initBeltLevel || initBeltName,
+          initBeltName || initBeltLevel,
+          belt_schema || null,
+          (graduated_at ? String(graduated_at).slice(0, 10) : null),
+          (affiliation_since ? String(affiliation_since).slice(0, 10) : null),
+          'Faixa inicial do cadastro',
+          req.user?.id || null,
+        ]
+      );
+    }
+
     await client.query('COMMIT');
 
     const p = insertRes.rows[0];
+
+    // Auto-emissão da carteirinha para novos praticantes. Best-effort: só quando
+    // há matrícula + faixa; nunca derruba o cadastro. Como a carteirinha lê os
+    // dados ao vivo, ela reflete qualquer mudança posterior automaticamente.
+    if (p.karate_registration_number && hasInitBelt) {
+      try {
+        await cards.issueCard({ federation_id: federationId, student_id: p.id, issued_by: req.user?.id || null });
+      } catch (e) {
+        console.warn('[karatePractitioners] auto-emissão de carteirinha falhou (não bloqueia cadastro):', e.message);
+      }
+    }
+
     res.status(201).json(shapePractitioner(p));
   } catch (err) {
     await client.query('ROLLBACK');
