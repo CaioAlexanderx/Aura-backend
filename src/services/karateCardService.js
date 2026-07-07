@@ -260,13 +260,24 @@ async function revokeCard({ federation_id, student_id, revoked_by }) {
  *  Inclui birth_date + cpf (contexto AUTENTICADO) para a arte aprovada da carteirinha. */
 async function getCurrentCard({ federation_id, student_id }) {
   const r = await db.query(
+    // Estrutura (faixa/dojô/foto/matrícula) derivada AO VIVO do praticante atual,
+    // com fallback ao snapshot da emissão. Assim a carteirinha reflete
+    // automaticamente qualquer mudança de dado (troca de dojô, novo Dan, etc.).
     `SELECT kc.*, cu.name AS student_name,
             to_char(cu.birth_date, 'YYYY-MM-DD') AS birth_date,
             cu.cpf_cnpj,
+            COALESCE(cb.belt_level, kc.belt_snapshot)                          AS belt_live,
+            COALESCE(cb.belt_name,  kc.belt_name_snapshot)                     AS belt_name_live,
+            COALESCE(cu.dojo_id, kc.dojo_id)                                   AS dojo_id_live,
+            COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot)      AS dojo_name_live,
+            COALESCE(cu.karate_photo_url, cu.photo_url, kc.photo_url_snapshot) AS photo_url_live,
+            COALESCE(cu.karate_registration_number, kc.card_number)           AS card_number_live,
             COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
             COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
      FROM karate_membership_cards kc
      JOIN customers cu ON cu.id = kc.student_id
+     LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = kc.federation_id
+     LEFT JOIN companies dj ON dj.id = cu.dojo_id
      LEFT JOIN companies fed ON fed.id = kc.federation_id
      WHERE kc.student_id = $1 AND kc.federation_id = $2
      ORDER BY kc.issued_at DESC
@@ -282,13 +293,13 @@ async function getCurrentCard({ federation_id, student_id }) {
     student_name: c.student_name,
     birth_date: c.birth_date,   // contexto autenticado/admin (NUNCA no verify publico); ja YYYY-MM-DD (tz-safe)
     cpf: c.cpf_cnpj || null,    // contexto autenticado/admin (NUNCA no verify publico)
-    card_number: c.card_number,
-    belt: c.belt_snapshot,
-    belt_name: c.belt_name_snapshot,
-    dojo_id: c.dojo_id,
-    dojo_name: c.dojo_name_snapshot,
-    photo_url: c.photo_url_snapshot,
-    is_minor: c.is_minor,
+    card_number: c.card_number_live,
+    belt: c.belt_live,
+    belt_name: c.belt_name_live,
+    dojo_id: c.dojo_id_live,
+    dojo_name: c.dojo_name_live,
+    photo_url: c.photo_url_live,
+    is_minor: computeIsMinor(c.birth_date),
     issued_at: c.issued_at,
     revoked_at: c.revoked_at || null,
     verify_token: c.verify_token,
@@ -318,19 +329,24 @@ function effectiveStatus(card) {
 async function verifyByToken(token) {
   if (!token || !/^[a-f0-9]{16,64}$/i.test(token)) return null;
   const r = await db.query(
-    `SELECT kc.card_number, kc.is_minor, kc.status AS card_status,
+    // Faixa, dojô e matrícula exibidos são os ATUAIS (live), com fallback ao
+    // snapshot — a verificação pública também reflete mudanças automaticamente.
+    `SELECT COALESCE(cu.karate_registration_number, kc.card_number) AS card_number,
+            kc.status AS card_status,
             kc.student_id, kc.federation_id,
-            kc.dojo_name_snapshot,
+            to_char(cu.birth_date, 'YYYY-MM-DD') AS birth_date,
             cu.name AS student_name,
             COALESCE(cb.belt_level, kc.belt_snapshot)      AS belt,
             COALESCE(cb.belt_name,  kc.belt_name_snapshot) AS belt_name,
             to_char(cb.current_since, 'YYYY-MM-DD') AS belt_since,
+            COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot) AS dojo_name,
             COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
             COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
      FROM karate_membership_cards kc
      JOIN customers cu ON cu.id = kc.student_id
      LEFT JOIN karate_current_belt cb
        ON cb.student_id = kc.student_id AND cb.federation_id = kc.federation_id
+     LEFT JOIN companies dj ON dj.id = cu.dojo_id
      LEFT JOIN companies fed ON fed.id = kc.federation_id
      WHERE kc.verify_token = $1
      LIMIT 1`,
@@ -350,6 +366,8 @@ async function verifyByToken(token) {
     validade = ann.validade;      // due_date ou null
   }
   const valid = situacao === 'valida';
+  // is_minor derivado ao vivo da data de nascimento atual (LGPD depende disso).
+  const isMinorLive = computeIsMinor(c.birth_date);
 
   const base = {
     valid,
@@ -358,13 +376,13 @@ async function verifyByToken(token) {
     belt: c.belt || null,         // nível (ex.: '2dan')
     belt_name: c.belt_name || null,
     belt_since: c.belt_since || null,
-    dojo_name: c.dojo_name_snapshot || null,
+    dojo_name: c.dojo_name || null,
     federation_name: c.federation_name || null,
     federation_logo: c.federation_logo || null,
-    is_minor: c.is_minor,
+    is_minor: isMinorLive,
   };
 
-  if (c.is_minor) {
+  if (isMinorLive) {
     // LGPD Art. 14 — nome reduzido + foto oculta (frontend); registro permanece
     return { ...base, display_name: reducedName(c.student_name), card_number: c.card_number || null };
   }
@@ -382,11 +400,15 @@ async function listCards({ federation_id, status, page = 1, pageSize = 25 }) {
 
   const cnt = await db.query(`SELECT COUNT(*) AS total FROM karate_membership_cards kc ${where}`, params);
   const rows = await db.query(
-    `SELECT kc.id, kc.student_id, kc.card_number, kc.belt_name_snapshot,
-            kc.dojo_name_snapshot, kc.is_minor, kc.valid_until, kc.status, kc.issued_at,
+    `SELECT kc.id, kc.student_id, kc.is_minor, kc.valid_until, kc.status, kc.issued_at,
+            COALESCE(cu.karate_registration_number, kc.card_number)      AS card_number,
+            COALESCE(cb.belt_name, kc.belt_name_snapshot)                AS belt_name,
+            COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot) AS dojo_name,
             cu.name AS student_name
      FROM karate_membership_cards kc
      JOIN customers cu ON cu.id = kc.student_id
+     LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = kc.federation_id
+     LEFT JOIN companies dj ON dj.id = cu.dojo_id
      ${where}
      ORDER BY kc.issued_at DESC
      LIMIT $${n} OFFSET $${n + 1}`,
@@ -401,8 +423,8 @@ async function listCards({ federation_id, status, page = 1, pageSize = 25 }) {
       student_id: c.student_id,
       student_name: c.student_name,
       card_number: c.card_number,
-      belt_name: c.belt_name_snapshot,
-      dojo_name: c.dojo_name_snapshot,
+      belt_name: c.belt_name,
+      dojo_name: c.dojo_name,
       is_minor: c.is_minor,
       status: effectiveStatus(c),
       issued_at: c.issued_at,
