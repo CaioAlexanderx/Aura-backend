@@ -94,9 +94,12 @@ router.get('/karate-gate', requireAuth, async (req, res) => {
     // trial. Qualquer outro estado — overdue, pending (PIX aguardando), inactive,
     // trial expirado — BLOQUEIA. (Assim gerar o PIX não desbloqueia antes do
     // pagamento; o webhook confirma → 'active' → gate some.)
+    const overdue = c.billing_status === 'overdue';
     const trialActive = c.trial_ends_at && new Date(c.trial_ends_at) > now;
     const active = c.billing_status === 'active';
-    const blocked = !active && !trialActive;
+    // 'overdue' (Asaas marcou cobrança vencida) SEMPRE bloqueia, mesmo se o
+    // trial_ends_at ainda for futuro. Fora disso: em dia = active OU trial vigente.
+    const blocked = overdue || (!active && !trialActive);
 
     res.json({
       state: blocked ? 'blocked' : 'ok',
