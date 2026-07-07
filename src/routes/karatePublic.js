@@ -433,7 +433,7 @@ async function resolveEvent(fedId, eventId) {
     try {
       const ex = await db.query(
         `SELECT id, name, exam_type, event_date, location, fee_amount, max_candidates, status,
-                registration_fields, description, 'exam' AS kind
+                hours, registration_fields, description, 'exam' AS kind
          FROM karate_belt_exams WHERE id = $1 AND federation_id = $2 LIMIT 1`,
         [eventId, fedId]
       );
@@ -447,7 +447,7 @@ async function resolveEvent(fedId, eventId) {
   }
   if (!HAS_REGISTRATION_FIELDS_COL) {
     const ex = await db.query(
-      `SELECT id, name, exam_type, event_date, location, fee_amount, max_candidates, status, description, 'exam' AS kind
+      `SELECT id, name, exam_type, event_date, location, fee_amount, max_candidates, status, hours, description, 'exam' AS kind
        FROM karate_belt_exams WHERE id = $1 AND federation_id = $2 LIMIT 1`,
       [eventId, fedId]
     );
@@ -637,6 +637,7 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
         description: ev.description || null,
         banner_url,
         event_date: ev.event_date, location: ev.location,
+        hours: ev.hours ?? null,
         fee_amount: ev.fee_amount,
         from_price: lowestPositivePrice([ev.fee_amount]),
         capacity,
