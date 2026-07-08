@@ -128,6 +128,34 @@ router.get('/verify/:token', async (req, res) => {
   }
 });
 
+// ── GET /verify/cert/:token — verificação pública de certificado (Fase 3) ──
+router.get('/verify/cert/:token', async (req, res) => {
+  try {
+    const r = await db.query(
+      `SELECT ic.data_snapshot, ic.template_snapshot, ic.revoked, ic.issued_at,
+              COALESCE(c.trade_name, c.legal_name) AS federation_name
+       FROM karate_issued_certificates ic
+       JOIN companies c ON c.id = ic.federation_id
+       WHERE ic.verify_token = $1 LIMIT 1`,
+      [req.params.token]
+    );
+    if (!r.rows.length) return res.status(404).json({ valid: false, error: 'Certificado não encontrado' });
+    const row = r.rows[0];
+    if (row.revoked) return res.status(200).json({ valid: false, revoked: true, error: 'Certificado revogado' });
+    res.json({
+      valid: true,
+      issued_at: row.issued_at,
+      federation_name: row.federation_name,
+      data: row.data_snapshot,
+      template: row.template_snapshot,
+    });
+  } catch (err) {
+    if (err.code === '42P01') return res.status(404).json({ valid: false, error: 'Certificado não encontrado' });
+    console.error('[karatePublic] verify cert error:', err.message);
+    res.status(500).json({ error: 'Erro ao verificar certificado' });
+  }
+});
+
 // ── GET /portal/me — portal AUTENTICADO (trajetória completa) ──
 router.get('/portal/me', requirePractitionerToken, async (req, res) => {
   const { practitioner_id, federation_id } = req.practitioner;
