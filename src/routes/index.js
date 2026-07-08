@@ -292,5 +292,6 @@ router.use('/federation/:id', require('./karateDojo'));
 //   POST /public/karate/:slug/lookup         — lookup praticante por CPF, e-mail ou FPKT
 //   GET  /public/karate/:slug/banners        — banners ativos (hub/inscricao/ambos)
 router.use('/federation/:id', require('./karatePromoBanners'));
+router.use('/federation/:id', require('./karateEventCertificates'));
 
 module.exports = router;
