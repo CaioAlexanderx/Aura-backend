@@ -389,6 +389,79 @@ async function verifyByToken(token) {
   return { ...base, display_name: c.student_name, card_number: c.card_number || null };
 }
 
+/**
+ * getCardCopyByToken — cópia digital autenticada por identidade (Item 6).
+ * O praticante prova quem é informando RG ou CPF; se bater com o cadastro,
+ * devolve o cartão COMPLETO (mesma forma de getCurrentCard) para gerar o PDF
+ * frente/verso. Se o cadastro não tiver NEM RG NEM CPF, devolve no_identity +
+ * WhatsApp da federação (fallback de contato). Nunca vaza dados sem match.
+ */
+function onlyDigitsCard(v) { return String(v == null ? '' : v).replace(/[^0-9]/g, ''); }
+
+async function getCardCopyByToken(token, identifier) {
+  if (!token || !/^[a-f0-9]{16,64}$/i.test(token)) return { not_found: true };
+  const r = await db.query(
+    `SELECT kc.id, kc.federation_id, kc.student_id, kc.issued_at, kc.verify_token, kc.status,
+            cu.name AS student_name,
+            to_char(cu.birth_date, 'YYYY-MM-DD') AS birth_date,
+            cu.cpf_cnpj, cu.rg,
+            COALESCE(cb.belt_level, kc.belt_snapshot)                          AS belt_live,
+            COALESCE(cb.belt_name,  kc.belt_name_snapshot)                     AS belt_name_live,
+            COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot)      AS dojo_name_live,
+            COALESCE(cu.karate_photo_url, cu.photo_url, kc.photo_url_snapshot) AS photo_url_live,
+            COALESCE(cu.karate_registration_number, kc.card_number)           AS card_number_live,
+            COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
+            COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo,
+            COALESCE(NULLIF(fed.wa_phone_display, ''), fed.phone) AS federation_whatsapp
+     FROM karate_membership_cards kc
+     JOIN customers cu ON cu.id = kc.student_id
+     LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = kc.federation_id
+     LEFT JOIN companies dj ON dj.id = cu.dojo_id
+     LEFT JOIN companies fed ON fed.id = kc.federation_id
+     WHERE kc.verify_token = $1
+     ORDER BY kc.issued_at DESC
+     LIMIT 1`,
+    [token]
+  );
+  if (!r.rows.length) return { not_found: true };
+  const c = r.rows[0];
+
+  const cpfDigits = onlyDigitsCard(c.cpf_cnpj);
+  const rgDigits  = onlyDigitsCard(c.rg);
+
+  // Sem RG nem CPF no cadastro → fallback WhatsApp da federação.
+  if (!cpfDigits && !rgDigits) {
+    return { no_identity: true, federation_name: c.federation_name || null, whatsapp: c.federation_whatsapp || null };
+  }
+
+  const idDigits = onlyDigitsCard(identifier);
+  const match = idDigits.length >= 5 && (idDigits === cpfDigits || idDigits === rgDigits);
+  if (!match) return { match: false };
+
+  // Match → devolve o cartão completo (mesma forma consumida pela carteirinha).
+  return {
+    match: true,
+    card: {
+      id: c.id,
+      federation_id: c.federation_id,
+      student_id: c.student_id,
+      student_name: c.student_name,
+      birth_date: c.birth_date,
+      cpf: c.cpf_cnpj || null,
+      card_number: c.card_number_live,
+      belt: c.belt_live,
+      belt_name: c.belt_name_live,
+      dojo_name: c.dojo_name_live,
+      photo_url: c.photo_url_live,
+      issued_at: c.issued_at,
+      verify_token: c.verify_token || token,
+      status: c.status,
+      federation_name: c.federation_name || null,
+      federation_logo: c.federation_logo || null,
+    },
+  };
+}
+
 /** listCards — listagem interna (admin/staff). */
 async function listCards({ federation_id, status, page = 1, pageSize = 25 }) {
   const conds = ['kc.federation_id = $1'];
@@ -469,6 +542,7 @@ module.exports = {
   revokeCard,
   getCurrentCard,
   verifyByToken,
+  getCardCopyByToken,
   listCards,
   issueBatch,
   effectiveStatus,

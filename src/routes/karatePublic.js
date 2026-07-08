@@ -129,6 +129,23 @@ router.get('/verify/:token', async (req, res) => {
   }
 });
 
+// ── POST /verify/:token/card — cópia digital autenticada (Item 6) ──
+// Body: { identifier } (RG ou CPF). Match → cartão completo p/ gerar PDF.
+// Sem RG/CPF no cadastro → { no_identity, whatsapp }. Sem match → 401.
+router.post('/verify/:token/card', async (req, res) => {
+  try {
+    const identifier = (req.body && (req.body.identifier || req.body.cpf || req.body.rg)) || '';
+    const out = await cards.getCardCopyByToken(req.params.token, identifier);
+    if (out.not_found) return res.status(404).json({ error: 'Carteirinha não encontrada' });
+    if (out.no_identity) return res.status(200).json({ no_identity: true, whatsapp: out.whatsapp, federation_name: out.federation_name });
+    if (!out.match) return res.status(401).json({ error: 'RG ou CPF não confere com o cadastro', code: 'IDENTITY_MISMATCH' });
+    return res.status(200).json({ card: out.card });
+  } catch (err) {
+    console.error('[karatePublic] verify card copy error:', err.message);
+    res.status(500).json({ error: 'Erro ao gerar cópia da carteirinha' });
+  }
+});
+
 // ── GET /verify/cert/:token — verificação pública de certificado (Fase 3) ──
 router.get('/verify/cert/:token', async (req, res) => {
   try {
