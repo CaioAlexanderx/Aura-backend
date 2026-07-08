@@ -75,6 +75,7 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
     const { rows: dojos } = await db.query(
       `SELECT
          c.id AS dojo_id, c.name AS dojo_name, c.fpkt_affiliation_id,
+         COALESCE(NULLIF(c.wa_phone_display, ''), c.phone) AS whatsapp,
          h.id AS annuity_id, h.reference_period, h.amount, h.due_date,
          h.paid_at, h.status AS annuity_status, h.transaction_id
        FROM companies c
@@ -99,6 +100,7 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
         dojo_id: d.dojo_id,
         dojo_name: d.dojo_name,
         fpkt_affiliation_id: d.fpkt_affiliation_id || null,
+        whatsapp: d.whatsapp || null,
         annuity_id: d.annuity_id || null,
         amount: d.amount ? parseFloat(d.amount) : 0,
         reference_period: d.reference_period || year,
@@ -122,6 +124,23 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
   } catch (err) {
     console.error('[karateAnnuities] list dojos error:', err.message);
     res.status(500).json({ error: 'Erro ao listar anuidades de dojôs' });
+  }
+});
+
+// POST /financial/annuities/pix-brcode — copia-e-cola PIX p/ mensagem de cobrança
+// (wa.me/e-mail). Gera o BR Code estático a partir da chave da federação SEM
+// persistir intent (é uma cobrança manual/adicional, não um lançamento).
+router.post('/annuities/pix-brcode', ...guards.adminOnly(), async (req, res) => {
+  const federationId = req.params.id;
+  const amount = parseFloat(req.body && req.body.amount);
+  if (!(amount > 0)) return res.status(422).json({ error: 'amount inválido', code: 'VALIDATION_ERROR' });
+  try {
+    const txid = ('WA' + Date.now().toString(36)).replace(/[^A-Za-z0-9]/g, '').slice(0, 20);
+    const r = await createPixCharge({ federationId, amount, txid, description: 'Anuidade' });
+    return res.json({ payload: r.payload || null, provider: r.provider || null });
+  } catch (err) {
+    console.error('[karateAnnuities] pix-brcode error:', err.message);
+    return res.status(500).json({ error: 'Erro ao gerar PIX' });
   }
 });
 
@@ -1136,6 +1155,7 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
          cu.id AS practitioner_id,
          cu.name AS full_name,
          cu.karate_registration_number,
+         cu.phone AS whatsapp,
          t.id AS transaction_id,
          t.amount,
          t.due_date,
@@ -1178,6 +1198,7 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
         practitioner_id: r.practitioner_id,
         full_name: r.full_name,
         karate_registration_number: r.karate_registration_number || null,
+        whatsapp: r.whatsapp || null,
         amount: r.amount ? parseFloat(r.amount) : 0,
         reference_period: year,
         due_date: r.due_date || null,
