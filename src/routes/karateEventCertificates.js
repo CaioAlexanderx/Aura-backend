@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { uploadToR2 } = require('../utils/r2Storage');
+const mailer = require('../services/karateMailer');
 
 const ALLOWED_LAYOUTS = ['A', 'B', 'C', 'D', 'E'];
 const ALLOWED_IMG = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
@@ -146,7 +147,7 @@ router.post('/belt-exams/:examId/certificates', ...guards.staffWrite(), async (r
     // Elegíveis: curso → não ausente/rejeitado; exame → aprovado; OU certificate_eligible
     const isCurso = event.exam_type === 'curso';
     const cand = await db.query(
-      `SELECT ec.student_id, cu.name AS student_name
+      `SELECT ec.student_id, cu.name AS student_name, cu.email AS student_email
        FROM karate_belt_exam_candidates ec JOIN customers cu ON cu.id = ec.student_id
        WHERE ec.exam_id = $1
          AND ( ec.certificate_eligible = true
@@ -177,6 +178,21 @@ router.post('/belt-exams/:examId/certificates', ...guards.staffWrite(), async (r
          VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb)`,
         [federationId, examId, c.student_id, token, JSON.stringify(tsnap), JSON.stringify(dsnap)]);
       issued++;
+      // E-mail "certificado disponível" — best-effort.
+      try {
+        if (c.student_email && mailer && mailer.sendRaw) {
+          const verifyUrl = `https://app.getaura.com.br/karate/verify/cert/${token}`;
+          const html = `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#2b2620">
+            <h2 style="color:#b02a2a;margin:0 0 8px">Seu certificado está disponível</h2>
+            <p>Olá, ${c.student_name || ''}!</p>
+            <p>Seu certificado do evento <b>${event.name || ''}</b> foi emitido.</p>
+            <p><a href="${verifyUrl}" style="display:inline-block;background:#b02a2a;color:#fff;text-decoration:none;padding:11px 20px;border-radius:8px;font-weight:bold">Ver e baixar certificado</a></p>
+            <p style="color:#6a6154;font-size:12px">Link de verificação: ${verifyUrl}</p>
+            <p style="color:#6a6154;font-size:13px">${event.federation_name || 'Federação'} · Aura Karatê</p>
+          </div>`;
+          mailer.sendRaw({ to: c.student_email, subject: `Certificado disponível — ${event.name || 'evento'}`, html }).catch(() => {});
+        }
+      } catch (e) { /* nunca bloqueia */ }
     }
     res.status(201).json({ issued, skipped, eligible: cand.rows.length });
   } catch (e) { console.error('[certs] emit', e.message); res.status(500).json({ error: 'Erro ao emitir certificados', detail: e.message }); }

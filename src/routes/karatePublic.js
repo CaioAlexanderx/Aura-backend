@@ -15,6 +15,7 @@
 const router = require('express').Router();
 const crypto = require('crypto');
 const db = require('../config/database');
+const mailer = require('../services/karateMailer');
 const cards = require('../services/karateCardService');
 const portalAuth = require('../services/karatePortalAuthService');
 const { requirePractitionerToken } = require('../middleware/karatePortalToken');
@@ -1114,6 +1115,30 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
         payment = { error: 'Não foi possível gerar o PIX agora. A federação confirmará o pagamento.' };
       }
     }
+
+    // E-mail "inscrição recebida" — best-effort, nunca bloqueia a resposta.
+    try {
+      const participantEmail = isGuest
+        ? (req.body && req.body.guest && req.body.guest.email) || null
+        : (student && student.email) || null;
+      if (participantEmail && mailer && mailer.sendRaw) {
+        const valorTxt = fee > 0 ? `R$ ${Number(fee).toFixed(2).replace('.', ',')}` : 'Gratuito';
+        const statusTxt = fee > 0
+          ? 'Sua inscrição está registrada e aguardando a confirmação do pagamento pela federação.'
+          : 'Sua inscrição está registrada.';
+        const html = `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;color:#2b2620">
+          <h2 style="color:#b02a2a;margin:0 0 8px">Inscrição recebida</h2>
+          <p>Olá, ${(student && student.name) || ''}!</p>
+          <p>${statusTxt}</p>
+          <table style="width:100%;border-collapse:collapse;margin:12px 0">
+            <tr><td style="color:#6a6154;padding:4px 0">Evento</td><td style="text-align:right;font-weight:bold">${ev.name || ''}</td></tr>
+            <tr><td style="color:#6a6154;padding:4px 0">Valor</td><td style="text-align:right;font-weight:bold">${valorTxt}</td></tr>
+          </table>
+          <p style="color:#6a6154;font-size:13px">${fed.name || 'Federação'} · Aura Karatê</p>
+        </div>`;
+        mailer.sendRaw({ to: participantEmail, subject: `Inscrição recebida — ${ev.name || 'evento'}`, html }).catch(() => {});
+      }
+    } catch (e) { /* e-mail nunca bloqueia */ }
 
     res.status(201).json({
       ok: true,
