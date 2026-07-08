@@ -862,13 +862,37 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
       });
     }
 
-    // Lookup do praticante por CPF/e-mail/FPKT (precisa estar cadastrado na federação)
-    const student = await resolvePractitionerByIdentifier(fed.id, { cpf, identifier });
+    // Lookup do praticante por CPF/e-mail/FPKT/RG (filiado). Se não achar e o
+    // formulário trouxe dados de convidado, cria um customer não-filiado (guest)
+    // e segue com o preço de não-filiado (Fase 2B).
+    let student = await resolvePractitionerByIdentifier(fed.id, { cpf, identifier });
+    let isGuest = false;
     if (!student) {
-      return res.status(404).json({
-        error: 'Cadastro não localizado nesta federação. Procure seu dojô ou a secretaria.',
-        code: 'PRACTITIONER_NOT_FOUND',
-      });
+      const guest = req.body && req.body.guest;
+      const gname = guest && guest.name ? String(guest.name).trim() : '';
+      if (gname) {
+        const gcpf = onlyDigits(guest.cpf || cpf || '') || null;
+        try {
+          const gi = await db.query(
+            `INSERT INTO customers (company_id, federation_id, name, cpf_cnpj, email, phone, is_student, is_guest)
+             VALUES ($1, $1, $2, $3, $4, $5, false, true)
+             RETURNING id, name`,
+            [fed.id, gname, gcpf, (guest.email || null), (guest.phone || null)]
+          );
+          student = { id: gi.rows[0].id, name: gi.rows[0].name };
+          isGuest = true;
+        } catch (e) {
+          if (e.code === '42703') {
+            return res.status(409).json({ error: 'Inscrição de não-filiado indisponível no momento.', code: 'GUEST_UNAVAILABLE' });
+          }
+          throw e;
+        }
+      } else {
+        return res.status(404).json({
+          error: 'Cadastro não localizado. Se você não é filiado, preencha seus dados como não-filiado.',
+          code: 'PRACTITIONER_NOT_FOUND',
+        });
+      }
     }
 
     const responsesJson = JSON.stringify(responses && typeof responses === 'object' ? responses : {});
@@ -1017,7 +1041,7 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
     const fee = ev.kind === 'competition' && category && category.fee_amount != null
       ? Number(category.fee_amount) || 0
       : _curLot
-        ? Number(_curLot.price_member) || 0
+        ? Number(isGuest ? _curLot.price_nonmember : _curLot.price_member) || 0
         : Number(ev.fee_amount) || 0;
     const kindLabel = ev.kind === 'exam' ? 'exame' : ev.kind === 'competition' ? 'campeonato' : 'curso';
     if (fee > 0 && paymentProvider && paymentProvider.createPixCharge) {
