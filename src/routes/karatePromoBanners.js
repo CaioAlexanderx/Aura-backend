@@ -79,7 +79,7 @@ router.post(
   async (req, res) => {
     try {
       const federationId = req.params.federationId || req.params.id;
-      const { format, title, event_id, placement, sort_order, active, starts_at, ends_at } = req.body || {};
+      const { format, title, event_id, placement, sort_order, active, starts_at, ends_at, has_text } = req.body || {};
 
       // Validar format
       if (!format || !ALLOWED_FORMATS.includes(format)) {
@@ -131,13 +131,13 @@ router.post(
       const ins = await db.query(
         `INSERT INTO karate_promo_banners
            (federation_id, title, image_url, format, event_id, placement,
-            active, sort_order, starts_at, ends_at, created_by, created_at)
+            active, sort_order, starts_at, ends_at, has_text, created_by, created_at)
          VALUES ($1, $2, $3, $4,
            $5::uuid,
            $6, $7,
            COALESCE($8::int, 0),
            $9::timestamptz, $10::timestamptz,
-           $11::uuid, NOW())
+           $11::boolean, $12::uuid, NOW())
          RETURNING *`,
         [
           federationId,
@@ -150,6 +150,7 @@ router.post(
           sort_order != null ? parseInt(sort_order, 10) : null,
           starts_at || null,
           ends_at || null,
+          has_text === true || has_text === 'true',
           req.user?.id || null,
         ]
       );
@@ -205,7 +206,7 @@ router.patch('/banners/:bannerId', ...guards.staffWrite(), async (req, res) => {
       return res.status(404).json({ error: 'Banner não encontrado', code: 'NOT_FOUND' });
     }
 
-    const { title, active, sort_order, format, event_id, placement, starts_at, ends_at } = req.body || {};
+    const { title, active, sort_order, format, event_id, placement, starts_at, ends_at, has_text } = req.body || {};
 
     // Construir SET dinâmico (só campos enviados)
     const sets = [];
@@ -214,6 +215,7 @@ router.patch('/banners/:bannerId', ...guards.staffWrite(), async (req, res) => {
 
     if (title !== undefined) { sets.push(`title = $${idx++}`); vals.push(title); }
     if (active !== undefined) { sets.push(`active = $${idx++}`); vals.push(active === true || active === 'true'); }
+    if (has_text !== undefined) { sets.push(`has_text = $${idx++}`); vals.push(has_text === true || has_text === 'true'); }
     if (sort_order !== undefined) { sets.push(`sort_order = $${idx++}`); vals.push(parseInt(sort_order, 10)); }
     if (format !== undefined) {
       if (!ALLOWED_FORMATS.includes(format)) {
