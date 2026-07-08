@@ -157,6 +157,42 @@ router.get('/verify/cert/:token', async (req, res) => {
   }
 });
 
+// ── POST /:slug/meus-certificados — participante consulta seus certificados ──
+// Escopo por federação (slug) + CPF. Anti-enumeração: sempre 200 com lista.
+router.post('/:slug/meus-certificados', async (req, res) => {
+  try {
+    const fed = await resolveFederation(req.params.slug);
+    if (!fed) return res.status(404).json({ error: 'Federação não encontrada' });
+    const cpf = onlyDigits((req.body && req.body.cpf) || '');
+    if (cpf.length < 11) return res.status(422).json({ error: 'Informe um CPF válido', code: 'VALIDATION_ERROR' });
+    let rows = [];
+    try {
+      const r = await db.query(
+        `SELECT ic.verify_token, ic.issued_at, ic.revoked,
+                ic.data_snapshot->>'course_name' AS course_name,
+                ic.data_snapshot->>'participant_name' AS participant_name
+         FROM karate_issued_certificates ic
+         JOIN customers cu ON cu.id = ic.student_id
+         WHERE ic.federation_id = $1
+           AND regexp_replace(COALESCE(cu.cpf_cnpj,''), '[^0-9]', '', 'g') = $2
+           AND ic.revoked = false
+         ORDER BY ic.issued_at DESC`,
+        [fed.id, cpf]
+      );
+      rows = r.rows;
+    } catch (e) { if (e.code !== '42P01') throw e; }
+    res.json({
+      federation: { name: fed.name },
+      certificates: rows.map((c) => ({
+        verify_token: c.verify_token, course_name: c.course_name, participant_name: c.participant_name, issued_at: c.issued_at,
+      })),
+    });
+  } catch (err) {
+    console.error('[karatePublic] meus-certificados error:', err.message);
+    res.status(500).json({ error: 'Erro ao consultar certificados' });
+  }
+});
+
 // ── GET /portal/me — portal AUTENTICADO (trajetória completa) ──
 router.get('/portal/me', requirePractitionerToken, async (req, res) => {
   const { practitioner_id, federation_id } = req.practitioner;
