@@ -84,7 +84,7 @@ router.get('/', ...guards.read(), async (req, res) => {
   const offset   = (page - 1) * pageSize;
 
   try {
-    const conditions = [`cu.federation_id = $1`];
+    const conditions = [`cu.federation_id = $1`, `cu.is_guest = false`];
     const params = [federationId];
     let n = 2;
 

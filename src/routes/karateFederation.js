@@ -158,7 +158,7 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
       ),
       db.query(
         `SELECT COUNT(*) AS practitioner_count FROM customers
-         WHERE federation_id = $1`,
+         WHERE federation_id = $1 AND is_guest = false`,
         [federationId]
       ),
       db.query(
