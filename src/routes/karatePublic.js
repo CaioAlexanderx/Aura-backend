@@ -89,7 +89,9 @@ function detectIdentifierQuery(rawIdentifier) {
       SELECT id, name, email, phone, dojo_id, karate_registration_number
       FROM customers
       WHERE federation_id = $1
-        AND karate_registration_number = $2
+        AND ( karate_registration_number = $2
+           OR ( length(regexp_replace($2, '[^0-9]', '', 'g')) >= 5
+                AND regexp_replace(COALESCE(rg,''), '[^0-9]', '', 'g') = regexp_replace($2, '[^0-9]', '', 'g') ) )
       LIMIT 1`,
     queryParam: id,
   };
@@ -542,6 +544,30 @@ async function resolveEventBannerUrl(eventId) {
   }
 }
 
+// Lotes de inscrição do evento (migration 215). Lote atual = primeiro lote
+// ativo (por sort_order) ainda não vencido; se todos venceram, usa o último.
+async function resolveEventLots(eventId) {
+  try {
+    const r = await db.query(
+      `SELECT id, name, sort_order, price_member, price_nonmember, ends_at, active
+       FROM karate_event_registration_lots
+       WHERE event_id = $1 AND active = true
+       ORDER BY sort_order ASC, created_at ASC`,
+      [eventId]
+    );
+    return r.rows;
+  } catch (e) {
+    if (e.code === '42P01') return []; // tabela ausente (migration pendente)
+    throw e;
+  }
+}
+function pickCurrentLot(lots) {
+  if (!lots || !lots.length) return null;
+  const now = Date.now();
+  const open = lots.find((l) => !l.ends_at || new Date(l.ends_at).getTime() >= now);
+  return open || lots[lots.length - 1];
+}
+
 async function resolveCompetitionCategories(competitionId) {
   try {
     const { rows } = await db.query(
@@ -632,6 +658,9 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
       capacity = { max: ev.max_candidates || null, filled: cap.rows[0].filled };
     }
 
+    const evLots = ev.kind === 'competition' ? [] : await resolveEventLots(ev.id);
+    const evCurrentLot = pickCurrentLot(evLots);
+
     res.json({
       federation: { name: fed.name, logo: fed.logo },
       event: {
@@ -643,7 +672,20 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
         event_date: ev.event_date, location: ev.location,
         hours: ev.hours ?? null,
         fee_amount: ev.fee_amount,
-        from_price: lowestPositivePrice([ev.fee_amount]),
+        from_price: evCurrentLot
+          ? lowestPositivePrice([evCurrentLot.price_member, evCurrentLot.price_nonmember])
+          : lowestPositivePrice([ev.fee_amount]),
+        lots: evLots.map((l) => ({
+          id: l.id, name: l.name,
+          price_member: Number(l.price_member), price_nonmember: Number(l.price_nonmember),
+          ends_at: l.ends_at, is_current: evCurrentLot ? l.id === evCurrentLot.id : false,
+        })),
+        current_lot: evCurrentLot ? {
+          id: evCurrentLot.id, name: evCurrentLot.name,
+          price_member: Number(evCurrentLot.price_member),
+          price_nonmember: Number(evCurrentLot.price_nonmember),
+          ends_at: evCurrentLot.ends_at,
+        } : null,
         capacity,
         registration_fields: ev.registration_fields || [],
       },
@@ -967,9 +1009,16 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
     // Competição: categoria pode sobrescrever a taxa da competição
     // (fee_amount em karate_competition_categories, quando != null).
     let payment = null;
+    // Preço: competição usa a categoria; exame/curso usa o LOTE atual. No 2A
+    // todo inscrito é filiado (fluxo de convidado entra no 2B) → price_member.
+    // Sem lotes configurados, cai no fee_amount legado do evento.
+    const _lots = ev.kind === 'competition' ? [] : await resolveEventLots(ev.id);
+    const _curLot = pickCurrentLot(_lots);
     const fee = ev.kind === 'competition' && category && category.fee_amount != null
       ? Number(category.fee_amount) || 0
-      : Number(ev.fee_amount) || 0;
+      : _curLot
+        ? Number(_curLot.price_member) || 0
+        : Number(ev.fee_amount) || 0;
     const kindLabel = ev.kind === 'exam' ? 'exame' : ev.kind === 'competition' ? 'campeonato' : 'curso';
     if (fee > 0 && paymentProvider && paymentProvider.createPixCharge) {
       try {
