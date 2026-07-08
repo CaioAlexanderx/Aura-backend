@@ -527,7 +527,7 @@ async function computeFromPrice(ev) {
 async function resolveEventBannerUrl(eventId) {
   try {
     const r = await db.query(
-      `SELECT image_url FROM karate_promo_banners
+      `SELECT image_url, has_text FROM karate_promo_banners
         WHERE event_id = $1 AND active = true
           AND (starts_at IS NULL OR starts_at <= NOW())
           AND (ends_at   IS NULL OR ends_at   >= NOW())
@@ -535,7 +535,7 @@ async function resolveEventBannerUrl(eventId) {
         LIMIT 1`,
       [eventId]
     );
-    return r.rows[0]?.image_url || null;
+    return r.rows[0] || null;
   } catch (e) {
     if (e.code === '42P01' || e.code === '42703') return null;
     throw e;
@@ -596,7 +596,9 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
       return res.status(409).json({ error: 'Inscrições encerradas para esta competição', code: 'CLOSED' });
     }
 
-    const banner_url = await resolveEventBannerUrl(ev.id);
+    const _banner = await resolveEventBannerUrl(ev.id);
+    const banner_url = _banner?.image_url || null;
+    const banner_has_text = _banner?.has_text === true;
     if (ev.kind === 'competition') {
       const categories = await resolveCompetitionCategories(ev.id);
       // A3 — reaproveita as categorias já buscadas (evita 2ª query).
@@ -608,6 +610,7 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
           type: null,
           description: ev.description || null,
           banner_url,
+          banner_has_text,
           event_date: ev.event_date, location: ev.location,
           fee_amount: ev.fee_amount,
           from_price,
@@ -636,6 +639,7 @@ router.get('/:slug/inscricao/:eventId', async (req, res) => {
         type: ev.exam_type || ev.event_type || null,
         description: ev.description || null,
         banner_url,
+        banner_has_text,
         event_date: ev.event_date, location: ev.location,
         hours: ev.hours ?? null,
         fee_amount: ev.fee_amount,
