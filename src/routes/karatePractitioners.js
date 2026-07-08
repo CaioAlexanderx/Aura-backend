@@ -809,6 +809,7 @@ router.post('/:practitionerId/graduations', ...guards.staffWrite(), async (req, 
   const beltName   = b.belt_name != null ? String(b.belt_name).trim() : '';
   const beltSchema = b.belt_schema === 'legacy' ? 'legacy' : 'fpkt_shotokan';
   const notes      = b.notes != null ? String(b.notes).trim() : null;
+  const cbktNumber = b.cbkt_number != null ? String(b.cbkt_number).trim() : null;
 
   if (!beltLevel && !beltName) {
     return res.status(422).json({ error: 'Informe belt_level ou belt_name', code: 'VALIDATION_ERROR' });
@@ -833,9 +834,9 @@ router.post('/:practitionerId/graduations', ...guards.staffWrite(), async (req, 
     const insertRes = await db.query(
       `INSERT INTO karate_belt_history
          (student_id, federation_id, belt_level, belt_name, belt_schema,
-          graduated_at, notes, created_by, created_at)
-       VALUES ($1, $2, $3, $4, $5, COALESCE($6::date, CURRENT_DATE), $7, $8, NOW())
-       RETURNING id, belt_level, belt_name, belt_schema, graduated_at, exam_id, notes`,
+          graduated_at, notes, cbkt_number, created_by, created_at)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6::date, CURRENT_DATE), $7, $8, $9, NOW())
+       RETURNING id, belt_level, belt_name, belt_schema, graduated_at, exam_id, notes, cbkt_number`,
       [
         practitionerId,
         federationId,
@@ -844,6 +845,7 @@ router.post('/:practitionerId/graduations', ...guards.staffWrite(), async (req, 
         beltSchema,
         graduatedAt,
         notes,
+        cbktNumber,
         req.user?.id || null,
       ]
     );
@@ -858,6 +860,7 @@ router.post('/:practitionerId/graduations', ...guards.staffWrite(), async (req, 
       is_legacy: r.belt_schema === 'legacy',
       exam_id: r.exam_id || null,
       notes: r.notes || null,
+      cbkt_number: r.cbkt_number || null,
     });
   } catch (err) {
     console.error('[karatePractitioners] graduation error:', err.message);
@@ -907,7 +910,7 @@ router.patch('/:practitionerId/graduations/:graduationId', ...guards.staffWrite(
       `UPDATE karate_belt_history
           SET ${sets.join(', ')}
         WHERE id = $${i} AND student_id = $${i + 1} AND federation_id = $${i + 2}
-      RETURNING id, belt_level, belt_name, belt_schema, graduated_at, exam_id, notes`,
+      RETURNING id, belt_level, belt_name, belt_schema, graduated_at, exam_id, notes, cbkt_number`,
       vals
     );
     if (!upd.rows.length) {
@@ -923,6 +926,7 @@ router.patch('/:practitionerId/graduations/:graduationId', ...guards.staffWrite(
       is_legacy: r.belt_schema === 'legacy',
       exam_id: r.exam_id || null,
       notes: r.notes || null,
+      cbkt_number: r.cbkt_number || null,
     });
   } catch (err) {
     // P0001 = RAISE EXCEPTION sem código explícito. Antes da migration 199
@@ -1083,7 +1087,7 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
     // requisições. created_at é sempre populado (NOW() no INSERT, tabela é
     // append-only) e reflete a ordem real de registro.
     const beltHistRes = await db.query(
-      `SELECT id, belt_level, belt_name, belt_schema, graduated_at, exam_id
+      `SELECT id, belt_level, belt_name, belt_schema, graduated_at, exam_id, notes, cbkt_number
        FROM karate_belt_history
        WHERE student_id = $1 AND federation_id = $2
        ORDER BY graduated_at ASC, created_at ASC`,
@@ -1098,6 +1102,8 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
       graduated_at: r.graduated_at,
       is_legacy: r.belt_schema === 'legacy',
       exam_id: r.exam_id || null,
+      notes: r.notes || null,
+      cbkt_number: r.cbkt_number || null,
     }));
 
     // P9 — last_exam: graduação mais recente (excluindo sentinela 1900-01-01 e futuro)
