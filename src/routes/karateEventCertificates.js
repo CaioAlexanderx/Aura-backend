@@ -9,6 +9,7 @@ const { uploadToR2 } = require('../utils/r2Storage');
 const mailer = require('../services/karateMailer');
 
 const ALLOWED_LAYOUTS = ['A', 'B', 'C', 'D', 'E'];
+const ALLOWED_FONTS = ['classica','imponente','elegante','sofisticada','tradicional'];
 const ALLOWED_IMG = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
 
 function extractImageBuffer(req) {
@@ -29,6 +30,9 @@ function tplBody(b) {
     body_text: b.body_text != null ? String(b.body_text) : null,
     seals: Array.isArray(b.seals) ? b.seals.filter(s => s && (s.label || s.image_url))
       .map(s => ({ label: String(s.label || ''), image_url: s.image_url || null })) : [],
+    font: ALLOWED_FONTS.includes(b.font) ? b.font : 'classica',
+    text_scale: (typeof b.text_scale === 'number' && b.text_scale > 0) ? Math.max(0.8, Math.min(1.6, b.text_scale)) : null,
+    auto_fit: b.auto_fit === true || b.auto_fit === 'true',
     is_default: b.is_default === true || b.is_default === 'true',
     active: !(b.active === false || b.active === 'false'),
   };
@@ -38,7 +42,7 @@ function tplBody(b) {
 router.get('/certificate-templates', ...guards.read(), async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT id, name, layout, title, body_mode, body_text, seals, is_default, active, created_at
+      `SELECT id, name, layout, title, body_mode, body_text, seals, font, text_scale, auto_fit, is_default, active, created_at
        FROM karate_certificate_templates WHERE federation_id = $1 ORDER BY is_default DESC, created_at DESC`,
       [req.params.id]
     );
@@ -54,10 +58,10 @@ router.post('/certificate-templates', ...guards.staffWrite(), async (req, res) =
   try {
     const { rows } = await db.query(
       `INSERT INTO karate_certificate_templates
-         (federation_id, name, layout, title, body_mode, body_text, seals, is_default, active)
-       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)
-       RETURNING id, name, layout, title, body_mode, body_text, seals, is_default, active, created_at`,
-      [req.params.id, b.name, b.layout, b.title, b.body_mode, b.body_text, JSON.stringify(b.seals), b.is_default, b.active]
+         (federation_id, name, layout, title, body_mode, body_text, seals, font, text_scale, auto_fit, is_default, active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12)
+       RETURNING id, name, layout, title, body_mode, body_text, seals, font, text_scale, auto_fit, is_default, active, created_at`,
+      [req.params.id, b.name, b.layout, b.title, b.body_mode, b.body_text, JSON.stringify(b.seals), b.font, b.text_scale, b.auto_fit, b.is_default, b.active]
     );
     res.status(201).json(rows[0]);
   } catch (e) { console.error('[certs] template create', e.message); res.status(500).json({ error: 'Erro ao criar modelo', detail: e.message }); }
@@ -66,7 +70,7 @@ router.post('/certificate-templates', ...guards.staffWrite(), async (req, res) =
 router.patch('/certificate-templates/:templateId', ...guards.staffWrite(), async (req, res) => {
   const b = tplBody({ ...req.body, name: req.body.name ?? 'x' });
   const sets = [], vals = []; let i = 1;
-  const fields = { name: b.name, layout: b.layout, title: b.title, body_mode: b.body_mode, body_text: b.body_text, is_default: b.is_default, active: b.active };
+  const fields = { name: b.name, layout: b.layout, title: b.title, body_mode: b.body_mode, body_text: b.body_text, font: b.font, text_scale: b.text_scale, auto_fit: b.auto_fit, is_default: b.is_default, active: b.active };
   for (const k of Object.keys(fields)) {
     if (req.body[k] !== undefined) { sets.push(`${k} = $${i++}`); vals.push(fields[k]); }
   }
@@ -78,7 +82,7 @@ router.patch('/certificate-templates/:templateId', ...guards.staffWrite(), async
     const { rows } = await db.query(
       `UPDATE karate_certificate_templates SET ${sets.join(', ')}
        WHERE id = $${i} AND federation_id = $${i + 1}
-       RETURNING id, name, layout, title, body_mode, body_text, seals, is_default, active, created_at`, vals);
+       RETURNING id, name, layout, title, body_mode, body_text, seals, font, text_scale, auto_fit, is_default, active, created_at`, vals);
     if (!rows.length) return res.status(404).json({ error: 'Modelo não encontrado' });
     res.json(rows[0]);
   } catch (e) { console.error('[certs] template patch', e.message); res.status(500).json({ error: 'Erro ao atualizar modelo' }); }
@@ -132,7 +136,7 @@ router.post('/belt-exams/:examId/certificates', ...guards.staffWrite(), async (r
     // Template: do banco (template_id) ou inline (req.body.template) ou default 'A'
     let template = null;
     if (req.body.template_id) {
-      const t = await db.query(`SELECT layout,title,body_mode,body_text,seals FROM karate_certificate_templates WHERE id=$1 AND federation_id=$2 LIMIT 1`, [req.body.template_id, federationId]);
+      const t = await db.query(`SELECT layout,title,body_mode,body_text,seals,font,text_scale,auto_fit FROM karate_certificate_templates WHERE id=$1 AND federation_id=$2 LIMIT 1`, [req.body.template_id, federationId]);
       template = t.rows[0] || null;
     }
     if (!template && req.body.template) template = tplBody(req.body.template);
@@ -161,7 +165,7 @@ router.post('/belt-exams/:examId/certificates', ...guards.staffWrite(), async (r
     const dates_text = req.body.dates_text || (event.event_date ? fmtBR(event.event_date) : '');
     const issued_date_text = req.body.issued_date_text || fmtBR(new Date());
     const location = req.body.location != null ? req.body.location : (event.location || '');
-    const tsnap = { layout: template.layout, title: template.title, body_mode: template.body_mode, body_text: template.body_text, seals: template.seals || [] };
+    const tsnap = { layout: template.layout, title: template.title, body_mode: template.body_mode, body_text: template.body_text, seals: template.seals || [], font: template.font || 'classica', text_scale: template.text_scale != null ? template.text_scale : null, auto_fit: template.auto_fit === true };
 
     let issued = 0, skipped = 0;
     for (const c of cand.rows) {
