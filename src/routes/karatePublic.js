@@ -40,7 +40,7 @@ async function resolveFederation(slugOrId) {
   if (!fedId && /^[0-9a-fA-F-]{36}$/.test(slugOrId)) fedId = slugOrId;
   if (!fedId) return null;
   const c = await db.query(
-    `SELECT id, COALESCE(trade_name, legal_name) AS name,
+    `SELECT id, COALESCE(trade_name, legal_name) AS name, slug,
             COALESCE(karate_logo_url, logo_url) AS logo
      FROM companies WHERE id = $1 LIMIT 1`,
     [fedId]
@@ -1189,7 +1189,7 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
           </table>
           <p style="color:#6a6154;font-size:13px">${fed.name || 'Federação'} · Aura Karatê</p>
         </div>`;
-        mailer.sendRaw({ to: participantEmail, subject: `Inscrição recebida — ${ev.name || 'evento'}`, html }).catch(() => {});
+        mailer.sendRaw({ to: participantEmail, subject: `Inscrição recebida — ${ev.name || 'evento'}`, html, federationName: fed.name, federationSlug: fed.slug }).catch(() => {});
       }
     } catch (e) { /* e-mail nunca bloqueia */ }
 

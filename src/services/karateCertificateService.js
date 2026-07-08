@@ -43,13 +43,14 @@ function safeTable(err) {
 async function getFederationEmailData(federationId) {
   try {
     const res = await db.query(
-      `SELECT name, email, karate_logo_url, wa_phone_display
+      `SELECT name, slug, email, karate_logo_url, wa_phone_display
        FROM companies WHERE id = $1 LIMIT 1`,
       [federationId]
     );
     const row = res.rows[0] || {};
     return {
       federationName:     row.name || 'Federação',
+      federationSlug:     row.slug || null,
       federationLogoUrl:  row.karate_logo_url || null,
       federationWhatsapp: row.wa_phone_display || null,
       federationEmail:    row.email || null,

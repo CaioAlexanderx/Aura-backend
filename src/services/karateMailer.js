@@ -17,6 +17,23 @@
 'use strict';
 
 const FROM = process.env.KARATE_SMTP_FROM || process.env.SMTP_FROM || 'Aura Karatê <noreply@getaura.com.br>';
+// Domínio verificado no Resend p/ envio das federações (qualquer local-part vale).
+const MAIL_DOMAIN = process.env.KARATE_MAIL_DOMAIN || 'getaura.com.br';
+
+// Remetente POR FEDERAÇÃO: "<Nome> <slug@dominio>" (ex.: "FPKT <fpkt@getaura.com.br>").
+// Retorna null se não houver slug utilizável — cai no FROM global (noreply).
+function federationFrom(name, slug) {
+  const local = String(slug == null ? '' : slug).toLowerCase().trim().replace(/[^a-z0-9._-]/g, '');
+  if (!local) return null;
+  const display = String(name == null ? '' : name).replace(/["<>\r\n]/g, '').trim() || local.toUpperCase();
+  return `${display} <${local}@${MAIL_DOMAIN}>`;
+}
+
+// Resolve o from: explícito (opts.from) > por federação (slug) > global.
+function resolveFrom(opts) {
+  const o = opts || {};
+  return o.from || federationFrom(o.federationName, o.federationSlug) || FROM;
+}
 const ICON_URL = 'https://cdn.jsdelivr.net/gh/CaioAlexanderx/aura-app@main/assets/Icon.png';
 
 // Envio cru via Resend. Sem chave (dev), loga e segue — não quebra a régua.
@@ -30,7 +47,7 @@ async function sendRaw(opts) {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      from: opts.from || FROM,
+      from: resolveFrom(opts),
       to: Array.isArray(opts.to) ? opts.to : [opts.to],
       subject: opts.subject,
       html: opts.html,
@@ -201,6 +218,8 @@ async function sendKarateEmail(to, opts) {
   return sendRaw({
     to,
     from: o.from,
+    federationName: o.federationName,
+    federationSlug: o.federationSlug,
     subject: o.subject,
     html,
     text: o.text || _stripHtml(`${o.heading || ''} ${o.bodyHtml || ''} ${o.ctaUrl || ''}`),
@@ -250,6 +269,7 @@ async function sendKarateAnnuityReminderEmail(to, data) {
     ctaUrl:   d.ctaUrl   || undefined,
     ctaLabel: d.ctaLabel || (d.ctaUrl ? 'Pagar anuidade' : undefined),
     federationName:     d.federationName,
+    federationSlug:     d.federationSlug,
     federationLogoUrl:  d.federationLogoUrl,
     federationWhatsapp: d.federationWhatsapp,
   });
@@ -257,6 +277,7 @@ async function sendKarateAnnuityReminderEmail(to, data) {
 
 module.exports = {
   sendRaw,
+  federationFrom,
   layout,
   sendKarateEmail,
   sendKarateAnnuityReminderEmail,

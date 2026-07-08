@@ -127,7 +127,7 @@ router.post('/belt-exams/:examId/certificates', ...guards.staffWrite(), async (r
   try {
     const ev = await db.query(
       `SELECT be.id, be.name, be.exam_type, be.event_date, be.location, be.hours,
-              COALESCE(c.trade_name, c.legal_name) AS federation_name
+              COALESCE(c.trade_name, c.legal_name) AS federation_name, c.slug AS federation_slug
        FROM karate_belt_exams be JOIN companies c ON c.id = be.federation_id
        WHERE be.id = $1 AND be.federation_id = $2 LIMIT 1`, [examId, federationId]);
     if (!ev.rows.length) return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
@@ -194,7 +194,7 @@ router.post('/belt-exams/:examId/certificates', ...guards.staffWrite(), async (r
             <p style="color:#6a6154;font-size:12px">Link de verificação: ${verifyUrl}</p>
             <p style="color:#6a6154;font-size:13px">${event.federation_name || 'Federação'} · Aura Karatê</p>
           </div>`;
-          mailer.sendRaw({ to: c.student_email, subject: `Certificado disponível — ${event.name || 'evento'}`, html }).catch(() => {});
+          mailer.sendRaw({ to: c.student_email, subject: `Certificado disponível — ${event.name || 'evento'}`, html, federationName: event.federation_name, federationSlug: event.federation_slug }).catch(() => {});
         }
       } catch (e) { /* nunca bloqueia */ }
     }
