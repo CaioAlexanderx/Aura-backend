@@ -1254,4 +1254,119 @@ router.delete('/belt-exams/:examId/instructors/:instructorId', ...guards.staffWr
   }
 });
 
+
+// ══════════════════════════════════════════════════════════════════
+// Lotes de inscrição do evento (karate_event_registration_lots — migration 215).
+// Cada lote tem preço de filiado e de não-filiado + data de virada (ends_at).
+// Reusa assertExamInFederation (definido no bloco de ministrantes acima).
+// ══════════════════════════════════════════════════════════════════
+function _lotBody(b) {
+  return {
+    name: (b.name != null && String(b.name).trim()) ? String(b.name).trim() : null,
+    sort_order: (b.sort_order === '' || b.sort_order == null) ? 0 : parseInt(b.sort_order, 10),
+    price_member: (b.price_member === '' || b.price_member == null) ? 0 : parseFloat(b.price_member),
+    price_nonmember: (b.price_nonmember === '' || b.price_nonmember == null) ? 0 : parseFloat(b.price_nonmember),
+    ends_at: b.ends_at || null,
+    active: !(b.active === false || b.active === 'false'),
+  };
+}
+
+// GET /belt-exams/:examId/lots
+router.get('/belt-exams/:examId/lots', ...guards.read(), async (req, res) => {
+  const { id: federationId, examId } = req.params;
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `SELECT id, event_id, name, sort_order, price_member, price_nonmember, ends_at, active, created_at
+       FROM karate_event_registration_lots WHERE event_id = $1
+       ORDER BY sort_order ASC, created_at ASC`,
+      [examId]
+    );
+    res.json(rows);
+  } catch (err) {
+    if (err.code === '42P01') return res.json([]);
+    console.error('[karateExams] lots list error:', err.message);
+    res.status(500).json({ error: 'Erro ao listar lotes' });
+  }
+});
+
+// POST /belt-exams/:examId/lots
+router.post('/belt-exams/:examId/lots', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId } = req.params;
+  const b = _lotBody(req.body || {});
+  if (!b.name) return res.status(422).json({ error: 'name é obrigatório', code: 'VALIDATION_ERROR' });
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `INSERT INTO karate_event_registration_lots
+         (event_id, name, sort_order, price_member, price_nonmember, ends_at, active)
+       VALUES ($1,$2,$3,$4,$5,$6::timestamptz,$7)
+       RETURNING id, event_id, name, sort_order, price_member, price_nonmember, ends_at, active, created_at`,
+      [examId, b.name, b.sort_order, b.price_member, b.price_nonmember, b.ends_at, b.active]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('[karateExams] lot create error:', err.message);
+    res.status(500).json({ error: 'Erro ao criar lote', detail: err.message });
+  }
+});
+
+// PATCH /belt-exams/:examId/lots/:lotId
+router.patch('/belt-exams/:examId/lots/:lotId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId, lotId } = req.params;
+  const ALLOWED = ['name', 'sort_order', 'price_member', 'price_nonmember', 'ends_at', 'active'];
+  const updates = [];
+  const values = [];
+  let idx = 1;
+  const parsed = _lotBody({ ...req.body });
+  for (const field of ALLOWED) {
+    if (req.body[field] !== undefined) {
+      let v = parsed[field];
+      const cast = field === 'ends_at' ? '::timestamptz' : '';
+      updates.push(`${field} = $${idx}${cast}`); values.push(v); idx++;
+    }
+  }
+  if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  values.push(lotId, examId);
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `UPDATE karate_event_registration_lots SET ${updates.join(', ')}
+       WHERE id = $${idx} AND event_id = $${idx + 1}
+       RETURNING id, event_id, name, sort_order, price_member, price_nonmember, ends_at, active, created_at`,
+      values
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lote não encontrado', code: 'NOT_FOUND' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[karateExams] lot patch error:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar lote', detail: err.message });
+  }
+});
+
+// DELETE /belt-exams/:examId/lots/:lotId
+router.delete('/belt-exams/:examId/lots/:lotId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId, lotId } = req.params;
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rowCount } = await db.query(
+      `DELETE FROM karate_event_registration_lots WHERE id = $1 AND event_id = $2`,
+      [lotId, examId]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Lote não encontrado', code: 'NOT_FOUND' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[karateExams] lot delete error:', err.message);
+    res.status(500).json({ error: 'Erro ao remover lote', detail: err.message });
+  }
+});
+
 module.exports = router;
