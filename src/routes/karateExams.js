@@ -46,7 +46,7 @@ const router = require('express').Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
-const { checkEligibility } = require('../services/karateExamService');
+const { checkEligibility, computeDanRegistrationChange } = require('../services/karateExamService');
 
 // Tipos de evento aceitos em karate_belt_exams.exam_type (espelha o CHECK da
 // migration 192). Graus específicos (dojô) + tipos amplos (federação).
@@ -885,42 +885,79 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
     });
   }
 
+  // Transação: o UPDATE do status dispara o trigger karate_on_exam_approved
+  // (insere o histórico de faixa). Na MESMA transação ajustamos o sufixo da
+  // matrícula (Dan 2º–6º) para que faixa e matrícula nunca fiquem divergentes.
+  const client = await db.connect();
   try {
-    // Verifica exame + candidato
-    const candRes = await db.query(
-      `SELECT ec.id, ec.student_id, ec.status AS current_status, ec.target_belt
+    await client.query('BEGIN');
+
+    const candRes = await client.query(
+      `SELECT ec.id, ec.student_id, ec.status AS current_status,
+              ec.target_belt, ec.target_belt_name,
+              cu.karate_registration_number AS reg_number
        FROM karate_belt_exam_candidates ec
        JOIN karate_belt_exams be ON be.id = ec.exam_id
+       JOIN customers cu ON cu.id = ec.student_id
        WHERE ec.id = $1 AND ec.exam_id = $2 AND be.federation_id = $3
        LIMIT 1`,
       [candidateId, examId, federationId]
     );
 
     if (!candRes.rows.length) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Candidato não encontrado', code: 'NOT_FOUND' });
     }
-
     const cand = candRes.rows[0];
 
     if (cand.current_status !== 'registered') {
+      await client.query('ROLLBACK');
       return res.status(409).json({
         error: `Resultado já lançado (status atual: ${cand.current_status})`,
         code: 'CONFLICT',
       });
     }
 
-    // Atualiza status — trigger karate_on_exam_approved é disparado
-    // automaticamente pelo banco quando status = 'approved'
-    // karate_belt_exam_candidates has no result_at column — use updated_at
-    const updRes = await db.query(
+    // Atualiza status — trigger karate_on_exam_approved insere o histórico de faixa
+    const updRes = await client.query(
       `UPDATE karate_belt_exam_candidates
        SET status = $1, result_notes = $2, updated_at = NOW()
        WHERE id = $3
        RETURNING id, exam_id, student_id, target_belt, status, result_notes, updated_at`,
       [status, result_notes || null, candidateId]
     );
-
     const updated = updRes.rows[0];
+
+    // ── Sufixo da matrícula (só na aprovação de faixa-preta) ──
+    // Shodan → só avisa; 2º–6º Dan → troca o sufixo automaticamente; 7º+/formato
+    // inesperado → pede revisão. A view karate_current_belt já reflete a faixa.
+    let registration = null;
+    if (status === 'approved') {
+      const change = computeDanRegistrationChange(cand.reg_number, cand.target_belt_name, cand.target_belt) || { action: 'none' };
+      if (change.action === 'update') {
+        const dup = await client.query(
+          `SELECT id FROM customers WHERE karate_registration_number = $1 AND id <> $2 LIMIT 1`,
+          [change.newNumber, cand.student_id]
+        );
+        if (dup.rows.length) {
+          registration = {
+            action: 'review', dan: change.dan,
+            message: `A matrícula sugerida (${change.newNumber}) já está em uso. Ajuste manualmente.`,
+          };
+        } else {
+          await client.query(
+            `UPDATE customers SET karate_registration_number = $1, updated_at = NOW() WHERE id = $2`,
+            [change.newNumber, cand.student_id]
+          );
+          registration = { action: 'updated', dan: change.dan, from: change.from, to: change.newNumber };
+        }
+      } else if (change.action === 'notify_create' || change.action === 'review') {
+        registration = { action: change.action, dan: change.dan, message: change.message };
+      }
+    }
+
+    await client.query('COMMIT');
+
     res.json({
       id: updated.id,
       exam_id: updated.exam_id,
@@ -929,13 +966,18 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
       status: updated.status,
       result_notes: updated.result_notes || null,
       result_at: updated.updated_at,
+      // registration: null quando não há ação; senão { action: 'updated'|'notify_create'|'review', ... }
+      registration,
       _note: status === 'approved'
         ? 'Trigger karate_on_exam_approved inseriu histórico de faixa (imutável)'
         : undefined,
     });
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* noop */ }
     console.error('[karateExams] result error:', err.message);
     res.status(500).json({ error: 'Erro ao lançar resultado', detail: err.message });
+  } finally {
+    client.release();
   }
 });
 

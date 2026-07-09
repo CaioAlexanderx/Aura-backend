@@ -186,4 +186,65 @@ async function checkEligibility(student_id, target_belt, federation_id) {
   };
 }
 
-module.exports = { checkEligibility };
+
+// ============================================================
+// Sufixo Dan da matrícula FPKT (formato <prefixo>-<SUFIXO>, ex.: 010-Y-NI).
+// Vocabulário confirmado nos dados reais da federação (07/2026):
+//   1 SHO · 2 NI · 3 SAN · 4 YON · 5 GO · 6 ROKU  (7º+ NANA/SHICHI/… ambíguo)
+// Regra (decisão Caio 07/2026):
+//   - Shodan (1º Dan): NÃO altera — só avisa a federação p/ criar NNN-Y-SHO
+//     (muda do formato kyu p/ o formato faixa-preta; número novo é atribuído).
+//   - 2º a 6º Dan: troca só o sufixo, preservando o prefixo (010-Y-SHO → 010-Y-NI).
+//   - 7º Dan+ ou matrícula fora do padrão faixa-preta: manda revisar (não altera).
+// ============================================================
+const DAN_SUFFIX = { 1: 'SHO', 2: 'NI', 3: 'SAN', 4: 'YON', 5: 'GO', 6: 'ROKU' };
+const DAN_SUFFIX_TOKENS = ['SHO', 'NI', 'SAN', 'YON', 'GO', 'ROKU', 'NANA', 'SHICHI', 'HACHI', 'KU', 'JU'];
+const BLACKBELT_SUFFIX_RE = new RegExp('^(.*)-(' + DAN_SUFFIX_TOKENS.join('|') + ')$', 'i');
+
+function parseDanDegree(name) {
+  if (name == null) return null;
+  const m = String(name).match(/(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * computeDanRegistrationChange(currentNumber, targetBeltName, targetBelt)
+ * PURA (sem DB). Decide o que fazer com a matrícula ao aprovar uma graduação.
+ * Retorna { action, dan?, from?, newNumber?, message? }:
+ *   - 'none'          → não é graduação de faixa-preta com grau identificável
+ *   - 'notify_create' → Shodan: federação cria a matrícula NNN-Y-SHO
+ *   - 'update'        → troca automática do sufixo (newNumber já pronto)
+ *   - 'review'        → 7º Dan+ ou formato inesperado: revisar manualmente
+ */
+function computeDanRegistrationChange(currentNumber, targetBeltName, targetBelt) {
+  const nameJoined = [targetBeltName, targetBelt].filter(Boolean).join(' ');
+  const isPreta = /preta/i.test(nameJoined);
+  const dan = parseDanDegree(targetBeltName) != null ? parseDanDegree(targetBeltName) : parseDanDegree(targetBelt);
+  if (!isPreta || !dan) return { action: 'none' };
+
+  if (dan === 1) {
+    return {
+      action: 'notify_create', dan,
+      message: 'Shodan (1º Dan): gere a matrícula de faixa-preta (formato NNN-Y-SHO) para este praticante.',
+    };
+  }
+  if (dan >= 7 || !DAN_SUFFIX[dan]) {
+    return {
+      action: 'review', dan,
+      message: 'Grau 7º Dan ou acima: confirme o sufixo da matrícula manualmente.',
+    };
+  }
+  const cur = String(currentNumber == null ? '' : currentNumber).trim();
+  const m = cur.match(BLACKBELT_SUFFIX_RE);
+  if (!m) {
+    return {
+      action: 'review', dan,
+      message: 'A matrícula atual não está no formato de faixa-preta (…-SHO/NI/SAN…). Ajuste manualmente.',
+    };
+  }
+  const newNumber = m[1] + '-' + DAN_SUFFIX[dan];
+  if (newNumber.toUpperCase() === cur.toUpperCase()) return { action: 'none', dan };
+  return { action: 'update', dan, from: cur, newNumber };
+}
+
+module.exports = { checkEligibility, computeDanRegistrationChange };
