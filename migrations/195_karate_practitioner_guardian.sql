@@ -1,0 +1,10 @@
+-- migration 195 (karatê · responsável do praticante) — RENUMERADA para
+-- 197_karate_practitioner_guardian.sql.
+--
+-- O número 195 colidiu com 195_fix_davi_variant_duplicates.sql (projeto Davi),
+-- que foi mergeado antes. Pela convenção do CLAUDE.md (numeração sequencial,
+-- incrementar se o número já existe), o DDL do responsável foi movido para 197.
+--
+-- Este arquivo é um TOMBSTONE sem efeito (apenas comentários). O DDL real e
+-- idempotente está em migrations/197_karate_practitioner_guardian.sql.
+-- As colunas guardian_* já estão aplicadas em prod (via Supabase MCP).
