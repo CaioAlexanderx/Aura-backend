@@ -144,7 +144,7 @@ describe('POST /belt-exams/:examId/candidates — elegibilidade é só AVISO', (
           exam_id: EXAM_ID,
           student_id: STUDENT_ID,
           target_belt: 5,
-          status: 'enrolled',
+          status: 'registered',
           created_at: new Date().toISOString(), // real schema: created_at (not enrolled_at)
         }],
       })
@@ -179,7 +179,7 @@ describe('POST /belt-exams/:examId/candidates — elegibilidade é só AVISO', (
         // FPKT #1: NUNCA 422 por elegibilidade
         expect(res.status).toBe(201);
         expect(res.body.id).toBe(CANDIDATE_ID);
-        expect(res.body.status).toBe('enrolled');
+        expect(res.body.status).toBe('registered');
         // Response uses created_at (real schema)
         expect(res.body.created_at).toBeTruthy();
         // Elegibilidade anexada como aviso
@@ -235,7 +235,7 @@ describe('PATCH /belt-exams/:examId/candidates/:candidateId (lançar resultado)'
         rows: [{
           id: CANDIDATE_ID,
           student_id: STUDENT_ID,
-          current_status: 'enrolled',
+          current_status: 'registered',
           target_belt: 5,
         }],
       })
@@ -307,10 +307,13 @@ describe('POST /belt-exams/:examId/close (fechar sem certificado)', () => {
       .mockResolvedValueOnce({                           // UPDATE status=done
         rows: [{ id: EXAM_ID, status: 'done', updated_at: new Date().toISOString() }],
       })
+      .mockResolvedValueOnce({})                         // SAVEPOINT cert_eligible
+      .mockResolvedValueOnce({ rowCount: 3 })            // UPDATE certificate_eligible
+      .mockResolvedValueOnce({})                         // RELEASE SAVEPOINT
       .mockResolvedValueOnce({                           // SELECT summary
         rows: [
           { status: 'approved', cnt: '3' },
-          { status: 'failed',   cnt: '1' },
+          { status: 'rejected', cnt: '1' },
         ],
       })
       .mockResolvedValueOnce({});                        // COMMIT
@@ -327,7 +330,7 @@ describe('POST /belt-exams/:examId/close (fechar sem certificado)', () => {
         expect(res.body.status).toBe('done');
         expect(res.body.summary).toBeDefined();
         expect(res.body.summary.approved).toBe(3);
-        expect(res.body.summary.failed).toBe(1);
+        expect(res.body.summary.rejected).toBe(1);
         // FPKT #3: nota explícita de que certificados NÃO são emitidos
         expect(res.body._note).toMatch(/NÃO emitidos automaticamente/i);
         done();
