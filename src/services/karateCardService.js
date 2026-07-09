@@ -272,6 +272,13 @@ async function getCurrentCard({ federation_id, student_id }) {
             COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot)      AS dojo_name_live,
             COALESCE(cu.karate_photo_url, cu.photo_url, kc.photo_url_snapshot) AS photo_url_live,
             COALESCE(cu.karate_registration_number, kc.card_number)           AS card_number_live,
+            -- Nº CBKT da faixa VIGENTE (casado pelo belt_name atual) — usado na
+            -- carteirinha do faixa-preta. NULL para faixas sem CBKT registrado.
+            (SELECT bh.cbkt_number FROM karate_belt_history bh
+              WHERE bh.student_id = cu.id AND bh.federation_id = kc.federation_id
+                AND bh.belt_name = COALESCE(cb.belt_name, kc.belt_name_snapshot)
+                AND bh.cbkt_number IS NOT NULL
+              ORDER BY bh.graduated_at DESC NULLS LAST LIMIT 1)             AS cbkt_number_live,
             COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
             COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
      FROM karate_membership_cards kc
@@ -294,6 +301,7 @@ async function getCurrentCard({ federation_id, student_id }) {
     birth_date: c.birth_date,   // contexto autenticado/admin (NUNCA no verify publico); ja YYYY-MM-DD (tz-safe)
     cpf: c.cpf_cnpj || null,    // contexto autenticado/admin (NUNCA no verify publico)
     card_number: c.card_number_live,
+    cbkt_number: c.cbkt_number_live || null,
     belt: c.belt_live,
     belt_name: c.belt_name_live,
     dojo_id: c.dojo_id_live,
@@ -339,6 +347,11 @@ async function verifyByToken(token) {
             COALESCE(cb.belt_level, kc.belt_snapshot)      AS belt,
             COALESCE(cb.belt_name,  kc.belt_name_snapshot) AS belt_name,
             to_char(cb.current_since, 'YYYY-MM-DD') AS belt_since,
+            (SELECT bh.cbkt_number FROM karate_belt_history bh
+              WHERE bh.student_id = kc.student_id AND bh.federation_id = kc.federation_id
+                AND bh.belt_name = COALESCE(cb.belt_name, kc.belt_name_snapshot)
+                AND bh.cbkt_number IS NOT NULL
+              ORDER BY bh.graduated_at DESC NULLS LAST LIMIT 1) AS cbkt_number,
             COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot) AS dojo_name,
             COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
             COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
@@ -376,6 +389,7 @@ async function verifyByToken(token) {
     belt: c.belt || null,         // nível (ex.: '2dan')
     belt_name: c.belt_name || null,
     belt_since: c.belt_since || null,
+    cbkt_number: c.cbkt_number || null,
     dojo_name: c.dojo_name || null,
     federation_name: c.federation_name || null,
     federation_logo: c.federation_logo || null,
@@ -410,6 +424,11 @@ async function getCardCopyByToken(token, identifier) {
             COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot)      AS dojo_name_live,
             COALESCE(cu.karate_photo_url, cu.photo_url, kc.photo_url_snapshot) AS photo_url_live,
             COALESCE(cu.karate_registration_number, kc.card_number)           AS card_number_live,
+            (SELECT bh.cbkt_number FROM karate_belt_history bh
+              WHERE bh.student_id = cu.id AND bh.federation_id = kc.federation_id
+                AND bh.belt_name = COALESCE(cb.belt_name, kc.belt_name_snapshot)
+                AND bh.cbkt_number IS NOT NULL
+              ORDER BY bh.graduated_at DESC NULLS LAST LIMIT 1)             AS cbkt_number_live,
             COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
             COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo,
             COALESCE(NULLIF(fed.wa_phone_display, ''), fed.phone) AS federation_whatsapp
@@ -449,6 +468,7 @@ async function getCardCopyByToken(token, identifier) {
       birth_date: c.birth_date,
       cpf: c.cpf_cnpj || null,
       card_number: c.card_number_live,
+      cbkt_number: c.cbkt_number_live || null,
       belt: c.belt_live,
       belt_name: c.belt_name_live,
       dojo_name: c.dojo_name_live,

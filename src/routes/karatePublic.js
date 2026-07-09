@@ -831,6 +831,16 @@ router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
       [student.id, fed.id]
     );
 
+    // Dados extras do filiado para auto-preenchimento na confirmação
+    // (nascimento + dojô). email/telefone já vêm no `student`.
+    const extra = await db.query(
+      `SELECT to_char(cu.birth_date,'YYYY-MM-DD') AS birth_date,
+              COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+         FROM customers cu LEFT JOIN companies dj ON dj.id = cu.dojo_id
+        WHERE cu.id = $1 LIMIT 1`,
+      [student.id]
+    );
+
     let already = false;
     if (ev.kind === 'exam') {
       const d = await db.query(
@@ -860,6 +870,10 @@ router.post('/:slug/inscricao/:eventId/lookup', async (req, res) => {
         name: student.name,
         current_belt: cb.rows[0]?.belt_level || null,
         current_belt_name: cb.rows[0]?.belt_name || null,
+        birth_date: extra.rows[0]?.birth_date || null,
+        email: student.email || null,
+        phone: student.phone || null,
+        dojo_name: extra.rows[0]?.dojo_name || null,
       },
       event: {
         id: ev.id, name: ev.name, kind: ev.kind, fee_amount: ev.fee_amount,
@@ -954,12 +968,26 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
       const gname = guest && guest.name ? String(guest.name).trim() : '';
       if (gname) {
         const gcpf = onlyDigits(guest.cpf || cpf || '') || null;
+        // Nascimento aceita YYYY-MM-DD ou dd/mm/aaaa; senão null.
+        let gbirth = null;
+        {
+          const b = String(guest.birth_date || '').trim();
+          if (/^\d{4}-\d{2}-\d{2}$/.test(b)) gbirth = b;
+          else { const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(b); if (m) gbirth = `${m[3]}-${m[2]}-${m[1]}`; }
+        }
+        // Faixa/dojô/professor do não-filiado não têm colunas próprias — vão como
+        // texto livre em customers.notes (informativo para a secretaria).
+        const noteParts = [];
+        if (guest.belt) noteParts.push('Faixa: ' + String(guest.belt).trim());
+        if (guest.dojo) noteParts.push('Dojô: ' + String(guest.dojo).trim());
+        if (guest.professor) noteParts.push('Professor: ' + String(guest.professor).trim());
+        const gnotes = noteParts.length ? ('Não-filiado — ' + noteParts.join(' · ')) : 'Não-filiado';
         try {
           const gi = await db.query(
-            `INSERT INTO customers (company_id, federation_id, name, cpf_cnpj, email, phone, is_student, is_guest)
-             VALUES ($1, $1, $2, $3, $4, $5, false, true)
+            `INSERT INTO customers (company_id, federation_id, name, cpf_cnpj, email, phone, birth_date, notes, is_student, is_guest)
+             VALUES ($1, $1, $2, $3, $4, $5, $6, $7, false, true)
              RETURNING id, name`,
-            [fed.id, gname, gcpf, (guest.email || null), (guest.phone || null)]
+            [fed.id, gname, gcpf, (guest.email || null), (guest.phone || null), gbirth, gnotes]
           );
           student = { id: gi.rows[0].id, name: gi.rows[0].name };
           isGuest = true;

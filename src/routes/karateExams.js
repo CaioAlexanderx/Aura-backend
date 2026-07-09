@@ -450,6 +450,53 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
 });
 
 // ── PATCH /belt-exams/:examId ───────────────────────────────
+// ── DELETE /belt-exams/:examId — excluir evento (exame/curso) ──
+// Seguro por padrão: só exclui eventos SEM dados relevantes (sem inscritos e
+// sem certificados emitidos). Caso contrário retorna 409 com mensagem clara —
+// evita apagar histórico por engano. Remove apenas os "filhos de configuração"
+// (instrutores, examinadores, lotes) e o próprio evento.
+router.delete('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId } = req.params;
+  try {
+    const ex = await db.query(
+      'SELECT id FROM karate_belt_exams WHERE id = $1 AND federation_id = $2',
+      [examId, federationId]
+    );
+    if (!ex.rows.length) return res.status(404).json({ error: 'Evento não encontrado' });
+
+    const safeCount = async (sql) => {
+      try { const r = await db.query(sql, [examId, federationId]); return r.rows[0]?.n || 0; }
+      catch (e) { if (e.code === '42P01') return 0; throw e; }
+    };
+    const nCand = await safeCount('SELECT count(*)::int AS n FROM karate_belt_exam_candidates WHERE exam_id = $1');
+    const nCert = await safeCount('SELECT count(*)::int AS n FROM karate_issued_certificates WHERE event_id = $1 AND federation_id = $2');
+    if (nCand > 0 || nCert > 0) {
+      return res.status(409).json({
+        error: 'Este evento tem inscritos ou certificados emitidos e não pode ser excluído. Cancele o evento ou remova os registros antes.',
+        code: 'EVENT_HAS_DATA',
+      });
+    }
+
+    // Sem dados relevantes → remove filhos de configuração + o evento.
+    for (const q of [
+      'DELETE FROM karate_belt_exam_instructors WHERE exam_id = $1',
+      'DELETE FROM karate_belt_exam_examiners WHERE exam_id = $1',
+      'DELETE FROM karate_event_registration_lots WHERE event_id = $1',
+    ]) {
+      try { await db.query(q, [examId]); }
+      catch (e) { if (e.code !== '42P01') throw e; }
+    }
+    await db.query('DELETE FROM karate_belt_exams WHERE id = $1 AND federation_id = $2', [examId, federationId]);
+    return res.json({ ok: true, deleted: examId });
+  } catch (err) {
+    console.error('[karateExams] delete error:', err.message);
+    if (err.code === '23503') {
+      return res.status(409).json({ error: 'Não foi possível excluir: há registros vinculados ao evento.', code: 'EVENT_HAS_DATA' });
+    }
+    return res.status(500).json({ error: 'Erro ao excluir evento' });
+  }
+});
+
 router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, examId } = req.params;
 
