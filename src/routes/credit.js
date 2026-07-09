@@ -358,10 +358,16 @@ router.get('/customer/:cid', async (req, res) => {
 
       // FIX: saldo por carne -- SO transacoes (sem JOIN com parcelas para evitar fan-out).
       // 1 debito de R$500 + 5 parcelas no JOIN antigo contava 500x5 = R$2.500 (errado).
+      // FIX 03/07/2026 (bug Jennifer): subtracao so considerava type='payment', ignorando
+      // type='refund' (devolucao). Isso fazia a ficha (que usa este balRows quando o cliente
+      // tem 'Conta geral'/carne) ficar com saldo desatualizado apos uma devolucao, enquanto
+      // o painel de crediario (GET /credit/balances, que le customer_credit_balances direto)
+      // ja mostrava o valor certo -- duas formulas de saldo divergentes. Agora usa type<>'debit'
+      // (payment + refund + qualquer tipo futuro), espelhando a view customer_credit_balances.
       const { rows: balRows } = await db.query(
         `SELECT account_id,
                 COALESCE(SUM(CASE WHEN type='debit' THEN amount ELSE 0 END)
-                       - SUM(CASE WHEN type='payment' THEN amount ELSE 0 END), 0) AS balance
+                       - SUM(CASE WHEN type<>'debit' THEN amount ELSE 0 END), 0) AS balance
            FROM customer_credit_transactions
           WHERE company_id = $1 AND customer_id = $2
           GROUP BY account_id`,

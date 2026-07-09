@@ -7,6 +7,14 @@
 // Criado: 13/06/2026
 // Fix    13/06/2026: companies.plan é enum plan_type; target_plan é TEXT.
 //   Postgres recusa "text = plan_type" sem cast explícito → plan::text.
+// Fix    24/06/2026: o bloco de pedidos do Studio selecionava colunas que NÃO
+//   existem na VIEW studio_orders (`order_number`, `total`). A view expõe
+//   `total_amount` e, como rótulo, `display_name` — não há número de pedido.
+//   A query antiga lançava `column "order_number" does not exist` a cada poll
+//   de /notifications (30s) de TODA empresa, floodando os logs do Postgres; e
+//   por rodar dentro de um catch silencioso, as notificações de pedido do
+//   Studio nunca apareciam. Agora usamos as colunas reais e expomos
+//   display_name (ou o id curto) como order_number pro card do app.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
@@ -52,10 +60,19 @@ router.get('/', async (req, res) => {
     } catch (_) { /* plano sem Canal Digital ou tabela não existe */ }
 
     // 3. Pedidos recentes do Studio (últimas 24h)
+    // fix (24/06/2026): a VIEW studio_orders não tem `order_number` nem `total`
+    // — tem `total_amount` e `display_name`. A query antiga floodava os logs
+    // com `column "order_number" does not exist`. Usamos as colunas reais e
+    // expomos display_name (ou o id curto) como order_number pro card do app.
     let studioOrders = [];
     try {
       const { rows } = await db.query(`
-        SELECT id, order_number, customer_name, total, status, created_at,
+        SELECT id,
+               COALESCE(display_name, LEFT(id::text, 8)) AS order_number,
+               customer_name,
+               total_amount AS total,
+               status,
+               created_at,
                'studio' AS source
         FROM studio_orders
         WHERE company_id = $1

@@ -145,6 +145,11 @@ router.get('/clients/:cid/activity', ...adminOnly, asyncHandler(async (req, res)
 // se a migration 110 ainda nao rodou. Sem isso, app subia antes
 // da migration aplicar e Gestao Aura mostrava 0 clientes.
 router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
+  // Gestão Aura lista apenas CLIENTES reais. Dojôs de federação são dados
+  // internos (companies com federation_id != id), não contas-cliente — só
+  // aparecem aqui se contratarem a Aura Dojô (conta independente futura).
+  // Filtro: (federation_id IS NULL OR federation_id = id) mantém a federação
+  // (federation_id NULL) e exclui os dojôs-membros.
   const { rows } = await pool.query(`
     SELECT c.id, c.trade_name, c.legal_name, c.plan, c.is_active,
        c.billing_status, c.billing_cycle, c.module_overrides,
@@ -159,6 +164,7 @@ router.get('/clients-360', ...adminOnly, asyncHandler(async (req, res) => {
     FROM companies c
     LEFT JOIN users u ON u.id=c.owner_id
     LEFT JOIN client_health_scores h ON h.company_id=c.id
+    WHERE (c.federation_id IS NULL OR c.federation_id = c.id)
     ORDER BY h.score ASC NULLS LAST, c.created_at DESC
   `);
 

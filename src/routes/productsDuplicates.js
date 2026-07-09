@@ -298,6 +298,20 @@ router.post('/merge-as-variants', async (req, res) => {
     });
   } catch (err) {
     await client.query('ROLLBACK');
+    // FIX (03/07/2026, erro Railway): trigger anti-dup (migration 195) barra a
+    // unificacao quando 2+ produtos ficariam com a MESMA combinacao cor+tamanho
+    // (ex: produtos identicos, sem nenhum atributo distintivo -- nao sao
+    // variantes de verdade, sao o mesmo item cadastrado 2x). Antes isso virava
+    // um 500 cru com o texto do trigger Postgres. Agora devolve 409 com uma
+    // mensagem acionavel: o caminho certo pra esses casos e excluir o
+    // duplicado, nao unificar como variante.
+    if (err.code === '23505' && /combinacao duplicada/i.test(err.message || '')) {
+      console.warn('[duplicates] merge bloqueado (variantes ficariam identicas):', err.message);
+      return res.status(409).json({
+        error: 'Dois ou mais produtos selecionados nao tem cor/tamanho diferentes entre si -- unificar geraria variantes identicas e indistinguiveis. Se sao o mesmo produto cadastrado duas vezes, exclua o duplicado em vez de unificar como variante.',
+        code: 'IDENTICAL_VARIANT_COMBO',
+      });
+    }
     console.error('[duplicates] merge error:', err.message, err.stack);
     res.status(500).json({ error: 'Erro ao unificar produtos: ' + err.message });
   } finally {

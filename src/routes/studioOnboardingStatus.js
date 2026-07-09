@@ -14,7 +14,13 @@
 //                 a composição em si não tem flag — o vínculo por product
 //                 já é suficiente)
 //   temProduto → products (is_personalizable=true AND is_active=true)
-//   temVenda   → digital_orders (vertical='studio' + status não cancelado)
+//   temVenda   → view studio_orders (digital + PDV + marketplace, não
+//                cancelados). FIX 03/07/2026: antes lia só digital_orders
+//                — lojista que vendia pelo PDV Studio ficava eternamente
+//                com “faça a primeira venda” no painel (racional novo:
+//                venda é RESULTADO, não tarefa; qualquer venda silencia
+//                o onboarding). Fallback defensivo pra digital_orders
+//                quando a view não existe no ambiente.
 //
 // DEFENSIVO (padrão Aura-backend):
 //   Cada checagem em try/catch individual. Erros 42P01 (tabela
@@ -116,16 +122,17 @@ router.get('/onboarding-status', async function(req, res) {
     }
   }
 
-  // ── temVenda: existe ≥1 venda Studio concluída ────────────
-  // Tabela: digital_orders  (vertical='studio')
-  // Exclui cancelados. Pedidos sem status explícito são tratados
-  // como válidos (mesma convenção de studioPainel.js e studio.js).
+  // ── temVenda: existe ≥1 venda Studio de QUALQUER fonte ─────
+  // View: studio_orders (digital + pdv + marketplace), não cancelados.
+  // FIX 03/07/2026: a versão anterior lia só digital_orders — venda
+  // feita no PDV Studio não contava e o painel cobrava “primeira
+  // venda” pra sempre. Fallback: se a view não existir no ambiente
+  // (42P01), tenta digital_orders como antes.
   try {
     const r = await db.query(
       `SELECT EXISTS (
-         SELECT 1 FROM digital_orders
+         SELECT 1 FROM studio_orders
           WHERE company_id = $1
-            AND vertical = 'studio'
             AND COALESCE(status, 'completed') NOT IN ('cancelled', 'cancelado')
          LIMIT 1
        ) AS exists`,
@@ -133,7 +140,25 @@ router.get('/onboarding-status', async function(req, res) {
     );
     out.temVenda = r.rows[0]?.exists === true;
   } catch (err) {
-    if (!isSchemaError(err)) {
+    if (isSchemaError(err)) {
+      try {
+        const r2 = await db.query(
+          `SELECT EXISTS (
+             SELECT 1 FROM digital_orders
+              WHERE company_id = $1
+                AND vertical = 'studio'
+                AND COALESCE(status, 'completed') NOT IN ('cancelled', 'cancelado')
+             LIMIT 1
+           ) AS exists`,
+          [cid]
+        );
+        out.temVenda = r2.rows[0]?.exists === true;
+      } catch (err2) {
+        if (!isSchemaError(err2)) {
+          console.error('[studio/onboarding-status][temVenda.fallback]', err2.message);
+        }
+      }
+    } else {
       console.error('[studio/onboarding-status][temVenda]', err.message);
     }
   }

@@ -75,6 +75,12 @@ router.use('/webhooks', require('./webhookMarketplaceStub'));
 // (sem auth — usa state com companyId).
 router.use('/marketplaces', require('./marketplaceAuthPublic'));
 
+// Visual Engine F3 (03/07/2026): template visual público pro preview 2D/3D
+// do storefront (products.visual_template_key → studio_visual_templates).
+// Montado ANTES de studioStorefront — rota específica, sem colisão com o
+// catch-all do storefront principal.
+router.use('/storefront', require('./studioStorefrontVisual'));
+
 // Aura Studio Nivel 1 Sub-onda D (25/05/2026):
 // Storefront publico Studio. Montado ANTES de /storefront pra que rotas
 // /storefront/:slug/studio/* sejam capturadas por studioStorefront e nao
@@ -118,19 +124,6 @@ router.use('/orcamento',         require('./studioQuotePublic'));
 //   POST /public/karate/:slug/inscricao/:eventId      — inscrição (exame/curso real; competição 501)
 router.use('/public/karate', require('./karatePublic'));
 
-// Solicitação de filiação self-service (microsite). Router separado (mantém
-// karatePublic.js intacto). Migration 186.
-//   POST /public/karate/:slug/affiliation-request
-router.use('/public/karate', require('./karateAffiliationsPublic'));
-
-// Portal do dojô SEM Aura (Canal B / link fixo), MOUNT TOKEN-ONLY: o microsite
-// só tem o slug + o token (não conhece o federation_id). O mesmo router de
-// /federation/:id/dojo é remontado aqui sem :id — Guard B (requireDojoPortal)
-// já escopa por token; requireDojoOfFederation vira no-op (sem :id na rota).
-//   GET  /public/karate/dojo/me · /practitioners · /annuity · /certificates
-//   POST /public/karate/dojo/annuity/pix
-router.use('/public/karate/dojo', require('./karateDojoPortal'));
-
 // ── AURA KARATÊ — Track E (público: ranking embellável) ──
 // Router separado (mantém karatePublic.js intacto). Migrations 168 + 169.
 //   GET /public/karate/:slug/seasons                  — temporadas/categorias
@@ -138,7 +131,12 @@ router.use('/public/karate/dojo', require('./karateDojoPortal'));
 //   GET /public/karate/:slug/ranking/:season/:category— atalho REST (iframe)
 router.use('/public/karate', require('./karatePublicRanking'));
 
-// ── AURA KARATÊ — Track A (backend cadastros) ──────────────────
+// ── AURA KARATÊ — Fase 0 Dojô (Canal B público: OTP do responsável) ──
+// POST /public/karate/:slug/dojo/portal/request-otp
+// POST /public/karate/:slug/dojo/portal/verify-otp
+router.use('/public/karate', require('./karateDojoPublic'));
+
+// ── AURA KARATÊ — Track A (backend cadastros) ──────────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
 // GET  /federation/:id/belt-distribution
@@ -149,31 +147,20 @@ router.use('/karate', require('./karateFederation'));
 // Ambos montados sob /federation/:id/practitioners
 router.use('/federation/:id/practitioners/import', require('./karateImport'));
 router.use('/federation/:id/practitioners',        require('./karatePractitioners'));
+// Export de dados do dojô (round-trip com o import). Montado ANTES do router
+// principal de dojos só por clareza; ambos respondem sob /federation/:id/dojos
+// e o caminho /:dojoId/export-data não colide com as rotas de karateDojos.
+router.use('/federation/:id/dojos',                require('./karateExportDojo'));
 router.use('/federation/:id/dojos',                require('./karateDojos'));
-// Keystone (Canal B): gestão do link fixo do dojô pela federação.
-// Montado ao lado de karateDojos (paths /:dojoId/portal-access não colidem).
-router.use('/federation/:id/dojos',                require('./karateDojoAccess'));
+// Fase 2: anexos (documentos/imagens) para dojô e praticante. Mesmo router
+// montado nas duas bases — ele deduz owner_type ('dojo'/'practitioner') pelo
+// req.baseUrl. Paths /:ownerId/documents não colidem com /:dojoId ou
+// /:practitionerId (formato de path distinto). Migration 207 (karate_documents).
+router.use('/federation/:id/dojos',                require('./karateDocuments'));
+router.use('/federation/:id/practitioners',        require('./karateDocuments'));
 // dashboard e belt-distribution são expostos pelo karateFederation router
 // mas precisam do param :id, então também montamos aqui:
 router.use('/federation/:id', require('./karateFederation'));
-
-// ── AURA KARATÊ — Keystone do dojô (Canal B / portal SEM Aura) ──
-// Migration 186. Auth = Guard B (link fixo), NÃO JWT de empresa.
-//   GET  /federation/:id/dojo/me            — dados do próprio dojô
-//   GET  /federation/:id/dojo/practitioners — lista nominal read-only
-//   GET  /federation/:id/dojo/annuity       — status + histórico de anuidade
-//   POST /federation/:id/dojo/annuity/pix   — PIX self-service da anuidade
-//   GET  /federation/:id/dojo/certificates  — status dos próprios certificados
-router.use('/federation/:id/dojo', require('./karateDojoPortal'));
-
-// ── AURA KARATÊ — Filiação de dojô (pré-aceite antes do pagamento) ──
-// Migration 186. A SOLICITAÇÃO é pública (karateAffiliationsPublic, abaixo);
-// aqui ficam a avaliação/aprovação/recusa pela federação.
-//   GET  /federation/:id/affiliation-requests            (read)
-//   GET  /federation/:id/affiliation-requests/:reqId     (read)
-//   POST /federation/:id/affiliation-requests/:reqId/approve (adminOnly)
-//   POST /federation/:id/affiliation-requests/:reqId/reject  (adminOnly)
-router.use('/federation/:id', require('./karateAffiliations'));
 
 // ── AURA KARATÊ — Track B (backend financeiro + anuidades) ──
 router.use('/federation/:id/financial', require('./karateAnnuities'));
@@ -217,6 +204,12 @@ router.use('/federation/:id', require('./karateCards'));
 //   .../categories, .../entries (inscrição + resultado), .../ranking
 //   GET       /federation/:id/rankings (temporada, via view)
 router.use('/federation/:id', require('./karateCompetitions'));
+
+// ── AURA KARATÊ — Track E+ (admin: biblioteca de categorias reutilizáveis) ──
+// Migration 196: karate_competition_category_templates.
+//   GET/POST     /federation/:id/category-templates
+//   PATCH/DELETE /federation/:id/category-templates/:tid
+router.use('/federation/:id', require('./karateCategoryTemplates'));
 
 // ── AURA KARATÊ — Track F (admin: conectividade dojô / Fase 5) ──
 // Migrations 170 + 171. Contrato docs/karate-fase5-openapi.yaml.
@@ -268,7 +261,7 @@ router.use('/federation/:id', require('./karateSettings'));
 //   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/advance
 router.use('/federation/:id', require('./karateBrackets'));
 
-// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────────────
+// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────────
 // Sem migration (totalmente derivado de tabelas existentes).
 // Guards federation_admin/staff/viewer para leitura; adminOnly para /report/send.
 //   GET  /federation/:id/network-health/summary
@@ -284,5 +277,21 @@ router.use('/federation/:id', require('./karateBrackets'));
 //   POST /federation/:id/network-health/report/send
 // Todos os GET: ?export=csv retorna arquivo CSV.
 router.use('/federation/:id/network-health', require('./karateNetworkHealth'));
+
+// ── AURA KARATÊ — Fase 0 Dojô (Canal A+B autenticado: endpoints /dojo/*) ──
+// GET /federation/:id/dojo/me  — piloto; fases 1-6 adicionam sub-routers
+router.use('/federation/:id', require('./karateDojo'));
+
+// ── AURA KARATÊ — Track Banner (banners promocionais da federação) ──
+// Migration 198 (karate_promo_banners). Guards staffWrite (POST) + read (GET) + adminOnly (DELETE).
+//   POST   /federation/:id/banners           — upload imagem (multipart ou base64) + cria banner
+//   GET    /federation/:id/banners           — lista banners (admin)
+//   PATCH  /federation/:id/banners/:bannerId — edita metadados
+//   DELETE /federation/:id/banners/:bannerId — remove banner
+// Público (em karatePublic.js):
+//   POST /public/karate/:slug/lookup         — lookup praticante por CPF, e-mail ou FPKT
+//   GET  /public/karate/:slug/banners        — banners ativos (hub/inscricao/ambos)
+router.use('/federation/:id', require('./karatePromoBanners'));
+router.use('/federation/:id', require('./karateEventCertificates'));
 
 module.exports = router;

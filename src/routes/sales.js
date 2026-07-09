@@ -36,17 +36,17 @@
 //   crediario, chamamos creditLedger.cancelCreditSale (apaga debit + A Receber +
 //   splits + cancela parcelas + recalcula credit_used).
 //
-// 19/06/2026 — VISIBILIDADE DE GRUPO (cross-CNPJ) na listagem/detalhe:
-//   Premissa Davi: comprou na Villa Branca, precisa enxergar/atender na Matriz.
-//   A troca (pdv.js) ja era group-aware; aqui a pagina Vendas passa a ser tambem.
-//   - buildWhere({ groupScope }) replica a clausula group_root (billing_owner)
-//     ja usada em products.js / pdv.js.
-//   - LISTAGEM + COUNT: groupScope=true (ve vendas do grupo). Expoe
-//     company_id / company_name / is_cross_filial por linha.
-//   - STATS (revenue/avg_ticket/contagens): groupScope=false (POR EMPRESA),
-//     pra nao duplicar receita entre CNPJs do grupo.
-//   - GET /:sale_id: leitura group-aware (abrir venda cross-filial pela lista).
-//     PATCH/cancel seguem company-scoped (muta so no proprio CNPJ).
+// 19/06/2026 — REVERT do #221: a pagina Vendas volta a ser POR EMPRESA.
+//   Cada CNPJ ve apenas suas proprias vendas aqui. A visibilidade cross-CNPJ
+//   fica SOMENTE no sistema de trocas (pdv.js sales-for-troca /
+//   sales-by-product-barcode), que ja era group-aware.
+//
+// 24/06/2026 — stats NaN-safe: um único numeric 'NaN' (ex.: unit_price de um
+//   returned_item vindo de payload invalido) envenenava o SUM e a receita por
+//   empresa virava NaN -> JSON null -> crash/zero na tela de Vendas. Agora o
+//   SQL usa NULLIF(x,'NaN'::numeric) (uma linha ruim contribui 0, nao zera o
+//   total) e o JS aplica `|| 0` em revenue/avg_ticket/net_amount. Raiz (nao
+//   persistir NaN) tratada no trocaV2.js.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
@@ -55,23 +55,9 @@ const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const creditLedger = require('../services/creditLedger');
 
-// Clausula de visibilidade de grupo (bidirecional via group_root). Espelha
-// products.js (listVisibilityWhere) e os lookups de troca em pdv.js. Usa apenas
-// $1 (= companyId) — sem novos parametros — entao os `vals` continuam iguais
-// entre a versao group e a company-only.
-const GROUP_SCOPE_SQL =
-  '(s.company_id = $1 OR EXISTS (' +
-  '  SELECT 1 FROM companies c2' +
-  '   WHERE c2.id = s.company_id' +
-  '     AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)' +
-  '       = COALESCE(NULLIF((SELECT billing_owner_company_id FROM companies WHERE id = $1), $1), $1)' +
-  '))';
-
 // Constroi clausula WHERE dinamica baseada nos filtros recebidos.
-// opts.groupScope=true -> ve vendas de todo o grupo de billing; senao so a empresa.
-function buildWhere(companyId, filters, opts) {
-  const groupScope = !!(opts && opts.groupScope);
-  const conds = [groupScope ? GROUP_SCOPE_SQL : 's.company_id = $1'];
+function buildWhere(companyId, filters) {
+  const conds = ['s.company_id = $1'];
   const vals = [companyId];
   let i = 2;
 
@@ -130,10 +116,7 @@ router.get('/', asyncHandler(async (req, res) => {
   } = req.query;
 
   const filters = { date_from, date_to, status, seller_id, customer_id, q, product_barcode };
-  // Listagem/contagem: visibilidade de grupo (cross-CNPJ).
-  const grp = buildWhere(companyId, filters, { groupScope: true });
-  // Stats: POR EMPRESA (nao duplica receita entre CNPJs do grupo).
-  const own = buildWhere(companyId, filters, { groupScope: false });
+  const { conds, vals } = buildWhere(companyId, filters);
 
   const limitNum = Math.min(parseInt(limit) || 50, 200);
   const offsetNum = parseInt(offset) || 0;
@@ -142,36 +125,35 @@ router.get('/', asyncHandler(async (req, res) => {
     'SELECT COUNT(*)::int AS total FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
-    'WHERE ' + grp.conds;
-  const { rows: countRows } = await pool.query(countQuery, grp.vals);
+    'WHERE ' + conds;
+  const { rows: countRows } = await pool.query(countQuery, vals);
   const total = countRows[0].total;
 
   // 02/06/2026: lista expoe net_amount/returned_value pra troca (lista mostra liquido).
   // net = total_amount (novos) - SUM(troca_returned_items) quando type='troca'.
-  // 19/06/2026: expoe company_id/company_name/is_cross_filial (visibilidade de grupo).
+  // 24/06/2026: NULLIF(...,'NaN') no subselect — um numeric 'NaN' nao polui o returned_value.
   const listQuery =
     'SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status, ' +
     "       COALESCE(s.type, 'sale') AS type, s.exchange_of_sale_id, " +
     '       s.cancelled_at, s.created_at, ' +
     '       s.customer_id, c.name AS customer_name, ' +
     '       s.seller_id, COALESCE(s.seller_name, e.name) AS seller_name, s.employee_id, ' +
-    '       s.company_id, COALESCE(comp.trade_name, comp.legal_name) AS company_name, ' +
-    '       (s.company_id != $1) AS is_cross_filial, ' +
     '       (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS items_count, ' +
-    '       (SELECT COALESCE(SUM(tri.quantity * tri.unit_price), 0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) AS returned_value, ' +
+    "       (SELECT COALESCE(SUM(NULLIF(tri.quantity,'NaN'::numeric) * NULLIF(tri.unit_price,'NaN'::numeric)), 0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) AS returned_value, " +
     "       (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS transaction_id " +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
-    'LEFT JOIN companies comp ON comp.id = s.company_id ' +
-    'WHERE ' + grp.conds + ' ' +
+    'WHERE ' + conds + ' ' +
     'ORDER BY s.created_at DESC ' +
-    'LIMIT $' + (grp.vals.length + 1) + ' OFFSET $' + (grp.vals.length + 2);
-  const { rows } = await pool.query(listQuery, [...grp.vals, limitNum, offsetNum]);
+    'LIMIT $' + (vals.length + 1) + ' OFFSET $' + (vals.length + 2);
+  const { rows } = await pool.query(listQuery, [...vals, limitNum, offsetNum]);
 
   // Stats agregados: receita conta troca pelo LIQUIDO (novos - devolvidos),
   // venda normal pelo total_amount. (Antes somava total_amount cheio da troca.)
-  // 19/06/2026: usa `own` (POR EMPRESA) — nao group — pra nao duplicar receita.
+  // 24/06/2026: NULLIF(...,'NaN'::numeric) em cada termo — um único valor NaN
+  // (ex.: unit_price corrompido) deixa de envenenar o SUM/AVG inteiro (uma
+  // linha ruim contribui 0/NULL em vez de zerar a receita da empresa toda).
   const statsQuery =
     'SELECT ' +
     '  COUNT(*)::int AS total_sales, ' +
@@ -179,15 +161,15 @@ router.get('/', asyncHandler(async (req, res) => {
     "  COUNT(*) FILTER (WHERE s.status = 'cancelled')::int AS cancelled_sales, " +
     "  COALESCE(SUM( " +
     "    CASE WHEN COALESCE(s.type,'sale') = 'troca' " +
-    "         THEN s.total_amount - (SELECT COALESCE(SUM(tri.quantity*tri.unit_price),0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) " +
-    "         ELSE s.total_amount END " +
+    "         THEN COALESCE(NULLIF(s.total_amount,'NaN'::numeric),0) - (SELECT COALESCE(SUM(NULLIF(tri.quantity,'NaN'::numeric)*NULLIF(tri.unit_price,'NaN'::numeric)),0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) " +
+    "         ELSE COALESCE(NULLIF(s.total_amount,'NaN'::numeric),0) END " +
     "  ) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled'), 0)::numeric AS revenue, " +
-    "  COALESCE(AVG(s.total_amount) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled' AND COALESCE(s.type,'sale')='sale'), 0)::numeric AS avg_ticket " +
+    "  COALESCE(AVG(NULLIF(s.total_amount,'NaN'::numeric)) FILTER (WHERE COALESCE(s.status, 'completed') != 'cancelled' AND COALESCE(s.type,'sale')='sale'), 0)::numeric AS avg_ticket " +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
-    'WHERE ' + own.conds;
-  const { rows: statsRows } = await pool.query(statsQuery, own.vals);
+    'WHERE ' + conds;
+  const { rows: statsRows } = await pool.query(statsQuery, vals);
   const stats = statsRows[0];
 
   res.json({
@@ -196,13 +178,15 @@ router.get('/', asyncHandler(async (req, res) => {
     offset: offsetNum,
     sales: rows.map(function(r) {
       const type = r.type || 'sale';
-      const newValue = parseFloat(r.total_amount);
-      const returnedValue = parseFloat(r.returned_value || 0);
+      // 24/06/2026: `|| 0` defende contra um total_amount/returned_value NaN
+      // (numeric 'NaN' serializa como string "NaN" -> parseFloat = NaN).
+      const newValue = parseFloat(r.total_amount) || 0;
+      const returnedValue = parseFloat(r.returned_value) || 0;
       const isTroca = type === 'troca';
       return {
         id: r.id,
         total_amount: newValue,
-        discount_amount: parseFloat(r.discount_amount || 0),
+        discount_amount: parseFloat(r.discount_amount || 0) || 0,
         payment_method: r.payment_method,
         status: r.status || 'completed',
         type: type,
@@ -216,24 +200,19 @@ router.get('/', asyncHandler(async (req, res) => {
         seller: { id: r.seller_id || r.employee_id || null, name: r.seller_name || null },
         items_count: r.items_count,
         transaction_id: r.transaction_id,
-        // 19/06/2026: origem da venda (visibilidade de grupo)
-        company_id: r.company_id,
-        company_name: r.company_name || null,
-        is_cross_filial: r.is_cross_filial === true,
       };
     }),
     stats: {
       total_sales: stats.total_sales,
       active_sales: stats.active_sales,
       cancelled_sales: stats.cancelled_sales,
-      revenue: parseFloat(stats.revenue),
-      avg_ticket: parseFloat(stats.avg_ticket),
+      revenue: parseFloat(stats.revenue) || 0,
+      avg_ticket: parseFloat(stats.avg_ticket) || 0,
     },
   });
 }));
 
 // GET /companies/:id/sales/:sale_id
-// 19/06/2026: leitura group-aware — abrir uma venda cross-filial a partir da lista.
 router.get('/:sale_id', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
@@ -241,19 +220,11 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   const saleRes = await pool.query(
     'SELECT s.*, c.name AS customer_name, c.phone AS customer_phone, c.email AS customer_email, ' +
     '       COALESCE(s.seller_name, e.name) AS seller_name_eff, ' +
-    '       COALESCE(comp.trade_name, comp.legal_name) AS company_name, ' +
-    '       (s.company_id != $2) AS is_cross_filial, ' +
     "       (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS transaction_id " +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
-    'LEFT JOIN companies comp ON comp.id = s.company_id ' +
-    'WHERE s.id = $1 AND (' +
-    '  s.company_id = $2 OR EXISTS (' +
-    '    SELECT 1 FROM companies c2 WHERE c2.id = s.company_id' +
-    '      AND COALESCE(NULLIF(c2.billing_owner_company_id, c2.id), c2.id)' +
-    '        = COALESCE(NULLIF((SELECT billing_owner_company_id FROM companies WHERE id = $2), $2), $2)' +
-    '  ))',
+    'WHERE s.id = $1 AND s.company_id = $2',
     [saleId, companyId]
   );
   if (!saleRes.rows.length) throw new AppError('Venda nao encontrada', 404);
@@ -275,10 +246,10 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       id: r.id,
       product_id: r.product_id,
       variant_id: r.variant_id,
-      quantity: parseFloat(r.quantity),
-      unit_price: parseFloat(r.unit_price),
-      discount: parseFloat(r.discount || 0),
-      total_price: parseFloat(r.total_price),
+      quantity: parseFloat(r.quantity) || 0,
+      unit_price: parseFloat(r.unit_price) || 0,
+      discount: parseFloat(r.discount || 0) || 0,
+      total_price: parseFloat(r.total_price) || 0,
       product_name: r.product_name || r.product_name_snapshot || 'Item',
       image_url: r.image_url,
     };
@@ -301,7 +272,7 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       [saleId]
     );
     const returnedValue = retRes.rows.reduce(function(acc, r) {
-      return acc + parseFloat(r.quantity) * parseFloat(r.unit_price);
+      return acc + (parseFloat(r.quantity) || 0) * (parseFloat(r.unit_price) || 0);
     }, 0);
     const newValue = items.reduce(function(acc, r) { return acc + r.total_price; }, 0);
     troca = {
@@ -313,15 +284,15 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
         return {
           product_id: r.product_id,
           variant_id: r.variant_id,
-          quantity: parseFloat(r.quantity),
-          unit_price: parseFloat(r.unit_price),
+          quantity: parseFloat(r.quantity) || 0,
+          unit_price: parseFloat(r.unit_price) || 0,
           product_name: r.product_name || r.product_name_snapshot || 'Item',
           image_url: r.image_url,
           original_sale_id: r.original_sale_id,
         };
       }),
       payments: payRes.rows.map(function(r) {
-        return { method: r.method, amount: parseFloat(r.amount) };
+        return { method: r.method, amount: parseFloat(r.amount) || 0 };
       }),
     };
   }
@@ -362,8 +333,8 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   res.json({
     sale: {
       id: sale.id,
-      total_amount: parseFloat(sale.total_amount),
-      discount_amount: parseFloat(sale.discount_amount || 0),
+      total_amount: parseFloat(sale.total_amount) || 0,
+      discount_amount: parseFloat(sale.discount_amount || 0) || 0,
       payment_method: sale.payment_method,
       status: sale.status || 'completed',
       type: sale.type || 'sale',
@@ -374,10 +345,6 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
       cash_tendered: sale.cash_tendered ? parseFloat(sale.cash_tendered) : null,
       coupon_code: sale.coupon_code,
       transaction_id: sale.transaction_id,
-      // 19/06/2026: origem (visibilidade de grupo)
-      company_id: sale.company_id,
-      company_name: sale.company_name || null,
-      is_cross_filial: sale.is_cross_filial === true,
     },
     customer: sale.customer_id ? {
       id: sale.customer_id,
@@ -396,7 +363,6 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
 }));
 
 // PATCH /companies/:id/sales/:sale_id
-// Mutacao segue company-scoped: so edita venda do proprio CNPJ.
 router.patch('/:sale_id', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
@@ -429,7 +395,6 @@ router.patch('/:sale_id', asyncHandler(async (req, res) => {
 }));
 
 // POST /companies/:id/sales/:sale_id/cancel  (troca-aware)
-// Mutacao segue company-scoped: so cancela venda do proprio CNPJ.
 router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const saleId = req.params.sale_id;
