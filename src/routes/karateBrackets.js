@@ -5,14 +5,18 @@
 // Kumite (bracket eliminatório):
 //   POST   /competitions/:cid/categories/:catId/bracket/generate  — gera/regenera (draft)
 //   POST   /competitions/:cid/categories/:catId/bracket/lock      — trava (official)
+//   POST   /competitions/:cid/categories/:catId/bracket/unlock    — destrava (locked→draft)
 //   GET    /competitions/:cid/categories/:catId/bracket           — lê bracket
-//   POST   /competitions/:cid/categories/:catId/bracket/advance   — avança vencedor
+//   POST   /competitions/:cid/categories/:catId/bracket/advance   — avança vencedor (+ placar opcional)
+//   PUT    /competitions/:cid/categories/:catId/bracket/matches   — edição total em lote (Fase 1)
+//   POST   /competitions/:cid/categories/:catId/bracket/reset     — limpa vencedores/placares (mantém seeding)
 //
 // Kata (por bateria):
 //   GET    /competitions/:cid/categories/:catId/kata-scores       — lê notas
 //   PUT    /competitions/:cid/categories/:catId/kata-scores       — salva nota
 //   POST   /competitions/:cid/categories/:catId/kata-scores/generate-order — sorteia ordem
 //   POST   /competitions/:cid/categories/:catId/kata-scores/advance — avança eliminatória→final
+//   PUT    /competitions/:cid/categories/:catId/kata-scores/order — reordena manualmente (drag-and-drop)
 // ============================================================
 'use strict';
 
@@ -68,6 +72,38 @@ async function loadEntries(client, catId, federationId) {
   }));
 }
 
+// ── helper: inscritos aguardando confirmação de pagamento ───────
+// Conta entries (não-withdrawn) com fee_paid=false SOMENTE quando a
+// categoria é paga (taxa da categoria, senão a taxa do evento > 0). Em
+// categoria gratuita, fee_paid=false não significa "aguardando pagamento",
+// então retorna 0. Defensivo p/ coluna/tabela ausente (42P01/42703 → 0).
+async function countPendingPayment(client, cid, catId) {
+  try {
+    const feeRes = await client.query(
+      `SELECT COALESCE(cat.fee_amount, comp.fee_amount, 0) AS effective_fee
+         FROM karate_competition_categories cat
+         JOIN karate_competitions comp ON comp.id = cat.competition_id
+        WHERE cat.id = $1 AND cat.competition_id = $2
+        LIMIT 1`,
+      [catId, cid]
+    );
+    const effectiveFee = Number(feeRes.rows[0]?.effective_fee) || 0;
+    if (effectiveFee <= 0) return 0;
+    const r = await client.query(
+      `SELECT COUNT(*)::int AS pending
+         FROM karate_competition_entries
+        WHERE category_id = $1
+          AND status NOT IN ('withdrawn')
+          AND fee_paid = false`,
+      [catId]
+    );
+    return r.rows[0]?.pending || 0;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return 0;
+    throw e;
+  }
+}
+
 // ── helper: load bracket + matches ──────────────────────────────
 async function loadBracket(client, catId) {
   let bracketRow = null;
@@ -93,10 +129,37 @@ async function loadBracket(client, catId) {
 }
 
 // ── helper: upsert bracket matches ──────────────────────────────
-async function upsertMatches(client, bracketId, matchRowsData) {
+// scoreMap opcional: { "r{round}-{slot}"|"third" -> { aka_score, shiro_score } }
+// usado para preservar placares já lançados quando advance() reconstrói o
+// bracket inteiro via delete+insert (stateToMatchRows não conhece scores).
+// Defensivo: coluna aka_score/shiro_score pode não existir ainda (42703).
+async function upsertMatches(client, bracketId, matchRowsData, scoreMap) {
   // Delete old matches and re-insert (simpler than diff)
   await client.query(`DELETE FROM karate_bracket_matches WHERE bracket_id = $1`, [bracketId]);
+  let scoresSupported = true;
   for (const m of matchRowsData) {
+    const key = m.bracket_kind === 'third' ? 'third' : `r${m.round}-${m.slot}`;
+    const scores = (scoreMap && scoreMap[key]) || { aka_score: null, shiro_score: null };
+
+    if (scoresSupported) {
+      try {
+        await client.query(
+          `INSERT INTO karate_bracket_matches
+             (bracket_id, round, slot, bracket_kind, aka_entry_id, shiro_entry_id, winner_entry_id, is_bye, aka_score, shiro_score)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+          [m.bracket_id, m.round, m.slot, m.bracket_kind,
+           m.aka_entry_id || null, m.shiro_entry_id || null, m.winner_entry_id || null, m.is_bye,
+           scores.aka_score, scores.shiro_score]
+        );
+        continue;
+      } catch (e) {
+        if (e.code === '42703') {
+          scoresSupported = false; // migration 210 ainda não aplicada — cai no fallback abaixo
+        } else {
+          throw e;
+        }
+      }
+    }
     await client.query(
       `INSERT INTO karate_bracket_matches
          (bracket_id, round, slot, bracket_kind, aka_entry_id, shiro_entry_id, winner_entry_id, is_bye)
@@ -104,6 +167,141 @@ async function upsertMatches(client, bracketId, matchRowsData) {
       [m.bracket_id, m.round, m.slot, m.bracket_kind,
        m.aka_entry_id || null, m.shiro_entry_id || null, m.winner_entry_id || null, m.is_bye]
     );
+  }
+}
+
+// ── helper: mapa "r{round}-{slot}"|"third" → { aka_score, shiro_score } ──
+// (usado para enriquecer o BracketState serializado no GET/PUT/reset/advance
+// sem precisar ensinar o serviço puro karateBracket.js sobre placares.)
+function buildScoreMap(matchRows) {
+  const map = {};
+  for (const m of matchRows) {
+    const key = m.bracket_kind === 'third' ? 'third' : `r${m.round}-${m.slot}`;
+    map[key] = {
+      aka_score: m.aka_score !== undefined ? m.aka_score : null,
+      shiro_score: m.shiro_score !== undefined ? m.shiro_score : null,
+    };
+  }
+  return map;
+}
+
+// ── helper: monta o BracketState serializado (shape retornado por GET,
+// PUT /matches, POST /reset, e reaproveitado no /advance) para kumite. ──
+function buildKumiteBracketState(bracketRow, matchRows, athletes, pendingPaymentCount) {
+  const state = rowsToState(matchRows, bracketRow, athletes);
+  const scoreMap = buildScoreMap(matchRows);
+
+  const athleteMap = {};
+  for (const a of athletes) athleteMap[a.id] = a;
+
+  const serializeMatch = (m) => {
+    const scoreKey = m.id === 'third' ? 'third' : m.id;
+    const scores = scoreMap[scoreKey] || { aka_score: null, shiro_score: null };
+    return {
+      id: m.id,
+      round: m.round,
+      slot: m.slot,
+      aka: m.akaId && m.akaId !== 'bye' && m.akaId !== null ? {
+        entry_id: m.akaId,
+        student_name: athleteMap[m.akaId]?.student_name || null,
+        dojo_name: athleteMap[m.akaId]?.dojo || null,
+      } : (m.akaId === 'bye' ? 'bye' : null),
+      shiro: m.shiroId && m.shiroId !== 'bye' && m.shiroId !== null ? {
+        entry_id: m.shiroId,
+        student_name: athleteMap[m.shiroId]?.student_name || null,
+        dojo_name: athleteMap[m.shiroId]?.dojo || null,
+      } : (m.shiroId === 'bye' ? 'bye' : null),
+      winner_entry_id: m.winnerId,
+      is_bye: m.isBye,
+      aka_score: scores.aka_score,
+      shiro_score: scores.shiro_score,
+    };
+  };
+
+  const rounds = state.rounds.map(r => r.map(serializeMatch));
+  const third = state.thirdPlaceMatch ? serializeMatch({
+    ...state.thirdPlaceMatch, round: state.rounds.length, slot: 0, isBye: false,
+  }) : null;
+
+  const lastRound = state.rounds[state.rounds.length - 1];
+  const champion = lastRound?.[0]?.winnerId
+    ? { entry_id: lastRound[0].winnerId, student_name: athleteMap[lastRound[0].winnerId]?.student_name || null }
+    : null;
+
+  return {
+    bracket_id: bracketRow.id,
+    status: bracketRow.status,
+    modality: bracketRow.modality,
+    seed: bracketRow.draw_seed,
+    options: bracketRow.options,
+    athletes_count: athletes.length,
+    pending_payment_count: pendingPaymentCount,
+    bye_count: state.byeCount,
+    rounds,
+    third_place_match: third,
+    champion,
+  };
+}
+
+// ── helper: aplica update parcial de placar/vencedor/slots em 1 match ────
+// Defensivo: se aka_score/shiro_score ainda não existirem na tabela (42703,
+// migration 210 não aplicada), ignora esses 2 campos silenciosamente.
+async function applyMatchUpdate(client, matchRow, patch) {
+  const fields = [];
+  const values = [];
+  let idx = 1;
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'aka_entry_id')) {
+    fields.push(`aka_entry_id = $${idx++}`); values.push(patch.aka_entry_id);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'shiro_entry_id')) {
+    fields.push(`shiro_entry_id = $${idx++}`); values.push(patch.shiro_entry_id);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'winner_entry_id')) {
+    fields.push(`winner_entry_id = $${idx++}`); values.push(patch.winner_entry_id);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'is_bye')) {
+    fields.push(`is_bye = $${idx++}`); values.push(!!patch.is_bye);
+  }
+
+  const hasScoreFields = Object.prototype.hasOwnProperty.call(patch, 'aka_score') ||
+    Object.prototype.hasOwnProperty.call(patch, 'shiro_score');
+
+  async function runUpdate(withScores) {
+    const f = [...fields];
+    const v = [...values];
+    let i = idx;
+    if (withScores) {
+      if (Object.prototype.hasOwnProperty.call(patch, 'aka_score')) {
+        f.push(`aka_score = $${i++}`); v.push(patch.aka_score);
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'shiro_score')) {
+        f.push(`shiro_score = $${i++}`); v.push(patch.shiro_score);
+      }
+    }
+    if (!f.length) return;
+    f.push(`updated_at = NOW()`);
+    v.push(matchRow.id);
+    await client.query(
+      `UPDATE karate_bracket_matches SET ${f.join(', ')} WHERE id = $${i}`,
+      v
+    );
+  }
+
+  if (hasScoreFields) {
+    try {
+      await runUpdate(true);
+    } catch (e) {
+      if (e.code === '42703') {
+        // Coluna aka_score/shiro_score ainda não existe — fallback: aplica
+        // só os demais campos, ignora os placares silenciosamente.
+        await runUpdate(false);
+      } else {
+        throw e;
+      }
+    }
+  } else {
+    await runUpdate(false);
   }
 }
 
@@ -133,6 +331,7 @@ router.post(
       const isKata = ['kata', 'team_kata'].includes(cat.modality);
 
       const athletes = await loadEntries(client, catId, federationId);
+      const pendingPaymentCount = await countPendingPayment(client, cid, catId);
       if (athletes.length < 2) {
         await client.query('ROLLBACK');
         return res.status(422).json({ error: 'Mínimo de 2 atletas inscritos para gerar chave', code: 'VALIDATION_ERROR' });
@@ -190,6 +389,7 @@ router.post(
           seed: drawSeed,
           options,
           athletes_count: athletes.length,
+          pending_payment_count: pendingPaymentCount,
           presentation_order: ordered.map((a, i) => ({ entry_id: a.id, student_name: a.student_name, order: i + 1 })),
         });
       }
@@ -230,6 +430,7 @@ router.post(
         seed: drawSeed,
         options,
         athletes_count: athletes.length,
+        pending_payment_count: pendingPaymentCount,
         bye_count: state.byeCount,
         same_dojo_clashes: sameDojoClashes,
         third_place: !!thirdPlace,
@@ -306,10 +507,11 @@ router.get(
       if (!comp) return res.status(404).json({ error: 'Competição não encontrada' });
 
       const athletes = await loadEntries(client, catId, federationId);
+      const pendingPaymentCount = await countPendingPayment(client, cid, catId);
       const { bracketRow, matchRows } = await loadBracket(client, catId);
 
       if (!bracketRow) {
-        return res.json({ status: 'not_generated', athletes_count: athletes.length, bracket: null });
+        return res.json({ status: 'not_generated', athletes_count: athletes.length, pending_payment_count: pendingPaymentCount, bracket: null });
       }
 
       // For kata: return scores instead
@@ -340,6 +542,7 @@ router.get(
           seed: bracketRow.draw_seed,
           options: bracketRow.options,
           athletes_count: athletes.length,
+          pending_payment_count: pendingPaymentCount,
           kata_scores: scores.map(s => ({
             entry_id: s.entry_id,
             student_name: s.student_name,
@@ -352,53 +555,9 @@ router.get(
         });
       }
 
-      // Kumite: reconstruct state
-      const state = rowsToState(matchRows, bracketRow, athletes);
-
-      // Build serializable rounds
-      const athleteMap = {};
-      for (const a of athletes) athleteMap[a.id] = a;
-
-      const serializeMatch = (m) => ({
-        id: m.id,
-        round: m.round,
-        slot: m.slot,
-        aka: m.akaId && m.akaId !== 'bye' && m.akaId !== null ? {
-          entry_id: m.akaId,
-          student_name: athleteMap[m.akaId]?.student_name || null,
-          dojo_name: athleteMap[m.akaId]?.dojo || null,
-        } : (m.akaId === 'bye' ? 'bye' : null),
-        shiro: m.shiroId && m.shiroId !== 'bye' && m.shiroId !== null ? {
-          entry_id: m.shiroId,
-          student_name: athleteMap[m.shiroId]?.student_name || null,
-          dojo_name: athleteMap[m.shiroId]?.dojo || null,
-        } : (m.shiroId === 'bye' ? 'bye' : null),
-        winner_entry_id: m.winnerId,
-        is_bye: m.isBye,
-      });
-
-      const rounds = state.rounds.map(r => r.map(serializeMatch));
-      const third = state.thirdPlaceMatch ? serializeMatch({
-        ...state.thirdPlaceMatch, round: state.rounds.length, slot: 0, isBye: false,
-      }) : null;
-
-      const lastRound = state.rounds[state.rounds.length - 1];
-      const champion = lastRound?.[0]?.winnerId
-        ? { entry_id: lastRound[0].winnerId, student_name: athleteMap[lastRound[0].winnerId]?.student_name || null }
-        : null;
-
-      res.json({
-        bracket_id: bracketRow.id,
-        status: bracketRow.status,
-        modality: bracketRow.modality,
-        seed: bracketRow.draw_seed,
-        options: bracketRow.options,
-        athletes_count: athletes.length,
-        bye_count: state.byeCount,
-        rounds,
-        third_place_match: third,
-        champion,
-      });
+      // Kumite: reconstruct state (mesmo shape usado por PUT /matches, /reset, /advance)
+      const bracketState = buildKumiteBracketState(bracketRow, matchRows, athletes, pendingPaymentCount);
+      res.json(bracketState);
     } catch (err) {
       console.error('[karateBrackets] get error:', err.message);
       res.status(500).json({ error: 'Erro ao carregar chave' });
@@ -411,7 +570,9 @@ router.get(
 // ═══════════════════════════════════════════════════════════════
 // POST /competitions/:cid/categories/:catId/bracket/advance
 // Lança vencedor de uma partida e propaga pelo bracket.
-// Body: { match_id, winner_entry_id }
+// Body: { match_id, winner_entry_id, aka_score?, shiro_score? }
+// aka_score/shiro_score são opcionais e retrocompatíveis: quando ausentes,
+// comportamento idêntico ao anterior. Defensivo p/ coluna ausente (42703).
 // Requires: bracket status = 'locked'
 // ═══════════════════════════════════════════════════════════════
 router.post(
@@ -419,7 +580,7 @@ router.post(
   ...guards.staffWrite(),
   async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
-    const { match_id: matchId, winner_entry_id: winnerId } = req.body;
+    const { match_id: matchId, winner_entry_id: winnerId, aka_score: akaScore, shiro_score: shiroScore } = req.body;
 
     if (!matchId || !winnerId) {
       return res.status(422).json({ error: 'match_id e winner_entry_id são obrigatórios', code: 'VALIDATION_ERROR' });
@@ -433,6 +594,7 @@ router.post(
       if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
 
       const athletes = await loadEntries(client, catId, federationId);
+      const pendingPaymentCount = await countPendingPayment(client, cid, catId);
       const { bracketRow, matchRows } = await loadBracket(client, catId);
 
       if (!bracketRow) {
@@ -454,8 +616,19 @@ router.post(
         return res.status(422).json({ error: err.message, code: 'VALIDATION_ERROR' });
       }
 
+      // Preserva placares já lançados em outras partidas + aplica o novo
+      // placar (se enviado) na partida que acabou de ser decidida.
+      const scoreMap = buildScoreMap(matchRows);
+      if (akaScore !== undefined || shiroScore !== undefined) {
+        const existing = scoreMap[matchId] || { aka_score: null, shiro_score: null };
+        scoreMap[matchId] = {
+          aka_score: akaScore !== undefined ? akaScore : existing.aka_score,
+          shiro_score: shiroScore !== undefined ? shiroScore : existing.shiro_score,
+        };
+      }
+
       const newMatchRows = stateToMatchRows(bracketRow.id, newState);
-      await upsertMatches(client, bracketRow.id, newMatchRows);
+      await upsertMatches(client, bracketRow.id, newMatchRows, scoreMap);
 
       await client.query('COMMIT');
 
@@ -476,6 +649,230 @@ router.post(
       await client.query('ROLLBACK');
       console.error('[karateBrackets] advance error:', err.message);
       res.status(500).json({ error: 'Erro ao avançar vencedor' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// PUT /competitions/:cid/categories/:catId/bracket/matches
+// Edição total em lote (arrasto/seed manual + vencedor + placar).
+// Body: { matches: [{ id, aka_entry_id?, shiro_entry_id?, winner_entry_id?,
+//                      aka_score?, shiro_score?, is_bye? }] }
+// - Update parcial por id: só altera os campos presentes em cada objeto.
+// - aka_entry_id/shiro_entry_id/winner_entry_id (quando não-nulos) devem
+//   pertencer a inscritos (entries) da categoria — senão 400.
+// - 409 se bracket.status === 'locked' (nada é persistido).
+// - Tudo em uma transação: qualquer falha de validação => ROLLBACK total.
+// - Defensivo: aka_score/shiro_score são ignorados silenciosamente se as
+//   colunas ainda não existirem (42703 — migration 210 não aplicada).
+// - Retorna o BracketState completo (mesmo shape do GET).
+// ═══════════════════════════════════════════════════════════════
+router.put(
+  '/competitions/:cid/categories/:catId/bracket/matches',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const { matches } = req.body;
+
+    if (!Array.isArray(matches) || matches.length === 0) {
+      return res.status(422).json({ error: 'matches deve ser um array não-vazio', code: 'VALIDATION_ERROR' });
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
+
+      const cat = await findCat(client, cid, catId);
+      if (!cat) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Categoria não encontrada' }); }
+
+      const { bracketRow, matchRows } = await loadBracket(client, catId);
+      if (!bracketRow) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Chave não gerada ainda', code: 'NOT_FOUND' });
+      }
+      if (bracketRow.status === 'locked') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Destrave a chave para editar.' });
+      }
+
+      const athletes = await loadEntries(client, catId, federationId);
+      const pendingPaymentCount = await countPendingPayment(client, cid, catId);
+
+      // Valida que todo entry_id referenciado pertence a um inscrito da categoria
+      const validEntryIds = new Set(athletes.map(a => a.id));
+      // matchById é indexado pelo id SINTÉTICO ("r{round}-{slot}" | "third") —
+      // o mesmo formato que o GET .../bracket devolve no campo `id` de cada
+      // partida (ver buildKumiteBracketState/rowsToState). O frontend só
+      // conhece esse id, nunca o UUID real da linha em karate_bracket_matches.
+      const matchById = new Map(matchRows.map(m => {
+        const syntheticId = m.bracket_kind === 'third' ? 'third' : `r${m.round}-${m.slot}`;
+        return [syntheticId, m];
+      }));
+      const errors = [];
+
+      for (const patch of matches) {
+        if (!patch || !patch.id) {
+          errors.push('Todo item de matches precisa de id');
+          continue;
+        }
+        if (!matchById.has(patch.id)) {
+          errors.push(`Partida não encontrada: ${patch.id}`);
+          continue;
+        }
+        for (const field of ['aka_entry_id', 'shiro_entry_id', 'winner_entry_id']) {
+          if (Object.prototype.hasOwnProperty.call(patch, field) && patch[field] !== null && patch[field] !== undefined) {
+            if (!validEntryIds.has(patch[field])) {
+              errors.push(`${field} (${patch[field]}) na partida ${patch.id} não pertence a um inscrito desta categoria`);
+            }
+          }
+        }
+        // winner_entry_id, quando presente, deve ser um dos dois lados resultantes do patch
+        if (Object.prototype.hasOwnProperty.call(patch, 'winner_entry_id') && patch.winner_entry_id) {
+          const row = matchById.get(patch.id);
+          const finalAka = Object.prototype.hasOwnProperty.call(patch, 'aka_entry_id') ? patch.aka_entry_id : row.aka_entry_id;
+          const finalShiro = Object.prototype.hasOwnProperty.call(patch, 'shiro_entry_id') ? patch.shiro_entry_id : row.shiro_entry_id;
+          if (patch.winner_entry_id !== finalAka && patch.winner_entry_id !== finalShiro) {
+            errors.push(`winner_entry_id (${patch.winner_entry_id}) na partida ${patch.id} não corresponde a aka nem shiro dessa partida`);
+          }
+        }
+      }
+
+      if (errors.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Validação falhou', details: errors, code: 'VALIDATION_ERROR' });
+      }
+
+      // Aplica updates parciais, um por um (por id — não sobrescreve campos ausentes)
+      for (const patch of matches) {
+        const row = matchById.get(patch.id);
+        await applyMatchUpdate(client, row, patch);
+      }
+
+      // Recarrega estado atualizado para devolver o BracketState completo
+      const { bracketRow: freshBracket, matchRows: freshMatchRows } = await loadBracket(client, catId);
+      const bracketState = buildKumiteBracketState(freshBracket, freshMatchRows, athletes, pendingPaymentCount);
+
+      await client.query('COMMIT');
+      res.json(bracketState);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] matches put error:', err.message);
+      res.status(500).json({ error: 'Erro ao salvar edição da chave' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// POST /competitions/:cid/categories/:catId/bracket/reset
+// Limpa winner_entry_id/aka_score/shiro_score de TODAS as partidas do
+// bracket, mantendo posições/seeding (aka_entry_id/shiro_entry_id/slot/round
+// intactos). 409 se status === 'locked'.
+// ═══════════════════════════════════════════════════════════════
+router.post(
+  '/competitions/:cid/categories/:catId/bracket/reset',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
+
+      const { bracketRow, matchRows } = await loadBracket(client, catId);
+      if (!bracketRow) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Chave não gerada ainda', code: 'NOT_FOUND' });
+      }
+      if (bracketRow.status === 'locked') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Destrave a chave para editar.' });
+      }
+
+      try {
+        await client.query(
+          `UPDATE karate_bracket_matches
+              SET winner_entry_id = NULL, aka_score = NULL, shiro_score = NULL, updated_at = NOW()
+            WHERE bracket_id = $1`,
+          [bracketRow.id]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          // Migration 210 não aplicada — reseta só o vencedor
+          await client.query(
+            `UPDATE karate_bracket_matches SET winner_entry_id = NULL, updated_at = NOW() WHERE bracket_id = $1`,
+            [bracketRow.id]
+          );
+        } else {
+          throw e;
+        }
+      }
+
+      const athletes = await loadEntries(client, catId, federationId);
+      const pendingPaymentCount = await countPendingPayment(client, cid, catId);
+      const { bracketRow: freshBracket, matchRows: freshMatchRows } = await loadBracket(client, catId);
+      const bracketState = buildKumiteBracketState(freshBracket, freshMatchRows, athletes, pendingPaymentCount);
+
+      await client.query('COMMIT');
+      res.json(bracketState);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] reset error:', err.message);
+      res.status(500).json({ error: 'Erro ao resetar chave' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// POST /competitions/:cid/categories/:catId/bracket/unlock
+// Transição de status: locked → draft.
+// ═══════════════════════════════════════════════════════════════
+router.post(
+  '/competitions/:cid/categories/:catId/bracket/unlock',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
+
+      let row;
+      try {
+        const br = await client.query(
+          `UPDATE karate_brackets SET status='draft', updated_at=NOW()
+           WHERE category_id = $1 AND status='locked'
+           RETURNING id, status`,
+          [catId]
+        );
+        row = br.rows[0];
+      } catch (e) {
+        if (e.code === '42P01') { await client.query('ROLLBACK'); return res.status(503).json({ error: 'Migration 183 não aplicada', code: 'SCHEMA_PENDING' }); }
+        throw e;
+      }
+
+      if (!row) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Chave não encontrada ou já destravada', code: 'CONFLICT' });
+      }
+
+      await client.query('COMMIT');
+      res.json({ status: 'draft' });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] unlock error:', err.message);
+      res.status(500).json({ error: 'Erro ao destravar chave' });
     } finally {
       client.release();
     }
@@ -622,6 +1019,7 @@ router.post(
       if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
 
       const athletes = await loadEntries(client, catId, federationId);
+      const pendingPaymentCount = await countPendingPayment(client, cid, catId);
       if (athletes.length < 2) { await client.query('ROLLBACK'); return res.status(422).json({ error: 'Mínimo de 2 atletas' }); }
 
       const drawSeed = seed !== undefined ? String(seed) : String(Date.now());
@@ -735,6 +1133,115 @@ router.post(
       await client.query('ROLLBACK');
       console.error('[karateBrackets] kata advance error:', err.message);
       res.status(500).json({ error: 'Erro ao avançar atletas' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// PUT /competitions/:cid/categories/:catId/kata-scores/order
+// Salva reordenação manual (drag-and-drop) da ordem de apresentação
+// de uma fase inteira.
+// Body: { phase: "eliminatoria" | "final", order: [{ entry_id, presentation_order }, ...] }
+// ═══════════════════════════════════════════════════════════════
+router.put(
+  '/competitions/:cid/categories/:catId/kata-scores/order',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const { phase, order } = req.body;
+
+    if (!phase || !['eliminatoria', 'final'].includes(phase)) {
+      return res.status(422).json({ error: 'phase deve ser eliminatoria ou final', code: 'VALIDATION_ERROR' });
+    }
+    if (!Array.isArray(order) || order.length === 0) {
+      return res.status(422).json({ error: 'order é obrigatório e deve ser uma lista', code: 'VALIDATION_ERROR' });
+    }
+    for (const item of order) {
+      if (!item || !item.entry_id || item.presentation_order === undefined || item.presentation_order === null) {
+        return res.status(422).json({ error: 'cada item de order precisa de entry_id e presentation_order', code: 'VALIDATION_ERROR' });
+      }
+      const posNum = parseInt(item.presentation_order, 10);
+      if (isNaN(posNum) || posNum < 1) {
+        return res.status(422).json({ error: 'presentation_order deve ser inteiro positivo', code: 'VALIDATION_ERROR' });
+      }
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada' }); }
+
+      const { bracketRow } = await loadBracket(client, catId);
+      if (!bracketRow) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave não gerada ainda' }); }
+      if (bracketRow.status !== 'locked') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave deve estar travada para reordenar', code: 'CONFLICT' }); }
+
+      try {
+        // valida que cada entry_id pertence a esse bracket/categoria/fase antes de gravar
+        const entryIds = order.map(o => o.entry_id);
+        const belongCheck = await client.query(
+          `SELECT entry_id FROM karate_kata_scores WHERE bracket_id=$1 AND phase=$2 AND entry_id = ANY($3::uuid[])`,
+          [bracketRow.id, phase, entryIds]
+        );
+        const belongingIds = new Set(belongCheck.rows.map(r => r.entry_id));
+        const invalid = entryIds.filter(id => !belongingIds.has(id));
+        if (invalid.length) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({ error: 'Um ou mais entry_id não pertencem a esta chave/fase', code: 'VALIDATION_ERROR', invalid_entry_ids: invalid });
+        }
+
+        for (const item of order) {
+          const posNum = parseInt(item.presentation_order, 10);
+          await client.query(
+            `UPDATE karate_kata_scores SET presentation_order=$1, updated_at=NOW()
+             WHERE bracket_id=$2 AND entry_id=$3 AND phase=$4`,
+            [posNum, bracketRow.id, item.entry_id, phase]
+          );
+        }
+      } catch (e) {
+        if (e.code === '42703' || e.code === '42P01') {
+          await client.query('ROLLBACK');
+          return res.status(503).json({ error: 'Migration 183 não aplicada' });
+        }
+        throw e;
+      }
+
+      let rows = [];
+      try {
+        const r = await client.query(
+          `SELECT ks.entry_id, ks.phase, ks.nota, ks.presentation_order, ks.advances,
+                  cu.name AS student_name,
+                  COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+           FROM karate_kata_scores ks
+           JOIN karate_brackets kb ON kb.id = ks.bracket_id
+           JOIN karate_competition_entries e ON e.id = ks.entry_id
+           JOIN customers cu ON cu.id = e.student_id
+           LEFT JOIN companies dj ON dj.id = e.dojo_id
+           WHERE kb.category_id = $1 AND ks.phase = $2
+           ORDER BY ks.presentation_order ASC NULLS LAST, ks.nota DESC NULLS LAST`,
+          [catId, phase]
+        );
+        rows = r.rows;
+      } catch (e) {
+        if (e.code !== '42703' && e.code !== '42P01') throw e;
+      }
+
+      await client.query('COMMIT');
+      res.json(rows.map(r => ({
+        entry_id: r.entry_id,
+        student_name: r.student_name,
+        dojo_name: r.dojo_name,
+        phase: r.phase,
+        nota: r.nota !== null ? parseFloat(r.nota) : null,
+        presentation_order: r.presentation_order,
+        advances: r.advances,
+      })));
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] kata-scores order put error:', err.message);
+      res.status(500).json({ error: 'Erro ao salvar ordem' });
     } finally {
       client.release();
     }

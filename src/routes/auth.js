@@ -39,6 +39,11 @@
 // acessos no Essencial quando ha acesso extra pago. Sem o campo, o
 // fallback ficava sempre 0 e o cliente via "A partir do plano Negocio"
 // apesar do acesso pago (caso Encanto). Nao toca os SELECTs criticos.
+//
+// Fase 0 Dojô (2026-06-17): dojo_id propagado no JWT (login/refresh/register)
+// e no objeto company de /login, /me e /register. resolveKarateContext
+// agora retorna { federation_id, karate_role, dojo_id }. Usado por
+// requireDojoAccess (Canal A) para escopar endpoints /dojo/*.
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -167,6 +172,7 @@ function shapeCompany(company, fallbackMemberRole) {
     member_role,
     federation_id: karate.federation_id,
     karate_role: karate.karate_role,
+    dojo_id: karate.dojo_id,
   };
 }
 
@@ -287,6 +293,7 @@ router.post('/register', async (req, res) => {
       consolidated_view: false,
       federation_id: karateCtx.federation_id,
       karate_role: karateCtx.karate_role,
+      dojo_id: karateCtx.dojo_id,
     };
     const accessToken = signAccessToken(tokenPayload);
     const { token: refreshToken } = signRefreshToken({ id: user.id });
@@ -312,6 +319,7 @@ router.post('/register', async (req, res) => {
         extra_seats_granted: 0,
         federation_id: karateCtx.federation_id,
         karate_role: karateCtx.karate_role,
+        dojo_id: karateCtx.dojo_id,
       } : null,
       consolidated_view: false,
       company_count: company ? 1 : 0,
@@ -343,7 +351,7 @@ router.post('/login', async (req, res) => {
 
     const ctx = await resolveDefaultContext(user.id);
     // Track G: contexto karate da primary (null em modo consolidado, alinhado com company=null).
-    const karateCtx = ctx.consolidated ? { federation_id: null, karate_role: null } : resolveKarateContext(ctx.primary);
+    const karateCtx = ctx.consolidated ? { federation_id: null, karate_role: null, dojo_id: null } : resolveKarateContext(ctx.primary);
 
     const tokenPayload = {
       id: user.id,
@@ -354,6 +362,7 @@ router.post('/login', async (req, res) => {
       consolidated_view: ctx.consolidated,
       federation_id: karateCtx.federation_id,
       karate_role: karateCtx.karate_role,
+      dojo_id: karateCtx.dojo_id,
     };
     const accessToken = signAccessToken(tokenPayload);
     const { token: refreshToken } = signRefreshToken({ id: user.id });
@@ -395,7 +404,7 @@ router.post('/refresh', async (req, res) => {
 
     const ctx = await resolveDefaultContext(user.id);
     // Track G: re-resolve contexto karate a cada refresh (TTL 1h mantem fresco).
-    const karateCtx = ctx.consolidated ? { federation_id: null, karate_role: null } : resolveKarateContext(ctx.primary);
+    const karateCtx = ctx.consolidated ? { federation_id: null, karate_role: null, dojo_id: null } : resolveKarateContext(ctx.primary);
 
     const newAccessToken = signAccessToken({
       id: user.id,
@@ -406,6 +415,7 @@ router.post('/refresh', async (req, res) => {
       consolidated_view: ctx.consolidated,
       federation_id: karateCtx.federation_id,
       karate_role: karateCtx.karate_role,
+      dojo_id: karateCtx.dojo_id,
     });
     res.json({
       token: newAccessToken,

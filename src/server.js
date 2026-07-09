@@ -66,6 +66,10 @@ function startServer() {
     // Track I: régua de lembrete de anuidade karatê (diário 9h BRT)
     const { initAnnuityReminderScheduler } = require('./jobs/annuityReminderScheduler');
     initAnnuityReminderScheduler();
+
+    // Aviso interno de vencimento (T-2) da mensalidade da federação karatê → contato@getaura.com.br
+    const { initKarateBillingDueScheduler } = require('./jobs/karateBillingDueScheduler');
+    initKarateBillingDueScheduler();
   });
 }
 

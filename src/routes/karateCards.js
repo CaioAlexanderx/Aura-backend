@@ -5,10 +5,11 @@
 // NÃO gera imagem (decisão Caio 07/06): apenas processa o pedido e
 // devolve os DADOS da carteirinha. A renderização é design/frontend.
 //
-//   POST /practitioners/:practitionerId/issue-card  — emite/renova (staffWrite)
-//   GET  /practitioners/:practitionerId/card        — carteirinha atual (read)
-//   GET  /cards                                     — lista (read)
-//   POST /cards/issue-batch                         — lote (adminOnly)
+//   POST /practitioners/:practitionerId/issue-card    — emite/renova (staffWrite)
+//   GET  /practitioners/:practitionerId/card          — carteirinha atual (read)
+//   POST /practitioners/:practitionerId/card/revoke   — revoga (staffWrite)
+//   GET  /cards                                       — lista (read)
+//   POST /cards/issue-batch                           — lote (adminOnly)
 // ============================================================
 'use strict';
 
@@ -55,6 +56,33 @@ router.get('/practitioners/:practitionerId/card', ...guards.read(), async (req, 
   } catch (err) {
     console.error('[karateCards] get error:', err.message);
     res.status(500).json({ error: 'Erro ao consultar carteirinha' });
+  }
+});
+
+// ── POST /practitioners/:practitionerId/card/revoke ───────
+// Revoga a carteirinha atual do praticante (status='revoked'). Idempotente:
+// revogar uma já revogada devolve ok. Após revogar, emitir de novo via
+// /issue-card gera uma nova carteirinha ativa (a revogada fica no histórico).
+router.post('/practitioners/:practitionerId/card/revoke', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, practitionerId } = req.params;
+  try {
+    const { card, alreadyRevoked } = await cards.revokeCard({
+      federation_id: federationId,
+      student_id: practitionerId,
+      revoked_by: req.user?.id || null,
+    });
+    res.json({
+      ...card,
+      revoked: true,
+      already_revoked: alreadyRevoked,
+      _note: alreadyRevoked
+        ? 'Carteirinha já estava revogada.'
+        : 'Carteirinha revogada. Emita uma nova via POST /issue-card se necessário.',
+    });
+  } catch (err) {
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message, code: 'NOT_FOUND' });
+    console.error('[karateCards] revoke error:', err.message);
+    res.status(500).json({ error: 'Erro ao revogar carteirinha', detail: err.message });
   }
 });
 

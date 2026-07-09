@@ -164,11 +164,21 @@ router.get('/competitions/:cid', ...guards.read(), async (req, res) => {
       [cid]
     );
 
+    // B3 — o header do admin mostrava "0 inscritos": a resposta do detalhe
+    // nunca trouxe um total no nível raiz, só por categoria (categories[].
+    // entry_count). category_count/entry_count agora somam as categorias
+    // desta competição (mesma fonte que a lista de categorias usa), igual ao
+    // que GET /competitions (lista) já calcula via JOIN direto.
+    const category_count = cats.rows.length;
+    const entry_count = cats.rows.reduce((sum, c) => sum + c.entry_count, 0);
+
     res.json({
       id: comp.id, federation_id: comp.federation_id, name: comp.name, season: comp.season,
       event_date: comp.event_date, location: comp.location || null,
       circuit_round: comp.circuit_round != null ? comp.circuit_round : null, fee_amount: comp.fee_amount,
       status: comp.status, created_at: comp.created_at, updated_at: comp.updated_at,
+      category_count,
+      entry_count,
       categories: cats.rows.map(c => ({
         id: c.id, name: c.name, modality: c.modality,
         min_age: c.min_age != null ? c.min_age : null, max_age: c.max_age != null ? c.max_age : null,
@@ -647,6 +657,46 @@ router.get('/rankings', ...guards.read(), async (req, res) => {
   } catch (err) {
     console.error('[karateCompetitions] season ranking error:', err.message);
     res.status(500).json({ error: 'Erro ao carregar ranking da temporada' });
+  }
+});
+
+// ── DELETE /competitions/:cid — exclusão DEFINITIVA (staffWrite) ──
+// Hard-delete do campeonato + dependências (matches, kata scores, brackets,
+// inscrições, categorias). Idempotente e defensivo p/ tabelas ausentes
+// (42P01, deployment parcial). Guarda: por segurança só permite excluir
+// competições em 'draft' ou 'cancelled' — competições 'open'/'done' devem
+// ser canceladas antes (evita apagar histórico ativo por engano).
+router.delete('/competitions/:cid', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid } = req.params;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    if (!['draft', 'cancelled'].includes(comp.status)) {
+      return res.status(409).json({
+        error: 'Só é possível excluir competições em rascunho ou canceladas. Cancele antes de excluir.',
+        code: 'CONFLICT',
+      });
+    }
+
+    const delWhere = 'competition_id = $1';
+    // Ordem: filhos de brackets/entries → brackets/entries → categorias → competição.
+    const steps = [
+      `DELETE FROM karate_bracket_matches WHERE bracket_id IN (SELECT id FROM karate_brackets WHERE ${delWhere})`,
+      `DELETE FROM karate_kata_scores    WHERE bracket_id IN (SELECT id FROM karate_brackets WHERE ${delWhere})`,
+      `DELETE FROM karate_brackets            WHERE ${delWhere}`,
+      `DELETE FROM karate_competition_entries WHERE ${delWhere}`,
+      `DELETE FROM karate_competition_categories WHERE ${delWhere}`,
+    ];
+    for (const q of steps) {
+      try { await db.query(q, [cid]); }
+      catch (e) { if (e.code !== '42P01') throw e; } // tabela ausente (deploy parcial) → ignora
+    }
+    await db.query(`DELETE FROM karate_competitions WHERE id = $1 AND federation_id = $2`, [cid, federationId]);
+
+    res.json({ ok: true, id: cid, _note: 'Competição excluída definitivamente.' });
+  } catch (err) {
+    console.error('[karateCompetitions] delete error:', err.message);
+    res.status(500).json({ error: 'Erro ao excluir competição' });
   }
 });
 

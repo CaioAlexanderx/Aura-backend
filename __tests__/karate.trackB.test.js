@@ -32,8 +32,8 @@ afterEach(() => {
 describe('karateFinanceService — computeAnnuityStatus', () => {
   const { computeAnnuityStatus } = require('../src/services/karateFinanceService');
 
-  it('retorna suspended quando annuity é null (sem cobrança)', () => {
-    expect(computeAnnuityStatus(null)).toBe('suspended');
+  it('retorna no_charge quando annuity é null (sem cobrança)', () => {
+    expect(computeAnnuityStatus(null)).toBe('no_charge');
   });
 
   it('retorna paid quando status=paid', () => {
@@ -64,8 +64,8 @@ describe('karateFinanceService — computeAnnuityStatus', () => {
     expect(computeAnnuityStatus({ status: 'pending', due_date: past.toISOString().split('T')[0] })).toBe('suspended');
   });
 
-  it('retorna suspended quando due_date é null e status != paid', () => {
-    expect(computeAnnuityStatus({ status: 'pending', due_date: null })).toBe('suspended');
+  it('retorna no_charge quando due_date é null e status != paid', () => {
+    expect(computeAnnuityStatus({ status: 'pending', due_date: null })).toBe('no_charge');
   });
 });
 
@@ -515,10 +515,10 @@ describe('getDojoAnnuityStatus (via DB mock)', () => {
     expect(result.days_overdue).toBeLessThanOrEqual(46);
   });
 
-  it('retorna status=suspended quando não há cobrança', async () => {
+  it('retorna status=no_charge quando não há cobrança', async () => {
     db.query.mockResolvedValueOnce({ rows: [] });
     const result = await getDojoAnnuityStatus(DOJO_ID, '2026');
-    expect(result.status).toBe('suspended');
+    expect(result.status).toBe('no_charge');
     expect(result.amount).toBe(0);
   });
 });

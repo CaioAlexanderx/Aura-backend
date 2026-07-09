@@ -71,6 +71,49 @@ router.get('/status', requireAuth, async (req, res) => {
   }
 });
 
+// GET /billing/karate-gate — estado BINÁRIO do gate de cobrança da federação
+// karatê (checkout "invisível"): 'ok' quando em dia; 'blocked' no vencimento /
+// atraso. Valor fixo R$169 (plano Negócio), sem seleção de plano. Read-only —
+// não cria cobrança nem toca no Asaas; só interpreta o estado já mantido pelo
+// webhook (billing_status) + datas.
+router.get('/karate-gate', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, plan, billing_status, trial_ends_at, next_billing_date, asaas_subscription_id
+         FROM companies WHERE id=$1`,
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
+    const c = rows[0];
+    const AMOUNT = 169; // plano Negócio (billingPricing.PLANS.negocio.monthly)
+    const now = new Date();
+    const dueRaw = c.next_billing_date || c.trial_ends_at || null;
+
+    // Regra binária, sem avisos prévios: a federação está EM DIA (invisível) só
+    // quando a assinatura está paga (billing_status='active') OU ainda dentro do
+    // trial. Qualquer outro estado — overdue, pending (PIX aguardando), inactive,
+    // trial expirado — BLOQUEIA. (Assim gerar o PIX não desbloqueia antes do
+    // pagamento; o webhook confirma → 'active' → gate some.)
+    const overdue = c.billing_status === 'overdue';
+    const trialActive = c.trial_ends_at && new Date(c.trial_ends_at) > now;
+    const active = c.billing_status === 'active';
+    // 'overdue' (Asaas marcou cobrança vencida) SEMPRE bloqueia, mesmo se o
+    // trial_ends_at ainda for futuro. Fora disso: em dia = active OU trial vigente.
+    const blocked = overdue || (!active && !trialActive);
+
+    res.json({
+      state: blocked ? 'blocked' : 'ok',
+      amount: AMOUNT,
+      billing_status: c.billing_status || null,
+      due_date: dueRaw || null,
+      has_subscription: !!c.asaas_subscription_id,
+    });
+  } catch (err) {
+    console.error('[BILLING] karate-gate error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar estado de cobranca' });
+  }
+});
+
 // POST /billing/tokenize — Tokenize credit card via Asaas
 // Card data flows through server but is NEVER stored
 // Returns only the token for use in /subscribe

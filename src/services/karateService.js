@@ -38,72 +38,62 @@ async function nextDojoAffiliationId(client, federationId) {
   return `FPKT-${String(nextNum).padStart(3, '0')}`;
 }
 
-// ── Geração de FPKT-A-NNNNN (praticante) ──────────────────
-// Formato: FPKT-A-NNNNN (5 dígitos com zero-padding, ex: FPKT-A-00427)
-// Estratégia: advisory lock por federação + MAX existente.
+// ── Geração do Nº de registro do praticante (NNNNN-D) ──────
+// Formato: <N>-D, continuando a maior numeração já existente na federação.
+//
+// Os dados reais da FPKT usam o padrão NNNNN-D (kyu) e variações por Dan nos
+// faixas-pretas (NNN-Y-SHO, -Y-NI, -Y-SAN). Para gerar o próximo número de um
+// praticante NOVO, pegamos o MAIOR PREFIXO NUMÉRICO entre TODOS os registros
+// da federação (independente do sufixo) e incrementamos, formatando como
+// "<N>-D" — o padrão dominante.
+//
+// (Decisão Caio 22/06.) O gerador antigo "FPKT-A-NNNNN" foi substituído porque
+// o regex /(\d+)$/ não casava com os importados (terminam em letra) e cairia
+// em colisão a partir de 00001.
+//
+// advisory lock por federação garante atomicidade sob concorrência.
 async function nextPractitionerRegistrationNumber(client, federationId) {
   await client.query(
     `SELECT pg_advisory_xact_lock(hashtext($1::text || '-practitioner'))`,
     [federationId]
   );
 
+  // Extrai os dígitos iniciais de cada karate_registration_number e pega o MAX.
+  // regexp_replace(x, '\D.*$', '') → mantém só o prefixo numérico ("21758-D" → "21758").
+  // Filtra para registros que começam com dígito (ignora formatos legados não-numéricos).
   const { rows } = await client.query(
-    `SELECT karate_registration_number
-     FROM customers
-     WHERE federation_id = $1 AND karate_registration_number IS NOT NULL
-     ORDER BY karate_registration_number DESC
-     LIMIT 1`,
+    `SELECT COALESCE(
+              MAX(NULLIF(regexp_replace(karate_registration_number, '\\D.*$', ''), '')::bigint),
+              0
+            ) AS maxnum
+       FROM customers
+      WHERE federation_id = $1
+        AND karate_registration_number ~ '^[0-9]'`,
     [federationId]
   );
 
-  let nextNum = 1;
-  if (rows.length > 0 && rows[0].karate_registration_number) {
-    const match = rows[0].karate_registration_number.match(/(\d+)$/);
-    if (match) nextNum = parseInt(match[1], 10) + 1;
-  }
-
-  return `FPKT-A-${String(nextNum).padStart(5, '0')}`;
+  // Defensivo: em testes o DB é mockado e pode devolver { rows: [] } (sem a
+  // linha do agregado). Em Postgres real MAX retorna sempre 1 linha (maxnum=0
+  // quando vazio, pelo COALESCE), então prod nunca cai no fallback.
+  const next = (parseInt(rows?.[0]?.maxnum, 10) || 0) + 1;
+  return `${next}-D`;
 }
 
 // ── Status computado do dojô ────────────────────────────────
-// Regra documentada:
-//   active      → afiliado, data de vencimento > 60 dias no futuro
-//   expiring    → vencimento entre 0 e 60 dias
-//   overdue     → vencimento há até 90 dias (ainda recuperável)
-//   defaulting  → vencimento há mais de 90 e até 180 dias
-//   suspended   → vencimento há mais de 180 dias ou is_active=false
+// Decisão de produto (02/07/2026): status do dojô é derivado UNICAMENTE de
+// is_active. Antes esta função misturava inadimplência (dias de atraso da
+// afiliação) com o status de ativação, retornando 'suspended' tanto para
+// is_active=false quanto para atraso > 180 dias — os dois conceitos são
+// independentes. Inadimplência de anuidade é métrica separada, calculada a
+// partir de karate_dojo_annuity_history (ver karateFinanceService.computeAnnuityStatus
+// e a query de annuity_status em routes/karateFederation.js) — NÃO tocada aqui.
 //
-// Calcula baseado em affiliation_model + affiliation_since:
-//   annual    → renova anualmente; vence no aniversário anual
-//   biannual  → vence a cada 6 meses
-//   quarterly → vence a cada 3 meses
+// Valores possíveis: 'active' | 'inactive'.
+//   active   → is_active !== false
+//   inactive → is_active === false
 function computeDojoStatus(affiliation_model, affiliation_since, is_active) {
-  if (is_active === false) return 'suspended';
-  if (!affiliation_since) return 'active';
-
-  const since = new Date(affiliation_since);
-  const now = new Date();
-
-  // Calcula a data de próximo vencimento
-  let periodMonths = 12;
-  if (affiliation_model === 'biannual') periodMonths = 6;
-  else if (affiliation_model === 'quarterly') periodMonths = 3;
-
-  // Vencimento = afiliação + UM período (sem auto-renovação).
-  // Se já passou e não houve renovação, escala overdue→defaulting→suspended.
-  const dueDate = new Date(since);
-  dueDate.setMonth(dueDate.getMonth() + periodMonths);
-
-  const dayMs = 1000 * 60 * 60 * 24;
-  const daysUntilDue = Math.round((dueDate - now) / dayMs);
-
-  if (daysUntilDue > 60) return 'active';
-  if (daysUntilDue > 0)  return 'expiring';
-
-  const daysOverdue = Math.round((now - dueDate) / dayMs);
-  if (daysOverdue <= 90)  return 'overdue';
-  if (daysOverdue <= 180) return 'defaulting';
-  return 'suspended';
+  if (is_active === false) return 'inactive';
+  return 'active';
 }
 
 // ── Parser de linha CSV simples ─────────────────────────────

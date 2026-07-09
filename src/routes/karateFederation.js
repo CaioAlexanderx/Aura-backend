@@ -17,6 +17,45 @@ const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { guards } = require('../config/karateRoles');
 
+// ── Ordenação estável de faixas (hierarquia + grau de Dan) ─────
+// O backend devolve um `rank` numérico por faixa para o FE ordenar de forma
+// estável a lista "Praticantes por graduação". Hierarquia geral:
+//   Branca < Amarela < Laranja < Verde < (Azul) < Roxa < Marrom < Preta(1°→2°→…)
+// belt_level da preta é 'preta' (string) e o grau vem do belt_name
+// ('Preta 1°', 'Preta 2°'…) — por isso ORDER BY belt_level sozinho NÃO separa
+// os Dan. Vermelha (histórica) vai pro fim. Acento/caixa normalizados.
+function normBeltLevel(level) {
+  return String(level || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+}
+
+const BELT_ORDER = {
+  branca: 10,
+  amarela: 20,
+  laranja: 30,
+  verde: 40,
+  azul_claro: 45, azulclaro: 45, 'azul claro': 45,
+  azul: 50,
+  azul_escuro: 55, azulescuro: 55, 'azul escuro': 55,
+  roxa: 60, roxo: 60,
+  marrom: 70,
+  // preta tratada à parte (grau soma ao rank base)
+  vermelha: 900, vermelho: 900, // histórica → fim
+};
+
+function beltRank(level, name) {
+  const b = normBeltLevel(level);
+  if (b === 'preta') {
+    const grau = parseInt((String(name || '').match(/(\d+)/) || [])[1], 10) || 1;
+    return 80 + grau; // 1º Dan=81, 2º Dan=82, …
+  }
+  if (b in BELT_ORDER) return BELT_ORDER[b];
+  return 500; // desconhecida → antes da vermelha, depois das conhecidas
+}
+
 // ── POST /karate/federation/setup ──────────────────────
 router.post('/federation/setup', requireAuth, async (req, res) => {
   const { name, slug, logo_url } = req.body;
@@ -105,15 +144,21 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
 
   try {
     // ── 1. KPIs principais (paralelo) ────────────────────────
+    // dojo_count = TODOS os dojôs da federação (vertical_active = karate_dojo),
+    // sem filtro de is_active — coerente com a página Dojôs (karateDojos.js) e
+    // Saúde da Rede (karateNetworkHealth.js), que contam todos. Dojô inativo
+    // continua sendo um dojô filiado da federação. `vertical` é o marcador de
+    // identidade permanente; `vertical_active` reflete se o módulo karatê
+    // segue ativo para aquele dojô — é esse último que define a contagem.
     const [dojoRes, practRes, revenueRes] = await Promise.all([
       db.query(
         `SELECT COUNT(*) AS dojo_count FROM companies
-         WHERE federation_id = $1 AND vertical = 'karate_dojo' AND is_active = true`,
+         WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
         [federationId]
       ),
       db.query(
         `SELECT COUNT(*) AS practitioner_count FROM customers
-         WHERE federation_id = $1`,
+         WHERE federation_id = $1 AND is_guest = false`,
         [federationId]
       ),
       db.query(
@@ -122,7 +167,7 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
          WHERE company_id = $1
            AND type = 'income'
            AND EXTRACT(YEAR FROM due_date) = EXTRACT(YEAR FROM NOW())
-           AND status = 'paid'`,
+           AND status = 'confirmed'`,
         [federationId]
       ),
     ]);
@@ -132,6 +177,10 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
     const revenueYtd = parseFloat(revenueRes.rows[0].revenue_ytd) || 0;
 
     // ── 2. Status de anuidade dos dojôs ────────────────────────
+    // Regra: dojô SEM cobrança (sem registro de anuidade, ou registro sem
+    // due_date) é um estado NEUTRO ('no_charge') — ausência de cobrança NÃO é
+    // inadimplência. 'suspended' passa a significar apenas "tinha cobrança e
+    // venceu há mais de 180 dias".
     const annuityRes = await db.query(
       `WITH latest_annuity AS (
          SELECT DISTINCT ON (h.dojo_id)
@@ -143,7 +192,7 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
          FROM karate_dojo_annuity_history h
          JOIN companies c ON c.id = h.dojo_id
            AND c.federation_id = $1
-           AND c.vertical = 'karate_dojo'
+           AND c.vertical_active = 'karate_dojo'
          ORDER BY
            h.dojo_id,
            CASE WHEN h.reference_period = $2 THEN 0 ELSE 1 END,
@@ -156,9 +205,9 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
          la.due_date,
          la.days_since_due,
          CASE
-           WHEN la.dojo_id IS NULL                          THEN 'suspended'
+           WHEN la.dojo_id IS NULL                          THEN 'no_charge'
            WHEN la.raw_status = 'paid'                      THEN 'paid'
-           WHEN la.due_date IS NULL                         THEN 'suspended'
+           WHEN la.due_date IS NULL                         THEN 'no_charge'
            WHEN la.due_date >= NOW()                        THEN 'due'
            WHEN la.days_since_due <= 90                     THEN 'overdue'
            WHEN la.days_since_due <= 180                    THEN 'defaulting'
@@ -167,12 +216,15 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
        FROM companies c
        LEFT JOIN latest_annuity la ON la.dojo_id = c.id
        WHERE c.federation_id = $1
-         AND c.vertical = 'karate_dojo'`,
+         AND c.vertical_active = 'karate_dojo'`,
       [federationId, currentYear]
     );
 
     const allDojos = annuityRes.rows;
     const OVERDUE_STATUSES = ['overdue', 'defaulting', 'suspended'];
+    // Dojô COM cobrança = tem um status de anuidade real (não 'no_charge').
+    // Inadimplência só faz sentido entre os que têm cobrança lançada.
+    const chargedDojos = allDojos.filter(d => d.annuity_status !== 'no_charge');
 
     const overdueDojosDetail = allDojos
       .filter(d => OVERDUE_STATUSES.includes(d.annuity_status))
@@ -183,14 +235,25 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
         days_overdue: parseInt(d.days_since_due, 10) || 0,
       }));
 
-    const overdueRate = allDojos.length > 0
-      ? parseFloat((overdueDojosDetail.length / allDojos.length).toFixed(4))
+    // overdue_rate sobre a base COM cobrança; 0 quando ninguém tem cobrança
+    // (evita divisão por zero e evita contar ausência de cobrança como atraso).
+    const overdueRate = chargedDojos.length > 0
+      ? parseFloat((overdueDojosDetail.length / chargedDojos.length).toFixed(4))
       : 0;
+
+    // C7: teto defensivo na lista de alerta (front pagina/linka o resto).
+    const OVERDUE_CAP = 50;
+    const overdueDojosCapped = overdueDojosDetail.slice(0, OVERDUE_CAP);
 
     // Upcoming events (stub — events table a implementar na Fase 2)
     const upcomingEvents = [];
 
     // ── 3. Distribuição de faixas ───────────────────────────
+    // Ordenada por `rank` numérico estável (hierarquia + grau de Dan), calculado
+    // no backend via beltRank(). belt_level da preta é 'preta' (string) e ORDER BY
+    // belt_level sozinho NÃO separaria os Dan — por isso o rank vai no payload e a
+    // lista já sai pré-ordenada. (A distribuição continua incluindo a Vermelha
+    // aqui; quem oculta a Vermelha é o FE.)
     const beltRes = await db.query(
       `SELECT cb.belt_level, cb.belt_name, COUNT(*) AS count
        FROM karate_current_belt cb
@@ -201,11 +264,42 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
       [federationId]
     );
 
-    const beltDistribution = beltRes.rows.map(r => ({
-      belt_level: r.belt_level,
-      belt_name:  r.belt_name,
-      count:      parseInt(r.count, 10),
+    // Scaffold das faixas KYU canônicas (FPKT Shotokan) — garante que toda
+    // faixa apareça no gráfico "Praticantes por graduação", mesmo com 0
+    // praticantes (ex.: Amarela). Sem isso, o GROUP BY dropa faixas sem
+    // ninguém e a cliente pergunta "cadê a amarela?". Graus Preta (belt_level
+    // 'preta', 1°..7°) e demais faixas fora do scaffold vêm dos dados como estão.
+    const KYU_ORDER = [
+      { belt_level: 'branca',      belt_name: 'Branca' },
+      { belt_level: 'amarela',     belt_name: 'Amarela' },
+      { belt_level: 'laranja',     belt_name: 'Laranja' },
+      { belt_level: 'verde',       belt_name: 'Verde' },
+      { belt_level: 'azul_claro',  belt_name: 'Azul Claro' },
+      { belt_level: 'roxo',        belt_name: 'Roxa' },
+      { belt_level: 'azul_escuro', belt_name: 'Azul Escuro' },
+      { belt_level: 'marrom',      belt_name: 'Marrom' },
+    ];
+    const kyuLevels = new Set(KYU_ORDER.map(k => k.belt_level));
+    const countByLevel = {};
+    for (const r of beltRes.rows) {
+      countByLevel[r.belt_level] = (countByLevel[r.belt_level] || 0) + parseInt(r.count, 10);
+    }
+    const kyuDistribution = KYU_ORDER.map(k => ({
+      belt_level: k.belt_level,
+      belt_name:  k.belt_name,
+      count:      countByLevel[k.belt_level] || 0,
+      rank:       beltRank(k.belt_level, k.belt_name),
     }));
+    const otherDistribution = beltRes.rows
+      .filter(r => !kyuLevels.has(r.belt_level))
+      .map(r => ({
+        belt_level: r.belt_level,
+        belt_name:  r.belt_name,
+        count:      parseInt(r.count, 10),
+        rank:       beltRank(r.belt_level, r.belt_name),
+      }));
+    const beltDistribution = [...kyuDistribution, ...otherDistribution]
+      .sort((a, b) => a.rank - b.rank);
 
     // ── 4. Track P: Alertas (derivados de dados já existentes) ──
     // Cada alert: { type, severity, title, count, action_path }
@@ -297,12 +391,17 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
     res.json({
       kpis: {
         dojo_count:        dojoCount,
+        // T1: número-destaque = TOTAL real de praticantes da federação
+        // (COUNT(*) customers WHERE federation_id), NÃO a soma das faixas
+        // visíveis. practitioner_count já é esse total; practitioner_total é
+        // um alias explícito para o FE não cair na soma de belt_distribution.
         practitioner_count: practCount,
+        practitioner_total: practCount,
         revenue_ytd:       revenueYtd,
         overdue_rate:      overdueRate,
       },
       upcoming_events:  upcomingEvents,
-      overdue_dojos:    overdueDojosDetail,
+      overdue_dojos:    overdueDojosCapped,
       belt_distribution: beltDistribution,
       alerts,  // Track P: novo campo aditivo
     });
@@ -327,11 +426,14 @@ router.get('/belt-distribution', ...guards.read(), async (req, res) => {
       [federationId]
     );
 
-    res.json(rows.map(r => ({
-      belt_level: r.belt_level,
-      belt_name:  r.belt_name,
-      count:      parseInt(r.count, 10),
-    })));
+    res.json(rows
+      .map(r => ({
+        belt_level: r.belt_level,
+        belt_name:  r.belt_name,
+        count:      parseInt(r.count, 10),
+        rank:       beltRank(r.belt_level, r.belt_name),
+      }))
+      .sort((a, b) => a.rank - b.rank));
   } catch (err) {
     console.error('[karateFederation] belt-distribution error:', err.message);
     res.status(500).json({ error: 'Erro ao carregar distribuição de faixas' });
@@ -361,7 +463,7 @@ router.get('/search', ...guards.read(), async (req, res) => {
          FROM companies c
          LEFT JOIN customers cu ON cu.dojo_id = c.id
          WHERE c.federation_id = $1
-           AND c.vertical = 'karate_dojo'
+           AND c.vertical_active = 'karate_dojo'
            AND (c.name ILIKE $2 OR c.fpkt_affiliation_id ILIKE $2)
          GROUP BY c.id
          ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC

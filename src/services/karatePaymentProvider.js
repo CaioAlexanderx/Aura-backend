@@ -27,6 +27,12 @@ const db = require('../config/database');
 const { buildStaticBrCode, validatePixKey } = require('./staticPixService');
 
 // ── Provider ativo (env-driven, default: static_brcode) ────
+// SEAM DO BaaS (Fase 0): esta é a interface abstrata de pagamento. Hoje o
+// provider ativo é 'static_brcode' (BR Code PIX local). Um provider 'baas'
+// (Aura Banking) pluga aqui como novo case de createPixCharge/getStatus, sem
+// tocar os call-sites. A reconciliação é agnóstica de provider via o ledger
+// karate_payment_intents, que agora guarda amount + source_type/source_id
+// (migration 213). BaaS permanece INATIVO até aprovação da federação.
 const ACTIVE_PROVIDER = process.env.KARATE_PAYMENT_PROVIDER || 'static_brcode';
 
 /**

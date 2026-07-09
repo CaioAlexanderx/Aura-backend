@@ -23,6 +23,65 @@
 // Guards: FEDERATION_READ para leitura; adminOnly para report/send.
 // Defensive 42P01: safe to deploy antes de qualquer nova migration.
 // Não requer migration — tudo derivado de tabelas existentes.
+//
+// NOTA DE COERÊNCIA DE MÉTRICAS (24/06): "Dojôs afiliados" da Saúde usa a
+// BASE TOTAL de dojôs da federação (todos vertical_active = karate_dojo, sem
+// filtro de is_active), igual à página Dojôs e ao Painel. As "novas filiações
+// no ano" continuam disponíveis, mas como métrica SEPARADA (new_affiliations_
+// year), nunca como o número de "afiliados". Inadimplência: dojô SEM cobrança
+// lançada não é inadimplente — o denominador são as anuidades efetivamente
+// lançadas; sem cobranças → inadimplência 0%.
+//
+// NOTA DE AFILIAÇÃO (25/06): "novas filiações no ano" e a evolução anual contam
+// por companies.affiliation_since (ano de filiação real), null-safe: dojô SEM
+// affiliation_since NÃO entra na contagem e NÃO usa created_at como proxy
+// (created_at é a data da IMPORTAÇÃO da base FPKT, não a data de filiação). Com
+// affiliation_since NULL em toda a base hoje, o indicador mostra 0 — correto; a
+// federação preenche "Filiação desde" na ficha do dojô. O total de filiados
+// (base total de dojôs) é independente disso.
+//
+// COBERTURA (Item 5, 25/06): a COBERTURA geográfica é a ÚNICA exceção à base
+// total — usa só dojôs CADASTRADOS E ATIVOS (is_active IS NOT FALSE), pois é
+// um retrato da presença real da rede no território. Não mexe em afiliados/
+// inadimplência (coerência #239). As "lacunas de cobertura" (regiões sem dojô)
+// foram REMOVIDAS: não são pendência a corrigir.
+//
+// NOTA DE GRADUAÇÕES (25/06): "Graduações Registradas" conta karate_belt_history
+// INDEPENDENTE de exam_id (as graduações importadas têm exam_id NULL e DEVEM
+// aparecer). Janela = YTD (date_trunc('year', CURRENT_DATE) até CURRENT_DATE),
+// excluindo a sentinela graduated_at = '1900-01-01' (backfill) e datas futuras
+// (typos da planilha). Gráfico, tabela e KPI usam a MESMA janela/fonte.
+//
+// NOTA DE CATEGORIZAÇÃO DE FAIXA (24/06): na "Relação de faixas" o belt_level
+// da faixa preta é 'preta' (o belt_name carrega o grau: 'Preta 1°', 'Preta 2°'…),
+// e NÃO '1dan'/'2dan'. A categorização antiga procurava keys como '1dan' e por
+// isso ~600 pretas caíam em nenhum bucket → Dan aparecia 0. Agora normalizamos
+// acento/caixa do belt_level e roteamos qualquer 'preta' para Dan (1º Dan por
+// padrão; 2º+ quando o grau no belt_name for >= 2). A Vermelha (histórica) NÃO
+// entra nos buckets ativos.
+//
+// NOTA DE PIRÂMIDE POR FAIXA + FILTRO STATUS (02/07): /relacao-faixas passou
+// de 5 buckets grossos (kyu_ini/int/av/dan1/dan2) para ~10 buckets por faixa
+// individual, na ordem canônica do NOVO FPKT Shotokan (Branca, Amarela,
+// Laranja, Verde, Azul Claro, Roxa, Azul Escuro, Marrom, 1º Dan, 2º Dan ou
+// acima). Vermelha continua fora. Marrom ainda é uma linha única (dados sem
+// grau salvo). O campo de resposta continua "buckets" (contrato do front),
+// mas agora cada item é por-faixa. beltBucketKey/counts grossos são mantidos
+// só internamente para os agregados kyu/dan/dan_pct. Endpoint também aceita
+// ?status=all|active|inactive (JOIN customers.is_active), com fallback
+// degradando para 'all' se a coluna não existir (42703). /afiliacao ganhou
+// dojos_ativos/dojos_inativos (companies.is_active, mesmo fallback).
+//
+// NOTA DE SCHEMA (23/06): correções de colunas inexistentes que faziam as
+// telas 500 contra uma federação com dados reais:
+//   - companies.karate_region NÃO existe → coluna correta é companies.region
+//   - karate_dojo_annuity_history NÃO tem season_year (nem season) → a "season"
+//     é derivada de due_date via EXTRACT(YEAR FROM due_date)::int
+//   - karate_belt_history NÃO tem exam_date/dojo_id/new_belt_level/old_belt_level/
+//     examiner_name → usa graduated_at; dojo_id vem de customers (student_id);
+//     o histórico guarda só a faixa CONQUISTADA (belt_level/belt_name).
+//   - karate_dojo_annuity_history.status é TEXTO (não o enum transaction_status):
+//     'paid'/'pending'/'overdue' são valores legítimos e foram mantidos.
 // ============================================================
 'use strict';
 
@@ -48,6 +107,91 @@ function currentSeason() {
 function fmtBRL(v) {
   const n = Number(v || 0);
   return 'R$ ' + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+}
+
+// Normaliza belt_level: minúsculo, sem acento, sem espaços nas bordas.
+// 'Preta', 'PRETA', 'roxa'/'roxo' caem todos no mesmo token.
+function normBelt(level) {
+  return String(level || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+}
+
+// Categoriza uma faixa (belt_level + belt_name) num bucket da pirâmide.
+// belt_level='preta' (qualquer grau) é Dan; o grau vem do belt_name
+// ('Preta 1°' → 1º Dan, 'Preta 2°'+ → 2º Dan ou acima). Tokens '1dan'..'9dan'
+// (caso o schema use esse formato) também são reconhecidos. Vermelha = null
+// (histórica, fora dos buckets ativos).
+function beltBucketKey(level, name) {
+  const b = normBelt(level);
+  if (!b) return null;
+  if (b === 'vermelha' || b === 'vermelho') return null; // histórica, não infla ativos
+  if (b === 'branca' || b === 'amarela' || b === 'laranja') return 'kyu_ini';
+  if (b === 'verde' || b === 'azul_claro' || b === 'azulclaro' || b === 'roxo' || b === 'roxa') return 'kyu_int';
+  if (b === 'azul_escuro' || b === 'azulescuro' || b === 'marrom') return 'kyu_av';
+  // Faixa preta / Dan
+  if (b === 'preta') {
+    const grau = parseInt((String(name || '').match(/(\d+)/) || [])[1], 10);
+    return grau >= 2 ? 'dan2' : 'dan1';
+  }
+  const danMatch = b.match(/^(\d+)\s*dan$/);
+  if (danMatch) {
+    return parseInt(danMatch[1], 10) >= 2 ? 'dan2' : 'dan1';
+  }
+  return null;
+}
+
+// ── Pirâmide por faixa individual (ordem canônica NOVO FPKT Shotokan) ──
+// Ordem da faixa mais baixa ao Dan: Branca, Amarela, Laranja, Verde,
+// Azul Claro, Roxa, Azul Escuro, Marrom, 1º Dan, 2º Dan ou acima.
+// Vermelha (histórica) fica FORA da pirâmide — mesmo critério de
+// beltBucketKey acima.
+// Marrom: os dados atuais NÃO trazem grau (3º/2º/1º kyu marrom) — todas as
+// faixas marrom caem numa única linha "Marrom" por enquanto. NÃO inventamos
+// graus que não existem no schema/dados; a distinção por grau será
+// adicionada quando a federação começar a graduar oficialmente com o grau
+// de marrom salvo em algum campo (hoje karate_current_belt/belt_history não
+// tem essa granularidade para marrom).
+const FAIXA_ORDER = [
+  { slug: 'branca',      long: 'Branca',            ordem: 1 },
+  { slug: 'amarela',     long: 'Amarela',            ordem: 2 },
+  { slug: 'laranja',     long: 'Laranja',            ordem: 3 },
+  { slug: 'verde',       long: 'Verde',              ordem: 4 },
+  { slug: 'azul_claro',  long: 'Azul Claro',         ordem: 5 },
+  { slug: 'roxa',        long: 'Roxa',               ordem: 6 },
+  { slug: 'azul_escuro', long: 'Azul Escuro',        ordem: 7 },
+  { slug: 'marrom',      long: 'Marrom',             ordem: 8 },
+  { slug: 'dan1',        long: '1º Dan',             ordem: 9 },
+  { slug: 'dan2',        long: '2º Dan ou acima',    ordem: 10 },
+];
+
+// Roteia uma faixa (belt_level + belt_name) para o slug da pirâmide
+// granular (FAIXA_ORDER acima). Reusa a mesma normalização de acento/caixa
+// de normBelt. Vermelha = null (histórica, fora da pirâmide). belt_name só
+// é usado para achar o grau da faixa preta (Dan), igual a beltBucketKey.
+function faixaSlugFor(level, name) {
+  const b = normBelt(level);
+  if (!b) return null;
+  if (b === 'vermelha' || b === 'vermelho') return null; // histórica, fora da pirâmide
+  if (b === 'branca') return 'branca';
+  if (b === 'amarela') return 'amarela';
+  if (b === 'laranja') return 'laranja';
+  if (b === 'verde') return 'verde';
+  if (b === 'azul_claro' || b === 'azulclaro') return 'azul_claro';
+  if (b === 'roxo' || b === 'roxa') return 'roxa';
+  if (b === 'azul_escuro' || b === 'azulescuro') return 'azul_escuro';
+  if (b === 'marrom') return 'marrom';
+  if (b === 'preta') {
+    const grau = parseInt((String(name || '').match(/(\d+)/) || [])[1], 10);
+    return grau >= 2 ? 'dan2' : 'dan1';
+  }
+  const danMatch = b.match(/^(\d+)\s*dan$/);
+  if (danMatch) {
+    return parseInt(danMatch[1], 10) >= 2 ? 'dan2' : 'dan1';
+  }
+  return null;
 }
 
 // Regiões administrativas do estado de SP usadas no heatmap.
@@ -91,7 +235,7 @@ const SP_MUN_TOTAL = {
 function buildCsv(cols, rows) {
   const esc = (v) => {
     const s = String(v == null ? '' : v);
-    return /["\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    return /["\\n;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   };
   const head = cols.map((c) => esc(c.label)).join(';');
   const body = rows.map((r) => cols.map((c) => esc(r[c.key])).join(';')).join('\r\n');
@@ -107,35 +251,77 @@ function sendCsv(res, filename, cols, rows) {
 
 // ── Afiliação da rede ─────────────────────────────────────────
 // Deriva de companies (karate_dojo) + karate_dojo_annuity_history.
-// Conta dojôs por season_year para evolução anual.
+// Conta dojôs por ano de FILIAÇÃO (affiliation_since) para evolução anual.
 router.get('/afiliacao', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
   try {
-    // Dojôs afiliados ativos (vertical_active = karate_dojo, federation_id = fedId)
+    // BASE TOTAL de dojôs da federação (sem filtro de is_active) — coerente
+    // com a página Dojôs e o Painel. Um dojô inativo continua filiado.
+    // affiliated_since = companies.affiliation_since (data real de filiação;
+    // pode ser NULL — a importação FPKT não trouxe essa data).
     const dojosRes = await safeQuery(
       `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name,
-              c.city, c.karate_region,
-              c.created_at::date AS affiliated_since
+              c.city, c.region,
+              c.affiliation_since::date AS affiliated_since
        FROM companies c
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
-         AND c.is_active = true
-       ORDER BY c.created_at ASC`,
+       ORDER BY c.affiliation_since ASC NULLS LAST, c.created_at ASC`,
       [fedId]
     );
     const dojos = dojosRes.rows;
 
-    // Evolução anual: conta dojôs afiliados em cada ano (por created_at)
+    // Evolução anual: conta novas filiações por ANO DE FILIAÇÃO (affiliation_since).
+    // Null-safe: dojô sem affiliation_since NÃO entra (não vira ano 0 nem usa
+    // created_at como proxy — created_at é a data da importação, não da filiação).
     const yearlyRes = await safeQuery(
-      `SELECT EXTRACT(YEAR FROM c.created_at)::int AS ano, COUNT(*)::int AS new_affiliations
+      `SELECT EXTRACT(YEAR FROM c.affiliation_since)::int AS ano, COUNT(*)::int AS new_affiliations
        FROM companies c
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
+         AND c.affiliation_since IS NOT NULL
        GROUP BY ano
        ORDER BY ano ASC`,
       [fedId]
     );
+
+    // Dojôs ativos vs. inativos (base TOTAL de dojôs da federação, mesma
+    // WHERE de dojosRes acima). Uma única query com COUNT(*) FILTER cobre os
+    // dois números:
+    //   - dojos_ativos: is_active IS NOT FALSE (true OU null contam como
+    //     ativo — mesmo critério de computeDojoStatus usado em /cobertura)
+    //   - dojos_inativos: is_active = false (só os explicitamente marcados)
+    // Defensivo contra 42703 (coluna is_active ausente antes da migration):
+    // nesse caso não há como distinguir ativo/inativo, então todos os dojôs
+    // da base total contam como "ativos" (mesmo comportamento adotado no
+    // resto do sistema quando is_active não existe) e inativos fica 0.
+    let dojosAtivos = dojos.length;
+    let dojosInativos = 0;
+    try {
+      const statusRes = await db.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE c.is_active IS NOT FALSE)::int AS ativos,
+           COUNT(*) FILTER (WHERE c.is_active = false)::int      AS inativos
+         FROM companies c
+         WHERE c.federation_id = $1
+           AND c.vertical_active = 'karate_dojo'`,
+        [fedId]
+      );
+      const row = statusRes.rows[0] || {};
+      dojosAtivos = parseInt(row.ativos || 0, 10);
+      dojosInativos = parseInt(row.inativos || 0, 10);
+    } catch (err) {
+      if (err.code === '42703') {
+        // companies.is_active ainda não existe (deployment parcial / coluna
+        // não aplicada) — fallback seguro: todos contam como ativos.
+        console.warn('[networkHealth] afiliacao: companies.is_active ausente (42703), fallback ativos=total/inativos=0');
+        dojosAtivos = dojos.length;
+        dojosInativos = 0;
+      } else {
+        throw err;
+      }
+    }
 
     // Anuidades do ano corrente para detectar renovações
     const season = currentSeason();
@@ -143,14 +329,17 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
       `SELECT dojo_id, status, paid_at
        FROM karate_dojo_annuity_history
        WHERE federation_id = $1
-         AND season_year = $2`,
+         AND EXTRACT(YEAR FROM due_date)::int = $2`,
       [fedId, season]
     );
     const annuityBydojo = {};
     for (const r of annuityRes.rows) annuityBydojo[r.dojo_id] = r;
 
     const totalNow = dojos.length;
-    const novas = dojos.filter((d) => {
+    // Novas filiações DO ANO — por affiliation_since (métrica SEPARADA, nunca
+    // confundida com "afiliados"). Null-safe: dojô sem affiliation_since não conta.
+    const newAffiliationsYear = dojos.filter((d) => {
+      if (!d.affiliated_since) return false;
       const y = new Date(d.affiliated_since).getFullYear();
       return y === season;
     }).length;
@@ -164,14 +353,14 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
       const cols = [
         { key: 'name', label: 'Dojô' },
         { key: 'city', label: 'Cidade' },
-        { key: 'karate_region', label: 'Região' },
-        { key: 'affiliated_since', label: 'Afiliado desde' },
+        { key: 'region', label: 'Região' },
+        { key: 'affiliated_since', label: 'Filiado desde' },
         { key: 'annuity_status', label: 'Anuidade' },
       ];
       const rows = dojos.map((d) => ({
         name: d.name,
         city: d.city || '',
-        karate_region: d.karate_region || '',
+        region: d.region || '',
         affiliated_since: d.affiliated_since ? String(d.affiliated_since).slice(0, 10) : '',
         annuity_status: annuityBydojo[d.id] ? annuityBydojo[d.id].status : 'sem registro',
       }));
@@ -181,14 +370,22 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
     res.json({
       season,
       total_now: totalNow,
-      novas_affiliacoes: novas,
+      // Campo novo, nomeado sem ambiguidade. Mantém-se novas_affiliacoes como
+      // alias legado pelo mesmo valor para não quebrar o front existente.
+      new_affiliations_year: newAffiliationsYear,
+      novas_affiliacoes: newAffiliationsYear,
       nao_renovaram: naoRenov,
+      // dojos_ativos/dojos_inativos: contagem de companies (base TOTAL de
+      // dojôs da federação) por status is_active. Ver query acima para o
+      // detalhe dos filtros e o fallback defensivo (42703).
+      dojos_ativos: dojosAtivos,
+      dojos_inativos: dojosInativos,
       yearly: yearlyRes.rows,
       dojos: dojos.map((d) => ({
         id: d.id,
         name: d.name,
         city: d.city || null,
-        region: d.karate_region || null,
+        region: d.region || null,
         affiliated_since: d.affiliated_since ? String(d.affiliated_since).slice(0, 10) : null,
         annuity_status: annuityBydojo[d.id] ? annuityBydojo[d.id].status : null,
       })),
@@ -211,7 +408,7 @@ router.get('/renovacao', ...guards.read(), async (req, res) => {
          COUNT(*) FILTER (WHERE status = 'paid')            AS renewed,
          COUNT(*) FILTER (WHERE status IN ('pending','overdue')) AS not_renewed
        FROM karate_dojo_annuity_history
-       WHERE federation_id = $1 AND season_year = $2`,
+       WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2`,
       [fedId, season]
     );
     const row = r.rows[0] || {};
@@ -228,28 +425,33 @@ router.get('/renovacao', ...guards.read(), async (req, res) => {
 });
 
 // ── Cobertura geográfica ──────────────────────────────────────
-// Agrupa dojôs por karate_region; mapeia para o grid de regiões de SP.
+// Agrupa dojôs por region; mapeia para o grid de regiões de SP.
 router.get('/cobertura', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
   try {
+    // Cobertura = dojôs CADASTRADOS E ATIVOS (Item 5). "Ativo" segue o critério
+    // do app (computeDojoStatus): inativo só quando is_active = false. Por isso
+    // is_active IS NOT FALSE (true OU null contam como ativo). NOTA: isto muda
+    // SÓ a base da cobertura; afiliados/inadimplência (coerência #239) seguem
+    // usando a base total em seus próprios endpoints.
     const r = await safeQuery(
-      `SELECT c.karate_region,
-              COUNT(*)::int AS dojos,
+      `SELECT c.region,
+              COUNT(DISTINCT c.id)::int AS dojos,
               COUNT(DISTINCT c.city) AS mun_covered,
               COUNT(cu.id)::int AS practitioners
        FROM companies c
        LEFT JOIN customers cu ON cu.dojo_id = c.id AND cu.federation_id = $1
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
-         AND c.is_active = true
-       GROUP BY c.karate_region`,
+         AND c.is_active IS NOT FALSE
+       GROUP BY c.region`,
       [fedId]
     );
 
     const byRegion = {};
     for (const row of r.rows) {
-      if (row.karate_region) byRegion[row.karate_region] = row;
+      if (row.region) byRegion[row.region] = row;
     }
 
     const regions = SP_REGIONS.map((reg) => {
@@ -265,9 +467,6 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
         practitioners: parseInt(data.practitioners || 0, 10),
       };
     });
-
-    const gaps = regions.filter((r) => r.dojos === 0);
-    const totalMunGap = gaps.reduce((s, r) => s + r.mun_total, 0);
 
     if (exportCsv) {
       const cols = [
@@ -285,11 +484,10 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
       return sendCsv(res, 'cobertura', cols, rows);
     }
 
+    // Item 5: "lacunas de cobertura" (regiões sem dojô) removidas — não é
+    // pendência a corrigir; a tela mostra só a densidade dos dojôs ativos.
     res.json({
       regions,
-      gap_count: gaps.length,
-      gap_mun_total: totalMunGap,
-      gap_names: gaps.map((g) => g.short).join(', '),
     });
   } catch (err) {
     console.error('[networkHealth] cobertura error:', err.message);
@@ -299,6 +497,8 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
 
 // ── Inadimplência da rede ─────────────────────────────────────
 // Status das anuidades de afiliação dos dojôs (em dia / vencendo / vencido).
+// REGRA: dojô SEM cobrança lançada não entra na conta — o denominador são as
+// anuidades efetivamente registradas. Sem cobranças → inadimplência 0%.
 router.get('/inadimplencia', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const season = parseInt(req.query.season) || currentSeason();
@@ -311,7 +511,7 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
               h.due_date, h.amount, h.status, h.paid_at
        FROM karate_dojo_annuity_history h
        JOIN companies c ON c.id = h.dojo_id
-       WHERE h.federation_id = $1 AND h.season_year = $2
+       WHERE h.federation_id = $1 AND EXTRACT(YEAR FROM h.due_date)::int = $2
        ORDER BY
          CASE h.status WHEN 'overdue' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
          h.due_date ASC`,
@@ -327,6 +527,7 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
       return diff >= 0 && diff <= 7;
     }).length;
     const vencido = rows.filter((r) => r.status === 'overdue').length;
+    // total aqui = anuidades lançadas. Sem cobranças → total 0 → inadPct 0.
     const inadPct = total > 0 ? Number((vencido / total * 100).toFixed(1)) : 0;
 
     if (exportCsv) {
@@ -371,12 +572,16 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
 });
 
 // ── Projeção de receita ───────────────────────────────────────
-// Agrupa anuidades por mês de vencimento (próximos 8 meses).
-// kind: 'real' (already paid) | 'proj' (pending/future)
+// Agrupa anuidades por mês de vencimento do mês corrente até dezembro do ano
+// corrente (inclusive). kind: 'real' (already paid) | 'proj' (pending/future)
 router.get('/projecao-receita', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
-  const months = parseInt(req.query.months) || 8;
+  // Janela: mês atual → dezembro do ano corrente (independe de quantos meses faltam).
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  // Quantos meses na série: de mês atual (0-based) até dezembro (11) inclusive.
+  const monthsInWindow = 12 - now.getMonth(); // ex: junho (5) → 7 meses (jun..dez)
   try {
     const r = await safeQuery(
       `SELECT
@@ -387,11 +592,11 @@ router.get('/projecao-receita', ...guards.read(), async (req, res) => {
          COUNT(*)::int                        AS annuities
        FROM karate_dojo_annuity_history
        WHERE federation_id = $1
-         AND due_date >= CURRENT_DATE - INTERVAL '1 month'
-         AND due_date <  CURRENT_DATE + ($2 * INTERVAL '1 month')
+         AND due_date >= DATE_TRUNC('month', CURRENT_DATE)
+         AND due_date <  MAKE_DATE($2::int, 12, 31) + INTERVAL '1 day'
        GROUP BY month_start
        ORDER BY month_start ASC`,
-      [fedId, months]
+      [fedId, currentYear]
     );
 
     const data = r.rows.map((row) => {
@@ -432,7 +637,7 @@ router.get('/projecao-receita', ...guards.read(), async (req, res) => {
     }
 
     res.json({
-      months,
+      months_in_window: monthsInWindow,
       total_realized: totalReal,
       total_projected: totalProj,
       data,
@@ -451,21 +656,25 @@ router.get('/dormencia', ...guards.read(), async (req, res) => {
   const season = parseInt(req.query.season) || currentSeason();
   const exportCsv = req.query.export === 'csv';
   try {
-    // Todos os dojôs afiliados
+    // Base TOTAL de dojôs afiliados (sem is_active)
     const dojosRes = await safeQuery(
-      `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name, c.city, c.karate_region
+      `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name, c.city, c.region
        FROM companies c
        WHERE c.federation_id = $1
-         AND c.vertical_active = 'karate_dojo'
-         AND c.is_active = true`,
+         AND c.vertical_active = 'karate_dojo'`,
       [fedId]
     );
 
-    // Dojôs que tiveram pelo menos um exam result na season
+    // Dojôs que tiveram pelo menos uma graduação na season.
+    // karate_belt_history não tem dojo_id nem exam_date → dojo via customers,
+    // data via graduated_at.
     const examRes = await safeQuery(
-      `SELECT DISTINCT dojo_id FROM karate_belt_history
-       WHERE federation_id = $1
-         AND EXTRACT(YEAR FROM exam_date)::int = $2`,
+      `SELECT DISTINCT cu.dojo_id
+       FROM karate_belt_history bh
+       JOIN customers cu ON cu.id = bh.student_id
+       WHERE bh.federation_id = $1
+         AND EXTRACT(YEAR FROM bh.graduated_at)::int = $2
+         AND cu.dojo_id IS NOT NULL`,
       [fedId, season]
     );
     const examActive = new Set(examRes.rows.map((r) => r.dojo_id));
@@ -488,7 +697,7 @@ router.get('/dormencia', ...guards.read(), async (req, res) => {
         id: d.id,
         name: d.name,
         city: d.city || null,
-        region: d.karate_region || null,
+        region: d.region || null,
         has_exam: hasExam,
         has_comp: hasComp,
         active: hasExam || hasComp,
@@ -538,7 +747,7 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
   const season = parseInt(req.query.season) || currentSeason();
   const exportCsv = req.query.export === 'csv';
   try {
-    // Praticantes por dojô
+    // Praticantes por dojô — base TOTAL de dojôs (sem is_active)
     const practRes = await safeQuery(
       `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name,
               COUNT(cu.id)::int AS practitioners
@@ -546,7 +755,6 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
        LEFT JOIN customers cu ON cu.dojo_id = c.id AND cu.federation_id = $1
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
-         AND c.is_active = true
        GROUP BY c.id, c.trade_name, c.legal_name
        ORDER BY practitioners DESC`,
       [fedId]
@@ -556,7 +764,7 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
     const revRes = await safeQuery(
       `SELECT dojo_id, SUM(amount) AS revenue
        FROM karate_dojo_annuity_history
-       WHERE federation_id = $1 AND season_year = $2 AND status = 'paid'
+       WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2 AND status = 'paid'
        GROUP BY dojo_id`,
       [fedId, season]
     );
@@ -612,48 +820,71 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
 
 // ── Graduações registradas ────────────────────────────────────
 // Exames Kyu→Dan registrados na federação, agrupados por mês.
+// karate_belt_history guarda só a faixa CONQUISTADA (belt_level/belt_name) e
+// a data em graduated_at; o dojô vem de customers (student_id).
+// Dan = faixa preta (belt_level 'preta', qualquer grau) OU tokens '1dan'..'9dan';
+// o restante é Kyu. Normaliza acento/caixa.
+// JANELA: YTD (1º jan do ano corrente → hoje). Conta INDEPENDENTE de exam_id
+// (graduações importadas têm exam_id NULL e DEVEM aparecer). Exclui a sentinela
+// 1900-01-01 e datas futuras. Gráfico (monthRes), tabela (listRes) e o KPI de
+// /summary usam a MESMA janela/fonte. (`months` mantido por compat de API, mas
+// a janela é YTD; o rótulo "YTD" e i18n de datas são do FE.)
 router.get('/graduacoes', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const months = parseInt(req.query.months) || 8;
   const exportCsv = req.query.export === 'csv';
   try {
-    // Mensal
+    // Mensal. Dan reconhecido por belt_level 'preta' (sem acento) ou '%dan%'.
     const monthRes = await safeQuery(
       `SELECT
-         DATE_TRUNC('month', exam_date) AS month_start,
-         COUNT(*) FILTER (WHERE new_belt_level NOT LIKE '%dan%') AS kyu_count,
-         COUNT(*) FILTER (WHERE new_belt_level LIKE '%dan%') AS dan_count,
+         DATE_TRUNC('month', graduated_at) AS month_start,
+         TO_CHAR(DATE_TRUNC('month', graduated_at), 'YYYY-MM') AS ym,
+         COUNT(*) FILTER (
+           WHERE translate(lower(belt_level), 'áàâãéêíóôõúç', 'aaaaeeiooouc') !~ 'preta|dan'
+         ) AS kyu_count,
+         COUNT(*) FILTER (
+           WHERE translate(lower(belt_level), 'áàâãéêíóôõúç', 'aaaaeeiooouc') ~ 'preta|dan'
+         ) AS dan_count,
          COUNT(*)::int AS total
        FROM karate_belt_history
        WHERE federation_id = $1
-         AND exam_date >= CURRENT_DATE - ($2 * INTERVAL '1 month')
+         AND graduated_at >= date_trunc('year', CURRENT_DATE)
+         AND graduated_at <= CURRENT_DATE
+         AND graduated_at <> DATE '1900-01-01'
        GROUP BY month_start
        ORDER BY month_start ASC`,
-      [fedId, months]
+      [fedId]
     );
 
-    // Lista detalhada
+    // Lista detalhada — MESMA janela/fonte do gráfico (YTD, sem exam_id filter,
+    // sem sentinela/datas futuras).
     const listRes = await safeQuery(
-      `SELECT bh.id, bh.exam_date, bh.student_id,
+      `SELECT bh.id, bh.graduated_at, bh.student_id,
               cu.name AS student_name,
               COALESCE(dj.trade_name, dj.legal_name) AS dojo_name,
-              bh.old_belt_level, bh.new_belt_level,
-              bh.examiner_name
+              bh.belt_level, bh.belt_name
        FROM karate_belt_history bh
        JOIN customers cu ON cu.id = bh.student_id
        LEFT JOIN companies dj ON dj.id = cu.dojo_id
        WHERE bh.federation_id = $1
-         AND bh.exam_date >= CURRENT_DATE - ($2 * INTERVAL '1 month')
-       ORDER BY bh.exam_date DESC`,
-      [fedId, months]
+         AND bh.graduated_at >= date_trunc('year', CURRENT_DATE)
+         AND bh.graduated_at <= CURRENT_DATE
+         AND bh.graduated_at <> DATE '1900-01-01'
+       ORDER BY bh.graduated_at DESC`,
+      [fedId]
     );
 
+    // Rótulo do mês derivado da string 'YYYY-MM' (TO_CHAR no SQL), NUNCA de
+    // new Date(month_start) — evita o shift de -1 mês por fuso (01/02 UTC virava
+    // 31/01 local → "jan"). Mesma classe dos bugs -1 dia já corrigidos.
+    const MESES_PT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
     const months_data = monthRes.rows.map((r) => {
-      const d = new Date(r.month_start);
+      const ym = r.ym || String(r.month_start).slice(0, 7);
+      const [yy, mm] = ym.split('-');
       return {
-        month: String(r.month_start).slice(0, 7),
-        mes: d.toLocaleString('pt-BR', { month: 'short' }).replace('.', ''),
-        ano: String(d.getFullYear()).slice(2),
+        month: ym,
+        mes: MESES_PT[parseInt(mm, 10) - 1] || '',
+        ano: String(yy).slice(2),
         kyu: parseInt(r.kyu_count || 0, 10),
         dan: parseInt(r.dan_count || 0, 10),
         total: parseInt(r.total || 0, 10),
@@ -665,20 +896,18 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
 
     if (exportCsv) {
       const cols = [
-        { key: 'exam_date', label: 'Data' },
+        { key: 'graduated_at', label: 'Data' },
         { key: 'dojo_name', label: 'Dojô' },
         { key: 'student_name', label: 'Candidato' },
-        { key: 'old_belt_level', label: 'De' },
-        { key: 'new_belt_level', label: 'Para' },
-        { key: 'examiner_name', label: 'Banca' },
+        { key: 'belt_level', label: 'Faixa' },
+        { key: 'belt_name', label: 'Nome da faixa' },
       ];
       const csvRows = listRes.rows.map((r) => ({
-        exam_date: r.exam_date ? String(r.exam_date).slice(0, 10) : '',
+        graduated_at: r.graduated_at ? String(r.graduated_at).slice(0, 10) : '',
         dojo_name: r.dojo_name || '',
         student_name: r.student_name || '',
-        old_belt_level: r.old_belt_level || '',
-        new_belt_level: r.new_belt_level || '',
-        examiner_name: r.examiner_name || '',
+        belt_level: r.belt_level || '',
+        belt_name: r.belt_name || '',
       }));
       return sendCsv(res, 'graduacoes-registradas', cols, csvRows);
     }
@@ -691,13 +920,13 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
       monthly: months_data,
       list: listRes.rows.map((r) => ({
         id: r.id,
-        exam_date: r.exam_date ? String(r.exam_date).slice(0, 10) : null,
+        exam_date: r.graduated_at ? String(r.graduated_at).slice(0, 10) : null,
         student_id: r.student_id,
         student_name: r.student_name,
         dojo_name: r.dojo_name || null,
-        from_belt: r.old_belt_level || null,
-        to_belt: r.new_belt_level || null,
-        examiner: r.examiner_name || null,
+        to_belt: r.belt_level || null,
+        to_belt_name: r.belt_name || null,
+        examiner: null,
       })),
     });
   } catch (err) {
@@ -709,43 +938,95 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
 // ── Relação de faixas (snapshot/pirâmide) ─────────────────────
 // Distribuição atual de atletas por faixa em toda a rede.
 // Caveat explícito: snapshot, não funil de coorte.
+//
+// ?status=all|active|inactive (default 'all' se ausente/valor inválido):
+// filtra os praticantes via JOIN com customers.is_active. Aplicado na MESMA
+// query que alimenta os buckets (não numa query separada), para os buckets
+// e os agregados (total/kyu/dan/dan_pct) sempre refletirem o mesmo filtro.
 router.get('/relacao-faixas', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
+  const status = ['all', 'active', 'inactive'].includes(String(req.query.status))
+    ? String(req.query.status) : 'all';
   try {
-    const r = await safeQuery(
-      `SELECT cb.belt_level, cb.belt_name,
-              COUNT(*)::int AS count
-       FROM karate_current_belt cb
-       WHERE cb.federation_id = $1
-       GROUP BY cb.belt_level, cb.belt_name
-       ORDER BY cb.belt_level ASC`,
-      [fedId]
-    );
+    // statusFilter é montado condicionalmente porque customers.is_active pode
+    // não existir ainda (42703) — nesse caso o catch abaixo refaz a query sem
+    // o filtro (degrada para o comportamento 'all') em vez de quebrar a rota.
+    let statusFilterSql = '';
+    if (status === 'active') statusFilterSql = "AND cu.is_active IS NOT FALSE";
+    else if (status === 'inactive') statusFilterSql = "AND cu.is_active = false";
 
-    // Agrupa em buckets conforme mockup
+    async function runQuery(filterSql) {
+      return safeQuery(
+        `SELECT cb.belt_level, cb.belt_name,
+                COUNT(*)::int AS count
+         FROM karate_current_belt cb
+         JOIN customers cu ON cu.id = cb.student_id
+         WHERE cb.federation_id = $1
+           ${filterSql}
+         GROUP BY cb.belt_level, cb.belt_name
+         ORDER BY cb.belt_level ASC`,
+        [fedId]
+      );
+    }
+
+    let r;
+    let effectiveStatus = status;
+    try {
+      r = await runQuery(statusFilterSql);
+    } catch (err) {
+      if (err.code === '42703' && statusFilterSql) {
+        // customers.is_active ausente — degrada para 'all' (sem filtro) em
+        // vez de derrubar a rota.
+        console.warn('[networkHealth] relacao-faixas: customers.is_active ausente (42703), ignorando ?status e usando all');
+        effectiveStatus = 'all';
+        r = await runQuery('');
+      } else {
+        throw err;
+      }
+    }
+
     const rows = r.rows;
-    const total = rows.reduce((s, r) => s + r.count, 0);
 
-    // Bucket definitions matching the mockup pyramid
-    const BUCKETS = [
-      { faixa: 'Kyu iniciante',      long: '9º–7º Kyu · iniciante',     keys: ['branca','amarela','laranja'] },
-      { faixa: 'Kyu intermediário',  long: '6º–4º Kyu · intermediário', keys: ['verde','azul_claro','roxo'] },
-      { faixa: 'Kyu avançado',       long: '3º–1º Kyu · avançado',      keys: ['azul_escuro','marrom'] },
-      { faixa: '1º Dan',             long: '1º Dan · faixa preta',      keys: ['1dan'] },
-      { faixa: '2º Dan ou acima',    long: '2º Dan ou acima',           keys: ['2dan','3dan','4dan','5dan','6dan','7dan','8dan','9dan'] },
-    ];
+    // counts por slug granular (FAIXA_ORDER). Vermelha/desconhecida = fora.
+    const counts = {};
+    for (const f of FAIXA_ORDER) counts[f.slug] = 0;
+    // total = só praticantes que caem em alguma faixa da pirâmide (Vermelha excluída).
+    let total = 0;
+    for (const row of rows) {
+      const slug = faixaSlugFor(row.belt_level, row.belt_name);
+      if (!slug || !(slug in counts)) continue; // Vermelha / faixa desconhecida → fora
+      counts[slug] += row.count;
+      total += row.count;
+    }
 
-    const beltMap = {};
-    for (const r of rows) beltMap[r.belt_level] = r.count;
+    // buckets: um item por faixa individual (~10 linhas), na ordem canônica
+    // FPKT Shotokan (Branca...2º Dan ou acima). Nome do campo continua
+    // "buckets" para não quebrar o contrato com o frontend; "faixa" carrega
+    // o rótulo (mesmo papel que "long" tinha nos 5 buckets grossos antigos).
+    const buckets = FAIXA_ORDER
+      .slice()
+      .sort((a, b) => a.ordem - b.ordem)
+      .map((f) => {
+        const n = counts[f.slug] || 0;
+        return {
+          faixa: f.slug,
+          long: f.long,
+          n,
+          pct: total > 0 ? Number((n / total * 100).toFixed(1)) : 0,
+        };
+      });
 
-    const buckets = BUCKETS.map((b) => {
-      const n = b.keys.reduce((s, k) => s + (beltMap[k] || 0), 0);
-      return { faixa: b.faixa, long: b.long, n, pct: total > 0 ? Number((n / total * 100).toFixed(1)) : 0 };
-    });
-
-    const danN = buckets.filter((b) => b.faixa.includes('Dan')).reduce((s, b) => s + b.n, 0);
-    const kyuN = total - danN;
+    // Agregados kyu/dan somando as faixas certas via beltBucketKey (mantido
+    // internamente só para esse fim — os buckets retornados são por-faixa).
+    const bucketCounts = { kyu_ini: 0, kyu_int: 0, kyu_av: 0, dan1: 0, dan2: 0 };
+    for (const row of rows) {
+      const k = beltBucketKey(row.belt_level, row.belt_name);
+      if (!k || !(k in bucketCounts)) continue;
+      bucketCounts[k] += row.count;
+    }
+    const danN = bucketCounts.dan1 + bucketCounts.dan2;
+    const kyuN = bucketCounts.kyu_ini + bucketCounts.kyu_int + bucketCounts.kyu_av;
     const danPct = total > 0 ? Number((danN / total * 100).toFixed(1)) : 0;
 
     if (exportCsv) {
@@ -759,13 +1040,14 @@ router.get('/relacao-faixas', ...guards.read(), async (req, res) => {
     }
 
     res.json({
+      status: effectiveStatus,
       total,
       kyu: kyuN,
       dan: danN,
       dan_pct: danPct,
       buckets,
       raw: rows,
-      _note: 'Snapshot da distribuição atual — não é um funil de coorte.',
+      _note: 'Snapshot da distribuição atual — não é um funil de coorte. Vermelha (histórica) fora da pirâmide. Marrom ainda não distingue grau (dados sem essa granularidade).',
     });
   } catch (err) {
     console.error('[networkHealth] relacao-faixas error:', err.message);
@@ -779,13 +1061,25 @@ router.get('/summary', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const season = parseInt(req.query.season) || currentSeason();
   try {
-    // 1. Dojôs afiliados
+    // 1. Dojôs afiliados — BASE TOTAL (sem is_active), coerente com Painel/Dojôs.
     const dojosRes = await safeQuery(
       `SELECT COUNT(*)::int AS total FROM companies
-       WHERE federation_id = $1 AND vertical_active = 'karate_dojo' AND is_active = true`,
+       WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
       [fedId]
     );
     const dojoCount = parseInt(dojosRes.rows[0]?.total || 0, 10);
+
+    // 1b. Novas filiações no ano — por affiliation_since (métrica SEPARADA, não
+    //     é "afiliados"). Null-safe: dojô sem affiliation_since não conta (NÃO
+    //     usa created_at, que é a data da importação). Todos NULL agora → 0.
+    const newAffRes = await safeQuery(
+      `SELECT COUNT(*)::int AS total FROM companies
+       WHERE federation_id = $1 AND vertical_active = 'karate_dojo'
+         AND affiliation_since IS NOT NULL
+         AND EXTRACT(YEAR FROM affiliation_since)::int = $2`,
+      [fedId, season]
+    );
+    const newAffiliationsYear = parseInt(newAffRes.rows[0]?.total || 0, 10);
 
     // 2. Praticantes registrados
     const practRes = await safeQuery(
@@ -795,24 +1089,29 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     );
     const practCount = parseInt(practRes.rows[0]?.total || 0, 10);
 
-    // 3. Inadimplência %
+    // 3. Inadimplência % — denominador = anuidades lançadas; dojô sem cobrança
+    //    não entra. Sem cobranças → total 0 → inadPct 0 (não divide por zero).
     const inadRes = await safeQuery(
       `SELECT
          COUNT(*)::int AS total,
          COUNT(*) FILTER (WHERE status = 'overdue')::int AS vencido
        FROM karate_dojo_annuity_history
-       WHERE federation_id = $1 AND season_year = $2`,
+       WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2`,
       [fedId, season]
     );
     const inadTotal = parseInt(inadRes.rows[0]?.total || 0, 10);
     const inadVencido = parseInt(inadRes.rows[0]?.vencido || 0, 10);
     const inadPct = inadTotal > 0 ? Number((inadVencido / inadTotal * 100).toFixed(1)) : 0;
 
-    // 4. Graduações nos últimos 8 meses
+    // 4. Graduações no ano (YTD) — independente de exam_id (graduações
+    //    importadas têm exam_id NULL e DEVEM contar). Exclui a sentinela
+    //    1900-01-01 (backfill) e datas futuras (typos da planilha).
     const gradRes = await safeQuery(
       `SELECT COUNT(*)::int AS total FROM karate_belt_history
        WHERE federation_id = $1
-         AND exam_date >= CURRENT_DATE - INTERVAL '8 months'`,
+         AND graduated_at >= date_trunc('year', CURRENT_DATE)
+         AND graduated_at <= CURRENT_DATE
+         AND graduated_at <> DATE '1900-01-01'`,
       [fedId]
     );
     const gradTotal = parseInt(gradRes.rows[0]?.total || 0, 10);
@@ -828,13 +1127,30 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     );
     const projTotal = Number(projRes.rows[0]?.total || 0);
 
+    // 1c. Dojôs FILIADOS EM DIA — decisão de produto (02/07): o KPI de topo da
+    //     Saúde da Rede conta apenas dojôs com anuidade de filiação PAGA na
+    //     temporada (status='paid'). Difere da base total (dojoCount), que segue
+    //     coerente com Painel/Dojôs. Dojô sem anuidade lançada NÃO é "em dia".
+    const emDiaRes = await safeQuery(
+      `SELECT COUNT(DISTINCT c.id)::int AS total
+         FROM companies c
+         JOIN karate_dojo_annuity_history a ON a.dojo_id = c.id
+        WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
+          AND EXTRACT(YEAR FROM a.due_date)::int = $2
+          AND a.status = 'paid'`,
+      [fedId, season]
+    );
+    const filiadosEmDia = parseInt(emDiaRes.rows[0]?.total || 0, 10);
+
     res.json({
       season,
+      dojo_total: dojoCount,
+      new_affiliations_year: newAffiliationsYear,
       kpis: [
-        { key: 'dojos', label: 'Dojôs afiliados', value: dojoCount, unit: '' },
+        { key: 'dojos', label: 'Filiados em dia', value: filiadosEmDia, unit: '' },
         { key: 'praticantes', label: 'Praticantes registrados', value: practCount, unit: '' },
         { key: 'inadimplencia', label: 'Inadimplência', value: inadPct, unit: '%' },
-        { key: 'graduacoes', label: 'Graduações · 8 meses', value: gradTotal, unit: '' },
+        { key: 'graduacoes', label: 'Graduações YTD', value: gradTotal, unit: '' },
         { key: 'receita_proj_90d', label: 'Receita proj. · 90 d', value: projTotal, unit: 'BRL' },
       ],
     });
@@ -844,7 +1160,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
   }
 });
 
-// ── Relatório periódico (DESIGN-28) ──────────────────────────
+// ── Relatório periódico ──────────────────────────────────────
 // Compõe um resumo da rede e envia por e-mail ao admin da federação.
 // POST /report/send — trigger manual; scheduler pode chamar o mesmo handler.
 router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
@@ -871,7 +1187,7 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
     const [dojosRes, inadRes, gradRes, dormRes] = await Promise.all([
       safeQuery(
         `SELECT COUNT(*)::int AS total FROM companies
-         WHERE federation_id = $1 AND vertical_active = 'karate_dojo' AND is_active = true`,
+         WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
         [fedId]
       ),
       safeQuery(
@@ -879,13 +1195,13 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
                 COUNT(*) FILTER (WHERE status = 'overdue')::int AS vencido,
                 COUNT(*) FILTER (WHERE status = 'paid')::int AS paid
          FROM karate_dojo_annuity_history
-         WHERE federation_id = $1 AND season_year = $2`,
+         WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2`,
         [fedId, season]
       ),
       safeQuery(
         `SELECT COUNT(*)::int AS total FROM karate_belt_history
          WHERE federation_id = $1
-           AND exam_date >= CURRENT_DATE - INTERVAL '30 days'`,
+           AND graduated_at >= CURRENT_DATE - INTERVAL '30 days'`,
         [fedId]
       ),
       safeQuery(
@@ -895,7 +1211,7 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
                SELECT 1 FROM karate_belt_history bh
                WHERE bh.federation_id = $1
                  AND bh.student_id = cu.id
-                 AND EXTRACT(YEAR FROM bh.exam_date)::int = $2
+                 AND EXTRACT(YEAR FROM bh.graduated_at)::int = $2
              ) OR EXISTS (
                SELECT 1 FROM karate_competition_entries e
                JOIN karate_competitions kc ON kc.id = e.competition_id
@@ -930,7 +1246,7 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
              style="border-collapse:collapse;margin-bottom:18px;">
         <tr>
           <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:13px;color:#44403c;">
-            Dojôs afiliados
+            Dojôs filiados
           </td>
           <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:14px;font-weight:700;color:#1c1917;text-align:right;">
             ${dojoCount}
