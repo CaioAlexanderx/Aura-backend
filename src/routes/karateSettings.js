@@ -35,9 +35,6 @@ const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { sendInviteEmail } = require('../services/mailer');
 const { buildInviteUrl } = require('../services/members');
-const { validatePixKey } = require('../services/staticPixService');
-
-const PIX_KEY_TYPES = ['CPF', 'CNPJ', 'EMAIL', 'PHONE', 'RANDOM'];
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -432,73 +429,6 @@ router.put('/settings/identity', ...guards.adminOnly(), async (req, res) => {
     }
     console.error('[karateSettings] identity put:', e.message);
     return res.status(500).json({ error: 'Erro ao salvar identidade' });
-  }
-});
-
-// ── GET /settings/payments — chave PIX de recebimento da federação ──
-// Lê digital_channel_config (company_id = federação). É a chave usada pelo
-// createPixCharge (anuidades de dojô, filiação). Sem ela, o PIX cai no mock.
-router.get('/settings/payments', ...guards.adminOnly(), async (req, res) => {
-  const fed = req.params.id;
-  try {
-    const { rows } = await db.query(
-      `SELECT pix_key, pix_key_type, pix_holder_name, pix_holder_city
-         FROM digital_channel_config WHERE company_id = $1 LIMIT 1`,
-      [fed]
-    );
-    const r = rows[0] || {};
-    return res.json({
-      pix_key:         r.pix_key || null,
-      pix_key_type:    r.pix_key_type || null,
-      pix_holder_name: r.pix_holder_name || null,
-      pix_holder_city: r.pix_holder_city || null,
-      configured:      !!(r.pix_key && String(r.pix_key).trim()),
-    });
-  } catch (e) {
-    if (e.code === '42P01') return res.json({ configured: false, pix_key: null });
-    console.error('[karateSettings] payments get:', e.message);
-    return res.status(500).json({ error: 'Erro ao ler configuração de pagamento' });
-  }
-});
-
-// ── PUT /settings/payments — define/atualiza a chave PIX ──
-router.put('/settings/payments', ...guards.adminOnly(), async (req, res) => {
-  const fed = req.params.id;
-  const { pix_key, pix_key_type, pix_holder_name, pix_holder_city } = req.body || {};
-
-  if (!pix_key || !String(pix_key).trim()) {
-    return res.status(422).json({ error: 'pix_key obrigatório', code: 'VALIDATION_ERROR' });
-  }
-  if (pix_key_type && !PIX_KEY_TYPES.includes(String(pix_key_type).toUpperCase())) {
-    return res.status(422).json({ error: 'pix_key_type inválido (CPF, CNPJ, EMAIL, PHONE, RANDOM)', code: 'VALIDATION_ERROR' });
-  }
-  const v = validatePixKey(pix_key, pix_key_type);
-  if (!v.valid) {
-    return res.status(422).json({ error: v.error, code: 'VALIDATION_ERROR' });
-  }
-  if (!pix_holder_name || !String(pix_holder_name).trim()) {
-    return res.status(422).json({ error: 'pix_holder_name obrigatório', code: 'VALIDATION_ERROR' });
-  }
-
-  try {
-    await db.query(
-      `INSERT INTO digital_channel_config
-         (company_id, pix_key, pix_key_type, pix_holder_name, pix_holder_city, updated_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT (company_id) DO UPDATE SET
-         pix_key = EXCLUDED.pix_key,
-         pix_key_type = EXCLUDED.pix_key_type,
-         pix_holder_name = EXCLUDED.pix_holder_name,
-         pix_holder_city = EXCLUDED.pix_holder_city,
-         updated_at = NOW()`,
-      [fed, v.normalized || String(pix_key).trim(),
-       pix_key_type ? String(pix_key_type).toUpperCase() : null,
-       String(pix_holder_name).trim(), pix_holder_city ? String(pix_holder_city).trim() : null]
-    );
-    return res.json({ updated: true, configured: true });
-  } catch (e) {
-    console.error('[karateSettings] payments put:', e.message);
-    return res.status(500).json({ error: 'Erro ao salvar chave PIX' });
   }
 });
 

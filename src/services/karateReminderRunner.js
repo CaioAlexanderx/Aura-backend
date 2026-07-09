@@ -37,6 +37,7 @@ async function getFederationMeta(fedId) {
     const { rows } = await db.query(
       `SELECT
          COALESCE(trade_name, legal_name) AS name,
+         slug,
          karate_logo_url,
          wa_phone_display
        FROM companies
@@ -44,9 +45,10 @@ async function getFederationMeta(fedId) {
        LIMIT 1`,
       [fedId]
     );
-    if (!rows.length) return { name: 'Federação', karate_logo_url: null, wa_phone_display: null };
+    if (!rows.length) return { name: 'Federação', slug: null, karate_logo_url: null, wa_phone_display: null };
     return {
       name:             rows[0].name             || 'Federação',
+      slug:             rows[0].slug             || null,
       karate_logo_url:  rows[0].karate_logo_url  || null,
       wa_phone_display: rows[0].wa_phone_display  || null,
     };
@@ -149,6 +151,7 @@ async function runForFederation(cfg, today) {
         offset:             due.offset,
         // ── DESIGN-30: metadados da federação ──────────────
         federationName:     fedMeta.name,
+        federationSlug:     fedMeta.slug,
         federationLogoUrl:  fedMeta.karate_logo_url,   // companies.karate_logo_url
         federationWhatsapp: fedMeta.wa_phone_display,   // companies.wa_phone_display
         // ctaUrl: página de pagamento Pix do dojô.
