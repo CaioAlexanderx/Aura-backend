@@ -44,6 +44,10 @@
 //   nao tem image_url; template (product_detail.js) troca a imagem
 //   principal quando o usuario seleciona uma cor com imagem propria.
 //   Migration 129 adicionou product_variants.image_url.
+//
+// F1 Loja Virtual (09/07/2026): expõe ga4_measurement_id, meta_pixel_id
+//   (migration 220) + custom_domain/status no site — o template usa para
+//   injetar analytics e montar canonical/og:url.
 // ============================================================
 'use strict';
 
@@ -333,6 +337,11 @@ async function buildStorefront(config) {
       service_cards: serviceCards,
       is_open_now,
       next_open_text,
+      // F1 (Alcance): SEO/analytics — colunas da migration 220; undefined-safe
+      ga4_measurement_id:   config.ga4_measurement_id || null,
+      meta_pixel_id:        config.meta_pixel_id || null,
+      custom_domain:        config.custom_domain || null,
+      custom_domain_status: config.custom_domain_status || null,
     },
     contact: {
       phone:     config.phone     || '',
