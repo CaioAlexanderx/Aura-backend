@@ -228,18 +228,23 @@ describe('PATCH /belt-exams/:examId/candidates/:candidateId (lançar resultado)'
 
   beforeEach(() => {
     jest.clearAllMocks();
-    // Ordem: SELECT candidato → UPDATE (dispara trigger)
-    // updated_at used as result_at (no result_at column in real schema)
-    db.query
-      .mockResolvedValueOnce({   // SELECT candidato + exame
+    // Handler transacional: BEGIN → SELECT candidato+matrícula → UPDATE (dispara
+    // trigger) → [ajuste de sufixo, aqui inativo pois alvo não é faixa-preta] → COMMIT.
+    const mockClient = { query: jest.fn(), release: jest.fn() };
+    db.connect.mockResolvedValue(mockClient);
+    mockClient.query
+      .mockResolvedValueOnce({})  // BEGIN
+      .mockResolvedValueOnce({    // SELECT candidato + exame + matrícula
         rows: [{
           id: CANDIDATE_ID,
           student_id: STUDENT_ID,
           current_status: 'registered',
           target_belt: 5,
+          target_belt_name: null,
+          reg_number: '12345-D',
         }],
       })
-      .mockResolvedValueOnce({   // UPDATE status=approved (trigger karate_on_exam_approved)
+      .mockResolvedValueOnce({    // UPDATE status=approved (trigger karate_on_exam_approved)
         rows: [{
           id: CANDIDATE_ID,
           exam_id: EXAM_ID,
@@ -249,7 +254,8 @@ describe('PATCH /belt-exams/:examId/candidates/:candidateId (lançar resultado)'
           result_notes: 'Excelente desempenho',
           updated_at: new Date().toISOString(), // real schema: updated_at (not result_at)
         }],
-      });
+      })
+      .mockResolvedValueOnce({}); // COMMIT
   });
 
   it('aprova candidato — trigger insere histórico de faixa', (done) => {
