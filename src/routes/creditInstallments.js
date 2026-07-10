@@ -1102,7 +1102,32 @@ router.get('/dashboard', async (req, res) => {
       if (e.code !== '42P01' && e.code !== '42703') throw e;
     }
 
-    res.json({ kpis: { ...kpis.rows[0], ...portfolio }, top_defaulters: top.rows });
+    // Fix 10/07 (relato Jenniffer): "Recebido no mes" contava parcelas QUITADAS,
+    // nao RECEBIMENTOS -- pagamento parcial, valor livre que nao quita parcela e
+    // recebimento de venda sem agenda ficavam de fora (validado em prod: 23/74).
+    // Fonte correta: ledger customer_credit_transactions type='payment' (refund/
+    // exchange_credit NAO contam). Mantem os nomes dos campos; sobrescreve os
+    // valores da query antiga. Defensivo 42P01 (fallback = calculo antigo).
+    let paidMonth = null;
+    try {
+      const pm = await pool.query(
+        `SELECT COUNT(*)                 AS paid_count,
+                COALESCE(SUM(amount), 0) AS paid_amount
+           FROM customer_credit_transactions
+          WHERE company_id = $1 AND type = 'payment'
+            AND DATE_TRUNC('month', created_at AT TIME ZONE 'America/Sao_Paulo')
+              = DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Sao_Paulo')`,
+        [companyId]
+      );
+      paidMonth = {
+        paid_this_month_count:  parseInt(pm.rows[0]?.paid_count || 0, 10),
+        paid_this_month_amount: parseFloat(pm.rows[0]?.paid_amount || 0),
+      };
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+
+    res.json({ kpis: { ...kpis.rows[0], ...portfolio, ...(paidMonth || {}) }, top_defaulters: top.rows });
   } catch (err) {
     console.error('GET /credit/dashboard', err.message);
     res.status(500).json({ error: err.message });
