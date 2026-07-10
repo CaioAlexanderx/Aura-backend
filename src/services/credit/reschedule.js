@@ -121,6 +121,41 @@ function sumRemaining(rows) {
 }
 
 // -------------------------------------------------------------
+// Saldo do ledger SEM cronograma: balance da view - restante de TODAS as
+// parcelas abertas do cliente (qualquer carne). E' a divida de venda 1x/fiado,
+// que nao gera agenda (ledger.js so agenda com installments > 1).
+// Base do "Parcelar saldo" (10/07, caso Veronica/Jenniffer).
+// -------------------------------------------------------------
+async function getUnscheduledBalance(db, companyId, customerId) {
+  let balance = 0;
+  try {
+    const { rows } = await db.query(
+      `SELECT COALESCE(balance, 0) AS balance
+         FROM customer_credit_balances
+        WHERE company_id = $1 AND customer_id = $2`,
+      [companyId, customerId]
+    );
+    balance = parseFloat(rows[0]?.balance) || 0;
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+  }
+  let scheduled = 0;
+  try {
+    const { rows } = await db.query(
+      `SELECT COALESCE(SUM(amount_due - covered_amount), 0) AS s
+         FROM credit_installments
+        WHERE company_id = $1 AND customer_id = $2
+          AND status IN ('pending', 'overdue')`,
+      [companyId, customerId]
+    );
+    scheduled = parseFloat(rows[0]?.s) || 0;
+  } catch (e) {
+    if (e.code !== '42P01') throw e;
+  }
+  return round2(Math.max(0, balance - scheduled));
+}
+
+// -------------------------------------------------------------
 // applyReschedule -- aplica a renegociacao (DENTRO de uma transacao).
 //   1. Lock das parcelas abertas do escopo -> open_remaining + ids substituidos.
 //   2. Guard: precisa existir parcela aberta (senao um delta>0 dobraria o saldo
@@ -146,18 +181,24 @@ async function applyReschedule(client, {
   const openRemaining = sumRemaining(openRows);
   const replacedIds = (openRows || []).map((i) => i.id).filter(Boolean);
 
-  // 2. Guard: sem parcela aberta nao ha o que renegociar (e um delta>0 criaria
-  //    debito em cima de divida sem cronograma -> double count).
+  // 2. Base da renegociacao. Sem parcela aberta, a base vira o saldo do ledger
+  //    SEM cronograma ("Parcelar saldo", 10/07): delta = total - saldo_sem_agenda,
+  //    logo manter o total nao mexe no ledger (sem double count) e desconto/
+  //    acrescimo seguem funcionando. So erra se nao ha nem saldo sem agenda.
+  let baseRemaining = openRemaining;
   if (replacedIds.length === 0) {
-    const e = new Error('Nao ha parcelas abertas para renegociar neste carne.');
-    e.status = 422;
-    e.code   = 'NO_OPEN_INSTALLMENTS';
-    throw e;
+    baseRemaining = await getUnscheduledBalance(client, companyId, customerId);
+    if (baseRemaining <= 0.005) {
+      const e = new Error('Nao ha parcelas abertas nem saldo sem parcelas para renegociar.');
+      e.status = 422;
+      e.code   = 'NO_OPEN_INSTALLMENTS';
+      throw e;
+    }
   }
 
   // 3. Plano puro (preview === apply).
   const plan = computeReschedulePlan({
-    openRemaining,
+    openRemaining: baseRemaining,
     total,
     installments,
     firstDueDate,
@@ -318,4 +359,4 @@ async function reduceReceivables(client, companyId, customerId, amount) {
   }
 }
 
-module.exports = { computeReschedulePlan, applyReschedule, loadOpenInstallments, sumRemaining };
+module.exports = { computeReschedulePlan, applyReschedule, loadOpenInstallments, sumRemaining, getUnscheduledBalance };
