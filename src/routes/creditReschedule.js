@@ -17,7 +17,7 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
-const { computeReschedulePlan, applyReschedule, loadOpenInstallments, sumRemaining } = require('../services/credit/reschedule');
+const { computeReschedulePlan, applyReschedule, loadOpenInstallments, sumRemaining, getUnscheduledBalance } = require('../services/credit/reschedule');
 
 // Helper canonico (mesmo de creditUnify.js/creditRefund.js).
 async function assertCrediarioEnabled(companyId) {
@@ -111,8 +111,13 @@ router.get('/customers/:cid/accounts/:accountId/reschedule/preview', async (req,
   try {
     const period   = await resolveReschedulePeriod(companyId, accountId);
     const openRows = await loadOpenInstallments(db, companyId, customerId, accountId, false);
+    // Parcelar saldo (10/07): sem parcela aberta, base = saldo sem cronograma.
+    let baseRemaining = sumRemaining(openRows);
+    if (openRows.length === 0) {
+      baseRemaining = await getUnscheduledBalance(db, companyId, customerId);
+    }
     const plan = computeReschedulePlan({
-      openRemaining: sumRemaining(openRows),
+      openRemaining: baseRemaining,
       total,
       installments,
       firstDueDate,
