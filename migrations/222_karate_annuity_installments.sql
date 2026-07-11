@@ -251,6 +251,20 @@ SELECT * FROM karate_dojo_annuity_history;
 -- → 'paid'. Dojô inativo sem cobrança continua 'sem_cobranca' (não gera
 -- cobrança, mas não é papel desta view decidir "nao_aplicavel" para dojô —
 -- mantém paridade com o comportamento anterior de 'inativo' via is_active).
+--
+-- ⚠️ Semântica de coluna (checada em review pós-F1 — ver karate_member_standing
+-- abaixo para o bug irmão que ESTA view não tinha):
+--   paid_amount     = valor já PAGO da anuidade corrente (SUM só das parcelas
+--                      com status='paid'). Nome já era coerente com o dado
+--                      pré-F1 (1 transaction paga = 1 valor); mantido sem
+--                      alteração nesta migration.
+--   valor_em_aberto = SUM de todas as parcelas NÃO pagas (vencidas ou não).
+--   valor_atrasado  = SUM das parcelas NÃO pagas E já vencidas (due_date <=
+--                      CURRENT_DATE).
+-- Esta view NÃO expõe "valor total cobrado" (equivalente a annuity_amount de
+-- karate_member_standing). Se algum consumidor futuro precisar do total
+-- cobrado, adicionar coluna nova explícita — não reaproveitar paid_amount
+-- para isso.
 CREATE OR REPLACE VIEW karate_dojo_standing AS
 SELECT
   c.id AS dojo_id,
@@ -292,10 +306,33 @@ WHERE c.federation_id IS NOT NULL;
 -- federation_id, dojo_id, full_name, karate_registration_number, whatsapp,
 -- is_active, belt_level, belt_name, is_black_belt, reference_year,
 -- annuity_tx_id, annuity_amount, annuity_due_date, annuity_paid, financeiro,
--- valor_em_aberto) + valor_atrasado novo. Gates preservados: faixa != preta
--- ou inativo → 'nao_aplicavel' (e valor 0 nos dois campos); sem cobrança no
--- período → 'sem_cobranca'; todas as parcelas pagas → 'em_dia'; >=1 parcela
--- vencida não paga → 'atrasado' (parcela futura NÃO torna ninguém atrasado).
+-- valor_em_aberto) + valor_atrasado e annuity_paid_amount novos. Gates
+-- preservados: faixa != preta ou inativo → 'nao_aplicavel' (e valor 0 nos
+-- dois campos); sem cobrança no período → 'sem_cobranca'; todas as parcelas
+-- pagas → 'em_dia'; >=1 parcela vencida não paga → 'atrasado' (parcela
+-- futura NÃO torna ninguém atrasado).
+--
+-- ⚠️ Semântica de coluna (não confiar no nome sem ler isto — bug pego em
+-- review antes de aplicar a migration):
+--   annuity_amount      = valor TOTAL COBRADO da anuidade na temporada (SUM
+--                          de TODAS as parcelas, pagas ou não). Pré-F1 já
+--                          significava isto (1 transaction = 1 valor
+--                          cobrado); PRESERVADO propositalmente.
+--   annuity_paid_amount = valor já PAGO na temporada (SUM só das parcelas
+--                          com status='paid'). Coluna NOVA desta migration.
+--                          Um rascunho anterior desta view redefiniu
+--                          acidentalmente "annuity_amount" para este
+--                          significado (preta inadimplente => annuity_amount
+--                          = 0), o que teria armadilhado qualquer consumidor
+--                          futuro que confiasse no nome antigo. Corrigido
+--                          antes de aplicar. Confirmado via grep que, até
+--                          esta migration, nenhuma rota de backend nem tela
+--                          do frontend lê annuity_amount ou
+--                          annuity_paid_amount desta view — sem consumidor
+--                          quebrado pela correção.
+--   valor_em_aberto      = SUM de parcelas NÃO pagas (vencidas ou não).
+--   valor_atrasado       = SUM de parcelas NÃO pagas E já vencidas (due_date
+--                          <= CURRENT_DATE).
 CREATE OR REPLACE VIEW karate_member_standing AS
 SELECT
   c.id AS student_id,
@@ -311,6 +348,7 @@ SELECT
   EXTRACT(year FROM now())::integer AS reference_year,
   fin.tx_id AS annuity_tx_id,
   fin.amount AS annuity_amount,
+  fin.paid_amount AS annuity_paid_amount,
   fin.due_date AS annuity_due_date,
   fin.paid AS annuity_paid,
   CASE
@@ -336,7 +374,8 @@ JOIN karate_current_belt cb ON cb.student_id = c.id
 LEFT JOIN LATERAL (
   SELECT
     hh.id AS tx_id,
-    SUM(CASE WHEN i.status = 'paid' THEN i.amount ELSE 0 END) AS amount,
+    SUM(i.amount) AS amount,
+    SUM(CASE WHEN i.status = 'paid' THEN i.amount ELSE 0 END) AS paid_amount,
     MIN(i.due_date) AS due_date,
     bool_and(i.status = 'paid') AS paid,
     COUNT(*) FILTER (WHERE i.status <> 'paid' AND i.due_date IS NOT NULL AND i.due_date <= CURRENT_DATE) AS overdue_open_count,
