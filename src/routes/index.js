@@ -58,6 +58,12 @@ router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
 router.use('/webhooks/instagram', require('./webhookInstagram'));
 router.use('/webhooks/mp',        require('./webhookMp'));
 
+// ── AURA KARATÊ — Track F5 (público: webhook de conciliação de pagamento) ──
+// Sem auth de empresa — o provedor de pagamento não tem sessão Aura.
+// Validação de token/segredo é feita dentro do handler (por federação,
+// com fallback de env). Ver src/routes/karateWebhooks.js.
+router.use('/webhooks/karate-payments', require('./karateWebhooks'));
+
 // ── AURA KARATÊ — Track F (público: webhook de sync do dojô / Via 1) ──
 // Sem auth de empresa. Autentica por federation_sync_token (header
 // X-Sync-Token, comparado por hash). Migrations 170 + 171.

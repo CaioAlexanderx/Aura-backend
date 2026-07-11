@@ -55,6 +55,7 @@ const { guards } = require('../config/karateRoles');
 const { getDojoAnnuityStatus, computeAnnuityStatus } = require('../services/karateFinanceService');
 const { createPixCharge, getStatus: providerGetStatus } = require('../services/karatePaymentProvider');
 const annuitySvc = require('../services/karateAnnuityService');
+const paymentSvc = require('../services/karatePaymentService');
 
 // ── Fase F1 (parcelas): schema pre-migration guard ──────────────
 // Backend sobe antes da migration 222 ser aplicada (armadilha #1 do
@@ -1177,7 +1178,7 @@ router.get('/payments/:intentId/status', ...guards.adminOnly(), async (req, res)
 
     if (intent.status === 'pending') {
       try {
-        const ps = await providerGetStatus({ payment_intent_id: intent.payment_intent_id });
+        const ps = await providerGetStatus({ payment_intent_id: intent.payment_intent_id, provider: intent.provider });
         liveStatus = ps.status;
         paid_at = ps.paid_at;
       } catch (_) {
@@ -1200,197 +1201,41 @@ router.get('/payments/:intentId/status', ...guards.adminOnly(), async (req, res)
 });
 
 // POST /financial/payments/:intentId/confirm
-// Admin confirma pagamento manualmente (ou webhook futuro chama este endpoint).
-// Reconcilia transaction (status=confirmed) + atualiza annuity_history.
-// NFS-e: emite via nfe_documents + fiscal.emitNfse (best-effort, não bloqueia confirm).
+// Admin confirma pagamento manualmente. Delega pra
+// services/karatePaymentService.confirmIntent (source='manual') — o mesmo
+// caminho usado pelo webhook de pagamento (source='webhook'), garantindo
+// que baixa manual e baixa automática produzam o efeito idêntico no
+// Financeiro (transaction confirmed + NFS-e best-effort).
 router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, res) => {
   const { id: federationId, intentId } = req.params;
   const { paid_at, emit_nfse = true } = req.body;
 
-  const client = await db.connect();
   try {
-    await client.query('BEGIN');
+    const result = await paymentSvc.confirmIntent(intentId, {
+      source: 'manual',
+      federationId,
+      paidAt: paid_at,
+      emitNfse: emit_nfse,
+    });
 
-    // Busca intent. LEFT JOIN (não INNER): intents novos (Fase F1, criados via
-    // /annuities/installments/:id/pix) sempre têm annuity_history_id, mas
-    // mantém-se LEFT para não quebrar algum intent legado sem header.
-    const intentRes = await client.query(
-      `SELECT kpi.*, kdah.dojo_id, kdah.practitioner_id, kdah.reference_period,
-              kdah.amount AS annuity_amount, kdah.status AS annuity_status,
-              kdah.id AS annuity_history_id
-       FROM karate_payment_intents kpi
-       LEFT JOIN karate_dojo_annuity_history kdah ON kdah.id = kpi.annuity_history_id
-       WHERE kpi.id = $1 AND kpi.federation_id = $2
-       LIMIT 1`,
-      [intentId, federationId]
-    );
-    if (!intentRes.rows.length) {
-      await client.query('ROLLBACK');
+    if (result.code === 'NOT_FOUND') {
       return res.status(404).json({ error: 'Intent não encontrado', code: 'NOT_FOUND' });
     }
-
-    const intent = intentRes.rows[0];
-    if (intent.status === 'paid') {
-      await client.query('ROLLBACK');
+    if (result.code === 'ALREADY_PAID') {
       return res.status(409).json({ error: 'Pagamento já confirmado', code: 'CONFLICT', idempotent_hit: true });
-    }
-
-    const paidAt = paid_at || new Date().toISOString();
-
-    // Atualiza intent
-    await client.query(
-      `UPDATE karate_payment_intents SET status = 'paid', paid_at = $1, updated_at = NOW() WHERE id = $2`,
-      [paidAt, intentId]
-    );
-
-    // Fase F1: intent aponta pra UMA PARCELA (source_type in dojo_annuity/
-    // cpf_annuity + source_id=installmentId, migration 213/222). Confirma a
-    // parcela — o header só vira 'paid' quando a ÚLTIMA parcela é paga
-    // (annuitySvc.syncAnnuityHeaderRollup). Intents legados (sem source_id,
-    // de antes da F1) continuam confirmando o header inteiro direto.
-    const isInstallmentIntent = ['dojo_annuity', 'cpf_annuity'].includes(intent.source_type) && intent.source_id;
-
-    if (isInstallmentIntent) {
-      await client.query(
-        `UPDATE karate_annuity_installments
-         SET status = 'paid', paid_at = $1, transaction_id = COALESCE($2, transaction_id), updated_at = NOW()
-         WHERE id = $3`,
-        [paidAt, intent.transaction_id, intent.source_id]
-      );
-      if (intent.annuity_history_id) {
-        await annuitySvc.syncAnnuityHeaderRollup(client, intent.annuity_history_id);
-      }
-    } else if (intent.annuity_history_id) {
-      // Legado: confirma o header inteiro (comportamento pré-F1).
-      await client.query(
-        `UPDATE karate_dojo_annuity_history
-         SET status = 'paid', paid_at = $1, updated_at = NOW()
-         WHERE id = $2`,
-        [paidAt, intent.annuity_history_id]
-      );
-    }
-
-    // Reconcilia transaction (status é o enum transaction_status → 'confirmed')
-    if (intent.transaction_id) {
-      await client.query(
-        `UPDATE transactions
-         SET status = 'confirmed', paid_at = $1, updated_at = NOW()
-         WHERE id = $2`,
-        [paidAt, intent.transaction_id]
-      );
-    }
-
-    await client.query('COMMIT');
-
-    // ── NFS-e: best-effort após commit (não bloqueia confirm se falhar) ──
-    let nfseRef = null;
-    if (emit_nfse && intent.transaction_id && intent.dojo_id) {
-      try {
-        // Busca dados fiscais da federação (prestador)
-        const fedRes = await db.query(
-          `SELECT id, legal_name, trade_name, name, cnpj, email, phone,
-                  inscricao_municipal, focus_company_id, certificate_uploaded, tax_regime,
-                  address_street, address_number, address_neighborhood,
-                  address_city, address_state, address_zip, ibge_code, inscricao_estadual
-           FROM companies WHERE id = $1 LIMIT 1`,
-          [federationId]
-        );
-        const dojoRes = await db.query(
-          `SELECT name, cnpj FROM companies WHERE id = $1 LIMIT 1`,
-          [intent.dojo_id]
-        );
-
-        if (fedRes.rows.length && fedRes.rows[0].cnpj && fedRes.rows[0].inscricao_municipal) {
-          const federation = fedRes.rows[0];
-          const dojoName = dojoRes.rows[0]?.name || 'Dojô';
-          const dojoCnpj = (dojoRes.rows[0]?.cnpj || '').replace(/\D/g, '');
-          const serviceDesc = `Anuidade Dojô ${dojoName} — ${intent.reference_period}`;
-          const serviceValue = parseFloat(intent.annuity_amount);
-          const refCode = `nfse-karate-${(intent.annuity_history_id || '').slice(0, 8)}-${Date.now()}`;
-
-          // Verifica idempotência: já existe NFS-e para este annuity_history_id?
-          const existingRef = await db.query(
-            `SELECT ref FROM nfe_documents
-             WHERE company_id = $1 AND type = 'nfse'
-               AND payload::jsonb ->> 'annuity_history_id' = $2
-             LIMIT 1`,
-            [federationId, intent.annuity_history_id]
-          ).catch(() => ({ rows: [] }));
-
-          if (!existingRef.rows.length) {
-            // Insere pendente
-            await db.query(
-              `INSERT INTO nfe_documents
-                 (company_id, ref, type, status, recipient_cnpj, recipient_name,
-                  description, service_code, value, iss_rate, payload)
-               VALUES ($1,$2,'nfse','pending',$3,$4,$5,$6,$7,$8,$9)`,
-              [
-                federationId, refCode, dojoCnpj, dojoName, serviceDesc, '', serviceValue, 2,
-                JSON.stringify({
-                  source: 'karate_annuity',
-                  annuity_history_id: intent.annuity_history_id,
-                  dojo_id: intent.dojo_id,
-                  federation_id: federationId,
-                  transaction_id: intent.transaction_id,
-                  reference_period: intent.reference_period,
-                }),
-              ]
-            );
-            nfseRef = refCode;
-
-            // Emite via Nuvem Fiscal (best-effort)
-            try {
-              const result = await fiscal.emitNfse(federation, {
-                recipient_cnpj: dojoCnpj || undefined,
-                recipient_name: dojoName,
-                description: serviceDesc,
-                service_code: '',
-                value: serviceValue,
-                iss_rate: 2,
-              });
-              const nfseStatus = result.status === 'autorizado' ? 'authorized'
-                               : result.status === 'rejeitado'  ? 'error' : 'processing';
-              await db.query(
-                `UPDATE nfe_documents
-                    SET status=$1, focus_id=$2, number=$3, xml_url=$4, pdf_url=$5,
-                        error_message=$6,
-                        issued_at=CASE WHEN $1='authorized' THEN NOW() ELSE NULL END,
-                        updated_at=NOW()
-                  WHERE ref=$7`,
-                [nfseStatus, result.id||null, result.numero||null,
-                 result.link_xml||null, result.link_pdf||null, result.mensagem||null, refCode]
-              ).catch(() => {});
-            } catch (fiscalErr) {
-              await db.query(
-                `UPDATE nfe_documents SET status='error', error_message=$1 WHERE ref=$2`,
-                [fiscalErr.message, refCode]
-              ).catch(() => {});
-              console.warn('[karateAnnuities] nfse emit failed (best-effort):', fiscalErr.message);
-            }
-          } else {
-            nfseRef = existingRef.rows[0].ref;
-          }
-        }
-      } catch (nfseErr) {
-        // NFS-e é best-effort: não bloqueia confirmação
-        console.warn('[karateAnnuities] nfse block failed (best-effort):', nfseErr.message);
-      }
     }
 
     res.json({
       intent_id: intentId,
-      transaction_id: intent.transaction_id,
+      transaction_id: result.transactionId,
       status: 'paid',
-      paid_at: paidAt,
-      nfse_ref: nfseRef,
+      paid_at: result.paidAt,
+      nfse_ref: result.nfseRef,
       idempotent_hit: false,
     });
   } catch (err) {
-    await client.query('ROLLBACK');
     console.error('[karateAnnuities] confirm error:', err.message);
     res.status(500).json({ error: 'Erro ao confirmar pagamento', detail: err.message });
-  } finally {
-    client.release();
   }
 });
 
