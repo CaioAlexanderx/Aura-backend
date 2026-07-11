@@ -191,9 +191,51 @@ router.get('/', ...guards.read(), async (req, res) => {
 });
 
 // ── GET /federation/:id/practitioners/export ────────────────
+// 11/07/2026: fix bug de produção — export baixava a federação inteira mesmo
+// quando a tela estava filtrada (ex.: CTA "Ver praticantes" do dojô, com
+// ?dojo_id=X). Agora aceita os MESMOS filtros opcionais da listagem (GET /),
+// espelhando exatamente a lógica de `conditions`/`params` daquele handler:
+//   dojo_id, belt_level, q (nome/cpf/registro) e status de afiliação (aceita
+//   tanto `status` quanto `affiliation_status`, para casar com o que o FE já
+//   manda em cada tela). Sem filtros → comportamento antigo preservado
+//   (exporta todos os praticantes da federação).
 router.get('/export', ...guards.read(), async (req, res) => {
   const federationId = req.params.id;
+  const { dojo_id, belt_level, q } = req.query;
+  const affiliationStatus = req.query.status || req.query.affiliation_status;
   try {
+    const conditions = [`cu.federation_id = $1`, `cu.is_guest = false`];
+    const params = [federationId];
+    let n = 2;
+
+    if (dojo_id) {
+      conditions.push(`cu.dojo_id = $${n}`);
+      params.push(dojo_id);
+      n++;
+    }
+    if (belt_level) {
+      conditions.push(`cb.belt_level = $${n}`);
+      params.push(belt_level);
+      n++;
+    }
+    if (q) {
+      conditions.push(`(cu.name ILIKE $${n} OR cu.cpf_cnpj ILIKE $${n} OR cu.karate_registration_number ILIKE $${n})`);
+      params.push(`%${q}%`);
+      n++;
+    }
+
+    // Mesmo mapeamento do GET / (list): active=is_active true,
+    // inactive=is_active false, pending=sem faixa.
+    if (affiliationStatus === 'active') {
+      conditions.push('cu.is_active = true');
+    } else if (affiliationStatus === 'inactive') {
+      conditions.push('cu.is_active = false');
+    } else if (affiliationStatus === 'pending') {
+      conditions.push('cb.belt_level IS NULL');
+    }
+
+    const where = `WHERE ${conditions.join(' AND ')}`;
+
     const { rows } = await db.query(
       `SELECT cu.name, cu.karate_registration_number, cu.cpf_cnpj, cu.rg,
               cu.birth_date, cu.email, cu.phone, cu.is_active,
@@ -203,9 +245,9 @@ router.get('/export', ...guards.read(), async (req, res) => {
        FROM customers cu
        LEFT JOIN companies comp ON comp.id = cu.dojo_id
        LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = cu.federation_id
-       WHERE cu.federation_id = $1 AND cu.is_guest = false
+       ${where}
        ORDER BY COALESCE(comp.trade_name, comp.legal_name) NULLS LAST, cu.name ASC`,
-      [federationId]
+      params
     );
     const isoDate = (v) => { if (!v) return null; try { return new Date(v).toISOString().slice(0,10); } catch(_) { return null; } };
     const practitioners = rows.map((r) => ({
