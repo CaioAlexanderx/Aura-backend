@@ -27,6 +27,28 @@
 // fix (22/05/2026): chama notifyPaymentConfirmed após onOrderConfirmed
 // para enviar e-mail de confirmação ao cliente (Pix MP e Cartão).
 // SELECT de digital_orders inclui order_number, customer_name, customer_email.
+//
+// SEGURANÇA (11/07/2026 — auditoria dos 2 webhooks públicos sem auth, ver
+// PR #360 pro padrão fail-closed usado no webhook de pagamento do karatê):
+//   Diferente do webhook Asaas (fail-closed / reverificação — ver
+//   webhookAsaas.js), este webhook JÁ tinha, antes desta mudança, uma
+//   mitigação equivalente embutida: quando nenhum gateway tem webhook_secret
+//   cadastrado, a validação HMAC é pulada (linhas abaixo), mas NENHUM
+//   caminho de mutação confia no body — todos os 3 pontos que confirmam um
+//   pedido (fluxo Pix por mp_payment_id, fallback CheckoutPro por
+//   external_reference, e o próprio fallback) chamam getMpPayment() e só
+//   gravam status=confirmed se o PRÓPRIO Mercado Pago responder
+//   status==='approved'. Um evento forjado no body (action/data.id
+//   inventados) não muta nada: ou o paymentId não existe pra nenhum access
+//   token de gateway cadastrado (getMpPayment falha silenciosamente pra
+//   cada candidate), ou existe mas não está 'approved', ou não tem
+//   external_reference que bata com um pedido pending_payment real.
+//   MP também não permite consultar payment de outro merchant com um
+//   access_token que não é dono dele — a reverificação é por si só um
+//   controle de posse, não só de status.
+//   Único gap real (agora corrigido): quando nenhum gateway tinha secret,
+//   nada era logado — o "modo sem proteção HMAC" ficava invisível nos logs
+//   do Railway. Adicionado warn ruidoso abaixo (ver "sem HMAC" no log).
 // ============================================================
 'use strict';
 
@@ -35,7 +57,7 @@ const router               = require('express').Router();
 const db                   = require('../config/database');
 const { getMpPayment }     = require('../services/mpService');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
-const notify               = require('../services/digitalOrderNotifications');
+const notify                = require('../services/digitalOrderNotifications');
 
 // Parse "ts=1704908010,v1=618c85345248..." → { ts, v1 } ou null.
 function parseMpSignatureHeader(header) {
@@ -94,7 +116,11 @@ router.post('/', async (req, res) => {
 
     // ===== Validação HMAC x-signature =====
     // Se algum gateway tem webhook_secret, exigimos x-signature válido.
-    // Se nenhum tem, pulamos (fallback legado consultando MP API).
+    // Se nenhum tem, pulamos (fallback legado consultando MP API) — mas
+    // NUNCA silenciosamente: loga WARN pra não ficar invisível no Railway
+    // que este webhook está aceitando notificações sem verificar HMAC
+    // (a proteção real, nesse modo, é a reverificação contra a API do MP
+    // mais abaixo — nenhuma mutação depende só disto aqui).
     const sigHeader = req.headers['x-signature'];
     const requestId = String(req.headers['x-request-id'] || '');
     const parsed = parseMpSignatureHeader(sigHeader);
@@ -118,6 +144,12 @@ router.post('/', async (req, res) => {
         console.warn('[webhookMp] x-signature inválido para todos os gateways com secret — possível spoofing (paymentId=' + paymentId + ')');
         return;
       }
+    } else {
+      console.warn('[webhookMp] NENHUM gateway com webhook_secret cadastrado — pulando validação HMAC ' +
+        '(paymentId=' + paymentId + '). Nenhuma mutação confia neste ponto: a confirmação abaixo só ' +
+        'acontece se o próprio Mercado Pago (getMpPayment) reportar status=approved pro access_token ' +
+        'dono do pagamento. Recomenda-se cadastrar webhook_secret por gateway assim que possível ' +
+        '(fecha a checagem de autenticidade sem depender só da reverificação).');
     }
 
     // ===== 1. Tenta encontrar pedido pelo mp_payment_id (Pix MP) =====
