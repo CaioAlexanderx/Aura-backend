@@ -20,6 +20,45 @@
 //     - last_payment_date so e escrito em pagamento efetivo (CONFIRMED/RECEIVED).
 //     - next_billing_date nunca e sobrescrito por NULL (COALESCE).
 //
+// FIX SEGURANCA (11/07/2026) — fail-closed, nunca confiar cegamente no body:
+//   Antes desta mudanca, sem ASAAS_WEBHOOK_SECRET configurado, validateToken()
+//   retornava true pra QUALQUER requisicao — um POST forjado na internet, na
+//   forma certa, mudava billing_status de empresa inteira e confirmava pedido
+//   Canal Digital, sem nenhuma verificacao contra o Asaas de verdade.
+//
+//   Esta rota tem clientes reais em producao (billing/assinatura). Fail-closed
+//   "burro" (401 sempre que faltar o segredo) tem risco real de derrubar a
+//   reconciliacao de pagamento em silencio SE o segredo nao estiver configurado
+//   no Railway — o que nao pudemos confirmar por acesso direto ao ambiente.
+//   Evidencia no repo (git log, commit e063cd0, 03/05/2026): "User confirmou
+//   que ASAAS_WEBHOOK_SECRET ja esta correto no Railway" + o proprio fluxo de
+//   billing seguiu processando eventos reais depois disso (fix 11/07/2026
+//   acima so faz sentido se eventos PAYMENT_DELETED estavam de fato chegando e
+//   sendo aceitos). Ou seja: ha indicio forte de que o segredo esta
+//   configurado hoje — mas o PR nao presume isso; ver "O que o Caio precisa
+//   fazer" na descricao do PR.
+//
+//   Estrategia adotada (2 camadas, nao mutuamente exclusivas com o cenario
+//   acima):
+//     1) Segredo configurado -> continua sendo a UNICA fonte de verdade.
+//        Token invalido = 401 IMEDIATO, zero leitura/escrita de negocio.
+//     2) Segredo AUSENTE -> NUNCA mais aceita cego. Em vez disso, o body e
+//        tratado como nao-confiavel: usamos so o payment.id pra buscar o
+//        pagamento de verdade na API do Asaas (GET /payments/:id, via
+//        ASAAS_API_KEY — credencial DIFERENTE do webhook secret, ja exigida
+//        por todo o resto da integracao de billing/assinatura e portanto com
+//        evidencia solida de estar configurada). O status_map, o customer e
+//        o valor gravado vem TODOS da resposta do Asaas, nunca do body.
+//        Um evento forjado (ID inventado, ou ID de pagamento que nao existe/
+//        nao pertence a esta operacao) nao muta NADA. Se a reverificacao
+//        falhar por qualquer motivo (rede, ASAAS_API_KEY tambem ausente,
+//        pagamento nao encontrado), a requisicao e um no-op — nunca mutacao.
+//   Isso preserva a reconciliacao de billing legitima mesmo se
+//   ASAAS_WEBHOOK_SECRET cair/for removido por engano, sem reabrir o buraco
+//   de forjar eventos direto no body.
+// ATENCAO: quando operando sem segredo, o log fica MUITO barulhento de
+// proposito (WARN por requisicao) — ninguem deve poder dizer que "nao viu".
+//
 // Handles two flows:
 //   1. externalReference = 'digital-order-<uuid>'  → pedido Canal Digital
 //   2. tudo mais                                    → billing de empresa (plano)
@@ -36,6 +75,7 @@ const router  = express.Router();
 const db      = require('../config/database');
 const crypto  = require('crypto');
 const notify  = require('../services/digitalOrderNotifications');
+const { asaas } = require('../services/asaasClient');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
@@ -44,7 +84,9 @@ if (ASAAS_WEBHOOK_TOKEN) {
   console.log('[WEBHOOK] ASAAS_WEBHOOK_SECRET configurado (length=' + ASAAS_WEBHOOK_TOKEN.length + ', sha256-prefix=' +
     crypto.createHash('sha256').update(ASAAS_WEBHOOK_TOKEN).digest('hex').slice(0, 8) + ')');
 } else {
-  console.warn('[WEBHOOK] ASAAS_WEBHOOK_SECRET NAO configurado — aceitando todos webhooks sem validar');
+  console.warn('[WEBHOOK] ASAAS_WEBHOOK_SECRET NAO configurado — operando em modo reverificacao ' +
+    'server-to-server (nunca confia no body; ver comentario de topo do arquivo). ' +
+    'Configure ASAAS_WEBHOOK_SECRET no Railway assim que possivel.');
 }
 
 function logIncomingRequest(req, decision, reason) {
@@ -65,11 +107,10 @@ function logIncomingRequest(req, decision, reason) {
     '] | all-header-count=' + headerNames.length + ' | from-ip=' + (req.ip || '(unknown)'));
 }
 
+// Valida o token contra ASAAS_WEBHOOK_SECRET. So deve ser chamada quando o
+// segredo esta configurado — o caso "sem segredo" e tratado no router (nao
+// aqui) porque o comportamento nesse caso NAO e "aceitar", e "reverificar".
 function validateToken(req) {
-  if (!ASAAS_WEBHOOK_TOKEN) {
-    logIncomingRequest(req, 'ACCEPTED', 'no secret configured');
-    return true;
-  }
   var token = req.headers['asaas-access-token'] || '';
   if (!token) {
     // Tenta variantes comuns de nome de header (caso Asaas tenha mudado)
@@ -87,20 +128,38 @@ function validateToken(req) {
     var a = Buffer.from(String(token));
     var b = Buffer.from(String(ASAAS_WEBHOOK_TOKEN));
     if (a.length !== b.length) {
-      logIncomingRequest(req, 'REJECTED-403',
+      logIncomingRequest(req, 'REJECTED-401',
         'token length mismatch: received=' + a.length + ', expected=' + b.length);
       return false;
     }
     const ok = crypto.timingSafeEqual(a, b);
     if (!ok) {
-      logIncomingRequest(req, 'REJECTED-403', 'token value mismatch (same length)');
+      logIncomingRequest(req, 'REJECTED-401', 'token value mismatch (same length)');
       return false;
     }
     logIncomingRequest(req, 'ACCEPTED', 'token valid');
     return true;
   } catch (err) {
-    logIncomingRequest(req, 'REJECTED-403', 'comparison threw: ' + err.message);
+    logIncomingRequest(req, 'REJECTED-401', 'comparison threw: ' + err.message);
     return false;
+  }
+}
+
+// Busca o pagamento DIRETO na API do Asaas (nunca confia no body). So
+// usada quando ASAAS_WEBHOOK_SECRET nao esta configurado. Usa ASAAS_API_KEY
+// (credencial diferente, ja exigida pelo restante da integracao de billing —
+// ver src/services/asaasClient.js). Retorna null em qualquer falha
+// (pagamento inexistente, rede, ASAAS_API_KEY tambem ausente) — o chamador
+// trata null como "nao mutar nada".
+async function reverifyPaymentWithAsaas(paymentId) {
+  if (!paymentId) return null;
+  try {
+    var verified = await asaas('GET', '/payments/' + encodeURIComponent(paymentId));
+    return (verified && verified.id) ? verified : null;
+  } catch (err) {
+    console.error('[WEBHOOK] reverificacao server-to-server falhou pra payment ' +
+      paymentId + ': ' + err.message);
+    return null;
   }
 }
 
@@ -136,6 +195,30 @@ var ORDER_PAYMENT_MAP = {
   PAYMENT_CHARGEBACK_REQUESTED: 'chargeback',
 };
 
+// Equivalentes aos mapas acima, mas chaveados pelo status REAL devolvido
+// pela API do Asaas (payment.status), nao pelo nome do evento do body.
+// Usados SOMENTE no modo reverificacao (sem segredo configurado) — nesse
+// modo o "evento" nunca decide nada, so o status que o Asaas confirma.
+// Sem equivalente pra PAYMENT_DELETED: se o pagamento foi apagado, o GET
+// devolve 404 e reverifyPaymentWithAsaas ja retorna null antes de chegar aqui.
+var ASAAS_STATUS_TO_BILLING = {
+  CONFIRMED: 'active',
+  RECEIVED:  'active',
+  OVERDUE:   'overdue',
+  REFUNDED:  'refunded',
+  CHARGEBACK_REQUESTED: 'chargeback',
+};
+var ASAAS_STATUS_IS_PAID = {
+  CONFIRMED: true,
+  RECEIVED:  true,
+};
+var ASAAS_STATUS_TO_ORDER_PAYMENT = {
+  CONFIRMED: 'confirmed',
+  RECEIVED:  'confirmed',
+  REFUNDED:  'refunded',
+  CHARGEBACK_REQUESTED: 'chargeback',
+};
+
 // Grava o evento cru em webhook_logs. Best-effort — nunca derruba o handler.
 async function logWebhookEvent(companyId, event, payment) {
   await db.query(
@@ -145,28 +228,70 @@ async function logWebhookEvent(companyId, event, payment) {
 }
 
 router.post('/', async function(req, res) {
-  if (!validateToken(req)) {
-    return res.status(403).json({ error: 'Invalid token' });
+  var hasSecret = !!ASAAS_WEBHOOK_TOKEN;
+
+  if (hasSecret) {
+    if (!validateToken(req)) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+  } else {
+    // Barulhento de proposito — sem isso o buraco fica invisivel nos logs.
+    console.warn('[WEBHOOK] ASAAS_WEBHOOK_SECRET ausente — NAO confiando no body. ' +
+      'Reverificando o pagamento direto na API do Asaas antes de qualquer mutacao.');
   }
 
-  var event   = req.body.event;
-  var payment = req.body.payment;
-  if (!event || !payment) return res.status(200).json({ received: true });
+  var event       = req.body.event;
+  var bodyPayment = req.body.payment;
+  if (!event || !bodyPayment) return res.status(200).json({ received: true });
 
-  console.log('[WEBHOOK] Asaas event: ' + event + ' | Payment: ' + payment.id + ' | ref: ' + payment.externalReference);
+  var payment       = bodyPayment;
+  var statusSource  = 'body'; // confiavel: token ja validado acima
+  var newStatus, isNeutral, isPaid, newOrderPaymentStatus;
+
+  if (!hasSecret) {
+    var verified = await reverifyPaymentWithAsaas(bodyPayment.id);
+    if (!verified) {
+      console.warn('[WEBHOOK] Reverificacao sem sucesso (pagamento nao encontrado no Asaas, ' +
+        'ASAAS_API_KEY ausente, ou erro de rede) — evento IGNORADO, ZERO mutacao. ' +
+        'claimed_event=' + event + ' | claimed_payment_id=' + (bodyPayment.id || '(ausente)'));
+      return res.status(200).json({ received: true, handled: false, reason: 'no_secret_reverification_failed' });
+    }
+    if (bodyPayment.status && verified.status !== bodyPayment.status) {
+      console.warn('[WEBHOOK] body reivindicava status diferente do status real no Asaas — ' +
+        'usando SOMENTE o status real. claimed=' + bodyPayment.status + ' real=' + verified.status +
+        ' payment_id=' + verified.id);
+    }
+    payment      = verified;      // nunca mais usamos bodyPayment daqui pra baixo
+    statusSource = 'asaas-api';
+  }
+
+  console.log('[WEBHOOK] Asaas event: ' + event + ' | Payment: ' + payment.id +
+    ' | ref: ' + payment.externalReference + ' | source=' + statusSource);
+
+  if (statusSource === 'asaas-api') {
+    var realStatus = payment.status;
+    newStatus             = ASAAS_STATUS_TO_BILLING[realStatus];
+    isNeutral              = false; // PAYMENT_DELETED equivalente ja foi filtrado (404 -> null acima)
+    isPaid                 = !!ASAAS_STATUS_IS_PAID[realStatus];
+    newOrderPaymentStatus  = ASAAS_STATUS_TO_ORDER_PAYMENT[realStatus];
+  } else {
+    newStatus             = PAYMENT_STATUS_MAP[event];
+    isNeutral              = !!STATUS_NEUTRAL_EVENTS[event];
+    isPaid                 = !!PAID_EVENTS[event];
+    newOrderPaymentStatus  = ORDER_PAYMENT_MAP[event];
+  }
 
   // ── 1. Digital order payment
   var extRef = payment.externalReference || '';
   if (extRef.startsWith('digital-order-')) {
-    return handleDigitalOrderPayment(req, res, event, payment, extRef);
+    return handleDigitalOrderPayment(req, res, event, payment, extRef, newOrderPaymentStatus);
   }
 
   // ── 2. Company billing (plano)
   try {
-    var isNeutral = !!STATUS_NEUTRAL_EVENTS[event];
-    var newStatus = PAYMENT_STATUS_MAP[event];
     if (!newStatus && !isNeutral) {
-      console.log('[WEBHOOK] Event ' + event + ' nao mapeado — ignorando (mas recebido)');
+      console.log('[WEBHOOK] Event/status nao mapeado — ignorando (mas recebido). event=' + event +
+        ' status_source=' + statusSource);
       return res.status(200).json({ received: true, handled: false, event_ignored: event });
     }
 
@@ -201,7 +326,6 @@ router.post('/', async function(req, res) {
     // last_payment_date so avanca em pagamento efetivo; nos demais eventos
     // (OVERDUE, REFUNDED, CHARGEBACK) preserva o que ja estava la.
     // next_billing_date nunca e sobrescrito por NULL.
-    var isPaid = !!PAID_EVENTS[event];
     await db.query(
       `UPDATE companies
           SET billing_status    = $1,
@@ -250,9 +374,8 @@ router.post('/', async function(req, res) {
   }
 });
 
-async function handleDigitalOrderPayment(req, res, event, payment, extRef) {
-  const orderId          = extRef.replace('digital-order-', '').trim();
-  const newPaymentStatus = ORDER_PAYMENT_MAP[event];
+async function handleDigitalOrderPayment(req, res, event, payment, extRef, newPaymentStatus) {
+  const orderId = extRef.replace('digital-order-', '').trim();
 
   if (!newPaymentStatus) {
     return res.status(200).json({ received: true, handled: false, reason: 'event_ignored' });
