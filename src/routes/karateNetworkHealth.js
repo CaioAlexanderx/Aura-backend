@@ -325,10 +325,13 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
 
     // Anuidades do ano corrente para detectar renovações
     const season = currentSeason();
+    // Fase F1: karate_dojo_annuity_history também guarda linhas de praticante
+    // (practitioner_id) — este relatório é só de DOJÔ, filtra dojo_id IS NOT NULL.
     const annuityRes = await safeQuery(
       `SELECT dojo_id, status, paid_at
        FROM karate_dojo_annuity_history
        WHERE federation_id = $1
+         AND dojo_id IS NOT NULL
          AND EXTRACT(YEAR FROM due_date)::int = $2`,
       [fedId, season]
     );
@@ -402,13 +405,16 @@ router.get('/renovacao', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const season = parseInt(req.query.season) || currentSeason();
   try {
+    // Fase F1: filtra dojo_id IS NOT NULL — taxa de renovação é métrica de
+    // DOJÔ; sem o filtro, anuidades de praticante (practitioner_id) inflariam
+    // o denominador/numerador.
     const r = await safeQuery(
       `SELECT
          COUNT(*)                                            AS total_due,
          COUNT(*) FILTER (WHERE status = 'paid')            AS renewed,
          COUNT(*) FILTER (WHERE status IN ('pending','overdue')) AS not_renewed
        FROM karate_dojo_annuity_history
-       WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2`,
+       WHERE federation_id = $1 AND dojo_id IS NOT NULL AND EXTRACT(YEAR FROM due_date)::int = $2`,
       [fedId, season]
     );
     const row = r.rows[0] || {};
@@ -583,6 +589,8 @@ router.get('/projecao-receita', ...guards.read(), async (req, res) => {
   // Quantos meses na série: de mês atual (0-based) até dezembro (11) inclusive.
   const monthsInWindow = 12 - now.getMonth(); // ex: junho (5) → 7 meses (jun..dez)
   try {
+    // Fase F1: projeção de receita é reportada só p/ anuidade de DOJÔ nesta
+    // tela — filtra dojo_id IS NOT NULL para não somar parcelas de praticante.
     const r = await safeQuery(
       `SELECT
          DATE_TRUNC('month', due_date)        AS month_start,
@@ -592,6 +600,7 @@ router.get('/projecao-receita', ...guards.read(), async (req, res) => {
          COUNT(*)::int                        AS annuities
        FROM karate_dojo_annuity_history
        WHERE federation_id = $1
+         AND dojo_id IS NOT NULL
          AND due_date >= DATE_TRUNC('month', CURRENT_DATE)
          AND due_date <  MAKE_DATE($2::int, 12, 31) + INTERVAL '1 day'
        GROUP BY month_start
@@ -761,10 +770,13 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
     );
 
     // Receita de anuidade por dojô (season)
+    // Fase F1: agrupa por dojo_id — exclui linhas de praticante (dojo_id NULL)
+    // para não poluir o mapa revByDojo.
     const revRes = await safeQuery(
       `SELECT dojo_id, SUM(amount) AS revenue
        FROM karate_dojo_annuity_history
-       WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2 AND status = 'paid'
+       WHERE federation_id = $1 AND dojo_id IS NOT NULL
+         AND EXTRACT(YEAR FROM due_date)::int = $2 AND status = 'paid'
        GROUP BY dojo_id`,
       [fedId, season]
     );
@@ -1091,12 +1103,14 @@ router.get('/summary', ...guards.read(), async (req, res) => {
 
     // 3. Inadimplência % — denominador = anuidades lançadas; dojô sem cobrança
     //    não entra. Sem cobranças → total 0 → inadPct 0 (não divide por zero).
+    // Fase F1: filtra dojo_id IS NOT NULL — inadimplência % deste painel é
+    // só de DOJÔ (a de praticante tem tela própria, via karate_member_standing).
     const inadRes = await safeQuery(
       `SELECT
          COUNT(*)::int AS total,
          COUNT(*) FILTER (WHERE status = 'overdue')::int AS vencido
        FROM karate_dojo_annuity_history
-       WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2`,
+       WHERE federation_id = $1 AND dojo_id IS NOT NULL AND EXTRACT(YEAR FROM due_date)::int = $2`,
       [fedId, season]
     );
     const inadTotal = parseInt(inadRes.rows[0]?.total || 0, 10);
@@ -1117,10 +1131,12 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     const gradTotal = parseInt(gradRes.rows[0]?.total || 0, 10);
 
     // 5. Receita projetada próximos 90 dias
+    // Fase F1: filtra dojo_id IS NOT NULL — projeção 90d deste painel é de DOJÔ.
     const projRes = await safeQuery(
       `SELECT COALESCE(SUM(amount), 0) AS total
        FROM karate_dojo_annuity_history
        WHERE federation_id = $1
+         AND dojo_id IS NOT NULL
          AND due_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '90 days'
          AND status != 'paid'`,
       [fedId]
@@ -1190,12 +1206,13 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
          WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
         [fedId]
       ),
+      // Fase F1: filtra dojo_id IS NOT NULL — resumo semanal por e-mail é de DOJÔ.
       safeQuery(
         `SELECT COUNT(*)::int AS total,
                 COUNT(*) FILTER (WHERE status = 'overdue')::int AS vencido,
                 COUNT(*) FILTER (WHERE status = 'paid')::int AS paid
          FROM karate_dojo_annuity_history
-         WHERE federation_id = $1 AND EXTRACT(YEAR FROM due_date)::int = $2`,
+         WHERE federation_id = $1 AND dojo_id IS NOT NULL AND EXTRACT(YEAR FROM due_date)::int = $2`,
         [fedId, season]
       ),
       safeQuery(
