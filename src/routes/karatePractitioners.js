@@ -469,6 +469,10 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
 
     // Faixa inicial → semeia karate_belt_history (a view karate_current_belt
     // deriva a faixa atual; a aba Trajetória mostra essa primeira entrada).
+    // graduated_at ("Data de último exame" no cadastro) é OPCIONAL:
+    // se o usuário preencher, essa é a data da graduação da faixa inicial;
+    // se vier vazio, grava NULL (não usar affiliation_since/CURRENT_DATE como
+    // fallback — isso inventaria uma data que o usuário não informou).
     const initBeltLevel = belt_level != null ? String(belt_level).trim() : '';
     const initBeltName  = belt_name  != null ? String(belt_name).trim()  : '';
     const hasInitBelt = !!(initBeltLevel || initBeltName);
@@ -476,14 +480,13 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       await client.query(
         `INSERT INTO karate_belt_history
            (student_id, federation_id, belt_level, belt_name, belt_schema, graduated_at, notes, created_by, created_at)
-         VALUES ($1, $2, $3, $4, $5, COALESCE($6::date, $7::date, CURRENT_DATE), $8, $9, NOW())`,
+         VALUES ($1, $2, $3, $4, $5, $6::date, $7, $8, NOW())`,
         [
           insertRes.rows[0].id, federationId,
           initBeltLevel || initBeltName,
           initBeltName || initBeltLevel,
           belt_schema || null,
           (graduated_at ? String(graduated_at).slice(0, 10) : null),
-          (affiliation_since ? String(affiliation_since).slice(0, 10) : null),
           'Faixa inicial do cadastro',
           req.user?.id || null,
         ]
