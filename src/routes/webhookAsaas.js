@@ -20,6 +20,19 @@
 //     - last_payment_date so e escrito em pagamento efetivo (CONFIRMED/RECEIVED).
 //     - next_billing_date nunca e sobrescrito por NULL (COALESCE).
 //
+// FIX (11/07/2026, parte 2) — evento fora de ordem mascarava inadimplencia:
+//   Caso Sheid Mania. Cartao no Asaas CONFIRMA na captura mas so REPASSA ~30
+//   dias depois — entao o PAYMENT_RECEIVED da mensalidade de junho (venc 08/06)
+//   chegou em 10/07, DEPOIS do PAYMENT_OVERDUE da mensalidade de julho (venc
+//   08/07, cartao recusado). Processando por ordem de chegada, o RECEIVED
+//   antigo sobrescreveu 'overdue' -> 'active': cliente inadimplente aparecia
+//   adimplente e ninguem via. Evento fora de ordem NAO e excecao aqui, e o
+//   comportamento normal de assinatura no cartao.
+//   Agora comparamos o dueDate da cobranca do evento com o dueDate do ultimo
+//   evento que mudou status (isStaleStatusEvent): se for de uma cobranca mais
+//   ANTIGA, billing_status nao muda. last_payment_date ainda avanca em
+//   pagamento efetivo (o dinheiro entrou mesmo) — via GREATEST, nunca retrocede.
+//
 // Handles two flows:
 //   1. externalReference = 'digital-order-<uuid>'  → pedido Canal Digital
 //   2. tudo mais                                    → billing de empresa (plano)
@@ -117,6 +130,10 @@ var PAYMENT_STATUS_MAP = {
   PAYMENT_CHARGEBACK_REQUESTED: 'chargeback',
 };
 
+// Eventos que MUDAM billing_status — usados no guard de ordenacao pra achar
+// qual foi a ultima cobranca a definir o estado da empresa.
+var STATUS_EVENTS = Object.keys(PAYMENT_STATUS_MAP);
+
 // Eventos registrados (auditoria) mas que NAO alteram o billing da empresa.
 var STATUS_NEUTRAL_EVENTS = {
   PAYMENT_DELETED: true,
@@ -142,6 +159,50 @@ async function logWebhookEvent(companyId, event, payment) {
     'INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at) VALUES ($1, \'asaas\', $2, $3, NOW())',
     [companyId, event, JSON.stringify(payment)]
   ).catch(function() {});
+}
+
+// ── Guard de ordenacao ────────────────────────────────────────
+// Retorna true quando o evento se refere a uma cobranca MAIS ANTIGA do que a
+// que definiu o estado atual da empresa — nesse caso ele nao pode mexer em
+// billing_status.
+//
+// Por que dueDate e nao data do evento: no cartao, o Asaas CONFIRMA na captura
+// e so REPASSA ~30 dias depois (PAYMENT_RECEIVED). Entao os eventos chegam
+// fora de ordem por design. O dueDate identifica de QUAL mensalidade o evento
+// fala; a data de chegada, nao.
+//
+// Ignora logs de digital-order (Canal Digital grava em webhook_logs com o mesmo
+// company_id, mas sao pedidos, nao mensalidade do plano).
+//
+// Best-effort: qualquer falha/ausencia de dado → nao stale (comportamento
+// antigo), pra nunca travar o processamento de um evento legitimo.
+async function isStaleStatusEvent(companyId, payment) {
+  try {
+    var incomingDue = payment && payment.dueDate ? String(payment.dueDate) : null;
+    if (!incomingDue) return false;
+
+    var { rows } = await db.query(
+      `SELECT payload->>'dueDate' AS due_date
+         FROM webhook_logs
+        WHERE company_id = $1
+          AND provider = 'asaas'
+          AND event = ANY($2)
+          AND payload->>'dueDate' IS NOT NULL
+          AND COALESCE(payload->>'externalReference', '') NOT LIKE 'digital-order-%'
+        ORDER BY processed_at DESC
+        LIMIT 1`,
+      [companyId, STATUS_EVENTS]
+    );
+
+    var lastDue = rows[0］ && rows[0].due_date ? String(rows[0].due_date) : null;
+    if (!lastDue) return false;
+
+    // ISO 'YYYY-MM-DD' → comparacao lexicografica == cronologica.
+    return incomingDue < lastDue;
+  } catch (err) {
+    console.error('[WEBHOOK] isStaleStatusEvent falhou (seguindo sem guard):', err.message);
+    return false;
+  }
 }
 
 router.post('/', async function(req, res) {
@@ -198,10 +259,40 @@ router.post('/', async function(req, res) {
       });
     }
 
+    var isPaid = !!PAID_EVENTS[event];
+
+    // ── Guard de ordenacao: evento de mensalidade ANTIGA ──────
+    // Nao muda billing_status. Se for pagamento efetivo, last_payment_date
+    // ainda avanca (o dinheiro entrou mesmo) — GREATEST garante que a data
+    // nunca retrocede. GREATEST ignora NULLs no Postgres.
+    var stale = await isStaleStatusEvent(company.id, payment);
+    if (stale) {
+      if (isPaid && payment.paymentDate) {
+        await db.query(
+          `UPDATE companies
+              SET last_payment_date = GREATEST(last_payment_date, $1::date),
+                  updated_at = NOW()
+            WHERE id = $2`,
+          [payment.paymentDate, company.id]
+        );
+      }
+      await logWebhookEvent(company.id, event, payment);
+      console.warn('[WEBHOOK] Company ' + company.id + ' — evento STALE ignorado pra status: ' +
+                   event + ' (cobranca venc ' + payment.dueDate + ' e mais antiga que a que definiu o estado atual). ' +
+                   'billing_status mantido em ' + prevStatus);
+      return res.status(200).json({
+        received: true,
+        handled: true,
+        status_changed: false,
+        status: prevStatus,
+        stale_event: event,
+        stale_due_date: payment.dueDate || null,
+      });
+    }
+
     // last_payment_date so avanca em pagamento efetivo; nos demais eventos
     // (OVERDUE, REFUNDED, CHARGEBACK) preserva o que ja estava la.
     // next_billing_date nunca e sobrescrito por NULL.
-    var isPaid = !!PAID_EVENTS[event];
     await db.query(
       `UPDATE companies
           SET billing_status    = $1,
