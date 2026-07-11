@@ -855,6 +855,10 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
 //   - karate_payment_intents.annuity_history_id → SET NULL (não bloqueia).
 //   - companies.sensei_practitioner_id → ON DELETE SET NULL (migration 193,
 //     não bloqueia a exclusão do dojô).
+//   - karate_dojo_roster_events / karate_dojo_roster_validation (tabelas do
+//     roster, 10/07/2026) NÃO têm FK pra companies — não bloqueiam o delete,
+//     mas ficam órfãs se não forem apagadas explicitamente. Apagadas via
+//     safeRosterWrite() (best-effort, 42P01) antes do DELETE FROM companies.
 router.delete('/:dojoId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, dojoId } = req.params;
   const cascade = String(req.query.cascade || '').toLowerCase() === 'true';
@@ -951,6 +955,22 @@ router.delete('/:dojoId', ...guards.staffWrite(), async (req, res) => {
     //    competition_entries, event_enrollments, transfers via practitioner_id,
     //    credit/dental/etc.) caem por CASCADE definido no schema.
     await client.query(`DELETE FROM customers WHERE dojo_id = $1`, [dojoId]);
+
+    // 5b) Tabelas novas do roster (karate_dojo_roster_events/-validation,
+    //     escritas por cascadeInactivateDojo/cascadeReactivateDojo no PATCH).
+    //     NÃO têm FK pra companies, então não bloqueiam a exclusão — mas sem
+    //     esse DELETE explícito ficam órfãs (dojo_id apontando pra uma
+    //     company que não existe mais). safeRosterWrite() é o mesmo helper
+    //     best-effort (SAVEPOINT + 42P01) já usado no cascade do PATCH: se as
+    //     tabelas ainda não existirem (deploy parcial), ignora e segue — a
+    //     cascata principal (o núcleo, acima) não pode ser derrubada por
+    //     tabelas auxiliares de auditoria/estado.
+    await safeRosterWrite(client, 'delete karate_dojo_roster_events', () => client.query(
+      `DELETE FROM karate_dojo_roster_events WHERE dojo_id = $1`, [dojoId]
+    ));
+    await safeRosterWrite(client, 'delete karate_dojo_roster_validation', () => client.query(
+      `DELETE FROM karate_dojo_roster_validation WHERE dojo_id = $1`, [dojoId]
+    ));
 
     // 6) Por fim, a linha de companies (o dojô).
     const del = await client.query(
