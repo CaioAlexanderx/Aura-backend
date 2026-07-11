@@ -194,7 +194,7 @@ async function isStaleStatusEvent(companyId, payment) {
       [companyId, STATUS_EVENTS]
     );
 
-    var lastDue = rows[0］ && rows[0].due_date ? String(rows[0].due_date) : null;
+    var lastDue = rows[0] && rows[0].due_date ? String(rows[0].due_date) : null;
     if (!lastDue) return false;
 
     // ISO 'YYYY-MM-DD' → comparacao lexicografica == cronologica.
