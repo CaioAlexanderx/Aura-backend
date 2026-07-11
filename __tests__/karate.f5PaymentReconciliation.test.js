@@ -4,12 +4,16 @@
 // Cobertura:
 //   1. karatePaymentProvider — sem config de federação, provider default
 //      continua static_brcode (gate: sem credenciais, nada muda).
-//   2. POST /webhooks/karate-payments
-//      a) confirma pagamento em evento pago (source='webhook')
-//      b) replay do MESMO evento é idempotente — não reaplica a baixa
-//      c) token inválido (federação com segredo configurado) → 401
-//      d) evento desconhecido → 200 no-op (nunca 500)
-//      e) sem nenhum segredo configurado (federação nem env) → aceita
+//   2. POST /webhooks/karate-payments (fail-closed — ver PR #360)
+//      a) SEM segredo configurado (federação nem env) + evento de
+//         pagamento válido na forma → 401, ZERO mutação (nenhuma parcela
+//         confirmada). Este é o teste que impede a regressão de
+//         segurança: ausência de segredo NUNCA pode confirmar pagamento.
+//      b) segredo configurado (federação) + assinatura inválida → 401,
+//         zero mutação, sem vazar detalhe do segredo na resposta.
+//      c) segredo configurado + assinatura válida → confirma o intent;
+//         replay do MESMO evento é idempotente (não reaplica a baixa).
+//      d) evento desconhecido + assinatura válida → 200 no-op (nunca 500).
 //
 // O /confirm manual (POST /financial/payments/:intentId/confirm) NÃO
 // muda de comportamento após o refactor pra karatePaymentService — a
@@ -88,47 +92,48 @@ describe('POST /webhooks/karate-payments', () => {
   beforeAll(() => { app = buildWebhookApp(); });
   beforeEach(() => { jest.clearAllMocks(); });
 
-  it('evento desconhecido -> 200 no-op (nunca 500)', (done) => {
+  const FEDERATION_SECRET = 'segredo-federacao-xyz';
+
+  it('(a) SEM segredo configurado (federação nem env) + evento de pagamento válido: 401, ZERO mutação', (done) => {
+    // Intent existe e está pendente — evento é PAYMENT_CONFIRMED, uma
+    // cobrança "de verdade". Mesmo assim, sem NENHUM segredo (nem
+    // federação, nem env), o gate tem que recusar ANTES de qualquer
+    // efeito colateral. Isto é o que impede que qualquer POST forjado na
+    // internet confirme uma parcela de anuidade.
     db.query
-      .mockResolvedValueOnce({ rows: [] })  // _findIntentByProviderPaymentId (nao encontrado)
-      .mockResolvedValue({ rows: [] });     // qualquer outra query (log best-effort)
-
-    request(app)
-      .post('/webhooks/karate-payments')
-      .send({ event: 'PAYMENT_OVERDUE', payment: { id: PROVIDER_PAYMENT_ID } })
-      .end((err, res) => {
-        if (err) return done(err);
-        expect(res.status).toBe(200);
-        expect(res.body.received).toBe(true);
-        expect(res.body.handled).toBe(false);
-        expect(res.body.event_ignored).toBe('PAYMENT_OVERDUE');
-        done();
-      });
-  });
-
-  it('sem nenhum segredo configurado (federação nem env): aceita sem exigir token', (done) => {
-    db.query
-      .mockResolvedValueOnce({ rows: [] })  // find intent -> nao encontrado (payload simples)
-      .mockResolvedValue({ rows: [] });
-
-    request(app)
-      .post('/webhooks/karate-payments')
-      .send({ event: 'PAYMENT_OVERDUE', payment: { id: 'unknown-id' } })
-      // nenhum header de token enviado de proposito
-      .end((err, res) => {
-        if (err) return done(err);
-        expect(res.status).toBe(200);
-        done();
-      });
-  });
-
-  it('token invalido quando a federação tem segredo configurado -> 401 (sem vazar detalhe)', (done) => {
-    db.query
-      .mockResolvedValueOnce({  // find intent -> encontrado, aponta pra federação com segredo
+      .mockResolvedValueOnce({ // 1) find intent by provider payment id
         rows: [{ id: INTENT_ID, federation_id: FED_ID, status: 'pending', provider: 'dynamic_provider' }],
       })
-      .mockResolvedValueOnce({  // resolve segredo da federação
-        rows: [{ karate_payment_provider_webhook_secret: 'segredo-federacao-xyz' }],
+      .mockResolvedValueOnce({ // 2) resolve segredo da federação -> nenhum configurado
+        rows: [{ karate_payment_provider_webhook_secret: null }],
+      });
+
+    request(app)
+      .post('/webhooks/karate-payments')
+      .send({ event: 'PAYMENT_CONFIRMED', payment: { id: PROVIDER_PAYMENT_ID } })
+      // nenhum header de token enviado de propósito — não há segredo pra apresentar
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(401);
+        // Prova de zero mutação: confirmIntent só abre transação via
+        // db.connect() (BEGIN/UPDATE/COMMIT). Se o gate barrou antes
+        // disso, db.connect nunca é chamado — nenhuma parcela é tocada.
+        expect(db.connect).not.toHaveBeenCalled();
+        // Só as 2 queries de lookup (find intent + resolver segredo) —
+        // nenhum INSERT em webhook_logs, nenhum UPDATE em
+        // karate_payment_intents / karate_annuity_installments / transactions.
+        expect(db.query).toHaveBeenCalledTimes(2);
+        done();
+      });
+  });
+
+  it('(b) segredo configurado (federação) + assinatura inválida: 401, zero mutação, sem vazar o segredo', (done) => {
+    db.query
+      .mockResolvedValueOnce({ // find intent -> encontrado, aponta pra federação com segredo
+        rows: [{ id: INTENT_ID, federation_id: FED_ID, status: 'pending', provider: 'dynamic_provider' }],
+      })
+      .mockResolvedValueOnce({ // resolve segredo da federação
+        rows: [{ karate_payment_provider_webhook_secret: FEDERATION_SECRET }],
       });
 
     request(app)
@@ -140,11 +145,40 @@ describe('POST /webhooks/karate-payments', () => {
         expect(res.status).toBe(401);
         expect(res.body.error).toBeTruthy();
         expect(JSON.stringify(res.body).toLowerCase()).not.toMatch(/segredo-federacao-xyz/);
+        expect(db.connect).not.toHaveBeenCalled();
+        expect(db.query).toHaveBeenCalledTimes(2);
         done();
       });
   });
 
-  describe('evento pago confirma o intent (source=webhook) e replay é idempotente', () => {
+  it('(d) evento desconhecido + assinatura válida: 200 no-op (nunca 500)', (done) => {
+    db.query
+      .mockResolvedValueOnce({ // find intent -> encontrado, federação com segredo
+        rows: [{ id: INTENT_ID, federation_id: FED_ID, status: 'pending', provider: 'dynamic_provider' }],
+      })
+      .mockResolvedValueOnce({ // resolve segredo da federação
+        rows: [{ karate_payment_provider_webhook_secret: FEDERATION_SECRET }],
+      })
+      .mockResolvedValueOnce({ rows: [] }); // log best-effort (webhook_logs)
+
+    request(app)
+      .post('/webhooks/karate-payments')
+      .set('X-Webhook-Token', FEDERATION_SECRET)
+      .send({ event: 'PAYMENT_OVERDUE', payment: { id: PROVIDER_PAYMENT_ID } })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.received).toBe(true);
+        expect(res.body.handled).toBe(false);
+        expect(res.body.event_ignored).toBe('PAYMENT_OVERDUE');
+        // Assinatura válida mas evento não é de pagamento -> nunca abre
+        // transação de confirmação.
+        expect(db.connect).not.toHaveBeenCalled();
+        done();
+      });
+  });
+
+  describe('(c) segredo configurado + assinatura válida: confirma o intent (source=webhook) e replay é idempotente', () => {
     const INTENT_ROW = {
       id: INTENT_ID,
       federation_id: FED_ID,
@@ -174,8 +208,8 @@ describe('POST /webhooks/karate-payments', () => {
     it('1a entrega: confirma o pagamento e baixa a transaction', (done) => {
       // 1) find intent by provider payment id
       db.query.mockResolvedValueOnce({ rows: [INTENT_ROW] });
-      // 2) resolve segredo da federação (nenhum configurado)
-      db.query.mockResolvedValueOnce({ rows: [{ karate_payment_provider_webhook_secret: null }] });
+      // 2) resolve segredo da federação (configurado)
+      db.query.mockResolvedValueOnce({ rows: [{ karate_payment_provider_webhook_secret: FEDERATION_SECRET }] });
       // 3) log best-effort (webhook_logs) — fire and forget
       db.query.mockResolvedValueOnce({ rows: [] });
 
@@ -190,6 +224,7 @@ describe('POST /webhooks/karate-payments', () => {
 
       request(app)
         .post('/webhooks/karate-payments')
+        .set('X-Webhook-Token', FEDERATION_SECRET)
         .send({ event: 'PAYMENT_CONFIRMED', payment: { id: PROVIDER_PAYMENT_ID } })
         .end((err, res) => {
           if (err) return done(err);
@@ -206,7 +241,7 @@ describe('POST /webhooks/karate-payments', () => {
     it('replay do MESMO evento: nao reaplica a baixa (idempotente, 200)', (done) => {
       // Mesma sequência de lookup, mas agora o intent já está 'paid'.
       db.query.mockResolvedValueOnce({ rows: [{ ...INTENT_ROW, status: 'paid' }] });
-      db.query.mockResolvedValueOnce({ rows: [{ karate_payment_provider_webhook_secret: null }] });
+      db.query.mockResolvedValueOnce({ rows: [{ karate_payment_provider_webhook_secret: FEDERATION_SECRET }] });
       db.query.mockResolvedValueOnce({ rows: [] });
 
       const mockClient = { query: jest.fn(), release: jest.fn() };
@@ -218,6 +253,7 @@ describe('POST /webhooks/karate-payments', () => {
 
       request(app)
         .post('/webhooks/karate-payments')
+        .set('X-Webhook-Token', FEDERATION_SECRET)
         .send({ event: 'PAYMENT_CONFIRMED', payment: { id: PROVIDER_PAYMENT_ID } })
         .end((err, res) => {
           if (err) return done(err);

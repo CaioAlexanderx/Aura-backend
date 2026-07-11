@@ -4,14 +4,21 @@
 // Montado em /webhooks/karate-payments (PÚBLICO, sem requireAuth — o
 // provedor de pagamento não tem sessão de usuário Aura).
 //
-// GATE: sem nenhuma credencial configurada (nem por federação em
-// digital_channel_config, nem via env), este endpoint nunca recebe
-// tráfego real — só o provider dinâmico (não o static_brcode, que não
-// tem webhook) chama isso, e o provider dinâmico só é criado quando há
-// credenciais. Mesmo assim, o handler abaixo nunca presume que uma
-// credencial existe: sem segredo configurado, o comportamento (aceitar
-// e logar) segue o MESMO padrão já adotado pelos outros webhooks públicos
-// deste projeto.
+// GATE (fail-closed): sem nenhuma credencial configurada (nem por
+// federação em digital_channel_config, nem via env), este endpoint NUNCA
+// processa o evento — responde 401 sem tocar em nenhuma tabela. Rota
+// pública cujo efeito é dar baixa em parcela de anuidade: ausência de
+// segredo tem que significar "recusar", nunca "confiar e processar" — do
+// contrário qualquer POST forjado na internet confirmaria pagamento.
+// Aceitar sem segredo é o comportamento adotado por outros webhooks
+// públicos deste projeto (ver corpo do PR #360 para a lista) — isso NÃO
+// é uma convenção a seguir aqui, é um risco conhecido nos outros,
+// deliberadamente fora do escopo desta rota.
+//
+// Resposta escolhida pra "sem segredo configurado": 401, idêntica (mesmo
+// status e mesmo corpo) à resposta de "segredo configurado mas token
+// inválido" — de propósito, pra não vazar ao chamador se o servidor tem
+// ou não uma credencial configurada pra essa federação.
 //
 // Contrato de entrada (mesmo vocabulário já usado internamente pelo
 // stub de provider dinâmico — services/karatePaymentProvider.js — e
@@ -110,14 +117,19 @@ router.post('/', async (req, res) => {
     const federationSecret = await _resolveFederationWebhookSecret(intent && intent.federation_id);
     const expectedSecret = federationSecret || GLOBAL_WEBHOOK_SECRET;
 
-    if (expectedSecret) {
-      const token = _extractToken(req);
-      if (!token || !_timingSafeMatch(token, expectedSecret)) {
-        console.warn('[karateWebhooks] token invalido ou ausente — rejeitado');
-        return res.status(401).json({ error: 'Não autorizado' });
-      }
-    } else {
-      console.warn('[karateWebhooks] nenhum segredo configurado (federação nem env) — aceitando sem validar');
+    // Fail-closed: sem segredo (nem por federação, nem env), a requisição é
+    // recusada ANTES de qualquer efeito colateral — mesma resposta (status
+    // e corpo) do caso "token inválido" logo abaixo, de propósito, pra não
+    // vazar se o servidor tem ou não uma credencial configurada.
+    if (!expectedSecret) {
+      console.warn('[karateWebhooks] nenhum segredo configurado (federação nem env) — recusando (fail-closed, zero mutação)');
+      return res.status(401).json({ error: 'Não autorizado' });
+    }
+
+    const token = _extractToken(req);
+    if (!token || !_timingSafeMatch(token, expectedSecret)) {
+      console.warn('[karateWebhooks] token invalido ou ausente — rejeitado');
+      return res.status(401).json({ error: 'Não autorizado' });
     }
 
     if (!event || !PAID_EVENTS.has(event)) {
