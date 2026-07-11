@@ -222,6 +222,88 @@ router.get('/', ...guards.read(), async (req, res) => {
   }
 });
 
+// ── GET /federation/:id/dojos/export ────────────────────────
+// 11/07/2026: export de dojôs (mesmo padrão do export de praticantes em
+// karatePractitioners.js) — aceita os MESMOS filtros opcionais da listagem
+// (GET /): region, affiliation_model, q e status. Sem filtros → exporta
+// todos os dojôs da federação.
+// ATENÇÃO ordem de rotas: precisa ser registrada ANTES de GET /:dojoId,
+// senão a string literal 'export' seria capturada como :dojoId (mesmo
+// cuidado documentado em karatePractitioners.js para /practitioners/export).
+// status é CALCULADO em JS via computeDojoStatus (não é coluna simples) —
+// para bater exatamente com o que a tela mostra, buscamos todas as linhas
+// que casam os demais filtros, computamos o status em JS com a MESMA
+// função usada pela listagem, e só então filtramos por status (igual ao
+// fast path condicional já usado em GET /).
+router.get('/export', ...guards.read(), async (req, res) => {
+  const federationId = req.params.id;
+  const { region, status, affiliation_model, q } = req.query;
+
+  try {
+    const conditions = [`c.federation_id = $1`, `c.vertical_active = 'karate_dojo'`];
+    const params = [federationId];
+    let n = 2;
+
+    if (region) {
+      conditions.push(`c.region ILIKE $${n}`);
+      params.push(`%${region}%`);
+      n++;
+    }
+    if (affiliation_model) {
+      conditions.push(`c.affiliation_model = $${n}`);
+      params.push(affiliation_model);
+      n++;
+    }
+    if (q) {
+      conditions.push(`(c.name ILIKE $${n} OR c.fpkt_affiliation_id ILIKE $${n})`);
+      params.push(`%${q}%`);
+      n++;
+    }
+
+    const where = `WHERE ${conditions.join(' AND ')}`;
+
+    const { rows } = await db.query(
+      `SELECT c.id, c.name, c.cnpj, c.region, c.fpkt_affiliation_id,
+              c.affiliation_model, c.affiliation_since, c.phone, c.email,
+              c.address_city, c.address_state, c.is_active,
+              COUNT(cu.id) AS practitioner_count,
+              COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
+       FROM companies c
+       LEFT JOIN customers cu ON cu.dojo_id = c.id
+       ${where}
+       GROUP BY c.id
+       ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
+      params
+    );
+
+    let dojos = rows.map(r => ({
+      nome: r.name || null,
+      codigo_fpkt: r.fpkt_affiliation_id || null,
+      status: computeDojoStatus(r.affiliation_model, r.affiliation_since, r.is_active),
+      regiao: r.region || null,
+      modelo_filiacao: r.affiliation_model || null,
+      cnpj: r.cnpj || null,
+      telefone: r.phone || null,
+      email: r.email || null,
+      cidade: r.address_city || null,
+      estado: r.address_state || null,
+      total_praticantes: parseInt(r.practitioner_count, 10) || 0,
+      praticantes_ativos: parseInt(r.active_practitioner_count, 10) || 0,
+    }));
+
+    // status é derivado (computeDojoStatus), não coluna: filtra em JS após
+    // computar, para bater exatamente com o que a listagem exibe.
+    if (status) {
+      dojos = dojos.filter(d => d.status === status);
+    }
+
+    res.json({ total: dojos.length, dojos });
+  } catch (err) {
+    console.error('[karateDojos] export error:', err.message);
+    res.status(500).json({ error: 'Erro ao exportar dojôs' });
+  }
+});
+
 // ── POST /federation/:id/dojos ──────────────────────────────
 router.post('/', ...guards.staffWrite(), async (req, res) => {
   const federationId = req.params.id;
