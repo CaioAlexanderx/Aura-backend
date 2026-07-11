@@ -190,6 +190,44 @@ router.get('/', ...guards.read(), async (req, res) => {
   }
 });
 
+// ── GET /federation/:id/practitioners/export ────────────────
+router.get('/export', ...guards.read(), async (req, res) => {
+  const federationId = req.params.id;
+  try {
+    const { rows } = await db.query(
+      `SELECT cu.name, cu.karate_registration_number, cu.cpf_cnpj, cu.rg,
+              cu.birth_date, cu.email, cu.phone, cu.is_active,
+              COALESCE(comp.trade_name, comp.legal_name) AS dojo_name,
+              comp.fpkt_affiliation_id AS dojo_fpkt,
+              cb.belt_name, cb.belt_level
+       FROM customers cu
+       LEFT JOIN companies comp ON comp.id = cu.dojo_id
+       LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = cu.federation_id
+       WHERE cu.federation_id = $1 AND cu.is_guest = false
+       ORDER BY COALESCE(comp.trade_name, comp.legal_name) NULLS LAST, cu.name ASC`,
+      [federationId]
+    );
+    const isoDate = (v) => { if (!v) return null; try { return new Date(v).toISOString().slice(0,10); } catch(_) { return null; } };
+    const practitioners = rows.map((r) => ({
+      nome: r.name || null,
+      numero_fpkt: r.karate_registration_number || null,
+      cpf: r.cpf_cnpj || null,
+      rg: r.rg || null,
+      nascimento: isoDate(r.birth_date),
+      email: r.email || null,
+      telefone: r.phone || null,
+      dojo: r.dojo_name || null,
+      dojo_fpkt: r.dojo_fpkt || null,
+      faixa: r.belt_name || r.belt_level || null,
+      situacao: r.is_active ? 'Ativo' : 'Inativo',
+    }));
+    res.json({ total: practitioners.length, practitioners });
+  } catch (err) {
+    console.error('[karatePractitioners] export error:', err.message);
+    res.status(500).json({ error: 'Erro ao exportar praticantes' });
+  }
+});
+
 // ── POST /federation/:id/practitioners ─────────────────────
 router.post('/', ...guards.staffWrite(), async (req, res) => {
   const federationId = req.params.id;
