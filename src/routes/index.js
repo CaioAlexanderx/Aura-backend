@@ -294,4 +294,9 @@ router.use('/federation/:id', require('./karateDojo'));
 router.use('/federation/:id', require('./karatePromoBanners'));
 router.use('/federation/:id', require('./karateEventCertificates'));
 
+// -- AURA KARATE -- Fase 6: Painel + Saude da rede (standing agregado)
+// GET /federation/:id/standing/summary -- KPIs de praticantes/pretas/dojos
+// derivados das views karate_member_standing / karate_dojo_standing.
+router.use('/federation/:id/standing', require('./karateStandingSummary'));
+
 module.exports = router;
