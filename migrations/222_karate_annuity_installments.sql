@@ -236,7 +236,16 @@ WHERE h.practitioner_id IS NOT NULL
 -- (f) nome canônico novo — karate_dojo_annuity_history ficou "mentirosa"
 -- (também guarda linhas de praticante). Código novo deve preferir esta view.
 -- ============================================================
-CREATE OR REPLACE VIEW karate_annuities AS
+-- DROP+CREATE (nao CREATE OR REPLACE): elimina de vez o 42P16 (nao e possivel
+-- mudar tipo de coluna de saida existente via REPLACE) independentemente do
+-- tipo/ordem de colunas herdado do ambiente (prod teve views aplicadas via MCP
+-- fora do repo, com tipos divergentes do que este arquivo produzia). Atomico
+-- dentro da transacao da migration. Confirmado via pg_depend que nenhuma outra
+-- view depende de karate_annuities/karate_dojo_standing/karate_member_standing
+-- -- sem necessidade de CASCADE. GRANTs sao reemitidos no fim do arquivo porque
+-- DROP VIEW descarta as permissoes concedidas antes.
+DROP VIEW IF EXISTS karate_annuities;
+CREATE VIEW karate_annuities AS
 SELECT * FROM karate_dojo_annuity_history;
 
 -- ============================================================
@@ -269,13 +278,26 @@ SELECT * FROM karate_dojo_annuity_history;
 -- ⚠️ POST-MORTEM (aplicação em 2026-07-11): CREATE OR REPLACE VIEW não permite
 -- mudar o tipo de uma coluna de SAÍDA já existente. SUM(numeric(12,2)) no
 -- Postgres devolve numeric sem precisão/escala — quebrava paid_amount
--- (42P16). Cast explícito ::numeric(12,2) em toda coluna agregada que já
--- existia na view antes desta migration; colunas novas também levam
--- numeric(12,2) por coerência (exceto valor_em_aberto de
--- karate_member_standing, cujo tipo pré-existente era numeric sem
--- precisão — preservado como estava, não "corrigido" para não quebrar o
--- contrato).
-CREATE OR REPLACE VIEW karate_dojo_standing AS
+-- (42P16). Cast explícito ::numeric(12,2) em toda coluna monetária agregada
+-- nas três views, sem exceção.
+--
+-- ⚠️ POST-MORTEM 3 (CI, mesmo dia): mesmo com os casts acima, o CI (que
+-- reconstrói o banco do zero a partir de migrations/*.sql) quebrou de novo
+-- com o MESMO 42P16 em annuity_amount — porque essa migration já tinha sido
+-- aplicada em produção via Supabase MCP com um cast diferente do que estava
+-- neste arquivo (drift entre repo e prod: o tipo "correto" varia por
+-- ambiente dependendo do histórico de CREATE OR REPLACE já aplicado nele).
+-- Cast coluna-a-coluna não resolve a classe do problema — sempre existe a
+-- possibilidade de o ambiente já ter um tipo diferente do que o arquivo
+-- produz. A correção definitiva é DROP VIEW IF EXISTS + CREATE VIEW (em vez
+-- de CREATE OR REPLACE): sem coluna de saída pré-existente, não há tipo para
+-- "mudar" — 42P16 deixa de ser possível independentemente do estado do
+-- ambiente. Os dois ambientes (repo/CI e prod) convergem no mesmo tipo
+-- (numeric(12,2) em toda coluna monetária, inclusive valor_em_aberto de
+-- karate_member_standing, que antes era numeric sem precisão/escala em
+-- prod). DROP VIEW descarta GRANTs — reemitidos no fim do arquivo.
+DROP VIEW IF EXISTS karate_dojo_standing;
+CREATE VIEW karate_dojo_standing AS
 SELECT
   c.id AS dojo_id,
   c.federation_id,
@@ -353,7 +375,8 @@ WHERE c.federation_id IS NOT NULL;
 --   valor_em_aberto      = SUM de parcelas NÃO pagas (vencidas ou não).
 --   valor_atrasado       = SUM de parcelas NÃO pagas E já vencidas (due_date
 --                          <= CURRENT_DATE).
-CREATE OR REPLACE VIEW karate_member_standing AS
+DROP VIEW IF EXISTS karate_member_standing;
+CREATE VIEW karate_member_standing AS
 SELECT
   c.id AS student_id,
   c.federation_id,
@@ -382,7 +405,7 @@ SELECT
     WHEN cb.belt_level = 'preta'::text AND COALESCE(c.is_active, true)
          AND fin.tx_id IS NOT NULL THEN COALESCE(fin.valor_em_aberto, 0::numeric)
     ELSE 0::numeric
-  END)::numeric AS valor_em_aberto,
+  END)::numeric(12,2) AS valor_em_aberto,
   fin.paid_amount::numeric(12,2) AS annuity_paid_amount,
   (CASE
     WHEN cb.belt_level = 'preta'::text AND COALESCE(c.is_active, true)
@@ -409,6 +432,31 @@ LEFT JOIN LATERAL (
   ORDER BY (bool_and(i.status = 'paid')) DESC, MIN(i.due_date) DESC NULLS LAST
   LIMIT 1
 ) fin ON true;
+
+-- ============================================================
+-- GRANTs -- reemitidos porque DROP VIEW descarta permissoes concedidas antes.
+-- Confirmado em producao (information_schema.role_table_grants) que as tres
+-- views tinham GRANT ALL (SELECT/INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/
+-- TRIGGER) para anon, authenticated, service_role e postgres (owner).
+--
+-- Condicional por role (pg_roles): em producao (Supabase) esses roles
+-- existem e os GRANTs sao aplicados; no CI (container postgres:16 generico,
+-- sem stack Supabase) nenhum desses roles existe -- GRANT direto para um
+-- role inexistente e erro fatal (42704), quebraria a migration do zero.
+-- Idempotente: GRANT pode ser reemitido sem problema.
+-- ============================================================
+DO $$
+DECLARE
+  r text;
+BEGIN
+  FOREACH r IN ARRAY ARRAY['anon', 'authenticated', 'service_role', 'postgres'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+      EXECUTE format('GRANT ALL ON TABLE karate_annuities TO %I', r);
+      EXECUTE format('GRANT ALL ON TABLE karate_dojo_standing TO %I', r);
+      EXECUTE format('GRANT ALL ON TABLE karate_member_standing TO %I', r);
+    END IF;
+  END LOOP;
+END $$;
 
 -- ============================================================
 -- FIM DA MIGRATION 222
