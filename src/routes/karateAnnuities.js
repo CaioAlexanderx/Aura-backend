@@ -68,7 +68,9 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
   const page     = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 25));
   const offset   = (page - 1) * pageSize;
-  const year     = new Date().getFullYear().toString();
+  const year     = (req.query.year && /^\d{4}$/.test(String(req.query.year)))
+    ? String(req.query.year)
+    : new Date().getFullYear().toString();
 
   try {
     // Busca dojôs + sua cobrança do ano (via karate_dojo_annuity_history)
@@ -102,6 +104,10 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
         fpkt_affiliation_id: d.fpkt_affiliation_id || null,
         whatsapp: d.whatsapp || null,
         annuity_id: d.annuity_id || null,
+        // annuity_history_id: alias idêntico a annuity_id — mantido por
+        // compatibilidade com os payloads de PATCH/pix que já usam esse nome.
+        annuity_history_id: d.annuity_id || null,
+        transaction_id: d.transaction_id || null,
         amount: d.amount ? parseFloat(d.amount) : 0,
         reference_period: d.reference_period || year,
         due_date: d.due_date || null,
@@ -166,7 +172,7 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
 
     // Verifica dojô
     const dojoRes = await client.query(
-      `SELECT id, name FROM companies WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo' LIMIT 1`,
+      `SELECT id, name FROM companies WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' LIMIT 1`,
       [dojoId, federationId]
     );
     if (!dojoRes.rows.length) {
@@ -718,7 +724,7 @@ router.post('/annuities/dojos/:dojoId/pay', ...guards.adminOnly(), async (req, r
     // Verifica dojô e escopo
     const dojoRes = await client.query(
       `SELECT id, name FROM companies
-       WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo'
+       WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo'
        LIMIT 1`,
       [dojoId, federationId]
     );
@@ -1146,7 +1152,9 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
   const page     = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 25));
   const offset   = (page - 1) * pageSize;
-  const year     = new Date().getFullYear().toString();
+  const year     = (req.query.year && /^\d{4}$/.test(String(req.query.year)))
+    ? String(req.query.year)
+    : new Date().getFullYear().toString();
 
   try {
     // Praticantes + sua cobrança anual (transactions com reference_type=customer)
@@ -1199,6 +1207,7 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
         full_name: r.full_name,
         karate_registration_number: r.karate_registration_number || null,
         whatsapp: r.whatsapp || null,
+        transaction_id: r.transaction_id || null,
         amount: r.amount ? parseFloat(r.amount) : 0,
         reference_period: year,
         due_date: r.due_date || null,
