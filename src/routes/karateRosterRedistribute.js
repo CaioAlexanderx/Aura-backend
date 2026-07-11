@@ -20,6 +20,20 @@
 // (dojo_id = :dojoId). Decisões para praticantes fora do dojô (já
 // transferidos/removidos por outra requisição concorrente, ou id inválido)
 // entram em skipped[] e nunca são tocadas.
+//
+// 11/07/2026 — Reescrito para processamento EM LOTE (set-based). O número
+// de queries agora é CONSTANTE (não cresce com o nº de praticantes):
+// dojôs grandes (ex.: 667 praticantes) faziam ~2.500 queries numa única
+// transação e estouravam o timeout do cliente (10s). Agrupamos as decisões
+// em memória por destino e usamos ANY($1::uuid[]) + INSERT ... SELECT
+// unnest(...) para mover/inativar/gravar histórico em lote. As mutações
+// (UPDATE customers) seguem escopadas estritamente a dojo_id = :dojoId
+// (origem), igual ao código anterior. A trava/validação de praticantes
+// (SELECT ... FOR UPDATE) permanece escopada a federation_id — não a
+// dojo_id — de propósito: é assim que o código anterior distinguia
+// PRACTITIONER_NOT_FOUND (id nem existe na federação) de
+// NOT_IN_TARGET_DOJO (existe, mas está em outro dojô); estreitar essa
+// query para dojo_id perderia essa distinção.
 // ============================================================
 'use strict';
 
@@ -49,7 +63,8 @@ async function safeRosterWrite(client, label, fn) {
 // Reimplementação inline da cascata de karateDojos.js.cascadeInactivateDojo
 // (não exportada de lá): snapshot de quem ainda está ativo no dojô, evento
 // 'inactivate_cascade' (affected = quem estava ativo) e desativa esses
-// praticantes. Roda DEPOIS das decisões — só pega quem sobrou.
+// praticantes. Roda DEPOIS das decisões — só pega quem sobrou. Já era
+// O(1) query (não depende de N) — mantida como estava.
 async function cascadeInactivateRemaining(client, { dojoId, federationId, actorId }) {
   const snap = await client.query(
     `SELECT id, is_active FROM customers WHERE dojo_id = $1`,
@@ -84,16 +99,14 @@ router.post('/:dojoId/redistribute', ...guards.staffWrite(), async (req, res) =>
   if (!decisions) {
     return res.status(422).json({ error: 'Campo decisions deve ser um array', code: 'VALIDATION_ERROR' });
   }
+  // Validação estrutural mínima (aborta a requisição inteira — não há
+  // student_id/action confiável para reportar como skipped). A ausência de
+  // destination_dojo_id num "transfer" NÃO aborta mais: vira skipped
+  // INVALID_DESTINATION_DOJO item a item (ver loop de agrupamento abaixo).
   for (const d of decisions) {
     if (!d || typeof d !== 'object' || !d.student_id || !['transfer', 'inactivate'].includes(d.action)) {
       return res.status(422).json({
         error: 'Cada item de decisions precisa de student_id e action ("transfer" ou "inactivate")',
-        code: 'VALIDATION_ERROR',
-      });
-    }
-    if (d.action === 'transfer' && !d.destination_dojo_id) {
-      return res.status(422).json({
-        error: 'Decisão de transfer exige destination_dojo_id',
         code: 'VALIDATION_ERROR',
       });
     }
@@ -115,127 +128,196 @@ router.post('/:dojoId/redistribute', ...guards.staffWrite(), async (req, res) =>
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Dojô não encontrado', code: 'NOT_FOUND' });
     }
+    const originDojoName = dojoRes.rows[0].name;
 
     const skipped = [];
     const appliedDecisions = [];
     let transferredCount = 0;
     let inactivatedCount = 0;
 
-    // Cache de nomes de dojôs de destino já validados nesta requisição
-    const destDojoCache = new Map();
+    // Dedup por student_id — a primeira decisão da lista prevalece (um
+    // client bem-comportado nunca deveria mandar duplicata; se mandar,
+    // decisões repetidas para o mesmo praticante são ignoradas em vez de
+    // reaplicadas duas vezes no mesmo lote).
+    const seenStudents = new Set();
+    const uniqueDecisions = [];
+    for (const d of decisions) {
+      const key = String(d.student_id);
+      if (seenStudents.has(key)) continue;
+      seenStudents.add(key);
+      uniqueDecisions.push(d);
+    }
 
-    for (const decision of decisions) {
-      const studentId = decision.student_id;
+    // 2) UMA query trava + valida TODOS os praticantes envolvidos.
+    // Escopo = federation_id (não dojo_id): é o que permite diferenciar
+    // PRACTITIONER_NOT_FOUND de NOT_IN_TARGET_DOJO, igual ao comportamento
+    // anterior por-item (SELECT ... WHERE id = $1 AND federation_id = $2).
+    const allStudentIds = uniqueDecisions.map((d) => d.student_id);
+    const pracRes = allStudentIds.length
+      ? await client.query(
+          `SELECT id, dojo_id FROM customers
+            WHERE id = ANY($1::uuid[]) AND federation_id = $2
+            FOR UPDATE`,
+          [allStudentIds, federationId]
+        )
+      : { rows: [] };
+    const pracDojoById = new Map(pracRes.rows.map((r) => [String(r.id), r.dojo_id]));
 
-      // Só mexe em quem está ATUALMENTE no dojô alvo (evita corrida/duplo-clique
-      // e decisões para praticantes já movidos por outra requisição).
-      const pracRes = await client.query(
-        `SELECT id, name, dojo_id, is_active FROM customers
-          WHERE id = $1 AND federation_id = $2
-          FOR UPDATE`,
-        [studentId, federationId]
-      );
-      if (!pracRes.rows.length) {
+    // Agrupamento em memória: transferGroups (destino -> student_ids) e
+    // inactivateIds. Decisões inválidas já viram skipped aqui, sem tocar o
+    // banco de novo.
+    const transferGroups = new Map(); // destination_dojo_id -> { destinationDojoId, studentIds: [] }
+    const inactivateIds = [];
+
+    for (const d of uniqueDecisions) {
+      const studentId = d.student_id;
+      const key = String(studentId);
+
+      if (!pracDojoById.has(key)) {
         skipped.push({ student_id: studentId, reason: 'PRACTITIONER_NOT_FOUND' });
         continue;
       }
-      const prac = pracRes.rows[0];
-      if (String(prac.dojo_id || '') !== String(dojoId)) {
+      if (String(pracDojoById.get(key) || '') !== String(dojoId)) {
         skipped.push({ student_id: studentId, reason: 'NOT_IN_TARGET_DOJO' });
         continue;
       }
 
-      if (decision.action === 'transfer') {
-        const destinationDojoId = decision.destination_dojo_id;
-
+      if (d.action === 'transfer') {
+        const destinationDojoId = d.destination_dojo_id;
+        if (!destinationDojoId) {
+          skipped.push({ student_id: studentId, reason: 'INVALID_DESTINATION_DOJO' });
+          continue;
+        }
         if (String(destinationDojoId) === String(dojoId)) {
           skipped.push({ student_id: studentId, reason: 'DESTINATION_EQUALS_ORIGIN' });
           continue;
         }
-
-        let destDojo = destDojoCache.get(String(destinationDojoId));
-        if (destDojo === undefined) {
-          const destRes = await client.query(
-            `SELECT id, name FROM companies
-              WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo'
-              LIMIT 1`,
-            [destinationDojoId, federationId]
-          );
-          destDojo = destRes.rows[0] || null;
-          destDojoCache.set(String(destinationDojoId), destDojo);
+        const destKey = String(destinationDojoId);
+        if (!transferGroups.has(destKey)) {
+          transferGroups.set(destKey, { destinationDojoId, studentIds: [] });
         }
-        if (!destDojo) {
-          skipped.push({ student_id: studentId, reason: 'INVALID_DESTINATION_DOJO' });
-          continue;
-        }
-
-        // UPDATE escopado ao dojô de origem — se outra requisição já moveu o
-        // praticante entre o FOR UPDATE acima e aqui, rowCount vem 0.
-        const upd = await client.query(
-          `UPDATE customers SET dojo_id = $1, updated_at = NOW()
-            WHERE id = $2 AND dojo_id = $3`,
-          [destinationDojoId, studentId, dojoId]
-        );
-        if (upd.rowCount === 0) {
-          skipped.push({ student_id: studentId, reason: 'NOT_IN_TARGET_DOJO' });
-          continue;
-        }
-
-        // Histórico imutável (mesmo padrão/colunas de karateTransfers.js)
-        try {
-          await client.query(
-            `INSERT INTO karate_practitioner_transfers
-               (practitioner_id, federation_id, origin_dojo_id, destination_dojo_id,
-                origin_dojo_name, destination_dojo_name, reason, transferred_at, initiated_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8)`,
-            [
-              studentId, federationId, dojoId, destinationDojoId,
-              dojoRes.rows[0].name, destDojo.name,
-              'Redistribuição por inativação de dojô', actorId,
-            ]
-          );
-        } catch (e) {
-          if (e && e.code === '42P01') {
-            // Migração 180 pendente: a movimentação de dojô já é válida, mas
-            // sem histórico persistível — aborta a transação inteira para não
-            // mover praticante sem rastro (mesma postura de karateTransfers.js).
-            await client.query('ROLLBACK');
-            return res.status(503).json({
-              error: 'Histórico de transferências ainda não disponível (migração 180 pendente)',
-              code: 'MIGRATION_PENDING',
-            });
-          }
-          throw e;
-        }
-
-        transferredCount++;
-        appliedDecisions.push({
-          student_id: studentId, action: 'transfer', destination_dojo_id: destinationDojoId,
-        });
+        transferGroups.get(destKey).studentIds.push(studentId);
       } else {
         // inactivate
-        const upd = await client.query(
-          `UPDATE customers SET is_active = false, updated_at = NOW()
-            WHERE id = $1 AND dojo_id = $2`,
-          [studentId, dojoId]
-        );
-        if (upd.rowCount === 0) {
-          skipped.push({ student_id: studentId, reason: 'NOT_IN_TARGET_DOJO' });
-          continue;
-        }
-        inactivatedCount++;
-        appliedDecisions.push({ student_id: studentId, action: 'inactivate' });
+        inactivateIds.push(studentId);
       }
     }
 
-    // 3) Evento de auditoria da redistribuição (best-effort, SAVEPOINT)
+    // 3) UMA query valida TODOS os dojôs de destino de uma vez.
+    const destIds = [...transferGroups.keys()];
+    const destRes = destIds.length
+      ? await client.query(
+          `SELECT id, name FROM companies
+            WHERE id = ANY($1::uuid[]) AND federation_id = $2 AND vertical = 'karate_dojo'`,
+          [destIds, federationId]
+        )
+      : { rows: [] };
+    const destNameById = new Map(destRes.rows.map((r) => [String(r.id), r.name]));
+
+    for (const [destKey, group] of transferGroups) {
+      if (!destNameById.has(destKey)) {
+        for (const sid of group.studentIds) {
+          skipped.push({ student_id: sid, reason: 'INVALID_DESTINATION_DOJO' });
+        }
+        transferGroups.delete(destKey);
+      }
+    }
+
+    // 4) Para CADA destino válido (poucos — um por dojô de destino
+    // escolhido no lote): um UPDATE em lote + um INSERT em lote no
+    // histórico. Isso é O(nº de dojôs de destino distintos), não O(N).
+    for (const [, group] of transferGroups) {
+      const destName = destNameById.get(String(group.destinationDojoId));
+
+      const upd = await client.query(
+        `UPDATE customers SET dojo_id = $1, updated_at = NOW()
+          WHERE id = ANY($2::uuid[]) AND dojo_id = $3
+          RETURNING id`,
+        [group.destinationDojoId, group.studentIds, dojoId]
+      );
+      const movedIds = upd.rows.map((r) => r.id);
+
+      // Defensivo: se por algum motivo nem todos os ids do grupo foram
+      // movidos (não deveria acontecer — já estão travados por FOR UPDATE
+      // desde o passo 2, dentro da mesma transação), os que sobraram vão
+      // para skipped em vez de silenciosamente desaparecer.
+      if (movedIds.length !== group.studentIds.length) {
+        const movedSet = new Set(movedIds.map(String));
+        for (const sid of group.studentIds) {
+          if (!movedSet.has(String(sid))) {
+            skipped.push({ student_id: sid, reason: 'NOT_IN_TARGET_DOJO' });
+          }
+        }
+      }
+      if (!movedIds.length) continue;
+
+      // Histórico imutável em lote (mesmas colunas de karateTransfers.js).
+      try {
+        await client.query(
+          `INSERT INTO karate_practitioner_transfers
+             (practitioner_id, federation_id, origin_dojo_id, destination_dojo_id,
+              origin_dojo_name, destination_dojo_name, reason, transferred_at, initiated_by)
+           SELECT u.id, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8
+             FROM unnest($1::uuid[]) AS u(id)`,
+          [
+            movedIds, federationId, dojoId, group.destinationDojoId,
+            originDojoName, destName,
+            'Redistribuição por inativação de dojô', actorId,
+          ]
+        );
+      } catch (e) {
+        if (e && e.code === '42P01') {
+          // Migração 180 pendente: a movimentação de dojô já é válida, mas
+          // sem histórico persistível — aborta a transação inteira para não
+          // mover praticante sem rastro (mesma postura de karateTransfers.js).
+          await client.query('ROLLBACK');
+          return res.status(503).json({
+            error: 'Histórico de transferências ainda não disponível (migração 180 pendente)',
+            code: 'MIGRATION_PENDING',
+          });
+        }
+        throw e;
+      }
+
+      transferredCount += movedIds.length;
+      for (const sid of movedIds) {
+        appliedDecisions.push({
+          student_id: sid, action: 'transfer', destination_dojo_id: group.destinationDojoId,
+        });
+      }
+    }
+
+    // 5) Inativações: UMA query em lote.
+    if (inactivateIds.length) {
+      const updI = await client.query(
+        `UPDATE customers SET is_active = false, updated_at = NOW()
+          WHERE id = ANY($1::uuid[]) AND dojo_id = $2
+          RETURNING id`,
+        [inactivateIds, dojoId]
+      );
+      inactivatedCount = updI.rowCount;
+
+      if (updI.rows.length !== inactivateIds.length) {
+        const inactivatedSet = new Set(updI.rows.map((r) => String(r.id)));
+        for (const sid of inactivateIds) {
+          if (!inactivatedSet.has(String(sid))) {
+            skipped.push({ student_id: sid, reason: 'NOT_IN_TARGET_DOJO' });
+          }
+        }
+      }
+      for (const r of updI.rows) {
+        appliedDecisions.push({ student_id: r.id, action: 'inactivate' });
+      }
+    }
+
+    // 6) Evento de auditoria da redistribuição (best-effort, SAVEPOINT)
     await safeRosterWrite(client, 'redistribute event', () => client.query(
       `INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
        VALUES ($1, $2, 'redistribute', $3::jsonb, $4)`,
       [dojoId, federationId, JSON.stringify(appliedDecisions), actorId]
     ));
 
-    // 4) Inativa o dojô (default true) + cascata para quem sobrou ativo
+    // 7) Inativa o dojô (default true) + cascata para quem sobrou ativo
     let dojoInactivated = false;
     if (inactivateDojo) {
       const dojoUpd = await client.query(
