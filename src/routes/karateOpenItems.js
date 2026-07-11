@@ -12,6 +12,10 @@
 // Fonte: VIEWs já existentes (karate_member_standing, karate_dojo_standing).
 // Nenhuma migration nova nesta fase.
 //
+// Correção 2 — a federação cobra POR DOJÔ (sensei), não preta a preta.
+// pretas.items[] agora inclui dojo_id (além de dojo_nome/whatsapp já
+// existentes) para o frontend agrupar a worklist por dojô.
+//
 // Guard: adminOnly() — financeiro é sensível (RBAC §7.3), mesmo padrão de
 // karateAnnuities.js / karateFinancial.js.
 //
@@ -45,6 +49,7 @@ router.get('/open-items', ...guards.adminOnly(), async (req, res) => {
            m.full_name,
            m.karate_registration_number,
            m.whatsapp,
+           m.dojo_id,
            COALESCE(c.trade_name, c.legal_name) AS dojo_nome,
            m.valor_em_aberto,
            m.annuity_due_date
@@ -68,6 +73,7 @@ router.get('/open-items', ...guards.adminOnly(), async (req, res) => {
       full_name: r.full_name,
       karate_registration_number: r.karate_registration_number,
       whatsapp: r.whatsapp,
+      dojo_id: r.dojo_id,
       dojo_nome: r.dojo_nome,
       valor_em_aberto: r.valor_em_aberto != null ? parseFloat(r.valor_em_aberto) : 0,
       annuity_due_date: r.annuity_due_date,
