@@ -265,6 +265,16 @@ SELECT * FROM karate_dojo_annuity_history;
 -- karate_member_standing). Se algum consumidor futuro precisar do total
 -- cobrado, adicionar coluna nova explícita — não reaproveitar paid_amount
 -- para isso.
+--
+-- ⚠️ POST-MORTEM (aplicação em 2026-07-11): CREATE OR REPLACE VIEW não permite
+-- mudar o tipo de uma coluna de SAÍDA já existente. SUM(numeric(12,2)) no
+-- Postgres devolve numeric sem precisão/escala — quebrava paid_amount
+-- (42P16). Cast explícito ::numeric(12,2) em toda coluna agregada que já
+-- existia na view antes desta migration; colunas novas também levam
+-- numeric(12,2) por coerência (exceto valor_em_aberto de
+-- karate_member_standing, cujo tipo pré-existente era numeric sem
+-- precisão — preservado como estava, não "corrigido" para não quebrar o
+-- contrato).
 CREATE OR REPLACE VIEW karate_dojo_standing AS
 SELECT
   c.id AS dojo_id,
@@ -273,7 +283,7 @@ SELECT
   COALESCE(c.is_active, false) AS is_active,
   EXTRACT(year FROM now())::integer AS reference_year,
   h.id AS annuity_id,
-  h.paid_amount,
+  h.paid_amount::numeric(12,2) AS paid_amount,
   h.paid_at,
   CASE
     WHEN h.id IS NULL THEN 'sem_cobranca'
@@ -281,8 +291,8 @@ SELECT
     WHEN h.overdue_open_count > 0 THEN 'atrasado'
     ELSE 'em_dia'
   END AS financeiro,
-  COALESCE(h.valor_em_aberto, 0::numeric) AS valor_em_aberto,
-  COALESCE(h.valor_atrasado, 0::numeric) AS valor_atrasado
+  COALESCE(h.valor_em_aberto, 0::numeric)::numeric(12,2) AS valor_em_aberto,
+  COALESCE(h.valor_atrasado, 0::numeric)::numeric(12,2) AS valor_atrasado
 FROM companies c
 LEFT JOIN LATERAL (
   SELECT
@@ -330,6 +340,16 @@ WHERE c.federation_id IS NOT NULL;
 --                          do frontend lê annuity_amount ou
 --                          annuity_paid_amount desta view — sem consumidor
 --                          quebrado pela correção.
+--
+-- ⚠️ POST-MORTEM 2: a primeira versão desta view inseria
+-- annuity_paid_amount NO MEIO da lista de colunas (entre annuity_amount e
+-- annuity_due_date). CREATE OR REPLACE VIEW exige mesmo nome/ordem/tipo
+-- para toda coluna já existente — só pode ANEXAR colunas novas no fim.
+-- Isso deslocava annuity_due_date/annuity_paid/financeiro/valor_em_aberto
+-- uma posição, o que teria quebrado a migration de novo (nome/tipo
+-- incompatível) logo após corrigir o erro original de paid_amount.
+-- Corrigido: annuity_paid_amount movida para o fim da lista, junto com
+-- valor_atrasado; ordem das colunas pré-existentes preservada.
 --   valor_em_aberto      = SUM de parcelas NÃO pagas (vencidas ou não).
 --   valor_atrasado       = SUM de parcelas NÃO pagas E já vencidas (due_date
 --                          <= CURRENT_DATE).
@@ -347,8 +367,7 @@ SELECT
   cb.belt_level = 'preta'::text AS is_black_belt,
   EXTRACT(year FROM now())::integer AS reference_year,
   fin.tx_id AS annuity_tx_id,
-  fin.amount AS annuity_amount,
-  fin.paid_amount AS annuity_paid_amount,
+  fin.amount::numeric(12,2) AS annuity_amount,
   fin.due_date AS annuity_due_date,
   fin.paid AS annuity_paid,
   CASE
@@ -359,16 +378,17 @@ SELECT
     WHEN fin.overdue_open_count > 0 THEN 'atrasado'::text
     ELSE 'em_dia'::text
   END AS financeiro,
-  CASE
+  (CASE
     WHEN cb.belt_level = 'preta'::text AND COALESCE(c.is_active, true)
          AND fin.tx_id IS NOT NULL THEN COALESCE(fin.valor_em_aberto, 0::numeric)
     ELSE 0::numeric
-  END AS valor_em_aberto,
-  CASE
+  END)::numeric AS valor_em_aberto,
+  fin.paid_amount::numeric(12,2) AS annuity_paid_amount,
+  (CASE
     WHEN cb.belt_level = 'preta'::text AND COALESCE(c.is_active, true)
          AND fin.tx_id IS NOT NULL THEN COALESCE(fin.valor_atrasado, 0::numeric)
     ELSE 0::numeric
-  END AS valor_atrasado
+  END)::numeric(12,2) AS valor_atrasado
 FROM customers c
 JOIN karate_current_belt cb ON cb.student_id = c.id
 LEFT JOIN LATERAL (
