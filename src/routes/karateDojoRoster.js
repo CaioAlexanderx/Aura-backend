@@ -10,7 +10,7 @@
 // PAGINAÇÃO NO SERVIDOR (11/07/2026) — dojôs grandes (um deles com ~400
 // praticantes) faziam o detalhe do dojô baixar e renderizar o quadro inteiro:
 //   ?status=all|active|inactive   (default: all)
-//   ?page=1&pageSize=25           (pageSize máx 100)
+//   ?page=1&pageSize=50           (default 50, máx 100)
 //   ?q=texto                      (busca por nome ou matrícula, opcional)
 //   ?all=1                        (desliga o LIMIT — lista completa)
 //
@@ -43,7 +43,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 
-const DEFAULT_PAGE_SIZE = 25;
+const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 
 const EMPTY_SUMMARY = Object.freeze({
