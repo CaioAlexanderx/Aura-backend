@@ -270,41 +270,6 @@ router.post('/annuities/pix-brcode', ...guards.adminOnly(), async (req, res) => 
 // Cria 1 transaction por parcela (idempotente por annuity-{id}-p{seq}) e
 // linka installments.transaction_id. Chamado dentro da MESMA transação do
 // client. `kind`: 'dojo'|'cpf' — decide category/reference_type/reference_id.
-async function createTransactionsForInstallments(client, {
-  federationId, kind, refId, refName, referencePeriod, installments,
-}) {
-  const category = annuitySvc.categoryForKind(kind);
-  const referenceType = kind === 'cpf' ? 'customer' : 'karate_dojo';
-  for (const inst of installments) {
-    const idempotencyKey = annuitySvc.transactionIdempotencyKey(inst.annuity_id, inst.seq);
-    const label = installments.length > 1 ? ` (${inst.seq}/${installments.length})` : '';
-    const txRes = await client.query(
-      `INSERT INTO transactions
-         (company_id, type, category, amount, status, due_date,
-          description, idempotency_key, reference_type, reference_id,
-          federation_id, created_at, updated_at)
-       VALUES ($1, 'income', $2, $3, 'pending', $4,
-               $5, $6, $7, $8,
-               $9, NOW(), NOW())
-       ON CONFLICT (idempotency_key) DO NOTHING
-       RETURNING id`,
-      [
-        federationId, category, inst.amount, inst.due_date,
-        `Anuidade ${kind === 'cpf' ? '' : 'dojô '}${refName} — ${referencePeriod}${label}`,
-        idempotencyKey, referenceType, refId, federationId,
-      ]
-    );
-    let txId = txRes.rows[0]?.id;
-    if (!txId) {
-      const ex = await client.query(`SELECT id FROM transactions WHERE idempotency_key = $1`, [idempotencyKey]);
-      txId = ex.rows[0]?.id;
-    }
-    await client.query(`UPDATE karate_annuity_installments SET transaction_id = $1 WHERE id = $2`, [txId, inst.id]);
-    inst.transaction_id = txId;
-  }
-  return installments;
-}
-
 // POST /financial/annuities/dojos/:dojoId/charge
 // Fase F1: aceita `plan` (default 'anual'). Sem `amount` explícito, usa o
 // preço vigente de karate_annual_fees para o plano (gera N parcelas —
@@ -410,7 +375,7 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
         let installments = await annuitySvc.createInstallmentsForAnnuity(client, {
           annuityId, federationId, specs,
         });
-        installments = await createTransactionsForInstallments(client, {
+        installments = await annuitySvc.createTransactionsForInstallments(client, {
           federationId, kind: 'dojo', refId: dojoId, refName: dojoName,
           referencePeriod: reference_period, installments,
         });
@@ -1700,7 +1665,7 @@ router.post('/annuities/cpf/:practitionerId/charge', ...guards.adminOnly(), asyn
         let installments = await annuitySvc.createInstallmentsForAnnuity(client, {
           annuityId, federationId, specs,
         });
-        installments = await createTransactionsForInstallments(client, {
+        installments = await annuitySvc.createTransactionsForInstallments(client, {
           federationId, kind: 'cpf', refId: practitionerId, refName: pract.full_name,
           referencePeriod: reference_period, installments,
         });
@@ -2056,7 +2021,7 @@ router.patch('/annuities/:annuityId/plan', ...guards.adminOnly(), async (req, re
       annuityId, federationId, specs,
     });
     const dojoRes = await client.query(`SELECT name FROM companies WHERE id = $1 LIMIT 1`, [hist.dojo_id]);
-    newInstallments = await createTransactionsForInstallments(client, {
+    newInstallments = await annuitySvc.createTransactionsForInstallments(client, {
       federationId,
       kind: 'dojo',
       refId: hist.dojo_id,

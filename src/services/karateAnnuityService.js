@@ -120,6 +120,46 @@ async function createInstallmentsForAnnuity(client, { annuityId, federationId, s
   return inserted;
 }
 
+// ── Cria (ou reaproveita, via idempotency_key) a transaction financeira de
+// cada parcela e amarra installment.transaction_id a ela. Extraído de
+// karateAnnuities.js (charge dojô/CPF) na Fase F3 para ser reusado também
+// pela campanha/lote (karateAnnuityCampaign.js) — MESMO motor de geração,
+// sem duplicar a lógica de criação de transaction+idempotency_key.
+async function createTransactionsForInstallments(client, {
+  federationId, kind, refId, refName, referencePeriod, installments,
+}) {
+  const category = categoryForKind(kind);
+  const referenceType = kind === 'cpf' ? 'customer' : 'karate_dojo';
+  for (const inst of installments) {
+    const idempotencyKey = transactionIdempotencyKey(inst.annuity_id, inst.seq);
+    const label = installments.length > 1 ? ` (${inst.seq}/${installments.length})` : '';
+    const txRes = await client.query(
+      `INSERT INTO transactions
+         (company_id, type, category, amount, status, due_date,
+          description, idempotency_key, reference_type, reference_id,
+          federation_id, created_at, updated_at)
+       VALUES ($1, 'income', $2, $3, 'pending', $4,
+               $5, $6, $7, $8,
+               $9, NOW(), NOW())
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id`,
+      [
+        federationId, category, inst.amount, inst.due_date,
+        `Anuidade ${kind === 'cpf' ? '' : 'dojô '}${refName} — ${referencePeriod}${label}`,
+        idempotencyKey, referenceType, refId, federationId,
+      ]
+    );
+    let txId = txRes.rows[0]?.id;
+    if (!txId) {
+      const ex = await client.query(`SELECT id FROM transactions WHERE idempotency_key = $1`, [idempotencyKey]);
+      txId = ex.rows[0]?.id;
+    }
+    await client.query(`UPDATE karate_annuity_installments SET transaction_id = $1 WHERE id = $2`, [txId, inst.id]);
+    inst.transaction_id = txId;
+  }
+  return installments;
+}
+
 async function getInstallments(client, annuityId) {
   const runner = client || db;
   const { rows } = await runner.query(
@@ -251,6 +291,7 @@ function categoryForKind(kind) {
 
 module.exports = {
   VALID_PLANS,
+  createTransactionsForInstallments,
   DEFAULT_DUE_MONTHS,
   VALID_PAYMENT_METHODS,
   lastDayOfMonthStr,
