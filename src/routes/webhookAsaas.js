@@ -8,9 +8,10 @@
 //              é mismatch de token, header com nome diferente, ou Asaas
 //              pausou a integracao). Logs aparecem no Railway.
 //
-// Handles two flows:
-//   1. externalReference = 'digital-order-<uuid>'  → pedido Canal Digital
-//   2. tudo mais                                    → billing de empresa (plano)
+// Handles three flows:
+//   1. event PIX_AUTOMATIC_RECURRING_AUTHORIZATION_* → autorização Pix Automático
+//   2. externalReference = 'digital-order-<uuid>'  → pedido Canal Digital
+//   3. tudo mais                                    → billing de empresa (plano)
 //
 // MULTI-CNPJ (M2): quando o billing da PRIMARY muda, propaga pras
 // empresas filhas (billing_owner_company_id = primary.id). Sem isso,
@@ -24,6 +25,7 @@ const router  = express.Router();
 const db      = require('../config/database');
 const crypto  = require('crypto');
 const notify  = require('../services/digitalOrderNotifications');
+const billingPix = require('../services/billingPix');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
@@ -114,6 +116,15 @@ router.post('/', async function(req, res) {
   }
 
   var event   = req.body.event;
+
+  // ── 0. Pix Automático: eventos de AUTORIZAÇÃO (sem objeto `payment`) ──
+  // Precisam ser tratados ANTES do guard `!payment` abaixo, pois o payload
+  // de autorização não traz `payment`. As cobranças recorrentes do Pix
+  // Automático continuam disparando os PAYMENT_* (tratados no fluxo 2).
+  if (event && event.indexOf('PIX_AUTOMATIC_RECURRING_AUTHORIZATION') === 0) {
+    return billingPix.handlePixAutoAuthorizationEvent(req, res, db);
+  }
+
   var payment = req.body.payment;
   if (!event || !payment) return res.status(200).json({ received: true });
 
