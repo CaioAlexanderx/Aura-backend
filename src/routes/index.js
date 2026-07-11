@@ -152,6 +152,8 @@ router.use('/federation/:id/practitioners',        require('./karatePractitioner
 // e o caminho /:dojoId/export-data não colide com as rotas de karateDojos.
 router.use('/federation/:id/dojos',                require('./karateExportDojo'));
 router.use('/federation/:id/dojos',                require('./karateDojos'));
+// Fase 4: roster do dojô (status + financeiro) — GET /:dojoId/members-standing
+router.use('/federation/:id/dojos',                require('./karateDojoRoster'));
 // Fase 2: anexos (documentos/imagens) para dojô e praticante. Mesmo router
 // montado nas duas bases — ele deduz owner_type ('dojo'/'practitioner') pelo
 // req.baseUrl. Paths /:ownerId/documents não colidem com /:dojoId ou
@@ -161,6 +163,8 @@ router.use('/federation/:id/practitioners',        require('./karateDocuments'))
 // dashboard e belt-distribution são expostos pelo karateFederation router
 // mas precisam do param :id, então também montamos aqui:
 router.use('/federation/:id', require('./karateFederation'));
+// Fase 6: Painel + Saúde da rede (standing agregado) — GET /standing/summary
+router.use('/federation/:id/standing', require('./karateStandingSummary'));
 
 // ── AURA KARATÊ — Track B (backend financeiro + anuidades) ──
 router.use('/federation/:id/financial', require('./karateAnnuities'));
@@ -169,6 +173,8 @@ router.use('/federation/:id/financial', require('./karateFees'));
 router.use('/federation/:id/financial', require('./karateFinancial'));
 // Track P: NFS-e para anuidades de dojô (reusa nuvemfiscal + nfe_documents)
 router.use('/federation/:id/financial', require('./karateNfse'));
+// Fase 5: valores em aberto segmentados (pretas CPF x dojôs) — GET /open-items
+router.use('/federation/:id/financial', require('./karateOpenItems'));
 
 // ── AURA KARATÊ — Track C (backend exames + cursos) ─────────────
 // (certificados Track J montado separadamente abaixo)
