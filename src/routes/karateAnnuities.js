@@ -76,34 +76,92 @@ const DOJO_ANNUITIES = true; // eslint-disable-line
 // foi aplicada (HAS_INSTALLMENTS). amount/due_date/status continuam vindo
 // do rollup do header (karate_dojo_annuity_history), mantido em sincronia
 // com as parcelas por karateAnnuityService.syncAnnuityHeaderRollup.
+//
+// Fase F2 — paginação real: LIMIT/OFFSET + COUNT(*) no banco (não busca a
+// tabela inteira pra fatiar em memória). `status` e a busca (`q`, por nome
+// do dojô ou código FPKT) viram WHERE no banco via `computed_status` — um
+// CASE que espelha karateFinanceService.computeAnnuityStatus() em SQL
+// (mesmos limiares: due>hoje, <=90 overdue, <=180 defaulting, senão
+// suspended). Os dois precisam ser mantidos em sincronia manualmente: sem
+// isso não dá pra filtrar+paginar no banco, já que esse status não é uma
+// coluna persistida.
+// `status` aceita, além do vocabulário legado (paid|due|overdue|defaulting|
+// suspended|no_charge), os alias agregados usados pelos KPIs do hub
+// (GET /financial/annuities/summary — ver karateAnnuitySummary.js):
+//   em_aberto = due ∪ overdue ∪ defaulting ∪ suspended (tudo não pago)
+//   atrasado  = overdue ∪ defaulting ∪ suspended (não pago E já vencido)
+// Isso garante que um clique num KPI do hub filtre esta lista com o MESMO
+// nome de status que o KPI usa.
+const STATUS_ALIASES = {
+  em_aberto: ['due', 'overdue', 'defaulting', 'suspended'],
+  atrasado: ['overdue', 'defaulting', 'suspended'],
+};
+function statusFilterValues(status) {
+  if (!status) return null;
+  return STATUS_ALIASES[status] || [status];
+}
+
+// SELECT list + WHERE compartilhados entre a query "com plan" (pós-migration
+// 222) e o fallback legado (sem h.plan) — só o que muda é a coluna h.plan.
+function dojosBaseSql(withPlan) {
+  return `
+    SELECT
+      c.id AS dojo_id, c.name AS dojo_name, c.fpkt_affiliation_id,
+      COALESCE(NULLIF(c.wa_phone_display, ''), c.phone) AS whatsapp,
+      h.id AS annuity_id, h.reference_period, h.amount, h.due_date,
+      h.paid_at, h.status AS annuity_status, h.transaction_id
+      ${withPlan ? ', h.plan' : ''},
+      CASE
+        WHEN h.id IS NULL THEN 'no_charge'
+        WHEN h.status = 'paid' THEN 'paid'
+        WHEN h.due_date IS NULL THEN 'no_charge'
+        WHEN h.due_date > CURRENT_DATE THEN 'due'
+        WHEN CURRENT_DATE - h.due_date <= 90 THEN 'overdue'
+        WHEN CURRENT_DATE - h.due_date <= 180 THEN 'defaulting'
+        ELSE 'suspended'
+      END AS computed_status,
+      CASE WHEN h.due_date IS NOT NULL AND h.status <> 'paid' AND h.due_date <= CURRENT_DATE
+           THEN (CURRENT_DATE - h.due_date) ELSE 0 END AS days_overdue
+    FROM companies c
+    LEFT JOIN karate_dojo_annuity_history h
+      ON h.dojo_id = c.id AND h.reference_period = $2
+    WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
+  `;
+}
+
+const DOJOS_FILTER_SQL = `
+  WHERE ($3::text IS NULL OR dojo_name ILIKE '%' || $3 || '%' OR fpkt_affiliation_id ILIKE '%' || $3 || '%')
+    AND ($4::text[] IS NULL OR computed_status = ANY($4::text[]))
+`;
+
 router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
   const federationId = req.params.id;
   const { status } = req.query;
-  const page     = Math.max(1, parseInt(req.query.page) || 1);
-  const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 25));
+  const page     = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 50));
   const offset   = (page - 1) * pageSize;
   const year     = (req.query.year && /^\d{4}$/.test(String(req.query.year)))
     ? String(req.query.year)
     : new Date().getFullYear().toString();
+  const statusValues = statusFilterValues(status);
+  const search = (req.query.q && String(req.query.q).trim()) ? String(req.query.q).trim() : null;
 
   try {
-    // Busca dojôs + sua cobrança do ano (via karate_dojo_annuity_history)
     let dojos;
+    let total = 0;
     let selectedPlan = HAS_INSTALLMENTS;
     if (selectedPlan) {
       try {
+        const countRes = await db.query(
+          `SELECT COUNT(*)::int AS total FROM (${dojosBaseSql(true)}) base ${DOJOS_FILTER_SQL}`,
+          [federationId, year, search, statusValues]
+        );
+        total = countRes.rows[0]?.total || 0;
         const r = await db.query(
-          `SELECT
-             c.id AS dojo_id, c.name AS dojo_name, c.fpkt_affiliation_id,
-             COALESCE(NULLIF(c.wa_phone_display, ''), c.phone) AS whatsapp,
-             h.id AS annuity_id, h.reference_period, h.amount, h.due_date,
-             h.paid_at, h.status AS annuity_status, h.transaction_id, h.plan
-           FROM companies c
-           LEFT JOIN karate_dojo_annuity_history h
-             ON h.dojo_id = c.id AND h.reference_period = $2
-           WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
-           ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
-          [federationId, year]
+          `SELECT * FROM (${dojosBaseSql(true)}) base ${DOJOS_FILTER_SQL}
+           ORDER BY fpkt_affiliation_id ASC NULLS LAST, dojo_name ASC
+           LIMIT $5 OFFSET $6`,
+          [federationId, year, search, statusValues, pageSize, offset]
         );
         dojos = r.rows;
       } catch (e) {
@@ -115,23 +173,21 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
       }
     }
     if (!selectedPlan) {
+      const countRes = await db.query(
+        `SELECT COUNT(*)::int AS total FROM (${dojosBaseSql(false)}) base ${DOJOS_FILTER_SQL}`,
+        [federationId, year, search, statusValues]
+      );
+      total = countRes.rows[0]?.total || 0;
       const r = await db.query(
-        `SELECT
-           c.id AS dojo_id, c.name AS dojo_name, c.fpkt_affiliation_id,
-           COALESCE(NULLIF(c.wa_phone_display, ''), c.phone) AS whatsapp,
-           h.id AS annuity_id, h.reference_period, h.amount, h.due_date,
-           h.paid_at, h.status AS annuity_status, h.transaction_id
-         FROM companies c
-         LEFT JOIN karate_dojo_annuity_history h
-           ON h.dojo_id = c.id AND h.reference_period = $2
-         WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
-         ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
-        [federationId, year]
+        `SELECT * FROM (${dojosBaseSql(false)}) base ${DOJOS_FILTER_SQL}
+         ORDER BY fpkt_affiliation_id ASC NULLS LAST, dojo_name ASC
+         LIMIT $5 OFFSET $6`,
+        [federationId, year, search, statusValues, pageSize, offset]
       );
       dojos = r.rows;
     }
 
-    // Busca parcelas de todas as anuidades da página em UMA query (evita N+1).
+    // Busca parcelas de todas as anuidades da PÁGINA em UMA query (evita N+1).
     let installmentsByAnnuity = {};
     if (selectedPlan) {
       const annuityIds = dojos.map(d => d.annuity_id).filter(Boolean);
@@ -149,16 +205,7 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
       }
     }
 
-    const dayMs = 1000 * 60 * 60 * 24;
-    const now = new Date();
-
-    let enriched = dojos.map(d => {
-      const computedStatus = computeAnnuityStatus(
-        d.annuity_id ? { status: d.annuity_status, due_date: d.due_date } : null
-      );
-      const daysOverdue = (d.due_date && computedStatus !== 'paid' && computedStatus !== 'due')
-        ? Math.max(0, Math.round((now - new Date(d.due_date)) / dayMs))
-        : 0;
+    const data = dojos.map(d => {
       const installments = d.annuity_id ? (installmentsByAnnuity[d.annuity_id] || []) : [];
       const out = {
         dojo_id: d.dojo_id,
@@ -174,12 +221,12 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
         reference_period: d.reference_period || year,
         due_date: d.due_date || null,
         paid_at: d.paid_at || null,
-        status: computedStatus,
-        days_overdue: daysOverdue,
+        status: d.computed_status,
+        days_overdue: d.days_overdue || 0,
         nfse_id: null, // populated from transaction if needed
       };
       if (selectedPlan) {
-        const { total, paid_total } = annuitySvc.computeTotals(installments);
+        const { total: instTotal, paid_total } = annuitySvc.computeTotals(installments);
         out.plan = d.plan || null;
         out.installments = installments.map(i => ({
           id: i.id,
@@ -191,20 +238,12 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
           transaction_id: i.transaction_id,
         }));
         out.paid_total = paid_total;
-        out.total = total || out.amount;
+        out.total = instTotal || out.amount;
       }
       return out;
     });
 
-    // Filter by status if requested
-    if (status) {
-      enriched = enriched.filter(d => d.status === status);
-    }
-
-    const total = enriched.length;
-    const data  = enriched.slice(offset, offset + pageSize);
-
-    res.json({ page, page_size: pageSize, total, data });
+    res.json({ data, total, page, pageSize });
   } catch (err) {
     console.error('[karateAnnuities] list dojos error:', err.message);
     res.status(500).json({ error: 'Erro ao listar anuidades de dojôs' });
@@ -1378,33 +1417,99 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
 // Shape antigo preservado (amount/due_date/paid_at/status vêm do rollup do
 // header); plan/installments/paid_total/total são aditivos. Fallback para a
 // leitura direta de transactions se a migration ainda não foi aplicada.
+//
+// Fase F2 — paginação real (mesmo padrão de /annuities/dojos, ver os
+// comentários lá): LIMIT/OFFSET + COUNT(*) no banco via `computed_status`
+// calculado em SQL (devolve o MESMO vocabulário de status usado na listagem
+// de dojôs, incluindo os alias `em_aberto`/`atrasado` usados pelos KPIs do
+// summary). Busca (`q`) por nome ou número de matrícula.
+function cpfBaseSql(withPlan) {
+  return `
+    SELECT
+      cu.id AS practitioner_id, cu.name AS full_name,
+      cu.karate_registration_number, cu.phone AS whatsapp,
+      h.id AS annuity_id, h.reference_period, h.amount, h.due_date,
+      h.paid_at, h.status AS annuity_status, h.transaction_id
+      ${withPlan ? ', h.plan' : ''},
+      CASE
+        WHEN h.id IS NULL THEN 'no_charge'
+        WHEN h.status = 'paid' THEN 'paid'
+        WHEN h.due_date IS NULL THEN 'no_charge'
+        WHEN h.due_date > CURRENT_DATE THEN 'due'
+        WHEN CURRENT_DATE - h.due_date <= 90 THEN 'overdue'
+        WHEN CURRENT_DATE - h.due_date <= 180 THEN 'defaulting'
+        ELSE 'suspended'
+      END AS computed_status,
+      CASE WHEN h.due_date IS NOT NULL AND h.status <> 'paid' AND h.due_date <= CURRENT_DATE
+           THEN (CURRENT_DATE - h.due_date) ELSE 0 END AS days_overdue
+    FROM customers cu
+    LEFT JOIN karate_dojo_annuity_history h
+      ON h.practitioner_id = cu.id AND h.reference_period = $2
+    WHERE cu.federation_id = $1
+  `;
+}
+
+// Fallback legado (migration 222 ausente): computed_status direto sobre
+// transactions (category='annuity_cpf'). Mesma regra canônica de "vencida"
+// (due_date <= hoje) do restante da Fase F2 — CLAUDE.md #vencida.
+const CPF_LEGACY_BASE_SQL = `
+  SELECT
+    cu.id AS practitioner_id, cu.name AS full_name,
+    cu.karate_registration_number, cu.phone AS whatsapp,
+    NULL::uuid AS annuity_id, NULL::text AS reference_period, t.amount, t.due_date,
+    t.paid_at, NULL::text AS annuity_status, t.id AS transaction_id,
+    CASE
+      WHEN t.id IS NULL THEN 'no_charge'
+      WHEN t.status = 'confirmed' OR t.paid_at IS NOT NULL THEN 'paid'
+      WHEN t.due_date IS NULL THEN 'due'
+      WHEN t.due_date > CURRENT_DATE THEN 'due'
+      WHEN CURRENT_DATE - t.due_date <= 90 THEN 'overdue'
+      WHEN CURRENT_DATE - t.due_date <= 180 THEN 'defaulting'
+      ELSE 'suspended'
+    END AS computed_status,
+    CASE WHEN t.due_date IS NOT NULL AND t.status <> 'confirmed' AND t.paid_at IS NULL AND t.due_date <= CURRENT_DATE
+         THEN (CURRENT_DATE - t.due_date) ELSE 0 END AS days_overdue
+  FROM customers cu
+  LEFT JOIN transactions t
+    ON t.reference_type = 'customer' AND t.reference_id = cu.id
+    AND t.category = 'annuity_cpf' AND EXTRACT(YEAR FROM t.due_date) = $2::int
+    AND t.federation_id = $1
+  WHERE cu.federation_id = $1
+`;
+
+const CPF_FILTER_SQL = `
+  WHERE ($3::text IS NULL OR full_name ILIKE '%' || $3 || '%' OR karate_registration_number ILIKE '%' || $3 || '%')
+    AND ($4::text[] IS NULL OR computed_status = ANY($4::text[]))
+`;
+
 router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
   const federationId = req.params.id;
   const { status } = req.query;
-  const page     = Math.max(1, parseInt(req.query.page) || 1);
-  const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 25));
+  const page     = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 50));
   const offset   = (page - 1) * pageSize;
   const year     = (req.query.year && /^\d{4}$/.test(String(req.query.year)))
     ? String(req.query.year)
     : new Date().getFullYear().toString();
+  const statusValues = statusFilterValues(status);
+  const search = (req.query.q && String(req.query.q).trim()) ? String(req.query.q).trim() : null;
 
   try {
     let rows;
+    let total = 0;
     let selectedPlan = HAS_INSTALLMENTS;
     if (selectedPlan) {
       try {
+        const countRes = await db.query(
+          `SELECT COUNT(*)::int AS total FROM (${cpfBaseSql(true)}) base ${CPF_FILTER_SQL}`,
+          [federationId, year, search, statusValues]
+        );
+        total = countRes.rows[0]?.total || 0;
         const r = await db.query(
-          `SELECT
-             cu.id AS practitioner_id, cu.name AS full_name,
-             cu.karate_registration_number, cu.phone AS whatsapp,
-             h.id AS annuity_id, h.reference_period, h.amount, h.due_date,
-             h.paid_at, h.status AS annuity_status, h.transaction_id, h.plan
-           FROM customers cu
-           LEFT JOIN karate_dojo_annuity_history h
-             ON h.practitioner_id = cu.id AND h.reference_period = $2
-           WHERE cu.federation_id = $1
-           ORDER BY cu.karate_registration_number ASC NULLS LAST, cu.name ASC`,
-          [federationId, year]
+          `SELECT * FROM (${cpfBaseSql(true)}) base ${CPF_FILTER_SQL}
+           ORDER BY karate_registration_number ASC NULLS LAST, full_name ASC
+           LIMIT $5 OFFSET $6`,
+          [federationId, year, search, statusValues, pageSize, offset]
         );
         rows = r.rows;
       } catch (e) {
@@ -1433,19 +1538,11 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
       }
     }
 
-    let enriched;
+    let data;
     if (selectedPlan) {
-      const dayMs = 1000 * 60 * 60 * 24;
-      const now = new Date();
-      enriched = rows.map(r => {
-        const computedStatus = computeAnnuityStatus(
-          r.annuity_id ? { status: r.annuity_status, due_date: r.due_date } : null
-        );
-        const daysOverdue = (r.due_date && computedStatus !== 'paid' && computedStatus !== 'due')
-          ? Math.max(0, Math.round((now - new Date(r.due_date)) / dayMs))
-          : 0;
+      data = rows.map(r => {
         const installments = r.annuity_id ? (installmentsByAnnuity[r.annuity_id] || []) : [];
-        const { total, paid_total } = annuitySvc.computeTotals(installments);
+        const { total: instTotal, paid_total } = annuitySvc.computeTotals(installments);
         return {
           practitioner_id: r.practitioner_id,
           full_name: r.full_name,
@@ -1456,8 +1553,8 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
           reference_period: r.reference_period || year,
           due_date: r.due_date || null,
           paid_at: r.paid_at || null,
-          status: computedStatus,
-          days_overdue: daysOverdue,
+          status: r.computed_status,
+          days_overdue: r.days_overdue || 0,
           transaction_id: r.transaction_id || null,
           plan: r.plan || null,
           installments: installments.map(i => ({
@@ -1465,59 +1562,37 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
             paid_at: i.paid_at, status: i.status, transaction_id: i.transaction_id,
           })),
           paid_total,
-          total: total || (r.amount ? parseFloat(r.amount) : 0),
+          total: instTotal || (r.amount ? parseFloat(r.amount) : 0),
         };
       });
     } else {
       // Fallback legado (migration 222 ausente): transactions diretamente.
-      const { rows: legacyRows } = await db.query(
-        `SELECT
-           cu.id AS practitioner_id, cu.name AS full_name,
-           cu.karate_registration_number, cu.phone AS whatsapp,
-           t.id AS transaction_id, t.amount, t.due_date, t.status AS tx_status, t.paid_at
-         FROM customers cu
-         LEFT JOIN transactions t
-           ON t.reference_type = 'customer' AND t.reference_id = cu.id
-           AND t.category = 'annuity_cpf' AND EXTRACT(YEAR FROM t.due_date) = $2
-           AND t.federation_id = $1
-         WHERE cu.federation_id = $1
-         ORDER BY cu.karate_registration_number ASC NULLS LAST, full_name ASC`,
-        [federationId, parseInt(year, 10)]
+      const countRes = await db.query(
+        `SELECT COUNT(*)::int AS total FROM (${CPF_LEGACY_BASE_SQL}) base ${CPF_FILTER_SQL}`,
+        [federationId, year, search, statusValues]
       );
-      const dayMs = 1000 * 60 * 60 * 24;
-      const now = new Date();
-      enriched = legacyRows.map(r => {
-        let annuityStatus = 'due';
-        if (!r.transaction_id) annuityStatus = 'no_charge';
-        else if (r.tx_status === 'confirmed' || r.paid_at) annuityStatus = 'paid';
-        else if (r.due_date) {
-          const daysUntil = Math.round((new Date(r.due_date) - now) / dayMs);
-          if (daysUntil >= 0) annuityStatus = 'due';
-          else {
-            const daysOver = Math.abs(daysUntil);
-            annuityStatus = daysOver <= 90 ? 'overdue' : daysOver <= 180 ? 'defaulting' : 'suspended';
-          }
-        }
-        return {
-          practitioner_id: r.practitioner_id,
-          full_name: r.full_name,
-          karate_registration_number: r.karate_registration_number || null,
-          whatsapp: r.whatsapp || null,
-          amount: r.amount ? parseFloat(r.amount) : 0,
-          reference_period: year,
-          due_date: r.due_date || null,
-          paid_at: r.paid_at || null,
-          status: annuityStatus,
-        };
-      });
+      total = countRes.rows[0]?.total || 0;
+      const r = await db.query(
+        `SELECT * FROM (${CPF_LEGACY_BASE_SQL}) base ${CPF_FILTER_SQL}
+         ORDER BY karate_registration_number ASC NULLS LAST, full_name ASC
+         LIMIT $5 OFFSET $6`,
+        [federationId, year, search, statusValues, pageSize, offset]
+      );
+      data = r.rows.map(row => ({
+        practitioner_id: row.practitioner_id,
+        full_name: row.full_name,
+        karate_registration_number: row.karate_registration_number || null,
+        whatsapp: row.whatsapp || null,
+        amount: row.amount ? parseFloat(row.amount) : 0,
+        reference_period: year,
+        due_date: row.due_date || null,
+        paid_at: row.paid_at || null,
+        status: row.computed_status,
+        days_overdue: row.days_overdue || 0,
+      }));
     }
 
-    if (status) enriched = enriched.filter(p => p.status === status);
-
-    const total = enriched.length;
-    const data  = enriched.slice(offset, offset + pageSize);
-
-    res.json({ page, page_size: pageSize, total, data });
+    res.json({ data, total, page, pageSize });
   } catch (err) {
     console.error('[karateAnnuities] list cpf error:', err.message);
     res.status(500).json({ error: 'Erro ao listar anuidades CPF' });

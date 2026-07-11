@@ -183,6 +183,7 @@ router.use('/federation/:id/standing', require('./karateStandingSummary'));
 
 // ── AURA KARATÊ — Track B (backend financeiro + anuidades) ──
 router.use('/federation/:id/financial', require('./karateAnnuities'));
+router.use('/federation/:id/financial', require('./karateAnnuitySummary'));
 router.use('/federation/:id/financial', require('./karateExpenses'));
 router.use('/federation/:id/financial', require('./karateFees'));
 router.use('/federation/:id/financial', require('./karateFinancial'));
