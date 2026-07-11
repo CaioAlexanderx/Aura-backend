@@ -27,6 +27,14 @@
 //   assinatura no Asaas (plano + 19xseats) via seatSubscription. Assim o
 //   acesso extra passa a ser cobrado automaticamente no cartao, como a
 //   assinatura — sem refazer checkout. Best-effort (billing_sync no response).
+//
+// 11/07/2026: POST /admin/clients/:cid/resync-subscription
+//   O sync so rodava DENTRO do PATCH /extra-seats, que faz no-op quando o
+//   count nao muda. Se o sync falhava por motivo transitorio (empresa estava
+//   'cancelled', Asaas fora do ar), a unica forma de re-disparar era salvar
+//   0 e depois 1 — gambiarra que ainda faz um PUT intermediario removendo o
+//   seat da assinatura. A rota nova re-dispara o sync de forma idempotente,
+//   sem alterar extra_seats_granted.
 // ============================================================
 
 const router = require('express').Router();
@@ -306,6 +314,10 @@ router.patch('/clients/:cid/extend-trial', ...adminOnly, asyncHandler(async (req
 // Asaas (plano + 19xseats) via syncSubscriptionSeatValue — assim o
 // acesso extra passa a ser cobrado automaticamente no cartao. Best-effort:
 // o resultado vai em billing_sync no response e no audit; nunca derruba o PATCH.
+//
+// 11/07/2026: quando o count NAO muda o handler continua fazendo no-op (nao
+// suja o audit). Pra re-disparar o sync sem mexer no count, use
+// POST /admin/clients/:cid/resync-subscription (abaixo).
 router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req, res) => {
   const { cid } = req.params;
   const { count, reason } = req.body || {};
@@ -374,6 +386,68 @@ router.patch('/clients/:cid/extra-seats', ...adminOnly, asyncHandler(async (req,
     extra_seats_granted: n,
     previous_extra_seats_granted: result.previous,
     changed: true,
+    billing_sync: billingSync,
+  });
+}));
+
+// ── POST /admin/clients/:cid/resync-subscription ───────────────
+// 11/07/2026: re-dispara a sincronizacao do valor da assinatura no Asaas
+// (plano + 19xseats) a partir do estado ATUAL da empresa, sem alterar
+// extra_seats_granted. Body: { reason?: string }.
+//
+// Por que existe: o sync so rodava dentro do PATCH /extra-seats, que faz
+// no-op quando o count nao muda. Se o sync falhou por motivo transitorio —
+// empresa estava 'cancelled' (guard do seatSubscription), Asaas fora do ar,
+// assinatura recem-criada — a unica saida era salvar 0 e depois 1 de novo.
+// Isso ainda dispara um PUT intermediario no Asaas REMOVENDO o seat da
+// assinatura, o que e perigoso se a segunda chamada falhar no meio.
+//
+// Idempotente: se o valor no Asaas ja bate, syncSubscriptionSeatValue
+// retorna skipped='value_unchanged' e nao faz PUT nenhum.
+router.post('/clients/:cid/resync-subscription', ...adminOnly, asyncHandler(async (req, res) => {
+  const { cid } = req.params;
+  const { reason } = req.body || {};
+
+  const { rows: comp } = await pool.query(
+    'SELECT id, plan, billing_cycle, billing_status, asaas_subscription_id FROM companies WHERE id = $1',
+    [cid]
+  );
+  if (!comp.length) throw new AppError('Empresa nao encontrada', 404);
+
+  // Defensivo pre-migration 110 (mesmo padrao do /clients-360): sem a coluna,
+  // o mapa volta vazio → seats = 0 → sync cobra so o plano.
+  const seatsMap = await getExtraSeatsMap([cid]);
+  const seats = seatsMap.get(cid) || 0;
+
+  const billingSync = await syncSubscriptionSeatValue({
+    id: cid,
+    plan: comp[0].plan,
+    billing_cycle: comp[0].billing_cycle,
+    billing_status: comp[0].billing_status,
+    asaas_subscription_id: comp[0].asaas_subscription_id,
+    extra_seats_granted: seats,
+  });
+
+  await pool.query(
+    `INSERT INTO admin_audit_log (staff_user_id, company_id, action, payload, reason)
+     VALUES ($1, $2, 'resync_subscription', $3, $4)`,
+    [
+      req.user.id,
+      cid,
+      JSON.stringify({
+        plan: comp[0].plan,
+        billing_cycle: comp[0].billing_cycle,
+        billing_status: comp[0].billing_status,
+        extra_seats_granted: seats,
+        billing_sync: billingSync,
+      }),
+      reason && typeof reason === 'string' ? reason.trim() : null,
+    ]
+  );
+
+  res.json({
+    extra_seats_granted: seats,
+    billing_status: comp[0].billing_status,
     billing_sync: billingSync,
   });
 }));
