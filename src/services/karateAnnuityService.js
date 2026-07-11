@@ -103,6 +103,83 @@ function buildInstallmentPlan({ plan, amount, dueMonths, seasonYear, fromDate })
   return specs;
 }
 
+// ── Validação do override de due_date (campanha/lote/charge individual) ──
+// Formato AAAA-MM-DD, data real, e ano batendo com a temporada (year) — não
+// aceita vencimento de ano diferente sem necessidade (ex.: due_date
+// '2027-03-15' numa campanha year=2026 é, na prática, sempre erro de
+// digitação da federação; recusamos com 422 em vez de aceitar silenciosamente).
+const DUE_DATE_OVERRIDE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function validateDueDateOverride(dueDate, seasonYear) {
+  if (dueDate === undefined || dueDate === null || String(dueDate).trim() === '') {
+    return { valid: true, value: null };
+  }
+  if (typeof dueDate !== 'string' || !DUE_DATE_OVERRIDE_RE.test(dueDate)) {
+    return { valid: false, error: 'due_date inválido — use o formato AAAA-MM-DD' };
+  }
+  const [y, m, d] = dueDate.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) {
+    return { valid: false, error: 'due_date inválido — data inexistente' };
+  }
+  if (seasonYear && y !== Number(seasonYear)) {
+    return {
+      valid: false,
+      error: `due_date deve ser do ano da temporada (${seasonYear}) — informado ${y}`,
+    };
+  }
+  return { valid: true, value: dueDate };
+}
+
+// ── Monta as parcelas de um alvo com os dois ajustes de vencimento
+// decididos na continuação da Fase F3 (ver PR #356):
+//
+// 1) Default seguro quando TODAS as parcelas do plano já venceram na
+//    temporada (ex.: campanha/charge rodado em julho pra plano anual que
+//    vence em maio): em vez de gerar a última parcela com a data ORIGINAL
+//    do plano (o que fazia a cobrança nascer já atrasada no mesmo instante
+//    em que a federação a cria), gera com due_date = ÚLTIMO DIA DO MÊS
+//    CORRENTE (mês de `fromDate`, ou de hoje se `fromDate` não for
+//    informado) — a cobrança nasce "a vencer". `dueDateAdjusted=true`
+//    sinaliza esse ajuste pra UI avisar o operador.
+//
+// 2) Override explícito (`dueDateOverride`, já validado por
+//    validateDueDateOverride): substitui o due_date da PRIMEIRA parcela
+//    gerada — única parcela em planos de 1x (anual/cpf); primeira parcela
+//    em planos multi-parcela (semestral/trimestral), as demais mantêm os
+//    meses do plano. `dueDateAdjusted` também fica true nesse caso (o
+//    due_date final difere do natural do plano).
+//
+// Usado tanto pela campanha/lote (karateAnnuityCampaign.js) quanto pelo
+// /charge individual (karateAnnuities.js) — MESMO motor, sem duplicar a
+// lógica de data.
+function buildPlanSpecs({ plan, amount, dueMonths, seasonYear, fromDate, dueDateOverride }) {
+  const restantes = buildInstallmentPlan({ plan, amount, dueMonths, seasonYear, fromDate });
+  let specs;
+  let dueDateAdjusted = false;
+
+  if (restantes.length) {
+    specs = restantes.slice();
+  } else {
+    const completo = buildInstallmentPlan({ plan, amount, dueMonths, seasonYear });
+    if (!completo.length) return { specs: [], dueDateAdjusted: false };
+    const today = fromDate ? new Date(fromDate) : new Date();
+    const safeDueDate = lastDayOfMonthStr(today.getUTCFullYear(), today.getUTCMonth() + 1);
+    const last = completo[completo.length - 1];
+    specs = [{ ...last, due_date: safeDueDate }];
+    dueDateAdjusted = true;
+  }
+
+  if (dueDateOverride) {
+    const first = specs[0];
+    if (first.due_date !== dueDateOverride) dueDateAdjusted = true;
+    specs = specs.slice();
+    specs[0] = { ...first, due_date: dueDateOverride };
+  }
+
+  return { specs, dueDateAdjusted };
+}
+
 // ── Cria as linhas de parcela para um header já existente ───
 async function createInstallmentsForAnnuity(client, { annuityId, federationId, specs }) {
   const inserted = [];
@@ -297,6 +374,8 @@ module.exports = {
   lastDayOfMonthStr,
   getVigentFee,
   buildInstallmentPlan,
+  buildPlanSpecs,
+  validateDueDateOverride,
   createInstallmentsForAnnuity,
   getInstallments,
   deriveInstallmentStatus,

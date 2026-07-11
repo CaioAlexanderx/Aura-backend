@@ -277,6 +277,16 @@ router.post('/annuities/pix-brcode', ...guards.adminOnly(), async (req, res) => 
 // dojô entra no meio do ano, só as parcelas restantes são geradas). Com
 // `amount` explícito, mantém o contrato antigo — 1 parcela única no valor
 // informado (override manual, comportamento idêntico ao pré-F1).
+//
+// Continuação F3 (PR #356): quando NÃO é amount manual, aceita `due_date`
+// opcional (ISO AAAA-MM-DD) que sobrescreve o vencimento da parcela gerada
+// (única em plano anual; primeira em semestral/trimestral — mesma
+// semântica de /campaign e /batch, ver buildPlanSpecs em
+// karateAnnuityService.js). Também aqui: se TODAS as parcelas do plano já
+// venceram na temporada, não erramos mais com 422 "nada a lançar" — geramos
+// a última parcela com due_date = último dia do mês corrente (default
+// seguro, ou o `due_date` informado, se houver), igual à campanha/lote.
+// Resposta inclui `due_date_ajustada` para a UI avisar o operador.
 router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req, res) => {
   const { id: federationId, dojoId } = req.params;
   const { amount, due_date, reference_period, plan: rawPlan } = req.body || {};
@@ -300,6 +310,14 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
   }
   if (!manualAmount && !HAS_INSTALLMENTS) {
     return res.status(422).json({ error: 'amount obrigatorio e deve ser > 0', code: 'VALIDATION_ERROR' });
+  }
+  let dueDateOverride = null;
+  if (!manualAmount) {
+    const dueDateCheck = annuitySvc.validateDueDateOverride(due_date, parseInt(reference_period, 10) || new Date().getFullYear());
+    if (!dueDateCheck.valid) {
+      return res.status(422).json({ error: dueDateCheck.error, code: 'VALIDATION_ERROR' });
+    }
+    dueDateOverride = dueDateCheck.value;
   }
 
   const client = await db.connect();
@@ -336,8 +354,10 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
       });
     }
 
-    // Monta as parcelas: override manual (1 parcela) ou plano vigente (N parcelas).
+    // Monta as parcelas: override manual (1 parcela) ou plano vigente (N parcelas,
+    // com default seguro + due_date override — ver buildPlanSpecs).
     let specs;
+    let dueDateAdjusted = false;
     if (manualAmount) {
       specs = [{ seq: 1, amount: Number(amount), due_date }];
     } else {
@@ -350,13 +370,15 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
           code: 'VALIDATION_ERROR',
         });
       }
-      specs = annuitySvc.buildInstallmentPlan({
-        plan, amount: fee.amount, dueMonths: fee.due_months, seasonYear, fromDate: new Date(),
+      const built = annuitySvc.buildPlanSpecs({
+        plan, amount: fee.amount, dueMonths: fee.due_months, seasonYear, fromDate: new Date(), dueDateOverride,
       });
+      specs = built.specs;
+      dueDateAdjusted = built.dueDateAdjusted;
       if (!specs.length) {
         await client.query('ROLLBACK');
         return res.status(422).json({
-          error: 'Todas as parcelas do plano já venceram para este período — nada a lançar.',
+          error: `Não foi possível montar o plano de parcelas para '${plan}' (fee sem due_months válido).`,
           code: 'VALIDATION_ERROR',
         });
       }
@@ -403,6 +425,7 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
             id: i.id, seq: i.seq, amount: parseFloat(i.amount), due_date: i.due_date,
             paid_at: i.paid_at, status: i.status, transaction_id: i.transaction_id,
           })),
+          due_date_ajustada: dueDateAdjusted,
           paid_total,
           total,
         });
@@ -1570,6 +1593,12 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
 // karate_annual_fees. Cria header (practitioner_id) + N parcelas (mesmo
 // mecanismo do dojô). Com `amount` explícito, mantém o contrato antigo (1
 // parcela única no valor informado).
+//
+// Continuação F3 (PR #356): mesmas regras do /charge de dojô — `due_date`
+// opcional sobrescreve o vencimento da parcela gerada, e "todas as
+// parcelas já venceram" não erra mais com 422: gera a última parcela com
+// due_date = fim do mês corrente (default seguro) ou o `due_date`
+// informado. Ver buildPlanSpecs em karateAnnuityService.js.
 router.post('/annuities/cpf/:practitionerId/charge', ...guards.adminOnly(), async (req, res) => {
   const { id: federationId, practitionerId } = req.params;
   const { amount, due_date, reference_period, plan: rawPlan } = req.body || {};
@@ -1593,6 +1622,14 @@ router.post('/annuities/cpf/:practitionerId/charge', ...guards.adminOnly(), asyn
   }
   if (!manualAmount && !HAS_INSTALLMENTS) {
     return res.status(422).json({ error: 'amount obrigatorio e deve ser > 0', code: 'VALIDATION_ERROR' });
+  }
+  let dueDateOverride = null;
+  if (!manualAmount) {
+    const dueDateCheck = annuitySvc.validateDueDateOverride(due_date, parseInt(reference_period, 10) || new Date().getFullYear());
+    if (!dueDateCheck.valid) {
+      return res.status(422).json({ error: dueDateCheck.error, code: 'VALIDATION_ERROR' });
+    }
+    dueDateOverride = dueDateCheck.value;
   }
 
   const client = await db.connect();
@@ -1630,6 +1667,7 @@ router.post('/annuities/cpf/:practitionerId/charge', ...guards.adminOnly(), asyn
         }
 
         let specs;
+        let dueDateAdjusted = false;
         if (manualAmount) {
           specs = [{ seq: 1, amount: Number(amount), due_date }];
         } else {
@@ -1642,13 +1680,15 @@ router.post('/annuities/cpf/:practitionerId/charge', ...guards.adminOnly(), asyn
               code: 'VALIDATION_ERROR',
             });
           }
-          specs = annuitySvc.buildInstallmentPlan({
-            plan, amount: fee.amount, dueMonths: fee.due_months, seasonYear, fromDate: new Date(),
+          const built = annuitySvc.buildPlanSpecs({
+            plan, amount: fee.amount, dueMonths: fee.due_months, seasonYear, fromDate: new Date(), dueDateOverride,
           });
+          specs = built.specs;
+          dueDateAdjusted = built.dueDateAdjusted;
           if (!specs.length) {
             await client.query('ROLLBACK');
             return res.status(422).json({
-              error: 'Todas as parcelas do plano já venceram para este período — nada a lançar.',
+              error: `Não foi possível montar o plano de parcelas para '${plan}' (fee sem due_months válido).`,
               code: 'VALIDATION_ERROR',
             });
           }
@@ -1689,6 +1729,7 @@ router.post('/annuities/cpf/:practitionerId/charge', ...guards.adminOnly(), asyn
             id: i.id, seq: i.seq, amount: parseFloat(i.amount), due_date: i.due_date,
             paid_at: i.paid_at, status: i.status, transaction_id: i.transaction_id,
           })),
+          due_date_ajustada: dueDateAdjusted,
           paid_total,
           total,
         });

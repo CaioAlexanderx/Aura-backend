@@ -302,6 +302,60 @@ describe('POST /financial/annuities/campaign/preview', () => {
       });
   });
 
+  it('devolve due_date (já com o default seguro aplicado) e due_date_ajustada por alvo, prontos pra UI mostrar antes de confirmar', (done) => {
+    const { client } = makeFakeDb({
+      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Central', is_active: true }],
+      fees: [{ federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] }],
+    });
+    db.query.mockImplementation(client.query);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign/preview`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: 2026, scope: 'dojos' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        // fee vence em maio; "hoje" (execução real) já passou de maio/2026
+        // → default seguro: due_date = fim do mês corrente, ajuste sinalizado.
+        expect(res.body.dojos[0].due_date_ajustada).toBe(true);
+        expect(res.body.dojos[0].due_date.slice(5, 7)).toBe(String(new Date().getUTCMonth() + 1).padStart(2, '0'));
+        done();
+      });
+  });
+
+  it('preview aceita due_date opcional e devolve o MESMO valor que /campaign vai usar de fato', (done) => {
+    const { client } = makeFakeDb({
+      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Central', is_active: true }],
+      fees: [{ federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] }],
+    });
+    db.query.mockImplementation(client.query);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign/preview`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: 2026, scope: 'dojos', due_date: '2026-10-05' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.dojos[0].due_date).toBe('2026-10-05');
+        expect(res.body.dojos[0].due_date_ajustada).toBe(true);
+        done();
+      });
+  });
+
+  it('preview: 422 quando due_date é de ano diferente da temporada', (done) => {
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign/preview`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: 2026, scope: 'both', due_date: '2030-01-01' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        done();
+      });
+  });
+
   it('422 quando year ausente/ inválido', (done) => {
     request(app)
       .post(`/federation/${FED_ID}/financial/annuities/campaign/preview`)
@@ -444,6 +498,54 @@ describe('POST /financial/annuities/campaign', () => {
         expect(d1.plan).toBe('anual');
         expect(d1.installments_count).toBe(1);
         expect(d1.total).toBe(500);
+        // continuação F3: fee com due_months=[5] e "hoje" (execução real)
+        // depois de maio → plano já venceu → default seguro aplicado.
+        expect(d1.due_date_ajustada).toBe(true);
+        expect(d1.due_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        expect(d1.due_date.slice(5, 7)).toBe(String(new Date().getUTCMonth() + 1).padStart(2, '0'));
+        done();
+      });
+  });
+
+  it('due_date (override explícito) sobrescreve o vencimento gerado para TODOS os alvos da rodada — dojôs e praticantes', (done) => {
+    const { client } = makeFakeDb(baseSeed());
+    db.connect.mockResolvedValue(client);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: 2026, scope: 'both', due_date: '2026-09-15' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        expect(res.body.created).toHaveLength(4);
+        expect(res.body.created.every((c) => c.due_date === '2026-09-15')).toBe(true);
+        expect(res.body.created.every((c) => c.due_date_ajustada === true)).toBe(true);
+        done();
+      });
+  });
+
+  it('422 quando due_date é de ano diferente da temporada', (done) => {
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: 2026, scope: 'both', due_date: '2027-01-10' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        expect(res.body.code).toBe('VALIDATION_ERROR');
+        done();
+      });
+  });
+
+  it('422 quando due_date tem formato inválido', (done) => {
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: 2026, scope: 'both', due_date: '15/09/2026' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
         done();
       });
   });
@@ -567,46 +669,102 @@ describe('POST /financial/annuities/batch', () => {
         done();
       });
   });
+
+  it('due_date (override explícito) sobrescreve o vencimento gerado no /batch — mesma semântica do /campaign', (done) => {
+    const { client } = makeFakeDb(baseSeed());
+    db.connect.mockResolvedValue(client);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/batch`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({
+        year: 2026,
+        targets: [{ type: 'dojo', id: 'd1' }, { type: 'practitioner', id: 'p1' }],
+        due_date: '2026-10-20',
+      })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        expect(res.body.created).toHaveLength(2);
+        expect(res.body.created.every((c) => c.due_date === '2026-10-20')).toBe(true);
+        expect(res.body.created.every((c) => c.due_date_ajustada === true)).toBe(true);
+        done();
+      });
+  });
+
+  it('422 no /batch quando due_date é de ano diferente da temporada', (done) => {
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/batch`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: 2026, targets: [{ type: 'dojo', id: 'd1' }], due_date: '2031-05-05' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        done();
+      });
+  });
 });
 
 // ============================================================
-// buildCampaignSpecs — "todas as parcelas já venceram → gera a última"
-// (decisão de produto F3 desta fase, ver PR)
+// buildCampaignSpecs — continuação F3 (PR #356): "todas as parcelas já
+// venceram" ganha DEFAULT SEGURO (due_date = fim do mês corrente, não a
+// data original do plano — a cobrança nasce "a vencer") + due_date
+// opcional editável pela federação. `usedLastInstallmentFallback` foi
+// renomeado para `due_date_ajustada` (nome mais claro pra UI avisar o
+// operador quando o vencimento não é o natural do plano).
 // ============================================================
 describe('buildCampaignSpecs (helper puro exposto via router.__testables)', () => {
   const { buildCampaignSpecs } = campaignRouter.__testables;
 
-  it('quando há parcelas restantes, usa o comportamento normal (igual ao /charge individual)', () => {
-    const { specs, usedLastInstallmentFallback } = buildCampaignSpecs({
+  it('quando há parcelas restantes, usa o comportamento normal (igual ao /charge individual) — sem ajuste', () => {
+    const { specs, due_date_ajustada } = buildCampaignSpecs({
       plan: 'trimestral', amount: 150, dueMonths: [2, 5, 8, 11], seasonYear: 2026,
     });
     // "hoje" nos testes é a data real de execução — as parcelas futuras
     // relativas a hoje devem aparecer normalmente.
-    expect(usedLastInstallmentFallback).toBe(false);
+    expect(due_date_ajustada).toBe(false);
     expect(Array.isArray(specs)).toBe(true);
   });
 
-  it('quando TODAS as parcelas do plano já venceram, gera só a última — não deixa o alvo sem cobrança', () => {
+  it('default seguro: quando TODAS as parcelas do plano já venceram, gera só a última com due_date = FIM DO MÊS CORRENTE — não deixa o alvo sem cobrança e não nasce atrasada', () => {
     // Plano fictício com vencimento num mês certamente já passado em
-    // qualquer execução real (janeiro de um ano bem anterior seria inválido
-    // pra buildInstallmentPlan pois usa seasonYear fixo) — simulamos isso
-    // fixando seasonYear no passado distante, então TODOS os due_months
-    // caem antes de "hoje".
+    // qualquer execução real — simulamos isso fixando seasonYear no
+    // passado distante, então TODOS os due_months caem antes de "hoje".
     const pastYear = 2000;
-    const { specs, usedLastInstallmentFallback } = buildCampaignSpecs({
+    const now = new Date();
+    const expectedSafeDueDate = require('../src/services/karateAnnuityService')
+      .lastDayOfMonthStr(now.getUTCFullYear(), now.getUTCMonth() + 1);
+
+    const { specs, due_date_ajustada } = buildCampaignSpecs({
       plan: 'trimestral', amount: 150, dueMonths: [2, 5, 8, 11], seasonYear: pastYear,
     });
-    expect(usedLastInstallmentFallback).toBe(true);
+    expect(due_date_ajustada).toBe(true);
     expect(specs).toHaveLength(1);
-    expect(specs[0]).toEqual({ seq: 4, amount: 150, due_date: `${pastYear}-11-30` });
+    // seq preserva a posição no plano completo (4ª parcela), mas o
+    // due_date NÃO é mais `${pastYear}-11-30` (que nasceria atrasada) —
+    // é o fim do mês corrente.
+    expect(specs[0]).toEqual({ seq: 4, amount: 150, due_date: expectedSafeDueDate });
   });
 
-  it('plano anual (dojô padrão da campanha) com vencimento já passado gera a única parcela existente', () => {
+  it('plano anual (dojô/praticante padrão da campanha) com vencimento já passado gera a única parcela existente, a vencer no fim do mês corrente', () => {
     const pastYear = 2000;
-    const { specs, usedLastInstallmentFallback } = buildCampaignSpecs({
+    const now = new Date();
+    const expectedSafeDueDate = require('../src/services/karateAnnuityService')
+      .lastDayOfMonthStr(now.getUTCFullYear(), now.getUTCMonth() + 1);
+
+    const { specs, due_date_ajustada } = buildCampaignSpecs({
       plan: 'anual', amount: 500, dueMonths: [5], seasonYear: pastYear,
     });
-    expect(usedLastInstallmentFallback).toBe(true);
-    expect(specs).toEqual([{ seq: 1, amount: 500, due_date: `${pastYear}-05-31` }]);
+    expect(due_date_ajustada).toBe(true);
+    expect(specs).toEqual([{ seq: 1, amount: 500, due_date: expectedSafeDueDate }]);
+  });
+
+  it('due_date override é respeitado mesmo no cenário de default seguro (plano 100% vencido)', () => {
+    const pastYear = 2000;
+    const { specs, due_date_ajustada } = buildCampaignSpecs({
+      plan: 'anual', amount: 500, dueMonths: [5], seasonYear: pastYear, dueDateOverride: '2099-09-10',
+    });
+    expect(specs).toEqual([{ seq: 1, amount: 500, due_date: '2099-09-10' }]);
+    expect(due_date_ajustada).toBe(true);
   });
 });

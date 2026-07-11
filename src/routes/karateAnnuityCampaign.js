@@ -33,16 +33,22 @@
 //   Praticante: customers.is_active = true E karate_current_belt.belt_level='preta'
 //               E SEM header em karate_dojo_annuity_history para (practitioner_id, year)
 //
-// Geração de parcelas: reusa karateAnnuityService.buildInstallmentPlan (a
-// MESMA lógica de data/valor do /charge individual — não duplicar). A única
-// diferença de comportamento em relação ao /charge manual (Fase F1) é
-// PROPOSITAL desta fase (ver PR): se TODAS as parcelas do plano já venceram
-// na temporada (ex.: campanha rodada em julho para um plano anual com
-// vencimento em maio), o /charge individual falha alto (422, decisão de
-// quem clicou 1 vez). Já a campanha/lote NUNCA deixa um elegível sem
-// nenhuma cobrança silenciosamente — gera só a ÚLTIMA parcela do plano
-// nesse caso (buildCampaignSpecs → usedLastInstallmentFallback=true no item
-// criado, para o front sinalizar isso ao operador).
+// Geração de parcelas: reusa karateAnnuityService.buildPlanSpecs (a MESMA
+// lógica de data/valor do /charge individual — não duplicar; ver PR #356
+// "continuação F3"). Se TODAS as parcelas do plano já venceram na temporada
+// (ex.: campanha rodada em julho para um plano anual com vencimento em
+// maio), NUNCA deixamos um elegível sem nenhuma cobrança silenciosamente —
+// gera só a ÚLTIMA parcela do plano, mas com due_date = ÚLTIMO DIA DO MÊS
+// CORRENTE (default seguro: a cobrança nasce "a vencer", não atrasada no
+// mesmo instante em que é criada — decisão de produto que substitui o
+// fallback anterior, que reusava a data original do plano). A federação
+// também pode informar `due_date` explicitamente (POST .../campaign,
+// .../batch e o /charge individual aceitam o campo) para sobrescrever a
+// data da primeira parcela gerada — ver validateDueDateOverride/
+// buildPlanSpecs em karateAnnuityService.js. Em ambos os casos
+// (default seguro OU override), o item criado marca
+// `due_date_ajustada=true` para o front avisar o operador (esse campo
+// substitui o antigo `usedLastInstallmentFallback` desta fase).
 //
 // Idempotência: pg_advisory_xact_lock(hashtext(federationId||'-campaign-'||year))
 // — MESMO namespace de lock para /campaign e /batch (mesmo motor, mesma
@@ -128,15 +134,16 @@ async function fetchEligiblePractitioners(client, federationId, year, excludeIds
 }
 
 // ── Monta as parcelas de um alvo de campanha (ver nota no cabeçalho sobre
-// o fallback "todas as parcelas já venceram → gera a última").
-function buildCampaignSpecs({ plan, amount, dueMonths, seasonYear }) {
-  const restantes = annuitySvc.buildInstallmentPlan({
-    plan, amount, dueMonths, seasonYear, fromDate: new Date(),
+// o default seguro "todas as parcelas já venceram → gera a última, a
+// vencer" e o override explícito de due_date). Wrapper fino sobre
+// annuitySvc.buildPlanSpecs — MESMO motor usado pelo /charge individual;
+// mantém o nome `buildCampaignSpecs` por compatibilidade com
+// router.__testables / testes existentes.
+function buildCampaignSpecs({ plan, amount, dueMonths, seasonYear, dueDateOverride }) {
+  const { specs, dueDateAdjusted } = annuitySvc.buildPlanSpecs({
+    plan, amount, dueMonths, seasonYear, fromDate: new Date(), dueDateOverride,
   });
-  if (restantes.length) return { specs: restantes, usedLastInstallmentFallback: false };
-  const completo = annuitySvc.buildInstallmentPlan({ plan, amount, dueMonths, seasonYear });
-  if (!completo.length) return { specs: [], usedLastInstallmentFallback: false };
-  return { specs: [completo[completo.length - 1]], usedLastInstallmentFallback: true };
+  return { specs, due_date_ajustada: dueDateAdjusted };
 }
 
 function specsTotal(specs) {
@@ -162,7 +169,7 @@ async function withSavepoint(client, label, fn) {
 // elegível. Reaproveita createInstallmentsForAnnuity / createTransactions-
 // ForInstallments / syncAnnuityHeaderRollup — MESMO motor do /charge
 // individual (karateAnnuities.js), sem duplicar a lógica de geração.
-async function createAnnuityForTarget(client, { type, id, name, federationId, year, plan, fee }) {
+async function createAnnuityForTarget(client, { type, id, name, federationId, year, plan, fee, dueDateOverride }) {
   const dojoId = type === 'dojo' ? id : null;
   const practitionerId = type === 'practitioner' ? id : null;
 
@@ -188,8 +195,8 @@ async function createAnnuityForTarget(client, { type, id, name, federationId, ye
   }
 
   const seasonYear = parseInt(year, 10) || new Date().getFullYear();
-  const { specs, usedLastInstallmentFallback } = buildCampaignSpecs({
-    plan, amount: fee.amount, dueMonths: fee.due_months, seasonYear,
+  const { specs, due_date_ajustada } = buildCampaignSpecs({
+    plan, amount: fee.amount, dueMonths: fee.due_months, seasonYear, dueDateOverride,
   });
   if (!specs.length) {
     return { status: 'error', reason: 'Não foi possível montar o plano de parcelas (fee sem due_months válido)' };
@@ -214,7 +221,8 @@ async function createAnnuityForTarget(client, { type, id, name, federationId, ye
     status: 'created',
     annuity_id: annuityId,
     installments_count: installments.length,
-    used_last_installment_fallback: usedLastInstallmentFallback,
+    due_date: specs[0].due_date,
+    due_date_ajustada,
     total: specsTotal(specs),
   };
 }
@@ -233,7 +241,8 @@ async function runTarget(client, target, buckets) {
         type: target.type, id: target.id, name: target.name,
         annuity_id: r.annuity_id, plan: target.plan,
         installments_count: r.installments_count,
-        used_last_installment_fallback: r.used_last_installment_fallback,
+        due_date: r.due_date,
+        due_date_ajustada: r.due_date_ajustada,
         total: r.total,
       });
     } else if (r.status === 'skipped') {
@@ -295,14 +304,19 @@ async function loadTargetInfo(client, type, id, federationId) {
 
 // ────────────────────────────────────────────────────────────────
 // POST /annuities/campaign/preview
-// { year, scope: 'dojos'|'practitioners'|'both' }
+// { year, scope: 'dojos'|'practitioners'|'both', due_date? }
 // Read-only — é o preview que protege o usuário: os números aqui são os que
 // a UI mostra antes do commit, então usam a MESMA query de elegibilidade e
-// o MESMO cálculo de parcelas que /campaign vai usar de fato.
+// o MESMO cálculo de parcelas (com o MESMO due_date, se informado) que
+// /campaign vai usar de fato. Cada alvo devolve `due_date` (o vencimento
+// que SERÁ usado, já com o default seguro aplicado quando todas as
+// parcelas do plano já venceram) e `due_date_ajustada` (true quando esse
+// due_date difere do vencimento natural do plano — default seguro ou
+// override) para a UI avisar o operador antes de confirmar.
 // ────────────────────────────────────────────────────────────────
 router.post('/annuities/campaign/preview', ...guards.adminOnly(), async (req, res) => {
   const federationId = req.params.id;
-  const { year: rawYear, scope: rawScope } = req.body || {};
+  const { year: rawYear, scope: rawScope, due_date: rawDueDate } = req.body || {};
   const year = normalizeYear(rawYear);
   const scope = VALID_SCOPES.includes(rawScope) ? rawScope : null;
 
@@ -317,6 +331,11 @@ router.post('/annuities/campaign/preview', ...guards.adminOnly(), async (req, re
   }
 
   const seasonYear = parseInt(year, 10);
+  const dueDateCheck = annuitySvc.validateDueDateOverride(rawDueDate, seasonYear);
+  if (!dueDateCheck.valid) {
+    return res.status(422).json({ error: dueDateCheck.error, code: 'VALIDATION_ERROR' });
+  }
+  const dueDateOverride = dueDateCheck.value;
   const wantDojos = scope === 'dojos' || scope === 'both';
   const wantPractitioners = scope === 'practitioners' || scope === 'both';
 
@@ -327,23 +346,44 @@ router.post('/annuities/campaign/preview', ...guards.adminOnly(), async (req, re
     if (wantDojos) {
       const rows = await fetchEligibleDojos(null, federationId, year, []);
       const fee = await annuitySvc.getVigentFee(null, federationId, 'dojo', 'anual');
-      const amount = fee
-        ? specsTotal(buildCampaignSpecs({ plan: 'anual', amount: fee.amount, dueMonths: fee.due_months, seasonYear }).specs)
-        : 0;
-      dojos = rows.map((r) => ({ dojo_id: r.dojo_id, name: r.name, plan_default: 'anual', amount }));
+      let amount = 0;
+      let dueDate = null;
+      let dueDateAdjusted = false;
+      if (fee) {
+        const built = buildCampaignSpecs({
+          plan: 'anual', amount: fee.amount, dueMonths: fee.due_months, seasonYear, dueDateOverride,
+        });
+        amount = specsTotal(built.specs);
+        dueDate = built.specs[0] ? built.specs[0].due_date : null;
+        dueDateAdjusted = built.due_date_ajustada;
+      }
+      dojos = rows.map((r) => ({
+        dojo_id: r.dojo_id, name: r.name, plan_default: 'anual', amount,
+        due_date: dueDate, due_date_ajustada: dueDateAdjusted,
+      }));
     }
 
     if (wantPractitioners) {
       const rows = await fetchEligiblePractitioners(null, federationId, year, []);
       const fee = await annuitySvc.getVigentFee(null, federationId, 'cpf', 'anual');
-      const amount = fee
-        ? specsTotal(buildCampaignSpecs({ plan: 'anual', amount: fee.amount, dueMonths: fee.due_months, seasonYear }).specs)
-        : 0;
+      let amount = 0;
+      let dueDate = null;
+      let dueDateAdjusted = false;
+      if (fee) {
+        const built = buildCampaignSpecs({
+          plan: 'anual', amount: fee.amount, dueMonths: fee.due_months, seasonYear, dueDateOverride,
+        });
+        amount = specsTotal(built.specs);
+        dueDate = built.specs[0] ? built.specs[0].due_date : null;
+        dueDateAdjusted = built.due_date_ajustada;
+      }
       practitioners = rows.map((r) => ({
         practitioner_id: r.practitioner_id,
         name: r.name,
         karate_registration_number: r.karate_registration_number || null,
         amount,
+        due_date: dueDate,
+        due_date_ajustada: dueDateAdjusted,
       }));
     }
 
@@ -369,11 +409,23 @@ router.post('/annuities/campaign/preview', ...guards.adminOnly(), async (req, re
 
 // ────────────────────────────────────────────────────────────────
 // POST /annuities/campaign
-// { year, scope: 'dojos'|'practitioners'|'both', exclude: { dojo_ids[], practitioner_ids[] } }
+// { year, scope: 'dojos'|'practitioners'|'both', exclude: { dojo_ids[], practitioner_ids[] }, due_date? }
+//
+// `due_date` (opcional, ISO AAAA-MM-DD) sobrescreve o vencimento da
+// PRIMEIRA parcela gerada de CADA alvo processado nesta chamada (dojôs E
+// praticantes, se scope='both') — mesma semântica usada pelo /batch e pelo
+// /charge individual (ver buildPlanSpecs em karateAnnuityService.js).
+// Semântica adotada (documentada por ser potencialmente ambígua — ver PR):
+// um único `due_date` por chamada, aplicado uniformemente a todos os alvos
+// da rodada, e não um mapa de overrides por alvo — a campanha já processa
+// N alvos elegíveis de uma vez sem que o operador escolha individualmente
+// quem entra, então "a rodada vence em X" é a única leitura consistente com
+// o restante do contrato do endpoint (scope + exclude, não uma lista
+// endereçável de alvos). Precisa ser do mesmo ano da temporada (`year`).
 // ────────────────────────────────────────────────────────────────
 router.post('/annuities/campaign', ...guards.adminOnly(), async (req, res) => {
   const federationId = req.params.id;
-  const { year: rawYear, scope: rawScope, exclude } = req.body || {};
+  const { year: rawYear, scope: rawScope, exclude, due_date: rawDueDate } = req.body || {};
   const year = normalizeYear(rawYear);
   const scope = VALID_SCOPES.includes(rawScope) ? rawScope : null;
 
@@ -386,6 +438,11 @@ router.post('/annuities/campaign', ...guards.adminOnly(), async (req, res) => {
       code: 'VALIDATION_ERROR',
     });
   }
+  const dueDateCheck = annuitySvc.validateDueDateOverride(rawDueDate, parseInt(year, 10));
+  if (!dueDateCheck.valid) {
+    return res.status(422).json({ error: dueDateCheck.error, code: 'VALIDATION_ERROR' });
+  }
+  const dueDateOverride = dueDateCheck.value;
 
   const excludeDojoIds = toUuidArray(exclude && exclude.dojo_ids);
   const excludePractitionerIds = toUuidArray(exclude && exclude.practitioner_ids);
@@ -414,7 +471,7 @@ router.post('/annuities/campaign', ...guards.adminOnly(), async (req, res) => {
       const dojos = await fetchEligibleDojos(client, federationId, year, excludeDojoIds);
       for (const d of dojos) {
         await runTarget(client, {
-          type: 'dojo', id: d.dojo_id, name: d.name, federationId, year, plan: 'anual', fee: dojoFee,
+          type: 'dojo', id: d.dojo_id, name: d.name, federationId, year, plan: 'anual', fee: dojoFee, dueDateOverride,
         }, { created, skipped, errors });
       }
     }
@@ -423,7 +480,7 @@ router.post('/annuities/campaign', ...guards.adminOnly(), async (req, res) => {
       const practs = await fetchEligiblePractitioners(client, federationId, year, excludePractitionerIds);
       for (const p of practs) {
         await runTarget(client, {
-          type: 'practitioner', id: p.practitioner_id, name: p.name, federationId, year, plan: 'anual', fee: practFee,
+          type: 'practitioner', id: p.practitioner_id, name: p.name, federationId, year, plan: 'anual', fee: practFee, dueDateOverride,
         }, { created, skipped, errors });
       }
     }
@@ -441,15 +498,19 @@ router.post('/annuities/campaign', ...guards.adminOnly(), async (req, res) => {
 
 // ────────────────────────────────────────────────────────────────
 // POST /annuities/batch
-// { targets: [{ type: 'dojo'|'practitioner', id }], year, plan? }
+// { targets: [{ type: 'dojo'|'practitioner', id }], year, plan?, due_date? }
 // Mesmo motor da campanha, para a multi-seleção manual da tabela. `plan`
 // (opcional, default 'anual') só afeta alvos type='dojo' — CPF só tem o
 // plano 'anual'. Cada alvo é REVALIDADO contra o banco (ver loadTargetInfo)
-// — nunca confia que a UI só mandou elegíveis.
+// — nunca confia que a UI só mandou elegíveis. `due_date` (opcional, ISO
+// AAAA-MM-DD) segue a MESMA semântica de /campaign: um único valor por
+// chamada, aplicado à primeira parcela gerada de CADA alvo do lote (dojô
+// ou praticante) — não um override por linha da tabela. Precisa ser do
+// mesmo ano de `year`.
 // ────────────────────────────────────────────────────────────────
 router.post('/annuities/batch', ...guards.adminOnly(), async (req, res) => {
   const federationId = req.params.id;
-  const { targets, year: rawYear, plan: rawPlan } = req.body || {};
+  const { targets, year: rawYear, plan: rawPlan, due_date: rawDueDate } = req.body || {};
   const year = normalizeYear(rawYear);
 
   if (!year) {
@@ -472,6 +533,11 @@ router.post('/annuities/batch', ...guards.adminOnly(), async (req, res) => {
       code: 'VALIDATION_ERROR',
     });
   }
+  const dueDateCheck = annuitySvc.validateDueDateOverride(rawDueDate, parseInt(year, 10));
+  if (!dueDateCheck.valid) {
+    return res.status(422).json({ error: dueDateCheck.error, code: 'VALIDATION_ERROR' });
+  }
+  const dueDateOverride = dueDateCheck.value;
   const dojoPlan = rawPlan || 'anual';
 
   const client = await db.connect();
@@ -520,7 +586,7 @@ router.post('/annuities/batch', ...guards.adminOnly(), async (req, res) => {
       }
 
       await runTarget(client, {
-        type: t.type, id: t.id, name: info.name, federationId, year, plan, fee,
+        type: t.type, id: t.id, name: info.name, federationId, year, plan, fee, dueDateOverride,
       }, { created, skipped, errors });
     }
 

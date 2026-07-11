@@ -273,8 +273,23 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
         });
     });
 
-    it('retorna 422 sem amount', (done) => {
+    it('retorna 422 sem amount quando não há fee vigente pro plano (fluxo por plano, sem override manual)', (done) => {
+      // Continuação F3 (PR #356): sem `amount`, o handler NÃO exige mais
+      // amount manual (usa a fee vigente do plano) — o 422 legítimo aqui é
+      // "fee não configurada", não "amount ausente" per se. Mock próprio
+      // (sobrepõe o db.connect do beforeEach só para esta chamada) pra não
+      // depender da data real de execução: BEGIN → SELECT dojô → advisory
+      // lock → checa existing → getVigentFee (sem linha = sem fee).
       jest.clearAllMocks();
+      const customClient = { query: jest.fn(), release: jest.fn() };
+      customClient.query
+        .mockResolvedValueOnce({})                                          // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [] })                                 // advisory lock
+        .mockResolvedValueOnce({ rows: [] })                                 // check existing
+        .mockResolvedValueOnce({ rows: [] });                                // getVigentFee → sem fee configurada
+      db.connect.mockResolvedValueOnce(customClient);
+
       request(app)
         .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
         .set('Authorization', 'Bearer ' + adminToken)
@@ -282,6 +297,127 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
         .end((err, res) => {
           if (err) return done(err);
           expect(res.status).toBe(422);
+          done();
+        });
+    });
+
+    it('continuação F3: plano com TODAS as parcelas já vencidas não erra mais com 422 — cria com due_date = fim do mês corrente (default seguro, due_date_ajustada=true)', (done) => {
+      // Fee vigente com due_months=[5] (maio) — "hoje" (execução real) já
+      // passou de maio/2026, então o plano por padrão está 100% vencido.
+      // Ordem real: BEGIN → SELECT dojô → advisory lock → checa existing →
+      // getVigentFee → INSERT header → INSERT installment → INSERT
+      // transaction → UPDATE installment.transaction_id → SELECT
+      // installments (rollup) → UPDATE header (rollup) → COMMIT.
+      jest.clearAllMocks();
+      const now = new Date();
+      const safeDueDate = require('../src/services/karateAnnuityService')
+        .lastDayOfMonthStr(now.getUTCFullYear(), now.getUTCMonth() + 1);
+      const customClient = { query: jest.fn(), release: jest.fn() };
+      customClient.query
+        .mockResolvedValueOnce({})                                          // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [] })                                 // advisory lock
+        .mockResolvedValueOnce({ rows: [] })                                 // check existing
+        .mockResolvedValueOnce({ rows: [{ id: 'fee-1', amount: 500, due_months: [5] }] }) // getVigentFee
+        .mockResolvedValueOnce({ rows: [{ id: HIST_ID }] })                  // INSERT header
+        .mockResolvedValueOnce({                                            // INSERT installment (seq 1)
+          rows: [{
+            id: 'inst-uuid-002', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: safeDueDate, status: 'pending', paid_at: null,
+            transaction_id: null, payment_method: null,
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [{ id: TX_ID }] })                    // INSERT transaction
+        .mockResolvedValueOnce({})                                          // UPDATE installment.transaction_id
+        .mockResolvedValueOnce({                                            // SELECT installments (rollup)
+          rows: [{
+            id: 'inst-uuid-002', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: safeDueDate, status: 'pending', paid_at: null,
+            transaction_id: TX_ID, payment_method: null,
+          }],
+        })
+        .mockResolvedValueOnce({                                            // UPDATE header (rollup)
+          rows: [{
+            id: HIST_ID, dojo_id: DOJO_ID, reference_period: '2026',
+            amount: 500.00, due_date: safeDueDate, status: 'pending',
+            paid_at: null, transaction_id: TX_ID,
+          }],
+        })
+        .mockResolvedValueOnce({});                                         // COMMIT
+      db.connect.mockResolvedValueOnce(customClient);
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ reference_period: '2026' })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(201);
+          expect(res.body.due_date).toBe(safeDueDate);
+          expect(res.body.due_date_ajustada).toBe(true);
+          done();
+        });
+    });
+
+    it('continuação F3: due_date opcional sobrescreve o vencimento da parcela gerada pelo plano', (done) => {
+      jest.clearAllMocks();
+      const customClient = { query: jest.fn(), release: jest.fn() };
+      customClient.query
+        .mockResolvedValueOnce({})                                          // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [] })                                 // advisory lock
+        .mockResolvedValueOnce({ rows: [] })                                 // check existing
+        .mockResolvedValueOnce({ rows: [{ id: 'fee-1', amount: 500, due_months: [5] }] }) // getVigentFee
+        .mockResolvedValueOnce({ rows: [{ id: HIST_ID }] })                  // INSERT header
+        .mockResolvedValueOnce({                                            // INSERT installment (seq 1)
+          rows: [{
+            id: 'inst-uuid-003', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: '2026-08-20', status: 'pending', paid_at: null,
+            transaction_id: null, payment_method: null,
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [{ id: TX_ID }] })                    // INSERT transaction
+        .mockResolvedValueOnce({})                                          // UPDATE installment.transaction_id
+        .mockResolvedValueOnce({                                            // SELECT installments (rollup)
+          rows: [{
+            id: 'inst-uuid-003', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: '2026-08-20', status: 'pending', paid_at: null,
+            transaction_id: TX_ID, payment_method: null,
+          }],
+        })
+        .mockResolvedValueOnce({                                            // UPDATE header (rollup)
+          rows: [{
+            id: HIST_ID, dojo_id: DOJO_ID, reference_period: '2026',
+            amount: 500.00, due_date: '2026-08-20', status: 'pending',
+            paid_at: null, transaction_id: TX_ID,
+          }],
+        })
+        .mockResolvedValueOnce({});                                         // COMMIT
+      db.connect.mockResolvedValueOnce(customClient);
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ reference_period: '2026', due_date: '2026-08-20' })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(201);
+          expect(res.body.due_date).toBe('2026-08-20');
+          expect(res.body.due_date_ajustada).toBe(true);
+          done();
+        });
+    });
+
+    it('continuação F3: 422 quando due_date informado é de ano diferente da temporada (reference_period)', (done) => {
+      jest.clearAllMocks();
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ reference_period: '2026', due_date: '2027-03-01' })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(422);
+          expect(res.body.code).toBe('VALIDATION_ERROR');
           done();
         });
     });
