@@ -8,6 +8,18 @@
 //              é mismatch de token, header com nome diferente, ou Asaas
 //              pausou a integracao). Logs aparecem no Railway.
 //
+// FIX (11/07/2026) — PAYMENT_DELETED destruia billing de cliente adimplente:
+//   Apagar uma cobranca avulsa/pendente/vencida no painel do Asaas dispara
+//   PAYMENT_DELETED. O mapa mandava isso pra billing_status='cancelled' e o
+//   UPDATE gravava last_payment_date = payment.paymentDate (NULL num pagamento
+//   deletado). Cliente em dia virava 'cancelled' com last_payment_date NULL,
+//   caia no checkout e perdia os gates de plano (Encanto Presentes: 15/06 e
+//   11/07). Agora:
+//     - PAYMENT_DELETED e NEUTRO: loga em webhook_logs, nao toca em companies.
+//       Cancelamento real vem de SUBSCRIPTION_DELETED/INACTIVATED.
+//     - last_payment_date so e escrito em pagamento efetivo (CONFIRMED/RECEIVED).
+//     - next_billing_date nunca e sobrescrito por NULL (COALESCE).
+//
 // Handles two flows:
 //   1. externalReference = 'digital-order-<uuid>'  → pedido Canal Digital
 //   2. tudo mais                                    → billing de empresa (plano)
@@ -92,13 +104,29 @@ function validateToken(req) {
   }
 }
 
+// 11/07/2026: PAYMENT_DELETED foi REMOVIDO deste mapa de proposito.
+// Apagar uma cobranca no painel NAO e um sinal de que o cliente cancelou a
+// assinatura — e uma operacao administrativa rotineira (limpar duplicada,
+// remover vencida antes de reemitir). Mapea-lo pra 'cancelled' derrubava
+// cliente adimplente pro checkout. Ver STATUS_NEUTRAL_EVENTS abaixo.
 var PAYMENT_STATUS_MAP = {
   PAYMENT_CONFIRMED: 'active',
   PAYMENT_RECEIVED:  'active',
   PAYMENT_OVERDUE:   'overdue',
-  PAYMENT_DELETED:   'cancelled',
   PAYMENT_REFUNDED:  'refunded',
   PAYMENT_CHARGEBACK_REQUESTED: 'chargeback',
+};
+
+// Eventos registrados (auditoria) mas que NAO alteram o billing da empresa.
+var STATUS_NEUTRAL_EVENTS = {
+  PAYMENT_DELETED: true,
+};
+
+// So estes eventos representam dinheiro efetivamente recebido — apenas eles
+// podem escrever last_payment_date.
+var PAID_EVENTS = {
+  PAYMENT_CONFIRMED: true,
+  PAYMENT_RECEIVED:  true,
 };
 
 var ORDER_PAYMENT_MAP = {
@@ -107,6 +135,14 @@ var ORDER_PAYMENT_MAP = {
   PAYMENT_REFUNDED:  'refunded',
   PAYMENT_CHARGEBACK_REQUESTED: 'chargeback',
 };
+
+// Grava o evento cru em webhook_logs. Best-effort — nunca derruba o handler.
+async function logWebhookEvent(companyId, event, payment) {
+  await db.query(
+    'INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at) VALUES ($1, \'asaas\', $2, $3, NOW())',
+    [companyId, event, JSON.stringify(payment)]
+  ).catch(function() {});
+}
 
 router.post('/', async function(req, res) {
   if (!validateToken(req)) {
@@ -127,8 +163,9 @@ router.post('/', async function(req, res) {
 
   // ── 2. Company billing (plano)
   try {
+    var isNeutral = !!STATUS_NEUTRAL_EVENTS[event];
     var newStatus = PAYMENT_STATUS_MAP[event];
-    if (!newStatus) {
+    if (!newStatus && !isNeutral) {
       console.log('[WEBHOOK] Event ' + event + ' nao mapeado — ignorando (mas recebido)');
       return res.status(200).json({ received: true, handled: false, event_ignored: event });
     }
@@ -144,9 +181,35 @@ router.post('/', async function(req, res) {
 
     var company    = result.rows[0];
     var prevStatus = company.billing_status;
+
+    // ── Evento neutro: audita e sai SEM tocar em companies ────
+    // PAYMENT_DELETED cai aqui. Apagar uma cobranca no Asaas nao diz nada
+    // sobre a saude da assinatura do cliente.
+    if (isNeutral) {
+      await logWebhookEvent(company.id, event, payment);
+      console.log('[WEBHOOK] Company ' + company.id + ' — evento neutro ' + event +
+                  ' registrado; billing_status preservado em ' + prevStatus);
+      return res.status(200).json({
+        received: true,
+        handled: true,
+        status_changed: false,
+        status: prevStatus,
+        event_neutral: event,
+      });
+    }
+
+    // last_payment_date so avanca em pagamento efetivo; nos demais eventos
+    // (OVERDUE, REFUNDED, CHARGEBACK) preserva o que ja estava la.
+    // next_billing_date nunca e sobrescrito por NULL.
+    var isPaid = !!PAID_EVENTS[event];
     await db.query(
-      'UPDATE companies SET billing_status=$1, last_payment_date=$2, next_billing_date=$3, updated_at=NOW() WHERE id=$4',
-      [newStatus, payment.paymentDate || null, payment.dueDate || null, company.id]
+      `UPDATE companies
+          SET billing_status    = $1,
+              last_payment_date = CASE WHEN $2 THEN COALESCE($3, last_payment_date) ELSE last_payment_date END,
+              next_billing_date = COALESCE($4, next_billing_date),
+              updated_at        = NOW()
+        WHERE id = $5`,
+      [newStatus, isPaid, payment.paymentDate || null, payment.dueDate || null, company.id]
     );
 
     // ── MULTI-CNPJ: propaga pra filhas se for primary ────
@@ -172,10 +235,7 @@ router.post('/', async function(req, res) {
       }
     }
 
-    await db.query(
-      'INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at) VALUES ($1, \'asaas\', $2, $3, NOW())',
-      [company.id, event, JSON.stringify(payment)]
-    ).catch(function() {});
+    await logWebhookEvent(company.id, event, payment);
 
     console.log('[WEBHOOK] Company ' + company.id + ' billing: ' + prevStatus + ' -> ' + newStatus);
     res.status(200).json({
@@ -225,11 +285,7 @@ async function handleDigitalOrderPayment(req, res, event, payment, extRef) {
       WHERE id = $4
     `, [newPaymentStatus, payment.id, shouldConfirmOrder, orderId]);
 
-    await db.query(
-      `INSERT INTO webhook_logs (company_id, provider, event, payload, processed_at)
-       VALUES ($1, 'asaas', $2, $3, NOW())`,
-      [order.company_id, event, JSON.stringify(payment)]
-    ).catch(() => {});
+    await logWebhookEvent(order.company_id, event, payment);
 
     console.log(`[WEBHOOK] digital_order ${orderId}: payment -> ${newPaymentStatus}` +
       (shouldConfirmOrder ? ', status -> confirmed' : ''));
