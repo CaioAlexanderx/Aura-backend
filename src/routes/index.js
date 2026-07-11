@@ -159,6 +159,10 @@ router.use('/federation/:id/practitioners',        require('./karatePractitioner
 // e o caminho /:dojoId/export-data não colide com as rotas de karateDojos.
 router.use('/federation/:id/dojos',                require('./karateExportDojo'));
 router.use('/federation/:id/dojos',                require('./karateDojos'));
+// Redistribuição na inativação de dojô: transfere/inativa praticantes em
+// lote e, opcionalmente, inativa o dojô ao final (cascata para quem sobrou).
+//   POST /federation/:id/dojos/:dojoId/redistribute   (staffWrite)
+router.use('/federation/:id/dojos',                require('./karateRosterRedistribute'));
 // Cascata de status dojô→praticantes + validação de quadro (10/07/2026):
 //   POST /federation/:id/dojos/:dojoId/request-roster-update  (adminOnly)
 //   GET  /federation/:id/dojos/:dojoId/roster-validation      (read)
