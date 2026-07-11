@@ -152,6 +152,8 @@ router.use('/federation/:id/practitioners',        require('./karatePractitioner
 // e o caminho /:dojoId/export-data não colide com as rotas de karateDojos.
 router.use('/federation/:id/dojos',                require('./karateExportDojo'));
 router.use('/federation/:id/dojos',                require('./karateDojos'));
+// Fase 4: roster do dojô (2 badges: status + financeiro), via VIEW karate_member_standing.
+router.use('/federation/:id/dojos',                require('./karateDojoRoster'));
 // Fase 2: anexos (documentos/imagens) para dojô e praticante. Mesmo router
 // montado nas duas bases — ele deduz owner_type ('dojo'/'practitioner') pelo
 // req.baseUrl. Paths /:ownerId/documents não colidem com /:dojoId ou
