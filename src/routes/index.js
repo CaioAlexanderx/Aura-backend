@@ -136,6 +136,13 @@ router.use('/public/karate', require('./karatePublicRanking'));
 // POST /public/karate/:slug/dojo/portal/verify-otp
 router.use('/public/karate', require('./karateDojoPublic'));
 
+// ── AURA KARATÊ — Cascata de status dojô→praticantes + validação de quadro (10/07/2026) ──
+// Portal público do sensei (SEM auth — token opaco escopado ao dojô):
+//   GET  /public/roster-update/:token
+//   POST /public/roster-update/:token
+//   GET  /public/roster-update/:token/export
+router.use('/public/roster-update', require('./karateRosterPortalPublic'));
+
 // ── AURA KARATÊ — Track A (backend cadastros) ──────────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
@@ -152,6 +159,10 @@ router.use('/federation/:id/practitioners',        require('./karatePractitioner
 // e o caminho /:dojoId/export-data não colide com as rotas de karateDojos.
 router.use('/federation/:id/dojos',                require('./karateExportDojo'));
 router.use('/federation/:id/dojos',                require('./karateDojos'));
+// Cascata de status dojô→praticantes + validação de quadro (10/07/2026):
+//   POST /federation/:id/dojos/:dojoId/request-roster-update  (adminOnly)
+//   GET  /federation/:id/dojos/:dojoId/roster-validation      (read)
+router.use('/federation/:id/dojos',                require('./karateRosterValidation'));
 // Fase 4: roster do dojô (status + financeiro) — GET /:dojoId/members-standing
 router.use('/federation/:id/dojos',                require('./karateDojoRoster'));
 // Fase 2: anexos (documentos/imagens) para dojô e praticante. Mesmo router

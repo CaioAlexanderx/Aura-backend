@@ -45,6 +45,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
+const crypto = require('crypto');
 const { nextDojoAffiliationId, computeDojoStatus } = require('../services/karateService');
 
 // Colunas de endereço estruturado (compartilhadas com a NF-e).
@@ -517,7 +518,139 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
   }
 });
 
+// ── Cascata de status dojô→praticantes (roster) — 10/07/2026 ────────────
+// Escritas em karate_dojo_roster_events/karate_dojo_roster_validation são
+// best-effort via SAVEPOINT: se a tabela ainda não existir (42P01, deploy
+// parcial — armadilha_schema_pre_migration do CLAUDE.md), fazemos ROLLBACK
+// TO SAVEPOINT e seguimos — a cascata em customers (o núcleo) já rodou e
+// não pode ser derrubada por essas tabelas auxiliares de auditoria/estado.
+async function safeRosterWrite(client, label, fn) {
+  await client.query('SAVEPOINT sp_roster_write');
+  try {
+    await fn();
+    await client.query('RELEASE SAVEPOINT sp_roster_write');
+  } catch (e) {
+    if (e && e.code === '42P01') {
+      await client.query('ROLLBACK TO SAVEPOINT sp_roster_write');
+      console.warn(`[karateDojos] roster write ignorada (schema pendente): ${label}`);
+    } else {
+      throw e;
+    }
+  }
+}
+
+// Inativando o dojô: snapshot de TODOS os customers do dojô, registra
+// evento 'inactivate_cascade' (affected = só quem estava ativo) e desativa
+// esses praticantes.
+async function cascadeInactivateDojo(client, { dojoId, federationId, actorId }) {
+  const snap = await client.query(
+    `SELECT id, is_active FROM customers WHERE dojo_id = $1`,
+    [dojoId]
+  );
+  const affected = snap.rows
+    .filter((r) => r.is_active !== false) // COALESCE(is_active, true) === true
+    .map((r) => ({ student_id: r.id, was_active: true }));
+
+  await safeRosterWrite(client, 'inactivate_cascade event', () => client.query(
+    `INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
+     VALUES ($1, $2, 'inactivate_cascade', $3::jsonb, $4)`,
+    [dojoId, federationId, JSON.stringify(affected), actorId]
+  ));
+
+  await client.query(
+    `UPDATE customers SET is_active = false, updated_at = NOW()
+     WHERE dojo_id = $1 AND COALESCE(is_active, true) = true`,
+    [dojoId]
+  );
+
+  return { affected_count: affected.length };
+}
+
+// Ativando o dojô: restaura SÓ o snapshot do último evento
+// 'inactivate_cascade' (evento 'reactivate_restore') e abre validação de
+// quadro pendente com token opaco de 30 dias (evento 'validation_requested').
+async function cascadeReactivateDojo(client, { dojoId, federationId, actorId }) {
+  let restoredCount = 0;
+  let lastEventRes = { rows: [] };
+
+  await safeRosterWrite(client, 'find last inactivate_cascade', async () => {
+    lastEventRes = await client.query(
+      `SELECT affected FROM karate_dojo_roster_events
+       WHERE dojo_id = $1 AND event = 'inactivate_cascade'
+       ORDER BY created_at DESC LIMIT 1`,
+      [dojoId]
+    );
+  });
+
+  const affected = Array.isArray(lastEventRes.rows[0] && lastEventRes.rows[0].affected)
+    ? lastEventRes.rows[0].affected
+    : [];
+
+  if (affected.length) {
+    // Só os do snapshot — não mexe em praticante que não estava no evento.
+    for (const item of affected) {
+      if (!item || !item.student_id) continue;
+      const wasActive = item.was_active !== false; // default true se ausente
+      const r = await client.query(
+        `UPDATE customers SET is_active = $1, updated_at = NOW()
+         WHERE id = $2 AND dojo_id = $3`,
+        [wasActive, item.student_id, dojoId]
+      );
+      restoredCount += r.rowCount;
+    }
+
+    await safeRosterWrite(client, 'reactivate_restore event', () => client.query(
+      `INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
+       VALUES ($1, $2, 'reactivate_restore', $3::jsonb, $4)`,
+      [dojoId, federationId, JSON.stringify(affected), actorId]
+    ));
+  }
+
+  // Reativação sempre pede confirmação do quadro (mesmo sem snapshot
+  // anterior — federação pode querer validar o quadro atual do dojô).
+  const token = crypto.randomBytes(24).toString('hex');
+  await safeRosterWrite(client, 'validation pending upsert', () => client.query(
+    `INSERT INTO karate_dojo_roster_validation
+       (dojo_id, federation_id, status, requested_at, validated_at, validated_by,
+        token, token_expires_at, updated_at)
+     VALUES ($1, $2, 'pending', NOW(), NULL, NULL, $3, NOW() + INTERVAL '30 days', NOW())
+     ON CONFLICT (dojo_id) DO UPDATE SET
+       federation_id    = EXCLUDED.federation_id,
+       status           = 'pending',
+       requested_at     = NOW(),
+       validated_at     = NULL,
+       validated_by     = NULL,
+       token            = EXCLUDED.token,
+       token_expires_at = EXCLUDED.token_expires_at,
+       updated_at       = NOW()`,
+    [dojoId, federationId, token]
+  ));
+
+  await safeRosterWrite(client, 'validation_requested event', () => client.query(
+    `INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
+     VALUES ($1, $2, 'validation_requested', $3::jsonb, $4)`,
+    [dojoId, federationId, JSON.stringify(affected), actorId]
+  ));
+
+  return { restored_count: restoredCount };
+}
+
 // ── PATCH /federation/:id/dojos/:dojoId ────────────────────
+//
+// 10/07/2026 — Cascata de status dojô→praticantes + validação de quadro.
+// Quando este PATCH ALTERA is_active, roda dentro da MESMA transação da
+// atualização de companies:
+//   - Inativando (false): snapshot dos customers do dojô, registra evento
+//     'inactivate_cascade' (affected = quem estava ativo) e desativa todos
+//     os praticantes do dojô.
+//   - Ativando (true): restaura (só) o snapshot do último
+//     'inactivate_cascade' (evento 'reactivate_restore') e abre validação
+//     de quadro pendente (karate_dojo_roster_validation, token opaco de 30
+//     dias para o portal público do sensei — evento 'validation_requested').
+// As escritas em karate_dojo_roster_events/karate_dojo_roster_validation
+// são best-effort (SAVEPOINT + 42P01) — nunca derrubam a cascata de
+// customers nem o PATCH em si (deploy parcial / migration pendente).
+// Preserva 100% do comportamento anterior do PATCH para os demais campos.
 router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, dojoId } = req.params;
 
@@ -603,8 +736,33 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
   updates.push('updated_at = NOW()');
   values.push(dojoId, federationId);
 
+  // Cascata só entra em jogo quando is_active vem no body do PATCH.
+  const isActiveRequested = req.body.is_active !== undefined;
+  const actorId = (req.user && req.user.id) || null;
+
+  const client = await db.connect();
   try {
-    const result = await db.query(
+    await client.query('BEGIN');
+
+    // Snapshot do is_active ATUAL (antes do UPDATE) — só quando relevante
+    // para a cascata. FOR UPDATE trava a linha p/ evitar corrida entre
+    // dois PATCH concorrentes decidindo o antes/depois errado.
+    let previousIsActive = null;
+    if (isActiveRequested) {
+      const prevRes = await client.query(
+        `SELECT is_active FROM companies
+         WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo'
+         FOR UPDATE`,
+        [dojoId, federationId]
+      );
+      if (!prevRes.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Dojô não encontrado', code: 'NOT_FOUND' });
+      }
+      previousIsActive = prevRes.rows[0].is_active !== false; // COALESCE(is_active, true)
+    }
+
+    const result = await client.query(
       `UPDATE companies
        SET ${updates.join(', ')}
        WHERE id = $${idx} AND federation_id = $${idx + 1} AND vertical = 'karate_dojo'
@@ -619,10 +777,26 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
     );
 
     if (!result.rows.length) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Dojô não encontrado', code: 'NOT_FOUND' });
     }
 
     const d = result.rows[0];
+    const newIsActive = d.is_active !== false;
+
+    let rosterCascade = null;
+    if (isActiveRequested && previousIsActive !== newIsActive) {
+      if (newIsActive === false) {
+        rosterCascade = await cascadeInactivateDojo(client, { dojoId, federationId, actorId });
+        rosterCascade.action = 'inactivate_cascade';
+      } else {
+        rosterCascade = await cascadeReactivateDojo(client, { dojoId, federationId, actorId });
+        rosterCascade.action = 'reactivate_restore';
+      }
+    }
+
+    await client.query('COMMIT');
+
     res.json({
       id: d.id,
       name: d.name,
@@ -641,10 +815,14 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       is_active: d.is_active !== false,
       status: computeDojoStatus(d.affiliation_model, d.affiliation_since, d.is_active),
       practitioner_count: 0, // não recomputado no PATCH por performance
+      ...(rosterCascade ? { roster_cascade: rosterCascade } : {}),
     });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('[karateDojos] update error:', err.message);
     res.status(500).json({ error: 'Erro ao atualizar dojô' });
+  } finally {
+    client.release();
   }
 });
 
