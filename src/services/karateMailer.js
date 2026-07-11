@@ -43,16 +43,21 @@ async function sendRaw(opts) {
     console.log(`[karateMailer] (dev) e-mail simulado -> ${opts.to}: ${opts.subject}`);
     return { id: 'dev-' + Date.now() };
   }
+  const payload = {
+    from: resolveFrom(opts),
+    to: Array.isArray(opts.to) ? opts.to : [opts.to],
+    subject: opts.subject,
+    html: opts.html,
+    text: opts.text,
+  };
+  // Reply-to = e-mail da federação, se cadastrado (companies.email) — Fase
+  // F4. Ausente = Resend usa o `from` como reply-to (comportamento padrão).
+  if (opts.replyTo) payload.reply_to = opts.replyTo;
+
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      from: resolveFrom(opts),
-      to: Array.isArray(opts.to) ? opts.to : [opts.to],
-      subject: opts.subject,
-      html: opts.html,
-      text: opts.text,
-    }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -275,12 +280,43 @@ async function sendKarateAnnuityReminderEmail(to, data) {
   });
 }
 
+
+// ── Template: e-mail de cobrança/lembrete de anuidade (Fase F4) ─────
+// Diferente de sendKarateAnnuityReminderEmail (texto fixo, usado pela
+// régua quando a federação NÃO customizou o template): esta função recebe
+// subject/bodyHtml JÁ RENDERIZADOS (karateReminderTemplate.renderTemplate,
+// com escape de HTML aplicado a todo valor injetado) mais os blocos
+// estruturados (modalidades + PIX copia-e-cola), montados FORA do texto
+// editável pelo próprio mailer — ver karateBillingMailer.js. O botão
+// wa.me continua vindo do layout() compartilhado (condicional a
+// federationWhatsapp), sem duplicar aqui.
+async function sendKarateAnnuityBillingEmail(to, opts) {
+  const o = opts || {};
+  const body = `${o.bodyHtml || ''}${o.modalidadesHtml || ''}${o.pixHtml || ''}`;
+  const html = layout(body, {
+    federationName:     o.federationName,
+    federationLogoUrl:  o.federationLogoUrl,
+    federationWhatsapp: o.federationWhatsapp,
+  });
+  return sendRaw({
+    to,
+    from: o.from,
+    replyTo: o.replyTo,
+    federationName: o.federationName,
+    federationSlug: o.federationSlug,
+    subject: o.subject,
+    html,
+    text: o.text || _stripHtml(`${o.subject || ''} ${o.bodyHtml || ''}`),
+  });
+}
+
 module.exports = {
   sendRaw,
   federationFrom,
   layout,
   sendKarateEmail,
   sendKarateAnnuityReminderEmail,
+  sendKarateAnnuityBillingEmail,
   fmtBRL,
   fmtDateBR,
 };

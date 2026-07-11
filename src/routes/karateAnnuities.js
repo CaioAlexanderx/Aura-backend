@@ -2390,4 +2390,10 @@ router.patch('/annuities/installments/:installmentId', ...guards.adminOnly(), as
 });
 
 
+// Exposto para reuso (Fase F4: POST /annuities/void-batch reusa a MESMA
+// lógica de estorno/remoção do void individual — ver karateAnnuityBilling.js).
+// Express Router é uma função; anexar uma propriedade nela não interfere
+// na montagem via router.use(path, require('./karateAnnuities')).
+router.__voidAnnuityCore = voidAnnuityCore;
+
 module.exports = router;
