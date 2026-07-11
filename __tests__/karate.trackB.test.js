@@ -213,14 +213,36 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
       const mockClient = { query: jest.fn(), release: jest.fn() };
       db.connect.mockResolvedValue(mockClient);
 
-      // Ordem: BEGIN → verifica dojô → advisory lock → checa existing → INSERT tx → INSERT hist → COMMIT
+      // Fase F1: amount manual ainda cria 1 parcela única (via
+      // karate_annuity_installments), pois as views canônicas exigem que
+      // TODO header tenha >=1 parcela. Ordem real do handler: BEGIN →
+      // verifica dojô → advisory lock → checa existing → INSERT header →
+      // INSERT installment (seq 1) → INSERT transaction → UPDATE installment
+      // (transaction_id) → SELECT installments (rollup) → UPDATE header
+      // (rollup) → COMMIT.
       mockClient.query
         .mockResolvedValueOnce({})   // BEGIN
         .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] }) // SELECT dojô
         .mockResolvedValueOnce({ rows: [] })  // advisory lock
         .mockResolvedValueOnce({ rows: [] })  // check existing annuity_history
+        .mockResolvedValueOnce({ rows: [{ id: HIST_ID }] })  // INSERT header
+        .mockResolvedValueOnce({              // INSERT installment (seq 1)
+          rows: [{
+            id: 'inst-uuid-001', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: '2026-12-31', status: 'pending', paid_at: null,
+            transaction_id: null, payment_method: null,
+          }],
+        })
         .mockResolvedValueOnce({ rows: [{ id: TX_ID }] })  // INSERT transaction
-        .mockResolvedValueOnce({              // INSERT karate_dojo_annuity_history
+        .mockResolvedValueOnce({})  // UPDATE installment.transaction_id
+        .mockResolvedValueOnce({              // SELECT installments (rollup)
+          rows: [{
+            id: 'inst-uuid-001', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: '2026-12-31', status: 'pending', paid_at: null,
+            transaction_id: TX_ID, payment_method: null,
+          }],
+        })
+        .mockResolvedValueOnce({              // UPDATE header (rollup)
           rows: [{
             id: HIST_ID,
             dojo_id: DOJO_ID,
@@ -229,6 +251,7 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
             due_date: '2026-12-31',
             status: 'pending',
             paid_at: null,
+            transaction_id: TX_ID,
           }],
         })
         .mockResolvedValueOnce({});  // COMMIT

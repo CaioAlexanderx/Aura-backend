@@ -57,22 +57,76 @@ async function getFederationMeta(fedId) {
   }
 }
 
-// Anuidades de dojô em aberto (não pagas, com vencimento) de uma federação.
+// Fase F1: fonte agora é PARCELA (karate_annuity_installments), não mais o
+// header — dojô E praticante (CPF), cada linha é UMA parcela em aberto.
+// `a.id` (usado como annuity_id no log/idempotência) passa a ser o id da
+// PARCELA. Fallback defensivo (42703/42P01, migration 222 ausente): volta
+// pro comportamento antigo (header de dojô, 1 linha por anuidade).
+// ⚠️ A régua continua OFF por padrão (gate é karate_reminder_config.enabled,
+// não tocado aqui) — esta troca de fonte não ativa nada sozinha.
 async function getOpenAnnuities(federationId) {
-  const { rows } = await db.query(
-    `SELECT a.id, a.dojo_id, a.federation_id, a.due_date, a.paid_at, a.status,
-            a.amount, a.reference_period,
-            COALESCE(d.trade_name, d.legal_name) AS dojo_name,
-            d.email AS dojo_email
-       FROM karate_dojo_annuity_history a
-       JOIN companies d ON d.id = a.dojo_id
-      WHERE a.federation_id = $1
-        AND a.paid_at IS NULL
-        AND a.status <> 'paid'
-        AND a.due_date IS NOT NULL`,
-    [federationId]
-  );
-  return rows;
+  try {
+    const { rows } = await db.query(
+      `SELECT i.id, i.federation_id, i.due_date, i.paid_at, i.status, i.amount,
+              h.reference_period, h.dojo_id, 'dojo' AS kind,
+              COALESCE(d.trade_name, d.legal_name) AS recipient_name,
+              d.email AS recipient_email
+         FROM karate_annuity_installments i
+         JOIN karate_dojo_annuity_history h ON h.id = i.annuity_id
+         JOIN companies d ON d.id = h.dojo_id
+        WHERE i.federation_id = $1
+          AND h.dojo_id IS NOT NULL
+          AND i.paid_at IS NULL
+          AND i.status <> 'paid'
+          AND i.due_date IS NOT NULL
+
+       UNION ALL
+
+       SELECT i.id, i.federation_id, i.due_date, i.paid_at, i.status, i.amount,
+              h.reference_period, h.dojo_id, 'cpf' AS kind,
+              cu.name AS recipient_name,
+              cu.email AS recipient_email
+         FROM karate_annuity_installments i
+         JOIN karate_dojo_annuity_history h ON h.id = i.annuity_id
+         JOIN customers cu ON cu.id = h.practitioner_id
+        WHERE i.federation_id = $1
+          AND h.practitioner_id IS NOT NULL
+          AND i.paid_at IS NULL
+          AND i.status <> 'paid'
+          AND i.due_date IS NOT NULL`,
+      [federationId]
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      dojo_id: r.dojo_id,
+      federation_id: r.federation_id,
+      due_date: r.due_date,
+      paid_at: r.paid_at,
+      status: r.status,
+      amount: r.amount,
+      reference_period: r.reference_period,
+      dojo_name: r.recipient_name,
+      dojo_email: r.recipient_email,
+      kind: r.kind,
+    }));
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+    // Fallback legado: migration 222 ainda não aplicada.
+    const { rows } = await db.query(
+      `SELECT a.id, a.dojo_id, a.federation_id, a.due_date, a.paid_at, a.status,
+              a.amount, a.reference_period,
+              COALESCE(d.trade_name, d.legal_name) AS dojo_name,
+              d.email AS dojo_email
+         FROM karate_dojo_annuity_history a
+         JOIN companies d ON d.id = a.dojo_id
+        WHERE a.federation_id = $1
+          AND a.paid_at IS NULL
+          AND a.status <> 'paid'
+          AND a.due_date IS NOT NULL`,
+      [federationId]
+    );
+    return rows.map((r) => ({ ...r, kind: 'dojo' }));
+  }
 }
 
 async function getSentCodes(annuityId, channel) {
