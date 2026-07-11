@@ -185,6 +185,8 @@ router.use('/federation/:id/standing', require('./karateStandingSummary'));
 router.use('/federation/:id/financial', require('./karateAnnuities'));
 // Fase F3: campanha anual de anuidades + cobrança em lote
 router.use('/federation/:id/financial', require('./karateAnnuityCampaign'));
+// Fase F4: e-mail de cobrança manual (single+batch) + void-batch.
+router.use('/federation/:id/financial', require('./karateAnnuityBilling'));
 router.use('/federation/:id/financial', require('./karateAnnuitySummary'));
 router.use('/federation/:id/financial', require('./karateExpenses'));
 router.use('/federation/:id/financial', require('./karateFees'));

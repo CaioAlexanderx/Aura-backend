@@ -1,28 +1,52 @@
 // ============================================================
-// AURA KARATÊ — Runner da régua de anuidade (Track I)
+// AURA KARATÊ — Runner da régua de anuidade (Track I / F4)
 // Camada DB-facing: lê config (opt-in), busca anuidades de dojô em aberto,
 // consulta o motor puro (karateReminderEngine) e envia o lembrete via
 // karateMailer, gravando no log (idempotência via índice único).
 //
+// Fase F4: quando a federação configurou subject_template/body_template
+// (karate_reminder_config, migration 223), a régua passa a usar ESSE
+// template (karateBillingMailer.sendBillingEmail — mesmo motor de render
+// + blocos de modalidades/PIX/wa.me do envio manual) em vez do texto fixo
+// de karateMailer.sendKarateAnnuityReminderEmail. Sem customização
+// (subject_template/body_template NULL, caso da imensa maioria hoje),
+// comportamento 100% preservado. A régua CONTINUA opt-in OFF por padrão —
+// esta mudança só afeta o CONTEÚDO do e-mail quando enabled=true E
+// customizado, nunca liga a régua sozinha.
+//
 // Defensivo (armadilha_schema_pre_migration): tabelas 174/175 podem não existir
-// em deploy parcial — trata 42P01 como "sem dados" e segue.
+// em deploy parcial — trata 42P01 como "sem dados" e segue. subject_template/
+// body_template (migration 223) podem não existir ainda — 42703 cai pro
+// SELECT legado (sem template).
 // ============================================================
 'use strict';
 
 const db = require('../config/database');
 const karateMailer = require('./karateMailer');
+const billingMailer = require('./karateBillingMailer');
 const { computeReminder, DEFAULT_OFFSETS } = require('./karateReminderEngine');
 
-// Federações com régua ligada. Defensivo a 42P01.
+// Federações com régua ligada. Defensivo a 42P01/42703.
 async function getEnabledConfigs() {
   try {
     const { rows } = await db.query(
-      `SELECT federation_id, channel, offsets_days
+      `SELECT federation_id, channel, offsets_days, subject_template, body_template
          FROM karate_reminder_config
         WHERE enabled = true`
     );
     return rows;
   } catch (e) {
+    if (e.code === '42703') {
+      try {
+        const { rows } = await db.query(
+          `SELECT federation_id, channel, offsets_days FROM karate_reminder_config WHERE enabled = true`
+        );
+        return rows;
+      } catch (e2) {
+        if (e2.code === '42P01') return [];
+        throw e2;
+      }
+    }
     if (e.code === '42P01') return [];
     throw e;
   }
@@ -195,27 +219,49 @@ async function runForFederation(cfg, today) {
         recipient: null, ruleCode: due.code, status: 'failed', error: 'sem e-mail do dojô' });
       failed++; continue;
     }
+    const hasCustomTemplate = !!(cfg.subject_template || cfg.body_template);
     try {
-      const res = await karateMailer.sendKarateAnnuityReminderEmail(recipient, {
-        dojoName:           a.dojo_name,
-        amount:             a.amount,
-        dueDate:            a.due_date,
-        referencePeriod:    a.reference_period,
-        ruleCode:           due.code,
-        offset:             due.offset,
-        // ── DESIGN-30: metadados da federação ──────────────
-        federationName:     fedMeta.name,
-        federationSlug:     fedMeta.slug,
-        federationLogoUrl:  fedMeta.karate_logo_url,   // companies.karate_logo_url
-        federationWhatsapp: fedMeta.wa_phone_display,   // companies.wa_phone_display
-        // ctaUrl: página de pagamento Pix do dojô.
-        // A rota backend POST /financial/annuities/dojos/:dojoId/pix existe,
-        // mas não há página frontend pública de pagamento Pix para o dojô ainda.
-        // Quando essa página for criada (Track ?), passar a URL aqui:
-        //   ctaUrl: `https://app.getaura.com.br/karate/pagar/${a.id}` (exemplo)
-        // Por ora, ctaUrl fica undefined → nenhum botão é renderizado.
-        ctaUrl: undefined,
-      });
+      let res;
+      if (hasCustomTemplate) {
+        // Fase F4: federação customizou o template — usa o MESMO motor do
+        // envio manual (render + blocos de modalidades/PIX/wa.me), com
+        // rule_code real (due.code) — a régua automática continua sob o
+        // lock de idempotência normal (só rule_code='manual' é isento,
+        // ver migration 223).
+        res = await billingMailer.sendBillingEmail(null, {
+          to: recipient,
+          kind: a.kind === 'cpf' ? 'cpf' : 'dojo',
+          nome: a.dojo_name,
+          amount: a.amount,
+          dueDate: a.due_date,
+          referencePeriod: a.reference_period,
+          federationId: fedId,
+          federationMeta: fedMeta,
+          subjectTemplate: cfg.subject_template,
+          bodyTemplate: cfg.body_template,
+        });
+      } else {
+        res = await karateMailer.sendKarateAnnuityReminderEmail(recipient, {
+          dojoName:           a.dojo_name,
+          amount:             a.amount,
+          dueDate:            a.due_date,
+          referencePeriod:    a.reference_period,
+          ruleCode:           due.code,
+          offset:             due.offset,
+          // ── DESIGN-30: metadados da federação ──────────────
+          federationName:     fedMeta.name,
+          federationSlug:     fedMeta.slug,
+          federationLogoUrl:  fedMeta.karate_logo_url,   // companies.karate_logo_url
+          federationWhatsapp: fedMeta.wa_phone_display,   // companies.wa_phone_display
+          // ctaUrl: página de pagamento Pix do dojô.
+          // A rota backend POST /financial/annuities/dojos/:dojoId/pix existe,
+          // mas não há página frontend pública de pagamento Pix para o dojô ainda.
+          // Quando essa página for criada (Track ?), passar a URL aqui:
+          //   ctaUrl: `https://app.getaura.com.br/karate/pagar/${a.id}` (exemplo)
+          // Por ora, ctaUrl fica undefined → nenhum botão é renderizado.
+          ctaUrl: undefined,
+        });
+      }
       await logSend({ federationId: fedId, annuityId: a.id, dojoId: a.dojo_id, channel,
         recipient, ruleCode: due.code, status: 'sent', providerId: res && res.id });
       sent++;
