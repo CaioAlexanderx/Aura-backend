@@ -923,6 +923,19 @@ router.delete('/:dojoId', ...guards.staffWrite(), async (req, res) => {
 
     // ── Caminho 3: cascata (ordem de FK — filhos antes do pai) ──
 
+    // karate_practitioner_transfers é append-only/imutável (trigger BEFORE
+    // UPDATE/DELETE em karate_practitioner_transfers_immutable(), migration 180).
+    // Isso impede edição casual de histórico — mas bloqueia também a exclusão
+    // definitiva em cascata do dojô: destination_dojo_id é FK RESTRICT (linha 1
+    // abaixo) e a exclusão de customers logo adiante (passo 5) dispara o
+    // mesmo trigger indiretamente via CASCADE de practitioner_id. A exclusão
+    // deliberada em cascata (?cascade=true, com 409 HAS_HISTORY já confirmado
+    // pelo caller) É a "correção excepcional" prevista no comentário do
+    // trigger. Migration 221 adicionou um escape hatch escopado por GUC:
+    // SET LOCAL expira sozinho no COMMIT/ROLLBACK desta transação — não
+    // afeta nenhuma outra rota ou sessão (NÃO usar SET global aqui).
+    await client.query("SET LOCAL app.allow_transfer_purge = 'on'");
+
     // 1) Transferências do dojô (origin OU destination). destination_dojo_id é
     //    RESTRICT → tem de sair antes de apagar a company. (origin é SET NULL,
     //    mas apagamos tudo para não deixar registros órfãos pela metade.)

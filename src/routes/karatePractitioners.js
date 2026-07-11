@@ -836,6 +836,15 @@ router.delete('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
 
     if (hasHistory && cascade) {
       // Apaga os filhos antes da linha de customers (ordem segura de FK).
+      // karate_practitioner_transfers é append-only/imutável (trigger BEFORE
+      // UPDATE/DELETE, migration 180) — impede edição casual do histórico,
+      // mas bloquearia também esta exclusão definitiva do praticante em
+      // cascata (já confirmada pelo caller via 409 HAS_HISTORY + ?cascade=true).
+      // Mesmo escape hatch escopado por GUC do DELETE de dojô (migration 221):
+      // SET LOCAL vale só para esta transação, expira sozinho no
+      // COMMIT/ROLLBACK — NÃO usar SET global.
+      await client.query("SET LOCAL app.allow_transfer_purge = 'on'");
+
       const safeExec = async (sql, params) => {
         try { await client.query(sql, params); }
         catch (e) { if (e.code !== '42P01') throw e; }
