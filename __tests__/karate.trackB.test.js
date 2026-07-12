@@ -222,7 +222,7 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
       // (rollup) → COMMIT.
       mockClient.query
         .mockResolvedValueOnce({})   // BEGIN
-        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP', karate_annuity_plan: 'anual' }] }) // SELECT dojô
         .mockResolvedValueOnce({ rows: [] })  // advisory lock
         .mockResolvedValueOnce({ rows: [] })  // check existing annuity_history
         .mockResolvedValueOnce({ rows: [{ id: HIST_ID }] })  // INSERT header
@@ -284,7 +284,7 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
       const customClient = { query: jest.fn(), release: jest.fn() };
       customClient.query
         .mockResolvedValueOnce({})                                          // BEGIN
-        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP', karate_annuity_plan: 'anual' }] }) // SELECT dojô
         .mockResolvedValueOnce({ rows: [] })                                 // advisory lock
         .mockResolvedValueOnce({ rows: [] })                                 // check existing
         .mockResolvedValueOnce({ rows: [] });                                // getVigentFee → sem fee configurada
@@ -315,7 +315,7 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
       const customClient = { query: jest.fn(), release: jest.fn() };
       customClient.query
         .mockResolvedValueOnce({})                                          // BEGIN
-        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP', karate_annuity_plan: 'anual' }] }) // SELECT dojô
         .mockResolvedValueOnce({ rows: [] })                                 // advisory lock
         .mockResolvedValueOnce({ rows: [] })                                 // check existing
         .mockResolvedValueOnce({ rows: [{ id: 'fee-1', amount: 500, due_months: [5] }] }) // getVigentFee
@@ -364,7 +364,7 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
       const customClient = { query: jest.fn(), release: jest.fn() };
       customClient.query
         .mockResolvedValueOnce({})                                          // BEGIN
-        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP', karate_annuity_plan: 'anual' }] }) // SELECT dojô
         .mockResolvedValueOnce({ rows: [] })                                 // advisory lock
         .mockResolvedValueOnce({ rows: [] })                                 // check existing
         .mockResolvedValueOnce({ rows: [{ id: 'fee-1', amount: 500, due_months: [5] }] }) // getVigentFee
@@ -418,6 +418,57 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
           if (err) return done(err);
           expect(res.status).toBe(422);
           expect(res.body.code).toBe('VALIDATION_ERROR');
+          done();
+        });
+    });
+
+    // F2 do plano de anuidades: /charge sem `plan` no request e sem
+    // karate_annuity_plan cadastrado no dojô NÃO cai mais no default
+    // 'anual' — devolve 422 PLANO_INDEFINIDO em vez de gerar uma cobrança
+    // no plano errado silenciosamente.
+    it('F2: 422 PLANO_INDEFINIDO quando dojô não tem karate_annuity_plan e nenhum plan foi informado no request (fluxo por plano, sem amount manual)', (done) => {
+      jest.clearAllMocks();
+      const customClient = { query: jest.fn(), release: jest.fn() };
+      customClient.query
+        .mockResolvedValueOnce({})                                                        // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] });              // SELECT dojô (sem karate_annuity_plan)
+      db.connect.mockResolvedValueOnce(customClient);
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ reference_period: '2026' })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(422);
+          expect(res.body.code).toBe('PLANO_INDEFINIDO');
+          done();
+        });
+    });
+
+    // Precedência: plan explícito no request vence mesmo quando o dojô não
+    // tem plano cadastrado — não é obrigatório persistir o plano no dojô
+    // para lançar UMA cobrança pontual.
+    it('F2: plan explícito no request funciona mesmo sem karate_annuity_plan cadastrado no dojô', (done) => {
+      jest.clearAllMocks();
+      const customClient = { query: jest.fn(), release: jest.fn() };
+      customClient.query
+        .mockResolvedValueOnce({})                                                        // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] })               // SELECT dojô (sem karate_annuity_plan)
+        .mockResolvedValueOnce({ rows: [] })                                               // advisory lock
+        .mockResolvedValueOnce({ rows: [] })                                               // check existing
+        .mockResolvedValueOnce({ rows: [{ id: 'fee-tri', amount: 150, due_months: [2, 5, 8, 11] }] }); // getVigentFee trimestral
+      db.connect.mockResolvedValueOnce(customClient);
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ reference_period: '2026', plan: 'trimestral' })
+        .end((err, res) => {
+          if (err) return done(err);
+          // Não é 422 PLANO_INDEFINIDO — a fee mockada foi consultada de fato
+          // (não parou antes por falta de plano).
+          expect(res.status).not.toBe(422);
           done();
         });
     });

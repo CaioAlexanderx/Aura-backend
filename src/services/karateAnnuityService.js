@@ -50,6 +50,26 @@ const DEFAULT_DUE_MONTHS = {
 
 const VALID_PAYMENT_METHODS = ['pix', 'dinheiro', 'transferencia', 'outro'];
 
+// ── F2 do plano de anuidades: plano DO DOJÔ (Migration 226) ──────────────
+// Antes desta fase, campanha/charge sempre assumiam 'anual' quando nada
+// era informado — um dojô trimestral (R$600/ano) era cobrado como anual
+// (R$500), sem erro nenhum. Ordem de precedência (documentada aqui porque
+// karateAnnuityCampaign.js E karateAnnuities.js /charge dependem dela):
+//   1) plan explícito NESTE request (override pontual/definição inline)
+//   2) companies.karate_annuity_plan (o que a federação cadastrou pro dojô)
+//   3) NULL — NUNCA vira 'anual' silenciosamente. Quem chama decide o que
+//      fazer com null (preview marca plano_indefinido:true; campanha/batch
+//      pulam o alvo para `errors[]` com reason='plano_indefinido'; /charge
+//      individual devolve 422 PLANO_INDEFINIDO).
+const PLANO_INDEFINIDO_REASON = 'plano_indefinido';
+
+function resolveDojoPlan(explicitPlan, dojoStoredPlan) {
+  const e = explicitPlan && VALID_PLANS.includes(explicitPlan) ? explicitPlan : null;
+  if (e) return e;
+  const d = dojoStoredPlan && VALID_PLANS.includes(dojoStoredPlan) ? dojoStoredPlan : null;
+  return d || null;
+}
+
 // ── Helpers de data ──────────────────────────────────────────
 
 // Último dia do mês `month` (1-12) no ano `year`, como 'YYYY-MM-DD'.
@@ -368,6 +388,8 @@ function categoryForKind(kind) {
 
 module.exports = {
   VALID_PLANS,
+  PLANO_INDEFINIDO_REASON,
+  resolveDojoPlan,
   createTransactionsForInstallments,
   DEFAULT_DUE_MONTHS,
   VALID_PAYMENT_METHODS,

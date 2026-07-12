@@ -63,6 +63,36 @@ const paymentSvc = require('../services/karatePaymentService');
 // rotas caem para o comportamento antigo (single-row, sem plan/installments).
 let HAS_INSTALLMENTS = true;
 
+// Migration 226 — companies.karate_annuity_plan (plano de anuidade REAL do
+// dojô; NULL = federação ainda não definiu). Mesma armadilha_schema_pre_migration
+// do CLAUDE.md: cache module-level otimista, vira false em 42703.
+let HAS_DOJO_ANNUITY_PLAN_COL = true;
+
+// Busca { id, name, karate_annuity_plan } do dojô, defensivamente. Usado por
+// POST /annuities/dojos/:dojoId/charge para resolver a ordem de precedência
+// do plano: plan explícito no request > karate_annuity_plan do dojô > (F2)
+// nunca 'anual' silencioso — ver comentário na rota de /charge.
+async function fetchDojoForCharge(client, dojoId, federationId) {
+  if (HAS_DOJO_ANNUITY_PLAN_COL) {
+    try {
+      return await client.query(
+        `SELECT id, name, karate_annuity_plan FROM companies
+         WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' LIMIT 1`,
+        [dojoId, federationId]
+      );
+    } catch (e) {
+      if (e.code === '42703') {
+        HAS_DOJO_ANNUITY_PLAN_COL = false;
+        console.warn('[karateAnnuities] karate_annuity_plan ausente (Migration 226 pendente) — fallback sem coluna');
+      } else throw e;
+    }
+  }
+  return client.query(
+    `SELECT id, name FROM companies WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' LIMIT 1`,
+    [dojoId, federationId]
+  );
+}
+
 // ────────────────────────────────────────────────────────────────
 const DOJO_ANNUITIES = true; // eslint-disable-line
 // ────────────────────────────────────────────────────────────────
@@ -291,12 +321,15 @@ router.post('/annuities/pix-brcode', ...guards.adminOnly(), async (req, res) => 
 router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req, res) => {
   const { id: federationId, dojoId } = req.params;
   const { amount, due_date, reference_period, plan: rawPlan } = req.body || {};
-  const plan = rawPlan || 'anual';
 
   if (!reference_period) {
     return res.status(422).json({ error: 'reference_period obrigatorio', code: 'VALIDATION_ERROR' });
   }
-  if (HAS_INSTALLMENTS && !annuitySvc.VALID_PLANS.includes(plan)) {
+  // Valida rawPlan cedo SE foi informado (formato). A resolução final do
+  // plano (precedência: rawPlan explícito > karate_annuity_plan do dojô >
+  // bloqueia) só acontece depois de buscar o dojô, dentro da transação —
+  // ver comentário mais abaixo, antes de montar as parcelas.
+  if (HAS_INSTALLMENTS && rawPlan && !annuitySvc.VALID_PLANS.includes(rawPlan)) {
     return res.status(422).json({
       error: `plan inválido. Valores aceitos: ${annuitySvc.VALID_PLANS.join(', ')}`,
       code: 'VALIDATION_ERROR',
@@ -325,16 +358,42 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
   try {
     await client.query('BEGIN');
 
-    // Verifica dojô
-    const dojoRes = await client.query(
-      `SELECT id, name FROM companies WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' LIMIT 1`,
-      [dojoId, federationId]
-    );
+    // Verifica dojô (traz karate_annuity_plan defensivamente — Migration 226)
+    const dojoRes = await fetchDojoForCharge(client, dojoId, federationId);
     if (!dojoRes.rows.length) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Dojô não encontrado', code: 'NOT_FOUND' });
     }
     const dojoName = dojoRes.rows[0].name;
+    const dojoAnnuityPlan = dojoRes.rows[0].karate_annuity_plan || null;
+
+    // ── Resolução do plano (F2 do bug de produto: dojô trimestral cobrado
+    // como anual) — precedência: plan explícito no request > plano
+    // cadastrado no dojô (karate_annuity_plan) > NUNCA assume 'anual'
+    // silenciosamente quando o valor vem da tabela de fees (gera N parcelas
+    // reais). O override manual de amount continua aceitando o default
+    // histórico 'anual' como RÓTULO (não dispara lookup de fee/parcelas —
+    // o operador já informou o valor exato a cobrar).
+    let plan;
+    if (manualAmount) {
+      plan = rawPlan || 'anual';
+    } else {
+      plan = rawPlan || dojoAnnuityPlan || null;
+      if (!plan) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          error: 'Este dojô ainda não tem um plano de anuidade cadastrado. Informe "plan" explicitamente no request ou cadastre o plano no dojô (karate_annuity_plan) antes de lançar a cobrança.',
+          code: 'PLANO_INDEFINIDO',
+        });
+      }
+      if (HAS_INSTALLMENTS && !annuitySvc.VALID_PLANS.includes(plan)) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          error: `plan inválido. Valores aceitos: ${annuitySvc.VALID_PLANS.join(', ')}`,
+          code: 'VALIDATION_ERROR',
+        });
+      }
+    }
 
     // Advisory lock por dojô para evitar cobrança dupla
     await client.query(
