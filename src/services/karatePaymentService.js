@@ -31,6 +31,7 @@
 const db      = require('../config/database');
 const fiscal  = require('../services/nuvemfiscal');
 const annuitySvc = require('./karateAnnuityService');
+const financeAudit = require('./karateFinanceAudit');
 
 // ── NFS-e best-effort (idêntico ao bloco que existia inline no route) ──
 async function _emitAnnuityNfseBestEffort(intent, paidAt) {
@@ -188,7 +189,19 @@ async function confirmIntent(intentId, opts = {}) {
     // de antes da F1) continuam confirmando o header inteiro direto.
     const isInstallmentIntent = ['dojo_annuity', 'cpf_annuity'].includes(intent.source_type) && intent.source_id;
 
+    // G3 (auditoria financeira): before/after são montados SEM nenhuma
+    // query extra — `intent` já traz tudo que precisamos (foi SELECTado
+    // antes de qualquer UPDATE nesta função). Isso preserva o número de
+    // queries desta transação (nenhum teste existente quebra).
+    let auditTargetType = null;
+    let auditTargetId = null;
+    let auditBefore = null;
+
     if (isInstallmentIntent) {
+      auditTargetType = 'installment';
+      auditTargetId = intent.source_id;
+      auditBefore = { status: 'pending', amount: intent.amount != null ? Number(intent.amount) : null };
+
       await client.query(
         `UPDATE karate_annuity_installments
          SET status = 'paid', paid_at = $1, transaction_id = COALESCE($2, transaction_id), updated_at = NOW()
@@ -199,6 +212,13 @@ async function confirmIntent(intentId, opts = {}) {
         await annuitySvc.syncAnnuityHeaderRollup(client, intent.annuity_history_id);
       }
     } else if (intent.annuity_history_id) {
+      auditTargetType = 'annuity';
+      auditTargetId = intent.annuity_history_id;
+      auditBefore = {
+        status: intent.annuity_status || 'pending',
+        amount: intent.annuity_amount != null ? Number(intent.annuity_amount) : null,
+      };
+
       // Legado: confirma o header inteiro (comportamento pré-F1).
       await client.query(
         `UPDATE karate_dojo_annuity_history
@@ -219,6 +239,26 @@ async function confirmIntent(intentId, opts = {}) {
     }
 
     await client.query('COMMIT');
+
+    // G3: rastro de auditoria financeira (quem fez, quando, antes/depois).
+    // Roda numa conexão PRÓPRIA do pool (db.query, não `client`), então
+    // nunca envenena a transação que acabou de ser commitada — best-effort
+    // de propósito, ver karateFinanceAudit.js.
+    if (auditTargetId) {
+      await financeAudit.logFinanceAudit({
+        federationId: intent.federation_id,
+        action: 'intent_confirm',
+        targetType: auditTargetType,
+        targetId: auditTargetId,
+        dojoId: intent.dojo_id || null,
+        practitionerId: intent.practitioner_id || null,
+        actorUserId: source === 'webhook' ? null : (opts.actorUserId || null),
+        actorLabel: source === 'webhook' ? 'webhook' : (opts.actorLabel || null),
+        source: source === 'webhook' ? 'webhook' : 'ui',
+        before: auditBefore,
+        after: { status: 'paid', paid_at: paidAt, transaction_id: intent.transaction_id || null },
+      }).catch((e) => console.error('[karatePaymentService] financeAudit falhou (best-effort):', e.message));
+    }
 
     // ── NFS-e: best-effort após commit (não bloqueia confirm se falhar) ──
     let nfseRef = null;

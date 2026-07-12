@@ -44,6 +44,7 @@ const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const annuitySvc = require('../services/karateAnnuityService');
 const billingMailer = require('../services/karateBillingMailer');
+const financeAudit = require('../services/karateFinanceAudit');
 // Reusa a MESMA lógica de estorno/remoção do void individual (ver
 // router.__voidAnnuityCore em karateAnnuities.js) — void-batch NÃO
 // reimplementa a lógica de apagar header+parcelas/cancelar transactions.
@@ -160,6 +161,15 @@ router.post('/annuities/installments/:installmentId/send-email', ...guards.admin
     if (!outcome.ok) {
       return res.status(502).json({ error: 'Falha ao enviar e-mail de cobrança', detail: outcome.error });
     }
+
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'email_send', targetType: 'installment', targetId: installmentId,
+      dojoId: inst.dojo_id || null, practitionerId: inst.practitioner_id || null,
+      actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: null,
+      after: { recipient: inst.ref_email, provider_id: outcome.providerId || null },
+    }).catch((e) => console.error('[karateAnnuityBilling] financeAudit falhou (send-email):', e.message));
+
     return res.json({
       sent: true,
       installment_id: installmentId,
@@ -214,6 +224,13 @@ router.post('/annuities/send-email-batch', ...guards.adminOnly(), async (req, re
       const outcome = await sendForInstallment(db, { inst, federationId, federationMeta, templates });
       if (outcome.ok) {
         sent.push({ installment_id: installmentId, name: inst.ref_name, recipient: inst.ref_email, provider_id: outcome.providerId || null });
+        await financeAudit.logFinanceAudit({
+          federationId, action: 'email_send', targetType: 'installment', targetId: installmentId,
+          dojoId: inst.dojo_id || null, practitionerId: inst.practitioner_id || null,
+          actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'batch',
+          before: null,
+          after: { recipient: inst.ref_email, provider_id: outcome.providerId || null },
+        }).catch((e) => console.error('[karateAnnuityBilling] financeAudit falhou (send-email-batch):', e.message));
       } else {
         errors.push({ installment_id: installmentId, name: inst.ref_name, reason: outcome.error });
       }
@@ -306,6 +323,7 @@ router.post('/annuities/void-batch', ...guards.adminOnly(), async (req, res) => 
 
   const client = await db.connect();
   const removed = [];
+  const removedAudit = [];
   const skipped = [];
   const errors = [];
   let counter = 0;
@@ -339,12 +357,29 @@ router.post('/annuities/void-batch', ...guards.adminOnly(), async (req, res) => 
           reference_period: r.result.reference_period,
           transaction_ids: r.result.transaction_ids,
         });
+        removedAudit.push({
+          annuity_id: annuityId,
+          dojo_id: r.result.dojo_id || null,
+          practitioner_id: r.result.practitioner_id || null,
+          before: { status: r.result.status, amount: r.result.amount, plan: r.result.plan },
+        });
       } else {
         skipped.push({ annuity_id: annuityId, reason: r.reason });
       }
     }
 
     await client.query('COMMIT');
+
+    for (const r of removedAudit) {
+      await financeAudit.logFinanceAudit({
+        federationId, action: 'void', targetType: 'annuity', targetId: r.annuity_id,
+        dojoId: r.dojo_id || null, practitionerId: r.practitioner_id || null,
+        actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'batch',
+        before: r.before,
+        after: null,
+      }).catch((e) => console.error('[karateAnnuityBilling] financeAudit falhou (void-batch):', e.message));
+    }
+
     return res.json({ removed, skipped, errors });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});

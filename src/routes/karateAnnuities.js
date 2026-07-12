@@ -56,6 +56,7 @@ const { getDojoAnnuityStatus, computeAnnuityStatus } = require('../services/kara
 const { createPixCharge, getStatus: providerGetStatus } = require('../services/karatePaymentProvider');
 const annuitySvc = require('../services/karateAnnuityService');
 const paymentSvc = require('../services/karatePaymentService');
+const financeAudit = require('../services/karateFinanceAudit');
 
 // ── Fase F1 (parcelas): schema pre-migration guard ──────────────
 // Backend sobe antes da migration 222 ser aplicada (armadilha #1 do
@@ -465,6 +466,13 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
 
         await client.query('COMMIT');
 
+        await financeAudit.logFinanceAudit({
+          federationId, action: 'charge_create', targetType: 'annuity', targetId: annuityId,
+          dojoId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+          before: null,
+          after: { plan, amount: parseFloat(header.amount), due_date: header.due_date, reference_period, installments_count: installments.length },
+        }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (charge dojo):', e.message));
+
         const { total, paid_total } = annuitySvc.computeTotals(installments);
         return res.status(201).json({
           dojo_id: dojoId,
@@ -536,6 +544,12 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
     );
     await client.query('COMMIT');
     const h = histRes.rows[0];
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'charge_create', targetType: 'annuity', targetId: h.id,
+      dojoId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: null,
+      after: { amount: parseFloat(h.amount), due_date: h.due_date, reference_period: h.reference_period },
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (charge dojo legado):', e.message));
     res.status(201).json({
       dojo_id: dojoId,
       dojo_name: dojoName,
@@ -686,6 +700,13 @@ router.patch('/annuities/dojos/:dojoId/:annuityId', ...guards.adminOnly(), async
 
     await client.query('COMMIT');
 
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'annuity_patch', targetType: 'annuity', targetId: annuityId,
+      dojoId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: { amount: hist.amount != null ? parseFloat(hist.amount) : null, due_date: hist.due_date, reference_period: hist.reference_period },
+      after: { amount: h.amount ? parseFloat(h.amount) : 0, due_date: h.due_date, reference_period: h.reference_period },
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (patch anuidade):', e.message));
+
     res.json({
       annuity_id: h.id,
       dojo_id: h.dojo_id,
@@ -762,6 +783,13 @@ router.post('/annuities/dojos/:dojoId/:annuityId/void', ...guards.adminOnly(), a
     await client.query(`DELETE FROM karate_dojo_annuity_history WHERE id = $1`, [annuityId]);
 
     await client.query('COMMIT');
+
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'void', targetType: 'annuity', targetId: annuityId,
+      dojoId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: { status: hist.status, amount: hist.amount != null ? parseFloat(hist.amount) : null, transaction_id: hist.transaction_id || null },
+      after: null,
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (void dojo):', e.message));
 
     res.json({
       voided: true,
@@ -927,6 +955,13 @@ router.post('/annuities/dojos/:dojoId/:annuityId/pay', ...guards.adminOnly(), as
     );
 
     await client.query('COMMIT');
+
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'annuity_pay', targetType: 'annuity', targetId: annuityId,
+      dojoId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: { status: hist.status, paid_at: hist.paid_at || null, amount: hist.amount != null ? parseFloat(hist.amount) : null },
+      after: { status: 'paid', paid_at: paidAtValue, amount: effectiveAmount, payment_method, transaction_id: transactionId },
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (pay dojo):', e.message));
 
     res.json({
       annuity_id: annuityId,
@@ -1096,6 +1131,14 @@ router.post('/annuities/dojos/:dojoId/pay', ...guards.adminOnly(), async (req, r
     await client.query('COMMIT');
 
     const h = histRes.rows[0];
+
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'annuity_charge_and_pay', targetType: 'annuity', targetId: h.id,
+      dojoId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: null,
+      after: { status: 'paid', amount: parseFloat(h.amount), due_date: h.due_date, paid_at: h.paid_at, payment_method, transaction_id: transactionId, reference_period: h.reference_period },
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (lança+baixa dojo):', e.message));
+
     res.status(201).json({
       annuity_id: h.id,
       dojo_id: dojoId,
@@ -1275,6 +1318,7 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
       federationId,
       paidAt: paid_at,
       emitNfse: emit_nfse,
+      actorUserId: financeAudit.actorFromReq(req).actorUserId,
     });
 
     if (result.code === 'NOT_FOUND') {
@@ -1639,6 +1683,13 @@ router.post('/annuities/cpf/:practitionerId/charge', ...guards.adminOnly(), asyn
         const header = await annuitySvc.syncAnnuityHeaderRollup(client, annuityId);
         await client.query('COMMIT');
 
+        await financeAudit.logFinanceAudit({
+          federationId, action: 'charge_create', targetType: 'annuity', targetId: annuityId,
+          practitionerId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+          before: null,
+          after: { plan, amount: parseFloat(header.amount), due_date: header.due_date, reference_period, installments_count: installments.length },
+        }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (charge cpf):', e.message));
+
         const { total, paid_total } = annuitySvc.computeTotals(installments);
         return res.status(201).json({
           practitioner_id: practitionerId,
@@ -1798,7 +1849,7 @@ router.post('/annuities/cpf/:practitionerId/pix', ...guards.adminOnly(), async (
 // parcelas). Idempotente.
 async function voidAnnuityCore(client, { federationId, annuityId }) {
   const histRes = await client.query(
-    `SELECT id, dojo_id, practitioner_id, federation_id, reference_period, plan, status, transaction_id
+    `SELECT id, dojo_id, practitioner_id, federation_id, reference_period, plan, status, amount, transaction_id
      FROM karate_dojo_annuity_history WHERE id = $1 AND federation_id = $2 LIMIT 1`,
     [annuityId, federationId]
   );
@@ -1842,6 +1893,9 @@ async function voidAnnuityCore(client, { federationId, annuityId }) {
     practitioner_id: hist.practitioner_id,
     reference_period: hist.reference_period,
     transaction_ids: Array.from(txIds),
+    status: hist.status,
+    amount: hist.amount != null ? parseFloat(hist.amount) : null,
+    plan: hist.plan,
   };
 }
 
@@ -1857,6 +1911,15 @@ router.post('/annuities/:annuityId/void', ...guards.adminOnly(), async (req, res
       return res.json({ voided: true, idempotent_hit: true, annuity_id: annuityId });
     }
     await client.query('COMMIT');
+
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'void', targetType: 'annuity', targetId: annuityId,
+      dojoId: result.dojo_id || null, practitionerId: result.practitioner_id || null,
+      actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: { status: result.status, amount: result.amount, plan: result.plan },
+      after: null,
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (void generico):', e.message));
+
     res.json({
       voided: true,
       idempotent_hit: false,
@@ -2003,6 +2066,13 @@ router.patch('/annuities/:annuityId/plan', ...guards.adminOnly(), async (req, re
 
     await client.query('COMMIT');
 
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'plan_change', targetType: 'annuity', targetId: annuityId,
+      dojoId: hist.dojo_id, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: { plan: hist.plan },
+      after: { plan, amount: parseFloat(header.amount), due_date: header.due_date },
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (troca de plano):', e.message));
+
     const { total, paid_total } = annuitySvc.computeTotals(newInstallments);
     res.json({
       annuity_id: annuityId,
@@ -2121,6 +2191,14 @@ router.post('/annuities/installments/:installmentId/pay', ...guards.adminOnly(),
 
     const header = await annuitySvc.syncAnnuityHeaderRollup(client, inst.annuity_id);
     await client.query('COMMIT');
+
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'installment_pay', targetType: 'installment', targetId: installmentId,
+      dojoId: inst.dojo_id || null, practitionerId: inst.practitioner_id || null,
+      actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: { status: inst.status, amount: inst.amount != null ? parseFloat(inst.amount) : null, paid_at: inst.paid_at || null, payment_method: inst.payment_method || null },
+      after: { status: 'paid', amount: effectiveAmount, paid_at: paidAtValue, payment_method, transaction_id: transactionId },
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (pay parcela):', e.message));
 
     res.json({
       installment_id: installmentId,
@@ -2295,6 +2373,13 @@ router.patch('/annuities/installments/:installmentId', ...guards.adminOnly(), as
 
     const header = await annuitySvc.syncAnnuityHeaderRollup(client, inst.annuity_id);
     await client.query('COMMIT');
+
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'installment_patch', targetType: 'installment', targetId: installmentId,
+      actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: { amount: inst.amount != null ? parseFloat(inst.amount) : null, due_date: inst.due_date },
+      after: { amount: parseFloat(updated.amount), due_date: updated.due_date },
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (patch parcela):', e.message));
 
     res.json({
       installment_id: updated.id,
