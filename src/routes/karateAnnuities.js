@@ -1256,6 +1256,21 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
 // calculado em SQL (devolve o MESMO vocabulário de status usado na listagem
 // de dojôs, incluindo os alias `em_aberto`/`atrasado` usados pelos KPIs do
 // summary). Busca (`q`) por nome ou número de matrícula.
+//
+// BUGFIX P0 (QA anuidades 11/07/2026): esta listagem devolvia TODOS os
+// customers da federação (9.625 registros), sem nenhum filtro de
+// elegibilidade — universo correto é só faixa-preta ATIVA (549), a MESMA
+// regra que karate_member_standing e GET /financial/annuities/summary já
+// aplicam (karateAnnuitySummary.js: `COALESCE(cu.is_active, true) AND
+// cb.belt_level = 'preta'`, join com a view karate_current_belt). Sem esse
+// filtro, praticante INATIVO ou não-preta aparecia na lista e podia
+// receber baixa de pagamento manual — já causou marcação acidental de
+// anuidades reais como pagas em produção (3 praticantes, 2 deles
+// inativos). Conferido em prod via SELECT antes do fix: 549 elegíveis,
+// 1 sem cobrança, 519 atrasado, R$ 31.105,00 em aberto — bate com os
+// KPIs do summary. Ausência de cobrança (no_charge) continua NEUTRA (não
+// é inadimplência) — este filtro só define quem ENTRA na lista, não
+// reclassifica status.
 function cpfBaseSql(withPlan) {
   return `
     SELECT
@@ -1276,15 +1291,20 @@ function cpfBaseSql(withPlan) {
       CASE WHEN h.due_date IS NOT NULL AND h.status <> 'paid' AND h.due_date <= CURRENT_DATE
            THEN (CURRENT_DATE - h.due_date) ELSE 0 END AS days_overdue
     FROM customers cu
+    LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id
     LEFT JOIN karate_dojo_annuity_history h
       ON h.practitioner_id = cu.id AND h.reference_period = $2
     WHERE cu.federation_id = $1
+      AND COALESCE(cu.is_active, true)
+      AND cb.belt_level = 'preta'
   `;
 }
 
 // Fallback legado (migration 222 ausente): computed_status direto sobre
 // transactions (category='annuity_cpf'). Mesma regra canônica de "vencida"
 // (due_date <= hoje) do restante da Fase F2 — CLAUDE.md #vencida.
+// Mesmo fix de elegibilidade do cpfBaseSql acima (bug P0 11/07/2026): só
+// faixa-preta ATIVA entra na listagem, mesmo no fallback legado.
 const CPF_LEGACY_BASE_SQL = `
   SELECT
     cu.id AS practitioner_id, cu.name AS full_name,
@@ -1303,11 +1323,14 @@ const CPF_LEGACY_BASE_SQL = `
     CASE WHEN t.due_date IS NOT NULL AND t.status <> 'confirmed' AND t.paid_at IS NULL AND t.due_date <= CURRENT_DATE
          THEN (CURRENT_DATE - t.due_date) ELSE 0 END AS days_overdue
   FROM customers cu
+  LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id
   LEFT JOIN transactions t
     ON t.reference_type = 'customer' AND t.reference_id = cu.id
     AND t.category = 'annuity_cpf' AND EXTRACT(YEAR FROM t.due_date) = $2::int
     AND t.federation_id = $1
   WHERE cu.federation_id = $1
+    AND COALESCE(cu.is_active, true)
+    AND cb.belt_level = 'preta'
 `;
 
 const CPF_FILTER_SQL = `
