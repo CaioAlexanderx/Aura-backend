@@ -478,6 +478,72 @@ describe('POST /financial/annuities/campaign/preview', () => {
         done();
       });
   });
+
+  // ── BUG P0 (achado em QA, wizard "Nova campanha" em produção): o Passo 3
+  // (Revisão) mostrava "vence —" nas linhas de dojô sem plano, mesmo o
+  // banner da mesma tela avisando "vão usar Anual por padrão" — a promessa
+  // (banner) e o cálculo (linha) discordavam. Causa raiz era 100% no front
+  // (Step3Review usava `d.due_date`, que o backend intencionalmente NUNCA
+  // preenche pra plano_indefinido — ver comentário da rota acima — em vez
+  // do plan_catalog, que já existe pra isso desde a Fase F2). Este teste
+  // não muda esse contrato (due_date do alvo continua null quando o plano
+  // está indefinido: resolveDojoPlan não pode ceder e o dojô ainda não
+  // tem decisão nenhuma tomada), mas TRAVA a garantia da qual o fix do
+  // front depende: o due_date que o catálogo oferece como sugestão (plano
+  // 'anual', o default do wizard) é EXATAMENTE o due_date que /campaign
+  // grava de fato quando esse dojô entra em `dojo_plans:{ [id]: 'anual' }`
+  // — ou seja, o número que a UI mostra "como se fosse Anual" nunca pode
+  // divergir do que a confirmação realmente lança.
+  it('dojô SEM plano: due_date do alvo continua null (nunca presume), mas plan_catalog.anual.due_date é EXATAMENTE o due_date que /campaign usaria se esse dojô entrasse em dojo_plans como anual', (done) => {
+    const futureYear = new Date().getUTCFullYear() + 1;
+    const { client: clientA } = makeFakeDb({
+      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Sem Plano', is_active: true }],
+      fees: [{ federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] }],
+    });
+    db.query.mockImplementation(clientA.query);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign/preview`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: String(futureYear), scope: 'dojos' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        // Invariante preservada: sem decisão tomada, o alvo não afirma um
+        // vencimento que ainda não é real.
+        expect(res.body.dojos[0].plano_indefinido).toBe(true);
+        expect(res.body.dojos[0].due_date).toBeNull();
+        const catalogAnual = res.body.plan_catalog.find((p) => p.plan === 'anual');
+        expect(catalogAnual).toBeDefined();
+        expect(catalogAnual.due_date).not.toBeNull();
+
+        // Agora repete o MESMO preview, mas com o default do wizard aplicado
+        // (dojo_plans:{d1:'anual'} — o que buildDojoPlansPayload manda no
+        // submit real quando o gestor não troca o chip de plano no Passo 3).
+        const { client: clientB } = makeFakeDb({
+          dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Sem Plano', is_active: true }],
+          fees: [{ federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] }],
+        });
+        db.query.mockImplementation(clientB.query);
+
+        request(app)
+          .post(`/federation/${FED_ID}/financial/annuities/campaign/preview`)
+          .set('Authorization', 'Bearer ' + adminToken)
+          .send({ year: String(futureYear), scope: 'dojos', dojo_plans: { d1: 'anual' } })
+          .end((err2, res2) => {
+            if (err2) return done(err2);
+            expect(res2.status).toBe(200);
+            expect(res2.body.dojos[0].plano_indefinido).toBe(false);
+            // A data que o catálogo sugeria bate byte a byte com a data que
+            // o alvo passa a ter assim que o plano é resolvido como anual —
+            // é essa coerência que o front usa (effectiveDojoDueDate) pra
+            // nunca mostrar "vence —" enquanto o banner promete Anual.
+            expect(res2.body.dojos[0].due_date).toBe(catalogAnual.due_date);
+            expect(res2.body.dojos[0].due_date_ajustada).toBe(catalogAnual.due_date_ajustada);
+            done();
+          });
+      });
+  });
 });
 
 // ============================================================
