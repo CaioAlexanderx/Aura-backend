@@ -173,6 +173,74 @@ describe('GET /financial/annuities/cpf — paginação real', () => {
         done();
       });
   });
+
+  // BUGFIX P0 (QA anuidades 11/07/2026): a listagem devolvia TODOS os
+  // customers da federação (9.625 registros em produção), sem filtro de
+  // elegibilidade — universo correto é só faixa-preta ATIVA (549, mesma
+  // regra de karate_member_standing / GET /financial/annuities/summary).
+  // Sem esse filtro, praticante INATIVO ou sem faixa preta aparecia na
+  // lista e podia receber baixa de pagamento manual — já causou mutação
+  // acidental em produção (3 praticantes marcados como pagos, 2 deles
+  // inativos). Este teste QUEBRA se alguém remover o filtro de novo.
+  it('BUGFIX P0: filtra por elegibilidade — só faixa-preta ATIVA entra na listagem (COUNT e SELECT)', (done) => {
+    db.query
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] }) // COUNT
+      .mockResolvedValueOnce({ rows: [] });             // SELECT paginado
+
+    request(app)
+      .get(`/federation/${FED_ID}/financial/annuities/cpf`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        const countSql = db.query.mock.calls[0][0];
+        const selectSql = db.query.mock.calls[1][0];
+        for (const sql of [countSql, selectSql]) {
+          expect(sql).toMatch(/karate_current_belt/);
+          expect(sql).toMatch(/belt_level\s*=\s*'preta'/);
+          expect(sql).toMatch(/is_active/);
+        }
+        done();
+      });
+  });
+
+  // Mesmo fix precisa valer no fallback legado (migration 222 ausente) —
+  // módulo ISOLADO pelo mesmo motivo do teste equivalente de /dojos acima
+  // (HAS_INSTALLMENTS é cache module-level compartilhado).
+  it('BUGFIX P0: fallback legado (42703) também filtra faixa-preta ATIVA', (done) => {
+    let isolatedApp, isolatedDb;
+    jest.isolateModules(() => {
+      isolatedDb = require('../src/config/database');
+      const isolatedRouter = require('../src/routes/karateAnnuities');
+      isolatedApp = express();
+      isolatedApp.use(express.json());
+      isolatedApp.use('/federation/:id/financial', isolatedRouter);
+    });
+
+    const err = new Error('column h.plan does not exist');
+    err.code = '42703';
+    isolatedDb.query
+      .mockRejectedValueOnce(err)                        // COUNT com h.plan falha
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] })    // COUNT fallback legado
+      .mockResolvedValueOnce({ rows: [] });                // SELECT fallback legado
+
+    request(isolatedApp)
+      .get(`/federation/${FED_ID}/financial/annuities/cpf`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .end((reqErr, res) => {
+        if (reqErr) return done(reqErr);
+        expect(res.status).toBe(200);
+        const legacyCountSql = isolatedDb.query.mock.calls[1][0];
+        const legacySelectSql = isolatedDb.query.mock.calls[2][0];
+        for (const sql of [legacyCountSql, legacySelectSql]) {
+          expect(sql).toMatch(/karate_current_belt/);
+          expect(sql).toMatch(/belt_level\s*=\s*'preta'/);
+          expect(sql).toMatch(/is_active/);
+        }
+        isolatedDb.query.mockReset();
+        done();
+      });
+  });
 });
 
 describe('PUT /financial/fees — vigência por plano (Fase F2)', () => {
