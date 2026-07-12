@@ -12,6 +12,21 @@
 //   matrícula FPKT (nunca por nome). O link de auto-atendimento do PRÓPRIO
 //   praticante vive em karateRosterSelfServicePublic.js — token SEPARADO
 //   (ver migration 225), só aceita contato.
+// (13/07/2026 — G1 fechamento: GET /:token agora devolve `self_service_url`
+//   pronto. Quem compartilha o link de auto-atendimento com os alunos é o
+//   SENSEI (cola no grupo do WhatsApp do dojô) — não a federação. Exigir
+//   que a federação copiasse o link e reenviasse ao sensei manualmente
+//   condenava a feature a não ser usada. DECISÃO DE SEGURANÇA: os tokens
+//   continuam SEPARADOS (karateRosterSelfServicePublic.js) — isso não muda;
+//   vazar o link de auto-atendimento nunca deve dar poder de sensei. Mas o
+//   inverso não é um downgrade de segurança: quem já possui o token do
+//   SENSEI (poder pleno — inativar, editar qualquer campo, adicionar
+//   praticante, confirmar o quadro) recebendo também o link de
+//   auto-atendimento (poder mínimo — só o próprio contato) é a hierarquia
+//   natural, não uma escalada. Se o self_service_token ainda não existir
+//   para o dojô (ou já expirou), este endpoint GERA um NOVO sob demanda,
+//   de forma idempotente (só regenera quando ausente/expirado — ver
+//   ensureSelfServiceUrl abaixo).
 //
 // SEM auth (mesmo padrão de dentalPortalPublic.js / studioApprovalPublic.js):
 // o token opaco de karate_dojo_roster_validation É a autenticação. Todo
@@ -19,7 +34,7 @@
 // dojo_id/federation_id do body são SEMPRE ignorados (nunca aceitos de fora).
 //
 //   GET   /public/roster-update/:token                          — quadro do dojô
-//                                                                   (ordenado, com missing/counts/progress)
+//                                                                   (ordenado, com missing/counts/progress/self_service_url)
 //   GET   /public/roster-update/:token/practitioners/:studentId — ficha completa
 //                                                                   ("ver ficha completa" da UI)
 //   PATCH /public/roster-update/:token/practitioners/:studentId — autosave granular
@@ -41,12 +56,70 @@
 'use strict';
 
 const router = require('express').Router();
+const crypto = require('crypto');
 const db = require('../config/database');
 const { nextPractitionerRegistrationNumber, parseCSVLine } = require('../services/karateService');
 
 let multer;
 try { multer = require('multer'); } catch (_) { multer = null; }
 const upload = multer ? multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } }) : null;
+
+// Mesma base de karateRosterValidation.js (APP_URL, default
+// https://app.getaura.com.br) — mantém as duas URLs (sensei/self-service)
+// consistentes entre os dois arquivos.
+const APP_URL = process.env.APP_URL || 'https://app.getaura.com.br';
+
+function rosterSelfServiceUrl(token) {
+  return `${APP_URL}/karate/roster-self/${token}`;
+}
+
+// ── Garante (idempotente) um self_service_token válido para o dojô e
+// devolve a URL pronta. Só GERA um token novo quando o dojô ainda não tem
+// nenhum (schema recém-migrado, ou dojô que nunca teve
+// request-roster-update chamado depois da migration 225) ou quando o que
+// existe já expirou — uma única query, sem round-trip de leitura antes.
+// Concorrência: duas chamadas simultâneas nesse estado "ausente/expirado"
+// podem gerar tokens diferentes, mas a última a commitar é a que vale (não
+// há perda de escopo/segurança, só o link antigo para de funcionar) — e
+// assim que EXISTE um token válido, chamadas seguintes caem no ramo ELSE e
+// preservam o mesmo token (não invalida um link que o sensei já colou no
+// grupo do dojô).
+async function ensureSelfServiceUrl(dojoId) {
+  const candidateToken = crypto.randomBytes(24).toString('hex');
+  try {
+    const { rows } = await db.query(
+      `UPDATE karate_dojo_roster_validation
+       SET self_service_token = CASE
+             WHEN self_service_token IS NULL
+                  OR self_service_token_expires_at IS NULL
+                  OR self_service_token_expires_at <= NOW()
+             THEN $2
+             ELSE self_service_token
+           END,
+           self_service_token_expires_at = CASE
+             WHEN self_service_token IS NULL
+                  OR self_service_token_expires_at IS NULL
+                  OR self_service_token_expires_at <= NOW()
+             THEN NOW() + INTERVAL '30 days'
+             ELSE self_service_token_expires_at
+           END
+       WHERE dojo_id = $1
+       RETURNING self_service_token`,
+      [dojoId, candidateToken]
+    );
+    if (!rows.length || !rows[0].self_service_token) return null;
+    return rosterSelfServiceUrl(rows[0].self_service_token);
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') {
+      // Migration 225 pendente — degrada para null (mesmo padrão dos
+      // outros handlers deste arquivo), nunca derruba o GET do quadro.
+      console.warn('[karateRosterPortalPublic] self_service_token schema pendente:', e.message);
+      return null;
+    }
+    console.error('[karateRosterPortalPublic] ensureSelfServiceUrl error:', e.message);
+    return null;
+  }
+}
 
 // ── Resolve token do SENSEI → { dojo_id, federation_id, status, dojo_nome, expired } ──
 // Toca last_accessed_at (best-effort) quando o token é válido — é o sinal
@@ -180,6 +253,7 @@ router.get('/:token', async (req, res) => {
     if (resolved.expired) return res.status(410).json({ error: 'Link expirado. Solicite uma nova atualização cadastral à federação.' });
 
     const quadro = await fetchQuadro(resolved.dojo_id, resolved.federation_id);
+    const selfServiceUrl = await ensureSelfServiceUrl(resolved.dojo_id);
 
     res.json({
       dojo_nome: resolved.dojo_nome,
@@ -187,6 +261,7 @@ router.get('/:token', async (req, res) => {
       praticantes: quadro.praticantes,
       counts: quadro.counts,
       progress: quadro.progress,
+      self_service_url: selfServiceUrl,
     });
   } catch (err) {
     if (err.code === '42P01' || err.code === '42703') {

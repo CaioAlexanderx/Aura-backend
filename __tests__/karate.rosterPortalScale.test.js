@@ -6,6 +6,9 @@
 //   (b) import casa por identificador estável (matrícula), nunca por nome
 //   (c) inativar pelo portal não gera cobrança nem mexe em mais ninguém
 //   (d) a ordenação põe preta-ativa-em-aberto no topo
+//   (e) GET /:token devolve self_service_url pronto — gera sob demanda
+//       quando ausente/expirado, preserva quando já existe válido, degrada
+//       para null quando a migration 225 ainda não foi aplicada (13/07/2026)
 //
 // Estilo: supertest + mock sequencial de db.query/db.connect (mesmo padrão
 // de __tests__/karate.trackM.routes.test.js) — sem Postgres real.
@@ -278,7 +281,9 @@ describe('GET /public/roster-update/:token — ordenação por consequência', (
           { id: 'p-a', name: 'Ana Preta', karate_registration_number: 'R1', is_active: true, phone: '119999', email: 'ana@x.com', belt_name: 'Preta', financeiro: 'atrasado', is_black_belt: true },
           { id: 'p-b', name: 'Bruno SemContato', karate_registration_number: 'R2', is_active: true, phone: null, email: null, belt_name: 'Verde', financeiro: 'nao_aplicavel', is_black_belt: false },
         ],
-      });
+      })
+      // ensureSelfServiceUrl: UPDATE idempotente (já existia um token válido)
+      .mockResolvedValueOnce({ rows: [{ self_service_token: SELF_TOKEN }] });
 
     request(app)
       .get(`/public/roster-update/${TOKEN}`)
@@ -299,6 +304,77 @@ describe('GET /public/roster-update/:token — ordenação por consequência', (
 
         // contagens: a+b = essenciais, resto = demais
         expect(res.body.counts).toEqual({ essenciais: 2, demais: 1 });
+
+        // self_service_url pronto — não é preciso pedir à federação
+        expect(res.body.self_service_url).toContain(`/karate/roster-self/${SELF_TOKEN}`);
+        done();
+      });
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// (e) GET /:token — self_service_url pronto (sensei não depende da
+//     federação pra compartilhar o link com os alunos)
+// ════════════════════════════════════════════════════════════
+describe('GET /public/roster-update/:token — self_service_url', () => {
+  function mockResolveAndQuadro() {
+    db.query
+      .mockResolvedValueOnce({
+        rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, status: 'pending', token_expires_at: FUTURE, dojo_nome: 'Dojô Teste' }],
+      })
+      .mockResolvedValueOnce({ rows: [] }) // touch last_accessed_at
+      .mockResolvedValueOnce({ rows: [] }); // fetchQuadro (sem praticantes, não é o foco deste teste)
+  }
+
+  it('devolve a URL pronta quando o dojô já tem self_service_token válido', (done) => {
+    const app = buildPortalApp();
+    mockResolveAndQuadro();
+    db.query.mockResolvedValueOnce({ rows: [{ self_service_token: SELF_TOKEN }] }); // ensureSelfServiceUrl
+
+    request(app)
+      .get(`/public/roster-update/${TOKEN}`)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.self_service_url).toBe(`https://app.getaura.com.br/karate/roster-self/${SELF_TOKEN}`);
+        done();
+      });
+  });
+
+  it('gera um self_service_token novo sob demanda quando o dojô ainda não tinha (idempotente)', (done) => {
+    const app = buildPortalApp();
+    mockResolveAndQuadro();
+    // A query idempotente devolve o token recém-gerado pelo próprio UPDATE
+    // (CASE WHEN NULL/expirado THEN novo) — o teste não precisa saber o
+    // valor exato do random, só que veio preenchido.
+    db.query.mockResolvedValueOnce({ rows: [{ self_service_token: 'recem-gerado-000' }] });
+
+    request(app)
+      .get(`/public/roster-update/${TOKEN}`)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.self_service_url).toBe('https://app.getaura.com.br/karate/roster-self/recem-gerado-000');
+        done();
+      });
+  });
+
+  it('degrada para self_service_url: null quando a migration 225 ainda não foi aplicada (42703), sem derrubar o GET', (done) => {
+    const app = buildPortalApp();
+    mockResolveAndQuadro();
+    db.query.mockImplementationOnce(() => {
+      const e = new Error('column "self_service_token" does not exist');
+      e.code = '42703';
+      return Promise.reject(e);
+    });
+
+    request(app)
+      .get(`/public/roster-update/${TOKEN}`)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.self_service_url).toBeNull();
+        expect(res.body.dojo_nome).toBe('Dojô Teste');
         done();
       });
   });
