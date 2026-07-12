@@ -217,6 +217,8 @@ router.use('/federation/:id/financial', require('./karateFinancial'));
 router.use('/federation/:id/financial', require('./karateNfse'));
 // Fase 5: valores em aberto segmentados (pretas CPF x dojôs) — GET /open-items
 router.use('/federation/:id/financial', require('./karateOpenItems'));
+// Fase G3: rastro de ações financeiras (quem fez, quando) — GET /audit
+router.use('/federation/:id/financial', require('./karateFinanceAuditRead'));
 
 // ── AURA KARATÊ — Track C (backend exames + cursos) ─────────────
 // (certificados Track J montado separadamente abaixo)

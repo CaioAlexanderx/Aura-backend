@@ -71,6 +71,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const annuitySvc = require('../services/karateAnnuityService');
+const financeAudit = require('../services/karateFinanceAudit');
 
 const VALID_SCOPES = ['dojos', 'practitioners', 'both'];
 
@@ -530,6 +531,22 @@ router.post('/annuities/campaign/preview', ...guards.adminOnly(), async (req, re
 // o restante do contrato do endpoint (scope + exclude, não uma lista
 // endereçável de alvos). Precisa ser do mesmo ano da temporada (`year`).
 // ────────────────────────────────────────────────────────────────
+// G3: registra 1 linha de auditoria por item efetivamente criado — reusado
+// por /campaign (source='campaign') e /batch (source='batch'). Roda DEPOIS
+// do COMMIT da rodada inteira (fire-and-forget, nunca bloqueia a resposta).
+async function logCreatedBatch(created, { federationId, actorUserId, source, routeLabel }) {
+  for (const c of created) {
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'charge_create', targetType: 'annuity', targetId: c.annuity_id,
+      dojoId: c.type === 'dojo' ? c.id : null,
+      practitionerId: c.type === 'practitioner' ? c.id : null,
+      actorUserId, source,
+      before: null,
+      after: { plan: c.plan, installments_count: c.installments_count, due_date: c.due_date, total: c.total },
+    }).catch((e) => console.error(`[karateAnnuityCampaign] financeAudit falhou (${routeLabel}):`, e.message));
+  }
+}
+
 router.post('/annuities/campaign', ...guards.adminOnly(), async (req, res) => {
   const federationId = req.params.id;
   const { year: rawYear, scope: rawScope, exclude, due_date: rawDueDate, dojo_plans: rawDojoPlans } = req.body || {};
@@ -635,6 +652,12 @@ router.post('/annuities/campaign', ...guards.adminOnly(), async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    await logCreatedBatch(created, {
+      federationId, actorUserId: financeAudit.actorFromReq(req).actorUserId,
+      source: 'campaign', routeLabel: 'campaign',
+    });
+
     res.status(201).json({ created, skipped, errors });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
@@ -765,6 +788,12 @@ router.post('/annuities/batch', ...guards.adminOnly(), async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    await logCreatedBatch(created, {
+      federationId, actorUserId: financeAudit.actorFromReq(req).actorUserId,
+      source: 'batch', routeLabel: 'batch',
+    });
+
     res.status(201).json({ created, skipped, errors });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
