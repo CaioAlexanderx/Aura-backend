@@ -133,25 +133,55 @@ router.get('/', ...guards.read(), async (req, res) => {
 
     const where = `WHERE ${conditions.join(' AND ')}`;
 
+    // karate_annuity_plan (Migration 226) — incluído na listagem defensivamente
+    // (mesmo padrão de HAS_ANNUITY_PLAN_COL usado no resto do arquivo): sem
+    // ele, a coluna "Modelo" da listagem só mostrava affiliation_model
+    // (metadado decorativo, nunca lido por rota de cobrança — ver
+    // DojoFichaModal.tsx) e afirmava "Anual" pra todo mundo mesmo quando o
+    // plano de anuidade REAL (o que a campanha usa) está indefinido — a
+    // lista prometia uma certeza que a ficha do dojô já desmentia.
+    const annuityCol = HAS_ANNUITY_PLAN_COL ? ', c.karate_annuity_plan' : '';
+
     if (status) {
       // Status agora é só active/inactive (deriva de is_active — ver
       // karateService.computeDojoStatus), mas mantemos o filtro em JS após
       // buscar o conjunto completo, para não duplicar a lógica em SQL.
       // NOTE: aceitável pois queries filtradas por status são tipicamente
       // dashboard-scoped e o resultado por federação é limitado (~centenas).
-      const allRes = await db.query(
-        `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
-                c.region, c.fpkt_affiliation_id,
-                c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-                ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
-                COUNT(cu.id) AS practitioner_count
-         FROM companies c
-         LEFT JOIN customers cu ON cu.dojo_id = c.id
-         ${where}
-         GROUP BY c.id
-         ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
-        params
-      );
+      let allRes;
+      try {
+        allRes = await db.query(
+          `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
+                  c.region, c.fpkt_affiliation_id,
+                  c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
+                  ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${annuityCol},
+                  COUNT(cu.id) AS practitioner_count
+           FROM companies c
+           LEFT JOIN customers cu ON cu.dojo_id = c.id
+           ${where}
+           GROUP BY c.id
+           ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
+          params
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_ANNUITY_PLAN_COL = false;
+          console.warn('[karateDojos] karate_annuity_plan ausente na listagem (Migration 226 pendente) — fallback sem coluna');
+          allRes = await db.query(
+            `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
+                    c.region, c.fpkt_affiliation_id,
+                    c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
+                    ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
+                    COUNT(cu.id) AS practitioner_count
+             FROM companies c
+             LEFT JOIN customers cu ON cu.dojo_id = c.id
+             ${where}
+             GROUP BY c.id
+             ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
+            params
+          );
+        } else throw e;
+      }
 
       const allDojosWithStatus = allRes.rows.map(r => ({
         id: r.id,
@@ -171,6 +201,7 @@ router.get('/', ...guards.read(), async (req, res) => {
         karate_logo_url: r.karate_logo_url || null,
         is_active: r.is_active !== false,
         status: computeDojoStatus(r.affiliation_model, r.affiliation_since, r.is_active),
+        karate_annuity_plan: r.karate_annuity_plan || null,
         practitioner_count: parseInt(r.practitioner_count, 10) || 0,
       }));
 
@@ -188,20 +219,42 @@ router.get('/', ...guards.read(), async (req, res) => {
     );
     const total = parseInt(countRes.rows[0].total, 10);
 
-    const dataRes = await db.query(
-      `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
-              c.region, c.fpkt_affiliation_id,
-              c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-              ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
-              COUNT(cu.id) AS practitioner_count
-       FROM companies c
-       LEFT JOIN customers cu ON cu.dojo_id = c.id
-       ${where}
-       GROUP BY c.id
-       ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC
-       LIMIT $${n} OFFSET $${n + 1}`,
-      [...params, pageSize, offset]
-    );
+    let dataRes;
+    try {
+      dataRes = await db.query(
+        `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
+                c.region, c.fpkt_affiliation_id,
+                c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
+                ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${annuityCol},
+                COUNT(cu.id) AS practitioner_count
+         FROM companies c
+         LEFT JOIN customers cu ON cu.dojo_id = c.id
+         ${where}
+         GROUP BY c.id
+         ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC
+         LIMIT $${n} OFFSET $${n + 1}`,
+        [...params, pageSize, offset]
+      );
+    } catch (e) {
+      if (e.code === '42703') {
+        HAS_ANNUITY_PLAN_COL = false;
+        console.warn('[karateDojos] karate_annuity_plan ausente na listagem (Migration 226 pendente) — fallback sem coluna');
+        dataRes = await db.query(
+          `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
+                  c.region, c.fpkt_affiliation_id,
+                  c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
+                  ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
+                  COUNT(cu.id) AS practitioner_count
+           FROM companies c
+           LEFT JOIN customers cu ON cu.dojo_id = c.id
+           ${where}
+           GROUP BY c.id
+           ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC
+           LIMIT $${n} OFFSET $${n + 1}`,
+          [...params, pageSize, offset]
+        );
+      } else throw e;
+    }
 
     const dojos = dataRes.rows.map(r => ({
       id: r.id,
@@ -221,6 +274,7 @@ router.get('/', ...guards.read(), async (req, res) => {
       karate_logo_url: r.karate_logo_url || null,
       is_active: r.is_active !== false,
       status: computeDojoStatus(r.affiliation_model, r.affiliation_since, r.is_active),
+      karate_annuity_plan: r.karate_annuity_plan || null,
       practitioner_count: parseInt(r.practitioner_count, 10) || 0,
     }));
 
