@@ -1,19 +1,12 @@
 // ============================================================
 // AURA KARATÊ — Solicitar atualização cadastral (independente) + estado
 // (10/07/2026 — cascata de status dojô→praticantes + validação de quadro)
-//
-// POST /federation/:id/dojos/:dojoId/request-roster-update  (staffWrite/adminOnly)
-//   Abre (ou reabre) uma solicitação de validação de quadro para o dojô,
-//   SEM alterar is_active — independente da cascata do PATCH is_active
-//   (ver karateDojos.js). Gera token opaco de 30 dias para o portal
-//   público do sensei (karateRosterPortalPublic.js).
-//
-// GET /federation/:id/dojos/:dojoId/roster-validation  (read)
-//   Estado atual da validação de quadro do dojô (para a UI mostrar banner
-//   "quadro pendente de confirmação"). Defensivo 42P01 → { status: null }.
-//
-// Montado direto em index.js (não em private.js) — mesmo padrão dos
-// demais mounts /federation/:id/dojos/... deste Track.
+// (12/07/2026 — G1: portal em escala. Além do token do sensei, gera um
+//   self_service_token SEPARADO para o link de auto-atendimento do
+//   praticante (ver karateRosterSelfServicePublic.js) — chaves diferentes
+//   de propósito (ver migration 225): vazar o link do grupo do dojô nunca
+//   dá poder de sensei. Também expõe GET /roster-progress (painel da
+//   federação — status por dojô, item 7 do G1).
 // ============================================================
 'use strict';
 
@@ -31,6 +24,100 @@ const APP_URL = process.env.APP_URL || 'https://app.getaura.com.br';
 function rosterUpdateUrl(token) {
   return `${APP_URL}/karate/roster-update/${token}`;
 }
+
+function rosterSelfServiceUrl(token) {
+  return `${APP_URL}/karate/roster-self/${token}`;
+}
+
+// ── GET /federation/:id/dojos/roster-progress ───────────────
+// Painel da federação (item 7 do G1): status do pedido por dojô, quantos
+// praticantes ainda sem contato, quantos essenciais faltam, último acesso.
+// Reusa karate_member_standing (fonte única de financeiro/faixa-preta) —
+// não reimplementa a regra de status.
+//
+// status por dojô:
+//   'nao_aberto'   — sem solicitação, OU solicitado mas o sensei nunca
+//                     abriu o link (last_accessed_at IS NULL)
+//   'em_andamento' — solicitado, já acessado, ainda não confirmado
+//   'validado'     — sensei confirmou o quadro (POST /:token de fechamento)
+//
+// essenciais_faltando = praticantes ativos com (a) faixa-preta ATIVA com
+//   anuidade em aberto na temporada OU (b) nenhum contato (nem telefone
+//   nem e-mail) — o mesmo critério de "grupo essencial" do portal
+//   (GET /public/roster-update/:token). praticantes_sem_contato é só o
+//   subconjunto (b), para a federação ver o tamanho do buraco de contato.
+router.get('/roster-progress', ...guards.read(), async (req, res) => {
+  const federationId = req.params.id;
+
+  try {
+    const { rows } = await db.query(
+      `WITH dojos AS (
+         SELECT id AS dojo_id, COALESCE(name, trade_name, legal_name) AS dojo_nome
+         FROM companies
+         WHERE federation_id = $1 AND vertical = 'karate_dojo'
+       ),
+       practicantes AS (
+         SELECT c.dojo_id,
+                COUNT(*) FILTER (
+                  WHERE COALESCE(c.is_active, true)
+                    AND (c.phone IS NULL OR btrim(c.phone) = '')
+                    AND (c.email IS NULL OR btrim(c.email) = '')
+                ) AS sem_contato,
+                COUNT(*) FILTER (
+                  WHERE COALESCE(c.is_active, true) AND (
+                    ((c.phone IS NULL OR btrim(c.phone) = '') AND (c.email IS NULL OR btrim(c.email) = ''))
+                    OR (COALESCE(kms.is_black_belt, false) AND kms.financeiro = 'atrasado')
+                  )
+                ) AS essenciais_faltando,
+                COUNT(*) FILTER (WHERE COALESCE(c.is_active, true)) AS total_ativos
+         FROM customers c
+         LEFT JOIN karate_member_standing kms ON kms.student_id = c.id
+         WHERE c.dojo_id IN (SELECT dojo_id FROM dojos)
+           AND c.is_student = true AND c.is_guest = false
+         GROUP BY c.dojo_id
+       )
+       SELECT d.dojo_id, d.dojo_nome,
+              v.status, v.last_accessed_at, v.requested_at, v.validated_at,
+              COALESCE(p.sem_contato, 0)::int          AS praticantes_sem_contato,
+              COALESCE(p.essenciais_faltando, 0)::int  AS essenciais_faltando,
+              COALESCE(p.total_ativos, 0)::int          AS total_praticantes
+       FROM dojos d
+       LEFT JOIN karate_dojo_roster_validation v ON v.dojo_id = d.dojo_id
+       LEFT JOIN practicantes p ON p.dojo_id = d.dojo_id
+       ORDER BY d.dojo_nome ASC`,
+      [federationId]
+    );
+
+    const data = rows.map((r) => {
+      let status;
+      if (!r.status) status = 'nao_aberto';
+      else if (r.status === 'validated') status = 'validado';
+      else if (!r.last_accessed_at) status = 'nao_aberto';
+      else status = 'em_andamento';
+
+      return {
+        dojo_id: r.dojo_id,
+        dojo_nome: r.dojo_nome,
+        status,
+        requested_at: r.requested_at || null,
+        validated_at: r.validated_at || null,
+        last_accessed_at: r.last_accessed_at || null,
+        praticantes_sem_contato: r.praticantes_sem_contato,
+        essenciais_faltando: r.essenciais_faltando,
+        total_praticantes: r.total_praticantes,
+      };
+    });
+
+    res.json({ data });
+  } catch (err) {
+    if (err.code === '42P01' || err.code === '42703') {
+      console.warn('[karateRosterValidation] roster-progress schema pendente:', err.message);
+      return res.json({ data: [] });
+    }
+    console.error('[karateRosterValidation] roster-progress error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar progresso de quadro dos dojôs' });
+  }
+});
 
 // ── POST /federation/:id/dojos/:dojoId/request-roster-update ───────────
 router.post('/:dojoId/request-roster-update', ...guards.adminOnly(), async (req, res) => {
@@ -50,25 +137,36 @@ router.post('/:dojoId/request-roster-update', ...guards.adminOnly(), async (req,
     }
 
     const token = crypto.randomBytes(24).toString('hex');
+    // Segredo SEPARADO do token do sensei (ver comentário de topo do arquivo
+    // e migration 225) — o self-service nunca usa o mesmo token de escrita
+    // plena.
+    const selfServiceToken = crypto.randomBytes(24).toString('hex');
 
     let row = null;
     try {
       const upsertRes = await db.query(
         `INSERT INTO karate_dojo_roster_validation
            (dojo_id, federation_id, status, requested_at, validated_at, validated_by,
-            token, token_expires_at, updated_at)
-         VALUES ($1, $2, 'pending', NOW(), NULL, NULL, $3, NOW() + INTERVAL '30 days', NOW())
+            token, token_expires_at,
+            self_service_token, self_service_token_expires_at,
+            updated_at)
+         VALUES ($1, $2, 'pending', NOW(), NULL, NULL, $3, NOW() + INTERVAL '30 days',
+                 $4, NOW() + INTERVAL '30 days', NOW())
          ON CONFLICT (dojo_id) DO UPDATE SET
-           federation_id    = EXCLUDED.federation_id,
-           status           = 'pending',
-           requested_at     = NOW(),
-           validated_at     = NULL,
-           validated_by     = NULL,
-           token            = EXCLUDED.token,
-           token_expires_at = EXCLUDED.token_expires_at,
-           updated_at       = NOW()
-         RETURNING status, requested_at, token, token_expires_at`,
-        [dojoId, federationId, token]
+           federation_id                 = EXCLUDED.federation_id,
+           status                        = 'pending',
+           requested_at                  = NOW(),
+           validated_at                  = NULL,
+           validated_by                  = NULL,
+           token                         = EXCLUDED.token,
+           token_expires_at              = EXCLUDED.token_expires_at,
+           self_service_token            = EXCLUDED.self_service_token,
+           self_service_token_expires_at = EXCLUDED.self_service_token_expires_at,
+           last_accessed_at              = NULL,
+           updated_at                    = NOW()
+         RETURNING status, requested_at, token, token_expires_at,
+                   self_service_token, self_service_token_expires_at`,
+        [dojoId, federationId, token, selfServiceToken]
       );
       row = upsertRes.rows[0];
     } catch (e) {
@@ -79,7 +177,31 @@ router.post('/:dojoId/request-roster-update', ...guards.adminOnly(), async (req,
           code: 'SCHEMA_PENDING',
         });
       }
-      throw e;
+      if (e.code === '42703') {
+        // Migration 225 (self_service_token) ainda não aplicada — cai para
+        // o INSERT antigo (só token do sensei), sem quebrar o request.
+        console.warn('[karateRosterValidation] colunas self_service ausentes (schema pendente):', e.message);
+        const fallbackRes = await db.query(
+          `INSERT INTO karate_dojo_roster_validation
+             (dojo_id, federation_id, status, requested_at, validated_at, validated_by,
+              token, token_expires_at, updated_at)
+           VALUES ($1, $2, 'pending', NOW(), NULL, NULL, $3, NOW() + INTERVAL '30 days', NOW())
+           ON CONFLICT (dojo_id) DO UPDATE SET
+             federation_id    = EXCLUDED.federation_id,
+             status           = 'pending',
+             requested_at     = NOW(),
+             validated_at     = NULL,
+             validated_by     = NULL,
+             token            = EXCLUDED.token,
+             token_expires_at = EXCLUDED.token_expires_at,
+             updated_at       = NOW()
+           RETURNING status, requested_at, token, token_expires_at`,
+          [dojoId, federationId, token]
+        );
+        row = { ...fallbackRes.rows[0], self_service_token: null, self_service_token_expires_at: null };
+      } else {
+        throw e;
+      }
     }
 
     // Evento de auditoria — best-effort (não derruba o request se a tabela
@@ -100,6 +222,8 @@ router.post('/:dojoId/request-roster-update', ...guards.adminOnly(), async (req,
       requested_at: row.requested_at,
       token: row.token,
       url: rosterUpdateUrl(row.token),
+      self_service_token: row.self_service_token || null,
+      self_service_url: row.self_service_token ? rosterSelfServiceUrl(row.self_service_token) : null,
     });
   } catch (err) {
     console.error('[karateRosterValidation] request-roster-update error:', err.message);
@@ -113,7 +237,8 @@ router.get('/:dojoId/roster-validation', ...guards.read(), async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      `SELECT status, requested_at, validated_at, validated_by, token, token_expires_at
+      `SELECT status, requested_at, validated_at, validated_by, token, token_expires_at,
+              self_service_token, self_service_token_expires_at, last_accessed_at
        FROM karate_dojo_roster_validation
        WHERE dojo_id = $1 AND federation_id = $2
        LIMIT 1`,
@@ -121,11 +246,17 @@ router.get('/:dojoId/roster-validation', ...guards.read(), async (req, res) => {
     );
 
     if (!rows.length) {
-      return res.json({ status: null, requested_at: null, validated_at: null, validated_by: null, token: null, url: null });
+      return res.json({
+        status: null, requested_at: null, validated_at: null, validated_by: null,
+        token: null, url: null, self_service_token: null, self_service_url: null,
+        last_accessed_at: null,
+      });
     }
 
     const r = rows[0];
     const tokenActive = !!r.token && r.token_expires_at && new Date(r.token_expires_at) > new Date();
+    const selfServiceActive = !!r.self_service_token && r.self_service_token_expires_at
+      && new Date(r.self_service_token_expires_at) > new Date();
 
     res.json({
       status: r.status || null,
@@ -134,11 +265,55 @@ router.get('/:dojoId/roster-validation', ...guards.read(), async (req, res) => {
       validated_by: r.validated_by || null,
       token: tokenActive ? r.token : null,
       url: tokenActive ? rosterUpdateUrl(r.token) : null,
+      self_service_token: selfServiceActive ? r.self_service_token : null,
+      self_service_url: selfServiceActive ? rosterSelfServiceUrl(r.self_service_token) : null,
+      last_accessed_at: r.last_accessed_at || null,
     });
   } catch (err) {
     if (err.code === '42P01') {
       console.warn('[karateRosterValidation] karate_dojo_roster_validation ausente (schema pendente):', err.message);
-      return res.json({ status: null, requested_at: null, validated_at: null, validated_by: null, token: null, url: null });
+      return res.json({
+        status: null, requested_at: null, validated_at: null, validated_by: null,
+        token: null, url: null, self_service_token: null, self_service_url: null,
+        last_accessed_at: null,
+      });
+    }
+    if (err.code === '42703') {
+      // Migration 225 pendente: colunas self_service_* ausentes. Degrada
+      // silenciosamente para o formato antigo em vez de 500.
+      console.warn('[karateRosterValidation] colunas self_service ausentes (schema pendente):', err.message);
+      try {
+        const { rows } = await db.query(
+          `SELECT status, requested_at, validated_at, validated_by, token, token_expires_at
+           FROM karate_dojo_roster_validation
+           WHERE dojo_id = $1 AND federation_id = $2
+           LIMIT 1`,
+          [dojoId, federationId]
+        );
+        if (!rows.length) {
+          return res.json({
+            status: null, requested_at: null, validated_at: null, validated_by: null,
+            token: null, url: null, self_service_token: null, self_service_url: null,
+            last_accessed_at: null,
+          });
+        }
+        const r = rows[0];
+        const tokenActive = !!r.token && r.token_expires_at && new Date(r.token_expires_at) > new Date();
+        return res.json({
+          status: r.status || null,
+          requested_at: r.requested_at || null,
+          validated_at: r.validated_at || null,
+          validated_by: r.validated_by || null,
+          token: tokenActive ? r.token : null,
+          url: tokenActive ? rosterUpdateUrl(r.token) : null,
+          self_service_token: null,
+          self_service_url: null,
+          last_accessed_at: null,
+        });
+      } catch (e2) {
+        console.error('[karateRosterValidation] roster-validation fallback error:', e2.message);
+        return res.status(500).json({ error: 'Erro ao carregar validação de quadro' });
+      }
     }
     console.error('[karateRosterValidation] roster-validation GET error:', err.message);
     res.status(500).json({ error: 'Erro ao carregar validação de quadro' });

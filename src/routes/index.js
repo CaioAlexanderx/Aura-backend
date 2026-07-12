@@ -144,10 +144,24 @@ router.use('/public/karate', require('./karateDojoPublic'));
 
 // ── AURA KARATÊ — Cascata de status dojô→praticantes + validação de quadro (10/07/2026) ──
 // Portal público do sensei (SEM auth — token opaco escopado ao dojô):
-//   GET  /public/roster-update/:token
-//   POST /public/roster-update/:token
-//   GET  /public/roster-update/:token/export
+//   GET   /public/roster-update/:token                          (missing/counts/progress — G1)
+//   GET   /public/roster-update/:token/practitioners/:studentId (ficha completa — G1)
+//   PATCH /public/roster-update/:token/practitioners/:studentId (autosave granular, inclui inativar — G1)
+//   POST  /public/roster-update/:token
+//   POST  /public/roster-update/:token/practitioner
+//   GET   /public/roster-update/:token/export
+//   GET   /public/roster-update/:token/export-missing (G1)
+//   POST  /public/roster-update/:token/import          (G1)
 router.use('/public/roster-update', require('./karateRosterPortalPublic'));
+
+// ── AURA KARATÊ — G1: auto-atendimento do PRÓPRIO praticante (12/07/2026) ──
+// Token SEPARADO do token do sensei acima (self_service_token — migration
+// 225). Só aceita telefone/e-mail do próprio praticante, após 2º fator
+// (nascimento ou matrícula). Ver comentário de topo do arquivo para a
+// decisão de segurança.
+//   GET  /public/roster-self/:token/search?q=nome
+//   POST /public/roster-self/:token/update
+router.use('/public/roster-self', require('./karateRosterSelfServicePublic'));
 
 // ── AURA KARATÊ — Track A (backend cadastros) ──────────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
@@ -172,6 +186,8 @@ router.use('/federation/:id/dojos',                require('./karateRosterRedist
 // Cascata de status dojô→praticantes + validação de quadro (10/07/2026):
 //   POST /federation/:id/dojos/:dojoId/request-roster-update  (adminOnly)
 //   GET  /federation/:id/dojos/:dojoId/roster-validation      (read)
+//   GET  /federation/:id/dojos/roster-progress                 (read — G1 item 7,
+//        painel de progresso por dojô para a federação)
 router.use('/federation/:id/dojos',                require('./karateRosterValidation'));
 // Fase 4: roster do dojô (status + financeiro) — GET /:dojoId/members-standing
 router.use('/federation/:id/dojos',                require('./karateDojoRoster'));
