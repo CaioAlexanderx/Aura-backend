@@ -60,6 +60,15 @@ const ADDRESS_COLS =
 // de time técnico cai para a forma sem esta coluna.
 let HAS_IS_ASSISTANT_COL = true;
 
+// Migration 226 — karate_annuity_plan (plano de anuidade DO DOJO; NULL =
+// federacao ainda nao definiu, ver comentario da migration). Backend sobe
+// antes da migration (armadilha_schema_pre_migration do CLAUDE.md): cache
+// module-level otimista, vira false em 42703 e as queries caem para a
+// forma sem esta coluna (dojo aparece com karate_annuity_plan: null, que
+// e o estado real "indefinido" -- degradacao graceful e correta).
+let HAS_ANNUITY_PLAN_COL = true;
+const KARATE_ANNUITY_PLAN_VALUES = ['anual', 'semestral', 'trimestral'];
+
 // Monta o bloco de endereço da resposta JSON a partir de uma row.
 // (a row já vem com address_neighborhood por causa do alias acima / RETURNING)
 function addressOut(r) {
@@ -328,6 +337,21 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     });
   }
 
+  // karate_annuity_plan (Migration 226) — OPCIONAL no cadastro. Ausente/''/null
+  // fica NULL (indefinido; a federação decide depois, no preview da campanha
+  // ou editando o dojô). NÃO confundir com affiliation_model acima — ver
+  // comentário da Migration 226 sobre por que são campos diferentes.
+  const rawAnnuityPlan = req.body.karate_annuity_plan;
+  const karateAnnuityPlan = rawAnnuityPlan === undefined || rawAnnuityPlan === null || String(rawAnnuityPlan).trim() === ''
+    ? null
+    : String(rawAnnuityPlan).trim();
+  if (karateAnnuityPlan !== null && !KARATE_ANNUITY_PLAN_VALUES.includes(karateAnnuityPlan)) {
+    return res.status(422).json({
+      error: `karate_annuity_plan inválido. Valores aceitos: ${KARATE_ANNUITY_PLAN_VALUES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -420,6 +444,27 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       ]
     );
 
+    // karate_annuity_plan é gravado à parte (UPDATE pontual) para não
+    // renumerar os $N do INSERT posicional acima — mesma transação, então
+    // se o dojô falhar em algum passo seguinte, o UPDATE também é revertido.
+    // Defensivo (armadilha_schema_pre_migration): 42703 não derruba o
+    // cadastro do dojô — só o plano fica sem ser salvo desta vez.
+    let savedAnnuityPlan = null;
+    if (karateAnnuityPlan !== null && HAS_ANNUITY_PLAN_COL) {
+      try {
+        await client.query(
+          `UPDATE companies SET karate_annuity_plan = $1 WHERE id = $2`,
+          [karateAnnuityPlan, insertRes.rows[0].id]
+        );
+        savedAnnuityPlan = karateAnnuityPlan;
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_ANNUITY_PLAN_COL = false;
+          console.warn('[karateDojos] karate_annuity_plan ausente no create (Migration 226 pendente) — ignorado');
+        } else throw e;
+      }
+    }
+
     await client.query('COMMIT');
 
     const dojo = insertRes.rows[0];
@@ -441,6 +486,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       is_active: dojo.is_active !== false,
       status: computeDojoStatus(dojo.affiliation_model, dojo.affiliation_since, dojo.is_active),
       practitioner_count: 0,
+      karate_annuity_plan: savedAnnuityPlan,
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -458,21 +504,51 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
   try {
     // LEFT JOIN com customers para trazer o nome atual do praticante vinculado como sensei.
     // O alias spr é "sensei practitioner row".
-    const dojoRes = await db.query(
-      `SELECT c.id, c.name, c.cnpj, c.sensei_cpf,
-              c.sensei_name, c.sensei_practitioner_id,
-              spr.name AS sensei_practitioner_name,
-              c.region, c.fpkt_affiliation_id,
-              c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-              ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
-              COUNT(cu.id) AS practitioner_count
-       FROM companies c
-       LEFT JOIN customers spr ON spr.id = c.sensei_practitioner_id
-       LEFT JOIN customers cu  ON cu.dojo_id = c.id
-       WHERE c.id = $1 AND c.federation_id = $2 AND c.vertical = 'karate_dojo'
-       GROUP BY c.id, spr.name`,
-      [dojoId, federationId]
-    );
+    // karate_annuity_plan (Migration 226) buscado defensivamente — cai
+    // para a query sem a coluna em 42703 (deploy antes da migration).
+    let dojoRes;
+    if (HAS_ANNUITY_PLAN_COL) {
+      try {
+        dojoRes = await db.query(
+          `SELECT c.id, c.name, c.cnpj, c.sensei_cpf,
+                  c.sensei_name, c.sensei_practitioner_id,
+                  spr.name AS sensei_practitioner_name,
+                  c.region, c.fpkt_affiliation_id,
+                  c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
+                  ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
+                  c.karate_annuity_plan,
+                  COUNT(cu.id) AS practitioner_count
+           FROM companies c
+           LEFT JOIN customers spr ON spr.id = c.sensei_practitioner_id
+           LEFT JOIN customers cu  ON cu.dojo_id = c.id
+           WHERE c.id = $1 AND c.federation_id = $2 AND c.vertical = 'karate_dojo'
+           GROUP BY c.id, spr.name`,
+          [dojoId, federationId]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_ANNUITY_PLAN_COL = false;
+          console.warn('[karateDojos] karate_annuity_plan ausente (Migration 226 pendente) — fallback sem coluna');
+        } else throw e;
+      }
+    }
+    if (dojoRes === undefined) {
+      dojoRes = await db.query(
+        `SELECT c.id, c.name, c.cnpj, c.sensei_cpf,
+                c.sensei_name, c.sensei_practitioner_id,
+                spr.name AS sensei_practitioner_name,
+                c.region, c.fpkt_affiliation_id,
+                c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
+                ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
+                COUNT(cu.id) AS practitioner_count
+         FROM companies c
+         LEFT JOIN customers spr ON spr.id = c.sensei_practitioner_id
+         LEFT JOIN customers cu  ON cu.dojo_id = c.id
+         WHERE c.id = $1 AND c.federation_id = $2 AND c.vertical = 'karate_dojo'
+         GROUP BY c.id, spr.name`,
+        [dojoId, federationId]
+      );
+    }
 
     if (!dojoRes.rows.length) {
       return res.status(404).json({ error: 'Dojô não encontrado', code: 'NOT_FOUND' });
@@ -591,6 +667,10 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
       is_active: d.is_active !== false,
       status: computeDojoStatus(d.affiliation_model, d.affiliation_since, d.is_active),
       practitioner_count: parseInt(d.practitioner_count, 10) || 0,
+      // karate_annuity_plan (Migration 226): plano de anuidade REAL do dojô
+      // (anual|semestral|trimestral) — null = federação ainda não definiu.
+      // NÃO confundir com affiliation_model acima (decorativo, não usado em billing).
+      karate_annuity_plan: d.karate_annuity_plan || null,
       technical_team: technicalTeam,
       annuity_history: annuityHistory,
     });
@@ -811,6 +891,27 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
     idx++;
   }
 
+  // ── Migration 226: karate_annuity_plan (plano de anuidade DO DOJÔ) ──
+  // '' ou null limpa o campo (volta a "indefinido" — decisão deliberada da
+  // federação de desfazer a escolha). Qualquer outro valor tem que ser um
+  // dos 3 planos válidos — NUNCA aceitamos silenciosamente algo fora disso.
+  // Gate em HAS_ANNUITY_PLAN_COL: se a Migration 226 ainda não rodou neste
+  // deploy, ignoramos silenciosamente o campo aqui (em vez de 500) — o
+  // valor só volta a ser gravável assim que a coluna existir.
+  if (req.body.karate_annuity_plan !== undefined && HAS_ANNUITY_PLAN_COL) {
+    const raw = req.body.karate_annuity_plan;
+    const v = raw === null || String(raw).trim() === '' ? null : String(raw).trim();
+    if (v !== null && !KARATE_ANNUITY_PLAN_VALUES.includes(v)) {
+      return res.status(422).json({
+        error: `karate_annuity_plan inválido. Valores aceitos: ${KARATE_ANNUITY_PLAN_VALUES.join(', ')} (ou null/vazio para limpar)`,
+        code: 'VALIDATION_ERROR',
+      });
+    }
+    updates.push(`karate_annuity_plan = $${idx}`);
+    values.push(v);
+    idx++;
+  }
+
   if (updates.length === 0) {
     return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }
@@ -844,19 +945,37 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       previousIsActive = prevRes.rows[0].is_active !== false; // COALESCE(is_active, true)
     }
 
-    const result = await client.query(
-      `UPDATE companies
-       SET ${updates.join(', ')}
-       WHERE id = $${idx} AND federation_id = $${idx + 1} AND vertical = 'karate_dojo'
-       RETURNING id, name, cnpj, sensei_cpf, sensei_name, sensei_practitioner_id,
+    const returningCols = `id, name, cnpj, sensei_cpf, sensei_name, sensei_practitioner_id,
                  region, fpkt_affiliation_id, affiliation_model,
                  affiliation_since, dojo_founded_year, address,
                  address_street, address_number, address_complement,
                  address_district AS address_neighborhood,
                  address_city, address_state, address_zip,
-                 phone, email, is_active`,
-      values
-    );
+                 phone, email, is_active${HAS_ANNUITY_PLAN_COL ? ', karate_annuity_plan' : ''}`;
+
+    let result;
+    try {
+      result = await client.query(
+        `UPDATE companies
+         SET ${updates.join(', ')}
+         WHERE id = $${idx} AND federation_id = $${idx + 1} AND vertical = 'karate_dojo'
+         RETURNING ${returningCols}`,
+        values
+      );
+    } catch (e) {
+      // Defensivo (armadilha_schema_pre_migration do CLAUDE.md): deploy subiu
+      // antes da Migration 226. Só socorre o caso karate_annuity_plan — outras
+      // colunas ausentes continuam sendo erro real (rethrow).
+      if (e.code === '42703' && /karate_annuity_plan/.test(e.message || '')) {
+        HAS_ANNUITY_PLAN_COL = false;
+        await client.query('ROLLBACK');
+        return res.status(503).json({
+          error: 'Campo karate_annuity_plan ainda não disponível neste ambiente — tente novamente em instantes.',
+          code: 'MIGRATION_PENDING',
+        });
+      }
+      throw e;
+    }
 
     if (!result.rows.length) {
       await client.query('ROLLBACK');
@@ -897,6 +1016,7 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       is_active: d.is_active !== false,
       status: computeDojoStatus(d.affiliation_model, d.affiliation_since, d.is_active),
       practitioner_count: 0, // não recomputado no PATCH por performance
+      karate_annuity_plan: d.karate_annuity_plan || null,
       ...(rosterCascade ? { roster_cascade: rosterCascade } : {}),
     });
   } catch (err) {

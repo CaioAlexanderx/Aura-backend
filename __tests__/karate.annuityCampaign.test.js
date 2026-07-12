@@ -67,23 +67,33 @@ function makeFakeDb(seed = {}) {
     if (/^SAVEPOINT/i.test(s) || /^RELEASE SAVEPOINT/i.test(s) || /^ROLLBACK TO SAVEPOINT/i.test(s)) return {};
     if (/pg_advisory_xact_lock/.test(s)) return { rows: [{ pg_advisory_xact_lock: null }] };
 
-    // ── elegibilidade dojô (scope da campanha) ──
+    // ── elegibilidade dojô (scope da campanha) ── traz karate_annuity_plan
+    // (F2 do bug de produto — Migration 226).
     if (/FROM companies c/.test(s) && /ANY\(\$3::uuid\[\]\)/.test(s) && /vertical_active = 'karate_dojo'/.test(s)) {
       const [fedId, year, excludeIds] = params;
       const rows = state.dojos
         .filter((d) => d.federation_id === fedId && d.is_active
           && !(excludeIds || []).includes(d.id)
           && !state.annuityHistory.some((h) => h.dojo_id === d.id && h.reference_period === year))
-        .map((d) => ({ dojo_id: d.id, name: d.name }));
+        .map((d) => ({ dojo_id: d.id, name: d.name, karate_annuity_plan: d.karate_annuity_plan || null }));
       return { rows };
     }
 
-    // ── loadTargetInfo dojô (/batch) ──
+    // ── loadTargetInfo dojô (/batch) ── idem, traz karate_annuity_plan.
     if (/WHERE id = \$1 AND federation_id = \$2 AND vertical_active = 'karate_dojo'/.test(s)) {
       const [id, fedId] = params;
       const d = state.dojos.find((x) => x.id === id && x.federation_id === fedId);
       if (!d) return { rows: [] };
-      return { rows: [{ id: d.id, name: d.name, is_active: d.is_active }] };
+      return { rows: [{ id: d.id, name: d.name, is_active: d.is_active, karate_annuity_plan: d.karate_annuity_plan || null }] };
+    }
+
+    // ── UPDATE companies SET karate_annuity_plan (definição inline no
+    // /campaign ou /batch, quando o dojô ainda não tinha plano salvo) ──
+    if (/UPDATE companies SET karate_annuity_plan/.test(s)) {
+      const [plan, dojoId] = params;
+      const d = state.dojos.find((x) => x.id === dojoId);
+      if (d) d.karate_annuity_plan = plan;
+      return { rows: [] };
     }
 
     // ── elegibilidade praticante (scope da campanha) — REGRA CRÍTICA ──
@@ -282,7 +292,7 @@ describe('POST /financial/annuities/campaign/preview', () => {
 
   it('scope=dojos não retorna praticantes, e vice-versa', (done) => {
     const { client } = makeFakeDb({
-      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Central', is_active: true }],
+      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Central', is_active: true, karate_annuity_plan: 'anual' }],
       fees: [{ federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] }],
     });
     db.query.mockImplementation(client.query);
@@ -295,7 +305,7 @@ describe('POST /financial/annuities/campaign/preview', () => {
         if (err) return done(err);
         expect(res.status).toBe(200);
         expect(res.body.dojos).toHaveLength(1);
-        expect(res.body.dojos[0]).toMatchObject({ dojo_id: 'd1', name: 'Dojo Central', plan_default: 'anual', amount: 500 });
+        expect(res.body.dojos[0]).toMatchObject({ dojo_id: 'd1', name: 'Dojo Central', plan: 'anual', plano_indefinido: false, amount: 500, installments_count: 1 });
         expect(res.body.practitioners).toEqual([]);
         expect(res.body.totals.practitioners_count).toBe(0);
         done();
@@ -304,7 +314,7 @@ describe('POST /financial/annuities/campaign/preview', () => {
 
   it('devolve due_date (já com o default seguro aplicado) e due_date_ajustada por alvo, prontos pra UI mostrar antes de confirmar', (done) => {
     const { client } = makeFakeDb({
-      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Central', is_active: true }],
+      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Central', is_active: true, karate_annuity_plan: 'anual' }],
       fees: [{ federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] }],
     });
     db.query.mockImplementation(client.query);
@@ -326,7 +336,7 @@ describe('POST /financial/annuities/campaign/preview', () => {
 
   it('preview aceita due_date opcional e devolve o MESMO valor que /campaign vai usar de fato', (done) => {
     const { client } = makeFakeDb({
-      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Central', is_active: true }],
+      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Central', is_active: true, karate_annuity_plan: 'anual' }],
       fees: [{ federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] }],
     });
     db.query.mockImplementation(client.query);
@@ -379,6 +389,95 @@ describe('POST /financial/annuities/campaign/preview', () => {
         done();
       });
   });
+
+  // ── F2 do plano de anuidades (o bug "18 dojôs cobrados como anual"): ────
+  it('dojô SEM karate_annuity_plan cadastrado aparece plano_indefinido:true, amount 0, e NÃO entra no valor_previsto', (done) => {
+    const { client } = makeFakeDb({
+      dojos: [
+        { id: 'd1', federation_id: FED_ID, name: 'Dojo Sem Plano', is_active: true }, // karate_annuity_plan ausente
+        { id: 'd2', federation_id: FED_ID, name: 'Dojo Com Plano', is_active: true, karate_annuity_plan: 'anual' },
+      ],
+      fees: [{ federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] }],
+    });
+    db.query.mockImplementation(client.query);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign/preview`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: 2026, scope: 'dojos' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.dojos).toHaveLength(2);
+        const d1 = res.body.dojos.find((d) => d.dojo_id === 'd1');
+        const d2 = res.body.dojos.find((d) => d.dojo_id === 'd2');
+        expect(d1).toMatchObject({ plan: null, plano_indefinido: true, amount: 0 });
+        expect(d2).toMatchObject({ plan: 'anual', plano_indefinido: false, amount: 500 });
+        // o total previsto NUNCA soma um chute pro dojô indefinido — só R$500 do d2.
+        expect(res.body.totals.valor_previsto).toBe(500);
+        expect(res.body.totals.dojos_count).toBe(2); // continua elegível — só o plano é que falta
+        expect(res.body.totals.dojos_plano_indefinido_count).toBe(1);
+        done();
+      });
+  });
+
+  it('preview traz plan_catalog com os 3 planos (valor/parcelas reais) para a UI montar o seletor inline do dojô indefinido', (done) => {
+    // seasonYear no futuro (ano que vem) para que NENHUM due_month do plano
+    // já tenha passado na data real de execução do teste — sem isso, um
+    // teste rodado, por exemplo, em julho veria só as parcelas restantes
+    // de ago/nov (comportamento correto de "novo filiado no meio do ano",
+    // mas não é o que este teste quer verificar: o catálogo COMPLETO).
+    const futureYear = new Date().getUTCFullYear() + 1;
+    const { client } = makeFakeDb({
+      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Sem Plano', is_active: true }],
+      fees: [
+        { federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] },
+        { federation_id: FED_ID, fee_type: 'dojo', plan: 'semestral', amount: 280, due_months: [5, 11] },
+        { federation_id: FED_ID, fee_type: 'dojo', plan: 'trimestral', amount: 150, due_months: [2, 5, 8, 11] },
+      ],
+    });
+    db.query.mockImplementation(client.query);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign/preview`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: String(futureYear), scope: 'dojos' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        const byPlan = Object.fromEntries(res.body.plan_catalog.map((p) => [p.plan, p]));
+        expect(byPlan.anual).toMatchObject({ amount: 500, installments_count: 1, fee_configurada: true });
+        expect(byPlan.semestral).toMatchObject({ amount: 560, installments_count: 2, fee_configurada: true });
+        expect(byPlan.trimestral).toMatchObject({ amount: 600, installments_count: 4, fee_configurada: true });
+        done();
+      });
+  });
+
+  it('dojo_plans no body do preview recalcula o dojô indefinido SEM persistir nada (definir direto no preview)', (done) => {
+    const futureYear = new Date().getUTCFullYear() + 1;
+    const { client, state } = makeFakeDb({
+      dojos: [{ id: 'd1', federation_id: FED_ID, name: 'Dojo Sem Plano', is_active: true }],
+      fees: [{ federation_id: FED_ID, fee_type: 'dojo', plan: 'trimestral', amount: 150, due_months: [2, 5, 8, 11] }],
+    });
+    db.query.mockImplementation(client.query);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign/preview`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: String(futureYear), scope: 'dojos', dojo_plans: { d1: 'trimestral' } })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.dojos[0]).toMatchObject({
+          plan: 'trimestral', plano_indefinido: false, amount: 600, installments_count: 4,
+        });
+        expect(res.body.totals.valor_previsto).toBe(600);
+        expect(res.body.totals.dojos_plano_indefinido_count).toBe(0);
+        // preview é read-only — não grava nada no cadastro do dojô.
+        expect(state.dojos.find((d) => d.id === 'd1').karate_annuity_plan).toBeUndefined();
+        done();
+      });
+  });
 });
 
 // ============================================================
@@ -391,9 +490,9 @@ describe('POST /financial/annuities/campaign', () => {
   function baseSeed() {
     return {
       dojos: [
-        { id: 'd1', federation_id: FED_ID, name: 'Dojo A', is_active: true },
-        { id: 'd2', federation_id: FED_ID, name: 'Dojo B', is_active: true },
-        { id: 'd3', federation_id: FED_ID, name: 'Dojo Inativo', is_active: false },
+        { id: 'd1', federation_id: FED_ID, name: 'Dojo A', is_active: true, karate_annuity_plan: 'anual' },
+        { id: 'd2', federation_id: FED_ID, name: 'Dojo B', is_active: true, karate_annuity_plan: 'anual' },
+        { id: 'd3', federation_id: FED_ID, name: 'Dojo Inativo', is_active: false, karate_annuity_plan: 'anual' },
       ],
       customers: [
         { id: 'p1', federation_id: FED_ID, name: 'Sensei 1', is_active: true, karate_registration_number: 'F1' },
@@ -483,7 +582,7 @@ describe('POST /financial/annuities/campaign', () => {
       });
   });
 
-  it('gera plano anual (1 parcela) por default para dojô, e computa o total corretamente', (done) => {
+  it('gera o plano anual (1 parcela) cadastrado no dojô e computa o total corretamente', (done) => {
     const { client } = makeFakeDb(baseSeed());
     db.connect.mockResolvedValue(client);
 
@@ -503,6 +602,100 @@ describe('POST /financial/annuities/campaign', () => {
         expect(d1.due_date_ajustada).toBe(true);
         expect(d1.due_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
         expect(d1.due_date.slice(5, 7)).toBe(String(new Date().getUTCMonth() + 1).padStart(2, '0'));
+        done();
+      });
+  });
+
+  // ── TESTE CRÍTICO (o bug de produto): dojô TRIMESTRAL cadastrado tem que
+  // gerar 4 parcelas de R$150 (Fev/Mai/Ago/Nov, total R$600/ano) — NÃO 1
+  // parcela de R$500 (o default 'anual' antigo). Quebra se alguém voltar a
+  // hardcodar plan:'anual' na campanha. seasonYear no futuro para garantir
+  // as 4 parcelas completas independente da data real de execução (ver
+  // nota em "preview traz plan_catalog...").
+  it('dojô com plano TRIMESTRAL cadastrado gera 4 parcelas (Fev/Mai/Ago/Nov) e valor do trimestral — não usa mais o default anual', (done) => {
+    const futureYear = new Date().getUTCFullYear() + 1;
+    const seed = {
+      dojos: [
+        { id: 'd1', federation_id: FED_ID, name: 'Dojo Trimestral', is_active: true, karate_annuity_plan: 'trimestral' },
+      ],
+      fees: [
+        { federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] },
+        { federation_id: FED_ID, fee_type: 'dojo', plan: 'trimestral', amount: 150, due_months: [2, 5, 8, 11] },
+      ],
+    };
+    const { client } = makeFakeDb(seed);
+    db.connect.mockResolvedValue(client);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: String(futureYear), scope: 'dojos' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        expect(res.body.errors).toHaveLength(0);
+        const d1 = res.body.created.find((c) => c.id === 'd1');
+        expect(d1).toBeDefined();
+        expect(d1.plan).toBe('trimestral');
+        expect(d1.installments_count).toBe(4);
+        expect(d1.total).toBe(600); // 4 x R$150 — NÃO R$500 do plano anual
+        expect(d1.due_date_ajustada).toBe(false); // parcelas no futuro, sem ajuste
+        done();
+      });
+  });
+
+  it('dojô SEM karate_annuity_plan e sem dojo_plans no request NÃO é cobrado como anual — vai para errors com reason plano_indefinido', (done) => {
+    const seed = {
+      dojos: [
+        { id: 'd1', federation_id: FED_ID, name: 'Dojo Sem Plano', is_active: true }, // karate_annuity_plan ausente
+      ],
+      fees: [
+        { federation_id: FED_ID, fee_type: 'dojo', plan: 'anual', amount: 500, due_months: [5] },
+      ],
+    };
+    const { client } = makeFakeDb(seed);
+    db.connect.mockResolvedValue(client);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: 2026, scope: 'dojos' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        expect(res.body.created).toHaveLength(0); // nunca assume anual
+        expect(res.body.skipped).toHaveLength(0);
+        expect(res.body.errors).toHaveLength(1);
+        expect(res.body.errors[0]).toMatchObject({ type: 'dojo', id: 'd1', reason: 'plano_indefinido' });
+        done();
+      });
+  });
+
+  it('dojo_plans define o plano inline na campanha E persiste em companies.karate_annuity_plan (fica valendo pra próxima rodada)', (done) => {
+    const futureYear = new Date().getUTCFullYear() + 1;
+    const seed = {
+      dojos: [
+        { id: 'd1', federation_id: FED_ID, name: 'Dojo Sem Plano', is_active: true }, // karate_annuity_plan ausente
+      ],
+      fees: [
+        { federation_id: FED_ID, fee_type: 'dojo', plan: 'semestral', amount: 280, due_months: [5, 11] },
+      ],
+    };
+    const { client, state } = makeFakeDb(seed);
+    db.connect.mockResolvedValue(client);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/campaign`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: String(futureYear), scope: 'dojos', dojo_plans: { d1: 'semestral' } })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        expect(res.body.errors).toHaveLength(0);
+        const d1 = res.body.created.find((c) => c.id === 'd1');
+        expect(d1).toMatchObject({ plan: 'semestral', installments_count: 2, total: 560 });
+        // definição inline persiste no cadastro do dojô.
+        expect(state.dojos.find((d) => d.id === 'd1').karate_annuity_plan).toBe('semestral');
         done();
       });
   });
@@ -573,7 +766,7 @@ describe('POST /financial/annuities/batch', () => {
   function baseSeed() {
     return {
       dojos: [
-        { id: 'd1', federation_id: FED_ID, name: 'Dojo A', is_active: true },
+        { id: 'd1', federation_id: FED_ID, name: 'Dojo A', is_active: true, karate_annuity_plan: 'anual' },
       ],
       customers: [
         { id: 'p1', federation_id: FED_ID, name: 'Sensei 1', is_active: true },
@@ -666,6 +859,49 @@ describe('POST /financial/annuities/batch', () => {
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(422);
+        done();
+      });
+  });
+
+  it('target.plan explícito no /batch tem precedência sobre o karate_annuity_plan salvo no dojô (override pontual)', (done) => {
+    const seed = baseSeed(); // d1 tem karate_annuity_plan: 'anual'
+    seed.fees.push({ federation_id: FED_ID, fee_type: 'dojo', plan: 'trimestral', amount: 150, due_months: [2, 5, 8, 11] });
+    const futureYear = new Date().getUTCFullYear() + 1;
+    const { client, state } = makeFakeDb(seed);
+    db.connect.mockResolvedValue(client);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/batch`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: String(futureYear), targets: [{ type: 'dojo', id: 'd1', plan: 'trimestral' }] })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        const d1 = res.body.created.find((c) => c.id === 'd1');
+        expect(d1).toMatchObject({ plan: 'trimestral', installments_count: 4, total: 600 });
+        // override pontual — dojô JÁ tinha plano salvo ('anual'), então o
+        // cadastro não é sobrescrito por essa cobrança avulsa.
+        expect(state.dojos.find((d) => d.id === 'd1').karate_annuity_plan).toBe('anual');
+        done();
+      });
+  });
+
+  it('dojô sem karate_annuity_plan e sem target.plan/plan global no /batch vai para errors com reason plano_indefinido (não assume anual)', (done) => {
+    const seed = baseSeed();
+    seed.dojos[0].karate_annuity_plan = undefined; // simula dojô sem plano cadastrado
+    const { client } = makeFakeDb(seed);
+    db.connect.mockResolvedValue(client);
+
+    request(app)
+      .post(`/federation/${FED_ID}/financial/annuities/batch`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ year: 2026, targets: [{ type: 'dojo', id: 'd1' }] })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        expect(res.body.created).toHaveLength(0);
+        expect(res.body.errors).toHaveLength(1);
+        expect(res.body.errors[0]).toMatchObject({ type: 'dojo', id: 'd1', reason: 'plano_indefinido' });
         done();
       });
   });
