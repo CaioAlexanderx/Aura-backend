@@ -14,9 +14,12 @@
 // GET /federation/:id/standing/summary
 //   {
 //     praticantes: { ativos, inativos, total },
-//     pretas:      { total (ATIVAS), inativas, em_dia, atrasado, valor_em_aberto },
+//     pretas:      { total (ATIVAS), inativas, em_dia, atrasado, sem_cobranca,
+//                    valor_em_aberto },
 //     dojos:       { ativos, em_dia, atrasado, inativos }
 //   }
+//   pretas.total === pretas.em_dia + pretas.atrasado + pretas.sem_cobranca SEMPRE
+//   (invariante testada em __tests__/karate.blackBeltAggregatesGuard.test.js).
 //
 // Guards: FEDERATION_READ (guards.read()) — leitura nunca é bloqueada por
 // plano (CLAUDE.md #3). Ambos Painel e Saúde da Rede consomem ESTE mesmo
@@ -31,10 +34,11 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
+const { blackBeltAggregatesSql } = require('../services/karateStandingQueries');
 
 const EMPTY_SUMMARY = Object.freeze({
   praticantes: { ativos: 0, inativos: 0, total: 0 },
-  pretas: { total: 0, inativas: 0, em_dia: 0, atrasado: 0, valor_em_aberto: 0 },
+  pretas: { total: 0, inativas: 0, em_dia: 0, atrasado: 0, sem_cobranca: 0, valor_em_aberto: 0 },
   dojos: { ativos: 0, em_dia: 0, atrasado: 0, inativos: 0 },
 });
 
@@ -55,7 +59,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     );
     const p = practRes.rows[0] || {};
 
-    // 2) Faixas-pretas — total / em_dia / atrasado / valor_em_aberto
+    // 2) Faixas-pretas — total / em_dia / atrasado / sem_cobranca / valor_em_aberto
     //
     // ⚠️ BUGFIX (11/07/2026): `total` era um COUNT(*) cru sobre is_black_belt,
     // ou seja, contava faixas-pretas INATIVAS junto com as ativas (665 em vez
@@ -66,15 +70,29 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     // tela que exibisse o número mostraria 665 achando que era 549.
     // Agora `total` = pretas ATIVAS (o universo cobrável) e `inativas` expõe
     // o resto explicitamente, em vez de escondê-lo dentro do total.
+    //
+    // ⚠️ BUGFIX 2 (12/07/2026): esta mesma classe de bug reapareceu em
+    // karateDojoRoster.js (139 vs 82 no dojô bb5e5cd9-...) porque a regra
+    // "is_black_belt AND is_active" estava reimplementada à mão aqui e lá,
+    // cada um com sua própria variação. Migrado para o fragmento SQL
+    // compartilhado (karateStandingQueries.blackBeltAggregatesSql), que
+    // TODO agregado de faixa-preta usa a partir de agora — nunca mais
+    // reimplementar isto localmente. O WHERE externo `AND is_black_belt`
+    // foi removido de propósito: os FILTERs abaixo já são autocontidos
+    // (repetem is_black_belt AND is_active cada um), então não há mais
+    // nenhuma dependência implícita de um WHERE externo para a contagem
+    // fechar — a mesma armadilha que permitiu o bug se espalhar.
+    // `sem_cobranca` é NOVO nesta correção: faixa-preta ativa sem anuidade
+    // lançada na temporada ainda (não é inadimplência). Sem este bucket,
+    // em_dia + atrasado nunca fechava com total quando havia pelo menos uma
+    // preta ativa "sem_cobranca" (ex.: FPKT tinha 1 desses — 29 + 519 = 548,
+    // não 549).
     const pretasRes = await db.query(
       `SELECT
-         COUNT(*) FILTER (WHERE is_active)::int                     AS total,
-         COUNT(*) FILTER (WHERE NOT is_active)::int                 AS inativas,
-         COUNT(*) FILTER (WHERE financeiro = 'em_dia')::int         AS em_dia,
-         COUNT(*) FILTER (WHERE financeiro = 'atrasado')::int       AS atrasado,
-         COALESCE(SUM(valor_em_aberto), 0)::numeric                 AS valor_em_aberto
+         ${blackBeltAggregatesSql()},
+         COALESCE(SUM(valor_em_aberto), 0)::numeric AS valor_em_aberto
        FROM karate_member_standing
-       WHERE federation_id = $1 AND is_black_belt`,
+       WHERE federation_id = $1`,
       [federationId]
     );
     const pt = pretasRes.rows[0] || {};
@@ -99,10 +117,11 @@ router.get('/summary', ...guards.read(), async (req, res) => {
         total: parseInt(p.total || 0, 10),
       },
       pretas: {
-        total: parseInt(pt.total || 0, 10),        // pretas ATIVAS (universo cobrável)
-        inativas: parseInt(pt.inativas || 0, 10),  // pretas inativas (não geram cobrança)
-        em_dia: parseInt(pt.em_dia || 0, 10),
-        atrasado: parseInt(pt.atrasado || 0, 10),
+        total: parseInt(pt.black_belt_total || 0, 10),           // pretas ATIVAS (universo cobrável)
+        inativas: parseInt(pt.black_belt_inactive || 0, 10),     // pretas inativas (não geram cobrança)
+        em_dia: parseInt(pt.black_belt_paid || 0, 10),
+        atrasado: parseInt(pt.black_belt_overdue || 0, 10),
+        sem_cobranca: parseInt(pt.black_belt_sem_cobranca || 0, 10),
         valor_em_aberto: Number(pt.valor_em_aberto || 0),
       },
       dojos: {

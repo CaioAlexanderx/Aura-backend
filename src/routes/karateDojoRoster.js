@@ -18,7 +18,13 @@
 //   { data, total, page, pageSize, summary }
 //   - total   → nº de linhas do RECORTE atual (status + q), para o pager
 //   - summary → contagens do quadro INTEIRO do dojô (independem de status/q/página):
-//       { total, active, inactive, black_belt_total, black_belt_paid, black_belt_overdue }
+//       { total, active, inactive,
+//         black_belt_total,        // faixas-pretas ATIVAS (universo cobrável)
+//         black_belt_inactive,     // faixas-pretas inativas (nunca geram cobrança)
+//         black_belt_paid, black_belt_overdue, black_belt_sem_cobranca }
+//     black_belt_total === black_belt_paid + black_belt_overdue + black_belt_sem_cobranca
+//     SEMPRE (ver src/services/karateStandingQueries.js — fonte única deste
+//     agregado; guarda-corpo em __tests__/karate.blackBeltAggregatesGuard.test.js).
 //     O detalhe do dojô usa summary para os KPIs (Total/Ativos/Inativos e o bloco
 //     de faixas-pretas) sem precisar da lista inteira em memória.
 //
@@ -42,6 +48,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
+const { blackBeltAggregatesSql, EMPTY_BLACK_BELT_AGGREGATES } = require('../services/karateStandingQueries');
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
@@ -50,9 +57,7 @@ const EMPTY_SUMMARY = Object.freeze({
   total: 0,
   active: 0,
   inactive: 0,
-  black_belt_total: 0,
-  black_belt_paid: 0,
-  black_belt_overdue: 0,
+  ...EMPTY_BLACK_BELT_AGGREGATES,
 });
 
 const isTruthy = (v) => v === '1' || v === 'true' || v === true;
@@ -126,13 +131,21 @@ router.get('/:dojoId/members-standing', ...guards.read(), async (req, res) => {
 
     // ── Sumário do quadro INTEIRO (ignora status / q / página) ────
     // Alimenta os KPIs da tela; agregado no banco, não em JS sobre a lista.
+    // ⚠️ BUGFIX (12/07/2026): `black_belt_total` era um COUNT(*) cru sobre
+    // is_black_belt — contava faixas-pretas INATIVAS junto (139 em vez de 82
+    // no dojô bb5e5cd9-...). paid/overdue já vinham gateados por is_active
+    // via `financeiro` (a view só popula financeiro para ativos; inativo →
+    // 'nao_aplicavel'), então paid+overdue nunca fechava com o total. Mesma
+    // classe do bug já corrigido em karateStandingSummary.js (665 vs 549) —
+    // agora as duas rotas usam o MESMO fragmento SQL compartilhado
+    // (karateStandingQueries.blackBeltAggregatesSql) para nunca mais
+    // divergir. black_belt_inactive e black_belt_sem_cobranca expõem o
+    // resto explicitamente em vez de escondê-lo dentro do total.
     const sumRes = await db.query(
-      `SELECT COUNT(*)::int                                                          AS total,
-              COUNT(*) FILTER (WHERE is_active)::int                                 AS active,
-              COUNT(*) FILTER (WHERE NOT is_active)::int                             AS inactive,
-              COUNT(*) FILTER (WHERE is_black_belt)::int                             AS black_belt_total,
-              COUNT(*) FILTER (WHERE is_black_belt AND financeiro = 'em_dia')::int   AS black_belt_paid,
-              COUNT(*) FILTER (WHERE is_black_belt AND financeiro = 'atrasado')::int AS black_belt_overdue
+      `SELECT COUNT(*)::int                          AS total,
+              COUNT(*) FILTER (WHERE is_active)::int     AS active,
+              COUNT(*) FILTER (WHERE NOT is_active)::int AS inactive,
+              ${blackBeltAggregatesSql()}
        FROM karate_member_standing
        WHERE federation_id = $1 AND dojo_id = $2`,
       [federationId, dojoId]
