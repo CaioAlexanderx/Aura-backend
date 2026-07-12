@@ -14,7 +14,7 @@
 // GET /federation/:id/standing/summary
 //   {
 //     praticantes: { ativos, inativos, total },
-//     pretas:      { total, em_dia, atrasado, valor_em_aberto },
+//     pretas:      { total (ATIVAS), inativas, em_dia, atrasado, valor_em_aberto },
 //     dojos:       { ativos, em_dia, atrasado, inativos }
 //   }
 //
@@ -34,7 +34,7 @@ const { guards } = require('../config/karateRoles');
 
 const EMPTY_SUMMARY = Object.freeze({
   praticantes: { ativos: 0, inativos: 0, total: 0 },
-  pretas: { total: 0, em_dia: 0, atrasado: 0, valor_em_aberto: 0 },
+  pretas: { total: 0, inativas: 0, em_dia: 0, atrasado: 0, valor_em_aberto: 0 },
   dojos: { ativos: 0, em_dia: 0, atrasado: 0, inativos: 0 },
 });
 
@@ -56,10 +56,20 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     const p = practRes.rows[0] || {};
 
     // 2) Faixas-pretas — total / em_dia / atrasado / valor_em_aberto
-    //    (mesma view, filtrando is_black_belt)
+    //
+    // ⚠️ BUGFIX (11/07/2026): `total` era um COUNT(*) cru sobre is_black_belt,
+    // ou seja, contava faixas-pretas INATIVAS junto com as ativas (665 em vez
+    // de 549 na FPKT). Como só faixa-preta ATIVA paga anuidade, esse total
+    // nunca fechava com em_dia + atrasado (que a view já gateia por is_active,
+    // devolvendo 'nao_aplicavel' para inativo). Não vazava para a UI hoje —
+    // StandingCard só usa `total` como teste de "está vazio?" — mas a primeira
+    // tela que exibisse o número mostraria 665 achando que era 549.
+    // Agora `total` = pretas ATIVAS (o universo cobrável) e `inativas` expõe
+    // o resto explicitamente, em vez de escondê-lo dentro do total.
     const pretasRes = await db.query(
       `SELECT
-         COUNT(*)::int                                             AS total,
+         COUNT(*) FILTER (WHERE is_active)::int                     AS total,
+         COUNT(*) FILTER (WHERE NOT is_active)::int                 AS inativas,
          COUNT(*) FILTER (WHERE financeiro = 'em_dia')::int         AS em_dia,
          COUNT(*) FILTER (WHERE financeiro = 'atrasado')::int       AS atrasado,
          COALESCE(SUM(valor_em_aberto), 0)::numeric                 AS valor_em_aberto
@@ -89,7 +99,8 @@ router.get('/summary', ...guards.read(), async (req, res) => {
         total: parseInt(p.total || 0, 10),
       },
       pretas: {
-        total: parseInt(pt.total || 0, 10),
+        total: parseInt(pt.total || 0, 10),        // pretas ATIVAS (universo cobrável)
+        inativas: parseInt(pt.inativas || 0, 10),  // pretas inativas (não geram cobrança)
         em_dia: parseInt(pt.em_dia || 0, 10),
         atrasado: parseInt(pt.atrasado || 0, 10),
         valor_em_aberto: Number(pt.valor_em_aberto || 0),
