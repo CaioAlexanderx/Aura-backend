@@ -156,18 +156,54 @@ router.get('/', ...guards.read(), async (req, res) => {
     const offsetIdx = dataParams.length + 2;
     dataParams.push(pageSize, offset);
 
-    const dataRes = await db.query(
-      `SELECT cu.id, cu.name AS full_name, cu.karate_registration_number,
-              comp.name AS dojo_name,
-              cb.belt_name, cu.is_active
-       FROM customers cu
-       LEFT JOIN companies comp ON comp.id = cu.dojo_id
-       LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = cu.federation_id
-       ${where}
-       ${orderBy}
-       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
-      dataParams
-    );
+    // BUGFIX (13/07/2026) — is_arbiter/is_instructor/is_examiner/is_assistant
+    // nunca vinham nesta listagem (só no GET de detalhe). Isso quebrava
+    // silenciosamente o modal "Gerir equipe técnica" do dojô: como toda
+    // linha chegava com essas flags undefined, o front tratava TODOS os
+    // papéis como "desmarcados" mesmo para quem já era árbitro/instrutor/
+    // examinador/auxiliar de verdade — tornando impossível desmarcar
+    // (remover da equipe) um papel que a UI nunca mostrava como marcado.
+    // Migration 206 (is_assistant) pode não estar aplicada ainda em todo
+    // ambiente — cache module-level otimista (HAS_IS_ASSISTANT_COL), mesmo
+    // padrão do GET de detalhe abaixo: degrada em 42703.
+    let dataRes;
+    if (HAS_IS_ASSISTANT_COL) {
+      try {
+        dataRes = await db.query(
+          `SELECT cu.id, cu.name AS full_name, cu.karate_registration_number,
+                  comp.name AS dojo_name,
+                  cb.belt_name, cu.is_active,
+                  cu.is_arbiter, cu.is_instructor, cu.is_examiner, cu.is_assistant
+           FROM customers cu
+           LEFT JOIN companies comp ON comp.id = cu.dojo_id
+           LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = cu.federation_id
+           ${where}
+           ${orderBy}
+           LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+          dataParams
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_IS_ASSISTANT_COL = false;
+          console.warn('[karatePractitioners] is_assistant ausente na listagem (migration 206 pendente)');
+        } else throw e;
+      }
+    }
+    if (dataRes === undefined) {
+      dataRes = await db.query(
+        `SELECT cu.id, cu.name AS full_name, cu.karate_registration_number,
+                comp.name AS dojo_name,
+                cb.belt_name, cu.is_active,
+                cu.is_arbiter, cu.is_instructor, cu.is_examiner
+         FROM customers cu
+         LEFT JOIN companies comp ON comp.id = cu.dojo_id
+         LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = cu.federation_id
+         ${where}
+         ${orderBy}
+         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+        dataParams
+      );
+    }
 
     const practitioners = dataRes.rows.map(r => ({
       id: r.id,
@@ -176,6 +212,10 @@ router.get('/', ...guards.read(), async (req, res) => {
       dojo_name: r.dojo_name || null,
       belt_name: r.belt_name || null,
       affiliation_status: r.is_active ? 'active' : 'inactive',
+      is_arbiter: !!r.is_arbiter,
+      is_instructor: !!r.is_instructor,
+      is_examiner: !!r.is_examiner,
+      is_assistant: r.is_assistant !== undefined ? !!r.is_assistant : false,
     }));
 
     res.json({
