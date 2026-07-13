@@ -24,11 +24,17 @@
 // ============================================================
 'use strict';
 
+const crypto = require('crypto');
+const QRCode = require('qrcode');
+const { validateRuntimeEnv } = require('../config/env');
 const db = require('../config/database');
 const mailer = require('./karateMailer');
 const tpl = require('./karateReminderTemplate');
 const annuitySvc = require('./karateAnnuityService');
 const { createPixCharge } = require('./karatePaymentProvider');
+const { signPixToken } = require('./karatePixPublicToken');
+
+const env = validateRuntimeEnv();
 
 const MONTH_ABBR = ['', 'jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
 
@@ -85,12 +91,83 @@ function buildModalidadesHtml(plans) {
   </div>`;
 }
 
-function buildPixHtml(pixCode) {
+// opts: { qrCid, publicUrl } — ambos opcionais, cada bloco só aparece se
+// o respectivo dado existir (QR pode falhar na geração; publicUrl só
+// existe quando há pixCode pra assinar o token). O copia-e-cola em si
+// SEMPRE aparece quando há pixCode — é o fallback que funciona em
+// qualquer cliente de e-mail, mesmo sem imagem e sem abrir link nenhum.
+function buildPixHtml(pixCode, opts) {
   if (!pixCode) return '';
+  const o = opts || {};
+
+  // QR inline (cid) — só quando a geração funcionou (getPixQrAttachment
+  // nunca lança; ausência aqui só significa "sem QR neste envio").
+  const qrBlock = o.qrCid
+    ? `<div style="text-align:center;margin-bottom:12px;">
+        <img src="cid:${tpl.escapeHtml(o.qrCid)}" width="160" height="160" alt="QR code do PIX"
+             style="display:inline-block;border-radius:8px;background:#ffffff;padding:6px;border:1px solid #e6e0d4;" />
+      </div>`
+    : '';
+
+  // Botão "Ver QR e copiar" — leva pra página pública (sem login, sem dado
+  // pessoal: só valor/competência/código, ver karatePixPublicToken.js).
+  // E-mail não executa JavaScript — um botão "copiar" de verdade só existe
+  // fora do e-mail; aqui é só um link.
+  const linkBlock = o.publicUrl
+    ? `<div style="text-align:center;margin-top:12px;">
+        <a href="${tpl.escapeHtml(o.publicUrl)}"
+           style="display:inline-block;background:#b02a2a;color:#ffffff;font-size:12px;font-weight:700;
+                  padding:9px 18px;border-radius:8px;text-decoration:none;letter-spacing:0.2px;">
+          Ver QR grande e copiar o código
+        </a>
+      </div>`
+    : '';
+
   return `<div style="margin-top:18px;padding:14px;background:#f7f5f0;border:1px solid #e6e0d4;border-radius:10px;">
+    ${qrBlock}
     <p style="margin:0 0 8px;font-size:12px;font-weight:800;color:#1c1917;text-transform:uppercase;letter-spacing:0.3px;">PIX copia e cola</p>
     <p style="margin:0;font-size:11px;color:#44403c;line-height:16px;word-break:break-all;font-family:'SF Mono',Consolas,monospace;">${tpl.escapeHtml(pixCode)}</p>
+    ${linkBlock}
   </div>`;
+}
+
+// Gera o PNG do QR do BR Code como anexo INLINE (content_id/cid) do
+// Resend — não faz fetch de imagem externa (mais confiável que uma URL:
+// o QR viaja dentro do próprio e-mail). Nunca lança: falha na geração do
+// QR não pode derrubar o envio da cobrança, o e-mail só segue sem essa
+// imagem (o copia-e-cola continua presente de qualquer forma).
+async function getPixQrAttachment(pixCode) {
+  if (!pixCode) return null;
+  try {
+    const buf = await QRCode.toBuffer(pixCode, { type: 'png', width: 320, margin: 1, errorCorrectionLevel: 'M' });
+    const cid = 'pix-qr-' + crypto.randomBytes(6).toString('hex');
+    return {
+      cid,
+      attachment: {
+        filename: 'pix-qrcode.png',
+        content: buf.toString('base64'),
+        content_type: 'image/png',
+        content_id: cid,
+      },
+    };
+  } catch (e) {
+    console.warn('[karateBillingMailer] QR do PIX falhou (e-mail segue sem QR):', e.message);
+    return null;
+  }
+}
+
+// URL da página pública de pagamento (front, sem login) — token stateless
+// assinado com o próprio BR Code (ver karatePixPublicToken.js). Nunca
+// lança; sem pixCode não há o que assinar.
+function buildPublicPixUrl({ amount, referencePeriod, pixCode }) {
+  if (!pixCode) return null;
+  try {
+    const token = signPixToken({ amount, referencePeriod, pixCode });
+    return `${env.APP_URL}/karate/pix/${token}`;
+  } catch (e) {
+    console.warn('[karateBillingMailer] geração do link público do PIX falhou:', e.message);
+    return null;
+  }
 }
 
 // Gera um BR Code PIX SÓ para exibição no e-mail (não persiste
@@ -138,6 +215,12 @@ async function sendBillingEmail(client, data) {
   });
   vars.pix_copia_cola = pixCode || '';
 
+  // QR inline (cid) + link da página pública — ambos derivados do MESMO
+  // pixCode acima, nenhum dos dois bloqueia o envio se falhar (ver
+  // comentários de getPixQrAttachment/buildPublicPixUrl).
+  const qrAttachment = await getPixQrAttachment(pixCode);
+  const publicPixUrl = buildPublicPixUrl({ amount: d.amount, referencePeriod: d.referencePeriod, pixCode });
+
   const subject = tpl.renderTemplate(d.subjectTemplate || tpl.DEFAULT_SUBJECT_TEMPLATE, vars);
   const bodyRendered = tpl.renderTemplate(d.bodyTemplate || tpl.DEFAULT_BODY_TEMPLATE, vars);
   const bodyHtml = tpl.textToHtmlParagraphs(bodyRendered);
@@ -147,7 +230,8 @@ async function sendBillingEmail(client, data) {
     subject,
     bodyHtml,
     modalidadesHtml: buildModalidadesHtml(plans),
-    pixHtml: buildPixHtml(pixCode),
+    pixHtml: buildPixHtml(pixCode, { qrCid: qrAttachment && qrAttachment.cid, publicUrl: publicPixUrl }),
+    attachments: qrAttachment ? [qrAttachment.attachment] : undefined,
     federationName:     fedMeta.name,
     federationSlug:     fedMeta.slug,
     federationLogoUrl:  fedMeta.karate_logo_url,
@@ -197,6 +281,8 @@ module.exports = {
   planosToText,
   buildModalidadesHtml,
   buildPixHtml,
+  getPixQrAttachment,
+  buildPublicPixUrl,
   getDisplayPixCode,
   sendBillingEmail,
   getFederationMeta,

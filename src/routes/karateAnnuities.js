@@ -140,6 +140,7 @@ function dojosBaseSql(withPlan) {
     SELECT
       c.id AS dojo_id, c.name AS dojo_name, c.fpkt_affiliation_id,
       COALESCE(NULLIF(c.wa_phone_display, ''), c.phone) AS whatsapp,
+      NULLIF(c.email, '') AS email,
       h.id AS annuity_id, h.reference_period, h.amount, h.due_date,
       h.paid_at, h.status AS annuity_status, h.transaction_id
       ${withPlan ? ', h.plan' : ''},
@@ -244,6 +245,7 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
         dojo_name: d.dojo_name,
         fpkt_affiliation_id: d.fpkt_affiliation_id || null,
         whatsapp: d.whatsapp || null,
+        email: d.email || null,
         annuity_id: d.annuity_id || null,
         // annuity_history_id: alias idêntico a annuity_id — mantido por
         // compatibilidade com os payloads de PATCH/pix que já usam esse nome.
@@ -1379,6 +1381,7 @@ function cpfBaseSql(withPlan) {
     SELECT
       cu.id AS practitioner_id, cu.name AS full_name,
       cu.karate_registration_number, cu.phone AS whatsapp,
+      NULLIF(cu.email, '') AS email,
       h.id AS annuity_id, h.reference_period, h.amount, h.due_date,
       h.paid_at, h.status AS annuity_status, h.transaction_id
       ${withPlan ? ', h.plan' : ''},
@@ -1412,6 +1415,7 @@ const CPF_LEGACY_BASE_SQL = `
   SELECT
     cu.id AS practitioner_id, cu.name AS full_name,
     cu.karate_registration_number, cu.phone AS whatsapp,
+    NULLIF(cu.email, '') AS email,
     NULL::uuid AS annuity_id, NULL::text AS reference_period, t.amount, t.due_date,
     t.paid_at, NULL::text AS annuity_status, t.id AS transaction_id,
     CASE
@@ -1507,6 +1511,7 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
           full_name: r.full_name,
           karate_registration_number: r.karate_registration_number || null,
           whatsapp: r.whatsapp || null,
+          email: r.email || null,
           annuity_id: r.annuity_id || null,
           amount: r.amount ? parseFloat(r.amount) : 0,
           reference_period: r.reference_period || year,
@@ -1542,6 +1547,7 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
         full_name: row.full_name,
         karate_registration_number: row.karate_registration_number || null,
         whatsapp: row.whatsapp || null,
+        email: row.email || null,
         amount: row.amount ? parseFloat(row.amount) : 0,
         reference_period: year,
         due_date: row.due_date || null,

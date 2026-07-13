@@ -54,6 +54,14 @@ async function sendRaw(opts) {
   // F4. Ausente = Resend usa o `from` como reply-to (comportamento padrão).
   if (opts.replyTo) payload.reply_to = opts.replyTo;
 
+  // Anexos inline (cid) — hoje só o QR do PIX de exibição (Fase F4/PIX).
+  // Cada item: { filename, content (base64), content_type, content_id }.
+  // Resend referencia via <img src="cid:<content_id>"> no HTML (ver
+  // karateBillingMailer.js). Nunca lança se ausente/vazio.
+  if (Array.isArray(opts.attachments) && opts.attachments.length) {
+    payload.attachments = opts.attachments;
+  }
+
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -80,14 +88,26 @@ function layout(content, opts) {
   const o = opts || {};
   const fed = o.federationName || 'Federação';
 
-  // ── Header: logo da federação OU ícone Aura Karatê ──────
-  const headerBlock = o.federationLogoUrl
-    ? `<img src="${_esc(o.federationLogoUrl)}" width="64" height="64"
+  // ── Header: identidade Shoji do e-mail = logo (se houver) + NOME DA
+  // FEDERAÇÃO em destaque (serifada), com o filete vermelho no topo do
+  // card como acento — não o ícone genérico da Aura. Antes o header
+  // sempre mostrava um ícone (o da federação OU o da Aura) + "Aura
+  // Karatê" em negrito, com o nome da federação pequeno embaixo — a
+  // hierarquia estava invertida (marca do produto > marca do cliente).
+  //
+  // Degradação obrigatória (karate_logo_url nulo/inacessível): cai para
+  // SÓ o nome — sem ícone de fallback. Muitos clientes de e-mail bloqueiam
+  // imagem por padrão; por isso o <img>, quando existe, sempre leva `alt`
+  // com o nome da federação e dimensões fixas (não desaba o layout se a
+  // imagem não carregar).
+  const logoBlock = o.federationLogoUrl
+    ? `<img src="${_esc(o.federationLogoUrl)}" width="56" height="56"
            alt="${_esc(fed)}"
-           style="display:block;border-radius:14px;object-fit:contain;background:#f4f1ea;" />`
-    : `<img src="${ICON_URL}" width="48" height="48"
-           alt="Aura Karatê"
-           style="display:block;border-radius:12px;" />`;
+           style="display:block;margin:0 auto 12px;border-radius:14px;object-fit:contain;background:#f4f1ea;" />`
+    : '';
+  const headerBlock = `${logoBlock}
+    <p style="margin:0;font-family:Georgia,'Times New Roman',serif;font-size:20px;
+              font-weight:700;color:#1c1917;letter-spacing:0.2px;">${_esc(fed)}</p>`;
 
   // ── Footer: wa.me só quando número disponível ────────────
   const waBlock = o.federationWhatsapp
@@ -116,12 +136,9 @@ function layout(content, opts) {
         <!-- Barra vermelha topo -->
         <tr><td height="4" style="background:#b02a2a;font-size:0;line-height:0;">&nbsp;</td></tr>
 
-        <!-- Header: logo / ícone + nome federação -->
+        <!-- Header: logo (opcional) + nome da federação em destaque -->
         <tr><td align="center" style="padding:28px 32px 0 32px;">
           ${headerBlock}
-          <p style="margin:10px 0 0;font-size:13px;font-weight:800;color:#1c1917;
-                    letter-spacing:0.3px;">Aura Karatê</p>
-          <p style="margin:2px 0 0;font-size:11px;color:#78716c;">${_esc(fed)}</p>
         </td></tr>
 
         <!-- Divisor sutil -->
@@ -307,6 +324,10 @@ async function sendKarateAnnuityBillingEmail(to, opts) {
     subject: o.subject,
     html,
     text: o.text || _stripHtml(`${o.subject || ''} ${o.bodyHtml || ''}`),
+    // QR do PIX de exibição, anexado inline (cid) — ver buildPixQrAttachment
+    // em karateBillingMailer.js. Ausente = e-mail segue sem o anexo (nunca
+    // bloqueia o envio da cobrança).
+    attachments: o.attachments,
   });
 }
 
