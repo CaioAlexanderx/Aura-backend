@@ -491,6 +491,11 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     });
   }
 
+  // ⚠️ BUGFIX (13/07/2026): o INSERT gravava `vertical` mas NÃO `vertical_active`.
+  // Como TODA a listagem/contagem de dojôs filtra por `vertical_active`, o dojô
+  // era criado com sucesso e ficava INVISÍVEL na tela — o usuário tentava de novo
+  // e gerava duplicata (dois 'ARMTEAM DOJÔ' em produção vieram daí). Os dois campos
+  // precisam ser gravados juntos.
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -546,10 +551,10 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
           affiliation_since, dojo_founded_year, address, phone, email,
           address_street, address_number, address_complement, address_district,
           address_city, address_state, address_zip,
-          federation_id, owner_id, vertical, is_active, created_at, updated_at)
+          federation_id, owner_id, vertical, vertical_active, is_active, created_at, updated_at)
        VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                $14, $15, $16, $17, $18, $19, $20,
-               $21, $22, 'karate_dojo', true, NOW(), NOW())
+               $21, $22, 'karate_dojo', 'karate_dojo', true, NOW(), NOW())
        RETURNING id, name, cnpj, sensei_cpf, sensei_name, sensei_practitioner_id,
                  region, fpkt_affiliation_id, affiliation_model,
                  affiliation_since, dojo_founded_year, address,
