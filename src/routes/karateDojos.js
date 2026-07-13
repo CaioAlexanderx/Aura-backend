@@ -396,9 +396,23 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
   if (!name || !String(name).trim()) {
     return res.status(422).json({ error: 'Campo name é obrigatório', code: 'VALIDATION_ERROR' });
   }
-  if (!affiliation_model || !['annual', 'biannual', 'quarterly'].includes(affiliation_model)) {
+  // affiliation_model é LEGADO/decorativo (nenhuma rota de cobrança o lê) e foi
+  // removido da UI, onde duplicava o "Plano de anuidade" real. Exigi-lo aqui
+  // quebrava a criação de dojô em produção (422). Agora é OPCIONAL: se vier,
+  // valida; se não vier, deriva do plano real; se não houver plano, 'annual'.
+  const PLAN_TO_MODEL = { anual: 'annual', semestral: 'biannual', trimestral: 'quarterly' };
+  const annuityPlan = req.body.karate_annuity_plan || null;
+  const effectiveModel =
+    affiliation_model || PLAN_TO_MODEL[annuityPlan] || 'annual';
+  if (!['annual', 'biannual', 'quarterly'].includes(effectiveModel)) {
     return res.status(422).json({
-      error: 'affiliation_model deve ser annual, biannual ou quarterly',
+      error: 'affiliation_model inválido',
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  if (annuityPlan && !['anual', 'semestral', 'trimestral'].includes(annuityPlan)) {
+    return res.status(422).json({
+      error: 'karate_annuity_plan deve ser anual, semestral ou trimestral',
       code: 'VALIDATION_ERROR',
     });
   }
@@ -492,7 +506,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
         senseiPractitionerId !== undefined ? senseiPractitionerId : null,
         region || null,
         fpktId,
-        affiliation_model,
+        effectiveModel,
         affiliation_since || null,
         dojo_founded_year || null,
         address || null,

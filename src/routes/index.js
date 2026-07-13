@@ -183,6 +183,12 @@ router.use('/federation/:id/practitioners',        require('./karatePractitioner
 // principal de dojos só por clareza; ambos respondem sob /federation/:id/dojos
 // e o caminho /:dojoId/export-data não colide com as rotas de karateDojos.
 router.use('/federation/:id/dojos',                require('./karateExportDojo'));
+// ⚠️ ORDEM IMPORTA: karateRosterValidation expõe a rota ESTÁTICA
+// GET /dojos/roster-progress. karateDojos tem GET /dojos/:dojoId, que é
+// curinga e engole qualquer path — o Express tentava usar "roster-progress"
+// como UUID e estourava em produção (invalid input syntax for type uuid).
+// Rota estática SEMPRE antes da paramétrica.
+router.use('/federation/:id/dojos',                require('./karateRosterValidation'));
 router.use('/federation/:id/dojos',                require('./karateDojos'));
 // Redistribuição na inativação de dojô: transfere/inativa praticantes em
 // lote e, opcionalmente, inativa o dojô ao final (cascata para quem sobrou).
@@ -193,7 +199,6 @@ router.use('/federation/:id/dojos',                require('./karateRosterRedist
 //   GET  /federation/:id/dojos/:dojoId/roster-validation      (read)
 //   GET  /federation/:id/dojos/roster-progress                 (read — G1 item 7,
 //        painel de progresso por dojô para a federação)
-router.use('/federation/:id/dojos',                require('./karateRosterValidation'));
 // Fase 4: roster do dojô (status + financeiro) — GET /:dojoId/members-standing
 router.use('/federation/:id/dojos',                require('./karateDojoRoster'));
 // Fase 2: anexos (documentos/imagens) para dojô e praticante. Mesmo router
