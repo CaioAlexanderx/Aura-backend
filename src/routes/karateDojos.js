@@ -69,6 +69,33 @@ let HAS_IS_ASSISTANT_COL = true;
 let HAS_ANNUITY_PLAN_COL = true;
 const KARATE_ANNUITY_PLAN_VALUES = ['anual', 'semestral', 'trimestral'];
 
+// Migration 230 — phone_mobile (telefone CELULAR do dojô, distinto do
+// `phone` legado que passa a ser o telefone FIXO). Mesma armadilha
+// schema-antes-da-migration do CLAUDE.md: cache module-level, desliga em 42703.
+let HAS_PHONE_MOBILE_COL = true;
+
+// Monta o SELECT extra das colunas "novas" que podem ainda não existir
+// dependendo do deploy. Sempre lê o estado ATUAL das flags — chamar de novo
+// depois de disableMissingDojoCol() já reflete a coluna desabilitada.
+function dojoOptionalCols() {
+  return (HAS_ANNUITY_PLAN_COL ? ', c.karate_annuity_plan' : '') +
+         (HAS_PHONE_MOBILE_COL ? ', c.phone_mobile' : '');
+}
+
+// Desliga a flag EXATA da coluna ausente, a partir da mensagem do erro
+// 42703 do Postgres (ex.: 'column c.phone_mobile does not exist'). Nunca
+// desliga a flag errada quando só uma das duas colunas novas estiver de
+// fato faltando. Retorna true se alguma flag foi desligada — quem chamou
+// deve tentar de novo (dojoOptionalCols() já vai refletir a mudança).
+function disableMissingDojoCol(e) {
+  if (e.code !== '42703') return false;
+  const msg = e.message || '';
+  let disabled = false;
+  if (HAS_ANNUITY_PLAN_COL && /karate_annuity_plan/.test(msg)) { HAS_ANNUITY_PLAN_COL = false; disabled = true; }
+  if (HAS_PHONE_MOBILE_COL && /phone_mobile/.test(msg)) { HAS_PHONE_MOBILE_COL = false; disabled = true; }
+  return disabled;
+}
+
 // Monta o bloco de endereço da resposta JSON a partir de uma row.
 // (a row já vem com address_neighborhood por causa do alias acima / RETURNING)
 function addressOut(r) {
@@ -133,14 +160,14 @@ router.get('/', ...guards.read(), async (req, res) => {
 
     const where = `WHERE ${conditions.join(' AND ')}`;
 
-    // karate_annuity_plan (Migration 226) — incluído na listagem defensivamente
-    // (mesmo padrão de HAS_ANNUITY_PLAN_COL usado no resto do arquivo): sem
-    // ele, a coluna "Modelo" da listagem só mostrava affiliation_model
-    // (metadado decorativo, nunca lido por rota de cobrança — ver
-    // DojoFichaModal.tsx) e afirmava "Anual" pra todo mundo mesmo quando o
-    // plano de anuidade REAL (o que a campanha usa) está indefinido — a
-    // lista prometia uma certeza que a ficha do dojô já desmentia.
-    const annuityCol = HAS_ANNUITY_PLAN_COL ? ', c.karate_annuity_plan' : '';
+    // karate_annuity_plan (Migration 226) e phone_mobile (Migration 230) —
+    // incluídos na listagem defensivamente (ver dojoOptionalCols/
+    // disableMissingDojoCol acima): sem karate_annuity_plan, a coluna
+    // "Modelo" da listagem só mostrava affiliation_model (metadado
+    // decorativo, nunca lido por rota de cobrança — ver DojoFichaModal.tsx)
+    // e afirmava "Anual" pra todo mundo mesmo quando o plano de anuidade
+    // REAL (o que a campanha usa) está indefinido — a lista prometia uma
+    // certeza que a ficha do dojô já desmentia.
 
     if (status) {
       // Status agora é só active/inactive (deriva de is_active — ver
@@ -154,7 +181,7 @@ router.get('/', ...guards.read(), async (req, res) => {
           `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
                   c.region, c.fpkt_affiliation_id,
                   c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-                  ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${annuityCol},
+                  ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${dojoOptionalCols()},
                   COUNT(cu.id) AS practitioner_count,
                   COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
            FROM companies c
@@ -165,14 +192,13 @@ router.get('/', ...guards.read(), async (req, res) => {
           params
         );
       } catch (e) {
-        if (e.code === '42703') {
-          HAS_ANNUITY_PLAN_COL = false;
-          console.warn('[karateDojos] karate_annuity_plan ausente na listagem (Migration 226 pendente) — fallback sem coluna');
+        if (disableMissingDojoCol(e)) {
+          console.warn('[karateDojos] coluna nova ausente na listagem (migration pendente) — fallback sem ela:', e.message);
           allRes = await db.query(
             `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
                     c.region, c.fpkt_affiliation_id,
                     c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-                    ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
+                    ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${dojoOptionalCols()},
                     COUNT(cu.id) AS practitioner_count,
                   COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
              FROM companies c
@@ -199,6 +225,7 @@ router.get('/', ...guards.read(), async (req, res) => {
         dojo_founded_year: r.dojo_founded_year || null,
         ...addressOut(r),
         phone: r.phone || null,
+        phone_mobile: r.phone_mobile || null,
         email: r.email || null,
         karate_logo_url: r.karate_logo_url || null,
         is_active: r.is_active !== false,
@@ -231,7 +258,7 @@ router.get('/', ...guards.read(), async (req, res) => {
         `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
                 c.region, c.fpkt_affiliation_id,
                 c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-                ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${annuityCol},
+                ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${dojoOptionalCols()},
                 COUNT(cu.id) AS practitioner_count,
                   COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
          FROM companies c
@@ -243,14 +270,13 @@ router.get('/', ...guards.read(), async (req, res) => {
         [...params, pageSize, offset]
       );
     } catch (e) {
-      if (e.code === '42703') {
-        HAS_ANNUITY_PLAN_COL = false;
-        console.warn('[karateDojos] karate_annuity_plan ausente na listagem (Migration 226 pendente) — fallback sem coluna');
+      if (disableMissingDojoCol(e)) {
+        console.warn('[karateDojos] coluna nova ausente na listagem (migration pendente) — fallback sem ela:', e.message);
         dataRes = await db.query(
           `SELECT c.id, c.name, c.cnpj, c.sensei_cpf, c.sensei_name, c.sensei_practitioner_id,
                   c.region, c.fpkt_affiliation_id,
                   c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-                  ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
+                  ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${dojoOptionalCols()},
                   COUNT(cu.id) AS practitioner_count,
                   COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
            FROM companies c
@@ -278,6 +304,7 @@ router.get('/', ...guards.read(), async (req, res) => {
       dojo_founded_year: r.dojo_founded_year || null,
       ...addressOut(r),
       phone: r.phone || null,
+      phone_mobile: r.phone_mobile || null,
       email: r.email || null,
       karate_logo_url: r.karate_logo_url || null,
       is_active: r.is_active !== false,
@@ -337,28 +364,60 @@ router.get('/export', ...guards.read(), async (req, res) => {
 
     const where = `WHERE ${conditions.join(' AND ')}`;
 
-    const { rows } = await db.query(
-      `SELECT c.id, c.name, c.cnpj, c.region, c.fpkt_affiliation_id,
-              c.affiliation_model, c.affiliation_since, c.phone, c.email,
-              c.address_city, c.address_state, c.is_active,
-              COUNT(cu.id) AS practitioner_count,
-              COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
-       FROM companies c
-       LEFT JOIN customers cu ON cu.dojo_id = c.id
-       ${where}
-       GROUP BY c.id
-       ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
-      params
-    );
+    // plano_anuidade (karate_annuity_plan) e telefone_celular (phone_mobile)
+    // — mesmo padrão defensivo do resto do arquivo (dojoOptionalCols/
+    // disableMissingDojoCol). affiliation_model NÃO entra mais aqui: é
+    // metadado legado/decorativo (nunca lido por rota de cobrança) e a
+    // planilha exportada chegou a exibir "Modelo de Filiação" com esse
+    // valor enquanto a ficha do dojô já mostrava o plano real — mesma
+    // contradição da Migration 226. plano_anuidade é a fonte única agora.
+    let rows;
+    try {
+      const r1 = await db.query(
+        `SELECT c.id, c.name, c.cnpj, c.region, c.fpkt_affiliation_id,
+                c.affiliation_model, c.affiliation_since, c.phone, c.email,
+                c.address_city, c.address_state, c.is_active${dojoOptionalCols()},
+                COUNT(cu.id) AS practitioner_count,
+                COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
+         FROM companies c
+         LEFT JOIN customers cu ON cu.dojo_id = c.id
+         ${where}
+         GROUP BY c.id
+         ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
+        params
+      );
+      rows = r1.rows;
+    } catch (e) {
+      if (disableMissingDojoCol(e)) {
+        console.warn('[karateDojos] coluna nova ausente no export (migration pendente) — fallback sem ela:', e.message);
+        const r2 = await db.query(
+          `SELECT c.id, c.name, c.cnpj, c.region, c.fpkt_affiliation_id,
+                  c.affiliation_model, c.affiliation_since, c.phone, c.email,
+                  c.address_city, c.address_state, c.is_active${dojoOptionalCols()},
+                  COUNT(cu.id) AS practitioner_count,
+                  COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
+           FROM companies c
+           LEFT JOIN customers cu ON cu.dojo_id = c.id
+           ${where}
+           GROUP BY c.id
+           ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
+          params
+        );
+        rows = r2.rows;
+      } else throw e;
+    }
 
     let dojos = rows.map(r => ({
       nome: r.name || null,
       codigo_fpkt: r.fpkt_affiliation_id || null,
       status: computeDojoStatus(r.affiliation_model, r.affiliation_since, r.is_active),
       regiao: r.region || null,
-      modelo_filiacao: r.affiliation_model || null,
+      // Plano de anuidade REAL do dojô (anual|semestral|trimestral), null =
+      // federação ainda não definiu — NUNCA inventar "Anual" aqui.
+      plano_anuidade: r.karate_annuity_plan || null,
       cnpj: r.cnpj || null,
       telefone: r.phone || null,
+      telefone_celular: r.phone_mobile || null,
       email: r.email || null,
       cidade: r.address_city || null,
       estado: r.address_state || null,
@@ -384,7 +443,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
   const federationId = req.params.id;
   const {
     name, cnpj, sensei_cpf, region, affiliation_model, affiliation_since,
-    dojo_founded_year, address, phone, email,
+    dojo_founded_year, address, phone, phone_mobile, email,
     address_street, address_number, address_complement,
     address_neighborhood, address_city, address_state, address_zip,
   } = req.body;
@@ -531,6 +590,24 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       }
     }
 
+    // phone_mobile (Migration 230) — mesmo padrão do karate_annuity_plan
+    // acima (UPDATE pontual, não renumera o INSERT; defensivo em 42703).
+    let savedPhoneMobile = null;
+    if (phone_mobile && HAS_PHONE_MOBILE_COL) {
+      try {
+        await client.query(
+          `UPDATE companies SET phone_mobile = $1 WHERE id = $2`,
+          [phone_mobile, insertRes.rows[0].id]
+        );
+        savedPhoneMobile = phone_mobile;
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_PHONE_MOBILE_COL = false;
+          console.warn('[karateDojos] phone_mobile ausente no create (Migration 230 pendente) — ignorado');
+        } else throw e;
+      }
+    }
+
     await client.query('COMMIT');
 
     const dojo = insertRes.rows[0];
@@ -548,6 +625,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       dojo_founded_year: dojo.dojo_founded_year || null,
       ...addressOut(dojo),
       phone: dojo.phone || null,
+      phone_mobile: savedPhoneMobile,
       email: dojo.email || null,
       is_active: dojo.is_active !== false,
       status: computeDojoStatus(dojo.affiliation_model, dojo.affiliation_since, dojo.is_active),
@@ -570,43 +648,18 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
   try {
     // LEFT JOIN com customers para trazer o nome atual do praticante vinculado como sensei.
     // O alias spr é "sensei practitioner row".
-    // karate_annuity_plan (Migration 226) buscado defensivamente — cai
-    // para a query sem a coluna em 42703 (deploy antes da migration).
+    // karate_annuity_plan (Migration 226) e phone_mobile (Migration 230)
+    // buscados defensivamente — cai para a query sem a(s) coluna(s) em
+    // 42703 (deploy antes da migration).
     let dojoRes;
-    if (HAS_ANNUITY_PLAN_COL) {
-      try {
-        dojoRes = await db.query(
-          `SELECT c.id, c.name, c.cnpj, c.sensei_cpf,
-                  c.sensei_name, c.sensei_practitioner_id,
-                  spr.name AS sensei_practitioner_name,
-                  c.region, c.fpkt_affiliation_id,
-                  c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-                  ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
-                  c.karate_annuity_plan,
-                  COUNT(cu.id) AS practitioner_count,
-                  COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
-           FROM companies c
-           LEFT JOIN customers spr ON spr.id = c.sensei_practitioner_id
-           LEFT JOIN customers cu  ON cu.dojo_id = c.id
-           WHERE c.id = $1 AND c.federation_id = $2 AND c.vertical = 'karate_dojo'
-           GROUP BY c.id, spr.name`,
-          [dojoId, federationId]
-        );
-      } catch (e) {
-        if (e.code === '42703') {
-          HAS_ANNUITY_PLAN_COL = false;
-          console.warn('[karateDojos] karate_annuity_plan ausente (Migration 226 pendente) — fallback sem coluna');
-        } else throw e;
-      }
-    }
-    if (dojoRes === undefined) {
+    try {
       dojoRes = await db.query(
         `SELECT c.id, c.name, c.cnpj, c.sensei_cpf,
                 c.sensei_name, c.sensei_practitioner_id,
                 spr.name AS sensei_practitioner_name,
                 c.region, c.fpkt_affiliation_id,
                 c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
-                ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
+                ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${dojoOptionalCols()},
                 COUNT(cu.id) AS practitioner_count,
                   COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
          FROM companies c
@@ -616,6 +669,26 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
          GROUP BY c.id, spr.name`,
         [dojoId, federationId]
       );
+    } catch (e) {
+      if (disableMissingDojoCol(e)) {
+        console.warn('[karateDojos] coluna nova ausente no detalhe (migration pendente) — fallback sem ela:', e.message);
+        dojoRes = await db.query(
+          `SELECT c.id, c.name, c.cnpj, c.sensei_cpf,
+                  c.sensei_name, c.sensei_practitioner_id,
+                  spr.name AS sensei_practitioner_name,
+                  c.region, c.fpkt_affiliation_id,
+                  c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
+                  ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${dojoOptionalCols()},
+                  COUNT(cu.id) AS practitioner_count,
+                  COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
+           FROM companies c
+           LEFT JOIN customers spr ON spr.id = c.sensei_practitioner_id
+           LEFT JOIN customers cu  ON cu.dojo_id = c.id
+           WHERE c.id = $1 AND c.federation_id = $2 AND c.vertical = 'karate_dojo'
+           GROUP BY c.id, spr.name`,
+          [dojoId, federationId]
+        );
+      } else throw e;
     }
 
     if (!dojoRes.rows.length) {
@@ -730,6 +803,7 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
       dojo_founded_year: d.dojo_founded_year || null,
       ...addressOut(d),
       phone: d.phone || null,
+      phone_mobile: d.phone_mobile || null,
       email: d.email || null,
       karate_logo_url: d.karate_logo_url || null,
       is_active: d.is_active !== false,
@@ -980,6 +1054,17 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
     idx++;
   }
 
+  // ── Migration 230: phone_mobile (telefone CELULAR do dojô) ──
+  // '' ou null limpa o campo (mesmo padrão de sensei_name/strOrNull). Gate
+  // em HAS_PHONE_MOBILE_COL — mesmo padrão defensivo do karate_annuity_plan
+  // acima (Migration 230 pendente não derruba o PATCH, só ignora o campo).
+  if (req.body.phone_mobile !== undefined && HAS_PHONE_MOBILE_COL) {
+    const v = strOrNull(req.body.phone_mobile);
+    updates.push(`phone_mobile = $${idx}`);
+    values.push(v);
+    idx++;
+  }
+
   if (updates.length === 0) {
     return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }
@@ -1019,7 +1104,7 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
                  address_street, address_number, address_complement,
                  address_district AS address_neighborhood,
                  address_city, address_state, address_zip,
-                 phone, email, is_active${HAS_ANNUITY_PLAN_COL ? ', karate_annuity_plan' : ''}`;
+                 phone, email, is_active${HAS_ANNUITY_PLAN_COL ? ', karate_annuity_plan' : ''}${HAS_PHONE_MOBILE_COL ? ', phone_mobile' : ''}`;
 
     let result;
     try {
@@ -1032,13 +1117,22 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       );
     } catch (e) {
       // Defensivo (armadilha_schema_pre_migration do CLAUDE.md): deploy subiu
-      // antes da Migration 226. Só socorre o caso karate_annuity_plan — outras
-      // colunas ausentes continuam sendo erro real (rethrow).
+      // antes da Migration 226 ou 230. Só socorre karate_annuity_plan/
+      // phone_mobile — outras colunas ausentes continuam sendo erro real
+      // (rethrow).
       if (e.code === '42703' && /karate_annuity_plan/.test(e.message || '')) {
         HAS_ANNUITY_PLAN_COL = false;
         await client.query('ROLLBACK');
         return res.status(503).json({
           error: 'Campo karate_annuity_plan ainda não disponível neste ambiente — tente novamente em instantes.',
+          code: 'MIGRATION_PENDING',
+        });
+      }
+      if (e.code === '42703' && /phone_mobile/.test(e.message || '')) {
+        HAS_PHONE_MOBILE_COL = false;
+        await client.query('ROLLBACK');
+        return res.status(503).json({
+          error: 'Campo phone_mobile ainda não disponível neste ambiente — tente novamente em instantes.',
           code: 'MIGRATION_PENDING',
         });
       }
@@ -1080,6 +1174,7 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       dojo_founded_year: d.dojo_founded_year || null,
       ...addressOut(d),
       phone: d.phone || null,
+      phone_mobile: d.phone_mobile || null,
       email: d.email || null,
       is_active: d.is_active !== false,
       status: computeDojoStatus(d.affiliation_model, d.affiliation_since, d.is_active),
