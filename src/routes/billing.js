@@ -39,6 +39,15 @@
 //   Ordem importa: reserva o uso do cupom ANTES de cobrar e libera se o Asaas
 //   recusar — cobrança recusada não pode queimar o cupom do cliente.
 //   Resgate auditado em coupon_redemptions (migration 228).
+//
+// 13/07/2026 — STUDIO NÃO TEM ESSENCIAL:
+//   A vertical Studio exige Negócio+ (é o gate do app, em
+//   app/studio/(estudio)/_layout.tsx). Mas o /subscribe aceitava qualquer
+//   plano: um cliente com vertical_active='studio' podia assinar Essencial pelo
+//   checkout — ou por uma chamada direta na API — e passar a pagar R$89 por um
+//   produto que a tela dele sequer carrega. Pagou e não recebeu.
+//   A regra agora vive AQUI, não só na tela (o mesmo tipo de bug que já nos
+//   custou o checkout mostrando 74,17 e cobrando 93,17).
 // ============================================================
 
 const express = require('express');
@@ -60,6 +69,18 @@ const {
   releaseCoupon,
   recordRedemption,
 } = require('../services/checkoutCoupon');
+
+// Verticais que exigem plano minimo. Espelha o gate do app (Negocio+).
+// Studio: nao existe Aura Studio no Essencial — a tela nem carrega.
+const VERTICAL_MIN_PLANS = {
+  studio: ['negocio', 'expansao'],
+};
+
+function planAllowedForVertical(vertical, plan) {
+  const allowed = VERTICAL_MIN_PLANS[String(vertical || '').toLowerCase()];
+  if (!allowed) return true; // vertical sem restricao (ou sem vertical)
+  return allowed.includes(String(plan || '').toLowerCase());
+}
 
 async function ensureAsaasCustomer(company, user) {
   if (company.asaas_customer_id) return company.asaas_customer_id;
@@ -98,6 +119,11 @@ router.get('/status', requireAuth, async (req, res) => {
       trial_ends_at: c.trial_ends_at || null,
       next_billing_date: c.next_billing_date || null,
       has_payment_method: !!c.asaas_subscription_id,
+      // 13/07: a tela precisa saber que Essencial nao e opcao pra esta empresa.
+      vertical_active: c.vertical_active || null,
+      allowed_plans: c.vertical_active && VERTICAL_MIN_PLANS[c.vertical_active]
+        ? VERTICAL_MIN_PLANS[c.vertical_active]
+        : Object.keys(PLANS),
     });
   } catch (err) {
     console.error('[BILLING] Status error:', err.message);
@@ -316,6 +342,20 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     const { rows: companies } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
     if (!companies.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const company = companies[0];
+
+    // ── Studio nao tem Essencial ──────────────────────────────
+    // A vertical exige Negocio+. Sem esta trava, o cliente Studio podia assinar
+    // Essencial (R$89) e cair num app que nao carrega o Studio: pagou e nao
+    // recebeu. Regra no backend, nao so na tela.
+    if (!planAllowedForVertical(company.vertical_active, plan)) {
+      const allowed = VERTICAL_MIN_PLANS[String(company.vertical_active).toLowerCase()];
+      return res.status(400).json({
+        error: 'O Aura Studio exige o plano Negocio ou superior.',
+        stage: 'plan_vertical',
+        vertical_active: company.vertical_active,
+        allowed_plans: allowed,
+      });
+    }
 
     const { rows: users } = await db.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
     const user = users[0];
