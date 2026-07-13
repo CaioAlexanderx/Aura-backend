@@ -155,7 +155,8 @@ router.get('/', ...guards.read(), async (req, res) => {
                   c.region, c.fpkt_affiliation_id,
                   c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
                   ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${annuityCol},
-                  COUNT(cu.id) AS practitioner_count
+                  COUNT(cu.id) AS practitioner_count,
+                  COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
            FROM companies c
            LEFT JOIN customers cu ON cu.dojo_id = c.id
            ${where}
@@ -172,7 +173,8 @@ router.get('/', ...guards.read(), async (req, res) => {
                     c.region, c.fpkt_affiliation_id,
                     c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
                     ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
-                    COUNT(cu.id) AS practitioner_count
+                    COUNT(cu.id) AS practitioner_count,
+                  COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
              FROM companies c
              LEFT JOIN customers cu ON cu.dojo_id = c.id
              ${where}
@@ -203,6 +205,10 @@ router.get('/', ...guards.read(), async (req, res) => {
         status: computeDojoStatus(r.affiliation_model, r.affiliation_since, r.is_active),
         karate_annuity_plan: r.karate_annuity_plan || null,
         practitioner_count: parseInt(r.practitioner_count, 10) || 0,
+        // Ativos: é o que a tabela do índice exibe (praticante inativo não
+        // conta como praticante do dojô). practitioner_count segue sendo o
+        // TOTAL — nomes distintos para números distintos.
+        active_practitioner_count: parseInt(r.active_practitioner_count, 10) || 0,
       }));
 
       const filtered = allDojosWithStatus.filter(d => d.status === status);
@@ -226,7 +232,8 @@ router.get('/', ...guards.read(), async (req, res) => {
                 c.region, c.fpkt_affiliation_id,
                 c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
                 ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url${annuityCol},
-                COUNT(cu.id) AS practitioner_count
+                COUNT(cu.id) AS practitioner_count,
+                  COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
          FROM companies c
          LEFT JOIN customers cu ON cu.dojo_id = c.id
          ${where}
@@ -244,7 +251,8 @@ router.get('/', ...guards.read(), async (req, res) => {
                   c.region, c.fpkt_affiliation_id,
                   c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
                   ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
-                  COUNT(cu.id) AS practitioner_count
+                  COUNT(cu.id) AS practitioner_count,
+                  COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
            FROM companies c
            LEFT JOIN customers cu ON cu.dojo_id = c.id
            ${where}
@@ -276,6 +284,10 @@ router.get('/', ...guards.read(), async (req, res) => {
       status: computeDojoStatus(r.affiliation_model, r.affiliation_since, r.is_active),
       karate_annuity_plan: r.karate_annuity_plan || null,
       practitioner_count: parseInt(r.practitioner_count, 10) || 0,
+        // Ativos: é o que a tabela do índice exibe (praticante inativo não
+        // conta como praticante do dojô). practitioner_count segue sendo o
+        // TOTAL — nomes distintos para números distintos.
+        active_practitioner_count: parseInt(r.active_practitioner_count, 10) || 0,
     }));
 
     res.json({ page, page_size: pageSize, total, data: dojos });
@@ -571,7 +583,8 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
                   c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
                   ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
                   c.karate_annuity_plan,
-                  COUNT(cu.id) AS practitioner_count
+                  COUNT(cu.id) AS practitioner_count,
+                  COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
            FROM companies c
            LEFT JOIN customers spr ON spr.id = c.sensei_practitioner_id
            LEFT JOIN customers cu  ON cu.dojo_id = c.id
@@ -594,7 +607,8 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
                 c.region, c.fpkt_affiliation_id,
                 c.affiliation_model, c.affiliation_since, c.dojo_founded_year,
                 ${ADDRESS_COLS}, c.phone, c.email, c.is_active, c.karate_logo_url,
-                COUNT(cu.id) AS practitioner_count
+                COUNT(cu.id) AS practitioner_count,
+                  COUNT(cu.id) FILTER (WHERE cu.is_active = true) AS active_practitioner_count
          FROM companies c
          LEFT JOIN customers spr ON spr.id = c.sensei_practitioner_id
          LEFT JOIN customers cu  ON cu.dojo_id = c.id
