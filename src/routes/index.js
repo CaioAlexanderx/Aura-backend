@@ -142,6 +142,11 @@ router.use('/public/karate', require('./karatePublicRanking'));
 // POST /public/karate/:slug/dojo/portal/verify-otp
 router.use('/public/karate', require('./karateDojoPublic'));
 
+// ── AURA KARATÊ — Fase F4/PIX: página pública de pagamento (QR + copiar) ──
+//   GET /public/karate/pix/:token — valor + competência + BR Code (sem
+//       dado pessoal — token stateless, ver karatePixPublicToken.js).
+router.use('/public/karate', require('./karatePixPublic'));
+
 // ── AURA KARATÊ — Cascata de status dojô→praticantes + validação de quadro (10/07/2026) ──
 // Portal público do sensei (SEM auth — token opaco escopado ao dojô):
 //   GET   /public/roster-update/:token                          (missing/counts/progress — G1)
