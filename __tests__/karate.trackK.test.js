@@ -185,37 +185,35 @@ describe('digits', () => {
 describe('applyEvent — aplicação idempotente', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('practitioner novo: reivindica dedupe + INSERT customers + tag', async () => {
-    // nextPractitionerRegistrationNumber emite 2 queries:
-    //   1) SELECT pg_advisory_xact_lock(…)   — advisory lock
-    //   2) SELECT karate_registration_number … — busca o máximo existente
-    // Sequência completa (6 queries):
+  it('practitioner novo (sem match por CPF): NÃO inventa número FPKT — falha explícita, não recuperável (H2)', async () => {
+    // (14/07/2026 — H2) O contrato de practitioner_added nunca carrega
+    // número FPKT (ver karateApplyEvent.js, cabeçalho + comentário em
+    // upsertPractitioner). Antes desta mudança, uma criação nova (sem
+    // match por CPF) chamava nextPractitionerRegistrationNumber e
+    // inventava um número — mesma classe de bug do quick-add do portal
+    // do sensei, agora fechada. Sequência real (2 queries antes de
+    // lançar o erro):
     //   0: INSERT karate_sync_applied … ON CONFLICT DO NOTHING RETURNING id  (claimApplied)
-    //   1: SELECT customers WHERE cpf …                                       (upsertPractitioner — CPF lookup)
-    //   2: SELECT pg_advisory_xact_lock(…)                                    (nextPractitionerRegistrationNumber)
-    //   3: SELECT karate_registration_number FROM customers …                 (nextPractitionerRegistrationNumber)
-    //   4: INSERT INTO customers … RETURNING id                               (upsertPractitioner — INSERT)
-    //   5: UPDATE karate_sync_applied SET target_table …                      (tagApplied)
+    //   1: SELECT customers WHERE cpf …                                       (upsertPractitioner — CPF lookup, não acha)
+    // upsertPractitioner lança sem rodar nenhum INSERT em customers.
     const client = makeMockClient([
       { rows: [{ id: 'applied-1' }] },   // 0: claimApplied → claimed
       { rows: [] },                      // 1: SELECT customer por cpf → não existe
-      { rows: [] },                      // 2: advisory lock (nextPractitionerRegistrationNumber)
-      { rows: [] },                      // 3: SELECT max registration number → nenhum, usa 1
-      { rows: [{ id: 'cust-1' }] },      // 4: INSERT customers RETURNING id
-      { rows: [] },                      // 5: tagApplied UPDATE
     ]);
-    const res = await applyEvent(client, ev({
-      event_type: 'practitioner_added',
-      payload: { event_uid: 'U1', full_name: 'Maria', cpf: '999' },
-    }));
-    expect(res.ok).toBe(true);
-    expect(res.applied).toBe(true);
-    expect(res.kind).toBe('practitioner');
-    expect(res.created).toBe(true);
-    expect(res.targetId).toBe('cust-1');
-    // a 1ª query é o claim com ON CONFLICT DO NOTHING
-    expect(client.query.mock.calls[0][0]).toMatch(/karate_sync_applied/i);
-    expect(client.query.mock.calls[0][0]).toMatch(/ON CONFLICT/i);
+    let threw = null;
+    try {
+      await applyEvent(client, ev({
+        event_type: 'practitioner_added',
+        payload: { event_uid: 'U1', full_name: 'Maria', cpf: '999' },
+      }));
+    } catch (e) { threw = e; }
+    expect(threw).not.toBeNull();
+    expect(threw.recoverable).toBe(false);
+    expect(threw.message).toMatch(/número de matrícula FPKT/i);
+    // só claim + CPF lookup rodaram — nenhum INSERT em customers foi tentado
+    expect(client.query).toHaveBeenCalledTimes(2);
+    const allSql = client.query.mock.calls.map((c) => (typeof c[0] === 'string' ? c[0] : '')).join('\n');
+    expect(allSql).not.toMatch(/INSERT INTO customers/i);
   });
 
   it('evento DUPLICADO: claim não retorna linha → no-op, NÃO muta', async () => {

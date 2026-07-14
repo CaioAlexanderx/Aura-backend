@@ -58,7 +58,8 @@
 const router = require('express').Router();
 const crypto = require('crypto');
 const db = require('../config/database');
-const { nextPractitionerRegistrationNumber, parseCSVLine } = require('../services/karateService');
+const { parseCSVLine } = require('../services/karateService');
+const { buildDedupKey } = require('../services/karatePractitionerDedup');
 
 let multer;
 try { multer = require('multer'); } catch (_) { multer = null; }
@@ -587,6 +588,20 @@ router.post('/:token', async (req, res) => {
 });
 
 // ── POST /public/roster-update/:token/practitioner ──────────
+// (14/07/2026 — H2: este endpoint NÃO cria mais o praticante direto em
+//   `customers`. O número FPKT é emitido pela FEDERAÇÃO, fora do sistema
+//   (regra fechada com o Caio, ver migration 231 / H1) — o quick-add do
+//   sensei era o único caminho restante que ainda inventava um número
+//   (nextPractitionerRegistrationNumber). Agora ele cria uma SOLICITAÇÃO
+//   em `karate_practitioner_requests` — a MESMA tabela/fluxo do portal
+//   novo do sensei (karateDojoPractitionerRequests.js) — que fica pendente
+//   até a federação aprovar (atribuindo o número real) ou rejeitar. Opção
+//   (a) do H2 em vez de desabilitar o botão: o esforço foi razoável porque
+//   a tabela/dedup/aprovação já existiam prontas da H1, e assim o sensei
+//   não perde a conveniência de "adicionar rápido pelo portal" — só deixa
+//   de sair com um número inventado. dojo_id/federation_id SEMPRE do
+//   token (nunca do body), mesma regra do resto deste arquivo. Continua
+//   NÃO expirando o token.
 router.post('/:token/practitioner', async (req, res) => {
   const token = req.params.token;
   const body = req.body || {};
@@ -595,6 +610,10 @@ router.post('/:token/practitioner', async (req, res) => {
   const email = body.email != null ? String(body.email).trim() : '';
   const beltLevel = body.belt_level != null ? String(body.belt_level).trim() : '';
   const beltName = body.belt_name != null ? String(body.belt_name).trim() : '';
+  const birthDateRaw = body.birth_date;
+  const birthDate = (typeof birthDateRaw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(birthDateRaw))
+    ? birthDateRaw
+    : null;
 
   if (!name) {
     return res.status(422).json({ error: 'Nome é obrigatório', code: 'VALIDATION_ERROR' });
@@ -628,36 +647,58 @@ router.post('/:token/practitioner', async (req, res) => {
       return res.status(410).json({ error: 'Link expirado. Solicite uma nova atualização cadastral à federação.' });
     }
 
-    const regNumber = await nextPractitionerRegistrationNumber(client, federationId);
+    // Mesma chave de idempotência do portal de solicitação novo: dojô +
+    // nome normalizado + nascimento (karatePractitionerDedup.buildDedupKey).
+    // O quick-add não coleta nascimento hoje — a chave ainda funciona, só
+    // fica mais permissiva (ver comentário no módulo de dedup).
+    const dedupKey = buildDedupKey(name, birthDate);
+    const payload = {
+      full_name: name,
+      birth_date: birthDate,
+      phone: phone || null,
+      email: email || null,
+      belt_level: beltLevel,
+      belt_name: beltName || beltLevel,
+      source: 'roster_portal_quick_add',
+    };
 
     const insertRes = await client.query(
-      `INSERT INTO customers
-         (company_id, name, phone, email, is_student, federation_id, dojo_id,
-          karate_registration_number, is_active, is_guest, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, true, $1, $5, $6, true, false, NOW(), NOW())
-       RETURNING id, name, karate_registration_number`,
-      [federationId, name, (phone || null), (email || null), dojoId, regNumber]
-    );
-    const student = insertRes.rows[0];
-
-    await client.query(
-      `INSERT INTO karate_belt_history
-         (student_id, federation_id, belt_level, belt_name, belt_schema, graduated_at, notes, created_by, created_at)
-       VALUES ($1, $2, $3, $4, NULL, CURRENT_DATE, $5, NULL, NOW())`,
-      [student.id, federationId, beltLevel, (beltName || beltLevel), 'Adicionado pelo sensei via portal']
+      `INSERT INTO karate_practitioner_requests
+         (federation_id, dojo_id, full_name, birth_date, phone, email,
+          claimed_belt, payload, dedup_key, requested_by_channel)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 'roster_portal_sensei')
+       ON CONFLICT (dojo_id, dedup_key) WHERE status = 'pendente' DO NOTHING
+       RETURNING id, status, created_at`,
+      [federationId, dojoId, name, birthDate, (phone || null), (email || null), (beltName || beltLevel), JSON.stringify(payload), dedupKey]
     );
 
-    await client.query('SAVEPOINT sp_practitioner_added_event');
+    let request = insertRes.rows[0];
+    let alreadyPending = false;
+
+    if (!request) {
+      // Já existe uma solicitação PENDENTE idêntica (mesmo dojô + nome +
+      // nascimento) — idempotente: não duplica, devolve a existente.
+      alreadyPending = true;
+      const existingRes = await client.query(
+        `SELECT id, status, created_at FROM karate_practitioner_requests
+          WHERE dojo_id = $1 AND dedup_key = $2 AND status = 'pendente'
+          LIMIT 1`,
+        [dojoId, dedupKey]
+      );
+      request = existingRes.rows[0];
+    }
+
+    await client.query('SAVEPOINT sp_practitioner_request_event');
     try {
       await client.query(
         `INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
-         VALUES ($1, $2, 'practitioner_added', $3::jsonb, NULL)`,
-        [dojoId, federationId, JSON.stringify([{ student_id: student.id, name: student.name }])]
+         VALUES ($1, $2, 'practitioner_request_created', $3::jsonb, NULL)`,
+        [dojoId, federationId, JSON.stringify([{ request_id: request.id, full_name: name }])]
       );
-      await client.query('RELEASE SAVEPOINT sp_practitioner_added_event');
+      await client.query('RELEASE SAVEPOINT sp_practitioner_request_event');
     } catch (e) {
       if (e.code === '42P01') {
-        await client.query('ROLLBACK TO SAVEPOINT sp_practitioner_added_event');
+        await client.query('ROLLBACK TO SAVEPOINT sp_practitioner_request_event');
         console.warn('[karateRosterPortalPublic] karate_dojo_roster_events ausente (schema pendente)');
       } else {
         throw e;
@@ -666,16 +707,23 @@ router.post('/:token/practitioner', async (req, res) => {
 
     await client.query('COMMIT');
 
-    res.status(201).json({
-      id: student.id,
-      name: student.name,
-      karate_registration_number: student.karate_registration_number || null,
+    res.status(alreadyPending ? 200 : 201).json({
+      id: request.id,
+      status: request.status,
+      created_at: request.created_at,
+      already_pending: alreadyPending,
       belt_name: beltName || beltLevel,
       belt_level: beltLevel,
-      is_active: true,
+      message: alreadyPending
+        ? 'Já existe uma solicitação pendente para esta pessoa neste dojô.'
+        : 'Solicitação enviada à federação. O número FPKT é atribuído por ela na aprovação — este praticante ainda não está no quadro.',
     });
   } catch (err) {
     await client.query('ROLLBACK');
+    if (err.code === '42P01') {
+      console.warn('[karateRosterPortalPublic] karate_practitioner_requests ausente (schema pendente)');
+      return res.status(503).json({ error: 'Solicitação de praticante ainda não disponível (migração pendente)', code: 'MIGRATION_PENDING' });
+    }
     console.error('[karateRosterPortalPublic] add practitioner error:', err.message);
     res.status(500).json({ error: 'Erro ao adicionar praticante' });
   } finally {

@@ -38,46 +38,25 @@ async function nextDojoAffiliationId(client, federationId) {
   return `FPKT-${String(nextNum).padStart(3, '0')}`;
 }
 
-// ── Geração do Nº de registro do praticante (NNNNN-D) ──────
-// Formato: <N>-D, continuando a maior numeração já existente na federação.
-//
-// Os dados reais da FPKT usam o padrão NNNNN-D (kyu) e variações por Dan nos
-// faixas-pretas (NNN-Y-SHO, -Y-NI, -Y-SAN). Para gerar o próximo número de um
-// praticante NOVO, pegamos o MAIOR PREFIXO NUMÉRICO entre TODOS os registros
-// da federação (independente do sufixo) e incrementamos, formatando como
-// "<N>-D" — o padrão dominante.
-//
-// (Decisão Caio 22/06.) O gerador antigo "FPKT-A-NNNNN" foi substituído porque
-// o regex /(\d+)$/ não casava com os importados (terminam em letra) e cairia
-// em colisão a partir de 00001.
-//
-// advisory lock por federação garante atomicidade sob concorrência.
-async function nextPractitionerRegistrationNumber(client, federationId) {
-  await client.query(
-    `SELECT pg_advisory_xact_lock(hashtext($1::text || '-practitioner'))`,
-    [federationId]
-  );
-
-  // Extrai os dígitos iniciais de cada karate_registration_number e pega o MAX.
-  // regexp_replace(x, '\D.*$', '') → mantém só o prefixo numérico ("21758-D" → "21758").
-  // Filtra para registros que começam com dígito (ignora formatos legados não-numéricos).
-  const { rows } = await client.query(
-    `SELECT COALESCE(
-              MAX(NULLIF(regexp_replace(karate_registration_number, '\\D.*$', ''), '')::bigint),
-              0
-            ) AS maxnum
-       FROM customers
-      WHERE federation_id = $1
-        AND karate_registration_number ~ '^[0-9]'`,
-    [federationId]
-  );
-
-  // Defensivo: em testes o DB é mockado e pode devolver { rows: [] } (sem a
-  // linha do agregado). Em Postgres real MAX retorna sempre 1 linha (maxnum=0
-  // quando vazio, pelo COALESCE), então prod nunca cai no fallback.
-  const next = (parseInt(rows?.[0]?.maxnum, 10) || 0) + 1;
-  return `${next}-D`;
-}
+// (14/07/2026 — H2) nextPractitionerRegistrationNumber FOI REMOVIDA daqui.
+// Regra fechada com o Caio: o número de matrícula FPKT é emitido SOMENTE
+// pela federação, fora do sistema — o backend NUNCA gera/inventa um
+// (migration 231 / H1). Os 3 chamadores que ainda existiam foram todos
+// fechados no mesmo PR (#381):
+//   1) karateRosterPortalPublic.js (quick-add do portal do sensei) — agora
+//      cria uma SOLICITAÇÃO pendente (karate_practitioner_requests), igual
+//      ao fluxo novo do sensei — nunca mais insere direto em customers.
+//   2) karateImport.js (import legado em massa) — o número agora é
+//      OBRIGATÓRIO na própria planilha (PRACTITIONER_FIELDS.registration_number);
+//      linha sem número vai para o relatório de erro, nunca ganha um
+//      inventado.
+//   3) karateApplyEvent.js (upsertPractitioner, sync dojô↔federação) — o
+//      contrato do evento practitioner_added nunca carregou número FPKT;
+//      criação nova (sem match por CPF) agora falha explicitamente
+//      (recoverable=false) em vez de inventar.
+// Se um dia surgir um caso legítimo de geração automática, ele PRECISA
+// vir com essa mesma decisão de produto revisada — não reintroduza esta
+// função "de leve" só porque um novo fluxo parece pedir um número.
 
 // ── Status computado do dojô ────────────────────────────────
 // Decisão de produto (02/07/2026): status do dojô é derivado UNICAMENTE de
@@ -127,6 +106,12 @@ function parseCSVLine(line) {
 // ── Mapeamento fuzzy de cabeçalhos CSV para campos do praticante ─
 const PRACTITIONER_FIELDS = {
   full_name:    ['nome', 'name', 'nome completo', 'full_name'],
+  // Número de matrícula FPKT — SEMPRE emitido pela federação, fora do
+  // sistema (regra H1, migration 231). O import legado (CSV) só aceita a
+  // linha se ela já TRAZ esse número na planilha de origem; nunca inventa
+  // um (ver karateImport.js handler / validateRow).
+  registration_number: ['matricula', 'matrícula', 'registro', 'numero fpkt', 'número fpkt',
+                         'num_fpkt', 'nº fpkt', 'fpkt', 'registration_number', 'karate_registration_number'],
   cpf:          ['cpf', 'documento', 'doc'],
   rg:           ['rg', 'identidade'],
   birth_date:   ['nascimento', 'data nascimento', 'data_nascimento', 'birthday', 'birth_date'],
@@ -185,7 +170,6 @@ function parseDate(value) {
 
 module.exports = {
   nextDojoAffiliationId,
-  nextPractitionerRegistrationNumber,
   computeDojoStatus,
   parseCSVLine,
   suggestPractitionerMapping,

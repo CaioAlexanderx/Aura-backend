@@ -30,7 +30,6 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const {
-  nextPractitionerRegistrationNumber,
   suggestPractitionerMapping,
   applyMap,
   parseDate,
@@ -70,11 +69,22 @@ function validateRow(data, rowIndex) {
     errors.push({ row: rowIndex + 1, field: 'full_name', message: 'Nome obrigatório' });
   }
 
+  // H2: o número de matrícula FPKT é emitido pela federação, FORA do
+  // sistema — o backend nunca gera/inventa (regra H1, migration 231). O
+  // import legado só grava a linha se a própria planilha já traz o
+  // número; sem ele, a linha vai para o relatório de erro (não é
+  // descartada silenciosamente, e não ganha um número inventado).
+  const registrationNumber = data.registration_number ? String(data.registration_number).trim() : '';
+  if (!registrationNumber) {
+    errors.push({ row: rowIndex + 1, field: 'registration_number', message: 'Número de matrícula FPKT obrigatório (não é gerado pelo sistema)' });
+  }
+
   const parsedBirth = parseDate(data.birth_date);
   const parsedGrad  = parseDate(data.graduated_at);
 
   const valid = {
     full_name:     String(data.full_name || '').trim(),
+    registration_number: registrationNumber || null,
     cpf:           data.cpf || null,
     rg:            data.rg  || null,
     birth_date:    parsedBirth,
@@ -190,8 +200,10 @@ const handler = async (req, res) => {
     await client.query('BEGIN');
 
     for (const p of validRows) {
-      // Gera número de registro para cada praticante
-      const regNumber = await nextPractitionerRegistrationNumber(client, federationId);
+      // Número de matrícula FPKT vem da PRÓPRIA planilha (validateRow já
+      // garantiu presença — linha sem número nem chega em validRows, vai
+      // para allErrors). O backend NUNCA gera/inventa este número (H2).
+      const regNumber = p.registration_number;
 
       // Resolve dojo_id: usa o informado ou null
       const dojoId = p.dojo_id || null;
