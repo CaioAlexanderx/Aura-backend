@@ -76,6 +76,77 @@ async function logRosterEventStandalone({ dojoId, federationId, event, affected,
   }
 }
 
+// ── Reabrir acesso do dojô ao rejeitar (item 4, H3) ──────────
+// O link público do sensei (/public/roster-update/:token/...) é gated por
+// karate_dojo_roster_validation.token_expires_at. Esse token EXPIRA
+// imediatamente quando o sensei "fecha" o quadro (POST /:token de
+// confirmação final seta token_expires_at = NOW() — ver
+// karateRosterPortalPublic.js). Se uma solicitação de praticante daquele
+// dojô é REJEITADA depois que ele já fechou o quadro, o link morre e ele
+// fica sem caminho de volta para ver o motivo e reenviar corrigido.
+//
+// Ao rejeitar, ESTENDEMOS (nunca encurtamos — GREATEST) tanto o token do
+// sensei quanto o self_service_token por mais 14 dias a partir de agora.
+// Só faz sentido se já existir uma linha de validação para o dojô (i.e.,
+// a federação já pediu atualização de quadro alguma vez e um token foi
+// emitido) — não criamos uma linha nova do zero aqui: isso inseriria o
+// dojô no painel de progresso de quadro (roster-progress) como se uma
+// validação tivesse sido solicitada, o que não é verdade e poluiria
+// aquele painel como efeito colateral de uma rejeição de praticante.
+// Quem tem acesso via login de dojô (Canal A/B de requireDojoAccess) já
+// enxerga a rejeição a qualquer momento via
+// GET /federation/:id/dojo/practitioner-requests?status=rejeitada — isto
+// aqui cobre especificamente o link público sem login.
+//
+// Best-effort / defensivo: 42P01 (tabela ausente) e 42703 (colunas
+// self_service_* da migration 225 ausentes) nunca derrubam a rejeição em
+// si, que já foi persistida antes desta chamada.
+async function reopenDojoRosterAccessBestEffort(dojoId) {
+  const EXTEND = "NOW() + INTERVAL '14 days'";
+  try {
+    const { rows } = await db.query(
+      `UPDATE karate_dojo_roster_validation
+          SET token_expires_at = GREATEST(COALESCE(token_expires_at, NOW()), ${EXTEND}),
+              self_service_token_expires_at = GREATEST(COALESCE(self_service_token_expires_at, NOW()), ${EXTEND}),
+              updated_at = NOW()
+        WHERE dojo_id = $1 AND token IS NOT NULL
+      RETURNING token, token_expires_at, self_service_token, self_service_token_expires_at`,
+      [dojoId]
+    );
+    if (!rows.length) return { reopened: false, reason: 'no_validation_row' };
+    return {
+      reopened: true,
+      token_expires_at: rows[0].token_expires_at,
+      self_service_token_expires_at: rows[0].self_service_token_expires_at,
+    };
+  } catch (e) {
+    if (e.code === '42703') {
+      // Migration 225 (self_service_token*) pendente — reabre só o token do sensei.
+      try {
+        const { rows } = await db.query(
+          `UPDATE karate_dojo_roster_validation
+              SET token_expires_at = GREATEST(COALESCE(token_expires_at, NOW()), ${EXTEND}),
+                  updated_at = NOW()
+            WHERE dojo_id = $1 AND token IS NOT NULL
+          RETURNING token, token_expires_at`,
+          [dojoId]
+        );
+        if (!rows.length) return { reopened: false, reason: 'no_validation_row' };
+        return { reopened: true, token_expires_at: rows[0].token_expires_at, self_service_token_expires_at: null };
+      } catch (e2) {
+        console.warn('[karatePractitionerRequestsAdmin] reabrir acesso do dojô falhou (colunas ausentes, não bloqueia):', e2.message);
+        return { reopened: false, reason: 'schema_pending' };
+      }
+    }
+    if (e.code === '42P01') {
+      console.warn('[karatePractitionerRequestsAdmin] karate_dojo_roster_validation ausente (schema pendente, não bloqueia)');
+      return { reopened: false, reason: 'schema_pending' };
+    }
+    console.error('[karatePractitionerRequestsAdmin] reabrir acesso do dojô falhou (não bloqueia):', e.message);
+    return { reopened: false, reason: 'error' };
+  }
+}
+
 function shapeDetail(r) {
   return {
     id: r.id,
@@ -111,7 +182,7 @@ router.get('/practitioner-requests', ...guards.read(), async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      `SELECT r.*, comp.name AS dojo_name
+      `SELECT r.*, COALESCE(comp.trade_name, comp.legal_name) AS dojo_name
          FROM karate_practitioner_requests r
          LEFT JOIN companies comp ON comp.id = r.dojo_id
         WHERE r.federation_id = $1
@@ -142,12 +213,88 @@ router.get('/practitioner-requests', ...guards.read(), async (req, res) => {
   }
 });
 
+// ── GET métricas da fila (H3) ────────────────────────────────
+// Rota ESTÁTICA — precisa vir ANTES de '/practitioner-requests/:requestId'
+// (Express trataria 'metrics' como :requestId senão).
+//
+// pendentes              — total de solicitações status='pendente' na federação.
+// mais_antiga             — { criada_em, dias } da solicitação pendente mais
+//                            velha (null se não há nenhuma pendente). dias é
+//                            piso (idade completa em dias, arredondado para
+//                            baixo) — para a federação enxergar urgência.
+// aguardando_numero_fpkt  — pendentes SEM fpkt_number_claimed (o sensei não
+//                            informou nenhum número — sinal forte de que é
+//                            uma CRIAÇÃO nova, não transferência, e que a
+//                            federação vai ter que emitir o número do zero;
+//                            claimed_belt/fpkt_number_claimed são o que o
+//                            sensei digitou, nunca autoritativo, mas a
+//                            AUSÊNCIA do claim já é um contador útil de
+//                            volume de "número a emitir").
+// por_dojo                — mesma contagem quebrada por dojô, ordenada pela
+//                            mais antiga primeiro (mesmo critério de urgência
+//                            da lista principal).
+router.get('/practitioner-requests/metrics', ...guards.read(), async (req, res) => {
+  const federationId = req.params.id;
+  const empty = { pendentes: 0, mais_antiga: null, aguardando_numero_fpkt: 0, por_dojo: [] };
+
+  try {
+    const totals = await db.query(
+      `SELECT
+          count(*) FILTER (WHERE r.status = 'pendente')::int AS pendentes,
+          min(r.created_at) FILTER (WHERE r.status = 'pendente') AS mais_antiga_criada_em,
+          count(*) FILTER (
+            WHERE r.status = 'pendente'
+              AND (r.fpkt_number_claimed IS NULL OR btrim(r.fpkt_number_claimed) = '')
+          )::int AS aguardando_numero_fpkt
+        FROM karate_practitioner_requests r
+        WHERE r.federation_id = $1`,
+      [federationId]
+    );
+
+    const porDojoRes = await db.query(
+      `SELECT r.dojo_id,
+              COALESCE(comp.trade_name, comp.legal_name) AS dojo_nome,
+              count(*)::int AS pendentes,
+              min(r.created_at) AS mais_antiga_criada_em
+         FROM karate_practitioner_requests r
+         LEFT JOIN companies comp ON comp.id = r.dojo_id
+        WHERE r.federation_id = $1 AND r.status = 'pendente'
+        GROUP BY r.dojo_id, COALESCE(comp.trade_name, comp.legal_name)
+        ORDER BY min(r.created_at) ASC`,
+      [federationId]
+    );
+
+    const diasDesde = (iso) => (iso ? Math.floor((Date.now() - new Date(iso).getTime()) / 86400000) : null);
+
+    const t = totals.rows[0] || {};
+    const maisAntigaCriadaEm = t.mais_antiga_criada_em || null;
+
+    return res.json({
+      pendentes: t.pendentes || 0,
+      mais_antiga: maisAntigaCriadaEm
+        ? { criada_em: maisAntigaCriadaEm, dias: diasDesde(maisAntigaCriadaEm) }
+        : null,
+      aguardando_numero_fpkt: t.aguardando_numero_fpkt || 0,
+      por_dojo: porDojoRes.rows.map((r) => ({
+        dojo_id: r.dojo_id,
+        dojo_nome: r.dojo_nome || null,
+        pendentes: r.pendentes,
+        mais_antiga_dias: diasDesde(r.mais_antiga_criada_em),
+      })),
+    });
+  } catch (e) {
+    if (e.code === '42P01') return res.json(empty);
+    console.error('[karatePractitionerRequestsAdmin] metrics error:', e.message);
+    return res.status(500).json({ error: 'Erro ao calcular métricas da fila' });
+  }
+});
+
 // ── GET detalhe ──────────────────────────────────────────────
 router.get('/practitioner-requests/:requestId', ...guards.read(), async (req, res) => {
   const { id: federationId, requestId } = req.params;
   try {
     const { rows } = await db.query(
-      `SELECT r.*, comp.name AS dojo_name
+      `SELECT r.*, COALESCE(comp.trade_name, comp.legal_name) AS dojo_name
          FROM karate_practitioner_requests r
          LEFT JOIN companies comp ON comp.id = r.dojo_id
         WHERE r.id = $1 AND r.federation_id = $2
@@ -434,14 +581,14 @@ router.post('/practitioner-requests/:requestId/approve-transfer', ...guards.staf
     let transferRow = null;
     if (String(originDojoId) !== String(destinationDojoId)) {
       const destRes = await client.query(
-        `SELECT id, name, email FROM companies WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo' LIMIT 1`,
+        `SELECT id, COALESCE(trade_name, legal_name) AS name, email FROM companies WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo' LIMIT 1`,
         [destinationDojoId, federationId]
       );
       const destDojo = destRes.rows[0] || null;
 
       let originDojo = null;
       if (originDojoId) {
-        const o = await client.query('SELECT id, name, email FROM companies WHERE id = $1 LIMIT 1', [originDojoId]);
+        const o = await client.query('SELECT id, COALESCE(trade_name, legal_name) AS name, email FROM companies WHERE id = $1 LIMIT 1', [originDojoId]);
         originDojo = o.rows[0] || null;
       }
 
@@ -534,7 +681,17 @@ router.post('/practitioner-requests/:requestId/reject', ...guards.staffWrite(), 
       actorId: (req.user && req.user.id) || null,
     });
 
-    return res.json({ request_id: requestId, status: 'rejeitada', reject_reason: reason });
+    // Item 4 (H3): rejeitar reabre/estende o acesso do link público do
+    // dojô, para o sensei conseguir voltar, ver o motivo e reenviar
+    // corrigido mesmo se ele já tinha "fechado" o quadro antes.
+    const dojoAccess = await reopenDojoRosterAccessBestEffort(row.dojo_id);
+
+    return res.json({
+      request_id: requestId,
+      status: 'rejeitada',
+      reject_reason: reason,
+      dojo_access_reopened: dojoAccess.reopened,
+    });
   } catch (e) {
     if (e.code === '42P01') return res.status(404).json({ error: 'Solicitação não encontrada', code: 'NOT_FOUND' });
     console.error('[karatePractitionerRequestsAdmin] reject error:', e.message);
