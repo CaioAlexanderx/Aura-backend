@@ -305,6 +305,69 @@ describe('POST /federation/:id/practitioner-requests/:requestId/approve-transfer
         done();
       });
   });
+
+  // ════════════════════════════════════════════════════════
+  // Item 2 (H3) — REGRA CRÍTICA: transferência NUNCA sobrescreve
+  // histórico. Praticante existente tem faixa X (karate_current_belt);
+  // a solicitação ALEGA faixa Y != X (o sensei pode ter digitado
+  // errado, ou o praticante pode ter subido de faixa sem o dojô
+  // anterior ter registrado). Aprovar como transferência PODE MUDAR
+  // O DOJÔ, mas NUNCA pode inserir/alterar karate_belt_history a
+  // partir da faixa alegada — isso só pode acontecer via edição
+  // deliberada e auditada, nunca como efeito colateral do aprovar.
+  // ════════════════════════════════════════════════════════
+  it('faixa alegada DIVERGENTE nunca escreve em karate_belt_history — histórico preservado, só o dojô muda (item 2)', (done) => {
+    const app = buildAdminApp();
+    const mockClient = { query: jest.fn(), release: jest.fn() };
+    db.connect.mockResolvedValue(mockClient);
+
+    // Praticante existente é FAIXA PRETA de verdade (karate_current_belt,
+    // fora do escopo desta query — approve-transfer nem consulta a faixa
+    // atual, prova em código de que não decide nada com base nela).
+    // A solicitação alega 'faixa branca' (claimed_belt = Y != X) — o
+    // handler sequer LÊ reqRow.claimed_belt no fluxo de transferência.
+    mockClient.query
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({ rows: [{
+        id: 'req-divergente-001', federation_id: FED_ID, dojo_id: DOJO_ID, status: 'pendente',
+        full_name: 'Praticante Faixa Preta', claimed_belt: 'faixa branca', payload: {},
+      }] }) // solicitação FOR UPDATE — claimed_belt DIVERGE da faixa real do praticante
+      .mockResolvedValueOnce({ rows: [{ id: 'prac-faixa-preta-001', name: 'Praticante Faixa Preta', email: null, dojo_id: 'dojo-origem-002' }] }) // praticante FOR UPDATE
+      .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojo Destino', email: null }] }) // dest company
+      .mockResolvedValueOnce({ rows: [{ id: 'dojo-origem-002', name: 'Dojo Origem', email: null }] }) // origin company
+      .mockResolvedValueOnce({ rows: [] }) // UPDATE customers dojo_id (só isto muda no praticante)
+      .mockResolvedValueOnce({ rows: [{ id: 'transfer-002', transferred_at: '2026-07-14', created_at: '2026-07-14T00:00:00Z' }] }) // INSERT transfers
+      .mockResolvedValueOnce({ rows: [] }) // UPDATE karate_practitioner_requests
+      .mockResolvedValueOnce({}) // SAVEPOINT
+      .mockResolvedValueOnce({ rows: [] }) // INSERT roster event
+      .mockResolvedValueOnce({}) // RELEASE SAVEPOINT
+      .mockResolvedValueOnce({}); // COMMIT
+
+    request(app)
+      .post(`/federation/${FED_ID}/practitioner-requests/req-divergente-001/approve-transfer`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ practitioner_id: 'prac-faixa-preta-001' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.resolution).toBe('transferred');
+
+        const allSql = mockClient.query.mock.calls.map((c) => (typeof c[0] === 'string' ? c[0] : ''));
+        const joined = allSql.join('\n');
+        // A prova central do item 2: NENHUMA query da transação toca
+        // karate_belt_history, mesmo com claimed_belt divergente no payload.
+        expect(joined).not.toMatch(/karate_belt_history/i);
+        expect(joined).not.toMatch(/annuity/i);
+
+        // O ÚNICO UPDATE em customers desta transação é o de dojo_id —
+        // não deve setar nenhuma coluna de faixa/belt.
+        const customersUpdate = allSql.find((sql) => /UPDATE customers/i.test(sql));
+        expect(customersUpdate).toMatch(/dojo_id/);
+        expect(customersUpdate).not.toMatch(/belt/i);
+
+        done();
+      });
+  });
 });
 
 describe('POST /federation/:id/practitioner-requests/:requestId/reject', () => {
@@ -327,7 +390,8 @@ describe('POST /federation/:id/practitioner-requests/:requestId/reject', () => {
     const app = buildAdminApp();
     db.query
       .mockResolvedValueOnce({ rows: [{ id: 'req-001', dojo_id: DOJO_ID, full_name: 'X' }] }) // UPDATE ... RETURNING
-      .mockResolvedValueOnce({ rows: [] }); // INSERT roster event (standalone)
+      .mockResolvedValueOnce({ rows: [] }) // INSERT roster event (standalone)
+      .mockResolvedValueOnce({ rows: [{ token: 'tok-1', token_expires_at: '2026-08-01T00:00:00Z', self_service_token: 'ss-1', self_service_token_expires_at: '2026-08-01T00:00:00Z' }] }); // reopen dojo access
 
     request(app)
       .post(`/federation/${FED_ID}/practitioner-requests/req-001/reject`)
@@ -338,6 +402,56 @@ describe('POST /federation/:id/practitioner-requests/:requestId/reject', () => {
         expect(res.status).toBe(200);
         expect(res.body.status).toBe('rejeitada');
         expect(res.body.reject_reason).toBe('CPF inválido');
+        done();
+      });
+  });
+
+  // (c) item 4, H3: rejeitar REABRE/ESTENDE o acesso do link público do
+  // dojô (karate_dojo_roster_validation) — o token expira quando o sensei
+  // "fecha" o quadro; se a rejeição chega depois, ele precisa conseguir
+  // voltar para ver o motivo e reenviar.
+  it('rejeição reabre o acesso do dojô (estende token_expires_at) — item 4', (done) => {
+    const app = buildAdminApp();
+    db.query
+      .mockResolvedValueOnce({ rows: [{ id: 'req-001', dojo_id: DOJO_ID, full_name: 'X' }] }) // UPDATE ... RETURNING
+      .mockResolvedValueOnce({ rows: [] }) // INSERT roster event (standalone)
+      .mockResolvedValueOnce({ rows: [{ token: 'tok-1', token_expires_at: '2026-08-01T00:00:00Z', self_service_token: 'ss-1', self_service_token_expires_at: '2026-08-01T00:00:00Z' }] }); // reopen dojo access
+
+    request(app)
+      .post(`/federation/${FED_ID}/practitioner-requests/req-001/reject`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ reason: 'CPF inválido' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.dojo_access_reopened).toBe(true);
+
+        // A 3ª chamada precisa ser o UPDATE que estende (GREATEST, nunca
+        // encurta) o token do dojô rejeitado — usando o dojo_id CORRETO
+        // (o da linha resolvida, não um valor arbitrário).
+        const reopenCall = db.query.mock.calls[2];
+        expect(reopenCall[0]).toMatch(/UPDATE karate_dojo_roster_validation/);
+        expect(reopenCall[0]).toMatch(/GREATEST/);
+        expect(reopenCall[1]).toEqual([DOJO_ID]);
+        done();
+      });
+  });
+
+  it('dojo_access_reopened:false sem quebrar a rejeição quando o dojô nunca teve link de validação', (done) => {
+    const app = buildAdminApp();
+    db.query
+      .mockResolvedValueOnce({ rows: [{ id: 'req-002', dojo_id: DOJO_ID, full_name: 'Y' }] }) // UPDATE ... RETURNING
+      .mockResolvedValueOnce({ rows: [] }) // INSERT roster event (standalone)
+      .mockResolvedValueOnce({ rows: [] }); // reopen dojo access -> nenhuma linha (nunca solicitou quadro)
+
+    request(app)
+      .post(`/federation/${FED_ID}/practitioner-requests/req-002/reject`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ reason: 'RG ilegível' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.dojo_access_reopened).toBe(false);
         done();
       });
   });
@@ -414,5 +528,74 @@ describe('karatePractitionerDedup — SUGERE, não decide', () => {
     expect(matches.length).toBe(1);
     expect(matches[0].matched_on).toEqual(['cpf']);
     expect(matches[0].confidence).toBe('low');
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// Item 5 (H3) — métricas da fila (pendentes, mais antiga, aguardando FPKT)
+// ════════════════════════════════════════════════════════════
+describe('GET /federation/:id/practitioner-requests/metrics', () => {
+  it('rota ESTÁTICA: "/practitioner-requests/metrics" não cai em /:requestId', (done) => {
+    const app = buildAdminApp();
+    db.query
+      .mockResolvedValueOnce({ rows: [{ pendentes: 3, mais_antiga_criada_em: '2026-07-01T00:00:00Z', aguardando_numero_fpkt: 2 }] })
+      .mockResolvedValueOnce({ rows: [
+        { dojo_id: DOJO_ID, dojo_nome: 'Dojo A', pendentes: 2, mais_antiga_criada_em: '2026-07-01T00:00:00Z' },
+        { dojo_id: OTHER_DOJO_ID, dojo_nome: 'Dojo B', pendentes: 1, mais_antiga_criada_em: '2026-07-10T00:00:00Z' },
+      ] });
+
+    request(app)
+      .get(`/federation/${FED_ID}/practitioner-requests/metrics`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.pendentes).toBe(3);
+        expect(res.body.aguardando_numero_fpkt).toBe(2);
+        expect(res.body.mais_antiga.criada_em).toBe('2026-07-01T00:00:00Z');
+        expect(typeof res.body.mais_antiga.dias).toBe('number');
+        expect(res.body.por_dojo.length).toBe(2);
+        expect(res.body.por_dojo[0].dojo_id).toBe(DOJO_ID);
+        // Prova de que "metrics" não foi engolido pela rota :requestId —
+        // se tivesse caído lá, a query seria um SELECT com WHERE r.id = $1.
+        const sql = db.query.mock.calls[0][0];
+        expect(sql).not.toMatch(/WHERE r\.id = \$1/);
+        done();
+      });
+  });
+
+  it('sem nenhuma pendente: mais_antiga é null, contadores zerados', (done) => {
+    const app = buildAdminApp();
+    db.query
+      .mockResolvedValueOnce({ rows: [{ pendentes: 0, mais_antiga_criada_em: null, aguardando_numero_fpkt: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    request(app)
+      .get(`/federation/${FED_ID}/practitioner-requests/metrics`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.pendentes).toBe(0);
+        expect(res.body.mais_antiga).toBeNull();
+        expect(res.body.por_dojo).toEqual([]);
+        done();
+      });
+  });
+
+  it('42P01 (migração pendente) degrada para métricas zeradas, sem 500', (done) => {
+    const app = buildAdminApp();
+    const err42P01 = Object.assign(new Error('relation does not exist'), { code: '42P01' });
+    db.query.mockRejectedValueOnce(err42P01);
+
+    request(app)
+      .get(`/federation/${FED_ID}/practitioner-requests/metrics`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.pendentes).toBe(0);
+        done();
+      });
   });
 });

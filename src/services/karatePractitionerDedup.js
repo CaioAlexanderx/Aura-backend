@@ -80,7 +80,7 @@ async function findPossibleMatches(db, { federationId, fullName, birthDate, rg, 
 
   const { rows } = await db.query(
     `SELECT c.id, c.name, c.karate_registration_number, c.birth_date, c.rg, c.cpf_cnpj,
-            c.dojo_id, comp.name AS dojo_name
+            c.dojo_id, COALESCE(comp.trade_name, comp.legal_name) AS dojo_name
        FROM customers c
        LEFT JOIN companies comp ON comp.id = c.dojo_id
       WHERE c.federation_id = $1
@@ -157,7 +157,7 @@ async function lookupByFpktNumber(db, { federationId, number }) {
   if (!normalized) return { found: false };
 
   const { rows } = await db.query(
-    `SELECT c.id, c.name, c.dojo_id, comp.name AS dojo_name, c.is_active
+    `SELECT c.id, c.name, c.dojo_id, COALESCE(comp.trade_name, comp.legal_name) AS dojo_name, c.is_active
        FROM customers c
        LEFT JOIN companies comp ON comp.id = c.dojo_id
       WHERE c.federation_id = $1 AND c.karate_registration_number = $2
