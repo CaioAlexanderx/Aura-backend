@@ -46,15 +46,25 @@ function rosterSelfServiceUrl(token) {
 //   nem e-mail) — o mesmo critério de "grupo essencial" do portal
 //   (GET /public/roster-update/:token). praticantes_sem_contato é só o
 //   subconjunto (b), para a federação ver o tamanho do buraco de contato.
+// status: 'active' (default) | 'all'. Qualquer valor além de 'all' cai em
+// 'active' — o default TEM que ser só ativos (não faz sentido cobrar
+// atualização cadastral de quem já saiu da federação). Mesmo predicado da
+// listagem de dojôs (karateDojos.js): vertical_active = 'karate_dojo' (NÃO
+// `vertical` — vertical é identidade permanente, vertical_active reflete o
+// módulo karatê ligado/desligado) + is_active IS NOT FALSE (mesma regra de
+// computeDojoStatus/karateService.js: ativo é is_active !== false).
 router.get('/roster-progress', ...guards.read(), async (req, res) => {
   const federationId = req.params.id;
+  const statusParam = String(req.query.status || 'active').toLowerCase();
+  const activeOnly = statusParam !== 'all';
 
   try {
     const { rows } = await db.query(
       `WITH dojos AS (
          SELECT id AS dojo_id, COALESCE(name, trade_name, legal_name) AS dojo_nome
          FROM companies
-         WHERE federation_id = $1 AND vertical = 'karate_dojo'
+         WHERE federation_id = $1 AND vertical_active = 'karate_dojo'
+           ${activeOnly ? 'AND is_active IS NOT FALSE' : ''}
        ),
        practicantes AS (
          SELECT c.dojo_id,
@@ -108,11 +118,28 @@ router.get('/roster-progress', ...guards.read(), async (req, res) => {
       };
     });
 
-    res.json({ data });
+    // Resumo agregado (KPIs da aba "Atualização cadastral" no front) —
+    // derivado do MESMO array `data` que a lista usa (fonte única: nunca
+    // diverge entre o card de KPI e a tabela abaixo dele).
+    const summary = data.reduce(
+      (acc, r) => {
+        if (r.status === 'nao_aberto') acc.nao_abriram += 1;
+        else if (r.status === 'em_andamento') acc.em_andamento += 1;
+        else if (r.status === 'validado') acc.validados += 1;
+        acc.praticantes_sem_contato += r.praticantes_sem_contato || 0;
+        return acc;
+      },
+      { total_dojos: data.length, nao_abriram: 0, em_andamento: 0, validados: 0, praticantes_sem_contato: 0 }
+    );
+
+    res.json({ data, summary });
   } catch (err) {
     if (err.code === '42P01' || err.code === '42703') {
       console.warn('[karateRosterValidation] roster-progress schema pendente:', err.message);
-      return res.json({ data: [] });
+      return res.json({
+        data: [],
+        summary: { total_dojos: 0, nao_abriram: 0, em_andamento: 0, validados: 0, praticantes_sem_contato: 0 },
+      });
     }
     console.error('[karateRosterValidation] roster-progress error:', err.message);
     res.status(500).json({ error: 'Erro ao carregar progresso de quadro dos dojôs' });
