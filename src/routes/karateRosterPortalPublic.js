@@ -28,6 +28,22 @@
 //   de forma idempotente (só regenera quando ausente/expirado — ver
 //   ensureSelfServiceUrl abaixo).
 //
+// (14/07/2026 — H2b: decisão fechada com o Caio — "solicitar novo
+//   praticante" mora AQUI, no link público, não atrás de JWT. A H2 tinha
+//   posto esse fluxo no Portal do Sensei autenticado (solicitacoes.tsx)
+//   por engano: o link público É o canal principal de atualização
+//   cadastral, e exigir login pra abrir uma ficha de matrícula nova
+//   condena a feature a não ser usada pelos senseis que só têm o link.
+//   POST /:token/practitioner já virava SOLICITAÇÃO desde H1/H2 (nunca
+//   insere em customers) — o que faltava era paridade de campos com a
+//   ficha completa do painel autenticado (cpf/rg/sexo/endereço/
+//   responsável) e os dois endpoints token-gated que só existiam
+//   JWT-gated: auto-localizar por FPKT e status das solicitações do
+//   dojô. Os dois são NOVOS abaixo, espelhando
+//   karateDojoPractitionerRequests.js 1:1 (mesmo service de dedup,
+//   mesmo shape de resposta), só trocando requireDojoAccess (JWT) por
+//   resolveToken (token opaco).
+//
 // SEM auth (mesmo padrão de dentalPortalPublic.js / studioApprovalPublic.js):
 // o token opaco de karate_dojo_roster_validation É a autenticação. Todo
 // acesso — leitura, escrita e export — é escopado ao dojo_id do token;
@@ -41,8 +57,17 @@
 //                                                                   (inclui is_active = "não treina mais")
 //   POST  /public/roster-update/:token                           — confirma o quadro (fecha o ciclo,
 //                                                                   expira o token; aceita updates[] de is_active)
-//   POST  /public/roster-update/:token/practitioner               — adiciona novo praticante
+//   POST  /public/roster-update/:token/practitioner               — H2b: abre uma SOLICITAÇÃO de
+//                                                                   praticante novo (ficha completa),
+//                                                                   NUNCA cria em customers direto
 //                                                                   (NÃO expira o token)
+//   GET   /public/roster-update/:token/fpkt-lookup?number=       — H2b: auto-localizar nº FPKT,
+//                                                                   escopado à federação do token
+//                                                                   (equivalente token-gated de
+//                                                                   karateDojoPractitionerRequests.js)
+//   GET   /public/roster-update/:token/practitioner-requests     — H2b: status das solicitações
+//                                                                   do PRÓPRIO dojô (pendente/
+//                                                                   aprovada/rejeitada + motivo)
 //   GET   /public/roster-update/:token/export                    — CSV do quadro inteiro
 //   GET   /public/roster-update/:token/export-missing             — CSV só de quem falta algo
 //                                                                   (matrícula + nome + telefone + e-mail)
@@ -57,13 +82,36 @@
 
 const router = require('express').Router();
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const db = require('../config/database');
 const { parseCSVLine } = require('../services/karateService');
-const { buildDedupKey } = require('../services/karatePractitionerDedup');
+const { buildDedupKey, lookupByFpktNumber, normalizeFpktNumber } = require('../services/karatePractitionerDedup');
 
 let multer;
 try { multer = require('multer'); } catch (_) { multer = null; }
 const upload = multer ? multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } }) : null;
+
+const isTestEnv = () => process.env.NODE_ENV === 'test';
+
+// Chave de rate limit = token + IP (mesmo padrão de
+// karateRosterSelfServicePublic.js): throttle por dojô E por origem, sem
+// um IP compartilhado (rede da escola/ginásio) travar todo mundo por
+// causa de um dojô barulhento em outro token.
+function keyByTokenAndIp(req) {
+  return `${req.params.token || 'no-token'}:${req.ip || 'no-ip'}`;
+}
+
+// Auto-localizar é uma BUSCA (o sensei pode digitar vários números
+// testando) — mesmo teto do lookup-fpkt autenticado
+// (karateDojoPractitionerRequests.js): 60/10min.
+const fpktLookupLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: keyByTokenAndIp,
+  skip: () => isTestEnv(),
+});
 
 // Mesma base de karateRosterValidation.js (APP_URL, default
 // https://app.getaura.com.br) — mantém as duas URLs (sensei/self-service)
@@ -602,28 +650,62 @@ router.post('/:token', async (req, res) => {
 //   de sair com um número inventado. dojo_id/federation_id SEMPRE do
 //   token (nunca do body), mesma regra do resto deste arquivo. Continua
 //   NÃO expirando o token.
+const VALID_SEX_VALUES = ['M', 'F', 'other'];
+
+// ── POST /public/roster-update/:token/practitioner ──────────
+// H2b: ficha COMPLETA, mesmo contrato de campos de
+// POST /federation/:id/dojo/practitioner-requests (karateDojoPractitionerRequests.js)
+// — só troca requireDojoAccess (JWT) por resolveToken (token opaco do
+// link público). full_name é o único campo obrigatório (mesma régua do
+// endpoint autenticado); `name`/`belt_level`/`belt_name` continuam aceitos
+// como fallback para não quebrar chamador antigo, mas o corpo canônico
+// agora é full_name/claimed_belt.
 router.post('/:token/practitioner', async (req, res) => {
   const token = req.params.token;
-  const body = req.body || {};
-  const name = body.name != null ? String(body.name).trim() : '';
-  const phone = body.phone != null ? String(body.phone).trim() : '';
-  const email = body.email != null ? String(body.email).trim() : '';
-  const beltLevel = body.belt_level != null ? String(body.belt_level).trim() : '';
-  const beltName = body.belt_name != null ? String(body.belt_name).trim() : '';
-  const birthDateRaw = body.birth_date;
-  const birthDate = (typeof birthDateRaw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(birthDateRaw))
-    ? birthDateRaw
-    : null;
+  const b = req.body || {};
 
-  if (!name) {
+  const full_name = (b.full_name != null ? String(b.full_name) : (b.name != null ? String(b.name) : '')).trim();
+  if (!full_name) {
     return res.status(422).json({ error: 'Nome é obrigatório', code: 'VALIDATION_ERROR' });
   }
-  if (!beltLevel) {
-    return res.status(422).json({ error: 'Faixa é obrigatória', code: 'VALIDATION_ERROR' });
+
+  const birth_date = (typeof b.birth_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(b.birth_date))
+    ? b.birth_date
+    : null;
+  if (b.birth_date && !birth_date) {
+    return res.status(422).json({ error: 'birth_date deve ser YYYY-MM-DD', code: 'VALIDATION_ERROR' });
   }
-  if (!phone && !email) {
-    return res.status(422).json({ error: 'Informe pelo menos um contato (telefone ou e-mail)', code: 'VALIDATION_ERROR' });
+
+  if (b.sex !== undefined && b.sex !== null && b.sex !== '' && !VALID_SEX_VALUES.includes(b.sex)) {
+    return res.status(422).json({ error: `sex inválido. Use: ${VALID_SEX_VALUES.join(', ')}`, code: 'VALIDATION_ERROR' });
   }
+
+  const cpf = b.cpf != null ? String(b.cpf).trim() || null : null;
+  const rg = b.rg != null ? String(b.rg).trim() || null : null;
+  const phone = b.phone != null ? String(b.phone).trim() || null : null;
+  const email = b.email != null ? String(b.email).trim() || null : null;
+  // claimed_belt é o campo canônico (ficha completa); belt_name/belt_level
+  // seguem aceitos como fallback (contrato antigo do quick-add).
+  const claimed_belt = (b.claimed_belt != null ? String(b.claimed_belt).trim() : '')
+    || (b.belt_name != null ? String(b.belt_name).trim() : '')
+    || (b.belt_level != null ? String(b.belt_level).trim() : '')
+    || null;
+  const fpktClaimed = b.fpkt_number_claimed != null ? normalizeFpktNumber(b.fpkt_number_claimed) || null : null;
+
+  // Ficha completa (nome, nascimento, CPF, RG, telefone, e-mail, faixa
+  // alegada, endereço, responsável se menor) — mesmo shape do payload do
+  // endpoint autenticado (karateDojoPractitionerRequests.js). dojo_id/
+  // federation_id NUNCA entram aqui — vêm sempre do token, resolvido
+  // dentro da transação abaixo (FOR UPDATE, nunca do body).
+  const payload = {
+    full_name, birth_date, cpf, rg, phone, email, sex: b.sex || null,
+    claimed_belt, fpkt_number_claimed: fpktClaimed,
+    street: b.street || null, number: b.number || null, complement: b.complement || null,
+    neighborhood: b.neighborhood || null, city: b.city || null, state: b.state || null, zip_code: b.zip_code || null,
+    guardian_name: b.guardian_name || null, guardian_cpf: b.guardian_cpf || null,
+    guardian_phone: b.guardian_phone || null, guardian_relationship: b.guardian_relationship || null,
+    source: 'roster_portal_public_request',
+  };
 
   const client = await db.connect();
   try {
@@ -649,27 +731,16 @@ router.post('/:token/practitioner', async (req, res) => {
 
     // Mesma chave de idempotência do portal de solicitação novo: dojô +
     // nome normalizado + nascimento (karatePractitionerDedup.buildDedupKey).
-    // O quick-add não coleta nascimento hoje — a chave ainda funciona, só
-    // fica mais permissiva (ver comentário no módulo de dedup).
-    const dedupKey = buildDedupKey(name, birthDate);
-    const payload = {
-      full_name: name,
-      birth_date: birthDate,
-      phone: phone || null,
-      email: email || null,
-      belt_level: beltLevel,
-      belt_name: beltName || beltLevel,
-      source: 'roster_portal_quick_add',
-    };
+    const dedupKey = buildDedupKey(full_name, birth_date);
 
     const insertRes = await client.query(
       `INSERT INTO karate_practitioner_requests
-         (federation_id, dojo_id, full_name, birth_date, phone, email,
-          claimed_belt, payload, dedup_key, requested_by_channel)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 'roster_portal_sensei')
+         (federation_id, dojo_id, full_name, birth_date, cpf, rg, phone, email,
+          claimed_belt, payload, fpkt_number_claimed, dedup_key, requested_by_channel)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'roster_portal_sensei')
        ON CONFLICT (dojo_id, dedup_key) WHERE status = 'pendente' DO NOTHING
        RETURNING id, status, created_at`,
-      [federationId, dojoId, name, birthDate, (phone || null), (email || null), (beltName || beltLevel), JSON.stringify(payload), dedupKey]
+      [federationId, dojoId, full_name, birth_date, cpf, rg, phone, email, claimed_belt, JSON.stringify(payload), fpktClaimed, dedupKey]
     );
 
     let request = insertRes.rows[0];
@@ -693,7 +764,7 @@ router.post('/:token/practitioner', async (req, res) => {
       await client.query(
         `INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
          VALUES ($1, $2, 'practitioner_request_created', $3::jsonb, NULL)`,
-        [dojoId, federationId, JSON.stringify([{ request_id: request.id, full_name: name }])]
+        [dojoId, federationId, JSON.stringify([{ request_id: request.id, full_name }])]
       );
       await client.query('RELEASE SAVEPOINT sp_practitioner_request_event');
     } catch (e) {
@@ -707,16 +778,28 @@ router.post('/:token/practitioner', async (req, res) => {
 
     await client.query('COMMIT');
 
+    // Hint imediato (best-effort, fora da transação — nunca bloqueia a
+    // solicitação já commitada): se o sensei já digitou um número FPKT,
+    // avisa na hora se ele já pertence a alguém (provável transferência).
+    let fpktHint = null;
+    if (fpktClaimed && !alreadyPending) {
+      try {
+        fpktHint = await lookupByFpktNumber(db, { federationId, number: fpktClaimed });
+      } catch (e) {
+        console.error('[karateRosterPortalPublic] fpkt hint falhou (não bloqueia):', e.message);
+      }
+    }
+
     res.status(alreadyPending ? 200 : 201).json({
       id: request.id,
       status: request.status,
       created_at: request.created_at,
       already_pending: alreadyPending,
-      belt_name: beltName || beltLevel,
-      belt_level: beltLevel,
+      claimed_belt,
+      fpkt_lookup: fpktHint,
       message: alreadyPending
         ? 'Já existe uma solicitação pendente para esta pessoa neste dojô.'
-        : 'Solicitação enviada à federação. O número FPKT é atribuído por ela na aprovação — este praticante ainda não está no quadro.',
+        : 'Solicitação enviada à federação. Ela vai validar e emitir o número FPKT — este praticante ainda não está no quadro.',
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -728,6 +811,87 @@ router.post('/:token/practitioner', async (req, res) => {
     res.status(500).json({ error: 'Erro ao adicionar praticante' });
   } finally {
     client.release();
+  }
+});
+
+// ── GET /public/roster-update/:token/fpkt-lookup?number= ────
+// H2b: auto-localizar token-gated — equivalente de
+// GET /federation/:id/dojo/practitioner-requests/lookup-fpkt (H1), sem
+// JWT. Escopado à FEDERAÇÃO do token (não só o dojô — o praticante pode
+// estar em outro dojô da mesma federação); devolve o MÍNIMO (nome + dojô
+// atual) — o bastante pro sensei reconhecer "isto é transferência", nunca
+// mais que isso (nenhum contato/CPF/endereço de terceiro).
+router.get('/:token/fpkt-lookup', fpktLookupLimiter, async (req, res) => {
+  const number = req.query.number != null ? String(req.query.number).trim() : '';
+  if (!number) {
+    return res.status(422).json({ error: 'Parâmetro number é obrigatório', code: 'VALIDATION_ERROR' });
+  }
+  try {
+    const resolved = await resolveToken(req.params.token, { touch: false });
+    if (!resolved) return res.status(404).json({ error: 'Link inválido' });
+    if (resolved.expired) return res.status(410).json({ error: 'Link expirado. Solicite uma nova atualização cadastral à federação.' });
+
+    const result = await lookupByFpktNumber(db, { federationId: resolved.federation_id, number });
+    return res.json(result);
+  } catch (err) {
+    if (err.code === '42P01' || err.code === '42703') {
+      console.warn('[karateRosterPortalPublic] fpkt-lookup schema pendente:', err.message);
+      return res.status(404).json({ error: 'Link inválido' });
+    }
+    console.error('[karateRosterPortalPublic] fpkt-lookup error:', err.message);
+    res.status(500).json({ error: 'Erro ao consultar número FPKT' });
+  }
+});
+
+// ── GET /public/roster-update/:token/practitioner-requests ──
+// H2b: status das solicitações do PRÓPRIO dojô, sem login — equivalente
+// token-gated de GET /federation/:id/dojo/practitioner-requests (H1).
+router.get('/:token/practitioner-requests', async (req, res) => {
+  const status = ['pendente', 'aprovada', 'rejeitada'].includes(req.query.status) ? req.query.status : null;
+  try {
+    const resolved = await resolveToken(req.params.token, { touch: false });
+    if (!resolved) return res.status(404).json({ error: 'Link inválido' });
+    if (resolved.expired) return res.status(410).json({ error: 'Link expirado. Solicite uma nova atualização cadastral à federação.' });
+
+    const { rows } = await db.query(
+      `SELECT r.id, r.status, r.resolution, r.reject_reason, r.full_name, r.birth_date,
+              r.claimed_belt, r.fpkt_number_claimed, r.resolved_practitioner_id,
+              r.created_at, r.resolved_at,
+              c.karate_registration_number AS resolved_fpkt_number,
+              c.name AS resolved_practitioner_name
+         FROM karate_practitioner_requests r
+         LEFT JOIN customers c ON c.id = r.resolved_practitioner_id
+        WHERE r.dojo_id = $1
+          AND ($2::text IS NULL OR r.status = $2)
+        ORDER BY r.created_at DESC
+        LIMIT 200`,
+      [resolved.dojo_id, status]
+    );
+    return res.json({
+      data: rows.map((r) => ({
+        id: r.id,
+        status: r.status,
+        resolution: r.resolution || null,
+        reject_reason: r.reject_reason || null,
+        full_name: r.full_name,
+        birth_date: r.birth_date || null,
+        claimed_belt: r.claimed_belt || null,
+        fpkt_number_claimed: r.fpkt_number_claimed || null,
+        resolved_practitioner_id: r.resolved_practitioner_id || null,
+        resolved_fpkt_number: r.resolved_fpkt_number || null,
+        resolved_practitioner_name: r.resolved_practitioner_name || null,
+        created_at: r.created_at,
+        resolved_at: r.resolved_at || null,
+      })),
+    });
+  } catch (err) {
+    if (err.code === '42P01') return res.json({ data: [] });
+    if (err.code === '42703') {
+      console.warn('[karateRosterPortalPublic] practitioner-requests schema pendente:', err.message);
+      return res.status(404).json({ error: 'Link inválido' });
+    }
+    console.error('[karateRosterPortalPublic] practitioner-requests list error:', err.message);
+    res.status(500).json({ error: 'Erro ao listar solicitações' });
   }
 });
 
