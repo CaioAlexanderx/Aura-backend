@@ -113,6 +113,25 @@ const fpktLookupLimiter = rateLimit({
   skip: () => isTestEnv(),
 });
 
+// QA H5: POST /:token/practitioner (H2b) herdava só o globalLimiter
+// genérico (300/min por IP) — quem tem o link (pode vazar num print de
+// WhatsApp) conseguia inundar a fila de moderação com centenas de
+// solicitações de identidades distintas (nome+nascimento variam
+// livremente, o índice de dedup parcial não segura volume). Mesmo teto do
+// irmão autenticado createLimiter (karateDojoPractitionerRequests.js):
+// 30/10min — dá folga generosa para matrícula em lote legítima de um
+// dojô real sem abrir porta para flood. Chave por token+IP (mesmo padrão
+// de fpktLookupLimiter acima).
+const practitionerCreateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: keyByTokenAndIp,
+  skip: () => isTestEnv(),
+  message: { error: 'Muitas solicitações de praticante para este link. Tente novamente em alguns minutos.', code: 'RATE_LIMITED' },
+});
+
 // Mesma base de karateRosterValidation.js (APP_URL, default
 // https://app.getaura.com.br) — mantém as duas URLs (sensei/self-service)
 // consistentes entre os dois arquivos.
@@ -660,7 +679,7 @@ const VALID_SEX_VALUES = ['M', 'F', 'other'];
 // endpoint autenticado); `name`/`belt_level`/`belt_name` continuam aceitos
 // como fallback para não quebrar chamador antigo, mas o corpo canônico
 // agora é full_name/claimed_belt.
-router.post('/:token/practitioner', async (req, res) => {
+router.post('/:token/practitioner', practitionerCreateLimiter, async (req, res) => {
   const token = req.params.token;
   const b = req.body || {};
 
@@ -846,7 +865,12 @@ router.get('/:token/fpkt-lookup', fpktLookupLimiter, async (req, res) => {
 // ── GET /public/roster-update/:token/practitioner-requests ──
 // H2b: status das solicitações do PRÓPRIO dojô, sem login — equivalente
 // token-gated de GET /federation/:id/dojo/practitioner-requests (H1).
-router.get('/:token/practitioner-requests', async (req, res) => {
+// QA H5: reusa fpktLookupLimiter (60/10min por token+IP) em vez de criar
+// um terceiro limiter quase idêntico — é uma leitura de status, mesmo
+// perfil de uso (consulta repetida durante uma sessão de matrícula) do
+// fpkt-lookup logo acima, e o teto de leitura já é mais folgado que o de
+// criação (practitionerCreateLimiter, 30/10min).
+router.get('/:token/practitioner-requests', fpktLookupLimiter, async (req, res) => {
   const status = ['pendente', 'aprovada', 'rejeitada'].includes(req.query.status) ? req.query.status : null;
   try {
     const resolved = await resolveToken(req.params.token, { touch: false });
