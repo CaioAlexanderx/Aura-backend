@@ -298,6 +298,27 @@ router.use('/federation/:id', require('./karateReminders'));
 //   POST /federation/:id/practitioners/:practitionerId/transfer    (staffWrite)
 router.use('/federation/:id', require('./karateTransfers'));
 
+// ── AURA KARATÊ — H1 (solicitação de criação/transferência de praticante) ──
+// Migration 231 (karate_practitioner_requests + índice único federation_id+
+// karate_registration_number). O número FPKT é emitido pela FEDERAÇÃO fora
+// do sistema — o backend nunca gera/inventa número; só registra na aprovação.
+//
+// Lado SENSEI (token-gated via requireDojoAccess — Canal A/B, dojo_id
+// sempre do token):
+//   POST /federation/:id/dojo/practitioner-requests
+//   GET  /federation/:id/dojo/practitioner-requests?status=
+//   GET  /federation/:id/dojo/practitioner-requests/lookup-fpkt?number=
+router.use('/federation/:id', require('./karateDojoPractitionerRequests'));
+
+// Lado FEDERAÇÃO (guards de karateRoles — dedup SUGERE, nunca decide):
+//   GET   /federation/:id/practitioner-requests?status=&dojo_id=
+//   GET   /federation/:id/practitioner-requests/:requestId
+//   PATCH /federation/:id/practitioner-requests/:requestId
+//   POST  /federation/:id/practitioner-requests/:requestId/approve-create
+//   POST  /federation/:id/practitioner-requests/:requestId/approve-transfer
+//   POST  /federation/:id/practitioner-requests/:requestId/reject
+router.use('/federation/:id', require('./karatePractitionerRequestsAdmin'));
+
 // ── AURA KARATÊ — Track H (configurações da federação) ───────────
 // Migration 181 (inscricao_municipal + regime_tributario em companies).
 //   GET/POST   /federation/:id/settings/members          — equipe FPKT

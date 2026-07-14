@@ -354,8 +354,7 @@ describe('POST /federation/:id/practitioners (criar praticante)', () => {
       .mockResolvedValueOnce({})                            // BEGIN
       .mockResolvedValueOnce({ rows: [{ id: FED_ID }] })   // verifica federação
       .mockResolvedValueOnce({ rows: [{ id: DOJO_ID }] })  // verifica dojô
-      .mockResolvedValueOnce({ rows: [] })                  // advisory lock pract
-      .mockResolvedValueOnce({ rows: [] })                  // MAX registration_number
+      .mockResolvedValueOnce({ rows: [] })                  // dup check karate_registration_number (H1: número agora é sempre informado, nunca gerado)
       .mockResolvedValueOnce({})                            // SAVEPOINT sex_affiliation_insert
       .mockResolvedValueOnce({                              // INSERT customer (com sex/affiliation_since)
         rows: [{
@@ -384,7 +383,32 @@ describe('POST /federation/:id/practitioners (criar praticante)', () => {
       .mockResolvedValueOnce({});                           // COMMIT
   });
 
-  it('cria praticante e retorna FPKT-A-NNNNN', function(done) {
+  // H1 (14/07/2026): o número FPKT é emitido pela federação FORA do sistema
+  // — o backend NUNCA mais gera/inventa número (removido nextPractitionerRegistrationNumber
+  // do POST direto). Este teste passou a enviar karate_registration_number
+  // explicitamente, como qualquer chamador precisa fazer agora.
+  it('cria praticante com karate_registration_number informado (número nunca é gerado pelo backend)', function(done) {
+    request(app)
+      .post('/federation/' + FED_ID + '/practitioners')
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({
+        full_name: 'João Silva',
+        cpf: '123.456.789-00',
+        birth_date: '1990-05-15',
+        email: 'joao@test.com',
+        dojo_id: DOJO_ID,
+        karate_registration_number: 'FPKT-A-00001',
+      })
+      .end(function(err, res) {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        expect(res.body.karate_registration_number).toBe('FPKT-A-00001');
+        expect(res.body.full_name).toBe('João Silva');
+        done();
+      });
+  });
+
+  it('retorna 422 sem karate_registration_number (H1: número é obrigatório, backend nunca gera)', function(done) {
     request(app)
       .post('/federation/' + FED_ID + '/practitioners')
       .set('Authorization', 'Bearer ' + adminToken)
@@ -397,9 +421,8 @@ describe('POST /federation/:id/practitioners (criar praticante)', () => {
       })
       .end(function(err, res) {
         if (err) return done(err);
-        expect(res.status).toBe(201);
-        expect(res.body.karate_registration_number).toMatch(/^FPKT-A-\d{5}$/);
-        expect(res.body.full_name).toBe('João Silva');
+        expect(res.status).toBe(422);
+        expect(res.body.code).toBe('FPKT_NUMBER_REQUIRED');
         done();
       });
   });
@@ -547,8 +570,7 @@ describe('POST /federation/:id/practitioners — alinhamento sex/affiliation_sin
       .mockResolvedValueOnce({})                            // BEGIN
       .mockResolvedValueOnce({ rows: [{ id: FED_ID }] })    // verifica federação
       .mockResolvedValueOnce({ rows: [{ id: DOJO_ID }] })   // verifica dojô
-      .mockResolvedValueOnce({ rows: [] })                   // advisory lock pract
-      .mockResolvedValueOnce({ rows: [] })                   // MAX registration_number
+      .mockResolvedValueOnce({ rows: [] })                   // dup check karate_registration_number (H1: número agora é sempre informado, nunca gerado)
       .mockResolvedValueOnce({})                             // SAVEPOINT sex_affiliation_insert
       .mockResolvedValueOnce({                               // INSERT customer
         rows: [{
@@ -573,6 +595,7 @@ describe('POST /federation/:id/practitioners — alinhamento sex/affiliation_sin
         sex: 'feminino',
         affiliation_since: '2024-01-10',
         is_assistant: true,
+        karate_registration_number: 'FPKT-A-00002',
       })
       .end(function(err, res) {
         if (err) return done(err);

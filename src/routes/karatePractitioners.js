@@ -53,7 +53,6 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
-const { nextPractitionerRegistrationNumber } = require('../services/karateService');
 const cards = require('../services/karateCardService');
 const { uploadToR2 } = require('../utils/r2Storage');
 
@@ -323,7 +322,11 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     guardian_name, guardian_cpf, guardian_phone, guardian_relationship,
     // Migration 205 — sexo e data de filiação
     sex, affiliation_since,
-    // Matrícula manual (opcional) — se ausente/vazia, gera sequencial automático
+    // Matrícula FPKT — OBRIGATÓRIA. O número é emitido pela federação FORA do
+    // nosso sistema (nunca por nós); aqui só REGISTRAMOS o que foi informado.
+    // Antes desta migration havia um modo "auto" (nextPractitionerRegistrationNumber)
+    // que inventava um número sequencial ("<N>-D") quando o campo vinha vazio —
+    // removido: gerar número sem autoridade da federação produz dado falso.
     karate_registration_number,
     // Faixa inicial (campo de faixa no cadastro) → semeia a trajetória
     belt_level, belt_name, belt_schema, graduated_at,
@@ -334,6 +337,16 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
   }
   if (!dojo_id) {
     return res.status(422).json({ error: 'Campo dojo_id é obrigatório', code: 'VALIDATION_ERROR' });
+  }
+  // FPKT é obrigatório e nunca gerado por nós (a federação emite fora do
+  // sistema) — sem número, 422 antes de abrir transação. Fluxo recomendado
+  // para dojô/sensei sem número em mãos: POST /federation/:id/dojo/practitioner-requests
+  // (solicitação), que fica pendente até a federação aprovar com o número.
+  if (!karate_registration_number || !String(karate_registration_number).trim()) {
+    return res.status(422).json({
+      error: 'Campo karate_registration_number é obrigatório. O número FPKT é emitido pela federação — este sistema nunca gera número automaticamente.',
+      code: 'FPKT_NUMBER_REQUIRED',
+    });
   }
   if (sex !== undefined && sex !== null && sex !== '' && !VALID_SEX_VALUES.includes(sex)) {
     return res.status(422).json({ error: `sex inválido. Use: ${VALID_SEX_VALUES.join(', ')}`, code: 'VALIDATION_ERROR' });
@@ -363,25 +376,18 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       return res.status(422).json({ error: 'dojo_id não pertence a esta federação', code: 'VALIDATION_ERROR' });
     }
 
-    // Número de registro: manual (informado pelo usuário) OU sequencial automático.
-    // Se vier preenchido (após trim), valida unicidade antes de inserir — 409 se já
-    // existir. Se vier ausente/vazio, mantém o comportamento atual (gera NNNNN-D).
-    const manualRegNumber = karate_registration_number !== undefined && karate_registration_number !== null
-      ? String(karate_registration_number).trim()
-      : '';
-    let regNumber;
-    if (manualRegNumber) {
-      const dupRes = await client.query(
-        `SELECT id FROM customers WHERE karate_registration_number = $1 LIMIT 1`,
-        [manualRegNumber]
-      );
-      if (dupRes.rows.length) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Número de matrícula já em uso.' });
-      }
-      regNumber = manualRegNumber;
-    } else {
-      regNumber = await nextPractitionerRegistrationNumber(client, federationId);
+    // Número de registro: SEMPRE informado (validado no 422 acima) — nunca
+    // gerado por nós. Valida unicidade antes de inserir — 409 se já existir
+    // (o índice único uq_customers_federation_fpkt / idx_customers_karate_reg_number
+    // é o backstop final contra corrida de dois requests concorrentes).
+    const regNumber = String(karate_registration_number).trim();
+    const dupRes = await client.query(
+      `SELECT id FROM customers WHERE karate_registration_number = $1 LIMIT 1`,
+      [regNumber]
+    );
+    if (dupRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Número de matrícula já em uso.' });
     }
 
     const baseCols = `company_id, name, cpf_cnpj, rg, birth_date, email, phone,
