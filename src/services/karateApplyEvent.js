@@ -285,8 +285,27 @@ async function tagApplied(client, appliedId, targetTable, targetId) {
 
 // ── Mutação: praticante ─────────────────────────────────────
 // Match por CPF dentro da federação (chave natural). Sem CPF, cria novo.
-// Atualiza dojo_id/dados básicos no match; cria com número de registro
-// gerado pelo helper canônico da Track A quando não existe.
+// Atualiza dojo_id/dados básicos no match.
+//
+// (14/07/2026 — H2) INVESTIGAÇÃO: o contrato do evento practitioner_added
+// (ver cabeçalho do arquivo) NUNCA carrega um número de matrícula FPKT —
+// os campos são só event_uid/external_id/full_name/cpf/rg/birth_date/
+// email/phone/belt_level/belt_name. Ou seja, este caminho não "propaga"
+// um número que já existe em outra instância: ele CRIA de verdade, e
+// antes desta mudança usava nextPractitionerRegistrationNumber como
+// fallback incondicional (100% das criações por sync inventariam um
+// número, porque o payload nunca tem um pra propagar). Isso viola a
+// regra fechada com o Caio (o número FPKT é emitido SÓ pela federação,
+// fora do sistema) — mesma classe de bug do quick-add do portal do
+// sensei (karateRosterPortalPublic.js). Diferença: aqui é um pipeline
+// assíncrono sem aprovação humana no meio (ao contrário da solicitação
+// da H1), então a correção é falha explícita em vez de virar solicitação
+// pendente: praticante sem match por CPF fica sem aplicar — o evento cai
+// em 'failed' depois de MAX_ATTEMPTS (karateSyncApplyRunner.js), visível
+// nos endpoints que já filtram status='failed' em karateFederation.js —
+// em vez de nascer com número inventado. Cada evento roda na própria
+// transação (runFederationApply), então isso NÃO derruba a fila nem
+// outros eventos pendentes.
 async function upsertPractitioner(client, ev, data) {
   const federationId = ev.federation_id;
   const dojoId = ev.dojo_id;
@@ -318,28 +337,16 @@ async function upsertPractitioner(client, ev, data) {
     return { id: existing.id, created: false };
   }
 
-  // Gera número de registro (advisory lock por federação — seguro na txn).
-  const { nextPractitionerRegistrationNumber } = require('./karateService');
-  let regNumber = null;
-  try {
-    regNumber = await nextPractitionerRegistrationNumber(client, federationId);
-  } catch (err) {
-    if (!isMissingSchema(err)) throw err;
-  }
-
-  const ins = await client.query(
-    `INSERT INTO customers
-       (company_id, name, cpf_cnpj, rg, birth_date, email, phone,
-        is_student, federation_id, dojo_id,
-        karate_registration_number, is_active, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, true, NOW(), NOW())
-     RETURNING id`,
-    [
-      federationId, data.full_name, data.cpf, data.rg, data.birth_date,
-      data.email, data.phone, federationId, dojoId, regNumber,
-    ]
+  // Sem match por CPF → seria uma criação nova. O contrato do evento não
+  // carrega número FPKT e o backend NUNCA gera um (regra H1/H2) — falha
+  // explícita em vez de inventar. NÃO recuperável: re-tentar sozinho não
+  // muda o payload (ele nunca vai ganhar um número por conta própria).
+  const err = new Error(
+    'practitioner_added sem correspondência por CPF: seria uma criação nova, mas o evento não carrega número de matrícula FPKT e o backend não gera número (regra H1/H2). Evento não aplicado — resolva manualmente (import/solicitação) com o número emitido pela federação.'
   );
-  return { id: ins.rows[0].id, created: true };
+  err.recoverable = false;
+  err.code = 'FPKT_NUMBER_REQUIRED';
+  throw err;
 }
 
 // ── Resolução do praticante p/ frequência ───────────────────
