@@ -42,6 +42,10 @@
 // ============================================================
 'use strict';
 
+// ORDENAÇÃO (13/07/2026): a listagem passou a ser ALFABÉTICA por nome.
+// Antes era por fpkt_affiliation_id (código de filiação) com o nome só como
+// desempate — ou seja, a ordem na tela parecia aleatória para quem procura
+// um dojô pelo nome, que é como a federação de fato o procura.
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
@@ -188,7 +192,7 @@ router.get('/', ...guards.read(), async (req, res) => {
            LEFT JOIN customers cu ON cu.dojo_id = c.id
            ${where}
            GROUP BY c.id
-           ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
+           ORDER BY c.name ASC`,
           params
         );
       } catch (e) {
@@ -205,7 +209,7 @@ router.get('/', ...guards.read(), async (req, res) => {
              LEFT JOIN customers cu ON cu.dojo_id = c.id
              ${where}
              GROUP BY c.id
-             ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
+             ORDER BY c.name ASC`,
             params
           );
         } else throw e;
@@ -265,7 +269,7 @@ router.get('/', ...guards.read(), async (req, res) => {
          LEFT JOIN customers cu ON cu.dojo_id = c.id
          ${where}
          GROUP BY c.id
-         ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC
+         ORDER BY c.name ASC
          LIMIT $${n} OFFSET $${n + 1}`,
         [...params, pageSize, offset]
       );
@@ -283,7 +287,7 @@ router.get('/', ...guards.read(), async (req, res) => {
            LEFT JOIN customers cu ON cu.dojo_id = c.id
            ${where}
            GROUP BY c.id
-           ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC
+           ORDER BY c.name ASC
            LIMIT $${n} OFFSET $${n + 1}`,
           [...params, pageSize, offset]
         );
@@ -383,7 +387,7 @@ router.get('/export', ...guards.read(), async (req, res) => {
          LEFT JOIN customers cu ON cu.dojo_id = c.id
          ${where}
          GROUP BY c.id
-         ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
+         ORDER BY c.name ASC`,
         params
       );
       rows = r1.rows;
@@ -400,7 +404,7 @@ router.get('/export', ...guards.read(), async (req, res) => {
            LEFT JOIN customers cu ON cu.dojo_id = c.id
            ${where}
            GROUP BY c.id
-           ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC`,
+           ORDER BY c.name ASC`,
           params
         );
         rows = r2.rows;
