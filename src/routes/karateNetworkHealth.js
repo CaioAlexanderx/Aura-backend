@@ -1,5 +1,21 @@
 // ============================================================
 // AURA KARATÊ — Track L: Saúde da Rede
+
+// ⚠️ BUGFIX (15/07/2026) — colunas `date`/`timestamptz` chegam do driver `pg`
+// como OBJETO Date, não string. String(dateObj).slice(0,10) devolve "Sun May 31"
+// (Date.prototype.toString()), não "2026-05-31" — os CSVs da Saúde da Rede
+// exportavam data-lixo. Só o tipo numeric tem parser customizado neste projeto
+// (src/config/database.js), então TODA data vem como Date.
+function toIsoDate(v) {
+  if (!v) return null;
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    return v.toISOString().slice(0, 10);
+  }
+  const s = String(v).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
 // Montado em /federation/:id/network-health/*
 //
 // Indicadores institucionais derivados de dados que a FEDERAÇÃO
@@ -547,7 +563,7 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
       const csvRows = rows.map((r) => ({
         dojo_name: r.dojo_name,
         city: r.city || '',
-        due_date: r.due_date ? String(r.due_date).slice(0, 10) : '',
+        due_date: toIsoDate(r.due_date) || '',
         amount: fmtBRL(r.amount),
         status: r.status,
       }));
@@ -565,10 +581,10 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
         dojo_id: r.dojo_id,
         dojo_name: r.dojo_name,
         city: r.city || null,
-        due_date: r.due_date ? String(r.due_date).slice(0, 10) : null,
+        due_date: toIsoDate(r.due_date),
         amount: Number(r.amount || 0),
         status: r.status,
-        paid_at: r.paid_at ? String(r.paid_at).slice(0, 10) : null,
+        paid_at: toIsoDate(r.paid_at),
       })),
     });
   } catch (err) {
@@ -915,7 +931,7 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
         { key: 'belt_name', label: 'Nome da faixa' },
       ];
       const csvRows = listRes.rows.map((r) => ({
-        graduated_at: r.graduated_at ? String(r.graduated_at).slice(0, 10) : '',
+        graduated_at: toIsoDate(r.graduated_at) || '',
         dojo_name: r.dojo_name || '',
         student_name: r.student_name || '',
         belt_level: r.belt_level || '',
@@ -932,7 +948,7 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
       monthly: months_data,
       list: listRes.rows.map((r) => ({
         id: r.id,
-        exam_date: r.graduated_at ? String(r.graduated_at).slice(0, 10) : null,
+        exam_date: toIsoDate(r.graduated_at),
         student_id: r.student_id,
         student_name: r.student_name,
         dojo_name: r.dojo_name || null,
