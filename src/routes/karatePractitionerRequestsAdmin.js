@@ -35,6 +35,83 @@ const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { findPossibleMatches, normalizeFpktNumber, buildDedupKey } = require('../services/karatePractitionerDedup');
 
+// ── Contato do dojô + link do sensei p/ o botão "Avisar no WhatsApp" ────
+// (item wa.me pós-rejeição). Telefone do DOJÔ (celular > fixo — WhatsApp
+// não funciona em fixo) + URL do link de atualização de quadro do sensei,
+// pra mensagem já carregar pra onde ele corrige e reenvia. Aditivo — não
+// muda nenhum contrato existente, só acrescenta campos.
+//
+// companies.phone_mobile é a Migration 230 e karate_dojo_roster_validation
+// é a Migration 220: ambas já aplicadas em prod, mas o backend sobe antes
+// da migration em deploys parciais (CLAUDE.md #1/#10) — cache module-level,
+// desliga na primeira 42703/42P01 e nunca derruba list/detail/reject por
+// causa deste extra (best-effort puro).
+let HAS_PHONE_MOBILE_COL = true;
+let HAS_ROSTER_VALIDATION_TABLE = true;
+
+const APP_URL = process.env.APP_URL || 'https://app.getaura.com.br';
+function rosterUpdateUrl(token) {
+  return token ? `${APP_URL}/karate/roster-update/${token}` : null;
+}
+
+// Best-effort: nunca lança — telefone ausente/coluna ausente vira null,
+// nunca erro. Não vaza telefone de terceiros: é o telefone do DOJÔ, que a
+// federação já administra (não é dado de praticante/responsável).
+async function getDojoContactBestEffort(dojoId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT phone${HAS_PHONE_MOBILE_COL ? ', phone_mobile' : ', NULL::text AS phone_mobile'}
+         FROM companies WHERE id = $1 LIMIT 1`,
+      [dojoId]
+    );
+    if (!rows.length) return { phone: null, phone_mobile: null };
+    return { phone: rows[0].phone || null, phone_mobile: rows[0].phone_mobile || null };
+  } catch (e) {
+    if (e.code === '42703' && HAS_PHONE_MOBILE_COL && /phone_mobile/.test(e.message || '')) {
+      HAS_PHONE_MOBILE_COL = false;
+      return getDojoContactBestEffort(dojoId);
+    }
+    console.warn('[karatePractitionerRequestsAdmin] contato do dojô indisponível (não bloqueia):', e.message);
+    return { phone: null, phone_mobile: null };
+  }
+}
+
+// Best-effort: URL do link público do sensei (mesmo token usado pelo fluxo
+// de reabertura de acesso em reopenDojoRosterAccessBestEffort — aqui só
+// LEMOS o token atual, não mexemos em expires_at).
+async function getDojoRosterUpdateUrlBestEffort(dojoId) {
+  if (!HAS_ROSTER_VALIDATION_TABLE) return null;
+  try {
+    const { rows } = await db.query(
+      `SELECT token FROM karate_dojo_roster_validation WHERE dojo_id = $1 AND token IS NOT NULL LIMIT 1`,
+      [dojoId]
+    );
+    return rows.length ? rosterUpdateUrl(rows[0].token) : null;
+  } catch (e) {
+    if (e.code === '42P01') {
+      HAS_ROSTER_VALIDATION_TABLE = false;
+      return null;
+    }
+    console.warn('[karatePractitionerRequestsAdmin] link do dojô indisponível (não bloqueia):', e.message);
+    return null;
+  }
+}
+
+// Junta os dois helpers acima num único bloco de campos aditivos, usado em
+// shapeDetail() (list/detail) e na resposta do reject.
+async function dojoWhatsappFieldsBestEffort(dojoId) {
+  const [contact, dojo_roster_update_url] = await Promise.all([
+    getDojoContactBestEffort(dojoId),
+    getDojoRosterUpdateUrlBestEffort(dojoId),
+  ]);
+  return {
+    dojo_phone: contact.phone,
+    dojo_phone_mobile: contact.phone_mobile,
+    dojo_whatsapp_phone: contact.phone_mobile || contact.phone || null,
+    dojo_roster_update_url,
+  };
+}
+
 async function logRosterEventBestEffort(client, { dojoId, federationId, event, affected, actorId = null }) {
   await client.query('SAVEPOINT sp_practitioner_request_event');
   try {
@@ -202,7 +279,12 @@ router.get('/practitioner-requests', ...guards.read(), async (req, res) => {
         cpf: r.cpf,
         fpktNumberClaimed: r.fpkt_number_claimed,
       });
-      return { ...shapeDetail(r), possible_matches: matches };
+      const shaped = { ...shapeDetail(r), possible_matches: matches };
+      // Campos do botão "Avisar no WhatsApp" só fazem sentido pra rejeitada
+      // (item wa.me pós-rejeição) — evita consultas extras nas demais linhas.
+      if (shaped.status !== 'rejeitada') return shaped;
+      const dojoFields = await dojoWhatsappFieldsBestEffort(r.dojo_id);
+      return { ...shaped, ...dojoFields };
     }));
 
     return res.json({ data });
@@ -309,7 +391,13 @@ router.get('/practitioner-requests/:requestId', ...guards.read(), async (req, re
       federationId, fullName: r.full_name, birthDate: r.birth_date,
       rg: r.rg, cpf: r.cpf, fpktNumberClaimed: r.fpkt_number_claimed,
     });
-    return res.json({ ...shapeDetail(r), possible_matches: matches });
+    const shaped = { ...shapeDetail(r), possible_matches: matches };
+    // Campos do botão "Avisar no WhatsApp" (item wa.me pós-rejeição) — só
+    // preenchidos quando já rejeitada; a federação pode voltar aqui depois,
+    // não só no calor do momento do reject.
+    if (shaped.status !== 'rejeitada') return res.json(shaped);
+    const dojoFields = await dojoWhatsappFieldsBestEffort(r.dojo_id);
+    return res.json({ ...shaped, ...dojoFields });
   } catch (e) {
     if (e.code === '42P01') return res.status(404).json({ error: 'Solicitação não encontrada', code: 'NOT_FOUND' });
     console.error('[karatePractitionerRequestsAdmin] detail error:', e.message);
@@ -686,11 +774,19 @@ router.post('/practitioner-requests/:requestId/reject', ...guards.staffWrite(), 
     // corrigido mesmo se ele já tinha "fechado" o quadro antes.
     const dojoAccess = await reopenDojoRosterAccessBestEffort(row.dojo_id);
 
+    // Botão "Avisar no WhatsApp" (wa.me simples, click-to-chat — a
+    // federação decide se clica; nada automático). Telefone do DOJÔ
+    // (celular > fixo) + a MESMA URL do link do sensei que acabou de ser
+    // reaberto acima, pra mensagem carregar direto pra onde ele corrige.
+    // Best-effort/aditivo: nunca derruba a rejeição, que já foi persistida.
+    const dojoFields = await dojoWhatsappFieldsBestEffort(row.dojo_id);
+
     return res.json({
       request_id: requestId,
       status: 'rejeitada',
       reject_reason: reason,
       dojo_access_reopened: dojoAccess.reopened,
+      ...dojoFields,
     });
   } catch (e) {
     if (e.code === '42P01') return res.status(404).json({ error: 'Solicitação não encontrada', code: 'NOT_FOUND' });
