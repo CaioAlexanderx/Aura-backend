@@ -48,6 +48,27 @@ function normalizeFpktNumber(v) {
   return String(v || '').trim();
 }
 
+// ⚠️ BUGFIX P0 (15/07/2026) — a fila da federação retornava 500 para QUALQUER
+// solicitação com data de nascimento (ou seja, ~96% dos casos reais).
+//
+// Causa: uma coluna `date` do Postgres chega aqui pelo driver `pg` como OBJETO
+// Date do JS, não como string. `String(dateObj).slice(0,10)` produz "Sun Apr 17"
+// (Date.prototype.toString()), não "2011-04-18" — o Postgres rejeitava o cast
+// `$4::date` e a query estourava. Pior: além de quebrar, o toString() usa o fuso
+// LOCAL, então até quando "funcionasse" perderia um dia (2011-04-18 → "Apr 17").
+//
+// Esta função é a fonte única de normalização de data neste módulo. Não volte a
+// usar String(x).slice(0,10) em coluna de data vinda do banco.
+function toIsoDate(v) {
+  if (!v) return null;
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    return v.toISOString().slice(0, 10);   // UTC — a coluna é `date`, sem fuso
+  }
+  const s = String(v).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
 // Chave de deduplicação/idempotência da SOLICITAÇÃO — dojô + nome
 // normalizado + nascimento (nascimento cobre 96% dos casos; quando ausente,
 // a chave ainda funciona, só fica mais permissiva a colisão de nomes iguais
@@ -55,7 +76,7 @@ function normalizeFpktNumber(v) {
 // usar um nome levemente diferente, nunca perda de dado).
 function buildDedupKey(fullName, birthDate) {
   const namePart = normalizeName(fullName);
-  const datePart = birthDate ? String(birthDate).slice(0, 10) : '';
+  const datePart = toIsoDate(birthDate) || '';
   return `${namePart}|${datePart}`;
 }
 
@@ -68,7 +89,7 @@ async function findPossibleMatches(db, { federationId, fullName, birthDate, rg, 
   const fpkt = fpktNumberClaimed ? normalizeFpktNumber(fpktNumberClaimed) : null;
   const rgDigits = digitsOnly(rg);
   const cpfDigits = digitsOnly(cpf);
-  const birth = birthDate ? String(birthDate).slice(0, 10) : null;
+  const birth = toIsoDate(birthDate);
 
   if (!fpkt && !birth && !rgDigits && !cpfDigits) {
     // Sem nenhuma chave forte pra buscar — nome sozinho não basta (regra
@@ -106,7 +127,7 @@ async function findPossibleMatches(db, { federationId, fullName, birthDate, rg, 
       score += SCORE.fpkt_number;
     }
 
-    const candidateBirth = r.birth_date ? String(r.birth_date).slice(0, 10) : null;
+    const candidateBirth = toIsoDate(r.birth_date);
     const candidateName = normalizeName(r.name);
     if (birth && candidateBirth === birth && normalizedTargetName && candidateName === normalizedTargetName) {
       matchedOn.push('name_birthdate');
