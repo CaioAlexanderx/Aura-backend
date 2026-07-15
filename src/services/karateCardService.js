@@ -557,6 +557,247 @@ async function issueBatch({ federation_id, issued_by, only_missing = true }) {
   return { eligible: cand.rows.length, issued, errors };
 }
 
+
+// ============================================================
+// Fila de impressão (print_status: to_print | printed | delivered)
+// ------------------------------------------------------------
+// Decisão de arquitetura (Caio, sisteminha de gestão de impressão):
+// reaproveita karate_membership_cards (migration 233) — NÃO cria tabela
+// paralela. Cada LINHA da tabela já é "uma emissão física"; a fila de
+// impressão é só um estado adicional sobre essa mesma linha.
+//
+// Três etapas, só andam para frente por ação explícita:
+//   'to_print'  → emissão entra aqui automaticamente (issueCard/issueBatch)
+//   'printed'   → clique em "Imprimir selecionadas" (markPrinted) — NÃO é
+//                 prova de impressão real (papel pode faltar, diálogo pode
+//                 ser cancelado) — por isso existe returnToQueue.
+//   'delivered' → SÓ confirmação manual da federação (markDelivered).
+//
+// returnToQueue ("não saiu" / "reimprimir perdeu-rasgou-graduou") devolve
+// para 'to_print' sem tocar em print_count — só uma nova passagem por
+// markPrinted conta como via nova. Isso é histórico de vias sem tabela de
+// auditoria separada: print_count + printed_at já bastam para a copy
+// "3ª via, reimpressa em 12/07" (formatada no frontend — tz-safe).
+//
+// Todas as mutações são em LOTE (ids[]) e retornam por-item {id, ok, error}
+// — lote nunca perde ninguém silenciosamente (itens de outra federação ou
+// já revogados voltam como error, não travam o restante).
+// ============================================================
+
+const PRINT_STATUSES = ['to_print', 'printed', 'delivered'];
+
+function orderColumnForQueue(status) {
+  if (status === 'printed') return 'kc.printed_at';
+  if (status === 'delivered') return 'kc.delivered_at';
+  return 'kc.issued_at';
+}
+
+/**
+ * listPrintQueue — cartões ATIVOS de uma etapa da fila, agrupáveis por dojô
+ * no frontend (devolve dojo_id/dojo_name por item + breakdown de contagem
+ * por dojô nesta etapa). Ordenação: "gerado por último, visualizado
+ * primeiro" — mais recente no topo pelo timestamp que fez o cartão ENTRAR
+ * nesta etapa (issued_at em to_print, printed_at em printed, delivered_at
+ * em delivered), regra explícita do Caio, válida nas três abas.
+ */
+async function listPrintQueue({ federation_id, print_status = 'to_print', dojo_id, search, page = 1, pageSize = 50 }) {
+  const status = PRINT_STATUSES.includes(print_status) ? print_status : 'to_print';
+  const conds = ['kc.federation_id = $1', "kc.status = 'active'", 'kc.print_status = $2'];
+  const params = [federation_id, status];
+  let n = 3;
+  if (dojo_id) { conds.push(`kc.dojo_id = $${n}`); params.push(dojo_id); n++; }
+  if (search) {
+    conds.push(`(cu.name ILIKE $${n} OR COALESCE(cu.karate_registration_number, kc.card_number) ILIKE $${n})`);
+    params.push(`%${search}%`);
+    n++;
+  }
+  const where = `WHERE ${conds.join(' AND ')}`;
+  const orderCol = orderColumnForQueue(status);
+  const pageClamped = Math.max(1, page);
+  const pageSizeClamped = Math.min(500, Math.max(1, pageSize));
+
+  const rows = await db.query(
+    `SELECT kc.id, kc.student_id, kc.print_status, kc.printed_at, kc.delivered_at,
+            kc.print_count, kc.issued_at, kc.is_minor, kc.dojo_id,
+            COALESCE(cu.karate_registration_number, kc.card_number)      AS card_number,
+            COALESCE(cb.belt_name, kc.belt_name_snapshot)                AS belt_name,
+            COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot) AS dojo_name,
+            cu.name AS student_name
+     FROM karate_membership_cards kc
+     JOIN customers cu ON cu.id = kc.student_id
+     LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = kc.federation_id
+     LEFT JOIN companies dj ON dj.id = kc.dojo_id
+     ${where}
+     ORDER BY ${orderCol} DESC NULLS LAST, kc.issued_at DESC
+     LIMIT $${n} OFFSET $${n + 1}`,
+    [...params, pageSizeClamped, (pageClamped - 1) * pageSizeClamped]
+  );
+
+  const cnt = await db.query(
+    `SELECT COUNT(*) AS total
+     FROM karate_membership_cards kc
+     JOIN customers cu ON cu.id = kc.student_id
+     ${where}`,
+    params
+  );
+
+  // Contadores da federação inteira (topo da tela: "18 a imprimir · 40
+  // impressas · 380 entregues") — independentes do filtro de dojô/busca.
+  const counterRows = await db.query(
+    `SELECT print_status, COUNT(*) AS n
+     FROM karate_membership_cards
+     WHERE federation_id = $1 AND status = 'active'
+     GROUP BY print_status`,
+    [federation_id]
+  );
+  const counters = { to_print: 0, printed: 0, delivered: 0 };
+  counterRows.rows.forEach((r) => { counters[r.print_status] = parseInt(r.n, 10); });
+
+  // Dojôs presentes NESTA etapa (para o filtro/agrupamento por dojô).
+  const dojoRows = await db.query(
+    `SELECT kc.dojo_id, COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot) AS dojo_name, COUNT(*) AS n
+     FROM karate_membership_cards kc
+     LEFT JOIN companies dj ON dj.id = kc.dojo_id
+     WHERE kc.federation_id = $1 AND kc.status = 'active' AND kc.print_status = $2
+     GROUP BY kc.dojo_id, COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot)
+     ORDER BY dojo_name NULLS LAST`,
+    [federation_id, status]
+  );
+
+  return {
+    page: pageClamped,
+    page_size: pageSizeClamped,
+    total: parseInt(cnt.rows[0].total, 10),
+    print_status: status,
+    counters,
+    dojos: dojoRows.rows.map((d) => ({
+      dojo_id: d.dojo_id,
+      dojo_name: d.dojo_name || 'Sem dojô',
+      count: parseInt(d.n, 10),
+    })),
+    data: rows.rows.map((c) => ({
+      id: c.id,
+      student_id: c.student_id,
+      student_name: c.student_name,
+      card_number: c.card_number,
+      belt_name: c.belt_name,
+      dojo_id: c.dojo_id,
+      dojo_name: c.dojo_name,
+      is_minor: c.is_minor,
+      print_status: c.print_status,
+      issued_at: c.issued_at,
+      printed_at: c.printed_at,
+      delivered_at: c.delivered_at,
+      print_count: c.print_count || 0,
+    })),
+  };
+}
+
+/**
+ * _transitionCards — aplica uma transição de print_status em lote,
+ * validando que cada cartão pertence à federação e está com status='active'.
+ * Nunca lança para o chamador por causa de UM item ruim — devolve
+ * {ok:[], errors:[{id, error}]} para que o lote nunca perca ninguém
+ * silenciosamente (o item ruim aparece explicitamente em errors[]).
+ */
+async function _transitionCards({ federation_id, card_ids, apply }) {
+  const ids = Array.from(new Set((card_ids || []).filter(Boolean)));
+  if (ids.length === 0) {
+    const err = new Error('Nenhum cartão informado');
+    err.code = 'NO_IDS';
+    throw err;
+  }
+
+  const ok = [];
+  const errors = [];
+  for (const id of ids) {
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const cur = await client.query(
+        `SELECT id, print_status FROM karate_membership_cards
+         WHERE id = $1 AND federation_id = $2 AND status = 'active'
+         FOR UPDATE`,
+        [id, federation_id]
+      );
+      if (!cur.rows.length) {
+        await client.query('ROLLBACK');
+        errors.push({ id, error: 'Cartão não encontrado nesta federação (ou revogado)' });
+        continue;
+      }
+      const updated = await apply(client, cur.rows[0]);
+      await client.query('COMMIT');
+      ok.push(updated.id);
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+      errors.push({ id, error: e.message });
+    } finally {
+      client.release();
+    }
+  }
+  return { ok, errors, total: ids.length };
+}
+
+/** markPrinted — "Imprimir selecionadas" move para 'printed' e conta uma via. */
+async function markPrinted({ federation_id, card_ids }) {
+  return _transitionCards({
+    federation_id,
+    card_ids,
+    apply: async (client, row) => {
+      const r = await client.query(
+        `UPDATE karate_membership_cards
+         SET print_status = 'printed', printed_at = NOW(), print_count = print_count + 1, updated_at = NOW()
+         WHERE id = $1
+         RETURNING id`,
+        [row.id]
+      );
+      return r.rows[0];
+    },
+  });
+}
+
+/** markDelivered — confirmação manual da federação (única forma de chegar em 'delivered'). */
+async function markDelivered({ federation_id, card_ids, delivered_by }) {
+  return _transitionCards({
+    federation_id,
+    card_ids,
+    apply: async (client, row) => {
+      const r = await client.query(
+        `UPDATE karate_membership_cards
+         SET print_status = 'delivered', delivered_at = NOW(), delivered_by = $2, updated_at = NOW()
+         WHERE id = $1
+         RETURNING id`,
+        [row.id, delivered_by || null]
+      );
+      return r.rows[0];
+    },
+  });
+}
+
+/**
+ * returnToQueue — "Não saiu / reimprimir" (da etapa 'printed') OU
+ * "Reimprimir" por perda/rasgo/graduação (da etapa 'delivered'). Mesma
+ * ação nos dois casos: volta para 'to_print' SEM alterar print_count
+ * (só a próxima markPrinted conta como via nova).
+ */
+async function returnToQueue({ federation_id, card_ids }) {
+  return _transitionCards({
+    federation_id,
+    card_ids,
+    apply: async (client, row) => {
+      const r = await client.query(
+        `UPDATE karate_membership_cards
+         SET print_status = 'to_print', updated_at = NOW()
+         WHERE id = $1
+         RETURNING id`,
+        [row.id]
+      );
+      return r.rows[0];
+    },
+  });
+}
+
+
 module.exports = {
   issueCard,
   revokeCard,
@@ -567,4 +808,8 @@ module.exports = {
   issueBatch,
   effectiveStatus,
   computeIsMinor,
+  listPrintQueue,
+  markPrinted,
+  markDelivered,
+  returnToQueue,
 };

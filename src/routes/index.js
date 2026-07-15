@@ -255,6 +255,11 @@ router.use('/federation/:id', require('./karateCertificates'));
 //   GET  /federation/:id/practitioners/:practitionerId/card        (read)
 //   GET  /federation/:id/cards                                     (read)
 //   POST /federation/:id/cards/issue-batch                         (adminOnly)
+// Fila de impressão (migration 233 — sisteminha de gestão A imprimir/Impressa/Entregue):
+//   GET  /federation/:id/cards/queue                                (read)
+//   POST /federation/:id/cards/queue/mark-printed                   (staffWrite)
+//   POST /federation/:id/cards/queue/mark-delivered                 (staffWrite)
+//   POST /federation/:id/cards/queue/return-to-queue                (staffWrite)
 router.use('/federation/:id', require('./karateCards'));
 
 // ── AURA KARATÊ — Track E (admin: competições + ranking) ────────
