@@ -211,4 +211,5 @@ module.exports = {
   buildDedupKey,
   findPossibleMatches,
   lookupByFpktNumber,
+  toIsoDate,
 };

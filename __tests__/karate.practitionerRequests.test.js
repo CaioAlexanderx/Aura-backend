@@ -97,7 +97,12 @@ describe('POST /federation/:id/dojo/practitioner-requests', () => {
     request(app)
       .post(`/federation/${FED_ID}/dojo/practitioner-requests`)
       .set('Authorization', 'Bearer ' + dojoToken)
-      .send({ full_name: 'Novo Aluno', birth_date: '2012-03-01', dojo_id: OTHER_DOJO_ID, federation_id: 'fed-outra' })
+      .send({
+        full_name: 'Novo Aluno', birth_date: '1990-03-01', sex: 'M', cpf: '11111111111', rg: '123456',
+        phone: '11999999999', email: 'novo.aluno@example.com', claimed_belt: 'Branca',
+        zip_code: '01000-000', street: 'Rua Teste', number: '100', neighborhood: 'Centro', city: 'São Paulo', state: 'SP',
+        dojo_id: OTHER_DOJO_ID, federation_id: 'fed-outra',
+      })
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(201);
@@ -124,7 +129,11 @@ describe('POST /federation/:id/dojo/practitioner-requests', () => {
     request(app)
       .post(`/federation/${FED_ID}/dojo/practitioner-requests`)
       .set('Authorization', 'Bearer ' + dojoToken)
-      .send({ full_name: 'Aluno Repetido', birth_date: '2011-05-05' })
+      .send({
+        full_name: 'Aluno Repetido', birth_date: '1991-05-05', sex: 'F', cpf: '22222222222', rg: '654321',
+        phone: '11988888888', email: 'aluno.repetido@example.com', claimed_belt: 'Branca',
+        zip_code: '01000-000', street: 'Rua Teste', number: '200', neighborhood: 'Centro', city: 'São Paulo', state: 'SP',
+      })
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(200);

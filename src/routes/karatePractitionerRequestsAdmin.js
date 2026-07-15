@@ -241,6 +241,7 @@ function shapeDetail(r) {
     email: r.email || null,
     claimed_belt: r.claimed_belt || null,
     fpkt_number_claimed: r.fpkt_number_claimed || null,
+    photo_url: r.photo_url || null,
     payload: r.payload || {},
     requested_by_channel: r.requested_by_channel || null,
     requested_by_label: r.requested_by_label || null,
@@ -549,16 +550,25 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
     }
 
     const payload = reqRow.payload || {};
+    // Item 9 (revisão Atualização Cadastral, 15/07/2026): a foto anexada
+    // na solicitação (karate_practitioner_requests.photo_url, migration
+    // 232) vira a foto do praticante na aprovação — mesma coluna que toda
+    // foto de praticante já usa (karate_photo_url), sem mecanismo novo.
+    // reqRow.photo_url vem undefined (não erro) se a migration 232 ainda
+    // não rodou (SELECT * não falha por coluna ausente na SELECT-list) —
+    // '|| null' cobre esse caso sem quebrar a aprovação.
     const insertRes = await client.query(
       `INSERT INTO customers
          (company_id, name, cpf_cnpj, rg, birth_date, email, phone,
           is_student, federation_id, dojo_id, karate_registration_number,
           street, number, complement, neighborhood, city, state, zip_code,
           guardian_name, guardian_cpf, guardian_phone, guardian_relationship,
+          karate_photo_url,
           is_active, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7, true, $1,$8,$9,
                $10,$11,$12,$13,$14,$15,$16,
                $17,$18,$19,$20,
+               $21,
                true, NOW(), NOW())
        RETURNING id, name, karate_registration_number, dojo_id`,
       [
@@ -567,6 +577,7 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
         payload.street || null, payload.number || null, payload.complement || null,
         payload.neighborhood || null, payload.city || null, payload.state || null, payload.zip_code || null,
         payload.guardian_name || null, payload.guardian_cpf || null, payload.guardian_phone || null, payload.guardian_relationship || null,
+        reqRow.photo_url || null,
       ]
     );
     const practitioner = insertRes.rows[0];

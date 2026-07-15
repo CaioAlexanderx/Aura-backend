@@ -221,6 +221,7 @@ describe('PATCH /public/roster-update/:token/practitioners/:studentId — inativ
     mockClient.query
       .mockResolvedValueOnce({}) // BEGIN
       .mockResolvedValueOnce({ rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, token_expires_at: FUTURE }] }) // token FOR UPDATE
+      .mockResolvedValueOnce({ rows: [{ name: 'João', is_active: true }] }) // valor ANTIGO (item 8 — diff antes/depois)
       .mockResolvedValueOnce({ rows: [{ id: 'pract-1', name: 'João', phone: '119999', email: null, is_active: false }] }) // UPDATE customers
       .mockResolvedValueOnce({}) // SAVEPOINT sp_granular_event
       .mockResolvedValueOnce({}) // INSERT karate_dojo_roster_events
@@ -240,7 +241,7 @@ describe('PATCH /public/roster-update/:token/practitioners/:studentId — inativ
         expect(res.status).toBe(200);
         expect(res.body.is_active).toBe(false);
 
-        const updateCall = mockClient.query.mock.calls[2];
+        const updateCall = mockClient.query.mock.calls[3];
         expect(updateCall[0]).toMatch(/UPDATE customers SET is_active = \$2, updated_at = NOW\(\)/);
         expect(updateCall[0]).toMatch(/WHERE id = \$1 AND dojo_id = \$3/);
         // Params: [studentId, is_active, dojoId] — só ESTE id, escopado ao dojô do token.
@@ -277,9 +278,18 @@ describe('GET /public/roster-update/:token — ordenação por consequência', (
       // e fora da ordem de prioridade, para provar que o handler reordena.
       .mockResolvedValueOnce({
         rows: [
-          { id: 'p-c', name: 'Zeca Comum', karate_registration_number: 'R3', is_active: true, phone: '119999', email: 'zeca@x.com', belt_name: 'Amarela', financeiro: 'nao_aplicavel', is_black_belt: false },
-          { id: 'p-a', name: 'Ana Preta', karate_registration_number: 'R1', is_active: true, phone: '119999', email: 'ana@x.com', belt_name: 'Preta', financeiro: 'atrasado', is_black_belt: true },
-          { id: 'p-b', name: 'Bruno SemContato', karate_registration_number: 'R2', is_active: true, phone: null, email: null, belt_name: 'Verde', financeiro: 'nao_aplicavel', is_black_belt: false },
+          { id: 'p-c', name: 'Zeca Comum', karate_registration_number: 'R3', is_active: true, phone: '119999', email: 'zeca@x.com',
+            birth_date: '2000-01-01', cpf_cnpj: '11111111111', rg: '123456', street: 'Rua A', city: 'São Paulo', state: 'SP',
+            belt_name: 'Amarela', financeiro: 'nao_aplicavel', is_black_belt: false },
+          { id: 'p-a', name: 'Ana Preta', karate_registration_number: 'R1', is_active: true, phone: '119999', email: 'ana@x.com',
+            birth_date: '1990-01-01', cpf_cnpj: '22222222222', rg: '654321', street: 'Rua B', city: 'São Paulo', state: 'SP',
+            belt_name: 'Preta', financeiro: 'atrasado', is_black_belt: true },
+          // grupo b — item 4: SÓ contato falta aqui de propósito (nascimento/cpf/rg/
+          // endereço presentes) pra provar que a régua de completude nova (item 4)
+          // não infla `missing` além do que o teste espera.
+          { id: 'p-b', name: 'Bruno SemContato', karate_registration_number: 'R2', is_active: true, phone: null, email: null,
+            birth_date: '1995-01-01', cpf_cnpj: '33333333333', rg: '789012', street: 'Rua C', city: 'São Paulo', state: 'SP',
+            belt_name: 'Verde', financeiro: 'nao_aplicavel', is_black_belt: false },
         ],
       })
       // ensureSelfServiceUrl: UPDATE idempotente (já existia um token válido)

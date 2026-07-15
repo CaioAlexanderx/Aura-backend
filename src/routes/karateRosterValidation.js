@@ -347,4 +347,121 @@ router.get('/:dojoId/roster-validation', ...guards.read(), async (req, res) => {
   }
 });
 
+
+// ── POST /federation/:id/dojos/:dojoId/revoke-roster-update ────────────
+// Item 1 (revisão Atualização Cadastral, 15/07/2026): a federação pediu
+// um "X" pra excluir/revogar o link quando não quiser mais que o dojô
+// acesse — ex.: link vazado, ou o ciclo de atualização foi encerrado
+// manualmente. Invalida os DOIS tokens do dojô (sensei e auto-atendimento
+// do aluno — a UI mostra os dois juntos no mesmo banner/card, revogar só
+// um deixaria o outro ativo por engano) fazendo *_expires_at = NOW():
+// mesmo efeito de "expirado por tempo", sem apagar histórico
+// (requested_at/validated_at continuam intactos — só o ACESSO morre).
+// Nunca deleta a linha (perderia o histórico de quando foi solicitado/
+// validado).
+router.post('/:dojoId/revoke-roster-update', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, dojoId } = req.params;
+  const actorId = (req.user && req.user.id) || null;
+
+  try {
+    const upd = await db.query(
+      `UPDATE karate_dojo_roster_validation
+          SET token_expires_at = NOW(),
+              self_service_token_expires_at = NOW(),
+              updated_at = NOW()
+        WHERE dojo_id = $1 AND federation_id = $2
+        RETURNING dojo_id`,
+      [dojoId, federationId]
+    );
+    if (!upd.rows.length) {
+      return res.status(404).json({ error: 'Nenhuma solicitação de atualização cadastral encontrada para este dojô', code: 'NOT_FOUND' });
+    }
+
+    try {
+      await db.query(
+        `INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
+         VALUES ($1, $2, 'roster_link_revoked', '[]'::jsonb, $3)`,
+        [dojoId, federationId, actorId]
+      );
+    } catch (e) {
+      if (e.code !== '42P01') throw e;
+      console.warn('[karateRosterValidation] karate_dojo_roster_events ausente (schema pendente):', e.message);
+    }
+
+    res.json({ revoked: true });
+  } catch (err) {
+    if (err.code === '42P01') {
+      console.warn('[karateRosterValidation] karate_dojo_roster_validation ausente (schema pendente):', err.message);
+      return res.status(503).json({ error: 'Validação de quadro ainda não disponível (migration pendente)', code: 'SCHEMA_PENDING' });
+    }
+    if (err.code === '42703') {
+      // Migration 225 pendente (self_service_token_expires_at ausente) —
+      // revoga só o token do sensei em vez de 500.
+      try {
+        const upd2 = await db.query(
+          `UPDATE karate_dojo_roster_validation
+              SET token_expires_at = NOW(), updated_at = NOW()
+            WHERE dojo_id = $1 AND federation_id = $2
+            RETURNING dojo_id`,
+          [dojoId, federationId]
+        );
+        if (!upd2.rows.length) {
+          return res.status(404).json({ error: 'Nenhuma solicitação de atualização cadastral encontrada para este dojô', code: 'NOT_FOUND' });
+        }
+        return res.json({ revoked: true });
+      } catch (e2) {
+        console.error('[karateRosterValidation] revoke fallback error:', e2.message);
+        return res.status(500).json({ error: 'Erro ao revogar o link' });
+      }
+    }
+    console.error('[karateRosterValidation] revoke-roster-update error:', err.message);
+    res.status(500).json({ error: 'Erro ao revogar o link' });
+  }
+});
+
+// ── GET /federation/:id/dojos/:dojoId/roster-events ─────────────────────
+// Item 8 (revisão Atualização Cadastral, 15/07/2026): a federação só via
+// "atualizações concluídas" no dojô, nunca O QUE mudou. karate_dojo_
+// roster_events já registrava eventos (o PATCH granular do portal grava
+// `practitioner_updated`/`practitioner_reactivated`/`practitioner_
+// inactivated` com `affected: [{ student_id, student_name, fields,
+// changes: [{field, from, to}], source }]` desde esta revisão — ver
+// karateRosterPortalPublic.js). Este GET expõe isso pronto pra tela do
+// dojô: achata cada `affected[]` de cada evento numa linha "o que mudou",
+// mais recente primeiro. Eventos sem `changes` (ex.: solicitação de
+// praticante novo, quadro confirmado) ainda aparecem, só sem a lista de
+// campo-a-campo.
+router.get('/:dojoId/roster-events', ...guards.read(), async (req, res) => {
+  const { id: federationId, dojoId } = req.params;
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+
+  try {
+    const { rows } = await db.query(
+      `SELECT id, event, affected, actor_id, created_at
+         FROM karate_dojo_roster_events
+        WHERE dojo_id = $1 AND federation_id = $2
+        ORDER BY created_at DESC
+        LIMIT $3`,
+      [dojoId, federationId, limit]
+    );
+
+    const data = rows.map((r) => ({
+      id: r.id,
+      event: r.event,
+      created_at: r.created_at,
+      actor_id: r.actor_id || null,
+      affected: Array.isArray(r.affected) ? r.affected : [],
+    }));
+
+    res.json({ data });
+  } catch (err) {
+    if (err.code === '42P01') {
+      console.warn('[karateRosterValidation] karate_dojo_roster_events ausente (schema pendente):', err.message);
+      return res.json({ data: [] });
+    }
+    console.error('[karateRosterValidation] roster-events error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar atualizações do dojô' });
+  }
+});
+
 module.exports = router;
