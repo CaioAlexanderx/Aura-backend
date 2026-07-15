@@ -63,7 +63,12 @@ describe('POST /public/roster-update/:token/practitioner — H2: vira solicitaç
 
     request(app)
       .post(`/public/roster-update/${TOKEN}/practitioner`)
-      .send({ name: 'Novo Aluno', phone: '11999998888', belt_level: '5', belt_name: 'Faixa Amarela' })
+      .send({
+        name: 'Novo Aluno', birth_date: '1990-01-01', phone: '11999998888', email: 'novo.aluno@example.com',
+        belt_level: '5', belt_name: 'Faixa Amarela',
+        sex: 'M', cpf: '11111111111', rg: '123456', claimed_belt: 'Faixa Amarela',
+        zip_code: '01000-000', street: 'Rua Teste', number: '100', neighborhood: 'Centro', city: 'São Paulo', state: 'SP',
+      })
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(201);
@@ -103,7 +108,11 @@ describe('POST /public/roster-update/:token/practitioner — H2: vira solicitaç
 
     request(app)
       .post(`/public/roster-update/${TOKEN}/practitioner`)
-      .send({ name: 'Aluno Repetido', email: 'x@x.com', belt_level: '3' })
+      .send({
+        name: 'Aluno Repetido', birth_date: '1991-02-02', email: 'x@x.com', phone: '11988887777', belt_level: '3',
+        sex: 'M', cpf: '11111111111', rg: '123456', claimed_belt: 'Faixa Amarela',
+        zip_code: '01000-000', street: 'Rua Teste', number: '100', neighborhood: 'Centro', city: 'São Paulo', state: 'SP',
+      })
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(200);
@@ -125,7 +134,11 @@ describe('POST /public/roster-update/:token/practitioner — H2: vira solicitaç
 
     request(app)
       .post(`/public/roster-update/${TOKEN}/practitioner`)
-      .send({ name: 'Aluno Tarde', phone: '11988887777', belt_level: '1' })
+      .send({
+        name: 'Aluno Tarde', birth_date: '1992-03-03', phone: '11988887777', email: 'aluno.tarde@example.com', belt_level: '1',
+        sex: 'M', cpf: '11111111111', rg: '123456', claimed_belt: 'Faixa Amarela',
+        zip_code: '01000-000', street: 'Rua Teste', number: '100', neighborhood: 'Centro', city: 'São Paulo', state: 'SP',
+      })
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(410);
@@ -312,7 +325,7 @@ describe('GET /public/roster-update/:token/practitioner-requests', () => {
         rows: [
           {
             id: 'req-001', status: 'aprovada', resolution: 'criacao', reject_reason: null,
-            full_name: 'Aluno Aprovado', birth_date: '2015-01-01', claimed_belt: 'Faixa Amarela',
+            full_name: 'Aluno Aprovado', birth_date: '1990-01-01', claimed_belt: 'Faixa Amarela',
             fpkt_number_claimed: null, resolved_practitioner_id: 'pract-1',
             created_at: '2026-07-01T00:00:00Z', resolved_at: '2026-07-05T00:00:00Z',
             resolved_fpkt_number: '55555', resolved_practitioner_name: 'Aluno Aprovado',

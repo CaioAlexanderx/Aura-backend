@@ -85,7 +85,9 @@ const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const db = require('../config/database');
 const { parseCSVLine } = require('../services/karateService');
-const { buildDedupKey, lookupByFpktNumber, normalizeFpktNumber } = require('../services/karatePractitionerDedup');
+const { buildDedupKey, lookupByFpktNumber, normalizeFpktNumber, toIsoDate } = require('../services/karatePractitionerDedup');
+const { validatePractitionerRequestPayload } = require('../services/karatePractitionerRequestValidation');
+const { uploadToR2 } = require('../utils/r2Storage');
 
 let multer;
 try { multer = require('multer'); } catch (_) { multer = null; }
@@ -135,6 +137,20 @@ const practitionerCreateLimiter = rateLimit({
 // Mesma base de karateRosterValidation.js (APP_URL, default
 // https://app.getaura.com.br) — mantém as duas URLs (sensei/self-service)
 // consistentes entre os dois arquivos.
+// Upload de foto na solicitação (item 9) — mesmo perfil de abuso do
+// practitionerCreateLimiter (base64 de até 5MB, canal público token+IP),
+// teto um pouco mais folgado porque um mesmo dojô pode reenviar a foto
+// (qualidade ruim, tentar de novo) sem que isso seja abuso.
+const photoUploadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: keyByTokenAndIp,
+  skip: () => isTestEnv(),
+  message: { error: 'Muitos envios de foto para este link. Tente novamente em alguns minutos.', code: 'RATE_LIMITED' },
+});
+
 const APP_URL = process.env.APP_URL || 'https://app.getaura.com.br';
 
 function rosterSelfServiceUrl(token) {
@@ -231,12 +247,39 @@ async function resolveToken(token, { touch = true } = {}) {
 //                 (fonte única: karate_member_standing.financeiro — não
 //                 reimplementa a regra); 'b' ativo sem NENHUM contato;
 //                 'c' o resto. Ordenação/contagens do item 2 usam isso.
+// Item 4 (revisão Atualização Cadastral, 15/07/2026) — BUG real do Caio:
+// apagou nascimento/e-mail/celular, preencheu só e-mail e celular, e o
+// sistema marcou como OK — porque "missing" só olhava telefone/e-mail.
+// "Todos os campos", como decidido aqui: os campos que o PORTAL edita
+// (PORTAL_EDITABLE_FIELDS abaixo) menos `complement`, que é modificador
+// opcional do endereço (nem toda casa tem apto/fundos) — o mesmo corte já
+// usado pela grade de completude do front (COMPLETENESS_COLUMNS em
+// app/karate/roster-update/[token].tsx: nascimento, CPF, RG, telefone,
+// e-mail, endereço). `endereco` é um grupo único (rua+cidade+UF — mesmo
+// mínimo que a grade já usa) para não punir número/bairro/CEP ausentes
+// isoladamente. Responsável fica de fora: não é editável por este PATCH
+// (segue somente leitura no portal, ver FullRecordPanel), exigi-lo aqui
+// deixaria o praticante permanentemente "incompleto" sem nenhum jeito de
+// resolver pelo link.
 function classifyPraticante(row) {
   const hasPhone = !!(row.phone && String(row.phone).trim());
   const hasEmail = !!(row.email && String(row.email).trim());
+  const hasBirthDate = !!row.birth_date;
+  const hasCpf = !!(row.cpf_cnpj && String(row.cpf_cnpj).trim());
+  const hasRg = !!(row.rg && String(row.rg).trim());
+  const hasAddress = !!(
+    row.street && String(row.street).trim() &&
+    row.city && String(row.city).trim() &&
+    row.state && String(row.state).trim()
+  );
+
   const missing = [];
   if (!hasPhone) missing.push('telefone');
   if (!hasEmail) missing.push('email');
+  if (!hasBirthDate) missing.push('nascimento');
+  if (!hasCpf) missing.push('cpf');
+  if (!hasRg) missing.push('rg');
+  if (!hasAddress) missing.push('endereco');
 
   const isActive = row.is_active !== false;
   const isBlackBeltOverdue = isActive && row.is_black_belt === true && row.financeiro === 'atrasado';
@@ -257,7 +300,8 @@ const GROUP_ORDER = { a: 0, b: 1, c: 2 };
 async function fetchQuadro(dojoId, federationId) {
   const { rows } = await db.query(
     `SELECT c.id, c.name, c.karate_registration_number, c.is_active,
-            c.phone, c.email, cb.belt_name,
+            c.phone, c.email, c.birth_date, c.cpf_cnpj, c.rg, c.street, c.city, c.state,
+            cb.belt_name,
             kms.financeiro, COALESCE(kms.is_black_belt, false) AS is_black_belt
      FROM customers c
      LEFT JOIN karate_current_belt cb ON cb.student_id = c.id AND cb.federation_id = $2
@@ -405,6 +449,13 @@ router.patch('/:token/practitioners/:studentId', async (req, res) => {
   const params = [studentId];
   let n = 2;
   const changedFields = [];
+  // Item 8 (revisão Atualização Cadastral, 15/07/2026): a federação pedia
+  // "o que o sensei mudou" e só via "concluído" — o evento gravava os
+  // NOMES dos campos alterados, nunca o valor antes/depois. `newValueByCol`
+  // guarda o valor novo por coluna (o valor ANTIGO vem de uma leitura antes
+  // do UPDATE, abaixo) para montar o diff exposto em
+  // GET /federation/:id/dojos/:dojoId/roster-events (karateRosterValidation.js).
+  const newValueByCol = {};
 
   for (const [key, col] of Object.entries(PORTAL_EDITABLE_FIELDS)) {
     if (Object.prototype.hasOwnProperty.call(body, key)) {
@@ -414,6 +465,7 @@ router.patch('/:token/practitioners/:studentId', async (req, res) => {
       params.push(val);
       n++;
       changedFields.push(key);
+      newValueByCol[col] = val;
     }
   }
 
@@ -426,6 +478,7 @@ router.patch('/:token/practitioners/:studentId', async (req, res) => {
     params.push(isActiveValue);
     n++;
     changedFields.push('is_active');
+    newValueByCol.is_active = isActiveValue;
   }
 
   if (!setClauses.length) {
@@ -457,12 +510,27 @@ router.patch('/:token/practitioners/:studentId', async (req, res) => {
     params.push(dojoId);
     const dojoParamIdx = params.length;
 
+    // Valor ANTIGO das colunas alteradas — lido ANTES do UPDATE, na mesma
+    // transação (já estamos com a linha do token sob FOR UPDATE, sem
+    // corrida possível entre a leitura e a escrita abaixo). Alimenta o
+    // diff do evento de auditoria (item 8) — sem isso a federação só via
+    // QUE algo mudou, nunca de que valor para qual.
+    const changedCols = Object.keys(newValueByCol);
+    let oldRow = {};
+    if (changedCols.length) {
+      const oldRes = await client.query(
+        `SELECT name, ${changedCols.join(', ')} FROM customers WHERE id = $1 AND dojo_id = $2`,
+        [studentId, dojoId]
+      );
+      oldRow = oldRes.rows[0] || {};
+    }
+
     // ESCOPO: só acerta praticante do dojô deste token (mesmo padrão do
     // POST /:token acima) — nunca aceita dojo_id/federation_id do body.
     const updateRes = await client.query(
       `UPDATE customers SET ${setClauses.join(', ')}, updated_at = NOW()
        WHERE id = $1 AND dojo_id = $${dojoParamIdx}
-       RETURNING id, name, phone, email, is_active`,
+       RETURNING id, name, phone, email, is_active, birth_date, cpf_cnpj, rg, street, city, state`,
       params
     );
     if (!updateRes.rows.length) {
@@ -470,6 +538,27 @@ router.patch('/:token/practitioners/:studentId', async (req, res) => {
       return res.status(404).json({ error: 'Praticante não encontrado neste dojô', code: 'NOT_FOUND' });
     }
     const updated = updateRes.rows[0];
+
+    // Diff antes/depois por campo (item 8) — usa o NOME do campo do
+    // PATCH (ex.: "cpf", "birth_date"), não a coluna SQL, pra bater com o
+    // que a UI já rotula (MISSING_LABEL/EditFieldRow no front). birth_date
+    // vem do driver pg como objeto Date — nunca interpolar/comparar direto
+    // (armadilha conhecida, ver CLAUDE.md: String(dateObj) vira "Sun Apr
+    // 17", não "2011-04-18"); toIsoDate (karatePractitionerDedup.js) é a
+    // fonte única de normalização de data já usada no resto do backend.
+    const normalizeForDiff = (col, v) => (col === 'birth_date' ? toIsoDate(v) : (v === undefined ? null : v));
+    const changes = [];
+    for (const [key, col] of Object.entries(PORTAL_EDITABLE_FIELDS)) {
+      if (!Object.prototype.hasOwnProperty.call(newValueByCol, col)) continue;
+      const from = normalizeForDiff(col, oldRow[col]);
+      const to = normalizeForDiff(col, newValueByCol[col]);
+      if (from !== to) changes.push({ field: key, from, to });
+    }
+    if (isActiveProvided) {
+      const from = oldRow.is_active !== false;
+      const to = isActiveValue;
+      if (from !== to) changes.push({ field: 'is_active', from, to });
+    }
 
     // Auditoria — best-effort via SAVEPOINT (mesmo padrão dos demais
     // endpoints deste arquivo). Regra invadiável: inativar aqui NUNCA gera
@@ -484,7 +573,17 @@ router.patch('/:token/practitioners/:studentId', async (req, res) => {
       await client.query(
         `INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
          VALUES ($1, $2, $3, $4::jsonb, NULL)`,
-        [dojoId, federationId, eventName, JSON.stringify([{ student_id: studentId, fields: changedFields, source: 'sensei_portal' }])]
+        [dojoId, federationId, eventName, JSON.stringify([{
+          student_id: studentId,
+          student_name: oldRow.name || updated.name || null,
+          fields: changedFields,
+          // Item 8: antes/depois por campo — a federação pedia isso
+          // explicitamente ("ela precisa ver o que o sensei mudou, de
+          // que valor para qual, quando"); `created_at` da própria linha
+          // já cobre o "quando".
+          changes,
+          source: 'sensei_portal',
+        }])]
       );
       await client.query('RELEASE SAVEPOINT sp_granular_event');
     } catch (e) {
@@ -517,12 +616,21 @@ router.patch('/:token/practitioners/:studentId', async (req, res) => {
     // precisar de um novo GET do quadro inteiro).
     let progress = null;
     try {
+      // Item 4: mesma régua de completude de classifyPraticante (todos os
+      // campos que o portal edita, exceto complement — endereço é
+      // rua+cidade+UF, mesmo mínimo da grade de completude do front).
       const q = await db.query(
         `SELECT COUNT(*) FILTER (WHERE is_active)::int AS total,
                 COUNT(*) FILTER (
                   WHERE is_active
                     AND phone IS NOT NULL AND btrim(phone) <> ''
                     AND email IS NOT NULL AND btrim(email) <> ''
+                    AND birth_date IS NOT NULL
+                    AND cpf_cnpj IS NOT NULL AND btrim(cpf_cnpj) <> ''
+                    AND rg IS NOT NULL AND btrim(rg) <> ''
+                    AND street IS NOT NULL AND btrim(street) <> ''
+                    AND city IS NOT NULL AND btrim(city) <> ''
+                    AND state IS NOT NULL AND btrim(state) <> ''
                 )::int AS resolved
          FROM customers WHERE dojo_id = $1 AND is_guest = false`,
         [dojoId]
@@ -726,6 +834,18 @@ router.post('/:token/practitioner', practitionerCreateLimiter, async (req, res) 
     source: 'roster_portal_public_request',
   };
 
+  // Item 6 (revisão Atualização Cadastral, 15/07/2026): mesma validação do
+  // canal autenticado (karateDojoPractitionerRequests.js) — TODOS os
+  // campos da ficha obrigatórios, validado no BACKEND (não só no front).
+  const validationErrors = validatePractitionerRequestPayload(payload);
+  if (validationErrors.length) {
+    return res.status(422).json({
+      error: validationErrors[0],
+      errors: validationErrors,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -833,6 +953,73 @@ router.post('/:token/practitioner', practitionerCreateLimiter, async (req, res) 
   }
 });
 
+// ── POST /public/roster-update/:token/practitioner/:requestId/photo ──
+// Item 9 (revisão Atualização Cadastral, 15/07/2026): foto do praticante
+// novo, pelo MESMO canal público que abre a solicitação — reusa
+// uploadToR2 (mesmo mecanismo de karatePractitioners.js/
+// karateDojoPractitionerRequests.js, nenhum upload novo inventado). O
+// portal público NÃO tem JWT (é token-gated, como todo o resto deste
+// arquivo) — por isso este endpoint fica AQUI, escopado ao token/dojô,
+// em vez do endpoint autenticado guards.staffWrite() de
+// karatePractitioners.js (que exige um customer já existente e sessão de
+// federação — nenhum dos dois existe no fluxo do sensei sem login).
+const PHOTO_ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+router.post('/:token/practitioner/:requestId/photo', photoUploadLimiter, async (req, res) => {
+  const token = req.params.token;
+  const { requestId } = req.params;
+  const { content, content_type } = req.body || {};
+
+  if (!content || typeof content !== 'string' || !content.trim()) {
+    return res.status(400).json({ error: 'Campo content (imagem em base64) é obrigatório', code: 'VALIDATION_ERROR' });
+  }
+  const mime = ((content_type || 'image/jpeg') + '').toLowerCase().split(';')[0].trim();
+  if (!PHOTO_ALLOWED_TYPES.includes(mime)) {
+    return res.status(400).json({
+      error: 'Tipo de imagem não suportado: ' + mime + '. Use image/jpeg, image/png ou image/webp.',
+      code: 'INVALID_CONTENT_TYPE',
+    });
+  }
+  const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+
+  try {
+    const resolved = await resolveToken(token, { touch: false });
+    if (!resolved) return res.status(404).json({ error: 'Link inválido' });
+    if (resolved.expired) return res.status(410).json({ error: 'Link expirado. Solicite uma nova atualização cadastral à federação.' });
+
+    // ESCOPO: só a solicitação DESTE dojô (nunca de outro dojô, mesmo na
+    // mesma federação) — mesma regra de todo o resto deste arquivo.
+    const reqRes = await db.query(
+      `SELECT id FROM karate_practitioner_requests WHERE id = $1 AND dojo_id = $2 LIMIT 1`,
+      [requestId, resolved.dojo_id]
+    );
+    if (!reqRes.rows.length) {
+      return res.status(404).json({ error: 'Solicitação não encontrada neste dojô', code: 'NOT_FOUND' });
+    }
+
+    const key = 'karate/practitioner-requests/' + requestId + '.' + ext;
+    const result = await uploadToR2(key, content, mime);
+    if (!result.success) {
+      console.error('[karateRosterPortalPublic] photo R2 error:', result.error);
+      return res.status(500).json({ error: 'Erro no armazenamento da imagem' });
+    }
+
+    await db.query(`UPDATE karate_practitioner_requests SET photo_url = $1 WHERE id = $2`, [result.url, requestId]);
+
+    res.json({ photo_url: result.url });
+  } catch (e) {
+    if (e.code === '42703') {
+      console.warn('[karateRosterPortalPublic] photo_url ausente (migration 232 pendente)');
+      return res.status(503).json({ error: 'Foto na solicitação ainda não disponível (migração pendente)', code: 'MIGRATION_PENDING' });
+    }
+    if (e.code === '42P01') {
+      return res.status(503).json({ error: 'Solicitação de praticante ainda não disponível (migração pendente)', code: 'MIGRATION_PENDING' });
+    }
+    console.error('[karateRosterPortalPublic] photo error:', e.message);
+    return res.status(500).json({ error: 'Erro ao anexar foto à solicitação' });
+  }
+});
+
 // ── GET /public/roster-update/:token/fpkt-lookup?number= ────
 // H2b: auto-localizar token-gated — equivalente de
 // GET /federation/:id/dojo/practitioner-requests/lookup-fpkt (H1), sem
@@ -879,7 +1066,7 @@ router.get('/:token/practitioner-requests', fpktLookupLimiter, async (req, res) 
 
     const { rows } = await db.query(
       `SELECT r.id, r.status, r.resolution, r.reject_reason, r.full_name, r.birth_date,
-              r.claimed_belt, r.fpkt_number_claimed, r.resolved_practitioner_id,
+              r.claimed_belt, r.fpkt_number_claimed, r.resolved_practitioner_id, r.photo_url,
               r.created_at, r.resolved_at,
               c.karate_registration_number AS resolved_fpkt_number,
               c.name AS resolved_practitioner_name
@@ -901,6 +1088,7 @@ router.get('/:token/practitioner-requests', fpktLookupLimiter, async (req, res) 
         birth_date: r.birth_date || null,
         claimed_belt: r.claimed_belt || null,
         fpkt_number_claimed: r.fpkt_number_claimed || null,
+        photo_url: r.photo_url || null,
         resolved_practitioner_id: r.resolved_practitioner_id || null,
         resolved_fpkt_number: r.resolved_fpkt_number || null,
         resolved_practitioner_name: r.resolved_practitioner_name || null,
@@ -1171,3 +1359,6 @@ router.post('/:token/import', async (req, res) => {
 });
 
 module.exports = router;
+// Exportado à parte para teste unitário direto (sem supertest/mock de db) —
+// ver __tests__/karate.rosterCompleteness.test.js (item 4).
+module.exports.classifyPraticante = classifyPraticante;

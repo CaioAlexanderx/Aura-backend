@@ -29,6 +29,8 @@ const rateLimit = require('express-rate-limit');
 const db = require('../config/database');
 const { requireDojoAccess } = require('../middleware/requireDojoAccess');
 const { buildDedupKey, lookupByFpktNumber, normalizeFpktNumber } = require('../services/karatePractitionerDedup');
+const { uploadToR2 } = require('../utils/r2Storage');
+const { validatePractitionerRequestPayload } = require('../services/karatePractitionerRequestValidation');
 
 const isTestEnv = () => process.env.NODE_ENV === 'test';
 
@@ -94,6 +96,7 @@ function shapeRequest(r) {
     // federação — não o que ele digitou (claimed pode ter vindo errado).
     resolved_fpkt_number: r.resolved_fpkt_number || null,
     resolved_practitioner_name: r.resolved_practitioner_name || null,
+    photo_url: r.photo_url || null,
     created_at: r.created_at,
     resolved_at: r.resolved_at || null,
   };
@@ -141,6 +144,19 @@ router.post('/dojo/practitioner-requests', requireDojoAccess, createLimiter, asy
     guardian_name: b.guardian_name || null, guardian_cpf: b.guardian_cpf || null,
     guardian_phone: b.guardian_phone || null, guardian_relationship: b.guardian_relationship || null,
   };
+
+  // Item 6 (revisão Atualização Cadastral, 15/07/2026): TODOS os campos da
+  // ficha são obrigatórios agora (antes só full_name + um dos dois
+  // contatos) — validado aqui no backend, não só no front (ver
+  // karatePractitionerRequestValidation.js para a lista exata e o porquê).
+  const validationErrors = validatePractitionerRequestPayload(payload);
+  if (validationErrors.length) {
+    return res.status(422).json({
+      error: validationErrors[0],
+      errors: validationErrors,
+      code: 'VALIDATION_ERROR',
+    });
+  }
 
   const dedupKey = buildDedupKey(full_name, birth_date);
 
@@ -224,7 +240,7 @@ router.get('/dojo/practitioner-requests', requireDojoAccess, async (req, res) =>
   try {
     const { rows } = await db.query(
       `SELECT r.id, r.status, r.resolution, r.reject_reason, r.full_name, r.birth_date,
-              r.claimed_belt, r.fpkt_number_claimed, r.resolved_practitioner_id,
+              r.claimed_belt, r.fpkt_number_claimed, r.resolved_practitioner_id, r.photo_url,
               r.created_at, r.resolved_at,
               c.karate_registration_number AS resolved_fpkt_number,
               c.name AS resolved_practitioner_name
@@ -256,6 +272,70 @@ router.get('/dojo/practitioner-requests/lookup-fpkt', requireDojoAccess, lookupL
   } catch (e) {
     console.error('[karateDojoPractitionerRequests] lookup-fpkt error:', e.message);
     return res.status(500).json({ error: 'Erro ao consultar número FPKT' });
+  }
+});
+
+
+// ── POST /federation/:id/dojo/practitioner-requests/:requestId/photo ──
+// Item 9 (revisão Atualização Cadastral, 15/07/2026): foto do praticante
+// NA SOLICITAÇÃO, antes de existir customer. Reusa o MESMO mecanismo de
+// upload de karatePractitioners.js (JSON + base64 -> uploadToR2 -> grava
+// URL) — só troca o destino (photo_url da solicitação, não
+// customers.karate_photo_url ainda) porque o praticante não existe até a
+// federação aprovar. Na aprovação (karatePractitionerRequestsAdmin.js) a
+// URL é copiada 1:1 para customers.karate_photo_url.
+const PHOTO_ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+router.post('/dojo/practitioner-requests/:requestId/photo', requireDojoAccess, createLimiter, async (req, res) => {
+  const dojoId = req.dojoId;
+  const { requestId } = req.params;
+  const { content, content_type } = req.body || {};
+
+  if (!content || typeof content !== 'string' || !content.trim()) {
+    return res.status(400).json({ error: 'Campo content (imagem em base64) é obrigatório', code: 'VALIDATION_ERROR' });
+  }
+  const mime = ((content_type || 'image/jpeg') + '').toLowerCase().split(';')[0].trim();
+  if (!PHOTO_ALLOWED_TYPES.includes(mime)) {
+    return res.status(400).json({
+      error: 'Tipo de imagem não suportado: ' + mime + '. Use image/jpeg, image/png ou image/webp.',
+      code: 'INVALID_CONTENT_TYPE',
+    });
+  }
+  const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+
+  try {
+    // ESCOPO: só a solicitação DESTE dojô (nunca de outro dojô da federação).
+    const reqRes = await db.query(
+      `SELECT id FROM karate_practitioner_requests WHERE id = $1 AND dojo_id = $2 LIMIT 1`,
+      [requestId, dojoId]
+    );
+    if (!reqRes.rows.length) {
+      return res.status(404).json({ error: 'Solicitação não encontrada neste dojô', code: 'NOT_FOUND' });
+    }
+
+    const key = 'karate/practitioner-requests/' + requestId + '.' + ext;
+    const result = await uploadToR2(key, content, mime);
+    if (!result.success) {
+      console.error('[karateDojoPractitionerRequests] photo R2 error:', result.error);
+      return res.status(500).json({ error: 'Erro no armazenamento da imagem' });
+    }
+
+    await db.query(
+      `UPDATE karate_practitioner_requests SET photo_url = $1 WHERE id = $2`,
+      [result.url, requestId]
+    );
+
+    res.json({ photo_url: result.url });
+  } catch (e) {
+    if (e.code === '42703') {
+      console.warn('[karateDojoPractitionerRequests] photo_url ausente (migration 232 pendente)');
+      return res.status(503).json({ error: 'Foto na solicitação ainda não disponível (migração pendente)', code: 'MIGRATION_PENDING' });
+    }
+    if (e.code === '42P01') {
+      return res.status(503).json({ error: 'Solicitação de praticante ainda não disponível (migração pendente)', code: 'MIGRATION_PENDING' });
+    }
+    console.error('[karateDojoPractitionerRequests] photo error:', e.message);
+    return res.status(500).json({ error: 'Erro ao anexar foto à solicitação' });
   }
 });
 
