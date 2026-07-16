@@ -79,3 +79,50 @@ describe('S3.1 — detector de indisponibilidade', () => {
     expect(contingency.isLikelyOffline(2)).toBe(false);
   });
 });
+
+
+describe('RTC — taxEngine.resolveItemIbsCbs (IBS/CBS, NT 2025.002)', () => {
+  test('homologação (tpAmb=2) SEMPRE inclui, mesmo Simples CRT=1', () => {
+    const r = taxEngine.resolveItemIbsCbs({ crt: 1, tpAmb: 2, vBC: 100 });
+    expect(r).not.toBeNull();
+    expect(r.cst).toBe('000');
+    expect(r.cClassTrib).toBe('000001');
+    expect(r.pIBSUF).toBeCloseTo(0.10);
+    expect(r.pIBSMun).toBeCloseTo(0.00);
+    expect(r.pCBS).toBeCloseTo(0.90);
+  });
+
+  test('produção regime normal (CRT=3) inclui (obrigatório a partir de 03/08/2026)', () => {
+    expect(taxEngine.resolveItemIbsCbs({ crt: 3, tpAmb: 1, vBC: 100 })).not.toBeNull();
+  });
+
+  test('produção Simples (CRT=1) OMITE (desobrigado até 01/2027)', () => {
+    expect(taxEngine.resolveItemIbsCbs({ crt: 1, tpAmb: 1, vBC: 100 })).toBeNull();
+  });
+
+  test('cálculo/arredondamento 2 casas: vBC=100 → IBS UF 0.10, Mun 0.00, CBS 0.90', () => {
+    const r = taxEngine.resolveItemIbsCbs({ crt: 1, tpAmb: 2, vBC: 100 });
+    expect(r.vIBSUF).toBe(0.10);
+    expect(r.vIBSMun).toBe(0.00);
+    expect(r.vIBS).toBe(0.10);
+    expect(r.vCBS).toBe(0.90);
+  });
+
+  test('arredondamento base pequena (R$1,00): IBS UF 0.00, CBS 0.01', () => {
+    const r = taxEngine.resolveItemIbsCbs({ crt: 1, tpAmb: 2, vBC: 1 });
+    expect(r.vIBSUF).toBe(0.00);
+    expect(r.vIBS).toBe(0.00);
+    expect(r.vCBS).toBe(0.01);
+  });
+
+  test('alíquotas ajustáveis por env sem deploy', () => {
+    process.env.NFCE_CBS_PCT = '1.50';
+    try {
+      const r = taxEngine.resolveItemIbsCbs({ crt: 1, tpAmb: 2, vBC: 100 });
+      expect(r.pCBS).toBeCloseTo(1.50);
+      expect(r.vCBS).toBe(1.50);
+    } finally {
+      delete process.env.NFCE_CBS_PCT;
+    }
+  });
+});

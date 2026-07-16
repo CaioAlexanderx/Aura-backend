@@ -82,4 +82,57 @@ function validateNcm(ncm) {
   return { valid: true, ncm: clean };
 }
 
-module.exports = { resolveItemTax, validateNcm, icmsGroupForCsosn, CSOSN_BY_PROFILE, VALID_PROFILES };
+
+function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+
+/** Lê um percentual do env (aceita vírgula/ponto); cai no default se ausente/NaN. */
+function envPct(name, def) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === '') return def;
+  const v = Number(String(raw).replace(',', '.'));
+  return Number.isFinite(v) ? v : def;
+}
+
+/**
+ * Resolve o grupo IBS/CBS (Reforma Tributária do Consumo, NT 2025.002) de um
+ * item da NFC-e (grupo UB `IBSCBS` do XSD; totalizador W03 `IBSCBSTot`).
+ *
+ * DECISÃO DE INCLUSÃO:
+ *   - homologação (tpAmb===2): SEMPRE inclui. A SEFAZ-SP de homologação roda
+ *     as regras de 2027 e REJEITA a nota sem o grupo (cStat 1115 —
+ *     "IBS/CBS não informado"), mesmo para emitente do Simples (CRT=1).
+ *   - produção (tpAmb===1): inclui quando crt !== 1 (regime normal), pois o
+ *     destaque de IBS/CBS passa a ser obrigatório a partir de 03/08/2026.
+ *     Emitente do SIMPLES NACIONAL (CRT=1) segue DESOBRIGADO de destacar até
+ *     01/2027 → retorna null (não emite o grupo). Isso preserva o
+ *     comportamento fiscal correto da piloto em produção enquanto homologamos.
+ *
+ * ALÍQUOTAS DO ANO-TESTE 2026 (ajustáveis por env, sem deploy):
+ *   IBS UF 0,10% · IBS Mun 0,00% · CBS 0,90%. A soma UF+Mun do IBS em 2026 é
+ *   0,10% (toda na UF). Base = valor líquido do item (vProd - vDesc).
+ * CST/cClassTrib default: 000 / 000001 — "tributação integral" (venda varejo),
+ *   par confirmado na Tabela de Classificação Tributária da NT 2025.002.
+ *
+ * @param {{ crt:number, tpAmb:number, vBC:number }} p
+ * @returns {null | {cst,cClassTrib,vBC,pIBSUF,vIBSUF,pIBSMun,vIBSMun,vIBS,pCBS,vCBS}}
+ */
+function resolveItemIbsCbs({ crt, tpAmb, vBC }) {
+  const include = Number(tpAmb) === 2 || Number(crt) !== 1;
+  if (!include) return null; // produção + Simples (CRT=1): desobrigado até 2027
+
+  const pIBSUF = envPct('NFCE_IBS_UF_PCT', 0.10);
+  const pIBSMun = envPct('NFCE_IBS_MUN_PCT', 0.00);
+  const pCBS = envPct('NFCE_CBS_PCT', 0.90);
+  const cst = process.env.NFCE_IBSCBS_CST || '000';
+  const cClassTrib = process.env.NFCE_IBSCBS_CCLASSTRIB || '000001';
+
+  const base = round2(vBC);
+  const vIBSUF = round2(base * pIBSUF / 100);
+  const vIBSMun = round2(base * pIBSMun / 100);
+  const vIBS = round2(vIBSUF + vIBSMun);
+  const vCBS = round2(base * pCBS / 100);
+
+  return { cst, cClassTrib, vBC: base, pIBSUF, vIBSUF, pIBSMun, vIBSMun, vIBS, pCBS, vCBS };
+}
+
+module.exports = { resolveItemTax, validateNcm, icmsGroupForCsosn, CSOSN_BY_PROFILE, VALID_PROFILES, resolveItemIbsCbs, envPct, round2 };

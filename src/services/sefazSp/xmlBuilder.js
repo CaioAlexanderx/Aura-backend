@@ -20,6 +20,7 @@
 const {
   ufToCodigo, isoBR, generateCNF, buildAccessKey44, validateTpag,
 } = require('../nuvemfiscal');
+const { resolveItemIbsCbs } = require('./taxEngine');
 
 const XML_HEADER = '<?xml version="1.0" encoding="UTF-8"?>';
 const NFE_NS = 'http://www.portalfiscal.inf.br/nfe';
@@ -86,6 +87,76 @@ function fmtUnit(n) {
 }
 
 function round2(n) { return Math.round(n * 100) / 100; }
+
+/** Percentual RTC (TDec_0302_04RTC): 4 casas decimais (ex.: 0.1000, 0.9000). */
+function fmtPct(n) {
+  const v = Number(n);
+  if (!isFinite(v)) throw new Error(`xmlBuilder: percentual inválido (${n})`);
+  return v.toFixed(4);
+}
+
+/** Base de cálculo IBS/CBS do item = valor líquido (vProd - vDesc). */
+function itemIbsBase(item) {
+  const total = round2(Number(item.quantity || 1) * Number(item.price || 0));
+  return round2(total - (Number(item.discount) || 0));
+}
+
+/**
+ * Grupo UB `IBSCBS` (NT 2025.002) do item, colocado como ÚLTIMO filho de
+ * <imposto> (ordem XSD: ...COFINS, ICMSUFDest?, IS?, IBSCBS?). `ibs` vem do
+ * taxEngine.resolveItemIbsCbs; null → não emite (Simples desobrigado em prod).
+ */
+function buildIbsCbsItemXml(ibs) {
+  if (!ibs) return '';
+  return '<IBSCBS>'
+    + tag('CST', ibs.cst)
+    + tag('cClassTrib', ibs.cClassTrib)
+    + '<gIBSCBS>'
+    + tag('vBC', fmt2(ibs.vBC))
+    + '<gIBSUF>'
+    + tag('pIBSUF', fmtPct(ibs.pIBSUF))
+    + tag('vIBSUF', fmt2(ibs.vIBSUF))
+    + '</gIBSUF>'
+    + '<gIBSMun>'
+    + tag('pIBSMun', fmtPct(ibs.pIBSMun))
+    + tag('vIBSMun', fmt2(ibs.vIBSMun))
+    + '</gIBSMun>'
+    + tag('vIBS', fmt2(ibs.vIBS))
+    + '<gCBS>'
+    + tag('pCBS', fmtPct(ibs.pCBS))
+    + tag('vCBS', fmt2(ibs.vCBS))
+    + '</gCBS>'
+    + '</gIBSCBS>'
+    + '</IBSCBS>';
+}
+
+/**
+ * Totalizador W03 `IBSCBSTot` (type TIBSCBSMonoTot), somando os itens.
+ * Vai em <total> depois de <ICMSTot>. Emite '' se nenhum item tem IBS/CBS.
+ */
+function buildIbsCbsTotXml(ibsList) {
+  const list = (ibsList || []).filter(Boolean);
+  if (!list.length) return '';
+  let vBC = 0, vIBSUF = 0, vIBSMun = 0, vIBS = 0, vCBS = 0;
+  for (const x of list) {
+    vBC += x.vBC; vIBSUF += x.vIBSUF; vIBSMun += x.vIBSMun; vIBS += x.vIBS; vCBS += x.vCBS;
+  }
+  vBC = round2(vBC); vIBSUF = round2(vIBSUF); vIBSMun = round2(vIBSMun);
+  vIBS = round2(vIBS); vCBS = round2(vCBS);
+  return '<IBSCBSTot>'
+    + tag('vBCIBSCBS', fmt2(vBC))
+    + '<gIBS>'
+    + '<gIBSUF>' + tag('vDif', '0.00') + tag('vDevTrib', '0.00') + tag('vIBSUF', fmt2(vIBSUF)) + '</gIBSUF>'
+    + '<gIBSMun>' + tag('vDif', '0.00') + tag('vDevTrib', '0.00') + tag('vIBSMun', fmt2(vIBSMun)) + '</gIBSMun>'
+    + tag('vIBS', fmt2(vIBS))
+    + tag('vCredPres', '0.00') + tag('vCredPresCondSus', '0.00')
+    + '</gIBS>'
+    + '<gCBS>'
+    + tag('vDif', '0.00') + tag('vDevTrib', '0.00') + tag('vCBS', fmt2(vCBS))
+    + tag('vCredPres', '0.00') + tag('vCredPresCondSus', '0.00')
+    + '</gCBS>'
+    + '</IBSCBSTot>';
+}
 
 function onlyDigits(s) { return String(s || '').replace(/\D/g, ''); }
 
@@ -224,6 +295,7 @@ function buildDetXml(items, { crt, tpAmb }) {
       + icms
       + buildPisCofinsXml('PIS', item.pisCst)
       + buildPisCofinsXml('COFINS', item.cofinsCst)
+      + buildIbsCbsItemXml(resolveItemIbsCbs({ crt, tpAmb, vBC: itemIbsBase(item) }))
       + '</imposto>'
       + '</det>';
   }).join('');
@@ -243,7 +315,7 @@ function buildPisCofinsXml(tributo, cst) {
     + `</${low}Outr></${low}>`;
 }
 
-function buildTotalXml(items) {
+function buildTotalXml(items, { crt, tpAmb } = {}) {
   let vProd = 0, vDesc = 0;
   for (const it of items) {
     vProd += round2(Number(it.quantity || 1) * Number(it.price || 0));
@@ -251,8 +323,21 @@ function buildTotalXml(items) {
   }
   vProd = round2(vProd); vDesc = round2(vDesc);
   const vNF = round2(vProd - vDesc);
-  // Ordem XSD ICMSTot
-  return '<total><ICMSTot>'
+
+  // IBS/CBS (NT 2025.002) — os tributos são "por fora": vNF (ICMSTot) NÃO os
+  // inclui; o total COM os impostos por fora vai no campo próprio vNFTot.
+  const ibsList = items.map((it) => resolveItemIbsCbs({ crt, tpAmb, vBC: itemIbsBase(it) }));
+  const ibsCbsTotXml = buildIbsCbsTotXml(ibsList);
+  let vNFTotXml = '';
+  if (ibsCbsTotXml) {
+    const sumIbs = round2(ibsList.reduce((acc, x) => acc + (x ? x.vIBS : 0), 0));
+    const sumCbs = round2(ibsList.reduce((acc, x) => acc + (x ? x.vCBS : 0), 0));
+    vNFTotXml = tag('vNFTot', fmt2(round2(vNF + sumIbs + sumCbs)));
+  }
+
+  // Ordem XSD <total>: ICMSTot, [ISSQNtot,retTrib,ISTot,] IBSCBSTot, vNFTot
+  return '<total>'
+    + '<ICMSTot>'
     + tag('vBC', '0.00') + tag('vICMS', '0.00') + tag('vICMSDeson', '0.00')
     + tag('vFCP', '0.00')
     + tag('vBCST', '0.00') + tag('vST', '0.00') + tag('vFCPST', '0.00') + tag('vFCPSTRet', '0.00')
@@ -262,7 +347,10 @@ function buildTotalXml(items) {
     + tag('vPIS', '0.00') + tag('vCOFINS', '0.00')
     + tag('vOutro', '0.00')
     + tag('vNF', fmt2(vNF))
-    + '</ICMSTot></total>';
+    + '</ICMSTot>'
+    + ibsCbsTotXml
+    + vNFTotXml
+    + '</total>';
 }
 
 function buildPagXml(payments, totalFallback) {
@@ -361,7 +449,7 @@ function buildInfNfe(company, nfceData, opts = {}) {
         name: nfceData.recipient_name,
       }, tpAmb)
     + buildDetXml(nfceData.items, { crt, tpAmb })
-    + buildTotalXml(nfceData.items)
+    + buildTotalXml(nfceData.items, { crt, tpAmb })
     + '<transp>' + tag('modFrete', '9') + '</transp>'
     + buildPagXml(nfceData.payments, totalValue)
     + buildInfAdicXml({ observacoes: nfceData.observacoes, infAdFisco: nfceData.infAdFisco })
@@ -388,6 +476,7 @@ module.exports = {
   buildInfNfe, composeNfe,
   // exporta blocos p/ teste unitário
   buildIdeXml, buildEmitXml, buildDestXml, buildDetXml, buildTotalXml, buildPisCofinsXml,
+  buildIbsCbsItemXml, buildIbsCbsTotXml, fmtPct, itemIbsBase,
   buildPagXml, buildInfAdicXml,
   esc, fmt2, fmtQty, fmtUnit,
   XML_HEADER, NFE_NS, HOMOLOG_DEST_XNOME,

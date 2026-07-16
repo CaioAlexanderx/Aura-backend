@@ -188,3 +188,65 @@ describe('sefazSp/xmlBuilder — escaping e composição', () => {
     expect(nfe).toContain(`xmlns="${xb.NFE_NS}"`);
   });
 });
+
+
+describe('sefazSp/xmlBuilder — IBS/CBS (Reforma Tributária, NT 2025.002)', () => {
+  test('homolog CRT=1: grupo IBSCBS por item (CST 000 / cClassTrib 000001)', () => {
+    const { infNfeXml } = build();
+    expect((infNfeXml.match(/<IBSCBS>/g) || []).length).toBe(3);
+    expect(infNfeXml).toContain('<CST>000</CST><cClassTrib>000001</cClassTrib>');
+    expect(infNfeXml).toContain('<pIBSUF>0.1000</pIBSUF>');
+    expect(infNfeXml).toContain('<pIBSMun>0.0000</pIBSMun>');
+    expect(infNfeXml).toContain('<pCBS>0.9000</pCBS>');
+  });
+
+  test('IBSCBS é o último filho de <imposto> (depois de PIS/COFINS)', () => {
+    const { infNfeXml } = build();
+    expect(infNfeXml.indexOf('</COFINS>')).toBeLessThan(infNfeXml.indexOf('<IBSCBS>'));
+  });
+
+  test('total: IBSCBSTot após ICMSTot, vNFTot por último; vBCIBSCBS = vNF', () => {
+    const { infNfeXml } = build();
+    expect(infNfeXml.indexOf('</ICMSTot>')).toBeLessThan(infNfeXml.indexOf('<IBSCBSTot>'));
+    expect(infNfeXml.indexOf('</IBSCBSTot>')).toBeLessThan(infNfeXml.indexOf('<vNFTot>'));
+    expect(infNfeXml).toContain('<vBCIBSCBS>549.96</vBCIBSCBS>');
+  });
+
+  test('vNF (ICMSTot) permanece "por fora" (não soma IBS/CBS); vNFTot os soma', () => {
+    const { infNfeXml } = build();
+    expect(infNfeXml).toContain('<vNF>549.96</vNF>');   // inalterado
+    // vNFTot = vNF + soma(vIBS) + soma(vCBS)
+    expect(infNfeXml).toContain('<vNFTot>555.46</vNFTot>');
+  });
+
+  test('produção regime normal (CRT=3): emite IBS/CBS', () => {
+    const company3 = { ...companyDavi, tax_regime: 'lucro_presumido' };
+    const { infNfeXml } = xb.buildInfNfe(company3, nfceDataVendaTipica,
+      { tpAmb: 1, cNF: '12345678', dhEmi: '2026-06-10T10:00:00-03:00' });
+    expect(infNfeXml).toContain('<IBSCBS>');
+    expect(infNfeXml).toContain('<IBSCBSTot>');
+  });
+
+  test('produção Simples (CRT=1): OMITE IBS/CBS (desobrigado até 2027)', () => {
+    const { infNfeXml } = build({}, { tpAmb: 1 });
+    expect(infNfeXml).not.toContain('<IBSCBS>');
+    expect(infNfeXml).not.toContain('<IBSCBSTot>');
+    expect(infNfeXml).not.toContain('<vNFTot>');
+  });
+
+  test('totalizador soma vIBS/vCBS de todos os itens', () => {
+    const data = {
+      items: [
+        { name: 'A', ncm: '64022000', quantity: 1, price: 100 },
+        { name: 'B', ncm: '64022000', quantity: 1, price: 100 },
+      ],
+      payments: [{ method: '01', value: 200 }], total_value: 200, serie: 1, numero: 5,
+    };
+    const { infNfeXml } = xb.buildInfNfe(companyDavi, data,
+      { tpAmb: 2, cNF: '00000001', dhEmi: '2026-06-10T10:00:00-03:00' });
+    // 2 itens de R$100 → vBC total 200; IBS UF 0.10+0.10=0.20; CBS 0.90+0.90=1.80
+    expect(infNfeXml).toContain('<vBCIBSCBS>200.00</vBCIBSCBS>');
+    expect(infNfeXml).toContain('<vIBSUF>0.20</vIBSUF>');
+    expect(infNfeXml).toContain('<vCBS>1.80</vCBS>');
+  });
+});
