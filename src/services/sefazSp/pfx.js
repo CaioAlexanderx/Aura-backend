@@ -150,6 +150,9 @@ function openPfx(pfxBuffer, password) {
   return {
     keyPem: forge.pki.privateKeyToPem(keyObj),
     certPem: forge.pki.certificateToPem(leaf),
+    // Cadeia completa (leaf primeiro) — vai no `cert` do TLS mTLS
+    chainPem: [leaf].concat(certs.filter(function (c) { return c !== leaf; }))
+      .map(function (c) { return forge.pki.certificateToPem(c); }).join(''),
     // DER base64 "puro" (sem header PEM) — vai no <X509Certificate>
     certDerBase64: forge.util.encode64(certDer),
     notBefore: leaf.validity.notBefore,

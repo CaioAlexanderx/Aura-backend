@@ -49,6 +49,31 @@ function soapEnvelope(wsdlNs, innerXml) {
     + '</soap12:Envelope>';
 }
 
+// ── TLS: Node/OpenSSL 3 também rejeita PFX moderno/misto ("Unsupported
+// PKCS12 PFX data"). Extraímos key/cert PEM via openPfx (que tem fallback
+// openssl) e entregamos ao https nesse formato — independe do formato do
+// .pfx. Cache por hash (evita reparse/subprocesso a cada chamada).
+const cryptoNode = require('crypto');
+const { openPfx } = require('./pfx');
+const _tlsCache = new Map(); // sha256(pfx|senha) → { key, cert }
+function tlsMaterial(pfx, passphrase) {
+  const h = cryptoNode.createHash('sha256')
+    .update(pfx).update('|')
+    .update(cryptoNode.createHash('sha256').update(String(passphrase || '')).digest())
+    .digest('hex');
+  if (_tlsCache.has(h)) return _tlsCache.get(h);
+  let material;
+  try {
+    const c = openPfx(pfx, passphrase);
+    material = { key: c.keyPem, cert: c.chainPem || c.certPem };
+  } catch (_) {
+    material = { pfx: pfx, passphrase: passphrase }; // fallback: comportamento antigo
+  }
+  if (_tlsCache.size > 32) _tlsCache.clear();
+  _tlsCache.set(h, material);
+  return material;
+}
+
 /** POST SOAP 1.2 com mTLS. Injetável p/ testes via opts.transport. */
 function postSoap(url, envelope, { pfx, passphrase, timeoutMs = DEFAULT_TIMEOUT_MS, transport } = {}) {
   if (transport) return transport(url, envelope);
@@ -57,9 +82,10 @@ function postSoap(url, envelope, { pfx, passphrase, timeoutMs = DEFAULT_TIMEOUT_
     const body = Buffer.from(envelope, 'utf8');
     const req = https.request({
       host: u.hostname,
+      port: u.port || 443,
       path: u.pathname + u.search,
       method: 'POST',
-      pfx, passphrase,
+      ...tlsMaterial(pfx, passphrase),
       headers: {
         'Content-Type': 'application/soap+xml; charset=utf-8',
         'Content-Length': body.length,
