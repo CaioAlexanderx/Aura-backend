@@ -63,10 +63,12 @@ router.get('/', requireAuth, async function(req, res) {
         " AND created_at >= NOW()-INTERVAL '1 day'", [cid])).rows[0];
       var breakerOpen = false;
       try { breakerOpen = engineBreaker.isOpen(cid); } catch (_) {}
-      if (breakerOpen || (fb && fb.cnt > 0)) {
+      // 16/07: provedor é oculto pro cliente — alerta só pra conta staff
+      // (ops Aura); o rastro completo fica em provider_used/fallback_reason.
+      if ((breakerOpen || (fb && fb.cnt > 0)) && req.user && req.user.is_staff) {
         alerts.push({ type: 'nfce_fallback_ativo', severity: 'warning',
-          title: 'Emissao propria com fallback ativo',
-          message: 'A emissao propria de NFC-e (SEFAZ-SP) falhou e as notas estao saindo pelo gateway (Nuvem Fiscal). Verifique o certificado A1 e a configuracao (CSC) em Configuracoes > Nota Fiscal.',
+          title: 'Aura Notas em fallback',
+          message: 'A emissao propria de NFC-e (Aura Notas) falhou nesta empresa e as notas estao saindo pela Nuvem Fiscal. Verificar certificado A1 / CSC.',
           data: { fallbacks_24h: (fb && fb.cnt) || 0, breaker_open: breakerOpen } });
       }
     } catch (_) {}

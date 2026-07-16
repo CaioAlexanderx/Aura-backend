@@ -147,6 +147,30 @@ async function fallbackColsAvailable() {
   return _fallbackColsAvailable;
 }
 
+// ── 16/07: aptidão pra emissão própria (modo AUTO do "Aura Notas").
+// Apta = A1 vigente salvo (company_certificates) + CSC configurado.
+// Cache 60s por company; defensivo pra tabela ausente (42P01 → gateway).
+const _engineCapableCache = new Map(); // companyId → { ok, at }
+async function engineCapable(companyId, config) {
+  const hasCsc = !!(config.csc_id && (config.csc_token_enc || config.csc_token));
+  if (!hasCsc) return false;
+  const hit = _engineCapableCache.get(companyId);
+  if (hit && Date.now() - hit.at < 60000) return hit.ok;
+  let ok = false;
+  try {
+    const { rows } = await db.query(
+      'SELECT 1 FROM company_certificates WHERE company_id=$1 AND not_after > NOW() LIMIT 1',
+      [companyId]
+    );
+    ok = rows.length > 0;
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    ok = false;
+  }
+  _engineCapableCache.set(companyId, { ok, at: Date.now() });
+  return ok;
+}
+
 // S4.2: grava provider_used/fallback_reason na emissão (defensivo p/ 42703).
 async function persistProviderUsed(emissionId, providerUsed, fallbackReason) {
   if (!(await fallbackColsAvailable())) return; // migration 237 ausente: no-op
@@ -319,7 +343,16 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     // (serie_sefaz_sp / next_number_sefaz_sp) pra nunca colidir com o gateway
     // no fallback. Se as colunas da migration 237 não existirem (42703),
     // caímos no comportamento LEGADO: sem fallback, série única do gateway.
-    const wantSefazSp = config.provider === 'sefaz_sp' && tipo === 'nfce';
+    // ── 16/07: "Aura Notas" é o provedor PRIMÁRIO e OCULTO (sem seletor na
+    // UI — decisão de produto). Semântica do nfce_config.provider:
+    //   'nuvemfiscal' → força gateway (kill-switch interno, via SQL);
+    //   'sefaz_sp'    → força engine;
+    //   NULL / outro  → AUTO: engine quando a empresa está APTA (A1 vigente
+    //                   salvo + CSC configurado), senão gateway. Fallback
+    //                   S4.2 + breaker S4.3 cobrem falhas em runtime.
+    const wantSefazSp = tipo === 'nfce'
+      && config.provider !== 'nuvemfiscal'
+      && (config.provider === 'sefaz_sp' || await engineCapable(req.params.id, config));
     const hasFallbackCols = await fallbackColsAvailable();
     const breakerOpen = wantSefazSp && hasFallbackCols && engineBreaker.isOpen(req.params.id);
     // useSefazSp = de fato vamos tentar a engine (provider próprio, colunas
