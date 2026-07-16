@@ -10,8 +10,8 @@
 // MESMO dojô, mas com propósitos diferentes:
 //   - token do sensei  → poder pleno no portal (inativar, editar qualquer
 //     campo, adicionar praticante, confirmar o quadro).
-//   - self_service_token → só as duas rotas deste arquivo, cujo body é
-//     whitelist estrita de campos.
+//   - self_service_token → só as rotas deste arquivo (busca, leitura da
+//     própria ficha e update), cujo body é whitelist estrita de campos.
 //
 // (16/07/2026 — decisão do Caio: abrir a FICHA INTEIRA aqui, não só
 // contato. Antes, este link só aceitava phone/email — decisão deliberada
@@ -48,6 +48,17 @@
 //   GET  /public/roster-self/:token/search?q=nome  — busca só por nome,
 //        devolve só { id, name }, no máximo 8 resultados, nunca a lista
 //        inteira do dojô (evita virar diretório vazado).
+//   POST /public/roster-self/:token/record           — devolve a PRÓPRIA
+//        ficha, após confirmar identidade (MESMO gate do /update: data de
+//        nascimento OU nº de matrícula FPKT). Existe porque este link não
+//        tinha leitura — o aluno abria a ficha vazia e digitava no escuro,
+//        o que contraria a intenção declarada da feature ("o dojô e o
+//        praticante REVISE tudo"). POST (não GET) porque a prova de
+//        identidade vai no BODY, nunca em querystring/URL. Devolve só os
+//        campos editáveis (mesma lista de SELF_SERVICE_EDITABLE_FIELDS)
+//        + os travados-só-leitura (nome, nº FPKT, faixa). Identidade errada
+//        → 403 IDENTITY_MISMATCH, sem vazar se o id existe (mesmo
+//        comportamento do /update).
 //   POST /public/roster-self/:token/update          — grava a ficha do
 //        PRÓPRIO praticante, após confirmar identidade com data de
 //        nascimento OU nº de matrícula FPKT. Qualquer chave fora de
@@ -60,6 +71,10 @@
 const router = require('express').Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../config/database');
+// toIsoDate: coluna `date` chega do driver `pg` como objeto Date JS —
+// String(dateObj).slice(0,10) vira "Sun Apr 17" (foi um P0 real, ver
+// karatePractitionerDedup.js). Fonte única de normalização de data.
+const { toIsoDate } = require('../services/karatePractitionerDedup');
 
 const isTestEnv = () => process.env.NODE_ENV === 'test';
 
@@ -80,6 +95,18 @@ const searchLimiter = rateLimit({
 });
 
 const updateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: keyByTokenAndIp,
+  skip: () => isTestEnv(),
+});
+
+// Mesmo orçamento do updateLimiter — /record é tão sujeito a tentativa de
+// adivinhar identidade (nascimento/matrícula) quanto /update, então recebe
+// o MESMO limite (não um mais frouxo só porque é leitura).
+const recordLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 10,
   standardHeaders: true,
@@ -221,6 +248,137 @@ function normalizeFieldValue(key, raw) {
       return { value: s, error: null };
   }
 }
+
+// ── POST /public/roster-self/:token/record ───────────────────
+// Leitura da PRÓPRIA ficha, atrás do MESMO gate de identidade do /update.
+// Existe porque, sem ela, o aluno abre a ficha vazia e digita no escuro —
+// contraria a intenção declarada da feature ("o dojô e o praticante
+// REVISE tudo"). POST (não GET) porque a prova de identidade vai no BODY,
+// nunca em querystring/URL (regra do projeto).
+//
+// Corpo: { student_id, identity: { birth_date? | karate_registration_number? } }
+// — EXATAMENTE o mesmo formato do /update.
+//
+// Resolve o token → dojo_id/federation_id (NUNCA do body). Devolve a
+// ficha só se (a) o praticante é deste dojô E (b) a identidade bate — a
+// MESMA checagem atômica de UMA query (WHERE id=$1 AND dojo_id=$2 AND
+// (birth_date=$x OR karate_registration_number=$y)) usada no /update, pra
+// nunca vazar se o id existe quando a identidade não bate (403
+// IDENTITY_MISMATCH, corpo idêntico ao do /update).
+//
+// Devolve SÓ os campos que o próprio aluno pode editar (a MESMA lista de
+// SELF_SERVICE_EDITABLE_FIELDS, dentro de `fields`) + os travados
+// só-para-exibição (nome, nº FPKT, faixa, dentro de `locked`). Nada de
+// is_active, financeiro ou qualquer dado de terceiro.
+router.post('/:token/record', recordLimiter, async (req, res) => {
+  const token = req.params.token;
+  const body = req.body || {};
+
+  const ALLOWED_RECORD_TOP_KEYS = new Set(['student_id', 'identity']);
+  const invalidTopKeys = Object.keys(body).filter((k) => !ALLOWED_RECORD_TOP_KEYS.has(k));
+  if (invalidTopKeys.length) {
+    return res.status(422).json({
+      error: `Campo(s) não permitido(s) neste link: ${invalidTopKeys.join(', ')}`,
+      code: 'FIELD_NOT_ALLOWED',
+    });
+  }
+
+  const studentId = body.student_id;
+  if (!studentId) {
+    return res.status(422).json({ error: 'student_id é obrigatório', code: 'VALIDATION_ERROR' });
+  }
+
+  const identityBody = isPlainObject(body.identity) ? body.identity : {};
+  const invalidIdentityKeys = Object.keys(identityBody).filter((k) => !ALLOWED_IDENTITY_KEYS.has(k));
+  if (invalidIdentityKeys.length) {
+    return res.status(422).json({
+      error: `Campo(s) não permitido(s) neste link: ${invalidIdentityKeys.map((k) => `identity.${k}`).join(', ')}`,
+      code: 'FIELD_NOT_ALLOWED',
+    });
+  }
+
+  const identityBirthDate = identityBody.birth_date ? String(identityBody.birth_date).trim() : null;
+  const identityRegNumber = identityBody.karate_registration_number ? String(identityBody.karate_registration_number).trim() : null;
+
+  if (!identityBirthDate && !identityRegNumber) {
+    return res.status(422).json({ error: 'Informe data de nascimento ou nº de matrícula para confirmar sua identidade', code: 'VALIDATION_ERROR' });
+  }
+  if (identityBirthDate && !ISO_DATE_REGEX.test(identityBirthDate)) {
+    return res.status(422).json({ error: 'identity.birth_date deve ser YYYY-MM-DD', code: 'VALIDATION_ERROR' });
+  }
+
+  try {
+    const resolved = await resolveSelfServiceToken(token);
+    if (!resolved) return res.status(404).json({ error: 'Link inválido' });
+    if (resolved.expired) return res.status(410).json({ error: 'Link expirado. Peça um novo link ao seu sensei.' });
+
+    const params = [studentId, resolved.dojo_id];
+    let n = 3;
+    // MESMA lógica do /update: o WHERE usa o(s) valor(es) de `identity`
+    // (a PROVA), nunca de `fields` (aqui nem existe `fields` — é leitura).
+    const identityParts = [];
+    if (identityBirthDate) { identityParts.push(`birth_date = $${n}::date`); params.push(identityBirthDate); n++; }
+    if (identityRegNumber) { identityParts.push(`karate_registration_number = $${n}`); params.push(identityRegNumber); n++; }
+    const federationParamIdx = n;
+    params.push(resolved.federation_id);
+
+    // ESCOPO + IDENTIDADE na MESMA query do /update — id do dojô do TOKEN
+    // (nunca do body) E 2º fator batendo, tudo em UM SELECT atômico. Não
+    // casou → 0 linhas → 403, sem distinguir "não existe" de "identidade
+    // errada" (evita vazar se o id existe).
+    const { rows } = await db.query(
+      `SELECT c.id, c.name, c.karate_registration_number,
+              cb.belt_name,
+              c.phone, c.email, c.cpf_cnpj, c.rg, c.birth_date,
+              c.street, c.number, c.complement, c.neighborhood, c.city, c.state, c.zip_code
+       FROM customers c
+       LEFT JOIN karate_current_belt cb ON cb.student_id = c.id AND cb.federation_id = $${federationParamIdx}
+       WHERE c.id = $1 AND c.dojo_id = $2 AND (${identityParts.join(' OR ')})
+       LIMIT 1`,
+      params
+    );
+
+    if (!rows.length) {
+      return res.status(403).json({ error: 'Não foi possível confirmar sua identidade', code: 'IDENTITY_MISMATCH' });
+    }
+
+    const r = rows[0];
+    res.json({
+      id: r.id,
+      // Travados: só-leitura, geridos pela federação — nunca entram em
+      // SELF_SERVICE_EDITABLE_FIELDS, mostrados aqui só pra dar contexto.
+      locked: {
+        name: r.name || null,
+        karate_registration_number: r.karate_registration_number || null,
+        belt_name: r.belt_name || null,
+      },
+      // Editáveis: MESMA lista/chaves de SELF_SERVICE_EDITABLE_FIELDS, pra
+      // o front poder comparar 1:1 com o que o aluno digitar e mandar só o
+      // que mudou no /update.
+      fields: {
+        phone: r.phone || null,
+        email: r.email || null,
+        cpf: r.cpf_cnpj || null,
+        rg: r.rg || null,
+        birth_date: toIsoDate(r.birth_date),
+        street: r.street || null,
+        number: r.number || null,
+        complement: r.complement || null,
+        neighborhood: r.neighborhood || null,
+        city: r.city || null,
+        state: r.state || null,
+        zip_code: r.zip_code || null,
+      },
+    });
+  } catch (err) {
+    if (err.code === '42P01' || err.code === '42703') {
+      console.warn('[karateRosterSelfServicePublic] ficha schema pendente:', err.message);
+      return res.status(404).json({ error: 'Link inválido' });
+    }
+    console.error('[karateRosterSelfServicePublic] record error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar ficha' });
+  }
+});
 
 router.post('/:token/update', updateLimiter, async (req, res) => {
   const token = req.params.token;
