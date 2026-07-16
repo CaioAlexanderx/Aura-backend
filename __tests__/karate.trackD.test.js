@@ -68,7 +68,8 @@ describe('karateCardService — verifyByToken', () => {
   // helper: monta a linha do cartão (1a query do verify)
   const cardRow = (over = {}) => ({
     card_number: 'FPKT-A-00001', is_minor: false, card_status: 'active',
-    student_id: 'stu-1', federation_id: 'fed-1', dojo_name_snapshot: 'Dojô X',
+    student_id: 'stu-1', federation_id: 'fed-1', dojo_name: 'Dojô X', dojo_name_snapshot: 'Dojô X',
+    birth_date: '1990-01-01',
     student_name: 'Maria Souza', belt: '1dan', belt_name: 'Preta',
     belt_since: '2024-03-12', federation_name: 'FPKT', federation_logo: null, ...over,
   });
@@ -94,7 +95,7 @@ describe('karateCardService — verifyByToken', () => {
 
   it('menor → nome reduzido "Primeiro S." mantendo o registro', async () => {
     db.query
-      .mockResolvedValueOnce({ rows: [cardRow({ is_minor: true, student_name: 'João Pedro Silva' })] })
+      .mockResolvedValueOnce({ rows: [cardRow({ birth_date: '2013-05-10', student_name: 'João Pedro Silva' })] })
       .mockResolvedValueOnce({ rows: [] });
     const r = await cardService.verifyByToken(TOKEN);
     expect(r.is_minor).toBe(true);

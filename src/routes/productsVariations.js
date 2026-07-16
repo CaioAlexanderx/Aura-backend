@@ -27,7 +27,7 @@
 // 22/05/2026: GET e PUT usam visibilityWhere para casos multi-CNPJ
 // (produto shared visto por subsidiaria). Bug Davi: editava produto
 // shared logado na Villa Branca, GET caia em 404 com o filtro naive
-// company_id=$cid → frontend mostrava mode='none' falso → user nao
+// company_id=$cid -> frontend mostrava mode='none' falso -> user nao
 // via variantes nem conseguia ajustar estoque. Mesma armadilha que
 // o PR #77 corrigiu pra productImage.js (memoria
 // armadilha_visibility_leaks_rotas_produto).
@@ -53,6 +53,46 @@
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+
+// ─── 30/06/2026: Normalizacao de cor (nome -> hex) ───────────
+// Imports/legados gravavam NOME no atributo Cor (ex.: "DARK BROWN",
+// "PRETO") em vez de hex; a validacao estrita travava o save inteiro
+// com erro generico ("hex deve ser no formato #RRGGBB"), bloqueando
+// edicao de cor E upload de foto da variante (caso Davi Calcados).
+// Agora o PUT tolera nomes conhecidos (porta de utils/colorNames.ts) e,
+// se nao reconhecer, retorna erro NOMEANDO a cor problematica.
+const COLOR_NAME_TO_HEX = {
+  'preto': '#000000', 'branco': '#FFFFFF', 'cinza': '#808080',
+  'cinza claro': '#C8C8C8', 'cinza escuro': '#404040',
+  'vermelho': '#EF4444', 'vinho': '#800020', 'rosa': '#EC4899',
+  'rosa claro': '#FFB6C1', 'laranja': '#F97316', 'amarelo': '#EAB308',
+  'marrom': '#8B4513', 'caramelo': '#BD7100', 'bege': '#F5DEB3',
+  'nude': '#F0EBDF', 'verde': '#22C55E', 'verde escuro': '#006400',
+  'verde agua': '#8BE8B3', 'azul': '#3B82F6', 'azul escuro': '#00008B',
+  'azul claro': '#ADD8E6', 'azul marinho': '#000050', 'roxo': '#8B5CF6',
+  'violeta': '#6D28D9', 'dourado': '#DAA520', 'prata': '#C0C0C0',
+  // aliases EN + casos de import conhecidos
+  'black': '#000000', 'white': '#FFFFFF', 'red': '#EF4444',
+  'blue': '#3B82F6', 'green': '#22C55E', 'yellow': '#EAB308',
+  'pink': '#EC4899', 'orange': '#F97316', 'purple': '#8B5CF6',
+  'brown': '#8B4513', 'gray': '#808080', 'grey': '#808080',
+  'gold': '#DAA520', 'silver': '#C0C0C0',
+  'dark brown': '#654321', 'darkbrown': '#654321',
+};
+function colorNorm(s) {
+  return String(s || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().trim();
+}
+// Retorna hex valido (preservando o caso quando ja e hex, pra nao
+// quebrar as chaves de matrix/barcodes) ou null se irreconhecivel.
+function coerceColorHex(raw) {
+  if (raw == null) return null;
+  const t = String(raw).trim();
+  if (/^#[0-9A-Fa-f]{6}$/.test(t)) return t;          // ja e hex: passthrough
+  if (/^[0-9A-Fa-f]{6}$/.test(t)) return '#' + t;     // hex sem '#'
+  return COLOR_NAME_TO_HEX[colorNorm(t)] || null;     // nome conhecido
+}
 
 // ─── Visibilidade de grupo (BIDIRECIONAL) ────────────────
 //
@@ -198,10 +238,42 @@ router.put('/:pid/variations', async (req, res) => {
     return res.status(400).json({ error: 'Maximo de 30 cores ou 30 tamanhos' });
   }
 
-  // Validacao: hex valido em cada cor
+  // 30/06/2026: valida E normaliza cada cor. Aceita hex (#RRGGBB) ou
+  // nome de cor conhecido (ex.: "Preto", "DARK BROWN"); coage o nome
+  // para hex. Se uma cor for irreconhecivel, retorna erro NOMEANDO ela
+  // (em vez do erro generico que travava o save inteiro). Quando uma cor
+  // e coagida, reescrevemos as chaves de matrix/barcodes (que vinham com
+  // o token antigo) pra nao perder estoque/codigo de barras.
+  const colorKeyRemap = [];   // { from, to }
   for (const c of colors) {
-    if (!c || !c.hex || !/^#[0-9A-Fa-f]{6}$/.test(c.hex)) {
-      return res.status(400).json({ error: 'Cor invalida: hex deve ser no formato #RRGGBB' });
+    const original = c && (c.hex != null ? c.hex : (c.name != null ? c.name : null));
+    const hex = coerceColorHex(original);
+    if (!hex) {
+      const shown = (original === null || original === undefined || original === '')
+        ? '(vazio)' : String(original);
+      return res.status(400).json({
+        error: 'Cor invalida: "' + shown + '". Use o seletor de cor (#RRGGBB) ou um nome reconhecido.',
+      });
+    }
+    if (c.hex !== hex) {
+      if (c.hex != null && c.hex !== hex) colorKeyRemap.push({ from: c.hex, to: hex });
+      c.hex = hex;
+    }
+  }
+  // Reescreve chaves de matrix/barcodes que usavam o token de cor antigo.
+  if (colorKeyRemap.length > 0) {
+    for (const map of [matrix, barcodes]) {
+      for (const k of Object.keys(map)) {
+        const sep = k.indexOf('|');
+        const h = sep >= 0 ? k.slice(0, sep) : k;
+        const sz = sep >= 0 ? k.slice(sep + 1) : '';
+        const hit = colorKeyRemap.find(r => r.from === h);
+        if (hit) {
+          const nk = hit.to + '|' + sz;
+          if (!(nk in map)) map[nk] = map[k];
+          delete map[k];
+        }
+      }
     }
   }
 

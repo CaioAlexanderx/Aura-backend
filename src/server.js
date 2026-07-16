@@ -62,10 +62,19 @@ function startServer() {
     // Iniciar scheduler de relatórios
     const { initReportScheduler } = require('./jobs/reportScheduler');
     initReportScheduler();
+    // Aura Notas: refresh de status + retransmissão de contingência (S2.4/S3.1)
     const { initNfceRefreshJob } = require('./jobs/nfceRefreshJob');
     initNfceRefreshJob();
     const { initNfceContingencyJob } = require('./jobs/nfceContingencyJob');
     initNfceContingencyJob();
+
+    // Track I: régua de lembrete de anuidade karatê (diário 9h BRT)
+    const { initAnnuityReminderScheduler } = require('./jobs/annuityReminderScheduler');
+    initAnnuityReminderScheduler();
+
+    // Aviso interno de vencimento (T-2) da mensalidade da federação karatê → contato@getaura.com.br
+    const { initKarateBillingDueScheduler } = require('./jobs/karateBillingDueScheduler');
+    initKarateBillingDueScheduler();
   });
 }
 

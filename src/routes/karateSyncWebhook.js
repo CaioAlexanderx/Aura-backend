@@ -1,4 +1,11 @@
 // ============================================================
+// ⚠️ PARQUEADO (22/06/2026) — Track F (motor de sync externo) está DORMENTE.
+// Decisão: o Aura Dojô é interno (mesma base); o handshake de sync com token
+// externo NÃO é usado. NÃO construir em cima deste arquivo nem das migrations
+// 170–172 / fila karate_sync_events. As trocas dojô↔federação usam o keystone
+// requireDojoAccess (Canais A/B) — ver src/routes/karateDojo.js e o doc
+// PLANEJAMENTO_KARATE_CONSOLIDADO.md §5. Mantido montado por retrocompat.
+// ============================================================
 // AURA KARATÊ — Webhook de Sincronização (Track F / Fase 5)
 // Montado em /webhooks/karate-sync (PÚBLICO, sem auth de empresa).
 // O dojô (Via 1) chama POST /:connId apresentando o federation_sync_token

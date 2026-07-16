@@ -1,4 +1,12 @@
 // ============================================================
+// ⚠️ PARQUEADO (22/06/2026) — Track F (conectividade por token externo) DORMENTE.
+// Decisão: o Aura Dojô é interno (mesma base); o handshake/sync_token externo
+// NÃO é usado. NÃO construir em cima destas rotas nem das migrations 170–172.
+// A filiação do dojô (Troca 6) virá por karate_affiliation_requests (fluxo de
+// pagamento), NÃO reusar a semântica de token daqui. Trocas dojô↔federação
+// usam requireDojoAccess (Canais A/B) — ver PLANEJAMENTO_KARATE_CONSOLIDADO.md
+// §5. Mantido montado por retrocompat.
+// ============================================================
 // AURA KARATÊ — Rotas de Conectividade Dojô (Track F / Fase 5)
 // Montado em /federation/:id (igual aos Tracks B/C/E).
 //

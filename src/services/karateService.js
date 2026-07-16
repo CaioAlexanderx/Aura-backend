@@ -38,72 +38,41 @@ async function nextDojoAffiliationId(client, federationId) {
   return `FPKT-${String(nextNum).padStart(3, '0')}`;
 }
 
-// ── Geração de FPKT-A-NNNNN (praticante) ──────────────────
-// Formato: FPKT-A-NNNNN (5 dígitos com zero-padding, ex: FPKT-A-00427)
-// Estratégia: advisory lock por federação + MAX existente.
-async function nextPractitionerRegistrationNumber(client, federationId) {
-  await client.query(
-    `SELECT pg_advisory_xact_lock(hashtext($1::text || '-practitioner'))`,
-    [federationId]
-  );
-
-  const { rows } = await client.query(
-    `SELECT karate_registration_number
-     FROM customers
-     WHERE federation_id = $1 AND karate_registration_number IS NOT NULL
-     ORDER BY karate_registration_number DESC
-     LIMIT 1`,
-    [federationId]
-  );
-
-  let nextNum = 1;
-  if (rows.length > 0 && rows[0].karate_registration_number) {
-    const match = rows[0].karate_registration_number.match(/(\d+)$/);
-    if (match) nextNum = parseInt(match[1], 10) + 1;
-  }
-
-  return `FPKT-A-${String(nextNum).padStart(5, '0')}`;
-}
+// (14/07/2026 — H2) nextPractitionerRegistrationNumber FOI REMOVIDA daqui.
+// Regra fechada com o Caio: o número de matrícula FPKT é emitido SOMENTE
+// pela federação, fora do sistema — o backend NUNCA gera/inventa um
+// (migration 231 / H1). Os 3 chamadores que ainda existiam foram todos
+// fechados no mesmo PR (#381):
+//   1) karateRosterPortalPublic.js (quick-add do portal do sensei) — agora
+//      cria uma SOLICITAÇÃO pendente (karate_practitioner_requests), igual
+//      ao fluxo novo do sensei — nunca mais insere direto em customers.
+//   2) karateImport.js (import legado em massa) — o número agora é
+//      OBRIGATÓRIO na própria planilha (PRACTITIONER_FIELDS.registration_number);
+//      linha sem número vai para o relatório de erro, nunca ganha um
+//      inventado.
+//   3) karateApplyEvent.js (upsertPractitioner, sync dojô↔federação) — o
+//      contrato do evento practitioner_added nunca carregou número FPKT;
+//      criação nova (sem match por CPF) agora falha explicitamente
+//      (recoverable=false) em vez de inventar.
+// Se um dia surgir um caso legítimo de geração automática, ele PRECISA
+// vir com essa mesma decisão de produto revisada — não reintroduza esta
+// função "de leve" só porque um novo fluxo parece pedir um número.
 
 // ── Status computado do dojô ────────────────────────────────
-// Regra documentada:
-//   active      → afiliado, data de vencimento > 60 dias no futuro
-//   expiring    → vencimento entre 0 e 60 dias
-//   overdue     → vencimento há até 90 dias (ainda recuperável)
-//   defaulting  → vencimento há mais de 90 e até 180 dias
-//   suspended   → vencimento há mais de 180 dias ou is_active=false
+// Decisão de produto (02/07/2026): status do dojô é derivado UNICAMENTE de
+// is_active. Antes esta função misturava inadimplência (dias de atraso da
+// afiliação) com o status de ativação, retornando 'suspended' tanto para
+// is_active=false quanto para atraso > 180 dias — os dois conceitos são
+// independentes. Inadimplência de anuidade é métrica separada, calculada a
+// partir de karate_dojo_annuity_history (ver karateFinanceService.computeAnnuityStatus
+// e a query de annuity_status em routes/karateFederation.js) — NÃO tocada aqui.
 //
-// Calcula baseado em affiliation_model + affiliation_since:
-//   annual    → renova anualmente; vence no aniversário anual
-//   biannual  → vence a cada 6 meses
-//   quarterly → vence a cada 3 meses
+// Valores possíveis: 'active' | 'inactive'.
+//   active   → is_active !== false
+//   inactive → is_active === false
 function computeDojoStatus(affiliation_model, affiliation_since, is_active) {
-  if (is_active === false) return 'suspended';
-  if (!affiliation_since) return 'active';
-
-  const since = new Date(affiliation_since);
-  const now = new Date();
-
-  // Calcula a data de próximo vencimento
-  let periodMonths = 12;
-  if (affiliation_model === 'biannual') periodMonths = 6;
-  else if (affiliation_model === 'quarterly') periodMonths = 3;
-
-  // Vencimento = afiliação + UM período (sem auto-renovação).
-  // Se já passou e não houve renovação, escala overdue→defaulting→suspended.
-  const dueDate = new Date(since);
-  dueDate.setMonth(dueDate.getMonth() + periodMonths);
-
-  const dayMs = 1000 * 60 * 60 * 24;
-  const daysUntilDue = Math.round((dueDate - now) / dayMs);
-
-  if (daysUntilDue > 60) return 'active';
-  if (daysUntilDue > 0)  return 'expiring';
-
-  const daysOverdue = Math.round((now - dueDate) / dayMs);
-  if (daysOverdue <= 90)  return 'overdue';
-  if (daysOverdue <= 180) return 'defaulting';
-  return 'suspended';
+  if (is_active === false) return 'inactive';
+  return 'active';
 }
 
 // ── Parser de linha CSV simples ─────────────────────────────
@@ -137,6 +106,12 @@ function parseCSVLine(line) {
 // ── Mapeamento fuzzy de cabeçalhos CSV para campos do praticante ─
 const PRACTITIONER_FIELDS = {
   full_name:    ['nome', 'name', 'nome completo', 'full_name'],
+  // Número de matrícula FPKT — SEMPRE emitido pela federação, fora do
+  // sistema (regra H1, migration 231). O import legado (CSV) só aceita a
+  // linha se ela já TRAZ esse número na planilha de origem; nunca inventa
+  // um (ver karateImport.js handler / validateRow).
+  registration_number: ['matricula', 'matrícula', 'registro', 'numero fpkt', 'número fpkt',
+                         'num_fpkt', 'nº fpkt', 'fpkt', 'registration_number', 'karate_registration_number'],
   cpf:          ['cpf', 'documento', 'doc'],
   rg:           ['rg', 'identidade'],
   birth_date:   ['nascimento', 'data nascimento', 'data_nascimento', 'birthday', 'birth_date'],
@@ -195,7 +170,6 @@ function parseDate(value) {
 
 module.exports = {
   nextDojoAffiliationId,
-  nextPractitionerRegistrationNumber,
   computeDojoStatus,
   parseCSVLine,
   suggestPractitionerMapping,

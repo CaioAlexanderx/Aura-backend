@@ -16,6 +16,10 @@
 // 03/06/2026 (Guia de medidas):
 //   + UPLOAD_ALLOWED_TYPES agora aceita application/pdf (arte/gabarito do cliente)
 //   + customization_config devolvido inteiro em GET /products (size_guide flui)
+// 16/06/2026 (Visibilidade na vitrine):
+//   + filtro studio_storefront_visible IS NOT FALSE em GET /products — o
+//     lojista escolhe quais itens aparecem na Loja Virtual (toggle no
+//     configurador do produto). Default true preserva o comportamento atual.
 //
 // Fluxo:
 //  1. Cliente entra em loja.getaura.com.br/:slug/studio
@@ -93,7 +97,7 @@ function listVisibilityWhere(cidParam) {
   ))`;
 }
 
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // computeChoicesDelta — soma price_delta de campos do tipo
 // 'option' / 'color' baseado nos valores selecionados em
 // `customization`. Inclusivo: aceita value scalar ou array.
@@ -103,7 +107,7 @@ function listVisibilityWhere(cidParam) {
 //   { value: 'g', label: 'Grande',  price_delta: 5.00 }
 // ]
 // Se customization[fieldId] === 'g' → soma 5.00
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 function computeChoicesDelta(cfg, customization) {
   if (!cfg || !Array.isArray(cfg.fields) || !customization) return 0;
   let delta = 0;
@@ -125,12 +129,12 @@ function computeChoicesDelta(cfg, customization) {
   return delta;
 }
 
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // computeBackDelta — retorna o valor cobrado pelo verso quando
 // o cliente marca `customization.has_back_selected = true` E o
 // produto tem cfg.has_back=true E cfg.back_charge_enabled=true.
 // Retorna 0 em qualquer outro cenário (backwards-compatible).
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 function computeBackDelta(cfg, customization) {
   if (!cfg || cfg.has_back !== true) return 0;
   if (cfg.back_charge_enabled !== true) return 0;
@@ -163,7 +167,7 @@ const UPLOAD_ALLOWED_TYPES = new Set([
   'application/pdf',
 ]);
 
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // GET /storefront/:slug/studio/products
 // Lista produtos da loja onde is_personalizable=true, com
 // customization_config + templates vinculados + estimativa SLA.
@@ -171,7 +175,9 @@ const UPLOAD_ALLOWED_TYPES = new Set([
 //   revision_policy_text) pra cliente ver antes de comprar.
 // customization_config e devolvido INTEIRO (p.customization_config);
 // campos como size_guide gravados dentro dele fluem automaticamente.
-// ────────────────────────────────────────────────────────────
+// Filtra studio_storefront_visible IS NOT FALSE: o lojista oculta itens
+// da vitrine pelo configurador do produto (Estoque Studio).
+// ─────────────────────────────────────────────
 router.get('/:slug/studio/products', async (req, res) => {
   try {
     const slug = req.params.slug.toLowerCase().trim();
@@ -198,6 +204,7 @@ router.get('/:slug/studio/products', async (req, res) => {
           AND is_active IS NOT FALSE
           AND is_personalizable = true
           AND customization_config IS NOT NULL
+          AND studio_storefront_visible IS NOT FALSE
         ORDER BY created_at DESC
         LIMIT 200`,
       [cid]
@@ -337,9 +344,9 @@ router.get('/:slug/studio/products', async (req, res) => {
   }
 });
 
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Validacao de customization vs customization_config do produto
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 function validateCustomizationValues(config, values) {
   if (!config || typeof config !== 'object') return null; // produto nao personalizavel
   if (!values || typeof values !== 'object') {
@@ -357,14 +364,14 @@ function validateCustomizationValues(config, values) {
   return null;
 }
 
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // POST /storefront/:slug/studio/upload
 // Upload publico de imagem ou PDF (cliente envia foto/gabarito direto da pagina).
 // Sem auth — protegido por slug + tamanho/tipo + key isolada por company.
 // Body: { content_base64, content_type, filename? }
 // Tipos aceitos: image/png, image/jpeg, image/jpg, image/webp, application/pdf
 // Para application/pdf: split('/').pop() retorna 'pdf' — ext correta automaticamente.
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 router.post('/:slug/studio/upload', async (req, res) => {
   try {
     const slug = req.params.slug.toLowerCase().trim();
@@ -434,7 +441,7 @@ router.post('/:slug/studio/upload', async (req, res) => {
   }
 });
 
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // POST /storefront/:slug/studio/order
 // Cria pedido Studio (digital_orders + digital_order_items
 //  com customization JSONB). Marca vertical='studio' e
@@ -443,7 +450,7 @@ router.post('/:slug/studio/upload', async (req, res) => {
 // effectivePrice = product.price + soma(price_delta das choices
 //   selecionadas em customization.option/color) + back_delta
 //   (quando customization.has_back_selected e cfg.back_charge_enabled)
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 router.post('/:slug/studio/order', async (req, res) => {
   const slug = req.params.slug.toLowerCase().trim();
   const {
@@ -780,11 +787,11 @@ router.post('/:slug/studio/order', async (req, res) => {
   }
 });
 
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // GET /storefront/:slug/studio/order/:oid
 // Poll de status do pedido Studio (cliente acompanha).
 // Inclui revisions policy pra cliente ver no estagio "sent".
-// ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 router.get('/:slug/studio/order/:oid', async (req, res) => {
   try {
     const { rows } = await db.query(`

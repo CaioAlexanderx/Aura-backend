@@ -1,6 +1,7 @@
 // ============================================================
 // AURA. — Rotas Multi-usuario RBAC (BE-09)
 // P1 #10: DELETE now truly removes pending members (not just suspend)
+// 19/06/2026 TEAM-RM: DELETE ?hard=true remove membro ativo/suspenso de vez (Configuracoes > Equipe)
 // ONDA 2.7: unified multi-CNPJ member management
 //   GET /unified — membros de todos os CNPJs do mesmo dono
 //   POST /invite  — delega para inviteMemberMulti (suporta company_ids[])
@@ -401,6 +402,11 @@ router.delete('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'adm
     if (rows[0].user_id === req.user.id) return res.status(400).json({ error: 'Voce nao pode remover a si mesmo' });
 
     const m = rows[0];
+    // 19/06/2026 TEAM-RM: ?hard=true => remocao REAL do membro (Configuracoes
+    // > Equipe ganhou "Remover" alem de "Suspender"). Convite pendente sempre
+    // some de vez (cancelar). Ativo/suspenso: hard delete so quando hard=true,
+    // senao mantem o comportamento antigo (suspender).
+    const hard = req.query.hard === 'true';
 
     if (m.status === 'pending') {
       // Sprint 4: log ANTES do DELETE pra preservar member_id na metadata
@@ -413,6 +419,17 @@ router.delete('/:mid', requireAuth, requireCompanyAccess({ roles: ['owner', 'adm
         [req.params.mid, req.params.id]
       );
       res.json({ message: 'Convite removido', deleted: true });
+    } else if (hard) {
+      // Log ANTES do DELETE pra preservar member_id na metadata do audit.
+      logAction(req.params.id, m.id, req.user.id, 'member_removed', {
+        role_label: m.role_label || null,
+        prev_status: m.status,
+      });
+      await db.query(
+        'DELETE FROM company_members WHERE id=$1 AND company_id=$2',
+        [req.params.mid, req.params.id]
+      );
+      res.json({ message: 'Membro removido', deleted: true, hard: true });
     } else {
       await db.query(
         `UPDATE company_members SET status='suspended', is_active=false WHERE id=$1 AND company_id=$2`,
