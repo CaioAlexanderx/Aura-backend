@@ -124,7 +124,7 @@ async function main() {
       total_value: price,
       serie: config.serie_nfce, numero,
       recipient_cpf: arg('cpf') || undefined,
-      observacoes: 'SMOKE TEST S1.6 — emissao propria Aura',
+      observacoes: 'SMOKE TEST S1.6 - emissao propria Aura',
     };
 
     const t0 = Date.now();

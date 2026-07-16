@@ -36,9 +36,23 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
 
-/** Sanitiza texto p/ campos xProd/xNome: colapsa espaços, sem quebras. */
+/** Sanitiza texto p/ campos livres (xProd/xNome/infCpl/...): colapsa
+ * espaços e restringe ao charset do schema TString ([ -\u00FF], Latin-1).
+ * Travessão/aspas tipográficas/reticências viram equivalente ASCII; o resto
+ * fora do Latin-1 (emoji etc.) é removido — senão a SEFAZ devolve
+ * Rejeição 225 (Falha no Schema XML). Caso real: 16/07, "—" no xFant. */
+const TXT_MAP = {
+  '\u2013': '-', '\u2014': '-',            // en/em dash
+  '\u2018': "'", '\u2019': "'",            // aspas simples tipográficas
+  '\u201C': '"', '\u201D': '"',            // aspas duplas tipográficas
+  '\u2026': '...', '\u00A0': ' ',          // reticências, nbsp
+  '\u2022': '-', '\u2122': 'TM',           // bullet, trademark
+};
 function txt(s, max) {
-  const clean = String(s || '').replace(/\s+/g, ' ').trim();
+  const clean = String(s || '')
+    .replace(/[\u2013\u2014\u2018\u2019\u201C\u201D\u2026\u00A0\u2022\u2122]/g, (ch) => TXT_MAP[ch])
+    .replace(/[^\u0020-\u00FF]/g, '')
+    .replace(/\s+/g, ' ').trim();
   return max ? clean.slice(0, max) : clean;
 }
 
