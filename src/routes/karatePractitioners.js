@@ -47,6 +47,14 @@
 // 02/07/2026: c6 — GET detalhe: janela de course_count ampliada de 1 para
 //   2 anos. Campo canônico agora é course_count_2y; course_count_last_year
 //   mantido como alias de back-compat (mesmo valor).
+// 16/07/2026: FPKT volta a ser OPCIONAL no POST/PATCH (decisão Caio,
+//   reverte a obrigatoriedade fechada em 14/07/2026 — H1). Sem número →
+//   grava NULL (nunca string vazia). O modo "auto" que inventava número
+//   sequencial continua removido — não reintroduzido. Unicidade continua
+//   validada quando o número É informado (POST e PATCH); os índices únicos
+//   uq_customers_federation_fpkt / idx_customers_karate_reg_number são
+//   partial (WHERE ... IS NOT NULL), então múltiplos NULL convivem sem
+//   violar unicidade — sem necessidade de migration.
 // ============================================================
 'use strict';
 
@@ -322,11 +330,15 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     guardian_name, guardian_cpf, guardian_phone, guardian_relationship,
     // Migration 205 — sexo e data de filiação
     sex, affiliation_since,
-    // Matrícula FPKT — OBRIGATÓRIA. O número é emitido pela federação FORA do
-    // nosso sistema (nunca por nós); aqui só REGISTRAMOS o que foi informado.
-    // Antes desta migration havia um modo "auto" (nextPractitionerRegistrationNumber)
-    // que inventava um número sequencial ("<N>-D") quando o campo vinha vazio —
-    // removido: gerar número sem autoridade da federação produz dado falso.
+    // Matrícula FPKT — OPCIONAL (decisão Caio, 16/07/2026 — reverte a
+    // obrigatoriedade fechada em 14/07/2026). O número é emitido pela
+    // federação FORA do nosso sistema (nunca por nós); aqui só REGISTRAMOS
+    // o que foi informado. Sem número → grava NULL (nunca string vazia).
+    // Um modo "auto" (nextPractitionerRegistrationNumber) que inventava um
+    // número sequencial ("<N>-D") quando o campo vinha vazio foi removido
+    // antes — CONTINUA removido: gerar número sem autoridade da federação
+    // produz dado falso. "Opcional" aqui significa "pode nascer sem", nunca
+    // "o backend inventa um".
     karate_registration_number,
     // Faixa inicial (campo de faixa no cadastro) → semeia a trajetória
     belt_level, belt_name, belt_schema, graduated_at,
@@ -338,16 +350,12 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
   if (!dojo_id) {
     return res.status(422).json({ error: 'Campo dojo_id é obrigatório', code: 'VALIDATION_ERROR' });
   }
-  // FPKT é obrigatório e nunca gerado por nós (a federação emite fora do
-  // sistema) — sem número, 422 antes de abrir transação. Fluxo recomendado
-  // para dojô/sensei sem número em mãos: POST /federation/:id/dojo/practitioner-requests
-  // (solicitação), que fica pendente até a federação aprovar com o número.
-  if (!karate_registration_number || !String(karate_registration_number).trim()) {
-    return res.status(422).json({
-      error: 'Campo karate_registration_number é obrigatório. O número FPKT é emitido pela federação — este sistema nunca gera número automaticamente.',
-      code: 'FPKT_NUMBER_REQUIRED',
-    });
-  }
+  // FPKT é OPCIONAL (decisão Caio, 16/07/2026) e nunca gerado por nós (a
+  // federação emite fora do sistema) — sem número, o cadastro segue normal
+  // e a coluna grava NULL. Fluxo alternativo para dojô/sensei que preferir
+  // aguardar o número em mãos antes de existir na ficha continua disponível:
+  // POST /federation/:id/dojo/practitioner-requests (solicitação), que fica
+  // pendente até a federação aprovar.
   if (sex !== undefined && sex !== null && sex !== '' && !VALID_SEX_VALUES.includes(sex)) {
     return res.status(422).json({ error: `sex inválido. Use: ${VALID_SEX_VALUES.join(', ')}`, code: 'VALIDATION_ERROR' });
   }
@@ -376,18 +384,30 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       return res.status(422).json({ error: 'dojo_id não pertence a esta federação', code: 'VALIDATION_ERROR' });
     }
 
-    // Número de registro: SEMPRE informado (validado no 422 acima) — nunca
-    // gerado por nós. Valida unicidade antes de inserir — 409 se já existir
-    // (o índice único uq_customers_federation_fpkt / idx_customers_karate_reg_number
-    // é o backstop final contra corrida de dois requests concorrentes).
-    const regNumber = String(karate_registration_number).trim();
-    const dupRes = await client.query(
-      `SELECT id FROM customers WHERE karate_registration_number = $1 LIMIT 1`,
-      [regNumber]
-    );
-    if (dupRes.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Número de matrícula já em uso.' });
+    // Número de registro (FPKT): OPCIONAL — nunca gerado por nós. Sem
+    // número → NULL (nunca string vazia: idx_customers_karate_reg_number
+    // é um índice único parcial que só exclui NULL, não '' — gravar ''
+    // faria o SEGUNDO cadastro sem FPKT estourar 409 por engano).
+    // uq_customers_federation_fpkt e idx_customers_karate_reg_number são
+    // ambos partial UNIQUE (WHERE karate_registration_number IS NOT NULL),
+    // então múltiplos praticantes com NULL convivem sem violar unicidade —
+    // confirmado no schema real (Supabase, 16/07/2026), sem necessidade de
+    // migration.
+    // Quando informado, valida unicidade antes de inserir — 409 se já
+    // existir (o índice único acima é o backstop final contra corrida de
+    // dois requests concorrentes).
+    const regNumber = (karate_registration_number != null && String(karate_registration_number).trim())
+      ? String(karate_registration_number).trim()
+      : null;
+    if (regNumber) {
+      const dupRes = await client.query(
+        `SELECT id FROM customers WHERE karate_registration_number = $1 LIMIT 1`,
+        [regNumber]
+      );
+      if (dupRes.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Número de matrícula já em uso.' });
+      }
     }
 
     const baseCols = `company_id, name, cpf_cnpj, rg, birth_date, email, phone,
@@ -646,23 +666,28 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
       }
     }
 
-    // Matrícula editável: valida unicidade (excluindo o próprio) antes de aplicar.
-    // Vazio não é permitido (a carteirinha depende do número).
+    // Matrícula editável: OPCIONAL (decisão Caio, 16/07/2026 — reverte a
+    // obrigatoriedade; se pode nascer sem FPKT, também pode ficar sem no
+    // PATCH — manter os dois em desacordo seria incoerente). Vazio/null →
+    // grava NULL (nunca string vazia — mesma razão do POST: o índice
+    // único parcial idx_customers_karate_reg_number só exclui NULL).
+    // Quando informado (trim não-vazio), valida unicidade (excluindo o
+    // próprio) antes de aplicar.
     if (b.karate_registration_number !== undefined) {
       const reg = String(b.karate_registration_number == null ? '' : b.karate_registration_number).trim();
       if (!reg) {
-        await client.query('ROLLBACK');
-        return res.status(422).json({ error: 'A matrícula não pode ficar vazia.', code: 'VALIDATION_ERROR' });
+        b.karate_registration_number = null; // normaliza p/ o SET dinâmico — limpa a matrícula
+      } else {
+        const dup = await client.query(
+          `SELECT id FROM customers WHERE karate_registration_number = $1 AND id <> $2 LIMIT 1`,
+          [reg, practitionerId]
+        );
+        if (dup.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({ error: 'Número de matrícula já em uso.' });
+        }
+        b.karate_registration_number = reg; // normaliza p/ o SET dinâmico
       }
-      const dup = await client.query(
-        `SELECT id FROM customers WHERE karate_registration_number = $1 AND id <> $2 LIMIT 1`,
-        [reg, practitionerId]
-      );
-      if (dup.rows.length) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'Número de matrícula já em uso.' });
-      }
-      b.karate_registration_number = reg; // normaliza p/ o SET dinâmico
     }
 
     const sets = [];

@@ -66,19 +66,44 @@ function buildPractitionersApp() {
 // ════════════════════════════════════════════════════════════
 // (a) + (b) — ficha direta (POST /federation/:id/practitioners)
 // ════════════════════════════════════════════════════════════
-describe('POST /federation/:id/practitioners — H1: número FPKT obrigatório, nunca gerado', () => {
-  it('422 FPKT_NUMBER_REQUIRED quando karate_registration_number não é enviado', (done) => {
+describe('POST /federation/:id/practitioners — H1: número FPKT opcional (reversão 16/07/2026), nunca gerado', () => {
+  // 16/07/2026 (decisão Caio): reverte a obrigatoriedade do FPKT fechada em
+  // 14/07/2026 — sem número o cadastro segue normal e grava NULL na coluna.
+  // O backend continua NUNCA gerando/inventando o número sozinho.
+  it('201 cria praticante quando karate_registration_number não é enviado (grava NULL)', (done) => {
     const app = buildPractitionersApp();
+    const mockClient = { query: jest.fn(), release: jest.fn() };
+    db.connect.mockResolvedValue(mockClient);
+
+    mockClient.query
+      .mockResolvedValueOnce({})                             // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: FED_ID }] })     // verifica federação
+      .mockResolvedValueOnce({ rows: [{ id: DOJO_ID }] })    // verifica dojô
+      // (sem dup check — sem número informado, a query é pulada)
+      .mockResolvedValueOnce({})                             // SAVEPOINT sex_affiliation_insert
+      .mockResolvedValueOnce({                               // INSERT customer
+        rows: [{
+          id: 'prac-sem-numero-001',
+          name: 'Aluno Sem Número',
+          dojo_id: DOJO_ID,
+          federation_id: FED_ID,
+          karate_registration_number: null,
+          is_active: true,
+          sex: null,
+          affiliation_since: null,
+        }],
+      })
+      .mockResolvedValueOnce({})                             // RELEASE SAVEPOINT sex_affiliation_insert
+      .mockResolvedValueOnce({});                            // COMMIT
+
     request(app)
       .post(`/federation/${FED_ID}/practitioners`)
       .set('Authorization', 'Bearer ' + adminToken)
       .send({ full_name: 'Aluno Sem Número', dojo_id: DOJO_ID })
       .end((err, res) => {
         if (err) return done(err);
-        expect(res.status).toBe(422);
-        expect(res.body.code).toBe('FPKT_NUMBER_REQUIRED');
-        // Nunca chega a abrir transação/consultar o banco — a validação é antes do BEGIN.
-        expect(db.connect).not.toHaveBeenCalled();
+        expect(res.status).toBe(201);
+        expect(res.body.karate_registration_number).toBeNull();
         done();
       });
   });

@@ -408,7 +408,46 @@ describe('POST /federation/:id/practitioners (criar praticante)', () => {
       });
   });
 
-  it('retorna 422 sem karate_registration_number (H1: número é obrigatório, backend nunca gera)', function(done) {
+  // 16/07/2026: decisão Caio reverte a obrigatoriedade do FPKT (H1,
+  // 14/07/2026) — sem número o cadastro segue normal e grava NULL. Mock
+  // dedicado (sobrescreve o db.connect do beforeEach) porque o caminho sem
+  // número PULA a query de dup check — a fila de mocks é mais curta.
+  it('cria praticante SEM karate_registration_number (FPKT é opcional — grava NULL, nunca gera)', function(done) {
+    const mockClient = { query: jest.fn(), release: jest.fn() };
+    db.connect.mockResolvedValue(mockClient);
+
+    mockClient.query
+      .mockResolvedValueOnce({})                            // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: FED_ID }] })   // verifica federação
+      .mockResolvedValueOnce({ rows: [{ id: DOJO_ID }] })  // verifica dojô
+      // (sem dup check — regNumber é null, a query é pulada)
+      .mockResolvedValueOnce({})                            // SAVEPOINT sex_affiliation_insert
+      .mockResolvedValueOnce({                              // INSERT customer
+        rows: [{
+          id: 'prac-uuid-003',
+          name: 'João Silva',
+          cpf_cnpj: '123.456.789-00',
+          rg: null,
+          birth_date: '1990-05-15',
+          email: 'joao@test.com',
+          phone: null,
+          is_student: true,
+          parent_guardian_id: null,
+          federation_id: FED_ID,
+          dojo_id: DOJO_ID,
+          is_arbiter: false,
+          is_instructor: false,
+          is_examiner: false,
+          karate_photo_url: null,
+          karate_registration_number: null,
+          is_active: true,
+          sex: null,
+          affiliation_since: null,
+        }],
+      })
+      .mockResolvedValueOnce({})                            // RELEASE SAVEPOINT sex_affiliation_insert
+      .mockResolvedValueOnce({});                           // COMMIT
+
     request(app)
       .post('/federation/' + FED_ID + '/practitioners')
       .set('Authorization', 'Bearer ' + adminToken)
@@ -421,8 +460,9 @@ describe('POST /federation/:id/practitioners (criar praticante)', () => {
       })
       .end(function(err, res) {
         if (err) return done(err);
-        expect(res.status).toBe(422);
-        expect(res.body.code).toBe('FPKT_NUMBER_REQUIRED');
+        expect(res.status).toBe(201);
+        expect(res.body.karate_registration_number).toBeNull();
+        expect(res.body.full_name).toBe('João Silva');
         done();
       });
   });
