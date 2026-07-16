@@ -133,19 +133,36 @@ router.get('/status', requireAuth, async (req, res) => {
 
 // GET /billing/karate-gate — estado BINÁRIO do gate de cobrança da federação
 // karatê (checkout "invisível"): 'ok' quando em dia; 'blocked' no vencimento /
-// atraso. Valor fixo R$169 (plano Negócio), sem seleção de plano. Read-only —
-// não cria cobrança nem toca no Asaas; só interpreta o estado já mantido pelo
-// webhook (billing_status) + datas.
+// atraso. Plano Negócio, sem seleção de plano. Read-only — não cria cobrança
+// nem toca no Asaas; só interpreta o estado já mantido pelo webhook
+// (billing_status) + datas.
+//
+// 16/07/2026: o valor NÃO é mais uma constante própria (AMOUNT = 169). Isso
+// duplicava a fonte de verdade que já existe em billingPricing.js — a mesma
+// família de bug que já mordeu este produto (vertical × vertical_active,
+// affiliation_model × karate_annuity_plan, remoteRows × rows...). O
+// /subscribe cobra getTotalValue(plan, cycle, billing_type, extraSeats) =
+// plano + R$19 × extra_seats_granted; o gate agora deriva o MESMO valor, pro
+// mesmo plano/ciclo que o botão desta tela vai assinar (negocio, monthly).
+// Assim, mudar o preço em PLANS.negocio.monthly já reflete aqui sem precisar
+// tocar nesta rota — e se a federação ganhar acesso extra, o número mostrado
+// na tela já é o que o Asaas vai cobrar (billing_type não afeta o valor,
+// ver applyCycle em billingPricing.js — 'PIX' aqui é só placeholder).
 router.get('/karate-gate', requireAuth, async (req, res) => {
   try {
+    // SELECT * (não lista de colunas) de propósito: extra_seats_granted pode
+    // não existir pré-migration 110. Uma lista explícita de colunas quebraria
+    // a query inteira com 42703 nesse caso; SELECT * simplesmente devolve a
+    // coluna ausente como undefined, e o parseInt(...) || 0 abaixo (mesmo
+    // padrão do /subscribe e do /validate-coupon) cobre isso com segurança.
     const { rows } = await db.query(
-      `SELECT id, plan, billing_status, trial_ends_at, next_billing_date, asaas_subscription_id
-         FROM companies WHERE id=$1`,
+      `SELECT * FROM companies WHERE id=$1`,
       [req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const c = rows[0];
-    const AMOUNT = 169; // plano Negócio (billingPricing.PLANS.negocio.monthly)
+    const extraSeats = parseInt(c.extra_seats_granted, 10) || 0;
+    const AMOUNT = getTotalValue('negocio', 'monthly', 'PIX', extraSeats);
     const now = new Date();
     const dueRaw = c.next_billing_date || c.trial_ends_at || null;
 
@@ -164,6 +181,7 @@ router.get('/karate-gate', requireAuth, async (req, res) => {
     res.json({
       state: blocked ? 'blocked' : 'ok',
       amount: AMOUNT,
+      extra_seats: extraSeats,
       billing_status: c.billing_status || null,
       due_date: dueRaw || null,
       has_subscription: !!c.asaas_subscription_id,
