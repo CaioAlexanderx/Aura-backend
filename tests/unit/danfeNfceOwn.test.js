@@ -1,4 +1,5 @@
-const { buildDanfeNfceHtml } = require('../../src/utils/buildDanfeNfceHtml');
+const { buildDanfeNfceHtml, QR_OPTS } = require('../../src/utils/buildDanfeNfceHtml');
+const { qrInlineSvg } = require('../../src/utils/qrInline');
 
 const company = {
   cnpj: '11222333000181', legal_name: 'Davi Calcados Ltda', trade_name: 'Davi Calçados',
@@ -38,9 +39,34 @@ describe('S2.3 — DANFE NFC-e da emissão própria', () => {
     expect(html).not.toContain('AMBIENTE DE HOMOLOGAÇÃO');
   });
 
-  test('QR da própria emissão (URL v2) vai pro gerador de imagem', () => {
+  // 16/07/2026: o QR passou a ser gerado local e embutido como SVG inline
+  // (era <img> do qrserver.com — ver qrInline.js). O teste antigo afirmava a
+  // URL do qrserver, que era detalhe de implementação; este afirma o que
+  // importa de verdade: QUAL texto o QR codifica, e que não há rede no meio.
+  test('QR da própria emissão (URL v2) é o que vai embutido no cupom', () => {
+    const em = emission();
+    const html = buildDanfeNfceHtml({ emission: em, company });
+    expect(html).toContain(qrInlineSvg(em.qr_code, QR_OPTS));
+    expect(html).not.toContain(qrInlineSvg(em.chave_acesso, QR_OPTS));
+  });
+
+  test('QR não depende de rede: nada de qrserver.com nem <img> no QR', () => {
     const html = buildDanfeNfceHtml({ emission: emission(), company });
-    expect(html).toContain(encodeURIComponent('https://www.homologacao.nfce.fazenda.sp.gov.br/qrcode?p='));
+    expect(html).not.toContain('qrserver.com');
+    expect(html).toContain('<div class="qr-wrap"><svg');
+  });
+
+  test('sem qr_code (gateway): QR cai no fallback da chave de acesso', () => {
+    const em = emission({ qr_code: null });
+    const html = buildDanfeNfceHtml({ emission: em, company });
+    expect(html).toContain(qrInlineSvg(em.chave_acesso, QR_OPTS));
+  });
+
+  test('auto-print não depende de onload/readyState', () => {
+    const html = buildDanfeNfceHtml({ emission: emission(), company });
+    expect(html).not.toContain('window.onload');
+    expect(html).not.toContain('readyState');
+    expect(html).toContain('document.images');
   });
 
   test('contingência (tpEmis=9): dizeres + DUAS vias', () => {

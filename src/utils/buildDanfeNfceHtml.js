@@ -12,9 +12,21 @@
 //   const html = buildDanfeNfceHtml({ emission, company });
 //   res.type('html').send(html);
 //
-// QR Code: usa qrserver.com (img src) — carrega síncrono pelo browser,
-// sem race com document.close() do popup. Mesmo padrão do PrintLabels.tsx.
+// QR Code (16/07/2026): gerado LOCAL e embutido como SVG inline
+// (utils/qrInline.js). Antes vinha de api.qrserver.com via <img src> e era a
+// metade visível do bug do Davi Calçados: o auto-print disparava antes do QR
+// chegar e o Chrome recusava o job com "Falha na impressão". O comentário
+// original aqui afirmava que o <img> "carrega síncrono pelo browser, sem race
+// com document.close()" — era falso, e custou dias de um lojista depurando uma
+// impressora sadia.
+//
+// Impressão (16/07/2026): utils/autoPrintScript.js. Não depende de
+// window.onload nem de readyState — ambos são inconfiáveis dentro de uma
+// janela montada por document.write (ver o porquê no próprio arquivo).
 // ============================================================================
+
+const { qrInlineSvg } = require('./qrInline');
+const { autoPrintScript } = require('./autoPrintScript');
 
 function escapeHtml(s) {
   if (s === null || s === undefined) return '';
@@ -124,11 +136,10 @@ function consultaUrlByUf(uf) {
   return CONSULTA_NFCE_URL[(uf || '').toUpperCase()] || CONSULTA_NFCE_URL._;
 }
 
-// QR Code via qrserver.com (API pública, gratuita). Retorna URL de imagem PNG.
-function qrImageUrl(text, size) {
-  const px = size || 200;
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${px}x${px}&data=${encodeURIComponent(text)}&bgcolor=ffffff&color=000000&margin=1`;
-}
+// QR do cupom: 28mm, ECC M, quiet zone 1 módulo. Constante única — o teste
+// reproduz o SVG com estes mesmos parâmetros pra afirmar QUAL texto foi
+// codificado, sem depender de detalhe de implementação do gerador.
+const QR_OPTS = { size: '28mm', margin: 1, ecc: 'M' };
 
 // ============================================================
 // Builder principal
@@ -167,8 +178,16 @@ function buildDanfeNfceHtml({ emission, company }) {
   const cpfNota = emission.customer_cpf ? formatCpf(emission.customer_cpf) : null;
   const nomeCliente = emission.customer_name || '';
   const consultaUrl = consultaUrlByUf(company.address_state);
-  // QR principal: usa o qr_code da Nuvem Fiscal se disponível (URL completa
+  // QR principal: usa o qr_code da emissão se disponível (URL completa
   // com chave + hash CSC), senão fallback pra chave de acesso.
+  //
+  // ⚠️ DÍVIDA CONHECIDA (16/07/2026): qr_code está NULL em 100% das emissões
+  // em produção — o caminho Nuvem Fiscal nunca devolve infNFeSupl/qrCode e
+  // ninguém baixa o XML pra extrair. Hoje cai sempre no fallback e o QR
+  // impresso codifica só a chave, que o app da SEFAZ não valida. É bug fiscal
+  // REAL e independente do bug de impressão corrigido aqui — PR separado (a
+  // engine própria já gera o QR certo em sefazSp/qrcode.js; falta o caminho
+  // do gateway e o backfill das notas já emitidas).
   const qrText = emission.qr_code || chave || consultaUrl;
   // Homolog: fake do gateway (HOMOLOG-) OU emissão própria em tpAmb=2
   // (QR aponta pro endpoint de homologação da SEFAZ-SP).
@@ -177,7 +196,13 @@ function buildDanfeNfceHtml({ emission, company }) {
   // S2.3: contingência offline (tpEmis=9) — dizeres + duas vias.
   const isContingencia = Number(emission.tp_emis) === 9;
 
-  // Logo: se company.logo_url, usa <img>; senão fallback pra iniciais (2 letras)
+  // QR inline (SVG, sem rede). String vazia se falhar — o cupom ainda sai
+  // com a chave de acesso legível logo acima.
+  const qrSvg = qrInlineSvg(qrText, QR_OPTS);
+
+  // Logo: se company.logo_url, usa <img>; senão fallback pra iniciais (2 letras).
+  // Segue remoto (R2) — é o único <img> que sobrou, e o autoPrintScript espera
+  // ele resolver (load OU error) antes de imprimir.
   const logoHtml = company.logo_url
     ? `<img class="logo-img" src="${escapeHtml(company.logo_url)}" alt="">`
     : `<div class="logo-fallback">${escapeHtml(getInitials(empresaNome))}</div>`;
@@ -254,9 +279,9 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '.item-calc{text-align:right;font-size:7.5pt;color:#000}';
   // Total
   html += '.total-row{font-size:10.5pt;font-weight:800;margin-top:1.5mm}';
-  // QR
+  // QR — SVG inline (era <img> remoto do qrserver.com até 16/07/2026)
   html += '.qr-wrap{text-align:center;margin:2mm 0 1mm 0}';
-  html += '.qr-wrap img{display:inline-block;width:28mm;height:28mm;image-rendering:pixelated}';
+  html += '.qr-wrap svg{display:inline-block;width:28mm;height:28mm}';
   // Consulta
   html += '.consulta{text-align:center;font-size:6.5pt;line-height:1.2;margin:1mm 0}';
   // Chave acesso
@@ -273,6 +298,9 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '</style></head><body>';
 
   // ========== Toolbar de tela (some no print) ==========
+  // Fallback manual: se o auto-print falhar por qualquer motivo, o operador
+  // ainda tem um botão. NUNCA remover — foi o único caminho que funcionou pro
+  // Davi enquanto o bug do race estava vivo.
   html += '<div class="print-toolbar">';
   html += `<span>DANFE NFC-e #${numero} — 80mm térmica</span>`;
   html += '<button onclick="window.print()">Imprimir</button>';
@@ -361,8 +389,8 @@ function buildDanfeNfceHtml({ emission, company }) {
   page += '<div class="section-label center">Chave de Acesso</div>';
   page += `<div class="chave">${escapeHtml(chaveFmt)}</div>`;
 
-  // QR único (SEFAZ) 28mm
-  page += `<div class="qr-wrap"><img src="${escapeHtml(qrImageUrl(qrText, 200))}" alt="QR NFC-e"></div>`;
+  // QR único (SEFAZ) 28mm — SVG inline, sem request
+  if (qrSvg) page += `<div class="qr-wrap">${qrSvg}</div>`;
   page += '<div class="consulta tiny">Consulte pela chave em<br>';
   page += `<b>${escapeHtml(consultaUrl.replace(/^https?:\/\//, ''))}</b></div>`;
 
@@ -381,14 +409,9 @@ function buildDanfeNfceHtml({ emission, company }) {
     html += '<div class="page"><div class="via-label">Via do Consumidor</div>' + page + '</div>';
   }
 
-  // Script: dispara print() depois que TODAS as imagens carregaram.
-  html += '<script>';
-  html += '(function(){';
-  html += 'function tryPrint(){setTimeout(function(){try{window.focus();window.print();}catch(e){}}, 400);}';
-  html += 'if(document.readyState==="complete"){tryPrint();}';
-  html += 'else{window.addEventListener("load", tryPrint);}';
-  html += '})();';
-  html += '</script>';
+  // Dispara o print sem depender de window.onload/readyState — ver o porquê
+  // em utils/autoPrintScript.js.
+  html += autoPrintScript({ delayMs: 250, bailMs: 3000 });
 
   html += '</body></html>';
   return html;
@@ -398,4 +421,5 @@ module.exports = {
   buildDanfeNfceHtml,
   // helpers expostos pra teste
   formatCnpj, formatCpf, formatChaveAcesso, formatDateBR, formatBRL, getInitials,
+  QR_OPTS,
 };
