@@ -1,5 +1,5 @@
 -- ============================================================
--- AURA. — Migration 173: Emissão própria de NFC-e (SEFAZ-SP) — S1.1
+-- AURA. — Migration 234 (ex-173): Emissão própria de NFC-e (SEFAZ-SP) — S1.1
 -- Roadmap NFC-e própria v1, Sessão 1.
 --
 -- 1. nfce_config: provider plugável ('nuvemfiscal'|'focusnfe'|'sefaz_sp')

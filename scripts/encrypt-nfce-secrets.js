@@ -2,7 +2,7 @@
 // ============================================================
 // AURA. — Backfill S1.1: cifra csc_token (em claro) → csc_token_enc
 // e NULLa a coluna em claro. Idempotente: pula linhas já cifradas
-// ou sem token. Roda DEPOIS da migration 173.
+// ou sem token. Roda DEPOIS da migration 234.
 //
 // Uso:
 //   CERT_MASTER_KEY=<64 hex> SUPABASE_DB_URL=postgres://... \

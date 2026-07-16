@@ -1,5 +1,5 @@
 -- ============================================================
--- AURA. — Migration 175: contingência offline (S3.1) + motor tributário (S3.2)
+-- AURA. — Migration 236 (ex-175): contingência offline (S3.1) + motor tributário (S3.2)
 --
 -- 1. nfce_pending_transmission: fila de retransmissão das notas emitidas
 --    em contingência (tpEmis=9). Prazo legal de transmissão controlado

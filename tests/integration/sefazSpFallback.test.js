@@ -62,7 +62,7 @@ const EMIT_BODY = {
 
 /**
  * Mock de db.query por inspeção de SQL. `opts.hasCols` controla se as colunas
- * da migration 176 existem. Guarda a última row de emissão em `state.emission`.
+ * da migration 237 existem. Guarda a última row de emissão em `state.emission`.
  */
 function makeDb(opts = {}) {
   const hasCols = opts.hasCols !== false;

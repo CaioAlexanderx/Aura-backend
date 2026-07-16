@@ -178,7 +178,7 @@ async function emitNfce(company, nfceData, ctx) {
     motivo_status: result.xMotivo || null,
     qr_code: qrCodeUrl,
     url_consulta: endpoints.urlConsulta,
-    // extras persistidos pela rota (colunas da migration 173)
+    // extras persistidos pela rota (colunas da migration 234)
     xml_signed: nfeXml,
     tp_emis: 1,
     provider: 'sefaz_sp',

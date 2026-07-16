@@ -120,7 +120,7 @@ function validatePayments(payments, totalNfce) {
 }
 
 // ── S4.2: cache module-level do check "colunas do fallback existem?" ──
-// Migration 176 (serie_sefaz_sp/next_number_sefaz_sp/provider_used/
+// Migration 237 (serie_sefaz_sp/next_number_sefaz_sp/provider_used/
 // fallback_reason) pode não estar aplicada quando o backend sobe (padrão do
 // CLAUDE.md). Sem as colunas, caímos no comportamento LEGADO: sem fallback,
 // série única do gateway, sem gravar provider_used. Cache pra não repetir o
@@ -149,7 +149,7 @@ async function fallbackColsAvailable() {
 
 // S4.2: grava provider_used/fallback_reason na emissão (defensivo p/ 42703).
 async function persistProviderUsed(emissionId, providerUsed, fallbackReason) {
-  if (!(await fallbackColsAvailable())) return; // migration 176 ausente: no-op
+  if (!(await fallbackColsAvailable())) return; // migration 237 ausente: no-op
   try {
     await db.query(
       `UPDATE nfce_emissions SET provider_used=$1, fallback_reason=$2 WHERE id=$3`,
@@ -163,7 +163,7 @@ async function persistProviderUsed(emissionId, providerUsed, fallbackReason) {
 
 router.get('/config', requireAuth, async (req, res) => {
   try {
-    // S4.4: provider + série/contador próprios (defensivo p/ migration 176 ausente)
+    // S4.4: provider + série/contador próprios (defensivo p/ migration 237 ausente)
     let rows;
     try {
       ({ rows } = await db.query(
@@ -208,7 +208,7 @@ router.post('/config', requireAuth, requireRole('client','analyst','admin'), asy
   try {
     const providerVal = (provider === undefined) ? null : provider;
     try {
-      // S4.4: caminho com colunas da migration 176
+      // S4.4: caminho com colunas da migration 237
       const { rows } = await db.query(
         `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce, provider, serie_sefaz_sp)
          VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false),COALESCE($9,'nuvemfiscal'),COALESCE($10,2))
@@ -226,7 +226,7 @@ router.post('/config', requireAuth, requireRole('client','analyst','admin'), asy
       return res.json({ config: rows[0] });
     } catch (e) {
       if (e.code !== '42703') throw e;
-      // Fallback legado (migration 176 não aplicada): sem provider/serie própria
+      // Fallback legado (migration 237 não aplicada): sem provider/serie própria
       const { rows } = await db.query(
         `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce)
          VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false))
@@ -317,7 +317,7 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     //
     // Numeração: a emissão própria usa SÉRIE/CONTADOR dedicados
     // (serie_sefaz_sp / next_number_sefaz_sp) pra nunca colidir com o gateway
-    // no fallback. Se as colunas da migration 176 não existirem (42703),
+    // no fallback. Se as colunas da migration 237 não existirem (42703),
     // caímos no comportamento LEGADO: sem fallback, série única do gateway.
     const wantSefazSp = config.provider === 'sefaz_sp' && tipo === 'nfce';
     const hasFallbackCols = await fallbackColsAvailable();
@@ -550,7 +550,7 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
           await db.query(`UPDATE nfce_emissions SET rejection_code=$1 WHERE id=$2`, [String(prov.cStat).slice(0,8), emission.id]);
         }
 
-        // S1.6/S3.1: extras da emissão própria (migrations 173/175)
+        // S1.6/S3.1: extras da emissão própria (migrations 234/175)
         if (useSefazSp) {
           await db.query(
             `UPDATE nfce_emissions SET xml_signed=$1, tp_emis=$2,
@@ -576,7 +576,7 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
         }
 
         // S4.2: rastro do provider efetivamente usado + motivo do fallback.
-        // Defensivo p/ migration 176 ausente (comportamento legado).
+        // Defensivo p/ migration 237 ausente (comportamento legado).
         await persistProviderUsed(emission.id, providerUsed, fallbackReason);
 
       } catch (apiErr) {
@@ -624,7 +624,7 @@ router.get('/', requireAuth, async (req, res) => {
     if (tipo)   { params.push(tipo);   where += ` AND tipo=$${params.length}`; }
     if (start)  { params.push(start);  where += ` AND created_at>=$${params.length}`; }
     if (end)    { params.push(end);    where += ` AND created_at<=$${params.length}`; }
-    // S4.4: provider_used/fallback_reason no SELECT (defensivo p/ migration 176)
+    // S4.4: provider_used/fallback_reason no SELECT (defensivo p/ migration 237)
     let rawRows;
     try {
       ({ rows: rawRows } = await db.query(

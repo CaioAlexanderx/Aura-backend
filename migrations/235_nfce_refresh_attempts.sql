@@ -1,5 +1,5 @@
 -- ============================================================
--- AURA. — Migration 174: retry/backoff de notas 'processando' (S2.4)
+-- AURA. — Migration 235 (ex-174): retry/backoff de notas 'processando' (S2.4)
 -- Emissão própria NFC-e: contador de tentativas de consulta + última
 -- tentativa, pro job nfceRefreshJob aplicar backoff exponencial.
 -- Idempotente.

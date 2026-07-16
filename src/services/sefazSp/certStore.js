@@ -1,6 +1,6 @@
 // ============================================================
 // AURA. — sefazSp/certStore: guarda/recupera certificado A1 cifrado
-// (tabela company_certificates, migration 173) — S1.3.
+// (tabela company_certificates, migration 234) — S1.3.
 //
 // Fluxo: upload (.pfx base64 + senha) → valida abrindo em memória →
 // cifra AES-256-GCM (secretCrypto, chave em env.CERT_MASTER_KEY) → upsert.
