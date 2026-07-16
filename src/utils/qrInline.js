@@ -15,6 +15,10 @@
 // requests, nada pra esperar, nada pra falhar. Sincrono de proposito,
 // pra manter buildDanfeNfceHtml() puro e sem async (as rotas que o
 // chamam nao precisam mudar).
+//
+// Validado (16/07) com sharp + jsqr: render a 224px (28mm @ 203dpi, a
+// resolucao real da termica) e decode de volta byte a byte, nos payloads
+// chave-nua, QR v2 real e QR longo de contingencia.
 // ============================================================
 'use strict';
 
@@ -43,12 +47,18 @@ function qrInlineSvg(text, opts = {}) {
     const data = qr.modules.data;
     const dim = n + margin * 2;
 
-    // Um unico <path> com todos os modulos escuros — bem menor que 1 <rect>
-    // por modulo (importa: isso vai inline no HTML de cada cupom).
+    // Um unico <path>, com merge dos modulos escuros consecutivos na
+    // horizontal: 1 sub-path por RUN, nao por modulo (-48% no payload real).
+    // Importa: isso vai inline no HTML de cada cupom impresso.
     let path = '';
     for (let y = 0; y < n; y++) {
-      for (let x = 0; x < n; x++) {
-        if (data[y * n + x]) path += `M${x + margin} ${y + margin}h1v1h-1z`;
+      let x = 0;
+      while (x < n) {
+        if (!data[y * n + x]) { x++; continue; }
+        let len = 0;
+        while (x + len < n && data[y * n + x + len]) len++;
+        path += `M${x + margin} ${y + margin}h${len}v1h-${len}z`;
+        x += len;
       }
     }
 
