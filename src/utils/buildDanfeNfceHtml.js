@@ -1,10 +1,10 @@
 // ============================================================================
-// AURA. — Gerador HTML da DANFE NFC-e térmica (80mm) — v2 compacta
+// AURA. — Gerador HTML da DANFE NFC-e termica (80mm) — v2 compacta
 //
 // Layout aprovado pelo Caio em 05/05/2026 (mockup mock_danfe_v2.html):
-// - Header com logo do cliente à esquerda + dados empresa à direita
-// - QR único 28mm centralizado (não 2 QRs como antes)
-// - Marca Aura textual discreta no rodapé
+// - Header com logo do cliente a esquerda + dados empresa a direita
+// - QR unico 28mm centralizado (nao 2 QRs como antes)
+// - Marca Aura textual discreta no rodape
 // - Body 8.5pt monospace, layout ~30% mais compacto que v1
 //
 // Uso:
@@ -12,9 +12,21 @@
 //   const html = buildDanfeNfceHtml({ emission, company });
 //   res.type('html').send(html);
 //
-// QR Code: usa qrserver.com (img src) — carrega síncrono pelo browser,
-// sem race com document.close() do popup. Mesmo padrão do PrintLabels.tsx.
+// QR Code (16/07/2026): gerado LOCAL e embutido como SVG inline
+// (utils/qrInline.js). Antes vinha de api.qrserver.com via <img src> e
+// era a metade visivel do bug do Davi Calcados: o auto-print disparava
+// antes do QR chegar e o Chrome recusava o job com "Falha na impressao".
+// O comentario original aqui dizia que o <img> "carrega sincrono pelo
+// browser, sem race com document.close()" — era falso, e custou caro:
+// a loja passou dias achando que a impressora estava com defeito.
+//
+// Impressao (16/07/2026): utils/autoPrintScript.js. Nao depende de
+// window.onload nem de readyState — ambos sao inconfiaveis dentro de uma
+// janela montada por document.write (ver o porque no proprio arquivo).
 // ============================================================================
+
+const { qrInlineSvg } = require('./qrInline');
+const { autoPrintScript } = require('./autoPrintScript');
 
 function escapeHtml(s) {
   if (s === null || s === undefined) return '';
@@ -41,7 +53,7 @@ function formatCpf(cpf) {
   return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
 }
 
-// Chave de acesso 44 dígitos em grupos de 4 pra leitura humana
+// Chave de acesso 44 digitos em grupos de 4 pra leitura humana
 function formatChaveAcesso(chave) {
   const d = String(chave || '').replace(/\D/g, '');
   if (d.length !== 44) return d;
@@ -61,7 +73,7 @@ function formatDateBR(dt) {
   return `${dd}/${mm}/${yyyy} ${hh}:${mi}:${ss}`;
 }
 
-// Iniciais 2 letras pra fallback do logo. "Davi Calçados Matriz" → "DC".
+// Iniciais 2 letras pra fallback do logo. "Davi Calcados Matriz" → "DC".
 function getInitials(name) {
   if (!name) return '?';
   const words = String(name).trim().split(/\s+/).filter(w => w.length > 0);
@@ -108,7 +120,7 @@ function paymentLabel(m) {
   return PAYMENT_LABELS[String(m).toLowerCase()] || PAYMENT_LABELS[String(m)] || String(m).toUpperCase();
 }
 
-// URL pública de consulta NFC-e por UF
+// URL publica de consulta NFC-e por UF
 const CONSULTA_NFCE_URL = {
   SP: 'https://www.nfce.fazenda.sp.gov.br/NFCeConsultaPublica',
   RJ: 'https://www4.fazenda.rj.gov.br/consultaNFCe/',
@@ -116,18 +128,12 @@ const CONSULTA_NFCE_URL = {
   RS: 'https://www.sefaz.rs.gov.br/NFCE/NFCE-COM.aspx',
   PR: 'http://www.fazenda.pr.gov.br/nfce',
   SC: 'https://sat.sef.sc.gov.br/nfce/consulta',
-  // fallback genérico — site SEFAZ nacional
+  // fallback generico — site SEFAZ nacional
   _: 'https://www.nfe.fazenda.gov.br/portal/consulta.aspx',
 };
 
 function consultaUrlByUf(uf) {
   return CONSULTA_NFCE_URL[(uf || '').toUpperCase()] || CONSULTA_NFCE_URL._;
-}
-
-// QR Code via qrserver.com (API pública, gratuita). Retorna URL de imagem PNG.
-function qrImageUrl(text, size) {
-  const px = size || 200;
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${px}x${px}&data=${encodeURIComponent(text)}&bgcolor=ffffff&color=000000&margin=1`;
 }
 
 // ============================================================
@@ -167,17 +173,26 @@ function buildDanfeNfceHtml({ emission, company }) {
   const cpfNota = emission.customer_cpf ? formatCpf(emission.customer_cpf) : null;
   const nomeCliente = emission.customer_name || '';
   const consultaUrl = consultaUrlByUf(company.address_state);
-  // QR principal: usa o qr_code da Nuvem Fiscal se disponível (URL completa
-  // com chave + hash CSC), senão fallback pra chave de acesso.
+  // QR principal: usa o qr_code da emissao se disponivel (URL completa com
+  // chave + hash CSC), senao fallback pra chave de acesso.
+  //
+  // ⚠️ DIVIDA CONHECIDA (16/07/2026): qr_code esta NULL em 100% das emissoes
+  // em producao — o caminho Nuvem Fiscal nunca devolve infNFeSupl/qrCode e
+  // ninguem baixa o XML pra extrair. Ou seja: hoje cai sempre no fallback e
+  // o QR impresso codifica so a chave, que o app da SEFAZ nao valida. E bug
+  // fiscal REAL e independente do bug de impressao corrigido aqui — tratado
+  // em PR separado (a engine propria ja gera o QR certo em sefazSp/qrcode.js;
+  // falta o caminho do gateway e o backfill das notas ja emitidas).
   const qrText = emission.qr_code || chave || consultaUrl;
-  // Homolog: fake do gateway (HOMOLOG-) OU emissão própria em tpAmb=2
-  // (QR aponta pro endpoint de homologação da SEFAZ-SP).
-  const isHomologacao = String(protocolo).startsWith('HOMOLOG-')
-    || /homologacao\./.test(String(emission.qr_code || ''));
-  // S2.3: contingência offline (tpEmis=9) — dizeres + duas vias.
-  const isContingencia = Number(emission.tp_emis) === 9;
+  const isHomologacao = String(protocolo).startsWith('HOMOLOG-');
 
-  // Logo: se company.logo_url, usa <img>; senão fallback pra iniciais (2 letras)
+  // QR inline (SVG, sem rede). String vazia se falhar — o cupom ainda sai
+  // com a chave de acesso legivel logo acima.
+  const qrSvg = qrInlineSvg(qrText, { size: '28mm', margin: 1, ecc: 'M' });
+
+  // Logo: se company.logo_url, usa <img>; senao fallback pra iniciais (2 letras).
+  // Segue remoto (R2) — e o unico <img> que sobrou, e o autoPrintScript espera
+  // ele resolver (load OU error) antes de imprimir.
   const logoHtml = company.logo_url
     ? `<img class="logo-img" src="${escapeHtml(company.logo_url)}" alt="">`
     : `<div class="logo-fallback">${escapeHtml(getInitials(empresaNome))}</div>`;
@@ -254,9 +269,9 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '.item-calc{text-align:right;font-size:7.5pt;color:#000}';
   // Total
   html += '.total-row{font-size:10.5pt;font-weight:800;margin-top:1.5mm}';
-  // QR
+  // QR — agora SVG inline (era <img> remoto ate 16/07/2026)
   html += '.qr-wrap{text-align:center;margin:2mm 0 1mm 0}';
-  html += '.qr-wrap img{display:inline-block;width:28mm;height:28mm;image-rendering:pixelated}';
+  html += '.qr-wrap svg{display:inline-block;width:28mm;height:28mm}';
   // Consulta
   html += '.consulta{text-align:center;font-size:6.5pt;line-height:1.2;margin:1mm 0}';
   // Chave acesso
@@ -266,129 +281,115 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '.consumidor{font-size:7.5pt;line-height:1.3}';
   // Aviso homologação
   html += '.homolog-warn{text-align:center;border:2px dashed #dc2626;padding:1.5mm;font-size:7.5pt;font-weight:700;color:#dc2626;margin:1mm 0}';
-  html += '.conting-warn{text-align:center;border:2px solid #000;padding:1.5mm;font-size:7.5pt;font-weight:800;margin:1mm 0}';
-  html += '.via-label{text-align:center;font-size:6.5pt;font-weight:700;letter-spacing:0.5pt;text-transform:uppercase;margin-bottom:1mm}';
   // Marca Aura discreta (só texto, sem QR)
   html += '.aura-mark{text-align:center;margin-top:2.5mm;padding-top:1.5mm;border-top:1px dotted #888;font-size:5.5pt;color:#666;font-style:italic;letter-spacing:0.3pt}';
   html += '</style></head><body>';
 
   // ========== Toolbar de tela (some no print) ==========
+  // Fallback manual: se o auto-print falhar por qualquer motivo, o operador
+  // ainda tem um botao. NUNCA remover — foi o unico caminho que funcionou
+  // pro Davi enquanto o bug do race estava vivo.
   html += '<div class="print-toolbar">';
   html += `<span>DANFE NFC-e #${numero} — 80mm térmica</span>`;
   html += '<button onclick="window.print()">Imprimir</button>';
   html += '</div>';
 
-  // ========== PÁGINA (1 ou 2 vias) ==========
-  let page = '';
+  // ========== PÁGINA ==========
+  html += '<div class="page">';
 
   // Aviso homologação (se aplicável)
   if (isHomologacao) {
-    page += '<div class="homolog-warn">EMITIDA EM AMBIENTE DE HOMOLOGAÇÃO<br>SEM VALOR FISCAL</div>';
+    html += '<div class="homolog-warn">EMITIDA EM AMBIENTE DE HOMOLOGAÇÃO<br>SEM VALOR FISCAL</div>';
   }
 
   // ===== Header: logo à esquerda + dados empresa =====
-  page += '<div class="header">';
-  page += logoHtml;
-  page += '<div class="empresa-info">';
-  page += `<div class="nome">${escapeHtml(empresaNome)}</div>`;
-  page += '<div class="info">';
-  page += `CNPJ ${cnpj}`;
-  if (ie) page += `<br>IE ${escapeHtml(ie)}`;
-  if (enderecoLinha1) page += `<br>${escapeHtml(enderecoLinha1)}`;
-  if (enderecoLinha2) page += ` — ${escapeHtml(enderecoLinha2)}`;
-  if (enderecoLinha3 || cep) page += `<br>${escapeHtml(enderecoLinha3)}${cep ? ' · ' + escapeHtml(cep) : ''}`;
-  page += '</div>';
-  page += '</div>';
-  page += '</div>';
+  html += '<div class="header">';
+  html += logoHtml;
+  html += '<div class="empresa-info">';
+  html += `<div class="nome">${escapeHtml(empresaNome)}</div>`;
+  html += '<div class="info">';
+  html += `CNPJ ${cnpj}`;
+  if (ie) html += `<br>IE ${escapeHtml(ie)}`;
+  if (enderecoLinha1) html += `<br>${escapeHtml(enderecoLinha1)}`;
+  if (enderecoLinha2) html += ` — ${escapeHtml(enderecoLinha2)}`;
+  if (enderecoLinha3 || cep) html += `<br>${escapeHtml(enderecoLinha3)}${cep ? ' · ' + escapeHtml(cep) : ''}`;
+  html += '</div>';
+  html += '</div>';
+  html += '</div>';
 
-  page += '<div class="divider"></div>';
+  html += '<div class="divider"></div>';
 
   // Título DANFE
-  page += '<div class="titulo">DANFE NFC-e</div>';
-  page += '<div class="subtitulo">Documento Auxiliar da NF-e ao Consumidor<br>Não permite aproveitamento de crédito de ICMS</div>';
+  html += '<div class="titulo">DANFE NFC-e</div>';
+  html += '<div class="subtitulo">Documento Auxiliar da NF-e ao Consumidor<br>Não permite aproveitamento de crédito de ICMS</div>';
 
-  page += '<div class="divider"></div>';
+  html += '<div class="divider"></div>';
 
   // Itens
-  page += '<div class="section-label">Itens</div>';
-  page += itemsHtml;
+  html += '<div class="section-label">Itens</div>';
+  html += itemsHtml;
 
-  page += '<div class="divider"></div>';
+  html += '<div class="divider"></div>';
 
   // Totais
-  page += `<div class="row"><span>Qtd. itens</span><span>${totalQty}</span></div>`;
+  html += `<div class="row"><span>Qtd. itens</span><span>${totalQty}</span></div>`;
   if (totalDiscount > 0) {
-    page += `<div class="row"><span>Subtotal</span><span>R$ ${formatBRL(totalProducts)}</span></div>`;
-    page += `<div class="row"><span>Desconto</span><span>− R$ ${formatBRL(totalDiscount)}</span></div>`;
+    html += `<div class="row"><span>Subtotal</span><span>R$ ${formatBRL(totalProducts)}</span></div>`;
+    html += `<div class="row"><span>Desconto</span><span>− R$ ${formatBRL(totalDiscount)}</span></div>`;
   }
-  page += `<div class="row total-row"><span>VALOR TOTAL</span><span>R$ ${formatBRL(totalNfce)}</span></div>`;
+  html += `<div class="row total-row"><span>VALOR TOTAL</span><span>R$ ${formatBRL(totalNfce)}</span></div>`;
 
-  page += '<div class="divider"></div>';
+  html += '<div class="divider"></div>';
 
   // Pagamentos
-  page += '<div class="section-label">Forma de Pagamento</div>';
-  page += paymentsHtml;
+  html += '<div class="section-label">Forma de Pagamento</div>';
+  html += paymentsHtml;
   // Tributos aproximados (Lei 12.741) — placeholder neutro
-  page += '<div class="row small mt1"><span>Trib. aprox. (Lei 12.741)</span><span>conforme NCM</span></div>';
+  html += '<div class="row small mt1"><span>Trib. aprox. (Lei 12.741)</span><span>conforme NCM</span></div>';
 
-  page += '<div class="divider"></div>';
+  html += '<div class="divider"></div>';
 
   // Consumidor
-  page += '<div class="section-label">Consumidor</div>';
+  html += '<div class="section-label">Consumidor</div>';
   if (cpfNota || nomeCliente) {
-    page += '<div class="consumidor">';
-    if (cpfNota) page += `CPF ${escapeHtml(cpfNota)}`;
-    if (cpfNota && nomeCliente) page += '<br>';
-    if (nomeCliente) page += `${escapeHtml(nomeCliente)}`;
-    page += '</div>';
+    html += '<div class="consumidor">';
+    if (cpfNota) html += `CPF ${escapeHtml(cpfNota)}`;
+    if (cpfNota && nomeCliente) html += '<br>';
+    if (nomeCliente) html += `${escapeHtml(nomeCliente)}`;
+    html += '</div>';
   } else {
-    page += '<div class="consumidor">Consumidor não identificado</div>';
+    html += '<div class="consumidor">Consumidor não identificado</div>';
   }
 
-  page += '<div class="divider"></div>';
+  html += '<div class="divider"></div>';
 
   // Info NFC-e
-  page += '<div class="section-label">Info NFC-e</div>';
-  page += `<div class="small">NFC-e nº <b>${escapeHtml(String(numero))}</b> · Série ${escapeHtml(String(serie))}<br>`;
-  page += `Emitida em ${escapeHtml(dataEmissao)}</div>`;
-  if (protocolo && !String(protocolo).startsWith('HOMOLOG-')) {
-    page += `<div class="protocol mt1">Protocolo de Autorização<br>${escapeHtml(protocolo)}</div>`;
+  html += '<div class="section-label">Info NFC-e</div>';
+  html += `<div class="small">NFC-e nº <b>${escapeHtml(String(numero))}</b> · Série ${escapeHtml(String(serie))}<br>`;
+  html += `Emitida em ${escapeHtml(dataEmissao)}</div>`;
+  if (protocolo && !isHomologacao) {
+    html += `<div class="protocol mt1">Protocolo de Autorização<br>${escapeHtml(protocolo)}</div>`;
   }
 
-  page += '<div class="divider"></div>';
+  html += '<div class="divider"></div>';
 
   // Chave acesso
-  page += '<div class="section-label center">Chave de Acesso</div>';
-  page += `<div class="chave">${escapeHtml(chaveFmt)}</div>`;
+  html += '<div class="section-label center">Chave de Acesso</div>';
+  html += `<div class="chave">${escapeHtml(chaveFmt)}</div>`;
 
-  // QR único (SEFAZ) 28mm
-  page += `<div class="qr-wrap"><img src="${escapeHtml(qrImageUrl(qrText, 200))}" alt="QR NFC-e"></div>`;
-  page += '<div class="consulta tiny">Consulte pela chave em<br>';
-  page += `<b>${escapeHtml(consultaUrl.replace(/^https?:\/\//, ''))}</b></div>`;
+  // QR único (SEFAZ) 28mm — SVG inline, sem request
+  if (qrSvg) html += `<div class="qr-wrap">${qrSvg}</div>`;
+  html += '<div class="consulta tiny">Consulte pela chave em<br>';
+  html += `<b>${escapeHtml(consultaUrl.replace(/^https?:\/\//, ''))}</b></div>`;
 
   // ===== Marca Aura discreta (só texto) =====
-  page += '<div class="aura-mark">gerado por Aura · getaura.com.br</div>';
+  html += '<div class="aura-mark">gerado por Aura · getaura.com.br</div>';
 
+  html += '</div>'; // /page
 
-  const contingBanner = '<div class="conting-warn">EMITIDA EM CONTINGÊNCIA'
-    + (protocolo ? '' : '<br>Pendente de autorização da SEFAZ')
-    + '</div>';
-  if (isContingencia) {
-    // Contingência offline: DUAS vias obrigatórias (consumidor + estabelecimento)
-    html += '<div class="page">' + contingBanner + '<div class="via-label">Via do Consumidor</div>' + page + '</div>';
-    html += '<div class="page">' + contingBanner + '<div class="via-label">Via do Estabelecimento</div>' + page + '</div>';
-  } else {
-    html += '<div class="page"><div class="via-label">Via do Consumidor</div>' + page + '</div>';
-  }
-
-  // Script: dispara print() depois que TODAS as imagens carregaram.
-  html += '<script>';
-  html += '(function(){';
-  html += 'function tryPrint(){setTimeout(function(){try{window.focus();window.print();}catch(e){}}, 400);}';
-  html += 'if(document.readyState==="complete"){tryPrint();}';
-  html += 'else{window.addEventListener("load", tryPrint);}';
-  html += '})();';
-  html += '</script>';
+  // Dispara o print sem depender de window.onload/readyState — ver o porque
+  // em utils/autoPrintScript.js.
+  html += autoPrintScript({ delayMs: 250, bailMs: 3000 });
 
   html += '</body></html>';
   return html;
