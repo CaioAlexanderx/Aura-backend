@@ -164,11 +164,17 @@ describe('sefazSp/xmlBuilder — contingência (tpEmis=9)', () => {
 
 describe('sefazSp/xmlBuilder — escaping e composição', () => {
   test('caracteres especiais escapados (& < >)', () => {
+    // item 1 em tpAmb=2 vira o literal de homologação (Rejeição 373);
+    // o escaping é validado no item 2, que mantém a descrição real.
     const { infNfeXml } = build({
-      items: [{ name: 'Sapato P&B <40>', ncm: '64022000', quantity: 1, price: 10 }],
-      payments: [{ method: '01', value: 10 }], total_value: 10,
+      items: [
+        { name: 'Item um', ncm: '64022000', quantity: 1, price: 10 },
+        { name: 'Sapato P&B <40>', ncm: '64022000', quantity: 1, price: 10 },
+      ],
+      payments: [{ method: '01', value: 20 }], total_value: 20,
     });
     expect(infNfeXml).toContain('Sapato P&amp;B &lt;40&gt;');
+    expect(infNfeXml).toContain('<xProd>NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL</xProd>');
   });
 
   test('composeNfe: NFe com infNFe + infNFeSupl + Signature na ordem', () => {

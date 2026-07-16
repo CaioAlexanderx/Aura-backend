@@ -165,7 +165,12 @@ function buildDestXml({ cpf, cnpj, name }, tpAmb) {
     + '</dest>';
 }
 
-function buildDetXml(items, { crt }) {
+// Homologação (tpAmb=2): a SEFAZ exige que a descrição do PRIMEIRO item
+// seja exatamente este literal (Rejeição 373 caso contrário; caso real
+// 16/07 no smoke). Vale só pro xProd do item 1 — os demais ficam reais.
+const XPROD_HOMOLOG = 'NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL';
+
+function buildDetXml(items, { crt, tpAmb }) {
   const isSimples = crt === 1 || crt === 4;
   return items.map((item, i) => {
     const qty = Number(item.quantity || 1);
@@ -199,7 +204,9 @@ function buildDetXml(items, { crt }) {
       + '<prod>'
       + tag('cProd', txt(item.code || item.product_id || String(i + 1), 60))
       + tag('cEAN', ean)
-      + tag('xProd', txt(item.name || item.description || `Item ${i + 1}`, 120))
+      + tag('xProd', (Number(tpAmb) === 2 && i === 0)
+          ? XPROD_HOMOLOG
+          : txt(item.name || item.description || `Item ${i + 1}`, 120))
       + tag('NCM', ncm)
       + tag('CFOP', item.cfop || '5102')
       + tag('uCom', txt(item.unit, 6) || 'UN')
@@ -353,7 +360,7 @@ function buildInfNfe(company, nfceData, opts = {}) {
         cpf: nfceData.recipient_cpf, cnpj: nfceData.recipient_cnpj,
         name: nfceData.recipient_name,
       }, tpAmb)
-    + buildDetXml(nfceData.items, { crt })
+    + buildDetXml(nfceData.items, { crt, tpAmb })
     + buildTotalXml(nfceData.items)
     + '<transp>' + tag('modFrete', '9') + '</transp>'
     + buildPagXml(nfceData.payments, totalValue)
