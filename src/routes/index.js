@@ -46,6 +46,8 @@ router.use('/admin', require('./adminRevenue'));
 router.use('/admin', require('./adminOps'));
 router.use('/admin', require('./adminGrowth'));
 router.use('/admin/leads', require('./adminLeads'));
+router.use('/admin/aura-notas', require('./adminAuraNotas')); // Gestão Aura — NFC-e engine própria (staff)
+
 router.use('/admin/cadences',   require('./adminCadences'));
 router.use('/admin/lead-goals', require('./adminLeadGoals'));
 router.use('/admin/lead-views', require('./adminLeadViews'));
