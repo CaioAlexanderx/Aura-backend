@@ -71,13 +71,13 @@ describe('sefazSp/qrcode — QR v2 contingência offline', () => {
 });
 
 describe('sefazSp/qrcode — infNFeSupl', () => {
-  test('qrCode em CDATA + urlChave sem esquema', () => {
+  test('qrCode em CDATA + urlChave COM esquema (878 sem ele — validado na SEFAZ 16/07)', () => {
     const xml = qr.buildInfNfeSupl({
       qrCodeUrl: qr.buildQrCodeUrl(BASE),
       urlConsulta: 'https://www.homologacao.nfce.fazenda.sp.gov.br/consulta',
     });
     expect(xml).toMatch(/^<infNFeSupl><qrCode><!\[CDATA\[https:\/\//);
-    expect(xml).toContain('<urlChave>www.homologacao.nfce.fazenda.sp.gov.br/consulta</urlChave>');
+    expect(xml).toContain('<urlChave>https://www.homologacao.nfce.fazenda.sp.gov.br/consulta</urlChave>');
     expect(xml).not.toContain('TOKEN-SECRETO-CSC');
   });
 

@@ -24,7 +24,7 @@ function sha1HexUpper(s) {
   return crypto.createHash('sha1').update(s, 'utf8').digest('hex').toUpperCase();
 }
 
-/** Remove o esquema p/ urlChave (SP publica sem https://). */
+/** (16/07: urlChave vai COM esquema — SP espera https://...; rejeição 878 sem ele. stripScheme mantida p/ uso futuro.) */
 function stripScheme(url) {
   return String(url || '').replace(/^https?:\/\//, '');
 }
@@ -81,7 +81,7 @@ function buildInfNfeSupl({ qrCodeUrl, urlConsulta }) {
   if (!urlConsulta) throw new Error('infNFeSupl: urlConsulta obrigatória');
   return '<infNFeSupl>'
     + `<qrCode><![CDATA[${qrCodeUrl}]]></qrCode>`
-    + `<urlChave>${stripScheme(urlConsulta)}</urlChave>`
+    + `<urlChave>${urlConsulta}</urlChave>`
     + '</infNFeSupl>';
 }
 

@@ -21,7 +21,7 @@ const ENDPOINTS = {
       inutilizacao:   'https://homologacao.nfce.fazenda.sp.gov.br/ws/NFeInutilizacao4.asmx',
       // QR Code v2 + consulta pública (S1.5)
       qrCodeBase:     'https://www.homologacao.nfce.fazenda.sp.gov.br/qrcode',
-      urlConsulta:    'https://www.homologacao.nfce.fazenda.sp.gov.br/consulta',
+      urlConsulta:    'https://www.homologacao.nfce.fazenda.sp.gov.br/NFCeConsultaPublica',
     },
     producao: {
       autorizacao:    'https://nfce.fazenda.sp.gov.br/ws/NFeAutorizacao4.asmx',
@@ -31,7 +31,7 @@ const ENDPOINTS = {
       recepcaoEvento: 'https://nfce.fazenda.sp.gov.br/ws/NFeRecepcaoEvento4.asmx',
       inutilizacao:   'https://nfce.fazenda.sp.gov.br/ws/NFeInutilizacao4.asmx',
       qrCodeBase:     'https://www.nfce.fazenda.sp.gov.br/qrcode',
-      urlConsulta:    'https://www.nfce.fazenda.sp.gov.br/consulta',
+      urlConsulta:    'https://www.nfce.fazenda.sp.gov.br/NFCeConsultaPublica',
     },
   },
 };
