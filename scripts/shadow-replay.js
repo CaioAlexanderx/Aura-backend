@@ -137,10 +137,13 @@ async function main() {
     const { pfx, password } = await loadCertificate(db, targetId);
     const cert = openPfx(pfx, password);
 
-    // últimas N autorizadas da fonte (com XML do gateway)
+    // últimas N autorizadas da fonte. O diff estrutural precisa do XML do
+    // gateway (xml_url); a reemissão (--transmit) não — então em modo
+    // transmit aceitamos notas sem XML arquivado e apenas pulamos o diff.
+    const xmlFilter = transmit ? '' : "AND xml_url IS NOT NULL";
     const { rows: emissions } = await db.query(
       `SELECT * FROM nfce_emissions
-        WHERE company_id=$1 AND status='autorizada' AND tipo='nfce' AND xml_url IS NOT NULL
+        WHERE company_id=$1 AND status='autorizada' AND tipo='nfce' ${xmlFilter}
         ORDER BY authorized_at DESC NULLS LAST LIMIT $2`,
       [sourceId, limit]);
     console.log(`Shadow-mode: ${emissions.length} notas autorizadas da fonte (pedido: ${limit})`);
@@ -161,7 +164,8 @@ async function main() {
       }
     }
 
-    let ok = 0, comDiff = 0, falhas = 0, autorizadas = 0;
+    let ok = 0, comDiff = 0, falhas = 0, autorizadas = 0, transmitidas = 0, semDiffBase = 0;
+    const rejByCStat = new Map();
     const relatorio = [];
 
     for (const em of emissions) {
@@ -169,34 +173,42 @@ async function main() {
       try {
         const payload = rebuildPayload(em, ncmByProductId);
 
-        // 1) monta + assina localmente (tpAmb=2, emitente = alvo)
-        const built = buildInfNfe(target, payload, { tpAmb: 2, tpEmis: 1 });
-        const { signatureXml } = signInfNfe(built.infNfeXml, {
-          keyPem: cert.keyPem, certDerBase64: cert.certDerBase64,
-        });
-        const ownXml = composeNfe({ signedInfNfeXml: built.infNfeXml, signatureXml });
-
-        // 2) diff contra o XML do gateway
-        const gatewayXml = await fetchUrl(em.xml_url);
-        const { igual, diffs } = diffNotas(ownXml, gatewayXml);
-        if (igual) { ok++; console.log(`  OK    ${label}`); }
-        else {
-          comDiff++;
-          console.log(`  DIFF  ${label}`);
-          diffs.forEach((d) => console.log(`        · ${d}`));
-          relatorio.push({ nota: label, diffs });
+        // 1+2) diff local contra o XML do gateway — só quando há XML
+        //      arquivado (xml_url). Sem ele, seguimos direto pra transmissão.
+        if (em.xml_url) {
+          const built = buildInfNfe(target, payload, { tpAmb: 2, tpEmis: 1 });
+          const { signatureXml } = signInfNfe(built.infNfeXml, {
+            keyPem: cert.keyPem, certDerBase64: cert.certDerBase64,
+          });
+          const ownXml = composeNfe({ signedInfNfeXml: built.infNfeXml, signatureXml });
+          const gatewayXml = await fetchUrl(em.xml_url);
+          const { igual, diffs } = diffNotas(ownXml, gatewayXml);
+          if (igual) { ok++; console.log(`  OK    ${label}`); }
+          else {
+            comDiff++;
+            console.log(`  DIFF  ${label}`);
+            diffs.forEach((d) => console.log(`        · ${d}`));
+            relatorio.push({ nota: label, diffs });
+          }
+        } else {
+          semDiffBase++;
         }
 
         // 3) transmissão real em homolog (opcional)
         if (transmit) {
+          transmitidas++;
           const { rows: rsv } = await db.query(
             `UPDATE nfce_config SET next_number = next_number + 1, updated_at=NOW()
               WHERE company_id=$1 RETURNING (next_number - 1) AS numero`, [targetId]);
           const r = await sefazSp.emitNfce(target,
             { ...payload, serie: config.serie_nfce, numero: parseInt(rsv[0].numero, 10) },
             { db, config });
-          if (r.status === 'autorizado') autorizadas++;
-          else console.log(`        transmit: ${r.status} [${r.codigo_status}] ${r.motivo_status}`);
+          if (r.status === 'autorizado') { autorizadas++; console.log(`  AUTZ  ${label} -> [${r.codigo_status}]`); }
+          else {
+            const key = String(r.codigo_status || r.status);
+            rejByCStat.set(key, (rejByCStat.get(key) || 0) + 1);
+            console.log(`  REJ   ${label}: [${r.codigo_status}] ${r.motivo_status}`);
+          }
         }
       } catch (err) {
         falhas++;
@@ -205,8 +217,16 @@ async function main() {
     }
 
     console.log('—'.repeat(60));
-    console.log(`Diff estrutural: ${ok} idênticas · ${comDiff} com diff · ${falhas} erros`);
-    if (transmit) console.log(`Transmissão homolog: ${autorizadas}/${emissions.length} autorizadas (critério: 50/50)`);
+    console.log(`Diff estrutural: ${ok} idênticas · ${comDiff} com diff · ${falhas} erros · ${semDiffBase} sem XML-base`);
+    if (transmit) {
+      console.log(`Transmissão homolog: ${autorizadas}/${transmitidas} autorizadas (critério: 50/50)`);
+      if (rejByCStat.size) {
+        console.log('Rejeições por cStat:');
+        for (const [c, n] of [...rejByCStat.entries()].sort((a, b) => b[1] - a[1])) {
+          console.log(`  cStat ${c}: ${n}`);
+        }
+      }
+    }
     if (relatorio.length) {
       console.log('\nDiffs a explicar (critério: todos explicados ou corrigidos):');
       for (const r of relatorio) console.log(`  ${r.nota}: ${r.diffs.length} divergência(s)`);
