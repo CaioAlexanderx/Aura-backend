@@ -26,6 +26,10 @@ const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { logAuditAction }           = require('../middleware/auditLog');
 const nuvemfiscal                  = require('../services/nuvemfiscal');
+const sefazSp                      = require('../services/sefazSp');
+const engineBreaker                = require('../services/sefazSp/engineBreaker');
+const rejectionCatalog             = require('../services/sefazSp/rejectionCatalog');
+const taxEngine                    = require('../services/sefazSp/taxEngine');
 const { buildDanfeNfceHtml }       = require('../utils/buildDanfeNfceHtml');
 
 const INSTRUCOES_NOTA = {
@@ -115,33 +119,151 @@ function validatePayments(payments, totalNfce) {
   return null;
 }
 
-router.get('/config', requireAuth, async (req, res) => {
+// ── S4.2: cache module-level do check "colunas do fallback existem?" ──
+// Migration 237 (serie_sefaz_sp/next_number_sefaz_sp/provider_used/
+// fallback_reason) pode não estar aplicada quando o backend sobe (padrão do
+// CLAUDE.md). Sem as colunas, caímos no comportamento LEGADO: sem fallback,
+// série única do gateway, sem gravar provider_used. Cache pra não repetir o
+// probe a cada request (só reprobiamos se o primeiro probe deu erro).
+let _fallbackColsAvailable = null; // true | false | null(=ainda não checado)
+async function fallbackColsAvailable() {
+  if (_fallbackColsAvailable !== null) return _fallbackColsAvailable;
+  try {
+    await db.query(
+      `SELECT serie_sefaz_sp, next_number_sefaz_sp FROM nfce_config LIMIT 0`
+    );
+    await db.query(
+      `SELECT provider_used, fallback_reason FROM nfce_emissions LIMIT 0`
+    );
+    _fallbackColsAvailable = true;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') {
+      _fallbackColsAvailable = false;
+    } else {
+      // erro transitório (conexão etc): não cacheia, tenta de novo na próxima
+      return false;
+    }
+  }
+  return _fallbackColsAvailable;
+}
+
+// ── 16/07: aptidão pra emissão própria (modo AUTO do "Aura Notas").
+// Apta = A1 vigente salvo (company_certificates) + CSC configurado.
+// Cache 60s por company; defensivo pra tabela ausente (42P01 → gateway).
+const _engineCapableCache = new Map(); // companyId → { ok, at }
+async function engineCapable(companyId, config) {
+  const hasCsc = !!(config.csc_id && (config.csc_token_enc || config.csc_token));
+  if (!hasCsc) return false;
+  const hit = _engineCapableCache.get(companyId);
+  if (hit && Date.now() - hit.at < 60000) return hit.ok;
+  let ok = false;
   try {
     const { rows } = await db.query(
-      `SELECT id, company_id, serie_nfce, next_number, ambiente, uf,
-              inscricao_estadual, is_active, csc_id, auto_emit_nfce
-         FROM nfce_config WHERE company_id=$1`,
-      [req.params.id]
+      'SELECT 1 FROM company_certificates WHERE company_id=$1 AND not_after > NOW() LIMIT 1',
+      [companyId]
     );
+    ok = rows.length > 0;
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    ok = false;
+  }
+  _engineCapableCache.set(companyId, { ok, at: Date.now() });
+  return ok;
+}
+
+// S4.2: grava provider_used/fallback_reason na emissão (defensivo p/ 42703).
+async function persistProviderUsed(emissionId, providerUsed, fallbackReason) {
+  if (!(await fallbackColsAvailable())) return; // migration 237 ausente: no-op
+  try {
+    await db.query(
+      `UPDATE nfce_emissions SET provider_used=$1, fallback_reason=$2 WHERE id=$3`,
+      [providerUsed || null, fallbackReason || null, emissionId]
+    );
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+    _fallbackColsAvailable = false; // corrige cache se o probe mentiu
+  }
+}
+
+router.get('/config', requireAuth, async (req, res) => {
+  try {
+    // S4.4: provider + série/contador próprios (defensivo p/ migration 237 ausente)
+    let rows;
+    try {
+      ({ rows } = await db.query(
+        `SELECT id, company_id, serie_nfce, next_number, ambiente, uf,
+                inscricao_estadual, is_active, csc_id, auto_emit_nfce,
+                provider, serie_sefaz_sp, next_number_sefaz_sp
+           FROM nfce_config WHERE company_id=$1`,
+        [req.params.id]
+      ));
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      ({ rows } = await db.query(
+        `SELECT id, company_id, serie_nfce, next_number, ambiente, uf,
+                inscricao_estadual, is_active, csc_id, auto_emit_nfce, provider
+           FROM nfce_config WHERE company_id=$1`,
+        [req.params.id]
+      ));
+    }
     res.json({ config: rows[0] || null, instrucoes: INSTRUCOES_NOTA });
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar config NFC-e' }); }
 });
 
 router.post('/config', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce } = req.body;
+  const { serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce,
+          provider, serie_sefaz_sp } = req.body;
+
+  // S4.4: seletor de provider por empresa. Whitelist restrita (focusnfe não
+  // é ofertável ainda). undefined = não mexe no provider (compat).
+  if (provider !== undefined && provider !== null &&
+      !['nuvemfiscal', 'sefaz_sp'].includes(provider)) {
+    return res.status(400).json({ error: 'provider inválido (use "nuvemfiscal" ou "sefaz_sp")' });
+  }
+  let serieSefazSp = null;
+  if (serie_sefaz_sp !== undefined && serie_sefaz_sp !== null) {
+    const s = parseInt(serie_sefaz_sp, 10);
+    if (!Number.isInteger(s) || s < 1 || s > 999) {
+      return res.status(400).json({ error: 'serie_sefaz_sp inválida (inteiro 1–999)' });
+    }
+    serieSefazSp = s;
+  }
+
   try {
-    const { rows } = await db.query(
-      `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false))
-       ON CONFLICT (company_id) DO UPDATE SET
-         serie_nfce=$2, ambiente=$3, uf=$4, inscricao_estadual=$5,
-         csc_id=$6, csc_token=$7, auto_emit_nfce=COALESCE($8,nfce_config.auto_emit_nfce), updated_at=NOW()
-       RETURNING *`,
-      [req.params.id, serie_nfce||1, ambiente||'homologacao', uf||'SP',
-       inscricao_estadual||null, csc_id||null, csc_token||null,
-       typeof auto_emit_nfce==='boolean' ? auto_emit_nfce : null]
-    );
-    res.json({ config: rows[0] });
+    const providerVal = (provider === undefined) ? null : provider;
+    try {
+      // S4.4: caminho com colunas da migration 237
+      const { rows } = await db.query(
+        `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce, provider, serie_sefaz_sp)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false),COALESCE($9,'nuvemfiscal'),COALESCE($10,2))
+         ON CONFLICT (company_id) DO UPDATE SET
+           serie_nfce=$2, ambiente=$3, uf=$4, inscricao_estadual=$5,
+           csc_id=$6, csc_token=$7, auto_emit_nfce=COALESCE($8,nfce_config.auto_emit_nfce),
+           provider=COALESCE($9,nfce_config.provider),
+           serie_sefaz_sp=COALESCE($10,nfce_config.serie_sefaz_sp), updated_at=NOW()
+         RETURNING *`,
+        [req.params.id, serie_nfce||1, ambiente||'homologacao', uf||'SP',
+         inscricao_estadual||null, csc_id||null, csc_token||null,
+         typeof auto_emit_nfce==='boolean' ? auto_emit_nfce : null,
+         providerVal, serieSefazSp]
+      );
+      return res.json({ config: rows[0] });
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      // Fallback legado (migration 237 não aplicada): sem provider/serie própria
+      const { rows } = await db.query(
+        `INSERT INTO nfce_config (company_id, serie_nfce, ambiente, uf, inscricao_estadual, csc_id, csc_token, auto_emit_nfce)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,false))
+         ON CONFLICT (company_id) DO UPDATE SET
+           serie_nfce=$2, ambiente=$3, uf=$4, inscricao_estadual=$5,
+           csc_id=$6, csc_token=$7, auto_emit_nfce=COALESCE($8,nfce_config.auto_emit_nfce), updated_at=NOW()
+         RETURNING *`,
+        [req.params.id, serie_nfce||1, ambiente||'homologacao', uf||'SP',
+         inscricao_estadual||null, csc_id||null, csc_token||null,
+         typeof auto_emit_nfce==='boolean' ? auto_emit_nfce : null]
+      );
+      return res.json({ config: rows[0] });
+    }
   } catch (err) { res.status(500).json({ error: 'Erro ao salvar config' }); }
 });
 
@@ -205,9 +327,46 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     const paymentsErr = validatePayments(payments, totalNfce);
     if (paymentsErr) return res.status(400).json(paymentsErr);
 
+    // ── S4.2: seletor de provider + fallback engine→gateway ──────────────
+    // CLASSIFICAÇÃO DE ERROS (regra de ouro):
+    //   • THROW de sefazSp.emitNfce = defeito da NOSSA engine (cert não
+    //     carrega/decripta, CSC ausente, falha de assinatura, bug de XML) →
+    //     registra no breaker e FALLBACK pro gateway na MESMA request.
+    //   • Resultado 'contingencia' = SEFAZ fora do ar → NÃO faz fallback
+    //     (o gateway fala com a MESMA SEFAZ e falharia igual; a contingência
+    //     offline já resolve). Segue o fluxo S3.
+    //   • Resultado 'rejeitado' = SEFAZ respondeu → NÃO faz fallback (é
+    //     problema de dado, o gateway rejeitaria igual) e conta como SUCESSO
+    //     pro breaker (a engine funcionou).
+    //
+    // Numeração: a emissão própria usa SÉRIE/CONTADOR dedicados
+    // (serie_sefaz_sp / next_number_sefaz_sp) pra nunca colidir com o gateway
+    // no fallback. Se as colunas da migration 237 não existirem (42703),
+    // caímos no comportamento LEGADO: sem fallback, série única do gateway.
+    // ── 16/07: "Aura Notas" é o provedor PRIMÁRIO e OCULTO (sem seletor na
+    // UI — decisão de produto). Semântica do nfce_config.provider:
+    //   'nuvemfiscal' → força gateway (kill-switch interno, via SQL);
+    //   'sefaz_sp'    → força engine;
+    //   NULL / outro  → AUTO: engine quando a empresa está APTA (A1 vigente
+    //                   salvo + CSC configurado), senão gateway. Fallback
+    //                   S4.2 + breaker S4.3 cobrem falhas em runtime.
+    const wantSefazSp = tipo === 'nfce'
+      && config.provider !== 'nuvemfiscal'
+      && (config.provider === 'sefaz_sp' || await engineCapable(req.params.id, config));
+    const hasFallbackCols = await fallbackColsAvailable();
+    const breakerOpen = wantSefazSp && hasFallbackCols && engineBreaker.isOpen(req.params.id);
+    // useSefazSp = de fato vamos tentar a engine (provider próprio, colunas
+    // presentes E breaker fechado). Breaker aberto → direto ao gateway.
+    let useSefazSp = wantSefazSp && hasFallbackCols && !breakerOpen;
+    let providerUsed = useSefazSp ? 'sefaz_sp' : 'nuvemfiscal';
+    let fallbackReason = breakerOpen ? 'breaker_open' : null;
+
     // ── #3 (02/06/2026): reserva ATOMICA do numero ANTES de transmitir ──
     // Retransmissao da MESMA venda+tipo apos rejeicao reusa o numero ja
     // reservado (so nota autorizada/denegada consome numero na SEFAZ).
+    // S4.2: a coluna de contador depende do provider efetivo.
+    const numCol   = useSefazSp ? 'next_number_sefaz_sp' : 'next_number';
+    let   serieNF  = useSefazSp ? config.serie_sefaz_sp : config.serie_nfce;
     let numeroNF = null;
     if (sale_id) {
       const { rows: prevRej } = await db.query(
@@ -223,22 +382,23 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
       // Incremento atomico: o row-lock de nfce_config serializa concorrentes,
       // entao cada emissao concorrente recebe um numero distinto.
       const { rows: rsv } = await db.query(
-        `UPDATE nfce_config SET next_number = next_number + 1, updated_at=NOW()
-          WHERE company_id=$1 RETURNING (next_number - 1) AS numero`,
+        `UPDATE nfce_config SET ${numCol} = ${numCol} + 1, updated_at=NOW()
+          WHERE company_id=$1 RETURNING (${numCol} - 1) AS numero`,
         [req.params.id]
       );
-      numeroNF = (rsv[0] && rsv[0].numero != null) ? parseInt(rsv[0].numero, 10) : config.next_number;
+      numeroNF = (rsv[0] && rsv[0].numero != null) ? parseInt(rsv[0].numero, 10)
+        : (useSefazSp ? (config.next_number_sefaz_sp || 1) : config.next_number);
     }
-    const serieNF  = config.serie_nfce;
 
     const now = new Date();
     const yy = String(now.getFullYear()).slice(2);
     const mm = String(now.getMonth()+1).padStart(2,'0');
     const modelo = tipo==='nfe' ? '55' : '65';
     const cUF = String(nuvemfiscal.ufToCodigo(config.uf||company.address_state)).padStart(2,'0');
-    const chaveAcessoTmp =
-      `${cUF}${yy}${mm}${'0'.repeat(14)}${modelo}${String(serieNF).padStart(3,'0')}` +
-      `${String(numeroNF).padStart(9,'0')}1${'0'.repeat(8)}1`;
+    const buildChaveTmp = (serie, numero) =>
+      `${cUF}${yy}${mm}${'0'.repeat(14)}${modelo}${String(serie).padStart(3,'0')}` +
+      `${String(numero).padStart(9,'0')}1${'0'.repeat(8)}1`;
+    let chaveAcessoTmp = buildChaveTmp(serieNF, numeroNF);
 
     const { rows: created } = await db.query(
       `INSERT INTO nfce_emissions
@@ -258,35 +418,53 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
     let finalStatus = 'processando';
     let prov = {};
 
-    if (config.ambiente === 'homologacao' && process.env.NUVEM_FISCAL_FORCE !== 'true') {
+    // useSefazSp já foi decidido acima (provider próprio + colunas + breaker
+    // fechado). S1.6: emissão própria só NFC-e (65); NF-e (55) segue no gateway.
+
+    if (config.ambiente === 'homologacao' && !useSefazSp && process.env.NUVEM_FISCAL_FORCE !== 'true') {
       prov.protocolo = 'HOMOLOG-' + String(numeroNF).padStart(6,'0');
       finalStatus = 'autorizada';
       await db.query(`UPDATE nfce_emissions SET status='autorizada', protocolo=$1, authorized_at=NOW() WHERE id=$2`, [prov.protocolo, emission.id]);
+      await persistProviderUsed(emission.id, providerUsed, fallbackReason);
     } else {
       try {
         const productIds = items.map(i => i.product_id).filter(id => typeof id==='string' && id.length>0);
         const ncmByProductId = new Map();
+        const taxProfileByProductId = new Map(); // S3.2
         if (productIds.length > 0) {
           const { rows: prodRows } = await db.query(
-            `SELECT id, ncm FROM products WHERE id=ANY($1::uuid[]) AND company_id=$2`,
+            `SELECT id, ncm, tax_profile FROM products WHERE id=ANY($1::uuid[]) AND company_id=$2`,
             [productIds, req.params.id]
           );
           for (const p of prodRows) {
             const n = (p.ncm||'').trim();
             if (n && n !== '00000000') ncmByProductId.set(p.id, n);
+            if (p.tax_profile) taxProfileByProductId.set(p.id, p.tax_profile);
           }
         }
 
+        const crtCompany = company.tax_regime === 'mei' ? 4
+          : (company.tax_regime === 'lucro_presumido' || company.tax_regime === 'lucro_real') ? 3 : 1;
         const nfItems = items.map(i => {
           const ncmFromItem = (i.ncm && String(i.ncm).trim()!=='00000000') ? String(i.ncm).trim() : null;
           const ncmFromDb   = ncmByProductId.get(i.product_id);
-          return {
+          const base = {
             code: String(i.product_id||i.code||''), name: i.product_name||i.name||'',
             description: i.description||i.product_name||i.name||'',
             ncm: ncmFromItem||ncmFromDb||'00000000', cfop: i.cfop||'5102', unit: i.unit||'UN',
             quantity: Number(i.quantity||1), price: Number(i.unit_price||i.price||0),
+            discount: Number(i.discount)||0,
             barcode: i.barcode||undefined,
           };
+          // S3.2: motor tributário só no caminho próprio (gateway intocado)
+          if (useSefazSp) {
+            const tax = taxEngine.resolveItemTax({
+              taxProfile: taxProfileByProductId.get(i.product_id), crt: crtCompany,
+            });
+            base.csosn = tax.csosn; base.orig = tax.orig;
+            base.pisCst = tax.pisCst; base.cofinsCst = tax.cofinsCst;
+          }
+          return base;
         });
 
         // F4 (29/05/2026): crediario = indPag 1 (a prazo) automaticamente.
@@ -302,15 +480,64 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
             }))
           : undefined;
 
-        const emitFn = tipo==='nfe' ? nuvemfiscal.emitNfe : nuvemfiscal.emitNfce;
-        const provResult = await emitFn(company, {
+        const buildEmitPayload = (serie, numero) => ({
           items: nfItems, total_value: totalNfce, payments: nfPayments,
           payment_method: paymentCode(payment_method), payment_change,
           recipient_cpf: customer_cpf, recipient_cnpj, recipient_name: customer_name,
           recipient_email: customer_email,
-          serie: serieNF, numero: numeroNF, observacoes,
+          serie, numero, observacoes,
           reference: `${tipo}-${emission.id}`,
         });
+
+        let provResult;
+        if (useSefazSp) {
+          // ── S4.2: tenta a engine própria. THROW = defeito NOSSO → fallback.
+          try {
+            provResult = await sefazSp.emitNfce(
+              company, buildEmitPayload(serieNF, numeroNF),
+              { db, config, allowContingency: true }
+            );
+            // Chegou aqui: engine devolveu resultado (autorizado/rejeitado/
+            // contingencia). Rejeição/autorização = SUCESSO pro breaker; a
+            // contingência NÃO é falha da engine (é SEFAZ fora), então também
+            // NÃO conta como falha — só não conta como sucesso.
+            if (provResult && provResult.status !== 'contingencia') {
+              engineBreaker.recordSuccess(req.params.id);
+            }
+          } catch (engineErr) {
+            // Defeito de infra da nossa engine → registra no breaker e FALLBACK
+            // pro gateway na MESMA request. O número da série própria já
+            // reservado fica QUEIMADO (gap aceitável, resolúvel por inutilização
+            // S2.1). Reservamos um número NOVO da série do GATEWAY.
+            engineBreaker.recordFailure(req.params.id);
+            console.error('[nfce] engine SEFAZ-SP falhou (fallback→gateway):',
+              engineErr.message, engineErr.payload || '');
+
+            useSefazSp = false;
+            providerUsed = 'nuvemfiscal';
+            fallbackReason = ('engine_error: ' + (engineErr.message || 'erro desconhecido')).slice(0, 500);
+
+            // reserva atômica do número do GATEWAY + recalcula série/chave temp
+            const { rows: gRsv } = await db.query(
+              `UPDATE nfce_config SET next_number = next_number + 1, updated_at=NOW()
+                WHERE company_id=$1 RETURNING (next_number - 1) AS numero`,
+              [req.params.id]
+            );
+            numeroNF = (gRsv[0] && gRsv[0].numero != null) ? parseInt(gRsv[0].numero, 10) : config.next_number;
+            serieNF = config.serie_nfce;
+            chaveAcessoTmp = buildChaveTmp(serieNF, numeroNF);
+            await db.query(
+              `UPDATE nfce_emissions SET numero=$1, serie=$2, chave_acesso=$3 WHERE id=$4`,
+              [numeroNF, serieNF, chaveAcessoTmp, emission.id]
+            );
+
+            const emitFn = tipo === 'nfe' ? nuvemfiscal.emitNfe : nuvemfiscal.emitNfce;
+            provResult = await emitFn(company, buildEmitPayload(serieNF, numeroNF));
+          }
+        } else {
+          const emitFn = tipo==='nfe' ? nuvemfiscal.emitNfe : nuvemfiscal.emitNfce;
+          provResult = await emitFn(company, buildEmitPayload(serieNF, numeroNF));
+        }
 
         console.log('[nfce] provResult (POST):', JSON.stringify(provResult, null, 2));
         prov = extractProvFields(provResult);
@@ -351,20 +578,69 @@ router.post('/emit', requireAuth, requireRole('client','analyst','admin'), async
            authorizedAt, errorMessage]
         );
 
+        // S2.2: rejection_code é provider-agnóstico (catálogo amigável)
+        if (finalStatus === 'rejeitada' && prov.cStat) {
+          await db.query(`UPDATE nfce_emissions SET rejection_code=$1 WHERE id=$2`, [String(prov.cStat).slice(0,8), emission.id]);
+        }
+
+        // S1.6/S3.1: extras da emissão própria (migrations 234/175)
+        if (useSefazSp) {
+          await db.query(
+            `UPDATE nfce_emissions SET xml_signed=$1, tp_emis=$2,
+                rejection_code=$3, transmitted_at=CASE WHEN $4 THEN NOW() ELSE transmitted_at END,
+                contingency_at=COALESCE($6, contingency_at)
+              WHERE id=$5`,
+            [provResult.xml_signed || null, provResult.tp_emis || 1,
+             finalStatus==='rejeitada' ? (prov.cStat || null) : null,
+             finalStatus==='autorizada', emission.id,
+             provResult.contingency_at || null]
+          );
+          // S3.1: contingência entra na fila de retransmissão (prazo legal)
+          if (provResult.status === 'contingencia') {
+            const deadlineH = parseInt(process.env.NFCE_CONTINGENCY_DEADLINE_H || '24', 10);
+            await db.query(
+              `INSERT INTO nfce_pending_transmission (company_id, emission_id, deadline_at)
+               VALUES ($1, $2, NOW() + ($3 || ' hours')::interval)
+               ON CONFLICT (emission_id) DO NOTHING`,
+              [req.params.id, emission.id, deadlineH]
+            );
+            console.log(`[nfce] contingência: nota ${numeroNF} enfileirada (prazo ${deadlineH}h)`);
+          }
+        }
+
+        // S4.2: rastro do provider efetivamente usado + motivo do fallback.
+        // Defensivo p/ migration 237 ausente (comportamento legado).
+        await persistProviderUsed(emission.id, providerUsed, fallbackReason);
+
       } catch (apiErr) {
-        console.error('[nfce] Nuvem Fiscal emit error:', apiErr.message, apiErr.payload||'');
+        // Chega aqui quando: gateway puro falhou, OU o PRÓPRIO fallback falhou.
+        // Em ambos, providerUsed/fallbackReason já refletem o caminho tomado.
+        const providerLabel = useSefazSp ? 'SEFAZ-SP' : 'Nuvem Fiscal';
+        console.error(`[nfce] ${providerLabel} emit error:`, apiErr.message, apiErr.payload||'');
         await db.query(`UPDATE nfce_emissions SET status='erro', error_message=$1 WHERE id=$2`, [apiErr.message, emission.id]);
-        return res.status(502).json({ error: 'Erro ao transmitir nota para Nuvem Fiscal: '+apiErr.message, payload: apiErr.payload||null, nfce_id: emission.id });
+        await persistProviderUsed(emission.id, providerUsed, fallbackReason);
+        return res.status(502).json({
+          error: `Erro ao transmitir nota para ${providerLabel}: `+apiErr.message,
+          payload: apiErr.payload||null, nfce_id: emission.id,
+          provider_used: providerUsed, fallback: fallbackReason != null,
+        });
       }
     }
 
     const { rows: final } = await db.query('SELECT * FROM nfce_emissions WHERE id=$1', [emission.id]);
     logAuditAction(req.user.id, req.params.id, 'nfce_emitted', `${tipo.toUpperCase()} no ${numeroNF} emitida -- R$ ${totalNfce}`);
 
+    const amigavel = finalStatus === 'rejeitada'
+      ? rejectionCatalog.lookup(prov.cStat, prov.motivo)
+      : null;
     res.status(201).json({ nfce: final[0], tipo,
       pdf_url: prov.pdfUrl||final[0].pdf_url, xml_url: prov.xmlUrl||final[0].xml_url,
       qr_code: prov.qrCode||final[0].qr_code, url_consulta: prov.urlConsulta||final[0].url_consulta,
-      motivo: prov.motivo||null, cStat: prov.cStat||null });
+      motivo: prov.motivo||null, cStat: prov.cStat||null,
+      rejeicao_amigavel: amigavel,
+      contingencia: prov.status === 'contingencia',
+      // S4.2: transparência do fallback pro frontend
+      provider_used: providerUsed, fallback: fallbackReason != null });
 
   } catch (err) {
     console.error('nfce emit error:', err);
@@ -381,14 +657,36 @@ router.get('/', requireAuth, async (req, res) => {
     if (tipo)   { params.push(tipo);   where += ` AND tipo=$${params.length}`; }
     if (start)  { params.push(start);  where += ` AND created_at>=$${params.length}`; }
     if (end)    { params.push(end);    where += ` AND created_at<=$${params.length}`; }
-    const { rows } = await db.query(
-      `SELECT id, numero, serie, tipo, chave_acesso, protocolo, status,
-              customer_cpf, customer_name, total_nfce, payment_method,
-              xml_url, pdf_url, qr_code, url_consulta,
-              authorized_at, cancelled_at, created_at, error_message
-         FROM nfce_emissions ${where} ORDER BY numero DESC LIMIT 100`,
-      params
-    );
+    // S4.4: provider_used/fallback_reason no SELECT (defensivo p/ migration 237)
+    let rawRows;
+    try {
+      ({ rows: rawRows } = await db.query(
+        `SELECT id, numero, serie, tipo, chave_acesso, protocolo, status,
+                customer_cpf, customer_name, total_nfce, payment_method,
+                xml_url, pdf_url, qr_code, url_consulta,
+                authorized_at, cancelled_at, created_at, error_message,
+                rejection_code, tp_emis, provider_used, fallback_reason
+           FROM nfce_emissions ${where} ORDER BY numero DESC LIMIT 100`,
+        params
+      ));
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      ({ rows: rawRows } = await db.query(
+        `SELECT id, numero, serie, tipo, chave_acesso, protocolo, status,
+                customer_cpf, customer_name, total_nfce, payment_method,
+                xml_url, pdf_url, qr_code, url_consulta,
+                authorized_at, cancelled_at, created_at, error_message,
+                rejection_code, tp_emis
+           FROM nfce_emissions ${where} ORDER BY numero DESC LIMIT 100`,
+        params
+      ));
+    }
+    // S2.2: motivo amigável (catálogo) pra rejeitadas/erro
+    const rows = rawRows.map(r => {
+      if (r.status !== 'rejeitada' && r.status !== 'erro') return r;
+      const code = r.rejection_code || rejectionCatalog.cStatFromErrorMessage(r.error_message);
+      return { ...r, rejeicao_amigavel: rejectionCatalog.lookup(code, r.error_message) };
+    });
     const { rows: stats } = await db.query(
       `SELECT COUNT(*)::int AS total,
               COUNT(*) FILTER (WHERE status='autorizada')::int AS authorized,
@@ -422,8 +720,9 @@ router.get('/:nfceId/danfe-termica', requireAuth, async (req, res) => {
     const { rows: emissions } = await db.query('SELECT * FROM nfce_emissions WHERE id=$1 AND company_id=$2', [nfceId, cid]);
     if (!emissions.length) return res.status(404).type('text/plain').send('Nota nao encontrada');
     const emission = emissions[0];
-    if (emission.status !== 'autorizada') {
-      return res.status(409).type('text/plain').send(`DANFE so pode ser impressa quando autorizada. Status: ${emission.status}`);
+    const isContingenciaPendente = Number(emission.tp_emis) === 9 && emission.status === 'processando';
+    if (emission.status !== 'autorizada' && !isContingenciaPendente) {
+      return res.status(409).type('text/plain').send(`DANFE so pode ser impressa quando autorizada (ou em contingencia pendente). Status: ${emission.status}`);
     }
     const { rows: companies } = await db.query(
       `SELECT id, cnpj, legal_name, trade_name, inscricao_estadual,
@@ -477,6 +776,47 @@ router.post('/:nfceId/cancel', requireAuth, requireRole('client','analyst','admi
   const { reason } = req.body;
   if (!reason || reason.length < 15) return res.status(400).json({ error: 'Motivo do cancelamento exige ao menos 15 caracteres (regra SEFAZ)' });
   try {
+    // S2.1: nota da emissão própria cancela via evento 110111 na SEFAZ-SP
+    // ANTES de marcar local — nada de cancelamento só-local.
+    const { rows: ownRows } = await db.query(
+      `SELECT * FROM nfce_emissions WHERE id=$1 AND company_id=$2 AND xml_signed IS NOT NULL`,
+      [req.params.nfceId, req.params.id]
+    );
+    if (ownRows.length) {
+      const own = ownRows[0];
+      if (own.status === 'cancelada') return res.json({ nfce: own, idempotent: true });
+      if (own.status !== 'autorizada') {
+        return res.status(400).json({ error: `Nota não pode ser cancelada (status: ${own.status})` });
+      }
+      // Prazo legal de cancelamento da NFC-e em SP (default 30min —
+      // ⚠️ confirmar no MOC SP vigente; ajustável via env).
+      const deadlineMin = parseInt(process.env.NFCE_CANCEL_DEADLINE_MIN || '30', 10);
+      const ageMin = own.authorized_at ? (Date.now() - new Date(own.authorized_at).getTime()) / 60000 : null;
+      if (ageMin !== null && ageMin > deadlineMin) {
+        return res.status(400).json({ error: `Prazo de cancelamento expirado (${deadlineMin} min após a autorização, regra SEFAZ-SP). Fale com seu contador sobre regularização.` });
+      }
+      const { rows: cfgRows } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
+      if (!cfgRows.length) return res.status(400).json({ error: 'Config NFC-e não encontrada' });
+      try {
+        const ev = await sefazSp.cancelNfce({
+          db, config: cfgRows[0], companyId: req.params.id,
+          chave: own.chave_acesso, protocolo: own.protocolo, justificativa: reason,
+        });
+        if (!ev.sucesso) {
+          return res.status(422).json({ error: `SEFAZ-SP recusou o cancelamento: [${ev.cStat}] ${ev.xMotivo || ''}`, cStat: ev.cStat });
+        }
+        const { rows: upd } = await db.query(
+          `UPDATE nfce_emissions SET status='cancelada', cancel_reason=$1, cancelled_at=NOW() WHERE id=$2 RETURNING *`,
+          [reason, own.id]
+        );
+        logAuditAction(req.user.id, req.params.id, 'nfce_cancelled',
+          `NFC-e no ${own.numero} cancelada na SEFAZ-SP (evento ${ev.protocoloEvento || ev.cStat}): ${reason}`);
+        return res.json({ nfce: upd[0], evento: { cStat: ev.cStat, protocolo: ev.protocoloEvento, ja_cancelada: ev.jaCancelada || false } });
+      } catch (apiErr) {
+        console.error('[nfce] SEFAZ-SP cancel error:', apiErr.message);
+        return res.status(502).json({ error: 'Erro ao cancelar na SEFAZ-SP: ' + apiErr.message });
+      }
+    }
     const { rows } = await db.query(
       `UPDATE nfce_emissions SET status='cancelada', cancel_reason=$1, cancelled_at=NOW()
         WHERE id=$2 AND company_id=$3 AND status='autorizada' RETURNING *`,
@@ -497,6 +837,143 @@ router.post('/:nfceId/cancel', requireAuth, requireRole('client','analyst','admi
     logAuditAction(req.user.id, req.params.id, 'nfce_cancelled', `${(emission.tipo||'nfce').toUpperCase()} no ${emission.numero} cancelada: ${reason}`);
     res.json({ nfce: emission });
   } catch (err) { res.status(500).json({ error: 'Erro ao cancelar nota' }); }
+});
+
+// ── S2.4: refresh manual (consulta situação na origem) ──
+router.post('/:nfceId/refresh', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await db.query('SELECT * FROM nfce_emissions WHERE id=$1 AND company_id=$2', [req.params.nfceId, req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Nota não encontrada' });
+    let emission = rows[0];
+
+    if (emission.xml_signed) {
+      // Emissão própria: consulta por chave na SEFAZ-SP
+      const { rows: cfgs } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
+      if (!cfgs.length) return res.status(400).json({ error: 'Config NFC-e não encontrada' });
+      try {
+        const r = await sefazSp.queryNfce({
+          chave: emission.chave_acesso, config: cfgs[0], db, companyId: req.params.id,
+        });
+        if (r.status === 'autorizado' && emission.status !== 'autorizada') {
+          await db.query(
+            `UPDATE nfce_emissions SET status='autorizada', protocolo=COALESCE($1, protocolo),
+                authorized_at=COALESCE(authorized_at, NOW()), transmitted_at=COALESCE(transmitted_at, NOW()),
+                refresh_attempts=refresh_attempts+1, last_refresh_at=NOW() WHERE id=$2`,
+            [r.protocolo, emission.id]
+          );
+        } else {
+          await db.query(`UPDATE nfce_emissions SET refresh_attempts=refresh_attempts+1, last_refresh_at=NOW() WHERE id=$1`, [emission.id]);
+        }
+        const refreshed = await db.query('SELECT * FROM nfce_emissions WHERE id=$1', [emission.id]);
+        return res.json({ emission: refreshed.rows[0], consulta: { cStat: r.codigo_status, motivo: r.motivo_status } });
+      } catch (apiErr) {
+        return res.status(502).json({ error: 'SEFAZ-SP indisponível pra consulta: ' + apiErr.message, emission });
+      }
+    }
+
+    // Gateway: mesma lógica best-effort do GET /:nfceId
+    if (emission.status === 'processando' && emission.nuvemfiscal_id) {
+      try {
+        const queryFn = emission.tipo==='nfe' ? nuvemfiscal.queryNfe : nuvemfiscal.queryNfce;
+        const provResult = await queryFn(emission.nuvemfiscal_id);
+        const prov = extractProvFields(provResult);
+        if (prov.status==='autorizado'||prov.status==='autorizada') {
+          await db.query(
+            `UPDATE nfce_emissions SET status='autorizada',
+                chave_acesso=COALESCE($1,chave_acesso), protocolo=COALESCE($2,protocolo),
+                xml_url=COALESCE($3,xml_url), pdf_url=COALESCE($4,pdf_url),
+                qr_code=COALESCE($5,qr_code), authorized_at=COALESCE(authorized_at, NOW()) WHERE id=$6`,
+            [prov.chaveAcesso, prov.protocolo, prov.xmlUrl, prov.pdfUrl, prov.qrCode, emission.id]
+          );
+          const refreshed = await db.query('SELECT * FROM nfce_emissions WHERE id=$1', [emission.id]);
+          emission = refreshed.rows[0];
+        }
+      } catch (e) { /* best-effort */ }
+    }
+    res.json({ emission });
+  } catch (err) { res.status(500).json({ error: 'Erro ao atualizar nota' }); }
+});
+
+// ── S2.1: inutilização de faixa (emissão própria) ──
+// Pros números reservados e abandonados (gap após rejeição não retransmitida).
+router.post('/inutilizar', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
+  const { serie, numero_inicial, numero_final, justificativa, ano } = req.body;
+  if (!justificativa || String(justificativa).trim().length < 15) {
+    return res.status(400).json({ error: 'Justificativa exige ao menos 15 caracteres (regra SEFAZ)' });
+  }
+  try {
+    const { rows: configs } = await db.query('SELECT * FROM nfce_config WHERE company_id=$1', [req.params.id]);
+    if (!configs.length) return res.status(400).json({ error: 'Config NFC-e não encontrada' });
+    const config = configs[0];
+    if (config.provider !== 'sefaz_sp') {
+      return res.status(400).json({ error: 'Inutilização direta disponível apenas na emissão própria (provider sefaz_sp).' });
+    }
+    const { rows: companies } = await db.query('SELECT cnpj FROM companies WHERE id=$1', [req.params.id]);
+    if (!companies.length || !companies[0].cnpj) return res.status(400).json({ error: 'CNPJ da empresa não cadastrado' });
+
+    const r = await sefazSp.inutilizarFaixa({
+      db, config, companyId: req.params.id,
+      cnpj: companies[0].cnpj,
+      serie: serie || config.serie_nfce,
+      nIni: numero_inicial, nFin: numero_final,
+      justificativa, ano2: ano ? String(ano).slice(-2) : undefined,
+    });
+    if (!r.sucesso) {
+      return res.status(422).json({ error: `SEFAZ-SP recusou a inutilização: [${r.cStat}] ${r.xMotivo || ''}`, cStat: r.cStat });
+    }
+    logAuditAction(req.user.id, req.params.id, 'nfce_inutilizada',
+      `Faixa ${numero_inicial}-${numero_final} série ${serie || config.serie_nfce} inutilizada (protocolo ${r.protocolo || r.cStat})`);
+    res.json({ inutilizacao: { cStat: r.cStat, protocolo: r.protocolo, faixa: [numero_inicial, numero_final] } });
+  } catch (err) {
+    console.error('[nfce] inutilizar error:', err.message);
+    res.status(502).json({ error: 'Erro ao inutilizar faixa: ' + err.message });
+  }
+});
+
+// ── S3.3: telemetria da emissão (página NFe / S4.1) ──
+router.get('/telemetry/resumo', requireAuth, async (req, res) => {
+  try {
+    const cid = req.params.id;
+    const { rows: [m] } = await db.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE created_at >= NOW()-INTERVAL '30 days')::int AS emitidas_30d,
+         COUNT(*) FILTER (WHERE status='autorizada' AND created_at >= NOW()-INTERVAL '30 days')::int AS autorizadas_30d,
+         COUNT(*) FILTER (WHERE status='rejeitada' AND created_at >= NOW()-INTERVAL '30 days')::int AS rejeitadas_30d,
+         COUNT(*) FILTER (WHERE tp_emis=9 AND created_at >= NOW()-INTERVAL '1 day')::int AS contingencias_24h,
+         COUNT(*) FILTER (WHERE tp_emis=9 AND created_at >= NOW()-INTERVAL '30 days')::int AS contingencias_30d,
+         COALESCE(AVG(EXTRACT(EPOCH FROM (authorized_at - created_at)) * 1000)
+           FILTER (WHERE status='autorizada' AND tp_emis=1 AND authorized_at IS NOT NULL
+                   AND created_at >= NOW()-INTERVAL '7 days'), 0)::int AS latencia_media_ms_7d
+       FROM nfce_emissions WHERE company_id=$1`, [cid]);
+
+    const { rows: [fila] } = await db.query(
+      `SELECT COUNT(*) FILTER (WHERE status='pending')::int AS pendentes,
+              COUNT(*) FILTER (WHERE status='rejected')::int AS rejeitadas_tardias,
+              COUNT(*) FILTER (WHERE status='expired')::int AS expiradas,
+              MIN(deadline_at) FILTER (WHERE status='pending') AS proximo_prazo
+         FROM nfce_pending_transmission WHERE company_id=$1`, [cid]);
+
+    const { rows: certs } = await db.query(
+      `SELECT subject_cn, not_after,
+              EXTRACT(DAY FROM (not_after - NOW()))::int AS dias_pra_vencer
+         FROM company_certificates WHERE company_id=$1`, [cid]);
+
+    const taxa = m.emitidas_30d > 0 ? Math.round((m.autorizadas_30d / m.emitidas_30d) * 1000) / 10 : null;
+    res.json({
+      emissao: { ...m, taxa_autorizacao_30d_pct: taxa, baseline_gateway_pct: 88 },
+      fila_contingencia: fila,
+      certificado: certs[0] ? {
+        subject_cn: certs[0].subject_cn, not_after: certs[0].not_after,
+        dias_pra_vencer: certs[0].dias_pra_vencer,
+        alerta: certs[0].dias_pra_vencer <= 7 ? 'critical'
+          : certs[0].dias_pra_vencer <= 15 ? 'warning'
+          : certs[0].dias_pra_vencer <= 30 ? 'info' : null,
+      } : null,
+    });
+  } catch (err) {
+    console.error('[nfce] telemetry error:', err.message);
+    res.status(500).json({ error: 'Erro ao calcular telemetria' });
+  }
 });
 
 module.exports = router;
