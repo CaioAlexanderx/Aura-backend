@@ -21,6 +21,16 @@
 //   - createCreditSale agora barra bloqueio MANUAL (status=blocked) lancando
 //     erro 422; POST /sale propaga 422 { code:CUSTOMER_BLOCKED, reason } em vez
 //     de 500. Score NUNCA bloqueia: aviso sai em credit.warnings[].
+// 11/06/2026 (auditoria C2-BE):
+//   - DELETE /sale agora reverte o crediario via cancelCreditSale (remove os
+//     -rest- de pagamento parcial, antes orfaos). O bloco inline so cuidava da
+//     A Receber com a key exata.
+// 19/06/2026 (troca-de-troca):
+//   - sales-for-troca e sales-by-product-barcode deixam de exigir
+//     type='sale': uma troca nao-cancelada agora e origem elegivel (cliente
+//     troca de novo um item recebido numa troca anterior). O motor trocaV2
+//     ja aceita origem type='troca'. Ambos expoem origin_type/is_troca_origin
+//     pra UI avisar antes de confirmar.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -432,7 +442,25 @@ router.get('/sale/:saleId', async (req, res) => {
        FROM sale_items si LEFT JOIN products p ON p.id=si.product_id WHERE si.sale_id=$1`,
       [req.params.saleId]
     );
-    res.json({ ...rows[0], items });
+    // Auditoria 12/06: refunded_quantity por item -- fonte: troca_returned_items
+    // (mesma guarda anti-dupla-devolucao do motor de devolucao B4 e da troca),
+    // ignorando trocas/devolucoes canceladas. Defensivo 42P01 (deploy parcial).
+    const refundedByItem = {};
+    try {
+      const { rows: refRows } = await db.query(
+        `SELECT tri.original_sale_item_id, COALESCE(SUM(tri.quantity),0) AS refunded
+           FROM troca_returned_items tri
+           JOIN sales ts ON ts.id = tri.troca_sale_id
+          WHERE tri.original_sale_id = $1
+            AND COALESCE(ts.status,'completed') != 'cancelled'
+          GROUP BY tri.original_sale_item_id`,
+        [req.params.saleId]
+      );
+      for (const r of refRows) refundedByItem[r.original_sale_item_id] = parseFloat(r.refunded) || 0;
+    } catch (refErr) {
+      if (refErr.code !== '42P01' && refErr.code !== '42703') throw refErr;
+    }
+    res.json({ ...rows[0], items: items.map(it => ({ ...it, refunded_quantity: refundedByItem[it.id] || 0 })) });
   } catch (e) { res.status(500).json({ error: 'Erro ao buscar venda' }); }
 });
 
@@ -558,32 +586,14 @@ router.delete('/sale/:saleId', async (req, res) => {
     if (sale.coupon_id) {
       await client.query(`UPDATE coupons SET current_uses=GREATEST(0,current_uses-1),updated_at=NOW() WHERE id=$1`, [sale.coupon_id]);
     }
-    // Reverte crediario: debit + A Receber
-    await client.query(
-      `DELETE FROM customer_credit_transactions WHERE sale_id=$1 AND company_id=$2 AND type='debit'`,
-      [req.params.saleId, req.params.id]
-    );
+    // Reverte a parte de caixa (venda a vista): transacao pdv-sale-<id>.
     await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-sale-'+req.params.saleId, req.params.id]);
-    await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-credit-receivable-'+req.params.saleId, req.params.id]);
-    // F1 (29/05/2026): cancela credit_installments + atualiza credit_used
+    // C2-BE (auditoria 11/06): reverte o crediario via cancelCreditSale, que
+    // remove o debit, a A Receber exata, OS -rest- de pagamento parcial (antes
+    // orfaos como "A Receber" eterno), cancela as parcelas e recalcula credit_used.
+    // Defensivo a deploy parcial (42P01/42703).
     try {
-      await client.query(
-        `UPDATE credit_installments
-           SET status='cancelled', covered_amount=0, updated_at=NOW()
-         WHERE sale_id=$1 AND company_id=$2 AND status IN ('pending','overdue')`,
-        [req.params.saleId, req.params.id]
-      );
-      if (sale.customer_id) {
-        await client.query(
-          `UPDATE customer_credit_profiles
-             SET credit_used=COALESCE((
-               SELECT GREATEST(0,balance) FROM customer_credit_balances
-               WHERE company_id=$1 AND customer_id=$2
-             ),0), updated_at=NOW()
-           WHERE company_id=$1 AND customer_id=$2`,
-          [req.params.id, sale.customer_id]
-        );
-      }
+      await cancelCreditSale(client, { companyId: req.params.id, saleId: req.params.saleId });
     } catch (e) {
       if (e.code !== '42P01' && e.code !== '42703') throw e;
     }
@@ -663,12 +673,15 @@ router.post('/troca/:trocaSaleId/reemitir-fiscal', async (req, res) => {
 });
 
 // ===== GET /sales-for-troca =====
+// 19/06/2026: removido o filtro type='sale' -> uma troca nao-cancelada agora e
+// origem elegivel (cliente troca de novo um item recebido em troca anterior).
+// origin_type/is_troca_origin alimentam o aviso na UI.
 router.get('/sales-for-troca', async (req, res) => {
   const { q, customer_id, order_number, nfce_chave, days=90, limit=50 } = req.query;
   const winDays = Math.max(1, Math.min(parseInt(days,10)||90, 365));
   const lim = Math.max(1, Math.min(parseInt(limit,10)||50, 200));
   const cond = [
-    "s.status!='cancelled'", "COALESCE(s.type,'sale')='sale'",
+    "s.status!='cancelled'",
     `s.created_at>=NOW()-INTERVAL '${winDays} days'`,
     `(s.company_id=$1 OR EXISTS (
        SELECT 1 FROM companies c2 WHERE c2.id=s.company_id
@@ -703,6 +716,8 @@ router.get('/sales-for-troca', async (req, res) => {
               s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
               s.seller_id, s.seller_name,
               (s.company_id!=$1) AS is_cross_filial,
+              COALESCE(s.type,'sale') AS origin_type,
+              (COALESCE(s.type,'sale')='troca') AS is_troca_origin,
               EXISTS (SELECT 1 FROM nfce_emissions nf WHERE nf.sale_id=s.id AND nf.tipo='nfce' AND nf.status='autorizada') AS has_nfce,
               COUNT(si.id) AS item_count,
               COALESCE(json_agg(json_build_object(
@@ -728,6 +743,8 @@ router.get('/sales-for-troca', async (req, res) => {
 });
 
 // ===== GET /sales-by-product-barcode =====
+// 19/06/2026: removido o filtro type='sale' no eligible_sales -> trocas nao-
+// canceladas tambem elegiveis. origin_type/is_troca_origin alimentam o aviso.
 router.get('/sales-by-product-barcode', async (req, res) => {
   const { barcode, days=90, limit=50 } = req.query;
   const raw = String(barcode||'').trim();
@@ -752,7 +769,7 @@ router.get('/sales-by-product-barcode', async (req, res) => {
          JOIN sale_items si ON si.sale_id=s.id
          JOIN matched_products mp ON mp.product_id=si.product_id
            AND (mp.variant_id IS NULL OR mp.variant_id=si.variant_id)
-         WHERE s.status!='cancelled' AND COALESCE(s.type,'sale')='sale'
+         WHERE s.status!='cancelled'
            AND s.created_at>=NOW()-INTERVAL '${winDays} days'
            AND (s.company_id=$1 OR EXISTS (
              SELECT 1 FROM companies c2 WHERE c2.id=s.company_id
@@ -763,6 +780,8 @@ router.get('/sales-by-product-barcode', async (req, res) => {
               s.company_id, COALESCE(comp.trade_name,comp.legal_name) AS company_name,
               s.customer_id, cust.name AS customer_name, cust.cpf_cnpj,
               s.seller_id, s.seller_name, (s.company_id!=$1) AS is_cross_filial,
+              COALESCE(s.type,'sale') AS origin_type,
+              (COALESCE(s.type,'sale')='troca') AS is_troca_origin,
               EXISTS (SELECT 1 FROM nfce_emissions nf WHERE nf.sale_id=s.id AND nf.tipo='nfce' AND nf.status='autorizada') AS has_nfce,
               COUNT(si.id) AS item_count,
               COALESCE(json_agg(json_build_object(

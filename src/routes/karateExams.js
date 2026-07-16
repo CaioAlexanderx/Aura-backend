@@ -14,6 +14,7 @@
 // Candidatos (inscrição e resultado):
 //   POST /belt-exams/:examId/candidates       — inscreve candidato
 //                                               SEMPRE 201 + eligibility (FPKT #1)
+//                                               target_belt OPCIONAL p/ exam_type='curso'
 //   PATCH /belt-exams/:examId/candidates/:cId — lança resultado
 //                                               approved→ trigger karate_on_exam_approved
 //                                               RBAC: guards.examResults
@@ -28,6 +29,16 @@
 // Estorno/correção:
 //   POST /belt-exams/:examId/candidates/:cId/correction
 //     — registro compensatório (karate_belt_history é imutável)
+//
+// NOTA DE COMPAT (22/06): o frontend lê exam.title/exam.exam_date, mas o schema
+// usa name/event_date. Todas as respostas abaixo expõem aliases title/exam_date
+// além dos campos canônicos name/event_date — additive, sem migration.
+//
+// TIPOS DE EVENTO (25/06): exam_type aceita os graus específicos usados pelos
+// dojôs (kyu_regional | dan_estadual | dan_nacional) MAIS os tipos AMPLOS da
+// federação (exame | curso). Tipos amplos NÃO inferem faixa-alvo: o grau (se
+// houver) vem do payload por candidato (target_belt na inscrição), nunca do
+// exam_type. 'curso' é evento sem graduação. Ver migration 192.
 // ============================================================
 'use strict';
 
@@ -35,7 +46,73 @@ const router = require('express').Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
-const { checkEligibility } = require('../services/karateExamService');
+const { checkEligibility, computeDanRegistrationChange } = require('../services/karateExamService');
+
+// Tipos de evento aceitos em karate_belt_exams.exam_type (espelha o CHECK da
+// migration 192). Graus específicos (dojô) + tipos amplos (federação).
+// NÃO derivamos faixa-alvo a partir do tipo: a graduação vem do payload por
+// candidato (target_belt). 'curso' é evento sem graduação.
+const VALID_EXAM_TYPES = ['kyu_regional', 'dan_estadual', 'dan_nacional', 'exame', 'curso'];
+
+// Migration 200 — registration_fields (karate_belt_exams) / registration_responses
+// (karate_belt_exam_candidates). Backend sobe antes da migration ser aplicada
+// (armadilha_schema_pre_migration do CLAUDE.md): cache module-level otimista,
+// vira false em 42703 e os SELECTs/INSERTs caem para a forma sem a coluna.
+let HAS_REGISTRATION_FIELDS_COL = true;
+
+// Bloco C — cache module-level otimista p/ certificate_eligible no GET de
+// detalhe (migration 202). Mesmo padrao: comeca true, vira false em 42703.
+let HAS_CERTIFICATE_ELIGIBLE_COL_DETAIL = true;
+
+const VALID_FIELD_TYPES = ['text', 'number', 'select', 'checkbox', 'date', 'phone'];
+
+/**
+ * Valida o formato de registration_fields recebido no PATCH do exame.
+ * Retorna { ok: true } ou { ok: false, error } com mensagem pronta pro 422.
+ * Formato esperado: array de { key, label, type, required, options? }.
+ */
+function validateRegistrationFields(fields) {
+  if (!Array.isArray(fields)) {
+    return { ok: false, error: 'registration_fields deve ser um array' };
+  }
+  const seenKeys = new Set();
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i];
+    if (!f || typeof f !== 'object' || Array.isArray(f)) {
+      return { ok: false, error: `registration_fields[${i}] deve ser um objeto` };
+    }
+    if (typeof f.key !== 'string' || !f.key.trim()) {
+      return { ok: false, error: `registration_fields[${i}].key é obrigatório (string)` };
+    }
+    if (seenKeys.has(f.key)) {
+      return { ok: false, error: `registration_fields[${i}].key duplicada: "${f.key}"` };
+    }
+    seenKeys.add(f.key);
+    if (typeof f.label !== 'string' || !f.label.trim()) {
+      return { ok: false, error: `registration_fields[${i}].label é obrigatório (string)` };
+    }
+    if (typeof f.type !== 'string' || !VALID_FIELD_TYPES.includes(f.type)) {
+      return { ok: false, error: `registration_fields[${i}].type inválido. Use: ${VALID_FIELD_TYPES.join(', ')}` };
+    }
+    if (f.required !== undefined && typeof f.required !== 'boolean') {
+      return { ok: false, error: `registration_fields[${i}].required deve ser boolean` };
+    }
+    if (f.type === 'select') {
+      if (!Array.isArray(f.options) || f.options.length === 0) {
+        return { ok: false, error: `registration_fields[${i}].options é obrigatório (array) quando type='select'` };
+      }
+      for (const opt of f.options) {
+        const isStr = typeof opt === 'string';
+        const isObj = opt && typeof opt === 'object' && !Array.isArray(opt) && typeof opt.value === 'string';
+        if (!isStr && !isObj) {
+          return { ok: false, error: `registration_fields[${i}].options deve conter strings ou objetos {value,label}` };
+        }
+      }
+    }
+  }
+  return { ok: true };
+}
+
 
 // ── GET /belt-exams ─────────────────────────────────────────
 router.get('/belt-exams', ...guards.read(), async (req, res) => {
@@ -72,8 +149,8 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
 
     const dataRes = await db.query(
       `SELECT
-         be.id, be.federation_id, be.event_date, be.location,
-         be.status, be.created_at,
+         be.id, be.federation_id, be.name, be.exam_type, be.event_date, be.location,
+         be.max_candidates, be.fee_amount, be.hours, be.status, be.created_at,
          COUNT(DISTINCT ec.id) AS candidate_count,
          COUNT(DISTINCT ee.id) AS examiner_count
        FROM karate_belt_exams be
@@ -89,8 +166,15 @@ router.get('/belt-exams', ...guards.read(), async (req, res) => {
     const data = dataRes.rows.map(r => ({
       id: r.id,
       federation_id: r.federation_id,
+      name: r.name || null,
+      title: r.name || null,            // alias compat front
+      exam_type: r.exam_type || null,
       event_date: r.event_date,
+      exam_date: r.event_date,          // alias compat front
       location: r.location || null,
+      max_candidates: r.max_candidates || null,
+      fee_amount: r.fee_amount || null,
+      hours: r.hours ?? null,
       status: r.status,
       candidate_count: parseInt(r.candidate_count, 10),
       examiner_count: parseInt(r.examiner_count, 10),
@@ -109,20 +193,33 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
   const federationId = req.params.id;
   // karate_belt_exams: id, federation_id, exam_type, name, event_date, location,
   //                    max_candidates, fee_amount, status, created_by, created_at, updated_at
-  const { exam_type, name, event_date, location, max_candidates, fee_amount } = req.body;
+  const { exam_type, name, event_date, location, max_candidates, fee_amount, hours } = req.body;
 
   if (!event_date) {
     return res.status(422).json({ error: 'event_date é obrigatório', code: 'VALIDATION_ERROR' });
   }
 
+  // Whitelist de exam_type (espelha o CHECK da migration 192). Tipo é OPCIONAL —
+  // null é aceito (evento amplo sem classificação). Quando informado, deve ser um
+  // dos valores válidos; caso contrário 422 limpo (em vez de 500 da constraint).
+  // NÃO inferimos faixa-alvo do tipo: para 'exame'/'curso' (amplos) a graduação,
+  // se houver, vem do payload por candidato (target_belt na inscrição). 'curso'
+  // é evento sem graduação.
+  if (exam_type !== undefined && exam_type !== null && !VALID_EXAM_TYPES.includes(exam_type)) {
+    return res.status(422).json({
+      error: `exam_type inválido. Use: ${VALID_EXAM_TYPES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
   try {
     const insertRes = await db.query(
       `INSERT INTO karate_belt_exams
-         (federation_id, exam_type, name, event_date, location, max_candidates, fee_amount,
+         (federation_id, exam_type, name, event_date, location, max_candidates, fee_amount, hours,
           status, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'scheduled', $8, NOW(), NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, NOW(), NOW())
        RETURNING id, federation_id, exam_type, name, event_date, location,
-                 max_candidates, fee_amount, status, created_at`,
+                 max_candidates, fee_amount, hours, status, created_at`,
       [
         federationId,
         exam_type || null,
@@ -130,7 +227,8 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
         event_date,
         location || null,
         max_candidates ? parseInt(max_candidates, 10) : null,
-        fee_amount ? parseFloat(fee_amount) : null,
+        (fee_amount === '' || fee_amount === undefined || fee_amount === null) ? 0 : parseFloat(fee_amount),
+        (hours === '' || hours === undefined || hours === null) ? null : parseInt(hours, 10),
         req.user?.id || null,
       ]
     );
@@ -141,10 +239,13 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
       federation_id: exam.federation_id,
       exam_type: exam.exam_type || null,
       name: exam.name || null,
+      title: exam.name || null,          // alias compat front
       event_date: exam.event_date,
+      exam_date: exam.event_date,        // alias compat front
       location: exam.location || null,
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
+      hours: exam.hours ?? null,
       status: exam.status,
       candidate_count: 0,
       examiner_count: 0,
@@ -152,7 +253,11 @@ router.post('/belt-exams', ...guards.staffWrite(), async (req, res) => {
     });
   } catch (err) {
     console.error('[karateExams] create error:', err.message);
-    res.status(500).json({ error: 'Erro ao criar exame', detail: err.message });
+    // Mensagem de erro deve refletir a entidade certa: este endpoint cria tanto
+    // 'exame' quanto 'curso' (evento amplo) — usa exam_type pra acertar a palavra
+    // em vez de sempre dizer "exame" mesmo quando o usuario estava criando um curso.
+    const entityLabel = exam_type === 'curso' ? 'curso' : 'exame';
+    res.status(500).json({ error: `Erro ao criar ${entityLabel}`, detail: err.message });
   }
 });
 
@@ -161,20 +266,41 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
   const { id: federationId, examId } = req.params;
 
   try {
-    const examRes = await db.query(
-      `SELECT id, federation_id, exam_type, name, event_date, location,
-              max_candidates, fee_amount, status, created_at, updated_at
-       FROM karate_belt_exams
-       WHERE id = $1 AND federation_id = $2
-       LIMIT 1`,
-      [examId, federationId]
-    );
-
-    if (!examRes.rows.length) {
-      return res.status(404).json({ error: 'Exame não encontrado', code: 'NOT_FOUND' });
+    let exam;
+    if (HAS_REGISTRATION_FIELDS_COL) {
+      try {
+        const examRes = await db.query(
+          `SELECT id, federation_id, exam_type, name, event_date, location,
+                  max_candidates, fee_amount, hours, status, description, registration_fields,
+                  created_at, updated_at
+           FROM karate_belt_exams
+           WHERE id = $1 AND federation_id = $2
+           LIMIT 1`,
+          [examId, federationId]
+        );
+        exam = examRes.rows[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_REGISTRATION_FIELDS_COL = false;
+          console.warn('[karateExams] registration_fields ausente (migration 200 pendente)');
+        } else throw e;
+      }
+    }
+    if (exam === undefined) {
+      const examRes = await db.query(
+        `SELECT id, federation_id, exam_type, name, event_date, location,
+                max_candidates, fee_amount, hours, status, description, created_at, updated_at
+         FROM karate_belt_exams
+         WHERE id = $1 AND federation_id = $2
+         LIMIT 1`,
+        [examId, federationId]
+      );
+      exam = examRes.rows[0];
     }
 
-    const exam = examRes.rows[0];
+    if (!exam) {
+      return res.status(404).json({ error: 'Exame não encontrado', code: 'NOT_FOUND' });
+    }
 
     // Banca — karate_exam_examiners: id, exam_id, examiner_id, role, dan_level, confirmed, created_at
     const examinerRes = await db.query(
@@ -189,33 +315,102 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
 
     // Candidatos — karate_belt_exam_candidates: id, exam_id, student_id, current_belt,
     //   target_belt, target_belt_name, belt_schema, status, result_notes, fee_paid,
-    //   created_at, updated_at
-    const candidateRes = await db.query(
-      `SELECT ec.id, ec.student_id, ec.target_belt, ec.target_belt_name,
-              ec.current_belt, ec.status, ec.result_notes, ec.created_at,
-              cu.name AS student_name,
-              cu.karate_registration_number,
-              cb.belt_level AS current_belt_level,
-              cb.belt_name  AS current_belt_name
-       FROM karate_belt_exam_candidates ec
-       JOIN customers cu ON cu.id = ec.student_id
-       LEFT JOIN karate_current_belt cb
-         ON cb.student_id = ec.student_id AND cb.federation_id = $2
-       WHERE ec.exam_id = $1
-       ORDER BY ec.created_at ASC`,
-      [examId, federationId]
-    );
+    //   registration_responses (migration 200), created_at, updated_at
+    let candidateRows;
+    if (HAS_REGISTRATION_FIELDS_COL) {
+      try {
+        const certEligibleSelect = HAS_CERTIFICATE_ELIGIBLE_COL_DETAIL
+          ? 'ec.certificate_eligible,' : '';
+        const candidateRes = await db.query(
+          `SELECT ec.id, ec.student_id, ec.target_belt, ec.target_belt_name,
+                  ec.current_belt, ec.status, ec.result_notes, ec.registration_responses,
+                  ${certEligibleSelect}
+                  ec.created_at,
+                  cu.name AS student_name,
+                  cu.karate_registration_number,
+                  cb.belt_level AS current_belt_level,
+                  cb.belt_name  AS current_belt_name
+           FROM karate_belt_exam_candidates ec
+           JOIN customers cu ON cu.id = ec.student_id
+           LEFT JOIN karate_current_belt cb
+             ON cb.student_id = ec.student_id AND cb.federation_id = $2
+           WHERE ec.exam_id = $1
+           ORDER BY ec.created_at ASC`,
+          [examId, federationId]
+        );
+        candidateRows = candidateRes.rows;
+      } catch (e) {
+        if (e.code === '42703') {
+          if (HAS_CERTIFICATE_ELIGIBLE_COL_DETAIL) {
+            // Pode ser certificate_eligible (migration 202) ou
+            // registration_responses (migration 200) que falta — tenta de
+            // novo só sem certificate_eligible antes de desistir de tudo.
+            HAS_CERTIFICATE_ELIGIBLE_COL_DETAIL = false;
+            try {
+              const retryRes = await db.query(
+                `SELECT ec.id, ec.student_id, ec.target_belt, ec.target_belt_name,
+                        ec.current_belt, ec.status, ec.result_notes, ec.registration_responses,
+                        ec.created_at,
+                        cu.name AS student_name,
+                        cu.karate_registration_number,
+                        cb.belt_level AS current_belt_level,
+                        cb.belt_name  AS current_belt_name
+                 FROM karate_belt_exam_candidates ec
+                 JOIN customers cu ON cu.id = ec.student_id
+                 LEFT JOIN karate_current_belt cb
+                   ON cb.student_id = ec.student_id AND cb.federation_id = $2
+                 WHERE ec.exam_id = $1
+                 ORDER BY ec.created_at ASC`,
+                [examId, federationId]
+              );
+              candidateRows = retryRes.rows;
+            } catch (e2) {
+              if (e2.code === '42703') {
+                HAS_REGISTRATION_FIELDS_COL = false;
+                console.warn('[karateExams] registration_responses ausente (migration 200 pendente)');
+              } else throw e2;
+            }
+          } else {
+            HAS_REGISTRATION_FIELDS_COL = false;
+            console.warn('[karateExams] registration_responses ausente (migration 200 pendente)');
+          }
+        } else throw e;
+      }
+    }
+    if (candidateRows === undefined) {
+      const candidateRes = await db.query(
+        `SELECT ec.id, ec.student_id, ec.target_belt, ec.target_belt_name,
+                ec.current_belt, ec.status, ec.result_notes, ec.created_at,
+                cu.name AS student_name,
+                cu.karate_registration_number,
+                cb.belt_level AS current_belt_level,
+                cb.belt_name  AS current_belt_name
+         FROM karate_belt_exam_candidates ec
+         JOIN customers cu ON cu.id = ec.student_id
+         LEFT JOIN karate_current_belt cb
+           ON cb.student_id = ec.student_id AND cb.federation_id = $2
+         WHERE ec.exam_id = $1
+         ORDER BY ec.created_at ASC`,
+        [examId, federationId]
+      );
+      candidateRows = candidateRes.rows;
+    }
 
     res.json({
       id: exam.id,
       federation_id: exam.federation_id,
       exam_type: exam.exam_type || null,
       name: exam.name || null,
+      title: exam.name || null,          // alias compat front
       event_date: exam.event_date,
+      exam_date: exam.event_date,        // alias compat front
       location: exam.location || null,
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
+      hours: exam.hours ?? null,
       status: exam.status,
+      description: exam.description || null,
+      registration_fields: exam.registration_fields || [],
       created_at: exam.created_at,
       updated_at: exam.updated_at,
       examiners: examinerRes.rows.map(e => ({
@@ -227,10 +422,12 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
         dan_level: e.dan_level || null,
         confirmed: e.confirmed,
       })),
-      candidates: candidateRes.rows.map(c => ({
+      candidates: candidateRows.map(c => ({
         id: c.id,
         student_id: c.student_id,
+        practitioner_id: c.student_id,
         student_name: c.student_name,
+        full_name: c.student_name,
         karate_registration_number: c.karate_registration_number || null,
         current_belt_level: c.current_belt_level || null,
         current_belt_name: c.current_belt_name || null,
@@ -238,6 +435,11 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
         target_belt_name: c.target_belt_name || null,
         status: c.status,
         result_notes: c.result_notes || null,
+        registration_responses: c.registration_responses || {},
+        // Bloco C — elegibilidade a certificado (migration 202). undefined
+        // quando a coluna ainda nao existe vira false (nunca undefined no
+        // payload, pra nao confundir o front com "indeterminado").
+        certificate_eligible: c.certificate_eligible === true,
         created_at: c.created_at,
       })),
     });
@@ -248,27 +450,101 @@ router.get('/belt-exams/:examId', ...guards.read(), async (req, res) => {
 });
 
 // ── PATCH /belt-exams/:examId ───────────────────────────────
+// ── DELETE /belt-exams/:examId — excluir evento (exame/curso) ──
+// Seguro por padrão: só exclui eventos SEM dados relevantes (sem inscritos e
+// sem certificados emitidos). Caso contrário retorna 409 com mensagem clara —
+// evita apagar histórico por engano. Remove apenas os "filhos de configuração"
+// (instrutores, examinadores, lotes) e o próprio evento.
+router.delete('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId } = req.params;
+  try {
+    const ex = await db.query(
+      'SELECT id FROM karate_belt_exams WHERE id = $1 AND federation_id = $2',
+      [examId, federationId]
+    );
+    if (!ex.rows.length) return res.status(404).json({ error: 'Evento não encontrado' });
+
+    const safeCount = async (sql) => {
+      try { const r = await db.query(sql, [examId, federationId]); return r.rows[0]?.n || 0; }
+      catch (e) { if (e.code === '42P01') return 0; throw e; }
+    };
+    const nCand = await safeCount('SELECT count(*)::int AS n FROM karate_belt_exam_candidates WHERE exam_id = $1');
+    const nCert = await safeCount('SELECT count(*)::int AS n FROM karate_issued_certificates WHERE event_id = $1 AND federation_id = $2');
+    if (nCand > 0 || nCert > 0) {
+      return res.status(409).json({
+        error: 'Este evento tem inscritos ou certificados emitidos e não pode ser excluído. Cancele o evento ou remova os registros antes.',
+        code: 'EVENT_HAS_DATA',
+      });
+    }
+
+    // Sem dados relevantes → remove filhos de configuração + o evento.
+    for (const q of [
+      'DELETE FROM karate_belt_exam_instructors WHERE exam_id = $1',
+      'DELETE FROM karate_belt_exam_examiners WHERE exam_id = $1',
+      'DELETE FROM karate_event_registration_lots WHERE event_id = $1',
+    ]) {
+      try { await db.query(q, [examId]); }
+      catch (e) { if (e.code !== '42P01') throw e; }
+    }
+    await db.query('DELETE FROM karate_belt_exams WHERE id = $1 AND federation_id = $2', [examId, federationId]);
+    return res.json({ ok: true, deleted: examId });
+  } catch (err) {
+    console.error('[karateExams] delete error:', err.message);
+    if (err.code === '23503') {
+      return res.status(409).json({ error: 'Não foi possível excluir: há registros vinculados ao evento.', code: 'EVENT_HAS_DATA' });
+    }
+    return res.status(500).json({ error: 'Erro ao excluir evento' });
+  }
+});
+
 router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, examId } = req.params;
 
   // karate_belt_exams editable columns: event_date, location, name, exam_type,
   //   max_candidates, fee_amount (dojo_id and notes do NOT exist)
-  const ALLOWED = ['event_date', 'location', 'name', 'exam_type', 'max_candidates', 'fee_amount'];
+  const ALLOWED = ['event_date', 'location', 'name', 'exam_type', 'max_candidates', 'fee_amount', 'description', 'hours'];
+
+  // Whitelist de exam_type quando presente (espelha migration 192 / POST).
+  if (req.body.exam_type !== undefined && req.body.exam_type !== null
+      && !VALID_EXAM_TYPES.includes(req.body.exam_type)) {
+    return res.status(422).json({
+      error: `exam_type inválido. Use: ${VALID_EXAM_TYPES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  // registration_fields (migration 200) — array de { key, label, type, required, options? }.
+  // Validação de formato ANTES de tocar o banco; 422 limpo se inválido.
+  const hasRegistrationFields = req.body.registration_fields !== undefined;
+  if (hasRegistrationFields) {
+    const check = validateRegistrationFields(req.body.registration_fields);
+    if (!check.ok) {
+      return res.status(422).json({ error: check.error, code: 'VALIDATION_ERROR' });
+    }
+  }
+
   const updates = [];
   const values = [];
   let idx = 1;
 
   for (const field of ALLOWED) {
     if (req.body[field] !== undefined) {
+      let v = req.body[field];
+      // fee_amount é NOT NULL DEFAULT 0 — nunca gravar NULL/"" (violaria a constraint).
+      if (field === 'fee_amount') {
+        v = (v === '' || v === null) ? 0 : parseFloat(v);
+      } else if (field === 'max_candidates' || field === 'hours') {
+        v = (v === '' || v === null) ? null : parseInt(v, 10);
+      }
       updates.push(`${field} = $${idx}`);
-      values.push(req.body[field]);
+      values.push(v);
       idx++;
     }
   }
 
   // Permitir atualizar status apenas para valores válidos não-terminais
   if (req.body.status !== undefined) {
-    const VALID_STATUS = ['scheduled', 'in_progress', 'cancelled'];
+    const VALID_STATUS = ['draft', 'open', 'closed'];
     if (!VALID_STATUS.includes(req.body.status)) {
       return res.status(422).json({
         error: `status inválido. Use: ${VALID_STATUS.join(', ')}. Para fechar use POST /close`,
@@ -280,6 +556,16 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
     idx++;
   }
 
+  // registration_fields entra no SET só se a coluna existir (cache otimista —
+  // vira false em 42703 e a tentativa abaixo cai pro UPDATE sem a coluna).
+  let registrationFieldsIdx = null;
+  if (hasRegistrationFields && HAS_REGISTRATION_FIELDS_COL) {
+    registrationFieldsIdx = idx;
+    updates.push(`registration_fields = $${idx}::jsonb`);
+    values.push(JSON.stringify(req.body.registration_fields));
+    idx++;
+  }
+
   if (updates.length === 0) {
     return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }
@@ -288,14 +574,52 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
   values.push(examId, federationId);
 
   try {
-    const result = await db.query(
-      `UPDATE karate_belt_exams
-       SET ${updates.join(', ')}
-       WHERE id = $${idx} AND federation_id = $${idx + 1}
-       RETURNING id, federation_id, exam_type, name, event_date, location,
-                 max_candidates, fee_amount, status, updated_at`,
-      values
-    );
+    let result;
+    try {
+      result = await db.query(
+        `UPDATE karate_belt_exams
+         SET ${updates.join(', ')}
+         WHERE id = $${idx} AND federation_id = $${idx + 1}
+         RETURNING id, federation_id, exam_type, name, event_date, location,
+                   max_candidates, fee_amount, hours, status,
+                   ${HAS_REGISTRATION_FIELDS_COL ? 'registration_fields,' : ''} updated_at`,
+        values
+      );
+    } catch (e) {
+      if (e.code === '42703' && registrationFieldsIdx !== null) {
+        // Coluna ainda não existe (migration 200 pendente) — refaz sem ela.
+        HAS_REGISTRATION_FIELDS_COL = false;
+        console.warn('[karateExams] registration_fields ausente no PATCH (migration 200 pendente)');
+        // Remonta updates/values sem o campo registration_fields.
+        const updates3 = [];
+        const values3 = [];
+        let idx3 = 1;
+        for (const field of ALLOWED) {
+          if (req.body[field] !== undefined) {
+            updates3.push(`${field} = $${idx3}`);
+            values3.push(req.body[field]);
+            idx3++;
+          }
+        }
+        if (req.body.status !== undefined) {
+          updates3.push(`status = $${idx3}`);
+          values3.push(req.body.status);
+          idx3++;
+        }
+        updates3.push('updated_at = NOW()');
+        values3.push(examId, federationId);
+        result = await db.query(
+          `UPDATE karate_belt_exams
+           SET ${updates3.join(', ')}
+           WHERE id = $${idx3} AND federation_id = $${idx3 + 1}
+           RETURNING id, federation_id, exam_type, name, event_date, location,
+                     max_candidates, fee_amount, hours, status, updated_at`,
+          values3
+        );
+      } else {
+        throw e;
+      }
+    }
 
     if (!result.rows.length) {
       return res.status(404).json({ error: 'Exame não encontrado', code: 'NOT_FOUND' });
@@ -307,11 +631,15 @@ router.patch('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) => 
       federation_id: exam.federation_id,
       exam_type: exam.exam_type || null,
       name: exam.name || null,
+      title: exam.name || null,          // alias compat front
       event_date: exam.event_date,
+      exam_date: exam.event_date,        // alias compat front
       location: exam.location || null,
       max_candidates: exam.max_candidates || null,
       fee_amount: exam.fee_amount || null,
+      hours: exam.hours ?? null,
       status: exam.status,
+      registration_fields: exam.registration_fields !== undefined ? (exam.registration_fields || []) : undefined,
       updated_at: exam.updated_at,
     });
   } catch (err) {
@@ -422,6 +750,9 @@ router.post('/belt-exams/:examId/examiners', ...guards.staffWrite(), async (req,
 // FPKT DECISÃO #1: SEMPRE retorna 201, mesmo inelegível.
 // Nunca retorna 422 por critério de elegibilidade.
 // A checagem é INFORMATIVA — retornada em eligibility{} na resposta.
+//
+// CURSO (exam_type='curso'): target_belt é OPCIONAL — cursos não graduam.
+// Para exames normais, target_belt continua obrigatório.
 router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, examId } = req.params;
   const { student_id, target_belt } = req.body;
@@ -429,17 +760,16 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
   if (!student_id) {
     return res.status(422).json({ error: 'student_id é obrigatório', code: 'VALIDATION_ERROR' });
   }
-  if (!target_belt) {
-    return res.status(422).json({ error: 'target_belt é obrigatório', code: 'VALIDATION_ERROR' });
-  }
+  // Nota: NÃO validamos target_belt aqui ainda — precisamos saber o exam_type
+  // antes de decidir se ele é obrigatório.
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
 
-    // Verifica exame
+    // Verifica exame e carrega exam_type para decidir a obrigatoriedade de target_belt
     const examCheck = await client.query(
-      `SELECT id, status FROM karate_belt_exams
+      `SELECT id, status, exam_type FROM karate_belt_exams
        WHERE id = $1 AND federation_id = $2 LIMIT 1`,
       [examId, federationId]
     );
@@ -447,12 +777,22 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Exame não encontrado', code: 'NOT_FOUND' });
     }
-    if (examCheck.rows[0].status === 'done' || examCheck.rows[0].status === 'cancelled') {
+
+    const exam = examCheck.rows[0];
+
+    if (exam.status === 'done' || exam.status === 'cancelled') {
       await client.query('ROLLBACK');
       return res.status(409).json({
-        error: `Exame com status ${examCheck.rows[0].status} não aceita novas inscrições`,
+        error: `Exame com status ${exam.status} não aceita novas inscrições`,
         code: 'CONFLICT',
       });
+    }
+
+    // Cursos não exigem faixa-alvo; exames normais sim.
+    const isCurso = exam.exam_type === 'curso';
+    if (!isCurso && !target_belt) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: 'target_belt é obrigatório para exames de faixa', code: 'VALIDATION_ERROR' });
     }
 
     // Advisory lock para evitar dupla inscrição
@@ -476,35 +816,38 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
       });
     }
 
-    // Insere candidato — karate_belt_exam_candidates: id, exam_id, student_id,
+    // Insere candidato — target_belt é NULL para cursos
+    // karate_belt_exam_candidates: id, exam_id, student_id,
     //   current_belt, target_belt, target_belt_name, belt_schema, status,
     //   result_notes, fee_paid, created_at, updated_at
     const insertRes = await client.query(
       `INSERT INTO karate_belt_exam_candidates
          (exam_id, student_id, target_belt, status, created_at, updated_at)
-       VALUES ($1, $2, $3, 'enrolled', NOW(), NOW())
+       VALUES ($1, $2, $3, 'registered', NOW(), NOW())
        RETURNING id, exam_id, student_id, target_belt, status, created_at`,
-      [examId, student_id, target_belt]
+      [examId, student_id, target_belt || null]
     );
 
     await client.query('COMMIT');
 
     const cand = insertRes.rows[0];
 
-    // FPKT #1: Checa elegibilidade APÓS inscrição (somente aviso, nunca bloqueia)
-    // A checagem usa db direto (fora da transação já fechada)
-    let eligibility = { eligible: true, is_hard_block: false, checks: [], warnings: [] };
-    try {
-      eligibility = await checkEligibility(student_id, target_belt, federationId);
-    } catch (eligErr) {
-      // Falha na checagem não impede a inscrição
-      eligibility = {
-        eligible: null,
-        is_hard_block: false,
-        checks: [],
-        warnings: ['Não foi possível verificar elegibilidade: ' + eligErr.message],
-        error: eligErr.message,
-      };
+    // FPKT #1: Checa elegibilidade APÓS inscrição (somente aviso, nunca bloqueia).
+    // Para cursos não há faixa-alvo — pulamos a checagem de elegibilidade.
+    let eligibility = null;
+    if (!isCurso) {
+      try {
+        eligibility = await checkEligibility(student_id, target_belt, federationId);
+      } catch (eligErr) {
+        // Falha na checagem não impede a inscrição
+        eligibility = {
+          eligible: null,
+          is_hard_block: false,
+          checks: [],
+          warnings: ['Não foi possível verificar elegibilidade: ' + eligErr.message],
+          error: eligErr.message,
+        };
+      }
     }
 
     // SEMPRE 201 — a elegibilidade é só informativa
@@ -515,7 +858,7 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
       target_belt: cand.target_belt,
       status: cand.status,
       created_at: cand.created_at,
-      eligibility, // FPKT #1: aviso anexado, nunca 422 por critério
+      eligibility, // null para cursos; objeto com checks para exames de faixa
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -534,7 +877,7 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
   const { id: federationId, examId, candidateId } = req.params;
   const { status, result_notes } = req.body;
 
-  const VALID_STATUS = ['approved', 'failed', 'absent'];
+  const VALID_STATUS = ['approved', 'rejected', 'absent'];
   if (!status || !VALID_STATUS.includes(status)) {
     return res.status(422).json({
       error: `status deve ser: ${VALID_STATUS.join(', ')}`,
@@ -542,42 +885,79 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
     });
   }
 
+  // Transação: o UPDATE do status dispara o trigger karate_on_exam_approved
+  // (insere o histórico de faixa). Na MESMA transação ajustamos o sufixo da
+  // matrícula (Dan 2º–6º) para que faixa e matrícula nunca fiquem divergentes.
+  const client = await db.connect();
   try {
-    // Verifica exame + candidato
-    const candRes = await db.query(
-      `SELECT ec.id, ec.student_id, ec.status AS current_status, ec.target_belt
+    await client.query('BEGIN');
+
+    const candRes = await client.query(
+      `SELECT ec.id, ec.student_id, ec.status AS current_status,
+              ec.target_belt, ec.target_belt_name,
+              cu.karate_registration_number AS reg_number
        FROM karate_belt_exam_candidates ec
        JOIN karate_belt_exams be ON be.id = ec.exam_id
+       JOIN customers cu ON cu.id = ec.student_id
        WHERE ec.id = $1 AND ec.exam_id = $2 AND be.federation_id = $3
        LIMIT 1`,
       [candidateId, examId, federationId]
     );
 
     if (!candRes.rows.length) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Candidato não encontrado', code: 'NOT_FOUND' });
     }
-
     const cand = candRes.rows[0];
 
-    if (cand.current_status !== 'enrolled') {
+    if (cand.current_status !== 'registered') {
+      await client.query('ROLLBACK');
       return res.status(409).json({
         error: `Resultado já lançado (status atual: ${cand.current_status})`,
         code: 'CONFLICT',
       });
     }
 
-    // Atualiza status — trigger karate_on_exam_approved é disparado
-    // automaticamente pelo banco quando status = 'approved'
-    // karate_belt_exam_candidates has no result_at column — use updated_at
-    const updRes = await db.query(
+    // Atualiza status — trigger karate_on_exam_approved insere o histórico de faixa
+    const updRes = await client.query(
       `UPDATE karate_belt_exam_candidates
        SET status = $1, result_notes = $2, updated_at = NOW()
        WHERE id = $3
        RETURNING id, exam_id, student_id, target_belt, status, result_notes, updated_at`,
       [status, result_notes || null, candidateId]
     );
-
     const updated = updRes.rows[0];
+
+    // ── Sufixo da matrícula (só na aprovação de faixa-preta) ──
+    // Shodan → só avisa; 2º–6º Dan → troca o sufixo automaticamente; 7º+/formato
+    // inesperado → pede revisão. A view karate_current_belt já reflete a faixa.
+    let registration = null;
+    if (status === 'approved') {
+      const change = computeDanRegistrationChange(cand.reg_number, cand.target_belt_name, cand.target_belt) || { action: 'none' };
+      if (change.action === 'update') {
+        const dup = await client.query(
+          `SELECT id FROM customers WHERE karate_registration_number = $1 AND id <> $2 LIMIT 1`,
+          [change.newNumber, cand.student_id]
+        );
+        if (dup.rows.length) {
+          registration = {
+            action: 'review', dan: change.dan,
+            message: `A matrícula sugerida (${change.newNumber}) já está em uso. Ajuste manualmente.`,
+          };
+        } else {
+          await client.query(
+            `UPDATE customers SET karate_registration_number = $1, updated_at = NOW() WHERE id = $2`,
+            [change.newNumber, cand.student_id]
+          );
+          registration = { action: 'updated', dan: change.dan, from: change.from, to: change.newNumber };
+        }
+      } else if (change.action === 'notify_create' || change.action === 'review') {
+        registration = { action: change.action, dan: change.dan, message: change.message };
+      }
+    }
+
+    await client.query('COMMIT');
+
     res.json({
       id: updated.id,
       exam_id: updated.exam_id,
@@ -586,13 +966,18 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
       status: updated.status,
       result_notes: updated.result_notes || null,
       result_at: updated.updated_at,
+      // registration: null quando não há ação; senão { action: 'updated'|'notify_create'|'review', ... }
+      registration,
       _note: status === 'approved'
         ? 'Trigger karate_on_exam_approved inseriu histórico de faixa (imutável)'
         : undefined,
     });
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* noop */ }
     console.error('[karateExams] result error:', err.message);
     res.status(500).json({ error: 'Erro ao lançar resultado', detail: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -612,7 +997,7 @@ router.post(
     if (!reason || !String(reason).trim()) {
       return res.status(422).json({ error: 'reason é obrigatório para correção', code: 'VALIDATION_ERROR' });
     }
-    const VALID_CORRECTED = ['approved', 'failed', 'absent'];
+    const VALID_CORRECTED = ['approved', 'rejected', 'absent'];
     if (corrected_status && !VALID_CORRECTED.includes(corrected_status)) {
       return res.status(422).json({
         error: `corrected_status deve ser: ${VALID_CORRECTED.join(', ')}`,
@@ -689,6 +1074,12 @@ router.post(
 // Fecha o exame e consolida resultados (status → done).
 // NÃO emite certificados (FPKT #3).
 // Valida que todos os candidatos têm resultado antes de fechar.
+// Bloco C — cache module-level otimista p/ certificate_eligible (migration 202).
+// Backend sobe antes da migration ser aplicada (armadilha_schema_pre_migration
+// do CLAUDE.md): comeca true, vira false em 42703 e o UPDATE de elegibilidade
+// e pulado (best-effort, nao impede o fechamento do exame).
+let HAS_CERTIFICATE_ELIGIBLE_COL = true;
+
 router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, examId } = req.params;
   const { force = false } = req.body;
@@ -698,7 +1089,7 @@ router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res
     await client.query('BEGIN');
 
     const examRes = await client.query(
-      `SELECT id, status FROM karate_belt_exams
+      `SELECT id, status, exam_type FROM karate_belt_exams
        WHERE id = $1 AND federation_id = $2 FOR UPDATE`,
       [examId, federationId]
     );
@@ -710,7 +1101,11 @@ router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res
 
     const exam = examRes.rows[0];
 
-    if (exam.status === 'done') {
+    // NOTA DE COMPAT: o status terminal historicamente gravado aqui é 'done',
+    // mas o restante do schema (PATCH /belt-exams, frontend) usa 'closed'.
+    // Checamos os dois pra nao deixar reabrir/fechar de novo um exame que já
+    // foi fechado sob o valor antigo.
+    if (exam.status === 'done' || exam.status === 'closed') {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Exame já fechado', code: 'CONFLICT' });
     }
@@ -723,7 +1118,7 @@ router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res
     const pendingRes = await client.query(
       `SELECT COUNT(*) AS pending
        FROM karate_belt_exam_candidates
-       WHERE exam_id = $1 AND status = 'enrolled'`,
+       WHERE exam_id = $1 AND status = 'registered'`,
       [examId]
     );
     const pendingCount = parseInt(pendingRes.rows[0].pending, 10);
@@ -737,7 +1132,8 @@ router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res
       });
     }
 
-    // Fecha exame
+    // Fecha exame — 'closed' é o valor canônico do enum (draft/open/closed)
+    // usado pelo PATCH /belt-exams e pelo frontend.
     const closeRes = await client.query(
       `UPDATE karate_belt_exams
        SET status = 'done', updated_at = NOW()
@@ -745,6 +1141,42 @@ router.post('/belt-exams/:examId/close', ...guards.staffWrite(), async (req, res
        RETURNING id, status, updated_at`,
       [examId]
     );
+
+    // Bloco C — marca certificate_eligible:
+    //   curso (exam_type='curso')  -> TODOS os inscritos/participantes
+    //   exame/graus                -> apenas status='approved'
+    // Best-effort: 42703 (migration 202 pendente) não impede o fechamento.
+    // Usa SAVEPOINT porque estamos dentro de uma transação (BEGIN acima) —
+    // um erro de coluna ausente abortaria a transação inteira até o
+    // ROLLBACK explícito; o savepoint isola só esta tentativa.
+    if (HAS_CERTIFICATE_ELIGIBLE_COL) {
+      await client.query('SAVEPOINT cert_eligible');
+      try {
+        const isCurso = exam.exam_type === 'curso';
+        if (isCurso) {
+          await client.query(
+            `UPDATE karate_belt_exam_candidates
+             SET certificate_eligible = true
+             WHERE exam_id = $1`,
+            [examId]
+          );
+        } else {
+          await client.query(
+            `UPDATE karate_belt_exam_candidates
+             SET certificate_eligible = true
+             WHERE exam_id = $1 AND status = 'approved'`,
+            [examId]
+          );
+        }
+        await client.query('RELEASE SAVEPOINT cert_eligible');
+      } catch (e) {
+        await client.query('ROLLBACK TO SAVEPOINT cert_eligible');
+        if (e.code === '42703') {
+          HAS_CERTIFICATE_ELIGIBLE_COL = false;
+          console.warn('[karateExams] certificate_eligible ausente (migration 202 pendente)');
+        } else throw e;
+      }
+    }
 
     // Sumário de resultados
     const summaryRes = await client.query(
@@ -795,5 +1227,235 @@ router.get(
     }
   }
 );
+
+
+// ══════════════════════════════════════════════════════════════════
+// Ministrantes do evento (karate_event_instructors — migration 212).
+// ≠ banca de exame (karate_exam_examiners). Nome livre + cargo + imagem
+// de assinatura (usada no certificado, Fase 5). Fundação do modelo de
+// evento canônico. Código defensivo p/ 42P01 (tabela ausente em deploy parcial).
+// ══════════════════════════════════════════════════════════════════
+async function assertExamInFederation(examId, federationId) {
+  const chk = await db.query(
+    `SELECT id FROM karate_belt_exams WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+    [examId, federationId]
+  );
+  return chk.rows.length > 0;
+}
+
+// GET /belt-exams/:examId/instructors
+router.get('/belt-exams/:examId/instructors', ...guards.read(), async (req, res) => {
+  const { id: federationId, examId } = req.params;
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `SELECT id, event_id, name, role, signature_url, sort_order, created_at
+       FROM karate_event_instructors WHERE event_id = $1
+       ORDER BY sort_order ASC, created_at ASC`,
+      [examId]
+    );
+    res.json(rows);
+  } catch (err) {
+    if (err.code === '42P01') return res.json([]); // tabela ausente (migration pendente)
+    console.error('[karateExams] instructors list error:', err.message);
+    res.status(500).json({ error: 'Erro ao listar ministrantes' });
+  }
+});
+
+// POST /belt-exams/:examId/instructors  { name, role?, signature_url?, sort_order? }
+router.post('/belt-exams/:examId/instructors', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId } = req.params;
+  const { name, role, signature_url, sort_order } = req.body;
+  if (!name || !String(name).trim()) {
+    return res.status(422).json({ error: 'name é obrigatório', code: 'VALIDATION_ERROR' });
+  }
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `INSERT INTO karate_event_instructors (event_id, name, role, signature_url, sort_order)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, event_id, name, role, signature_url, sort_order, created_at`,
+      [examId, String(name).trim(), role || null, signature_url || null,
+       (sort_order === '' || sort_order === undefined || sort_order === null) ? 0 : parseInt(sort_order, 10)]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('[karateExams] instructor create error:', err.message);
+    res.status(500).json({ error: 'Erro ao adicionar ministrante', detail: err.message });
+  }
+});
+
+// PATCH /belt-exams/:examId/instructors/:instructorId
+router.patch('/belt-exams/:examId/instructors/:instructorId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId, instructorId } = req.params;
+  const ALLOWED = ['name', 'role', 'signature_url', 'sort_order'];
+  const updates = [];
+  const values = [];
+  let idx = 1;
+  for (const field of ALLOWED) {
+    if (req.body[field] !== undefined) {
+      let v = req.body[field];
+      if (field === 'sort_order') v = (v === '' || v === null) ? 0 : parseInt(v, 10);
+      else if (field === 'name') v = String(v).trim();
+      updates.push(`${field} = $${idx}`); values.push(v); idx++;
+    }
+  }
+  if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  values.push(instructorId, examId);
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `UPDATE karate_event_instructors SET ${updates.join(', ')}
+       WHERE id = $${idx} AND event_id = $${idx + 1}
+       RETURNING id, event_id, name, role, signature_url, sort_order, created_at`,
+      values
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Ministrante não encontrado', code: 'NOT_FOUND' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[karateExams] instructor patch error:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar ministrante', detail: err.message });
+  }
+});
+
+// DELETE /belt-exams/:examId/instructors/:instructorId
+router.delete('/belt-exams/:examId/instructors/:instructorId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId, instructorId } = req.params;
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rowCount } = await db.query(
+      `DELETE FROM karate_event_instructors WHERE id = $1 AND event_id = $2`,
+      [instructorId, examId]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Ministrante não encontrado', code: 'NOT_FOUND' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[karateExams] instructor delete error:', err.message);
+    res.status(500).json({ error: 'Erro ao remover ministrante', detail: err.message });
+  }
+});
+
+
+// ══════════════════════════════════════════════════════════════════
+// Lotes de inscrição do evento (karate_event_registration_lots — migration 215).
+// Cada lote tem preço de filiado e de não-filiado + data de virada (ends_at).
+// Reusa assertExamInFederation (definido no bloco de ministrantes acima).
+// ══════════════════════════════════════════════════════════════════
+function _lotBody(b) {
+  return {
+    name: (b.name != null && String(b.name).trim()) ? String(b.name).trim() : null,
+    sort_order: (b.sort_order === '' || b.sort_order == null) ? 0 : parseInt(b.sort_order, 10),
+    price_member: (b.price_member === '' || b.price_member == null) ? 0 : parseFloat(b.price_member),
+    price_nonmember: (b.price_nonmember === '' || b.price_nonmember == null) ? 0 : parseFloat(b.price_nonmember),
+    ends_at: b.ends_at || null,
+    active: !(b.active === false || b.active === 'false'),
+  };
+}
+
+// GET /belt-exams/:examId/lots
+router.get('/belt-exams/:examId/lots', ...guards.read(), async (req, res) => {
+  const { id: federationId, examId } = req.params;
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `SELECT id, event_id, name, sort_order, price_member, price_nonmember, ends_at, active, created_at
+       FROM karate_event_registration_lots WHERE event_id = $1
+       ORDER BY sort_order ASC, created_at ASC`,
+      [examId]
+    );
+    res.json(rows);
+  } catch (err) {
+    if (err.code === '42P01') return res.json([]);
+    console.error('[karateExams] lots list error:', err.message);
+    res.status(500).json({ error: 'Erro ao listar lotes' });
+  }
+});
+
+// POST /belt-exams/:examId/lots
+router.post('/belt-exams/:examId/lots', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId } = req.params;
+  const b = _lotBody(req.body || {});
+  if (!b.name) return res.status(422).json({ error: 'name é obrigatório', code: 'VALIDATION_ERROR' });
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `INSERT INTO karate_event_registration_lots
+         (event_id, name, sort_order, price_member, price_nonmember, ends_at, active)
+       VALUES ($1,$2,$3,$4,$5,$6::timestamptz,$7)
+       RETURNING id, event_id, name, sort_order, price_member, price_nonmember, ends_at, active, created_at`,
+      [examId, b.name, b.sort_order, b.price_member, b.price_nonmember, b.ends_at, b.active]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('[karateExams] lot create error:', err.message);
+    res.status(500).json({ error: 'Erro ao criar lote', detail: err.message });
+  }
+});
+
+// PATCH /belt-exams/:examId/lots/:lotId
+router.patch('/belt-exams/:examId/lots/:lotId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId, lotId } = req.params;
+  const ALLOWED = ['name', 'sort_order', 'price_member', 'price_nonmember', 'ends_at', 'active'];
+  const updates = [];
+  const values = [];
+  let idx = 1;
+  const parsed = _lotBody({ ...req.body });
+  for (const field of ALLOWED) {
+    if (req.body[field] !== undefined) {
+      let v = parsed[field];
+      const cast = field === 'ends_at' ? '::timestamptz' : '';
+      updates.push(`${field} = $${idx}${cast}`); values.push(v); idx++;
+    }
+  }
+  if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  values.push(lotId, examId);
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rows } = await db.query(
+      `UPDATE karate_event_registration_lots SET ${updates.join(', ')}
+       WHERE id = $${idx} AND event_id = $${idx + 1}
+       RETURNING id, event_id, name, sort_order, price_member, price_nonmember, ends_at, active, created_at`,
+      values
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lote não encontrado', code: 'NOT_FOUND' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[karateExams] lot patch error:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar lote', detail: err.message });
+  }
+});
+
+// DELETE /belt-exams/:examId/lots/:lotId
+router.delete('/belt-exams/:examId/lots/:lotId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, examId, lotId } = req.params;
+  try {
+    if (!(await assertExamInFederation(examId, federationId))) {
+      return res.status(404).json({ error: 'Evento não encontrado', code: 'NOT_FOUND' });
+    }
+    const { rowCount } = await db.query(
+      `DELETE FROM karate_event_registration_lots WHERE id = $1 AND event_id = $2`,
+      [lotId, examId]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Lote não encontrado', code: 'NOT_FOUND' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[karateExams] lot delete error:', err.message);
+    res.status(500).json({ error: 'Erro ao remover lote', detail: err.message });
+  }
+});
 
 module.exports = router;

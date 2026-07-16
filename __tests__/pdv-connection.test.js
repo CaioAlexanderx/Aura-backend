@@ -6,6 +6,11 @@
 // trigger trg_sale_update_customer (migration 137), fonte unica. Os testes
 // abaixo passaram a verificar a AUSENCIA do UPDATE customers no pdv.js.
 // As metricas de FUNCIONARIO (employees) continuam no codigo do pdv.js.
+//
+// 11/06/2026 (auditoria C2-BE): o cancelamento passou a reverter o crediario
+// via cancelCreditSale (services/creditLedger), que emite suas proprias queries
+// (SELECT customer_id + DELETEs + UPDATE installments + UPDATE credit_used). O
+// mock do DELETE foi atualizado para cobrir essa sequencia.
 
 jest.mock('../src/config/database');
 const db = require('../src/config/database');
@@ -107,20 +112,24 @@ describe('PDV → Cliente → Funcionário', () => {
   });
 
   describe('DELETE /sale/:saleId (cancelamento)', () => {
-    it('reverte metrica do funcionario (cliente via trigger 137)', async () => {
+    it('reverte metrica do funcionario + crediario via cancelCreditSale (cliente via trigger 137)', async () => {
       mockClient.query
         .mockResolvedValueOnce({}) // BEGIN
-        .mockResolvedValueOnce({ rows: [{ id: SALE, customer_id: CUST, employee_id: EMP, total_amount: 70 }] })
-        .mockResolvedValueOnce({ rows: [{ product_id: PROD, variant_id: null, quantity: 1 }] })
+        .mockResolvedValueOnce({ rows: [{ id: SALE, customer_id: CUST, employee_id: EMP, total_amount: 70 }] }) // SELECT sale
+        .mockResolvedValueOnce({ rows: [{ product_id: PROD, variant_id: null, quantity: 1 }] }) // SELECT items
         .mockResolvedValueOnce({}) // stock revert (UPDATE products)
         .mockResolvedValueOnce({}) // INSERT stock_movements
         .mockResolvedValueOnce({}) // employee revert (cliente NAO faz mais UPDATE manual)
-        .mockResolvedValueOnce({}) // delete credit debit
-        .mockResolvedValueOnce({}) // delete tx pdv-sale
-        .mockResolvedValueOnce({}) // delete tx pdv-credit-receivable
-        .mockResolvedValueOnce({}) // cancel credit_installments
-        .mockResolvedValueOnce({}) // update credit_profiles
-        .mockResolvedValueOnce({}) // mark cancelled
+        .mockResolvedValueOnce({}) // DELETE tx pdv-sale (caixa)
+        // cancelCreditSale(client, {...}):
+        .mockResolvedValueOnce({ rows: [{ customer_id: CUST }] }) // SELECT customer_id FROM sales
+        .mockResolvedValueOnce({}) // DELETE customer_credit_transactions debit
+        .mockResolvedValueOnce({}) // DELETE transactions A Receber exata
+        .mockResolvedValueOnce({}) // DELETE transactions -rest- (LIKE)
+        .mockResolvedValueOnce({}) // UPDATE credit_installments cancelled
+        .mockResolvedValueOnce({}) // UPDATE customer_credit_profiles (credit_used)
+        // de volta no route:
+        .mockResolvedValueOnce({}) // mark cancelled (UPDATE sales)
         .mockResolvedValueOnce({}); // COMMIT
 
       const res = await request(app).delete(`/companies/${CID}/pdv/sale/${SALE}`);
@@ -133,6 +142,9 @@ describe('PDV → Cliente → Funcionário', () => {
       expect(calls.some(c => c.includes('UPDATE customers') && c.includes('GREATEST'))).toBe(false);
       // Metrica do funcionario continua revertida no codigo.
       expect(calls.some(c => c.includes('UPDATE employees') && c.includes('GREATEST'))).toBe(true);
+      // C2-BE: reversao do crediario via cancelCreditSale — remove debit + os -rest- (LIKE).
+      expect(calls.some(c => /DELETE FROM customer_credit_transactions/i.test(c) && /'debit'/i.test(c))).toBe(true);
+      expect(calls.some(c => /DELETE FROM transactions/i.test(c) && /LIKE/i.test(c))).toBe(true);
     });
   });
 

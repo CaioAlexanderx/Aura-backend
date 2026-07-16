@@ -5,10 +5,17 @@
 // NÃO gera imagem (decisão Caio 07/06): apenas processa o pedido e
 // devolve os DADOS da carteirinha. A renderização é design/frontend.
 //
-//   POST /practitioners/:practitionerId/issue-card  — emite/renova (staffWrite)
-//   GET  /practitioners/:practitionerId/card        — carteirinha atual (read)
-//   GET  /cards                                     — lista (read)
-//   POST /cards/issue-batch                         — lote (adminOnly)
+//   POST /practitioners/:practitionerId/issue-card    — emite/renova (staffWrite)
+//   GET  /practitioners/:practitionerId/card          — carteirinha atual (read)
+//   POST /practitioners/:practitionerId/card/revoke   — revoga (staffWrite)
+//   GET  /cards                                       — lista (read)
+//   POST /cards/issue-batch                           — lote (adminOnly)
+//
+// ── Fila de impressão (migration 233 / sisteminha de gestão) ────
+//   GET  /cards/queue                    — lista por etapa + contadores (read)
+//   POST /cards/queue/mark-printed       — "Imprimir selecionadas" (staffWrite)
+//   POST /cards/queue/mark-delivered     — confirmação manual de entrega (staffWrite)
+//   POST /cards/queue/return-to-queue    — "não saiu" / reimprimir (staffWrite)
 // ============================================================
 'use strict';
 
@@ -58,6 +65,33 @@ router.get('/practitioners/:practitionerId/card', ...guards.read(), async (req, 
   }
 });
 
+// ── POST /practitioners/:practitionerId/card/revoke ───────
+// Revoga a carteirinha atual do praticante (status='revoked'). Idempotente:
+// revogar uma já revogada devolve ok. Após revogar, emitir de novo via
+// /issue-card gera uma nova carteirinha ativa (a revogada fica no histórico).
+router.post('/practitioners/:practitionerId/card/revoke', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, practitionerId } = req.params;
+  try {
+    const { card, alreadyRevoked } = await cards.revokeCard({
+      federation_id: federationId,
+      student_id: practitionerId,
+      revoked_by: req.user?.id || null,
+    });
+    res.json({
+      ...card,
+      revoked: true,
+      already_revoked: alreadyRevoked,
+      _note: alreadyRevoked
+        ? 'Carteirinha já estava revogada.'
+        : 'Carteirinha revogada. Emita uma nova via POST /issue-card se necessário.',
+    });
+  } catch (err) {
+    if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message, code: 'NOT_FOUND' });
+    console.error('[karateCards] revoke error:', err.message);
+    res.status(500).json({ error: 'Erro ao revogar carteirinha', detail: err.message });
+  }
+});
+
 // ── GET /cards ─────────────────────────────────
 router.get('/cards', ...guards.read(), async (req, res) => {
   const federationId = req.params.id;
@@ -90,6 +124,81 @@ router.post('/cards/issue-batch', ...guards.adminOnly(), async (req, res) => {
   } catch (err) {
     console.error('[karateCards] batch error:', err.message);
     res.status(500).json({ error: 'Erro na emissão em lote', detail: err.message });
+  }
+});
+
+
+// ── GET /cards/queue ─────────────────────────────
+// Lista cartões ATIVOS de UMA etapa da fila (print_status), com contadores
+// da federação inteira (as três etapas) e o breakdown por dojô da etapa
+// atual (agrupamento/filtro). Ordenação: mais recente primeiro pelo
+// timestamp que fez o cartão entrar nesta etapa.
+router.get('/cards/queue', ...guards.read(), async (req, res) => {
+  const federationId = req.params.id;
+  const { print_status, dojo_id, search } = req.query;
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.min(500, Math.max(1, parseInt(req.query.pageSize) || 50));
+  try {
+    const out = await cards.listPrintQueue({
+      federation_id: federationId,
+      print_status: print_status || 'to_print',
+      dojo_id: dojo_id || null,
+      search: search || null,
+      page,
+      pageSize,
+    });
+    res.json(out);
+  } catch (err) {
+    console.error('[karateCards] queue list error:', err.message);
+    res.status(500).json({ error: 'Erro ao listar fila de impressão' });
+  }
+});
+
+// ── POST /cards/queue/mark-printed ────────────────
+// "Imprimir selecionadas": move para 'printed' e conta uma via. Disparado
+// pelo clique do botão de imprimir no frontend (confirmação inline antes).
+router.post('/cards/queue/mark-printed', ...guards.staffWrite(), async (req, res) => {
+  const federationId = req.params.id;
+  const { card_ids } = req.body || {};
+  try {
+    const out = await cards.markPrinted({ federation_id: federationId, card_ids });
+    res.json({ ...out, _note: 'Cartões marcados como impressos. Isso NÃO confirma que a impressão física saiu — use "Não saiu / reimprimir" se necessário.' });
+  } catch (err) {
+    if (err.code === 'NO_IDS') return res.status(400).json({ error: err.message, code: 'NO_IDS' });
+    console.error('[karateCards] mark-printed error:', err.message);
+    res.status(500).json({ error: 'Erro ao marcar carteirinhas como impressas', detail: err.message });
+  }
+});
+
+// ── POST /cards/queue/mark-delivered ──────────────
+// Confirmação manual da federação — única forma de chegar em 'delivered'.
+router.post('/cards/queue/mark-delivered', ...guards.staffWrite(), async (req, res) => {
+  const federationId = req.params.id;
+  const { card_ids } = req.body || {};
+  try {
+    const out = await cards.markDelivered({ federation_id: federationId, card_ids, delivered_by: req.user?.id || null });
+    res.json({ ...out, _note: 'Cartões marcados como entregues.' });
+  } catch (err) {
+    if (err.code === 'NO_IDS') return res.status(400).json({ error: err.message, code: 'NO_IDS' });
+    console.error('[karateCards] mark-delivered error:', err.message);
+    res.status(500).json({ error: 'Erro ao marcar carteirinhas como entregues', detail: err.message });
+  }
+});
+
+// ── POST /cards/queue/return-to-queue ─────────────
+// "Não saiu / reimprimir" (de 'printed') OU "Reimprimir" por perda, rasgo
+// ou graduação (de 'delivered'). Volta para 'to_print' sem alterar
+// print_count — só a próxima impressão de fato conta como via nova.
+router.post('/cards/queue/return-to-queue', ...guards.staffWrite(), async (req, res) => {
+  const federationId = req.params.id;
+  const { card_ids } = req.body || {};
+  try {
+    const out = await cards.returnToQueue({ federation_id: federationId, card_ids });
+    res.json({ ...out, _note: 'Cartões devolvidos para "A imprimir".' });
+  } catch (err) {
+    if (err.code === 'NO_IDS') return res.status(400).json({ error: err.message, code: 'NO_IDS' });
+    console.error('[karateCards] return-to-queue error:', err.message);
+    res.status(500).json({ error: 'Erro ao devolver carteirinhas para a fila', detail: err.message });
   }
 });
 

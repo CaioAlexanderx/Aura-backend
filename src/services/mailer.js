@@ -407,6 +407,33 @@ async function sendWeeklyReport(company, kpis, reportUrl) {
   });
 }
 
+// Notificacao interna (CS/comercial) quando uma conta self-service e criada,
+// pra follow-up rapido. Destino: env CS_NOTIFY_EMAIL (default contato@getaura.com.br).
+async function sendSelfServeSignupNotification(info) {
+  const to = process.env.CS_NOTIFY_EMAIL || 'contato@getaura.com.br';
+  const row = (label, value) => value
+    ? `<tr><td style="padding:6px 14px 6px 0;color:#8a8aa0;font-size:13px;white-space:nowrap;">${label}</td><td style="padding:6px 0;color:#fff;font-size:14px;">${value}</td></tr>`
+    : '';
+  const content = `
+    <h2 style="color:#a78bfa;margin:0 0 6px;font-size:20px;">Nova conta self-service 🎉</h2>
+    <p style="color:#8a8aa0;font-size:13px;margin:0 0 18px;line-height:1.5;">Trial de ${info.trialDays || 7} dias no plano ${info.plan || 'negocio'}. Bom momento pra um follow-up de CS.</p>
+    <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;">
+      ${row('Nome', info.name)}
+      ${row('Empresa', info.companyName)}
+      ${row('E-mail', info.email)}
+      ${row('Telefone', info.phone)}
+      ${row('CNPJ', info.cnpj)}
+      ${row('Plano', info.plan)}
+      ${row('Trial até', info.trialEndsAt)}
+    </table>`;
+  return sendMail({
+    to,
+    subject: `Nova conta self-service: ${info.companyName || info.email}`,
+    html: emailLayout(content),
+    text: `Nova conta self-service\nNome: ${info.name || '-'}\nEmpresa: ${info.companyName || '-'}\nE-mail: ${info.email || '-'}\nTelefone: ${info.phone || '-'}\nCNPJ: ${info.cnpj || '-'}\nPlano: ${info.plan || '-'}\nTrial ate: ${info.trialEndsAt || '-'}`,
+  });
+}
+
 module.exports = {
   sendVerificationEmail,
   sendVerificationLinkEmail,
@@ -416,4 +443,5 @@ module.exports = {
   sendOrderStatusEmail,
   sendOwnerNewOrderEmail,
   sendWeeklyReport,
+  sendSelfServeSignupNotification,
 };

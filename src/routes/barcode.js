@@ -1,6 +1,14 @@
 // ============================================================
 // AURA. — Barcode / QR Code
 // fix(schema): B-02 — stock_quantity→stock_qty, active→is_active
+// fix(19/06/2026): lookup do scan tambem resolve barcode de VARIANTE.
+//   Antes /products/barcode/:code so casava products.barcode com
+//   is_active=true. Depois da migration que move barcode pras variants,
+//   o pai ativo fica com barcode=NULL e o EAN-13 vive na variante (ou
+//   num pai duplicado desativado por merge) -> 404 no scanner.
+//   Caso Davi Calcados: troca nao localizava Mormaii (7909937905668) nem
+//   Klin Flyer 469 (7909874573449). Agora faz LEFT JOIN em variants
+//   ativas e casa p.barcode OR pv.barcode, retornando o pai (+ variante).
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -90,8 +98,15 @@ router.delete(
 );
 
 // GET /companies/:id/products/barcode/:code
-// Lookup por código — usado pelo PDV ao escanear
+// Lookup por código — usado pelo PDV/troca ao escanear.
 // fix(B-02): stock_quantity→stock_qty, active→is_active
+// fix(19/06/2026): casa tambem barcode de variante ativa. Sem isso, pai
+//   com barcode=NULL (codigo so na variante) dava 404 no scanner — embora
+//   a busca textual em products.js (search) ja achasse via EXISTS(pv).
+//   Retorna sempre o produto-pai; matched_variant_id/_sku permitem o
+//   PDV/troca pre-selecionar o tamanho escaneado. ORDER BY prefere match
+//   no nivel do produto; LIMIT 1 evita ambiguidade quando variantes de
+//   tamanhos diferentes compartilham o mesmo EAN.
 router.get(
   '/barcode/:code',
   requireAuth,
@@ -102,11 +117,19 @@ router.get(
       const result = await pool.query(
         `SELECT p.id, p.name, p.description, p.price, p.cost_price,
                 p.stock_qty, p.barcode, p.barcode_format, p.category,
-                p.sku, p.is_active
+                p.sku, p.is_active,
+                pv.id         AS matched_variant_id,
+                pv.sku_suffix AS matched_variant_sku
          FROM products p
+         LEFT JOIN product_variants pv
+                ON pv.product_id = p.id
+               AND pv.is_active  = true
+               AND pv.barcode    = $2
          WHERE p.company_id = $1
-           AND p.barcode    = $2
-           AND p.is_active  = true`,
+           AND p.is_active  = true
+           AND (p.barcode = $2 OR pv.id IS NOT NULL)
+         ORDER BY (p.barcode = $2) DESC NULLS LAST
+         LIMIT 1`,
         [company_id, code]
       );
 

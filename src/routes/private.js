@@ -62,12 +62,23 @@ router.use('/billing', require('./billing'));
 router.use('/support', require('./support'));
 router.use('/customers', require('./customers'));
 router.use('/employees', require('./employees'));
+// Notificações do app (endomarketing banners + avisos de pedido) — sem gate de plano
+router.use('/notifications', require('./notifications'));
 
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
+// Decomposicao credit.js (passo 1, 11/06/2026): /balances isolado, montado ANTES de ./credit
+// para atender GET /credit/balances com a flag de atraso calculada por data (relato #1).
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditBalances'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInstallments'));
+// B4 (11/06/2026): devolucao de venda no crediario -- POST /credit/sales/:saleId/refund
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditRefund'));
+// Item 3 (13/06/2026): unificacao de carne -- GET+POST /credit/customers/:cid/accounts/:accountId/unify
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditUnify'));
+// Item 2 (16/06/2026): renegociacao de parcelas -- GET+POST /credit/customers/:cid/accounts/:accountId/reschedule
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditReschedule'));
 // F2-2B (29/05/2026): preview 360 + quick-customer
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditPreview'));
 // F2-2D (29/05/2026): a receber crediario no Financeiro
@@ -123,20 +134,28 @@ router.use('/food/nfce', requirePlan('negocio', 'expansao'), require('./foodNfce
 router.use('/food/schedule', requirePlan('negocio', 'expansao'), require('./foodSchedule'));
 router.use('/food/hub', requirePlan('negocio', 'expansao'), require('./foodHub'));
 
-// Aura Studio: gate de plano REMOVIDO -- Studio acessivel em todos os planos.
-router.use('/studio', require('./studio'));
-router.use('/studio', require('./studioPainel'));
-router.use('/studio', require('./studioKdsApproval'));
-router.use('/studio', require('./studioBulkHub'));
-router.use('/studio', require('./studioUpload'));
-router.use('/studio', require('./studioBulkConvert'));
-router.use('/studio', require('./studioSaleItemPatch'));
-router.use('/studio', require('./studioMarketplaceListing'));
+// Aura Studio: vertical contratada, gateada por plano (negocio+expansao) como
+// os demais verticais. Gate restaurado em 10/06/2026 (Onda 1 -- 1.2, decisao
+// Caio); requirePlan ja era o padrao de food/dental/etc. O toggle
+// pdv_settings.studio_enabled + module_overrides seguem como gate de UI no
+// aura-app; aqui o gate de API e por plano, igual aos outros verticais.
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studio'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPainel'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioKdsApproval'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioBulkHub'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioUpload'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioBulkConvert'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioSaleItemPatch'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioMarketplaceListing'));
 // Camada 1 — Orçamento + Precificação + Pagamentos (30/05/2026)
-router.use('/studio', require('./studioQuotes'));    // Fase A: Orçamento como entidade
-router.use('/studio', require('./studioPricing'));   // Fase B: Motor de precificação
-router.use('/studio', require('./studioPayments'));  // Fase C: Sinal / pagamento parcial
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioQuotes'));    // Fase A: Orçamento como entidade
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPricing'));   // Fase B: Motor de precificação
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPayments'));  // Fase C: Sinal / pagamento parcial
 // Agente B (02/06/2026): status de onboarding derivado (read-only, sem migration)
-router.use('/studio', require('./studioOnboardingStatus'));
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioOnboardingStatus'));
+// F0 Visual Engine (02/07/2026): templates visuais 2D/3D globais mantidos pela
+// Aura (CRUD staff-only) + registro de renders com content_hash (base da
+// aprovação formal da F2). Contrato no chat c/ Caio.
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioVisualTemplates'));
 
 module.exports = router;

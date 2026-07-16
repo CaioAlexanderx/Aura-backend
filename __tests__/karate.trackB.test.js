@@ -13,8 +13,10 @@
 'use strict';
 
 jest.mock('../src/config/database');
+jest.mock('../src/services/nuvemfiscal');
 
-const db = require('../src/config/database');
+const db     = require('../src/config/database');
+const fiscal = require('../src/services/nuvemfiscal');
 
 // Module-scope afterEach: drains mockResolvedValueOnce queues after every
 // test so that early-return (422) tests don't leave stale resolved values
@@ -30,8 +32,8 @@ afterEach(() => {
 describe('karateFinanceService — computeAnnuityStatus', () => {
   const { computeAnnuityStatus } = require('../src/services/karateFinanceService');
 
-  it('retorna suspended quando annuity é null (sem cobrança)', () => {
-    expect(computeAnnuityStatus(null)).toBe('suspended');
+  it('retorna no_charge quando annuity é null (sem cobrança)', () => {
+    expect(computeAnnuityStatus(null)).toBe('no_charge');
   });
 
   it('retorna paid quando status=paid', () => {
@@ -62,8 +64,8 @@ describe('karateFinanceService — computeAnnuityStatus', () => {
     expect(computeAnnuityStatus({ status: 'pending', due_date: past.toISOString().split('T')[0] })).toBe('suspended');
   });
 
-  it('retorna suspended quando due_date é null e status != paid', () => {
-    expect(computeAnnuityStatus({ status: 'pending', due_date: null })).toBe('suspended');
+  it('retorna no_charge quando due_date é null e status != paid', () => {
+    expect(computeAnnuityStatus({ status: 'pending', due_date: null })).toBe('no_charge');
   });
 });
 
@@ -79,10 +81,10 @@ const makeToken = (overrides) => jwt.sign(
 );
 const adminToken = makeToken();
 
-const FED_ID  = 'fed-uuid-001';
-const DOJO_ID = 'dojo-uuid-001';
-const HIST_ID = 'hist-uuid-001';
-const TX_ID   = 'tx-uuid-001';
+const FED_ID    = 'fed-uuid-001';
+const DOJO_ID   = 'dojo-uuid-001';
+const HIST_ID   = 'hist-uuid-001';
+const TX_ID     = 'tx-uuid-001';
 const INTENT_ID = 'intent-uuid-001';
 
 function buildApp() {
@@ -211,14 +213,36 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
       const mockClient = { query: jest.fn(), release: jest.fn() };
       db.connect.mockResolvedValue(mockClient);
 
-      // Ordem: BEGIN → verifica dojô → advisory lock → checa existing → INSERT tx → INSERT hist → COMMIT
+      // Fase F1: amount manual ainda cria 1 parcela única (via
+      // karate_annuity_installments), pois as views canônicas exigem que
+      // TODO header tenha >=1 parcela. Ordem real do handler: BEGIN →
+      // verifica dojô → advisory lock → checa existing → INSERT header →
+      // INSERT installment (seq 1) → INSERT transaction → UPDATE installment
+      // (transaction_id) → SELECT installments (rollup) → UPDATE header
+      // (rollup) → COMMIT.
       mockClient.query
         .mockResolvedValueOnce({})   // BEGIN
-        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP', karate_annuity_plan: 'anual' }] }) // SELECT dojô
         .mockResolvedValueOnce({ rows: [] })  // advisory lock
         .mockResolvedValueOnce({ rows: [] })  // check existing annuity_history
+        .mockResolvedValueOnce({ rows: [{ id: HIST_ID }] })  // INSERT header
+        .mockResolvedValueOnce({              // INSERT installment (seq 1)
+          rows: [{
+            id: 'inst-uuid-001', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: '2026-12-31', status: 'pending', paid_at: null,
+            transaction_id: null, payment_method: null,
+          }],
+        })
         .mockResolvedValueOnce({ rows: [{ id: TX_ID }] })  // INSERT transaction
-        .mockResolvedValueOnce({              // INSERT karate_dojo_annuity_history
+        .mockResolvedValueOnce({})  // UPDATE installment.transaction_id
+        .mockResolvedValueOnce({              // SELECT installments (rollup)
+          rows: [{
+            id: 'inst-uuid-001', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: '2026-12-31', status: 'pending', paid_at: null,
+            transaction_id: TX_ID, payment_method: null,
+          }],
+        })
+        .mockResolvedValueOnce({              // UPDATE header (rollup)
           rows: [{
             id: HIST_ID,
             dojo_id: DOJO_ID,
@@ -227,6 +251,7 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
             due_date: '2026-12-31',
             status: 'pending',
             paid_at: null,
+            transaction_id: TX_ID,
           }],
         })
         .mockResolvedValueOnce({});  // COMMIT
@@ -248,8 +273,23 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
         });
     });
 
-    it('retorna 422 sem amount', (done) => {
+    it('retorna 422 sem amount quando não há fee vigente pro plano (fluxo por plano, sem override manual)', (done) => {
+      // Continuação F3 (PR #356): sem `amount`, o handler NÃO exige mais
+      // amount manual (usa a fee vigente do plano) — o 422 legítimo aqui é
+      // "fee não configurada", não "amount ausente" per se. Mock próprio
+      // (sobrepõe o db.connect do beforeEach só para esta chamada) pra não
+      // depender da data real de execução: BEGIN → SELECT dojô → advisory
+      // lock → checa existing → getVigentFee (sem linha = sem fee).
       jest.clearAllMocks();
+      const customClient = { query: jest.fn(), release: jest.fn() };
+      customClient.query
+        .mockResolvedValueOnce({})                                          // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP', karate_annuity_plan: 'anual' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [] })                                 // advisory lock
+        .mockResolvedValueOnce({ rows: [] })                                 // check existing
+        .mockResolvedValueOnce({ rows: [] });                                // getVigentFee → sem fee configurada
+      db.connect.mockResolvedValueOnce(customClient);
+
       request(app)
         .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
         .set('Authorization', 'Bearer ' + adminToken)
@@ -257,6 +297,178 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
         .end((err, res) => {
           if (err) return done(err);
           expect(res.status).toBe(422);
+          done();
+        });
+    });
+
+    it('continuação F3: plano com TODAS as parcelas já vencidas não erra mais com 422 — cria com due_date = fim do mês corrente (default seguro, due_date_ajustada=true)', (done) => {
+      // Fee vigente com due_months=[5] (maio) — "hoje" (execução real) já
+      // passou de maio/2026, então o plano por padrão está 100% vencido.
+      // Ordem real: BEGIN → SELECT dojô → advisory lock → checa existing →
+      // getVigentFee → INSERT header → INSERT installment → INSERT
+      // transaction → UPDATE installment.transaction_id → SELECT
+      // installments (rollup) → UPDATE header (rollup) → COMMIT.
+      jest.clearAllMocks();
+      const now = new Date();
+      const safeDueDate = require('../src/services/karateAnnuityService')
+        .lastDayOfMonthStr(now.getUTCFullYear(), now.getUTCMonth() + 1);
+      const customClient = { query: jest.fn(), release: jest.fn() };
+      customClient.query
+        .mockResolvedValueOnce({})                                          // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP', karate_annuity_plan: 'anual' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [] })                                 // advisory lock
+        .mockResolvedValueOnce({ rows: [] })                                 // check existing
+        .mockResolvedValueOnce({ rows: [{ id: 'fee-1', amount: 500, due_months: [5] }] }) // getVigentFee
+        .mockResolvedValueOnce({ rows: [{ id: HIST_ID }] })                  // INSERT header
+        .mockResolvedValueOnce({                                            // INSERT installment (seq 1)
+          rows: [{
+            id: 'inst-uuid-002', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: safeDueDate, status: 'pending', paid_at: null,
+            transaction_id: null, payment_method: null,
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [{ id: TX_ID }] })                    // INSERT transaction
+        .mockResolvedValueOnce({})                                          // UPDATE installment.transaction_id
+        .mockResolvedValueOnce({                                            // SELECT installments (rollup)
+          rows: [{
+            id: 'inst-uuid-002', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: safeDueDate, status: 'pending', paid_at: null,
+            transaction_id: TX_ID, payment_method: null,
+          }],
+        })
+        .mockResolvedValueOnce({                                            // UPDATE header (rollup)
+          rows: [{
+            id: HIST_ID, dojo_id: DOJO_ID, reference_period: '2026',
+            amount: 500.00, due_date: safeDueDate, status: 'pending',
+            paid_at: null, transaction_id: TX_ID,
+          }],
+        })
+        .mockResolvedValueOnce({});                                         // COMMIT
+      db.connect.mockResolvedValueOnce(customClient);
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ reference_period: '2026' })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(201);
+          expect(res.body.due_date).toBe(safeDueDate);
+          expect(res.body.due_date_ajustada).toBe(true);
+          done();
+        });
+    });
+
+    it('continuação F3: due_date opcional sobrescreve o vencimento da parcela gerada pelo plano', (done) => {
+      jest.clearAllMocks();
+      const customClient = { query: jest.fn(), release: jest.fn() };
+      customClient.query
+        .mockResolvedValueOnce({})                                          // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP', karate_annuity_plan: 'anual' }] }) // SELECT dojô
+        .mockResolvedValueOnce({ rows: [] })                                 // advisory lock
+        .mockResolvedValueOnce({ rows: [] })                                 // check existing
+        .mockResolvedValueOnce({ rows: [{ id: 'fee-1', amount: 500, due_months: [5] }] }) // getVigentFee
+        .mockResolvedValueOnce({ rows: [{ id: HIST_ID }] })                  // INSERT header
+        .mockResolvedValueOnce({                                            // INSERT installment (seq 1)
+          rows: [{
+            id: 'inst-uuid-003', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: '2026-08-20', status: 'pending', paid_at: null,
+            transaction_id: null, payment_method: null,
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [{ id: TX_ID }] })                    // INSERT transaction
+        .mockResolvedValueOnce({})                                          // UPDATE installment.transaction_id
+        .mockResolvedValueOnce({                                            // SELECT installments (rollup)
+          rows: [{
+            id: 'inst-uuid-003', annuity_id: HIST_ID, seq: 1, amount: 500,
+            due_date: '2026-08-20', status: 'pending', paid_at: null,
+            transaction_id: TX_ID, payment_method: null,
+          }],
+        })
+        .mockResolvedValueOnce({                                            // UPDATE header (rollup)
+          rows: [{
+            id: HIST_ID, dojo_id: DOJO_ID, reference_period: '2026',
+            amount: 500.00, due_date: '2026-08-20', status: 'pending',
+            paid_at: null, transaction_id: TX_ID,
+          }],
+        })
+        .mockResolvedValueOnce({});                                         // COMMIT
+      db.connect.mockResolvedValueOnce(customClient);
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ reference_period: '2026', due_date: '2026-08-20' })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(201);
+          expect(res.body.due_date).toBe('2026-08-20');
+          expect(res.body.due_date_ajustada).toBe(true);
+          done();
+        });
+    });
+
+    it('continuação F3: 422 quando due_date informado é de ano diferente da temporada (reference_period)', (done) => {
+      jest.clearAllMocks();
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ reference_period: '2026', due_date: '2027-03-01' })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(422);
+          expect(res.body.code).toBe('VALIDATION_ERROR');
+          done();
+        });
+    });
+
+    // F2 do plano de anuidades: /charge sem `plan` no request e sem
+    // karate_annuity_plan cadastrado no dojô NÃO cai mais no default
+    // 'anual' — devolve 422 PLANO_INDEFINIDO em vez de gerar uma cobrança
+    // no plano errado silenciosamente.
+    it('F2: 422 PLANO_INDEFINIDO quando dojô não tem karate_annuity_plan e nenhum plan foi informado no request (fluxo por plano, sem amount manual)', (done) => {
+      jest.clearAllMocks();
+      const customClient = { query: jest.fn(), release: jest.fn() };
+      customClient.query
+        .mockResolvedValueOnce({})                                                        // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] });              // SELECT dojô (sem karate_annuity_plan)
+      db.connect.mockResolvedValueOnce(customClient);
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ reference_period: '2026' })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(422);
+          expect(res.body.code).toBe('PLANO_INDEFINIDO');
+          done();
+        });
+    });
+
+    // Precedência: plan explícito no request vence mesmo quando o dojô não
+    // tem plano cadastrado — não é obrigatório persistir o plano no dojô
+    // para lançar UMA cobrança pontual.
+    it('F2: plan explícito no request funciona mesmo sem karate_annuity_plan cadastrado no dojô', (done) => {
+      jest.clearAllMocks();
+      const customClient = { query: jest.fn(), release: jest.fn() };
+      customClient.query
+        .mockResolvedValueOnce({})                                                        // BEGIN
+        .mockResolvedValueOnce({ rows: [{ id: DOJO_ID, name: 'Dojô SP' }] })               // SELECT dojô (sem karate_annuity_plan)
+        .mockResolvedValueOnce({ rows: [] })                                               // advisory lock
+        .mockResolvedValueOnce({ rows: [] })                                               // check existing
+        .mockResolvedValueOnce({ rows: [{ id: 'fee-tri', amount: 150, due_months: [2, 5, 8, 11] }] }); // getVigentFee trimestral
+      db.connect.mockResolvedValueOnce(customClient);
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/annuities/dojos/' + DOJO_ID + '/charge')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ reference_period: '2026', plan: 'trimestral' })
+        .end((err, res) => {
+          if (err) return done(err);
+          // Não é 422 PLANO_INDEFINIDO — a fee mockada foi consultada de fato
+          // (não parou antes por falta de plano).
+          expect(res.status).not.toBe(422);
           done();
         });
     });
@@ -319,39 +531,80 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
 
   // ── confirm ──
   describe('POST /financial/payments/:intentId/confirm', () => {
+    // Shared intent row returned by the SELECT inside the transaction.
+    // cnpj + inscricao_municipal must be present for the NFS-e block to run.
+    const INTENT_ROW = {
+      id: INTENT_ID,
+      payment_intent_id: 'static-dojo-xxx-2026',
+      provider: 'static_brcode',
+      status: 'pending',
+      annuity_history_id: HIST_ID,
+      transaction_id: TX_ID,
+      dojo_id: DOJO_ID,
+      reference_period: '2026',
+      annuity_amount: 500.00,
+      annuity_status: 'pending',
+    };
+
+    // Federation row with cnpj + inscricao_municipal so the NFS-e block fires.
+    const FED_ROW = {
+      id: FED_ID,
+      name: 'Federação SP',
+      legal_name: 'Federação SP Ltda',
+      cnpj: '12345678000100',
+      inscricao_municipal: '123456',
+      email: 'fed@example.com',
+      phone: '11999999999',
+      focus_company_id: null,
+      certificate_uploaded: false,
+      tax_regime: 'simples',
+      address_street: 'Rua Teste',
+      address_number: '1',
+      address_neighborhood: 'Centro',
+      address_city: 'São Paulo',
+      address_state: 'SP',
+      address_zip: '01310100',
+      ibge_code: '3550308',
+    };
+
+    // Dojo row for the NFS-e block (tomador)
+    const DOJO_ROW = { name: 'Dojô SP', cnpj: '98765432000100' };
+
     beforeEach(() => {
       jest.clearAllMocks();
+
+      // fiscal.emitNfse: simulates Nuvem Fiscal returning authorized status
+      fiscal.emitNfse = jest.fn().mockResolvedValue({
+        status: 'autorizado',
+        id: 'nfse-focus-001',
+        numero: '42',
+        link_pdf: null,
+        link_xml: null,
+        mensagem: null,
+      });
+
+      // client.query mocks — handles the DB transaction (BEGIN … COMMIT)
       const mockClient = { query: jest.fn(), release: jest.fn() };
       db.connect.mockResolvedValue(mockClient);
 
-      // Ordem: BEGIN → busca intent+annuity → UPDATE intent → UPDATE annuity_history
-      //         → UPDATE transaction → SELECT nfe_id → INSERT nfse → UPDATE tx nfe_id → COMMIT
       mockClient.query
-        .mockResolvedValueOnce({})  // BEGIN
-        .mockResolvedValueOnce({    // SELECT intent JOIN annuity_history
-          rows: [{
-            id: INTENT_ID,
-            payment_intent_id: 'static-dojo-xxx-2026',
-            provider: 'static_brcode',
-            status: 'pending',
-            annuity_history_id: HIST_ID,
-            transaction_id: TX_ID,
-            dojo_id: DOJO_ID,
-            reference_period: '2026',
-            annuity_amount: 500.00,
-            annuity_status: 'pending',
-          }],
-        })
-        .mockResolvedValueOnce({ rows: [] })  // UPDATE intent status=paid
-        .mockResolvedValueOnce({ rows: [] })  // UPDATE annuity_history status=paid
-        .mockResolvedValueOnce({ rows: [] })  // UPDATE transaction status=paid
-        .mockResolvedValueOnce({ rows: [{ nfe_id: null }] })  // SELECT nfe_id
-        .mockResolvedValueOnce({ rows: [{ id: 'nfse-uuid-001' }] })  // INSERT nfse
-        .mockResolvedValueOnce({ rows: [] })  // UPDATE transaction nfe_id
-        .mockResolvedValueOnce({});  // COMMIT
+        .mockResolvedValueOnce({})                      // BEGIN
+        .mockResolvedValueOnce({ rows: [INTENT_ROW] })  // SELECT intent JOIN annuity_history
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE intent status=paid
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE annuity_history status=paid
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE transaction status=paid
+        .mockResolvedValueOnce({});                      // COMMIT
+
+      // db.query mocks — handles the best-effort NFS-e block (post-COMMIT)
+      db.query
+        .mockResolvedValueOnce({ rows: [FED_ROW] })   // SELECT companies (federation fiscal data)
+        .mockResolvedValueOnce({ rows: [DOJO_ROW] })  // SELECT companies (dojo name + cnpj)
+        .mockResolvedValueOnce({ rows: [] })           // SELECT nfe_documents idempotency check
+        .mockResolvedValueOnce({ rows: [] })           // INSERT nfe_documents (pending)
+        .mockResolvedValueOnce({ rows: [] });          // UPDATE nfe_documents (after fiscal.emitNfse)
     });
 
-    it('confirma pagamento, retorna status=paid e nfse_id', (done) => {
+    it('confirma pagamento, retorna status=paid e nfse_ref', (done) => {
       request(app)
         .post('/federation/' + FED_ID + '/financial/payments/' + INTENT_ID + '/confirm')
         .set('Authorization', 'Bearer ' + adminToken)
@@ -360,7 +613,36 @@ describe('POST charge → pix → confirm (dojô anuidade)', () => {
           if (err) return done(err);
           expect(res.status).toBe(200);
           expect(res.body.status).toBe('paid');
-          expect(res.body.nfse_id).toBe('nfse-uuid-001');
+          // nfse_ref is a generated code like "nfse-karate-<8chars>-<timestamp>"
+          expect(res.body.nfse_ref).toMatch(/^nfse-karate-/);
+          expect(res.body.idempotent_hit).toBe(false);
+          done();
+        });
+    });
+
+    it('confirma pagamento e retorna status=paid mesmo sem emissão NFS-e (emit_nfse=false)', (done) => {
+      // No NFS-e block runs, so no extra db.query calls needed — reset to empty
+      jest.clearAllMocks();
+      const mockClient2 = { query: jest.fn(), release: jest.fn() };
+      db.connect.mockResolvedValue(mockClient2);
+
+      mockClient2.query
+        .mockResolvedValueOnce({})                      // BEGIN
+        .mockResolvedValueOnce({ rows: [INTENT_ROW] })  // SELECT intent JOIN annuity_history
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE intent status=paid
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE annuity_history status=paid
+        .mockResolvedValueOnce({ rows: [] })             // UPDATE transaction status=paid
+        .mockResolvedValueOnce({});                      // COMMIT
+
+      request(app)
+        .post('/federation/' + FED_ID + '/financial/payments/' + INTENT_ID + '/confirm')
+        .set('Authorization', 'Bearer ' + adminToken)
+        .send({ emit_nfse: false })
+        .end((err, res) => {
+          if (err) return done(err);
+          expect(res.status).toBe(200);
+          expect(res.body.status).toBe('paid');
+          expect(res.body.nfse_ref).toBeNull();
           expect(res.body.idempotent_hit).toBe(false);
           done();
         });
@@ -443,10 +725,10 @@ describe('getDojoAnnuityStatus (via DB mock)', () => {
     expect(result.days_overdue).toBeLessThanOrEqual(46);
   });
 
-  it('retorna status=suspended quando não há cobrança', async () => {
+  it('retorna status=no_charge quando não há cobrança', async () => {
     db.query.mockResolvedValueOnce({ rows: [] });
     const result = await getDojoAnnuityStatus(DOJO_ID, '2026');
-    expect(result.status).toBe('suspended');
+    expect(result.status).toBe('no_charge');
     expect(result.amount).toBe(0);
   });
 });

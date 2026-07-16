@@ -14,6 +14,15 @@
 //   - 403 no POST quando atinge limite retorna body { error, limit, current }
 //     pra FE montar mensagem contextual de upgrade.
 //
+// 19/06/2026 -- TEAM-RM: fluxo de remocao "Suspender + Apagar" (report Davi).
+//   - DELETE virou remocao REAL (hard delete), nao mais soft. Antes o
+//     "apagar" so marcava is_active=false/status=dismissed, o que confundia
+//     (apagava da lista mas mantinha no banco -- "suspendia em vez de apagar").
+//   - Guarda de historico: se o funcionario tem vinculo financeiro (vendas,
+//     transacoes, folha ou comissoes), DELETE retorna 409 { code:'HAS_HISTORY' }
+//     e o FE oferece Suspender em vez de apagar (preserva rastreabilidade).
+//   - Suspender/Reativar continuam via PATCH { status, is_active } (ja suportado).
+//
 // Folha de pagamento real (salario, holerite, comissao, eSocial) continua
 // Negocio+ via mounts em private.js. Esta rota e apenas CRUD da pessoa.
 // ============================================================
@@ -223,6 +232,10 @@ router.post('/', async (req, res) => {
 });
 
 // PATCH /:eid -- update employee
+//
+// Tambem e a porta de SUSPENDER / REATIVAR:
+//   Suspender -> { status: 'dismissed', is_active: false }
+//   Reativar  -> { status: 'active',    is_active: true  }
 router.patch('/:eid', async (req, res) => {
   const { id: cid, eid } = req.params;
   const updates = [], values = [];
@@ -279,18 +292,57 @@ router.patch('/:eid', async (req, res) => {
   }
 });
 
-// DELETE /:eid -- soft delete
+// DELETE /:eid -- remocao REAL (hard delete)
+//
+// 19/06/2026 -- TEAM-RM: antes era soft delete (so marcava is_active=false),
+// o que "suspendia em vez de apagar". Agora apaga de verdade, mas protege o
+// historico: se o funcionario tem vinculo financeiro (vendas, transacoes,
+// folha ou comissoes), retorna 409 { code:'HAS_HISTORY' } e o FE oferece
+// Suspender. Dependencias leves (metas, regras de comissao, sessoes de caixa)
+// caem por CASCADE / SET NULL definidos no schema.
 router.delete('/:eid', async (req, res) => {
   const { id: cid, eid } = req.params;
   try {
-    const { rows } = await db.query(
-      `UPDATE employees SET is_active = false, status = 'dismissed', updated_at = NOW()
-       WHERE id = $1 AND company_id = $2 RETURNING id, name`,
+    // Confere existencia + escopo da empresa.
+    const { rows: found } = await db.query(
+      'SELECT id, name FROM employees WHERE id = $1 AND company_id = $2',
       [eid, cid]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Funcionario nao encontrado' });
-    res.json({ deleted: true, id: eid, name: rows[0].name });
+    if (!found.length) return res.status(404).json({ error: 'Funcionario nao encontrado' });
+
+    // Guarda de historico: bloqueia hard delete quando ha rastro financeiro.
+    const { rows: refRows } = await db.query(
+      `SELECT
+         (SELECT COUNT(*) FROM sales WHERE employee_id = $1 OR exchange_employee_id = $1)::int AS sales,
+         (SELECT COUNT(*) FROM transactions WHERE employee_id = $1)::int AS transactions,
+         (SELECT COUNT(*) FROM payroll_items WHERE employee_id = $1)::int AS payroll,
+         (SELECT COUNT(*) FROM commission_ledger WHERE employee_id = $1)::int AS commissions`,
+      [eid]
+    );
+    const refs = refRows[0] || {};
+    const hasHistory = (refs.sales || 0) + (refs.transactions || 0) + (refs.payroll || 0) + (refs.commissions || 0) > 0;
+    if (hasHistory) {
+      return res.status(409).json({
+        error: 'Este funcionario tem historico vinculado (vendas, folha ou comissoes) e nao pode ser apagado. Use Suspender para mante-lo no historico como desligado.',
+        code: 'HAS_HISTORY',
+        refs,
+      });
+    }
+
+    // Sem historico -> remocao real.
+    const { rows } = await db.query(
+      'DELETE FROM employees WHERE id = $1 AND company_id = $2 RETURNING id, name',
+      [eid, cid]
+    );
+    res.json({ deleted: true, hard: true, id: eid, name: rows[0]?.name });
   } catch (err) {
+    // FK inesperada (23503) -> orienta suspender em vez de quebrar.
+    if (err && err.code === '23503') {
+      return res.status(409).json({
+        error: 'Este funcionario possui registros vinculados e nao pode ser apagado. Use Suspender.',
+        code: 'HAS_HISTORY',
+      });
+    }
     console.error('[employees] delete error:', err.message);
     res.status(500).json({ error: 'Erro ao remover funcionario' });
   }

@@ -3,6 +3,13 @@
 // Auth: OAuth 2.0 client_credentials
 // Docs: https://dev.nuvemfiscal.com.br/docs/api
 //
+// 23/06/2026 (timeout SEFAZ): todas as chamadas HTTP (getToken + nuvemRequest)
+// agora abortam após NUVEM_FISCAL_TIMEOUT_MS (default 20s) via AbortSignal.
+// Sem isso, uma lentidão/travamento da Nuvem Fiscal pendurava a requisição
+// indefinidamente — e no fluxo de troca (trocaV2 pós-COMMIT) segurava uma
+// conexão do pool o tempo todo, esgotando o pool e travando o app (incidente
+// 23/06). Timeout => erro 504 claro, conexão liberada.
+//
 // 01/06/2026 (fix Rejeicao 871): NF-e 55 de devolucao agora manda
 // Forma de Pagamento = 'Sem Pagamento' (tPag=90, vPag=0). Antes ia o
 // metodo real (tPag=01 Dinheiro com valor) e a SEFAZ rejeitava
@@ -24,6 +31,20 @@ const AUTH_URL     = 'https://auth.nuvemfiscal.com.br/oauth/token';
 const CLIENT_ID    = process.env.NUVEM_FISCAL_CLIENT_ID;
 const CLIENT_SECRET = process.env.NUVEM_FISCAL_CLIENT_SECRET;
 
+// Timeout de toda chamada HTTP à Nuvem Fiscal/SEFAZ. Sem isso, uma chamada
+// pendurada segura a requisição (e a conexão do pool no fluxo de troca) pra
+// sempre. Configurável via env; default 20s.
+const SEFAZ_TIMEOUT_MS = Number(process.env.NUVEM_FISCAL_TIMEOUT_MS) || 20000;
+
+// Cria um AbortSignal que dispara após ms. Guard p/ runtimes sem
+// AbortSignal.timeout (Node < 17.3) — degrada para sem-timeout.
+function timeoutSignal(ms) {
+  try {
+    if (AbortSignal && typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms);
+  } catch (_) {}
+  return undefined;
+}
+
 let _token = null;
 let _tokenExpires = 0;
 
@@ -32,11 +53,22 @@ async function getToken() {
   if (!CLIENT_ID || !CLIENT_SECRET) {
     throw new Error('NUVEM_FISCAL_CLIENT_ID e NUVEM_FISCAL_CLIENT_SECRET nao configurados');
   }
-  const resp = await fetch(AUTH_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `grant_type=client_credentials&client_id=${encodeURIComponent(CLIENT_ID)}&client_secret=${encodeURIComponent(CLIENT_SECRET)}&scope=empresa%20cnpj%20cep%20nfe%20nfce%20nfse`,
-  });
+  let resp;
+  try {
+    resp = await fetch(AUTH_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=client_credentials&client_id=${encodeURIComponent(CLIENT_ID)}&client_secret=${encodeURIComponent(CLIENT_SECRET)}&scope=empresa%20cnpj%20cep%20nfe%20nfce%20nfse`,
+      signal: timeoutSignal(SEFAZ_TIMEOUT_MS),
+    });
+  } catch (e) {
+    const isTimeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
+    const err = new Error(isTimeout
+      ? `Nuvem Fiscal timeout (${SEFAZ_TIMEOUT_MS}ms) ao obter token`
+      : `Falha de rede ao obter token Nuvem Fiscal: ${e.message}`);
+    err.status = isTimeout ? 504 : 502;
+    throw err;
+  }
   const data = await resp.json();
   if (!resp.ok || !data.access_token) {
     throw new Error(data.error_description || 'Erro ao obter token Nuvem Fiscal');
@@ -59,9 +91,20 @@ async function nuvemRequest(method, path, body) {
   const opts = {
     method,
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    signal: timeoutSignal(SEFAZ_TIMEOUT_MS),
   };
   if (body && method !== 'GET') opts.body = JSON.stringify(body);
-  const resp = await fetch(`${NUVEM_URL}${path}`, opts);
+  let resp;
+  try {
+    resp = await fetch(`${NUVEM_URL}${path}`, opts);
+  } catch (e) {
+    const isTimeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
+    const err = new Error(isTimeout
+      ? `Nuvem Fiscal timeout (${SEFAZ_TIMEOUT_MS}ms) em ${method} ${path}`
+      : `Falha de rede Nuvem Fiscal (${method} ${path}): ${e.message}`);
+    err.status = isTimeout ? 504 : 502;
+    throw err;
+  }
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     const erros = extractErros(data);

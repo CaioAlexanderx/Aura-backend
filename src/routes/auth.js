@@ -24,6 +24,26 @@
 // feat/terms-acceptance (2026-05-14): /auth/register agora exige
 // terms_accepted=true no body e persiste terms_accepted_at + terms_version
 // na tabela users (migration 114). Qualquer cadastro sem aceite recebe 400.
+//
+// Track G (2026-06-09): acesso real karate. resolveKarateContext deriva
+// federation_id (federacao=company.id; dojo=company.federation_id) e
+// karate_role (owner->federation_admin/dojo_owner; demais role_label crus)
+// a partir da company primaria. Exposto no JWT (login/refresh/register) e
+// no objeto company de /login, /me e /register. Sem migration: a coluna
+// companies.federation_id ja existe. requireCompanyAccess inalterado.
+//
+// FIX 2026-06-15: /me e /login agora expoem extra_seats_granted no objeto
+// company (via getExtraSeatsForCompany, defensivo a 42703 -> 0). Era a
+// metade que faltou do fix de 13/05: o gate de Equipe (configuracoes.tsx)
+// usa company.extra_seats_granted como fallback pra liberar a gestao de
+// acessos no Essencial quando ha acesso extra pago. Sem o campo, o
+// fallback ficava sempre 0 e o cliente via "A partir do plano Negocio"
+// apesar do acesso pago (caso Encanto). Nao toca os SELECTs criticos.
+//
+// Fase 0 Dojô (2026-06-17): dojo_id propagado no JWT (login/refresh/register)
+// e no objeto company de /login, /me e /register. resolveKarateContext
+// agora retorna { federation_id, karate_role, dojo_id }. Usado por
+// requireDojoAccess (Canal A) para escopar endpoints /dojo/*.
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -33,6 +53,9 @@ const db      = require('../config/database');
 const { validateRuntimeEnv } = require('../config/env');
 const { requireAuth } = require('../middleware/auth');
 const { logAuditAction } = require('../middleware/auditLog');
+const { sendSelfServeSignupNotification } = require('../services/mailer');
+const { resolveKarateContext } = require('../config/karateRoles');
+const { getExtraSeatsForCompany } = require('../services/extraSeats');
 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -61,13 +84,23 @@ async function storeRefreshToken(userId, refreshToken, req) {
   try { await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5)', [userId, hashToken(refreshToken), new Date(Date.now() + REFRESH_TTL_MS), req.ip, (req.headers['user-agent'] || '').substring(0, 200)]); } catch (_) {}
 }
 
+// 15/06/2026: anexa extra_seats_granted ao objeto company ja moldado.
+// Helper defensivo (captura 42703 pre-migration -> 0). Nunca lanca.
+async function withExtraSeats(shaped, companyId) {
+  if (!shaped || !companyId) return shaped;
+  let extra = 0;
+  try { extra = await getExtraSeatsForCompany(companyId); } catch (_) { extra = 0; }
+  return { ...shaped, extra_seats_granted: extra };
+}
+
 async function resolveDefaultContext(userId, dbConn) {
   const conn = dbConn || db;
   const { rows } = await conn.query(
     `SELECT DISTINCT ON (c.id)
             c.id, c.legal_name, c.plan, c.onboarding_step,
             c.trial_ends_at, c.module_overrides, c.billing_status,
-            c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
+            c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
+            c.federation_id,
             c.is_primary, c.created_at,
             CASE
               WHEN c.owner_id = $1 THEN 'owner'
@@ -118,6 +151,10 @@ async function resolveDefaultContext(userId, dbConn) {
 
 function shapeCompany(company, fallbackMemberRole) {
   if (!company) return null;
+  const member_role = company.member_role || fallbackMemberRole || 'owner';
+  // Track G (acesso real): federation_id + karate_role derivados da company.
+  // null fora de karate; federacao->id proprio, dojo->federation_id (pai).
+  const karate = resolveKarateContext({ ...company, member_role });
   return {
     id: company.id,
     name: company.legal_name || company.name || company.trade_name,
@@ -129,15 +166,20 @@ function shapeCompany(company, fallbackMemberRole) {
     billing_status: company.billing_status || null,
     access_code_used: !!(company.access_code_used),
     vertical_active: company.vertical_active || null,
+    vertical: company.vertical || null,
     ai_enabled: !!(company.ai_enabled),
     ai_consent_at: company.ai_consent_at || null,
-    member_role: company.member_role || fallbackMemberRole || 'owner',
+    member_role,
+    federation_id: karate.federation_id,
+    karate_role: karate.karate_role,
+    dojo_id: karate.dojo_id,
   };
 }
 
 // POST /api/v1/auth/register
 router.post('/register', async (req, res) => {
-  const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version } = req.body;
+  const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version, self_serve } = req.body;
+  const isSelfServe = (self_serve === true || self_serve === 'true');
 
   if (!name || !email || !password) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password' });
   // Aceite dos Termos obrigatorio — registrado para fins de auditoria juridica (migration 114)
@@ -163,6 +205,12 @@ router.post('/register', async (req, res) => {
       await client.query('UPDATE access_codes SET uses = uses + 1, updated_at = NOW() WHERE id = $1', [ac.id]);
     }
 
+    // Cadastro self-service (site /comecar e app /cadastro): sem codigo de acesso,
+    // trial padrao Negocio 7 dias. Cadastros internos (sem a flag) seguem essencial.
+    if (!access_code && isSelfServe) {
+      plan = 'negocio'; trialDays = 7; codeType = 'self_serve';
+    }
+
     const isStaff = email.toLowerCase().trim().endsWith('@getaura.com.br');
     const password_hash = await bcrypt.hash(password, 12);
 
@@ -185,7 +233,7 @@ router.post('/register', async (req, res) => {
       const cleanCnpj = cnpj.replace(/\D/g, '');
       if (cleanCnpj.length === 14 || cleanCnpj.length === 11) {
         const { rows: existingCompanies } = await client.query(
-          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, ai_enabled, ai_consent_at FROM companies WHERE cnpj = $1',
+          'SELECT id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, billing_status, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id FROM companies WHERE cnpj = $1',
           [cleanCnpj]
         );
         if (existingCompanies.length > 0) {
@@ -202,8 +250,8 @@ router.post('/register', async (req, res) => {
       isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
       const { rows: [newCompany] } = await client.query(
-        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, ai_enabled, ai_consent_at',
-        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null]
+        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6, $7) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id',
+        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null]
       );
       company = newCompany;
     }
@@ -220,6 +268,22 @@ router.post('/register', async (req, res) => {
     }
     await client.query('COMMIT');
 
+    // E-mail de follow-up pra CS quando uma conta self-service e criada (best-effort, nao bloqueia).
+    if (isNewCompany && trialDays > 0 && (isSelfServe || codeType === 'trial')) {
+      sendSelfServeSignupNotification({
+        name: user.name,
+        companyName: company.trade_name || company.legal_name,
+        email: user.email,
+        phone: phone || null,
+        cnpj: cnpj || null,
+        plan: company.plan,
+        trialDays,
+        trialEndsAt: company.trial_ends_at,
+      }).catch((e) => console.error('[register] self-serve notify email falhou:', e.message));
+    }
+
+    // Track G: contexto karate da company recem-resolvida (member_role local).
+    const karateCtx = resolveKarateContext(company ? { ...company, member_role: memberRole } : null);
     const tokenPayload = {
       id: user.id,
       role: user.role,
@@ -227,6 +291,9 @@ router.post('/register', async (req, res) => {
       company: company ? company.id : null,
       is_staff: user.is_staff,
       consolidated_view: false,
+      federation_id: karateCtx.federation_id,
+      karate_role: karateCtx.karate_role,
+      dojo_id: karateCtx.dojo_id,
     };
     const accessToken = signAccessToken(tokenPayload);
     const { token: refreshToken } = signRefreshToken({ id: user.id });
@@ -248,6 +315,11 @@ router.post('/register', async (req, res) => {
         ai_enabled: !!(company.ai_enabled),
         ai_consent_at: company.ai_consent_at || null,
         member_role: memberRole,
+        // Empresa recem-criada/associada: 0 acessos extras (consistencia de shape).
+        extra_seats_granted: 0,
+        federation_id: karateCtx.federation_id,
+        karate_role: karateCtx.karate_role,
+        dojo_id: karateCtx.dojo_id,
       } : null,
       consolidated_view: false,
       company_count: company ? 1 : 0,
@@ -278,6 +350,8 @@ router.post('/login', async (req, res) => {
     if (user.totp_enabled) return res.json({ requires_2fa: true, user_id: user.id, message: 'Autenticacao de dois fatores necessaria.' });
 
     const ctx = await resolveDefaultContext(user.id);
+    // Track G: contexto karate da primary (null em modo consolidado, alinhado com company=null).
+    const karateCtx = ctx.consolidated ? { federation_id: null, karate_role: null, dojo_id: null } : resolveKarateContext(ctx.primary);
 
     const tokenPayload = {
       id: user.id,
@@ -286,6 +360,9 @@ router.post('/login', async (req, res) => {
       company: ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null),
       is_staff: user.is_staff || false,
       consolidated_view: ctx.consolidated,
+      federation_id: karateCtx.federation_id,
+      karate_role: karateCtx.karate_role,
+      dojo_id: karateCtx.dojo_id,
     };
     const accessToken = signAccessToken(tokenPayload);
     const { token: refreshToken } = signRefreshToken({ id: user.id });
@@ -293,10 +370,15 @@ router.post('/login', async (req, res) => {
     setRefreshCookie(res, refreshToken);
     logAuditAction(user.id, ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null), 'login', 'Login: ' + user.email + (ctx.consolidated ? ' [consolidated]' : ''));
 
+    // 15/06/2026: anexa extra_seats_granted ao company (fallback do gate de Equipe).
+    const companyOut = ctx.consolidated
+      ? null
+      : await withExtraSeats(shapeCompany(ctx.primary, ctx.primary?.member_role), ctx.primary ? ctx.primary.id : null);
+
     res.json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '1h',
       user: { id: user.id, name: user.name, email: user.email, role: user.role, is_staff: user.is_staff || false, email_verified: user.email_verified || false },
-      company: ctx.consolidated ? null : shapeCompany(ctx.primary, ctx.primary?.member_role),
+      company: companyOut,
       consolidated_view: ctx.consolidated,
       company_count: ctx.count,
     });
@@ -321,6 +403,8 @@ router.post('/refresh', async (req, res) => {
     const user = uRows[0];
 
     const ctx = await resolveDefaultContext(user.id);
+    // Track G: re-resolve contexto karate a cada refresh (TTL 1h mantem fresco).
+    const karateCtx = ctx.consolidated ? { federation_id: null, karate_role: null, dojo_id: null } : resolveKarateContext(ctx.primary);
 
     const newAccessToken = signAccessToken({
       id: user.id,
@@ -329,6 +413,9 @@ router.post('/refresh', async (req, res) => {
       company: ctx.consolidated ? null : (ctx.primary ? ctx.primary.id : null),
       is_staff: user.is_staff || false,
       consolidated_view: ctx.consolidated,
+      federation_id: karateCtx.federation_id,
+      karate_role: karateCtx.karate_role,
+      dojo_id: karateCtx.dojo_id,
     });
     res.json({
       token: newAccessToken,
@@ -369,7 +456,8 @@ router.post('/me', requireAuth, async (req, res) => {
       const { rows: cRows } = await db.query(
         `SELECT c.id, c.legal_name, c.plan, c.onboarding_step,
                 c.trial_ends_at, c.module_overrides, c.billing_status,
-                c.access_code_used, c.vertical_active, c.ai_enabled, c.ai_consent_at,
+                c.access_code_used, c.vertical_active, c.vertical, c.ai_enabled, c.ai_consent_at,
+                c.federation_id,
                 CASE
                   WHEN c.owner_id = $1 THEN 'owner'
                   ELSE COALESCE(cm.role_label, 'member')
@@ -404,9 +492,14 @@ router.post('/me', requireAuth, async (req, res) => {
     );
     const companyCount = countRows[0]?.cnt || 0;
 
+    // 15/06/2026: anexa extra_seats_granted ao company (fallback do gate de Equipe).
+    const companyOut = company
+      ? await withExtraSeats(shapeCompany(company, memberRole), company.id)
+      : null;
+
     res.json({
       user: { id: u.id, name: u.name, email: u.email, role: u.role, is_staff: u.is_staff || false, totp_enabled: u.totp_enabled || false, email_verified: u.email_verified || false },
-      company: company ? shapeCompany(company, memberRole) : null,
+      company: companyOut,
       consolidated_view: jwtConsolidated,
       company_count: companyCount,
     });

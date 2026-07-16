@@ -5,6 +5,9 @@
 //   NF-e (modelo 55) de devolucao emitida pra troca, via Nuvem Fiscal.
 // 07/06/2026: GET /print/credit/:cid/carne — carnê/extrato imprimível
 //   do crediário do cliente (agrupado por carnê + Pix estático manual).
+// 11/06/2026: GET /print/credit/receipts/:transactionId — recibo de
+//   pagamento de crediário (B5): empresa, cliente, encargos, saldo,
+//   crédito a favor + texto WhatsApp.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -16,6 +19,16 @@ const { buildStaticBrCode, validatePixKey } = require('../services/staticPixServ
 const NUVEM_URL = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
 
 function fmt(v) { return parseFloat(v || 0).toFixed(2); }
+
+// A1-BE: sanitize all user-controlled values before embedding in HTML
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 function receiptHTML({ company, sale, items, payments, options = {} }) {
   const { autoprint = false, width80 = true } = options;
@@ -252,6 +265,13 @@ router.get('/danfe/devolucao/:saleId', requireAuth, async (req, res) => {
 //
 // requireAuth: frontend deve chamar via fetch com Authorization header
 // e renderizar via document.write (mesmo padrão das outras rotas /print/*).
+//
+// 3T3 (11/06/2026): cada parcela EM ABERTO ganha Pix copia-e-cola + QR
+//   POR PARCELA, reusando buildStaticBrCode (mesmo gerador do B2). O valor
+//   do Pix da parcela e o PRINCIPAL restante (amount_due - covered_amount);
+//   encargos lazy (mora/multa) NAO entram no papel pois mudam diariamente —
+//   uma nota fixa avisa que atrasos sao calculados no pagamento. As somas
+//   impressas batem com customer_credit_balances (sem encargos).
 // ============================================================
 router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   const companyId  = req.params.id;
@@ -336,8 +356,10 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/carne] accounts warn:', e.message);
     }
 
-    // 6. Chave Pix da loja (digital_channel_config)
-    let pixPayload = null;
+    // 6. Chave Pix da loja (digital_channel_config). Captura pixSetup p/ reuso
+    //    no bloco global E nos blocos por parcela (3T3).
+    let pixSetup = null;   // { pixKey, name, city }
+    let pixPayload = null; // bloco global (saldo total)
     try {
       const { rows: cfgRows } = await db.query(
         `SELECT pix_key, pix_key_type, pix_holder_name, pix_holder_city, site_name, address
@@ -353,12 +375,17 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
             const parts = String(cfg.address).split(',').map(s => s.trim());
             city = parts[parts.length - 2] || parts[parts.length - 1] || '';
           }
+          pixSetup = {
+            pixKey: validation.normalized,
+            name:   cfg.pix_holder_name || cfg.site_name || company.display_name || 'AURA NEGOCIO',
+            city:   city || company.address_city || 'BRASIL',
+          };
           // Se saldo > 0 inclui o valor; senão gera sem valor fixo (comprador digita)
           pixPayload = buildStaticBrCode({
-            pixKey:          validation.normalized,
+            pixKey:          pixSetup.pixKey,
             amount:          totalBalance > 0 ? totalBalance : undefined,
-            beneficiaryName: cfg.pix_holder_name || cfg.site_name || company.display_name || 'AURA NEGOCIO',
-            beneficiaryCity: city || company.address_city || 'BRASIL',
+            beneficiaryName: pixSetup.name,
+            beneficiaryCity: pixSetup.city,
             txid:            `CRED${customerId.replace(/-/g, '').slice(0, 20)}`,
           });
         }
@@ -397,6 +424,9 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       return dt.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
     }
 
+    // 3T3: coleta os QRs (global + por parcela) p/ renderizar 1x no fim do body.
+    const pixQrJobs = [];
+
     let accountsHTML = '';
     if (orderedKeys.length === 0) {
       accountsHTML = '<p style="color:#666;font-size:12px">Nenhuma parcela registrada.</p>';
@@ -404,7 +434,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       for (const key of orderedKeys) {
         const instList = groups[key] || [];
         const acc = key === '__none__' ? null : accountMap[key];
-        const accName = acc ? acc.name : 'Sem carnê';
+        const accName = acc ? acc.name : 'Sem carne';
         const accStatus = acc ? acc.status : null;
         const accBalance = instList
           .filter(i => i.status !== 'paid')
@@ -412,19 +442,45 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 
         const rowsHTML = instList.map(inst => {
           const remaining = Math.max(0, parseFloat(inst.amount_due) - parseFloat(inst.covered_amount || 0));
+
+          // 3T3: Pix por parcela (so em aberto, com valor de PRINCIPAL restante).
+          let pixRow = '';
+          if (pixSetup && inst.status !== 'paid' && remaining > 0.005) {
+            const instPix = buildStaticBrCode({
+              pixKey:          pixSetup.pixKey,
+              amount:          remaining,
+              beneficiaryName: pixSetup.name,
+              beneficiaryCity: pixSetup.city,
+              txid:            `CRED${String(inst.id).replace(/-/g, '').slice(0, 20)}`,
+            });
+            const qrId = 'qr-' + String(inst.id).replace(/-/g, '');
+            pixQrJobs.push({ id: qrId, payload: instPix });
+            pixRow = `<tr><td colspan="5" style="padding:2px 4px 10px">
+              <div style="border:1px solid #ccc;background:#fafafa;padding:6px;page-break-inside:avoid">
+                <div style="font-size:10px;font-weight:bold;margin-bottom:3px">
+                  Pix da parcela ${inst.installment_number}/${inst.total_installments} — R$${fmt(remaining)}
+                </div>
+                <div style="font-family:'Courier New',monospace;font-size:8px;word-break:break-all;
+                            background:#fff;border:1px solid #ddd;padding:4px;margin-bottom:5px;
+                            user-select:all">${instPix}</div>
+                <div id="${qrId}" style="text-align:center"></div>
+              </div>
+            </td></tr>`;
+          }
+
           return `<tr>
             <td style="padding:3px 4px">${inst.installment_number}/${inst.total_installments}</td>
             <td style="padding:3px 4px">${fmtDate(inst.due_date)}</td>
             <td style="padding:3px 4px;text-align:right">R$${fmt(inst.amount_due)}</td>
-            <td style="padding:3px 4px;text-align:right">${inst.status !== 'paid' ? `R$${fmt(remaining)}` : '—'}</td>
+            <td style="padding:3px 4px;text-align:right">${inst.status !== 'paid' ? 'R$' + fmt(remaining) : '—'}</td>
             <td style="padding:3px 4px;text-align:center">${statusLabel(inst.status)}</td>
-          </tr>`;
+          </tr>${pixRow}`;
         }).join('');
 
         accountsHTML += `
           <div style="margin-bottom:16px">
             <div style="font-weight:bold;font-size:13px;margin-bottom:4px">
-              ${accName}${accStatus === 'closed' ? ' <span style="font-size:10px;color:#666">(encerrado)</span>' : ''}
+              ${esc(accName)}${accStatus === 'closed' ? ' <span style="font-size:10px;color:#666">(encerrado)</span>' : ''}
             </div>
             <table style="width:100%;border-collapse:collapse;font-size:11px">
               <thead>
@@ -445,13 +501,14 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       }
     }
 
-    // 8. Bloco Pix
+    // 8. Bloco Pix global (pagar tudo de uma vez)
     let pixHTML = '';
     if (pixPayload) {
+      pixQrJobs.push({ id: 'carne-qr', payload: pixPayload });
       const balLabel = totalBalance > 0 ? ` — R$ ${fmt(totalBalance)}` : '';
       pixHTML = `
         <div style="border:1px solid #000;padding:10px;margin-top:12px;page-break-inside:avoid">
-          <div style="font-weight:bold;font-size:13px;margin-bottom:6px">Pagar via Pix${balLabel}</div>
+          <div style="font-weight:bold;font-size:13px;margin-bottom:6px">Pagar tudo de uma vez via Pix${balLabel}</div>
           <div style="font-size:10px;margin-bottom:6px;color:#444">
             Copie o codigo abaixo ou escaneie o QR Code com o app do seu banco.
           </div>
@@ -464,17 +521,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
           <div style="font-size:9px;color:#666;margin-top:6px;text-align:center">
             Pagamento confirmado manualmente pela loja.
           </div>
-        </div>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-        <script>
-          (function() {
-            var el = document.getElementById('carne-qr');
-            if (el && typeof QRCode !== 'undefined') {
-              new QRCode(el, { text: ${JSON.stringify(pixPayload)}, width: 120, height: 120,
-                correctLevel: QRCode.CorrectLevel.M });
-            }
-          })();
-        </script>`;
+        </div>`;
     } else {
       pixHTML = `
         <div style="border:1px dashed #999;padding:8px;margin-top:12px;font-size:10px;color:#666;text-align:center">
@@ -482,13 +529,28 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
         </div>`;
     }
 
+    // 3T3: script unico que renderiza todos os QRs (global + por parcela).
+    const qrScript = pixQrJobs.length
+      ? `<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+         <script>
+           (function() {
+             var jobs = ${JSON.stringify(pixQrJobs)};
+             if (typeof QRCode === 'undefined') return;
+             jobs.forEach(function(j) {
+               var el = document.getElementById(j.id);
+               if (el) new QRCode(el, { text: j.payload, width: 116, height: 116, correctLevel: QRCode.CorrectLevel.M });
+             });
+           })();
+         </script>`
+      : '';
+
     // 9. Montar HTML final
     const printDate = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
     const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>Carne - ${company.display_name}</title>
+  <title>Carne - ${esc(company.display_name)}</title>
   <style>
     @page { margin: 10mm 12mm; size: A4; }
     * { margin:0; padding:0; box-sizing:border-box; }
@@ -503,22 +565,26 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 </head>
 <body>
   <div class="center" style="margin-bottom:8px">
-    <div class="company-name">${company.display_name}</div>
-    ${company.cnpj ? `<div>CNPJ: ${company.cnpj}</div>` : ''}
-    ${company.phone ? `<div>Tel: ${company.phone}</div>` : ''}
-    ${company.address_city ? `<div>${company.address_city}${company.address_state ? ' - ' + company.address_state : ''}</div>` : ''}
+    <div class="company-name">${esc(company.display_name)}</div>
+    ${company.cnpj ? '<div>CNPJ: ' + company.cnpj + '</div>' : ''}
+    ${company.phone ? '<div>Tel: ' + esc(company.phone) + '</div>' : ''}
+    ${company.address_city ? '<div>' + esc(company.address_city) + (company.address_state ? ' - ' + esc(company.address_state) : '') + '</div>' : ''}
   </div>
   <div class="divider"></div>
   <div class="center bold" style="font-size:15px;margin-bottom:4px">CARNE / EXTRATO DE CREDIARIO</div>
   <div style="font-size:10px;text-align:center;margin-bottom:8px">Emitido em: ${printDate}</div>
   <div class="divider"></div>
   <div style="margin-bottom:8px">
-    <div><strong>Cliente:</strong> ${customer.name}</div>
-    ${customer.phone ? `<div><strong>Telefone:</strong> ${customer.phone}</div>` : ''}
-    ${customer.cpf_cnpj ? `<div><strong>CPF/CNPJ:</strong> ${customer.cpf_cnpj}</div>` : ''}
+    <div><strong>Cliente:</strong> ${esc(customer.name)}</div>
+    ${customer.phone ? '<div><strong>Telefone:</strong> ' + esc(customer.phone) + '</div>' : ''}
+    ${customer.cpf_cnpj ? '<div><strong>CPF/CNPJ:</strong> ' + esc(customer.cpf_cnpj) + '</div>' : ''}
   </div>
   <div class="divider"></div>
   <div class="section-title">Cronograma de Parcelas</div>
+  <div style="font-size:10px;color:#444;margin-bottom:10px">
+    Os valores exibidos sao de <strong>principal</strong>. Parcelas em atraso estao sujeitas a
+    multa e mora, calculadas no momento do pagamento.
+  </div>
   ${accountsHTML}
   <div class="divider"></div>
   <div style="text-align:right;font-size:13px;font-weight:bold;margin-bottom:8px">
@@ -527,11 +593,12 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   ${pixHTML}
   <div class="divider"></div>
   <div style="font-size:9px;text-align:center;margin-top:6px;color:#666">
-    ${company.display_name} &mdash; Powered by Aura. &mdash; getaura.com.br
+    ${esc(company.display_name)} &mdash; Powered by Aura. &mdash; getaura.com.br
   </div>
   <br>
   <button onclick="window.print()" style="width:100%;padding:10px;cursor:pointer;font-size:14px">Imprimir</button>
-  <script>window.onload = function() { window.print(); };</script>
+  ${qrScript}
+  <script>window.onload = function() { setTimeout(function(){ window.print(); }, 350); };</script>
 </body>
 </html>`;
 
@@ -540,6 +607,192 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[print] carne error:', err.message);
     res.status(500).json({ error: 'Erro ao gerar carne de crediario' });
+  }
+});
+
+// ============================================================
+// GET /print/credit/receipts/:transactionId  (B5)
+// Recibo de pagamento de crediário — HTML imprimível.
+//
+// Fonte: customer_credit_transactions WHERE id=:transactionId
+//        AND company_id=:id AND type='payment'.
+// Encargos: transactions WHERE idempotency_key='credit-charges-<txId>'
+//           (defensivo a 42703/42P01 — campo opcional).
+// Saldo: customer_credit_balances.balance (defensivo).
+// Crédito a favor: balance < 0 → exibe valor absoluto.
+//
+// Frontend chama via fetch + Authorization header + document.write
+// (mesmo padrão /print/credit/:cid/carne).
+// ============================================================
+router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
+  const companyId     = req.params.id;
+  const transactionId = req.params.transactionId;
+
+  try {
+    // 1. Dados da empresa
+    const { rows: companyRows } = await db.query(
+      `SELECT COALESCE(trade_name, legal_name) AS display_name,
+              cnpj, phone, address_city, address_state
+         FROM companies WHERE id = $1`,
+      [companyId]
+    );
+    if (!companyRows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
+    const company = companyRows[0];
+
+    // 2. Transação de pagamento
+    const { rows: txRows } = await db.query(
+      `SELECT id, customer_id, amount, payment_method, created_at, account_id
+         FROM customer_credit_transactions
+        WHERE id = $1 AND company_id = $2 AND type = 'payment'`,
+      [transactionId, companyId]
+    );
+    if (!txRows.length) return res.status(404).json({ error: 'Transacao nao encontrada' });
+    const tx = txRows[0];
+
+    // 3. Cliente
+    const { rows: custRows } = await db.query(
+      `SELECT name, phone, cpf_cnpj FROM customers WHERE id = $1 AND company_id = $2`,
+      [tx.customer_id, companyId]
+    );
+    const customer = custRows[0] || { name: 'Cliente', phone: null, cpf_cnpj: null };
+
+    // 4. Encargos vinculados (mora/multa) — opcional, defensivo
+    let chargesAmount = 0;
+    try {
+      const { rows: chRows } = await db.query(
+        `SELECT amount FROM transactions
+          WHERE idempotency_key = $1
+            AND company_id = $2
+            AND category LIKE 'Crediario - Encargos%'
+          LIMIT 1`,
+        ['credit-charges-' + transactionId, companyId]
+      );
+      if (chRows.length) chargesAmount = Math.abs(parseFloat(chRows[0].amount || 0));
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] charges warn:', e.message);
+    }
+
+    // 5. Saldo restante após pagamento — defensivo
+    let balance = null;
+    try {
+      const { rows: balRows } = await db.query(
+        `SELECT COALESCE(balance, 0) AS balance
+           FROM customer_credit_balances
+          WHERE customer_id = $1 AND company_id = $2`,
+        [tx.customer_id, companyId]
+      );
+      if (balRows.length) balance = parseFloat(balRows[0].balance);
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] balance warn:', e.message);
+    }
+
+    // 6. Montar HTML
+    const payDate = new Date(tx.created_at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const amountPaid = parseFloat(tx.amount || 0);
+
+    const payMethodLabel = _payLabel(tx.payment_method || 'outro');
+
+    const chargesRow = chargesAmount > 0
+      ? '<tr><td style="padding:3px 0;color:#666">Encargos (mora/multa)</td>' +
+        '<td style="text-align:right;padding:3px 0;color:#666">R$' + fmt(chargesAmount) + '</td></tr>'
+      : '';
+
+    let balanceRow = '';
+    if (balance !== null) {
+      if (balance < 0) {
+        balanceRow =
+          '<tr><td style="padding:3px 0;color:#166534;font-weight:bold">Credito a favor</td>' +
+          '<td style="text-align:right;padding:3px 0;color:#166534;font-weight:bold">R$' + fmt(Math.abs(balance)) + '</td></tr>';
+      } else {
+        balanceRow =
+          '<tr><td style="padding:3px 0">Saldo restante</td>' +
+          '<td style="text-align:right;padding:3px 0">R$' + fmt(balance) + '</td></tr>';
+      }
+    }
+
+    // Bloco WhatsApp (texto pré-formatado — trivial pois é só concatenar)
+    const waLines = [
+      '*Recibo de Pagamento — Crediario*',
+      company.display_name,
+      '',
+      'Cliente: ' + customer.name,
+      'Data: ' + payDate,
+      'Valor pago: R$' + fmt(amountPaid),
+      'Metodo: ' + payMethodLabel,
+    ];
+    if (chargesAmount > 0) waLines.push('Encargos: R$' + fmt(chargesAmount));
+    if (balance !== null) {
+      if (balance < 0) {
+        waLines.push('Credito a favor: R$' + fmt(Math.abs(balance)));
+      } else {
+        waLines.push('Saldo restante: R$' + fmt(balance));
+      }
+    }
+    waLines.push('', 'Powered by Aura. - getaura.com.br');
+    const waText = waLines.join('\n');
+
+    const html = '<!DOCTYPE html>\n' +
+      '<html lang="pt-BR">\n' +
+      '<head>\n' +
+      '  <meta charset="UTF-8">\n' +
+      '  <title>Recibo Crediario - ' + esc(company.display_name) + '</title>\n' +
+      '  <style>\n' +
+      '    @page { margin: 10mm 12mm; size: A4; }\n' +
+      '    * { margin:0; padding:0; box-sizing:border-box; }\n' +
+      '    body { font-family:\'Courier New\',monospace; font-size:12px; color:#000; max-width:500px; margin:0 auto; }\n' +
+      '    .center { text-align:center; }\n' +
+      '    .bold { font-weight:bold; }\n' +
+      '    .divider { border-top:1px dashed #000; margin:8px 0; }\n' +
+      '    .company-name { font-size:16px; font-weight:bold; }\n' +
+      '    table { width:100%; border-collapse:collapse; }\n' +
+      '    td { vertical-align:top; font-size:12px; }\n' +
+      '    .total-row td { font-weight:bold; font-size:14px; border-top:2px solid #000; padding-top:5px; }\n' +
+      '    .footer { font-size:9px; text-align:center; margin-top:8px; color:#666; }\n' +
+      '    .wa-block { background:#f0fdf4; border:1px solid #86efac; border-radius:4px; padding:10px; margin-top:12px; }\n' +
+      '    .wa-block textarea { width:100%; font-family:monospace; font-size:11px; border:none; background:transparent; resize:none; outline:none; }\n' +
+      '    @media print { body { -webkit-print-color-adjust:exact; print-color-adjust:exact; } button, .wa-block { display:none !important; } }\n' +
+      '  </style>\n' +
+      '</head>\n' +
+      '<body>\n' +
+      '  <div class="center" style="margin-bottom:8px">\n' +
+      '    <div class="company-name">' + esc(company.display_name) + '</div>\n' +
+      (company.cnpj ? '    <div>CNPJ: ' + company.cnpj + '</div>\n' : '') +
+      (company.phone ? '    <div>Tel: ' + esc(company.phone) + '</div>\n' : '') +
+      (company.address_city ? '    <div>' + esc(company.address_city) + (company.address_state ? ' - ' + esc(company.address_state) : '') + '</div>\n' : '') +
+      '  </div>\n' +
+      '  <div class="divider"></div>\n' +
+      '  <div class="center bold" style="font-size:14px;margin-bottom:4px">RECIBO DE PAGAMENTO — CREDIARIO</div>\n' +
+      '  <div class="divider"></div>\n' +
+      '  <div style="margin-bottom:8px">\n' +
+      '    <div><strong>Cliente:</strong> ' + esc(customer.name) + '</div>\n' +
+      (customer.phone ? '    <div><strong>Telefone:</strong> ' + esc(customer.phone) + '</div>\n' : '') +
+      (customer.cpf_cnpj ? '    <div><strong>CPF/CNPJ:</strong> ' + esc(customer.cpf_cnpj) + '</div>\n' : '') +
+      '  </div>\n' +
+      '  <div class="divider"></div>\n' +
+      '  <table>\n' +
+      '    <tr><td style="padding:3px 0">Data</td><td style="text-align:right;padding:3px 0">' + payDate + '</td></tr>\n' +
+      '    <tr><td style="padding:3px 0">Metodo</td><td style="text-align:right;padding:3px 0">' + payMethodLabel + '</td></tr>\n' +
+      chargesRow +
+      '    <tr class="total-row"><td>Valor pago</td><td style="text-align:right">R$' + fmt(amountPaid) + '</td></tr>\n' +
+      balanceRow +
+      '  </table>\n' +
+      '  <div class="divider"></div>\n' +
+      '  <div class="footer">Powered by Aura. - getaura.com.br</div>\n' +
+      '  <br>\n' +
+      '  <button onclick="window.print()" style="width:100%;padding:10px;cursor:pointer;font-size:14px">Imprimir</button>\n' +
+      '  <div class="wa-block" style="margin-top:12px">\n' +
+      '    <div style="font-size:11px;font-weight:bold;margin-bottom:6px;color:#166534">Texto para WhatsApp</div>\n' +
+      '    <textarea rows="' + waLines.length + '" readonly onclick="this.select()">' + waText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</textarea>\n' +
+      '  </div>\n' +
+      '  <script>window.onload = function() { window.print(); };</script>\n' +
+      '</body>\n' +
+      '</html>';
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    console.error('[print] recibo crediario error:', err.message);
+    res.status(500).json({ error: 'Erro ao gerar recibo de crediario' });
   }
 });
 
