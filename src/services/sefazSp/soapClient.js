@@ -54,9 +54,12 @@ function soapEnvelope(wsdlNs, innerXml) {
 // openssl) e entregamos ao https nesse formato — independe do formato do
 // .pfx. Cache por hash (evita reparse/subprocesso a cada chamada).
 const cryptoNode = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { openPfx } = require('./pfx');
 const _tlsCache = new Map(); // sha256(pfx|senha) → { key, cert }
 function tlsMaterial(pfx, passphrase) {
+  if (!pfx) return {}; // sem cert de cliente (ex.: diagnóstico)
   const h = cryptoNode.createHash('sha256')
     .update(pfx).update('|')
     .update(cryptoNode.createHash('sha256').update(String(passphrase || '')).digest())
@@ -74,6 +77,27 @@ function tlsMaterial(pfx, passphrase) {
   return material;
 }
 
+// ── CA dos servidores SEFAZ: as raízes ICP-Brasil não vêm no bundle
+// Mozilla embutido no Node ("unable to get local issuer certificate").
+// Anexamos os PEMs de ./certs (hoje: raiz v10, que assina a AC SOLUTI
+// SSL EV G4 usada por nfce.fazenda.sp.gov.br homolog+prod) às raízes
+// padrão. Novas raízes = só dropar o .pem na pasta.
+let _caBundle = null;
+function caBundle() {
+  if (_caBundle) return _caBundle;
+  const extra = [];
+  try {
+    const dir = path.join(__dirname, 'certs');
+    for (const f of fs.readdirSync(dir)) {
+      if (f.endsWith('.pem') || f.endsWith('.crt')) {
+        extra.push(fs.readFileSync(path.join(dir, f), 'utf8'));
+      }
+    }
+  } catch (_) { /* sem ./certs → segue só com as raízes padrão */ }
+  _caBundle = require('tls').rootCertificates.concat(extra);
+  return _caBundle;
+}
+
 /** POST SOAP 1.2 com mTLS. Injetável p/ testes via opts.transport. */
 function postSoap(url, envelope, { pfx, passphrase, timeoutMs = DEFAULT_TIMEOUT_MS, transport } = {}) {
   if (transport) return transport(url, envelope);
@@ -85,6 +109,7 @@ function postSoap(url, envelope, { pfx, passphrase, timeoutMs = DEFAULT_TIMEOUT_
       port: u.port || 443,
       path: u.pathname + u.search,
       method: 'POST',
+      ca: caBundle(),
       ...tlsMaterial(pfx, passphrase),
       headers: {
         'Content-Type': 'application/soap+xml; charset=utf-8',
