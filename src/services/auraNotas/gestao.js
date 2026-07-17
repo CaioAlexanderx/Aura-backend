@@ -107,11 +107,14 @@ function validateCscId(v) {
   return { ok: true, value: s };
 }
 
-/** Valida o CSC token: 36 caracteres alfanuméricos (código de segurança do contribuinte). */
+/** Valida o CSC token. A SEFAZ-SP emite em formato UUID COM hífens
+ * (ex.: 82adf14f-9d3b-4320-be1f-b4101554c4c9 — 36 chars) — caso real do
+ * cutover Davi 16/07; outras UFs variam. Aceita 20–44 chars alfanum/hífen
+ * e preserva o valor EXATO (os hífens entram no hash do QR Code). */
 function validateCscToken(v) {
   const s = String(v == null ? '' : v).trim();
-  if (!/^[A-Za-z0-9]{36}$/.test(s)) {
-    return { ok: false, error: 'csc_token inválido (36 caracteres alfanuméricos)' };
+  if (!/^[A-Za-z0-9-]{20,44}$/.test(s)) {
+    return { ok: false, error: 'csc_token inválido (20–44 caracteres alfanuméricos ou hífen, exatamente como emitido pela SEFAZ)' };
   }
   return { ok: true, value: s };
 }
