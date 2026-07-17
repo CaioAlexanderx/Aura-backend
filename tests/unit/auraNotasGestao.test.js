@@ -82,15 +82,22 @@ describe('validateCscId', () => {
 
 describe('validateCscToken', () => {
   const ok36 = 'A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R8'; // 36 alfanum
+  const okUuid = '82adf14f-9d3b-4320-be1f-b4101554c4c9'; // formato real SEFAZ-SP
   test('36 alfanuméricos ok', () => {
     expect(g.validateCscToken(ok36)).toEqual({ ok: true, value: ok36 });
   });
+  test('UUID com hífens (formato SEFAZ-SP) ok, preservado exato', () => {
+    expect(g.validateCscToken(okUuid)).toEqual({ ok: true, value: okUuid });
+    expect(g.validateCscToken('x'.repeat(19)).ok).toBe(false);
+    expect(g.validateCscToken('x'.repeat(45)).ok).toBe(false);
+    expect(g.validateCscToken('82adf14f_9d3b').ok).toBe(false);
+  });
   test('35 ou 37 falha', () => {
-    expect(g.validateCscToken(ok36.slice(0, 35)).ok).toBe(false);
-    expect(g.validateCscToken(ok36 + 'X').ok).toBe(false);
+    expect(g.validateCscToken(ok36.slice(0, 15)).ok).toBe(false);
+    expect(g.validateCscToken((ok36 + ok36).slice(0, 45)).ok).toBe(false);
   });
   test('com símbolo falha', () => {
-    expect(g.validateCscToken('A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R-').ok).toBe(false);
+    expect(g.validateCscToken('A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R*').ok).toBe(false);
   });
 });
 
