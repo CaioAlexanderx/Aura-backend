@@ -119,6 +119,16 @@ router.use('/aprovacao',         require('./studioApprovalPublic'));
 // Migration 138. Espelha a mecânica de /aprovacao.
 router.use('/orcamento',         require('./studioQuotePublic'));
 
+// ── AURA KARATÊ — F0 Aura Dojô (público: claim da conta do dojô) ──
+// A federação convida o e-mail do sensei; ele define a senha no link e vira
+// o owner REAL da company do dojô (antes: user-sistema
+// '!locked-system-no-login', ver karateDojos.js). Migration 240.
+// Montado ANTES dos routers /public/karate abaixo (rota estática
+// 'dojo-claim' nunca deve ser capturada como :slug).
+//   POST /public/karate/dojo-claim/verify    {token}
+//   POST /public/karate/dojo-claim/complete  {token, name, password}
+router.use('/public/karate/dojo-claim', require('./karateDojoClaimPublic'));
+
 // ── AURA KARATÊ — Track D (público: carteirinha verify + portal + inscrição) ──
 // SEM auth de empresa. Auth própria por token/OTP. Migration 164.
 //   GET  /public/karate/verify/:token                 — verify carteirinha (mínimo/LGPD)
@@ -191,6 +201,11 @@ router.use('/federation/:id/dojos',                require('./karateExportDojo')
 // como UUID e estourava em produção (invalid input syntax for type uuid).
 // Rota estática SEMPRE antes da paramétrica.
 router.use('/federation/:id/dojos',                require('./karateRosterValidation'));
+// F0 Aura Dojô — convite de claim da conta do dojô (owner real):
+//   POST/GET/DELETE /federation/:id/dojos/:dojoId/claim-invite
+// Paths de 2 segmentos (/:dojoId/claim-invite) não colidem com o curinga
+// GET /:dojoId de karateDojos. Migration 240 (não aplicada — defensivo 42P01).
+router.use('/federation/:id/dojos',                require('./karateDojoClaim'));
 router.use('/federation/:id/dojos',                require('./karateDojos'));
 // Redistribuição na inativação de dojô: transfere/inativa praticantes em
 // lote e, opcionalmente, inativa o dojô ao final (cascata para quem sobrou).
@@ -349,7 +364,7 @@ router.use('/federation/:id', require('./karateSettings'));
 //   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/advance
 router.use('/federation/:id', require('./karateBrackets'));
 
-// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────────
+// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────
 // Sem migration (totalmente derivado de tabelas existentes).
 // Guards federation_admin/staff/viewer para leitura; adminOnly para /report/send.
 //   GET  /federation/:id/network-health/summary

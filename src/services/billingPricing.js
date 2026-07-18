@@ -50,6 +50,12 @@ const ANNUAL_DISCOUNT = 1 / 6;
 // abaixo disso (100% de desconto deve virar trial_days, nao cobranca de R$0).
 const MIN_CHARGE_BRL = 5;
 
+// Aura Dojô (karate_dojo) — plano único R$140/mês; gate ainda DESLIGADO (F3c)
+// De propósito FORA do objeto PLANS: não pode aparecer no checkout do varejo
+// (getPlanValue/getTotalValue seguem só com essencial/negocio/expansao) e não
+// mexe no karate-gate existente da federação.
+const KARATE_DOJO_MONTHLY_BRL = 140;
+
 function round2(v) {
   return Math.round(v * 100) / 100;
 }
@@ -106,6 +112,7 @@ module.exports = {
   ANNUAL_DISCOUNT,
   SEAT_PRICE_BRL,
   MIN_CHARGE_BRL,
+  KARATE_DOJO_MONTHLY_BRL,
   applyCycle,
   getPlanValue,
   getSeatsValue,
