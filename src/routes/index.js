@@ -364,7 +364,7 @@ router.use('/federation/:id', require('./karateSettings'));
 //   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/advance
 router.use('/federation/:id', require('./karateBrackets'));
 
-// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────
+// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────────
 // Sem migration (totalmente derivado de tabelas existentes).
 // Guards federation_admin/staff/viewer para leitura; adminOnly para /report/send.
 //   GET  /federation/:id/network-health/summary
