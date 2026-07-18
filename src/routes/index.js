@@ -119,6 +119,19 @@ router.use('/aprovacao',         require('./studioApprovalPublic'));
 // Migration 138. Espelha a mecânica de /aprovacao.
 router.use('/orcamento',         require('./studioQuotePublic'));
 
+// ── AURA KARATÊ — F0 Canal B (portal do dojô por LINK FIXO revogável) ──
+// Token opaco (hash SHA-256+segredo em karate_dojo_portal_links — migration
+// 239) enviado em Authorization: Bearer. NÃO substitui o fluxo OTP de
+// karateDojoPublic.js (montado abaixo) — a decisão de produto do Canal B
+// (ESCOPO 19/06) é link fixo. Montado ANTES dos routers /public/karate pra
+// rota fixa /dojo/* nunca ser capturada por padrões /:slug/*.
+//   GET  /public/karate/dojo/me
+//   GET  /public/karate/dojo/practitioners
+//   GET  /public/karate/dojo/annuity
+//   POST /public/karate/dojo/annuity/pix
+//   GET  /public/karate/dojo/certificates
+router.use('/public/karate/dojo', require('./karateDojoPortalPublic'));
+
 // ── AURA KARATÊ — Track D (público: carteirinha verify + portal + inscrição) ──
 // SEM auth de empresa. Auth própria por token/OTP. Migration 164.
 //   GET  /public/karate/verify/:token                 — verify carteirinha (mínimo/LGPD)
@@ -203,6 +216,13 @@ router.use('/federation/:id/dojos',                require('./karateRosterRedist
 //        painel de progresso por dojô para a federação)
 // Fase 4: roster do dojô (status + financeiro) — GET /:dojoId/members-standing
 router.use('/federation/:id/dojos',                require('./karateDojoRoster'));
+// F0 Canal B: gestão do LINK FIXO do portal do dojô (gera/rotaciona/revoga).
+// Migration 239 (karate_dojo_portal_links). Path /:dojoId/portal-link não
+// colide com /:dojoId de karateDojos (formato distinto).
+//   POST   /federation/:id/dojos/:dojoId/portal-link   (staffWrite — devolve token 1x)
+//   DELETE /federation/:id/dojos/:dojoId/portal-link   (staffWrite — revoga)
+//   GET    /federation/:id/dojos/:dojoId/portal-link   (read — nunca devolve o token)
+router.use('/federation/:id/dojos',                require('./karateDojoPortalLink'));
 // Fase 2: anexos (documentos/imagens) para dojô e praticante. Mesmo router
 // montado nas duas bases — ele deduz owner_type ('dojo'/'practitioner') pelo
 // req.baseUrl. Paths /:ownerId/documents não colidem com /:dojoId ou
