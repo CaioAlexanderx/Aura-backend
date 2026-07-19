@@ -16,6 +16,7 @@
 //   POST /cards/queue/mark-printed       — "Imprimir selecionadas" (staffWrite)
 //   POST /cards/queue/mark-delivered     — confirmação manual de entrega (staffWrite)
 //   POST /cards/queue/return-to-queue    — "não saiu" / reimprimir (staffWrite)
+//   POST /cards/queue/remove-from-queue  — "Tirar da fila", NÃO revoga (migration 241, staffWrite)
 // ============================================================
 'use strict';
 
@@ -187,8 +188,11 @@ router.post('/cards/queue/mark-delivered', ...guards.staffWrite(), async (req, r
 
 // ── POST /cards/queue/return-to-queue ─────────────
 // "Não saiu / reimprimir" (de 'printed') OU "Reimprimir" por perda, rasgo
-// ou graduação (de 'delivered'). Volta para 'to_print' sem alterar
+// ou graduação (de 'delivered') OU devolver algo tirado da fila (de
+// 'out_of_queue', migration 241). Volta para 'to_print' sem alterar
 // print_count — só a próxima impressão de fato conta como via nova.
+// Não valida print_status de origem (aceita qualquer etapa) — é o
+// caminho de volta universal da fila.
 router.post('/cards/queue/return-to-queue', ...guards.staffWrite(), async (req, res) => {
   const federationId = req.params.id;
   const { card_ids } = req.body || {};
@@ -199,6 +203,26 @@ router.post('/cards/queue/return-to-queue', ...guards.staffWrite(), async (req, 
     if (err.code === 'NO_IDS') return res.status(400).json({ error: err.message, code: 'NO_IDS' });
     console.error('[karateCards] return-to-queue error:', err.message);
     res.status(500).json({ error: 'Erro ao devolver carteirinhas para a fila', detail: err.message });
+  }
+});
+
+// ── POST /cards/queue/remove-from-queue ────────────
+// "Tirar da fila" (migration 241, decisão Caio 17/07/2026): a federação
+// decide não imprimir agora. NÃO revoga — status continua 'active', o
+// QR/verificação pública continua validando normalmente. Só sai de
+// 'to_print' — a partir de 'printed'/'delivered' o item volta como error
+// por-item (ver removeFromQueue no service para a justificativa); nunca
+// 500 por causa de um item com origem inválida no meio do lote.
+router.post('/cards/queue/remove-from-queue', ...guards.staffWrite(), async (req, res) => {
+  const federationId = req.params.id;
+  const { card_ids } = req.body || {};
+  try {
+    const out = await cards.removeFromQueue({ federation_id: federationId, card_ids });
+    res.json({ ...out, _note: 'Cartões tirados da fila de impressão. A carteirinha continua ativa e válida — use "Devolver para a fila" para reverter.' });
+  } catch (err) {
+    if (err.code === 'NO_IDS') return res.status(400).json({ error: err.message, code: 'NO_IDS' });
+    console.error('[karateCards] remove-from-queue error:', err.message);
+    res.status(500).json({ error: 'Erro ao tirar carteirinhas da fila', detail: err.message });
   }
 });
 

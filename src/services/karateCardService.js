@@ -582,14 +582,56 @@ async function issueBatch({ federation_id, issued_by, only_missing = true }) {
 // Todas as mutações são em LOTE (ids[]) e retornam por-item {id, ok, error}
 // — lote nunca perde ninguém silenciosamente (itens de outra federação ou
 // já revogados voltam como error, não travam o restante).
+//
+// 17/07/2026 (Caio — migration 241): quarta etapa, 'out_of_queue' —
+// "tirar da fila", pra federação gerenciar melhor o que deve ser impresso
+// de fato. NÃO é revogação: status continua 'active', verifyByToken()
+// (verificação pública / QR) não filtra por print_status — o praticante
+// segue com carteirinha válida normalmente. Só sai de 'to_print' (ver
+// removeFromQueue) — tirar da fila algo já 'printed'/'delivered' é
+// semanticamente estranho (o cartão físico já existe ou foi entregue) e
+// bagunçaria o histórico de vias; se a federação quer desfazer uma
+// impressão/entrega, o caminho já existente é returnToQueue. É reversível:
+// returnToQueue aceita voltar de qualquer etapa (não valida origem), então
+// já aceita 'out_of_queue' sem mudança nenhuma nela.
 // ============================================================
 
-const PRINT_STATUSES = ['to_print', 'printed', 'delivered'];
+const PRINT_STATUSES = ['to_print', 'printed', 'delivered', 'out_of_queue'];
 
-function orderColumnForQueue(status) {
+function orderColumnForQueue(status, includeOutOfQueueAt = true) {
   if (status === 'printed') return 'kc.printed_at';
   if (status === 'delivered') return 'kc.delivered_at';
+  if (status === 'out_of_queue') return includeOutOfQueueAt ? 'kc.out_of_queue_at' : 'kc.issued_at';
   return 'kc.issued_at';
+}
+
+// ------------------------------------------------------------
+// Defensivo (CLAUDE.md armadilha #1 — schema antes da migration): o
+// backend sobe ANTES da migration 241 ser aplicada. karate_membership_cards
+// .out_of_queue_at é referenciada incondicionalmente no SELECT de
+// listPrintQueue (usado pelas 4 abas, não só 'out_of_queue') — sem cache
+// defensivo, um deploy sem a migration aplicada quebraria a fila INTEIRA
+// (to_print/printed/delivered também) com 42703, não só a aba nova.
+//
+// Cache module-level (mesmo padrão de src/services/extraSeats.js):
+// "existe" fica true até restart; "não existe" expira em 60s pra detectar
+// a migration rodando sem precisar reiniciar o processo.
+// ------------------------------------------------------------
+let _outOfQueueAtExists = null; // null=não testado, true=existe, false=ausente (cache temporário)
+let _outOfQueueAtMissingAt = 0;
+const OUT_OF_QUEUE_AT_MISS_TTL_MS = 60 * 1000;
+
+function _outOfQueueAtCacheStale() {
+  return _outOfQueueAtExists === false && (Date.now() - _outOfQueueAtMissingAt) >= OUT_OF_QUEUE_AT_MISS_TTL_MS;
+}
+function _shouldTryOutOfQueueAt() {
+  return _outOfQueueAtExists !== false || _outOfQueueAtCacheStale();
+}
+function _markOutOfQueueAtExists() { _outOfQueueAtExists = true; _outOfQueueAtMissingAt = 0; }
+function _markOutOfQueueAtMissing() {
+  _outOfQueueAtExists = false;
+  _outOfQueueAtMissingAt = Date.now();
+  console.warn('[karateCardService] karate_membership_cards.out_of_queue_at ainda não existe (migration 241 pendente). Aba "Fora da fila" degradada até a migration rodar. Tentando de novo em 60s.');
 }
 
 /**
@@ -612,26 +654,53 @@ async function listPrintQueue({ federation_id, print_status = 'to_print', dojo_i
     n++;
   }
   const where = `WHERE ${conds.join(' AND ')}`;
-  const orderCol = orderColumnForQueue(status);
   const pageClamped = Math.max(1, page);
   const pageSizeClamped = Math.min(500, Math.max(1, pageSize));
 
-  const rows = await db.query(
-    `SELECT kc.id, kc.student_id, kc.print_status, kc.printed_at, kc.delivered_at,
-            kc.print_count, kc.issued_at, kc.is_minor, kc.dojo_id,
-            COALESCE(cu.karate_registration_number, kc.card_number)      AS card_number,
-            COALESCE(cb.belt_name, kc.belt_name_snapshot)                AS belt_name,
-            COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot) AS dojo_name,
-            cu.name AS student_name
-     FROM karate_membership_cards kc
-     JOIN customers cu ON cu.id = kc.student_id
-     LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = kc.federation_id
-     LEFT JOIN companies dj ON dj.id = kc.dojo_id
-     ${where}
-     ORDER BY ${orderCol} DESC NULLS LAST, kc.issued_at DESC
-     LIMIT $${n} OFFSET $${n + 1}`,
-    [...params, pageSizeClamped, (pageClamped - 1) * pageSizeClamped]
-  );
+  // Defensivo: tenta com out_of_queue_at (migration 241); se a coluna ainda
+  // não existir (42703 — deploy antes da migration), cai pra uma versão sem
+  // ela (NULL no lugar + ORDER BY volta pra issued_at) e cacheia por 60s
+  // pra não repetir a tentativa fracassada em todo request (ver cache no
+  // topo do arquivo). Isso vale para as 4 abas — a coluna é sempre
+  // referenciada no SELECT, não só quando print_status='out_of_queue'.
+  async function fetchRows(includeOutOfQueueAt) {
+    const orderCol = orderColumnForQueue(status, includeOutOfQueueAt);
+    const outOfQueueAtCol = includeOutOfQueueAt ? 'kc.out_of_queue_at' : 'NULL::timestamptz AS out_of_queue_at';
+    return db.query(
+      `SELECT kc.id, kc.student_id, kc.print_status, kc.printed_at, kc.delivered_at,
+              ${outOfQueueAtCol},
+              kc.print_count, kc.issued_at, kc.is_minor, kc.dojo_id,
+              COALESCE(cu.karate_registration_number, kc.card_number)      AS card_number,
+              COALESCE(cb.belt_name, kc.belt_name_snapshot)                AS belt_name,
+              COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot) AS dojo_name,
+              cu.name AS student_name
+       FROM karate_membership_cards kc
+       JOIN customers cu ON cu.id = kc.student_id
+       LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = kc.federation_id
+       LEFT JOIN companies dj ON dj.id = kc.dojo_id
+       ${where}
+       ORDER BY ${orderCol} DESC NULLS LAST, kc.issued_at DESC
+       LIMIT $${n} OFFSET $${n + 1}`,
+      [...params, pageSizeClamped, (pageClamped - 1) * pageSizeClamped]
+    );
+  }
+
+  let rows;
+  if (_shouldTryOutOfQueueAt()) {
+    try {
+      rows = await fetchRows(true);
+      _markOutOfQueueAtExists();
+    } catch (e) {
+      if (e.code === '42703') {
+        _markOutOfQueueAtMissing();
+        rows = await fetchRows(false);
+      } else {
+        throw e;
+      }
+    }
+  } else {
+    rows = await fetchRows(false);
+  }
 
   const cnt = await db.query(
     `SELECT COUNT(*) AS total
@@ -650,7 +719,7 @@ async function listPrintQueue({ federation_id, print_status = 'to_print', dojo_i
      GROUP BY print_status`,
     [federation_id]
   );
-  const counters = { to_print: 0, printed: 0, delivered: 0 };
+  const counters = { to_print: 0, printed: 0, delivered: 0, out_of_queue: 0 };
   counterRows.rows.forEach((r) => { counters[r.print_status] = parseInt(r.n, 10); });
 
   // Dojôs presentes NESTA etapa (para o filtro/agrupamento por dojô).
@@ -688,6 +757,7 @@ async function listPrintQueue({ federation_id, print_status = 'to_print', dojo_i
       issued_at: c.issued_at,
       printed_at: c.printed_at,
       delivered_at: c.delivered_at,
+      out_of_queue_at: c.out_of_queue_at,
       print_count: c.print_count || 0,
     })),
   };
@@ -797,6 +867,58 @@ async function returnToQueue({ federation_id, card_ids }) {
   });
 }
 
+/**
+ * removeFromQueue — "Tirar da fila" (migration 241 / decisão Caio
+ * 17/07/2026): a federação decide não imprimir um cartão agora. NÃO é
+ * revogação — status continua 'active', verifyByToken() (verificação
+ * pública / QR) não filtra por print_status, então o praticante segue
+ * com carteirinha válida normalmente. Só sai da FILA (aba operacional).
+ *
+ * Regra de origem, validada aqui no backend (não só escondida na UI, por
+ * pedido explícito): SÓ aceita a partir de 'to_print'. Tirar da fila algo
+ * já 'printed' ou 'delivered' é semanticamente estranho — o cartão físico
+ * já existe ou já foi entregue ao praticante — e bagunçaria o histórico
+ * de vias (print_count/printed_at/delivered_at). Se a federação quer
+ * desfazer uma impressão ou entrega, o caminho já existente é
+ * returnToQueue ("não saiu" / reimprimir). Item com origem inválida vira
+ * error por-item (não trava o resto do lote, mesmo comportamento de
+ * _transitionCards para qualquer outra falha).
+ *
+ * Reversível: returnToQueue não valida print_status de origem (aceita
+ * qualquer etapa), então já devolve 'out_of_queue' pra 'to_print' sem
+ * nenhuma mudança nela.
+ *
+ * Defensivo (armadilha #1): se a migration 241 ainda não rodou, o UPDATE
+ * abaixo falha (coluna out_of_queue_at ausente e/ou CHECK constraint
+ * ainda sem 'out_of_queue') — _transitionCards já captura qualquer
+ * exceção por item e devolve como {id, error} sem derrubar o lote nem a
+ * rota (nunca 500); não há fallback "degradado" que faça sentido aqui,
+ * porque a transição em si só passa a existir depois da migration.
+ */
+async function removeFromQueue({ federation_id, card_ids }) {
+  return _transitionCards({
+    federation_id,
+    card_ids,
+    apply: async (client, row) => {
+      if (row.print_status !== 'to_print') {
+        const err = new Error(
+          `Só é possível tirar da fila cartões em 'to_print' (este está em '${row.print_status}'). Use "Não saiu / reimprimir" para desfazer impressão ou entrega.`
+        );
+        err.code = 'INVALID_TRANSITION';
+        throw err;
+      }
+      const r = await client.query(
+        `UPDATE karate_membership_cards
+         SET print_status = 'out_of_queue', out_of_queue_at = NOW(), updated_at = NOW()
+         WHERE id = $1
+         RETURNING id`,
+        [row.id]
+      );
+      return r.rows[0];
+    },
+  });
+}
+
 
 module.exports = {
   issueCard,
@@ -812,4 +934,5 @@ module.exports = {
   markPrinted,
   markDelivered,
   returnToQueue,
+  removeFromQueue,
 };
