@@ -53,7 +53,7 @@ const ACTIVE_PROVIDER = process.env.KARATE_PAYMENT_PROVIDER || 'static_brcode';
 
 // ── Cache module-level: evita repetir o try/catch de coluna ausente
 // (CLAUDE.md armadilha #1) a cada request depois que já sabemos se as
-// colunas da Fase F5 existem no banco. ────────────────────
+// colunas da Fase F5 existem no banco. ──────────────────────────────
 let _f5ColumnsAvailable = null; // null=desconhecido, true/false=cacheado
 
 /**
@@ -97,7 +97,7 @@ function _resolveProvider(cfg) {
   return configured || ACTIVE_PROVIDER;
 }
 
-// ── static_brcode provider ────────────────────────
+// ── static_brcode provider ─────────────────────────────────
 async function _staticBrCodeCreate({ federationId, amount, txid, description, cfg }) {
   const resolvedCfg = cfg !== undefined ? cfg : await _fetchFederationConfig(federationId);
 
@@ -226,7 +226,7 @@ async function _asaasGetStatus({ payment_intent_id, apiKey, baseUrl }) {
   };
 }
 
-// ── Public interface ──────────────────────────
+// ── Public interface ───────────────────────────────────────
 
 async function createPixCharge({ federationId, amount, txid, description }) {
   const cfg = await _fetchFederationConfig(federationId);
