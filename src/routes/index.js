@@ -353,7 +353,7 @@ router.use('/federation/:id', require('./karateTransfers'));
 router.use('/federation/:id', require('./karateDojoPractitionerRequests'));
 
 // ── AURA DOJÔ — F2 (alunos do dojô: registro PRÓPRIO + responsáveis) ──
-// Migration 241 (karate_dojo_students + karate_dojo_guardians). DECISÃO
+// Migration 242 (karate_dojo_students + karate_dojo_guardians). DECISÃO
 // CENTRAL: o aluno do dojô NÃO escreve em karate_practitioners/customers
 // (que são da FEDERAÇÃO) — é registro próprio do dojô; practitioner_id
 // fica NULL até o merge/sync com a FPKT ser definido. GETs aceitam Canal
