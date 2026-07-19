@@ -310,8 +310,8 @@ async function getStudent(dojoId, studentId) {
   return s;
 }
 
-async function resolveGuardianOrThrow(dojoId, guardianId, runQuery = db.query.bind(db)) {
-  const g = await runQuery(
+async function resolveGuardianOrThrow(dojoId, guardianId) {
+  const g = await db.query(
     `SELECT id, full_name, phone, relationship
        FROM karate_dojo_guardians
       WHERE id = $1 AND dojo_id = $2
@@ -340,7 +340,7 @@ async function createStudent(dojoId, data) {
        (dojo_id, full_name, birth_date, cpf, sex, phone, email, photo_url,
         belt_label, belt_order, status, guardian_id, consent_lgpd, notes, enrolled_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-             COALESCE($11, 'active'), $12, COALESESCE_PLACEHOLDER, $14, $15)
+             COALESCE($11, 'active'), $12, COALESCE($13, false), $14, $15)
      RETURNING ${studentFields('')}`,
     [
       dojoId,
