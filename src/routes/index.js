@@ -23,7 +23,7 @@ router.use('/referrals', accessCodesRouter);
 router.use('/invite', require('./invitePublic'));
 
 // ── Leads públicos do site (getaura.com.br via Cloudflare Worker) ──
-// POST /api/v1/public/leads -> sales_leads (source='site') -> ProspecaoAdmin
+// POST /api/v1/public/leads -> sales_leads (source='site') -> ProspeçaoAdmin
 router.use('/public/leads', require('./leadsPublic'));
 
 router.use('/me/companies', require('./userCompanies'));
@@ -193,7 +193,7 @@ router.use('/public/roster-update', require('./karateRosterPortalPublic'));
 //   POST /public/roster-self/:token/update
 router.use('/public/roster-self', require('./karateRosterSelfServicePublic'));
 
-// ── AURA KARATÊ — Track A (backend cadastros) ──────────────
+// ── AURA KARATÊ — Track A (backend cadastros) ──────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
 // GET  /federation/:id/belt-distribution
@@ -351,6 +351,24 @@ router.use('/federation/:id', require('./karateTransfers'));
 //   GET  /federation/:id/dojo/practitioner-requests?status=
 //   GET  /federation/:id/dojo/practitioner-requests/lookup-fpkt?number=
 router.use('/federation/:id', require('./karateDojoPractitionerRequests'));
+
+// ── AURA DOJÔ — F2 (alunos do dojô: registro PRÓPRIO + responsáveis) ──
+// Migration 241 (karate_dojo_students + karate_dojo_guardians). DECISÃO
+// CENTRAL: o aluno do dojô NÃO escreve em karate_practitioners/customers
+// (que são da FEDERAÇÃO) — é registro próprio do dojô; practitioner_id
+// fica NULL até o merge/sync com a FPKT ser definido. GETs aceitam Canal
+// A e B (portal lê); escrita (POST/PATCH/DELETE) exige Canal A (senão
+// 403 PORTAL_READ_ONLY).
+//   GET    /federation/:id/dojo/students             (?status=&q=&belt=&summary=1)
+//   POST   /federation/:id/dojo/students
+//   GET    /federation/:id/dojo/students/:sid        (ficha + responsável)
+//   PATCH  /federation/:id/dojo/students/:sid
+//   DELETE /federation/:id/dojo/students/:sid        (F3: virará 409 HAS_HISTORY)
+//   POST   /federation/:id/dojo/students/import      ({rows:[...]}, máx 500)
+//   GET    /federation/:id/dojo/guardians            (+ contagem de alunos)
+//   POST   /federation/:id/dojo/guardians
+//   PATCH  /federation/:id/dojo/guardians/:gid
+router.use('/federation/:id', require('./karateDojoStudents'));
 
 // Lado FEDERAÇÃO (guards de karateRoles — dedup SUGERE, nunca decide):
 //   GET   /federation/:id/practitioner-requests?status=&dojo_id=
