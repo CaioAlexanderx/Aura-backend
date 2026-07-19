@@ -7,12 +7,12 @@
 // exigem Canal A — o portal (B) é somente leitura (403 PORTAL_READ_ONLY).
 //
 // DECISÃO CENTRAL (F2): o aluno do dojô é registro PRÓPRIO
-// (karate_dojo_students, migration 241) — NUNCA escreve em
+// (karate_dojo_students, migration 242) — NUNCA escreve em
 // karate_practitioners/customers (federação). practitioner_id = vínculo
 // futuro com a FPKT (fica NULL até o modelo de sync ser definido).
 //
 // Escopo SEMPRE por req.dojoId do guard — nunca do body/query.
-// Defensivo 42P01 (migration 241 pendente): GETs de lista devolvem vazio +
+// Defensivo 42P01 (migration 242 pendente): GETs de lista devolvem vazio +
 // schema_pending; writes e ficha devolvem 503 SCHEMA_PENDING.
 //
 //   GET    /federation/:id/dojo/students             (?status=&q=&belt=&summary=1)
@@ -48,11 +48,11 @@ function handleWriteError(res, e, ctx) {
     return res.status(e.status).json({ error: e.message, code: e.code || 'ERROR' });
   }
   if (e && e.code === '23505') {
-    // UNIQUE parcial (dojo_id, cpf) — migration 241
+    // UNIQUE parcial (dojo_id, cpf) — migration 242
     return res.status(409).json({ error: 'Já existe um aluno com este CPF neste dojô', code: 'DUPLICATE_CPF' });
   }
   if (e && e.code === '42P01') {
-    return res.status(503).json({ error: 'Alunos do dojô ainda não disponíveis (migration 241 pendente)', code: 'SCHEMA_PENDING' });
+    return res.status(503).json({ error: 'Alunos do dojô ainda não disponíveis (migration 242 pendente)', code: 'SCHEMA_PENDING' });
   }
   console.error(`[karateDojoStudents] ${ctx}:`, e.message);
   return res.status(500).json({ error: 'Erro interno' });

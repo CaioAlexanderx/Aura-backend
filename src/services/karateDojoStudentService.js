@@ -3,7 +3,7 @@
 //
 // DECISÃO CENTRAL: o aluno do dojô NÃO é o praticante federado
 // (karate_practitioners/customers, que são da FEDERAÇÃO). É um registro
-// próprio do dojô em karate_dojo_students (migration 241);
+// próprio do dojô em karate_dojo_students (migration 242);
 // practitioner_id fica NULL até o merge/sync com a FPKT ser definido —
 // NENHUMA função aqui escreve nesse campo.
 //
