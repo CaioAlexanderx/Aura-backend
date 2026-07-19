@@ -183,6 +183,35 @@ describe('POST /federation/:id/practitioners/:pid/issue-card', () => {
         done();
       });
   });
+
+  // 17/07/2026: fecha bug pré-existente — o botão manual (issue-card) não
+  // bloqueava praticante sem matrícula FPKT (emitia com card_number NULL, só
+  // um warning). A validação agora vive em issueCard() (karateCardService,
+  // compartilhada pelos 3 call sites) e devolve 422 claro.
+  it('praticante SEM matrícula FPKT -> 422 FPKT_NUMBER_REQUIRED (não emite com card_number NULL)', (done) => {
+    const client = { query: jest.fn(), release: jest.fn() };
+    db.connect.mockResolvedValue(client);
+    client.query
+      .mockResolvedValueOnce({})                                  // BEGIN
+      .mockResolvedValueOnce({ rows: [{                          // snapshot SEM matrícula
+        id: PRAC, name: 'João Silva', karate_registration_number: null,
+        dojo_id: 'dojo-1', birth_date: '1990-01-01', photo_url: null,
+        belt_snapshot: '1dan', belt_name_snapshot: 'Preta', dojo_name: 'Dojô X',
+      }] })
+      .mockResolvedValueOnce({ rows: [] })                       // advisory lock
+      .mockResolvedValueOnce({});                                // ROLLBACK
+
+    request(app)
+      .post(`/federation/${FED}/practitioners/${PRAC}/issue-card`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({})
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        expect(res.body.code).toBe('FPKT_NUMBER_REQUIRED');
+        done();
+      });
+  });
 });
 
 describe('POST /public/karate/:slug/portal/verify-otp', () => {

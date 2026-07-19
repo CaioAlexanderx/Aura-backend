@@ -42,6 +42,11 @@ router.post('/practitioners/:practitionerId/issue-card', ...guards.staffWrite(),
     });
   } catch (err) {
     if (err.code === 'NOT_FOUND') return res.status(404).json({ error: err.message, code: 'NOT_FOUND' });
+    // 17/07/2026: fecha bug pré-existente — este botão manual não bloqueava
+    // praticante sem matrícula FPKT (emitia com card_number NULL, só um
+    // warning). A validação agora vive em issueCard() (karateCardService),
+    // compartilhada pelos 3 call sites; aqui só traduzimos pra 422 claro.
+    if (err.code === 'FPKT_NUMBER_REQUIRED') return res.status(422).json({ error: err.message, code: 'FPKT_NUMBER_REQUIRED' });
     console.error('[karateCards] issue error:', err.message);
     res.status(500).json({ error: 'Erro ao emitir carteirinha', detail: err.message });
   }

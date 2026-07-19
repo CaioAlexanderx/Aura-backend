@@ -101,10 +101,25 @@ async function issueCard({ federation_id, student_id, issued_by }) {
       [federation_id, student_id]
     );
 
-    const warnings = [];
+    // 17/07/2026 (decisão Caio, fechando bug pré-existente): matrícula FPKT é
+    // pré-requisito DURO para existir carteirinha — o número é emitido pela
+    // federação fora do sistema, uma carteirinha com card_number NULL não
+    // pode existir. Antes disso era só um warning (issueBatch já filtrava
+    // karate_registration_number IS NOT NULL nos candidatos, então nunca
+    // pegava isso na prática; mas o botão manual — POST /issue-card — não
+    // filtrava nada e deixava passar, gerando carteirinha com número NULL).
+    // Bloqueando aqui, na função compartilhada pelos 3 call sites
+    // (issue-card manual, issueBatch, e a nova emissão via upload de foto),
+    // fecha o buraco pra sempre, e não só no chamador que eu lembrei de
+    // consertar hoje.
     if (!p.karate_registration_number) {
-      warnings.push('Praticante sem número de registro FPKT — carteirinha emitida, mas recomenda-se registrar.');
+      await client.query('ROLLBACK');
+      const err = new Error('Praticante sem número de matrícula FPKT — carteirinha não pode ser emitida sem matrícula.');
+      err.code = 'FPKT_NUMBER_REQUIRED';
+      throw err;
     }
+
+    const warnings = [];
     if (!p.belt_snapshot) {
       warnings.push('Praticante sem graduação registrada — faixa em branco na carteirinha.');
     }
