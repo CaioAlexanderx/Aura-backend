@@ -1,0 +1,11 @@
+-- migration 241 (Aura Dojô · alunos do dojô) — RENUMERADA para
+-- 242_karate_dojo_students.sql.
+--
+-- O número 241 colidiu com 241_karate_card_queue_out_of_queue.sql (PR #402),
+-- mergeado em main em 19/07/2026 enquanto este PR (#403) estava aberto.
+-- Pela convenção do CLAUDE.md (numeração sequencial, incrementar se o número
+-- já existe — mesmo precedente da 195→197), o DDL foi movido para 242.
+--
+-- Este arquivo é um TOMBSTONE sem efeito (apenas comentários). O DDL real e
+-- idempotente está em migrations/242_karate_dojo_students.sql. Nenhuma das
+-- duas foi aplicada em produção ainda (aplicar a 242 via MCP antes do deploy).

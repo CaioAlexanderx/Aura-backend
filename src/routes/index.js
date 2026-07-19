@@ -352,6 +352,24 @@ router.use('/federation/:id', require('./karateTransfers'));
 //   GET  /federation/:id/dojo/practitioner-requests/lookup-fpkt?number=
 router.use('/federation/:id', require('./karateDojoPractitionerRequests'));
 
+// ── AURA DOJÔ — F2 (alunos do dojô: registro PRÓPRIO + responsáveis) ──
+// Migration 242 (karate_dojo_students + karate_dojo_guardians). DECISÃO
+// CENTRAL: o aluno do dojô NÃO escreve em karate_practitioners/customers
+// (que são da FEDERAÇÃO) — é registro próprio do dojô; practitioner_id
+// fica NULL até o merge/sync com a FPKT ser definido. GETs aceitam Canal
+// A e B (portal lê); escrita (POST/PATCH/DELETE) exige Canal A (senão
+// 403 PORTAL_READ_ONLY).
+//   GET    /federation/:id/dojo/students             (?status=&q=&belt=&summary=1)
+//   POST   /federation/:id/dojo/students
+//   GET    /federation/:id/dojo/students/:sid        (ficha + responsável)
+//   PATCH  /federation/:id/dojo/students/:sid
+//   DELETE /federation/:id/dojo/students/:sid        (F3: virará 409 HAS_HISTORY)
+//   POST   /federation/:id/dojo/students/import      ({rows:[...]}, máx 500)
+//   GET    /federation/:id/dojo/guardians            (+ contagem de alunos)
+//   POST   /federation/:id/dojo/guardians
+//   PATCH  /federation/:id/dojo/guardians/:gid
+router.use('/federation/:id', require('./karateDojoStudents'));
+
 // Lado FEDERAÇÃO (guards de karateRoles — dedup SUGERE, nunca decide):
 //   GET   /federation/:id/practitioner-requests?status=&dojo_id=
 //   GET   /federation/:id/practitioner-requests/:requestId
