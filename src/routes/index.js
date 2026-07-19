@@ -23,7 +23,7 @@ router.use('/referrals', accessCodesRouter);
 router.use('/invite', require('./invitePublic'));
 
 // ── Leads públicos do site (getaura.com.br via Cloudflare Worker) ──
-// POST /api/v1/public/leads -> sales_leads (source='site') -> ProspeçaoAdmin
+// POST /api/v1/public/leads -> sales_leads (source='site') -> ProspecaoAdmin
 router.use('/public/leads', require('./leadsPublic'));
 
 router.use('/me/companies', require('./userCompanies'));
@@ -193,7 +193,7 @@ router.use('/public/roster-update', require('./karateRosterPortalPublic'));
 //   POST /public/roster-self/:token/update
 router.use('/public/roster-self', require('./karateRosterSelfServicePublic'));
 
-// ── AURA KARATÊ — Track A (backend cadastros) ──────────
+// ── AURA KARATÊ — Track A (backend cadastros) ──────────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
 // GET  /federation/:id/belt-distribution
