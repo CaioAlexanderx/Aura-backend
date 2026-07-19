@@ -8,6 +8,11 @@
 // 11/06/2026: GET /print/credit/receipts/:transactionId — recibo de
 //   pagamento de crediário (B5): empresa, cliente, encargos, saldo,
 //   crédito a favor + texto WhatsApp.
+// 18/07/2026: cupom não-fiscal, carnê e recibo passam a usar
+//   autoPrintScript (sem window.onload) + botão manual SEMPRE, e nenhum
+//   recurso remoto em documento de impressão: QR Pix via qrInline local
+//   (era api.qrserver.com) e QRs do carnê inline (era cdnjs/qrcodejs).
+//   Mesmo tratamento do back#391 (DANFE) — pendência declarada lá.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -15,6 +20,8 @@ const db      = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const nuvemfiscal = require('../services/nuvemfiscal');
 const { buildStaticBrCode, validatePixKey } = require('../services/staticPixService');
+const { autoPrintScript } = require('../utils/autoPrintScript');
+const { qrInlineSvg } = require('../utils/qrInline');
 
 const NUVEM_URL = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
 
@@ -60,10 +67,14 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
   const cashAmt= cash ? parseFloat(cash.amount) : (isCash && sale.cash_tendered ? parseFloat(sale.cash_tendered) : 0);
   const change = cashAmt > parseFloat(sale.total_amount) ? (cashAmt - parseFloat(sale.total_amount)).toFixed(2) : null;
 
-  const pixSection = sale.pix_payload
+  // 18/07: QR Pix gerado LOCAL e embutido como SVG (qrInline) — era <img>
+  // do api.qrserver.com. Imagem remota em documento de impressão segura o
+  // `load` pra sempre se a rede da loja dropa o request.
+  const pixQr = sale.pix_payload ? qrInlineSvg(sale.pix_payload, { size: '24mm', margin: 1, ecc: 'M' }) : '';
+  const pixSection = pixQr
     ? `<div style="text-align:center;margin:6px 0">
          <div style="font-size:10px;margin-bottom:3px">Pix para pagamento:</div>
-         <img src="https://api.qrserver.com/v1/create-qr-code/?size=90x90&data=${encodeURIComponent(sale.pix_payload)}" width="90" height="90" alt="QR Pix">
+         ${pixQr}
        </div>` : '';
 
   const w = width80 ? '72mm' : '100%';
@@ -129,7 +140,8 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
   <div class="divider"></div>
   ${sale.notes ? `<div style="font-size:10px">Obs: ${sale.notes}</div><div class="divider"></div>` : ''}
   <div class="footer">Obrigado pela preferencia!<br>${company.trade_name || company.legal_name}<br><small>Powered by Aura. - getaura.com.br</small></div>
-  ${autoprint ? `<script>window.onload=()=>window.print();</script>` : '<br><button onclick="window.print()" style="width:100%;padding:8px;margin-top:8px;cursor:pointer">Imprimir</button>'}
+  <br><button onclick="window.print()" style="width:100%;padding:8px;margin-top:8px;cursor:pointer">Imprimir</button>
+  ${autoprint ? autoPrintScript() : ''}
 </body>
 </html>`;
 }
@@ -272,6 +284,10 @@ router.get('/danfe/devolucao/:saleId', requireAuth, async (req, res) => {
 //   encargos lazy (mora/multa) NAO entram no papel pois mudam diariamente —
 //   uma nota fixa avisa que atrasos sao calculados no pagamento. As somas
 //   impressas batem com customer_credit_balances (sem encargos).
+//
+// 18/07/2026: QRs renderizados server-side via qrInline (SVG embutido) —
+//   antes dependiam do qrcodejs via cdnjs (recurso remoto em documento de
+//   impressão). Disparo via autoPrintScript, não window.onload.
 // ============================================================
 router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   const companyId  = req.params.id;
@@ -424,8 +440,8 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       return dt.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
     }
 
-    // 3T3: coleta os QRs (global + por parcela) p/ renderizar 1x no fim do body.
-    const pixQrJobs = [];
+    // 18/07: QRs inline (SVG server-side, sem CDN). 30mm ≈ os 116px antigos.
+    const QR_CARNE_OPTS = { size: '30mm', margin: 1, ecc: 'M' };
 
     let accountsHTML = '';
     if (orderedKeys.length === 0) {
@@ -453,8 +469,6 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
               beneficiaryCity: pixSetup.city,
               txid:            `CRED${String(inst.id).replace(/-/g, '').slice(0, 20)}`,
             });
-            const qrId = 'qr-' + String(inst.id).replace(/-/g, '');
-            pixQrJobs.push({ id: qrId, payload: instPix });
             pixRow = `<tr><td colspan="5" style="padding:2px 4px 10px">
               <div style="border:1px solid #ccc;background:#fafafa;padding:6px;page-break-inside:avoid">
                 <div style="font-size:10px;font-weight:bold;margin-bottom:3px">
@@ -463,7 +477,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
                 <div style="font-family:'Courier New',monospace;font-size:8px;word-break:break-all;
                             background:#fff;border:1px solid #ddd;padding:4px;margin-bottom:5px;
                             user-select:all">${instPix}</div>
-                <div id="${qrId}" style="text-align:center"></div>
+                <div style="text-align:center">${qrInlineSvg(instPix, QR_CARNE_OPTS)}</div>
               </div>
             </td></tr>`;
           }
@@ -504,7 +518,6 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
     // 8. Bloco Pix global (pagar tudo de uma vez)
     let pixHTML = '';
     if (pixPayload) {
-      pixQrJobs.push({ id: 'carne-qr', payload: pixPayload });
       const balLabel = totalBalance > 0 ? ` — R$ ${fmt(totalBalance)}` : '';
       pixHTML = `
         <div style="border:1px solid #000;padding:10px;margin-top:12px;page-break-inside:avoid">
@@ -515,9 +528,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
           <div style="font-family:'Courier New',monospace;font-size:9px;word-break:break-all;
                       background:#f5f5f5;padding:6px;border:1px solid #ccc;margin-bottom:8px;
                       user-select:all">${pixPayload}</div>
-          <div style="text-align:center">
-            <div id="carne-qr"></div>
-          </div>
+          <div style="text-align:center">${qrInlineSvg(pixPayload, QR_CARNE_OPTS)}</div>
           <div style="font-size:9px;color:#666;margin-top:6px;text-align:center">
             Pagamento confirmado manualmente pela loja.
           </div>
@@ -528,21 +539,6 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
           Pagamento confirmado manualmente pela loja. Nenhuma chave Pix configurada.
         </div>`;
     }
-
-    // 3T3: script unico que renderiza todos os QRs (global + por parcela).
-    const qrScript = pixQrJobs.length
-      ? `<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-         <script>
-           (function() {
-             var jobs = ${JSON.stringify(pixQrJobs)};
-             if (typeof QRCode === 'undefined') return;
-             jobs.forEach(function(j) {
-               var el = document.getElementById(j.id);
-               if (el) new QRCode(el, { text: j.payload, width: 116, height: 116, correctLevel: QRCode.CorrectLevel.M });
-             });
-           })();
-         </script>`
-      : '';
 
     // 9. Montar HTML final
     const printDate = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
@@ -597,8 +593,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   </div>
   <br>
   <button onclick="window.print()" style="width:100%;padding:10px;cursor:pointer;font-size:14px">Imprimir</button>
-  ${qrScript}
-  <script>window.onload = function() { setTimeout(function(){ window.print(); }, 350); };</script>
+  ${autoPrintScript({ delayMs: 350 })}
 </body>
 </html>`;
 
@@ -784,7 +779,7 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       '    <div style="font-size:11px;font-weight:bold;margin-bottom:6px;color:#166534">Texto para WhatsApp</div>\n' +
       '    <textarea rows="' + waLines.length + '" readonly onclick="this.select()">' + waText.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</textarea>\n' +
       '  </div>\n' +
-      '  <script>window.onload = function() { window.print(); };</script>\n' +
+      '  ' + autoPrintScript() + '\n' +
       '</body>\n' +
       '</html>';
 
