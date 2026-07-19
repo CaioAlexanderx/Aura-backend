@@ -47,6 +47,10 @@
 // 02/07/2026: c6 — GET detalhe: janela de course_count ampliada de 1 para
 //   2 anos. Campo canônico agora é course_count_2y; course_count_last_year
 //   mantido como alias de back-compat (mesmo valor).
+// 17/07/2026: decisão Caio — removida a auto-emissão de carteirinha no POST
+//   de cadastro. Agora ela só nasce (a) no upload da PRIMEIRA foto (ver
+//   comentário na rota /:practitionerId/photo) ou (b) no botão manual/lote
+//   (karateCards.js).
 // ============================================================
 'use strict';
 
@@ -543,16 +547,13 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
 
     const p = insertRes.rows[0];
 
-    // Auto-emissão da carteirinha para novos praticantes. Best-effort: só quando
-    // há matrícula + faixa; nunca derruba o cadastro. Como a carteirinha lê os
-    // dados ao vivo, ela reflete qualquer mudança posterior automaticamente.
-    if (p.karate_registration_number && hasInitBelt) {
-      try {
-        await cards.issueCard({ federation_id: federationId, student_id: p.id, issued_by: req.user?.id || null });
-      } catch (e) {
-        console.warn('[karatePractitioners] auto-emissão de carteirinha falhou (não bloqueia cadastro):', e.message);
-      }
-    }
+    // 17/07/2026 (decisão Caio): REMOVIDA a auto-emissão de carteirinha aqui
+    // no cadastro. A carteirinha agora só nasce (a) no upload da PRIMEIRA
+    // foto do praticante (POST /:practitionerId/photo, ver comentário lá) ou
+    // (b) no botão manual/lote (karateCards.js). Cadastrar um praticante sem
+    // foto (o caminho normal aqui) não gera mais carteirinha automaticamente
+    // — antes isso acontecia sempre que havia matrícula + faixa, mesmo sem
+    // nenhuma foto cadastrada.
 
     res.status(201).json(shapePractitioner(p));
   } catch (err) {
@@ -1440,6 +1441,61 @@ router.post('/:practitionerId/photo', ...guards.staffWrite(), async (req, res) =
        WHERE id = $2 AND federation_id = $3`,
       [result.url, practitionerId, federationId]
     );
+
+    // 17/07/2026 (decisão Caio): a auto-emissão de carteirinha SAIU do
+    // cadastro (POST /practitioners) e passou a acontecer AQUI, no upload da
+    // foto — "a carteirinha só é gerada automaticamente ao inserir uma foto
+    // para o praticante ou clicar no botão gerador na aba de carteirinha".
+    //
+    // Regras:
+    //   - Só emite quando o praticante AINDA NÃO TEM carteirinha nenhuma —
+    //     nenhuma linha em karate_membership_cards para ele, em QUALQUER
+    //     status (inclui 'revoked'). Trocar a foto de quem já tem carteirinha
+    //     (ativa, expirada OU revogada) NÃO emite nada:
+    //       (1) a carteirinha lê os dados ao vivo (getCurrentCard), então a
+    //           foto nova já aparece sozinha na carteirinha existente;
+    //       (2) a fila de impressão usa "gerado por último, visualizado
+    //           primeiro" (migration 233) — reemitir a cada troca de foto
+    //           jogaria a carteirinha para o topo da fila de quem já
+    //           imprimiu/entregou a dele;
+    //       (3) uma carteirinha 'revoked' foi revogada de propósito pela
+    //           federação (decisão 25/06/2026) — a foto não deve
+    //           "ressuscitá-la". Reemissão pós-revogação continua sendo só
+    //           via botão manual/lote (karateCards.js).
+    //   - Mesmo pré-requisito de sempre (não é decoração — o nº de matrícula
+    //     é emitido pela federação FORA do sistema, carteirinha sem matrícula
+    //     não pode existir): karate_registration_number presente + faixa
+    //     registrada (karate_belt_history).
+    //   - Best-effort, igual ao padrão antigo: falha aqui NUNCA derruba o
+    //     upload da foto (try/catch + console.warn).
+    try {
+      const alreadyHasCard = await db.query(
+        `SELECT 1 FROM karate_membership_cards WHERE student_id = $1 AND federation_id = $2 LIMIT 1`,
+        [practitionerId, federationId]
+      );
+      if (!alreadyHasCard.rows.length) {
+        const elig = await db.query(
+          `SELECT cu.karate_registration_number,
+                  EXISTS (
+                    SELECT 1 FROM karate_belt_history bh
+                    WHERE bh.student_id = cu.id AND bh.federation_id = $2
+                  ) AS has_belt
+             FROM customers cu
+            WHERE cu.id = $1 AND cu.federation_id = $2`,
+          [practitionerId, federationId]
+        );
+        const e = elig.rows[0];
+        if (e && e.karate_registration_number && e.has_belt) {
+          await cards.issueCard({ federation_id: federationId, student_id: practitionerId, issued_by: req.user?.id || null });
+        }
+      }
+    } catch (e) {
+      if (e.code === '42P01' || e.code === '42703') {
+        console.warn('[karatePractitioners] auto-emissão de carteirinha na foto pulada (schema ausente, provável deploy parcial):', e.message);
+      } else {
+        console.warn('[karatePractitioners] auto-emissão de carteirinha na foto falhou (não bloqueia upload):', e.message);
+      }
+    }
 
     res.json({ photo_url: result.url });
   } catch (err) {
