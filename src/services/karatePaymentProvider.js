@@ -53,7 +53,7 @@ const ACTIVE_PROVIDER = process.env.KARATE_PAYMENT_PROVIDER || 'static_brcode';
 
 // ── Cache module-level: evita repetir o try/catch de coluna ausente
 // (CLAUDE.md armadilha #1) a cada request depois que já sabemos se as
-// colunas da Fase F5 existem no banco. ──────────────────────────────
+// colunas da Fase F5 existem no banco. ────────────────────
 let _f5ColumnsAvailable = null; // null=desconhecido, true/false=cacheado
 
 /**
@@ -97,7 +97,7 @@ function _resolveProvider(cfg) {
   return configured || ACTIVE_PROVIDER;
 }
 
-// ── static_brcode provider ─────────────────────────────────
+// ── static_brcode provider ────────────────────────
 async function _staticBrCodeCreate({ federationId, amount, txid, description, cfg }) {
   const resolvedCfg = cfg !== undefined ? cfg : await _fetchFederationConfig(federationId);
 
@@ -226,7 +226,7 @@ async function _asaasGetStatus({ payment_intent_id, apiKey, baseUrl }) {
   };
 }
 
-// ── Public interface ───────────────────────────────────────
+// ── Public interface ──────────────────────────
 
 async function createPixCharge({ federationId, amount, txid, description }) {
   const cfg = await _fetchFederationConfig(federationId);
@@ -271,4 +271,13 @@ async function getStatus({ payment_intent_id, provider, federationId }) {
   }
 }
 
-module.exports = { createPixCharge, getStatus, ACTIVE_PROVIDER };
+// ── F3a Aura Dojô — alias semântico: cobrança PIX cujo RECEBEDOR é uma company
+// qualquer (o próprio DOJÔ), não a federação. A resolução de chave PIX já é
+// por company_id em digital_channel_config (createPixCharge trata federationId
+// como company_id), então este alias só deixa o call-site do dojô explícito
+// (`companyId: dojoId`) sem duplicar lógica nem quebrar os call-sites atuais.
+async function createPixChargeForCompany({ companyId, amount, txid, description }) {
+  return createPixCharge({ federationId: companyId, amount, txid, description });
+}
+
+module.exports = { createPixCharge, createPixChargeForCompany, getStatus, ACTIVE_PROVIDER };
