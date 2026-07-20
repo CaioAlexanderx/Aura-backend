@@ -820,7 +820,7 @@ router.post('/annuities/dojos/:dojoId/:annuityId/void', ...guards.adminOnly(), a
 //
 // Body (todos opcionais):
 //   paid_at?         — YYYY-MM-DD (default: hoje)
-//   payment_method?  — 'pix'|'dinheiro'|'transferencia'|'outro' (default: 'pix')
+//   payment_method?  — 'pix'|'dinheiro'|'transferencia'|'credito_cbkt'|'outro' (default: 'pix')
 //   amount?          — valor recebido (default: amount da cobrança)
 //
 // Idempotente: se a anuidade já está 'paid', retorna 200 sem efeito colateral.
@@ -836,7 +836,7 @@ router.post('/annuities/dojos/:dojoId/:annuityId/pay', ...guards.adminOnly(), as
     amount: overrideAmount,
   } = req.body || {};
 
-  const VALID_METHODS = ['pix', 'dinheiro', 'transferencia', 'outro'];
+  const VALID_METHODS = ['pix', 'dinheiro', 'transferencia', 'credito_cbkt', 'outro'];
   if (payment_method && !VALID_METHODS.includes(payment_method)) {
     return res.status(422).json({
       error: `payment_method inválido. Valores aceitos: ${VALID_METHODS.join(', ')}`,
@@ -999,7 +999,7 @@ router.post('/annuities/dojos/:dojoId/:annuityId/pay', ...guards.adminOnly(), as
 //   amount           (obrig.) — valor recebido
 //   paid_at?         — YYYY-MM-DD (default: hoje)
 //   due_date?        — YYYY-MM-DD (default: paid_at)
-//   payment_method?  — 'pix'|'dinheiro'|'transferencia'|'outro' (default: 'pix')
+//   payment_method?  — 'pix'|'dinheiro'|'transferencia'|'credito_cbkt'|'outro' (default: 'pix')
 //
 // Idempotente: se já existe cobrança para o período retorna 409 com
 //   { code:'CONFLICT', annuity_id } para que o caller possa redirecionar
@@ -1023,7 +1023,7 @@ router.post('/annuities/dojos/:dojoId/pay', ...guards.adminOnly(), async (req, r
   if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
     return res.status(422).json({ error: 'amount obrigatorio e deve ser > 0', code: 'VALIDATION_ERROR' });
   }
-  const VALID_METHODS = ['pix', 'dinheiro', 'transferencia', 'outro'];
+  const VALID_METHODS = ['pix', 'dinheiro', 'transferencia', 'credito_cbkt', 'outro'];
   if (payment_method && !VALID_METHODS.includes(payment_method)) {
     return res.status(422).json({
       error: `payment_method inválido. Valores aceitos: ${VALID_METHODS.join(', ')}`,
