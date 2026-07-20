@@ -261,3 +261,14 @@ describe('validateDueDateOverride', () => {
   });
 });
 
+describe('VALID_PAYMENT_METHODS (formas de pagamento aceitas na baixa)', () => {
+  it('mantém pix, dinheiro, transferencia e outro', () => {
+    expect(svc.VALID_PAYMENT_METHODS).toEqual(
+      expect.arrayContaining(['pix', 'dinheiro', 'transferencia', 'outro'])
+    );
+  });
+
+  it('aceita credito_cbkt (Crédito CBKT) como forma de pagamento válida', () => {
+    expect(svc.VALID_PAYMENT_METHODS).toContain('credito_cbkt');
+  });
+});
