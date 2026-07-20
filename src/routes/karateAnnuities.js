@@ -78,7 +78,7 @@ async function fetchDojoForCharge(client, dojoId, federationId) {
     try {
       return await client.query(
         `SELECT id, name, karate_annuity_plan FROM companies
-         WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' LIMIT 1`,
+         WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' AND karate_dojo_linked_at IS NOT NULL LIMIT 1`,
         [dojoId, federationId]
       );
     } catch (e) {
@@ -89,7 +89,7 @@ async function fetchDojoForCharge(client, dojoId, federationId) {
     }
   }
   return client.query(
-    `SELECT id, name FROM companies WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' LIMIT 1`,
+    `SELECT id, name FROM companies WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' AND karate_dojo_linked_at IS NOT NULL LIMIT 1`,
     [dojoId, federationId]
   );
 }
@@ -159,6 +159,7 @@ function dojosBaseSql(withPlan) {
     LEFT JOIN karate_dojo_annuity_history h
       ON h.dojo_id = c.id AND h.reference_period = $2
     WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
+      AND c.karate_dojo_linked_at IS NOT NULL
   `;
 }
 
@@ -900,7 +901,7 @@ router.post('/annuities/dojos/:dojoId/:annuityId/pay', ...guards.adminOnly(), as
       return res.status(422).json({ error: 'amount deve ser > 0', code: 'VALIDATION_ERROR' });
     }
 
-    // ── Concilia/cria a transaction ──────────────────────────
+    // ── Concilia/cria a transaction ───────────────────────
     let transactionId = hist.transaction_id;
 
     if (transactionId) {
