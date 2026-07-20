@@ -36,6 +36,7 @@ const router = require('express').Router({ mergeParams: true });
 const { requireDojoAccess } = require('../middleware/requireDojoAccess');
 const svc = require('../services/karateDojoBillingService');
 const baasSvc = require('../services/karateDojoBaasService');
+const reminders = require('../services/karateDojoReminderEngine');
 
 // Canal B (portal do dojô) é SOMENTE LEITURA — alterar cobrança exige a
 // conta do dojô (Canal A).
@@ -199,6 +200,55 @@ router.put('/dojo/billing/config', requireDojoAccess, requireChannelA, async (re
     return res.json(cfg);
   } catch (e) {
     return handleWriteError(res, e, 'put config');
+  }
+});
+
+// ── F3c: Régua de cobrança do dojô (dojô→aluno) ──
+// GET aceita Canal A e B; PUT config e POST run exigem Canal A. Defensivo
+// 42P01 (migration 245 pendente): GET config cai no default, GET log vazio,
+// writes → 503 SCHEMA_PENDING (via handleWriteError).
+router.get('/dojo/billing/reminder-config', requireDojoAccess, async (req, res) => {
+  try {
+    const cfg = await reminders.getConfig(req.dojoId);
+    return res.json(cfg);
+  } catch (e) {
+    if (e && (e.code === '42P01' || e.code === '42703')) {
+      return res.json({ enabled: false, offsets: reminders.DEFAULT_OFFSETS, send_email: true, updated_at: null });
+    }
+    console.error('[karateDojoBilling] reminder config:', e.message);
+    return res.status(500).json({ error: 'Erro ao obter configuração da régua' });
+  }
+});
+
+router.put('/dojo/billing/reminder-config', requireDojoAccess, requireChannelA, async (req, res) => {
+  try {
+    const cfg = await reminders.putConfig(req.dojoId, req.body || {});
+    return res.json(cfg);
+  } catch (e) {
+    return handleWriteError(res, e, 'reminder config');
+  }
+});
+
+router.get('/dojo/billing/reminder-log', requireDojoAccess, async (req, res) => {
+  try {
+    const competence = req.query.competence != null && String(req.query.competence).trim() !== ''
+      ? String(req.query.competence).trim() : null;
+    const result = await reminders.getLog(req.dojoId, { competence });
+    return res.json(result);
+  } catch (e) {
+    if (e && (e.code === '42P01' || e.code === '42703')) return res.json({ data: [] });
+    console.error('[karateDojoBilling] reminder log:', e.message);
+    return res.status(500).json({ error: 'Erro ao obter histórico da régua' });
+  }
+});
+
+// Canal A: dispara a régua AGORA só deste dojô (roda mesmo com enabled=false).
+router.post('/dojo/billing/reminders/run', requireDojoAccess, requireChannelA, async (req, res) => {
+  try {
+    const result = await reminders.runForDojo(req.dojoId, { today: (req.body && req.body.today) || null });
+    return res.json(result);
+  } catch (e) {
+    return handleWriteError(res, e, 'reminders run');
   }
 });
 

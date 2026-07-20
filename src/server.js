@@ -75,6 +75,10 @@ function startServer() {
     // Aviso interno de vencimento (T-2) da mensalidade da federação karatê → contato@getaura.com.br
     const { initKarateBillingDueScheduler } = require('./jobs/karateBillingDueScheduler');
     initKarateBillingDueScheduler();
+
+    // F3c: régua de cobrança do dojô (dojô→aluno) — diário ~9h10 BRT
+    const { initDojoReminderScheduler } = require('./jobs/dojoReminderScheduler');
+    initDojoReminderScheduler();
   });
 }
 
