@@ -64,6 +64,7 @@ router.get('/roster-progress', ...guards.read(), async (req, res) => {
          SELECT id AS dojo_id, COALESCE(name, trade_name, legal_name) AS dojo_nome
          FROM companies
          WHERE federation_id = $1 AND vertical_active = 'karate_dojo'
+           AND karate_dojo_linked_at IS NOT NULL
            ${activeOnly ? 'AND is_active IS NOT FALSE' : ''}
        ),
        practicantes AS (
