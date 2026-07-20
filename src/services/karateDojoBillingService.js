@@ -434,19 +434,69 @@ async function getPixConfigRow(dojoId) {
   }
 }
 
-async function createChargePix(dojoId, chargeId) {
-  const cur = await db.query(
+// F3c: leitura defensiva da cobrança pro PIX. pix_payload (migration 245)
+// pode não existir ainda — 42703 cai pro SELECT sem a coluna (sem reuso).
+// pix_txid (243) sempre existe.
+async function fetchChargeForPix(dojoId, chargeId) {
+  const base =
     `SELECT id, amount, competence, status,
-            to_char(due_date, 'YYYY-MM-DD') AS due_date
-       FROM karate_dojo_charges
-      WHERE id = $1 AND dojo_id = $2 LIMIT 1`,
-    [chargeId, dojoId]
-  );
-  if (!cur.rows.length) throw svcError(404, 'NOT_FOUND', 'Cobrança não encontrada neste dojô');
-  const c = cur.rows[0];
+            to_char(due_date, 'YYYY-MM-DD') AS due_date, pix_txid`;
+  try {
+    const { rows } = await db.query(
+      `${base}, pix_payload FROM karate_dojo_charges WHERE id = $1 AND dojo_id = $2 LIMIT 1`,
+      [chargeId, dojoId]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    if (!(e && e.code === '42703')) throw e;
+    const { rows } = await db.query(
+      `${base} FROM karate_dojo_charges WHERE id = $1 AND dojo_id = $2 LIMIT 1`,
+      [chargeId, dojoId]
+    );
+    return rows[0] || null;
+  }
+}
+
+// F3c: persiste txid + BR Code (pix_payload) BEST-EFFORT. Se pix_payload
+// (migration 245) ainda não existe, 42703 cai pro UPDATE só do txid (o
+// comportamento pré-F3c), preservando a conciliação.
+async function persistPixArtifacts(dojoId, chargeId, txid, payload) {
+  try {
+    await db.query(
+      `UPDATE karate_dojo_charges SET pix_txid = $3, pix_payload = $4, updated_at = now()
+        WHERE id = $1 AND dojo_id = $2`,
+      [chargeId, dojoId, txid, payload]
+    );
+  } catch (e) {
+    if (e && e.code === '42703') {
+      try {
+        await db.query(
+          `UPDATE karate_dojo_charges SET pix_txid = $3, updated_at = now()
+            WHERE id = $1 AND dojo_id = $2`,
+          [chargeId, dojoId, txid]
+        );
+      } catch (_) { /* best-effort */ }
+    }
+    /* outros erros: best-effort, ignora */
+  }
+}
+
+async function createChargePix(dojoId, chargeId) {
+  const c = await fetchChargeForPix(dojoId, chargeId);
+  if (!c) throw svcError(404, 'NOT_FOUND', 'Cobrança não encontrada neste dojô');
   if (c.status === 'cancelled') throw svcError(409, 'CHARGE_CANCELLED', 'Cobrança cancelada não gera PIX');
 
   const amount = Number(c.amount);
+  const existingPayload = c.pix_payload && String(c.pix_payload).trim() ? String(c.pix_payload) : null;
+
+  // Monta a página pública a partir de um BR Code (token stateless — só
+  // valor/competência/BR Code, sem dado pessoal).
+  const buildPublicUrl = (pixCode) => {
+    try {
+      const token = signPixToken({ amount, referencePeriod: c.competence, pixCode });
+      return `${env.APP_URL}/karate/pix/${token}`;
+    } catch (_) { return null; }
+  };
 
   // ── Provider EFETIVO (F3b) ──
   // BaaS (subconta Asaas do dojô) só quando o dojô optou por 'baas', a
@@ -455,6 +505,12 @@ async function createChargePix(dojoId, chargeId) {
   // caminho pix_manual (F3a) fica idêntico ao de antes.
   const baas = await baasSvc.resolveActiveBaas(dojoId);
   if (baas) {
+    // REUSO (F3c): já há BR Code salvo E o pagamento na subconta já foi
+    // criado (pix_txid). NUNCA cria um novo payment Asaas a cada clique/
+    // lembrete — evita cobranças duplicadas na subconta do dojô.
+    if (existingPayload && c.pix_txid) {
+      return { payload: existingPayload, public_url: buildPublicUrl(existingPayload), provider: 'baas' };
+    }
     let res;
     try {
       res = await baasSvc.createChargePixViaBaas({
@@ -473,25 +529,20 @@ async function createChargePix(dojoId, chargeId) {
         'nas configurações, troque o recebimento para a chave PIX própria do dojô.');
     }
 
-    // pix_txid = id do pagamento NA SUBCONTA (conciliação via webhook). Best-effort.
-    try {
-      await db.query(
-        `UPDATE karate_dojo_charges SET pix_txid = $3, updated_at = now()
-          WHERE id = $1 AND dojo_id = $2`,
-        [chargeId, dojoId, res.payment_id]
-      );
-    } catch (_) { /* best-effort */ }
+    // pix_txid = id do pagamento NA SUBCONTA (conciliação via webhook).
+    // Salva também o BR Code (pix_payload) pra reuso. Best-effort.
+    await persistPixArtifacts(dojoId, chargeId, res.payment_id, res.payload);
 
-    let publicUrl = null;
-    try {
-      const token = signPixToken({ amount, referencePeriod: c.competence, pixCode: res.payload });
-      publicUrl = `${env.APP_URL}/karate/pix/${token}`;
-    } catch (_) { publicUrl = null; }
-
-    return { payload: res.payload, public_url: publicUrl, provider: 'baas' };
+    return { payload: res.payload, public_url: buildPublicUrl(res.payload), provider: 'baas' };
   }
 
   // ── Caminho pix_manual (chave PIX do PRÓPRIO dojô — F3a) ──
+  // REUSO (F3c): BR Code salvo → devolve o mesmo (a chave própria não muda
+  // o recebedor a cada clique).
+  if (existingPayload) {
+    return { payload: existingPayload, public_url: buildPublicUrl(existingPayload), provider: 'pix_manual' };
+  }
+
   const cfg = await getPixConfigRow(dojoId);
   if (!cfg || !cfg.pix_key || !String(cfg.pix_key).trim()) {
     throw svcError(409, 'PIX_NAO_CONFIGURADO', 'O dojô ainda não configurou uma chave PIX de recebimento');
@@ -507,25 +558,11 @@ async function createChargePix(dojoId, chargeId) {
   const pixCode = charge && charge.payload;
   if (!pixCode) throw svcError(502, 'PIX_PROVIDER_ERROR', 'Falha ao gerar o código PIX');
 
-  // Guarda o txid pra conciliação futura — BEST-EFFORT (fora de qualquer
-  // transação; nunca deixa a falha aqui derrubar a geração do PIX).
-  try {
-    await db.query(
-      `UPDATE karate_dojo_charges SET pix_txid = $3, updated_at = now()
-        WHERE id = $1 AND dojo_id = $2`,
-      [chargeId, dojoId, txid]
-    );
-  } catch (_) { /* best-effort */ }
+  // Guarda txid + BR Code pra conciliação/reuso — BEST-EFFORT (fora de
+  // qualquer transação; nunca deixa a falha aqui derrubar a geração do PIX).
+  await persistPixArtifacts(dojoId, chargeId, txid, pixCode);
 
-  // public_url = página pública EXISTENTE do app (mesma de F4/PIX). O token
-  // stateless só carrega valor/competência/BR Code — sem dado pessoal.
-  let publicUrl = null;
-  try {
-    const token = signPixToken({ amount, referencePeriod: c.competence, pixCode });
-    publicUrl = `${env.APP_URL}/karate/pix/${token}`;
-  } catch (_) { publicUrl = null; }
-
-  return { payload: pixCode, public_url: publicUrl, provider: 'pix_manual' };
+  return { payload: pixCode, public_url: buildPublicUrl(pixCode), provider: 'pix_manual' };
 }
 
 // ── Baixa manual / cancelamento (idempotentes) ──

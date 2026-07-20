@@ -59,6 +59,8 @@ const {
   PLANS,
   ANNUAL_DISCOUNT,
   MIN_CHARGE_BRL,
+  KARATE_DOJO_MONTHLY_BRL,
+  SEAT_PRICE_BRL,
   getPlanValue,
   getTotalValue,
   getFirstChargeValue,
@@ -80,6 +82,50 @@ function planAllowedForVertical(vertical, plan) {
   const allowed = VERTICAL_MIN_PLANS[String(vertical || '').toLowerCase()];
   if (!allowed) return true; // vertical sem restricao (ou sem vertical)
   return allowed.includes(String(plan || '').toLowerCase());
+}
+
+// ── F3c: flag do gate do plano Aura Dojô (default OFF). Com OFF, o gate
+// NUNCA exige pagamento (required:false), mas ainda devolve os valores pra
+// tela exibir o preço. Nada muda para federação/varejo.
+function dojoGateEnabled() {
+  const v = String(process.env.DOJO_GATE_ENABLED || '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'on' || v === 'yes';
+}
+
+// GET /billing/karate-gate para company vertical karate_dojo. Responde no
+// formato do plano dojô (required/plan/amount/seats/seat_amount/total/...).
+// required=true SÓ com a flag ligada E billing inativo/atrasado E trial
+// expirado E sem bypass de conta interna. is_staff (@getaura) NUNCA é gated
+// — mesmo espírito do gate da federação, que também não gateia conta interna.
+// amount vem de billingPricing (fonte única) — mudar o preço lá reflete aqui.
+function karateDojoGate(c, res) {
+  const extraSeats = parseInt(c.extra_seats_granted, 10) || 0;
+  const amount = KARATE_DOJO_MONTHLY_BRL;
+  const seatAmount = SEAT_PRICE_BRL;
+  const total = Math.round((amount + extraSeats * seatAmount) * 100) / 100;
+
+  const now = new Date();
+  const trialActive = c.trial_ends_at && new Date(c.trial_ends_at) > now;
+  const active = c.billing_status === 'active';
+  const overdue = c.billing_status === 'overdue';
+  const isStaff = c.is_staff === true; // conta interna @getaura — nunca gated
+
+  let required = false;
+  if (dojoGateEnabled() && !isStaff) {
+    // billing inativo (não active) E trial expirado — ou overdue explícito.
+    required = overdue || (!active && !trialActive);
+  }
+
+  return res.json({
+    required,
+    plan: 'dojo',
+    amount,
+    seats: extraSeats,
+    seat_amount: seatAmount,
+    total,
+    trial_ends_at: c.trial_ends_at || null,
+    billing_status: c.billing_status || null,
+  });
 }
 
 async function ensureAsaasCustomer(company, user) {
@@ -161,6 +207,14 @@ router.get('/karate-gate', requireAuth, async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const c = rows[0];
+
+    // F3c: company da vertical dojô responde no formato do plano Aura Dojô
+    // (R$140 + seats), atrás da flag DOJO_GATE_ENABLED. Federação/varejo
+    // seguem exatamente como antes (regressão coberta por teste).
+    if (c.vertical === 'karate_dojo' || c.vertical_active === 'karate_dojo') {
+      return karateDojoGate(c, res);
+    }
+
     const extraSeats = parseInt(c.extra_seats_granted, 10) || 0;
     const AMOUNT = getTotalValue('negocio', 'monthly', 'PIX', extraSeats);
     const now = new Date();
@@ -341,6 +395,13 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     credit_card_holder_address_number,
     credit_card_holder_address,
   } = req.body;
+
+  // F3c: plano Aura Dojô (SaaS R$140 via conta Asaas MÃE) — ramo próprio,
+  // FORA de PLANS do varejo. Delega ANTES da validação de PLANS (que
+  // rejeitaria 'dojo'). requireAuth/requireRole já rodaram nesta rota.
+  if (plan === 'dojo') {
+    return require('../services/dojoSaasCheckout').subscribeDojoSaas(req, res);
+  }
 
   if (!plan || !PLANS[plan]) {
     return res.status(400).json({ error: 'Plano invalido. Opcoes: essencial, negocio, expansao' });
