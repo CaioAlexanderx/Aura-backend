@@ -901,7 +901,7 @@ router.post('/annuities/dojos/:dojoId/:annuityId/pay', ...guards.adminOnly(), as
       return res.status(422).json({ error: 'amount deve ser > 0', code: 'VALIDATION_ERROR' });
     }
 
-    // ── Concilia/cria a transaction ───────────────────────
+    // ── Concilia/cria a transaction ──────────────────────────
     let transactionId = hist.transaction_id;
 
     if (transactionId) {
