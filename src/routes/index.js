@@ -405,6 +405,31 @@ router.use('/federation/:id', require('./karateDojoStudents'));
 //   PUT    /federation/:id/dojo/billing/baas/provider
 router.use('/federation/:id', require('./karateDojoBilling'));
 
+// ── AURA DOJÔ — F4 (turmas, matrículas, presença + check-in QR por toggle) ──
+// Migration 246 (karate_dojo_classes + karate_dojo_class_enrollments +
+// karate_dojo_attendance + karate_dojo_class_settings). Turmas com grade
+// semanal (weekdays 0=domingo..6=sábado + HH:MM); matrícula aluno↔turma;
+// presença por data (chamada manual = caminho primário; alimenta os
+// critérios de exame de faixa — F5). CHECK-IN POR QR é TOGGLE por dojô
+// (karate_dojo_class_settings.qr_checkin_enabled, default OFF): token
+// STATELESS assinado (HMAC-SHA256, student_id+dojo_id, sem expiração —
+// credencial de presença, não de acesso). GETs aceitam Canal A e B; escrita
+// exige Canal A (403 PORTAL_READ_ONLY); POST /classes/checkin é Canal A (é o
+// dojô escaneando). Defensivo 42P01 (migration 246 pendente). Rotas
+// /dojo/students/:sid/{attendance-summary,qr} não colidem com o
+// /dojo/students/:sid (1 segmento) de karateDojoStudents.
+//   GET/PUT  /federation/:id/dojo/classes/settings                (toggle QR)
+//   POST     /federation/:id/dojo/classes/checkin                 (QR — Canal A)
+//   GET/POST /federation/:id/dojo/classes
+//   PATCH/DELETE /federation/:id/dojo/classes/:cid                (DELETE c/ presença → 409 HAS_HISTORY)
+//   GET      /federation/:id/dojo/classes/:cid/students
+//   POST     /federation/:id/dojo/classes/:cid/enroll             (409 ALREADY_ENROLLED / 422 inativo)
+//   DELETE   /federation/:id/dojo/classes/:cid/enroll/:studentId  (presenças ficam)
+//   GET/PUT  /federation/:id/dojo/classes/:cid/attendance         (?date=YYYY-MM-DD / upsert em lote)
+//   GET      /federation/:id/dojo/students/:sid/attendance-summary
+//   GET      /federation/:id/dojo/students/:sid/qr
+router.use('/federation/:id', require('./karateDojoClasses'));
+
 // Lado FEDERAÇÃO (guards de karateRoles — dedup SUGERE, nunca decide):
 //   GET   /federation/:id/practitioner-requests?status=&dojo_id=
 //   GET   /federation/:id/practitioner-requests/:requestId
