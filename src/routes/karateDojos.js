@@ -78,6 +78,17 @@ const KARATE_ANNUITY_PLAN_VALUES = ['anual', 'semestral', 'trimestral'];
 // schema-antes-da-migration do CLAUDE.md: cache module-level, desliga em 42703.
 let HAS_PHONE_MOBILE_COL = true;
 
+// Migration 247 — companies.karate_dojo_linked_at (timestamptz NULL). NULL =
+// dojô ainda NÃO conectado à federação (self-serve, invisível na interface da
+// federação; o shell do dojô continua 100% funcional). NOT NULL = conectado/
+// filiado (visível). federation_id é vínculo TÉCNICO (roteamento/guard), não
+// visibilidade. Mesma armadilha_schema_pre_migration: cache module-level
+// otimista, vira false em 42703 e o create não marca o vínculo (a
+// migration/backfill resolve). SÓ gateia a ESCRITA do vínculo aqui; a
+// LISTAGEM filtra direto por karate_dojo_linked_at IS NOT NULL (migration
+// aplicada ANTES do deploy — ver PR).
+let HAS_DOJO_LINKED_COL = true;
+
 // Monta o SELECT extra das colunas "novas" que podem ainda não existir
 // dependendo do deploy. Sempre lê o estado ATUAL das flags — chamar de novo
 // depois de disableMissingDojoCol() já reflete a coluna desabilitada.
@@ -142,7 +153,7 @@ router.get('/', ...guards.read(), async (req, res) => {
   const offset   = (page - 1) * pageSize;
 
   try {
-    const conditions = [`c.federation_id = $1`, `c.vertical_active = 'karate_dojo'`];
+    const conditions = [`c.federation_id = $1`, `c.vertical_active = 'karate_dojo'`, `c.karate_dojo_linked_at IS NOT NULL`];
     const params = [federationId];
     let n = 2;
 
@@ -346,7 +357,7 @@ router.get('/export', ...guards.read(), async (req, res) => {
   const { region, status, affiliation_model, q } = req.query;
 
   try {
-    const conditions = [`c.federation_id = $1`, `c.vertical_active = 'karate_dojo'`];
+    const conditions = [`c.federation_id = $1`, `c.vertical_active = 'karate_dojo'`, `c.karate_dojo_linked_at IS NOT NULL`];
     const params = [federationId];
     let n = 2;
 
@@ -627,6 +638,26 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
         if (e.code === '42703') {
           HAS_PHONE_MOBILE_COL = false;
           console.warn('[karateDojos] phone_mobile ausente no create (Migration 230 pendente) — ignorado');
+        } else throw e;
+      }
+    }
+
+    // Migration 247: dojô criado PELA federação nasce já conectado/visível
+    // (registro da federação, nunca self-serve). Marca o vínculo com now().
+    // Defensivo (armadilha_schema_pre_migration): 42703 (migration 247
+    // pendente) não derruba o cadastro — só a marca de vínculo fica para a
+    // migration/backfill. O fluxo F6 de filiação passará a setar isto no
+    // ACEITE da conexão de um dojô self-serve.
+    if (HAS_DOJO_LINKED_COL) {
+      try {
+        await client.query(
+          `UPDATE companies SET karate_dojo_linked_at = COALESCE(karate_dojo_linked_at, NOW()) WHERE id = $1`,
+          [insertRes.rows[0].id]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_DOJO_LINKED_COL = false;
+          console.warn('[karateDojos] karate_dojo_linked_at ausente no create (Migration 247 pendente) — ignorado');
         } else throw e;
       }
     }
