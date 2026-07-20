@@ -74,7 +74,7 @@ router.patch('/clients/:cid/karate', ...adminOnly, asyncHandler(async (req, res)
     const oldVertical = company.vertical;
     const newVertical = mode === null ? null : VERTICAL_BY_MODE[mode];
 
-    // ── Desativar ────────────────────────────────────────────
+    // ── Desativar ─────────────────────────────────────
     if (mode === null) {
       const { rows } = await client.query(
         `UPDATE companies
@@ -99,7 +99,7 @@ router.patch('/clients/:cid/karate', ...adminOnly, asyncHandler(async (req, res)
     // garante name p/ as listagens karatê (c.name é usado nas rotas)
     const ensuredName = company.name || company.trade_name || company.legal_name || 'Sem nome';
 
-    // ── Federação ────────────────────────────────────────────
+    // ── Federação ───────────────────────────────────
     if (mode === 'federation') {
       const slug = body.slug ? slugify(body.slug) : (company.slug || slugify(ensuredName));
       if (!slug) throw new AppError('Não foi possível derivar um slug — informe body.slug', 400);
@@ -153,7 +153,7 @@ router.patch('/clients/:cid/karate', ...adminOnly, asyncHandler(async (req, res)
       });
     }
 
-    // ── Dojô ─────────────────────────────────────────────────
+    // ── Dojô ────────────────────────────────────────
     // mode === 'dojo'
     const federationId = body.federation_id;
     if (!federationId) {
@@ -188,6 +188,10 @@ router.patch('/clients/:cid/karate', ...adminOnly, asyncHandler(async (req, res)
               federation_id = $3,
               fpkt_affiliation_id = $4,
               affiliation_model = $5,
+              -- Migration 247: admin habilita o dojô AGINDO PELA federação, então
+              -- o dojô nasce conectado/visível. COALESCE preserva um vínculo
+              -- anterior (idempotente). O fluxo F6 setará no aceite da conexão.
+              karate_dojo_linked_at = COALESCE(karate_dojo_linked_at, NOW()),
               updated_at = NOW()
         WHERE id = $1
         RETURNING id, name, vertical, vertical_active, federation_id, fpkt_affiliation_id, affiliation_model`,
