@@ -153,7 +153,8 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
     const [dojoRes, practRes, revenueRes] = await Promise.all([
       db.query(
         `SELECT COUNT(*) AS dojo_count FROM companies
-         WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
+         WHERE federation_id = $1 AND vertical_active = 'karate_dojo'
+           AND karate_dojo_linked_at IS NOT NULL`,
         [federationId]
       ),
       db.query(
@@ -193,6 +194,7 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
          JOIN companies c ON c.id = h.dojo_id
            AND c.federation_id = $1
            AND c.vertical_active = 'karate_dojo'
+           AND c.karate_dojo_linked_at IS NOT NULL
          ORDER BY
            h.dojo_id,
            CASE WHEN h.reference_period = $2 THEN 0 ELSE 1 END,
@@ -216,7 +218,8 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
        FROM companies c
        LEFT JOIN latest_annuity la ON la.dojo_id = c.id
        WHERE c.federation_id = $1
-         AND c.vertical_active = 'karate_dojo'`,
+         AND c.vertical_active = 'karate_dojo'
+         AND c.karate_dojo_linked_at IS NOT NULL`,
       [federationId, currentYear]
     );
 
@@ -464,6 +467,7 @@ router.get('/search', ...guards.read(), async (req, res) => {
          LEFT JOIN customers cu ON cu.dojo_id = c.id
          WHERE c.federation_id = $1
            AND c.vertical_active = 'karate_dojo'
+           AND c.karate_dojo_linked_at IS NOT NULL
            AND (c.name ILIKE $2 OR c.fpkt_affiliation_id ILIKE $2)
          GROUP BY c.id
          ORDER BY c.fpkt_affiliation_id ASC NULLS LAST, c.name ASC
