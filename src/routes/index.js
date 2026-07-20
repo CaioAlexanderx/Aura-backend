@@ -56,6 +56,13 @@ router.use('/admin/lead-goals', require('./adminLeadGoals'));
 router.use('/admin/lead-views', require('./adminLeadViews'));
 
 router.use('/webhooks/asaas',     require('./webhookAsaas'));
+// ── AURA DOJÔ — F3b (público: conciliação da subconta Asaas do dojô/BaaS) ──
+// Sem auth de empresa. Autentica por header asaas-access-token comparado por
+// HASH contra o token da subconta (karate_dojo_baas_accounts.webhook_token_hash,
+// migration 244). PAYMENT_RECEIVED/CONFIRMED (externalReference=charge_id) dão
+// baixa idempotente; eventos de status de conta atualizam o onboarding;
+// PAYMENT_DELETED/estorno nunca regridem cobrança paga. Flag DOJO_BAAS_ENABLED.
+router.use('/webhooks/asaas-dojo', require('./karateDojoBaasWebhook'));
 router.use('/webhooks/whatsapp',  require('./webhookWhatsapp'));
 router.use('/webhooks/instagram', require('./webhookInstagram'));
 router.use('/webhooks/mp',        require('./webhookMp'));
@@ -267,7 +274,7 @@ router.use('/federation/:id/financial', require('./karateOpenItems'));
 // Fase G3: rastro de ações financeiras (quem fez, quando) — GET /audit
 router.use('/federation/:id/financial', require('./karateFinanceAuditRead'));
 
-// ── AURA KARATÊ — Track C (backend exames + cursos) ─────────
+// ── AURA KARATÊ — Track C (backend exames + cursos) ─────
 // (certificados Track J montado separadamente abaixo)
 router.use('/federation/:id', require('./karateRequirements'));
 router.use('/federation/:id', require('./karateExams'));
@@ -391,6 +398,11 @@ router.use('/federation/:id', require('./karateDojoStudents'));
 //   POST   /federation/:id/dojo/billing/charges/:cid/cancel
 //   GET    /federation/:id/dojo/billing/config
 //   PUT    /federation/:id/dojo/billing/config
+// F3b — Conta Aura do dojô (BaaS via subconta Asaas, OPT-IN, flag
+// DOJO_BAAS_ENABLED; migration 244 karate_dojo_baas_accounts):
+//   GET    /federation/:id/dojo/billing/baas
+//   POST   /federation/:id/dojo/billing/baas/activate
+//   PUT    /federation/:id/dojo/billing/baas/provider
 router.use('/federation/:id', require('./karateDojoBilling'));
 
 // Lado FEDERAÇÃO (guards de karateRoles — dedup SUGERE, nunca decide):
@@ -425,7 +437,7 @@ router.use('/federation/:id', require('./karateSettings'));
 //   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/advance
 router.use('/federation/:id', require('./karateBrackets'));
 
-// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────────
+// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────
 // Sem migration (totalmente derivado de tabelas existentes).
 // Guards federation_admin/staff/viewer para leitura; adminOnly para /report/send.
 //   GET  /federation/:id/network-health/summary

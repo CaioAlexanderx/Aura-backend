@@ -23,12 +23,19 @@
 //   POST   /federation/:id/dojo/billing/charges/:cid/cancel
 //   GET    /federation/:id/dojo/billing/config
 //   PUT    /federation/:id/dojo/billing/config
+//
+// F3b — Conta Aura do dojô (BaaS via subconta Asaas, OPT-IN, flag
+// DOJO_BAAS_ENABLED). GET aceita A e B; activate/provider exigem Canal A:
+//   GET    /federation/:id/dojo/billing/baas
+//   POST   /federation/:id/dojo/billing/baas/activate
+//   PUT    /federation/:id/dojo/billing/baas/provider
 // ============================================================
 'use strict';
 
 const router = require('express').Router({ mergeParams: true });
 const { requireDojoAccess } = require('../middleware/requireDojoAccess');
 const svc = require('../services/karateDojoBillingService');
+const baasSvc = require('../services/karateDojoBaasService');
 
 // Canal B (portal do dojô) é SOMENTE LEITURA — alterar cobrança exige a
 // conta do dojô (Canal A).
@@ -145,7 +152,7 @@ router.get('/dojo/billing/charges', requireDojoAccess, async (req, res) => {
   }
 });
 
-// ── PIX de uma cobrança (recebedor = chave do DOJÔ) ──
+// ── PIX de uma cobrança (recebedor = chave do DOJÔ, ou subconta BaaS se opt-in) ──
 router.post('/dojo/billing/charges/:cid/pix', requireDojoAccess, requireChannelA, async (req, res) => {
   try {
     const result = await svc.createChargePix(req.dojoId, req.params.cid);
@@ -192,6 +199,38 @@ router.put('/dojo/billing/config', requireDojoAccess, requireChannelA, async (re
     return res.json(cfg);
   } catch (e) {
     return handleWriteError(res, e, 'put config');
+  }
+});
+
+// ── F3b: Conta Aura do dojô (BaaS via subconta Asaas, OPT-IN) ──
+// enabled = feature flag DOJO_BAAS_ENABLED (env). GET aceita Canal A e B;
+// activate/provider exigem Canal A. Com a flag OFF: GET → enabled:false e
+// activate → 503 BAAS_DISABLED (via handleWriteError, e.status=503).
+router.get('/dojo/billing/baas', requireDojoAccess, async (req, res) => {
+  try {
+    const status = await baasSvc.getStatus(req.dojoId);
+    return res.json(status);
+  } catch (e) {
+    console.error('[karateDojoBilling] baas status:', e.message);
+    return res.status(500).json({ error: 'Erro ao obter status da Conta Aura do dojô' });
+  }
+});
+
+router.post('/dojo/billing/baas/activate', requireDojoAccess, requireChannelA, async (req, res) => {
+  try {
+    const result = await baasSvc.activate(req.dojoId, req.body || {});
+    return res.status(201).json(result);
+  } catch (e) {
+    return handleWriteError(res, e, 'baas activate');
+  }
+});
+
+router.put('/dojo/billing/baas/provider', requireDojoAccess, requireChannelA, async (req, res) => {
+  try {
+    const result = await baasSvc.setProvider(req.dojoId, (req.body || {}).provider);
+    return res.json(result);
+  } catch (e) {
+    return handleWriteError(res, e, 'baas provider');
   }
 });
 

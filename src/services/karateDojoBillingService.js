@@ -10,6 +10,13 @@
 // + split) fica OPCIONAL/FUTURO atrás do karatePaymentProvider (seam já
 // existente). Nada aqui fala com Asaas hoje.
 //
+// F3b (19/07/2026): a Conta Aura do dojô (BaaS via subconta Asaas) é OPT-IN
+// e atrás da flag DOJO_BAAS_ENABLED. createChargePix resolve o provider
+// EFETIVO: com a flag ligada E o dojô tendo escolhido 'baas' E a subconta
+// aprovada, a cobrança PIX é criada NA SUBCONTA do dojô (com split de 0,5%
+// pra conta-mãe) via karateDojoBaasService; senão, segue o caminho pix_manual
+// (chave própria). resolveActiveBaas NÃO toca o banco com a flag desligada.
+//
 // Escopo SEMPRE por req.dojoId (o company do dojô) — nunca do body/query.
 // Migration 243 (karate_dojo_billing_plans/_subscriptions/_charges). As
 // rotas tratam 42P01 (schema pendente) — aqui só propagamos o erro.
@@ -26,6 +33,7 @@ const db = require('../config/database');
 const { validateRuntimeEnv } = require('../config/env');
 const { createPixChargeForCompany } = require('./karatePaymentProvider');
 const { signPixToken } = require('./karatePixPublicToken');
+const baasSvc = require('./karateDojoBaasService');
 
 const env = validateRuntimeEnv();
 
@@ -428,7 +436,9 @@ async function getPixConfigRow(dojoId) {
 
 async function createChargePix(dojoId, chargeId) {
   const cur = await db.query(
-    `SELECT id, amount, competence, status FROM karate_dojo_charges
+    `SELECT id, amount, competence, status,
+            to_char(due_date, 'YYYY-MM-DD') AS due_date
+       FROM karate_dojo_charges
       WHERE id = $1 AND dojo_id = $2 LIMIT 1`,
     [chargeId, dojoId]
   );
@@ -436,12 +446,57 @@ async function createChargePix(dojoId, chargeId) {
   const c = cur.rows[0];
   if (c.status === 'cancelled') throw svcError(409, 'CHARGE_CANCELLED', 'Cobrança cancelada não gera PIX');
 
+  const amount = Number(c.amount);
+
+  // ── Provider EFETIVO (F3b) ──
+  // BaaS (subconta Asaas do dojô) só quando o dojô optou por 'baas', a
+  // subconta está aprovada E a flag DOJO_BAAS_ENABLED está ligada.
+  // resolveActiveBaas NÃO toca o banco quando a flag está desligada — o
+  // caminho pix_manual (F3a) fica idêntico ao de antes.
+  const baas = await baasSvc.resolveActiveBaas(dojoId);
+  if (baas) {
+    let res;
+    try {
+      res = await baasSvc.createChargePixViaBaas({
+        account: baas,
+        amount,
+        chargeId,
+        competence: c.competence,
+        dueDate: c.due_date,
+      });
+    } catch (e) {
+      if (e && e.status) throw e;
+      // Sem fallback SILENCIOSO pra chave manual: o valor iria pra outro
+      // recebedor. O dojô decide trocar o provider nas configurações.
+      throw svcError(502, 'BAAS_INDISPONIVEL',
+        'Não foi possível gerar o PIX na Conta Aura do dojô agora. Tente novamente ou, ' +
+        'nas configurações, troque o recebimento para a chave PIX própria do dojô.');
+    }
+
+    // pix_txid = id do pagamento NA SUBCONTA (conciliação via webhook). Best-effort.
+    try {
+      await db.query(
+        `UPDATE karate_dojo_charges SET pix_txid = $3, updated_at = now()
+          WHERE id = $1 AND dojo_id = $2`,
+        [chargeId, dojoId, res.payment_id]
+      );
+    } catch (_) { /* best-effort */ }
+
+    let publicUrl = null;
+    try {
+      const token = signPixToken({ amount, referencePeriod: c.competence, pixCode: res.payload });
+      publicUrl = `${env.APP_URL}/karate/pix/${token}`;
+    } catch (_) { publicUrl = null; }
+
+    return { payload: res.payload, public_url: publicUrl, provider: 'baas' };
+  }
+
+  // ── Caminho pix_manual (chave PIX do PRÓPRIO dojô — F3a) ──
   const cfg = await getPixConfigRow(dojoId);
   if (!cfg || !cfg.pix_key || !String(cfg.pix_key).trim()) {
     throw svcError(409, 'PIX_NAO_CONFIGURADO', 'O dojô ainda não configurou uma chave PIX de recebimento');
   }
 
-  const amount = Number(c.amount);
   const txid = makeTxid();
   const charge = await createPixChargeForCompany({
     companyId: dojoId,
@@ -470,7 +525,7 @@ async function createChargePix(dojoId, chargeId) {
     publicUrl = `${env.APP_URL}/karate/pix/${token}`;
   } catch (_) { publicUrl = null; }
 
-  return { payload: pixCode, public_url: publicUrl };
+  return { payload: pixCode, public_url: publicUrl, provider: 'pix_manual' };
 }
 
 // ── Baixa manual / cancelamento (idempotentes) ──
