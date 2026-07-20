@@ -193,7 +193,7 @@ router.use('/public/roster-update', require('./karateRosterPortalPublic'));
 //   POST /public/roster-self/:token/update
 router.use('/public/roster-self', require('./karateRosterSelfServicePublic'));
 
-// ── AURA KARATÊ — Track A (backend cadastros) ──────────────
+// ── AURA KARATÊ — Track A (backend cadastros) ──────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
 // GET  /federation/:id/belt-distribution
@@ -267,13 +267,13 @@ router.use('/federation/:id/financial', require('./karateOpenItems'));
 // Fase G3: rastro de ações financeiras (quem fez, quando) — GET /audit
 router.use('/federation/:id/financial', require('./karateFinanceAuditRead'));
 
-// ── AURA KARATÊ — Track C (backend exames + cursos) ─────────────
+// ── AURA KARATÊ — Track C (backend exames + cursos) ─────────
 // (certificados Track J montado separadamente abaixo)
 router.use('/federation/:id', require('./karateRequirements'));
 router.use('/federation/:id', require('./karateExams'));
 router.use('/federation/:id', require('./karateCourses'));
 
-// ── AURA KARATÊ — Track J (certificados: fluxo de pedido) ─────────
+// ── AURA KARATÊ — Track J (certificados: fluxo de pedido) ─────
 // Substitui o fluxo Track C de emissão sob demanda.
 // Migration 182: karate_certificate_orders + karate_certificate_order_history.
 // Defensive 42P01: safe to merge antes da migration ser aplicada.
@@ -369,6 +369,29 @@ router.use('/federation/:id', require('./karateDojoPractitionerRequests'));
 //   POST   /federation/:id/dojo/guardians
 //   PATCH  /federation/:id/dojo/guardians/:gid
 router.use('/federation/:id', require('./karateDojoStudents'));
+
+// ── AURA DOJÔ — F3a (motor de mensalidades: planos, assinaturas, cobranças) ──
+// Migration 243 (karate_dojo_billing_plans + karate_dojo_subscriptions +
+// karate_dojo_charges). CHARGE-BASED: gera-se a cobrança do mês e o aluno
+// paga UM PIX por cobrança (Pix Automático só em outubro). Recebedor = chave
+// PIX do PRÓPRIO dojô (digital_channel_config do company do dojô, migration
+// 088) — BaaS Asaas fica opcional/futuro atrás do karatePaymentProvider.
+// GETs aceitam Canal A e B; escrita (POST/PATCH/PUT/DELETE) exige Canal A
+// (senão 403 PORTAL_READ_ONLY). Defensivo 42P01 (migration 243 pendente).
+//   GET    /federation/:id/dojo/billing/plans
+//   POST   /federation/:id/dojo/billing/plans
+//   PATCH  /federation/:id/dojo/billing/plans/:pid
+//   POST   /federation/:id/dojo/billing/students/:sid/subscribe
+//   DELETE /federation/:id/dojo/billing/students/:sid/subscribe
+//   GET    /federation/:id/dojo/billing/subscriptions
+//   POST   /federation/:id/dojo/billing/generate          ({competence:'YYYY-MM'})
+//   GET    /federation/:id/dojo/billing/charges           (?competence=&status=&q=)
+//   POST   /federation/:id/dojo/billing/charges/:cid/pix
+//   POST   /federation/:id/dojo/billing/charges/:cid/confirm
+//   POST   /federation/:id/dojo/billing/charges/:cid/cancel
+//   GET    /federation/:id/dojo/billing/config
+//   PUT    /federation/:id/dojo/billing/config
+router.use('/federation/:id', require('./karateDojoBilling'));
 
 // Lado FEDERAÇÃO (guards de karateRoles — dedup SUGERE, nunca decide):
 //   GET   /federation/:id/practitioner-requests?status=&dojo_id=
