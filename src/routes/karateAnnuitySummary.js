@@ -1,14 +1,34 @@
 // ============================================================
-// AURA KARATÊ — Fase F2: KPIs do Hub de Anuidades
+// AURA KARATÊ — Fase F2/F3: KPIs do Hub de Anuidades
 // GET /federation/:id/financial/annuities/summary?year=YYYY
 //
 // Os 4 KPIs do hub, agregados NO BANCO (nunca somados no cliente):
 //   previsto   = total cobrado na temporada (TODAS as parcelas, pagas ou não)
-//   recebido   = já pago (parcelas com status='paid')
-//   em_aberto  = não pago, vencida OU não (SUM de status<>'paid')
-//   atrasado   = não pago E JÁ VENCIDA (due_date <= hoje)
-// Cada bucket tem `valor` (soma das parcelas) e `count` (nº de parcelas),
-// segmentado por `dojo`, por `praticante` e o `total` (soma dos dois).
+//   recebido   = SUM(amount_paid) de TODAS as parcelas (F3 — ver nota abaixo)
+//   em_aberto  = SALDO em aberto (amount - amount_paid) das parcelas
+//                status<>'paid', vencida OU não
+//   atrasado   = SALDO em aberto (amount - amount_paid) das parcelas
+//                status<>'paid' E JÁ VENCIDA (due_date <= hoje)
+// `valor` sempre soma dinheiro (previsto = recebido + em_aberto, sempre);
+// `count` sempre soma PARCELAS (nº de linhas), não dinheiro — recebido_count
+// conta só as INTEIRAMENTE quitadas (status='paid'); em_aberto_count/
+// atrasado_count contam parcelas ainda não fechadas, mesmo as parciais
+// (uma parcela com amount_paid>0 mas status='partial' ainda soma em
+// em_aberto_count/valor pelo saldo restante — ela só sai de lá quando
+// fechar de vez). Segmentado por `dojo`, por `praticante` e o `total`
+// (soma dos dois).
+//
+// ⚠️ F3 (migration 247 já aplicada em produção, ver PR da reforma da
+// anuidade): antes desta fase, `recebido`/`em_aberto`/`atrasado` eram
+// BINÁRIOS (status='paid' vs status<>'paid', amount_paid não existia).
+// Com applyAnnuityPayment aceitando baixa PARCIAL (status='partial',
+// amount_paid < amount), o binário ficou incorreto: uma parcela de
+// R$500 com R$300 já pagos contava R$0 em recebido e R$500 (o valor
+// CHEIO, não o saldo de R$200) em em_aberto — subestimava recebido e
+// SUPERESTIMAVA em_aberto/atrasado ao mesmo tempo. Corrigido para somar
+// amount_paid/saldo real. previsto = recebido + em_aberto SEMPRE (era
+// verdade antes, continua sendo agora — só ficou granular por centavo em
+// vez de binário por parcela).
 //
 // Fonte única da regra ("não reimplemente a regra de status"): os mesmos
 // limiares de karate_dojo_standing/karate_member_standing (migration 222) —
@@ -91,7 +111,7 @@ function rowToSegment(row) {
 // separadas e garante que total = dojo + praticante sempre (mesma fonte).
 const SUMMARY_SQL = `
   WITH elig AS (
-    SELECT i.amount, i.status, i.due_date,
+    SELECT i.amount, i.amount_paid, i.status, i.due_date,
            CASE WHEN h.dojo_id IS NOT NULL THEN 'dojo' ELSE 'praticante' END AS kind
     FROM karate_annuity_installments i
     JOIN karate_dojo_annuity_history h ON h.id = i.annuity_id
@@ -113,11 +133,11 @@ const SUMMARY_SQL = `
     COUNT(*)::int AS previsto_count,
     COALESCE(SUM(amount), 0) AS previsto_valor,
     COUNT(*) FILTER (WHERE status = 'paid')::int AS recebido_count,
-    COALESCE(SUM(amount) FILTER (WHERE status = 'paid'), 0) AS recebido_valor,
+    COALESCE(SUM(amount_paid), 0) AS recebido_valor,
     COUNT(*) FILTER (WHERE status <> 'paid')::int AS em_aberto_count,
-    COALESCE(SUM(amount) FILTER (WHERE status <> 'paid'), 0) AS em_aberto_valor,
+    COALESCE(SUM(amount - amount_paid) FILTER (WHERE status <> 'paid'), 0) AS em_aberto_valor,
     COUNT(*) FILTER (WHERE status <> 'paid' AND due_date IS NOT NULL AND due_date <= CURRENT_DATE)::int AS atrasado_count,
-    COALESCE(SUM(amount) FILTER (WHERE status <> 'paid' AND due_date IS NOT NULL AND due_date <= CURRENT_DATE), 0) AS atrasado_valor
+    COALESCE(SUM(amount - amount_paid) FILTER (WHERE status <> 'paid' AND due_date IS NOT NULL AND due_date <= CURRENT_DATE), 0) AS atrasado_valor
   FROM elig
   GROUP BY GROUPING SETS ((kind), ())
 `;
