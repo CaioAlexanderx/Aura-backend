@@ -78,12 +78,36 @@ const KARATE_ANNUITY_PLAN_VALUES = ['anual', 'semestral', 'trimestral'];
 // schema-antes-da-migration do CLAUDE.md: cache module-level, desliga em 42703.
 let HAS_PHONE_MOBILE_COL = true;
 
+// Migration 248 (F2 da reforma da anuidade) — karate_charges_adhesion:
+// seletor persistente ("este dojô paga taxa de adesão?") marcado pela
+// federação no cadastro/reativação, lido por POST .../charge no momento
+// do lançamento (ver karateAnnuityService.buildAdhesionSpec). Mesma
+// armadilha_schema_pre_migration do CLAUDE.md: cache module-level, desliga
+// em 42703.
+let HAS_CHARGES_ADHESION_COL = true;
+
+// Coerção boolean segura (mesma usada por is_active no PATCH): aceita
+// true/'true'/1/'1'/'sim' como true; false/'false'/0/'0'/''/null/'não' como
+// false. Módulo-scope porque tanto POST (cadastro) quanto PATCH
+// (edição/reativação) precisam dela para karate_charges_adhesion.
+function toBool(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return v !== 0;
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase();
+    if (['true', '1', 'yes', 'sim', 't'].includes(s)) return true;
+    if (['false', '0', 'no', 'nao', 'não', 'f', ''].includes(s)) return false;
+  }
+  return Boolean(v);
+}
+
 // Monta o SELECT extra das colunas "novas" que podem ainda não existir
 // dependendo do deploy. Sempre lê o estado ATUAL das flags — chamar de novo
 // depois de disableMissingDojoCol() já reflete a coluna desabilitada.
 function dojoOptionalCols() {
   return (HAS_ANNUITY_PLAN_COL ? ', c.karate_annuity_plan' : '') +
-         (HAS_PHONE_MOBILE_COL ? ', c.phone_mobile' : '');
+         (HAS_PHONE_MOBILE_COL ? ', c.phone_mobile' : '') +
+         (HAS_CHARGES_ADHESION_COL ? ', c.karate_charges_adhesion' : '');
 }
 
 // Desliga a flag EXATA da coluna ausente, a partir da mensagem do erro
@@ -97,6 +121,7 @@ function disableMissingDojoCol(e) {
   let disabled = false;
   if (HAS_ANNUITY_PLAN_COL && /karate_annuity_plan/.test(msg)) { HAS_ANNUITY_PLAN_COL = false; disabled = true; }
   if (HAS_PHONE_MOBILE_COL && /phone_mobile/.test(msg)) { HAS_PHONE_MOBILE_COL = false; disabled = true; }
+  if (HAS_CHARGES_ADHESION_COL && /karate_charges_adhesion/.test(msg)) { HAS_CHARGES_ADHESION_COL = false; disabled = true; }
   return disabled;
 }
 
@@ -235,6 +260,7 @@ router.get('/', ...guards.read(), async (req, res) => {
         is_active: r.is_active !== false,
         status: computeDojoStatus(r.affiliation_model, r.affiliation_since, r.is_active),
         karate_annuity_plan: r.karate_annuity_plan || null,
+        karate_charges_adhesion: r.karate_charges_adhesion === true,
         practitioner_count: parseInt(r.practitioner_count, 10) || 0,
         // Ativos: é o que a tabela do índice exibe (praticante inativo não
         // conta como praticante do dojô). practitioner_count segue sendo o
@@ -314,6 +340,7 @@ router.get('/', ...guards.read(), async (req, res) => {
       is_active: r.is_active !== false,
       status: computeDojoStatus(r.affiliation_model, r.affiliation_since, r.is_active),
       karate_annuity_plan: r.karate_annuity_plan || null,
+        karate_charges_adhesion: r.karate_charges_adhesion === true,
       practitioner_count: parseInt(r.practitioner_count, 10) || 0,
         // Ativos: é o que a tabela do índice exibe (praticante inativo não
         // conta como praticante do dojô). practitioner_count segue sendo o
@@ -631,6 +658,31 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       }
     }
 
+    // karate_charges_adhesion (Migration 248, F2 da reforma da anuidade) —
+    // seletor "este dojô paga taxa de adesão?" marcado no CADASTRO (aqui) e
+    // na REATIVAÇÃO (PATCH .../:dojoId, is_active:true). Default da coluna é
+    // false — só grava (UPDATE pontual, mesmo padrão dos campos acima) quando
+    // vier explicitamente true no body; ausência do campo não sobrescreve o
+    // default. Defensivo em 42703 (Migration 248 ainda não aplicada).
+    let savedChargesAdhesion = false;
+    if (req.body.karate_charges_adhesion !== undefined && HAS_CHARGES_ADHESION_COL) {
+      const chargesAdhesion = toBool(req.body.karate_charges_adhesion);
+      if (chargesAdhesion) {
+        try {
+          await client.query(
+            `UPDATE companies SET karate_charges_adhesion = $1 WHERE id = $2`,
+            [chargesAdhesion, insertRes.rows[0].id]
+          );
+          savedChargesAdhesion = true;
+        } catch (e) {
+          if (e.code === '42703') {
+            HAS_CHARGES_ADHESION_COL = false;
+            console.warn('[karateDojos] karate_charges_adhesion ausente no create (Migration 248 pendente) — ignorado');
+          } else throw e;
+        }
+      }
+    }
+
     await client.query('COMMIT');
 
     const dojo = insertRes.rows[0];
@@ -654,6 +706,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
       status: computeDojoStatus(dojo.affiliation_model, dojo.affiliation_since, dojo.is_active),
       practitioner_count: 0,
       karate_annuity_plan: savedAnnuityPlan,
+      karate_charges_adhesion: savedChargesAdhesion,
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -836,6 +889,10 @@ router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
       // (anual|semestral|trimestral) — null = federação ainda não definiu.
       // NÃO confundir com affiliation_model acima (decorativo, não usado em billing).
       karate_annuity_plan: d.karate_annuity_plan || null,
+      // karate_charges_adhesion (Migration 248, F2): seletor "este dojô paga
+      // taxa de adesão?" marcado no cadastro/reativação — lido por
+      // POST .../charge no lançamento (buildAdhesionSpec).
+      karate_charges_adhesion: d.karate_charges_adhesion === true,
       technical_team: technicalTeam,
       annuity_history: annuityHistory,
     });
@@ -1008,18 +1065,8 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
     // precisarem de normalização específica — não entram no fieldMap genérico).
   };
 
-  // Coerção boolean segura: aceita true/'true'/1/'1' como true; false/'false'/0/'0'/''/null como false.
-  function toBool(v) {
-    if (typeof v === 'boolean') return v;
-    if (typeof v === 'number') return v !== 0;
-    if (typeof v === 'string') {
-      const s = v.trim().toLowerCase();
-      if (['true', '1', 'yes', 'sim', 't'].includes(s)) return true;
-      if (['false', '0', 'no', 'nao', 'não', 'f', ''].includes(s)) return false;
-    }
-    return Boolean(v);
-  }
-
+  // toBool: coerção boolean segura — definida em module-scope (usada também
+  // por POST / para karate_charges_adhesion), reutilizada aqui.
   const updates = [];
   const values = [];
   let idx = 1;
@@ -1088,6 +1135,20 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
     idx++;
   }
 
+  // ── Migration 248: karate_charges_adhesion (seletor de taxa de adesão) ──
+  // Marcado pela federação no cadastro OU aqui, na edição/reativação
+  // (PATCH com is_active:true é a "reativação" que o produto descreveu —
+  // o mesmo PATCH também é o lugar natural de ligar/desligar o seletor de
+  // adesão para um dojô que retorna). Boolean simples, mesma coerção de
+  // is_active. Gate em HAS_CHARGES_ADHESION_COL: Migration 248 pendente não
+  // derruba o PATCH, só ignora o campo (mesmo padrão defensivo de
+  // karate_annuity_plan/phone_mobile acima).
+  if (req.body.karate_charges_adhesion !== undefined && HAS_CHARGES_ADHESION_COL) {
+    updates.push(`karate_charges_adhesion = $${idx}`);
+    values.push(toBool(req.body.karate_charges_adhesion));
+    idx++;
+  }
+
   if (updates.length === 0) {
     return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }
@@ -1127,7 +1188,7 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
                  address_street, address_number, address_complement,
                  address_district AS address_neighborhood,
                  address_city, address_state, address_zip,
-                 phone, email, is_active${HAS_ANNUITY_PLAN_COL ? ', karate_annuity_plan' : ''}${HAS_PHONE_MOBILE_COL ? ', phone_mobile' : ''}`;
+                 phone, email, is_active${HAS_ANNUITY_PLAN_COL ? ', karate_annuity_plan' : ''}${HAS_PHONE_MOBILE_COL ? ', phone_mobile' : ''}${HAS_CHARGES_ADHESION_COL ? ', karate_charges_adhesion' : ''}`;
 
     let result;
     try {
@@ -1156,6 +1217,14 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(503).json({
           error: 'Campo phone_mobile ainda não disponível neste ambiente — tente novamente em instantes.',
+          code: 'MIGRATION_PENDING',
+        });
+      }
+      if (e.code === '42703' && /karate_charges_adhesion/.test(e.message || '')) {
+        HAS_CHARGES_ADHESION_COL = false;
+        await client.query('ROLLBACK');
+        return res.status(503).json({
+          error: 'Campo karate_charges_adhesion ainda não disponível neste ambiente — tente novamente em instantes.',
           code: 'MIGRATION_PENDING',
         });
       }
@@ -1203,6 +1272,7 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
       status: computeDojoStatus(d.affiliation_model, d.affiliation_since, d.is_active),
       practitioner_count: 0, // não recomputado no PATCH por performance
       karate_annuity_plan: d.karate_annuity_plan || null,
+      karate_charges_adhesion: d.karate_charges_adhesion === true,
       ...(rosterCascade ? { roster_cascade: rosterCascade } : {}),
     });
   } catch (err) {
