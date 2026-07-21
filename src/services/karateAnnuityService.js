@@ -48,7 +48,7 @@ const DEFAULT_DUE_MONTHS = {
   trimestral: [2, 5, 8, 11],
 };
 
-const VALID_PAYMENT_METHODS = ['pix', 'dinheiro', 'transferencia', 'credito_cbkt', 'outro'];
+const VALID_PAYMENT_METHODS = ['pix', 'dinheiro', 'transferencia', 'credito_cbkt', 'credito_exame', 'outro'];
 
 // ── F2 do plano de anuidades: plano DO DOJÔ (Migration 226) ──────────────
 // Antes desta fase, campanha/charge sempre assumiam 'anual' quando nada
