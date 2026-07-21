@@ -38,6 +38,13 @@ const db = require('../config/database');
 
 const VALID_PLANS = ['anual', 'semestral', 'trimestral'];
 
+// ── F2 da reforma da anuidade: taxa de ADESÃO (filiação) ─────────────────
+// Cobrança ÚNICA, além da anuidade proporcional, quando a federação marca
+// (seletor persistente, companies.karate_charges_adhesion — Migration 248)
+// que o dojô paga adesão no cadastro ou na reativação. Valor em constante
+// nomeada (nunca número solto no meio da rota) — ver buildAdhesionSpec().
+const ADESAO_FEE_BRL = 195;
+
 // Fallback SOMENTE quando a fee vigente não tem due_months configurado
 // (deployment parcial / federação sem seed). Os valores reais de produção
 // vêm de karate_annual_fees (migration 222 semeia os 3 planos de dojô +
@@ -82,6 +89,79 @@ function lastDayOfMonthStr(year, month) {
 function daysBetween(a, b) {
   const dayMs = 1000 * 60 * 60 * 24;
   return Math.round((new Date(a) - new Date(b)) / dayMs);
+}
+
+// Evita acúmulo de lixo de ponto flutuante em soma/divisão de dinheiro
+// (CLAUDE.md: numeric vem como string do pg, nunca acumular float solto).
+// Mesmo helper/mesma técnica de karateAnnuityLedger.round2 — não importa
+// de lá para não criar dependência cruzada entre o motor de GERAÇÃO
+// (este arquivo) e o motor de BAIXA (karateAnnuityLedger.js).
+function round2(n) {
+  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+
+// Extrai {year, month, day} de uma data PURA 'YYYY-MM-DD' — aceita tanto
+// string quanto o objeto Date que o pg devolve para colunas `date`
+// (armadilha CLAUDE.md #1: pg devolve `date` como Date; NUNCA usar
+// `new Date(iso)` para reinterpretar essa string, isso volta um dia no
+// fuso BR — aqui não fazemos nem uma coisa nem outra, só regex sobre os
+// componentes já corretos que o pg/ISO já trazem). companies.affiliation_since
+// vem como Date à meia-noite UTC (coluna `date`) — .toISOString() nela é
+// seguro (não é reinterpretação de fuso, é o mesmo objeto já correto).
+function parseDateParts(value) {
+  if (!value) return null;
+  const s = value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return null;
+  return { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]), iso: s };
+}
+
+// ── F2 — proporcional por mês restante ────────────────────────────────
+// Decisão fechada com o Caio: dojô que se filia durante o ano paga
+// anuidade = taxa_anual ÷ 12 × meses_restantes_até_dezembro, com o MÊS DE
+// INGRESSO CONTANDO CHEIO. remainingMonths = 13 - mês (jan=1 -> 12 meses
+// cheios; jul=7 -> 6; dez=12 -> 1).
+function remainingMonthsFromAffiliation(affiliationMonth) {
+  const month = Number(affiliationMonth);
+  if (!Number.isInteger(month) || month < 1 || month > 12) {
+    throw new Error(`affiliationMonth inválido: ${affiliationMonth} (esperado inteiro 1-12)`);
+  }
+  return 13 - month;
+}
+
+// annualAmount: valor ANUAL cheio do plano (para dojô: fee.amount × nº de
+// parcelas do plano completo — ver buildProportionalPlanSpecs; cada plano
+// [anual/semestral/trimestral] tem seu próprio total anual, não é o mesmo
+// número para os três). `year` é aceito no shape pedido pelo produto para
+// deixar explícito de qual temporada a filiação faz parte, mas o cálculo em
+// si depende só do MÊS (a regra "mês de ingresso conta cheio" é a mesma
+// independente do ano da temporada).
+// Arredondamento: tudo em CENTAVOS inteiros (Math.round em cada etapa) —
+// nunca acumula fração de centavo em float solto. Arredonda só o resultado
+// final para R$ (division by 100), nunca arredonda em etapas intermediárias.
+function computeProportionalAnnuity({ annualAmount, affiliationMonth, year }) { // eslint-disable-line no-unused-vars
+  const remainingMonths = remainingMonthsFromAffiliation(affiliationMonth);
+  const annualCents = Math.round(round2(annualAmount) * 100);
+  const proportionalCents = Math.round((annualCents * remainingMonths) / 12);
+  return round2(proportionalCents / 100);
+}
+
+// ── Distribui `totalAmount` em `count` parcelas iguais, SEM perder/sobrar
+// centavo (soma das parcelas geradas === totalAmount sempre). Todas as
+// parcelas recebem o mesmo valor base (totalCents/count, arredondado para
+// baixo); a ÚLTIMA parcela absorve o resto em centavos — único lugar a
+// checar numa auditoria ("por que a última parcela é 1 centavo maior"),
+// em vez de espalhar o resto entre parcelas aleatórias.
+function distributeAmountAcrossInstallments(totalAmount, count) {
+  const n = Number(count);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`count inválido em distributeAmountAcrossInstallments: ${count}`);
+  }
+  const totalCents = Math.round(round2(totalAmount) * 100);
+  const baseCents = Math.floor(totalCents / n);
+  const amounts = new Array(n).fill(baseCents);
+  amounts[n - 1] = totalCents - baseCents * (n - 1); // resto vai pra última
+  return amounts.map((c) => round2(c / 100));
 }
 
 // ── Fee vigente ──────────────────────────────────────────────
@@ -200,17 +280,98 @@ function buildPlanSpecs({ plan, amount, dueMonths, seasonYear, fromDate, dueDate
   return { specs, dueDateAdjusted };
 }
 
+// ── F2 — plano de parcelas PROPORCIONAL (dojô filiado durante o ano) ────
+// Regra fechada com o Caio: quando o dojô se filiou NA temporada corrente
+// (affiliationMonth/seasonYear resolvidos por quem chama a partir de
+// companies.affiliation_since), CONSOLIDAMOS — calculamos o valor
+// proporcional sobre o TOTAL ANUAL do plano (fee.amount × nº de parcelas
+// do plano CHEIO, não confundir com o plano 'anual' de 1 parcela: um dojô
+// trimestral tem seu próprio total anual = amount×4) e distribuímos esse
+// total proporcional IGUALMENTE pelas parcelas do plano cujo vencimento
+// ainda não passou NA DATA DE FILIAÇÃO (mesmo mês usado na fração — um só
+// "relógio" para fração e corte de parcelas, decisão deliberada: evita
+// dois critérios de data diferentes no mesmo cálculo, o que dificultaria
+// auditoria). NÃO proporcionaliza cada parcela isoladamente (rejeitado:
+// abriria espaço para a soma das parcelas divergir do total proporcional
+// por causa de arredondamento em cada parcela separada).
+//
+// O que acontece com uma parcela cujo mês de vencimento já passou no
+// momento da filiação: ela é PULADA (não é gerada) — mas o valor dela NÃO
+// se perde. Como dividimos o TOTAL proporcional (já calculado sobre os
+// meses restantes a partir do mês de filiação) pelo Nº de parcelas que
+// sobraram (não pelo Nº de parcelas do plano completo), o valor da parcela
+// pulada é absorvido igualmente pelas parcelas restantes. Essa é a opção
+// mais simples de auditar: em qualquer momento, SOMA(parcelas geradas) ===
+// valor proporcional total — uma única igualdade para conferir, sem
+// precisar reconstruir "quanto teria sido cada parcela antes do corte".
+//
+// Caso-limite (plano inteiro já vencido na data de filiação — ex.: dojô
+// trimestral [Fev,Mai,Ago,Nov] que se filia em Dezembro): mesmo default
+// seguro do F3/buildPlanSpecs — gera 1 parcela única, due_date = último
+// dia do MÊS DE FILIAÇÃO, carregando o total proporcional inteiro (que já
+// é pequeno nesse caso: 1/12 do anual, dezembro só tem 1 mês restante).
+function buildProportionalPlanSpecs({ plan, feeAmount, dueMonths, seasonYear, affiliationMonth, dueDateOverride }) {
+  const fullPlan = buildInstallmentPlan({ plan, amount: feeAmount, dueMonths, seasonYear });
+  if (!fullPlan.length) return { specs: [], dueDateAdjusted: false, proportionalTotal: 0, fullTotal: 0, remainingMonths: 0 };
+
+  const fullTotal = round2(fullPlan.reduce((s, p) => s + Number(p.amount), 0));
+  const proportionalTotal = computeProportionalAnnuity({ annualAmount: fullTotal, affiliationMonth, year: seasonYear });
+  const remainingMonths = remainingMonthsFromAffiliation(affiliationMonth);
+
+  // Corte de sobrevivência: mesmo mês de referência da fração (mês de
+  // filiação) — NÃO "hoje" (esse é o corte usado por buildPlanSpecs para o
+  // caso não-proporcional; aqui usamos o mês de filiação para os dois
+  // cálculos ficarem no mesmo "relógio", ver comentário acima).
+  const cutoff = new Date(Date.UTC(Number(seasonYear), Number(affiliationMonth) - 1, 1));
+  let surviving = fullPlan.filter((p) => new Date(p.due_date + 'T23:59:59Z') >= cutoff);
+
+  let dueDateAdjusted = false;
+  if (!surviving.length) {
+    const last = fullPlan[fullPlan.length - 1];
+    surviving = [{ ...last, due_date: lastDayOfMonthStr(seasonYear, affiliationMonth) }];
+    dueDateAdjusted = true;
+  }
+
+  const amounts = distributeAmountAcrossInstallments(proportionalTotal, surviving.length);
+  let specs = surviving.map((s, idx) => ({ seq: s.seq, amount: amounts[idx], due_date: s.due_date }));
+
+  if (dueDateOverride) {
+    const first = specs[0];
+    if (first.due_date !== dueDateOverride) dueDateAdjusted = true;
+    specs = specs.slice();
+    specs[0] = { ...first, due_date: dueDateOverride };
+  }
+
+  return { specs, dueDateAdjusted, proportionalTotal, fullTotal, remainingMonths };
+}
+
+// ── F2 — parcela de ADESÃO (kind='filiacao') ─────────────────────────────
+// Pura (sem DB) — quem chama já resolveu `alreadyHasAdhesionInstallment`
+// via query (guarda de unicidade, ver comentário na rota /charge: nunca
+// duas parcelas 'filiacao' abertas para o mesmo dojô — reativar um dojô
+// que já tem parcela de adesão (paga ou não) NÃO duplica). `dueDate` =
+// data de filiação (affiliationSince); se o dojô não tem affiliation_since
+// cadastrado, quem chama passa `fallbackDueDate` (data do lançamento).
+function buildAdhesionSpec({ chargesAdhesion, alreadyHasAdhesionInstallment, affiliationSince, fallbackDueDate }) {
+  if (!chargesAdhesion || alreadyHasAdhesionInstallment) return null;
+  const dueDate = affiliationSince || fallbackDueDate;
+  return { seq: 0, amount: ADESAO_FEE_BRL, due_date: dueDate, kind: 'filiacao' };
+}
+
 // ── Cria as linhas de parcela para um header já existente ───
+// `s.kind` opcional por spec (default 'anuidade', mesmo default da coluna
+// — migration 247). Specs de adesão (buildAdhesionSpec) trazem
+// kind:'filiacao' explícito.
 async function createInstallmentsForAnnuity(client, { annuityId, federationId, specs }) {
   const inserted = [];
   for (const s of specs) {
     const { rows } = await client.query(
       `INSERT INTO karate_annuity_installments
-         (annuity_id, federation_id, seq, amount, due_date, status)
-       VALUES ($1, $2, $3, $4, $5, 'pending')
+         (annuity_id, federation_id, seq, amount, due_date, status, kind)
+       VALUES ($1, $2, $3, $4, $5, 'pending', $6)
        ON CONFLICT (annuity_id, seq) DO NOTHING
        RETURNING *`,
-      [annuityId, federationId, s.seq, s.amount, s.due_date]
+      [annuityId, federationId, s.seq, s.amount, s.due_date, s.kind || 'anuidade']
     );
     if (rows.length) inserted.push(rows[0]);
   }
@@ -227,9 +388,21 @@ async function createTransactionsForInstallments(client, {
 }) {
   const category = categoryForKind(kind);
   const referenceType = kind === 'cpf' ? 'customer' : 'karate_dojo';
+  // F2: parcela de adesão (kind='filiacao') é avulsa — não entra na
+  // numeração "(seq/N)" das parcelas de anuidade nem herda a descrição
+  // "Anuidade ..." (evita confundir a taxa de adesão com uma parcela da
+  // anuidade no extrato financeiro). category/reference_type continuam os
+  // mesmos da anuidade (annuity_dojo/karate_dojo) — F2 não introduz uma
+  // categoria nova em `transactions`; a distinção fica no
+  // karate_annuity_installments.kind, fonte de verdade auditável.
+  const annuityCount = installments.filter((i) => i.kind !== 'filiacao').length;
   for (const inst of installments) {
     const idempotencyKey = transactionIdempotencyKey(inst.annuity_id, inst.seq);
-    const label = installments.length > 1 ? ` (${inst.seq}/${installments.length})` : '';
+    const isAdhesion = inst.kind === 'filiacao';
+    const label = !isAdhesion && annuityCount > 1 ? ` (${inst.seq}/${annuityCount})` : '';
+    const description = isAdhesion
+      ? `Taxa de adesão ${kind === 'cpf' ? '' : 'dojô '}${refName}`
+      : `Anuidade ${kind === 'cpf' ? '' : 'dojô '}${refName} — ${referencePeriod}${label}`;
     const txRes = await client.query(
       `INSERT INTO transactions
          (company_id, type, category, amount, status, due_date,
@@ -242,7 +415,7 @@ async function createTransactionsForInstallments(client, {
        RETURNING id`,
       [
         federationId, category, inst.amount, inst.due_date,
-        `Anuidade ${kind === 'cpf' ? '' : 'dojô '}${refName} — ${referencePeriod}${label}`,
+        description,
         idempotencyKey, referenceType, refId, federationId,
       ]
     );
@@ -389,6 +562,7 @@ function categoryForKind(kind) {
 module.exports = {
   VALID_PLANS,
   PLANO_INDEFINIDO_REASON,
+  ADESAO_FEE_BRL,
   resolveDojoPlan,
   createTransactionsForInstallments,
   DEFAULT_DUE_MONTHS,
@@ -397,6 +571,8 @@ module.exports = {
   getVigentFee,
   buildInstallmentPlan,
   buildPlanSpecs,
+  buildProportionalPlanSpecs,
+  buildAdhesionSpec,
   validateDueDateOverride,
   createInstallmentsForAnnuity,
   getInstallments,
@@ -407,4 +583,9 @@ module.exports = {
   syncAnnuityHeaderRollup,
   transactionIdempotencyKey,
   categoryForKind,
+  round2,
+  parseDateParts,
+  remainingMonthsFromAffiliation,
+  computeProportionalAnnuity,
+  distributeAmountAcrossInstallments,
 };

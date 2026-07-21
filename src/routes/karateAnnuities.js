@@ -69,29 +69,46 @@ let HAS_INSTALLMENTS = true;
 // do CLAUDE.md: cache module-level otimista, vira false em 42703.
 let HAS_DOJO_ANNUITY_PLAN_COL = true;
 
-// Busca { id, name, karate_annuity_plan } do dojô, defensivamente. Usado por
-// POST /annuities/dojos/:dojoId/charge para resolver a ordem de precedência
-// do plano: plan explícito no request > karate_annuity_plan do dojô > (F2)
-// nunca 'anual' silencioso — ver comentário na rota de /charge.
+// Migration 248 (F2 da reforma da anuidade) — companies.karate_charges_adhesion
+// (seletor "este dojô paga taxa de adesão?", marcado no cadastro/reativação
+// — ver karateDojos.js). Mesma armadilha_schema_pre_migration do CLAUDE.md.
+let HAS_CHARGES_ADHESION_COL = true;
+
+// companies.affiliation_since é schema PRÉ-EXISTENTE (não é desta fase, não
+// precisa de flag defensiva) — fonte da data de filiação usada pelo F2 para
+// o cálculo proporcional (computeProportionalAnnuity) e para o due_date
+// "na filiação" da parcela de adesão (buildAdhesionSpec).
+//
+// Busca { id, name, karate_annuity_plan, affiliation_since,
+// karate_charges_adhesion } do dojô, defensivamente. Usado por
+// POST /annuities/dojos/:dojoId/charge para resolver: (a) a ordem de
+// precedência do plano (plan explícito no request > karate_annuity_plan do
+// dojô > F2: nunca 'anual' silencioso); (b) se a anuidade deste lançamento
+// deve ser PROPORCIONAL (dojô filiado no ano da temporada corrente — F2);
+// (c) se deve semear a parcela de adesão (F2, karate_charges_adhesion).
 async function fetchDojoForCharge(client, dojoId, federationId) {
-  if (HAS_DOJO_ANNUITY_PLAN_COL) {
-    try {
-      return await client.query(
-        `SELECT id, name, karate_annuity_plan FROM companies
-         WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' LIMIT 1`,
-        [dojoId, federationId]
-      );
-    } catch (e) {
-      if (e.code === '42703') {
-        HAS_DOJO_ANNUITY_PLAN_COL = false;
-        console.warn('[karateAnnuities] karate_annuity_plan ausente (Migration 226 pendente) — fallback sem coluna');
-      } else throw e;
+  const cols = ['id', 'name', 'affiliation_since'];
+  if (HAS_DOJO_ANNUITY_PLAN_COL) cols.push('karate_annuity_plan');
+  if (HAS_CHARGES_ADHESION_COL) cols.push('karate_charges_adhesion');
+  try {
+    return await client.query(
+      `SELECT ${cols.join(', ')} FROM companies
+       WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' LIMIT 1`,
+      [dojoId, federationId]
+    );
+  } catch (e) {
+    if (e.code === '42703') {
+      const msg = e.message || '';
+      let disabled = false;
+      if (HAS_DOJO_ANNUITY_PLAN_COL && /karate_annuity_plan/.test(msg)) { HAS_DOJO_ANNUITY_PLAN_COL = false; disabled = true; }
+      if (HAS_CHARGES_ADHESION_COL && /karate_charges_adhesion/.test(msg)) { HAS_CHARGES_ADHESION_COL = false; disabled = true; }
+      if (disabled) {
+        console.warn('[karateAnnuities] coluna ausente em fetchDojoForCharge (migration pendente) — retry sem ela:', msg);
+        return fetchDojoForCharge(client, dojoId, federationId);
+      }
     }
+    throw e;
   }
-  return client.query(
-    `SELECT id, name FROM companies WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' LIMIT 1`,
-    [dojoId, federationId]
-  );
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -369,6 +386,12 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
     }
     const dojoName = dojoRes.rows[0].name;
     const dojoAnnuityPlan = dojoRes.rows[0].karate_annuity_plan || null;
+    // F2 — data de filiação (fonte do proporcional) e seletor de adesão
+    // (fonte: companies.karate_charges_adhesion, marcado no cadastro/
+    // reativação — ver karateDojos.js). parseDateParts nunca usa
+    // `new Date(iso)` (armadilha CLAUDE.md: volta um dia no fuso BR).
+    const dojoAffiliationSince = annuitySvc.parseDateParts(dojoRes.rows[0].affiliation_since);
+    const dojoChargesAdhesion = dojoRes.rows[0].karate_charges_adhesion === true;
 
     // ── Resolução do plano (F2 do bug de produto: dojô trimestral cobrado
     // como anual) — precedência: plan explícito no request > plano
@@ -421,6 +444,10 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
     // com default seguro + due_date override — ver buildPlanSpecs).
     let specs;
     let dueDateAdjusted = false;
+    // F2 — preenchido só quando a anuidade sai PROPORCIONAL (dojô filiado na
+    // temporada corrente); null no caso normal (valor cheio) ou manualAmount.
+    // Vai na resposta e no financeAudit para o operador auditar o cálculo.
+    let proportionalInfo = null;
     if (manualAmount) {
       specs = [{ seq: 1, amount: Number(amount), due_date }];
     } else {
@@ -433,9 +460,35 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
           code: 'VALIDATION_ERROR',
         });
       }
-      const built = annuitySvc.buildPlanSpecs({
-        plan, amount: fee.amount, dueMonths: fee.due_months, seasonYear, fromDate: new Date(), dueDateOverride,
-      });
+
+      // ── F2: anuidade PROPORCIONAL quando o dojô se filiou NA temporada
+      // corrente (companies.affiliation_since no mesmo ano de reference_period).
+      // Decisão fechada com o Caio: consolidada — calcula o valor proporcional
+      // sobre o TOTAL ANUAL do plano e distribui igualmente pelas parcelas
+      // (2 no semestral, 4 no trimestral) cujo vencimento ainda não passou —
+      // ver buildProportionalPlanSpecs (regra completa + caso da parcela já
+      // vencida documentados lá). Dojô filiado em ano anterior (renovação) ou
+      // sem affiliation_since cadastrado: comportamento igual ao pré-F2
+      // (buildPlanSpecs, valor cheio da fee, corte por "hoje").
+      const isNewAffiliateThisSeason = !!(dojoAffiliationSince && dojoAffiliationSince.year === seasonYear);
+      let built;
+      if (isNewAffiliateThisSeason) {
+        built = annuitySvc.buildProportionalPlanSpecs({
+          plan, feeAmount: fee.amount, dueMonths: fee.due_months, seasonYear,
+          affiliationMonth: dojoAffiliationSince.month, dueDateOverride,
+        });
+        proportionalInfo = {
+          applied: true,
+          affiliation_month: dojoAffiliationSince.month,
+          remaining_months: built.remainingMonths,
+          full_annual_amount: built.fullTotal,
+          proportional_amount: built.proportionalTotal,
+        };
+      } else {
+        built = annuitySvc.buildPlanSpecs({
+          plan, amount: fee.amount, dueMonths: fee.due_months, seasonYear, fromDate: new Date(), dueDateOverride,
+        });
+      }
       specs = built.specs;
       dueDateAdjusted = built.dueDateAdjusted;
       if (!specs.length) {
@@ -444,6 +497,41 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
           error: `Não foi possível montar o plano de parcelas para '${plan}' (fee sem due_months válido).`,
           code: 'VALIDATION_ERROR',
         });
+      }
+    }
+
+    // ── F2: parcela de ADESÃO (kind='filiacao', ADESAO_FEE_BRL, cobrança
+    // única e À PARTE da anuidade). Seletor persistente
+    // (companies.karate_charges_adhesion, Migration 248, marcado no
+    // cadastro/reativação — karateDojos.js). Quando marcado, semeia a
+    // parcela aqui, no MESMO annuity_id do lançamento corrente.
+    // Guarda de unicidade (nunca 2 parcelas 'filiacao' abertas pro mesmo
+    // dojô — reativar um dojô que já tem adesão lançada não duplica):
+    // consulta via join (installments não guarda dojo_id direto), sob
+    // advisory lock DEDICADO (adesão não é por período, não reaproveita o
+    // lock acima). Só roda quando HAS_INSTALLMENTS — sem a infra de
+    // parcelas (migration 222) não há onde semear a parcela de adesão.
+    let adhesionCharged = false;
+    if (HAS_INSTALLMENTS && dojoChargesAdhesion) {
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtext($1::text || '-annuity-adhesion'))`,
+        [dojoId]
+      );
+      const existingAdhesion = await client.query(
+        `SELECT 1 FROM karate_annuity_installments i
+           JOIN karate_dojo_annuity_history h ON h.id = i.annuity_id
+          WHERE h.dojo_id = $1 AND i.kind = 'filiacao' LIMIT 1`,
+        [dojoId]
+      );
+      const adhesionSpec = annuitySvc.buildAdhesionSpec({
+        chargesAdhesion: dojoChargesAdhesion,
+        alreadyHasAdhesionInstallment: existingAdhesion.rows.length > 0,
+        affiliationSince: dojoAffiliationSince ? dojoAffiliationSince.iso : null,
+        fallbackDueDate: new Date().toISOString().slice(0, 10),
+      });
+      if (adhesionSpec) {
+        specs = [adhesionSpec, ...specs];
+        adhesionCharged = true;
       }
     }
 
@@ -472,7 +560,12 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
           federationId, action: 'charge_create', targetType: 'annuity', targetId: annuityId,
           dojoId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
           before: null,
-          after: { plan, amount: parseFloat(header.amount), due_date: header.due_date, reference_period, installments_count: installments.length },
+          after: {
+            plan, amount: parseFloat(header.amount), due_date: header.due_date, reference_period,
+            installments_count: installments.length,
+            proportional: proportionalInfo,
+            adhesion_charged: adhesionCharged,
+          },
         }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (charge dojo):', e.message));
 
         const { total, paid_total } = annuitySvc.computeTotals(installments);
@@ -492,10 +585,20 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
           annuity_history_id: annuityId,
           plan,
           installments: installments.map(i => ({
-            id: i.id, seq: i.seq, amount: parseFloat(i.amount), due_date: i.due_date,
+            id: i.id, seq: i.seq, kind: i.kind || 'anuidade', amount: parseFloat(i.amount), due_date: i.due_date,
             paid_at: i.paid_at, status: i.status, transaction_id: i.transaction_id,
           })),
           due_date_ajustada: dueDateAdjusted,
+          // F2: null quando a anuidade não é proporcional (renovação / dojô
+          // filiado em ano anterior / affiliation_since ausente / amount
+          // manual); preenchido com o cálculo quando é (ver comentário acima,
+          // buildProportionalPlanSpecs).
+          proportional: proportionalInfo,
+          // F2: true só quando a parcela de adesão (kind='filiacao') foi
+          // efetivamente semeada NESTE lançamento — false tanto quando o
+          // dojô não tem o seletor marcado quanto quando já existia adesão
+          // (guarda de unicidade evitou duplicar).
+          adhesion_charged: adhesionCharged,
           paid_total,
           total,
         });
