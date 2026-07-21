@@ -1,5 +1,5 @@
 // ============================================================
-// AURA KARATÊ — Ledger de pagamentos da anuidade (Fase F1)
+// AURA KARATÊ — Ledger de pagamentos da anuidade (Fase F1 + F3)
 //
 // Por que um módulo separado de karateAnnuityService.js:
 //   karateAnnuityService.js já é o motor de GERAÇÃO do plano de parcelas
@@ -35,8 +35,8 @@
 //   due_date preenchido. Em due_date empatado (mesma data), seq ASC
 //   desempata pela ordem natural do plano.
 //
-// Atomicidade / idempotência (F1 não tem rota ainda — HTTP retry é
-// problema de F3):
+// Atomicidade / idempotência (F1 não tinha rota ainda — HTTP retry era
+// escopo de F3, agora resolvido abaixo):
 //   Toda a leitura+distribuição+escrita roda em UMA transação (BEGIN/
 //   COMMIT), com `SELECT ... FOR UPDATE` travando as parcelas do
 //   annuity_id logo no início — duas chamadas concorrentes de
@@ -44,25 +44,38 @@
 //   primeira liberar as linhas), então não há leitura de saldo
 //   desatualizado nem dupla baixa sobre o mesmo saldo. Qualquer erro no
 //   meio do caminho faz ROLLBACK — não existe estado "meio aplicado"
-//   (installments atualizadas mas ledger não gravado, ou vice-versa). O
-//   que este módulo NÃO resolve sozinho: um retry HTTP que reenvia a
-//   MESMA requisição de baixa duas vezes vai aplicar o pagamento duas
-//   vezes (do ponto de vista deste service são dois `amount` legítimos —
-//   ele não tem como saber que é retry). Fica documentado aqui para a
-//   F3: a rota deve gerar/aceitar um id de operação (idempotency key) e
-//   usar um UNIQUE constraint (ex.: (annuity_id, idempotency_key) em
-//   karate_annuity_payments, coluna a adicionar quando a rota existir)
-//   para transformar retry em no-op — fora de escopo do F1 porque não há
-//   rota nem cliente reenviando nada ainda.
+//   (installments atualizadas mas ledger não gravado, ou vice-versa).
+//
+// Dedup por operation_id (Fase F3, migration 249):
+//   Um retry HTTP que reenvia a MESMA requisição de baixa duas vezes (ex.:
+//   timeout + reenvio automático, duplo-clique) é um problema DIFERENTE de
+//   concorrência — são dois `amount` legítimos do ponto de vista deste
+//   motor, ele não tem como saber que é retry sem uma pista do cliente.
+//   Se o caller passar `operation_id` (string opaca, gerada pelo
+//   cliente/UI — idempotency key), a MESMA operation_id em duas chamadas
+//   aplica o pagamento UMA vez só: a primeira reserva a chave em
+//   karate_annuity_payment_operations (INSERT ... ON CONFLICT DO NOTHING,
+//   operation_id é PRIMARY KEY) e grava o resultado completo nela antes do
+//   COMMIT; a segunda perde a corrida no INSERT, não escreve nada de novo
+//   (nem installments, nem ledger), e devolve o MESMO resultado da
+//   primeira com `idempotent_hit:true`. Sem operation_id, comportamento
+//   idêntico ao F1 (aplica normal, sem passar pela tabela). Ver migration
+//   249 para o desenho completo (por que tabela dedicada em vez de UNIQUE
+//   direto no ledger — uma operação pode gerar várias linhas de ledger).
+//   Backend sobe antes da migration: cache module-level otimista
+//   (HAS_OPERATION_ID_SUPPORT), cai pra "aplica sem dedup" em 42P01 em vez
+//   de 500 — dedup ausente nunca bloqueia a baixa em si.
 //
 // dry-run:
 //   dryRun:true roda a MESMA leitura+distribuição (mesmo código, mesmo
 //   `SELECT ... FOR UPDATE` dentro da transação, para refletir o saldo
 //   real mesmo sob concorrência) mas termina em ROLLBACK em vez de
 //   COMMIT — nenhuma linha de installment, ledger ou rollup do header é
-//   alterada. O shape do retorno é idêntico ao do commit real (mesma
-//   função monta os dois a partir da mesma distribuição) — é o que a
-//   prévia da tela (F4) vai consumir.
+//   alterada, e `operation_id` é IGNORADO (preview nunca consome a chave
+//   de idempotência — só o commit real participa do dedup). O shape do
+//   retorno é idêntico ao do commit real (mesma função monta os dois a
+//   partir da mesma distribuição, mesmos campos `idempotent_hit`/
+//   `operation_id`) — é o que a prévia da tela (F4) vai consumir.
 //
 // Armadilha CLAUDE.md nº1 (pg devolve date/timestamp como objeto Date):
 //   due_date (coluna `date`) é serializado nas alocações via toIsoDate()
@@ -96,6 +109,11 @@ function round2(n) {
 // Tolerância de meio centavo para comparações de saldo (arredondamento
 // acumulado em somas de várias parcelas).
 const EPSILON = 0.005;
+
+// Migration 249 (F3) — karate_annuity_payment_operations (dedup por
+// operation_id). Mesma armadilha_schema_pre_migration do CLAUDE.md: cache
+// module-level otimista, vira false em 42P01 (tabela ainda não existe).
+let HAS_OPERATION_ID_SUPPORT = true;
 
 class AnnuityPaymentError extends Error {
   constructor(code, message, status, details) {
@@ -188,16 +206,18 @@ function computeDistribution(installments, amount) {
   };
 }
 
-// ── applyAnnuityPayment — o motor de baixa FIFO (coração do F1) ─────────
+// ── applyAnnuityPayment — o motor de baixa FIFO (coração do F1, dedup do F3) ─
 //
 // { federation_id, annuity_id, amount, payment_method, paid_at,
-//   created_by, dryRun }
+//   created_by, dryRun, operation_id }
 //
 // Carrega as parcelas do annuity_id (FIFO), distribui `amount` sobre o
 // saldo de cada uma da mais antiga pra mais nova, recusa excedente
 // (AMOUNT_EXCEEDS_BALANCE), grava ledger + atualiza installment + rollup
 // do header numa única transação. dryRun:true faz a mesma distribuição em
-// memória e não grava nada (ROLLBACK sempre).
+// memória e não grava nada (ROLLBACK sempre) — operation_id é ignorado no
+// dry-run. Com operation_id no commit real, um retry com a MESMA chave não
+// reaplica o pagamento (ver comentário de topo do arquivo).
 async function applyAnnuityPayment({
   federation_id,
   annuity_id,
@@ -206,6 +226,8 @@ async function applyAnnuityPayment({
   paid_at,
   created_by = null,
   dryRun = false,
+  operation_id = null,
+  installment_id = null,
 }) {
   if (!federation_id) {
     throw new AnnuityPaymentError('FEDERATION_ID_REQUIRED', 'federation_id é obrigatório', 422);
@@ -230,6 +252,13 @@ async function applyAnnuityPayment({
   }
   const paidAtIso = paidAtDate.toISOString();
 
+  const opId = operation_id != null && String(operation_id).trim() !== ''
+    ? String(operation_id).trim()
+    : null;
+  if (opId !== null && opId.length > 200) {
+    throw new AnnuityPaymentError('OPERATION_ID_INVALID', 'operation_id inválido (máx. 200 caracteres)', 422);
+  }
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -253,7 +282,92 @@ async function applyAnnuityPayment({
       );
     }
 
-    const dist = computeDistribution(installments, amt);
+    // Escopo opcional a UMA parcela específica (ex.: rota legada de baixa
+    // por installmentId — ver karateAnnuities.js, consolidação F3). Reusa
+    // TODO o resto do motor (lock, dedup, status, ledger, rollup) — só
+    // restringe o array que entra em computeDistribution a essa parcela,
+    // em vez do FIFO completo da anuidade. Continua vindo do MESMO
+    // SELECT...FOR UPDATE acima (mesma trava, mesma atomicidade).
+    let targetInstallments = installments;
+    if (installment_id) {
+      targetInstallments = installments.filter((i) => String(i.id) === String(installment_id));
+      if (!targetInstallments.length) {
+        throw new AnnuityPaymentError(
+          'INSTALLMENT_NOT_FOUND',
+          'Parcela não encontrada nesta anuidade',
+          404
+        );
+      }
+    }
+
+    // ── Dedup por operation_id (F3, migration 249) — PRÉ-CHECAGEM ──────
+    // Roda ANTES de computeDistribution de propósito: um retry genuíno
+    // chega DEPOIS que a 1ª chamada já mudou o saldo das parcelas (ex.:
+    // pagamento que quitou tudo) — se checássemos o operation_id só DEPOIS
+    // de calcular a distribuição sobre o saldo JÁ ATUALIZADO, o retry
+    // tomaria AMOUNT_EXCEEDS_BALANCE (saldo já é 0) em vez do replay
+    // idempotente esperado. A pré-checagem é só leitura (SELECT), não
+    // reserva nada — se não achar nada aqui, cai no fluxo normal e a
+    // reserva de verdade (INSERT ON CONFLICT) acontece mais abaixo, já
+    // depois da validação de saldo (assim uma tentativa que falha por
+    // AMOUNT_EXCEEDS_BALANCE NÃO consome a chave — o cliente pode tentar
+    // de novo com o valor corrigido usando o MESMO operation_id).
+    async function replayFromRow(row) {
+      if (
+        String(row.annuity_id) !== String(annuity_id) ||
+        Math.abs(round2(Number(row.amount)) - amt) > EPSILON
+      ) {
+        throw new AnnuityPaymentError(
+          'OPERATION_ID_CONFLICT',
+          'operation_id já foi usado para uma baixa diferente (annuity_id/amount não coincidem) — gere uma nova chave de operação.',
+          409,
+          { operation_id: opId }
+        );
+      }
+      if (row.result == null) {
+        // Reservado por uma transação concorrente que ainda não commitou
+        // — sem snapshot pra devolver ainda (corrida rara).
+        throw new AnnuityPaymentError(
+          'OPERATION_IN_PROGRESS',
+          'Esta operação já está sendo processada — tente novamente em instantes.',
+          409
+        );
+      }
+      return { ...row.result, idempotent_hit: true };
+    }
+
+    if (opId && !dryRun && HAS_OPERATION_ID_SUPPORT) {
+      // SAVEPOINT: mesma razão do claim mais abaixo — um 42P01 aqui não
+      // pode abortar a transação inteira (armadilha CLAUDE.md #10).
+      await client.query('SAVEPOINT op_precheck');
+      try {
+        const existing = await client.query(
+          `SELECT federation_id, annuity_id, amount, result
+             FROM karate_annuity_payment_operations
+            WHERE operation_id = $1`,
+          [opId]
+        );
+        if (existing.rows.length) {
+          const replay = await replayFromRow(existing.rows[0]);
+          await client.query('ROLLBACK');
+          return replay;
+        }
+      } catch (e) {
+        if (e instanceof AnnuityPaymentError) throw e;
+        if (e.code === '42P01') {
+          await client.query('ROLLBACK TO SAVEPOINT op_precheck');
+          HAS_OPERATION_ID_SUPPORT = false;
+          console.warn(
+            '[karateAnnuityLedger] migration 249 ausente (karate_annuity_payment_operations) — dedup por operation_id desativado, aplicando normalmente:',
+            e.message
+          );
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    const dist = computeDistribution(targetInstallments, amt);
 
     if (dryRun) {
       await client.query('ROLLBACK');
@@ -261,12 +375,77 @@ async function applyAnnuityPayment({
         dry_run: true,
         federation_id,
         annuity_id,
+        installment_id: installment_id || null,
         amount: amt,
         payment_method,
         paid_at: paidAtIso,
+        operation_id: opId,
+        idempotent_hit: false,
         ...dist,
         header: null,
       };
+    }
+
+    // ── Reserva de verdade (F3, migration 249) ──────────────────────────
+    // Só chega aqui depois que amount JÁ passou pela validação de saldo —
+    // uma AMOUNT_EXCEEDS_BALANCE nunca consome a chave (ver comentário
+    // acima). INSERT ... ON CONFLICT DO NOTHING é o que resolve a corrida
+    // real entre duas chamadas concorrentes com o MESMO operation_id (a
+    // pré-checagem acima é só uma otimização de UX para o caso comum de
+    // retry sequencial, não substitui esta reserva atômica).
+    if (opId && HAS_OPERATION_ID_SUPPORT) {
+      // SAVEPOINT: um 42P01 aqui (tabela ainda não migrada) NÃO pode
+      // deixar a transação inteira "aborted" (Postgres aborta a TX inteira
+      // no primeiro erro de statement, catch em JS sozinho não desfaz isso
+      // — armadilha CLAUDE.md #10). ROLLBACK TO SAVEPOINT desfaz só a
+      // tentativa de claim, preservando o FOR UPDATE/dist já obtidos.
+      await client.query('SAVEPOINT op_claim');
+      try {
+        const claim = await client.query(
+          `INSERT INTO karate_annuity_payment_operations
+             (operation_id, federation_id, annuity_id, amount)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (operation_id) DO NOTHING
+           RETURNING operation_id`,
+          [opId, federation_id, annuity_id, amt]
+        );
+
+        if (!claim.rows.length) {
+          // Perdeu a corrida — outra chamada (concorrente) reservou a
+          // MESMA chave entre a pré-checagem e agora. Busca o resultado
+          // gravado em vez de reaplicar o pagamento.
+          const existing = await client.query(
+            `SELECT federation_id, annuity_id, amount, result
+               FROM karate_annuity_payment_operations
+              WHERE operation_id = $1`,
+            [opId]
+          );
+          await client.query('ROLLBACK');
+
+          const row = existing.rows[0];
+          if (!row) {
+            // Corrida extrema (linha sumiu entre o INSERT e o SELECT).
+            throw new AnnuityPaymentError(
+              'OPERATION_IN_PROGRESS',
+              'Esta operação já está sendo processada — tente novamente em instantes.',
+              409
+            );
+          }
+          return await replayFromRow(row);
+        }
+      } catch (e) {
+        if (e instanceof AnnuityPaymentError) throw e;
+        if (e.code === '42P01') {
+          await client.query('ROLLBACK TO SAVEPOINT op_claim');
+          HAS_OPERATION_ID_SUPPORT = false;
+          console.warn(
+            '[karateAnnuityLedger] migration 249 ausente (karate_annuity_payment_operations) — dedup por operation_id desativado, aplicando normalmente:',
+            e.message
+          );
+        } else {
+          throw e;
+        }
+      }
     }
 
     for (const a of dist.allocations) {
@@ -283,9 +462,9 @@ async function applyAnnuityPayment({
 
       await client.query(
         `INSERT INTO karate_annuity_payments
-           (federation_id, installment_id, annuity_id, amount, paid_at, payment_method, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [federation_id, a.installment_id, annuity_id, a.amount_applied, paidAtIso, payment_method, created_by]
+           (federation_id, installment_id, annuity_id, amount, paid_at, payment_method, created_by, operation_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [federation_id, a.installment_id, annuity_id, a.amount_applied, paidAtIso, payment_method, created_by, opId]
       );
     }
 
@@ -293,18 +472,29 @@ async function applyAnnuityPayment({
     // karateAnnuityService.syncAnnuityHeaderRollup, não duplica a lógica.
     const header = await syncAnnuityHeaderRollup(client, annuity_id);
 
-    await client.query('COMMIT');
-
-    return {
+    const result = {
       dry_run: false,
       federation_id,
       annuity_id,
+      installment_id: installment_id || null,
       amount: amt,
       payment_method,
       paid_at: paidAtIso,
+      operation_id: opId,
       ...dist,
       header,
     };
+
+    if (opId && HAS_OPERATION_ID_SUPPORT) {
+      await client.query(
+        `UPDATE karate_annuity_payment_operations SET result = $1::jsonb WHERE operation_id = $2`,
+        [JSON.stringify(result), opId]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    return { ...result, idempotent_hit: false };
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;

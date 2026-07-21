@@ -480,11 +480,22 @@ function computeAggregateFinanceiro(installments) {
   return hasOverdueOpen ? 'atrasado' : 'em_dia';
 }
 
+// F3 da reforma da anuidade: paid_total somava só parcelas status='paid'
+// pelo valor CHEIO — binário, pré-amount_paid (migration 247). Com baixa
+// parcial (applyAnnuityPayment, status='partial'), isso subestimava o
+// valor recebido (uma parcela de R$500 com R$300 pagos contava R$0).
+// Agora soma amount_paid de TODAS as parcelas (paga, parcial ou pendente
+// — pendente contribui 0 naturalmente). `i.amount_paid` pode vir ausente
+// (undefined) se o caller não SELECTou a coluna (ou migration 247 ainda
+// não aplicada) — nesse caso cai pro binário antigo como fallback seguro,
+// nunca lança.
 function computeTotals(installments) {
   const total = (installments || []).reduce((s, i) => s + Number(i.amount), 0);
   const paidTotal = (installments || [])
-    .filter((i) => i.status === 'paid')
-    .reduce((s, i) => s + Number(i.amount), 0);
+    .reduce((s, i) => {
+      const amountPaid = i.amount_paid != null ? Number(i.amount_paid) : (i.status === 'paid' ? Number(i.amount) : 0);
+      return s + amountPaid;
+    }, 0);
   return {
     total: Number(total.toFixed(2)),
     paid_total: Number(paidTotal.toFixed(2)),
