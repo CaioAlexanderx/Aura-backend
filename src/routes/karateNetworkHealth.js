@@ -521,19 +521,41 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
 // Status das anuidades de afiliação dos dojôs (em dia / vencendo / vencido).
 // REGRA: dojô SEM cobrança lançada não entra na conta — o denominador são as
 // anuidades efetivamente registradas. Sem cobranças → inadimplência 0%.
+// ?status=all|active|inactive (default 'active' — Caio, 21/07/2026: "não
+// podemos cobrar e controlar os inativos... sempre ativos primeiro"). Mesmo
+// mecanismo de /relacao-faixas (?status=), agora com o default correto desde
+// a origem: um dojô desativado que ficou inadimplente antes de sair não deve
+// aparecer como "vencido" para sempre nesta lista de cobrança.
+//
+// AUDITORIA (22/07/2026): o drawer "inadimplencia" da tela Saúde da Rede não
+// é mais aberto por nenhum onDetail no front (StandingCard/InadimplenciaCard
+// migraram para o drawer "standing") — mas o endpoint CONTINUA sendo chamado
+// a cada carregamento da tela (Promise.allSettled em saude-rede/index.tsx) e
+// o botão de export CSV do drawer é genérico (`downloadCsv(fedId, drawerKey)`)
+// — reaproveitaria esta rota se `drawerKey` voltar a valer "inadimplencia".
+// Não é seguro tratar como 100% órfão: segmentado por padrão em vez de
+// removido.
 router.get('/inadimplencia', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const season = parseInt(req.query.season) || currentSeason();
   const exportCsv = req.query.export === 'csv';
+  const status = ['all', 'active', 'inactive'].includes(String(req.query.status))
+    ? String(req.query.status) : 'active';
   try {
+    let statusFilterSql = '';
+    if (status === 'active') statusFilterSql = 'AND c.is_active IS NOT FALSE';
+    else if (status === 'inactive') statusFilterSql = 'AND c.is_active = false';
+
     const r = await safeQuery(
       `SELECT h.dojo_id,
               COALESCE(c.trade_name, c.legal_name) AS dojo_name,
               c.city,
+              c.is_active AS dojo_is_active,
               h.due_date, h.amount, h.status, h.paid_at
        FROM karate_dojo_annuity_history h
        JOIN companies c ON c.id = h.dojo_id
        WHERE h.federation_id = $1 AND EXTRACT(YEAR FROM h.due_date)::int = $2
+         ${statusFilterSql}
        ORDER BY
          CASE h.status WHEN 'overdue' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
          h.due_date ASC`,
@@ -572,6 +594,7 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
 
     res.json({
       season,
+      status,
       total,
       em_dia: emDia,
       vencendo,
@@ -581,6 +604,7 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
         dojo_id: r.dojo_id,
         dojo_name: r.dojo_name,
         city: r.city || null,
+        dojo_is_active: r.dojo_is_active !== false,
         due_date: toIsoDate(r.due_date),
         amount: Number(r.amount || 0),
         status: r.status,
@@ -676,17 +700,28 @@ router.get('/projecao-receita', ...guards.read(), async (req, res) => {
 // ── Dojô ativo × dormente ─────────────────────────────────────
 // Dojô ativo na season: registrou >= 1 exame OU >= 1 inscrição em competição.
 // Dojô dormente: nenhuma dessas ações.
+//
+// BUGFIX (22/07/2026 — auditoria ativo/inativo, Caio 21/07/2026: "não
+// podemos cobrar e controlar os inativos... sempre ativos primeiro"):
+// dormência é uma lista de REENGAJAMENTO (ação) — nasce segmentada. Dojô que
+// já saiu da federação (is_active=false) não "dorme", ele saiu; misturá-lo
+// aqui infla artificialmente a contagem de dormentes com quem não é mais
+// contatável. Mesmo critério de is_active de karate_dojo_standing (companies
+// é NOT NULL DEFAULT true, IS NOT FALSE é equivalente a = true). Sem
+// ?status= (ao contrário de /inadimplencia/relacao-faixas) — hardcoded
+// ativo, mesmo padrão de /cobertura, já que a task não pede toggle aqui.
 router.get('/dormencia', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const season = parseInt(req.query.season) || currentSeason();
   const exportCsv = req.query.export === 'csv';
   try {
-    // Base TOTAL de dojôs afiliados (sem is_active)
+    // Base de dojôs afiliados ATIVOS (companies.is_active).
     const dojosRes = await safeQuery(
       `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name, c.city, c.region
        FROM companies c
        WHERE c.federation_id = $1
-         AND c.vertical_active = 'karate_dojo'`,
+         AND c.vertical_active = 'karate_dojo'
+         AND c.is_active IS NOT FALSE`,
       [fedId]
     );
 
@@ -767,12 +802,19 @@ router.get('/dormencia', ...guards.read(), async (req, res) => {
 
 // ── Concentração ──────────────────────────────────────────────
 // Share dos top-5 dojôs em praticantes e receita de anuidade.
+//
+// BUGFIX (22/07/2026 — auditoria ativo/inativo): endpoint confirmado 100%
+// órfão no front (services/karateNetworkHealthApi.ts define getConcentracao,
+// mas nenhum component/tela do aura-app chama). Ainda assim segmentado por
+// consistência — dojô inativo não deveria contar em "concentração de
+// praticantes/receita" se o endpoint voltar a ser usado; risco de regressão
+// é zero enquanto permanecer desconectado da UI.
 router.get('/concentracao', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const season = parseInt(req.query.season) || currentSeason();
   const exportCsv = req.query.export === 'csv';
   try {
-    // Praticantes por dojô — base TOTAL de dojôs (sem is_active)
+    // Praticantes por dojô — base de dojôs ATIVOS (companies.is_active)
     const practRes = await safeQuery(
       `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name,
               COUNT(cu.id)::int AS practitioners
@@ -780,6 +822,7 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
        LEFT JOIN customers cu ON cu.dojo_id = c.id AND cu.federation_id = $1
        WHERE c.federation_id = $1
          AND c.vertical_active = 'karate_dojo'
+         AND c.is_active IS NOT FALSE
        GROUP BY c.id, c.trade_name, c.legal_name
        ORDER BY practitioners DESC`,
       [fedId]
@@ -967,15 +1010,19 @@ router.get('/graduacoes', ...guards.read(), async (req, res) => {
 // Distribuição atual de atletas por faixa em toda a rede.
 // Caveat explícito: snapshot, não funil de coorte.
 //
-// ?status=all|active|inactive (default 'all' se ausente/valor inválido):
-// filtra os praticantes via JOIN com customers.is_active. Aplicado na MESMA
+// ?status=all|active|inactive (default 'active' se ausente/valor inválido —
+// BUGFIX 22/07/2026, auditoria ativo/inativo: o mecanismo já existia, só o
+// default estava errado. Caio, 21/07/2026: "não podemos cobrar e controlar
+// os inativos... sempre ativos primeiro". Quem passa ?status= explícito não
+// é afetado — só o comportamento sem o parâmetro muda de 'all' pra 'active').
+// Filtra os praticantes via JOIN com customers.is_active. Aplicado na MESMA
 // query que alimenta os buckets (não numa query separada), para os buckets
 // e os agregados (total/kyu/dan/dan_pct) sempre refletirem o mesmo filtro.
 router.get('/relacao-faixas', ...guards.read(), async (req, res) => {
   const fedId = req.params.id;
   const exportCsv = req.query.export === 'csv';
   const status = ['all', 'active', 'inactive'].includes(String(req.query.status))
-    ? String(req.query.status) : 'all';
+    ? String(req.query.status) : 'active';
   try {
     // statusFilter é montado condicionalmente porque customers.is_active pode
     // não existir ainda (42703) — nesse caso o catch abaixo refaz a query sem
@@ -1109,10 +1156,14 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     );
     const newAffiliationsYear = parseInt(newAffRes.rows[0]?.total || 0, 10);
 
-    // 2. Praticantes registrados
+    // 2. Praticantes registrados — só ATIVOS por padrão (Caio, 21/07/2026:
+    // "não podemos cobrar e controlar os inativos... sempre ativos primeiro").
+    // Mesmo critério de is_active usado por karate_member_standing
+    // (COALESCE(customers.is_active, true) — customers.is_active é NOT NULL
+    // DEFAULT true, então equivalente a IS NOT FALSE).
     const practRes = await safeQuery(
       `SELECT COUNT(*)::int AS total FROM customers
-       WHERE federation_id = $1`,
+       WHERE federation_id = $1 AND is_active IS NOT FALSE`,
       [fedId]
     );
     const practCount = parseInt(practRes.rows[0]?.total || 0, 10);
@@ -1121,12 +1172,24 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     //    não entra. Sem cobranças → total 0 → inadPct 0 (não divide por zero).
     // Fase F1: filtra dojo_id IS NOT NULL — inadimplência % deste painel é
     // só de DOJÔ (a de praticante tem tela própria, via karate_member_standing).
+    //
+    // BUGFIX (22/07/2026 — auditoria ativo/inativo, Caio 21/07/2026: "não
+    // podemos cobrar e controlar os inativos... sempre ativos primeiro"):
+    // faltava o JOIN em companies.is_active — um dojô DESATIVADO com anuidade
+    // vencida inflava o numerador/denominador deste KPI para sempre (nunca
+    // renova, nunca some da conta). Card de baixo da Saúde da Rede já usa
+    // karate_dojo_standing.is_active (COALESCE(companies.is_active, false);
+    // companies.is_active é NOT NULL DEFAULT true, então equivalente a
+    // IS NOT FALSE) — mesmo critério reusado aqui, agora as duas fontes
+    // convergem no mesmo número (ver teste de convergência com
+    // /standing/summary).
     const inadRes = await safeQuery(
       `SELECT
          COUNT(*)::int AS total,
-         COUNT(*) FILTER (WHERE status = 'overdue')::int AS vencido
-       FROM karate_dojo_annuity_history
-       WHERE federation_id = $1 AND dojo_id IS NOT NULL AND EXTRACT(YEAR FROM due_date)::int = $2`,
+         COUNT(*) FILTER (WHERE h.status = 'overdue')::int AS vencido
+       FROM karate_dojo_annuity_history h
+       JOIN companies c ON c.id = h.dojo_id AND c.is_active IS NOT FALSE
+       WHERE h.federation_id = $1 AND h.dojo_id IS NOT NULL AND EXTRACT(YEAR FROM h.due_date)::int = $2`,
       [fedId, season]
     );
     const inadTotal = parseInt(inadRes.rows[0]?.total || 0, 10);
@@ -1162,12 +1225,21 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     // 1c. Dojôs FILIADOS EM DIA — decisão de produto (02/07): o KPI de topo da
     //     Saúde da Rede conta apenas dojôs com anuidade de filiação PAGA na
     //     temporada (status='paid'). Difere da base total (dojoCount), que segue
-    //     coerente com Painel/Dojôs. Dojô sem anuidade lançada NÃO é "em dia".
+    //     coerente com Painel/Dojôs (NOTA DE COERÊNCIA no topo do arquivo —
+    //     dojoCount/dojo_total NÃO é tocado por esta correção de propósito,
+    //     para não divergir de /afiliacao e do Painel). Dojô sem anuidade
+    //     lançada NÃO é "em dia".
+    //
+    // BUGFIX (22/07/2026 — auditoria ativo/inativo): "em dia" é um número de
+    // cobrança (quem pagou a anuidade da temporada) — dojô inativo não deveria
+    // aparecer aqui (não cobramos dele). Adicionado c.is_active IS NOT FALSE,
+    // mesmo critério de karate_dojo_standing.is_active.
     const emDiaRes = await safeQuery(
       `SELECT COUNT(DISTINCT c.id)::int AS total
          FROM companies c
          JOIN karate_dojo_annuity_history a ON a.dojo_id = c.id
         WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
+          AND c.is_active IS NOT FALSE
           AND EXTRACT(YEAR FROM a.due_date)::int = $2
           AND a.status = 'paid'`,
       [fedId, season]
@@ -1185,6 +1257,15 @@ router.get('/summary', ...guards.read(), async (req, res) => {
         { key: 'graduacoes', label: 'Graduações YTD', value: gradTotal, unit: '' },
         { key: 'receita_proj_90d', label: 'Receita proj. · 90 d', value: projTotal, unit: 'BRL' },
       ],
+      // Campo NOVO, aditivo (não substitui kpis — front não precisa mudar):
+      // expõe o numerador/denominador crus por trás do KPI "Inadimplência"
+      // (kpis[2].value é só o %). Existe para permitir comparação direta com
+      // GET /standing/summary → dojos.atrasado (mesmo critério de
+      // companies.is_active) sem ninguém precisar recalcular a % às cegas —
+      // é exatamente esse tipo de "duas fontes que deviam convergir e não dá
+      // pra provar que convergem" que causou a divergência desta auditoria
+      // (22/07/2026).
+      inadimplencia: { total: inadTotal, vencido: inadVencido, pct: inadPct },
     });
   } catch (err) {
     console.error('[networkHealth] summary error:', err.message);
@@ -1216,19 +1297,40 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
     }
 
     // Gather summary data (re-uses safe queries)
-    const [dojosRes, inadRes, gradRes, dormRes] = await Promise.all([
+    //
+    // BUGFIX (22/07/2026 — auditoria ativo/inativo, Caio 21/07/2026: "não
+    // podemos cobrar e controlar os inativos... sempre ativos primeiro"):
+    // as queries cruas de Inadimplência e Dojôs dormentes saíam do app (vão
+    // pro e-mail) sem segmentar por companies.is_active. Segmentadas abaixo,
+    // mesmo critério de is_active usado por karate_dojo_standing (ver /summary
+    // acima). dojoActiveRes é NOVA — usada só no cálculo de dormência, para
+    // não misturar dojô que já saiu da federação com dojô ativo sem exame/
+    // competição na season. dojosRes (base TOTAL) continua alimentando só a
+    // linha "Dojôs filiados" do e-mail, coerente com Painel/Dojôs/afiliação —
+    // não é tocada por esta correção.
+    const [dojosRes, dojoActiveRes, inadRes, gradRes, dormRes] = await Promise.all([
       safeQuery(
         `SELECT COUNT(*)::int AS total FROM companies
          WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
         [fedId]
       ),
+      // Base de dojôs ATIVOS — denominador do cálculo de dormência (abaixo).
+      safeQuery(
+        `SELECT COUNT(*)::int AS total FROM companies
+         WHERE federation_id = $1 AND vertical_active = 'karate_dojo'
+           AND is_active IS NOT FALSE`,
+        [fedId]
+      ),
       // Fase F1: filtra dojo_id IS NOT NULL — resumo semanal por e-mail é de DOJÔ.
+      // is_active IS NOT FALSE: dojô desativado não entra na Inadimplência do
+      // relatório (mesmo critério de karate_dojo_standing.is_active).
       safeQuery(
         `SELECT COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE status = 'overdue')::int AS vencido,
-                COUNT(*) FILTER (WHERE status = 'paid')::int AS paid
-         FROM karate_dojo_annuity_history
-         WHERE federation_id = $1 AND dojo_id IS NOT NULL AND EXTRACT(YEAR FROM due_date)::int = $2`,
+                COUNT(*) FILTER (WHERE h.status = 'overdue')::int AS vencido,
+                COUNT(*) FILTER (WHERE h.status = 'paid')::int AS paid
+         FROM karate_dojo_annuity_history h
+         JOIN companies c ON c.id = h.dojo_id AND c.is_active IS NOT FALSE
+         WHERE h.federation_id = $1 AND h.dojo_id IS NOT NULL AND EXTRACT(YEAR FROM h.due_date)::int = $2`,
         [fedId, season]
       ),
       safeQuery(
@@ -1259,6 +1361,7 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
     ]);
 
     const dojoCount = parseInt(dojosRes.rows[0]?.total || 0, 10);
+    const dojoActiveCount = parseInt(dojoActiveRes.rows[0]?.total || 0, 10);
     const inadTotal = parseInt(inadRes.rows[0]?.total || 0, 10);
     const inadVencido = parseInt(inadRes.rows[0]?.vencido || 0, 10);
     const inadPaid = parseInt(inadRes.rows[0]?.paid || 0, 10);
@@ -1266,7 +1369,9 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
     const inadPct = inadTotal > 0 ? Math.round(inadVencido / inadTotal * 100) : null;
     const gradLast30 = parseInt(gradRes.rows[0]?.total || 0, 10);
     const activeDojos = parseInt(dormRes.rows[0]?.active_dojos || 0, 10);
-    const dormenteDojos = dojoCount - activeDojos;
+    // Dormência = dojôs ATIVOS (dojoActiveCount) sem exame/competição na
+    // season — dojô inativo não "dorme", ele saiu; não é reengajável.
+    const dormenteDojos = Math.max(dojoActiveCount - activeDojos, 0);
 
     const fedName = fed.name || 'Federação';
     const dateStr = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric', timeZone: 'America/Sao_Paulo' });
@@ -1295,7 +1400,7 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
         </tr>
         <tr>
           <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:13px;color:#44403c;">
-            Inadimplência (${season})
+            Inadimplência — dojôs ativos (${season})
           </td>
           <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:14px;font-weight:700;color:${inadVencido > 0 ? '#b02a2a' : '#15803d'};text-align:right;">
             ${inadPct !== null ? inadPct + '%' : '—'}
@@ -1303,7 +1408,7 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
         </tr>
         <tr>
           <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:13px;color:#44403c;">
-            Dojôs dormentes (${season})
+            Dojôs dormentes (ativos, ${season})
           </td>
           <td style="padding:10px 14px;border:1px solid #e6e0d4;font-size:14px;font-weight:700;color:${dormenteDojos > 0 ? '#b45309' : '#15803d'};text-align:right;">
             ${dormenteDojos}
@@ -1335,7 +1440,7 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
       sent: true,
       to: toEmail,
       season,
-      summary: { dojoCount, renewalPct, inadPct, dormenteDojos, gradLast30 },
+      summary: { dojoCount, dojoActiveCount, renewalPct, inadPct, dormenteDojos, gradLast30 },
     });
   } catch (err) {
     console.error('[networkHealth] report/send error:', err.message);
