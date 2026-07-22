@@ -78,9 +78,12 @@ describe('GET /financial/annuities/dojos — paginação real', () => {
         if (err) return done(err);
         expect(res.status).toBe(200);
         expect(res.body.pageSize).toBe(100);
-        // LIMIT deve ter ido pro banco já capado em 100
+        // LIMIT deve ter ido pro banco já capado em 100.
+        // [federationId, year, dojoStatusValues, search, statusValues, pageSize, offset]
+        // (dojo_status entrou como $3 — ver karateAnnuities.js — empurrando
+        // pageSize de $5 pra $6, índice 4 -> 5 aqui.)
         const dataCallParams = db.query.mock.calls[1][1];
-        expect(dataCallParams[4]).toBe(100);
+        expect(dataCallParams[5]).toBe(100);
         done();
       });
   });
@@ -96,8 +99,10 @@ describe('GET /financial/annuities/dojos — paginação real', () => {
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(200);
+        // [federationId, year, dojoStatusValues, search, statusValues, ...] —
+        // statusValues é o índice 4 agora (dojo_status entrou como $3).
         const countParams = db.query.mock.calls[0][1];
-        expect(countParams[3]).toEqual(['overdue', 'defaulting', 'suspended']);
+        expect(countParams[4]).toEqual(['overdue', 'defaulting', 'suspended']);
         done();
       });
   });

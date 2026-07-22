@@ -191,10 +191,25 @@ function statusFilterValues(status) {
 
 // SELECT list + WHERE compartilhados entre a query "com plan" (pós-migration
 // 222) e o fallback legado (sem h.plan) — só o que muda é a coluna h.plan.
+//
+// dojo_status (Caio, 21/07/2026): dojô inativo não é acionável — não dá
+// pra cobrar nem controlar quem já saiu da federação. Por isso a listagem
+// filtra por companies.is_active via $3 (array de boolean, ou NULL pra
+// "todos"). Default do endpoint é [true] (só ativos) — ver route handler
+// abaixo. c.is_active também é exposto no SELECT (dojo_is_active) pra UI
+// poder rotular o dojô quando dojo_status=all/inactive trouxer os dois.
+// MESMO critério usado pelo summary/KPIs (karateAnnuitySummary.js) — ver
+// dojoStatusToIsActiveValues em karateAnnuityService.js, compartilhado
+// pelos dois arquivos pra lista e KPI nunca divergirem.
+//
+// ⚠️ Numeração posicional: $1=federationId, $2=year, $3=dojoStatusValues.
+// Isso empurra o resto pra baixo — search vira $4, statusValues $5,
+// pageSize $6, offset $7 (ver DOJOS_FILTER_SQL e os 4 call sites da rota).
 function dojosBaseSql(withPlan) {
   return `
     SELECT
       c.id AS dojo_id, c.name AS dojo_name, c.fpkt_affiliation_id,
+      c.is_active AS dojo_is_active,
       COALESCE(NULLIF(c.wa_phone_display, ''), c.phone) AS whatsapp,
       NULLIF(c.email, '') AS email,
       h.id AS annuity_id, h.reference_period, h.amount, h.due_date,
@@ -215,12 +230,13 @@ function dojosBaseSql(withPlan) {
     LEFT JOIN karate_dojo_annuity_history h
       ON h.dojo_id = c.id AND h.reference_period = $2
     WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
+      AND ($3::boolean[] IS NULL OR c.is_active = ANY($3::boolean[]))
   `;
 }
 
 const DOJOS_FILTER_SQL = `
-  WHERE ($3::text IS NULL OR dojo_name ILIKE '%' || $3 || '%' OR fpkt_affiliation_id ILIKE '%' || $3 || '%')
-    AND ($4::text[] IS NULL OR computed_status = ANY($4::text[]))
+  WHERE ($4::text IS NULL OR dojo_name ILIKE '%' || $4 || '%' OR fpkt_affiliation_id ILIKE '%' || $4 || '%')
+    AND ($5::text[] IS NULL OR computed_status = ANY($5::text[]))
 `;
 
 router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
@@ -234,6 +250,19 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
     : new Date().getFullYear().toString();
   const statusValues = statusFilterValues(status);
   const search = (req.query.q && String(req.query.q).trim()) ? String(req.query.q).trim() : null;
+  // dojo_status: ativo/inativo do DOJÔ (companies.is_active) — NÃO confundir
+  // com `status`, que é status de ANUIDADE (paid/overdue/em_aberto/...).
+  // Default 'active' (Caio, 21/07/2026): inativo nunca infla a listagem
+  // nem os KPIs por padrão. Ver dojoStatusToIsActiveValues (compartilhado
+  // com o summary em karateAnnuityService.js).
+  const dojoStatus = annuitySvc.parseDojoStatus(req.query.dojo_status);
+  if (dojoStatus === null) {
+    return res.status(422).json({
+      error: `dojo_status inválido. Valores aceitos: ${annuitySvc.DOJO_STATUS_VALUES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  const dojoStatusValues = annuitySvc.dojoStatusToIsActiveValues(dojoStatus);
 
   try {
     let dojos;
@@ -243,14 +272,14 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
       try {
         const countRes = await db.query(
           `SELECT COUNT(*)::int AS total FROM (${dojosBaseSql(true)}) base ${DOJOS_FILTER_SQL}`,
-          [federationId, year, search, statusValues]
+          [federationId, year, dojoStatusValues, search, statusValues]
         );
         total = countRes.rows[0]?.total || 0;
         const r = await db.query(
           `SELECT * FROM (${dojosBaseSql(true)}) base ${DOJOS_FILTER_SQL}
            ORDER BY fpkt_affiliation_id ASC NULLS LAST, dojo_name ASC
-           LIMIT $5 OFFSET $6`,
-          [federationId, year, search, statusValues, pageSize, offset]
+           LIMIT $6 OFFSET $7`,
+          [federationId, year, dojoStatusValues, search, statusValues, pageSize, offset]
         );
         dojos = r.rows;
       } catch (e) {
@@ -264,14 +293,14 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
     if (!selectedPlan) {
       const countRes = await db.query(
         `SELECT COUNT(*)::int AS total FROM (${dojosBaseSql(false)}) base ${DOJOS_FILTER_SQL}`,
-        [federationId, year, search, statusValues]
+        [federationId, year, dojoStatusValues, search, statusValues]
       );
       total = countRes.rows[0]?.total || 0;
       const r = await db.query(
         `SELECT * FROM (${dojosBaseSql(false)}) base ${DOJOS_FILTER_SQL}
          ORDER BY fpkt_affiliation_id ASC NULLS LAST, dojo_name ASC
-         LIMIT $5 OFFSET $6`,
-        [federationId, year, search, statusValues, pageSize, offset]
+         LIMIT $6 OFFSET $7`,
+        [federationId, year, dojoStatusValues, search, statusValues, pageSize, offset]
       );
       dojos = r.rows;
     }
@@ -300,6 +329,9 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
         dojo_id: d.dojo_id,
         dojo_name: d.dojo_name,
         fpkt_affiliation_id: d.fpkt_affiliation_id || null,
+        // is_active: companies.is_active do dojô — pra UI rotular quando
+        // dojo_status=all/inactive trouxer registros inativos na mesma lista.
+        is_active: d.dojo_is_active !== false,
         whatsapp: d.whatsapp || null,
         email: d.email || null,
         annuity_id: d.annuity_id || null,
@@ -1460,6 +1492,18 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
 
 // ────────────────────────────────────────────────────────────────
 // CPF ANNUITIES
+//
+// dojo_status (ver seção DOJO ANNUITIES acima) NÃO tem equivalente aqui
+// por enquanto. cpfBaseSql já filtra `COALESCE(cu.is_active, true)` de
+// forma FIXA (sem toggle) desde o BUGFIX P0 de 11/07/2026 — praticante
+// inativo simplesmente NUNCA entra na listagem nem no segmento
+// `praticante` do summary (karateAnnuitySummary.js usa o mesmo predicado).
+// Isso já cumpre a premissa "inativo não polui os números" pro lado CPF,
+// mas diverge do padrão novo do dojô (ativo por padrão, inativo acessível
+// via filtro explícito — nunca some do sistema): hoje não existe forma de
+// listar/auditar praticante inativo por essa rota. Trade-off aceito pra
+// este PR (dojô primeiro, per escopo combinado) — dar ao CPF o mesmo
+// leque active|inactive|all fica de FOLLOW-UP explícito, não é silencioso.
 // ────────────────────────────────────────────────────────────────
 
 // GET /financial/annuities/cpf

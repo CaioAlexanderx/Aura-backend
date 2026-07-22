@@ -45,10 +45,15 @@
 //     Praticante que perdeu a faixa preta ou ficou inativo depois de ter
 //     sido cobrado SAI do KPI (mesmo comportamento de
 //     karate_member_standing, que também filtra por estado atual).
-//   - Segmento `dojo` não filtra por is_active — mesma paridade de
-//     karate_dojo_standing (todo dojô com cobrança conta, ativo ou não;
-//     dojô inativo simplesmente não GERA cobrança nova, mas uma cobrança
-//     histórica de quando estava ativo continua no KPI).
+//   - Segmento `dojo` FILTRA por companies.is_active (decisão de produto,
+//     Caio 21/07/2026: "não temos ação, não podemos cobrar e controlar os
+//     inativos [...] o mesmo para indicadores e números absolutos, sempre
+//     ativos primeiro"). Default é só dojô ATIVO — dojô inativo com saldo
+//     em aberto NÃO infla previsto/recebido/em_aberto/atrasado por padrão.
+//     Aceita `?dojo_status=active|inactive|all` (mesmo parâmetro e mesmo
+//     default de GET /financial/annuities/dojos — ver dojoStatusToIsActiveValues
+//     em karateAnnuityService.js, IMPORTADO daqui, não reimplementado, pra
+//     lista×KPI nunca divergirem no critério de ativo/inativo).
 //   - Ausência de cobrança nunca aparece aqui como "atrasado" — dojôs/
 //     praticantes sem nenhuma parcela no ano simplesmente não somam em
 //     nenhum bucket (não existe bucket "sem_cobranca" nos KPIs; ele é
@@ -76,6 +81,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
+const annuitySvc = require('../services/karateAnnuityService');
 
 function emptyBucket() {
   return { valor: 0, count: 0 };
@@ -109,6 +115,10 @@ function rowToSegment(row) {
 // GROUPING SETS ((kind), ()) devolve 3 linhas numa query só: 'dojo',
 // 'praticante' e uma linha com kind=NULL (o total geral) — evita 3 queries
 // separadas e garante que total = dojo + praticante sempre (mesma fonte).
+// dojo_status ($3, boolean[] ou NULL): mesmo critério/mesmo parâmetro de
+// GET /financial/annuities/dojos (karateAnnuities.js) — companies.is_active
+// do dojô. Aplicado só na perna 'dojo' do OR; a perna 'praticante' segue
+// intocada (customers.is_active + faixa preta, regra própria dela).
 const SUMMARY_SQL = `
   WITH elig AS (
     SELECT i.amount, i.amount_paid, i.status, i.due_date,
@@ -117,10 +127,14 @@ const SUMMARY_SQL = `
     JOIN karate_dojo_annuity_history h ON h.id = i.annuity_id
     LEFT JOIN customers cu ON cu.id = h.practitioner_id
     LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id
+    LEFT JOIN companies c ON c.id = h.dojo_id
     WHERE h.federation_id = $1
       AND h.reference_period = $2
       AND (
-        h.dojo_id IS NOT NULL
+        (
+          h.dojo_id IS NOT NULL
+          AND ($3::boolean[] IS NULL OR COALESCE(c.is_active, true) = ANY($3::boolean[]))
+        )
         OR (
           h.practitioner_id IS NOT NULL
           AND COALESCE(cu.is_active, true)
@@ -148,9 +162,21 @@ router.get('/annuities/summary', ...guards.adminOnly(), async (req, res) => {
   const year = (req.query.year && /^\d{4}$/.test(String(req.query.year)))
     ? String(req.query.year)
     : new Date().getFullYear().toString();
+  // dojo_status: MESMO parâmetro/MESMO default ('active') de
+  // GET /financial/annuities/dojos — parseDojoStatus/dojoStatusToIsActiveValues
+  // vêm de karateAnnuityService.js pra garantir que o segmento `dojo` do
+  // summary e a listagem usem exatamente o mesmo universo de dojôs.
+  const dojoStatus = annuitySvc.parseDojoStatus(req.query.dojo_status);
+  if (dojoStatus === null) {
+    return res.status(422).json({
+      error: `dojo_status inválido. Valores aceitos: ${annuitySvc.DOJO_STATUS_VALUES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  const dojoStatusValues = annuitySvc.dojoStatusToIsActiveValues(dojoStatus);
 
   try {
-    const { rows } = await db.query(SUMMARY_SQL, [federationId, year]);
+    const { rows } = await db.query(SUMMARY_SQL, [federationId, year, dojoStatusValues]);
     const out = emptySummary(year);
     for (const row of rows) {
       const seg = rowToSegment(row);

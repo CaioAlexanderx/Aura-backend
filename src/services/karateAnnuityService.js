@@ -570,6 +570,38 @@ function categoryForKind(kind) {
   return kind === 'cpf' ? 'annuity_cpf' : 'annuity_dojo';
 }
 
+// ── dojo_status (filtro de ativo/inativo do DOJÔ) ──────────────────────
+// Decisão de produto (Caio, 21/07/2026): "nao temos acao, nao podemos
+// cobrar e controlar os inativos. Logo, precisamos sempre ter essa visao
+// segmentada [...] o mesmo para indicadores e numeros absolutos, sempre
+// ativos primeiro." Compartilhado aqui entre GET /annuities/dojos
+// (karateAnnuities.js) e GET /annuities/summary (karateAnnuitySummary.js)
+// para garantir que lista e KPIs usem SEMPRE o mesmo criterio -- se
+// divergirem, o topo do hub mostra um numero e a lista mostra outro (bug
+// ja visto neste produto). NAO confundir com `customers.is_active`
+// (praticante) -- este filtro e sobre `companies.is_active` (dojo).
+//
+// Valores aceitos: 'active' (default) | 'inactive' | 'all'.
+const DOJO_STATUS_VALUES = ['active', 'inactive', 'all'];
+
+// Faz o parse do query param `dojo_status`. Retorna null se o valor
+// informado for invalido (caller decide como reportar -- normalmente 422).
+// String vazia/ausente => default 'active'.
+function parseDojoStatus(raw) {
+  const v = (raw !== undefined && raw !== null && String(raw).trim() !== '')
+    ? String(raw).trim()
+    : 'active';
+  return DOJO_STATUS_VALUES.includes(v) ? v : null;
+}
+
+// Converte o valor ja parseado de dojo_status no array usado no SQL
+// (`c.is_active = ANY($N::boolean[])`, ou NULL pra "sem filtro" = 'all').
+function dojoStatusToIsActiveValues(dojoStatus) {
+  if (dojoStatus === 'all') return null;
+  if (dojoStatus === 'inactive') return [false];
+  return [true]; // 'active' (default)
+}
+
 module.exports = {
   VALID_PLANS,
   PLANO_INDEFINIDO_REASON,
@@ -599,4 +631,7 @@ module.exports = {
   remainingMonthsFromAffiliation,
   computeProportionalAnnuity,
   distributeAmountAcrossInstallments,
+  DOJO_STATUS_VALUES,
+  parseDojoStatus,
+  dojoStatusToIsActiveValues,
 };
