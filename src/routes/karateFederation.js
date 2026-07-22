@@ -56,6 +56,37 @@ function beltRank(level, name) {
   return 500; // desconhecida → antes da vermelha, depois das conhecidas
 }
 
+// ── Segmentação por is_active do PRATICANTE (customers.is_active) ──────
+// Decisão de produto (Caio 21/07/2026, mesma citada em
+// karateAnnuityService.js/dojoStatusToIsActiveValues): "não podemos cobrar e
+// controlar os inativos [...] o mesmo para indicadores e números absolutos,
+// sempre ativos primeiro." Aqui o filtro é sobre customers.is_active
+// (PRATICANTE) — NÃO confundir com companies.is_active (dojô), que é outro
+// campo (ver karateAnnuitySummary.js). Usado por "Praticantes por graduação"
+// (dashboard) e por GET /belt-distribution — os dois DEVEM aceitar o mesmo
+// parâmetro/mesmo default, senão o card do painel e o endpoint dedicado
+// divergem no mesmo número (mesma classe de bug já vista em anuidades).
+// Default 'active' (só ativos) — espelha Praticantes-federação, Dojôs e
+// Anuidades, que já seguem essa premissa.
+const PRACTITIONER_STATUS_VALUES = ['active', 'inactive', 'all'];
+
+// String vazia/ausente => default 'active'. Retorna null se valor inválido
+// (caller decide como reportar — aqui sempre 422).
+function parsePractitionerStatus(raw) {
+  const v = (raw !== undefined && raw !== null && String(raw).trim() !== '')
+    ? String(raw).trim()
+    : 'active';
+  return PRACTITIONER_STATUS_VALUES.includes(v) ? v : null;
+}
+
+// Converte o status já parseado no array usado no SQL
+// (`c.is_active = ANY($N::boolean[])`), ou null pra "sem filtro" ('all').
+function practitionerStatusToIsActiveValues(status) {
+  if (status === 'all') return null;
+  if (status === 'inactive') return [false];
+  return [true]; // 'active' (default)
+}
+
 // ── POST /karate/federation/setup ──────────────────────
 router.post('/federation/setup', requireAuth, async (req, res) => {
   const { name, slug, logo_url } = req.body;
@@ -141,6 +172,18 @@ router.post('/federation/setup', requireAuth, async (req, res) => {
 router.get('/dashboard', ...guards.read(), async (req, res) => {
   const federationId = req.params.id;
   const currentYear = new Date().getFullYear().toString();
+  // belt_distribution: ?status=active|inactive|all (default 'active') — ver
+  // parsePractitionerStatus/practitionerStatusToIsActiveValues acima. MESMO
+  // parâmetro/MESMO default de GET /belt-distribution (endpoint dedicado),
+  // pra card do painel e endpoint nunca divergirem no mesmo número.
+  const practitionerStatus = parsePractitionerStatus(req.query.status);
+  if (practitionerStatus === null) {
+    return res.status(422).json({
+      error: `status inválido. Valores aceitos: ${PRACTITIONER_STATUS_VALUES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  const practitionerActiveValues = practitionerStatusToIsActiveValues(practitionerStatus);
 
   try {
     // ── 1. KPIs principais (paralelo) ────────────────────────
@@ -254,14 +297,16 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
     // belt_level sozinho NÃO separaria os Dan — por isso o rank vai no payload e a
     // lista já sai pré-ordenada. (A distribuição continua incluindo a Vermelha
     // aqui; quem oculta a Vermelha é o FE.)
+    const beltParams = practitionerActiveValues ? [federationId, practitionerActiveValues] : [federationId];
     const beltRes = await db.query(
       `SELECT cb.belt_level, cb.belt_name, COUNT(*) AS count
        FROM karate_current_belt cb
        JOIN customers c ON c.id = cb.student_id
        WHERE c.federation_id = $1
+         ${practitionerActiveValues ? 'AND c.is_active = ANY($2::boolean[])' : ''}
        GROUP BY cb.belt_level, cb.belt_name
        ORDER BY cb.belt_level`,
-      [federationId]
+      beltParams
     );
 
     // Scaffold das faixas KYU canônicas (FPKT Shotokan) — garante que toda
@@ -403,6 +448,10 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
       upcoming_events:  upcomingEvents,
       overdue_dojos:    overdueDojosCapped,
       belt_distribution: beltDistribution,
+      // Status aplicado ao belt_distribution acima (mesmo default/mesmo
+      // parâmetro de GET /belt-distribution) — o FE usa pra refletir o
+      // toggle ativo/inativo/todos no card do painel.
+      belt_distribution_status: practitionerStatus,
       alerts,  // Track P: novo campo aditivo
     });
   } catch (err) {
@@ -415,15 +464,29 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
 router.get('/belt-distribution', ...guards.read(), async (req, res) => {
   const federationId = req.params.id;
 
+  // ?status=active|inactive|all (default 'active') — MESMO parâmetro/MESMO
+  // default do card "Praticantes por graduação" no dashboard (ver
+  // parsePractitionerStatus acima), pra nunca divergir do mesmo número.
+  const practitionerStatus = parsePractitionerStatus(req.query.status);
+  if (practitionerStatus === null) {
+    return res.status(422).json({
+      error: `status inválido. Valores aceitos: ${PRACTITIONER_STATUS_VALUES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  const practitionerActiveValues = practitionerStatusToIsActiveValues(practitionerStatus);
+
   try {
+    const beltParams = practitionerActiveValues ? [federationId, practitionerActiveValues] : [federationId];
     const { rows } = await db.query(
       `SELECT cb.belt_level, cb.belt_name, COUNT(*) AS count
        FROM karate_current_belt cb
        JOIN customers c ON c.id = cb.student_id
        WHERE c.federation_id = $1
+         ${practitionerActiveValues ? 'AND c.is_active = ANY($2::boolean[])' : ''}
        GROUP BY cb.belt_level, cb.belt_name
        ORDER BY cb.belt_level`,
-      [federationId]
+      beltParams
     );
 
     res.json(rows
@@ -456,9 +519,10 @@ router.get('/search', ...guards.read(), async (req, res) => {
 
   try {
     const [dojoRes, practRes] = await Promise.all([
-      // Dojôs: busca por nome ou FPKT-ID
+      // Dojôs: busca por nome ou FPKT-ID. is_active exposto (não filtrado
+      // — busca é pontual/baixo impacto) pra o FE marcar visualmente "inativo".
       db.query(
-        `SELECT c.id, c.name, c.fpkt_affiliation_id, c.region,
+        `SELECT c.id, c.name, c.fpkt_affiliation_id, c.region, c.is_active,
                 COUNT(cu.id)::int AS practitioner_count
          FROM companies c
          LEFT JOIN customers cu ON cu.dojo_id = c.id
@@ -470,11 +534,12 @@ router.get('/search', ...guards.read(), async (req, res) => {
          LIMIT 10`,
         [federationId, pattern]
       ),
-      // Praticantes: busca por nome ou número de registro
+      // Praticantes: busca por nome ou número de registro. is_active exposto
+      // (mesmo motivo acima — não filtra, só marca).
       db.query(
         `SELECT cu.id, cu.name AS full_name, cu.karate_registration_number,
                 dj.name AS dojo_name,
-                cb.belt_name
+                cb.belt_name, cu.is_active
          FROM customers cu
          LEFT JOIN companies dj ON dj.id = cu.dojo_id
          LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = $1
@@ -493,6 +558,7 @@ router.get('/search', ...guards.read(), async (req, res) => {
         name: d.name,
         fpkt_affiliation_id: d.fpkt_affiliation_id || null,
         region: d.region || null,
+        is_active: d.is_active !== false,
         practitioner_count: d.practitioner_count || 0,
         _type: 'dojo',
       })),
@@ -502,6 +568,7 @@ router.get('/search', ...guards.read(), async (req, res) => {
         karate_registration_number: p.karate_registration_number || null,
         dojo_name: p.dojo_name || null,
         belt_name: p.belt_name || null,
+        is_active: p.is_active !== false,
         _type: 'practitioner',
       })),
     });
