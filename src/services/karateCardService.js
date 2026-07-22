@@ -497,7 +497,22 @@ async function getCardCopyByToken(token, identifier) {
   };
 }
 
-/** listCards — listagem interna (admin/staff). */
+/**
+ * listCards — listagem interna (admin/staff).
+ *
+ * `status` aqui é o status da CARTEIRINHA (kc.status: active/expired/
+ * revoked...) — já existia antes deste patch, mantido como está. Auditoria
+ * ativo/inativo (21/07/2026): a listagem não fazia JOIN em customers.is_active
+ * nem devolvia o campo, então carteirinha de praticante inativo aparecia
+ * misturada sem marcação nenhuma. customers já era JOINado aqui (cu), então
+ * só expomos cu.is_active pro FE poder mostrar a badge — NÃO filtramos por
+ * padrão (endpoint interno de baixo uso, pode ter uso legítimo de ver
+ * todas as carteirinhas independente do praticante estar ativo). Não
+ * reaproveitamos o nome `status` pra isso (colidiria com o status de
+ * carteirinha já existente); se um filtro por praticante ativo/inativo for
+ * necessário aqui, usar um param novo (ex.: `practitioner_status`) — não
+ * implementado agora por falta de caso de uso confirmado.
+ */
 async function listCards({ federation_id, status, page = 1, pageSize = 25 }) {
   const conds = ['kc.federation_id = $1'];
   const params = [federation_id];
@@ -512,7 +527,8 @@ async function listCards({ federation_id, status, page = 1, pageSize = 25 }) {
             COALESCE(cu.karate_registration_number, kc.card_number)      AS card_number,
             COALESCE(cb.belt_name, kc.belt_name_snapshot)                AS belt_name,
             COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot) AS dojo_name,
-            cu.name AS student_name
+            cu.name AS student_name,
+            cu.is_active AS practitioner_is_active
      FROM karate_membership_cards kc
      JOIN customers cu ON cu.id = kc.student_id
      LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = kc.federation_id
@@ -536,6 +552,8 @@ async function listCards({ federation_id, status, page = 1, pageSize = 25 }) {
       is_minor: c.is_minor,
       status: effectiveStatus(c),
       issued_at: c.issued_at,
+      // Praticante (não a carteirinha) — badge de inativo no FE. Não filtra.
+      is_active: c.practitioner_is_active !== false,
     })),
   };
 }

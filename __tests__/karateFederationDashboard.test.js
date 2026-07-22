@@ -166,3 +166,78 @@ describe('GET /federation/:id/dashboard — coerência de métricas', () => {
       });
   });
 });
+
+// ── belt_distribution: segmentação por is_active do PRATICANTE ──────
+// Auditoria 21/07/2026 (Caio: "não podemos cobrar e controlar os inativos
+// [...] sempre ativos primeiro"): "Praticantes por graduação" não filtrava
+// por customers.is_active. Cobre: default só ativos (params traz o array
+// boolean[] e a query text traz o filtro), toggle ?status=all (sem filtro)
+// e ?status=inactive (filtro por inativos), e 422 pra status inválido —
+// SEM tocar na ordem/contagem das outras queries do handler (mesma
+// primeDashboard, mesmo mock sequencial).
+describe('GET /federation/:id/dashboard — belt_distribution por is_active', () => {
+  let app;
+  beforeAll(() => { app = buildApp(); });
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  it('default (sem ?status): filtra customers.is_active = ANY([true]) e devolve belt_distribution_status="active"', (done) => {
+    primeDashboard({ dojoCount: 1, annuityRows: [] });
+    request(app)
+      .get(`/federation/${FED_ID}/dashboard`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.belt_distribution_status).toBe('active');
+        // beltRes é a 5ª chamada a db.query (dojoRes, practRes, revenueRes, annuityRes, beltRes)
+        const beltCall = db.query.mock.calls[4];
+        expect(beltCall[0]).toMatch(/c\.is_active = ANY\(\$2::boolean\[\]\)/);
+        expect(beltCall[1]).toEqual([FED_ID, [true]]);
+        done();
+      });
+  });
+
+  it('?status=all: remove o filtro de is_active (só $1)', (done) => {
+    primeDashboard({ dojoCount: 1, annuityRows: [] });
+    request(app)
+      .get(`/federation/${FED_ID}/dashboard?status=all`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.belt_distribution_status).toBe('all');
+        const beltCall = db.query.mock.calls[4];
+        expect(beltCall[0]).not.toMatch(/is_active/);
+        expect(beltCall[1]).toEqual([FED_ID]);
+        done();
+      });
+  });
+
+  it('?status=inactive: filtra customers.is_active = ANY([false])', (done) => {
+    primeDashboard({ dojoCount: 1, annuityRows: [] });
+    request(app)
+      .get(`/federation/${FED_ID}/dashboard?status=inactive`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.belt_distribution_status).toBe('inactive');
+        const beltCall = db.query.mock.calls[4];
+        expect(beltCall[1]).toEqual([FED_ID, [false]]);
+        done();
+      });
+  });
+
+  it('?status inválido -> 422 VALIDATION_ERROR, nenhuma query dispara', (done) => {
+    request(app)
+      .get(`/federation/${FED_ID}/dashboard?status=bogus`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        expect(res.body.code).toBe('VALIDATION_ERROR');
+        expect(db.query).not.toHaveBeenCalled();
+        done();
+      });
+  });
+});
