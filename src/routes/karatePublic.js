@@ -146,6 +146,56 @@ router.post('/verify/:token/card', async (req, res) => {
   }
 });
 
+// ── GET /card/:token — carteirinha virtual COMPLETA (com foto) por token ──
+// Diferente do /verify/:token (reduzido, LGPD — corta CPF/nascimento/
+// histórico e esconde foto de menor): este endpoint devolve o cartão CHEIO,
+// mesmo shape usado na emissão/impressão da carteirinha (inclui foto), pra
+// a federação mandar o link da carteirinha VIRTUAL no lugar de imprimir.
+//
+// Token-gated pelo MESMO verify_token do cartão (link opaco/inadivinhável,
+// compartilhado pela federação direto com o titular) — sem auth, mas só
+// devolve o cartão daquele token: nunca lista, nunca aceita id sequencial.
+// Não expõe id/federation_id/student_id internos (não usados pra renderizar
+// a carteirinha no front).
+//
+// 404 quando o token não corresponde a NENHUMA carteirinha. Carteirinha
+// REVOGADA não é 404 — devolve 200 com status:'revoked' no corpo, pro front
+// marcar "revogada" na carteirinha virtual em vez de fingir que é válida.
+//
+// LGPD (decisão flagrada no PR): ao contrário do /verify, NÃO reduz nome nem
+// oculta foto de menor — a carteirinha impressa já mostra os dados reais do
+// menor (é a carteirinha dele), então a virtual espelha isso. Ver
+// getFullCardByToken (karateCardService.js) para o detalhe da decisão.
+router.get('/card/:token', async (req, res) => {
+  try {
+    const c = await cards.getFullCardByToken(req.params.token);
+    if (!c) {
+      return res.status(404).json({ error: 'Carteirinha não encontrada' });
+    }
+    res.json({
+      card_number: c.card_number,
+      cbkt_number: c.cbkt_number,
+      student_name: c.student_name,
+      birth_date: c.birth_date,
+      cpf: c.cpf,
+      belt: c.belt,
+      belt_name: c.belt_name,
+      dojo_name: c.dojo_name,
+      photo_url: c.photo_url,
+      is_minor: c.is_minor,
+      issued_at: c.issued_at,
+      revoked_at: c.revoked_at,
+      status: c.status,
+      verify_token: c.verify_token,
+      federation_name: c.federation_name,
+      federation_logo: c.federation_logo,
+    });
+  } catch (err) {
+    console.error('[karatePublic] full card by token error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar carteirinha' });
+  }
+});
+
 // ── GET /verify/cert/:token — verificação pública de certificado (Fase 3) ──
 router.get('/verify/cert/:token', async (req, res) => {
   try {
@@ -332,7 +382,6 @@ router.post('/portal/opt-in', requirePractitionerToken, async (req, res) => {
   }
 });
 
-// ── POST /:slug/portal/request-otp ────────────────────────
 router.post('/:slug/portal/request-otp', async (req, res) => {
   try {
     const fed = await resolveFederation(req.params.slug);
@@ -345,7 +394,6 @@ router.post('/:slug/portal/request-otp', async (req, res) => {
   }
 });
 
-// ── POST /:slug/portal/verify-otp ───────────────────────
 router.post('/:slug/portal/verify-otp', async (req, res) => {
   try {
     const fed = await resolveFederation(req.params.slug);

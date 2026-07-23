@@ -35,7 +35,7 @@ function buildApp() {
   return app;
 }
 
-// ── Lógica pura ──────────────────────────────────────────────
+// ── Lógica pura ────────────────────────────
 describe('karateCardService — computeIsMinor', () => {
   it('detecta menor de idade', () => {
     const d = new Date(); d.setFullYear(d.getFullYear() - 10);
@@ -59,7 +59,7 @@ describe('karateCardService — effectiveStatus (sem validade por tempo)', () =>
   });
 });
 
-// ── Verify público (LGPD + anuidade) ──────────────────────
+// ── Verify público (LGPD + anuidade) ────────────────
 describe('karateCardService — verifyByToken', () => {
   const TOKEN = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'; // 32 hex
 
@@ -123,7 +123,7 @@ describe('karateCardService — verifyByToken', () => {
   });
 });
 
-// ── Token de portal ─────────────────────────────────────────
+// ── Token de portal ───────────────────────────────
 describe('karatePortalAuthService — token de portal', () => {
   it('sign → verify roundtrip preserva ids', () => {
     const t = portalAuth.signPortalToken({ practitionerId: 'p1', federationId: 'f1' });
@@ -139,7 +139,7 @@ describe('karatePortalAuthService — token de portal', () => {
   });
 });
 
-// ── Rotas HTTP ───────────────────────────────────────────────
+// ── Rotas HTTP ──────────────────────────────────
 describe('POST /federation/:id/practitioners/:pid/issue-card', () => {
   const FED = 'fed-uuid-001';
   const PRAC = 'prac-uuid-001';
@@ -227,6 +227,170 @@ describe('POST /public/karate/:slug/portal/verify-otp', () => {
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(404);
+        done();
+      });
+  });
+});
+
+// ── Carteirinha virtual COMPLETA por token (com foto) ─────────────
+// GET /public/karate/card/:token — irmã do /verify (reduzido), pra a
+// federação mandar o link da carteirinha virtual no lugar de imprimir.
+describe('karateCardService — getFullCardByToken', () => {
+  const TOKEN = 'f1e2d3c4b5a697887766554433221100'; // 32 hex
+
+  beforeEach(() => jest.clearAllMocks());
+
+  // helper: monta a linha da query "ao vivo" (kc.* + joins)
+  const fullCardRow = (over = {}) => ({
+    id: 'card-1', federation_id: 'fed-1', student_id: 'stu-1',
+    dojo_id: 'dojo-1', verify_token: TOKEN, status: 'active',
+    revoked_at: null, issued_at: new Date('2026-01-10T12:00:00Z'),
+    student_name: 'Maria Souza', birth_date: '1990-01-01', cpf_cnpj: '12345678900',
+    belt_live: '1dan', belt_name_live: 'Preta',
+    dojo_id_live: 'dojo-1', dojo_name_live: 'Dojô X',
+    photo_url_live: 'https://cdn.example.com/photo.jpg',
+    card_number_live: 'FPKT-A-00001', cbkt_number_live: null,
+    federation_name: 'FPKT', federation_logo: null,
+    ...over,
+  });
+
+  it('token malformado → null (sem consultar DB)', async () => {
+    const r = await cardService.getFullCardByToken('not a token!');
+    expect(r).toBeNull();
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  it('token inexistente → null', async () => {
+    db.query.mockResolvedValueOnce({ rows: [] });
+    const r = await cardService.getFullCardByToken(TOKEN);
+    expect(r).toBeNull();
+  });
+
+  it('token válido → cartão cheio COM photo_url', async () => {
+    db.query.mockResolvedValueOnce({ rows: [fullCardRow()] });
+    const r = await cardService.getFullCardByToken(TOKEN);
+    expect(r).not.toBeNull();
+    expect(r.photo_url).toBe('https://cdn.example.com/photo.jpg');
+    expect(r.student_name).toBe('Maria Souza');
+    expect(r.card_number).toBe('FPKT-A-00001');
+    expect(r.belt_name).toBe('Preta');
+    expect(r.status).toBe('active');
+    expect(db.query).toHaveBeenCalledTimes(1);
+    // query só filtra por verify_token — nunca por id sequencial
+    expect(db.query.mock.calls[0][1]).toEqual([TOKEN]);
+  });
+
+  it('cartão revogado → status "revoked" (sem esconder dados)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [fullCardRow({ status: 'revoked', revoked_at: new Date('2026-02-01T00:00:00Z') })] });
+    const r = await cardService.getFullCardByToken(TOKEN);
+    expect(r.status).toBe('revoked');
+    expect(r.photo_url).toBe('https://cdn.example.com/photo.jpg');
+  });
+
+  it('menor → NÃO reduz nome nem esconde foto (decisão LGPD documentada no PR)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [fullCardRow({ birth_date: '2013-05-10', student_name: 'João Pedro Silva' })] });
+    const r = await cardService.getFullCardByToken(TOKEN);
+    expect(r.is_minor).toBe(true);
+    expect(r.student_name).toBe('João Pedro Silva'); // nome completo, ao contrário do /verify
+    expect(r.photo_url).toBe('https://cdn.example.com/photo.jpg'); // foto NÃO oculta
+  });
+});
+
+describe('GET /public/karate/card/:token', () => {
+  let app;
+  const TOKEN = 'f1e2d3c4b5a697887766554433221100';
+  beforeAll(() => { app = buildApp(); });
+  beforeEach(() => jest.clearAllMocks());
+
+  const fullCardRow = (over = {}) => ({
+    id: 'card-1', federation_id: 'fed-1', student_id: 'stu-1',
+    dojo_id: 'dojo-1', verify_token: TOKEN, status: 'active',
+    revoked_at: null, issued_at: new Date('2026-01-10T12:00:00Z'),
+    student_name: 'Maria Souza', birth_date: '1990-01-01', cpf_cnpj: '12345678900',
+    belt_live: '1dan', belt_name_live: 'Preta',
+    dojo_id_live: 'dojo-1', dojo_name_live: 'Dojô X',
+    photo_url_live: 'https://cdn.example.com/photo.jpg',
+    card_number_live: 'FPKT-A-00001', cbkt_number_live: null,
+    federation_name: 'FPKT', federation_logo: null,
+    ...over,
+  });
+
+  it('token válido → 200 com cartão cheio COM photo_url, e SEM ids internos', (done) => {
+    db.query.mockResolvedValueOnce({ rows: [fullCardRow()] });
+    request(app)
+      .get(`/public/karate/card/${TOKEN}`)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.photo_url).toBe('https://cdn.example.com/photo.jpg');
+        expect(res.body.student_name).toBe('Maria Souza');
+        expect(res.body.card_number).toBe('FPKT-A-00001');
+        expect(res.body.status).toBe('active');
+        expect(res.body.verify_token).toBe(TOKEN);
+        // não vaza ids internos que o front não usa pra renderizar
+        expect(res.body.id).toBeUndefined();
+        expect(res.body.federation_id).toBeUndefined();
+        expect(res.body.student_id).toBeUndefined();
+        done();
+      });
+  });
+
+  it('token inválido/inexistente → 404', (done) => {
+    db.query.mockResolvedValueOnce({ rows: [] });
+    request(app)
+      .get('/public/karate/card/0000000000000000000000000000dead')
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(404);
+        done();
+      });
+  });
+
+  it('cartão revogado → 200 com status:"revoked" (NÃO 404) pro front mostrar "revogada"', (done) => {
+    db.query.mockResolvedValueOnce({ rows: [fullCardRow({ status: 'revoked' })] });
+    request(app)
+      .get(`/public/karate/card/${TOKEN}`)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe('revoked');
+        expect(res.body.photo_url).toBeTruthy(); // continua com foto, só marcado como revogada
+        done();
+      });
+  });
+
+  it('rota só aceita o token — id extra na query string é ignorado (não vaza outro cartão)', (done) => {
+    db.query.mockResolvedValueOnce({ rows: [fullCardRow()] });
+    request(app)
+      .get(`/public/karate/card/${TOKEN}`)
+      .query({ id: 'outro-cartao-999' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        // a única chamada ao DB usa só o token do path, nunca o `id` da query
+        expect(db.query.mock.calls[0][1]).toEqual([TOKEN]);
+        done();
+      });
+  });
+
+  it('/verify/:token continua reduzido — não regrediu (sem photo_url/cpf/birth_date)', (done) => {
+    db.query
+      .mockResolvedValueOnce({ rows: [{
+        card_number: 'FPKT-A-00001', is_minor: false, card_status: 'active',
+        student_id: 'stu-1', federation_id: 'fed-1', dojo_name: 'Dojô X', dojo_name_snapshot: 'Dojô X',
+        birth_date: '1990-01-01', student_name: 'Maria Souza', belt: '1dan', belt_name: 'Preta',
+        belt_since: '2024-03-12', federation_name: 'FPKT', federation_logo: null,
+      }] })
+      .mockResolvedValueOnce({ rows: [] }); // anuidade
+    request(app)
+      .get(`/public/karate/verify/${TOKEN}`)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.photo_url).toBeUndefined();
+        expect(res.body.cpf).toBeUndefined();
+        expect(res.body.birth_date).toBeUndefined();
+        expect(res.body.display_name).toBe('Maria Souza');
         done();
       });
   });

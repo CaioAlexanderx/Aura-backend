@@ -339,6 +339,85 @@ function effectiveStatus(card) {
 }
 
 /**
+ * getFullCardByToken — carteirinha VIRTUAL COMPLETA (com foto) por token
+ * opaco. Irmã de verifyByToken: MESMA chave de busca (kc.verify_token) e
+ * MESMA estrutura "ao vivo" de getCurrentCard (faixa/dojô/foto/matrícula
+ * derivados do praticante atual, com fallback ao snapshot da emissão) —
+ * mas sem exigir { federation_id, student_id } (contexto autenticado), só
+ * o token. Usada pelo link compartilhável que a federação manda direto pro
+ * praticante no lugar de imprimir a carteirinha (substitui o PDF impresso).
+ *
+ * Decisão LGPD (flagrada no PR): ao contrário de verifyByToken (verificação
+ * pública por QR — reduz nome/oculta foto de menor), esta função NÃO aplica
+ * nenhum corte de menor. A carteirinha impressa já mostra nome e foto reais
+ * do menor (é a carteirinha DELE); este endpoint é o equivalente digital
+ * dessa MESMA carteirinha — não a verificação pública. O token é
+ * opaco/inadivinhável e distribuído pela federação diretamente ao titular
+ * (ou responsável, se menor).
+ *
+ * Devolve o cartão ESPECÍFICO daquele token, seja qual for o status
+ * (active/expired/revoked) — o chamador decide o que fazer com o status
+ * (ex.: marcar "revogada" na tela em vez de 404, pra não confundir "token
+ * inválido" com "carteirinha revogada"). Retorna null se o token não
+ * corresponde a nenhuma carteirinha.
+ */
+async function getFullCardByToken(token) {
+  if (!token || !/^[a-f0-9]{16,64}$/i.test(token)) return null;
+  const r = await db.query(
+    // Mesma query "ao vivo" de getCurrentCard, só troca o WHERE de
+    // (student_id, federation_id) para verify_token — único por cartão.
+    `SELECT kc.*, cu.name AS student_name,
+            to_char(cu.birth_date, 'YYYY-MM-DD') AS birth_date,
+            cu.cpf_cnpj,
+            COALESCE(cb.belt_level, kc.belt_snapshot)                          AS belt_live,
+            COALESCE(cb.belt_name,  kc.belt_name_snapshot)                     AS belt_name_live,
+            COALESCE(cu.dojo_id, kc.dojo_id)                                   AS dojo_id_live,
+            COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot)      AS dojo_name_live,
+            COALESCE(cu.karate_photo_url, cu.photo_url, kc.photo_url_snapshot) AS photo_url_live,
+            COALESCE(cu.karate_registration_number, kc.card_number)           AS card_number_live,
+            (SELECT bh.cbkt_number FROM karate_belt_history bh
+              WHERE bh.student_id = cu.id AND bh.federation_id = kc.federation_id
+                AND bh.belt_name = COALESCE(cb.belt_name, kc.belt_name_snapshot)
+                AND bh.cbkt_number IS NOT NULL
+              ORDER BY bh.graduated_at DESC NULLS LAST LIMIT 1)             AS cbkt_number_live,
+            COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
+            COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
+     FROM karate_membership_cards kc
+     JOIN customers cu ON cu.id = kc.student_id
+     LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = kc.federation_id
+     LEFT JOIN companies dj ON dj.id = cu.dojo_id
+     LEFT JOIN companies fed ON fed.id = kc.federation_id
+     WHERE kc.verify_token = $1
+     LIMIT 1`,
+    [token]
+  );
+  if (!r.rows.length) return null;
+  const c = r.rows[0];
+  return {
+    id: c.id,
+    federation_id: c.federation_id,
+    student_id: c.student_id,
+    dojo_id: c.dojo_id_live,
+    student_name: c.student_name,
+    birth_date: c.birth_date,   // ja formatado YYYY-MM-DD (tz-safe, to_char)
+    cpf: c.cpf_cnpj || null,
+    card_number: c.card_number_live,
+    cbkt_number: c.cbkt_number_live || null,
+    belt: c.belt_live,
+    belt_name: c.belt_name_live,
+    dojo_name: c.dojo_name_live,
+    photo_url: c.photo_url_live,
+    is_minor: computeIsMinor(c.birth_date),
+    issued_at: c.issued_at,
+    revoked_at: c.revoked_at || null,
+    verify_token: c.verify_token,
+    status: effectiveStatus(c),
+    federation_name: c.federation_name || null,
+    federation_logo: c.federation_logo || null,
+  };
+}
+
+/**
  * verifyByToken — DADOS MÍNIMOS para a página pública de verificação (LGPD).
  * Nunca expõe CPF, data de nascimento, contato ou histórico de graduações.
  * Menores: nome reduzido ("Primeiro S.") + foto oculta (frontend); o nº de
@@ -957,6 +1036,7 @@ module.exports = {
   issueCard,
   revokeCard,
   getCurrentCard,
+  getFullCardByToken,
   verifyByToken,
   getCardCopyByToken,
   listCards,
