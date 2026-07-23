@@ -577,6 +577,161 @@ async function getCardCopyByToken(token, identifier) {
 }
 
 /**
+ * getCardPreviewByToken — contexto MÍNIMO pré-identidade da carteirinha
+ * virtual (GET /card/:token, decisão Caio 21/07/2026: o cartão CHEIO com
+ * foto não pode mais ser liberado só com o token — link vazado exporia a
+ * foto de qualquer um). Devolve só o suficiente pra tela dizer "carteirinha
+ * de [dojô/federação] — confirme sua identidade": SEM nome, foto, CPF, RG,
+ * nascimento ou status do praticante/cartão.
+ *
+ * Propositalmente NÃO faz JOIN em `customers` — defesa em profundidade,
+ * pra nenhum dado do praticante conseguir vazar aqui nem por engano futuro
+ * (ex.: alguém adiciona uma coluna ao SELECT sem perceber que este é o
+ * passo PRÉ-identidade). O contexto de dojô vem de `kc.dojo_id` (snapshot
+ * da carteirinha), não do praticante.
+ *
+ * Retorna null se o token não corresponde a nenhuma carteirinha (mesmo
+ * 404 genérico do GET).
+ */
+async function getCardPreviewByToken(token) {
+  if (!token || !/^[a-f0-9]{16,64}$/i.test(token)) return null;
+  const r = await db.query(
+    `SELECT COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot) AS dojo_name,
+            COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
+            COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
+     FROM karate_membership_cards kc
+     LEFT JOIN companies dj  ON dj.id = kc.dojo_id
+     LEFT JOIN companies fed ON fed.id = kc.federation_id
+     WHERE kc.verify_token = $1
+     LIMIT 1`,
+    [token]
+  );
+  if (!r.rows.length) return null;
+  const c = r.rows[0];
+  return {
+    dojo_name: c.dojo_name || null,
+    federation_name: c.federation_name || null,
+    federation_logo: c.federation_logo || null,
+  };
+}
+
+/**
+ * verifyCardIdentityByToken — gate de identidade pra liberar o cartão
+ * CHEIO (com foto) da carteirinha virtual. MESMO padrão/filosofia de erro
+ * de karateRosterSelfServicePublic.js (link do aluno): escopo (token) +
+ * identidade batida numa query atômica SÓ; qualquer UM de nascimento/RG/
+ * CPF que confira libera; 0 linhas = mismatch, SEM distinguir "token bem
+ * formado mas que não existe" de "token existe mas identidade não bate"
+ * de "praticante não tem esse dado cadastrado" — os três casos voltam o
+ * MESMO `{ mismatch: true }` (403 IDENTITY_MISMATCH na rota). Essa é a
+ * leitura LITERAL do requisito ("token inválido e identidade errada devem
+ * ser indistinguíveis"): ao contrário do GET leve (que resolve a
+ * existência do token separadamente e devolve 404 — precisa, pra tela
+ * poder dizer "link quebrado"), este endpoint É o alvo de força bruta
+ * (identidade), então não dá NENHUM sinal a mais sobre o token em cima do
+ * que a identidade já revelaria.
+ *
+ * Só um caso curto-circuita pra `{ not_found: true }` (404) SEM consultar
+ * o banco: token com FORMATO inválido (nem 16-64 hex chars) — mesmo
+ * comportamento de getFullCardByToken/verifyByToken/getCardCopyByToken
+ * neste arquivo (todas tratam string fora do formato como erro de input,
+ * não como sinal sobre um token específico — não revela nada sobre se
+ * ALGUM token real existe).
+ *
+ * birthDate já deve chegar normalizado (YYYY-MM-DD, por REGEX/componente —
+ * nunca `new Date(iso)`, ver normalizeBirthDateInput em karatePublic.js).
+ * A comparação de nascimento acontece via `to_char` no SQL (nunca em JS),
+ * pra nunca sofrer shift de fuso (armadilha P0 do CLAUDE.md). cpfDigits/
+ * rgDigits já devem chegar só-dígitos (onlyDigits).
+ *
+ * Retorna:
+ *   { not_found: true } — token com formato inválido (erro de input)
+ *   { mismatch: true }  — token bem formado SEM match (existente ou não,
+ *                          identidade certa ou não — tudo o mesmo bucket)
+ *   { card: {...} }     — MESMO shape de getFullCardByToken (cartão cheio)
+ */
+async function verifyCardIdentityByToken(token, { birthDate, cpfDigits, rgDigits } = {}) {
+  if (!token || !/^[a-f0-9]{16,64}$/i.test(token)) return { not_found: true };
+
+  const identityParts = [];
+  const params = [token];
+  let n = 2;
+  if (birthDate) {
+    identityParts.push(`to_char(cu.birth_date, 'YYYY-MM-DD') = $${n}`);
+    params.push(birthDate);
+    n++;
+  }
+  if (cpfDigits) {
+    identityParts.push(`regexp_replace(COALESCE(cu.cpf_cnpj,''), '[^0-9]', '', 'g') = $${n}`);
+    params.push(cpfDigits);
+    n++;
+  }
+  if (rgDigits) {
+    identityParts.push(`regexp_replace(COALESCE(cu.rg,''), '[^0-9]', '', 'g') = $${n}`);
+    params.push(rgDigits);
+    n++;
+  }
+  // Chamador (karatePublic.js) já valida que ao menos um fator plausível
+  // veio no body antes de chegar aqui — sem fator nenhum, nem consulta o
+  // banco (evita query sempre-falsa).
+  if (!identityParts.length) return { mismatch: true };
+
+  const r = await db.query(
+    // MESMA query "ao vivo" de getFullCardByToken, só acrescenta o WHERE de
+    // identidade (OR entre os fatores informados) — escopo (token) e
+    // identidade resolvidos atomicamente na MESMA query.
+    `SELECT kc.*, cu.name AS student_name,
+            to_char(cu.birth_date, 'YYYY-MM-DD') AS birth_date,
+            cu.cpf_cnpj,
+            COALESCE(cb.belt_level, kc.belt_snapshot)                          AS belt_live,
+            COALESCE(cb.belt_name,  kc.belt_name_snapshot)                     AS belt_name_live,
+            COALESCE(cu.dojo_id, kc.dojo_id)                                   AS dojo_id_live,
+            COALESCE(dj.trade_name, dj.legal_name, kc.dojo_name_snapshot)      AS dojo_name_live,
+            COALESCE(cu.karate_photo_url, cu.photo_url, kc.photo_url_snapshot) AS photo_url_live,
+            COALESCE(cu.karate_registration_number, kc.card_number)           AS card_number_live,
+            (SELECT bh.cbkt_number FROM karate_belt_history bh
+              WHERE bh.student_id = cu.id AND bh.federation_id = kc.federation_id
+                AND bh.belt_name = COALESCE(cb.belt_name, kc.belt_name_snapshot)
+                AND bh.cbkt_number IS NOT NULL
+              ORDER BY bh.graduated_at DESC NULLS LAST LIMIT 1)             AS cbkt_number_live,
+            COALESCE(fed.trade_name, fed.legal_name) AS federation_name,
+            COALESCE(fed.karate_logo_url, fed.logo_url) AS federation_logo
+     FROM karate_membership_cards kc
+     JOIN customers cu ON cu.id = kc.student_id
+     LEFT JOIN karate_current_belt cb ON cb.student_id = cu.id AND cb.federation_id = kc.federation_id
+     LEFT JOIN companies dj ON dj.id = cu.dojo_id
+     LEFT JOIN companies fed ON fed.id = kc.federation_id
+     WHERE kc.verify_token = $1 AND (${identityParts.join(' OR ')})
+     LIMIT 1`,
+    params
+  );
+
+  if (!r.rows.length) return { mismatch: true };
+
+  const c = r.rows[0];
+  return {
+    card: {
+      card_number: c.card_number_live,
+      cbkt_number: c.cbkt_number_live || null,
+      student_name: c.student_name,
+      birth_date: c.birth_date,
+      cpf: c.cpf_cnpj || null,
+      belt: c.belt_live,
+      belt_name: c.belt_name_live,
+      dojo_name: c.dojo_name_live,
+      photo_url: c.photo_url_live,
+      is_minor: computeIsMinor(c.birth_date),
+      issued_at: c.issued_at,
+      revoked_at: c.revoked_at || null,
+      verify_token: c.verify_token,
+      status: effectiveStatus(c),
+      federation_name: c.federation_name || null,
+      federation_logo: c.federation_logo || null,
+    },
+  };
+}
+
+/**
  * listCards — listagem interna (admin/staff).
  *
  * `status` aqui é o status da CARTEIRINHA (kc.status: active/expired/
@@ -1037,6 +1192,8 @@ module.exports = {
   revokeCard,
   getCurrentCard,
   getFullCardByToken,
+  getCardPreviewByToken,
+  verifyCardIdentityByToken,
   verifyByToken,
   getCardCopyByToken,
   listCards,

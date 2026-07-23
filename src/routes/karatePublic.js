@@ -14,6 +14,7 @@
 
 const router = require('express').Router();
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const db = require('../config/database');
 const mailer = require('../services/karateMailer');
 const cards = require('../services/karateCardService');
@@ -24,6 +25,42 @@ let paymentProvider = null;
 try { paymentProvider = require('../services/karatePaymentProvider'); } catch (_) {}
 
 const onlyDigits = (s) => String(s || '').replace(/\D/g, '');
+
+// Normaliza data de nascimento de ENTRADA (gate de identidade da
+// carteirinha virtual, GET+POST /card/:token) — aceita "dd/mm/aaaa" OU
+// "yyyy-mm-dd", sempre por REGEX/componente. NUNCA `new Date(iso)`: em fuso
+// BR isso volta um dia (armadilha do CLAUDE.md, P0 já aconteceu). Retorna
+// null se não bater com nenhum dos dois formatos aceitos — o chamador
+// simplesmente não usa nascimento como fator de identidade nesse caso (não
+// é erro fatal, RG/CPF ainda podem liberar).
+function normalizeBirthDateInput(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  return null;
+}
+
+const isTestEnv = () => process.env.NODE_ENV === 'test';
+
+// Rate limit do gate de identidade da carteirinha virtual — MESMO padrão de
+// karateRosterSelfServicePublic.js (updateLimiter): 10 tentativas / 10 min,
+// chave = token + IP. O gate de 3 campos (nascimento/RG/CPF) é fraco contra
+// tentativa em massa; recebe o MESMO orçamento apertado do link de
+// auto-atendimento do aluno, não um mais frouxo só por não gravar nada.
+function keyByCardTokenAndIp(req) {
+  return `${req.params.token || 'no-token'}:${req.ip || 'no-ip'}`;
+}
+const cardVerifyLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: keyByCardTokenAndIp,
+  skip: () => isTestEnv(),
+});
 
 // Migration 200 — registration_fields (karate_belt_exams) / registration_responses
 // (karate_belt_exam_candidates / karate_event_enrollments). Cache module-level
@@ -146,32 +183,109 @@ router.post('/verify/:token/card', async (req, res) => {
   }
 });
 
-// ── GET /card/:token — carteirinha virtual COMPLETA (com foto) por token ──
-// Diferente do /verify/:token (reduzido, LGPD — corta CPF/nascimento/
-// histórico e esconde foto de menor): este endpoint devolve o cartão CHEIO,
-// mesmo shape usado na emissão/impressão da carteirinha (inclui foto), pra
-// a federação mandar o link da carteirinha VIRTUAL no lugar de imprimir.
+// ── GET /card/:token — carteirinha virtual, passo LEVE (pré-identidade) ──
+// (21/07/2026 — decisão do Caio): o cartão CHEIO (com foto) NÃO pode mais
+// ser liberado só com o token — um link vazado exporia a foto de qualquer
+// um. Este GET deixou de devolver o cartão cheio (era o comportamento do
+// PR #416, revertido aqui): agora devolve só o CONTEXTO MÍNIMO pra tela
+// renderizar algo e pedir a identidade — nome do dojô/federação, SEM foto,
+// nome, CPF, RG, nascimento ou status do praticante/cartão (ver
+// getCardPreviewByToken em karateCardService.js — não faz JOIN em
+// customers de propósito). O cartão cheio só sai em
+// POST /card/:token/verify, depois de confirmar nascimento OU RG OU CPF.
 //
-// Token-gated pelo MESMO verify_token do cartão (link opaco/inadivinhável,
-// compartilhado pela federação direto com o titular) — sem auth, mas só
-// devolve o cartão daquele token: nunca lista, nunca aceita id sequencial.
-// Não expõe id/federation_id/student_id internos (não usados pra renderizar
-// a carteirinha no front).
-//
-// 404 quando o token não corresponde a NENHUMA carteirinha. Carteirinha
-// REVOGADA não é 404 — devolve 200 com status:'revoked' no corpo, pro front
-// marcar "revogada" na carteirinha virtual em vez de fingir que é válida.
-//
-// LGPD (decisão flagrada no PR): ao contrário do /verify, NÃO reduz nome nem
-// oculta foto de menor — a carteirinha impressa já mostra os dados reais do
-// menor (é a carteirinha dele), então a virtual espelha isso. Ver
-// getFullCardByToken (karateCardService.js) para o detalhe da decisão.
+// 404 quando o token não corresponde a NENHUMA carteirinha (mesmo
+// comportamento de antes — só o CORPO da resposta de sucesso mudou).
 router.get('/card/:token', async (req, res) => {
   try {
-    const c = await cards.getFullCardByToken(req.params.token);
-    if (!c) {
+    const preview = await cards.getCardPreviewByToken(req.params.token);
+    if (!preview) {
       return res.status(404).json({ error: 'Carteirinha não encontrada' });
     }
+    res.json({
+      requires_identity: true,
+      dojo_name: preview.dojo_name,
+      federation_name: preview.federation_name,
+      federation_logo: preview.federation_logo,
+    });
+  } catch (err) {
+    console.error('[karatePublic] card preview by token error:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar carteirinha' });
+  }
+});
+
+// ── POST /card/:token/verify — libera o cartão CHEIO após identidade ──
+// Body: { birth_date?, rg?, cpf? } (pelo menos um) — QUALQUER UM que bata
+// com o praticante dono do token libera o cartão completo (mesmo shape que
+// o GET /card/:token devolvia antes desta mudança: card_number, foto,
+// nome, nascimento, cpf, faixa, dojô, status etc.).
+//
+// Normalização (replicada de karateRosterSelfServicePublic.js):
+//   - birth_date: aceita "dd/mm/aaaa" OU "yyyy-mm-dd", normalizado por
+//     REGEX/componente (normalizeBirthDateInput) — NUNCA `new Date(iso)`
+//     (volta um dia no fuso BR, armadilha do CLAUDE.md). Comparado no SQL
+//     via to_char(cu.birth_date, 'YYYY-MM-DD'), nunca em JS — sem risco
+//     nenhum de shift de fuso em nenhuma das duas pontas.
+//   - cpf: só dígitos (onlyDigits), precisa ter exatamente 11 pra contar
+//     como fator — senão é ignorado (não derruba a request se outro fator
+//     ainda pode bater).
+//   - rg: só dígitos (onlyDigits, MESMA convenção de detectIdentifierQuery/
+//     A4 já usada neste arquivo pra RG — não reinventa uma normalização
+//     "letra + dígitos" nova), precisa ter >= 5 dígitos pra contar.
+//
+// Nenhum fator plausível no body → 422 VALIDATION_ERROR (erro de formato,
+// não vaza nada sobre o token).
+//
+// 404 SÓ quando o token tem formato inválido (nem parece um token — erro
+// de input, não revela nada sobre tokens reais). Qualquer token BEM
+// FORMADO — exista ou não, identidade certa ou errada, praticante sem
+// aquele dado cadastrado — sempre volta o MESMO 403 IDENTITY_MISMATCH.
+// Leitura literal do requisito ("token inválido e identidade errada devem
+// ser indistinguíveis"): ao contrário do GET leve acima (que precisa
+// resolver existência pra dizer "link quebrado" na tela), ESTE endpoint é
+// o alvo de força bruta — não dá nenhum sinal extra sobre o token em cima
+// do que a tentativa de identidade já revelaria. Ver
+// verifyCardIdentityByToken (karateCardService.js) para o detalhe.
+//
+// Carteirinha REVOGADA: ainda exige identidade (não authenticamos "de
+// graça" só pra mostrar que está revogada) — só depois do match é que o
+// corpo volta com status:'revoked' (mesmo cartão cheio de antes, o front
+// decide como marcar "revogada" na tela).
+//
+// Rate limit: MESMO padrão do link de auto-atendimento do aluno
+// (cardVerifyLimiter — 10 tentativas / 10 min, chave token+IP).
+router.post('/card/:token/verify', cardVerifyLimiter, async (req, res) => {
+  const body = req.body || {};
+  try {
+    const birthDate = normalizeBirthDateInput(body.birth_date);
+    const cpfDigits = onlyDigits(body.cpf);
+    const rgDigits = onlyDigits(body.rg);
+
+    const hasBirth = !!birthDate;
+    const hasCpf = cpfDigits.length === 11;
+    const hasRg = rgDigits.length >= 5;
+
+    if (!hasBirth && !hasCpf && !hasRg) {
+      return res.status(422).json({
+        error: 'Informe data de nascimento, RG ou CPF válidos para confirmar sua identidade',
+        code: 'VALIDATION_ERROR',
+      });
+    }
+
+    const result = await cards.verifyCardIdentityByToken(req.params.token, {
+      birthDate: hasBirth ? birthDate : null,
+      cpfDigits: hasCpf ? cpfDigits : null,
+      rgDigits: hasRg ? rgDigits : null,
+    });
+
+    if (result.not_found) {
+      return res.status(404).json({ error: 'Carteirinha não encontrada' });
+    }
+    if (result.mismatch) {
+      return res.status(403).json({ error: 'Não foi possível confirmar sua identidade', code: 'IDENTITY_MISMATCH' });
+    }
+
+    const c = result.card;
     res.json({
       card_number: c.card_number,
       cbkt_number: c.cbkt_number,
@@ -191,8 +305,8 @@ router.get('/card/:token', async (req, res) => {
       federation_logo: c.federation_logo,
     });
   } catch (err) {
-    console.error('[karatePublic] full card by token error:', err.message);
-    res.status(500).json({ error: 'Erro ao carregar carteirinha' });
+    console.error('[karatePublic] card identity verify error:', err.message);
+    res.status(500).json({ error: 'Erro ao confirmar identidade' });
   }
 });
 
