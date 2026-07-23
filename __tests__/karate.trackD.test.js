@@ -296,7 +296,64 @@ describe('karateCardService — getFullCardByToken', () => {
   });
 });
 
-describe('GET /public/karate/card/:token', () => {
+describe('GET /public/karate/card/:token — passo LEVE (pré-identidade)', () => {
+  let app;
+  const TOKEN = 'f1e2d3c4b5a697887766554433221100';
+  beforeAll(() => { app = buildApp(); });
+  beforeEach(() => jest.clearAllMocks());
+
+  const previewRow = (over = {}) => ({
+    dojo_name: 'Dojô X', federation_name: 'FPKT', federation_logo: null, ...over,
+  });
+
+  it('token válido → 200 com contexto MÍNIMO (dojô/federação), SEM foto/nome/cpf/nascimento', (done) => {
+    db.query.mockResolvedValueOnce({ rows: [previewRow()] });
+    request(app)
+      .get(`/public/karate/card/${TOKEN}`)
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.requires_identity).toBe(true);
+        expect(res.body.dojo_name).toBe('Dojô X');
+        expect(res.body.federation_name).toBe('FPKT');
+        // nada sensível vaza no passo pré-validação
+        expect(res.body.photo_url).toBeUndefined();
+        expect(res.body.student_name).toBeUndefined();
+        expect(res.body.cpf).toBeUndefined();
+        expect(res.body.birth_date).toBeUndefined();
+        expect(res.body.rg).toBeUndefined();
+        expect(res.body.card_number).toBeUndefined();
+        expect(res.body.status).toBeUndefined();
+        done();
+      });
+  });
+
+  it('token inválido/inexistente → 404', (done) => {
+    db.query.mockResolvedValueOnce({ rows: [] });
+    request(app)
+      .get('/public/karate/card/0000000000000000000000000000dead')
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(404);
+        done();
+      });
+  });
+
+  it('query string extra é ignorada — só o token do path é usado na consulta', (done) => {
+    db.query.mockResolvedValueOnce({ rows: [previewRow()] });
+    request(app)
+      .get(`/public/karate/card/${TOKEN}`)
+      .query({ id: 'outro-cartao-999' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(db.query.mock.calls[0][1]).toEqual([TOKEN]);
+        done();
+      });
+  });
+});
+
+describe('POST /public/karate/card/:token/verify — gate de identidade (nascimento/RG/CPF)', () => {
   let app;
   const TOKEN = 'f1e2d3c4b5a697887766554433221100';
   beforeAll(() => { app = buildApp(); });
@@ -315,10 +372,11 @@ describe('GET /public/karate/card/:token', () => {
     ...over,
   });
 
-  it('token válido → 200 com cartão cheio COM photo_url, e SEM ids internos', (done) => {
+  it('identidade correta (nascimento YYYY-MM-DD) → 200 com cartão cheio COM foto', (done) => {
     db.query.mockResolvedValueOnce({ rows: [fullCardRow()] });
     request(app)
-      .get(`/public/karate/card/${TOKEN}`)
+      .post(`/public/karate/card/${TOKEN}/verify`)
+      .send({ birth_date: '1990-01-01' })
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(200);
@@ -326,49 +384,123 @@ describe('GET /public/karate/card/:token', () => {
         expect(res.body.student_name).toBe('Maria Souza');
         expect(res.body.card_number).toBe('FPKT-A-00001');
         expect(res.body.status).toBe('active');
-        expect(res.body.verify_token).toBe(TOKEN);
-        // não vaza ids internos que o front não usa pra renderizar
-        expect(res.body.id).toBeUndefined();
-        expect(res.body.federation_id).toBeUndefined();
-        expect(res.body.student_id).toBeUndefined();
+        // nascimento comparado no SQL via to_char — checa que o valor mandado
+        // ao banco já está normalizado, sem shift de fuso
+        expect(db.query.mock.calls[0][1]).toContain('1990-01-01');
         done();
       });
   });
 
-  it('token inválido/inexistente → 404', (done) => {
+  it('identidade correta (nascimento dd/mm/aaaa) → normaliza sem shift de fuso e libera', (done) => {
+    db.query.mockResolvedValueOnce({ rows: [fullCardRow()] });
+    request(app)
+      .post(`/public/karate/card/${TOKEN}/verify`)
+      .send({ birth_date: '01/01/1990' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        // dd/mm/aaaa "01/01/1990" -> "1990-01-01", nunca "1989-12-31" (armadilha
+        // de new Date(iso) no fuso BR)
+        expect(db.query.mock.calls[0][1]).toContain('1990-01-01');
+        done();
+      });
+  });
+
+  it('identidade correta (RG) → 200 com cartão cheio', (done) => {
+    db.query.mockResolvedValueOnce({ rows: [fullCardRow()] });
+    request(app)
+      .post(`/public/karate/card/${TOKEN}/verify`)
+      .send({ rg: '12.345.678-9' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.photo_url).toBeTruthy();
+        // RG normalizado só-dígitos antes de ir pro banco
+        expect(db.query.mock.calls[0][1]).toContain('123456789');
+        done();
+      });
+  });
+
+  it('identidade correta (CPF) → 200 com cartão cheio', (done) => {
+    db.query.mockResolvedValueOnce({ rows: [fullCardRow()] });
+    request(app)
+      .post(`/public/karate/card/${TOKEN}/verify`)
+      .send({ cpf: '123.456.789-00' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.photo_url).toBeTruthy();
+        expect(db.query.mock.calls[0][1]).toContain('12345678900');
+        done();
+      });
+  });
+
+  it('identidade errada → 403 IDENTITY_MISMATCH, sem foto/dados no corpo', (done) => {
     db.query.mockResolvedValueOnce({ rows: [] });
     request(app)
-      .get('/public/karate/card/0000000000000000000000000000dead')
+      .post(`/public/karate/card/${TOKEN}/verify`)
+      .send({ birth_date: '2000-01-01' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('IDENTITY_MISMATCH');
+        expect(res.body.photo_url).toBeUndefined();
+        expect(res.body.student_name).toBeUndefined();
+        done();
+      });
+  });
+
+  it('nenhum campo de identidade informado → 422 VALIDATION_ERROR (sem consultar o banco)', (done) => {
+    request(app)
+      .post(`/public/karate/card/${TOKEN}/verify`)
+      .send({})
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        expect(res.body.code).toBe('VALIDATION_ERROR');
+        expect(db.query).not.toHaveBeenCalled();
+        done();
+      });
+  });
+
+  it('token inválido/inexistente → 404 (indistinto do formato genérico do GET leve)', (done) => {
+    request(app)
+      .post('/public/karate/card/not-a-valid-token/verify')
+      .send({ birth_date: '1990-01-01' })
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(404);
+        expect(db.query).not.toHaveBeenCalled();
         done();
       });
   });
 
-  it('cartão revogado → 200 com status:"revoked" (NÃO 404) pro front mostrar "revogada"', (done) => {
+  it('token bem formado mas inexistente + identidade errada → mesma resposta 403 (não vira oráculo)', (done) => {
+    // token com formato válido (32 hex) mas que não existe no banco: a query
+    // atômica token+identidade não acha linha nenhuma, e o resultado (403
+    // IDENTITY_MISMATCH) é o MESMO que uma identidade errada num token
+    // existente — replica a filosofia de erro do karateRosterSelfServicePublic.js.
+    db.query.mockResolvedValueOnce({ rows: [] });
+    request(app)
+      .post('/public/karate/card/0000000000000000000000000000dead/verify')
+      .send({ birth_date: '1990-01-01' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('IDENTITY_MISMATCH');
+        done();
+      });
+  });
+
+  it('cartão revogado + identidade correta → 200 com status:"revoked" (continua exigindo identidade)', (done) => {
     db.query.mockResolvedValueOnce({ rows: [fullCardRow({ status: 'revoked' })] });
     request(app)
-      .get(`/public/karate/card/${TOKEN}`)
+      .post(`/public/karate/card/${TOKEN}/verify`)
+      .send({ cpf: '12345678900' })
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(200);
         expect(res.body.status).toBe('revoked');
-        expect(res.body.photo_url).toBeTruthy(); // continua com foto, só marcado como revogada
-        done();
-      });
-  });
-
-  it('rota só aceita o token — id extra na query string é ignorado (não vaza outro cartão)', (done) => {
-    db.query.mockResolvedValueOnce({ rows: [fullCardRow()] });
-    request(app)
-      .get(`/public/karate/card/${TOKEN}`)
-      .query({ id: 'outro-cartao-999' })
-      .end((err, res) => {
-        if (err) return done(err);
-        expect(res.status).toBe(200);
-        // a única chamada ao DB usa só o token do path, nunca o `id` da query
-        expect(db.query.mock.calls[0][1]).toEqual([TOKEN]);
         done();
       });
   });
