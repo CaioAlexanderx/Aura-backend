@@ -382,7 +382,6 @@ router.post('/portal/opt-in', requirePractitionerToken, async (req, res) => {
   }
 });
 
-// ── POST /:slug/portal/request-otp ────────────────────────────────────────────────────────────────────────────────────────
 router.post('/:slug/portal/request-otp', async (req, res) => {
   try {
     const fed = await resolveFederation(req.params.slug);
@@ -395,7 +394,6 @@ router.post('/:slug/portal/request-otp', async (req, res) => {
   }
 });
 
-// ── POST /:slug/portal/verify-otp ─────────────────────────────────
 router.post('/:slug/portal/verify-otp', async (req, res) => {
   try {
     const fed = await resolveFederation(req.params.slug);
