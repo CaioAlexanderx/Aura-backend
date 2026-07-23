@@ -271,4 +271,8 @@ describe('VALID_PAYMENT_METHODS (formas de pagamento aceitas na baixa)', () => {
   it('aceita credito_cbkt (Crédito CBKT) como forma de pagamento válida', () => {
     expect(svc.VALID_PAYMENT_METHODS).toContain('credito_cbkt');
   });
+
+  it('aceita boleto como forma de pagamento válida', () => {
+    expect(svc.VALID_PAYMENT_METHODS).toContain('boleto');
+  });
 });

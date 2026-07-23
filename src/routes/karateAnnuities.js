@@ -995,7 +995,7 @@ router.post('/annuities/dojos/:dojoId/:annuityId/void', ...guards.adminOnly(), a
 //
 // Body (todos opcionais):
 //   paid_at?         — YYYY-MM-DD (default: hoje)
-//   payment_method?  — 'pix'|'dinheiro'|'transferencia'|'credito_cbkt'|'credito_exame'|'outro' (default: 'pix')
+//   payment_method?  — 'pix'|'dinheiro'|'transferencia'|'credito_cbkt'|'credito_exame'|'boleto'|'outro' (default: 'pix')
 //   amount?          — valor recebido (default: amount da cobrança)
 //
 // Idempotente: se a anuidade já está 'paid', retorna 200 sem efeito colateral.
@@ -1144,7 +1144,7 @@ router.post('/annuities/dojos/:dojoId/:annuityId/pay', ...guards.adminOnly(), as
 //   amount           (obrig.) — valor recebido
 //   paid_at?         — YYYY-MM-DD (default: hoje)
 //   due_date?        — YYYY-MM-DD (default: paid_at)
-//   payment_method?  — 'pix'|'dinheiro'|'transferencia'|'credito_cbkt'|'credito_exame'|'outro' (default: 'pix')
+//   payment_method?  — 'pix'|'dinheiro'|'transferencia'|'credito_cbkt'|'credito_exame'|'boleto'|'outro' (default: 'pix')
 //
 // Idempotente: se já existe cobrança para o período retorna 409 com
 //   { code:'CONFLICT', annuity_id } para que o caller possa redirecionar
