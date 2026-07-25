@@ -86,6 +86,17 @@ let HAS_PHONE_MOBILE_COL = true;
 // em 42703.
 let HAS_CHARGES_ADHESION_COL = true;
 
+// Migration 251 — companies.karate_dojo_linked_at (timestamptz NULL). NULL =
+// dojô ainda NÃO conectado à federação (self-serve, invisível na interface da
+// federação; o shell do dojô continua 100% funcional). NOT NULL = conectado/
+// filiado (visível). federation_id é vínculo TÉCNICO (roteamento/guard), não
+// visibilidade. Mesma armadilha_schema_pre_migration: cache module-level
+// otimista, vira false em 42703 e o create não marca o vínculo (a
+// migration/backfill resolve). SÓ gateia a ESCRITA do vínculo aqui; a
+// LISTAGEM filtra direto por karate_dojo_linked_at IS NOT NULL (migration
+// aplicada ANTES do deploy — ver PR).
+let HAS_DOJO_LINKED_COL = true;
+
 // Coerção boolean segura (mesma usada por is_active no PATCH): aceita
 // true/'true'/1/'1'/'sim' como true; false/'false'/0/'0'/''/null/'não' como
 // false. Módulo-scope porque tanto POST (cadastro) quanto PATCH
@@ -167,7 +178,7 @@ router.get('/', ...guards.read(), async (req, res) => {
   const offset   = (page - 1) * pageSize;
 
   try {
-    const conditions = [`c.federation_id = $1`, `c.vertical_active = 'karate_dojo'`];
+    const conditions = [`c.federation_id = $1`, `c.vertical_active = 'karate_dojo'`, `c.karate_dojo_linked_at IS NOT NULL`];
     const params = [federationId];
     let n = 2;
 
@@ -373,7 +384,7 @@ router.get('/export', ...guards.read(), async (req, res) => {
   const { region, status, affiliation_model, q } = req.query;
 
   try {
-    const conditions = [`c.federation_id = $1`, `c.vertical_active = 'karate_dojo'`];
+    const conditions = [`c.federation_id = $1`, `c.vertical_active = 'karate_dojo'`, `c.karate_dojo_linked_at IS NOT NULL`];
     const params = [federationId];
     let n = 2;
 
@@ -684,6 +695,38 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    // Migration 251: dojô criado PELA federação nasce já conectado/visível
+    // (registro DA federação, nunca self-serve) — marca o vínculo com NOW().
+    // COALESCE preserva um vínculo anterior (idempotente).
+    //
+    // DEPOIS do COMMIT de propósito (armadilha_tx_poison_best_effort_savepoint):
+    // um try/catch best-effort DENTRO do BEGIN envenenaria a transação — em
+    // 42703 (Migration 251 ainda não aplicada) a tx entraria em estado
+    // abortado e o COMMIT seguinte viraria ROLLBACK SILENCIOSO, jogando fora
+    // o cadastro inteiro do dojô. Fora da transação o pior caso é o dojô
+    // nascer sem a marca de vínculo (o backfill da migration cobre), nunca
+    // perder o cadastro — por isso o catch aqui NUNCA re-lança: o 201 já
+    // está garantido pelo COMMIT acima. (A alternativa seria SAVEPOINT antes
+    // do UPDATE; preferimos pós-COMMIT por ser um efeito best-effort que não
+    // precisa da atomicidade do cadastro.)
+    // O fluxo F6 de filiação passará a setar isto no ACEITE da conexão de um
+    // dojô self-serve.
+    if (HAS_DOJO_LINKED_COL) {
+      try {
+        await client.query(
+          `UPDATE companies SET karate_dojo_linked_at = COALESCE(karate_dojo_linked_at, NOW()) WHERE id = $1`,
+          [insertRes.rows[0].id]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          HAS_DOJO_LINKED_COL = false;
+          console.warn('[karateDojos] karate_dojo_linked_at ausente no create (Migration 251 pendente) — ignorado');
+        } else {
+          console.warn('[karateDojos] falha ao marcar karate_dojo_linked_at no create (dojô já commitado) —', e.message);
+        }
+      }
+    }
 
     const dojo = insertRes.rows[0];
     res.status(201).json({
