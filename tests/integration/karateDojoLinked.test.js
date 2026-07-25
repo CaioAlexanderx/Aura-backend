@@ -16,7 +16,15 @@
 //
 // mockResolvedValue (não ...Once) de propósito: o que importa é a SQL
 // emitida, não quantas queries o handler faz — assim o teste não quebra
-// quando um handler ganha/perde uma query.
+// quando um handler ganha/perde uma query. EXCEÇÃO: o teste de GET / (lista)
+// usa mockImplementation. O fast path de GET / (sem filtro de status, ver
+// src/routes/karateDojos.js) faz `SELECT COUNT(*) AS total FROM companies c
+// ...` e lê `countRes.rows[0].total` SEM guarda — com rows:[] para TODAS as
+// queries isso vira `Cannot read properties of undefined` (500), não um
+// 200 com lista vazia. O mock responde {rows:[{total:'0'}]} só para a query
+// de COUNT (identificada pela própria SQL); as demais queries do handler
+// (fetch paginado) continuam recebendo rows:[] normalmente, que é o que
+// elas toleram bem.
 //
 // db.query.mockReset() em afterEach (jest.clearAllMocks NÃO drena filas).
 // ============================================================
@@ -53,7 +61,15 @@ describe('Aura Dojô — dojô só aparece para a federação após conexão (ka
   });
 
   test('GET /dojos (lista da federação) filtra por karate_dojo_linked_at IS NOT NULL', async () => {
-    db.query.mockResolvedValue({ rows: [] });
+    // Fast path de GET / (sem status) faz SELECT COUNT(*) AS total e lê
+    // countRes.rows[0].total direto — precisa de uma linha com `total`,
+    // senão é TypeError (500). As demais queries (fetch paginado) toleram
+    // rows:[] (vira lista vazia no response).
+    db.query.mockImplementation((sql) => {
+      const s = String(sql);
+      if (/COUNT\(\*\) AS total/i.test(s)) return Promise.resolve({ rows: [{ total: '0' }] });
+      return Promise.resolve({ rows: [] });
+    });
     const res = await request(app)
       .get(`/api/v1/federation/${fedId}/dojos`)
       .set(adminHeader());
