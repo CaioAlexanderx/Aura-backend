@@ -21,6 +21,11 @@
 // O número FPKT é gerado pela FEDERAÇÃO, fora do nosso sistema — o sensei
 // pode ou não sabê-lo (fpkt_number_claimed é OPCIONAL). Quem aprova e
 // registra o número de verdade é a federação (karatePractitionerRequestsAdmin.js).
+//
+// ── GATE DE CONEXÃO (polish 25/07/2026) ─────────────────────
+// Solicitar praticante é ESCRITA na federação — só existe depois que o dojô
+// se conectou (companies.karate_dojo_linked_at, migration 251). Sem conexão:
+// 409 DOJO_NAO_CONECTADO. Ver src/services/karateDojoLinkStatus.js.
 // ============================================================
 'use strict';
 
@@ -31,6 +36,7 @@ const { requireDojoAccess } = require('../middleware/requireDojoAccess');
 const { buildDedupKey, lookupByFpktNumber, normalizeFpktNumber } = require('../services/karatePractitionerDedup');
 const { uploadToR2 } = require('../utils/r2Storage');
 const { validatePractitionerRequestPayload } = require('../services/karatePractitionerRequestValidation');
+const { isDojoLinked } = require('../services/karateDojoLinkStatus');
 
 const isTestEnv = () => process.env.NODE_ENV === 'test';
 
@@ -106,6 +112,20 @@ function shapeRequest(r) {
 router.post('/dojo/practitioner-requests', requireDojoAccess, createLimiter, async (req, res) => {
   const dojoId = req.dojoId;
   const federationId = req.federationId;
+
+  // Gate de conexão (polish 25/07/2026): esta rota CRIA algo na federação
+  // — não pode existir para um dojô que ainda não se conectou a ela.
+  // 409 (conflito de ESTADO do dojô), não 403 (que soaria como permissão
+  // do usuário). Antes da validação da ficha de propósito: mandar o sensei
+  // preencher 15 campos para depois dizer "seu dojô nem está conectado"
+  // seria cruel. Fail-open no helper (migration 251 pendente → passa).
+  if (!(await isDojoLinked(dojoId))) {
+    return res.status(409).json({
+      error: 'Conecte seu dojô à federação para enviar solicitações',
+      code: 'DOJO_NAO_CONECTADO',
+    });
+  }
+
   const b = req.body || {};
 
   const full_name = b.full_name != null ? String(b.full_name).trim() : '';
@@ -284,6 +304,8 @@ router.get('/dojo/practitioner-requests/lookup-fpkt', requireDojoAccess, lookupL
 // customers.karate_photo_url ainda) porque o praticante não existe até a
 // federação aprovar. Na aprovação (karatePractitionerRequestsAdmin.js) a
 // URL é copiada 1:1 para customers.karate_photo_url.
+// NÃO gateado por conexão de propósito: opera sobre uma solicitação que só
+// existe se a CRIAÇÃO passou pelo gate acima (e é escopada ao próprio dojô).
 const PHOTO_ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 router.post('/dojo/practitioner-requests/:requestId/photo', requireDojoAccess, createLimiter, async (req, res) => {
