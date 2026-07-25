@@ -188,6 +188,11 @@ router.patch('/clients/:cid/karate', ...adminOnly, asyncHandler(async (req, res)
               federation_id = $3,
               fpkt_affiliation_id = $4,
               affiliation_model = $5,
+              -- Migration 251: o admin habilita o dojô AGINDO PELA federação,
+              -- então o dojô nasce conectado/visível. COALESCE preserva um
+              -- vínculo anterior (idempotente). O fluxo F6 setará no aceite
+              -- da conexão de um dojô self-serve.
+              karate_dojo_linked_at = COALESCE(karate_dojo_linked_at, NOW()),
               updated_at = NOW()
         WHERE id = $1
         RETURNING id, name, vertical, vertical_active, federation_id, fpkt_affiliation_id, affiliation_model`,
