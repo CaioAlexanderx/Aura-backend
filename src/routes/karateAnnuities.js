@@ -94,7 +94,7 @@ async function fetchDojoForCharge(client, dojoId, federationId) {
   try {
     return await client.query(
       `SELECT ${cols.join(', ')} FROM companies
-       WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' LIMIT 1`,
+       WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo' AND karate_dojo_linked_at IS NOT NULL LIMIT 1`,
       [dojoId, federationId]
     );
   } catch (e) {
@@ -230,6 +230,7 @@ function dojosBaseSql(withPlan) {
     LEFT JOIN karate_dojo_annuity_history h
       ON h.dojo_id = c.id AND h.reference_period = $2
     WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
+      AND c.karate_dojo_linked_at IS NOT NULL
       AND ($3::boolean[] IS NULL OR c.is_active = ANY($3::boolean[]))
   `;
 }
