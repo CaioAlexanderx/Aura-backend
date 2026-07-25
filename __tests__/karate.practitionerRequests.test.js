@@ -7,9 +7,24 @@
 //   (c) solicitação duplicada é idempotente (mesmo dojô+nome+nascimento)
 //   (d) o dojô vem do TOKEN, nunca do body
 //   (e) aprovar (criação ou transferência) NÃO gera cobrança
+//   (f) gate de conexão: dojô não conectado não solicita (409) — PR #422
 //
 // Estilo: supertest + mock sequencial de db.query/db.connect (mesmo padrão
 // de __tests__/karate.trackM.routes.test.js / karate.rosterPortalScale.test.js).
+//
+// ── ATENÇÃO ao bloco POST /dojo/practitioner-requests ───────
+// O PR #422 ("superfícies federativas do dojô só após conexão") colocou o
+// helper isDojoLinked (src/services/karateDojoLinkStatus.js) como PRIMEIRA
+// coisa do handler — antes até da validação da ficha. Isso insere uma
+// query (`SELECT karate_dojo_linked_at FROM companies`) na FRENTE de
+// qualquer fila posicional de mockResolvedValueOnce, e foi exatamente o
+// que quebrou o CI: o helper comeu o mock do INSERT, leu uma row sem a
+// coluna (undefined => NÃO conectado) e devolveu 409; os casos seguintes
+// herdaram o deslocamento da fila.
+// Por isso este bloco mocka POR SQL (mockImplementation), não por posição
+// — mesmo padrão de tests/integration/karateDojoNotLinked.test.js. Mock
+// genérico `{rows: []}` também não serve: o handler lê `rows[0]` direto em
+// vários pontos (foi o que quebrou o CI no PR #421).
 // ============================================================
 'use strict';
 
@@ -63,6 +78,42 @@ function buildPractitionersApp() {
   return app;
 }
 
+// ── Utilitários do gate de conexão (PR #422) ────────────────
+// A query do helper karateDojoLinkStatus é a ÚNICA que traz a coluna
+// karate_dojo_linked_at na lista do SELECT.
+const isLinkQuery = (s) => /SELECT\s+karate_dojo_linked_at/i.test(s);
+
+const callsMatching = (re) => db.query.mock.calls.filter((c) => re.test(String(c[0])));
+
+// linkedAt: null => dojô NÃO conectado; Date/string => conectado.
+// answer(sql) responde as demais queries do handler (null => `{rows: []}`).
+// Despacha pela SQL, nunca pela ordem: query nova entrando na frente do
+// handler não pode mais desalinhar teste nenhum.
+function mockDojoDb(linkedAt, answer) {
+  db.query.mockImplementation((sql) => {
+    const s = String(sql);
+    if (isLinkQuery(s)) return Promise.resolve({ rows: [{ karate_dojo_linked_at: linkedAt }] });
+    if (answer) {
+      const r = answer(s);
+      if (r) return Promise.resolve(r);
+    }
+    return Promise.resolve({ rows: [] });
+  });
+}
+
+const LINKED_AT = new Date('2026-07-01T12:00:00Z'); // dojô conectado
+
+// Ficha completa e válida — desde o item 6 (15/07/2026) TODOS os campos
+// são obrigatórios, então um payload parcial daria 422 antes do que
+// queremos testar.
+function fullPayload(extra) {
+  return Object.assign({
+    full_name: 'Novo Aluno', birth_date: '1990-03-01', sex: 'M', cpf: '11111111111', rg: '123456',
+    phone: '11999999999', email: 'novo.aluno@example.com', claimed_belt: 'Branca',
+    zip_code: '01000-000', street: 'Rua Teste', number: '100', neighborhood: 'Centro', city: 'São Paulo', state: 'SP',
+  }, extra || {});
+}
+
 // ════════════════════════════════════════════════════════════
 // (a) + (b) — ficha direta (POST /federation/:id/practitioners)
 // ════════════════════════════════════════════════════════════
@@ -85,32 +136,37 @@ describe('POST /federation/:id/practitioners — H1: número FPKT obrigatório, 
 });
 
 // ════════════════════════════════════════════════════════════
-// (c) + (d) — POST /federation/:id/dojo/practitioner-requests
+// (c) + (d) + (f) — POST /federation/:id/dojo/practitioner-requests
+// Todos os casos abaixo simulam um dojô CONECTADO (exceto o do gate):
+// sem isso o handler para no 409 antes de qualquer coisa.
 // ════════════════════════════════════════════════════════════
 describe('POST /federation/:id/dojo/practitioner-requests', () => {
   it('201 cria solicitação — dojo_id vem do TOKEN, nunca do body (d)', (done) => {
     const app = buildDojoApp();
-    db.query
-      .mockResolvedValueOnce({ rows: [{ id: 'req-001', status: 'pendente', created_at: '2026-07-14T00:00:00Z' }] }) // INSERT ... RETURNING
-      .mockResolvedValueOnce({ rows: [] }); // logRosterEventBestEffort INSERT
+    mockDojoDb(LINKED_AT, (s) => {
+      if (/INSERT INTO karate_practitioner_requests/.test(s)) {
+        return { rows: [{ id: 'req-001', status: 'pendente', created_at: '2026-07-14T00:00:00Z' }] };
+      }
+      return null; // roster event (best-effort) e demais → { rows: [] }
+    });
 
     request(app)
       .post(`/federation/${FED_ID}/dojo/practitioner-requests`)
       .set('Authorization', 'Bearer ' + dojoToken)
-      .send({
-        full_name: 'Novo Aluno', birth_date: '1990-03-01', sex: 'M', cpf: '11111111111', rg: '123456',
-        phone: '11999999999', email: 'novo.aluno@example.com', claimed_belt: 'Branca',
-        zip_code: '01000-000', street: 'Rua Teste', number: '100', neighborhood: 'Centro', city: 'São Paulo', state: 'SP',
-        dojo_id: OTHER_DOJO_ID, federation_id: 'fed-outra',
-      })
+      .send(fullPayload({ dojo_id: OTHER_DOJO_ID, federation_id: 'fed-outra' }))
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(201);
         expect(res.body.already_pending).toBe(false);
 
+        // O gate de conexão roda ANTES de tudo (PR #422): a 1ª query do
+        // handler é a dele, não mais o INSERT.
+        expect(isLinkQuery(String(db.query.mock.calls[0][0]))).toBe(true);
+
         // O INSERT real precisa ter usado DOJO_ID (do token) — nunca OTHER_DOJO_ID (do body).
-        const insertCall = db.query.mock.calls[0];
-        expect(insertCall[0]).toMatch(/INSERT INTO karate_practitioner_requests/);
+        // Localizado pela SQL, não pela posição na fila.
+        const insertCall = callsMatching(/INSERT INTO karate_practitioner_requests/)[0];
+        expect(insertCall).toBeDefined();
         const params = insertCall[1];
         // Ordem dos params: federationId, dojoId, full_name, ...
         expect(params[0]).toBe(FED_ID);
@@ -122,31 +178,41 @@ describe('POST /federation/:id/dojo/practitioner-requests', () => {
 
   it('200 idempotente quando já existe solicitação PENDENTE igual (mesmo dojô+nome+nascimento) (c)', (done) => {
     const app = buildDojoApp();
-    db.query
-      .mockResolvedValueOnce({ rows: [] }) // INSERT ... ON CONFLICT DO NOTHING -> 0 rows (colidiu)
-      .mockResolvedValueOnce({ rows: [{ id: 'req-existing-001', status: 'pendente', created_at: '2026-07-10T00:00:00Z' }] }); // SELECT existing
+    mockDojoDb(LINKED_AT, (s) => {
+      // INSERT ... ON CONFLICT DO NOTHING -> 0 rows (colidiu)
+      if (/INSERT INTO karate_practitioner_requests/.test(s)) return { rows: [] };
+      // SELECT da solicitação pendente existente
+      if (/dedup_key = \$2/.test(s)) {
+        return { rows: [{ id: 'req-existing-001', status: 'pendente', created_at: '2026-07-10T00:00:00Z' }] };
+      }
+      return null;
+    });
 
     request(app)
       .post(`/federation/${FED_ID}/dojo/practitioner-requests`)
       .set('Authorization', 'Bearer ' + dojoToken)
-      .send({
+      .send(fullPayload({
         full_name: 'Aluno Repetido', birth_date: '1991-05-05', sex: 'F', cpf: '22222222222', rg: '654321',
-        phone: '11988888888', email: 'aluno.repetido@example.com', claimed_belt: 'Branca',
-        zip_code: '01000-000', street: 'Rua Teste', number: '200', neighborhood: 'Centro', city: 'São Paulo', state: 'SP',
-      })
+        phone: '11988888888', email: 'aluno.repetido@example.com', number: '200',
+      }))
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(200);
         expect(res.body.already_pending).toBe(true);
         expect(res.body.id).toBe('req-existing-001');
-        // Não deve haver uma terceira chamada de INSERT — só o conflito + a busca da existente.
-        expect(db.query).toHaveBeenCalledTimes(2);
+        // Não deve haver uma segunda tentativa de INSERT — só o conflito +
+        // a busca da existente. (Contar chamadas por SQL, não o total: o
+        // total inclui a query do gate de conexão.)
+        expect(callsMatching(/INSERT INTO karate_practitioner_requests/).length).toBe(1);
+        expect(callsMatching(/dedup_key = \$2/).length).toBe(1);
         done();
       });
   });
 
   it('422 quando full_name está ausente', (done) => {
     const app = buildDojoApp();
+    mockDojoDb(LINKED_AT);
+
     request(app)
       .post(`/federation/${FED_ID}/dojo/practitioner-requests`)
       .set('Authorization', 'Bearer ' + dojoToken)
@@ -155,7 +221,61 @@ describe('POST /federation/:id/dojo/practitioner-requests', () => {
         if (err) return done(err);
         expect(res.status).toBe(422);
         expect(res.body.code).toBe('VALIDATION_ERROR');
-        expect(db.query).not.toHaveBeenCalled();
+        // Nada é gravado. A ÚNICA query que roda é a do gate de conexão,
+        // que por decisão do #422 vem antes da validação da ficha (não
+        // adianta mandar preencher 15 campos para depois dizer que o dojô
+        // nem está conectado).
+        expect(db.query.mock.calls.every((c) => isLinkQuery(String(c[0])))).toBe(true);
+        expect(callsMatching(/INSERT INTO/i).length).toBe(0);
+        done();
+      });
+  });
+
+  // ── Gate de conexão (PR #422) — o caminho novo ────────────
+  it('409 DOJO_NAO_CONECTADO quando o dojô ainda não se conectou à federação — nada gravado (f)', (done) => {
+    const app = buildDojoApp();
+    mockDojoDb(null); // karate_dojo_linked_at NULL = dojô self-serve não conectado
+
+    request(app)
+      .post(`/federation/${FED_ID}/dojo/practitioner-requests`)
+      .set('Authorization', 'Bearer ' + dojoToken)
+      .send(fullPayload()) // ficha PERFEITA: o que barra é o estado do dojô, não o payload
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(409); // conflito de ESTADO, não 403 de permissão
+        expect(res.body.code).toBe('DOJO_NAO_CONECTADO');
+        expect(res.body.error).toMatch(/Conecte seu dojô/i);
+        // Solicitar praticante é ESCRITA na federação: não pode sobrar nada.
+        expect(callsMatching(/INSERT INTO/i).length).toBe(0);
+        done();
+      });
+  });
+
+  it('42703 (migration 251 pendente) → fail-open: o gate NÃO bloqueia quem já usa (f)', (done) => {
+    const app = buildDojoApp();
+    // Decisão explícita do helper: coluna ausente/erro transitório devolve
+    // linked:true. Esconder a solicitação de todo mundo porque a coluna
+    // ainda não existe seria pior que deixar passar num caso novo.
+    db.query.mockImplementation((sql) => {
+      const s = String(sql);
+      if (isLinkQuery(s)) {
+        return Promise.reject(Object.assign(new Error('column karate_dojo_linked_at does not exist'), { code: '42703' }));
+      }
+      if (/INSERT INTO karate_practitioner_requests/.test(s)) {
+        return Promise.resolve({ rows: [{ id: 'req-failopen', status: 'pendente', created_at: '2026-07-25T00:00:00Z' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    request(app)
+      .post(`/federation/${FED_ID}/dojo/practitioner-requests`)
+      .set('Authorization', 'Bearer ' + dojoToken)
+      .send(fullPayload())
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(201);
+        expect(res.body.id).toBe('req-failopen');
+        expect(callsMatching(/INSERT INTO karate_practitioner_requests/).length).toBe(1);
         done();
       });
   });
@@ -468,6 +588,8 @@ describe('POST /federation/:id/practitioner-requests/:requestId/reject', () => {
 
 // ════════════════════════════════════════════════════════════
 // GET auto-localizar por número FPKT (portal do sensei)
+// NÃO gateado por conexão (é leitura/consulta, não escreve nada na
+// federação) — segue com fila posicional simples.
 // ════════════════════════════════════════════════════════════
 describe('GET /federation/:id/dojo/practitioner-requests/lookup-fpkt', () => {
   it('found:true e is_transfer:true quando o número já pertence a alguém', (done) => {
