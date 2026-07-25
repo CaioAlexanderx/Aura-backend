@@ -106,6 +106,7 @@ const DOJO_ELIGIBLE_SQL = `
   FROM companies c
   WHERE c.federation_id = $1
     AND c.vertical_active = 'karate_dojo'
+    AND c.karate_dojo_linked_at IS NOT NULL
     AND COALESCE(c.is_active, false)
     AND NOT EXISTS (
       SELECT 1 FROM karate_dojo_annuity_history h
@@ -123,6 +124,7 @@ const DOJO_ELIGIBLE_SQL_LEGACY = `
   FROM companies c
   WHERE c.federation_id = $1
     AND c.vertical_active = 'karate_dojo'
+    AND c.karate_dojo_linked_at IS NOT NULL
     AND COALESCE(c.is_active, false)
     AND NOT EXISTS (
       SELECT 1 FROM karate_dojo_annuity_history h
@@ -313,6 +315,7 @@ async function loadTargetInfo(client, type, id, federationId) {
           `SELECT id, name, COALESCE(is_active, false) AS is_active, karate_annuity_plan
            FROM companies
            WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo'
+             AND karate_dojo_linked_at IS NOT NULL
            LIMIT 1`,
           [id, federationId]
         ));
@@ -328,6 +331,7 @@ async function loadTargetInfo(client, type, id, federationId) {
         `SELECT id, name, COALESCE(is_active, false) AS is_active
          FROM companies
          WHERE id = $1 AND federation_id = $2 AND vertical_active = 'karate_dojo'
+           AND karate_dojo_linked_at IS NOT NULL
          LIMIT 1`,
         [id, federationId]
       ));

@@ -282,7 +282,7 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
               c.affiliation_since::date AS affiliated_since
        FROM companies c
        WHERE c.federation_id = $1
-         AND c.vertical_active = 'karate_dojo'
+         AND c.vertical_active = 'karate_dojo' AND c.karate_dojo_linked_at IS NOT NULL
        ORDER BY c.affiliation_since ASC NULLS LAST, c.created_at ASC`,
       [fedId]
     );
@@ -295,7 +295,7 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
       `SELECT EXTRACT(YEAR FROM c.affiliation_since)::int AS ano, COUNT(*)::int AS new_affiliations
        FROM companies c
        WHERE c.federation_id = $1
-         AND c.vertical_active = 'karate_dojo'
+         AND c.vertical_active = 'karate_dojo' AND c.karate_dojo_linked_at IS NOT NULL
          AND c.affiliation_since IS NOT NULL
        GROUP BY ano
        ORDER BY ano ASC`,
@@ -321,7 +321,7 @@ router.get('/afiliacao', ...guards.read(), async (req, res) => {
            COUNT(*) FILTER (WHERE c.is_active = false)::int      AS inativos
          FROM companies c
          WHERE c.federation_id = $1
-           AND c.vertical_active = 'karate_dojo'`,
+           AND c.vertical_active = 'karate_dojo' AND c.karate_dojo_linked_at IS NOT NULL`,
         [fedId]
       );
       const row = statusRes.rows[0] || {};
@@ -465,7 +465,7 @@ router.get('/cobertura', ...guards.read(), async (req, res) => {
        FROM companies c
        LEFT JOIN customers cu ON cu.dojo_id = c.id AND cu.federation_id = $1
        WHERE c.federation_id = $1
-         AND c.vertical_active = 'karate_dojo'
+         AND c.vertical_active = 'karate_dojo' AND c.karate_dojo_linked_at IS NOT NULL
          AND c.is_active IS NOT FALSE
        GROUP BY c.region`,
       [fedId]
@@ -720,7 +720,7 @@ router.get('/dormencia', ...guards.read(), async (req, res) => {
       `SELECT c.id, COALESCE(c.trade_name, c.legal_name) AS name, c.city, c.region
        FROM companies c
        WHERE c.federation_id = $1
-         AND c.vertical_active = 'karate_dojo'
+         AND c.vertical_active = 'karate_dojo' AND c.karate_dojo_linked_at IS NOT NULL
          AND c.is_active IS NOT FALSE`,
       [fedId]
     );
@@ -821,7 +821,7 @@ router.get('/concentracao', ...guards.read(), async (req, res) => {
        FROM companies c
        LEFT JOIN customers cu ON cu.dojo_id = c.id AND cu.federation_id = $1
        WHERE c.federation_id = $1
-         AND c.vertical_active = 'karate_dojo'
+         AND c.vertical_active = 'karate_dojo' AND c.karate_dojo_linked_at IS NOT NULL
          AND c.is_active IS NOT FALSE
        GROUP BY c.id, c.trade_name, c.legal_name
        ORDER BY practitioners DESC`,
@@ -1139,7 +1139,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     // 1. Dojôs afiliados — BASE TOTAL (sem is_active), coerente com Painel/Dojôs.
     const dojosRes = await safeQuery(
       `SELECT COUNT(*)::int AS total FROM companies
-       WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
+       WHERE federation_id = $1 AND vertical_active = 'karate_dojo' AND karate_dojo_linked_at IS NOT NULL`,
       [fedId]
     );
     const dojoCount = parseInt(dojosRes.rows[0]?.total || 0, 10);
@@ -1149,7 +1149,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
     //     usa created_at, que é a data da importação). Todos NULL agora → 0.
     const newAffRes = await safeQuery(
       `SELECT COUNT(*)::int AS total FROM companies
-       WHERE federation_id = $1 AND vertical_active = 'karate_dojo'
+       WHERE federation_id = $1 AND vertical_active = 'karate_dojo' AND karate_dojo_linked_at IS NOT NULL
          AND affiliation_since IS NOT NULL
          AND EXTRACT(YEAR FROM affiliation_since)::int = $2`,
       [fedId, season]
@@ -1238,7 +1238,7 @@ router.get('/summary', ...guards.read(), async (req, res) => {
       `SELECT COUNT(DISTINCT c.id)::int AS total
          FROM companies c
          JOIN karate_dojo_annuity_history a ON a.dojo_id = c.id
-        WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
+        WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo' AND c.karate_dojo_linked_at IS NOT NULL
           AND c.is_active IS NOT FALSE
           AND EXTRACT(YEAR FROM a.due_date)::int = $2
           AND a.status = 'paid'`,
@@ -1311,13 +1311,13 @@ router.post('/report/send', ...guards.adminOnly(), async (req, res) => {
     const [dojosRes, dojoActiveRes, inadRes, gradRes, dormRes] = await Promise.all([
       safeQuery(
         `SELECT COUNT(*)::int AS total FROM companies
-         WHERE federation_id = $1 AND vertical_active = 'karate_dojo'`,
+         WHERE federation_id = $1 AND vertical_active = 'karate_dojo' AND karate_dojo_linked_at IS NOT NULL`,
         [fedId]
       ),
       // Base de dojôs ATIVOS — denominador do cálculo de dormência (abaixo).
       safeQuery(
         `SELECT COUNT(*)::int AS total FROM companies
-         WHERE federation_id = $1 AND vertical_active = 'karate_dojo'
+         WHERE federation_id = $1 AND vertical_active = 'karate_dojo' AND karate_dojo_linked_at IS NOT NULL
            AND is_active IS NOT FALSE`,
         [fedId]
       ),
