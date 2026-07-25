@@ -13,12 +13,32 @@
 //   Fase 2: /dojo/annuity, /dojo/annuity/pix
 //   Fase 3: /dojo/events, /dojo/events/:id/enroll
 //   etc.
+//
+// ── GATE DE CONEXÃO (polish 25/07/2026) ─────────────────────
+// companies.karate_dojo_linked_at (migration 251, PR #420) é a CONEXÃO do
+// dojô com a federação; federation_id é só vínculo TÉCNICO (roteamento +
+// guard). O #420 fechou o lado da federação (ela não enxerga dojô não
+// conectado); o QA de produção mostrou o buraco INVERSO — /dojo/events
+// devolvia os exames/cursos reais da FPKT e /dojo/annuity falava em
+// "filiação à federação" para um dojô que nunca se conectou.
+//
+// Regra: as superfícies FEDERATIVAS só existem depois da conexão.
+//   /dojo/me      → sempre responde; ganha linked + linked_at (aditivo)
+//   /dojo/events  → não conectado: 200 vazio + not_linked:true
+//   /dojo/annuity → não conectado: 200 vazio + not_linked:true
+// NUNCA 403: o front precisa distinguir "sem eventos" de "não conectado"
+// para mostrar o estado explicativo certo (403 vira erro genérico).
+//
+// /dojo/practitioners NÃO é gateado: é a lista dos praticantes DO PRÓPRIO
+// dojô — para um dojô não conectado ela simplesmente vem vazia, e não há
+// conteúdo da federação vazando.
 // ============================================================
 'use strict';
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { requireDojoAccess } = require('../middleware/requireDojoAccess');
+const { getDojoLinkStatus } = require('../services/karateDojoLinkStatus');
 
 // GET /federation/:id/dojo/me
 // Retorna dados do dojô autenticado + canal de autenticação usado.
@@ -44,6 +64,14 @@ router.get('/dojo/me', requireDojoAccess, async (req, res) => {
       });
     }
     const dojo = rows[0];
+
+    // Status de conexão com a federação (ADITIVO — nada foi removido ou
+    // renomeado; o front atual depende do shape acima). Query separada de
+    // propósito: se karate_dojo_linked_at entrasse no SELECT principal, a
+    // ausência da coluna (migration 251 pendente) derrubaria o /dojo/me
+    // inteiro com 42703. Fail-open dentro do helper → linked:true.
+    const link = await getDojoLinkStatus(req.dojoId);
+
     res.json({
       dojo: {
         id: dojo.id,
@@ -51,7 +79,13 @@ router.get('/dojo/me', requireDojoAccess, async (req, res) => {
         phone: dojo.phone,
         federation_id: dojo.federation_id,
         auth_channel: req.dojoAuthChannel, // 'A' | 'B'
+        linked: link.linked,               // karate_dojo_linked_at IS NOT NULL
+        linked_at: link.linked_at,         // ISO 8601 UTC | null
       },
+      // Espelhados no topo para o front não precisar cavar o objeto só
+      // para decidir se renderiza a área da federação.
+      linked: link.linked,
+      linked_at: link.linked_at,
     });
   } catch (err) {
     console.error('[karateDojo] /dojo/me error:', err.message);
@@ -62,8 +96,22 @@ router.get('/dojo/me', requireDojoAccess, async (req, res) => {
 // GET /federation/:id/dojo/events
 // Lista eventos (exames/cursos) ABERTOS da federação — consulta read-only
 // para o painel do sensei. A inscrição é intermediada pela federação.
+// Dojô NÃO conectado: 200 vazio + not_linked:true (nunca 403 — ver topo).
 router.get('/dojo/events', requireDojoAccess, async (req, res) => {
   try {
+    const link = await getDojoLinkStatus(req.dojoId);
+    if (!link.linked) {
+      // Mesmas chaves do caso conectado (`events`, `count`, `federation`)
+      // + `data` (alias) para o front novo. Nada da federação é lido.
+      return res.json({
+        events: [],
+        data: [],
+        count: 0,
+        federation: null,
+        not_linked: true,
+      });
+    }
+
     const { rows } = await db.query(
       `SELECT id, name, exam_type, event_date, location, fee_amount, status
          FROM karate_belt_exams
@@ -147,8 +195,21 @@ router.get('/dojo/practitioners', requireDojoAccess, async (req, res) => {
 // Situacao + historico da anuidade do dojo (read-only) + chave PIX da
 // federacao para pagamento. "Pago" = paid_at nao-nulo. Degradacao graceful
 // se a tabela/coluna ainda nao existir.
+// A anuidade AQUI é a da FILIAÇÃO à federação (não a mensalidade que o
+// dojô cobra dos alunos — essa é F3a, interna, e não é gateada). Dojô NÃO
+// conectado: 200 vazio + not_linked:true, mesmas chaves de sempre.
 router.get('/dojo/annuity', requireDojoAccess, async (req, res) => {
   try {
+    const link = await getDojoLinkStatus(req.dojoId);
+    if (!link.linked) {
+      return res.json({
+        pending: null,
+        history: [],
+        pix: null,
+        not_linked: true,
+      });
+    }
+
     let history = [];
     try {
       const { rows } = await db.query(
