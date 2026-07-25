@@ -72,8 +72,12 @@ function mockDb(linkedAt, extra) {
   db.query.mockImplementation((sql) => {
     const s = String(sql);
     if (isLinkQuery(s)) return Promise.resolve({ rows: [{ karate_dojo_linked_at: linkedAt }] });
-    if (/FROM companies c\s*\n?\s*LEFT JOIN users u/.test(s) && /c\.legal_name/.test(s)) {
-      return Promise.resolve({ rows: [companyRow] }); // /dojo/me
+    // /dojo/me. A âncora é o INÍCIO do SELECT, não o FROM: o contato da
+    // federação em /dojo/events também faz `FROM companies c LEFT JOIN
+    // users u` e menciona c.legal_name (dentro do COALESCE) — casar pelo
+    // FROM devolveria a row do dojô para a query da federação.
+    if (/SELECT c\.id, c\.legal_name/.test(s)) {
+      return Promise.resolve({ rows: [companyRow] });
     }
     if (extra) {
       const r = extra(s);
