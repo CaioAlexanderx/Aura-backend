@@ -165,8 +165,9 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
       rows: [
         // não federado: cadastro privado do dojô
         { ...studentRow(), is_federated: false, has_pending_request: false, fpkt_number: null },
-        // solicitação H1 aberta, federação ainda não aprovou
-        { ...studentRow({ id: 'a2' }), is_federated: true, has_pending_request: true, fpkt_number: null },
+        // solicitação H1 aberta: pendente NÃO é federado (o marcador só vira
+        // true quando a federação confirma) — mas o front precisa do estado
+        { ...studentRow({ id: 'a2' }), is_federated: false, has_pending_request: true, fpkt_number: null },
         // confirmado pela federação
         {
           ...studentRow({ id: 'a3', practitioner_id: 'p1' }),
@@ -183,7 +184,7 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(res.body.data[0].federated).toBe(false);
     expect(res.body.data[0].federation_link_status).toBe('none');
 
-    expect(res.body.data[1].federated).toBe(true);
+    expect(res.body.data[1].federated).toBe(false);
     expect(res.body.data[1].federation_link_status).toBe('pending');
     expect(res.body.data[1].practitioner_id).toBeNull();
 
