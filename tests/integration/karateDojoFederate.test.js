@@ -61,9 +61,12 @@ const adminHeader = () => ({
   Authorization: `Bearer ${jwt.sign({ id: 'staff1', role: 'admin' }, SECRET, { expiresIn: '1h' })}`,
 });
 
+// Matcher pode ser regex OU função (algumas queries só se distinguem por
+// DOIS pedaços da SQL — um regex só não basta).
+const matches = (m, s) => (typeof m === 'function' ? Boolean(m(s)) : m.test(s));
 const sqls = () => db.query.mock.calls.map((c) => String(c[0]));
-const hitSql = (re) => sqls().some((s) => re.test(s));
-const findCall = (re) => db.query.mock.calls.find((c) => re.test(String(c[0])));
+const hitSql = (m) => sqls().some((s) => matches(m, s));
+const findCall = (m) => db.query.mock.calls.find((c) => matches(m, String(c[0])));
 
 // Query do helper karateDojoLinkStatus (a única que menciona a coluna).
 const isLinkQuery = (s) => /SELECT\s+karate_dojo_linked_at/i.test(s);
@@ -377,7 +380,7 @@ describe('F5a — gate de conexão e canal', () => {
     expect(hitSql(/UPDATE karate_dojo_students/)).toBe(false);
     expect(hitSql(/INSERT INTO karate_practitioner_requests/)).toBe(false);
     // Gate ANTES de qualquer leitura de aluno/federação
-    expect(hitSql(/karate_registration_number = \$2/)).toBe(false);
+    expect(hitSql(isFpktLookup)).toBe(false);
   });
 
   test('Canal B (portal) → 403 PORTAL_READ_ONLY sem tocar o banco', async () => {
