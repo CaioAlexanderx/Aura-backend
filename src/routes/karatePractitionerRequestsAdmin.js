@@ -27,6 +27,13 @@
 // demais fluxos de roster — não usa karate_finance_audit_log porque o
 // target_type dessa tabela é restrito a 'annuity'/'installment' e isto não
 // é ação financeira).
+//
+// ── F5a (26/07/2026) ─────────────────────────────────────
+// A solicitação agora pode ter nascido de um ALUNO do dojô
+// (karate_practitioner_requests.student_id, migration 253). Nesse caso a
+// aprovação fecha o ciclo: o practitioner_id resultante volta para o aluno
+// (karate_dojo_students) na MESMA transação — ver
+// linkDojoStudentOnApprove abaixo.
 // ============================================================
 'use strict';
 
@@ -153,6 +160,64 @@ async function logRosterEventStandalone({ dojoId, federationId, event, affected,
   }
 }
 
+// ── F5a: devolver o praticante ao ALUNO que originou a solicitação ────
+// A solicitação criada por POST /dojo/students/:sid/federate carrega
+// student_id (migration 253). Aprovar é o momento — e o ÚNICO momento — em
+// que a federação CONFIRMA o que o sensei declarou, então é aqui que o
+// practitioner_id volta para karate_dojo_students. Dentro da MESMA
+// transação do approve: se ficasse para depois do COMMIT, uma falha
+// deixaria o aluno "pendente" para sempre com o praticante já criado.
+//
+// SAVEPOINT (nunca try/catch nu dentro de BEGIN — tx-poison): schema do
+// lado do dojô ausente (42703 is_federated / 42P01 karate_dojo_students,
+// migrations 253/242 pendentes) NÃO pode derrubar a aprovação, que é o ato
+// da FEDERAÇÃO. Fail-open explícito: perde-se o fio de volta (o sensei
+// revincula pelo número FPKT em /federate), nunca o praticante.
+//
+// student_id vem undefined (não erro) quando a migration 253 ainda não
+// rodou — SELECT * não falha por coluna ausente na SELECT-list.
+async function linkDojoStudentOnApprove(client, { studentId, dojoId, practitionerId }) {
+  if (!studentId || !practitionerId) return { linked: false, reason: 'no_student' };
+
+  const SP = 'SAVEPOINT sp_link_dojo_student';
+  const attempt = async (withFederatedCol) => {
+    await client.query(
+      `UPDATE karate_dojo_students
+          SET practitioner_id = $1${withFederatedCol ? ', is_federated = true' : ''}, updated_at = now()
+        WHERE id = $2 AND dojo_id = $3`,
+      [practitionerId, studentId, dojoId]
+    );
+  };
+
+  await client.query(SP);
+  try {
+    await attempt(true);
+    await client.query('RELEASE SAVEPOINT sp_link_dojo_student');
+    return { linked: true };
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+    await client.query('ROLLBACK TO SAVEPOINT sp_link_dojo_student');
+    if (e.code === '42P01') {
+      console.warn('[karatePractitionerRequestsAdmin] karate_dojo_students ausente (migration 242 pendente) — aluno não vinculado');
+      await client.query('RELEASE SAVEPOINT sp_link_dojo_student');
+      return { linked: false, reason: 'schema_pending' };
+    }
+    // 42703: provavelmente is_federated (migration 253 pendente) — grava só
+    // o vínculo real, que é o que importa.
+    try {
+      await attempt(false);
+      await client.query('RELEASE SAVEPOINT sp_link_dojo_student');
+      console.warn('[karatePractitionerRequestsAdmin] is_federated ausente (migration 253 pendente) — gravado só practitioner_id no aluno');
+      return { linked: true, reason: 'partial_schema' };
+    } catch (e2) {
+      await client.query('ROLLBACK TO SAVEPOINT sp_link_dojo_student');
+      await client.query('RELEASE SAVEPOINT sp_link_dojo_student');
+      console.warn('[karatePractitionerRequestsAdmin] não foi possível vincular o aluno (não bloqueia a aprovação):', e2.message);
+      return { linked: false, reason: 'schema_pending' };
+    }
+  }
+}
+
 // ── Reabrir acesso do dojô ao rejeitar (item 4, H3) ──────────
 // O link público do sensei (/public/roster-update/:token/...) é gated por
 // karate_dojo_roster_validation.token_expires_at. Esse token EXPIRA
@@ -246,13 +311,16 @@ function shapeDetail(r) {
     requested_by_channel: r.requested_by_channel || null,
     requested_by_label: r.requested_by_label || null,
     resolved_practitioner_id: r.resolved_practitioner_id || null,
+    // F5a (aditivo): de qual aluno do dojô esta solicitação nasceu (null
+    // nas avulsas e em todas as anteriores à migration 253).
+    student_id: r.student_id || null,
     created_at: r.created_at,
     resolved_at: r.resolved_at || null,
     resolved_by: r.resolved_by || null,
   };
 }
 
-// ── GET listar (com matches embutidos) ──────────────────────
+// ── GET listar (com matches embutidos) ─────────────────────
 router.get('/practitioner-requests', ...guards.read(), async (req, res) => {
   const federationId = req.params.id;
   const status = ['pendente', 'aprovada', 'rejeitada'].includes(req.query.status) ? req.query.status : null;
@@ -296,7 +364,7 @@ router.get('/practitioner-requests', ...guards.read(), async (req, res) => {
   }
 });
 
-// ── GET métricas da fila (H3) ────────────────────────────────
+// ── GET métricas da fila (H3) ──────────────────────────────
 // Rota ESTÁTICA — precisa vir ANTES de '/practitioner-requests/:requestId'
 // (Express trataria 'metrics' como :requestId senão).
 //
@@ -372,7 +440,7 @@ router.get('/practitioner-requests/metrics', ...guards.read(), async (req, res) 
   }
 });
 
-// ── GET detalhe ──────────────────────────────────────────────
+// ── GET detalhe ────────────────────────────────────────
 router.get('/practitioner-requests/:requestId', ...guards.read(), async (req, res) => {
   const { id: federationId, requestId } = req.params;
   try {
@@ -406,7 +474,7 @@ router.get('/practitioner-requests/:requestId', ...guards.read(), async (req, re
   }
 });
 
-// ── PATCH editar antes de aprovar ────────────────────────────
+// ── PATCH editar antes de aprovar ──────────────────────────
 const EDITABLE_FIELDS = [
   'full_name', 'birth_date', 'cpf', 'rg', 'phone', 'email', 'claimed_belt', 'fpkt_number_claimed',
 ];
@@ -510,7 +578,7 @@ router.patch('/practitioner-requests/:requestId', ...guards.staffWrite(), async 
   }
 });
 
-// ── POST aprovar como CRIAÇÃO ────────────────────────────────
+// ── POST aprovar como CRIAÇÃO ────────────────────────────
 router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, requestId } = req.params;
   const fpktNumber = req.body && req.body.fpkt_number != null ? normalizeFpktNumber(req.body.fpkt_number) : '';
@@ -607,9 +675,17 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
       [practitioner.id, (req.user && req.user.id) || null, requestId]
     );
 
+    // F5a: se a solicitação nasceu de um ALUNO do dojô, o vínculo volta
+    // para ele agora — mesma transação, fail-open por SAVEPOINT.
+    const studentLink = await linkDojoStudentOnApprove(client, {
+      studentId: reqRow.student_id || null,
+      dojoId: reqRow.dojo_id,
+      practitionerId: practitioner.id,
+    });
+
     await logRosterEventBestEffort(client, {
       dojoId: reqRow.dojo_id, federationId, event: 'practitioner_request_approved_create',
-      affected: [{ request_id: requestId, practitioner_id: practitioner.id, fpkt_number: fpktNumber }],
+      affected: [{ request_id: requestId, practitioner_id: practitioner.id, fpkt_number: fpktNumber, student_id: reqRow.student_id || null }],
       actorId: (req.user && req.user.id) || null,
     });
 
@@ -619,6 +695,8 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
       request_id: requestId,
       status: 'aprovada',
       resolution: 'created',
+      student_id: reqRow.student_id || null,
+      student_linked: studentLink.linked === true,
       practitioner: {
         id: practitioner.id,
         name: practitioner.name,
@@ -638,7 +716,7 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
   }
 });
 
-// ── POST aprovar como TRANSFERÊNCIA ──────────────────────────
+// ── POST aprovar como TRANSFERÊNCIA ────────────────────────
 router.post('/practitioner-requests/:requestId/approve-transfer', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, requestId } = req.params;
   const practitionerId = req.body && req.body.practitioner_id;
@@ -725,9 +803,17 @@ router.post('/practitioner-requests/:requestId/approve-transfer', ...guards.staf
       [practitionerId, (req.user && req.user.id) || null, requestId]
     );
 
+    // F5a: mesma regra da aprovação por criação — se veio de um aluno do
+    // dojô, o aluno passa a apontar para o praticante transferido.
+    const studentLink = await linkDojoStudentOnApprove(client, {
+      studentId: reqRow.student_id || null,
+      dojoId: destinationDojoId,
+      practitionerId,
+    });
+
     await logRosterEventBestEffort(client, {
       dojoId: destinationDojoId, federationId, event: 'practitioner_request_approved_transfer',
-      affected: [{ request_id: requestId, practitioner_id: practitionerId, origin_dojo_id: originDojoId, destination_dojo_id: destinationDojoId }],
+      affected: [{ request_id: requestId, practitioner_id: practitionerId, origin_dojo_id: originDojoId, destination_dojo_id: destinationDojoId, student_id: reqRow.student_id || null }],
       actorId: (req.user && req.user.id) || null,
     });
 
@@ -738,6 +824,8 @@ router.post('/practitioner-requests/:requestId/approve-transfer', ...guards.staf
       status: 'aprovada',
       resolution: 'transferred',
       practitioner_id: practitionerId,
+      student_id: reqRow.student_id || null,
+      student_linked: studentLink.linked === true,
       transfer: transferRow ? { id: transferRow.id, transferred_at: transferRow.transferred_at } : null,
     });
   } catch (e) {
@@ -749,7 +837,7 @@ router.post('/practitioner-requests/:requestId/approve-transfer', ...guards.staf
   }
 });
 
-// ── POST rejeitar ─────────────────────────────────────────────
+// ── POST rejeitar ───────────────────────────────────────
 router.post('/practitioner-requests/:requestId/reject', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, requestId } = req.params;
   const reason = req.body && req.body.reason != null ? String(req.body.reason).trim() : '';
