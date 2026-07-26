@@ -3,9 +3,19 @@
 //
 // DECISÃO CENTRAL: o aluno do dojô NÃO é o praticante federado
 // (karate_practitioners/customers, que são da FEDERAÇÃO). É um registro
-// próprio do dojô em karate_dojo_students (migration 242);
-// practitioner_id fica NULL até o merge/sync com a FPKT ser definido —
-// NENHUMA função aqui escreve nesse campo.
+// próprio do dojô em karate_dojo_students (migration 242).
+//
+// F5a (26/07/2026) — QUEM FEDERA É O SENSEI, A FEDERAÇÃO CONFIRMA:
+//   practitioner_id deixou de ser "vínculo futuro" e passou a ser gravado
+//   por dois caminhos, ambos reusando o que já existia:
+//     1) o aluno JÁ tem número FPKT → lookupByFpktNumber (H1) confirma e
+//        o vínculo é gravado na hora;
+//     2) o aluno é NOVO na federação → abre a solicitação H1
+//        (createPractitionerRequest) com student_id; quando a federação
+//        aprova, o practitioner_id volta para o aluno.
+//   is_federated (migration 253) é a DECLARAÇÃO do sensei;
+//   practitioner_id é a CONFIRMAÇÃO. Aluno não federado é cadastro
+//   privado do dojô e a federação não o enxerga.
 //
 // Família é entidade de primeira classe (billing familiar na F3):
 // responsável em karate_dojo_guardians; um responsável → N alunos.
@@ -25,6 +35,8 @@
 'use strict';
 
 const db = require('../config/database');
+const { lookupByFpktNumber, normalizeFpktNumber } = require('./karatePractitionerDedup');
+const { createPractitionerRequest } = require('./karatePractitionerRequestCreate');
 
 const VALID_STATUS = ['active', 'inactive'];
 const VALID_SEX_VALUES = ['M', 'F', 'other'];
@@ -36,6 +48,62 @@ function svcError(status, code, message) {
   e.status = status;
   e.code = code;
   return e;
+}
+
+// ── F5a: schema do vínculo federativo (migration 253) ──
+// O backend sobe antes da migration em deploy parcial (CLAUDE.md #1/#10).
+// Flags module-level: na primeira 42703/42P01 das colunas NOVAS, degradamos
+// e seguimos servindo a lista — esconder os alunos porque uma coluna ainda
+// não existe seria muito pior que mostrar todo mundo como não federado.
+let HAS_IS_FEDERATED_COL = true;
+let HAS_REQUEST_STUDENT_ID_COL = true;
+
+// Sem a coluna, practitioner_id NOT NULL é a melhor verdade disponível
+// (é o vínculo real; is_federated é só a declaração).
+function isFederatedExpr(p) {
+  return HAS_IS_FEDERATED_COL ? `${p}is_federated` : `(${p}practitioner_id IS NOT NULL)`;
+}
+
+function pendingRequestExpr(p) {
+  return HAS_REQUEST_STUDENT_ID_COL
+    ? `EXISTS (SELECT 1 FROM karate_practitioner_requests pr_req
+                 WHERE pr_req.student_id = ${p}id AND pr_req.status = 'pendente')`
+    : 'false';
+}
+
+// Campos federativos ADITIVOS, sempre na MESMA query da leitura do aluno —
+// nenhuma query nova entra na frente de nada (armadilha da fila de mocks).
+function federationFields(p) {
+  return (
+    `${isFederatedExpr(p)} AS is_federated, ` +
+    `${pendingRequestExpr(p)} AS has_pending_request, ` +
+    `fp.karate_registration_number AS fpkt_number, fp.name AS practitioner_name`
+  );
+}
+
+function federationJoin(p) {
+  return `LEFT JOIN customers fp ON fp.id = ${p}practitioner_id`;
+}
+
+function isFederationSchemaError(e) {
+  if (!e || (e.code !== '42703' && e.code !== '42P01')) return false;
+  // Só degrada por causa das coisas NOVAS. 42P01 de karate_dojo_students
+  // continua subindo (a rota responde schema_pending, migration 242).
+  return /is_federated|student_id|karate_practitioner_requests/i.test(e.message || '');
+}
+
+// UMA única retentativa degradada (armadilha "retry chain 42P01": nunca
+// re-tentar em cadeia — se falhar de novo, o erro sobe).
+async function withFederationSchemaFallback(run) {
+  try {
+    return await run();
+  } catch (e) {
+    if (!isFederationSchemaError(e) || (!HAS_IS_FEDERATED_COL && !HAS_REQUEST_STUDENT_ID_COL)) throw e;
+    console.warn('[karateDojoStudentService] schema da F5a ausente (migration 253 pendente) — degradando:', e.message);
+    HAS_IS_FEDERATED_COL = false;
+    HAS_REQUEST_STUDENT_ID_COL = false;
+    return run();
+  }
 }
 
 // ── Datas / idade (tz-safe: split manual, nunca new Date('YYYY-MM-DD')) ──
@@ -196,6 +264,17 @@ function studentFields(p) {
 }
 
 function shapeStudent(row) {
+  // federated: a coluna manda quando existe. Quando ela NÃO vem na row
+  // (migration 253 pendente, RETURNING de create/update), o vínculo real
+  // (practitioner_id) é a verdade — nunca inventamos "federado" do nada.
+  const federated = row.is_federated === true || (row.is_federated == null && !!row.practitioner_id);
+  // linked  = a federação confirmou (existe praticante vinculado)
+  // pending = existe solicitação H1 pendente para este aluno
+  // none    = cadastro privado do dojô
+  const linkStatus = row.practitioner_id
+    ? 'linked'
+    : (row.has_pending_request === true ? 'pending' : 'none');
+
   return {
     id: row.id,
     full_name: row.full_name,
@@ -214,6 +293,11 @@ function shapeStudent(row) {
     consent_lgpd: row.consent_lgpd === true,
     notes: row.notes || null,
     practitioner_id: row.practitioner_id || null,
+    // ── F5a (aditivo) ──
+    federated,
+    fpkt_number: row.fpkt_number || null,
+    practitioner_name: row.practitioner_name || null,
+    federation_link_status: linkStatus,
     enrolled_at: row.enrolled_at || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -221,22 +305,26 @@ function shapeStudent(row) {
 }
 
 // ── Consultas ──
-async function listStudents(dojoId, { status = null, q = null, belt = null } = {}) {
-  const { rows } = await db.query(
+// federated: true | false | null (null/ausente = todos)
+async function listStudents(dojoId, { status = null, q = null, belt = null, federated = null } = {}) {
+  const { rows } = await withFederationSchemaFallback(() => db.query(
     `SELECT ${studentFields('s.')},
             g.full_name AS guardian_full_name, g.phone AS guardian_phone,
-            g.relationship AS guardian_relationship
+            g.relationship AS guardian_relationship,
+            ${federationFields('s.')}
        FROM karate_dojo_students s
        LEFT JOIN karate_dojo_guardians g ON g.id = s.guardian_id
+       ${federationJoin('s.')}
       WHERE s.dojo_id = $1
         AND ($2::text IS NULL OR s.status = $2)
         AND ($3::text IS NULL OR s.full_name ILIKE '%' || $3 || '%'
              OR s.cpf = regexp_replace($3, '\\D', '', 'g'))
         AND ($4::text IS NULL OR s.belt_label = $4)
+        AND ($5::boolean IS NULL OR ${isFederatedExpr('s.')} = $5)
       ORDER BY s.full_name ASC
       LIMIT 1000`,
-    [dojoId, status, q, belt]
-  );
+    [dojoId, status, q, belt, federated]
+  ));
   return rows.map((r) => {
     const s = shapeStudent(r);
     s.guardian = r.guardian_id
@@ -283,17 +371,19 @@ async function getSummary(dojoId) {
 }
 
 async function getStudent(dojoId, studentId) {
-  const { rows } = await db.query(
+  const { rows } = await withFederationSchemaFallback(() => db.query(
     `SELECT ${studentFields('s.')},
             g.full_name AS guardian_full_name, g.cpf AS guardian_cpf,
             g.phone AS guardian_phone, g.email AS guardian_email,
-            g.relationship AS guardian_relationship
+            g.relationship AS guardian_relationship,
+            ${federationFields('s.')}
        FROM karate_dojo_students s
        LEFT JOIN karate_dojo_guardians g ON g.id = s.guardian_id
+       ${federationJoin('s.')}
       WHERE s.id = $1 AND s.dojo_id = $2
       LIMIT 1`,
     [studentId, dojoId]
-  );
+  ));
   if (!rows.length) return null;
   const r = rows[0];
   const s = shapeStudent(r);
@@ -360,6 +450,9 @@ async function createStudent(dojoId, data) {
       data.enrolled_at !== undefined ? data.enrolled_at : null,
     ]
   );
+  // Aluno recém-criado nunca nasce federado nem com solicitação pendente:
+  // shapeStudent devolve federated:false / federation_link_status:'none'
+  // sem precisar de NENHUMA query extra (o INSERT não muda de lugar).
   const s = shapeStudent(rows[0]);
   s.guardian = guardian
     ? { id: guardian.id, full_name: guardian.full_name, phone: guardian.phone, relationship: guardian.relationship }
@@ -374,12 +467,18 @@ const UPDATABLE_COLS = [
 ];
 
 async function updateStudent(dojoId, studentId, data) {
-  const existing = await db.query(
-    `SELECT ${studentFields('')} FROM karate_dojo_students
-      WHERE id = $1 AND dojo_id = $2
+  // O SELECT que já existia ganhou os campos federativos (mesma query, sem
+  // custo de round-trip novo): o PATCH não altera practitioner_id nem
+  // is_federated (não estão em UPDATABLE_COLS — federar tem rota própria),
+  // então o estado federativo lido aqui vale para a resposta.
+  const existing = await withFederationSchemaFallback(() => db.query(
+    `SELECT ${studentFields('s.')}, ${federationFields('s.')}
+       FROM karate_dojo_students s
+       ${federationJoin('s.')}
+      WHERE s.id = $1 AND s.dojo_id = $2
       LIMIT 1`,
     [studentId, dojoId]
-  );
+  ));
   if (!existing.rows.length) {
     throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
   }
@@ -415,7 +514,14 @@ async function updateStudent(dojoId, studentId, data) {
       RETURNING ${studentFields('')}`,
     vals
   );
-  const s = shapeStudent(upd.rows[0]);
+  // RETURNING não faz JOIN: o estado federativo vem do SELECT acima.
+  const s = shapeStudent({
+    ...upd.rows[0],
+    is_federated: cur.is_federated,
+    has_pending_request: cur.has_pending_request,
+    fpkt_number: cur.fpkt_number,
+    practitioner_name: cur.practitioner_name,
+  });
   s.guardian = guardian
     ? { id: guardian.id, full_name: guardian.full_name, phone: guardian.phone, relationship: guardian.relationship }
     : null;
@@ -434,6 +540,239 @@ async function deleteStudent(dojoId, studentId) {
     throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
   }
   return { deleted: true, id: studentId };
+}
+
+// ============================================================
+// F5a — FEDERAR / DESFEDERAR o aluno
+// ============================================================
+
+// Leitura crua do aluno (sem JOIN): usada pelos fluxos de federação, que
+// precisam da ficha para pré-preencher a solicitação H1.
+async function loadStudentOrThrow(dojoId, studentId) {
+  const { rows } = await db.query(
+    `SELECT ${studentFields('')} FROM karate_dojo_students
+      WHERE id = $1 AND dojo_id = $2
+      LIMIT 1`,
+    [studentId, dojoId]
+  );
+  if (!rows.length) {
+    throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
+  }
+  return rows[0];
+}
+
+// Escreve as DUAS colunas do vínculo de uma vez. Defensivo 42703
+// (migration 253 pendente): grava só practitioner_id — o vínculo REAL não
+// pode se perder por causa da coluna de declaração.
+async function writeFederationLink(dojoId, studentId, { practitionerId, federated }) {
+  const attempt = async (withCol) => {
+    const sets = ['practitioner_id = $1'];
+    if (withCol) sets.push(`is_federated = ${federated ? 'true' : 'false'}`);
+    sets.push('updated_at = now()');
+    return db.query(
+      `UPDATE karate_dojo_students SET ${sets.join(', ')}
+        WHERE id = $2 AND dojo_id = $3
+        RETURNING id`,
+      [practitionerId, studentId, dojoId]
+    );
+  };
+
+  try {
+    const r = await attempt(HAS_IS_FEDERATED_COL);
+    return r.rows.length > 0;
+  } catch (e) {
+    if (e.code === '42703' && HAS_IS_FEDERATED_COL && /is_federated/i.test(e.message || '')) {
+      HAS_IS_FEDERATED_COL = false;
+      console.warn('[karateDojoStudentService] is_federated ausente (migration 253 pendente) — gravando só practitioner_id');
+      const r = await attempt(false);
+      return r.rows.length > 0;
+    }
+    throw e;
+  }
+}
+
+async function findPendingRequestForStudent(dojoId, studentId) {
+  if (!HAS_REQUEST_STUDENT_ID_COL) return null;
+  try {
+    const { rows } = await db.query(
+      `SELECT id, status, created_at FROM karate_practitioner_requests
+        WHERE dojo_id = $1 AND student_id = $2 AND status = 'pendente'
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [dojoId, studentId]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') {
+      HAS_REQUEST_STUDENT_ID_COL = false;
+      console.warn('[karateDojoStudentService] student_id/karate_practitioner_requests ausente — sem estado "pendente" por aluno');
+      return null;
+    }
+    throw e;
+  }
+}
+
+// Caminho 1: o aluno JÁ tem número FPKT (veio de outro dojô / já tem
+// carteirinha). MESMA lógica do lookup-fpkt do H1 — nada reimplementado.
+//
+// IMPORTANTE: vincular NÃO move o praticante de dojô na federação. Isso é
+// decisão da FEDERAÇÃO (approve-transfer). Aqui o dojô só reivindica o
+// vínculo local; is_transfer avisa o front de que o praticante está hoje
+// em outro dojô e que a transferência formal continua sendo com a FPKT.
+async function federateStudentByFpktNumber(dojoId, federationId, studentId, rawNumber) {
+  const number = normalizeFpktNumber(rawNumber);
+  if (!number) {
+    throw svcError(422, 'VALIDATION_ERROR', 'Informe o número FPKT do aluno');
+  }
+
+  await loadStudentOrThrow(dojoId, studentId);
+
+  const lookup = await lookupByFpktNumber(db, { federationId, number });
+  if (!lookup || !lookup.found) {
+    throw svcError(
+      404,
+      'FPKT_NUMBER_NOT_FOUND',
+      'Número FPKT não encontrado nesta federação. Confira o número ou marque o aluno como novo para solicitar o cadastro à federação.'
+    );
+  }
+  const practitioner = lookup.practitioner || {};
+
+  // O mesmo praticante não pode ser reivindicado por dois alunos do MESMO
+  // dojô (viraria dois cadastros disputando um número FPKT).
+  const dup = await db.query(
+    `SELECT id, full_name FROM karate_dojo_students
+      WHERE dojo_id = $1 AND practitioner_id = $2 AND id <> $3
+      LIMIT 1`,
+    [dojoId, practitioner.id, studentId]
+  );
+  if (dup.rows.length) {
+    throw svcError(
+      409,
+      'PRACTITIONER_JA_VINCULADO',
+      `Este número FPKT já está vinculado ao aluno "${dup.rows[0].full_name}" deste dojô.`
+    );
+  }
+
+  const ok = await writeFederationLink(dojoId, studentId, { practitionerId: practitioner.id, federated: true });
+  if (!ok) {
+    throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
+  }
+
+  const isTransfer = Boolean(practitioner.current_dojo_id) &&
+    String(practitioner.current_dojo_id) !== String(dojoId);
+
+  return {
+    linked: true,
+    student_id: studentId,
+    federated: true,
+    federation_link_status: 'linked',
+    is_transfer: isTransfer,
+    practitioner: {
+      id: practitioner.id,
+      name: practitioner.name || null,
+      fpkt_number: number,
+      current_dojo_id: practitioner.current_dojo_id || null,
+      current_dojo_name: practitioner.current_dojo_name || null,
+    },
+  };
+}
+
+// Ficha da solicitação = dados do ALUNO como base + o que o sensei mandou
+// no corpo (o corpo vence). Evita redigitar o que o dojô já tem.
+function mergeStudentIntoRequestPayload(student, body) {
+  const b = body || {};
+  const pick = (key, fallback) => {
+    const v = b[key];
+    return v !== undefined && v !== null && String(v).trim() !== '' ? v : (fallback || null);
+  };
+  const merged = { ...b };
+  delete merged.request; // flag de controle, não é campo da ficha
+  merged.full_name = pick('full_name', student.full_name);
+  merged.birth_date = pick('birth_date', student.birth_date);
+  merged.cpf = pick('cpf', student.cpf);
+  merged.phone = pick('phone', student.phone);
+  merged.email = pick('email', student.email);
+  merged.sex = pick('sex', student.sex);
+  merged.claimed_belt = pick('claimed_belt', student.belt_label);
+  return merged;
+}
+
+// Caminho 2: o aluno é NOVO na federação — abre a solicitação H1 que já
+// existe (createPractitionerRequest), agora carimbada com student_id.
+// NÃO marca is_federated: pendente não é federado; o marcador só vira true
+// quando a federação aprova (ou quando o número existente é confirmado).
+async function federateStudentByRequest(dojoId, federationId, studentId, { body, channel = null, actorLabel = null } = {}) {
+  const student = await loadStudentOrThrow(dojoId, studentId);
+
+  if (student.practitioner_id) {
+    throw svcError(409, 'JA_FEDERADO', 'Este aluno já está vinculado a um praticante da federação.');
+  }
+
+  // Idempotente: pedir de novo devolve a solicitação pendente que existe.
+  const pending = await findPendingRequestForStudent(dojoId, studentId);
+  if (pending) {
+    return {
+      linked: false,
+      student_id: studentId,
+      federated: false,
+      request_id: pending.id,
+      status: 'pending',
+      federation_link_status: 'pending',
+      already_pending: true,
+      created_at: pending.created_at,
+      message: 'Já existe uma solicitação pendente para este aluno.',
+    };
+  }
+
+  const result = await createPractitionerRequest({
+    federationId,
+    dojoId,
+    body: mergeStudentIntoRequestPayload(student, body),
+    channel,
+    actorLabel,
+    studentId,
+  });
+
+  if (result.status >= 400) {
+    const e = svcError(result.status, result.body.code || 'ERROR', result.body.error);
+    if (result.body.errors) e.errors = result.body.errors;
+    throw e;
+  }
+
+  return {
+    linked: false,
+    student_id: studentId,
+    federated: false,
+    request_id: result.body.id,
+    status: 'pending',
+    federation_link_status: 'pending',
+    already_pending: result.body.already_pending === true,
+    created_at: result.body.created_at,
+    fpkt_lookup: result.body.fpkt_lookup || null,
+  };
+}
+
+// Desfederar = o DOJÔ deixa de reivindicar o praticante.
+//
+// ⚠️ NÃO APAGA NADA em karate_practitioners/customers de propósito: o
+// praticante pertence à FEDERAÇÃO e continua existindo (com número, faixa,
+// histórico) mesmo que o dojô tenha marcado o aluno errado. Sair do
+// cadastro federado é ato da federação, nunca efeito colateral de um
+// clique no portal do dojô.
+async function unfederateStudent(dojoId, studentId) {
+  const ok = await writeFederationLink(dojoId, studentId, { practitionerId: null, federated: false });
+  if (!ok) {
+    throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
+  }
+  return {
+    unlinked: true,
+    id: studentId,
+    student_id: studentId,
+    federated: false,
+    practitioner_id: null,
+    fpkt_number: null,
+    federation_link_status: 'none',
+  };
 }
 
 // ── Import em lote (até 500 linhas JSON já parseadas pelo front) ──
@@ -670,4 +1009,8 @@ module.exports = {
   listGuardians,
   createGuardian,
   updateGuardian,
+  // F5a
+  federateStudentByFpktNumber,
+  federateStudentByRequest,
+  unfederateStudent,
 };
