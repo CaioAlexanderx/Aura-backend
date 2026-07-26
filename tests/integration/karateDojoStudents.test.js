@@ -8,6 +8,13 @@
 //   escopo — queries SEMPRE parametrizadas por req.dojoId (nunca do body)
 //   guardians: POST cria + GET lista com contagem de alunos
 //
+// AUDITORIA F5a (26/07/2026): o shape do aluno ganhou federated,
+// fpkt_number e federation_link_status, e o SELECT do PATCH ganhou JOIN.
+// A fila posicional deste arquivo CONTINUA válida porque NENHUMA query
+// nova entra na frente de nada — os campos federativos vieram por JOIN nas
+// MESMAS queries que já existiam. Isso agora está ASSERTADO (o caso do
+// PATCH federado conta as queries), e não só afirmado no PR.
+//
 // REGRA CRÍTICA (padrão karateDojoClaim.test.js): db.query.mockReset() em
 // afterEach — jest.clearAllMocks NÃO drena filas mockResolvedValueOnce.
 // Import usa transação via db.connect() → client mockado na ordem exata
@@ -52,6 +59,9 @@ afterEach(() => {
   db.query.mockReset();
 });
 
+// Row "crua" do banco. De propósito SEM is_federated/fpkt_number: prova o
+// fallback do shape quando a migration 253 ainda não rodou (a coluna não
+// vem na row) — nesse caso practitioner_id é a única verdade.
 const studentRow = (over = {}) => ({
   id: sid,
   full_name: 'Aluno Teste',
@@ -103,6 +113,12 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(db.query.mock.calls[0][1][0]).toBe(dojoId);
     // cpf armazenado normalizado (só dígitos) — o UNIQUE parcial depende disso
     expect(db.query.mock.calls[0][1][3]).toBe('52998224725');
+    // F5a: aluno novo nasce cadastro PRIVADO do dojô (e sem query extra)
+    expect(res.body.federated).toBe(false);
+    expect(res.body.practitioner_id).toBeNull();
+    expect(res.body.fpkt_number).toBeNull();
+    expect(res.body.federation_link_status).toBe('none');
+    expect(db.query.mock.calls.length).toBe(1);
   });
 
   test('POST menor de 18 sem responsável → 422 MENOR_SEM_RESPONSAVEL (sem tocar o banco)', async () => {
@@ -144,6 +160,41 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(params[1]).toBe('active');
   });
 
+  test('GET lista — F5a: os 3 estados do vínculo federativo, na MESMA query', async () => {
+    db.query.mockResolvedValueOnce({
+      rows: [
+        // não federado: cadastro privado do dojô
+        { ...studentRow(), is_federated: false, has_pending_request: false, fpkt_number: null },
+        // solicitação H1 aberta: pendente NÃO é federado (o marcador só vira
+        // true quando a federação confirma) — mas o front precisa do estado
+        { ...studentRow({ id: 'a2' }), is_federated: false, has_pending_request: true, fpkt_number: null },
+        // confirmado pela federação
+        {
+          ...studentRow({ id: 'a3', practitioner_id: 'p1' }),
+          is_federated: true,
+          has_pending_request: false,
+          fpkt_number: 'FPKT-123',
+          practitioner_name: 'João Praticante',
+        },
+      ],
+    });
+    const res = await request(app).get(`${base}/students`).set(canalA());
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].federated).toBe(false);
+    expect(res.body.data[0].federation_link_status).toBe('none');
+
+    expect(res.body.data[1].federated).toBe(false);
+    expect(res.body.data[1].federation_link_status).toBe('pending');
+    expect(res.body.data[1].practitioner_id).toBeNull();
+
+    expect(res.body.data[2].federated).toBe(true);
+    expect(res.body.data[2].federation_link_status).toBe('linked');
+    expect(res.body.data[2].fpkt_number).toBe('FPKT-123');
+    // uma query só: os campos federativos vêm por JOIN, não por N+1
+    expect(db.query.mock.calls.length).toBe(1);
+  });
+
   test('GET lista com summary=1 devolve totais + pirâmide por faixa', async () => {
     db.query
       .mockResolvedValueOnce({ rows: [] })                                              // lista
@@ -179,6 +230,33 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     const updParams = db.query.mock.calls[1][1];
     expect(updParams[updParams.length - 1]).toBe(dojoId);
     expect(updParams[updParams.length - 2]).toBe(sid);
+  });
+
+  test('PATCH — F5a: estado federativo vem do SELECT que JÁ existia (2 queries, nenhuma nova)', async () => {
+    db.query
+      .mockResolvedValueOnce({
+        rows: [{
+          ...studentRow({ practitioner_id: 'p1' }),
+          is_federated: true,
+          has_pending_request: false,
+          fpkt_number: 'FPKT-123',
+          practitioner_name: 'João Praticante',
+        }],
+      })                                                                                   // SELECT existente (com JOIN)
+      .mockResolvedValueOnce({ rows: [studentRow({ practitioner_id: 'p1', belt_label: 'Amarela' })] }); // UPDATE RETURNING
+
+    const res = await request(app)
+      .patch(`${base}/students/${sid}`)
+      .set(canalA())
+      .send({ belt_label: 'Amarela' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.belt_label).toBe('Amarela');
+    expect(res.body.federated).toBe(true);
+    expect(res.body.fpkt_number).toBe('FPKT-123');
+    expect(res.body.federation_link_status).toBe('linked');
+    // A asserção que protege a fila posicional deste arquivo:
+    expect(db.query.mock.calls.length).toBe(2);
   });
 
   test('PATCH que TORNA menor sem responsável → 422 (estado resultante, não só o patch)', async () => {
