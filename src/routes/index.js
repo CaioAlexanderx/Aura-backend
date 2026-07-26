@@ -439,6 +439,28 @@ router.use('/federation/:id', require('./karateDojoClasses'));
 //   POST  /federation/:id/practitioner-requests/:requestId/reject
 router.use('/federation/:id', require('./karatePractitionerRequestsAdmin'));
 
+// ── AURA DOJÔ — F6 (conexão/filiação self-serve do dojô à federação) ──
+// Migration 252 (karate_affiliation_requests). companies.federation_id é
+// vínculo TÉCNICO (roteamento + requireDojoAccess); a VISIBILIDADE para a
+// federação é companies.karate_dojo_linked_at (migration 251). Até aqui só
+// a federação/admin setava o vínculo — o dojô self-serve ficava invisível
+// e sem caminho para pedir. Mesmo formato do H1: pedido → inbox → aceite.
+// O ACEITE é o que seta karate_dojo_linked_at (não o pagamento) e o número
+// de filiação é SEMPRE digitado pela federação (o backend nunca gera).
+//
+// Lado DOJÔ (requireDojoAccess; POST só Canal A, Canal B lê):
+//   GET  /federation/:id/dojo/connection
+//   POST /federation/:id/dojo/connection
+router.use('/federation/:id', require('./karateDojoConnection'));
+// Lado FEDERAÇÃO (guards de karateRoles). ⚠️ /affiliation-requests/metrics é
+// rota ESTÁTICA e já é declarada ANTES de /affiliation-requests/:requestId
+// dentro do próprio router (mesma armadilha de /dojos/roster-progress).
+//   GET  /federation/:id/affiliation-requests?status=
+//   GET  /federation/:id/affiliation-requests/metrics
+//   POST /federation/:id/affiliation-requests/:requestId/approve  {fpkt_number}
+//   POST /federation/:id/affiliation-requests/:requestId/reject   {reason}
+router.use('/federation/:id', require('./karateAffiliationRequestsAdmin'));
+
 // ── AURA KARATÊ — Track H (configurações da federação) ───────────
 // Migration 181 (inscricao_municipal + regime_tributario em companies).
 //   GET/POST   /federation/:id/settings/members          — equipe FPKT
