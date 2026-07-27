@@ -177,7 +177,7 @@ describe('QA 1 — GET /dojo/me devolve o cadastro completo (fim dos 11 campos "
 });
 
 describe('QA 2 — PATCH /dojo/me (o dojô edita o próprio cadastro)', () => {
-  test('campo FEDERATIVO no body é ignorado em silêncio (nunca entra no UPDATE)', async () => {
+  test('campo FEDERATIVO no body é ignorado em silêncio (nunca entra no SET)', async () => {
     mockDojoMe(new Date('2026-07-01T12:00:00Z'), (s) => {
       if (/^UPDATE companies SET/.test(s)) return { rows: [{ id: dojoId }] };
       return null;
@@ -204,11 +204,14 @@ describe('QA 2 — PATCH /dojo/me (o dojô edita o próprio cadastro)', () => {
     const upd = findCall(/^UPDATE companies SET/);
     expect(upd).toBeDefined();
     const updSql = String(upd[0]);
-    for (const col of ['fpkt_affiliation_id', 'affiliation_model', 'affiliation_since', 'region', 'federation_id =']) {
-      expect(updSql).not.toContain(col);
+    // Só a cláusula SET interessa: o WHERE escopa por federation_id de
+    // propósito (é o guard), procurar na SQL inteira daria falso positivo.
+    const setClause = updSql.split('WHERE')[0];
+    for (const col of ['fpkt_affiliation_id', 'affiliation_model', 'affiliation_since', 'region', 'federation_id']) {
+      expect(setClause).not.toContain(col);
     }
-    expect(updSql).toContain('trade_name =');
-    expect(updSql).toContain('phone =');
+    expect(setClause).toContain('trade_name =');
+    expect(setClause).toContain('phone =');
     // escopo: id + federation_id do TOKEN, nas duas últimas posições
     const params = upd[1];
     expect(params[params.length - 2]).toBe(dojoId);
