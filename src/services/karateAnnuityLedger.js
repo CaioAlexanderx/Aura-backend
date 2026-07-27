@@ -503,11 +503,237 @@ async function applyAnnuityPayment({
   }
 }
 
+// pg devolve timestamptz como Date -- normaliza pra ISO string (mesmo
+// formato que applyAnnuityPayment grava/devolve em paid_at) sem reinterpretar
+// fuso (nao e uma coluna `date` pura, e timestamptz -- .toISOString() aqui e
+// seguro).
+function toIsoDateTime(v) {
+  if (v == null) return null;
+  return v instanceof Date ? v.toISOString() : String(v);
+}
+
+// ============================================================
+// recomputeAnnuityFromLedger -- Editar/remover uma baixa lancada por engano
+//
+// Decisao de FIFO (documentada aqui por pedido explicito do Caio,
+// 23/07/2026 -- ver PR): o motor F1/F3 (applyAnnuityPayment) grava cada
+// baixa como N linhas em karate_annuity_payments (uma por parcela tocada
+// pelo FIFO daquele momento). Editar/remover UMA linha tem duas
+// abordagens possiveis:
+//
+//   (a) Recompute LOCAL por linha: mexe so na parcela dona da linha
+//       editada/removida (amount_paid = SUM das linhas QUE JA APONTAM
+//       para aquela parcela). Simples, mas pode deixar o FIFO "impuro":
+//       ex. baixa de R$500 zera parcela 1 (R$300) e deixa R$200 na
+//       parcela 2; se a federacao depois EDITA a linha da parcela 1 para
+//       R$100 (achou que era R$100, nao R$300), o motor original teria
+//       estourado R$200 pra parcela 2 automaticamente -- o recompute local
+//       NAO faz isso, a parcela 1 fica com saldo aberto de R$200 sem dono
+//       e a parcela 2 continua com so R$200 aplicado, mesmo havendo R$200
+//       "sobrando" que deveriam ter fluido pra ela. Estado diverge do que
+//       o motor produziria numa baixa nova.
+//
+//   (b) Rebuild GLOBAL por anuidade (ESCOLHIDA): apaga TODA a distribuicao
+//       atual, zera as parcelas em memoria, e RE-APLICA cada linha do
+//       ledger remanescente (ja com a edicao/remocao feita) em ordem
+//       cronologica de aplicacao original, rerodando o MESMO
+//       computeDistribution do motor a cada linha -- reatribuindo
+//       installment_id conforme o FIFO real pede. Mais codigo, mas o
+//       estado pos-edicao fica IDENTICO ao que o motor produziria se as
+//       baixas tivessem sido lancadas, desde o inicio, com os valores ja
+//       corrigidos. E a opcao pedida explicitamente pelo Caio -- "manter o
+//       FIFO integro e o estado identico ao motor" -- e e a unica que lida
+//       corretamente com edicao pra CIMA que estoura o saldo da parcela
+//       original (o excedente tem que fluir pra proxima parcela em aberto,
+//       exatamente como aconteceria numa baixa nova).
+//
+// Ordem de replay: `created_at` ASC (a ordem REAL em que cada baixa foi
+// efetivamente aplicada pelo motor -- NUNCA `paid_at`, que e a data
+// NOMINAL do pagamento e pode ser retroativa/editada livremente sem mudar
+// "quando" ela foi de fato lancada no sistema). Todas as linhas de UMA
+// MESMA chamada de applyAnnuityPayment compartilham o EXATO MESMO
+// created_at (grava dentro da mesma transacao -- `now()` do Postgres e
+// fixo por transacao, nao por statement), entao o desempate secundario
+// (due_date/seq da parcela a que a linha pertencia, id como desempate
+// final) reconstroi a ordem FIFO INTRA-operacao em que o motor original
+// alocou aquela baixa entre as parcelas que tocou. Isso e o que garante
+// que aplicar as sub-parcelas de uma baixa dividida em sequencia (nesta
+// ordem) reproduz exatamente o mesmo resultado que aplicar o valor total
+// de uma vez (FIFO e associativo nesse sentido: dividir um valor em
+// pedacos ordenados e aplica-los um a um nao muda quem recebe o que,
+// desde que a ordem relativa dos pedacos seja preservada e nada mais se
+// intercale no meio -- que e o caso aqui, dentro de uma unica transacao).
+//
+// Efeito colateral aceito e documentado: os `id` (uuid) das linhas do
+// ledger NAO sobrevivem a um recompute -- a tabela inteira da anuidade e
+// apagada e re-inserida com ids novos (created_at original e preservado
+// para manter a ordem de replay estavel em recomputes futuros). Isso e
+// seguro porque karate_annuity_payments e um ledger de AUDITORIA/EXTRATO
+// (nada mais referencia payment_id como chave estrangeira) -- quem le o
+// extrato depois de um recompute ve o estado novo, correto.
+//
+// AMOUNT_EXCEEDS_BALANCE "de graca": como o replay reusa computeDistribution
+// (mesma validacao de saldo do motor), se o total editado ultrapassar o
+// que a anuidade deve, o replay estoura e lanca AnnuityPaymentError
+// AMOUNT_EXCEEDS_BALANCE no meio do rebuild -- a transacao inteira do
+// caller deve dar ROLLBACK (nenhuma escrita parcial fica presa).
+//
+// Reconciliacao de `transactions` (bidirecional, diferente de
+// reconcileClosedInstallmentTransactions do karateAnnuities.js, que so
+// FECHA) fica a cargo do CALLER (rota) -- este motor so mexe em
+// karate_annuity_payments/karate_annuity_installments/
+// karate_dojo_annuity_history, nunca em `transactions` (mesma separacao de
+// responsabilidade do resto deste arquivo).
+//
+// `client` ja deve estar dentro de um BEGIN do caller (mesmo padrao de
+// syncAnnuityHeaderRollup -- este helper NAO abre/fecha transacao sozinho).
+// A mutacao da(s) linha(s) editada(s)/removida(s) do ledger e
+// responsabilidade do CALLER, ANTES de chamar este helper (UPDATE/DELETE
+// direto em karate_annuity_payments) -- este helper so LE o ledger como
+// esta no momento em que e chamado e reconstroi tudo a partir dali.
+// ============================================================
+async function recomputeAnnuityFromLedger(client, { federation_id, annuity_id }) {
+  if (!federation_id) {
+    throw new AnnuityPaymentError('FEDERATION_ID_REQUIRED', 'federation_id e obrigatorio', 422);
+  }
+  if (!annuity_id) {
+    throw new AnnuityPaymentError('ANNUITY_ID_REQUIRED', 'annuity_id e obrigatorio', 422);
+  }
+
+  // Mesmo lock/mesma ordem FIFO do motor (SELECT ... FOR UPDATE) -- serializa
+  // qualquer applyAnnuityPayment/recompute concorrente sobre a MESMA anuidade.
+  const { rows: installments } = await client.query(
+    `SELECT id, annuity_id, federation_id, seq, amount, amount_paid, status, due_date, kind, payment_method, paid_at
+       FROM karate_annuity_installments
+      WHERE annuity_id = $1 AND federation_id = $2
+      ORDER BY due_date ASC NULLS FIRST, seq ASC
+      FOR UPDATE`,
+    [annuity_id, federation_id]
+  );
+
+  if (!installments.length) {
+    throw new AnnuityPaymentError(
+      'ANNUITY_NOT_FOUND',
+      'Nenhuma parcela encontrada para este annuity_id/federation_id',
+      404
+    );
+  }
+
+  const fifoOrder = installments.map((i) => String(i.id));
+  const state = new Map();
+  for (const inst of installments) {
+    state.set(String(inst.id), {
+      id: inst.id,
+      seq: inst.seq,
+      due_date: inst.due_date,
+      kind: inst.kind,
+      amount: round2(inst.amount),
+      amount_paid: 0,
+      status: 'pending',
+      payment_method: null,
+      paid_at: null,
+    });
+  }
+
+  // Ledger remanescente (ja com a edicao/remocao do caller aplicada) --
+  // ver comentario de topo sobre a ordem de replay.
+  const { rows: ledgerRows } = await client.query(
+    `SELECT p.id, p.installment_id, p.amount, p.paid_at, p.payment_method,
+            p.created_by, p.operation_id, p.created_at
+       FROM karate_annuity_payments p
+       JOIN karate_annuity_installments i ON i.id = p.installment_id
+      WHERE p.annuity_id = $1 AND p.federation_id = $2
+      ORDER BY p.created_at ASC, i.due_date ASC NULLS FIRST, i.seq ASC, p.id ASC`,
+    [annuity_id, federation_id]
+  );
+
+  const newLedgerRows = [];
+  for (const row of ledgerRows) {
+    const snapshot = fifoOrder.map((id) => {
+      const s = state.get(id);
+      return {
+        id: s.id,
+        annuity_id,
+        seq: s.seq,
+        due_date: s.due_date,
+        kind: s.kind,
+        amount: s.amount,
+        amount_paid: s.amount_paid,
+        status: s.status,
+      };
+    });
+
+    const dist = computeDistribution(snapshot, round2(Number(row.amount)));
+    const paidAtVal = toIsoDateTime(row.paid_at);
+
+    for (const a of dist.allocations) {
+      const s = state.get(String(a.installment_id));
+      s.amount_paid = a.amount_paid_after;
+      s.status = a.status_after;
+      if (row.payment_method != null) s.payment_method = row.payment_method;
+      if (a.status_after === 'paid') s.paid_at = paidAtVal;
+
+      newLedgerRows.push({
+        installment_id: a.installment_id,
+        amount: a.amount_applied,
+        paid_at: row.paid_at,
+        payment_method: row.payment_method,
+        created_by: row.created_by,
+        operation_id: row.operation_id,
+        created_at: row.created_at,
+      });
+    }
+  }
+
+  await client.query(
+    `DELETE FROM karate_annuity_payments WHERE annuity_id = $1 AND federation_id = $2`,
+    [annuity_id, federation_id]
+  );
+  for (const r of newLedgerRows) {
+    await client.query(
+      `INSERT INTO karate_annuity_payments
+         (federation_id, installment_id, annuity_id, amount, paid_at, payment_method, created_by, operation_id, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [federation_id, r.installment_id, annuity_id, r.amount, r.paid_at, r.payment_method, r.created_by, r.operation_id, r.created_at]
+    );
+  }
+
+  const updatedInstallments = [];
+  for (const id of fifoOrder) {
+    const s = state.get(id);
+    const { rows } = await client.query(
+      `UPDATE karate_annuity_installments
+          SET amount_paid = $1,
+              status = $2,
+              payment_method = $3,
+              paid_at = $4::timestamptz,
+              updated_at = NOW()
+        WHERE id = $5
+        RETURNING *`,
+      [s.amount_paid, s.status, s.payment_method, s.paid_at, id]
+    );
+    updatedInstallments.push(rows[0]);
+  }
+
+  // Fonte unica de verdade do rollup do header -- mesma funcao do motor.
+  const header = await syncAnnuityHeaderRollup(client, annuity_id);
+
+  return {
+    federation_id,
+    annuity_id,
+    installments: updatedInstallments,
+    ledger: newLedgerRows,
+    header,
+  };
+}
+
 module.exports = {
   AnnuityPaymentError,
   applyAnnuityPayment,
   computeDistribution,
   deriveStatusFromAmountPaid,
   toIsoDate,
+  toIsoDateTime,
   round2,
+  recomputeAnnuityFromLedger,
 };
