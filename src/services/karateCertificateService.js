@@ -122,8 +122,26 @@ async function fireTransitionEmail(order, toStatus, { federationData, dojoEmail,
 }
 
 // ── createOrder ────────────────────────────────────────────────
-// Valida que o praticante tem a graduação em karate_belt_history,
-// depois cria o pedido em status 'requested'.
+// Cria o pedido em status 'requested'.
+//
+// ⚠️ P0 CORRIGIDO EM 27/07/2026 — LEIA ANTES DE MEXER
+// A checagem "advisory" de graduação abaixo consultava DUAS colunas que
+// NUNCA existiram em karate_belt_history:
+//     WHERE kbh.practitioner_id = $1  ← a coluna é student_id
+//       AND (kbh.source = 'exam' OR kbh.source IS NOT NULL)  ← não existe
+// O Postgres respondia 42703 (`column kbh.practitioner_id does not exist`),
+// o catch só tratava 42P01, o erro subia e virava:
+//   • 503 SCHEMA_PENDING em POST /federation/:id/dojo/cert-orders (F5b)
+//   • 500 genérico em POST /federation/:id/certificate-orders (Track J)
+// Resultado: karate_certificate_orders ficou com ZERO linhas desde a
+// migration 182 — nenhum pedido de certificado jamais foi gravado.
+// O `beltCheck` sempre teve o resultado DESCARTADO, então a query estava
+// derrubando o fluxo inteiro sem sequer decidir nada.
+//
+// Contrato mantido: a checagem continua ADVISORY (nunca bloqueia o pedido;
+// quem decide se a graduação vale é a federação ao processar). O que muda:
+// consulta colunas que existem, é escopada pela federação, loga quando não
+// encontra e NUNCA deixa um erro de schema/cast derrubar a escrita.
 async function createOrder({
   federationId,
   dojoId,
@@ -143,22 +161,34 @@ async function createOrder({
   createdBy,
   createdByName,
 }) {
-  // Valida que o praticante tem graduação aprovada registrada
-  let beltCheck;
+  // Checagem ADVISORY: o praticante tem essa graduação registrada?
+  let beltCheck = { rows: [] };
   try {
     beltCheck = await db.query(
       `SELECT kbh.id
        FROM karate_belt_history kbh
-       WHERE kbh.practitioner_id = $1
+       WHERE kbh.student_id = $1
          AND kbh.belt_level = $2
-         AND (kbh.source = 'exam' OR kbh.source IS NOT NULL)
+         AND kbh.federation_id = $3
        LIMIT 1`,
-      [practitionerId, beltLevel]
+      [practitionerId, beltLevel, federationId]
     );
   } catch (err) {
-    // Tabela pode não existir em dev — prossegue com aviso
-    if (err.code === '42P01') beltCheck = { rows: [] };
-    else throw err;
+    // 42P01 tabela ausente / 42703 coluna ausente / 22P02 id fora do formato
+    // uuid: nada disso pode derrubar um pedido cujo resultado é informativo.
+    if (err.code === '42P01' || err.code === '42703' || err.code === '22P02') {
+      console.warn(
+        '[karateCertificate] belt check indisponível (segue sem bloquear):',
+        err.code, err.message
+      );
+      beltCheck = { rows: [] };
+    } else throw err;
+  }
+  if (!beltCheck.rows.length) {
+    console.warn(
+      '[karateCertificate] pedido sem graduação correspondente em karate_belt_history ' +
+      `(practitioner=${practitionerId} belt=${beltLevel} fed=${federationId})`
+    );
   }
 
   // Verifica que não há pedido pendente para a mesma graduação
