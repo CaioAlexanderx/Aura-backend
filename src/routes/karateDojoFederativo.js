@@ -70,8 +70,27 @@ async function requireDojoLinked(req, res, next) {
   return next();
 }
 
-// Erro de ESCRITA: 42P01 vira 503 (o dado não foi gravado e o cliente
-// precisa saber que pode tentar de novo depois da migration).
+// ── Mapeamento de erro: TABELA ausente ≠ COLUNA ausente ──────
+//
+// ⚠️ P0 27/07/2026. A versão anterior jogava 42P01 E 42703 no MESMO balde
+// 503 SCHEMA_PENDING, sem NENHUM log. Resultado: uma SQL nossa que citava
+// uma coluna inexistente (karateCertificateService.createOrder, ver o
+// comentário lá) devolvia "indisponível no momento" — mensagem que diz ao
+// operador para esperar uma migration que nunca viria, ao front que não é
+// erro dele, e ao log absolutamente nada. O pedido de certificado ficou
+// morto em produção e o console do navegador ficou limpo.
+//
+// Regra nova:
+//   42P01 / TABLE_MISSING → a RELAÇÃO não existe. Isso é migration pendente
+//     de verdade (o deploy pode ir à frente do banco). 503, retentável.
+//   42703 → a coluna não existe numa tabela que EXISTE. Neste repo toda
+//     coluna nasce em migration numerada junto com o código que a usa;
+//     quando falta, quase sempre é a NOSSA SQL divergindo do schema. Os
+//     poucos casos legítimos de coluna pendente (registration_responses da
+//     migr. 200, karate_current_belt da 229) já degradam DENTRO do service.
+//     Então aqui é erro real: 500 + código próprio + o texto do Postgres.
+// Em qualquer caminho: SEMPRE console.error. Erro de escrita silencioso foi
+// a causa de o P0 sobreviver a um QA inteiro.
 function handleWriteError(res, e, ctx) {
   if (e && e.status) {
     const body = { error: e.message, code: e.code || 'ERROR' };
@@ -79,33 +98,59 @@ function handleWriteError(res, e, ctx) {
     return res.status(e.status).json(body);
   }
   if (e && (e.code === '42P01' || e.code === 'TABLE_MISSING')) {
+    console.error(`[karateDojoFederativo] ${ctx}: SCHEMA_PENDING (${e.code}):`, e.message);
     return res.status(503).json({
       error: 'Recurso federativo indisponível no momento (schema pendente)',
       code: 'SCHEMA_PENDING',
+      pg_code: '42P01',
     });
   }
   if (e && e.code === '42703') {
-    return res.status(503).json({
-      error: 'Recurso federativo indisponível no momento (schema pendente)',
-      code: 'SCHEMA_PENDING',
+    console.error(
+      `[karateDojoFederativo] ${ctx}: 42703 — consulta cita coluna inexistente (SQL divergente do schema):`,
+      e.message
+    );
+    return res.status(500).json({
+      error: 'Falha ao gravar: uma consulta do servidor não bate com o schema do banco. O pedido NÃO foi registrado.',
+      code: 'SQL_SCHEMA_MISMATCH',
+      pg_code: '42703',
+      detail: e.message,
     });
   }
-  console.error(`[karateDojoFederativo] ${ctx}:`, e && e.message);
-  return res.status(500).json({ error: 'Erro interno' });
+  console.error(`[karateDojoFederativo] ${ctx}:`, e && e.code, e && e.message);
+  return res.status(500).json({
+    error: 'Erro interno',
+    code: 'INTERNAL_ERROR',
+    pg_code: (e && e.code) || null,
+  });
 }
 
 // Erro de LEITURA: degrada (lista vazia + schema_pending) em vez de 5xx —
 // uma tela em branco com aviso é melhor que um erro vermelho quando o
 // único problema é uma migration ainda não aplicada.
+//
+// A degradação FICA (é decisão de UX), mas nunca mais é silenciosa: 42703
+// numa leitura é o mesmo cheiro de SQL divergente do schema e vai para o
+// log como console.error, com o texto do Postgres.
 function handleReadError(res, e, ctx, extra) {
   if (e && e.status) {
     return res.status(e.status).json({ error: e.message, code: e.code || 'ERROR' });
   }
-  if (e && (e.code === '42P01' || e.code === '42703' || e.code === 'TABLE_MISSING')) {
+  if (e && (e.code === '42P01' || e.code === 'TABLE_MISSING')) {
+    console.warn(`[karateDojoFederativo] ${ctx}: schema pendente (${e.code}):`, e.message);
     return res.json(Object.assign({ data: [], count: 0, schema_pending: true }, extra || {}));
   }
-  console.error(`[karateDojoFederativo] ${ctx}:`, e && e.message);
-  return res.status(500).json({ error: 'Erro interno' });
+  if (e && e.code === '42703') {
+    console.error(
+      `[karateDojoFederativo] ${ctx}: 42703 — consulta cita coluna inexistente (SQL divergente do schema):`,
+      e.message
+    );
+    return res.json(
+      Object.assign({ data: [], count: 0, schema_pending: true, pg_code: '42703' }, extra || {})
+    );
+  }
+  console.error(`[karateDojoFederativo] ${ctx}:`, e && e.code, e && e.message);
+  return res.status(500).json({ error: 'Erro interno', code: 'INTERNAL_ERROR' });
 }
 
 function actor(req) {
@@ -138,7 +183,8 @@ router.get('/dojo/aptos', requireDojoAccess, requireDojoLinked, async (req, res)
 //
 // Sempre 200 (mesmo com created:0): um lote parcial NÃO é erro — o front
 // mostra quem entrou e por que cada um ficou de fora. Erro só quando NADA
-// pôde ser avaliado (corpo inválido → 422, schema pendente → 503).
+// pôde ser avaliado (corpo inválido → 422, tabela ausente → 503, SQL
+// divergente do schema → 500 SQL_SCHEMA_MISMATCH).
 router.post('/dojo/cert-orders', requireDojoAccess, requireChannelA, requireDojoLinked, async (req, res) => {
   const b = req.body || {};
   try {
