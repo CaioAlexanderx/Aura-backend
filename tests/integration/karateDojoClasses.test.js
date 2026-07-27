@@ -8,8 +8,16 @@
 //   summary: total_present/30d/90d + by_class + recent
 //   QR: GET token do aluno; toggle OFF → 409 QR_DESABILITADO;
 //       token de outro dojô → 403 DOJO_MISMATCH; checkin feliz + repetido
-//       → already_checked; sem turma hoje → 409 NO_CLASS_TODAY
+//       → already_checked; sem aula hoje → 409 NO_CLASS_TODAY;
+//       sem NENHUMA matrícula → 409 NOT_ENROLLED
 //   Canal B: PUT settings → 403 PORTAL_READ_ONLY
+//
+// ⚠️ QA 27/07/2026: a busca da turma do dia passou a trazer TODAS as
+// matrículas do aluno (turmas ativas) e a filtrar o weekday em JS —
+// continua sendo UMA query na mesma posição da fila, mas o rows:[] mudou
+// de significado: agora quer dizer "não matriculado em NENHUMA turma"
+// (NOT_ENROLLED), não "sem aula hoje". O caso de NO_CLASS_TODAY foi
+// reescrito para o cenário que o nome dele sempre descreveu.
 //
 // Padrão karateDojoBilling.test.js: db.query.mockReset() em afterEach.
 // ============================================================
@@ -243,16 +251,30 @@ describe('F4 — turmas, matrículas e presença do dojô', () => {
     expect(r2.body.already_checked).toBe(true);
   });
 
-  test('checkin sem class_id e sem turma no dia → 409 NO_CLASS_TODAY', async () => {
+  test('checkin sem class_id, MATRICULADO mas sem aula hoje → 409 NO_CLASS_TODAY', async () => {
     const token = svc.signQrToken({ student_id: sid, dojo_id: dojoId });
     db.query
       .mockResolvedValueOnce({ rows: [{ qr_checkin_enabled: true }] })                    // getSettings
       .mockResolvedValueOnce({ rows: [{ id: sid, full_name: 'Aluno', belt_label: null }] }) // aluno
-      .mockResolvedValueOnce({ rows: [] });                                               // nenhuma turma no dia
+      // matriculado numa turma de QUARTA (3); 2026-07-20 é segunda (weekday 1)
+      .mockResolvedValueOnce({ rows: [{ id: cid, name: 'Infantil', start_time: '18:00', weekdays: [3] }] });
     const res = await request(app).post(`${base}/classes/checkin`).set(canalA())
       .send({ token, date: '2026-07-20' });
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('NO_CLASS_TODAY');
+  });
+
+  test('checkin sem class_id e SEM NENHUMA matrícula → 409 NOT_ENROLLED (é cadastro, não agenda)', async () => {
+    const token = svc.signQrToken({ student_id: sid, dojo_id: dojoId });
+    db.query
+      .mockResolvedValueOnce({ rows: [{ qr_checkin_enabled: true }] })                    // getSettings
+      .mockResolvedValueOnce({ rows: [{ id: sid, full_name: 'Aluno', belt_label: null }] }) // aluno
+      .mockResolvedValueOnce({ rows: [] });                                               // nenhuma matrícula
+    const res = await request(app).post(`${base}/classes/checkin`).set(canalA())
+      .send({ token, date: '2026-07-20' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('NOT_ENROLLED');
+    expect(res.body.error).toBe('Aluno não está matriculado em nenhuma turma.');
   });
 
   test('Canal B: PUT settings → 403 PORTAL_READ_ONLY (sem tocar o banco)', async () => {
