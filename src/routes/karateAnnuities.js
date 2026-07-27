@@ -57,7 +57,7 @@ const { createPixCharge, getStatus: providerGetStatus } = require('../services/k
 const annuitySvc = require('../services/karateAnnuityService');
 const paymentSvc = require('../services/karatePaymentService');
 const financeAudit = require('../services/karateFinanceAudit');
-const { applyAnnuityPayment, AnnuityPaymentError, toIsoDate, recomputeAnnuityFromLedger } = require('../services/karateAnnuityLedger');
+const { applyAnnuityPayment, AnnuityPaymentError, toIsoDate, recomputeAnnuityFromLedger, round2 } = require('../services/karateAnnuityLedger');
 
 // ── Fase F1 (parcelas): schema pre-migration guard ──────────────
 // Backend sobe antes da migration 222 ser aplicada (armadilha #1 do
@@ -793,32 +793,118 @@ router.post('/annuities/dojos/:dojoId/charge', ...guards.adminOnly(), async (req
   }
 });
 
-// PATCH /financial/annuities/dojos/:dojoId/:annuityId
-// 25/06/2026 — DOJO-RM: corrige um lançamento de anuidade AINDA NÃO pago.
-// Campos: amount/value, due_date, reference_period/competência.
-// Se já estiver 'paid', retorna 409 (não editar valor de algo conciliado).
-// Mantém a transaction conciliada em sincronia (amount/due_date/description).
+// PATCH /financial/annuities/dojos/:dojoId/:annuityId — edita o HEADER da
+// anuidade (valor total, plano, período de referência e vencimentos das
+// parcelas). Decisão do Caio, 23/07/2026: ao contrário da versão antiga
+// desta rota (que só corrigia lançamento AINDA NÃO pago, 409 ALREADY_PAID),
+// esta edição funciona INDEPENDENTE do status — inclusive com pagamento já
+// lançado. É a metade "anuidade" do que o PR #431 fez para "pagamento"
+// (editar/remover baixa) — reusa a MESMA primitiva de reconciliação
+// (recomputeAnnuityFromLedger).
+//
+// Contrato do body (todos os campos opcionais; ao menos um obrigatório):
+//   {
+//     amount?: number,                         // novo TOTAL da anuidade
+//                                               // (só a porção kind='anuidade'
+//                                               // — a parcela de adesão,
+//                                               // kind='filiacao', nunca
+//                                               // entra nesta soma nem é
+//                                               // tocada por esta rota)
+//     plan?: 'anual'|'semestral'|'trimestral',
+//     reference_period?: string,
+//     installments?: [{ seq: number, due_date: 'YYYY-MM-DD', amount: number }],
+//   }
+//
+// Precedência de reestruturação das parcelas kind='anuidade' (a parcela de
+// ADESÃO, kind='filiacao', NUNCA é tocada por esta rota — sobrevive intacta
+// a qualquer edição):
+//   1) `installments` explícito — define a estrutura inteira (substitui
+//      plan/amount para fins de estrutura). Se `amount` também vier, tem
+//      que bater com a soma das parcelas (tolerância de 1 centavo), senão
+//      422 VALIDATION_ERROR — evita o front mandar dois valores
+//      contraditórios sem perceber.
+//   2) `plan` (sem installments) — busca a fee vigente do novo plano
+//      (karate_annual_fees) e monta as parcelas nos meses de vencimento do
+//      plano (mesmo motor de PATCH /annuities/:annuityId/plan e de
+//      buildInstallmentPlan). Usa `amount` como o novo TOTAL, distribuído
+//      igualmente pelas parcelas do plano, se informado — senão usa o
+//      valor cheio da fee (fee.amount por parcela, mesmo padrão do resto
+//      do serviço).
+//   3) só `amount` (sem plan/installments) — mantém os MESMOS vencimentos/
+//      nº de parcelas 'anuidade' atuais, só redistribui o novo total entre
+//      elas (distributeAmountAcrossInstallments).
+//   4) nem installments, nem plan, nem amount — não mexe em parcela
+//      nenhuma (só reference_period, se informado).
+//
+// Preservação de pagamento (NUNCA perde dinheiro já recebido nem órfãos de
+// ledger — CLAUDE.md "idempotência"): as parcelas 'anuidade' NOVAS são
+// casadas com as ATUAIS por `seq`. Quando o seq sobrevive na estrutura
+// nova, o ID da parcela é mantido — UPDATE in place (amount/due_date),
+// NUNCA DELETE+INSERT — porque karate_annuity_payments.installment_id tem
+// ON DELETE CASCADE em karate_annuity_installments: apagar a parcela
+// apagaria o ledger dela junto. Quando uma parcela antiga NÃO sobrevive
+// (ex.: trimestral 4x → anual 1x), o ledger dela é REALOCADO (UPDATE
+// installment_id) para a parcela-âncora (menor seq da estrutura nova)
+// ANTES do DELETE — o recomputeAnnuityFromLedger chamado no fim ignora
+// para qual parcela cada linha do ledger apontava antes (ele reconstrói a
+// distribuição do zero, em ordem cronológica, sobre a estrutura viva no
+// momento da chamada) — a realocação só existe para a linha sobreviver à
+// query de replay (que faz JOIN com a parcela) sem cair no CASCADE.
+//
+// 422 AMOUNT_BELOW_PAID: o novo total (só da porção kind='anuidade') não
+// pode ficar abaixo do que JÁ foi efetivamente recebido nela — isso exigiria
+// carteira de crédito (saldo credor reutilizável), que está fora de escopo
+// nesta fase (mesma regra do motor F1/F3 — ver
+// karateAnnuityLedger.computeDistribution/AMOUNT_EXCEEDS_BALANCE, a mesma
+// restrição espelhada aqui na ponta de edição do valor devido).
+//
+// Transação atômica: header + parcelas + ledger + recompute, tudo dentro
+// do MESMO BEGIN/COMMIT (o recompute já faz o próprio SELECT ... FOR
+// UPDATE nas parcelas — reentrante dentro da mesma transação, não há lock
+// duplicado/deadlock).
 router.patch('/annuities/dojos/:dojoId/:annuityId', ...guards.adminOnly(), async (req, res) => {
   const { id: federationId, dojoId, annuityId } = req.params;
   const body = req.body || {};
 
-  // Aceita `amount` ou `value` (alias). String vazia → ignora o campo.
-  const rawAmount = body.amount !== undefined ? body.amount : body.value;
-  const rawDueDate = body.due_date;
-  const rawPeriod = body.reference_period !== undefined ? body.reference_period
-                  : (body.competencia !== undefined ? body.competencia : undefined);
+  const hasAmount = body.amount !== undefined && body.amount !== null && String(body.amount).trim() !== '';
+  const hasPlan = body.plan !== undefined && body.plan !== null && String(body.plan).trim() !== '';
+  const hasPeriod = body.reference_period !== undefined && body.reference_period !== null && String(body.reference_period).trim() !== '';
+  const hasInstallments = Array.isArray(body.installments);
+
+  if (!hasAmount && !hasPlan && !hasPeriod && !hasInstallments) {
+    return res.status(400).json({ error: 'Nenhum campo para atualizar (amount, plan, reference_period ou installments)' });
+  }
+
+  if (hasPlan && !annuitySvc.VALID_PLANS.includes(body.plan)) {
+    return res.status(422).json({
+      error: `plan inválido. Valores aceitos: ${annuitySvc.VALID_PLANS.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  let bodyAmount = null;
+  if (hasAmount) {
+    bodyAmount = round2(Number(body.amount));
+    if (!Number.isFinite(bodyAmount) || bodyAmount <= 0) {
+      return res.status(422).json({ error: 'amount deve ser > 0', code: 'VALIDATION_ERROR' });
+    }
+  }
+
+  if (hasInstallments && !body.installments.length) {
+    return res.status(422).json({ error: 'installments não pode ser vazio', code: 'VALIDATION_ERROR' });
+  }
+
+  const newPeriod = hasPeriod ? String(body.reference_period).trim() : null;
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
 
-    // Busca o lançamento (escopo dojô + federação)
     const histRes = await client.query(
-      `SELECT id, dojo_id, federation_id, reference_period, amount, due_date,
-              status, transaction_id
+      `SELECT id, dojo_id, federation_id, reference_period, plan, amount, due_date, status
        FROM karate_dojo_annuity_history
        WHERE id = $1 AND dojo_id = $2 AND federation_id = $3
-       LIMIT 1`,
+       FOR UPDATE`,
       [annuityId, dojoId, federationId]
     );
     if (!histRes.rows.length) {
@@ -827,40 +913,9 @@ router.patch('/annuities/dojos/:dojoId/:annuityId', ...guards.adminOnly(), async
     }
     const hist = histRes.rows[0];
 
-    // Não editar algo já pago/conciliado.
-    if (hist.status === 'paid') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        error: 'Lançamento já pago — não é possível editar o valor de algo conciliado. Use estorno (void) se precisar reverter.',
-        code: 'ALREADY_PAID',
-      });
-    }
-
-    // Monta os updates dinâmicos.
-    const sets = [];
-    const vals = [];
-    let i = 1;
-    let newAmount = null;
-    let newDueDate = null;
-    let newPeriod = null;
-
-    if (rawAmount !== undefined && String(rawAmount).trim() !== '') {
-      const amt = Number(rawAmount);
-      if (isNaN(amt) || amt <= 0) {
-        await client.query('ROLLBACK');
-        return res.status(422).json({ error: 'amount deve ser > 0', code: 'VALIDATION_ERROR' });
-      }
-      newAmount = amt;
-      sets.push(`amount = $${i}`); vals.push(amt); i++;
-    }
-    if (rawDueDate !== undefined && String(rawDueDate).trim() !== '') {
-      newDueDate = rawDueDate;
-      sets.push(`due_date = $${i}`); vals.push(rawDueDate); i++;
-    }
-    if (rawPeriod !== undefined && String(rawPeriod).trim() !== '') {
-      newPeriod = String(rawPeriod).trim();
-
-      // Evita colidir com outra cobrança do mesmo período no dojô.
+    // Evita colidir com outra cobrança do mesmo período no dojô (mesma
+    // checagem da rota antiga).
+    if (hasPeriod) {
       const dup = await client.query(
         `SELECT id FROM karate_dojo_annuity_history
          WHERE dojo_id = $1 AND reference_period = $2 AND id <> $3 LIMIT 1`,
@@ -873,73 +928,250 @@ router.patch('/annuities/dojos/:dojoId/:annuityId', ...guards.adminOnly(), async
           code: 'CONFLICT',
         });
       }
-      sets.push(`reference_period = $${i}`); vals.push(newPeriod); i++;
     }
 
-    if (sets.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-    }
-
-    sets.push('updated_at = NOW()');
-    vals.push(annuityId);
-
-    const upd = await client.query(
-      `UPDATE karate_dojo_annuity_history
-       SET ${sets.join(', ')}
-       WHERE id = $${i}
-       RETURNING id, dojo_id, reference_period, amount, due_date, status, paid_at, transaction_id`,
-      vals
+    const instRes = await client.query(
+      `SELECT * FROM karate_annuity_installments WHERE annuity_id = $1 AND federation_id = $2 ORDER BY seq ASC FOR UPDATE`,
+      [annuityId, federationId]
     );
-    const h = upd.rows[0];
+    const allInstallments = instRes.rows;
+    // kind='filiacao' (parcela de adesão) NUNCA entra na reestruturação
+    // desta rota — só a porção 'anuidade' é editável aqui.
+    const anuidadeInstallments = allInstallments.filter((i) => i.kind !== 'filiacao');
+    const paidTotal = round2(anuidadeInstallments.reduce((s, i) => s + Number(i.amount_paid || 0), 0));
 
-    // Mantém a transaction conciliada em sincronia (se houver e não estiver cancelada).
-    if (hist.transaction_id) {
-      const txSets = [];
-      const txVals = [];
-      let j = 1;
-      if (newAmount !== null) { txSets.push(`amount = $${j}`); txVals.push(newAmount); j++; }
-      if (newDueDate !== null) { txSets.push(`due_date = $${j}`); txVals.push(newDueDate); j++; }
-      // Atualiza descrição se o período mudou (mantém legível na trilha financeira).
-      if (newPeriod !== null) {
-        const dojoNameRes = await client.query(`SELECT name FROM companies WHERE id = $1 LIMIT 1`, [dojoId]);
-        const dojoName = dojoNameRes.rows[0]?.name || 'Dojô';
-        txSets.push(`description = $${j}`); txVals.push(`Anuidade dojô ${dojoName} — ${newPeriod}`); j++;
+    const seasonYear = parseInt(newPeriod || hist.reference_period, 10) || new Date().getFullYear();
+
+    // ── Monta a nova estrutura de parcelas 'anuidade' (null = não reestrutura) ──
+    let newSpecs = null;
+    if (hasInstallments) {
+      const seen = new Set();
+      newSpecs = [];
+      for (const item of body.installments) {
+        const seq = Number(item && item.seq);
+        const amt = Number(item && item.amount);
+        if (!Number.isInteger(seq) || seq <= 0) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({ error: `seq inválido em installments: ${item && item.seq}`, code: 'VALIDATION_ERROR' });
+        }
+        if (seen.has(seq)) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({ error: `seq duplicado em installments: ${seq}`, code: 'VALIDATION_ERROR' });
+        }
+        seen.add(seq);
+        if (!Number.isFinite(amt) || amt <= 0) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({ error: `amount inválido na parcela seq=${seq}`, code: 'VALIDATION_ERROR' });
+        }
+        const dueCheck = annuitySvc.validateDueDateOverride(item && item.due_date, seasonYear);
+        if (!dueCheck.valid || !dueCheck.value) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({
+            error: `due_date inválido na parcela seq=${seq}: ${dueCheck.error || 'obrigatório'}`,
+            code: 'VALIDATION_ERROR',
+          });
+        }
+        newSpecs.push({ seq, amount: round2(amt), due_date: dueCheck.value });
       }
-      if (txSets.length) {
-        txSets.push('updated_at = NOW()');
-        txVals.push(hist.transaction_id);
-        await client.query(
-          `UPDATE transactions SET ${txSets.join(', ')}
-           WHERE id = $${j} AND status <> 'cancelled'`,
-          txVals
-        );
+      newSpecs.sort((a, b) => a.seq - b.seq);
+      const explicitTotal = round2(newSpecs.reduce((s, x) => s + x.amount, 0));
+      if (hasAmount && Math.abs(explicitTotal - bodyAmount) > 0.01) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          error: `amount (R$ ${bodyAmount.toFixed(2)}) não bate com a soma das installments (R$ ${explicitTotal.toFixed(2)})`,
+          code: 'VALIDATION_ERROR',
+        });
+      }
+    } else if (hasPlan) {
+      const fee = await annuitySvc.getVigentFee(client, federationId, 'dojo', body.plan);
+      if (!fee) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          error: `Nenhuma fee configurada para o plano '${body.plan}' (karate_annual_fees).`,
+          code: 'VALIDATION_ERROR',
+        });
+      }
+      const planSpecs = annuitySvc.buildInstallmentPlan({
+        plan: body.plan, amount: fee.amount, dueMonths: fee.due_months, seasonYear,
+      });
+      if (!planSpecs.length) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({ error: `Plano '${body.plan}' sem meses de vencimento configurados.`, code: 'VALIDATION_ERROR' });
+      }
+      if (hasAmount) {
+        const amounts = annuitySvc.distributeAmountAcrossInstallments(bodyAmount, planSpecs.length);
+        newSpecs = planSpecs.map((s, idx) => ({ seq: s.seq, amount: amounts[idx], due_date: s.due_date }));
+      } else {
+        newSpecs = planSpecs.map((s) => ({ seq: s.seq, amount: round2(s.amount), due_date: s.due_date }));
+      }
+    } else if (hasAmount) {
+      if (!anuidadeInstallments.length) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          error: 'Anuidade sem parcelas de anuidade para redistribuir o novo valor — informe plan ou installments.',
+          code: 'VALIDATION_ERROR',
+        });
+      }
+      const amounts = annuitySvc.distributeAmountAcrossInstallments(bodyAmount, anuidadeInstallments.length);
+      newSpecs = anuidadeInstallments.map((inst, idx) => ({
+        seq: inst.seq,
+        amount: amounts[idx],
+        due_date: toIsoDate(inst.due_date),
+      }));
+    }
+
+    if (newSpecs) {
+      const newTotal = round2(newSpecs.reduce((s, x) => s + x.amount, 0));
+      if (newTotal < paidTotal - 0.005) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          error: `Novo valor total (R$ ${newTotal.toFixed(2)}) é menor do que o já recebido nesta anuidade (R$ ${paidTotal.toFixed(2)}). Renegociação com crédito está fora de escopo nesta fase — ajuste o valor para, no mínimo, o valor já pago.`,
+          code: 'AMOUNT_BELOW_PAID',
+          details: { new_total: newTotal, paid_total: paidTotal },
+        });
+      }
+
+      // ── Casa por seq: mantém o ID de toda parcela que sobrevive (nunca
+      // DELETE+INSERT em cima de parcela com ledger — ver comentário de
+      // topo da rota sobre ON DELETE CASCADE).
+      const existingBySeq = new Map(anuidadeInstallments.map((i) => [Number(i.seq), i]));
+      const newSeqSet = new Set(newSpecs.map((s) => s.seq));
+      const newSeqToId = new Map();
+      const insertedWithoutTx = [];
+
+      for (const spec of newSpecs) {
+        const existing = existingBySeq.get(spec.seq);
+        if (existing) {
+          await client.query(
+            `UPDATE karate_annuity_installments SET amount = $1, due_date = $2, updated_at = NOW() WHERE id = $3`,
+            [spec.amount, spec.due_date, existing.id]
+          );
+          newSeqToId.set(spec.seq, existing.id);
+          if (existing.transaction_id) {
+            await client.query(
+              `UPDATE transactions SET amount = $1, due_date = $2, updated_at = NOW() WHERE id = $3 AND status <> 'cancelled'`,
+              [spec.amount, spec.due_date, existing.transaction_id]
+            );
+          }
+        } else {
+          const ins = await client.query(
+            `INSERT INTO karate_annuity_installments
+               (annuity_id, federation_id, seq, amount, due_date, status, kind)
+             VALUES ($1,$2,$3,$4,$5,'pending','anuidade')
+             RETURNING id`,
+            [annuityId, federationId, spec.seq, spec.amount, spec.due_date]
+          );
+          const newId = ins.rows[0].id;
+          newSeqToId.set(spec.seq, newId);
+          insertedWithoutTx.push({ id: newId, annuity_id: annuityId, seq: spec.seq, amount: spec.amount, due_date: spec.due_date, kind: 'anuidade' });
+        }
+      }
+
+      // Transaction financeira para as parcelas NOVAS (que ainda não tinham).
+      if (insertedWithoutTx.length) {
+        const dojoRes = await client.query(`SELECT COALESCE(trade_name, legal_name) AS name FROM companies WHERE id = $1 LIMIT 1`, [dojoId]);
+        const dojoName = dojoRes.rows[0]?.name || 'Dojô';
+        await annuitySvc.createTransactionsForInstallments(client, {
+          federationId, kind: 'dojo', refId: dojoId, refName: dojoName,
+          referencePeriod: newPeriod || hist.reference_period, installments: insertedWithoutTx,
+        });
+      }
+
+      // Parcelas antigas que não sobreviveram à estrutura nova: realoca o
+      // ledger delas para a parcela-âncora (menor seq da estrutura nova)
+      // ANTES de apagar — preserva o dinheiro (o recompute redistribui via
+      // FIFO logo abaixo). Cancela a transaction (preserva a trilha, nunca
+      // apaga) e qualquer PIX intent pendente da parcela removida.
+      const surplus = anuidadeInstallments.filter((i) => !newSeqSet.has(Number(i.seq)));
+      if (surplus.length) {
+        const anchorSeq = Math.min(...newSpecs.map((s) => s.seq));
+        const anchorId = newSeqToId.get(anchorSeq);
+        for (const old of surplus) {
+          await client.query(
+            `UPDATE karate_annuity_payments SET installment_id = $1 WHERE installment_id = $2`,
+            [anchorId, old.id]
+          );
+          if (old.transaction_id) {
+            await client.query(
+              `UPDATE transactions SET status = 'cancelled', updated_at = NOW() WHERE id = $1 AND status <> 'cancelled'`,
+              [old.transaction_id]
+            );
+          }
+          await client.query(
+            `UPDATE karate_payment_intents SET status = 'cancelled', updated_at = NOW() WHERE status = 'pending' AND source_id = $1`,
+            [old.id]
+          );
+          await client.query(`DELETE FROM karate_annuity_installments WHERE id = $1`, [old.id]);
+        }
       }
     }
+
+    // ── Header: reference_period/plan são colunas que o rollup
+    // (syncAnnuityHeaderRollup, chamado dentro de recomputeAnnuityFromLedger
+    // logo abaixo) NÃO toca — atualizamos aqui, direto.
+    if (hasPeriod || hasPlan) {
+      const sets = []; const vals = []; let i = 1;
+      if (hasPeriod) { sets.push(`reference_period = $${i}`); vals.push(newPeriod); i++; }
+      if (hasPlan) { sets.push(`plan = $${i}`); vals.push(body.plan); i++; }
+      sets.push('updated_at = NOW()');
+      vals.push(annuityId);
+      await client.query(`UPDATE karate_dojo_annuity_history SET ${sets.join(', ')} WHERE id = $${i}`, vals);
+    }
+
+    // ── Reconcilia TUDO (parcelas/ledger/rollup do header) a partir do
+    // ledger remanescente — mesma primitiva do PR #431 (editar/remover
+    // baixa). Roda sempre (idempotente mesmo quando nenhuma parcela mudou
+    // de estrutura — mantém uma única saída de escrita/consistência).
+    const result = await recomputeAnnuityFromLedger(client, { federation_id: federationId, annuity_id: annuityId });
 
     await client.query('COMMIT');
 
-    await financeAudit.logFinanceAudit({
-      federationId, action: 'annuity_patch', targetType: 'annuity', targetId: annuityId,
+    reconcileInstallmentTransactions(result.installments).catch((e) =>
+      console.error('[karateAnnuities] reconcileInstallmentTransactions falhou (patch anuidade):', e.message)
+    );
+
+    financeAudit.logFinanceAudit({
+      federationId, action: 'annuity_edit', targetType: 'annuity', targetId: annuityId,
       dojoId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
-      before: { amount: hist.amount != null ? parseFloat(hist.amount) : null, due_date: hist.due_date, reference_period: hist.reference_period },
-      after: { amount: h.amount ? parseFloat(h.amount) : 0, due_date: h.due_date, reference_period: h.reference_period },
+      before: {
+        amount: hist.amount != null ? parseFloat(hist.amount) : null,
+        plan: hist.plan || null,
+        reference_period: hist.reference_period,
+        installments: anuidadeInstallments.map((i) => ({
+          seq: i.seq, amount: parseFloat(i.amount), due_date: toIsoDate(i.due_date), amount_paid: parseFloat(i.amount_paid || 0),
+        })),
+      },
+      after: {
+        amount: result.header ? parseFloat(result.header.amount) : null,
+        plan: result.header ? result.header.plan : null,
+        reference_period: result.header ? result.header.reference_period : (newPeriod || hist.reference_period),
+        installments: result.installments.filter((i) => i.kind !== 'filiacao').map((i) => ({
+          seq: i.seq, amount: parseFloat(i.amount), due_date: toIsoDate(i.due_date), amount_paid: parseFloat(i.amount_paid || 0), status: i.status,
+        })),
+      },
     }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (patch anuidade):', e.message));
 
+    const { total, paid_total } = annuitySvc.computeTotals(result.installments);
     res.json({
-      annuity_id: h.id,
-      dojo_id: h.dojo_id,
-      reference_period: h.reference_period,
-      amount: h.amount ? parseFloat(h.amount) : 0,
-      due_date: h.due_date,
-      status: h.status,
-      paid_at: h.paid_at || null,
-      transaction_id: h.transaction_id || null,
+      annuity_id: annuityId,
+      dojo_id: dojoId,
+      reference_period: result.header ? result.header.reference_period : (newPeriod || hist.reference_period),
+      plan: result.header ? result.header.plan || null : null,
+      amount: result.header ? parseFloat(result.header.amount) : null,
+      due_date: result.header ? toIsoDate(result.header.due_date) : null,
+      status: result.header ? result.header.status : null,
+      paid_at: result.header ? result.header.paid_at : null,
+      installments: result.installments.map(mapInstallmentForResponse),
+      total,
+      paid_total,
     });
   } catch (err) {
-    await client.query('ROLLBACK');
+    await client.query('ROLLBACK').catch(() => {});
+    if (err instanceof AnnuityPaymentError) {
+      return res.status(err.status).json({ error: err.message, code: err.code, details: err.details || null });
+    }
     console.error('[karateAnnuities] patch annuity error:', err.message);
-    res.status(500).json({ error: 'Erro ao corrigir lançamento', detail: err.message });
+    res.status(500).json({ error: 'Erro ao editar anuidade', detail: err.message });
   } finally {
     client.release();
   }
@@ -2506,7 +2738,10 @@ function mapInstallmentForResponse(inst) {
     amount: parseFloat(inst.amount),
     amount_paid: inst.amount_paid != null ? parseFloat(inst.amount_paid) : 0,
     status: inst.status,
-    due_date: inst.due_date,
+    // pg devolve `date` como objeto Date — toIsoDate() evita a armadilha
+    // CLAUDE.md #1/#toIsoDate (reinterpretação de fuso ao serializar a
+    // data pura como ISO datetime completo).
+    due_date: toIsoDate(inst.due_date),
     paid_at: inst.paid_at,
     payment_method: inst.payment_method || null,
     transaction_id: inst.transaction_id || null,
