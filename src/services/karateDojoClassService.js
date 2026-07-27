@@ -557,30 +557,45 @@ async function checkin(dojoId, body) {
   } else {
     // Sem class_id: turma do DIA (weekday da data) em que o aluno está
     // matriculado. Se houver 2+, a com start_time mais próxima da hora atual
-    // (BRT); turma sem horário fica por último. Nenhuma → 409 NO_CLASS_TODAY.
+    // (BRT); turma sem horário fica por último.
+    //
+    // ⚠️ QA 27/07/2026 — MENSAGEM ENGANOSA: aluno SEM NENHUMA matrícula
+    // recebia "não tem turma matriculada para esta data" (NO_CLASS_TODAY) e
+    // o sensei ia caçar problema na AGENDA quando o problema era o
+    // CADASTRO. Agora a MESMA query traz todas as matrículas do aluno em
+    // turmas ATIVAS e o filtro do dia é feito em JS — continua sendo UMA
+    // query, na posição de sempre (nada entra na frente de nada):
+    //   nenhuma matrícula ativa           → 409 NOT_ENROLLED (é cadastro)
+    //   matriculado, mas nada hoje        → 409 NO_CLASS_TODAY (é agenda)
     const weekday = weekdayOf(date);
-    const cand = await db.query(
-      `SELECT c.id, c.name, c.start_time
+    const enrolled = await db.query(
+      `SELECT c.id, c.name, c.start_time, c.weekdays
          FROM karate_dojo_classes c
          JOIN karate_dojo_class_enrollments e ON e.class_id = c.id AND e.student_id = $2
-        WHERE c.dojo_id = $1 AND c.active = true AND $3 = ANY(c.weekdays)`,
-      [dojoId, student.id, weekday]
+        WHERE c.dojo_id = $1 AND c.active = true`,
+      [dojoId, student.id]
     );
-    if (!cand.rows.length) {
+    if (!enrolled.rows.length) {
+      throw svcError(409, 'NOT_ENROLLED', 'Aluno não está matriculado em nenhuma turma.');
+    }
+    const cand = enrolled.rows.filter(
+      (r) => Array.isArray(r.weekdays) && r.weekdays.map(Number).includes(weekday)
+    );
+    if (!cand.length) {
       throw svcError(409, 'NO_CLASS_TODAY', 'O aluno não tem turma matriculada para esta data');
     }
-    if (cand.rows.length === 1) {
-      klass = cand.rows[0];
+    if (cand.length === 1) {
+      klass = cand[0];
     } else {
       const nowMin = brtNow().minutes;
       let best = null;
       let bestDist = Infinity;
-      for (const r of cand.rows) {
+      for (const r of cand) {
         const tm = timeToMinutes(r.start_time);
         const dist = tm == null ? Infinity : Math.abs(tm - nowMin);
         if (dist < bestDist) { bestDist = dist; best = r; }
       }
-      klass = best || cand.rows[0];
+      klass = best || cand[0];
     }
   }
 
