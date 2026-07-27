@@ -461,6 +461,33 @@ router.use('/federation/:id', require('./karateDojoConnection'));
 //   POST /federation/:id/affiliation-requests/:requestId/reject   {reason}
 router.use('/federation/:id', require('./karateAffiliationRequestsAdmin'));
 
+// ── AURA DOJÔ — F5b (as TRÊS trocas federativas dojô ↔ federação) ──
+// SEM migration nova: reusa karate_certificate_orders (182, já tem dojo_id
+// NOT NULL), karate_belt_exams + karate_belt_exam_candidates (157/192),
+// karate_events + karate_event_enrollments (160, curso legado) e
+// karate_belt_history / view karate_current_belt (149/229).
+//
+// REGRA TRANSVERSAL: só participa aluno com practitioner_id NOT NULL — a
+// única prova de que a FEDERAÇÃO confirmou o vínculo (migration 253).
+// is_federated é a DECLARAÇÃO do sensei e NUNCA autoriza; quem é pulado
+// volta com razão acionável (ALUNO_NAO_FEDERADO), nunca sumindo em
+// silêncio. Gate de conexão em TODAS as rotas (409 DOJO_NAO_CONECTADO):
+// certificado é emitido PELA federação, evento é DA federação e exame é
+// julgado pela BANCA — nada disso existe para dojô não conectado.
+// Escrita só Canal A (403 PORTAL_READ_ONLY no portal); GETs aceitam A e B.
+//
+// ⚠️ /dojo/events/:eventId/{enroll,enrollments} têm 3 segmentos e NÃO
+// colidem com o GET /dojo/events (1 segmento) de karateDojo.js — mesma
+// lógica de /dojo/students/:sid/{attendance-summary,qr} da F4.
+//   GET  /federation/:id/dojo/aptos                       (graduações sem pedido)
+//   POST /federation/:id/dojo/cert-orders                 ({items:[{student_id, belt_history_id?}]})
+//   GET  /federation/:id/dojo/cert-orders                 (?status=&page=&pageSize=)
+//   POST /federation/:id/dojo/events/:eventId/enroll      ({student_ids:[uuid]}, idempotente)
+//   GET  /federation/:id/dojo/events/:eventId/enrollments
+//   POST /federation/:id/dojo/belt-exams/:examId/candidates ({student_ids:[uuid]} — SUBMETE, nunca gradua)
+//   GET  /federation/:id/dojo/belt-exams/:examId/candidates
+router.use('/federation/:id', require('./karateDojoFederativo'));
+
 // ── AURA KARATÊ — Track H (configurações da federação) ───────────
 // Migration 181 (inscricao_municipal + regime_tributario em companies).
 //   GET/POST   /federation/:id/settings/members          — equipe FPKT
