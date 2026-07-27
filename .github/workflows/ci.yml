@@ -10,7 +10,7 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     services:
       postgres:
@@ -72,6 +72,17 @@ jobs:
             echo "   OK: $f"
           done
 
+      # Heap: o padrão do Node (~2 GB) virou o teto da suíte em 27/07/2026
+      # (OOM, exit 134, com ZERO teste falhando). --runInBand + --coverage
+      # acumulam módulos e mapas de cobertura num processo só; 4 GB dá
+      # folga num runner de 16 GB.
+      #
+      # --detectOpenHandles saiu de propósito: ele guarda o stack trace de
+      # todo handle assíncrono aberto (e o repo sobe Express/WS em dezenas
+      # de suítes). É ferramenta de diagnóstico local — em CI, com
+      # --forceExit, só custava memória. Para investigar handle vazando,
+      # rode localmente: npx jest --detectOpenHandles <arquivo>
       - name: Run tests
-        run: node node_modules/jest/bin/jest.js --forceExit --detectOpenHandles --runInBand --coverage
-
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: node node_modules/jest/bin/jest.js --forceExit --runInBand --coverage
