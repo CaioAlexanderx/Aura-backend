@@ -14,6 +14,17 @@
 // derruba o CI. Mock genérico {rows: []} também não serve: vários handlers
 // leem rows[0] direto.
 //
+// ⚠️⚠️ GUARDA DE SCHEMA (adicionada no fix do P0 de 27/07/2026)
+// O mock antigo respondia {rows:[{id:'h1'}]} a QUALQUER SQL que citasse
+// karate_belt_history — inclusive a de createOrder, que citava
+// `kbh.practitioner_id` e `kbh.source`, DUAS colunas que não existem. O
+// Postgres de produção respondia 42703; o mock respondia sucesso. Por isso
+// a suíte inteira ficou verde enquanto NENHUM pedido de certificado era
+// gravado em produção.
+// Agora o mock se comporta como o banco: toda referência `kbh.<coluna>` é
+// conferida contra a lista REAL de colunas de karate_belt_history e uma
+// coluna desconhecida vira rejeição 42703, exatamente como em produção.
+//
 // db.query.mockReset() + db.connect.mockReset() em afterEach.
 // ============================================================
 'use strict';
@@ -34,9 +45,36 @@ const s1 = 'a1000000-0000-0000-0000-00000000000a'; // federado
 const s2 = 'a2000000-0000-0000-0000-00000000000b'; // NÃO federado
 const s3 = 'a3000000-0000-0000-0000-00000000000c'; // de outro dojô
 const p1 = 'c1000000-0000-0000-0000-0000000000aa'; // practitioner de s1
+const bh1 = 'h1000000-0000-0000-0000-0000000000b1'; // graduação de p1
 const examId = 'e1000000-0000-0000-0000-0000000000e1';
 const base = `/api/v1/federation/${fedId}/dojo`;
 const LINKED_AT = new Date('2026-07-01T12:00:00Z');
+
+// Colunas REAIS de karate_belt_history em produção (conferidas em
+// information_schema em 27/07/2026). NÃO existem `practitioner_id` nem
+// `source` — a chave do praticante é student_id.
+const KARATE_BELT_HISTORY_COLS = [
+  'id', 'student_id', 'federation_id', 'belt_level', 'belt_name', 'belt_schema',
+  'graduated_at', 'examiner_1_id', 'examiner_2_id', 'exam_id', 'notes',
+  'created_by', 'created_at', 'cbkt_number',
+];
+
+// Devolve o Error 42703 que o Postgres devolveria, ou null se a SQL só
+// cita colunas existentes. Aplicado ao alias `kbh` (usado exclusivamente
+// pela checagem de graduação de karateCertificateService.createOrder).
+function beltHistoryColError(sql) {
+  const re = /\bkbh\.([a-z_][a-z0-9_]*)/gi;
+  let m;
+  while ((m = re.exec(sql)) !== null) {
+    const col = m[1].toLowerCase();
+    if (!KARATE_BELT_HISTORY_COLS.includes(col)) {
+      const e = new Error(`column kbh.${col} does not exist`);
+      e.code = '42703';
+      return e;
+    }
+  }
+  return null;
+}
 
 // Canal A: JWT de acesso da conta do dojô (dojo_id no token)
 const canalA = () => ({
@@ -63,7 +101,7 @@ const sqls = () => db.query.mock.calls.map((c) => String(c[0]));
 const hitSql = (m) => sqls().some((s) => matches(m, s));
 const findCall = (m) => db.query.mock.calls.find((c) => matches(m, String(c[0])));
 
-// ── matchers ───────────────────────────────────────────
+// ── matchers ────────────────────────────────────────
 // Query do helper karateDojoLinkStatus (a única que menciona a coluna).
 const isLinkQuery = (s) => /SELECT\s+karate_dojo_linked_at/i.test(s);
 // GET /aptos — graduações sem pedido.
@@ -72,6 +110,9 @@ const isAptos = (s) => /FROM karate_dojo_students s/.test(s) && /JOIN karate_bel
 const isStudentsBatch = (s) => /FROM karate_dojo_students/.test(s) && /id = ANY\(\$2::uuid\[\]\)/.test(s);
 // Faixa atual canônica (view da migration 229).
 const isCurrentBelt = (s) => /FROM karate_current_belt/.test(s);
+// resolveGraduation quando o front manda belt_history_id.
+const isBeltHistoryById = (s) =>
+  /FROM karate_belt_history/.test(s) && /WHERE id = \$1 AND student_id = \$2/.test(s);
 // createOrder (karateCertificateService) — 3 queries + histórico.
 const isCertBeltCheck = (s) => /FROM karate_belt_history kbh/.test(s);
 const isCertDup = (s) => /SELECT id FROM karate_certificate_orders/.test(s);
@@ -91,7 +132,23 @@ const isCandInsert = (s) => /INSERT INTO karate_belt_exam_candidates/.test(s);
 const isCandList = (s) =>
   /FROM karate_belt_exam_candidates c/.test(s) && /JOIN karate_dojo_students s/.test(s);
 
-// ── factories ─────────────────────────────────────────
+// Posições do INSERT de karate_certificate_orders (createOrder).
+// $1 federation_id, $2 dojo_id, $3 practitioner_id, $4 belt_level,
+// $5 belt_name, $6 exam_date, $7 exam_ref, $8 nome_impresso,
+// $9 delivery_type, $10..$14 addr_*, $15 observacao, ($16/$17 created_by*)
+const CERT_INSERT = {
+  federation_id: 0,
+  dojo_id: 1,
+  practitioner_id: 2,
+  belt_level: 3,
+  belt_name: 4,
+  exam_date: 5,
+  exam_ref: 6,
+  nome_impresso: 7,
+  delivery_type: 8,
+};
+
+// ── factories ─────────────────────────────────────
 const studentRow = (id, practitionerId, name) => ({
   id,
   full_name: name,
@@ -128,12 +185,18 @@ const orderRow = (over = {}) => ({
 });
 
 // linkedAt = null → dojô NÃO conectado; Date → conectado.
+// `extra(sql)` pode devolver um resultado ({rows}) OU um Error — Error vira
+// rejeição, que é como se simula um erro do Postgres.
 function mockDojo(linkedAt, extra) {
   db.query.mockImplementation((sql) => {
     const s = String(sql);
     if (isLinkQuery(s)) return Promise.resolve({ rows: [{ karate_dojo_linked_at: linkedAt }] });
+    // GUARDA DE SCHEMA: o banco rejeita ANTES de qualquer mock responder.
+    const schemaErr = beltHistoryColError(s);
+    if (schemaErr) return Promise.reject(schemaErr);
     if (extra) {
       const r = extra(s);
+      if (r instanceof Error) return Promise.reject(r);
       if (r) return Promise.resolve(r);
     }
     return Promise.resolve({ rows: [] });
@@ -160,7 +223,7 @@ describe('F5b — GET /dojo/aptos', () => {
               practitioner_id: p1,
               practitioner_name: 'Aluno Um FPKT',
               fpkt_number: 'FPKT-1234',
-              belt_history_id: 'h1000000-0000-0000-0000-0000000000b1',
+              belt_history_id: bh1,
               belt_level: 'marrom',
               belt_name: '1º Kyu — Marrom',
               graduated_at: '2026-06-10',
@@ -217,6 +280,114 @@ describe('F5b — GET /dojo/aptos', () => {
 // 1) CERTIFICADOS — POST /dojo/cert-orders (lote)
 // ============================================================
 describe('F5b — POST /dojo/cert-orders', () => {
+  // Mock do caminho feliz completo do pedido de certificado.
+  const certHappy = (over) => (s) => {
+    if (over) {
+      const r = over(s);
+      if (r) return r;
+    }
+    if (isStudentsBatch(s)) return { rows: [studentRow(s1, p1, 'Aluno Um')] };
+    if (isCurrentBelt(s)) {
+      return {
+        rows: [{ belt_level: 'marrom', belt_name: '1º Kyu — Marrom', current_since: '2026-06-10', exam_id: examId }],
+      };
+    }
+    if (isExamNameLookup(s)) return { rows: [{ name: 'Exame de Kyu — Jun/2026' }] };
+    if (isCertBeltCheck(s)) return { rows: [{ id: bh1 }] };
+    if (isCertDup(s)) return { rows: [] };
+    if (isCertInsert(s)) return { rows: [orderRow()] };
+    if (isCertHistInsert(s)) return { rows: [] };
+    return null;
+  };
+
+  // ── O TESTE QUE FALTAVA (P0 de 27/07/2026) ────────────────
+  // O caso "cria em lote" existia, mas o mock respondia sucesso a qualquer
+  // SQL que citasse karate_belt_history — inclusive à que citava colunas
+  // inexistentes. Com a guarda de schema ligada, este caso reprova contra o
+  // código antigo (42703 → 503) e só passa com a SQL correta.
+  it('CAMINHO FELIZ: grava o pedido com TODOS os NOT NULL preenchidos', async () => {
+    mockDojo(LINKED_AT, certHappy());
+
+    const res = await request(app)
+      .post(`${base}/cert-orders`)
+      .set(canalA())
+      .send({ items: [{ student_id: s1 }], delivery_type: 'mail', addr_cidade: 'Belém' });
+
+    // Antes do fix isto era 503 SCHEMA_PENDING e o INSERT nunca acontecia.
+    expect(res.status).toBe(200);
+    expect(res.body.created).toBe(1);
+    expect(res.body.skipped).toEqual([]);
+
+    const ins = findCall(isCertInsert);
+    expect(ins).toBeDefined();
+    const p = ins[1];
+
+    // NOT NULL em karate_certificate_orders — nenhum pode chegar vazio.
+    expect(p[CERT_INSERT.federation_id]).toBe(fedId);
+    expect(p[CERT_INSERT.dojo_id]).toBe(dojoId); // do TOKEN, nunca do corpo
+    // practitioner_id é TEXT na tabela: precisa ser string, não objeto/uuid nulo.
+    expect(typeof p[CERT_INSERT.practitioner_id]).toBe('string');
+    expect(p[CERT_INSERT.practitioner_id]).toBe(p1);
+    expect(p[CERT_INSERT.belt_level]).toBe('marrom');
+    expect(p[CERT_INSERT.belt_name]).toBe('1º Kyu — Marrom');
+    expect(p[CERT_INSERT.nome_impresso]).toBe('Aluno Um');
+    // delivery_type é ENUM karate_cert_delivery (pickup|mail).
+    expect(['pickup', 'mail']).toContain(p[CERT_INSERT.delivery_type]);
+    expect(p[CERT_INSERT.delivery_type]).toBe('mail');
+
+    for (const campo of ['federation_id', 'dojo_id', 'practitioner_id', 'belt_level', 'belt_name', 'nome_impresso', 'delivery_type']) {
+      expect(p[CERT_INSERT[campo]]).toBeTruthy();
+    }
+
+    // status é literal na SQL e precisa ser um label do ENUM karate_cert_status.
+    expect(String(ins[0])).toMatch(/'requested'/);
+
+    // A checagem de graduação consulta as colunas que EXISTEM (era o bug).
+    const beltCheck = findCall(isCertBeltCheck);
+    expect(String(beltCheck[0])).toMatch(/kbh\.student_id/);
+    expect(String(beltCheck[0])).not.toMatch(/kbh\.practitioner_id/);
+    expect(String(beltCheck[0])).not.toMatch(/kbh\.source/);
+  });
+
+  it('CAMINHO FELIZ com belt_history_id: belt_name e nome_impresso vêm da graduação escolhida', async () => {
+    mockDojo(
+      LINKED_AT,
+      certHappy((s) => {
+        if (isBeltHistoryById(s)) {
+          return {
+            rows: [{
+              id: bh1,
+              belt_level: 'marrom',
+              belt_name: '1º Kyu — Marrom',
+              current_since: '2026-06-10',
+              exam_id: examId,
+            }],
+          };
+        }
+        return null;
+      })
+    );
+
+    const res = await request(app)
+      .post(`${base}/cert-orders`)
+      .set(canalA())
+      .send({ items: [{ student_id: s1, belt_history_id: bh1 }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.created).toBe(1);
+
+    // A graduação foi resolvida pelo id enviado (e validada contra o
+    // praticante E a federação), não pela view de faixa atual.
+    const grad = findCall(isBeltHistoryById);
+    expect(grad[1]).toEqual([bh1, p1, fedId]);
+    expect(hitSql(isCurrentBelt)).toBe(false);
+
+    const p = findCall(isCertInsert)[1];
+    expect(p[CERT_INSERT.belt_name]).toBe('1º Kyu — Marrom');
+    expect(p[CERT_INSERT.nome_impresso]).toBe('Aluno Um');
+    expect(p[CERT_INSERT.delivery_type]).toBe('pickup'); // default
+  });
+
   it('cria em lote e pula com razão acionável (não federado / outro dojô)', async () => {
     mockDojo(LINKED_AT, (s) => {
       if (isStudentsBatch(s)) {
@@ -234,7 +405,7 @@ describe('F5b — POST /dojo/cert-orders', () => {
         };
       }
       if (isExamNameLookup(s)) return { rows: [{ name: 'Exame de Kyu — Jun/2026' }] };
-      if (isCertBeltCheck(s)) return { rows: [{ id: 'h1' }] };
+      if (isCertBeltCheck(s)) return { rows: [{ id: bh1 }] };
       if (isCertDup(s)) return { rows: [] };
       if (isCertInsert(s)) return { rows: [orderRow()] };
       if (isCertHistInsert(s)) return { rows: [] };
@@ -270,7 +441,7 @@ describe('F5b — POST /dojo/cert-orders', () => {
       if (isCurrentBelt(s)) {
         return { rows: [{ belt_level: 'marrom', belt_name: '1º Kyu — Marrom', current_since: '2026-06-10', exam_id: null }] };
       }
-      if (isCertBeltCheck(s)) return { rows: [{ id: 'h1' }] };
+      if (isCertBeltCheck(s)) return { rows: [{ id: bh1 }] };
       if (isCertDup(s)) return { rows: [{ id: 'ja-existe' }] }; // dup check do createOrder
       return null;
     });
@@ -283,6 +454,70 @@ describe('F5b — POST /dojo/cert-orders', () => {
     expect(res.status).toBe(200);
     expect(res.body.created).toBe(0);
     expect(res.body.skipped[0]).toMatchObject({ student_id: s1, reason: 'JA_SOLICITADO' });
+    expect(hitSql(isCertInsert)).toBe(false);
+  });
+
+  it('a checagem de graduação é ADVISORY: sem linha em belt_history o pedido é gravado assim mesmo', async () => {
+    mockDojo(LINKED_AT, certHappy((s) => (isCertBeltCheck(s) ? { rows: [] } : null)));
+
+    const res = await request(app)
+      .post(`${base}/cert-orders`)
+      .set(canalA())
+      .send({ items: [{ student_id: s1 }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.created).toBe(1);
+    expect(hitSql(isCertInsert)).toBe(true);
+  });
+
+  it('42P01 (tabela ausente) na ESCRITA → 503 SCHEMA_PENDING, nada gravado', async () => {
+    mockDojo(
+      LINKED_AT,
+      certHappy((s) => {
+        if (isCertDup(s)) {
+          const e = new Error('relation "karate_certificate_orders" does not exist');
+          e.code = '42P01';
+          return e;
+        }
+        return null;
+      })
+    );
+
+    const res = await request(app)
+      .post(`${base}/cert-orders`)
+      .set(canalA())
+      .send({ items: [{ student_id: s1 }] });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('SCHEMA_PENDING');
+    expect(hitSql(isCertInsert)).toBe(false);
+  });
+
+  // REGRESSÃO DO P0: 42703 não pode mais se disfarçar de "indisponível no
+  // momento". A resposta precisa dizer que é falha REAL e não gravada.
+  it('42703 (coluna inexistente) na ESCRITA → 500 SQL_SCHEMA_MISMATCH, nunca 503 mudo', async () => {
+    mockDojo(
+      LINKED_AT,
+      certHappy((s) => {
+        if (isCertDup(s)) {
+          const e = new Error('column o.practitioner_id does not exist');
+          e.code = '42703';
+          return e;
+        }
+        return null;
+      })
+    );
+
+    const res = await request(app)
+      .post(`${base}/cert-orders`)
+      .set(canalA())
+      .send({ items: [{ student_id: s1 }] });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('SQL_SCHEMA_MISMATCH');
+    expect(res.body.pg_code).toBe('42703');
+    expect(res.body.detail).toMatch(/does not exist/);
+    expect(res.body.error).toMatch(/NÃO foi registrado/);
     expect(hitSql(isCertInsert)).toBe(false);
   });
 
@@ -507,6 +742,39 @@ describe('F5b — POST /dojo/belt-exams/:examId/candidates', () => {
     // O dojô SUBMETE, nunca gradua: nada é escrito em karate_belt_history.
     expect(hitSql(/INSERT INTO karate_belt_history/)).toBe(false);
     expect(hitSql(/UPDATE karate_belt_exam_candidates/)).toBe(false);
+  });
+
+  // Simétrico do caso de certificado: o INSERT de candidato precisa levar
+  // exam_id e student_id (o practitioner_id, TEXT/uuid) preenchidos, e o
+  // resto dos NOT NULL da tabela (belt_schema, status, fee_paid,
+  // registration_responses, certificate_eligible) tem DEFAULT no banco —
+  // por isso a lista curta de colunas do INSERT é suficiente e correta.
+  it('INSERT do candidato leva exam_id e student_id preenchidos (nenhum NOT NULL sem valor)', async () => {
+    mockDojo(LINKED_AT, (s) => {
+      if (isExamResolve(s)) return { rows: [examRow()] };
+      if (isStudentsBatch(s)) return { rows: [studentRow(s1, p1, 'Aluno Um')] };
+      if (isCandDup(s)) return { rows: [] };
+      if (isCandInsert(s)) return { rows: [{ id: 'cand-1' }] };
+      return null;
+    });
+
+    const res = await request(app)
+      .post(`${base}/belt-exams/${examId}/candidates`)
+      .set(canalA())
+      .send({ student_ids: [s1] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.submitted).toBe(1);
+
+    const ins = findCall(isCandInsert);
+    expect(ins[1][0]).toBe(examId);
+    expect(typeof ins[1][1]).toBe('string');
+    expect(ins[1][1]).toBe(p1);
+    expect(ins[1].every((v) => v !== null && v !== undefined)).toBe(true);
+    // status vem literal na SQL ('registered'): o dojô SUBMETE, não gradua.
+    expect(String(ins[0])).toMatch(/'registered'/);
+    // Este caminho não toca karate_belt_history — logo não sofria o P0.
+    expect(hitSql(isCertBeltCheck)).toBe(false);
   });
 
   it('422 NAO_E_EXAME quando o id aponta para um CURSO', async () => {
