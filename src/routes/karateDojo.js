@@ -5,14 +5,12 @@
 // Aceita Canal A (JWT Aura Dojô com dojo_id) e Canal B (dojo portal token).
 // Ambos são resolvidos por requireDojoAccess → req.dojoId + req.federationId.
 //
-// Endpoints efetivos (Fase 0):
-//   GET /federation/:id/dojo/me  — contexto do dojô autenticado (piloto)
-//
-// Fases seguintes:
-//   Fase 1: /dojo/cert-orders, /dojo/aptos
-//   Fase 2: /dojo/annuity, /dojo/annuity/pix
-//   Fase 3: /dojo/events, /dojo/events/:id/enroll
-//   etc.
+// Endpoints efetivos:
+//   GET   /federation/:id/dojo/me   — contexto + cadastro completo do dojô
+//   PATCH /federation/:id/dojo/me   — o dojô edita o PRÓPRIO cadastro (Canal A)
+//   GET   /federation/:id/dojo/events
+//   GET   /federation/:id/dojo/practitioners
+//   GET   /federation/:id/dojo/annuity
 //
 // ── GATE DE CONEXÃO (polish 25/07/2026) ─────────────────────
 // companies.karate_dojo_linked_at (migration 251, PR #420) é a CONEXÃO do
@@ -32,6 +30,23 @@
 // /dojo/practitioners NÃO é gateado: é a lista dos praticantes DO PRÓPRIO
 // dojô — para um dojô não conectado ela simplesmente vem vazia, e não há
 // conteúdo da federação vazando.
+//
+// ── QA 27/07/2026: /dojo/me estava incompleto ───────────────
+// A tela de Configurações do dojô mostrava 11 campos "—" porque o /dojo/me
+// devolvia só id/name/phone/federation_id/auth_channel. O cadastro do dojô
+// é a PRÓPRIA linha de companies (o dojô tem registro próprio) e o bloco
+// FEDERATIVO já existe nas colunas que a federação usa em karateDojos.js
+// (fpkt_affiliation_id, affiliation_model, affiliation_since, region) —
+// nada precisou ser inventado, só exposto.
+//
+// Divisão de responsabilidade do PATCH:
+//   editável pelo dojô  → name (trade_name), cnpj, email, phone, founded_at
+//   read-only (federação) → fpkt_affiliation_id, affiliation_status,
+//                           affiliation_model, affiliated_since, region,
+//                           practitioners_count, federation_*
+// Campo federativo no body é IGNORADO EM SILÊNCIO (não vira 422): o front
+// manda o objeto inteiro de volta e recusar o PATCH por causa de um campo
+// que ele só está ecoando seria hostil.
 // ============================================================
 'use strict';
 
@@ -40,48 +55,136 @@ const db = require('../config/database');
 const { requireDojoAccess } = require('../middleware/requireDojoAccess');
 const { getDojoLinkStatus } = require('../services/karateDojoLinkStatus');
 
-// GET /federation/:id/dojo/me
-// Retorna dados do dojô autenticado + canal de autenticação usado.
-// Usado pelo app (Canal A) e portal off-app (Canal B) para hidratar contexto.
-router.get('/dojo/me', requireDojoAccess, async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      `SELECT c.id, c.legal_name, c.trade_name, c.phone,
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// companies.dojo_founded_at chega na migration 254. O backend sobe ANTES
+// da migration em deploy parcial (CLAUDE.md #1/#10): flag module-level +
+// UMA retentativa degradada (nunca cadeia de retry).
+let HAS_FOUNDED_AT_COL = true;
+
+// Canal B (portal do dojô) é SOMENTE LEITURA — alterar o cadastro exige a
+// conta do dojô (Canal A), mesmo padrão de karateDojoStudents/Billing.
+function requireChannelA(req, res, next) {
+  if (req.dojoAuthChannel !== 'A') {
+    return res.status(403).json({
+      error: 'O portal do dojô é somente leitura. Entre com a conta do dojô para alterar dados.',
+      code: 'PORTAL_READ_ONLY',
+    });
+  }
+  return next();
+}
+
+function isValidDateStr(s) {
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+// ⚠️ O prefixo `SELECT c.id, c.legal_name` é ÂNCORA de mock em
+// tests/integration/karateDojoNotLinked.test.js — mantenha-o.
+// karate_dojo_linked_at NÃO entra aqui de propósito: fica no helper
+// getDojoLinkStatus (query separada, fail-open) para a ausência da coluna
+// não derrubar o /dojo/me inteiro com 42703.
+function dojoSelectSql() {
+  const foundedAt = HAS_FOUNDED_AT_COL
+    ? "to_char(c.dojo_founded_at, 'YYYY-MM-DD') AS founded_at"
+    : 'NULL::text AS founded_at';
+  return `SELECT c.id, c.legal_name, c.trade_name, c.slug, c.cnpj, c.email, c.phone,
               c.federation_id, c.vertical, c.created_at,
-              u.email AS owner_email
+              c.fpkt_affiliation_id, c.affiliation_model, c.region,
+              to_char(c.affiliation_since, 'YYYY-MM-DD') AS affiliated_since,
+              ${foundedAt},
+              u.email AS owner_email,
+              COALESCE(f.trade_name, f.legal_name) AS federation_name,
+              f.slug AS federation_slug,
+              (SELECT count(*) FROM customers cu WHERE cu.dojo_id = c.id)::int AS practitioners_count
          FROM companies c
          LEFT JOIN users u ON u.id = c.owner_id
+         LEFT JOIN companies f ON f.id = c.federation_id
         WHERE c.id = $1
           AND c.federation_id = $2
           AND c.vertical = 'karate_dojo'
-          AND c.is_active = true`,
-      [req.dojoId, req.federationId]
-    );
-    if (!rows.length) {
-      return res.status(404).json({
-        error: 'Dojô não encontrado ou não pertence a esta federação',
-        code: 'DOJO_NOT_FOUND',
-      });
-    }
-    const dojo = rows[0];
+          AND c.is_active = true`;
+}
 
-    // Status de conexão com a federação (ADITIVO — nada foi removido ou
-    // renomeado; o front atual depende do shape acima). Query separada de
-    // propósito: se karate_dojo_linked_at entrasse no SELECT principal, a
-    // ausência da coluna (migration 251 pendente) derrubaria o /dojo/me
-    // inteiro com 42703. Fail-open dentro do helper → linked:true.
+function isFoundedAtSchemaError(e) {
+  return Boolean(
+    e && e.code === '42703' && HAS_FOUNDED_AT_COL && /dojo_founded_at/i.test(e.message || '')
+  );
+}
+
+async function loadDojo(dojoId, federationId) {
+  try {
+    const { rows } = await db.query(dojoSelectSql(), [dojoId, federationId]);
+    return rows[0] || null;
+  } catch (e) {
+    if (!isFoundedAtSchemaError(e)) throw e;
+    HAS_FOUNDED_AT_COL = false;
+    console.warn('[karateDojo] companies.dojo_founded_at ausente (migration 254 pendente) — founded_at virá null');
+    const { rows } = await db.query(dojoSelectSql(), [dojoId, federationId]);
+    return rows[0] || null;
+  }
+}
+
+// affiliation_status NÃO é coluna (não existe em lugar nenhum do schema) —
+// é DERIVADO da verdade que existe. Melhor um estado explicável do que um
+// "—" eterno na tela, e melhor derivar do que criar coluna nova só para a
+// federação esquecer de preencher.
+function affiliationStatus(row, link) {
+  if (row.fpkt_affiliation_id) return 'filiado';
+  if (link && link.linked) return 'pendente';
+  return 'nao_filiado';
+}
+
+function shapeDojo(row, { authChannel, link }) {
+  return {
+    id: row.id,
+    name: row.trade_name || row.legal_name || null,
+    slug: row.slug || null,
+    cnpj: row.cnpj || null,
+    // e-mail do CADASTRO do dojô (o que o PATCH edita). owner_email não
+    // entra como fallback: depois de limpar o campo o dojô veria o e-mail
+    // do dono "voltando" sozinho.
+    email: row.email || null,
+    phone: row.phone || null,
+    founded_at: row.founded_at || null,
+    // ── bloco FEDERATIVO (read-only para o dojô) ──
+    federation_id: row.federation_id,
+    federation_name: row.federation_name || null,
+    federation_slug: row.federation_slug || null,
+    fpkt_affiliation_id: row.fpkt_affiliation_id || null,
+    affiliation_status: affiliationStatus(row, link),
+    affiliation_model: row.affiliation_model || null,
+    affiliated_since: row.affiliated_since || null,
+    region: row.region || null,
+    practitioners_count: row.practitioners_count != null ? Number(row.practitioners_count) : null,
+    // ── contexto ──
+    auth_channel: authChannel, // 'A' | 'B'
+    linked: link.linked, // karate_dojo_linked_at IS NOT NULL
+    linked_at: link.linked_at, // ISO 8601 UTC | null
+  };
+}
+
+function notFound(res) {
+  return res.status(404).json({
+    error: 'Dojô não encontrado ou não pertence a esta federação',
+    code: 'DOJO_NOT_FOUND',
+  });
+}
+
+// GET /federation/:id/dojo/me
+// Contexto + cadastro do dojô autenticado. Usado pelo app (Canal A) e pelo
+// portal off-app (Canal B) para hidratar a tela de Configurações.
+router.get('/dojo/me', requireDojoAccess, async (req, res) => {
+  try {
+    const dojo = await loadDojo(req.dojoId, req.federationId);
+    if (!dojo) return notFound(res);
+
     const link = await getDojoLinkStatus(req.dojoId);
 
     res.json({
-      dojo: {
-        id: dojo.id,
-        name: dojo.trade_name || dojo.legal_name,
-        phone: dojo.phone,
-        federation_id: dojo.federation_id,
-        auth_channel: req.dojoAuthChannel, // 'A' | 'B'
-        linked: link.linked,               // karate_dojo_linked_at IS NOT NULL
-        linked_at: link.linked_at,         // ISO 8601 UTC | null
-      },
+      dojo: shapeDojo(dojo, { authChannel: req.dojoAuthChannel, link }),
       // Espelhados no topo para o front não precisar cavar o objeto só
       // para decidir se renderiza a área da federação.
       linked: link.linked,
@@ -90,6 +193,138 @@ router.get('/dojo/me', requireDojoAccess, async (req, res) => {
   } catch (err) {
     console.error('[karateDojo] /dojo/me error:', err.message);
     res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// Só estes cinco campos existem para o PATCH. Qualquer outra chave do body
+// (inclusive o bloco federativo inteiro) é ignorada sem erro.
+function validateDojoPatch(body) {
+  const b = body || {};
+  const errors = [];
+  const data = {};
+
+  if (b.name !== undefined) {
+    const v = b.name != null ? String(b.name).trim() : '';
+    if (!v) errors.push('name não pode ficar vazio');
+    else data.trade_name = v;
+  }
+
+  if (b.cnpj !== undefined) {
+    if (b.cnpj === null || String(b.cnpj).trim() === '') {
+      data.cnpj = null;
+    } else {
+      const digits = String(b.cnpj).replace(/\D/g, '');
+      if (digits.length !== 14) errors.push('cnpj inválido (esperados 14 dígitos)');
+      else data.cnpj = digits;
+    }
+  }
+
+  if (b.email !== undefined) {
+    if (b.email === null || String(b.email).trim() === '') {
+      data.email = null;
+    } else {
+      const v = String(b.email).trim();
+      if (!EMAIL_RE.test(v)) errors.push('email inválido');
+      else data.email = v;
+    }
+  }
+
+  if (b.phone !== undefined) {
+    if (b.phone === null || String(b.phone).trim() === '') {
+      data.phone = null;
+    } else {
+      const digits = String(b.phone).replace(/\D/g, '');
+      if (digits.length < 10 || digits.length > 11) errors.push('phone inválido (esperados 10 ou 11 dígitos)');
+      else data.phone = digits;
+    }
+  }
+
+  if (b.founded_at !== undefined) {
+    if (b.founded_at === null || String(b.founded_at).trim() === '') {
+      data.founded_at = null;
+    } else {
+      const v = String(b.founded_at).trim().slice(0, 10);
+      if (!isValidDateStr(v)) errors.push('founded_at deve ser uma data válida no formato YYYY-MM-DD');
+      else data.founded_at = v;
+    }
+  }
+
+  return { errors, data };
+}
+
+// UPDATE escopado por (id, federation_id, vertical) — o dojô do GUARD,
+// nunca id vindo do body. Statement único, sem BEGIN (nada de tx-poison).
+async function updateDojo(dojoId, federationId, data, { withFoundedAt } = {}) {
+  const useFoundedAt = withFoundedAt === undefined ? HAS_FOUNDED_AT_COL : withFoundedAt;
+  const sets = [];
+  const vals = [];
+
+  for (const col of ['trade_name', 'cnpj', 'email', 'phone']) {
+    if (data[col] === undefined) continue;
+    vals.push(data[col]);
+    sets.push(`${col} = $${vals.length}`);
+  }
+
+  if (data.founded_at !== undefined) {
+    vals.push(data.founded_at);
+    const p = `$${vals.length}::date`;
+    if (useFoundedAt) sets.push(`dojo_founded_at = ${p}`);
+    // Espelha o ANO na coluna que a FEDERAÇÃO já lê (karateDojos.js) —
+    // sem isso a tela dela continuaria mostrando o ano antigo.
+    sets.push(`dojo_founded_year = EXTRACT(YEAR FROM ${p})::smallint`);
+  }
+
+  if (!sets.length) return true; // PATCH vazio = no-op (devolve o estado atual)
+
+  sets.push('updated_at = now()');
+  vals.push(dojoId, federationId);
+
+  const { rows } = await db.query(
+    `UPDATE companies SET ${sets.join(', ')}
+      WHERE id = $${vals.length - 1}
+        AND federation_id = $${vals.length}
+        AND vertical = 'karate_dojo'
+      RETURNING id`,
+    vals
+  );
+  return rows.length > 0;
+}
+
+// PATCH /federation/:id/dojo/me (Canal A)
+// Resposta 200 com o MESMO shape do GET.
+router.patch('/dojo/me', requireDojoAccess, requireChannelA, async (req, res) => {
+  const { errors, data } = validateDojoPatch(req.body);
+  if (errors.length) {
+    return res.status(422).json({ error: errors[0], errors, code: 'VALIDATION_ERROR' });
+  }
+
+  try {
+    let ok;
+    try {
+      ok = await updateDojo(req.dojoId, req.federationId, data);
+    } catch (e) {
+      if (!isFoundedAtSchemaError(e)) throw e;
+      HAS_FOUNDED_AT_COL = false;
+      console.warn('[karateDojo] companies.dojo_founded_at ausente (migration 254 pendente) — gravando só o ano');
+      ok = await updateDojo(req.dojoId, req.federationId, data, { withFoundedAt: false });
+    }
+    if (!ok) return notFound(res);
+
+    const dojo = await loadDojo(req.dojoId, req.federationId);
+    if (!dojo) return notFound(res);
+    const link = await getDojoLinkStatus(req.dojoId);
+
+    return res.json({
+      dojo: shapeDojo(dojo, { authChannel: req.dojoAuthChannel, link }),
+      linked: link.linked,
+      linked_at: link.linked_at,
+    });
+  } catch (err) {
+    if (err && err.code === '23505') {
+      return res.status(409).json({ error: 'Já existe uma empresa com este CNPJ', code: 'DUPLICATE_CNPJ' });
+    }
+    console.error('[karateDojo] PATCH /dojo/me error:', err.message);
+    return res.status(500).json({ error: 'Erro interno' });
   }
 });
 

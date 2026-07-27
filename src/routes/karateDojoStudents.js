@@ -20,7 +20,7 @@
 // Defensivo 42P01 (migration 242 pendente): GETs de lista devolvem vazio +
 // schema_pending; writes e ficha devolvem 503 SCHEMA_PENDING.
 //
-//   GET    /federation/:id/dojo/students             (?status=&q=&belt=&federated=&summary=1)
+//   GET    /federation/:id/dojo/students             (?status=&q=&belt=&federated=&summary=1&limit=&offset=)
 //   POST   /federation/:id/dojo/students             (422 inválido / menor sem responsável)
 //   POST   /federation/:id/dojo/students/import      ({rows:[...]}, máx 500)
 //   GET    /federation/:id/dojo/students/:sid        (ficha + responsável)
@@ -78,6 +78,11 @@ function parseFederatedFilter(raw) {
 }
 
 // ── GET /federation/:id/dojo/students ──
+// QA 27/07/2026: o handler lia os filtros mas IGNORAVA o limit (o service
+// tinha LIMIT 1000 fixo) — limit=50 e limit=200 devolviam os mesmos 205
+// alunos / 105 KB. Agora é paginação de verdade e `count` é o TOTAL sem
+// paginação (antes era data.length, que com LIMIT fixo por acaso batia).
+// `data`/`count`/`summary` mantêm os nomes que o app já consome.
 router.get('/dojo/students', requireDojoAccess, async (req, res) => {
   try {
     const status = ['active', 'inactive'].includes(req.query.status) ? req.query.status : null;
@@ -85,14 +90,30 @@ router.get('/dojo/students', requireDojoAccess, async (req, res) => {
     const belt = req.query.belt != null && String(req.query.belt).trim() !== '' ? String(req.query.belt).trim() : null;
     const federated = parseFederatedFilter(req.query.federated);
 
-    const data = await svc.listStudents(req.dojoId, { status, q, belt, federated });
-    const payload = { data, count: data.length };
+    const page = await svc.listStudentsPaged(req.dojoId, {
+      status,
+      q,
+      belt,
+      federated,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+
+    const payload = {
+      data: page.data,
+      count: page.count,
+      limit: page.limit,
+      offset: page.offset,
+    };
     if (req.query.summary === '1' || req.query.summary === 'true') {
       payload.summary = await svc.getSummary(req.dojoId);
     }
     return res.json(payload);
   } catch (e) {
-    if (e && e.code === '42P01') return res.json({ data: [], count: 0, schema_pending: true });
+    if (e && e.code === '42P01') {
+      const paging = svc.parsePaging({ limit: req.query.limit, offset: req.query.offset });
+      return res.json({ data: [], count: 0, limit: paging.limit, offset: paging.offset, schema_pending: true });
+    }
     console.error('[karateDojoStudents] list error:', e.message);
     return res.status(500).json({ error: 'Erro ao listar alunos' });
   }

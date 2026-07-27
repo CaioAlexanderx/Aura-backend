@@ -27,6 +27,11 @@
 // torne isso verdadeiro. O import em lote é TOLERANTE: importa mesmo
 // assim, com warning na resposta (o bloqueio é só no form).
 //
+// PAGINAÇÃO (QA 27/07/2026): a lista tinha LIMIT 1000 FIXO e ignorava o
+// limit do cliente — limit=50 e limit=200 devolviam os mesmos 205 alunos
+// (105 KB). Agora é limit/offset de verdade, com o total (sem paginação)
+// vindo por count(*) OVER() na MESMA query.
+//
 // Idade tz-safe: birth_date é date puro — NUNCA new Date('YYYY-MM-DD')
 // (interpretaria como UTC e voltaria um dia em UTC-3); split manual.
 // Todas as leituras de date usam to_char(...,'YYYY-MM-DD') para o driver
@@ -43,11 +48,28 @@ const VALID_SEX_VALUES = ['M', 'F', 'other'];
 const IMPORT_MAX_ROWS = 500;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Paginação da lista de alunos. 100 cobre a tela; 500 é o teto para quem
+// exporta/imprime sem virar payload de 100 KB de novo.
+const LIST_DEFAULT_LIMIT = 100;
+const LIST_MAX_LIMIT = 500;
+
 function svcError(status, code, message) {
   const e = new Error(message);
   e.status = status;
   e.code = code;
   return e;
+}
+
+// limit/offset chegam como string da query — lixo vira default (nunca 422:
+// "dado faltante ≠ pendência" também vale para parâmetro de paginação).
+function parsePaging({ limit, offset } = {}) {
+  let l = Number(limit);
+  if (!Number.isFinite(l) || l <= 0) l = LIST_DEFAULT_LIMIT;
+  l = Math.min(Math.floor(l), LIST_MAX_LIMIT);
+
+  let o = Number(offset);
+  if (!Number.isFinite(o) || o < 0) o = 0;
+  return { limit: l, offset: Math.floor(o) };
 }
 
 // ── F5a: schema do vínculo federativo (migration 253) ──
@@ -306,12 +328,22 @@ function shapeStudent(row) {
 
 // ── Consultas ──
 // federated: true | false | null (null/ausente = todos)
-async function listStudents(dojoId, { status = null, q = null, belt = null, federated = null } = {}) {
+//
+// count(*) OVER() dá o total SEM paginação na PRÓPRIA query — de propósito:
+// um SELECT COUNT separado entraria na fila de queries e desalinharia os
+// mocks posicionais dos testes que já existem (armadilha conhecida). O
+// único caso em que a window function não serve é página VAZIA com offset
+// > 0 (não há linha para carregar o total) — aí sim vai um COUNT dedicado.
+async function listStudentsPaged(dojoId, opts = {}) {
+  const { status = null, q = null, belt = null, federated = null } = opts;
+  const { limit, offset } = parsePaging(opts);
+
   const { rows } = await withFederationSchemaFallback(() => db.query(
     `SELECT ${studentFields('s.')},
             g.full_name AS guardian_full_name, g.phone AS guardian_phone,
             g.relationship AS guardian_relationship,
-            ${federationFields('s.')}
+            ${federationFields('s.')},
+            count(*) OVER() AS total_count
        FROM karate_dojo_students s
        LEFT JOIN karate_dojo_guardians g ON g.id = s.guardian_id
        ${federationJoin('s.')}
@@ -322,10 +354,11 @@ async function listStudents(dojoId, { status = null, q = null, belt = null, fede
         AND ($4::text IS NULL OR s.belt_label = $4)
         AND ($5::boolean IS NULL OR ${isFederatedExpr('s.')} = $5)
       ORDER BY s.full_name ASC
-      LIMIT 1000`,
-    [dojoId, status, q, belt, federated]
+      LIMIT $6 OFFSET $7`,
+    [dojoId, status, q, belt, federated, limit, offset]
   ));
-  return rows.map((r) => {
+
+  const data = rows.map((r) => {
     const s = shapeStudent(r);
     s.guardian = r.guardian_id
       ? {
@@ -337,6 +370,40 @@ async function listStudents(dojoId, { status = null, q = null, belt = null, fede
       : null;
     return s;
   });
+
+  let count;
+  if (rows.length) {
+    count = rows[0].total_count != null ? Number(rows[0].total_count) : rows.length;
+  } else if (offset > 0) {
+    count = await countStudents(dojoId, { status, q, belt, federated });
+  } else {
+    count = 0;
+  }
+
+  return { data, count, limit, offset };
+}
+
+// Só usado quando a página vem vazia com offset > 0 (ver acima).
+async function countStudents(dojoId, { status = null, q = null, belt = null, federated = null } = {}) {
+  const { rows } = await withFederationSchemaFallback(() => db.query(
+    `SELECT count(*)::int AS total
+       FROM karate_dojo_students s
+      WHERE s.dojo_id = $1
+        AND ($2::text IS NULL OR s.status = $2)
+        AND ($3::text IS NULL OR s.full_name ILIKE '%' || $3 || '%'
+             OR s.cpf = regexp_replace($3, '\\D', '', 'g'))
+        AND ($4::text IS NULL OR s.belt_label = $4)
+        AND ($5::boolean IS NULL OR ${isFederatedExpr('s.')} = $5)`,
+    [dojoId, status, q, belt, federated]
+  ));
+  return rows.length && rows[0].total != null ? Number(rows[0].total) : 0;
+}
+
+// Compat: assinatura antiga (devolve o ARRAY). Sem limit/offset explicitos
+// vale o default da paginação.
+async function listStudents(dojoId, opts = {}) {
+  const page = await listStudentsPaged(dojoId, opts);
+  return page.data;
 }
 
 async function getSummary(dojoId) {
@@ -995,11 +1062,16 @@ async function updateGuardian(dojoId, guardianId, data) {
 
 module.exports = {
   IMPORT_MAX_ROWS,
+  LIST_DEFAULT_LIMIT,
+  LIST_MAX_LIMIT,
   computeAge,
   isMinor,
+  parsePaging,
   validateStudentPayload,
   validateGuardianPayload,
   listStudents,
+  listStudentsPaged,
+  countStudents,
   getSummary,
   getStudent,
   createStudent,

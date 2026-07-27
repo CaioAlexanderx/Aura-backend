@@ -4,9 +4,16 @@
 //   config: GET default (sem registro) → PUT liga+offsets → GET reflete
 //   PUT validação: offsets fora de -15..30 → 422
 //   run (Canal A): 1 pending vencendo hoje → sent + log
-//   rerun mesmo estágio → skipped (dedupe por charge_id+offset+channel)
+//   rerun mesmo estágio → skipped_sent (dedupe por charge_id+offset+channel)
 //   sem e-mail (guardian e aluno) → skipped_no_email
 //   Canal B: GET config ok / PUT config e POST run → 403 PORTAL_READ_ONLY
+//
+// ⚠️ QA 27/07/2026: o runner passou a devolver
+// { sent, skipped_no_email, skipped_sent, failed, skipped } — `skipped`
+// virou a SOMA dos dois motivos (compat com quem já consome) e os motivos
+// ficaram separados porque o front rotulava TODO skip como "sem e-mail",
+// o que era mentira quando o skip era dedupe. Os casos abaixo foram
+// atualizados junto com o handler (e agora afirmam QUAL foi o motivo).
 //
 // db.query é 100% mockado (tests/jest.setup.js). RESEND_API_KEY ausente →
 // karateMailer.sendKarateEmail simula o envio (não chama fetch), então o
@@ -112,12 +119,12 @@ describe('F3c — régua de cobrança do dojô (dojô→aluno)', () => {
       .mockResolvedValueOnce({ rows: [enabledConfigRow] })   // getConfig
       .mockResolvedValueOnce({ rows: [candidate()] })         // candidatas (offset 0)
       .mockResolvedValueOnce({ rows: [dojoMetaRow] })         // getDojoMeta
-      .mockResolvedValueOnce({ rows: [] })                    // alreadyLogged → não enviado
+      .mockResolvedValueOnce({ rows: [] })                    // alreadyLogged → nenhum 'sent'
       .mockResolvedValueOnce({ rows: [{ id: 'log1' }] });     // logSend 'sent'
 
     const res = await request(app).post(`${base}/reminders/run`).set(canalA()).send({});
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ sent: 1, skipped: 0, failed: 0 });
+    expect(res.body).toEqual({ sent: 1, skipped_no_email: 0, skipped_sent: 0, failed: 0, skipped: 0 });
 
     // o INSERT do log gravou status 'sent' e escopo por dojô
     const insert = db.query.mock.calls.find((c) => String(c[0]).includes('INSERT INTO karate_dojo_reminder_log'));
@@ -126,16 +133,17 @@ describe('F3c — régua de cobrança do dojô (dojô→aluno)', () => {
     expect(insert[1][4]).toBe('sent');       // status
   });
 
-  test('POST reminders/run: rerun do mesmo estágio → skipped (dedupe)', async () => {
+  test('POST reminders/run: rerun do mesmo estágio JÁ ENVIADO → skipped_sent (dedupe)', async () => {
     db.query
       .mockResolvedValueOnce({ rows: [enabledConfigRow] })                 // getConfig
       .mockResolvedValueOnce({ rows: [candidate()] })                       // candidatas
       .mockResolvedValueOnce({ rows: [dojoMetaRow] })                       // getDojoMeta
-      .mockResolvedValueOnce({ rows: [{ exists: 1 }] });                    // alreadyLogged → já enviado
+      .mockResolvedValueOnce({ rows: [{ exists: 1 }] });                    // alreadyLogged → já 'sent'
 
     const res = await request(app).post(`${base}/reminders/run`).set(canalA()).send({});
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ sent: 0, skipped: 1, failed: 0 });
+    // skipped continua sendo a SOMA (compat), mas agora dá pra saber o motivo
+    expect(res.body).toEqual({ sent: 0, skipped_no_email: 0, skipped_sent: 1, failed: 0, skipped: 1 });
     // não inseriu novo log
     const insert = db.query.mock.calls.find((c) => String(c[0]).includes('INSERT INTO karate_dojo_reminder_log'));
     expect(insert).toBeUndefined();
@@ -151,10 +159,12 @@ describe('F3c — régua de cobrança do dojô (dojô→aluno)', () => {
 
     const res = await request(app).post(`${base}/reminders/run`).set(canalA()).send({});
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ sent: 0, skipped: 1, failed: 0 });
+    expect(res.body).toEqual({ sent: 0, skipped_no_email: 1, skipped_sent: 0, failed: 0, skipped: 1 });
     const insert = db.query.mock.calls.find((c) => String(c[0]).includes('INSERT INTO karate_dojo_reminder_log'));
     expect(insert).toBeDefined();
     expect(insert[1][4]).toBe('skipped_no_email'); // status
+    // e o log NUNCA mais é DO NOTHING: o retry precisa sobrescrever o skip
+    expect(String(insert[0])).toContain('DO UPDATE');
   });
 
   test('Canal B: GET reminder-config OK / PUT + run → 403 PORTAL_READ_ONLY', async () => {
