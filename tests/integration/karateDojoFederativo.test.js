@@ -41,11 +41,16 @@ beforeAll(() => {
 const SECRET = 'aura-test-secret-2026';
 const fedId = 'fed00000-0000-0000-0000-000000000001';
 const dojoId = 'd0000000-0000-0000-0000-000000000002';
+// ⚠️ Todo id daqui que vai no CORPO de um request passa pelo isUuid() do
+// service (createCertOrdersBatch), que exige UUID HEXADECIMAL. Um id como
+// 'h1000000-…' não é hex: o item é pulado com ID_INVALIDO ANTES de qualquer
+// query e o caso morre com "created: 0" sem nunca exercitar o que pretendia
+// testar. Primeiro caractere (e todos os outros) sempre em [0-9a-f].
 const s1 = 'a1000000-0000-0000-0000-00000000000a'; // federado
 const s2 = 'a2000000-0000-0000-0000-00000000000b'; // NÃO federado
 const s3 = 'a3000000-0000-0000-0000-00000000000c'; // de outro dojô
 const p1 = 'c1000000-0000-0000-0000-0000000000aa'; // practitioner de s1
-const bh1 = 'h1000000-0000-0000-0000-0000000000b1'; // graduação de p1
+const bh1 = 'b1000000-0000-0000-0000-0000000000b1'; // graduação de p1
 const examId = 'e1000000-0000-0000-0000-0000000000e1';
 const base = `/api/v1/federation/${fedId}/dojo`;
 const LINKED_AT = new Date('2026-07-01T12:00:00Z');
@@ -173,7 +178,7 @@ const examRow = (over = {}) => ({
 });
 
 const orderRow = (over = {}) => ({
-  id: 'o1000000-0000-0000-0000-0000000000f1',
+  id: 'f1000000-0000-0000-0000-0000000000f1',
   federation_id: fedId,
   dojo_id: dojoId,
   practitioner_id: p1,
@@ -374,6 +379,10 @@ describe('F5b — POST /dojo/cert-orders', () => {
       .send({ items: [{ student_id: s1, belt_history_id: bh1 }] });
 
     expect(res.status).toBe(200);
+    // skipped ANTES de created: se o item for pulado, a mensagem do Jest
+    // mostra a RAZÃO (ex.: ID_INVALIDO) em vez de um opaco
+    // "Expected: 1 / Received: 0" que não diz onde o caminho morreu.
+    expect(res.body.skipped).toEqual([]);
     expect(res.body.created).toBe(1);
 
     // A graduação foi resolvida pelo id enviado (e validada contra o
