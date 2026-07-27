@@ -29,6 +29,14 @@
 //   GET    /federation/:id/dojo/billing/baas
 //   POST   /federation/:id/dojo/billing/baas/activate
 //   PUT    /federation/:id/dojo/billing/baas/provider
+//
+// F3c — Régua de cobrança (e-mail automático + WhatsApp manual):
+//   GET    /federation/:id/dojo/billing/reminder-config
+//   PUT    /federation/:id/dojo/billing/reminder-config
+//   GET    /federation/:id/dojo/billing/reminder-log
+//   POST   /federation/:id/dojo/billing/reminders/run
+//   GET    /federation/:id/dojo/reminders/whatsapp-queue    (?date=YYYY-MM-DD)
+//   POST   /federation/:id/dojo/reminders/:chargeId/whatsapp-sent
 // ============================================================
 'use strict';
 
@@ -249,6 +257,34 @@ router.post('/dojo/billing/reminders/run', requireDojoAccess, requireChannelA, a
     return res.json(result);
   } catch (e) {
     return handleWriteError(res, e, 'reminders run');
+  }
+});
+
+// ── F3c: canal WhatsApp (fila MANUAL) ──
+// GET aceita Canal A e B (o portal pode CONSULTAR quem está na fila);
+// confirmar o envio é escrita → Canal A.
+router.get('/dojo/reminders/whatsapp-queue', requireDojoAccess, async (req, res) => {
+  try {
+    const date = req.query.date != null && String(req.query.date).trim() !== ''
+      ? String(req.query.date).trim() : null;
+    const result = await reminders.whatsappQueue(req.dojoId, { date });
+    return res.json(result);
+  } catch (e) {
+    if (e && e.status) return res.status(e.status).json({ error: e.message, code: e.code || 'ERROR' });
+    if (e && (e.code === '42P01' || e.code === '42703')) {
+      return res.json({ date: null, data: [], count: 0, schema_pending: true });
+    }
+    console.error('[karateDojoBilling] whatsapp queue:', e.message);
+    return res.status(500).json({ error: 'Erro ao montar a fila de WhatsApp' });
+  }
+});
+
+router.post('/dojo/reminders/:chargeId/whatsapp-sent', requireDojoAccess, requireChannelA, async (req, res) => {
+  try {
+    const result = await reminders.markWhatsappSent(req.dojoId, req.params.chargeId, (req.body || {}).offset);
+    return res.json(result);
+  } catch (e) {
+    return handleWriteError(res, e, 'whatsapp sent');
   }
 });
 
