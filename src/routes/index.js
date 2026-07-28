@@ -457,7 +457,6 @@ router.use('/federation/:id', require('./karateDojoConnection'));
 // dentro do próprio router (mesma armadilha de /dojos/roster-progress).
 //   GET  /federation/:id/affiliation-requests?status=
 //   GET  /federation/:id/affiliation-requests/metrics
-//   POST /federation/:id/affiliation-requests                     {dojo_id,...} (migration 255 — federação abre pelo dojô)
 //   POST /federation/:id/affiliation-requests/:requestId/approve  {fpkt_number}
 //   POST /federation/:id/affiliation-requests/:requestId/reject   {reason}
 router.use('/federation/:id', require('./karateAffiliationRequestsAdmin'));

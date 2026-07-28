@@ -95,11 +95,6 @@ function shapeRequestForFederation(r) {
     students_count: r.students_count != null ? Number(r.students_count) : null,
     notes: r.notes || null,
     status: r.status,
-    // origin: 'dojo' (self-serve, POST /dojo/connection) | 'federation'
-    // (a federação abriu pelo dojô, POST /affiliation-requests). Mesmo
-    // inbox, mesmo approve/reject — só muda quem iniciou (migration 255).
-    origin: r.origin || 'dojo',
-    requested_by: r.requested_by || null,
     created_at: toIso(r.created_at),
     reviewed_at: toIso(r.reviewed_at),
     rejection_reason: r.rejection_reason || null,
@@ -175,11 +170,10 @@ async function getConnectionState({ dojoId, federationId }) {
   return out;
 }
 
-// ── INSERT compartilhado (dojô self-serve OU federação) ─────
-// migration 255: o MESMO inbox atende as duas origens. origin +
-// requestedBy só mudam o rótulo de quem abriu — validação, idempotência
-// (um pending por dojô) e o approve/reject que vêm depois são idênticos.
-async function insertAffiliationRequest({ dojoId, federationId, body, origin, requestedBy, alreadyPendingMessage }) {
+// ── INSERT compartilhado (dojô self-serve) ──────────────────
+// Extraído de createConnectionRequest para reuso interno; hoje só o
+// self-serve (POST /dojo/connection) chama este caminho.
+async function insertAffiliationRequest({ dojoId, federationId, body, alreadyPendingMessage }) {
   const b = body || {};
   const contact_name = text(b.contact_name, 200);
   const contact_phone = text(b.contact_phone, 40);
@@ -207,18 +201,16 @@ async function insertAffiliationRequest({ dojoId, federationId, body, origin, re
     text(b.state, 8),
     intOrNull(b.students_count),
     text(b.notes, 2000),
-    origin,
-    requestedBy || null,
   ];
 
   try {
     const ins = await db.query(
       `INSERT INTO karate_affiliation_requests
          (federation_id, dojo_id, contact_name, contact_phone, contact_email,
-          cnpj, cpf, address, city, state, students_count, notes, origin, requested_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          cnpj, cpf, address, city, state, students_count, notes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        ON CONFLICT (dojo_id) WHERE status = 'pending' DO NOTHING
-       RETURNING id, status, created_at, origin`,
+       RETURNING id, status, created_at`,
       params
     );
 
@@ -227,17 +219,14 @@ async function insertAffiliationRequest({ dojoId, federationId, body, origin, re
       return {
         id: row.id,
         status: row.status,
-        origin: row.origin,
         created_at: toIso(row.created_at),
         already_pending: false,
       };
     }
 
     // Já havia um pendente — devolve o mesmo (idempotente, espelha o H1).
-    // Vale para as duas origens: um dojô só tem UM pending por vez, não
-    // importa quem abriu.
     const existing = await db.query(
-      `SELECT id, status, created_at, origin FROM karate_affiliation_requests
+      `SELECT id, status, created_at FROM karate_affiliation_requests
         WHERE dojo_id = $1 AND status = 'pending'
         ORDER BY created_at DESC LIMIT 1`,
       [dojoId]
@@ -251,7 +240,6 @@ async function insertAffiliationRequest({ dojoId, federationId, body, origin, re
     return {
       id: row.id,
       status: row.status,
-      origin: row.origin,
       created_at: toIso(row.created_at),
       already_pending: true,
       message: alreadyPendingMessage,
@@ -279,52 +267,6 @@ async function createConnectionRequest({ dojoId, federationId, body }) {
     dojoId,
     federationId,
     body,
-    origin: 'dojo',
-    requestedBy: null,
-    alreadyPendingMessage: 'Já existe uma solicitação de conexão pendente para este dojô.',
-  });
-}
-
-// ── POST /affiliation-requests (LADO FEDERAÇÃO — abre pelo dojô) ────
-// migration 255: convergência com o "Conectar dojô" — em vez de um
-// segundo inbox, a federação empilha no MESMO lugar que o self-serve.
-// Exige que o dojô já esteja tecnicamente roteado pra esta federação
-// (companies.federation_id = federationId — mesma checagem que
-// requireDojoAccess faria do lado do dojô) e ainda NÃO esteja visível
-// (karate_dojo_linked_at NULL). Não usa karate_dojo_connections/via: isso
-// é config de sincronia pós-vínculo (Track F, parqueada), não filiação.
-async function createFederationInitiatedRequest({ dojoId, federationId, body, actorId }) {
-  if (!dojoId) {
-    throw httpError(422, 'VALIDATION_ERROR', 'Campo dojo_id é obrigatório');
-  }
-
-  const dojoRow = await db.query(
-    `SELECT id, federation_id, karate_dojo_linked_at FROM companies WHERE id = $1 LIMIT 1`,
-    [dojoId]
-  );
-  const dojo = (dojoRow.rows && dojoRow.rows[0]) || null;
-  if (!dojo) {
-    throw httpError(404, 'DOJO_NOT_FOUND', 'Dojô não encontrado');
-  }
-  if (dojo.federation_id !== federationId) {
-    throw httpError(
-      422,
-      'DOJO_NAO_ROTEADO',
-      'Este dojô ainda não está tecnicamente vinculado a esta federação (companies.federation_id). Ajuste o vínculo técnico antes de abrir a filiação.'
-    );
-  }
-
-  const link = await getDojoLinkStatus(dojoId);
-  if (link.linked) {
-    throw httpError(409, 'JA_CONECTADO', 'Este dojô já está conectado a esta federação.');
-  }
-
-  return insertAffiliationRequest({
-    dojoId,
-    federationId,
-    body,
-    origin: 'federation',
-    requestedBy: actorId || null,
     alreadyPendingMessage: 'Já existe uma solicitação de conexão pendente para este dojô.',
   });
 }
@@ -355,18 +297,13 @@ async function listRequests({ federationId, status }) {
 
 // ── GET /affiliation-requests/metrics ───────────────────────
 async function requestMetrics({ federationId }) {
-  const empty = {
-    pending: 0, approved: 0, rejected: 0, mais_antiga: null,
-    pending_by_origin: { dojo: 0, federation: 0 },
-  };
+  const empty = { pending: 0, approved: 0, rejected: 0, mais_antiga: null };
   try {
     const { rows } = await db.query(
       `SELECT
           count(*) FILTER (WHERE r.status = 'pending')::int  AS pending,
           count(*) FILTER (WHERE r.status = 'approved')::int AS approved,
           count(*) FILTER (WHERE r.status = 'rejected')::int AS rejected,
-          count(*) FILTER (WHERE r.status = 'pending' AND r.origin = 'dojo')::int AS pending_dojo,
-          count(*) FILTER (WHERE r.status = 'pending' AND r.origin = 'federation')::int AS pending_federation,
           min(r.created_at) FILTER (WHERE r.status = 'pending') AS mais_antiga_criada_em
          FROM karate_affiliation_requests r
         WHERE r.federation_id = $1`,
@@ -378,12 +315,6 @@ async function requestMetrics({ federationId }) {
       pending: t.pending || 0,
       approved: t.approved || 0,
       rejected: t.rejected || 0,
-      // Quebra por origem (migration 255): quanto da fila veio do dojô
-      // (self-serve) vs. foi aberto pela própria federação.
-      pending_by_origin: {
-        dojo: t.pending_dojo || 0,
-        federation: t.pending_federation || 0,
-      },
       mais_antiga: criadaEm
         ? {
             criada_em: toIso(criadaEm),
@@ -546,7 +477,6 @@ async function rejectRequest({ federationId, requestId, reason, actorId }) {
 module.exports = {
   getConnectionState,
   createConnectionRequest,
-  createFederationInitiatedRequest,
   listRequests,
   requestMetrics,
   approveRequest,
