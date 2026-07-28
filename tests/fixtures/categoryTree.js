@@ -3,9 +3,13 @@
 // Consumido por B1 (tests/services/categoryTree.test.js) e por B2.
 // Espelha a arvore de calcados proposta na spec v2 secao 6.3, passo 2.
 //
-// Convencao do repo: strings PT-BR em codigo SEM acento. A unica
-// excecao e SLUG_CASES, que precisa de entrada acentuada para exercitar
-// unaccent() dentro de category_slugify().
+// ESCOPO: a F0 e PRODUCT-ONLY (decisao de 28/07, ver CONTRACT_CATEGORIES.md
+// secao 0). Nao existe fixture de arvore de servico -- servico saiu do
+// escopo e nenhum endpoint novo expoe selecao de type.
+//
+// Convencao do repo: strings PT-BR em codigo SEM acento. A unica excecao e
+// SLUG_CASES, que precisa de entrada acentuada para exercitar unaccent()
+// dentro de category_slugify().
 // ============================================================
 
 const COMPANY_A = '08c05f0e-b75b-4c12-870e-d7fb65f1dca0'; // Davi Matriz
@@ -77,16 +81,9 @@ const TREE_PRODUCT = [
   },
 ];
 
-// 'Tenis' aparece em Feminino, Masculino e (potencialmente) Infantil.
-// Slug identico sob pais DIFERENTES nao colide -- o indice unico e por
-// (company_id, type, parent_id, name_norm). Usado para provar isso.
+// 'Tenis' aparece em Feminino e Masculino. Slug identico sob pais DIFERENTES
+// nao colide -- o indice unico e por (company_id, type, parent_id, name_norm).
 const DUPLICATE_LEAF_NAME = 'Tenis';
-
-// Arvore de servico: mesmo nome de raiz que a de produto NAO colide,
-// porque o indice unico inclui type.
-const TREE_SERVICE = [
-  { name: 'Feminino', type: 'service', expectedPath: '/feminino', expectedDepth: 0 },
-];
 
 // Entrada acentuada -> saida esperada de category_slugify().
 // Unica excecao a convencao de "sem acento em codigo".
@@ -103,12 +100,13 @@ const SLUG_CASES = [
   { input: '',                    expected: '' },
 ];
 
-// Casos que devem levantar erro. As tres primeiras strings vem de
-// RAISE EXCEPTION em trigger e chegam como SQLSTATE P0001.
+// Casos que devem levantar erro.
+// CATEGORY_TYPE_MISMATCH NAO esta aqui: o trigger continua no schema como
+// guarda latente, mas nenhum caminho da F0 consegue dispara-lo (tudo e
+// 'product'). Nao e superficie de API -- ver CONTRACT_CATEGORIES.md secao 6.
 const ERROR_CASES = {
   maxDepth:    { sqlstate: '23514', message: 'product_categories_depth_max' },
   cycle:       { sqlstate: 'P0001', message: 'CATEGORY_CYCLE' },
-  typeMismatch:{ sqlstate: 'P0001', message: 'CATEGORY_TYPE_MISMATCH' },
   crossTenant: { sqlstate: 'P0001', message: 'CATEGORY_CROSS_TENANT' },
   duplicate:   { sqlstate: '23505', message: 'product_categories_unique_sibling' },
 };
@@ -134,7 +132,6 @@ module.exports = {
   COMPANY_A,
   COMPANY_B,
   TREE_PRODUCT,
-  TREE_SERVICE,
   DUPLICATE_LEAF_NAME,
   SLUG_CASES,
   ERROR_CASES,

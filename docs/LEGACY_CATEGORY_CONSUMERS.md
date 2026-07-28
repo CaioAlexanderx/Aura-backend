@@ -41,7 +41,11 @@ O `move_to` do `DELETE` é caso à parte: enquanto não houver links, ele ainda 
 
 ---
 
-## 3. Achado não previsto na spec v2 — `products.unit = 'srv'`
+## 3. `products.unit = 'srv'` — RESOLVIDO por decisão de escopo
+
+**Status: fechado em 28/07/2026.** Mantido no documento porque explica por que a F0 não tem guard de coerência de tipo, e porque a dívida da §3.3 continua viva.
+
+### 3.1 O achado
 
 A rota legada distingue produto de serviço **pela coluna `products.unit`**, não por uma coluna `type` em `products`:
 
@@ -52,19 +56,36 @@ A rota legada distingue produto de serviço **pela coluna `products.unit`**, nã
 `(p.unit IS NULL OR p.unit <> 'srv')`
 ```
 
-Isso aparece em três lugares do arquivo: no `countExpr` do `GET /`, no `unitFilter` do `PATCH` e no `unitFilter` do `DELETE`.
+Aparece em três lugares do arquivo: no `countExpr` do `GET /`, no `unitFilter` do `PATCH` e no `unitFilter` do `DELETE`.
 
-**Consequência que a spec v2 não cobre.** O `type` da migration 045 vive em `product_categories`; a contraparte em `products` é `unit = 'srv'`. Nada no schema impede vincular um produto com `unit = 'srv'` a uma categoria `type = 'product'` — o trigger `trg_link_tenant_guard` valida apenas `company_id`.
+O `type` da migration 045 vive só em `product_categories`. Os dois sistemas nunca se tocavam — até a F0 criar `product_category_links`, que é o primeiro vínculo estruturado entre produto e categoria. Um produto `unit='srv'` vinculado a uma categoria `type='product'` sumiria das duas listagens legadas: a de serviço o exclui pelo `type`, a de produto pelo `unit`.
 
-Se isso acontecer, o produto fica invisível nas duas listagens legadas: a de serviço o exclui pelo filtro de `unit`, e a de produto também, porque `unit = 'srv'`.
+### 3.2 A decisão
 
-**Aberto para decisão de Caio.** Três opções:
+**Serviço sai do escopo da F0.** A árvore é product-only. Ver `CONTRACT_CATEGORIES.md` §0.
 
-1. **Estender o guard** — acrescentar ao `trg_link_tenant_guard` a validação de coerência entre `products.unit` e `product_categories.type`, levantando `CATEGORY_TYPE_MISMATCH`. Custa uma migration nova (262) e fecha a porta no nível mais baixo.
-2. **Validar na API** — B1 recusa o vínculo incoerente em `PUT /products/:id/categories` e no `bulk`. Mais barato, mas não protege escrita direta no banco.
-3. **Não tratar** — aceitar que a UI só oferece a árvore do `type` certo e que o caso é improvável na prática.
+Com a árvore sem opinião sobre serviço, os dois sistemas deixam de se encontrar e a incoerência não tem onde acontecer. **Nenhum guard no trigger, nenhuma validação de `unit` na API, nenhuma migration nova.**
 
-Recomendação: **opção 1**. O mesmo argumento que justifica o guard de tenant vale aqui — a tabela cruza duas entidades e a coerência não é expressável por FK. Mas é escopo novo, e por isso não foi implementado sem decisão.
+Dado que sustenta, medido em 28/07:
+
+| Fato | Valor |
+|---|---|
+| `product_categories` com `type='service'` | **0** na base inteira |
+| `products` com `unit='srv'` fora da empresa `Aura.` | **0** |
+| `products` com `unit='srv'` na empresa `Aura.` | 6 — SKUs dos próprios planos, faturamento interno |
+| Sheid Mania (piloto Studio) | 54 produtos, **0** `unit='srv'`, **0** categorias `type='service'` |
+
+Toda vertical que vende serviço tem modelo próprio e não passa por `product_categories`: Studio (`studio_template_categories`, `studio_orders`, `studio_quotes`, `studio_compositions`), Barber (`barbershop_appointment_services`, `barbershop_queue`), Odonto (TISS), Salão (`salon_partner_splits`). **O Shell Studio não é afetado.**
+
+### 3.3 Dívida que permanece
+
+A decisão remove o conflito, não a causa. `products.unit` continua sendo campo de **unidade de medida** sobrecarregado como discriminador de tipo. Os valores reais na base são texto livre e inconsistente:
+
+`par` (5.359) · `un` (3.313) · `PR` (20) · `srv` (6) · `UN` (4) · `PARES` (4) · `PAR` (1) · `KIT` (1) · `kit` (1) · `pct` (1) · `L` (1)
+
+E a comparação da rota legada é `= 'srv'`, **sensível a caixa** — um serviço cadastrado como `'SRV'` já hoje é tratado como produto pelas listagens. Bug anterior à F0, sem sintoma porque não há serviço de cliente na base.
+
+A correção de raiz seria uma coluna própria em `products` (`is_service boolean` ou `type`), com backfill de `unit = 'srv'` e migração dos consumidores. **Fora do escopo da F0 e sem urgência.** Só volta à mesa se um cliente do Shell Negócio passar a comercializar serviço.
 
 ---
 
