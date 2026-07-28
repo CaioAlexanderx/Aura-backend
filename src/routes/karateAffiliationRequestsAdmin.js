@@ -4,6 +4,7 @@
 //
 //   GET  /federation/:id/affiliation-requests?status=
 //   GET  /federation/:id/affiliation-requests/metrics
+//   POST /federation/:id/affiliation-requests                     {dojo_id,...}
 //   POST /federation/:id/affiliation-requests/:requestId/approve  {fpkt_number}
 //   POST /federation/:id/affiliation-requests/:requestId/reject   {reason}
 //
@@ -17,6 +18,17 @@
 // affiliation_since, tudo numa transação. Não depende de pagamento — a
 // anuidade segue o fluxo que já existe. O número de filiação é SEMPRE
 // digitado aqui pela federação: sem ele, 422.
+//
+// CONVERGÊNCIA (migration 255, 27/07/2026): investigação confirmou que
+// karate_dojo_connections/"Conectar dojô" (Track F) NÃO é um segundo
+// inbox de filiação — é configuração de MODO DE SINCRONIA (native/manual)
+// para um dojô que JÁ está linkado (o próprio picker do modal só lista
+// dojôs com karate_dojo_linked_at IS NOT NULL) e está parqueada/dormente
+// para handshake externo (ver header de karateConnections.js). O ÚNICO
+// gap real era: a federação não tinha como abrir ESTE pedido pelo lado
+// dela (só o dojô self-serve conseguia, via POST /dojo/connection). O
+// POST base abaixo fecha esse gap SEM criar tabela nova: mesmo inbox,
+// mesmo approve/reject/FPKT, só o campo `origin` muda.
 // ============================================================
 'use strict';
 
@@ -54,6 +66,27 @@ router.get('/affiliation-requests/metrics', ...guards.read(), async (req, res) =
     return res.json(out);
   } catch (e) {
     return sendServiceError(res, e, 'GET /affiliation-requests/metrics');
+  }
+});
+
+// ── POST criar (LADO FEDERAÇÃO abre pelo dojô) ──────────────
+// migration 255: mesmo inbox do self-serve (POST /dojo/connection), só
+// que iniciado pela federação — dojo_id no corpo (precisa já estar
+// tecnicamente roteado a esta federação: companies.federation_id).
+// 201 { id, status:'pending', origin:'federation' }
+// 200 { ..., already_pending:true }         — já havia pendente
+// 404 DOJO_NOT_FOUND | 422 DOJO_NAO_ROTEADO | 409 JA_CONECTADO
+router.post('/affiliation-requests', ...guards.staffWrite(), async (req, res) => {
+  try {
+    const out = await svc.createFederationInitiatedRequest({
+      federationId: req.params.id,
+      dojoId: req.body && req.body.dojo_id,
+      body: req.body || {},
+      actorId: (req.user && req.user.id) || null,
+    });
+    return res.status(out.already_pending ? 200 : 201).json(out);
+  } catch (e) {
+    return sendServiceError(res, e, 'POST /affiliation-requests');
   }
 });
 
