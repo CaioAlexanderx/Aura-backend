@@ -3,6 +3,9 @@
 //
 // Anuidades Dojô:
 //   GET   /financial/annuities/dojos                    — lista c/ status
+//         (?dojo_id= filtra UM único dojô — página de detalhe do dojô,
+//          reusa a mesma listagem/mesmos componentes da aba de Anuidades;
+//          AND adicional sobre o escopo de federação, nunca o substitui)
 //   POST  /financial/annuities/dojos/:dojoId/charge     — lança cobrança
 //   PATCH /financial/annuities/dojos/:dojoId/:annuityId — corrige cobrança NÃO paga
 //   POST  /financial/annuities/dojos/:dojoId/:annuityId/void — estorna/cancela cobrança
@@ -57,6 +60,10 @@ const { createPixCharge, getStatus: providerGetStatus } = require('../services/k
 const annuitySvc = require('../services/karateAnnuityService');
 const paymentSvc = require('../services/karatePaymentService');
 const financeAudit = require('../services/karateFinanceAudit');
+
+// Validação simples de uuid p/ query params opcionais (ex.: ?dojo_id=).
+// Mesmo padrão de UUID_RE usado em karateDojoFederativeService.js.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const { applyAnnuityPayment, AnnuityPaymentError, toIsoDate, recomputeAnnuityFromLedger, round2 } = require('../services/karateAnnuityLedger');
 
 // ── Fase F1 (parcelas): schema pre-migration guard ──────────────
@@ -243,9 +250,19 @@ function statusFilterValues(status) {
 // dojoStatusToIsActiveValues em karateAnnuityService.js, compartilhado
 // pelos dois arquivos pra lista e KPI nunca divergirem.
 //
-// ⚠️ Numeração posicional: $1=federationId, $2=year, $3=dojoStatusValues.
-// Isso empurra o resto pra baixo — search vira $4, statusValues $5,
-// pageSize $6, offset $7 (ver DOJOS_FILTER_SQL e os 4 call sites da rota).
+// ⚠️ Numeração posicional: $1=federationId, $2=year, $3=dojoStatusValues,
+// $4=dojoIdFilter. Isso empurra o resto pra baixo — search vira $5,
+// statusValues $6, pageSize $7, offset $8 (ver DOJOS_FILTER_SQL e os 4 call
+// sites da rota).
+//
+// dojo_id ($4, uuid ou NULL — Caio, 27/07/2026): filtro OPCIONAL por UM
+// único dojô, usado pela página de detalhe do dojô (frontend:
+// app/karate/(federation)/dojos/[dojoId].tsx) pra reusar esta MESMA rota/
+// MESMOS componentes da aba de Anuidades do hub, em vez de duplicar a
+// query. É um AND ADICIONAL sobre c.federation_id = $1 — NUNCA substitui o
+// escopo de federação. dojo_id de outra federação não bate com nenhuma
+// linha (c.federation_id = $1 já exclui) e a lista volta vazia, nunca
+// vaza dado de outra federação.
 function dojosBaseSql(withPlan) {
   return `
     SELECT
@@ -273,12 +290,13 @@ function dojosBaseSql(withPlan) {
     WHERE c.federation_id = $1 AND c.vertical_active = 'karate_dojo'
       AND c.karate_dojo_linked_at IS NOT NULL
       AND ($3::boolean[] IS NULL OR c.is_active = ANY($3::boolean[]))
+      AND ($4::uuid IS NULL OR c.id = $4)
   `;
 }
 
 const DOJOS_FILTER_SQL = `
-  WHERE ($4::text IS NULL OR dojo_name ILIKE '%' || $4 || '%' OR fpkt_affiliation_id ILIKE '%' || $4 || '%')
-    AND ($5::text[] IS NULL OR computed_status = ANY($5::text[]))
+  WHERE ($5::text IS NULL OR dojo_name ILIKE '%' || $5 || '%' OR fpkt_affiliation_id ILIKE '%' || $5 || '%')
+    AND ($6::text[] IS NULL OR computed_status = ANY($6::text[]))
 `;
 
 router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
@@ -305,6 +323,20 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
     });
   }
   const dojoStatusValues = annuitySvc.dojoStatusToIsActiveValues(dojoStatus);
+  // dojo_id (Caio, 27/07/2026): filtro OPCIONAL por um único dojô — ver
+  // comentário em dojosBaseSql/DOJOS_FILTER_SQL acima. uuid inválido -> 422
+  // (mesmo padrão de dojo_status logo acima), nunca chega ao banco.
+  // Ausente/vazio -> dojoIdFilter fica null -> comportamento 100% idêntico
+  // ao atual (o AND ($4::uuid IS NULL OR c.id = $4) vira no-op).
+  const rawDojoId = req.query.dojo_id;
+  let dojoIdFilter = null;
+  if (rawDojoId !== undefined && rawDojoId !== null && String(rawDojoId).trim() !== '') {
+    const trimmedDojoId = String(rawDojoId).trim();
+    if (!UUID_RE.test(trimmedDojoId)) {
+      return res.status(422).json({ error: 'dojo_id inválido (uuid esperado)', code: 'VALIDATION_ERROR' });
+    }
+    dojoIdFilter = trimmedDojoId;
+  }
 
   try {
     let dojos;
@@ -314,14 +346,14 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
       try {
         const countRes = await db.query(
           `SELECT COUNT(*)::int AS total FROM (${dojosBaseSql(true)}) base ${DOJOS_FILTER_SQL}`,
-          [federationId, year, dojoStatusValues, search, statusValues]
+          [federationId, year, dojoStatusValues, dojoIdFilter, search, statusValues]
         );
         total = countRes.rows[0]?.total || 0;
         const r = await db.query(
           `SELECT * FROM (${dojosBaseSql(true)}) base ${DOJOS_FILTER_SQL}
            ORDER BY fpkt_affiliation_id ASC NULLS LAST, dojo_name ASC
-           LIMIT $6 OFFSET $7`,
-          [federationId, year, dojoStatusValues, search, statusValues, pageSize, offset]
+           LIMIT $7 OFFSET $8`,
+          [federationId, year, dojoStatusValues, dojoIdFilter, search, statusValues, pageSize, offset]
         );
         dojos = r.rows;
       } catch (e) {
@@ -335,14 +367,14 @@ router.get('/annuities/dojos', ...guards.adminOnly(), async (req, res) => {
     if (!selectedPlan) {
       const countRes = await db.query(
         `SELECT COUNT(*)::int AS total FROM (${dojosBaseSql(false)}) base ${DOJOS_FILTER_SQL}`,
-        [federationId, year, dojoStatusValues, search, statusValues]
+        [federationId, year, dojoStatusValues, dojoIdFilter, search, statusValues]
       );
       total = countRes.rows[0]?.total || 0;
       const r = await db.query(
         `SELECT * FROM (${dojosBaseSql(false)}) base ${DOJOS_FILTER_SQL}
          ORDER BY fpkt_affiliation_id ASC NULLS LAST, dojo_name ASC
-         LIMIT $6 OFFSET $7`,
-        [federationId, year, dojoStatusValues, search, statusValues, pageSize, offset]
+         LIMIT $7 OFFSET $8`,
+        [federationId, year, dojoStatusValues, dojoIdFilter, search, statusValues, pageSize, offset]
       );
       dojos = r.rows;
     }

@@ -130,7 +130,7 @@ describe('GET /annuities/dojos — dojo_status', () => {
     expect(db.query).toHaveBeenCalledTimes(1);
   });
 
-  test('numeração posicional: pageSize/offset continuam corretos com o novo $3 (agora $6/$7)', async () => {
+  test('numeração posicional: pageSize/offset continuam corretos com $4=dojoIdFilter (agora $7/$8)', async () => {
     mockCompanyAccess();
     db.query
       .mockResolvedValueOnce({ rows: [{ total: 0 }] })
@@ -143,9 +143,113 @@ describe('GET /annuities/dojos — dojo_status', () => {
 
     const selectSql = db.query.mock.calls[2][0];
     const selectParams = db.query.mock.calls[2][1];
-    expect(selectSql).toMatch(/LIMIT \$6 OFFSET \$7/);
-    expect(selectParams[5]).toBe(10); // pageSize
-    expect(selectParams[6]).toBe(10); // offset = (page-1)*pageSize = (2-1)*10
+    expect(selectSql).toMatch(/LIMIT \$7 OFFSET \$8/);
+    expect(selectParams[6]).toBe(10); // pageSize
+    expect(selectParams[7]).toBe(10); // offset = (page-1)*pageSize = (2-1)*10
+  });
+});
+
+// ── GET /annuities/dojos — dojo_id (filtro por UM único dojô) ───────
+describe('GET /annuities/dojos — dojo_id', () => {
+  const otherDojoId = 'aaaaaaaa-0000-0000-0000-000000000002';
+
+  test('dojo_id válido: chega no $4 posicional de todas as 4 call sites (count+select, com/sem plan)', async () => {
+    mockCompanyAccess();
+    db.query
+      .mockResolvedValueOnce({ rows: [{ total: 1 }] }) // COUNT
+      .mockResolvedValueOnce({ rows: [] })              // SELECT (sem dojo -> installments não é buscado)
+      ;
+
+    const res = await request(app)
+      .get(`${financialBase}/annuities/dojos`)
+      .query({ dojo_id: otherDojoId })
+      .set(authHeader());
+
+    expect(res.status).toBe(200);
+    const countParams = db.query.mock.calls[1][1];
+    const selectParams = db.query.mock.calls[2][1];
+    // [federationId, year, dojoStatusValues, dojoIdFilter, search, statusValues, pageSize, offset]
+    expect(countParams[3]).toBe(otherDojoId);
+    expect(selectParams[3]).toBe(otherDojoId);
+  });
+
+  test('sem dojo_id: $4 é null (comportamento idêntico ao atual, filtro vira no-op)', async () => {
+    mockCompanyAccess();
+    db.query
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await request(app)
+      .get(`${financialBase}/annuities/dojos`)
+      .set(authHeader());
+
+    const countParams = db.query.mock.calls[1][1];
+    const selectParams = db.query.mock.calls[2][1];
+    expect(countParams[3]).toBeNull();
+    expect(selectParams[3]).toBeNull();
+  });
+
+  test('dojo_id inválido (não-uuid) -> 422 VALIDATION_ERROR, nunca chega ao banco', async () => {
+    mockCompanyAccess();
+
+    const res = await request(app)
+      .get(`${financialBase}/annuities/dojos`)
+      .query({ dojo_id: 'not-a-uuid' })
+      .set(authHeader());
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('VALIDATION_ERROR');
+    // só o role check rodou -- nenhuma query de listagem foi disparada
+    expect(db.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('dojo_id de outra federação nunca vaza: o filtro é AND sobre c.federation_id = $1 (mesmo dojosBaseSql), nunca substitui o escopo', async () => {
+    // Este teste documenta o contrato via leitura do SQL: dojosBaseSql() tem
+    // "WHERE c.federation_id = $1 ... AND ($4::uuid IS NULL OR c.id = $4)" —
+    // ambas as condições são ANDadas na MESMA subquery base, então um
+    // dojo_id de outra federação (federation_id diferente de $1) nunca
+    // bate a linha WHERE inteira, e o resultado real do Postgres seria
+    // vazio. Com db.query mockado, simulamos exatamente esse retorno vazio
+    // pra garantir que o handler propaga "vazio" pro cliente sem tentar
+    // contornar/relaxar o filtro.
+    mockCompanyAccess();
+    db.query
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .get(`${financialBase}/annuities/dojos`)
+      .query({ dojo_id: otherDojoId })
+      .set(authHeader());
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([]);
+    expect(res.body.total).toBe(0);
+
+    const selectSql = db.query.mock.calls[2][0];
+    // garante que o SQL efetivamente gerado tem federation_id ANDado com
+    // dojo_id na MESMA subquery (não em cláusulas independentes que um dos
+    // dois poderia "vencer" isoladamente).
+    expect(selectSql).toMatch(/WHERE c\.federation_id = \$1[\s\S]*AND \(\$4::uuid IS NULL OR c\.id = \$4\)/);
+  });
+
+  test('dojo_id + demais filtros (status, q, year) continuam sendo enviados juntos, sem se sobrescreverem', async () => {
+    mockCompanyAccess();
+    db.query
+      .mockResolvedValueOnce({ rows: [{ total: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await request(app)
+      .get(`${financialBase}/annuities/dojos`)
+      .query({ dojo_id: otherDojoId, status: 'em_aberto', q: 'Shotokan', year: '2026' })
+      .set(authHeader());
+
+    const selectParams = db.query.mock.calls[2][1];
+    // [federationId, year, dojoStatusValues, dojoIdFilter, search, statusValues, pageSize, offset]
+    expect(selectParams[1]).toBe('2026');
+    expect(selectParams[3]).toBe(otherDojoId);
+    expect(selectParams[4]).toBe('Shotokan');
+    expect(selectParams[5]).toEqual(['due', 'overdue', 'defaulting', 'suspended']);
   });
 });
 

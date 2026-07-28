@@ -75,6 +75,25 @@
 // Defensivo 42P01/42703: parcelas/header (migration 222) ou
 // karate_current_belt ausentes (deployment parcial) → devolve zeros em vez
 // de 500, nunca quebra o hub.
+//
+// NÃO tem `dojo_id` (Caio, 27/07/2026): este endpoint agrega TODA a
+// federação, GROUPING SETS por `dojo`/`praticante`/`total` — filtrar por um
+// único dojô quebraria o segmento `praticante` (que não tem noção de
+// dojo_id, é por customers/faixa-preta) e o `total` (viraria mistura de um
+// dojô + federação inteira de praticantes, sem sentido). Pra página de
+// detalhe do dojô (Previsto/Recebido/Saldo daquele dojô), o frontend deve
+// DERIVAR os 3 números a partir do registro já filtrado que
+// GET /financial/annuities/dojos?dojo_id=<id> devolve, usando a MESMA
+// fórmula deste arquivo (linha por linha, sobre `installments[]` do dojô):
+//   previsto  = total (== soma de installments[].amount)
+//   recebido  = paid_total (== soma de installments[].amount_paid)
+//   em_aberto = soma, para installments com status <> 'paid', de
+//               (amount - amount_paid)
+//   atrasado  = igual a em_aberto, mas só installments com
+//               due_date <= hoje
+// Isso preserva a régua idêntica (mesma fórmula, mesma fonte de dados —
+// karate_annuity_installments) sem inventar uma semântica de single-dojô
+// pra um endpoint desenhado pra agregação federação-wide.
 // ============================================================
 'use strict';
 
