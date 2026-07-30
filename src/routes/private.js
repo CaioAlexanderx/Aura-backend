@@ -30,6 +30,10 @@ router.use('/caixa', require('./caixa'));
 router.use('/products', require('./productsDuplicates'));
 router.use('/products', require('./productsBatch'));
 router.use('/products', require('./productsVariations'));
+// F0 Bloco B1 (30/07/2026): productLinksRouter expoe /products/unclassified
+// e /products/categories/bulk (estaticas) -- tem que montar ANTES de
+// require('./products') por causa do GET/PATCH/DELETE /:pid dele.
+router.use('/products', require('./productCategories').productLinksRouter);
 router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
 router.use('/products', require('./productImage'));
@@ -38,7 +42,7 @@ router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 router.use('/products', require('./danfeImport'));
 router.use('/products/:pid/variants', require('./variants'));
-router.use('/product-categories', require('./productCategories'));
+router.use('/product-categories', require('./productCategories').categoriesRouter);
 router.use('/', require('./productLinks').companyRouter);
 router.use('/coupons', require('./coupons'));
 router.use('/nfce', require('./nfce'));
