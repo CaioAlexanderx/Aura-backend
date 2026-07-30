@@ -187,9 +187,12 @@ function _digitsOnly(s) {
   return String(s || '').replace(/\D/g, '');
 }
 
+// O separador entre "R$" e o valor é um NBSP (U+00A0) — de propósito: impede
+// que o cliente de e-mail quebre a linha no meio do dinheiro. Escrito como
+// escape explícito para não se perder numa edição futura do arquivo.
 function fmtBRL(v) {
   const n = Number(v || 0);
-  return 'R$ ' + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return 'R$ ' + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
 
 // ── Datas ────────────────────────────────────────────────────
