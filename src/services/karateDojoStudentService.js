@@ -25,15 +25,41 @@
 //   carteirinha (migration 262) —, campos que a ficha H1 exige e que até
 //   hoje só existiam do lado da federação. Sem isso, "o dojô é a fonte da
 //   identidade" seria uma frase sem coluna.
-//   SEXO: a borda de escrita passa a ACEITAR os dois vocabulários
-//   ('M'/'F'/'other' e 'masculino'/'feminino'/'outro') via
-//   src/utils/personIdentity.js e continua GRAVANDO M/F/other — zero
-//   mudança visível no app. A conversão do dado é F7.2.
+//   SEXO: a borda de escrita ACEITA os dois vocabulários ('M'/'F'/'other'
+//   e 'masculino'/'feminino'/'outro') via src/utils/personIdentity.js e
+//   continua GRAVANDO M/F/other — zero mudança visível no app.
 //   FOTO: karate_photo_url (nome idêntico ao lado da federação) substitui
 //   photo_url, que sempre foi coluna morta. photo_url continua aceita e a
 //   leitura devolve COALESCE(karate_photo_url, photo_url).
-//   NÃO ENTRA NESTE PR: a conferência ao federar (F7.1), a tela de adoção
-//   e a sincronização dojô→federação (F7.2).
+//
+// F7.1 (30/07/2026): federar virou CONFERIR-DEPOIS-ADOTAR, em
+//   services/karateStudentIdentityLink.js. A rota deixou de chamar daqui.
+//
+// F7.2 (30/07/2026) — SINCRONIZAÇÃO CONTÍNUA (o que este PR faz aqui):
+//   Até agora a identidade era copiada UMA VEZ, no instante do vínculo
+//   (F7.1). Editar o aluno depois disso não mexia em nada na federação: no
+//   dia seguinte a ficha divergia de novo. Agora, quando um aluno cujo
+//   praticante está ADOTADO POR ESTE DOJÔ tem a identidade alterada, o
+//   praticante recebe a mesma alteração, na MESMA transação, com trilha.
+//   A regra, o que sobe, o que nunca sobe e a decisão sobre campo
+//   esvaziado moram em services/karateIdentitySync.js — aqui só ficam os
+//   dois PONTOS DE ENTRADA (PATCH e import), porque são os dois lugares
+//   onde a ficha do aluno muda.
+//
+//   POR QUE A TRANSAÇÃO É CONDICIONAL: updateStudent só abre BEGIN quando
+//   há o que sincronizar (o PATCH tocou em identidade E o aluno tem
+//   practitioner_id E a 262 está aplicada). O caminho comum — mudar faixa,
+//   status, observação, ou editar um aluno não federado — continua sendo
+//   exatamente as duas queries de sempre. Transacionar sempre custaria
+//   BEGIN/COMMIT em todo salvamento de aluno para servir a um caso que
+//   hoje é minoria absoluta (6 alunos de dojô, 0 adotados).
+//
+//   REMOVIDO NESTE PR (limpeza prevista pela F7.1):
+//   federateStudentByFpktNumber, unfederateStudent e o writeFederationLink
+//   que só eles usavam. Estavam sem NENHUM chamador desde que a rota
+//   passou a usar karateStudentIdentityLink — auditado arquivo a arquivo
+//   em src/ e tests/ antes de apagar. federateStudentByRequest (caminho 2,
+//   solicitação H1) CONTINUA vivo e é chamado pela rota.
 //
 // Família é entidade de primeira classe (billing familiar na F3):
 // responsável em karate_dojo_guardians; um responsável → N alunos.
@@ -58,8 +84,8 @@
 'use strict';
 
 const db = require('../config/database');
-const { lookupByFpktNumber, normalizeFpktNumber } = require('./karatePractitionerDedup');
 const { createPractitionerRequest } = require('./karatePractitionerRequestCreate');
+const identitySync = require('./karateIdentitySync');
 const { normalizeCpf, toDojoSex, normalizeUf, normalizeZipCode } = require('../utils/personIdentity');
 
 const VALID_STATUS = ['active', 'inactive'];
@@ -79,6 +105,13 @@ const IDENTITY_COLS = [
   'rg', 'zip_code', 'street', 'number', 'complement',
   'neighborhood', 'city', 'state', 'karate_photo_url',
 ];
+
+// F7.2 — quais colunas do ALUNO disparam sincronização com a federação.
+// NÃO é uma lista nova: vem de karateIdentitySync, que por sua vez a tira
+// de IDENTITY_FIELDS (F7.1). Nome, nascimento, CPF e sexo entram aqui e
+// NÃO estão em IDENTITY_COLS — são de antes da 262 e mesmo assim são
+// identidade da pessoa.
+const SYNCED_IDENTITY_COLS = identitySync.DOJO_COLUMNS;
 
 function svcError(status, code, message) {
   const e = new Error(message);
@@ -661,6 +694,8 @@ async function createStudent(dojoId, data) {
   // Aluno recém-criado nunca nasce federado nem com solicitação pendente:
   // shapeStudent devolve federated:false / federation_link_status:'none'
   // sem precisar de NENHUMA query extra (o INSERT não muda de lugar).
+  // Pelo mesmo motivo NÃO há sync aqui: sem practitioner_id não existe
+  // ficha adotada para receber nada.
   const s = shapeStudent(rows[0]);
   s.guardian = guardian
     ? { id: guardian.id, full_name: guardian.full_name, phone: guardian.phone, relationship: guardian.relationship }
@@ -680,11 +715,18 @@ function updatableCols() {
   return HAS_IDENTITY_COLS ? UPDATABLE_COLS.concat(IDENTITY_COLS) : UPDATABLE_COLS;
 }
 
-async function updateStudent(dojoId, studentId, data) {
+// F7.2: quais colunas de IDENTIDADE este PATCH tocou. `photo_url` (coluna
+// morta) NÃO conta de propósito — quem sobe é karate_photo_url.
+function touchedIdentityCols(data) {
+  return SYNCED_IDENTITY_COLS.filter((c) => data[c] !== undefined);
+}
+
+async function updateStudent(dojoId, studentId, data, ctx = {}) {
   // O SELECT que já existia ganhou os campos federativos (mesma query, sem
   // custo de round-trip novo): o PATCH não altera practitioner_id nem
   // is_federated (não estão em UPDATABLE_COLS — federar tem rota própria),
-  // então o estado federativo lido aqui vale para a resposta.
+  // então o estado federativo lido aqui vale para a resposta E é o que
+  // decide se há sync a fazer.
   const existing = await withStudentSchemaFallback(() => db.query(
     `SELECT ${studentFields('s.')}, ${federationFields('s.')}
        FROM karate_dojo_students s
@@ -712,7 +754,7 @@ async function updateStudent(dojoId, studentId, data) {
     throw svcError(422, 'MENOR_SEM_RESPONSAVEL', 'Aluno menor de 18 anos precisa de um responsável vinculado (LGPD). Vincule um responsável antes de salvar.');
   }
 
-  const runUpdate = () => {
+  const buildUpdate = () => {
     const sets = [];
     const vals = [];
     for (const col of updatableCols()) {
@@ -723,22 +765,59 @@ async function updateStudent(dojoId, studentId, data) {
     }
     sets.push('updated_at = now()');
     vals.push(studentId, dojoId);
-    return db.query(
-      `UPDATE karate_dojo_students SET ${sets.join(', ')}
+    return {
+      sql: `UPDATE karate_dojo_students SET ${sets.join(', ')}
         WHERE id = $${vals.length - 1} AND dojo_id = $${vals.length}
         RETURNING ${studentFields('')}`,
-      vals
-    );
+      vals,
+    };
+  };
+  const runUpdate = () => {
+    const q = buildUpdate();
+    return db.query(q.sql, q.vals);
   };
 
+  // ── F7.2: precisa sincronizar? ──
+  // Três condições, todas necessárias:
+  //   • o PATCH tocou em campo de IDENTIDADE (faixa/status/observação não);
+  //   • o aluno TEM praticante vinculado (sem vínculo não há o que subir);
+  //   • a 262 está aplicada (sem ela não existe ficha adotada — e abrir
+  //     transação para descobrir isso seria custo puro).
+  // Quando alguma falha, o caminho é EXATAMENTE o de sempre: duas queries,
+  // sem BEGIN. É o que mantém o salvamento comum barato.
+  const touched = touchedIdentityCols(data);
+  const needsSync = HAS_IDENTITY_COLS && Boolean(cur.practitioner_id) && touched.length > 0;
+
   let upd;
-  try {
-    upd = await runUpdate();
-  } catch (e) {
-    if (!HAS_IDENTITY_COLS || !isIdentitySchemaError(e)) throw e;
-    HAS_IDENTITY_COLS = false;
-    console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — PATCH aplicado sem RG/endereço/foto:', e.message);
-    upd = await runUpdate();
+  let syncResult = null;
+
+  if (!needsSync) {
+    try {
+      upd = await runUpdate();
+    } catch (e) {
+      if (!HAS_IDENTITY_COLS || !isIdentitySchemaError(e)) throw e;
+      HAS_IDENTITY_COLS = false;
+      console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — PATCH aplicado sem RG/endereço/foto:', e.message);
+      upd = await runUpdate();
+    }
+  } else {
+    try {
+      ({ upd, syncResult } = await updateStudentWithSync({
+        dojoId,
+        studentId,
+        buildUpdate,
+        practitionerId: cur.practitioner_id,
+        ctx,
+      }));
+    } catch (e) {
+      if (!HAS_IDENTITY_COLS || !isIdentitySchemaError(e)) throw e;
+      // A transação inteira já foi revertida (ROLLBACK no catch de lá).
+      // UMA retentativa, agora degradada e sem sync — nunca em cadeia.
+      HAS_IDENTITY_COLS = false;
+      console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — PATCH refeito sem sync:', e.message);
+      upd = await runUpdate();
+      syncResult = { status: 'skipped', synced: false, fields: [], reason: 'SCHEMA_PENDING' };
+    }
   }
 
   // RETURNING não faz JOIN: o estado federativo vem do SELECT acima.
@@ -752,7 +831,51 @@ async function updateStudent(dojoId, studentId, data) {
   s.guardian = guardian
     ? { id: guardian.id, full_name: guardian.full_name, phone: guardian.phone, relationship: guardian.relationship }
     : null;
+  // Aditivo e só quando houve tentativa: o front mostra "ficha da federação
+  // atualizada" — e, se o sync falhou, o sensei FICA SABENDO em vez de
+  // achar que subiu. Falha de sync nunca vira erro do salvamento.
+  if (syncResult) s.identity_sync = syncResult;
   return s;
+}
+
+// Transação do PATCH com sync. A ordem importa: o aluno é gravado PRIMEIRO
+// e o sync vem depois, dentro de SAVEPOINT (dentro de karateIdentitySync) —
+// assim uma falha do sync descarta só o sync, e o COMMIT ainda salva o
+// aluno. O contrário (sync antes) obrigaria a desfazer o salvamento.
+async function updateStudentWithSync({ dojoId, studentId, buildUpdate, practitionerId, ctx }) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const q = buildUpdate();
+    const upd = await client.query(q.sql, q.vals);
+    if (!upd.rows.length) {
+      await client.query('ROLLBACK');
+      throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
+    }
+
+    // NUNCA lança: devolve o resultado (ok | skipped | failed). É o que
+    // permite cumprir "falha do sync não derruba o salvamento" sem
+    // try/catch nu dentro do BEGIN (armadilha tx-poison).
+    const syncResult = await identitySync.syncStudentIdentity(client, {
+      dojoId,
+      federationId: ctx.federationId || null,
+      studentId,
+      practitionerId,
+      student: upd.rows[0],
+      studentLabel: upd.rows[0].full_name || null,
+      actor: ctx.actor || null,
+    });
+
+    await client.query('COMMIT');
+    return { upd, syncResult };
+  } catch (e) {
+    // ROLLBACK best-effort SÓ na saída de erro (a conexão pode ter caído).
+    try { await client.query('ROLLBACK'); } catch (_) { /* conexão pode ter caído */ }
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 async function deleteStudent(dojoId, studentId) {
@@ -770,11 +893,16 @@ async function deleteStudent(dojoId, studentId) {
 }
 
 // ============================================================
-// F5a — FEDERAR / DESFEDERAR o aluno
+// F5a — FEDERAR o aluno NOVO (caminho 2: solicitação H1)
+//
+// O caminho 1 (número FPKT existente) e o desfederar moram em
+// services/karateStudentIdentityLink.js desde a F7.1 — vincular virou
+// ADOTAR a ficha e exige conferência campo a campo. As versões antigas
+// que viviam aqui foram removidas na F7.2 (estavam sem chamador).
 // ============================================================
 
-// Leitura crua do aluno (sem JOIN): usada pelos fluxos de federação, que
-// precisam da ficha para pré-preencher a solicitação H1.
+// Leitura crua do aluno (sem JOIN): usada pelo fluxo de solicitação, que
+// precisa da ficha para pré-preencher a solicitação H1.
 async function loadStudentOrThrow(dojoId, studentId) {
   const { rows } = await withStudentSchemaFallback(() => db.query(
     `SELECT ${studentFields('')} FROM karate_dojo_students
@@ -786,36 +914,6 @@ async function loadStudentOrThrow(dojoId, studentId) {
     throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
   }
   return rows[0];
-}
-
-// Escreve as DUAS colunas do vínculo de uma vez. Defensivo 42703
-// (migration 253 pendente): grava só practitioner_id — o vínculo REAL não
-// pode se perder por causa da coluna de declaração.
-async function writeFederationLink(dojoId, studentId, { practitionerId, federated }) {
-  const attempt = async (withCol) => {
-    const sets = ['practitioner_id = $1'];
-    if (withCol) sets.push(`is_federated = ${federated ? 'true' : 'false'}`);
-    sets.push('updated_at = now()');
-    return db.query(
-      `UPDATE karate_dojo_students SET ${sets.join(', ')}
-        WHERE id = $2 AND dojo_id = $3
-        RETURNING id`,
-      [practitionerId, studentId, dojoId]
-    );
-  };
-
-  try {
-    const r = await attempt(HAS_IS_FEDERATED_COL);
-    return r.rows.length > 0;
-  } catch (e) {
-    if (e.code === '42703' && HAS_IS_FEDERATED_COL && /is_federated/i.test(e.message || '')) {
-      HAS_IS_FEDERATED_COL = false;
-      console.warn('[karateDojoStudentService] is_federated ausente (migration 253 pendente) — gravando só practitioner_id');
-      const r = await attempt(false);
-      return r.rows.length > 0;
-    }
-    throw e;
-  }
 }
 
 async function findPendingRequestForStudent(dojoId, studentId) {
@@ -837,78 +935,6 @@ async function findPendingRequestForStudent(dojoId, studentId) {
     }
     throw e;
   }
-}
-
-// Caminho 1: o aluno JÁ tem número FPKT (veio de outro dojô / já tem
-// carteirinha). MESMA lógica do lookup-fpkt do H1 — nada reimplementado.
-//
-// IMPORTANTE: vincular NÃO move o praticante de dojô na federação. Isso é
-// decisão da FEDERAÇÃO (approve-transfer). Aqui o dojô só reivindica o
-// vínculo local; is_transfer avisa o front de que o praticante está hoje
-// em outro dojô e que a transferência formal continua sendo com a FPKT.
-async function federateStudentByFpktNumber(dojoId, federationId, studentId, rawNumber) {
-  const number = normalizeFpktNumber(rawNumber);
-  if (!number) {
-    throw svcError(422, 'VALIDATION_ERROR', 'Informe o número FPKT do aluno');
-  }
-
-  await loadStudentOrThrow(dojoId, studentId);
-
-  const lookup = await lookupByFpktNumber(db, { federationId, number });
-  if (!lookup || !lookup.found) {
-    throw svcError(
-      404,
-      'FPKT_NUMBER_NOT_FOUND',
-      'Número FPKT não encontrado nesta federação. Confira o número ou marque o aluno como novo para solicitar o cadastro à federação.'
-    );
-  }
-  const practitioner = lookup.practitioner || {};
-
-  // O mesmo praticante não pode ser reivindicado por dois alunos do MESMO
-  // dojô (viraria dois cadastros disputando um número FPKT).
-  //
-  // F7.0: a partir da migration 262 existe também um UNIQUE GLOBAL parcial
-  // em practitioner_id — a checagem abaixo continua servindo para dar a
-  // mensagem BOA quando o conflito é dentro do próprio dojô ("já vinculado
-  // ao aluno Fulano"), e o índice cobre o caso entre dojôs DIFERENTES, que
-  // esta query nunca viu (ela filtra por dojo_id). O 23505 resultante é
-  // mapeado pela rota. A conferência humana ao federar é F7.1.
-  const dup = await db.query(
-    `SELECT id, full_name FROM karate_dojo_students
-      WHERE dojo_id = $1 AND practitioner_id = $2 AND id <> $3
-      LIMIT 1`,
-    [dojoId, practitioner.id, studentId]
-  );
-  if (dup.rows.length) {
-    throw svcError(
-      409,
-      'PRACTITIONER_JA_VINCULADO',
-      `Este número FPKT já está vinculado ao aluno "${dup.rows[0].full_name}" deste dojô.`
-    );
-  }
-
-  const ok = await writeFederationLink(dojoId, studentId, { practitionerId: practitioner.id, federated: true });
-  if (!ok) {
-    throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
-  }
-
-  const isTransfer = Boolean(practitioner.current_dojo_id) &&
-    String(practitioner.current_dojo_id) !== String(dojoId);
-
-  return {
-    linked: true,
-    student_id: studentId,
-    federated: true,
-    federation_link_status: 'linked',
-    is_transfer: isTransfer,
-    practitioner: {
-      id: practitioner.id,
-      name: practitioner.name || null,
-      fpkt_number: number,
-      current_dojo_id: practitioner.current_dojo_id || null,
-      current_dojo_name: practitioner.current_dojo_name || null,
-    },
-  };
 }
 
 // Ficha da solicitação = dados do ALUNO como base + o que o sensei mandou
@@ -997,30 +1023,6 @@ async function federateStudentByRequest(dojoId, federationId, studentId, { body,
   };
 }
 
-// Desfederar = o DOJÔ deixa de reivindicar o praticante.
-//
-// ⚠️ NÃO APAGA NADA em karate_practitioners/customers de propósito: o
-// praticante pertence à FEDERAÇÃO e continua existindo (com número, faixa,
-// histórico) mesmo que o dojô tenha marcado o aluno errado. Sair do
-// cadastro federado é ato da federação, nunca efeito colateral de um
-// clique no portal do dojô. (A FK da migration 262 é ON DELETE SET NULL
-// justamente pela mesma razão, no sentido contrário.)
-async function unfederateStudent(dojoId, studentId) {
-  const ok = await writeFederationLink(dojoId, studentId, { practitionerId: null, federated: false });
-  if (!ok) {
-    throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
-  }
-  return {
-    unlinked: true,
-    id: studentId,
-    student_id: studentId,
-    federated: false,
-    practitioner_id: null,
-    fpkt_number: null,
-    federation_link_status: 'none',
-  };
-}
-
 // ── Import em lote (até 500 linhas JSON já parseadas pelo front) ──
 // Formato da linha: { full_name, birth_date?, cpf?, phone?, email?,
 //                     belt_label?, guardian_name?, guardian_phone? }
@@ -1033,7 +1035,17 @@ async function unfederateStudent(dojoId, studentId) {
 // pendente) envenenaria a transação inteira; a retentativa degradada
 // exigiria SAVEPOINT por linha. RG/endereço entram pelo form/PATCH, que
 // são fora de transação e têm o fallback.
-async function importStudents(dojoId, rows) {
+//
+// F7.2 — O SYNC DO LOTE NÃO PODE VIRAR 500 UPDATEs:
+//   O import só INSERE alunos novos e o INSERT não grava practitioner_id.
+//   Ou seja: hoje NENHUMA linha importada nasce com ficha adotada, e o
+//   sync do lote custa ZERO query (a lista de ids vai vazia e a função
+//   retorna sem tocar o banco). O RETURNING passou a devolver
+//   practitioner_id para que isso seja um FATO VERIFICADO a cada linha, e
+//   não uma suposição: se algum dia o import aceitar número FPKT, as
+//   linhas vinculadas caem na versão em LOTE do sync — UMA query de
+//   candidatos para as 500 linhas, e UPDATE só nas fichas que divergem.
+async function importStudents(dojoId, rows, ctx = {}) {
   if (!Array.isArray(rows)) {
     throw svcError(422, 'VALIDATION_ERROR', 'Corpo esperado: { rows: [...] } (array de linhas já parseadas)');
   }
@@ -1043,13 +1055,15 @@ async function importStudents(dojoId, rows) {
   const warnings = [];
   let created = 0;
   let skipped = 0;
-  if (!rows.length) return { created, skipped, warnings };
+  let identitySyncResult = { status: 'ok', synced: 0, checked: 0, fields: [], reason: 'NOTHING_TO_SYNC' };
+  if (!rows.length) return { created, skipped, warnings, identity_sync: identitySyncResult };
 
   const client = await db.connect();
   try {
     await client.query('BEGIN');
     const seenCpfs = new Set();
     const guardianCache = new Map(); // lower(nome)|phone → id (dedupe no lote)
+    const linkedStudentIds = [];     // F7.2: linhas que nasceram com praticante
 
     for (let i = 0; i < rows.length; i++) {
       const rowNum = i + 1;
@@ -1147,15 +1161,28 @@ async function importStudents(dojoId, rows) {
         warnings.push({ row: rowNum, code: 'MENOR_SEM_RESPONSAVEL', message: 'Menor de 18 anos sem responsável vinculado — importado mesmo assim; vincule um responsável depois' });
       }
 
-      await client.query(
+      const ins = await client.query(
         `INSERT INTO karate_dojo_students
            (dojo_id, full_name, birth_date, cpf, phone, email, belt_label, guardian_id, status)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
-         RETURNING id`,
+         RETURNING id, practitioner_id`,
         [dojoId, fullName, birthDate, cpf, phone, email, beltLabel, guardianId]
       );
       created++;
+      // Sempre NULL hoje (o INSERT não grava a coluna). Conferir em vez de
+      // supor é o que faz o caminho continuar correto quando isso mudar.
+      const insRow = (ins && ins.rows && ins.rows[0]) || null;
+      if (insRow && insRow.practitioner_id) linkedStudentIds.push(insRow.id);
     }
+
+    // Lista vazia = ZERO query (ver cabeçalho). Quando houver linhas
+    // vinculadas, é UMA query de candidatos para o lote inteiro.
+    identitySyncResult = await identitySync.syncStudentsBatch(client, {
+      dojoId,
+      federationId: ctx.federationId || null,
+      studentIds: linkedStudentIds,
+      actor: ctx.actor || null,
+    });
 
     await client.query('COMMIT');
   } catch (e) {
@@ -1165,7 +1192,7 @@ async function importStudents(dojoId, rows) {
     client.release();
   }
 
-  return { created, skipped, warnings };
+  return { created, skipped, warnings, identity_sync: identitySyncResult };
 }
 
 // ── Responsáveis (CRUD mínimo) ──
@@ -1250,9 +1277,11 @@ module.exports = {
   LIST_DEFAULT_LIMIT,
   LIST_MAX_LIMIT,
   IDENTITY_COLS,
+  SYNCED_IDENTITY_COLS,
   computeAge,
   isMinor,
   parsePaging,
+  touchedIdentityCols,
   validateStudentPayload,
   validateGuardianPayload,
   listStudents,
@@ -1267,8 +1296,8 @@ module.exports = {
   listGuardians,
   createGuardian,
   updateGuardian,
-  // F5a
-  federateStudentByFpktNumber,
+  // F5a — caminho 2 (solicitação H1). O caminho 1 e o desfederar são da
+  // F7.1 (karateStudentIdentityLink); as versões antigas daqui foram
+  // removidas na F7.2 por não terem chamador.
   federateStudentByRequest,
-  unfederateStudent,
 };
