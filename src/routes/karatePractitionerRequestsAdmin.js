@@ -34,6 +34,29 @@
 // aprovação fecha o ciclo: o practitioner_id resultante volta para o aluno
 // (karate_dojo_students) na MESMA transação — ver
 // linkDojoStudentOnApprove abaixo.
+//
+// ── F7.0 (30/07/2026) — BUG DE PERDA DE DADO NO approve-create ──
+// "O fluxo de informação SOBE: dojô → federação." Só que o INSERT em
+// customers do approve-create NÃO INCLUÍA as colunas `sex` e
+// `affiliation_since`. O sexo é OBRIGATÓRIO na ficha H1 (validado em
+// karatePractitionerRequestValidation), viaja até aqui dentro do
+// `payload` jsonb — e morria ali: o praticante nascia com sex NULL, e
+// depois alguém teria que redigitar na federação exatamente o dado que o
+// dojô já tinha mandado. Corrigido abaixo.
+//   sex ................. gravado no vocabulário CANÔNICO
+//                         ('masculino'|'feminino'|'outro', CHECK da migr
+//                         205) via normalizeSex — a ficha manda 'M'/'F'.
+//   affiliation_since ... payload.affiliation_since quando o dojô informou
+//                         uma data válida; senão a DATA DA APROVAÇÃO. É a
+//                         mesma decisão já tomada logo abaixo para
+//                         graduated_at do karate_belt_history: a federação
+//                         só pode afirmar o que ELA emitiu, e ela emitiu a
+//                         filiação HOJE. Nunca inventa uma data anterior.
+// SEM branch defensivo para essas duas: `customers.sex` (migration 205) e
+// `customers.affiliation_since` JÁ ESTÃO em produção — medido em
+// 30/07/2026: 189 e 179 linhas não-nulas respectivamente. A regra "o
+// código sobe antes da migration" vale para as colunas que a migration
+// 262 cria, e nenhuma delas é escrita aqui.
 // ============================================================
 'use strict';
 
@@ -41,6 +64,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { findPossibleMatches, normalizeFpktNumber, buildDedupKey } = require('../services/karatePractitionerDedup');
+const { normalizeSex } = require('../utils/personIdentity');
 
 // ── Contato do dojô + link do sensei p/ o botão "Avisar no WhatsApp" ────
 // (item wa.me pós-rejeição). Telefone do DOJÔ (celular > fixo — WhatsApp
@@ -59,6 +83,15 @@ let HAS_ROSTER_VALIDATION_TABLE = true;
 const APP_URL = process.env.APP_URL || 'https://app.getaura.com.br';
 function rosterUpdateUrl(token) {
   return token ? `${APP_URL}/karate/roster-update/${token}` : null;
+}
+
+// F7.0: date puro vindo do payload jsonb. NUNCA new Date('YYYY-MM-DD')
+// (interpretaria como UTC e voltaria um dia em UTC-3) — só validação de
+// forma; quem converte é o Postgres, com ::date.
+function asPlainDate(v) {
+  if (typeof v !== 'string') return null;
+  const s = v.trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
 }
 
 // Best-effort: nunca lança — telefone ausente/coluna ausente vira null,
@@ -176,6 +209,12 @@ async function logRosterEventStandalone({ dojoId, federationId, event, affected,
 //
 // student_id vem undefined (não erro) quando a migration 253 ainda não
 // rodou — SELECT * não falha por coluna ausente na SELECT-list.
+//
+// F7.0: com o UNIQUE GLOBAL parcial em practitioner_id (migration 262),
+// este UPDATE pode agora falhar com 23505 se OUTRO aluno (de qualquer
+// dojô) já reivindicou o mesmo praticante. O SAVEPOINT já cobre: a
+// aprovação segue (é ato da federação e não pode ser refém do cadastro do
+// dojô) e o vínculo fica por fazer, com student_linked:false na resposta.
 async function linkDojoStudentOnApprove(client, { studentId, dojoId, practitionerId }) {
   if (!studentId || !practitionerId) return { linked: false, reason: 'no_student' };
 
@@ -195,6 +234,13 @@ async function linkDojoStudentOnApprove(client, { studentId, dojoId, practitione
     await client.query('RELEASE SAVEPOINT sp_link_dojo_student');
     return { linked: true };
   } catch (e) {
+    if (e.code === '23505') {
+      // F7.0: outro aluno já reivindicou este praticante (UNIQUE global).
+      await client.query('ROLLBACK TO SAVEPOINT sp_link_dojo_student');
+      await client.query('RELEASE SAVEPOINT sp_link_dojo_student');
+      console.warn('[karatePractitionerRequestsAdmin] praticante já vinculado a outro aluno (UNIQUE global, migration 262) — aprovação mantida, vínculo não gravado');
+      return { linked: false, reason: 'already_claimed' };
+    }
     if (e.code !== '42703' && e.code !== '42P01') throw e;
     await client.query('ROLLBACK TO SAVEPOINT sp_link_dojo_student');
     if (e.code === '42P01') {
@@ -618,6 +664,19 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
     }
 
     const payload = reqRow.payload || {};
+
+    // ── F7.0: o que o dojô mandou e morria no payload jsonb ──
+    // sex: a ficha H1 exige e manda 'M'/'F'/'other'; customers.sex tem
+    // CHECK no CANÔNICO ('masculino'|'feminino'|'outro', migration 205).
+    // normalizeSex traduz. Valor irreconhecível vira NULL — a aprovação
+    // NUNCA cai por causa de um sexo mal digitado ("dado inválido não pode
+    // virar 500 no ato da federação"); o CHECK aceita NULL.
+    const sexCanonical = normalizeSex(payload.sex);
+    // affiliation_since: se o dojô informou uma data válida, ela vale; se
+    // não, a federação só pode afirmar o que ELA emitiu — e ela emitiu a
+    // filiação AGORA. Mesma decisão do graduated_at logo abaixo.
+    const affiliationSince = asPlainDate(payload.affiliation_since);
+
     // Item 9 (revisão Atualização Cadastral, 15/07/2026): a foto anexada
     // na solicitação (karate_practitioner_requests.photo_url, migration
     // 232) vira a foto do praticante na aprovação — mesma coluna que toda
@@ -631,21 +690,21 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
           is_student, federation_id, dojo_id, karate_registration_number,
           street, number, complement, neighborhood, city, state, zip_code,
           guardian_name, guardian_cpf, guardian_phone, guardian_relationship,
-          karate_photo_url,
+          karate_photo_url, sex, affiliation_since,
           is_active, created_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7, true, $1,$8,$9,
                $10,$11,$12,$13,$14,$15,$16,
                $17,$18,$19,$20,
-               $21,
+               $21, $22, COALESCE($23::date, CURRENT_DATE),
                true, NOW(), NOW())
-       RETURNING id, name, karate_registration_number, dojo_id`,
+       RETURNING id, name, karate_registration_number, dojo_id, sex, affiliation_since`,
       [
         federationId, reqRow.full_name, reqRow.cpf, reqRow.rg, reqRow.birth_date, reqRow.email, reqRow.phone,
         reqRow.dojo_id, fpktNumber,
         payload.street || null, payload.number || null, payload.complement || null,
         payload.neighborhood || null, payload.city || null, payload.state || null, payload.zip_code || null,
         payload.guardian_name || null, payload.guardian_cpf || null, payload.guardian_phone || null, payload.guardian_relationship || null,
-        reqRow.photo_url || null,
+        reqRow.photo_url || null, sexCanonical, affiliationSince,
       ]
     );
     const practitioner = insertRes.rows[0];
@@ -702,6 +761,11 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
         name: practitioner.name,
         karate_registration_number: practitioner.karate_registration_number,
         dojo_id: practitioner.dojo_id,
+        // F7.0 (aditivo): o que a federação acabou de gravar a partir da
+        // ficha do dojô — visível na resposta para não virar dado invisível
+        // de novo.
+        sex: practitioner.sex || null,
+        affiliation_since: practitioner.affiliation_since || null,
       },
     });
   } catch (e) {

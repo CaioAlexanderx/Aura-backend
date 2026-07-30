@@ -17,6 +17,24 @@
 //   practitioner_id é a CONFIRMAÇÃO. Aluno não federado é cadastro
 //   privado do dojô e a federação não o enxerga.
 //
+// F7.0 (30/07/2026) — O FLUXO DE INFORMAÇÃO SOBE: dojô → federação.
+//   "A federação não faz gestão de informação. O trabalho dela é apenas
+//    receber a sincronização dos dados gerenciados pelos dojôs." (Caio)
+//   Consequência prática AQUI: a ficha do aluno passa a ter onde guardar a
+//   identidade INTEIRA da pessoa — RG, endereço completo e foto de
+//   carteirinha (migration 262) —, campos que a ficha H1 exige e que até
+//   hoje só existiam do lado da federação. Sem isso, "o dojô é a fonte da
+//   identidade" seria uma frase sem coluna.
+//   SEXO: a borda de escrita passa a ACEITAR os dois vocabulários
+//   ('M'/'F'/'other' e 'masculino'/'feminino'/'outro') via
+//   src/utils/personIdentity.js e continua GRAVANDO M/F/other — zero
+//   mudança visível no app. A conversão do dado é F7.2.
+//   FOTO: karate_photo_url (nome idêntico ao lado da federação) substitui
+//   photo_url, que sempre foi coluna morta. photo_url continua aceita e a
+//   leitura devolve COALESCE(karate_photo_url, photo_url).
+//   NÃO ENTRA NESTE PR: a conferência ao federar (F7.1), a tela de adoção
+//   e a sincronização dojô→federação (F7.2).
+//
 // Família é entidade de primeira classe (billing familiar na F3):
 // responsável em karate_dojo_guardians; um responsável → N alunos.
 //
@@ -42,6 +60,7 @@
 const db = require('../config/database');
 const { lookupByFpktNumber, normalizeFpktNumber } = require('./karatePractitionerDedup');
 const { createPractitionerRequest } = require('./karatePractitionerRequestCreate');
+const { normalizeCpf, toDojoSex, normalizeUf, normalizeZipCode } = require('../utils/personIdentity');
 
 const VALID_STATUS = ['active', 'inactive'];
 const VALID_SEX_VALUES = ['M', 'F', 'other'];
@@ -52,6 +71,14 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // exporta/imprime sem virar payload de 100 KB de novo.
 const LIST_DEFAULT_LIMIT = 100;
 const LIST_MAX_LIMIT = 500;
+
+// F7.0 — identidade da pessoa (migration 262). Lista ÚNICA: alimenta o
+// SELECT, o INSERT, o UPDATE e o fallback de schema. Uma lista só evita a
+// divergência clássica "adicionei no PATCH e esqueci no POST".
+const IDENTITY_COLS = [
+  'rg', 'zip_code', 'street', 'number', 'complement',
+  'neighborhood', 'city', 'state', 'karate_photo_url',
+];
 
 function svcError(status, code, message) {
   const e = new Error(message);
@@ -72,13 +99,14 @@ function parsePaging({ limit, offset } = {}) {
   return { limit: l, offset: Math.floor(o) };
 }
 
-// ── F5a: schema do vínculo federativo (migration 253) ──
-// O backend sobe antes da migration em deploy parcial (CLAUDE.md #1/#10).
-// Flags module-level: na primeira 42703/42P01 das colunas NOVAS, degradamos
-// e seguimos servindo a lista — esconder os alunos porque uma coluna ainda
-// não existe seria muito pior que mostrar todo mundo como não federado.
-let HAS_IS_FEDERATED_COL = true;
-let HAS_REQUEST_STUDENT_ID_COL = true;
+// ── Schema em deploy parcial (CLAUDE.md #1/#10) ──
+// O backend sobe ANTES da migration. Flags module-level: na primeira
+// 42703/42P01 das colunas NOVAS, degradamos e seguimos servindo a lista —
+// esconder os alunos porque uma coluna ainda não existe seria muito pior
+// que mostrar todo mundo como não federado / sem endereço.
+let HAS_IS_FEDERATED_COL = true;      // migration 253
+let HAS_REQUEST_STUDENT_ID_COL = true; // migration 253
+let HAS_IDENTITY_COLS = true;          // migration 262 (F7.0)
 
 // Sem a coluna, practitioner_id NOT NULL é a melhor verdade disponível
 // (é o vínculo real; is_federated é só a declaração).
@@ -107,6 +135,16 @@ function federationJoin(p) {
   return `LEFT JOIN customers fp ON fp.id = ${p}practitioner_id`;
 }
 
+// F7.0: quando a migration 262 ainda não rodou, as colunas de identidade
+// viram NULL::text com o MESMO alias — o shape da resposta não muda de
+// formato, só vem vazio. Nenhuma query extra, nenhum campo some do JSON.
+function identityFields(p) {
+  if (!HAS_IDENTITY_COLS) {
+    return IDENTITY_COLS.map((c) => `NULL::text AS ${c}`).join(', ');
+  }
+  return IDENTITY_COLS.map((c) => `${p}${c}`).join(', ');
+}
+
 function isFederationSchemaError(e) {
   if (!e || (e.code !== '42703' && e.code !== '42P01')) return false;
   // Só degrada por causa das coisas NOVAS. 42P01 de karate_dojo_students
@@ -114,16 +152,36 @@ function isFederationSchemaError(e) {
   return /is_federated|student_id|karate_practitioner_requests/i.test(e.message || '');
 }
 
+// Só 42703 (coluna): a AUSÊNCIA da tabela nunca é problema de identidade.
+function isIdentitySchemaError(e) {
+  if (!e || e.code !== '42703') return false;
+  return new RegExp(`\\b(${IDENTITY_COLS.join('|')})\\b`, 'i').test(e.message || '');
+}
+
 // UMA única retentativa degradada (armadilha "retry chain 42P01": nunca
-// re-tentar em cadeia — se falhar de novo, o erro sobe).
-async function withFederationSchemaFallback(run) {
+// re-tentar em cadeia — se falhar de novo, o erro sobe). As duas famílias
+// de flag são avaliadas no MESMO catch para que um ambiente sem 253 E sem
+// 262 degrade de uma vez, em vez de exigir duas voltas.
+async function withStudentSchemaFallback(run) {
   try {
     return await run();
   } catch (e) {
-    if (!isFederationSchemaError(e) || (!HAS_IS_FEDERATED_COL && !HAS_REQUEST_STUDENT_ID_COL)) throw e;
-    console.warn('[karateDojoStudentService] schema da F5a ausente (migration 253 pendente) — degradando:', e.message);
-    HAS_IS_FEDERATED_COL = false;
-    HAS_REQUEST_STUDENT_ID_COL = false;
+    let degraded = false;
+
+    if (HAS_IDENTITY_COLS && isIdentitySchemaError(e)) {
+      HAS_IDENTITY_COLS = false;
+      degraded = true;
+      console.warn('[karateDojoStudentService] schema da F7.0 ausente (migration 262 pendente) — degradando identidade:', e.message);
+    }
+
+    if ((HAS_IS_FEDERATED_COL || HAS_REQUEST_STUDENT_ID_COL) && isFederationSchemaError(e)) {
+      HAS_IS_FEDERATED_COL = false;
+      HAS_REQUEST_STUDENT_ID_COL = false;
+      degraded = true;
+      console.warn('[karateDojoStudentService] schema da F5a ausente (migration 253 pendente) — degradando:', e.message);
+    }
+
+    if (!degraded) throw e;
     return run();
   }
 }
@@ -187,9 +245,11 @@ function validateStudentPayload(body, { partial = false } = {}) {
     if (b.cpf === null || String(b.cpf).trim() === '') {
       data.cpf = null;
     } else {
-      const digits = String(b.cpf).replace(/\D/g, '');
-      if (digits.length !== 11) errors.push('cpf inválido (esperados 11 dígitos)');
-      else data.cpf = digits; // normalizado — o UNIQUE (dojo_id, cpf) depende disso
+      // F7.0: helper único (src/utils/personIdentity.js) — o mesmo que a
+      // borda da federação usa. O UNIQUE (dojo_id, cpf) depende disso.
+      const digits = normalizeCpf(b.cpf);
+      if (!digits || digits.length !== 11) errors.push('cpf inválido (esperados 11 dígitos)');
+      else data.cpf = digits;
     }
   }
 
@@ -205,8 +265,13 @@ function validateStudentPayload(body, { partial = false } = {}) {
 
   if (b.sex !== undefined) {
     if (b.sex === null || b.sex === '') data.sex = null;
-    else if (!VALID_SEX_VALUES.includes(b.sex)) errors.push(`sex inválido. Use: ${VALID_SEX_VALUES.join(', ')}`);
-    else data.sex = b.sex;
+    else {
+      // F7.0: ACEITA os dois vocabulários, GRAVA o do dojô (M/F/other).
+      // 'masculino' entra sem quebrar nada; 'xyz' continua sendo 422.
+      const dojoSex = toDojoSex(b.sex);
+      if (!dojoSex) errors.push(`sex inválido. Use: ${VALID_SEX_VALUES.join(', ')}`);
+      else data.sex = dojoSex;
+    }
   }
 
   if (b.status !== undefined) {
@@ -227,6 +292,35 @@ function validateStudentPayload(body, { partial = false } = {}) {
   for (const field of ['phone', 'photo_url', 'belt_label', 'notes']) {
     if (b[field] === undefined) continue;
     data[field] = b[field] != null && String(b[field]).trim() !== '' ? String(b[field]).trim() : null;
+  }
+
+  // ── F7.0: identidade da pessoa (migration 262) ──
+  // Whitelist explícita, mesmo espírito de UPDATABLE_COLS: nada entra por
+  // spread do body. Texto livre é neutro; CEP e UF têm forma conhecida e
+  // por isso são 422 quando vêm errados ("inválido é erro").
+  for (const field of ['rg', 'street', 'number', 'complement', 'neighborhood', 'city', 'karate_photo_url']) {
+    if (b[field] === undefined) continue;
+    data[field] = b[field] != null && String(b[field]).trim() !== '' ? String(b[field]).trim() : null;
+  }
+
+  if (b.zip_code !== undefined) {
+    if (b.zip_code === null || String(b.zip_code).trim() === '') {
+      data.zip_code = null;
+    } else {
+      const cep = normalizeZipCode(b.zip_code);
+      if (!cep) errors.push('zip_code inválido (esperados 8 dígitos)');
+      else data.zip_code = cep;
+    }
+  }
+
+  if (b.state !== undefined) {
+    if (b.state === null || String(b.state).trim() === '') {
+      data.state = null;
+    } else {
+      const uf = normalizeUf(b.state);
+      if (!uf) errors.push('state inválido (esperada a UF com 2 letras)');
+      else data.state = uf;
+    }
   }
 
   if (b.guardian_id !== undefined) {
@@ -251,8 +345,8 @@ function validateGuardianPayload(body, { partial = false } = {}) {
     if (b.cpf === null || String(b.cpf).trim() === '') {
       data.cpf = null;
     } else {
-      const digits = String(b.cpf).replace(/\D/g, '');
-      if (digits.length !== 11) errors.push('cpf inválido (esperados 11 dígitos)');
+      const digits = normalizeCpf(b.cpf);
+      if (!digits || digits.length !== 11) errors.push('cpf inválido (esperados 11 dígitos)');
       else data.cpf = digits;
     }
   }
@@ -281,7 +375,8 @@ function studentFields(p) {
     `${p}id, ${p}full_name, to_char(${p}birth_date, 'YYYY-MM-DD') AS birth_date, ` +
     `${p}cpf, ${p}sex, ${p}phone, ${p}email, ${p}photo_url, ${p}belt_label, ${p}belt_order, ` +
     `${p}status, ${p}guardian_id, ${p}consent_lgpd, ${p}notes, ${p}practitioner_id, ` +
-    `to_char(${p}enrolled_at, 'YYYY-MM-DD') AS enrolled_at, ${p}created_at, ${p}updated_at`
+    `to_char(${p}enrolled_at, 'YYYY-MM-DD') AS enrolled_at, ${p}created_at, ${p}updated_at, ` +
+    identityFields(p)
   );
 }
 
@@ -320,6 +415,18 @@ function shapeStudent(row) {
     fpkt_number: row.fpkt_number || null,
     practitioner_name: row.practitioner_name || null,
     federation_link_status: linkStatus,
+    // ── F7.0 (aditivo): identidade da pessoa, dona pelo DOJÔ ──
+    rg: row.rg || null,
+    zip_code: row.zip_code || null,
+    street: row.street || null,
+    number: row.number || null,
+    complement: row.complement || null,
+    neighborhood: row.neighborhood || null,
+    city: row.city || null,
+    state: row.state || null,
+    // photo_url é coluna MORTA (migration 242, nenhuma UI escreveu nela).
+    // COALESCE mantém compatível quem por acaso tenha algo lá.
+    karate_photo_url: row.karate_photo_url || row.photo_url || null,
     enrolled_at: row.enrolled_at || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -338,7 +445,7 @@ async function listStudentsPaged(dojoId, opts = {}) {
   const { status = null, q = null, belt = null, federated = null } = opts;
   const { limit, offset } = parsePaging(opts);
 
-  const { rows } = await withFederationSchemaFallback(() => db.query(
+  const { rows } = await withStudentSchemaFallback(() => db.query(
     `SELECT ${studentFields('s.')},
             g.full_name AS guardian_full_name, g.phone AS guardian_phone,
             g.relationship AS guardian_relationship,
@@ -385,7 +492,7 @@ async function listStudentsPaged(dojoId, opts = {}) {
 
 // Só usado quando a página vem vazia com offset > 0 (ver acima).
 async function countStudents(dojoId, { status = null, q = null, belt = null, federated = null } = {}) {
-  const { rows } = await withFederationSchemaFallback(() => db.query(
+  const { rows } = await withStudentSchemaFallback(() => db.query(
     `SELECT count(*)::int AS total
        FROM karate_dojo_students s
       WHERE s.dojo_id = $1
@@ -438,7 +545,7 @@ async function getSummary(dojoId) {
 }
 
 async function getStudent(dojoId, studentId) {
-  const { rows } = await withFederationSchemaFallback(() => db.query(
+  const { rows } = await withStudentSchemaFallback(() => db.query(
     `SELECT ${studentFields('s.')},
             g.full_name AS guardian_full_name, g.cpf AS guardian_cpf,
             g.phone AS guardian_phone, g.email AS guardian_email,
@@ -481,6 +588,15 @@ async function resolveGuardianOrThrow(dojoId, guardianId) {
   return g.rows[0];
 }
 
+// Colunas/params BASE do INSERT. Os campos da F7.0 são acrescentados DEPOIS
+// ($16+), nunca no meio: os testes de integração conferem a posição do
+// dojo_id ($1) e do cpf ($4) na fila de params.
+const CREATE_BASE_COLS =
+  'dojo_id, full_name, birth_date, cpf, sex, phone, email, photo_url, ' +
+  'belt_label, belt_order, status, guardian_id, consent_lgpd, notes, enrolled_at';
+const CREATE_BASE_VALUES =
+  "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'active'), $12, COALESCE($13, false), $14, $15";
+
 async function createStudent(dojoId, data) {
   let guardian = null;
   if (data.guardian_id) {
@@ -492,31 +608,56 @@ async function createStudent(dojoId, data) {
     throw svcError(422, 'MENOR_SEM_RESPONSAVEL', 'Aluno menor de 18 anos precisa de um responsável vinculado (LGPD). Cadastre o responsável e vincule antes de salvar.');
   }
 
-  const { rows } = await db.query(
-    `INSERT INTO karate_dojo_students
-       (dojo_id, full_name, birth_date, cpf, sex, phone, email, photo_url,
-        belt_label, belt_order, status, guardian_id, consent_lgpd, notes, enrolled_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-             COALESCE($11, 'active'), $12, COALESCE($13, false), $14, $15)
-     RETURNING ${studentFields('')}`,
-    [
-      dojoId,
-      data.full_name,
-      data.birth_date !== undefined ? data.birth_date : null,
-      data.cpf !== undefined ? data.cpf : null,
-      data.sex !== undefined ? data.sex : null,
-      data.phone !== undefined ? data.phone : null,
-      data.email !== undefined ? data.email : null,
-      data.photo_url !== undefined ? data.photo_url : null,
-      data.belt_label !== undefined ? data.belt_label : null,
-      data.belt_order !== undefined ? data.belt_order : null,
-      data.status !== undefined ? data.status : null,
-      data.guardian_id !== undefined ? data.guardian_id : null,
-      data.consent_lgpd !== undefined ? data.consent_lgpd : null,
-      data.notes !== undefined ? data.notes : null,
-      data.enrolled_at !== undefined ? data.enrolled_at : null,
-    ]
-  );
+  const baseParams = [
+    dojoId,
+    data.full_name,
+    data.birth_date !== undefined ? data.birth_date : null,
+    data.cpf !== undefined ? data.cpf : null,
+    data.sex !== undefined ? data.sex : null,
+    data.phone !== undefined ? data.phone : null,
+    data.email !== undefined ? data.email : null,
+    data.photo_url !== undefined ? data.photo_url : null,
+    data.belt_label !== undefined ? data.belt_label : null,
+    data.belt_order !== undefined ? data.belt_order : null,
+    data.status !== undefined ? data.status : null,
+    data.guardian_id !== undefined ? data.guardian_id : null,
+    data.consent_lgpd !== undefined ? data.consent_lgpd : null,
+    data.notes !== undefined ? data.notes : null,
+    data.enrolled_at !== undefined ? data.enrolled_at : null,
+  ];
+
+  const attempt = (withIdentity) => {
+    let cols = CREATE_BASE_COLS;
+    let values = CREATE_BASE_VALUES;
+    const params = baseParams.slice();
+    if (withIdentity) {
+      for (const c of IDENTITY_COLS) {
+        params.push(data[c] !== undefined ? data[c] : null);
+        cols += `, ${c}`;
+        values += `, $${params.length}`;
+      }
+    }
+    return db.query(
+      `INSERT INTO karate_dojo_students (${cols})
+       VALUES (${values})
+       RETURNING ${studentFields('')}`,
+      params
+    );
+  };
+
+  let rows;
+  try {
+    ({ rows } = await attempt(HAS_IDENTITY_COLS));
+  } catch (e) {
+    // Defensivo (CLAUDE.md #1): o backend sobe antes da migration 262. UMA
+    // retentativa sem os campos novos — perder o RG do cadastro é ruim,
+    // não conseguir cadastrar o aluno é inaceitável.
+    if (!HAS_IDENTITY_COLS || !isIdentitySchemaError(e)) throw e;
+    HAS_IDENTITY_COLS = false;
+    console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — aluno criado sem RG/endereço/foto:', e.message);
+    ({ rows } = await attempt(false));
+  }
+
   // Aluno recém-criado nunca nasce federado nem com solicitação pendente:
   // shapeStudent devolve federated:false / federation_link_status:'none'
   // sem precisar de NENHUMA query extra (o INSERT não muda de lugar).
@@ -533,12 +674,18 @@ const UPDATABLE_COLS = [
   'notes', 'enrolled_at',
 ];
 
+// Whitelist efetiva: os campos da F7.0 só entram quando a migration 262 já
+// rodou. Continua sendo whitelist — nada vem do spread do body.
+function updatableCols() {
+  return HAS_IDENTITY_COLS ? UPDATABLE_COLS.concat(IDENTITY_COLS) : UPDATABLE_COLS;
+}
+
 async function updateStudent(dojoId, studentId, data) {
   // O SELECT que já existia ganhou os campos federativos (mesma query, sem
   // custo de round-trip novo): o PATCH não altera practitioner_id nem
   // is_federated (não estão em UPDATABLE_COLS — federar tem rota própria),
   // então o estado federativo lido aqui vale para a resposta.
-  const existing = await withFederationSchemaFallback(() => db.query(
+  const existing = await withStudentSchemaFallback(() => db.query(
     `SELECT ${studentFields('s.')}, ${federationFields('s.')}
        FROM karate_dojo_students s
        ${federationJoin('s.')}
@@ -565,22 +712,35 @@ async function updateStudent(dojoId, studentId, data) {
     throw svcError(422, 'MENOR_SEM_RESPONSAVEL', 'Aluno menor de 18 anos precisa de um responsável vinculado (LGPD). Vincule um responsável antes de salvar.');
   }
 
-  const sets = [];
-  const vals = [];
-  for (const col of UPDATABLE_COLS) {
-    if (data[col] !== undefined) {
-      vals.push(data[col]);
-      sets.push(`${col} = $${vals.length}`);
+  const runUpdate = () => {
+    const sets = [];
+    const vals = [];
+    for (const col of updatableCols()) {
+      if (data[col] !== undefined) {
+        vals.push(data[col]);
+        sets.push(`${col} = $${vals.length}`);
+      }
     }
+    sets.push('updated_at = now()');
+    vals.push(studentId, dojoId);
+    return db.query(
+      `UPDATE karate_dojo_students SET ${sets.join(', ')}
+        WHERE id = $${vals.length - 1} AND dojo_id = $${vals.length}
+        RETURNING ${studentFields('')}`,
+      vals
+    );
+  };
+
+  let upd;
+  try {
+    upd = await runUpdate();
+  } catch (e) {
+    if (!HAS_IDENTITY_COLS || !isIdentitySchemaError(e)) throw e;
+    HAS_IDENTITY_COLS = false;
+    console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — PATCH aplicado sem RG/endereço/foto:', e.message);
+    upd = await runUpdate();
   }
-  sets.push('updated_at = now()');
-  vals.push(studentId, dojoId);
-  const upd = await db.query(
-    `UPDATE karate_dojo_students SET ${sets.join(', ')}
-      WHERE id = $${vals.length - 1} AND dojo_id = $${vals.length}
-      RETURNING ${studentFields('')}`,
-    vals
-  );
+
   // RETURNING não faz JOIN: o estado federativo vem do SELECT acima.
   const s = shapeStudent({
     ...upd.rows[0],
@@ -616,12 +776,12 @@ async function deleteStudent(dojoId, studentId) {
 // Leitura crua do aluno (sem JOIN): usada pelos fluxos de federação, que
 // precisam da ficha para pré-preencher a solicitação H1.
 async function loadStudentOrThrow(dojoId, studentId) {
-  const { rows } = await db.query(
+  const { rows } = await withStudentSchemaFallback(() => db.query(
     `SELECT ${studentFields('')} FROM karate_dojo_students
       WHERE id = $1 AND dojo_id = $2
       LIMIT 1`,
     [studentId, dojoId]
-  );
+  ));
   if (!rows.length) {
     throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
   }
@@ -706,6 +866,13 @@ async function federateStudentByFpktNumber(dojoId, federationId, studentId, rawN
 
   // O mesmo praticante não pode ser reivindicado por dois alunos do MESMO
   // dojô (viraria dois cadastros disputando um número FPKT).
+  //
+  // F7.0: a partir da migration 262 existe também um UNIQUE GLOBAL parcial
+  // em practitioner_id — a checagem abaixo continua servindo para dar a
+  // mensagem BOA quando o conflito é dentro do próprio dojô ("já vinculado
+  // ao aluno Fulano"), e o índice cobre o caso entre dojôs DIFERENTES, que
+  // esta query nunca viu (ela filtra por dojo_id). O 23505 resultante é
+  // mapeado pela rota. A conferência humana ao federar é F7.1.
   const dup = await db.query(
     `SELECT id, full_name FROM karate_dojo_students
       WHERE dojo_id = $1 AND practitioner_id = $2 AND id <> $3
@@ -746,6 +913,9 @@ async function federateStudentByFpktNumber(dojoId, federationId, studentId, rawN
 
 // Ficha da solicitação = dados do ALUNO como base + o que o sensei mandou
 // no corpo (o corpo vence). Evita redigitar o que o dojô já tem.
+//
+// F7.0: com RG e endereço no aluno, a solicitação H1 deixa de exigir que o
+// sensei redigite o que ele já cadastrou — é o "fluxo que sobe" na prática.
 function mergeStudentIntoRequestPayload(student, body) {
   const b = body || {};
   const pick = (key, fallback) => {
@@ -757,9 +927,17 @@ function mergeStudentIntoRequestPayload(student, body) {
   merged.full_name = pick('full_name', student.full_name);
   merged.birth_date = pick('birth_date', student.birth_date);
   merged.cpf = pick('cpf', student.cpf);
+  merged.rg = pick('rg', student.rg);
   merged.phone = pick('phone', student.phone);
   merged.email = pick('email', student.email);
   merged.sex = pick('sex', student.sex);
+  merged.zip_code = pick('zip_code', student.zip_code);
+  merged.street = pick('street', student.street);
+  merged.number = pick('number', student.number);
+  merged.complement = pick('complement', student.complement);
+  merged.neighborhood = pick('neighborhood', student.neighborhood);
+  merged.city = pick('city', student.city);
+  merged.state = pick('state', student.state);
   merged.claimed_belt = pick('claimed_belt', student.belt_label);
   return merged;
 }
@@ -825,7 +1003,8 @@ async function federateStudentByRequest(dojoId, federationId, studentId, { body,
 // praticante pertence à FEDERAÇÃO e continua existindo (com número, faixa,
 // histórico) mesmo que o dojô tenha marcado o aluno errado. Sair do
 // cadastro federado é ato da federação, nunca efeito colateral de um
-// clique no portal do dojô.
+// clique no portal do dojô. (A FK da migration 262 é ON DELETE SET NULL
+// justamente pela mesma razão, no sentido contrário.)
 async function unfederateStudent(dojoId, studentId) {
   const ok = await writeFederationLink(dojoId, studentId, { practitionerId: null, federated: false });
   if (!ok) {
@@ -848,6 +1027,12 @@ async function unfederateStudent(dojoId, studentId) {
 // Transação ÚNICA: ou o lote inteiro entra, ou nada entra. Contadores são
 // computados em JS — NENHUM try/catch best-effort DENTRO do BEGIN (evita
 // tx-poison); qualquer falha inesperada aborta o lote com ROLLBACK.
+//
+// F7.0: o import continua com o conjunto de colunas de sempre, de
+// propósito. Ele roda DENTRO de um BEGIN e um 42703 (migration 262
+// pendente) envenenaria a transação inteira; a retentativa degradada
+// exigiria SAVEPOINT por linha. RG/endereço entram pelo form/PATCH, que
+// são fora de transação e têm o fallback.
 async function importStudents(dojoId, rows) {
   if (!Array.isArray(rows)) {
     throw svcError(422, 'VALIDATION_ERROR', 'Corpo esperado: { rows: [...] } (array de linhas já parseadas)');
@@ -888,8 +1073,8 @@ async function importStudents(dojoId, rows) {
 
       let cpf = null;
       if (r.cpf != null && String(r.cpf).trim() !== '') {
-        const digits = String(r.cpf).replace(/\D/g, '');
-        if (digits.length === 11) cpf = digits;
+        const digits = normalizeCpf(r.cpf);
+        if (digits && digits.length === 11) cpf = digits;
         else warnings.push({ row: rowNum, code: 'INVALID_CPF', message: 'cpf inválido — aluno importado sem CPF' });
       }
 
@@ -1064,6 +1249,7 @@ module.exports = {
   IMPORT_MAX_ROWS,
   LIST_DEFAULT_LIMIT,
   LIST_MAX_LIMIT,
+  IDENTITY_COLS,
   computeAge,
   isMinor,
   parsePaging,
