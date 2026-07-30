@@ -97,6 +97,22 @@ A varredura de código foi feita por leitura direcionada via MCP do GitHub, arqu
 
 **Falta auditar, em `aura-backend`:** PDV (`pdv*.js`), produtos (`products.js`), importação (`importData.js`), relatórios e DRE, curva ABC, storefront (`src/services/storefrontBuilder.js`, `src/templates/storefrontPage.js`), canal digital, marketplaces, etiquetas, NFC-e e emissão fiscal.
 
+### 4.1 Odonto (`src/routes/dentalSupplies.js`) — AUDITADO, RESOLVIDO em 30/07/2026
+
+Auditado por decisão do Caio. Escrevia em `products.category` como espelho legado de `products.dental_category` em dois pontos:
+
+- `POST /dental/supplies` — `category` estava na lista de colunas do `INSERT INTO products`, com o mesmo valor de `dental_category`.
+- `PATCH /dental/supplies/:id` — `category = COALESCE($5, category)` ao lado de `dental_category = COALESCE($5, dental_category)`.
+
+Removido em `fix/dental-supplies-drop-legacy-category`. Motivação:
+
+- O discriminador do módulo é a coluna booleana **`products.is_dental_supply`**, não o texto em `category`.
+- A taxonomia do módulo vive em coluna própria, **`products.dental_category`**.
+- **`products.category` nunca era lida de volta** pelo módulo Odonto — nenhum `SELECT`, nenhum `WHERE`. Só aparecia por efeito colateral dos `RETURNING *`.
+- Base de produção, medida em 30/07: **0** empresas com `vertical='dental'`, **0** produtos com `is_dental_supply`, **0** `dental_category` preenchido. Sem dado para migrar, sem migration necessária.
+
+Com a F0 (migration 259), `products.category` passou a ser mantida exclusivamente pelo trigger `trg_sync_legacy_category`; o Odonto tinha um segundo escritor nessa coluna. Está fechado — não entra mais na lista de pendências abaixo.
+
 **Falta auditar, em `aura-app`:** `estoque.tsx`, formulários de produto, filtros de PDV, e todo consumidor de `category` em `services/api.ts`.
 
 **Recomendação:** fechar esta lista com um `grep -rn "\.category\b"` local nos dois repos antes do merge do Bloco B1 — é minutos de trabalho com o repo em disco e cobre o que a leitura via MCP não alcança. Até lá, o dual-write protege as leituras: `products.category` continua populado e coerente, então **nenhum consumidor de leitura quebra**, mesmo os não mapeados.
