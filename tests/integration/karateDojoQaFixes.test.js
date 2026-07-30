@@ -523,7 +523,16 @@ describe('QA 5 — fila de WhatsApp (responsável de menor quase nunca tem e-mai
     expect(item.amount).toBe(140);
     expect(item.already_sent).toBe(false);
     expect(item.message).toContain('vence hoje'); // offset 0
-    expect(item.message).toContain('2026-07');
+    // ⚠️ QA 30/07/2026 — o texto que chega à família mudou:
+    //   • competência por extenso ("julho/2026", não o ISO "2026-07");
+    //   • data SEM deslocamento de fuso (era "04/07/2026" para um
+    //     vencimento em 05/07 — new Date('2026-07-05') é meia-noite UTC).
+    // O campo `competence` do payload continua ISO (chave do front).
+    expect(item.message).toContain('referente a julho/2026');
+    expect(item.message).toContain('vence hoje (05/07/2026)');
+    expect(item.message).not.toContain('2026-07,');
+    expect(item.message).not.toContain('04/07/2026');
+    expect(item.competence).toBe('2026-07');
     expect(item.wa_url.startsWith('https://wa.me/5591999990000?text=')).toBe(true);
     expect(decodeURIComponent(item.wa_url.split('?text=')[1])).toBe(item.message);
     // escopo por dojô do token
@@ -534,11 +543,13 @@ describe('QA 5 — fila de WhatsApp (responsável de menor quase nunca tem e-mai
     mockWaQueue([waRow({ offset_val: 3 })]);
     const atraso = await request(app).get(`${waBase}/whatsapp-queue?date=2026-07-08`).set(canalA());
     expect(atraso.body.data[0].message).toContain('em aberto');
+    expect(atraso.body.data[0].message).toContain('venceu em 05/07/2026');
 
     db.query.mockReset();
     mockWaQueue([waRow({ offset_val: -3 })]);
     const aVencer = await request(app).get(`${waBase}/whatsapp-queue?date=2026-07-02`).set(canalA());
     expect(aVencer.body.data[0].message).toContain('vence em');
+    expect(aVencer.body.data[0].message).toContain('vence em 05/07/2026');
   });
 
   test('date inválida → 422 (sem tocar o banco)', async () => {
