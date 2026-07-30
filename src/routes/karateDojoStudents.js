@@ -15,13 +15,19 @@
 // pelo /federate (número FPKT já existente) ou pela aprovação da
 // solicitação H1.
 //
-// F7.1 (30/07/2026) — A ÚNICA EXCEÇÃO à regra "não escreve em customers":
+// F7.1 (30/07/2026) — A PRIMEIRA EXCEÇÃO à regra "não escreve em customers":
 // federar passou a ser uma ADOÇÃO. Ao confirmar o vínculo o dojô assume a
 // ficha da pessoa na federação (karate_identity_managed_by = 'dojo') e a
 // resolução escolhida pelo sensei é gravada nos DOIS lados, numa transação
-// só. É o único momento em que o backend escreve nos dois — o sync
-// contínuo é a F7.2. Toda a lógica mora em
-// services/karateStudentIdentityLink.js.
+// só. Toda a lógica mora em services/karateStudentIdentityLink.js.
+//
+// F7.2 (30/07/2026) — A EXCEÇÃO VIROU REGRA CONTÍNUA: enquanto a ficha
+// estiver adotada por ESTE dojô, editar a identidade do aluno (PATCH ou
+// import) atualiza o praticante na MESMA transação, com trilha. Nada disso
+// mora aqui: o handler só entrega o ATOR e a federação (sempre do token)
+// para a trilha; a regra está em services/karateIdentitySync.js.
+// O que NUNCA sobe: matrícula FPKT, papéis federativos, is_active, dojo_id
+// e faixa — isso é o que a federação EMITE.
 //
 // Escopo SEMPRE por req.dojoId do guard — nunca do body/query.
 // Defensivo 42P01 (migration 242 pendente): GETs de lista devolvem vazio +
@@ -31,7 +37,7 @@
 //   POST   /federation/:id/dojo/students             (422 inválido / menor sem responsável)
 //   POST   /federation/:id/dojo/students/import      ({rows:[...]}, máx 500)
 //   GET    /federation/:id/dojo/students/:sid        (ficha + responsável)
-//   PATCH  /federation/:id/dojo/students/:sid
+//   PATCH  /federation/:id/dojo/students/:sid        (F7.2 — sincroniza identidade se adotada)
 //   DELETE /federation/:id/dojo/students/:sid        (delete real por ora; F3 → 409 HAS_HISTORY)
 //   POST   /federation/:id/dojo/students/:sid/federate    (F5a/F7.1 — Canal A)
 //   DELETE /federation/:id/dojo/students/:sid/federate    (F5a/F7.1 — Canal A)
@@ -90,12 +96,18 @@ function parseFederatedFilter(raw) {
 }
 
 // Quem está agindo — sempre do TOKEN, nunca do corpo. Vai para a trilha
-// de auditoria da F7.1.
+// de auditoria da F7.1 (adoção) e da F7.2 (sync contínuo).
 function actorFrom(req) {
   return {
     userId: (req.user && req.user.id) || null,
     label: (req.user && (req.user.name || req.user.email)) || null,
   };
+}
+
+// Contexto que as escritas de aluno passam ao service para a trilha do
+// sync. federationId vem do guard (rota montada sob /federation/:id).
+function identityCtx(req) {
+  return { federationId: req.federationId || null, actor: actorFrom(req) };
 }
 
 // ── GET /federation/:id/dojo/students ──
@@ -161,7 +173,7 @@ router.post('/dojo/students', requireDojoAccess, requireChannelA, async (req, re
 // Definido ANTES das rotas /:sid (convenção do repo — literal antes de param).
 router.post('/dojo/students/import', requireDojoAccess, requireChannelA, async (req, res) => {
   try {
-    const result = await svc.importStudents(req.dojoId, (req.body || {}).rows);
+    const result = await svc.importStudents(req.dojoId, (req.body || {}).rows, identityCtx(req));
     return res.json(result);
   } catch (e) {
     return handleWriteError(res, e, 'import students');
@@ -182,13 +194,17 @@ router.get('/dojo/students/:sid', requireDojoAccess, async (req, res) => {
 });
 
 // ── PATCH /federation/:id/dojo/students/:sid ──
+// F7.2: quando o aluno tem praticante vinculado E a ficha dele na federação
+// está adotada por ESTE dojô, alterar a identidade sobe para o praticante
+// na mesma transação. A resposta ganha `identity_sync` para o app poder
+// dizer "atualizado também na federação" — ou avisar que não subiu.
 router.patch('/dojo/students/:sid', requireDojoAccess, requireChannelA, async (req, res) => {
   const { errors, data } = svc.validateStudentPayload(req.body, { partial: true });
   if (errors.length) {
     return res.status(422).json({ error: errors[0], errors, code: 'VALIDATION_ERROR' });
   }
   try {
-    const student = await svc.updateStudent(req.dojoId, req.params.sid, data);
+    const student = await svc.updateStudent(req.dojoId, req.params.sid, data, identityCtx(req));
     return res.json(student);
   } catch (e) {
     return handleWriteError(res, e, 'update student');
@@ -233,12 +249,11 @@ router.delete('/dojo/students/:sid', requireDojoAccess, requireChannelA, async (
 // nome e pedia "confirme o vínculo" — mas o backend JÁ TINHA GRAVADO.
 // Aqui a ordem é mostrar → perguntar → gravar.
 //
-// ⚠️ svc.federateStudentByFpktNumber / svc.unfederateStudent (F5a)
-// continuam existindo em karateDojoStudentService.js mas NÃO são mais
-// chamados por esta rota. Não foram removidos DE PROPÓSITO: aquele arquivo
-// está sendo reescrito em paralelo pelo PR #446 (F7.0) e mexer nele aqui
-// criaria conflito num arquivo inteiro. A remoção entra na F7.2, depois
-// que o #446 mergear.
+// ✅ F7.2: svc.federateStudentByFpktNumber e svc.unfederateStudent (as
+// versões F5a que ficaram órfãs quando esta rota passou a usar
+// identityLink) foram REMOVIDAS do service — era a limpeza que a F7.1
+// deixou marcada para depois do #446. svc.federateStudentByRequest, o
+// caminho 2 (solicitação H1), continua vivo e é chamado logo abaixo.
 // ============================================================
 router.post('/dojo/students/:sid/federate', requireDojoAccess, requireChannelA, async (req, res) => {
   const b = req.body || {};
@@ -301,6 +316,10 @@ router.post('/dojo/students/:sid/federate', requireDojoAccess, requireChannelA, 
 // segue existindo (número, faixa, histórico) — só volta a ser a FEDERAÇÃO
 // quem digita a ficha dele. Excluir praticante é ato da federação, jamais
 // efeito colateral de um clique no portal do dojô.
+//
+// F7.2: devolver a gestão também ENCERRA o sync contínuo — a partir daqui
+// o guarda de karateIdentitySync não encontra mais a ficha como adotada
+// por este dojô e nenhuma edição do aluno sobe.
 //
 // SEM gate de conexão de propósito: desfazer uma marcação errada é higiene
 // do cadastro INTERNO e não pode depender de estar conectado. Pelo mesmo
