@@ -21,15 +21,19 @@
 //   somente quando a fee vigente não tem due_months preenchido).
 //   Novo filiado no meio do ano: gera só as parcelas restantes (due_date >=
 //   hoje) — ver `fromDate` em buildInstallmentPlan.
+//   VENCE HOJE, ATRASA AMANHÃ (prática brasileira; decisão do Caio,
+//   30/07/2026): o dia do vencimento inteiro conta como "em dia".
 //
 // Vocabulário (dois níveis, propositalmente diferentes — não confundir):
 //   1) Por parcela / por anuidade individual (listagens /dojos, /cpf):
 //      'pending'|'paid' é o que é PERSISTIDO. Em leitura, deriva-se:
-//      'due' (não venceu) | 'overdue' (<=90d) | 'defaulting' (91-180d) |
-//      'suspended' (>180d) | 'paid'. Sem nenhuma parcela: 'no_charge'.
+//      'due' (não venceu, INCLUINDO o próprio dia do vencimento) |
+//      'overdue' (<=90d) | 'defaulting' (91-180d) | 'suspended' (>180d) |
+//      'paid'. Sem nenhuma parcela: 'no_charge'.
 //   2) Agregado da anuidade (views karate_dojo_standing/karate_member_standing,
 //      KPIs do hub): 'paid' | 'em_dia' (nenhuma parcela vencida em aberto —
-//      parcela futura NÃO conta) | 'atrasado' (>=1 parcela vencida não paga) |
+//      parcela futura NÃO conta, parcela que vence HOJE também não) |
+//      'atrasado' (>=1 parcela vencida não paga) |
 //      'sem_cobranca' (neutro, sem anuidade na temporada).
 // ============================================================
 'use strict';
@@ -86,9 +90,46 @@ function lastDayOfMonthStr(year, month) {
   return d.toISOString().slice(0, 10);
 }
 
+const DAY_MS = 1000 * 60 * 60 * 24;
+// America/Sao_Paulo é UTC−3 o ano todo (DST abolido em 2019). Aritmética
+// pura em vez de Intl/toLocaleDateString: o Railway roda sem full-icu e o
+// locale cai silenciosamente para en-US (bug 13/05/2026, ver
+// src/routes/dashboard.js).
+const SP_OFFSET_MS = 3 * 60 * 60 * 1000;
+const PURE_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+// Reduz qualquer entrada ao "carimbo do DIA" (meia-noite UTC do dia de
+// calendário correspondente) — a unidade certa para comparar vencimento
+// com hoje. Comparar TIMESTAMPS era a origem de dois bugs:
+//   • Math.round sobre a diferença em ms colapsava "vence hoje" em 0;
+//   • `new Date(due_date) <= now` marcava "vence hoje" como atrasado a
+//     partir das 21h do dia ANTERIOR em Brasília (meia-noite UTC).
+//
+// Regras (mesmas de parseDateParts / karateMailer.fmtDateBR):
+//   • string 'AAAA-MM-DD' → componentes literais, sem fuso;
+//   • Date à meia-noite UTC exata → é coluna `date` do pg, data pura;
+//   • qualquer outro instante → dia de calendário em São Paulo.
+function dayStamp(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'string') {
+    const m = PURE_DATE_RE.exec(value.trim());
+    if (m) return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  }
+  const d = value instanceof Date ? value : new Date(value);
+  const t = d.getTime();
+  if (Number.isNaN(t)) return null;
+  if (t % DAY_MS === 0) return t;
+  return Math.floor((t - SP_OFFSET_MS) / DAY_MS) * DAY_MS;
+}
+
+// Diferença em DIAS DE CALENDÁRIO (não em milissegundos) entre `a` e `b`.
+// Entrada inválida/ausente → 0 (mesmo dia): dado faltante é neutro, nunca
+// vira cobrança atrasada sozinho.
 function daysBetween(a, b) {
-  const dayMs = 1000 * 60 * 60 * 24;
-  return Math.round((new Date(a) - new Date(b)) / dayMs);
+  const da = dayStamp(a);
+  const dbb = dayStamp(b);
+  if (da === null || dbb === null) return 0;
+  return Math.round((da - dbb) / DAY_MS);
 }
 
 // Evita acúmulo de lixo de ponto flutuante em soma/divisão de dinheiro
@@ -440,13 +481,21 @@ async function getInstallments(client, annuityId) {
 }
 
 // ── Status derivado por parcela (leitura, nunca persistido) ─
+//
+// ⚠️ REGRA DE NEGÓCIO (Caio, 30/07/2026): VENCE HOJE, ATRASA AMANHÃ.
+// O guard era `daysUntilDue > 0` sobre um Math.round da diferença em
+// MILISSEGUNDOS: qualquer parcela vencendo hoje colapsava para 0 e era
+// reportada como 'overdue' o dia inteiro — na lista de dojôs, na lista de
+// CPF, na régua de cobrança e nos KPIs do hub. Agora a comparação é por
+// DIA DE CALENDÁRIO em São Paulo (daysBetween/dayStamp) e o próprio dia do
+// vencimento conta como 'due'.
 function deriveInstallmentStatus(installment) {
   if (!installment) return 'no_charge';
   if (installment.status === 'paid') return 'paid';
   if (!installment.due_date) return 'due';
   const daysUntilDue = daysBetween(installment.due_date, new Date());
-  if (daysUntilDue > 0) return 'due';
-  const daysOverdue = Math.abs(daysUntilDue);
+  if (daysUntilDue >= 0) return 'due';
+  const daysOverdue = -daysUntilDue;
   if (daysOverdue <= 90) return 'overdue';
   if (daysOverdue <= 180) return 'defaulting';
   return 'suspended';
@@ -468,14 +517,21 @@ function computeAnnuityListStatus(installments) {
 }
 
 // ── Agregado (views/KPIs do hub) — paid|em_dia|atrasado|sem_cobranca.
-// Parcela futura NUNCA torna ninguém atrasado.
+// Parcela futura NUNCA torna ninguém atrasado — e, desde 30/07/2026, a
+// parcela que vence HOJE também não.
+//
+// ⚠️ `new Date(i.due_date) <= now` (versão anterior) comparava TIMESTAMPS:
+// uma parcela que vence hoje virava 'atrasado' assim que o relógio UTC
+// passava da meia-noite, ou seja, às 21h do dia ANTERIOR em Brasília.
+// daysBetween compara DIA DE CALENDÁRIO em São Paulo — mesma régua de
+// deriveInstallmentStatus, sem dois critérios de data no mesmo módulo.
 function computeAggregateFinanceiro(installments) {
   if (!installments || !installments.length) return 'sem_cobranca';
   const allPaid = installments.every((i) => i.status === 'paid');
   if (allPaid) return 'paid';
   const now = new Date();
   const hasOverdueOpen = installments.some(
-    (i) => i.status !== 'paid' && i.due_date && new Date(i.due_date) <= now
+    (i) => i.status !== 'paid' && i.due_date && daysBetween(i.due_date, now) < 0
   );
   return hasOverdueOpen ? 'atrasado' : 'em_dia';
 }
@@ -628,6 +684,8 @@ module.exports = {
   categoryForKind,
   round2,
   parseDateParts,
+  dayStamp,
+  daysBetween,
   remainingMonthsFromAffiliation,
   computeProportionalAnnuity,
   distributeAmountAcrossInstallments,
