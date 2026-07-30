@@ -56,7 +56,9 @@ router.get('/', async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      `SELECT c.id, c.name, c.color, c.sort_order, c.type, c.path,
+      `SELECT c.id, c.company_id, c.name, c.slug, c.path, c.depth, c.parent_id,
+              c.color, c.sort_order, c.type, c.image_url, c.banner_url,
+              c.is_visible_storefront, c.seo_title, c.seo_description,
               c.created_at, c.updated_at, ${countExpr} AS product_count
          FROM product_categories c
         WHERE ${filters.join(' AND ')}
@@ -100,7 +102,8 @@ router.post('/', async (req, res) => {
     const { rows } = await db.query(
       `INSERT INTO product_categories (company_id, name, color, sort_order, type, parent_id)
        VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, company_id, name, slug, path, depth, color, sort_order, type, parent_id, created_at`,
+       RETURNING id, company_id, name, slug, path, depth, color, sort_order, type, parent_id,
+                 image_url, banner_url, is_visible_storefront, seo_title, seo_description, created_at`,
       [cid, cleanName, hex, parseInt(sort_order) || 0, type, parentId]
     );
     res.status(201).json(rows[0]);
