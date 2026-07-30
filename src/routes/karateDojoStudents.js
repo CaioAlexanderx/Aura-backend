@@ -13,8 +13,15 @@
 // F5a (26/07/2026): o SENSEI declara se o aluno é FEDERADO e a FEDERAÇÃO
 // confirma. practitioner_id deixou de ser "vínculo futuro" — ele é gravado
 // pelo /federate (número FPKT já existente) ou pela aprovação da
-// solicitação H1. Continua valendo que estas rotas NÃO escrevem em
-// karate_practitioners/customers: elas só gravam a referência no ALUNO.
+// solicitação H1.
+//
+// F7.1 (30/07/2026) — A ÚNICA EXCEÇÃO à regra "não escreve em customers":
+// federar passou a ser uma ADOÇÃO. Ao confirmar o vínculo o dojô assume a
+// ficha da pessoa na federação (karate_identity_managed_by = 'dojo') e a
+// resolução escolhida pelo sensei é gravada nos DOIS lados, numa transação
+// só. É o único momento em que o backend escreve nos dois — o sync
+// contínuo é a F7.2. Toda a lógica mora em
+// services/karateStudentIdentityLink.js.
 //
 // Escopo SEMPRE por req.dojoId do guard — nunca do body/query.
 // Defensivo 42P01 (migration 242 pendente): GETs de lista devolvem vazio +
@@ -26,8 +33,8 @@
 //   GET    /federation/:id/dojo/students/:sid        (ficha + responsável)
 //   PATCH  /federation/:id/dojo/students/:sid
 //   DELETE /federation/:id/dojo/students/:sid        (delete real por ora; F3 → 409 HAS_HISTORY)
-//   POST   /federation/:id/dojo/students/:sid/federate    (F5a — Canal A)
-//   DELETE /federation/:id/dojo/students/:sid/federate    (F5a — Canal A)
+//   POST   /federation/:id/dojo/students/:sid/federate    (F5a/F7.1 — Canal A)
+//   DELETE /federation/:id/dojo/students/:sid/federate    (F5a/F7.1 — Canal A)
 //   GET    /federation/:id/dojo/guardians            (+ contagem de alunos vinculados)
 //   POST   /federation/:id/dojo/guardians
 //   PATCH  /federation/:id/dojo/guardians/:gid
@@ -37,6 +44,7 @@
 const router = require('express').Router({ mergeParams: true });
 const { requireDojoAccess } = require('../middleware/requireDojoAccess');
 const svc = require('../services/karateDojoStudentService');
+const identityLink = require('../services/karateStudentIdentityLink');
 const { isDojoLinked } = require('../services/karateDojoLinkStatus');
 
 // Canal B (portal do dojô) é SOMENTE LEITURA: o portal existe para
@@ -56,6 +64,10 @@ function handleWriteError(res, e, ctx) {
     const body = { error: e.message, code: e.code || 'ERROR' };
     // Ficha da solicitação H1 devolve a lista completa de campos faltando.
     if (e.errors) body.errors = e.errors;
+    // F7.1: a conferência devolve TODOS os bloqueios, não só o primeiro —
+    // o sensei precisa ver a lista inteira para saber o que corrigir.
+    if (e.blockers) body.blockers = e.blockers;
+    if (e.legacy_code) body.legacy_code = e.legacy_code;
     return res.status(e.status).json(body);
   }
   if (e && e.code === '23505') {
@@ -75,6 +87,15 @@ function parseFederatedFilter(raw) {
   if (raw === 'true' || raw === '1') return true;
   if (raw === 'false' || raw === '0') return false;
   return null;
+}
+
+// Quem está agindo — sempre do TOKEN, nunca do corpo. Vai para a trilha
+// de auditoria da F7.1.
+function actorFrom(req) {
+  return {
+    userId: (req.user && req.user.id) || null,
+    label: (req.user && (req.user.name || req.user.email)) || null,
+  };
 }
 
 // ── GET /federation/:id/dojo/students ──
@@ -187,22 +208,37 @@ router.delete('/dojo/students/:sid', requireDojoAccess, requireChannelA, async (
 });
 
 // ============================================================
-// F5a — FEDERAR / DESFEDERAR o aluno
+// F5a/F7.1 — FEDERAR / DESFEDERAR o aluno
 //
 // POST /dojo/students/:sid/federate  (Canal A)
-//   { fpkt_number }        → o aluno JÁ tem número (outro dojô/carteirinha):
-//                            confirma pelo MESMO lookup do H1 e vincula.
-//                            200 { linked: true, practitioner, is_transfer }
-//                            404 FPKT_NUMBER_NOT_FOUND
-//                            409 PRACTITIONER_JA_VINCULADO
-//   { request: true, ... }  → o aluno é NOVO na federação: abre a
-//                            solicitação H1 (mesma rota/fila de sempre) e
-//                            o aluno fica 'pending'.
-//                            200 { linked: false, request_id, status }
-//                            Repetir devolve a MESMA solicitação (idempotente).
 //
-// Sempre 200 nos dois caminhos: o front lê `linked`/`status`, não o código
-// HTTP, e "já pendente" x "criada agora" são o MESMO estado para o sensei.
+//   { fpkt_number }                    → PREVIEW. NÃO GRAVA NADA.
+//       200 { preview:true, practitioner, is_transfer, can_link,
+//             blockers[], comparison[] }
+//       404 FPKT_NUMBER_NOT_FOUND (preservado da F5a)
+//
+//   { fpkt_number, confirm:true, resolution } → CONFIRMAÇÃO (grava).
+//       200 { linked:true, practitioner, applied[], is_transfer }
+//       409 CPF_CONFLITANTE | PRATICANTE_JA_VINCULADO
+//       503 SCHEMA_PENDING_262 (migration 262 ainda não aplicada)
+//
+//   { request: true, ... }             → o aluno é NOVO na federação: abre
+//       a solicitação H1 (mesma rota/fila de sempre). INALTERADO na F7.1 —
+//       ali quem cria o praticante é a federação, e a conferência é a fila
+//       de aprovação dela.
+//
+// POR QUE O PREVIEW EXISTE (produção, 30/07/2026): uma aluna de 12 anos
+// (CPF 123..., nascimento 1998) foi vinculada a um praticante nascido em
+// 2020, com outro CPF, sem um aviso. O front detectava a divergência de
+// nome e pedia "confirme o vínculo" — mas o backend JÁ TINHA GRAVADO.
+// Aqui a ordem é mostrar → perguntar → gravar.
+//
+// ⚠️ svc.federateStudentByFpktNumber / svc.unfederateStudent (F5a)
+// continuam existindo em karateDojoStudentService.js mas NÃO são mais
+// chamados por esta rota. Não foram removidos DE PROPÓSITO: aquele arquivo
+// está sendo reescrito em paralelo pelo PR #446 (F7.0) e mexer nele aqui
+// criaria conflito num arquivo inteiro. A remoção entra na F7.2, depois
+// que o #446 mergear.
 // ============================================================
 router.post('/dojo/students/:sid/federate', requireDojoAccess, requireChannelA, async (req, res) => {
   const b = req.body || {};
@@ -211,6 +247,7 @@ router.post('/dojo/students/:sid/federate', requireDojoAccess, requireChannelA, 
     // Gate de conexão ANTES de olhar o corpo (mesma decisão do H1, PR #422):
     // federar cria/reivindica algo na FEDERAÇÃO — não existe para um dojô
     // que ainda não se conectou. 409 (conflito de ESTADO), nunca 403.
+    // Vale inclusive para o PREVIEW: sem conexão não há o que conferir.
     if (!(await isDojoLinked(req.dojoId))) {
       return res.status(409).json({
         error: 'Conecte seu dojô à federação para federar alunos',
@@ -228,8 +265,21 @@ router.post('/dojo/students/:sid/federate', requireDojoAccess, requireChannelA, 
       });
     }
 
+    // Ausência de `confirm` é PREVIEW. É o default de propósito: um cliente
+    // antigo que só manda { fpkt_number } passa a NÃO gravar em vez de
+    // gravar sem conferir — falhar para o lado seguro.
+    const confirm = b.confirm === true || b.confirm === 'true';
+
     const result = rawNumber
-      ? await svc.federateStudentByFpktNumber(req.dojoId, req.federationId, req.params.sid, rawNumber)
+      ? await identityLink.federateByNumber({
+          dojoId: req.dojoId,
+          federationId: req.federationId,
+          studentId: req.params.sid,
+          rawNumber,
+          confirm,
+          resolution: b.resolution,
+          actor: actorFrom(req),
+        })
       : await svc.federateStudentByRequest(req.dojoId, req.federationId, req.params.sid, {
           body: b,
           channel: req.dojoAuthChannel || null,
@@ -245,16 +295,25 @@ router.post('/dojo/students/:sid/federate', requireDojoAccess, requireChannelA, 
 // ── DELETE /federation/:id/dojo/students/:sid/federate ──
 // Desvincula: is_federated=false, practitioner_id=NULL.
 //
-// ⚠️ NÃO apaga NADA em karate_practitioners/customers: o praticante segue
-// existindo na FEDERAÇÃO (número, faixa, histórico) — só o dojô deixa de
-// reivindicá-lo. Excluir praticante é ato da federação, jamais efeito
-// colateral de um clique no portal do dojô.
+// F7.1: passa a DEVOLVER A GESTÃO DA FICHA à federação
+// (karate_identity_managed_by='federation', karate_identity_dojo_id=NULL).
+// Continua sem apagar NADA em karate_practitioners/customers: o praticante
+// segue existindo (número, faixa, histórico) — só volta a ser a FEDERAÇÃO
+// quem digita a ficha dele. Excluir praticante é ato da federação, jamais
+// efeito colateral de um clique no portal do dojô.
 //
 // SEM gate de conexão de propósito: desfazer uma marcação errada é higiene
-// do cadastro INTERNO e não pode depender de estar conectado.
+// do cadastro INTERNO e não pode depender de estar conectado. Pelo mesmo
+// motivo NÃO exige a migration 262 — sem ela o desvínculo acontece e a
+// devolução da gestão é pulada (identity_returned:false).
 router.delete('/dojo/students/:sid/federate', requireDojoAccess, requireChannelA, async (req, res) => {
   try {
-    const result = await svc.unfederateStudent(req.dojoId, req.params.sid);
+    const result = await identityLink.unfederateStudent({
+      dojoId: req.dojoId,
+      studentId: req.params.sid,
+      federationId: req.federationId || null,
+      actor: actorFrom(req),
+    });
     return res.json(result);
   } catch (e) {
     return handleWriteError(res, e, 'unfederate student');
