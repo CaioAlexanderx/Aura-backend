@@ -6,9 +6,11 @@
 // se testa direto, com um client de transação de mentira — sem Express,
 // sem token, sem fila de mocks para desalinhar.
 //
-// ⚠️ MOCK POR SQL (o client despacha por regex), NUNCA fila posicional:
+// ⚠️ MOCK POR SQL (o client despacha por matcher), NUNCA fila posicional:
 // a ordem interna do sync (SAVEPOINT → SELECT → UPDATE → trilha → RELEASE)
 // é detalhe de implementação e não pode virar contrato de teste.
+// Matcher pode ser regex OU função — algumas queries só se distinguem por
+// DOIS pedaços da SQL (mesma convenção de karateDojoFederate.test.js).
 // ============================================================
 'use strict';
 
@@ -19,6 +21,8 @@ const dojoId = 'd0000000-0000-0000-0000-000000000002';
 const outroDojoId = 'd0000000-0000-0000-0000-000000000003';
 const fedId = 'fed00000-0000-0000-0000-000000000001';
 const sid = 'a1000000-0000-0000-0000-00000000000a';
+
+const matches = (m, s) => (typeof m === 'function' ? Boolean(m(s)) : m.test(s));
 
 // Client de transação de mentira. `dispatch(sql, params)` devolve o
 // resultado OU um Error (que é lançado, para simular falha do banco).
@@ -31,8 +35,9 @@ function fakeClient(dispatch = () => null) {
     }),
   };
   client.sqls = () => client.query.mock.calls.map((c) => String(c[0]));
-  client.find = (re) => client.query.mock.calls.find((c) => re.test(String(c[0])));
-  client.hit = (re) => client.sqls().some((s) => re.test(s));
+  client.find = (m) => client.query.mock.calls.find((c) => matches(m, String(c[0])));
+  client.count = (m) => client.sqls().filter((s) => matches(m, s)).length;
+  client.hit = (m) => client.count(m) > 0;
   return client;
 }
 
@@ -364,14 +369,19 @@ describe('F7.2 — falha isolada por SAVEPOINT (nunca ROLLBACK da transação)',
 // ════════════════════════════════════════════════════════════
 describe('F7.2 — sync em lote (import)', () => {
   const batchRow = (id, over = {}) => {
-    const row = { student_id: id, student_label: `Aluno ${id}`, practitioner_id: `p_${id}`, practitioner_label: `Prat ${id}`, fpkt_number: `FPKT-${id}` };
-    for (const f of IDENTITY_FIELDS) {
-      row[`d_${f.key}`] = studentRow()[f.dojoCol] || null;
-      row[`f_${f.key}`] = fedRow()[f.key] || null;
+    const row = {
+      student_id: id,
+      student_label: `Aluno ${id}`,
+      practitioner_id: `p_${id}`,
+      practitioner_label: `Prat ${id}`,
+      fpkt_number: `FPKT-${id}`,
+    };
+    const d = studentRow();
+    const f = fedRow();
+    for (const field of IDENTITY_FIELDS) {
+      row[`d_${field.key}`] = d[field.dojoCol] != null ? d[field.dojoCol] : null;
+      row[`f_${field.key}`] = f[field.key] != null ? f[field.key] : null;
     }
-    // a foto tem nome diferente dos dois lados na leitura
-    row.d_photo_url = 'https://cdn/foto.jpg';
-    row.f_photo_url = 'https://cdn/foto.jpg';
     return Object.assign(row, over);
   };
 
@@ -404,13 +414,12 @@ describe('F7.2 — sync em lote (import)', () => {
     expect(res.synced).toBe(2); // o que já estava igual não gera escrita
 
     // A ASSERÇÃO QUE IMPORTA: candidatos em UMA query só, não uma por aluno.
-    const candidateCalls = client.sqls().filter(isBatchCandidate);
-    expect(candidateCalls.length).toBe(1);
+    expect(client.count(isBatchCandidate)).toBe(1);
     expect(client.find(isBatchCandidate)[1]).toEqual([['s1', 's2', 's3'], dojoId]);
     expect(String(client.find(isBatchCandidate)[0])).toContain('s.id = ANY($1::uuid[])');
 
     // 2 UPDATEs (um por ficha divergente), nunca 3.
-    expect(client.sqls().filter(isFedUpdate).length).toBe(2);
+    expect(client.count(isFedUpdate)).toBe(2);
     // trilha por ficha sincronizada, com o source do lote
     const audits = client.query.mock.calls.filter((c) => isAudit(String(c[0])));
     expect(audits.length).toBe(2);
