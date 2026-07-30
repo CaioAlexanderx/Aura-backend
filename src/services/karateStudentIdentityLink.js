@@ -32,8 +32,8 @@
 //
 // ── POR QUE UM ARQUIVO NOVO ─────────────────────────────────
 // karateDojoStudentService.js está sendo reescrito em paralelo pelo PR #446
-// (F7.0). Toda a lógica nova mora aqui e o service só DELEGA, para a área
-// de conflito entre os dois PRs ser de duas funções, não do arquivo inteiro.
+// (F7.0). Toda a lógica nova mora aqui e a rota chama daqui, para a área de
+// conflito entre os dois PRs ser ZERO naquele arquivo.
 //
 // ── DEFENSIVO A SCHEMA PENDENTE (262 e 263) ─────────────────
 // Este código sobe ANTES das migrations. Em vez do padrão
@@ -443,7 +443,7 @@ function validateResolution(resolution) {
 // dado preenchido com o vazio do outro lado — nem quando o sensei pede
 // "federation" num campo em que a federação não tem nada. Resolver conflito
 // é escolher entre dois valores, nunca destruir um.
-function planResolution(comparison, resolution, student, practitioner) {
+function planResolution(comparison, resolution) {
   const dojoWrites = [];
   const fedWrites = [];
   const applied = [];
@@ -681,8 +681,6 @@ async function federateByNumber({
     );
   }
 
-  const plan = planResolution(comparison, resolved, student, practitioner);
-
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -706,6 +704,14 @@ async function federateByNumber({
       const first = lockedBlockers[0];
       throw svcError(409, first.code, first.message, { blockers: lockedBlockers });
     }
+
+    // O PLANO é montado com as linhas TRAVADAS, não com a leitura que
+    // alimentou o preview. A escolha do sensei é "qual LADO vence", não
+    // "qual string gravar": se a ficha mudou entre a conferência e o
+    // clique, vale o que está no banco agora. Gravar o valor velho seria
+    // a mesma corrupção de cadastro que este PR veio impedir.
+    const lockedComparison = buildComparison(lockedStudent, lockedPractitioner);
+    const plan = planResolution(lockedComparison, resolved);
 
     // Trocar de praticante devolve o ANTERIOR à federação. Sem isto, um
     // vínculo desfeito por engano deixaria um praticante "adotado" por um
