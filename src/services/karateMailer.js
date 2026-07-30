@@ -189,11 +189,66 @@ function _digitsOnly(s) {
 
 function fmtBRL(v) {
   const n = Number(v || 0);
-  return 'R$ ' + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return 'R$ ' + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
+
+// Monta DD/MM/AAAA a partir de componentes já corretos (sem fuso nenhum).
+function _partsToBR(year, month, day) {
+  return `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}/${year}`;
+}
+
+// ── fmtDateBR: data em pt-BR SEM deslocar o dia ──────────────
+//
+// ⚠️ NÃO "simplifique" isto de volta para
+//     new Date(d).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+// Era exatamente o que estava aqui e virou bug de produção (30/07/2026):
+// `new Date('2026-07-10')` é meia-noite UTC; renderizado em America/Sao_Paulo
+// (UTC-3) volta 3 horas e cai em 09/07/2026. Como TODA coluna `date` do
+// Postgres chega como a string 'YYYY-MM-DD' (ou como Date à meia-noite),
+// o vencimento saía UM DIA ANTES para o destinatário — a mensagem de
+// WhatsApp da régua do dojô dizia "venceu em 09/07/2026" para uma cobrança
+// com due_date = 2026-07-10, com a tela e o banco mostrando 10/07.
+//
+// Regras (nesta ordem):
+//   1. null/undefined/string vazia → '' (dado ausente é neutro; nunca
+//      "Invalid Date" na cara do destinatário).
+//   2. string começando com 'YYYY-MM-DD' (com ou sem hora) → recorta
+//      ano/mês/dia por regex. Data-only NÃO tem fuso: não pode passar
+//      por Date().
+//   3. Date à meia-noite UTC exata = o que o driver `pg` devolve numa
+//      coluna `date` quando o servidor roda em UTC (produção). Usa os
+//      componentes UTC — converter para -03 traria o mesmo -1 dia por
+//      outro caminho.
+//   4. Date de timestamp real → comportamento original preservado
+//      (toLocaleDateString com timeZone America/Sao_Paulo).
 function fmtDateBR(d) {
-  try { return new Date(d).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
-  catch (_) { return String(d); }
+  if (d === null || d === undefined) return '';
+
+  if (typeof d === 'string') {
+    const s = d.trim();
+    if (!s) return '';
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+    if (m) return _partsToBR(m[1], m[2], m[3]);
+  }
+
+  const dt = d instanceof Date ? d : new Date(d);
+  if (!(dt instanceof Date) || Number.isNaN(dt.getTime())) return String(d);
+
+  // Coluna `date` do pg em servidor UTC: 00:00:00.000Z cravado.
+  if (
+    dt.getUTCHours() === 0 &&
+    dt.getUTCMinutes() === 0 &&
+    dt.getUTCSeconds() === 0 &&
+    dt.getUTCMilliseconds() === 0
+  ) {
+    return _partsToBR(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
+  }
+
+  try {
+    return dt.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+  } catch (_) {
+    return _partsToBR(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
+  }
 }
 
 // ── Interface genérica karatê (Track J e L reusam) ───────────
