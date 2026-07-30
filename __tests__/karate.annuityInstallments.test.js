@@ -80,6 +80,17 @@ describe('deriveInstallmentStatus (por parcela, leitura)', () => {
     const past = new Date(); past.setDate(past.getDate() - 200);
     expect(svc.deriveInstallmentStatus({ status: 'pending', due_date: past.toISOString().slice(0, 10) })).toBe('suspended');
   });
+  it('não paga, due_date = HOJE em America/Sao_Paulo → due (vence hoje não é atraso, prática BR)', () => {
+    const today = svc.todayIsoSaoPaulo();
+    expect(svc.deriveInstallmentStatus({ status: 'pending', due_date: today })).toBe('due');
+  });
+  it('não paga, due_date = ONTEM em America/Sao_Paulo → overdue', () => {
+    const todayParts = svc.parseDateParts(svc.todayIsoSaoPaulo());
+    const yesterday = new Date(
+      Date.UTC(todayParts.year, todayParts.month - 1, todayParts.day) - 24 * 60 * 60 * 1000
+    ).toISOString().slice(0, 10);
+    expect(svc.deriveInstallmentStatus({ status: 'pending', due_date: yesterday })).toBe('overdue');
+  });
 });
 
 describe('computeAggregateFinanceiro (agregado da anuidade, views/KPIs)', () => {

@@ -86,9 +86,41 @@ function lastDayOfMonthStr(year, month) {
   return d.toISOString().slice(0, 10);
 }
 
-function daysBetween(a, b) {
-  const dayMs = 1000 * 60 * 60 * 24;
-  return Math.round((new Date(a) - new Date(b)) / dayMs);
+// Bug histórico (corrigido nesta versão — ver PR "parcela que vence hoje
+// deixa de nascer atrasada"): o antigo `daysBetween(a, b)` comparava
+// TIMESTAMPS (`new Date(a) - new Date(b)`), não datas. `due_date` é uma
+// coluna `date`; `new Date('2026-07-31')` vira meia-noite UTC. Comparado
+// contra o instante atual (`new Date()`), a diferença fica sub-diária o
+// dia inteiro em que a parcela vence, `Math.round` colapsa pra 0, e o
+// guard `> 0` classificava a parcela como 'overdue' já a partir do
+// primeiro instante do dia do vencimento — o dia inteiro, até a virada de
+// data em UTC (que nem bate com a virada em Brasília). Os dois helpers
+// abaixo substituem esse cálculo por comparação de DATA PURA no fuso de
+// operação (America/Sao_Paulo), nunca timestamp — e tratam o vencimento do
+// dia como EM DIA (prática brasileira: vence hoje, atrasa amanhã).
+
+// 'YYYY-MM-DD' de hoje no fuso America/Sao_Paulo. Nunca usar
+// `new Date().toISOString()` aqui — isso dá a data em UTC, que vira o dia
+// até 3h mais cedo do que no relógio de operação (Brasília), fazendo uma
+// parcela nascer "atrasada" ainda à noite do dia anterior.
+function todayIsoSaoPaulo(now) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now || new Date());
+}
+
+// Diferença em DIAS entre duas datas puras 'YYYY-MM-DD' (isoA - isoB).
+// Reusa parseDateParts (mesmo parser de data pura do resto do arquivo — ver
+// comentário dela) e Date.UTC sobre os componentes já corretos — nunca
+// `new Date(iso)` direto, que reintroduziria timestamp/fuso na conta.
+function daysBetweenIsoDates(isoA, isoB) {
+  const a = parseDateParts(isoA);
+  const b = parseDateParts(isoB);
+  if (!a || !b) return 0;
+  const ua = Date.UTC(a.year, a.month - 1, a.day);
+  const ub = Date.UTC(b.year, b.month - 1, b.day);
+  return Math.round((ua - ub) / (1000 * 60 * 60 * 24));
 }
 
 // Evita acúmulo de lixo de ponto flutuante em soma/divisão de dinheiro
@@ -444,9 +476,9 @@ function deriveInstallmentStatus(installment) {
   if (!installment) return 'no_charge';
   if (installment.status === 'paid') return 'paid';
   if (!installment.due_date) return 'due';
-  const daysUntilDue = daysBetween(installment.due_date, new Date());
-  if (daysUntilDue > 0) return 'due';
-  const daysOverdue = Math.abs(daysUntilDue);
+  const daysUntilDue = daysBetweenIsoDates(installment.due_date, todayIsoSaoPaulo());
+  if (daysUntilDue >= 0) return 'due';        // vence HOJE não é atraso
+  const daysOverdue = -daysUntilDue;
   if (daysOverdue <= 90) return 'overdue';
   if (daysOverdue <= 180) return 'defaulting';
   return 'suspended';
@@ -468,15 +500,19 @@ function computeAnnuityListStatus(installments) {
 }
 
 // ── Agregado (views/KPIs do hub) — paid|em_dia|atrasado|sem_cobranca.
-// Parcela futura NUNCA torna ninguém atrasado.
+// Parcela futura NUNCA torna ninguém atrasado. Comparação por DATA PURA em
+// America/Sao_Paulo (nunca timestamp — ver comentário nos helpers de data
+// no topo do arquivo): parcela que vence hoje não é atrasada.
 function computeAggregateFinanceiro(installments) {
   if (!installments || !installments.length) return 'sem_cobranca';
   const allPaid = installments.every((i) => i.status === 'paid');
   if (allPaid) return 'paid';
-  const now = new Date();
-  const hasOverdueOpen = installments.some(
-    (i) => i.status !== 'paid' && i.due_date && new Date(i.due_date) <= now
-  );
+  const today = todayIsoSaoPaulo();
+  const hasOverdueOpen = installments.some((i) => {
+    if (i.status === 'paid' || !i.due_date) return false;
+    const d = parseDateParts(i.due_date);
+    return d ? d.iso < today : false;          // vence hoje não é atrasado
+  });
   return hasOverdueOpen ? 'atrasado' : 'em_dia';
 }
 
@@ -611,6 +647,8 @@ module.exports = {
   DEFAULT_DUE_MONTHS,
   VALID_PAYMENT_METHODS,
   lastDayOfMonthStr,
+  todayIsoSaoPaulo,
+  daysBetweenIsoDates,
   getVigentFee,
   buildInstallmentPlan,
   buildPlanSpecs,
