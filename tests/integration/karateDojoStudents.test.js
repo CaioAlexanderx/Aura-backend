@@ -8,6 +8,7 @@
 //   escopo — queries SEMPRE parametrizadas por req.dojoId (nunca do body)
 //   guardians: POST cria + GET lista com contagem de alunos
 //   F7.0 — identidade da pessoa (RG, endereço, foto) + sexo normalizado
+//   F7.2 — sync contínuo dojô → federação no PATCH e no import
 //
 // AUDITORIA F5a (26/07/2026): o shape do aluno ganhou federated,
 // fpkt_number e federation_link_status, e o SELECT do PATCH ganhou JOIN.
@@ -25,6 +26,24 @@
 //     asserção mantida abaixo, agora como GUARDA dessa promessa;
 //   - nenhuma query NOVA foi criada: os campos vieram na MESMA query
 //     (contagem de chamadas assertada nos casos de POST e PATCH).
+//
+// AUDITORIA F7.2 (30/07/2026): updateStudent passou a poder rodar DENTRO
+// de uma transação (db.connect) para sincronizar a ficha da federação.
+// NENHUM caso deste arquivo mudou de comportamento, e isso é por desenho,
+// não por sorte: a transação só abre quando as TRÊS condições valem —
+// o PATCH tocou em IDENTIDADE, o aluno tem practitioner_id, e a 262 está
+// aplicada. Os casos existentes ou mexem em faixa/status (não é
+// identidade) ou usam studentRow() com practitioner_id null. Os dois
+// casos que passariam perto estão marcados abaixo com a razão.
+// DUAS mudanças estruturais foram necessárias:
+//   1. afterEach agora reseta db.connect também (e restaura a
+//      implementação base do jest.setup) — sem isso o client de uma
+//      transação vazaria para o caso seguinte;
+//   2. o caso do 42703 saiu para um describe PRÓPRIO, no fim do arquivo.
+//      Ele desliga HAS_IDENTITY_COLS (flag module-level, é assim que o
+//      fallback de deploy parcial funciona) e, a partir dali, needsSync é
+//      sempre false — todo caso de sync declarado depois passaria "verde"
+//      sem testar nada.
 //
 // REGRA CRÍTICA (padrão karateDojoClaim.test.js): db.query.mockReset() em
 // afterEach — jest.clearAllMocks NÃO drena filas mockResolvedValueOnce.
@@ -68,6 +87,13 @@ const canalB = () => ({
 
 afterEach(() => {
   db.query.mockReset();
+  // F7.2: o PATCH pode abrir transação. Sem resetar (e restaurar) o
+  // db.connect, o client de um caso vazaria para o próximo.
+  db.connect.mockReset();
+  db.connect.mockImplementation(() => ({
+    query: jest.fn().mockResolvedValue({ rows: [] }),
+    release: jest.fn(),
+  }));
 });
 
 // Row "crua" do banco. De propósito SEM is_federated/fpkt_number: prova o
@@ -132,7 +158,9 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(res.body.practitioner_id).toBeNull();
     expect(res.body.fpkt_number).toBeNull();
     expect(res.body.federation_link_status).toBe('none');
+    // F7.2: aluno novo não tem praticante — nenhum sync, nenhuma transação
     expect(db.query.mock.calls.length).toBe(1);
+    expect(db.connect).not.toHaveBeenCalled();
   });
 
   test('POST menor de 18 sem responsável → 422 MENOR_SEM_RESPONSAVEL (sem tocar o banco)', async () => {
@@ -246,6 +274,9 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(updParams[updParams.length - 2]).toBe(sid);
   });
 
+  // ⚠️ F7.2: este é um dos dois casos que passam perto do sync. Ele
+  // continua com 2 queries e sem transação porque belt_label NÃO é
+  // identidade da pessoa — faixa é da federação, e o dojô não a sobrescreve.
   test('PATCH — F5a: estado federativo vem do SELECT que JÁ existia (2 queries, nenhuma nova)', async () => {
     db.query
       .mockResolvedValueOnce({
@@ -271,6 +302,9 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(res.body.federation_link_status).toBe('linked');
     // A asserção que protege a fila posicional deste arquivo:
     expect(db.query.mock.calls.length).toBe(2);
+    // F7.2: faixa não é identidade → nem transação, nem sync.
+    expect(db.connect).not.toHaveBeenCalled();
+    expect(res.body.identity_sync).toBeUndefined();
   });
 
   test('PATCH que TORNA menor sem responsável → 422 (estado resultante, não só o patch)', async () => {
@@ -429,7 +463,8 @@ describe('F7.0 — identidade do aluno (RG, endereço, foto, sexo)', () => {
 
     expect(res.status).toBe(201);
     // O que vai para o banco continua sendo M/F/other (a migration 262 mantém
-    // os dois vocabulários no CHECK; a conversão do dado é F7.2).
+    // os dois vocabulários no CHECK). Quem converte para o canônico é o sync
+    // da F7.2, na hora de escrever em customers — nunca aqui.
     expect(db.query.mock.calls[0][1][4]).toBe('M');
     expect(res.body.sex).toBe('M');
   });
@@ -495,6 +530,10 @@ describe('F7.0 — identidade do aluno (RG, endereço, foto, sexo)', () => {
     expect(res.body.karate_photo_url).toBe('https://cdn/legado.jpg'); // fallback
   });
 
+  // ⚠️ F7.2: o SEGUNDO caso que passa perto. Aqui o PATCH TOCA em
+  // identidade (rg, city) — mas studentRow() tem practitioner_id null, ou
+  // seja, não existe ficha na federação para receber nada. Continua sendo
+  // o caminho de 2 queries, sem transação.
   test('PATCH grava identidade e mantém o escopo (id + dojo_id no fim dos params)', async () => {
     db.query
       .mockResolvedValueOnce({ rows: [studentRow()] })                                      // SELECT existente
@@ -509,6 +548,7 @@ describe('F7.0 — identidade do aluno (RG, endereço, foto, sexo)', () => {
     expect(res.body.rg).toBe('7654321');
     expect(res.body.city).toBe('Ananindeua');
     expect(db.query.mock.calls.length).toBe(2); // nenhuma query nova
+    expect(db.connect).not.toHaveBeenCalled();  // aluno sem praticante: nada a sincronizar
 
     const updSql = String(db.query.mock.calls[1][0]);
     expect(updSql).toMatch(/rg = \$1/);
@@ -517,12 +557,288 @@ describe('F7.0 — identidade do aluno (RG, endereço, foto, sexo)', () => {
     expect(updParams[updParams.length - 1]).toBe(dojoId);
     expect(updParams[updParams.length - 2]).toBe(sid);
   });
+});
 
-  // ⚠️ ESTE TESTE FICA POR ÚLTIMO NO ARQUIVO DE PROPÓSITO.
-  // O flag HAS_IDENTITY_COLS do service é module-level (é assim que o
-  // fallback de deploy parcial funciona: degradou, ficou degradado). Depois
-  // que ele vira false, todo caso seguinte deste módulo rodaria degradado.
-  test('42703 (migration 262 pendente) → aluno é criado mesmo assim, sem os campos novos', async () => {
+// ════════════════════════════════════════════════════════════
+// F7.2 — SINCRONIZAÇÃO CONTÍNUA (dojô → federação)
+//
+// "A federação não faz gestão de informação. O trabalho dela é apenas
+//  receber a sincronização dos dados gerenciados pelos dojôs." (Caio)
+//
+// A F7.1 copiava a ficha UMA VEZ, ao federar. Aqui a cópia passa a
+// acontecer TODA VEZ que o sensei edita a identidade de um aluno cuja
+// ficha está adotada por ESTE dojô — na mesma transação e com trilha.
+//
+// ⚠️ MOCK POR SQL (mockImplementation despachando por regex), nunca fila
+// posicional: o sync acrescenta queries DENTRO da transação e uma fila
+// posicional quebraria a cada ajuste de ordem interna.
+// ════════════════════════════════════════════════════════════
+describe('F7.2 — PATCH sincroniza a identidade com a federação', () => {
+  const isStudentSelect = (s) => /FROM karate_dojo_students s/.test(s) && /WHERE s\.id = \$1 AND s\.dojo_id = \$2/.test(s);
+  const isStudentUpdate = (s) => /^UPDATE karate_dojo_students SET/.test(s.trim());
+  const isCandidate = (s) => /FROM customers c/.test(s) && /karate_identity_managed_by = 'dojo'/.test(s);
+  const isFedUpdate = (s) => /^UPDATE customers SET/.test(s.trim());
+  const isAudit = (s) => /INSERT INTO karate_identity_audit/.test(s);
+
+  // Aluno federado (tem praticante) — é o gatilho do sync.
+  const federado = (over = {}) => ({
+    ...studentRow({ practitioner_id: 'p1', ...over }),
+    is_federated: true,
+    has_pending_request: false,
+    fpkt_number: 'FPKT-123',
+    practitioner_name: 'Aluno Teste',
+  });
+
+  // Ficha do praticante como o SELECT de candidato do sync devolve.
+  const fichaFederacao = (over = {}) => ({
+    practitioner_id: 'p1',
+    practitioner_label: 'Aluno Teste',
+    fpkt_number: 'FPKT-123',
+    full_name: 'Aluno Teste',
+    birth_date: '1990-05-10',
+    cpf: '52998224725',
+    rg: null,
+    sex: 'masculino',
+    phone: '91999990000',
+    email: 'aluno@exemplo.com',
+    zip_code: null,
+    street: null,
+    number: null,
+    complement: null,
+    neighborhood: null,
+    city: null,
+    state: null,
+    photo_url: null,
+    ...over,
+  });
+
+  function mockPatch({ existing, tx }) {
+    db.query.mockImplementation((sql) => {
+      if (isStudentSelect(String(sql))) return Promise.resolve({ rows: [existing] });
+      return Promise.resolve({ rows: [] });
+    });
+    const client = {
+      query: jest.fn(async (sql) => {
+        const r = tx(String(sql));
+        if (r instanceof Error) throw r;
+        return r || { rows: [] };
+      }),
+      release: jest.fn(),
+    };
+    client.sqls = () => client.query.mock.calls.map((c) => String(c[0]));
+    client.find = (m) => client.query.mock.calls.find((c) => m(String(c[0])));
+    client.hit = (m) => client.sqls().some((s) => m(s));
+    db.connect.mockImplementation(() => client);
+    return client;
+  }
+
+  test('ficha adotada por ESTE dojô: o telefone sobe na MESMA transação, com trilha', async () => {
+    const client = mockPatch({
+      existing: federado(),
+      tx: (s) => {
+        if (isStudentUpdate(s)) return { rows: [studentRow({ practitioner_id: 'p1', phone: '91888880000' })] };
+        if (isCandidate(s)) return { rows: [fichaFederacao()] };
+        if (isFedUpdate(s)) return { rows: [{ id: 'p1' }] };
+        return { rows: [] };
+      },
+    });
+
+    const res = await request(app)
+      .patch(`${base}/students/${sid}`)
+      .set(canalA())
+      .send({ phone: '91888880000' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.phone).toBe('91888880000');
+    expect(res.body.identity_sync).toMatchObject({ status: 'ok', synced: true, fields: ['phone'] });
+
+    const all = client.sqls();
+    expect(all).toContain('BEGIN');
+    expect(all).toContain('COMMIT');
+    expect(all).not.toContain('ROLLBACK');
+    // o aluno é gravado ANTES do sync (se o sync cair, o salvamento fica)
+    expect(all.findIndex(isStudentUpdate)).toBeLessThan(all.findIndex(isFedUpdate));
+    expect(all).toContain('SAVEPOINT sp_identity_sync');
+
+    // O guarda é parametrizado pelo praticante do aluno e pelo dojô do TOKEN
+    expect(client.find(isCandidate)[1]).toEqual(['p1', dojoId]);
+    // E o que subiu foi só telefone — nada de matrícula/faixa/papéis
+    const setClause = String(client.find(isFedUpdate)[0]).split('WHERE')[0];
+    expect(setClause).toContain('phone =');
+    expect(setClause).not.toContain('karate_registration_number');
+    expect(setClause).not.toContain('belt');
+    expect(setClause).not.toContain('is_active');
+    // trilha com action=sync
+    expect(client.find(isAudit)[1][7]).toBe('sync');
+  });
+
+  test('praticante gerido pela FEDERAÇÃO: nada é escrito em customers (e o aluno salva)', async () => {
+    const client = mockPatch({
+      existing: federado(),
+      tx: (s) => {
+        if (isStudentUpdate(s)) return { rows: [studentRow({ practitioner_id: 'p1', phone: '91888880000' })] };
+        if (isCandidate(s)) return { rows: [] }; // managed_by='federation' → não volta
+        return { rows: [] };
+      },
+    });
+
+    const res = await request(app)
+      .patch(`${base}/students/${sid}`)
+      .set(canalA())
+      .send({ phone: '91888880000' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.phone).toBe('91888880000');
+    expect(res.body.identity_sync).toMatchObject({ status: 'skipped', reason: 'NOT_ADOPTED_BY_THIS_DOJO' });
+    expect(client.hit(isFedUpdate)).toBe(false);
+    expect(client.hit(isAudit)).toBe(false);
+    expect(client.sqls()).toContain('COMMIT');
+  });
+
+  test('falha do sync NÃO derruba o salvamento — e não passa silenciosa', async () => {
+    const client = mockPatch({
+      existing: federado(),
+      tx: (s) => {
+        if (isStudentUpdate(s)) return { rows: [studentRow({ practitioner_id: 'p1', phone: '91888880000' })] };
+        if (isCandidate(s)) return { rows: [fichaFederacao()] };
+        if (isFedUpdate(s)) return Object.assign(new Error('deadlock detected'), { code: '40P01' });
+        return { rows: [] };
+      },
+    });
+
+    const res = await request(app)
+      .patch(`${base}/students/${sid}`)
+      .set(canalA())
+      .send({ phone: '91888880000' });
+
+    // O aluno FOI salvo: 200 com o telefone novo.
+    expect(res.status).toBe(200);
+    expect(res.body.phone).toBe('91888880000');
+    // E o sensei fica sabendo que a federação não recebeu.
+    expect(res.body.identity_sync).toMatchObject({ status: 'failed', synced: false, error_code: '40P01' });
+
+    const all = client.sqls();
+    expect(all).toContain('ROLLBACK TO SAVEPOINT sp_identity_sync'); // descarta SÓ o sync
+    expect(all).toContain('COMMIT');                                  // o aluno persiste
+    expect(all).not.toContain('ROLLBACK');                            // nunca o rollback da transação
+  });
+
+  test('o sync converge a ficha inteira, e o sexo sobe no vocabulário canônico', async () => {
+    const client = mockPatch({
+      existing: federado(),
+      tx: (s) => {
+        if (isStudentUpdate(s)) return { rows: [studentRow({ practitioner_id: 'p1', sex: 'F', city: 'Belém' })] };
+        if (isCandidate(s)) return { rows: [fichaFederacao({ sex: 'masculino', city: null })] };
+        if (isFedUpdate(s)) return { rows: [{ id: 'p1' }] };
+        return { rows: [] };
+      },
+    });
+
+    const res = await request(app)
+      .patch(`${base}/students/${sid}`)
+      .set(canalA())
+      .send({ sex: 'feminino' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.sex).toBe('F'); // o dojô continua vendo M/F/other
+
+    const [sql, vals] = client.find(isFedUpdate);
+    const setClause = String(sql).split('WHERE')[0];
+    const idx = (col) => Number(setClause.match(new RegExp(`${col} = \\$(\\d+)`))[1]) - 1;
+    expect(vals[idx('sex')]).toBe('feminino'); // customers usa o canônico
+    // city estava vazio na federação e preenchido no dojô → também sobe
+    // (converge a ficha, não só o campo do PATCH)
+    expect(vals[idx('city')]).toBe('Belém');
+    expect(res.body.identity_sync.fields).toEqual(expect.arrayContaining(['sex', 'city']));
+  });
+
+  test('Canal B não sincroniza nada (403 antes de qualquer query)', async () => {
+    const res = await request(app)
+      .patch(`${base}/students/${sid}`)
+      .set(canalB())
+      .send({ phone: '91888880000' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PORTAL_READ_ONLY');
+    expect(db.query).not.toHaveBeenCalled();
+    expect(db.connect).not.toHaveBeenCalled();
+  });
+});
+
+describe('F7.2 — import em lote sincroniza sem explodir', () => {
+  const isBatchCandidate = (s) => /JOIN customers c ON c\.id = s\.practitioner_id/.test(s);
+
+  function mockImportTx(dispatch) {
+    const client = {
+      query: jest.fn(async (sql, params) => dispatch(String(sql), params) || { rows: [] }),
+      release: jest.fn(),
+    };
+    client.sqls = () => client.query.mock.calls.map((c) => String(c[0]));
+    client.count = (m) => client.sqls().filter((s) => m(s)).length;
+    client.find = (m) => client.query.mock.calls.find((c) => m(String(c[0])));
+    db.connect.mockImplementationOnce(() => client);
+    return client;
+  }
+
+  test('import comum (ninguém federado) → ZERO query de sync', async () => {
+    const client = mockImportTx((s) => {
+      if (/INSERT INTO karate_dojo_students/.test(s)) return { rows: [{ id: 'i1', practitioner_id: null }] };
+      return { rows: [] };
+    });
+
+    const res = await request(app)
+      .post(`${base}/students/import`)
+      .set(canalA())
+      .send({ rows: [{ full_name: 'Um' }, { full_name: 'Dois' }, { full_name: 'Três' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.created).toBe(3);
+    // O INSERT devolve practitioner_id para que "ninguém nasce federado"
+    // seja verificado, e não suposto.
+    expect(String(client.find((s) => /INSERT INTO karate_dojo_students/.test(s))[0]))
+      .toContain('RETURNING id, practitioner_id');
+    expect(client.count(isBatchCandidate)).toBe(0);
+    expect(client.sqls()).not.toContain('SAVEPOINT sp_identity_sync_batch');
+    expect(res.body.identity_sync).toMatchObject({ status: 'ok', synced: 0, reason: 'NOTHING_TO_SYNC' });
+    expect(client.sqls()).toContain('COMMIT');
+  });
+
+  test('linhas com praticante → UMA query de candidatos para o lote inteiro', async () => {
+    let seq = 0;
+    const client = mockImportTx((s) => {
+      if (/INSERT INTO karate_dojo_students/.test(s)) {
+        seq += 1;
+        return { rows: [{ id: `i${seq}`, practitioner_id: `p${seq}` }] };
+      }
+      if (isBatchCandidate(s)) return { rows: [] }; // nenhuma ficha adotada por este dojô
+      return { rows: [] };
+    });
+
+    const res = await request(app)
+      .post(`${base}/students/import`)
+      .set(canalA())
+      .send({ rows: [{ full_name: 'Um' }, { full_name: 'Dois' }, { full_name: 'Três' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.created).toBe(3);
+    // A ASSERÇÃO DESTE CASO: 3 linhas vinculadas → 1 query, não 3.
+    expect(client.count(isBatchCandidate)).toBe(1);
+    expect(client.find(isBatchCandidate)[1]).toEqual([['i1', 'i2', 'i3'], dojoId]);
+    expect(client.sqls()).toContain('SAVEPOINT sp_identity_sync_batch');
+    expect(client.sqls()).toContain('COMMIT');
+    expect(client.sqls()).not.toContain('ROLLBACK');
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// ⚠️ ESTE DESCRIBE FICA POR ÚLTIMO NO ARQUIVO DE PROPÓSITO.
+// O flag HAS_IDENTITY_COLS do service é module-level (é assim que o
+// fallback de deploy parcial funciona: degradou, ficou degradado). Depois
+// que ele vira false, todo caso seguinte deste módulo rodaria degradado —
+// e, na F7.2, com o sync DESLIGADO (needsSync exige a 262).
+// ════════════════════════════════════════════════════════════
+describe('F7.0/F7.2 — deploy parcial: migration 262 ainda não aplicada', () => {
+  test('42703 → aluno é criado mesmo assim, sem os campos novos', async () => {
     const err42703 = Object.assign(
       new Error('column "zip_code" of relation "karate_dojo_students" does not exist'),
       { code: '42703' }
@@ -547,5 +863,26 @@ describe('F7.0 — identidade do aluno (RG, endereço, foto, sexo)', () => {
     expect(String(db.query.mock.calls[1][0])).not.toMatch(/\$24/);
     // O shape não muda de formato: as colunas viram NULL::text com o alias.
     expect(String(db.query.mock.calls[1][0])).toMatch(/NULL::text AS zip_code/);
+  });
+
+  test('sem a 262, o PATCH de aluno federado NÃO abre transação (não há ficha adotada)', async () => {
+    // HAS_IDENTITY_COLS já está false por causa do caso anterior — que é
+    // exatamente o estado que este caso quer exercitar.
+    db.query
+      .mockResolvedValueOnce({ rows: [{ ...studentRow({ practitioner_id: 'p1' }), is_federated: true }] })
+      .mockResolvedValueOnce({ rows: [studentRow({ practitioner_id: 'p1', phone: '91888880000' })] });
+
+    const res = await request(app)
+      .patch(`${base}/students/${sid}`)
+      .set(canalA())
+      .send({ phone: '91888880000' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.phone).toBe('91888880000');
+    // Sem a 262 não existe karate_identity_managed_by: não há o que
+    // sincronizar, e o custo do sync tem que ser zero.
+    expect(db.connect).not.toHaveBeenCalled();
+    expect(db.query.mock.calls.length).toBe(2);
+    expect(res.body.identity_sync).toBeUndefined();
   });
 });

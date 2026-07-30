@@ -35,6 +35,14 @@
 // (F7.0). Toda a lógica nova mora aqui e a rota chama daqui, para a área de
 // conflito entre os dois PRs ser ZERO naquele arquivo.
 //
+// ── F7.2 (30/07/2026): ESTE ARQUIVO É A FONTE DA LISTA ──────
+// A sincronização contínua (services/karateIdentitySync.js) consome DAQUI
+// IDENTITY_FIELDS, compareKey, hasValue, storeForDojo/storeForFederation e
+// writeIdentityAudit. Nada é copiado para lá: a adoção (F7.1) e o sync
+// (F7.2) precisam concordar campo a campo, e duas listas iguais hoje são
+// duas listas diferentes em duas semanas. A ÚNICA mudança da F7.2 neste
+// arquivo é a superfície de exportação abaixo — comportamento intacto.
+//
 // ── DEFENSIVO A SCHEMA PENDENTE (262 e 263) ─────────────────
 // Este código sobe ANTES das migrations. Em vez do padrão
 // try/catch-42703-e-retenta (que dentro de um BEGIN envenena a transação),
@@ -148,6 +156,9 @@ function _resetSchemaCache() {
 // Uma lista alimenta SELECT, comparação, resolução e UPDATE dos dois
 // lados. É o mesmo motivo do IDENTITY_COLS do #446: o clássico "adicionei
 // na comparação e esqueci no UPDATE" não tem onde acontecer.
+//
+// F7.2: a sincronização contínua importa ESTA constante — se um campo
+// entrar aqui, ele passa a subir no sync automaticamente.
 //
 // dojoCol/fedCol são nomes de coluna vindos DESTA constante — nunca do
 // corpo da requisição. Não há concatenação de identificador com dado do
@@ -443,6 +454,7 @@ function validateResolution(resolution) {
 // dado preenchido com o vazio do outro lado — nem quando o sensei pede
 // "federation" num campo em que a federação não tem nada. Resolver conflito
 // é escolher entre dois valores, nunca destruir um.
+// (F7.2 herda esta MESMA regra para o sync contínuo — ver karateIdentitySync.)
 function planResolution(comparison, resolution) {
   const dojoWrites = [];
   const fedWrites = [];
@@ -495,6 +507,11 @@ function planResolution(comparison, resolution) {
 // da adoção (armadilha tx-poison). E a ordem é deliberada — 263 primeiro,
 // roster_events como rede. Se os DOIS falharem, o erro sobe e a transação
 // inteira aborta: adoção sem rastro não acontece.
+//
+// F7.2: o sync contínuo grava a trilha por AQUI (action 'sync'). O
+// SAVEPOINT interno aninha dentro do SAVEPOINT do sync — Postgres permite,
+// e é o que garante que uma trilha impossível descarte o sync inteiro em
+// vez de derrubar o salvamento do aluno.
 async function writeIdentityAudit(client, probe, rec) {
   await client.query('SAVEPOINT sp_identity_audit');
 
@@ -914,4 +931,14 @@ module.exports = {
   planResolution,
   compareKey,
   _resetSchemaCache,
+  // ── F7.2 ──────────────────────────────────────────────────
+  // Consumidos por services/karateIdentitySync.js. Exportar em vez de
+  // copiar é o que garante que a ADOÇÃO (F7.1) e o SYNC (F7.2) usem
+  // exatamente o mesmo predicado de "tem valor", o mesmo vocabulário de
+  // gravação e a mesma trilha. Duas cópias iguais hoje seriam duas cópias
+  // diferentes daqui a duas semanas.
+  hasValue,
+  storeForDojo,
+  storeForFederation,
+  writeIdentityAudit,
 };
