@@ -118,7 +118,15 @@ Base: `/api/v1/companies/:id/product-categories`
 | POST | `/:catId/move` | Body: `{ parent_id, sort_order }`. Valida ciclo e profundidade. |
 | POST | `/merge` | Body: `{ source_ids: [], target_id }`. |
 | POST | `/reorder` | Body: `{ parent_id, ordered_ids: [] }`. |
-| POST | `/clone-from` | Body: `{ source_company_id }`. Copia árvore vazia de outra unidade. |
+| POST | `/clone-from` | Body: `{ source_company_id }`. Copia árvore vazia de outra unidade. **Exige que origem e destino estejam no mesmo grupo de faturamento** (padrão `group_root` de `products.js`) — ver §3.2. |
+
+### 3.2 `POST /clone-from` — guarda de grupo [ACRESCENTADO EM 30/07]
+
+`clone-from` copia a árvore de **outra empresa**. Sem guarda, qualquer empresa clonaria a taxonomia de qualquer outra — a estrutura de categorias de um concorrente é informação de negócio, e a rota é autenticada apenas contra a empresa de **destino**.
+
+A rota exige que origem e destino estejam no **mesmo grupo de faturamento**, usando o mesmo padrão `group_root` que `src/routes/products.js` já aplica. Origem fora do grupo → `403`.
+
+Isso resolve o caso Davi (Matriz → Villa Branca, mesmo grupo) e fecha o buraco. Não estava no congelamento de 28/07 — foi levantado na implementação do B1 e aceito na revisão de 30/07.
 
 ### 3.1 `DELETE /:catId` — decisão B1, fechada em 30/07
 
@@ -285,6 +293,19 @@ Estado da base em 30/07: `product_category_links` = **0 linhas**, `category_migr
 
 Também nesta revisão: §8 com os nomes reais dos 7 triggers, §6 com a terceira exceção `P0001` (`CATEGORY_TYPE_MISMATCH`) e com o `23503` da FK `parent_id`, §7 marcando a query da spec como superada.
 
+### 9.1.1 Adendo de 30/07 (noite) — revisão dos PRs da Onda B
+
+Levantado ao revisar #440 (B1), #441 (B2) e #637 (B3), todos escritos em paralelo:
+
+| # | O que apareceu | Onde ficou |
+|---|---|---|
+| 1 | **O contrato não fixava os envelopes de resposta.** O frontend inventou cinco, inclusive um `{ ok: boolean }` inexistente, e abreviou `product_count`/`sample_product_names` para `count`/`sample_names`. Reconciliado nos dois lados. | §10, nova |
+| 2 | **`clone-from` não tinha guarda de tenant.** Sem ela, qualquer empresa clonaria a árvore de qualquer outra. Levantado pelo agente do B1 por conta própria, aceito. | §3.2, nova |
+| 3 | O `GET /` e o `POST /` devolviam projeção incompleta de `Category` (sem `parent_id`, `slug`, `depth` e os metadados) — o cliente não conseguiria derivar hierarquia da lista flat. Corrigido no backend, envelope preservado. | §10 |
+| 4 | O caminho do código de erro (`err.data.code`) foi verificado nos dois lados e **bate**. | §10.1 |
+
+**Lição para as próximas fases: congelar objeto e lista de rotas não é congelar contrato.** Enquanto o envelope de resposta não estiver escrito, dois agentes paralelos vão inventar dois envelopes diferentes, e a conta só aparece na integração.
+
 ### 9.2 Divergências conhecidas contra a SPEC_LOJA_F0_TAXONOMIA_v2.md
 
 Onde divergir, **este documento vence**. Lista para quem ler a spec depois:
@@ -296,3 +317,34 @@ Onde divergir, **este documento vence**. Lista para quem ler a spec depois:
 | §4.3 — "cinco triggers", nomes `trg_category_path`, `trg_category_no_cycle` | Sete objetos, com os nomes da §8. | §8 |
 | §4.6 — query de árvore com `LIKE ... ESCAPE '\'` | `left(d.path, length(p.path)+1) = p.path \|\| '/'`. | §7 |
 | Bloco B3, aceite — "`type` é parâmetro do hook e do picker" | O picker e os hooks novos são product-only. Sem seletor de tipo. | §1, §2 |
+
+---
+
+## 10. Envelopes de resposta — fixados em 30/07, depois da Onda B
+
+O congelamento de 28/07 definiu o **objeto** `Category` e a lista de rotas, mas **não o envelope de cada resposta**. O resultado foi previsível: o frontend construiu contra mock e inventou cinco envelopes que o backend não devolvia (inclusive um `{ ok: boolean }` que não existe em lugar nenhum). Foi reconciliado na revisão dos PRs #440/#441/#637; os shapes abaixo são os **implementados e verificados**, e valem para C1, C2 e D sem nova negociação.
+
+| Endpoint | Envelope |
+|---|---|
+| `GET /product-categories/` | `{ categories: Category[], total, type }` — objeto `Category` **completo** (§2), inclusive `parent_id`, `slug`, `depth` |
+| `GET /product-categories/tree` | `{ categories: Category[], type }` — aninhado por `children`, com `product_count_total` |
+| `POST /product-categories/` | objeto `Category` completo |
+| `PATCH /product-categories/:catId` | objeto `Category` completo + `affected_products` |
+| `DELETE /product-categories/:catId` | `{ deleted: true, id, moved_products, type }` |
+| `GET /products/unclassified` | `{ products: [{ id, name, sku, barcode, category, stock_qty, price, created_at }], total, limit, offset }` |
+| `PUT /products/:productId/categories` | `{ product_id, primary_category_id, also_in }` |
+| `POST /products/categories/bulk` | `{ updated, mode, primary_category_id }` |
+| `GET /categories/migration/proposal` | `{ items: StagingRow[], orphan: StagingRow \| null }` |
+| `GET /categories/migration/status` | `{ state, total, approved, applied, orphans }` |
+| `GET /products/brand-candidates` | `{ candidates: [{ token, product_count }] }` |
+| `POST /products/brand/apply` | `{ results: [{ token, brand, updated }] }` |
+
+`StagingRow` = `{ id, raw_value, product_count, sample_product_names, kind, target_path, status, resolved_category_id, resolved_at, created_at, updated_at }` — os nomes são os **das colunas de `category_migration_staging`**. Não abreviar para `count` / `sample_names` no cliente.
+
+### 10.1 Corpo de erro
+
+O código de erro vai na **raiz** do JSON: `{ error: "<mensagem>", code: "CATEGORY_HAS_CHILDREN", ...extra }`, onde `extra` é `children_count`, `product_count`, `existing_id` ou a lista de candidatos, conforme a §6.
+
+No `aura-app`, `services/api.ts` faz `throw new ApiError(data.error, res.status, data)` — **o corpo cru inteiro fica em `ApiError.data`**. Logo o cliente lê o código em **`err.data.code`**. Verificado nos dois lados em 30/07.
+
+Ressalva: os `400` de validação simples do B2 (`kind` inválido, `assignments[]` ausente) devolvem só `{ error }`, sem `code`. O cliente cai no fallback `err.message`, o que é aceitável. Não padronizar isso agora.
