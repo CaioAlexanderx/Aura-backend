@@ -27,6 +27,13 @@ router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
 router.use('/', require('./pdvSettings'));
 router.use('/caixa', require('./caixa'));
+// F0 Bloco B2 (30/07/2026): categoryMigration atende /categories/migration/*
+// e /products/brand-candidates + /products/brand/apply, com os caminhos ja
+// completos dentro do proprio router -- por isso monta na RAIZ. Tem que vir
+// ANTES de todos os mounts de /products: ./products tem GET /:id curinga e
+// capturaria 'brand-candidates' como uuid. Rota estatica sempre antes da
+// parametrica.
+router.use('/', require('./categoryMigration'));
 router.use('/products', require('./productsDuplicates'));
 router.use('/products', require('./productsBatch'));
 router.use('/products', require('./productsVariations'));
