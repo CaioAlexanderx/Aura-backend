@@ -8,23 +8,37 @@
 //   caminho 2 — o aluno é NOVO → abre a solicitação H1 (com student_id) e
 //                a aprovação devolve o practitioner_id ao aluno
 //
+// ⚠️ ATUALIZADO PELA F7.1 (30/07/2026) — o caminho 1 virou DOIS MODOS:
+//   { fpkt_number }               → PREVIEW, não grava nada
+//   { fpkt_number, confirm:true } → confirmação, grava numa transação
+// Os casos deste arquivo que "vinculam" passaram a mandar confirm:true e a
+// inspecionar o CLIENT da transação (db.connect) em vez de db.query. O que
+// NÃO mudou está marcado caso a caso — em especial 404
+// FPKT_NUMBER_NOT_FOUND, o gate DOJO_NAO_CONECTADO, o Canal B read-only,
+// o caminho 2 (solicitação H1) e o filtro ?federated=.
+//
 // ⚠️ MOCK POR SQL (mockImplementation), NUNCA fila posicional de
 // mockResolvedValueOnce: query nova entrando na frente (foi o que o helper
 // karateDojoLinkStatus fez no PR #422) desalinha a fila inteira e derruba
 // o CI. Mock genérico {rows: []} também não serve: os handlers leem
-// rows[0] direto.
+// rows[0] direto. A F7.1 acrescentou UMA query nova no início do caminho 1
+// (a sonda de schema no information_schema) — mock por SQL absorve isso
+// sem que nenhum outro caso precise mudar.
 //
-// db.query.mockReset() + db.connect.mockReset() em afterEach.
+// db.query.mockReset() + db.connect.mockReset() em afterEach, mais
+// identityLink._resetSchemaCache(): a sonda tem cache module-level e sem o
+// reset o primeiro caso decidiria o schema de todos os outros.
 // ============================================================
 'use strict';
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
 
-let app, db;
+let app, db, identityLink;
 beforeAll(() => {
   ({ app } = require('../../src/index'));
   db = require('../../src/config/database');
+  identityLink = require('../../src/services/karateStudentIdentityLink');
 });
 
 const SECRET = 'aura-test-secret-2026';
@@ -70,37 +84,81 @@ const findCall = (m) => db.query.mock.calls.find((c) => matches(m, String(c[0]))
 
 // Query do helper karateDojoLinkStatus (a única que menciona a coluna).
 const isLinkQuery = (s) => /SELECT\s+karate_dojo_linked_at/i.test(s);
-// Ficha do aluno lida pelos fluxos de federação (loadStudentOrThrow).
+// F7.1: sonda de schema (uma query, sem exceção — ver karateStudentIdentityLink).
+const isSchemaProbe = (s) => /information_schema/.test(s);
+// Ficha do aluno lida pelos fluxos de federação.
 const isStudentLoad = (s) =>
-  /FROM karate_dojo_students/.test(s) && /WHERE id = \$1 AND dojo_id = \$2/.test(s);
-// "Este praticante já pertence a outro aluno deste dojô?"
+  /FROM karate_dojo_students/.test(s) && /WHERE s?\.?id = \$1 AND s?\.?dojo_id = \$2/.test(s);
+// F7.1: "este praticante já pertence a algum aluno?" — agora GLOBAL ($1 é o
+// practitioner, não mais o dojô).
 const isClaimCheck = (s) =>
-  /FROM karate_dojo_students/.test(s) && /practitioner_id = \$2/.test(s);
-// lookupByFpktNumber (karatePractitionerDedup)
+  /FROM karate_dojo_students/.test(s) && /practitioner_id = \$1/.test(s);
+// lookupByFpktNumber / loadPractitionerByNumber (mesmo WHERE)
 const isFpktLookup = (s) => /karate_registration_number = \$2/.test(s);
 // Solicitação H1 pendente DESTE aluno
 const isPendingByStudent = (s) =>
   /FROM karate_practitioner_requests/.test(s) && /student_id = \$2/.test(s);
 
+// Schema sondado. Default = tudo aplicado (262 + 263); casos de degradação
+// sobrescrevem.
+let SCHEMA = null;
+const schemaRow = (over = {}) => ({
+  has_customer_identity: true,
+  has_student_identity: true,
+  has_is_federated: true,
+  has_identity_audit: true,
+  ...over,
+});
+
+// Ficha do aluno no formato que a F7.1 lê (aliases = chaves de comparação).
 const studentRow = (over = {}) => ({
   id: sid,
-  full_name: 'Aluno Teste',
+  dojo_id: dojoId,
+  practitioner_id: null,
+  full_name: 'João Praticante',
   birth_date: '1995-04-12',
   cpf: '52998224725',
+  rg: null,
   sex: 'M',
   phone: '91999990000',
   email: 'aluno@exemplo.com',
+  zip_code: null,
+  street: null,
+  number: null,
+  complement: null,
+  neighborhood: null,
+  city: null,
+  state: null,
   photo_url: null,
-  belt_label: 'Branca',
-  belt_order: 1,
-  status: 'active',
-  guardian_id: null,
-  consent_lgpd: false,
-  notes: null,
-  practitioner_id: null,
-  enrolled_at: '2026-07-01',
-  created_at: '2026-07-19T00:00:00Z',
-  updated_at: '2026-07-19T00:00:00Z',
+  ...over,
+});
+
+// Praticante da federação, IDÊNTICO ao aluno acima por padrão: assim os
+// casos que só querem testar o VÍNCULO não geram nenhuma escrita de campo
+// e os parâmetros do UPDATE continuam sendo [practitioner, sid, dojoId].
+const practitionerRow = (over = {}) => ({
+  id: 'p1',
+  karate_registration_number: 'FPKT-123',
+  dojo_id: outroDojoId,
+  dojo_name: 'Dojô Vizinho',
+  is_active: true,
+  full_name: 'João Praticante',
+  birth_date: '1995-04-12',
+  cpf: '52998224725',
+  rg: null,
+  sex: 'masculino', // vocabulário canônico — compareKey normaliza os dois
+  phone: '91999990000',
+  email: 'aluno@exemplo.com',
+  zip_code: null,
+  street: null,
+  number: null,
+  complement: null,
+  neighborhood: null,
+  city: null,
+  state: null,
+  photo_url: null,
+  karate_identity_managed_by: 'federation',
+  karate_identity_dojo_id: null,
   ...over,
 });
 
@@ -109,6 +167,7 @@ function mockDojo(linkedAt, extra) {
   db.query.mockImplementation((sql) => {
     const s = String(sql);
     if (isLinkQuery(s)) return Promise.resolve({ rows: [{ karate_dojo_linked_at: linkedAt }] });
+    if (isSchemaProbe(s)) return Promise.resolve({ rows: [SCHEMA || schemaRow()] });
     if (extra) {
       const r = extra(s);
       if (r) return Promise.resolve(r);
@@ -128,44 +187,51 @@ function mockTx(dispatch) {
 }
 
 const txSqls = (client) => client.query.mock.calls.map((c) => String(c[0]));
+const txFind = (client, m) => client.query.mock.calls.find((c) => matches(m, String(c[0])));
+const txHit = (client, m) => txSqls(client).some((s) => matches(m, s));
+
+// Transação padrão da CONFIRMAÇÃO: relê aluno + praticante com lock,
+// grava, audita, commita.
+function mockConfirmTx({ student = studentRow(), practitioner = practitionerRow(), claim = null } = {}) {
+  return mockTx((s) => {
+    if (isStudentLoad(s)) return { rows: [student] };
+    if (isFpktLookup(s)) return { rows: [practitioner] };
+    if (isClaimCheck(s)) return { rows: claim ? [claim] : [] };
+    if (/UPDATE karate_dojo_students/.test(s)) return { rows: [{ id: sid }] };
+    if (/UPDATE customers/.test(s)) return { rows: [{ id: practitioner.id, name: practitioner.full_name, karate_registration_number: practitioner.karate_registration_number }] };
+    return { rows: [] };
+  });
+}
 
 afterEach(() => {
   db.query.mockReset();
   db.connect.mockReset();
+  identityLink._resetSchemaCache();
+  SCHEMA = null;
 });
 
 // ============================================================
 // CAMINHO 1 — o aluno JÁ tem número FPKT
 // ============================================================
-describe('F5a — federar informando o número FPKT', () => {
+describe('F5a/F7.1 — federar informando o número FPKT', () => {
   test('sem token → 401', async () => {
     const res = await request(app).post(`${dojoBase}/students/${sid}/federate`).send({ fpkt_number: 'FPKT-123' });
     expect(res.status).toBe(401);
   });
 
-  test('número existente em OUTRO dojô → vincula e avisa que é transferência', async () => {
+  test('número existente em OUTRO dojô → confirma, vincula e avisa que é transferência', async () => {
     mockDojo(LINKED_AT, (s) => {
-      if (/UPDATE karate_dojo_students/.test(s)) return { rows: [{ id: sid }] };
       if (isClaimCheck(s)) return { rows: [] };
       if (isStudentLoad(s)) return { rows: [studentRow()] };
-      if (isFpktLookup(s)) {
-        return {
-          rows: [{
-            id: 'p1',
-            name: 'João Praticante',
-            dojo_id: outroDojoId,
-            dojo_name: 'Dojô Vizinho',
-            is_active: true,
-          }],
-        };
-      }
+      if (isFpktLookup(s)) return { rows: [practitionerRow()] };
       return null;
     });
+    const client = mockConfirmTx();
 
     const res = await request(app)
       .post(`${dojoBase}/students/${sid}/federate`)
       .set(canalA())
-      .send({ fpkt_number: '  FPKT-123 ' });
+      .send({ fpkt_number: '  FPKT-123 ', confirm: true });
 
     expect(res.status).toBe(200);
     expect(res.body.linked).toBe(true);
@@ -178,68 +244,81 @@ describe('F5a — federar informando o número FPKT', () => {
       fpkt_number: 'FPKT-123', // normalizado (trim)
     });
 
-    // O vínculo gravado: practitioner_id + declaração, escopado pelo TOKEN
-    const upd = findCall(/UPDATE karate_dojo_students/);
+    // O vínculo gravado: practitioner_id + declaração, escopado pelo TOKEN.
+    // Fichas idênticas → nenhuma escrita de campo → params inalterados.
+    const upd = txFind(client, /UPDATE karate_dojo_students/);
     expect(String(upd[0])).toContain('is_federated = true');
     expect(upd[1]).toEqual(['p1', sid, dojoId]);
+
+    // F7.1: a ADOÇÃO acontece na MESMA transação
+    const adopt = txFind(client, /UPDATE customers/);
+    expect(String(adopt[0])).toContain("karate_identity_managed_by = 'dojo'");
+    expect(res.body.adopted).toBe(true);
+
+    const all = txSqls(client);
+    expect(all).toContain('BEGIN');
+    expect(all).toContain('COMMIT');
+    expect(all).not.toContain('ROLLBACK');
   });
 
   test('número do PRÓPRIO dojô → vincula, mas is_transfer:false', async () => {
+    const p = practitionerRow({ dojo_id: dojoId, dojo_name: 'Meu Dojô' });
     mockDojo(LINKED_AT, (s) => {
-      if (/UPDATE karate_dojo_students/.test(s)) return { rows: [{ id: sid }] };
       if (isClaimCheck(s)) return { rows: [] };
       if (isStudentLoad(s)) return { rows: [studentRow()] };
-      if (isFpktLookup(s)) {
-        return { rows: [{ id: 'p1', name: 'João Praticante', dojo_id: dojoId, dojo_name: 'Meu Dojô', is_active: true }] };
-      }
+      if (isFpktLookup(s)) return { rows: [p] };
       return null;
     });
+    mockConfirmTx({ practitioner: p });
 
     const res = await request(app)
       .post(`${dojoBase}/students/${sid}/federate`)
       .set(canalA())
-      .send({ fpkt_number: 'FPKT-123' });
+      .send({ fpkt_number: 'FPKT-123', confirm: true });
 
     expect(res.status).toBe(200);
     expect(res.body.linked).toBe(true);
     expect(res.body.is_transfer).toBe(false);
   });
 
-  test('número inexistente → 404 FPKT_NUMBER_NOT_FOUND, nada gravado', async () => {
+  test('número inexistente → 404 FPKT_NUMBER_NOT_FOUND, nada gravado (INALTERADO)', async () => {
     mockDojo(LINKED_AT, (s) => {
       if (isStudentLoad(s)) return { rows: [studentRow()] };
-      return null; // lookup cai no default {rows: []} → found:false
+      return null; // lookup cai no default {rows: []} → not found
     });
 
     const res = await request(app)
       .post(`${dojoBase}/students/${sid}/federate`)
       .set(canalA())
-      .send({ fpkt_number: 'FPKT-INEXISTENTE' });
+      .send({ fpkt_number: 'FPKT-INEXISTENTE', confirm: true });
 
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('FPKT_NUMBER_NOT_FOUND');
     expect(hitSql(/UPDATE karate_dojo_students/)).toBe(false);
+    expect(db.connect).not.toHaveBeenCalled();
   });
 
-  test('número já vinculado a OUTRO aluno do mesmo dojô → 409 PRACTITIONER_JA_VINCULADO', async () => {
+  test('número já vinculado a OUTRO aluno do mesmo dojô → 409 PRATICANTE_JA_VINCULADO', async () => {
     mockDojo(LINKED_AT, (s) => {
-      if (isClaimCheck(s)) return { rows: [{ id: 'outro-aluno', full_name: 'Maria Aluna' }] };
+      if (isClaimCheck(s)) return { rows: [{ id: 'outro-aluno', full_name: 'Maria Aluna', dojo_id: dojoId, dojo_name: 'Meu Dojô' }] };
       if (isStudentLoad(s)) return { rows: [studentRow()] };
-      if (isFpktLookup(s)) {
-        return { rows: [{ id: 'p1', name: 'João Praticante', dojo_id: dojoId, dojo_name: 'Meu Dojô', is_active: true }] };
-      }
+      if (isFpktLookup(s)) return { rows: [practitionerRow({ dojo_id: dojoId, dojo_name: 'Meu Dojô' })] };
       return null;
     });
 
     const res = await request(app)
       .post(`${dojoBase}/students/${sid}/federate`)
       .set(canalA())
-      .send({ fpkt_number: 'FPKT-123' });
+      .send({ fpkt_number: 'FPKT-123', confirm: true });
 
     expect(res.status).toBe(409);
-    expect(res.body.code).toBe('PRACTITIONER_JA_VINCULADO');
+    // ⚠️ RENOMEADO na F7.1: PRACTITIONER_JA_VINCULADO → PRATICANTE_JA_VINCULADO
+    // (contrato final, o app está sendo feito contra ele). legacy_code
+    // acompanha para o app não quebrar entre um deploy e outro.
+    expect(res.body.code).toBe('PRATICANTE_JA_VINCULADO');
+    expect(res.body.legacy_code).toBe('PRACTITIONER_JA_VINCULADO');
     expect(res.body.error).toMatch(/Maria Aluna/);
-    expect(hitSql(/UPDATE karate_dojo_students/)).toBe(false);
+    expect(db.connect).not.toHaveBeenCalled();
   });
 
   test('aluno de outro dojô → 404 (query escopada por req.dojoId)', async () => {
@@ -272,6 +351,8 @@ describe('F5a — federar informando o número FPKT', () => {
 
 // ============================================================
 // CAMINHO 2 — o aluno é NOVO na federação (solicitação H1)
+// INALTERADO PELA F7.1: aqui quem cria o praticante é a FEDERAÇÃO, e a
+// conferência é a fila de aprovação dela.
 // ============================================================
 describe('F5a — federar aluno novo (abre a solicitação H1 que já existia)', () => {
   // O que o aluno NÃO tem no cadastro do dojô (rg + endereço) vem do corpo;
@@ -287,10 +368,36 @@ describe('F5a — federar aluno novo (abre a solicitação H1 que já existia)',
     state: 'PA',
   });
 
+  // O caminho 2 usa loadStudentOrThrow do service antigo (SELECT sem alias
+  // de tabela) — shape próprio, com belt_label e guardian.
+  const h1StudentRow = (over = {}) => ({
+    id: sid,
+    full_name: 'Aluno Teste',
+    birth_date: '1995-04-12',
+    cpf: '52998224725',
+    sex: 'M',
+    phone: '91999990000',
+    email: 'aluno@exemplo.com',
+    photo_url: null,
+    belt_label: 'Branca',
+    belt_order: 1,
+    status: 'active',
+    guardian_id: null,
+    consent_lgpd: false,
+    notes: null,
+    practitioner_id: null,
+    enrolled_at: '2026-07-01',
+    created_at: '2026-07-19T00:00:00Z',
+    updated_at: '2026-07-19T00:00:00Z',
+    ...over,
+  });
+  const isH1StudentLoad = (s) =>
+    /FROM karate_dojo_students/.test(s) && /WHERE id = \$1 AND dojo_id = \$2/.test(s);
+
   test('cria a solicitação com student_id e o aluno fica pending', async () => {
     mockDojo(LINKED_AT, (s) => {
       if (isPendingByStudent(s)) return { rows: [] };
-      if (isStudentLoad(s)) return { rows: [studentRow()] };
+      if (isH1StudentLoad(s)) return { rows: [h1StudentRow()] };
       if (/INSERT INTO karate_practitioner_requests/.test(s)) {
         return { rows: [{ id: reqId, status: 'pendente', created_at: '2026-07-26T10:00:00Z' }] };
       }
@@ -330,7 +437,7 @@ describe('F5a — federar aluno novo (abre a solicitação H1 que já existia)',
       if (isPendingByStudent(s)) {
         return { rows: [{ id: reqId, status: 'pendente', created_at: '2026-07-26T10:00:00Z' }] };
       }
-      if (isStudentLoad(s)) return { rows: [studentRow()] };
+      if (isH1StudentLoad(s)) return { rows: [h1StudentRow()] };
       return null;
     });
 
@@ -348,7 +455,7 @@ describe('F5a — federar aluno novo (abre a solicitação H1 que já existia)',
 
   test('aluno JÁ vinculado → 409 JA_FEDERADO (não abre solicitação duplicada)', async () => {
     mockDojo(LINKED_AT, (s) => {
-      if (isStudentLoad(s)) return { rows: [studentRow({ practitioner_id: 'p1' })] };
+      if (isH1StudentLoad(s)) return { rows: [h1StudentRow({ practitioner_id: 'p1' })] };
       return null;
     });
 
@@ -364,7 +471,7 @@ describe('F5a — federar aluno novo (abre a solicitação H1 que já existia)',
 });
 
 // ============================================================
-// GATE DE CONEXÃO + CANAL
+// GATE DE CONEXÃO + CANAL — INALTERADOS pela F7.1
 // ============================================================
 describe('F5a — gate de conexão e canal', () => {
   test('dojô NÃO conectado → 409 DOJO_NAO_CONECTADO, nada gravado', async () => {
@@ -373,14 +480,16 @@ describe('F5a — gate de conexão e canal', () => {
     const res = await request(app)
       .post(`${dojoBase}/students/${sid}/federate`)
       .set(canalA())
-      .send({ fpkt_number: 'FPKT-123' });
+      .send({ fpkt_number: 'FPKT-123', confirm: true });
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('DOJO_NAO_CONECTADO');
     expect(hitSql(/UPDATE karate_dojo_students/)).toBe(false);
     expect(hitSql(/INSERT INTO karate_practitioner_requests/)).toBe(false);
-    // Gate ANTES de qualquer leitura de aluno/federação
+    // Gate ANTES de qualquer leitura de aluno/federação — inclusive antes
+    // do preview: sem conexão não há o que conferir.
     expect(hitSql(isFpktLookup)).toBe(false);
+    expect(db.connect).not.toHaveBeenCalled();
   });
 
   test('Canal B (portal) → 403 PORTAL_READ_ONLY sem tocar o banco', async () => {
@@ -388,7 +497,7 @@ describe('F5a — gate de conexão e canal', () => {
     const res = await request(app)
       .post(`${dojoBase}/students/${sid}/federate`)
       .set(canalB())
-      .send({ fpkt_number: 'FPKT-123' });
+      .send({ fpkt_number: 'FPKT-123', confirm: true });
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('PORTAL_READ_ONLY');
@@ -399,9 +508,19 @@ describe('F5a — gate de conexão e canal', () => {
 // ============================================================
 // DESFEDERAR
 // ============================================================
-describe('F5a — DELETE /federate desvincula sem tocar no cadastro da federação', () => {
-  test('desvincula (is_federated=false, practitioner_id=NULL) e NÃO escreve em karate_practitioners/customers', async () => {
-    mockDojo(LINKED_AT, (s) => (/UPDATE karate_dojo_students/.test(s) ? { rows: [{ id: sid }] } : null));
+describe('F5a/F7.1 — DELETE /federate desvincula e DEVOLVE a gestão da ficha', () => {
+  test('desvincula (is_federated=false, practitioner_id=NULL) e NÃO apaga nada em customers', async () => {
+    mockDojo(LINKED_AT);
+    const client = mockTx((s) => {
+      if (/FROM karate_dojo_students/.test(s) && /FOR UPDATE/.test(s)) {
+        return { rows: [{ id: sid, full_name: 'João Praticante', practitioner_id: 'p1' }] };
+      }
+      if (/UPDATE karate_dojo_students/.test(s)) return { rows: [{ id: sid }] };
+      if (/UPDATE customers/.test(s)) {
+        return { rows: [{ id: 'p1', name: 'João Praticante', karate_registration_number: 'FPKT-123' }] };
+      }
+      return { rows: [] };
+    });
 
     const res = await request(app).delete(`${dojoBase}/students/${sid}/federate`).set(canalA());
 
@@ -410,19 +529,35 @@ describe('F5a — DELETE /federate desvincula sem tocar no cadastro da federaç�
     expect(res.body.federated).toBe(false);
     expect(res.body.practitioner_id).toBeNull();
     expect(res.body.federation_link_status).toBe('none');
+    // F7.1: a gestão volta para a federação
+    expect(res.body.identity_returned).toBe(true);
+    expect(res.body.identity_managed_by).toBe('federation');
 
-    const upd = findCall(/UPDATE karate_dojo_students/);
+    const upd = txFind(client, /UPDATE karate_dojo_students/);
     expect(String(upd[0])).toContain('is_federated = false');
-    expect(upd[1]).toEqual([null, sid, dojoId]);
+    expect(String(upd[0])).toContain('practitioner_id = NULL');
+    expect(upd[1]).toEqual([sid, dojoId]);
 
-    // A ASSERÇÃO QUE IMPORTA: o praticante continua existindo na federação.
-    expect(hitSql(/DELETE FROM customers/i)).toBe(false);
-    expect(hitSql(/UPDATE customers/i)).toBe(false);
-    expect(hitSql(/karate_practitioners/i)).toBe(false);
+    // A ASSERÇÃO QUE IMPORTA CONTINUA VALENDO: o praticante continua
+    // existindo na federação com a ficha intacta. O UPDATE customers da
+    // F7.1 mexe SÓ nas duas colunas de GESTÃO — nada de nome/CPF/faixa.
+    const back = txFind(client, /UPDATE customers/);
+    expect(String(back[0])).toContain("karate_identity_managed_by = 'federation'");
+    expect(String(back[0])).toContain('karate_identity_dojo_id = NULL');
+    expect(String(back[0])).not.toMatch(/\bname\s*=/);
+    expect(String(back[0])).not.toMatch(/cpf_cnpj\s*=/);
+    expect(String(back[0])).not.toMatch(/karate_registration_number\s*=/);
+    // Escopado: só devolve a ficha que ESTE dojô adotou.
+    expect(back[1]).toEqual(['p1', dojoId]);
+
+    expect(txHit(client, /DELETE FROM customers/i)).toBe(false);
+    expect(txHit(client, /karate_practitioners/i)).toBe(false);
+    expect(txSqls(client)).toContain('COMMIT');
   });
 
   test('aluno de outro dojô → 404', async () => {
-    mockDojo(LINKED_AT); // UPDATE cai no default {rows: []}
+    mockDojo(LINKED_AT);
+    mockTx(() => ({ rows: [] })); // SELECT FOR UPDATE não acha
     const res = await request(app).delete(`${dojoBase}/students/${sid}/federate`).set(canalA());
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('NOT_FOUND');
@@ -430,7 +565,7 @@ describe('F5a — DELETE /federate desvincula sem tocar no cadastro da federaç�
 });
 
 // ============================================================
-// FILTRO ?federated=
+// FILTRO ?federated= — INALTERADO pela F7.1
 // ============================================================
 describe('F5a — GET /students?federated=', () => {
   const isListQuery = (s) => /FROM karate_dojo_students s/.test(s) && /ORDER BY s\.full_name/.test(s);
@@ -463,6 +598,7 @@ describe('F5a — GET /students?federated=', () => {
 
 // ============================================================
 // LADO FEDERAÇÃO — aprovar devolve o praticante ao aluno
+// INALTERADO pela F7.1 (o handler é outro arquivo).
 // ============================================================
 describe('F5a — approve-create fecha o ciclo no aluno do dojô', () => {
   const requestRow = (over = {}) => ({
