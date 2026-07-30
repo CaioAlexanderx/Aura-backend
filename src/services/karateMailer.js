@@ -187,13 +187,90 @@ function _digitsOnly(s) {
   return String(s || '').replace(/\D/g, '');
 }
 
+// O separador entre "R$" e o valor é um NBSP (U+00A0) — de propósito: impede
+// que o cliente de e-mail quebre a linha no meio do dinheiro. Escrito como
+// escape explícito para não se perder numa edição futura do arquivo.
 function fmtBRL(v) {
   const n = Number(v || 0);
   return 'R$ ' + n.toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
+
+// ── Datas ────────────────────────────────────────────────────
+//
+// ⚠️ BUG DE PRODUÇÃO (QA Aura Dojô, 30/07/2026): a mensagem de uma cobrança
+// com vencimento 10/07/2026 dizia "venceu em 09/07/2026".
+//
+// Causa: a implementação anterior era
+//   new Date(d).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+// e `new Date('2026-07-10')` é meia-noite **UTC**; convertida para São Paulo
+// (UTC−3) volta para 09/07/2026 às 21h. Como a régua do dojô entrega a data
+// como STRING data-only (`to_char(c.due_date,'YYYY-MM-DD')`) e o pg entrega
+// colunas `date` como Date à meia-noite UTC, o erro era GARANTIDO em todo
+// vencimento — e-mail e WhatsApp do aluno, e e-mail de anuidade do dojô.
+//
+// Regra desta função (a mesma já usada em karateAnnuityService.parseDateParts
+// e em src/routes/dashboard.js):
+//   1. DATA PURA nunca passa por fuso — parse manual dos componentes.
+//   2. TIMESTAMP REAL continua sendo lido em São Paulo (aí o fuso importa
+//      de verdade), mas por aritmética UTC−3 em vez de toLocaleDateString:
+//      America/Sao_Paulo é UTC−3 o ano todo (DST abolido em 2019) e
+//      `toLocaleDateString('pt-BR')` cai silenciosamente para en-US no
+//      Railway quando o Node não tem full-icu (bug Maria/Encanto,
+//      13/05/2026 — ver comentário em src/routes/dashboard.js).
+const SP_OFFSET_MS = 3 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const PURE_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+function _pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
 function fmtDateBR(d) {
-  try { return new Date(d).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
-  catch (_) { return String(d); }
+  try {
+    if (d === null || d === undefined || d === '') return '';
+
+    // (1) Data pura em string ('AAAA-MM-DD') — formata direto, sem Date.
+    if (typeof d === 'string') {
+      const m = PURE_DATE_RE.exec(d.trim());
+      if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+    }
+
+    // (2) Data pura vinda do pg: coluna `date` chega como Date à meia-noite
+    //     UTC exata (mesma leitura de karateAnnuityService.parseDateParts).
+    //     Um timestamp real cravado em 00:00:00.000Z é indistinguível e
+    //     cairia aqui — é 1 instante em 86.400.000, e mesmo nesse caso o
+    //     dia UTC é uma leitura defensável.
+    if (d instanceof Date && !Number.isNaN(d.getTime()) && d.getTime() % DAY_MS === 0) {
+      return `${_pad2(d.getUTCDate())}/${_pad2(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+    }
+
+    // (3) Timestamp real — converte para São Paulo (UTC−3).
+    const dt = d instanceof Date ? d : new Date(d);
+    if (Number.isNaN(dt.getTime())) return String(d);
+    const sp = new Date(dt.getTime() - SP_OFFSET_MS);
+    return `${_pad2(sp.getUTCDate())}/${_pad2(sp.getUTCMonth() + 1)}/${sp.getUTCFullYear()}`;
+  } catch (_) {
+    return String(d);
+  }
+}
+
+// ── Competência por extenso ──────────────────────────────────
+// 'AAAA-MM' → 'julho/2026'. A competência é armazenada em ISO
+// (karate_dojo_charges.competence) e ia CRUA para a mensagem do aluno
+// ("referente a 2026-07") — ilegível para a família. Valor fora do formato
+// volta inalterado: nunca inventa mês.
+const MONTHS_PT_BR = [
+  'janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
+  'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro',
+];
+
+function fmtCompetenceBR(v) {
+  const s = String(v == null ? '' : v).trim();
+  const m = /^(\d{4})-(\d{2})(?:-\d{2})?$/.exec(s);
+  if (!m) return s;
+  const idx = Number(m[2]) - 1;
+  if (!(idx >= 0 && idx <= 11)) return s;
+  return `${MONTHS_PT_BR[idx]}/${m[1]}`;
 }
 
 // ── Interface genérica karatê (Track J e L reusam) ───────────
@@ -259,6 +336,10 @@ function _stripHtml(s) {
 //
 // ctaUrl: URL da página de pagamento Pix do dojô, passada pelo runner
 // (data.ctaUrl). Se ausente, nenhum botão é renderizado.
+//
+// ⚠️ dueDate aqui chega como Date (coluna `date` do pg, via
+// karateReminderRunner.getOpenAnnuities) — fmtDateBR trata esse caso como
+// DATA PURA; antes do fix de 30/07/2026 saía um dia antes.
 async function sendKarateAnnuityReminderEmail(to, data) {
   const d = data || {};
   const overdue = (d.offset || 0) > 0;
@@ -340,4 +421,5 @@ module.exports = {
   sendKarateAnnuityBillingEmail,
   fmtBRL,
   fmtDateBR,
+  fmtCompetenceBR,
 };
