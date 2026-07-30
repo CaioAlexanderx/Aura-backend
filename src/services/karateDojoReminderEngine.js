@@ -26,6 +26,13 @@
 //                MESMO (karate_dojo_reminder_log), com channel='whatsapp'
 //                — a coluna não tem CHECK constraint.
 //
+// LINGUAGEM DA MENSAGEM (QA 30/07/2026): a data de vencimento sai por
+// karateMailer.fmtDateBR (que trata a string data-only do to_char SEM
+// passar por fuso — antes saía um dia antes) e a competência sai por
+// karateMailer.fmtCompetenceBR ("julho/2026" em vez de "2026-07"). O campo
+// `competence` do PAYLOAD da fila continua ISO — o front depende dele;
+// só o texto para o humano mudou.
+//
 // LINK DE PAGAMENTO: usa karate_dojo_charges.pix_payload (BR Code já
 // gerado) para montar a página pública (signPixToken). Se ausente, gera via
 // karateDojoBillingService.createChargePix (que salva pix_payload e, no
@@ -77,6 +84,11 @@ function isValidDateStr(s) {
 
 function fmtBRL(v) {
   return karateMailer.fmtBRL(v);
+}
+
+// Competência 'AAAA-MM' → 'julho/2026' (nunca vai crua para o aluno).
+function fmtCompetence(v) {
+  return karateMailer.fmtCompetenceBR(v);
 }
 
 // ── Config ──
@@ -260,6 +272,7 @@ function subjectFor(offset, amount) {
 
 function bodyFor(offset, charge, meta) {
   const venc = karateMailer.fmtDateBR(charge.due_date);
+  const comp = fmtCompetence(charge.competence);
   const quando = offset < 0
     ? `vence em <strong>${venc}</strong>`
     : offset > 0
@@ -271,7 +284,7 @@ function bodyFor(offset, charge, meta) {
       Olá${charge.student_name ? ', responsável de ' + escapeHtml(charge.student_name) : ''}!
     </p>
     <p style="font-size:14px;color:#44403c;line-height:22px;margin:0 0 14px;">
-      A mensalidade referente a <strong>${escapeHtml(charge.competence)}</strong> no valor de
+      A mensalidade referente a <strong>${escapeHtml(comp)}</strong> no valor de
       <strong style="color:#1c1917;">${fmtBRL(charge.amount)}</strong> ${quando}.
     </p>
     <p style="font-size:13px;color:#78716c;line-height:21px;margin:0;">
@@ -408,19 +421,24 @@ function normalizeBrPhone(raw) {
 
 // Texto pt-BR pronto, no tom do produto (o sensei manda para a família).
 // Varia pelo SINAL do offset, igual ao e-mail.
+//
+// ⚠️ QA 30/07/2026: a data sai por fmtDateBR (data pura, sem deslocamento
+// de fuso — antes uma cobrança de 10/07 dizia "venceu em 09/07") e a
+// competência sai por extenso ("julho/2026", não "2026-07").
 function whatsappMessage(offset, charge, meta, paymentUrl) {
   const venc = karateMailer.fmtDateBR(charge.due_date);
+  const comp = fmtCompetence(charge.competence);
   const valor = fmtBRL(charge.amount);
   const aluno = charge.student_name ? ` do(a) ${charge.student_name}` : '';
   const dojo = meta && meta.name ? meta.name : 'o dojô';
 
   let linha;
   if (offset < 0) {
-    linha = `A mensalidade${aluno} referente a ${charge.competence}, no valor de ${valor}, vence em ${venc}.`;
+    linha = `A mensalidade${aluno} referente a ${comp}, no valor de ${valor}, vence em ${venc}.`;
   } else if (offset > 0) {
-    linha = `A mensalidade${aluno} referente a ${charge.competence}, no valor de ${valor}, venceu em ${venc} e está em aberto.`;
+    linha = `A mensalidade${aluno} referente a ${comp}, no valor de ${valor}, venceu em ${venc} e está em aberto.`;
   } else {
-    linha = `A mensalidade${aluno} referente a ${charge.competence}, no valor de ${valor}, vence hoje (${venc}).`;
+    linha = `A mensalidade${aluno} referente a ${comp}, no valor de ${valor}, vence hoje (${venc}).`;
   }
 
   const partes = [`Olá! Aqui é ${dojo}.`, linha];
@@ -505,6 +523,8 @@ async function whatsappQueue(dojoId, { date = null, config = null } = {}) {
       phone,
       amount: row.amount != null ? Number(row.amount) : null,
       due_date: row.due_date,
+      // ISO de propósito: o front usa este campo como CHAVE (filtro por
+      // competência). O texto por extenso vive só na `message`.
       competence: row.competence,
       payment_url: paymentUrl,
       message,
@@ -605,4 +625,6 @@ module.exports = {
   markWhatsappSent,
   whatsappMessage,
   normalizeBrPhone,
+  // exposto para teste do texto do e-mail (data + competência)
+  bodyFor,
 };
