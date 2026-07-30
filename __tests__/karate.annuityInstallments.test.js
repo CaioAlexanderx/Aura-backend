@@ -60,7 +60,50 @@ describe('buildInstallmentPlan', () => {
   });
 });
 
+// ============================================================
+// QA de produção 30/07/2026 — "vence hoje, atrasa amanhã"
+//
+// daysBetween usava Math.round sobre a diferença em MILISSEGUNDOS e o guard
+// de deriveInstallmentStatus era `> 0`: toda parcela vencendo HOJE colapsava
+// para 0 e era reportada como 'overdue' o dia inteiro (lista de dojôs, lista
+// de CPF, régua e KPIs do hub). Agora a comparação é por DIA DE CALENDÁRIO
+// em America/Sao_Paulo.
+// ============================================================
+describe('daysBetween — dia de calendário, não timestamp', () => {
+  it('conta dias inteiros entre duas datas puras', () => {
+    expect(svc.daysBetween('2026-07-31', '2026-07-30')).toBe(1);
+    expect(svc.daysBetween('2026-07-30', '2026-07-31')).toBe(-1);
+    expect(svc.daysBetween('2026-07-31', '2026-07-31')).toBe(0);
+  });
+
+  it('a virada de mês não desloca nada (era o que derrubava o CI nos dias 30 e 31)', () => {
+    expect(svc.daysBetween('2026-07-31', new Date('2026-07-30T15:00:00Z'))).toBe(1);
+    expect(svc.daysBetween('2026-07-31', new Date('2026-07-31T15:00:00Z'))).toBe(0);
+    expect(svc.daysBetween('2026-07-31', new Date('2026-08-01T15:00:00Z'))).toBe(-1);
+  });
+
+  it('meia-noite UTC = 21h do dia ANTERIOR em Brasília: a parcela de amanhã ainda não venceu', () => {
+    // Era exatamente aqui que computeAggregateFinanceiro antecipava o atraso.
+    expect(svc.daysBetween('2026-07-31', new Date('2026-07-31T00:30:00Z'))).toBe(1);
+  });
+
+  it('Date à meia-noite UTC (coluna `date` do pg) é lido como data pura', () => {
+    expect(svc.daysBetween(new Date('2026-07-31T00:00:00.000Z'), '2026-07-31')).toBe(0);
+    expect(svc.dayStamp(new Date('2026-07-31T00:00:00.000Z'))).toBe(svc.dayStamp('2026-07-31'));
+  });
+
+  it('valor ausente/inválido é neutro (0), nunca vira atraso sozinho', () => {
+    expect(svc.daysBetween(null, '2026-07-31')).toBe(0);
+    expect(svc.daysBetween('lixo', '2026-07-31')).toBe(0);
+  });
+});
+
 describe('deriveInstallmentStatus (por parcela, leitura)', () => {
+  // Dia de calendário em São Paulo, deslocado em N dias — mesma régua que o
+  // serviço usa, sem depender do fuso do processo de teste.
+  const spDayStr = (offsetDays = 0) =>
+    new Date(svc.dayStamp(new Date()) + offsetDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
   it('paga → paid, independente do due_date', () => {
     expect(svc.deriveInstallmentStatus({ status: 'paid', due_date: '2000-01-01' })).toBe('paid');
   });
@@ -80,9 +123,26 @@ describe('deriveInstallmentStatus (por parcela, leitura)', () => {
     const past = new Date(); past.setDate(past.getDate() - 200);
     expect(svc.deriveInstallmentStatus({ status: 'pending', due_date: past.toISOString().slice(0, 10) })).toBe('suspended');
   });
+
+  // ── QA 30/07/2026: a fronteira exata ──
+  it('vence HOJE → due (antes era reportada como atrasada o dia inteiro)', () => {
+    expect(svc.deriveInstallmentStatus({ status: 'pending', due_date: spDayStr(0) })).toBe('due');
+  });
+  it('véspera (vence amanhã) → due', () => {
+    expect(svc.deriveInstallmentStatus({ status: 'pending', due_date: spDayStr(1) })).toBe('due');
+  });
+  it('venceu ONTEM → overdue', () => {
+    expect(svc.deriveInstallmentStatus({ status: 'pending', due_date: spDayStr(-1) })).toBe('overdue');
+  });
+  it('due_date vindo do pg como Date (meia-noite UTC) e vencendo hoje → due', () => {
+    expect(svc.deriveInstallmentStatus({ status: 'pending', due_date: new Date(svc.dayStamp(new Date())) })).toBe('due');
+  });
 });
 
 describe('computeAggregateFinanceiro (agregado da anuidade, views/KPIs)', () => {
+  const spDayStr = (offsetDays = 0) =>
+    new Date(svc.dayStamp(new Date()) + offsetDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
   it('sem parcelas → sem_cobranca (neutro)', () => {
     expect(svc.computeAggregateFinanceiro([])).toBe('sem_cobranca');
     expect(svc.computeAggregateFinanceiro(null)).toBe('sem_cobranca');
@@ -108,6 +168,18 @@ describe('computeAggregateFinanceiro (agregado da anuidade, views/KPIs)', () => 
       { status: 'pending', due_date: future.toISOString().slice(0, 10) },
     ])).toBe('atrasado');
   });
+
+  // ── QA 30/07/2026 ──
+  it('parcela que vence HOJE em aberto → em_dia (não atrasado)', () => {
+    expect(svc.computeAggregateFinanceiro([
+      { status: 'pending', due_date: spDayStr(0) },
+    ])).toBe('em_dia');
+  });
+  it('parcela que venceu ONTEM em aberto → atrasado', () => {
+    expect(svc.computeAggregateFinanceiro([
+      { status: 'pending', due_date: spDayStr(-1) },
+    ])).toBe('atrasado');
+  });
 });
 
 describe('computeAnnuityListStatus (vocabulário legado das listagens /dojos, /cpf)', () => {
@@ -124,6 +196,10 @@ describe('computeAnnuityListStatus (vocabulário legado das listagens /dojos, /c
       { status: 'pending', due_date: d90.toISOString().slice(0, 10) },
       { status: 'pending', due_date: d10.toISOString().slice(0, 10) },
     ])).toBe('suspended');
+  });
+  it('só uma parcela, vencendo hoje → due (a lista não mostra mais "atrasado")', () => {
+    const hoje = new Date(svc.dayStamp(new Date())).toISOString().slice(0, 10);
+    expect(svc.computeAnnuityListStatus([{ status: 'pending', due_date: hoje }])).toBe('due');
   });
 });
 
@@ -188,6 +264,12 @@ describe('buildPlanSpecs — default seguro + override de due_date (continuaçã
     expect(dueDateAdjusted).toBe(true);
     // devido a due_date = fim do mês CORRENTE, a parcela nunca nasce
     // derivada como atrasada (overdue/defaulting/suspended).
+    //
+    // ⚠️ QA 30/07/2026: esta linha era a que derrubava o CI de `main` no
+    // PENÚLTIMO e no ÚLTIMO dia de cada mês — o vencimento caía "hoje" (ou
+    // faltando menos de 24 h) e o Math.round da diferença em ms colapsava
+    // para 0, com o guard `> 0` mandando a parcela para 'overdue'. Com a
+    // comparação por dia de calendário, o dia do vencimento é 'due'.
     expect(svc.deriveInstallmentStatus({ status: 'pending', due_date: specs[0].due_date })).toBe('due');
   });
 
