@@ -23,11 +23,18 @@
 // job já sobe postgres:16 e aplica migrations/*.sql do zero antes de
 // `npm test` (ver .github/workflows/ci.yml) — este teste roda contra
 // esse schema real.
+//
+// F8.0 (31/07/2026): a ORDEM Roxa x Azul Claro que a 229 tinha invertida
+// e corrigida pela migration 264, e o comportamento novo da view esta em
+// __tests__/karate.beltDegreeAndOrder.test.js. Aqui a mudanca foi tirar o
+// mapa de faixa DUPLICADO que este proprio arquivo mantinha (ver o teste
+// de invariante abaixo).
 // ============================================================
 'use strict';
 
 const { Pool } = require('pg');
 const { v4: uuid } = require('uuid');
+const beltScale = require('../src/utils/karateBeltScale');
 
 const CONN =
   process.env.SUPABASE_DB_URL ||
@@ -121,9 +128,14 @@ describe('karate_current_belt — faixa não regride por causa de data (migratio
   });
 
   test('invariante: nenhum praticante do fixture exibe faixa menor que o máximo do próprio histórico', async () => {
-    const rankOf = {
-      branca: 1, amarela: 2, laranja: 3, verde: 4, roxo: 5, roxa: 5,
-      azul_claro: 6, azul_escuro: 7, marrom: 8, preta: 9, vermelha: 0,
+    // F8.0 (31/07/2026): este teste mantinha o SEU PRÓPRIO mapa de faixa,
+    // copiado da migration 229 — e com ele o mesmo bug (roxo=5,
+    // azul_claro=6, invertidos). Um teste com a escala errada não protege
+    // nada: ele CONGELA o erro. Agora usa a escala canônica, a mesma que a
+    // migration 264 escreve no CASE da view.
+    const rankOf = (level) => {
+      const r = beltScale.levelRankOf(level);
+      return r == null ? 0 : r;
     };
 
     const { rows } = await client.query(
@@ -132,7 +144,7 @@ describe('karate_current_belt — faixa não regride por causa de data (migratio
     );
     const maxRankByStudent = {};
     for (const r of rows) {
-      const rank = rankOf[r.belt_level.toLowerCase()] ?? 0;
+      const rank = rankOf(r.belt_level);
       maxRankByStudent[r.student_id] = Math.max(maxRankByStudent[r.student_id] || 0, rank);
     }
 
@@ -143,7 +155,7 @@ describe('karate_current_belt — faixa não regride por causa de data (migratio
 
     expect(current.length).toBeGreaterThan(0);
     for (const c of current) {
-      const currentRank = rankOf[c.belt_level.toLowerCase()] ?? 0;
+      const currentRank = rankOf(c.belt_level);
       expect(currentRank).toBeGreaterThanOrEqual(maxRankByStudent[c.student_id]);
     }
   });

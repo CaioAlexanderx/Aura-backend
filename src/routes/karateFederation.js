@@ -17,43 +17,41 @@ const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { guards } = require('../config/karateRoles');
 
-// ── Ordenação estável de faixas (hierarquia + grau de Dan) ─────
+// ── Ordenação estável de faixas — DELEGADA ao dicionário canônico ──
 // O backend devolve um `rank` numérico por faixa para o FE ordenar de forma
-// estável a lista "Praticantes por graduação". Hierarquia geral:
-//   Branca < Amarela < Laranja < Verde < (Azul) < Roxa < Marrom < Preta(1°→2°→…)
-// belt_level da preta é 'preta' (string) e o grau vem do belt_name
-// ('Preta 1°', 'Preta 2°'…) — por isso ORDER BY belt_level sozinho NÃO separa
-// os Dan. Vermelha (histórica) vai pro fim. Acento/caixa normalizados.
-function normBeltLevel(level) {
-  return String(level || '')
-    .trim()
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '');
-}
+// estável a lista "Praticantes por graduação". O rank é OPACO: só a ORDEM
+// importa, nunca o valor absoluto.
+//
+// F8.0 (31/07/2026): este arquivo mantinha a TERCEIRA escala de faixa do
+// backend — um mapa próprio (branca 10 … vermelha 900) com
+// azul_claro=45, azul=50, azul_escuro=55, roxa=60. Ou seja, colocava Azul
+// Escuro ANTES da Roxa, quando o Azul Escuro é 4º kyu e vem DEPOIS da Roxa
+// (5º kyu). Era um erro DIFERENTE do da migration 229 (que invertia Roxa e
+// Azul Claro) — duas escalas erradas, de dois jeitos, no mesmo backend.
+// Curiosidade que confirma o diagnóstico: o scaffold KYU_ORDER logo abaixo
+// (usado no dashboard) SEMPRE listou azul_claro → roxo → azul_escuro na
+// ordem certa; o .sort(rank) é que reordenava errado depois.
+//
+// Agora tudo vem de src/utils/karateBeltScale.js. A escala de exibição
+// preserva a ordem de grandeza que o FE já recebia (múltiplos de 10 por
+// cor, vermelha 900, desconhecida 500).
+const { COLOR_SCALE, beltDisplayRank } = require('../utils/karateBeltScale');
 
-const BELT_ORDER = {
-  branca: 10,
-  amarela: 20,
-  laranja: 30,
-  verde: 40,
-  azul_claro: 45, azulclaro: 45, 'azul claro': 45,
-  azul: 50,
-  azul_escuro: 55, azulescuro: 55, 'azul escuro': 55,
-  roxa: 60, roxo: 60,
-  marrom: 70,
-  // preta tratada à parte (grau soma ao rank base)
-  vermelha: 900, vermelho: 900, // histórica → fim
-};
+// Scaffold das faixas KYU canônicas (FPKT Shotokan) — DERIVADO de
+// COLOR_SCALE, não mais uma quarta lista de faixas escrita à mão. Garante
+// que toda faixa apareça no gráfico "Praticantes por graduação" mesmo com
+// 0 praticantes (ex.: Amarela): sem isso o GROUP BY dropa a faixa vazia e
+// a cliente pergunta "cadê a amarela?". Preta (belt_level 'preta', com o
+// grau em belt_name) e Vermelha (legada) ficam de fora do scaffold e vêm
+// dos dados como estão.
+const KYU_SCAFFOLD = Object.freeze(
+  COLOR_SCALE.filter((c) => c.kyus.length > 0).map((c) =>
+    Object.freeze({ belt_level: c.level, belt_name: c.label })
+  )
+);
 
 function beltRank(level, name) {
-  const b = normBeltLevel(level);
-  if (b === 'preta') {
-    const grau = parseInt((String(name || '').match(/(\d+)/) || [])[1], 10) || 1;
-    return 80 + grau; // 1º Dan=81, 2º Dan=82, …
-  }
-  if (b in BELT_ORDER) return BELT_ORDER[b];
-  return 500; // desconhecida → antes da vermelha, depois das conhecidas
+  return beltDisplayRank(level, name);
 }
 
 // ── Segmentação por is_active do PRATICANTE (customers.is_active) ──────
@@ -312,21 +310,7 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
       beltParams
     );
 
-    // Scaffold das faixas KYU canônicas (FPKT Shotokan) — garante que toda
-    // faixa apareça no gráfico "Praticantes por graduação", mesmo com 0
-    // praticantes (ex.: Amarela). Sem isso, o GROUP BY dropa faixas sem
-    // ninguém e a cliente pergunta "cadê a amarela?". Graus Preta (belt_level
-    // 'preta', 1°..7°) e demais faixas fora do scaffold vêm dos dados como estão.
-    const KYU_ORDER = [
-      { belt_level: 'branca',      belt_name: 'Branca' },
-      { belt_level: 'amarela',     belt_name: 'Amarela' },
-      { belt_level: 'laranja',     belt_name: 'Laranja' },
-      { belt_level: 'verde',       belt_name: 'Verde' },
-      { belt_level: 'azul_claro',  belt_name: 'Azul Claro' },
-      { belt_level: 'roxo',        belt_name: 'Roxa' },
-      { belt_level: 'azul_escuro', belt_name: 'Azul Escuro' },
-      { belt_level: 'marrom',      belt_name: 'Marrom' },
-    ];
+    const KYU_ORDER = KYU_SCAFFOLD; // ver KYU_SCAFFOLD no topo (F8.0)
     const kyuLevels = new Set(KYU_ORDER.map(k => k.belt_level));
     const countByLevel = {};
     for (const r of beltRes.rows) {
