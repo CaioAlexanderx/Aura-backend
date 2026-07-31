@@ -4,19 +4,29 @@
 //
 //   GET  /federation/:id/affiliation-requests?status=
 //   GET  /federation/:id/affiliation-requests/metrics
-//   POST /federation/:id/affiliation-requests/:requestId/approve  {fpkt_number}
-//   POST /federation/:id/affiliation-requests/:requestId/reject   {reason}
+//   POST /federation/:id/affiliation-requests/revoke               {dojo_id, reason}
+//   POST /federation/:id/affiliation-requests/:requestId/approve   {fpkt_number}
+//   POST /federation/:id/affiliation-requests/:requestId/reject    {reason}
 //
-// ⚠️ ORDEM DAS ROTAS: '/affiliation-requests/metrics' é ESTÁTICA e precisa
-// vir ANTES de qualquer '/affiliation-requests/:requestId...' — armadilha
-// já paga em produção neste repo (o Express tratou 'roster-progress' como
-// UUID e estourou "invalid input syntax for type uuid").
+// ⚠️ ORDEM DAS ROTAS: '/affiliation-requests/metrics' e
+// '/affiliation-requests/revoke' são ESTÁTICAS e precisam vir ANTES de
+// qualquer '/affiliation-requests/:requestId...' — armadilha já paga em
+// produção neste repo (o Express tratou 'roster-progress' como UUID e
+// estourou "invalid input syntax for type uuid"). Aqui as duas estáticas têm
+// 2 segmentos e as paramétricas têm 3, então não haveria captura de qualquer
+// forma; declarar na ordem certa é para a próxima pessoa não precisar contar
+// segmento nenhum.
 //
 // APROVAR = CONECTAR (decisão do Caio): o aceite seta
 // companies.karate_dojo_linked_at (migration 251) + fpkt_affiliation_id +
 // affiliation_since, tudo numa transação. Não depende de pagamento — a
 // anuidade segue o fluxo que já existe. O número de filiação é SEMPRE
 // digitado aqui pela federação: sem ele, 422.
+//
+// REVOGAR = DESCONECTAR (decisão do Caio, 30/07/2026 — F7.4): "Somente a
+// federação pode cancelar esse vínculo. Dojô solicita, federação pode
+// aceitar e posteriormente revogar." O ciclo inteiro (pedir → aceitar →
+// revogar) mora aqui, e as três pontas usam o mesmo serviço.
 //
 // Decisão de produto (revertendo PR #433 / migration 255): a federação
 // NUNCA abre uma filiação espontaneamente. É sempre o dojô que assina a
@@ -59,6 +69,40 @@ router.get('/affiliation-requests/metrics', ...guards.read(), async (req, res) =
     return res.json(out);
   } catch (e) {
     return sendServiceError(res, e, 'GET /affiliation-requests/metrics');
+  }
+});
+
+// ── POST revogar a filiação (ROTA ESTÁTICA — antes de :requestId) ──
+// O ato de cancelar o vínculo é EXCLUSIVO da federação (guards.staffWrite()
+// no escopo /federation/:id). Não existe caminho pelo qual o dojô se
+// desfilie sozinho: do lado dele (karateDojoConnection.js) só há o GET do
+// estado e o POST do PEDIDO, e este PR não abre nenhuma porta nova.
+//
+// O alvo é o DOJÔ, não a solicitação: todo dojô criado PELA federação nasce
+// filiado sem nunca ter existido uma linha em karate_affiliation_requests
+// (ver getConnectionState) — chavear a revogação por :requestId deixaria
+// exatamente esses de fora.
+//
+// O que a revogação faz (detalhe e justificativa em revokeAffiliation):
+// zera companies.karate_dojo_linked_at e marca os praticantes do dojô como
+// INATIVOS na visão da federação (customers.is_active = false). Não apaga
+// nada e NÃO devolve a gestão das fichas — o dojô desfiliado continua usando
+// o Aura e continua dono da identidade dos alunos dele.
+//
+// 200 { ok, revoked, dojo_id, was_linked_at, practitioners_inactivated }
+// 422 REVOKE_REASON_REQUIRED | 404 NOT_FOUND | 409 NAO_CONECTADO
+router.post('/affiliation-requests/revoke', ...guards.staffWrite(), async (req, res) => {
+  const body = req.body || {};
+  try {
+    const out = await svc.revokeAffiliation({
+      federationId: req.params.id,
+      dojoId: body.dojo_id,
+      reason: body.reason,
+      actorId: (req.user && req.user.id) || null,
+    });
+    return res.json(out);
+  } catch (e) {
+    return sendServiceError(res, e, 'POST /affiliation-requests/revoke');
   }
 });
 
