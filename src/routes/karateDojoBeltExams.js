@@ -172,7 +172,13 @@ function handleReadError(res, e, ctx, extra) {
 // Rota ESTÁTICA e de 1 segmento; não colide com /dojo/graduation-exams/*.
 router.get('/dojo/belt-ladder', requireDojoAccess, (req, res) => {
   const out = svc.beltLadder();
-  return res.json({ data: out.data, count: out.data.length, schema: out.schema, ceiling: out.ceiling, ceiling_reason: out.ceiling_reason });
+  return res.json({
+    data: out.data,
+    count: out.data.length,
+    schema: out.schema,
+    ceiling: out.ceiling,
+    ceiling_reason: out.ceiling_reason,
+  });
 });
 
 // ============================================================
@@ -213,7 +219,12 @@ router.get('/dojo/graduation-exams', requireDojoAccess, async (req, res) => {
 router.get('/dojo/graduation-exams/:examId', requireDojoAccess, async (req, res) => {
   try {
     const out = await svc.getExam({ dojoId: req.dojoId, examId: req.params.examId });
-    const attachments = await listAttachments(req.federationId, req.params.examId).catch(() => []);
+    // Anexo é acessório da ficha: se a tabela ainda não existe (207/265
+    // pendentes) a ficha do exame NÃO pode cair junto.
+    const attachments = await listAttachments(req.federationId, req.params.examId).catch((e) => {
+      console.warn('[karateDojoBeltExams] anexos indisponíveis na ficha do exame:', e && e.code, e && e.message);
+      return [];
+    });
     return res.json({ exam: out.exam, results: out.results, count: out.results.length, attachments });
   } catch (e) {
     return handleReadError(res, e, 'GET /dojo/graduation-exams/:examId', { exam: null, results: [] });
@@ -289,7 +300,7 @@ async function listAttachments(federationId, examId) {
     [federationId, OWNER_TYPE, examId]
   );
   return Promise.all(
-    rows.map(async (d) => ({
+    (rows || []).map(async (d) => ({
       id: d.id,
       filename: d.filename,
       content_type: d.content_type || null,
@@ -314,7 +325,7 @@ function normalizeFiles(body) {
 
 function validateFile(f, idx) {
   const where = `arquivo ${idx + 1}`;
-  const filename = f.filename != null ? String(f.filename).trim() : '';
+  const filename = f && f.filename != null ? String(f.filename).trim() : '';
   if (!filename) return { status: 422, code: 'VALIDATION_ERROR', error: `${where}: filename é obrigatório` };
   if (!f.content || typeof f.content !== 'string') {
     return { status: 422, code: 'VALIDATION_ERROR', error: `${where}: content (base64) é obrigatório` };
@@ -400,7 +411,7 @@ router.post('/dojo/graduation-exams/:examId/attachments', requireDojoAccess, req
           WHERE federation_id = $1 AND owner_type = $2 AND owner_id = $3`,
         [req.federationId, OWNER_TYPE, exam.id]
       );
-      existing = Number(rows[0] && rows[0].n) || 0;
+      existing = Number(rows && rows[0] && rows[0].n) || 0;
     } catch (err) {
       if (!isMissingTableOrColumn(err)) throw err;
       return res.status(503).json({
@@ -448,7 +459,9 @@ router.post('/dojo/graduation-exams/:examId/attachments', requireDojoAccess, req
         if (err && err.code === '23514') {
           // O CHECK de owner_type ainda não conhece 'dojo_belt_exam'.
           // Diagnóstico exato em vez de "erro interno".
-          console.error('[karateDojoBeltExams] karate_documents.owner_type recusou dojo_belt_exam (migration 265 pendente)');
+          console.error(
+            '[karateDojoBeltExams] karate_documents.owner_type recusou dojo_belt_exam (migration 265 pendente)'
+          );
           return res.status(503).json({
             error: 'Anexo do exame ainda não disponível (migration 265 pendente)',
             code: 'MIGRATION_PENDING',
@@ -511,7 +524,7 @@ router.delete(
         }
         throw err;
       }
-      if (!docRes.rows.length) {
+      if (!docRes.rows || !docRes.rows.length) {
         return res.status(404).json({ error: 'Anexo não encontrado', code: 'NOT_FOUND' });
       }
 
@@ -525,8 +538,11 @@ router.delete(
         console.error('[karateDojoBeltExams] R2 delete lançou (segue removendo metadado):', err.message);
       }
 
-      await db.query(`-- f81:delete-attachment
-         DELETE FROM karate_documents WHERE id = $1`, [req.params.docId]);
+      await db.query(
+        `-- f81:delete-attachment
+         DELETE FROM karate_documents WHERE id = $1`,
+        [req.params.docId]
+      );
       return res.json({ deleted: true, id: req.params.docId });
     } catch (e) {
       return handleWriteError(res, e, 'DELETE /dojo/graduation-exams/:examId/attachments/:docId');
@@ -535,3 +551,17 @@ router.delete(
 );
 
 module.exports = router;
+
+// ── Exportado SÓ para teste ────────────────────────────────
+// Os limites do anexo são contrato de produto (ver o bloco no topo), mas
+// verificar o teto de 7 MB por HTTP obrigaria a montar uma string de 7 MB
+// dentro do Jest — e é assim que este repo já derrubou o CI por OOM
+// (exit 134, heap limit, zero teste falhando). A regra é testada na
+// função pura; o caminho HTTP é testado com os casos baratos.
+module.exports.__validateFile = validateFile;
+module.exports.__attachmentLimits = {
+  MAX_BASE64_LENGTH,
+  MAX_FILES_PER_REQUEST,
+  MAX_FILES_PER_EXAM,
+  ALLOWED_CONTENT_TYPES,
+};
