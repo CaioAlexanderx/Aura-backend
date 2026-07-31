@@ -507,6 +507,38 @@ router.use('/federation/:id', require('./karateAffiliationRequestsAdmin'));
 //   GET  /federation/:id/dojo/belt-exams/:examId/candidates
 router.use('/federation/:id', require('./karateDojoFederativo'));
 
+// ── AURA DOJÔ — F8.1 (o EXAME DE FAIXA DO DOJÔ) ──────────────
+// Migrations 264 (tabelas + teto do sensei no CHECK) e 265 (escolha de
+// certificado por aluno + anexo do lote em karate_documents).
+//
+// REGRA DE NEGÓCIO CORRIGIDA (Caio, 31/07/2026): do 10º kyu ao 1º kyu quem
+// examina é o SENSEI; a federação só emite o certificado dos aprovados.
+// Banca da federação é EXCLUSIVA de faixa preta. O "O DOJÔ NUNCA GRADUA"
+// do cabeçalho de karateDojoFederativo.js continua valendo — mas só para o
+// DAN, e o fluxo de candidatos/banca dele NÃO foi tocado.
+//
+// ⚠️ PREFIXO DISTINTO DE PROPÓSITO: /dojo/belt-exams/:examId/candidates já
+// existe na F5b e significa o oposto (submeter candidatos à BANCA). O exame
+// do dojô é /dojo/graduation-exams — sem colisão e sem depender da ordem
+// de montagem.
+//
+// SEM gate de conexão: o exame é ato INTERNO do dojô (a 264 deixou
+// federation_id nullable justamente porque dojô sem filiação também
+// gradua). Só o PEDIDO DE CERTIFICADO é federativo, e a falta de conexão
+// volta como motivo POR ALUNO — nunca como 409 que anularia uma graduação
+// que já aconteceu. Escrita só Canal A (403 PORTAL_READ_ONLY); GETs A e B.
+//   GET    /federation/:id/dojo/belt-ladder                                  (escada FPKT + teto do sensei)
+//   POST   /federation/:id/dojo/graduation-exams                             ({exam_date, title?, examiner_name?, notes?})
+//   GET    /federation/:id/dojo/graduation-exams                             (?status=&page=&pageSize=)
+//   GET    /federation/:id/dojo/graduation-exams/:examId                     (+ resultados + anexos)
+//   PATCH  /federation/:id/dojo/graduation-exams/:examId                     (só enquanto draft → 409 se concluído)
+//   POST   /federation/:id/dojo/graduation-exams/:examId/cancel
+//   POST   /federation/:id/dojo/graduation-exams/:examId/results             ({results:[{student_id, result, to_belt_level, to_belt_kyu?, request_certificate?}]})
+//   GET    /federation/:id/dojo/graduation-exams/:examId/attachments
+//   POST   /federation/:id/dojo/graduation-exams/:examId/attachments         ({files:[{content, filename, content_type}]})
+//   DELETE /federation/:id/dojo/graduation-exams/:examId/attachments/:docId
+router.use('/federation/:id', require('./karateDojoBeltExams'));
+
 // ── AURA KARATÊ — Track H (configurações da federação) ───────────
 // Migration 181 (inscricao_municipal + regime_tributario em companies).
 //   GET/POST   /federation/:id/settings/members          — equipe FPKT
