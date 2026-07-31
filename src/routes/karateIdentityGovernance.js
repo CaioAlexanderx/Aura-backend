@@ -69,10 +69,14 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { loadIdentityOwner } = require('../services/karateIdentityWriteGuard');
-const { describeExit } = require('../services/karateDojoExitState');
 const reclaim = require('../services/karateIdentityReclaim');
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+// Motivo fixo da devolução disparada pela EXCLUSÃO do dojô. É texto de
+// TRILHA (fica em karate_identity_audit.changes[].reason), não de UI.
+const DELETE_RECLAIM_REASON =
+  'Exclusão do dojô pela federação: a gestão das fichas voltou para a federação antes de o cadastro do dojô ser apagado.';
 
 function isUuid(v) {
   return !!v && UUID_RE.test(String(v));
@@ -163,9 +167,12 @@ router.delete('/dojos/:dojoId', ...guards.staffWrite(), async (req, res, next) =
 
   let out;
   try {
-    out = await reclaim.reclaimDojoIdentitiesForDelete({
+    // MESMA porta da retomada manual (uma regra de devolução em lote, não
+    // duas), com o motivo da exclusão no lugar do motivo digitado pelo staff.
+    out = await reclaim.reclaimDojoIdentities({
       federationId,
       dojoId,
+      reason: DELETE_RECLAIM_REASON,
       actor: actorFrom(req),
     });
   } catch (e) {
@@ -261,6 +268,4 @@ router.post('/identity/regularize', ...guards.staffWrite(), async (req, res) => 
   }
 });
 
-// Reexportado para o teste conseguir montar o aviso sem subir o Express.
 module.exports = router;
-module.exports.describeExit = describeExit;
