@@ -1,16 +1,24 @@
 // ============================================================
-// AURA DOJÔ — F7.4: quando o dojô sai, a gestão volta para a federação
+// AURA DOJÔ — F7.4: quando o dojô SAI DO AURA, a gestão volta para a federação
 //
 // O QUE ESTE ARQUIVO TRAVA
-//   1. tabela-verdade de "o dojô saiu?" (espelha os casos de
-//      tests/integration/karateDojoGate.test.js para os dois não divergirem)
-//   2. dojô sem Aura → a ficha volta a aceitar escrita da federação NA HORA
+//   1. tabela-verdade de "o dojô saiu do Aura?" — TRÊS pernas: company
+//      apagada, company inativada, vertical karate_dojo desligada
+//   2. o que NÃO é saída (correções do dono do produto, 30/07/2026):
+//      desfiliação da federação e inadimplência com a Aura
+//   3. dojô sem Aura → a ficha volta a aceitar escrita da federação NA HORA
 //      (sem depender de job) e a trilha registra a devolução (action='release')
-//   3. dojô VIVO → continua 409 IDENTITY_MANAGED_BY_DOJO (a F7.3 não afrouxou)
-//   4. retomada MANUAL em lote (com motivo obrigatório)
-//   5. regularização em lote com ?dry_run=1 (relatório sem escrever)
-//   6. DELETE de praticante AVISA e nunca bloqueia
-//   7. o caminho das 15.488 fichas geridas pela federação: ZERO query nova
+//   4. dojô VIVO → continua 409 IDENTITY_MANAGED_BY_DOJO (a F7.3 não afrouxou)
+//   5. retomada MANUAL em lote (com motivo obrigatório)
+//   6. regularização em lote com ?dry_run=1 (relatório sem escrever)
+//   7. DELETE de praticante AVISA e nunca bloqueia
+//   8. o caminho das 15.488 fichas geridas pela federação: ZERO query nova
+//
+// A REVOGAÇÃO da filiação (a outra metade da correção — inativar os
+// praticantes do dojô desfiliado na visão da federação) tem arquivo próprio:
+// tests/integration/karateAffiliationRevoke.test.js. Ela não mora aqui de
+// propósito: revogar NÃO mexe na gestão da ficha, que é o assunto deste
+// arquivo.
 //
 // ⚠️ MOCK POR SQL (matcher regex/função), NUNCA fila posicional. A ordem
 //    interna (SELECT do dono → BEGIN → UPDATE → trilha → COMMIT) é detalhe de
@@ -67,16 +75,16 @@ const isCustomerDelete = (s) => /DELETE FROM customers/.test(s);
 
 // ── Fábricas de linha ───────────────────────────────────────
 // Estado do dojô como o dojoStateSelect('d') devolve (prefixo identity_dojo_).
+// São QUATRO colunas: id, is_active, vertical, vertical_active. Não há
+// billing_status, trial_ends_at, is_staff nem karate_dojo_linked_at — as duas
+// pernas que dependiam delas foram removidas por correção do dono do produto
+// (ver o describe "o que NÃO é saída").
 function dojoState(over = {}) {
   return {
     identity_dojo_company_id: dojoId,
     identity_dojo_is_active: true,
     identity_dojo_vertical: 'karate_dojo',
     identity_dojo_vertical_active: 'karate_dojo',
-    identity_dojo_billing_status: 'active',
-    identity_dojo_trial_ends_at: null,
-    identity_dojo_is_staff: false,
-    identity_dojo_linked_at: new Date('2026-07-01T12:00:00Z'),
     identity_dojo_state_loaded: true,
     ...over,
   };
@@ -156,16 +164,15 @@ afterEach(() => {
   db.query.mockReset();
   db.connect.mockReset();
   guard._resetDojoStateCache();
-  delete process.env.DOJO_GATE_ENABLED;
 });
 
 // ============================================================
-// 1) A TABELA-VERDADE DE "O DOJÔ SAIU?"
+// 1) A TABELA-VERDADE DE "O DOJÔ SAIU DO AURA?"
 // ============================================================
-describe('F7.4 — o que conta como "o dojô saiu"', () => {
+describe('F7.4 — o que conta como "o dojô saiu do Aura"', () => {
   const evalRow = (over) => exitState.evaluateDojoExitFromRow(dojoState(over));
 
-  test('dojô normal, pagando e conectado → NÃO saiu', () => {
+  test('dojô normal e ativo → NÃO saiu', () => {
     expect(evalRow({}).exited).toBe(false);
   });
 
@@ -185,50 +192,10 @@ describe('F7.4 — o que conta como "o dojô saiu"', () => {
     expect(evalRow({ identity_dojo_vertical_active: null }).exited).toBe(false);
   });
 
-  test('desconectado da federação (karate_dojo_linked_at NULL) → saiu', () => {
-    const e = evalRow({ identity_dojo_linked_at: null });
-    expect(e.exited).toBe(true);
-    expect(e.reason).toBe(exitState.EXIT_REASONS.UNLINKED_FROM_FEDERATION);
-  });
-
   test('company apagada (LEFT JOIN sem linha) → saiu', () => {
     const e = evalRow({ identity_dojo_company_id: null });
     expect(e.exited).toBe(true);
     expect(e.reason).toBe(exitState.EXIT_REASONS.COMPANY_MISSING);
-  });
-
-  // ── Cobrança: MESMA condição de karateDojoGate (billing.js) ──
-  test('gate DESLIGADO + billing inativo → NÃO saiu (o dojô continua usando o Aura)', () => {
-    expect(evalRow({ identity_dojo_billing_status: 'inactive', identity_dojo_trial_ends_at: '2020-01-01' }).exited)
-      .toBe(false);
-  });
-
-  test('gate LIGADO + billing inativo + trial expirado → saiu', () => {
-    process.env.DOJO_GATE_ENABLED = 'true';
-    const e = evalRow({ identity_dojo_billing_status: 'inactive', identity_dojo_trial_ends_at: '2020-01-01' });
-    expect(e.exited).toBe(true);
-    expect(e.reason).toBe(exitState.EXIT_REASONS.BILLING_BLOCKED);
-  });
-
-  test('gate LIGADO + trial VIGENTE → NÃO saiu', () => {
-    process.env.DOJO_GATE_ENABLED = 'true';
-    expect(evalRow({ identity_dojo_billing_status: 'trial', identity_dojo_trial_ends_at: '2999-01-01' }).exited)
-      .toBe(false);
-  });
-
-  test('gate LIGADO + conta interna @getaura (is_staff) → NUNCA sai por cobrança', () => {
-    process.env.DOJO_GATE_ENABLED = 'true';
-    expect(evalRow({
-      identity_dojo_is_staff: true,
-      identity_dojo_billing_status: 'inactive',
-      identity_dojo_trial_ends_at: '2020-01-01',
-    }).exited).toBe(false);
-  });
-
-  test('gate LIGADO + billing overdue → saiu', () => {
-    process.env.DOJO_GATE_ENABLED = 'true';
-    expect(evalRow({ identity_dojo_billing_status: 'overdue' }).reason)
-      .toBe(exitState.EXIT_REASONS.BILLING_BLOCKED);
   });
 
   test('linha SEM o estado do dojô: "não sei" NUNCA vira "saiu"', () => {
@@ -239,7 +206,57 @@ describe('F7.4 — o que conta como "o dojô saiu"', () => {
 });
 
 // ============================================================
-// 2) A GUARDA: dojô que saiu libera NA HORA e devolve a gestão
+// 2) O QUE **NÃO** É SAÍDA — as duas correções do dono do produto
+// ============================================================
+// Estes casos não descrevem comportamento novo: eles TRAVAM a remoção de duas
+// pernas que este PR chegou a ter. Sem eles, reintroduzir "desfiliou logo
+// saiu" ou "não pagou logo saiu" passaria no CI sem ninguém ver.
+describe('F7.4 — o que NÃO é saída (correções do dono do produto, 30/07/2026)', () => {
+  test('DESFILIAÇÃO não é saída: o dojô desfiliado continua dono da identidade dos alunos dele', () => {
+    // "Sobre desconectar da federação, a única ação seria inativar os
+    //  praticantes do dojô desfiliado na visão da federação, o resto
+    //  permanece igual." Mesmo que a linha traga a coluna do vínculo zerada,
+    //  a avaliação não pode enxergar saída nenhuma.
+    const e = exitState.evaluateDojoExitFromRow(
+      dojoState({ identity_dojo_linked_at: null, karate_dojo_linked_at: null })
+    );
+    expect(e.exited).toBe(false);
+    expect(exitState.EXIT_REASONS.UNLINKED_FROM_FEDERATION).toBeUndefined();
+  });
+
+  test('INADIMPLÊNCIA não é saída, com gate ligado ou desligado', () => {
+    // "Não vamos criar gate por inadimplência. Teoricamente, se a federação
+    //  aceitar o vínculo, entendemos que o dojô está autorizado a se filiar."
+    process.env.DOJO_GATE_ENABLED = 'true';
+    try {
+      const e = exitState.evaluateDojoExitFromRow(
+        dojoState({
+          identity_dojo_billing_status: 'overdue',
+          identity_dojo_trial_ends_at: '2020-01-01',
+          identity_dojo_is_staff: false,
+        })
+      );
+      expect(e.exited).toBe(false);
+      expect(exitState.EXIT_REASONS.BILLING_BLOCKED).toBeUndefined();
+    } finally {
+      delete process.env.DOJO_GATE_ENABLED;
+    }
+  });
+
+  test('o estado lido do dojô tem SÓ as colunas das três pernas', () => {
+    // Nenhuma coluna de cobrança e nenhuma coluna de vínculo entram no
+    // SELECT — coluna que ninguém avalia não vira 42703 de ninguém.
+    const cols = exitState.DOJO_STATE_FIELDS.map((f) => f.col);
+    expect(cols).toEqual(['id', 'is_active', 'vertical', 'vertical_active']);
+    const frag = exitState.dojoStateSelect('d');
+    expect(frag).not.toMatch(/billing_status|trial_ends_at|is_staff|karate_dojo_linked_at/);
+    expect(Object.values(exitState.EXIT_REASONS).sort())
+      .toEqual(['company_inactive', 'company_missing', 'vertical_off']);
+  });
+});
+
+// ============================================================
+// 3) A GUARDA: dojô que saiu libera NA HORA e devolve a gestão
 // ============================================================
 describe('F7.4 — a guarda de escrita da identidade', () => {
   const call = (extra = {}) => guard.assertIdentityWriteAllowed({
@@ -269,9 +286,23 @@ describe('F7.4 — a guarda de escrita da identidade', () => {
     expect(tx).toBeDefined();
   });
 
-  test('a devolução escreve as DUAS colunas juntas e confere o dono no WHERE', async () => {
+  test('dojô DESFILIADO mas VIVO no Aura: continua 409 — desfiliar não devolve gestão', async () => {
     db.query.mockImplementation((s) => (isOwnerRead(String(s))
       ? Promise.resolve({ rows: [ownerRow({}, { identity_dojo_linked_at: null })] })
+      : Promise.resolve({ rows: [] })));
+
+    await expect(call()).rejects.toMatchObject({
+      status: 409,
+      code: guard.CODE_BLOCKED,
+      identity_managed_by: 'dojo',
+    });
+    expect(db.connect).not.toHaveBeenCalled();
+    expect(hitSql(isRelease)).toBe(false);
+  });
+
+  test('a devolução escreve as DUAS colunas juntas e confere o dono no WHERE', async () => {
+    db.query.mockImplementation((s) => (isOwnerRead(String(s))
+      ? Promise.resolve({ rows: [ownerRow({}, { identity_dojo_company_id: null })] })
       : Promise.resolve({ rows: [] })));
     const tx = mockReleaseTx();
 
@@ -371,7 +402,7 @@ describe('F7.4 — a guarda de escrita da identidade', () => {
       if (!isOwnerRead(sql)) return Promise.resolve({ rows: [] });
       if (first && /identity_dojo_state_loaded/.test(sql)) {
         first = false;
-        const e = new Error('column d.karate_dojo_linked_at does not exist');
+        const e = new Error('column d.vertical_active does not exist');
         e.code = '42703';
         return Promise.reject(e);
       }
@@ -395,7 +426,7 @@ describe('F7.4 — a guarda de escrita da identidade', () => {
 });
 
 // ============================================================
-// 3) RETOMADA MANUAL EM LOTE (a federação retoma o dojô inteiro)
+// 4) RETOMADA MANUAL EM LOTE (a federação retoma o dojô inteiro)
 // ============================================================
 describe('F7.4 — retomada manual pela federação', () => {
   const url = `/api/v1/federation/${fedId}/dojos/${dojoId}/identity/reclaim`;
@@ -448,7 +479,7 @@ describe('F7.4 — retomada manual pela federação', () => {
 });
 
 // ============================================================
-// 4) REGULARIZAÇÃO EM LOTE (?dry_run=1 não escreve)
+// 5) REGULARIZAÇÃO EM LOTE (?dry_run=1 não escreve)
 // ============================================================
 describe('F7.4 — regularização em lote', () => {
   test('dry_run devolve o relatório e NÃO abre transação', async () => {
@@ -477,7 +508,7 @@ describe('F7.4 — regularização em lote', () => {
 });
 
 // ============================================================
-// 5) DELETE DE PRATICANTE: AVISA, NUNCA BLOQUEIA
+// 6) DELETE DE PRATICANTE: AVISA, NUNCA BLOQUEIA
 // ============================================================
 describe('F7.4 — DELETE de praticante com ficha adotada', () => {
   const url = `/api/v1/federation/${fedId}/practitioners/${pid}`;
