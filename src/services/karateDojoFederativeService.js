@@ -46,29 +46,14 @@ const enroll = require('./karateEventEnrollmentService');
 const MAX_BATCH = 200;
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-// Ranking de faixa — MESMOS pesos do CASE da migration 229
-// (view karate_current_belt). Campo de APRESENTAÇÃO: o front ordena/agrupa
-// por ele. Nunca entra em WHERE, então divergir do banco não corrompe nada;
-// se a 229 mudar, este mapa acompanha.
-const BELT_ORDER = {
-  vermelha: 0,
-  branca: 1,
-  amarela: 2,
-  laranja: 3,
-  verde: 4,
-  roxo: 5,
-  roxa: 5,
-  azul_claro: 6,
-  azul_escuro: 7,
-  marrom: 8,
-  preta: 9,
-};
-
-function beltOrderOf(beltLevel) {
-  if (!beltLevel) return null;
-  const key = String(beltLevel).trim().toLowerCase();
-  return Object.prototype.hasOwnProperty.call(BELT_ORDER, key) ? BELT_ORDER[key] : null;
-}
+// Ranking de faixa — DELEGADO ao dicionário canônico (F8.0).
+// Este mapa era uma cópia literal do CASE da migration 229 ("MESMOS pesos
+// do CASE da migration 229", dizia o comentário) — e herdou dela a Roxa e a
+// Azul Claro invertidas. A escala agora tem UM dono só:
+// src/utils/karateBeltScale.js, espelhado pelo CASE da migration 264.
+// BELT_ORDER e beltOrderOf continuam exportados com o mesmo formato para
+// não quebrar nenhum consumidor; só os VALORES foram corrigidos.
+const { BELT_ORDER, beltOrderOf } = require('../utils/karateBeltScale');
 
 function serviceError(status, code, message) {
   const e = new Error(message);
