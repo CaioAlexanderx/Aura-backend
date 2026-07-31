@@ -29,6 +29,7 @@
 
 const guard = require('../src/services/karateIdentityWriteGuard');
 const { FEDERATION_OWNED_COLS } = require('../src/services/karateIdentitySync');
+const { EXIT_REASONS, EXIT_LABELS } = require('../src/services/karateDojoExitState');
 
 const {
   CHANNELS,
@@ -76,6 +77,23 @@ function dojoOwnerRow(overrides = {}) {
     karate_identity_managed_by: 'dojo',
     karate_identity_dojo_id: DOJO_ID,
     identity_dojo_name: DOJO_NAME,
+    ...overrides,
+  });
+}
+
+// Ficha ADOTADA cujo dojô SAIU do Aura (F7.4): o OWNER_SQL real traz o
+// estado do dojô junto (dojoStateSelect/DEFAULT_PREFIX 'identity_dojo_',
+// em karateDojoExitState.js), então o fixture inclui as mesmas colunas
+// prefixadas que aquele SELECT devolveria — inclusive `..._state_loaded`,
+// sem a qual evaluateDojoExitFromRow devolve UNKNOWN_EXIT (dado faltante
+// nunca vira "saiu"). Padrão: company inativada (o "Suspender" da UI).
+function dojoExitedOwnerRow(overrides = {}) {
+  return dojoOwnerRow({
+    identity_dojo_state_loaded: true,
+    identity_dojo_company_id: DOJO_ID,
+    identity_dojo_is_active: false,
+    identity_dojo_vertical: 'karate_dojo',
+    identity_dojo_vertical_active: 'karate_dojo',
     ...overrides,
   });
 }
@@ -234,10 +252,14 @@ describe('ficha gerida pela FEDERAÇÃO → libera', () => {
     expect(identityOwnershipPayload(federationOwnerRow())).toEqual({
       identity_managed_by: 'federation',
       identity_dojo: null,
+      identity_previous_dojo: null,
+      identity_dojo_exit: null,
     });
     expect(identityOwnershipPayload(dojoOwnerRow())).toEqual({
       identity_managed_by: 'dojo',
       identity_dojo: { id: DOJO_ID, name: DOJO_NAME },
+      identity_previous_dojo: null,
+      identity_dojo_exit: null,
     });
   });
 });
@@ -310,6 +332,31 @@ describe('ficha mantida por DOJÔ + campo de identidade → 409 IDENTITY_MANAGED
     expect(e.status).toBe(409);
     expect(e.message).not.toContain(DOJO_ID);
     expect(identityGuardBody(e).identity_dojo).toEqual({ id: DOJO_ID, name: null });
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// DOJÔ QUE SAIU DO AURA (F7.4) — a gestão da ficha volta sozinha
+// ════════════════════════════════════════════════════════════
+describe('identityOwnershipPayload — dojô SAIU do Aura → gestão volta para a federação', () => {
+  it('managed_by volta a "federation" e os campos novos dizem QUAL era o dojô e POR QUE ele saiu', () => {
+    expect(identityOwnershipPayload(dojoExitedOwnerRow())).toEqual({
+      identity_managed_by: 'federation',
+      identity_dojo: null,
+      identity_previous_dojo: { id: DOJO_ID, name: DOJO_NAME },
+      identity_dojo_exit: {
+        reason: EXIT_REASONS.COMPANY_INACTIVE,
+        label: EXIT_LABELS[EXIT_REASONS.COMPANY_INACTIVE],
+      },
+    });
+  });
+
+  it('NÃO é a mesma coisa que "ficha da federação desde sempre": identity_previous_dojo prova que ela foi adotada', () => {
+    const exited = identityOwnershipPayload(dojoExitedOwnerRow());
+    const neverAdopted = identityOwnershipPayload(federationOwnerRow());
+    expect(exited.identity_managed_by).toBe(neverAdopted.identity_managed_by);
+    expect(exited.identity_previous_dojo).not.toBeNull();
+    expect(neverAdopted.identity_previous_dojo).toBeNull();
   });
 });
 
