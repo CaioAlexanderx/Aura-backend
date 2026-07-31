@@ -1,5 +1,5 @@
 // ============================================================
-// AURA DOJÔ — F7.4: "O DOJÔ SAIU?" (leitura ÚNICA, sem ir ao banco)
+// AURA DOJÔ — F7.4: "O DOJÔ SAIU DO AURA?" (leitura ÚNICA, sem ir ao banco)
 //
 // AS PREMISSAS (Caio, 30/07/2026)
 //   1. "A federação não faz gestão de informação. O trabalho dela é apenas
@@ -15,27 +15,31 @@
 // não usa mais o sistema. Este arquivo define, em UM lugar só, o que conta como
 // "o dojô saiu".
 //
+// ⚠️ "SAIU" = SAIU DO AURA. NÃO É "SAIU DA FEDERAÇÃO".
+// Duas correções do dono do produto (30/07/2026) recortaram este módulo:
+//
+//   (i)  "Sobre desconectar da federação, a única ação seria INATIVAR OS
+//        PRATICANTES do dojô desfiliado na visão da federação, o resto
+//        permanece igual — e somente a federação pode cancelar esse vínculo."
+//        → desfiliação NÃO devolve a gestão da ficha. O dojô desfiliado
+//        continua usando o Aura e continua sendo o dono da identidade dos
+//        alunos DELE (premissa 1: o fluxo SOBE, e ele continua lá em cima).
+//        O efeito da revogação é outro e mora em outro lugar:
+//        karateAffiliationRequestService.revokeAffiliation() inativa os
+//        praticantes daquele dojô (customers.is_active = false) — os dados
+//        permanecem, some só a condição de filiado ativo.
+//
+//   (ii) "Não vamos criar gate por inadimplência. Teoricamente, se a federação
+//        aceitar o vínculo, entendemos que o dojô está autorizado a se filiar."
+//        → inadimplência com a Aura NÃO afeta a gestão da ficha. Não há
+//        predicado de cobrança neste arquivo, nem espelho de karateDojoGate(),
+//        nem leitura de DOJO_GATE_ENABLED. billing.js e este módulo não se
+//        conhecem.
+//
 // ── O QUE EU ENCONTREI NO CÓDIGO (auditado em 30/07/2026) ───
 // Não presumi nenhum destes estados — cada um saiu de leitura:
 //
-//  (a) ASSINATURA CANCELADA / INADIMPLENTE — companies.billing_status +
-//      companies.trial_ends_at + companies.is_staff + env DOJO_GATE_ENABLED.
-//      Fonte: src/routes/billing.js, função karateDojoGate() (o gate de
-//      R$140/mês do plano Aura Dojô) e src/services/dojoSaasCheckout.js, que
-//      é quem ESCREVE billing_status ('active' | 'pending') + billing_cycle +
-//      next_billing_date. O webhook Asaas (src/routes/webhookAsaas.js) mexe
-//      no mesmo billing_status. A regra do gate, copiada literalmente:
-//        required = gateLigado && !is_staff && (overdue || (!active && !trialAtivo))
-//      DECISÃO: a devolução por COBRANÇA usa a MESMA condição, inclusive a
-//      flag DOJO_GATE_ENABLED. Motivo (importante): com a flag DESLIGADA — que
-//      é o estado de produção hoje — o dojô inadimplente CONTINUA usando o
-//      Aura normalmente. Ele não saiu de lugar nenhum; devolver a gestão da
-//      ficha nesse caso quebraria o sync (F7.2) de um cliente vivo por causa
-//      de um boleto. "Saiu por cobrança" = "a cobrança realmente o expulsou".
-//      Se a flag e o billing divergissem, teríamos DOIS conceitos de dojô
-//      pagante — a mesma família de bug de vertical × vertical_active.
-//
-//  (b) VERTICAL DESLIGADA — companies.vertical × companies.vertical_active.
+//  (a) VERTICAL DESLIGADA — companies.vertical × companies.vertical_active.
 //      Fonte: src/routes/karateDojos.js (todas as listagens filtram
 //      `c.vertical_active = 'karate_dojo'`), src/routes/karateFederation.js
 //      (dashboard: "`vertical` é o marcador de identidade permanente;
@@ -48,7 +52,7 @@
 //      ("dado faltante ≠ pendência"). Só conta quando vertical_active tem
 //      valor E o valor não é 'karate_dojo'.
 //
-//  (c) COMPANY INATIVADA — companies.is_active = false.
+//  (b) COMPANY INATIVADA — companies.is_active = false.
 //      Fonte: src/routes/karateDojos.js, PATCH /:dojoId → cascadeInactivateDojo()
 //      (que já desativa os praticantes do dojô em cascata e registra
 //      'inactivate_cascade' em karate_dojo_roster_events). É o "Suspender" da UI.
@@ -58,7 +62,7 @@
 //      sensei re-federa o aluno pela conferência da F7.1 (mostrar → perguntar
 //      → gravar), que é o caminho seguro. Nada é apagado no meio.
 //
-//  (d) COMPANY APAGADA — DELETE /federation/:id/dojos/:dojoId
+//  (c) COMPANY APAGADA — DELETE /federation/:id/dojos/:dojoId
 //      (src/routes/karateDojos.js). Aqui há uma BOMBA que este PR desarma:
 //      customers.karate_identity_dojo_id tem FK ON DELETE SET NULL (migration
 //      262) e a mesma migration criou o CHECK customers_karate_identity_coherent
@@ -71,38 +75,20 @@
 //      o DELETE estourar. Por isso a devolução acontece ANTES, no interceptador
 //      de src/routes/karateIdentityGovernance.js.
 //
-//  (e) DESCONECTADO DA FEDERAÇÃO — companies.karate_dojo_linked_at IS NULL.
-//      Fonte: src/services/karateDojoLinkStatus.js (modelo da migration 251:
-//      "NULL = dojô self-serve AINDA NÃO conectado; NOT NULL = conectado") e
-//      src/routes/karateDojoConnection.js (o ACEITE da federação é o que seta
-//      linked_at; companies.federation_id é vínculo TÉCNICO, não conexão).
-//      DECISÃO: TAMBÉM é saída — e esta foi a decisão mais difícil do PR, então
-//      vai com o argumento inteiro:
-//        • A adoção é uma AUTORIZAÇÃO FEDERATIVA, não um dado do dojô. Quem a
-//          concede é a federação. E a rota que concede
-//          (POST /dojo/students/:sid/federate, karateDojoStudents.js) RECUSA
-//          com 409 DOJO_NAO_CONECTADO quando linked_at é NULL. Manter em pé uma
-//          autorização que HOJE não poderia ser concedida é incoerente.
-//        • O dojô desconectado é INVISÍVEL para a federação: todas as listagens
-//          (karateDojos.js, karateFederation.js dashboard/search,
-//          karateNetworkHealth) filtram `karate_dojo_linked_at IS NOT NULL`.
-//          Sem esta regra, a federação ficaria bloqueada de editar a ficha por
-//          um dono que ela não consegue nem enxergar para pedir a correção — o
-//          oposto exato da premissa 2.
-//        • O CONTRA-ARGUMENTO (registrado de propósito): desconectar da
-//          federação NÃO é sair do Aura — o dojô desconectado continua com o
-//          shell interno 100% funcional (alunos, turmas, presença,
-//          mensalidades), como diz o cabeçalho de karateDojoLinkStatus.js. Ele
-//          pode continuar editando aquele aluno todo dia.
-//        • POR QUE O CONTRA-ARGUMENTO NÃO GANHA: a devolução NÃO toca o aluno
-//          do dojô. karate_dojo_students continua intacto, com practitioner_id
-//          e tudo mais; o dojô continua editando a ficha DELE. O que para é a
-//          escrita por cima do cadastro DA FEDERAÇÃO — que é justamente o que a
-//          federação deixou de autorizar ao desconectar. E o caminho de volta
-//          existe e é o certo: reconectar + re-federar passa pela conferência
-//          campo a campo da F7.1. Nada é apagado, nada some.
-//
 // ── O QUE **NÃO** É SAÍDA ───────────────────────────────────
+//   • DESFILIAÇÃO (companies.karate_dojo_linked_at IS NULL). Correção (i)
+//     acima. Sair da federação não é sair do Aura: o dojô desfiliado continua
+//     com o shell interno 100% funcional (alunos, turmas, presença,
+//     mensalidades — ver o cabeçalho de karateDojoLinkStatus.js) e continua
+//     mantendo a identidade dos alunos dele. Quem trata a revogação é
+//     services/karateAffiliationRequestService.revokeAffiliation(), e o que
+//     ela faz é inativar os praticantes na visão da federação — nunca mexer
+//     em karate_identity_managed_by. Por isso karate_dojo_linked_at nem entra
+//     em DOJO_STATE_FIELDS: coluna que ninguém avalia não vira 42703 de
+//     ninguém.
+//   • INADIMPLÊNCIA / assinatura vencida. Correção (ii) acima. Não há
+//     predicado de cobrança aqui. Boleto em atraso é conversa entre a Aura e
+//     o dojô; não muda quem é dono da ficha do praticante.
 //   • companies.federation_id apontando para outra federação — é roteamento
 //     técnico e não tem nada a ver com quem mantém a ficha.
 //   • Dojô sem chave PIX, sem BaaS, sem alunos, sem cobrança gerada: ausência
@@ -123,12 +109,12 @@
 'use strict';
 
 // ── Vocabulário das saídas ──────────────────────────────────
+// Três, e as três são "o dojô não usa mais o Aura". Não existe saída por
+// desfiliação nem por cobrança (ver as correções (i) e (ii) no cabeçalho).
 const EXIT_REASONS = Object.freeze({
   COMPANY_MISSING: 'company_missing',
   COMPANY_INACTIVE: 'company_inactive',
   VERTICAL_OFF: 'vertical_off',
-  UNLINKED_FROM_FEDERATION: 'unlinked_from_federation',
-  BILLING_BLOCKED: 'billing_blocked',
 });
 
 // Frase curta, em português, para a resposta da API e para a trilha. Quem lê
@@ -137,8 +123,6 @@ const EXIT_LABELS = Object.freeze({
   [EXIT_REASONS.COMPANY_MISSING]: 'o cadastro do dojô não existe mais',
   [EXIT_REASONS.COMPANY_INACTIVE]: 'o dojô está inativado',
   [EXIT_REASONS.VERTICAL_OFF]: 'o dojô está com o módulo Aura Dojô desligado',
-  [EXIT_REASONS.UNLINKED_FROM_FEDERATION]: 'o dojô não está conectado à federação',
-  [EXIT_REASONS.BILLING_BLOCKED]: 'a assinatura do dojô está cancelada ou vencida',
 });
 
 // Estado "não sei" — o único seguro quando a linha de companies não veio.
@@ -160,15 +144,15 @@ const IN_AURA = Object.freeze({
 // Uma lista só: quem monta SELECT usa dojoStateSelect(); quem lê a linha usa
 // readDojoState(). Os identificadores saem DAQUI, nunca do corpo de nenhuma
 // requisição — não há concatenação de dado do usuário em SQL neste arquivo.
+//
+// `vertical` não é avaliado por evaluateDojoExit — ele viaja junto para que
+// quem lê o relatório consiga distinguir "dojô que nunca foi karatê" de "dojô
+// de karatê com o módulo desligado" sem uma segunda query.
 const DOJO_STATE_FIELDS = Object.freeze([
   { col: 'id', key: 'company_id' },
   { col: 'is_active', key: 'is_active' },
   { col: 'vertical', key: 'vertical' },
   { col: 'vertical_active', key: 'vertical_active' },
-  { col: 'billing_status', key: 'billing_status' },
-  { col: 'trial_ends_at', key: 'trial_ends_at' },
-  { col: 'is_staff', key: 'is_staff' },
-  { col: 'karate_dojo_linked_at', key: 'linked_at' },
 ]);
 
 const DEFAULT_PREFIX = 'identity_dojo_';
@@ -194,35 +178,11 @@ function readDojoState(row, prefix = DEFAULT_PREFIX) {
   return state;
 }
 
-// ── Cobrança: a MESMA condição de karateDojoGate (billing.js) ──
-// Duplicada aqui de propósito e com o motivo escrito: billing.js tem ~42KB e
-// carrega o checkout do VAREJO inteiro; um PR de identidade não tem por que
-// reescrever aquele arquivo. O que impede a divergência silenciosa é o teste
-// tests/unit/karateDojoExitState.test.js, que fixa a tabela-verdade dos MESMOS
-// quatro casos do tests/integration/karateDojoGate.test.js. Unificar as duas
-// (extrair o predicado para cá e fazer billing.js importar) é F8 — está no
-// corpo do PR.
-function dojoGateEnabled() {
-  const v = String(process.env.DOJO_GATE_ENABLED || '').trim().toLowerCase();
-  return v === '1' || v === 'true' || v === 'on' || v === 'yes';
-}
-
-function isDojoBillingBlocked(state) {
-  if (!state || !state.loaded) return false;
-  if (!dojoGateEnabled()) return false;      // gate desligado = ninguém é expulso
-  if (state.is_staff === true) return false; // conta interna @getaura nunca é gated
-  const now = new Date();
-  const trialActive = state.trial_ends_at && new Date(state.trial_ends_at) > now;
-  const active = state.billing_status === 'active';
-  const overdue = state.billing_status === 'overdue';
-  return overdue || (!active && !trialActive);
-}
-
 // ── A pergunta ──────────────────────────────────────────────
 // evaluateDojoExit(state) → { known, exited, reason, label }
 // A ordem das perguntas é a ordem da CONVERSA com o operador: o motivo mais
-// definitivo primeiro (não existe > inativado > desligado > desconectado >
-// cobrança), para a mensagem dizer a causa raiz e não um sintoma.
+// definitivo primeiro (não existe > inativado > desligado), para a mensagem
+// dizer a causa raiz e não um sintoma.
 function evaluateDojoExit(state) {
   if (!state || !state.loaded) return UNKNOWN_EXIT;
 
@@ -243,12 +203,6 @@ function evaluateDojoExit(state) {
     state.vertical_active !== 'karate_dojo'
   ) {
     return exit(EXIT_REASONS.VERTICAL_OFF);
-  }
-  if (state.linked_at === null || state.linked_at === undefined) {
-    return exit(EXIT_REASONS.UNLINKED_FROM_FEDERATION);
-  }
-  if (isDojoBillingBlocked(state)) {
-    return exit(EXIT_REASONS.BILLING_BLOCKED);
   }
   return IN_AURA;
 }
@@ -274,8 +228,6 @@ module.exports = {
   DEFAULT_PREFIX,
   dojoStateSelect,
   readDojoState,
-  dojoGateEnabled,
-  isDojoBillingBlocked,
   evaluateDojoExit,
   evaluateDojoExitFromRow,
   describeExit,
