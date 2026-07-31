@@ -68,10 +68,22 @@
 // PR ser seguro de mergear ANTES da migration 179 ser aplicada (o backend
 // não roda migrations no boot). Nesse estado, applyEvent devolve um
 // resultado 'deferred' (não-fatal) e o evento permanece 'pending'.
+//
+// ------------------------------------------------------------
+// 30/07/2026 — F7.3-A: ESTE MOTOR RESPEITA O MARCADOR DA FICHA
+// upsertPractitioner era a quinta porta (e a mais silenciosa) por onde a
+// federação reescrevia a pessoa: casava por CPF e sobrescrevia
+// name/rg/birth_date/email/phone por COALESCE, inclusive em ficha já
+// ADOTADA por um dojô (customers.karate_identity_managed_by = 'dojo').
+// Agora ele consulta o marcador antes de escrever — ver o comentário
+// longo em upsertPractitioner para o porquê de PULAR em vez de FALHAR.
 // ============================================================
 'use strict';
 
 const crypto = require('crypto');
+// F7.3-A — a leitura de "quem mantém esta ficha" é a MESMA dos outros
+// quatro canais (ficha da federação, portal do sensei, auto-atendimento).
+const { loadIdentityOwner } = require('./karateIdentityWriteGuard');
 
 // ────────────────────────────────────────────────────────────
 // NÚCLEO PURO (sem I/O) — testável isoladamente.
@@ -306,6 +318,25 @@ async function tagApplied(client, appliedId, targetTable, targetId) {
 // em vez de nascer com número inventado. Cada evento roda na própria
 // transação (runFederationApply), então isso NÃO derruba a fila nem
 // outros eventos pendentes.
+//
+// (30/07/2026 — F7.3-A) FICHA ADOTADA POR DOJÔ: o COALESCE abaixo escreve
+// name/rg/birth_date/email/phone — cinco campos de IDENTIDADE, que desde
+// a F7.1 podem pertencer a um dojô. Este era o canal mais silencioso de
+// todos: sem tela, sem ator humano, disparado por um webhook.
+//
+// PULAR (e não falhar) é decisão consciente:
+//   • falhar marcaria o evento como 'failed' depois de MAX_ATTEMPTS e o
+//     motor ficaria re-tentando para sempre um payload que NUNCA vai
+//     ganhar autorização — o dono da ficha é outro sistema, não há o que
+//     esperar. Seria ruído permanente no painel de sync;
+//   • o evento não é inútil: dojo_id (o vínculo de onde a pessoa treina)
+//     é coluna da FEDERAÇÃO e continua sendo aplicado. Só a PESSOA fica
+//     de fora;
+//   • o dado não se perde: a ficha do dojô é a fonte, e a F7.2 sobe a
+//     versão dele. Sobrescrever aqui seria justamente inverter o fluxo.
+// O resultado carrega identity_skipped:true até applyEvent, para o
+// runner e o painel de sync poderem mostrar "aplicado, identidade não
+// sobrescrita (ficha do dojô)".
 async function upsertPractitioner(client, ev, data) {
   const federationId = ev.federation_id;
   const dojoId = ev.dojo_id;
@@ -322,6 +353,36 @@ async function upsertPractitioner(client, ev, data) {
   }
 
   if (existing) {
+    // savepoint:true porque estamos DENTRO da transação do runner: um
+    // 42703 (migration 262 pendente) não pode envenenar a transação do
+    // chamador (armadilha tx-poison). Sem a 262 não existe ficha
+    // adotada, e o guarda devolve 'federation' — o caminho de sempre.
+    const owner = await loadIdentityOwner(client, existing.id, { savepoint: true });
+
+    if (owner.managedBy === 'dojo') {
+      // Só o que é da FEDERAÇÃO. dojo_id fica de fora de IDENTITY_FIELDS
+      // de propósito (é onde a federação acha que a pessoa treina, não
+      // quem a pessoa é) — ver FEDERATION_OWNED_COLS em karateIdentitySync.
+      await client.query(
+        `UPDATE customers SET
+           dojo_id     = COALESCE($2, dojo_id),
+           updated_at  = NOW()
+         WHERE id = $1`,
+        [existing.id, dojoId]
+      );
+      console.warn(
+        '[karateApplyEvent] practitioner_added: identidade NÃO sobrescrita — ficha mantida pelo dojô',
+        (owner.dojo && owner.dojo.name) || (owner.dojo && owner.dojo.id) || '(dojô desconhecido)',
+        'practitioner:', existing.id
+      );
+      return {
+        id: existing.id,
+        created: false,
+        identity_skipped: true,
+        identity_dojo_id: (owner.dojo && owner.dojo.id) || null,
+      };
+    }
+
     await client.query(
       `UPDATE customers SET
          name        = COALESCE($2, name),
@@ -334,7 +395,7 @@ async function upsertPractitioner(client, ev, data) {
        WHERE id = $1`,
       [existing.id, data.full_name, data.rg, data.birth_date, data.email, data.phone, dojoId]
     );
-    return { id: existing.id, created: false };
+    return { id: existing.id, created: false, identity_skipped: false };
   }
 
   // Sem match por CPF → seria uma criação nova. O contrato do evento não
@@ -427,6 +488,8 @@ async function settleAnnuity(client, ev, data) {
  *                ignored ou invalid — todos drenam a fila).
  *   - ok=false → falha recuperável → o motor re-tenta (status volta a pending).
  *   - deferred → schema ausente: NÃO drena (mantém pending até a migration).
+ *   - identity_skipped (só practitioner) → aplicado, mas a IDENTIDADE não
+ *     foi sobrescrita porque a ficha é mantida por um dojô (F7.3-A).
  */
 async function applyEvent(client, ev) {
   const decision = decideMutation(ev);
@@ -465,7 +528,16 @@ async function applyEvent(client, ev) {
     if (decision.kind === 'practitioner') {
       const r = await upsertPractitioner(client, ev, decision.data);
       await tagApplied(client, claim.appliedId, 'customers', r.id);
-      return { ok: true, applied: true, kind: 'practitioner', created: r.created, targetId: r.id };
+      return {
+        ok: true,
+        applied: true,
+        kind: 'practitioner',
+        created: r.created,
+        targetId: r.id,
+        identity_skipped: !!r.identity_skipped,
+        identity_dojo_id: r.identity_dojo_id || null,
+        detail: r.identity_skipped ? 'identidade não sobrescrita: ficha mantida pelo dojô' : undefined,
+      };
     }
     if (decision.kind === 'attendance') {
       const r = await recordAttendance(client, ev, decision.data);

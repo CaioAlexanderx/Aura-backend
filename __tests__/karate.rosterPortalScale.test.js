@@ -10,8 +10,17 @@
 //       quando ausente/expirado, preserva quando já existe válido, degrada
 //       para null quando a migration 225 ainda não foi aplicada (13/07/2026)
 //
-// Estilo: supertest + mock sequencial de db.query/db.connect (mesmo padrão
-// de __tests__/karate.trackM.routes.test.js) — sem Postgres real.
+// Estilo: supertest + mock de db.query/db.connect — sem Postgres real.
+//
+// (30/07/2026 — F7.3-A) Os blocos que a guarda de identidade tocou saíram
+// da FILA POSICIONAL (mockResolvedValueOnce encadeado) e passaram a
+// despachar por TEXTO do SQL. Motivo concreto: a guarda acrescentou três
+// queries no PATCH e três no import (SAVEPOINT + SELECT + RELEASE) logo
+// depois do FOR UPDATE do token, e o auto-atendimento ganhou o SELECT do
+// dono da ficha ANTES do UPDATE — com fila posicional cada query nova
+// empurra todas as respostas seguintes um degrau e o CI fica vermelho por
+// motivo errado. Os casos que NÃO ganharam query nenhuma (POST /record, o
+// GET do quadro e o self_service_url) ficaram como estavam.
 // ============================================================
 'use strict';
 
@@ -34,6 +43,43 @@ const FED_ID = 'fed-uuid-001';
 
 const FUTURE = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
+// ── Despacho de mock por SQL (nunca por posição) ────────────
+// `routes` é uma lista [regex, resposta]; a primeira que casar com o texto
+// do SQL responde. BEGIN/COMMIT/SAVEPOINT/ROLLBACK e qualquer query nova
+// caem no fallback sem deslocar mais nada.
+function sqlRouter(routes, fallback = { rows: [] }) {
+  return (sql, params) => {
+    const text = typeof sql === 'string' ? sql : '';
+    for (const [pattern, reply] of routes) {
+      if (pattern.test(text)) return Promise.resolve(typeof reply === 'function' ? reply(text, params) : reply);
+    }
+    return Promise.resolve(fallback);
+  };
+}
+
+function findCall(mockFn, pattern) {
+  return mockFn.mock.calls.find((c) => typeof c[0] === 'string' && pattern.test(c[0]));
+}
+
+function callsMatching(mockFn, pattern) {
+  return mockFn.mock.calls.filter((c) => typeof c[0] === 'string' && pattern.test(c[0]));
+}
+
+// Linha de "quem mantém a ficha" com a IDENTIDADE NA FEDERAÇÃO — é o
+// caminho de 9.783 dos 9.783 praticantes de hoje, e o que mantém o
+// comportamento destes testes byte-a-byte igual ao de antes da F7.3-A.
+function federationOwnerRow(id = 'pract-1', name = 'Aluno Teste') {
+  return {
+    id,
+    practitioner_label: name,
+    fpkt_number: 'FPKT-001',
+    federation_id: FED_ID,
+    karate_identity_managed_by: 'federation',
+    karate_identity_dojo_id: null,
+    identity_dojo_name: null,
+  };
+}
+
 function buildPortalApp() {
   const app = express();
   app.use(express.json());
@@ -53,6 +99,17 @@ function buildSelfServiceApp() {
 //     identidade (prova) separada de fields (o que muda)
 // ════════════════════════════════════════════════════════════
 describe('POST /public/roster-self/:token/update — whitelist de campos', () => {
+  // Rotas comuns dos casos que chegam no banco: token → dono da ficha →
+  // UPDATE → evento → touch. `updateReply` é o único ponto que cada teste
+  // precisa customizar.
+  function selfServiceRoutes(updateReply) {
+    return [
+      [/FROM karate_dojo_roster_validation/, { rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, self_service_token_expires_at: FUTURE }] }],
+      [/practitioner_label/, { rows: [federationOwnerRow()] }],
+      [/^\s*UPDATE customers SET/, updateReply],
+    ];
+  }
+
   it('422 FIELD_NOT_ALLOWED quando o body traz chave de topo fora de {student_id, identity, fields}', (done) => {
     const app = buildSelfServiceApp();
     request(app)
@@ -125,11 +182,9 @@ describe('POST /public/roster-self/:token/update — whitelist de campos', () =>
 
   it('200 quando fields (ficha inteira) + identity (matrícula) são enviados — SET nunca inclui is_active/faixa/dojo_id/matrícula', (done) => {
     const app = buildSelfServiceApp();
-    db.query
-      .mockResolvedValueOnce({ rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, self_service_token_expires_at: FUTURE }] }) // resolveSelfServiceToken
-      .mockResolvedValueOnce({ rows: [{ id: 'pract-1', name: 'Aluno Teste', phone: '11999990000', email: 'aluno@teste.com' }] }) // UPDATE customers
-      .mockResolvedValueOnce({ rows: [] }) // evento
-      .mockResolvedValueOnce({ rows: [] }); // touch last_accessed_at
+    db.query.mockImplementation(sqlRouter(selfServiceRoutes(
+      { rows: [{ id: 'pract-1', name: 'Aluno Teste', phone: '11999990000', email: 'aluno@teste.com' }] }
+    )));
 
     request(app)
       .post(`/public/roster-self/${SELF_TOKEN}/update`)
@@ -149,7 +204,7 @@ describe('POST /public/roster-self/:token/update — whitelist de campos', () =>
         expect(res.status).toBe(200);
         expect(res.body.ok).toBe(true);
 
-        const updateCall = db.query.mock.calls[1];
+        const updateCall = findCall(db.query, /^\s*UPDATE customers SET/);
         const [setClause, whereClause] = updateCall[0].split(/\bWHERE\b/);
         expect(updateCall[0]).toMatch(/UPDATE customers SET/);
         expect(setClause).not.toMatch(/is_active/);
@@ -180,9 +235,13 @@ describe('POST /public/roster-self/:token/update — whitelist de campos', () =>
 
   it('403 IDENTITY_MISMATCH quando matrícula/nascimento não batem (0 linhas afetadas) — zero mutação', (done) => {
     const app = buildSelfServiceApp();
-    db.query
-      .mockResolvedValueOnce({ rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, self_service_token_expires_at: FUTURE }] })
-      .mockResolvedValueOnce({ rows: [] }); // UPDATE não encontrou match de identidade
+    // A identidade não bate: nem o SELECT do dono (mesmo WHERE de prova) nem
+    // o UPDATE encontram linha.
+    db.query.mockImplementation(sqlRouter([
+      [/FROM karate_dojo_roster_validation/, { rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, self_service_token_expires_at: FUTURE }] }],
+      [/practitioner_label/, { rows: [] }],
+      [/^\s*UPDATE customers SET/, { rows: [] }], // UPDATE não encontrou match de identidade
+    ]));
 
     request(app)
       .post(`/public/roster-self/${SELF_TOKEN}/update`)
@@ -191,20 +250,21 @@ describe('POST /public/roster-self/:token/update — whitelist de campos', () =>
         if (err) return done(err);
         expect(res.status).toBe(403);
         expect(res.body.code).toBe('IDENTITY_MISMATCH');
-        // Só 2 chamadas: resolve token + UPDATE que não achou linha. Nenhum
-        // evento de auditoria é gravado (nada mudou de fato).
-        expect(db.query).toHaveBeenCalledTimes(2);
+        // Nada mudou de fato: nenhum evento de auditoria é gravado.
+        expect(callsMatching(db.query, /INSERT INTO/i)).toHaveLength(0);
         done();
       });
   });
 
   it('praticante de OUTRO dojô (mesmo com identidade certa) não atualiza — escopo do token', (done) => {
     const app = buildSelfServiceApp();
-    db.query
-      .mockResolvedValueOnce({ rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, self_service_token_expires_at: FUTURE }] })
+    db.query.mockImplementation(sqlRouter([
+      [/FROM karate_dojo_roster_validation/, { rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, self_service_token_expires_at: FUTURE }] }],
+      [/practitioner_label/, { rows: [] }],
       // WHERE id=$1 AND dojo_id=$2 AND (...) — praticante existe mas é de
       // outro dojô, o WHERE nunca bate, UPDATE devolve 0 linhas.
-      .mockResolvedValueOnce({ rows: [] });
+      [/^\s*UPDATE customers SET/, { rows: [] }],
+    ]));
 
     request(app)
       .post(`/public/roster-self/${SELF_TOKEN}/update`)
@@ -213,7 +273,7 @@ describe('POST /public/roster-self/:token/update — whitelist de campos', () =>
         if (err) return done(err);
         expect(res.status).toBe(403);
         expect(res.body.code).toBe('IDENTITY_MISMATCH');
-        const updateCall = db.query.mock.calls[1];
+        const updateCall = findCall(db.query, /^\s*UPDATE customers SET/);
         expect(updateCall[0]).toMatch(/WHERE id = \$1 AND dojo_id = \$2/);
         expect(updateCall[1][0]).toBe('pract-outro-dojo');
         expect(updateCall[1][1]).toBe(DOJO_ID); // dojo_id vem do TOKEN, nunca do body
@@ -223,11 +283,9 @@ describe('POST /public/roster-self/:token/update — whitelist de campos', () =>
 
   it('corrige birth_date confirmando identidade por nº FPKT (não pelo próprio nascimento, que está errado)', (done) => {
     const app = buildSelfServiceApp();
-    db.query
-      .mockResolvedValueOnce({ rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, self_service_token_expires_at: FUTURE }] })
-      .mockResolvedValueOnce({ rows: [{ id: 'pract-1', name: 'Aluno Teste', phone: null, email: null }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
+    db.query.mockImplementation(sqlRouter(selfServiceRoutes(
+      { rows: [{ id: 'pract-1', name: 'Aluno Teste', phone: null, email: null }] }
+    )));
 
     request(app)
       .post(`/public/roster-self/${SELF_TOKEN}/update`)
@@ -239,7 +297,7 @@ describe('POST /public/roster-self/:token/update — whitelist de campos', () =>
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(200);
-        const updateCall = db.query.mock.calls[1];
+        const updateCall = findCall(db.query, /^\s*UPDATE customers SET/);
         expect(updateCall[0]).toMatch(/birth_date = \$3/); // SET com o valor NOVO
         expect(updateCall[0]).toMatch(/karate_registration_number = \$4/); // WHERE usa a matrícula, não o nascimento
         expect(updateCall[1]).toEqual(['pract-1', DOJO_ID, '2011-04-18', 'FPKT-001']);
@@ -249,11 +307,9 @@ describe('POST /public/roster-self/:token/update — whitelist de campos', () =>
 
   it('a mesma query funciona quando o campo CONFIRMADO (identity.birth_date) é o mesmo sendo ALTERADO (fields.birth_date) — WHERE usa o valor ANTIGO', (done) => {
     const app = buildSelfServiceApp();
-    db.query
-      .mockResolvedValueOnce({ rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, self_service_token_expires_at: FUTURE }] })
-      .mockResolvedValueOnce({ rows: [{ id: 'pract-1', name: 'Aluno Teste', phone: null, email: null }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
+    db.query.mockImplementation(sqlRouter(selfServiceRoutes(
+      { rows: [{ id: 'pract-1', name: 'Aluno Teste', phone: null, email: null }] }
+    )));
 
     request(app)
       .post(`/public/roster-self/${SELF_TOKEN}/update`)
@@ -265,7 +321,7 @@ describe('POST /public/roster-self/:token/update — whitelist de campos', () =>
       .end((err, res) => {
         if (err) return done(err);
         expect(res.status).toBe(200);
-        const updateCall = db.query.mock.calls[1];
+        const updateCall = findCall(db.query, /^\s*UPDATE customers SET/);
         // SET birth_date = $3 (novo) ... WHERE ... birth_date = $4::date (antigo)
         expect(updateCall[0]).toMatch(/SET birth_date = \$3/);
         expect(updateCall[0]).toMatch(/birth_date = \$4::date/);
@@ -279,6 +335,9 @@ describe('POST /public/roster-self/:token/update — whitelist de campos', () =>
 // (a2) self-service — leitura da própria ficha (POST /record), ANTES do
 //     /update, atrás do MESMO gate de identidade — a feature existe pra
 //     REVISAR o cadastro, não digitar no escuro.
+//
+// Este endpoint é SÓ LEITURA: a F7.3-A não acrescentou query nenhuma aqui,
+// então os mocks posicionais destes casos continuam válidos como estavam.
 // ════════════════════════════════════════════════════════════
 describe('POST /public/roster-self/:token/record — leitura da própria ficha', () => {
   it('422 FIELD_NOT_ALLOWED quando o body traz chave de topo fora de {student_id, identity}', (done) => {
@@ -516,21 +575,14 @@ describe('POST /public/roster-update/:token/import — casamento por matrícula'
       ';Maria Souza;11988887777;', // sem matrícula — mesmo tendo nome, NUNCA deve casar por nome
     ].join('\r\n');
 
-    mockClient.query
-      .mockResolvedValueOnce({}) // BEGIN
-      .mockResolvedValueOnce({ rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, token_expires_at: FUTURE }] }) // token FOR UPDATE
-      .mockResolvedValueOnce({}) // SAVEPOINT sp_import_row (linha 1)
-      .mockResolvedValueOnce({ rows: [{ id: 'pract-1', name: 'João da Silva' }] }) // UPDATE linha 1 (matrícula bate)
-      .mockResolvedValueOnce({}) // RELEASE SAVEPOINT (linha 1)
-      .mockResolvedValueOnce({}) // SAVEPOINT sp_import_row (linha 2 — sem matrícula, curto-circuita antes do UPDATE)
-      .mockResolvedValueOnce({}) // ROLLBACK TO SAVEPOINT (linha 2)
-      .mockResolvedValueOnce({}) // SAVEPOINT sp_import_event
-      .mockResolvedValueOnce({}) // INSERT karate_dojo_roster_events
-      .mockResolvedValueOnce({}) // RELEASE SAVEPOINT
-      .mockResolvedValueOnce({}) // SAVEPOINT sp_import_touch
-      .mockResolvedValueOnce({}) // UPDATE last_accessed_at
-      .mockResolvedValueOnce({}) // RELEASE SAVEPOINT
-      .mockResolvedValueOnce({}); // COMMIT
+    mockClient.query.mockImplementation(sqlRouter([
+      // token sob FOR UPDATE
+      [/FROM karate_dojo_roster_validation/, { rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, token_expires_at: FUTURE }] }],
+      // F7.3-A: lote de "quem mantém a ficha" — nenhuma ficha adotada aqui
+      [/AS fpkt_number/, { rows: [] }],
+      // UPDATE da linha com matrícula
+      [/^\s*UPDATE customers SET/, { rows: [{ id: 'pract-1', name: 'João da Silva' }] }],
+    ]));
 
     request(app)
       .post(`/public/roster-update/${TOKEN}/import`)
@@ -541,12 +593,12 @@ describe('POST /public/roster-update/:token/import — casamento por matrícula'
         expect(res.body.atualizados).toBe(1);
         expect(res.body.erros).toHaveLength(1);
         expect(res.body.erros[0].motivo).toMatch(/matr[íi]cula/i);
+        // F7.3-A: nenhuma linha pulada por ficha adotada neste cenário
+        expect(res.body.skipped_identity_managed_by_dojo).toEqual([]);
 
         // A query de UPDATE só rodou 1x (linha com matrícula) — nunca com
         // WHERE por nome.
-        const updateCalls = mockClient.query.mock.calls.filter(
-          (c) => typeof c[0] === 'string' && c[0].includes('UPDATE customers')
-        );
+        const updateCalls = callsMatching(mockClient.query, /UPDATE customers/);
         expect(updateCalls).toHaveLength(1);
         expect(updateCalls[0][0]).toMatch(/karate_registration_number = \$1 AND dojo_id = \$2/);
         expect(updateCalls[0][0]).not.toMatch(/name\s*=/i);
@@ -561,19 +613,12 @@ describe('POST /public/roster-update/:token/import — casamento por matrícula'
 
     const csv = ['Matrícula FPKT;Nome;Telefone;E-mail', 'FPKT-999;Alguém;11977776666;'].join('\r\n');
 
-    mockClient.query
-      .mockResolvedValueOnce({}) // BEGIN
-      .mockResolvedValueOnce({ rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, token_expires_at: FUTURE }] })
-      .mockResolvedValueOnce({}) // SAVEPOINT
-      .mockResolvedValueOnce({ rows: [] }) // UPDATE não encontrou (matrícula de outro dojô ou inexistente)
-      .mockResolvedValueOnce({}) // ROLLBACK TO SAVEPOINT
-      .mockResolvedValueOnce({}) // SAVEPOINT sp_import_event
-      .mockResolvedValueOnce({}) // INSERT evento
-      .mockResolvedValueOnce({}) // RELEASE
-      .mockResolvedValueOnce({}) // SAVEPOINT sp_import_touch
-      .mockResolvedValueOnce({}) // UPDATE last_accessed_at
-      .mockResolvedValueOnce({}) // RELEASE
-      .mockResolvedValueOnce({}); // COMMIT
+    mockClient.query.mockImplementation(sqlRouter([
+      [/FROM karate_dojo_roster_validation/, { rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, token_expires_at: FUTURE }] }],
+      [/AS fpkt_number/, { rows: [] }],
+      // UPDATE não encontrou (matrícula de outro dojô ou inexistente)
+      [/^\s*UPDATE customers SET/, { rows: [] }],
+    ]));
 
     request(app)
       .post(`/public/roster-update/${TOKEN}/import`)
@@ -598,20 +643,15 @@ describe('PATCH /public/roster-update/:token/practitioners/:studentId — inativ
     const mockClient = { query: jest.fn(), release: jest.fn() };
     db.connect.mockResolvedValue(mockClient);
 
-    mockClient.query
-      .mockResolvedValueOnce({}) // BEGIN
-      .mockResolvedValueOnce({ rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, token_expires_at: FUTURE }] }) // token FOR UPDATE
-      .mockResolvedValueOnce({ rows: [{ name: 'João', is_active: true }] }) // valor ANTIGO (item 8 — diff antes/depois)
-      .mockResolvedValueOnce({ rows: [{ id: 'pract-1', name: 'João', phone: '119999', email: null, is_active: false }] }) // UPDATE customers
-      .mockResolvedValueOnce({}) // SAVEPOINT sp_granular_event
-      .mockResolvedValueOnce({}) // INSERT karate_dojo_roster_events
-      .mockResolvedValueOnce({}) // RELEASE SAVEPOINT
-      .mockResolvedValueOnce({}) // SAVEPOINT sp_touch_access
-      .mockResolvedValueOnce({}) // UPDATE last_accessed_at
-      .mockResolvedValueOnce({}) // RELEASE SAVEPOINT
-      .mockResolvedValueOnce({}); // COMMIT
+    mockClient.query.mockImplementation(sqlRouter([
+      [/FROM karate_dojo_roster_validation/, { rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, token_expires_at: FUTURE }] }],
+      [/practitioner_label/, { rows: [federationOwnerRow('pract-1', 'João')] }],
+      // valor ANTIGO (item 8 — diff antes/depois)
+      [/^\s*SELECT name,/, { rows: [{ name: 'João', is_active: true }] }],
+      [/^\s*UPDATE customers SET/, { rows: [{ id: 'pract-1', name: 'João', phone: '119999', email: null, is_active: false }] }],
+    ]));
 
-    db.query.mockResolvedValueOnce({ rows: [{ total: 10, resolved: 4 }] }); // progresso pós-PATCH
+    db.query.mockResolvedValue({ rows: [{ total: 10, resolved: 4 }] }); // progresso pós-PATCH
 
     request(app)
       .patch(`/public/roster-update/${TOKEN}/practitioners/pract-1`)
@@ -621,7 +661,7 @@ describe('PATCH /public/roster-update/:token/practitioners/:studentId — inativ
         expect(res.status).toBe(200);
         expect(res.body.is_active).toBe(false);
 
-        const updateCall = mockClient.query.mock.calls[3];
+        const updateCall = findCall(mockClient.query, /^\s*UPDATE customers SET/);
         expect(updateCall[0]).toMatch(/UPDATE customers SET is_active = \$2, updated_at = NOW\(\)/);
         expect(updateCall[0]).toMatch(/WHERE id = \$1 AND dojo_id = \$3/);
         // Params: [studentId, is_active, dojoId] — só ESTE id, escopado ao dojô do token.
@@ -642,6 +682,8 @@ describe('PATCH /public/roster-update/:token/practitioners/:studentId — inativ
 
 // ════════════════════════════════════════════════════════════
 // (d) ordenação por consequência — preta-ativa-em-aberto no topo
+//
+// GET é só leitura: a F7.3-A não acrescentou query nenhuma aqui.
 // ════════════════════════════════════════════════════════════
 describe('GET /public/roster-update/:token — ordenação por consequência', () => {
   it('grupo a (preta ATIVA em aberto) > grupo b (ativo sem nenhum contato) > grupo c (resto)', (done) => {

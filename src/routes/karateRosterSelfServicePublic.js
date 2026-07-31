@@ -45,6 +45,28 @@
 // ele só entra em `identity`, nunca em `fields` — ninguém além da
 // federação grava essa coluna, ver CLAUDE.md).
 //
+// ── 30/07/2026 — F7.3-A: FICHA MANTIDA POR DOJÔ É SÓ-LEITURA AQUI ──
+// Desde a F7.1/F7.2 uma ficha pode estar ADOTADA por um dojô
+// (customers.karate_identity_managed_by = 'dojo'): quem digita aquela
+// pessoa é o sistema do dojô, e o dado SOBE de lá para a federação. Este
+// link é justamente o canal que desfazia isso — o aluno (ou quem
+// tivesse o link) reescrevia por baixo o que o sensei tinha acabado de
+// mandar para cima. Agora a escrita de campo de identidade em ficha
+// adotada é recusada com 409 IDENTITY_MANAGED_BY_DOJO, dizendo o NOME do
+// dojô que mantém a ficha e mandando falar com ele.
+//
+// SEM OVERRIDE, por definição: token não é credencial de staff. As duas
+// chaves de override (federation_identity_override /
+// identity_override_reason) já morrem antes, no whitelist de chaves de
+// topo (422 FIELD_NOT_ALLOWED) — a porta não existe neste arquivo.
+//
+// O guarda roda com a MESMA prova de identidade do UPDATE (id do
+// praticante + dojô do token + 2º fator no WHERE). É deliberado: assim
+// ele nunca responde sobre uma ficha cuja identidade não foi provada, e
+// este link não vira uma sonda de "quem é gerido por quem". Nenhuma
+// linha → segue direto para o UPDATE de sempre, que devolve o 403
+// IDENTITY_MISMATCH de sempre.
+//
 //   GET  /public/roster-self/:token/search?q=nome  — busca só por nome,
 //        devolve só { id, name }, no máximo 8 resultados, nunca a lista
 //        inteira do dojô (evita virar diretório vazado).
@@ -75,6 +97,14 @@ const db = require('../config/database');
 // String(dateObj).slice(0,10) vira "Sun Apr 17" (foi um P0 real, ver
 // karatePractitionerDedup.js). Fonte única de normalização de data.
 const { toIsoDate } = require('../services/karatePractitionerDedup');
+// F7.3-A — a guarda de escrita de identidade é UMA só, compartilhada com
+// a ficha da federação, o portal do sensei e o motor de sync legado.
+const {
+  assertIdentityWriteAllowed,
+  identityGuardBody,
+  isIdentityGuardError,
+  CHANNELS,
+} = require('../services/karateIdentityWriteGuard');
 
 const isTestEnv = () => process.env.NODE_ENV === 'test';
 
@@ -385,6 +415,10 @@ router.post('/:token/update', updateLimiter, async (req, res) => {
   const body = req.body || {};
 
   // ── whitelist de chaves de topo ──────────────────────────────
+  // É AQUI que o override da federação morre neste arquivo:
+  // federation_identity_override / identity_override_reason não estão em
+  // ALLOWED_TOP_KEYS, então viram 422 FIELD_NOT_ALLOWED antes de qualquer
+  // outra coisa. Token não é credencial de staff — a porta não existe.
   const invalidTopKeys = Object.keys(body).filter((k) => !ALLOWED_TOP_KEYS.has(k));
   if (invalidTopKeys.length) {
     return res.status(422).json({
@@ -457,6 +491,56 @@ router.post('/:token/update', updateLimiter, async (req, res) => {
         params.push(normalizedFields[key]);
         n++;
         changedFields.push(key);
+      }
+    }
+
+    // ── F7.3-A: ficha mantida por dojô é só-leitura por aqui ────
+    // O guarda usa a MESMA prova de identidade do UPDATE (id do
+    // praticante + dojô do TOKEN + 2º fator no WHERE). Assim ele só
+    // responde sobre ficha cuja identidade já foi provada — este link
+    // não vira sonda de "quem é gerido por quem". Zero linha aqui →
+    // segue direto para o UPDATE, que devolve o 403 IDENTITY_MISMATCH
+    // de sempre (o comportamento de hoje fica byte-a-byte igual).
+    //
+    // Defensivo a 42703/42P01: sem a migration 262 não existe
+    // karate_identity_managed_by — e também não existe ficha adotada,
+    // então liberar é o comportamento CERTO, não uma degradação.
+    const guardParams = [studentId, resolved.dojo_id];
+    const guardIdentityParts = [];
+    let g = 3;
+    if (identityBirthDate) { guardIdentityParts.push(`c.birth_date = $${g}::date`); guardParams.push(identityBirthDate); g++; }
+    if (identityRegNumber) { guardIdentityParts.push(`c.karate_registration_number = $${g}`); guardParams.push(identityRegNumber); g++; }
+
+    let ownerRow = null;
+    try {
+      const ownerRes = await db.query(
+        `SELECT c.id, c.name AS practitioner_label, c.karate_registration_number AS fpkt_number,
+                c.federation_id, c.karate_identity_managed_by, c.karate_identity_dojo_id,
+                COALESCE(d.trade_name, d.legal_name) AS identity_dojo_name
+         FROM customers c
+         LEFT JOIN companies d ON d.id = c.karate_identity_dojo_id
+         WHERE c.id = $1 AND c.dojo_id = $2 AND (${guardIdentityParts.join(' OR ')})
+         LIMIT 1`,
+        guardParams
+      );
+      ownerRow = (ownerRes && ownerRes.rows && ownerRes.rows[0]) || null;
+    } catch (e) {
+      if (e.code !== '42703' && e.code !== '42P01') throw e;
+      console.warn('[karateRosterSelfServicePublic] schema de identidade pendente (262):', e.message);
+    }
+
+    if (ownerRow) {
+      try {
+        await assertIdentityWriteAllowed({
+          owner: ownerRow,
+          columns: changedFields.map((k) => SELF_SERVICE_EDITABLE_FIELDS[k]),
+          channel: CHANNELS.SELF_SERVICE,
+          canOverride: false, // token não é credencial de staff
+          body,
+        });
+      } catch (e) {
+        if (isIdentityGuardError(e)) return res.status(e.status).json(identityGuardBody(e));
+        throw e;
       }
     }
 

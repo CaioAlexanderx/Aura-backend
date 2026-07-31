@@ -59,6 +59,19 @@ const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const cards = require('../services/karateCardService');
 const { uploadToR2 } = require('../utils/r2Storage');
+// F7.3-A — guarda ÚNICA de escrita da identidade. A lista de colunas
+// protegidas lá dentro é DERIVADA de IDENTITY_FIELDS: o que o dojô
+// sincroniza é exatamente o que a federação deixa de escrever, sem ninguém
+// precisar lembrar de atualizar nada aqui.
+const {
+  assertIdentityWriteAllowed,
+  identityOwnershipPayload,
+  identityGuardBody,
+  isIdentityGuardError,
+  writeOverrideAudit,
+  buildOverrideChanges,
+  CHANNELS,
+} = require('../services/karateIdentityWriteGuard');
 
 // Campos de endereço da ficha (colunas em customers).
 const ADDRESS_COLS = ['street', 'number', 'complement', 'neighborhood', 'city', 'state', 'zip_code'];
@@ -75,8 +88,24 @@ let HAS_SEX_AFFILIATION_COLS = true;
 // SELECTs/INSERTs/UPDATEs caem para a forma sem esta coluna.
 let HAS_IS_ASSISTANT_COL = true;
 
+// Migration 262 — karate_identity_managed_by / karate_identity_dojo_id
+// (F7.1: a ficha pode ser MANTIDA por um dojô). Mesmo cache module-level
+// otimista dos anteriores: vira false em 42703 e o GET de detalhe passa a
+// responder identity_managed_by:'federation' / identity_dojo:null — que é a
+// verdade enquanto a 262 não roda, porque sem ela não existe ficha adotada.
+let HAS_IDENTITY_COLS = true;
+
 // Valores aceitos para o campo sex (mesma lista do CHECK customers_sex_check).
 const VALID_SEX_VALUES = ['masculino', 'feminino', 'outro'];
+
+// Ator da trilha de identidade (F7.3-A). O rastro humano vale mais que o id:
+// writeIdentityAudit descarta id fora de forma UUID e preserva o rótulo.
+function identityActor(req) {
+  return {
+    userId: req.user && req.user.id,
+    label: (req.user && (req.user.name || req.user.email)) || null,
+  };
+}
 
 // ── GET /federation/:id/practitioners ──────────────────────
 router.get('/', ...guards.read(), async (req, res) => {
@@ -668,6 +697,10 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
 
     const sets = [];
     const vals = [];
+    // F7.3-A: as colunas/valores que vão MESMO para o SET. É daqui que sai a
+    // lista entregue à guarda de identidade (e o antes/depois da trilha do
+    // override) — sempre de FIELD_COL, nunca do corpo da requisição.
+    const writes = [];
     let i = 1;
     for (const [field, col] of Object.entries(FIELD_COL)) {
       if (b[field] === undefined) continue;
@@ -680,11 +713,71 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
         v = null;
       }
       sets.push(`${col} = $${i}`); vals.push(v); i++;
+      writes.push({ col, value: v });
     }
     if (!sets.length) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Nenhum campo para atualizar' });
     }
+
+    // ── F7.3-A: a federação não reescreve ficha adotada por dojô ─
+    // A DECISÃO (Caio, 30/07/2026): "A federação não faz gestão de
+    // informação. O trabalho dela é apenas receber a sincronização dos dados
+    // gerenciados pelos dojôs." As colunas chegam à guarda vindas do SET que
+    // ACABOU de ser montado (FIELD_COL) — nada aqui vem do corpo da
+    // requisição e nada aqui vira SQL.
+    //
+    // O que continua editável SEMPRE, inclusive em ficha adotada: matrícula
+    // FPKT, papéis federativos (is_student/is_arbiter/is_instructor/
+    // is_examiner/is_assistant), is_active, dojo_id, parent_guardian_id,
+    // guardian_* e affiliation_since. Nenhum deles está na lista protegida,
+    // então a guarda devolve "liberado" sem sequer ir ao banco.
+    //
+    // Requisição MISTA (campo de identidade + campo federativo no mesmo
+    // body) é recusada INTEIRA com 409. É o comportamento correto: gravar
+    // metade deixaria o staff achando que salvou tudo, e a divergência que
+    // esta fase veio matar voltaria silenciosa.
+    //
+    // As duas chaves de override (federation_identity_override e
+    // identity_override_reason) NÃO são campos da ficha: não estão em
+    // FIELD_COL, então o laço acima já as ignora por construção. Body só com
+    // elas cai no 400 "Nenhum campo para atualizar" logo acima — correto.
+    //
+    // A leitura da guarda usa `db` (pool) e não o `client` desta transação:
+    // fica FORA do BEGIN, e um 42703 (migration 262 pendente) não tem como
+    // envenenar a transação (armadilha tx-poison).
+    let guard;
+    try {
+      guard = await assertIdentityWriteAllowed({
+        runner: db,
+        practitionerId,
+        columns: writes.map((w) => w.col),
+        channel: CHANNELS.FEDERATION_ADMIN,
+        canOverride: true,
+        body: req.body,
+        actor: identityActor(req),
+      });
+    } catch (e) {
+      if (isIdentityGuardError(e)) {
+        await client.query('ROLLBACK');
+        return res.status(e.status).json(identityGuardBody(e));
+      }
+      throw e;
+    }
+
+    // Override: o "antes" é lido TRAVADO (FOR UPDATE) dentro da MESMA
+    // transação do UPDATE, para a trilha não descrever um estado que já mudou
+    // entre a leitura e a escrita. Só as colunas de identidade que vão mudar
+    // — e elas saem de guard.columns, que saiu de FIELD_COL.
+    let overrideBefore = null;
+    if (guard.overridden) {
+      const beforeRes = await client.query(
+        `SELECT ${guard.columns.join(', ')} FROM customers WHERE id = $1 FOR UPDATE`,
+        [practitionerId]
+      );
+      overrideBefore = beforeRes.rows[0] || null;
+    }
+
     sets.push('updated_at = NOW()');
     vals.push(practitionerId, federationId);
 
@@ -712,6 +805,9 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
           const sets2 = [];
           const vals2 = [];
           let i2 = 1;
+          // F7.3-A: a trilha do override tem que descrever o SET que
+          // REALMENTE rodou — aqui sex/affiliation_since/is_assistant saíram.
+          writes.length = 0;
           for (const [field, col] of Object.entries(FIELD_COL)) {
             if (NEW_COL_FIELDS.has(field)) continue;
             if (b[field] === undefined) continue;
@@ -723,6 +819,7 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
               v = null;
             }
             sets2.push(`${col} = $${i2}`); vals2.push(v); i2++;
+            writes.push({ col, value: v });
           }
           if (!sets2.length) {
             // Só havia sex/affiliation_since/is_assistant no body e a coluna não existe.
@@ -740,6 +837,26 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     } else {
       await client.query(updateSql, vals);
     }
+
+    // ── F7.3-A: override sem trilha NÃO acontece ────────────────
+    // A trilha é gravada ANTES do COMMIT, na MESMA transação do UPDATE.
+    // writeIdentityAudit lança quando NENHUMA trilha pôde ser gravada (nem
+    // karate_identity_audit, nem o fallback roster_events); o erro sobe para
+    // o catch, que faz ROLLBACK — e a sobrescrita é descartada junto. É isso
+    // que torna a frase acima verdadeira em vez de decorativa.
+    if (guard.overridden) {
+      await writeOverrideAudit(client, {
+        federationId,
+        practitionerId,
+        practitionerLabel: (guard.owner && guard.owner.practitionerLabel) || null,
+        fpktNumber: (guard.owner && guard.owner.fpktNumber) || null,
+        dojoId: guard.dojo && guard.dojo.id,
+        changes: buildOverrideChanges(overrideBefore, writes),
+        reason: guard.reason,
+        actor: identityActor(req),
+      });
+    }
+
     await client.query('COMMIT');
 
     // Retorna a ficha atualizada (com faixa atual). Reusa a mesma lógica de
@@ -813,6 +930,12 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     res.json(shapePractitioner(out.rows[0]));
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
+    // F7.3-A: recusa da guarda de identidade que tenha escapado do try local
+    // responde com o MESMO corpo dos outros canais (a tela da F7.3-B lê
+    // identity_dojo sem saber por qual rota passou).
+    if (isIdentityGuardError(err)) {
+      return res.status(err.status).json(identityGuardBody(err));
+    }
     if (err.code === '23505') {
       return res.status(409).json({ error: 'Número de matrícula já em uso.' });
     }
@@ -1303,8 +1426,50 @@ router.get('/:practitionerId', ...guards.read(), async (req, res) => {
       courseCount2y = 0;
     }
 
+    // ── F7.3-A: quem MANTÉM esta ficha ──────────────────────────
+    // A tela da F7.3-B entra em modo leitura com isto (e mostra o NOME do
+    // dojô), então o detalhe precisa dizer quem manda na identidade.
+    //
+    // Query PRÓPRIA em vez de três colunas dentro dos SELECTs acima, por um
+    // motivo concreto: aqueles três blocos SÃO as variantes defensivas de
+    // 205/206 e cada catch atribui o 42703 que pegar ao SEU cache
+    // (HAS_SEX_AFFILIATION_COLS / HAS_IS_ASSISTANT_COL). Uma quarta coluna
+    // opcional ali faria a coluna faltante da 262 desligar o cache ERRADO —
+    // e dobraria o número de variantes de SELECT para responder uma pergunta
+    // que cabe em uma query.
+    //
+    // Cache module-level otimista, mesmo padrão dos outros: 42703/42P01
+    // (migration 262 pendente) degrada para "a federação gerencia", que é a
+    // verdade naquele estado — sem a 262 não existe ficha adotada.
+    let identityOwnership = { identity_managed_by: 'federation', identity_dojo: null };
+    if (HAS_IDENTITY_COLS) {
+      try {
+        const ownRes = await db.query(
+          `SELECT cu.karate_identity_managed_by,
+                  cu.karate_identity_dojo_id,
+                  COALESCE(idj.trade_name, idj.legal_name) AS identity_dojo_name
+             FROM customers cu
+             LEFT JOIN companies idj ON idj.id = cu.karate_identity_dojo_id
+            WHERE cu.id = $1
+            LIMIT 1`,
+          [practitionerId]
+        );
+        if (ownRes.rows.length) identityOwnership = identityOwnershipPayload(ownRes.rows[0]);
+      } catch (e) {
+        if (e.code === '42703' || e.code === '42P01') {
+          HAS_IDENTITY_COLS = false;
+          console.warn('[karatePractitioners] karate_identity_* ausentes no GET detalhe (migration 262 pendente)');
+        } else throw e;
+      }
+    }
+
     res.json({
       ...shapePractitioner(p),
+      // F7.3-A — identity_managed_by: 'federation' | 'dojo'
+      //          identity_dojo: { id, name } | null
+      // O nome do dojô sai de COALESCE(trade_name, legal_name), como no resto
+      // da F7 (nunca companies.name).
+      ...identityOwnership,
       belt_history: beltHistory,
       last_exam: lastExam,
       // course_count_2y é o campo canônico (janela de 2 anos, c6).

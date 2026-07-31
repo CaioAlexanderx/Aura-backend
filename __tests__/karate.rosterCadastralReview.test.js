@@ -19,6 +19,13 @@
 // Estilo: mistura unit test direto (sem mock de banco, mais rápido e mais
 // fácil de auditar) com um teste de contrato via supertest+mock de
 // db.connect para o item 5 (mesmo padrão de karate.rosterPortalScale.test.js).
+//
+// (30/07/2026 — F7.3-A) O mock do item 5 deixou de ser FILA POSICIONAL e
+// passou a despachar por TEXTO do SQL. A guarda de identidade acrescentou
+// três queries no PATCH (SAVEPOINT + SELECT do dono da ficha + RELEASE)
+// entre o FOR UPDATE do token e a leitura do valor antigo; com fila
+// posicional, cada query nova empurra todas as respostas seguintes um
+// degrau e o CI quebra por motivo errado. Despacho por SQL é imune a isso.
 // ============================================================
 'use strict';
 
@@ -35,6 +42,24 @@ afterEach(() => {
 
 const { classifyPraticante } = require('../src/routes/karateRosterPortalPublic');
 const { validatePractitionerRequestPayload } = require('../src/services/karatePractitionerRequestValidation');
+
+// ── Despacho de mock por SQL (nunca por posição) ────────────
+// `routes` é uma lista [regex, resposta]; a primeira que casar com o texto
+// do SQL responde. BEGIN/COMMIT/SAVEPOINT e qualquer query nova caem no
+// fallback sem quebrar nada.
+function sqlRouter(routes, fallback = { rows: [] }) {
+  return (sql) => {
+    const text = typeof sql === 'string' ? sql : '';
+    for (const [pattern, reply] of routes) {
+      if (pattern.test(text)) return Promise.resolve(typeof reply === 'function' ? reply(text) : reply);
+    }
+    return Promise.resolve(fallback);
+  };
+}
+
+function findCall(mockFn, pattern) {
+  return mockFn.mock.calls.find((c) => typeof c[0] === 'string' && pattern.test(c[0]));
+}
 
 // ════════════════════════════════════════════════════════════
 // (4) classifyPraticante — completude olha TODOS os campos, não só contato
@@ -176,20 +201,33 @@ describe('PATCH /public/roster-update/:token/practitioners/:studentId — item 5
     const mockClient = { query: jest.fn(), release: jest.fn() };
     db.connect.mockResolvedValue(mockClient);
 
-    mockClient.query
-      .mockResolvedValueOnce({}) // BEGIN
-      .mockResolvedValueOnce({ rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, token_expires_at: FUTURE }] }) // token FOR UPDATE
-      .mockResolvedValueOnce({ rows: [{ name: 'Caio', phone: null }] }) // valor antigo
-      .mockResolvedValueOnce({ rows: [{ id: 'pract-1', name: 'Caio', phone: '11999998888', email: null, is_active: true, birth_date: null, cpf_cnpj: null, rg: '388588718', street: null, city: null, state: null }] }) // UPDATE customers
-      .mockResolvedValueOnce({}) // SAVEPOINT
-      .mockResolvedValueOnce({}) // INSERT event
-      .mockResolvedValueOnce({}) // RELEASE
-      .mockResolvedValueOnce({}) // SAVEPOINT touch
-      .mockResolvedValueOnce({}) // UPDATE last_accessed_at
-      .mockResolvedValueOnce({}) // RELEASE
-      .mockResolvedValueOnce({}); // COMMIT
+    mockClient.query.mockImplementation(sqlRouter([
+      // token sob FOR UPDATE
+      [/FROM karate_dojo_roster_validation/, { rows: [{ dojo_id: DOJO_ID, federation_id: FED_ID, token_expires_at: FUTURE }] }],
+      // F7.3-A: dono da ficha — federação gerencia, comportamento idêntico ao de sempre
+      [/practitioner_label/, {
+        rows: [{
+          id: 'pract-1',
+          practitioner_label: 'Caio',
+          fpkt_number: 'FPKT-001',
+          federation_id: FED_ID,
+          karate_identity_managed_by: 'federation',
+          karate_identity_dojo_id: null,
+          identity_dojo_name: null,
+        }],
+      }],
+      // valor ANTIGO (item 8 — diff antes/depois)
+      [/^\s*SELECT name,/, { rows: [{ name: 'Caio', phone: null }] }],
+      // UPDATE customers
+      [/^\s*UPDATE customers SET/, {
+        rows: [{
+          id: 'pract-1', name: 'Caio', phone: '11999998888', email: null, is_active: true,
+          birth_date: null, cpf_cnpj: null, rg: '388588718', street: null, city: null, state: null,
+        }],
+      }],
+    ]));
 
-    db.query.mockResolvedValueOnce({ rows: [{ total: 1, resolved: 0 }] }); // progresso
+    db.query.mockResolvedValue({ rows: [{ total: 1, resolved: 0 }] }); // progresso
 
     request(app)
       .patch(`/public/roster-update/${TOKEN}/practitioners/pract-1`)
@@ -198,9 +236,7 @@ describe('PATCH /public/roster-update/:token/practitioners/:studentId — item 5
         if (err) return done(err);
         expect(res.status).toBe(200);
 
-        const updateCall = mockClient.query.mock.calls.find(
-          (c) => typeof c[0] === 'string' && /^\s*UPDATE customers SET/.test(c[0])
-        );
+        const updateCall = findCall(mockClient.query, /^\s*UPDATE customers SET/);
         expect(updateCall[0]).toMatch(/SET phone = \$2, updated_at = NOW\(\)/);
         expect(updateCall[0]).not.toMatch(/rg\s*=/);
         expect(updateCall[0]).not.toMatch(/cpf_cnpj\s*=/);

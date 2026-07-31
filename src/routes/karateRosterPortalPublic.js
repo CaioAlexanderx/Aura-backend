@@ -44,6 +44,36 @@
 //   mesmo shape de resposta), só trocando requireDojoAccess (JWT) por
 //   resolveToken (token opaco).
 //
+// ── 30/07/2026 — F7.3-A: FICHA MANTIDA POR DOJÔ É SÓ-LEITURA AQUI ──
+// Desde a F7.1/F7.2 uma ficha pode estar ADOTADA por um dojô
+// (customers.karate_identity_managed_by = 'dojo'): quem digita aquela
+// pessoa é o sistema do próprio dojô, e o dado SOBE de lá para a
+// federação. Este arquivo era duas das cinco portas por onde a federação
+// continuava sobrescrevendo a PESSOA por baixo:
+//
+//   PATCH /:token/practitioners/:studentId — reescrevia telefone, e-mail,
+//     CPF, RG, nascimento e o endereço inteiro;
+//   POST  /:token/import                   — reescrevia telefone/e-mail
+//     em LOTE, por matrícula, a partir de uma planilha que pode estar
+//     meses atrasada.
+//
+// Agora as duas passam pela guarda única (services/karateIdentityWriteGuard,
+// a mesma da ficha da federação, do auto-atendimento e do motor de sync):
+// campo de IDENTIDADE em ficha adotada é recusado com 409
+// IDENTITY_MANAGED_BY_DOJO dizendo o NOME do dojô que mantém a ficha, e no
+// import a linha é PULADA e DECLARADA em skipped_identity_managed_by_dojo[]
+// (pular em silêncio seria pior que sobrescrever — o sensei precisa saber
+// por que aquela linha não entrou).
+//
+// SEM OVERRIDE, por definição: token não é credencial de staff. Pedir
+// federation_identity_override/identity_override_reason por aqui é recusa
+// explícita (403 IDENTITY_OVERRIDE_NOT_ALLOWED), nunca um caminho.
+//
+// O que NÃO é campo de identidade continua livre para este canal:
+// is_active ("não treina mais", tanto no PATCH quanto no POST /:token),
+// matrícula FPKT e papéis federativos. A federação não perde nada do que
+// ela EMITE — perde só o direito de reescrever a PESSOA.
+//
 // SEM auth (mesmo padrão de dentalPortalPublic.js / studioApprovalPublic.js):
 // o token opaco de karate_dojo_roster_validation É a autenticação. Todo
 // acesso — leitura, escrita e export — é escopado ao dojo_id do token;
@@ -88,6 +118,15 @@ const { parseCSVLine } = require('../services/karateService');
 const { buildDedupKey, lookupByFpktNumber, normalizeFpktNumber, toIsoDate } = require('../services/karatePractitionerDedup');
 const { validatePractitionerRequestPayload } = require('../services/karatePractitionerRequestValidation');
 const { uploadToR2 } = require('../utils/r2Storage');
+// F7.3-A — a guarda de escrita de identidade é UMA só, compartilhada com a
+// ficha da federação, o auto-atendimento e o motor de sync legado. A lista
+// de colunas protegidas mora lá (derivada de IDENTITY_FIELDS), nunca aqui.
+const {
+  assertIdentityWriteAllowed,
+  identityGuardBody,
+  isIdentityGuardError,
+  CHANNELS,
+} = require('../services/karateIdentityWriteGuard');
 
 let multer;
 try { multer = require('multer'); } catch (_) { multer = null; }
@@ -507,6 +546,58 @@ router.patch('/:token/practitioners/:studentId', async (req, res) => {
       return res.status(410).json({ error: 'Link expirado. Solicite uma nova atualização cadastral à federação.' });
     }
 
+    // ── F7.3-A: ficha mantida por dojô é só-leitura por aqui ────
+    // A leitura de "quem mantém esta ficha" usa o MESMO escopo do UPDATE
+    // logo abaixo (id do praticante + dojô do TOKEN). É deliberado: assim
+    // este link nunca responde sobre praticante de outro dojô e não vira
+    // uma sonda de "quem é gerido por quem". Zero linha aqui → segue para
+    // o UPDATE de sempre, que devolve o 404 NOT_FOUND de sempre.
+    //
+    // SAVEPOINT porque estamos DENTRO de um BEGIN: sem a migration 262 as
+    // colunas de identidade não existem (42703) e um erro solto aqui
+    // envenenaria a transação inteira (armadilha tx-poison). Sem a 262
+    // também não existe ficha adotada — liberar é o comportamento CERTO
+    // naquele estado, não uma degradação preguiçosa.
+    let identityOwnerRow = null;
+    await client.query('SAVEPOINT sp_identity_owner');
+    try {
+      const ownerRes = await client.query(
+        `SELECT c.id, c.name AS practitioner_label, c.karate_registration_number AS fpkt_number,
+                c.federation_id, c.karate_identity_managed_by, c.karate_identity_dojo_id,
+                COALESCE(d.trade_name, d.legal_name) AS identity_dojo_name
+           FROM customers c
+           LEFT JOIN companies d ON d.id = c.karate_identity_dojo_id
+          WHERE c.id = $1 AND c.dojo_id = $2
+          LIMIT 1`,
+        [studentId, dojoId]
+      );
+      await client.query('RELEASE SAVEPOINT sp_identity_owner');
+      identityOwnerRow = (ownerRes && ownerRes.rows && ownerRes.rows[0]) || null;
+    } catch (e) {
+      await client.query('ROLLBACK TO SAVEPOINT sp_identity_owner');
+      if (e.code !== '42703' && e.code !== '42P01') throw e;
+      console.warn('[karateRosterPortalPublic] schema de identidade pendente (262):', e.message);
+    }
+
+    try {
+      // `columns` são NOMES DE COLUNA vindos de PORTAL_EDITABLE_FIELDS —
+      // nunca do corpo da requisição. is_active não está no mapa (é campo
+      // da federação, não da pessoa) e cai fora pelo filter.
+      await assertIdentityWriteAllowed({
+        owner: identityOwnerRow,
+        columns: changedFields.map((k) => PORTAL_EDITABLE_FIELDS[k]).filter(Boolean),
+        channel: CHANNELS.DOJO_PORTAL,
+        canOverride: false, // token não é credencial de staff — este link não tem override
+        body,
+      });
+    } catch (e) {
+      if (isIdentityGuardError(e)) {
+        await client.query('ROLLBACK');
+        return res.status(e.status).json(identityGuardBody(e));
+      }
+      throw e;
+    }
+
     params.push(dojoId);
     const dojoParamIdx = params.length;
 
@@ -666,6 +757,12 @@ router.patch('/:token/practitioners/:studentId', async (req, res) => {
 // Fecha o ciclo (confirma o quadro) e EXPIRA o token — continua existindo
 // para o fluxo de revisão em lote / confirmação final; o PATCH granular
 // acima é o novo caminho de autosave campo a campo durante a sessão.
+//
+// F7.3-A: este endpoint só escreve `is_active` — SITUAÇÃO, não IDENTIDADE.
+// is_active está em FEDERATION_ALWAYS_ALLOWED (karateIdentityWriteGuard):
+// quem confirma que a pessoa ainda treina é o dojô/federação, e a ficha
+// adotada não muda isso. Por isso NÃO passa pela guarda — não há campo de
+// identidade nenhum neste caminho.
 router.post('/:token', async (req, res) => {
   const token = req.params.token;
   const body = req.body || {};
@@ -787,6 +884,12 @@ const VALID_SEX_VALUES = ['M', 'F', 'other'];
 // endpoint autenticado); `name`/`belt_level`/`belt_name` continuam aceitos
 // como fallback para não quebrar chamador antigo, mas o corpo canônico
 // agora é full_name/claimed_belt.
+//
+// F7.3-A: NÃO passa pela guarda de identidade porque não escreve em
+// `customers` — desde a H2 este endpoint só INSERE em
+// karate_practitioner_requests (uma solicitação pendente). A escrita real
+// da pessoa acontece na APROVAÇÃO, do lado da federação
+// (karatePractitionerRequestsAdmin.js), que é outro canal.
 router.post('/:token/practitioner', practitionerCreateLimiter, async (req, res) => {
   const token = req.params.token;
   const b = req.body || {};
@@ -963,6 +1066,11 @@ router.post('/:token/practitioner', practitionerCreateLimiter, async (req, res) 
 // em vez do endpoint autenticado guards.staffWrite() de
 // karatePractitioners.js (que exige um customer já existente e sessão de
 // federação — nenhum dos dois existe no fluxo do sensei sem login).
+//
+// F7.3-A: escreve `photo_url` em karate_practitioner_requests, NUNCA em
+// customers — a solicitação ainda não é uma pessoa no quadro. A cópia
+// para customers.karate_photo_url acontece na aprovação, do lado da
+// federação (karatePractitionerRequestsAdmin.js), fora deste arquivo.
 const PHOTO_ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 router.post('/:token/practitioner/:requestId/photo', photoUploadLimiter, async (req, res) => {
@@ -1186,6 +1294,14 @@ router.get('/:token/export-missing', async (req, res) => {
 // Reimporta a planilha de export-missing preenchida. Casamento por
 // identificador estável (matrícula FPKT) — NUNCA por nome (item 5).
 // Idempotente; erro em uma linha não aborta o lote (SAVEPOINT por linha).
+//
+// F7.3-A: telefone e e-mail são campos de IDENTIDADE. Numa ficha ADOTADA
+// (customers.karate_identity_managed_by = 'dojo') quem os mantém é o
+// sistema do próprio dojô e o dado SOBE de lá — uma planilha antiga
+// reenviada aqui desfazia isso em LOTE, sem ninguém perceber. As linhas
+// dessas fichas são puladas e DECLARADAS na resposta
+// (skipped_identity_managed_by_dojo[]); pular em silêncio seria pior que
+// sobrescrever.
 const IDENTIFIER_HEADER_ALIASES = ['matricula fpkt', 'matricula', 'registro fpkt', 'registro', 'karate_registration_number', 'fpkt'];
 const PHONE_HEADER_ALIASES = ['telefone', 'phone', 'fone', 'celular'];
 const EMAIL_HEADER_ALIASES = ['email', 'e-mail'];
@@ -1205,10 +1321,28 @@ function resolveImportColumns(headers) {
   return map;
 }
 
-async function doImport(token, csvText, res) {
+async function doImport(token, csvText, res, body = {}) {
   if (!csvText || !String(csvText).trim()) {
     return res.status(422).json({ error: 'csv_content vazio', code: 'VALIDATION_ERROR' });
   }
+
+  // F7.3-A: este canal NÃO tem override — token não é credencial de staff.
+  // Pedir federation_identity_override/identity_override_reason aqui é
+  // RECUSA EXPLÍCITA (403), nunca um pedido ignorado em silêncio: quem
+  // tentou precisa saber que essa porta não existe. As colunas vêm do mapa
+  // do próprio arquivo (PORTAL_EDITABLE_FIELDS), nunca do corpo.
+  try {
+    await assertIdentityWriteAllowed({
+      columns: [PORTAL_EDITABLE_FIELDS.phone, PORTAL_EDITABLE_FIELDS.email],
+      channel: CHANNELS.DOJO_PORTAL,
+      canOverride: false,
+      body,
+    });
+  } catch (e) {
+    if (isIdentityGuardError(e)) return res.status(e.status).json(identityGuardBody(e));
+    throw e;
+  }
+
   const stripped = String(csvText).replace(/^﻿/, '');
   const lines = stripped.split(/\r?\n/).filter((l) => l.trim());
   if (lines.length < 2) {
@@ -1224,9 +1358,28 @@ async function doImport(token, csvText, res) {
     return res.status(422).json({ error: 'Coluna de matrícula (identificador estável) não encontrada no CSV', code: 'VALIDATION_ERROR' });
   }
 
+  // F7.3-A: as matrículas da planilha em UMA passada — a pergunta "quem
+  // mantém esta ficha" vira UMA query de lote lá embaixo, nunca N
+  // consultas dentro do loop (400 praticantes por dojô, 101 dojôs).
+  const sheetIdentifiers = [];
+  {
+    const seen = new Set();
+    for (let i = 1; i < lines.length; i++) {
+      const values = splitLine(lines[i]);
+      const row = {};
+      headers.forEach((h, idx) => { row[h] = values[idx] !== undefined ? values[idx] : ''; });
+      const identifier = String(row[colMap.identifier] || '').trim();
+      if (identifier && !seen.has(identifier)) {
+        seen.add(identifier);
+        sheetIdentifiers.push(identifier);
+      }
+    }
+  }
+
   const client = await db.connect();
   const erros = [];
   const applied = [];
+  const puladosIdentidade = [];
   let atualizados = 0;
   let ignorados = 0;
 
@@ -1251,6 +1404,45 @@ async function doImport(token, csvText, res) {
       return res.status(410).json({ error: 'Link expirado. Solicite uma nova atualização cadastral à federação.' });
     }
 
+    // ── F7.3-A: quais matrículas desta planilha estão em ficha ADOTADA ──
+    // UMA query de lote (= ANY), escopada ao dojô do TOKEN como todo o
+    // resto deste arquivo. SAVEPOINT porque estamos dentro de um BEGIN:
+    // sem a migration 262 as colunas não existem (42703) e o erro solto
+    // envenenaria a transação (armadilha tx-poison). Sem a 262 também não
+    // existe ficha adotada — o mapa fica vazio e o import segue como
+    // sempre foi.
+    const identityManagedByDojo = new Map();
+    if (sheetIdentifiers.length) {
+      await client.query('SAVEPOINT sp_identity_batch');
+      try {
+        const ownedRes = await client.query(
+          `SELECT c.karate_registration_number AS fpkt_number,
+                  c.name AS practitioner_label,
+                  c.karate_identity_dojo_id,
+                  COALESCE(d.trade_name, d.legal_name) AS identity_dojo_name
+             FROM customers c
+             LEFT JOIN companies d ON d.id = c.karate_identity_dojo_id
+            WHERE c.dojo_id = $1
+              AND c.karate_registration_number = ANY($2::text[])
+              AND c.karate_identity_managed_by = 'dojo'`,
+          [dojoId, sheetIdentifiers]
+        );
+        await client.query('RELEASE SAVEPOINT sp_identity_batch');
+        for (const r of (ownedRes && ownedRes.rows) || []) {
+          identityManagedByDojo.set(String(r.fpkt_number), {
+            name: r.practitioner_label || null,
+            dojo: r.karate_identity_dojo_id
+              ? { id: r.karate_identity_dojo_id, name: r.identity_dojo_name || null }
+              : null,
+          });
+        }
+      } catch (e) {
+        await client.query('ROLLBACK TO SAVEPOINT sp_identity_batch');
+        if (e.code !== '42703' && e.code !== '42P01') throw e;
+        console.warn('[karateRosterPortalPublic] schema de identidade pendente (262) no import:', e.message);
+      }
+    }
+
     for (let i = 1; i < lines.length; i++) {
       const rowNum = i + 1;
       const values = splitLine(lines[i]);
@@ -1270,6 +1462,21 @@ async function doImport(token, csvText, res) {
         }
         if (!phoneVal && !emailVal) {
           ignorados++;
+          await client.query('ROLLBACK TO SAVEPOINT sp_import_row');
+          continue;
+        }
+
+        // F7.3-A: ficha mantida pelo dojô — telefone/e-mail vêm de lá e
+        // sobem sozinhos. A linha é PULADA e DECLARADA na resposta.
+        const identityOwner = identityManagedByDojo.get(identifier);
+        if (identityOwner) {
+          puladosIdentidade.push({
+            row: rowNum,
+            matricula: identifier,
+            nome: identityOwner.name,
+            identity_dojo: identityOwner.dojo,
+            motivo: `Ficha mantida pelo dojô ${(identityOwner.dojo && identityOwner.dojo.name) || 'que a adotou'} — telefone e e-mail são atualizados no sistema do próprio dojô e sobem sozinhos para a federação.`,
+          });
           await client.query('ROLLBACK TO SAVEPOINT sp_import_row');
           continue;
         }
@@ -1331,7 +1538,7 @@ async function doImport(token, csvText, res) {
     }
 
     await client.query('COMMIT');
-    res.json({ atualizados, ignorados, erros });
+    res.json({ atualizados, ignorados, erros, skipped_identity_managed_by_dojo: puladosIdentidade });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[karateRosterPortalPublic] import error:', err.message);
@@ -1350,12 +1557,12 @@ router.post('/:token/import', async (req, res) => {
         return res.status(422).json({ error: 'Falha ao ler arquivo enviado', code: 'VALIDATION_ERROR' });
       }
       const csvText = req.file ? req.file.buffer.toString('utf8') : (req.body && req.body.csv_content);
-      return doImport(token, csvText, res);
+      return doImport(token, csvText, res, req.body || {});
     });
   }
 
   const csvText = req.body && req.body.csv_content;
-  return doImport(token, csvText, res);
+  return doImport(token, csvText, res, req.body || {});
 });
 
 module.exports = router;
