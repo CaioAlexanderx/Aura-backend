@@ -11,14 +11,25 @@
 //   pelo dojô que a mantém (via adoção F7.1 / sync F7.2) — e a recusa diz
 //   QUAL dojô mantém aquela ficha.
 //
-// ── F7.4 (30/07/2026): …ENQUANTO AQUELE DOJÔ AINDA ESTIVER LÁ ──
+// ── F7.4 (30/07/2026): …ENQUANTO AQUELE DOJÔ AINDA USAR O AURA ──
 // A regra acima estava valendo para sempre. Uma vez adotada, a ficha ficava
-// marcada como do dojô mesmo depois de ele cancelar a assinatura, ter a
-// vertical desligada, ser inativado, ser apagado ou se desconectar da
-// federação — e a federação ficava IMPEDIDA de editar a identidade de um
-// praticante cujo dojô não usa mais o sistema. É o oposto exato da premissa 2
-// do dono do produto ("para os dojôs não vinculados, ou que não têm Aura, a
-// federação deve ter total liberdade").
+// marcada como do dojô mesmo depois de ele ter a vertical desligada, ser
+// inativado ou ser apagado — e a federação ficava IMPEDIDA de editar a
+// identidade de um praticante cujo dojô não usa mais o sistema. É o oposto
+// exato da premissa 2 do dono do produto ("para os dojôs não vinculados, ou
+// que não têm Aura, a federação deve ter total liberdade").
+//
+// ⚠️ SÃO TRÊS PERNAS, E TODAS SÃO "SAIU DO AURA". Duas outras que este PR
+// chegou a ter foram removidas por correção do dono do produto (30/07/2026):
+//   • DESFILIAÇÃO da federação NÃO devolve a gestão. "Sobre desconectar da
+//     federação, a única ação seria inativar os praticantes do dojô desfiliado
+//     na visão da federação, o resto permanece igual." O dojô desfiliado
+//     continua usando o Aura e continua dono da identidade dos alunos dele —
+//     esta guarda continua recusando a escrita da federação naquela ficha.
+//   • INADIMPLÊNCIA não entra. "Não vamos criar gate por inadimplência.
+//     Teoricamente, se a federação aceitar o vínculo, entendemos que o dojô
+//     está autorizado a se filiar." Não há leitura de billing_status,
+//     trial_ends_at nem DOJO_GATE_ENABLED em lugar nenhum deste caminho.
 //
 // O QUE MUDOU AQUI, E SÓ ISSO: o OWNER_SQL já fazia LEFT JOIN em `companies`
 // para poder dizer o NOME do dojô na recusa. Agora o MESMO join traz também o
@@ -64,9 +75,7 @@
 // dojô e o que fazer, o override depende de QUEM está pedindo (o banco
 // não tem o token), e um RAISE EXCEPTION viraria 500 genérico em vez de
 // 409 legível. Além disso o gatilho dispararia contra a própria adoção e
-// contra o sync, que são escritas legítimas. A F7.4 acrescenta um motivo:
-// "o dojô ainda está no Aura?" depende de uma FLAG DE AMBIENTE
-// (DOJO_GATE_ENABLED) que o banco não enxerga.
+// contra o sync, que são escritas legítimas.
 //
 // ── O QUE CONTINUA LIVRE PARA A FEDERAÇÃO, SEMPRE ───────────
 // Matrícula FPKT, papéis federativos (is_arbiter/is_instructor/
@@ -77,6 +86,11 @@
 // abaixo é conferida contra a lista protegida no carregamento do módulo: se
 // as duas listas um dia se cruzarem, o require estoura no boot em vez de a
 // matrícula de alguém virar campo bloqueado em produção.
+//
+// `is_active` estar nesta lista é o que permite a REVOGAÇÃO da filiação
+// (karateAffiliationRequestService.revokeAffiliation) inativar os praticantes
+// do dojô desfiliado na visão da federação sem esbarrar nesta guarda:
+// situação é coisa que a federação EMITE, não é identidade da pessoa.
 //
 // ── guardian_* NÃO É BLOQUEADO (decisão consciente) ─────────
 // guardian_name/guardian_cpf/guardian_phone/guardian_relationship
@@ -469,12 +483,16 @@ async function assertIdentityWriteAllowed({
     };
   }
 
-  // ── F7.4: O DOJÔ AINDA ESTÁ LÁ? ────────────────────────────
+  // ── F7.4: O DOJÔ AINDA USA O AURA? ─────────────────────────
   // A ficha diz 'dojo', mas o dojô saiu do Aura (inativado, vertical
-  // desligada, apagado, desconectado da federação, ou cobrança bloqueada com
-  // o gate ligado). A premissa 2 manda liberar — e liberar AGORA, sem
+  // desligada ou apagado). A premissa 2 manda liberar — e liberar AGORA, sem
   // esperar rotina nenhuma. A decisão é tomada com a linha que ACABOU de ser
   // lida; a arrumação do marcador vem depois e não pode atrapalhar.
+  //
+  // Dojô DESFILIADO da federação NÃO cai aqui (correção do dono do produto,
+  // 30/07/2026): desfiliar não é sair do Aura, e o dojô desfiliado continua
+  // dono da identidade dos alunos dele. Inadimplência também não: não existe
+  // gate por cobrança em nenhum ponto deste caminho.
   const exit = resolved.exit || UNKNOWN_EXIT;
   if (exit.exited) {
     let regularized = null;
