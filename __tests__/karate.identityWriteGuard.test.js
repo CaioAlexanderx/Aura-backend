@@ -176,7 +176,7 @@ describe('assertGuardListsAreDisjoint — a proteção é executada, não promet
   });
 });
 
-describe('IDENTITY_COLS — o que é a PESSOA (derivado de IDENTITY_FIELDS)', () => {
+describe('IDENTITY_COLS — o que é a PESSOA (derivado de IDENTITY_FIELDS + GUARDIAN_SYNC_FIELDS)', () => {
   it('cobre nome, CPF, RG, nascimento, sexo e contato', () => {
     for (const col of ['name', 'cpf_cnpj', 'rg', 'birth_date', 'sex', 'phone', 'email']) {
       expect(IDENTITY_COLS).toContain(col);
@@ -211,21 +211,46 @@ describe('IDENTITY_COLS — o que é a PESSOA (derivado de IDENTITY_FIELDS)', ()
     }
   });
 
-  it('NÃO cobre parent_guardian_id nem guardian_* (decisão consciente: o dojô não os sincroniza hoje)', () => {
-    for (const col of [
-      'parent_guardian_id',
-      'guardian_name',
-      'guardian_cpf',
-      'guardian_phone',
-      'guardian_relationship',
-    ]) {
-      expect(IDENTITY_COLS).not.toContain(col);
-    }
+  // F8 (31/07/2026): guardian_* passou a ser sincronizado pelo dojô
+  // (GUARDIAN_SYNC_FIELDS, karateStudentIdentityLink.js) e por isso SAIU
+  // desta lista de "não cobre" — ver o describe dedicado logo abaixo.
+  // parent_guardian_id continua fora: é o VÍNCULO (um id, federativo),
+  // nunca os DADOS do responsável.
+  it('NÃO cobre parent_guardian_id (é o vínculo federativo, não o dado do responsável)', () => {
+    expect(IDENTITY_COLS).not.toContain('parent_guardian_id');
   });
 
   it('NÃO cobre as próprias colunas de gestão da ficha', () => {
     expect(IDENTITY_COLS).not.toContain('karate_identity_managed_by');
     expect(IDENTITY_COLS).not.toContain('karate_identity_dojo_id');
+  });
+});
+
+// F8 (31/07/2026): guardian_* passou a ser protegido, no mesmo commit em
+// que passou a ser sincronizado — é a promessa central do PR aplicada ao
+// campo novo, não só aos que já existiam.
+describe('IDENTITY_COLS — F8: guardian_* agora É identidade protegida', () => {
+  it('cobre as quatro colunas do responsável que o dojô sincroniza', () => {
+    for (const col of ['guardian_name', 'guardian_cpf', 'guardian_phone', 'guardian_relationship']) {
+      expect(IDENTITY_COLS).toContain(col);
+    }
+  });
+
+  it('escrever guardian_cpf numa ficha adotada por dojô é bloqueada com o MESMO 409 de rg/endereço/foto', async () => {
+    const e = await capture(assertIdentityWriteAllowed({
+      owner: dojoOwnerRow(),
+      columns: ['guardian_name', 'guardian_cpf', 'guardian_phone', 'guardian_relationship'],
+      channel: CHANNELS.FEDERATION_ADMIN,
+      canOverride: true,
+      body: {},
+    }));
+    expect(e).not.toBeNull();
+    expect(isIdentityGuardError(e)).toBe(true);
+    expect(e.status).toBe(409);
+    expect(e.code).toBe(CODE_BLOCKED);
+    expect(identityGuardBody(e).blocked_fields).toEqual([
+      'guardian_name', 'guardian_cpf', 'guardian_phone', 'guardian_relationship',
+    ]);
   });
 });
 
@@ -369,6 +394,9 @@ describe('ficha do dojô + só colunas FEDERATIVAS → libera sem custo de query
     // prova que ele NÃO é perguntado.
     const runner = makeRunner([[/practitioner_label/, { rows: [dojoOwnerRow()] }]]);
 
+    // F8: guardian_name SAIU daqui (agora é protegido, ver describe
+    // dedicado acima) — affiliation_since entra no lugar como coluna
+    // federativa de verdade (FEDERATION_ALWAYS_ALLOWED).
     const out = await assertIdentityWriteAllowed({
       runner,
       practitionerId: PRACT_ID,
@@ -378,7 +406,7 @@ describe('ficha do dojô + só colunas FEDERATIVAS → libera sem custo de query
         'dojo_id',
         'parent_guardian_id',
         'is_arbiter',
-        'guardian_name',
+        'affiliation_since',
       ],
       channel: CHANNELS.FEDERATION_ADMIN,
       canOverride: true,
