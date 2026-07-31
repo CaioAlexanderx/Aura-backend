@@ -11,6 +11,27 @@
 //   pelo dojô que a mantém (via adoção F7.1 / sync F7.2) — e a recusa diz
 //   QUAL dojô mantém aquela ficha.
 //
+// ── F7.4 (30/07/2026): …ENQUANTO AQUELE DOJÔ AINDA ESTIVER LÁ ──
+// A regra acima estava valendo para sempre. Uma vez adotada, a ficha ficava
+// marcada como do dojô mesmo depois de ele cancelar a assinatura, ter a
+// vertical desligada, ser inativado, ser apagado ou se desconectar da
+// federação — e a federação ficava IMPEDIDA de editar a identidade de um
+// praticante cujo dojô não usa mais o sistema. É o oposto exato da premissa 2
+// do dono do produto ("para os dojôs não vinculados, ou que não têm Aura, a
+// federação deve ter total liberdade").
+//
+// O QUE MUDOU AQUI, E SÓ ISSO: o OWNER_SQL já fazia LEFT JOIN em `companies`
+// para poder dizer o NOME do dojô na recusa. Agora o MESMO join traz também o
+// ESTADO do dojô (services/karateDojoExitState.js). Se o dojô saiu, a guarda
+// devolve "liberado" NA HORA — a federação nunca fica esperando um job — e
+// dispara a regularização do marcador em transação PRÓPRIA, best-effort
+// (services/karateIdentityReclaim.js). Nenhuma query nova entra em nenhum
+// caminho: o custo da F7.4 nesta guarda é literalmente zero.
+//
+// O caminho das 15.488 fichas geridas pela federação continua idêntico: sem
+// campo de identidade no corpo, a guarda decide sem ir ao banco; com campo de
+// identidade e managed_by='federation', é a MESMA query de antes.
+//
 // ── O BURACO QUE ESTE ARQUIVO FECHA ─────────────────────────
 // A F7.1 (adoção) e a F7.2 (sync contínuo) fazem o dado SUBIR. Nenhuma
 // das duas impede a federação de continuar sobrescrevendo por baixo — e
@@ -43,17 +64,19 @@
 // dojô e o que fazer, o override depende de QUEM está pedindo (o banco
 // não tem o token), e um RAISE EXCEPTION viraria 500 genérico em vez de
 // 409 legível. Além disso o gatilho dispararia contra a própria adoção e
-// contra o sync, que são escritas legítimas.
+// contra o sync, que são escritas legítimas. A F7.4 acrescenta um motivo:
+// "o dojô ainda está no Aura?" depende de uma FLAG DE AMBIENTE
+// (DOJO_GATE_ENABLED) que o banco não enxerga.
 //
 // ── O QUE CONTINUA LIVRE PARA A FEDERAÇÃO, SEMPRE ───────────
 // Matrícula FPKT, papéis federativos (is_arbiter/is_instructor/
 // is_examiner/is_assistant/is_student), is_active, dojo_id,
 // parent_guardian_id, graduações/certificados/anuidade. A federação não
 // perde nada do que ela EMITE — perde só o direito de reescrever a
-// PESSOA. FEDERATION_ALWAYS_ALLOWED abaixo é conferida contra a lista
-// protegida no carregamento do módulo: se as duas listas um dia se
-// cruzarem, o require estoura no boot em vez de a matrícula de alguém
-// virar campo bloqueado em produção.
+// PESSOA, e só enquanto um dojô VIVO a mantiver. FEDERATION_ALWAYS_ALLOWED
+// abaixo é conferida contra a lista protegida no carregamento do módulo: se
+// as duas listas um dia se cruzarem, o require estoura no boot em vez de a
+// matrícula de alguém virar campo bloqueado em produção.
 //
 // ── guardian_* NÃO É BLOQUEADO (decisão consciente) ─────────
 // guardian_name/guardian_cpf/guardian_phone/guardian_relationship
@@ -68,12 +91,22 @@
 // não existe ficha adotada. A sonda degrada para "federação gerencia"
 // (libera), que é o comportamento correto naquele estado. Dentro de
 // transação a leitura roda em SAVEPOINT: um 42703 aqui não pode
-// envenenar a transação do chamador (armadilha tx-poison).
+// envenenar a transação do chamador (armadilha tx-poison). As colunas de
+// ESTADO do dojô (F7.4) têm cache module-level otimista próprio: se
+// qualquer uma faltar, o SELECT cai para a forma da F7.3 e o
+// comportamento volta a ser exatamente o de antes deste PR — nunca o
+// contrário (estado desconhecido JAMAIS libera a escrita).
 // ============================================================
 'use strict';
 
 const { IDENTITY_FIELDS, writeIdentityAudit } = require('./karateStudentIdentityLink');
 const { FEDERATION_OWNED_COLS } = require('./karateIdentitySync');
+const {
+  dojoStateSelect,
+  evaluateDojoExitFromRow,
+  UNKNOWN_EXIT,
+} = require('./karateDojoExitState');
+const { releaseAbandonedIdentityBestEffort } = require('./karateIdentityReclaim');
 
 // ── Canais ──────────────────────────────────────────────────
 // O canal decide DUAS coisas: o texto da recusa (quem está lendo é o
@@ -183,7 +216,26 @@ function identityGuardBody(e) {
 // ============================================================
 // LEITURA DE QUEM MANTÉM A FICHA
 // ============================================================
+// F7.4: o LEFT JOIN em companies já existia (para o NOME do dojô na recusa).
+// Agora ele traz também o ESTADO do dojô — mesma query, mesmo custo.
 const OWNER_SQL = `
+  SELECT c.id,
+         c.name AS practitioner_label,
+         c.karate_registration_number AS fpkt_number,
+         c.federation_id,
+         c.karate_identity_managed_by,
+         c.karate_identity_dojo_id,
+         COALESCE(d.trade_name, d.legal_name) AS identity_dojo_name,
+         ${dojoStateSelect('d')}
+    FROM customers c
+    LEFT JOIN companies d ON d.id = c.karate_identity_dojo_id
+   WHERE c.id = $1
+   LIMIT 1`;
+
+// Forma F7.3 (sem o estado do dojô). É para onde a leitura cai se alguma das
+// colunas de companies não existir naquele ambiente — o comportamento volta a
+// ser o de antes deste PR, nunca mais permissivo.
+const OWNER_SQL_LEGACY = `
   SELECT c.id,
          c.name AS practitioner_label,
          c.karate_registration_number AS fpkt_number,
@@ -196,29 +248,59 @@ const OWNER_SQL = `
    WHERE c.id = $1
    LIMIT 1`;
 
+// Cache module-level otimista (mesmo padrão de HAS_SEX_AFFILIATION_COLS em
+// karatePractitioners.js). Vira false em 42703 e a leitura passa a usar a
+// forma legada.
+let HAS_DOJO_STATE_COLS = true;
+
+function ownerSql() {
+  return HAS_DOJO_STATE_COLS ? OWNER_SQL : OWNER_SQL_LEGACY;
+}
+
+// Estado global precisa ser zerável entre casos de teste.
+function _resetDojoStateCache() {
+  HAS_DOJO_STATE_COLS = true;
+}
+
 const SCHEMA_PENDING_OWNER = Object.freeze({
   found: false,
   managedBy: 'federation',
   dojo: null,
+  exit: UNKNOWN_EXIT,
   schemaPending: true,
+});
+
+const NOT_FOUND_OWNER = Object.freeze({
+  found: false,
+  managedBy: 'federation',
+  dojo: null,
+  exit: UNKNOWN_EXIT,
+  schemaPending: false,
 });
 
 // `runner` é db (fora de transação) ou o client de uma transação já
 // aberta. Com savepoint:true a leitura fica isolada: 42703 (migration 262
 // pendente) não envenena a transação de quem chamou.
 async function loadIdentityOwner(runner, practitionerId, opts = {}) {
-  if (!practitionerId) return { found: false, managedBy: 'federation', dojo: null, schemaPending: false };
+  if (!practitionerId) return NOT_FOUND_OWNER;
   const useSavepoint = !!opts.savepoint;
 
   if (useSavepoint) await runner.query('SAVEPOINT sp_identity_guard');
   try {
-    const { rows } = await runner.query(OWNER_SQL, [practitionerId]);
+    const { rows } = await runner.query(ownerSql(), [practitionerId]);
     if (useSavepoint) await runner.query('RELEASE SAVEPOINT sp_identity_guard');
-    if (!rows.length) return { found: false, managedBy: 'federation', dojo: null, schemaPending: false };
+    if (!rows.length) return NOT_FOUND_OWNER;
     return normalizeOwnerRow(rows[0]);
   } catch (e) {
     if (useSavepoint) {
       try { await runner.query('ROLLBACK TO SAVEPOINT sp_identity_guard'); } catch (_) { /* conexão pode ter caído */ }
+    }
+    // F7.4: pode ser SÓ uma coluna de estado do dojô faltando. Desliga o
+    // acréscimo e tenta de novo com a forma da F7.3 antes de degradar.
+    if (e && e.code === '42703' && HAS_DOJO_STATE_COLS) {
+      HAS_DOJO_STATE_COLS = false;
+      console.warn('[karateIdentityWriteGuard] colunas de estado do dojô ausentes — caindo para a leitura F7.3');
+      return loadIdentityOwner(runner, practitionerId, opts);
     }
     if (e && (e.code === '42703' || e.code === '42P01')) {
       // Sem a 262 não existe ficha adotada: liberar é o comportamento
@@ -234,9 +316,14 @@ async function loadIdentityOwner(runner, practitionerId, opts = {}) {
 // que já traga as colunas (o auto-atendimento, por exemplo, reusa o
 // SELECT que ele JÁ faz com o 2º fator de identidade no WHERE — assim o
 // guarda nunca responde sobre uma ficha cuja identidade não foi provada).
+//
+// F7.4: quando a linha NÃO traz o estado do dojô (é o caso de todo chamador
+// que passa o próprio SELECT), evaluateDojoExitFromRow devolve UNKNOWN_EXIT —
+// "não sei" NUNCA vira "saiu". Dado faltante é neutro.
 function normalizeOwnerRow(row) {
-  if (!row) return { found: false, managedBy: 'federation', dojo: null, schemaPending: false };
+  if (!row) return NOT_FOUND_OWNER;
   const managedBy = row.karate_identity_managed_by === 'dojo' ? 'dojo' : 'federation';
+  const dojoId = row.karate_identity_dojo_id || null;
   return {
     found: true,
     practitionerId: row.id || null,
@@ -244,9 +331,10 @@ function normalizeOwnerRow(row) {
     fpktNumber: row.fpkt_number || row.karate_registration_number || null,
     federationId: row.federation_id || null,
     managedBy,
-    dojo: managedBy === 'dojo' && row.karate_identity_dojo_id
-      ? { id: row.karate_identity_dojo_id, name: row.identity_dojo_name || null }
+    dojo: managedBy === 'dojo' && dojoId
+      ? { id: dojoId, name: row.identity_dojo_name || null }
       : null,
+    exit: managedBy === 'dojo' && dojoId ? evaluateDojoExitFromRow(row) : UNKNOWN_EXIT,
     schemaPending: false,
   };
 }
@@ -291,9 +379,10 @@ function blockedMessage(channel, owner, blocked) {
   }
 
   return (
-    `A ficha ${quem} é mantida pelo dojô ${who} (identidade adotada). ` +
+    `A ficha ${quem} é mantida pelo dojô ${who} (identidade adotada), e o dojô continua ativo no Aura. ` +
     `A federação não reescreve dados pessoais de ficha adotada: ${labelList(blocked)}. ` +
-    'Peça a correção ao dojô (ela sobe sozinha), ou, em caso excepcional, repita a requisição com ' +
+    'Peça a correção ao dojô (ela sobe sozinha); ou retome a gestão das fichas deste dojô de uma vez em ' +
+    'Dojôs › Retomar gestão das fichas; ou, em caso excepcional, repita a requisição com ' +
     `${OVERRIDE_FLAG_KEY}:true e ${OVERRIDE_REASON_KEY} — o override fica registrado na trilha da ficha. ` +
     'Matrícula, papéis federativos, situação, dojô e graduações continuam editáveis normalmente.'
   );
@@ -322,6 +411,7 @@ function readOverrideRequest(body) {
 //     canOverride: true,          // só em canal com staffWrite
 //     body: req.body,
 //     owner,                      // opcional: linha já lida pelo chamador
+//     regularize: true,           // F7.4: arruma o marcador do dojô que saiu
 //   });
 //   if (guard.overridden) { /* grave e CHAME writeOverrideAudit na MESMA tx */ }
 //
@@ -336,6 +426,7 @@ async function assertIdentityWriteAllowed({
   body = null,
   owner = null,
   actor = null,
+  regularize = true,
 } = {}) {
   const blocked = identityColumnsIn(columns);
   const request = readOverrideRequest(body);
@@ -372,6 +463,45 @@ async function assertIdentityWriteAllowed({
       overridden: false,
       managedBy: 'federation',
       dojo: null,
+      columns: blocked.map((b) => b.col),
+      schemaPending: !!resolved.schemaPending,
+      owner: resolved,
+    };
+  }
+
+  // ── F7.4: O DOJÔ AINDA ESTÁ LÁ? ────────────────────────────
+  // A ficha diz 'dojo', mas o dojô saiu do Aura (inativado, vertical
+  // desligada, apagado, desconectado da federação, ou cobrança bloqueada com
+  // o gate ligado). A premissa 2 manda liberar — e liberar AGORA, sem
+  // esperar rotina nenhuma. A decisão é tomada com a linha que ACABOU de ser
+  // lida; a arrumação do marcador vem depois e não pode atrapalhar.
+  const exit = resolved.exit || UNKNOWN_EXIT;
+  if (exit.exited) {
+    let regularized = null;
+    if (regularize && !resolved.schemaPending) {
+      // Transação PRÓPRIA, best-effort, NUNCA lança: se falhar, a escrita da
+      // federação acontece do mesmo jeito e o marcador fica para a
+      // regularização em lote. Nunca usa o `runner` do chamador — é o que
+      // impede qualquer interação com a transação dele (tx-poison).
+      regularized = await releaseAbandonedIdentityBestEffort({
+        practitionerId: resolved.practitionerId || practitionerId,
+        dojoId: resolved.dojo && resolved.dojo.id,
+        federationId: resolved.federationId,
+        practitionerLabel: resolved.practitionerLabel,
+        fpktNumber: resolved.fpktNumber,
+        dojoName: resolved.dojo && resolved.dojo.name,
+        exit,
+        actor,
+      });
+    }
+    return {
+      blocked: false,
+      overridden: false,
+      managedBy: 'federation',
+      dojo: null,
+      previousDojo: resolved.dojo,
+      dojoExit: exit,
+      identityReturned: !!(regularized && regularized.released),
       columns: blocked.map((b) => b.col),
       schemaPending: !!resolved.schemaPending,
       owner: resolved,
@@ -483,11 +613,18 @@ function buildOverrideChanges(beforeRow, writes) {
 
 // Contrato de LEITURA para a UI (F7.3-B entra em modo leitura com isto).
 // Uma função só para os GETs não inventarem três formatos diferentes.
+//
+// F7.4: quando a linha lida SOUBER o estado do dojô e ele tiver saído, a UI
+// recebe identity_managed_by:'federation' — a mesma verdade que a guarda
+// aplica na escrita. Telas e escrita não podem discordar.
 function identityOwnershipPayload(row) {
   const o = normalizeOwnerRow(row);
+  const exited = !!(o.exit && o.exit.exited);
   return {
-    identity_managed_by: o.managedBy,
-    identity_dojo: o.dojo,
+    identity_managed_by: exited ? 'federation' : o.managedBy,
+    identity_dojo: exited ? null : o.dojo,
+    identity_previous_dojo: exited ? o.dojo : null,
+    identity_dojo_exit: exited ? { reason: o.exit.reason, label: o.exit.label } : null,
   };
 }
 
@@ -504,6 +641,7 @@ module.exports = {
   CODE_OVERRIDE_FORBIDDEN,
   CODE_OVERRIDE_REASON,
   OWNER_SQL,
+  OWNER_SQL_LEGACY,
   assertIdentityWriteAllowed,
   loadIdentityOwner,
   normalizeOwnerRow,
@@ -515,4 +653,5 @@ module.exports = {
   identityGuardBody,
   isIdentityGuardError,
   assertGuardListsAreDisjoint,
+  _resetDojoStateCache,
 };
