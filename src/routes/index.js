@@ -206,6 +206,25 @@ router.use('/public/roster-self', require('./karateRosterSelfServicePublic'));
 // GET  /federation/:id/belt-distribution
 router.use('/karate', require('./karateFederation'));
 
+// ── AURA DOJÔ — F7.4 (governança da gestão da ficha do praticante) ──
+// ⚠️ ORDEM IMPORTA — e aqui ela é o CONTRATO do router, não estilo. Duas das
+// rotas dele são INTERCEPTADORES: rodam ANTES do handler real e chamam
+// next(). Montado DEPOIS de karatePractitioners/karateDojos, nenhum dos dois
+// rodaria (o handler real responde e nunca cede a vez).
+//   DELETE /federation/:id/practitioners/:practitionerId — acrescenta à
+//     resposta o aviso de que aquela ficha era mantida por um dojô ATIVO e o
+//     que aconteceu com o vínculo do aluno. NÃO bloqueia (premissa 2: a
+//     federação remove dados).
+//   DELETE /federation/:id/dojos/:dojoId — devolve à federação as fichas que
+//     aquele dojô mantinha ANTES de a company ser apagada. Sem isso, o
+//     ON DELETE SET NULL da FK da migration 262 viola o CHECK
+//     customers_karate_identity_coherent e o DELETE inteiro estoura 23514.
+// As demais rotas são literais de 2+ segmentos e não colidem com nada:
+//   POST /federation/:id/dojos/:dojoId/identity/reclaim (staffWrite + motivo)
+//   GET  /federation/:id/identity/exited-dojos          (read)
+//   POST /federation/:id/identity/regularize            (staffWrite, ?dry_run=1)
+router.use('/federation/:id', require('./karateIdentityGovernance'));
+
 // Praticantes: /import DEVE vir ANTES de /:practitionerId
 // para que a string literal 'import' não seja capturada como UUID.
 // Ambos montados sob /federation/:id/practitioners
