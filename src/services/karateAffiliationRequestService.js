@@ -27,6 +27,12 @@
 //   é a terceira. Não existe — e não pode passar a existir — nenhum
 //   caminho pelo qual o DOJÔ se desconecte sozinho: do lado dele
 //   (karateDojoConnection.js) só há GET do estado e POST do pedido.
+// DECISÃO 4 (Caio, 31/07/2026 — F7.4): "A INATIVAÇÃO É FEITA PELA PRÓPRIA
+//   FEDERAÇÃO." Revogar a filiação e inativar os praticantes eram, na
+//   primeira versão desta função, uma coisa só; agora são DOIS ATOS
+//   SEPARADOS. revokeAffiliation() apenas REVOGA. Quem inativa é a
+//   federação, à mão, pelo caminho que ela já tem (cascadeInactivateDojo,
+//   o "Suspender" de karateDojos.js). Ver o bloco de revokeAffiliation.
 //
 // Erros viajam como Error com .status + .code (as rotas só traduzem para
 // HTTP). Defensivo 42P01/42703: leitura degrada (vazio + schema_pending),
@@ -495,44 +501,58 @@ async function rejectRequest({ federationId, requestId, reason, actorId }) {
 // ============================================================
 // REVOGAÇÃO DA FILIAÇÃO (F7.4 — ato EXCLUSIVO da federação)
 // ============================================================
-// A CORREÇÃO DO DONO DO PRODUTO (30/07/2026):
-//   "Sobre desconectar da federação, a única ação seria INATIVAR OS
-//    PRATICANTES do dojô desfiliado na visão da federação, o resto permanece
-//    igual — e SOMENTE A FEDERAÇÃO pode cancelar esse vínculo. Dojô solicita,
-//    federação pode aceitar e posteriormente revogar."
+// AS DUAS ORDENS DO DONO DO PRODUTO, NA ORDEM EM QUE CHEGARAM:
 //
-// ── O QUE A REVOGAÇÃO FAZ ───────────────────────────────────
-//   1. companies.karate_dojo_linked_at = NULL — o dojô sai das listagens,
-//      contagens, agregados, régua e saúde da rede da federação (todas
-//      filtram `karate_dojo_linked_at IS NOT NULL`), e perde as superfícies
-//      federativas do lado dele (karateDojoLinkStatus).
-//   2. customers.is_active = false para os praticantes daquele dojô.
+//   30/07/2026 — "Somente a federação pode cancelar esse vínculo. Dojô
+//     solicita, federação pode aceitar e posteriormente revogar."
+//   31/07/2026 — "A INATIVAÇÃO É FEITA PELA PRÓPRIA FEDERAÇÃO."
 //
-// ── POR QUE `customers.is_active`, E NÃO UM CAMPO NOVO ──────
-// Porque é o campo que a federação JÁ usa para separar praticante ativo de
-// inativo, e não havia por que inventar outro:
-//   • karateDojos.js conta `COUNT(cu.id) FILTER (WHERE cu.is_active = true)
-//     AS active_practitioner_count` — é literalmente "na visão da federação";
-//   • a view karate_member_standing (migration 220) já não gera cobrança de
-//     anuidade para praticante inativo (`COALESCE(c.is_active, true)` no CASE
-//     de financeiro/valor_em_aberto) — desfiliar para de cobrar sozinho;
-//   • cascadeInactivateDojo() (PATCH is_active=false em karateDojos.js) faz
-//     EXATAMENTE isto quando o dojô é suspenso. Reusar o mesmo mecanismo é o
-//     que impede dois conceitos de "praticante ativo" — a mesma família de
-//     bug de vertical × vertical_active.
-// `is_active` está em FEDERATION_ALWAYS_ALLOWED (karateIdentityWriteGuard):
-// situação é coisa que a federação EMITE. Por isso inativar não esbarra na
-// guarda de identidade nem precisa de override.
+// A segunda corrige a primeira implementação: revogar a filiação e inativar
+// os praticantes daquele dojô eram, aqui, UMA transação só. Não são mais.
+// São DOIS ATOS SEPARADOS, cada um disparado por uma decisão humana da
+// federação:
+//
+//   ATO 1 — REVOGAR A FILIAÇÃO (esta função)
+//           companies.karate_dojo_linked_at = NULL + a trilha do ato.
+//           O dojô sai das listagens, contagens, agregados, régua e saúde
+//           da rede da federação (todas filtram
+//           `karate_dojo_linked_at IS NOT NULL`) e perde as superfícies
+//           federativas do lado dele (karateDojoLinkStatus).
+//
+//   ATO 2 — INATIVAR OS PRATICANTES (NÃO é feito aqui)
+//           cascadeInactivateDojo(), o "Suspender" da UI da federação
+//           (PATCH /federation/:id/dojos/:dojoId com is_active=false, em
+//           karateDojos.js). Esse caminho JÁ EXISTIA antes desta F7.4,
+//           continua exatamente como estava, e é INDEPENDENTE da revogação:
+//           dá para suspender sem revogar, revogar sem suspender, ou os
+//           dois. Este PR não criou caminho novo de inativação e não
+//           alterou uma linha de karateDojos.js.
+//
+// POR QUE SEPARAR — revogar é um fato jurídico do vínculo entre pessoas
+// jurídicas; inativar é um juízo sobre CADA praticante, que pode continuar
+// treinando, se transferir ou já estar inativo. Amarrar os dois tirava da
+// federação a decisão que é dela, e tornava a revogação um ato de efeito
+// irreversível em massa (dezenas de fichas) para quem só queria desfazer
+// uma filiação.
+//
+// ── INFORMAÇÃO, NUNCA AÇÃO ──────────────────────────────────
+// Para a federação decidir se suspende, a resposta informa quantos
+// praticantes ATIVOS aquele dojô ainda tem (`active_practitioners`) — uma
+// contagem escalar, lida na mesma transação, best-effort por SAVEPOINT: se
+// ela não vier, a revogação acontece do mesmo jeito e o campo vem null.
+// É um número na tela, não um gatilho.
 //
 // ── O QUE A REVOGAÇÃO **NÃO** FAZ ───────────────────────────
-//   • NÃO apaga nada. Nem praticante, nem graduação, nem histórico. "Os dados
-//     permanecem, some só a condição de filiado ativo."
-//   • NÃO toca karate_identity_managed_by / karate_identity_dojo_id. Esta é a
-//     outra metade da correção: desfiliar NÃO devolve a gestão da ficha para
-//     a federação. O dojô desfiliado continua usando o Aura e continua dono
-//     da identidade dos alunos dele (premissa 1 — o fluxo SOBE). Quem devolve
-//     a gestão é só a SAÍDA DO AURA (karateDojoExitState: apagado, inativado,
-//     vertical desligada).
+//   • NÃO toca customers. Nenhum UPDATE, nenhum is_active, nenhum snapshot.
+//     Ver ATO 2 acima: a inativação é da federação, à mão.
+//   • NÃO apaga nada. Nem praticante, nem graduação, nem histórico. "Os
+//     dados permanecem, some só a condição de filiado ativo."
+//   • NÃO toca karate_identity_managed_by / karate_identity_dojo_id.
+//     Desfiliar NÃO devolve a gestão da ficha para a federação: o dojô
+//     desfiliado continua usando o Aura e continua dono da identidade dos
+//     alunos dele (premissa 1 — o fluxo SOBE). Quem devolve a gestão é só a
+//     SAÍDA DO AURA (karateDojoExitState: apagado, inativado, vertical
+//     desligada).
 //   • NÃO limpa fpkt_affiliation_id nem affiliation_since: são o histórico da
 //     filiação que existiu, e o número precisa continuar reservado para o dojô
 //     dentro da federação.
@@ -558,42 +578,45 @@ async function rejectRequest({ federationId, requestId, reason, actorId }) {
 //
 // ── TRILHA (sem DDL) ────────────────────────────────────────
 // karate_dojo_roster_events.event NÃO tem CHECK (migration 220 — e o
-// cabeçalho da 263 registra isso com todas as letras), então cabem os dois
-// eventos abaixo sem tocar em schema:
-//   'affiliation_revoked' — o ATO: quem, quando, por quê, e desde quando o
-//        dojô estava filiado.
-//   'inactivate_cascade' — o SNAPSHOT, no MESMO contrato documentado na 220
-//        (`array de { student_id, was_active }`). É deliberado usar o evento
-//        existente: é ele que cascadeReactivateDojo() lê para restaurar o
-//        quadro. Assim a inativação é REVERSÍVEL pelo caminho que já existe,
-//        em vez de virar um estado sem volta.
-// As duas escritas são best-effort por SAVEPOINT (42P01: migration 220
+// cabeçalho da 263 registra isso com todas as letras), então o evento
+// 'affiliation_revoked' cabe sem tocar em schema. Ele registra O ATO: quem,
+// quando, por quê, desde quando o dojô estava filiado e quantos praticantes
+// ativos ficaram para a federação avaliar.
+// NÃO gravamos mais o snapshot 'inactivate_cascade': aquele evento é o
+// contrato de cascadeInactivateDojo()/cascadeReactivateDojo() e passa a ser
+// escrito só por quem de fato inativa — a federação, no ATO 2. Gravar um
+// snapshot aqui sujaria a restauração daquele caminho com um evento que
+// nunca inativou ninguém.
+// A escrita da trilha é best-effort por SAVEPOINT (42P01: migration 220
 // pendente não pode derrubar a revogação, exatamente como safeRosterWrite em
-// karateDojos.js). O núcleo — UPDATE customers + UPDATE companies — nunca é
-// engolido: erro ali aborta a transação, como tem que ser.
+// karateDojos.js). O núcleo — UPDATE companies — nunca é engolido: erro ali
+// aborta a transação, como tem que ser.
 // ============================================================
 
 // Espelha safeRosterWrite de karateDojos.js: SAVEPOINT antes, ROLLBACK TO
-// SAVEPOINT em 42P01, rethrow em qualquer outro erro. NUNCA um try/catch nu
-// dentro do BEGIN (armadilha tx-poison).
-async function safeRosterEvent(client, label, fn) {
+// SAVEPOINT em 42P01/42703, rethrow em qualquer outro erro. NUNCA um
+// try/catch nu dentro do BEGIN (armadilha tx-poison). Devolve o resultado de
+// fn(), ou null quando o passo degradou.
+async function safeStep(client, label, fn) {
   await client.query('SAVEPOINT sp_affiliation_revoke');
   try {
-    await fn();
+    const out = await fn();
     await client.query('RELEASE SAVEPOINT sp_affiliation_revoke');
+    return out;
   } catch (e) {
     if (e && (e.code === '42P01' || e.code === '42703')) {
       await client.query('ROLLBACK TO SAVEPOINT sp_affiliation_revoke');
-      console.warn(`[karateAffiliationRequestService] trilha ignorada (schema pendente): ${label}`);
-    } else {
-      throw e;
+      console.warn(`[karateAffiliationRequestService] passo ignorado (schema pendente): ${label}`);
+      return null;
     }
+    throw e;
   }
 }
 
 // revokeAffiliation({ federationId, dojoId, reason, actorId })
-//   200 { ok, dojo_id, dojo_name, revoked_at, was_linked_at,
-//         practitioners_inactivated, reason }
+//   200 { ok, revoked, dojo_id, dojo_name, was_linked_at, reason,
+//         practitioners_changed:false, identity_management_changed:false,
+//         active_practitioners }
 //   422 REVOKE_REASON_REQUIRED | 404 NOT_FOUND | 409 NAO_CONECTADO
 async function revokeAffiliation({ federationId, dojoId, reason, actorId } = {}) {
   if (!dojoId) {
@@ -604,7 +627,7 @@ async function revokeAffiliation({ federationId, dojoId, reason, actorId } = {})
     throw httpError(
       422,
       'REVOKE_REASON_REQUIRED',
-      'Informe o motivo da revogação (ele fica registrado na trilha da filiação e explica por que os praticantes do dojô passaram a constar como inativos).'
+      'Informe o motivo da revogação (ele fica registrado na trilha da filiação).'
     );
   }
 
@@ -630,23 +653,26 @@ async function revokeAffiliation({ federationId, dojoId, reason, actorId } = {})
       throw httpError(404, 'NOT_FOUND', 'Dojô não encontrado nesta federação');
     }
     if (comp.karate_dojo_linked_at === null || comp.karate_dojo_linked_at === undefined) {
-      // Idempotência honesta: não há vínculo para cancelar. Melhor um 409
-      // explícito que inativar o quadro de um dojô já desfiliado uma segunda
-      // vez (o snapshot da primeira vez seria sobrescrito por um vazio).
+      // Idempotência honesta: não há vínculo para cancelar. Um 409 explícito
+      // é mais útil que um 200 que não revogou nada.
       throw httpError(409, 'NAO_CONECTADO', 'Este dojô não está filiado a esta federação.');
     }
 
-    // Snapshot ANTES de inativar — mesmo formato de cascadeInactivateDojo
-    // (array de { student_id, was_active }), que é o que a restauração lê.
-    const snap = await client.query(
-      `SELECT id, is_active FROM customers WHERE dojo_id = $1`,
+    // INFORMAÇÃO (não ação): quantos praticantes ATIVOS o dojô ainda tem, com
+    // o mesmo critério que a federação já usa em karateDojos.js
+    // (`COUNT(*) FILTER (WHERE is_active = true)`, com is_active NULL contando
+    // como ativo). Escalar, um índice em dojo_id resolve, e best-effort: se
+    // degradar, o campo vem null e a revogação acontece do mesmo jeito.
+    const cnt = await safeStep(client, 'contagem de praticantes ativos', () => client.query(
+      `SELECT COUNT(*)::int AS active_practitioners
+         FROM customers
+        WHERE dojo_id = $1 AND COALESCE(is_active, true) = true`,
       [dojoId]
-    );
-    const affected = (snap.rows || [])
-      .filter((r) => r.is_active !== false) // COALESCE(is_active, true) === true
-      .map((r) => ({ student_id: r.id, was_active: true }));
+    ));
+    const raw = cnt && cnt.rows && cnt.rows[0] ? cnt.rows[0].active_practitioners : null;
+    const activePractitioners = raw === null || raw === undefined ? null : Number(raw);
 
-    // Trilha 1 — o ATO. actor_id é uuid: um 'staff1' de teste viraria 22P02 e
+    // Trilha — o ATO. actor_id é uuid: um 'staff1' de teste viraria 22P02 e
     // derrubaria a revogação inteira por causa do log; o rastro humano fica
     // no payload (mesma decisão do asUuid de karateStudentIdentityLink).
     const actorUuid =
@@ -654,7 +680,7 @@ async function revokeAffiliation({ federationId, dojoId, reason, actorId } = {})
         ? String(actorId)
         : null;
 
-    await safeRosterEvent(client, 'affiliation_revoked event', () => client.query(
+    await safeStep(client, 'affiliation_revoked event', () => client.query(
       `INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
        VALUES ($1, $2, 'affiliation_revoked', $3::jsonb, $4)`,
       [
@@ -665,9 +691,10 @@ async function revokeAffiliation({ federationId, dojoId, reason, actorId } = {})
             reason: motivo,
             actor_id: actorId || null,
             was_linked_at: toIso(comp.karate_dojo_linked_at),
-            practitioners_inactivated: affected.length,
+            active_practitioners: activePractitioners,
             note:
-              'Revogação da filiação pela federação. Nenhum dado foi apagado e a gestão das fichas ' +
+              'Revogação da filiação pela federação. Nenhum praticante foi alterado (a inativação é ato ' +
+              'próprio da federação, pelo Suspender do dojô), nenhum dado foi apagado e a gestão das fichas ' +
               'NÃO mudou de dono: o dojô continua usando o Aura e continua mantendo a identidade dos alunos dele.',
           },
         ]),
@@ -675,24 +702,9 @@ async function revokeAffiliation({ federationId, dojoId, reason, actorId } = {})
       ]
     ));
 
-    // Trilha 2 — o SNAPSHOT, no evento que cascadeReactivateDojo() já sabe ler.
-    await safeRosterEvent(client, 'inactivate_cascade event', () => client.query(
-      `INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
-       VALUES ($1, $2, 'inactivate_cascade', $3::jsonb, $4)`,
-      [dojoId, federationId, JSON.stringify(affected), actorUuid]
-    ));
-
-    // NÚCLEO 1 — os praticantes passam a constar como INATIVOS na visão da
-    // federação. Nada é apagado; só a situação muda.
-    await client.query(
-      `UPDATE customers SET is_active = false, updated_at = NOW()
-        WHERE dojo_id = $1 AND COALESCE(is_active, true) = true`,
-      [dojoId]
-    );
-
-    // NÚCLEO 2 — o vínculo cai. Esta é a ÚNICA escrita de NULL nesta coluna em
-    // todo o repositório, e ela só é alcançável por guards.staffWrite() da
-    // federação.
+    // NÚCLEO (único) — o vínculo cai. Esta é a ÚNICA escrita de NULL nesta
+    // coluna em todo o repositório, e ela só é alcançável por
+    // guards.staffWrite() da federação.
     const off = await client.query(
       `UPDATE companies
           SET karate_dojo_linked_at = NULL, updated_at = NOW()
@@ -707,18 +719,27 @@ async function revokeAffiliation({ federationId, dojoId, reason, actorId } = {})
     await client.query('COMMIT');
     inTx = false;
 
+    const quantos =
+      activePractitioners === null
+        ? ''
+        : ` Este dojô ainda tem ${activePractitioners} praticante(s) ativo(s) na sua visão — se for o caso, ` +
+          'suspenda o dojô para inativá-los.';
+
     return {
       ok: true,
       revoked: true,
       dojo_id: dojoId,
       dojo_name: comp.dojo_name || null,
       was_linked_at: toIso(comp.karate_dojo_linked_at),
-      practitioners_inactivated: affected.length,
       reason: motivo,
+      // As duas coisas que a revogação NÃO faz, ditas na resposta para não
+      // depender de ninguém ler a documentação.
+      practitioners_changed: false,
       identity_management_changed: false,
+      active_practitioners: activePractitioners,
       message:
-        `A filiação do dojô ${comp.dojo_name || ''} foi revogada. ${affected.length} praticante(s) passaram a constar ` +
-        'como inativos na visão da federação — nenhum dado foi apagado, e a gestão das fichas continua com o dojô.',
+        `A filiação do dojô ${comp.dojo_name || ''} foi revogada. Nenhum praticante foi alterado e nenhum dado ` +
+        'foi apagado; a gestão das fichas continua com o dojô.' + quantos,
     };
   } catch (e) {
     if (inTx) {

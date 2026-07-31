@@ -28,6 +28,13 @@
 // aceitar e posteriormente revogar." O ciclo inteiro (pedir → aceitar →
 // revogar) mora aqui, e as três pontas usam o mesmo serviço.
 //
+// REVOGAR ≠ INATIVAR (decisão do Caio, 31/07/2026 — F7.4): "A inativação é
+// feita pela própria federação." Revogar a filiação e inativar os praticantes
+// do dojô eram, na primeira versão, um ato só. São dois. A inativação segue
+// pelo caminho que a federação já tinha — cascadeInactivateDojo(), o
+// "Suspender" do PATCH /federation/:id/dojos/:dojoId, em karateDojos.js —
+// que não foi alterado por esta F7.4 e é independente da revogação.
+//
 // Decisão de produto (revertendo PR #433 / migration 255): a federação
 // NUNCA abre uma filiação espontaneamente. É sempre o dojô que assina a
 // Aura quem inicia o pedido (self-serve, POST /dojo/connection). O inbox
@@ -83,13 +90,19 @@ router.get('/affiliation-requests/metrics', ...guards.read(), async (req, res) =
 // (ver getConnectionState) — chavear a revogação por :requestId deixaria
 // exatamente esses de fora.
 //
-// O que a revogação faz (detalhe e justificativa em revokeAffiliation):
-// zera companies.karate_dojo_linked_at e marca os praticantes do dojô como
-// INATIVOS na visão da federação (customers.is_active = false). Não apaga
-// nada e NÃO devolve a gestão das fichas — o dojô desfiliado continua usando
-// o Aura e continua dono da identidade dos alunos dele.
+// O que a revogação faz (detalhe e justificativa em revokeAffiliation): zera
+// companies.karate_dojo_linked_at e grava a trilha do ato. NÃO INATIVA
+// NINGUÉM — a inativação é ato próprio da federação, pelo "Suspender" do
+// dojô (cascadeInactivateDojo, em karateDojos.js). Também não apaga nada e
+// NÃO devolve a gestão das fichas: o dojô desfiliado continua usando o Aura e
+// continua dono da identidade dos alunos dele.
 //
-// 200 { ok, revoked, dojo_id, was_linked_at, practitioners_inactivated }
+// A resposta INFORMA quantos praticantes ativos o dojô ainda tem
+// (active_practitioners) para a federação decidir se suspende. É número na
+// tela, não gatilho.
+//
+// 200 { ok, revoked, dojo_id, was_linked_at, practitioners_changed:false,
+//       identity_management_changed:false, active_practitioners }
 // 422 REVOKE_REASON_REQUIRED | 404 NOT_FOUND | 409 NAO_CONECTADO
 router.post('/affiliation-requests/revoke', ...guards.staffWrite(), async (req, res) => {
   const body = req.body || {};
