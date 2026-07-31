@@ -50,15 +50,22 @@
 // foto. Se um campo entrar naquela lista, ele sobe aqui automaticamente —
 // é o mesmo motivo de existir da lista única.
 //
+// F8 (31/07/2026): GUARDIAN_SYNC_FIELDS (mesmo arquivo, lista SEPARADA —
+// ver o comentário lá para o porquê) entra na mesma esteira: nome, CPF,
+// telefone e parentesco do RESPONSÁVEL do aluno agora também sobem, para
+// as colunas guardian_* do praticante. SYNC_FIELDS abaixo é a UNIÃO das
+// duas listas — é ela, e não IDENTITY_FIELDS sozinha, que alimenta
+// planSync/DOJO_COLUMNS/os SELECTs deste arquivo.
+//
 // ── O QUE NUNCA SOBE ────────────────────────────────────────
 // Matrícula FPKT, papéis federativos (is_arbiter/is_instructor/
 // is_examiner/is_assistant), is_active da filiação, dojo_id (onde a
 // federação acha que a pessoa treina), faixa/dan/graduação e as próprias
 // colunas de gestão da ficha. Isso é o que a federação EMITE — e o que
 // ela emite ninguém edita por fora. A proteção não é "tomar cuidado":
-// FEDERATION_OWNED_COLS abaixo é conferida contra IDENTITY_FIELDS no
-// carregamento do módulo e o require ESTOURA se alguém acrescentar uma
-// coluna da federação à lista de identidade.
+// FEDERATION_OWNED_COLS abaixo é conferida contra SYNC_FIELDS (identidade
+// + responsável) no carregamento do módulo e o require ESTOURA se alguém
+// acrescentar uma coluna da federação a qualquer uma das duas listas.
 //
 // ── CAMPO ESVAZIADO: O DOJÔ NUNCA APAGA A FEDERAÇÃO ─────────
 // Se o sensei apaga o telefone do aluno, o telefone do praticante NÃO é
@@ -101,17 +108,28 @@
 // karate_identity_managed_by, a query falha com 42703 dentro do
 // SAVEPOINT, o sync é descartado com reason SCHEMA_PENDING e o aluno é
 // salvo assim mesmo — que é exatamente o comportamento desejado, porque
-// sem a 262 também não existe ficha adotada para sincronizar.
+// sem a 262 também não existe ficha adotada para sincronizar. O mesmo
+// vale para o responsável (F8): karate_dojo_guardians já existe desde a
+// migration 242, então o LEFT JOIN novo em BATCH_CANDIDATE_SQL não
+// depende de nenhuma migration desta onda.
 // ============================================================
 'use strict';
 
 const {
   IDENTITY_FIELDS,
+  GUARDIAN_SYNC_FIELDS,
   compareKey,
   hasValue,
   storeForFederation,
   writeIdentityAudit,
 } = require('./karateStudentIdentityLink');
+
+// F8: a lista que este módulo realmente usa é a UNIÃO — identidade da
+// pessoa (F7.1/F7.2) + responsável (F8). planSync, DOJO_COLUMNS e os dois
+// SELECTs (dojoSelectList/fedSelectList) iteram SYNC_FIELDS, nunca
+// IDENTITY_FIELDS isolada, para que um campo novo em QUALQUER uma das
+// duas listas de origem suba automaticamente sem precisar tocar aqui.
+const SYNC_FIELDS = Object.freeze(IDENTITY_FIELDS.concat(GUARDIAN_SYNC_FIELDS));
 
 // Migration 263 fixou o CHECK de `source` em
 // (dojo_federate | dojo_unfederate | federation_admin | sync_job | import).
@@ -146,16 +164,17 @@ const FEDERATION_OWNED_COLS = Object.freeze([
 ]);
 
 // Guarda de carregamento: se alguém acrescentar uma coluna da federação a
-// IDENTITY_FIELDS, o require estoura no boot (e no primeiro teste), em vez
-// de a matrícula de alguém ser sobrescrita silenciosamente em produção.
+// SYNC_FIELDS (identidade OU responsável), o require estoura no boot (e
+// no primeiro teste), em vez de a matrícula de alguém ser sobrescrita
+// silenciosamente em produção.
 function assertIdentityFieldsAreSafe() {
-  const leak = IDENTITY_FIELDS
+  const leak = SYNC_FIELDS
     .map((f) => f.fedCol)
     .filter((col) => FEDERATION_OWNED_COLS.includes(col));
   if (leak.length) {
     throw new Error(
       `[karateIdentitySync] campo da FEDERAÇÃO na lista de identidade: ${leak.join(', ')}. ` +
-      'O dojô é dono da identidade da pessoa; a federação é dona do que ela EMITE. Reveja IDENTITY_FIELDS.'
+      'O dojô é dono da identidade da pessoa; a federação é dona do que ela EMITE. Reveja IDENTITY_FIELDS/GUARDIAN_SYNC_FIELDS.'
     );
   }
 }
@@ -163,13 +182,23 @@ assertIdentityFieldsAreSafe();
 
 // Colunas do lado do ALUNO que disparam sync. Exportada para o service do
 // aluno decidir, sem uma segunda lista, se o PATCH mexeu em identidade.
-const DOJO_COLUMNS = Object.freeze(IDENTITY_FIELDS.map((f) => f.dojoCol));
+// F8: inclui guardian_full_name/guardian_cpf/guardian_phone/
+// guardian_relationship — nomes ACHATADOS (não são coluna de
+// karate_dojo_students; ver o comentário de GUARDIAN_SYNC_FIELDS).
+const DOJO_COLUMNS = Object.freeze(SYNC_FIELDS.map((f) => f.dojoCol));
 
 // ============================================================
 // LEITURA DOS DOIS LADOS
 // ============================================================
 // A foto é COALESCE(karate_photo_url, photo_url) dos dois lados —
 // photo_url ficou DEPRECADA por COMMENT na 262, não foi dropada.
+//
+// F8: campos do responsável (f.dojoCol começando em 'guardian_') não têm
+// coluna própria em karate_dojo_students — quem os lê é
+// karateDojoStudentService.fetchGuardianSyncFields, que monta o objeto
+// `student` passado a syncStudentIdentity já com essas chaves achatadas.
+// Por isso readDojoValue não precisa de um branch novo: `row[f.dojoCol]`
+// já funciona igual para os dois grupos de campo.
 function readDojoValue(row, f) {
   if (!row) return null;
   if (f.coalescePhoto) {
@@ -181,7 +210,7 @@ function readDojoValue(row, f) {
 }
 
 function fedSelectList(alias, prefix) {
-  return IDENTITY_FIELDS.map((f) => {
+  return SYNC_FIELDS.map((f) => {
     if (f.isDate) {
       // date puro via to_char: o driver devolveria Date com fuso e a data
       // voltaria um dia em UTC-3 (P0 de 15/07).
@@ -195,11 +224,15 @@ function fedSelectList(alias, prefix) {
 }
 
 function dojoSelectList(alias, prefix) {
-  return IDENTITY_FIELDS.map((f) => {
+  return SYNC_FIELDS.map((f) => {
     if (f.isDate) return `to_char(${alias}.${f.dojoCol}, 'YYYY-MM-DD') AS ${prefix}${f.key}`;
     if (f.coalescePhoto) {
       return `COALESCE(${alias}.karate_photo_url, ${alias}.photo_url) AS ${prefix}${f.key}`;
     }
+    // F8: campo do RESPONSÁVEL vem de karate_dojo_guardians, não de
+    // karate_dojo_students — join fixo no alias 'g' (ver
+    // BATCH_CANDIDATE_SQL, que declara o LEFT JOIN).
+    if (f.guardianCol) return `g.${f.guardianCol} AS ${prefix}${f.key}`;
     return `${alias}.${f.dojoCol} AS ${prefix}${f.key}`;
   }).join(', ');
 }
@@ -209,17 +242,19 @@ function dojoSelectList(alias, prefix) {
 // ============================================================
 // getDojo(f) / getFed(f) devolvem o valor CRU de cada lado. Nenhuma
 // concatenação de identificador com dado do usuário: `col` sai sempre de
-// IDENTITY_FIELDS.
+// SYNC_FIELDS.
 function planSync(getDojo, getFed) {
   const writes = [];
   const changes = [];
 
-  for (const f of IDENTITY_FIELDS) {
+  for (const f of SYNC_FIELDS) {
     const dojoRaw = getDojo(f);
 
     // ── A REGRA DO ESVAZIAMENTO (ver cabeçalho) ──
     // Vazio do dojô não apaga a federação. É a mesma linha de
-    // planResolution da F7.1 ("vencedor SEM valor = campo PULADO").
+    // planResolution da F7.1 ("vencedor SEM valor = campo PULADO"). Vale
+    // também para o responsável: se o dojô não tem CPF do responsável
+    // cadastrado, o guardian_cpf da federação (se houver) não é apagado.
     if (!hasValue(dojoRaw)) continue;
 
     const fedRaw = getFed(f);
@@ -337,7 +372,10 @@ async function syncStudentIdentity(client, {
     // O sync compara a ficha INTEIRA, não só o campo que veio no PATCH.
     // De propósito: é idempotente e CONVERGE. Subir só o campo tocado
     // deixaria divergências antigas presas para sempre, e o sensei não tem
-    // como saber quais são.
+    // como saber quais são. Vale também para o responsável (F8): mesmo
+    // quando o PATCH é só "trocou o telefone do aluno", o responsável
+    // ATUAL entra na comparação junto (ver
+    // karateDojoStudentService.fetchGuardianSyncFields).
     const plan = planSync(
       (f) => readDojoValue(student, f),
       (f) => fed[f.key]
@@ -401,7 +439,9 @@ async function syncStudentIdentity(client, {
 }
 
 // ============================================================
-// SYNC EM LOTE (import de até 500 linhas)
+// SYNC EM LOTE (import de até 500 linhas; F8: também usado pelo PATCH de
+// RESPONSÁVEL, que pode afetar N alunos de uma vez — ver
+// karateDojoStudentService.updateGuardian)
 // ============================================================
 // O import roda numa transação ÚNICA. Fazer 500 syncs individuais seriam
 // 500 SELECTs de candidato — por isso o lote tem porta própria:
@@ -416,6 +456,13 @@ async function syncStudentIdentity(client, {
 // practitioner_id, hoje o custo do sync no lote é literalmente nada — o
 // caminho existe para que, quando o import passar a aceitar número FPKT,
 // o lote já suba por aqui e não por 500 idas ao banco.
+//
+// F8: o mesmo caminho serve o PATCH de um responsável — 1 responsável : N
+// alunos (karate_dojo_guardians, migration 242), e o service já resolve
+// os N student_id ANTES de chamar esta função. O LEFT JOIN abaixo em
+// karate_dojo_guardians lê o responsável ATUAL de cada aluno na mesma
+// query de candidatos — inclusive quando quem mudou foi o responsável, e
+// não o aluno.
 const BATCH_CANDIDATE_SQL =
   `SELECT s.id AS student_id,
           s.full_name AS student_label,
@@ -426,6 +473,7 @@ const BATCH_CANDIDATE_SQL =
           ${fedSelectList('c', 'f_')}
      FROM karate_dojo_students s
      JOIN customers c ON c.id = s.practitioner_id
+     LEFT JOIN karate_dojo_guardians g ON g.id = s.guardian_id
     WHERE s.dojo_id = $2
       AND s.id = ANY($1::uuid[])
       AND c.karate_identity_managed_by = 'dojo'
