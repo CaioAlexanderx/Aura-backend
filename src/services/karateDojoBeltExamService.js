@@ -61,6 +61,12 @@
 // POOL (db.query), não o client da transação, e já dispara e-mail —
 // prendê-lo ao BEGIN transformaria o primeiro DUPLICATE_ORDER em veneno
 // para o lote inteiro (mesma decisão de createCertOrdersBatch, F5b).
+//
+// ── ÂNCORAS DE MOCK ────────────────────────────────────────
+// Toda SQL deste arquivo começa com um comentário `-- f81:<nome>`. Os
+// testes despacham por ELE (regex), nunca por posição na fila de
+// mockResolvedValueOnce — fila posicional já derrubou o CI deste repo
+// quatro vezes. Renomear uma âncora é mudar contrato de teste.
 // ============================================================
 'use strict';
 
@@ -129,7 +135,7 @@ async function beltHistoryCols() {
           AND column_name = ANY($1::text[])`,
       [BELT_HISTORY_OPTIONAL_COLS]
     );
-    found = rows.map((r) => r.column_name);
+    found = (rows || []).map((r) => r.column_name);
   } catch (e) {
     // information_schema não falha em banco sadio; se falhar, degradar para
     // "nenhuma coluna opcional" é mais seguro que derrubar a graduação.
@@ -162,7 +168,7 @@ async function resultCols() {
           AND column_name = ANY($1::text[])`,
       [RESULT_OPTIONAL_COLS]
     );
-    found = rows.map((r) => r.column_name);
+    found = (rows || []).map((r) => r.column_name);
   } catch (e) {
     console.warn('[karateDojoBeltExam] probe de colunas do resultado falhou:', e && e.message);
     found = [];
@@ -264,7 +270,7 @@ async function loadExam(dojoId, examId) {
       LIMIT 1`,
     [examId, dojoId]
   );
-  return rows[0] || null;
+  return (rows && rows[0]) || null;
 }
 
 function publicExam(row, extra) {
@@ -282,7 +288,6 @@ function publicExam(row, extra) {
       created_by_name: row.created_by_name || null,
       created_at: row.created_at,
       updated_at: row.updated_at,
-      completed_at: row.completed_at !== undefined ? row.completed_at : undefined,
     },
     extra || {}
   );
@@ -310,9 +315,18 @@ async function createExam({ dojoId, federationId, body, createdBy, createdByName
      VALUES ($1, $2, $3::date, $4, $5, $6, 'draft', $7, $8)
      RETURNING id, dojo_id, federation_id, exam_date::text AS exam_date, title,
                examiner_name, notes, status, created_by_name, created_at, updated_at`,
-    [dojoId, federationId || null, examDate.slice(0, 10), title, examiner, notes, createdBy || null, createdByName || null]
+    [
+      dojoId,
+      federationId || null,
+      examDate.slice(0, 10),
+      title,
+      examiner,
+      notes,
+      createdBy || null,
+      createdByName || null,
+    ]
   );
-  return publicExam(rows[0], { results_count: 0, approved_count: 0, attachments_count: 0 });
+  return publicExam(rows[0], { results_count: 0, approved_count: 0 });
 }
 
 // ── updateExam — só enquanto NÃO concluído ──────────────────
@@ -419,8 +433,11 @@ async function listExams(dojoId, params) {
   );
 
   return {
-    data: rows.map((r) =>
-      publicExam(r, { results_count: Number(r.results_count) || 0, approved_count: Number(r.approved_count) || 0 })
+    data: (rows || []).map((r) =>
+      publicExam(r, {
+        results_count: Number(r.results_count) || 0,
+        approved_count: Number(r.approved_count) || 0,
+      })
     ),
     page,
     pageSize,
@@ -452,7 +469,7 @@ async function getExam({ dojoId, examId }) {
     [examId, dojoId]
   );
 
-  const results = rows.map((r) => ({
+  const results = (rows || []).map((r) => ({
     id: r.id,
     student_id: r.student_id,
     name: r.student_name || null,
@@ -460,6 +477,8 @@ async function getExam({ dojoId, examId }) {
     federated: Boolean(r.practitioner_id),
     result: r.result,
     from_belt: beltView(r.from_belt_level, r.from_belt_kyu, r.from_belt_dan),
+    // Para o REPROVADO isto é a faixa PRETENDIDA (a coluna é NOT NULL no
+    // schema da 264 e guarda o que ele tentou), não uma graduação.
     to_belt: r.to_belt_level ? beltView(r.to_belt_level, r.to_belt_kyu, null) : null,
     to_belt_name: r.to_belt_name || null,
     notes: r.notes || null,
@@ -510,7 +529,7 @@ async function resolveCurrentBelt(student, federationId) {
         LIMIT 1`,
       [student.id]
     );
-    if (rows.length && rows[0].to_belt_level) {
+    if (rows && rows.length && rows[0].to_belt_level) {
       candidates.push({
         source: 'dojo_exam',
         level: scale.normalizeBeltLevel(rows[0].to_belt_level),
@@ -535,7 +554,7 @@ async function resolveCurrentBelt(student, federationId) {
           LIMIT 1`,
         [student.practitioner_id, federationId]
       );
-      if (rows.length && rows[0].belt_level) {
+      if (rows && rows.length && rows[0].belt_level) {
         const deg = scale.resolveDegree(rows[0].belt_level, rows[0].belt_name, rows[0].belt_schema);
         candidates.push({
           source: 'federation',
@@ -556,6 +575,20 @@ async function resolveCurrentBelt(student, federationId) {
     if (!best || rank > best.rank) best = Object.assign({ rank }, c);
   }
   return best; // null = faixa atual desconhecida (não bloqueia)
+}
+
+// Destino gravado para quem NÃO passou. to_belt_level é NOT NULL na 264 e
+// o CHECK karate_dojo_exam_results_no_black_belt_check proíbe preta em
+// QUALQUER linha — inclusive na de um reprovado. Então: usa a faixa que
+// ele tentou; se o sensei não informou, cai na faixa ATUAL dele; e se a
+// atual for preta (ou desconhecida), Branca. Nunca preta, nunca nulo.
+function fallbackTarget(from) {
+  if (from && from.level && !scale.isBlackBelt(from.level) && !scale.isLegacyOnlyLevel(from.level)) {
+    const kyu = from.dan == null ? from.kyu : null;
+    const label = scale.beltLabel(from.level, { kyu });
+    if (label) return { level: from.level, kyu: kyu != null ? kyu : null, label };
+  }
+  return { level: 'branca', kyu: scale.kyuFromColor('branca', scale.BELT_SCHEMA_FPKT), label: 'Branca' };
 }
 
 // ============================================================
@@ -619,17 +652,31 @@ async function planResults({ dojoId, federationId, examId, items }) {
       result,
       notes: trimOrNull(it.notes),
       // Reprovado nunca pede certificado (o CHECK da 265 diz o mesmo).
-      certificate_requested: result === 'approved' && (it.request_certificate === true || it.request_certificate === 'true'),
+      certificate_requested:
+        result === 'approved' && (it.request_certificate === true || it.request_certificate === 'true'),
       to: null,
     };
 
-    if (result === 'approved') {
+    // A faixa PRETENDIDA. Obrigatória para quem passou; opcional para quem
+    // não passou — mas, quando vem, passa pelas MESMAS travas: o CHECK do
+    // banco proíbe preta em qualquer linha de resultado do dojô.
+    const hasTarget = it.to_belt_level != null && String(it.to_belt_level).trim() !== '';
+    if (result === 'approved' && !hasTarget) {
+      errors.push({
+        student_id: sid,
+        code: 'FAIXA_DESTINO_OBRIGATORIA',
+        message: 'Informe to_belt_level (faixa de destino) para quem foi aprovado',
+      });
+      continue;
+    }
+
+    if (hasTarget) {
       const level = scale.normalizeBeltLevel(it.to_belt_level);
       if (!level) {
         errors.push({
           student_id: sid,
-          code: 'FAIXA_DESTINO_OBRIGATORIA',
-          message: 'Informe to_belt_level (faixa de destino) para quem foi aprovado',
+          code: 'FAIXA_DESCONHECIDA',
+          message: 'Faixa de destino fora da escala oficial da FPKT',
         });
         continue;
       }
@@ -637,8 +684,7 @@ async function planResults({ dojoId, federationId, examId, items }) {
         errors.push({
           student_id: sid,
           code: 'TETO_DO_SENSEI',
-          message:
-            `O dojô gradua até ${scale.DOJO_CEILING.label}. ${scale.DOJO_CEILING_REASON}`,
+          message: `O dojô gradua até ${scale.DOJO_CEILING.label}. ${scale.DOJO_CEILING_REASON}`,
         });
         continue;
       }
@@ -699,7 +745,7 @@ async function planResults({ dojoId, federationId, examId, items }) {
         WHERE dojo_id = $1 AND id = ANY($2::uuid[])`,
       [dojoId, ids]
     );
-    for (const r of rows) studentsById.set(r.id, r);
+    for (const r of rows || []) studentsById.set(r.id, r);
   }
 
   const plan = [];
@@ -745,14 +791,18 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
     for (const entry of plan) {
       const isApproved = entry.result === 'approved';
       const practitionerId = entry.student.practitioner_id || null;
-      const to = entry.to;
       const from = entry.from;
+      // Aprovado: o destino é a graduação. Reprovado: é a faixa pretendida
+      // (informada ou deduzida) — nunca preta, nunca nula.
+      const to = entry.to || fallbackTarget(from);
 
       // 1) O RESULTADO. UNIQUE (exam_id, student_id) da 264 é a 1ª trava de
       //    idempotência: relançar faz UPDATE da mesma linha.
-      const certCols = resCols.certificate_requested ? ', certificate_requested' : '';
-      const certVals = resCols.certificate_requested ? ', $14' : '';
-      const certSet = resCols.certificate_requested ? ', certificate_requested = EXCLUDED.certificate_requested' : '';
+      const certCol = resCols.certificate_requested ? ', certificate_requested' : '';
+      const certVal = resCols.certificate_requested ? ', $14' : '';
+      const certSet = resCols.certificate_requested
+        ? ', certificate_requested = EXCLUDED.certificate_requested'
+        : '';
       const params = [
         exam.id,
         dojoId,
@@ -761,9 +811,9 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
         from ? from.level : null,
         from && from.dan == null ? from.kyu : null,
         from ? from.dan : null,
-        isApproved ? to.level : (from ? from.level : 'branca'),
-        isApproved ? to.label : (from ? scale.beltLabel(from.level, { kyu: from.kyu, dan: from.dan }) : 'Branca'),
-        isApproved ? to.kyu : (from && from.dan == null ? from.kyu : null),
+        to.level,
+        to.label,
+        to.kyu,
         scale.BELT_SCHEMA_FPKT,
         entry.result,
         entry.notes,
@@ -776,8 +826,8 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
            (exam_id, dojo_id, student_id, practitioner_id,
             from_belt_level, from_belt_kyu, from_belt_dan,
             to_belt_level, to_belt_name, to_belt_kyu,
-            belt_schema, result, notes${certCols})
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13${certVals})
+            belt_schema, result, notes${certCol})
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13${certVal})
          ON CONFLICT (exam_id, student_id) DO UPDATE
             SET practitioner_id = EXCLUDED.practitioner_id,
                 from_belt_level = EXCLUDED.from_belt_level,
@@ -802,7 +852,7 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
         federated: Boolean(practitionerId),
         result: entry.result,
         from_belt: from ? beltView(from.level, from.kyu, from.dan) : null,
-        to_belt: isApproved ? beltView(to.level, to.kyu, null) : null,
+        to_belt: beltView(to.level, to.kyu, null),
         belt_history_id: resultRow.belt_history_id || null,
         belt_history: null, // 'created' | 'reused' | null
         belt_history_skipped_reason: null,
@@ -824,8 +874,8 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
       // 2) A FAIXA DO ALUNO É CONSEQUÊNCIA DA GRADUAÇÃO.
       //    belt_order recebe o rank CANÔNICO da cor (LEVEL_RANK, 1..9) —
       //    a MESMA escala que a F5b já devolve como belt_order em
-      //    listAptos. A coluna é texto livre/inteiro sem CHECK (migr 242) e
-      //    só ordena/agrupa; o grau dentro da cor vive no belt_label
+      //    listAptos. A coluna é inteiro sem CHECK (migration 242) e só
+      //    ordena/agrupa; o grau dentro da cor vive no belt_label
       //    ("Marrom 1º kyu"), que é o que a pirâmide de faixas agrupa.
       await client.query(
         `-- f81:update-student-belt
@@ -857,7 +907,12 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
       }
 
       // 2ª trava: gêmeo pela chave natural (ver cabeçalho).
-      const twinConds = ['student_id = $1', 'federation_id = $2', 'lower(belt_level) = lower($3)', 'graduated_at = $4::date'];
+      const twinConds = [
+        'student_id = $1',
+        'federation_id = $2',
+        'lower(belt_level) = lower($3)',
+        'graduated_at = $4::date',
+      ];
       const twinVals = [practitionerId, federationId, to.level, exam.exam_date];
       if (cols.source) twinConds.push("source = 'exam_dojo'");
       if (cols.source_dojo_id) {
@@ -871,11 +926,24 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
       );
 
       let historyId;
-      if (twin.rows.length) {
+      if (twin.rows && twin.rows.length) {
         historyId = twin.rows[0].id;
         out.belt_history = 'reused';
       } else {
-        const hCols = ['student_id', 'federation_id', 'belt_level', 'belt_name', 'belt_schema', 'graduated_at', 'notes', 'created_by'];
+        // exam_id fica NULL de propósito: aquela coluna aponta para
+        // karate_belt_exams (o exame DA FEDERAÇÃO). O exame do dojô mora em
+        // outra tabela, e o vínculo inverso é
+        // karate_dojo_belt_exam_results.belt_history_id.
+        const hCols = [
+          'student_id',
+          'federation_id',
+          'belt_level',
+          'belt_name',
+          'belt_schema',
+          'graduated_at',
+          'notes',
+          'created_by',
+        ];
         const hVals = [
           practitionerId,
           federationId,
@@ -886,10 +954,6 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
           entry.notes || `Exame do dojô${exam.title ? ': ' + exam.title : ''}`,
           exam.created_by || null,
         ];
-        // exam_id fica NULL de propósito: aquela coluna aponta para
-        // karate_belt_exams (o exame DA FEDERAÇÃO). O exame do dojô mora em
-        // outra tabela e o vínculo inverso é
-        // karate_dojo_belt_exam_results.belt_history_id.
         if (cols.source) {
           hVals.push('exam_dojo');
           hCols.push('source');
@@ -902,7 +966,7 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
           hVals.push(to.kyu);
           hCols.push('belt_kyu');
         }
-        const ph = hVals.map((_, i) => (hCols[i] === 'graduated_at' ? `$${i + 1}::date` : `$${i + 1}`));
+        const ph = hCols.map((c, i) => (c === 'graduated_at' ? `$${i + 1}::date` : `$${i + 1}`));
         const ins = await client.query(
           `-- f81:insert-belt-history
            INSERT INTO karate_belt_history (${hCols.join(', ')})
@@ -951,21 +1015,31 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
 // Certificados — DEPOIS do COMMIT, um por vez, nunca em transação
 //
 // DECISÃO: o exame CRIA O PEDIDO DE VERDADE, não uma "intenção pendente".
-// A fila de aptos (listAptos) é DERIVADA: graduação sem pedido ativo. Se o
-// exame só marcasse intenção, o aluno apareceria ao mesmo tempo como apto
-// e como "já pedido" — duas verdades para a mesma pergunta. Criando o
-// pedido, ele sai da fila sozinho (NOT EXISTS) e quem o sensei não marcou
-// continua lá, pedível pela tela que já existe. Zero conceito novo.
+// A fila de aptos (karateDojoFederativeService.listAptos) é DERIVADA:
+// graduação sem pedido ativo. Se o exame só marcasse intenção, o aluno
+// apareceria ao mesmo tempo como apto e como "já pedido" — duas verdades
+// para a mesma pergunta. Criando o pedido, ele sai da fila sozinho
+// (NOT EXISTS) e quem o sensei NÃO marcou continua lá, pedível pela tela
+// que já existe. Zero conceito novo, zero mudança em listAptos.
 //
 // createOrder já faz o dup check por (praticante, faixa) e grava o
 // histórico do pedido — é o MESMO caminho de POST /dojo/cert-orders.
 // ============================================================
-async function requestCertificates({ dojoId, federationId, exam, applied, delivery, createdBy, createdByName, resCols }) {
+async function requestCertificates({
+  dojoId,
+  federationId,
+  exam,
+  applied,
+  delivery,
+  createdBy,
+  createdByName,
+  resCols,
+}) {
   const wanted = applied.filter((a) => a.certificate.requested);
   if (!wanted.length) return applied;
 
   // Certificado é ato FEDERATIVO: não existe para dojô sem conexão. Mesma
-  // regra do gate de POST /dojo/cert-orders — mas aqui ele não pode
+  // regra do gate de POST /dojo/cert-orders — mas aqui ela não pode
   // derrubar a GRADUAÇÃO (que é interna e já foi commitada), então vira
   // motivo por aluno em vez de 409 do lote.
   let linked = true;
@@ -985,7 +1059,8 @@ async function requestCertificates({ dojoId, federationId, exam, applied, delive
     }
     if (!a.belt_history_id) {
       a.certificate.reason = 'SEM_GRADUACAO_FEDERATIVA';
-      a.certificate.message = 'A graduação não pôde ser registrada na federação — o certificado não foi solicitado.';
+      a.certificate.message =
+        'A graduação não pôde ser registrada na federação — o certificado não foi solicitado.';
       continue;
     }
     if (!linked) {
@@ -1040,7 +1115,8 @@ async function requestCertificates({ dojoId, federationId, exam, applied, delive
       }
       console.error('[karateDojoBeltExam] createOrder falhou:', e && e.code, e && e.message);
       a.certificate.reason = 'ERRO';
-      a.certificate.message = 'Não foi possível registrar o pedido de certificado. A graduação está registrada.';
+      a.certificate.message =
+        'Não foi possível registrar o pedido de certificado. A graduação está registrada.';
     }
   }
   return applied;
@@ -1076,7 +1152,7 @@ async function submitResults({ dojoId, federationId, examId, body, createdBy, cr
   });
 
   const approved = applied.filter((a) => a.result === 'approved');
-  return {
+  const out = {
     exam: publicExam(Object.assign({}, exam, { status: 'completed' })),
     completed: true,
     results: applied,
@@ -1090,10 +1166,11 @@ async function submitResults({ dojoId, federationId, examId, body, createdBy, cr
       certificates_requested: applied.filter((a) => a.certificate.requested).length,
       certificates_created: applied.filter((a) => a.certificate.created).length,
     },
-    // Aviso de topo: o front não precisa varrer a lista para saber que
-    // alguém ficou de fora do lado federativo.
-    schema_degraded: !cols.source || !resCols.certificate_requested ? true : undefined,
   };
+  // Aviso de topo: o front não precisa varrer a lista para saber que o
+  // lado federativo saiu degradado por migration pendente.
+  if (!cols.source || !resCols.certificate_requested) out.schema_degraded = true;
+  return out;
 }
 
 // ── beltLadder — o que o sensei pode escolher ──────────────
@@ -1133,6 +1210,7 @@ module.exports = {
   // exportados para teste/reuso interno
   parseBeltLabel,
   ladderRank,
+  fallbackTarget,
   resolveCurrentBelt,
   beltHistoryCols,
   resultCols,
