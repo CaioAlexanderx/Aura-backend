@@ -729,9 +729,18 @@ router.patch('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
     //
     // O que continua editável SEMPRE, inclusive em ficha adotada: matrícula
     // FPKT, papéis federativos (is_student/is_arbiter/is_instructor/
-    // is_examiner/is_assistant), is_active, dojo_id, parent_guardian_id,
-    // guardian_* e affiliation_since. Nenhum deles está na lista protegida,
-    // então a guarda devolve "liberado" sem sequer ir ao banco.
+    // is_examiner/is_assistant), is_active, dojo_id, parent_guardian_id e
+    // affiliation_since. Nenhum deles está na lista protegida, então a
+    // guarda devolve "liberado" sem sequer ir ao banco.
+    //
+    // F8 (31/07/2026): guardian_* SAIU dessa lista — o responsável do aluno
+    // agora sobe do dojô (karateIdentitySync.js) e por isso passou a ser
+    // IDENTIDADE protegida como qualquer outro campo da ficha adotada (ver
+    // GUARDIAN_SYNC_FIELDS em karateStudentIdentityLink.js e o comentário
+    // "F8" em karateIdentityWriteGuard.js). Uma PATCH federativa que tente
+    // escrever guardian_name/guardian_cpf/guardian_phone/
+    // guardian_relationship numa ficha adotada por dojô agora recebe o
+    // mesmo 409 IDENTITY_MANAGED_BY_DOJO que rg/endereço/foto já recebiam.
     //
     // Requisição MISTA (campo de identidade + campo federativo no mesmo
     // body) é recusada INTEIRA com 409. É o comportamento correto: gravar
