@@ -9,6 +9,7 @@
 //   guardians: POST cria + GET lista com contagem de alunos
 //   F7.0 — identidade da pessoa (RG, endereço, foto) + sexo normalizado
 //   F7.2 — sync contínuo dojô → federação no PATCH e no import
+//   F8 — upload de foto do aluno + responsável sincroniza para a federação
 //
 // AUDITORIA F5a (26/07/2026): o shape do aluno ganhou federated,
 // fpkt_number e federation_link_status, e o SELECT do PATCH ganhou JOIN.
@@ -45,6 +46,18 @@
 //      sempre false — todo caso de sync declarado depois passaria "verde"
 //      sem testar nada.
 //
+// AUDITORIA F8 (31/07/2026): dois pontos de entrada novos —
+//   POST /dojo/students/:sid/photo reusa uploadToR2 (mockado neste
+//     arquivo: o SDK do R2 é responsabilidade de r2Storage.js, aqui só o
+//     CONTRATO da rota é testado) e o MESMO caminho transacional do PATCH
+//     (updateStudentWithSync) quando o aluno tem ficha adotada.
+//   PATCH /dojo/guardians/:gid ganhou sync em LOTE (syncStudentsBatch) para
+//     todos os alunos ADOTADOS vinculados àquele responsável — mesmo
+//     mecanismo do import, reaproveitado.
+// Os describes F8 ficam ANTES do describe de deploy parcial (que desliga
+// HAS_IDENTITY_COLS module-level e nunca liga de novo) — mesma regra do
+// resto do arquivo.
+//
 // REGRA CRÍTICA (padrão karateDojoClaim.test.js): db.query.mockReset() em
 // afterEach — jest.clearAllMocks NÃO drena filas mockResolvedValueOnce.
 // Import usa transação via db.connect() → client mockado na ordem exata
@@ -54,6 +67,15 @@
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
+
+// F8: uploadToR2 é o ÚNICO ponto de saída para o R2 na rota de foto do
+// aluno (mesmo helper que a rota do praticante usa) — mockado por
+// completo aqui. O SDK do R2 (src/utils/r2Storage.js) tem responsabilidade
+// própria; este arquivo testa o CONTRATO da rota (validação, canal, sync).
+jest.mock('../../src/utils/r2Storage', () => ({
+  uploadToR2: jest.fn(),
+}));
+const { uploadToR2 } = require('../../src/utils/r2Storage');
 
 let app, db;
 beforeAll(() => {
@@ -94,6 +116,10 @@ afterEach(() => {
     query: jest.fn().mockResolvedValue({ rows: [] }),
     release: jest.fn(),
   }));
+  // F8: uploadToR2 é mock de módulo — precisa da mesma disciplina de
+  // reset que db.query/db.connect, senão uma fila Once vaza para o caso
+  // seguinte.
+  uploadToR2.mockReset();
 });
 
 // Row "crua" do banco. De propósito SEM is_federated/fpkt_number: prova o
@@ -831,11 +857,323 @@ describe('F7.2 — import em lote sincroniza sem explodir', () => {
 });
 
 // ════════════════════════════════════════════════════════════
+// F8 — POST /dojo/students/:sid/photo
+//
+// Reusa uploadToR2 (mesmo helper da rota do praticante) — o teste de
+// integração cobre o CONTRATO da rota (validação, canal, sync); o SDK do
+// R2 é responsabilidade de src/utils/r2Storage.js (mockado no topo deste
+// arquivo).
+// ════════════════════════════════════════════════════════════
+describe('F8 — POST /dojo/students/:sid/photo (upload de foto)', () => {
+  test('upload aceito: grava karate_photo_url — aluno não federado, sem sync/transação', async () => {
+    // 3 idas ao banco FORA de transação: a rota confere existência ANTES
+    // de gastar o upload no R2 (mesma ordem da rota do praticante), e
+    // svc.setStudentPhoto confere de novo por conta própria (é uma função
+    // exportada com contrato próprio, não confia cegamente no chamador) —
+    // depois vem o UPDATE. Nenhuma das duas é a transação do sync (essa só
+    // abre quando o aluno tem practitioner_id).
+    uploadToR2.mockResolvedValueOnce({ success: true, url: 'https://cdn/aluno.jpg' });
+    db.query
+      .mockResolvedValueOnce({ rows: [studentRow()] })                                     // rota: svc.getStudent (existe?)
+      .mockResolvedValueOnce({ rows: [studentRow()] })                                     // svc.setStudentPhoto: existência própria
+      .mockResolvedValueOnce({ rows: [studentRow({ karate_photo_url: 'https://cdn/aluno.jpg' })] }); // UPDATE RETURNING
+
+    const res = await request(app)
+      .post(`${base}/students/${sid}/photo`)
+      .set(canalA())
+      .send({ content: 'ZmFrZS1iYXNlNjQ=', content_type: 'image/jpeg' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.karate_photo_url).toBe('https://cdn/aluno.jpg');
+    expect(res.body.identity_sync).toBeUndefined();
+    expect(uploadToR2).toHaveBeenCalledTimes(1);
+    const [key, content, mime] = uploadToR2.mock.calls[0];
+    expect(key).toBe(`karate/dojo-students/${dojoId}/${sid}.jpg`);
+    expect(content).toBe('ZmFrZS1iYXNlNjQ=');
+    expect(mime).toBe('image/jpeg');
+    expect(db.query.mock.calls.length).toBe(3);
+    expect(db.connect).not.toHaveBeenCalled(); // sem praticante, sem transação
+  });
+
+  test('content ausente → 400 VALIDATION_ERROR, sem chamar o R2 nem o banco', async () => {
+    const res = await request(app)
+      .post(`${base}/students/${sid}/photo`)
+      .set(canalA())
+      .send({ content_type: 'image/jpeg' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('VALIDATION_ERROR');
+    expect(uploadToR2).not.toHaveBeenCalled();
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  test('content_type não suportado → 400 INVALID_CONTENT_TYPE, sem chamar o R2', async () => {
+    const res = await request(app)
+      .post(`${base}/students/${sid}/photo`)
+      .set(canalA())
+      .send({ content: 'ZmFrZQ==', content_type: 'application/pdf' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_CONTENT_TYPE');
+    expect(uploadToR2).not.toHaveBeenCalled();
+  });
+
+  test('extensão sai do content_type: image/png → chave .png, image/webp → chave .webp', async () => {
+    uploadToR2.mockResolvedValueOnce({ success: true, url: 'https://cdn/a.png' });
+    db.query
+      .mockResolvedValueOnce({ rows: [studentRow()] })  // rota: svc.getStudent
+      .mockResolvedValueOnce({ rows: [studentRow()] })  // svc.setStudentPhoto: existência própria
+      .mockResolvedValueOnce({ rows: [studentRow({ karate_photo_url: 'https://cdn/a.png' })] });
+
+    const res = await request(app)
+      .post(`${base}/students/${sid}/photo`)
+      .set(canalA())
+      .send({ content: 'ZmFrZQ==', content_type: 'image/png' });
+
+    expect(res.status).toBe(200);
+    expect(uploadToR2.mock.calls[0][0]).toBe(`karate/dojo-students/${dojoId}/${sid}.png`);
+  });
+
+  test('aluno inexistente neste dojô → 404, sem chamar o R2', async () => {
+    db.query.mockResolvedValueOnce({ rows: [] }); // getStudent não encontra
+
+    const res = await request(app)
+      .post(`${base}/students/${sid}/photo`)
+      .set(canalA())
+      .send({ content: 'ZmFrZQ==', content_type: 'image/png' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('NOT_FOUND');
+    expect(uploadToR2).not.toHaveBeenCalled();
+  });
+
+  test('R2 falha → 500, sem gravar nada no banco', async () => {
+    uploadToR2.mockResolvedValueOnce({ success: false, error: 'boom' });
+    db.query.mockResolvedValueOnce({ rows: [studentRow()] }); // getStudent existe
+
+    const res = await request(app)
+      .post(`${base}/students/${sid}/photo`)
+      .set(canalA())
+      .send({ content: 'ZmFrZQ==', content_type: 'image/jpeg' });
+
+    expect(res.status).toBe(500);
+    expect(db.query.mock.calls.length).toBe(1); // só o getStudent — nenhum UPDATE
+  });
+
+  test('Canal B → 403 PORTAL_READ_ONLY, sem chamar o R2 nem o banco', async () => {
+    const res = await request(app)
+      .post(`${base}/students/${sid}/photo`)
+      .set(canalB())
+      .send({ content: 'ZmFrZQ==', content_type: 'image/jpeg' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PORTAL_READ_ONLY');
+    expect(uploadToR2).not.toHaveBeenCalled();
+    expect(db.query).not.toHaveBeenCalled();
+  });
+
+  test('ficha adotada por ESTE dojô: a foto sobe na mesma transação (reusa updateStudentWithSync)', async () => {
+    uploadToR2.mockResolvedValueOnce({ success: true, url: 'https://cdn/aluno.jpg' });
+
+    const federado = {
+      ...studentRow({ practitioner_id: 'p1' }),
+      is_federated: true,
+      has_pending_request: false,
+      fpkt_number: 'FPKT-123',
+      practitioner_name: 'Aluno Teste',
+    };
+
+    const isStudentUpdate = (s) => /^UPDATE karate_dojo_students SET/.test(s.trim());
+    const isCandidate = (s) => /FROM customers c/.test(s) && /karate_identity_managed_by = 'dojo'/.test(s);
+    const isFedUpdate = (s) => /^UPDATE customers SET/.test(s.trim());
+
+    // Duas idas ao banco FORA da transação com a MESMA linha: a rota
+    // (svc.getStudent) e a existência própria de svc.setStudentPhoto.
+    db.query.mockResolvedValue({ rows: [federado] });
+
+    const client = {
+      query: jest.fn(async (sql) => {
+        const s = String(sql);
+        // A row do UPDATE só difere da federação em karate_photo_url — os
+        // demais campos de identidade vêm NULOS dos dois lados de propósito,
+        // para a asserção abaixo (`fields` = ['photo_url']) não pegar
+        // convergências incidentais de outros campos junto.
+        if (isStudentUpdate(s)) return { rows: [studentRow({
+          practitioner_id: 'p1', karate_photo_url: 'https://cdn/aluno.jpg',
+          full_name: null, birth_date: null, cpf: null, sex: null, phone: null, email: null,
+        })] };
+        if (isCandidate(s)) return {
+          rows: [{
+            practitioner_id: 'p1', practitioner_label: 'Aluno Teste', fpkt_number: 'FPKT-123',
+            full_name: null, birth_date: null, cpf: null, rg: null, sex: null, phone: null, email: null,
+            zip_code: null, street: null, number: null, complement: null, neighborhood: null,
+            city: null, state: null, photo_url: null,
+            guardian_full_name: null, guardian_cpf: null, guardian_phone: null, guardian_relationship: null,
+          }],
+        };
+        if (isFedUpdate(s)) return { rows: [{ id: 'p1' }] };
+        return { rows: [] };
+      }),
+      release: jest.fn(),
+    };
+    db.connect.mockImplementation(() => client);
+
+    const res = await request(app)
+      .post(`${base}/students/${sid}/photo`)
+      .set(canalA())
+      .send({ content: 'ZmFrZQ==', content_type: 'image/jpeg' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.karate_photo_url).toBe('https://cdn/aluno.jpg');
+    expect(res.body.identity_sync).toMatchObject({ status: 'ok', synced: true });
+    // f.key da foto é 'photo_url' (karate_photo_url é só o NOME da coluna
+    // dos dois lados — ver IDENTITY_FIELDS em karateStudentIdentityLink.js)
+    expect(res.body.identity_sync.fields).toEqual(['photo_url']);
+
+    const all = client.query.mock.calls.map((c) => String(c[0]));
+    expect(all).toContain('BEGIN');
+    expect(all).toContain('COMMIT');
+    expect(all.some(isFedUpdate)).toBe(true);
+    const setClause = String(client.query.mock.calls.find((c) => isFedUpdate(String(c[0])))[0]).split('WHERE')[0];
+    expect(setClause).toContain('karate_photo_url =');
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// F8 — PATCH /dojo/guardians/:gid sincroniza os alunos ADOTADOS
+// vinculados a este responsável (1 responsável : N alunos).
+// Reusa syncStudentsBatch — o MESMO mecanismo do import (F7.2).
+// ════════════════════════════════════════════════════════════
+describe('F8 — PATCH /dojo/guardians/:gid sincroniza para a federação', () => {
+  const guardianRow = (over = {}) => ({
+    id: 'g1', full_name: 'Mãe Zelosa', cpf: null, phone: '91988880000', email: null,
+    relationship: 'mãe', created_at: '2026-07-19T00:00:00Z', updated_at: '2026-07-19T00:00:00Z',
+    ...over,
+  });
+
+  test('sem aluno adotado vinculado: UPDATE direto, sem transação nem identity_sync', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [guardianRow()] })                        // SELECT existing
+      .mockResolvedValueOnce({ rows: [] })                                     // SELECT alunos adotados vinculados (nenhum)
+      .mockResolvedValueOnce({ rows: [guardianRow({ phone: '91977776666' })] }); // UPDATE
+
+    const res = await request(app)
+      .patch(`${base}/guardians/g1`)
+      .set(canalA())
+      .send({ phone: '91977776666' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.phone).toBe('91977776666');
+    expect(res.body.identity_sync).toBeUndefined();
+    expect(db.connect).not.toHaveBeenCalled();
+    expect(db.query.mock.calls.length).toBe(3);
+  });
+
+  test('com aluno ADOTADO vinculado: nome e telefone do responsável sobem para a ficha da federação, em LOTE', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [guardianRow()] })      // SELECT existing
+      .mockResolvedValueOnce({ rows: [{ id: sid }] });       // SELECT alunos adotados vinculados (1)
+
+    const isGuardianUpdate = (s) => /^UPDATE karate_dojo_guardians SET/.test(s.trim());
+    const isBatchCandidate = (s) => /JOIN customers c ON c\.id = s\.practitioner_id/.test(s);
+    const isFedUpdate = (s) => /^UPDATE customers SET/.test(s.trim());
+    const isAudit = (s) => /INSERT INTO karate_identity_audit/.test(s);
+
+    const client = {
+      query: jest.fn(async (sql) => {
+        const s = String(sql);
+        if (isGuardianUpdate(s)) return { rows: [guardianRow({ phone: '91977776666' })] };
+        if (isBatchCandidate(s)) return {
+          rows: [{
+            student_id: sid, student_label: 'Aluno Teste',
+            practitioner_id: 'p1', practitioner_label: 'Aluno Teste', fpkt_number: 'FPKT-123',
+            // Todos os campos de IDENTIDADE do aluno neutros (null dos dois
+            // lados) — este teste só cobre o RESPONSÁVEL, não a ficha
+            // inteira (isso já é coberto no describe F7.2).
+            d_full_name: null, f_full_name: null,
+            d_birth_date: null, f_birth_date: null,
+            d_cpf: null, f_cpf: null,
+            d_rg: null, f_rg: null,
+            d_sex: null, f_sex: null,
+            d_phone: null, f_phone: null,
+            d_email: null, f_email: null,
+            d_zip_code: null, f_zip_code: null,
+            d_street: null, f_street: null,
+            d_number: null, f_number: null,
+            d_complement: null, f_complement: null,
+            d_neighborhood: null, f_neighborhood: null,
+            d_city: null, f_city: null,
+            d_state: null, f_state: null,
+            d_photo_url: null, f_photo_url: null,
+            // Responsável: nome e telefone DIVERGEM (dojô tem, federação
+            // não/tem outro) → disparam write. CPF/parentesco iguais nos
+            // dois lados (ou ambos vazios) → não disparam.
+            d_guardian_full_name: 'Mãe Zelosa', f_guardian_full_name: null,
+            d_guardian_cpf: null, f_guardian_cpf: null,
+            d_guardian_phone: '91977776666', f_guardian_phone: '91988880000',
+            d_guardian_relationship: null, f_guardian_relationship: null,
+          }],
+        };
+        if (isFedUpdate(s)) return { rows: [{ id: 'p1' }] };
+        return { rows: [] };
+      }),
+      release: jest.fn(),
+    };
+    db.connect.mockImplementation(() => client);
+
+    const res = await request(app)
+      .patch(`${base}/guardians/g1`)
+      .set(canalA())
+      .send({ phone: '91977776666' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.phone).toBe('91977776666');
+    expect(res.body.identity_sync).toMatchObject({ status: 'ok', synced: 1, checked: 1 });
+    // Campo do sync usa a CHAVE (guardian_full_name), não a coluna de
+    // customers (guardian_name) — ver GUARDIAN_SYNC_FIELDS.
+    expect(res.body.identity_sync.fields).toEqual(
+      expect.arrayContaining(['guardian_full_name', 'guardian_phone'])
+    );
+
+    const all = client.query.mock.calls.map((c) => String(c[0]));
+    expect(all).toContain('BEGIN');
+    expect(all).toContain('COMMIT');
+    expect(all.some(isFedUpdate)).toBe(true);
+    expect(all).toContain('SAVEPOINT sp_identity_sync_batch');
+
+    const candidateCall = client.query.mock.calls.find((c) => isBatchCandidate(String(c[0])));
+    expect(candidateCall[1]).toEqual([[sid], dojoId]);
+
+    // A coluna ESCRITA em customers é guardian_name (fedCol), não
+    // guardian_full_name (que é só a chave/label do lado do dojô).
+    const fedCall = client.query.mock.calls.find((c) => isFedUpdate(String(c[0])));
+    const setClause = String(fedCall[0]).split('WHERE')[0];
+    expect(setClause).toContain('guardian_name =');
+    expect(setClause).toContain('guardian_phone =');
+    expect(setClause).not.toContain('guardian_full_name =');
+
+    // trilha gravada
+    expect(client.query.mock.calls.some((c) => isAudit(String(c[0])))).toBe(true);
+  });
+
+  test('Canal B → 403 PORTAL_READ_ONLY, sem tocar o banco', async () => {
+    const res = await request(app)
+      .patch(`${base}/guardians/g1`)
+      .set(canalB())
+      .send({ phone: '91977776666' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PORTAL_READ_ONLY');
+    expect(db.query).not.toHaveBeenCalled();
+  });
+});
+
+// ════════════════════════════════════════════════════════════
 // ⚠️ ESTE DESCRIBE FICA POR ÚLTIMO NO ARQUIVO DE PROPÓSITO.
 // O flag HAS_IDENTITY_COLS do service é module-level (é assim que o
 // fallback de deploy parcial funciona: degradou, ficou degradado). Depois
 // que ele vira false, todo caso seguinte deste módulo rodaria degradado —
-// e, na F7.2, com o sync DESLIGADO (needsSync exige a 262).
+// e, na F7.2/F8, com o sync DESLIGADO (needsSync exige a 262).
 // ════════════════════════════════════════════════════════════
 describe('F7.0/F7.2 — deploy parcial: migration 262 ainda não aplicada', () => {
   test('42703 → aluno é criado mesmo assim, sem os campos novos', async () => {
@@ -884,5 +1222,26 @@ describe('F7.0/F7.2 — deploy parcial: migration 262 ainda não aplicada', () =
     expect(db.connect).not.toHaveBeenCalled();
     expect(db.query.mock.calls.length).toBe(2);
     expect(res.body.identity_sync).toBeUndefined();
+  });
+
+  test('sem a 262, o upload de foto responde 503 SCHEMA_PENDING (karate_photo_url não existe)', async () => {
+    // Mesmo estado degradado herdado dos casos acima (HAS_IDENTITY_COLS
+    // module-level já é false). A EXISTÊNCIA do aluno continua sendo
+    // verificável (withStudentSchemaFallback já degrada as colunas de
+    // identidade para NULL, mas a linha existe) — a rota confere isso
+    // ANTES de subir para o R2, então o upload ACONTECE. Só depois, dentro
+    // de svc.setStudentPhoto, é que a ausência da coluna de destino vira
+    // 503 — não há onde GRAVAR a URL que o R2 acabou de devolver.
+    uploadToR2.mockResolvedValueOnce({ success: true, url: 'https://cdn/orfa.jpg' });
+    db.query.mockResolvedValue({ rows: [studentRow()] }); // getStudent (rota) + existência própria do service
+
+    const res = await request(app)
+      .post(`${base}/students/${sid}/photo`)
+      .set(canalA())
+      .send({ content: 'ZmFrZQ==', content_type: 'image/jpeg' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('SCHEMA_PENDING');
+    expect(uploadToR2).toHaveBeenCalledTimes(1);
   });
 });

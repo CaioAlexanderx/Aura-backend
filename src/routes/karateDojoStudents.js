@@ -29,6 +29,13 @@
 // O que NUNCA sobe: matrícula FPKT, papéis federativos, is_active, dojo_id
 // e faixa — isso é o que a federação EMITE.
 //
+// F8 (31/07/2026) — A FICHA DO ALUNO GANHA FOTO: reusa EXATAMENTE o
+// mecanismo do upload de foto do praticante (uploadToR2, mesmos tipos e
+// mesmo limite de 5 MB) e o MESMO caminho de sync contínuo da F7.2 — a
+// foto é só mais um campo de identidade (karate_photo_url já estava em
+// SYNCED_IDENTITY_COLS desde a migration 262). O responsável também passa
+// a subir: ver comentário na rota PATCH /dojo/guardians/:gid.
+//
 // Escopo SEMPRE por req.dojoId do guard — nunca do body/query.
 // Defensivo 42P01 (migration 242 pendente): GETs de lista devolvem vazio +
 // schema_pending; writes e ficha devolvem 503 SCHEMA_PENDING.
@@ -39,11 +46,12 @@
 //   GET    /federation/:id/dojo/students/:sid        (ficha + responsável)
 //   PATCH  /federation/:id/dojo/students/:sid        (F7.2 — sincroniza identidade se adotada)
 //   DELETE /federation/:id/dojo/students/:sid        (delete real por ora; F3 → 409 HAS_HISTORY)
+//   POST   /federation/:id/dojo/students/:sid/photo       (F8 — upload de foto, sincroniza se adotada)
 //   POST   /federation/:id/dojo/students/:sid/federate    (F5a/F7.1 — Canal A)
 //   DELETE /federation/:id/dojo/students/:sid/federate    (F5a/F7.1 — Canal A)
 //   GET    /federation/:id/dojo/guardians            (+ contagem de alunos vinculados)
 //   POST   /federation/:id/dojo/guardians
-//   PATCH  /federation/:id/dojo/guardians/:gid
+//   PATCH  /federation/:id/dojo/guardians/:gid       (F8 — sincroniza alunos adotados vinculados a este responsável)
 // ============================================================
 'use strict';
 
@@ -52,6 +60,7 @@ const { requireDojoAccess } = require('../middleware/requireDojoAccess');
 const svc = require('../services/karateDojoStudentService');
 const identityLink = require('../services/karateStudentIdentityLink');
 const { isDojoLinked } = require('../services/karateDojoLinkStatus');
+const { uploadToR2 } = require('../utils/r2Storage');
 
 // Canal B (portal do dojô) é SOMENTE LEITURA: o portal existe para
 // consulta; alteração de cadastro exige a conta do dojô (Canal A).
@@ -223,6 +232,77 @@ router.delete('/dojo/students/:sid', requireDojoAccess, requireChannelA, async (
   }
 });
 
+// ── POST /federation/:id/dojo/students/:sid/photo ──
+// F8 — Upload de foto do aluno. REUSA EXATAMENTE o mecanismo do upload de
+// foto do praticante (POST /:practitionerId/photo em karatePractitioners.js):
+// mesmo helper uploadToR2 (src/utils/r2Storage.js), MESMOS tipos aceitos e
+// MESMO limite de tamanho. Nenhum segundo caminho de upload de arquivo.
+//
+// Body JSON:
+//   content      {string}  Imagem em base64 (obrigatório).
+//   content_type {string?} MIME. Default: "image/jpeg".
+//                          Aceitos: image/jpeg, image/png, image/webp
+//                          (mesma lista ALLOWED_TYPES da rota do praticante).
+//
+// Limite de tamanho: 5 MB — herdado de express.json({ limit: '5mb' }) em
+// src/app.js (global, não por rota); acima disso o Express já responde 413
+// antes de chegar aqui. Não é um limite novo — é o mesmo que já protege o
+// upload do praticante.
+//
+// Grava karate_dojo_students.karate_photo_url (migration 262, F7.0).
+// Diferente da rota do praticante — que só devolve { photo_url } — esta
+// devolve a FICHA INTEIRA do aluno, no mesmo shape do PATCH/GET, porque
+// karate_photo_url já é um SYNCED_IDENTITY_COLS: se o aluno tem
+// practitioner_id e a ficha dele está adotada por este dojô
+// (karate_identity_managed_by='dojo'), svc.setStudentPhoto reusa
+// updateStudentWithSync — o MESMO mecanismo transacional do PATCH (F7.2) —
+// e a foto sobe para a federação. `identity_sync` na resposta diz se subiu.
+router.post('/dojo/students/:sid/photo', requireDojoAccess, requireChannelA, async (req, res) => {
+  const { content, content_type } = req.body || {};
+
+  if (!content || typeof content !== 'string' || !content.trim()) {
+    return res.status(400).json({
+      error: 'Campo content (imagem em base64) é obrigatório',
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  // Mesma lista da rota do praticante — rejeita tipos claramente não-imagem.
+  const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+  const mime = ((content_type || 'image/jpeg') + '').toLowerCase().split(';')[0].trim();
+  if (!ALLOWED_TYPES.includes(mime)) {
+    return res.status(400).json({
+      error: 'Tipo de imagem não suportado: ' + mime + '. Use image/jpeg, image/png ou image/webp.',
+      code: 'INVALID_CONTENT_TYPE',
+    });
+  }
+  const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+
+  try {
+    // Confirma que o aluno existe NESTE dojô antes de gastar um upload no
+    // R2 — mesma ordem da rota do praticante (valida, depois sobe).
+    const existing = await svc.getStudent(req.dojoId, req.params.sid);
+    if (!existing) {
+      return res.status(404).json({ error: 'Aluno não encontrado neste dojô', code: 'NOT_FOUND' });
+    }
+
+    // Chave própria do aluno do dojô — nunca reusa o namespace
+    // 'karate/practitioners/...' da federação (são storages de pessoas
+    // diferentes até a adoção existir).
+    const key = 'karate/dojo-students/' + req.dojoId + '/' + req.params.sid + '.' + ext;
+    const result = await uploadToR2(key, content, mime);
+    if (!result.success) {
+      console.error('[karateDojoStudents] photo R2 error:', result.error);
+      return res.status(500).json({ error: 'Erro no armazenamento da imagem' });
+    }
+
+    const student = await svc.setStudentPhoto(req.dojoId, req.params.sid, result.url, identityCtx(req));
+    return res.json(student);
+  } catch (e) {
+    return handleWriteError(res, e, 'upload student photo');
+  }
+});
+
 // ============================================================
 // F5a/F7.1 — FEDERAR / DESFEDERAR o aluno
 //
@@ -366,13 +446,21 @@ router.post('/dojo/guardians', requireDojoAccess, requireChannelA, async (req, r
 });
 
 // ── PATCH /federation/:id/dojo/guardians/:gid ──
+// F8: o responsável de 1 dojô pode ter N alunos (topo do service). Editar o
+// responsável agora pode ter o que subir para a federação em cada ficha de
+// aluno ADOTADA vinculada a ele — svc.updateGuardian localiza esses alunos
+// e sincroniza todos em LOTE, na mesma transação do UPDATE do responsável
+// (reusa identitySync.syncStudentsBatch, o mesmo mecanismo do import).
+// `identityCtx(req)` é o mesmo contexto {federationId, actor} usado pelas
+// escritas de aluno — necessário aqui pela primeira vez porque antes desta
+// fase o responsável nunca tinha o que sincronizar.
 router.patch('/dojo/guardians/:gid', requireDojoAccess, requireChannelA, async (req, res) => {
   const { errors, data } = svc.validateGuardianPayload(req.body, { partial: true });
   if (errors.length) {
     return res.status(422).json({ error: errors[0], errors, code: 'VALIDATION_ERROR' });
   }
   try {
-    const guardian = await svc.updateGuardian(req.dojoId, req.params.gid, data);
+    const guardian = await svc.updateGuardian(req.dojoId, req.params.gid, data, identityCtx(req));
     return res.json(guardian);
   } catch (e) {
     return handleWriteError(res, e, 'update guardian');

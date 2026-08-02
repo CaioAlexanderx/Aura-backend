@@ -65,10 +65,10 @@
 // cópias da mesma regra são cinco regras diferentes em duas semanas —
 // é o mesmo argumento que fez a F7.2 importar IDENTITY_FIELDS em vez de
 // copiar. Aqui a lista de colunas protegidas é DERIVADA de
-// IDENTITY_FIELDS (karateStudentIdentityLink.js): o que o dojô
-// sincroniza é exatamente o que a federação deixa de escrever. Se um
-// campo entrar naquela lista, ele passa a ser protegido aqui no mesmo
-// commit, sem ninguém lembrar de nada.
+// IDENTITY_FIELDS + GUARDIAN_SYNC_FIELDS (karateStudentIdentityLink.js):
+// o que o dojô sincroniza é exatamente o que a federação deixa de
+// escrever. Se um campo entrar em qualquer uma das duas listas, ele passa
+// a ser protegido aqui no mesmo commit, sem ninguém lembrar de nada.
 //
 // ── POR QUE NÃO GATILHO NO BANCO ────────────────────────────
 // Mesmo motivo já escrito na F7.2: a mensagem tem que dizer o NOME do
@@ -92,13 +92,18 @@
 // do dojô desfiliado na visão da federação sem esbarrar nesta guarda:
 // situação é coisa que a federação EMITE, não é identidade da pessoa.
 //
-// ── guardian_* NÃO É BLOQUEADO (decisão consciente) ─────────
-// guardian_name/guardian_cpf/guardian_phone/guardian_relationship
-// descrevem a pessoa, mas NÃO estão em IDENTITY_FIELDS: o dojô não os
-// sincroniza hoje. Bloquear um campo que o dojô não consegue escrever
-// seria congelar o dado — ninguém poderia mais corrigi-lo. Bloqueia-se
-// exatamente o que o dojô consegue manter. Entra na F8 junto com a
-// entrada desses campos no sync (ver corpo do PR).
+// ── F8 (31/07/2026): guardian_* PASSA A SER BLOQUEADO ───────
+// Até aqui guardian_name/guardian_cpf/guardian_phone/guardian_relationship
+// ficavam de fora de propósito: o dojô não os sincronizava, e bloquear um
+// campo que ele não conseguia escrever teria CONGELADO o dado — ninguém
+// poderia mais corrigi-lo. Agora o dojô escreve responsável
+// (karate_dojo_guardians, migration 242) e sincroniza os quatro campos
+// (GUARDIAN_SYNC_FIELDS, em karateStudentIdentityLink.js — lista SEPARADA
+// de IDENTITY_FIELDS; ver o comentário lá para o porquê). Os quatro
+// SAÍRAM de FEDERATION_ALWAYS_ALLOWED: IDENTITY_LABEL_BY_COL abaixo passa
+// a derivar de IDENTITY_FIELDS + GUARDIAN_SYNC_FIELDS juntos, e uma
+// coluna não pode estar em DUAS listas ao mesmo tempo
+// (assertGuardListsAreDisjoint garante, no boot).
 //
 // ── DEFENSIVO A SCHEMA (42703 / 42P01) ──────────────────────
 // Sem a migration 262 não existe karate_identity_managed_by — e também
@@ -113,7 +118,7 @@
 // ============================================================
 'use strict';
 
-const { IDENTITY_FIELDS, writeIdentityAudit } = require('./karateStudentIdentityLink');
+const { IDENTITY_FIELDS, GUARDIAN_SYNC_FIELDS, writeIdentityAudit } = require('./karateStudentIdentityLink');
 const { FEDERATION_OWNED_COLS } = require('./karateIdentitySync');
 const {
   dojoStateSelect,
@@ -137,13 +142,14 @@ const CHANNELS = Object.freeze({
 const PUBLIC_CHANNELS = Object.freeze([CHANNELS.DOJO_PORTAL, CHANNELS.SELF_SERVICE]);
 
 // ── As colunas protegidas ───────────────────────────────────
-// DERIVADAS de IDENTITY_FIELDS — nunca digitadas de novo.
+// DERIVADAS de IDENTITY_FIELDS + GUARDIAN_SYNC_FIELDS (F8) — nunca
+// digitadas de novo.
 // photo_url entra à parte: ficou DEPRECADA por COMMENT na 262 (não foi
 // dropada) e a leitura da foto é COALESCE(karate_photo_url, photo_url)
 // nos dois lados. Deixá-la de fora seria manter uma porta lateral para
 // a mesma informação.
 const IDENTITY_LABEL_BY_COL = Object.freeze(
-  IDENTITY_FIELDS.reduce(
+  IDENTITY_FIELDS.concat(GUARDIAN_SYNC_FIELDS).reduce(
     (acc, f) => { acc[f.fedCol] = f.label; return acc; },
     { photo_url: 'Foto (coluna legada)' }
   )
@@ -152,7 +158,7 @@ const IDENTITY_LABEL_BY_COL = Object.freeze(
 const IDENTITY_COLS = Object.freeze(Object.keys(IDENTITY_LABEL_BY_COL));
 
 // O que a federação escreve SEMPRE, em qualquer ficha. Não é usada para
-// montar SQL: existe para a proteção ser EXECUTADA (assertGuardListsAreDisjoint)
+// montar SQL; existe para a proteção ser EXECUTADA (assertGuardListsAreDisjoint)
 // e para o teste conseguir asseverar a promessa do PR.
 const FEDERATION_ALWAYS_ALLOWED = Object.freeze([
   'karate_registration_number',
@@ -166,10 +172,6 @@ const FEDERATION_ALWAYS_ALLOWED = Object.freeze([
   'federation_id',
   'parent_guardian_id',
   'affiliation_since',
-  'guardian_name',
-  'guardian_cpf',
-  'guardian_phone',
-  'guardian_relationship',
   'karate_identity_managed_by',
   'karate_identity_dojo_id',
 ]);

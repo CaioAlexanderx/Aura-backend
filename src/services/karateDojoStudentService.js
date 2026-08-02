@@ -786,7 +786,13 @@ async function updateStudent(dojoId, studentId, data, ctx = {}) {
   // Quando alguma falha, o caminho é EXATAMENTE o de sempre: duas queries,
   // sem BEGIN. É o que mantém o salvamento comum barato.
   const touched = touchedIdentityCols(data);
-  const needsSync = HAS_IDENTITY_COLS && Boolean(cur.practitioner_id) && touched.length > 0;
+  // F8: trocar/remover o responsável também pode ter o que subir — o
+  // RESPONSÁVEL não é uma coluna de SYNCED_IDENTITY_COLS (vive noutra
+  // tabela), então `touched` sozinho não veria essa mudança. guardian_id
+  // sendo tocado é gatilho por si só, mesmo que nenhuma coluna de
+  // identidade do ALUNO tenha mudado.
+  const guardianTouched = data.guardian_id !== undefined;
+  const needsSync = HAS_IDENTITY_COLS && Boolean(cur.practitioner_id) && (touched.length > 0 || guardianTouched);
 
   let upd;
   let syncResult = null;
@@ -807,6 +813,7 @@ async function updateStudent(dojoId, studentId, data, ctx = {}) {
         studentId,
         buildUpdate,
         practitionerId: cur.practitioner_id,
+        guardianId: mergedGuardian,
         ctx,
       }));
     } catch (e) {
@@ -842,7 +849,7 @@ async function updateStudent(dojoId, studentId, data, ctx = {}) {
 // e o sync vem depois, dentro de SAVEPOINT (dentro de karateIdentitySync) —
 // assim uma falha do sync descarta só o sync, e o COMMIT ainda salva o
 // aluno. O contrário (sync antes) obrigaria a desfazer o salvamento.
-async function updateStudentWithSync({ dojoId, studentId, buildUpdate, practitionerId, ctx }) {
+async function updateStudentWithSync({ dojoId, studentId, buildUpdate, practitionerId, guardianId, ctx }) {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -854,6 +861,13 @@ async function updateStudentWithSync({ dojoId, studentId, buildUpdate, practitio
       throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
     }
 
+    // F8: o responsável mora em OUTRA tabela (karate_dojo_guardians) — o
+    // RETURNING acima só traz colunas de karate_dojo_students. O sync
+    // compara a FICHA INTEIRA (comentário de karateIdentitySync), e isso
+    // agora inclui o responsável ATUAL do aluno, não só o que este PATCH
+    // tocou.
+    const guardianFields = await fetchGuardianSyncFields(client, dojoId, guardianId);
+
     // NUNCA lança: devolve o resultado (ok | skipped | failed). É o que
     // permite cumprir "falha do sync não derruba o salvamento" sem
     // try/catch nu dentro do BEGIN (armadilha tx-poison).
@@ -862,7 +876,7 @@ async function updateStudentWithSync({ dojoId, studentId, buildUpdate, practitio
       federationId: ctx.federationId || null,
       studentId,
       practitionerId,
-      student: upd.rows[0],
+      student: { ...upd.rows[0], ...guardianFields },
       studentLabel: upd.rows[0].full_name || null,
       actor: ctx.actor || null,
     });
@@ -876,6 +890,106 @@ async function updateStudentWithSync({ dojoId, studentId, buildUpdate, practitio
   } finally {
     client.release();
   }
+}
+
+// F8 — campos do responsável para o SYNC (dojô → federação). Separado de
+// resolveGuardianOrThrow (que serve a RESPOSTA do POST/PATCH do aluno e
+// não traz cpf) porque o sync PRECISA do cpf: guardian_cpf é campo de
+// identidade na federação. Chaves ACHATADAS (guardian_full_name,
+// guardian_cpf, ...) — são os mesmos nomes de GUARDIAN_SYNC_FIELDS.dojoCol
+// em karateStudentIdentityLink.js, para o sync ler com
+// `row[f.dojoCol]` sem precisar de um branch novo.
+async function fetchGuardianSyncFields(client, dojoId, guardianId) {
+  if (!guardianId) {
+    return { guardian_full_name: null, guardian_cpf: null, guardian_phone: null, guardian_relationship: null };
+  }
+  const { rows } = await client.query(
+    `SELECT full_name, cpf, phone, relationship
+       FROM karate_dojo_guardians
+      WHERE id = $1 AND dojo_id = $2
+      LIMIT 1`,
+    [guardianId, dojoId]
+  );
+  const g = rows[0] || {};
+  return {
+    guardian_full_name: g.full_name || null,
+    guardian_cpf: g.cpf || null,
+    guardian_phone: g.phone || null,
+    guardian_relationship: g.relationship || null,
+  };
+}
+
+// ============================================================
+// F8 — POST /dojo/students/:sid/photo (upload de foto do aluno)
+// ============================================================
+// Mesma forma de updateStudent para um campo único (karate_photo_url):
+// sem praticante vinculado, sem sync, sem transação — o caminho comum
+// (a imensa maioria dos uploads) continua sendo uma query só. Com
+// praticante vinculado, sobe a ficha completa (incluindo o responsável
+// ATUAL) na MESMA transação, reusando updateStudentWithSync — mesmo
+// motivo de sempre: o sync compara a ficha inteira, não só o campo
+// tocado.
+//
+// karate_photo_url já é um SYNCED_IDENTITY_COLS (dentro de IDENTITY_COLS,
+// migration 262) — não precisa entrar em nenhuma lista nova.
+async function setStudentPhoto(dojoId, studentId, photoUrl, ctx = {}) {
+  const existing = await withStudentSchemaFallback(() => db.query(
+    `SELECT ${studentFields('s.')}, ${federationFields('s.')}
+       FROM karate_dojo_students s
+       ${federationJoin('s.')}
+      WHERE s.id = $1 AND s.dojo_id = $2
+      LIMIT 1`,
+    [studentId, dojoId]
+  ));
+  if (!existing.rows.length) {
+    throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
+  }
+  const cur = existing.rows[0];
+
+  if (!HAS_IDENTITY_COLS) {
+    // karate_photo_url só existe com a migration 262 (F7.0). Sem ela não
+    // há onde gravar — mesmo 503 que o resto da F7.0 usa quando a coluna
+    // falta, em vez de inventar uma coluna alternativa.
+    throw svcError(
+      503,
+      'SCHEMA_PENDING',
+      'Upload de foto do aluno depende da migration 262 (karate_photo_url), ainda não aplicada.'
+    );
+  }
+
+  const buildUpdate = () => ({
+    sql: `UPDATE karate_dojo_students SET karate_photo_url = $1, updated_at = now()
+           WHERE id = $2 AND dojo_id = $3
+       RETURNING ${studentFields('')}`,
+    vals: [photoUrl, studentId, dojoId],
+  });
+
+  const needsSync = Boolean(cur.practitioner_id);
+  let upd;
+  let syncResult = null;
+  if (!needsSync) {
+    const q = buildUpdate();
+    upd = await db.query(q.sql, q.vals);
+  } else {
+    ({ upd, syncResult } = await updateStudentWithSync({
+      dojoId,
+      studentId,
+      buildUpdate,
+      practitionerId: cur.practitioner_id,
+      guardianId: cur.guardian_id,
+      ctx,
+    }));
+  }
+
+  const s = shapeStudent({
+    ...upd.rows[0],
+    is_federated: cur.is_federated,
+    has_pending_request: cur.has_pending_request,
+    fpkt_number: cur.fpkt_number,
+    practitioner_name: cur.practitioner_name,
+  });
+  if (syncResult) s.identity_sync = syncResult;
+  return s;
 }
 
 async function deleteStudent(dojoId, studentId) {
@@ -1241,7 +1355,12 @@ async function createGuardian(dojoId, data) {
 
 const GUARDIAN_UPDATABLE_COLS = ['full_name', 'cpf', 'phone', 'email', 'relationship'];
 
-async function updateGuardian(dojoId, guardianId, data) {
+// F8: PATCH do responsável agora pode subir para a federação — 1
+// responsável : N alunos (comentário de topo do arquivo), então uma
+// mudança aqui pode afetar VÁRIAS fichas adotadas de uma vez. `ctx` é o
+// mesmo formato de updateStudent/setStudentPhoto (identityCtx(req) na
+// rota): { federationId, actor }.
+async function updateGuardian(dojoId, guardianId, data, ctx = {}) {
   const existing = await db.query(
     `SELECT id, full_name, cpf, phone, email, relationship, created_at, updated_at
        FROM karate_dojo_guardians
@@ -1263,13 +1382,61 @@ async function updateGuardian(dojoId, guardianId, data) {
   if (!sets.length) return existing.rows[0]; // PATCH vazio = no-op
   sets.push('updated_at = now()');
   vals.push(guardianId, dojoId);
-  const upd = await db.query(
-    `UPDATE karate_dojo_guardians SET ${sets.join(', ')}
+  const buildUpdate = () => ({
+    sql: `UPDATE karate_dojo_guardians SET ${sets.join(', ')}
       WHERE id = $${vals.length - 1} AND dojo_id = $${vals.length}
       RETURNING id, full_name, cpf, phone, email, relationship, created_at, updated_at`,
-    vals
+    vals,
+  });
+
+  // Quais alunos DESTE responsável têm praticante vinculado — só esses
+  // têm o que sincronizar (syncStudentsBatch filtra de novo por ficha
+  // ADOTADA POR ESTE dojô; passar um aluno não-adotado aqui é inofensivo,
+  // ele só não gera UPDATE). Sem nenhum, o caminho continua sendo a
+  // MESMA UPDATE de sempre, sem transação — a maioria dos responsáveis
+  // não tem aluno federado.
+  const linked = await db.query(
+    `SELECT id FROM karate_dojo_students WHERE guardian_id = $1 AND dojo_id = $2 AND practitioner_id IS NOT NULL`,
+    [guardianId, dojoId]
   );
-  return upd.rows[0];
+  const studentIds = linked.rows.map((r) => r.id);
+
+  if (!studentIds.length) {
+    const q = buildUpdate();
+    const upd = await db.query(q.sql, q.vals);
+    return upd.rows[0];
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const q = buildUpdate();
+    const upd = await client.query(q.sql, q.vals);
+    if (!upd.rows.length) {
+      await client.query('ROLLBACK');
+      throw svcError(404, 'NOT_FOUND', 'Responsável não encontrado neste dojô');
+    }
+
+    // Mesmo mecanismo do import (F7.2/F8): 1 query de candidatos para
+    // TODOS os alunos deste responsável, nunca 1 por aluno.
+    const syncResult = await identitySync.syncStudentsBatch(client, {
+      dojoId,
+      federationId: ctx.federationId || null,
+      studentIds,
+      actor: ctx.actor || null,
+      source: identitySync.SOURCE_STUDENT_EDIT,
+    });
+
+    await client.query('COMMIT');
+    const g = upd.rows[0];
+    g.identity_sync = syncResult;
+    return g;
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* conexão pode ter caído */ }
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 module.exports = {
@@ -1296,6 +1463,7 @@ module.exports = {
   listGuardians,
   createGuardian,
   updateGuardian,
+  setStudentPhoto,
   // F5a — caminho 2 (solicitação H1). O caminho 1 e o desfederar são da
   // F7.1 (karateStudentIdentityLink); as versões antigas daqui foram
   // removidas na F7.2 por não terem chamador.

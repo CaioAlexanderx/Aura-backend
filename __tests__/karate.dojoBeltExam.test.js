@@ -151,7 +151,15 @@ function poolQuery(sql, params) {
           : [],
       });
     case 'load-exam':
-      return Promise.resolve({ rows: state.exam && p[0] === state.exam.id && p[1] === DOJO_ID ? [state.exam] : [] });
+      // Escopo por dojô: a linha simulada só "existe" para quem consulta
+      // se dojo_id do TOKEN ($2) bater com dojo_id DA LINHA
+      // (state.exam.dojo_id) — nunca contra uma constante fixa. Comparar
+      // contra a constante DOJO_ID faria esta condição ser sempre
+      // verdadeira nos testes (o token aqui usa sempre DOJO_ID), mesmo
+      // quando o teste muda state.exam.dojo_id para simular um exame de
+      // OUTRO dojô — mascarando exatamente o caso que o teste "exame de
+      // outro dojô é 404" existe para provar.
+      return Promise.resolve({ rows: state.exam && p[0] === state.exam.id && p[1] === state.exam.dojo_id ? [state.exam] : [] });
     case 'insert-exam':
       return Promise.resolve({
         rows: [Object.assign({}, state.exam, { exam_date: p[2], title: p[3], examiner_name: p[4], notes: p[5] })],

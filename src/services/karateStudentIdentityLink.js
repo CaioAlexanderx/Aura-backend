@@ -185,6 +185,53 @@ const IDENTITY_FIELDS = Object.freeze([
   { key: 'photo_url', label: 'Foto', kind: 'url', dojoCol: 'karate_photo_url', fedCol: 'karate_photo_url', dojoNeeds262: true, coalescePhoto: true },
 ]);
 
+// ============================================================
+// F8 (31/07/2026) — O RESPONSÁVEL TAMBÉM SOBE
+//
+// Até aqui (F7.1/F7.2) guardian_name/guardian_cpf/guardian_phone/
+// guardian_relationship ficaram FORA de IDENTITY_FIELDS por decisão
+// consciente (ver o comentário homônimo em karateIdentityWriteGuard.js,
+// que este PR revisita): o dojô não os sincronizava, então bloqueá-los na
+// federação teria CONGELADO o dado — ninguém poderia mais corrigi-lo.
+//
+// Agora o dojô ESCREVE responsável (karate_dojo_guardians, migration 242)
+// e o dono do produto pede a MESMA ficha nos dois lados. Os quatro campos
+// passam a subir dojô → federação (services/karateIdentitySync.js) e, por
+// consequência, a ficar PROTEGIDOS pela guarda — a lista de bloqueio é
+// DERIVADA da lista de identidade (ver karateIdentityWriteGuard.js).
+//
+// ── POR QUE UMA LISTA SEPARADA DE IDENTITY_FIELDS, E NÃO A MESMA ──
+// IDENTITY_FIELDS alimenta TRÊS coisas ao mesmo tempo: a comparação da
+// F7.1 (buildComparison/planResolution, a tela "conferir antes de
+// federar"), o UPDATE que ela pode gerar DOS DOIS LADOS (buildDojoUpdate
+// grava de volta em karate_dojo_students quando a federação vence um
+// campo) e o sync contínuo da F7.2 (só dojô → federação). O responsável
+// vive numa TABELA À PARTE (karate_dojo_guardians — 1 responsável : N
+// alunos, ver cabeçalho de karateDojoStudentService.js) — não numa coluna
+// de karate_dojo_students. Colocá-lo em IDENTITY_FIELDS obrigaria
+// buildDojoUpdate a saber escrever numa tabela diferente (achar/criar o
+// responsável certo, decidir qual dos N alunos está sendo conferido) só
+// para cobrir um caso que o pedido de hoje não pede: o pedido é "o
+// responsável sobe" (uma direção), não "o responsável entra na
+// conferência de adoção" (as duas). GUARDIAN_SYNC_FIELDS existe para não
+// empurrar essa segunda decisão para dentro deste PR — fica para quando
+// (se) a conferência de adoção precisar comparar responsável também.
+//
+// `guardianCol` é a coluna em karate_dojo_guardians (join por
+// karate_dojo_students.guardian_id — ver BATCH_CANDIDATE_SQL e
+// dojoSelectList em karateIdentitySync.js). `dojoCol` é o nome ACHATADO
+// que karateDojoStudentService.fetchGuardianSyncFields usa para montar o
+// objeto passado a syncStudentIdentity quando não há SQL rodando (o PATCH
+// do aluno e o upload de foto resolvem o responsável em código, não numa
+// query de sync).
+// ============================================================
+const GUARDIAN_SYNC_FIELDS = Object.freeze([
+  { key: 'guardian_full_name', label: 'Nome do responsável', kind: 'name', dojoCol: 'guardian_full_name', guardianCol: 'full_name', fedCol: 'guardian_name' },
+  { key: 'guardian_cpf', label: 'CPF do responsável', kind: 'cpf', dojoCol: 'guardian_cpf', guardianCol: 'cpf', fedCol: 'guardian_cpf' },
+  { key: 'guardian_phone', label: 'Telefone do responsável', kind: 'phone', dojoCol: 'guardian_phone', guardianCol: 'phone', fedCol: 'guardian_phone' },
+  { key: 'guardian_relationship', label: 'Parentesco do responsável', kind: 'text', dojoCol: 'guardian_relationship', guardianCol: 'relationship', fedCol: 'guardian_relationship' },
+]);
+
 const FIELD_BY_KEY = Object.freeze(
   IDENTITY_FIELDS.reduce((acc, f) => { acc[f.key] = f; return acc; }, {})
 );
@@ -922,6 +969,7 @@ async function unfederateStudent({ dojoId, studentId, federationId = null, actor
 
 module.exports = {
   IDENTITY_FIELDS,
+  GUARDIAN_SYNC_FIELDS,
   federateByNumber,
   unfederateStudent,
   // Exportados para teste/inspeção — a comparação é a regra de negócio
