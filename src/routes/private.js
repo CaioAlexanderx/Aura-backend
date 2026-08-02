@@ -75,6 +75,27 @@ router.use('/customers', require('./customers'));
 router.use('/employees', require('./employees'));
 // Notificações do app (endomarketing banners + avisos de pedido) — sem gate de plano
 router.use('/notifications', require('./notifications'));
+// 02/08/2026 — Ranking de vendedores liberado pro Essencial.
+//
+// O ranking saiu da tela de Folha e virou aba propria em /vendas no app. Ele e
+// leitura de VENDA (quem vendeu quanto no periodo), nao de folha de pagamento:
+// quem esta no Essencial cadastra vendedores (limite 3) e atribui venda no PDV,
+// entao precisa enxergar o resultado disso. Segue a regra da casa de nunca
+// bloquear GET de leitura por plano (CLAUDE.md, armadilha 3) e o precedente de
+// `clientes`, liberado em 11/05/2026 pelo mesmo motivo.
+//
+// Continua gateado em Negocio+: folha de fato (payslipEmail), comissoes
+// (commission) e metas (goals, no bloco Expansao).
+//
+// ATENCAO -- a POSICAO deste mount importa e por isso ele subiu pra ca.
+// Nao bastava tirar o requirePlan da linha antiga: ela ficava DEPOIS de
+//   router.use('/employees', requirePlan('negocio','expansao'), payslipEmail)
+// e o requirePlan de um app.use roda pra QUALQUER path abaixo do prefixo --
+// inclusive /employees/ranking. Como requirePlan responde 403 direto (nao
+// chama next()), o Essencial levava 403 do mount do payslipEmail antes de
+// chegar no router de ranking. Mantendo o mount aqui em cima, antes de
+// qualquer /employees gateado, a rota fica de fato acessivel.
+router.use('/employees/ranking', require('./employeesRanking'));
 
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
@@ -96,7 +117,6 @@ router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditPrevi
 router.use('/financial', requirePlan('negocio', 'expansao'), require('./financialReceivables'));
 router.use('/birthday', requirePlan('negocio', 'expansao'), require('./birthday'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./payslipEmail'));
-router.use('/employees/ranking', requirePlan('negocio', 'expansao'), require('./employeesRanking'));
 router.use('/employees', requirePlan('negocio', 'expansao'), require('./commission'));
 router.use('/appointments', requirePlan('negocio', 'expansao'), require('./appointments'));
 router.use('/digital-channel', requirePlan('negocio', 'expansao'), require('./digitalChannel'));
