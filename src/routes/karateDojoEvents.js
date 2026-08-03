@@ -76,7 +76,7 @@ function handleWriteError(res, e, ctx) {
   if (e && (e.code === '42P01' || e.code === 'TABLE_MISSING')) {
     console.error(`[karateDojoEvents] ${ctx}: SCHEMA_PENDING (${e.code}):`, e.message);
     return res.status(503).json({
-      error: 'Eventos do dojô indisponíveis no momento (migration 268 pendente)',
+      error: 'Eventos do dojô indisponíveis no momento (migration 269 pendente)',
       code: 'SCHEMA_PENDING',
       pg_code: '42P01',
     });
