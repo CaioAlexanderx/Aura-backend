@@ -235,7 +235,13 @@ router.post('/sale', async (req, res) => {
       productNames.push(productName);
       enrichedItems.push({ ...item, product_name_snapshot: productName, cost_price: costPrice, item_discount: itemDiscount, line_total: lineTotal, stock_company_id: stockCompanyId });
     }
-    let discountAmt = 0;
+    // Cupom e desconto manual SOMAM. O PDV mostra `subtotal - manual - cupom`
+    // na tela e manda os dois campos no mesmo body; enquanto isto aqui era
+    // if/else-if, o backend descartava o desconto manual em silencio e gravava
+    // um total MAIOR que o combinado com o cliente -- sobra no fechamento de
+    // caixa na venda a vista, e debito a maior no crediario.
+    let couponDiscount = 0;
+    let manualDiscount = 0;
     let couponId = null;
     let couponCodeUsed = null;
     if (coupon_code) {
@@ -254,16 +260,23 @@ router.post('/sale', async (req, res) => {
       if (coupon.expires_at && new Date(coupon.expires_at) < new Date()) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom expirado' }); }
       if (coupon.max_uses !== null && coupon.current_uses >= coupon.max_uses) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom esgotado' }); }
       if (coupon.min_order_value > 0 && subtotal < parseFloat(coupon.min_order_value)) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Valor minimo: R$ ${Number(coupon.min_order_value).toFixed(2).replace('.',',')}` }); }
-      discountAmt = coupon.discount_type === 'percent'
+      couponDiscount = coupon.discount_type === 'percent'
         ? Math.round(subtotal * parseFloat(coupon.discount_value) / 100 * 100) / 100
         : Math.min(parseFloat(coupon.discount_value), subtotal);
       couponId = coupon.id;
       couponCodeUsed = upperCode;
-    } else if (discount_amount && parseFloat(discount_amount) > 0) {
-      discountAmt = parseFloat(discount_amount);
-    } else if (discount_pct && parseFloat(discount_pct) > 0) {
-      discountAmt = parseFloat((subtotal * parseFloat(discount_pct) / 100).toFixed(2));
     }
+    if (discount_amount && parseFloat(discount_amount) > 0) {
+      manualDiscount = parseFloat(discount_amount);
+    } else if (discount_pct && parseFloat(discount_pct) > 0) {
+      manualDiscount = parseFloat((subtotal * parseFloat(discount_pct) / 100).toFixed(2));
+    }
+    // Teto no subtotal: a soma nunca pode produzir total negativo. O front ja
+    // faz Math.max(0, ...) na tela -- aqui e a mesma regra do outro lado.
+    const discountAmt = Math.min(
+      parseFloat((couponDiscount + manualDiscount).toFixed(2)),
+      subtotal
+    );
     const totalAmount = parseFloat((subtotal - discountAmt).toFixed(2));
     if (employee_id) {
       const { rows: empCheck } = await client.query(
