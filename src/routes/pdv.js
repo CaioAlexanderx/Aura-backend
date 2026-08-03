@@ -31,11 +31,17 @@
 //     troca de novo um item recebido numa troca anterior). O motor trocaV2
 //     ja aceita origem type='troca'. Ambos expoem origin_type/is_troca_origin
 //     pra UI avisar antes de confirmar.
+// 02/08/2026 (cupom nominal):
+//   - POST /sale passa a comparar coupons.customer_id com o customer_id da
+//     venda (services/couponPolicy). Blindar so o /coupons/validate nao
+//     resolvia: e AQUI que o cupom e gravado e o current_uses incrementado,
+//     entao o /sale era um bypass completo do cupom de aniversario.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
 const trocaV2     = require('../services/trocaV2');
 const { createCreditSale, cancelCreditSale } = require('../services/creditLedger');
+const { checkCouponOwner } = require('../services/couponPolicy');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -235,10 +241,16 @@ router.post('/sale', async (req, res) => {
     if (coupon_code) {
       const upperCode = String(coupon_code).toUpperCase().trim();
       const { rows: coupons } = await client.query(
-        `SELECT * FROM coupons WHERE company_id=$1 AND code=$2 AND is_active=true`, [req.params.id, upperCode]
+        `SELECT c.*, cust.name AS owner_name
+           FROM coupons c
+           LEFT JOIN customers cust ON cust.id = c.customer_id
+          WHERE c.company_id=$1 AND c.code=$2 AND c.is_active=true`,
+        [req.params.id, upperCode]
       );
       if (!coupons.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom nao encontrado' }); }
       const coupon = coupons[0];
+      const couponOwner = checkCouponOwner(coupon, customer_id);
+      if (!couponOwner.ok) { await client.query('ROLLBACK'); return res.status(400).json({ error: couponOwner.error, code: couponOwner.code }); }
       if (coupon.expires_at && new Date(coupon.expires_at) < new Date()) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom expirado' }); }
       if (coupon.max_uses !== null && coupon.current_uses >= coupon.max_uses) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom esgotado' }); }
       if (coupon.min_order_value > 0 && subtotal < parseFloat(coupon.min_order_value)) { await client.query('ROLLBACK'); return res.status(400).json({ error: `Valor minimo: R$ ${Number(coupon.min_order_value).toFixed(2).replace('.',',')}` }); }

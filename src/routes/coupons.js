@@ -4,6 +4,7 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
+const { checkCouponOwner } = require('../services/couponPolicy');
 
 // GET /coupons
 // Query: ?source=birthday|manual|... pra filtrar por origem
@@ -54,15 +55,22 @@ router.post('/', async (req, res) => {
 
 // POST /coupons/validate — Validar cupom (usado pelo PDV antes de finalizar)
 router.post('/validate', async (req, res) => {
-  const { code, order_total } = req.body;
+  const { code, order_total, customer_id } = req.body;
   if (!code) return res.status(400).json({ valid: false, error: 'Codigo obrigatorio' });
   try {
     const { rows } = await db.query(
-      `SELECT * FROM coupons WHERE company_id=$1 AND code=$2 AND is_active=true`,
+      `SELECT c.*, cust.name AS owner_name
+         FROM coupons c
+         LEFT JOIN customers cust ON cust.id = c.customer_id
+        WHERE c.company_id=$1 AND c.code=$2 AND c.is_active=true`,
       [req.params.id, String(code).toUpperCase().trim()]
     );
     if (!rows.length) return res.json({ valid: false, error: 'Cupom nao encontrado' });
     const c = rows[0];
+    // Titularidade vem ANTES de validade/uso de proposito: assim a resposta
+    // nao revela se o cupom alheio esta expirado ou ja foi usado.
+    const owner = checkCouponOwner(c, customer_id);
+    if (!owner.ok) return res.json({ valid: false, error: owner.error, error_code: owner.code });
     if (c.expires_at && new Date(c.expires_at) < new Date()) return res.json({ valid: false, error: 'Cupom expirado' });
     if (c.max_uses !== null && c.current_uses >= c.max_uses) return res.json({ valid: false, error: 'Cupom esgotado (limite de usos)' });
     const total = parseFloat(order_total || 0);
