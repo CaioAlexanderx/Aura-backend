@@ -42,7 +42,7 @@ const db = require('../config/database');
 
 const VALID_PLANS = ['anual', 'semestral', 'trimestral'];
 
-// ── F2 da reforma da anuidade: taxa de ADESÃO (filiação) ─────────────────
+// ── F2 da reforma da anuidade: taxa de ADESÃO (filiação) ─────────────────────
 // Cobrança ÚNICA, além da anuidade proporcional, quando a federação marca
 // (seletor persistente, companies.karate_charges_adhesion — Migration 248)
 // que o dojô paga adesão no cadastro ou na reativação. Valor em constante
@@ -81,7 +81,7 @@ function resolveDojoPlan(explicitPlan, dojoStoredPlan) {
   return d || null;
 }
 
-// ── Helpers de data ──────────────────────────────────────────
+// ── Helpers de data ──────────────────────────
 
 // Último dia do mês `month` (1-12) no ano `year`, como 'YYYY-MM-DD'.
 function lastDayOfMonthStr(year, month) {
@@ -157,7 +157,7 @@ function parseDateParts(value) {
   return { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]), iso: s };
 }
 
-// ── F2 — proporcional por mês restante ────────────────────────────────
+// ── F2 — proporcional por mês restante ──────────────────────────
 // Decisão fechada com o Caio: dojô que se filia durante o ano paga
 // anuidade = taxa_anual ÷ 12 × meses_restantes_até_dezembro, com o MÊS DE
 // INGRESSO CONTANDO CHEIO. remainingMonths = 13 - mês (jan=1 -> 12 meses
@@ -205,7 +205,7 @@ function distributeAmountAcrossInstallments(totalAmount, count) {
   return amounts.map((c) => round2(c / 100));
 }
 
-// ── Fee vigente ──────────────────────────────────────────────
+// ── Fee vigente ────────────────────────────────
 // feeType: 'dojo' | 'cpf'. plan: 'anual'|'semestral'|'trimestral'|null.
 async function getVigentFee(client, federationId, feeType, plan) {
   const runner = client || db;
@@ -222,7 +222,7 @@ async function getVigentFee(client, federationId, feeType, plan) {
   return rows[0] || null;
 }
 
-// ── Monta as datas/valores das parcelas de um plano ─────────
+// ── Monta as datas/valores das parcelas de um plano ─────
 // fee: { amount, due_months } (amount = valor POR parcela, já vem assim da
 // tabela de fees — ex: semestral tem amount=280, devido 2x).
 // seasonYear: ano da temporada (ex: 2026).
@@ -386,7 +386,7 @@ function buildProportionalPlanSpecs({ plan, feeAmount, dueMonths, seasonYear, af
   return { specs, dueDateAdjusted, proportionalTotal, fullTotal, remainingMonths };
 }
 
-// ── F2 — parcela de ADESÃO (kind='filiacao') ─────────────────────────────
+// ── F2 — parcela de ADESÃO (kind='filiacao') ────────────────────────
 // Pura (sem DB) — quem chama já resolveu `alreadyHasAdhesionInstallment`
 // via query (guarda de unicidade, ver comentário na rota /charge: nunca
 // duas parcelas 'filiacao' abertas para o mesmo dojô — reativar um dojô
@@ -626,7 +626,7 @@ function categoryForKind(kind) {
   return kind === 'cpf' ? 'annuity_cpf' : 'annuity_dojo';
 }
 
-// ── dojo_status (filtro de ativo/inativo do DOJÔ) ──────────────────────
+// ── dojo_status (filtro de ativo/inativo do DOJÔ) ──────────────────
 // Decisão de produto (Caio, 21/07/2026): "nao temos acao, nao podemos
 // cobrar e controlar os inativos. Logo, precisamos sempre ter essa visao
 // segmentada [...] o mesmo para indicadores e numeros absolutos, sempre
@@ -655,6 +655,41 @@ function parseDojoStatus(raw) {
 function dojoStatusToIsActiveValues(dojoStatus) {
   if (dojoStatus === 'all') return null;
   if (dojoStatus === 'inactive') return [false];
+  return [true]; // 'active' (default)
+}
+
+// ── member_status (filtro de ativo/inativo do PRATICANTE) ────────────
+// Irmão de dojo_status acima, mesma lógica, mesmo shape de retorno — mas
+// sobre `customers.is_active` (praticante), NÃO `companies.is_active`
+// (dojô). Compartilhado entre GET /annuities/cpf (karateAnnuities.js) e
+// GET /annuities/summary (karateAnnuitySummary.js) pra lista e KPIs do
+// segmento `praticante` nunca divergirem no critério de ativo/inativo —
+// mesmo motivo/mesmo bug histórico documentado em dojo_status acima.
+//
+// IMPORTANTE: a trava de faixa-preta (`cb.belt_level = 'preta'`) NUNCA é
+// afrouxada por este filtro — member_status só relaxa/restringe
+// `customers.is_active`, a elegibilidade de faixa continua obrigatória em
+// TODOS os valores (active|inactive|all).
+//
+// Valores aceitos: 'active' (default) | 'inactive' | 'all'.
+const MEMBER_STATUS_VALUES = ['active', 'inactive', 'all'];
+
+// Faz o parse do query param `member_status`. Retorna null se o valor
+// informado for invalido (caller decide como reportar -- normalmente 400/422).
+// String vazia/ausente => default 'active'.
+function parseMemberStatus(raw) {
+  const v = (raw !== undefined && raw !== null && String(raw).trim() !== '')
+    ? String(raw).trim()
+    : 'active';
+  return MEMBER_STATUS_VALUES.includes(v) ? v : null;
+}
+
+// Converte o valor ja parseado de member_status no array usado no SQL
+// (`COALESCE(cu.is_active, true) = ANY($N::boolean[])`, ou NULL pra "sem
+// filtro" = 'all').
+function memberStatusToIsActiveValues(memberStatus) {
+  if (memberStatus === 'all') return null;
+  if (memberStatus === 'inactive') return [false];
   return [true]; // 'active' (default)
 }
 
@@ -692,4 +727,7 @@ module.exports = {
   DOJO_STATUS_VALUES,
   parseDojoStatus,
   dojoStatusToIsActiveValues,
+  MEMBER_STATUS_VALUES,
+  parseMemberStatus,
+  memberStatusToIsActiveValues,
 };
