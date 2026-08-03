@@ -1,22 +1,29 @@
 // ============================================================
 // AURA DOJÔ — F4: Rotas de turmas, matrículas, presença + check-in QR
+// F9: QR Único do dojô (GET /dojo/qr) + janela de tolerância no checkin.
 //
 // Montado sob /federation/:id (padrão karateDojoStudents/karateDojoBilling).
 // Guard: requireDojoAccess (Canal A = conta do dojô; Canal B = portal do
 // responsável). REGRA DE CANAL: GET aceita A e B; POST/PATCH/PUT/DELETE
 // exigem Canal A — o portal (B) é somente leitura (403 PORTAL_READ_ONLY).
 // EXCEÇÃO semântica: POST /dojo/classes/checkin é Canal A (é o DOJÔ
-// escaneando o QR do aluno, não o portal).
+// escaneando o QR — pessoal do aluno ou o único do dojô, F9 — não o
+// portal). GET /dojo/qr TAMBÉM é Canal A: imprimir o cartaz único é
+// ação do dojô, não do portal do responsável.
 //
 // Escopo SEMPRE por req.dojoId do guard — nunca do body/query. Defensivo
 // 42P01 (migration 246 pendente): GETs de lista devolvem vazio/default +
-// schema_pending; writes devolvem 503 SCHEMA_PENDING.
+// schema_pending; writes devolvem 503 SCHEMA_PENDING. F9: defensivo
+// também a 23514 (check_violation) em karate_dojo_attendance_method_check
+// — acontece se o check-in pelo QR único ('qr_dojo') for usado ANTES da
+// migration 268 (que amplia o CHECK) ser aplicada.
 //
-// ORDEM: rotas LITERais (/settings, /checkin) ANTES das paramétricas
+// ORDEM: rotas LITERais (/settings, /checkin, /qr) ANTES das paramétricas
 // (/:cid) — convenção do repo (o Express casa na ordem de registro).
 //
 //   GET/PUT  /federation/:id/dojo/classes/settings                (toggle QR)
 //   POST     /federation/:id/dojo/classes/checkin                 (QR — Canal A)
+//   GET      /federation/:id/dojo/qr                              (F9 — QR único do dojô, Canal A)
 //   GET/POST /federation/:id/dojo/classes
 //   PATCH/DELETE /federation/:id/dojo/classes/:cid                (DELETE c/ presença → 409 HAS_HISTORY)
 //   GET      /federation/:id/dojo/classes/:cid/students
@@ -24,7 +31,7 @@
 //   DELETE   /federation/:id/dojo/classes/:cid/enroll/:studentId  (presenças ficam)
 //   GET/PUT  /federation/:id/dojo/classes/:cid/attendance         (?date=YYYY-MM-DD / upsert em lote)
 //   GET      /federation/:id/dojo/students/:sid/attendance-summary
-//   GET      /federation/:id/dojo/students/:sid/qr                (token stateless)
+//   GET      /federation/:id/dojo/students/:sid/qr                (token stateless, F4 — QR pessoal)
 // ============================================================
 'use strict';
 
@@ -46,10 +53,21 @@ function requireChannelA(req, res, next) {
 
 function handleWriteError(res, e, ctx) {
   if (e && e.status) {
-    return res.status(e.status).json({ error: e.message, code: e.code || 'ERROR' });
+    const body = { error: e.message, code: e.code || 'ERROR' };
+    // F9: 409 AMBIGUOUS_CLASS carrega as turmas candidatas — o front
+    // pergunta ao aluno/operador qual delas, nunca escolhe sozinho.
+    if (e.candidates) body.candidates = e.candidates;
+    return res.status(e.status).json(body);
   }
   if (e && e.code === '42P01') {
     return res.status(503).json({ error: 'Turmas do dojô ainda não disponíveis (migration 246 pendente)', code: 'SCHEMA_PENDING' });
+  }
+  // F9: check-in pelo QR único grava method='qr_dojo'; se a migration 268
+  // (que amplia o CHECK de attendance.method) ainda não foi aplicada, o
+  // INSERT viola a constraint — devolve SCHEMA_PENDING em vez de vazar
+  // erro de banco (mesmo racional do 42P01 acima).
+  if (e && e.code === '23514' && /karate_dojo_attendance_method_check/.test(String(e.constraint || e.message || ''))) {
+    return res.status(503).json({ error: 'Check-in pelo QR único do dojô ainda não disponível (migration 268 pendente)', code: 'SCHEMA_PENDING' });
   }
   console.error(`[karateDojoClasses] ${ctx}:`, e.message);
   return res.status(500).json({ error: 'Erro interno' });
@@ -77,6 +95,8 @@ router.put('/dojo/classes/settings', requireDojoAccess, requireChannelA, async (
 });
 
 // ── Check-in por QR (Canal A — o dojô escaneando; literal ANTES de /:cid) ──
+// Aceita os DOIS formatos de token (mesma assinatura): QR pessoal do
+// aluno (F4) e QR único do dojô (F9, exige body.student_id).
 router.post('/dojo/classes/checkin', requireDojoAccess, requireChannelA, async (req, res) => {
   try {
     const result = await svc.checkin(req.dojoId, req.body || {});
@@ -84,6 +104,14 @@ router.post('/dojo/classes/checkin', requireDojoAccess, requireChannelA, async (
   } catch (e) {
     return handleWriteError(res, e, 'checkin');
   }
+});
+
+// ── F9: QR ÚNICO do dojô (literal — ANTES de /:cid) ──
+// Stateless (não toca o banco) — sempre o MESMO token pro mesmo dojô, o
+// sensei imprime o cartaz uma vez. Canal A: gerar/reimprimir o cartaz único
+// é ação do dojô, o portal do responsável não precisa disso.
+router.get('/dojo/qr', requireDojoAccess, requireChannelA, (req, res) => {
+  return res.json(svc.getDojoQrToken(req.dojoId));
 });
 
 // ── Turmas ──
