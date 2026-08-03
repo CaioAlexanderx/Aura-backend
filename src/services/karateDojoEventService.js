@@ -9,14 +9,14 @@
 // migrations 264/265) e não é tocado aqui — ele tem regra de negócio própria
 // (teto do sensei, ligação com karate_belt_history, cascata de certificado)
 // que não se aplica a curso/seminário. Este service cobre só o modelo NOVO
-// (karate_dojo_events / karate_dojo_event_enrollments, migration 268) e
+// (karate_dojo_events / karate_dojo_event_enrollments, migration 269) e
 // FAZ A PONTE com o exame de kyu numa única função: listEventsHub. A UNION
 // mora aqui, em JS — não no banco.
 //
 // Campeonato do dojô é fase separada e NÃO entra neste arquivo. O
 // discriminador `source` da listagem unificada existe justamente para uma
 // terceira fonte poder entrar depois sem quebrar o contrato dos dois
-// primeiros (ver cabeçalho da migration 268).
+// primeiros (ver cabeçalho da migration 269).
 //
 // ── ESCOPO SEMPRE PELO dojo_id DO TOKEN ─────────────────────
 // Toda query é escopada por dojo_id vindo de req.dojoId (nunca do corpo/
