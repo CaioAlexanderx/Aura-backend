@@ -54,6 +54,7 @@ const { validateRuntimeEnv } = require('../config/env');
 const { requireAuth } = require('../middleware/auth');
 const { logAuditAction } = require('../middleware/auditLog');
 const { sendSelfServeSignupNotification } = require('../services/mailer');
+const { issueVerification } = require('./verification');
 const { resolveKarateContext } = require('../config/karateRoles');
 const { getExtraSeatsForCompany } = require('../services/extraSeats');
 
@@ -282,6 +283,15 @@ router.post('/register', async (req, res) => {
       }).catch((e) => console.error('[register] self-serve notify email falhou:', e.message));
     }
 
+    // Task Sign Up 03/08: dispara o e-mail de verificacao JA no cadastro
+    // (best-effort — nao bloqueia a resposta). A tela de espera do app
+    // reaproveita este envio pela janela de idempotencia de 60s do
+    // issueVerification, entao nao ha e-mail duplicado.
+    if (!user.email_verified && !isStaff) {
+      issueVerification(user.id, user.email, user.name)
+        .catch((e) => console.error('[register] verification email falhou:', e.message));
+    }
+
     // Track G: contexto karate da company recem-resolvida (member_role local).
     const karateCtx = resolveKarateContext(company ? { ...company, member_role: memberRole } : null);
     const tokenPayload = {
@@ -327,7 +337,16 @@ router.post('/register', async (req, res) => {
       joined_existing: company ? !isNewCompany : false,
       no_company: skipCompany,
     });
-  } catch (err) { await client.query('ROLLBACK'); console.error('register error:', err); res.status(500).json({ error: 'Erro ao criar conta' }); }
+  } catch (err) {
+    await client.query('ROLLBACK');
+    // Corrida SELECT-then-INSERT (duplo submit / retry de rede): a unique
+    // constraint de users.email vira 409 honesto em vez de 500 generico.
+    if (err.code === '23505' && /users.*email|email.*users/i.test(err.constraint || err.detail || '')) {
+      return res.status(409).json({ error: 'E-mail ja cadastrado' });
+    }
+    console.error('register error:', err);
+    res.status(500).json({ error: 'Erro ao criar conta' });
+  }
   finally { client.release(); }
 });
 

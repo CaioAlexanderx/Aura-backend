@@ -110,10 +110,17 @@ app.use(cookieParser());
 app.use(sentryContext);
 
 // ── Rate limiting ───────────────────────────────────
+// Task Sign Up 03/08: os limites por IP eram estourados por clientes
+// legitimos atras de CGNAT (IP compartilhado por operadora, muito comum
+// no Brasil) — verificado empiricamente que o dominio railway.app NAO
+// passa pelo Cloudflare (sem cf-ray; server: railway-hikari), entao
+// `trust proxy 1` esta correto e o problema era so o tamanho do balde.
+// authLimiter 10→20 e globalLimiter 300→600. Se um dia a API for
+// servida atras do Cloudflare (dominio proprio), revisar trust proxy.
 
 const authLimiter = rateLimit({
   windowMs:  15 * 60 * 1000,
-  max:       10,
+  max:       20,
   message:   { error: 'Muitas tentativas. Tente novamente em 15 minutos.' },
   standardHeaders: true,
   legacyHeaders:   false,
@@ -131,7 +138,7 @@ const cnpjLimiter = rateLimit({
 
 const globalLimiter = rateLimit({
   windowMs:  60 * 1000,
-  max:       300,
+  max:       600,
   message:   { error: 'Muitas requisicoes. Tente novamente em 1 minuto.' },
   standardHeaders: true,
   legacyHeaders:   false,

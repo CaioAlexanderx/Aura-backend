@@ -94,9 +94,18 @@ async function sendMail(opts) {
   return sendViaDev(opts);
 }
 
-// -- Template: verificacao de email via LINK --
-async function sendVerificationLinkEmail(to, confirmUrl, userName) {
+// -- Template: verificacao de email via LINK (+ codigo OTP opcional) --
+// Task Sign Up 03/08: quando otpCode vem preenchido, o e-mail traz tambem
+// o codigo de 6 digitos digitavel no app — caminho paralelo ao link.
+async function sendVerificationLinkEmail(to, confirmUrl, userName, otpCode) {
   const firstName = userName ? userName.split(' ')[0] : '';
+  const otpBlock = otpCode ? `
+    <p style="font-size:12px;color:#64748b;text-align:center;margin:26px 0 8px;">ou digite este c&oacute;digo na tela de confirma&ccedil;&atilde;o:</p>
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center" style="background:#1e1b4b;border:2px solid #7c3aed;border-radius:14px;padding:16px;">
+        <span style="font-size:30px;font-weight:800;letter-spacing:8px;color:#c4b5fd;font-family:'Courier New',monospace;">${otpCode}</span>
+      </td></tr>
+    </table>` : '';
   const html = emailLayout(`
     <p style="font-size:15px;color:#e2e8f0;margin:0 0 6px;">Ol&aacute;${firstName ? ', ' + firstName : ''}!</p>
     <p style="font-size:13px;color:#94a3b8;line-height:22px;margin:0 0 28px;">Confirme seu e-mail clicando no bot&atilde;o abaixo para ativar sua conta na Aura:</p>
@@ -104,15 +113,15 @@ async function sendVerificationLinkEmail(to, confirmUrl, userName) {
       <tr><td align="center">
         <a href="${confirmUrl}" style="display:inline-block;background:#7c3aed;color:#fff;font-size:16px;font-weight:700;padding:16px 40px;border-radius:12px;text-decoration:none;">Confirmar meu e-mail</a>
       </td></tr>
-    </table>
+    </table>${otpBlock}
     <p style="font-size:11px;color:#64748b;text-align:center;margin:24px 0 6px;">Ou copie este link:</p>
     <p style="font-size:10px;color:#7c3aed;text-align:center;word-break:break-all;margin:0 0 24px;background:#1e1b4b;padding:10px 14px;border-radius:8px;">${confirmUrl}</p>
-    <p style="font-size:11px;color:#64748b;margin:0;">Link v&aacute;lido por <strong style="color:#94a3b8;">1 hora</strong>. Se voc&ecirc; n&atilde;o criou uma conta, ignore este e-mail.</p>
+    <p style="font-size:11px;color:#64748b;margin:0;">Link e c&oacute;digo v&aacute;lidos por <strong style="color:#94a3b8;">1 hora</strong>. Se voc&ecirc; n&atilde;o criou uma conta, ignore este e-mail.</p>
   `);
   return sendMail({
     to,
     subject: 'Confirme seu e-mail - Aura.',
-    text: `Ola${firstName ? ' ' + firstName : ''}! Confirme seu e-mail: ${confirmUrl} (valido por 1 hora).`,
+    text: `Ola${firstName ? ' ' + firstName : ''}! Confirme seu e-mail: ${confirmUrl}${otpCode ? ` — ou use o codigo ${otpCode} na tela de confirmacao` : ''} (validos por 1 hora).`,
     html,
   });
 }
