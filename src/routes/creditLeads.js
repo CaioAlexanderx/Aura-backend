@@ -215,8 +215,8 @@ router.get('/leads', async (req, res) => {
           countParams
         );
         counts = {
-          pending: parseInt((cnt[0] && cnt[0].pending) || '0', 10),
-          contacted: parseInt((cnt[0] && cnt[0].contacted) || '0', 10),
+          pending: parseInt(cnt[0] && cnt[0].pending || '0', 10),
+          contacted: parseInt(cnt[0] && cnt[0].contacted || '0', 10),
         };
       } catch (e) {
         if (e.code !== '42P01' && e.code !== '42703') throw e;
@@ -349,6 +349,214 @@ router.get('/leads', async (req, res) => {
     if (err.status === 404) return res.status(404).json({ error: err.message });
     console.error('[credit] leads error:', err.message);
     res.status(500).json({ error: 'Erro ao listar leads de crediario' });
+  }
+});
+
+// ============================================================
+// FASE 3 -- cupom + registro de contato
+//
+// Ficam neste mesmo arquivo (e nao num creditLeadsActions.js) porque o
+// mount `/credit -> creditLeads` ja cobre /leads/*: um arquivo novo
+// exigiria mexer no private.js sem ganho nenhum de organizacao.
+// ============================================================
+
+// Mesma politica do birthday.js: cupom e dinheiro, entao criacao e
+// owner/admin. O LOG de contato nao exige -- vendedora que fala com o
+// cliente precisa conseguir registrar.
+function requireOwnerOrAdmin(req, res, next) {
+  if (req.companyRole !== 'owner' && req.companyRole !== 'admin') {
+    return res.status(403).json({
+      error: 'Apenas owner ou admin podem criar cupons',
+      your_role: req.companyRole,
+    });
+  }
+  next();
+}
+
+const COUPON_DEFAULTS = {
+  discount_type:   'percent',
+  discount_value:  10,
+  validity_days:   15,   // maior que o de aniversario (7): aqui a janela
+                         // de decisao do cliente e mais longa, nao ha data
+  min_order_value: 0,
+  max_uses:        1,
+};
+
+// VOLTA-<PRIMEIRONOME>-<YY>. Mesmo formato do ANIV- do aniversario, pra
+// o lojista reconhecer a origem do cupom so de bater o olho no relatorio.
+function generateLeadCode(customerName, attempt = 0) {
+  const raw = String(customerName || 'CLIENTE')
+    .trim()
+    .split(/\s+/)[0]
+    .normalize('NFD')
+    // Sem o replace de combining marks que o birthday.js tem: depois do
+    // NFD o acento vira caractere proprio, e o filtro [^A-Za-z0-9] abaixo
+    // ja o remove. Conferido com Jose/Angela/Marcia/ção -- mesmo
+    // resultado. Um regex a menos, e um cheio de caractere invisivel.
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase()
+    .slice(0, 12);
+  const first = raw || 'CLIENTE';
+  const yy = String(new Date().getFullYear()).slice(-2);
+  const suffix = attempt > 0 ? `-${attempt + 1}` : '';
+  return `VOLTA-${first}-${yy}${suffix}`;
+}
+
+// Carrega o cliente e CONFIRMA que ele e mesmo um lead (zerado, com
+// historico). Sem isso daria pra carimbar source='credit_lead' em cupom
+// de qualquer cliente, e a metrica de "cupom de lead que virou venda"
+// nasceria suja.
+//
+// Tambem barra opt-out AQUI, no servidor. Hoje o marketing_opt_out so e
+// respeitado na UI do aniversario; numa feature explicitamente de
+// prospeccao isso nao basta.
+async function loadLead(companyId, customerId) {
+  const { rows } = await db.query(
+    `SELECT c.id, c.name, c.phone, c.marketing_opt_out,
+            cb.balance, cb.total_debited
+       FROM customers c
+       LEFT JOIN customer_credit_balances cb
+              ON cb.customer_id = c.id AND cb.company_id = c.company_id
+      WHERE c.id = $1 AND c.company_id = $2 AND c.is_active = true`,
+    [customerId, companyId]
+  );
+  if (!rows.length) { const e = new Error('Cliente nao encontrado'); e.status = 404; throw e; }
+  const r = rows[0];
+
+  if (r.marketing_opt_out === true) {
+    const e = new Error('Cliente optou por nao receber comunicacoes de marketing');
+    e.status = 403; e.code = 'MARKETING_OPT_OUT'; throw e;
+  }
+
+  const balance = parseFloat(r.balance);
+  const totalDebited = parseFloat(r.total_debited);
+  if (!(totalDebited > 0)) {
+    const e = new Error('Cliente nunca comprou no crediario');
+    e.status = 409; e.code = 'NOT_A_LEAD'; throw e;
+  }
+  if (!(balance <= ZERO)) {
+    const e = new Error('Cliente tem saldo em aberto no crediario');
+    e.status = 409; e.code = 'HAS_OPEN_BALANCE'; throw e;
+  }
+  return { ...r, balance, total_debited: totalDebited };
+}
+
+// ── POST /leads/:customerId/coupon ─────────────────────────
+// Body: { code?, description?, discount_type?, discount_value?,
+//         validity_days?, min_order_value?, max_uses? }
+router.post('/leads/:customerId/coupon', requireOwnerOrAdmin, async (req, res) => {
+  const companyId = req.params.id;
+  try {
+    await assertCrediarioEnabled(companyId);
+    const lead = await loadLead(companyId, req.params.customerId);
+
+    const discount_type   = req.body.discount_type || COUPON_DEFAULTS.discount_type;
+    const discount_value  = parseFloat(req.body.discount_value ?? COUPON_DEFAULTS.discount_value);
+    const min_order_value = parseFloat(req.body.min_order_value ?? COUPON_DEFAULTS.min_order_value);
+    const max_uses        = req.body.max_uses ?? COUPON_DEFAULTS.max_uses;
+    const validity_days   = parseInt(req.body.validity_days ?? COUPON_DEFAULTS.validity_days, 10);
+    const description     = req.body.description || `Credito livre - ${lead.name}`;
+
+    if (isNaN(discount_value) || discount_value <= 0) {
+      return res.status(400).json({ error: 'discount_value invalido' });
+    }
+    if (!['percent', 'fixed'].includes(discount_type)) {
+      return res.status(400).json({ error: 'discount_type invalido' });
+    }
+    if (isNaN(validity_days) || validity_days <= 0 || validity_days > 365) {
+      return res.status(400).json({ error: 'validity_days deve estar entre 1 e 365' });
+    }
+
+    const expires = new Date();
+    expires.setDate(expires.getDate() + validity_days);
+    expires.setHours(23, 59, 59, 999);
+
+    let code = req.body.code
+      ? String(req.body.code).toUpperCase().trim()
+      : generateLeadCode(lead.name);
+
+    let attempt = 0;
+    while (attempt < 5) {
+      const { rows: existing } = await db.query(
+        `SELECT 1 FROM coupons WHERE company_id = $1 AND code = $2`,
+        [companyId, code]
+      );
+      if (!existing.length) break;
+      attempt++;
+      code = generateLeadCode(lead.name, attempt);
+    }
+
+    const { rows } = await db.query(
+      `INSERT INTO coupons (company_id, code, description, discount_type, discount_value,
+                            min_order_value, max_uses, expires_at, customer_id, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'credit_lead')
+       RETURNING *`,
+      [companyId, code, description, discount_type, discount_value,
+       min_order_value, max_uses, expires.toISOString(), lead.id]
+    );
+
+    res.status(201).json({
+      coupon: rows[0],
+      customer: { id: lead.id, name: lead.name, phone: lead.phone },
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Nao foi possivel gerar codigo unico -- informe um manualmente' });
+    }
+    if (err.code === '23514') {
+      // CHECK de coupons.source sem 'credit_lead' = migration 267 nao aplicada
+      return res.status(503).json({ error: 'Migration pendente no banco (coupons.source)', code: 'MIGRATION_PENDING' });
+    }
+    console.error('[credit] lead coupon:', err.message);
+    res.status(500).json({ error: 'Erro ao criar cupom do lead' });
+  }
+});
+
+// ── POST /leads/:customerId/contact ────────────────────────
+// Body: { coupon_id?, method='wa_link', message? }
+//
+// Idempotente por DIA (uq_credit_lead_contact_per_day): duplo-clique nao
+// duplica, mas o lojista pode recontatar amanha e num segundo carne.
+// Grava snapshot do saldo pra medir depois sem reconstruir o passado --
+// o saldo do cliente muda assim que ele recompra.
+router.post('/leads/:customerId/contact', async (req, res) => {
+  const companyId = req.params.id;
+  const { coupon_id, method = 'wa_link', message } = req.body || {};
+
+  if (!['wa_link', 'wa_api', 'sms', 'email'].includes(method)) {
+    return res.status(400).json({ error: 'method invalido' });
+  }
+
+  try {
+    await assertCrediarioEnabled(companyId);
+    // Revalida opt-out no registro tambem: o log e a prova de que houve
+    // contato, entao nao pode existir pra quem pediu pra nao ser contatado.
+    const lead = await loadLead(companyId, req.params.customerId);
+
+    const { rows } = await db.query(
+      `INSERT INTO credit_lead_contacts
+         (company_id, customer_id, coupon_id, method, user_id, message,
+          balance_at_contact, total_debited_at_contact)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (company_id, customer_id, contact_day)
+       DO UPDATE SET
+         coupon_id = COALESCE(EXCLUDED.coupon_id, credit_lead_contacts.coupon_id),
+         method    = EXCLUDED.method,
+         message   = COALESCE(EXCLUDED.message, credit_lead_contacts.message),
+         sent_at   = NOW()
+       RETURNING *`,
+      [companyId, lead.id, coupon_id || null, method,
+       req.user?.id || null, message || null, lead.balance, lead.total_debited]
+    );
+    res.status(201).json({ contact: rows[0] });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.code });
+    if (err.code === '42P01') {
+      return res.status(503).json({ error: 'Migration pendente no banco (credit_lead_contacts)', code: 'MIGRATION_PENDING' });
+    }
+    console.error('[credit] lead contact:', err.message);
+    res.status(500).json({ error: 'Erro ao registrar contato' });
   }
 });
 
