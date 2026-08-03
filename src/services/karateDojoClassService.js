@@ -1,5 +1,6 @@
 // ============================================================
 // AURA DOJÔ — F4: Service de turmas, matrículas e presença
+// F9 (QR único do dojô): ver bloco "QR do dojô + check-in" no fim.
 //
 // DECISÃO CENTRAL: o dojô organiza os alunos (karate_dojo_students, F2) em
 // TURMAS com grade semanal (weekdays 0=domingo..6=sábado + horário). A
@@ -12,8 +13,25 @@
 // numa data). CHECK-IN POR QR é OPCIONAL, ligado por TOGGLE por dojô
 // (karate_dojo_class_settings.qr_checkin_enabled, default OFF — nem toda
 // academia exige). O token do QR é STATELESS: base64url(payload)+'.'+HMAC-
-// SHA256, payload = student_id + dojo_id, SEM expiração — é credencial de
-// PRESENÇA (não de acesso). Verificação por comparação em tempo constante.
+// SHA256, SEM expiração — é credencial de PRESENÇA (não de acesso).
+// Verificação por comparação em tempo constante.
+//
+// F9 — DOIS formatos de token, MESMA assinatura/segredo (nenhum dos dois
+// é adivinhável, ambos verificados por verifyQrToken):
+//   • QR PESSOAL do aluno (F4, payload { s: student_id, d: dojo_id }) —
+//     o de sempre. O dojô escaneia o QR do aluno (Canal A); a turma é
+//     resolvida pelo weekday da data + start_time mais próxima da hora
+//     atual quando há 2+ turmas no dia. ESTE CAMINHO NÃO MUDOU (F9
+//     preserva 100% do comportamento validado em QA — nenhuma turma
+//     nunca "some": sempre resolve para a mais próxima, sem janela).
+//   • QR ÚNICO do dojô (F9, payload { d: dojo_id }, SEM 's') — um cartaz
+//     só, impresso uma vez (GET /dojo/qr). Quem bipa esse token PRECISA
+//     informar body.student_id (não há aluno embutido). A turma é
+//     resolvida por JANELA DE TOLERÂNCIA ao redor do horário (ver
+//     CHECKIN_WINDOW_*_MIN abaixo) — nenhuma turma na janela → 409
+//     NO_CLASS_NOW (distinto de NOT_ENROLLED/NO_CLASS_TODAY); mais de
+//     uma → 409 AMBIGUOUS_CLASS com as candidatas (o front pergunta ao
+//     aluno/operador, o serviço NUNCA escolhe por adivinhação).
 //
 // Regra da casa: dado faltante ≠ pendência (present null = não marcado, é
 // neutro). DELETE de turma COM presenças → 409 HAS_HISTORY (preserva a
@@ -39,6 +57,21 @@ const QR_SECRET = process.env.DOJO_QR_TOKEN_SECRET || env.JWT_SECRET;
 const QR_CONTEXT = 'karate-dojo-qr-v1';
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+// ── F9 — janela de tolerância do check-in pelo QR único do dojô ──
+// Escolha EXPLÍCITA (nada de número mágico espalhado pelo código): o
+// aluno pode chegar ADIANTADO (comum — responsável deixa cedo antes de
+// outro compromisso) ou ATRASADO / a aula ainda estar rolando (aulas de
+// karatê costumam durar 60–90min). Se o dojô achar curto/longo demais
+// pra realidade dele, é AQUI que se ajusta — não há outro lugar no
+// código que decide "agora tem aula ou não".
+//   30 min ANTES do horário de início da turma.
+//   60 min DEPOIS do horário de início da turma.
+// Turma SEM start_time cadastrado não tem janela pra violar — conta
+// como sempre "na janela" (mesmo racional do fallback do F4: turma sem
+// horário fica disponível, nunca bloqueia o check-in).
+const CHECKIN_WINDOW_BEFORE_MIN = 30;
+const CHECKIN_WINDOW_AFTER_MIN = 60;
 
 function svcError(status, code, message) {
   const e = new Error(message);
@@ -82,7 +115,15 @@ function timeToMinutes(t) {
   return h * 60 + mi;
 }
 
-// ── Token do QR (stateless, HMAC-SHA256; payload student_id+dojo_id) ──
+// F9 — a turma está "na janela" do instante atual? Sem start_time
+// cadastrado, não há janela pra violar (sempre true — mesmo fallback
+// permissivo do F4 pra turma sem horário).
+function inCheckinWindow(startMin, nowMin) {
+  if (startMin == null) return true;
+  return nowMin >= startMin - CHECKIN_WINDOW_BEFORE_MIN && nowMin <= startMin + CHECKIN_WINDOW_AFTER_MIN;
+}
+
+// ── Token do QR (stateless, HMAC-SHA256) ──
 function b64url(buf) {
   return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
@@ -103,8 +144,18 @@ function signQrToken({ student_id, dojo_id }) {
   return `${payloadB64}.${qrSign(payloadB64)}`;
 }
 
+// F9 — QR ÚNICO do dojô: MESMA assinatura, payload { d: dojo_id } SEM
+// 's' (sem aluno embutido — um cartaz só, impresso uma vez). Quem bipa
+// esse token informa o aluno explicitamente no corpo do check-in.
+function signDojoQrToken({ dojo_id }) {
+  const payload = { d: String(dojo_id) };
+  const payloadB64 = b64url(Buffer.from(JSON.stringify(payload), 'utf8'));
+  return `${payloadB64}.${qrSign(payloadB64)}`;
+}
+
 // Verifica assinatura em tempo constante. Retorna { student_id, dojo_id }
-// ou null (ausente/adulterado/malformado) — nunca lança.
+// (student_id é null quando o token é o QR ÚNICO do dojô — F9) ou null
+// (ausente/adulterado/malformado) — nunca lança.
 function verifyQrToken(token) {
   try {
     const parts = String(token || '').split('.');
@@ -116,8 +167,9 @@ function verifyQrToken(token) {
     const b = Buffer.from(expected);
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
     const payload = JSON.parse(fromB64url(payloadB64).toString('utf8'));
-    if (!payload || !payload.s || !payload.d) return null;
-    return { student_id: String(payload.s), dojo_id: String(payload.d) };
+    // F9: payload sem 's' é válido (QR único do dojô); 'd' é sempre exigido.
+    if (!payload || !payload.d) return null;
+    return { student_id: payload.s ? String(payload.s) : null, dojo_id: String(payload.d) };
   } catch (_) {
     return null;
   }
@@ -503,7 +555,7 @@ async function putSettings(dojoId, body) {
   return { qr_checkin_enabled: rows[0].qr_checkin_enabled === true };
 }
 
-// ── QR do aluno + check-in ──
+// ── QR do aluno (F4) + QR do dojô (F9) ──
 async function getStudentQrToken(dojoId, studentId) {
   const st = await db.query(
     `SELECT id FROM karate_dojo_students WHERE id = $1 AND dojo_id = $2 LIMIT 1`,
@@ -513,8 +565,60 @@ async function getStudentQrToken(dojoId, studentId) {
   return { token: signQrToken({ student_id: studentId, dojo_id: dojoId }) };
 }
 
+// F9 — token ÚNICO do dojô (stateless: não consulta banco, é só a
+// assinatura HMAC do dojo_id do próprio guard). O mesmo token de sempre
+// pro mesmo dojô (não gira sozinho) — impresso uma vez, vale até o dojô
+// pedir um novo cartaz (não há endpoint de "revogar"; troca de segredo
+// global invalidaria todos os QRs, pessoais e único, igualmente).
+function getDojoQrToken(dojoId) {
+  return { token: signDojoQrToken({ dojo_id: dojoId }) };
+}
+
+// Busca as turmas ATIVAS em que o aluno está matriculado e filtra pelo
+// weekday da data. UMA query (mesma posição de sempre); erros distinguem
+// CADASTRO (NOT_ENROLLED: nenhuma matrícula) de AGENDA (NO_CLASS_TODAY:
+// matriculado, mas nada nesse dia da semana). Compartilhada pelos dois
+// formatos de QR — o aluno sem matrícula/sem aula hoje é o MESMO problema
+// independente de qual cartaz foi bipado.
+async function classesEnrolledOnWeekday(dojoId, studentId, weekday) {
+  const { rows } = await db.query(
+    `SELECT c.id, c.name, c.start_time, c.end_time, c.weekdays
+       FROM karate_dojo_classes c
+       JOIN karate_dojo_class_enrollments e ON e.class_id = c.id AND e.student_id = $2
+      WHERE c.dojo_id = $1 AND c.active = true`,
+    [dojoId, studentId]
+  );
+  if (!rows.length) {
+    throw svcError(409, 'NOT_ENROLLED', 'Aluno não está matriculado em nenhuma turma.');
+  }
+  const today = rows.filter((r) => Array.isArray(r.weekdays) && r.weekdays.map(Number).includes(weekday));
+  if (!today.length) {
+    throw svcError(409, 'NO_CLASS_TODAY', 'O aluno não tem turma matriculada para esta data');
+  }
+  return today;
+}
+
+// Turma explícita (class_id no corpo) — usado tanto pelo QR pessoal
+// quanto pelo QR único (ex.: reenvio depois de um 409 AMBIGUOUS_CLASS,
+// já com a turma escolhida). Só checa matrícula — não repete a janela
+// de tolerância (quem mandou o class_id já resolveu a ambiguidade).
+async function resolveExplicitClass(dojoId, studentId, classId) {
+  const c = await db.query(
+    `SELECT id, name FROM karate_dojo_classes WHERE id = $1 AND dojo_id = $2 LIMIT 1`,
+    [classId, dojoId]
+  );
+  if (!c.rows.length) throw svcError(404, 'CLASS_NOT_FOUND', 'Turma não encontrada neste dojô');
+  const en = await db.query(
+    `SELECT 1 FROM karate_dojo_class_enrollments WHERE class_id = $1 AND student_id = $2 LIMIT 1`,
+    [classId, studentId]
+  );
+  if (!en.rows.length) throw svcError(409, 'NOT_ENROLLED', 'Aluno não está matriculado nesta turma');
+  return c.rows[0];
+}
+
 // Resolve o aluno do token, valida o dojô e o toggle, escolhe a turma e
-// marca present=true method='qr'. Idempotente (repetir → already_checked).
+// marca present=true method='qr'|'qr_dojo'. Idempotente (repetir →
+// already_checked).
 async function checkin(dojoId, body) {
   const b = body || {};
 
@@ -530,9 +634,23 @@ async function checkin(dojoId, body) {
     throw svcError(409, 'QR_DESABILITADO', 'O check-in por QR está desativado neste dojô');
   }
 
+  // F9 — payload.student_id ausente = QR ÚNICO do dojô: quem bipa precisa
+  // informar o aluno explicitamente (não há aluno embutido no token).
+  const isDojoQr = !payload.student_id;
+  let studentId;
+  if (isDojoQr) {
+    studentId = b.student_id != null ? String(b.student_id).trim() : '';
+    if (!studentId) {
+      throw svcError(422, 'STUDENT_ID_REQUIRED', 'Informe o aluno para o check-in pelo QR único do dojô.');
+    }
+  } else {
+    studentId = payload.student_id;
+  }
+  const method = isDojoQr ? 'qr_dojo' : 'qr';
+
   const st = await db.query(
     `SELECT id, full_name, belt_label FROM karate_dojo_students WHERE id = $1 AND dojo_id = $2 LIMIT 1`,
-    [payload.student_id, dojoId]
+    [studentId, dojoId]
   );
   if (!st.rows.length) throw svcError(404, 'NOT_FOUND', 'Aluno do QR não encontrado neste dojô');
   const student = st.rows[0];
@@ -542,60 +660,59 @@ async function checkin(dojoId, body) {
 
   let klass;
   const explicitClass = b.class_id != null && String(b.class_id).trim() !== '' ? String(b.class_id).trim() : null;
+
   if (explicitClass) {
-    const c = await db.query(
-      `SELECT id, name FROM karate_dojo_classes WHERE id = $1 AND dojo_id = $2 LIMIT 1`,
-      [explicitClass, dojoId]
-    );
-    if (!c.rows.length) throw svcError(404, 'CLASS_NOT_FOUND', 'Turma não encontrada neste dojô');
-    const en = await db.query(
-      `SELECT 1 FROM karate_dojo_class_enrollments WHERE class_id = $1 AND student_id = $2 LIMIT 1`,
-      [explicitClass, student.id]
-    );
-    if (!en.rows.length) throw svcError(409, 'NOT_ENROLLED', 'Aluno não está matriculado nesta turma');
-    klass = c.rows[0];
-  } else {
-    // Sem class_id: turma do DIA (weekday da data) em que o aluno está
-    // matriculado. Se houver 2+, a com start_time mais próxima da hora atual
-    // (BRT); turma sem horário fica por último.
-    //
-    // ⚠️ QA 27/07/2026 — MENSAGEM ENGANOSA: aluno SEM NENHUMA matrícula
-    // recebia "não tem turma matriculada para esta data" (NO_CLASS_TODAY) e
-    // o sensei ia caçar problema na AGENDA quando o problema era o
-    // CADASTRO. Agora a MESMA query traz todas as matrículas do aluno em
-    // turmas ATIVAS e o filtro do dia é feito em JS — continua sendo UMA
-    // query, na posição de sempre (nada entra na frente de nada):
-    //   nenhuma matrícula ativa           → 409 NOT_ENROLLED (é cadastro)
-    //   matriculado, mas nada hoje        → 409 NO_CLASS_TODAY (é agenda)
+    // Mesmo caminho pros dois formatos de QR — turma já escolhida (pelo
+    // operador ou em resposta a um 409 AMBIGUOUS_CLASS anterior).
+    klass = await resolveExplicitClass(dojoId, student.id, explicitClass);
+  } else if (isDojoQr) {
+    // F9 — QR único: resolve por JANELA DE TOLERANCIA (ver
+    // CHECKIN_WINDOW_*_MIN no topo do arquivo). Nenhuma turma na janela →
+    // erro distinto de "não matriculado"/"sem aula hoje". Mais de uma →
+    // devolve as candidatas; o serviço NUNCA escolhe por adivinhação.
     const weekday = weekdayOf(date);
-    const enrolled = await db.query(
-      `SELECT c.id, c.name, c.start_time, c.weekdays
-         FROM karate_dojo_classes c
-         JOIN karate_dojo_class_enrollments e ON e.class_id = c.id AND e.student_id = $2
-        WHERE c.dojo_id = $1 AND c.active = true`,
-      [dojoId, student.id]
-    );
-    if (!enrolled.rows.length) {
-      throw svcError(409, 'NOT_ENROLLED', 'Aluno não está matriculado em nenhuma turma.');
+    const today = await classesEnrolledOnWeekday(dojoId, student.id, weekday);
+    const nowMin = brtNow().minutes;
+    const inWindow = today.filter((r) => inCheckinWindow(timeToMinutes(r.start_time), nowMin));
+
+    if (!inWindow.length) {
+      throw svcError(
+        409,
+        'NO_CLASS_NOW',
+        `Não há aula agora (tolerância: ${CHECKIN_WINDOW_BEFORE_MIN} min antes e ${CHECKIN_WINDOW_AFTER_MIN} min depois do horário da turma).`
+      );
     }
-    const cand = enrolled.rows.filter(
-      (r) => Array.isArray(r.weekdays) && r.weekdays.map(Number).includes(weekday)
-    );
-    if (!cand.length) {
-      throw svcError(409, 'NO_CLASS_TODAY', 'O aluno não tem turma matriculada para esta data');
+    if (inWindow.length > 1) {
+      const err = svcError(409, 'AMBIGUOUS_CLASS', 'Mais de uma turma possível agora — escolha qual.');
+      err.candidates = inWindow.map((r) => ({
+        id: r.id,
+        name: r.name,
+        start_time: r.start_time || null,
+        end_time: r.end_time || null,
+      }));
+      throw err;
     }
-    if (cand.length === 1) {
-      klass = cand[0];
+    klass = inWindow[0];
+  } else {
+    // QR PESSOAL do aluno (F4) — comportamento ORIGINAL preservado byte a
+    // byte: turma do dia (weekday da data) em que o aluno está
+    // matriculado; 2+ turmas no dia = a de start_time mais próxima da
+    // hora atual (BRT); turma sem horário fica por último. SEM janela —
+    // este caminho já foi validado em QA e não muda no F9.
+    const weekday = weekdayOf(date);
+    const today = await classesEnrolledOnWeekday(dojoId, student.id, weekday);
+    if (today.length === 1) {
+      klass = today[0];
     } else {
       const nowMin = brtNow().minutes;
       let best = null;
       let bestDist = Infinity;
-      for (const r of cand) {
+      for (const r of today) {
         const tm = timeToMinutes(r.start_time);
         const dist = tm == null ? Infinity : Math.abs(tm - nowMin);
         if (dist < bestDist) { bestDist = dist; best = r; }
       }
-      klass = best || cand[0];
+      klass = best || today[0];
     }
   }
 
@@ -609,10 +726,10 @@ async function checkin(dojoId, body) {
 
   await db.query(
     `INSERT INTO karate_dojo_attendance (dojo_id, class_id, student_id, date, present, method)
-     VALUES ($1, $2, $3, $4::date, true, 'qr')
+     VALUES ($1, $2, $3, $4::date, true, $5)
      ON CONFLICT (class_id, student_id, date)
-     DO UPDATE SET present = true, method = 'qr'`,
-    [dojoId, klass.id, student.id, date]
+     DO UPDATE SET present = true, method = $5`,
+    [dojoId, klass.id, student.id, date, method]
   );
 
   return {
@@ -626,7 +743,12 @@ async function checkin(dojoId, body) {
 module.exports = {
   // token (exportado p/ o front/testes gerarem/validarem)
   signQrToken,
+  signDojoQrToken,
   verifyQrToken,
+  // F9 — janela de tolerância (exportada pra testes não hardcodarem o
+  // valor separadamente da fonte de verdade)
+  CHECKIN_WINDOW_BEFORE_MIN,
+  CHECKIN_WINDOW_AFTER_MIN,
   // turmas
   validateClassPayload,
   listClasses,
@@ -646,5 +768,6 @@ module.exports = {
   getSettings,
   putSettings,
   getStudentQrToken,
+  getDojoQrToken,
   checkin,
 }
