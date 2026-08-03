@@ -103,6 +103,10 @@ router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require
 // Decomposicao credit.js (passo 1, 11/06/2026): /balances isolado, montado ANTES de ./credit
 // para atender GET /credit/balances com a flag de atraso calculada por data (relato #1).
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditBalances'));
+// Credito Livre (02/08/2026): GET /credit/leads -- clientes que ja compraram no
+// crediario e hoje estao zerados, como lead de venda. Mesma razao do /balances
+// pra montar ANTES de ./credit: rota estatica antes de qualquer curinga.
+router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditLeads'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./credit'));
 router.use('/credit', requirePlan('negocio', 'expansao'), require('./creditInstallments'));
 // B4 (11/06/2026): devolucao de venda no crediario -- POST /credit/sales/:saleId/refund
