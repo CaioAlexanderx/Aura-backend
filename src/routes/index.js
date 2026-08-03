@@ -152,14 +152,14 @@ router.use('/public/karate/dojo', require('./karateDojoPortalPublic'));
 // ── AURA KARATÊ — Track D (público: carteirinha verify + portal + inscrição) ──
 // SEM auth de empresa. Auth própria por token/OTP. Migration 164.
 //   GET  /public/karate/verify/:token                 — verify carteirinha (mínimo/LGPD)
-//   GET  /public/karate/portal/me                     — portal autenticado (OTP→JWT)
-//   POST /public/karate/portal/opt-in                 — opt-in portal público (não menores)
-//   POST /public/karate/:slug/portal/request-otp      — solicita OTP (genérico)
-//   POST /public/karate/:slug/portal/verify-otp       — valida OTP → token de portal
-//   GET  /public/karate/:slug/p/:publicToken          — portal público (reduzido)
-//   GET  /public/karate/:slug/events                  — agenda pública
-//   GET  /public/karate/:slug/inscricao/:eventId      — dados p/ inscrição
-//   POST /public/karate/:slug/inscricao/:eventId      — inscrição (exame/curso real; competição 501)
+//   GET  /public/karate/portal/me                      — portal autenticado (OTP→JWT)
+//   POST /public/karate/portal/opt-in                  — opt-in portal público (não menores)
+//   POST /public/karate/:slug/portal/request-otp       — solicita OTP (genérico)
+//   POST /public/karate/:slug/portal/verify-otp        — valida OTP → token de portal
+//   GET  /public/karate/:slug/p/:publicToken           — portal público (reduzido)
+//   GET  /public/karate/:slug/events                   — agenda pública
+//   GET  /public/karate/:slug/inscricao/:eventId       — dados p/ inscrição
+//   POST /public/karate/:slug/inscricao/:eventId       — inscrição (exame/curso real; competição 501)
 router.use('/public/karate', require('./karatePublic'));
 
 // ── AURA KARATÊ — Track E (público: ranking embellável) ──
@@ -538,6 +538,44 @@ router.use('/federation/:id', require('./karateDojoFederativo'));
 //   POST   /federation/:id/dojo/graduation-exams/:examId/attachments         ({files:[{content, filename, content_type}]})
 //   DELETE /federation/:id/dojo/graduation-exams/:examId/attachments/:docId
 router.use('/federation/:id', require('./karateDojoBeltExams'));
+
+// ── AURA DOJÔ — F9 (eventos do dojô: curso + seminário + hub unificado) ──
+// Migration 269 (karate_dojo_events + karate_dojo_event_enrollments).
+//
+// Pedido do dono do produto (03/08/2026): "criar evento para exames de
+// faixa (Kyu), cursos, seminários, etc., com a estrutura idêntica de
+// criação de eventos que já temos na federação." O exame de kyu JÁ EXISTE
+// (karate_dojo_belt_exams, F8.1, logo acima) e NÃO é tocado por este
+// router — ele tem regra de negócio própria (teto do sensei, ligação com
+// karate_belt_history, cascata de certificado) que não se aplica a
+// curso/seminário. Este router cobre só o modelo NOVO (curso/seminário) e
+// expõe o HUB que junta as duas fontes numa listagem só.
+//
+// Campeonato do dojô é fase separada (subsistema completo: categorias,
+// chaveamento, kata) e NÃO entra aqui — o discriminador `source`/`kind` da
+// listagem unificada já deixa espaço para uma terceira fonte entrar depois
+// sem quebrar o contrato das duas primeiras (ver migration 269 e
+// karateDojoEventService.listEventsHub).
+//
+// ⚠️ PREFIXO "own-events" (não "events") DE PROPÓSITO: "/dojo/events"
+// (1 segmento, karateDojo.js) é a vitrine read-only dos eventos DA
+// FEDERAÇÃO, e "/dojo/events/:eventId/enroll" (3 segmentos, F5b logo
+// acima) já inscreve em EVENTO DA FEDERAÇÃO por practitioner_id. Reusar
+// "events" para o evento PRÓPRIO do dojô colidiria com os dois — mesma
+// razão que fez o exame de kyu virar "graduation-exams" em vez de
+// "belt-exams". SEM gate de conexão: curso/seminário são atos internos do
+// dojô (mesma razão de graduation-exams). Escrita só Canal A (403
+// PORTAL_READ_ONLY); GETs aceitam A e B.
+//   GET    /federation/:id/dojo/events-hub                          (?kind=&page=&pageSize= — eventos próprios + exame de kyu)
+//   POST   /federation/:id/dojo/own-events                          ({kind:'curso'|'seminario', name, event_date, location?, fee_amount?, max_participants?, hours?, description?})
+//   GET    /federation/:id/dojo/own-events                          (?kind=&status=&page=&pageSize=)
+//   GET    /federation/:id/dojo/own-events/:eventId
+//   PATCH  /federation/:id/dojo/own-events/:eventId                 (bloqueado só se cancelado)
+//   POST   /federation/:id/dojo/own-events/:eventId/cancel
+//   POST   /federation/:id/dojo/own-events/:eventId/enroll          ({student_ids:[uuid]})
+//   GET    /federation/:id/dojo/own-events/:eventId/enrollments
+//   DELETE /federation/:id/dojo/own-events/:eventId/enrollments/:studentId
+router.use('/federation/:id', require('./karateDojoEvents'));
 
 // ── AURA KARATÊ — Track H (configurações da federação) ───────────
 // Migration 181 (inscricao_municipal + regime_tributario em companies).
