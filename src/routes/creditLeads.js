@@ -29,6 +29,19 @@
 // "conta zerada desde", nao "quitou em".
 //
 // ------------------------------------------------------------
+// Segmentacao por contato (?contacted=)
+// ------------------------------------------------------------
+// A fila util e a de quem AINDA NAO foi contatado. Se os contatados
+// ficassem misturados, eles ocupariam o topo permanentemente (o score nao
+// sabe de contato) e ainda consumiriam o LIMIT, encurtando a fila real.
+// Por isso o corte e feito NO BANCO, com EXISTS, e nao no cliente.
+//
+// A tabela credit_lead_contacts nasce na migration 267, junto com esta
+// rota. Ainda assim probamos a existencia dela (cache module-level, mesmo
+// padrao do hasExchangeCols em employeesRanking.js): em deploy parcial a
+// rota degrada pra "sem segmentacao" em vez de estourar 42P01.
+//
+// ------------------------------------------------------------
 // Custo
 // ------------------------------------------------------------
 // customer_credit_balances e VIEW agregadora, nao materializada. O
@@ -56,6 +69,27 @@ async function assertCrediarioEnabled(companyId) {
     const e = new Error('Modulo de crediario nao esta habilitado. Ative em Configuracoes > PDV > Politicas do Caixa.');
     e.status = 403; e.code = 'CREDIARIO_DISABLED'; throw e;
   }
+}
+
+// Probe da tabela de contatos (migration 267). Cache module-level de 60s,
+// mesmo padrao do hasExchangeCols em employeesRanking.js.
+let _contactsCheckedAt = 0;
+let _contactsAvailable = null;
+async function hasContactsTable() {
+  const now = Date.now();
+  if (_contactsAvailable !== null && (now - _contactsCheckedAt) < 60000) return _contactsAvailable;
+  try {
+    const r = await db.query(
+      `SELECT COUNT(*) AS n FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'credit_lead_contacts'`
+    );
+    _contactsAvailable = parseInt((r.rows[0] && r.rows[0].n) || '0', 10) > 0;
+  } catch (e) {
+    console.warn('[credit] probe credit_lead_contacts falhou:', e.message);
+    _contactsAvailable = false;
+  }
+  _contactsCheckedAt = now;
+  return _contactsAvailable;
 }
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
@@ -89,7 +123,7 @@ function leadScore(row, maxDebited) {
   return Math.round((volume * 0.35 + payer * 0.35 + recency * 0.30) * 100);
 }
 
-// GET /leads?months=3|6|12|all&q=texto&limit=100
+// GET /leads?months=3|6|12|all&contacted=0|1|all&q=texto&limit=100
 router.get('/leads', async (req, res) => {
   const companyId = req.params.id;
   const monthsRaw = req.query.months == null ? '6' : String(req.query.months);
@@ -97,10 +131,19 @@ router.get('/leads', async (req, res) => {
   const q = req.query.q ? String(req.query.q).trim() : '';
   const limit = clamp(parseInt(req.query.limit, 10) || 100, 1, 500);
 
+  // contacted: '0' = so nao contatados (fila util, default do app)
+  //            '1' = so ja contatados
+  //            'all' / ausente = sem segmentacao
+  const contactedRaw = req.query.contacted == null ? 'all' : String(req.query.contacted);
+  const contacted = contactedRaw === '0' || contactedRaw === 'false' ? 'pending'
+                  : contactedRaw === '1' || contactedRaw === 'true' ? 'done'
+                  : 'all';
+
   try {
     await assertCrediarioEnabled(companyId);
+    const contactsOk = await hasContactsTable();
 
-    // ---- Query principal: so view + customers (sempre existem) ----
+    // ---- Query principal: view + customers (+ EXISTS de contato) ----
     const conditions = [
       'cb.company_id = $1',
       `cb.balance <= ${ZERO}`,
@@ -120,6 +163,16 @@ router.get('/leads', async (req, res) => {
       params.push(`%${q}%`);
       i++;
     }
+
+    // Segmentacao por contato -- no banco, pra o LIMIT valer sobre o
+    // conjunto certo. Se a tabela ainda nao existir, ignora o filtro.
+    const CONTACT_EXISTS = `EXISTS (
+      SELECT 1 FROM credit_lead_contacts lc
+       WHERE lc.company_id = cb.company_id AND lc.customer_id = cb.customer_id
+    )`;
+    if (contactsOk && contacted === 'pending') conditions.push(`NOT ${CONTACT_EXISTS}`);
+    if (contactsOk && contacted === 'done') conditions.push(CONTACT_EXISTS);
+
     params.push(limit);
 
     const { rows } = await db.query(
@@ -136,6 +189,39 @@ router.get('/leads', async (req, res) => {
     );
 
     const ids = rows.map((r) => r.id);
+
+    // ---- Contagem dos dois segmentos (pra UI mostrar os dois numeros
+    //      sem precisar de uma segunda chamada) ----
+    let counts = { pending: null, contacted: null };
+    if (contactsOk) {
+      try {
+        const countConds = [
+          'cb.company_id = $1',
+          `cb.balance <= ${ZERO}`,
+          'cb.total_debited > 0',
+          'COALESCE(c.marketing_opt_out, false) = false',
+        ];
+        const countParams = [companyId];
+        if (months != null) {
+          countConds.push(`cb.last_activity_at >= NOW() - ($2 || ' months')::interval`);
+          countParams.push(String(months));
+        }
+        const { rows: cnt } = await db.query(
+          `SELECT COUNT(*) FILTER (WHERE NOT ${CONTACT_EXISTS}) AS pending,
+                  COUNT(*) FILTER (WHERE ${CONTACT_EXISTS})     AS contacted
+             FROM customer_credit_balances cb
+             JOIN customers c ON c.id = cb.customer_id
+            WHERE ${countConds.join(' AND ')}`,
+          countParams
+        );
+        counts = {
+          pending: parseInt((cnt[0] && cnt[0].pending) || '0', 10),
+          contacted: parseInt((cnt[0] && cnt[0].contacted) || '0', 10),
+        };
+      } catch (e) {
+        if (e.code !== '42P01' && e.code !== '42703') throw e;
+      }
+    }
 
     // ---- Ultima compra no crediario (MAX debito) ----
     // Hoje nenhuma rota expoe isso. Nao da pra usar customers.last_purchase_at:
@@ -173,10 +259,9 @@ router.get('/leads', async (req, res) => {
       }
     }
 
-    // ---- Ultimo contato (marcador; NAO remove da lista) ----
-    // Decisao de produto: contatado continua aparecendo, so sinalizado.
+    // ---- Ultimo contato (data, pro segmento "ja contatados") ----
     const lastContact = {};
-    if (ids.length) {
+    if (ids.length && contactsOk) {
       try {
         const { rows: lc } = await db.query(
           `SELECT customer_id, MAX(sent_at) AS last_contact_at
@@ -251,6 +336,11 @@ router.get('/leads', async (req, res) => {
       leads: enriched,
       total: enriched.length,
       window_months: months,
+      segment: contacted,
+      // Contagem dos dois segmentos na janela atual. null quando a tabela
+      // de contatos ainda nao existe (deploy parcial).
+      pending_count: counts.pending,
+      contacted_count: counts.contacted,
       // Util pro front decidir se mostra "sem telefone" como aviso agregado.
       without_phone: enriched.filter((r) => !r.phone).length,
     });
