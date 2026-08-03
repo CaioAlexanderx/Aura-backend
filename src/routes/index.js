@@ -540,7 +540,7 @@ router.use('/federation/:id', require('./karateDojoFederativo'));
 router.use('/federation/:id', require('./karateDojoBeltExams'));
 
 // ── AURA DOJÔ — F9 (eventos do dojô: curso + seminário + hub unificado) ──
-// Migration 268 (karate_dojo_events + karate_dojo_event_enrollments).
+// Migration 269 (karate_dojo_events + karate_dojo_event_enrollments).
 //
 // Pedido do dono do produto (03/08/2026): "criar evento para exames de
 // faixa (Kyu), cursos, seminários, etc., com a estrutura idêntica de
@@ -554,7 +554,7 @@ router.use('/federation/:id', require('./karateDojoBeltExams'));
 // Campeonato do dojô é fase separada (subsistema completo: categorias,
 // chaveamento, kata) e NÃO entra aqui — o discriminador `source`/`kind` da
 // listagem unificada já deixa espaço para uma terceira fonte entrar depois
-// sem quebrar o contrato das duas primeiras (ver migration 268 e
+// sem quebrar o contrato das duas primeiras (ver migration 269 e
 // karateDojoEventService.listEventsHub).
 //
 // ⚠️ PREFIXO "own-events" (não "events") DE PROPÓSITO: "/dojo/events"
