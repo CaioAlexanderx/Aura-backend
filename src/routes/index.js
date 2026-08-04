@@ -162,7 +162,7 @@ router.use('/public/karate/dojo', require('./karateDojoPortalPublic'));
 //   POST /public/karate/:slug/inscricao/:eventId       — inscrição (exame/curso real; competição 501)
 router.use('/public/karate', require('./karatePublic'));
 
-// ── AURA KARATÊ — Track E (público: ranking embellável) ──
+// ── AURA KARATÊ — Track E (público: ranking embelável) ──
 // Router separado (mantém karatePublic.js intacto). Migrations 168 + 169.
 //   GET /public/karate/:slug/seasons                  — temporadas/categorias
 //   GET /public/karate/:slug/ranking?season=&category=— ranking (widget)
@@ -173,6 +173,16 @@ router.use('/public/karate', require('./karatePublicRanking'));
 // POST /public/karate/:slug/dojo/portal/request-otp
 // POST /public/karate/:slug/dojo/portal/verify-otp
 router.use('/public/karate', require('./karateDojoPublic'));
+
+// ── AURA DOJÔ — F9.1 (público: verificação do certificado PRÓPRIO DO DOJÔ) ──
+// Router separado de karatePublic.js (mesmo racional de karateDojoPublic /
+// karatePublicRanking / karatePixPublic: vários routers pequenos sob o
+// mesmo prefixo). Documento NÃO OFICIAL — a resposta marca
+// certificate_type:'dojo' + official:false para nunca ser confundida com
+// GET /public/karate/verify/:token (carteirão) nem com o verify do
+// certificado OFICIAL da federação (karatePublic.js).
+//   GET /public/karate/verify/dojo-cert/:token
+router.use('/public/karate', require('./karateDojoCertPublic'));
 
 // ── AURA KARATÊ — Fase F4/PIX: página pública de pagamento (QR + copiar) ──
 //   GET /public/karate/pix/:token — valor + competência + BR Code (sem
@@ -200,7 +210,7 @@ router.use('/public/roster-update', require('./karateRosterPortalPublic'));
 //   POST /public/roster-self/:token/update
 router.use('/public/roster-self', require('./karateRosterSelfServicePublic'));
 
-// ── AURA KARATÊ — Track A (backend cadastros) ──────────
+// ── AURA KARATÊ — Track A (backend cadastros) ────────
 // POST /karate/federation/setup (sem escopo de empresa, auth only)
 // GET  /federation/:id/dashboard
 // GET  /federation/:id/belt-distribution
@@ -294,7 +304,6 @@ router.use('/federation/:id/financial', require('./karateOpenItems'));
 router.use('/federation/:id/financial', require('./karateFinanceAuditRead'));
 
 // ── AURA KARATÊ — Track C (backend exames + cursos) ─────
-// (certificados Track J montado separadamente abaixo)
 router.use('/federation/:id', require('./karateRequirements'));
 router.use('/federation/:id', require('./karateExams'));
 router.use('/federation/:id', require('./karateCourses'));
@@ -312,7 +321,7 @@ router.use('/federation/:id', require('./karateCourses'));
 //   POST   /federation/:id/certificate-orders/:orderId/refuse
 router.use('/federation/:id', require('./karateCertificates'));
 
-// ── AURA KARATÊ — Track D (admin: carteirinha digital) ──────────
+// ── AURA KARATÊ — Track D (admin: carteirinha digital) ─────────
 // Migration 164. Somente DADOS (sem geração de imagem no app).
 //   POST /federation/:id/practitioners/:practitionerId/issue-card  (staffWrite)
 //   GET  /federation/:id/practitioners/:practitionerId/card        (read)
@@ -507,7 +516,7 @@ router.use('/federation/:id', require('./karateAffiliationRequestsAdmin'));
 //   GET  /federation/:id/dojo/belt-exams/:examId/candidates
 router.use('/federation/:id', require('./karateDojoFederativo'));
 
-// ── AURA DOJÔ — F8.1 (o EXAME DE FAIXA DO DOJÔ) ──────────────
+// ── AURA DOJÔ — F8.1 (o EXAME DE FAIXA DO DOJÔ) ─────────────
 // Migrations 264 (tabelas + teto do sensei no CHECK) e 265 (escolha de
 // certificado por aluno + anexo do lote em karate_documents).
 //
@@ -577,6 +586,34 @@ router.use('/federation/:id', require('./karateDojoBeltExams'));
 //   DELETE /federation/:id/dojo/own-events/:eventId/enrollments/:studentId
 router.use('/federation/:id', require('./karateDojoEvents'));
 
+// ── AURA DOJÔ — F9.1 (o CERTIFICADO PRÓPRIO DO DOJÔ) ───────────
+// Migration 271 (karate_dojo_certificate_templates + karate_dojo_issued_certificates).
+//
+// Pedido do dono do produto (04/08/2026): certificado dentro de Eventos,
+// idem federação (mesmo editor de layout/logo/selo/título/corpo/assinatura),
+// emissão+impressão em massa; a página de certificados vira SOMENTE status
+// dos pedidos à federação. Processo: dojô examina → emite o PRÓPRIO
+// certificado para os aprovados → pede à federação o certificado OFICIAL
+// (fluxo já existente, karateDojoBeltExamService.requestCertificates,
+// intocado). Elegibilidade = karate_dojo_belt_exam_results.result='approved'
+// do exame do dojô (F8.1, logo acima) — esta tabela NÃO é alterada aqui,
+// só lida.
+//
+// ⚠️ PREFIXO "own-certificates" (não "certificates") DE PROPÓSITO: mesma
+// razão de own-events/graduation-exams — /dojo/cert-orders (F5b, acima) já
+// significa o PEDIDO OFICIAL à federação. SEM gate de conexão (ato
+// interno do dojô). Escrita só Canal A (403 PORTAL_READ_ONLY); GETs A e B.
+//   GET    /federation/:id/dojo/certificate-templates
+//   POST   /federation/:id/dojo/certificate-templates
+//   PATCH  /federation/:id/dojo/certificate-templates/:templateId
+//   DELETE /federation/:id/dojo/certificate-templates/:templateId
+//   POST   /federation/:id/dojo/certificate-assets                          (selo/assinatura → R2)
+//   POST   /federation/:id/dojo/graduation-exams/:examId/own-certificates   (emissão em massa)
+//   GET    /federation/:id/dojo/graduation-exams/:examId/own-certificates
+//   GET    /federation/:id/dojo/own-certificates                           (status geral)
+// Verificação pública: GET /public/karate/verify/dojo-cert/:token (acima).
+router.use('/federation/:id', require('./karateDojoCertificates'));
+
 // ── AURA KARATÊ — Track H (configurações da federação) ───────────
 // Migration 181 (inscricao_municipal + regime_tributario em companies).
 //   GET/POST   /federation/:id/settings/members          — equipe FPKT
@@ -600,7 +637,7 @@ router.use('/federation/:id', require('./karateSettings'));
 //   POST /federation/:id/competitions/:cid/categories/:catId/kata-scores/advance
 router.use('/federation/:id', require('./karateBrackets'));
 
-// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────────
+// ── AURA KARATÊ — Track L (Saúde da Rede) ─────────
 // Sem migration (totalmente derivado de tabelas existentes).
 // Guards federation_admin/staff/viewer para leitura; adminOnly para /report/send.
 //   GET  /federation/:id/network-health/summary
