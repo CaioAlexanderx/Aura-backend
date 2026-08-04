@@ -2998,3 +2998,32 @@ router.get('/annuities/:annuityId/payments', ...guards.adminOnly(), async (req, 
   } catch (err) {
     if (err.code === '42703' || err.code === '42P01') {
       console.warn('[karateAnnuities] extrato: tabela/coluna ausente (migration 247/249 pendente) —', err.message);
+      return res.json({ annuity_id: annuityId, dojo_id: null, practitioner_id: null, total: 0, count: 0, data: [] });
+    }
+    console.error('[karateAnnuities] extrato de anuidade error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar extrato da anuidade' });
+  }
+});
+
+function round2ForResponse(n) {
+  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+
+function mapInstallmentForResponse(inst) {
+  if (!inst) return null;
+  return {
+    installment_id: inst.id,
+    seq: inst.seq,
+    kind: inst.kind,
+    amount: parseFloat(inst.amount),
+    amount_paid: inst.amount_paid != null ? parseFloat(inst.amount_paid) : 0,
+    status: inst.status,
+    // pg devolve `date` como objeto Date — toIsoDate() evita a armadilha
+    // CLAUDE.md #1/#toIsoDate (reinterpretação de fuso ao serializar a
+    // data pura como ISO datetime completo).
+    due_date: toIsoDate(inst.due_date),
+    paid_at: inst.paid_at,
+    payment_method: inst.payment_method || null,
+    transaction_id: inst.transaction_id || null,
+  };
+}
