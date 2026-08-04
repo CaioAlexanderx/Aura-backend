@@ -44,7 +44,7 @@ function buildApp() {
   return app;
 }
 
-// ── Fake DB em memória — interpreta o SQL real do handler por padrão ──────
+// ── Fake DB em memória — interpreta o SQL real do handler por padrão ────────────
 function makeFakeDb(seed = {}) {
   const state = {
     dojos: seed.dojos || [],               // { id, federation_id, name, is_active }
@@ -328,8 +328,12 @@ describe('POST /financial/annuities/campaign/preview', () => {
         expect(res.status).toBe(200);
         // fee vence em maio; "hoje" (execução real) já passou de maio/2026
         // → default seguro: due_date = fim do mês corrente, ajuste sinalizado.
+        // Mês corrente EM SÃO PAULO (não UTC cru — ver bug corrigido em
+        // 03/08/2026 no default seguro de buildPlanSpecs).
         expect(res.body.dojos[0].due_date_ajustada).toBe(true);
-        expect(res.body.dojos[0].due_date.slice(5, 7)).toBe(String(new Date().getUTCMonth() + 1).padStart(2, '0'));
+        const svcRef = require('../src/services/karateAnnuityService');
+        const spNow = new Date(svcRef.dayStamp(new Date()));
+        expect(res.body.dojos[0].due_date.slice(5, 7)).toBe(String(spNow.getUTCMonth() + 1).padStart(2, '0'));
         done();
       });
   });
@@ -667,7 +671,10 @@ describe('POST /financial/annuities/campaign', () => {
         // depois de maio → plano já venceu → default seguro aplicado.
         expect(d1.due_date_ajustada).toBe(true);
         expect(d1.due_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-        expect(d1.due_date.slice(5, 7)).toBe(String(new Date().getUTCMonth() + 1).padStart(2, '0'));
+        // Mês corrente EM SÃO PAULO (não UTC cru — bug corrigido 03/08/2026).
+        const svcRef = require('../src/services/karateAnnuityService');
+        const spNow = new Date(svcRef.dayStamp(new Date()));
+        expect(d1.due_date.slice(5, 7)).toBe(String(spNow.getUTCMonth() + 1).padStart(2, '0'));
         done();
       });
   });
@@ -1028,14 +1035,20 @@ describe('buildCampaignSpecs (helper puro exposto via router.__testables)', () =
     expect(Array.isArray(specs)).toBe(true);
   });
 
-  it('default seguro: quando TODAS as parcelas do plano já venceram, gera só a última com due_date = FIM DO MÊS CORRENTE — não deixa o alvo sem cobrança e não nasce atrasada', () => {
+  it('default seguro: quando TODAS as parcelas do plano já venceram, gera só a última com due_date = FIM DO MÊS CORRENTE EM SÃO PAULO — não deixa o alvo sem cobrança e não nasce atrasada', () => {
     // Plano fictício com vencimento num mês certamente já passado em
     // qualquer execução real — simulamos isso fixando seasonYear no
     // passado distante, então TODOS os due_months caem antes de "hoje".
+    //
+    // ⚠️ Bug de produção corrigido em 03/08/2026: o mês corrente era
+    // derivado com getUTCFullYear()/getUTCMonth() (UTC), não em São Paulo.
+    // O EXPECTED aqui precisa usar o MESMO cálculo em SP que a implementação
+    // usa agora — senão o teste volta a ficar cego perto da virada do mês.
     const pastYear = 2000;
+    const svcRef = require('../src/services/karateAnnuityService');
     const now = new Date();
-    const expectedSafeDueDate = require('../src/services/karateAnnuityService')
-      .lastDayOfMonthStr(now.getUTCFullYear(), now.getUTCMonth() + 1);
+    const nowSP = new Date(svcRef.dayStamp(now));
+    const expectedSafeDueDate = svcRef.lastDayOfMonthStr(nowSP.getUTCFullYear(), nowSP.getUTCMonth() + 1);
 
     const { specs, due_date_ajustada } = buildCampaignSpecs({
       plan: 'trimestral', amount: 150, dueMonths: [2, 5, 8, 11], seasonYear: pastYear,
@@ -1048,11 +1061,12 @@ describe('buildCampaignSpecs (helper puro exposto via router.__testables)', () =
     expect(specs[0]).toEqual({ seq: 4, amount: 150, due_date: expectedSafeDueDate });
   });
 
-  it('plano anual (dojô/praticante padrão da campanha) com vencimento já passado gera a única parcela existente, a vencer no fim do mês corrente', () => {
+  it('plano anual (dojô/praticante padrão da campanha) com vencimento já passado gera a única parcela existente, a vencer no fim do mês corrente EM SÃO PAULO', () => {
     const pastYear = 2000;
+    const svcRef = require('../src/services/karateAnnuityService');
     const now = new Date();
-    const expectedSafeDueDate = require('../src/services/karateAnnuityService')
-      .lastDayOfMonthStr(now.getUTCFullYear(), now.getUTCMonth() + 1);
+    const nowSP = new Date(svcRef.dayStamp(now));
+    const expectedSafeDueDate = svcRef.lastDayOfMonthStr(nowSP.getUTCFullYear(), nowSP.getUTCMonth() + 1);
 
     const { specs, due_date_ajustada } = buildCampaignSpecs({
       plan: 'anual', amount: 500, dueMonths: [5], seasonYear: pastYear,
