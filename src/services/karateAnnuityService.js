@@ -230,15 +230,26 @@ async function getVigentFee(client, federationId, feeType, plan) {
 // filiado no meio do ano gera só as parcelas restantes). Mantém o `seq`
 // original (posição no plano completo) mesmo quando pula parcelas, para não
 // perder o "parcela 3 de 4" na exibição.
+//
+// Corte "já venceu": compara DIA DE CALENDÁRIO EM SÃO PAULO (dayStamp),
+// nunca timestamp cru — mesmo raciocínio de VENCE HOJE, ATRASA AMANHÃ. A
+// versão antiga (`new Date(dueDate + 'T23:59:59') < cutoff`) comparava o
+// FIM DO DIA em UTC contra o instante `cutoff`: entre 21h e meia-noite de
+// Brasília do ÚLTIMO DIA de qualquer mês do plano, o relógio UTC já tinha
+// passado das 23:59:59 daquele dia, e a parcela vencendo HOJE (em SP) era
+// descartada como "já vencida" ~3h antes da hora — a anuidade podia nascer
+// faltando a parcela do mês corrente. dayStamp já resolve isso (mesmo
+// helper usado por deriveInstallmentStatus/computeAggregateFinanceiro) —
+// reaproveitado aqui em vez de reimplementar a conversão de fuso.
 function buildInstallmentPlan({ plan, amount, dueMonths, seasonYear, fromDate }) {
   const months = (Array.isArray(dueMonths) && dueMonths.length ? dueMonths : DEFAULT_DUE_MONTHS[plan] || [5])
     .slice()
     .sort((a, b) => a - b);
-  const cutoff = fromDate ? new Date(fromDate) : null;
+  const cutoffStamp = fromDate ? dayStamp(fromDate) : null;
   const specs = [];
   months.forEach((m, idx) => {
     const dueDate = lastDayOfMonthStr(seasonYear, m);
-    if (cutoff && new Date(dueDate + 'T23:59:59') < cutoff) return; // já venceu — não gera
+    if (cutoffStamp !== null && dayStamp(dueDate) < cutoffStamp) return; // já venceu — não gera
     specs.push({ seq: idx + 1, amount: Number(amount), due_date: dueDate });
   });
   return specs;
@@ -284,6 +295,19 @@ function validateDueDateOverride(dueDate, seasonYear) {
 //    informado) — a cobrança nasce "a vencer". `dueDateAdjusted=true`
 //    sinaliza esse ajuste pra UI avisar o operador.
 //
+//    BUG CORRIGIDO EM 03/08/2026: "mês corrente" era calculado com
+//    `today.getUTCFullYear()`/`today.getUTCMonth()` — em UTC, não em
+//    America/Sao_Paulo. Entre 21h e meia-noite de Brasília do ÚLTIMO DIA
+//    do mês, o relógio UTC já tinha virado o dia 1 do mês seguinte:
+//    getUTCMonth() devolvia o mês ERRADO e a parcela nascia com due_date
+//    um mês inteiro à frente do pretendido — dado GRAVADO errado (não é
+//    só leitura/derivação de status, como o bug irmão já corrigido no
+//    #442). Corrigido reaproveitando dayStamp (mesmo helper que resolve
+//    "hoje em SP" no resto deste arquivo) em vez de reimplementar a
+//    conversão de fuso com Intl/toLocaleDateString — deliberadamente
+//    evitados neste repo por causa do full-icu no Railway (ver comentário
+//    de SP_OFFSET_MS acima).
+//
 // 2) Override explícito (`dueDateOverride`, já validado por
 //    validateDueDateOverride): substitui o due_date da PRIMEIRA parcela
 //    gerada — única parcela em planos de 1x (anual/cpf); primeira parcela
@@ -305,7 +329,11 @@ function buildPlanSpecs({ plan, amount, dueMonths, seasonYear, fromDate, dueDate
     const completo = buildInstallmentPlan({ plan, amount, dueMonths, seasonYear });
     if (!completo.length) return { specs: [], dueDateAdjusted: false };
     const today = fromDate ? new Date(fromDate) : new Date();
-    const safeDueDate = lastDayOfMonthStr(today.getUTCFullYear(), today.getUTCMonth() + 1);
+    // "Mês corrente" EM SÃO PAULO — dayStamp(today) já devolve a
+    // meia-noite UTC do dia de calendário correto em SP; extrai
+    // ano/mês desse carimbo em vez de ler direto do instante UTC.
+    const todaySP = new Date(dayStamp(today));
+    const safeDueDate = lastDayOfMonthStr(todaySP.getUTCFullYear(), todaySP.getUTCMonth() + 1);
     const last = completo[completo.length - 1];
     specs = [{ ...last, due_date: safeDueDate }];
     dueDateAdjusted = true;
