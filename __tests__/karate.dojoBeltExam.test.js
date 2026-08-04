@@ -18,6 +18,7 @@
 //      por exame
 //   8. Canal B (portal) é read-only em toda escrita
 //   9. a escada devolvida à UI marca a Preta como não concedível
+//   10. (F10, 04/08/2026) os três quesitos — kihon/kata/kumite
 //
 // ── ESTILO: MOCK POR SQL, NUNCA POR POSIÇÃO ────────────────
 // Toda SQL do service/rota começa com uma âncora `-- f81:<nome>`. O
@@ -121,6 +122,10 @@ function baseState() {
     // colunas opcionais presentes
     hasBeltHistoryOptionalCols: true,
     hasResultCertCols: true,
+    // F10 (migration 272) — kihon/kata/kumite. Flag INDEPENDENTE de
+    // hasResultCertCols: são migrations diferentes (265 × 272) e um
+    // deploy pode ter uma sem a outra.
+    hasQuesitoCols: true,
     // anexos existentes no exame
     attachmentCount: 0,
     attachmentRows: [],
@@ -144,12 +149,16 @@ function poolQuery(sql, params) {
           ? [{ column_name: 'source' }, { column_name: 'source_dojo_id' }, { column_name: 'belt_kyu' }, { column_name: 'belt_dan' }]
           : [],
       });
-    case 'probe-result-cols':
-      return Promise.resolve({
-        rows: state.hasResultCertCols
-          ? [{ column_name: 'certificate_requested' }, { column_name: 'certificate_order_id' }]
-          : [],
-      });
+    case 'probe-result-cols': {
+      const rows = [];
+      if (state.hasResultCertCols) {
+        rows.push({ column_name: 'certificate_requested' }, { column_name: 'certificate_order_id' });
+      }
+      if (state.hasQuesitoCols) {
+        rows.push({ column_name: 'kihon' }, { column_name: 'kata' }, { column_name: 'kumite' });
+      }
+      return Promise.resolve({ rows });
+    }
     case 'load-exam':
       // Escopo por dojô: a linha simulada só "existe" para quem consulta
       // se dojo_id do TOKEN ($2) bater com dojo_id DA LINHA
@@ -817,5 +826,99 @@ describe('F8.1 — deploy à frente do banco', () => {
 
     // E o UPSERT do resultado não cita certificate_requested.
     expect(state.calls.upserts[0].sql).not.toMatch(/certificate_requested/);
+  });
+});
+
+// ============================================================
+// 10) F10 (04/08/2026) — OS TRÊS QUESITOS: kihon, kata, kumite
+//
+// Sistema japonês tradicional de marcação visual: 〇 círculo > △ triângulo
+// > □ quadrado. Gravado como VALOR NOMEADO, nunca o caractere Unicode.
+// Os três são OPCIONAIS e NUNCA derivam `result` — aprovação continua
+// decisão explícita do sensei (ver cabeçalho do service, F10).
+// ============================================================
+describe('F10 — quesitos (kihon/kata/kumite), círculo > triângulo > quadrado', () => {
+  test('grava os três quesitos como VALOR NOMEADO — nunca o caractere Unicode', async () => {
+    const res = await postResults([
+      {
+        student_id: STUDENT_FED,
+        result: 'approved',
+        to_belt_level: 'azul_claro',
+        kihon: 'circulo',
+        kata: 'triangulo',
+        kumite: 'quadrado',
+      },
+    ]);
+
+    expect(res.status).toBe(200);
+    const up = state.calls.upserts[0];
+    expect(up.params).toContain('circulo');
+    expect(up.params).toContain('triangulo');
+    expect(up.params).toContain('quadrado');
+    // Nunca o símbolo Unicode gravado como valor.
+    expect(up.sql).not.toMatch(/[〇△□]/);
+    expect(res.body.results[0].quesitos).toEqual({ kihon: 'circulo', kata: 'triangulo', kumite: 'quadrado' });
+  });
+
+  test('os três quesitos são OPCIONAIS — omitir não bloqueia e a resposta traz null (dado faltante é neutro)', async () => {
+    const res = await postResults([
+      { student_id: STUDENT_LOCAL, result: 'approved', to_belt_level: 'laranja' },
+    ]);
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].quesitos).toEqual({ kihon: null, kata: null, kumite: null });
+  });
+
+  test('valor fora da escala oficial (kata: "estrela") é recusado com QUESITO_INVALIDO — nada é gravado', async () => {
+    const res = await postResults([
+      { student_id: STUDENT_FED, result: 'approved', to_belt_level: 'azul_claro', kata: 'estrela' },
+    ]);
+
+    expect(res.status).toBe(422);
+    expect(res.body.errors[0]).toMatchObject({ student_id: STUDENT_FED, code: 'QUESITO_INVALIDO' });
+    expect(res.body.errors[0].message).toMatch(/kata/);
+    expect(db.connect).not.toHaveBeenCalled();
+  });
+
+  test('REPROVADO também pode ter os três quesitos registrados — resultado NÃO é derivado deles', async () => {
+    const res = await postResults([
+      {
+        student_id: STUDENT_FED,
+        result: 'failed',
+        to_belt_level: 'azul_claro',
+        kihon: 'quadrado',
+        kata: 'quadrado',
+        kumite: 'quadrado',
+      },
+    ]);
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].result).toBe('failed');
+    expect(res.body.results[0].quesitos).toEqual({ kihon: 'quadrado', kata: 'quadrado', kumite: 'quadrado' });
+  });
+
+  test('sem as colunas da 272, os quesitos saem degradados: schema_degraded, UPSERT sem kihon, resposta com null (nunca finge que gravou)', async () => {
+    state.hasQuesitoCols = false;
+
+    const res = await postResults([
+      { student_id: STUDENT_FED, result: 'approved', to_belt_level: 'azul_claro', kihon: 'circulo' },
+    ]);
+
+    expect(res.status).toBe(200);
+    expect(res.body.schema_degraded).toBe(true);
+    expect(state.calls.upserts[0].sql).not.toMatch(/\bkihon\b/);
+    expect(res.body.results[0].quesitos).toEqual({ kihon: null, kata: null, kumite: null });
+  });
+
+  test('QUESITO_RANK: círculo > triângulo > quadrado — fonte única, nunca um mapa reinventado', () => {
+    expect(svc.QUESITO_RANK.circulo).toBeGreaterThan(svc.QUESITO_RANK.triangulo);
+    expect(svc.QUESITO_RANK.triangulo).toBeGreaterThan(svc.QUESITO_RANK.quadrado);
+  });
+
+  test('normalizeQuesito: aceita maiúsculas/espaços; string vazia e null viram null', () => {
+    expect(svc.normalizeQuesito('  Circulo  ')).toBe('circulo');
+    expect(svc.normalizeQuesito('')).toBeNull();
+    expect(svc.normalizeQuesito(null)).toBeNull();
+    expect(svc.normalizeQuesito(undefined)).toBeNull();
   });
 });

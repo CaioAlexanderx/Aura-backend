@@ -67,6 +67,18 @@
 // testes despacham por ELE (regex), nunca por posição na fila de
 // mockResolvedValueOnce — fila posicional já derrubou o CI deste repo
 // quatro vezes. Renomear uma âncora é mudar contrato de teste.
+//
+// ── F10 (04/08/2026) — OS TRÊS QUESITOS (Kihon, Kata, Kumite) ──────
+// A ficha de graduação real (Areikan Karatê-Dô, Shotokan Tradicional)
+// avalia os três quesitos SEPARADAMENTE, com o sistema japonês
+// tradicional de marcação visual: 〇 círculo > △ triângulo > □ quadrado
+// (hierarquia confirmada pelo dono do produto). Ver QUESITO_RANK abaixo —
+// fonte ÚNICA da hierarquia, no mesmo espírito de karateBeltScale.js
+// (F8.0): nenhum relatório ou ordenação futuro deve reinventar um mapa
+// próprio. Os três campos são OPCIONAIS (dado faltante é neutro) e
+// NENHUM deles deriva ou restringe `result` — aprovação continua decisão
+// explícita do sensei. Colunas em migration 272, mesmo mecanismo de probe
+// (RESULT_OPTIONAL_COLS/resultCols) que certificate_requested já usava.
 // ============================================================
 'use strict';
 
@@ -81,6 +93,48 @@ const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const EXAM_STATUS = ['draft', 'completed', 'cancelled'];
+
+// ============================================================
+// F10 — OS TRÊS QUESITOS: sistema japonês tradicional de marcação
+//
+// Hierarquia CONFIRMADA pelo dono do produto (04/08/2026), do melhor
+// para o pior:
+//
+//   〇 círculo   >   △ triângulo   >   □ quadrado
+//
+// Gravado como VALOR NOMEADO ('circulo'|'triangulo'|'quadrado'), NUNCA o
+// caractere Unicode — o símbolo é APRESENTAÇÃO (o app decide como
+// desenhar 〇/△/□), o dado é o CONCEITO. QUESITO_RANK é a ÚNICA fonte da
+// hierarquia: relatório e ordenação futuros devem ler DAQUI, nunca
+// reinventar um mapa novo — este produto já teve 7 representações
+// divergentes da escala de faixas espalhadas pelo código (ver o
+// cabeçalho de src/utils/karateBeltScale.js, F8.0); os quesitos não
+// repetem o erro.
+//
+// Os três campos são OPCIONAIS: dado faltante é NEUTRO, nunca pendência
+// (princípio deste produto). O `result` (aprovado/reprovado) CONTINUA
+// sendo decisão EXPLÍCITA do sensei — nunca derivado de média ou nota
+// mínima dos quesitos. Nenhuma regra deste arquivo cruza quesito com
+// aprovação: reprovado também pode ter os três marcados (é onde mais
+// importa — explica O QUE faltou).
+// ============================================================
+const QUESITO_VALUES = Object.freeze(['circulo', 'triangulo', 'quadrado']);
+const QUESITO_FIELDS = Object.freeze(['kihon', 'kata', 'kumite']);
+
+// Maior = melhor. círculo(3) > triângulo(2) > quadrado(1). Ausente (null)
+// NÃO tem rank — é desconhecido, nunca "pior que quadrado".
+const QUESITO_RANK = Object.freeze({ circulo: 3, triangulo: 2, quadrado: 1 });
+
+function normalizeQuesito(v) {
+  if (v == null) return null;
+  const s = String(v).trim().toLowerCase();
+  return s === '' ? null : s;
+}
+
+function quesitoRankOf(v) {
+  const n = normalizeQuesito(v);
+  return n && Object.prototype.hasOwnProperty.call(QUESITO_RANK, n) ? QUESITO_RANK[n] : null;
+}
 
 function serviceError(status, code, message, extra) {
   const e = new Error(message);
@@ -152,8 +206,17 @@ async function beltHistoryCols() {
   return out;
 }
 
-// Mesma mecânica para as colunas que a 265 acrescenta ao RESULTADO.
-const RESULT_OPTIONAL_COLS = ['certificate_requested', 'certificate_order_id'];
+// Mesma mecânica para as colunas que a 265 acrescenta ao RESULTADO — e
+// agora também para os três quesitos da 272 (F10): mesmo probe, mesma
+// query, mesma degradação por coluna. Uma coluna faltando não derruba as
+// outras (cada chave do `out` é independente).
+const RESULT_OPTIONAL_COLS = [
+  'certificate_requested',
+  'certificate_order_id',
+  'kihon',
+  'kata',
+  'kumite',
+];
 let _resultColsCache = null;
 
 async function resultCols() {
@@ -176,6 +239,9 @@ async function resultCols() {
   const out = {
     certificate_requested: found.includes('certificate_requested'),
     certificate_order_id: found.includes('certificate_order_id'),
+    kihon: found.includes('kihon'),
+    kata: found.includes('kata'),
+    kumite: found.includes('kumite'),
   };
   if (RESULT_OPTIONAL_COLS.every((c) => out[c])) _resultColsCache = out;
   return out;
@@ -453,6 +519,14 @@ async function getExam({ dojoId, examId }) {
   const certSelect = cols.certificate_requested
     ? 'r.certificate_requested, r.certificate_order_id'
     : 'false AS certificate_requested, NULL::uuid AS certificate_order_id';
+  // F10: mesmo degrade-por-coluna do certSelect acima — cada quesito é
+  // independente (um deploy pode ter certificado migrado e quesito não).
+  const quesitoSelect =
+    (cols.kihon ? 'r.kihon' : 'NULL::text AS kihon') +
+    ', ' +
+    (cols.kata ? 'r.kata' : 'NULL::text AS kata') +
+    ', ' +
+    (cols.kumite ? 'r.kumite' : 'NULL::text AS kumite');
 
   const { rows } = await db.query(
     `-- f81:list-results
@@ -460,7 +534,7 @@ async function getExam({ dojoId, examId }) {
             r.from_belt_level, r.from_belt_kyu, r.from_belt_dan,
             r.to_belt_level, r.to_belt_name, r.to_belt_kyu,
             r.result, r.notes, r.belt_history_id, r.created_at,
-            ${certSelect},
+            ${certSelect}, ${quesitoSelect},
             s.full_name AS student_name
        FROM karate_dojo_belt_exam_results r
        LEFT JOIN karate_dojo_students s ON s.id = r.student_id
@@ -483,6 +557,13 @@ async function getExam({ dojoId, examId }) {
     to_belt_name: r.to_belt_name || null,
     notes: r.notes || null,
     belt_history_id: r.belt_history_id || null,
+    // F10: os três quesitos — sempre os três juntos, nunca implícito. NULL
+    // é "não avaliado", nunca "pior valor possível".
+    quesitos: {
+      kihon: r.kihon || null,
+      kata: r.kata || null,
+      kumite: r.kumite || null,
+    },
     certificate: {
       requested: r.certificate_requested === true,
       order_id: r.certificate_order_id || null,
@@ -654,8 +735,36 @@ async function planResults({ dojoId, federationId, examId, items }) {
       // Reprovado nunca pede certificado (o CHECK da 265 diz o mesmo).
       certificate_requested:
         result === 'approved' && (it.request_certificate === true || it.request_certificate === 'true'),
+      // F10: os três quesitos — OPCIONAIS e INDEPENDENTES de `result`.
+      // Reprovado também pode ter os três marcados (ver cabeçalho).
+      kihon: null,
+      kata: null,
+      kumite: null,
       to: null,
     };
+
+    // F10: cada quesito é lido SÓ se veio no corpo (dado faltante é
+    // neutro — não vira erro, não vira default). Valor fora da escala
+    // oficial derruba o LOTE inteiro, igual a qualquer outro campo
+    // inválido deste service.
+    let quesitoInvalidField = null;
+    for (const field of QUESITO_FIELDS) {
+      if (it[field] === undefined) continue;
+      const v = normalizeQuesito(it[field]);
+      if (v !== null && QUESITO_VALUES.indexOf(v) === -1) {
+        quesitoInvalidField = field;
+        break;
+      }
+      entry[field] = v;
+    }
+    if (quesitoInvalidField) {
+      errors.push({
+        student_id: sid,
+        code: 'QUESITO_INVALIDO',
+        message: `${quesitoInvalidField}: use 'circulo', 'triangulo' ou 'quadrado' (ou omita — quesito é opcional)`,
+      });
+      continue;
+    }
 
     // A faixa PRETENDIDA. Obrigatória para quem passou; opcional para quem
     // não passou — mas, quando vem, passa pelas MESMAS travas: o CHECK do
@@ -799,7 +908,6 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
       // 1) O RESULTADO. UNIQUE (exam_id, student_id) da 264 é a 1ª trava de
       //    idempotência: relançar faz UPDATE da mesma linha.
       const certCol = resCols.certificate_requested ? ', certificate_requested' : '';
-      const certVal = resCols.certificate_requested ? ', $14' : '';
       const certSet = resCols.certificate_requested
         ? ', certificate_requested = EXCLUDED.certificate_requested'
         : '';
@@ -818,7 +926,27 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
         entry.result,
         entry.notes,
       ];
-      if (resCols.certificate_requested) params.push(entry.certificate_requested);
+      let certVal = '';
+      if (resCols.certificate_requested) {
+        params.push(entry.certificate_requested);
+        certVal = `, $${params.length}`;
+      }
+
+      // F10: os três quesitos entram como BLOCO (mesma migration, mesmo
+      // probe) — se um existe, os três existem. Placeholders calculados a
+      // partir de params.length (nunca hardcoded) para não depender de
+      // certCol/certVal terem entrado antes.
+      let quesitoCol = '';
+      let quesitoVal = '';
+      let quesitoSet = '';
+      const hasQuesitoCols = resCols.kihon && resCols.kata && resCols.kumite;
+      if (hasQuesitoCols) {
+        params.push(entry.kihon, entry.kata, entry.kumite);
+        const n = params.length;
+        quesitoCol = ', kihon, kata, kumite';
+        quesitoVal = `, $${n - 2}, $${n - 1}, $${n}`;
+        quesitoSet = ', kihon = EXCLUDED.kihon, kata = EXCLUDED.kata, kumite = EXCLUDED.kumite';
+      }
 
       const upsert = await client.query(
         `-- f81:upsert-result
@@ -826,8 +954,8 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
            (exam_id, dojo_id, student_id, practitioner_id,
             from_belt_level, from_belt_kyu, from_belt_dan,
             to_belt_level, to_belt_name, to_belt_kyu,
-            belt_schema, result, notes${certCol})
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13${certVal})
+            belt_schema, result, notes${certCol}${quesitoCol})
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13${certVal}${quesitoVal})
          ON CONFLICT (exam_id, student_id) DO UPDATE
             SET practitioner_id = EXCLUDED.practitioner_id,
                 from_belt_level = EXCLUDED.from_belt_level,
@@ -838,7 +966,7 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
                 to_belt_kyu     = EXCLUDED.to_belt_kyu,
                 belt_schema     = EXCLUDED.belt_schema,
                 result          = EXCLUDED.result,
-                notes           = EXCLUDED.notes${certSet}
+                notes           = EXCLUDED.notes${certSet}${quesitoSet}
          RETURNING id, belt_history_id`,
         params
       );
@@ -857,6 +985,12 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
         belt_history: null, // 'created' | 'reused' | null
         belt_history_skipped_reason: null,
         student_belt_updated: false,
+        // F10: eco do que foi REALMENTE gravado — se a 272 ainda não rodou
+        // (colunas ausentes), a resposta é null: nunca finge que persistiu
+        // um valor que na verdade não foi escrito no banco.
+        quesitos: hasQuesitoCols
+          ? { kihon: entry.kihon || null, kata: entry.kata || null, kumite: entry.kumite || null }
+          : { kihon: null, kata: null, kumite: null },
         certificate: {
           requested: entry.certificate_requested,
           created: false,
@@ -1168,8 +1302,11 @@ async function submitResults({ dojoId, federationId, examId, body, createdBy, cr
     },
   };
   // Aviso de topo: o front não precisa varrer a lista para saber que o
-  // lado federativo saiu degradado por migration pendente.
-  if (!cols.source || !resCols.certificate_requested) out.schema_degraded = true;
+  // lado federativo (ou os quesitos, F10) saiu degradado por migration
+  // pendente.
+  if (!cols.source || !resCols.certificate_requested || !resCols.kihon || !resCols.kata || !resCols.kumite) {
+    out.schema_degraded = true;
+  }
   return out;
 }
 
@@ -1215,4 +1352,10 @@ module.exports = {
   beltHistoryCols,
   resultCols,
   __resetColumnCache,
+  // F10 — os três quesitos (constante nomeada, fonte única da hierarquia)
+  QUESITO_VALUES,
+  QUESITO_FIELDS,
+  QUESITO_RANK,
+  normalizeQuesito,
+  quesitoRankOf,
 };
