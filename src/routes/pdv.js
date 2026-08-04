@@ -36,6 +36,12 @@
 //     venda (services/couponPolicy). Blindar so o /coupons/validate nao
 //     resolvia: e AQUI que o cupom e gravado e o current_uses incrementado,
 //     entao o /sale era um bypass completo do cupom de aniversario.
+// 04/08/2026 (fix syntax error json_build_object): sales-for-troca e
+//   sales-by-product-barcode tinham virgula faltando entre
+//   'original_sale_item_id',si.id e 'total_price',si.total_price (patch
+//   manual mal aplicado), MAIS virgula sobrando antes do ')' de fechamento --
+//   Postgres rejeitava a query inteira com "syntax error at or near ")"" e
+//   os dois endpoints de busca de venda pra troca caiam 100% (500) no PDV.
 // ============================================================
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
@@ -749,8 +755,8 @@ router.get('/sales-for-troca', async (req, res) => {
                 'product_id',si.product_id,'variant_id',si.variant_id,
                 'product_name_snapshot',si.product_name_snapshot,
                 'quantity',si.quantity,'unit_price',si.unit_price,
-                'original_sale_item_id',si.id
-                'total_price',si.total_price,
+                'original_sale_item_id',si.id,
+                'total_price',si.total_price
               )) FILTER (WHERE si.id IS NOT NULL),'[]'::json) AS items
          FROM sales s ${nfceJoin}
          LEFT JOIN companies comp ON comp.id=s.company_id
@@ -814,8 +820,8 @@ router.get('/sales-by-product-barcode', async (req, res) => {
                 'product_id',si.product_id,'variant_id',si.variant_id,
                 'product_name_snapshot',si.product_name_snapshot,
                 'quantity',si.quantity,'unit_price',si.unit_price,
-                'original_sale_item_id',si.id
-                'total_price',si.total_price,
+                'original_sale_item_id',si.id,
+                'total_price',si.total_price
               )) FILTER (WHERE si.id IS NOT NULL),'[]'::json) AS items
          FROM sales s JOIN eligible_sales es ON es.id=s.id
          LEFT JOIN companies comp ON comp.id=s.company_id
