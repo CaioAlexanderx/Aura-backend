@@ -61,6 +61,22 @@
 //   em src/ e tests/ antes de apagar. federateStudentByRequest (caminho 2,
 //   solicitação H1) CONTINUA vivo e é chamado pela rota.
 //
+// F10 (04/08/2026) — FILIAÇÃO: MÃE E PAI (aditivo, migration 272)
+//   A ficha de graduação real (Areikan Karatê-Dô) pede Mãe e Pai
+//   SEPARADAMENTE. Isso é FILIAÇÃO (identidade da pessoa) — não é o mesmo
+//   conceito que karate_dojo_guardians (o RESPONSÁVEL: quem paga/recebe
+//   cobrança e é o contato de emergência). Os dois podem não coincidir e
+//   um aluno pode ter mãe/pai registrados sem ter responsável vinculado
+//   (ou vice-versa). Por isso mother_name/father_name são colunas NOVAS
+//   em karate_dojo_students — nunca um substituto do guardian_id.
+//   `customers` (praticante da federação) NÃO tem coluna equivalente
+//   hoje (conferido em produção) — então mother_name/father_name NÃO
+//   entram em IDENTITY_FIELDS nem em GUARDIAN_SYNC_FIELDS
+//   (karateStudentIdentityLink.js) e por consequência não entram na
+//   guarda de karateIdentityWriteGuard.js: não há disputa de lista para
+//   uma coluna que só existe de um lado. Se um dia a federação ganhar
+//   filiação, aí sim isso entra no sync — decisão de outro PR.
+//
 // Família é entidade de primeira classe (billing familiar na F3):
 // responsável em karate_dojo_guardians; um responsável → N alunos.
 //
@@ -106,11 +122,20 @@ const IDENTITY_COLS = [
   'neighborhood', 'city', 'state', 'karate_photo_url',
 ];
 
+// F10 — filiação (migration 272). Lista SEPARADA de IDENTITY_COLS de
+// propósito: colunas de uma migration DIFERENTE (272, não 262) e com
+// probe de schema PRÓPRIO. Misturar as duas degradaria RG/endereço junto
+// se só mother_name/father_name estivessem faltando (ou vice-versa) —
+// exatamente o erro que uma lista única evitaria, ao contrário.
+const PARENTAGE_COLS = ['mother_name', 'father_name'];
+
 // F7.2 — quais colunas do ALUNO disparam sincronização com a federação.
 // NÃO é uma lista nova: vem de karateIdentitySync, que por sua vez a tira
 // de IDENTITY_FIELDS (F7.1). Nome, nascimento, CPF e sexo entram aqui e
 // NÃO estão em IDENTITY_COLS — são de antes da 262 e mesmo assim são
-// identidade da pessoa.
+// identidade da pessoa. mother_name/father_name (F10, migration 272) NÃO
+// entram aqui: `customers` não tem coluna equivalente hoje, então não há
+// para onde sincronizar (ver cabeçalho do arquivo).
 const SYNCED_IDENTITY_COLS = identitySync.DOJO_COLUMNS;
 
 function svcError(status, code, message) {
@@ -140,6 +165,7 @@ function parsePaging({ limit, offset } = {}) {
 let HAS_IS_FEDERATED_COL = true;      // migration 253
 let HAS_REQUEST_STUDENT_ID_COL = true; // migration 253
 let HAS_IDENTITY_COLS = true;          // migration 262 (F7.0)
+let HAS_PARENTAGE_COLS = true;         // migration 272 (F10)
 
 // Sem a coluna, practitioner_id NOT NULL é a melhor verdade disponível
 // (é o vínculo real; is_federated é só a declaração).
@@ -178,6 +204,14 @@ function identityFields(p) {
   return IDENTITY_COLS.map((c) => `${p}${c}`).join(', ');
 }
 
+// F10 — mesma mecânica de identityFields, para a filiação (migration 272).
+function parentageFields(p) {
+  if (!HAS_PARENTAGE_COLS) {
+    return PARENTAGE_COLS.map((c) => `NULL::text AS ${c}`).join(', ');
+  }
+  return PARENTAGE_COLS.map((c) => `${p}${c}`).join(', ');
+}
+
 function isFederationSchemaError(e) {
   if (!e || (e.code !== '42703' && e.code !== '42P01')) return false;
   // Só degrada por causa das coisas NOVAS. 42P01 de karate_dojo_students
@@ -189,6 +223,13 @@ function isFederationSchemaError(e) {
 function isIdentitySchemaError(e) {
   if (!e || e.code !== '42703') return false;
   return new RegExp(`\\b(${IDENTITY_COLS.join('|')})\\b`, 'i').test(e.message || '');
+}
+
+// F10 — mesmo mecanismo, PROBE PRÓPRIO (migration 272 é um boundary
+// diferente da 262). Ver comentário de PARENTAGE_COLS.
+function isParentageSchemaError(e) {
+  if (!e || e.code !== '42703') return false;
+  return new RegExp(`\\b(${PARENTAGE_COLS.join('|')})\\b`, 'i').test(e.message || '');
 }
 
 // UMA única retentativa degradada (armadilha "retry chain 42P01": nunca
@@ -205,6 +246,12 @@ async function withStudentSchemaFallback(run) {
       HAS_IDENTITY_COLS = false;
       degraded = true;
       console.warn('[karateDojoStudentService] schema da F7.0 ausente (migration 262 pendente) — degradando identidade:', e.message);
+    }
+
+    if (HAS_PARENTAGE_COLS && isParentageSchemaError(e)) {
+      HAS_PARENTAGE_COLS = false;
+      degraded = true;
+      console.warn('[karateDojoStudentService] schema da F10 ausente (migration 272 pendente) — degradando filiação:', e.message);
     }
 
     if ((HAS_IS_FEDERATED_COL || HAS_REQUEST_STUDENT_ID_COL) && isFederationSchemaError(e)) {
@@ -356,6 +403,15 @@ function validateStudentPayload(body, { partial = false } = {}) {
     }
   }
 
+  // ── F10: filiação — mãe e pai (migration 272) ──
+  // Texto livre, mesmo tratamento de rg/street/etc acima: ausente é
+  // neutro (não entra em `data`), string vazia vira null explícito
+  // (permite apagar o campo num PATCH), valor não-vazio é trim().
+  for (const field of ['mother_name', 'father_name']) {
+    if (b[field] === undefined) continue;
+    data[field] = b[field] != null && String(b[field]).trim() !== '' ? String(b[field]).trim() : null;
+  }
+
   if (b.guardian_id !== undefined) {
     data.guardian_id = b.guardian_id != null && String(b.guardian_id).trim() !== '' ? String(b.guardian_id).trim() : null;
   }
@@ -409,7 +465,7 @@ function studentFields(p) {
     `${p}cpf, ${p}sex, ${p}phone, ${p}email, ${p}photo_url, ${p}belt_label, ${p}belt_order, ` +
     `${p}status, ${p}guardian_id, ${p}consent_lgpd, ${p}notes, ${p}practitioner_id, ` +
     `to_char(${p}enrolled_at, 'YYYY-MM-DD') AS enrolled_at, ${p}created_at, ${p}updated_at, ` +
-    identityFields(p)
+    identityFields(p) + ', ' + parentageFields(p)
   );
 }
 
@@ -460,6 +516,9 @@ function shapeStudent(row) {
     // photo_url é coluna MORTA (migration 242, nenhuma UI escreveu nela).
     // COALESCE mantém compatível quem por acaso tenha algo lá.
     karate_photo_url: row.karate_photo_url || row.photo_url || null,
+    // ── F10 (aditivo, migration 272): filiação — mãe e pai ──
+    mother_name: row.mother_name || null,
+    father_name: row.father_name || null,
     enrolled_at: row.enrolled_at || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -659,12 +718,19 @@ async function createStudent(dojoId, data) {
     data.enrolled_at !== undefined ? data.enrolled_at : null,
   ];
 
-  const attempt = (withIdentity) => {
+  const attempt = (withIdentity, withParentage) => {
     let cols = CREATE_BASE_COLS;
     let values = CREATE_BASE_VALUES;
     const params = baseParams.slice();
     if (withIdentity) {
       for (const c of IDENTITY_COLS) {
+        params.push(data[c] !== undefined ? data[c] : null);
+        cols += `, ${c}`;
+        values += `, $${params.length}`;
+      }
+    }
+    if (withParentage) {
+      for (const c of PARENTAGE_COLS) {
         params.push(data[c] !== undefined ? data[c] : null);
         cols += `, ${c}`;
         values += `, $${params.length}`;
@@ -680,15 +746,26 @@ async function createStudent(dojoId, data) {
 
   let rows;
   try {
-    ({ rows } = await attempt(HAS_IDENTITY_COLS));
+    ({ rows } = await attempt(HAS_IDENTITY_COLS, HAS_PARENTAGE_COLS));
   } catch (e) {
-    // Defensivo (CLAUDE.md #1): o backend sobe antes da migration 262. UMA
-    // retentativa sem os campos novos — perder o RG do cadastro é ruim,
-    // não conseguir cadastrar o aluno é inaceitável.
-    if (!HAS_IDENTITY_COLS || !isIdentitySchemaError(e)) throw e;
-    HAS_IDENTITY_COLS = false;
-    console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — aluno criado sem RG/endereço/foto:', e.message);
-    ({ rows } = await attempt(false));
+    // Defensivo (CLAUDE.md #1): o backend sobe antes das migrations 262/272.
+    // Avalia as DUAS famílias no mesmo catch (mesmo espírito de
+    // withStudentSchemaFallback) — perder RG/endereço/mãe/pai do cadastro
+    // é ruim, não conseguir cadastrar o aluno é inaceitável. UMA
+    // retentativa, nunca em cadeia.
+    let degraded = false;
+    if (HAS_IDENTITY_COLS && isIdentitySchemaError(e)) {
+      HAS_IDENTITY_COLS = false;
+      degraded = true;
+      console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — aluno criado sem RG/endereço/foto:', e.message);
+    }
+    if (HAS_PARENTAGE_COLS && isParentageSchemaError(e)) {
+      HAS_PARENTAGE_COLS = false;
+      degraded = true;
+      console.warn('[karateDojoStudentService] filiação F10 ausente (migration 272 pendente) — aluno criado sem mãe/pai:', e.message);
+    }
+    if (!degraded) throw e;
+    ({ rows } = await attempt(HAS_IDENTITY_COLS, HAS_PARENTAGE_COLS));
   }
 
   // Aluno recém-criado nunca nasce federado nem com solicitação pendente:
@@ -710,9 +787,13 @@ const UPDATABLE_COLS = [
 ];
 
 // Whitelist efetiva: os campos da F7.0 só entram quando a migration 262 já
-// rodou. Continua sendo whitelist — nada vem do spread do body.
+// rodou, e os da F10 só quando a 272 já rodou. Continua sendo whitelist —
+// nada vem do spread do body.
 function updatableCols() {
-  return HAS_IDENTITY_COLS ? UPDATABLE_COLS.concat(IDENTITY_COLS) : UPDATABLE_COLS;
+  let cols = UPDATABLE_COLS;
+  if (HAS_IDENTITY_COLS) cols = cols.concat(IDENTITY_COLS);
+  if (HAS_PARENTAGE_COLS) cols = cols.concat(PARENTAGE_COLS);
+  return cols;
 }
 
 // F7.2: quais colunas de IDENTIDADE este PATCH tocou. `photo_url` (coluna
@@ -801,9 +882,18 @@ async function updateStudent(dojoId, studentId, data, ctx = {}) {
     try {
       upd = await runUpdate();
     } catch (e) {
-      if (!HAS_IDENTITY_COLS || !isIdentitySchemaError(e)) throw e;
-      HAS_IDENTITY_COLS = false;
-      console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — PATCH aplicado sem RG/endereço/foto:', e.message);
+      let degraded = false;
+      if (HAS_IDENTITY_COLS && isIdentitySchemaError(e)) {
+        HAS_IDENTITY_COLS = false;
+        degraded = true;
+        console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — PATCH aplicado sem RG/endereço/foto:', e.message);
+      }
+      if (HAS_PARENTAGE_COLS && isParentageSchemaError(e)) {
+        HAS_PARENTAGE_COLS = false;
+        degraded = true;
+        console.warn('[karateDojoStudentService] filiação F10 ausente (migration 272 pendente) — PATCH aplicado sem mãe/pai:', e.message);
+      }
+      if (!degraded) throw e;
       upd = await runUpdate();
     }
   } else {
@@ -817,11 +907,22 @@ async function updateStudent(dojoId, studentId, data, ctx = {}) {
         ctx,
       }));
     } catch (e) {
-      if (!HAS_IDENTITY_COLS || !isIdentitySchemaError(e)) throw e;
       // A transação inteira já foi revertida (ROLLBACK no catch de lá).
       // UMA retentativa, agora degradada e sem sync — nunca em cadeia.
-      HAS_IDENTITY_COLS = false;
-      console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — PATCH refeito sem sync:', e.message);
+      // Avalia as DUAS famílias (F7.0 e F10) no mesmo catch, mesmo
+      // espírito de withStudentSchemaFallback.
+      let degraded = false;
+      if (HAS_IDENTITY_COLS && isIdentitySchemaError(e)) {
+        HAS_IDENTITY_COLS = false;
+        degraded = true;
+        console.warn('[karateDojoStudentService] identidade F7.0 ausente (migration 262 pendente) — PATCH refeito sem sync:', e.message);
+      }
+      if (HAS_PARENTAGE_COLS && isParentageSchemaError(e)) {
+        HAS_PARENTAGE_COLS = false;
+        degraded = true;
+        console.warn('[karateDojoStudentService] filiação F10 ausente (migration 272 pendente) — PATCH refeito sem sync:', e.message);
+      }
+      if (!degraded) throw e;
       upd = await runUpdate();
       syncResult = { status: 'skipped', synced: false, fields: [], reason: 'SCHEMA_PENDING' };
     }
@@ -1159,6 +1260,13 @@ async function federateStudentByRequest(dojoId, federationId, studentId, { body,
 //   não uma suposição: se algum dia o import aceitar número FPKT, as
 //   linhas vinculadas caem na versão em LOTE do sync — UMA query de
 //   candidatos para as 500 linhas, e UPDATE só nas fichas que divergem.
+//
+// F10 — DECISÃO DE ESCOPO (declarada, não omissão silenciosa): o import em
+// lote NÃO foi estendido para aceitar mother_name/father_name. A planilha
+// de importação hoje não tem essas colunas e mãe/pai chegam via
+// form/PATCH (que tem o fallback de schema). Se o import ganhar essas
+// colunas depois, o INSERT abaixo precisa entrar na lista de colunas
+// como as demais.
 async function importStudents(dojoId, rows, ctx = {}) {
   if (!Array.isArray(rows)) {
     throw svcError(422, 'VALIDATION_ERROR', 'Corpo esperado: { rows: [...] } (array de linhas já parseadas)');
@@ -1444,6 +1552,7 @@ module.exports = {
   LIST_DEFAULT_LIMIT,
   LIST_MAX_LIMIT,
   IDENTITY_COLS,
+  PARENTAGE_COLS,
   SYNCED_IDENTITY_COLS,
   computeAge,
   isMinor,
