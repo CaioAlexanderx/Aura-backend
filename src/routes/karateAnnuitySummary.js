@@ -40,11 +40,17 @@
 // batem exatamente com os das views (conferido em produção, ver PR).
 //
 // Regras de negócio que este endpoint RESPEITA (CLAUDE.md):
-//   - Só faixa-preta ATIVA entra no segmento `praticante` (join com
-//     customers.is_active + karate_current_belt.belt_level='preta').
-//     Praticante que perdeu a faixa preta ou ficou inativo depois de ter
-//     sido cobrado SAI do KPI (mesmo comportamento de
-//     karate_member_standing, que também filtra por estado atual).
+//   - Segmento `praticante` FILTRA por customers.is_active (join com
+//     karate_current_belt.belt_level='preta', que continua FIXO — a faixa
+//     preta nunca é afrouxada). Default é só praticante ATIVO — mesmo
+//     default/mesmo parâmetro (`?member_status=active|inactive|all`) de
+//     GET /financial/annuities/cpf (ver parseMemberStatus/
+//     memberStatusToIsActiveValues em karateAnnuityService.js,
+//     compartilhado pelos dois arquivos pra lista e KPI nunca divergirem).
+//     Praticante que perdeu a faixa preta SEMPRE sai do KPI (a faixa preta
+//     não tem toggle); inativo sai por padrão, mas pode ser incluído via
+//     member_status (mesmo comportamento de karate_member_standing, que
+//     também filtra por estado atual).
 //   - Segmento `dojo` FILTRA por companies.is_active (decisão de produto,
 //     Caio 21/07/2026: "não temos ação, não podemos cobrar e controlar os
 //     inativos [...] o mesmo para indicadores e números absolutos, sempre
@@ -136,8 +142,11 @@ function rowToSegment(row) {
 // separadas e garante que total = dojo + praticante sempre (mesma fonte).
 // dojo_status ($3, boolean[] ou NULL): mesmo critério/mesmo parâmetro de
 // GET /financial/annuities/dojos (karateAnnuities.js) — companies.is_active
-// do dojô. Aplicado só na perna 'dojo' do OR; a perna 'praticante' segue
-// intocada (customers.is_active + faixa preta, regra própria dela).
+// do dojô. Aplicado só na perna 'dojo' do OR.
+// member_status ($4, boolean[] ou NULL): mesmo critério/mesmo parâmetro de
+// GET /financial/annuities/cpf (karateAnnuities.js) — customers.is_active
+// do praticante. Aplicado só na perna 'praticante' do OR;
+// cb.belt_level='preta' continua FIXO (nunca afrouxado por este parâmetro).
 const SUMMARY_SQL = `
   WITH elig AS (
     SELECT i.amount, i.amount_paid, i.status, i.due_date,
@@ -156,7 +165,7 @@ const SUMMARY_SQL = `
         )
         OR (
           h.practitioner_id IS NOT NULL
-          AND COALESCE(cu.is_active, true)
+          AND ($4::boolean[] IS NULL OR COALESCE(cu.is_active, true) = ANY($4::boolean[]))
           AND cb.belt_level = 'preta'
         )
       )
@@ -193,9 +202,23 @@ router.get('/annuities/summary', ...guards.adminOnly(), async (req, res) => {
     });
   }
   const dojoStatusValues = annuitySvc.dojoStatusToIsActiveValues(dojoStatus);
+  // member_status: MESMO parâmetro/MESMO default ('active') de
+  // GET /financial/annuities/cpf — parseMemberStatus/
+  // memberStatusToIsActiveValues, também importados de
+  // karateAnnuityService.js, pra o segmento `praticante` do summary e a
+  // listagem CPF nunca divergirem no critério de ativo/inativo (mesmo
+  // motivo do dojoStatus acima).
+  const memberStatus = annuitySvc.parseMemberStatus(req.query.member_status);
+  if (memberStatus === null) {
+    return res.status(400).json({
+      error: `member_status inválido. Valores aceitos: ${annuitySvc.MEMBER_STATUS_VALUES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  const memberStatusValues = annuitySvc.memberStatusToIsActiveValues(memberStatus);
 
   try {
-    const { rows } = await db.query(SUMMARY_SQL, [federationId, year, dojoStatusValues]);
+    const { rows } = await db.query(SUMMARY_SQL, [federationId, year, dojoStatusValues, memberStatusValues]);
     const out = emptySummary(year);
     for (const row of rows) {
       const seg = rowToSegment(row);
