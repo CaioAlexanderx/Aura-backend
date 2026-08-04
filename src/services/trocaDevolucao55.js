@@ -2,6 +2,18 @@
 // AURA. — services/trocaDevolucao55.js
 // Helper de orquestracao da NF-e modelo 55 de devolucao de venda.
 //
+// 03/08/2026 (Aura Notas na 55): a devolucao agora sai pela ENGINE PROPRIA
+// (sefazSp/nfe55) quando a empresa esta APTA — mesma semantica AUTO do PDV
+// (routes/nfce.js S4.2/16-07): A1 vigente salvo + UF SP; kill-switch
+// nfce_config.provider='nuvemfiscal' forca gateway. NF-e 55 NAO usa CSC.
+// THROW da engine → engineBreaker + fallback pro gateway na MESMA chamada
+// (fallback_reason='engine_error: ...'); breaker aberto → direto gateway
+// ('breaker_open'). Rejeicao da SEFAZ = a engine FUNCIONOU (sem fallback —
+// problema de dado, o gateway rejeitaria igual). provider_used/
+// fallback_reason/xml_signed persistidos defensivamente (42703).
+// Contexto: Nuvem Fiscal fora do ar em 03/08 — o gateway quebrava ate o
+// getToken (resposta nao-JSON) e a troca ficava sem NF-e de devolucao.
+//
 // 27/05/2026 (log detalhado): catch do emit com console.error estruturado.
 // 25/05/2026 (Polish v3): dest = proprio emitente (SEFAZ FAQ MG #7).
 // 12/05/2026 (Fase C): CFOP 1.202 + CSOSN 102 + tpNF=0 + finNFe=4 + refNFe.
@@ -20,6 +32,8 @@
 
 const db = require('../config/database');
 const nuvemfiscal = require('./nuvemfiscal');
+const sefazSpNfe55 = require('./sefazSp/nfe55');
+const engineBreaker = require('./sefazSp/engineBreaker');
 
 class TrocaDevolucao55Error extends Error {
   constructor(status, body) {
@@ -36,9 +50,9 @@ function validNcm(n) {
   return (s.length === 8 && s !== '00000000') ? s : null;
 }
 
-// Normaliza status + motivo da resposta da Nuvem Fiscal. Status no topo
-// ('autorizado'|'rejeitado'|'denegado'|'pendente'|...) e motivo em
-// codigo_status/motivo_status (cStat+xMotivo da SEFAZ).
+// Normaliza status + motivo da resposta do provedor (gateway OU engine
+// propria — mesma shape). Status no topo ('autorizado'|'rejeitado'|...) e
+// motivo em codigo_status/motivo_status (cStat+xMotivo da SEFAZ).
 function normalizeDfeStatus(result) {
   const raw = String((result && result.status) || '').toLowerCase();
   const aut = (result && (result.autorizacao || result.protocolo_autorizacao)) || {};
@@ -157,42 +171,105 @@ async function handle(client, {
     motivo: notes || 'Troca',
   };
 
-  // 6. Emite NF-e/55
-  let nfeResult;
+  // 5b. Aptidao pra emissao propria (Aura Notas, modelo 55).
+  // Apta = nfce_config presente + UF SP + provider != 'nuvemfiscal'
+  // (kill-switch) + A1 vigente salvo (company_certificates). Sem CSC —
+  // QR Code e exclusivo da NFC-e. Defensivo pra tabela/coluna ausente.
+  let config = null;
   try {
-    nfeResult = await nuvemfiscal.emitNfeDevolucao(company, {
-      originalChave: orig.chave_acesso,
-      items: devolucaoItems,
-      consumerInfo: consumerInfo,
-      serie: 1,
-      numero: nextNumero,
-      reference: 'troca-' + trocaSaleId,
-    });
-  } catch (sefazErr) {
-    let payloadStr = null;
-    try { payloadStr = JSON.stringify(sefazErr.payload, null, 2); } catch (_) {}
-    console.error('[trocaDevolucao55] SEFAZ error:', {
-      message: sefazErr.message,
-      status: sefazErr.status,
-      erros: sefazErr.erros || [],
-      context: {
-        company_id: saleCompanyId,
-        company_cnpj: company.cnpj,
-        original_chave: orig.chave_acesso,
-        troca_sale_id: trocaSaleId,
-        nfe55_numero: nextNumero,
-        total_devolucao: parseFloat(returnedValue.toFixed(2)),
-        items_count: devolucaoItems.length,
-      },
-    });
-    if (payloadStr) {
-      console.error('[trocaDevolucao55] SEFAZ payload completo:', payloadStr);
+    const { rows: cfgRows } = await q(
+      `SELECT * FROM nfce_config WHERE company_id = $1`,
+      [saleCompanyId]
+    );
+    config = cfgRows[0] || null;
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    config = null;
+  }
+
+  let engineApta = false;
+  if (config && String(config.uf || 'SP').toUpperCase() === 'SP' && config.provider !== 'nuvemfiscal') {
+    try {
+      const { rows: certRows } = await q(
+        `SELECT 1 FROM company_certificates WHERE company_id = $1 AND not_after > NOW() LIMIT 1`,
+        [saleCompanyId]
+      );
+      engineApta = certRows.length > 0;
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+      engineApta = false;
     }
-    throw new TrocaDevolucao55Error(502, {
-      error: 'SEFAZ rejeitou NF-e modelo 55 de devolucao: ' + sefazErr.message,
-      sefaz_payload: sefazErr.payload || null,
-      erros: sefazErr.erros || [],
-    });
+  }
+
+  const breakerOpen = engineApta && engineBreaker.isOpen(saleCompanyId);
+  let providerUsed = null;
+  let fallbackReason = breakerOpen ? 'breaker_open' : null;
+
+  // 6. Emite NF-e/55 — engine propria primeiro (quando apta), gateway como
+  // fallback. Payload IDENTICO nos dois caminhos.
+  const emitParams = {
+    originalChave: orig.chave_acesso,
+    items: devolucaoItems,
+    consumerInfo: consumerInfo,
+    serie: 1,
+    numero: nextNumero,
+    reference: 'troca-' + trocaSaleId,
+  };
+
+  let nfeResult = null;
+
+  if (engineApta && !breakerOpen) {
+    try {
+      nfeResult = await sefazSpNfe55.emitNfeDevolucao55(company, emitParams, {
+        db: client || db,
+        config: config,
+      });
+      // Engine respondeu (autorizada OU rejeitada) = engine de pe.
+      engineBreaker.recordSuccess(saleCompanyId);
+      providerUsed = 'sefaz_sp';
+    } catch (engineErr) {
+      // THROW = defeito NOSSO (cert, assinatura, XML) ou SEFAZ inacessivel →
+      // breaker + fallback pro gateway na MESMA chamada.
+      engineBreaker.recordFailure(saleCompanyId);
+      fallbackReason = ('engine_error: ' + (engineErr.message || 'erro desconhecido')).slice(0, 500);
+      console.error('[trocaDevolucao55] engine SEFAZ-SP falhou (fallback→gateway):',
+        engineErr.message);
+      nfeResult = null;
+    }
+  }
+
+  if (!nfeResult) {
+    providerUsed = 'nuvemfiscal';
+    try {
+      nfeResult = await nuvemfiscal.emitNfeDevolucao(company, emitParams);
+    } catch (sefazErr) {
+      let payloadStr = null;
+      try { payloadStr = JSON.stringify(sefazErr.payload, null, 2); } catch (_) {}
+      console.error('[trocaDevolucao55] SEFAZ error:', {
+        message: sefazErr.message,
+        status: sefazErr.status,
+        erros: sefazErr.erros || [],
+        fallback_reason: fallbackReason,
+        context: {
+          company_id: saleCompanyId,
+          company_cnpj: company.cnpj,
+          original_chave: orig.chave_acesso,
+          troca_sale_id: trocaSaleId,
+          nfe55_numero: nextNumero,
+          total_devolucao: parseFloat(returnedValue.toFixed(2)),
+          items_count: devolucaoItems.length,
+        },
+      });
+      if (payloadStr) {
+        console.error('[trocaDevolucao55] SEFAZ payload completo:', payloadStr);
+      }
+      throw new TrocaDevolucao55Error(502, {
+        error: 'SEFAZ rejeitou NF-e modelo 55 de devolucao: ' + sefazErr.message,
+        sefaz_payload: sefazErr.payload || null,
+        erros: sefazErr.erros || [],
+        fallback_reason: fallbackReason,
+      });
+    }
   }
 
   const devolucaoChave = (nfeResult && (nfeResult.chave_acesso || nfeResult.chave)) || null;
@@ -203,34 +280,58 @@ async function handle(client, {
   const nfeMotivo = norm.motivo;
   const nfeErrorMsg = (nfeStatus !== 'autorizada' && nfeStatus !== 'processando') ? (nfeMotivo || null) : null;
   if (nfeErrorMsg) {
-    console.warn('[trocaDevolucao55] NF-e 55 ' + nfeStatus + ' (troca ' + trocaSaleId + '): ' + nfeErrorMsg);
+    console.warn('[trocaDevolucao55] NF-e 55 ' + nfeStatus + ' (troca ' + trocaSaleId + ', provider ' + providerUsed + '): ' + nfeErrorMsg);
   }
 
-  // 7. Insere registro (com error_message + metadata)
-  await q(
-    `INSERT INTO nfce_emissions
-       (company_id, sale_id, numero, serie, chave_acesso, tipo, finalidade,
-        ref_chave_nfe, status, nuvemfiscal_id, customer_cpf, customer_name,
-        items, total_products, total_nfce, emitted_by, error_message, metadata)
-     VALUES ($1, $2, $3, 1, $4, 'nfe', 4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15::jsonb)`,
-    [
-      saleCompanyId,
-      trocaSaleId,
-      nextNumero,
-      devolucaoChave,
-      orig.chave_acesso,
-      nfeStatus,
-      nuvemId,
-      orig.customer_cpf,
-      orig.customer_name || null,
-      JSON.stringify(devolucaoItems),
-      parseFloat(returnedValue.toFixed(2)),
-      parseFloat(returnedValue.toFixed(2)),
-      userId || null,
-      nfeErrorMsg,
-      JSON.stringify(nfeResult || {}),
-    ]
-  );
+  // 7. Insere registro (com error_message + metadata). O XML assinado da
+  // emissao propria vai na coluna xml_signed (migration 234), NAO no
+  // metadata (economiza espaco e casa com o rastro da NFC-e propria).
+  const xmlSigned = (nfeResult && nfeResult.xml_signed) || null;
+  const metaObj = Object.assign({}, nfeResult || {});
+  delete metaObj.xml_signed;
+
+  const baseInsertVals = [
+    saleCompanyId,
+    trocaSaleId,
+    nextNumero,
+    devolucaoChave,
+    orig.chave_acesso,
+    nfeStatus,
+    nuvemId,
+    orig.customer_cpf,
+    orig.customer_name || null,
+    JSON.stringify(devolucaoItems),
+    parseFloat(returnedValue.toFixed(2)),
+    parseFloat(returnedValue.toFixed(2)),
+    userId || null,
+    nfeErrorMsg,
+    JSON.stringify(metaObj),
+  ];
+
+  try {
+    // Caminho com colunas das migrations 234 (xml_signed) + 237
+    // (provider_used/fallback_reason).
+    await q(
+      `INSERT INTO nfce_emissions
+         (company_id, sale_id, numero, serie, chave_acesso, tipo, finalidade,
+          ref_chave_nfe, status, nuvemfiscal_id, customer_cpf, customer_name,
+          items, total_products, total_nfce, emitted_by, error_message, metadata,
+          provider_used, fallback_reason, xml_signed)
+       VALUES ($1, $2, $3, 1, $4, 'nfe', 4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15::jsonb, $16, $17, $18)`,
+      baseInsertVals.concat([providerUsed, fallbackReason, xmlSigned])
+    );
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+    // Fallback legado (migrations ausentes): INSERT sem as colunas novas.
+    await q(
+      `INSERT INTO nfce_emissions
+         (company_id, sale_id, numero, serie, chave_acesso, tipo, finalidade,
+          ref_chave_nfe, status, nuvemfiscal_id, customer_cpf, customer_name,
+          items, total_products, total_nfce, emitted_by, error_message, metadata)
+       VALUES ($1, $2, $3, 1, $4, 'nfe', 4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15::jsonb)`,
+      baseInsertVals
+    );
+  }
 
   // 8. Marca a trocaSale
   await q(
@@ -253,6 +354,9 @@ async function handle(client, {
     status: nfeStatus,
     motivo: nfeMotivo || null,
     error_message: nfeErrorMsg,
+    provider_used: providerUsed,
+    fallback: fallbackReason != null,
+    fallback_reason: fallbackReason,
   };
 }
 
