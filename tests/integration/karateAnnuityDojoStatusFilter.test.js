@@ -45,8 +45,8 @@ afterEach(() => {
   db.query.mockReset();
 });
 
-// ── GET /annuities/dojos ────────────────────────────────────────
- describe('GET /annuities/dojos — dojo_status', () => {
+// ── GET /annuities/dojos ────────────────────────────────────────────
+describe('GET /annuities/dojos — dojo_status', () => {
   test('default (sem dojo_status na query): filtra companies.is_active = [true] no $3 posicional', async () => {
     mockCompanyAccess();
     db.query
@@ -253,7 +253,7 @@ describe('GET /annuities/dojos — dojo_id', () => {
   });
 });
 
-// ── GET /annuities/summary ──────────────────────────────
+// ── GET /annuities/summary ──────────────────────────────────────────
 describe('GET /annuities/summary — dojo_status', () => {
   function summaryRows({ dojo, praticante, total } = {}) {
     const zero = { previsto_count: 0, previsto_valor: 0, recebido_count: 0, recebido_valor: 0, em_aberto_count: 0, em_aberto_valor: 0, atrasado_count: 0, atrasado_valor: 0 };
@@ -324,7 +324,7 @@ describe('GET /annuities/summary — dojo_status', () => {
   });
 });
 
-// ── Consistência lista × summary ────────────────────────
+// ── Consistência lista × summary ────────────────────────────────────
 describe('dojo_status — consistência lista × summary (mesmo universo)', () => {
   test('mesmo dojo_status produz o MESMO array de is_active em ambas as rotas (via helper compartilhado)', () => {
     const annuitySvc = require('../../src/services/karateAnnuityService');
