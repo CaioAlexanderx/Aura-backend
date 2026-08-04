@@ -750,6 +750,7 @@ router.get('/sales-for-troca', async (req, res) => {
                 'product_name_snapshot',si.product_name_snapshot,
                 'quantity',si.quantity,'unit_price',si.unit_price,
                 'original_sale_item_id',si.id
+                'total_price',si.total_price,
               )) FILTER (WHERE si.id IS NOT NULL),'[]'::json) AS items
          FROM sales s ${nfceJoin}
          LEFT JOIN companies comp ON comp.id=s.company_id
@@ -814,6 +815,7 @@ router.get('/sales-by-product-barcode', async (req, res) => {
                 'product_name_snapshot',si.product_name_snapshot,
                 'quantity',si.quantity,'unit_price',si.unit_price,
                 'original_sale_item_id',si.id
+                'total_price',si.total_price,
               )) FILTER (WHERE si.id IS NOT NULL),'[]'::json) AS items
          FROM sales s JOIN eligible_sales es ON es.id=s.id
          LEFT JOIN companies comp ON comp.id=s.company_id
