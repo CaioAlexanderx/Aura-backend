@@ -939,7 +939,8 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
       let quesitoCol = '';
       let quesitoVal = '';
       let quesitoSet = '';
-      if (resCols.kihon && resCols.kata && resCols.kumite) {
+      const hasQuesitoCols = resCols.kihon && resCols.kata && resCols.kumite;
+      if (hasQuesitoCols) {
         params.push(entry.kihon, entry.kata, entry.kumite);
         const n = params.length;
         quesitoCol = ', kihon, kata, kumite';
@@ -984,13 +985,12 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
         belt_history: null, // 'created' | 'reused' | null
         belt_history_skipped_reason: null,
         student_belt_updated: false,
-        // F10: eco do que foi gravado (ou tentado, se a 272 ainda não
-        // rodou — nesse caso volta null, nunca inventa um valor).
-        quesitos: {
-          kihon: entry.kihon || null,
-          kata: entry.kata || null,
-          kumite: entry.kumite || null,
-        },
+        // F10: eco do que foi REALMENTE gravado — se a 272 ainda não rodou
+        // (colunas ausentes), a resposta é null: nunca finge que persistiu
+        // um valor que na verdade não foi escrito no banco.
+        quesitos: hasQuesitoCols
+          ? { kihon: entry.kihon || null, kata: entry.kata || null, kumite: entry.kumite || null }
+          : { kihon: null, kata: null, kumite: null },
         certificate: {
           requested: entry.certificate_requested,
           created: false,
