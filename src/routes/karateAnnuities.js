@@ -2498,3 +2498,503 @@ router.patch('/annuities/cpf/:practitionerId/:annuityId', ...guards.adminOnly(),
         [newPeriod, annuityId]
       );
     }
+
+    // ── Reconcilia TUDO (parcela/ledger/rollup do header) a partir do
+    // ledger remanescente — mesma primitiva do PATCH de dojô/PR #431.
+    const result = await recomputeAnnuityFromLedger(client, { federation_id: federationId, annuity_id: annuityId });
+
+    await client.query('COMMIT');
+
+    reconcileInstallmentTransactions(result.installments).catch((e) =>
+      console.error('[karateAnnuities] reconcileInstallmentTransactions falhou (patch anuidade cpf):', e.message)
+    );
+
+    financeAudit.logFinanceAudit({
+      federationId, action: 'annuity_edit', targetType: 'annuity', targetId: annuityId,
+      practitionerId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: {
+        amount: hist.amount != null ? parseFloat(hist.amount) : null,
+        plan: hist.plan || null,
+        reference_period: hist.reference_period,
+        installments: installments.map((i) => ({
+          seq: i.seq, amount: parseFloat(i.amount), due_date: toIsoDate(i.due_date), amount_paid: parseFloat(i.amount_paid || 0),
+        })),
+      },
+      after: {
+        amount: result.header ? parseFloat(result.header.amount) : null,
+        plan: result.header ? result.header.plan : null,
+        reference_period: result.header ? result.header.reference_period : (newPeriod || hist.reference_period),
+        installments: result.installments.map((i) => ({
+          seq: i.seq, amount: parseFloat(i.amount), due_date: toIsoDate(i.due_date), amount_paid: parseFloat(i.amount_paid || 0), status: i.status,
+        })),
+      },
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (patch anuidade cpf):', e.message));
+
+    const { total, paid_total } = annuitySvc.computeTotals(result.installments);
+    res.json({
+      annuity_id: annuityId,
+      practitioner_id: practitionerId,
+      reference_period: result.header ? result.header.reference_period : (newPeriod || hist.reference_period),
+      plan: result.header ? result.header.plan || null : null,
+      amount: result.header ? parseFloat(result.header.amount) : null,
+      due_date: result.header ? toIsoDate(result.header.due_date) : null,
+      status: result.header ? result.header.status : null,
+      paid_at: result.header ? result.header.paid_at : null,
+      installments: result.installments.map(mapInstallmentForResponse),
+      total,
+      paid_total,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (err instanceof AnnuityPaymentError) {
+      return res.status(err.status).json({ error: err.message, code: err.code, details: err.details || null });
+    }
+    console.error('[karateAnnuities] patch annuity cpf error:', err.message);
+    res.status(500).json({ error: 'Erro ao editar anuidade', detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+
+// ────────────────────────────────────────────────────────────────
+// Fase F1 — ROTAS SOBRE PARCELAS (funcionam para dojô E praticante)
+// ────────────────────────────────────────────────────────────────
+
+// Estorna/cancela TODA a anuidade (todas as parcelas) — generaliza o void
+// legado (dojos/:dojoId/:annuityId/void) para qualquer header (dojo_id OU
+// practitioner_id). Cancela as transactions de cada parcela (preserva
+// trilha), cancela intents PIX pendentes (annuity_history_id legado E
+// source_id por parcela — migration 213) e apaga o header (CASCADE apaga as
+// parcelas). Idempotente.
+async function voidAnnuityCore(client, { federationId, annuityId }) {
+  const histRes = await client.query(
+    `SELECT id, dojo_id, practitioner_id, federation_id, reference_period, plan, status, amount, transaction_id
+     FROM karate_dojo_annuity_history WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+    [annuityId, federationId]
+  );
+  if (!histRes.rows.length) return { found: false };
+  const hist = histRes.rows[0];
+
+  let installments = [];
+  try {
+    const r = await client.query(
+      `SELECT id, transaction_id FROM karate_annuity_installments WHERE annuity_id = $1`,
+      [annuityId]
+    );
+    installments = r.rows;
+  } catch (e) {
+    if (e.code !== '42P01') throw e;
+  }
+
+  const txIds = new Set();
+  installments.forEach((i) => { if (i.transaction_id) txIds.add(i.transaction_id); });
+  if (hist.transaction_id) txIds.add(hist.transaction_id);
+
+  for (const txId of txIds) {
+    await client.query(
+      `UPDATE transactions SET status = 'cancelled', updated_at = NOW() WHERE id = $1 AND status <> 'cancelled'`,
+      [txId]
+    );
+  }
+
+  const installmentIds = installments.map((i) => i.id);
+  await client.query(
+    `UPDATE karate_payment_intents SET status = 'cancelled', updated_at = NOW()
+     WHERE status = 'pending' AND (annuity_history_id = $1 OR source_id = ANY($2::uuid[]))`,
+    [annuityId, installmentIds]
+  );
+
+  await client.query(`DELETE FROM karate_dojo_annuity_history WHERE id = $1`, [annuityId]);
+
+  return {
+    found: true,
+    dojo_id: hist.dojo_id,
+    practitioner_id: hist.practitioner_id,
+    reference_period: hist.reference_period,
+    transaction_ids: Array.from(txIds),
+    status: hist.status,
+    amount: hist.amount != null ? parseFloat(hist.amount) : null,
+    plan: hist.plan,
+  };
+}
+
+// POST /financial/annuities/:annuityId/void
+router.post('/annuities/:annuityId/void', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, annuityId } = req.params;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await voidAnnuityCore(client, { federationId, annuityId });
+    if (!result.found) {
+      await client.query('ROLLBACK');
+      return res.json({ voided: true, idempotent_hit: true, annuity_id: annuityId });
+    }
+    await client.query('COMMIT');
+
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'void', targetType: 'annuity', targetId: annuityId,
+      dojoId: result.dojo_id || null, practitionerId: result.practitioner_id || null,
+      actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: { status: result.status, amount: result.amount, plan: result.plan },
+      after: null,
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (void generico):', e.message));
+
+    res.json({
+      voided: true,
+      idempotent_hit: false,
+      annuity_id: annuityId,
+      dojo_id: result.dojo_id || null,
+      practitioner_id: result.practitioner_id || null,
+      reference_period: result.reference_period,
+      transaction_ids: result.transaction_ids,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[karateAnnuities] void (generic) error:', err.message);
+    res.status(500).json({ error: 'Erro ao estornar anuidade', detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// PATCH /financial/annuities/:annuityId/plan
+// Troca o plano de uma anuidade de DOJÔ (praticante só tem 'anual', N=1 —
+// não se aplica). 409 HAS_PAID_INSTALLMENT se alguma parcela já foi paga.
+// 409 HAS_NFSE se já existe NFS-e emitida/em processamento para alguma
+// transaction das parcelas atuais (nota fiscal não se cancela por troca de
+// plano — exige estorno). Recria as parcelas do zero (só as que ainda não
+// venceram) com o preço vigente do novo plano.
+router.patch('/annuities/:annuityId/plan', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, annuityId } = req.params;
+  const { plan } = req.body || {};
+
+  if (!plan || !annuitySvc.VALID_PLANS.includes(plan)) {
+    return res.status(422).json({
+      error: `plan inválido. Valores aceitos: ${annuitySvc.VALID_PLANS.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const histRes = await client.query(
+      `SELECT id, dojo_id, practitioner_id, federation_id, reference_period, plan
+       FROM karate_dojo_annuity_history WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+      [annuityId, federationId]
+    );
+    if (!histRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Anuidade não encontrada', code: 'NOT_FOUND' });
+    }
+    const hist = histRes.rows[0];
+
+    if (hist.practitioner_id) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        error: 'Praticante só tem o plano anual (parcela única) — troca de plano não se aplica',
+        code: 'VALIDATION_ERROR',
+      });
+    }
+
+    const instRes = await client.query(
+      `SELECT id, status, transaction_id FROM karate_annuity_installments WHERE annuity_id = $1`,
+      [annuityId]
+    );
+    const installments = instRes.rows;
+
+    if (installments.some((i) => i.status === 'paid')) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Já existe parcela paga — não é possível trocar o plano. Use estorno (void) se precisar reverter.',
+        code: 'HAS_PAID_INSTALLMENT',
+      });
+    }
+
+    const txIds = installments.map((i) => i.transaction_id).filter(Boolean);
+    if (txIds.length) {
+      const nfseRes = await client.query(
+        `SELECT id FROM nfe_documents
+         WHERE type = 'nfse' AND status IN ('authorized','processing')
+           AND (payload::jsonb ->> 'transaction_id') = ANY($1::text[])
+         LIMIT 1`,
+        [txIds.map(String)]
+      ).catch(() => ({ rows: [] }));
+      if (nfseRes.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Já existe NFS-e emitida para esta anuidade — nota fiscal não se cancela por troca de plano, exige estorno.',
+          code: 'HAS_NFSE',
+        });
+      }
+    }
+
+    // Cancela as transactions das parcelas atuais (preserva trilha) e apaga
+    // as parcelas (nenhuma está paga — checado acima).
+    for (const i of installments) {
+      if (i.transaction_id) {
+        await client.query(
+          `UPDATE transactions SET status = 'cancelled', updated_at = NOW() WHERE id = $1 AND status <> 'cancelled'`,
+          [i.transaction_id]
+        );
+      }
+    }
+    await client.query(
+      `UPDATE karate_payment_intents SET status = 'cancelled', updated_at = NOW()
+       WHERE status = 'pending' AND source_id = ANY($1::uuid[])`,
+      [installments.map((i) => i.id)]
+    );
+    await client.query(`DELETE FROM karate_annuity_installments WHERE annuity_id = $1`, [annuityId]);
+
+    const seasonYear = parseInt(hist.reference_period, 10) || new Date().getFullYear();
+    const fee = await annuitySvc.getVigentFee(client, federationId, 'dojo', plan);
+    if (!fee) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        error: `Nenhuma fee configurada para o plano '${plan}' (karate_annual_fees).`,
+        code: 'VALIDATION_ERROR',
+      });
+    }
+    const specs = annuitySvc.buildInstallmentPlan({
+      plan, amount: fee.amount, dueMonths: fee.due_months, seasonYear, fromDate: new Date(),
+    });
+    if (!specs.length) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        error: 'Todas as parcelas do novo plano já venceram para este período — nada a lançar.',
+        code: 'VALIDATION_ERROR',
+      });
+    }
+
+    let newInstallments = await annuitySvc.createInstallmentsForAnnuity(client, {
+      annuityId, federationId, specs,
+    });
+    const dojoRes = await client.query(`SELECT name FROM companies WHERE id = $1 LIMIT 1`, [hist.dojo_id]);
+    newInstallments = await annuitySvc.createTransactionsForInstallments(client, {
+      federationId,
+      kind: 'dojo',
+      refId: hist.dojo_id,
+      refName: dojoRes.rows[0]?.name || 'Dojô',
+      referencePeriod: hist.reference_period,
+      installments: newInstallments,
+    });
+
+    await client.query(`UPDATE karate_dojo_annuity_history SET plan = $1, updated_at = NOW() WHERE id = $2`, [plan, annuityId]);
+    const header = await annuitySvc.syncAnnuityHeaderRollup(client, annuityId);
+
+    await client.query('COMMIT');
+
+    await financeAudit.logFinanceAudit({
+      federationId, action: 'plan_change', targetType: 'annuity', targetId: annuityId,
+      dojoId: hist.dojo_id, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: { plan: hist.plan },
+      after: { plan, amount: parseFloat(header.amount), due_date: header.due_date },
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (troca de plano):', e.message));
+
+    const { total, paid_total } = annuitySvc.computeTotals(newInstallments);
+    res.json({
+      annuity_id: annuityId,
+      dojo_id: hist.dojo_id,
+      plan,
+      amount: parseFloat(header.amount),
+      due_date: header.due_date,
+      installments: newInstallments.map((i) => ({
+        id: i.id, seq: i.seq, amount: parseFloat(i.amount), due_date: i.due_date,
+        paid_at: i.paid_at, status: i.status, transaction_id: i.transaction_id,
+      })),
+      paid_total,
+      total,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[karateAnnuities] patch plan error:', err.message);
+    res.status(500).json({ error: 'Erro ao trocar plano', detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// ============================================================
+// Fase F3 da reforma da anuidade — BAIXA LIVRE CANÔNICA sobre o motor F1
+// (applyAnnuityPayment / karateAnnuityLedger.js). Consolida em UMA porta
+// de escrita o que antes eram baixas escrevendo direto em installments —
+// ver notas de consolidação nas rotas antigas mais abaixo neste arquivo.
+//
+//   POST /financial/annuities/:annuityId/receive/preview — dry-run (NÃO
+//     grava nada, mesmo shape do commit — a F4 usa isto pra prévia ao
+//     vivo). Registrada ANTES de qualquer rota paramétrica que possa
+//     capturar "preview" (armadilha CLAUDE.md: rota estática antes de
+//     paramétrica, 3 ocorrências já — aqui não há colisão real de
+//     segmentos com as rotas /annuities/dojos|cpf|installments/... porque
+//     os últimos segmentos literais nunca coincidem, mas a ordem de
+//     registro é mantida de propósito, defensivamente, pelo mesmo motivo).
+//   POST /financial/annuities/:annuityId/receive — commit real. Aceita
+//     operation_id opcional (dedup de retry HTTP — migration 249; ver
+//     karateAnnuityLedger.js). Erros do motor (AnnuityPaymentError) viram
+//     a resposta HTTP 1:1 (AMOUNT_EXCEEDS_BALANCE/OPERATION_ID_CONFLICT/
+//     OPERATION_IN_PROGRESS → 422/409, ANNUITY_NOT_FOUND → 404).
+//   GET  /financial/annuities/:annuityId/payments — extrato (ledger
+//     karate_annuity_payments daquela anuidade), mais recente primeiro.
+//
+// Guard: adminOnly() — mesmo padrão de TODAS as outras rotas de baixa
+// deste arquivo (RBAC §7.3, financeiro é sensível).
+// ============================================================
+
+// paid_at aceito como 'YYYY-MM-DD' (convertido pra meio-dia horário de
+// Brasília, MESMO padrão das rotas de baixa legadas deste arquivo — evita
+// a armadilha CLAUDE.md #1 de "dia trocado" que dar new Date('YYYY-MM-DD')
+// direto causaria, já que meia-noite UTC = 21h do dia anterior em BRT) ou
+// como ISO completo (passa direto — o motor valida). Ausente -> undefined,
+// o motor usa "agora".
+function resolveReceivePaidAt(paid_at) {
+  if (paid_at === undefined || paid_at === null || String(paid_at).trim() === '') return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(paid_at))) {
+    return `${paid_at}T12:00:00-03:00`;
+  }
+  return paid_at;
+}
+
+function respondAnnuityPaymentError(res, err, fallbackMsg) {
+  if (err instanceof AnnuityPaymentError) {
+    return res.status(err.status).json({ error: err.message, code: err.code, details: err.details || null });
+  }
+  console.error('[karateAnnuities]', fallbackMsg, err.message);
+  return res.status(500).json({ error: fallbackMsg, detail: err.message });
+}
+
+// POST /financial/annuities/:annuityId/receive/preview — dry-run (NÃO grava).
+router.post('/annuities/:annuityId/receive/preview', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, annuityId } = req.params;
+  const { amount, payment_method = null, paid_at } = req.body || {};
+
+  if (payment_method && !annuitySvc.VALID_PAYMENT_METHODS.includes(payment_method)) {
+    return res.status(422).json({
+      error: `payment_method inválido. Valores aceitos: ${annuitySvc.VALID_PAYMENT_METHODS.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  try {
+    const result = await applyAnnuityPayment({
+      federation_id: federationId,
+      annuity_id: annuityId,
+      amount,
+      payment_method,
+      paid_at: resolveReceivePaidAt(paid_at),
+      dryRun: true,
+    });
+    res.json(result);
+  } catch (err) {
+    respondAnnuityPaymentError(res, err, 'Erro ao simular baixa da anuidade');
+  }
+});
+
+// POST /financial/annuities/:annuityId/receive — baixa livre (commit real).
+// Body: { amount, payment_method, paid_at?, operation_id? }.
+router.post('/annuities/:annuityId/receive', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, annuityId } = req.params;
+  const { amount, payment_method = null, paid_at, operation_id } = req.body || {};
+
+  if (payment_method && !annuitySvc.VALID_PAYMENT_METHODS.includes(payment_method)) {
+    return res.status(422).json({
+      error: `payment_method inválido. Valores aceitos: ${annuitySvc.VALID_PAYMENT_METHODS.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  try {
+    const result = await applyAnnuityPayment({
+      federation_id: federationId,
+      annuity_id: annuityId,
+      amount,
+      payment_method,
+      paid_at: resolveReceivePaidAt(paid_at),
+      created_by: financeAudit.actorFromReq(req).actorUserId,
+      operation_id,
+      dryRun: false,
+    });
+
+    // idempotent_hit:true = retry — a baixa já foi auditada e reconciliada
+    // na 1ª chamada, não duplica nenhum dos dois.
+    if (!result.idempotent_hit) {
+      await reconcileClosedInstallmentTransactions(result.allocations, result.paid_at);
+
+      financeAudit.logFinanceAudit({
+        federationId,
+        action: 'annuity_receive',
+        targetType: 'annuity',
+        targetId: annuityId,
+        dojoId: result.header?.dojo_id || null,
+        practitionerId: result.header?.practitioner_id || null,
+        actorUserId: financeAudit.actorFromReq(req).actorUserId,
+        source: 'ui',
+        before: { balance: result.balance_before },
+        after: {
+          balance: result.balance_after,
+          amount: result.amount,
+          payment_method: result.payment_method,
+          operation_id: result.operation_id,
+        },
+      }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (receive):', e.message));
+    }
+
+    res.json(result);
+  } catch (err) {
+    respondAnnuityPaymentError(res, err, 'Erro ao registrar baixa da anuidade');
+  }
+});
+
+// GET /financial/annuities/:annuityId/payments — extrato (ledger
+// karate_annuity_payments), mais recente primeiro (paid_at DESC; created_at
+// DESC como desempate — "gerado por último, visualizado primeiro").
+router.get('/annuities/:annuityId/payments', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, annuityId } = req.params;
+
+  try {
+    const headerRes = await db.query(
+      `SELECT id, dojo_id, practitioner_id FROM karate_dojo_annuity_history
+        WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+      [annuityId, federationId]
+    );
+    if (!headerRes.rows.length) {
+      return res.status(404).json({ error: 'Anuidade não encontrada', code: 'NOT_FOUND' });
+    }
+
+    const { rows } = await db.query(
+      `SELECT p.id, p.installment_id, p.annuity_id, p.amount, p.paid_at,
+              p.payment_method, p.created_by, p.operation_id, p.created_at,
+              i.seq, i.kind
+         FROM karate_annuity_payments p
+         JOIN karate_annuity_installments i ON i.id = p.installment_id
+        WHERE p.annuity_id = $1 AND p.federation_id = $2
+        ORDER BY p.paid_at DESC, p.created_at DESC`,
+      [annuityId, federationId]
+    );
+
+    const data = rows.map((r) => ({
+      id: r.id,
+      installment_id: r.installment_id,
+      annuity_id: r.annuity_id,
+      seq: r.seq,
+      kind: r.kind,
+      amount: Number(r.amount),
+      paid_at: r.paid_at,
+      payment_method: r.payment_method,
+      created_by: r.created_by,
+      operation_id: r.operation_id,
+      created_at: r.created_at,
+    }));
+
+    res.json({
+      annuity_id: annuityId,
+      dojo_id: headerRes.rows[0].dojo_id || null,
+      practitioner_id: headerRes.rows[0].practitioner_id || null,
+      total: round2ForResponse(data.reduce((s, r) => s + r.amount, 0)),
+      count: data.length,
+      data,
+    });
+  } catch (err) {
+    if (err.code === '42703' || err.code === '42P01') {
+      console.warn('[karateAnnuities] extrato: tabela/coluna ausente (migration 247/249 pendente) —', err.message);
