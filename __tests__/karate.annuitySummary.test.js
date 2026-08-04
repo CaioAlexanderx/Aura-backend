@@ -4,7 +4,7 @@
 // A rota faz UMA query (GROUPING SETS) que devolve até 3 linhas: kind='dojo',
 // kind='praticante', kind=NULL (total). Os testes mockam db.query e cobrem:
 //   1. mapeamento correto das 3 linhas pro shape { year, total, dojo, praticante }
-//   2. bucket ausente (ex.: federação sem cobrança de dojô) -> zeros, não quebra
+//   2. bucket ausente (ex.: federação sem cobrança de dojo) -> zeros, não quebra
 //   3. defensivo 42703/42P01 -> zeros (nunca 500)
 //   4. year: default (ano corrente) e explícito via querystring
 //   5. a query em si RESPEITA as regras de negócio que não podem ser violadas:
@@ -98,7 +98,7 @@ describe('GET /federation/:id/financial/annuities/summary', () => {
       });
   });
 
-  it('segmento ausente na query (ex.: federação sem cobrança de dojô) devolve zeros nesse segmento, não quebra', (done) => {
+  it('segmento ausente na query (ex.: federação sem cobrança de dojo) devolve zeros nesse segmento, não quebra', (done) => {
     db.query.mockResolvedValueOnce({
       rows: [
         {
@@ -213,7 +213,7 @@ describe('GET /federation/:id/financial/annuities/summary', () => {
       });
   });
 
-  // ── Regras de negócio embutidas na query em si (SQL) ──────────────────
+  // ── Regras de negócio embutidas na query em si (SQL) ───────────────────────
   describe('regras de negócio embutidas na SQL (proteção contra regressão silenciosa)', () => {
     it('segmento praticante só considera faixa-preta ATIVA (join com is_active + belt_level=preta)', (done) => {
       db.query.mockResolvedValueOnce({ rows: [] });
@@ -263,9 +263,11 @@ describe('GET /federation/:id/financial/annuities/summary', () => {
           if (err) return done(err);
           const [sql, params] = db.query.mock.calls[0];
           expect(sql).toMatch(/h\.reference_period\s*=\s*\$2/);
-          // $3 = dojoStatusValues (filtro companies.is_active do dojô,
+          // $3 = dojoStatusValues (filtro companies.is_active do dojo,
           // default [true] — ver karateAnnuityService.js/dojoStatusToIsActiveValues).
-          expect(params).toEqual([FED_ID, '2031', [true]]);
+          // $4 = memberStatusValues (customers.is_active do praticante),
+          // mesmo default [true] — ver parseMemberStatus/memberStatusToIsActiveValues.
+          expect(params).toEqual([FED_ID, '2031', [true], [true]]);
           done();
         });
     });
