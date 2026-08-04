@@ -58,6 +58,35 @@ describe('buildInstallmentPlan', () => {
     const specs = svc.buildInstallmentPlan({ plan: 'semestral', amount: 280, dueMonths: null, seasonYear: 2026 });
     expect(specs.map((s) => s.due_date)).toEqual(['2026-05-31', '2026-11-30']);
   });
+
+  // ============================================================
+  // Bug de produção corrigido em 03/08/2026 (irmão do bug de buildPlanSpecs
+  // abaixo): o corte "já venceu" comparava `new Date(dueDate+'T23:59:59')`
+  // (fim do dia em UTC) contra `cutoff` (o instante `fromDate`, em UTC). Só
+  // funciona por acaso na maior parte do mês; entre 21h e meia-noite de
+  // Brasília do ÚLTIMO DIA de um mês do plano, o relógio UTC já tinha
+  // passado das 23:59:59 daquele dia — a parcela vencendo HOJE (em SP) era
+  // descartada como "já vencida" ~3h antes da hora. Corrigido comparando
+  // dia de calendário em SP via dayStamp (mesma técnica de daysBetween).
+  // ============================================================
+  it('instante crítico (21h–meia-noite de Brasília do próprio dia de vencimento): a parcela que vence HOJE em SP ainda entra no plano — não é tratada como já vencida', () => {
+    // Deriva o mês/ano corrente EM SÃO PAULO a partir da data real de
+    // execução (nunca hardcode um mês/ano fixo — o teste tem que valer em
+    // qualquer dia do ano).
+    const spNow = new Date(svc.dayStamp(new Date()));
+    const spYear = spNow.getUTCFullYear();
+    const spMonth = spNow.getUTCMonth() + 1;
+    const lastDayStr = svc.lastDayOfMonthStr(spYear, spMonth);
+
+    // Instante crítico: 22h em Brasília do PRÓPRIO dia de vencimento (que,
+    // por construção, é "hoje" em SP) = 01h UTC do dia seguinte.
+    const criticalInstant = new Date(Date.parse(lastDayStr + 'T00:00:00.000Z') + 25 * 60 * 60 * 1000);
+
+    const specs = svc.buildInstallmentPlan({
+      plan: 'anual', amount: 500, dueMonths: [spMonth], seasonYear: spYear, fromDate: criticalInstant,
+    });
+    expect(specs).toEqual([{ seq: 1, amount: 500, due_date: lastDayStr }]);
+  });
 });
 
 // ============================================================
@@ -245,15 +274,22 @@ describe('buildPlanSpecs — default seguro + override de due_date (continuaçã
     expect(dueDateAdjusted).toBe(false);
   });
 
-  it('default seguro: TODAS as parcelas já venceram → gera só a última, due_date = fim do MÊS CORRENTE (não a data original do plano) — nasce "a vencer", não atrasada', () => {
+  it('default seguro: TODAS as parcelas já venceram → gera só a última, due_date = fim do MÊS CORRENTE EM SÃO PAULO (não a data original do plano) — nasce "a vencer", não atrasada', () => {
     // "hoje" é a data real de execução (mesmo padrão já usado nos testes de
     // campanha) — assim due_date = fim do mês corrente nunca é uma data
-    // fixa que quebra com a passagem do tempo.
-    // Callers reais (campaign/batch/charge) SEMPRE passam fromDate: new
-    // Date() explicitamente — sem fromDate, buildInstallmentPlan não filtra
-    // nada (contrato dela: cutoff só existe quando fromDate é informado).
+    // fixa que quebra com a passagem do tempo. Callers reais (campaign/
+    // batch/charge) SEMPRE passam fromDate: new Date() explicitamente —
+    // sem fromDate, buildInstallmentPlan não filtra nada (contrato dela:
+    // cutoff só existe quando fromDate é informado).
+    //
+    // ⚠️ Bug de produção corrigido em 03/08/2026: o "mês corrente" era
+    // derivado com getUTCFullYear()/getUTCMonth() (UTC), não em São Paulo
+    // — este teste tinha o MESMO viés que a implementação (os dois em
+    // UTC), então "passava" sem provar nada perto da virada de mês/dia. A
+    // expectativa correta é o mês corrente EM SÃO PAULO (dayStamp).
     const now = new Date();
-    const expectedSafeDueDate = svc.lastDayOfMonthStr(now.getUTCFullYear(), now.getUTCMonth() + 1);
+    const nowSP = new Date(svc.dayStamp(now));
+    const expectedSafeDueDate = svc.lastDayOfMonthStr(nowSP.getUTCFullYear(), nowSP.getUTCMonth() + 1);
 
     const { specs, dueDateAdjusted } = svc.buildPlanSpecs({
       plan: 'anual', amount: 500, dueMonths: [5], seasonYear: 2000, fromDate: now, // ano bem passado — plano 100% vencido
@@ -271,6 +307,36 @@ describe('buildPlanSpecs — default seguro + override de due_date (continuaçã
     // para 0, com o guard `> 0` mandando a parcela para 'overdue'. Com a
     // comparação por dia de calendário, o dia do vencimento é 'due'.
     expect(svc.deriveInstallmentStatus({ status: 'pending', due_date: specs[0].due_date })).toBe('due');
+  });
+
+  // ============================================================
+  // Caso concreto (03/08/2026): 21h–meia-noite de Brasília do ÚLTIMO DIA
+  // do mês, que em UTC já é dia 1 do mês seguinte. Congela o instante
+  // exato do bug em produção — o vencimento gerado tem que cair no MÊS
+  // CORRENTE em São Paulo, nunca no mês seguinte (que é o que o relógio
+  // UTC mostra neste instante). Datas derivadas da execução real — nunca
+  // hardcoded — para o teste valer em qualquer dia do ano.
+  // ============================================================
+  it('instante crítico: 31 (último dia do mês) às 22h em Brasília (= dia 1 às 01h UTC) — due_date cai no mês corrente em SP, não no mês seguinte em UTC', () => {
+    const spNow = new Date(svc.dayStamp(new Date()));
+    const spYear = spNow.getUTCFullYear();
+    const spMonth = spNow.getUTCMonth() + 1; // mês corrente em SP, 1-12
+    const lastDayStr = svc.lastDayOfMonthStr(spYear, spMonth);
+
+    // 22h em Brasília do último dia do mês corrente = 01h UTC do dia 1 do
+    // mês seguinte (America/Sao_Paulo é UTC-3 o ano todo).
+    const criticalInstant = new Date(Date.parse(lastDayStr + 'T00:00:00.000Z') + 25 * 60 * 60 * 1000);
+
+    // Plano 100% vencido (temporada bem no passado) força o ramo do
+    // "default seguro" em buildPlanSpecs — é ele que continha o bug.
+    const { specs, dueDateAdjusted } = svc.buildPlanSpecs({
+      plan: 'anual', amount: 500, dueMonths: [5], seasonYear: 2000, fromDate: criticalInstant,
+    });
+
+    expect(specs).toHaveLength(1);
+    expect(dueDateAdjusted).toBe(true);
+    // Com o bug (getUTCMonth cru), isto teria caído no mês SEGUINTE.
+    expect(specs[0].due_date).toBe(lastDayStr);
   });
 
   it('override explícito (plano de 1 parcela): due_date informado substitui a única parcela gerada', () => {
