@@ -44,7 +44,8 @@ test('token válido devolve certificate_type dojo + official:false + notice', as
   expect(res.body.valid).toBe(true);
   expect(res.body.certificate_type).toBe('dojo');
   expect(res.body.official).toBe(false);
-  expect(res.body.notice).toMatch(/NÃO.*confund/i.test(res.body.notice) ? /./ : /prÓprio dojô/i);
+  expect(res.body.notice).toMatch(/próprio dojô/i);
+  expect(res.body.notice).toMatch(/federação \(fpkt\)/i);
   expect(res.body.dojo_name).toBe('Dojô Kondei');
 });
 
