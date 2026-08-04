@@ -686,6 +686,30 @@ function dojoStatusToIsActiveValues(dojoStatus) {
   return [true]; // 'active' (default)
 }
 
+// ── member_status (filtro de ativo/inativo do PRATICANTE) ──────────────
+// Espelha dojo_status acima, mas para customers.is_active (não
+// companies.is_active) — usado por GET /annuities/cpf
+// (karateAnnuities.js) e pela perna `praticante` de GET /annuities/summary
+// (karateAnnuitySummary.js). cb.belt_level = 'preta' permanece SEMPRE
+// incondicional em qualquer codepath que use este filtro — nunca gated
+// por member_status (só faixa-preta entra na régua CPF, ativo ou não).
+//
+// Valores aceitos: 'active' (default) | 'inactive' | 'all'.
+const MEMBER_STATUS_VALUES = ['active', 'inactive', 'all'];
+
+function parseMemberStatus(raw) {
+  const v = (raw !== undefined && raw !== null && String(raw).trim() !== '')
+    ? String(raw).trim()
+    : 'active';
+  return MEMBER_STATUS_VALUES.includes(v) ? v : null;
+}
+
+function memberStatusToIsActiveValues(memberStatus) {
+  if (memberStatus === 'all') return null;
+  if (memberStatus === 'inactive') return [false];
+  return [true]; // 'active' (default)
+}
+
 module.exports = {
   VALID_PLANS,
   PLANO_INDEFINIDO_REASON,
@@ -720,4 +744,7 @@ module.exports = {
   DOJO_STATUS_VALUES,
   parseDojoStatus,
   dojoStatusToIsActiveValues,
+  MEMBER_STATUS_VALUES,
+  parseMemberStatus,
+  memberStatusToIsActiveValues,
 };
