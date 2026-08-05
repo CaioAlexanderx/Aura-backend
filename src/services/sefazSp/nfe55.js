@@ -15,8 +15,10 @@
 // Reusa os blocos exportados do xmlBuilder (emit, det, total, infAdic,
 // composeNfe) — o que muda vs. NFC-e 65:
 //   • mod=55, tpNF=0 (entrada), finNFe=4, tpImp=1
-//   • NFref/refNFe (B12a — logo APÓS cMunFG e ANTES de tpImp; elemento
-//     fora de ordem = Rejeição 215/225)
+//   • NFref/refNFe: grupo referenciado NO FINAL da sequência de <ide>,
+//     depois de verProc (elemento fora de ordem = Rejeição 215/225 —
+//     05/08/2026: era exatamente esse o bug da 1ª devolução real em prod,
+//     ver buildIde55Xml)
 //   • dest = PRÓPRIO emitente (SEFAZ FAQ MG #7; paridade com
 //     nuvemfiscal.buildSelfDest: indIEDest=1 quando há IE)
 //   • pag tPag=90 'Sem Pagamento' vPag=0 (Rejeição 871 se for método real)
@@ -97,12 +99,12 @@ const TXT_MAP = {
   '–': '-', '—': '-',            // en/em dash
   '‘': "'", '’': "'",            // aspas simples tipograficas
   '“': '"', '”': '"',            // aspas duplas tipograficas
-  '…': '...', ' ': ' ',          // reticencias, nbsp
+  '…': '...', ' ': ' ',          // reticencias, nbsp
   '•': '-', '™': 'TM',           // bullet, trademark
 };
 function txt(s, max) {
   const clean = String(s || '')
-    .replace(/[–—‘’“”… •™]/g, (ch) => TXT_MAP[ch])
+    .replace(/[–—‘’“”… •™]/g, (ch) => TXT_MAP[ch])
     .replace(/[^ -ÿ]/g, '')
     .replace(/\s+/g, ' ').trim();
   return max ? clean.slice(0, max) : clean;
@@ -114,9 +116,21 @@ function onlyDigits(s) { return String(s || '').replace(/\D/g, ''); }
 
 /**
  * ide do modelo 55. Ordem TIde (a ordem IMPORTA — 215/225):
- * cUF,cNF,natOp,mod,serie,nNF,dhEmi,tpNF,idDest,cMunFG,NFref,tpImp,
- * tpEmis,cDV,tpAmb,finNFe,indFinal,indPres,procEmi,verProc.
- * NFref é o B12a: logo após cMunFG (B12), antes de tpImp (B21).
+ * cUF,cNF,natOp,mod,serie,nNF,dhEmi,tpNF,idDest,cMunFG,tpImp,
+ * tpEmis,cDV,tpAmb,finNFe,indFinal,indPres,procEmi,verProc,NFref.
+ *
+ * NFref é o grupo de Documento Fiscal Referenciado: fica no FINAL da
+ * sequência de <ide> (depois de verProc, e de dhCont/xJust quando há
+ * contingência) — NÃO logo após cMunFG.
+ *
+ * 05/08/2026: bug real. Este bloco tinha NFref logo após cMunFG (comentário
+ * antigo dizia "posição B12a"), fora de ordem. A 1ª devolução real da engine
+ * em prod (troca a5842443-836e-4302-87f2-c55b8768132a, Davi Villa Branca,
+ * 04/08 21:35 UTC) foi rejeitada pela SEFAZ-SP com "225 - Rejeição: Falha no
+ * Schema XML do lote de NFe" — rejeição genérica de sequence do XSD, não um
+ * motivo específico de conteúdo. Confirmado contra o leiauteNFe_v4.00.xsd
+ * (nfephp-org/sped-nfe): NFref é o último elemento de TIde. Corrigido movendo
+ * o bloco pro fim, depois de verProc.
  */
 function buildIde55Xml(p) {
   return '<ide>'
@@ -130,7 +144,6 @@ function buildIde55Xml(p) {
     + tag('tpNF', '0')           // 0 = entrada (devolução)
     + tag('idDest', '1')
     + tag('cMunFG', p.cMunFG)
-    + (p.refNFe ? '<NFref>' + tag('refNFe', p.refNFe) + '</NFref>' : '')
     + tag('tpImp', '1')          // DANFE retrato (tpImp=4 é só NFC-e)
     + tag('tpEmis', '1')
     + tag('cDV', p.cDV)
@@ -140,6 +153,7 @@ function buildIde55Xml(p) {
     + tag('indPres', '1')
     + tag('procEmi', '0')
     + tag('verProc', p.verProc || 'Aura/1.0')
+    + (p.refNFe ? '<NFref>' + tag('refNFe', p.refNFe) + '</NFref>' : '')
     + '</ide>';
 }
 
