@@ -2,8 +2,9 @@
  * sefazSp/nfe55 — emissão própria da NF-e 55 de devolução (Aura Notas).
  *
  * Cobre:
- *  - montagem do XML (mod 55, tpNF=0, finNFe=4, NFref na posição B12a,
- *    dest = próprio emitente, pag tPag=90, sem infNFeSupl)
+ *  - montagem do XML (mod 55, tpNF=0, finNFe=4, NFref no FINAL de <ide>
+ *    (depois de verProc — corrigido 05/08/2026, ver comentário do teste
+ *    abaixo), dest = próprio emitente, pag tPag=90, sem infNFeSupl)
  *  - endpoints NF-e (host nfe.fazenda.sp.gov.br, ≠ NFC-e)
  *  - orquestração: autorizada, rejeitada, e transporte com mocks
  *    (certStore/pfx/signer mockados; SOAP via transport injetado)
@@ -75,13 +76,27 @@ describe('nfe55 — buildInfNfe55Devolucao (XML modelo 55)', () => {
     expect(built.infNfeXml).toContain(`Id="NFe${built.chave}"`);
   });
 
-  it('NFref fica na posição B12a: após cMunFG e ANTES de tpImp (ordem XSD)', () => {
+  // 05/08/2026 — este teste antes afirmava "NFref fica na posição B12a:
+  // após cMunFG e ANTES de tpImp", ou seja, encodava o próprio bug que
+  // rejeitou (225 - Falha no Schema XML) a 1ª devolução real em prod
+  // (troca a5842443-836e-4302-87f2-c55b8768132a, Davi Villa Branca).
+  // Conferido contra o leiauteNFe_v4.00.xsd oficial: NFref é o ÚLTIMO
+  // elemento da sequência de <ide>, depois de verProc — não existe
+  // "posição B12a" no leiaute real. Ver [[incidente_nfe55_devolucao_
+  // rejeicao225_nfref_ordem_05ago2026]] na memória do projeto.
+  it('NFref fica no FINAL de <ide>: depois de verProc (ordem XSD; NÃO logo após cMunFG)', () => {
     const { infNfeXml } = buildOk();
-    const iCMun = infNfeXml.indexOf('</cMunFG>');
-    const iNFref = infNfeXml.indexOf('<NFref><refNFe>');
-    const iTpImp = infNfeXml.indexOf('<tpImp>');
-    expect(iNFref).toBeGreaterThan(iCMun);
-    expect(iNFref).toBeLessThan(iTpImp);
+    const iIdeOpen = infNfeXml.indexOf('<ide>');
+    const iIdeCloseTag = infNfeXml.indexOf('</ide>');
+    const ide = infNfeXml.slice(iIdeOpen, iIdeCloseTag);
+
+    const iVerProc = ide.indexOf('<verProc>');
+    const iNFref = ide.indexOf('<NFref><refNFe>');
+    expect(iVerProc).toBeGreaterThan(-1);
+    expect(iNFref).toBeGreaterThan(iVerProc);
+    // NFref é o ÚLTIMO filho de <ide>: seu </NFref> termina exatamente
+    // onde a fatia de <ide> (até </ide> exclusive) termina.
+    expect(ide.endsWith('</NFref>')).toBe(true);
     expect(infNfeXml).toContain(`<refNFe>${CHAVE_ORIG}</refNFe>`);
   });
 
