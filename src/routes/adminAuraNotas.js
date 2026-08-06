@@ -19,6 +19,16 @@
 // CACHE: a emissão (routes/nfce.js) tem _engineCapableCache de 60s — uma
 // mudança de CSC/A1/provider aqui reflete na emissão em ATÉ 60s (não há
 // invalidação cross-módulo; é aceitável e documentado).
+//
+// 06/08/2026 — "Adicionar empresa" / "Remover" (Gestão Aura > Aura Notas):
+// GET /companies é um INNER JOIN com nfce_config, então uma empresa que já
+// existe no sistema (cadastrada pelo cliente) mas ainda não tem config fiscal
+// nenhuma (ex.: Finesse/AP) fica INVISÍVEL nesse painel. GET /empresas-sem-config
+// é a busca que alimenta o botão "Adicionar empresa" (escolher uma empresa já
+// existente pra configurar). PUT /:companyId/fiscal virou um UPSERT — o MESMO
+// formulário/endpoint que edita também cria a linha de nfce_config quando ela
+// não existe ainda. DELETE /:companyId/fiscal é o "Remover": tira só a config
+// fiscal (nfce_config + certificado A1), não mexe na empresa em si.
 // ============================================================
 'use strict';
 
@@ -30,6 +40,7 @@ const sefazSp = require('../services/sefazSp');
 const engineBreaker = require('../services/sefazSp/engineBreaker');
 const { encryptString, hasMasterKey } = require('../utils/secretCrypto');
 const g = require('../services/auraNotas/gestao');
+const { ENDPOINTS: SEFAZ_SP_ENDPOINTS_65 } = require('../services/sefazSp/endpoints');
 
 // ── Staff-gate: só contas internas da Aura (is_staff no JWT) ──────────────
 function requireStaff(req, res, next) {
@@ -183,6 +194,35 @@ function safeBreakerOpen(companyId) {
   try { return engineBreaker.isOpen(companyId); } catch (_) { return false; }
 }
 
+// ── 1b. GET /empresas-sem-config — busca p/ o botão "Adicionar empresa" ────
+// Empresas que JÁ existem em `companies` (cadastradas pelo próprio cliente,
+// via signup ou multi-CNPJ) mas ainda NÃO têm linha em nfce_config — hoje
+// ficam invisíveis em GET /companies (INNER JOIN). ?q= filtra por nome/CNPJ.
+// Só empresas ativas (is_active=true na tabela companies).
+router.get('/empresas-sem-config', async (req, res) => {
+  const q = String((req.query || {}).q || '').trim();
+  try {
+    const params = [];
+    let where = 'WHERE c.is_active = true AND nc.company_id IS NULL';
+    if (q) {
+      params.push(`%${q}%`);
+      where += ` AND (c.legal_name ILIKE $${params.length} OR c.trade_name ILIKE $${params.length} OR c.cnpj ILIKE $${params.length})`;
+    }
+    const { rows } = await db.query(
+      `SELECT c.id AS company_id, COALESCE(c.trade_name, c.legal_name) AS name,
+              c.legal_name, c.trade_name, c.cnpj, c.address_state
+         FROM companies c
+         LEFT JOIN nfce_config nc ON nc.company_id = c.id
+         ${where}
+        ORDER BY COALESCE(c.trade_name, c.legal_name) NULLS LAST
+        LIMIT 50`, params);
+    res.json({ companies: rows });
+  } catch (err) {
+    console.error('[aura-notas] GET /empresas-sem-config error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar empresas sem configuração fiscal' });
+  }
+});
+
 // ── 2. GET /:companyId — detalhe fiscal + config + cert + telemetria ───────
 router.get('/:companyId', async (req, res) => {
   const cid = req.params.companyId;
@@ -250,6 +290,12 @@ router.get('/:companyId', async (req, res) => {
 // ── 3. PUT /:companyId/fiscal — dados fiscais da empresa + config ──────────
 // Aceita qualquer subconjunto. Campos da company vão pra companies; ambiente/
 // uf/provider/serie_sefaz_sp/is_active vão pra nfce_config.
+//
+// 06/08/2026: virou UPSERT em nfce_config (antes era UPDATE puro e, se a
+// empresa ainda não tinha linha em nfce_config, o UPDATE afetava 0 linhas
+// silenciosamente — a resposta dizia "ok:true" mas nada era salvo). Agora,
+// se a linha não existe, é criada — é o que faz o botão "Adicionar empresa"
+// funcionar reusando este MESMO endpoint/formulário.
 router.put('/:companyId/fiscal', async (req, res) => {
   const cid = req.params.companyId;
   const b = req.body || {};
@@ -315,6 +361,25 @@ router.put('/:companyId/fiscal', async (req, res) => {
     return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }
 
+  // 06/08/2026 — Nuvem Fiscal não existe mais: se o provider vai ficar
+  // 'sefaz_sp' (engine própria), a UF final precisa ter endpoints cadastrados
+  // (ver services/sefazSp/endpoints.js — hoje SP e AP via SVRS), senão a
+  // emissão real ia estourar depois. Bloqueia aqui, na config.
+  if (prov.value === 'sefaz_sp') {
+    let effectiveUf = uf.value;
+    if (effectiveUf === undefined) {
+      const { rows: cur } = await db.query('SELECT uf FROM nfce_config WHERE company_id=$1', [cid]);
+      effectiveUf = (cur[0] && cur[0].uf) || 'SP';
+    }
+    const ufKey = String(effectiveUf).toUpperCase();
+    if (!SEFAZ_SP_ENDPOINTS_65[ufKey]) {
+      return res.status(400).json({
+        error: `UF ${ufKey} ainda não é suportada na emissão própria (engine SEFAZ). `
+          + `UFs disponíveis: ${Object.keys(SEFAZ_SP_ENDPOINTS_65).join(', ')}.`,
+      });
+    }
+  }
+
   try {
     if (companyFields.length) {
       const set = companyFields.map((f, i) => `${f.col}=$${i + 1}`);
@@ -325,12 +390,19 @@ router.put('/:companyId/fiscal', async (req, res) => {
       if (!rowCount) return res.status(404).json({ error: 'Empresa não encontrada' });
     }
     if (configFields.length) {
-      const set = configFields.map((f, i) => `${f.col}=$${i + 1}`);
-      const vals = configFields.map((f) => f.val);
-      vals.push(cid);
+      // UPSERT: cria a linha de nfce_config se a empresa ainda não tem uma
+      // (botão "Adicionar empresa"), ou atualiza os campos enviados se já tem.
+      const cols = ['company_id', ...configFields.map((f) => f.col)];
+      const placeholders = cols.map((_, i) => `$${i + 1}`);
+      const vals = [cid, ...configFields.map((f) => f.val)];
+      const updateSet = configFields.map((f) => `${f.col}=EXCLUDED.${f.col}`).join(', ');
       try {
         await db.query(
-          `UPDATE nfce_config SET ${set.join(', ')}, updated_at=NOW() WHERE company_id=$${vals.length}`, vals);
+          `INSERT INTO nfce_config (${cols.join(', ')}, updated_at)
+           VALUES (${placeholders.join(', ')}, NOW())
+           ON CONFLICT (company_id) DO UPDATE SET ${updateSet}, updated_at=NOW()`,
+          vals
+        );
       } catch (e) {
         if (e.code === '42703') {
           return res.status(400).json({ error: 'Colunas de configuração ausentes no banco (migration 237 pendente).' });
@@ -342,6 +414,56 @@ router.put('/:companyId/fiscal', async (req, res) => {
   } catch (err) {
     console.error('[aura-notas] PUT /fiscal error:', err.message);
     res.status(500).json({ error: 'Erro ao salvar dados fiscais' });
+  }
+});
+
+// ── 3b. DELETE /:companyId/fiscal — botão "Remover" ─────────────────────────
+// Remove SÓ a configuração fiscal do Aura Notas (nfce_config + certificado A1
+// associado) — a empresa em si (login, vendas, etc.) continua existindo e
+// ativa normalmente. NÃO é o mesmo "Remover empresa" do fluxo self-service
+// de Multi-CNPJ (esse desativa a empresa inteira; não é o que este botão faz).
+//
+// Bloqueado se a empresa já EMITIU alguma nota fiscal por essa config (não dá
+// pra apagar a config e deixar numero/série/protocolo órfãos de histórico
+// real). Nesse caso o caminho é desativar (PUT /fiscal { is_active:false }),
+// não remover — a mensagem de erro já indica isso.
+router.delete('/:companyId/fiscal', async (req, res) => {
+  const cid = req.params.companyId;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows: cfgs } = await client.query('SELECT company_id FROM nfce_config WHERE company_id=$1', [cid]);
+    if (!cfgs.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Esta empresa não tem configuração fiscal no Aura Notas.' });
+    }
+
+    const { rows: emCount } = await client.query(
+      'SELECT COUNT(*)::int AS n FROM nfce_emissions WHERE company_id=$1', [cid]);
+    if (emCount[0].n > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Esta empresa já emitiu nota fiscal pelo Aura Notas — não é possível remover a configuração (o histórico fiscal ficaria órfão). Desative-a em vez de remover (is_active = false).',
+        code: 'HAS_EMISSIONS',
+      });
+    }
+
+    try {
+      await client.query('DELETE FROM company_certificates WHERE company_id=$1', [cid]);
+    } catch (e) {
+      if (e.code !== '42P01') throw e; // tabela ausente (migration 234): ignora
+    }
+    await client.query('DELETE FROM nfce_config WHERE company_id=$1', [cid]);
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[aura-notas] DELETE /:companyId/fiscal error:', err.message);
+    res.status(500).json({ error: 'Erro ao remover configuração fiscal' });
+  } finally {
+    client.release();
   }
 });
 
