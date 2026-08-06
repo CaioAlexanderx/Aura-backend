@@ -27,12 +27,18 @@
 //   • SEM contingência offline (devolução não trava PDV): timeout ambíguo
 //     → consulta por chave; nunca renumera (regra de ouro do soapClient)
 //
-// Endpoints: NF-e 55 em SP usa host PRÓPRIO (nfe.fazenda.sp.gov.br) —
-// diferente da NFC-e (nfce.fazenda.sp.gov.br). Mantidos aqui (e não em
-// endpoints.js) pra deixar o hotfix num arquivo só; migrar pra endpoints.js
-// quando a engine 55 ganhar mais operações (evento/inutilização).
-// ⚠️ Conferir contra a tabela oficial do Portal da NF-e na primeira
-// homologação (mesmo checklist do S1.6).
+// Endpoints: NF-e 55 usa host PRÓPRIO por UF (ex.: SP usa
+// nfe.fazenda.sp.gov.br — diferente da NFC-e nfce.fazenda.sp.gov.br).
+// Mantidos aqui (e não em endpoints.js) pra deixar o hotfix num arquivo
+// só; migrar pra endpoints.js quando a engine 55 ganhar mais operações
+// (evento/inutilização).
+//
+// 06/08/2026 — Nuvem Fiscal não existe mais: toda emissão sai pela
+// engine própria. Estendido pra AP (NF-e 55 delega autorização à SVRS,
+// mesmo padrão da NFC-e 65 — ver endpoints.js).
+// ⚠️ Conferir contra a tabela oficial do Portal da NF-e / SVRS na
+// primeira homologação real (mesmo checklist do S1.6, agora repetido
+// pra AP).
 //
 // Memory: [[nfe55-devolucao-dest-proprio-emitente]]
 // ============================================================
@@ -50,7 +56,7 @@ const {
   ufToCodigo, isoBR, generateCNF, buildAccessKey44,
 } = require('../nuvemfiscal');
 
-// ---------- endpoints NF-e 55 (SP, serviços versão 4.00) ----------
+// ---------- endpoints NF-e 55 (serviços versão 4.00) ----------
 
 const ENDPOINTS_NFE55 = {
   SP: {
@@ -71,12 +77,33 @@ const ENDPOINTS_NFE55 = {
       inutilizacao:      'https://nfe.fazenda.sp.gov.br/ws/nfeinutilizacao4.asmx',
     },
   },
+  // AP não tem SEFAZ própria — autorização delegada à SVRS (Sefaz Virtual
+  // do RS), igual à NFC-e 65 (ver endpoints.js). Fonte: portal oficial
+  // SVRS (dfe-portal.svrs.rs.gov.br).
+  AP: {
+    homologacao: {
+      autorizacao:       'https://nfe-homologacao.svrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
+      retAutorizacao:    'https://nfe-homologacao.svrs.rs.gov.br/ws/NfeRetAutorizacao/NFeRetAutorizacao4.asmx',
+      statusServico:     'https://nfe-homologacao.svrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
+      consultaProtocolo: 'https://nfe-homologacao.svrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
+      recepcaoEvento:    'https://nfe-homologacao.svrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
+      inutilizacao:      'https://nfe-homologacao.svrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
+    },
+    producao: {
+      autorizacao:       'https://nfe.svrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
+      retAutorizacao:    'https://nfe.svrs.rs.gov.br/ws/NfeRetAutorizacao/NFeRetAutorizacao4.asmx',
+      statusServico:     'https://nfe.svrs.rs.gov.br/ws/NfeStatusServico/NfeStatusServico4.asmx',
+      consultaProtocolo: 'https://nfe.svrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
+      recepcaoEvento:    'https://nfe.svrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
+      inutilizacao:      'https://nfe.svrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
+    },
+  },
 };
 
 function getEndpoints55(uf, ambiente) {
   const ufKey = String(uf || 'SP').toUpperCase();
   if (!ENDPOINTS_NFE55[ufKey]) {
-    throw new Error(`sefazSp/nfe55: UF ${ufKey} não suportada na emissão própria da NF-e 55 (escopo: SP). Use o gateway.`);
+    throw new Error(`sefazSp/nfe55: UF ${ufKey} não suportada na emissão própria da NF-e 55. UFs disponíveis: ${Object.keys(ENDPOINTS_NFE55).join(', ')}.`);
   }
   const amb = ambiente === 1 || ambiente === '1' || ambiente === 'producao' ? 'producao'
     : ambiente === 2 || ambiente === '2' || ambiente === 'homologacao' ? 'homologacao'
@@ -262,7 +289,7 @@ function resolveTpAmb(config) {
 }
 
 /**
- * Emite a NF-e 55 de devolução direto na SEFAZ-SP (síncrona, indSinc=1).
+ * Emite a NF-e 55 de devolução direto na SEFAZ (síncrona, indSinc=1).
  * MESMO payload do gateway (nuvemfiscal.emitNfeDevolucao) + ctx.
  * Timeout ambíguo → consulta por chave ANTES de desistir; nunca renumera.
  */
