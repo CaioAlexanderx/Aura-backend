@@ -31,6 +31,10 @@ const engineBreaker                = require('../services/sefazSp/engineBreaker'
 const rejectionCatalog             = require('../services/sefazSp/rejectionCatalog');
 const taxEngine                    = require('../services/sefazSp/taxEngine');
 const { buildDanfeNfceHtml }       = require('../utils/buildDanfeNfceHtml');
+// 06/08/2026 — Nuvem Fiscal não existe mais: precisamos validar, na hora de
+// SALVAR a config (não só na hora de emitir), se a UF da empresa já tem
+// suporte na engine própria — hoje SP e AP (SVRS). Ver services/sefazSp/endpoints.js.
+const { ENDPOINTS: SEFAZ_SP_ENDPOINTS_65 } = require('../services/sefazSp/endpoints');
 
 const INSTRUCOES_NOTA = {
   nfce: 'NFC-e (Nota Fiscal do Consumidor): ideal para vendas a pessoas fisicas. O CPF do comprador e opcional. Use na maioria das vendas do balcao.',
@@ -220,6 +224,22 @@ router.post('/config', requireAuth, requireRole('client','analyst','admin'), asy
       !['nuvemfiscal', 'sefaz_sp'].includes(provider)) {
     return res.status(400).json({ error: 'provider inválido (use "nuvemfiscal" ou "sefaz_sp")' });
   }
+
+  // 06/08/2026 — Nuvem Fiscal não existe mais: forçar provider='sefaz_sp'
+  // (engine própria) pra uma UF sem endpoints configurados vai estourar só
+  // na hora de emitir (erro genérico no meio do fluxo do PDV). Bloqueia
+  // aqui, na config, com uma mensagem clara — antes era só SP; hoje
+  // inclui AP (via SVRS, ver services/sefazSp/endpoints.js).
+  if (provider === 'sefaz_sp') {
+    const ufKey = String(uf || 'SP').toUpperCase();
+    if (!SEFAZ_SP_ENDPOINTS_65[ufKey]) {
+      return res.status(400).json({
+        error: `UF ${ufKey} ainda não é suportada na emissão própria (engine SEFAZ). `
+          + `UFs disponíveis: ${Object.keys(SEFAZ_SP_ENDPOINTS_65).join(', ')}.`,
+      });
+    }
+  }
+
   let serieSefazSp = null;
   if (serie_sefaz_sp !== undefined && serie_sefaz_sp !== null) {
     const s = parseInt(serie_sefaz_sp, 10);
