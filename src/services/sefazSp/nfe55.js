@@ -40,6 +40,10 @@
 // primeira homologação real (mesmo checklist do S1.6, agora repetido
 // pra AP).
 //
+// 07/08/2026 — infNFe NÃO declara xmlns próprio: mesmo bug do
+// xmlBuilder.js (cStat 587 "Usar somente o namespace padrao da NF-e"),
+// já que NFe (composeNfe) e enviNFe (soapClient.js) já declaram.
+//
 // Memory: [[nfe55-devolucao-dest-proprio-emitente]]
 // ============================================================
 'use strict';
@@ -260,7 +264,7 @@ function buildInfNfe55Devolucao(company, nfeData, opts = {}) {
   // CFOP 1.202 + CSOSN 102 (default do buildDetXml no Simples) — Fase C.
   const items = nfeData.items.map((it) => ({ ...it, cfop: it.cfop || '1202' }));
 
-  const infNfeXml = `<infNFe xmlns="${NFE_NS}" Id="NFe${chave}" versao="4.00">`
+  const infNfeXml = `<infNFe Id="NFe${chave}" versao="4.00">`
     + buildIde55Xml({
         cUF: String(cUF), cNF,
         natOp: txt(nfeData.natureza_operacao, 60) || 'Devolucao de venda',

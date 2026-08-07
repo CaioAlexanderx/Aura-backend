@@ -12,6 +12,11 @@
 // Ordem dos elementos segue o XSD leiauteNFe_v4.00 (a ordem IMPORTA:
 // elemento fora de ordem = rejeição 215/225). Nenhuma tag vazia é emitida.
 //
+// 07/08/2026 — infNFe NÃO declara xmlns próprio: já vem de NFe (composeNfe)
+// e de novo de enviNFe (soapClient.js) — declarar nos três causava cStat 587
+// ("Usar somente o namespace padrao da NF-e", elemento enviNFe/NFe[1]/infNFe).
+// eventos.js já seguia esse padrão (infEvento/infInut sem xmlns próprio).
+//
 // Saída: infNFe SEM assinatura (signer S1.3 assina; qrcode S1.5 monta
 // infNFeSupl; composeNfe junta tudo).
 // ============================================================
@@ -38,21 +43,21 @@ function esc(s) {
 }
 
 /** Sanitiza texto p/ campos livres (xProd/xNome/infCpl/...): colapsa
- * espaços e restringe ao charset do schema TString ([ -\u00FF], Latin-1).
+ * espaços e restringe ao charset do schema TString ([ -ÿ], Latin-1).
  * Travessão/aspas tipográficas/reticências viram equivalente ASCII; o resto
  * fora do Latin-1 (emoji etc.) é removido — senão a SEFAZ devolve
  * Rejeição 225 (Falha no Schema XML). Caso real: 16/07, "—" no xFant. */
 const TXT_MAP = {
-  '\u2013': '-', '\u2014': '-',            // en/em dash
-  '\u2018': "'", '\u2019': "'",            // aspas simples tipográficas
-  '\u201C': '"', '\u201D': '"',            // aspas duplas tipográficas
-  '\u2026': '...', '\u00A0': ' ',          // reticências, nbsp
-  '\u2022': '-', '\u2122': 'TM',           // bullet, trademark
+  '–': '-', '—': '-',            // en/em dash
+  '‘': "'", '’': "'",            // aspas simples tipográficas
+  '“': '"', '”': '"',            // aspas duplas tipográficas
+  '…': '...', ' ': ' ',          // reticências, nbsp
+  '•': '-', '™': 'TM',           // bullet, trademark
 };
 function txt(s, max) {
   const clean = String(s || '')
-    .replace(/[\u2013\u2014\u2018\u2019\u201C\u201D\u2026\u00A0\u2022\u2122]/g, (ch) => TXT_MAP[ch])
-    .replace(/[^\u0020-\u00FF]/g, '')
+    .replace(/[–—‘’“”… •™]/g, (ch) => TXT_MAP[ch])
+    .replace(/[^ -ÿ]/g, '')
     .replace(/\s+/g, ' ').trim();
   return max ? clean.slice(0, max) : clean;
 }
@@ -433,7 +438,7 @@ function buildInfNfe(company, nfceData, opts = {}) {
     ? Number(nfceData.total_value)
     : nfceData.items.reduce((s, it) => s + round2(Number(it.quantity || 1) * Number(it.price || 0)) - (Number(it.discount) || 0), 0);
 
-  const infNfeXml = `<infNFe xmlns="${NFE_NS}" Id="NFe${chave}" versao="4.00">`
+  const infNfeXml = `<infNFe Id="NFe${chave}" versao="4.00">`
     + buildIdeXml({
         cUF: String(cUF), cNF,
         natOp: txt(nfceData.natureza_operacao, 60) || 'Venda ao consumidor',
