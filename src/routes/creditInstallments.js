@@ -571,7 +571,7 @@ router.post('/installments', async (req, res) => {
   }
   const n = parseInt(installments);
   const total = parseFloat(total_amount);
-  if (isNaN(n) || n < 1 || n > 36) return res.status(400).json({ error: 'installments deve ser entre 1 e 36.' });
+  if (isNaN(n) || n < 1 || n > 100) return res.status(400).json({ error: 'installments deve ser entre 1 e 100.' });
   if (isNaN(total) || total <= 0)   return res.status(400).json({ error: 'total_amount invalido.' });
 
   const client = await pool.connect();

@@ -176,7 +176,7 @@ async function createCreditSale(client, {
     const effectiveRate = parseFloat(interestRate) > 0
       ? parseFloat(interestRate)
       : parseFloat(accountTerms?.interest_rate || config?.interest_rate) || 0;
-    const n = Math.min(parseInt(installments), maxN, 36);
+    const n = Math.min(parseInt(installments), maxN, 100);
     const period = resolvePeriod(
       periodUnit || accountTerms?.period_unit,
       periodCount || accountTerms?.period_count,
