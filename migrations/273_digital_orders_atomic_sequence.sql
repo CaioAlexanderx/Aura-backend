@@ -8,6 +8,13 @@
 -- ... RETURNING, que usa lock de linha do Postgres pra serializar
 -- corretamente chamadas concorrentes. Formato de saída (5 dígitos
 -- zero-padded, sem prefixo) inalterado — é o que já está em produção hoje.
+--
+-- RETURNS VARCHAR (não TEXT): migrations/070_digital_orders.sql já criou
+-- next_digital_order_number(uuid) como RETURNS VARCHAR. CREATE OR REPLACE
+-- não pode trocar o tipo de retorno de uma função existente (precisaria
+-- DROP FUNCTION antes), e num banco replay do zero (CI) 070 roda antes
+-- desta migration — então mantemos VARCHAR pra bater com 070. O valor
+-- retornado é a mesma string de qualquer forma.
 
 CREATE TABLE IF NOT EXISTS digital_order_sequences (
   company_id uuid PRIMARY KEY,
@@ -26,8 +33,8 @@ GROUP BY company_id
 ON CONFLICT (company_id) DO UPDATE
   SET last_seq = GREATEST(digital_order_sequences.last_seq, EXCLUDED.last_seq);
 
-CREATE OR REPLACE FUNCTION public.next_digital_order_number(p_company_id uuid)
-RETURNS text
+CREATE OR REPLACE FUNCTION next_digital_order_number(p_company_id uuid)
+RETURNS VARCHAR
 LANGUAGE plpgsql
 AS $function$
 DECLARE
