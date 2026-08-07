@@ -10,12 +10,16 @@
 // estados menores. O layout do XML (NFC-e 65) é o mesmo em todo o
 // país; só muda o host que autoriza e o host de consulta pública/QR.
 //
+// 07/08/2026 — qrCodeBase de AP corrigido conforme referência ACBr
+// (Fontes/ACBrDFe/ACBrNFe/ACBrNFeServicos.ini, seção [NFCe_AP_P]/
+// [NFCe_AP_H]): homologação usa nfcehml/nfce.php, produção usa
+// nfce/nfcep.php — antes ambos apontavam pro mesmo /nfce/consulta
+// (só correto pra urlConsulta, não pro QR).
+//
 // ⚠️ Conferir contra a tabela oficial de endereços de cada UF na
 // primeira rodada de homologação real (S1.6 smoke, agora repetido p/
 // AP) — URLs de webservice mudam raramente, mas a conferência é parte
-// do checklist. qrCodeBase/urlConsulta de AP seguem o padrão do portal
-// SVRS+SEFAZ-AP hoje conhecido; CONFIRMAR antes do primeiro emissão
-// real em produção para AP.
+// do checklist.
 // Versão dos serviços: 4.00 (NFeAutorizacao4 síncrono p/ NFC-e).
 // ============================================================
 'use strict';
@@ -45,7 +49,8 @@ const ENDPOINTS = {
     },
   },
   // AP não tem SEFAZ própria — autorização delegada à SVRS (Sefaz Virtual
-  // do RS). Fonte: portal oficial SVRS (dfe-portal.svrs.rs.gov.br).
+  // do RS). Fonte: portal oficial SVRS (dfe-portal.svrs.rs.gov.br) +
+  // referência ACBr (ACBrNFeServicos.ini) pras URLs de QR/consulta.
   AP: {
     homologacao: {
       autorizacao:    'https://nfce-homologacao.svrs.rs.gov.br/ws/NfeAutorizacao/NFeAutorizacao4.asmx',
@@ -54,8 +59,7 @@ const ENDPOINTS = {
       consultaProtocolo: 'https://nfce-homologacao.svrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
       recepcaoEvento: 'https://nfce-homologacao.svrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
       inutilizacao:   'https://nfce-homologacao.svrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
-      // ⚠️ NÃO CONFIRMADO com fonte 100% oficial — conferir antes do go-live.
-      qrCodeBase:     'https://www.sefaz.ap.gov.br/nfce/consulta',
+      qrCodeBase:     'https://www.sefaz.ap.gov.br/nfcehml/nfce.php',
       urlConsulta:    'https://www.sefaz.ap.gov.br/nfce/consulta',
     },
     producao: {
@@ -65,8 +69,7 @@ const ENDPOINTS = {
       consultaProtocolo: 'https://nfce.svrs.rs.gov.br/ws/NfeConsulta/NfeConsulta4.asmx',
       recepcaoEvento: 'https://nfce.svrs.rs.gov.br/ws/recepcaoevento/recepcaoevento4.asmx',
       inutilizacao:   'https://nfce.svrs.rs.gov.br/ws/nfeinutilizacao/nfeinutilizacao4.asmx',
-      // ⚠️ NÃO CONFIRMADO com fonte 100% oficial — conferir antes do go-live.
-      qrCodeBase:     'https://www.sefaz.ap.gov.br/nfce/consulta',
+      qrCodeBase:     'https://www.sefaz.ap.gov.br/nfce/nfcep.php',
       urlConsulta:    'https://www.sefaz.ap.gov.br/nfce/consulta',
     },
   },

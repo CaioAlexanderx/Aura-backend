@@ -26,7 +26,7 @@ const contingency = require('./contingency');
 const { getEndpoints } = require('./endpoints');
 const { decryptString } = require('../../utils/secretCrypto');
 
-const { isoBR: soapIsoNow } = require('../nuvemfiscal');
+const { isoBR: soapIsoNow, ufToCodigo } = require('../nuvemfiscal');
 
 function totalParaQr(nfceData) {
   if (nfceData.total_value !== undefined) return Number(nfceData.total_value);
@@ -204,8 +204,9 @@ async function queryNfce({ chave, config, db, companyId, transport }) {
 async function statusServico({ config, db, companyId, transport }) {
   const tpAmb = resolveTpAmb(config);
   const endpoints = getEndpoints(config.uf || 'SP', tpAmb);
+  const cUF = ufToCodigo(config.uf || 'SP');
   const { pfx, password } = await loadCertificate(db, companyId);
-  return soap.statusServico({ tpAmb, endpoints, pfx, passphrase: password, transport });
+  return soap.statusServico({ tpAmb, cUF, endpoints, pfx, passphrase: password, transport });
 }
 
 /**
@@ -215,11 +216,12 @@ async function statusServico({ config, db, companyId, transport }) {
 async function cancelNfce({ db, config, companyId, chave, protocolo, justificativa, transport }) {
   const tpAmb = resolveTpAmb(config);
   const endpoints = getEndpoints(config.uf || 'SP', tpAmb);
+  const cOrgao = ufToCodigo(config.uf || 'SP');
   const { pfx, password } = await loadCertificate(db, companyId);
   const cert = openPfx(pfx, password);
   const cnpj = String(chave).slice(6, 20); // CNPJ do emitente embutido na chave
   return eventos.cancelarNfce({
-    chave, cnpj, tpAmb, protocolo, justificativa, endpoints,
+    chave, cnpj, tpAmb, cOrgao, protocolo, justificativa, endpoints,
     cert: { keyPem: cert.keyPem, certDerBase64: cert.certDerBase64 },
     pfx, passphrase: password, transport,
   });
@@ -232,10 +234,11 @@ async function cancelNfce({ db, config, companyId, chave, protocolo, justificati
 async function inutilizarFaixa({ db, config, companyId, cnpj, serie, nIni, nFin, justificativa, ano2, transport }) {
   const tpAmb = resolveTpAmb(config);
   const endpoints = getEndpoints(config.uf || 'SP', tpAmb);
+  const cUF = ufToCodigo(config.uf || 'SP');
   const { pfx, password } = await loadCertificate(db, companyId);
   const cert = openPfx(pfx, password);
   return eventos.inutilizar({
-    tpAmb, ano2, cnpj, serie, nIni, nFin, justificativa, endpoints,
+    tpAmb, cUF, ano2, cnpj, serie, nIni, nFin, justificativa, endpoints,
     cert: { keyPem: cert.keyPem, certDerBase64: cert.certDerBase64 },
     pfx, passphrase: password, transport,
   });
