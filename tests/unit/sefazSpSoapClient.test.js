@@ -75,7 +75,10 @@ describe('sefazSp/endpoints', () => {
   });
 
   test('UF fora do escopo rejeita com orientação de gateway', () => {
-    expect(() => getEndpoints('RJ', 2)).toThrow(/escopo: SP/);
+    // 06/08/2026: escopo passou de SP-only para SP+AP (SEFAZ AP via SVRS).
+    // A mensagem de erro lista as UFs disponíveis dinamicamente em vez de
+    // citar "SP" fixo — o teste acompanha esse contrato.
+    expect(() => getEndpoints('RJ', 2)).toThrow(/não suportada na emissão própria/);
   });
 });
 
