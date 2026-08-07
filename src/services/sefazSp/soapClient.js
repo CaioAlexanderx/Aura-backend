@@ -217,6 +217,15 @@ async function statusServico({ tpAmb, cUF, endpoints, ...opts }) {
  * NFeAutorizacao4 síncrono (indSinc=1) — UMA tentativa, sem retry.
  * Timeout/erro de rede → SefazTransportError(ambiguous=true): o chamador
  * DEVE consultar por chave antes de reemitir. Nunca renumerar.
+ *
+ * Rejeição pode vir em dois níveis: (a) por-nota, com protNFe/infProt
+ * presente (cStat vem de infProt.cStat); ou (b) em nível de LOTE, sem
+ * nenhum protNFe (cStat vem do próprio retEnviNFe — ex.: cStat 587
+ * "namespace inválido", XML malformado, etc.). Como indSinc=1 SEMPRE
+ * devolve uma resposta terminal (nunca "ainda processando"), qualquer
+ * cStat fora de 100/150 é rejeição definitiva — rejeitada NÃO deve exigir
+ * infProt, senão rejeições de lote ficam presas em "processando" pra
+ * sempre (bug real: cStat 587 nunca marcava rejeitada=true).
  * @param {string} signedNfeXml — '<NFe>...</NFe>' assinado (+infNFeSupl)
  * @returns { cStat, xMotivo, protNFe?, protocolo?, chNFe?, digVal?, autorizada, rejeitada, rawXml }
  */
@@ -246,7 +255,7 @@ async function autorizar({ signedNfeXml, idLote, tpAmb, endpoints, ...opts }) {
     dhRecbto: infProt ? (infProt.dhRecbto || null) : null,
     digVal: infProt ? (infProt.digVal || null) : null,
     autorizada: cStat === '100' || cStat === '150',
-    rejeitada: !!infProt && cStat !== '100' && cStat !== '150',
+    rejeitada: cStat !== '100' && cStat !== '150',
     rawXml,
   };
 }
