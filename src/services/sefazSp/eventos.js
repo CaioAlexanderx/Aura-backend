@@ -11,6 +11,11 @@
 //   (Id = "ID" + cUF + ano2 + CNPJ + mod + serie[3] + nIni[9] + nFin[9]).
 //   Sucesso: cStat 102.
 //
+// cOrgao/cUF: código IBGE da UF da empresa (35=SP, 16=AP, ...) — precisa
+// bater com a UF que o Web Service atende (mesma regra do statusServico
+// em soapClient.js). Default 35 só por compat retroativa (empresas SP
+// existentes antes desse parâmetro existir).
+//
 // Auto-contido no transporte (reusa soapEnvelope/postSoap exportados)
 // e na assinatura (constantes do signer) — não altera módulos da S1.
 // ============================================================
@@ -92,9 +97,10 @@ async function callSoap(url, wsdlNs, innerXml, retKey, opts) {
 
 /**
  * Monta o infEvento de cancelamento (sem assinatura).
+ * @param {number|string} [cOrgao=35] — código IBGE da UF da empresa.
  * @returns { infEventoXml, idEvento }
  */
-function buildInfEventoCancelamento({ chave, cnpj, tpAmb, protocolo, justificativa, nSeqEvento = 1, dhEvento }) {
+function buildInfEventoCancelamento({ chave, cnpj, tpAmb, cOrgao = 35, protocolo, justificativa, nSeqEvento = 1, dhEvento }) {
   if (!/^\d{44}$/.test(String(chave))) throw new Error('cancelamento: chave deve ter 44 dígitos');
   const cnpjClean = onlyDigits(cnpj);
   if (cnpjClean.length !== 14) throw new Error('cancelamento: CNPJ inválido');
@@ -106,7 +112,7 @@ function buildInfEventoCancelamento({ chave, cnpj, tpAmb, protocolo, justificati
   const seq = String(nSeqEvento).padStart(2, '0');
   const idEvento = `ID${TP_EVENTO_CANCELAMENTO}${chave}${seq}`;
   const infEventoXml = `<infEvento Id="${idEvento}">`
-    + '<cOrgao>35</cOrgao>'
+    + `<cOrgao>${cOrgao}</cOrgao>`
     + `<tpAmb>${Number(tpAmb)}</tpAmb>`
     + `<CNPJ>${cnpjClean}</CNPJ>`
     + `<chNFe>${chave}</chNFe>`
@@ -127,8 +133,8 @@ function buildInfEventoCancelamento({ chave, cnpj, tpAmb, protocolo, justificati
  * Envia o cancelamento. Sucesso: cStat 135 (vinculado) ou 136 (registrado).
  * 573 = duplicidade de evento (já cancelada) — tratado como sucesso idempotente.
  */
-async function cancelarNfce({ chave, cnpj, tpAmb, protocolo, justificativa, endpoints, cert, ...opts }) {
-  const { infEventoXml } = buildInfEventoCancelamento({ chave, cnpj, tpAmb, protocolo, justificativa });
+async function cancelarNfce({ chave, cnpj, tpAmb, cOrgao, protocolo, justificativa, endpoints, cert, ...opts }) {
+  const { infEventoXml } = buildInfEventoCancelamento({ chave, cnpj, tpAmb, cOrgao, protocolo, justificativa });
   const eventoWrapper = `<evento xmlns="${NFE_NS}" versao="1.00">${infEventoXml}</evento>`;
   const signatureXml = signElement(eventoWrapper, 'infEvento', cert);
   const eventoXml = `<evento xmlns="${NFE_NS}" versao="1.00">${infEventoXml}${signatureXml}</evento>`;
@@ -157,8 +163,13 @@ async function cancelarNfce({ chave, cnpj, tpAmb, protocolo, justificativa, endp
 
 // ---------- Inutilização ----------
 
-/** Monta o infInut (sem assinatura). @returns { infInutXml, idInut } */
-function buildInfInut({ tpAmb, ano2, cnpj, serie, nIni, nFin, justificativa, mod = 65 }) {
+/**
+ * Monta o infInut (sem assinatura).
+ * @param {number|string} [cUF=35] — código IBGE da UF da empresa (entra
+ *   no campo <cUF> e no prefixo do atributo Id).
+ * @returns { infInutXml, idInut }
+ */
+function buildInfInut({ tpAmb, cUF = 35, ano2, cnpj, serie, nIni, nFin, justificativa, mod = 65 }) {
   const cnpjClean = onlyDigits(cnpj);
   if (cnpjClean.length !== 14) throw new Error('inutilização: CNPJ inválido');
   const a2 = String(ano2 ?? String(new Date().getFullYear()).slice(2));
@@ -172,11 +183,11 @@ function buildInfInut({ tpAmb, ano2, cnpj, serie, nIni, nFin, justificativa, mod
     throw new Error('inutilização: justificativa deve ter entre 15 e 255 caracteres');
   }
   const serie3 = String(Number(serie)).padStart(3, '0');
-  const idInut = `ID35${a2}${cnpjClean}${mod}${serie3}${String(ini).padStart(9, '0')}${String(fin).padStart(9, '0')}`;
+  const idInut = `ID${cUF}${a2}${cnpjClean}${mod}${serie3}${String(ini).padStart(9, '0')}${String(fin).padStart(9, '0')}`;
   const infInutXml = `<infInut Id="${idInut}">`
     + `<tpAmb>${Number(tpAmb)}</tpAmb>`
     + '<xServ>INUTILIZAR</xServ>'
-    + '<cUF>35</cUF>'
+    + `<cUF>${cUF}</cUF>`
     + `<ano>${a2}</ano>`
     + `<CNPJ>${cnpjClean}</CNPJ>`
     + `<mod>${mod}</mod>`
@@ -189,8 +200,8 @@ function buildInfInut({ tpAmb, ano2, cnpj, serie, nIni, nFin, justificativa, mod
 }
 
 /** Envia a inutilização da faixa. Sucesso: cStat 102. */
-async function inutilizar({ tpAmb, ano2, cnpj, serie, nIni, nFin, justificativa, endpoints, cert, ...opts }) {
-  const { infInutXml } = buildInfInut({ tpAmb, ano2, cnpj, serie, nIni, nFin, justificativa });
+async function inutilizar({ tpAmb, cUF, ano2, cnpj, serie, nIni, nFin, justificativa, endpoints, cert, ...opts }) {
+  const { infInutXml } = buildInfInut({ tpAmb, cUF, ano2, cnpj, serie, nIni, nFin, justificativa });
   const wrapper = `<inutNFe xmlns="${NFE_NS}" versao="4.00">${infInutXml}</inutNFe>`;
   const signatureXml = signElement(wrapper, 'infInut', cert);
   const inner = `<inutNFe xmlns="${NFE_NS}" versao="4.00">${infInutXml}${signatureXml}</inutNFe>`;

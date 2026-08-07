@@ -190,12 +190,16 @@ async function withRetry(fn, { attempts = 3, baseDelayMs = 500 } = {}) {
 
 /**
  * NFeStatusServico4 — consSitServ. Idempotente: retry automático.
+ * @param {number|string} [cUF] — código IBGE da UF da empresa (ex.: 35=SP,
+ *   16=AP). Precisa bater com a UF que o Web Service atende, senão a SEFAZ
+ *   rejeita com cStat 410. Fallback 35 só por compat retroativa.
  * @returns { cStat, xMotivo, dhRecbto, tMed, online } (107 = em operação)
  */
-async function statusServico({ tpAmb, endpoints, ...opts }) {
+async function statusServico({ tpAmb, cUF, endpoints, ...opts }) {
   const eps = endpoints || getEndpoints('SP', tpAmb);
+  const cUFResolved = cUF || 35;
   const inner = `<consStatServ xmlns="${NFE_NS}" versao="4.00">`
-    + `<tpAmb>${tpAmb}</tpAmb><cUF>35</cUF><xServ>STATUS</xServ></consStatServ>`;
+    + `<tpAmb>${tpAmb}</tpAmb><cUF>${cUFResolved}</cUF><xServ>STATUS</xServ></consStatServ>`;
   const { ret } = await withRetry(
     () => callService(eps.statusServico, WSDL_NS.statusServico, inner, 'retConsStatServ', opts,
       { ambiguousOnNetError: false })
