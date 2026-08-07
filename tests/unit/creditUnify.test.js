@@ -84,9 +84,9 @@ describe('computeUnifyPlan', () => {
     expect(p.schedule.map((s) => s.amount_due)).toEqual([33.33]);
   });
 
-  test('N clampado em 1..36', () => {
+  test('N clampado em 1..100', () => {
     expect(computeUnifyPlan({ newAmount: 10, installments: 0 }).installments_count).toBe(1);
-    expect(computeUnifyPlan({ newAmount: 10, installments: 999 }).installments_count).toBe(36);
+    expect(computeUnifyPlan({ newAmount: 10, installments: 999 }).installments_count).toBe(100);
   });
 
   test('determinismo: soma das parcelas == total em valores quebrados', () => {
