@@ -13,7 +13,7 @@
 //                     sobra (amount_due - covered_amount) -- parcela paga em
 //                     parte entra so com o restante.
 //   newAmount:        principal da nova compra (reais).
-//   installments:     N parcelas do carne unificado (escolha do lojista). 1..36.
+//   installments:     N parcelas do carne unificado (escolha do lojista). 1..100.
 //   interestRate:     juros mensais (decimal). Decisao Caio 13/06: "se houver
 //                     juros, recalcular". Modelo: juros simples SO sobre a nova
 //                     compra (newAmount * rate * N) -- nao re-cobra juros sobre
@@ -36,7 +36,7 @@ function computeUnifyPlan({
   periodCount = 1,
 } = {}) {
   // N: numero de parcelas do carne unificado, clampado (igual createCreditSale).
-  const N = Math.max(1, Math.min(parseInt(installments, 10) || 1, 36));
+  const N = Math.max(1, Math.min(parseInt(installments, 10) || 1, 100));
 
   // Saldo carregado: so o que SOBRA das parcelas abertas (face value, ja com
   // os juros que elas porventura ja carreguem). Parcela paga em parte entra so
