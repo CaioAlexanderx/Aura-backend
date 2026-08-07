@@ -1320,8 +1320,8 @@ router.post('/manual-entry', async (req, res) => {
 
   if (!total || total <= 0)
     return res.status(400).json({ error: 'amount invalido' });
-  if (n < 1 || n > 36)
-    return res.status(400).json({ error: 'installments deve ser entre 1 e 36' });
+  if (n < 1 || n > 100)
+    return res.status(400).json({ error: 'installments deve ser entre 1 e 100' });
   if (!customer_id && !new_customer?.name)
     return res.status(400).json({ error: 'Informe customer_id ou new_customer.name' });
   if (!customer_id && !new_customer?.phone)
