@@ -185,14 +185,29 @@ async function emitNfce(company, nfceData, ctx) {
   };
 }
 
-/** Consulta situação por chave (paridade c/ queryNfce dos gateways). */
+/**
+ * Consulta situação por chave (paridade c/ queryNfce dos gateways).
+ * status é 3 vias:
+ *  - 'autorizado' — cStat 100 (uso autorizado).
+ *  - 'processando' — ainda não consta na base da SEFAZ (cStat 217), OU
+ *    cancelada (101, tratada como não-rejeição defensivamente aqui — quem
+ *    chama essa função é o fluxo de retry de nota 'processando'; uma nota
+ *    cancelada nunca deveria estar nesse estado, mas não é seguro marcá-la
+ *    'rejeitado' por engano).
+ *  - 'rejeitado' — qualquer outro cStat definitivo (SEFAZ já respondeu e
+ *    não é autorização): antes disso essa distinção era descartada e TUDO
+ *    que não era 'autorizado' virava 'processando' pra sempre, mesmo uma
+ *    rejeição definitiva já confirmada pela SEFAZ (ex.: cStat 587).
+ */
 async function queryNfce({ chave, config, db, companyId, transport }) {
   const tpAmb = resolveTpAmb(config);
   const endpoints = getEndpoints(config.uf || 'SP', tpAmb);
   const { pfx, password } = await loadCertificate(db, companyId);
   const r = await soap.consultarChave({ chave, tpAmb, endpoints, pfx, passphrase: password, transport });
+  const aindaPendente = r.naoConsta || String(r.cStat) === '101';
+  const status = r.autorizada ? 'autorizado' : (aindaPendente ? 'processando' : 'rejeitado');
   return {
-    status: r.autorizada ? 'autorizado' : 'processando',
+    status,
     chave_acesso: chave,
     protocolo: r.protocolo,
     codigo_status: r.cStat,
