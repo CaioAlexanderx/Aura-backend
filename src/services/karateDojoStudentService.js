@@ -534,8 +534,32 @@ function shapeStudent(row) {
 // único caso em que a window function não serve é página VAZIA com offset
 // > 0 (não há linha para carregar o total) — aí sim vai um COUNT dedicado.
 async function listStudentsPaged(dojoId, opts = {}) {
-  const { status = null, q = null, belt = null, federated = null } = opts;
+  const { status = null, q = null, belt = null, federated = null, tag_id = null } = opts;
   const { limit, offset } = parsePaging(opts);
+
+  // F11: filtro por tag (?tag_id=). O JOIN/EXISTS contra
+  // karate_dojo_student_tags só entra na SQL quando tag_id vem preenchido —
+  // de propósito: essa tabela é NOVA (migration 274) e pode não existir
+  // ainda em produção; se ela aparecesse na query sempre, toda chamada a
+  // listStudentsPaged (mesmo sem filtro de tag) quebraria com 42P01 até a
+  // migration ser aplicada. Sem tag_id, a query fica byte-idêntica à de
+  // antes (mesmos $1..$7). Com tag_id, vira $1..$8 (tag entra antes de
+  // limit/offset) e, se a tabela ainda não existir, o 42P01 sobe e é
+  // pego pelo catch da ROTA (GET /dojo/students), que já devolve
+  // { data:[], count:0, ..., schema_pending:true } — nenhum tratamento
+  // extra precisa ser escrito aqui.
+  const params = [dojoId, status, q, belt, federated];
+  let tagClause = '';
+  if (tag_id) {
+    params.push(tag_id);
+    tagClause = `AND EXISTS (
+          SELECT 1 FROM karate_dojo_student_tags dst
+           WHERE dst.student_id = s.id AND dst.tag_id = $${params.length}
+        )`;
+  }
+  params.push(limit, offset);
+  const limitIdx = params.length - 1;
+  const offsetIdx = params.length;
 
   const { rows } = await withStudentSchemaFallback(() => db.query(
     `SELECT ${studentFields('s.')},
@@ -552,9 +576,10 @@ async function listStudentsPaged(dojoId, opts = {}) {
              OR s.cpf = regexp_replace($3, '\\D', '', 'g'))
         AND ($4::text IS NULL OR s.belt_label = $4)
         AND ($5::boolean IS NULL OR ${isFederatedExpr('s.')} = $5)
+        ${tagClause}
       ORDER BY s.full_name ASC
-      LIMIT $6 OFFSET $7`,
-    [dojoId, status, q, belt, federated, limit, offset]
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+    params
   ));
 
   const data = rows.map((r) => {
@@ -574,7 +599,7 @@ async function listStudentsPaged(dojoId, opts = {}) {
   if (rows.length) {
     count = rows[0].total_count != null ? Number(rows[0].total_count) : rows.length;
   } else if (offset > 0) {
-    count = await countStudents(dojoId, { status, q, belt, federated });
+    count = await countStudents(dojoId, { status, q, belt, federated, tag_id });
   } else {
     count = 0;
   }
@@ -583,7 +608,16 @@ async function listStudentsPaged(dojoId, opts = {}) {
 }
 
 // Só usado quando a página vem vazia com offset > 0 (ver acima).
-async function countStudents(dojoId, { status = null, q = null, belt = null, federated = null } = {}) {
+async function countStudents(dojoId, { status = null, q = null, belt = null, federated = null, tag_id = null } = {}) {
+  const params = [dojoId, status, q, belt, federated];
+  let tagClause = '';
+  if (tag_id) {
+    params.push(tag_id);
+    tagClause = `AND EXISTS (
+          SELECT 1 FROM karate_dojo_student_tags dst
+           WHERE dst.student_id = s.id AND dst.tag_id = $${params.length}
+        )`;
+  }
   const { rows } = await withStudentSchemaFallback(() => db.query(
     `SELECT count(*)::int AS total
        FROM karate_dojo_students s
@@ -592,8 +626,9 @@ async function countStudents(dojoId, { status = null, q = null, belt = null, fed
         AND ($3::text IS NULL OR s.full_name ILIKE '%' || $3 || '%'
              OR s.cpf = regexp_replace($3, '\\D', '', 'g'))
         AND ($4::text IS NULL OR s.belt_label = $4)
-        AND ($5::boolean IS NULL OR ${isFederatedExpr('s.')} = $5)`,
-    [dojoId, status, q, belt, federated]
+        AND ($5::boolean IS NULL OR ${isFederatedExpr('s.')} = $5)
+        ${tagClause}`,
+    params
   ));
   return rows.length && rows[0].total != null ? Number(rows[0].total) : 0;
 }

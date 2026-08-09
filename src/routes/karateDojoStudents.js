@@ -36,11 +36,18 @@
 // SYNCED_IDENTITY_COLS desde a migration 262). O responsável também passa
 // a subir: ver comentário na rota PATCH /dojo/guardians/:gid.
 //
+// F11 (09/08/2026) — filtro ?tag_id= na listagem: escopo/paginação/busca
+// existentes não mudam de forma; a lógica do filtro (JOIN condicional só
+// quando tag_id vem preenchido, pra não exigir a tabela nova em toda
+// chamada) vive em karateDojoStudentService.js. Tags em si (CRUD,
+// atribuição, contagem por tag) são karateDojoTagService.js /
+// karateDojoTags.js — não duplicadas aqui.
+//
 // Escopo SEMPRE por req.dojoId do guard — nunca do body/query.
 // Defensivo 42P01 (migration 242 pendente): GETs de lista devolvem vazio +
 // schema_pending; writes e ficha devolvem 503 SCHEMA_PENDING.
 //
-//   GET    /federation/:id/dojo/students             (?status=&q=&belt=&federated=&summary=1&limit=&offset=)
+//   GET    /federation/:id/dojo/students             (?status=&q=&belt=&federated=&tag_id=&summary=1&limit=&offset=)
 //   POST   /federation/:id/dojo/students             (422 inválido / menor sem responsável)
 //   POST   /federation/:id/dojo/students/import      ({rows:[...]}, máx 500)
 //   GET    /federation/:id/dojo/students/:sid        (ficha + responsável)
@@ -104,6 +111,16 @@ function parseFederatedFilter(raw) {
   return null;
 }
 
+// F11: ?tag_id= — ausente/vazio = sem filtro (todos os alunos, com e sem
+// tags). Só uma checagem de "veio alguma coisa", sem validar formato de
+// UUID aqui — se o id não existir/não pertencer ao dojô, a query do
+// service simplesmente não encontra ninguém (lista vazia, não erro).
+function parseTagIdFilter(raw) {
+  if (raw == null) return null;
+  const v = String(raw).trim();
+  return v === '' ? null : v;
+}
+
 // Quem está agindo — sempre do TOKEN, nunca do corpo. Vai para a trilha
 // de auditoria da F7.1 (adoção) e da F7.2 (sync contínuo).
 function actorFrom(req) {
@@ -131,12 +148,14 @@ router.get('/dojo/students', requireDojoAccess, async (req, res) => {
     const q = req.query.q != null && String(req.query.q).trim() !== '' ? String(req.query.q).trim() : null;
     const belt = req.query.belt != null && String(req.query.belt).trim() !== '' ? String(req.query.belt).trim() : null;
     const federated = parseFederatedFilter(req.query.federated);
+    const tagId = parseTagIdFilter(req.query.tag_id);
 
     const page = await svc.listStudentsPaged(req.dojoId, {
       status,
       q,
       belt,
       federated,
+      tag_id: tagId,
       limit: req.query.limit,
       offset: req.query.offset,
     });
