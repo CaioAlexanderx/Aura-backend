@@ -394,7 +394,7 @@ router.use('/federation/:id', require('./karateDojoPractitionerRequests'));
 // fica NULL até o merge/sync com a FPKT ser definido. GETs aceitam Canal
 // A e B (portal lê); escrita (POST/PATCH/DELETE) exige Canal A (senão
 // 403 PORTAL_READ_ONLY).
-//   GET    /federation/:id/dojo/students             (?status=&q=&belt=&summary=1)
+//   GET    /federation/:id/dojo/students             (?status=&q=&belt=&tag_id=&summary=1)
 //   POST   /federation/:id/dojo/students
 //   GET    /federation/:id/dojo/students/:sid        (ficha + responsável)
 //   PATCH  /federation/:id/dojo/students/:sid
@@ -457,6 +457,32 @@ router.use('/federation/:id', require('./karateDojoBilling'));
 //   GET      /federation/:id/dojo/students/:sid/attendance-summary
 //   GET      /federation/:id/dojo/students/:sid/qr
 router.use('/federation/:id', require('./karateDojoClasses'));
+
+// ── AURA DOJÔ — F11 (tags configuráveis do aluno) ──
+// Migration 274 (karate_dojo_tags + karate_dojo_student_tags). Pedido do
+// dono do produto: a planilha real do 1º dojô (Areikan, Araraquara/SP, 484
+// alunos) tem uma coluna "Academia" (4 locais de treino) que NÃO é modelo
+// de "unidade" nem dojô separado — é uma TAG configurável pelo sensei, com
+// N tags por aluno (começa em "academia" e cresce para "bolsista",
+// "competição" etc). Gerida em Configurações (CRUD completo). Vínculo
+// ancorado em karate_dojo_students (nunca em customers — tag é do dojô, e
+// aluno não federado também tem tag). Nome único por dojô
+// case-insensitive. DELETE só quando a tag nunca foi usada (0 vínculos);
+// tag em uso vira 409 TAG_EM_USO — o caminho é desativar (PATCH
+// {active:false}), preservando o histórico. GETs aceitam Canal A e B;
+// escrita exige Canal A (403 PORTAL_READ_ONLY). Defensivo 42P01 (migration
+// 274 pendente). Tag ≠ turma (karateDojoClasses acima): turma tem
+// dia/horário e controla presença; tag é rótulo livre. As duas coexistem.
+//   GET    /federation/:id/dojo/tags                        (?active=)
+//   POST   /federation/:id/dojo/tags
+//   PATCH  /federation/:id/dojo/tags/:tid                    (renomear / cor / active)
+//   DELETE /federation/:id/dojo/tags/:tid                     (409 TAG_EM_USO se houver vínculo)
+//   GET    /federation/:id/dojo/students/:sid/tags
+//   POST   /federation/:id/dojo/students/:sid/tags            ({tag_id})
+//   DELETE /federation/:id/dojo/students/:sid/tags/:tid
+// Filtro na listagem de alunos: GET /federation/:id/dojo/students?tag_id=
+// (convive com paginação/busca existentes — ver karateDojoStudentService.js)
+router.use('/federation/:id', require('./karateDojoTags'));
 
 // Lado FEDERAÇÃO (guards de karateRoles — dedup SUGERE, nunca decide):
 //   GET   /federation/:id/practitioner-requests?status=&dojo_id=
