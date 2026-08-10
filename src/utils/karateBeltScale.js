@@ -10,7 +10,7 @@
 //   "Branca, Amarela, Laranja, Verde, Azul Claro, Roxa, Azul Escuro,
 //    Marrom (3 Kyus) e Preta."  — Caio, 31/07/2026
 //
-// ── POR QUE ESTE ARQUIVO EXISTE ────────────────────────────
+// ── POR QUE ESTE ARQUIVO EXISTE ────────────────────────
 // Até hoje o backend tinha QUATRO representações divergentes da mesma
 // escala, e três delas discordavam entre si:
 //
@@ -33,14 +33,14 @@
 // arquivo = regressão (ver __tests__/karate.beltScale.test.js, que
 // também confere o CASE da migration 264 contra LEVEL_RANK).
 //
-// ── ONDE O SENSEI PARA ────────────────────────────────────
+// ── ONDE O SENSEI PARA ───────────────────────
 // O teto da graduação feita pelo DOJÔ é o 1º kyu (Marrom 1º kyu).
 // Faixa preta é EXCLUSIVAMENTE banca da federação — e isso não é regra
 // nova nossa: a própria tabela de requisitos da FPKT (seed da migration
 // 150) carrega, no degrau 1kyu → 1dan, a nota "Exame estadual
 // obrigatório com banca designada pela FPKT".
 //
-// ── DUAS ESCALAS, NÃO UMA ─────────────────────────────────
+// ── DUAS ESCALAS, NÃO UMA ─────────────────────
 // karate_belt_history.belt_schema separa 'fpkt_shotokan' (a atual, 10
 // kyus, sem vermelha) de 'legacy' (sistema antigo de 7 kyus, com
 // vermelha — 953 linhas, a última de 2016). Este módulo descreve a
@@ -50,7 +50,7 @@
 // repo, e inventá-la carimbaria um fato falso em 4.446 graduações.
 // Vermelha fica FORA da progressão (rank 0), como já estava na 229.
 //
-// ── GRAU: COR ≠ GRAU ──────────────────────────────────────
+// ── GRAU: COR ≠ GRAU ────────────────────────
 // belt_level guarda a COR ('marrom', 'preta'). O grau vive dentro do
 // texto de belt_name ("Preta 1°", "Marrom 3°kyu") — foi assim que a
 // 229 teve de extrair dan por regex. A migration 264 cria belt_kyu /
@@ -68,7 +68,7 @@ const BELT_SCHEMAS = Object.freeze([BELT_SCHEMA_FPKT, BELT_SCHEMA_LEGACY]);
 // Grau máximo de faixa preta reconhecido pela escala (1º ao 10º dan).
 const MAX_DAN = 10;
 
-// ── A escala, em ordem CRESCENTE de graduação ──────────────
+// ── A escala, em ordem CRESCENTE de graduação ────────────
 // `kyus` lista os kyus daquela cor, do mais baixo para o mais alto
 // (marrom tem três). Cor com um kyu só é DEDUTÍVEL: saber a cor é saber
 // o kyu. Marrom não é: 3º, 2º e 1º kyu dividem a mesma cor.
@@ -97,6 +97,13 @@ const LEGACY_ONLY_LEVELS = Object.freeze(['vermelha']);
 // azul_claro e azul_escuro. Mapeado para azul_claro por ser o primeiro
 // azul da progressão; se algum dia entrar dado com 'azul' cru, ele cai
 // na faixa mais baixa das duas em vez de virar uma faixa fantasma.
+//
+// 'azul escura' (F12, 10/08/2026): grafia feminina encontrada na
+// planilha real do primeiro dojô importado (Associação Areikan Karatê-Dô,
+// "4º Kyu - Azul Escura") — mesma faixa que 'azul escuro', só concordância
+// de gênero diferente. Confirmado inofensivo pelo guarda-corpo de
+// __tests__/karate.beltScale.test.js (o teste só varre mapas de RANK
+// numérico, não alias de nome).
 const LEVEL_ALIASES = Object.freeze({
   roxa: 'roxo',
   azul: 'azul_claro',
@@ -104,10 +111,11 @@ const LEVEL_ALIASES = Object.freeze({
   'azul claro': 'azul_claro',
   azulescuro: 'azul_escuro',
   'azul escuro': 'azul_escuro',
+  'azul escura': 'azul_escuro',
   vermelho: 'vermelha',
 });
 
-// ── Rank por COR (0..9) ────────────────────────────────────
+// ── Rank por COR (0..9) ────────────────────────
 // É o espelho EXATO do CASE de karate_current_belt (migration 264).
 // Derivado da ordem de COLOR_SCALE — não é uma segunda lista escrita à
 // mão, é a mesma lista contada. vermelha=0 fica fora da progressão.
@@ -147,7 +155,7 @@ const FPKT_LADDER = Object.freeze(
   ).map((step, i) => Object.freeze(Object.assign({}, step, { rank: i + 1 })))
 );
 
-// ── Fronteira do sensei ────────────────────────────────────
+// ── Fronteira do sensei ────────────────────────
 // Último degrau que o dojô pode conceder. Tudo acima é banca federativa.
 const DOJO_CEILING = Object.freeze({ level: 'marrom', kyu: 1, label: 'Marrom 1º kyu' });
 const DOJO_CEILING_REASON =
