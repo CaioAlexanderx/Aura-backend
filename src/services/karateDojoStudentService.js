@@ -61,21 +61,31 @@
 //   em src/ e tests/ antes de apagar. federateStudentByRequest (caminho 2,
 //   solicitação H1) CONTINUA vivo e é chamado pela rota.
 //
-// F10 (04/08/2026) — FILIAÇÃO: MÃE E PAI (aditivo, migration 272)
-//   A ficha de graduação real (Areikan Karatê-Dô) pede Mãe e Pai
-//   SEPARADAMENTE. Isso é FILIAÇÃO (identidade da pessoa) — não é o mesmo
-//   conceito que karate_dojo_guardians (o RESPONSÁVEL: quem paga/recebe
-//   cobrança e é o contato de emergência). Os dois podem não coincidir e
-//   um aluno pode ter mãe/pai registrados sem ter responsável vinculado
-//   (ou vice-versa). Por isso mother_name/father_name são colunas NOVAS
-//   em karate_dojo_students — nunca um substituto do guardian_id.
-//   `customers` (praticante da federação) NÃO tem coluna equivalente
-//   hoje (conferido em produção) — então mother_name/father_name NÃO
-//   entram em IDENTITY_FIELDS nem em GUARDIAN_SYNC_FIELDS
+// F10 (04/08/2026) — FILIAÇÃO: mãe e pai (migration 272, PARENTAGE_COLS).
+//   Filiação (identidade da pessoa) — não é o mesmo conceito que
+//   karate_dojo_guardians (o RESPONSÁVEL: quem paga/recebe cobrança e é o
+//   contato de emergência). Os dois podem não coincidir e um aluno pode
+//   ter mãe/pai registrados sem ter responsável vinculado (ou vice-versa).
+//   Por isso mother_name/father_name são colunas NOVAS em
+//   karate_dojo_students — nunca um substituto do guardian_id.
+//   `customers` (praticante da federação) NÃO tem coluna equivalente hoje
+//   (conferido em produção) — então mother_name/father_name NÃO entram em
+//   IDENTITY_FIELDS nem em GUARDIAN_SYNC_FIELDS
 //   (karateStudentIdentityLink.js) e por consequência não entram na
 //   guarda de karateIdentityWriteGuard.js: não há disputa de lista para
 //   uma coluna que só existe de um lado. Se um dia a federação ganhar
 //   filiação, aí sim isso entra no sync — decisão de outro PR.
+//
+// F11 (09/08/2026) — TAGS configuráveis (migration 274,
+//   karateDojoTagService.js). "Academia" da planilha real do Areikan virou
+//   tag, não unidade/dojô separado. Ver comentário de listStudentsPaged.
+//
+// F12 (10/08/2026) — IMPORTADOR: ficha completa da planilha real (Areikan
+//   Karatê-Dô, 484 alunos, 15 colunas). O import saía de 8 campos
+//   (full_name/birth_date/cpf/phone/email/belt_label/guardian_name/
+//   guardian_phone) para 15 colunas da planilha real, perdendo status
+//   ativo/inativo (254 dos 484 entrariam ATIVOS por engano), endereço,
+//   RG, Mãe, Pai e Academia. Ver o comentário completo em importStudents.
 //
 // Família é entidade de primeira classe (billing familiar na F3):
 // responsável em karate_dojo_guardians; um responsável → N alunos.
@@ -103,6 +113,14 @@ const db = require('../config/database');
 const { createPractitionerRequest } = require('./karatePractitionerRequestCreate');
 const identitySync = require('./karateIdentitySync');
 const { normalizeCpf, toDojoSex, normalizeUf, normalizeZipCode } = require('../utils/personIdentity');
+const {
+  normalizeBeltLevel,
+  colorOf,
+  isLegacyOnlyLevel,
+  parseDegreeFromName,
+  beltDisplayRank,
+  beltLabel: formatCanonicalBeltLabel,
+} = require('../utils/karateBeltScale');
 
 const VALID_STATUS = ['active', 'inactive'];
 const VALID_SEX_VALUES = ['M', 'F', 'other'];
@@ -1273,35 +1291,204 @@ async function federateStudentByRequest(dojoId, federationId, studentId, { body,
   };
 }
 
+// ============================================================
+// F12 — IMPORTAÇÃO EM LOTE: normalizadores puros (sem banco)
+//
+// Testáveis sem mock de SQL, mesmo espírito de validateStudentPayload e
+// dos testes de F10 (karate.dojoStudentParentage.test.js): funções puras
+// primeiro, banco só onde é inevitável (dedupe/tag/responsável).
+// ============================================================
+
+// Telefone: a planilha real tem MÁSCARA ERRADA na origem
+// ("(16) 9811-49883" — 11 dígitos corretos, hífen fora do lugar). Em vez
+// de tentar validar a máscara, extrai só os dígitos: 10 ou 11 dígitos é um
+// telefone BR válido (fixo ou celular), qualquer outra coisa é inválido —
+// campo fica null e a linha ganha warning (import é TOLERANTE).
+function normalizePhoneDigits(raw) {
+  if (raw == null) return null;
+  const digits = String(raw).replace(/\D/g, '');
+  return digits.length === 10 || digits.length === 11 ? digits : null;
+}
+
+// CPF: dígito verificador (mod 11, algoritmo padrão da Receita). Decisão
+// do produto (planilha real do Areikan, 16 CPFs com DV inválido): NÃO
+// bloqueia a linha — são alunos reais com erro de digitação antigo. O CPF
+// entra assim mesmo; quem chama decide o warning (marcado para revisão).
+function isValidCpfChecksum(digits) {
+  if (!/^\d{11}$/.test(digits)) return false;
+  if (/^(\d)\1{10}$/.test(digits)) return false; // 11 dígitos iguais: nunca válido
+  const calcDigit = (len) => {
+    let sum = 0;
+    for (let i = 0; i < len; i++) sum += parseInt(digits[i], 10) * (len + 1 - i);
+    const rest = (sum * 10) % 11;
+    return rest === 10 ? 0 : rest;
+  };
+  if (calcDigit(9) !== parseInt(digits[9], 10)) return false;
+  if (calcDigit(10) !== parseInt(digits[10], 10)) return false;
+  return true;
+}
+
+// Endereço: 96% das linhas da planilha real vêm com o número GRUDADO no
+// fim do nome da rua ("Rua Exemplo 123", às vezes com vírgula antes do
+// número). Extrai o número (dígitos + sufixo de letra opcional, ex.
+// "123A") do FIM da string; o resto vira street. Sem número reconhecível
+// no fim, a string inteira vira street e number fica null (dado faltante
+// é neutro, nunca erro).
+function splitAddress(raw) {
+  if (raw == null) return { street: null, number: null };
+  const v = String(raw).trim();
+  if (!v) return { street: null, number: null };
+  const m = v.match(/^(.*?)[,]?\s+(\d+[A-Za-z]?)\s*$/);
+  if (m && m[1].trim()) {
+    return { street: m[1].trim(), number: m[2].trim() };
+  }
+  return { street: v, number: null };
+}
+
+// Status: coluna "Ativo" da planilha real. Vocabulário tolerante (a
+// planilha pode vir com Sim/Não, TRUE/FALSE, Ativo/Inativo, 1/0) — quem
+// não reconhece vira 'active' (default neutro, igual ao import de sempre)
+// COM warning, para não mascarar um valor inesperado como se fosse "sim".
+const ACTIVE_STATUS_TOKENS = new Set(['ativo', 'active', 'sim', 's', 'true', '1', 'yes']);
+const INACTIVE_STATUS_TOKENS = new Set(['inativo', 'inactive', 'nao', 'n', 'false', '0', 'no']);
+
+function normalizeImportStatus(raw) {
+  if (raw == null) return { status: 'active', recognized: true };
+  if (typeof raw === 'boolean') return { status: raw ? 'active' : 'inactive', recognized: true };
+  const v = String(raw)
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+  if (!v) return { status: 'active', recognized: true };
+  if (ACTIVE_STATUS_TOKENS.has(v)) return { status: 'active', recognized: true };
+  if (INACTIVE_STATUS_TOKENS.has(v)) return { status: 'inactive', recognized: true };
+  return { status: 'active', recognized: false };
+}
+
+// Faixa: a planilha real traz "1º Kyu - Marrom", "10º Kyu - Branca",
+// "Preta 1º Dan" e "4º Kyu - Azul Escura" (feminino, grafia diferente do
+// "Azul Escuro" canônico). Fonte ÚNICA da escala: src/utils/
+// karateBeltScale.js (nenhum mapa de faixa novo aqui) — este parser só
+// EXTRAI a cor/grau do texto solto da planilha e delega toda a semântica
+// de ordenação/rótulo para lá.
+function detectImportBeltLevel(raw) {
+  const stripped = raw
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+  if (/\bpreta\b/i.test(stripped)) return 'preta';
+
+  // Remove um prefixo "<n>º Kyu -" / "<n> Kyu" quando existir; o que
+  // sobra tende a ser só a cor ("Marrom", "Azul Escura", ...).
+  let candidate = raw.replace(/^\s*\d+\s*[oº°]?\s*kyu\s*-?\s*/i, '').trim();
+  if (candidate === raw.trim() || !candidate) {
+    const parts = raw.split('-').map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 1) candidate = parts[parts.length - 1];
+  }
+
+  let level = normalizeBeltLevel(candidate);
+  if (level && (colorOf(level) || isLegacyOnlyLevel(level))) return level;
+
+  // Última tentativa: a string inteira já é só a cor (ex. "Branca").
+  level = normalizeBeltLevel(raw);
+  if (level && colorOf(level)) return level;
+
+  return null;
+}
+
+function parseImportBeltLabel(raw) {
+  if (raw == null) return { belt_label: null, belt_order: null, recognized: true };
+  const v = String(raw).trim();
+  if (!v) return { belt_label: null, belt_order: null, recognized: true };
+
+  const level = detectImportBeltLevel(v);
+  if (!level) return { belt_label: null, belt_order: null, recognized: false };
+
+  const degree = parseDegreeFromName(level, v);
+  return {
+    belt_label: formatCanonicalBeltLabel(level, degree),
+    belt_order: beltDisplayRank(level, degree),
+    recognized: true,
+  };
+}
+
 // ── Import em lote (até 500 linhas JSON já parseadas pelo front) ──
-// Formato da linha: { full_name, birth_date?, cpf?, phone?, email?,
-//                     belt_label?, guardian_name?, guardian_phone? }
-// Transação ÚNICA: ou o lote inteiro entra, ou nada entra. Contadores são
-// computados em JS — NENHUM try/catch best-effort DENTRO do BEGIN (evita
-// tx-poison); qualquer falha inesperada aborta o lote com ROLLBACK.
 //
-// F7.0: o import continua com o conjunto de colunas de sempre, de
-// propósito. Ele roda DENTRO de um BEGIN e um 42703 (migration 262
-// pendente) envenenaria a transação inteira; a retentativa degradada
-// exigiria SAVEPOINT por linha. RG/endereço entram pelo form/PATCH, que
-// são fora de transação e têm o fallback.
+// F12 (10/08/2026) — DE 8 CAMPOS PARA A FICHA REAL DO DOJÔ
 //
-// F7.2 — O SYNC DO LOTE NÃO PODE VIRAR 500 UPDATEs:
-//   O import só INSERE alunos novos e o INSERT não grava practitioner_id.
-//   Ou seja: hoje NENHUMA linha importada nasce com ficha adotada, e o
-//   sync do lote custa ZERO query (a lista de ids vai vazia e a função
-//   retorna sem tocar o banco). O RETURNING passou a devolver
-//   practitioner_id para que isso seja um FATO VERIFICADO a cada linha, e
-//   não uma suposição: se algum dia o import aceitar número FPKT, as
-//   linhas vinculadas caem na versão em LOTE do sync — UMA query de
-//   candidatos para as 500 linhas, e UPDATE só nas fichas que divergem.
+// A planilha real do primeiro dojô a entrar (Associação Areikan Karatê-Dô,
+// 484 alunos) tem 15 colunas: Nome, Graduação KYU, Academia, Ativo, Data
+// Nascimento, RG, CPF, Pai, Mãe, Telefone, Endereço, CEP, Bairro, Cidade,
+// Email. O import de 8 campos (full_name/birth_date/cpf/phone/email/
+// belt_label/guardian_name/guardian_phone, da F2) aproveitava 6 de 15 —
+// e o pior: SEM status, os 254 inativos entrariam ATIVOS.
 //
-// F10 — DECISÃO DE ESCOPO (declarada, não omissão silenciosa): o import em
-// lote NÃO foi estendido para aceitar mother_name/father_name. A planilha
-// de importação hoje não tem essas colunas e mãe/pai chegam via
-// form/PATCH (que tem o fallback de schema). Se o import ganhar essas
-// colunas depois, o INSERT abaixo precisa entrar na lista de colunas
-// como as demais.
+// MAPA COLUNA → CAMPO (linha da planilha → chave aceita nesta função):
+//   Nome              → full_name
+//   Graduação KYU     → belt_label   (texto solto; ver parseImportBeltLabel)
+//   Academia          → academia     (vira TAG — karate_dojo_tags, migr 274)
+//   Ativo             → status       (ver normalizeImportStatus)
+//   Data Nascimento   → birth_date   (YYYY-MM-DD; ausente/inválido = neutro)
+//   RG                → rg
+//   CPF               → cpf          (DV inválido NÃO bloqueia — marcado p/ revisão)
+//   Pai               → father_name  (filiação — migr 272)
+//   Mãe               → mother_name  (filiação — migr 272; também vira o
+//                                      RESPONSÁVEL quando o aluno é menor)
+//   Telefone          → phone        (máscara da origem é ignorada; só dígitos)
+//   Endereço          → address      (combinado; separado em street/number)
+//   CEP               → zip_code
+//   Bairro            → neighborhood
+//   Cidade            → city
+//   Email             → email
+// Campos legados mantidos por compatibilidade (outras planilhas/callers):
+//   guardian_name / guardian_phone → responsável EXPLÍCITO (sobrepõe a
+//   regra de mãe/pai abaixo quando vier preenchido).
+//
+// RESPONSÁVEL DE MENOR (regra do dono do produto): 370/484 (76%) são
+// menores de 18 e a planilha NÃO tem coluna de responsável — mas telefone
+// e e-mail da linha "parecem" ser dos pais (uma aluna de 16 anos tem o
+// e-mail da mãe). Regra: para MENOR (birth_date conhecida e < 18 anos),
+// cria/reusa o responsável com o nome da MÃE (ou do PAI se a mãe estiver
+// vazia) e usa o telefone/e-mail DA LINHA como contato dele — nesse caso
+// phone/email NÃO ficam também no cadastro do próprio aluno (evita
+// duplicar o contato do pai como se fosse do filho). Para ADULTO, telefone
+// e e-mail são do próprio aluno, como sempre.
+// mother_name/father_name são gravados SEMPRE (é filiação/identidade —
+// diferente de "quem é o responsável"), estejam ou não usados como
+// responsável.
+//
+// IDADE DESCONHECIDA (7 linhas sem data de nascimento — decisão declarada,
+// não omissão): sem birth_date não dá para saber se é menor. Tratada como
+// ADULTO (telefone/e-mail ficam no próprio aluno, mãe/pai só como
+// filiação) — com warning AGE_UNKNOWN_TREATED_AS_ADULT na linha, para o
+// sensei revisar manualmente quem realmente é.
+//
+// TAGS ("Academia"): criada se não existir (case-insensitive por dojô —
+// UNIQUE de migration 274) e reusada entre linhas da mesma tag no MESMO
+// lote (cache local, evita 484 buscas para 4 tags).
+//
+// REIMPORTAÇÃO / IDEMPOTÊNCIA (comportamento MELHORADO neste PR): o
+// dedupe de sempre é por (dojo_id, cpf) — mas 14% da planilha real (e
+// qualquer linha sem CPF) não tinham NENHUMA proteção contra duplicar ao
+// reimportar o mesmo arquivo. Agora, quando a linha não tem CPF, o dedupe
+// cai para (dojo_id, lower(full_name), birth_date) — no lote (Set) e no
+// banco. Continua não sendo "idempotência forte" (editar o nome depois de
+// importar faz uma reimportação não reconhecer a linha), mas fecha o
+// buraco que faria uma reimportação de 484 alunos duplicar os ~68 sem CPF.
+//
+// POLÍTICA DE ERRO POR LINHA: import continua TOLERANTE — campo inválido
+// vira warning + campo NULL, a linha entra mesmo assim (nunca 422 por
+// causa de UMA linha ruim). As duas únicas razões para uma linha ser
+// SKIPPED (não criar registro) são: full_name ausente, ou duplicata (CPF
+// ou nome+nascimento) — o resto é sempre "importa e avisa".
+//
+// F7.0/F7.2 (mantido): roda DENTRO de um BEGIN; RG/endereço/filiação já
+// são colunas garantidas por este PR ("SEM MIGRATION — já existem em
+// produção": 262, 272, 274) — se por algum motivo excepcional a coluna
+// não existir, o 42703 sobe e ROLLBACK do lote inteiro (mesma política de
+// "qualquer falha inesperada aborta o lote" que este arquivo já tinha).
+// F7.2: sync em lote ao final — hoje custa ZERO query (import nunca grava
+// practitioner_id), mesmo comportamento de antes.
 async function importStudents(dojoId, rows, ctx = {}) {
   if (!Array.isArray(rows)) {
     throw svcError(422, 'VALIDATION_ERROR', 'Corpo esperado: { rows: [...] } (array de linhas já parseadas)');
@@ -1319,7 +1506,9 @@ async function importStudents(dojoId, rows, ctx = {}) {
   try {
     await client.query('BEGIN');
     const seenCpfs = new Set();
+    const seenNameKeys = new Set();  // F12: dedupe de linhas SEM cpf (dojo, nome, nascimento)
     const guardianCache = new Map(); // lower(nome)|phone → id (dedupe no lote)
+    const tagCache = new Map();      // lower(nome da tag) → id (dedupe no lote)
     const linkedStudentIds = [];     // F7.2: linhas que nasceram com praticante
 
     for (let i = 0; i < rows.length; i++) {
@@ -1341,13 +1530,25 @@ async function importStudents(dojoId, rows, ctx = {}) {
         if (isValidDateStr(v)) birthDate = v;
         else warnings.push({ row: rowNum, code: 'INVALID_BIRTH_DATE', message: `birth_date inválido ("${v}") — aluno importado sem data de nascimento` });
       }
+      // null = idade DESCONHECIDA (7 casos na planilha real); true/false = conhecida.
+      const isMinorRow = birthDate ? isMinor(birthDate) : null;
 
       let cpf = null;
       if (r.cpf != null && String(r.cpf).trim() !== '') {
         const digits = normalizeCpf(r.cpf);
-        if (digits && digits.length === 11) cpf = digits;
-        else warnings.push({ row: rowNum, code: 'INVALID_CPF', message: 'cpf inválido — aluno importado sem CPF' });
+        if (digits && digits.length === 11) {
+          cpf = digits;
+          // F12: DV inválido NÃO bloqueia — decisão do produto (16 casos
+          // reais na planilha do Areikan). Importa marcado para revisão.
+          if (!isValidCpfChecksum(cpf)) {
+            warnings.push({ row: rowNum, code: 'CPF_CHECKSUM_INVALID', message: 'CPF com dígito verificador inválido — importado mesmo assim, marcado para revisão' });
+          }
+        } else {
+          warnings.push({ row: rowNum, code: 'INVALID_CPF', message: 'cpf inválido — aluno importado sem CPF' });
+        }
       }
+
+      const rg = r.rg != null && String(r.rg).trim() !== '' ? String(r.rg).trim() : null;
 
       let email = null;
       if (r.email != null && String(r.email).trim() !== '') {
@@ -1356,76 +1557,219 @@ async function importStudents(dojoId, rows, ctx = {}) {
         else warnings.push({ row: rowNum, code: 'INVALID_EMAIL', message: 'email inválido — aluno importado sem e-mail' });
       }
 
-      const phone = r.phone != null && String(r.phone).trim() !== '' ? String(r.phone).trim() : null;
-      const beltLabel = r.belt_label != null && String(r.belt_label).trim() !== '' ? String(r.belt_label).trim() : null;
+      let phone = null;
+      if (r.phone != null && String(r.phone).trim() !== '') {
+        phone = normalizePhoneDigits(r.phone);
+        if (!phone) warnings.push({ row: rowNum, code: 'INVALID_PHONE', message: 'telefone inválido — aluno importado sem telefone' });
+      }
 
-      // Dedupe por (dojo_id, cpf): no lote (Set) e no banco (SELECT na MESMA
-      // conexão/transação — também enxerga linhas já inseridas neste lote).
-      // Checar ANTES de inserir evita 23505 no UNIQUE parcial (que abortaria
-      // a transação inteira).
+      const beltParsed = parseImportBeltLabel(r.belt_label);
+      if (!beltParsed.recognized) {
+        warnings.push({ row: rowNum, code: 'INVALID_BELT', message: `belt_label não reconhecido ("${String(r.belt_label).trim()}") — aluno importado sem faixa` });
+      }
+
+      const statusParsed = normalizeImportStatus(r.status);
+      if (!statusParsed.recognized) {
+        warnings.push({ row: rowNum, code: 'INVALID_STATUS', message: `status não reconhecido ("${String(r.status).trim()}") — aluno importado como ativo` });
+      }
+
+      const motherName = r.mother_name != null && String(r.mother_name).trim() !== '' ? String(r.mother_name).trim() : null;
+      const fatherName = r.father_name != null && String(r.father_name).trim() !== '' ? String(r.father_name).trim() : null;
+
+      let zipCode = null;
+      if (r.zip_code != null && String(r.zip_code).trim() !== '') {
+        zipCode = normalizeZipCode(r.zip_code);
+        if (!zipCode) warnings.push({ row: rowNum, code: 'INVALID_ZIP', message: 'CEP inválido — aluno importado sem CEP' });
+      }
+
+      // F12: 96% das linhas vêm com o número grudado na rua. street/number
+      // já separados pelo caller (planilha nova) têm PRIORIDADE; sem eles,
+      // usa address (combinado) e separa aqui.
+      let street = r.street != null && String(r.street).trim() !== '' ? String(r.street).trim() : null;
+      let number = r.number != null && String(r.number).trim() !== '' ? String(r.number).trim() : null;
+      if (!street && r.address != null && String(r.address).trim() !== '') {
+        const split = splitAddress(r.address);
+        street = split.street;
+        number = split.number;
+      }
+      const neighborhood = r.neighborhood != null && String(r.neighborhood).trim() !== '' ? String(r.neighborhood).trim() : null;
+      // Planilha real tem 1 typo de cidade conhecido ("Araraqaura") e 8
+      // linhas sem cidade — nenhuma correção automática aqui de propósito
+      // (autocorrigir texto livre é decisão de produto separada, não
+      // deste PR). Cidade entra exatamente como veio, só trim().
+      const city = r.city != null && String(r.city).trim() !== '' ? String(r.city).trim() : null;
+      // A planilha não traz sexo nem UF — nulos, nunca inventados (UF
+      // poderia sair do CEP, mas isso é decisão separada e não está
+      // implementada aqui).
+      const sex = null;
+      const state = null;
+
+      // ── Dedupe: por CPF quando existe; por nome+nascimento quando não ──
+      // (F12: fecha o buraco de reimportação para as linhas sem CPF — ver
+      // cabeçalho da função).
       if (cpf) {
         if (seenCpfs.has(cpf)) {
           skipped++;
           warnings.push({ row: rowNum, code: 'DUP_CPF', message: 'CPF duplicado no lote — linha ignorada' });
           continue;
         }
-        const dup = await client.query(
+        const dupCpf = await client.query(
           `SELECT id FROM karate_dojo_students WHERE dojo_id = $1 AND cpf = $2 LIMIT 1`,
           [dojoId, cpf]
         );
-        if (dup.rows.length) {
+        if (dupCpf.rows.length) {
           skipped++;
           warnings.push({ row: rowNum, code: 'DUP_CPF', message: 'CPF já cadastrado neste dojô — linha ignorada' });
           continue;
         }
         seenCpfs.add(cpf);
+      } else {
+        const nameKey = `${fullName.toLowerCase()}|${birthDate || ''}`;
+        if (seenNameKeys.has(nameKey)) {
+          skipped++;
+          warnings.push({ row: rowNum, code: 'DUP_NAME_NO_CPF', message: 'Nome e nascimento duplicados no lote (linha sem CPF) — linha ignorada' });
+          continue;
+        }
+        const dupName = await client.query(
+          `SELECT id FROM karate_dojo_students
+             WHERE dojo_id = $1 AND lower(full_name) = lower($2)
+               AND birth_date IS NOT DISTINCT FROM $3
+             LIMIT 1`,
+          [dojoId, fullName, birthDate]
+        );
+        if (dupName.rows.length) {
+          skipped++;
+          warnings.push({ row: rowNum, code: 'DUP_NAME_NO_CPF', message: 'Aluno com mesmo nome e nascimento já cadastrado neste dojô (linha sem CPF) — linha ignorada' });
+          continue;
+        }
+        seenNameKeys.add(nameKey);
       }
 
-      // Responsável on-the-fly quando guardian_name vier (dedupe por
-      // nome+phone no mesmo lote/dojô).
+      // ── Tag ("Academia") ──
+      let tagId = null;
+      const tagName = r.academia != null && String(r.academia).trim() !== '' ? String(r.academia).trim() : null;
+      if (tagName) {
+        const tagKey = tagName.toLowerCase();
+        if (tagCache.has(tagKey)) {
+          tagId = tagCache.get(tagKey);
+        } else {
+          const tagRes = await client.query(
+            `INSERT INTO karate_dojo_tags (dojo_id, name, color, active)
+             VALUES ($1, $2, NULL, true)
+             ON CONFLICT (dojo_id, lower(name)) DO UPDATE SET updated_at = now()
+             RETURNING id`,
+            [dojoId, tagName]
+          );
+          tagId = tagRes.rows[0].id;
+          tagCache.set(tagKey, tagId);
+        }
+      }
+
+      // ── Responsável ──
+      // Caminho 1 (legado, prioridade): guardian_name explícito na linha —
+      // mesmo comportamento de sempre (planilhas de 8 campos continuam
+      // funcionando byte a byte).
+      // Caminho 2 (F12): menor SEM guardian_name explícito — responsável
+      // vira a MÃE (ou o PAI se a mãe estiver vazia), com telefone/e-mail
+      // DA LINHA. Nesse caminho phone/email NÃO vão para o cadastro do
+      // próprio aluno (evita duplicar contato do pai como se fosse do
+      // filho — ver cabeçalho da função).
       let guardianId = null;
+      let guardianSourceName = null;
+      let guardianSourcePhone = null;
+      let guardianSourceEmail = null;
+      let guardianRelationship = null;
+      let contactMovedToGuardian = false;
+
       if (r.guardian_name != null && String(r.guardian_name).trim() !== '') {
-        const gName = String(r.guardian_name).trim();
-        const gPhone = r.guardian_phone != null && String(r.guardian_phone).trim() !== '' ? String(r.guardian_phone).trim() : null;
-        const key = `${gName.toLowerCase()}|${gPhone || ''}`;
-        if (guardianCache.has(key)) {
-          guardianId = guardianCache.get(key);
+        guardianSourceName = String(r.guardian_name).trim();
+        guardianSourcePhone = r.guardian_phone != null && String(r.guardian_phone).trim() !== '' ? String(r.guardian_phone).trim() : null;
+        guardianSourceEmail = null;
+      } else if (isMinorRow === true) {
+        if (motherName) {
+          guardianSourceName = motherName;
+          guardianRelationship = 'mãe';
+        } else if (fatherName) {
+          guardianSourceName = fatherName;
+          guardianRelationship = 'pai';
+        }
+        if (guardianSourceName) {
+          guardianSourcePhone = phone;
+          guardianSourceEmail = email;
+          contactMovedToGuardian = true;
+        }
+      }
+
+      if (guardianSourceName) {
+        const gKey = `${guardianSourceName.toLowerCase()}|${guardianSourcePhone || ''}`;
+        if (guardianCache.has(gKey)) {
+          guardianId = guardianCache.get(gKey);
         } else {
           const found = await client.query(
             `SELECT id FROM karate_dojo_guardians
               WHERE dojo_id = $1 AND lower(full_name) = lower($2)
                 AND COALESCE(phone, '') = COALESCE($3, '')
               LIMIT 1`,
-            [dojoId, gName, gPhone]
+            [dojoId, guardianSourceName, guardianSourcePhone]
           );
           if (found.rows.length) {
             guardianId = found.rows[0].id;
           } else {
             const ins = await client.query(
-              `INSERT INTO karate_dojo_guardians (dojo_id, full_name, phone)
-               VALUES ($1, $2, $3) RETURNING id`,
-              [dojoId, gName, gPhone]
+              `INSERT INTO karate_dojo_guardians (dojo_id, full_name, phone, email, relationship)
+               VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+              [dojoId, guardianSourceName, guardianSourcePhone, guardianSourceEmail, guardianRelationship]
             );
             guardianId = ins.rows[0].id;
           }
-          guardianCache.set(key, guardianId);
+          guardianCache.set(gKey, guardianId);
         }
       }
 
+      // Contato do PRÓPRIO aluno: só quando não foi "consumido" pelo
+      // responsável derivado de mãe/pai (caminho 2 acima).
+      const studentPhone = contactMovedToGuardian && guardianId ? null : phone;
+      const studentEmail = contactMovedToGuardian && guardianId ? null : email;
+
       // Import TOLERANTE: menor sem responsável na planilha entra MESMO
       // ASSIM, com warning (o bloqueio 422 MENOR_SEM_RESPONSAVEL é só no form).
-      if (birthDate && isMinor(birthDate) && !guardianId) {
-        warnings.push({ row: rowNum, code: 'MENOR_SEM_RESPONSAVEL', message: 'Menor de 18 anos sem responsável vinculado — importado mesmo assim; vincule um responsável depois' });
+      if (isMinorRow === true && !guardianId) {
+        warnings.push({ row: rowNum, code: 'MENOR_SEM_RESPONSAVEL', message: 'Menor de 18 anos sem responsável vinculado (nem mãe/pai na planilha) — importado mesmo assim; vincule um responsável depois' });
+      }
+      // F12: idade desconhecida (sem birth_date) — decisão DECLARADA: trata
+      // como adulto (contato fica no próprio aluno; mãe/pai só como
+      // filiação), mas avisa para o sensei revisar manualmente.
+      if (isMinorRow === null) {
+        warnings.push({ row: rowNum, code: 'AGE_UNKNOWN_TREATED_AS_ADULT', message: 'Sem data de nascimento — não deu para saber se é menor; importado como adulto (revisar manualmente)' });
       }
 
       const ins = await client.query(
         `INSERT INTO karate_dojo_students
-           (dojo_id, full_name, birth_date, cpf, phone, email, belt_label, guardian_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
+           (dojo_id, full_name, birth_date, cpf, rg, sex, phone, email,
+            belt_label, belt_order, status, guardian_id,
+            mother_name, father_name, zip_code, street, number,
+            neighborhood, city, state)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                 $13, $14, $15, $16, $17, $18, $19, $20)
          RETURNING id, practitioner_id`,
-        [dojoId, fullName, birthDate, cpf, phone, email, beltLabel, guardianId]
+        [
+          dojoId, fullName, birthDate, cpf, rg, sex, studentPhone, studentEmail,
+          beltParsed.belt_label, beltParsed.belt_order, statusParsed.status, guardianId,
+          motherName, fatherName, zipCode, street, number,
+          neighborhood, city, state,
+        ]
       );
       created++;
+
+      if (tagId) {
+        await client.query(
+          `INSERT INTO karate_dojo_student_tags (student_id, tag_id)
+           VALUES ($1, $2)
+           ON CONFLICT (student_id, tag_id) DO NOTHING`,
+          [ins.rows[0].id, tagId]
+        );
+      }
+
       // Sempre NULL hoje (o INSERT não grava a coluna). Conferir em vez de
       // supor é o que faz o caminho continuar correto quando isso mudar.
       const insRow = (ins && ins.rows && ins.rows[0]) || null;
@@ -1608,6 +1952,13 @@ module.exports = {
   createGuardian,
   updateGuardian,
   setStudentPhoto,
+  // F12 — normalizadores puros do import (testáveis sem banco)
+  normalizePhoneDigits,
+  isValidCpfChecksum,
+  splitAddress,
+  normalizeImportStatus,
+  parseImportBeltLabel,
+  detectImportBeltLevel,
   // F5a — caminho 2 (solicitação H1). O caminho 1 e o desfederar são da
   // F7.1 (karateStudentIdentityLink); as versões antigas daqui foram
   // removidas na F7.2 por não terem chamador.
