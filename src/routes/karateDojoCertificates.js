@@ -345,7 +345,12 @@ router.post('/dojo/graduation-exams/:examId/own-certificates', requireDojoAccess
     const signatories = (Array.isArray(template.signatories) && template.signatories.length)
       ? template.signatories
       : (exam.examiner_name ? [{ name: exam.examiner_name, role: 'Sensei / Examinador', signature_url: null }] : []);
-    const instructors_text = exam.examiner_name ? `Sensei ${exam.examiner_name}` : '';
+    // Nome CRU do examinador — sem decorar prefixo. O sensei costuma
+    // digitar "Sensei Fulano" no próprio campo (é assim que se identifica);
+    // concatenar outro "Sensei " aqui duplicava o título no certificado
+    // emitido ("Sensei Sensei Fulano"). `signatories` já seguia a
+    // convenção certa (nome cru + role em campo separado) — alinhado aqui.
+    const instructors_text = exam.examiner_name || '';
 
     const dates_text = req.body.dates_text || (exam.exam_date ? fmtBR(exam.exam_date) : '');
     const issued_date_text = req.body.issued_date_text || fmtBR(new Date());

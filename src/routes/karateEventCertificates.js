@@ -146,7 +146,12 @@ router.post('/belt-exams/:examId/certificates', ...guards.staffWrite(), async (r
     const instr = await db.query(
       `SELECT name, role, signature_url FROM karate_event_instructors WHERE event_id = $1 ORDER BY sort_order ASC, created_at ASC`, [examId]);
     const signatories = instr.rows.map(r => ({ name: r.name, role: r.role || null, signature_url: r.signature_url || null }));
-    const instructors_text = joinNames(instr.rows.map(r => (r.name ? (`Sensei ${r.name}`) : '')).filter(Boolean));
+    // Nome CRU dos ministrantes — sem decorar prefixo "Sensei". Muitos já
+    // digitam "Sensei Fulano" no próprio cadastro (é assim que se
+    // identificam); prefixar de novo aqui duplicava o título no
+    // certificado emitido ("Sensei Sensei Fulano"). `signatories`, logo
+    // acima, já usa o nome cru + `role` em campo separado — alinhado aqui.
+    const instructors_text = joinNames(instr.rows.map(r => r.name).filter(Boolean));
 
     // Elegíveis: curso → não ausente/rejeitado; exame → aprovado; OU certificate_eligible
     const isCurso = event.exam_type === 'curso';
