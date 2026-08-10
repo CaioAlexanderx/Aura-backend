@@ -632,7 +632,16 @@ describe('F7.0 — identidade do aluno (RG, endereço, foto, sexo)', () => {
 // posicional quebraria a cada ajuste de ordem interna.
 // ════════════════════════════════
 describe('F7.2 — PATCH sincroniza a identidade quando a ficha está adotada', () => {
-  const isStudentSelect = (s) => /FROM karate_dojo_students s/.test(s) && /LEFT JOIN karate_dojo_guardians/.test(s);
+  // F12 (bug fix, ago/2026): a query que updateStudent usa para CARREGAR
+  // o aluno (karateDojoStudentService.js) só faz LEFT JOIN customers fp
+  // (federationJoin) — NÃO junta karate_dojo_guardians (esse join só
+  // existe no SELECT do GET /students/:id, uma query diferente). O regex
+  // antigo exigia LEFT JOIN karate_dojo_guardians, que essa query nunca
+  // tem: isStudentSelect nunca casava, db.query caía no fallback
+  // `{ rows: [] }` e o PATCH respondia 404 mesmo com o handler correto.
+  // A negação de karate_dojo_guardians mantém o regex específico da
+  // query de carga (não da de listagem/GET-by-id, que tem os dois joins).
+  const isStudentSelect = (s) => /FROM karate_dojo_students s/.test(s) && /LEFT JOIN customers fp/.test(s) && !/karate_dojo_guardians/.test(s);
   const isStudentUpdate = (s) => /^UPDATE karate_dojo_students SET/.test(s.trim());
   const isCandidate = (s) => /FROM customers c/.test(s) && /karate_identity_managed_by = 'dojo'/.test(s);
   const isFedUpdate = (s) => /^UPDATE customers SET/.test(s.trim());
