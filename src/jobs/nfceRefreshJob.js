@@ -5,9 +5,13 @@
 // SEFAZ instável) são consultadas por chave com BACKOFF exponencial:
 // tentativa N espera BASE_MS * 2^N (cap 30min), máximo 10 tentativas.
 // - consulta diz autorizada (100) → nota vira autorizada (sucesso tardio)
+// - consulta diz rejeitada (qualquer cStat definitivo != 100/217/101) →
+//   nota vira 'rejeitada' JÁ NA PRIMEIRA consulta que detectar isso —
+//   não espera MAX_ATTEMPTS (a resposta da SEFAZ já é terminal, não tem
+//   por que continuar tentando)
 // - consulta diz não consta (217) → continua processando; o PDV pode
 //   reemitir a venda (mesmo número é reusado pela regra da rota)
-// - 10 tentativas sem resposta → status 'erro' com orientação
+// - 10 tentativas sem resposta definitiva → status 'erro' com orientação
 //
 // Mesmo padrão do reportScheduler (setInterval + init/stop). Tick
 // injetável pra teste (deps {db, sefazSp}).
@@ -25,10 +29,10 @@ function backoffMs(attempts) {
 
 /**
  * Um ciclo da fila. @param deps {{ db, sefazSp, now? }} — injetável p/ teste.
- * @returns resumo { scanned, authorized, stillPending, exhausted, errors }
+ * @returns resumo { scanned, authorized, rejected, stillPending, exhausted, errors }
  */
 async function tickNfceRefresh({ db, sefazSp, now = () => Date.now() }) {
-  const summary = { scanned: 0, authorized: 0, stillPending: 0, exhausted: 0, errors: 0 };
+  const summary = { scanned: 0, authorized: 0, rejected: 0, stillPending: 0, exhausted: 0, errors: 0 };
 
   const { rows: pending } = await db.query(
     `SELECT e.id, e.company_id, e.chave_acesso, e.refresh_attempts, e.last_refresh_at, e.created_at
@@ -63,6 +67,18 @@ async function tickNfceRefresh({ db, sefazSp, now = () => Date.now() }) {
           [r.protocolo, em.id]
         );
         summary.authorized++;
+      } else if (r.status === 'rejeitado') {
+        // Resposta terminal da SEFAZ (indSinc=1 nunca deixa "ainda
+        // processando" de verdade) — persiste na primeira detecção, não
+        // espera MAX_ATTEMPTS. Desbloqueia reemissão imediatamente.
+        await db.query(
+          `UPDATE nfce_emissions
+              SET status='rejeitada', rejection_code=$1, error_message=$2,
+                  refresh_attempts=refresh_attempts+1, last_refresh_at=NOW()
+            WHERE id=$3`,
+          [r.codigo_status || null, r.motivo_status || 'Rejeitada pela SEFAZ', em.id]
+        );
+        summary.rejected++;
       } else {
         const isLast = em.refresh_attempts + 1 >= MAX_ATTEMPTS;
         await db.query(
@@ -95,7 +111,7 @@ function initNfceRefreshJob() {
   _interval = setInterval(() => {
     tickNfceRefresh({ db, sefazSp })
       .then((s) => {
-        if (s.scanned > 0) console.log(`[nfceRefresh] scanned=${s.scanned} autorizada=${s.authorized} pendente=${s.stillPending} esgotada=${s.exhausted} erros=${s.errors}`);
+        if (s.scanned > 0) console.log(`[nfceRefresh] scanned=${s.scanned} autorizada=${s.authorized} rejeitada=${s.rejected} pendente=${s.stillPending} esgotada=${s.exhausted} erros=${s.errors}`);
       })
       .catch((e) => console.error('[nfceRefresh] tick crash:', e.message));
   }, 2 * 60 * 1000); // a cada 2min (o backoff por nota decide quem consulta)

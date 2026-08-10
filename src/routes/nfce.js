@@ -248,7 +248,6 @@ router.post('/config', requireAuth, requireRole('client','analyst','admin'), asy
     }
     serieSefazSp = s;
   }
-
   try {
     const providerVal = (provider === undefined) ? null : provider;
     try {
@@ -880,6 +879,15 @@ router.post('/:nfceId/refresh', requireAuth, async (req, res) => {
                 authorized_at=COALESCE(authorized_at, NOW()), transmitted_at=COALESCE(transmitted_at, NOW()),
                 refresh_attempts=refresh_attempts+1, last_refresh_at=NOW() WHERE id=$2`,
             [r.protocolo, emission.id]
+          );
+        } else if (r.status === 'rejeitado' && emission.status !== 'rejeitada') {
+          // Rejeição definitiva (não é mais "ainda processando"): persiste
+          // agora com o cStat/motivo reais e libera reemissão — /emit só
+          // bloqueia reemissão pra status IN ('autorizada','processando').
+          await db.query(
+            `UPDATE nfce_emissions SET status='rejeitada', rejection_code=$1, error_message=$2,
+                refresh_attempts=refresh_attempts+1, last_refresh_at=NOW() WHERE id=$3`,
+            [r.codigo_status, r.motivo_status, emission.id]
           );
         } else {
           await db.query(`UPDATE nfce_emissions SET refresh_attempts=refresh_attempts+1, last_refresh_at=NOW() WHERE id=$1`, [emission.id]);
