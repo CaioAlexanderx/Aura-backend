@@ -135,6 +135,10 @@ describe('F8.0 — o bug da 229: Roxa × Azul Claro', () => {
     expect(scale.normalizeBeltLevel('AZUL-ESCURO')).toBe('azul_escuro');
     expect(scale.normalizeBeltLevel('Amarela')).toBe('amarela');
     expect(scale.beltDisplayRank('Roxa')).toBe(scale.beltDisplayRank('roxo'));
+    // F12: grafia feminina da planilha real do Areikan ("4º Kyu - Azul
+    // Escura") resolve para o MESMO nível que "Azul Escuro".
+    expect(scale.normalizeBeltLevel('Azul Escura')).toBe('azul_escuro');
+    expect(scale.beltDisplayRank('Azul Escura')).toBe(scale.beltDisplayRank('azul_escuro'));
   });
 });
 
