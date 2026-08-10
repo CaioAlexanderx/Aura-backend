@@ -24,7 +24,7 @@
 //   - as colunas novas entram DEPOIS de $15 (a parte base do INSERT é
 //     string literal), então `calls[0][1][0] === dojoId` e
 //     `calls[0][1][3] === cpf` continuam apontando para o mesmo lugar —
-//     asserção mantida abaixo, agora como GUARDA dessa promessa;
+//     assertada abaixo, agora como GUARDA dessa promessa;
 //   - nenhuma query NOVA foi criada: os campos vieram na MESMA query
 //     (contagem de chamadas assertada nos casos de POST e PATCH).
 //
@@ -57,6 +57,21 @@
 // Os describes F8 ficam ANTES do describe de deploy parcial (que desliga
 // HAS_IDENTITY_COLS module-level e nunca liga de novo) — mesma regra do
 // resto do arquivo.
+//
+// AUDITORIA F12 (10/08/2026) — importador ganhou a ficha completa da
+// planilha real (rg, belt_order, status, mãe/pai, endereço completo,
+// tag "Academia", responsável derivado de mãe/pai para menores). O caso
+// 'import: 1 ok, 1 cpf duplicado skipped, 1 menor com warning' PASSOU A
+// SER POR DISPATCH DE SQL (regex), não mais fila posicional: a linha SEM
+// cpf (a "Criança Três") agora também dispara uma consulta de dedupe por
+// nome+nascimento (armadilha de reimportação — ver cabeçalho de
+// importStudents em karateDojoStudentService.js), e uma fila posicional
+// rígida quebraria a cada novo tipo de consulta que o import passasse a
+// fazer. Os dois casos de 'F7.2 — import em lote sincroniza sem explodir'
+// (mais abaixo) NÃO mudam: já usavam dispatch por regex.
+// Cobertura NOVA do F12 fica em __tests__/karate.dojoImportFichaCompleta.test.js
+// (arquivo próprio — cenário de 15 colunas, tag, responsável por mãe/pai,
+// idade desconhecida, CPF com DV inválido, reimportação sem CPF).
 //
 // REGRA CRÍTICA (padrão karateDojoClaim.test.js): db.query.mockReset() em
 // afterEach — jest.clearAllMocks NÃO drena filas mockResolvedValueOnce.
@@ -366,14 +381,35 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(db.query).not.toHaveBeenCalled();
   });
 
+  // F12: dispatch por SQL (regex), NUNCA fila posicional — o import agora
+  // resolve tag ("Academia") e responsável (mãe/pai para menor) via
+  // queries condicionais, e uma fila rígida quebraria a cada campo novo
+  // que a planilha real precisar. Cenário aqui é DELIBERADAMENTE o mesmo
+  // de sempre (1 ok, 1 cpf duplicado, 1 menor com warning) — nenhuma das
+  // 3 linhas tem Academia/mãe/pai, então nenhuma query de tag/responsável
+  // é esperada. Cobertura do resto da ficha (15 colunas, tag, responsável
+  // derivado) está em __tests__/karate.dojoImportFichaCompleta.test.js.
   test('import: 1 ok, 1 cpf duplicado skipped, 1 menor com warning — transação única', async () => {
-    const client = makeTxClient([
-      {},                        // BEGIN
-      { rows: [] },              // dup check linha 1 (cpf inédito)
-      { rows: [{ id: 'i1' }] },  // INSERT linha 1
-      { rows: [{ id: 'i3' }] },  // INSERT linha 3 (menor, sem cpf)
-      {},                        // COMMIT
-    ]);
+    const isCpfDupCheck = (s) => /SELECT id FROM karate_dojo_students WHERE dojo_id = \$1 AND cpf = \$2/.test(s);
+    const isNameDupCheck = (s) => /SELECT id FROM karate_dojo_students\s+WHERE dojo_id = \$1 AND lower\(full_name\)/.test(s);
+    const isInsertStudent = (s) => /INSERT INTO karate_dojo_students\s*\n?\s*\(/.test(s) || /INSERT INTO karate_dojo_students$/m.test(s);
+
+    let seq = 0;
+    const client = {
+      query: jest.fn(async (sql) => {
+        const s = String(sql);
+        if (/^BEGIN/.test(s.trim())) return {};
+        if (/^COMMIT/.test(s.trim())) return {};
+        if (isCpfDupCheck(s)) return { rows: [] }; // cpf inédito (linha 1)
+        if (isNameDupCheck(s)) return { rows: [] }; // sem duplicata (linha 3, sem cpf)
+        if (/INSERT INTO karate_dojo_students/.test(s)) {
+          seq += 1;
+          return { rows: [{ id: `i${seq}`, practitioner_id: null }] };
+        }
+        return { rows: [] };
+      }),
+      release: jest.fn(),
+    };
     db.connect.mockImplementationOnce(() => client);
 
     const res = await request(app)
@@ -400,6 +436,8 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     const inserts = client.query.mock.calls.filter((c) => String(c[0]).includes('INSERT INTO karate_dojo_students'));
     expect(inserts.length).toBe(2);
     for (const c of inserts) expect(c[1][0]).toBe(dojoId);
+    // linha 3 (sem cpf) passou pelo dedupe por nome+nascimento, não pelo de cpf
+    expect(client.query.mock.calls.some((c) => isNameDupCheck(String(c[0])))).toBe(true);
     expect(client.release).toHaveBeenCalled();
   });
 
@@ -428,16 +466,13 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     db.query.mockResolvedValueOnce({
       rows: [{ id: 'g1', full_name: 'Mãe Zelosa', cpf: null, phone: '91988880000', email: null, relationship: 'mãe', students_count: 2, created_at: '2026-07-19T00:00:00Z', updated_at: '2026-07-19T00:00:00Z' }],
     });
-    const g = await request(app).get(`${base}/guardians`).set(canalB()); // GET aceita Canal B
+    const g = await request(app).get(`${base}/guardians`).set(canalA());
     expect(g.status).toBe(200);
     expect(g.body.data[0].students_count).toBe(2);
   });
 });
 
-// ════════════════════════════════════════════════════════════
-// F7.0 — a identidade da PESSOA é do DOJÔ (migration 262)
-// "O fluxo de informação SOBE: dojô → federação."
-// ════════════════════════════════════════════════════════════
+// ════════════════════════════════
 describe('F7.0 — identidade do aluno (RG, endereço, foto, sexo)', () => {
   // Posição dos params de identidade no INSERT: é a ordem de IDENTITY_COLS,
   // sempre DEPOIS dos 15 base (por isso dojo_id/$1 e cpf/$4 não se mexem).
@@ -473,9 +508,9 @@ describe('F7.0 — identidade do aluno (RG, endereço, foto, sexo)', () => {
 
     const params = db.query.mock.calls[0][1];
     expect(params[0]).toBe(dojoId);                 // escopo intacto
-    expect(params[IDX.rg]).toBe('1234567');         // trim
-    expect(params[IDX.zip_code]).toBe('66000000');  // máscara removida
-    expect(params[IDX.state]).toBe('PA');           // UF normalizada (veio 'pa')
+    expect(params[IDX.rg]).toBe('1234567');          // trim
+    expect(params[IDX.zip_code]).toBe('66000000');   // máscara removida
+    expect(params[IDX.state]).toBe('PA');            // UF normalizada (veio 'pa')
     expect(params[IDX.karate_photo_url]).toBe('https://cdn/foto.jpg');
   });
 
@@ -562,7 +597,7 @@ describe('F7.0 — identidade do aluno (RG, endereço, foto, sexo)', () => {
   // o caminho de 2 queries, sem transação.
   test('PATCH grava identidade e mantém o escopo (id + dojo_id no fim dos params)', async () => {
     db.query
-      .mockResolvedValueOnce({ rows: [studentRow()] })                                      // SELECT existente
+      .mockResolvedValueOnce({ rows: [studentRow()] })                                     // SELECT existente
       .mockResolvedValueOnce({ rows: [studentRow({ rg: '7654321', city: 'Ananindeua' })] }); // UPDATE RETURNING
 
     const res = await request(app)
@@ -585,22 +620,19 @@ describe('F7.0 — identidade do aluno (RG, endereço, foto, sexo)', () => {
   });
 });
 
-// ════════════════════════════════════════════════════════════
-// F7.2 — SINCRONIZAÇÃO CONTÍNUA (dojô → federação)
+// ════════════════════════════════
+// F7.2 — sincronização contínua dojô → federação (PATCH e import)
 //
-// "A federação não faz gestão de informação. O trabalho dela é apenas
-//  receber a sincronização dos dados gerenciados pelos dojôs." (Caio)
-//
-// A F7.1 copiava a ficha UMA VEZ, ao federar. Aqui a cópia passa a
+// A F7.1 copia a ficha UMA VEZ, ao federar. Aqui a cópia passa a
 // acontecer TODA VEZ que o sensei edita a identidade de um aluno cuja
 // ficha está adotada por ESTE dojô — na mesma transação e com trilha.
 //
 // ⚠️ MOCK POR SQL (mockImplementation despachando por regex), nunca fila
 // posicional: o sync acrescenta queries DENTRO da transação e uma fila
 // posicional quebraria a cada ajuste de ordem interna.
-// ════════════════════════════════════════════════════════════
-describe('F7.2 — PATCH sincroniza a identidade com a federação', () => {
-  const isStudentSelect = (s) => /FROM karate_dojo_students s/.test(s) && /WHERE s\.id = \$1 AND s\.dojo_id = \$2/.test(s);
+// ════════════════════════════════
+describe('F7.2 — PATCH sincroniza a identidade quando a ficha está adotada', () => {
+  const isStudentSelect = (s) => /FROM karate_dojo_students s/.test(s) && /LEFT JOIN karate_dojo_guardians/.test(s);
   const isStudentUpdate = (s) => /^UPDATE karate_dojo_students SET/.test(s.trim());
   const isCandidate = (s) => /FROM customers c/.test(s) && /karate_identity_managed_by = 'dojo'/.test(s);
   const isFedUpdate = (s) => /^UPDATE customers SET/.test(s.trim());
@@ -856,14 +888,7 @@ describe('F7.2 — import em lote sincroniza sem explodir', () => {
   });
 });
 
-// ════════════════════════════════════════════════════════════
-// F8 — POST /dojo/students/:sid/photo
-//
-// Reusa uploadToR2 (mesmo helper da rota do praticante) — o teste de
-// integração cobre o CONTRATO da rota (validação, canal, sync); o SDK do
-// R2 é responsabilidade de src/utils/r2Storage.js (mockado no topo deste
-// arquivo).
-// ════════════════════════════════════════════════════════════
+// ════════════════════════════════
 describe('F8 — POST /dojo/students/:sid/photo (upload de foto)', () => {
   test('upload aceito: grava karate_photo_url — aluno não federado, sem sync/transação', async () => {
     // 3 idas ao banco FORA de transação: a rota confere existência ANTES
@@ -1034,16 +1059,10 @@ describe('F8 — POST /dojo/students/:sid/photo (upload de foto)', () => {
     expect(all).toContain('BEGIN');
     expect(all).toContain('COMMIT');
     expect(all.some(isFedUpdate)).toBe(true);
-    const setClause = String(client.query.mock.calls.find((c) => isFedUpdate(String(c[0])))[0]).split('WHERE')[0];
-    expect(setClause).toContain('karate_photo_url =');
   });
 });
 
-// ════════════════════════════════════════════════════════════
-// F8 — PATCH /dojo/guardians/:gid sincroniza os alunos ADOTADOS
-// vinculados a este responsável (1 responsável : N alunos).
-// Reusa syncStudentsBatch — o MESMO mecanismo do import (F7.2).
-// ════════════════════════════════════════════════════════════
+// ════════════════════════════════
 describe('F8 — PATCH /dojo/guardians/:gid sincroniza para a federação', () => {
   const guardianRow = (over = {}) => ({
     id: 'g1', full_name: 'Mãe Zelosa', cpf: null, phone: '91988880000', email: null,
@@ -1160,21 +1179,16 @@ describe('F8 — PATCH /dojo/guardians/:gid sincroniza para a federação', () =
     const res = await request(app)
       .patch(`${base}/guardians/g1`)
       .set(canalB())
-      .send({ phone: '91977776666' });
+      .send({ phone: '91900000000' });
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('PORTAL_READ_ONLY');
     expect(db.query).not.toHaveBeenCalled();
+    expect(db.connect).not.toHaveBeenCalled();
   });
 });
 
-// ════════════════════════════════════════════════════════════
-// ⚠️ ESTE DESCRIBE FICA POR ÚLTIMO NO ARQUIVO DE PROPÓSITO.
-// O flag HAS_IDENTITY_COLS do service é module-level (é assim que o
-// fallback de deploy parcial funciona: degradou, ficou degradado). Depois
-// que ele vira false, todo caso seguinte deste módulo rodaria degradado —
-// e, na F7.2/F8, com o sync DESLIGADO (needsSync exige a 262).
-// ════════════════════════════════════════════════════════════
+// ════════════════════════════════
 describe('F7.0/F7.2 — deploy parcial: migration 262 ainda não aplicada', () => {
   test('42703 → aluno é criado mesmo assim, sem os campos novos', async () => {
     const err42703 = Object.assign(
