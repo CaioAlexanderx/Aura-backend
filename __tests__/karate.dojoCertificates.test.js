@@ -363,7 +363,14 @@ describe('F9.1 — emissão em massa a partir do exame', () => {
     expect(cert.data_snapshot.signatories).toEqual([
       { name: 'Kondei', role: 'Sensei / Examinador', signature_url: null },
     ]);
-    expect(cert.data_snapshot.instructors_text).toBe('Sensei Kondei');
+    // Nome CRU, sem prefixo "Sensei " decorado — mesma convenção da
+    // asserção de `signatories` logo acima (nome cru + título no campo
+    // `role`, separado). O sensei já costuma digitar "Sensei Fulano" no
+    // próprio campo `examiner_name` (é assim que se identifica); se o
+    // backend prefixasse "Sensei " de novo aqui, o certificado saía
+    // "Sensei Sensei Fulano" — bug real, corrigido no #477. Este teste,
+    // antes, travava exatamente essa duplicação.
+    expect(cert.data_snapshot.instructors_text).toBe('Kondei');
   });
 
   test('template com signatories próprias sobrescreve o fallback do examinador', async () => {
