@@ -148,7 +148,12 @@ router.post('/affiliation-requests/revoke', ...guards.staffWrite(), async (req, 
 // 422 TARGET_NOT_DOJO | 422 REQUESTER_WITHOUT_OWNER | 422 REQUESTER_IS_SYSTEM_OWNED
 // 404 NOT_FOUND | 404 TARGET_NOT_FOUND | 409 FPKT_NUMBER_TAKEN
 // 409 JA_RESOLVIDA | 409 TARGET_ALREADY_CLAIMED | 409 TARGET_INACTIVE
-// 409 MIGRACAO_COLIDIU
+// 409 TARGET_OWNER_INCONSISTENT | 409 MIGRACAO_COLIDIU
+//     ⚠️ TARGET_ALREADY_CLAIMED × TARGET_OWNER_INCONSISTENT: o primeiro é
+//     "o registro tem dono de verdade — aponte OUTRO"; o segundo é "o dono
+//     do registro não existe/está nulo — ninguém reclamou nada, ESTE
+//     registro precisa ser corrigido na federação". Ações humanas
+//     diferentes, códigos diferentes.
 router.post('/affiliation-requests/:requestId/approve', ...guards.staffWrite(), async (req, res) => {
   const body = req.body || {};
   try {
