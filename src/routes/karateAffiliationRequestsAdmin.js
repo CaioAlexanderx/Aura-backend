@@ -5,7 +5,7 @@
 //   GET  /federation/:id/affiliation-requests?status=
 //   GET  /federation/:id/affiliation-requests/metrics
 //   POST /federation/:id/affiliation-requests/revoke               {dojo_id, reason}
-//   POST /federation/:id/affiliation-requests/:requestId/approve   {fpkt_number}
+//   POST /federation/:id/affiliation-requests/:requestId/approve   {fpkt_number, target_company_id?}
 //   POST /federation/:id/affiliation-requests/:requestId/reject    {reason}
 //
 // ⚠️ ORDEM DAS ROTAS: '/affiliation-requests/metrics' e
@@ -22,6 +22,14 @@
 // affiliation_since, tudo numa transação. Não depende de pagamento — a
 // anuidade segue o fluxo que já existe. O número de filiação é SEMPRE
 // digitado aqui pela federação: sem ele, 422.
+//
+// APROVAR TAMBÉM É APONTAR (decisão do Caio, 10/08/2026 — F11): a federação
+// já tem 105 dojôs cadastrados (o REGISTRO FEDERATIVO, com o código FPKT e
+// os praticantes), e o sensei que assina a Aura chega por uma conta NOVA e
+// vazia. No aceite, a federação diz QUAL daqueles registros é ele —
+// `target_company_id` — e a conta do sensei passa a SER aquela linha.
+// O campo é OPCIONAL: sem ele o aceite é o de sempre (dojô genuinamente
+// novo, sem registro anterior na federação).
 //
 // REVOGAR = DESCONECTAR (decisão do Caio, 30/07/2026 — F7.4): "Somente a
 // federação pode cancelar esse vínculo. Dojô solicita, federação pode
@@ -119,15 +127,36 @@ router.post('/affiliation-requests/revoke', ...guards.staffWrite(), async (req, 
   }
 });
 
-// ── POST aprovar (aceite = conexão) ─────────────────────────
-// 200 { ok, dojo_id, fpkt_affiliation_id, linked_at }
-// 422 FPKT_NUMBER_REQUIRED | 409 FPKT_NUMBER_TAKEN | 409 JA_RESOLVIDA
+// ── POST aprovar (aceite = conexão, e opcionalmente ASSUNÇÃO) ──
+// Corpo:
+//   fpkt_number        (obrigatório) — número emitido pela federação.
+//   target_company_id  (OPCIONAL)    — QUAL registro federativo preexistente
+//     é este dojô. Quando vem, a conta do sensei ASSUME aquele registro na
+//     mesma transação do aceite: ele vira owner da company do registro, o
+//     trabalho que já tinha cadastrado é reapontado e a conta do cadastro é
+//     DESATIVADA. Os praticantes NÃO se movem — eles já estão no registro.
+//     Quando NÃO vem, o aceite é o de sempre (dojô genuinamente novo).
+//     `registry_company_id` é aceito como alias: o campo é chamado de
+//     "registro" em toda a conversa do produto, e um nome só no front que
+//     não bata com o back custa um deploy inteiro para descobrir.
+//
+// 200 { ok, dojo_id, fpkt_affiliation_id, linked_at[, assumption,
+//       requester_company_id] }
+//     ⚠️ COM apontamento, `dojo_id` é o do REGISTRO — não o da conta que
+//     pediu (essa vem em `requester_company_id`).
+// 422 FPKT_NUMBER_REQUIRED | 422 TARGET_COMPANY_INVALID | 422 TARGET_IS_REQUESTER
+// 422 TARGET_NOT_DOJO | 422 REQUESTER_WITHOUT_OWNER | 422 REQUESTER_IS_SYSTEM_OWNED
+// 404 NOT_FOUND | 404 TARGET_NOT_FOUND | 409 FPKT_NUMBER_TAKEN
+// 409 JA_RESOLVIDA | 409 TARGET_ALREADY_CLAIMED | 409 TARGET_INACTIVE
+// 409 MIGRACAO_COLIDIU
 router.post('/affiliation-requests/:requestId/approve', ...guards.staffWrite(), async (req, res) => {
+  const body = req.body || {};
   try {
     const out = await svc.approveRequest({
       federationId: req.params.id,
       requestId: req.params.requestId,
-      fpktNumber: req.body && req.body.fpkt_number,
+      fpktNumber: body.fpkt_number,
+      targetCompanyId: body.target_company_id || body.registry_company_id,
       actorId: (req.user && req.user.id) || null,
     });
     return res.json(out);
