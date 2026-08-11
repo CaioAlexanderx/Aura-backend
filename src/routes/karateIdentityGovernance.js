@@ -1,5 +1,6 @@
 // ============================================================
-// AURA DOJÔ — F7.4: GOVERNANÇA DA GESTÃO DA FICHA (lado FEDERAÇÃO)
+// AURA DOJÔ — GOVERNANÇA DA GESTÃO DA FICHA (lado FEDERAÇÃO)
+// + EXCLUSÃO DE DOJÔ = DESATIVAÇÃO (compliance, 11/08/2026)
 //
 // AS PREMISSAS (Caio, 30/07/2026)
 //   1. "A federação não faz gestão de informação. O trabalho dela é apenas
@@ -10,58 +11,66 @@
 //      sem o acesso e gestão do dojô. Ou seja, a gestão volta para a federação."
 //
 // Montado sob /federation/:id, ANTES de karatePractitioners e de karateDojos
-// (ver src/routes/index.js). A ordem é obrigatória: as duas primeiras rotas
-// aqui são INTERCEPTADORES que rodam antes do handler real e chamam next().
+// (ver src/routes/index.js). A ordem é obrigatória:
 //
 //   DELETE /federation/:id/practitioners/:practitionerId   (intercepta: AVISA)
-//   DELETE /federation/:id/dojos/:dojoId                    (intercepta: DEVOLVE)
+//   DELETE /federation/:id/dojos/:dojoId                    (RESPONDE: DESATIVA)
 //   POST   /federation/:id/dojos/:dojoId/identity/reclaim    (staffWrite + motivo)
 //   GET    /federation/:id/identity/exited-dojos             (read)
 //   POST   /federation/:id/identity/regularize               (staffWrite, ?dry_run=1)
 //
-// ── POR QUE INTERCEPTADOR, E NÃO EDIÇÃO DOS DOIS HANDLERS ───
-// Os dois DELETEs vivem em karatePractitioners.js (80 KB) e karateDojos.js
-// (70 KB). O que a F7.4 precisa fazer neles é ADITIVO e acontece ANTES do
-// corpo de cada handler — nada do comportamento existente muda. Um router
-// montado antes deixa os dois arquivos com 0 linha alterada (e, portanto, os
-// testes deles intocados), e concentra a regra nova num arquivo só, que é a
-// mesma escolha que fez a F7.3-A virar um módulo em vez de cinco cópias.
-// Os guards são os MESMOS dos handlers reais (guards.staffWrite()), para o
-// interceptador nunca ver uma requisição que o handler recusaria.
+// ── A MUDANÇA DE 11/08/2026: O DELETE DE DOJÔ NÃO APAGA MAIS ──
+// Até aqui esta rota era um INTERCEPTADOR: devolvia a gestão das fichas e
+// chamava next(), e quem respondia era o handler de karateDojos.js — que
+// apagava a linha de `companies` de verdade e, com ?cascade=true, arrastava
+// junto os `customers` do dojô e, por ON DELETE CASCADE do schema,
+// `karate_belt_history` (as GRADUAÇÕES), certificados e inscrições. São 207
+// FKs CASCADE apontando para `companies`, e o guard é `guards.staffWrite()`
+// (owner | federation_admin | federation_staff) — perfil operacional comum,
+// não admin de plataforma.
 //
-// ── O QUE O INTERCEPTADOR DE DOJÔ RESOLVE (é bug, não enfeite) ──
-// customers.karate_identity_dojo_id tem FK ON DELETE SET NULL (migration 262)
-// e a MESMA migration criou o CHECK customers_karate_identity_coherent
-// (managed_by <> 'dojo' OR karate_identity_dojo_id IS NOT NULL). Apagar a
-// company de um dojô que ainda mantém alguma ficha faz o SET NULL violar o
-// CHECK → 23514 → 500 no DELETE do dojô. A cascata de karateDojos.js só apaga
-// `customers WHERE dojo_id = $1` (onde a pessoa TREINA), que é uma coluna
-// DIFERENTE de karate_identity_dojo_id (quem é DONO DA FICHA) — basta um
-// praticante adotado que treine em outro dojô (o caso `is_transfer` da F7.1)
-// para o DELETE estourar. Devolver a gestão ANTES é a única ordem possível.
+// Os termos de uso obrigam a guardar os dados por 60 dias. Decisão do dono do
+// produto (11/08/2026): "a rota passa a desativar em vez de apagar. Dessa
+// forma podemos disponibilizar os dados e também excluir posteriormente sem
+// nos impactar ou sem impactar a federação."
 //
-// TRADE-OFF ASSUMIDO: se o DELETE do dojô for recusado logo depois
-// (409 HAS_HISTORY, quando o staff não confirmou a cascata), as fichas JÁ
-// terão voltado para a federação. É deliberado:
-//   • a federação acabou de mandar apagar o dojô — a premissa 3 se aplica;
-//   • nada é perdido: o aluno do dojô continua intacto e re-federar restaura
-//     a adoção pela conferência da F7.1;
-//   • a alternativa (devolver DEPOIS do DELETE) é impossível — o SET NULL já
-//     teria estourado o CHECK e derrubado o DELETE inteiro;
-//   • a resposta do 409 carrega `identity_released`, então não é silencioso.
+// Este router é o PRIMEIRO handler que o Express alcança para
+// DELETE /federation/:id/dojos/:dojoId. Ele agora RESPONDE (não chama mais
+// next()), delegando o trabalho a services/karateDojoDeactivationService.js —
+// o caminho destrutivo de karateDojos.js deixa de ser alcançável. O teste
+// tests/integration/karateDojoDeleteSoft.test.js congela isso pelo app
+// COMPOSTO: se alguém trocar a ordem de montagem em src/routes/index.js, ele
+// fica vermelho.
+//
+// ── POR QUE A DEVOLUÇÃO DA GESTÃO CONTINUA (e por que ela mudou de lugar) ──
+// Ela existia por DUAS razões e só uma sumiu:
+//   (a) TÉCNICA (sumiu): customers.karate_identity_dojo_id tem FK ON DELETE
+//       SET NULL (migration 262) e a mesma migration criou o CHECK
+//       customers_karate_identity_coherent. Apagar a company de um dojô que
+//       ainda mantinha alguma ficha violava o CHECK → 23514 → 500. Sem DELETE,
+//       não há SET NULL, e o CHECK não é mais violado.
+//   (b) DE PRODUTO (fica): premissa 3. Dojô desativado não deve continuar
+//       gerindo identidade. E `is_active = false` já é uma das três pernas de
+//       "o dojô saiu do Aura" em services/karateDojoExitState.js
+//       (EXIT_REASONS.COMPANY_INACTIVE) — ou seja, a guarda preguiçosa já
+//       liberaria a escrita da federação NA HORA. A devolução deixou de ser
+//       o que impede um crash e passou a ser o que faz o BANCO parar de
+//       mentir, exatamente como POST /identity/regularize.
+//
+// Por isso a ORDEM INVERTEU: antes era devolver→apagar (obrigatório, senão
+// 23514); agora é desativar→devolver. Isso apaga de vez o trade-off que o
+// cabeçalho antigo assumia ("se o DELETE for recusado com 409 as fichas já
+// terão voltado"): não há mais 409, e num dojô inexistente (404) nada é
+// devolvido — o interceptador antigo não conseguia garantir isso.
 //
 // ── O DELETE DE PRATICANTE CONTINUA LIVRE (premissa 2) ──────
 // O interceptador de praticante NÃO bloqueia, NÃO devolve gestão e NÃO grava
-// nada: ele só AVISA. Apagar a ficha por baixo de um dojô ativo é destrutivo
-// e hoje é silencioso — o aluno do dojô sobrevive e perde o vínculo
-// (karate_dojo_students.practitioner_id vira NULL pela FK SET NULL da 262) sem
-// que ninguém saiba. O aviso entra na resposta do 200; o comportamento do
-// DELETE (200 / 409 HAS_HISTORY / ?cascade=true) fica exatamente igual.
+// nada: ele só AVISA. Esse comportamento não foi tocado por este PR.
 //
 // ── DEFENSIVO ───────────────────────────────────────────────
-// Nenhum interceptador pode derrubar a operação real: qualquer erro aqui é
-// logado e vira next(). "Não consegui montar o aviso" nunca pode virar
-// "não consegui apagar".
+// A devolução da gestão nunca pode derrubar a desativação: qualquer erro
+// nela é logado e a resposta sai assim mesmo (o dojô JÁ está desativado, e
+// POST /identity/regularize resolve o resto depois).
 // ============================================================
 'use strict';
 
@@ -70,13 +79,19 @@ const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { loadIdentityOwner } = require('../services/karateIdentityWriteGuard');
 const reclaim = require('../services/karateIdentityReclaim');
+const deactivation = require('../services/karateDojoDeactivationService');
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 // Motivo fixo da devolução disparada pela EXCLUSÃO do dojô. É texto de
 // TRILHA (fica em karate_identity_audit.changes[].reason), não de UI.
 const DELETE_RECLAIM_REASON =
-  'Exclusão do dojô pela federação: a gestão das fichas voltou para a federação antes de o cadastro do dojô ser apagado.';
+  'Desativação do dojô pela federação: a gestão das fichas voltou para a federação. Nenhum dado foi apagado.';
+
+// Motivo gravado no carimbo de retenção (companies.removal_reason, migration
+// 277). Também é texto de TRILHA, não de UI.
+const REMOVAL_REASON =
+  'Remoção do dojô solicitada pela federação (a rota DELETE desativa; nada é apagado).';
 
 function isUuid(v) {
   return !!v && UUID_RE.test(String(v));
@@ -159,41 +174,111 @@ router.delete('/practitioners/:practitionerId', ...guards.staffWrite(), async (r
 });
 
 // ============================================================
-// INTERCEPTADOR 2 — DELETE de dojô: DEVOLVE a gestão ANTES
+// DELETE DE DOJÔ — DESATIVA. NADA É APAGADO.
 // ============================================================
-router.delete('/dojos/:dojoId', ...guards.staffWrite(), async (req, res, next) => {
+// Resposta 200:
+//   { deactivated:true, deleted:false, id, name, is_active:false,
+//     already_inactive, counts, roster_cascade, retention:{...},
+//     reactivate:{...}, cascade_requested, cascade_ignored,
+//     identity_released? }
+//
+// ?cascade=true — ACEITO E IGNORADO, nunca em silêncio.
+//   O parâmetro só existia para autorizar o expurgo. Recusá-lo com 4xx
+//   transformaria em erro a chamada que o front JÁ faz hoje (é o segundo
+//   passo do fluxo "Excluir definitivamente") e deixaria o operador sem
+//   saída. Aceitar e responder `cascade_ignored:true` mantém a chamada
+//   funcionando e diz a verdade: o caminho destrutivo que ele pedia não
+//   existe mais.
+//
+// 409 HAS_HISTORY — REMOVIDO.
+//   Ele era a trava contra destruir histórico por engano. Não há mais
+//   destruição: a operação é reversível por PATCH { is_active:true }. Mantê-lo
+//   obrigaria toda desativação de dojô com histórico (isto é, praticamente
+//   todas) a passar pelo ?cascade=true que agora ignoramos — barreira sem
+//   nada atrás. O que ele carregava de útil, o `counts`, continua na resposta
+//   de sucesso, para a UI poder dizer quantos praticantes foram desativados
+//   junto.
+router.delete('/dojos/:dojoId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, dojoId } = req.params;
-  if (!isUuid(dojoId)) return next();
+  if (!isUuid(dojoId)) {
+    return res.status(422).json({ error: 'dojoId inválido', code: 'VALIDATION_ERROR' });
+  }
+
+  const cascadeRequested = String((req.query && req.query.cascade) || '').toLowerCase() === 'true';
+  const actor = actorFrom(req);
 
   let out;
   try {
-    // MESMA porta da retomada manual (uma regra de devolução em lote, não
-    // duas), com o motivo da exclusão no lugar do motivo digitado pelo staff.
-    out = await reclaim.reclaimDojoIdentities({
+    out = await deactivation.deactivateDojo({
+      federationId,
+      dojoId,
+      actorId: actor.userId,
+      reason: REMOVAL_REASON,
+    });
+  } catch (e) {
+    console.error('[karateIdentityGovernance] desativação do dojô falhou:', (e && e.code) || '', e && e.message);
+    return res.status(500).json({ error: 'Erro ao desativar o dojô', code: 'DEACTIVATION_FAILED' });
+  }
+
+  if (!out || !out.found) {
+    return res.status(404).json({ error: 'Dojô não encontrado', code: 'NOT_FOUND' });
+  }
+
+  // Premissa 3, DEPOIS da desativação (ver o cabeçalho). Best-effort: falhar
+  // aqui não desfaz nem esconde a desativação, que já está commitada.
+  let identityReleased = null;
+  try {
+    const rel = await reclaim.reclaimDojoIdentities({
       federationId,
       dojoId,
       reason: DELETE_RECLAIM_REASON,
-      actor: actorFrom(req),
+      actor,
     });
+    if (rel && rel.count) {
+      identityReleased = {
+        count: rel.count,
+        practitioners: rel.released,
+        message:
+          `${rel.count} ficha(s) que este dojô mantinha voltaram para a gestão da federação. ` +
+          'Nenhum dado foi apagado por causa disso — só o marcador de quem gerencia a ficha mudou.',
+      };
+    }
   } catch (e) {
-    // Nunca derruba o DELETE por causa da devolução: se ela falhar, o DELETE
-    // segue e (no pior caso) estoura o 23514 que já estourava antes deste PR.
-    console.error('[karateIdentityGovernance] devolução pré-DELETE do dojô falhou:', (e && e.code) || '', e && e.message);
-    return next();
+    console.error('[karateIdentityGovernance] devolução da gestão após a desativação falhou:', (e && e.code) || '', e && e.message);
   }
 
-  if (!out || !out.count) return next();
-
-  decorateJson(res, {
-    identity_released: {
-      count: out.count,
-      practitioners: out.released,
-      message:
-        `${out.count} ficha(s) que este dojô mantinha voltaram para a gestão da federação antes da exclusão. ` +
-        'Nenhum dado foi apagado por causa disso — só o marcador de quem gerencia a ficha mudou.',
+  return res.json({
+    deactivated: true,
+    deleted: false,
+    code: 'DEACTIVATED',
+    id: out.id,
+    name: out.name,
+    is_active: false,
+    already_inactive: out.already_inactive,
+    counts: out.counts,
+    roster_cascade: out.roster_cascade,
+    retention: {
+      policy_days: out.retention_days,
+      removal_requested_at: out.removal_requested_at,
+      note:
+        'Os dados continuam no Aura. A exclusão definitiva é tratada fora desta rota, ' +
+        `depois do prazo de ${out.retention_days} dias previsto nos termos de uso.`,
     },
+    reactivate: {
+      method: 'PATCH',
+      path: `/api/v1/federation/${federationId}/dojos/${dojoId}`,
+      body: { is_active: true },
+      note:
+        'Reativar restaura os praticantes que estavam ativos no momento da desativação ' +
+        'e abre a validação de quadro com o sensei.',
+    },
+    cascade_requested: cascadeRequested,
+    cascade_ignored: cascadeRequested,
+    message: out.already_inactive
+      ? 'Este dojô já estava desativado. Nada foi apagado.'
+      : 'Dojô desativado. Nenhum dado foi apagado: praticantes, graduações, certificados e histórico financeiro continuam no Aura.',
+    ...(identityReleased ? { identity_released: identityReleased } : {}),
   });
-  return next();
 });
 
 // ============================================================
