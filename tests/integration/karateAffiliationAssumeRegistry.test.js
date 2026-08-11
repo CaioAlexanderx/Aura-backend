@@ -46,16 +46,28 @@ beforeAll(() => {
   ({ LOCKED_SYSTEM_PASSWORD: LOCKED } = require('../../src/services/karateDojoClaimService'));
 });
 
+// ⚠️ TODO ID DAQUI PARA BAIXO É UUID HEXADECIMAL DE VERDADE — mnemônico não
+// pode custar a validade do uuid. `target_company_id` passa pelo UUID_RE de
+// approveRequest ANTES de qualquer transação (um não-uuid viraria 22P02
+// dentro do BEGIN, então barrar cedo está certo): um 'r' de "registro" ou um
+// 'u' de "user" está fora de [0-9a-f] e devolve 422 TARGET_COMPANY_INVALID em
+// TODOS os casos que apontam o registro — inclusive nos que esperam 404 e
+// 409. O arquivo inteiro fica verde-de-mentira ou vermelho-de-mentira
+// provando só que a validação de formato existe, sem exercitar uma linha do
+// serviço de assunção. Vale igual para os ids de USUÁRIO: eles viajam crus
+// para colunas uuid (karate_dojo_registry_assumptions.user_id, actor_id),
+// e 22P02 NÃO é um dos códigos que o safeStep degrada.
 const SECRET = 'aura-test-secret-2026';
 const fedId = 'fed00000-0000-0000-0000-000000000001';
 const outraFedId = 'fed00000-0000-0000-0000-0000000000ff';
 const reqId = 'a0000000-0000-0000-0000-00000000000f';
 // A conta que o sensei criou no Sign Up (vazia, descartável).
 const contaNovaId = 'c0000000-0000-0000-0000-000000000001';
-// Um dos 105 registros federativos preexistentes.
-const registroId = 'r0000000-0000-0000-0000-000000000105';
-const senseiUserId = 'u0000000-0000-0000-0000-000000000001';
-const systemUserId = 'u0000000-0000-0000-0000-0000000000ff';
+// Um dos 105 registros federativos preexistentes ('de' = dojô existente).
+const registroId = 'de000000-0000-0000-0000-000000000105';
+// Os dois usuários ('ba' só para lê-los de relance nas asserções).
+const senseiUserId = 'ba000000-0000-0000-0000-000000000001';
+const systemUserId = 'ba000000-0000-0000-0000-0000000000ff';
 
 const approveUrl = `/api/v1/federation/${fedId}/affiliation-requests/${reqId}/approve`;
 const LINKED_AT = new Date('2020-03-01T12:00:00Z');
