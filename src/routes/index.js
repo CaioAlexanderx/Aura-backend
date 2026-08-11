@@ -498,6 +498,46 @@ router.use('/federation/:id', require('./karateDojoClasses'));
 // (convive com paginação/busca existentes — ver karateDojoStudentService.js)
 router.use('/federation/:id', require('./karateDojoTags'));
 
+// ── AURA DOJÔ — F11.3 (REVISÃO DO PLANTEL HERDADO — lado DOJÔ) ──
+// Migration 276 (karate_dojo_roster_reviews + ..._items + ..._notices).
+//
+// A F11.0–F11.2 (migration 275) fez a conta do sensei PASSAR A SER o
+// registro federativo, herdando os praticantes que já apontavam para
+// aquela linha. Só que a lista da FPKT está velha: 9.840 praticantes em
+// 105 registros, e 74 dojôs marcados como inativos ainda carregam 4.033
+// deles. Decisão do dono do produto (10/08/2026): ao assumir o registro o
+// sensei REVISA esse plantel e marca quem realmente treina com ele; quem
+// ele não reconhece volta para a federação COMO AVISO.
+//
+// ⚠️ "NÃO RECONHECIDO" NÃO É "INATIVO". O praticante pode ter MUDADO DE
+// DOJÔ (karate_practitioner_transfers, 540 linhas). Concluir a revisão NÃO
+// INATIVA NINGUÉM — gera avisos, e quem decide (inativar / transferir /
+// manter) é a federação, pelo router logo abaixo de
+// karateAffiliationRequestsAdmin. A resposta do /complete devolve
+// `practitioners_changed:false` para isso ficar no contrato, não só no
+// comentário.
+//
+// VOLUME/RETOMADA: o maior dojô da planilha tem 288 alunos. A listagem é
+// paginada com busca, a marcação é EM LOTE (até 500 por chamada) e o
+// estado PERSISTE entre sessões — a revisão é criada na primeira marcação
+// (nunca num GET) e só fecha no /complete. Reenviar a mesma marcação é
+// idempotente; concluir duas vezes não duplica aviso.
+//
+// SEM gate de conexão, de propósito: plantel herdado só existe para dojô
+// que a federação cadastrou, e quem assumiu um registro já está conectado
+// por construção. Escrita só Canal A (403 PORTAL_READ_ONLY); GETs A e B.
+// Defensivo 42P01 (migration 276 pendente): GETs degradam listando o
+// plantel com todo mundo 'pending' + schema_pending; POSTs devolvem 503.
+//
+// ⚠️ 'roster-review' não colide com nada: /dojo/students, /dojo/tags,
+// /dojo/classes, /dojo/own-events etc. são todos prefixos literais
+// distintos, e não existe rota /dojo/:algo de 1 segmento paramétrica.
+//   GET  /federation/:id/dojo/roster-review            (estado + contagens)
+//   GET  /federation/:id/dojo/roster-review/roster     (?q=&status=&review_status=&limit=&offset=)
+//   POST /federation/:id/dojo/roster-review/mark       ({practitioner_ids:[], status:'recognized'|'not_recognized'|'pending'})
+//   POST /federation/:id/dojo/roster-review/complete   ({pending_policy?:'not_recognized'|'recognized'})
+router.use('/federation/:id', require('./karateDojoRosterReview'));
+
 // Lado FEDERAÇÃO (guards de karateRoles — dedup SUGERE, nunca decide):
 //   GET   /federation/:id/practitioner-requests?status=&dojo_id=
 //   GET   /federation/:id/practitioner-requests/:requestId
@@ -528,6 +568,36 @@ router.use('/federation/:id', require('./karateDojoConnection'));
 //   POST /federation/:id/affiliation-requests/:requestId/approve  {fpkt_number}
 //   POST /federation/:id/affiliation-requests/:requestId/reject   {reason}
 router.use('/federation/:id', require('./karateAffiliationRequestsAdmin'));
+
+// ── AURA DOJÔ — F11.3 (AVISOS DA REVISÃO DO PLANTEL — lado FEDERAÇÃO) ──
+// Migration 276. O par do router de revisão montado acima: aqui a FPKT vê
+// o que cada dojô comunicou e DECIDE.
+//
+// O aviso diz uma coisa só: "o sensei do dojô X não reconhece esta pessoa
+// como aluno atual dele". Ele NÃO inativa ninguém — a pessoa pode ter
+// mudado de dojô. Por isso a listagem traz, lado a lado, o SNAPSHOT do
+// momento do aviso e o ESTADO ATUAL do praticante (dojô e is_active de
+// hoje, + o derivado practitioner_left_dojo): um praticante que hoje está
+// em OUTRO dojô quase sempre é transferência não registrada.
+//
+// Três decisões, todas humanas e com ator identificado:
+//   inactivated → customers.is_active=false (único caminho desta fase que
+//                 encosta em is_active);
+//   transferred → move o praticante + grava karate_practitioner_transfers
+//                 (append-only), no mesmo padrão do approve-transfer;
+//   kept        → conferido, fica como está (sem isso a fila nunca esvazia).
+// Inativar/transferir são escopados também pelo dojô QUE AVISOU: se a
+// pessoa já saiu de lá, 409 PRATICANTE_JA_SAIU_DO_DOJO em vez de mexer em
+// quem hoje treina noutro lugar.
+//
+// ⚠️ /roster-review-notices/metrics é rota ESTÁTICA e já é declarada ANTES
+// de /roster-review-notices/:noticeId/... dentro do próprio router (mesma
+// armadilha de /dojos/roster-progress).
+//   GET  /federation/:id/roster-review-notices           (?decision=&dojo_id=&q=&limit=&offset=)
+//   GET  /federation/:id/roster-review-notices/metrics
+//   POST /federation/:id/roster-review-notices/:noticeId/decision
+//        { decision:'inactivated'|'transferred'|'kept', note?, destination_dojo_id? }
+router.use('/federation/:id', require('./karateRosterReviewNoticesAdmin'));
 
 // ── AURA DOJÔ — F5b (as TRÊS trocas federativas dojô ↔ federação) ──
 // SEM migration nova: reusa karate_certificate_orders (182, já tem dojo_id
