@@ -30,6 +30,30 @@
 //     no caminho de sync (karateIdentitySync / karateIdentityWriteGuard).
 // Se algum dia alguém precisar mexer em customers.dojo_id, não é aqui.
 //
+// ── AUSÊNCIA DE DADO NÃO É PERMISSÃO (a assimetria alvo × requester) ──
+// O predicado "este owner é o user-sistema?" aparece nos DOIS lados deste
+// fluxo, e ele NÃO significa a mesma coisa nos dois:
+//
+//   • no REQUESTER a pergunta serve para RECUSAR ("a conta que pediu é ela
+//     própria um registro? então não há sensei para mover"). Um predicado
+//     permissivo aí é FAIL-CLOSED: no máximo recusa um aceite legítimo, e
+//     alguém reclama. Inofensivo — e por isso continua usando
+//     isSystemOwnerHash, herdado de isSystemOwner (karateDojoClaimService),
+//     onde `!hash` (LEFT JOIN sem match) é defensivo e está documentado;
+//
+//   • no ALVO a MESMA pergunta serve para PERMITIR ("este registro ainda não
+//     tem usuário? então pode ser assumido"). Aí o permissivo é FAIL-OPEN:
+//     um registro cujo `owner_id` apontasse para um usuário que não existe
+//     mais seria lido como "sem dono" e poderia ser assumido por OUTRA
+//     PESSOA — levando junto os praticantes e a anuidade daquele dojô.
+//
+// Por isso o ALVO exige igualdade ESTRITA com LOCKED_SYSTEM_PASSWORD
+// (isLockedSystemHash) e trata owner_id nulo, usuário inexistente e hash
+// vazio como TARGET_OWNER_INCONSISTENT — bloqueia, sempre.
+// ⚠️ Isto NÃO é motivo para "consertar" karateDojoClaimService: lá o
+// permissivo é intencional, documentado e serve a outro fluxo (o claim, que
+// só fecha quando alguém prova posse do e-mail do convite).
+//
 // ── O QUE ESTE SERVIÇO FAZ, NA TRANSAÇÃO DE QUEM O CHAMA ────
 //   1. o usuário dono da company que PEDIU vira OWNER da company do
 //      REGISTRO (companies.owner_id + linha 'owner' ativa em
@@ -177,8 +201,22 @@ function asUuid(v) {
   return v && UUID_RE.test(String(v)) ? String(v) : null;
 }
 
+// ⚠️ USO EXCLUSIVO DO **REQUESTER**. Copiado de isSystemOwner
+// (karateDojoClaimService): `!hash` trata "usuário inexistente" como
+// user-sistema. Do lado do requester isso é FAIL-CLOSED (o predicado RECUSA
+// o aceite), e portanto inofensivo. Do lado do ALVO seria FAIL-OPEN — ver o
+// bloco "AUSÊNCIA DE DADO NÃO É PERMISSÃO" no cabeçalho e use
+// isLockedSystemHash.
 function isSystemOwnerHash(hash) {
   return !hash || hash === LOCKED_SYSTEM_PASSWORD;
+}
+
+// ⚠️ USO DO **ALVO**: igualdade ESTRITA, sem nenhuma tolerância a ausência.
+// É este predicado — e só ele — que autoriza uma company com praticantes e
+// anuidade a mudar de dono. Ausência de dado aqui é estado inesperado, não
+// permissão.
+function isLockedSystemHash(hash) {
+  return hash === LOCKED_SYSTEM_PASSWORD;
 }
 
 // ── LEITURA + VALIDAÇÃO DO REGISTRO APONTADO ────────────────
@@ -187,8 +225,19 @@ function isSystemOwnerHash(hash) {
 //   2. é um dojô mesmo?                      (vertical = 'karate_dojo')
 //   3. ele AINDA NÃO TEM USUÁRIO?            (senão seria roubar a conta de
 //                                             alguém — 409, sempre)
-// A 3 é a que protege gente: "sem usuário" = owner é o user-sistema
-// compartilhado E não há nenhum membro ativo que seja usuário real.
+// A 3 é a que protege gente, e "ainda não tem usuário" tem definição
+// ESTRITA: o owner é O USER-SISTEMA (password_hash exatamente
+// '!locked-system-no-login') E não há nenhum membro ativo que seja usuário
+// real. Qualquer outro estado do owner BLOQUEIA:
+//   • owner_id nulo ............... 409 TARGET_OWNER_INCONSISTENT
+//   • owner_id → usuário que não existe mais (LEFT JOIN sem match)
+//                                   409 TARGET_OWNER_INCONSISTENT
+//   • usuário existe mas sem senha  409 TARGET_OWNER_INCONSISTENT
+//   • usuário REAL ................ 409 TARGET_ALREADY_CLAIMED
+// Os dois códigos são diferentes de propósito, porque a ação humana é
+// diferente: "já reclamado" = aponte OUTRO registro; "inconsistente" =
+// ninguém reclamou nada, ESTE registro está quebrado e precisa ser corrigido
+// na federação antes de qualquer aprovação.
 async function loadAndValidateTarget(client, { federationId, targetCompanyId }) {
   const t = await client.query(
     `/* assumption:target-lock */
@@ -226,14 +275,46 @@ async function loadAndValidateTarget(client, { federationId, targetCompanyId }) 
     );
   }
 
-  // "ainda não tem usuário", parte 1: o owner é o user-sistema compartilhado?
+  // "ainda não tem usuário", parte 1: o owner é O USER-SISTEMA compartilhado?
+  // `companies.owner_id` é NOT NULL na base — um nulo aqui não é "registro
+  // livre", é estado inesperado, e estado inesperado NÃO abre porta.
+  if (!target.owner_id) {
+    throw httpError(
+      409,
+      'TARGET_OWNER_INCONSISTENT',
+      'O registro apontado está sem dono (owner_id nulo) — isso não é o usuário de sistema, é um estado ' +
+      'inesperado. Corrija o registro na federação antes de vinculá-lo a um sensei.'
+    );
+  }
+
   const ow = await client.query(
     `/* assumption:target-owner */
      SELECT id, password_hash FROM users WHERE id = $1 LIMIT 1`,
     [target.owner_id]
   );
   const ownerRow = (ow && ow.rows && ow.rows[0]) || null;
-  if (!isSystemOwnerHash(ownerRow && ownerRow.password_hash)) {
+
+  // ⚠️ AQUI ESTAVA A BRECHA: com o predicado permissivo (`!hash`), um owner
+  // que não existe mais na tabela users passava por "sem dono" e o registro
+  // podia ser assumido por outra pessoa — com os praticantes e a anuidade
+  // dele junto. Ausência de linha é INCONSISTÊNCIA, nunca permissão.
+  if (!ownerRow) {
+    throw httpError(
+      409,
+      'TARGET_OWNER_INCONSISTENT',
+      'O registro apontado tem um dono que não existe mais (o usuário foi removido). Corrija o registro na ' +
+      'federação antes de vinculá-lo a um sensei.'
+    );
+  }
+  if (!ownerRow.password_hash) {
+    throw httpError(
+      409,
+      'TARGET_OWNER_INCONSISTENT',
+      'O dono do registro apontado não é o usuário de sistema e está sem senha definida. Corrija o registro ' +
+      'na federação antes de vinculá-lo a um sensei.'
+    );
+  }
+  if (!isLockedSystemHash(ownerRow.password_hash)) {
     throw httpError(
       409,
       'TARGET_ALREADY_CLAIMED',
@@ -269,6 +350,10 @@ async function loadAndValidateTarget(client, { federationId, targetCompanyId }) 
 // Ela precisa ter um usuário REAL — é ele que vai ser movido. Uma conta
 // cujo owner é o user-sistema não é conta de sensei nenhum: é outro
 // registro, e mover um registro para dentro de outro não é este fluxo.
+//
+// Aqui o predicado permissivo (isSystemOwnerHash) FICA: do lado do
+// requester, "não achei o usuário" leva a RECUSAR o aceite — fail-closed.
+// É exatamente o oposto do que acontece no alvo (ver o cabeçalho).
 async function loadAndValidateRequester(client, { requesterCompanyId }) {
   const r = await client.query(
     `/* assumption:requester-lock */
@@ -570,4 +655,5 @@ module.exports = {
   httpError,
   safeStep,
   isSystemOwnerHash,
+  isLockedSystemHash,
 };
