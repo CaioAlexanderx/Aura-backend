@@ -44,6 +44,34 @@
 // e no objeto company de /login, /me e /register. resolveKarateContext
 // agora retorna { federation_id, karate_role, dojo_id }. Usado por
 // requireDojoAccess (Canal A) para escopar endpoints /dojo/*.
+//
+// ── F11 Sign Up de dojo (2026-08-11) ────────────────────────
+// /auth/register passa a aceitar { vertical:'karate_dojo', federation_id }.
+// Antes disso era IMPOSSIVEL um dojo entrar sozinho: o INSERT INTO companies
+// nao gravava vertical/vertical_active/federation_id, e o unico caminho era
+// PATCH /admin/clients/:cid/karate (adminOnly). Sem os dois campos, o JWT
+// nascia sem dojo_id/federation_id e requireDojoAccess devolvia 403
+// NOT_DOJO_TOKEN — o sensei nao conseguia nem PEDIR conexao a federacao
+// (POST /federation/:id/dojo/connection), que e o passo seguinte da F6.
+//
+// TRES REGRAS QUE ESTE ARQUIVO NAO PODE VIOLAR:
+//  1. karate_dojo_linked_at continua NULO. Criar a conta NAO e estar
+//     filiado — a filiacao vem do ACEITE da federacao (F6,
+//     karateAffiliationRequestsAdmin.js). Escolher a federacao aqui e
+//     DECLARACAO DE INTENCAO: define o roteamento tecnico (federation_id),
+//     nao o vinculo. Se este INSERT algum dia setar linked_at, o dojo
+//     aparece como filiado sem a federacao ter aprovado nada.
+//  2. fpkt_affiliation_id nunca e gerado. O numero FPKT e SEMPRE digitado
+//     pela federacao no aceite — "o backend NUNCA gera numero".
+//  3. O caminho de varejo e bit-a-bit o mesmo. Sem `vertical` no body,
+//     nenhuma query nova roda e vertical/vertical_active/federation_id vao
+//     NULL no INSERT (exatamente o que o DEFAULT ja fazia).
+//
+// E-mail/CNPJ podem coincidir com um dos registros federativos existentes:
+// NAO tentamos casar, vincular nem reivindicar nada. Se o CNPJ ja tem
+// company, o cadastro de dojo para em 409 (em vez de "entrar" na empresa
+// alheia como o fluxo de varejo faz) — a ligacao com o registro da
+// federacao acontece depois, no aceite.
 // ============================================================
 const router  = require('express').Router();
 const bcrypt  = require('bcrypt');
@@ -67,6 +95,15 @@ const IS_PROD = env.NODE_ENV === 'production';
 
 // MULTICNPJ: ranking de planos pra calcular plan efetivo no modo consolidado.
 const PLAN_RANK = { essencial: 1, negocio: 2, expansao: 3, personalizado: 4 };
+
+// F11: verticais que o proprio cliente pode declarar no cadastro. Lista
+// FECHADA de propósito — a regra de onboarding.js ("vertical NUNCA e ativada
+// automaticamente ... so a equipe Aura ativa via Gestao Aura") continua
+// valendo para todas as outras. A excecao existe porque o dojo precisa do
+// par vertical + federation_id ja no primeiro token para conseguir pedir
+// filiacao; nenhuma outra vertical tem essa dependencia.
+const SELF_SERVE_VERTICALS = new Set(['karate_dojo']);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function signAccessToken(payload) {
   return jwt.sign({ ...payload, type: 'access' }, JWT_SECRET, { expiresIn: ACCESS_TTL });
@@ -179,7 +216,7 @@ function shapeCompany(company, fallbackMemberRole) {
 
 // POST /api/v1/auth/register
 router.post('/register', async (req, res) => {
-  const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version, self_serve } = req.body;
+  const { name, email, password, company_name, phone, cnpj, access_code, terms_accepted, terms_version, self_serve, vertical, federation_id } = req.body;
   const isSelfServe = (self_serve === true || self_serve === 'true');
 
   if (!name || !email || !password) return res.status(400).json({ error: 'Campos obrigatorios: name, email, password' });
@@ -188,11 +225,56 @@ router.post('/register', async (req, res) => {
   if (password.length < 8) return res.status(400).json({ error: 'Senha deve ter pelo menos 8 caracteres' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'E-mail invalido' });
 
+  // ── F11: ramo declarado no cadastro (opcional) ─────────────
+  // Sem `vertical` no body nada abaixo roda e o fluxo segue identico ao
+  // que sempre foi (varejo). Todas as validacoes de dojo sao feitas ANTES
+  // de abrir a transacao — nao ha por que hashear senha e inserir usuario
+  // para descobrir que a federacao nao foi escolhida.
+  const requestedVertical = (typeof vertical === 'string' && vertical.trim()) ? vertical.trim() : null;
+  if (requestedVertical && !SELF_SERVE_VERTICALS.has(requestedVertical)) {
+    return res.status(400).json({
+      error: 'Ramo de atividade indisponivel para autocadastro. Fale com a equipe Aura.',
+      code: 'VERTICAL_NOT_SELF_SERVE',
+    });
+  }
+  const isDojoSignup = requestedVertical === 'karate_dojo';
+  const dojoFederationId = (typeof federation_id === 'string') ? federation_id.trim() : '';
+  if (isDojoSignup && !company_name) {
+    return res.status(400).json({
+      error: 'Informe o nome do dojo para criar a conta',
+      code: 'DOJO_COMPANY_REQUIRED',
+    });
+  }
+  if (isDojoSignup && !UUID_RE.test(dojoFederationId)) {
+    return res.status(400).json({
+      error: 'Escolha a federacao do seu dojo',
+      code: 'FEDERATION_REQUIRED',
+    });
+  }
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
     const { rows: existing } = await client.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase().trim()]);
     if (existing.length > 0) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'E-mail ja cadastrado' }); }
+
+    // F11: a federacao escolhida precisa existir e estar ativa. `vertical` e
+    // o campo CANONICO de identidade (ver src/config/karateRoles.js). Nao
+    // olhamos nada alem disso — nao ha "reivindicacao" de registro aqui.
+    if (isDojoSignup) {
+      const { rows: feds } = await client.query(
+        `SELECT id FROM companies
+          WHERE id = $1 AND vertical = 'karate_federation' AND is_active = true`,
+        [dojoFederationId]
+      );
+      if (!feds.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: 'Federacao invalida ou indisponivel',
+          code: 'FEDERATION_NOT_FOUND',
+        });
+      }
+    }
 
     let plan = 'essencial', trialDays = 0, discountPct = 0, codeType = null, codeId = null, referrerId = null;
     if (access_code) {
@@ -247,12 +329,37 @@ router.post('/register', async (req, res) => {
       }
     }
 
+    // F11: cadastro de dojo NUNCA entra numa empresa que ja existe. O fluxo
+    // de varejo "entra como vendedor" (acima) e aceitavel para uma loja com
+    // dois socios; para um dojo seria pior que inutil — a conta nasceria sem
+    // ser dona de nada e, se o CNPJ bater com um registro que a federacao ja
+    // cadastrou, viraria uma reivindicacao silenciosa de dado alheio.
+    if (isDojoSignup && company) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Ja existe uma conta Aura com este CNPJ. Entre com ela ou peca acesso ao responsavel.',
+        code: 'CNPJ_ALREADY_REGISTERED',
+      });
+    }
+
     if (!skipCompany && !company) {
       isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
+      // F11: `vertical` e `vertical_active` recebem o MESMO valor ($10) —
+      // identidade permanente + modulo ativo — e `federation_id` ($11) e a
+      // federacao escolhida. No varejo os tres vao NULL, que e exatamente o
+      // que o INSERT sem essas colunas ja gravava.
+      //
+      // ⚠️ karate_dojo_linked_at e fpkt_affiliation_id NAO aparecem aqui e
+      // nao podem aparecer: o vinculo (linked_at) e do ACEITE da federacao e
+      // o numero FPKT e sempre digitado por ela. Ver o cabecalho do arquivo.
+      const newVertical = isDojoSignup ? 'karate_dojo' : null;
+      const newFederationId = isDojoSignup ? dojoFederationId : null;
       const { rows: [newCompany] } = await client.query(
-        'INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone) VALUES ($1, $2, $2, $3, \'cnpj\', $4, $5, $6, $7) RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id',
-        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null]
+        `INSERT INTO companies (owner_id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, access_code_used, cnpj, phone, vertical, vertical_active, federation_id)
+         VALUES ($1, $2, $2, $3, 'cnpj', $4, $5, $6, $7, $8, $8, $9)
+         RETURNING id, legal_name, trade_name, plan, onboarding_step, trial_ends_at, module_overrides, access_code_used, vertical_active, vertical, ai_enabled, ai_consent_at, federation_id`,
+        [user.id, company_name.trim(), plan, trialEndsAt, access_code || null, cnpj ? cnpj.replace(/\D/g, '') : null, phone || null, newVertical, newFederationId]
       );
       company = newCompany;
     }
@@ -293,6 +400,10 @@ router.post('/register', async (req, res) => {
     }
 
     // Track G: contexto karate da company recem-resolvida (member_role local).
+    // F11: para o dojo, isso ja devolve dojo_id = company.id e federation_id =
+    // a federacao escolhida — que e exatamente o par que requireDojoAccess
+    // exige no Canal A. E o que destrava POST /federation/:id/dojo/connection
+    // logo depois do cadastro (antes: 403 NOT_DOJO_TOKEN).
     const karateCtx = resolveKarateContext(company ? { ...company, member_role: memberRole } : null);
     const tokenPayload = {
       id: user.id,
@@ -309,7 +420,7 @@ router.post('/register', async (req, res) => {
     const { token: refreshToken } = signRefreshToken({ id: user.id });
     await storeRefreshToken(user.id, refreshToken, req);
     setRefreshCookie(res, refreshToken);
-    logAuditAction(user.id, company ? company.id : null, 'register', 'New account: ' + email.toLowerCase().trim() + (skipCompany ? ' (invite flow, no company)' : !isNewCompany ? ' (joined existing company)' : '') + ' | terms_version=' + acceptedVersion);
+    logAuditAction(user.id, company ? company.id : null, 'register', 'New account: ' + email.toLowerCase().trim() + (skipCompany ? ' (invite flow, no company)' : !isNewCompany ? ' (joined existing company)' : '') + (isDojoSignup ? ' [dojo self-signup, federation=' + dojoFederationId + ', NOT linked]' : '') + ' | terms_version=' + acceptedVersion);
 
     res.status(201).json({
       token: accessToken, refresh_token: refreshToken, token_expires_in: '1h',
@@ -330,6 +441,9 @@ router.post('/register', async (req, res) => {
         federation_id: karateCtx.federation_id,
         karate_role: karateCtx.karate_role,
         dojo_id: karateCtx.dojo_id,
+        // F11: explicito no contrato pra o front nunca inferir filiacao a
+        // partir de federation_id. Conta criada != dojo filiado.
+        karate_dojo_linked_at: null,
       } : null,
       consolidated_view: false,
       company_count: company ? 1 : 0,
