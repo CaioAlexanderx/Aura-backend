@@ -126,6 +126,20 @@ router.use('/aprovacao',         require('./studioApprovalPublic'));
 // Migration 138. Espelha a mecânica de /aprovacao.
 router.use('/orcamento',         require('./studioQuotePublic'));
 
+// ── AURA DOJÔ — F11 (público: lista de federações para o CADASTRO) ──
+// SEM migration. Único caminho público que LISTA federações — todos os
+// outros routers /public/karate abaixo partem de um :slug/token de UMA
+// federação já conhecida. Usado pelo seletor do passo "Sua empresa" do
+// autocadastro (POST /auth/register com vertical='karate_dojo'), quando o
+// sensei ainda não tem conta e portanto nenhuma rota autenticada serve.
+// Devolve SÓ id + nome (ver comentário de topo de karateFederationsPublic.js).
+//
+// ⚠️ Montado ANTES dos demais /public/karate: 'federations' é rota estática
+// de 1 segmento e nunca pode ser capturada como :slug (mesma armadilha de
+// /dojos/roster-progress e /public/karate/dojo).
+//   GET /public/karate/federations
+router.use('/public/karate', require('./karateFederationsPublic'));
+
 // ── AURA KARATÊ — F0 Aura Dojô (público: claim da conta do dojô) ──
 // A federação convida o e-mail do sensei; ele define a senha no link e vira
 // o owner REAL da company do dojô (antes: user-sistema
