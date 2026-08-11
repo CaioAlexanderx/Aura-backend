@@ -20,6 +20,13 @@
 //    devolução da gestão) é detalhe de implementação; virá-la contrato de
 //    teste é o que já derrubou o CI deste repo em #421, #423 e #449.
 //
+// ⚠️ MATCHER DE PROIBIÇÃO OLHA O **VERBO**, NUNCA A MENÇÃO SOLTA.
+//    Um `/karate_belt_history/` cru casa com a LEITURA legítima que o
+//    COUNTS_SQL do serviço faz (ele conta as graduações para a resposta poder
+//    dizer quantas foram preservadas) e fica vermelho sem ninguém ter apagado
+//    nada. É o mesmo falso positivo do `not.toMatch(/is_active = false/)` que
+//    casava com um FILTER de contagem. Proibição é sobre ESCRITA.
+//
 // ⚠️ Ids de fixture são uuid hexadecimal VÁLIDO (mesmas constantes de
 //    tests/integration/karateIdentityF74.test.js). Um 'r0000000-…' custou 13
 //    testes vermelhos.
@@ -83,6 +90,23 @@ const isCompanyDelete = (s) => /DELETE\s+FROM\s+companies/i.test(s);
 const isCustomerDelete = (s) => /DELETE\s+FROM\s+customers/i.test(s);
 const isAnyDelete = (s) => /DELETE\s+FROM\s+/i.test(s);
 const isTransferPurge = (s) => /allow_transfer_purge/.test(s);
+
+// ── AS GRADUAÇÕES: PROIBIÇÃO POR VERBO, NÃO POR MENÇÃO ──────
+// karate_belt_history é LIDA no caminho feliz: o COUNTS_SQL do serviço faz
+// `SELECT COUNT(*) FROM karate_belt_history` para a resposta poder dizer
+// quantas graduações foram preservadas — a leitura é, literalmente, a prova
+// de que elas continuam lá. O que este arquivo proíbe é ESCRITA.
+//
+// `withoutRowLock` existe porque `SELECT … FOR UPDATE` (o lock da linha do
+// dojô e o `FOR UPDATE OF c` do candidatesSql) contém a palavra UPDATE sem
+// ser escrita nenhuma. Sem isso, o próprio SELECT viraria "escrita".
+const mentionsBeltHistory = (s) => /karate_belt_history/i.test(s);
+const withoutRowLock = (s) => String(s).replace(/\bFOR\s+UPDATE(\s+OF\s+\w+)?/gi, ' ');
+const hasWriteVerb = (s) =>
+  /(?:\bINSERT\s+INTO\b|\bUPDATE\s+|\bDELETE\s+FROM\b|\bTRUNCATE\b)/i.test(withoutRowLock(s));
+const isBeltHistoryWrite = (s) =>
+  /(?:\bINSERT\s+INTO|\bUPDATE|\bDELETE\s+FROM|\bTRUNCATE(?:\s+TABLE)?)\s+(?:ONLY\s+)?karate_belt_history\b/i.test(s);
+const isPureRead = (s) => /^\s*(?:WITH|SELECT)\b/i.test(s) && !hasWriteVerb(s);
 
 // ── Client de transação de mentira que despacha por SQL ─────
 function mockTx(dispatch) {
@@ -206,10 +230,58 @@ describe('DELETE de dojô — nada é apagado', () => {
     expect(txHit(tx, isAnyDelete)).toBe(false);
   });
 
-  test('as graduações não são tocadas: nenhuma escrita em karate_belt_history', async () => {
+  // ⚠️ A asserção aqui é sobre ESCRITA, não sobre a palavra. O serviço LÊ
+  //    karate_belt_history (COUNTS_SQL) para responder `counts.belt_history`,
+  //    e é exatamente essa leitura que prova que as 188 graduações do cenário
+  //    continuaram no banco. Um matcher /karate_belt_history/ cru ficava
+  //    vermelho por causa dessa leitura — falso positivo idêntico ao do
+  //    /is_active = false/ que casava com um FILTER de contagem.
+  test('as graduações não são tocadas: nenhuma ESCRITA em karate_belt_history', async () => {
     const tx = scenario();
     await request(app).delete(`${url}?cascade=true`).set(staffAuth());
-    expect(txHit(tx, /karate_belt_history/)).toBe(false);
+
+    const touching = txSqls(tx).filter(mentionsBeltHistory);
+
+    // Âncora anti-vácuo: a tabela É alcançada nesta requisição (o COUNTS_SQL).
+    // Sem isto, um mock que parasse de chegar ao serviço deixaria as duas
+    // asserções abaixo passarem sobre uma lista vazia — teste que mente.
+    expect(touching.length).toBeGreaterThan(0);
+
+    // (a) nenhuma escrita cujo ALVO seja a tabela das graduações.
+    expect(txHit(tx, isBeltHistoryWrite)).toBe(false);
+
+    // (b) mais estrito que (a): TODA query que sequer menciona a tabela tem de
+    //     ser leitura pura. Pega também o oblíquo — um
+    //     `DELETE FROM customers WHERE id IN (SELECT student_id FROM
+    //     karate_belt_history)` não escreve na tabela, mas apaga o dono da
+    //     graduação e faria a cascata do schema levar a graduação junto.
+    //     O `? null : sql` é para a falha imprimir a SQL culpada.
+    touching.forEach((sql) => {
+      expect(isPureRead(sql) ? null : sql).toBeNull();
+    });
+  });
+
+  // Este caso existe para a asserção acima não poder virar decoração: se
+  // alguém reintroduzir o expurgo das graduações amanhã, são ESTES matchers
+  // que ficam vermelhos. Se eles pararem de pegar, o vermelho aparece aqui.
+  test('a proibição das graduações é real: os matchers pegam a regressão', () => {
+    expect(isBeltHistoryWrite('DELETE FROM karate_belt_history WHERE student_id = $1')).toBe(true);
+    expect(isBeltHistoryWrite('delete\n  from  ONLY karate_belt_history bh WHERE bh.student_id = ANY($1)')).toBe(true);
+    expect(isBeltHistoryWrite('UPDATE karate_belt_history SET student_id = NULL WHERE student_id = $1')).toBe(true);
+    expect(isBeltHistoryWrite('INSERT INTO karate_belt_history (student_id, belt) VALUES ($1, $2)')).toBe(true);
+    expect(isBeltHistoryWrite('TRUNCATE TABLE karate_belt_history')).toBe(true);
+
+    // …e continuam deixando passar a LEITURA legítima do COUNTS_SQL,
+    // inclusive quando ela convive com `FOR UPDATE` na mesma requisição.
+    const leitura = '\n  SELECT (SELECT COUNT(*) FROM karate_belt_history bh JOIN customers cu ON cu.id = bh.student_id WHERE cu.dojo_id = $1)::int AS belt_history';
+    expect(isBeltHistoryWrite(leitura)).toBe(false);
+    expect(isPureRead(leitura)).toBe(true);
+    expect(isPureRead("SELECT id, name, is_active FROM companies WHERE id = $1 FOR UPDATE")).toBe(true);
+
+    // O oblíquo cai na camada (b), não na (a).
+    const obliquo = 'DELETE FROM customers WHERE id IN (SELECT student_id FROM karate_belt_history)';
+    expect(isBeltHistoryWrite(obliquo)).toBe(false);
+    expect(isPureRead(obliquo)).toBe(false);
   });
 });
 
