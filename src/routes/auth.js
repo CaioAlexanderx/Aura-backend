@@ -345,8 +345,8 @@ router.post('/register', async (req, res) => {
     if (!skipCompany && !company) {
       isNewCompany = true;
       const trialEndsAt = trialDays > 0 ? new Date(Date.now() + trialDays * 86400000).toISOString() : null;
-      // F11: `vertical` e `vertical_active` recebem o MESMO valor ($10) —
-      // identidade permanente + modulo ativo — e `federation_id` ($11) e a
+      // F11: `vertical` e `vertical_active` recebem o MESMO placeholder ($8)
+      // — identidade permanente + modulo ativo — e `federation_id` ($9) e a
       // federacao escolhida. No varejo os tres vao NULL, que e exatamente o
       // que o INSERT sem essas colunas ja gravava.
       //
