@@ -33,6 +33,15 @@
 //   SEPARADOS. revokeAffiliation() apenas REVOGA. Quem inativa é a
 //   federação, à mão, pelo caminho que ela já tem (cascadeInactivateDojo,
 //   o "Suspender" de karateDojos.js). Ver o bloco de revokeAffiliation.
+// DECISÃO 5 (Caio, 10/08/2026 — F11): "O DOJÔ ASSUME O REGISTRO
+//   FEDERATIVO." A federação já tem 105 dojôs cadastrados como companies —
+//   o REGISTRO FEDERATIVO, com o código FPKT, a filiação e os 9.840
+//   praticantes pendurados (104 deles sem nenhum usuário). O sensei que
+//   vira cliente NÃO cai nesse registro: ele cria uma conta nova, vazia, e
+//   pede vínculo. NO ACEITE, a federação APONTA qual daqueles registros é
+//   ele — e a conta do sensei PASSA A SER aquela linha.
+//   O apontamento é OPCIONAL: sem ele, o aceite é exatamente o que sempre
+//   foi (dojô genuinamente novo). Ver o bloco de approveRequest.
 //
 // Erros viajam como Error com .status + .code (as rotas só traduzem para
 // HTTP). Defensivo 42P01/42703: leitura degrada (vazio + schema_pending),
@@ -42,6 +51,10 @@
 
 const db = require('../config/database');
 const { getDojoLinkStatus } = require('./karateDojoLinkStatus');
+const {
+  assumeRegistry,
+  writeAssumptionTrail,
+} = require('./karateDojoRegistryAssumptionService');
 
 const VALID_STATUS = ['pending', 'approved', 'rejected'];
 
@@ -49,6 +62,12 @@ const VALID_STATUS = ['pending', 'approved', 'rejected'];
 // que isso não é motivo, é ruído — e este texto fica na trilha para alguém
 // ler daqui a seis meses.
 const REVOKE_REASON_MIN = 5;
+
+// O apontamento do registro (F11) chega do corpo da requisição e entra em
+// query como uuid: um 'abc' viraria 22P02 lá dentro — erro de banco cru,
+// 500 e transação abortada por causa de um campo digitado errado. Barrar
+// aqui devolve 422 legível ANTES de abrir transação.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 function httpError(status, code, message) {
   const err = new Error(message);
@@ -357,13 +376,55 @@ async function requestMetrics({ federationId }) {
 // approved, ou nada acontece. Nenhum passo best-effort dentro do BEGIN
 // (um try/catch que engole erro ali dentro envenenaria a transação e o
 // COMMIT viraria ROLLBACK silencioso — armadilha tx-poison).
-async function approveRequest({ federationId, requestId, fpktNumber, actorId }) {
+//
+// ── O APONTAMENTO (F11) É OPCIONAL ──────────────────────────
+// `targetCompanyId` responde "QUAL dos registros federativos preexistentes
+// É este dojô?".
+//
+//   SEM apontamento → este handler faz exatamente o que sempre fez: é o
+//     caminho do dojô genuinamente novo, aquele que não tem registro
+//     nenhum na federação. Nenhuma query nova roda, nada é migrado, e ele
+//     continua funcionando com a migration 275 NÃO aplicada.
+//   COM apontamento → antes de marcar o vínculo, a conta do sensei ASSUME
+//     aquele registro (karateDojoRegistryAssumptionService.assumeRegistry,
+//     na MESMA transação): o usuário dele vira owner da company do
+//     registro, o trabalho que ele já tinha é reapontado, e a company do
+//     cadastro é DESATIVADA (nunca apagada). Os praticantes NÃO se movem —
+//     eles já estão no registro, é o usuário que se move.
+//
+// DUAS CONSEQUÊNCIAS que não podem ser esquecidas por quem mexer aqui:
+//   • quem recebe o número e o vínculo passa a ser O REGISTRO. Marcar a
+//     conta do cadastro deixaria karate_dojo_linked_at numa company
+//     is_active=false — vínculo em empresa que não existe mais para
+//     ninguém;
+//   • a checagem de número duplicado precisa EXCLUIR o registro, não a
+//     conta que pediu: o número que a federação digita é, quase sempre,
+//     exatamente o que aquele registro JÁ TEM. Excluir a conta nova
+//     devolveria FPKT_NUMBER_TAKEN do registro contra ele mesmo.
+//
+// karate_affiliation_requests.dojo_id NÃO é reapontado, de propósito: ele
+// registra QUEM PEDIU, e quem pediu foi a conta nova. Para onde o pedido
+// levou está na trilha (karate_dojo_registry_assumptions + roster event
+// 'registry_assumed') — é lá que essa pergunta se responde.
+async function approveRequest({ federationId, requestId, fpktNumber, actorId, targetCompanyId }) {
   const numero = text(fpktNumber, 60);
   if (!numero) {
     throw httpError(
       422,
       'FPKT_NUMBER_REQUIRED',
       'Campo fpkt_number é obrigatório para aprovar a filiação — o número é emitido pela federação, este sistema nunca gera número.'
+    );
+  }
+
+  // Apontamento OPCIONAL: ausente é neutro, não erro. Presente e malformado
+  // é erro — e barrado antes de qualquer transação (um não-uuid viraria
+  // 22P02 dentro do BEGIN).
+  const alvo = text(targetCompanyId, 64);
+  if (alvo && !UUID_RE.test(alvo)) {
+    throw httpError(
+      422,
+      'TARGET_COMPANY_INVALID',
+      'O registro apontado (target_company_id) não é um identificador válido.'
     );
   }
 
@@ -386,17 +447,46 @@ async function approveRequest({ federationId, requestId, fpktNumber, actorId }) 
       throw httpError(409, 'JA_RESOLVIDA', 'Solicitação já foi resolvida');
     }
 
+    // Apontar a própria conta que pediu não é assunção: seria a conta se
+    // engolindo (e a validação de "registro sem usuário" recusaria com uma
+    // mensagem que não explica nada). Se a conta que pediu JÁ É o registro,
+    // o aceite é o aceite comum — sem apontamento.
+    if (alvo && String(alvo) === String(reqRow.dojo_id)) {
+      throw httpError(
+        422,
+        'TARGET_IS_REQUESTER',
+        'O registro apontado é a própria conta que pediu a filiação. Se ela já é o registro federativo, aprove sem apontar nenhum registro.'
+      );
+    }
+
+    // COM apontamento, o dojô que sai daqui filiado é o REGISTRO.
+    const dojoIdEfetivo = alvo || reqRow.dojo_id;
+
     // Número único DENTRO da federação (mesmo escopo do número de
     // praticante). Exclui o próprio dojô: reaprovar mantendo o mesmo
-    // número não pode colidir consigo mesmo.
+    // número não pode colidir consigo mesmo — e, com apontamento, "o
+    // próprio dojô" é o REGISTRO (que tipicamente já carrega esse número).
     const dup = await client.query(
       `SELECT id FROM companies
         WHERE federation_id = $1 AND fpkt_affiliation_id = $2 AND id <> $3
         LIMIT 1`,
-      [federationId, numero, reqRow.dojo_id]
+      [federationId, numero, dojoIdEfetivo]
     );
     if (dup.rows && dup.rows.length) {
       throw httpError(409, 'FPKT_NUMBER_TAKEN', 'Número de filiação já em uso nesta federação.');
+    }
+
+    // A ASSUNÇÃO (F11) — dentro desta MESMA transação: ou o sensei vira dono
+    // do registro E o pedido fica approved, ou nada aconteceu. Ela valida o
+    // registro apontado (é desta federação? é dojô? ainda não tem usuário?) e
+    // lança erro de serviço com código próprio quando não é.
+    let assumption = null;
+    if (alvo) {
+      assumption = await assumeRegistry(client, {
+        federationId,
+        requesterCompanyId: reqRow.dojo_id,
+        targetCompanyId: alvo,
+      });
     }
 
     // O ACEITE é o que cria a conexão (DECISÃO 1). COALESCE em
@@ -409,7 +499,7 @@ async function approveRequest({ federationId, requestId, fpktNumber, actorId }) 
               affiliation_since     = COALESCE(affiliation_since, CURRENT_DATE)
         WHERE id = $2 AND federation_id = $3
       RETURNING id, karate_dojo_linked_at, fpkt_affiliation_id`,
-      [numero, reqRow.dojo_id, federationId]
+      [numero, dojoIdEfetivo, federationId]
     );
     const comp = (upd && upd.rows && upd.rows[0]) || null;
     if (!comp) {
@@ -423,15 +513,42 @@ async function approveRequest({ federationId, requestId, fpktNumber, actorId }) 
       [actorId || null, requestId]
     );
 
+    // Trilha da assunção — best-effort por SAVEPOINT lá dentro: enquanto a
+    // migration 275 não for aplicada, 42P01 degrada e o aceite acontece do
+    // mesmo jeito (o rastro fica em karate_dojo_roster_events, da 220).
+    if (assumption) {
+      const trail = await writeAssumptionTrail(client, {
+        federationId,
+        requestId,
+        result: assumption,
+        actorId,
+        fpktNumber: numero,
+      });
+      assumption.trail_persisted = trail.trail_persisted;
+    }
+
     await client.query('COMMIT');
     inTx = false;
 
-    return {
+    const out = {
       ok: true,
       dojo_id: comp.id,
       fpkt_affiliation_id: comp.fpkt_affiliation_id,
       linked_at: toIso(comp.karate_dojo_linked_at),
     };
+
+    if (assumption) {
+      out.assumption = assumption;
+      // Explícito na resposta: o dojo_id devolvido NÃO é o da conta que
+      // pediu. Quem consome isto (front da federação) precisa saber que o
+      // alvo mudou sem ter que ler documentação.
+      out.requester_company_id = reqRow.dojo_id;
+      out.message =
+        `Filiação aprovada. A conta do sensei passou a ser o registro ${assumption.to_company_name || ''}`.trim() +
+        ' — os praticantes já cadastrados nele continuam onde estavam, e a conta usada no cadastro foi desativada.';
+    }
+
+    return out;
   } catch (e) {
     if (inTx) {
       try { await client.query('ROLLBACK'); } catch (_) { /* conexão já morta */ }
