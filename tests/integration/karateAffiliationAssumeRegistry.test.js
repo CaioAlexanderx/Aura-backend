@@ -604,3 +604,130 @@ describe('F11 — apontamento inválido e pedido já resolvido', () => {
     expect(txSqls(tx)).not.toContain('COMMIT');
   });
 });
+
+// ============================================================
+// 5) "SEM DONO" NO ALVO É ESTRITAMENTE O USER-SISTEMA
+// ============================================================
+// A pergunta 3 do aceite decide se uma company com 9.840 praticantes e a
+// anuidade da federação pendurada MUDA DE DONO. Ela nasceu copiada de
+// isSystemOwner (karateDojoClaimService), onde `!hash` — "não achei linha em
+// users" — conta como user-sistema: lá isso é defensivo e está documentado,
+// porque o predicado serve para RECUSAR o claim.
+//
+// Aqui ele serve para PERMITIR, e o mesmo `!hash` se INVERTE em FAIL-OPEN:
+// um registro cujo owner_id aponte para um usuário que não existe mais
+// (depois de qualquer limpeza da tabela users) seria lido como "sem dono" e
+// poderia ser assumido por OUTRA PESSOA — com os praticantes e a anuidade
+// junto. Os casos abaixo congelam a regra estrita: só o user-sistema, com o
+// hash exato, abre a porta. Todo o resto BLOQUEIA.
+//
+// ⚠️ A assimetria é de propósito: no REQUESTER o permissivo continua (lá ele
+// é fail-closed), e karateDojoClaimService NÃO foi alterado. O último teste
+// deste bloco é a guarda de regressão dessas duas coisas.
+describe('F11 — o alvo só é assumível se o owner FOR o user-sistema', () => {
+  // Ids de usuário que NÃO existem na tabelinha simulada. Hexadecimais de
+  // verdade, como todo id deste arquivo: eles viajam crus para colunas uuid.
+  const ownerFantasmaId = 'ba000000-0000-0000-0000-0000000000aa';
+  const senseiFantasmaId = 'ba000000-0000-0000-0000-0000000000bb';
+
+  test('owner_id aponta para usuário que NÃO EXISTE MAIS → 409 TARGET_OWNER_INCONSISTENT', async () => {
+    // Era exatamente este o caminho fail-open: a linha de users não vem, o
+    // predicado permissivo lia "sem dono" e liberava a assunção.
+    const w = makeWorld();
+    w.registro.owner_id = ownerFantasmaId; // sem entrada em w.users
+    const tx = mockApproveTx(w);
+
+    const res = await request(app).post(approveUrl).set(staffAuth())
+      .send({ fpkt_number: 'FPKT-007', target_company_id: registroId });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('TARGET_OWNER_INCONSISTENT');
+    // Código PRÓPRIO, não o de "já reclamado": ninguém reclamou nada — o
+    // registro é que está quebrado, e a ação da federação é outra.
+    expect(res.body.code).not.toBe('TARGET_ALREADY_CLAIMED');
+
+    // E nada aconteceu: nem o usuário se moveu, nem a conta foi descartada,
+    // nem o vínculo foi marcado.
+    expect(txHit(tx, isOwnerTransfer)).toBe(false);
+    expect(txHit(tx, isMemberOwner)).toBe(false);
+    expect(txHit(tx, isDiscard)).toBe(false);
+    expect(txHit(tx, isLinkUpdate)).toBe(false);
+    expect(txHit(tx, touchesCustomers)).toBe(false);
+    expect(txSqls(tx)).toContain('ROLLBACK');
+    expect(txSqls(tx)).not.toContain('COMMIT');
+  });
+
+  test('owner_id NULO → 409 TARGET_OWNER_INCONSISTENT (nulo não é o user-sistema)', async () => {
+    // companies.owner_id é NOT NULL na base: um nulo aqui é estado
+    // inesperado, e estado inesperado não vira permissão.
+    const w = makeWorld();
+    w.registro.owner_id = null;
+    const tx = mockApproveTx(w);
+
+    const res = await request(app).post(approveUrl).set(staffAuth())
+      .send({ fpkt_number: 'FPKT-007', target_company_id: registroId });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('TARGET_OWNER_INCONSISTENT');
+    expect(txHit(tx, isOwnerTransfer)).toBe(false);
+    expect(txHit(tx, isMemberOwner)).toBe(false);
+    expect(txHit(tx, isDiscard)).toBe(false);
+    expect(txHit(tx, isLinkUpdate)).toBe(false);
+    expect(txSqls(tx)).toContain('ROLLBACK');
+    expect(txSqls(tx)).not.toContain('COMMIT');
+  });
+
+  test('owner existe mas SEM SENHA → 409 TARGET_OWNER_INCONSISTENT (hash vazio não é o hash travado)', async () => {
+    const w = makeWorld();
+    w.users[systemUserId].password_hash = null;
+    const tx = mockApproveTx(w);
+
+    const res = await request(app).post(approveUrl).set(staffAuth())
+      .send({ fpkt_number: 'FPKT-007', target_company_id: registroId });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('TARGET_OWNER_INCONSISTENT');
+    expect(txHit(tx, isOwnerTransfer)).toBe(false);
+    expect(txHit(tx, isDiscard)).toBe(false);
+    expect(txSqls(tx)).toContain('ROLLBACK');
+  });
+
+  test('CAMINHO FELIZ INTACTO: owner É o user-sistema → 200 e a assunção acontece', async () => {
+    const w = makeWorld();
+    // Dito em voz alta no fixture: é ESTE hash, e só ele, que abre a porta.
+    expect(w.users[w.registro.owner_id].password_hash).toBe(LOCKED);
+    const tx = mockApproveTx(w);
+
+    const res = await request(app).post(approveUrl).set(staffAuth())
+      .send({ fpkt_number: 'FPKT-007', target_company_id: registroId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.assumption.assumed).toBe(true);
+    expect(res.body.dojo_id).toBe(registroId);
+    expect(res.body.requester_company_id).toBe(contaNovaId);
+    const own = txFind(tx, isOwnerTransfer);
+    expect(own[1]).toEqual([senseiUserId, registroId, fedId]);
+    expect(txHit(tx, isDiscard)).toBe(true);
+    expect(txSqls(tx)).toContain('COMMIT');
+    expect(txSqls(tx)).not.toContain('ROLLBACK');
+  });
+
+  test('do lado do REQUESTER o permissivo CONTINUA: usuário sumido → 422 REQUESTER_IS_SYSTEM_OWNED', async () => {
+    // Guarda de regressão da assimetria: lá o mesmo "não achei o usuário"
+    // leva a RECUSAR o aceite (fail-closed), e por isso não foi mexido —
+    // nem aqui, nem em karateDojoClaimService.
+    const w = makeWorld();
+    w.contaNova.owner_id = senseiFantasmaId; // sem entrada em w.users
+    const tx = mockApproveTx(w);
+
+    const res = await request(app).post(approveUrl).set(staffAuth())
+      .send({ fpkt_number: 'FPKT-007', target_company_id: registroId });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('REQUESTER_IS_SYSTEM_OWNED');
+    expect(txHit(tx, isOwnerTransfer)).toBe(false);
+    expect(txHit(tx, isDiscard)).toBe(false);
+    expect(txSqls(tx)).toContain('ROLLBACK');
+    expect(txSqls(tx)).not.toContain('COMMIT');
+  });
+});
