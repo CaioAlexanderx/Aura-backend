@@ -56,6 +56,12 @@
 'use strict';
 
 const db = require('../config/database');
+// ⚠️ Quem está agindo: o RÓTULO vem do banco (users.full_name), nunca do
+// JWT. O helper mora em services/actorLabel.js porque o lado da FEDERAÇÃO
+// (karateRosterReviewNoticeService.decideNotice) precisa exatamente do
+// mesmo caminho — lá `decided_by_label` gravava NULL pelo mesmo motivo.
+// Ler o cabeçalho daquele arquivo antes de mexer em qualquer `*_label`.
+const { resolveActor } = require('./actorLabel');
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -170,52 +176,6 @@ function parsePractitionerIds(raw) {
     throw svcError(422, 'BATCH_TOO_LARGE', `Máximo de ${MAX_BATCH} praticantes por chamada`);
   }
   return ids;
-}
-
-// ── Quem está agindo ────────────────────────────────────────
-// Os *_label existem para CONGELAR o nome no momento do ato: o usuário
-// pode sair da empresa depois, e a federação continua precisando saber
-// quem reportou aquele praticante.
-//
-// ⚠️ O label NÃO PODE vir do token. `req.user` é o payload cru do JWT e
-// ele não tem `name` nem `email` (signAccessToken em routes/auth.js põe
-// só id, role, plan, company, is_staff, consolidated_view, federation_id,
-// karate_role, dojo_id). Ler req.user.name gravava NULL em
-// reviewed_by_label / started_by_label / completed_by_label /
-// reported_by_label — foi o que aconteceu em produção até 12/08/2026.
-// Mexer no payload do JWT para "resolver" isso invalidaria todo token em
-// uso; o nome se resolve aqui, no banco.
-//
-// A coluna é `full_name` (NÃO existe `users.name`). Fallback: email e
-// depois NULL — um usuário sem nome não pode derrubar a marcação.
-//
-// UMA VEZ POR REQUISIÇÃO, nunca por praticante: markBatch processa lotes
-// de até 500 ids e um SELECT por linha seria 500 idas ao banco para
-// escrever sempre o mesmo texto.
-async function resolveActor(actor) {
-  const userId = (actor && actor.userId) || null;
-  const given = (actor && actor.label) || null;
-  if (!userId) return { userId: null, label: given };
-  if (given) return { userId, label: given };
-  try {
-    const { rows } = await db.query(
-      `-- drr:actor-label
-       SELECT full_name, email
-         FROM users
-        WHERE id = $1
-        LIMIT 1`,
-      [userId]
-    );
-    if (!rows.length) return { userId, label: null };
-    const fullName = rows[0].full_name != null ? String(rows[0].full_name).trim() : '';
-    const email = rows[0].email != null ? String(rows[0].email).trim() : '';
-    return { userId, label: fullName || email || null };
-  } catch (e) {
-    // Resolver o nome é enfeite da trilha; nunca pode impedir o sensei de
-    // marcar o plantel. O uuid (reviewed_by) continua indo certo.
-    console.warn('[karateDojoRosterReview] label do ator não resolvido (não bloqueia):', e.message);
-    return { userId, label: null };
-  }
 }
 
 // ── A sessão de revisão ─────────────────────────────────────
@@ -563,7 +523,7 @@ async function markBatch(dojoId, federationId, { practitionerIds, status }, acto
   }
 
   // UMA resolução de nome por requisição, antes do lote — não uma por
-  // praticante (o lote vai a 500).
+  // praticante (o lote vai a 500). Ver services/actorLabel.js.
   const resolvedActor = await resolveActor(actor);
 
   const review = await ensureOpenReview(dojoId, federationId, resolvedActor);
@@ -828,6 +788,8 @@ module.exports = {
   parseReviewStatusFilter,
   parseSearch,
   parsePractitionerIds,
+  // Re-exportado de services/actorLabel para não quebrar quem já importava
+  // `resolveActor` daqui. A implementação é ÚNICA e mora lá.
   resolveActor,
   getOpenReview,
   getLatestReview,
