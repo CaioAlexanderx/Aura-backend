@@ -90,12 +90,50 @@
 // inteira é abortada por quem abriu o BEGIN. 23505 numa migração de dados
 // (CPF de aluno repetido, nome de tag repetido) vira um 409 legível — nunca
 // um "número de filiação em uso" enganoso.
+//
+// ── 11/08/2026 — O 500 DA PRIMEIRA ASSUNÇÃO REAL (leia antes de mexer
+//    em qualquer ON CONFLICT deste arquivo) ─────────────────
+// O primeiro aceite COM apontamento em produção devolveu 500 genérico e a
+// transação inteira caiu — nada gravado, pedido ainda `pending`. Não era
+// validação, não era escrita de negócio: era a TRILHA.
+//
+// `uq_karate_dojo_registry_assumptions_request` (migration 275) é um índice
+// único **PARCIAL** (`WHERE request_id IS NOT NULL`, porque request_id é
+// nullable de propósito). O INSERT usava `ON CONFLICT (request_id)` sem
+// predicado — e o Postgres NÃO infere índice parcial a partir de uma
+// especificação sem WHERE: devolve **42P10** ("there is no unique or
+// exclusion constraint matching the ON CONFLICT specification").
+//
+// 42P10 não é 42P01 nem 42703, então o safeStep não degradava, o erro subia,
+// approveRequest não o reconhecia (não é isServiceError, não é 23505) e a
+// rota traduzia para 500 genérico. Só aparecia COM `target_company_id`
+// porque writeAssumptionTrail só é chamado quando há assunção.
+//
+// DUAS TRAVAS, para o mesmo bug não voltar por outro caminho:
+//   1. a especificação passou a repetir o predicado do índice —
+//      `ON CONFLICT (request_id) WHERE request_id IS NOT NULL`. Se um dia o
+//      índice deixar de ser parcial, ESTE é o ponto a mudar junto;
+//   2. os passos de TRILHA toleram 42P10 além de 42P01/42703 (safeStep com
+//      extraCodes). Trilha é best-effort por decisão de projeto: divergência
+//      de schema no LOG não pode derrubar o ato. Essa tolerância é
+//      EXCLUSIVA da trilha — os passos de migração de dados continuam
+//      estritos, porque lá degradar em silêncio perderia trabalho do sensei.
 // ============================================================
 'use strict';
 
 const { LOCKED_SYSTEM_PASSWORD } = require('./karateDojoClaimService');
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+// Códigos que SEMPRE degradam um passo tolerante: tabela ausente (42P01) e
+// coluna ausente (42703) — migração pendente no ambiente.
+const SCHEMA_PENDING_CODES = Object.freeze(['42P01', '42703']);
+
+// 42P10 = "no unique or exclusion constraint matching the ON CONFLICT
+// specification". É divergência entre o índice que existe no banco e o que o
+// INSERT declara. Só é tolerado nos passos de TRILHA (ver o bloco de
+// 11/08/2026 no cabeçalho) — nunca nos passos que movem dados.
+const TRAIL_TOLERATED_CODES = Object.freeze(['42P10']);
 
 function httpError(status, code, message, extra) {
   const err = new Error(message);
@@ -181,7 +219,12 @@ const SINGLE_ROW_TABLES = Object.freeze([
 // tolerante a SCHEMA (42P01/42703) dentro de SAVEPOINT. Qualquer outro erro
 // volta ao savepoint e SOBE — quem chamou decide (e a transação inteira cai).
 // Nunca um try/catch nu dentro do BEGIN (armadilha tx-poison).
-async function safeStep(client, label, fn) {
+//
+// `extraCodes` amplia a tolerância APENAS para quem pedir explicitamente. Só
+// a trilha usa isso hoje (42P10), e o motivo está no cabeçalho: um índice
+// que não bate com o ON CONFLICT do log não pode derrubar o ato registrado.
+async function safeStep(client, label, fn, extraCodes) {
+  const tolerated = SCHEMA_PENDING_CODES.concat(Array.isArray(extraCodes) ? extraCodes : []);
   await client.query('SAVEPOINT sp_registry_assumption');
   try {
     const out = await fn();
@@ -189,8 +232,10 @@ async function safeStep(client, label, fn) {
     return out;
   } catch (e) {
     await client.query('ROLLBACK TO SAVEPOINT sp_registry_assumption');
-    if (e && (e.code === '42P01' || e.code === '42703')) {
-      console.warn(`[karateDojoRegistryAssumption] passo ignorado (schema pendente): ${label}`);
+    if (e && tolerated.includes(e.code)) {
+      console.warn(
+        `[karateDojoRegistryAssumption] passo ignorado (${e.code}): ${label} — ${e.message}`
+      );
       return null;
     }
     throw e;
@@ -400,6 +445,9 @@ async function loadAndValidateRequester(client, { requesterCompanyId }) {
 // Tabela ausente (migração pendente) conta como 0 e vira `schema_pending` na
 // trilha — ausência de tabela não é ausência de dado, e essa diferença fica
 // escrita.
+//
+// ⚠️ Estes passos NÃO recebem extraCodes: aqui a tolerância se paga com
+// trabalho do sensei perdido em silêncio. Só a trilha degrada além do schema.
 async function moveDojoWorkload(client, { fromCompanyId, toCompanyId }) {
   const moved = {};
   const keptAtSource = {};
@@ -487,9 +535,12 @@ async function moveDojoWorkload(client, { fromCompanyId, toCompanyId }) {
 //   1. o pedido é travado com FOR UPDATE e só prossegue se status='pending'
 //      (approveRequest). Reexecutar devolve 409 JA_RESOLVIDA e não chega aqui;
 //   2. company_members entra por ON CONFLICT (company_id, user_id) DO UPDATE —
-//      rodar duas vezes não duplica linha, no máximo reafirma 'owner';
-//   3. a trilha entra por ON CONFLICT (request_id) DO NOTHING — um pedido,
-//      no máximo uma assunção registrada.
+//      rodar duas vezes não duplica linha, no máximo reafirma 'owner'.
+//      Esse ON CONFLICT infere `company_members_company_id_user_id_key`, que é
+//      UNIQUE TOTAL (sem WHERE) — por isso não precisa de predicado, ao
+//      contrário do índice PARCIAL da trilha (ver writeAssumptionTrail);
+//   3. a trilha entra por ON CONFLICT (request_id) WHERE request_id IS NOT
+//      NULL DO NOTHING — um pedido, no máximo uma assunção.
 async function assumeRegistry(client, {
   federationId,
   requesterCompanyId,
@@ -567,11 +618,24 @@ async function assumeRegistry(client, {
 //     tem CHECK nessa tabela (o cabeçalho da 220/263 registra isso), então
 //     'registry_assumed' cabe sem DDL;
 //   • karate_dojo_registry_assumptions — a tabela enxuta da migration 275,
-//     com UNIQUE(request_id). É ela que responde "de qual company para qual,
-//     por quem, quando, e o que foi migrado" numa consulta só.
+//     com UNIQUE PARCIAL (request_id) WHERE request_id IS NOT NULL. É ela que
+//     responde "de qual company para qual, por quem, quando, e o que foi
+//     migrado" numa consulta só.
+//
+// ⚠️ O PREDICADO DO ON CONFLICT NÃO É ENFEITE. O índice da 275 é PARCIAL
+// (`WHERE request_id IS NOT NULL`, porque request_id é nullable de
+// propósito: uma adoção em lote nasce sem pedido). O Postgres só infere um
+// índice parcial quando a especificação REPETE o predicado dele; sem o WHERE
+// o servidor devolve 42P10 e o INSERT explode. Foi exatamente esse o 500 da
+// primeira assunção real em produção (11/08/2026) — a validação passava, as
+// escritas de negócio passavam, e o ato inteiro caía no LOG. Se alguém
+// tornar o índice total um dia, este WHERE sai junto.
+//
 // As duas escritas são best-effort por SAVEPOINT: enquanto a 275 não for
 // aplicada, 42P01 degrada e o aceite acontece do mesmo jeito (o rastro fica
-// na 220). O que NÃO degrada é erro de verdade — esse sobe e derruba tudo.
+// na 220). Elas também toleram 42P10 (extraCodes) — divergência entre o
+// índice do banco e o ON CONFLICT do log é problema do log, não do ato.
+// O que NÃO degrada é erro de verdade — esse sobe e derruba tudo.
 //
 // actor_id é coluna uuid: um 'staff1' de teste viraria 22P02 e derrubaria o
 // aceite POR CAUSA DO LOG. Vai NULL na coluna e cru em actor_ref/payload
@@ -605,40 +669,50 @@ async function writeAssumptionTrail(client, {
       'O usuário de sistema compartilhado pelos registros não foi alterado nem removido.',
   };
 
-  await safeStep(client, 'roster event registry_assumed', () => client.query(
-    `/* assumption:roster-event */
-     INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
-     VALUES ($1, $2, 'registry_assumed', $3::jsonb, $4)`,
-    [result.to_company_id, federationId, JSON.stringify([payload]), actorUuid]
-  ));
+  await safeStep(
+    client,
+    'roster event registry_assumed',
+    () => client.query(
+      `/* assumption:roster-event */
+       INSERT INTO karate_dojo_roster_events (dojo_id, federation_id, event, affected, actor_id)
+       VALUES ($1, $2, 'registry_assumed', $3::jsonb, $4)`,
+      [result.to_company_id, federationId, JSON.stringify([payload]), actorUuid]
+    ),
+    TRAIL_TOLERATED_CODES
+  );
 
-  const ins = await safeStep(client, 'karate_dojo_registry_assumptions', () => client.query(
-    `/* assumption:trail */
-     INSERT INTO karate_dojo_registry_assumptions
-       (request_id, federation_id, from_company_id, to_company_id, user_id,
-        actor_id, actor_ref, fpkt_affiliation_id, from_company_was_empty, migrated)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
-     ON CONFLICT (request_id) DO NOTHING
-     RETURNING id`,
-    [
-      requestId || null,
-      federationId,
-      result.from_company_id,
-      result.to_company_id,
-      result.user_id,
-      actorUuid,
-      actorId ? String(actorId) : null,
-      fpktNumber || null,
-      result.from_company_was_empty,
-      JSON.stringify({
-        migrated: result.migrated,
-        kept_at_source: result.kept_at_source,
-        schema_pending: result.schema_pending,
-        migrated_rows: result.migrated_rows,
-        from_company_discarded: result.from_company_discarded,
-      }),
-    ]
-  ));
+  const ins = await safeStep(
+    client,
+    'karate_dojo_registry_assumptions',
+    () => client.query(
+      `/* assumption:trail */
+       INSERT INTO karate_dojo_registry_assumptions
+         (request_id, federation_id, from_company_id, to_company_id, user_id,
+          actor_id, actor_ref, fpkt_affiliation_id, from_company_was_empty, migrated)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+       ON CONFLICT (request_id) WHERE request_id IS NOT NULL DO NOTHING
+       RETURNING id`,
+      [
+        requestId || null,
+        federationId,
+        result.from_company_id,
+        result.to_company_id,
+        result.user_id,
+        actorUuid,
+        actorId ? String(actorId) : null,
+        fpktNumber || null,
+        result.from_company_was_empty,
+        JSON.stringify({
+          migrated: result.migrated,
+          kept_at_source: result.kept_at_source,
+          schema_pending: result.schema_pending,
+          migrated_rows: result.migrated_rows,
+          from_company_discarded: result.from_company_discarded,
+        }),
+      ]
+    ),
+    TRAIL_TOLERATED_CODES
+  );
 
   return { trail_persisted: ins !== null };
 }
@@ -656,4 +730,6 @@ module.exports = {
   safeStep,
   isSystemOwnerHash,
   isLockedSystemHash,
+  SCHEMA_PENDING_CODES,
+  TRAIL_TOLERATED_CODES,
 };
