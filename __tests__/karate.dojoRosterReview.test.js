@@ -44,8 +44,16 @@ const USER_ID       = '55555555-5555-4555-8555-555555555555';
 const PRAC_A     = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'; // treina no dojô
 const PRAC_B     = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1'; // parou há anos
 const PRAC_C     = 'cccccccc-cccc-4ccc-8ccc-ccccccccccc1'; // mudou de dojô (não sabemos)
+const PRAC_D     = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4'; // entra DEPOIS da revisão
 const PRAC_ALIEN = 'dddddddd-dddd-4ddd-8ddd-ddddddddddd1'; // de OUTRO dojô
 const NOTICE_ID  = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1';
+
+// O nome que está NA LINHA DE users — de propósito DIFERENTE do `name` do
+// JWT abaixo. É assim que os testes de label provam que o rótulo vem do
+// banco e não do token (o token real nem sequer TEM esse campo:
+// signAccessToken não assina name/email).
+const DB_FULL_NAME = 'Kondei Yamamoto (banco)';
+const DB_EMAIL     = 'sensei@kondeibrasil.com.br';
 
 const tokenA = jwt.sign(
   { type: 'access', id: USER_ID, name: 'Sensei Kondei', dojo_id: DOJO_ID, federation_id: FED_ID },
@@ -82,9 +90,11 @@ function tagOf(sql) {
   return m ? m[1] : null;
 }
 
-// ── Estado simulado ─────────────────────────────────────────
-function baseState() {
-  const prac = (id, name, num, active, dojoId) => ({
+// ── Estado simulado ──────────────────────────────────────────
+// `prac` mora no escopo do módulo porque um dos testes precisa acrescentar
+// praticante DEPOIS da revisão concluída (plantel que cresceu).
+function prac(id, name, num, active, dojoId) {
+  return {
     id,
     name,
     karate_registration_number: num,
@@ -93,13 +103,20 @@ function baseState() {
     karate_photo_url: null,
     dojo_id: dojoId,
     federation_id: FED_ID,
-  });
+  };
+}
+
+function baseState() {
   return {
     practitioners: {
       [PRAC_A]: prac(PRAC_A, 'Ana Treina Aqui', '1001-D', true, DOJO_ID),
       [PRAC_B]: prac(PRAC_B, 'Bruno Parou em 2019', '1002-D', true, DOJO_ID),
       [PRAC_C]: prac(PRAC_C, 'Carla Mudou de Dojô', '1003-D', false, DOJO_ID),
       [PRAC_ALIEN]: prac(PRAC_ALIEN, 'Praticante Alheio', '9999-D', true, OTHER_DOJO_ID),
+    },
+    // A linha de users é a ÚNICA fonte dos *_label (o JWT não tem nome).
+    users: {
+      [USER_ID]: { id: USER_ID, full_name: DB_FULL_NAME, email: DB_EMAIL },
     },
     reviews: {},   // id -> row
     items: [],     // { review_id, dojo_id, practitioner_id, status, reviewed_by, reviewed_by_label }
@@ -181,6 +198,14 @@ function dispatch(sql, params) {
   const p = params || [];
   switch (tagOf(s)) {
     // ── lado DOJÔ ──
+    case 'actor-label': {
+      // params: [userId] — a linha é procurada pelo id que o SERVICE
+      // mandou (o do token), não por USER_ID direto.
+      const u = state.users[p[0]];
+      return Promise.resolve({
+        rows: u ? [{ full_name: u.full_name, email: u.email }] : [],
+      });
+    }
     case 'open-review': {
       const r = Object.values(state.reviews).find((x) => x.dojo_id === p[0] && x.status === 'in_progress');
       return Promise.resolve({ rows: r ? [r] : [] });
@@ -468,26 +493,45 @@ function mark(ids, status) {
     .send({ practitioner_ids: ids, status });
 }
 
-// ════════════════════════════════════════════════════════════
+function getState() {
+  return request(buildDojoApp())
+    .get(`/federation/${FED_ID}/dojo/roster-review`)
+    .set('Authorization', 'Bearer ' + tokenA);
+}
+
+function getRoster(qs) {
+  return request(buildDojoApp())
+    .get(`/federation/${FED_ID}/dojo/roster-review/roster${qs || ''}`)
+    .set('Authorization', 'Bearer ' + tokenA);
+}
+
+function completeAs(body) {
+  return request(buildDojoApp())
+    .post(`/federation/${FED_ID}/dojo/roster-review/complete`)
+    .set('Authorization', 'Bearer ' + tokenA)
+    .send(body || {});
+}
+
+// ═══════════════════════════════════════════════════════════
 // GET /dojo/roster-review — estado, sem efeito colateral
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 describe('GET /federation/:id/dojo/roster-review', () => {
-  test('sem revisão aberta: review null e TODO o plantel como pendente', async () => {
-    const res = await request(buildDojoApp())
-      .get(`/federation/${FED_ID}/dojo/roster-review`)
-      .set('Authorization', 'Bearer ' + tokenA);
+  test('nenhuma revisão JAMAIS criada: review null e TODO o plantel como pendente', async () => {
+    const res = await getState();
 
     expect(res.status).toBe(200);
     expect(res.body.review).toBeNull();
+    expect(res.body.review_status).toBeNull();
     expect(res.body.summary).toMatchObject({
       inherited_total: 3, recognized: 0, not_recognized: 0, pending: 3, inactive_in_federation: 1,
     });
+    // É ESTE o caso legítimo da variante sem revisão — o convite inicial à
+    // revisão. Ela não pode desaparecer junto com a correção do contador.
+    expect(db.query.mock.calls.some((c) => tagOf(c[0]) === 'summary-no-review')).toBe(true);
   });
 
   test('abrir a tela NÃO cria revisão (listagem nunca escreve)', async () => {
-    await request(buildDojoApp())
-      .get(`/federation/${FED_ID}/dojo/roster-review`)
-      .set('Authorization', 'Bearer ' + tokenA);
+    await getState();
     expect(Object.keys(state.reviews)).toHaveLength(0);
     const sqls = db.query.mock.calls.map((c) => String(c[0])).join('\n');
     expect(sqls).not.toMatch(/INSERT INTO karate_dojo_roster_reviews/);
@@ -506,14 +550,12 @@ describe('GET /federation/:id/dojo/roster-review', () => {
   });
 });
 
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // GET /dojo/roster-review/roster — volume: paginação e busca
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 describe('GET /federation/:id/dojo/roster-review/roster', () => {
   test('lista o plantel herdado com review_status pending para quem nunca foi tocado', async () => {
-    const res = await request(buildDojoApp())
-      .get(`/federation/${FED_ID}/dojo/roster-review/roster`)
-      .set('Authorization', 'Bearer ' + tokenA);
+    const res = await getRoster();
 
     expect(res.status).toBe(200);
     expect(res.body.count).toBe(3);
@@ -523,9 +565,7 @@ describe('GET /federation/:id/dojo/roster-review/roster', () => {
   });
 
   test('paginação de verdade: limit=1 devolve 1 item e o count TOTAL', async () => {
-    const res = await request(buildDojoApp())
-      .get(`/federation/${FED_ID}/dojo/roster-review/roster?limit=1&offset=1`)
-      .set('Authorization', 'Bearer ' + tokenA);
+    const res = await getRoster('?limit=1&offset=1');
 
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(1);
@@ -535,9 +575,7 @@ describe('GET /federation/:id/dojo/roster-review/roster', () => {
   });
 
   test('busca por nome (?q=) filtra', async () => {
-    const res = await request(buildDojoApp())
-      .get(`/federation/${FED_ID}/dojo/roster-review/roster?q=Bruno`)
-      .set('Authorization', 'Bearer ' + tokenA);
+    const res = await getRoster('?q=Bruno');
     expect(res.body.count).toBe(1);
     expect(res.body.data[0].practitioner_id).toBe(PRAC_B);
   });
@@ -545,23 +583,19 @@ describe('GET /federation/:id/dojo/roster-review/roster', () => {
   test('depois de marcar, review_status reflete a marcação e ?review_status= filtra', async () => {
     await mark([PRAC_A], 'recognized');
 
-    const all = await request(buildDojoApp())
-      .get(`/federation/${FED_ID}/dojo/roster-review/roster`)
-      .set('Authorization', 'Bearer ' + tokenA);
+    const all = await getRoster();
     const a = all.body.data.find((r) => r.practitioner_id === PRAC_A);
     expect(a.review_status).toBe('recognized');
 
-    const pend = await request(buildDojoApp())
-      .get(`/federation/${FED_ID}/dojo/roster-review/roster?review_status=pending`)
-      .set('Authorization', 'Bearer ' + tokenA);
+    const pend = await getRoster('?review_status=pending');
     expect(pend.body.count).toBe(2);
     expect(pend.body.data.map((r) => r.practitioner_id)).not.toContain(PRAC_A);
   });
 });
 
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // POST /dojo/roster-review/mark — lote, idempotência, escopo
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 describe('POST /federation/:id/dojo/roster-review/mark', () => {
   test('marca VÁRIOS numa chamada só e abre a revisão na primeira marcação', async () => {
     const res = await mark([PRAC_A, PRAC_B], 'recognized');
@@ -679,15 +713,11 @@ describe('POST /federation/:id/dojo/roster-review/mark', () => {
   });
 });
 
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // POST /dojo/roster-review/complete — a regra central
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 describe('POST /federation/:id/dojo/roster-review/complete', () => {
-  const complete = (body) =>
-    request(buildDojoApp())
-      .post(`/federation/${FED_ID}/dojo/roster-review/complete`)
-      .set('Authorization', 'Bearer ' + tokenA)
-      .send(body || {});
+  const complete = (body) => completeAs(body);
 
   test('409 REVISAO_NAO_INICIADA quando ninguém marcou nada ainda', async () => {
     const res = await complete();
@@ -785,11 +815,158 @@ describe('POST /federation/:id/dojo/roster-review/complete', () => {
   });
 });
 
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// DEPOIS DE CONCLUIR — regressão de produção (12/08/2026)
+//
+// O dojô de 4 praticantes concluiu a revisão com 1 recognized + 3
+// not_recognized e o badge da aba passou de 1 para 4: sem revisão
+// 'in_progress', o summary ia para a variante sem revisão e contava o
+// plantel INTEIRO como pendente. Os itens nunca saíram do banco.
+// Antes do import dos 484 alunos da Areikan isso vira "484 pendentes"
+// permanentes — convite a remarcar tudo e abrir uma 2ª revisão.
+// ═══════════════════════════════════════════════════════════
+describe('revisão CONCLUÍDA: o contador não pode ressuscitar o plantel', () => {
+  async function concluirRevisao() {
+    await mark([PRAC_A], 'recognized');
+    await mark([PRAC_B, PRAC_C], 'not_recognized');
+    const res = await completeAs({});
+    expect(res.status).toBe(200);
+    return res.body.review.id;
+  }
+
+  test('o summary devolve os contadores REAIS, não o plantel inteiro pendente', async () => {
+    await concluirRevisao();
+    const res = await getState();
+
+    expect(res.status).toBe(200);
+    expect(res.body.review.status).toBe('completed');
+    expect(res.body.review_status).toBe('completed'); // o front distingue sem inferir
+    expect(res.body.summary).toMatchObject({
+      inherited_total: 3, recognized: 1, not_recognized: 2, pending: 0,
+    });
+  });
+
+  test('o summary é consultado COM o id da revisão concluída (não pela variante sem revisão)', async () => {
+    const reviewId = await concluirRevisao();
+    db.query.mockClear();
+    await getState();
+
+    const calls = db.query.mock.calls.filter((c) => tagOf(c[0]) === 'summary');
+    expect(calls).toHaveLength(1);
+    // Escopo confrontado com a LINHA simulada — a revisão que existe no
+    // estado, e que está concluída —, nunca com uma constante do arquivo.
+    expect(state.reviews[reviewId].status).toBe('completed');
+    expect(calls[0][1][2]).toBe(state.reviews[reviewId].id);
+    expect(db.query.mock.calls.some((c) => tagOf(c[0]) === 'summary-no-review')).toBe(false);
+  });
+
+  test('a listagem continua mostrando as marcações (não volta todo mundo para pending)', async () => {
+    const reviewId = await concluirRevisao();
+    const res = await getRoster();
+
+    expect(res.status).toBe(200);
+    expect(res.body.review_id).toBe(state.reviews[reviewId].id);
+    expect(res.body.review_status).toBe('completed');
+    const byId = {};
+    for (const r of res.body.data) byId[r.practitioner_id] = r.review_status;
+    expect(byId[PRAC_A]).toBe('recognized');
+    expect(byId[PRAC_B]).toBe('not_recognized');
+    expect(byId[PRAC_C]).toBe('not_recognized');
+
+    const pend = await getRoster('?review_status=pending');
+    expect(pend.body.count).toBe(0);
+  });
+
+  test('plantel que CRESCEU depois: só o praticante novo conta como pendente', async () => {
+    await concluirRevisao();
+    // Entrou na federação DEPOIS da revisão — nunca foi revisado, então
+    // pendente é o certo ("marque abaixo se o plantel mudou desde então").
+    state.practitioners[PRAC_D] = prac(PRAC_D, 'Diego Entrou Depois', '1004-D', true, DOJO_ID);
+
+    const res = await getState();
+    expect(res.body.summary).toMatchObject({
+      inherited_total: 4, recognized: 1, not_recognized: 2, pending: 1,
+    });
+
+    const pend = await getRoster('?review_status=pending');
+    expect(pend.body.count).toBe(1);
+    expect(pend.body.data[0].practitioner_id).toBe(PRAC_D);
+
+    // E os outros três mantiveram a marcação.
+    const all = await getRoster();
+    const marcados = all.body.data.filter((r) => r.review_status !== 'pending');
+    expect(marcados.map((r) => r.practitioner_id).sort()).toEqual([PRAC_A, PRAC_B, PRAC_C].sort());
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// *_label — congelar o NOME de quem agiu
+//
+// O JWT não tem name/email (signAccessToken assina só id/role/plan/...),
+// então `req.user.name` gravava NULL em todos os *_label em produção. O
+// rótulo agora vem de users.full_name, com fallback para email.
+// ═══════════════════════════════════════════════════════════
+describe('*_label vem de users.full_name, nunca do JWT', () => {
+  test('reviewed_by_label e started_by_label saem da linha de users', async () => {
+    const res = await mark([PRAC_A, PRAC_B], 'recognized');
+    expect(res.status).toBe(200);
+
+    // O nome do banco é DIFERENTE do `name` do token de teste — se o
+    // handler voltasse a ler req.user.name, esta asserção quebraria.
+    expect(state.users[USER_ID].full_name).not.toBe('Sensei Kondei');
+    expect(state.items).toHaveLength(2);
+    expect(state.items.every((i) => i.reviewed_by_label === DB_FULL_NAME)).toBe(true);
+    expect(state.items.every((i) => i.reviewed_by === USER_ID)).toBe(true);
+
+    const review = Object.values(state.reviews)[0];
+    expect(review.started_by_label).toBe(DB_FULL_NAME);
+    expect(review.started_by).toBe(USER_ID);
+  });
+
+  test('resolve o nome UMA vez por requisição, não por praticante', async () => {
+    await mark([PRAC_A, PRAC_B, PRAC_C], 'recognized');
+    const calls = db.query.mock.calls.filter((c) => tagOf(c[0]) === 'actor-label');
+    expect(calls).toHaveLength(1);
+    // E procurando pelo id do ator — confrontado com a linha simulada.
+    expect(calls[0][1][0]).toBe(state.users[USER_ID].id);
+  });
+
+  test('cai para o email quando full_name é NULL', async () => {
+    state.users[USER_ID].full_name = null;
+    await mark([PRAC_A], 'recognized');
+    expect(state.items[0].reviewed_by_label).toBe(DB_EMAIL);
+  });
+
+  test('sem full_name e sem email: label NULL, e a marcação NÃO falha', async () => {
+    state.users[USER_ID].full_name = null;
+    state.users[USER_ID].email = null;
+    const res = await mark([PRAC_A], 'recognized');
+    expect(res.status).toBe(200);
+    expect(res.body.marked).toBe(1);
+    expect(state.items[0].reviewed_by_label).toBeNull();
+    expect(state.items[0].reviewed_by).toBe(USER_ID); // o uuid continua certo
+  });
+
+  test('completed_by_label e reported_by_label também vêm do banco', async () => {
+    await mark([PRAC_A], 'recognized');
+    await mark([PRAC_B, PRAC_C], 'not_recognized');
+    const res = await completeAs({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.review.completed_by_label).toBe(DB_FULL_NAME);
+    expect(state.notices).toHaveLength(2);
+    // É este rótulo que a federação lê na fila de avisos para saber quem
+    // reportou — estava NULL em produção.
+    expect(state.notices.every((n) => n.reported_by_label === DB_FULL_NAME)).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
 // Migration 276 pendente — o código sobe antes do banco
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 describe('schema pendente (migration 276 não aplicada)', () => {
-  // Só as tabelas NOVAS faltam; customers existe e continua respondendo.
+  // Só as tabelas NOVAS faltam; customers e users existem e continuam
+  // respondendo (por isso 'actor-label' não entra nesta lista).
   function mock276Pending() {
     db.query.mockReset();
     db.query.mockImplementation((sql, params) => {
@@ -811,9 +988,7 @@ describe('schema pendente (migration 276 não aplicada)', () => {
 
   test('GET /dojo/roster-review degrada com schema_pending, sem 500', async () => {
     mock276Pending();
-    const res = await request(buildDojoApp())
-      .get(`/federation/${FED_ID}/dojo/roster-review`)
-      .set('Authorization', 'Bearer ' + tokenA);
+    const res = await getState();
     expect(res.status).toBe(200);
     expect(res.body.schema_pending).toBe(true);
     expect(res.body.review).toBeNull();
@@ -822,9 +997,7 @@ describe('schema pendente (migration 276 não aplicada)', () => {
 
   test('GET .../roster ainda LISTA o plantel (todo mundo pending)', async () => {
     mock276Pending();
-    const res = await request(buildDojoApp())
-      .get(`/federation/${FED_ID}/dojo/roster-review/roster`)
-      .set('Authorization', 'Bearer ' + tokenA);
+    const res = await getRoster();
     expect(res.status).toBe(200);
     expect(res.body.count).toBe(3);
     expect(res.body.review_id).toBeNull();
@@ -852,17 +1025,14 @@ describe('schema pendente (migration 276 não aplicada)', () => {
   });
 });
 
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 // LADO FEDERAÇÃO — a fila de avisos e a decisão
-// ════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 describe('GET /federation/:id/roster-review-notices', () => {
   async function seedNotices() {
     await mark([PRAC_A], 'recognized');
     await mark([PRAC_B, PRAC_C], 'not_recognized');
-    await request(buildDojoApp())
-      .post(`/federation/${FED_ID}/dojo/roster-review/complete`)
-      .set('Authorization', 'Bearer ' + tokenA)
-      .send({});
+    await completeAs({});
   }
 
   test('lista os avisos da federação com snapshot + estado ATUAL do praticante', async () => {
@@ -922,10 +1092,7 @@ describe('POST /federation/:id/roster-review-notices/:noticeId/decision', () => 
   async function seedOneNotice() {
     await mark([PRAC_A, PRAC_C], 'recognized');
     await mark([PRAC_B], 'not_recognized');
-    await request(buildDojoApp())
-      .post(`/federation/${FED_ID}/dojo/roster-review/complete`)
-      .set('Authorization', 'Bearer ' + tokenA)
-      .send({});
+    await completeAs({});
     state.clientSql = [];
     db.connect.mockClear(); // a conclusão acima já abriu uma transação
     return state.notices[0].id;
