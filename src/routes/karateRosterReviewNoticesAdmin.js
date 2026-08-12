@@ -55,10 +55,21 @@ const router = require('express').Router({ mergeParams: true });
 const { guards } = require('../config/karateRoles');
 const svc = require('../services/karateRosterReviewNoticeService');
 
+// Quem está agindo — SEMPRE do token, nunca do corpo.
+//
+// ⚠️ SÓ O uuid SAI DAQUI. Até 12/08/2026 esta função devolvia
+// `label: req.user.name || req.user.email` e por isso `decided_by_label`
+// era NULL em TODAS as decisões em produção: `req.user` é o payload cru do
+// JWT e `signAccessToken` (routes/auth.js) assina apenas id, role, plan,
+// company, is_staff, consolidated_view, federation_id, karate_role e
+// dojo_id — nunca `name` nem `email`. O rótulo é resolvido no serviço, no
+// banco (users.full_name → email), pelo helper compartilhado
+// services/actorLabel.js. Pôr o nome no JWT invalidaria os tokens em uso.
+// Mesma correção que o PR #489 fez no lado do dojô.
 function actorFrom(req) {
   return {
     userId: (req.user && req.user.id) || null,
-    label: (req.user && (req.user.name || req.user.email)) || null,
+    label: null,
   };
 }
 
