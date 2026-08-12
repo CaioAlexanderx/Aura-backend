@@ -1327,195 +1327,26 @@ router.patch('/:dojoId', ...guards.staffWrite(), async (req, res) => {
   }
 });
 
-// ── DELETE /federation/:id/dojos/:dojoId ───────────────────
+// ── DELETE /federation/:id/dojos/:dojoId — SAIU DAQUI ──────
 //
-// 25/06/2026 — DOJO-RM: a federação tem liberdade total de gerenciar dados.
-// Decisão de produto (Caio): oferecer DOIS caminhos para excluir um dojô com
-// histórico vinculado — desativar (soft, via PATCH is_active=false) OU excluir
-// definitivamente (hard, em cascata). Este endpoint suporta ambos:
+// 11/08/2026 (compliance). O handler destrutivo que vivia aqui apagava a
+// linha de `companies` e, com ?cascade=true, os `customers` do dojô — e com
+// eles, por ON DELETE CASCADE, `karate_belt_history` (as GRADUAÇÕES),
+// certificados e inscrições. Os termos de uso obrigam a guardar os dados por
+// 60 dias.
 //
-//   - Sem dependentes              → hard delete direto da linha de companies → 200 { deleted:true }
-//   - Com dependentes e SEM cascade → 409 { code:'HAS_HISTORY', counts } (nada é apagado;
-//     o FE oferece "Desativar" vs "Excluir definitivamente")
-//   - Com dependentes e ?cascade=true → hard delete em CASCATA, em transação,
-//     na ordem correta de FK → 200 { deleted:true, cascade:true, counts }
+// Decisão do dono do produto: a rota passa a DESATIVAR. Ela agora é
+// respondida por src/routes/karateIdentityGovernance.js (montado ANTES deste
+// router em src/routes/index.js), que delega a
+// src/services/karateDojoDeactivationService.js:
+//   UPDATE companies SET is_active = false  +  a MESMA cascata dojô→praticantes
+//   do PATCH is_active=false logo acima (cascadeInactivateDojo), o que a torna
+//   reversível por PATCH { is_active: true } (cascadeReactivateDojo).
 //
-// Notas de schema (verificadas via information_schema):
-//   - customers.dojo_id → ON DELETE SET NULL (NÃO cascata; orfanaria praticantes).
-//     Os praticantes do dojô têm company_id = FEDERAÇÃO (não o dojô), então o
-//     cascade de companies NÃO os apaga. Por isso, na cascata, apagamos
-//     explicitamente os customers do dojô (e seus filhos caem por CASCADE:
-//     karate_belt_history, transfers via practitioner_id, attendance, etc.).
-//   - karate_practitioner_transfers.destination_dojo_id → ON DELETE RESTRICT
-//     (BLOQUEIA o delete da company). Apagamos as transfers do dojô antes.
-//   - karate_dojo_annuity_history.dojo_id e karate_dojo_connections.dojo_id →
-//     ON DELETE CASCADE (caem sozinhos), mas as transactions de anuidade têm
-//     federation_id=federação (SET NULL) e company_id=federação — NÃO são do
-//     dojô — portanto NÃO são apagadas. Cancelamos as transactions de anuidade
-//     do dojô (preserva trilha financeira) antes de apagar o annuity_history.
-//   - karate_payment_intents.annuity_history_id → SET NULL (não bloqueia).
-//   - companies.sensei_practitioner_id → ON DELETE SET NULL (migration 193,
-//     não bloqueia a exclusão do dojô).
-//   - karate_dojo_roster_events / karate_dojo_roster_validation (tabelas do
-//     roster, 10/07/2026) NÃO têm FK pra companies — não bloqueiam o delete,
-//     mas ficam órfãs se não forem apagadas explicitamente. Apagadas via
-//     safeRosterWrite() (best-effort, 42P01) antes do DELETE FROM companies.
-router.delete('/:dojoId', ...guards.staffWrite(), async (req, res) => {
-  const { id: federationId, dojoId } = req.params;
-  const cascade = String(req.query.cascade || '').toLowerCase() === 'true';
-
-  const client = await db.connect();
-  try {
-    await client.query('BEGIN');
-
-    // Confere existência + escopo (federação + vertical).
-    const found = await client.query(
-      `SELECT id, name FROM companies
-       WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo' LIMIT 1`,
-      [dojoId, federationId]
-    );
-    if (!found.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Dojô não encontrado', code: 'NOT_FOUND' });
-    }
-
-    // Conta dependentes (histórico vinculado).
-    const cntRes = await client.query(
-      `SELECT
-         (SELECT COUNT(*) FROM customers WHERE dojo_id = $1)::int AS practitioners,
-         (SELECT COUNT(*) FROM karate_dojo_annuity_history WHERE dojo_id = $1)::int AS annuities,
-         (SELECT COUNT(*) FROM transactions
-            WHERE reference_type = 'karate_dojo' AND reference_id = $1)::int AS transactions,
-         (SELECT COUNT(*) FROM karate_belt_history bh
-            JOIN customers cu ON cu.id = bh.student_id
-            WHERE cu.dojo_id = $1)::int AS belt_history,
-         (SELECT COUNT(*) FROM karate_practitioner_transfers
-            WHERE origin_dojo_id = $1 OR destination_dojo_id = $1)::int AS transfers,
-         (SELECT COUNT(*) FROM karate_dojo_connections WHERE dojo_id = $1)::int AS connections`,
-      [dojoId]
-    );
-    const counts = cntRes.rows[0] || {};
-    const totalDeps =
-      (counts.practitioners || 0) + (counts.annuities || 0) + (counts.transactions || 0) +
-      (counts.belt_history || 0) + (counts.transfers || 0) + (counts.connections || 0);
-
-    // ── Caminho 1: sem dependentes → hard delete direto ──
-    if (totalDeps === 0) {
-      const del = await client.query(
-        `DELETE FROM companies
-         WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo'
-         RETURNING id, name`,
-        [dojoId, federationId]
-      );
-      await client.query('COMMIT');
-      return res.json({ deleted: true, cascade: false, id: dojoId, name: del.rows[0]?.name, counts });
-    }
-
-    // ── Caminho 2: com dependentes e SEM ?cascade=true → 409 HAS_HISTORY ──
-    if (!cascade) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        error: 'Este dojô tem histórico vinculado (praticantes, anuidades, transferências, graduações). ' +
-               'Use Desativar para mantê-lo no histórico, ou Excluir definitivamente (cascade) para apagar tudo.',
-        code: 'HAS_HISTORY',
-        counts,
-      });
-    }
-
-    // ── Caminho 3: cascata (ordem de FK — filhos antes do pai) ──
-
-    // karate_practitioner_transfers é append-only/imutável (trigger BEFORE
-    // UPDATE/DELETE em karate_practitioner_transfers_immutable(), migration 180).
-    // Isso impede edição casual de histórico — mas bloqueia também a exclusão
-    // definitiva em cascata do dojô: destination_dojo_id é FK RESTRICT (linha 1
-    // abaixo) e a exclusão de customers logo adiante (passo 5) dispara o
-    // mesmo trigger indiretamente via CASCADE de practitioner_id. A exclusão
-    // deliberada em cascata (?cascade=true, com 409 HAS_HISTORY já confirmado
-    // pelo caller) É a "correção excepcional" prevista no comentário do
-    // trigger. Migration 221 adicionou um escape hatch escopado por GUC:
-    // SET LOCAL expira sozinho no COMMIT/ROLLBACK desta transação — não
-    // afeta nenhuma outra rota ou sessão (NÃO usar SET global aqui).
-    await client.query("SET LOCAL app.allow_transfer_purge = 'on'");
-
-    // 1) Transferências do dojô (origin OU destination). destination_dojo_id é
-    //    RESTRICT → tem de sair antes de apagar a company. (origin é SET NULL,
-    //    mas apagamos tudo para não deixar registros órfãos pela metade.)
-    await client.query(
-      `DELETE FROM karate_practitioner_transfers
-       WHERE origin_dojo_id = $1 OR destination_dojo_id = $1`,
-      [dojoId]
-    );
-
-    // 2) Conexões do dojô (CASCADE pela company, mas explícito por clareza).
-    await client.query(`DELETE FROM karate_dojo_connections WHERE dojo_id = $1`, [dojoId]);
-
-    // 3) Transactions de anuidade do dojô: NÃO apagar — cancelar (preserva trilha
-    //    financeira). São identificadas por reference_type/reference_id (company_id
-    //    e federation_id apontam para a federação, não para o dojô).
-    await client.query(
-      `UPDATE transactions
-       SET status = 'cancelled', updated_at = NOW()
-       WHERE reference_type = 'karate_dojo' AND reference_id = $1 AND status <> 'cancelled'`,
-      [dojoId]
-    );
-
-    // 4) Histórico de anuidades do dojô (CASCADE pela company, mas explícito;
-    //    karate_payment_intents.annuity_history_id é SET NULL → não bloqueia).
-    await client.query(`DELETE FROM karate_dojo_annuity_history WHERE dojo_id = $1`, [dojoId]);
-
-    // 5) Praticantes do dojô. company_id deles = federação (não cai pelo cascade
-    //    da company do dojô), e dojo_id é SET NULL → precisamos apagar explicito.
-    //    Filhos do customer (karate_belt_history, attendance, certificates,
-    //    competition_entries, event_enrollments, transfers via practitioner_id,
-    //    credit/dental/etc.) caem por CASCADE definido no schema.
-    await client.query(`DELETE FROM customers WHERE dojo_id = $1`, [dojoId]);
-
-    // 5b) Tabelas novas do roster (karate_dojo_roster_events/-validation,
-    //     escritas por cascadeInactivateDojo/cascadeReactivateDojo no PATCH).
-    //     NÃO têm FK pra companies, então não bloqueiam a exclusão — mas sem
-    //     esse DELETE explícito ficam órfãs (dojo_id apontando pra uma
-    //     company que não existe mais). safeRosterWrite() é o mesmo helper
-    //     best-effort (SAVEPOINT + 42P01) já usado no cascade do PATCH: se as
-    //     tabelas ainda não existirem (deploy parcial), ignora e segue — a
-    //     cascata principal (o núcleo, acima) não pode ser derrubada por
-    //     tabelas auxiliares de auditoria/estado.
-    await safeRosterWrite(client, 'delete karate_dojo_roster_events', () => client.query(
-      `DELETE FROM karate_dojo_roster_events WHERE dojo_id = $1`, [dojoId]
-    ));
-    await safeRosterWrite(client, 'delete karate_dojo_roster_validation', () => client.query(
-      `DELETE FROM karate_dojo_roster_validation WHERE dojo_id = $1`, [dojoId]
-    ));
-
-    // 6) Por fim, a linha de companies (o dojô).
-    const del = await client.query(
-      `DELETE FROM companies
-       WHERE id = $1 AND federation_id = $2 AND vertical = 'karate_dojo'
-       RETURNING id, name`,
-      [dojoId, federationId]
-    );
-
-    await client.query('COMMIT');
-    return res.json({
-      deleted: true,
-      cascade: true,
-      id: dojoId,
-      name: del.rows[0]?.name,
-      counts,
-    });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    // FK inesperada (23503) → orienta desativar em vez de quebrar.
-    if (err && err.code === '23503') {
-      return res.status(409).json({
-        error: 'Este dojô possui registros vinculados que impedem a exclusão. Use Desativar.',
-        code: 'HAS_HISTORY',
-      });
-    }
-    console.error('[karateDojos] delete error:', err.message);
-    res.status(500).json({ error: 'Erro ao remover dojô', detail: err.message });
-  } finally {
-    client.release();
-  }
-});
+// Congelado em tests/integration/karateDojoDeleteSoft.test.js: a rota não
+// emite `DELETE FROM companies` nem `DELETE FROM customers` em caminho nenhum.
+//
+// A exclusão definitiva depois dos 60 dias é fase própria (retenção com job de
+// limpeza) e não mora em rota de operação da federação.
 
 module.exports = router;
