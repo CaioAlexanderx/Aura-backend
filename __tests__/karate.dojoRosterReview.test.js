@@ -1200,3 +1200,159 @@ describe('POST /federation/:id/roster-review-notices/:noticeId/decision', () => 
     expect(state.notices.find((n) => n.id === NOTICE_ID).decision).toBe('pending');
   });
 });
+
+// ═══════════════════════════════════════════════════════════
+// decided_by_label — o MESMO defeito do #489, do lado da FEDERAÇÃO
+//
+// Validado em produção em 12/08/2026: as três decisões (manter, transferir,
+// inativar) gravaram `decision` e `decision_note` corretos e `decided_by`
+// com uuid válido — e `decided_by_label` NULL nas TRÊS. A causa é a mesma
+// do lado do dojô: a rota mandava `label: req.user.name || req.user.email`
+// e `signAccessToken` não assina nenhum dos dois.
+//
+// Por que a coluna importa: ela CONGELA quem decidiu no momento da decisão.
+// Inativar ou transferir um praticante muda o cadastro de uma pessoa; o
+// usuário que decidiu pode sair da federação depois, e um JOIN feito no
+// futuro devolveria nada. A trilha não pode depender de um vínculo vivo.
+//
+// O token admin desta suíte carrega `name: 'FPKT Staff'` DE PROPÓSITO e o
+// banco tem outro nome: se alguém reintroduzir a leitura do token, as
+// asserções abaixo apontam exatamente isso.
+// ═══════════════════════════════════════════════════════════
+describe('decided_by_label vem de users.full_name (lado FEDERAÇÃO)', () => {
+  const decide = (noticeId, body) =>
+    request(buildFedApp())
+      .post(`/federation/${FED_ID}/roster-review-notices/${noticeId}/decision`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send(body);
+
+  // Um aviso só (PRAC_B). Limpa os mocks DEPOIS de semear: as chamadas de
+  // marcação/conclusão também resolvem o rótulo (lado dojô) e contaminariam
+  // a contagem de 'actor-label' da decisão.
+  async function seedOneNotice() {
+    await mark([PRAC_A, PRAC_C], 'recognized');
+    await mark([PRAC_B], 'not_recognized');
+    await completeAs({});
+    state.clientSql = [];
+    db.query.mockClear();
+    db.connect.mockClear();
+    return state.notices[0].id;
+  }
+
+  // Três avisos (A, B e C não reconhecidos) para exercitar as três decisões
+  // numa federação só — foi exatamente o cenário validado em produção.
+  async function seedThreeNotices() {
+    await mark([PRAC_A, PRAC_B, PRAC_C], 'not_recognized');
+    await completeAs({});
+    expect(state.notices).toHaveLength(3);
+    state.clientSql = [];
+    db.query.mockClear();
+    db.connect.mockClear();
+    return state.notices.map((n) => n.id);
+  }
+
+  test('a decisão grava decided_by_label da LINHA DE users, não do JWT', async () => {
+    const id = await seedOneNotice();
+    const res = await decide(id, { decision: 'kept', note: 'Confirmei por telefone' });
+
+    expect(res.status).toBe(200);
+    // O `name` que existe no token admin é OUTRO — se o handler voltasse a
+    // lê-lo, o rótulo gravado seria 'FPKT Staff' e isto quebraria.
+    expect(state.users[USER_ID].full_name).not.toBe('FPKT Staff');
+    expect(state.notices[0].decided_by_label).toBe(DB_FULL_NAME);
+    expect(state.notices[0].decided_by).toBe(USER_ID);
+    // E o contrato de resposta carrega o mesmo rótulo (o front mostra
+    // "decidido por" sem uma segunda chamada).
+    expect(res.body.notice.decided_by_label).toBe(DB_FULL_NAME);
+  });
+
+  test('as TRÊS decisões gravam o rótulo (em produção vieram NULL nas três)', async () => {
+    const [idA, idB, idC] = await seedThreeNotices();
+
+    const kept = await decide(idA, { decision: 'kept' });
+    const inativado = await decide(idB, { decision: 'inactivated', note: 'Sem contato desde 2019' });
+    const transferido = await decide(idC, {
+      decision: 'transferred', destination_dojo_id: DEST_DOJO_ID,
+    });
+
+    expect([kept.status, inativado.status, transferido.status]).toEqual([200, 200, 200]);
+    // A conferência é feita contra as LINHAS simuladas (o que ficou gravado),
+    // não contra o corpo da resposta.
+    expect(state.notices.map((n) => n.decision)).toEqual(['kept', 'inactivated', 'transferred']);
+    expect(state.notices.map((n) => n.decided_by_label))
+      .toEqual([DB_FULL_NAME, DB_FULL_NAME, DB_FULL_NAME]);
+    expect(state.notices.every((n) => n.decided_by === state.users[USER_ID].id)).toBe(true);
+  });
+
+  test('resolve o rótulo UMA vez por requisição e FORA da transação', async () => {
+    const id = await seedOneNotice();
+    await decide(id, { decision: 'kept' });
+
+    const calls = db.query.mock.calls.filter((c) => tagOf(c[0]) === 'actor-label');
+    expect(calls).toHaveLength(1);
+    // Procurando pelo id do ator — confrontado com a linha simulada de users,
+    // nunca com a constante USER_ID do arquivo.
+    expect(calls[0][1][0]).toBe(state.users[USER_ID].id);
+    // FORA do BEGIN: um SELECT que falhasse dentro da transação a
+    // envenenaria (25P02) e derrubaria a decisão por causa de um enfeite.
+    expect(state.clientSql.some((s) => /drr:actor-label/.test(s))).toBe(false);
+  });
+
+  test('cai para o email quando full_name é NULL', async () => {
+    const id = await seedOneNotice();
+    state.users[USER_ID].full_name = null;
+
+    const res = await decide(id, { decision: 'kept' });
+    expect(res.status).toBe(200);
+    expect(state.notices[0].decided_by_label).toBe(DB_EMAIL);
+  });
+
+  test('sem full_name e sem email: rótulo NULL e a decisão acontece do mesmo jeito', async () => {
+    const id = await seedOneNotice();
+    state.users[USER_ID].full_name = null;
+    state.users[USER_ID].email = null;
+
+    const res = await decide(id, { decision: 'kept' });
+    expect(res.status).toBe(200);
+    expect(state.notices[0].decision).toBe('kept');
+    expect(state.notices[0].decided_by_label).toBeNull();
+    expect(state.notices[0].decided_by).toBe(USER_ID); // o uuid continua certo
+  });
+
+  test('BEST-EFFORT: se o SELECT em users falhar, a decisão AINDA é registrada', async () => {
+    const id = await seedOneNotice();
+    // Só a resolução do rótulo quebra; todo o resto do banco responde.
+    db.query.mockImplementation((sql, params) => {
+      if (tagOf(sql) === 'actor-label') {
+        const err = new Error('terminating connection due to administrator command');
+        err.code = '57P01';
+        return Promise.reject(err);
+      }
+      return dispatch(sql, params);
+    });
+
+    const res = await decide(id, { decision: 'inactivated', note: 'Sem contato desde 2019' });
+
+    expect(res.status).toBe(200);
+    // O ATO aconteceu — é ele que não pode depender do enfeite.
+    expect(res.body.effect).toMatchObject({ practitioner_changed: true, is_active: false });
+    expect(state.practitioners[PRAC_B].is_active).toBe(false);
+    expect(state.notices[0].decision).toBe('inactivated');
+    expect(state.notices[0].decision_note).toBe('Sem contato desde 2019');
+    // O uuid (dado forte, vem do token) continua certo; só o rótulo cai.
+    expect(state.notices[0].decided_by).toBe(USER_ID);
+    expect(state.notices[0].decided_by_label).toBeNull();
+  });
+
+  test('a transferência registra o ator resolvido em karate_practitioner_transfers', async () => {
+    const id = await seedOneNotice();
+    const res = await decide(id, { decision: 'transferred', destination_dojo_id: DEST_DOJO_ID });
+
+    expect(res.status).toBe(200);
+    expect(state.transfers).toHaveLength(1);
+    // initiated_by é o $8 do INSERT — o uuid do ator, confrontado com a
+    // linha simulada de users.
+    expect(state.transfers[0].params[7]).toBe(state.users[USER_ID].id);
+    expect(state.notices[0].decided_by_label).toBe(DB_FULL_NAME);
+  });
+});
