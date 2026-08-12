@@ -15,6 +15,14 @@ const { requireAuth } = require('../middleware/auth');
 const VALID_TYPES = ['income', 'expense'];
 const MAX_BATCH = 5000;
 
+// Marcas de acentuação combinantes (U+0300–U+036F): é o que sobra depois de
+// normalize('NFD') e o que precisa sair para 'crédito' virar 'credito'.
+// Construída com new RegExp de propósito — assim o intervalo fica em escapes
+// ASCII visíveis no diff, em vez de dois caracteres combinantes crus no
+// fonte (invisíveis no editor e alvo do eslint no-misleading-character-class).
+// /g aqui é inofensivo: String.replace não carrega lastIndex entre chamadas.
+const COMBINING_MARKS = new RegExp('[\\u0300-\\u036f]', 'g');
+
 // Type aliases in Portuguese
 const TYPE_ALIASES = {
   receita: 'income', income: 'income', entrada: 'income', venda: 'income', credito: 'income',
@@ -27,12 +35,12 @@ function normalizeTransaction(tx) {
 
   // 1. Normalize type (accept Portuguese names)
   if (n.type) {
-    const t = String(n.type).trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const t = String(n.type).trim().toLowerCase().normalize('NFD').replace(COMBINING_MARKS, '');
     n.type = TYPE_ALIASES[t] || t;
   }
   // Also check 'tipo' field (Portuguese header name)
   if (!n.type && n.tipo) {
-    const t = String(n.tipo).trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const t = String(n.tipo).trim().toLowerCase().normalize('NFD').replace(COMBINING_MARKS, '');
     n.type = TYPE_ALIASES[t] || t;
   }
 
@@ -235,15 +243,15 @@ router.post('/import-ofx', requireAuth, async (req, res) => {
       // O Postgres NÃO infere índice parcial a partir de uma especificação
       // sem o predicado: devolve **42P10** ("there is no unique or exclusion
       // constraint matching the ON CONFLICT specification"). E 42P10 aqui não
-      // é um erro de uma linha — este INSERT roda dentro do BEGIN abaixo, o
+      // é um erro de uma linha — este INSERT roda dentro do BEGIN acima, o
       // catch dá ROLLBACK e responde 500, então o extrato INTEIRO era
       // perdido: nenhuma transação, nenhum import_log, e um "Erro ao salvar
       // extrato OFX" sem nenhuma pista da causa.
       //
       // Mesma armadilha do 500 da assunção do registro federativo (F11,
       // 11/08/2026, back#487). Se um dia o índice deixar de ser parcial,
-      // ESTE é o ponto a mudar junto — e tests/unit/onConflictPartialIndexGuard.test.js
-      // é quem cobra isso no CI.
+      // ESTE é o ponto a mudar junto — e
+      // tests/unit/onConflictPartialIndexGuard.test.js é quem cobra isso no CI.
       await client.query(
         `INSERT INTO transactions (company_id, type, amount, description, category, due_date, status, fitid, import_batch_id, notes, created_by, paid_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (company_id, fitid) WHERE fitid IS NOT NULL DO NOTHING`,
         [companyId, tx.type, tx.amount, tx.description, tx.category, tx.due_date, tx.status || 'confirmed', tx.fitid, batchId, tx.notes, req.user?.id || null, tx.due_date, tx.due_date]);
