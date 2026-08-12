@@ -33,12 +33,37 @@
 // outro lugar. É a tradução, em SQL, da regra de que o aviso é uma foto do
 // passado, não um comando sobre o presente.
 //
+// ── ⚠️ decided_by_label — 12/08/2026, o mesmo defeito do #489 ─
+// O PR #489 corrigiu os `*_label` do lado do DOJÔ (reviewed_by_label,
+// started_by_label, completed_by_label, reported_by_label). Este lado
+// ficou de fora e continuou quebrado: as 3 decisões validadas em produção
+// gravaram `decision`, `decision_note` e `decided_by` (uuid) certos e
+// `decided_by_label` NULL nas TRÊS.
+//
+// A causa é a mesma: o rótulo vinha de `req.user.name || req.user.email`, e
+// `req.user` é o payload CRU do JWT — `signAccessToken` (routes/auth.js)
+// não assina `name` nem `email`. Sempre undefined, sempre NULL na coluna.
+//
+// Isso importa porque a coluna existe para CONGELAR quem decidiu no momento
+// da decisão. Resolver por JOIN depois não é equivalente: inativar ou
+// transferir um praticante é ato que muda o cadastro de uma pessoa, e o
+// usuário que decidiu pode sair da federação — o vínculo some, a
+// responsabilidade pelo ato não.
+//
+// A resolução agora é a MESMA de lá, pelo helper compartilhado
+// `services/actorLabel.js`: users.full_name → email → NULL, UMA vez por
+// requisição e FORA do BEGIN (best-effort; falhar em achar o nome não pode
+// impedir a federação de decidir, e um SELECT que falhasse dentro da
+// transação a envenenaria). Mexer no payload do JWT para "resolver" isso
+// invalidaria todo token em uso.
+//
 // Âncoras `-- drr:<nome>` em toda SQL (mock por SQL nos testes, nunca fila
 // posicional). Defensivo 42P01 (migration 276 pendente).
 // ============================================================
 'use strict';
 
 const db = require('../config/database');
+const { resolveActor } = require('./actorLabel');
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -204,6 +229,18 @@ async function decideNotice(federationId, noticeId, { decision, note, destinatio
     );
   }
 
+  // ⚠️ QUEM DECIDIU — resolvido UMA vez, ANTES do BEGIN.
+  //   • uma vez por REQUISIÇÃO: a fila da federação já é decidida em
+  //     sequência e nada aqui pode virar um SELECT por praticante;
+  //   • FORA da transação: o rótulo é best-effort e um SELECT que falhasse
+  //     dentro do BEGIN envenenaria a tx (25P02) — a decisão em si, que é
+  //     o ato de verdade, seria perdida por causa de um enfeite;
+  //   • do BANCO, nunca do token: ver o bloco de 12/08/2026 no cabeçalho e
+  //     services/actorLabel.js.
+  // O uuid (`decided_by`) continua vindo do token e é o dado forte; o label
+  // pode ser NULL sem que a trilha perca a identificação de quem agiu.
+  const resolvedActor = await resolveActor(actor);
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -305,7 +342,7 @@ async function decideNotice(federationId, noticeId, { decision, note, destinatio
             notice.practitioner_id, federationId, notice.dojo_id, destId,
             origin.length ? origin[0].name : null, dest[0].name,
             'Decisão da federação sobre aviso de revisão do plantel (praticante não reconhecido pelo dojô de origem)',
-            (actor && actor.userId) || null,
+            resolvedActor.userId,
           ]
         );
       } catch (e) {
@@ -342,8 +379,8 @@ async function decideNotice(federationId, noticeId, { decision, note, destinatio
         noticeId, federationId, target,
         note != null && String(note).trim() !== '' ? String(note).trim().slice(0, 1000) : null,
         target === 'transferred' ? destId : null,
-        (actor && actor.userId) || null,
-        (actor && actor.label) || null,
+        resolvedActor.userId,
+        resolvedActor.label,
       ]
     );
     if (!updated.length) {
@@ -362,7 +399,7 @@ async function decideNotice(federationId, noticeId, { decision, note, destinatio
         decision: target,
         destination_dojo_id: target === 'transferred' ? destId : null,
       }],
-      actorId: (actor && actor.userId) || null,
+      actorId: resolvedActor.userId,
     });
 
     await client.query('COMMIT');
