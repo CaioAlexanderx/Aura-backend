@@ -39,6 +39,31 @@
 //   entrada de caixa). Quando o cliente paga depois, o recebimento gera
 //   sale_payments (dinheiro/pix) na sessão daquele dia — contabilizado lá,
 //   sem dupla contagem (o débito fica preso à sessão da venda).
+//
+// 12/08/2026 (CRITICAL FIX fechamento × troca v2 — caso Davi 11/08):
+// - calcularTotais agora EXCLUI os sale_payments NEGATIVOS de vendas
+//   type='troca'. A trocaV2 grava uma row de -returnedValue (valor dos
+//   itens devolvidos) para manter SUM(sale_payments) = faturamento líquido
+//   em janelas longas (PR #55) — mas os paymentSplits da troca já são o
+//   LÍQUIDO pago pelo cliente. Na visão POR SESSÃO, a row negativa
+//   subtraía a devolução em dobro: fechamento da Villa Branca 11/08
+//   imprimiu R$40 num dia com R$229,99 de entradas (pix -189,99 + pix
+//   +100 + cartão 129,99); troca par-a-par na Matriz imprimiu -R$159,99.
+//   O dinheiro do item devolvido entrou no caixa na sessão da VENDA
+//   ORIGINAL — não sai do caixa de hoje, a menos que haja reembolso real.
+// - Reembolso real ao cliente (troca_payouts) agora É descontado do
+//   bucket do método (dinheiro/pix/estorno de cartão) — antes, devolver
+//   dinheiro vivo ao cliente não reduzia o dinheiro_esperado.
+//   'crediario_credito' não desconta (vira crédito na carteira do
+//   cliente, nenhum dinheiro sai da gaveta).
+// - calcularTotais e calcularMetricas agora ignoram vendas CANCELADAS
+//   (sale_payments de venda cancelada contavam no fechamento).
+// - calcularMetricas: sales_count filtrava status='active', mas vendas
+//   usam 'completed'/'cancelled' — a contagem de vendas do PDF saía 0
+//   desde sempre. Agora conta status <> 'cancelled'. Nova métrica
+//   total_vendas (SUM sales.total_amount, fonte única de "vendas" —
+//   ver fonte_unica_vendas_09mai2026) para o PDF separar "Vendas do
+//   período" de "Entradas no caixa" (total_geral).
 // ============================================================
 
 const pool = require('../config/database');
@@ -85,6 +110,16 @@ async function getSessaoAberta(companyId) {
 async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
   const until = closedAt || new Date();
 
+  // 12/08/2026: dois filtros novos na fonte principal:
+  //   1) COALESCE(s.status,'completed') <> 'cancelled' — pagamento de venda
+  //      cancelada não pode contar no caixa.
+  //   2) NOT (sp.amount < 0 AND s.type = 'troca') — a row negativa de
+  //      -returnedValue que a trocaV2 grava é um artefato contábil de
+  //      "faturamento líquido" entre sessões (compensa o payment da venda
+  //      ORIGINAL, registrado na sessão do dia da venda original). Na
+  //      visão por sessão ela subtraía a devolução em dobro, porque os
+  //      splits positivos da troca já são só o líquido pago hoje.
+  //      Reembolso real ao cliente sai do caixa via troca_payouts (abaixo).
   const { rows: spRows } = await pool.query(
     `SELECT
        sp.method,
@@ -92,6 +127,8 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
      FROM sale_payments sp
      JOIN sales s ON s.id = sp.sale_id
      WHERE sp.company_id = $1
+       AND COALESCE(s.status, 'completed') <> 'cancelled'
+       AND NOT (sp.amount < 0 AND COALESCE(s.type, 'sale') = 'troca')
        AND (
          sp.sessao_id = $2
          OR (
@@ -186,22 +223,78 @@ async function calcularTotais(companyId, sessaoId, openedAt, closedAt) {
     }
   }
 
+  // 12/08/2026: reembolsos REAIS ao cliente (troca_payouts) saem do caixa
+  // da sessão — descontam o bucket do método. 'crediario_credito' fica de
+  // fora: vira crédito na carteira (customer_credit_transactions), nenhum
+  // dinheiro sai da gaveta. Defensivo a deploy parcial (42P01/42703),
+  // mesmo padrão do bloco de fiado acima.
+  let devolucoes = 0;
+  try {
+    const { rows: poRows } = await pool.query(
+      `SELECT tp.method,
+              COALESCE(SUM(tp.amount), 0)::numeric(12,2) AS total
+         FROM troca_payouts tp
+        WHERE tp.company_id = $1
+          AND (
+            tp.sessao_id = $2
+            OR (
+              tp.sessao_id IS NULL
+              AND tp.created_at >= $3
+              AND tp.created_at < $4
+            )
+          )
+        GROUP BY tp.method`,
+      [companyId, sessaoId, openedAt, until]
+    );
+    for (const row of poRows) {
+      const val = parseFloat(row.total);
+      if (!Number.isFinite(val) || val <= 0) continue;
+      switch (row.method) {
+        case 'dinheiro':        totais.dinheiro       -= val; devolucoes += val; break;
+        case 'pix':             totais.pix            -= val; devolucoes += val; break;
+        case 'cartao_estorno':
+        case 'cartao_credito':
+        case 'credito':
+        case 'cartao':          totais.cartao_credito -= val; devolucoes += val; break;
+        case 'cartao_debito':
+        case 'debito':          totais.cartao_debito  -= val; devolucoes += val; break;
+        case 'crediario_credito': break; // crédito na carteira — não sai do caixa
+        default:                totais.outros         -= val; devolucoes += val; break;
+      }
+    }
+  } catch (err) {
+    if (err.code !== '42P01' && err.code !== '42703') throw err;
+  }
+
   totais.geral = Object.values(totais).reduce((acc, v) => acc + v, 0);
   for (const k of Object.keys(totais)) {
     totais[k] = Math.round(totais[k] * 100) / 100;
   }
+  // Informativo (NÃO entra em totais.geral nem é persistido em
+  // caixa_fechamentos — a tabela é snapshot imutável de colunas fixas).
+  totais.devolucoes = Math.round(devolucoes * 100) / 100;
   return totais;
 }
 
 /**
  * Calcula metricas adicionais do dia (best-effort).
- * Retorna { sales_count, new_customers_count } com 0 em caso de erro.
+ * Retorna { sales_count, new_customers_count, total_vendas } com 0 em
+ * caso de erro.
+ *
+ * total_vendas = SUM(sales.total_amount) da janela, status <> 'cancelled'
+ * — a fonte única de "vendas" (regime competência), o MESMO número que a
+ * tela de Vendas mostra. É deliberadamente DIFERENTE de totais.geral
+ * (entradas no caixa por método): num dia com troca ou crediário os dois
+ * divergem por design, e o PDF de fechamento mostra os dois com rótulos
+ * distintos pra ninguém achar que "o caixa não bate".
  */
 async function calcularMetricas(companyId, sessaoId, openedAt, closedAt) {
   const until = closedAt || new Date();
-  const result = { sales_count: 0, new_customers_count: 0 };
+  const result = { sales_count: 0, new_customers_count: 0, total_vendas: 0 };
 
   try {
+    // 12/08/2026: era COALESCE(s.status,'active') = 'active', mas vendas
+    // usam 'completed'/'cancelled' — sales_count saía 0 em TODO fechamento.
     const { rows } = await pool.query(
       `SELECT COUNT(DISTINCT s.id)::int AS c
        FROM sales s
@@ -210,12 +303,27 @@ async function calcularMetricas(companyId, sessaoId, openedAt, closedAt) {
          AND (sp.sessao_id = $2
               OR (sp.sessao_id IS NULL
                   AND s.created_at >= $3 AND s.created_at < $4))
-         AND COALESCE(s.status, 'active') = 'active'`,
+         AND COALESCE(s.status, 'completed') <> 'cancelled'`,
       [companyId, sessaoId, openedAt, until]
     );
     result.sales_count = rows[0]?.c || 0;
   } catch (err) {
     // tabela ausente ou schema diferente — segue silenciosamente
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT COALESCE(SUM(s.total_amount), 0)::numeric(12,2) AS total
+       FROM sales s
+       WHERE s.company_id = $1
+         AND s.created_at >= $2
+         AND s.created_at < $3
+         AND COALESCE(s.status, 'completed') <> 'cancelled'`,
+      [companyId, openedAt, until]
+    );
+    result.total_vendas = parseFloat(rows[0]?.total || 0);
+  } catch (err) {
+    // idem
   }
 
   try {
@@ -309,7 +417,8 @@ async function getStatus(companyId) {
 /**
  * Fecha a sessão aberta atual.
  * Retorna o snapshot enriquecido com:
- *   - sales_count, new_customers_count (metricas do dia)
+ *   - sales_count, new_customers_count, total_vendas (metricas do dia)
+ *   - total_devolucoes (reembolsos de troca que saíram do caixa)
  *   - sessao_label (#XXXXX baseado no UUID, util pra exibir/PDF)
  *   - closed_at (timestamp de fechamento)
  */
@@ -394,6 +503,8 @@ async function fechar(companyId, userId, dinheiroContado, observacao = null) {
     sessao_label,
     sales_count: metricas.sales_count,
     new_customers_count: metricas.new_customers_count,
+    total_vendas: metricas.total_vendas,
+    total_devolucoes: totais.devolucoes,
   };
 }
 
