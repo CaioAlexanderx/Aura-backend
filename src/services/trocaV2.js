@@ -3,6 +3,23 @@
 // Handler do contrato v2 do POST /pdv/troca.
 // Doc: Aura/AUDITORIA_TROCA_PDV_2026-05-17.docx
 //
+// 12/08/2026 (auditoria troca fiscal — 3 fixes):
+//   - UPDATE pos-COMMIT da emissao pendente (e o da reemissao manual)
+//     virou NON-FATAL: um erro de banco nesse UPDATE nao pode mais
+//     reclassificar o resultado fiscal REAL como 'falha'. Caso concreto:
+//     a coluna updated_at nao existia em nfce_emissions (42703, corrigido
+//     na migration 278) e TODA devolucao aparecia como falha pro lojista
+//     com "column updated_at does not exist" — mesmo quando a SEFAZ
+//     respondia.
+//   - decideFiscalPerOrigin: cancel_reissue automatico agora exige
+//     nuvemfiscal_id na NFC-e original (o pre-cancelamento e via gateway).
+//     NFC-e emitida pela engine propria (primaria desde 17/07) nao tem
+//     esse id — antes o preCancelNfces PULAVA o cancelamento em silencio
+//     e a troca reportava sucesso com a nota original ainda autorizada.
+//     Nota da engine cai em devolucao_55 (valida em qualquer idade).
+//   - preCancelNfces: pedido EXPLICITO de cancel_reissue pra nota da
+//     engine agora falha com 409 CANCEL_REISSUE_ENGINE_UNSUPPORTED em vez
+//     do skip silencioso.
 // 23/06/2026 (fix travamento de pool): client.release() movido pra LOGO APOS
 //   o COMMIT. Antes o release so ocorria no finally, no fim de tudo — entao a
 //   conexao ficava presa durante a fase pos-COMMIT (chamada SEFAZ sem timeout +
@@ -390,7 +407,14 @@ function decideFiscalPerOrigin(originSales, returnedItems, requestedStrategy) {
     const ageHours = s.nfce.authorized_at
       ? (now - new Date(s.nfce.authorized_at).getTime()) / 3600000
       : 9999;
-    strategyMap.set(s.id, ageHours < 24 ? 'cancel_reissue' : 'devolucao_55');
+    // 12/08/2026: cancel_reissue automatico exige nuvemfiscal_id — o
+    // pre-cancelamento (preCancelNfces) e feito via gateway. NFC-e emitida
+    // pela engine propria (primaria desde 17/07) nao tem esse id; antes o
+    // cancelamento era PULADO em silencio e a troca "dava certo" com a
+    // nota original ainda autorizada. Nota da engine cai em devolucao_55,
+    // que vale em qualquer idade.
+    const canGatewayCancel = !!s.nfce.nuvemfiscal_id;
+    strategyMap.set(s.id, (ageHours < 24 && canGatewayCancel) ? 'cancel_reissue' : 'devolucao_55');
   }
   return strategyMap;
 }
@@ -399,7 +423,20 @@ async function preCancelNfces(originSales, strategyMap) {
   const cancelled = [];
   for (const s of originSales) {
     if (strategyMap.get(s.id) !== 'cancel_reissue') continue;
-    if (!s.nfce || !s.nfce.nuvemfiscal_id) continue;
+    if (!s.nfce) continue;
+    if (!s.nfce.nuvemfiscal_id) {
+      // 12/08/2026: NFC-e da engine propria — o gateway nao tem como
+      // cancela-la. So chega aqui com nfce_strategy='cancel_reissue'
+      // EXPLICITO (o per_origin ja desvia pra devolucao_55). Antes era um
+      // `continue` silencioso: a original ficava autorizada e a troca
+      // reportava sucesso com a chave antiga.
+      throw new TrocaV2Error(409, {
+        error: 'A NFC-e original foi emitida pela engine propria (Aura Notas) e o cancelamento via troca ainda nao esta disponivel para ela. Use nfce_strategy="devolucao_55" ou "per_origin".',
+        code: 'CANCEL_REISSUE_ENGINE_UNSUPPORTED',
+        original_sale_id: s.id,
+        original_chave: s.nfce.chave_acesso || null,
+      });
+    }
 
     const ageHours = s.nfce.authorized_at
       ? (Date.now() - new Date(s.nfce.authorized_at).getTime()) / 3600000
@@ -660,16 +697,28 @@ async function reemitirEmissao(emission) {
       notes: null,
       userId: null,
     });
-    await db.query(
-      `UPDATE nfce_emissions SET status='autorizada', chave_acesso=$1, last_error=NULL, updated_at=NOW() WHERE id=$2`,
-      [result.chave_acesso || null, emission.id]
-    );
-    return { status: 'autorizada', chave_acesso: result.chave_acesso || null, origin_sale_id: originSaleId, error: null };
+    // 12/08/2026: o UPDATE da linha pendente e NON-FATAL — o resultado
+    // fiscal REAL ja esta persistido pela trocaDevolucao55 (row tipo='nfe').
+    // Antes, updated_at inexistente (42703, migration 278) jogava a
+    // execucao no catch e a reemissao AUTORIZADA era devolvida como falha.
+    const reStatus = result.status || 'autorizada';
+    const reChave = result.devolucao_chave || result.chave_acesso || null;
+    try {
+      await db.query(
+        `UPDATE nfce_emissions SET status=$1, chave_acesso=COALESCE($2, chave_acesso), last_error=$3, updated_at=NOW() WHERE id=$4`,
+        [reStatus, reChave, result.error_message || null, emission.id]
+      );
+    } catch (updErr) {
+      console.warn('[trocaV2.reemitirEmissao] update da emissao pendente falhou (non-fatal, resultado fiscal preservado):', updErr.message);
+    }
+    return { status: reStatus, chave_acesso: reChave, origin_sale_id: originSaleId, error: result.error_message || null };
   } catch (err) {
     await db.query(
       `UPDATE nfce_emissions SET status='falha', last_error=$1, retry_count=retry_count+1, next_retry_at=NOW()+INTERVAL '5 minutes', updated_at=NOW() WHERE id=$2`,
       [err.message, emission.id]
-    );
+    ).catch((updErr) => {
+      console.warn('[trocaV2.reemitirEmissao] update de falha nao persistiu (non-fatal):', updErr.message);
+    });
     return { status: 'falha', chave_acesso: null, origin_sale_id: originSaleId, error: err.message };
   }
 }
@@ -955,11 +1004,21 @@ async function handle(req, res) {
           const devStatus = result.status || 'processando';
           const devChave = result.devolucao_chave || result.chave_acesso || null;
           if (emission.emission_id) {
-            await db.query(
-              `UPDATE nfce_emissions SET status=$1, chave_acesso=COALESCE($2, chave_acesso),
-                  last_error=$3, updated_at=NOW() WHERE id=$4`,
-              [devStatus, devChave, result.error_message || null, emission.emission_id]
-            );
+            // 12/08/2026: NON-FATAL. O resultado fiscal REAL ja esta
+            // persistido pela trocaDevolucao55 (row tipo='nfe'); um erro de
+            // banco AQUI (ex.: updated_at inexistente antes da migration
+            // 278 — 42703) nao pode reclassificar a devolucao como 'falha'
+            // pro lojista. Era exatamente o que acontecia: toda devolucao
+            // voltava "column updated_at does not exist" na UI.
+            try {
+              await db.query(
+                `UPDATE nfce_emissions SET status=$1, chave_acesso=COALESCE($2, chave_acesso),
+                    last_error=$3, updated_at=NOW() WHERE id=$4`,
+                [devStatus, devChave, result.error_message || null, emission.emission_id]
+              );
+            } catch (updErr) {
+              console.warn('[trocaV2] update da emissao pendente falhou (non-fatal, resultado fiscal preservado):', updErr.message);
+            }
           }
           fiscalResults.push({
             origin_sale_id: emission.origin_sale_id,
@@ -973,7 +1032,9 @@ async function handle(req, res) {
             await db.query(
               `UPDATE nfce_emissions SET status='falha', last_error=$1, retry_count=retry_count+1, next_retry_at=NOW()+INTERVAL '5 minutes' WHERE id=$2`,
               [err.message, emission.emission_id]
-            );
+            ).catch((updErr) => {
+              console.warn('[trocaV2] update de falha nao persistiu (non-fatal):', updErr.message);
+            });
           }
           fiscalResults.push({
             origin_sale_id: emission.origin_sale_id,

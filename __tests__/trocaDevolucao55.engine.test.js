@@ -8,6 +8,10 @@
  *  - sem A1 vigente → direto gateway
  *  - kill-switch provider='nuvemfiscal' → direto gateway
  *  - breaker aberto → direto gateway (fallback_reason='breaker_open')
+ *  - 12/08/2026: numeração da 55 = série própria (serie_nfe55, default 2) +
+ *    contador atômico next_number_nfe55 no nfce_config (fix Rejeição 539 —
+ *    a série 1 do CNPJ pode ter números queimados por ERP anterior);
+ *    fallback legado MAX+1 série 1 quando a migration 278 não existe.
  *
  * Mocks do db POR CONTEÚDO do SQL (nunca fila posicional).
  */
@@ -51,8 +55,10 @@ const GATEWAY_OK = {
 
 /**
  * db.query roteado pelo CONTEÚDO do SQL. `overrides`:
- *   config: null (sem linha) | objeto (linha do nfce_config)
- *   cert:   false → sem A1 vigente
+ *   config:   null (sem linha) | objeto (linha do nfce_config)
+ *   cert:     false → sem A1 vigente
+ *   serieCfg: false → migration 278 ausente (UPDATE do contador → 42703,
+ *             cai no legado MAX+1 série 1)
  */
 function mockDbBySql(overrides = {}) {
   const inserts = [];
@@ -60,6 +66,14 @@ function mockDbBySql(overrides = {}) {
     const s = String(sql);
     if (s.includes("tipo = 'nfce'") && s.includes('FROM nfce_emissions')) {
       return { rows: [{ id: 'orig-1', chave_acesso: CHAVE_ORIG, numero: 281, customer_cpf: '12345678901', customer_name: 'Maria', authorized_at: new Date() }] };
+    }
+    if (s.includes('next_number_nfe55')) {
+      if (overrides.serieCfg === false) {
+        const err = new Error('column "next_number_nfe55" does not exist');
+        err.code = '42703';
+        throw err;
+      }
+      return { rows: [{ serie_nfe55: 2, numero: 7 }] };
     }
     if (s.includes('next_numero')) return { rows: [{ next_numero: 7 }] };
     if (s.includes('FROM companies')) return { rows: [COMPANY_ROW] };
@@ -112,19 +126,37 @@ describe('trocaDevolucao55 — roteamento engine × gateway', () => {
     expect(out.fallback).toBe(false);
     expect(out.devolucao_chave).toBe(ENGINE_OK.chave_acesso);
 
-    // payload da engine = MESMO payload do gateway (chave original, itens, numero)
+    // payload da engine = MESMO payload do gateway (chave original, itens,
+    // numero) — 12/08: serie/numero vem do contador atômico (serie 2, nº 7)
     const [companyArg, paramsArg, ctxArg] = nfe55.emitNfeDevolucao55.mock.calls[0];
     expect(companyArg.cnpj).toBe(COMPANY_ROW.cnpj);
     expect(paramsArg.originalChave).toBe(CHAVE_ORIG);
     expect(paramsArg.numero).toBe(7);
+    expect(paramsArg.serie).toBe(2);
     expect(paramsArg.items[0].cfop).toBe('1202');
     expect(ctxArg.config).toEqual(CONFIG_ROW);
 
     expect(inserts).toHaveLength(1);
     expect(inserts[0].params).toEqual(expect.arrayContaining(['sefaz_sp', '<NFe>assinada</NFe>']));
+    // serie persistida no INSERT (não mais literal 1)
+    expect(inserts[0].params).toEqual(expect.arrayContaining([2]));
     // xml_signed NÃO duplicado no metadata
     const metaParam = inserts[0].params.find((p) => typeof p === 'string' && p.startsWith('{') && p.includes('chave_acesso'));
     expect(metaParam).not.toContain('assinada');
+  });
+
+  it('migration 278 ausente (42703 no contador) → fallback legado: MAX+1 na série 1', async () => {
+    mockDbBySql({ serieCfg: false });
+    nfe55.emitNfeDevolucao55.mockResolvedValue(ENGINE_OK);
+
+    const out = await callHandle();
+
+    expect(out.status).toBe('autorizada');
+    expect(out.devolucao_serie).toBe(1);
+    expect(out.devolucao_numero).toBe(7);
+    const [, paramsArg] = nfe55.emitNfeDevolucao55.mock.calls[0];
+    expect(paramsArg.serie).toBe(1);
+    expect(paramsArg.numero).toBe(7);
   });
 
   it('THROW da engine → fallback pro gateway com fallback_reason=engine_error e breaker registrado', async () => {
@@ -231,6 +263,7 @@ describe('trocaDevolucao55 — roteamento engine × gateway', () => {
     expect(out.status).toBe('autorizada');
     expect(inserts).toHaveLength(2);
     expect(inserts[1].sql).not.toContain('provider_used');
-    expect(inserts[1].params).toHaveLength(15);
+    // 12/08: base ganhou a coluna serie parametrizada → 16 valores
+    expect(inserts[1].params).toHaveLength(16);
   });
 });

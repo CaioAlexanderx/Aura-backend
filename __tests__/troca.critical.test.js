@@ -110,10 +110,22 @@ describe('troca — caminhos criticos', () => {
   // C2 — decideFiscalPerOrigin (logica de estrategia sem DB)
   // ===========================================================================
   describe('C2 — decideFiscalPerOrigin', () => {
+    // 12/08/2026: nuvemfiscal_id presente = NFC-e cancelavel via gateway.
+    // NFC-e da engine propria (sem esse id) NAO pode cair em cancel_reissue
+    // automatico — ver teste especifico abaixo.
     const makeSaleWithNfce = (id, ageHours) => ({
       id,
       nfce: {
         id: `nfce_${id}`,
+        nuvemfiscal_id: `nf_${id}`,
+        authorized_at: new Date(Date.now() - ageHours * 3600000).toISOString(),
+      },
+    });
+    const makeSaleWithEngineNfce = (id, ageHours) => ({
+      id,
+      nfce: {
+        id: `nfce_${id}`,
+        nuvemfiscal_id: null, // emitida pela engine propria (sefaz_sp)
         authorized_at: new Date(Date.now() - ageHours * 3600000).toISOString(),
       },
     });
@@ -127,7 +139,7 @@ describe('troca — caminhos criticos', () => {
       expect(map.get('s2')).toBe('none');
     });
 
-    it('strategy=per_origin: NFC-e < 24h => cancel_reissue', () => {
+    it('strategy=per_origin: NFC-e < 24h (gateway) => cancel_reissue', () => {
       const sales = [makeSaleWithNfce('s1', 2)];
       const returned = [{ original_sale_id: 's1' }];
       const map = decideFiscalPerOrigin(sales, returned, 'per_origin');
@@ -136,6 +148,13 @@ describe('troca — caminhos criticos', () => {
 
     it('strategy=per_origin: NFC-e > 24h => devolucao_55', () => {
       const sales = [makeSaleWithNfce('s1', 30)];
+      const returned = [{ original_sale_id: 's1' }];
+      const map = decideFiscalPerOrigin(sales, returned, 'per_origin');
+      expect(map.get('s1')).toBe('devolucao_55');
+    });
+
+    it('strategy=per_origin: NFC-e da engine propria (<24h, sem nuvemfiscal_id) => devolucao_55 — antes caia em cancel_reissue e o cancelamento era PULADO em silencio', () => {
+      const sales = [makeSaleWithEngineNfce('s1', 2)];
       const returned = [{ original_sale_id: 's1' }];
       const map = decideFiscalPerOrigin(sales, returned, 'per_origin');
       expect(map.get('s1')).toBe('devolucao_55');
@@ -192,6 +211,11 @@ describe('troca — caminhos criticos', () => {
         nfStub.emitNfeDevolucao({ cnpj: '12345678000199' }, {})
       ).rejects.toMatchObject({ erros: expect.any(Array) });
     });
+
+    // TODO (Fase 1): chamar trocaV2.handle em modo rejeitada e verificar que
+    //   - a troca (tabela sales type=troca) foi persistida
+    //   - fiscal.per_origin[0].status === 'falha'
+    //   - nao houve rollback da transacao de estoque
   });
 
   describe('falha fiscal — timeout SEFAZ', () => {
@@ -337,6 +361,27 @@ describe('troca — caminhos criticos', () => {
       expect(src).toMatch(/'pendente'/);
       // E atualizar para 'falha' com last_error pos-commit
       expect(src).toMatch(/last_error/);
+    });
+
+    it('trocaV2.js NAO deixa o UPDATE pos-commit reclassificar o resultado fiscal real (12/08 — updated_at drift)', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const src = fs.readFileSync(
+        path.join(__dirname, '../src/services/trocaV2.js'),
+        'utf8'
+      );
+      // O UPDATE de sucesso da emissao pendente roda em try/catch proprio
+      expect(src).toMatch(/non-fatal, resultado fiscal preservado/);
+    });
+
+    it('preCancelNfces falha EXPLICITO (nao skip silencioso) para NFC-e da engine propria', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const src = fs.readFileSync(
+        path.join(__dirname, '../src/services/trocaV2.js'),
+        'utf8'
+      );
+      expect(src).toMatch(/CANCEL_REISSUE_ENGINE_UNSUPPORTED/);
     });
   });
 

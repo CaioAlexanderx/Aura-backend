@@ -2,6 +2,20 @@
 // AURA. — services/trocaDevolucao55.js
 // Helper de orquestracao da NF-e modelo 55 de devolucao de venda.
 //
+// 12/08/2026 (fix Rejeicao 539 — numeracao propria):
+// A numeracao era MAX(numero)+1 sobre nfce_emissions, serie 1 FIXA. Mas o
+// CNPJ pode ter queimado numeros da serie 1 num ERP anterior — a Davi
+// Calcados Matriz tem NF-e 55 serie 1 de 2023, e TODA devolucao (03/07
+// nº1, 04/07 nº2 via gateway; 11/08 nº3 via engine) morreu com "539 -
+// Duplicidade de NF-e com diferenca na Chave de Acesso", marchando de 1
+// em 1 por numeros ja usados. Agora: serie DEDICADA por empresa
+// (nfce_config.serie_nfe55, default 2) + contador atomico
+// (next_number_nfe55, UPDATE...RETURNING) — mesmo padrao da NFC-e propria
+// (serie_sefaz_sp/next_number_sefaz_sp). Defensivo 42703/42P01 (deploy
+// antes da migration 278) e empresa sem linha de nfce_config → cai no
+// legado (MAX+1, serie 1). Gaps de numeracao por falha pos-alocacao sao
+// aceitaveis (inutilizacao cobre).
+//
 // 03/08/2026 (Aura Notas na 55): a devolucao agora sai pela ENGINE PROPRIA
 // (sefazSp/nfe55) quando a empresa esta APTA — mesma semantica AUTO do PDV
 // (routes/nfce.js S4.2/16-07): A1 vigente salvo + UF SP; kill-switch
@@ -103,14 +117,41 @@ async function handle(client, {
   }
   const orig = origNfceList[0];
 
-  // 2. Proximo numero serie 1 NF-e/55
-  const { rows: nfeSeq } = await q(
-    `SELECT COALESCE(MAX(numero), 0) + 1 AS next_numero
-       FROM nfce_emissions
-      WHERE company_id = $1 AND tipo = 'nfe' AND COALESCE(serie, 1) = 1`,
-    [saleCompanyId]
-  );
-  const nextNumero = parseInt(nfeSeq[0] && nfeSeq[0].next_numero, 10) || 1;
+  // 2. Serie + numero da NF-e 55 (fix 539, 12/08/2026):
+  //    Caminho novo — serie dedicada + contador atomico no nfce_config
+  //    (migration 278). NUNCA reciclamos a serie 1 por MAX+1: o CNPJ pode
+  //    ter queimado esses numeros num ERP anterior (Davi Matriz: 55s de
+  //    2023 → 539 em toda tentativa).
+  //    Fallback legado (42703/42P01 = migration ausente; ou empresa sem
+  //    linha de nfce_config): MAX(numero)+1 na serie 1, comportamento
+  //    antigo.
+  let serieNfe55 = 1;
+  let nextNumero = null;
+  try {
+    const { rows: seqRows } = await q(
+      `UPDATE nfce_config
+          SET next_number_nfe55 = next_number_nfe55 + 1,
+              updated_at = NOW()
+        WHERE company_id = $1
+        RETURNING serie_nfe55, next_number_nfe55 - 1 AS numero`,
+      [saleCompanyId]
+    );
+    if (seqRows.length) {
+      serieNfe55 = parseInt(seqRows[0].serie_nfe55, 10) || 2;
+      nextNumero = parseInt(seqRows[0].numero, 10) || 1;
+    }
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+  }
+  if (nextNumero == null) {
+    const { rows: nfeSeq } = await q(
+      `SELECT COALESCE(MAX(numero), 0) + 1 AS next_numero
+         FROM nfce_emissions
+        WHERE company_id = $1 AND tipo = 'nfe' AND COALESCE(serie, 1) = $2`,
+      [saleCompanyId, serieNfe55]
+    );
+    nextNumero = parseInt(nfeSeq[0] && nfeSeq[0].next_numero, 10) || 1;
+  }
 
   // 3. Empresa
   const { rows: companyRows } = await q(
@@ -211,7 +252,7 @@ async function handle(client, {
     originalChave: orig.chave_acesso,
     items: devolucaoItems,
     consumerInfo: consumerInfo,
-    serie: 1,
+    serie: serieNfe55,
     numero: nextNumero,
     reference: 'troca-' + trocaSaleId,
   };
@@ -255,6 +296,7 @@ async function handle(client, {
           company_cnpj: company.cnpj,
           original_chave: orig.chave_acesso,
           troca_sale_id: trocaSaleId,
+          nfe55_serie: serieNfe55,
           nfe55_numero: nextNumero,
           total_devolucao: parseFloat(returnedValue.toFixed(2)),
           items_count: devolucaoItems.length,
@@ -286,6 +328,8 @@ async function handle(client, {
   // 7. Insere registro (com error_message + metadata). O XML assinado da
   // emissao propria vai na coluna xml_signed (migration 234), NAO no
   // metadata (economiza espaco e casa com o rastro da NFC-e propria).
+  // 12/08/2026: serie deixou de ser literal 1 — vai parametrizada
+  // (serie_nfe55 da empresa, ou 1 no fallback legado).
   const xmlSigned = (nfeResult && nfeResult.xml_signed) || null;
   const metaObj = Object.assign({}, nfeResult || {});
   delete metaObj.xml_signed;
@@ -294,6 +338,7 @@ async function handle(client, {
     saleCompanyId,
     trocaSaleId,
     nextNumero,
+    serieNfe55,
     devolucaoChave,
     orig.chave_acesso,
     nfeStatus,
@@ -317,7 +362,7 @@ async function handle(client, {
           ref_chave_nfe, status, nuvemfiscal_id, customer_cpf, customer_name,
           items, total_products, total_nfce, emitted_by, error_message, metadata,
           provider_used, fallback_reason, xml_signed)
-       VALUES ($1, $2, $3, 1, $4, 'nfe', 4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15::jsonb, $16, $17, $18)`,
+       VALUES ($1, $2, $3, $4, $5, 'nfe', 4, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16::jsonb, $17, $18, $19)`,
       baseInsertVals.concat([providerUsed, fallbackReason, xmlSigned])
     );
   } catch (e) {
@@ -328,7 +373,7 @@ async function handle(client, {
          (company_id, sale_id, numero, serie, chave_acesso, tipo, finalidade,
           ref_chave_nfe, status, nuvemfiscal_id, customer_cpf, customer_name,
           items, total_products, total_nfce, emitted_by, error_message, metadata)
-       VALUES ($1, $2, $3, 1, $4, 'nfe', 4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15::jsonb)`,
+       VALUES ($1, $2, $3, $4, $5, 'nfe', 4, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16::jsonb)`,
       baseInsertVals
     );
   }
@@ -349,7 +394,7 @@ async function handle(client, {
     original_numero: orig.numero,
     devolucao_chave: devolucaoChave,
     devolucao_numero: nextNumero,
-    devolucao_serie: 1,
+    devolucao_serie: serieNfe55,
     nuvemfiscal_id: nuvemId,
     status: nfeStatus,
     motivo: nfeMotivo || null,
