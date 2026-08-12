@@ -32,6 +32,17 @@
 //     linha é "ainda não revisado", então a revisão é retomável de graça e
 //     não pré-popula 9.840 linhas.
 //
+// ── ⚠️ REVISÃO CORRENTE = ABERTA **OU** ÚLTIMA CONCLUÍDA ─────
+// Regressão de 12/08/2026: leitura (summary e listagem) usava só a revisão
+// `in_progress`. Depois do /complete não existe mais uma, o reviewId ia
+// null e o summary caía na variante `-- drr:summary-no-review`, onde
+// `pending = COUNT(*)` do plantel INTEIRO. Um dojô de 4 praticantes com a
+// revisão concluída (1 recognized + 3 not_recognized) via o badge pular de
+// 1 para 4 e a listagem voltar a mostrar todo mundo 'pending'. As
+// marcações nunca saíram do banco — o backend é que parava de lê-las.
+// Toda LEITURA passa por getCurrentReview(). A variante sem revisão
+// continua existindo para o caso legítimo: dojô que nunca marcou nada.
+//
 // ── MOCK POR SQL ────────────────────────────────────────────
 // Toda SQL carrega uma âncora `-- drr:<nome>` (mesmo espírito do `-- dtag:`
 // de karateDojoTagService.js). Os testes despacham por regex sobre a
@@ -161,6 +172,52 @@ function parsePractitionerIds(raw) {
   return ids;
 }
 
+// ── Quem está agindo ────────────────────────────────────────
+// Os *_label existem para CONGELAR o nome no momento do ato: o usuário
+// pode sair da empresa depois, e a federação continua precisando saber
+// quem reportou aquele praticante.
+//
+// ⚠️ O label NÃO PODE vir do token. `req.user` é o payload cru do JWT e
+// ele não tem `name` nem `email` (signAccessToken em routes/auth.js põe
+// só id, role, plan, company, is_staff, consolidated_view, federation_id,
+// karate_role, dojo_id). Ler req.user.name gravava NULL em
+// reviewed_by_label / started_by_label / completed_by_label /
+// reported_by_label — foi o que aconteceu em produção até 12/08/2026.
+// Mexer no payload do JWT para "resolver" isso invalidaria todo token em
+// uso; o nome se resolve aqui, no banco.
+//
+// A coluna é `full_name` (NÃO existe `users.name`). Fallback: email e
+// depois NULL — um usuário sem nome não pode derrubar a marcação.
+//
+// UMA VEZ POR REQUISIÇÃO, nunca por praticante: markBatch processa lotes
+// de até 500 ids e um SELECT por linha seria 500 idas ao banco para
+// escrever sempre o mesmo texto.
+async function resolveActor(actor) {
+  const userId = (actor && actor.userId) || null;
+  const given = (actor && actor.label) || null;
+  if (!userId) return { userId: null, label: given };
+  if (given) return { userId, label: given };
+  try {
+    const { rows } = await db.query(
+      `-- drr:actor-label
+       SELECT full_name, email
+         FROM users
+        WHERE id = $1
+        LIMIT 1`,
+      [userId]
+    );
+    if (!rows.length) return { userId, label: null };
+    const fullName = rows[0].full_name != null ? String(rows[0].full_name).trim() : '';
+    const email = rows[0].email != null ? String(rows[0].email).trim() : '';
+    return { userId, label: fullName || email || null };
+  } catch (e) {
+    // Resolver o nome é enfeite da trilha; nunca pode impedir o sensei de
+    // marcar o plantel. O uuid (reviewed_by) continua indo certo.
+    console.warn('[karateDojoRosterReview] label do ator não resolvido (não bloqueia):', e.message);
+    return { userId, label: null };
+  }
+}
+
 // ── A sessão de revisão ─────────────────────────────────────
 async function getOpenReview(dojoId, client) {
   const q = client || db;
@@ -186,6 +243,21 @@ async function getLatestReview(dojoId) {
     [dojoId]
   );
   return rows.length ? shapeReview(rows[0]) : null;
+}
+
+// A revisão CORRENTE PARA LEITURA: a aberta se houver, senão a última —
+// mesmo já concluída. É o que summary e listagem têm que enxergar.
+//
+// ⚠️ Não confundir com ensureOpenReview: ESCRITA continua exigindo uma
+// revisão 'in_progress'. Aqui é só leitura; devolver a concluída não
+// reabre nada.
+//
+// Devolve null só quando o dojô NUNCA marcou ninguém — e aí `pending =
+// plantel inteiro` está certo: é o convite inicial à revisão.
+async function getCurrentReview(dojoId) {
+  const open = await getOpenReview(dojoId);
+  if (open) return open;
+  return getLatestReview(dojoId);
 }
 
 // Qual assunção de registro trouxe este plantel (migration 275). Best-effort
@@ -237,8 +309,9 @@ async function ensureOpenReview(dojoId, federationId, actor) {
 
 // ── O plantel herdado ───────────────────────────────────────
 // customers.dojo_id = a company do REGISTRO (sempre req.dojoId, do token).
-// O LEFT JOIN traz a marcação da revisão ABERTA; sem revisão aberta a
-// variante SEM JOIN é usada e todo mundo sai como 'pending'.
+// O LEFT JOIN traz a marcação da revisão CORRENTE (aberta ou a última
+// concluída); só quando não existe revisão nenhuma a variante SEM JOIN é
+// usada e todo mundo sai como 'pending'.
 //
 // ⚠️ DUAS SQL LITERAIS, NÃO UM BUILDER COM O MESMO ARRAY DE PARÂMETROS.
 // A versão sem JOIN não cita `$3` (review_id) — e um `$n` declarado e não
@@ -330,7 +403,7 @@ async function listRoster(dojoId, federationId, opts = {}) {
     };
   };
 
-  // Sem revisão aberta não há o que juntar: vai direto na variante simples
+  // Sem revisão NENHUMA não há o que juntar: vai direto na variante simples
   // (uma consulta a menos e nenhum JOIN inútil sobre 9.840 linhas).
   let withReview = !!reviewId;
   let schemaPending = false;
@@ -376,6 +449,15 @@ async function countRoster(params, withReview) {
 // Contagens do plantel INTEIRO (independem de filtro/página) — é o que a
 // barra de progresso do sensei mostra e o que a conclusão usa para decidir
 // se ainda há pendente.
+//
+// `reviewId` é a revisão CORRENTE (aberta ou última concluída). Com a
+// revisão concluída, `pending` = praticantes do plantel SEM item naquela
+// revisão — normalmente 0, e > 0 quando o plantel CRESCEU depois dela.
+// Isso é o comportamento desejado: quem entrou depois nunca foi revisado.
+//
+// reviewId null = nenhuma revisão jamais criada. Aí `pending = COUNT(*)`
+// está certo (o convite inicial), e é para ESSE caso que a variante
+// `-- drr:summary-no-review` existe.
 async function getSummary(dojoId, federationId, reviewId, client) {
   const q = client || db;
   const runSql = (withReview) => `-- drr:summary${withReview ? '' : '-no-review'}
@@ -417,16 +499,26 @@ async function getSummary(dojoId, federationId, reviewId, client) {
 
 // Estado da revisão para a tela: a aberta se houver, senão a última
 // concluída (para o front conseguir dizer "revisado em 12/08, 41 avisos").
+//
+// ⚠️ O summary tem que ler A MESMA revisão que o `review` devolvido, senão
+// a tela se contradiz: cabeçalho "concluída" com contador de plantel
+// inteiro pendente. `review_status` vai junto, no topo, para o front
+// distinguir "concluída, sem pendências" de "em andamento" sem ter que
+// cavar dentro de `review`.
 async function getReviewState(dojoId, federationId) {
   try {
-    const open = await getOpenReview(dojoId);
-    const review = open || (await getLatestReview(dojoId));
-    const summary = await getSummary(dojoId, federationId, open ? open.id : null);
-    return { review, summary, schema_pending: false };
+    const review = await getCurrentReview(dojoId);
+    const summary = await getSummary(dojoId, federationId, review ? review.id : null);
+    return {
+      review,
+      review_status: review ? review.status : null,
+      summary,
+      schema_pending: false,
+    };
   } catch (e) {
     if (!isMissingRelation(e)) throw e;
     const summary = await getSummary(dojoId, federationId, null);
-    return { review: null, summary, schema_pending: true };
+    return { review: null, review_status: null, summary, schema_pending: true };
   }
 }
 
@@ -456,8 +548,10 @@ async function markBatch(dojoId, federationId, { practitionerIds, status }, acto
   // Nenhum id do lote pertence a este dojô: nada a marcar e — importante —
   // nenhuma revisão a abrir. Um corpo com ids alheios não pode ter como
   // efeito colateral iniciar a revisão do plantel de quem mandou.
+  // O summary devolvido aqui é de LEITURA: revisão corrente, não só a
+  // aberta (senão devolver 0 marcado zeraria o contador da tela).
   if (!scoped.length) {
-    const current = await getOpenReview(dojoId);
+    const current = await getCurrentReview(dojoId);
     return {
       review: current,
       status: target,
@@ -468,7 +562,11 @@ async function markBatch(dojoId, federationId, { practitionerIds, status }, acto
     };
   }
 
-  const review = await ensureOpenReview(dojoId, federationId, actor);
+  // UMA resolução de nome por requisição, antes do lote — não uma por
+  // praticante (o lote vai a 500).
+  const resolvedActor = await resolveActor(actor);
+
+  const review = await ensureOpenReview(dojoId, federationId, resolvedActor);
   if (!review) {
     throw svcError(500, 'REVIEW_UNAVAILABLE', 'Não foi possível abrir a revisão do plantel');
   }
@@ -501,7 +599,7 @@ async function markBatch(dojoId, federationId, { practitionerIds, status }, acto
                 reviewed_by_label = EXCLUDED.reviewed_by_label,
                 reviewed_at = now()
          RETURNING practitioner_id`,
-        [review.id, dojoId, scoped, target, (actor && actor.userId) || null, (actor && actor.label) || null]
+        [review.id, dojoId, scoped, target, resolvedActor.userId, resolvedActor.label]
       );
       changed = rows.length;
     }
@@ -554,6 +652,10 @@ async function completeReview(dojoId, federationId, { pendingPolicy } = {}, acto
     );
   }
 
+  // FORA da transação, de propósito: o SELECT em users usa o pool e não
+  // tem nada que fazer dentro do BEGIN que trava a revisão.
+  const resolvedActor = await resolveActor(actor);
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -598,7 +700,7 @@ async function completeReview(dojoId, federationId, { pendingPolicy } = {}, acto
                   ON i.practitioner_id = c.id AND i.review_id = $1
           WHERE c.dojo_id = $2 AND c.federation_id = $3 AND i.id IS NULL
          ON CONFLICT (review_id, practitioner_id) DO NOTHING`,
-        [review.id, dojoId, federationId, policy, (actor && actor.userId) || null, (actor && actor.label) || null]
+        [review.id, dojoId, federationId, policy, resolvedActor.userId, resolvedActor.label]
       );
     }
 
@@ -620,7 +722,7 @@ async function completeReview(dojoId, federationId, { pendingPolicy } = {}, acto
         WHERE i.review_id = $1 AND i.dojo_id = $2 AND i.status = 'not_recognized'
        ON CONFLICT (review_id, practitioner_id) DO NOTHING
        RETURNING id`,
-      [review.id, dojoId, federationId || null, (actor && actor.userId) || null, (actor && actor.label) || null]
+      [review.id, dojoId, federationId || null, resolvedActor.userId, resolvedActor.label]
     );
     const noticesCreated = noticeRows.length;
 
@@ -642,8 +744,8 @@ async function completeReview(dojoId, federationId, { pendingPolicy } = {}, acto
        RETURNING ${REVIEW_COLS}`,
       [
         review.id,
-        (actor && actor.userId) || null,
-        (actor && actor.label) || null,
+        resolvedActor.userId,
+        resolvedActor.label,
         after.inherited_total,
         after.recognized,
         after.not_recognized,
@@ -667,7 +769,7 @@ async function completeReview(dojoId, federationId, { pendingPolicy } = {}, acto
         notices_created: noticesCreated,
         pending_policy: policy || null,
       }],
-      actorId: (actor && actor.userId) || null,
+      actorId: resolvedActor.userId,
     });
 
     await client.query('COMMIT');
@@ -726,8 +828,10 @@ module.exports = {
   parseReviewStatusFilter,
   parseSearch,
   parsePractitionerIds,
+  resolveActor,
   getOpenReview,
   getLatestReview,
+  getCurrentReview,
   ensureOpenReview,
   listRoster,
   getSummary,

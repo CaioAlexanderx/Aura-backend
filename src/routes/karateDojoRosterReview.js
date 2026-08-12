@@ -35,13 +35,13 @@
 //     (review_id, practitioner_id) + DO UPDATE), e concluir duas vezes não
 //     duplica aviso (DO NOTHING).
 //
-// ── SEM GATE DE CONEXÃO, DE PROPÓSITO ───────────────────────
-// Diferente de karateDojoFederativo.js (409 DOJO_NAO_CONECTADO), aqui não
-// há gate: o plantel herdado SÓ EXISTE para um dojô que a federação
-// cadastrou — e todo dojô que assumiu um registro está, por construção,
-// conectado (o aceite é o que seta karate_dojo_linked_at). Um dojô sem
-// conexão simplesmente não tem praticante nenhum apontando para ele, e a
-// lista volta vazia. Um 409 aqui só esconderia isso atrás de um erro.
+// ── ⚠️ LEITURA É PELA REVISÃO CORRENTE, NÃO PELA ABERTA ──────
+// Depois do /complete não existe revisão 'in_progress'. Ler o plantel pela
+// aberta fazia o backend esquecer as marcações da revisão recém-concluída:
+// contador voltava ao plantel inteiro como "pendente" e a lista inteira
+// aparecia sem marcação (produção, 12/08/2026). Os dois GETs usam
+// svc.getCurrentReview() = aberta || última, mesmo já concluída. ESCRITA
+// continua exigindo uma revisão aberta.
 //
 // Escopo SEMPRE por req.dojoId / req.federationId do guard — nunca do
 // body/query. Defensivo 42P01 (migration 276 pendente): GETs degradam
@@ -75,10 +75,17 @@ function requireChannelA(req, res, next) {
 // Quem está agindo — SEMPRE do token, nunca do corpo. Vai para
 // reviewed_by/started_by/completed_by e para a trilha em
 // karate_dojo_roster_events.
+//
+// ⚠️ SÓ O uuid SAI DAQUI. O nome (os *_label) é resolvido no serviço, no
+// banco (users.full_name). `req.user` é o payload cru do JWT e NÃO tem
+// `name` nem `email` — signAccessToken (routes/auth.js) assina apenas id,
+// role, plan, company, is_staff, consolidated_view, federation_id,
+// karate_role e dojo_id. Ler req.user.name aqui gravava NULL em todos os
+// *_label em produção; e pôr o nome no JWT invalidaria os tokens em uso.
 function actorFrom(req) {
   return {
     userId: (req.user && req.user.id) || null,
-    label: (req.user && (req.user.name || req.user.email)) || null,
+    label: null,
   };
 }
 
@@ -112,7 +119,12 @@ function handleWriteError(res, e, ctx) {
 
 // ── GET /federation/:id/dojo/roster-review ──────────────────
 // Estado da revisão (a aberta; se não houver, a última concluída) +
-// contagens do plantel INTEIRO. É o que alimenta a barra de progresso.
+// contagens do plantel INTEIRO **daquela mesma revisão**. É o que alimenta
+// a barra de progresso e o badge da aba.
+//
+// `review_status` vem repetido no topo (além de dentro de `review`) para o
+// front distinguir "concluída, sem pendências" de "em andamento" sem
+// inferir isso de `summary.pending === 0`.
 //
 // ⚠️ NÃO cria revisão. Abrir a tela para olhar não é começar a revisar.
 router.get('/dojo/roster-review', requireDojoAccess, async (req, res) => {
@@ -123,6 +135,7 @@ router.get('/dojo/roster-review', requireDojoAccess, async (req, res) => {
     if (svc.isMissingRelation(e)) {
       return res.json({
         review: null,
+        review_status: null,
         summary: { inherited_total: 0, recognized: 0, not_recognized: 0, pending: 0, inactive_in_federation: 0 },
         schema_pending: true,
       });
@@ -141,26 +154,35 @@ router.get('/dojo/roster-review', requireDojoAccess, async (req, res) => {
 //
 // `review_status` de quem nunca foi tocado é 'pending' — não existe linha
 // para ele (ver migration 276: a AUSÊNCIA é o estado).
+//
+// ⚠️ O JOIN é com a revisão CORRENTE (aberta OU a última concluída), o
+// mesmo critério do summary — se a listagem olhasse só a aberta, depois do
+// /complete a tela se contradiria: "1 reconhecido / 3 não reconheço" no
+// cabeçalho e a lista inteira sem marcação embaixo.
 router.get('/dojo/roster-review/roster', requireDojoAccess, async (req, res) => {
   try {
-    const open = await svc.getOpenReview(req.dojoId).catch((e) => {
+    const current = await svc.getCurrentReview(req.dojoId).catch((e) => {
       if (svc.isMissingRelation(e)) return null;
       throw e;
     });
     const page = await svc.listRoster(req.dojoId, req.federationId, {
-      reviewId: open ? open.id : null,
+      reviewId: current ? current.id : null,
       q: req.query.q,
       status: req.query.status,
       review_status: req.query.review_status,
       limit: req.query.limit,
       offset: req.query.offset,
     });
-    return res.json(Object.assign({ review_id: open ? open.id : null }, page));
+    return res.json(Object.assign({
+      review_id: current ? current.id : null,
+      review_status: current ? current.status : null,
+    }, page));
   } catch (e) {
     if (svc.isMissingRelation(e)) {
       const paging = svc.parsePaging(req.query);
       return res.json({
         review_id: null,
+        review_status: null,
         data: [],
         count: 0,
         limit: paging.limit,
