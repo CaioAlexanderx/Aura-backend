@@ -1,0 +1,122 @@
+-- ============================================================
+-- AURA — Migration 281: TRANSAÇÃO ÓRFÃ NUNCA MAIS FICA ABERTA PARA SEMPRE
+--
+-- ── NUMERAÇÃO ───────────────────────────────────────────────
+-- 280 é a última no `main` (280_karate_dojo_student_guardians.sql). A
+-- numeração deste repo é por ARQUIVO no main, não pelo que o banco já
+-- aplicou — conferido na pasta antes de escrever: não existe nenhum 281_.
+--
+-- ── O INCIDENTE (13/08/2026, produção) ──────────────────────
+-- Import dos 484 alunos do primeiro dojô real (Areikan) por
+-- POST /federation/:fid/dojo/students/import. O request estourou o
+-- timeout do CLIENTE e o cliente desistiu. O Node parou de mandar
+-- comandos — mas NÃO fechou a transação.
+--
+-- Resultado medido no banco:
+--   • uma sessão `idle in transaction` por OITO MINUTOS,
+--   • parada em `SELECT id FROM karate_dojo_guardians WHERE dojo_id = $1
+--     AND lower(full_name) = lower($2)`,
+--   • `wait_event = ClientRead` (o backend esperando o próximo comando de
+--     um cliente que nunca mais falou),
+--   • segurando uma conexão do pool e os locks das linhas já escritas.
+-- Só terminou porque um humano rodou `pg_terminate_backend`.
+--
+-- ── POR QUE O QUE JÁ EXISTIA NÃO PEGOU ──────────────────────
+-- src/config/database.js já mandava, no evento `connect` do pool:
+--   SET statement_timeout TO 30000;
+--   SET idle_in_transaction_session_timeout TO 30000;
+-- E mesmo assim a sessão órfã ficou 8 minutos. A prova de que aquele SET
+-- não vale em produção está nos VALORES OBSERVADOS no banco no dia do
+-- incidente: `idle_in_transaction_session_timeout = 0` e
+-- `statement_timeout = 2min` — nenhum dos dois é 30s. Ou seja: o SET de
+-- sessão não sobreviveu.
+--
+-- É o comportamento esperado de um pooler em modo TRANSACTION (Supavisor/
+-- PgBouncer, que é como este backend fala com o Postgres): parâmetro de
+-- SESSÃO setado fora de uma transação vale para aquele "ciclo" e é
+-- descartado — a conexão de servidor que atende a próxima transação pode
+-- ser outra, e volta ao default. Um `SET` de sessão via pooler é uma
+-- promessa que o pooler não é obrigado a cumprir.
+--
+-- ── A DEFESA DESTA MIGRATION ────────────────────────────────
+-- `ALTER DATABASE ... SET` grava o default NO CATÁLOGO do Postgres. Todo
+-- backend novo — inclusive as conexões de servidor que o Supavisor abre,
+-- inclusive psql, jobs, MCP e qualquer coisa que não passe pelo pool do
+-- app — lê esse default no startup da sessão. Não depende do pooler
+-- repassar nada, não depende de o app lembrar de setar, e cobre TODA rota,
+-- não só o import.
+--
+-- ── O NÚMERO: 120s, e por quê ───────────────────────────────
+-- `idle_in_transaction_session_timeout` NÃO conta tempo executando; conta
+-- tempo com a transação ABERTA e o backend OCIOSO esperando o cliente
+-- (exatamente o `ClientRead` do incidente). Então o número precisa ficar
+-- acima do maior INTERVALO ENTRE COMANDOS legítimo, não acima da duração
+-- da operação.
+--
+--   Piso (errar para menos mata transação boa): o pior intervalo legítimo
+--   entre dois comandos de uma mesma transação neste backend é o de uma
+--   transação que espera uma chamada externa entre dois passos (emissão
+--   fiscal — SEFAZ/provedor). Esses aguardos são da ordem de dezenas de
+--   segundos, limitados pelo timeout HTTP de cada cliente. 120s dá
+--   múltiplos de folga sobre isso. O import, que era a operação mais cara
+--   conhecida, deixou de ser o caso extremo neste mesmo PR: o lote inteiro
+--   virou ~8 comandos, e os intervalos entre eles são CPU do Node
+--   (milissegundos).
+--
+--   Teto (errar para mais deixa recurso preso): 120s é 1/4 dos 8 minutos
+--   do incidente e casa com o `statement_timeout = 2min` já vigente em
+--   produção. Com os dois, um backend preso — executando OU ocioso em
+--   transação — segura conexão e locks por no máximo ~2 minutos, e o
+--   limite passa a ser o mesmo pelos dois caminhos. Um número único é mais
+--   fácil de raciocinar em plantão do que dois.
+--
+-- Reduzir depois é seguro e barato (é outro ALTER DATABASE, sem deploy);
+-- começar apertado demais e matar uma transação fiscal boa não é. Por isso
+-- este PR começa em 120s em vez de nos 30s que o código tentava.
+--
+-- ── O QUE ESTA MIGRATION NÃO FAZ ────────────────────────────
+-- Não mexe em `statement_timeout` (2min em produção, e não foi ele que
+-- falhou). Não mexe em nenhuma tabela, coluna, índice ou dado. Não altera
+-- ROLE nenhuma: se algum dia alguém puser `ALTER ROLE ... SET
+-- idle_in_transaction_session_timeout`, o valor da ROLE vence o do
+-- DATABASE — conferir com a consulta de verificação abaixo antes de
+-- concluir que "não pegou".
+--
+-- IDEMPOTENTE: `ALTER DATABASE ... SET` é atribuição, não acumulação —
+-- rodar duas vezes deixa o mesmo estado.
+--
+-- APLICAÇÃO: só vale para SESSÕES NOVAS. As conexões já abertas do pool
+-- continuam com o default antigo até serem recicladas (idleTimeoutMillis
+-- de 60s em src/config/database.js) ou até o próximo deploy.
+-- ============================================================
+
+-- O nome do banco não pode ser parâmetro em ALTER DATABASE; daí o
+-- format(%I) com current_database(), que faz a migration rodar igual em
+-- produção, staging e em qualquer branch do Supabase.
+DO $$
+BEGIN
+  EXECUTE format(
+    'ALTER DATABASE %I SET idle_in_transaction_session_timeout = %L',
+    current_database(),
+    '120s'
+  );
+END $$;
+
+-- ── VERIFICAÇÃO (rodar em uma sessão NOVA, depois de aplicar) ──
+--   SELECT setconfig FROM pg_db_role_setting s
+--     JOIN pg_database d ON d.oid = s.setdatabase
+--    WHERE d.datname = current_database() AND s.setrole = 0;
+--   -- esperado conter: idle_in_transaction_session_timeout=120s
+--
+--   SHOW idle_in_transaction_session_timeout;  -- esperado: 2min
+--
+-- Se o SHOW não bater com o catálogo, procure um ALTER ROLE por cima:
+--   SELECT r.rolname, s.setconfig FROM pg_db_role_setting s
+--     LEFT JOIN pg_roles r ON r.oid = s.setrole;
+
+-- ── REVERSÃO ────────────────────────────────────────────────
+--   DO $$ BEGIN
+--     EXECUTE format('ALTER DATABASE %I RESET idle_in_transaction_session_timeout', current_database());
+--   END $$;
+-- Volta ao default do Postgres (0 = sem limite), que é exatamente o estado
+-- em que o incidente aconteceu.
