@@ -9,16 +9,18 @@
 //
 // POR QUE UM MÓDULO PRÓPRIO: karateDojoStudentService.js já tem ~2.000
 // linhas e três famílias de fallback de schema. Toda a mecânica do
-// vínculo N:N (migration 277) mora aqui — buscar-ou-criar responsável,
+// vínculo N:N (migration 280) mora aqui — buscar-ou-criar responsável,
 // gravar os vínculos, rebaixar o principal, e o fragmento de SQL que
 // devolve a lista na MESMA query da ficha. O service só chama.
 //
-// REGRA DO PRINCIPAL: no máximo UM is_primary por aluno (índice parcial
-// uq_karate_dojo_student_guardians_primary). Quem escreve REBAIXA os
-// outros (UPDATE ... SET is_primary = false) ANTES de gravar o novo —
+// REGRA DO PRINCIPAL: no máximo UM is_primary por aluno (índice PARCIAL
+// uq_kdsg_one_primary_per_student, migration 280). Quem escreve REBAIXA
+// os outros (UPDATE ... SET is_primary = false) ANTES de gravar o novo —
 // nenhum ON CONFLICT deste arquivo mira o índice parcial, só o UNIQUE
-// TOTAL (student_id, guardian_id). Mirar índice parcial sem repetir o
-// predicado é 42P10 → 500 genérico + ROLLBACK (armadilha conhecida).
+// TOTAL uq_kdsg_student_guardian (student_id, guardian_id). Mirar índice
+// parcial sem repetir o predicado é 42P10 → 500 genérico + ROLLBACK
+// (armadilha conhecida; trava estática em
+// tests/unit/onConflictPartialIndexGuard.test.js).
 //
 // ESCOPO: esta tabela NÃO tem dojo_id (o escopo vem do aluno). Todo
 // chamador aqui já recebe um studentId de um aluno JÁ escopado por
@@ -31,18 +33,28 @@
 // string" — assim uma query nova (ou renomeada) não rouba a resposta de
 // outra, e mudar a formatação da SQL não quebra teste nenhum.
 //
-// DEPLOY PARCIAL (CLAUDE.md #1): o backend sobe ANTES da migration 277.
+// DEPLOY PARCIAL (CLAUDE.md #1): o backend sobe ANTES da migration 280.
 // HAS_LINK_TABLE degrada na primeira 42P01/42703 da tabela nova e o
 // sistema volta a se comportar EXATAMENTE como antes (responsável único
 // por guardian_id) — nunca deixa de servir a ficha do aluno.
+//
+// ⚠️ DENTRO DE TRANSAÇÃO A DEGRADAÇÃO PRECISA DE SAVEPOINT: um 42P01
+// dentro de um BEGIN envenena a transação inteira (armadilha
+// "tx poison best-effort"), então try/catch cru não serve. É por isso que
+// upsertLinksBatchInTx existe: ela abre SAVEPOINT, tenta, e no erro dá
+// ROLLBACK TO SAVEPOINT — a transação do import continua viva e os
+// alunos entram com o responsável principal (guardian_id), como antes.
 // ============================================================
 'use strict';
 
 const db = require('../config/database');
 
-// migration 277 (F13). Ver comentário de topo.
+// migration 280 (F13). Ver comentário de topo.
 let HAS_LINK_TABLE = true;
 
+// Teto de responsáveis por aluno. Não é regra de negócio dura — é freio
+// contra corpo malformado (um array de 500 "responsáveis" viraria 500
+// INSERTs). Mãe, pai, e mais dois (avó, padrasto) cobrem o mundo real.
 const MAX_GUARDIANS_PER_STUDENT = 4;
 
 function svcError(status, code, message) {
@@ -64,7 +76,7 @@ function isLinkSchemaError(e) {
 function noteSchemaError(e) {
   if (!HAS_LINK_TABLE || !isLinkSchemaError(e)) return false;
   HAS_LINK_TABLE = false;
-  console.warn('[karateDojoStudentGuardians] vínculo N:N ausente (migration 277 pendente) — degradando para responsável único:', e.message);
+  console.warn('[karateDojoStudentGuardians] vínculo N:N ausente (migration 280 pendente) — degradando para responsável único:', e.message);
   return true;
 }
 
@@ -75,7 +87,7 @@ function hasLinkTable() {
 // ── Leitura: a lista vem na MESMA query da ficha ──
 // Nenhuma query nova entra na frente de nada (armadilha da fila de mocks
 // dos testes de integração, que contam db.query.mock.calls.length).
-// Sem a migration 277, o fragmento vira um literal — o shape da resposta
+// Sem a migration 280, o fragmento vira um literal — o shape da resposta
 // não muda de formato, só vem vazio (mesma mecânica de identityFields).
 function guardiansJsonField(p) {
   if (!HAS_LINK_TABLE) return `'[]'::json AS guardians_json`;
@@ -113,7 +125,7 @@ function shapeLink(raw) {
 // Monta a lista de responsáveis da ficha a partir da row do SELECT.
 // `legacy` é o responsável que veio pelo guardian_id (LEFT JOIN de
 // sempre): entra na lista quando ainda não houver vínculo para ele —
-// é o que mantém a ficha correta ANTES da migration 277 rodar e para
+// é o que mantém a ficha correta ANTES da migration 280 rodar e para
 // qualquer escrita antiga que só tenha mexido em guardian_id.
 function guardiansFromRow(row, legacy) {
   const out = [];
@@ -137,7 +149,7 @@ function guardiansFromRow(row, legacy) {
     // O principal do jeito antigo: entra na frente e é o principal, a
     // menos que a lista JÁ tenha declarado um.
     const alreadyPrimary = out.some((g) => g.is_primary);
-    out.unshift({ ...legacy, is_primary: !alreadyPrimary });
+    out.unshift({ ...shapeLink(legacy), is_primary: !alreadyPrimary });
     seen.add(legacy.id);
   }
 
@@ -153,6 +165,47 @@ function primaryOf(list) {
 // ── Escrita ──
 function trimOrNull(v) {
   return v != null && String(v).trim() !== '' ? String(v).trim() : null;
+}
+
+// Validação PURA do corpo (sem banco) — usada por
+// validateStudentPayload. Devolve { errors, list }: `list` só existe
+// quando não há erro. Regra da casa: ausente é neutro (o chamador nem
+// chama), INVÁLIDO é 422.
+function validateGuardiansInput(raw) {
+  const errors = [];
+  if (raw === null) return { errors, list: [] }; // null explícito = "sem responsável"
+  if (!Array.isArray(raw)) {
+    errors.push('guardians deve ser uma lista');
+    return { errors, list: null };
+  }
+  if (raw.length > MAX_GUARDIANS_PER_STUDENT) {
+    errors.push(`Máximo de ${MAX_GUARDIANS_PER_STUDENT} responsáveis por aluno`);
+    return { errors, list: null };
+  }
+  const list = [];
+  for (let i = 0; i < raw.length; i++) {
+    const item = raw[i];
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      errors.push(`guardians[${i}] deve ser um objeto`);
+      continue;
+    }
+    const guardianId = trimOrNull(item.guardian_id);
+    const fullName = trimOrNull(item.full_name);
+    if (!guardianId && !fullName) {
+      errors.push(`guardians[${i}] precisa de guardian_id (responsável existente) ou full_name (para criar)`);
+      continue;
+    }
+    list.push({
+      guardian_id: guardianId,
+      full_name: fullName,
+      cpf: trimOrNull(item.cpf),
+      phone: trimOrNull(item.phone),
+      email: trimOrNull(item.email),
+      relationship: trimOrNull(item.relationship),
+      is_primary: item.is_primary === true || item.is_primary === 'true',
+    });
+  }
+  return { errors, list: errors.length ? null : list };
 }
 
 // Busca-ou-cria por (dojo, lower(nome), telefone) — MESMA chave que o
@@ -183,10 +236,34 @@ async function findOrCreateGuardian(exec, dojoId, entry) {
   return ins.rows[0].id;
 }
 
+// Busca por NOME dentro do dojô, ignorando o telefone. Serve ao
+// responsável SEM contato (o "segundo" do import: a planilha do Areikan
+// traz um telefone só, então o pai entra nomeado e sem número para o
+// sensei completar). Ignorar o telefone aqui é de propósito: sem isso, um
+// pai já cadastrado COM telefone viraria um segundo cadastro SEM — e o
+// dojô passaria a ter duas linhas da mesma pessoa.
+async function findGuardianByName(exec, dojoId, fullName) {
+  const name = trimOrNull(fullName);
+  if (!name) return null;
+  const found = await exec.query(
+    `-- tag:guardian_find_by_name
+     SELECT id FROM karate_dojo_guardians
+      WHERE dojo_id = $1 AND lower(full_name) = lower($2)
+      ORDER BY (phone IS NOT NULL) DESC, created_at ASC
+      LIMIT 1`,
+    [dojoId, name]
+  );
+  return found.rows.length ? found.rows[0].id : null;
+}
+
 // Resolve a lista pedida pelo front em ids de responsável DESTE dojô.
 // guardian_id existente é CONFERIDO no escopo do dojô (422 se for de
 // outro) — nunca aceitamos id do corpo sem checar.
 async function resolveGuardians(exec, dojoId, list) {
+  if (!Array.isArray(list)) return [];
+  if (list.length > MAX_GUARDIANS_PER_STUDENT) {
+    throw svcError(422, 'VALIDATION_ERROR', `Máximo de ${MAX_GUARDIANS_PER_STUDENT} responsáveis por aluno`);
+  }
   const resolved = [];
   const seen = new Set();
   for (const entry of list) {
@@ -220,24 +297,59 @@ async function resolveGuardians(exec, dojoId, list) {
   return resolved;
 }
 
-// INSERT multi-linha (uma query para os N vínculos, nunca uma por
-// responsável). ON CONFLICT mira o UNIQUE TOTAL (student_id, guardian_id).
-async function upsertLinks(exec, studentId, resolved) {
-  if (!resolved.length) return;
-  const params = [studentId];
-  const tuples = resolved.map((g) => {
-    params.push(g.guardian_id, g.relationship, g.is_primary);
-    return `($1, $${params.length - 2}, $${params.length - 1}, $${params.length})`;
+// Monta o INSERT multi-linha dos vínculos. `entries` é
+// [{ student_id, guardian_id, relationship, is_primary }] — de UM aluno
+// (PATCH) ou de VÁRIOS (import em lote): a SQL é a mesma, o que muda é
+// quantas tuplas entram. UMA query, nunca uma por responsável.
+//
+// ON CONFLICT mira uq_kdsg_student_guardian, que é UNIQUE TOTAL — e
+// índice total NÃO leva predicado (repetir um WHERE aqui seria o erro
+// inverso). O índice PARCIAL uq_kdsg_one_primary_per_student NÃO é
+// arbiter de nada neste arquivo: o principal é garantido rebaixando os
+// outros ANTES (demotePrimary), não por upsert.
+function buildLinkInsert(entries) {
+  const params = [];
+  const tuples = entries.map((e) => {
+    params.push(e.student_id, e.guardian_id, e.relationship, e.is_primary === true);
+    return `($${params.length - 3}, $${params.length - 2}, $${params.length - 1}, $${params.length})`;
   });
-  await exec.query(
+  const sql =
     `-- tag:student_guardian_link_upsert
      INSERT INTO karate_dojo_student_guardians (student_id, guardian_id, relationship, is_primary)
      VALUES ${tuples.join(', ')}
      ON CONFLICT (student_id, guardian_id) DO UPDATE
         SET relationship = COALESCE(EXCLUDED.relationship, karate_dojo_student_guardians.relationship),
-            is_primary   = EXCLUDED.is_primary`,
-    params
+            is_primary   = EXCLUDED.is_primary,
+            updated_at   = now()`;
+  return { sql, params };
+}
+
+async function upsertLinks(exec, studentId, resolved) {
+  if (!resolved.length) return;
+  const { sql, params } = buildLinkInsert(
+    resolved.map((g) => ({ student_id: studentId, ...g }))
   );
+  await exec.query(sql, params);
+}
+
+// Versão para DENTRO de uma transação já aberta (o import). SAVEPOINT
+// porque 42P01/42703 dentro de BEGIN envenena a transação inteira: sem
+// isso, a migration 280 pendente derrubaria a importação dos 484 alunos
+// em vez de só deixá-los com o responsável principal.
+// Devolve true quando os vínculos foram gravados.
+async function upsertLinksBatchInTx(client, entries) {
+  if (!HAS_LINK_TABLE || !entries.length) return false;
+  const { sql, params } = buildLinkInsert(entries);
+  await client.query('SAVEPOINT sp_kdsg_links');
+  try {
+    await client.query(sql, params);
+    await client.query('RELEASE SAVEPOINT sp_kdsg_links');
+    return true;
+  } catch (e) {
+    await client.query('ROLLBACK TO SAVEPOINT sp_kdsg_links');
+    if (!noteSchemaError(e)) throw e; // erro que NÃO é schema novo sobe
+    return false;
+  }
 }
 
 // Rebaixa TODOS os principais do aluno. Roda ANTES de gravar o novo
@@ -277,7 +389,7 @@ async function replaceLinks(exec, studentId, resolved) {
 }
 
 // Espelha o principal em karate_dojo_students.guardian_id (a coluna
-// continua viva — ver cabeçalho da migration 277). Escopado por dojo_id,
+// continua viva — ver cabeçalho da migration 280). Escopado por dojo_id,
 // mesmo caminho de escopo do GET.
 async function syncPrimaryColumn(exec, dojoId, studentId, primaryGuardianId) {
   await exec.query(
@@ -316,9 +428,14 @@ module.exports = {
   guardiansFromRow,
   primaryOf,
   shapeLink,
+  trimOrNull,
+  validateGuardiansInput,
   findOrCreateGuardian,
+  findGuardianByName,
   resolveGuardians,
+  buildLinkInsert,
   upsertLinks,
+  upsertLinksBatchInTx,
   demotePrimary,
   replaceLinks,
   syncPrimaryColumn,
