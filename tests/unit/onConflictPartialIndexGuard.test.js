@@ -61,6 +61,16 @@
 // `ON CONFLICT DO NOTHING` sem lista (forma "bare") e
 // `ON CONFLICT ON CONSTRAINT x` são IMUNES a 42P10 — não fazem inferência
 // por especificação. São ignorados, não aprovados.
+//
+// COMENTÁRIO NÃO É CÓDIGO (achado em 12/08/2026, escrevendo a F13): um
+// comentário que EXPLICA a regra — "o ON CONFLICT (student_id, guardian_id)
+// do upsert é idempotente" — virava um SITE, com a tabela do INSERT
+// ANTERIOR (errada) e 400 caracteres de código como "predicado". Inerte
+// naquele caso, mas é site fantasma: pode reprovar ou absolver por acidente
+// quando o catálogo crescer, e desencoraja documentar a própria regra que
+// esta trava defende. Ocorrência em linha que COMEÇA com `//` ou `*` é
+// pulada. Estreito de propósito: SQL de verdade nunca começa assim, e
+// comentário DENTRO de template literal é `--`, que continua sendo lido.
 // ============================================================
 'use strict';
 
@@ -131,6 +141,16 @@ function listJsFiles(dir) {
   return out;
 }
 
+// A ocorrência está numa linha de COMENTÁRIO JS? Só olha o começo da
+// linha: `//` (linha) ou `*` (continuação de bloco). Ver o comentário de
+// topo — deliberadamente estreito, para não confundir `--` de SQL dentro
+// de template literal (que é código de verdade e continua sendo lido).
+function isJsCommentLine(text, idx) {
+  const lineStart = text.lastIndexOf('\n', idx) + 1;
+  const head = text.slice(lineStart, idx).replace(/^\s+/, '');
+  return head.startsWith('//') || head.startsWith('*');
+}
+
 // Parênteses CASADOS na mão. Uma regex `\(([^)]*)\)` cortaria
 // `ON CONFLICT (dojo_id, lower(name))` em `dojo_id, lower(name` e o teste
 // passaria a mentir exatamente no caso que ele existe para pegar.
@@ -139,6 +159,9 @@ function extractOnConflicts(text) {
   const re = /ON\s+CONFLICT/gi;
   let m;
   while ((m = re.exec(text)) !== null) {
+    // Comentário explicando a regra não é um site (ver topo).
+    if (isJsCommentLine(text, m.index)) continue;
+
     let i = m.index + m[0].length;
     while (i < text.length && /\s/.test(text[i])) i += 1;
 
@@ -253,6 +276,7 @@ describe('ON CONFLICT × índices PARCIAIS e por EXPRESSÃO (42P10)', () => {
   test('o upsert do vínculo (F13) mira o índice TOTAL, sem predicado', () => {
     const link = SITES.find((s) => s.table === 'karate_dojo_student_guardians');
     expect(link).toBeDefined();
+    expect(link.file).toBe('src/services/karateDojoStudentGuardians.js');
     expect(link.arbiter).toBe('student_id,guardian_id');
     // índice TOTAL não leva (nem pode levar) predicado — um WHERE aqui
     // seria o erro inverso, e também dá 42P10.
@@ -283,6 +307,32 @@ describe('ON CONFLICT × índices PARCIAIS e por EXPRESSÃO (42P10)', () => {
       expect(
         extractOnConflicts('INSERT INTO customers (a) VALUES ($1) ON CONFLICT ON CONSTRAINT customers_pkey DO NOTHING')
       ).toHaveLength(0);
+    });
+
+    test('COMENTÁRIO não é site: explicar a regra não vira ocorrência', () => {
+      // O caso real que motivou a regra: o comentário do import da F13
+      // vinha DEPOIS de um INSERT INTO karate_dojo_student_tags, então o
+      // site fantasma nascia com a tabela errada e 400 caracteres de
+      // código no lugar do predicado.
+      const out = extractOnConflicts(
+        'INSERT INTO karate_dojo_student_tags (a) VALUES ($1) ON CONFLICT (student_id, tag_id) DO NOTHING;\n' +
+        '      // o ON CONFLICT (student_id, guardian_id) do upsert é idempotente.\n' +
+        '      const x = 1;'
+      );
+      expect(out).toHaveLength(1);
+      expect(out[0].arbiter).toBe('student_id,tag_id');
+    });
+
+    test('continuação de bloco (`*`) também não é site', () => {
+      expect(extractOnConflicts('/**\n * ON CONFLICT (student_id) DO UPDATE ...\n */')).toHaveLength(0);
+    });
+
+    test('mas SQL indentado dentro de template literal continua sendo lido', () => {
+      const out = extractOnConflicts(
+        'const sql = `\n     INSERT INTO transactions (a)\n     VALUES ($1)\n     -- comentário SQL\n     ON CONFLICT (company_id, fitid) WHERE fitid IS NOT NULL DO NOTHING`;'
+      );
+      expect(out).toHaveLength(1);
+      expect(out[0].arbiter).toBe('company_id,fitid');
     });
 
     test('aceita ON CONFLICT colado no parêntese (salesGoals.js é minificado)', () => {
