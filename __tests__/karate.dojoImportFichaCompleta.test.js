@@ -62,19 +62,148 @@ describe('F12 — normalizadores puros do import (sem banco)', () => {
     });
   });
 
-  describe('splitAddress — 96% da planilha real tem o número grudado no fim da rua', () => {
-    test('número grudado sem vírgula', () => {
-      expect(svc.splitAddress('Rua Exemplo 123')).toEqual({ street: 'Rua Exemplo', number: '123' });
+  // ── splitAddress ────────────────────────────────────────────────────
+  // 13/08/2026: a versão anterior pegava o ÚLTIMO número da string e por
+  // isso o COMPLEMENTO virava o número da casa — medido em produção no
+  // ensaio de 21 linhas do Areikan:
+  //   "Rua Manoel Rodrigues Jacob 1451 - AP 74" gravou number='74'
+  //   "Rua 21 Lote 15, quadra 12"               gravou number='12'
+  // 129 dos 476 endereços da planilha (27%) trazem complemento no texto.
+  // A regra nova procura o número da VIA (primeiro número depois do nome
+  // da via e ANTES de qualquer marcador de complemento) e devolve um
+  // terceiro campo, `complement`. Os 3 casos antigos continuam aqui, só
+  // com o campo novo — o contrato de retorno mudou no mesmo PR.
+  describe('splitAddress — o número é o da VIA, nunca o do complemento', () => {
+    describe('COM complemento no texto: o número correto é o da via', () => {
+      test.each([
+        ['Rua Manoel Rodrigues Jacob 1451 - AP 74', 'Rua Manoel Rodrigues Jacob', '1451', 'AP 74'],
+        ['Rua Carlos Gomes 1884 - Ap. 131', 'Rua Carlos Gomes', '1884', 'Ap. 131'],
+        ['Rua Imaculada Conceição 3377 AP 401', 'Rua Imaculada Conceição', '3377', 'AP 401'],
+        ['Avenida São Geraldo 229 AP 84', 'Avenida São Geraldo', '229', 'AP 84'],
+        ['Avenida Martinho Gerhard Rolfsen 1027 - casa 39', 'Avenida Martinho Gerhard Rolfsen', '1027', 'casa 39'],
+        ['Rua Professora Adélia Izique 1101, apto 908', 'Rua Professora Adélia Izique', '1101', 'apto 908'],
+        ['Rua Comendador Pedro Morganti 1509 ap.92', 'Rua Comendador Pedro Morganti', '1509', 'ap.92'],
+        ['Rua Lilia Elisa Eberle Lupo 841 casa C51', 'Rua Lilia Elisa Eberle Lupo', '841', 'casa C51'],
+        ['Rua Benedito Jesus Santos Miguel 46, apto 06', 'Rua Benedito Jesus Santos Miguel', '46', 'apto 06'],
+        ['Avenida Governador Orestes Quercia 1301 (b. 23 / ap. 101)', 'Avenida Governador Orestes Quercia', '1301', '(b. 23 / ap. 101)'],
+        ['Avenida Deputado Federal Mário Eugênio 600 casa J4', 'Avenida Deputado Federal Mário Eugênio', '600', 'casa J4'],
+        ['Avenida Dom Pedro II 1195, apto 42', 'Avenida Dom Pedro II', '1195', 'apto 42'],
+        ['Rua Bahia 2790 - bloco H apto 44', 'Rua Bahia', '2790', 'bloco H apto 44'],
+        ['Avenida José Bonifácio 797 - apto 121', 'Avenida José Bonifácio', '797', 'apto 121'],
+        ['Rua Gonçalves Dias 878 - casa 07', 'Rua Gonçalves Dias', '878', 'casa 07'],
+        ['Avenida Rodrigo Fernando Grillo 587 apto 1 BL 1', 'Avenida Rodrigo Fernando Grillo', '587', 'apto 1 BL 1'],
+        ['Avenida Sebastião Aparecido Lopes 177, apto 304-Bloco 2', 'Avenida Sebastião Aparecido Lopes', '177', 'apto 304-Bloco 2'],
+        ['Avenida Oswaldo Gonçalves de Jesus 387 quadra C lote 24', 'Avenida Oswaldo Gonçalves de Jesus', '387', 'quadra C lote 24'],
+        ["Avenida Mari Amélia de Amorim Dael'Olio 278 - Qd D lote 8", "Avenida Mari Amélia de Amorim Dael'Olio", '278', 'Qd D lote 8'],
+        ['Rua Lilia Elisa Eberle Lupo 501 - Quadra C lote 13', 'Rua Lilia Elisa Eberle Lupo', '501', 'Quadra C lote 13'],
+        ['Rua Nívea Cunha Fenerich 201 - casa 18', 'Rua Nívea Cunha Fenerich', '201', 'casa 18'],
+        // "15" faz parte do NOME da via; o número de porta é o 890
+        ['Avenida 15 de Novembro 890 Apto 112', 'Avenida 15 de Novembro', '890', 'Apto 112'],
+        ['Avenida João Porsani R A, 64 LT 08 Quadra A', 'Avenida João Porsani R A', '64', 'LT 08 Quadra A'],
+        ['Avenida Deputado Federal Mário Eugênio 595, casa i 14', 'Avenida Deputado Federal Mário Eugênio', '595', 'casa i 14'],
+        // "N°" colado no número
+        ['Avenida Ipê Branco N°63 casa H12', 'Avenida Ipê Branco', '63', 'casa H12'],
+        // linhas REAIS gravadas errado no ensaio de 21 (produção, 13/08/2026)
+        ['Rua Comendador Pedro Morganti 1409 - Apto. 96', 'Rua Comendador Pedro Morganti', '1409', 'Apto. 96'],
+        ['Alameda 2 246 Quadra 12, lote 11/12', 'Alameda 2', '246', 'Quadra 12, lote 11/12'],
+        ['Alameda 2 n 246 Quadra 12, lote 11/12', 'Alameda 2', '246', 'Quadra 12, lote 11/12'],
+      ])('%s → street=%s number=%s complement=%s', (raw, street, number, complement) => {
+        expect(svc.splitAddress(raw)).toEqual({ street, number, complement });
+      });
     });
-    test('número com vírgula antes e sufixo de letra', () => {
-      expect(svc.splitAddress('Avenida Teste, 45A')).toEqual({ street: 'Avenida Teste', number: '45A' });
+
+    // DECISÃO (regra de ouro): sem número de porta reconhecível, number
+    // fica NULL. "Casa J2" e "Lote 15" identificam a unidade dentro do
+    // condomínio, não a porta na via — gravá-los em `number` faria a ficha
+    // AFIRMAR algo falso e quebraria ordenação/busca por número. Nada se
+    // perde: o texto vai inteiro para `complement`.
+    describe('SEM número de via: number NULL, complemento preservado', () => {
+      test('"Avenida Nadima Damha Casa J2" → number null, "Casa J2" vira complemento', () => {
+        expect(svc.splitAddress('Avenida Nadima Damha Casa J2'))
+          .toEqual({ street: 'Avenida Nadima Damha', number: null, complement: 'Casa J2' });
+      });
+      test('"Rua 21 Lote 15, quadra 12" → "21" é o NOME da via; não há número de porta', () => {
+        expect(svc.splitAddress('Rua 21 Lote 15, quadra 12'))
+          .toEqual({ street: 'Rua 21', number: null, complement: 'Lote 15, quadra 12' });
+      });
     });
-    test('sem número reconhecível no fim → tudo vira street, number null (neutro, não erro)', () => {
-      expect(svc.splitAddress('Travessa Sem Numero')).toEqual({ street: 'Travessa Sem Numero', number: null });
+
+    // Os 347 simples (73% da planilha) NÃO podem quebrar.
+    describe('SIMPLES (347 dos 476): número no fim, sem complemento', () => {
+      test.each([
+        ['Avenida São Geraldo 131', 'Avenida São Geraldo', '131'],
+        ['Rua Lázaro Pedroso 577', 'Rua Lázaro Pedroso', '577'],
+        ['Avenida Miguel Damha 40', 'Avenida Miguel Damha', '40'],
+        ['Rua Pedro Álvares Cabral 253', 'Rua Pedro Álvares Cabral', '253'],
+        ['Avenida das Bromélias 93', 'Avenida das Bromélias', '93'],
+        ['Rua João Gurgel 173', 'Rua João Gurgel', '173'],
+        // número no NOME da via, sem complemento: o de porta ainda é o 890
+        ['Avenida 15 de Novembro 890', 'Avenida 15 de Novembro', '890'],
+        // linhas reais do ensaio de 21 que já estavam certas
+        ['Avenida Irma Antonia de Arruda Camargo 352', 'Avenida Irma Antonia de Arruda Camargo', '352'],
+        ['Rua Clóvis Silveira Bueno 1114', 'Rua Clóvis Silveira Bueno', '1114'],
+        ['Rua Miguel Cortez 478', 'Rua Miguel Cortez', '478'],
+        // casos do teste ORIGINAL desta suíte (contrato só ganhou complement)
+        ['Rua Exemplo 123', 'Rua Exemplo', '123'],
+        ['Avenida Teste, 45A', 'Avenida Teste', '45A'],
+      ])('%s → street=%s number=%s (complement null)', (raw, street, number) => {
+        expect(svc.splitAddress(raw)).toEqual({ street, number, complement: null });
+      });
     });
-    test('ausente/vazio → os dois campos null', () => {
-      expect(svc.splitAddress(null)).toEqual({ street: null, number: null });
-      expect(svc.splitAddress('')).toEqual({ street: null, number: null });
+
+    describe('SEM nenhum dígito: number null e street inteiro', () => {
+      test.each([
+        'Avenida Aagide Hermes Callera',
+        'Rua Padre Duarte',
+        'Avenida Jorge Miguel Saba',
+        'Travessa Sem Numero',
+      ])('%s → tudo em street (dado faltante é neutro, não erro)', (raw) => {
+        expect(svc.splitAddress(raw)).toEqual({ street: raw, number: null, complement: null });
+      });
+    });
+
+    describe('guardas contra o remédio virar doença', () => {
+      test('palavra de complemento no NOME da via não vira complemento ("Rua Casa Branca 100")', () => {
+        expect(svc.splitAddress('Rua Casa Branca 100'))
+          .toEqual({ street: 'Rua Casa Branca', number: '100', complement: null });
+      });
+      test('número do NOME da via sem número de porta → number null (nunca chutar "15")', () => {
+        expect(svc.splitAddress('Avenida 15 de Novembro'))
+          .toEqual({ street: 'Avenida 15 de Novembro', number: null, complement: null });
+      });
+      test('espaços repetidos são normalizados, não perdem texto', () => {
+        expect(svc.splitAddress('  Rua   Exemplo   123  '))
+          .toEqual({ street: 'Rua Exemplo', number: '123', complement: null });
+      });
+      test('ausente/vazio → os três campos null', () => {
+        expect(svc.splitAddress(null)).toEqual({ street: null, number: null, complement: null });
+        expect(svc.splitAddress('')).toEqual({ street: null, number: null, complement: null });
+        expect(svc.splitAddress('   ')).toEqual({ street: null, number: null, complement: null });
+      });
+    });
+
+    // Invariante do PR: NADA de texto se perde. street + number +
+    // complement, concatenados, reconstroem o endereço original a menos de
+    // pontuação separadora, espaços e do RÓTULO "nº/N°" (que deixa de ser
+    // texto e vira o campo `number`).
+    test('invariante: street + number + complement reconstroem o endereço original', () => {
+      const amostra = [
+        'Rua Manoel Rodrigues Jacob 1451 - AP 74',
+        'Rua 21 Lote 15, quadra 12',
+        'Avenida Nadima Damha Casa J2',
+        'Avenida Governador Orestes Quercia 1301 (b. 23 / ap. 101)',
+        'Avenida Sebastião Aparecido Lopes 177, apto 304-Bloco 2',
+        'Alameda 2 246 Quadra 12, lote 11/12',
+        'Avenida 15 de Novembro 890 Apto 112',
+        'Avenida Aagide Hermes Callera',
+        'Rua Exemplo 123',
+      ];
+      const soLetrasENumeros = (s) => String(s || '').toLowerCase().replace(/[^0-9a-zà-ÿ]/gi, '');
+      for (const raw of amostra) {
+        const r = svc.splitAddress(raw);
+        const rebuilt = soLetrasENumeros([r.street, r.number, r.complement].filter(Boolean).join(' '));
+        expect(rebuilt).toBe(soLetrasENumeros(raw));
+      }
     });
   });
 
@@ -325,6 +454,48 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
     expect(res.warnings.some((w) => w.row === 1 && w.code === 'CPF_CHECKSUM_INVALID')).toBe(true);
     const studentInsert = client.calls.find((c) => isStudentInsert(c[0]));
     expect(studentInsert[1]).toEqual(expect.arrayContaining(['52998224726'])); // CPF entra assim mesmo
+  });
+
+  // 13/08/2026 — o complemento tem coluna PRÓPRIA (karate_dojo_students.
+  // complement, text, já existente: nenhuma migration neste PR). Antes ele
+  // ficava grudado em `street` e o apartamento ia parar em `number`.
+  test('endereço com complemento: number é o da VIA e o complemento vai para a coluna complement', async () => {
+    const db = require('../src/config/database');
+    const client = buildClient((s) => {
+      if (isNameDup(s)) return { rows: [] };
+    });
+    db.connect = jest.fn().mockResolvedValueOnce(client);
+
+    const rows = [{ full_name: 'Mora No Apto', address: 'Rua Manoel Rodrigues Jacob 1451 - AP 74' }];
+    const res = await svc.importStudents(dojoId, rows, {});
+
+    expect(res.created).toBe(1);
+    const insert = client.calls.find((c) => isStudentInsert(c[0]));
+    expect(insert[0]).toContain('complement'); // a coluna entra no INSERT
+    expect(insert[1][15]).toBe('Rua Manoel Rodrigues Jacob'); // street
+    expect(insert[1][16]).toBe('1451');                       // number: a VIA, não o "74" do AP
+    expect(insert[1][17]).toBe('AP 74');                      // complement
+  });
+
+  test('complement explícito da planilha tem prioridade e o street/number já separados não são reprocessados', async () => {
+    const db = require('../src/config/database');
+    const client = buildClient((s) => {
+      if (isNameDup(s)) return { rows: [] };
+    });
+    db.connect = jest.fn().mockResolvedValueOnce(client);
+
+    const rows = [{
+      full_name: 'Planilha Nova',
+      street: 'Rua Já Separada', number: '10', complement: 'Bloco B apto 3',
+      address: 'Rua Ignorada 999 casa 1',
+    }];
+    const res = await svc.importStudents(dojoId, rows, {});
+
+    expect(res.created).toBe(1);
+    const p = client.calls.find((c) => isStudentInsert(c[0]))[1];
+    expect(p[15]).toBe('Rua Já Separada');
+    expect(p[16]).toBe('10');
+    expect(p[17]).toBe('Bloco B apto 3');
   });
 
   test('reimportação de linha SEM CPF: dedupe por (dojo_id, nome, nascimento) evita duplicar', async () => {
