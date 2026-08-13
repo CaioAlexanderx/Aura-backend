@@ -1292,11 +1292,58 @@ router.post('/customers/:cid/payments', async (req, res) => {
   }
 });
 
+// ============================================================
+// Incidente Valen (13/08/2026): /manual-entry cria a divida inteira num loop
+// sequencial de INSERTs (ate 100 parcelas), sem protecao de idempotencia.
+// Um timeout de rede no cliente NAO interrompe a transacao no servidor -- ela
+// segue rodando e comita normalmente. O usuario, ve a mensagem de timeout e
+// tenta de novo, e cada retry cria uma conta+parcelas NOVAS e completas
+// (5 duplicatas de R$25.000 em producao). Fix: mesmo padrao de
+// Idempotency-Key + UNIQUE(idempotency_key) ja usado em /payment e
+// /customers/:cid/payments (creditLedger.applyPayment).
+//
+// buildManualEntryReplay: dado uma Idempotency-Key ja processada, remonta a
+// resposta original (customer/transaction/installments/new_balance) para
+// devolver ao cliente em vez de duplicar o lancamento.
+// ============================================================
+async function buildManualEntryReplay(companyId, tx) {
+  const { rows: custRows } = await db.query(
+    `SELECT id, name FROM customers WHERE id = $1 AND company_id = $2`,
+    [tx.customer_id, companyId]
+  );
+  const { rows: instRows } = await db.query(
+    `SELECT * FROM credit_installments
+      WHERE company_id = $1 AND customer_id = $2 AND sale_id IS NULL
+        AND account_id IS NOT DISTINCT FROM $3
+      ORDER BY installment_number ASC`,
+    [companyId, tx.customer_id, tx.account_id || null]
+  );
+  const { rows: balRows } = await db.query(
+    `SELECT balance FROM customer_credit_balances WHERE customer_id = $1 AND company_id = $2`,
+    [tx.customer_id, companyId]
+  );
+  return {
+    replay: true,
+    customer: custRows[0] || { id: tx.customer_id },
+    transaction: { ...tx, amount: parseFloat(tx.amount) },
+    account_id: tx.account_id || null,
+    installments: instRows.map(r => ({
+      ...r,
+      amount_due:     parseFloat(r.amount_due),
+      covered_amount: parseFloat(r.covered_amount || 0),
+    })),
+    new_balance: parseFloat(balRows[0]?.balance || 0),
+  };
+}
+
 // POST /manual-entry
 // F3: aceita account_id (anexa ao carne) OU new_account_name (cria carne e usa).
 // F2: se carne tem terms_snapshot, usa como defaults de juros/periodicidade.
 // 05/06/2026: aceita entry_date e period_unit/period_count.
 // B2: pix_link fica NULL (link fake aposentado); Pix real e on-demand.
+// 13/08/2026: aceita header Idempotency-Key -- retry de rede (timeout do
+// cliente com a tx ja commitada no servidor) devolve o lancamento ja criado
+// em vez de duplicar conta+parcelas. Ver buildManualEntryReplay acima.
 router.post('/manual-entry', async (req, res) => {
   const companyId = req.params.id;
   const {
@@ -1317,6 +1364,9 @@ router.post('/manual-entry', async (req, res) => {
   const total = parseFloat(amount);
   const n     = parseInt(installments) || 1;
   const entryDate = normalizeBackdate(entry_date);
+  const idempotencyKey = req.headers['idempotency-key']
+    ? String(req.headers['idempotency-key']).trim()
+    : null;
 
   if (!total || total <= 0)
     return res.status(400).json({ error: 'amount invalido' });
@@ -1331,6 +1381,27 @@ router.post('/manual-entry', async (req, res) => {
     await assertCrediarioEnabled(companyId);
   } catch (err) {
     return res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+
+  // Replay check ANTES de qualquer escrita: se essa Idempotency-Key ja foi
+  // processada com sucesso (o response original pode ter se perdido no
+  // cliente por timeout), devolve o resultado existente em vez de duplicar.
+  if (idempotencyKey) {
+    try {
+      const { rows: existingTx } = await db.query(
+        `SELECT id, customer_id, account_id, amount, notes, created_at
+           FROM customer_credit_transactions
+          WHERE company_id = $1 AND idempotency_key = $2
+          LIMIT 1`,
+        [companyId, idempotencyKey]
+      );
+      if (existingTx.length) {
+        return res.status(200).json(await buildManualEntryReplay(companyId, existingTx[0]));
+      }
+    } catch (e) {
+      if (e.code !== '42703' && e.code !== '42P01') throw e;
+      // coluna/indice idempotency_key ainda nao existe (deploy parcial) -- segue sem protecao
+    }
   }
 
   const client = await db.connect();
@@ -1400,17 +1471,35 @@ router.post('/manual-entry', async (req, res) => {
     }
 
     // 3. Create debit transaction
+    // 13/08/2026: idempotency_key + ON CONFLICT DO NOTHING -- se outra
+    // requisicao com a MESMA key venceu a corrida entre o check acima e este
+    // INSERT (ex.: 2 retries quase simultaneos), aborta esta tx sem criar
+    // conta/parcelas duplicadas e devolve o resultado da que ja foi processada.
     const notes = description ? String(description).trim() : 'Lancamento manual';
     let transaction;
     try {
       const { rows: txRows } = await client.query(
         `INSERT INTO customer_credit_transactions
-           (company_id, customer_id, type, amount, notes, source, created_by, created_at, account_id)
+           (company_id, customer_id, type, amount, notes, source, created_by, created_at, account_id, idempotency_key)
          VALUES ($1, $2, 'debit', $3, $4, 'manual', $5,
-                 COALESCE(($6::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW()), $7)
+                 COALESCE(($6::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW()), $7, $8)
+         ON CONFLICT (idempotency_key) DO NOTHING
          RETURNING *`,
-        [companyId, custId, total, notes, req.user?.id || null, entryDate, resolvedAccountId]
+        [companyId, custId, total, notes, req.user?.id || null, entryDate, resolvedAccountId, idempotencyKey]
       );
+      if (!txRows.length) {
+        await client.query('ROLLBACK');
+        const { rows: winnerTx } = await db.query(
+          `SELECT id, customer_id, account_id, amount, notes, created_at
+             FROM customer_credit_transactions
+            WHERE company_id = $1 AND idempotency_key = $2 LIMIT 1`,
+          [companyId, idempotencyKey]
+        );
+        if (winnerTx.length) {
+          return res.status(200).json(await buildManualEntryReplay(companyId, winnerTx[0]));
+        }
+        return res.status(409).json({ error: 'Requisicao duplicada em processamento simultaneo -- tente novamente' });
+      }
       transaction = txRows[0];
     } catch (e) {
       if (e.code === '42703') {
