@@ -38,6 +38,13 @@
 // não de leitura das migrations. Migration não é verdade: a verdade é o
 // índice que está lá.
 //
+// ⚠️ EXCEÇÃO DECLARADA (F13, 12/08/2026): uq_kdsg_one_primary_per_student
+// entra AINDA NÃO APLICADO (migration 280). É a única entrada nessa
+// condição e está marcada como tal. Catalogar só depois do deploy é
+// exatamente a ordem que produziu o 42P10 de 11/08 — o código que mira o
+// índice é escrito ANTES de o índice existir, então a trava precisa
+// existir antes também. Quando a 280 rodar, a marca sai e nada mais muda.
+//
 // ⚠️ SE UM ÍNDICE MUDAR, MUDE AQUI JUNTO. Um índice que deixa de ser
 // parcial faz o `WHERE` do código virar erro; um que PASSA a ser parcial
 // precisa entrar nesta lista para o próximo `ON CONFLICT` nascer certo.
@@ -70,6 +77,11 @@ const PARTIAL_INDEXES = [
   // ── dojô / federação (as tabelas que o importador dos 484 toca) ──
   { table: 'karate_dojo_students', arbiter: 'dojo_id,cpf', index: 'uq_karate_dojo_students_dojo_cpf', predicate: /cpf\s+is\s+not\s+null/i, human: 'WHERE cpf IS NOT NULL' },
   { table: 'karate_dojo_students', arbiter: 'practitioner_id', index: 'uq_karate_dojo_students_practitioner', predicate: /practitioner_id\s+is\s+not\s+null/i, human: 'WHERE practitioner_id IS NOT NULL' },
+  // ⏳ AINDA NÃO APLICADO — migration 280 (F13, dois responsáveis por aluno).
+  // O par (student_id, guardian_id) da MESMA tabela é UNIQUE TOTAL
+  // (uq_kdsg_student_guardian) e por isso NÃO entra aqui: índice total não
+  // leva predicado, e é ele que o upsert do import mira.
+  { table: 'karate_dojo_student_guardians', arbiter: 'student_id', index: 'uq_kdsg_one_primary_per_student', predicate: /is_primary/i, human: 'WHERE is_primary' },
   { table: 'karate_dojo_subscriptions', arbiter: 'student_id', index: 'uq_karate_dojo_subscriptions_active_student', predicate: /canceled_at\s+is\s+null/i, human: 'WHERE canceled_at IS NULL' },
   { table: 'karate_dojo_annuity_history', arbiter: 'dojo_id,reference_period', index: 'uq_kdah_dojo_period', predicate: /dojo_id\s+is\s+not\s+null/i, human: 'WHERE dojo_id IS NOT NULL' },
   { table: 'karate_dojo_annuity_history', arbiter: 'practitioner_id,reference_period', index: 'uq_kdah_practitioner_period', predicate: /practitioner_id\s+is\s+not\s+null/i, human: 'WHERE practitioner_id IS NOT NULL' },
@@ -233,6 +245,20 @@ describe('ON CONFLICT × índices PARCIAIS e por EXPRESSÃO (42P10)', () => {
     expect(ofx.predicate).toMatch(/where\s+fitid\s+is\s+not\s+null/i);
   });
 
+  // F13 — o vínculo aluno↔responsável nasce mirando o índice TOTAL, e é
+  // isso que precisa continuar verdade. Se alguém trocar o arbiter para
+  // `(student_id)` "porque só pode haver um principal", o caso acima
+  // (predicado do índice PARCIAL) passa a reprovar — este aqui é a outra
+  // metade: garante que o site existe e mira o par completo, sem WHERE.
+  test('o upsert do vínculo (F13) mira o índice TOTAL, sem predicado', () => {
+    const link = SITES.find((s) => s.table === 'karate_dojo_student_guardians');
+    expect(link).toBeDefined();
+    expect(link.arbiter).toBe('student_id,guardian_id');
+    // índice TOTAL não leva (nem pode levar) predicado — um WHERE aqui
+    // seria o erro inverso, e também dá 42P10.
+    expect(link.predicate).not.toMatch(/where/i);
+  });
+
   // O parser é a parte que pode mentir em silêncio. Estes casos provam que
   // ele lê o que promete ler — inclusive parêntese aninhado.
   describe('o parser (a parte que poderia mentir em silêncio)', () => {
@@ -273,6 +299,17 @@ describe('ON CONFLICT × índices PARCIAIS e por EXPRESSÃO (42P10)', () => {
       const idx = PARTIAL_INDEXES.find(
         (i) => i.table === 'transactions' && i.arbiter === 'company_id,fitid'
       );
+      expect(idx.predicate.test(bad.predicate)).toBe(false);
+    });
+
+    test('a regra PEGA a regressão do vínculo F13 (arbiter trocado para o índice parcial)', () => {
+      const bad = extractOnConflicts(
+        'INSERT INTO karate_dojo_student_guardians (a) VALUES ($1) ON CONFLICT (student_id) DO UPDATE SET is_primary = true'
+      )[0];
+      const idx = PARTIAL_INDEXES.find(
+        (i) => i.table === 'karate_dojo_student_guardians' && i.arbiter === 'student_id'
+      );
+      expect(idx).toBeDefined();
       expect(idx.predicate.test(bad.predicate)).toBe(false);
     });
   });
