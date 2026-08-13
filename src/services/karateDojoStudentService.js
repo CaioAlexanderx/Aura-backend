@@ -1449,21 +1449,127 @@ function isValidCpfChecksum(digits) {
   return true;
 }
 
-// Endereço: 96% das linhas da planilha real vêm com o número GRUDADO no
-// fim do nome da rua ("Rua Exemplo 123", às vezes com vírgula antes do
-// número). Extrai o número (dígitos + sufixo de letra opcional, ex.
-// "123A") do FIM da string; o resto vira street. Sem número reconhecível
-// no fim, a string inteira vira street e number fica null (dado faltante
-// é neutro, nunca erro).
+// ── Endereço: número da VIA × complemento (13/08/2026) ─────────────────
+// A planilha real traz o endereço numa coluna só. A versão anterior desta
+// função pegava o ÚLTIMO número da string, e por isso o COMPLEMENTO virava
+// o número da casa: "Rua Manoel Rodrigues Jacob 1451 - AP 74" gravava
+// number='74' (o apartamento) em vez de '1451'. 129 dos 476 endereços da
+// planilha do Areikan (27%) têm complemento no texto.
+//
+// Regra nova: o número da via é o primeiro número que aparece DEPOIS do
+// nome da via e ANTES de qualquer marcador de complemento; o que vem
+// depois dele vira `complement`. Na dúvida, number = null e a string
+// inteira fica em `street` — dado ausente é neutro, dado errado é dano.
+const ADDRESS_COMPLEMENT_MARKERS = new Set([
+  'ap', 'apt', 'apto', 'apts', 'aptos', 'apart', 'apartamento', 'apartamentos',
+  'bloco', 'blocos', 'bl', 'casa', 'casas', 'lote', 'lotes', 'lt',
+  'quadra', 'quadras', 'qd', 'sala', 'salas', 'cj', 'conj', 'conjunto',
+  'torre', 'torres', 'fundos',
+]);
+
+// Só serve para UMA coisa: reconhecer que o número logo depois do tipo de
+// via faz parte do NOME dela ("Rua 21", "Avenida 15 de Novembro"), não é
+// número de porta.
+const ADDRESS_VIA_TYPES = new Set([
+  'rua', 'r', 'avenida', 'av', 'alameda', 'al', 'travessa', 'tv', 'trav',
+  'praca', 'pca', 'rodovia', 'rod', 'estrada', 'via', 'largo', 'viela',
+  'passagem', 'servidao', 'ladeira', 'marginal',
+]);
+
+const ADDR_EDGE_PUNCT = /^[.,;:/\\\-–—]+|[.,;:/\\\-–—]+$/g;
+const ADDR_TRAIL_SEP = /[\s,;:/\\\-–—]+$/;
+const ADDR_LEAD_SEP = /^[\s,;:/\\\-–—]+/;
+
+function addrFold(s) {
+  return s.normalize('NFD').replace(COMBINING_MARKS, '').toLowerCase();
+}
+
+function addrToken(t) {
+  const bareRaw = t.replace(ADDR_EDGE_PUNCT, '');
+  const bare = addrFold(bareRaw);
+  const nAttached = bare.match(/^(?:n|no|nr|num|numero)[ºo°]?\.?(\d+[a-z]?)$/);
+  const mk = bare.match(/^([a-z]+)(?:[.\s]*\d.*)?$/);
+  return {
+    bareRaw,
+    bare,
+    numOnly: /^\d+[a-z]?$/.test(bare),
+    nAttached: nAttached ? nAttached[1] : null,
+    nStandalone: /^(?:n|no|nr|num|numero)[ºo°]?\.?$/.test(bare),
+    marker: mk && ADDRESS_COMPLEMENT_MARKERS.has(mk[1]) ? mk[1] : null,
+    hasDigit: /\d/.test(bare),
+    startsGroup: /^[([]/.test(t),
+    endsSep: /[.,;:/\\\-–—]$/.test(t),
+    pureSep: bare === '',
+  };
+}
+
 function splitAddress(raw) {
-  if (raw == null) return { street: null, number: null };
-  const v = String(raw).trim();
-  if (!v) return { street: null, number: null };
-  const m = v.match(/^(.*?)[,]?\s+(\d+[A-Za-z]?)\s*$/);
-  if (m && m[1].trim()) {
-    return { street: m[1].trim(), number: m[2].trim() };
+  if (raw == null) return { street: null, number: null, complement: null };
+  const v = String(raw).replace(/\s+/g, ' ').trim();
+  if (!v) return { street: null, number: null, complement: null };
+  const whole = () => ({ street: v, number: null, complement: null });
+
+  const tokens = v.split(' ');
+  const meta = tokens.map(addrToken);
+
+  // 1) Onde começa o complemento. Um marcador só vale se estiver DEPOIS do
+  // miolo do nome da via (índice >= 2, senão "Rua Casa Branca 100" viraria
+  // complemento) e se o contexto confirmar: pontuação/número antes, ou
+  // dígito colado/logo depois ("AP 74", "ap.92", "Casa J2").
+  let cStart = tokens.length;
+  for (let i = 0; i < meta.length; i++) {
+    const m = meta[i];
+    if (i >= 1 && m.startsGroup) { cStart = i; break; }
+    if (!m.marker || i < 2) continue;
+    const prev = meta[i - 1];
+    const next = meta[i + 1];
+    const legit = prev.pureSep || prev.endsSep || prev.numOnly
+      || prev.nAttached != null || m.hasDigit || (next != null && next.hasDigit);
+    if (legit) { cStart = i; break; }
   }
-  return { street: v, number: null };
+
+  // 2) O número da via, procurado SÓ antes do complemento.
+  let numIdx = -1;
+  let markerIdx = -1;
+  for (let i = 0; i < cStart; i++) {
+    if (meta[i].nAttached != null) { numIdx = i; break; }
+    if (meta[i].nStandalone && i + 1 < cStart && meta[i + 1].numOnly) {
+      numIdx = i + 1; markerIdx = i; break;
+    }
+  }
+  if (numIdx === -1) {
+    for (let i = cStart - 1; i >= 0; i--) {
+      if (!meta[i].numOnly) continue;
+      if (i === 0) break;                                            // sobraria street vazio
+      if (i === 1 && ADDRESS_VIA_TYPES.has(meta[0].bare)) break;     // "Rua 21", "Avenida 15 de Novembro"
+      numIdx = i;
+      break;
+    }
+  }
+
+  // 3) Sem número: se havia marcador, o complemento ainda se separa.
+  if (numIdx === -1) {
+    if (cStart >= tokens.length) return whole();
+    const street = tokens.slice(0, cStart).join(' ').replace(ADDR_TRAIL_SEP, '').trim();
+    if (!street) return whole();
+    const complement = tokens.slice(cStart).join(' ').trim();
+    return { street, number: null, complement: complement || null };
+  }
+
+  // Texto solto depois do número SEM nenhum marcador de complemento = a
+  // heurística não entendeu a linha. Não divide (regra de ouro).
+  if (cStart >= tokens.length && meta.slice(numIdx + 1).some((m) => !m.pureSep)) return whole();
+
+  let streetParts = tokens.slice(0, numIdx);
+  if (markerIdx >= 0) streetParts = streetParts.filter((_, i) => i !== markerIdx);
+  const street = streetParts.join(' ').replace(ADDR_TRAIL_SEP, '').trim();
+  if (!street) return whole();
+
+  const numMatch = meta[numIdx].bareRaw.match(/(\d+[A-Za-z]?)$/);
+  if (!numMatch) return whole();
+
+  const complement = tokens.slice(numIdx + 1).join(' ').replace(ADDR_LEAD_SEP, '').trim();
+  return { street, number: numMatch[1], complement: complement || null };
 }
 
 // Status: coluna "Ativo" da planilha real. Vocabulário tolerante (a
@@ -1738,15 +1844,22 @@ async function importStudents(dojoId, rows, ctx = {}) {
         if (!zipCode) warnings.push({ row: rowNum, code: 'INVALID_ZIP', message: 'CEP inválido — aluno importado sem CEP' });
       }
 
-      // F12: 96% das linhas vêm com o número grudado na rua. street/number
-      // já separados pelo caller (planilha nova) têm PRIORIDADE; sem eles,
-      // usa address (combinado) e separa aqui.
+      // F12: 96% das linhas vêm com o número grudado na rua. street/number/
+      // complement já separados pelo caller (planilha nova) têm PRIORIDADE;
+      // sem eles, usa address (combinado) e separa aqui.
+      // 13/08/2026: splitAddress agora devolve TAMBÉM o complemento — 27%
+      // dos endereços do Areikan trazem "AP 74"/"casa J2"/"lote 15" no
+      // mesmo campo, e era isso que virava `number` por engano.
       let street = r.street != null && String(r.street).trim() !== '' ? String(r.street).trim() : null;
       let number = r.number != null && String(r.number).trim() !== '' ? String(r.number).trim() : null;
+      let complement = r.complement != null && String(r.complement).trim() !== '' ? String(r.complement).trim() : null;
       if (!street && r.address != null && String(r.address).trim() !== '') {
         const split = splitAddress(r.address);
         street = split.street;
         number = split.number;
+        // Complemento explícito da planilha manda; o extraído do texto só
+        // preenche o buraco (nunca sobrescreve o que o caller já sabia).
+        if (!complement) complement = split.complement;
       }
       const neighborhood = r.neighborhood != null && String(r.neighborhood).trim() !== '' ? String(r.neighborhood).trim() : null;
       // Planilha real tem 1 typo de cidade conhecido ("Araraqaura") e 8
@@ -1931,15 +2044,15 @@ async function importStudents(dojoId, rows, ctx = {}) {
         `INSERT INTO karate_dojo_students
            (dojo_id, full_name, birth_date, cpf, rg, sex, phone, email,
             belt_label, belt_order, status, guardian_id,
-            mother_name, father_name, zip_code, street, number,
+            mother_name, father_name, zip_code, street, number, complement,
             neighborhood, city, state)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                 $13, $14, $15, $16, $17, $18, $19, $20)
+                 $13, $14, $15, $16, $17, $18, $19, $20, $21)
          RETURNING id, practitioner_id`,
         [
           dojoId, fullName, birthDate, cpf, rg, sex, studentPhone, studentEmail,
           beltParsed.belt_label, beltParsed.belt_order, statusParsed.status, guardianId,
-          motherName, fatherName, zipCode, street, number,
+          motherName, fatherName, zipCode, street, number, complement,
           neighborhood, city, state,
         ]
       );
