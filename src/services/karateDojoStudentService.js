@@ -87,6 +87,17 @@
 //   ativo/inativo (254 dos 484 entrariam ATIVOS por engano), endereço,
 //   RG, Mãe, Pai e Academia. Ver o comentário completo em importStudents.
 //
+// F13 (12/08/2026) — DOIS RESPONSÁVEIS POR ALUNO (migration 280,
+//   services/karateDojoStudentGuardians.js). "Vamos usar os dois contatos
+//   separados, penso que em um caso de emergência com uma criança, é bom
+//   ter o contato de ambos." (Caio). guardian_id (FK singular) continua
+//   existindo e continua sendo o responsável PRINCIPAL — o vínculo N:N
+//   vive em karate_dojo_student_guardians e é ADITIVO. Toda a mecânica
+//   (buscar-ou-criar, upsert, rebaixar o principal, o fragmento de SQL da
+//   ficha) mora no módulo próprio; aqui ficam só os pontos de entrada:
+//   getStudent (leitura), createStudent/updateStudent (o corpo aceita
+//   `guardians: [...]`) e importStudents (mãe E pai).
+//
 // Família é entidade de primeira classe (billing familiar na F3):
 // responsável em karate_dojo_guardians; um responsável → N alunos.
 //
@@ -112,6 +123,7 @@
 const db = require('../config/database');
 const { createPractitionerRequest } = require('./karatePractitionerRequestCreate');
 const identitySync = require('./karateIdentitySync');
+const guardianLinks = require('./karateDojoStudentGuardians');
 const { normalizeCpf, toDojoSex, normalizeUf, normalizeZipCode } = require('../utils/personIdentity');
 const {
   normalizeBeltLevel,
@@ -126,6 +138,15 @@ const VALID_STATUS = ['active', 'inactive'];
 const VALID_SEX_VALUES = ['M', 'F', 'other'];
 const IMPORT_MAX_ROWS = 500;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Marcas combinantes (acentos) para o strip de NFD do import. Construída
+// com escapes ASCII de propósito: escrita como literal de regex, o
+// intervalo U+0300–U+036F fica com os caracteres COMBINANTES crus no
+// fonte — invisíveis no editor e no diff, e reclamados pelo eslint
+// `no-misleading-character-class`. Mesma correção já feita em
+// src/routes/transactionsBatch.js (PR #490). Constante única e
+// compartilhada: /g em String.replace não guarda lastIndex.
+const COMBINING_MARKS = new RegExp('[\\u0300-\\u036f]', 'g');
 
 // Paginação da lista de alunos. 100 cobre a tela; 500 é o teto para quem
 // exporta/imprime sem virar payload de 100 KB de novo.
@@ -271,6 +292,12 @@ async function withStudentSchemaFallback(run) {
       degraded = true;
       console.warn('[karateDojoStudentService] schema da F10 ausente (migration 272 pendente) — degradando filiação:', e.message);
     }
+
+    // F13: a tabela de vínculo é NOVA (migration 280). Mesma família de
+    // degradação: sem ela a ficha volta a ter UM responsável, nunca deixa
+    // de ser servida. O módulo decide (e loga) — aqui só marcamos que
+    // vale UMA retentativa.
+    if (guardianLinks.noteSchemaError(e)) degraded = true;
 
     if ((HAS_IS_FEDERATED_COL || HAS_REQUEST_STUDENT_ID_COL) && isFederationSchemaError(e)) {
       HAS_IS_FEDERATED_COL = false;
@@ -434,6 +461,19 @@ function validateStudentPayload(body, { partial = false } = {}) {
     data.guardian_id = b.guardian_id != null && String(b.guardian_id).trim() !== '' ? String(b.guardian_id).trim() : null;
   }
 
+  // ── F13: a LISTA de responsáveis (migration 280) ──
+  // Ausente = neutro (o PATCH não mexe em vínculo nenhum). `null` ou `[]`
+  // = escolha EXPLÍCITA de deixar o aluno sem responsável — e aí
+  // guardian_id vira null e a regra do menor volta a valer, como deve.
+  // Quando `guardians` vem, ele MANDA sobre `guardian_id` no mesmo corpo:
+  // é a lista que descreve a intenção inteira (quem entra, quem sai, quem
+  // é o principal); guardian_id sozinho só sabe falar de um.
+  if (b.guardians !== undefined) {
+    const g = guardianLinks.validateGuardiansInput(b.guardians);
+    if (g.errors.length) errors.push(...g.errors);
+    else data.guardians = g.list;
+  }
+
   return { errors, data };
 }
 
@@ -514,6 +554,12 @@ function shapeStudent(row) {
     status: row.status,
     guardian_id: row.guardian_id || null,
     guardian: null, // preenchido pelos callers quando disponível (ficha/list)
+    // F13 (migration 280) — a LISTA de responsáveis (mãe E pai, cada um
+    // com contato próprio). Default [] para o shape ser estável em toda
+    // resposta; a ficha (getStudent) e as escritas costuram a lista real.
+    // A listagem paginada NÃO traz a lista de propósito: seriam N
+    // subqueries num payload que já foi motivo de QA por tamanho.
+    guardians: [],
     consent_lgpd: row.consent_lgpd === true,
     notes: row.notes || null,
     practitioner_id: row.practitioner_id || null,
@@ -695,7 +741,8 @@ async function getStudent(dojoId, studentId) {
             g.full_name AS guardian_full_name, g.cpf AS guardian_cpf,
             g.phone AS guardian_phone, g.email AS guardian_email,
             g.relationship AS guardian_relationship,
-            ${federationFields('s.')}
+            ${federationFields('s.')},
+            ${guardianLinks.guardiansJsonField('s.')}
        FROM karate_dojo_students s
        LEFT JOIN karate_dojo_guardians g ON g.id = s.guardian_id
        ${federationJoin('s.')}
@@ -716,7 +763,60 @@ async function getStudent(dojoId, studentId) {
         relationship: r.guardian_relationship || null,
       }
     : null;
+  // F13: a lista completa. O responsável legado (guardian_id) é costurado
+  // como PRINCIPAL quando ainda não existe vínculo para ele — é o que
+  // mantém a ficha correta ANTES da migration 280 rodar e para qualquer
+  // escrita antiga que só tenha mexido em guardian_id.
+  s.guardians = guardianLinks.guardiansFromRow(r, s.guardian);
   return s;
+}
+
+// F13 — grava os vínculos do aluno e devolve a lista para a resposta.
+// SEM transação de propósito: o createStudent/updateStudent comum não
+// abre BEGIN e não vai passar a abrir por causa de uma tabela ADITIVA. O
+// que garante que nada se perde é a ordem: o responsável PRINCIPAL já foi
+// gravado em karate_dojo_students.guardian_id (o campo legado continua
+// sendo a verdade da transição) ANTES de chegar aqui.
+// Degrada só no schema novo (migration 280 pendente) — qualquer outro
+// erro SOBE, porque erro de banco de verdade não pode virar silêncio.
+async function persistGuardianLinks(dojoId, studentId, resolved) {
+  if (!guardianLinks.hasLinkTable()) return null;
+  try {
+    await guardianLinks.replaceLinks(db, studentId, resolved);
+    return await guardianLinks.listForStudent(dojoId, studentId);
+  } catch (e) {
+    if (!guardianLinks.noteSchemaError(e)) throw e;
+    return null;
+  }
+}
+
+// F13 — costura a lista gravada na resposta: `guardians` (a lista) e
+// `guardian` (o PRINCIPAL, no shape legado que o app já consome).
+function applyGuardianListToShape(s, list) {
+  if (!Array.isArray(list) || !list.length) return;
+  s.guardians = list;
+  const primary = guardianLinks.primaryOf(list);
+  if (primary) {
+    s.guardian = {
+      id: primary.id,
+      full_name: primary.full_name,
+      cpf: primary.cpf,
+      phone: primary.phone,
+      email: primary.email,
+      relationship: primary.relationship,
+    };
+  }
+}
+
+// F13 — resolve `data.guardians` em ids deste dojô e devolve o `data`
+// com guardian_id apontando para o PRINCIPAL. Roda ANTES do INSERT/UPDATE
+// de propósito: é o que faz a regra do menor (MENOR_SEM_RESPONSAVEL)
+// olhar o estado REAL, e não um payload que ainda não virou vínculo.
+async function resolveGuardiansIntoData(dojoId, data) {
+  if (data.guardians === undefined) return { data, resolved: null };
+  const resolved = await guardianLinks.resolveGuardians(db, dojoId, data.guardians || []);
+  const primary = guardianLinks.primaryOf(resolved);
+  return { data: { ...data, guardian_id: primary ? primary.guardian_id : null }, resolved };
 }
 
 async function resolveGuardianOrThrow(dojoId, guardianId) {
@@ -743,8 +843,17 @@ const CREATE_BASE_VALUES =
   "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'active'), $12, COALESCE($13, false), $14, $15";
 
 async function createStudent(dojoId, data) {
+  // F13: quando o corpo traz a LISTA, ela manda — os responsáveis são
+  // resolvidos (buscados ou criados) e o PRINCIPAL vira guardian_id.
+  const pre = await resolveGuardiansIntoData(dojoId, data);
+  data = pre.data;
+  const resolvedGuardians = pre.resolved;
+
+  // resolveGuardians já conferiu o escopo (ou criou) cada responsável da
+  // lista — repetir a busca aqui seria um round-trip para saber o que
+  // acabamos de saber.
   let guardian = null;
-  if (data.guardian_id) {
+  if (data.guardian_id && !resolvedGuardians) {
     guardian = await resolveGuardianOrThrow(dojoId, data.guardian_id);
   }
   // EXCEÇÃO à regra "dado faltante ≠ pendência" (LGPD, espelha migr 197/231):
@@ -830,6 +939,9 @@ async function createStudent(dojoId, data) {
   s.guardian = guardian
     ? { id: guardian.id, full_name: guardian.full_name, phone: guardian.phone, relationship: guardian.relationship }
     : null;
+  if (resolvedGuardians) {
+    applyGuardianListToShape(s, await persistGuardianLinks(dojoId, s.id, resolvedGuardians));
+  }
   return s;
 }
 
@@ -875,8 +987,14 @@ async function updateStudent(dojoId, studentId, data, ctx = {}) {
   const cur = existing.rows[0];
   if (!Object.keys(data).length) return shapeStudent(cur); // PATCH vazio = no-op
 
+  // F13: idem createStudent — a lista resolve ANTES, para a regra do
+  // menor logo abaixo enxergar o estado RESULTANTE de verdade.
+  const pre = await resolveGuardiansIntoData(dojoId, data);
+  data = pre.data;
+  const resolvedGuardians = pre.resolved;
+
   let guardian = null;
-  if (data.guardian_id) {
+  if (data.guardian_id && !resolvedGuardians) {
     guardian = await resolveGuardianOrThrow(dojoId, data.guardian_id);
   }
 
@@ -996,6 +1114,9 @@ async function updateStudent(dojoId, studentId, data, ctx = {}) {
   // atualizada" — e, se o sync falhou, o sensei FICA SABENDO em vez de
   // achar que subiu. Falha de sync nunca vira erro do salvamento.
   if (syncResult) s.identity_sync = syncResult;
+  if (resolvedGuardians) {
+    applyGuardianListToShape(s, await persistGuardianLinks(dojoId, studentId, resolvedGuardians));
+  }
   return s;
 }
 
@@ -1359,7 +1480,7 @@ function normalizeImportStatus(raw) {
     .trim()
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '');
+    .replace(COMBINING_MARKS, '');
   if (!v) return { status: 'active', recognized: true };
   if (ACTIVE_STATUS_TOKENS.has(v)) return { status: 'active', recognized: true };
   if (INACTIVE_STATUS_TOKENS.has(v)) return { status: 'inactive', recognized: true };
@@ -1375,7 +1496,7 @@ function normalizeImportStatus(raw) {
 function detectImportBeltLevel(raw) {
   const stripped = raw
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '');
+    .replace(COMBINING_MARKS, '');
   if (/\bpreta\b/i.test(stripped)) return 'preta';
 
   // Remove um prefixo "<n>º Kyu -" / "<n> Kyu" quando existir; o que
@@ -1448,11 +1569,38 @@ function parseImportBeltLabel(raw) {
 // menores de 18 e a planilha NÃO tem coluna de responsável — mas telefone
 // e e-mail da linha "parecem" ser dos pais (uma aluna de 16 anos tem o
 // e-mail da mãe). Regra: para MENOR (birth_date conhecida e < 18 anos),
-// cria/reusa o responsável com o nome da MÃE (ou do PAI se a mãe estiver
-// vazia) e usa o telefone/e-mail DA LINHA como contato dele — nesse caso
-// phone/email NÃO ficam também no cadastro do próprio aluno (evita
-// duplicar o contato do pai como se fosse do filho). Para ADULTO, telefone
-// e e-mail são do próprio aluno, como sempre.
+// cria/reusa responsável a partir da filiação da linha.
+//
+// F13 (12/08/2026) — OS DOIS, NÃO UM: até aqui era a MÃE, "ou o pai se a
+// mãe estiver vazia". Virou MÃE **E** PAI, cada um como um responsável
+// próprio, com o parentesco certo ('mãe'/'pai') no vínculo — "em um caso
+// de emergência com uma criança, é bom ter o contato de ambos" (Caio).
+//
+// A PLANILHA TRAZ UM TELEFONE SÓ (e um e-mail só). Regra declarada:
+//   • o contato vai para o PRINCIPAL — a mãe; o pai quando não há mãe.
+//     É exatamente quem a ficha já mostrava antes deste PR, então nenhuma
+//     ficha existente muda de contato;
+//   • o SEGUNDO entra NOMEADO E SEM CONTATO. Inventar um telefone para
+//     ele (copiar o do outro) seria pior do que não ter: numa emergência,
+//     dois números iguais é UM número com aparência de dois. A ficha
+//     mostra o campo vazio e um warning GUARDIAN_SEM_CONTATO por linha
+//     nomeia quem falta, para o sensei completar.
+//
+// CONTATO SAI DO ALUNO (contactMovedToGuardian) — MANTIDO, e agora com
+// razão mais forte: o telefone da linha é do adulto, não da criança de 10
+// anos. Antes havia um efeito colateral ruim — o contato "sumia" da ficha
+// e reaparecia só dentro do responsável. Com a lista de responsáveis na
+// resposta da ficha (F13), o contato continua VISÍVEL, agora atribuído a
+// QUEM ele é de verdade. Para ADULTO nada muda: telefone e e-mail são do
+// próprio aluno, como sempre.
+//
+// IRMÃOS NÃO DUPLICAM O RESPONSÁVEL: karate_dojo_guardians é escopada por
+// DOJÔ (não por aluno), e o cache do lote + a busca-ou-cria por
+// (dojo, lower(nome), telefone) fazem "Caio Marmorato Toloi" e "Lucas
+// Marmorato Toloi" apontarem para a MESMA mãe. Para o segundo responsável
+// (sem telefone) a busca é por NOME dentro do dojô, de propósito: senão um
+// pai já cadastrado COM telefone viraria uma segunda linha SEM.
+//
 // mother_name/father_name são gravados SEMPRE (é filiação/identidade —
 // diferente de "quem é o responsável"), estejam ou não usados como
 // responsável.
@@ -1489,6 +1637,10 @@ function parseImportBeltLabel(raw) {
 // "qualquer falha inesperada aborta o lote" que este arquivo já tinha).
 // F7.2: sync em lote ao final — hoje custa ZERO query (import nunca grava
 // practitioner_id), mesmo comportamento de antes.
+// F13: os vínculos aluno↔responsável do lote inteiro vão em UMA query ao
+// final, dentro de SAVEPOINT — com a migration 280 pendente, um 42P01
+// cru envenenaria a transação e derrubaria a importação dos 484 alunos,
+// que já entraram corretamente com o responsável principal.
 async function importStudents(dojoId, rows, ctx = {}) {
   if (!Array.isArray(rows)) {
     throw svcError(422, 'VALIDATION_ERROR', 'Corpo esperado: { rows: [...] } (array de linhas já parseadas)');
@@ -1500,7 +1652,10 @@ async function importStudents(dojoId, rows, ctx = {}) {
   let created = 0;
   let skipped = 0;
   let identitySyncResult = { status: 'ok', synced: 0, checked: 0, fields: [], reason: 'NOTHING_TO_SYNC' };
-  if (!rows.length) return { created, skipped, warnings, identity_sync: identitySyncResult };
+  let guardianLinksResult = { written: false, count: 0 };
+  if (!rows.length) {
+    return { created, skipped, warnings, identity_sync: identitySyncResult, guardian_links: guardianLinksResult };
+  }
 
   const client = await db.connect();
   try {
@@ -1510,6 +1665,7 @@ async function importStudents(dojoId, rows, ctx = {}) {
     const guardianCache = new Map(); // lower(nome)|phone → id (dedupe no lote)
     const tagCache = new Map();      // lower(nome da tag) → id (dedupe no lote)
     const linkedStudentIds = [];     // F7.2: linhas que nasceram com praticante
+    const pendingLinks = [];         // F13: vínculos aluno↔responsável do lote
 
     for (let i = 0; i < rows.length; i++) {
       const rowNum = i + 1;
@@ -1665,66 +1821,94 @@ async function importStudents(dojoId, rows, ctx = {}) {
         }
       }
 
-      // ── Responsável ──
+      // ── Responsáveis (F13: mãe E pai, cada um com o seu contato) ──
       // Caminho 1 (legado, prioridade): guardian_name explícito na linha —
-      // mesmo comportamento de sempre (planilhas de 8 campos continuam
-      // funcionando byte a byte).
-      // Caminho 2 (F12): menor SEM guardian_name explícito — responsável
-      // vira a MÃE (ou o PAI se a mãe estiver vazia), com telefone/e-mail
-      // DA LINHA. Nesse caminho phone/email NÃO vão para o cadastro do
-      // próprio aluno (evita duplicar contato do pai como se fosse do
-      // filho — ver cabeçalho da função).
-      let guardianId = null;
-      let guardianSourceName = null;
-      let guardianSourcePhone = null;
-      let guardianSourceEmail = null;
-      let guardianRelationship = null;
+      // UM responsável, com guardian_phone. Planilhas de 8 campos
+      // continuam funcionando byte a byte.
+      // Caminho 2 (F12→F13): menor SEM guardian_name explícito — mãe E pai
+      // viram responsáveis. O telefone/e-mail ÚNICO da linha fica com o
+      // PRINCIPAL (mãe; pai quando não há mãe); o outro entra nomeado e
+      // sem contato, com warning. Ver o cabeçalho da função.
+      const guardianSources = [];
       let contactMovedToGuardian = false;
 
       if (r.guardian_name != null && String(r.guardian_name).trim() !== '') {
-        guardianSourceName = String(r.guardian_name).trim();
-        guardianSourcePhone = r.guardian_phone != null && String(r.guardian_phone).trim() !== '' ? String(r.guardian_phone).trim() : null;
-        guardianSourceEmail = null;
+        guardianSources.push({
+          name: String(r.guardian_name).trim(),
+          phone: r.guardian_phone != null && String(r.guardian_phone).trim() !== '' ? String(r.guardian_phone).trim() : null,
+          email: null,
+          relationship: null,
+        });
       } else if (isMinorRow === true) {
-        if (motherName) {
-          guardianSourceName = motherName;
-          guardianRelationship = 'mãe';
-        } else if (fatherName) {
-          guardianSourceName = fatherName;
-          guardianRelationship = 'pai';
-        }
-        if (guardianSourceName) {
-          guardianSourcePhone = phone;
-          guardianSourceEmail = email;
+        if (motherName) guardianSources.push({ name: motherName, phone: null, email: null, relationship: 'mãe' });
+        if (fatherName) guardianSources.push({ name: fatherName, phone: null, email: null, relationship: 'pai' });
+        if (guardianSources.length) {
+          // O contato da linha é do PRINCIPAL — e sai do cadastro do aluno.
+          guardianSources[0].phone = phone;
+          guardianSources[0].email = email;
           contactMovedToGuardian = true;
+          for (let k = 1; k < guardianSources.length; k++) {
+            warnings.push({
+              row: rowNum,
+              code: 'GUARDIAN_SEM_CONTATO',
+              message: `Responsável "${guardianSources[k].name}" (${guardianSources[k].relationship}) importado SEM telefone/e-mail — a planilha traz um contato só, que ficou com o responsável principal. Complete o contato dele na ficha do aluno.`,
+            });
+          }
         }
       }
 
-      if (guardianSourceName) {
-        const gKey = `${guardianSourceName.toLowerCase()}|${guardianSourcePhone || ''}`;
-        if (guardianCache.has(gKey)) {
-          guardianId = guardianCache.get(gKey);
-        } else {
-          const found = await client.query(
-            `SELECT id FROM karate_dojo_guardians
-              WHERE dojo_id = $1 AND lower(full_name) = lower($2)
-                AND COALESCE(phone, '') = COALESCE($3, '')
-              LIMIT 1`,
-            [dojoId, guardianSourceName, guardianSourcePhone]
-          );
+      // Resolve cada responsável em um id DESTE dojô. O cache do lote é o
+      // que faz IRMÃOS compartilharem a mesma linha de
+      // karate_dojo_guardians em vez de duplicá-la.
+      const rowGuardians = [];
+      for (let k = 0; k < guardianSources.length; k++) {
+        const gs = guardianSources[k];
+        const gKey = `${gs.name.toLowerCase()}|${gs.phone || ''}`;
+        let gid = guardianCache.get(gKey) || null;
+        if (!gid) {
+          const found = gs.phone
+            // Com telefone: chave exata (dojo, nome, telefone) — a
+            // busca-ou-cria de sempre, byte a byte.
+            ? await client.query(
+                `SELECT id FROM karate_dojo_guardians
+                  WHERE dojo_id = $1 AND lower(full_name) = lower($2)
+                    AND COALESCE(phone, '') = COALESCE($3, '')
+                  LIMIT 1`,
+                [dojoId, gs.name, gs.phone]
+              )
+            // SEM telefone (o segundo responsável): procura por NOME e
+            // aceita a pessoa que já existe COM telefone. Sem isso, um pai
+            // já cadastrado viraria uma SEGUNDA linha sem contato — dois
+            // cadastros da mesma pessoa no mesmo dojô.
+            : await client.query(
+                `SELECT id FROM karate_dojo_guardians
+                  WHERE dojo_id = $1 AND lower(full_name) = lower($2)
+                  ORDER BY (phone IS NOT NULL) DESC, created_at ASC
+                  LIMIT 1`,
+                [dojoId, gs.name]
+              );
           if (found.rows.length) {
-            guardianId = found.rows[0].id;
+            gid = found.rows[0].id;
           } else {
             const ins = await client.query(
               `INSERT INTO karate_dojo_guardians (dojo_id, full_name, phone, email, relationship)
                VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-              [dojoId, guardianSourceName, guardianSourcePhone, guardianSourceEmail, guardianRelationship]
+              [dojoId, gs.name, gs.phone, gs.email, gs.relationship]
             );
-            guardianId = ins.rows[0].id;
+            gid = ins.rows[0].id;
           }
-          guardianCache.set(gKey, guardianId);
+          guardianCache.set(gKey, gid);
         }
+        // Mãe e pai com o MESMO nome resolvem para a mesma pessoa: um
+        // vínculo só (o índice UNIQUE do vínculo também não deixaria dois).
+        if (rowGuardians.some((x) => x.guardian_id === gid)) continue;
+        rowGuardians.push({ guardian_id: gid, relationship: gs.relationship, is_primary: rowGuardians.length === 0 });
       }
+
+      // guardian_id (coluna legada) = o PRINCIPAL. Continua sendo escrito
+      // exatamente como antes — é o que telas e serviços não reescritos
+      // por este PR continuam lendo.
+      const guardianId = rowGuardians.length ? rowGuardians[0].guardian_id : null;
 
       // Contato do PRÓPRIO aluno: só quando não foi "consumido" pelo
       // responsável derivado de mãe/pai (caminho 2 acima).
@@ -1770,11 +1954,33 @@ async function importStudents(dojoId, rows, ctx = {}) {
         );
       }
 
+      // F13: acumula — os vínculos do lote INTEIRO viram UMA query depois
+      // do laço, nunca uma por aluno (484 alunos × 2 responsáveis seriam
+      // 968 round-trips).
+      for (const g of rowGuardians) {
+        pendingLinks.push({
+          student_id: ins.rows[0].id,
+          guardian_id: g.guardian_id,
+          relationship: g.relationship,
+          is_primary: g.is_primary,
+        });
+      }
+
       // Sempre NULL hoje (o INSERT não grava a coluna). Conferir em vez de
       // supor é o que faz o caminho continuar correto quando isso mudar.
       const insRow = (ins && ins.rows && ins.rows[0]) || null;
       if (insRow && insRow.practitioner_id) linkedStudentIds.push(insRow.id);
     }
+
+    // F13 — vínculos do lote em UMA query, dentro de SAVEPOINT. Lista
+    // vazia = ZERO query (nenhum aluno com responsável no lote).
+    // Reimportar o mesmo arquivo não duplica vínculo: o aluno repetido é
+    // SKIPPED pelo dedupe antes de chegar aqui e, mesmo que chegasse, o
+    // ON CONFLICT (student_id, guardian_id) do upsert é idempotente.
+    guardianLinksResult = {
+      written: await guardianLinks.upsertLinksBatchInTx(client, pendingLinks),
+      count: pendingLinks.length,
+    };
 
     // Lista vazia = ZERO query (ver cabeçalho). Quando houver linhas
     // vinculadas, é UMA query de candidatos para o lote inteiro.
@@ -1793,7 +1999,7 @@ async function importStudents(dojoId, rows, ctx = {}) {
     client.release();
   }
 
-  return { created, skipped, warnings, identity_sync: identitySyncResult };
+  return { created, skipped, warnings, identity_sync: identitySyncResult, guardian_links: guardianLinksResult };
 }
 
 // ── Responsáveis (CRUD mínimo) ──
@@ -1963,4 +2169,9 @@ module.exports = {
   // F7.1 (karateStudentIdentityLink); as versões antigas daqui foram
   // removidas na F7.2 por não terem chamador.
   federateStudentByRequest,
+  // F13 — vínculo N:N aluno↔responsável (migration 280). A mecânica mora
+  // em services/karateDojoStudentGuardians.js; reexportado aqui para as
+  // rotas/testes não precisarem conhecer dois módulos.
+  MAX_GUARDIANS_PER_STUDENT: guardianLinks.MAX_GUARDIANS_PER_STUDENT,
+  listStudentGuardians: guardianLinks.listForStudent,
 };

@@ -38,6 +38,13 @@
 // não de leitura das migrations. Migration não é verdade: a verdade é o
 // índice que está lá.
 //
+// ⚠️ EXCEÇÃO DECLARADA (F13, 12/08/2026): uq_kdsg_one_primary_per_student
+// entra AINDA NÃO APLICADO (migration 280). É a única entrada nessa
+// condição e está marcada como tal. Catalogar só depois do deploy é
+// exatamente a ordem que produziu o 42P10 de 11/08 — o código que mira o
+// índice é escrito ANTES de o índice existir, então a trava precisa
+// existir antes também. Quando a 280 rodar, a marca sai e nada mais muda.
+//
 // ⚠️ SE UM ÍNDICE MUDAR, MUDE AQUI JUNTO. Um índice que deixa de ser
 // parcial faz o `WHERE` do código virar erro; um que PASSA a ser parcial
 // precisa entrar nesta lista para o próximo `ON CONFLICT` nascer certo.
@@ -54,6 +61,16 @@
 // `ON CONFLICT DO NOTHING` sem lista (forma "bare") e
 // `ON CONFLICT ON CONSTRAINT x` são IMUNES a 42P10 — não fazem inferência
 // por especificação. São ignorados, não aprovados.
+//
+// COMENTÁRIO NÃO É CÓDIGO (achado em 12/08/2026, escrevendo a F13): um
+// comentário que EXPLICA a regra — "o ON CONFLICT (student_id, guardian_id)
+// do upsert é idempotente" — virava um SITE, com a tabela do INSERT
+// ANTERIOR (errada) e 400 caracteres de código como "predicado". Inerte
+// naquele caso, mas é site fantasma: pode reprovar ou absolver por acidente
+// quando o catálogo crescer, e desencoraja documentar a própria regra que
+// esta trava defende. Ocorrência em linha que COMEÇA com `//` ou `*` é
+// pulada. Estreito de propósito: SQL de verdade nunca começa assim, e
+// comentário DENTRO de template literal é `--`, que continua sendo lido.
 // ============================================================
 'use strict';
 
@@ -70,6 +87,11 @@ const PARTIAL_INDEXES = [
   // ── dojô / federação (as tabelas que o importador dos 484 toca) ──
   { table: 'karate_dojo_students', arbiter: 'dojo_id,cpf', index: 'uq_karate_dojo_students_dojo_cpf', predicate: /cpf\s+is\s+not\s+null/i, human: 'WHERE cpf IS NOT NULL' },
   { table: 'karate_dojo_students', arbiter: 'practitioner_id', index: 'uq_karate_dojo_students_practitioner', predicate: /practitioner_id\s+is\s+not\s+null/i, human: 'WHERE practitioner_id IS NOT NULL' },
+  // ⏳ AINDA NÃO APLICADO — migration 280 (F13, dois responsáveis por aluno).
+  // O par (student_id, guardian_id) da MESMA tabela é UNIQUE TOTAL
+  // (uq_kdsg_student_guardian) e por isso NÃO entra aqui: índice total não
+  // leva predicado, e é ele que o upsert do import mira.
+  { table: 'karate_dojo_student_guardians', arbiter: 'student_id', index: 'uq_kdsg_one_primary_per_student', predicate: /is_primary/i, human: 'WHERE is_primary' },
   { table: 'karate_dojo_subscriptions', arbiter: 'student_id', index: 'uq_karate_dojo_subscriptions_active_student', predicate: /canceled_at\s+is\s+null/i, human: 'WHERE canceled_at IS NULL' },
   { table: 'karate_dojo_annuity_history', arbiter: 'dojo_id,reference_period', index: 'uq_kdah_dojo_period', predicate: /dojo_id\s+is\s+not\s+null/i, human: 'WHERE dojo_id IS NOT NULL' },
   { table: 'karate_dojo_annuity_history', arbiter: 'practitioner_id,reference_period', index: 'uq_kdah_practitioner_period', predicate: /practitioner_id\s+is\s+not\s+null/i, human: 'WHERE practitioner_id IS NOT NULL' },
@@ -119,6 +141,16 @@ function listJsFiles(dir) {
   return out;
 }
 
+// A ocorrência está numa linha de COMENTÁRIO JS? Só olha o começo da
+// linha: `//` (linha) ou `*` (continuação de bloco). Ver o comentário de
+// topo — deliberadamente estreito, para não confundir `--` de SQL dentro
+// de template literal (que é código de verdade e continua sendo lido).
+function isJsCommentLine(text, idx) {
+  const lineStart = text.lastIndexOf('\n', idx) + 1;
+  const head = text.slice(lineStart, idx).replace(/^\s+/, '');
+  return head.startsWith('//') || head.startsWith('*');
+}
+
 // Parênteses CASADOS na mão. Uma regex `\(([^)]*)\)` cortaria
 // `ON CONFLICT (dojo_id, lower(name))` em `dojo_id, lower(name` e o teste
 // passaria a mentir exatamente no caso que ele existe para pegar.
@@ -127,6 +159,9 @@ function extractOnConflicts(text) {
   const re = /ON\s+CONFLICT/gi;
   let m;
   while ((m = re.exec(text)) !== null) {
+    // Comentário explicando a regra não é um site (ver topo).
+    if (isJsCommentLine(text, m.index)) continue;
+
     let i = m.index + m[0].length;
     while (i < text.length && /\s/.test(text[i])) i += 1;
 
@@ -233,6 +268,21 @@ describe('ON CONFLICT × índices PARCIAIS e por EXPRESSÃO (42P10)', () => {
     expect(ofx.predicate).toMatch(/where\s+fitid\s+is\s+not\s+null/i);
   });
 
+  // F13 — o vínculo aluno↔responsável nasce mirando o índice TOTAL, e é
+  // isso que precisa continuar verdade. Se alguém trocar o arbiter para
+  // `(student_id)` "porque só pode haver um principal", o caso acima
+  // (predicado do índice PARCIAL) passa a reprovar — este aqui é a outra
+  // metade: garante que o site existe e mira o par completo, sem WHERE.
+  test('o upsert do vínculo (F13) mira o índice TOTAL, sem predicado', () => {
+    const link = SITES.find((s) => s.table === 'karate_dojo_student_guardians');
+    expect(link).toBeDefined();
+    expect(link.file).toBe('src/services/karateDojoStudentGuardians.js');
+    expect(link.arbiter).toBe('student_id,guardian_id');
+    // índice TOTAL não leva (nem pode levar) predicado — um WHERE aqui
+    // seria o erro inverso, e também dá 42P10.
+    expect(link.predicate).not.toMatch(/where/i);
+  });
+
   // O parser é a parte que pode mentir em silêncio. Estes casos provam que
   // ele lê o que promete ler — inclusive parêntese aninhado.
   describe('o parser (a parte que poderia mentir em silêncio)', () => {
@@ -259,6 +309,32 @@ describe('ON CONFLICT × índices PARCIAIS e por EXPRESSÃO (42P10)', () => {
       ).toHaveLength(0);
     });
 
+    test('COMENTÁRIO não é site: explicar a regra não vira ocorrência', () => {
+      // O caso real que motivou a regra: o comentário do import da F13
+      // vinha DEPOIS de um INSERT INTO karate_dojo_student_tags, então o
+      // site fantasma nascia com a tabela errada e 400 caracteres de
+      // código no lugar do predicado.
+      const out = extractOnConflicts(
+        'INSERT INTO karate_dojo_student_tags (a) VALUES ($1) ON CONFLICT (student_id, tag_id) DO NOTHING;\n' +
+        '      // o ON CONFLICT (student_id, guardian_id) do upsert é idempotente.\n' +
+        '      const x = 1;'
+      );
+      expect(out).toHaveLength(1);
+      expect(out[0].arbiter).toBe('student_id,tag_id');
+    });
+
+    test('continuação de bloco (`*`) também não é site', () => {
+      expect(extractOnConflicts('/**\n * ON CONFLICT (student_id) DO UPDATE ...\n */')).toHaveLength(0);
+    });
+
+    test('mas SQL indentado dentro de template literal continua sendo lido', () => {
+      const out = extractOnConflicts(
+        'const sql = `\n     INSERT INTO transactions (a)\n     VALUES ($1)\n     -- comentário SQL\n     ON CONFLICT (company_id, fitid) WHERE fitid IS NOT NULL DO NOTHING`;'
+      );
+      expect(out).toHaveLength(1);
+      expect(out[0].arbiter).toBe('company_id,fitid');
+    });
+
     test('aceita ON CONFLICT colado no parêntese (salesGoals.js é minificado)', () => {
       const out = extractOnConflicts(
         'INSERT INTO employee_goals(a) VALUES($1) ON CONFLICT(company_id,employee_id,reference_month) DO UPDATE SET a=1'
@@ -273,6 +349,17 @@ describe('ON CONFLICT × índices PARCIAIS e por EXPRESSÃO (42P10)', () => {
       const idx = PARTIAL_INDEXES.find(
         (i) => i.table === 'transactions' && i.arbiter === 'company_id,fitid'
       );
+      expect(idx.predicate.test(bad.predicate)).toBe(false);
+    });
+
+    test('a regra PEGA a regressão do vínculo F13 (arbiter trocado para o índice parcial)', () => {
+      const bad = extractOnConflicts(
+        'INSERT INTO karate_dojo_student_guardians (a) VALUES ($1) ON CONFLICT (student_id) DO UPDATE SET is_primary = true'
+      )[0];
+      const idx = PARTIAL_INDEXES.find(
+        (i) => i.table === 'karate_dojo_student_guardians' && i.arbiter === 'student_id'
+      );
+      expect(idx).toBeDefined();
       expect(idx.predicate.test(bad.predicate)).toBe(false);
     });
   });

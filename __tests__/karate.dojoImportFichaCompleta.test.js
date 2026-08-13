@@ -17,6 +17,12 @@
 //   - CPF com DV inválido: importa mesmo assim, marcado para revisão
 //   - responsável derivado de mãe/pai para menor sem guardian_name
 //   - idade desconhecida (sem birth_date): tratado como adulto, com warning
+//
+// F13 (12/08/2026): o responsável derivado deixou de ser UM ("a mãe, ou o
+// pai se a mãe estiver vazia") e passou a ser OS DOIS. O caso abaixo foi
+// reescrito no PR que fez a mudança — a cobertura ampla da F13 (só mãe, só
+// pai, adulto, irmãos, reimportação, deploy parcial) vive em
+// __tests__/karate.dojoStudentGuardians.test.js.
 // ============================================================
 'use strict';
 
@@ -165,6 +171,7 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
   function isGuardianInsert(s) { return /INSERT INTO karate_dojo_guardians/.test(s); }
   function isStudentInsert(s) { return /INSERT INTO karate_dojo_students/.test(s); }
   function isTagLink(s) { return /INSERT INTO karate_dojo_student_tags/.test(s); }
+  function isGuardianLink(s) { return /INSERT INTO karate_dojo_student_guardians/.test(s); }
 
   function buildClient(dispatch) {
     let seq = 0;
@@ -209,12 +216,18 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
     expect(tagLinks.length).toBe(2);
   });
 
-  test('menor sem guardian_name explícito: responsável vira a MÃE, telefone/email da linha migram para o responsável', async () => {
+  // F13 (12/08/2026): este caso ANTES afirmava "responsável vira a MÃE".
+  // O handler mudou (mãe E pai), então o caso muda no MESMO PR. Note o
+  // mock: ele devolve um id DIFERENTE por ordem de inserção — a versão
+  // antiga devolvia 'g-mae' para qualquer INSERT, o que colapsava os dois
+  // responsáveis em um e deixava o caso verde por acidente.
+  test('menor sem guardian_name explícito: mãe E pai viram responsáveis; o telefone/e-mail da linha fica com a MÃE', async () => {
     const db = require('../src/config/database');
+    let gseq = 0;
     const client = buildClient((s) => {
       if (isNameDup(s)) return { rows: [] };
       if (isGuardianLookup(s)) return { rows: [] };
-      if (isGuardianInsert(s)) return { rows: [{ id: 'g-mae' }] };
+      if (isGuardianInsert(s)) { gseq += 1; return { rows: [{ id: `g${gseq}` }] }; }
     });
     db.connect = jest.fn().mockResolvedValueOnce(client);
 
@@ -226,20 +239,35 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
     const res = await svc.importStudents(dojoId, rows, {});
 
     expect(res.created).toBe(1);
-    expect(res.warnings.some((w) => w.code === 'MENOR_SEM_RESPONSAVEL')).toBe(false); // achou mãe: sem warning
+    expect(res.warnings.some((w) => w.code === 'MENOR_SEM_RESPONSAVEL')).toBe(false); // achou os pais: sem warning
 
-    const guardianInsert = client.calls.find((c) => isGuardianInsert(c[0]));
-    expect(guardianInsert[1]).toEqual(
-      expect.arrayContaining([dojoId, 'Maria da Silva', '91988887777', 'mae@exemplo.com'])
-    );
+    const guardianInserts = client.calls.filter((c) => isGuardianInsert(c[0]));
+    expect(guardianInserts.length).toBe(2);
+    // MÃE: fica com o contato ÚNICO da planilha e com o parentesco certo.
+    expect(guardianInserts[0][1]).toEqual([dojoId, 'Maria da Silva', '91988887777', 'mae@exemplo.com', 'mãe']);
+    // PAI: entra NOMEADO e SEM contato — inventar um telefone (copiar o da
+    // mãe) seria pior do que não ter; numa emergência, dois números iguais
+    // é UM número com aparência de dois.
+    expect(guardianInserts[1][1]).toEqual([dojoId, 'José da Silva', null, null, 'pai']);
+    const semContato = res.warnings.find((w) => w.code === 'GUARDIAN_SEM_CONTATO');
+    expect(semContato).toMatchObject({ row: 1 });
+    expect(semContato.message).toContain('José da Silva');
+
+    // DOIS vínculos, um só principal (a mãe, que tem o contato).
+    const link = client.calls.find((c) => isGuardianLink(c[0]));
+    expect(link[1]).toEqual(['stu1', 'g1', 'mãe', true, 'stu1', 'g2', 'pai', false]);
 
     const studentInsert = client.calls.find((c) => isStudentInsert(c[0]));
-    // guardian_id preenchido, e o telefone/email do PRÓPRIO aluno ficam
-    // null (o contato migrou inteiro para o responsável — evita duplicar
-    // o contato do pai como se fosse do filho).
-    expect(studentInsert[1]).toEqual(expect.arrayContaining(['g-mae']));
+    // guardian_id (legado) segue apontando para a MÃE — asserção original
+    // preservada: nenhuma ficha existente muda de responsável principal.
+    expect(studentInsert[1]).toEqual(expect.arrayContaining(['g1']));
+    // O telefone/email do PRÓPRIO aluno ficam null (o contato migrou para
+    // o responsável — evita registrar o contato do adulto como se fosse da
+    // criança de 10 anos).
+    expect(studentInsert[1][6]).toBeNull();
+    expect(studentInsert[1][7]).toBeNull();
     // mother_name/father_name são filiação e são gravados SEMPRE, mesmo
-    // quando a mãe também é o responsável.
+    // quando os dois também são os responsáveis.
     expect(studentInsert[1]).toEqual(expect.arrayContaining(['Maria da Silva', 'José da Silva']));
   });
 
@@ -257,6 +285,8 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
     expect(res.skipped).toBe(0);
     expect(res.warnings.some((w) => w.row === 1 && w.code === 'MENOR_SEM_RESPONSAVEL')).toBe(true);
     expect(client.calls.some((c) => isGuardianInsert(c[0]))).toBe(false);
+    // sem responsável nenhum, nenhum vínculo é escrito (nem SAVEPOINT)
+    expect(client.calls.some((c) => isGuardianLink(c[0]))).toBe(false);
   });
 
   test('sem birth_date (idade desconhecida): tratado como adulto, telefone/email ficam no próprio aluno, warning declarado', async () => {
