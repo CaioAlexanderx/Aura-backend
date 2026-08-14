@@ -274,7 +274,10 @@ describe('GET /annuities/summary — dojo_status', () => {
 
     expect(res.status).toBe(200);
     const summaryParams = db.query.mock.calls[1][1];
-    expect(summaryParams).toEqual([fedId, expect.any(String), [true]]);
+    // F6.5 (13/08/2026): SUMMARY_SQL ganhou um 4º parâmetro
+    // (practitionerStatusValues, $4) — default também [true], mesmo padrão
+    // de dojoStatusValues ($3). Ver practitioner_status em karateAnnuitySummary.js.
+    expect(summaryParams).toEqual([fedId, expect.any(String), [true], [true]]);
   });
 
   test('dojo inativo com saldo em aberto NÃO aparece no em_aberto do default (a query já devolve o universo filtrado — aqui garantimos que o filtro [true] foi de fato passado)', async () => {
