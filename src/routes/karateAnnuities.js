@@ -16,9 +16,11 @@
 //   POST  /financial/payments/:intentId/confirm         — admin marca pago + NFS-e
 //
 // Anuidades CPF:
-//   GET  /financial/annuities/cpf                      — lista praticantes
-//   POST /financial/annuities/cpf/:practitionerId/charge
-//   POST /financial/annuities/cpf/:practitionerId/pix
+//   GET   /financial/annuities/cpf                      — lista praticantes
+//         (?practitioner_status=active|inactive|all — mesmo leque do dojô)
+//   POST  /financial/annuities/cpf/:practitionerId/charge
+//   PATCH /financial/annuities/cpf/:practitionerId/:annuityId — corrige cobrança
+//   POST  /financial/annuities/cpf/:practitionerId/pix
 //
 // Guards: adminOnly() em todas as rotas (RBAC §7.3).
 // Idempotência via transactions.idempotency_key.
@@ -1799,17 +1801,13 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
 // ────────────────────────────────────────────────────────────────
 // CPF ANNUITIES
 //
-// dojo_status (ver seção DOJO ANNUITIES acima) NÃO tem equivalente aqui
-// por enquanto. cpfBaseSql já filtra `COALESCE(cu.is_active, true)` de
-// forma FIXA (sem toggle) desde o BUGFIX P0 de 11/07/2026 — praticante
-// inativo simplesmente NUNCA entra na listagem nem no segmento
-// `praticante` do summary (karateAnnuitySummary.js usa o mesmo predicado).
-// Isso já cumpre a premissa "inativo não polui os números" pro lado CPF,
-// mas diverge do padrão novo do dojô (ativo por padrão, inativo acessível
-// via filtro explícito — nunca some do sistema): hoje não existe forma de
-// listar/auditar praticante inativo por essa rota. Trade-off aceito pra
-// este PR (dojô primeiro, per escopo combinado) — dar ao CPF o mesmo
-// leque active|inactive|all fica de FOLLOW-UP explícito, não é silencioso.
+// practitioner_status (F6.5, 13/08/2026) — mesmo leque active|inactive|all
+// que dojo_status já tinha (ver seção DOJO ANNUITIES acima), agora também
+// pro segmento Praticantes: cpfBaseSql/CPF_LEGACY_BASE_SQL filtram por
+// customers.is_active via $3 (array de boolean, ou NULL pra "todos").
+// Default do endpoint continua 'active' (mesmo comportamento de antes pra
+// quem não manda o parâmetro) — fecha o follow-up que este comentário
+// deixava em aberto (o trade-off "dojô primeiro" do PR anterior).
 // ────────────────────────────────────────────────────────────────
 
 // GET /financial/annuities/cpf
@@ -1840,12 +1838,27 @@ router.post('/payments/:intentId/confirm', ...guards.adminOnly(), async (req, re
 // KPIs do summary. Ausência de cobrança (no_charge) continua NEUTRA (não
 // é inadimplência) — este filtro só define quem ENTRA na lista, não
 // reclassifica status.
+// practitioner_status ($3, boolean[] ou NULL — F6.5, 13/08/2026): mesmo
+// leque active|inactive|all que o dojô já tem (dojo_status acima), agora
+// espelhado pro lado CPF — follow-up explícito do trade-off documentado no
+// comentário da seção CPF ANNUITIES logo abaixo (praticante inativo não
+// tinha, até aqui, nenhuma forma de ser listado/auditado por esta rota).
+// Default do endpoint continua 'active' — comportamento OBSERVÁVEL
+// idêntico ao de antes pra quem não manda o parâmetro. cu.is_active
+// também é exposto no SELECT (practitioner_is_active) pra UI rotular o
+// praticante quando practitioner_status=all/inactive trouxer os dois,
+// mesmo padrão do dojo_is_active em dojosBaseSql.
+//
+// ⚠️ Numeração posicional: $1=federationId, $2=year, $3=practitionerStatusValues.
+// Isso empurra CPF_FILTER_SQL pra baixo — search vira $4, statusValues $5,
+// pageSize $6, offset $7 (ver CPF_FILTER_SQL e os 2 call sites da rota).
 function cpfBaseSql(withPlan) {
   return `
     SELECT
       cu.id AS practitioner_id, cu.name AS full_name,
       cu.karate_registration_number, cu.phone AS whatsapp,
       NULLIF(cu.email, '') AS email,
+      cu.is_active AS practitioner_is_active,
       h.id AS annuity_id, h.reference_period, h.amount, h.due_date,
       h.paid_at, h.status AS annuity_status, h.transaction_id
       ${withPlan ? ', h.plan' : ''},
@@ -1865,7 +1878,7 @@ function cpfBaseSql(withPlan) {
     LEFT JOIN karate_dojo_annuity_history h
       ON h.practitioner_id = cu.id AND h.reference_period = $2
     WHERE cu.federation_id = $1
-      AND COALESCE(cu.is_active, true)
+      AND ($3::boolean[] IS NULL OR COALESCE(cu.is_active, true) = ANY($3::boolean[]))
       AND cb.belt_level = 'preta'
   `;
 }
@@ -1880,6 +1893,7 @@ const CPF_LEGACY_BASE_SQL = `
     cu.id AS practitioner_id, cu.name AS full_name,
     cu.karate_registration_number, cu.phone AS whatsapp,
     NULLIF(cu.email, '') AS email,
+    cu.is_active AS practitioner_is_active,
     NULL::uuid AS annuity_id, NULL::text AS reference_period, t.amount, t.due_date,
     t.paid_at, NULL::text AS annuity_status, t.id AS transaction_id,
     CASE
@@ -1900,13 +1914,13 @@ const CPF_LEGACY_BASE_SQL = `
     AND t.category = 'annuity_cpf' AND EXTRACT(YEAR FROM t.due_date) = $2::int
     AND t.federation_id = $1
   WHERE cu.federation_id = $1
-    AND COALESCE(cu.is_active, true)
+    AND ($3::boolean[] IS NULL OR COALESCE(cu.is_active, true) = ANY($3::boolean[]))
     AND cb.belt_level = 'preta'
 `;
 
 const CPF_FILTER_SQL = `
-  WHERE ($3::text IS NULL OR full_name ILIKE '%' || $3 || '%' OR karate_registration_number ILIKE '%' || $3 || '%')
-    AND ($4::text[] IS NULL OR computed_status = ANY($4::text[]))
+  WHERE ($4::text IS NULL OR full_name ILIKE '%' || $4 || '%' OR karate_registration_number ILIKE '%' || $4 || '%')
+    AND ($5::text[] IS NULL OR computed_status = ANY($5::text[]))
 `;
 
 router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
@@ -1920,6 +1934,17 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
     : new Date().getFullYear().toString();
   const statusValues = statusFilterValues(status);
   const search = (req.query.q && String(req.query.q).trim()) ? String(req.query.q).trim() : null;
+  // practitioner_status: ativo/inativo do PRATICANTE (customers.is_active) —
+  // mesmo parâmetro/mesmo default ('active') de dojo_status, ver comentário
+  // em cpfBaseSql acima.
+  const practitionerStatus = annuitySvc.parsePractitionerStatus(req.query.practitioner_status);
+  if (practitionerStatus === null) {
+    return res.status(422).json({
+      error: `practitioner_status inválido. Valores aceitos: ${annuitySvc.PRACTITIONER_STATUS_VALUES.join(', ')}`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+  const practitionerStatusValues = annuitySvc.practitionerStatusToIsActiveValues(practitionerStatus);
 
   try {
     let rows;
@@ -1929,14 +1954,14 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
       try {
         const countRes = await db.query(
           `SELECT COUNT(*)::int AS total FROM (${cpfBaseSql(true)}) base ${CPF_FILTER_SQL}`,
-          [federationId, year, search, statusValues]
+          [federationId, year, practitionerStatusValues, search, statusValues]
         );
         total = countRes.rows[0]?.total || 0;
         const r = await db.query(
           `SELECT * FROM (${cpfBaseSql(true)}) base ${CPF_FILTER_SQL}
            ORDER BY karate_registration_number ASC NULLS LAST, full_name ASC
-           LIMIT $5 OFFSET $6`,
-          [federationId, year, search, statusValues, pageSize, offset]
+           LIMIT $6 OFFSET $7`,
+          [federationId, year, practitionerStatusValues, search, statusValues, pageSize, offset]
         );
         rows = r.rows;
       } catch (e) {
@@ -1974,6 +1999,10 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
           practitioner_id: r.practitioner_id,
           full_name: r.full_name,
           karate_registration_number: r.karate_registration_number || null,
+          // is_active: customers.is_active do praticante — pra UI rotular
+          // quando practitioner_status=all/inactive trouxer os dois (mesmo
+          // papel do dojo_is_active/is_active em dojosBaseSql).
+          is_active: r.practitioner_is_active !== false,
           whatsapp: r.whatsapp || null,
           email: r.email || null,
           annuity_id: r.annuity_id || null,
@@ -1999,19 +2028,20 @@ router.get('/annuities/cpf', ...guards.adminOnly(), async (req, res) => {
       // Fallback legado (migration 222 ausente): transactions diretamente.
       const countRes = await db.query(
         `SELECT COUNT(*)::int AS total FROM (${CPF_LEGACY_BASE_SQL}) base ${CPF_FILTER_SQL}`,
-        [federationId, year, search, statusValues]
+        [federationId, year, practitionerStatusValues, search, statusValues]
       );
       total = countRes.rows[0]?.total || 0;
       const r = await db.query(
         `SELECT * FROM (${CPF_LEGACY_BASE_SQL}) base ${CPF_FILTER_SQL}
          ORDER BY karate_registration_number ASC NULLS LAST, full_name ASC
-         LIMIT $5 OFFSET $6`,
-        [federationId, year, search, statusValues, pageSize, offset]
+         LIMIT $6 OFFSET $7`,
+        [federationId, year, practitionerStatusValues, search, statusValues, pageSize, offset]
       );
       data = r.rows.map(row => ({
         practitioner_id: row.practitioner_id,
         full_name: row.full_name,
         karate_registration_number: row.karate_registration_number || null,
+        is_active: row.practitioner_is_active !== false,
         whatsapp: row.whatsapp || null,
         email: row.email || null,
         amount: row.amount ? parseFloat(row.amount) : 0,
@@ -2235,6 +2265,183 @@ router.post('/annuities/cpf/:practitionerId/charge', ...guards.adminOnly(), asyn
     await client.query('ROLLBACK').catch(() => {});
     console.error('[karateAnnuities] cpf charge error:', err.message);
     res.status(500).json({ error: 'Erro ao lançar cobrança CPF', detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// PATCH /financial/annuities/cpf/:practitionerId/:annuityId
+// F6.5 (13/08/2026) — editar cobrança de anuidade CPF já lançada (valor/
+// vencimento/período), mesmo botão "Editar" que a anuidade de dojô já tem
+// (ver PATCH /annuities/dojos/:dojoId/:annuityId acima), agora disponível
+// pro segmento Praticantes do hub. MUITO mais simples que a versão de
+// dojô de propósito: anuidade CPF é SEMPRE 1x/ano, plano 'anual' fixo (ver
+// regra de negócio no topo de karateAnnuityService.js) — nunca existe
+// reestruturação de N parcelas nem troca de plano aqui, só edita a ÚNICA
+// parcela 'anuidade' já existente. Por isso este endpoint NÃO aceita
+// `plan` nem `installments[]` (só fazem sentido no dojô, que tem múltiplos
+// regimes) — só amount/due_date/reference_period.
+router.patch('/annuities/cpf/:practitionerId/:annuityId', ...guards.adminOnly(), async (req, res) => {
+  const { id: federationId, practitionerId, annuityId } = req.params;
+  const body = req.body || {};
+
+  const hasAmount = body.amount !== undefined && body.amount !== null && String(body.amount).trim() !== '';
+  const hasPeriod = body.reference_period !== undefined && body.reference_period !== null && String(body.reference_period).trim() !== '';
+  const hasDueDate = body.due_date !== undefined && body.due_date !== null && String(body.due_date).trim() !== '';
+
+  if (!hasAmount && !hasPeriod && !hasDueDate) {
+    return res.status(400).json({ error: 'Nenhum campo para atualizar (amount, due_date ou reference_period)' });
+  }
+
+  let bodyAmount = null;
+  if (hasAmount) {
+    bodyAmount = round2(Number(body.amount));
+    if (!Number.isFinite(bodyAmount) || bodyAmount <= 0) {
+      return res.status(422).json({ error: 'amount deve ser > 0', code: 'VALIDATION_ERROR' });
+    }
+  }
+
+  const newPeriod = hasPeriod ? String(body.reference_period).trim() : null;
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const histRes = await client.query(
+      `SELECT id, practitioner_id, federation_id, reference_period, plan, amount, due_date, status
+       FROM karate_dojo_annuity_history
+       WHERE id = $1 AND practitioner_id = $2 AND federation_id = $3
+       FOR UPDATE`,
+      [annuityId, practitionerId, federationId]
+    );
+    if (!histRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Lançamento não encontrado', code: 'NOT_FOUND' });
+    }
+    const hist = histRes.rows[0];
+
+    // Evita colidir com outra cobrança do mesmo período pro mesmo praticante
+    // (mesma checagem da rota de dojô).
+    if (hasPeriod) {
+      const dup = await client.query(
+        `SELECT id FROM karate_dojo_annuity_history
+         WHERE practitioner_id = $1 AND reference_period = $2 AND id <> $3 LIMIT 1`,
+        [practitionerId, newPeriod, annuityId]
+      );
+      if (dup.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error: 'Já existe outra cobrança para este praticante no período ' + newPeriod,
+          code: 'CONFLICT',
+        });
+      }
+    }
+
+    const seasonYear = parseInt(newPeriod || hist.reference_period, 10) || new Date().getFullYear();
+    let dueIso = null;
+    if (hasDueDate) {
+      const dueCheck = annuitySvc.validateDueDateOverride(body.due_date, seasonYear);
+      if (!dueCheck.valid || !dueCheck.value) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          error: `due_date inválido: ${dueCheck.error || 'obrigatório'}`,
+          code: 'VALIDATION_ERROR',
+        });
+      }
+      dueIso = dueCheck.value;
+    }
+
+    const instRes = await client.query(
+      `SELECT * FROM karate_annuity_installments WHERE annuity_id = $1 AND federation_id = $2 ORDER BY seq ASC FOR UPDATE`,
+      [annuityId, federationId]
+    );
+    // kind='filiacao' nunca existe pra CPF hoje, mas filtramos por
+    // consistência com a mesma guarda do lado dojô — só a parcela
+    // 'anuidade' é editável aqui.
+    const anuidadeInstallments = instRes.rows.filter((i) => i.kind !== 'filiacao');
+    if (!anuidadeInstallments.length) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({ error: 'Anuidade sem parcela para editar.', code: 'VALIDATION_ERROR' });
+    }
+    // CPF é sempre 1x/ano — edita a (única) parcela 'anuidade'.
+    const inst = anuidadeInstallments[0];
+    const paidTotal = round2(Number(inst.amount_paid || 0));
+    const newAmount = hasAmount ? bodyAmount : round2(Number(inst.amount));
+    const newDueDate = hasDueDate ? dueIso : toIsoDate(inst.due_date);
+
+    if (newAmount < paidTotal - 0.005) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        error: `Novo valor (R$ ${newAmount.toFixed(2)}) é menor do que o já recebido nesta anuidade (R$ ${paidTotal.toFixed(2)}). Ajuste o valor para, no mínimo, o valor já pago.`,
+        code: 'AMOUNT_BELOW_PAID',
+        details: { new_total: newAmount, paid_total: paidTotal },
+      });
+    }
+
+    await client.query(
+      `UPDATE karate_annuity_installments SET amount = $1, due_date = $2, updated_at = NOW() WHERE id = $3`,
+      [newAmount, newDueDate, inst.id]
+    );
+    if (inst.transaction_id) {
+      await client.query(
+        `UPDATE transactions SET amount = $1, due_date = $2, updated_at = NOW() WHERE id = $3 AND status <> 'cancelled'`,
+        [newAmount, newDueDate, inst.transaction_id]
+      );
+    }
+
+    if (hasPeriod) {
+      await client.query(
+        `UPDATE karate_dojo_annuity_history SET reference_period = $1, updated_at = NOW() WHERE id = $2`,
+        [newPeriod, annuityId]
+      );
+    }
+
+    // Reconcilia parcelas/ledger/rollup do header a partir do ledger
+    // remanescente — mesma primitiva usada pela edição de dojô.
+    const result = await recomputeAnnuityFromLedger(client, { federation_id: federationId, annuity_id: annuityId });
+
+    await client.query('COMMIT');
+
+    reconcileInstallmentTransactions(result.installments).catch((e) =>
+      console.error('[karateAnnuities] reconcileInstallmentTransactions falhou (patch anuidade cpf):', e.message)
+    );
+
+    financeAudit.logFinanceAudit({
+      federationId, action: 'annuity_edit', targetType: 'annuity', targetId: annuityId,
+      practitionerId, actorUserId: financeAudit.actorFromReq(req).actorUserId, source: 'ui',
+      before: {
+        amount: hist.amount != null ? parseFloat(hist.amount) : null,
+        reference_period: hist.reference_period,
+        due_date: toIsoDate(inst.due_date),
+      },
+      after: {
+        amount: result.header ? parseFloat(result.header.amount) : null,
+        reference_period: result.header ? result.header.reference_period : (newPeriod || hist.reference_period),
+        due_date: result.header ? toIsoDate(result.header.due_date) : newDueDate,
+      },
+    }).catch((e) => console.error('[karateAnnuities] financeAudit falhou (patch anuidade cpf):', e.message));
+
+    const { total, paid_total } = annuitySvc.computeTotals(result.installments);
+    res.json({
+      annuity_id: annuityId,
+      practitioner_id: practitionerId,
+      reference_period: result.header ? result.header.reference_period : (newPeriod || hist.reference_period),
+      plan: result.header ? (result.header.plan || 'anual') : 'anual',
+      amount: result.header ? parseFloat(result.header.amount) : null,
+      due_date: result.header ? toIsoDate(result.header.due_date) : null,
+      status: result.header ? result.header.status : null,
+      paid_at: result.header ? result.header.paid_at : null,
+      installments: result.installments.map(mapInstallmentForResponse),
+      total,
+      paid_total,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (err instanceof AnnuityPaymentError) {
+      return res.status(err.status).json({ error: err.message, code: err.code, details: err.details || null });
+    }
+    console.error('[karateAnnuities] patch annuity cpf error:', err.message);
+    res.status(500).json({ error: 'Erro ao editar anuidade', detail: err.message });
   } finally {
     client.release();
   }
