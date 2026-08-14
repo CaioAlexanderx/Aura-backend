@@ -1,0 +1,8 @@
+-- Backfill historico de anuidades FPKT (2017-2025) a partir de Anuidade_Dojos.xlsx
+-- 220 registros de anuidade (dojo-ano) + 396 parcelas (395 anuidade + 1 filiacao). federation_id = FPKT (274994b3-6324-4e7b-942e-e6dd19666149).
+-- transaction_id fica NULL (nao sao criados lancamentos financeiros retroativos para historico ja quitado).
+-- Correcoes aplicadas na fonte: 9 datas '28/02/1017' (typo) corrigidas para 2017.
+-- Caso especial: KONDEI 2024 tem parcela seq=2 kind='filiacao' (Taxa de Filiacao R$195 separada da anuidade).
+-- Caso especial: ASSOCIACAO SIMOES 2017 fica status='pending' (parcela 2 de R$125 nao paga, anuidade R$500 com R$375 pagos).
+-- Ver conteudo completo aplicado via Supabase MCP na sessao de 13/08/2026 (arquivo idem aplicado ao projeto hawtujkztrjpvvkihowb).
+-- Nota: por tamanho, ver o arquivo 281_migration.sql gerado na sessao para o statement INSERT completo (220 + 396 linhas de VALUES); o mesmo texto foi executado 1:1 via apply_migration.
