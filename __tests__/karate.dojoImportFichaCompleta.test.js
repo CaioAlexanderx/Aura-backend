@@ -62,7 +62,7 @@ describe('F12 — normalizadores puros do import (sem banco)', () => {
     });
   });
 
-  // ── splitAddress ────────────────────────────────────────────────────
+  // ── splitAddress ──────────────────────────────────────────────
   // 13/08/2026: a versão anterior pegava o ÚLTIMO número da string e por
   // isso o COMPLEMENTO virava o número da casa — medido em produção no
   // ensaio de 21 linhas do Areikan:
@@ -287,32 +287,143 @@ describe('F12 — normalizadores puros do import (sem banco)', () => {
 // karateDojoStudents.test.js NÃO cobre (aquele arquivo mantém o cenário
 // clássico de 8 campos). Mock por SQL (regex), nunca fila posicional —
 // mesma convenção do resto do repo.
+//
+// F14 (13/08/2026) — POR QUE ESTE BLOCO FOI REESCRITO
+// O handler deixou de fazer ~10 queries POR LINHA e passou a fazer um
+// número FIXO de queries por LOTE (ver o cabeçalho de importStudents). Os
+// SQLs mudaram, então os despachos do mock mudam no MESMO PR — e, junto,
+// as asserções que só faziam sentido em SQL de uma linha por vez
+// (`params[6]` era o telefone daquela linha; agora `params[8]` é o ARRAY
+// de telefones do lote).
+//
+// O mock virou um BANCO DE MENTIRA em vez de uma pilha de respostas
+// prontas: ele responde às leituras a partir de `existing`, o conjunto de
+// linhas que "já estão no banco DAQUELE dojô", indexado por dojo_id. Isso
+// tira a tautologia da versão anterior por dois lados:
+//   • o escopo é confrontado com DADO: se o handler mandar o dojo_id
+//     errado, o banco de mentira não acha nada e o caso de reimportação
+//     falha — antes, o teste só comparava params[0] com a constante do
+//     próprio arquivo, o que é sempre verdade e não prova escopo nenhum;
+//   • a resposta depende do que foi PERGUNTADO: os CPFs/nomes que voltam
+//     são os que o handler mandou e que existem lá, não uma linha fixa.
 // ============================================================
-describe('F12 — import transacional: tag, responsável mãe/pai, idade desconhecida', () => {
+describe('F12/F14 — import transacional: tag, responsável mãe/pai, idade desconhecida', () => {
   const dojoId = 'd0000000-0000-0000-0000-000000000002';
+  const OUTRO_DOJO = 'd0000000-0000-0000-0000-00000000dead';
 
+  // ── Despacho por SQL (âncora de comentário `-- tag:` onde existe) ──
+  // Nenhum predicado novo canibaliza os antigos: as âncoras `tag:` são
+  // únicas, e "karate_dojo_student_guardians"/"karate_dojo_student_tags"
+  // não casam com /karate_dojo_students/ (o "s" final não bate).
   function isBegin(s) { return /^BEGIN/.test(s.trim()); }
   function isCommit(s) { return /^COMMIT/.test(s.trim()); }
-  function isCpfDup(s) { return /SELECT id FROM karate_dojo_students WHERE dojo_id = \$1 AND cpf = \$2/.test(s); }
-  function isNameDup(s) { return /SELECT id FROM karate_dojo_students\s+WHERE dojo_id = \$1 AND lower\(full_name\)/.test(s); }
+  function isRollback(s) { return /^ROLLBACK/.test(s.trim()); }
+  function isIdleGuard(s) { return /SET\s+LOCAL\s+idle_in_transaction_session_timeout/i.test(s); }
+  function isSavepoint(s) { return /^(SAVEPOINT|RELEASE SAVEPOINT)/.test(s.trim()); }
+  function isCpfDup(s) { return /tag:import_dedupe_cpf/.test(s); }
+  function isNameDup(s) { return /tag:import_dedupe_name_birth/.test(s); }
   function isTagUpsert(s) { return /INSERT INTO karate_dojo_tags/.test(s); }
-  function isGuardianLookup(s) { return /SELECT id FROM karate_dojo_guardians/.test(s); }
+  function isGuardianLookup(s) { return /tag:import_guardian_lookup/.test(s); }
   function isGuardianInsert(s) { return /INSERT INTO karate_dojo_guardians/.test(s); }
   function isStudentInsert(s) { return /INSERT INTO karate_dojo_students/.test(s); }
   function isTagLink(s) { return /INSERT INTO karate_dojo_student_tags/.test(s); }
   function isGuardianLink(s) { return /INSERT INTO karate_dojo_student_guardians/.test(s); }
 
-  function buildClient(dispatch) {
-    let seq = 0;
+  // Ordem das colunas do INSERT em lote de alunos. $1 é o dojo_id; de $2
+  // em diante é um array por coluna, nesta ordem.
+  const STUDENT_COLS = [
+    'id', 'full_name', 'birth_date', 'cpf', 'rg', 'sex', 'phone', 'email',
+    'belt_label', 'belt_order', 'status', 'guardian_id',
+    'mother_name', 'father_name', 'zip_code', 'street', 'number', 'complement',
+    'neighborhood', 'city', 'state',
+  ];
+  function col(params, name) {
+    const i = STUDENT_COLS.indexOf(name);
+    if (i < 0) throw new Error(`coluna desconhecida no INSERT de alunos: ${name}`);
+    return params[1 + i];
+  }
+  // Guardas: se o INSERT mudar de forma, o teste precisa QUEBRAR aqui e
+  // não passar por acidente lendo o array errado.
+  function studentInsertOf(client) {
+    const call = client.calls.find((c) => isStudentInsert(c[0]));
+    if (!call) return null;
+    expect(call[1]).toHaveLength(1 + STUDENT_COLS.length);
+    return call[1];
+  }
+
+  const lower = (v) => String(v).toLowerCase();
+
+  // ── Banco de mentira: responde às LEITURAS a partir de `existing` ──
+  // `existing` é { [dojo_id]: { students: [...], guardians: [...] } }.
+  function buildClient(existing = {}, extra = () => undefined) {
     const calls = [];
+    const tagStore = new Map(); // lower(nome) → { id, name }
+    let tagSeq = 0;
     const client = {
       query: jest.fn(async (sql, params) => {
         const s = String(sql);
         calls.push([s, params]);
-        if (isBegin(s) || isCommit(s)) return {};
-        const custom = dispatch(s, params);
+        if (isBegin(s) || isCommit(s) || isRollback(s) || isIdleGuard(s) || isSavepoint(s)) return {};
+
+        const custom = extra(s, params);
         if (custom !== undefined) return custom;
-        if (isStudentInsert(s)) { seq += 1; return { rows: [{ id: `stu${seq}`, practitioner_id: null }] }; }
+
+        const scope = existing[params && params[0]] || { students: [], guardians: [] };
+
+        if (isCpfDup(s)) {
+          const asked = params[1] || [];
+          const rows = (scope.students || [])
+            .filter((st) => st.cpf && asked.includes(st.cpf))
+            .map((st) => ({ cpf: st.cpf }));
+          return { rows };
+        }
+
+        if (isNameDup(s)) {
+          const names = params[1] || [];
+          const births = params[2] || [];
+          const rows = [];
+          for (let i = 0; i < names.length; i++) {
+            const hit = (scope.students || []).some(
+              (st) => lower(st.full_name) === lower(names[i])
+                && (st.birth_date || null) === (births[i] || null)
+            );
+            if (hit) rows.push({ ord: String(i + 1) });
+          }
+          return { rows };
+        }
+
+        if (isGuardianLookup(s)) {
+          const names = params[1] || [];
+          const phones = params[2] || [];
+          const rows = [];
+          for (let i = 0; i < names.length; i++) {
+            const cands = (scope.guardians || [])
+              .filter((g) => lower(g.full_name) === lower(names[i]))
+              .filter((g) => phones[i] == null || (g.phone || '') === (phones[i] || ''))
+              // mesmo desempate do SQL: quem tem telefone primeiro, depois o mais antigo
+              .sort((a, b) => (b.phone ? 1 : 0) - (a.phone ? 1 : 0) || a.seq - b.seq);
+            if (cands.length) rows.push({ ord: String(i + 1), id: cands[0].id, has_phone: !!cands[0].phone });
+          }
+          return { rows };
+        }
+
+        if (isTagUpsert(s)) {
+          const names = params[1] || [];
+          const rows = [];
+          for (const name of names) {
+            const key = lower(name);
+            if (!tagStore.has(key)) { tagSeq += 1; tagStore.set(key, { id: `tag${tagSeq}`, name }); }
+            rows.push({ id: tagStore.get(key).id, name: tagStore.get(key).name });
+          }
+          return { rows };
+        }
+
+        if (isStudentInsert(s)) {
+          // RETURNING id, practitioner_id — os ids são os que o handler
+          // gerou e mandou; practitioner_id é sempre NULL no import.
+          return { rows: (params[1] || []).map((id) => ({ id, practitioner_id: null })) };
+        }
+
         return { rows: [] };
       }),
       release: jest.fn(),
@@ -321,13 +432,72 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
     return client;
   }
 
-  test('Academia vira tag: cria na primeira ocorrência, reusa (cache) nas seguintes do mesmo lote', async () => {
+  function mount(client) {
     const db = require('../src/config/database');
-    const client = buildClient((s) => {
-      if (isCpfDup(s)) return { rows: [] };
-      if (isTagUpsert(s)) return { rows: [{ id: 'tag-areikan' }] };
+    db.connect = jest.fn().mockResolvedValueOnce(client);
+  }
+
+  // ── F14: o custo do lote não cresce com o número de linhas ──
+  describe('F14 — número de idas ao banco é FIXO por lote (era ~10 por linha)', () => {
+    function lote(n) {
+      const rows = [];
+      for (let i = 0; i < n; i++) {
+        rows.push({
+          full_name: `Aluno ${i}`,
+          birth_date: '2015-06-01',
+          mother_name: `Mãe ${i}`,
+          father_name: `Pai ${i}`,
+          phone: '91988887777',
+          academia: 'Escola I Karate Areikan',
+        });
+      }
+      return rows;
+    }
+
+    test('3 linhas e 30 linhas custam exatamente as MESMAS queries', async () => {
+      const c3 = buildClient({});
+      mount(c3);
+      const r3 = await svc.importStudents(dojoId, lote(3), {});
+
+      const c30 = buildClient({});
+      mount(c30);
+      const r30 = await svc.importStudents(dojoId, lote(30), {});
+
+      expect(r3.created).toBe(3);
+      expect(r30.created).toBe(30);
+      // O número de queries é o mesmo — é ESTE o conserto do PR.
+      expect(c30.calls.length).toBe(c3.calls.length);
+      // E as escritas em lote acontecem UMA vez cada, para 30 alunos.
+      expect(c30.calls.filter((c) => isStudentInsert(c[0]))).toHaveLength(1);
+      expect(c30.calls.filter((c) => isGuardianInsert(c[0]))).toHaveLength(1);
+      expect(c30.calls.filter((c) => isTagLink(c[0]))).toHaveLength(1);
+      expect(c30.calls.filter((c) => isTagUpsert(c[0]))).toHaveLength(1);
+      expect(c30.calls.filter((c) => isNameDup(c[0]))).toHaveLength(1);
+      expect(c30.calls.filter((c) => isGuardianLookup(c[0]))).toHaveLength(1);
+      // 30 alunos entram no MESMO INSERT (e 60 responsáveis no mesmo insert).
+      expect(studentInsertOf(c30)[1]).toHaveLength(30);
+      const gIns = c30.calls.find((c) => isGuardianInsert(c[0]));
+      expect(gIns[1][2]).toHaveLength(60);
     });
-    db.connect.mockResolvedValueOnce ? db.connect.mockResolvedValueOnce(client) : (db.connect = jest.fn().mockResolvedValueOnce(client));
+
+    test('a transação abre com o teto de ociosidade (SET LOCAL) antes de qualquer escrita', async () => {
+      const client = buildClient({});
+      mount(client);
+      await svc.importStudents(dojoId, lote(1), {});
+
+      expect(isBegin(client.calls[0][0])).toBe(true);
+      expect(isIdleGuard(client.calls[1][0])).toBe(true);
+      // SET LOCAL (e não SET puro): fora da transação o pooler em modo
+      // transaction descarta o parâmetro — foi assim que a transação
+      // órfã de 8 minutos passou pelo SET do pool em src/config/database.js.
+      expect(client.calls[1][0]).toMatch(/SET\s+LOCAL/i);
+      expect(client.calls[1][0]).not.toMatch(/\$\d/); // SET não aceita parâmetro
+    });
+  });
+
+  test('Academia vira tag: UM upsert para o lote e um vínculo por aluno', async () => {
+    const client = buildClient({});
+    mount(client);
 
     const rows = [
       { full_name: 'Aluno Um', cpf: '52998224725', academia: 'Escola I Karate Areikan' },
@@ -337,28 +507,29 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
 
     expect(res.created).toBe(2);
     const tagUpserts = client.calls.filter((c) => isTagUpsert(c[0]));
-    // 1 upsert só: a segunda linha reusa via cache local do lote (mesma
-    // chave normalizada em minúsculas), não bate no banco de novo.
-    expect(tagUpserts.length).toBe(1);
+    // 1 upsert só, com 1 nome: as duas linhas colapsam na mesma chave
+    // normalizada em minúsculas antes de o SQL ser montado.
+    expect(tagUpserts).toHaveLength(1);
     expect(tagUpserts[0][1][0]).toBe(dojoId);
+    expect(tagUpserts[0][1][1]).toEqual(['Escola I Karate Areikan']);
+    // O arbiter repete a EXPRESSÃO do índice (uq_karate_dojo_tags_dojo_name_ci).
+    expect(tagUpserts[0][0]).toMatch(/ON CONFLICT \(dojo_id, lower\(name\)\)/);
+
     const tagLinks = client.calls.filter((c) => isTagLink(c[0]));
-    expect(tagLinks.length).toBe(2);
+    expect(tagLinks).toHaveLength(1);
+    // Os dois alunos, com a MESMA tag — e os student_id são exatamente os
+    // ids que foram gravados no INSERT de alunos.
+    const ids = col(studentInsertOf(client), 'id');
+    expect(tagLinks[0][1][0]).toEqual(ids);
+    expect(tagLinks[0][1][1]).toEqual(['tag1', 'tag1']);
   });
 
   // F13 (12/08/2026): este caso ANTES afirmava "responsável vira a MÃE".
-  // O handler mudou (mãe E pai), então o caso muda no MESMO PR. Note o
-  // mock: ele devolve um id DIFERENTE por ordem de inserção — a versão
-  // antiga devolvia 'g-mae' para qualquer INSERT, o que colapsava os dois
-  // responsáveis em um e deixava o caso verde por acidente.
+  // O handler mudou (mãe E pai), então o caso muda no MESMO PR.
+  // F14: o INSERT dos dois responsáveis virou UM só, com arrays.
   test('menor sem guardian_name explícito: mãe E pai viram responsáveis; o telefone/e-mail da linha fica com a MÃE', async () => {
-    const db = require('../src/config/database');
-    let gseq = 0;
-    const client = buildClient((s) => {
-      if (isNameDup(s)) return { rows: [] };
-      if (isGuardianLookup(s)) return { rows: [] };
-      if (isGuardianInsert(s)) { gseq += 1; return { rows: [{ id: `g${gseq}` }] }; }
-    });
-    db.connect = jest.fn().mockResolvedValueOnce(client);
+    const client = buildClient({});
+    mount(client);
 
     const rows = [{
       full_name: 'Criança Menor', birth_date: '2015-06-01',
@@ -370,42 +541,104 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
     expect(res.created).toBe(1);
     expect(res.warnings.some((w) => w.code === 'MENOR_SEM_RESPONSAVEL')).toBe(false); // achou os pais: sem warning
 
-    const guardianInserts = client.calls.filter((c) => isGuardianInsert(c[0]));
-    expect(guardianInserts.length).toBe(2);
+    const gIns = client.calls.filter((c) => isGuardianInsert(c[0]));
+    expect(gIns).toHaveLength(1);
+    const [gScope, gIds, gNames, gPhones, gEmails, gRels] = gIns[0][1];
+    expect(gScope).toBe(dojoId);
+    expect(gNames).toEqual(['Maria da Silva', 'José da Silva']);
     // MÃE: fica com o contato ÚNICO da planilha e com o parentesco certo.
-    expect(guardianInserts[0][1]).toEqual([dojoId, 'Maria da Silva', '91988887777', 'mae@exemplo.com', 'mãe']);
     // PAI: entra NOMEADO e SEM contato — inventar um telefone (copiar o da
     // mãe) seria pior do que não ter; numa emergência, dois números iguais
     // é UM número com aparência de dois.
-    expect(guardianInserts[1][1]).toEqual([dojoId, 'José da Silva', null, null, 'pai']);
+    expect(gPhones).toEqual(['91988887777', null]);
+    expect(gEmails).toEqual(['mae@exemplo.com', null]);
+    expect(gRels).toEqual(['mãe', 'pai']);
+
     const semContato = res.warnings.find((w) => w.code === 'GUARDIAN_SEM_CONTATO');
     expect(semContato).toMatchObject({ row: 1 });
     expect(semContato.message).toContain('José da Silva');
 
-    // DOIS vínculos, um só principal (a mãe, que tem o contato).
+    // DOIS vínculos, um só principal (a mãe, que tem o contato) — e os ids
+    // do vínculo são os MESMOS que foram inseridos (aluno e responsáveis),
+    // não valores inventados pelo mock.
+    const params = studentInsertOf(client);
+    const studentId = col(params, 'id')[0];
     const link = client.calls.find((c) => isGuardianLink(c[0]));
-    expect(link[1]).toEqual(['stu1', 'g1', 'mãe', true, 'stu1', 'g2', 'pai', false]);
+    expect(link[1]).toEqual([studentId, gIds[0], 'mãe', true, studentId, gIds[1], 'pai', false]);
 
-    const studentInsert = client.calls.find((c) => isStudentInsert(c[0]));
     // guardian_id (legado) segue apontando para a MÃE — asserção original
     // preservada: nenhuma ficha existente muda de responsável principal.
-    expect(studentInsert[1]).toEqual(expect.arrayContaining(['g1']));
+    expect(col(params, 'guardian_id')).toEqual([gIds[0]]);
     // O telefone/email do PRÓPRIO aluno ficam null (o contato migrou para
     // o responsável — evita registrar o contato do adulto como se fosse da
     // criança de 10 anos).
-    expect(studentInsert[1][6]).toBeNull();
-    expect(studentInsert[1][7]).toBeNull();
+    expect(col(params, 'phone')).toEqual([null]);
+    expect(col(params, 'email')).toEqual([null]);
     // mother_name/father_name são filiação e são gravados SEMPRE, mesmo
     // quando os dois também são os responsáveis.
-    expect(studentInsert[1]).toEqual(expect.arrayContaining(['Maria da Silva', 'José da Silva']));
+    expect(col(params, 'mother_name')).toEqual(['Maria da Silva']);
+    expect(col(params, 'father_name')).toEqual(['José da Silva']);
+  });
+
+  // F14 — o "cache do lote" da F13 virou índice de chaves distintas. Este
+  // caso é o que prova que ele continua fazendo o serviço para o qual foi
+  // criado: 87 responsáveis da planilha real do Areikan são compartilhados
+  // por irmãos.
+  test('irmãos compartilham a MESMA mãe: um INSERT de responsável, dois vínculos', async () => {
+    const client = buildClient({});
+    mount(client);
+
+    const rows = [
+      { full_name: 'Caio Marmorato Toloi', birth_date: '2014-03-02', mother_name: 'Ana Marmorato', phone: '1699998888' },
+      { full_name: 'Lucas Marmorato Toloi', birth_date: '2016-07-19', mother_name: 'Ana Marmorato', phone: '1699998888' },
+    ];
+    const res = await svc.importStudents(dojoId, rows, {});
+
+    expect(res.created).toBe(2);
+    const gIns = client.calls.filter((c) => isGuardianInsert(c[0]));
+    expect(gIns).toHaveLength(1);
+    expect(gIns[0][1][2]).toEqual(['Ana Marmorato']); // UMA linha de responsável
+    const guardianId = gIns[0][1][1][0];
+
+    const params = studentInsertOf(client);
+    expect(col(params, 'guardian_id')).toEqual([guardianId, guardianId]);
+
+    const link = client.calls.find((c) => isGuardianLink(c[0]));
+    const ids = col(params, 'id');
+    expect(link[1]).toEqual([ids[0], guardianId, 'mãe', true, ids[1], guardianId, 'mãe', true]);
+  });
+
+  // F14 — a busca SEM telefone (o segundo responsável) tem que continuar
+  // aceitando a pessoa que já existe COM telefone; senão um pai já
+  // cadastrado vira uma SEGUNDA linha sem contato.
+  test('pai já cadastrado COM telefone é reaproveitado pela busca sem telefone (não vira segundo cadastro)', async () => {
+    const client = buildClient({
+      [dojoId]: {
+        students: [],
+        guardians: [{ id: 'g-pai-existente', full_name: 'José da Silva', phone: '1633334444', seq: 1 }],
+      },
+    });
+    mount(client);
+
+    const rows = [{
+      full_name: 'Criança Menor', birth_date: '2015-06-01',
+      mother_name: 'Maria da Silva', father_name: 'José da Silva',
+      phone: '91988887777',
+    }];
+    const res = await svc.importStudents(dojoId, rows, {});
+
+    expect(res.created).toBe(1);
+    const gIns = client.calls.filter((c) => isGuardianInsert(c[0]));
+    // Só a MÃE é criada; o pai é reaproveitado.
+    expect(gIns[0][1][2]).toEqual(['Maria da Silva']);
+
+    const link = client.calls.find((c) => isGuardianLink(c[0]));
+    expect(link[1]).toContain('g-pai-existente');
   });
 
   test('menor sem mãe nem pai na planilha: continua entrando com warning MENOR_SEM_RESPONSAVEL (nunca bloqueia)', async () => {
-    const db = require('../src/config/database');
-    const client = buildClient((s) => {
-      if (isNameDup(s)) return { rows: [] };
-    });
-    db.connect = jest.fn().mockResolvedValueOnce(client);
+    const client = buildClient({});
+    mount(client);
 
     const rows = [{ full_name: 'Órfão De Planilha', birth_date: '2016-01-01' }];
     const res = await svc.importStudents(dojoId, rows, {});
@@ -414,16 +647,15 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
     expect(res.skipped).toBe(0);
     expect(res.warnings.some((w) => w.row === 1 && w.code === 'MENOR_SEM_RESPONSAVEL')).toBe(true);
     expect(client.calls.some((c) => isGuardianInsert(c[0]))).toBe(false);
-    // sem responsável nenhum, nenhum vínculo é escrito (nem SAVEPOINT)
+    // sem responsável nenhum, nenhum vínculo é escrito (nem SAVEPOINT),
+    // e nem a busca de responsáveis chega a ser feita
     expect(client.calls.some((c) => isGuardianLink(c[0]))).toBe(false);
+    expect(client.calls.some((c) => isGuardianLookup(c[0]))).toBe(false);
   });
 
   test('sem birth_date (idade desconhecida): tratado como adulto, telefone/email ficam no próprio aluno, warning declarado', async () => {
-    const db = require('../src/config/database');
-    const client = buildClient((s) => {
-      if (isNameDup(s)) return { rows: [] };
-    });
-    db.connect = jest.fn().mockResolvedValueOnce(client);
+    const client = buildClient({});
+    mount(client);
 
     const rows = [{
       full_name: 'Idade Desconhecida', mother_name: 'Mãe Desconhecida',
@@ -435,54 +667,46 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
     expect(res.warnings.some((w) => w.row === 1 && w.code === 'AGE_UNKNOWN_TREATED_AS_ADULT')).toBe(true);
     // adulto: NENHUM responsável é criado a partir da mãe (é só filiação aqui)
     expect(client.calls.some((c) => isGuardianInsert(c[0]))).toBe(false);
-    const studentInsert = client.calls.find((c) => isStudentInsert(c[0]));
+    const params = studentInsertOf(client);
     // telefone/email do próprio aluno (não migraram para ninguém)
-    expect(studentInsert[1]).toEqual(expect.arrayContaining(['91977776666', 'quemsabe@exemplo.com']));
+    expect(col(params, 'phone')).toEqual(['91977776666']);
+    expect(col(params, 'email')).toEqual(['quemsabe@exemplo.com']);
+    expect(col(params, 'mother_name')).toEqual(['Mãe Desconhecida']);
   });
 
   test('CPF com DV inválido: importa mesmo assim, com warning de revisão (nunca bloqueia a linha)', async () => {
-    const db = require('../src/config/database');
-    const client = buildClient((s) => {
-      if (isCpfDup(s)) return { rows: [] };
-    });
-    db.connect = jest.fn().mockResolvedValueOnce(client);
+    const client = buildClient({});
+    mount(client);
 
     const rows = [{ full_name: 'CPF Torto', cpf: '52998224726' }]; // DV inválido de propósito
     const res = await svc.importStudents(dojoId, rows, {});
 
     expect(res.created).toBe(1);
     expect(res.warnings.some((w) => w.row === 1 && w.code === 'CPF_CHECKSUM_INVALID')).toBe(true);
-    const studentInsert = client.calls.find((c) => isStudentInsert(c[0]));
-    expect(studentInsert[1]).toEqual(expect.arrayContaining(['52998224726'])); // CPF entra assim mesmo
+    expect(col(studentInsertOf(client), 'cpf')).toEqual(['52998224726']); // CPF entra assim mesmo
   });
 
   // 13/08/2026 — o complemento tem coluna PRÓPRIA (karate_dojo_students.
-  // complement, text, já existente: nenhuma migration neste PR). Antes ele
-  // ficava grudado em `street` e o apartamento ia parar em `number`.
+  // complement, text, já existente). Antes ele ficava grudado em `street`
+  // e o apartamento ia parar em `number`.
   test('endereço com complemento: number é o da VIA e o complemento vai para a coluna complement', async () => {
-    const db = require('../src/config/database');
-    const client = buildClient((s) => {
-      if (isNameDup(s)) return { rows: [] };
-    });
-    db.connect = jest.fn().mockResolvedValueOnce(client);
+    const client = buildClient({});
+    mount(client);
 
     const rows = [{ full_name: 'Mora No Apto', address: 'Rua Manoel Rodrigues Jacob 1451 - AP 74' }];
     const res = await svc.importStudents(dojoId, rows, {});
 
     expect(res.created).toBe(1);
-    const insert = client.calls.find((c) => isStudentInsert(c[0]));
-    expect(insert[0]).toContain('complement'); // a coluna entra no INSERT
-    expect(insert[1][15]).toBe('Rua Manoel Rodrigues Jacob'); // street
-    expect(insert[1][16]).toBe('1451');                       // number: a VIA, não o "74" do AP
-    expect(insert[1][17]).toBe('AP 74');                      // complement
+    const call = client.calls.find((c) => isStudentInsert(c[0]));
+    expect(call[0]).toContain('complement'); // a coluna entra no INSERT
+    expect(col(call[1], 'street')).toEqual(['Rua Manoel Rodrigues Jacob']);
+    expect(col(call[1], 'number')).toEqual(['1451']); // a VIA, não o "74" do AP
+    expect(col(call[1], 'complement')).toEqual(['AP 74']);
   });
 
   test('complement explícito da planilha tem prioridade e o street/number já separados não são reprocessados', async () => {
-    const db = require('../src/config/database');
-    const client = buildClient((s) => {
-      if (isNameDup(s)) return { rows: [] };
-    });
-    db.connect = jest.fn().mockResolvedValueOnce(client);
+    const client = buildClient({});
+    mount(client);
 
     const rows = [{
       full_name: 'Planilha Nova',
@@ -492,53 +716,150 @@ describe('F12 — import transacional: tag, responsável mãe/pai, idade desconh
     const res = await svc.importStudents(dojoId, rows, {});
 
     expect(res.created).toBe(1);
-    const p = client.calls.find((c) => isStudentInsert(c[0]))[1];
-    expect(p[15]).toBe('Rua Já Separada');
-    expect(p[16]).toBe('10');
-    expect(p[17]).toBe('Bloco B apto 3');
+    const params = studentInsertOf(client);
+    expect(col(params, 'street')).toEqual(['Rua Já Separada']);
+    expect(col(params, 'number')).toEqual(['10']);
+    expect(col(params, 'complement')).toEqual(['Bloco B apto 3']);
   });
 
-  test('reimportação de linha SEM CPF: dedupe por (dojo_id, nome, nascimento) evita duplicar', async () => {
-    const db = require('../src/config/database');
-    const client = buildClient((s) => {
-      if (isNameDup(s)) return { rows: [{ id: 'ja-existe' }] }; // já está no banco
+  // ── Dedupe: as DUAS mensagens continuam saindo no caso certo ──
+  describe('dedupe (a política de SKIP não mudou)', () => {
+    test('reimportação de linha SEM CPF: dedupe por (dojo_id, nome, nascimento) evita duplicar', async () => {
+      const client = buildClient({
+        [dojoId]: { students: [{ full_name: 'Já Importado Antes', birth_date: '2000-01-01' }], guardians: [] },
+      });
+      mount(client);
+
+      const rows = [{ full_name: 'Já Importado Antes', birth_date: '2000-01-01' }];
+      const res = await svc.importStudents(dojoId, rows, {});
+
+      expect(res.created).toBe(0);
+      expect(res.skipped).toBe(1);
+      expect(res.warnings.some((w) => w.row === 1 && w.code === 'DUP_NAME_NO_CPF')).toBe(true);
+      expect(client.calls.some((c) => isStudentInsert(c[0]))).toBe(false);
     });
-    db.connect = jest.fn().mockResolvedValueOnce(client);
 
-    const rows = [{ full_name: 'Já Importado Antes', birth_date: '2000-01-01' }];
-    const res = await svc.importStudents(dojoId, rows, {});
+    test('reimportação do MESMO arquivo (linha com CPF) continua protegida por (dojo_id, cpf)', async () => {
+      const client = buildClient({
+        [dojoId]: { students: [{ full_name: 'Repetido', cpf: '52998224725' }], guardians: [] },
+      });
+      mount(client);
 
-    expect(res.created).toBe(0);
-    expect(res.skipped).toBe(1);
-    expect(res.warnings.some((w) => w.row === 1 && w.code === 'DUP_NAME_NO_CPF')).toBe(true);
-    expect(client.calls.some((c) => isStudentInsert(c[0]))).toBe(false);
-  });
+      const rows = [{ full_name: 'Repetido', cpf: '52998224725' }];
+      const res = await svc.importStudents(dojoId, rows, {});
 
-  test('reimportação do MESMO arquivo (linha com CPF) continua protegida por (dojo_id, cpf)', async () => {
-    const db = require('../src/config/database');
-    const client = buildClient((s) => {
-      if (isCpfDup(s)) return { rows: [{ id: 'ja-existe' }] };
+      expect(res.created).toBe(0);
+      expect(res.skipped).toBe(1);
+      expect(res.warnings.some((w) => w.row === 1 && w.code === 'DUP_CPF')).toBe(true);
     });
-    db.connect = jest.fn().mockResolvedValueOnce(client);
 
-    const rows = [{ full_name: 'Repetido', cpf: '52998224725' }];
-    const res = await svc.importStudents(dojoId, rows, {});
+    // ESCOPO CONFRONTADO COM DADO, não com a constante: o mesmo aluno
+    // "já existe", mas em OUTRO dojô. Se o handler mandar o dojo_id
+    // errado na query de dedupe, o banco de mentira devolve a duplicata e
+    // este caso quebra.
+    test('o dedupe é POR DOJÔ: o mesmo CPF em outro dojô não bloqueia a linha', async () => {
+      const client = buildClient({
+        [OUTRO_DOJO]: { students: [{ full_name: 'Repetido', cpf: '52998224725' }], guardians: [] },
+      });
+      mount(client);
 
-    expect(res.created).toBe(0);
-    expect(res.skipped).toBe(1);
-    expect(res.warnings.some((w) => w.row === 1 && w.code === 'DUP_CPF')).toBe(true);
+      const res = await svc.importStudents(dojoId, [{ full_name: 'Repetido', cpf: '52998224725' }], {});
+
+      expect(res.created).toBe(1);
+      expect(res.skipped).toBe(0);
+      const dedupe = client.calls.find((c) => isCpfDup(c[0]));
+      expect(dedupe[1][0]).toBe(dojoId);
+      expect(dedupe[1][1]).toEqual(['52998224725']);
+    });
+
+    // As duas mensagens de DUP_CPF não são intercambiáveis, e qual delas
+    // sai depende de a chave existir OU NÃO no banco — exatamente como no
+    // laço antigo, que só marcava a chave como "vista no lote" depois de
+    // ela sobreviver à consulta.
+    test('chave NOVA repetida no lote: a 2ª linha leva "duplicado no lote"', async () => {
+      const client = buildClient({});
+      mount(client);
+
+      const res = await svc.importStudents(dojoId, [
+        { full_name: 'Primeira', cpf: '52998224725' },
+        { full_name: 'Segunda', cpf: '52998224725' },
+      ], {});
+
+      expect(res.created).toBe(1);
+      expect(res.skipped).toBe(1);
+      const w = res.warnings.filter((x) => x.code === 'DUP_CPF');
+      expect(w).toHaveLength(1);
+      expect(w[0].row).toBe(2);
+      expect(w[0].message).toMatch(/duplicado no lote/);
+    });
+
+    test('chave que JÁ ESTÁ no banco e repetida no lote: as DUAS linhas levam "já cadastrado"', async () => {
+      const client = buildClient({
+        [dojoId]: { students: [{ full_name: 'Primeira', cpf: '52998224725' }], guardians: [] },
+      });
+      mount(client);
+
+      const res = await svc.importStudents(dojoId, [
+        { full_name: 'Primeira', cpf: '52998224725' },
+        { full_name: 'Segunda', cpf: '52998224725' },
+      ], {});
+
+      expect(res.created).toBe(0);
+      expect(res.skipped).toBe(2);
+      const w = res.warnings.filter((x) => x.code === 'DUP_CPF');
+      expect(w.map((x) => x.row)).toEqual([1, 2]);
+      for (const x of w) expect(x.message).toMatch(/já cadastrado neste dojô/);
+    });
+
+    test('linha vazia demais (sem full_name) é ignorada sem tocar o banco de dedupe/insert', async () => {
+      const client = buildClient({});
+      mount(client);
+
+      const res = await svc.importStudents(dojoId, [{ full_name: '   ' }], {});
+
+      expect(res.created).toBe(0);
+      expect(res.skipped).toBe(1);
+      expect(res.warnings[0]).toMatchObject({ row: 1, code: 'MISSING_NAME' });
+      expect(client.calls.some((c) => isStudentInsert(c[0]))).toBe(false);
+      expect(client.calls.some((c) => isCpfDup(c[0]))).toBe(false);
+      expect(client.calls.some((c) => isNameDup(c[0]))).toBe(false);
+    });
   });
 
-  test('linha vazia demais (sem full_name) é ignorada sem tocar o banco de dedupe/insert', async () => {
-    const db = require('../src/config/database');
-    const client = buildClient(() => undefined);
-    db.connect = jest.fn().mockResolvedValueOnce(client);
+  // ── Os warnings continuam saindo agrupados por LINHA ──
+  // Esta é a parte que a reescrita mais poderia ter quebrado sem ninguém
+  // notar: agora as fases rodam para o lote inteiro, e uma implementação
+  // ingênua devolveria os avisos agrupados por FASE.
+  test('a ordem dos warnings é por linha, e dentro da linha é a de sempre', async () => {
+    const client = buildClient({});
+    mount(client);
 
-    const res = await svc.importStudents(dojoId, [{ full_name: '   ' }], {});
+    const res = await svc.importStudents(dojoId, [
+      { full_name: 'Linha Um', phone: '123' },                       // INVALID_PHONE + AGE_UNKNOWN
+      { full_name: 'Linha Dois', birth_date: '2015-01-01', email: 'nao-e-email',
+        mother_name: 'Mãe Dois', father_name: 'Pai Dois' },          // INVALID_EMAIL + GUARDIAN_SEM_CONTATO
+    ], {});
 
-    expect(res.created).toBe(0);
-    expect(res.skipped).toBe(1);
-    expect(res.warnings[0]).toMatchObject({ row: 1, code: 'MISSING_NAME' });
-    expect(client.calls.some((c) => isStudentInsert(c[0]))).toBe(false);
+    expect(res.created).toBe(2);
+    expect(res.warnings.map((w) => [w.row, w.code])).toEqual([
+      [1, 'INVALID_PHONE'],
+      [1, 'AGE_UNKNOWN_TREATED_AS_ADULT'],
+      [2, 'INVALID_EMAIL'],
+      [2, 'GUARDIAN_SEM_CONTATO'],
+    ]);
+  });
+
+  test('erro no meio do lote dá ROLLBACK e devolve a conexão', async () => {
+    const boom = new Error('42703 column does not exist');
+    const client = buildClient({}, (s) => {
+      if (isStudentInsert(s)) throw boom;
+      return undefined;
+    });
+    mount(client);
+
+    await expect(svc.importStudents(dojoId, [{ full_name: 'Qualquer' }], {})).rejects.toThrow(boom);
+    expect(client.calls.some((c) => isRollback(c[0]))).toBe(true);
+    expect(client.calls.some((c) => isCommit(c[0]))).toBe(false);
+    expect(client.release).toHaveBeenCalled();
   });
 });

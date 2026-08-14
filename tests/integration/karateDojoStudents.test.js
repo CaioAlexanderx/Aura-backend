@@ -73,6 +73,13 @@
 // (arquivo próprio — cenário de 15 colunas, tag, responsável por mãe/pai,
 // idade desconhecida, CPF com DV inválido, reimportação sem CPF).
 //
+// AUDITORIA F14 (13/08/2026) — o import passou a custar por LOTE, não por
+// LINHA: dedupe, busca de responsáveis e INSERTs viraram UMA query cada,
+// com arrays, e a transação abre com `SET LOCAL
+// idle_in_transaction_session_timeout` (incidente da transação órfã de 8
+// minutos). Os dois casos deste arquivo que olham o INSERT do import
+// mudaram junto — mesmas asserções de comportamento, forma nova de SQL.
+//
 // REGRA CRÍTICA (padrão karateDojoClaim.test.js): db.query.mockReset() em
 // afterEach — jest.clearAllMocks NÃO drena filas mockResolvedValueOnce.
 // Import usa transação via db.connect() → client mockado na ordem exata
@@ -381,30 +388,32 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(db.query).not.toHaveBeenCalled();
   });
 
-  // F12: dispatch por SQL (regex), NUNCA fila posicional — o import agora
-  // resolve tag ("Academia") e responsável (mãe/pai para menor) via
-  // queries condicionais, e uma fila rígida quebraria a cada campo novo
+  // F12: dispatch por SQL (regex), NUNCA fila posicional — o import
+  // resolve tag ("Academia") e responsável (mãe/pai para menor) por
+  // caminhos condicionais, e uma fila rígida quebraria a cada campo novo
   // que a planilha real precisar. Cenário aqui é DELIBERADAMENTE o mesmo
   // de sempre (1 ok, 1 cpf duplicado, 1 menor com warning) — nenhuma das
   // 3 linhas tem Academia/mãe/pai, então nenhuma query de tag/responsável
   // é esperada. Cobertura do resto da ficha (15 colunas, tag, responsável
   // derivado) está em __tests__/karate.dojoImportFichaCompleta.test.js.
+  //
+  // F14 (13/08/2026): o dedupe virou UMA query por LOTE (âncoras
+  // `-- tag:import_dedupe_*`) e os alunos entram em UM INSERT com arrays.
+  // O cenário e o resultado observável são os mesmos; o que mudou é a
+  // forma da SQL, então as âncoras e a contagem de INSERTs mudam junto.
   test('import: 1 ok, 1 cpf duplicado skipped, 1 menor com warning — transação única', async () => {
-    const isCpfDupCheck = (s) => /SELECT id FROM karate_dojo_students WHERE dojo_id = \$1 AND cpf = \$2/.test(s);
-    const isNameDupCheck = (s) => /SELECT id FROM karate_dojo_students\s+WHERE dojo_id = \$1 AND lower\(full_name\)/.test(s);
-    const isInsertStudent = (s) => /INSERT INTO karate_dojo_students\s*\n?\s*\(/.test(s) || /INSERT INTO karate_dojo_students$/m.test(s);
+    const isCpfDupCheck = (s) => /tag:import_dedupe_cpf/.test(s);
+    const isNameDupCheck = (s) => /tag:import_dedupe_name_birth/.test(s);
 
-    let seq = 0;
     const client = {
-      query: jest.fn(async (sql) => {
+      query: jest.fn(async (sql, params) => {
         const s = String(sql);
         if (/^BEGIN/.test(s.trim())) return {};
         if (/^COMMIT/.test(s.trim())) return {};
         if (isCpfDupCheck(s)) return { rows: [] }; // cpf inédito (linha 1)
         if (isNameDupCheck(s)) return { rows: [] }; // sem duplicata (linha 3, sem cpf)
         if (/INSERT INTO karate_dojo_students/.test(s)) {
-          seq += 1;
-          return { rows: [{ id: `i${seq}`, practitioner_id: null }] };
+          return { rows: (params[1] || []).map((id) => ({ id, practitioner_id: null })) };
         }
         return { rows: [] };
       }),
@@ -432,10 +441,14 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     const sqls = client.query.mock.calls.map((c) => String(c[0]));
     expect(sqls).toContain('BEGIN');
     expect(sqls).toContain('COMMIT');
-    // INSERTs escopados pelo dojô do token
+    // Teto de ociosidade aplicado DENTRO da transação (F14) — é o que
+    // impede a transação órfã de 8 minutos do incidente de 13/08.
+    expect(sqls.some((s) => /SET\s+LOCAL\s+idle_in_transaction_session_timeout/i.test(s))).toBe(true);
+    // UM INSERT para as 2 linhas que entraram, escopado pelo dojô do token
     const inserts = client.query.mock.calls.filter((c) => String(c[0]).includes('INSERT INTO karate_dojo_students'));
-    expect(inserts.length).toBe(2);
-    for (const c of inserts) expect(c[1][0]).toBe(dojoId);
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0][1][0]).toBe(dojoId);
+    expect(inserts[0][1][1]).toHaveLength(2); // ids dos 2 alunos criados
     // linha 3 (sem cpf) passou pelo dedupe por nome+nascimento, não pelo de cpf
     expect(client.query.mock.calls.some((c) => isNameDupCheck(String(c[0])))).toBe(true);
     expect(client.release).toHaveBeenCalled();
@@ -848,8 +861,10 @@ describe('F7.2 — import em lote sincroniza sem explodir', () => {
   }
 
   test('import comum (ninguém federado) → ZERO query de sync', async () => {
-    const client = mockImportTx((s) => {
-      if (/INSERT INTO karate_dojo_students/.test(s)) return { rows: [{ id: 'i1', practitioner_id: null }] };
+    const client = mockImportTx((s, params) => {
+      if (/INSERT INTO karate_dojo_students/.test(s)) {
+        return { rows: (params[1] || []).map((id) => ({ id, practitioner_id: null })) };
+      }
       return { rows: [] };
     });
 
@@ -871,11 +886,10 @@ describe('F7.2 — import em lote sincroniza sem explodir', () => {
   });
 
   test('linhas com praticante → UMA query de candidatos para o lote inteiro', async () => {
-    let seq = 0;
-    const client = mockImportTx((s) => {
+    const client = mockImportTx((s, params) => {
       if (/INSERT INTO karate_dojo_students/.test(s)) {
-        seq += 1;
-        return { rows: [{ id: `i${seq}`, practitioner_id: `p${seq}` }] };
+        // F14: UM INSERT devolve N linhas — o RETURNING é por aluno.
+        return { rows: (params[1] || []).map((_, i) => ({ id: `i${i + 1}`, practitioner_id: `p${i + 1}` })) };
       }
       if (isBatchCandidate(s)) return { rows: [] }; // nenhuma ficha adotada por este dojô
       return { rows: [] };
