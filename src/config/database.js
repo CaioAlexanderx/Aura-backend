@@ -52,10 +52,48 @@ const pool = new Pool({
 // e derrubar TODAS as conexões. Aqui o SET roda depois do connect e o erro é
 // engolido (best-effort), então nunca quebra a conexão.
 //   statement_timeout: mata uma query presa depois de 30s (libera o client).
-//   idle_in_transaction_session_timeout: mata transação esquecida aberta (30s).
+//   idle_in_transaction_session_timeout: mata transação esquecida aberta.
+//
+// ⚠️ ISTO AQUI NÃO É A DEFESA — LEIA ANTES DE CONFIAR NELE (13/08/2026)
+// Em 13/08/2026 uma transação do import de alunos ficou `idle in
+// transaction` por OITO MINUTOS em produção, segurando conexão do pool e
+// locks, até alguém rodar `pg_terminate_backend` na mão. Este SET estava
+// aqui, com 30s, o tempo todo.
+//
+// A prova de que ele não estava valendo são os valores LIDOS do banco no
+// dia: `idle_in_transaction_session_timeout = 0` e
+// `statement_timeout = 2min`. Nenhum dos dois é o que esta linha pede.
+// Explicação: com um pooler em modo TRANSACTION (Supavisor/PgBouncer, que
+// é como este backend fala com o Postgres), `SET` de SESSÃO emitido FORA
+// de uma transação vale no máximo para aquele ciclo — a próxima transação
+// pode cair em outra conexão de servidor, com o default do banco. Um
+// `SET` de sessão através de um pooler é uma promessa que o pooler não é
+// obrigado a cumprir, e o `.catch()` que engole o erro faz o fracasso ser
+// SILENCIOSO.
+//
+// AS DEFESAS QUE VALEM, em ordem:
+//   1. migration 281 — `ALTER DATABASE ... SET
+//      idle_in_transaction_session_timeout = '120s'`. Fica no catálogo do
+//      Postgres, então TODA sessão nova nasce com ele: as conexões do
+//      pooler, as de fora do pool (psql, jobs, MCP), todas. É a única que
+//      não depende de ninguém lembrar de nada. O porquê do número está no
+//      cabeçalho da migration.
+//   2. `SET LOCAL` logo depois do BEGIN, na operação longa (hoje:
+//      importStudents). `SET LOCAL` vive DENTRO da transação, que o
+//      pooler é obrigado a manter na mesma conexão de servidor — é o
+//      único SET que não pode ser descartado. Quem escrever uma nova
+//      operação cara deve fazer o mesmo.
+//   3. este hook, que continua aqui porque em conexão DIRETA (modo
+//      session, sem pooler) ele funciona e não custa nada.
+//
+// O valor de idle_in_transaction subiu de 30s para 120s para casar com o
+// da migration 281: dois limites diferentes para a mesma coisa, um deles
+// invisível, é o tipo de divergência que se paga em plantão. Não é
+// afrouxamento na prática — os 30s nunca chegaram a valer em produção.
+// statement_timeout fica como está: não foi ele que falhou.
 pool.on('connect', (client) => {
   client
-    .query("SET statement_timeout TO 30000; SET idle_in_transaction_session_timeout TO 30000;")
+    .query("SET statement_timeout TO 30000; SET idle_in_transaction_session_timeout TO 120000;")
     .catch((err) => console.warn('[db] nao foi possivel aplicar timeouts na conexao:', err.message));
 });
 
