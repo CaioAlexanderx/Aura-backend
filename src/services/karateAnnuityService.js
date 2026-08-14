@@ -686,6 +686,31 @@ function dojoStatusToIsActiveValues(dojoStatus) {
   return [true]; // 'active' (default)
 }
 
+// ── practitioner_status (filtro de ativo/inativo do PRATICANTE, F6.5,
+// 13/08/2026) ────────────────────────────────────────────────────────────
+// Espelha dojo_status (companies.is_active) só que sobre customers.is_active
+// — mesmo critério/mesmo default ('active'), fechando o follow-up que
+// ficou em aberto quando dojo_status foi implementado (só o segmento dojô
+// tinha o leque active|inactive|all; praticante inativo simplesmente não
+// tinha forma de ser listado/auditado por GET /annuities/cpf). Compartilhado
+// entre karateAnnuities.js (listagem) e karateAnnuitySummary.js (KPIs) —
+// mesmo motivo do par dojo_status/dojoStatusToIsActiveValues: lista e KPI
+// nunca podem divergir no critério de ativo/inativo.
+const PRACTITIONER_STATUS_VALUES = ['active', 'inactive', 'all'];
+
+function parsePractitionerStatus(raw) {
+  const v = (raw !== undefined && raw !== null && String(raw).trim() !== '')
+    ? String(raw).trim()
+    : 'active';
+  return PRACTITIONER_STATUS_VALUES.includes(v) ? v : null;
+}
+
+function practitionerStatusToIsActiveValues(practitionerStatus) {
+  if (practitionerStatus === 'all') return null;
+  if (practitionerStatus === 'inactive') return [false];
+  return [true]; // 'active' (default)
+}
+
 module.exports = {
   VALID_PLANS,
   PLANO_INDEFINIDO_REASON,
@@ -720,4 +745,7 @@ module.exports = {
   DOJO_STATUS_VALUES,
   parseDojoStatus,
   dojoStatusToIsActiveValues,
+  PRACTITIONER_STATUS_VALUES,
+  parsePractitionerStatus,
+  practitionerStatusToIsActiveValues,
 };
