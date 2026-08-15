@@ -43,7 +43,7 @@ describe('computeUnifyPlan', () => {
     expect(sumSchedule(p.schedule)).toBeCloseTo(100, 2);
   });
 
-  test('com juros: juros simples SO sobre a nova compra (newAmount * rate * N)', () => {
+  test('com juros: juros simples FLAT sobre a nova compra (newAmount * rate, independente de N)', () => {
     const p = computeUnifyPlan({
       openInstallments: [],
       newAmount: 100,
@@ -52,11 +52,12 @@ describe('computeUnifyPlan', () => {
       firstDueDate: '2026-07-01',
     });
 
-    expect(p.interest_added).toBeCloseTo(6, 2); // 100 * 0.02 * 3
-    expect(p.total).toBeCloseTo(106, 2);
-    // floor(106/3)=35.33, resto na ultima
-    expect(p.schedule.map((s) => s.amount_due)).toEqual([35.33, 35.33, 35.34]);
-    expect(sumSchedule(p.schedule)).toBeCloseTo(106, 2);
+    // 13/08/2026 (feedback Caio): juros total FLAT sobre o valor, nao mais
+    // multiplicado por N -- 100 * 0.02 = 2 (ANTES: 100 * 0.02 * 3 = 6).
+    expect(p.interest_added).toBeCloseTo(2, 2);
+    expect(p.total).toBeCloseTo(102, 2);
+    expect(p.schedule.map((s) => s.amount_due)).toEqual([34, 34, 34]);
+    expect(sumSchedule(p.schedule)).toBeCloseTo(102, 2);
   });
 
   test('juros NAO incide sobre o saldo ja parcelado (so sobre a nova compra)', () => {
@@ -67,10 +68,11 @@ describe('computeUnifyPlan', () => {
       interestRate: 0.05,
       firstDueDate: '2026-08-01',
     });
-    // saldo 200 entra a face; juros so sobre 100: 100*0.05*2 = 10
-    expect(p.interest_added).toBeCloseTo(10, 2);
-    expect(p.total).toBeCloseTo(310, 2); // 200 + 100 + 10
-    expect(sumSchedule(p.schedule)).toBeCloseTo(310, 2);
+    // saldo 200 entra a face; juros FLAT so sobre 100 (nao multiplica por N):
+    // 100 * 0.05 = 5 (ANTES: 100 * 0.05 * 2 = 10).
+    expect(p.interest_added).toBeCloseTo(5, 2);
+    expect(p.total).toBeCloseTo(305, 2); // 200 + 100 + 5
+    expect(sumSchedule(p.schedule)).toBeCloseTo(305, 2);
   });
 
   test('reparcelar sem nova compra (newAmount 0) e valido', () => {
