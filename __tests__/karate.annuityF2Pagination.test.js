@@ -166,11 +166,15 @@ describe('GET /financial/annuities/cpf — paginação real', () => {
         expect(res.status).toBe(200);
         expect(res.body.page).toBe(2);
         expect(res.body.pageSize).toBe(10);
+        // F6.5 (13/08/2026): cpfBaseSql ganhou practitioner_status como $3
+        // (empurrando search pra $4 e statusValues/pageSize/offset um a
+        // mais cada) — [federationId, year, practitionerStatusValues,
+        // search, statusValues, pageSize, offset].
         const countParams = db.query.mock.calls[0][1];
-        expect(countParams[2]).toBe('silva');
+        expect(countParams[3]).toBe('silva');
         const dataParams = db.query.mock.calls[1][1];
-        // offset = (page-1)*pageSize = 10
-        expect(dataParams[5]).toBe(10);
+        // offset = (page-1)*pageSize = 10, agora no índice 6.
+        expect(dataParams[6]).toBe(10);
         // confirma que é o caminho PRIMÁRIO (pós-migration 222), não o
         // fallback legado (transactions) — guarda contra vazamento do
         // cache HAS_INSTALLMENTS entre testes deste arquivo.
