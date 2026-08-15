@@ -265,7 +265,9 @@ describe('GET /federation/:id/financial/annuities/summary', () => {
           expect(sql).toMatch(/h\.reference_period\s*=\s*\$2/);
           // $3 = dojoStatusValues (filtro companies.is_active do dojô,
           // default [true] — ver karateAnnuityService.js/dojoStatusToIsActiveValues).
-          expect(params).toEqual([FED_ID, '2031', [true]]);
+          // $4 = practitionerStatusValues (F6.5, 13/08/2026 — mesmo default
+          // [true], filtro customers.is_active do praticante).
+          expect(params).toEqual([FED_ID, '2031', [true], [true]]);
           done();
         });
     });
