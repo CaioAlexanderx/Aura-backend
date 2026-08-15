@@ -99,7 +99,7 @@ describe('creditLedger.createCreditSale', () => {
     expect(inst1Call[0]).toMatch(/covered_amount/i);
   });
 
-  test('juros simples aplicados quando interest_rate > 0', async () => {
+  test('juros simples (flat) aplicados quando interest_rate > 0', async () => {
     const debitRow  = { id: 'tx-03', amount: '100.00' };
     const profileRow = { id: 'prof-01', status: 'active' };
     const configRow  = { id: 'conf-01', max_installments: 12, interest_rate: '0.02' }; // 2%
@@ -124,7 +124,10 @@ describe('creditLedger.createCreditSale', () => {
 
     const inst1Insert = client.query.mock.calls[4];
     const amt = inst1Insert[1][5]; // 6o parametro = amount_due
-    expect(parseFloat(amt)).toBeCloseTo(52, 1);
+    // 13/08/2026 (feedback Caio): juros total FLAT sobre o valor, independente
+    // de N -- total = 100 * (1 + 0.02) = 102, dividido em 2x = 51 cada
+    // (ANTES: total = 100 * (1 + 0.02 * 2) = 104 -> 52 cada).
+    expect(parseFloat(amt)).toBeCloseTo(51, 1);
   });
 });
 

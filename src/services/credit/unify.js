@@ -16,7 +16,7 @@
 //   installments:     N parcelas do carne unificado (escolha do lojista). 1..100.
 //   interestRate:     juros mensais (decimal). Decisao Caio 13/06: "se houver
 //                     juros, recalcular". Modelo: juros simples SO sobre a nova
-//                     compra (newAmount * rate * N) -- nao re-cobra juros sobre
+//                     compra (newAmount * rate) -- nao re-cobra juros sobre
 //                     saldo ja parcelado. 0 = sem juros (caso comum no fiado).
 //   firstDueDate:     vencimento da 1a parcela do carne unificado (YYYY-MM-DD).
 //   periodUnit/Count: periodicidade (mesma semantica de terms.resolvePeriod).
@@ -51,9 +51,11 @@ function computeUnifyPlan({
   const newAmt = round2(Math.max(0, Number(newAmount) || 0));
   const rate   = parseFloat(interestRate) || 0;
 
-  // Juros simples SO sobre a nova compra (evita re-cobrar juros do saldo ja
-  // parcelado). Mesmo formato de juros do createCreditSale (linear * N).
-  const interestAdded = rate > 0 ? round2(newAmt * rate * N) : 0;
+  // 13/08/2026 (feedback Caio): juros total FLAT sobre a nova compra,
+  // independente do numero de parcelas -- ANTES multiplicava por N (juros
+  // linear por parcela), escalando o juros total junto com o parcelamento.
+  // Mesma correcao aplicada em createCreditSale e /manual-entry.
+  const interestAdded = rate > 0 ? round2(newAmt * rate) : 0;
 
   const total = round2(openRemaining + newAmt + interestAdded);
 

@@ -1,4 +1,3 @@
-// ============================================================
 // AURA. -- Crediario (fiado) por cliente
 // GET    /companies/:id/credit/balances
 // GET    /companies/:id/credit/customer/:cid
@@ -1528,8 +1527,13 @@ router.post('/manual-entry', async (req, res) => {
         ? parseFloat(interest_rate)
         : parseFloat(accountTerms?.interest_rate != null ? accountTerms.interest_rate : config?.interest_rate) || 0;
 
+    // 13/08/2026 (feedback Caio): juros total FLAT sobre o valor do lancamento,
+    // independente do numero de parcelas -- ANTES multiplicava por n (juros
+    // linear por parcela), o que fazia o juros total escalar com o parcelamento
+    // e confundia o lojista/cliente (ex: 10% em 10x cobrava 100% de juros).
+    // Agora: total_com_juros = valor * (1 + taxa), sempre, seja 1x ou 50x.
     const totalWithInterest = effectiveRate > 0
-      ? parseFloat((total * (1 + effectiveRate * n)).toFixed(2))
+      ? parseFloat((total * (1 + effectiveRate)).toFixed(2))
       : total;
     const baseAmount = Math.floor((totalWithInterest / n) * 100) / 100;
     const remainder  = Math.round((totalWithInterest - baseAmount * n) * 100) / 100;
