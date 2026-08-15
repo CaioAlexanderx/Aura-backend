@@ -189,8 +189,13 @@ async function createCreditSale(client, {
       return d.toISOString().split('T')[0];
     })();
 
+    // 13/08/2026 (feedback Caio): juros total FLAT sobre o valor da venda,
+    // independente do numero de parcelas -- ANTES multiplicava por n (juros
+    // linear por parcela), o que escalava o juros total junto com o
+    // parcelamento (ex: 10% em 10x cobrava 100% de juros). Mesma correcao
+    // aplicada em /manual-entry e computeUnifyPlan.
     const totalWithInterest = effectiveRate > 0
-      ? parseFloat((amount * (1 + effectiveRate * n)).toFixed(2))
+      ? parseFloat((amount * (1 + effectiveRate)).toFixed(2))
       : amount;
 
     const baseAmount = Math.floor((totalWithInterest / n) * 100) / 100;
