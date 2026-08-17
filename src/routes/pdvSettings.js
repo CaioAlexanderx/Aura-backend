@@ -9,9 +9,11 @@
 //   BOOL: require_customer, require_seller, caixa_enabled, crediario_enabled,
 //         cash_tender_modal_enabled, studio_enabled, studio_kds_enabled,
 //         studio_gallery_enabled, studio_approval_enabled, food_mode_enabled,
-//         food_nfce_manual_enabled, food_comanda_print_enabled
+//         food_nfce_manual_enabled, food_comanda_print_enabled,
+//         card_fee_enabled
 //   STRING (enum): studio_approval_mode (wa_me | whatsapp_business)
-//   NUMBER: service_fee_pct, food_service_fee_pct
+//   NUMBER: service_fee_pct, food_service_fee_pct,
+//           card_fee_credit_pct, card_fee_debit_pct
 //
 // 26/05/2026: ampliada whitelist pra desbloquear UI Studio/Food. Antes,
 // app/studio/(estudio)/configuracoes.tsx tentava salvar studio_approval_*
@@ -38,6 +40,8 @@ const ALLOWED_BOOL_KEYS = [
   'food_mode_enabled',
   'food_nfce_manual_enabled',
   'food_comanda_print_enabled',
+  // 17/08/2026 — taxa da maquininha (Negocio + Studio)
+  'card_fee_enabled',
 ];
 
 // String enum: studio_approval_mode pode ser "wa_me" ou "whatsapp_business"
@@ -48,7 +52,15 @@ const ALLOWED_STRING_KEYS = {
 const ALLOWED_NUMBER_KEYS = [
   'service_fee_pct',
   'food_service_fee_pct',
+  // 17/08/2026 — aliquotas SEPARADAS: a adquirente cobra diferente em
+  // credito e debito. Percentuais (5 = 5%), teto de 100 abaixo.
+  'card_fee_credit_pct',
+  'card_fee_debit_pct',
 ];
+
+// Percentuais que nao fazem sentido acima de 100% — sem teto, um dedo
+// escorregado (500 em vez de 5) viraria despesa maior que a venda.
+const PCT_KEYS = ['card_fee_credit_pct', 'card_fee_debit_pct'];
 
 const DEFAULT_SETTINGS = {
   require_customer:          false,
@@ -66,6 +78,9 @@ const DEFAULT_SETTINGS = {
   food_mode_enabled:         false,
   food_nfce_manual_enabled:  false,
   food_comanda_print_enabled:false,
+  card_fee_enabled:          false,
+  card_fee_credit_pct:       0,
+  card_fee_debit_pct:        0,
 };
 
 function validateSettings(settings) {
@@ -103,6 +118,9 @@ function validateSettings(settings) {
       const num = Number(settings[key]);
       if (!Number.isFinite(num) || num < 0) {
         throw new AppError(key + ' deve ser numero >= 0', 400);
+      }
+      if (PCT_KEYS.includes(key) && num > 100) {
+        throw new AppError(key + ' deve ser percentual entre 0 e 100', 400);
       }
       clean[key] = num;
     }
