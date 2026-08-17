@@ -27,6 +27,7 @@ const router  = express.Router({ mergeParams: true });
 const crypto  = require('crypto');
 const db      = require('../config/database');
 const { markStudioOnboarding } = require('../utils/studioOnboarding');
+const collectionNotice = require('../services/credit/collectionNotice');
 
 // ═══════════════════════════════════════════════════════
 // FASE 4: KDS de Produção (atualizado 25/05 — KDS unificado + S-2.5)
@@ -108,6 +109,74 @@ async function hasInstallmentsTable() {
   _instCheckedAt = now;
   return _instAvailable;
 }
+
+// ─── POST /orders/:oid/cobrar-saldo ──────────────────────────────────────────
+// Cobranca do saldo da encomenda, INDEPENDENTE do crediario.
+//
+// 17/08/2026. O Studio nao tem crediario -- nao existe fiado nesse mercado.
+// As rotas de /credit ficam atras de assertCrediarioEnabled, entao cobrar por
+// la exigiria a lojista ligar um produto que ela nao usa so pra receber uma
+// encomenda que ela JA vendeu. Isso nao e degradacao, e bloqueio de
+// experiencia: a venda com sinal fecha e o dinheiro fica sem porta de saida.
+//
+// A separacao e de SUPERFICIE, nao de dado: por baixo continua a mesma parcela
+// (vencimento, Pix, baixa de pagamento, estorno no cancelamento e A Receber
+// vem de graca). O que nao atravessa e o PRODUTO crediario -- fiado, limite,
+// score, carne, renegociacao -- que segue exclusivo do shell Negocio.
+//
+// Escopo estreito de proposito: recebe o ID do PEDIDO, resolve a parcela a
+// partir dele e confere a empresa. Nao aceita installment_id solto, entao esta
+// rota nao vira uma porta lateral pro ledger de credito inteiro.
+router.post('/orders/:oid/cobrar-saldo', async function(req, res) {
+  const cid = req.params.id;
+  const oid = req.params.oid;
+  const { template = 'encomenda', channel = 'whatsapp' } = req.body || {};
+
+  if (!(await hasInstallmentsTable())) {
+    return res.status(409).json({
+      error: 'Cobranca de saldo indisponivel neste ambiente.',
+      code: 'BALANCE_UNAVAILABLE',
+    });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    // A parcela sai do PEDIDO: o pedido do Studio de origem PDV e a venda,
+    // entao sale_id = oid. Escopo por empresa em todas as pontas.
+    const { rows } = await client.query(
+      `SELECT ci.*, COALESCE(c.name, c.phone) AS customer_name, c.phone,
+              COALESCE(co.trade_name, co.legal_name) AS store_name
+         FROM credit_installments ci
+         LEFT JOIN customers c ON c.id = ci.customer_id AND c.company_id = ci.company_id
+         LEFT JOIN companies co ON co.id = ci.company_id
+        WHERE ci.company_id = $1
+          AND ci.sale_id = $2
+          AND ci.status NOT IN ('paid', 'cancelled')
+          AND (ci.amount_due - COALESCE(ci.covered_amount, 0)) > 0.005
+        ORDER BY ci.due_date ASC
+        LIMIT 1`,
+      [cid, oid]
+    );
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        error: 'Esta encomenda nao tem saldo em aberto.',
+        code: 'NO_OPEN_BALANCE',
+      });
+    }
+
+    const notice = await collectionNotice.buildNotice(client, {
+      companyId: cid, installmentId: rows[0].id, template, channel, row: rows[0],
+    });
+    await client.query('COMMIT');
+    return res.json({ success: true, ...notice });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[studio/orders/cobrar-saldo]', err.message);
+    return res.status(500).json({ error: 'Erro ao preparar a cobranca do saldo.' });
+  } finally { client.release(); }
+});
 
 // ─── GET /orders — lista da view studio_orders (digital + pdv + marketplace) ────
 // ?with_balance=true — so encomendas com saldo em aberto (aba "A receber").
