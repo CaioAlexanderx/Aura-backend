@@ -43,13 +43,82 @@ const VALID_PRODUCTION_STATUS = [
   'cancelled',
 ];
 
+// ─── Saldo a receber da encomenda (17/08/2026) ───────────────────────────────
+// Venda com sinal (F2): o saldo vive em credit_installments, 1 parcela na data
+// combinada. Aqui ele e exposto junto do pedido pra que o Kanban e a lista de
+// Pedidos mostrem "quanto ainda tenho a receber desta encomenda" sem precisar
+// da tela de Crediario -- vocabulario que nao existe no mercado de
+// personalizados (a lojista pensa em encomenda em aberto, nao em fiado).
+//
+// Enriquecemos AQUI, no endpoint, e nao na view studio_orders: a migration 208
+// preserva a view existente em prod de proposito ("View studio_orders ja existe
+// -- mantida como esta"), entao alterar a view seria mexer num objeto que o
+// versionamento nao controla.
+//
+// So cobre source='pdv'. O deposito de digital_orders (deposit_required/
+// deposit_paid, migration 141) e outro mecanismo, sem parcela e sem id que os
+// endpoints de cobranca aceitem -- misturar os dois num campo so confundiria a
+// tela e a lojista.
+const BALANCE_LATERAL = `
+    LEFT JOIN LATERAL (
+      SELECT ci.id AS installment_id,
+             ROUND((ci.amount_due - COALESCE(ci.covered_amount, 0))::numeric, 2) AS amount,
+             ci.due_date,
+             (ci.due_date < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date) AS is_overdue
+        FROM credit_installments ci
+       WHERE ci.company_id = o.company_id
+         AND ci.sale_id    = o.pdv_sale_id
+         AND ci.status NOT IN ('paid', 'cancelled')
+         AND (ci.amount_due - COALESCE(ci.covered_amount, 0)) > 0.005
+       ORDER BY ci.due_date ASC
+       LIMIT 1
+    ) bal ON TRUE`;
+
+const BALANCE_COLS = `
+              bal.installment_id AS balance_installment_id,
+              bal.amount         AS balance_amount,
+              bal.due_date       AS balance_due_date,
+              CASE WHEN bal.installment_id IS NULL THEN NULL
+                   WHEN bal.is_overdue THEN 'overdue'
+                   ELSE 'pending' END AS balance_status,`;
+
+// Campos de saldo nulos — mantem o shape identico nos fallbacks slim/raw, pra
+// que o app nunca precise checar se o campo existe.
+const NULL_BALANCE = {
+  balance_installment_id: null,
+  balance_amount:         null,
+  balance_due_date:       null,
+  balance_status:         null,
+};
+
+// Deploy parcial: se credit_installments nao existir, o LATERAL derrubaria a
+// query RICA inteira pro fallback slim (perdendo item_count, aprovacoes etc).
+// Cache module-level evita repetir a checagem a cada request (CLAUDE.md #1).
+let _instCheckedAt = 0;
+let _instAvailable = null;
+async function hasInstallmentsTable() {
+  const now = Date.now();
+  if (_instAvailable !== null && (now - _instCheckedAt) < 60000) return _instAvailable;
+  try {
+    const r = await db.query(`SELECT to_regclass('public.credit_installments') AS t`);
+    _instAvailable = !!r.rows[0]?.t;
+  } catch (e) {
+    _instAvailable = false;
+  }
+  _instCheckedAt = now;
+  return _instAvailable;
+}
+
 // ─── GET /orders — lista da view studio_orders (digital + pdv + marketplace) ────
+// ?with_balance=true — so encomendas com saldo em aberto (aba "A receber").
 router.get('/orders', async function(req, res) {
-  const { status, days = 30, limit = 200 } = req.query;
+  const { status, days = 30, limit = 200, with_balance } = req.query;
   const cid = req.params.id;
   const safeLimit = Math.min(parseInt(limit) || 200, 500);
   const safeDays  = Math.min(parseInt(days) || 30, 365);
   const statusFilter = (status && VALID_PRODUCTION_STATUS.includes(String(status))) ? String(status) : null;
+  const onlyWithBalance = with_balance === 'true' || with_balance === '1';
+  const withBalance = await hasInstallmentsTable();
 
   // ── 1. Tentativa RICA: view completa com subselects (KDS precisa disso) ──
   try {
@@ -60,6 +129,12 @@ router.get('/orders', async function(req, res) {
       where += ` AND o.studio_production_status = $${params.length}`;
     }
     where += ` AND o.created_at >= NOW() - INTERVAL '${safeDays} days'`;
+    // Aba "A receber": so o que tem saldo em aberto. Sem a tabela de parcelas
+    // nao ha o que filtrar -- devolve vazio em vez de listar tudo, que daria a
+    // impressao errada de que todo pedido tem saldo.
+    if (onlyWithBalance) {
+      where += withBalance ? ` AND bal.installment_id IS NOT NULL` : ` AND FALSE`;
+    }
     params.push(safeLimit);
 
     const r = await db.query(
@@ -68,6 +143,7 @@ router.get('/orders', async function(req, res) {
               o.customer_name, o.customer_phone,
               o.display_name,
               o.source,
+${withBalance ? BALANCE_COLS : ''}
               o.digital_order_id,
               o.pdv_sale_id,
               o.marketplace_order_id,
@@ -91,13 +167,17 @@ router.get('/orders', async function(req, res) {
                 ORDER BY a.created_at DESC LIMIT 1) AS pending_approval_url,
               (SELECT COUNT(*) FROM studio_approval_links a
                 WHERE a.order_id = o.digital_order_id) AS approval_count
-         FROM studio_orders o
+         FROM studio_orders o${withBalance ? BALANCE_LATERAL : ''}
         WHERE ${where}
         ORDER BY o.created_at DESC
         LIMIT $${params.length}`,
       params
     );
-    return res.json({ orders: r.rows });
+    return res.json({
+      orders: withBalance
+        ? r.rows
+        : r.rows.map((row) => ({ ...row, ...NULL_BALANCE })),
+    });
   } catch (errRich) {
     console.error('[studio/orders:GET][rich]', errRich.message, errRich.code, errRich.stack);
   }
@@ -136,6 +216,7 @@ router.get('/orders', async function(req, res) {
         item_count: 0,
         pending_approval_url: null,
         approval_count: 0,
+        ...NULL_BALANCE,
       })),
       degraded: 'slim',
     });
@@ -177,6 +258,7 @@ router.get('/orders', async function(req, res) {
         item_count: 0,
         pending_approval_url: null,
         approval_count: 0,
+        ...NULL_BALANCE,
       })),
       degraded: 'raw',
     });
