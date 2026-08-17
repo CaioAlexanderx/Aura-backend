@@ -455,6 +455,17 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       txRemoved = true;
     }
 
+    // Taxa da maquininha (17/08/2026): a despesa pdv-card-fee-<id> tem que
+    // sair JUNTO com a receita da venda. Senao cancelar a venda deixava a
+    // despesa orfa -- a receita sumia e o custo ficava, virando prejuizo
+    // fantasma no fechamento. Este cancel apaga transacao por transacao,
+    // por idempotency_key: a chave nova precisa estar listada aqui.
+    const cardFeeDel = await client.query(
+      'DELETE FROM transactions WHERE idempotency_key = $1 AND company_id = $2 RETURNING amount',
+      ['pdv-card-fee-' + saleId, companyId]
+    );
+    const cardFeeRemoved = cardFeeDel.rows.length > 0;
+
     const paymentsDel = await client.query(
       'DELETE FROM sale_payments WHERE sale_id = $1 RETURNING id, amount',
       [saleId]
@@ -571,6 +582,7 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       refunded_amount: refundedAmount,
       mirror_created: false,
       tx_removed: txRemoved,
+      card_fee_removed: cardFeeRemoved,
       credit_reversed: creditReversed,
       items_returned: itemsRes.rows.length,
       payments_removed: paymentsRemoved,

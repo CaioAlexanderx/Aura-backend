@@ -186,6 +186,66 @@ async function resolveSignalCustomer(client, companyId, body) {
   }
 }
 
+// ── Taxa da maquininha (17/08/2026) ──────────────────────────
+// Toggle em Configuracoes > PDV (vale pro Shell Negocio e pro Studio).
+// Ligado, toda venda no cartao gera a despesa sozinha.
+//
+// Base = soma dos sale_payments no cartao, cada um na SUA aliquota:
+// 'cartao' e CREDITO nos dois shells, 'debito' e separado. Dinheiro, Pix e
+// crediario nao geram taxa.
+//
+// A receita bruta fica INTACTA: a taxa e uma despesa separada, nunca um
+// abatimento da receita. Lancada na COMPETENCIA da venda (status
+// 'confirmed'), nao na data do repasse da adquirente.
+//
+// Fora de escopo por decisao: taxa por parcelamento e conciliacao de repasse.
+const CARD_FEE_KEY = (saleId) => 'pdv-card-fee-' + saleId;
+
+async function insertCardFeeExpense(client, { companyId, saleId, cardBase, createdBy, saleDate, itemsSummary }) {
+  const credBase = parseFloat((cardBase?.cartao || 0).toFixed(2));
+  const debBase  = parseFloat((cardBase?.debito || 0).toFixed(2));
+  if (credBase <= 0 && debBase <= 0) return null;
+
+  let settings = null;
+  try {
+    const { rows } = await client.query(`SELECT pdv_settings FROM companies WHERE id = $1`, [companyId]);
+    settings = rows[0]?.pdv_settings || null;
+  } catch (e) {
+    // Empresa/coluna indisponivel: a venda NAO pode cair por causa da taxa.
+    console.warn('[PDV] card fee fail-open:', e.message);
+    return null;
+  }
+  if (!settings?.card_fee_enabled) return null;
+
+  const clampPct = (v) => Math.min(Math.max(parseFloat(v) || 0, 0), 100);
+  const creditPct = clampPct(settings.card_fee_credit_pct);
+  const debitPct  = clampPct(settings.card_fee_debit_pct);
+
+  const fee = parseFloat((credBase * creditPct / 100 + debBase * debitPct / 100).toFixed(2));
+  if (fee <= 0) return null;
+
+  const parts = [];
+  if (credBase > 0 && creditPct > 0) parts.push(`credito ${fmt(credBase)} x ${creditPct}%`);
+  if (debBase  > 0 && debitPct  > 0) parts.push(`debito ${fmt(debBase)} x ${debitPct}%`);
+
+  const dueExpr = saleDate ? `$6::date` : SP_DATE_NOW;
+  const params = [
+    companyId, fee,
+    `Taxa da maquininha - ${itemsSummary || 'Venda'} (${parts.join(' + ')})`,
+    createdBy || null, CARD_FEE_KEY(saleId),
+  ];
+  if (saleDate) params.push(saleDate);
+
+  await client.query(
+    `INSERT INTO transactions
+       (company_id,type,status,amount,description,category,due_date,paid_at,created_by,idempotency_key)
+     VALUES ($1,'expense','confirmed',$2,$3,'Taxas de cartão',${dueExpr},NOW(),$4,$5)
+     ON CONFLICT (idempotency_key) DO NOTHING`,
+    params
+  );
+  return { fee, credit_pct: creditPct, debit_pct: debitPct, credit_base: credBase, debit_base: debBase };
+}
+
 async function fetchCustomerPhone(customerId) {
   if (!customerId) return null;
   try {
@@ -496,6 +556,9 @@ async function handleSale(req, res, opts = {}) {
       );
       activeSessaoId = sessRes?.rows?.[0]?.id || null;
     } catch (sessErr) {}
+    // Base da taxa da maquininha: acumulada a partir dos sale_payments que
+    // realmente entraram, cada forma na sua aliquota.
+    const cardBase = { cartao: 0, debito: 0 };
     if (Array.isArray(payments) && payments.length > 0) {
       for (const p of payments) {
         const m = (p.method || '').toLowerCase();
@@ -507,6 +570,7 @@ async function handleSale(req, res, opts = {}) {
            VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
           [sale.id, req.params.id, p.method, amt, activeSessaoId]
         );
+        if (m === 'cartao' || m === 'debito') cardBase[m] += amt;
       }
     } else if (cashAmount > 0) {
       const fallbackMethod = (payment_method || 'dinheiro').toLowerCase();
@@ -516,6 +580,9 @@ async function handleSale(req, res, opts = {}) {
            VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
           [sale.id, req.params.id, fallbackMethod, cashAmount, activeSessaoId]
         );
+        if (fallbackMethod === 'cartao' || fallbackMethod === 'debito') {
+          cardBase[fallbackMethod] += cashAmount;
+        }
       }
     }
     if (cashAmount > 0) {
@@ -540,6 +607,17 @@ async function handleSale(req, res, opts = {}) {
       );
     }
 
+    // Taxa da maquininha: despesa propria, logo apos a receita da venda.
+    // Fica DENTRO da transacao -- a despesa nasce e morre junto com a venda.
+    const cardFee = await insertCardFeeExpense(client, {
+      companyId:    req.params.id,
+      saleId:       sale.id,
+      cardBase,
+      createdBy:    req.user?.id || null,
+      saleDate:     sale_date || null,
+      itemsSummary: productNames.slice(0, 3).join(', '),
+    });
+
     await client.query('COMMIT');
 
     const { rows: saleItems } = await db.query(
@@ -563,6 +641,9 @@ async function handleSale(req, res, opts = {}) {
       sale: { ...sale, items: saleItems },
       coupon_applied: couponCodeUsed ? { code: couponCodeUsed, discount: discountAmt } : null,
       credit: creditInfo,
+      // Taxa da maquininha lancada (null quando o toggle esta desligado,
+      // nao houve cartao na venda ou a aliquota e zero).
+      card_fee: cardFee,
       // F2: o que o PDV do Studio precisa mostrar no comprovante do sinal.
       signal: opts.signalSale ? {
         amount:           signalAmount,
@@ -820,7 +901,13 @@ router.delete('/sale/:saleId', async (req, res) => {
       await client.query(`UPDATE coupons SET current_uses=GREATEST(0,current_uses-1),updated_at=NOW() WHERE id=$1`, [sale.coupon_id]);
     }
     // Reverte a parte de caixa (venda a vista): transacao pdv-sale-<id>.
-    await client.query(`DELETE FROM transactions WHERE idempotency_key=$1 AND company_id=$2`, ['pdv-sale-'+req.params.saleId, req.params.id]);
+    // 17/08/2026: a taxa da maquininha (pdv-card-fee-<id>) sai JUNTO. Sem
+    // isso, cancelar a venda deixava a despesa orfa: a receita sumia e o
+    // custo ficava -- prejuizo fantasma no fechamento.
+    await client.query(
+      `DELETE FROM transactions WHERE idempotency_key = ANY($1) AND company_id=$2`,
+      [['pdv-sale-'+req.params.saleId, CARD_FEE_KEY(req.params.saleId)], req.params.id]
+    );
     // C2-BE (auditoria 11/06): reverte o crediario via cancelCreditSale, que
     // remove o debit, a A Receber exata, OS -rest- de pagamento parcial (antes
     // orfaos como "A Receber" eterno), cancela as parcelas e recalcula credit_used.
