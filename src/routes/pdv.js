@@ -36,6 +36,13 @@
 //     venda (services/couponPolicy). Blindar so o /coupons/validate nao
 //     resolvia: e AQUI que o cupom e gravado e o current_uses incrementado,
 //     entao o /sale era um bypass completo do cupom de aniversario.
+// 17/08/2026 (F2 venda com sinal):
+//   - POST /sale extraido em handleSale(req,res,opts) e POST /sale-com-sinal
+//     normaliza o body e delega -- precificacao, estoque, cupom, caixa e NFC-e
+//     ficam num lugar so (mesmo idioma do POST /troca -> trocaV2.handle).
+//   - O saldo e DERIVADO do total calculado no servidor (total - sinal), entao
+//     `sinal + saldo = total` por construcao: nao e split, e forma de pagamento
+//     propria. splitIsBalanced (app) nao se aplica.
 // 04/08/2026 (fix syntax error json_build_object): sales-for-troca e
 //   sales-by-product-barcode tinham virgula faltando entre
 //   'original_sale_item_id',si.id e 'total_price',si.total_price (patch
@@ -102,6 +109,83 @@ async function hasExchangeCols(client) {
   return _exchangeColsAvailable;
 }
 
+// ── F2 (17/08/2026): venda com sinal ─────────────────────────
+// Formas aceitas no SINAL: dinheiro de verdade entrando no caixa hoje.
+// 'crediario' fica de fora de proposito -- sinal pago no crediario seria
+// so mais saldo devedor, nao sinal.
+const SIGNAL_METHODS = ['dinheiro', 'pix', 'cartao', 'debito'];
+
+const isValidISODate = (s) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s || '')) return false;
+  const d = new Date(s + 'T12:00:00Z');
+  return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+};
+
+// Resolve o cliente da venda com sinal DENTRO da transacao da venda: se a
+// venda falhar adiante, o cadastro criado aqui volta atras junto.
+//
+// Regra de produto: a venda NUNCA trava por falta de cadastro. Com
+// customer_id, usa. Sem ele, procura por CPF/CNPJ ou telefone e, se nao
+// achar, cria na hora. Espelha o fallback de conflito do
+// POST /credit/quick-customer (routes/creditPreview.js).
+async function resolveSignalCustomer(client, companyId, body) {
+  if (body?.customer_id) {
+    const { rows } = await client.query(
+      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
+      [body.customer_id, companyId]
+    );
+    if (!rows.length) {
+      const err = new Error('Cliente nao encontrado nesta empresa.');
+      err.statusCode = 404;
+      err.code = 'CUSTOMER_NOT_FOUND';
+      throw err;
+    }
+    return rows[0].id;
+  }
+
+  const c     = body?.customer || {};
+  const name  = String(c.name     || body?.customer_name     || '').trim() || null;
+  const phone = String(c.phone    || body?.customer_phone    || '').trim() || null;
+  const cpf   = String(c.cpf_cnpj || body?.customer_cpf_cnpj || '').trim() || null;
+
+  if (!name && !phone && !cpf) {
+    const err = new Error('Informe o cliente: nome, telefone ou CPF.');
+    err.statusCode = 422;
+    err.code = 'SINAL_REQUIRES_CUSTOMER';
+    throw err;
+  }
+
+  // Busca so por identificador FORTE (CPF/CNPJ ou telefone). Nome sozinho
+  // NAO casa: um homonimo herdaria o saldo devedor do cliente errado.
+  const findSql =
+    `SELECT id FROM customers
+      WHERE company_id = $1
+        AND ( ($2::text IS NOT NULL AND cpf_cnpj = $2)
+           OR ($3::text IS NOT NULL AND phone    = $3) )
+      ORDER BY (cpf_cnpj = $2) DESC NULLS LAST
+      LIMIT 1`;
+
+  if (cpf || phone) {
+    const { rows } = await client.query(findSql, [companyId, cpf, phone]);
+    if (rows.length) return rows[0].id;
+  }
+
+  try {
+    const { rows } = await client.query(
+      `INSERT INTO customers (company_id, name, phone, cpf_cnpj)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [companyId, name || phone || cpf, phone, cpf]
+    );
+    return rows[0].id;
+  } catch (insertErr) {
+    // Unique de CPF/CNPJ -- corrida ou cadastro pre-existente: usa o que ha.
+    if (insertErr.code !== '23505') throw insertErr;
+    const { rows } = await client.query(findSql, [companyId, cpf, phone]);
+    if (!rows.length) throw insertErr;
+    return rows[0].id;
+  }
+}
+
 async function fetchCustomerPhone(customerId) {
   if (!customerId) return null;
   try {
@@ -159,7 +243,9 @@ router.get('/scan/:code', async (req, res) => {
 });
 
 // ===== POST /sale =====
-router.post('/sale', async (req, res) => {
+// 17/08/2026 (F2): corpo extraido em handleSale pra ser reusado pelo
+// POST /sale-com-sinal. `opts.signalSale` liga o desenho da venda com sinal.
+async function handleSale(req, res, opts = {}) {
   const {
     items, customer_id, employee_id, payment_method,
     discount_amount, discount_pct, coupon_code, notes, seller_id, payments,
@@ -167,12 +253,22 @@ router.post('/sale', async (req, res) => {
   } = req.body;
   if (!items?.length) return res.status(400).json({ error: 'items obrigatorio' });
 
+  // F2: cliente pode ser resolvido/criado dentro da transacao -- por isso
+  // customerId e mutavel, e nao o `customer_id` cru do body.
+  let customerId = customer_id || null;
+
+  const signalAmount  = opts.signalSale ? parseFloat(req.body?.sinal?.amount ?? 0) : 0;
+  const signalMethod  = opts.signalSale ? String(req.body?.sinal?.method || 'dinheiro').toLowerCase() : null;
+  const signalDueDate = opts.signalSale ? (req.body?.saldo_due_date || null) : null;
+
   // F1 (29/05/2026): 422 quando crediario sem customer_id
   // Nao pode virar venda a vista silenciosa (bug #4 do plano).
+  // F2: nao vale pra venda com sinal -- ali o cliente e resolvido (ou criado)
+  // logo apos o BEGIN, entao exigir cadastro previo travaria a venda.
   const hasCreditInPayments = Array.isArray(payments) &&
     payments.some(p => (p.method || '').toLowerCase() === 'crediario');
   const isCrediario = (payment_method || '').toLowerCase() === 'crediario' || hasCreditInPayments;
-  if (isCrediario && !customer_id) {
+  if (!opts.signalSale && isCrediario && !customerId) {
     return res.status(422).json({
       error: 'Cliente obrigatorio para venda no crediario.',
       code: 'CREDIARIO_REQUIRES_CUSTOMER',
@@ -188,6 +284,12 @@ router.post('/sale', async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(caixaCheck.status).json(caixaCheck.body);
       }
+    }
+    // F2: resolvido DENTRO da transacao -- se a venda falhar adiante, o
+    // cadastro criado aqui volta atras junto. Antes do cupom, que precisa
+    // do dono pra validar cupom nominal.
+    if (opts.signalSale) {
+      customerId = await resolveSignalCustomer(client, req.params.id, req.body);
     }
     let subtotal = 0;
     const enrichedItems = [];
@@ -261,7 +363,7 @@ router.post('/sale', async (req, res) => {
       );
       if (!coupons.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom nao encontrado' }); }
       const coupon = coupons[0];
-      const couponOwner = checkCouponOwner(coupon, customer_id);
+      const couponOwner = checkCouponOwner(coupon, customerId);
       if (!couponOwner.ok) { await client.query('ROLLBACK'); return res.status(400).json({ error: couponOwner.error, code: couponOwner.code }); }
       if (coupon.expires_at && new Date(coupon.expires_at) < new Date()) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom expirado' }); }
       if (coupon.max_uses !== null && coupon.current_uses >= coupon.max_uses) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Cupom esgotado' }); }
@@ -290,8 +392,25 @@ router.post('/sale', async (req, res) => {
       );
       if (!empCheck.length) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Funcionario nao encontrado nesta empresa' }); }
     }
-    const rawCreditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
-    const creditAmount = (rawCreditAmount > 0 && customer_id) ? rawCreditAmount : 0;
+    // F2: no sinal o saldo e DERIVADO do total calculado aqui no servidor,
+    // nunca de um valor mandado pelo cliente -- assim `sinal + saldo = total`
+    // por construcao. Sem piso de sinal (decisao de produto): so 0 < sinal < total.
+    let creditAmount;
+    if (opts.signalSale) {
+      if (!(signalAmount > 0) || signalAmount >= totalAmount) {
+        await client.query('ROLLBACK');
+        return res.status(422).json({
+          error: `O sinal deve ser maior que zero e menor que o total da venda (R$ ${fmt(totalAmount)}).`,
+          code: 'SINAL_INVALIDO',
+          total_amount: totalAmount,
+          sinal: signalAmount,
+        });
+      }
+      creditAmount = parseFloat((totalAmount - signalAmount).toFixed(2));
+    } else {
+      const rawCreditAmount = calcCreditAmount({ payment_method, payments, totalAmount });
+      creditAmount = (rawCreditAmount > 0 && customerId) ? rawCreditAmount : 0;
+    }
     const cashAmount = parseFloat((totalAmount - creditAmount).toFixed(2));
     const { rows: sales } = await client.query(
       sale_date
@@ -300,7 +419,7 @@ router.post('/sale', async (req, res) => {
         : `INSERT INTO sales (company_id,customer_id,seller_id,employee_id,seller_name,total_amount,discount_amount,payment_method,notes,coupon_id,coupon_code,status)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'completed') RETURNING *`,
       [
-        req.params.id, customer_id||null,
+        req.params.id, customerId||null,
         seller_id||req.user?.id||null, employee_id||null, seller_name||null,
         totalAmount, discountAmt,
         payment_method||(payments?.[0]?.method)||'dinheiro',
@@ -355,11 +474,15 @@ router.post('/sale', async (req, res) => {
     if (creditAmount > 0) {
       creditSaleResult = await createCreditSale(client, {
         companyId:    req.params.id,
-        customerId:   customer_id,
+        customerId,
         saleId:       sale.id,
         amount:       creditAmount,
-        installments: parseInt(req.body?.installments || 1),
-        firstDueDate: req.body?.first_due_date || null,
+        // F2: o saldo do sinal e sempre 1x na data combinada, com juros ZERO
+        // explicito -- e reserva, nao financiamento. Sem o 0 explicito o saldo
+        // herdaria o juros do crediario da empresa (ver ledger.js).
+        installments: opts.signalSale ? 1 : parseInt(req.body?.installments || 1),
+        firstDueDate: opts.signalSale ? signalDueDate : (req.body?.first_due_date || null),
+        interestRate: opts.signalSale ? 0 : undefined,
         productNames,
         createdBy:    req.user?.id || null,
       });
@@ -416,6 +539,7 @@ router.post('/sale', async (req, res) => {
         txParams
       );
     }
+
     await client.query('COMMIT');
 
     const { rows: saleItems } = await db.query(
@@ -426,7 +550,7 @@ router.post('/sale', async (req, res) => {
     if (creditAmount > 0) {
       const { rows: bal } = await db.query(
         `SELECT balance FROM customer_credit_balances WHERE customer_id=$1 AND company_id=$2`,
-        [customer_id, req.params.id]
+        [customerId, req.params.id]
       );
       creditInfo = {
         debited: creditAmount,
@@ -439,6 +563,15 @@ router.post('/sale', async (req, res) => {
       sale: { ...sale, items: saleItems },
       coupon_applied: couponCodeUsed ? { code: couponCodeUsed, discount: discountAmt } : null,
       credit: creditInfo,
+      // F2: o que o PDV do Studio precisa mostrar no comprovante do sinal.
+      signal: opts.signalSale ? {
+        amount:           signalAmount,
+        method:           signalMethod,
+        balance:          creditAmount,
+        balance_due_date: signalDueDate,
+        customer_id:      customerId,
+        installment:      creditSaleResult?.schedule?.[0] || null,
+      } : undefined,
       receipt_url: `/companies/${req.params.id}/print/receipt/${sale.id}`,
     });
   } catch (e) {
@@ -452,9 +585,78 @@ router.post('/sale', async (req, res) => {
         reason: e.reason || null,
       });
     }
+    // F2: resolveSignalCustomer sinaliza 404 CUSTOMER_NOT_FOUND /
+    // 422 SINAL_REQUIRES_CUSTOMER do mesmo jeito -- propaga em vez de virar 500.
+    if (e && e.statusCode && e.code) {
+      return res.status(e.statusCode).json({ error: e.message, code: e.code });
+    }
     console.error('[PDV] Erro ao registrar venda:', e.message);
     res.status(500).json({ error: 'Erro ao registrar venda' });
   } finally { client.release(); }
+}
+
+router.post('/sale', (req, res) => handleSale(req, res));
+
+// ===== POST /sale-com-sinal =====
+// F2 (17/08/2026) -- venda com sinal. A lojista fecha a venda recebendo parte
+// agora e o restante numa data combinada. Motivador: Sheid Mania (camisas
+// personalizadas), onde a venda fecha na entrega mas o sinal entra hoje.
+//
+// Body:
+//   items[]         -- igual ao POST /sale
+//   sinal           -- { method: dinheiro|pix|cartao|debito, amount }
+//   saldo_due_date  -- 'YYYY-MM-DD', vencimento do saldo
+//   customer_id     -- opcional; sem ele, find-or-create por
+//   customer        -- { name, phone, cpf_cnpj }
+//   ...demais campos do POST /sale (discount, coupon, seller, notes, sale_date)
+//
+// Numa transacao so (a do handleSale):
+//   1. sales pelo valor CHEIO -- a NFC-e sai aqui, na conclusao
+//   2. sale_payments do sinal na forma escolhida -> entra no caixa hoje
+//   3. createCreditSale do saldo: 1x, na data combinada, juros 0
+//      -> debit + A Receber pending + parcela 1/1 (regua de cobranca e Pix)
+//
+// O estorno do sinal sai pelo cancelamento na aba Vendas, que ja apaga a
+// transacao pdv-sale-<id>, os sale_payments e reverte o crediario.
+router.post('/sale-com-sinal', async (req, res) => {
+  const b = req.body || {};
+  if (!b.items?.length) return res.status(400).json({ error: 'items obrigatorio' });
+
+  const sinal  = b.sinal || {};
+  const amount = parseFloat(sinal.amount ?? sinal.value ?? 0);
+  const method = String(sinal.method || '').toLowerCase();
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(422).json({
+      error: 'Informe o valor do sinal.',
+      code: 'SINAL_INVALIDO',
+    });
+  }
+  if (!SIGNAL_METHODS.includes(method)) {
+    return res.status(422).json({
+      error: `Forma de pagamento do sinal invalida. Use: ${SIGNAL_METHODS.join(', ')}.`,
+      code: 'SINAL_METHOD_INVALIDO',
+    });
+  }
+  const dueDate = String(b.saldo_due_date || '').trim();
+  if (!isValidISODate(dueDate)) {
+    return res.status(422).json({
+      error: 'Informe a data de vencimento do saldo no formato YYYY-MM-DD.',
+      code: 'SALDO_DUE_DATE_INVALIDA',
+    });
+  }
+
+  // Mesmo idioma do POST /troca -> trocaV2.handle: normaliza o body pro
+  // formato que o handleSale ja entende e delega. O sinal vira o UNICO
+  // sale_payments; o saldo o handleSale deriva de total - sinal.
+  req.body = {
+    ...b,
+    sinal: { method, amount },
+    saldo_due_date: dueDate,
+    payments: [{ method, value: amount }],
+    payment_method: b.payment_method || 'sinal',
+  };
+  return handleSale(req, res, { signalSale: true });
 });
 
 // ===== GET /sale/:saleId =====

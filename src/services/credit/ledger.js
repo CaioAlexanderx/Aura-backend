@@ -71,7 +71,7 @@ async function _updateCreditUsed(client, companyId, customerId) {
 async function createCreditSale(client, {
   companyId, customerId, saleId, amount,
   installments = 1, firstDueDate = null,
-  interestRate = 0, productNames = [], createdBy = null,
+  interestRate = null, productNames = [], createdBy = null,
   periodUnit = null, periodCount = null,
   accountId = null,
 }) {
@@ -194,8 +194,15 @@ async function createCreditSale(client, {
     }
 
     const maxN = parseInt(accountTerms?.max_installments || config?.max_installments) || 12;
-    const effectiveRate = parseFloat(interestRate) > 0
-      ? parseFloat(interestRate)
+    // 17/08/2026 (F2 venda com sinal): taxa EXPLICITA manda, inclusive 0.
+    // Antes o teste era `parseFloat(interestRate) > 0`, entao `interestRate: 0`
+    // caia no fallback de config -- nao havia como PEDIR juros zero, e o saldo
+    // da venda com sinal (que e reserva, nao financiamento) herdaria o juros do
+    // crediario da empresa. Mesmo idioma ja usado em /manual-entry
+    // (routes/credit.js). Sem o parametro (null/undefined) nada muda: config manda.
+    const rateGiven = interestRate !== null && interestRate !== undefined && interestRate !== '';
+    const effectiveRate = rateGiven
+      ? (parseFloat(interestRate) || 0)
       : parseFloat(accountTerms?.interest_rate || config?.interest_rate) || 0;
     const n = Math.min(nRequested, maxN, 100);
     const period = resolvePeriod(
