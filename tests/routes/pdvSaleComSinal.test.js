@@ -48,7 +48,7 @@ const app = buildApp();
 
 // Despacha por CONTEUDO do SQL. `over` permite sobrescrever/adicionar
 // respostas caso a caso sem reescrever o dispatcher inteiro.
-function mockClient({ interestRate = '0', existingCustomer = null, customerInsertFails = false } = {}) {
+function mockClient({ interestRate = '0', existingCustomer = null, customerInsertFails = false, profileStatus = 'active' } = {}) {
   const query = jest.fn().mockImplementation((sql) => {
     const s = String(sql || '');
 
@@ -78,7 +78,7 @@ function mockClient({ interestRate = '0', existingCustomer = null, customerInser
 
     // --- crediario ---
     if (/INSERT INTO customer_credit_profiles/i.test(s)) {
-      return Promise.resolve({ rows: [{ id: 'prof-1', status: 'active', credit_score: 700 }] });
+      return Promise.resolve({ rows: [{ id: 'prof-1', status: profileStatus, credit_score: 700, blocked_reason: 'Calote anterior' }] });
     }
     if (/INSERT INTO credit_plan_configs/i.test(s)) {
       return Promise.resolve({ rows: [{ id: 'conf-1', max_installments: 12, interest_rate: interestRate }] });
@@ -334,6 +334,39 @@ describe('POST /pdv/sale-com-sinal -- validacao', () => {
   test('401 sem token', async () => {
     const res = await request(app).post(`/api/v1/companies/${cid}/pdv/sale-com-sinal`).send(BODY);
     expect(res.status).toBe(401);
+  });
+});
+
+// Bloqueio de credito e conceito do PRODUTO crediario (fiado). Na venda com
+// sinal ele nao se aplica: a lojista ja esta com o dinheiro do sinal na mao e
+// ainda nao entregou a peca -- e no Studio nem existe fiado.
+describe('venda com sinal x bloqueio de credito do cliente', () => {
+  test('cliente com credito BLOQUEADO ainda pode fechar venda com sinal', async () => {
+    const client = mockClient({ existingCustomer: cust, profileStatus: 'blocked' });
+    db.connect.mockResolvedValue(client);
+    mockPostCommit();
+
+    const res = await post(BODY);
+
+    expect(res.status).toBe(201);
+    expect(callsMatching(client, /INSERT INTO credit_installments/i)).toHaveLength(1);
+  });
+
+  // Guarda do PDV do Negocio: no crediario de verdade, bloqueio continua barrando.
+  test('no crediario comum, cliente bloqueado continua barrado com 422', async () => {
+    const client = mockClient({ existingCustomer: cust, profileStatus: 'blocked' });
+    db.connect.mockResolvedValue(client);
+    mockPostCommit();
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/pdv/sale`).set(adminAuth)
+      .send({
+        items: [{ product_id: prod, quantity: 1, unit_price: 240 }],
+        payment_method: 'crediario', customer_id: cust,
+      });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('CUSTOMER_BLOCKED');
   });
 });
 

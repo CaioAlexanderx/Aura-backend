@@ -40,6 +40,7 @@ const express = require('express');
 const pool = require('../config/database');
 const creditLedger = require('../services/creditLedger');
 const { buildStaticBrCode, validatePixKey, sanitizeTxid } = require('../services/staticPixService');
+const collectionNotice = require('../services/credit/collectionNotice');
 
 const router = express.Router({ mergeParams: true });
 
@@ -1215,6 +1216,9 @@ router.put('/collection/rules', async (req, res) => {
 // B2: a mensagem de cobranca agora carrega o Pix copia-e-cola REAL (EMV),
 // com o valor devido HOJE (remaining + encargos lazy). Fallback: pix_link
 // legado gravado na parcela (parcelas novas nao gravam mais).
+// 17/08/2026: corpo extraido pra services/credit/collectionNotice.js, SEM
+// mudanca de comportamento. O mesmo motor agora atende a cobranca do saldo
+// de encomenda do Studio, que nao passa pelo gate de crediario.
 router.post('/collection/trigger/:iid', async (req, res) => {
   const companyId     = req.params.id;
   const installmentId = req.params.iid;
@@ -1222,63 +1226,12 @@ router.post('/collection/trigger/:iid', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const ins = await client.query(
-      `SELECT ci.*, COALESCE(c.name, c.phone) AS customer_name, c.phone,
-              COALESCE(co.trade_name, co.legal_name) AS store_name
-       FROM credit_installments ci
-       LEFT JOIN customers c ON c.id=ci.customer_id AND c.company_id=ci.company_id
-       LEFT JOIN companies co ON co.id=ci.company_id
-       WHERE ci.id=$1 AND ci.company_id=$2`,
-      [installmentId, companyId]
-    );
-    if (!ins.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Parcela nao encontrada.' }); }
-    const row = ins.rows[0];
-    const daysLate = Math.max(0, Math.floor((Date.now() - new Date(row.due_date)) / 86400000));
-
-    // B2: Pix copia-e-cola real (defensivo: qualquer falha => fallback legado).
-    let pixCopiaECola = '';
-    try {
-      const { config, profile } = await loadLateContext(companyId, row.customer_id);
-      const terms = creditLedger.resolveTerms(profile, config);
-      const remaining = parseFloat((parseFloat(row.amount_due) - parseFloat(row.covered_amount || 0)).toFixed(2));
-      const lc = creditLedger.computeLateCharges(row, terms, config);
-      const totalDue = parseFloat((remaining + lc.charges_total).toFixed(2));
-      const pix = await resolvePixSetup(companyId);
-      if (pix && totalDue > 0) {
-        pixCopiaECola = buildStaticBrCode({
-          pixKey:          pix.pixKey,
-          amount:          totalDue,
-          beneficiaryName: pix.name,
-          beneficiaryCity: pix.city,
-          txid:            sanitizeTxid('CRED' + String(installmentId).replace(/-/g, '')),
-        });
-      }
-    } catch (_) { pixCopiaECola = ''; }
-
-    const message = buildWhatsAppMessage(template, {
-      customerName:      row.customer_name,
-      storeName:         row.store_name || 'Loja',
-      amount:            parseFloat(row.amount_due).toFixed(2).replace('.', ','),
-      dueDate:           new Date(row.due_date).toLocaleDateString('pt-BR'),
-      installmentNum:    row.installment_number,
-      totalInstallments: row.total_installments,
-      pixLink:           pixCopiaECola || row.pix_link || '',
-      daysLate:          String(daysLate),
+    const notice = await collectionNotice.buildNotice(client, {
+      companyId, installmentId, template, channel,
     });
-    try {
-      await client.query(
-        `INSERT INTO credit_collection_events
-           (installment_id, channel, template, days_relative, status, message_preview)
-         VALUES ($1,$2,$3,$4,'sent',$5)`,
-        [installmentId, channel, template, daysLate, message.slice(0, 300)]
-      );
-      await client.query(
-        `UPDATE credit_installments SET collection_stage=collection_stage+1, updated_at=NOW() WHERE id=$1`,
-        [installmentId]
-      );
-    } catch (e) { if (e.code !== '42P01' && e.code !== '42703') throw e; }
+    if (!notice) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Parcela nao encontrada.' }); }
     await client.query('COMMIT');
-    res.json({ success: true, installment_id: installmentId, channel, template, message, pix_copia_cola: pixCopiaECola || null, phone: row.phone, days_late: daysLate });
+    res.json({ success: true, ...notice });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('POST /credit/collection/trigger/:iid', err.message);

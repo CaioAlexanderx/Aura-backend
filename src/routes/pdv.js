@@ -543,6 +543,9 @@ async function handleSale(req, res, opts = {}) {
         installments: opts.signalSale ? 1 : parseInt(req.body?.installments || 1),
         firstDueDate: opts.signalSale ? signalDueDate : (req.body?.first_due_date || null),
         interestRate: opts.signalSale ? 0 : undefined,
+        // Venda com sinal nao e fiado: bloqueio de credito do cliente nao
+        // pode derrubar uma venda em que a lojista ja recebeu o sinal.
+        enforceCreditBlock: !opts.signalSale,
         productNames,
         createdBy:    req.user?.id || null,
       });

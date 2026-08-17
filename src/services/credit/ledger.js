@@ -74,6 +74,12 @@ async function createCreditSale(client, {
   interestRate = null, productNames = [], createdBy = null,
   periodUnit = null, periodCount = null,
   accountId = null,
+  // 17/08/2026: bloqueio manual de credito e conceito do PRODUTO crediario
+  // (fiado). Na venda com sinal do Studio ele nao se aplica: a lojista ja
+  // esta com o dinheiro do sinal na mao e ainda nao entregou a peca, e
+  // naquele shell nem existe fiado. Default true -- o PDV do Negocio
+  // continua barrando exatamente como antes.
+  enforceCreditBlock = true,
 }) {
   // 0. Bloqueio manual (UNICO impeditivo) + aviso de score (NAO-impeditivo).
   //    Carrega profile/config de forma defensiva (tabela/coluna podem faltar
@@ -85,7 +91,7 @@ async function createCreditSale(client, {
   } catch (e) {
     if (e.code !== '42P01' && e.code !== '42703') throw e;
   }
-  if (_profile?.status === 'blocked') {
+  if (enforceCreditBlock && _profile?.status === 'blocked') {
     const err = new Error(
       `Cliente com credito bloqueado. Motivo: ${_profile.blocked_reason || 'Bloqueio manual'}.`
     );
