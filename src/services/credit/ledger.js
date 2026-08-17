@@ -137,24 +137,45 @@ async function createCreditSale(client, {
   }
 
   // 2. Financeiro: A Receber pending
+  //
+  // 17/08/2026: o due_date era SEMPRE ${SP_DATE_NOW} -- o A Receber nascia
+  // vencendo HOJE, mesmo quando a venda combinava um vencimento futuro. Quem
+  // olhasse "A Receber vencido" via a linha estourada no mesmo dia da venda.
+  // Agora, quando o caller informa `firstDueDate`, ela manda. Sem ela o
+  // comportamento antigo fica intacto.
+  const arDueExpr = firstDueDate ? '$6::date' : SP_DATE_NOW;
+  const arParams = [
+    companyId, amount,
+    `Crediario - venda ${saleId}`,
+    createdBy,
+    'pdv-credit-receivable-' + saleId,
+  ];
+  if (firstDueDate) arParams.push(firstDueDate);
   await client.query(
     `INSERT INTO transactions
        (company_id, type, status, amount, description, category,
         due_date, paid_at, created_by, idempotency_key)
      VALUES ($1, 'income', 'pending', $2, $3, 'Crediario - A Receber',
-             ${SP_DATE_NOW}, NULL, $4, $5)
+             ${arDueExpr}, NULL, $4, $5)
      ON CONFLICT (idempotency_key) DO NOTHING`,
-    [
-      companyId, amount,
-      `Crediario - venda ${saleId}`,
-      createdBy,
-      'pdv-credit-receivable-' + saleId,
-    ]
+    arParams
   );
 
-  // 3. Agenda de parcelas (installments > 1)
+  // 3. Agenda de parcelas
+  //
+  // 17/08/2026: o bloco era `if (installments > 1)` -- uma venda 1x NAO
+  // gerava nenhuma linha em credit_installments. Sem parcela nao existe
+  // due_date, nem Pix da parcela (GET /credit/installments/:iid/pix), nem
+  // regua de cobranca, nem inadimplencia: o saldo virava um A Receber solto.
+  //
+  // Agora 1x TAMBEM gera a parcela, mas SO quando o caller informa
+  // `firstDueDate` explicitamente. O gate e deliberado: preserva o
+  // comportamento do PDV do Negocio (venda 1x no crediario, sem data
+  // combinada, continua sem parcela e sem mexer em relatorio/teste existente)
+  // e atende quem pede vencimento -- a venda com sinal do Studio.
+  const nRequested = Math.max(1, parseInt(installments, 10) || 1);
   const schedule = [];
-  if (installments > 1) {
+  if (nRequested > 1 || firstDueDate) {
     // Hub F1.4: reusa profile/config ja carregados no topo (evita queries duplicadas).
     const config = _config;
 
@@ -176,7 +197,7 @@ async function createCreditSale(client, {
     const effectiveRate = parseFloat(interestRate) > 0
       ? parseFloat(interestRate)
       : parseFloat(accountTerms?.interest_rate || config?.interest_rate) || 0;
-    const n = Math.min(parseInt(installments), maxN, 100);
+    const n = Math.min(nRequested, maxN, 100);
     const period = resolvePeriod(
       periodUnit || accountTerms?.period_unit,
       periodCount || accountTerms?.period_count,
@@ -236,14 +257,18 @@ async function createCreditSale(client, {
 
     try {
       await client.query(
+        // 17/08/2026: `is_installment` passa a ser $5 em vez de `true` fixo.
+        // Com a agenda de 1x, marcar a venda como parcelada mudaria o que
+        // relatorios e filtros existentes consideram "parcelado". 1x com
+        // vencimento tem parcela, mas NAO e venda parcelada.
         `UPDATE sales
-           SET is_installment = true, total_installments = $2,
+           SET is_installment = $5, total_installments = $2,
                credit_plan_snapshot = $3
          WHERE id = $1 AND company_id = $4`,
         [saleId, n,
          JSON.stringify({ installments: n, total_amount: amount, interest_rate: effectiveRate,
                           period_unit: period.unit, period_count: period.count }),
-         companyId]
+         companyId, n > 1]
       );
     } catch (e) {
       if (e.code !== '42703' && e.code !== '42P01') throw e;

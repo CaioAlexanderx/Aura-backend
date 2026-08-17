@@ -563,3 +563,124 @@ describe('creditLedger.getCustomerCreditPreview', () => {
     expect(preview.over_limit).toBe(false);
   });
 });
+
+// ============================================================
+// 17/08/2026 -- Agenda de parcelas em vendas 1x
+//
+// Ate aqui, `createCreditSale` so criava credit_installments quando
+// installments > 1: o INSERT estava dentro de `if (installments > 1)`.
+// Uma venda 1x gerava debit + A Receber e mais nada -- sem parcela nao ha
+// due_date, Pix da parcela, regua de cobranca nem inadimplencia. E o
+// A Receber nascia com due_date = hoje, fixo, ignorando a data combinada.
+//
+// Motivador: venda com sinal no PDV do Studio (sinal agora + saldo numa data
+// escolhida). O gate por `firstDueDate` explicito e o que preserva o
+// comportamento do PDV do Negocio, onde 1x continua sem parcela.
+//
+// Estes testes despacham o mock POR CONTEUDO DO SQL, nao por posicao na fila:
+// assim nao quebram quando a ordem interna das queries mudar.
+// ============================================================
+function makeSqlClient({ instIds = ['inst-x1'] } = {}) {
+  let instIdx = 0;
+  const query = jest.fn().mockImplementation((sql) => {
+    if (/INSERT INTO customer_credit_profiles/i.test(sql)) {
+      return Promise.resolve({ rows: [{ id: 'prof-9', status: 'active', credit_score: 700 }] });
+    }
+    if (/INSERT INTO credit_plan_configs/i.test(sql)) {
+      return Promise.resolve({ rows: [{ id: 'conf-9', max_installments: 12, interest_rate: '0' }] });
+    }
+    if (/INSERT INTO customer_credit_transactions/i.test(sql)) {
+      return Promise.resolve({ rows: [{ id: 'tx-9', type: 'debit', amount: '240.00' }] });
+    }
+    if (/INSERT INTO credit_installments/i.test(sql)) {
+      return Promise.resolve({ rows: [{ id: instIds[instIdx++] || 'inst-extra' }] });
+    }
+    return Promise.resolve({ rows: [] });
+  });
+  return { query };
+}
+const callsMatching = (client, re) =>
+  client.query.mock.calls.filter((c) => re.test(c[0] || ''));
+
+describe('createCreditSale -- venda 1x com vencimento combinado', () => {
+  beforeEach(() => { jest.resetAllMocks(); });
+
+  test('1x COM firstDueDate: cria a parcela 1/1 na data escolhida', async () => {
+    const client = makeSqlClient();
+
+    const result = await creditLedger.createCreditSale(client, {
+      companyId: COMPANY_ID, customerId: CUSTOMER_ID, saleId: SALE_ID,
+      amount: 240, installments: 1, firstDueDate: '2026-08-24',
+    });
+
+    const inst = callsMatching(client, /INSERT INTO credit_installments/i);
+    expect(inst).toHaveLength(1);
+    // (company, sale, customer, numero, total, valor, vencimento, ...)
+    expect(inst[0][1]).toEqual(expect.arrayContaining([COMPANY_ID, SALE_ID, CUSTOMER_ID, 1, 1, 240, '2026-08-24']));
+    expect(result.schedule).toHaveLength(1);
+    expect(result.schedule[0]).toMatchObject({ installment_number: 1, amount_due: 240, due_date: '2026-08-24' });
+  });
+
+  test('1x COM firstDueDate: o A Receber vence na data escolhida, nao hoje', async () => {
+    const client = makeSqlClient();
+
+    await creditLedger.createCreditSale(client, {
+      companyId: COMPANY_ID, customerId: CUSTOMER_ID, saleId: SALE_ID,
+      amount: 240, installments: 1, firstDueDate: '2026-08-24',
+    });
+
+    const ar = callsMatching(client, /Crediario - A Receber/i);
+    expect(ar).toHaveLength(1);
+    expect(ar[0][0]).toMatch(/\$6::date/);            // usa o parametro de data
+    expect(ar[0][0]).not.toMatch(/America\/Sao_Paulo/); // e nao o "hoje" fixo
+    expect(ar[0][1]).toContain('2026-08-24');
+  });
+
+  test('1x com vencimento NAO marca a venda como parcelada', async () => {
+    const client = makeSqlClient();
+
+    await creditLedger.createCreditSale(client, {
+      companyId: COMPANY_ID, customerId: CUSTOMER_ID, saleId: SALE_ID,
+      amount: 240, installments: 1, firstDueDate: '2026-08-24',
+    });
+
+    const upd = callsMatching(client, /UPDATE sales/i);
+    expect(upd).toHaveLength(1);
+    expect(upd[0][1]).toContain(false); // is_installment
+    expect(upd[0][1]).toContain(1);     // total_installments
+  });
+
+  // Guarda de regressao do PDV do Negocio: 1x sem data combinada e o caminho
+  // que ja existia. Se este teste falhar, toda venda 1x no crediario passou a
+  // gerar parcela -- efeito colateral que o gate por firstDueDate evita.
+  test('1x SEM firstDueDate: continua sem parcela e com A Receber vencendo hoje', async () => {
+    const client = makeSqlClient();
+
+    const result = await creditLedger.createCreditSale(client, {
+      companyId: COMPANY_ID, customerId: CUSTOMER_ID, saleId: SALE_ID,
+      amount: 240, installments: 1,
+    });
+
+    expect(callsMatching(client, /INSERT INTO credit_installments/i)).toHaveLength(0);
+    expect(callsMatching(client, /UPDATE sales/i)).toHaveLength(0);
+    expect(result.schedule).toHaveLength(0);
+
+    const ar = callsMatching(client, /Crediario - A Receber/i);
+    expect(ar[0][0]).toMatch(/America\/Sao_Paulo/);
+    expect(ar[0][1]).toHaveLength(5); // sem o 6o parametro de data
+  });
+
+  test('parcelado (3x) segue marcando is_installment = true', async () => {
+    const client = makeSqlClient({ instIds: ['i1', 'i2', 'i3'] });
+
+    await creditLedger.createCreditSale(client, {
+      companyId: COMPANY_ID, customerId: CUSTOMER_ID, saleId: SALE_ID,
+      amount: 300, installments: 3, firstDueDate: '2026-09-01',
+    });
+
+    expect(callsMatching(client, /INSERT INTO credit_installments/i)).toHaveLength(3);
+    const upd = callsMatching(client, /UPDATE sales/i);
+    expect(upd[0][1]).toContain(true);
+    expect(upd[0][1]).toContain(3);
+  });
+});
