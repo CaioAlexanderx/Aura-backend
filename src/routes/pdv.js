@@ -121,14 +121,22 @@ const isValidISODate = (s) => {
   return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
 };
 
-// Resolve o cliente da venda com sinal DENTRO da transacao da venda: se a
-// venda falhar adiante, o cadastro criado aqui volta atras junto.
+// Resolve o cliente da venda DENTRO da transacao: se a venda falhar adiante,
+// o cadastro criado aqui volta atras junto.
 //
 // Regra de produto: a venda NUNCA trava por falta de cadastro. Com
 // customer_id, usa. Sem ele, procura por CPF/CNPJ ou telefone e, se nao
 // achar, cria na hora. Espelha o fallback de conflito do
 // POST /credit/quick-customer (routes/creditPreview.js).
-async function resolveSignalCustomer(client, companyId, body) {
+//
+// 17/08/2026 (F5): deixou de ser exclusivo da venda com sinal. Qualquer
+// venda que mande `customer` inline passa por aqui -- e o que permite o PDV
+// do Studio parar de enfiar o nome do cliente em `seller_name`.
+//
+// `required` separa os dois casos: na venda com sinal o saldo e de ALGUEM,
+// entao sem identificador e 422. Na venda comum o cliente e opcional desde
+// sempre, entao devolve null e a venda segue sem vinculo.
+async function resolveInlineCustomer(client, companyId, body, { required = false } = {}) {
   if (body?.customer_id) {
     const { rows } = await client.query(
       `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
@@ -149,6 +157,7 @@ async function resolveSignalCustomer(client, companyId, body) {
   const cpf   = String(c.cpf_cnpj || body?.customer_cpf_cnpj || '').trim() || null;
 
   if (!name && !phone && !cpf) {
+    if (!required) return null;
     const err = new Error('Informe o cliente: nome, telefone ou CPF.');
     err.statusCode = 422;
     err.code = 'SINAL_REQUIRES_CUSTOMER';
@@ -348,8 +357,15 @@ async function handleSale(req, res, opts = {}) {
     // F2: resolvido DENTRO da transacao -- se a venda falhar adiante, o
     // cadastro criado aqui volta atras junto. Antes do cupom, que precisa
     // do dono pra validar cupom nominal.
-    if (opts.signalSale) {
-      customerId = await resolveSignalCustomer(client, req.params.id, req.body);
+    // F5 (17/08/2026): tambem resolve na venda comum quando vem `customer`
+    // inline. Sem esse bloco, a unica saida do PDV do Studio era mandar o
+    // nome em seller_name -- que e o campo do VENDEDOR. Resultado: a venda
+    // aparecia como "Consumidor" e o nome do cliente saia na posicao de quem
+    // vendeu, e o cliente nunca existia no cadastro.
+    if (opts.signalSale || req.body?.customer || req.body?.customer_name) {
+      customerId = await resolveInlineCustomer(client, req.params.id, req.body, {
+        required: !!opts.signalSale,
+      });
     }
     let subtotal = 0;
     const enrichedItems = [];
@@ -669,7 +685,7 @@ async function handleSale(req, res, opts = {}) {
         reason: e.reason || null,
       });
     }
-    // F2: resolveSignalCustomer sinaliza 404 CUSTOMER_NOT_FOUND /
+    // F2: resolveInlineCustomer sinaliza 404 CUSTOMER_NOT_FOUND /
     // 422 SINAL_REQUIRES_CUSTOMER do mesmo jeito -- propaga em vez de virar 500.
     if (e && e.statusCode && e.code) {
       return res.status(e.statusCode).json({ error: e.message, code: e.code });
