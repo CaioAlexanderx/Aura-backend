@@ -95,7 +95,62 @@ async function sendExpoPush(tokens, title, body, data) {
 
 // ---- Helpers ----
 
-const fmt = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
+// 17/08/2026: guarda contra `undefined`/null. Antes, um `total` ausente
+// virava `Number(undefined).toFixed(2)` = "NaN" e o lojista recebia
+// "R$ NaN" no push e no e-mail. Ver loadOrderForNotify() abaixo.
+const fmt = (v) => {
+  const n = Number(v);
+  if (v === null || v === undefined || v === '' || Number.isNaN(n)) return 'R$ —';
+  return `R$ ${n.toFixed(2).replace('.', ',')}`;
+};
+
+// Colunas que as notificações realmente consomem.
+const NOTIFY_FIELDS =
+  'id, company_id, order_number, customer_name, customer_email, ' +
+  'customer_phone, total, delivery_type, payment_method';
+
+/**
+ * 17/08/2026 — POR QUE ISSO EXISTE:
+ * Cada caller de notifyPaymentConfirmed montava o `order` com um SELECT
+ * próprio, e 3 dos 5 esqueciam `total`, `delivery_type` e `customer_phone`:
+ *   - digitalOrders.js  (approve-payment)
+ *   - webhookMp.js      (Pix e cartão)
+ *   - webhookAsaas.js
+ * Resultado: push "R$ NaN", e-mail do lojista com Total "R$ NaN", modalidade
+ * sempre "🏪 Retirada" (o ternário cai no else quando o campo é undefined) e
+ * bloco de WhatsApp sumindo. Nunca apareceu em produção porque nenhum pedido
+ * chegava a `confirmed` — o botão de aprovar Pix estava quebrado no app
+ * (aura-app#686).
+ *
+ * A correção é o notificador deixar de confiar no que o caller passa e
+ * recarregar a linha canônica pelo id. Assim um caller novo não precisa
+ * lembrar da lista de colunas — o contrato passa a ser só `order.id`.
+ */
+async function loadOrderForNotify(order) {
+  if (!order || !order.id) return order || null;
+
+  // Caller já trouxe a linha completa (INSERT ... RETURNING *): não vai ao banco.
+  const complete =
+    order.company_id !== undefined &&
+    order.total !== undefined &&
+    order.delivery_type !== undefined &&
+    order.customer_phone !== undefined;
+  if (complete) return order;
+
+  try {
+    const { rows } = await db.query(
+      `SELECT ${NOTIFY_FIELDS} FROM digital_orders WHERE id = $1`,
+      [order.id]
+    );
+    // rows[0] vence nos campos que ele traz; overrides do caller que NÃO
+    // estão em NOTIFY_FIELDS (ex.: `status` forçado pelo webhookAsaas)
+    // continuam valendo.
+    return rows.length ? { ...order, ...rows[0] } : order;
+  } catch (err) {
+    console.error('[notify] falha ao recarregar pedido pra notificação:', err.message);
+    return order;
+  }
+}
 
 async function getStoreName(company_id) {
   try {
@@ -119,7 +174,11 @@ async function getStoreName(company_id) {
  *   2. E-mail ao lojista — template com resumo do pedido
  *   3. E-mail ao cliente — "Pedido confirmado ✅"
  */
-async function notifyPaymentConfirmed({ order }) {
+async function notifyPaymentConfirmed({ order: input }) {
+  // Recarrega a linha canônica: callers passam recortes diferentes do pedido.
+  const order = await loadOrderForNotify(input);
+  if (!order) return;
+
   const company_id = order.company_id;
   const store_name = await getStoreName(company_id);
 
