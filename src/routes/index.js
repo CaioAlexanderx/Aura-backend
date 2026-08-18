@@ -121,6 +121,11 @@ router.use('/food',              require('./food'));
 // Migration 132. PR Aura-backend#112.
 router.use('/aprovacao',         require('./studioApprovalPublic'));
 
+// K3 (18/08/2026): acompanhamento público da encomenda ("pizza tracker").
+// Sem auth — o token é a credencial, igual /aprovacao. Migration 286.
+// O link viaja na mensagem de WhatsApp que o checkout já monta na venda.
+router.use('/acompanhar',        require('./studioTrackPublic'));
+
 // Studio Camada 1 Fase A (30/05/2026): aceite público do orçamento via link.
 // Sem auth — cliente recebe link e abre /orcamento/:token no navegador.
 // Migration 138. Espelha a mecânica de /aprovacao.

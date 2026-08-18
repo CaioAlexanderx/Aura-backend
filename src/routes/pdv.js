@@ -694,6 +694,13 @@ async function handleSale(req, res, opts = {}) {
         installment:      creditSaleResult?.schedule?.[0] || null,
       } : undefined,
       receipt_url: `/companies/${req.params.id}/print/receipt/${sale.id}`,
+      // K3 (18/08/2026): URL de acompanhamento, pronta pro app colar na
+      // mensagem do cliente. O token vem do RETURNING * do INSERT -- e
+      // gerado por DEFAULT no banco (migration 286), entao ja chega aqui
+      // sem consulta extra. null enquanto a migration nao rodou.
+      track_url: sale.tracker_token
+        ? `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${sale.tracker_token}`
+        : null,
     });
   } catch (e) {
     await client.query('ROLLBACK');
