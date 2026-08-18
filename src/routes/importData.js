@@ -22,6 +22,7 @@ const router  = express.Router({ mergeParams: true });
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
+const { linkImportedCategories } = require('../services/importCategoryLink');
 
 // ─── Mapeamento de colunas — fuzzy match ────────────────────
 
@@ -342,6 +343,8 @@ router.post('/products/import', requireAuth, async (req, res) => {
 
   const batchId = uuidv4();
   let saved = 0, dupes = 0;
+  // D4: relatorio de taxonomia da importacao (vinculados x pendentes no wizard)
+  const categorias = { linked: 0, pending: [], ambiguous: [], skipped: false };
 
   // ── Fase 1: dedup dentro do proprio lote ──────────────────
   // Previne falha de unique constraint quando o CSV tem o mesmo
@@ -414,15 +417,29 @@ router.post('/products/import', requireAuth, async (req, res) => {
     }
 
     try {
-      await db.query(
+      // D4: RETURNING passa a ser necessario -- linkImportedCategories
+      // precisa do id real de cada produto inserido. ON CONFLICT DO
+      // NOTHING faz o RETURNING trazer SO o que entrou de fato, que e
+      // exatamente o conjunto que deve ganhar vinculo.
+      const { rows: inseridos } = await db.query(
         `INSERT INTO products
            (company_id, name, price, cost_price, stock_qty, stock_min,
             barcode, sku, category, color, size, unit, description, ncm, import_batch_id)
          VALUES ${placeholders.join(',')}
-         ON CONFLICT DO NOTHING`,
+         ON CONFLICT DO NOTHING
+         RETURNING id, category`,
         params
       );
       saved += chunk.length;
+
+      // Nunca derruba a importacao: linkImportedCategories nao lanca, e o
+      // analyze do wizard recalcula o staging a partir de products de
+      // qualquer forma.
+      const parcial = await linkImportedCategories(db, companyId, inseridos);
+      categorias.linked += parcial.linked;
+      for (const v of parcial.pending)   if (!categorias.pending.includes(v))   categorias.pending.push(v);
+      for (const v of parcial.ambiguous) if (!categorias.ambiguous.includes(v)) categorias.ambiguous.push(v);
+      if (parcial.skipped) categorias.skipped = true;
     } catch (err) {
       console.error('[import-products] DB error:', err.message);
       return res.status(500).json({ error: 'Erro ao salvar produtos', detail: err.message });
@@ -448,6 +465,14 @@ router.post('/products/import', requireAuth, async (req, res) => {
     error_count: errors.length,
     batch_id: batchId,
     errors: errors.slice(0, 20),
+    // D4: taxonomia. `pendentes` e `ambiguos` sao os valores que ficaram
+    // na fila do wizard de migracao -- o lojista tem que VER isso na
+    // resposta, senao "deixar pendente" vira silencio.
+    categorias: {
+      vinculados: categorias.linked,
+      pendentes:  categorias.pending,
+      ambiguos:   categorias.ambiguous,
+    },
   });
 });
 
