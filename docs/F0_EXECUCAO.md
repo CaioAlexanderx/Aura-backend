@@ -11,7 +11,8 @@
 
 Se você está pegando a F0 do zero (agente novo, ou eu depois de semanas em outra frente), leia **nesta ordem** e pare quando tiver o suficiente:
 
-1. **Esta seção e a §2** — estado de cada item e o que está livre para executar agora.
+1. **Esta seção e a §2** — o que é cada item, de que depende e de que lado vive.
+   Para saber o que já **entrou**, use o git (§2.1) — este arquivo não guarda estado.
 2. **`CONTRACT_CATEGORIES.md`** — forma da API. A §10 (envelopes) e a §9.1 (decisões `DEC-nn`) são as que mais economizam retrabalho.
 3. **`LEGACY_CATEGORY_CONSUMERS.md`** — quem escreve e quem lê `products.category`. Escritas estão fechadas (§2.2); leituras seguem protegidas pelo dual-write.
 4. **`tests/fixtures/categoryTree.js`** — a árvore confirmada da Davi, usada por B1 e B2.
@@ -40,32 +41,48 @@ Até 18/08 as decisões usavam `A1`/`B1`/`C1` e colidiam de frente com os itens:
 
 Lado: **BE** = `aura-backend`, **APP** = `aura-app`.
 
-| Item | O quê | Lado | Estado | Depende de |
-|---|---|---|---|---|
-| Bloco 0 | Auditoria de consumidores de `products.category` | BE | ✅ fechado (escritas) — PR #438, #509 | — |
-| Bloco A | Schema: árvore, links, triggers, staging, `brand` (migrations 257–261) | BE | ✅ em produção — PR #438 | Bloco 0 |
-| B1 | API de árvore + absorção do CRUD legado | BE | ✅ mergeado — PR #440 | Bloco A |
-| B2 | API de migração de categorias + extração de marca | BE | ✅ mergeado — PR #441 | Bloco A |
-| B3 | `CategoryTreePicker` + hooks de categoria | APP | ✅ mergeado — PR #637 | contrato |
-| **C1** | Tela *Organizar catálogo* | APP | ⬜ **livre** | B1, B3 |
-| **C2** | Wizard de migração de categorias | APP | ⬜ **livre** | B2, B3 |
-| **D1** | Cadastro de produto usa o picker no lugar do campo de texto | APP | ⬜ livre | C1 |
-| **D2** | Filtro hierárquico em estoque e PDV | APP | ⬜ livre | C1 |
-| **D3** | Árvore no payload público do storefront | BE | ✅ mergeado | B1 |
-| **D4** | `productsBatch` e `importData` escrevem links, não texto | BE | ✅ mergeado | B1, DEC-06, DEC-08 |
-| **E1** | Cobertura do catálogo por categoria (placar do lojista) | BE | 🟨 metade feita — PR #511 | B1 |
-| **E2** | Auditoria de leituras de `products.category` | BE | ⬜ livre | D1–D4 |
-| **P1** | Wiring da geração de descrição por IA | APP | 🅿️ **estacionado** — §4 | PR #511 |
+| Item | O quê | Lado | Depende de |
+|---|---|---|---|
+| Bloco 0 | Auditoria de consumidores de `products.category` | BE | — |
+| Bloco A | Schema: árvore, links, triggers, staging, `brand` (migrations 257–261) | BE | Bloco 0 |
+| B1 | API de árvore + absorção do CRUD legado | BE | Bloco A |
+| B2 | API de migração de categorias + extração de marca | BE | Bloco A |
+| B3 | `CategoryTreePicker` + hooks de categoria | APP | contrato |
+| C1 | Tela *Organizar catálogo* | APP | B1, B3 |
+| C2 | Wizard de migração de categorias | APP | B2, B3 |
+| D1 | Cadastro de produto usa o picker no lugar do campo de texto | APP | C1 |
+| D2 | Filtro hierárquico em estoque e PDV | APP | C1 |
+| D3 | Árvore no payload público do storefront | BE | B1 |
+| D4 | `productsBatch` e `importData` escrevem links, não texto | BE | B1, DEC-06, DEC-08 |
+| E1 | Cobertura do catálogo por categoria (placar do lojista) | BE | B1 |
+| E2 | Auditoria de leituras de `products.category` | BE | D1–D4 |
+| P1 | Wiring da geração de descrição por IA | APP | E1 · **estacionado, ver §4** |
+
+### 2.1 Onde está o estado — e por que não está aqui
+
+**Este arquivo não tem coluna de status, de propósito.**
+
+A primeira versão tinha, e o custo apareceu no primeiro par de PRs paralelos: D3 e D4 tocaram arquivos disjuntos de código e **mesmo assim conflitaram**, porque os dois marcaram o próprio item como concluído na mesma tabela. Com duas frentes em paralelo — que é justamente o desenho da fase — isso se repetiria a cada par de PRs.
+
+Estado vive no git. Este arquivo guarda o que o git **não** tem: dependência, lado, briefing, ordem e as decisões de desenho.
+
+```bash
+gh pr list --state merged --search "f0 in:title" --limit 20
+```
+
+Para um item específico, o assunto do commit carrega o código (`D3 --`, `D4 --`), então `git log --oneline --grep="D4 --"` responde direto.
+
+**Um item só é "livre" quando tudo em `Depende de` já entrou.** É a tabela acima mais o git — não uma terceira lista para alguém manter.
 
 ### O que mudou em 18/08
 
-**A Onda D foi quebrada em quatro itens** porque metade dela é backend. Enquanto D era um bloco único "de frontend", ela ficava atrás de C inteira; separada, **D3 e D4 podem ir agora, em paralelo com C**, sem tocar no app. Foi o congelamento restrito ao wiring da IA que deixou isso visível.
+**A Onda D foi quebrada em quatro itens** porque metade dela é backend. Enquanto D era um bloco único "de frontend", ela ficava atrás de C inteira; separada, **D3 e D4 não dependem do app** e correm em paralelo com C. Foi o congelamento restrito ao wiring da IA que deixou isso visível.
 
 **A Onda E ganhou metade adiantada.** O `GET /products/descriptions/coverage` do PR #511 já devolve total, com/sem descrição, com/sem foto e percentuais para a empresa. O que falta em E1 é quebrar por categoria e ligar ao limiar de publicação.
 
 ---
 
-## 3. Briefings dos itens livres
+## 3. Briefings
 
 Cada briefing é autocontido: dá para abrir um PR só com ele e o contrato.
 
@@ -93,7 +110,7 @@ Cada briefing é autocontido: dá para abrir um PR só com ele e o contrato.
 
 **Armadilha.** Filtrar `is_dental_supply IS NOT TRUE` no staging mesmo com o espelho dental removido (`DEC-05`) — protege contra base antiga.
 
-### D3 — Árvore no payload público (BE) · *pode ir agora*
+### D3 — Árvore no payload público (BE)
 
 **Objetivo.** A vitrine pública passa a enxergar a árvore, preparando a navegação por categoria da fase seguinte.
 
@@ -107,7 +124,7 @@ Cada briefing é autocontido: dá para abrir um PR só com ele e o contrato.
 
 > ⚠️ **Medido em 18/08, e é o que dá o tamanho do que falta:** `product_category_links` está **vazia na base inteira** — zero vínculos. As 55 categorias do backfill do Bloco A estão em 3 empresas, **todas em `depth = 0`** (lista flat, não árvore), e a Davi Calçados não tem nenhuma. Ou seja: **D3 está correto e não mostra nada ainda.** A taxonomia só ganha corpo quando C2 (wizard) rodar para o piloto. Isso não é bug do D3 — é a fila real da fase.
 
-### D4 — `productsBatch` e `importData` (BE) · *pode ir agora*
+### D4 — `productsBatch` e `importData` (BE)
 
 **Objetivo.** Fechar os dois pontos de escrita em `products.category` que o Bloco 0 mapeou tarde (`DEC-06`).
 
@@ -153,9 +170,9 @@ Itens **desacoplados da onda de propósito**, para revisitar no fim do projeto. 
 
 ## 5. Ordem recomendada
 
-Com o congelamento restrito ao P1, a fase destrava em duas frentes paralelas:
+Ordem por dependência, não por calendário — cruze com o git (§2.1) para saber onde a fase está.
 
-**Agora, em paralelo:**
+**Duas frentes paralelas, assim que B estiver dentro:**
 - **BE:** D3 e D4 — independentes entre si e do app.
 - **APP:** C1 e C2 — arquivos disjuntos, o mesmo padrão que funcionou na Onda B.
 
@@ -164,6 +181,10 @@ Com o congelamento restrito ao P1, a fase destrava em duas frentes paralelas:
 **Fechando:** E1, depois E2.
 
 **Fim do projeto:** P1.
+
+### Regra de branch
+
+**Saia sempre do `main` do momento, não de um `main` de ontem.** D3 saiu de um `main` anterior ao merge do D4 e conflitou por bookkeeping mesmo com código disjunto. Com duas frentes paralelas o `main` anda entre abrir e mergear um PR — rebasear na hora de abrir é mais barato que resolver na hora de fechar.
 
 ---
 
