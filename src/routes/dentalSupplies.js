@@ -140,18 +140,18 @@ router.post('/', async (req, res) => {
 
     const { rows } = await client.query(
       `INSERT INTO products
-         (company_id, name, description, category, dental_category,
+         (company_id, name, description, dental_category,
           unit, cost_price, supplier_name,
           stock_qty, stock_min, stock_max,
           expiry_date, lot_number,
           is_dental_supply, is_active, price)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,true,true,0)
+       -- products.category NAO e escrita aqui: desde a F0 (migration 259) ela e mantida pelo trigger trg_sync_legacy_category a partir de product_category_links. O discriminador do modulo e is_dental_supply; a taxonomia e dental_category.
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,true,0)
        RETURNING *`,
       [
         companyId,
         name.trim(),
         description || null,
-        dental_category || 'outro',       // category = dental_category (compatibilidade)
         dental_category || 'outro',
         unit || 'un',
         cost_price || 0,
@@ -235,7 +235,7 @@ router.patch('/:id', async (req, res) => {
           SET name            = COALESCE($3, name),
               description     = COALESCE($4, description),
               dental_category = COALESCE($5, dental_category),
-              category        = COALESCE($5, category),
+              -- products.category NAO e escrita aqui: desde a F0 (migration 259) ela e mantida pelo trigger trg_sync_legacy_category a partir de product_category_links. O discriminador do modulo e is_dental_supply; a taxonomia e dental_category.
               unit            = COALESCE($6, unit),
               cost_price      = COALESCE($7, cost_price),
               supplier_name   = COALESCE($8, supplier_name),
