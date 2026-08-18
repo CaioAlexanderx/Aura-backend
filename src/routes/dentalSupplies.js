@@ -10,6 +10,16 @@
 // Categorias dentais:
 //   anestesico | resina | fio | broca | descartavel |
 //   material_restaurador | material_protecao | rx | equipamento | outro
+//
+// F0 Loja Digital (18/08/2026): esta rota ESPELHAVA dental_category em
+// products.category "por compatibilidade". O espelho morreu: category
+// agora pertence a taxonomia da loja (dual-write via links, migration
+// 259) e valor dental ali poluiria o staging do wizard (B2 le os
+// distintos de products.category) e seria ANULADO pelo cleanup de
+// categoryMigration.js. dental_category e o unico campo de categoria
+// deste modulo. Medido antes do fix: 0 insumos dentais na base inteira
+// (modulo parado) — sem backfill. Decisao do Caio: prioridade e a F0;
+// dental fica, mas fora do caminho da taxonomia.
 // ============================================================
 
 const express = require('express');
@@ -140,18 +150,17 @@ router.post('/', async (req, res) => {
 
     const { rows } = await client.query(
       `INSERT INTO products
-         (company_id, name, description, category, dental_category,
+         (company_id, name, description, dental_category,
           unit, cost_price, supplier_name,
           stock_qty, stock_min, stock_max,
           expiry_date, lot_number,
           is_dental_supply, is_active, price)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,true,true,0)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,true,0)
        RETURNING *`,
       [
         companyId,
         name.trim(),
         description || null,
-        dental_category || 'outro',       // category = dental_category (compatibilidade)
         dental_category || 'outro',
         unit || 'un',
         cost_price || 0,
@@ -235,7 +244,6 @@ router.patch('/:id', async (req, res) => {
           SET name            = COALESCE($3, name),
               description     = COALESCE($4, description),
               dental_category = COALESCE($5, dental_category),
-              category        = COALESCE($5, category),
               unit            = COALESCE($6, unit),
               cost_price      = COALESCE($7, cost_price),
               supplier_name   = COALESCE($8, supplier_name),

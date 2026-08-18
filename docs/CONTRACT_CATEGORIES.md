@@ -306,6 +306,17 @@ Levantado ao revisar #440 (B1), #441 (B2) e #637 (B3), todos escritos em paralel
 
 **Lição para as próximas fases: congelar objeto e lista de rotas não é congelar contrato.** Enquanto o envelope de resposta não estiver escrito, dois agentes paralelos vão inventar dois envelopes diferentes, e a conta só aparece na integração.
 
+### 9.1.2 Adendo de 18/08/2026 — fechamento do Bloco 0 e escopo da Onda D
+
+Quatro decisões do Caio, tomadas na revisão do repasse da F0:
+
+| # | Decisão | Consequência |
+|---|---|---|
+| 1 | **Árvore da Davi confirmada: `Feminino`, `Masculino`, `Infantil`** no nível 0. Sem `Esportivo`. | `tests/fixtures/categoryTree.js` já refletia exatamente isso — a árvore sai de "proposta" para **confirmada**. O wizard da C2 permite renomear e criar raiz, então a decisão não trava o cliente. |
+| 2 | **O módulo dental sai do caminho da taxonomia.** Ele espelhava `dental_category` em `products.category`; o espelho foi removido (`src/routes/dentalSupplies.js`). | O B2 não vê `anestesico`/`broca`/`rx` como categorias candidatas no staging. Recomendação adicional: filtrar `is_dental_supply IS NOT TRUE` no staging mesmo assim. Ver `LEGACY_CATEGORY_CONSUMERS.md` §2.2.1. |
+| 3 | **`productsBatch.js` e `importData.js` entram no escopo declarado da Onda D.** | São pontos de escrita em `products.category` que o Bloco 0 não tinha mapeado. Importação que grava texto livre recria o problema que a F0 resolve. |
+| 4 | **O Bloco 0 está fechado quanto a escritas.** | O gate para o merge do B1 está cumprido. Ver `LEGACY_CATEGORY_CONSUMERS.md` §2.2 e §4. |
+
 ### 9.2 Divergências conhecidas contra a SPEC_LOJA_F0_TAXONOMIA_v2.md
 
 Onde divergir, **este documento vence**. Lista para quem ler a spec depois:
