@@ -1,6 +1,7 @@
 # LEGACY_CATEGORY_CONSUMERS — auditoria de `products.category`
 
 **Fase:** F0 — Bloco 0 (pré-requisito) · **Data:** 28/07/2026 · **Fechamento:** 18/08/2026
+**Estado e sequência dos itens da fase:** `docs/F0_EXECUCAO.md`
 **Status: ESCRITAS FECHADAS** — a §2.2 traz a varredura completa. Leituras seguem
 protegidas pelo dual-write; a §4 explica o que isso cobre e o que não cobre.
 

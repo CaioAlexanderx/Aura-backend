@@ -4,6 +4,10 @@
 
 > Este contrato é a fonte da verdade para a paralelização. Os agentes de frontend (B3, C1, C2) constroem contra ele com mock; os de backend (B1, B2) implementam contra ele. **Mudança depois do congelamento exige aviso ao orquestrador e re-sync dos dois lados no mesmo dia.**
 >
+> **Estado, sequência e briefings de cada item: `docs/F0_EXECUCAO.md`.** Este documento diz *o que a API é*; o quadro diz *o que falta fazer e em que ordem*.
+>
+> ⚠️ **Regra de namespace de código (18/08/2026).** `B1`, `C1`, `C2`, `D1`… são **itens de execução** (onda + número). `DEC-01`, `DEC-02`… são **decisões**. Até 18/08 as decisões usavam `A1`/`B1`/`C1`, que colidia de frente com os itens — `B1` significava ao mesmo tempo "agente da API de árvore" e "decisão do `move_to`". Foram renumeradas; o de-para está na §9.1. **Nunca reutilizar um código entre os dois espaços.**
+>
 > **Onde este documento e a SPEC_LOJA_F0_TAXONOMIA_v2.md divergirem, este documento vence.** A spec é anterior ao congelamento. As divergências conhecidas estão listadas na §9.2.
 
 ---
@@ -37,7 +41,7 @@ Toda vertical que de fato vende serviço **já tem modelo próprio** e não pass
 1. A coluna `product_categories.type` **permanece no schema**. A rota legada lê, o aura-app chama `?type=`, e a migration 045 a criou. Dropar quebraria contrato existente sem ganho nenhum.
 2. Os índices da migration 257 mantêm `type` na chave. Com todas as linhas em `'product'`, a coluna é constante e o índice se comporta como se ela não existisse. Deixa a porta aberta sem custo.
 3. O trigger `trg_category_path_maintain` mantém a validação `NEW.type = parent.type`. É guarda latente de schema, não superfície de API.
-4. **Nenhum endpoint NOVO da F0 expõe seleção de `type`.** O CRUD legado (`GET /`, `POST /`, `PATCH /:catId`, `DELETE /:catId`) continua bilíngue por retrocompatibilidade — ver §1 e a decisão **C1** da §9.1.
+4. **Nenhum endpoint NOVO da F0 expõe seleção de `type`.** O CRUD legado (`GET /`, `POST /`, `PATCH /:catId`, `DELETE /:catId`) continua bilíngue por retrocompatibilidade — ver §1 e a decisão **DEC-03** da §9.1.
 
 ---
 
@@ -47,7 +51,7 @@ O repo monta tudo sob `/api/v1/companies/:id/...` com `Router({ mergeParams: tru
 
 O router de categorias **mantém o path `/product-categories`**, que o aura-app já chama hoje. Não criar `/categories` em paralelo.
 
-### Tratamento de `?type=` [ATUALIZADO EM 30/07 — decisão C1]
+### Tratamento de `?type=` [ATUALIZADO EM 30/07 — decisão DEC-03]
 
 | Endpoint | Comportamento |
 |---|---|
@@ -89,7 +93,7 @@ O router de categorias **mantém o path `/product-categories`**, que o aura-app 
 
 O frontend **não deve construir seletor de tipo** em nenhuma tela nova. O `type` no payload é retrocompatibilidade.
 
-### `product_count` — decisão A1, fechada em 30/07
+### `product_count` — decisão DEC-01, fechada em 30/07
 
 Há duas semânticas possíveis e elas **não** coincidem:
 
@@ -128,7 +132,7 @@ A rota exige que origem e destino estejam no **mesmo grupo de faturamento**, usa
 
 Isso resolve o caso Davi (Matriz → Villa Branca, mesmo grupo) e fecha o buraco. Não estava no congelamento de 28/07 — foi levantado na implementação do B1 e aceito na revisão de 30/07.
 
-### 3.1 `DELETE /:catId` — decisão B1, fechada em 30/07
+### 3.1 `DELETE /:catId` — decisão DEC-02, fechada em 30/07
 
 **O comportamento atual está errado e precisa ser reescrito, não preservado.** Três problemas medidos em 30/07:
 
@@ -285,11 +289,13 @@ Estado da base em 30/07: `product_category_links` = **0 linhas**, `category_migr
 
 ### 9.1 Re-sync de 30/07/2026 — três decisões de Caio
 
+> **De-para dos códigos antigos (renumerados em 18/08):** `A1` → `DEC-01`, `B1` → `DEC-02`, `C1` → `DEC-03`. Documentos e PRs anteriores a 18/08 usam os códigos antigos.
+
 | # | Decisão | Efeito |
 |---|---|---|
-| **A1** | `GET /` mantém `product_count` ao vivo; `GET /tree` usa a coluna. | §2. Limitação de irmãos homônimos aceita como transitória. |
-| **B1** | `DELETE ?move_to=` aceita uuid **e** nome, resolve para id, move **links** e não texto. Guardas de filho e de produto viram obrigatórias. | §3.1, §6. Evita PR sincronizado no `aura-app`. |
-| **C1** | `POST /` volta a aceitar `type: 'service'`, criando flat. `422 CATEGORY_SERVICE_OUT_OF_SCOPE` removido. | §1, §6. Evita regressão em `AddServiceForm.tsx` e `CategoriesModal.tsx`. |
+| **DEC-01** | `GET /` mantém `product_count` ao vivo; `GET /tree` usa a coluna. | §2. Limitação de irmãos homônimos aceita como transitória. |
+| **DEC-02** | `DELETE ?move_to=` aceita uuid **e** nome, resolve para id, move **links** e não texto. Guardas de filho e de produto viram obrigatórias. | §3.1, §6. Evita PR sincronizado no `aura-app`. |
+| **DEC-03** | `POST /` volta a aceitar `type: 'service'`, criando flat. `422 CATEGORY_SERVICE_OUT_OF_SCOPE` removido. | §1, §6. Evita regressão em `AddServiceForm.tsx` e `CategoriesModal.tsx`. |
 
 Também nesta revisão: §8 com os nomes reais dos 7 triggers, §6 com a terceira exceção `P0001` (`CATEGORY_TYPE_MISMATCH`) e com o `23503` da FK `parent_id`, §7 marcando a query da spec como superada.
 
@@ -312,10 +318,10 @@ Quatro decisões do Caio, tomadas na revisão do repasse da F0:
 
 | # | Decisão | Consequência |
 |---|---|---|
-| 1 | **Árvore da Davi confirmada: `Feminino`, `Masculino`, `Infantil`** no nível 0. Sem `Esportivo`. | `tests/fixtures/categoryTree.js` já refletia exatamente isso — a árvore sai de "proposta" para **confirmada**. O wizard da C2 permite renomear e criar raiz, então a decisão não trava o cliente. |
-| 2 | **O módulo dental sai do caminho da taxonomia.** Ele espelhava `dental_category` em `products.category`; o espelho foi removido (`src/routes/dentalSupplies.js`). | O B2 não vê `anestesico`/`broca`/`rx` como categorias candidatas no staging. Recomendação adicional: filtrar `is_dental_supply IS NOT TRUE` no staging mesmo assim. Ver `LEGACY_CATEGORY_CONSUMERS.md` §2.2.1. |
-| 3 | **`productsBatch.js` e `importData.js` entram no escopo declarado da Onda D.** | São pontos de escrita em `products.category` que o Bloco 0 não tinha mapeado. Importação que grava texto livre recria o problema que a F0 resolve. |
-| 4 | **O Bloco 0 está fechado quanto a escritas.** | O gate para o merge do B1 está cumprido. Ver `LEGACY_CATEGORY_CONSUMERS.md` §2.2 e §4. |
+| **DEC-04** | **Árvore da Davi confirmada: `Feminino`, `Masculino`, `Infantil`** no nível 0. Sem `Esportivo`. | `tests/fixtures/categoryTree.js` já refletia exatamente isso — a árvore sai de "proposta" para **confirmada**. O wizard da C2 permite renomear e criar raiz, então a decisão não trava o cliente. |
+| **DEC-05** | **O módulo dental sai do caminho da taxonomia.** Ele espelhava `dental_category` em `products.category`; o espelho foi removido (`src/routes/dentalSupplies.js`). | O B2 não vê `anestesico`/`broca`/`rx` como categorias candidatas no staging. Recomendação adicional: filtrar `is_dental_supply IS NOT TRUE` no staging mesmo assim. Ver `LEGACY_CATEGORY_CONSUMERS.md` §2.2.1. |
+| **DEC-06** | **`productsBatch.js` e `importData.js` entram no escopo declarado da Onda D.** | São pontos de escrita em `products.category` que o Bloco 0 não tinha mapeado. Importação que grava texto livre recria o problema que a F0 resolve. |
+| **DEC-07** | **O Bloco 0 está fechado quanto a escritas.** | O gate para o merge do B1 está cumprido. Ver `LEGACY_CATEGORY_CONSUMERS.md` §2.2 e §4. |
 
 ### 9.2 Divergências conhecidas contra a SPEC_LOJA_F0_TAXONOMIA_v2.md
 
