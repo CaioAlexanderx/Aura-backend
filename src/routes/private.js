@@ -34,6 +34,11 @@ router.use('/caixa', require('./caixa'));
 // capturaria 'brand-candidates' como uuid. Rota estatica sempre antes da
 // parametrica.
 router.use('/', require('./categoryMigration'));
+// F0 IA de descricao (18/08/2026): TODAS as rotas comecam por
+// `descriptions`, que e ESTATICO, e ./products tem GET /:id curinga --
+// montar depois faria o Express tratar 'descriptions' como uuid e estourar
+// "invalid input syntax for type uuid". Mesma armadilha do Bloco B1 abaixo.
+router.use('/products', require('./productDescriptions'));
 router.use('/products', require('./productsDuplicates'));
 router.use('/products', require('./productsBatch'));
 router.use('/products', require('./productsVariations'));
