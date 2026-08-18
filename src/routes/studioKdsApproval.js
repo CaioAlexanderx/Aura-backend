@@ -92,6 +92,11 @@ const BALANCE_COLS = `
 //   1. mockup aprovado/enviado -- so pedido digital (approval_links.order_id
 //      aponta pra digital_orders; nao ha sale_id ali)
 //   2. render do Visual Engine -- via sale_item (PDV) ou digital_order_item
+//      (o join do digital_order_item compara ::text: em prod o id da tabela
+//      e BIGINT e o FK do render e UUID -- migration 208 assumiu uuid. Sem o
+//      cast, o 42883 derrubava a query RICA inteira pro fallback slim e
+//      matava foto, prazo e saldo do board. Com o cast, o braco apenas nao
+//      casa nada ate o schema convergir -- mesmo resultado, sem explosao.)
 //   3. foto do produto vendido
 //
 // Levantamento em prod (18/08): 0 renders e 0 mockups gravados; a cobertura
@@ -110,7 +115,7 @@ const CARD_IMAGE_COL = `
                     AND NULLIF(TRIM(r.file_url), '') IS NOT NULL
                   ORDER BY (r.kind = 'hd_2d') DESC, r.created_at DESC LIMIT 1),
                 (SELECT r.file_url FROM studio_visual_renders r
-                   JOIN digital_order_items doi2 ON doi2.id = r.digital_order_item_id
+                   JOIN digital_order_items doi2 ON doi2.id::text = r.digital_order_item_id::text
                   WHERE doi2.order_id = o.digital_order_id
                     AND NULLIF(TRIM(r.file_url), '') IS NOT NULL
                   ORDER BY (r.kind = 'hd_2d') DESC, r.created_at DESC LIMIT 1),
