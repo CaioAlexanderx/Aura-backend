@@ -6,8 +6,14 @@
 // via pdv-summary-patch.js. Teste atualizado pra mockar ambas.
 //
 // 11/05/2026: PR #56 introduziu assertCaixaOpenOrAllowed que faz query
-// SELECT pdv_settings logo apos BEGIN. Mocks de POST /sale precisam
+// SELECT pdv_settings logo apos BEGIN. Mocks de POST /sale precisavam
 // incluir CAIXA_DISABLED_MOCK pra nao desalinhar a sequencia.
+//
+// 18/08/2026: mock convertido pra DESPACHO POR SQL. As duas notas acima sao
+// justamente correcoes de desalinhamento de fila -- manutencao pura, sem
+// nenhum bug encontrado. Com despacho por conteudo, query nova no fluxo de
+// venda deixa de quebrar o teste, e o helper ja resolve o caixa sozinho.
+// Convencao do CLAUDE.md: mock por SQL, nunca por posicao.
 // ============================================================
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
@@ -31,16 +37,27 @@ const mockSale    = { id:'sale1', total_amount:25.00, payment_method:'pix', stat
 // o segundo slot (SELECT caixa_sessoes).
 const CAIXA_DISABLED_MOCK = { rows: [{ pdv_settings: { caixa_enabled: false } }] };
 
-// Helper: monta cliente transacional mockado
-function mockClient(queryResults = []) {
-  const client = {
-    query: jest.fn(),
-    release: jest.fn(),
-  };
-  // Cada chamada a client.query retorna o resultado correspondente
-  queryResults.forEach(result => client.query.mockResolvedValueOnce(result));
-  // Fallback para chamadas extras (ROLLBACK, etc)
-  client.query.mockResolvedValue({ rows: [] });
+// Helper: cliente transacional mockado, despachando por CONTEUDO DO SQL.
+//
+// 18/08/2026: era posicional (uma fila de mockResolvedValueOnce espelhando a
+// ordem exata das queries do handleSale). Toda query nova no fluxo de venda
+// deslocava a fila; os dois avisos no cabecalho deste arquivo (07/05 e 11/05)
+// sao correcoes desse tipo -- manutencao pura, sem bug encontrado.
+//
+// Agora cada teste declara SO o que importa pra ele, por regex de SQL. Query
+// nova no meio do fluxo nao quebra nada, e o que nao foi declarado cai num
+// default seguro.
+function mockClient(porSql = {}) {
+  const client = { query: jest.fn(), release: jest.fn() };
+  client.query.mockImplementation((sql) => {
+    const t = String(sql || '');
+    for (const [padrao, valor] of Object.entries(porSql)) {
+      if (new RegExp(padrao, 'i').test(t)) return Promise.resolve(valor);
+    }
+    // assertCaixaOpenOrAllowed: caixa_enabled=false aprova sem checar sessoes
+    if (/SELECT pdv_settings FROM companies/i.test(t)) return Promise.resolve(CAIXA_DISABLED_MOCK);
+    return Promise.resolve({ rows: [] });
+  });
   return client;
 }
 
@@ -73,13 +90,10 @@ describe('POST /companies/:id/pdv/sale — validações de entrada', () => {
 describe('POST /companies/:id/pdv/sale — venda atômica', () => {
   test('201 — venda criada (produto sem rastrear estoque)', async () => {
     // Produto sem product_id — não faz query de produto, só BEGIN + caixa_check + INSERT sale + INSERT item + COMMIT
-    const client = mockClient([
-      { rows: [] },                           // BEGIN
-      CAIXA_DISABLED_MOCK,                    // assertCaixaOpenOrAllowed: caixa_enabled=false
-      { rows: [mockSale] },                   // INSERT sale
-      { rows: [{ id:'si1' }] },               // INSERT sale_item
-      { rows: [] },                           // COMMIT
-    ]);
+    const client = mockClient({
+      'INSERT INTO sales':      { rows: [mockSale] },
+      'INSERT INTO sale_items': { rows: [{ id: 'si1' }] },
+    });
     db.connect.mockResolvedValueOnce(client);
     // db.query extra após COMMIT (busca itens)
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
@@ -100,12 +114,10 @@ describe('POST /companies/:id/pdv/sale — venda atômica', () => {
 
   test('409 — estoque insuficiente', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
-    const client = mockClient([
-      { rows: [] },                                                           // BEGIN
-      CAIXA_DISABLED_MOCK,                                                    // assertCaixaOpenOrAllowed
-      { rows: [{ name:'Produto', cost_price:10, stock_qty: '0' }] },         // SELECT produto (estoque 0)
-      { rows: [] },                                                           // ROLLBACK
-    ]);
+    const client = mockClient({
+      // o que este teste realmente diz: o produto existe, mas com estoque 0
+      'FROM products p JOIN companies': { rows: [{ name: 'Produto', cost_price: 10, stock_qty: '0' }] },
+    });
     db.connect.mockResolvedValueOnce(client);
 
     const res = await request(app)
