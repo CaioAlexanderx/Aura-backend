@@ -15,34 +15,104 @@
 //   por rodar dentro de um catch silencioso, as notificações de pedido do
 //   Studio nunca apareciam. Agora usamos as colunas reais e expomos
 //   display_name (ou o id curto) como order_number pro card do app.
+//
+// 18/08/2026 — EXPANSÃO PARA AURA DOJÔ / KARATÊ / STUDIO (migration 285).
+//   Esta rota já respondia para os três shells (é montada em private.js para
+//   TODA empresa, sem gate de plano), mas o banner só sabia segmentar por
+//   empresa e por plano. Sem alvo de shell, um aviso do Aura Dojô aparecia
+//   também na loja de varejo. Agora o banner casa com o SHELL da empresa:
+//
+//     shell = COALESCE(vertical_active, vertical, 'negocio')
+//
+//   e `target_vertical IS NULL` segue significando "todos os shells" — o
+//   comportamento de todo banner que já existe. Lista de shells válidos:
+//   src/services/appNotifications.js (SHELLS), que é também por onde o
+//   BACKEND dispara banner sem passar pela Gestão Aura.
+//
+//   `vertical_active` é o campo que a Gestão Aura liga (adminVertical.js) e
+//   `vertical` é o do cadastro do dojô/federação (auth.js) — daí o COALESCE
+//   nessa ordem. O único Studio da base hoje tem vertical NULL e
+//   vertical_active 'studio'; os dojôs têm os dois preenchidos.
+//
+//   Defensivo (CLAUDE.md, armadilha 1): antes da migration 285 a coluna
+//   target_vertical não existe. Em 42703 a query cai na forma antiga e o
+//   cache module-level evita repetir o try/catch a cada poll de 30s.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 
-// GET — Banners ativos (não lidos) + pedidos recentes das últimas 24h
-router.get('/', async (req, res) => {
-  const cid = req.params.id;
-  try {
-    // 1. Banners ativos não lidos por esta empresa
-    // Nota: companies.plan é do tipo plan_type (enum); fazemos cast ::text
-    // para comparar com a coluna target_plan TEXT da app_notifications.
-    const { rows: banners } = await db.query(`
-      SELECT n.id, n.type, n.title, n.body, n.html_content,
-             n.cta_label, n.cta_url, n.cta_route, n.created_at
-      FROM app_notifications n
-      WHERE n.is_active = true
+// null = ainda não sabemos; true/false = decidido para o resto do processo.
+let hasTargetVertical = null;
+
+// Filtro de alvo compartilhado pelo GET e pelo read-all — o write path tem
+// que enxergar exatamente os mesmos banners que o read path (CLAUDE.md,
+// armadilha 7), senão "marcar todas como lidas" cria linha de leitura para
+// banner de outro shell e ele some se um dia for redirecionado.
+function targetFilter(withVertical) {
+  return `
         AND (n.expires_at IS NULL OR n.expires_at > NOW())
         AND (n.target_company_id IS NULL OR n.target_company_id = $1)
         AND (n.target_plan IS NULL OR n.target_plan = (
               SELECT plan::text FROM companies WHERE id = $1 LIMIT 1
             ))
+        ${withVertical ? `AND (n.target_vertical IS NULL OR n.target_vertical = (
+              SELECT COALESCE(vertical_active, vertical, 'negocio')
+                FROM companies WHERE id = $1 LIMIT 1
+            ))` : ''}`;
+}
+
+function bannersSql(withVertical) {
+  return `
+      SELECT n.id, n.type, n.title, n.body, n.html_content,
+             n.cta_label, n.cta_url, n.cta_route, n.created_at
+             ${withVertical ? ', n.target_vertical' : ''}
+      FROM app_notifications n
+      WHERE n.is_active = true
+        ${targetFilter(withVertical)}
         AND NOT EXISTS (
           SELECT 1 FROM notification_reads r
           WHERE r.notification_id = n.id AND r.company_id = $1
         )
       ORDER BY n.created_at DESC
-      LIMIT 20
-    `, [cid]);
+      LIMIT 20`;
+}
+
+function readAllSql(withVertical) {
+  return `
+      INSERT INTO notification_reads (notification_id, company_id)
+      SELECT n.id, $1
+      FROM app_notifications n
+      WHERE n.is_active = true
+        ${targetFilter(withVertical)}
+        AND NOT EXISTS (
+          SELECT 1 FROM notification_reads r
+          WHERE r.notification_id = n.id AND r.company_id = $1
+        )
+      ON CONFLICT (notification_id, company_id) DO NOTHING`;
+}
+
+// Roda a query na forma nova e, só em 42703 (migration 285 ausente),
+// repete na forma antiga — memorizando a decisão.
+async function runWithVerticalFallback(sqlFor, params) {
+  try {
+    const res = await db.query(sqlFor(hasTargetVertical !== false), params);
+    if (hasTargetVertical === null) hasTargetVertical = true;
+    return res;
+  } catch (err) {
+    if (err.code !== '42703') throw err;
+    hasTargetVertical = false;
+    return db.query(sqlFor(false), params);
+  }
+}
+
+// GET — Banners ativos (não lidos) + pedidos recentes das últimas 24h
+router.get('/', async (req, res) => {
+  const cid = req.params.id;
+  try {
+    // 1. Banners ativos não lidos por esta empresa, filtrados por empresa,
+    // plano e shell. Nota: companies.plan é do tipo plan_type (enum); fazemos
+    // cast ::text para comparar com a coluna target_plan TEXT.
+    const { rows: banners } = await runWithVerticalFallback(bannersSql, [cid]);
 
     // 2. Pedidos recentes do Canal Digital (últimas 24h)
     let digitalOrders = [];
@@ -116,22 +186,12 @@ router.post('/banners/:nid/read', async (req, res) => {
   }
 });
 
-// POST /read-all-banners — marca todos os banners ativos como lidos para esta empresa
+// POST /read-all-banners — marca como lidos os banners que esta empresa
+// de fato VÊ (mesmo filtro do GET: empresa + plano + shell + validade).
 router.post('/read-all-banners', async (req, res) => {
   const cid = req.params.id;
   try {
-    await db.query(`
-      INSERT INTO notification_reads (notification_id, company_id)
-      SELECT n.id, $1
-      FROM app_notifications n
-      WHERE n.is_active = true
-        AND (n.target_company_id IS NULL OR n.target_company_id = $1)
-        AND NOT EXISTS (
-          SELECT 1 FROM notification_reads r
-          WHERE r.notification_id = n.id AND r.company_id = $1
-        )
-      ON CONFLICT (notification_id, company_id) DO NOTHING
-    `, [cid]);
+    await runWithVerticalFallback(readAllSql, [cid]);
     res.json({ ok: true });
   } catch (err) {
     console.error('[notifications] read-all error:', err.message);
