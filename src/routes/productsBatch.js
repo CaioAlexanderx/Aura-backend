@@ -11,6 +11,7 @@
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+const { linkImportedCategories } = require('../services/importCategoryLink');
 
 function getPlanLimit(plan) {
   switch ((plan || '').toLowerCase()) {
@@ -111,6 +112,7 @@ router.post('/batch-create', async (req, res) => {
   // Bulk INSERT em transacao
   const client = await db.connect();
   const created = [];
+  let categorias = { linked: 0, pending: [], ambiguous: [], skipped: false };
   try {
     await client.query('BEGIN');
 
@@ -135,6 +137,12 @@ router.post('/batch-create', async (req, res) => {
     );
     rows.forEach(r => created.push(r));
 
+    // D4: vincula categoria na arvore (ou deixa pendente no wizard).
+    // DENTRO da transacao: ou o lote inteiro entra com vinculo, ou nada
+    // entra -- produto criado com vinculo faltando seria pior que o
+    // legado, porque o wizard nao reprocessa quem ja tem link.
+    categorias = await linkImportedCategories(client, cid, rows);
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
@@ -150,6 +158,13 @@ router.post('/batch-create', async (req, res) => {
     total_requested: input.length,
     duplicates,
     errors,
+    // D4: mesma razao do importData -- o que ficou pendente no wizard
+    // precisa aparecer para quem criou o lote.
+    categorias: {
+      vinculados: categorias.linked,
+      pendentes:  categorias.pending,
+      ambiguos:   categorias.ambiguous,
+    },
   });
 });
 

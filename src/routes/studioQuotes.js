@@ -12,6 +12,12 @@
 //
 // M2 (30/05/2026): convert auto-cria marco de sinal em studio_payments
 // quando deposit_amount > 0 (fecha o loop orçamento→sinal sem passo manual).
+//
+// 18/08/2026: /send agora é idempotente. Reenviar um quote já em 'sent'
+// preserva o token existente (não rotaciona) — o botão "Enviar ao cliente"
+// da tela do editor fica visível enquanto status ∈ {draft, sent}, e o
+// merchant reabrindo a tela pra pegar o wa.me matava a URL que o cliente
+// já tinha. Ver comentário no handler de /send.
 // ============================================================
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
@@ -315,6 +321,23 @@ router.delete('/quotes/:qid', async function(req, res) {
 });
 
 // ─── POST /quotes/:qid/send ──────────────────────────────────
+// 18/08/2026 — Idempotente do ponto de vista do link compartilhado.
+//
+// Regra: só emite token NOVO na transição draft → sent. Se o quote já está
+// em 'sent' e tem token, PRESERVA o token, só prorroga expires_at e refaz
+// sent_at. Isso é o que importa: a mesma URL que já viajou no WhatsApp
+// continua valendo depois do merchant reclicar "Enviar ao cliente"
+// (o botão fica visível pra draft E sent — ver canSend em
+// app/studio/(estudio)/gestao/orcamentos/[id].tsx do aura-app).
+//
+// Antes desta correção, cada clique gerava um token novo e sobrescrevia o
+// anterior — o cliente externo abria a URL antiga e caía em 404 ("Link
+// inválido ou expirado"). Caso real de hoje 18/08: Sheid Mania / Monique
+// Campos, token trocado ~06 horas depois do envio original.
+//
+// Se um dia precisar de "regenerar link" (revogação por vazamento etc.),
+// isso vira ação separada explícita (ex: POST /quotes/:qid/regenerate-link),
+// não efeito colateral do botão principal.
 router.post('/quotes/:qid/send', async function(req, res) {
   const cid = req.params.id;
   const qid = req.params.qid;
@@ -333,16 +356,22 @@ router.post('/quotes/:qid/send', async function(req, res) {
       return res.status(400).json({ error: `Não é possível enviar orçamento com status '${quote.status}'` });
     }
 
-    let token = null;
-    for (let i = 0; i < 5; i++) {
-      const candidate = crypto.randomBytes(32).toString('hex');
-      const exists = await db.query(
-        `SELECT 1 FROM studio_quotes WHERE token = $1 LIMIT 1`,
-        [candidate]
-      );
-      if (!exists.rows.length) { token = candidate; break; }
+    // Idempotência do token: reuse quando já existe. Só gera novo na
+    // transição real draft → sent (ou se, por algum motivo antigo, uma row
+    // em 'sent' estiver sem token — não deveria acontecer, mas o defensivo
+    // evita 500).
+    let token = quote.token;
+    if (!token) {
+      for (let i = 0; i < 5; i++) {
+        const candidate = crypto.randomBytes(32).toString('hex');
+        const exists = await db.query(
+          `SELECT 1 FROM studio_quotes WHERE token = $1 LIMIT 1`,
+          [candidate]
+        );
+        if (!exists.rows.length) { token = candidate; break; }
+      }
+      if (!token) return res.status(500).json({ error: 'Não foi possível gerar token' });
     }
-    if (!token) return res.status(500).json({ error: 'Não foi possível gerar token' });
 
     const vDays = Math.max(1, parseInt(quote.validity_days) || 7);
 
