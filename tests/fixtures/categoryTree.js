@@ -1,7 +1,14 @@
 // ============================================================
 // AURA. -- Fixture de arvore de categorias (F0 Bloco A)
 // Consumido por B1 (tests/services/categoryTree.test.js) e por B2.
-// Espelha a arvore de calcados proposta na spec v2 secao 6.3, passo 2.
+// Espelha a arvore de calcados da spec v2 secao 6.3, passo 2.
+//
+// ARVORE CONFIRMADA em 18/08/2026 (decisao do Caio, piloto Davi Calcados):
+// nivel 0 = Feminino, Masculino, Infantil. "Esportivo", que a spec chegou a
+// cogitar como quarto no de nivel 0, NAO entra: calcado esportivo e recorte
+// de uso, nao de publico, e conviveria mal com os outros tres (um tenis de
+// corrida feminino pertenceria a dois nos de nivel 0 ao mesmo tempo). O
+// caminho para esse recorte e categoria secundaria ou faceta, nao raiz.
 //
 // ESCOPO: a F0 e PRODUCT-ONLY (decisao de 28/07, ver CONTRACT_CATEGORIES.md
 // secao 0). Nao existe fixture de arvore de servico -- servico saiu do

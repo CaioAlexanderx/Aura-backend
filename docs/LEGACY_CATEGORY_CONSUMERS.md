@@ -1,11 +1,13 @@
 # LEGACY_CATEGORY_CONSUMERS — auditoria de `products.category`
 
-**Fase:** F0 — Bloco 0 (pré-requisito) · **Data:** 28/07/2026
-**Status: PARCIAL — ver seção 4.**
+**Fase:** F0 — Bloco 0 (pré-requisito) · **Data:** 28/07/2026 · **Fechamento:** 18/08/2026
+**Status: ESCRITAS FECHADAS** — a §2.2 traz a varredura completa. Leituras seguem
+protegidas pelo dual-write; a §4 explica o que isso cobre e o que não cobre.
 
 > Propósito: `products.category` passa a ser escrito pelo trigger `trg_sync_legacy_category` (migration 259). Todo ponto que **também** escreve nessa coluna vai conflitar. Todo ponto que **lê** precisa continuar funcionando durante o dual-write, e só pode ser depreciado quando esta lista estiver vazia.
 >
-> Leitura pura. Nenhum arquivo de código foi alterado nesta auditoria.
+> A auditoria de 28/07 foi leitura pura. O fechamento de 18/08 alterou **um**
+> arquivo: `src/routes/dentalSupplies.js`, que escrevia na coluna (ver §2.2.1).
 
 ---
 
@@ -38,6 +40,46 @@ Varredura em `pg_views`, `pg_matviews`, `pg_proc`, `pg_trigger` e `pg_indexes`.
 **Ação para o Bloco B1:** o trigger `trg_sync_legacy_category_rename` (259) já faz a cascata de rename a partir dos links. **Remover a cascata manual do `PATCH`.** Manter as duas causa escrita dupla — no melhor caso redundante, no pior divergente, porque as duas usam critérios diferentes: o trigger casa por **link primário**, a rota casa por **igualdade de texto em `products.category`**.
 
 O `move_to` do `DELETE` é caso à parte: enquanto não houver links, ele ainda é a única forma de mover produto entre categorias-texto. B1 decide se reimplementa via links ou mantém até a migração de dados rodar. **Precisa de decisão explícita, não de omissão.**
+
+### 2.2 Varredura completa de escritas — grep local, 18/08/2026
+
+Rodado o grep recomendado pela §4 (repo em disco, os dois repos). **A lista de
+escritas em `products.category` está fechada:**
+
+| Arquivo | Escrita | Situação |
+|---|---|---|
+| `src/routes/products.js` | `POST /` (INSERT, default `'Produtos'`) e `PATCH /:id` (via `fieldMap`) | Esperado. É o cadastro — a Onda D troca o campo de texto pelo picker. |
+| `src/routes/productsBatch.js` | INSERT em lote com colunas dinâmicas (inclui `category`) | **Entra no escopo declarado da Onda D** (decisão de 18/08). |
+| `src/routes/importData.js` | 2 INSERTs + 1 UPDATE (importação de planilha) | **Entra no escopo declarado da Onda D** — importação escrevendo texto livre recriaria o problema que a F0 resolve. |
+| `src/routes/dentalSupplies.js` | ~~INSERT + UPDATE espelhando `dental_category` em `category`~~ | **REMOVIDO em 18/08** (esta mudança). Ver 2.2.1. |
+| `src/services/categoryMigration.js` | UPDATE de cleanup (`category = NULL` sem link) | Esperado — é o próprio serviço da F0. |
+| `src/routes/productCategories.js` | cascata do PATCH + `move_to` do DELETE | Já auditado na §2.1. |
+
+No `aura-app`: 119 ocorrências de `.category`, todas leitura ou montagem de
+payload do cadastro — protegidas pelo dual-write; B3/D cuidam da troca.
+
+### 2.2.1 O caso `dentalSupplies` — resolvido
+
+A rota espelhava `dental_category` (enum de insumo odontológico) em
+`products.category` "por compatibilidade". Sem trigger lendo a coluna
+(o dual-write da 259 flui **links → coluna**, nunca o contrário), o espelho
+não semeava a árvore — mas causava dois problemas reais:
+
+1. **Poluição do staging do B2**: o wizard lê os distintos de
+   `products.category`; `anestesico`/`broca`/`rx` apareceriam como categorias
+   candidatas da loja.
+2. **Anulação pelo cleanup**: `categoryMigration.js` zera `category` de
+   produto sem link — apagaria o espelho dental de quem rodasse a migração.
+
+Fix: o espelho foi removido (INSERT e PATCH); `dental_category` é o único
+campo de categoria do módulo dental. Medido antes do fix: **0 insumos
+dentais na base inteira** (módulo parado) — nenhum backfill necessário.
+Decisão do Caio (18/08): a prioridade é a F0; o dental permanece montado,
+mas fora do caminho da taxonomia.
+
+**Recomendação belt-and-suspenders para o B2**: o staging deve filtrar
+`is_dental_supply IS NOT TRUE` mesmo assim — protege contra base antiga ou
+escrita futura que escape deste documento.
 
 ---
 
@@ -89,16 +131,19 @@ A correção de raiz seria uma coluna própria em `products` (`is_service boolea
 
 ---
 
-## 4. O que esta auditoria NÃO cobre
+## 4. Cobertura da auditoria — ATUALIZADA em 18/08/2026
 
-Esta seção existe para que ninguém trate o documento como completo.
+**Escritas: lista FECHADA.** O grep local recomendado pela versão anterior
+desta seção foi rodado em 18/08 nos dois repos (ver §2.2). Todos os pontos
+de escrita em `products.category` estão mapeados e tratados. O gate do
+Bloco 0 para o merge do B1 está cumprido.
 
-A varredura de código foi feita por leitura direcionada via MCP do GitHub, arquivo a arquivo, e **não** por grep sobre a árvore inteira dos dois repos. Foi auditado apenas `src/routes/productCategories.js` — escolhido por ser o ponto de escrita que a própria spec já apontava.
+**Leituras: mapeadas por amostragem, protegidas por design.** O dual-write
+mantém `products.category` populado e coerente, então nenhum consumidor de
+leitura quebra — mesmo os que não foram lidos um a um (PDV, DRE, curva ABC,
+storefront, marketplaces, etiquetas, fiscal). A troca de leitura por árvore
+é trabalho da Onda D e da F3, arquivo a arquivo, com o legado de rede.
 
-**Falta auditar, em `aura-backend`:** PDV (`pdv*.js`), produtos (`products.js`), importação (`importData.js`), relatórios e DRE, curva ABC, storefront (`src/services/storefrontBuilder.js`, `src/templates/storefrontPage.js`), canal digital, marketplaces, etiquetas, NFC-e e emissão fiscal.
-
-**Falta auditar, em `aura-app`:** `estoque.tsx`, formulários de produto, filtros de PDV, e todo consumidor de `category` em `services/api.ts`.
-
-**Recomendação:** fechar esta lista com um `grep -rn "\.category\b"` local nos dois repos antes do merge do Bloco B1 — é minutos de trabalho com o repo em disco e cobre o que a leitura via MCP não alcança. Até lá, o dual-write protege as leituras: `products.category` continua populado e coerente, então **nenhum consumidor de leitura quebra**, mesmo os não mapeados.
-
-O risco remanescente é restrito a **outros pontos de escrita** ainda não descobertos.
+**O que segue fora do escopo desta auditoria:** consumidores fora dos dois
+repos (integrações externas que leiam o payload público) e SQL ad-hoc de
+operação. Nada disso escreve na coluna.
