@@ -83,6 +83,56 @@ const BALANCE_COLS = `
                    WHEN bal.is_overdue THEN 'overdue'
                    ELSE 'pending' END AS balance_status,`;
 
+// ─── K1 (18/08/2026): a cara do card ────────────────────────────────────────
+// Personalizado se vende pelo olho -- um card sem imagem e uma planilha em pe.
+// A imagem NAO tem tela, botao nem configuracao: sai do dado que ja existe,
+// em cascata, e o app cai no monograma quando nada e encontrado.
+//
+// Ordem (do mais especifico daquele pedido pro mais generico):
+//   1. mockup aprovado/enviado -- so pedido digital (approval_links.order_id
+//      aponta pra digital_orders; nao ha sale_id ali)
+//   2. render do Visual Engine -- via sale_item (PDV) ou digital_order_item
+//   3. foto do produto vendido
+//
+// Levantamento em prod (18/08): 0 renders e 0 mockups gravados; a cobertura
+// real hoje vem toda do nivel 3 e alcanca ~50% dos cards. A cascata cobre os
+// niveis 1 e 2 porque eles passam a valer sozinhos quando o Visual Engine e a
+// aprovacao rodarem -- sem migration nova nem mudanca de tela.
+const CARD_IMAGE_COL = `
+              COALESCE(
+                (SELECT a.mockup_url FROM studio_approval_links a
+                  WHERE a.order_id = o.digital_order_id
+                    AND NULLIF(TRIM(a.mockup_url), '') IS NOT NULL
+                  ORDER BY a.created_at DESC LIMIT 1),
+                (SELECT r.file_url FROM studio_visual_renders r
+                   JOIN sale_items si2 ON si2.id = r.sale_item_id
+                  WHERE si2.sale_id = o.pdv_sale_id
+                    AND NULLIF(TRIM(r.file_url), '') IS NOT NULL
+                  ORDER BY (r.kind = 'hd_2d') DESC, r.created_at DESC LIMIT 1),
+                (SELECT r.file_url FROM studio_visual_renders r
+                   JOIN digital_order_items doi2 ON doi2.id = r.digital_order_item_id
+                  WHERE doi2.order_id = o.digital_order_id
+                    AND NULLIF(TRIM(r.file_url), '') IS NOT NULL
+                  ORDER BY (r.kind = 'hd_2d') DESC, r.created_at DESC LIMIT 1),
+                (SELECT p.image_url FROM sale_items si3
+                   JOIN products p ON p.id = si3.product_id
+                  WHERE si3.sale_id = o.pdv_sale_id
+                    AND NULLIF(TRIM(p.image_url), '') IS NOT NULL
+                  ORDER BY si3.id LIMIT 1),
+                (SELECT p.image_url FROM digital_order_items doi3
+                   JOIN products p ON p.id = doi3.product_id
+                  WHERE doi3.order_id = o.digital_order_id
+                    AND NULLIF(TRIM(p.image_url), '') IS NOT NULL
+                  ORDER BY doi3.id LIMIT 1)
+              ) AS card_image_url,`;
+
+// promised_date nasce na migration 285 — separado da imagem porque, sem a
+// coluna, o subselect derrubaria a query RICA inteira pro fallback slim
+// (perdendo item_count, aprovacoes e a propria imagem). Com o guard, o campo
+// simplesmente nao aparece ate a migration rodar.
+const PROMISED_COL = `
+              (SELECT s2.promised_date FROM sales s2 WHERE s2.id = o.pdv_sale_id) AS promised_date,`;
+
 // Campos de saldo nulos — mantem o shape identico nos fallbacks slim/raw, pra
 // que o app nunca precise checar se o campo existe.
 const NULL_BALANCE = {
@@ -90,6 +140,12 @@ const NULL_BALANCE = {
   balance_amount:         null,
   balance_due_date:       null,
   balance_status:         null,
+};
+
+// K1: mesmo contrato dos campos de saldo — shape estavel nos fallbacks.
+const NULL_CARD = {
+  card_image_url: null,
+  promised_date:  null,
 };
 
 // Deploy parcial: se credit_installments nao existir, o LATERAL derrubaria a
@@ -108,6 +164,25 @@ async function hasInstallmentsTable() {
   }
   _instCheckedAt = now;
   return _instAvailable;
+}
+
+// K1: mesma guarda pra sales.promised_date (migration 285).
+let _promCheckedAt = 0;
+let _promAvailable = null;
+async function hasPromisedDate() {
+  const now = Date.now();
+  if (_promAvailable !== null && (now - _promCheckedAt) < 60000) return _promAvailable;
+  try {
+    const r = await db.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'sales' AND column_name = 'promised_date' LIMIT 1`
+    );
+    _promAvailable = r.rows.length > 0;
+  } catch (e) {
+    _promAvailable = false;
+  }
+  _promCheckedAt = now;
+  return _promAvailable;
 }
 
 // ─── POST /orders/:oid/cobrar-saldo ──────────────────────────────────────────
@@ -188,6 +263,7 @@ router.get('/orders', async function(req, res) {
   const statusFilter = (status && VALID_PRODUCTION_STATUS.includes(String(status))) ? String(status) : null;
   const onlyWithBalance = with_balance === 'true' || with_balance === '1';
   const withBalance = await hasInstallmentsTable();
+  const withPromised = await hasPromisedDate();
 
   // ── 1. Tentativa RICA: view completa com subselects (KDS precisa disso) ──
   try {
@@ -212,6 +288,8 @@ router.get('/orders', async function(req, res) {
               o.customer_name, o.customer_phone,
               o.display_name,
               o.source,
+${CARD_IMAGE_COL}
+${withPromised ? PROMISED_COL : ''}
 ${withBalance ? BALANCE_COLS : ''}
               o.digital_order_id,
               o.pdv_sale_id,
@@ -242,11 +320,75 @@ ${withBalance ? BALANCE_COLS : ''}
         LIMIT $${params.length}`,
       params
     );
-    return res.json({
-      orders: withBalance
-        ? r.rows
-        : r.rows.map((row) => ({ ...row, ...NULL_BALANCE })),
-    });
+    let orders = r.rows.map((row) => ({
+      ...(withBalance ? null : NULL_BALANCE),
+      ...(withPromised ? null : { promised_date: null }),
+      ...row,
+    }));
+
+    // K1 (18/08/2026): a view studio_orders so traz venda de PDV quando
+    // studio_production_status IS NOT NULL -- ou seja, quando o produto e
+    // personalizavel e o trigger marcou. Isso esta CERTO pro Kanban: venda sem
+    // personalizacao nao tem fabricacao, entao nao e fila de producao.
+    //
+    // Mas a aba "A receber" le a MESMA rota, e ali o criterio e outro: dinheiro
+    // devido e dinheiro devido, tenha arte ou nao. Sem este bloco, uma venda com
+    // sinal de produto nao-personalizavel ficaria sem nenhuma tela onde cobrar --
+    // o saldo existiria, venceria, e seria invisivel.
+    if (onlyWithBalance && withBalance) {
+      const extra = await db.query(
+        `SELECT s.id, s.created_at, s.total_amount, s.status,
+                NULL::text AS studio_production_status,
+                cu.name AS customer_name, cu.phone AS customer_phone,
+                'PDV-' || LEFT(s.id::text, 8) AS display_name,
+                'pdv'::text AS source,
+                NULL::uuid AS digital_order_id,
+                s.id AS pdv_sale_id,
+                NULL::uuid AS marketplace_order_id,
+                NULL::text AS marketplace_platform,
+                NULL::timestamptz AS customization_collected_at,
+                (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count,
+                NULL::text AS pending_approval_url,
+                0 AS approval_count,
+                (SELECT p.image_url FROM sale_items si3
+                   JOIN products p ON p.id = si3.product_id
+                  WHERE si3.sale_id = s.id
+                    AND NULLIF(TRIM(p.image_url), '') IS NOT NULL
+                  ORDER BY si3.id LIMIT 1) AS card_image_url,
+                ${withPromised ? 's.promised_date' : 'NULL::date'} AS promised_date,
+                bal.installment_id AS balance_installment_id,
+                bal.amount         AS balance_amount,
+                bal.due_date       AS balance_due_date,
+                CASE WHEN bal.is_overdue THEN 'overdue' ELSE 'pending' END AS balance_status
+           FROM sales s
+           LEFT JOIN customers cu ON cu.id = s.customer_id
+           JOIN LATERAL (
+             SELECT ci.id AS installment_id,
+                    ROUND((ci.amount_due - COALESCE(ci.covered_amount, 0))::numeric, 2) AS amount,
+                    ci.due_date,
+                    (ci.due_date < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date) AS is_overdue
+               FROM credit_installments ci
+              WHERE ci.company_id = s.company_id
+                AND ci.sale_id    = s.id
+                AND ci.status NOT IN ('paid', 'cancelled')
+                AND (ci.amount_due - COALESCE(ci.covered_amount, 0)) > 0.005
+              ORDER BY ci.due_date ASC
+              LIMIT 1
+           ) bal ON TRUE
+          WHERE s.company_id = $1
+            AND s.studio_production_status IS NULL
+            AND COALESCE(s.status, 'completed') <> 'cancelled'
+            AND s.created_at >= NOW() - INTERVAL '${safeDays} days'
+          ORDER BY s.created_at DESC
+          LIMIT $2`,
+        [cid, safeLimit]
+      );
+      orders = orders.concat(extra.rows);
+      orders.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      orders = orders.slice(0, safeLimit);
+    }
+
+    return res.json({ orders });
   } catch (errRich) {
     console.error('[studio/orders:GET][rich]', errRich.message, errRich.code, errRich.stack);
   }
@@ -286,6 +428,7 @@ ${withBalance ? BALANCE_COLS : ''}
         pending_approval_url: null,
         approval_count: 0,
         ...NULL_BALANCE,
+        ...NULL_CARD,
       })),
       degraded: 'slim',
     });
@@ -328,6 +471,7 @@ ${withBalance ? BALANCE_COLS : ''}
         pending_approval_url: null,
         approval_count: 0,
         ...NULL_BALANCE,
+        ...NULL_CARD,
       })),
       degraded: 'raw',
     });

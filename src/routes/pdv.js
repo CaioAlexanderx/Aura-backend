@@ -504,6 +504,27 @@ async function handleSale(req, res, opts = {}) {
       ]
     );
     const sale = sales[0];
+
+    // K1 (18/08/2026): prazo prometido de entrega. UPDATE separado em vez de
+    // entrar no INSERT por dois motivos -- o INSERT ja tem parametros
+    // condicionais por causa do sale_date, e a coluna pode faltar em deploy
+    // parcial, onde o 42703 e absorvido sem derrubar a venda.
+    //
+    // Opcional de proposito: sem prazo combinado a venda segue igual e o card
+    // do Kanban usa a idade do pedido, como sempre fez.
+    const promisedDate = String(req.body?.promised_date || '').trim();
+    if (promisedDate && isValidISODate(promisedDate)) {
+      try {
+        await client.query(
+          `UPDATE sales SET promised_date = $1::date WHERE id = $2 AND company_id = $3`,
+          [promisedDate, sale.id, req.params.id]
+        );
+        sale.promised_date = promisedDate;
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+      }
+    }
+
     for (const item of enrichedItems) {
       await client.query(
         `INSERT INTO sale_items (sale_id,product_id,variant_id,quantity,unit_price,unit_cost,discount,total_price,product_name_snapshot)
