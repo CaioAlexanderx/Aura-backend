@@ -51,7 +51,7 @@ Lado: **BE** = `aura-backend`, **APP** = `aura-app`.
 | **C2** | Wizard de migração de categorias | APP | ⬜ **livre** | B2, B3 |
 | **D1** | Cadastro de produto usa o picker no lugar do campo de texto | APP | ⬜ livre | C1 |
 | **D2** | Filtro hierárquico em estoque e PDV | APP | ⬜ livre | C1 |
-| **D3** | Árvore no payload público do storefront | BE | ⬜ **livre — pode ir agora** | B1 |
+| **D3** | Árvore no payload público do storefront | BE | ✅ mergeado | B1 |
 | **D4** | `productsBatch` e `importData` escrevem links, não texto | BE | ✅ mergeado | B1, DEC-06, DEC-08 |
 | **E1** | Cobertura do catálogo por categoria (placar do lojista) | BE | 🟨 metade feita — PR #511 | B1 |
 | **E2** | Auditoria de leituras de `products.category` | BE | ⬜ livre | D1–D4 |
@@ -102,6 +102,10 @@ Cada briefing é autocontido: dá para abrir um PR só com ele e o contrato.
 **Regra inegociável.** **Adicionar, nunca remover.** O campo `category` (texto) continua no payload pelo mesmo princípio do dual-write: consumidor externo que lê o payload hoje não pode quebrar. Depreciação só quando a lista de leitores estiver vazia.
 
 **Aceite.** Payload atual continua byte-compatível para quem ignora os campos novos. Slug de categoria sai no payload — é a semente das URLs canônicas da fase de vitrine.
+
+**Entregue assim.** O payload ganhou `categories[]` (lista flat com `parent_id`, mesmo formato do `GET /product-categories`) e, por produto, `category_id` / `category_slug` / `category_path`. O campo `category` (texto) **permanece**. Só entram categorias com `is_visible_storefront` — a árvore interna do lojista não é necessariamente a navegação que ele quer pública. Produto sem vínculo devolve `null`, nunca deriva categoria do texto legado.
+
+> ⚠️ **Medido em 18/08, e é o que dá o tamanho do que falta:** `product_category_links` está **vazia na base inteira** — zero vínculos. As 55 categorias do backfill do Bloco A estão em 3 empresas, **todas em `depth = 0`** (lista flat, não árvore), e a Davi Calçados não tem nenhuma. Ou seja: **D3 está correto e não mostra nada ainda.** A taxonomia só ganha corpo quando C2 (wizard) rodar para o piloto. Isso não é bug do D3 — é a fila real da fase.
 
 ### D4 — `productsBatch` e `importData` (BE) · *pode ir agora*
 

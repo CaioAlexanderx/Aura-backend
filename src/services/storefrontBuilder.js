@@ -247,12 +247,77 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
   return rows;
 }
 
+// ── D3 (18/08/2026): taxonomia no payload público ────────────
+//
+// REGRA INEGOCIÁVEL: ADICIONA, NUNCA REMOVE. O campo `category` (texto)
+// continua em cada produto pelo mesmo princípio do dual-write da
+// migration 259 -- consumidor que lê o payload hoje (template da
+// vitrine, integração externa, app) não pode quebrar. Depreciação só
+// quando a lista de leitores estiver vazia.
+//
+// Só categorias com is_visible_storefront entram: a árvore interna do
+// lojista não é necessariamente a navegação que ele quer pública.
+//
+// O `slug` sai no payload de propósito -- é a semente das URLs
+// canônicas por categoria da fase de vitrine.
+//
+// Defensivo: sem as migrations 257/258 (42P01/42703) devolve vazio e o
+// payload sai idêntico ao de antes (CLAUDE.md, armadilhas 1 e 10).
+
+async function fetchStorefrontCategories(cid) {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, slug, path, depth, parent_id, sort_order
+         FROM product_categories
+        WHERE company_id = $1
+          AND type = 'product'
+          AND is_visible_storefront IS NOT FALSE
+        ORDER BY depth, sort_order NULLS LAST, name`,
+      [cid]
+    );
+    return rows;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return [];
+    throw e;
+  }
+}
+
+// Vínculo PRIMÁRIO de cada produto. Secundárias ficam de fora do payload
+// v1: navegação por faceta é da fase de vitrine, e mandar todos os
+// vínculos agora inflaria o payload sem consumidor.
+async function fetchPrimaryCategoryLinks(productIds) {
+  if (!productIds.length) return {};
+  try {
+    const { rows } = await db.query(
+      `SELECT product_id, category_id
+         FROM product_category_links
+        WHERE product_id = ANY($1::uuid[]) AND is_primary`,
+      [productIds]
+    );
+    const map = {};
+    rows.forEach(r => { map[r.product_id] = r.category_id; });
+    return map;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return {};
+    throw e;
+  }
+}
+
 async function buildStorefront(config) {
   const cid = config.company_id;
   const featuredIds = parseFeaturedIds(config.featured_product_ids);
   const hiddenIds   = parseHiddenIds(config.hidden_product_ids);
 
   const products = await fetchStorefrontProducts(cid, featuredIds, hiddenIds);
+
+  // D3: árvore + vínculo primário. Só categorias visíveis na vitrine
+  // entram, e o produto só recebe categoria que esteja nesse conjunto --
+  // produto compartilhado de outra empresa não pode arrastar a categoria
+  // dela para o payload público desta loja.
+  const categories = await fetchStorefrontCategories(cid);
+  const categoryById = {};
+  categories.forEach(c => { categoryById[c.id] = c; });
+  const primaryLinkByProduct = await fetchPrimaryCategoryLinks(products.map(p => p.id));
 
   let variantsByProduct = {};
   if (products.length > 0) {
@@ -363,14 +428,29 @@ async function buildStorefront(config) {
       const pvariants = variantsByProduct[p.id] || [];
       const hasVariants = pvariants.length > 0;
       const inStock = hasVariants ? pvariants.some(v => v.stock_qty > 0) : p.stock_qty > 0;
+      const cat = categoryById[primaryLinkByProduct[p.id]] || null;
       return {
         id: p.id, name: p.name, description: p.description,
         price: config.show_prices !== false ? parseFloat(p.price) : null,
+        // `category` (texto) PERMANECE -- ver a regra em fetchStorefrontCategories.
         image_url: p.image_url, category: p.category,
+        // D3: campos ADITIVOS. null quando o produto ainda não tem
+        // vínculo (catálogo pré-migração) ou quando a categoria não é
+        // visível na vitrine.
+        category_id:   cat ? cat.id   : null,
+        category_slug: cat ? cat.slug : null,
+        category_path: cat ? cat.path : null,
         stock_qty: p.stock_qty, in_stock: inStock, variants: pvariants,
       };
     }),
     total_products: products.length,
+    // D3: lista FLAT com parent_id -- o cliente deriva a hierarquia, mesmo
+    // formato que o GET /product-categories já usa (contrato §10). Vazia
+    // em base sem as migrations 257/258.
+    categories: categories.map(c => ({
+      id: c.id, name: c.name, slug: c.slug,
+      path: c.path, depth: c.depth, parent_id: c.parent_id,
+    })),
     // URL canônica da loja — custom domain quando ativo, senão loja.getaura.com.br/slug.
     // Consumida pelo aura-app (TabMeuSite) para exibir o link correto ao operador.
     storefront_url: (config.custom_domain && config.custom_domain_status === 'active')
