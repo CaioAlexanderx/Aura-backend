@@ -13,6 +13,22 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+const overdueRule = require('../services/credit/overdue');
+
+// Carencia da loja (late_grace_days). Defensivo: se a tabela/coluna nao existir,
+// cai no default da regra (3 dias).
+async function loadGraceDays(companyId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT late_grace_days FROM credit_plan_configs WHERE company_id = $1`,
+      [companyId]
+    );
+    return overdueRule.resolveGraceDays(rows[0]);
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+    return overdueRule.DEFAULT_GRACE_DAYS;
+  }
+}
 
 async function assertCrediarioEnabled(companyId) {
   const { rows } = await db.query(
@@ -52,16 +68,22 @@ router.get('/balances', async (req, res) => {
       params
     );
 
-    // Atraso por DATA (America/Sao_Paulo) + proximo vencimento, por cliente.
+    // Atraso pela REGRA UNICA (services/credit/overdue.js): data + carencia +
+    // tolerancia de residuo + parcela retroativa vira "a conferir". Nunca le
+    // credit_installments.status como fonte de atraso.
     const overdueByCustomer = {};
     try {
       const ids = rows.map((r) => r.id);
       if (ids.length) {
+        const graceDays = await loadGraceDays(req.params.id);
+        const isOverdue = overdueRule.overdueSql({ graceDays });
+        const isToReview = overdueRule.toReviewSql({});
         const { rows: oiRows } = await db.query(
           `SELECT customer_id,
                   MIN(due_date) FILTER (WHERE status IN ('pending','overdue')) AS next_due_date,
-                  BOOL_OR(due_date < (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
-                          AND status IN ('pending','overdue'))                 AS overdue
+                  MIN(due_date) FILTER (WHERE ${isOverdue})                    AS oldest_overdue_date,
+                  BOOL_OR(${isOverdue})                                        AS overdue,
+                  COUNT(*) FILTER (WHERE ${isToReview})                        AS to_review_count
              FROM credit_installments
             WHERE company_id = $1 AND customer_id = ANY($2::uuid[])
             GROUP BY customer_id`,
@@ -71,6 +93,8 @@ router.get('/balances', async (req, res) => {
           overdueByCustomer[o.customer_id] = {
             overdue: o.overdue === true,
             next_due_date: o.next_due_date ? String(o.next_due_date).split('T')[0] : null,
+            oldest_overdue_date: o.oldest_overdue_date ? String(o.oldest_overdue_date).split('T')[0] : null,
+            to_review_count: parseInt(o.to_review_count || 0, 10),
           };
         }
       }
@@ -92,8 +116,13 @@ router.get('/balances', async (req, res) => {
         total_debited: parseFloat(r.total_debited) || 0,
         total_paid: parseFloat(r.total_paid) || 0,
         last_activity_at: r.last_activity_at,
-        overdue:          (overdueByCustomer[r.id] || {}).overdue || false,
-        next_due_date:    (overdueByCustomer[r.id] || {}).next_due_date || null,
+        overdue:             (overdueByCustomer[r.id] || {}).overdue || false,
+        next_due_date:       (overdueByCustomer[r.id] || {}).next_due_date || null,
+        // Vencimento mais antigo que REALMENTE conta como atraso (ja com carencia
+        // e sem retroativas) -- e a base do aging, nao o next_due_date.
+        oldest_overdue_date: (overdueByCustomer[r.id] || {}).oldest_overdue_date || null,
+        // Parcelas retroativas vencidas: carne historico a conferir, nao atraso.
+        to_review_count:     (overdueByCustomer[r.id] || {}).to_review_count || 0,
       })),
       total_open: parseFloat(totals.total_open.toFixed(2)),
       customers_open: totals.customers_open,

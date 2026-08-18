@@ -45,6 +45,7 @@ const collectionNotice = require('../services/credit/collectionNotice');
 const router = express.Router({ mergeParams: true });
 
 const SP_DATE = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
+const overdueRule = require('../services/credit/overdue');
 
 const nz = (v) => (v === undefined || v === null || v === '') ? null : v;
 
@@ -186,7 +187,8 @@ router.get('/customers/:cid/profile', async (req, res) => {
     try {
       const r = await client.query(
         `SELECT id, installment_number, total_installments, amount_due, covered_amount,
-                due_date, status, pix_link, late_fee, late_interest, collection_stage, account_id
+                due_date, status, pix_link, late_fee, late_interest, collection_stage, account_id,
+                created_at
          FROM credit_installments
          WHERE company_id = $1 AND customer_id = $2 AND status IN ('pending','overdue')
          ORDER BY due_date ASC`,
@@ -198,7 +200,8 @@ router.get('/customers/:cid/profile', async (req, res) => {
         // account_id ainda nao existe (deploy parcial) — fallback sem a coluna
         const r = await client.query(
           `SELECT id, installment_number, total_installments, amount_due, covered_amount,
-                  due_date, status, pix_link, late_fee, late_interest, collection_stage
+                  due_date, status, pix_link, late_fee, late_interest, collection_stage,
+                  created_at
            FROM credit_installments
            WHERE company_id = $1 AND customer_id = $2 AND status IN ('pending','overdue')
            ORDER BY due_date ASC`,
@@ -229,8 +232,13 @@ router.get('/customers/:cid/profile', async (req, res) => {
       open_installments: installmentRows.map(i => {
         const remaining = parseFloat((parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)).toFixed(2));
         const lc = creditLedger.computeLateCharges(i, terms, config);
+        // Regra UNICA de atraso -- nunca derive atraso de `status` (congela).
+        const cls = overdueRule.classifyInstallment(i, config);
         return {
           ...i,
+          is_overdue:    cls.is_overdue,
+          needs_review:  cls.needs_review,
+          days_late:     cls.days_late,
           account_id:    i.account_id || null,
           remaining,
           late_fee:      lc.late_fee,
@@ -716,8 +724,12 @@ router.get('/installments', async (req, res) => {
     const data = r.rows.map(row => {
       const remaining = parseFloat((parseFloat(row.amount_due) - parseFloat(row.covered_amount || 0)).toFixed(2));
       const lc = creditLedger.computeLateCharges(row, lateTerms, lateConfig);
+      const cls = overdueRule.classifyInstallment(row, lateConfig);
       return {
         ...row,
+        is_overdue:    cls.is_overdue,
+        needs_review:  cls.needs_review,
+        days_late:     cls.days_late,
         late_fee:      lc.late_fee,
         late_interest: lc.late_interest,
         charges_total: lc.charges_total,
@@ -1042,17 +1054,34 @@ router.get('/dashboard', async (req, res) => {
       [companyId]
     );
 
+    let dashGrace = overdueRule.DEFAULT_GRACE_DAYS;
+    try {
+      const cfg = await pool.query(
+        `SELECT late_grace_days FROM credit_plan_configs WHERE company_id=$1`, [companyId]
+      );
+      dashGrace = overdueRule.resolveGraceDays(cfg.rows[0]);
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+
+    // Regra UNICA de atraso: os KPIs pararam de contar `status='overdue'` cru
+    // (que so sincroniza quando alguem abre esta tela) e passaram a usar a
+    // mesma expressao de GET /credit/balances e da ficha.
+    const isOverdue  = overdueRule.overdueSql({ graceDays: dashGrace });
+    const isToReview = overdueRule.toReviewSql({});
     const kpis = await pool.query(
       `SELECT
          COUNT(*) FILTER (WHERE status IN ('pending','overdue'))                                     AS total_open_count,
          COALESCE(SUM(amount_due - covered_amount) FILTER (WHERE status IN ('pending','overdue')), 0) AS total_open_amount,
-         COUNT(*) FILTER (WHERE status='overdue')                                                     AS overdue_count,
-         COALESCE(SUM(amount_due - covered_amount) FILTER (WHERE status='overdue'), 0)               AS overdue_amount,
-         COUNT(*) FILTER (WHERE status='overdue'
+         COUNT(*) FILTER (WHERE ${isOverdue})                                                         AS overdue_count,
+         COALESCE(SUM(amount_due - covered_amount) FILTER (WHERE ${isOverdue}), 0)                   AS overdue_amount,
+         COUNT(*) FILTER (WHERE ${isToReview})                                                        AS to_review_count,
+         COALESCE(SUM(amount_due - covered_amount) FILTER (WHERE ${isToReview}), 0)                  AS to_review_amount,
+         COUNT(*) FILTER (WHERE ${isOverdue}
            AND due_date < ${SP_DATE} - 30)                                                           AS critical_count,
          COALESCE(SUM(amount_due - covered_amount) FILTER (
-           WHERE status='overdue' AND due_date < ${SP_DATE} - 30), 0)                                AS critical_amount,
-         COUNT(DISTINCT customer_id) FILTER (WHERE status='overdue')                                 AS defaulting_customers,
+           WHERE ${isOverdue} AND due_date < ${SP_DATE} - 30), 0)                                    AS critical_amount,
+         COUNT(DISTINCT customer_id) FILTER (WHERE ${isOverdue})                                     AS defaulting_customers,
          COUNT(*) FILTER (WHERE status='paid'
            AND DATE_TRUNC('month', paid_at AT TIME ZONE 'America/Sao_Paulo')
              = DATE_TRUNC('month', NOW() AT TIME ZONE 'America/Sao_Paulo'))                          AS paid_this_month_count,
@@ -1076,7 +1105,7 @@ router.get('/dashboard', async (req, res) => {
        LEFT JOIN customers c ON c.id=ci.customer_id AND c.company_id=ci.company_id
        LEFT JOIN customer_credit_profiles ccp
          ON ccp.customer_id=ci.customer_id AND ccp.company_id=ci.company_id
-       WHERE ci.company_id=$1 AND ci.status='overdue'
+       WHERE ci.company_id=$1 AND ${overdueRule.overdueSql({ alias: 'ci', graceDays: dashGrace })}
        GROUP BY ci.customer_id, c.name, c.phone, ccp.credit_score, ccp.status
        ORDER BY total_overdue DESC LIMIT 20`,
       [companyId]
@@ -1139,10 +1168,23 @@ router.get('/dashboard', async (req, res) => {
 router.get('/dashboard/aging', async (req, res) => {
   const companyId = req.params.id;
   try {
+    let agingGrace = overdueRule.DEFAULT_GRACE_DAYS;
+    try {
+      const cfg = await pool.query(
+        `SELECT late_grace_days FROM credit_plan_configs WHERE company_id=$1`, [companyId]
+      );
+      agingGrace = overdueRule.resolveGraceDays(cfg.rows[0]);
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+    // Regra UNICA: so cai nas faixas de atraso o que a regra considera atraso.
+    // Parcela retroativa (carne historico) e residuo de centavos ficam em
+    // 'a_vencer' -- senao o mapa de risco pinta de vermelho quem esta em dia.
+    const agingOverdue = overdueRule.overdueSql({ graceDays: agingGrace });
     const r = await pool.query(
       `SELECT
          CASE
-           WHEN due_date >= ${SP_DATE}      THEN 'a_vencer'
+           WHEN NOT ${agingOverdue}         THEN 'a_vencer'
            WHEN due_date >= ${SP_DATE} - 30 THEN '1_30_dias'
            WHEN due_date >= ${SP_DATE} - 60 THEN '31_60_dias'
            WHEN due_date >= ${SP_DATE} - 90 THEN '61_90_dias'
