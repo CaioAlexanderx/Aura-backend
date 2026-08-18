@@ -184,12 +184,41 @@ O índice parcial `product_category_links_one_primary` faz `INSERT ... ON CONFLI
 |---|---|---|
 | POST | `/categories/migration/analyze` | Varre `products.category`, popula staging: uma linha por valor-texto distinto + uma linha órfã. Idempotente. |
 | GET | `/categories/migration/proposal` | Staging agrupado, com contagem e até 5 nomes de exemplo por linha. |
-| PATCH | `/categories/migration/items/:itemId` | O **lojista** classifica: `{ kind, target_path?, status }`. |
+| PATCH | `/categories/migration/items/:itemId` | O **lojista** classifica: `{ kind, target_path?, status }`. **Valores de `kind` e `status` na §5.1 — enumerados, não livres.** |
 | POST | `/categories/migration/apply` | Aplica o aprovado. Transacional por lote de 100, retomável. |
 | GET | `/categories/migration/status` | `{ state, total, approved, applied, orphans }`. |
 | GET | `/products/brand-candidates` | Agrupa `split_part(btrim(name), ' ', 1)` dos produtos sem `brand`, com contagem. Puro SQL. |
 | POST | `/products/brand/apply` | Body: `{ assignments: [{ token, brand }] }`. Máx 100 tokens. |
 | GET | `/catalog/health` | Cobertura de categoria, foto, descrição, custo, marca, e contagem de órfãos. |
+
+### 5.1 `kind` e `status` — valores aceitos [ACRESCENTADO EM 18/08/2026]
+
+**Esta seção existe porque a ausência dela quebrou o C2.** Até 18/08 o contrato descrevia o corpo do PATCH como `{ kind, target_path?, status }` sem dizer **quais valores** `kind` aceita. O agente do B3, construindo contra mock, tipou `"existing" | "new" | "ignore"` — três valores que o backend rejeita. Todo PATCH do wizard daria `400`. É a lição da §9.1.1 repetida num campo em vez de num envelope: **congelar o nome do campo não é congelar o campo.**
+
+`kind` — validado em `VALID_KINDS` (`src/services/categoryMigration.js`) **e** no CHECK `category_migration_staging_kind_chk` (migration 260). Os dois têm a mesma lista:
+
+| `kind` | O que o lojista está dizendo | O que o `apply` faz |
+|---|---|---|
+| `category` | "isto é uma categoria de verdade" | `applyCategoryRow`: **resolve** `target_path` na árvore e vincula os produtos. `target_path` é **obrigatório**; caminho inexistente devolve erro acionável — criar nó é sempre ato deliberado do lojista. |
+| `brand` | "isto era marca, não categoria" | `applyNonCategoryRow` |
+| `attribute` | "isto era atributo (cor, tamanho, material)" | `applyNonCategoryRow` |
+| `collection` | "isto era coleção ou campanha" | `applyNonCategoryRow` |
+| `discard` | "isto é lixo de cadastro" | `applyNonCategoryRow` |
+
+`applyNonCategoryRow` **não cria categoria nenhuma**: limpa `products.category` dos produtos daquele valor que não ganharam vínculo, e marca a linha como aplicada.
+
+`status` — validado em `VALID_STATUSES` na rota (`pending`, `approved`, `rejected`) e no CHECK da tabela, que aceita também `applied`:
+
+| `status` | Quem escreve | Efeito |
+|---|---|---|
+| `pending` | default da tabela | Fora da fila do `apply` |
+| `approved` | o lojista, via PATCH | **É o que entra na fila do `apply`** |
+| `rejected` | o lojista, via PATCH | Fora da fila |
+| `applied` | o `apply`, nunca o cliente | Terminal. Enviar no PATCH é recusado. |
+
+> **Um item classificado mas não aprovado é ignorado em silêncio pelo `apply`.** Mandar `kind` sem `status: 'approved'` é o erro fácil de cometer — o PATCH devolve `200` e o item simplesmente não migra.
+
+---
 
 O `analyze` varre apenas produtos que não são serviço (`unit IS NULL OR unit <> 'srv'`), preservando o filtro que a rota legada já aplica. Na prática isso só exclui os 6 SKUs de plano da própria Aura.
 
@@ -311,6 +340,8 @@ Levantado ao revisar #440 (B1), #441 (B2) e #637 (B3), todos escritos em paralel
 | 4 | O caminho do código de erro (`err.data.code`) foi verificado nos dois lados e **bate**. | §10.1 |
 
 **Lição para as próximas fases: congelar objeto e lista de rotas não é congelar contrato.** Enquanto o envelope de resposta não estiver escrito, dois agentes paralelos vão inventar dois envelopes diferentes, e a conta só aparece na integração.
+
+**Reincidência em 18/08, num campo em vez de num envelope.** O contrato nomeava `kind` no corpo do PATCH de migração mas não enumerava os valores; o B3 tipou `existing|new|ignore` e o backend só aceita `category|brand|attribute|collection|discard`. Descoberto ao construir o C2, antes de qualquer chamada real. Valores escritos na §5.1. **A regra que fecha os dois casos: todo campo com conjunto fechado de valores tem que ter o conjunto escrito — nomear o campo não basta.**
 
 ### 9.1.2 Adendo de 18/08/2026 — fechamento do Bloco 0 e escopo da Onda D
 
