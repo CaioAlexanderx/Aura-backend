@@ -52,7 +52,7 @@ Lado: **BE** = `aura-backend`, **APP** = `aura-app`.
 | **D1** | Cadastro de produto usa o picker no lugar do campo de texto | APP | ⬜ livre | C1 |
 | **D2** | Filtro hierárquico em estoque e PDV | APP | ⬜ livre | C1 |
 | **D3** | Árvore no payload público do storefront | BE | ⬜ **livre — pode ir agora** | B1 |
-| **D4** | `productsBatch` e `importData` escrevem links, não texto | BE | ⬜ **livre — pode ir agora** | B1, DEC-06 |
+| **D4** | `productsBatch` e `importData` escrevem links, não texto | BE | ✅ mergeado | B1, DEC-06, DEC-08 |
 | **E1** | Cobertura do catálogo por categoria (placar do lojista) | BE | 🟨 metade feita — PR #511 | B1 |
 | **E2** | Auditoria de leituras de `products.category` | BE | ⬜ livre | D1–D4 |
 | **P1** | Wiring da geração de descrição por IA | APP | 🅿️ **estacionado** — §4 | PR #511 |
@@ -112,6 +112,10 @@ Cada briefing é autocontido: dá para abrir um PR só com ele e o contrato.
 **Aceite.** Importar planilha com categoria nova cria categoria na árvore (ou deixa explicitamente pendente para o wizard) em vez de gravar texto solto. Nenhuma rota escreve `products.category` diretamente — o dual-write da migration 259 é a única fonte.
 
 **Armadilha.** `productsBatch` monta colunas dinamicamente; verificar todo caminho que inclui `category`.
+
+**Resolvido assim (DEC-08).** Categoria que existe na árvore vira vínculo primário e `products.category` passa a ser escrito pelo trigger. Categoria que **não** existe — ou cujo nome é **ambíguo**, existindo em dois ramos — fica **pendente em `category_migration_staging`**, com o texto mantido no produto.
+
+Manter o texto não é concessão: o wizard casa produto com valor por `products.category = raw_value`. Zerar o texto do que não resolveu perderia esses produtos de vista para sempre. "Pendente" significa **na fila do wizard**, não texto apagado. As duas rotas devolvem `categorias: { vinculados, pendentes, ambiguos }` na resposta — pendência que não aparece vira silêncio.
 
 ### E1 — Placar de cobertura por categoria (BE)
 
