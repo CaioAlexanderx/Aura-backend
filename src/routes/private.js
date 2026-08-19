@@ -189,6 +189,8 @@ router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioBulkH
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioUpload'));
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioBulkConvert'));
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioSaleItemPatch'));
+// S5 — fila de triagem da arte que o cliente enviou (migration 289).
+router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioArtReview'));
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioMarketplaceListing'));
 // Camada 1 — Orçamento + Precificação + Pagamentos (30/05/2026)
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioQuotes'));    // Fase A: Orçamento como entidade
