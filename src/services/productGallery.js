@@ -1,7 +1,9 @@
 // ============================================================
 // AURA — Galeria de fotos do produto (S9, migration 290)
 //
-// Ate 6 fotos por produto, na ordem de exibicao. O indice 0 e a CAPA, e
+// Ate 5 fotos por produto, na ordem de exibicao (era 6 na migration 290;
+// virou 5 na 291, quando a galeria ganhou tela no catalogo do Studio e o
+// numero passou a ser visivel pro lojista). O indice 0 e a CAPA, e
 // `products.image_url` continua espelhando ela — assim todos os
 // consumidores atuais de image_url (listagem, carrinho, marketplace,
 // notificacao, PDV) seguem funcionando sem serem tocados. Mesmo padrao
@@ -12,7 +14,7 @@
 // ============================================================
 'use strict';
 
-const MAX_FOTOS = 6;
+const MAX_FOTOS = 5;
 
 // Aceita http(s) e data URI de imagem. Recusa o resto: um `javascript:`
 // no src de <img> nao executa, mas uma URL invalida vira foto quebrada na
@@ -41,7 +43,7 @@ function normalizeGallery(raw) {
   for (const v of arr) {
     if (!urlValida(v)) return { error: 'Foto invalida na galeria: use uma URL http(s)' };
     const s = String(v).trim();
-    // Duplicata nao vira uma posicao a menos no limite de 6: a mesma foto
+    // Duplicata nao vira uma posicao a menos no limite: a mesma foto
     // duas vezes no carrossel e erro de quem cadastrou, nao intencao.
     if (!limpo.includes(s)) limpo.push(s);
   }

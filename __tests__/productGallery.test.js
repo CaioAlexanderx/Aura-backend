@@ -1,5 +1,5 @@
 // ============================================================
-// AURA — Galeria de fotos do produto, ate 6 (S9, migration 290)
+// AURA — Galeria de fotos do produto (S9, migrations 290/291)
 //
 // `products.image_url` guardava UMA foto. Uma caneca precisa de mais de
 // um angulo — a estampa, a alca, o interior colorido, a foto de uso — e a
@@ -36,14 +36,16 @@ describe('normalizeGallery', () => {
     expect(normalizeGallery(JSON.stringify([A, B])).gallery).toEqual([A, B]);
   });
 
+  // Derivado de MAX_FOTOS de proposito: o limite ja mudou uma vez (6 -> 5) e
+  // um numero fixo aqui vira falso negativo na proxima.
   test(`recusa acima de ${MAX_FOTOS} fotos`, () => {
-    const sete = Array.from({ length: 7 }, (_, i) => `https://cdn.exemplo.com/${i}.png`);
-    expect(normalizeGallery(sete).error).toMatch(/Maximo de 6/);
-    expect(normalizeGallery(sete.slice(0, 6)).gallery).toHaveLength(6);
+    const demais = Array.from({ length: MAX_FOTOS + 1 }, (_, i) => `https://cdn.exemplo.com/${i}.png`);
+    expect(normalizeGallery(demais).error).toMatch(new RegExp(`Maximo de ${MAX_FOTOS}`));
+    expect(normalizeGallery(demais.slice(0, MAX_FOTOS)).gallery).toHaveLength(MAX_FOTOS);
   });
 
   // A mesma foto duas vezes no carrossel e erro de cadastro, nao intencao
-  // — e nao pode consumir uma das 6 vagas.
+  // — e nao pode consumir uma das vagas.
   test('duplicata e descartada, sem gastar vaga', () => {
     const r = normalizeGallery([A, B, A, B, C]);
     expect(r.gallery).toEqual([A, B, C]);
