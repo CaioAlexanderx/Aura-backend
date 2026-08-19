@@ -10,6 +10,28 @@ const express = require('express');
 const router  = express.Router();
 const db      = require('../config/database');
 
+/**
+ * Carimba a PRIMEIRA abertura do link (migration 292).
+ *
+ * Sem isto a lojista fica no escuro entre "enviei" e "respondeu": nao sabe
+ * se o cliente ao menos abriu. So a primeira visita grava — a pergunta e
+ * "chegou?", nao "quantas vezes olhou".
+ *
+ * Fire-and-forget de proposito: se a coluna ainda nao existe (42703) ou o
+ * UPDATE falhar, o cliente continua vendo o orcamento normalmente. Nunca
+ * derrubar a proposta por causa de um dado de acompanhamento.
+ */
+function marcarVisualizado(quoteId) {
+  db.query(
+    `UPDATE studio_quotes SET viewed_at = NOW()
+      WHERE id = $1 AND viewed_at IS NULL`,
+    [quoteId]
+  ).catch(function(err) {
+    if (err && err.code === '42703') return; // migration 292 ainda nao aplicada
+    console.error('[orcamento/:token] viewed_at:', err.message);
+  });
+}
+
 // GET /orcamento/:token — dados públicos do orçamento
 router.get('/:token', async function(req, res) {
   try {
@@ -41,6 +63,10 @@ router.get('/:token', async function(req, res) {
     }
 
     const q = r.rows[0];
+
+    // Primeira abertura do link — a lojista precisa saber se chegou.
+    // Nao aguarda: acompanhar nao pode atrasar (nem derrubar) a proposta.
+    marcarVisualizado(q.id);
 
     // Verificar expiração: se status ainda é 'sent' mas já venceu → retornar 'expired'
     const expired = q.expires_at && new Date(q.expires_at) < new Date();
