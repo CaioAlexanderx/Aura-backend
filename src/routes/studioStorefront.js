@@ -346,19 +346,84 @@ router.get('/:slug/studio/products', async (req, res) => {
 
 // ─────────────────────────────────────────────
 // Validacao de customization vs customization_config do produto
+//
+// 18/08/2026 — S0 (F1_CONTEUDO_STUDIO.md): a regra "todo campo required
+// e exigido isoladamente" tornava a compra IMPOSSIVEL em loja publicada.
+// A Sheid Mania marcou "Obrigatorio" em Texto, Foto do cliente, Template
+// da galeria e Cor ao mesmo tempo. A intencao da lojista e legitima ("o
+// cliente precisa me dizer o que estampar"), mas `image` e `template`
+// preenchem o MESMO slot de arte — o proprio motor visual le
+// `values.image || values.template` (compose3dMug.ts). Exigir os dois
+// juntos e uma condicao que nenhum cliente consegue satisfazer.
+//
+// Duas correcoes, ambas espelhadas em useStorefront.ts (commitConfigure)
+// no aura-app. As duas validacoes precisam concordar: divergencia entre
+// elas faz o app aceitar o item no carrinho e o backend recusar o pedido
+// no fechamento — o pior dos dois mundos pro cliente.
+//
+//   1. GRUPO DE ORIGEM DA ARTE: campos `image` e `template` do mesmo lado
+//      formam um grupo. Se ao menos um for required, basta UM preenchido.
+//      Com um unico campo do tipo no lado, o comportamento e identico ao
+//      anterior — nao ha relaxamento onde a lojista pediu um campo so.
+//      `art_service = 'designer'` ("crie minha arte pra mim") satisfaz o
+//      grupo inteiro: quem contratou a criacao nao tem arte pra enviar.
+//
+//   2. LADO INATIVO: campo `side: 'back'` so e exigido quando o verso
+//      esta ativo, replicando effectiveBackSelected do app. Antes, produto
+//      com verso opcional e campo obrigatorio no verso era aceito pelo app
+//      e recusado aqui.
 // ─────────────────────────────────────────────
+const ART_SOURCE_TYPES = new Set(['image', 'template']);
+
+function isFilledValue(v) {
+  return !(v == null || (typeof v === 'string' && !v.trim()));
+}
+
+// Mesma regra de effectiveBackSelected (aura-app): verso sem cobranca
+// esta sempre ativo; com cobranca, depende da escolha do cliente.
+function backIsActive(config, values) {
+  if (!config || config.has_back !== true) return false;
+  if (config.back_charge_enabled !== true) return true;
+  return !!values && values.has_back_selected === true;
+}
+
+function fieldSideOf(f) {
+  return f && f.side === 'back' ? 'back' : 'front';
+}
+
 function validateCustomizationValues(config, values) {
   if (!config || typeof config !== 'object') return null; // produto nao personalizavel
   if (!values || typeof values !== 'object') {
     return 'customization obrigatoria';
   }
   if (!Array.isArray(config.fields)) return null;
-  for (const f of config.fields) {
-    if (f.required) {
-      const v = values[f.id];
-      if (v == null || (typeof v === 'string' && !v.trim())) {
-        return `campo "${f.label || f.id}" obrigatorio`;
-      }
+
+  const backActive = backIsActive(config, values);
+  const fields = config.fields.filter(
+    (f) => f && (fieldSideOf(f) !== 'back' || backActive)
+  );
+
+  // "Crie minha arte pra mim" dispensa o cliente de enviar arte.
+  const artServiceHired = fields.some(
+    (f) => f.config && f.config.is_art_service === true && values[f.id] === 'designer'
+  );
+
+  // Grupo de origem da arte, por lado.
+  for (const side of ['front', 'back']) {
+    const group = fields.filter(
+      (f) => ART_SOURCE_TYPES.has(f.type) && fieldSideOf(f) === side
+    );
+    if (!group.some((f) => f.required)) continue;
+    if (artServiceHired) continue;
+    if (group.some((f) => isFilledValue(values[f.id]))) continue;
+    const labels = group.map((f) => `"${f.label || f.id}"`).join(' ou ');
+    return `informe a arte em ${labels}`;
+  }
+
+  for (const f of fields) {
+    if (ART_SOURCE_TYPES.has(f.type)) continue; // ja coberto pelo grupo
+    if (f.required && !isFilledValue(values[f.id])) {
+      return `campo "${f.label || f.id}" obrigatorio`;
     }
   }
   return null;
@@ -828,3 +893,5 @@ router.get('/:slug/studio/order/:oid', async (req, res) => {
 });
 
 module.exports = router;
+// Exposto para teste — mesma convencao de karateDojoBeltExams.__validateFile.
+module.exports.__validateCustomizationValues = validateCustomizationValues;
