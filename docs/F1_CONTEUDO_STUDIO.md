@@ -12,7 +12,7 @@
 1. **§1 (o alvo) e §2 (o que já existe)** — mais da metade da página já está construída. Ler §2 antes de escrever código evita reimplementar motor visual, upload e serviço de arte.
 2. **§3 (o que está quebrado)** — há um bug **em loja publicada** que impede compra hoje. É o primeiro item, não um detalhe.
 3. **§4 (registro de itens)** e o briefing do item que você vai tocar na §5.
-4. **§6 (decisões em aberto)** — três escolhas do lojista que travam desenho, não código.
+4. **§6 (decisões fechadas)** — as três respostas do lojista e o que cada uma custa. A `DEC-10` em particular aumenta o S3; leia antes de dimensioná-lo.
 
 Namespace herdado da F0 (`F0_EXECUCAO.md` §1): item de execução = letra + número (aqui a família **`S`**); decisão = `DEC-nn`, numeração **contínua com a F0** (última fechada: `DEC-08`).
 
@@ -67,11 +67,17 @@ Vinculei `caneca-classica` à *CANECA BRANCA* em produção, consultei o endpoin
 
 ## 3. O que está quebrado
 
-### 3.1 Bloqueio de compra em loja publicada — prioridade máxima
+### 3.1 Bloqueio de compra em loja publicada — resolvido pelo S0
 
-`sheid-mania` está **publicada**, com 13 produtos personalizáveis na vitrine. Toda caneca tem os 4 campos marcados `required: true` ao mesmo tempo: *Texto*, *Foto do cliente*, *Escolher template da galeria* e *Cor*.
+**Corrigido em 18/08/2026** (`Aura-backend#521` e `aura-app#707`). Fica registrado porque explica a forma da validação de hoje.
 
-`useStorefront.ts:281` (`commitConfigure`) exige todos os obrigatórios antes de adicionar ao carrinho. Ou seja: **o cliente precisa digitar um texto E enviar uma foto E escolher um template da galeria para conseguir comprar.** São caminhos alternativos tratados como cumulativos — na prática, ninguém fecha o pedido.
+`sheid-mania` está publicada, com 13 produtos personalizáveis na vitrine. Toda caneca tem os 4 campos marcados `required: true` ao mesmo tempo: *Texto*, *Foto do cliente*, *Escolher template da galeria* e *Cor*. A validação exigia cada campo required isoladamente, dos dois lados — então o cliente precisava digitar um texto **e** enviar uma foto **e** escolher um template para fechar o pedido. Como `image` e `template` preenchem o mesmo slot de arte, era condição que ninguém satisfaz.
+
+A correção foi em código, não no dado da Sheid: o painel de personalização oferece o checkbox *Obrigatório* por campo sem impedir a combinação impossível, então consertar só as linhas da loja deixaria a armadilha para a próxima lojista. `image` e `template` do mesmo lado passaram a formar um **grupo de origem da arte** — basta um preenchido —, e `art_service = 'designer'` satisfaz o grupo inteiro.
+
+Dois efeitos colaterais registrados: o backend também passou a pular campos do verso quando o verso está inativo (divergência que dava 400 no fechamento de item aceito no carrinho), e a validação do app virou a função pura `validateRequiredFields`, exportada, para poder ser testada contra os mesmos casos do servidor.
+
+**A causa raiz continua aberta**, fora do escopo da F1: há dois editores de personalização gravando formatos diferentes (§7).
 
 ### 3.2 A configuração das canecas é boilerplate, não configuração
 
@@ -115,8 +121,8 @@ Lado: **BE** = `aura-backend`, **APP** = `aura-app`, **DADO** = conteúdo com a 
 | S1 | Página única por categoria, com seletor de modelo | APP | F0 D3 |
 | S2 | Frete por CEP no storefront do Studio | BE | — |
 | S3 | Mockup 3D no carrossel mais cor da louça ligada ao seletor | APP | S1 |
-| S4 | Três caminhos de arte, todos com preço antes do fechamento | APP | `DEC-09` |
-| S5 | Triagem da arte do cliente pela lojista (não bloqueante) | BE + APP | `DEC-11` |
+| S4 | Três caminhos de arte, todos com preço antes do fechamento | APP | — (`DEC-09` fechada) |
+| S5 | Triagem da arte do cliente pela lojista (não bloqueante) | BE + APP | — (`DEC-11` fechada) |
 | S6 | Desconto progressivo visível na página | APP | dados de `qty_tiers` |
 | S7 | Conteúdo do piloto: árvore, swatches, deltas, textos | DADO | S0 |
 
@@ -134,7 +140,9 @@ Uma rota por categoria da F0. O seletor de Modelo lista os produtos da categoria
 Portar de `storefront.js`. Verificar antes se o cálculo de lá assume peso/dimensão que o produto personalizável não preenche.
 
 ### S3 — Mockup no carrossel (APP)
-O mockup entra como **item do carrossel de fotos**, não como painel separado — é o pedido explícito e é também o pico da demonstração para a lojista. Passar `garmentColor` do valor do campo de cor até `Mug3DPreview` (hoje o parâmetro existe e ninguém o alimenta). Ver `DEC-10` sobre quantos templates serão necessários.
+O mockup entra como **item do carrossel de fotos**, não como painel separado — é o pedido explícito e é também o pico da demonstração para a lojista. Passar `garmentColor` do valor do campo de cor até `Mug3DPreview` (hoje o parâmetro existe e ninguém o alimenta).
+
+Por `DEC-10`, cada modelo tem seu template — o que exige, **antes** de cadastrar qualquer um, mover a geometria do código para o `spec`. Ver a §6 para os três passos; é o que faz do S3 o item mais caro da fase.
 
 ### S4 — Três caminhos de arte (APP)
 Não são dois: (a) cliente envia arte pronta; (b) cliente envia e a lojista ajusta — cobrado; (c) a lojista cria do zero — cobrado mais caro. Os três precisam aparecer no preço **antes** do fechamento; hoje a lojista absorve (b) silenciosamente. O motor de (c) já existe em `FieldArtService`; falta (b) e falta o dado dos dois.
@@ -150,18 +158,41 @@ Fila da arte recebida com três saídas: aceitar como está, ajustar (aplica o p
 
 ---
 
-## 6. Decisões em aberto
+## 6. Decisões fechadas
 
-| Código | Pergunta | Por que trava |
-|---|---|---|
-| `DEC-09` | Preço de criação de arte é **por empresa** ou **por produto**? | Criar arte de caneca e de camiseta não dá o mesmo trabalho. Por empresa segue o padrão de `pdv_settings`/`FieldArtService`; por produto exige `studio_pricing_rules` (que já tem `setup_fee` e `labor_cost` sem uso). Define S4. |
-| `DEC-10` | Um template 3D genérico ou um por família de caneca? | A geometria é fixa no código (§2.1). Um só template renderiza errado Chopp, Alça Coração e Com Colher. Alternativa: manter foto 2D nesses e 3D só nas de parede reta. Define S3. |
-| `DEC-11` | A triagem **atrasa** o pedido ou corre em paralelo? | Se atrasa, precisa de estado de pedido "aguardando arte" e de prazo. Se corre em paralelo, o pedido segue e o ajuste vira item de trabalho. Define S5. |
+As três foram respondidas em 18/08/2026. Nenhuma decisão da F1 segue aberta.
+
+### `DEC-09` — preço de criação de arte é **por produto**
+
+Criar arte de caneca e de camiseta não dá o mesmo trabalho, então o preço acompanha o produto.
+
+**Já está implementado.** `art_service` vive em `products.customization_config`, que é coluna do produto — o editor grava `art_service_price` por produto. A frase da versão anterior desta seção, que agrupava `FieldArtService` com `pdv_settings` como se fosse configuração por empresa, estava errada: `pdv_settings` guarda só a política de **revisão**, não o preço de criação.
+
+Consequência para S4: nada de storage novo. O caminho (b) — cliente envia e a lojista ajusta — entra como mais uma choice no mesmo campo, com seu próprio `price_delta`. `studio_pricing_rules` não é necessário aqui.
+
+### `DEC-10` — um template 3D **por modelo de caneca**
+
+Cada modelo tem o seu. Chopp, Alça Coração e Com Colher deixam de ser representadas por uma caneca genérica.
+
+**Isso aumenta o S3, e vale dizer por quê.** Não é semear 9 linhas em `studio_visual_templates`: a geometria hoje está **fixa no código** (`compose3dMug.ts`, `CylinderGeometry(1, 0.94, 2.3)` mais alça `TorusGeometry(0.52, 0.11)`), e o `spec` não tem onde carregar forma. Para haver template por modelo é preciso, antes:
+
+1. estender o `spec` com parâmetros de geometria (diâmetro, altura, conicidade, forma e posição da alça, presença de colher);
+2. fazer `createMugViewer` ler esses parâmetros em vez das constantes;
+3. só então cadastrar um template por modelo.
+
+O passo 1 muda o `schema` do `spec` (hoje `schema: 1`) e precisa manter `caneca-classica` funcionando — os campos novos entram opcionais, com os valores atuais como default.
+
+### `DEC-11` — a triagem é **parte do processo**, não um portão
+
+Corre junto com o pedido. Não existe estado "aguardando arte" nem prazo suspenso: o pedido segue e o ajuste da arte é uma etapa de trabalho como qualquer outra.
+
+Consequência para S5: nenhum estado novo de pedido, nenhuma mudança no prazo. A fila de triagem é uma visão sobre pedidos que já existem, com as três saídas da §5 (aceitar, ajustar cobrando, devolver).
 
 ---
 
 ## 7. Pendências fora do escopo, registradas para não sumirem
 
+- **Dois editores de personalização gravam o mesmo `customization_config` em formatos diferentes.** `produtos/[id]/personalizacao.tsx` gera ids estáveis (`text`, `image`, `template`, `art_service`) com `required: false` e config rico; `StudioPersonalizacaoPanel.tsx` gera ids voláteis `f_<timestamp>`, config vazio e checkbox *Obrigatório* livre. Foi o segundo que produziu a config da Sheid (§3.2). Importa além do S0: o motor visual lê os valores por **nome** de campo, então config com id volátil não alimenta o mockup. Tarefa registrada em separado.
 - `threeLoader.ts` carrega three.js por CDN (§3.6).
 - Sheid tem 0 `studio_pricing_rules` e 0 `product_category_links` — a base do piloto é greenfield nos dois eixos.
 - 36 dos 74 produtos ativos da Sheid estão na categoria genérica "Produtos", que não é taxonomia.
