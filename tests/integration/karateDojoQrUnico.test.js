@@ -84,6 +84,32 @@ function minutesToHHMM(min) {
 
 const NOW = brtNowForTest();
 
+// ── Dois horários dentro da janela, sem cruzar a meia-noite ──
+//
+// 19/08/2026 — o caso de ambiguidade falhava TODA noite entre 23:50 e
+// 00:29 BRT, e derrubava o CI de qualquer PR que rodasse nesse intervalo
+// (aconteceu duas vezes seguidas num PR que não toca karatê).
+//
+// Causa: as duas turmas nasciam em `agora - 10` e `agora + 10`, e
+// minutesToHHMM faz wrap em 1440. Às 23:55, `+10` virava 00:00 — que o
+// serviço lê como 1430 minutos de distância, fora da janela. Sobrava UMA
+// turma candidata, então vinha 200 no lugar do 409 esperado. Depois da
+// meia-noite o mesmo acontecia com `-10`, para trás.
+//
+// A correção é do TESTE, não do serviço: o caso quer duas turmas dentro
+// da janela, não testar a virada do dia. Perto das bordas as duas vão
+// para o mesmo lado — -20/-10 cabem nos 30 min antes, +10/+20 cabem nos
+// 60 min depois, e nenhuma das quatro cruza o limite do dia.
+//
+// O serviço de fato NÃO acha uma turma de 00:00 num check-in às 23:50.
+// Isso é bug de produto (turma na virada do dia), registrado à parte —
+// não é o que este arquivo cobre.
+function doisOffsetsNaJanela(nowMin) {
+  if (nowMin + 10 > 1439) return [-20, -10];
+  if (nowMin - 10 < 0)    return [10, 20];
+  return [-10, 10];
+}
+
 // ── GET /dojo/qr ──
 describe('F9 — GET /dojo/qr (QR único do dojô)', () => {
   test('Canal A: devolve token SEM aluno embutido (payload só dojo_id)', async () => {
@@ -193,9 +219,10 @@ describe('F9 — janela de tolerância (30 min antes / 60 min depois)', () => {
 
   test('2 turmas dentro da janela ao mesmo tempo → 409 AMBIGUOUS_CLASS com candidates (não escolhe sozinho)', async () => {
     const token = svc.signDojoQrToken({ dojo_id: dojoId });
+    const [offA, offB] = doisOffsetsNaJanela(NOW.minutes);
     mockCheckinCommon([
-      { id: cid1, name: 'Infantil', start_time: minutesToHHMM(NOW.minutes - 10), end_time: null, weekdays: [NOW.weekday] },
-      { id: cid2, name: 'Adulto', start_time: minutesToHHMM(NOW.minutes + 10), end_time: null, weekdays: [NOW.weekday] },
+      { id: cid1, name: 'Infantil', start_time: minutesToHHMM(NOW.minutes + offA), end_time: null, weekdays: [NOW.weekday] },
+      { id: cid2, name: 'Adulto', start_time: minutesToHHMM(NOW.minutes + offB), end_time: null, weekdays: [NOW.weekday] },
     ]);
 
     const res = await request(app)
