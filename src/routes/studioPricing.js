@@ -171,6 +171,46 @@ router.put('/pricing/rules/:productId', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// DELETE /studio/pricing/rules/:productId  (19/08/2026 — QA)
+// Remove a regra de precificação de um produto. productId='global'
+// => product_id IS NULL. Soft-delete (is_active=false) porque o GET
+// já filtra por is_active e a tabela é referência histórica de
+// orçamentos antigos.
+//
+// Existia UI de excluir no app que só apagava do estado local: o card
+// sumia e a regra continuava sendo aplicada nos orçamentos seguintes.
+// ─────────────────────────────────────────────────────────────
+router.delete('/pricing/rules/:productId', async (req, res) => {
+  const cid = req.params.id;
+  const pid = req.params.productId;
+  const productIdValue = pid === 'global' ? null : pid;
+
+  try {
+    const { rows } = productIdValue === null
+      ? await db.query(
+          `UPDATE studio_pricing_rules SET is_active = false, updated_at = NOW()
+            WHERE company_id = $1 AND product_id IS NULL AND is_active = true
+            RETURNING id`,
+          [cid]
+        )
+      : await db.query(
+          `UPDATE studio_pricing_rules SET is_active = false, updated_at = NOW()
+            WHERE company_id = $1 AND product_id = $2 AND is_active = true
+            RETURNING id`,
+          [cid, productIdValue]
+        );
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Regra não encontrada' });
+    }
+    return res.json({ deleted: true, product_id: productIdValue });
+  } catch (e) {
+    console.error('[studioPricing] DELETE /rules/:productId', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // POST /studio/pricing/quote-line
 // Calcula preço de uma linha de orçamento.
 // Body: { product_id?, quantity, urgency?, overrides?: { unit_price?, unit_cost? } }

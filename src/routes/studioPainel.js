@@ -299,6 +299,7 @@ router.get('/painel', async function(req, res) {
        )
        SELECT itens.product_id,
               COALESCE(MAX(p.name), MAX(itens.product_name), 'Produto') AS name,
+              MAX(p.image_url) AS image_url,
               SUM(itens.revenue)::float AS revenue,
               SUM(itens.qty)::float     AS qty
          FROM itens
@@ -314,6 +315,9 @@ router.get('/painel', async function(req, res) {
     out.top_produtos = r.rows.map((row) => ({
       product_id: row.product_id,
       name:       row.name || 'Produto',
+      // 19/08/2026 (QA): o Top 5 truncava o nome em ~110px sem imagem —
+      // "Caneca personali…" não identifica nada pro lojista.
+      image_url:  row.image_url || null,
       revenue:    Math.round((parseFloat(row.revenue) || 0) * 100) / 100,
       qty:        Math.round((parseFloat(row.qty) || 0) * 100) / 100,
     }));
