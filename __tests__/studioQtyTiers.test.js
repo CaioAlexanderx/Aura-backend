@@ -63,6 +63,15 @@ describe('unitPriceForQty', () => {
     expect(unitPriceForQty(100, [{ min_qty: 1, unit_price: 80, unit_multiplier: 0.5 }], 3)).toBe(80);
   });
 
+  // Achado pelo teste do lado do app: Number(null) e 0, que e finito.
+  // Sem esta guarda, faixa com preco corrompido entrega o produto de graca.
+  test('faixa com preco zero nao zera o pedido', () => {
+    expect(unitPriceForQty(39.9, [{ min_qty: 2, unit_price: 0 }], 5)).toBe(39.9);
+    expect(unitPriceForQty(39.9, [{ min_qty: 2, unit_price: null, unit_multiplier: 0.8 }], 5))
+      .toBeCloseTo(31.92, 2);
+    expect(buildLadder(39.9, [{ min_qty: 2, unit_price: 0 }])).toEqual([]);
+  });
+
   test('quantidade invalida cai no preco de tabela', () => {
     expect(unitPriceForQty(39.9, ESCADA, 0)).toBe(39.9);
     expect(unitPriceForQty(39.9, ESCADA, -5)).toBe(39.9);
@@ -83,6 +92,7 @@ describe('parseTiers — faixa mal cadastrada nao derruba a loja', () => {
       { min_qty: 10 },                                   // nao muda nada
       { min_qty: 10, unit_multiplier: 0 },               // multiplicador zero
       { min_qty: 10, unit_price: -1 },                   // preco negativo
+      { min_qty: 10, unit_price: 0 },                    // faixa gratuita: nao existe
       null, 'lixo', 42,
     ])).toEqual([]);
   });
