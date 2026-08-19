@@ -462,4 +462,12 @@ async function buildStorefront(config) {
   };
 }
 
-module.exports = { buildStorefront, parseFeaturedIds, parseHiddenIds, computeOpenState };
+module.exports = {
+  buildStorefront, parseFeaturedIds, parseHiddenIds, computeOpenState,
+  // Exportados em 19/08/2026 (S1) para o storefront do Studio montar a
+  // MESMA arvore de categorias que a loja comum, em vez de uma segunda
+  // implementacao. As duas regras que importam vivem aqui e valem para
+  // os dois: so categoria com is_visible_storefront entra, e so o
+  // vinculo primario sai no payload.
+  fetchStorefrontCategories, fetchPrimaryCategoryLinks,
+};
