@@ -53,6 +53,9 @@ const { createMpPixPayment, createMpPreference } = require('../services/mpServic
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { calculateShippingQuote } = require('../services/shippingQuote');
 const { COURIER, validateCourierPickup } = require('../services/courierPickup');
+const {
+  fetchStorefrontCategories, fetchPrimaryCategoryLinks,
+} = require('../services/storefrontBuilder');
 
 function validateCpfCnpj(raw) {
   if (!raw) return null;
@@ -303,6 +306,25 @@ router.get('/:slug/studio/products', async (req, res) => {
     const hasCard = hasMpGateway && cardEnabled;
     const hasOnDelivery = !!config.pay_on_delivery_enabled;
 
+    // S1 (19/08/2026) — árvore de categorias no payload do Studio.
+    //
+    // O D3 levou a taxonomia da F0 para o payload da loja comum, mas não
+    // para este. Aqui só saía o texto legado `category`, e sem id nem
+    // path não há como a vitrine agrupar as 9 canecas numa página só.
+    //
+    // Os dois helpers vêm de storefrontBuilder de propósito: as regras
+    // que importam — só categoria com is_visible_storefront entra, e só
+    // o vínculo primário sai — valem igual nos dois storefronts, e uma
+    // segunda implementação divergiria na primeira mudança.
+    //
+    // Aditivo: `category` (texto) permanece, e os campos novos saem null
+    // em catálogo pré-migração. Loja sem as migrations 257/258 recebe
+    // categories: [] e o payload fica idêntico ao de antes.
+    const categories = await fetchStorefrontCategories(cid);
+    const categoryById = {};
+    categories.forEach(c => { categoryById[c.id] = c; });
+    const primaryLinkByProduct = await fetchPrimaryCategoryLinks(products.map(p => p.id));
+
     res.json({
       site: {
         name: config.site_name || configs[0].company_display_name,
@@ -312,19 +334,33 @@ router.get('/:slug/studio/products', async (req, res) => {
         logo_url: config.logo_url || null,
         cover_url: config.cover_url || null,
       },
-      products: products.map(p => ({
-        id: p.id,
-        name: p.name,
-        description: p.description || null,
-        price: parseFloat(p.price),
-        image_url: p.image_url || null,
-        category: p.category || null,
-        stock_qty: p.stock_qty,
-        customization_config: p.customization_config,
-        templates: [
-          ...(templatesByProduct[p.id] || []),
-          ...(templatesByProduct.__global__ || []),
-        ],
+      products: products.map(p => {
+        // Produto compartilhado de outra empresa não arrasta a categoria
+        // dela: só entra vínculo cuja categoria está na árvore DESTA loja.
+        const cat = categoryById[primaryLinkByProduct[p.id]] || null;
+        return {
+          id: p.id,
+          name: p.name,
+          description: p.description || null,
+          price: parseFloat(p.price),
+          image_url: p.image_url || null,
+          category: p.category || null,
+          category_id:   cat ? cat.id   : null,
+          category_slug: cat ? cat.slug : null,
+          category_path: cat ? cat.path : null,
+          stock_qty: p.stock_qty,
+          customization_config: p.customization_config,
+          templates: [
+            ...(templatesByProduct[p.id] || []),
+            ...(templatesByProduct.__global__ || []),
+          ],
+        };
+      }),
+      // Lista FLAT com parent_id — o cliente deriva a hierarquia, mesmo
+      // formato do payload da loja comum e do GET /product-categories.
+      categories: categories.map(c => ({
+        id: c.id, name: c.name, slug: c.slug,
+        path: c.path, depth: c.depth, parent_id: c.parent_id,
       })),
       sla: {
         sla_base_days: slaBaseDays,
