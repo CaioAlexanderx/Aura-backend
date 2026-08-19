@@ -1135,6 +1135,38 @@ router.get('/:slug/studio/order/:oid', async (req, res) => {
   }
 });
 
+// ─── GET /:slug/studio — endereco publico da vitrine de personalizados ───
+// loja.getaura.com.br/:slug/studio e o endereco que o painel divulga (botao
+// "Ver como cliente" e o card de WhatsApp). Ele NUNCA existiu: o
+// customDomainMiddleware reescreve loja.getaura.com.br/x/y para
+// /api/v1/storefront/x/y, e aqui so havia /studio/products, /studio/order e
+// afins. A lojista clicava e caia num JSON de erro.
+//
+// A vitrine em si e uma rota do app (app/cardapio/studio/[slug].tsx), entao
+// o que falta aqui e so a ponte. 302 e nao 301 de proposito: se um dia a
+// vitrine mudar de casa, ninguem fica preso a um redirect cacheado no
+// navegador do cliente.
+function urlVitrineStudio(slug) {
+  const appUrl = process.env.APP_URL || 'https://app.getaura.com.br';
+  return `${appUrl}/cardapio/studio/${encodeURIComponent(slug)}`;
+}
+
+router.get('/:slug/studio', function(req, res) {
+  res.redirect(302, urlVitrineStudio(req.params.slug));
+});
+
+// Forma antiga com id de produto no fim — era o que o painel gerava ate
+// 19/08/2026. Nao ha rota de produto na vitrine, entao cai na loja: melhor
+// a loja certa do que um erro. Declarada DEPOIS das rotas especificas
+// (/studio/products, /studio/order...) para nao engoli-las.
+router.get('/:slug/studio/:pid', function(req, res, next) {
+  // Nao sequestra os subcaminhos reais da API, caso algum seja adicionado
+  // depois desta linha por engano.
+  const reservados = ['products', 'order', 'upload', 'shipping-quote'];
+  if (reservados.includes(req.params.pid)) return next();
+  res.redirect(302, urlVitrineStudio(req.params.slug));
+});
+
 module.exports = router;
 // Exposto para teste — mesma convencao de karateDojoBeltExams.__validateFile.
 module.exports.__validateCustomizationValues = validateCustomizationValues;
