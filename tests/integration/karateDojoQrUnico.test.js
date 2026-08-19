@@ -303,6 +303,100 @@ describe('F9 — janela de tolerância (30 min antes / 60 min depois)', () => {
   });
 });
 
+// ── regressão: a janela NÃO cruza a meia-noite (limite conhecido) ──
+//
+// 19/08/2026 — FIXA o comportamento atual, não descreve o desejado. Uma
+// turma na virada do dia (00:00, ou 23:50 vista do dia seguinte) NÃO é
+// encontrada pelo check-in do QR único. Medido antes de decidir: ZERO
+// turmas com start_time em 23:xx/00:xx na base inteira e ZERO presenças
+// method='qr_dojo' — o caminho com o bug nunca rodou em produção. O
+// racional completo (e o que um conserto de verdade exigiria) está no
+// bloco CHECKIN_WINDOW_*_MIN em src/services/karateDojoClassService.js.
+//
+// São DUAS barreiras independentes, e cada uma é pinada no nível em que
+// dá pra ser determinística:
+//   • a aritmética da janela (minutos lineares 0..1439) — unitária, com
+//     `nowMin` explícito: pelo HTTP o "agora" é o relógio do CI e o caso
+//     é justamente 23:50, que só existiria 40 min por dia;
+//   • o filtro de weekday, que rejeita ANTES da janela sequer rodar —
+//     esse é determinístico via HTTP, porque a turma nasce no weekday de
+//     AMANHÃ, que nunca é o de hoje, em qualquer horário que o CI rode.
+describe('F9 — regressão: janela é linear por data, não cruza a meia-noite', () => {
+  test('aritmética: turma 00:00 vs check-in 23:50 fica FORA da janela (1430 min, não 10)', () => {
+    const meiaNoite = 0;
+    const vinteTresCinquenta = 23 * 60 + 50;
+
+    // O caso do bug, nos dois sentidos.
+    expect(svc.inCheckinWindow(meiaNoite, vinteTresCinquenta)).toBe(false);
+    expect(svc.inCheckinWindow(vinteTresCinquenta, 10)).toBe(false);
+
+    // Contraprova: dentro do MESMO dia a janela funciona nas duas pontas,
+    // então o false acima é a virada do dia — não uma janela quebrada.
+    expect(svc.inCheckinWindow(30, 10)).toBe(true);   // 20 min antes  (≤ 30)
+    expect(svc.inCheckinWindow(0, 60)).toBe(true);    // 60 min depois (≤ 60)
+    expect(svc.inCheckinWindow(0, 61)).toBe(false);   // 61 min depois → fora
+
+    // Turma sem start_time nunca bloqueia (fallback permissivo do F4).
+    expect(svc.inCheckinWindow(null, vinteTresCinquenta)).toBe(true);
+  });
+
+  // Instantes FIXOS (BRT = UTC-3 o ano todo, sem horário de verão desde
+  // 2019 — a conversão é estável). Segunda 17/08/2026 é weekday 1, terça
+  // 18/08/2026 é weekday 2.
+  const SEG_2350 = new Date('2026-08-18T02:50:00Z'); // 2026-08-17 23:50 BRT (seg)
+  const TER_0010 = new Date('2026-08-18T03:10:00Z'); // 2026-08-18 00:10 BRT (ter)
+  const SEG = 1;
+  const TER = 2;
+
+  async function checkinEm(now, enrolledRows) {
+    const token = svc.signDojoQrToken({ dojo_id: dojoId });
+    mockCheckinCommon(enrolledRows, (s) => {
+      if (/SELECT present FROM karate_dojo_attendance/.test(s)) return { rows: [] };
+      if (/INSERT INTO karate_dojo_attendance/.test(s)) return { rows: [] };
+      return null;
+    });
+    // direto no service: `opts.now` é a costura de teste, a rota não passa.
+    return svc.checkin(dojoId, { token, student_id: sid }, { now });
+  }
+
+  test('CONTROLE: às 23:50, turma de 23:45 no MESMO dia entra na janela (23:50 não é o problema)', async () => {
+    const r = await checkinEm(SEG_2350, [
+      { id: cid1, name: 'Noturna', start_time: '23:45', end_time: null, weekdays: [SEG] },
+    ]);
+    expect(r.class.id).toBe(cid1);
+    expect(r.date).toBe('2026-08-17'); // data do relógio, e a turma é desse dia
+  });
+
+  test('turma de 00:00 (weekday de TERÇA) num check-in às 23:50 de SEGUNDA → 409 NO_CLASS_TODAY', async () => {
+    // NÃO é NO_CLASS_NOW: classesEnrolledOnWeekday() descarta a turma no
+    // filtro de weekday, ANTES de inCheckinWindow() ser chamada. Ou seja,
+    // trocar a janela por distância circular sozinha não mudaria este 409.
+    await expect(
+      checkinEm(SEG_2350, [{ id: cid1, name: 'Madrugada', start_time: '00:00', end_time: null, weekdays: [TER] }])
+    ).rejects.toMatchObject({ status: 409, code: 'NO_CLASS_TODAY' });
+
+    const insertCalls = db.query.mock.calls.filter((c) => /INSERT INTO karate_dojo_attendance/.test(String(c[0])));
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  test('sentido inverso: turma de 23:50 de SEGUNDA num check-in às 00:10 de TERÇA → 409 NO_CLASS_TODAY', async () => {
+    await expect(
+      checkinEm(TER_0010, [{ id: cid1, name: 'Noturna', start_time: '23:50', end_time: null, weekdays: [SEG] }])
+    ).rejects.toMatchObject({ status: 409, code: 'NO_CLASS_TODAY' });
+
+    const insertCalls = db.query.mock.calls.filter((c) => /INSERT INTO karate_dojo_attendance/.test(String(c[0])));
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  test('mesmo com o weekday certo, a janela linear rejeita a turma de 00:00 às 23:50 → 409 NO_CLASS_NOW', async () => {
+    // Segunda barreira isolada: aqui a turma passa no filtro de weekday
+    // (cadastrada na SEGUNDA), então quem rejeita é a aritmética da janela.
+    await expect(
+      checkinEm(SEG_2350, [{ id: cid1, name: 'Madrugada', start_time: '00:00', end_time: null, weekdays: [SEG] }])
+    ).rejects.toMatchObject({ status: 409, code: 'NO_CLASS_NOW' });
+  });
+});
+
 // ── regressão: o QR PESSOAL do aluno continua gravando method='qr' ──
 describe('F9 — regressão: QR pessoal do aluno não muda de comportamento', () => {
   test('check-in com token pessoal (class_id explícito) grava method "qr" (não "qr_dojo")', async () => {

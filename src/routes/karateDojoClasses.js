@@ -79,7 +79,11 @@ router.get('/dojo/classes/settings', requireDojoAccess, async (req, res) => {
     const cfg = await svc.getSettings(req.dojoId);
     return res.json(cfg);
   } catch (e) {
-    if (e && e.code === '42P01') return res.json({ qr_checkin_enabled: false });
+    // A faixa de horário é constante do código, não depende da migration —
+    // vai junto mesmo no fallback pro front não ficar sem a dica.
+    if (e && e.code === '42P01') {
+      return res.json({ qr_checkin_enabled: false, class_start_time_range: svc.CLASS_START_TIME_RANGE });
+    }
     console.error('[karateDojoClasses] get settings:', e.message);
     return res.status(500).json({ error: 'Erro ao obter configuração de check-in' });
   }
