@@ -42,7 +42,11 @@ function parseTiers(raw) {
     const unitPrice = t.unit_price == null ? null : num(t.unit_price);
     const mult      = t.unit_multiplier == null ? null : num(t.unit_multiplier);
     if (unitPrice == null && mult == null) continue;   // faixa que nao muda nada
-    if (unitPrice != null && unitPrice < 0) continue;
+    // unit_price <= 0 sai fora, nao so o negativo: faixa gratuita nao
+    // existe no configurador da lojista, e `unit_price: 0` (ou um null que
+    // vira 0 no caminho) entregaria o produto DE GRACA. Achado pelo teste
+    // do lado do app, onde Number(null) === 0 passava pela guarda.
+    if (unitPrice != null && unitPrice <= 0) continue;
     if (mult != null && mult <= 0) continue;
     out.push({ min_qty: min, max_qty: max, unit_price: unitPrice, unit_multiplier: mult });
   }
