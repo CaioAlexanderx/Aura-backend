@@ -34,6 +34,9 @@ router.use('/caixa', require('./caixa'));
 // capturaria 'brand-candidates' como uuid. Rota estatica sempre antes da
 // parametrica.
 router.use('/', require('./categoryMigration'));
+// E1 (F0): GET /catalog/health -- indice de saude do catalogo. Path
+// proprio e estatico, sem colisao com os mounts de /products.
+router.use('/', require('./catalogHealth'));
 // F0 IA de descricao (18/08/2026): TODAS as rotas comecam por
 // `descriptions`, que e ESTATICO, e ./products tem GET /:id curinga --
 // montar depois faria o Express tratar 'descriptions' como uuid e estourar
