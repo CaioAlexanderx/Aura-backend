@@ -13,11 +13,15 @@ const db      = require('../config/database');
 // GET /orcamento/:token — dados públicos do orçamento
 router.get('/:token', async function(req, res) {
   try {
+    // 19/08/2026 — marca do lojista no orçamento: logo, cores e contato
+    // vêm do digital_channel_config (mesma fonte da vitrine pública).
     const r = await db.query(
       `SELECT q.id, q.token, q.status, q.expires_at,
               q.customer_name, q.subtotal, q.discount, q.total,
               q.deposit_pct, q.deposit_amount, q.response_note, q.responded_at,
               c.trade_name, c.legal_name,
+              dc.site_name, dc.logo_url, dc.primary_color, dc.secondary_color,
+              dc.whatsapp AS dc_whatsapp, dc.phone AS dc_phone, dc.instagram,
               (SELECT json_agg(json_build_object(
                 'description', qi.description,
                 'quantity', qi.quantity,
@@ -27,6 +31,7 @@ router.get('/:token', async function(req, res) {
                FROM studio_quote_items qi WHERE qi.quote_id = q.id) AS items
          FROM studio_quotes q
          JOIN companies c ON c.id = q.company_id
+         LEFT JOIN digital_channel_config dc ON dc.company_id = q.company_id
         WHERE q.token = $1 LIMIT 1`,
       [req.params.token]
     );
@@ -41,11 +46,21 @@ router.get('/:token', async function(req, res) {
     const expired = q.expires_at && new Date(q.expires_at) < new Date();
     const status  = expired && q.status === 'sent' ? 'expired' : q.status;
 
+    // WhatsApp: só dígitos, pra montar wa.me no front
+    const waDigits = String(q.dc_whatsapp || q.dc_phone || '').replace(/\D/g, '') || null;
+
     res.json({
       token:          q.token,
       status,
       expires_at:     q.expires_at,
-      shop:           { name: q.trade_name || q.legal_name || 'Estúdio' },
+      shop: {
+        name:            q.site_name || q.trade_name || q.legal_name || 'Estúdio',
+        logo_url:        q.logo_url || null,
+        primary_color:   q.primary_color || null,
+        secondary_color: q.secondary_color || null,
+        whatsapp:        waDigits,
+        instagram:       q.instagram || null,
+      },
       customer_name:  q.customer_name,
       subtotal:       parseFloat(q.subtotal) || 0,
       discount:       parseFloat(q.discount) || 0,
