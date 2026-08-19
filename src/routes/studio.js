@@ -274,20 +274,51 @@ router.get('/gallery/templates', async function(req, res) {
   const { category_id, tag, limit = 200 } = req.query;
   const params = [req.params.id];
   let where = 't.company_id = $1 AND t.is_active = true';
-  if (category_id) { params.push(category_id); where += ` AND category_id = $${params.length}`; }
-  if (tag)         { params.push(tag);         where += ` AND $${params.length} = ANY(tags)`; }
+  if (category_id) { params.push(category_id); where += ` AND t.category_id = $${params.length}`; }
+  if (tag)         { params.push(tag);         where += ` AND $${params.length} = ANY(t.tags)`; }
+  const limitParams = [...params, Math.min(parseInt(limit) || 200, 500)];
   try {
+    // linked_products: produtos vinculados diretamente ao template (galeria
+    // organizada por produto — 19/08/2026). LATERAL evita GROUP BY em t.*.
     const r = await db.query(
-      `SELECT t.*, c.name AS category_name, c.color AS category_color
+      `SELECT t.*, c.name AS category_name, c.color AS category_color,
+              COALESCE(lp.linked_products, '[]'::json) AS linked_products
          FROM studio_templates t
          LEFT JOIN studio_template_categories c ON c.id = t.category_id
+         LEFT JOIN LATERAL (
+           SELECT json_agg(json_build_object('id', p.id, 'name', p.name, 'image_url', p.image_url) ORDER BY p.name) AS linked_products
+             FROM studio_product_templates pt
+             JOIN products p ON p.id = pt.product_id
+            WHERE pt.template_id = t.id AND pt.company_id = t.company_id AND pt.product_id IS NOT NULL
+         ) lp ON true
         WHERE ${where}
         ORDER BY t.use_count DESC, t.created_at DESC
         LIMIT $${params.length + 1}`,
-      [...params, Math.min(parseInt(limit) || 200, 500)]
+      limitParams
     );
     res.json({ templates: r.rows });
-  } catch (err) { res.status(500).json({ error: 'Erro ao listar templates' }); }
+  } catch (err) {
+    // 42P01: studio_product_templates ausente (deployment parcial) → lista sem vínculos
+    if (err.code === '42P01') {
+      try {
+        const r = await db.query(
+          `SELECT t.*, c.name AS category_name, c.color AS category_color
+             FROM studio_templates t
+             LEFT JOIN studio_template_categories c ON c.id = t.category_id
+            WHERE ${where}
+            ORDER BY t.use_count DESC, t.created_at DESC
+            LIMIT $${params.length + 1}`,
+          limitParams
+        );
+        return res.json({ templates: r.rows });
+      } catch (err2) {
+        console.error('[studio/gallery/templates] fallback error:', err2.message);
+        return res.status(500).json({ error: 'Erro ao listar templates' });
+      }
+    }
+    console.error('[studio/gallery/templates] error:', err.message);
+    res.status(500).json({ error: 'Erro ao listar templates' });
+  }
 });
 
 router.post('/gallery/templates', async function(req, res) {
