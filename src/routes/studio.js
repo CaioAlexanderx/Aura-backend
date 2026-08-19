@@ -3,6 +3,7 @@
 // Atualizado 26/05/2026 — Fase 10A: IA Haiku sugere templates pro produto
 //                       + Issue 2: qty_multiplier_by_option em compositions
 //                       + Verso: has_back + back_print_area + field.side
+//                       + Meio:  has_middle + middle_print_area (caneca/copo)
 //
 // Fase 0+1: /health, /products/:pid/customization-config, /personalize
 // Fase 2  : /gallery/* (categorias + templates + vinculação)
@@ -31,7 +32,10 @@ const db      = require('../config/database');
 // ─── Schema customization_config (Fase 1 + Verso 26/05/2026) ─
 const VALID_FIELD_TYPES = ['text', 'image', 'template', 'color', 'option'];
 const VALID_POSITIONS   = ['center', 'left', 'right'];
-const VALID_SIDES       = ['front', 'back'];
+// 'middle' (19/08/2026): faixa central / wrap 360 — o caso de caneca e
+// copo, onde a arte da a volta e nao e nem frente nem verso. Espelha
+// has_back em tudo: area propria, cobranca opcional e side nos fields.
+const VALID_SIDES       = ['front', 'back', 'middle'];
 
 function validateCustomizationConfig(cfg) {
   if (!cfg || typeof cfg !== 'object') return 'config obrigatório';
@@ -68,6 +72,33 @@ function validateCustomizationConfig(cfg) {
     }
   }
 
+  if (cfg.has_middle !== undefined && typeof cfg.has_middle !== 'boolean') {
+    return 'has_middle deve ser boolean';
+  }
+  if (cfg.has_middle === true) {
+    if (!cfg.middle_print_area || typeof cfg.middle_print_area !== 'object') {
+      return 'middle_print_area obrigatório quando has_middle=true';
+    }
+    const mpa = cfg.middle_print_area;
+    if (typeof mpa.width_cm !== 'number' || !isFinite(mpa.width_cm) || mpa.width_cm <= 0) {
+      return 'middle_print_area.width_cm inválido';
+    }
+    if (typeof mpa.height_cm !== 'number' || !isFinite(mpa.height_cm) || mpa.height_cm <= 0) {
+      return 'middle_print_area.height_cm inválido';
+    }
+    if (mpa.position !== undefined && !VALID_POSITIONS.includes(mpa.position)) {
+      return 'middle_print_area.position inválido (center/left/right)';
+    }
+  }
+  if (cfg.middle_charge_enabled !== undefined && typeof cfg.middle_charge_enabled !== 'boolean') {
+    return 'middle_charge_enabled deve ser boolean';
+  }
+  if (cfg.middle_charge_enabled === true) {
+    if (typeof cfg.middle_price_delta !== 'number' || !isFinite(cfg.middle_price_delta) || cfg.middle_price_delta <= 0) {
+      return 'middle_price_delta deve ser número > 0 quando middle_charge_enabled=true';
+    }
+  }
+
   if (!Array.isArray(cfg.fields)) return 'fields deve ser array';
   if (cfg.fields.length === 0) return 'pelo menos 1 field obrigatório';
   if (cfg.fields.length > 12) return 'máximo 12 fields por produto';
@@ -78,10 +109,13 @@ function validateCustomizationConfig(cfg) {
     if (typeof f.required !== 'boolean') return `fields[${i}].required deve ser boolean`;
     if (f.side !== undefined) {
       if (!VALID_SIDES.includes(f.side)) {
-        return `fields[${i}].side inválido (front/back)`;
+        return `fields[${i}].side inválido (front/back/middle)`;
       }
       if (f.side === 'back' && cfg.has_back !== true) {
         return `fields[${i}].side='back' requer has_back=true`;
+      }
+      if (f.side === 'middle' && cfg.has_middle !== true) {
+        return `fields[${i}].side='middle' requer has_middle=true`;
       }
     }
   }

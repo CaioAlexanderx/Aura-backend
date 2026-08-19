@@ -152,6 +152,20 @@ function computeBackDelta(cfg, customization) {
   return v;
 }
 
+// ─────────────────────────────────────────────
+// computeMiddleDelta — mesmo contrato do verso, para a faixa central /
+// wrap 360 (caneca, copo). Cobrado so quando o cliente marca
+// `customization.has_middle_selected = true` e a loja ligou a cobranca.
+// ─────────────────────────────────────────────
+function computeMiddleDelta(cfg, customization) {
+  if (!cfg || cfg.has_middle !== true) return 0;
+  if (cfg.middle_charge_enabled !== true) return 0;
+  if (!customization || customization.has_middle_selected !== true) return 0;
+  const v = cfg.middle_price_delta;
+  if (typeof v !== 'number' || !isFinite(v) || v <= 0) return 0;
+  return v;
+}
+
 // CORS publico — mesma config do storefront.js
 router.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -469,8 +483,18 @@ function backIsActive(config, values) {
   return !!values && values.has_back_selected === true;
 }
 
+// Mesma regra do verso para a faixa central (caneca/copo).
+function middleIsActive(config, values) {
+  if (!config || config.has_middle !== true) return false;
+  if (config.middle_charge_enabled !== true) return true;
+  return !!values && values.has_middle_selected === true;
+}
+
 function fieldSideOf(f) {
-  return f && f.side === 'back' ? 'back' : 'front';
+  if (!f) return 'front';
+  if (f.side === 'back') return 'back';
+  if (f.side === 'middle') return 'middle';
+  return 'front';
 }
 
 function validateCustomizationValues(config, values) {
@@ -481,9 +505,10 @@ function validateCustomizationValues(config, values) {
   if (!Array.isArray(config.fields)) return null;
 
   const backActive = backIsActive(config, values);
-  const fields = config.fields.filter(
-    (f) => f && (fieldSideOf(f) !== 'back' || backActive)
-  );
+  const middleActive = middleIsActive(config, values);
+  const ladoAtivo = (lado) =>
+    lado === 'back' ? backActive : lado === 'middle' ? middleActive : true;
+  const fields = config.fields.filter((f) => f && ladoAtivo(fieldSideOf(f)));
 
   // "Crie minha arte pra mim" dispensa o cliente de enviar arte.
   const artServiceHired = fields.some(
@@ -491,7 +516,7 @@ function validateCustomizationValues(config, values) {
   );
 
   // Grupo de origem da arte, por lado.
-  for (const side of ['front', 'back']) {
+  for (const side of ['front', 'back', 'middle']) {
     const group = fields.filter(
       (f) => ART_SOURCE_TYPES.has(f.type) && fieldSideOf(f) === side
     );
@@ -767,6 +792,7 @@ router.post('/:slug/studio/order', async (req, res) => {
     let subtotal = 0;
     let hasStudioItem = false;
     let totalBackDeltaAdded = 0; // rastreabilidade pro log
+    let totalMiddleDeltaAdded = 0;
 
     for (const item of items) {
       const p = productMap[item.product_id];
@@ -804,7 +830,15 @@ router.post('/:slug/studio/order', async (req, res) => {
         console.log(`[studio/storefront/order] back delta aplicado em "${p.name}": R$${backDelta.toFixed(2)} x ${qty} = R$${itemBackTotal.toFixed(2)}`);
       }
 
-      const effectivePrice = basePrice + choicesDelta + backDelta;
+      // Meio (faixa central / wrap 360) — mesmo contrato do verso
+      const middleDelta = computeMiddleDelta(cfg, item.customization);
+      if (middleDelta > 0) {
+        const itemMiddleTotal = middleDelta * qty;
+        totalMiddleDeltaAdded += itemMiddleTotal;
+        console.log(`[studio/storefront/order] middle delta aplicado em "${p.name}": R$${middleDelta.toFixed(2)} x ${qty} = R$${itemMiddleTotal.toFixed(2)}`);
+      }
+
+      const effectivePrice = basePrice + choicesDelta + backDelta + middleDelta;
       const itemSubtotal = effectivePrice * qty;
       subtotal += itemSubtotal;
       hasStudioItem = true;
@@ -830,6 +864,9 @@ router.post('/:slug/studio/order', async (req, res) => {
       return res.status(400).json({ error: 'Pedido Studio precisa de ao menos 1 produto personalizavel' });
     }
 
+    if (totalMiddleDeltaAdded > 0) {
+      console.log(`[studio/storefront/order] total middle_delta somado ao subtotal: R$${totalMiddleDeltaAdded.toFixed(2)}`);
+    }
     if (totalBackDeltaAdded > 0) {
       console.log(`[studio/storefront/order] total back_delta somado ao subtotal: R$${totalBackDeltaAdded.toFixed(2)}`);
     }
@@ -1101,3 +1138,7 @@ router.get('/:slug/studio/order/:oid', async (req, res) => {
 module.exports = router;
 // Exposto para teste — mesma convencao de karateDojoBeltExams.__validateFile.
 module.exports.__validateCustomizationValues = validateCustomizationValues;
+// Expostos pro teste: o delta de preco do verso/meio e regra de dinheiro,
+// e regra de dinheiro sem teste e onde o cliente final e cobrado errado.
+module.exports.__computeBackDelta = computeBackDelta;
+module.exports.__computeMiddleDelta = computeMiddleDelta;
