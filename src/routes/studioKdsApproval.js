@@ -26,7 +26,6 @@ const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const crypto  = require('crypto');
 const db      = require('../config/database');
-const { markStudioOnboarding } = require('../utils/studioOnboarding');
 const collectionNotice = require('../services/credit/collectionNotice');
 
 // ═══════════════════════════════════════════════════════
@@ -791,8 +790,6 @@ router.post('/orders/:oid/approval', async function(req, res) {
        VALUES ($1, 1, $2, $3, 'shop')`,
       [inserted.id, mockup_url, 'Mockup inicial enviado pra aprovação']
     );
-
-    markStudioOnboarding(db, req.params.id, 'wa');
 
     res.status(201).json({
       ...inserted,

@@ -14,8 +14,6 @@
 // com `vertical = 'studio'` (NÃO existe tabela studio_orders).
 // View studio_hub_kpis já agrega KPIs comuns.
 //
-// Persistência de onboarding (markStudioOnboarding) gravada em
-// companies.studio_settings.onboarding.{key} nos pontos-chave.
 //
 // Gate de plano (requirePlan) aplicado no mount em src/routes/private.js.
 //
@@ -29,7 +27,6 @@
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
-const { markStudioOnboarding } = require('../utils/studioOnboarding');
 
 // ─── Schema customization_config (Fase 1 + Verso 26/05/2026) ─
 const VALID_FIELD_TYPES = ['text', 'image', 'template', 'color', 'option'];
@@ -177,7 +174,6 @@ router.put('/products/:pid/customization-config', async function(req, res) {
       [JSON.stringify(cfg), req.params.pid, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Produto não encontrado' });
-    markStudioOnboarding(db, req.params.id, 'product');
     res.json({
       product_id: r.rows[0].id, name: r.rows[0].name,
       is_personalizable: r.rows[0].is_personalizable,
@@ -195,7 +191,6 @@ router.post('/products/:pid/personalize', async function(req, res) {
       [enabled, req.params.pid, req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Produto não encontrado' });
-    if (enabled) markStudioOnboarding(db, req.params.id, 'product');
     res.json(r.rows[0]);
   } catch (err) { res.status(500).json({ error: 'Erro ao alterar produto' }); }
 });
@@ -335,7 +330,6 @@ router.post('/gallery/templates', async function(req, res) {
       [req.params.id, category_id || null, String(name).trim(), description || null,
        image_url, thumb_url || null, tagsArr, req.user?.id || null]
     );
-    markStudioOnboarding(db, req.params.id, 'gallery');
     res.status(201).json(r.rows[0]);
   } catch (err) {
     console.error('[studio/gallery/templates:POST]', err.message);
@@ -674,8 +668,6 @@ const ALLOWED_STUDIO_SETTINGS = [
   'max_revisions_included',       // int — qtas revisões grátis o cliente tem (0 = ilimitado)
   'extra_revision_price',         // float — preço cobrado por revisão extra
   'revision_policy_text',         // string — texto exibido pro cliente sobre a política
-  // Fase 5 onboarding
-  'onboarding',                   // jsonb — { walkthrough_seen: bool, product: bool, gallery: bool, sla: bool, wa: bool }
   // Camada 1: gate de produção por sinal (opt-in, default false — zero quebra pra quem já opera)
   'require_deposit_for_production',  // boolean — exige deposit_paid=true antes de in_production
   // UX: guia da home Studio (dismissível pelo usuário — bug fix 01/06/2026)
@@ -721,8 +713,6 @@ router.patch('/settings', async function(req, res) {
       [JSON.stringify(filtered), req.params.id]
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Empresa não encontrada' });
-    if (filtered.approval_wa_phone) markStudioOnboarding(db, req.params.id, 'wa');
-    if (filtered.default_sla_days)  markStudioOnboarding(db, req.params.id, 'sla');
     res.json({ settings: r.rows[0].settings });
   } catch (err) {
     console.error('[studio/settings:PATCH]', err.message);

@@ -196,8 +196,6 @@ router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioMarke
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioQuotes'));    // Fase A: Orçamento como entidade
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPricing'));   // Fase B: Motor de precificação
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPayments'));  // Fase C: Sinal / pagamento parcial
-// Agente B (02/06/2026): status de onboarding derivado (read-only, sem migration)
-router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioOnboardingStatus'));
 // F0 Visual Engine (02/07/2026): templates visuais 2D/3D globais mantidos pela
 // Aura (CRUD staff-only) + registro de renders com content_hash (base da
 // aprovação formal da F2). Contrato no chat c/ Caio.
