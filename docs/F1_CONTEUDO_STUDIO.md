@@ -47,7 +47,7 @@ Auditado em 18/08/2026 no código e na base de produção.
 | Agrupamento por categoria | F0 · `product_category_links` + payload público (D3) | Pronto no backend |
 | Seletor de cor com `price_delta` | `fields/FieldColor.tsx` — lê `config.colors` + `config.choices[].price_delta` | Motor pronto, **sem dados** (§3.2) |
 | Preço variável por escolha | `computeChoicesDelta` no storefront | Pronto |
-| Desconto progressivo | `studio_pricing_rules.qty_tiers` | Motor pronto, **0 regras na Sheid** |
+| Desconto progressivo | `studio_pricing_rules.qty_tiers` | **Só o armazenamento existia** — ver §3.7. Entregue no S6 |
 | Mockup 3D | `visualEngine/compose3dMug.ts` + `Mug3DPreview.tsx`, template global `caneca-classica` (`model3d`, published) | Pronto e **verificado ponta a ponta** (§2.1) |
 | Upload da arte do cliente | `fields/FieldImage.tsx` | Pronto |
 | **Lojista cria a arte, com preço** | `fields/FieldArtService.tsx` — `art_service` = `none` \| `designer`, `price_delta` na choice, mais briefing em `art_service_brief` | **Pronto**, sem dados |
@@ -105,6 +105,14 @@ Hoje o fluxo de aprovação é **lojista → cliente** (`/aprovacao/:token`: a l
 
 E ele **não é um portão de qualidade**: ajustar a arte do cliente para caber no produto e adequar às cores de impressão é rotina, acontece na maioria dos pedidos. A pergunta da lojista não é "aprovo ou rejeito", é "ajusto por conta ou cobro por isso". Consequência de desenho: a triagem **não bloqueia** o pedido; ela escolhe entre caminhos que já estão precificados.
 
+### 3.7 O desconto progressivo nunca chegou à loja — corrigido pelo S6
+
+Registro de um erro meu neste documento: a §2 dizia "motor pronto" para o desconto por quantidade. Não era verdade.
+
+`qty_tiers` existia desde o configurador de preço do lojista, mas **o único código que lia o campo** era o simulador de custo em `studioPricing.js` — que calcula preço sugerido a partir de custo, mão de obra e margem. É outra conta, e não podia ser reusada na vitrine justamente por misturar dado que não pode ir para o público.
+
+Na prática: a lojista configurava a escada, e nem a página exibia, nem o pedido aplicava. O S6 fechou os dois lados, com a faixa incidindo sobre o **preço de venda** e nenhum campo de custo atravessando para o payload.
+
 ### 3.6 Risco registrado — three.js por CDN
 
 `threeLoader.ts` injeta `three.min.js` do cdnjs em runtime, por decisão consciente (evitar regenerar o lockfile). Numa vitrine pública isso é dependência externa no caminho crítico do mockup. Não bloqueia a F1; registrar para revisitar quando o lockfile puder ser regenerado.
@@ -123,7 +131,7 @@ Lado: **BE** = `aura-backend`, **APP** = `aura-app`, **DADO** = conteúdo com a 
 | S3 | Mockup 3D no carrossel mais cor da louça ligada ao seletor | APP | S1 |
 | S4 | Três caminhos de arte, todos com preço antes do fechamento | APP | — (`DEC-09` fechada) |
 | S5 | Triagem da arte do cliente pela lojista (não bloqueante) | BE + APP | — (`DEC-11` fechada) |
-| S6 | Desconto progressivo visível na página | APP | dados de `qty_tiers` |
+| S6 | Desconto progressivo: escada no payload e faixa aplicada no pedido | BE + APP | — |
 | S7 | Conteúdo do piloto: árvore, swatches, deltas, textos | DADO | S0 |
 | S8 | Retirada por app de entrega (Uber, 99) com nome e placa | BE + APP | S2 |
 
@@ -151,8 +159,12 @@ Não são dois: (a) cliente envia arte pronta; (b) cliente envia e a lojista aju
 ### S5 — Triagem (BE + APP)
 Fila da arte recebida com três saídas: aceitar como está, ajustar (aplica o preço de (b) e notifica), ou devolver para novo envio. Não bloqueia o pedido (§3.5). Reaproveitar o link público de aprovação já existente para comunicar o resultado.
 
-### S6 — Desconto progressivo (APP)
-`qty_tiers` já existe e está vazio na Sheid. Exibir a escada de preço na própria página — é argumento de venda para atacado e some se ficar escondido no carrinho.
+### S6 — Desconto progressivo (BE + APP)
+Era o item que eu tinha dado como quase pronto e que se revelou o mais fundo depois do S0 — ver §3.7. O backend está entregue: escada no payload público (`qty_tiers` por produto, só preço e percentual) e faixa aplicada no fechamento, relida do banco e nunca aceita do cliente.
+
+Falta o app: exibir a escada na página, que é argumento de venda para atacado e some se ficar escondido no carrinho.
+
+Duas regras que valem além do S6: faixa mal cadastrada **nunca encarece** (multiplicador acima de 1 é ignorado), e com faixas sobrepostas vence a de maior `min_qty` — quem compra mais não paga mais.
 
 ### S8 — Retirada por app de entrega (BE + APP)
 

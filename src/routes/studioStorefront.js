@@ -56,6 +56,7 @@ const { COURIER, validateCourierPickup } = require('../services/courierPickup');
 const {
   fetchStorefrontCategories, fetchPrimaryCategoryLinks,
 } = require('../services/storefrontBuilder');
+const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
 
 function validateCpfCnpj(raw) {
   if (!raw) return null;
@@ -320,6 +321,26 @@ router.get('/:slug/studio/products', async (req, res) => {
     // Aditivo: `category` (texto) permanece, e os campos novos saem null
     // em catálogo pré-migração. Loja sem as migrations 257/258 recebe
     // categories: [] e o payload fica idêntico ao de antes.
+    // S6 (19/08/2026) — desconto progressivo. `qty_tiers` existia desde o
+    // configurador de preco do lojista e NUNCA chegava na loja: o unico
+    // leitor era o simulador de custo, que e outra conta (custo + mao de
+    // obra + margem). Aqui sai so a escada de preco unitario — nenhum
+    // campo de custo atravessa para o payload publico.
+    let tiersByProduct = {};
+    try {
+      const { rows: regras } = await db.query(
+        `SELECT product_id, qty_tiers
+           FROM studio_pricing_rules
+          WHERE company_id = $1 AND is_active IS NOT FALSE
+            AND qty_tiers IS NOT NULL`,
+        [cid]
+      );
+      regras.forEach((r) => { tiersByProduct[r.product_id] = r.qty_tiers; });
+    } catch (e) {
+      // Tabela ausente neste ambiente: loja segue sem escada (armadilha 10).
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+
     const categories = await fetchStorefrontCategories(cid);
     const categoryById = {};
     categories.forEach(c => { categoryById[c.id] = c; });
@@ -348,6 +369,9 @@ router.get('/:slug/studio/products', async (req, res) => {
           category_id:   cat ? cat.id   : null,
           category_slug: cat ? cat.slug : null,
           category_path: cat ? cat.path : null,
+          // S6 — escada de desconto por quantidade. [] quando a lojista
+          // nao configurou faixa nenhuma, que e o caso de toda a base hoje.
+          qty_tiers: buildLadder(parseFloat(p.price), tiersByProduct[p.id]),
           stock_qty: p.stock_qty,
           customization_config: p.customization_config,
           templates: [
@@ -717,6 +741,23 @@ router.post('/:slug/studio/order', async (req, res) => {
     );
     const productMap = Object.fromEntries(products.map(p => [p.id, p]));
 
+    // S6 — as faixas de quantidade que o payload publico exibiu. Sao
+    // relidas aqui do banco, nunca aceitas do cliente: preco de venda e
+    // decisao do servidor.
+    const tiersByProductOrder = {};
+    try {
+      const { rows: regras } = await db.query(
+        `SELECT product_id, qty_tiers
+           FROM studio_pricing_rules
+          WHERE company_id = $1 AND is_active IS NOT FALSE
+            AND qty_tiers IS NOT NULL`,
+        [cid]
+      );
+      regras.forEach((r) => { tiersByProductOrder[r.product_id] = r.qty_tiers; });
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+
     const orderItems = [];
     let subtotal = 0;
     let hasStudioItem = false;
@@ -740,8 +781,14 @@ router.post('/:slug/studio/order', async (req, res) => {
         return res.status(400).json({ error: `Personalizacao de "${p.name}": ${valErr}` });
       }
 
-      // Aplica price_delta das choices selecionadas (option/color)
-      const basePrice = parseFloat(p.price);
+      // S6 — desconto progressivo. A faixa incide sobre o preco de tabela;
+      // os deltas de personalizacao sao adicionais e entram DEPOIS. Sem
+      // isso o cliente veria a escada na pagina e pagaria o preco cheio.
+      const listPrice = parseFloat(p.price);
+      const basePrice = unitPriceForQty(listPrice, tiersByProductOrder[p.id], qty);
+      if (basePrice !== listPrice) {
+        console.log(`[studio/storefront/order] faixa de quantidade em "${p.name}": ${qty}un R$${listPrice.toFixed(2)} -> R$${basePrice.toFixed(2)}`);
+      }
       const choicesDelta = computeChoicesDelta(cfg, item.customization);
 
       // Verso (frente/verso) — soma back_price_delta quando cliente marcou
