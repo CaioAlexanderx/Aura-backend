@@ -255,7 +255,7 @@ router.get('/:pid/variants', async (req, res) => {
 // calls — compat com testes existentes).
 router.post('/', async (req, res) => {
   const cid = req.params.id;
-  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size, ncm } = req.body;
+  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size, ncm, image_url } = req.body;
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'name e obrigatorio' });
 
   let defaultShared = false;
@@ -279,18 +279,46 @@ router.post('/', async (req, res) => {
     if (current >= planLimit) return res.status(403).json({ error: `Limite de produtos atingido (${planLimit}).`, limit: planLimit, current });
   } catch (err) { console.error('[products] count/group check error:', err.message); }
 
+  // A foto escolhida na CRIACAO era descartada em silencio: o app mandava
+  // image_url no body e o INSERT nao listava a coluna. A lojista subia a foto,
+  // via a previa, salvava — e o produto nascia sem foto nenhuma.
+  // gallery_urls nasce junto com a capa no indice 0, igual ao backfill da 290.
+  let capaNova = null;
+  if (image_url !== undefined && image_url !== null && String(image_url).trim() !== '') {
+    const g = normalizeGallery([image_url]);
+    if (g.error) return res.status(400).json({ error: g.error });
+    capaNova = g.cover;
+  }
+
   const isGroupShared = req.body.is_group_shared !== undefined
     ? !!req.body.is_group_shared
     : defaultShared;
 
   try {
-    const result = await db.query(
-      `INSERT INTO products (company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared)\n       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-      [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
+    const colsBase = 'company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared';
+    const paramsBase = [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
        parseFloat(price)||0, parseFloat(cost_price)||0, parseInt(stock_qty)||0, parseInt(min_stock)||0,
        parseInt(stock_max)||0, unit||'un', color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
-       size ? String(size).slice(0,100) : null, sanitizeNcm(ncm), isGroupShared]
-    );
+       size ? String(size).slice(0,100) : null, sanitizeNcm(ncm), isGroupShared];
+
+    let result;
+    try {
+      result = await db.query(
+        `INSERT INTO products (${colsBase}, image_url, gallery_urls)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb) RETURNING *`,
+        [...paramsBase, capaNova, JSON.stringify(capaNova ? [capaNova] : [])]
+      );
+    } catch (e) {
+      // gallery_urls veio na migration 290. Se o banco estiver atras do
+      // deploy, criar produto nao pode quebrar pro varejo inteiro: cai pro
+      // INSERT antigo e a foto se perde so nesse intervalo.
+      if (e.code !== '42703') throw e;
+      result = await db.query(
+        `INSERT INTO products (${colsBase})
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+        paramsBase
+      );
+    }
 
     // Detectar sugestão de merge: verifica se existem outros produtos sem variantes
     // com o mesmo nome base (após strip do sufixo de tamanho) na mesma empresa.
