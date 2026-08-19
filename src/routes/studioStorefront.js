@@ -4,6 +4,7 @@
 // POST /storefront/:slug/studio/order     — cria pedido Studio
 // GET  /storefront/:slug/studio/order/:oid — poll status do pedido
 // POST /storefront/:slug/studio/upload    — upload de imagem/pdf (cliente envia foto)
+// GET  /storefront/:slug/studio/shipping-quote — cotacao de frete por CEP (S2)
 //
 // Nivel 1 Sub-onda D (25/05/2026)
 // 25/05/2026 (Loja Digital Studio fechamento):
@@ -50,6 +51,7 @@ const { generatePix }     = require('../services/pixService');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
 const { uploadToR2 }      = require('../utils/r2Storage');
+const { calculateShippingQuote } = require('../services/shippingQuote');
 
 function validateCpfCnpj(raw) {
   if (!raw) return null;
@@ -437,6 +439,49 @@ function validateCustomizationValues(config, values) {
 // Tipos aceitos: image/png, image/jpeg, image/jpg, image/webp, application/pdf
 // Para application/pdf: split('/').pop() retorna 'pdf' — ext correta automaticamente.
 // ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// GET /storefront/:slug/studio/shipping-quote?cep=&subtotal=
+//
+// 18/08/2026 — S2 (F1_CONTEUDO_STUDIO.md §3.4). A loja comum calcula
+// frete por CEP desde a Fase 5b; o Studio cobrava sempre o delivery_fee
+// fixo e ignorava frete gratis acima de X e faixa por distancia, mesmo
+// com a lojista tendo configurado as duas coisas no mesmo
+// digital_channel_config. Quem vende caneca personalizada vende para
+// fora da cidade — sem cotacao, o cliente so descobre o frete depois de
+// preencher o pedido inteiro.
+//
+// A regra em si nao e reimplementada: calculateShippingQuote recebe a
+// row de digital_channel_config, e o Studio resolve a MESMA row pelo
+// slug. Uma implementacao, dois storefronts.
+// ─────────────────────────────────────────────
+router.get('/:slug/studio/shipping-quote', async (req, res) => {
+  try {
+    const slug = req.params.slug.toLowerCase().trim();
+    const { rows } = await db.query(
+      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`,
+      [slug]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Loja nao encontrada' });
+    const config = rows[0];
+
+    if (!config.delivery_enabled) {
+      return res.status(400).json({ error: 'Loja nao faz entregas' });
+    }
+
+    const cep = String(req.query.cep || '').trim();
+    if (!cep) return res.status(400).json({ error: 'cep obrigatorio' });
+
+    const subtotal = parseFloat(req.query.subtotal) || 0;
+    if (subtotal < 0) return res.status(400).json({ error: 'subtotal invalido' });
+
+    const quote = await calculateShippingQuote(config, cep, subtotal);
+    res.json(quote);
+  } catch (err) {
+    console.error('[studio-storefront] shipping-quote error:', err);
+    res.status(500).json({ error: 'Erro ao calcular frete' });
+  }
+});
+
 router.post('/:slug/studio/upload', async (req, res) => {
   try {
     const slug = req.params.slug.toLowerCase().trim();
@@ -525,6 +570,7 @@ router.post('/:slug/studio/order', async (req, res) => {
     request_nfce, customer_cpf_cnpj,
     address_zip, address_street, address_number, address_complement,
     address_neighborhood, address_city, address_state,
+    expected_delivery_fee,
   } = req.body;
 
   if (!customer_name || !customer_phone) {
@@ -673,11 +719,46 @@ router.post('/:slug/studio/order', async (req, res) => {
       console.log(`[studio/storefront/order] total back_delta somado ao subtotal: R$${totalBackDeltaAdded.toFixed(2)}`);
     }
 
-    // Frete: Studio cobra delivery_fee fixo (sem distancia complexa por enquanto;
-    // tier por distancia esta em config mas nao expomos no Studio MVP)
+    // Frete (S2, 18/08/2026) — mesma regra da loja comum. Antes daqui o
+    // Studio cobrava sempre config.delivery_fee, ignorando frete gratis
+    // acima de X e faixa por distancia que a lojista ja configurava no
+    // mesmo digital_channel_config.
+    //
+    // O valor NUNCA vem do cliente: e recalculado no servidor a partir do
+    // CEP. expected_delivery_fee serve so para detectar cotacao velha —
+    // se o cliente cotou, deixou a aba aberta e a lojista mudou a tabela,
+    // ele leva 409 em vez de pagar um frete que nao existe mais.
+    //
+    // Sem CEP, cai no delivery_fee fixo: e o comportamento de antes do S2
+    // e o unico possivel sem saber o destino.
     let delivery_fee = 0;
+    let shippingMeta = null;
     if (dtype === 'delivery') {
-      delivery_fee = parseFloat(config.delivery_fee) || 0;
+      if (address_zip) {
+        const cleanZip = String(address_zip).replace(/\D/g, '');
+        const quote = await calculateShippingQuote(config, cleanZip, subtotal);
+        shippingMeta = quote;
+        if (quote.error && quote.fee == null) {
+          return res.status(400).json({
+            error: quote.error,
+            distance_km: quote.distance_km,
+          });
+        }
+        delivery_fee = parseFloat(quote.fee) || 0;
+
+        if (expected_delivery_fee != null && expected_delivery_fee !== '') {
+          const expected = parseFloat(expected_delivery_fee);
+          if (Number.isFinite(expected) && Math.abs(expected - delivery_fee) > 0.01) {
+            return res.status(409).json({
+              error: 'Valor de frete desatualizado. Atualize a pagina e tente de novo.',
+              server_fee: delivery_fee,
+              client_fee: expected,
+            });
+          }
+        }
+      } else {
+        delivery_fee = parseFloat(config.delivery_fee) || 0;
+      }
     }
     const total = subtotal + delivery_fee;
 
@@ -834,6 +915,7 @@ router.post('/:slug/studio/order', async (req, res) => {
       subtotal,
       status:         initialStatus,
       payment_method: pmethod,
+      shipping:       shippingMeta,
       studio_production_status: 'pending_art',
       pix: pixData ? {
         qrcode:     pixData.qrcode,
