@@ -22,6 +22,14 @@
 -- foto passa a ter galeria de um item.
 -- ============================================================
 
+-- DERIVA DE SCHEMA, corrigida aqui: `products.image_url` existe em
+-- producao mas NUNCA entrou como migration — foi criada direto na base. O
+-- CI monta o schema so a partir desta pasta, entao a coluna nao existia
+-- la, e o backfill abaixo quebrou o build. `IF NOT EXISTS` torna a linha
+-- inofensiva em producao e conserta o schema de teste de uma vez.
+ALTER TABLE products
+  ADD COLUMN IF NOT EXISTS image_url TEXT;
+
 ALTER TABLE products
   ADD COLUMN IF NOT EXISTS gallery_urls JSONB NOT NULL DEFAULT '[]'::jsonb;
 
