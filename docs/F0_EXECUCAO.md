@@ -142,6 +142,12 @@ Manter o texto não é concessão: o wizard casa produto com valor por `products
 
 **Objetivo.** Transformar o índice de saúde em ferramenta de gestão do lojista, não em relatório técnico.
 
+**Entregue como `GET /companies/:id/catalog/health`** — o endpoint que o contrato §5 inventariava e o B2 deixou explicitamente para a Onda E. Devolve cobertura de categoria (árvore **e** texto, lado a lado), foto, descrição, custo, marca, contagem de órfãos, e a quebra **por categoria** com a subárvore somada.
+
+> ⚠️ **Medido na Davi em 18/08, e muda a leitura da fase:** dos 1.434 produtos ativos, **só 251 têm categoria em texto**. Os outros **1.183 são órfãos — não têm categoria por caminho nenhum.** O wizard (C2) não alcança esses: não há texto para classificar. Eles precisam do fluxo de atribuição em lote (`/products/unclassified` + `/products/categories/bulk`, que o B1 construiu) ou do picker no cadastro, um a um.
+>
+> Ou seja: a C2 destrava 17,5% do catálogo do piloto, não o catálogo inteiro. O resto depende de um fluxo que existe no backend e ainda não tem tela.
+
 **Escopo.** Estender `GET /products/descriptions/coverage` (PR #511) com quebra por categoria de nível 0 e 1, e expor o limiar de publicação.
 
 **Por que importa.** É o que torna a fase de conteúdo acionável: "Feminino: 12/80 com foto" é meta; "10,3% de cobertura" é lamento. Medido em 18/08: a Davi tem 10,3% de foto e 0% de descrição.

@@ -132,12 +132,42 @@ A correção de raiz seria uma coluna própria em `products` (`is_service boolea
 
 ---
 
+## 3.4 Leituras de `products.category` — auditoria fechada (E2, 18/08/2026)
+
+O Bloco 0 fechou as **escritas** (§2.2). Esta seção fecha as **leituras**, que era o item E2 da Onda E.
+
+### Backend — 26 arquivos leem `p.category`
+
+| Grupo | Arquivos | O que acontece com eles |
+|---|---|---|
+| **Da própria F0** | `productCategories`, `categoryMigration`, `importCategoryLink`, `catalogHealth`, `productDescriptionAi`, `productDescriptions`, `productLinks` | São o motor da fase. Nada a fazer. |
+| **Vitrine pública** | `storefrontBuilder`, `studioStorefront`, `templates/storefront/parts/{init,products,product_detail}` | **Já migrados aditivamente na D3**: o payload ganhou `categories[]` + `category_id/slug/path` e manteve o texto. Os templates seguem lendo texto — trocar é trabalho da fase de vitrine, junto das URLs canônicas. |
+| **Cadastro e importação** | `products`, `productsBatch`, `importData`, `barcode`, `scanner` | Escrita fechada na D4; a leitura é eco do que gravaram. |
+| **Relatórios e análise** | `salesAnalytics`, `productsRanking`, `productMargin`, `reportDataQueries`, `reportGenerator`, `weeklyReport`, `financeiroInsights`, `meAggregates`, `digitalChannel` | **É aqui que mora o trabalho restante.** Agrupam receita/venda por texto de categoria. Enquanto o dual-write existir, os números continuam certos. |
+| **PDV** | `pdv` | Idem — filtro por texto, protegido pelo dual-write. |
+
+### App — 56 arquivos citam `.category`
+
+A maioria é de **outro domínio**: categoria de transação financeira, `dental_category`, categoria de lead no CRM, categoria de competição do Karatê. Os consumidores de categoria de **produto** se concentram em `screens/estoque/*`, `app/(tabs)/estoque.tsx`, `app/(tabs)/index.tsx`, `app/studio/(estudio)/estoque.tsx`, `components/screens/canal/TabVitrine.tsx` e `QuickBatchProductsModal`.
+
+Desses, os de estoque e PDV foram tratados na **D1/D2**: o cadastro escreve vínculo e o filtro virou hierárquico. Os demais leem texto para exibir, e continuam corretos pelo dual-write.
+
+### Conclusão: nenhuma leitura bloqueia a fase
+
+**Nenhum consumidor de leitura quebra**, porque `products.category` continua populado e coerente pelo trigger da migration 259. A migração de leitura é incremental e por consumidor, não um corte.
+
+**A coluna só pode ser depreciada quando os relatórios pararem de agrupar por ela** — é o grupo de "Relatórios e análise" acima, não a vitrine e não o estoque. Isso é trabalho de outra fase; a F0 não o exige.
+
+---
+
 ## 4. Cobertura da auditoria — ATUALIZADA em 18/08/2026
 
 **Escritas: lista FECHADA.** O grep local recomendado pela versão anterior
 desta seção foi rodado em 18/08 nos dois repos (ver §2.2). Todos os pontos
 de escrita em `products.category` estão mapeados e tratados. O gate do
 Bloco 0 para o merge do B1 está cumprido.
+
+**Leituras: FECHADAS em 18/08 (E2) — ver §3.4.** O parágrafo abaixo é o registro de como estavam antes.
 
 **Leituras: mapeadas por amostragem, protegidas por design.** O dual-write
 mantém `products.category` populado e coerente, então nenhum consumidor de
