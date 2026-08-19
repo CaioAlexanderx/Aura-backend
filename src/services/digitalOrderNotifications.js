@@ -107,7 +107,10 @@ const fmt = (v) => {
 // Colunas que as notificações realmente consomem.
 const NOTIFY_FIELDS =
   'id, company_id, order_number, customer_name, customer_email, ' +
-  'customer_phone, total, delivery_type, payment_method';
+  'customer_phone, total, delivery_type, payment_method, ' +
+  // migration 288 — sem estas duas o caminho de recarga perde justamente
+  // o que o lojista precisa saber num pedido delivery_type='courier'.
+  'courier_name, courier_plate';
 
 /**
  * 17/08/2026 — POR QUE ISSO EXISTE:
@@ -182,7 +185,17 @@ async function notifyPaymentConfirmed({ order: input }) {
   const company_id = order.company_id;
   const store_name = await getStoreName(company_id);
 
-  const deliveryLabel = order.delivery_type === 'delivery' ? '🚚 Entrega' : '🏪 Retirada';
+  // 'courier' (migration 288) precisa de rótulo próprio: sem ele o pedido
+  // que um motoboy de app vai buscar chega como "🏪 Retirada", e o lojista
+  // só descobre que há um terceiro no meio ao abrir o pedido. Nome e placa
+  // vão no push porque é a informação de que ele precisa no balcão, na hora.
+  const deliveryLabel =
+    order.delivery_type === 'delivery' ? '🚚 Entrega' :
+    order.delivery_type === 'courier'
+      ? '🛵 Retirada por app'
+        + (order.courier_name  ? ` · ${order.courier_name}` : '')
+        + (order.courier_plate ? ` (${order.courier_plate})` : '')
+      : '🏪 Retirada';
   const paymentLabel  = order.payment_method === 'pix'         ? 'Pix' :
                         order.payment_method === 'card'        ? 'Cartão' : 'Na entrega';
 

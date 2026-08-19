@@ -52,6 +52,7 @@ const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { calculateShippingQuote } = require('../services/shippingQuote');
+const { COURIER, validateCourierPickup } = require('../services/courierPickup');
 
 function validateCpfCnpj(raw) {
   if (!raw) return null;
@@ -338,6 +339,20 @@ router.get('/:slug/studio/products', async (req, res) => {
         has_card: hasCard,
         pay_on_delivery_enabled: hasOnDelivery,
       },
+      // migration 288 — este payload nao expunha modalidade de entrega
+      // nenhuma, entao o checkout do Studio oferecia "Retirar na loja" e
+      // "Receber em casa" fixos, mesmo em loja com delivery_enabled=false
+      // (o cliente escolhia e tomava 400 no fechamento). Agora as tres
+      // modalidades vem do config, no mesmo formato que storefrontBuilder
+      // usa na loja comum.
+      delivery: {
+        pickup_enabled:         config.pickup_enabled !== false,
+        delivery_enabled:       config.delivery_enabled || false,
+        courier_pickup_enabled: config.courier_pickup_enabled === true,
+        delivery_fee:           parseFloat(config.delivery_fee) || 0,
+        pickup_eta_text:        config.pickup_eta_text   || null,
+        delivery_eta_text:      config.delivery_eta_text || null,
+      },
       total_products: products.length,
     });
   } catch (err) {
@@ -614,6 +629,16 @@ router.post('/:slug/studio/order', async (req, res) => {
       return res.status(400).json({ error: 'Retirada nao disponivel nesta loja' });
     }
 
+    // Retirada por app (migration 288): o cliente contrata Uber/99 e diz
+    // quem vai buscar. Sem nome e placa a lojista entrega a personalizacao
+    // de alguem para o primeiro motoboy que citar o numero do pedido.
+    let courierData = null;
+    if (dtype === COURIER) {
+      const r = validateCourierPickup(config, req.body);
+      if (r.error) return res.status(400).json({ error: r.error });
+      courierData = r;
+    }
+
     let cpfNorm = null;
     if (request_nfce || customer_cpf_cnpj) {
       cpfNorm = validateCpfCnpj(customer_cpf_cnpj);
@@ -787,6 +812,7 @@ router.post('/:slug/studio/order', async (req, res) => {
           customer_cpf_cnpj, nfce_requested,
           address_zip, address_street, address_number, address_complement,
           address_neighborhood, address_city, address_state,
+          courier_name, courier_plate,
           vertical, studio_production_status
         ) VALUES (
           $1, next_digital_order_number($1), $2, $3, $4,
@@ -796,6 +822,7 @@ router.post('/:slug/studio/order', async (req, res) => {
           $13, $14,
           $15, $16, $17, $18,
           $19, $20, $21,
+          $22, $23,
           'studio', 'pending_art'
         ) RETURNING *
       `, [
@@ -807,6 +834,8 @@ router.post('/:slug/studio/order', async (req, res) => {
         address_street || null, address_number || null, address_complement || null,
         address_neighborhood || null, address_city || null,
         address_state ? String(address_state).toUpperCase() : null,
+        courierData ? courierData.courier_name : null,
+        courierData ? courierData.courier_plate : null,
       ]);
       order = newOrder;
 

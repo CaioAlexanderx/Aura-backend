@@ -125,6 +125,7 @@ Lado: **BE** = `aura-backend`, **APP** = `aura-app`, **DADO** = conteúdo com a 
 | S5 | Triagem da arte do cliente pela lojista (não bloqueante) | BE + APP | — (`DEC-11` fechada) |
 | S6 | Desconto progressivo visível na página | APP | dados de `qty_tiers` |
 | S7 | Conteúdo do piloto: árvore, swatches, deltas, textos | DADO | S0 |
+| S8 | Retirada por app de entrega (Uber, 99) com nome e placa | BE + APP | S2 |
 
 ---
 
@@ -152,6 +153,14 @@ Fila da arte recebida com três saídas: aceitar como está, ajustar (aplica o p
 
 ### S6 — Desconto progressivo (APP)
 `qty_tiers` já existe e está vazio na Sheid. Exibir a escada de preço na própria página — é argumento de venda para atacado e some se ficar escondido no carrinho.
+
+### S8 — Retirada por app de entrega (BE + APP)
+
+Terceiro `delivery_type`, ao lado de `pickup` e `delivery`: o **cliente** contrata o entregador e informa quem vai buscar. A loja não cobra frete — quem paga o app é o cliente — e não precisa de endereço.
+
+Os dois campos são do **entregador**, não do cliente, e é isso que dá o item sua razão de ser: sem nome e placa, a lojista entrega a personalização de alguém para o primeiro motoboy que citar o número do pedido. Numa loja que imprime arte sob encomenda, o pacote trocado não tem segunda via.
+
+Backend entregue: `courier_pickup_enabled` no config (default `false`), `courier_name`/`courier_plate` no pedido, validação compartilhada em `services/courierPickup.js` e as três modalidades expostas no payload público dos **dois** storefronts. Falta o consumo no app — o chip da modalidade e os dois campos no checkout —, que vai junto com o S1.
 
 ### S7 — Conteúdo do piloto (DADO)
 Árvore de categoria da Sheid (hoje: 36 produtos em "Produtos", 36 sem categoria, 0 links), swatches reais por modelo, `price_delta`, `qty_tiers`, preço de arte, descrição e tamanho de impressão. É o item de maior prazo e o que menos depende de código.

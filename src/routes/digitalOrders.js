@@ -43,6 +43,10 @@ router.get('/', async (req, res) => {
         o.payment_proof_url, o.payment_proof_uploaded_at,
         o.confirmed_at, o.delivered_at, o.cancelled_at, o.created_at,
         o.customer_id, o.transaction_id, o.stock_deducted, o.nfce_id,
+        -- migration 288: esta lista e explicita, entao coluna nova nao
+        -- aparece sozinha aqui. Sem as duas o lojista ve delivery_type
+        -- 'courier' na listagem sem saber quem vai buscar o pedido.
+        o.courier_name, o.courier_plate,
         COUNT(i.id)::int AS item_count
       FROM digital_orders o
       LEFT JOIN digital_order_items i ON i.order_id = o.id

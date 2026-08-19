@@ -412,6 +412,9 @@ async function buildStorefront(config) {
       show_stock:       config.show_stock  || false,
       pickup_enabled:   config.pickup_enabled   !== false,
       delivery_enabled: config.delivery_enabled || false,
+      // migration 288 — retirada por app (cliente contrata Uber/99).
+      // Default false: a modalidade so aparece depois que a lojista liga.
+      courier_pickup_enabled: config.courier_pickup_enabled === true,
       delivery_fee:     parseFloat(config.delivery_fee) || 0,
       has_pix:                  hasPix,
       // Migration 121: has_card respeita card_enabled toggle
