@@ -71,36 +71,11 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 // como sempre "na janela" (mesmo racional do fallback do F4: turma sem
 // horário fica disponível, nunca bloqueia o check-in).
 //
-// LIMITE CONHECIDO E DELIBERADO — a janela é LINEAR DENTRO DE UMA DATA:
-// NÃO cruza a meia-noite. `date` é resolvido primeiro (relógio BRT ou
-// body.date), o weekday sai dessa data, e a janela compara minutos
-// absolutos do dia (0..1439) sem aritmética circular. Consequência: uma
-// turma de 00:00 é lida como 1430 min de distância de um check-in às
-// 23:50 (não 10) → 409. E, antes disso, ela nem chega na janela: o
-// filtro de weekday em classesEnrolledOnWeekday() já a descarta, porque
-// a turma de 00:00 pertence ao weekday do dia SEGUINTE → 409
-// NO_CLASS_TODAY. Ver tests/integration/karateDojoQrUnico.test.js.
-//
-// Por que NÃO foi consertado (19/08/2026): medido na base inteira —
-// ZERO turmas com start_time em 23:xx ou 00:xx (a única turma cadastrada
-// começa 18:00), e ZERO presenças method='qr_dojo' (o único caminho que
-// usa esta janela). Consertar de verdade não é trocar por distância
-// circular: exigiria enumerar OCORRÊNCIAS (turma + data em que ela cai,
-// incluindo ontem/amanhã), gravar a presença na data da OCORRÊNCIA e não
-// na do relógio — senão a presença cai num dia em que a turma não existe
-// e a idempotência quebra (bipar 23:50 e 00:05 viraria 2 linhas) — e
-// ainda mudar o contrato de `candidates` do 409 AMBIGUOUS_CLASS pra
-// carregar `date` (o front teria que ecoar no reenvio). Backend + front
-// pra um cenário com ZERO ocorrências.
-//
-// Em vez disso a porta é fechada no CADASTRO: validateClassPayload()
-// recusa start_time na faixa em que a janela vazaria pra fora do dia
-// (23:00–00:29, DERIVADA destas constantes — ver windowCrossesMidnight).
-// Assim o estado quebrado deixa de ser alcançável, sem mexer em contrato
-// nenhum. Se um dia um dojô real precisar de turma na virada, o caminho
-// é o refactor de ocorrências acima — e aí a costura `opts.now` do
-// checkin() permite testá-lo sem esperar a meia-noite.
-// O comportamento atual fica FIXADO por teste em karateDojoQrUnico.
+// A janela é LINEAR DENTRO DE UMA DATA — não cruza a meia-noite. Isso é
+// um limite conhecido, com uma barreira no cadastro que o torna
+// inalcançável: o porquê e o custo de mudar estão em UM lugar só, em
+// windowCrossesMidnight() logo abaixo. Mexeu na janela? Leia lá antes:
+// a faixa barrada no cadastro é derivada DESTES dois números.
 const CHECKIN_WINDOW_BEFORE_MIN = 30;
 const CHECKIN_WINDOW_AFTER_MIN = 60;
 
@@ -158,12 +133,64 @@ function minutesToHHMM(min) {
   return `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 }
 
-// A janela desta turma vazaria pra fora do dia dela? É a faixa em que o
-// check-in por QR único fica quebrado (ver o bloco CHECKIN_WINDOW_* acima).
-// DERIVADO das constantes, nunca hardcodado: se alguém afrouxar a janela
-// pra 90/120 min, a faixa barrada acompanha sozinha.
+// ════════════════════════════════════════════════════════════════════
+// TURMA NA VIRADA DO DIA — o limite da janela e por que ele é barrado
+// no cadastro em vez de consertado. Registro de decisão (19/08/2026).
+// ════════════════════════════════════════════════════════════════════
+//
+// O SINTOMA. Turma de 00:00, aluno bipa o QR único às 23:50: leva 409 e
+// não registra presença. O mesmo no sentido inverso (turma 23:50, bipe
+// às 00:10).
+//
+// SÃO DUAS BARREIRAS, e essa é a parte contraintuitiva — consertar só a
+// aritmética não resolveria nada:
+//   1. weekdayOf(date) sai da data do RELÓGIO, e classesEnrolledOnWeekday()
+//      filtra por ela. Uma turma de 00:00 pertence ao weekday do dia
+//      SEGUINTE, então às 23:50 ela é descartada ANTES de a janela rodar
+//      → 409 NO_CLASS_TODAY (não NO_CLASS_NOW).
+//   2. só depois vem inCheckinWindow(), que compara minutos absolutos do
+//      dia (0..1439) sem aritmética circular: 00:00 fica a 1430 min de
+//      23:50, não a 10.
+//
+// O QUE UM CONSERTO DE VERDADE CUSTARIA. Não é trocar por distância
+// circular. Seria enumerar OCORRÊNCIAS (turma + a data em que ela cai,
+// incluindo ontem e amanhã) e gravar a presença na data da OCORRÊNCIA,
+// não na do relógio — senão a presença cai num dia em que a turma não
+// existe (some da chamada manual) e a idempotência quebra: bipar 23:50 e
+// de novo 00:05 viraria DUAS linhas, com already_checked=false nas duas.
+// E o 409 AMBIGUOUS_CLASS teria que carregar `date` em cada candidata,
+// com o front ecoando no reenvio — mudança de contrato, backend + front.
+//
+// POR QUE NÃO FIZEMOS. Medido na base inteira antes de decidir: ZERO
+// turmas com start_time em 23:xx ou 00:xx (a única cadastrada começa
+// 18:00) e ZERO presenças method='qr_dojo' — o único caminho que usa
+// esta janela nunca gravou nada em produção. Contrato mexido em dois
+// repos para um cenário sem nenhuma ocorrência não se paga.
+//
+// O QUE FIZEMOS. Fechamos a porta no CADASTRO (validateClassPayload):
+// start_time na faixa em que a janela vazaria pra fora do dia é recusado.
+// O estado quebrado deixa de ser ALCANÇÁVEL, sem tocar em contrato algum.
+// Barra só start_time — end_time não entra na janela; turma sem horário
+// segue permitida (fallback do F4).
+//
+// SE UM DOJÔ REAL PRECISAR de turma na virada, o caminho é o refactor de
+// ocorrências acima. A costura `opts.now` de checkin() existe pra isso
+// ser testável sem esperar a meia-noite. Atenção: os testes em
+// karateDojoQrUnico.test.js fixam o comportamento ATUAL (o 409), então
+// eles INVERTEM de propósito quando a semântica mudar — não é regressão.
+//
+// A faixa é DERIVADA das constantes da janela, nunca hardcodada: afrouxar
+// pra 90/120 min alarga a faixa barrada sozinho, sem ninguém lembrar.
 const EARLIEST_SAFE_START_MIN = CHECKIN_WINDOW_BEFORE_MIN;            // 00:30
 const LATEST_SAFE_START_MIN = 1439 - CHECKIN_WINDOW_AFTER_MIN;        // 22:59
+
+// Faixa em formato de contrato — o front mostra como DICA no formulário
+// (via GET /dojo/classes/settings) em vez de deixar o usuário descobrir
+// no 422, e sem hardcodar '00:30'/'22:59' do outro lado.
+const CLASS_START_TIME_RANGE = Object.freeze({
+  min: minutesToHHMM(EARLIEST_SAFE_START_MIN),
+  max: minutesToHHMM(LATEST_SAFE_START_MIN),
+});
 
 function windowCrossesMidnight(startMin) {
   if (startMin == null) return false;
@@ -273,13 +300,9 @@ function validateClassPayload(body, { partial = false } = {}) {
     }
   }
 
-  // Turma na VIRADA DO DIA é barrada no cadastro. Só start_time importa —
-  // end_time não entra na janela do check-in. A janela de tolerância é
-  // linear dentro de uma data e não cruza a meia-noite (bloco
-  // CHECKIN_WINDOW_* no topo); uma turma nessa faixa ficaria com o
-  // check-in por QR único quebrado justamente na hora da aula. Em vez de
-  // deixar cadastrar e falhar depois na cara do aluno, recusa aqui — a
-  // faixa é estreita (23:00–00:29) e não existe turma real nela.
+  // Turma na virada do dia deixaria o check-in por QR sem janela válida
+  // justamente na hora da aula — recusa aqui em vez de falhar depois na
+  // cara do aluno. Racional completo em windowCrossesMidnight().
   if (data.start_time != null && windowCrossesMidnight(timeToMinutes(data.start_time))) {
     errors.push(
       `start_time deve estar entre ${minutesToHHMM(EARLIEST_SAFE_START_MIN)} e ${minutesToHHMM(LATEST_SAFE_START_MIN)} — ` +
@@ -600,7 +623,13 @@ async function getSettings(dojoId) {
     `SELECT qr_checkin_enabled FROM karate_dojo_class_settings WHERE dojo_id = $1 LIMIT 1`,
     [dojoId]
   );
-  return { qr_checkin_enabled: rows.length ? rows[0].qr_checkin_enabled === true : false };
+  return {
+    qr_checkin_enabled: rows.length ? rows[0].qr_checkin_enabled === true : false,
+    // Constante derivada, não vem do banco — o front usa pra montar a dica
+    // "turma pode começar entre X e Y" no formulário. Ver
+    // CLASS_START_TIME_RANGE / windowCrossesMidnight().
+    class_start_time_range: CLASS_START_TIME_RANGE,
+  };
 }
 
 async function putSettings(dojoId, body) {
@@ -613,7 +642,12 @@ async function putSettings(dojoId, body) {
      RETURNING qr_checkin_enabled`,
     [dojoId, enabled]
   );
-  return { qr_checkin_enabled: rows[0].qr_checkin_enabled === true };
+  // Mesma forma do GET — o front re-renderiza o formulário a partir da
+  // resposta do PUT sem precisar de um segundo fetch.
+  return {
+    qr_checkin_enabled: rows[0].qr_checkin_enabled === true,
+    class_start_time_range: CLASS_START_TIME_RANGE,
+  };
 }
 
 // ── QR do aluno (F4) + QR do dojô (F9) ──
@@ -822,6 +856,9 @@ module.exports = {
   CHECKIN_WINDOW_BEFORE_MIN,
   CHECKIN_WINDOW_AFTER_MIN,
   inCheckinWindow,
+  // faixa de start_time aceita no cadastro (derivada das duas acima) —
+  // vai no payload de settings pro front montar a dica do formulário
+  CLASS_START_TIME_RANGE,
   // turmas
   validateClassPayload,
   listClasses,

@@ -174,6 +174,29 @@ describe('F4 — turmas, matrículas e presença do dojô', () => {
       expect(res.status).toBe(201);
     });
 
+    test('GET settings entrega a faixa pro front montar a dica (sem hardcodar do outro lado)', async () => {
+      db.query.mockResolvedValueOnce({ rows: [{ qr_checkin_enabled: true }] });
+      const res = await request(app).get(`${base}/classes/settings`).set(canalA());
+
+      expect(res.status).toBe(200);
+      // os MESMOS limites que a validação aplica — se alguém mexer nas
+      // constantes da janela, front e backend andam juntos
+      expect(res.body.class_start_time_range).toEqual({
+        min: hhmm(primeiroValido),
+        max: hhmm(ultimoValido),
+      });
+    });
+
+    test('GET settings com migration pendente (42P01) ainda entrega a faixa', async () => {
+      db.query.mockRejectedValueOnce(Object.assign(new Error('no table'), { code: '42P01' }));
+      const res = await request(app).get(`${base}/classes/settings`).set(canalA());
+
+      expect(res.status).toBe(200);
+      expect(res.body.qr_checkin_enabled).toBe(false);
+      // a faixa é constante do código, não depende do banco
+      expect(res.body.class_start_time_range).toEqual({ min: '00:30', max: '22:59' });
+    });
+
     test('turma SEM start_time continua permitida (fallback do F4 não regride)', async () => {
       db.query.mockResolvedValueOnce({
         rows: [{ id: 'cl9', name: 'Sem horário', weekdays: [1], start_time: null, end_time: null, modality: null, active: true }],
