@@ -34,6 +34,7 @@
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
 const creditLedger = require('../services/creditLedger');
+const overdueRule  = require('../services/credit/overdue');
 
 async function assertCrediarioEnabled(companyId) {
   const { rows } = await db.query(
@@ -297,7 +298,8 @@ router.get('/customer/:cid', async (req, res) => {
     try {
       const r = await db.query(
         `SELECT id, installment_number, total_installments,
-                amount_due, covered_amount, due_date, status, late_fee, late_interest, account_id
+                amount_due, covered_amount, due_date, status, late_fee, late_interest, account_id,
+                created_at
            FROM credit_installments
           WHERE customer_id = $1 AND company_id = $2
             AND status IN ('pending','overdue')
@@ -310,7 +312,8 @@ router.get('/customer/:cid', async (req, res) => {
         // account_id ainda nao existe -- fallback sem a coluna
         const r = await db.query(
           `SELECT id, installment_number, total_installments,
-                  amount_due, covered_amount, due_date, status, late_fee, late_interest
+                  amount_due, covered_amount, due_date, status, late_fee, late_interest,
+                  created_at
              FROM credit_installments
             WHERE customer_id = $1 AND company_id = $2
               AND status IN ('pending','overdue')
@@ -342,7 +345,6 @@ router.get('/customer/:cid', async (req, res) => {
     // F3: carnes do cliente (defensivo: tabela pode nao existir ainda)
     let accounts = [];
     try {
-      const today = `(NOW() AT TIME ZONE 'America/Sao_Paulo')::date`;
 
       // Carnes cadastrados
       const { rows: accRows } = await db.query(
@@ -374,11 +376,18 @@ router.get('/customer/:cid', async (req, res) => {
       );
 
       // Metricas de parcelas por carne -- SO credit_installments (sem JOIN com transacoes).
+      // Regra UNICA de atraso (services/credit/overdue.js) -- a mesma de
+      // GET /credit/balances e do dashboard. Antes daqui saia atraso por data
+      // pura enquanto a ficha usava status cru: carne "Em dia" + topo
+      // "Em atraso" no mesmo cliente (relato Valen/livia aline, 18/08/2026).
+      const accIsOverdue  = overdueRule.overdueSql({ graceDays: overdueRule.resolveGraceDays(lateConfig) });
+      const accToReview   = overdueRule.toReviewSql({});
       const { rows: instRows } = await db.query(
         `SELECT account_id,
                 COUNT(*) FILTER (WHERE status IN ('pending','overdue'))               AS open_count,
                 MIN(due_date) FILTER (WHERE status IN ('pending','overdue'))          AS next_due_date,
-                BOOL_OR(due_date < ${today} AND status IN ('pending','overdue'))      AS overdue
+                BOOL_OR(${accIsOverdue})                                              AS overdue,
+                COUNT(*) FILTER (WHERE ${accToReview})                                AS to_review_count
            FROM credit_installments
           WHERE company_id = $1 AND customer_id = $2
           GROUP BY account_id`,
@@ -393,9 +402,10 @@ router.get('/customer/:cid', async (req, res) => {
       const instMap = {};
       for (const r of instRows) {
         instMap[r.account_id ?? '__legacy__'] = {
-          open_count:    r.open_count,
-          next_due_date: r.next_due_date,
-          overdue:       r.overdue,
+          open_count:      r.open_count,
+          next_due_date:   r.next_due_date,
+          overdue:         r.overdue,
+          to_review_count: parseInt(r.to_review_count || 0, 10),
         };
       }
 
@@ -410,7 +420,8 @@ router.get('/customer/:cid', async (req, res) => {
           balance:       parseFloat(bd.balance || 0),
           open_count:    parseInt(id.open_count || 0),
           next_due_date: id.next_due_date ? String(id.next_due_date).split('T')[0] : null,
-          overdue:       id.overdue || false,
+          overdue:         id.overdue || false,
+          to_review_count: id.to_review_count || 0,
           period_unit:   acc.period_unit || null,
           period_count:  acc.period_count ? parseInt(acc.period_count) : null,
         });
@@ -427,7 +438,8 @@ router.get('/customer/:cid', async (req, res) => {
           balance:       parseFloat(legacyBal.balance),
           open_count:    parseInt(legacyInst?.open_count || 0),
           next_due_date: legacyInst?.next_due_date ? String(legacyInst.next_due_date).split('T')[0] : null,
-          overdue:       legacyInst?.overdue || false,
+          overdue:         legacyInst?.overdue || false,
+          to_review_count: legacyInst?.to_review_count || 0,
           period_unit:   null,
           period_count:  null,
         });
@@ -456,8 +468,15 @@ router.get('/customer/:cid', async (req, res) => {
       open_installments: installmentRows.map(i => {
         const remaining = parseFloat((parseFloat(i.amount_due) - parseFloat(i.covered_amount || 0)).toFixed(2));
         const lc = creditLedger.computeLateCharges(i, lateTerms, lateConfig);
+        // Regra UNICA: o consumidor NUNCA deve olhar `status` para decidir
+        // atraso -- ele so e sincronizado quando alguem abre o dashboard e
+        // fica congelado no meio tempo.
+        const cls = overdueRule.classifyInstallment(i, lateConfig);
         return {
           id: i.id,
+          is_overdue:          cls.is_overdue,
+          needs_review:        cls.needs_review,
+          days_late:           cls.days_late,
           installment_number:  i.installment_number,
           total_installments:  i.total_installments,
           amount_due:          parseFloat(i.amount_due),
