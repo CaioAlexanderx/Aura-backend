@@ -135,6 +135,7 @@ Lado: **BE** = `aura-backend`, **APP** = `aura-app`, **DADO** = conteúdo com a 
 | S7 | Conteúdo do piloto: árvore, swatches, deltas, textos | DADO | S0 |
 | S8 | Retirada por app de entrega (Uber, 99) com nome e placa | BE + APP | S2 |
 | S9 | Galeria de até 6 fotos por produto | BE + APP | — |
+| S10 | Fundo e sombra no mockup 3D | APP | S3 |
 
 ---
 
@@ -188,6 +189,24 @@ Backend entregue (migration 290): `gallery_urls` jsonb com até 6, CHECK no banc
 A capa é o índice 0 e **`image_url` continua espelhando ela** — mesmo dual-write que a F0 usa em `products.category`, e pela mesma razão: `image_url` tem leitor demais (listagem, carrinho, marketplace, notificação, PDV) para ser trocado de uma vez.
 
 Falta o app: a tela da lojista subir e reordenar, e o carrossel na vitrine.
+
+### S10 — Fundo e sombra no mockup 3D (APP)
+
+Hoje a caneca aparece sobre uma cor chapada. O objetivo é uma cena simples de mesa de escritório, estática, com acabamento puxando para o realista.
+
+**O caminho óbvio é o errado.** Pôr uma foto de mesa atrás deixa a caneca *flutuando*: sem sombra e com perspectiva que não bate, costuma ficar pior que o fundo liso atual. O que vende realismo, em ordem de impacto:
+
+1. **Sombra de contato** — plano abaixo com `receiveShadow`, luz direcional com `castShadow`, caneca projetando. É o que "pousa" o objeto, e sozinho já entrega a maior parte da sensação. É o item indispensável.
+2. **`envMap`** — o material é `MeshStandardMaterial` sem environment map. Cerâmica fosca sobrevive, mas a *Cromada Prata* e a *Imperial dourada* ficam cinza chapado: metal sem nada para refletir não parece metal. Dá para gerar o ambiente com `PMREMGenerator` a partir de um gradiente em canvas, sem arquivo externo.
+3. **Gradiente suave**, não foto — mesa sugerida por um plano com cor de madeira, tudo dessaturado.
+
+**A restrição que define o escopo:** `threeLoader.ts` carrega o `three.min.js` **core** por CDN, e `GLTFLoader`/`RGBELoader` vivem em `examples/`, fora desse bundle. Mesa em GLB e HDRI real só depois de resolver a dívida do CDN (§3.6). Sombra, `envMap` procedural e gradiente cabem no core.
+
+**Ressalva de produto:** o mockup existe para o cliente ver **a arte dele** na caneca. Cena rica compete com a estampa. A cena tem que ser discreta e dessaturada, e o critério de aceite é a leitura da arte — não a beleza da cena isolada.
+
+**Efeito colateral bom:** `snapshot()` e `recordTurntable()` alimentam os renders de aprovação que a lojista manda ao cliente. Hoje saem com fundo chapado; passam a sair com a cena.
+
+Tudo em `compose3dMug.ts`, sem backend.
 
 ### S7 — Conteúdo do piloto (DADO)
 Árvore de categoria da Sheid (hoje: 36 produtos em "Produtos", 36 sem categoria, 0 links), swatches reais por modelo, `price_delta`, `qty_tiers`, preço de arte, descrição e tamanho de impressão. É o item de maior prazo e o que menos depende de código.
