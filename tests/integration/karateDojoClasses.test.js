@@ -102,6 +102,91 @@ describe('F4 — turmas, matrículas e presença do dojô', () => {
     expect(db.query).not.toHaveBeenCalled();
   });
 
+  // ── turma na VIRADA DO DIA é barrada no cadastro ──
+  //
+  // 19/08/2026 — a janela de tolerância do check-in por QR é linear dentro
+  // de uma data e não cruza a meia-noite (bloco CHECKIN_WINDOW_* em
+  // karateDojoClassService.js). Turma com start_time em 23:00–00:29 teria
+  // a janela vazando pro dia vizinho e o check-in falharia na hora da aula.
+  // Barra no cadastro em vez de deixar quebrar na cara do aluno. A faixa é
+  // DERIVADA das constantes da janela — por isso o teste calcula os limites
+  // a partir delas em vez de hardcodar '00:30'/'22:59'.
+  describe('start_time na virada do dia → 422 (janela do check-in não cruza a meia-noite)', () => {
+    const svc = require('../../src/services/karateDojoClassService');
+    const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    const primeiroValido = svc.CHECKIN_WINDOW_BEFORE_MIN;        // 00:30
+    const ultimoValido = 1439 - svc.CHECKIN_WINDOW_AFTER_MIN;    // 22:59
+
+    test.each([
+      ['00:00', 'meia-noite cravada'],
+      ['00:29', 'último minuto da borda de baixo'],
+      ['23:00', 'primeiro minuto da borda de cima'],
+      ['23:50', 'o caso que derrubava o CI'],
+      ['23:59', 'último minuto do dia'],
+    ])('POST com start_time %s (%s) → 422, sem tocar o banco', async (start_time) => {
+      const res = await request(app)
+        .post(`${base}/classes`)
+        .set(canalA())
+        .send({ name: 'Madrugada', weekdays: [1], start_time });
+
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe('VALIDATION_ERROR');
+      expect(db.query).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      [hhmm(primeiroValido), 'primeira hora válida da faixa'],
+      [hhmm(ultimoValido), 'última hora válida da faixa'],
+      ['18:00', 'horário real da única turma cadastrada'],
+    ])('POST com start_time %s (%s) → 201 (a barreira não pega horário legítimo)', async (start_time) => {
+      db.query.mockResolvedValueOnce({
+        rows: [{ id: 'cl9', name: 'Turma', weekdays: [1], start_time, end_time: null, modality: null, active: true }],
+      });
+      const res = await request(app)
+        .post(`${base}/classes`)
+        .set(canalA())
+        .send({ name: 'Turma', weekdays: [1], start_time });
+
+      expect(res.status).toBe(201);
+      expect(db.query).toHaveBeenCalled();
+    });
+
+    test('PATCH movendo turma existente pra virada do dia → 422 (o write path fecha junto)', async () => {
+      const res = await request(app)
+        .patch(`${base}/classes/${cid}`)
+        .set(canalA())
+        .send({ start_time: '23:30' });
+
+      expect(res.status).toBe(422);
+      expect(res.body.code).toBe('VALIDATION_ERROR');
+      expect(db.query).not.toHaveBeenCalled();
+    });
+
+    test('end_time na virada NÃO é barrado — só start_time entra na janela', async () => {
+      db.query.mockResolvedValueOnce({
+        rows: [{ id: 'cl9', name: 'Turma', weekdays: [1], start_time: '22:30', end_time: '23:59', modality: null, active: true }],
+      });
+      const res = await request(app)
+        .post(`${base}/classes`)
+        .set(canalA())
+        .send({ name: 'Turma', weekdays: [1], start_time: '22:30', end_time: '23:59' });
+
+      expect(res.status).toBe(201);
+    });
+
+    test('turma SEM start_time continua permitida (fallback do F4 não regride)', async () => {
+      db.query.mockResolvedValueOnce({
+        rows: [{ id: 'cl9', name: 'Sem horário', weekdays: [1], start_time: null, end_time: null, modality: null, active: true }],
+      });
+      const res = await request(app)
+        .post(`${base}/classes`)
+        .set(canalA())
+        .send({ name: 'Sem horário', weekdays: [1] });
+
+      expect(res.status).toBe(201);
+    });
+  });
+
   test('GET classes → lista com students_count', async () => {
     db.query.mockResolvedValueOnce({
       rows: [{ id: 'cl1', name: 'Infantil', weekdays: [1, 3], start_time: '18:00', end_time: null, modality: null, active: true, students_count: 5 }],
