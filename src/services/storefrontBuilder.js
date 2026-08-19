@@ -223,7 +223,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
 
   if (featuredIds && featuredIds.length > 0) {
     const sql = `
-      SELECT id, name, description, price, image_url, category, stock_qty, created_at
+      SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty, created_at
       FROM products
       WHERE ${visibility}
         AND is_active IS NOT FALSE
@@ -236,7 +236,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
   }
 
   const sql = `
-    SELECT id, name, description, price, image_url, category, stock_qty, created_at
+    SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty, created_at
     FROM products
     WHERE ${visibility}
       AND is_active IS NOT FALSE
@@ -436,7 +436,10 @@ async function buildStorefront(config) {
         id: p.id, name: p.name, description: p.description,
         price: config.show_prices !== false ? parseFloat(p.price) : null,
         // `category` (texto) PERMANECE -- ver a regra em fetchStorefrontCategories.
-        image_url: p.image_url, category: p.category,
+        image_url: p.image_url,
+        // S9 — carrossel de fotos (migration 290). [] quando nao ha galeria.
+        gallery_urls: Array.isArray(p.gallery_urls) ? p.gallery_urls : [],
+        category: p.category,
         // D3: campos ADITIVOS. null quando o produto ainda não tem
         // vínculo (catálogo pré-migração) ou quando a categoria não é
         // visível na vitrine.

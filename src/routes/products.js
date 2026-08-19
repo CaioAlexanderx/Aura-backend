@@ -46,6 +46,7 @@
 //   Davi clicava nele ao invés do pai com variantes.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
+const { normalizeGallery } = require('../services/productGallery');
 const db = require('../config/database');
 
 const HARD_CAP = 20000;
@@ -347,6 +348,19 @@ router.patch('/:pid', async (req, res) => {
     } catch (err) { console.error('[products] decrement error:', err.message); return res.status(500).json({ error: 'Erro ao decrementar estoque' }); }
   }
 
+  // S9 (migration 290) — galeria de ate 6 fotos. Fica FORA do fieldMap
+  // porque nao e um valor escalar: precisa ser validada e, sobretudo,
+  // precisa manter `image_url` espelhando a capa. Todo o resto do sistema
+  // (listagem, carrinho, marketplace, notificacao, PDV) le image_url, e
+  // nenhum desses lugares foi tocado — mesmo racional do dual-write de
+  // products.category na F0.
+  let galeria = null;
+  if (req.body.gallery_urls !== undefined) {
+    const g = normalizeGallery(req.body.gallery_urls);
+    if (g.error) return res.status(400).json({ error: g.error });
+    galeria = g;
+  }
+
   const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size', image_url:'image_url', ncm:'ncm', is_group_shared:'is_group_shared', studio_storefront_visible:'studio_storefront_visible' };
   const numFields = ['price','cost_price','stock_qty','stock_min','stock_max'];
   const updates = [], values = []; let idx = 1;
@@ -357,6 +371,16 @@ router.patch('/:pid', async (req, res) => {
       if (dbCol === 'color' && val && !/^#[0-9A-Fa-f]{6}$/.test(val)) val = null;
       if (dbCol === 'ncm') val = sanitizeNcm(val);
       values.push(val); idx++;
+    }
+  }
+  if (galeria) {
+    updates.push(`gallery_urls = $${idx}::jsonb`);
+    values.push(JSON.stringify(galeria.gallery)); idx++;
+    // A capa segue a galeria, a menos que o proprio request tenha mandado
+    // image_url junto — nesse caso a escolha explicita vence.
+    if (req.body.image_url === undefined) {
+      updates.push(`image_url = $${idx}`);
+      values.push(galeria.cover); idx++;
     }
   }
   if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });

@@ -205,7 +205,7 @@ router.get('/:slug/studio/products', async (req, res) => {
     // Lista produtos personalizaveis (respeita visibility canonica)
     const visibility = listVisibilityWhere('$1');
     const { rows: products } = await db.query(
-      `SELECT id, name, description, price, image_url, category, stock_qty,
+      `SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty,
               customization_config
          FROM products
         WHERE ${visibility}
@@ -366,6 +366,10 @@ router.get('/:slug/studio/products', async (req, res) => {
           description: p.description || null,
           price: parseFloat(p.price),
           image_url: p.image_url || null,
+          // S9 — carrossel de fotos. A capa e o indice 0 e espelha
+          // image_url; produto sem galeria devolve [] e o consumidor cai
+          // na foto unica de antes.
+          gallery_urls: Array.isArray(p.gallery_urls) ? p.gallery_urls : [],
           category: p.category || null,
           category_id:   cat ? cat.id   : null,
           category_slug: cat ? cat.slug : null,
