@@ -638,16 +638,25 @@ router.put('/compositions/by-product/:pid', async function(req, res) {
 
 router.get('/compositions/summary', async function(req, res) {
   try {
+    // 19/08/2026 (QA): image_url via LEFT JOIN products — a aba Fichas
+    // Técnicas identificava produto só por nome ("caneca branca fosca" vs
+    // "caneca branca brilho"). A view não expõe a coluna; o JOIN evita
+    // migration e degrada pra null se o produto sumiu.
     const r = await db.query(
-      `SELECT composition_id, product_id, product_name, product_price,
-              total_cost, margin_pct, item_count
-         FROM studio_compositions_summary
-        WHERE company_id = $1 AND is_active = true
-        ORDER BY product_name`,
+      `SELECT s.composition_id, s.product_id, s.product_name, s.product_price,
+              s.total_cost, s.margin_pct, s.item_count,
+              p.image_url
+         FROM studio_compositions_summary s
+         LEFT JOIN products p ON p.id = s.product_id
+        WHERE s.company_id = $1 AND s.is_active = true
+        ORDER BY s.product_name`,
       [req.params.id]
     );
     res.json({ compositions: r.rows, count: r.rows.length });
-  } catch (err) { res.status(500).json({ error: 'Erro ao listar composições' }); }
+  } catch (err) {
+    console.error('[studio/compositions/summary]', err.message);
+    res.status(500).json({ error: 'Erro ao listar composições' });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════
