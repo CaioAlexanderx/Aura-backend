@@ -134,6 +134,7 @@ Lado: **BE** = `aura-backend`, **APP** = `aura-app`, **DADO** = conteúdo com a 
 | S6 | Desconto progressivo: escada no payload e faixa aplicada no pedido | BE + APP | — |
 | S7 | Conteúdo do piloto: árvore, swatches, deltas, textos | DADO | S0 |
 | S8 | Retirada por app de entrega (Uber, 99) com nome e placa | BE + APP | S2 |
+| S9 | Galeria de até 6 fotos por produto | BE + APP | — |
 
 ---
 
@@ -177,6 +178,16 @@ Terceiro `delivery_type`, ao lado de `pickup` e `delivery`: o **cliente** contra
 Os dois campos são do **entregador**, não do cliente, e é isso que dá o item sua razão de ser: sem nome e placa, a lojista entrega a personalização de alguém para o primeiro motoboy que citar o número do pedido. Numa loja que imprime arte sob encomenda, o pacote trocado não tem segunda via.
 
 Backend entregue: `courier_pickup_enabled` no config (default `false`), `courier_name`/`courier_plate` no pedido, validação compartilhada em `services/courierPickup.js` e as três modalidades expostas no payload público dos **dois** storefronts. Falta o consumo no app — o chip da modalidade e os dois campos no checkout —, que vai junto com o S1.
+
+### S9 — Galeria de fotos (BE + APP)
+
+`products.image_url` guardava **uma** foto. Uma caneca precisa de mais de um ângulo — a estampa, a alça, o interior colorido, a foto de uso —, e a §1 pede carrossel. A vitrine estava pobre por limitação de cadastro, não por falta de material.
+
+Backend entregue (migration 290): `gallery_urls` jsonb com até 6, CHECK no banco, `PATCH /products/:id` validando, e a galeria exposta nos payloads públicos dos **dois** storefronts.
+
+A capa é o índice 0 e **`image_url` continua espelhando ela** — mesmo dual-write que a F0 usa em `products.category`, e pela mesma razão: `image_url` tem leitor demais (listagem, carrinho, marketplace, notificação, PDV) para ser trocado de uma vez.
+
+Falta o app: a tela da lojista subir e reordenar, e o carrossel na vitrine.
 
 ### S7 — Conteúdo do piloto (DADO)
 Árvore de categoria da Sheid (hoje: 36 produtos em "Produtos", 36 sem categoria, 0 links), swatches reais por modelo, `price_delta`, `qty_tiers`, preço de arte, descrição e tamanho de impressão. É o item de maior prazo e o que menos depende de código.
