@@ -57,6 +57,7 @@ const {
   fetchStorefrontCategories, fetchPrimaryCategoryLinks,
 } = require('../services/storefrontBuilder');
 const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
+const { initialArtStatus } = require('../services/artReview');
 
 function validateCpfCnpj(raw) {
   if (!raw) return null;
@@ -812,6 +813,8 @@ router.post('/:slug/studio/order', async (req, res) => {
         quantity:      qty,
         subtotal:      itemSubtotal,
         customization: item.customization || null,
+        // S5 — entra na fila de triagem so quem mandou arte propria.
+        art_review_status: initialArtStatus(cfg, item.customization),
         // metadata auxiliar (nao persistida — so resposta)
         _base_price: basePrice,
         _choices_delta: choicesDelta,
@@ -925,11 +928,16 @@ router.post('/:slug/studio/order', async (req, res) => {
       for (const item of orderItems) {
         await client.query(`
           INSERT INTO digital_order_items
-            (order_id, product_id, product_name, product_image, unit_price, quantity, subtotal, customization)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            (order_id, product_id, product_name, product_image, unit_price, quantity, subtotal,
+             customization, art_review_status)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
         `, [order.id, item.product_id, item.product_name, item.product_image,
             item.unit_price, item.quantity, item.subtotal,
-            item.customization ? JSON.stringify(item.customization) : null]);
+            item.customization ? JSON.stringify(item.customization) : null,
+            // S5 — 'pendente' so quando ha arte DE CLIENTE para olhar.
+            // Quem contratou a criacao nao entra na fila: ali quem produz
+            // e a lojista, e o fluxo lojista -> cliente ja cobre.
+            item.art_review_status || null]);
       }
       await client.query('COMMIT');
     } catch (txErr) {

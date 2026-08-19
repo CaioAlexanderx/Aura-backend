@@ -157,7 +157,11 @@ Por `DEC-10`, cada modelo tem seu template — o que exige, **antes** de cadastr
 Não são dois: (a) cliente envia arte pronta; (b) cliente envia e a lojista ajusta — cobrado; (c) a lojista cria do zero — cobrado mais caro. Os três precisam aparecer no preço **antes** do fechamento; hoje a lojista absorve (b) silenciosamente. O motor de (c) já existe em `FieldArtService`; falta (b) e falta o dado dos dois.
 
 ### S5 — Triagem (BE + APP)
-Fila da arte recebida com três saídas: aceitar como está, ajustar (aplica o preço de (b) e notifica), ou devolver para novo envio. Não bloqueia o pedido (§3.5). Reaproveitar o link público de aprovação já existente para comunicar o resultado.
+Fila da arte recebida com três saídas: aceitar como está, ajustar, ou devolver para novo envio. **Não bloqueia o pedido** (§3.5, `DEC-11`): é metadado do item, sem estado novo de pedido e sem prazo suspenso.
+
+Backend entregue (migration 289): `art_review_status` no item, fila e decisão em `/companies/:id/studio/art-review`. Só entra na fila quem mandou arte **própria** — quem contratou a criação fica fora, porque ali quem produz é a lojista e o fluxo lojista → cliente já cobre.
+
+Falta o app: a tela da fila. E fica registrado o que **não** foi feito: avisar o cliente de que a arte voltou continua manual, pelo WhatsApp que a loja já coleta. Um fluxo de reenvio pelo cliente é item próprio, não meio-caminho escondido aqui.
 
 ### S6 — Desconto progressivo (BE + APP)
 Era o item que eu tinha dado como quase pronto e que se revelou o mais fundo depois do S0 — ver §3.7. O backend está entregue: escada no payload público (`qty_tiers` por produto, só preço e percentual) e faixa aplicada no fechamento, relida do banco e nunca aceita do cliente.
