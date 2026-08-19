@@ -73,7 +73,7 @@ router.get('/products', async (req, res) => {
     }
     params.push(limit);
     const { rows } = await db.query(
-      `SELECT id, name, description, price, image_url, category, stock_qty,
+      `SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty,
               is_personalizable, customization_config, company_id, created_at,
               studio_storefront_visible, visual_template_key
          FROM products
@@ -89,8 +89,14 @@ router.get('/products', async (req, res) => {
         description: r.description || null,
         price: parseFloat(r.price) || 0,
         image_url: r.image_url || null,
+        // Galeria do produto (migration 290/291) — o editor do catalogo
+        // precisa dela pra montar a lista de fotos; [] quando nao ha.
+        gallery_urls: Array.isArray(r.gallery_urls) ? r.gallery_urls : [],
         category: r.category || null,
-        stock_qty: parseFloat(r.stock_qty) || 0,
+        // stock_qty NULL = produto sem controle de estoque (sob encomenda).
+        // Colapsar pra 0 fazia a UI dizer "Sem estoque" em produto
+        // perfeitamente vendavel — sao coisas diferentes.
+        stock_qty: r.stock_qty == null ? null : (parseFloat(r.stock_qty) || 0),
         is_personalizable: !!r.is_personalizable,
         customization_config: r.customization_config,
         studio_storefront_visible: r.studio_storefront_visible !== false,
@@ -121,7 +127,7 @@ router.get('/products', async (req, res) => {
         }
         params2.push(limit);
         const { rows } = await db.query(
-          `SELECT id, name, description, price, image_url, category, stock_qty,
+          `SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty,
                   is_personalizable, customization_config, company_id, created_at,
                   studio_storefront_visible
              FROM products
@@ -137,8 +143,9 @@ router.get('/products', async (req, res) => {
             description: r.description || null,
             price: parseFloat(r.price) || 0,
             image_url: r.image_url || null,
+            gallery_urls: Array.isArray(r.gallery_urls) ? r.gallery_urls : [],
             category: r.category || null,
-            stock_qty: parseFloat(r.stock_qty) || 0,
+            stock_qty: r.stock_qty == null ? null : (parseFloat(r.stock_qty) || 0),
             is_personalizable: !!r.is_personalizable,
             customization_config: r.customization_config,
             studio_storefront_visible: r.studio_storefront_visible !== false,
