@@ -387,6 +387,10 @@ router.patch('/competitions/:cid/categories/:catId', ...guards.staffWrite(), asy
 });
 
 // ── GET /competitions/:cid/entries ──
+// P0 equipes (migration 294): entries de EQUIPE (team_id) aparecem com o
+// nome da equipe em student_name e is_team=true. Cache module-level
+// otimista para a coluna nova (42703 → forma antiga, só atletas).
+let HAS_TEAM_ENTRIES_LIST = true;
 router.get('/competitions/:cid/entries', ...guards.read(), async (req, res) => {
   const { id: federationId, cid } = req.params;
   const { category_id } = req.query;
@@ -399,25 +403,56 @@ router.get('/competitions/:cid/entries', ...guards.read(), async (req, res) => {
     let n = 2;
     if (category_id) { conditions.push(`e.category_id = $${n}`); params.push(category_id); n++; }
 
-    const { rows } = await db.query(
-      `SELECT e.id, e.category_id, e.student_id, e.dojo_id, e.status, e.fee_paid,
-              e.placement, e.points_awarded, e.result_notes, e.created_at,
-              cat.name AS category_name, cat.modality,
-              cu.name AS student_name, cu.karate_registration_number,
-              COALESCE(dj.trade_name, dj.legal_name) AS dojo_name,
-              cb.belt_level AS current_belt, cb.belt_name AS current_belt_name
-       FROM karate_competition_entries e
-       JOIN karate_competition_categories cat ON cat.id = e.category_id
-       JOIN customers cu ON cu.id = e.student_id
-       LEFT JOIN companies dj ON dj.id = e.dojo_id
-       LEFT JOIN karate_current_belt cb ON cb.student_id = e.student_id AND cb.federation_id = $${n}
-       WHERE ${conditions.join(' AND ')}
-       ORDER BY cat.name ASC, e.placement ASC NULLS LAST, e.created_at ASC`,
-      [...params, federationId]
-    );
+    const sqlNew = `
+      SELECT e.id, e.category_id, e.student_id, e.team_id, e.dojo_id, e.status, e.fee_paid,
+             e.placement, e.points_awarded, e.result_notes, e.created_at,
+             cat.name AS category_name, cat.modality,
+             COALESCE(cu.name, t.name) AS student_name, cu.karate_registration_number,
+             COALESCE(dj.trade_name, dj.legal_name) AS dojo_name,
+             cb.belt_level AS current_belt, cb.belt_name AS current_belt_name
+      FROM karate_competition_entries e
+      JOIN karate_competition_categories cat ON cat.id = e.category_id
+      LEFT JOIN customers cu ON cu.id = e.student_id
+      LEFT JOIN karate_competition_teams t ON t.id = e.team_id
+      LEFT JOIN companies dj ON dj.id = e.dojo_id
+      LEFT JOIN karate_current_belt cb ON cb.student_id = e.student_id AND cb.federation_id = $${n}
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY cat.name ASC, e.placement ASC NULLS LAST, e.created_at ASC`;
+    const sqlOld = `
+      SELECT e.id, e.category_id, e.student_id, e.dojo_id, e.status, e.fee_paid,
+             e.placement, e.points_awarded, e.result_notes, e.created_at,
+             cat.name AS category_name, cat.modality,
+             cu.name AS student_name, cu.karate_registration_number,
+             COALESCE(dj.trade_name, dj.legal_name) AS dojo_name,
+             cb.belt_level AS current_belt, cb.belt_name AS current_belt_name
+      FROM karate_competition_entries e
+      JOIN karate_competition_categories cat ON cat.id = e.category_id
+      JOIN customers cu ON cu.id = e.student_id
+      LEFT JOIN companies dj ON dj.id = e.dojo_id
+      LEFT JOIN karate_current_belt cb ON cb.student_id = e.student_id AND cb.federation_id = $${n}
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY cat.name ASC, e.placement ASC NULLS LAST, e.created_at ASC`;
+
+    let rows;
+    if (HAS_TEAM_ENTRIES_LIST) {
+      try {
+        ({ rows } = await db.query(sqlNew, [...params, federationId]));
+      } catch (e) {
+        if (e.code === '42703' || e.code === '42P01') {
+          HAS_TEAM_ENTRIES_LIST = false;
+          console.warn('[karateCompetitions] team_id ausente na listagem (migração 294 pendente)');
+        } else throw e;
+      }
+    }
+    if (rows === undefined) {
+      ({ rows } = await db.query(sqlOld, [...params, federationId]));
+    }
+
     res.json(rows.map(r => ({
       id: r.id, category_id: r.category_id, category_name: r.category_name, modality: r.modality,
       student_id: r.student_id, student_name: r.student_name,
+      team_id: r.team_id !== undefined ? (r.team_id || null) : null,
+      is_team: !!r.team_id,
       karate_registration_number: r.karate_registration_number || null,
       current_belt: r.current_belt || null, current_belt_name: r.current_belt_name || null,
       dojo_id: r.dojo_id, dojo_name: r.dojo_name || null,
@@ -679,12 +714,18 @@ router.delete('/competitions/:cid', ...guards.staffWrite(), async (req, res) => 
     }
 
     const delWhere = 'competition_id = $1';
-    // Ordem: filhos de brackets/entries → brackets/entries → categorias → competição.
+    // Ordem: filhos de brackets/entries → brackets/entries → equipes/delegações
+    // (migration 294) → categorias → competição. Tabelas da 294 podem não
+    // existir ainda (42P01 → ignorado, deploy parcial).
     const steps = [
       `DELETE FROM karate_bracket_matches WHERE bracket_id IN (SELECT id FROM karate_brackets WHERE ${delWhere})`,
       `DELETE FROM karate_kata_scores    WHERE bracket_id IN (SELECT id FROM karate_brackets WHERE ${delWhere})`,
       `DELETE FROM karate_brackets            WHERE ${delWhere}`,
       `DELETE FROM karate_competition_entries WHERE ${delWhere}`,
+      `DELETE FROM karate_competition_team_members WHERE team_id IN (SELECT id FROM karate_competition_teams WHERE ${delWhere})`,
+      `DELETE FROM karate_competition_teams   WHERE ${delWhere}`,
+      `DELETE FROM karate_delegation_orders   WHERE ${delWhere}`,
+      `DELETE FROM karate_competition_divisions WHERE ${delWhere}`,
       `DELETE FROM karate_competition_categories WHERE ${delWhere}`,
     ];
     for (const q of steps) {

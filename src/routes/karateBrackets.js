@@ -50,7 +50,43 @@ async function findCat(client, cid, catId) {
 }
 
 // ── helper: load entries for a category ─────────────────────────
+// P0 equipes (migration 294): a entry pode apontar para um ATLETA
+// (student_id) ou para uma EQUIPE (team_id) — o nome exibido na chave vem
+// de quem existir. Cache module-level otimista: se team_id ainda não
+// existe (294 pendente), degrada para a forma antiga (só atletas) sem
+// repetir o 42703 a cada request.
+let HAS_TEAM_ENTRIES = true;
 async function loadEntries(client, catId, federationId) {
+  if (HAS_TEAM_ENTRIES) {
+    try {
+      const r = await client.query(
+        `SELECT e.id, e.student_id, e.dojo_id, e.team_id,
+                COALESCE(cu.name, t.name) AS student_name,
+                COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+         FROM karate_competition_entries e
+         LEFT JOIN customers cu ON cu.id = e.student_id
+         LEFT JOIN karate_competition_teams t ON t.id = e.team_id
+         LEFT JOIN companies dj ON dj.id = e.dojo_id
+         WHERE e.category_id = $1
+           AND e.status NOT IN ('withdrawn')
+         ORDER BY e.created_at ASC`,
+        [catId]
+      );
+      return r.rows.map(r => ({
+        id: r.id,
+        student_id: r.student_id,
+        team_id: r.team_id || null,
+        dojo_id: r.dojo_id,
+        dojo: r.dojo_name,
+        student_name: r.student_name,
+      }));
+    } catch (e) {
+      if (e.code === '42703' || e.code === '42P01') {
+        HAS_TEAM_ENTRIES = false;
+        console.warn('[karateBrackets] team_id/karate_competition_teams ausente (migração 294 pendente) — chave só com atletas');
+      } else throw e;
+    }
+  }
   const r = await client.query(
     `SELECT e.id, e.student_id, e.dojo_id,
             cu.name AS student_name,

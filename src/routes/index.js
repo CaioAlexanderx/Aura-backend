@@ -367,6 +367,14 @@ router.use('/federation/:id', require('./karateCompetitions'));
 //   PATCH/DELETE /federation/:id/category-templates/:tid
 router.use('/federation/:id', require('./karateCategoryTemplates'));
 
+// ── AURA KARATÊ — P0 Hub de Campeonatos: SETUP da competição ────
+// Migration 294 (divisões, precificação, ciclo operacional).
+//   GET/POST     /federation/:id/competitions/:cid/divisions       (read/staffWrite)
+//   PATCH/DELETE /federation/:id/competitions/:cid/divisions/:divId (staffWrite)
+//   PATCH        /federation/:id/competitions/:cid/pricing          (staffWrite)
+//   GET          /federation/:id/competitions/:cid/delegations      (read)
+router.use('/federation/:id', require('./karateCompetitionSetup'));
+
 // ── AURA KARATÊ — Track F (admin: conectividade dojô / Fase 5) ──
 // Migrations 170 + 171. Contrato docs/karate-fase5-openapi.yaml.
 //   GET/POST /federation/:id/connections (+ /requests)
@@ -700,6 +708,20 @@ router.use('/federation/:id', require('./karateDojoBeltExams'));
 //   GET    /federation/:id/dojo/own-events/:eventId/enrollments
 //   DELETE /federation/:id/dojo/own-events/:eventId/enrollments/:studentId
 router.use('/federation/:id', require('./karateDojoEvents'));
+
+// ── AURA DOJÔ — P0 Hub de Campeonatos: DELEGAÇÃO ────────────────
+// Migration 294. O clube inscreve sua delegação (atletas + equipes) num
+// campeonato 'open' da federação, vê a cotação composta (taxa única por
+// atleta, equipes por prova, isenções por contrapartida) e submete UM
+// pedido consolidado. Gate de conexão nas escritas (ato federativo);
+// Canal B é somente leitura.
+//   GET  /federation/:id/dojo/competitions                        (A+B — vitrine)
+//   GET  /federation/:id/dojo/competitions/:cid/categories        (A+B)
+//   POST /federation/:id/dojo/competitions/:cid/delegation/quote  (A — dry-run)
+//   POST /federation/:id/dojo/competitions/:cid/delegation        (A — submete)
+//   GET  /federation/:id/dojo/delegations                         (A+B)
+//   GET  /federation/:id/dojo/delegations/:orderId                (A+B)
+router.use('/federation/:id', require('./karateDelegations'));
 
 // ── AURA DOJÔ — F9.1 (o CERTIFICADO PRÓPRIO DO DOJÔ) ───────────
 // Migration 271 (karate_dojo_certificate_templates + karate_dojo_issued_certificates).
