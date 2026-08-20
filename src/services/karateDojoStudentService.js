@@ -575,6 +575,9 @@ function shapeStudent(row) {
     belt_label: row.belt_label || null,
     belt_order: row.belt_order != null ? Number(row.belt_order) : null,
     status: row.status,
+    // EXP2: inadimplência (cobrança pending vencida). Só vem nas queries que
+    // selecionam has_overdue (lista + ficha); ausente ⇒ false, nunca undefined.
+    has_overdue: row.has_overdue === true,
     guardian_id: row.guardian_id || null,
     guardian: null, // preenchido pelos callers quando disponível (ficha/list)
     // F13 (migration 280) — a LISTA de responsáveis (mãe E pai, cada um
@@ -620,8 +623,17 @@ function shapeStudent(row) {
 // mocks posicionais dos testes que já existem (armadilha conhecida). O
 // único caso em que a window function não serve é página VAZIA com offset
 // > 0 (não há linha para carregar o total) — aí sim vai um COUNT dedicado.
+// EXP2 — inadimplência visível: aluno "inadimplente" = tem cobrança pending
+// vencida (due_date < hoje em São Paulo). Subquery correlacionada em
+// karate_dojo_charges; se a tabela de billing ainda não existir, o 42P01 sobe
+// e é pego pelo catch da rota (schema_pending), como os demais.
+const OVERDUE_EXISTS =
+  `EXISTS (SELECT 1 FROM karate_dojo_charges kc
+            WHERE kc.student_id = s.id AND kc.status = 'pending'
+              AND kc.due_date < (now() AT TIME ZONE 'America/Sao_Paulo')::date)`;
+
 async function listStudentsPaged(dojoId, opts = {}) {
-  const { status = null, q = null, belt = null, federated = null, tag_id = null } = opts;
+  const { status = null, q = null, belt = null, federated = null, tag_id = null, overdue = null } = opts;
   const { limit, offset } = parsePaging(opts);
 
   // F11: filtro por tag (?tag_id=). O JOIN/EXISTS contra
@@ -644,6 +656,7 @@ async function listStudentsPaged(dojoId, opts = {}) {
            WHERE dst.student_id = s.id AND dst.tag_id = $${params.length}
         )`;
   }
+  const overdueClause = overdue ? `AND ${OVERDUE_EXISTS}` : '';
   params.push(limit, offset);
   const limitIdx = params.length - 1;
   const offsetIdx = params.length;
@@ -653,6 +666,7 @@ async function listStudentsPaged(dojoId, opts = {}) {
             g.full_name AS guardian_full_name, g.phone AS guardian_phone,
             g.relationship AS guardian_relationship,
             ${federationFields('s.')},
+            ${OVERDUE_EXISTS} AS has_overdue,
             count(*) OVER() AS total_count
        FROM karate_dojo_students s
        LEFT JOIN karate_dojo_guardians g ON g.id = s.guardian_id
@@ -664,6 +678,7 @@ async function listStudentsPaged(dojoId, opts = {}) {
         AND ($4::text IS NULL OR s.belt_label = $4)
         AND ($5::boolean IS NULL OR ${isFederatedExpr('s.')} = $5)
         ${tagClause}
+        ${overdueClause}
       ORDER BY s.full_name ASC
       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
     params
@@ -686,7 +701,7 @@ async function listStudentsPaged(dojoId, opts = {}) {
   if (rows.length) {
     count = rows[0].total_count != null ? Number(rows[0].total_count) : rows.length;
   } else if (offset > 0) {
-    count = await countStudents(dojoId, { status, q, belt, federated, tag_id });
+    count = await countStudents(dojoId, { status, q, belt, federated, tag_id, overdue });
   } else {
     count = 0;
   }
@@ -695,7 +710,7 @@ async function listStudentsPaged(dojoId, opts = {}) {
 }
 
 // Só usado quando a página vem vazia com offset > 0 (ver acima).
-async function countStudents(dojoId, { status = null, q = null, belt = null, federated = null, tag_id = null } = {}) {
+async function countStudents(dojoId, { status = null, q = null, belt = null, federated = null, tag_id = null, overdue = null } = {}) {
   const params = [dojoId, status, q, belt, federated];
   let tagClause = '';
   if (tag_id) {
@@ -705,6 +720,7 @@ async function countStudents(dojoId, { status = null, q = null, belt = null, fed
            WHERE dst.student_id = s.id AND dst.tag_id = $${params.length}
         )`;
   }
+  const overdueClause = overdue ? `AND ${OVERDUE_EXISTS}` : '';
   const { rows } = await withStudentSchemaFallback(() => db.query(
     `SELECT count(*)::int AS total
        FROM karate_dojo_students s
@@ -714,7 +730,8 @@ async function countStudents(dojoId, { status = null, q = null, belt = null, fed
              OR s.cpf = regexp_replace($3, '\\D', '', 'g'))
         AND ($4::text IS NULL OR s.belt_label = $4)
         AND ($5::boolean IS NULL OR ${isFederatedExpr('s.')} = $5)
-        ${tagClause}`,
+        ${tagClause}
+        ${overdueClause}`,
     params
   ));
   return rows.length && rows[0].total != null ? Number(rows[0].total) : 0;
@@ -765,6 +782,7 @@ async function getStudent(dojoId, studentId) {
             g.phone AS guardian_phone, g.email AS guardian_email,
             g.relationship AS guardian_relationship,
             ${federationFields('s.')},
+            ${OVERDUE_EXISTS} AS has_overdue,
             ${guardianLinks.guardiansJsonField('s.')}
        FROM karate_dojo_students s
        LEFT JOIN karate_dojo_guardians g ON g.id = s.guardian_id

@@ -110,6 +110,32 @@ describe('createOrder — criar pedido de certificado', () => {
       })
     ).rejects.toMatchObject({ code: 'DUPLICATE_ORDER' });
   });
+
+  it('progressão dentro da mesma cor NÃO é duplicata — dedupe inclui belt_name (grau)', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [{ ok: 1 }] })   // escopo dojô
+      .mockResolvedValueOnce({ rows: [{ ok: 1 }] })   // escopo praticante
+      .mockResolvedValueOnce({ rows: [{ id: 'bh-1' }] }) // belt_history
+      .mockResolvedValueOnce({ rows: [] })            // dupCheck: nenhum pedido p/ ESTE grau
+      .mockResolvedValueOnce({ rows: [{ ...baseOrder }] }) // INSERT
+      .mockResolvedValueOnce({ rows: [] });           // history insert
+
+    const order = await createOrder({
+      federationId:   FED_ID,
+      dojoId:         DOJO_ID,
+      practitionerId: PRACT_ID,
+      beltLevel:      'marrom',
+      beltName:       'Marrom 1º kyu',
+      nomeImpresso:   'João Silva',
+    });
+    expect(order.id).toBe(ORDER_ID);
+
+    // Marrom tem 3 kyus: "Marrom 3º kyu" e "Marrom 1º kyu" são graduações
+    // DISTINTAS. O dedupe precisa olhar belt_name (grau), não só belt_level.
+    const dupCall = db.query.mock.calls.find(c => /SELECT id FROM karate_certificate_orders/.test(String(c[0])));
+    expect(String(dupCall[0])).toMatch(/belt_name\s*=/i);
+    expect(dupCall[1]).toContain('Marrom 1º kyu');
+  });
 });
 
 // ── Suite 2: advanceStatus ────────────────────────────────────

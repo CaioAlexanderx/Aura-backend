@@ -227,17 +227,22 @@ async function createOrder({
     );
   }
 
-  // Verifica que não há pedido pendente para a mesma graduação
+  // Verifica que não há pedido pendente para a mesma graduação.
+  // Dedupe por belt_level (cor) + belt_name (GRAU): Marrom tem 3 kyus e Preta
+  // 10 dans, então "Marrom 3º kyu" e "Marrom 2º kyu" são graduações DISTINTAS.
+  // Antes o dedupe olhava só belt_level (cor) e barrava a progressão dentro da
+  // mesma cor (Marrom 3º→2º→1º kyu, a reta antes da preta) com DUPLICATE_ORDER.
   let dupCheck;
   try {
     dupCheck = await db.query(
       `SELECT id FROM karate_certificate_orders
        WHERE practitioner_id = $1
          AND belt_level = $2
+         AND belt_name = $4
          AND federation_id = $3
          AND status NOT IN ('refused')
        LIMIT 1`,
-      [practitionerId, beltLevel, federationId]
+      [practitionerId, beltLevel, federationId, beltName]
     );
   } catch (err) { safeTable(err); }
 

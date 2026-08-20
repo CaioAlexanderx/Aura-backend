@@ -1006,17 +1006,18 @@ async function applyResults({ dojoId, federationId, exam, plan, cols, resCols })
       }
 
       // 2) A FAIXA DO ALUNO É CONSEQUÊNCIA DA GRADUAÇÃO.
-      //    belt_order recebe o rank CANÔNICO da cor (LEVEL_RANK, 1..9) —
-      //    a MESMA escala que a F5b já devolve como belt_order em
-      //    listAptos. A coluna é inteiro sem CHECK (migration 242) e só
-      //    ordena/agrupa; o grau dentro da cor vive no belt_label
-      //    ("Marrom 1º kyu"), que é o que a pirâmide de faixas agrupa.
+      //    belt_order recebe o rank de EXIBIÇÃO grade-aware (beltDisplayRank,
+      //    escala 10..100), a MESMA que o IMPORTADOR grava. É crucial usarem a
+      //    MESMA escala: a pirâmide agrupa/ordena por (belt_label, belt_order)
+      //    — se o exame gravasse levelRankOf (1..9) e o import beltDisplayRank
+      //    (82 p/ Marrom 1º kyu), o mesmo "Marrom 1º kyu" viraria DUAS linhas
+      //    na pirâmide e a ordem quebraria. O grau (to.kyu) alimenta o rank.
       await client.query(
         `-- f81:update-student-belt
          UPDATE karate_dojo_students
             SET belt_label = $1, belt_order = $2, updated_at = now()
           WHERE id = $3 AND dojo_id = $4`,
-        [to.label, scale.levelRankOf(to.level), entry.student_id, dojoId]
+        [to.label, scale.beltDisplayRank(to.level, { kyu: to.kyu }), entry.student_id, dojoId]
       );
       out.student_belt_updated = true;
 

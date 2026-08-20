@@ -298,6 +298,17 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(res.body.summary.by_belt).toEqual([{ belt_label: 'Branca', belt_order: 1, count: 2 }]);
   });
 
+  test('EXP2 — lista expõe has_overdue e ?inadimplente=1 filtra por cobrança vencida', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ ...studentRow(), has_overdue: true, total_count: 1 }] });
+    const res = await request(app).get(`${base}/students?inadimplente=1`).set(canalA());
+
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].has_overdue).toBe(true);
+    const sql = String(db.query.mock.calls[0][0]);
+    expect(sql).toMatch(/AS has_overdue/);          // indicador exposto
+    expect(sql).toMatch(/karate_dojo_charges/);     // filtro toca a cobrança vencida
+  });
+
   test('GET ficha de aluno de OUTRO dojô → 404 (query parametrizada por req.dojoId)', async () => {
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).get(`${base}/students/${sid}`).set(canalA());
