@@ -1402,30 +1402,46 @@ router.post('/:slug/inscricao/:eventId', async (req, res) => {
 // — nunca registradas no router. Export movido para o fim real do arquivo.
 
 // Busca payment_status (karate_payment_intents) para as inscrições ativas
-// retornadas por /:slug/lookup. karate_payment_intents não tem FK direta pra
-// inscrição (é vinculada por federation_id + criada no momento do PIX) —
-// então casamos pelo txid, que o fluxo de inscrição gera como
-// `insc-<inscriptionId>` (ver POST /:slug/inscricao/:eventId). Código
-// defensivo: 42P01/42703 (tabela/coluna ausente) -> payment_status null p/
-// todos os itens, sem quebrar o lookup.
+// retornadas por /:slug/lookup.
+//
+// FIX (P0 Aura Pay): o INSERT do intent grava source_type='event_registration'
+// + source_id = id da inscrição (migration 213, índice idx_kpi_source) — esse
+// é o vínculo canônico. A versão anterior casava payment_intent_id contra o
+// TXID cru (`insc-<id>`), mas payment_intent_id guarda o id do PROVIDER
+// (`static-<txid>` / id Asaas) — nunca casava, e payment_status saía null
+// para todas as inscrições desde sempre.
+//
+// Pode haver mais de um intent por inscrição (PIX regenerado): 'paid' vence;
+// entre não-pagos, o mais recente. Código defensivo: 42P01/42703 (tabela ou
+// colunas da 213 ausentes) -> payment_status null p/ todos, sem quebrar o
+// lookup.
 async function resolvePaymentStatuses(federationId, inscriptionIds) {
   const statuses = {};
   if (!inscriptionIds.length) return statuses;
   try {
-    const txids = inscriptionIds.map((id) => `insc-${String(id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 18)}`);
     const { rows } = await db.query(
-      `SELECT payment_intent_id, status
+      `SELECT source_id, status, created_at
        FROM karate_payment_intents
-       WHERE federation_id = $1 AND payment_intent_id = ANY($2::text[])`,
-      [federationId, txids]
+       WHERE federation_id = $1
+         AND source_type = 'event_registration'
+         AND source_id = ANY($2::uuid[])`,
+      [federationId, inscriptionIds]
     );
-    const byTxid = {};
-    for (const r of rows) byTxid[r.payment_intent_id] = r.status;
-    inscriptionIds.forEach((id, i) => {
-      statuses[id] = byTxid[txids[i]] || null;
+    // 'paid' vence sobre qualquer outro status; empate de não-pagos → o mais
+    // recente (o QR regenerado substitui o anterior na leitura).
+    const best = {};
+    for (const r of rows) {
+      const cur = best[r.source_id];
+      const beats = !cur
+        || (r.status === 'paid' && cur.status !== 'paid')
+        || (cur.status !== 'paid' && r.status !== 'paid' && new Date(r.created_at) > new Date(cur.created_at));
+      if (beats) best[r.source_id] = r;
+    }
+    inscriptionIds.forEach((id) => {
+      statuses[id] = best[id] ? best[id].status : null;
     });
   } catch (e) {
-    if (e.code === '42P01' || e.code === '42703') {
+    if (e.code === '42P01' || e.code === '42703' || e.code === '22P02') {
       console.warn('[karatePublic] karate_payment_intents ausente/coluna faltando em resolvePaymentStatuses:', e.code);
       inscriptionIds.forEach((id) => { statuses[id] = null; });
     } else throw e;

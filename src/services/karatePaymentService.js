@@ -226,6 +226,42 @@ async function confirmIntent(intentId, opts = {}) {
          WHERE id = $2`,
         [paidAt, intent.annuity_history_id]
       );
+    } else if (intent.source_type === 'event_registration' && intent.source_id) {
+      // ── FIX (P0 Aura Pay): baixa da INSCRIÇÃO DE EVENTO ──────────────
+      // O funil público (karatePublic POST /:slug/inscricao/:eventId) cria o
+      // intent com source_type='event_registration' + source_id = id da
+      // inscrição — mas este confirm só tratava anuidade, então o PIX pago
+      // confirmava o intent e a inscrição ficava fee_paid=false para sempre
+      // (o pending_payment_count do bracket nunca zerava sozinho).
+      //
+      // O source_id pode morar em QUALQUER uma das três tabelas de inscrição
+      // (competição / exame-curso canônico / curso legado) — o intent não
+      // guarda qual. Tenta as três em ordem de probabilidade e para na
+      // primeira que atualizar. SAVEPOINT por tentativa: uma tabela ausente
+      // (42P01, deploy parcial) não pode envenenar a transação do confirm
+      // (armadilha_tx_poison_best_effort_savepoint do CLAUDE.md).
+      // karate_event_enrollments não tem updated_at (migration 160) — por
+      // isso o SET difere na terceira.
+      const feePaidTargets = [
+        `UPDATE karate_competition_entries    SET fee_paid = true, updated_at = NOW() WHERE id = $1 AND fee_paid = false`,
+        `UPDATE karate_belt_exam_candidates   SET fee_paid = true, updated_at = NOW() WHERE id = $1 AND fee_paid = false`,
+        `UPDATE karate_event_enrollments      SET fee_paid = true                     WHERE id = $1 AND fee_paid = false`,
+      ];
+      for (const sql of feePaidTargets) {
+        await client.query('SAVEPOINT sp_event_fee');
+        try {
+          const upd = await client.query(sql, [intent.source_id]);
+          await client.query('RELEASE SAVEPOINT sp_event_fee');
+          if (upd.rowCount > 0) break;
+        } catch (e) {
+          await client.query('ROLLBACK TO SAVEPOINT sp_event_fee');
+          if (e.code !== '42P01' && e.code !== '42703') throw e;
+        }
+      }
+      // Sem financeAudit aqui de propósito: karate_finance_audit_log tem
+      // CHECK target_type IN ('annuity','installment') (migration 227) — o
+      // rastro de pagamento de evento nasce com trilha própria no P0 da
+      // delegação, não remendado no log de anuidades.
     }
 
     // Reconcilia transaction (status é o enum transaction_status → 'confirmed')
