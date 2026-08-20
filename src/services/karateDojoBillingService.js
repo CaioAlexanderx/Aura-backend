@@ -510,11 +510,28 @@ async function createChargePix(dojoId, chargeId) {
   // caminho pix_manual (F3a) fica idêntico ao de antes.
   const baas = await baasSvc.resolveActiveBaas(dojoId);
   if (baas) {
-    // REUSO (F3c): já há BR Code salvo E o pagamento na subconta já foi
-    // criado (pix_txid). NUNCA cria um novo payment Asaas a cada clique/
-    // lembrete — evita cobranças duplicadas na subconta do dojô.
-    if (existingPayload && c.pix_txid) {
-      return { payload: existingPayload, public_url: buildPublicUrl(existingPayload), provider: 'baas' };
+    // REUSO ROBUSTO (A1): o pix_txid é a prova de que o pagamento na subconta
+    // JÁ existe. Se ele existe, NUNCA cria outro — mesmo que o pix_payload não
+    // tenha persistido (persistPixArtifacts é best-effort; a coluna pode faltar
+    // com a 245 pendente). Antes o guard exigia AS DUAS colunas, então uma
+    // falha de persist fazia a fila/lembrete criar N cobranças a cada GET.
+    if (c.pix_txid) {
+      if (existingPayload) {
+        return { payload: existingPayload, public_url: buildPublicUrl(existingPayload), provider: 'baas' };
+      }
+      // payload ausente → RE-BUSCA o BR Code no Asaas (leitura), nunca duplica.
+      try {
+        const re = await baasSvc.fetchChargePixViaBaas({ account: baas, paymentId: c.pix_txid });
+        if (re && re.payload) {
+          await persistPixArtifacts(dojoId, chargeId, c.pix_txid, re.payload); // best-effort
+          return { payload: re.payload, public_url: buildPublicUrl(re.payload), provider: 'baas' };
+        }
+      } catch (e) {
+        console.warn('[karateDojoBilling] re-fetch do PIX BaaS falhou (não duplica a cobrança):', e.message);
+      }
+      // Não recuperou o BR Code — mas NÃO cria uma segunda cobrança. O link
+      // fica indisponível até reconciliar; melhor do que cobrar em dobro.
+      return { payload: null, public_url: null, provider: 'baas' };
     }
     let res;
     try {
