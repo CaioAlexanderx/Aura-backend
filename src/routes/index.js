@@ -188,6 +188,17 @@ router.use('/public/karate', require('./karatePublic'));
 //   GET /public/karate/:slug/ranking/:season/:category— atalho REST (iframe)
 router.use('/public/karate', require('./karatePublicRanking'));
 
+// ── AURA KARATÊ — P0 Hub de Campeonatos: páginas públicas ──────
+// Conferência de inscrições + chaves publicadas (gate por
+// conference_published_at / brackets_published_at — 404 PUBLICATION_PENDING
+// antes da federação publicar). Substitui o PDF de conferência por e-mail
+// e as chaves por WhatsApp.
+//   GET /public/karate/:slug/competitions/:cid
+//   GET /public/karate/:slug/competitions/:cid/conference
+//   GET /public/karate/:slug/competitions/:cid/brackets
+//   GET /public/karate/:slug/competitions/:cid/categories/:catId/bracket
+router.use('/public/karate', require('./karateCompetitionsPublic'));
+
 // ── AURA KARATÊ — Fase 0 Dojô (Canal B público: OTP do responsável) ──
 // POST /public/karate/:slug/dojo/portal/request-otp
 // POST /public/karate/:slug/dojo/portal/verify-otp

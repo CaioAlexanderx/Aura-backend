@@ -694,6 +694,244 @@ async function getOrder(federationId, dojoId, orderId) {
   }
 }
 
+// ============================================================
+// FILA DE CONFERÊNCIA — comprovante (dojô) + confirmar/recusar (federação)
+// Digitaliza o fluxo real: "planilhas de inscrição sem comprovante de
+// depósito, e vice-versa, serão desconsideradas" (Regulamento JKA). Para a
+// federação SEM Aura Pay, esta fila É o produto; para a que aderir, é o
+// que o Aura Pay elimina.
+// ============================================================
+
+const RECEIPT_TYPES = Object.freeze({
+  'application/pdf': 'pdf',
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+});
+// ~5MB reais (base64 infla ~33%) — mesma régua dos anexos de exame do dojô.
+const RECEIPT_MAX_BASE64 = 7 * 1024 * 1024;
+
+// Dojô anexa o comprovante do pedido → status 'awaiting_confirmation'.
+// Aceito em awaiting_payment (primeiro envio) e awaiting_confirmation
+// (reenvio/correção do arquivo). pix_direct também aceita: se o PIX falhou
+// na geração, o clube pode pagar por fora e comprovar.
+async function uploadReceipt({ federationId, dojoId, orderId, fileBase64, contentType, uploadToR2 }) {
+  if (!isUuid(orderId)) throw serviceError(404, 'NOT_FOUND', 'Pedido não encontrado');
+  const ext = RECEIPT_TYPES[String(contentType || '').toLowerCase()];
+  if (!ext) {
+    throw serviceError(422, 'TIPO_INVALIDO', 'Comprovante deve ser PDF, JPEG, PNG ou WebP');
+  }
+  const b64 = String(fileBase64 || '');
+  if (!b64) throw serviceError(422, 'VALIDATION_ERROR', 'Arquivo vazio');
+  if (b64.length > RECEIPT_MAX_BASE64) {
+    throw serviceError(422, 'ARQUIVO_GRANDE', 'Comprovante acima de 5MB');
+  }
+
+  const { rows } = await db.query(
+    `-- p0d:receipt-load-order
+     SELECT id, status FROM karate_delegation_orders
+      WHERE id = $1 AND federation_id = $2 AND dojo_id = $3
+      LIMIT 1`,
+    [orderId, federationId, dojoId]
+  );
+  if (!rows.length) throw serviceError(404, 'NOT_FOUND', 'Pedido não encontrado');
+  const order = rows[0];
+  if (!['awaiting_payment', 'awaiting_confirmation'].includes(order.status)) {
+    throw serviceError(409, 'STATUS_INVALIDO',
+      `Pedido ${order.status === 'paid' ? 'já confirmado' : order.status} não aceita comprovante`);
+  }
+
+  const key = `karate/${federationId}/delegation-receipts/${orderId}/${Date.now()}.${ext}`;
+  const up = await uploadToR2(key, b64, contentType);
+  if (!up || !up.url) {
+    throw serviceError(502, 'UPLOAD_FALHOU', 'Não foi possível salvar o comprovante — tente novamente');
+  }
+
+  const upd = await db.query(
+    `-- p0d:receipt-update-order
+     UPDATE karate_delegation_orders
+        SET receipt_url = $1, receipt_uploaded_at = NOW(),
+            status = 'awaiting_confirmation', updated_at = NOW()
+      WHERE id = $2
+    RETURNING id, status, receipt_url, receipt_uploaded_at`,
+    [up.url, orderId]
+  );
+  return upd.rows[0];
+}
+
+// Federação confirma o pedido: 'paid' + cascata fee_paid nas entries.
+// Idempotente: já pago → 409 ALREADY_PAID (a UI mostra quem confirmou).
+async function confirmOrder({ federationId, competitionId, orderId, actorId, actorName }) {
+  if (!isUuid(orderId)) throw serviceError(404, 'NOT_FOUND', 'Pedido não encontrado');
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const cur = await client.query(
+      `-- p0d:confirm-load-order
+       SELECT id, status, dojo_id, total_amount FROM karate_delegation_orders
+        WHERE id = $1 AND federation_id = $2 AND competition_id = $3
+        FOR UPDATE`,
+      [orderId, federationId, competitionId]
+    );
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      throw serviceError(404, 'NOT_FOUND', 'Pedido não encontrado nesta competição');
+    }
+    const order = cur.rows[0];
+    if (order.status === 'paid') {
+      await client.query('ROLLBACK');
+      throw serviceError(409, 'ALREADY_PAID', 'Pedido já confirmado');
+    }
+    if (order.status === 'cancelled') {
+      await client.query('ROLLBACK');
+      throw serviceError(409, 'PEDIDO_CANCELADO', 'Pedido cancelado não pode ser confirmado');
+    }
+
+    await client.query(
+      `-- p0d:confirm-order
+       UPDATE karate_delegation_orders
+          SET status = 'paid', confirmed_by = $1, confirmed_by_name = $2,
+              confirmed_at = NOW(), updated_at = NOW()
+        WHERE id = $3`,
+      [actorId || null, actorName || null, orderId]
+    );
+    const cascade = await client.query(
+      `-- p0d:confirm-cascade
+       UPDATE karate_competition_entries
+          SET fee_paid = true, updated_at = NOW()
+        WHERE delegation_order_id = $1 AND fee_paid = false`,
+      [orderId]
+    );
+
+    await client.query('COMMIT');
+    return { id: orderId, status: 'paid', entries_marked_paid: cascade.rowCount || 0 };
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* noop */ }
+    if (e.isServiceError) throw e;
+    if (e.code === '42P01') throw serviceError(503, 'SCHEMA_PENDING', 'Delegações indisponíveis (migração 294 pendente)');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// Federação recusa: pedido 'cancelled' + inscrições/equipes 'withdrawn'.
+// As entries NÃO são apagadas (rastro do que foi pedido e recusado) — só
+// saem das listagens/chaves, que já filtram withdrawn.
+async function rejectOrder({ federationId, competitionId, orderId, reason }) {
+  if (!isUuid(orderId)) throw serviceError(404, 'NOT_FOUND', 'Pedido não encontrado');
+  const cleanReason = reason != null && String(reason).trim() !== ''
+    ? String(reason).trim().slice(0, 1000) : null;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const cur = await client.query(
+      `-- p0d:reject-load-order
+       SELECT id, status FROM karate_delegation_orders
+        WHERE id = $1 AND federation_id = $2 AND competition_id = $3
+        FOR UPDATE`,
+      [orderId, federationId, competitionId]
+    );
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      throw serviceError(404, 'NOT_FOUND', 'Pedido não encontrado nesta competição');
+    }
+    const order = cur.rows[0];
+    if (order.status === 'paid') {
+      await client.query('ROLLBACK');
+      throw serviceError(409, 'PEDIDO_PAGO', 'Pedido já confirmado — não pode ser recusado. Trate o estorno fora do sistema.');
+    }
+    if (order.status === 'cancelled') {
+      await client.query('ROLLBACK');
+      throw serviceError(409, 'JA_CANCELADO', 'Pedido já cancelado');
+    }
+
+    await client.query(
+      `-- p0d:reject-order
+       UPDATE karate_delegation_orders
+          SET status = 'cancelled', cancelled_at = NOW(), cancel_reason = $1, updated_at = NOW()
+        WHERE id = $2`,
+      [cleanReason, orderId]
+    );
+    const entries = await client.query(
+      `-- p0d:reject-withdraw-entries
+       UPDATE karate_competition_entries
+          SET status = 'withdrawn', updated_at = NOW()
+        WHERE delegation_order_id = $1 AND status <> 'withdrawn'`,
+      [orderId]
+    );
+    await client.query(
+      `-- p0d:reject-withdraw-teams
+       UPDATE karate_competition_teams
+          SET status = 'withdrawn', updated_at = NOW()
+        WHERE delegation_order_id = $1 AND status <> 'withdrawn'`,
+      [orderId]
+    );
+
+    await client.query('COMMIT');
+    return { id: orderId, status: 'cancelled', entries_withdrawn: entries.rowCount || 0 };
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* noop */ }
+    if (e.isServiceError) throw e;
+    if (e.code === '42P01') throw serviceError(503, 'SCHEMA_PENDING', 'Delegações indisponíveis (migração 294 pendente)');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// Detalhe do pedido para a FEDERAÇÃO (fila de conferência).
+async function getOrderForFederation(federationId, competitionId, orderId) {
+  if (!isUuid(orderId)) return null;
+  try {
+    const { rows } = await db.query(
+      `-- p0d:fed-get-order
+       SELECT o.*, COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+         FROM karate_delegation_orders o
+         LEFT JOIN companies dj ON dj.id = o.dojo_id
+        WHERE o.id = $1 AND o.federation_id = $2 AND o.competition_id = $3
+        LIMIT 1`,
+      [orderId, federationId, competitionId]
+    );
+    if (!rows.length) return null;
+    const o = rows[0];
+    const entries = await db.query(
+      `-- p0d:fed-order-entries
+       SELECT e.id, e.category_id, cat.name AS category_name, e.status, e.fee_paid,
+              e.student_id, cu.name AS student_name,
+              e.team_id, t.name AS team_name
+         FROM karate_competition_entries e
+         JOIN karate_competition_categories cat ON cat.id = e.category_id
+         LEFT JOIN customers cu ON cu.id = e.student_id
+         LEFT JOIN karate_competition_teams t ON t.id = e.team_id
+        WHERE e.delegation_order_id = $1
+        ORDER BY cat.name ASC, cu.name ASC NULLS LAST`,
+      [orderId]
+    );
+    return {
+      id: o.id,
+      dojo: { id: o.dojo_id, name: o.dojo_name || null },
+      status: o.status,
+      payment_mode: o.payment_mode,
+      total_amount: Number(o.total_amount),
+      officials_count: o.officials_count,
+      quote: o.quote || {},
+      receipt_url: o.receipt_url || null,
+      receipt_uploaded_at: o.receipt_uploaded_at || null,
+      created_at: o.created_at,
+      confirmed_at: o.confirmed_at || null,
+      confirmed_by_name: o.confirmed_by_name || null,
+      cancelled_at: o.cancelled_at || null,
+      cancel_reason: o.cancel_reason || null,
+      entries: entries.rows,
+    };
+  } catch (e) {
+    if (e.code === '42P01') return null;
+    throw e;
+  }
+}
+
 module.exports = {
   MAX_ATHLETES,
   MAX_TEAMS,
@@ -703,4 +941,8 @@ module.exports = {
   submitDelegation,
   listOrders,
   getOrder,
+  uploadReceipt,
+  confirmOrder,
+  rejectOrder,
+  getOrderForFederation,
 };

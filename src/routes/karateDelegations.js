@@ -233,4 +233,27 @@ router.get('/dojo/delegations/:orderId', requireDojoAccess, async (req, res) => 
   }
 });
 
+// ── POST /dojo/delegations/:orderId/receipt — comprovante ───
+// Body: { file_base64, content_type } (PDF/JPEG/PNG/WebP, ~5MB).
+// Digitaliza o "planilha sem comprovante será desconsiderada" do fluxo
+// real: pedido vai para awaiting_confirmation e entra na fila da
+// federação. Reenvio permitido enquanto não confirmado.
+router.post('/dojo/delegations/:orderId/receipt', requireDojoAccess, requireChannelA, async (req, res) => {
+  try {
+    const { uploadToR2 } = require('../utils/r2Storage');
+    const b = req.body || {};
+    const out = await svc.uploadReceipt({
+      federationId: req.federationId,
+      dojoId: req.dojoId,
+      orderId: req.params.orderId,
+      fileBase64: b.file_base64,
+      contentType: b.content_type,
+      uploadToR2,
+    });
+    return res.json({ order: out });
+  } catch (e) {
+    return handleWriteError(res, e, 'POST /dojo/delegations/:orderId/receipt');
+  }
+});
+
 module.exports = router;
