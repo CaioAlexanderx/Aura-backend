@@ -30,7 +30,11 @@ const isTrue = (v, def) => {
 };
 
 // GET /federation/:id/dojos/:dojoId/export-data
-router.get('/:dojoId/export-data', ...guards.dojoScope(), async (req, res) => {
+// guards.read() (não dojoScope): dump cadastral completo (CPF, RG, nascimento,
+// endereço de todos os praticantes) é visão de GESTÃO da federação. Sob
+// dojoScope, um papel de dojô exportava a base de QUALQUER dojô — IDOR de PII
+// em massa. O dojô exporta os próprios dados pela superfície /dojo/*.
+router.get('/:dojoId/export-data', ...guards.read(), async (req, res) => {
   const { id: federationId, dojoId } = req.params;
   const status = ['all', 'active', 'inactive'].includes(String(req.query.status))
     ? String(req.query.status) : 'all';

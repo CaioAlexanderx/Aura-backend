@@ -464,12 +464,16 @@ router.delete('/belt-exams/:examId', ...guards.staffWrite(), async (req, res) =>
     );
     if (!ex.rows.length) return res.status(404).json({ error: 'Evento não encontrado' });
 
-    const safeCount = async (sql) => {
-      try { const r = await db.query(sql, [examId, federationId]); return r.rows[0]?.n || 0; }
+    // Cada query declara seus próprios placeholders → recebe seus próprios
+    // params. Antes safeCount sempre mandava [examId, federationId] (2 valores)
+    // e a contagem de candidatos declarava só $1 → Postgres rejeitava o Bind
+    // (08P01), o catch só tolerava 42P01, e TODO DELETE de evento virava 500.
+    const safeCount = async (sql, params) => {
+      try { const r = await db.query(sql, params); return r.rows[0]?.n || 0; }
       catch (e) { if (e.code === '42P01') return 0; throw e; }
     };
-    const nCand = await safeCount('SELECT count(*)::int AS n FROM karate_belt_exam_candidates WHERE exam_id = $1');
-    const nCert = await safeCount('SELECT count(*)::int AS n FROM karate_issued_certificates WHERE event_id = $1 AND federation_id = $2');
+    const nCand = await safeCount('SELECT count(*)::int AS n FROM karate_belt_exam_candidates WHERE exam_id = $1', [examId]);
+    const nCert = await safeCount('SELECT count(*)::int AS n FROM karate_issued_certificates WHERE event_id = $1 AND federation_id = $2', [examId, federationId]);
     if (nCand > 0 || nCert > 0) {
       return res.status(409).json({
         error: 'Este evento tem inscritos ou certificados emitidos e não pode ser excluído. Cancele o evento ou remova os registros antes.',
@@ -876,6 +880,14 @@ router.post('/belt-exams/:examId/candidates', ...guards.staffWrite(), async (req
 router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResults(), async (req, res) => {
   const { id: federationId, examId, candidateId } = req.params;
   const { status, result_notes } = req.body;
+  // A banca pode definir a faixa alcançada no lançamento do resultado. O dojô
+  // submete a pessoa sem faixa-alvo (target_belt nullable, migration 293), então
+  // é AQUI que ela pode ser gravada, antes do trigger de aprovação escrever o
+  // histórico. Aceita target_belt (cor) e target_belt_name (rótulo com grau).
+  const bodyTargetBelt = req.body.target_belt != null && String(req.body.target_belt).trim() !== ''
+    ? String(req.body.target_belt).trim() : null;
+  const bodyTargetBeltName = req.body.target_belt_name != null && String(req.body.target_belt_name).trim() !== ''
+    ? String(req.body.target_belt_name).trim() : null;
 
   const VALID_STATUS = ['approved', 'rejected', 'absent'];
   if (!status || !VALID_STATUS.includes(status)) {
@@ -918,13 +930,31 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
       });
     }
 
-    // Atualiza status — trigger karate_on_exam_approved insere o histórico de faixa
+    // Faixa efetiva: a definida agora pela banca ou a que o candidato já trazia.
+    const effectiveTargetBelt = bodyTargetBelt || cand.target_belt || null;
+    // Aprovar dispara o trigger karate_on_exam_approved, que insere
+    // belt_level = target_belt em karate_belt_history (coluna NOT NULL). Sem
+    // faixa, o trigger estouraria 23502 DENTRO da transação — 500 depois do
+    // exame já ter acontecido. Barra ANTES do BEGIN mutar qualquer coisa.
+    if (status === 'approved' && !effectiveTargetBelt) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        error: 'Defina a faixa alcançada (target_belt) para aprovar este candidato.',
+        code: 'TARGET_BELT_REQUIRED',
+      });
+    }
+
+    // Atualiza status + faixa (COALESCE preserva o valor existente se o corpo
+    // não trouxer) — trigger karate_on_exam_approved insere o histórico de faixa
     const updRes = await client.query(
       `UPDATE karate_belt_exam_candidates
-       SET status = $1, result_notes = $2, updated_at = NOW()
+       SET status = $1, result_notes = $2,
+           target_belt = COALESCE($4, target_belt),
+           target_belt_name = COALESCE($5, target_belt_name),
+           updated_at = NOW()
        WHERE id = $3
-       RETURNING id, exam_id, student_id, target_belt, status, result_notes, updated_at`,
-      [status, result_notes || null, candidateId]
+       RETURNING id, exam_id, student_id, target_belt, target_belt_name, status, result_notes, updated_at`,
+      [status, result_notes || null, candidateId, bodyTargetBelt, bodyTargetBeltName]
     );
     const updated = updRes.rows[0];
 
@@ -933,7 +963,7 @@ router.patch('/belt-exams/:examId/candidates/:candidateId', ...guards.examResult
     // inesperado → pede revisão. A view karate_current_belt já reflete a faixa.
     let registration = null;
     if (status === 'approved') {
-      const change = computeDanRegistrationChange(cand.reg_number, cand.target_belt_name, cand.target_belt) || { action: 'none' };
+      const change = computeDanRegistrationChange(cand.reg_number, updated.target_belt_name, updated.target_belt) || { action: 'none' };
       if (change.action === 'update') {
         const dup = await client.query(
           `SELECT id FROM customers WHERE karate_registration_number = $1 AND id <> $2 LIMIT 1`,

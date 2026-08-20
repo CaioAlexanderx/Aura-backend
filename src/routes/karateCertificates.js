@@ -40,6 +40,30 @@ function reqDojoId(req) {
   return (req.user && req.user.dojo_id) || (req.companyContext && req.companyContext.dojo_id) || null;
 }
 
+// Papéis escopados a um dojô (não à federação). Definidos por company_members.
+const DOJO_SCOPED_ROLES = ['sensei', 'dojo_owner'];
+
+// Resolve o dojo_id efetivo RESPEITANDO o escopo do chamador — o handler nunca
+// confia cegamente em dojo_id do corpo/query (era o IDOR: um dojô lia/gravava
+// pedidos de outro dojô via ?dojo_id= ou body):
+//  - papel de dojô (sensei/dojo_owner): TRAVADO no próprio dojo_id; um dojo_id
+//    diferente no corpo/query é 403.
+//  - staff/owner da federação: pode mirar um dojô específico (corpo/query); a
+//    posse à federação é validada no service (createOrder/getOrdersByDojo).
+function resolveScopedDojoId(req, requested) {
+  const own = reqDojoId(req);
+  if (DOJO_SCOPED_ROLES.includes(req.companyRole)) {
+    if (!own) return { error: 'NO_DOJO', message: 'Conta de dojô sem dojo_id no contexto.' };
+    if (requested && String(requested) !== String(own)) {
+      return { error: 'FORBIDDEN', message: 'Você só pode operar certificados do seu próprio dojô.' };
+    }
+    return { dojoId: own };
+  }
+  const target = requested || own;
+  if (!target) return { error: 'MISSING', message: 'dojo_id é obrigatório.' };
+  return { dojoId: target };
+}
+
 function whoOpts(req, orgName) {
   return {
     whoId:   req.user?.id   || null,
@@ -66,10 +90,12 @@ router.post('/certificate-orders', ...guards.dojoScope(), async (req, res) => {
     return res.status(400).json({ error: 'Para envio por correio, addr_logradouro é obrigatório.' });
   }
 
-  const resolvedDojoId = dojo_id || reqDojoId(req);
-  if (!resolvedDojoId) {
-    return res.status(400).json({ error: 'dojo_id é obrigatório.' });
+  const scoped = resolveScopedDojoId(req, dojo_id);
+  if (scoped.error) {
+    const code = scoped.error === 'FORBIDDEN' ? 403 : 400;
+    return res.status(code).json({ error: scoped.message, code: scoped.error });
   }
+  const resolvedDojoId = scoped.dojoId;
 
   try {
     const order = await createOrder({
@@ -94,6 +120,7 @@ router.post('/certificate-orders', ...guards.dojoScope(), async (req, res) => {
     return res.status(201).json(order);
   } catch (err) {
     if (err.code === 'DUPLICATE_ORDER') return res.status(409).json({ error: err.message, code: err.code });
+    if (err.code === 'FORBIDDEN_SCOPE') return res.status(403).json({ error: err.message, code: err.code });
     if (err.code === 'TABLE_MISSING')   return res.status(503).json({ error: err.message, code: err.code });
     console.error('[karateCertificates] createOrder error:', err.message);
     return res.status(500).json({ error: 'Erro ao criar pedido de certificado.' });
@@ -104,11 +131,12 @@ router.post('/certificate-orders', ...guards.dojoScope(), async (req, res) => {
 // Dojô lista seus próprios pedidos.
 router.get('/certificate-orders/mine', ...guards.dojoScope(), async (req, res) => {
   const federationId = req.params.id;
-  const dojoId = req.query.dojo_id || reqDojoId(req);
-
-  if (!dojoId) {
-    return res.status(400).json({ error: 'dojo_id é obrigatório (query ou contexto do usuário).' });
+  const scoped = resolveScopedDojoId(req, req.query.dojo_id);
+  if (scoped.error) {
+    const code = scoped.error === 'FORBIDDEN' ? 403 : 400;
+    return res.status(code).json({ error: scoped.message, code: scoped.error });
   }
+  const dojoId = scoped.dojoId;
 
   try {
     const orders = await getOrdersByDojo(dojoId, federationId, {

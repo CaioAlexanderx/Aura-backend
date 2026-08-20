@@ -161,6 +161,42 @@ async function createOrder({
   createdBy,
   createdByName,
 }) {
+  // ── Escopo federativo (anti-IDOR) ──────────────────────────────
+  // dojo_id e practitioner_id podem chegar do corpo da requisição. Validamos
+  // que AMBOS pertencem a ESTA federação antes de gravar — senão um pedido
+  // poderia ser forjado em nome de outro dojô / para praticante alheio.
+  // companies.federation_id (migration 147) e customers.federation_id/dojo_id
+  // (migration 148) são as âncoras. 22P02 (uuid inválido) → trata como ausente.
+  const scopeCheck = async (sql, params) => {
+    try { const r = await db.query(sql, params); return r.rows.length > 0; }
+    catch (e) { if (e.code === '22P02') return false; throw e; }
+  };
+  const dojoOk = await scopeCheck(
+    `SELECT 1 FROM companies
+      WHERE id = $1 AND federation_id = $2
+        AND (vertical = 'karate_dojo' OR vertical_active = 'karate_dojo')
+      LIMIT 1`,
+    [dojoId, federationId]
+  );
+  if (!dojoOk) {
+    const e = new Error('Dojô não pertence a esta federação.');
+    e.code = 'FORBIDDEN_SCOPE';
+    throw e;
+  }
+  // Praticante: da federação OU do próprio dojô do pedido (cobre praticante
+  // ainda sem federation_id populado, mas já vinculado ao dojô).
+  const practitionerOk = await scopeCheck(
+    `SELECT 1 FROM customers
+      WHERE id = $1 AND (federation_id = $2 OR dojo_id = $3)
+      LIMIT 1`,
+    [practitionerId, federationId, dojoId]
+  );
+  if (!practitionerOk) {
+    const e = new Error('Praticante não pertence a esta federação/dojô.');
+    e.code = 'FORBIDDEN_SCOPE';
+    throw e;
+  }
+
   // Checagem ADVISORY: o praticante tem essa graduação registrada?
   let beltCheck = { rows: [] };
   try {
