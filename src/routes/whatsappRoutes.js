@@ -7,8 +7,20 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const wa = require('../services/whatsapp');
+const { encrypt, decrypt } = require('../services/dojoBaasCrypto');
 
-// Helper: get company WA config
+// A9 — o token permanente do Graph API é cifrado em repouso (AES-256-GCM,
+// mesmo cofre do dojoBaasCrypto). Formato cifrado = "v1:...". Token legado
+// (gravado em texto puro antes da cifra) NÃO tem o prefixo v1: → usado como
+// está (migração transparente). Se v1: e a decifra falhar (chave errada/
+// adulteração), o erro PROPAGA — nunca devolve o ciphertext como se fosse token.
+function decryptToken(stored) {
+  if (!stored) return stored;
+  if (!/^v1:/.test(String(stored))) return stored; // legado em texto puro
+  return decrypt(stored);
+}
+
+// Helper: get company WA config (token já DECIFRADO para uso nos envios)
 async function getWaConfig(companyId) {
   const { rows } = await db.query(
     'SELECT wa_waba_id, wa_phone_number_id, wa_phone_display, wa_access_token FROM companies WHERE id=$1',
@@ -16,6 +28,7 @@ async function getWaConfig(companyId) {
   );
   if (!rows.length) throw new Error('Empresa nao encontrada');
   if (!rows[0].wa_access_token) throw new Error('WhatsApp nao conectado. Conecte em Configuracoes > WhatsApp.');
+  rows[0].wa_access_token = decryptToken(rows[0].wa_access_token);
   return rows[0];
 }
 
@@ -37,13 +50,13 @@ router.post('/connect', async (req, res) => {
       } catch {}
     }
 
-    // Save to company
+    // Save to company — token CIFRADO em repouso (A9).
     await db.query(
       `UPDATE companies SET
         wa_waba_id=$1, wa_phone_number_id=$2, wa_phone_display=$3,
         wa_access_token=$4, wa_connected_at=NOW(), updated_at=NOW()
        WHERE id=$5`,
-      [waba_id || null, phone_number_id || null, phoneDisplay, accessToken, cid]
+      [waba_id || null, phone_number_id || null, phoneDisplay, encrypt(accessToken), cid]
     );
 
     res.json({
