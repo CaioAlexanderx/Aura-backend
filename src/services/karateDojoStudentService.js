@@ -787,7 +787,8 @@ async function getDashboard(dojoId) {
   //    O guard enrolled_at evita marcar recém-matriculado (ainda sem chamada).
   const evasao = await db.query(
     `SELECT s.id, s.full_name, s.belt_label,
-            to_char(la.last_date, 'YYYY-MM-DD') AS last_attendance
+            to_char(la.last_date, 'YYYY-MM-DD') AS last_attendance,
+            count(*) OVER()::int AS total_count
        FROM karate_dojo_students s
        LEFT JOIN LATERAL (
          SELECT max(a.date) AS last_date FROM karate_dojo_attendance a
@@ -818,7 +819,8 @@ async function getDashboard(dojoId) {
   //    a elegibilidade FPKT completa (min_months/min_courses) — é um sinal de
   //    "quem está pronto para o sensei olhar". Elegibilidade formal = follow-up.
   const aptos = await db.query(
-    `SELECT s.id, s.full_name, s.belt_label, cnt.n AS presences_90d
+    `SELECT s.id, s.full_name, s.belt_label, cnt.n AS presences_90d,
+            count(*) OVER()::int AS total_count
        FROM karate_dojo_students s
        JOIN LATERAL (
          SELECT count(*)::int AS n FROM karate_dojo_attendance a
@@ -833,9 +835,14 @@ async function getDashboard(dojoId) {
     [dojoId]
   );
 
+  // count EXATO (total pré-LIMIT via window) — a lista fica capada em 200,
+  // mas o número mostrado no card é o total real (evita "200" quando são 230).
+  const totalCount = (res) =>
+    res.rows[0] && res.rows[0].total_count != null ? Number(res.rows[0].total_count) : res.rows.length;
+
   return {
     evasao: {
-      count: evasao.rows.length,
+      count: totalCount(evasao),
       students: evasao.rows.map((r) => ({
         id: r.id, full_name: r.full_name, belt_label: r.belt_label || null,
         last_attendance: r.last_attendance || null,
@@ -849,7 +856,7 @@ async function getDashboard(dojoId) {
       })),
     },
     exam_candidates: {
-      count: aptos.rows.length,
+      count: totalCount(aptos),
       students: aptos.rows.map((r) => ({
         id: r.id, full_name: r.full_name, belt_label: r.belt_label || null,
         presences_90d: Number(r.presences_90d) || 0,
