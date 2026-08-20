@@ -183,6 +183,29 @@ router.get('/dojo/students', requireDojoAccess, async (req, res) => {
   }
 });
 
+// ── GET /federation/:id/dojo/dashboard ──
+// Onda 4 — ferramentas do sensei: evasão, aniversariantes do mês e candidatos
+// a exame (heurística de presença). Escopo SEMPRE pelo req.dojoId do token.
+router.get('/dojo/dashboard', requireDojoAccess, async (req, res) => {
+  try {
+    const data = await svc.getDashboard(req.dojoId);
+    return res.json(data);
+  } catch (e) {
+    // 42P01: karate_dojo_attendance/students ainda sem migration (246/242) —
+    // devolve vazio + schema_pending, sem 500 (mesmo padrão da listagem).
+    if (e && e.code === '42P01') {
+      return res.json({
+        evasao: { count: 0, students: [] },
+        birthdays: { count: 0, students: [] },
+        exam_candidates: { count: 0, students: [] },
+        schema_pending: true,
+      });
+    }
+    console.error('[karateDojoStudents] dashboard error:', e.message);
+    return res.status(500).json({ error: 'Erro ao carregar o painel do dojô' });
+  }
+});
+
 // ── POST /federation/:id/dojo/students ──
 router.post('/dojo/students', requireDojoAccess, requireChannelA, async (req, res) => {
   const { errors, data } = svc.validateStudentPayload(req.body, { partial: false });

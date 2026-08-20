@@ -775,6 +775,89 @@ async function getSummary(dojoId) {
   };
 }
 
+// ── Onda 4 — Dashboard do sensei ────────────────────────────────
+// Três leituras sobre dados que já existem (presença, nascimento), pensadas
+// para o painel do dojô. Datas em America/São Paulo (não UTC do servidor).
+// karate_dojo_attendance.present é boolean → contamos SÓ present=true (a
+// linha existe também para ausência marcada). Cada peça degrada isolada.
+const SP_TODAY = `(now() AT TIME ZONE 'America/Sao_Paulo')::date`;
+
+async function getDashboard(dojoId) {
+  // 1) EVASÃO — ativo, matriculado há >30 dias, sem presença nos últimos 30.
+  //    O guard enrolled_at evita marcar recém-matriculado (ainda sem chamada).
+  const evasao = await db.query(
+    `SELECT s.id, s.full_name, s.belt_label,
+            to_char(la.last_date, 'YYYY-MM-DD') AS last_attendance
+       FROM karate_dojo_students s
+       LEFT JOIN LATERAL (
+         SELECT max(a.date) AS last_date FROM karate_dojo_attendance a
+          WHERE a.student_id = s.id AND a.present = true
+       ) la ON true
+      WHERE s.dojo_id = $1 AND s.status = 'active'
+        AND (s.enrolled_at IS NULL OR s.enrolled_at <= ${SP_TODAY} - INTERVAL '30 days')
+        AND (la.last_date IS NULL OR la.last_date < ${SP_TODAY} - INTERVAL '30 days')
+      ORDER BY la.last_date ASC NULLS FIRST, s.full_name ASC
+      LIMIT 200`,
+    [dojoId]
+  );
+
+  // 2) ANIVERSARIANTES do mês (ativos).
+  const bdays = await db.query(
+    `SELECT id, full_name, belt_label,
+            to_char(birth_date, 'YYYY-MM-DD') AS birth_date,
+            extract(day from birth_date)::int AS day
+       FROM karate_dojo_students
+      WHERE dojo_id = $1 AND status = 'active' AND birth_date IS NOT NULL
+        AND extract(month from birth_date) = extract(month from ${SP_TODAY})
+      ORDER BY extract(day from birth_date) ASC, full_name ASC`,
+    [dojoId]
+  );
+
+  // 3) CANDIDATOS A EXAME (heurística de engajamento) — ativo, NÃO faixa-preta,
+  //    com >=12 presenças nos últimos 90 dias (~1x/semana por 3 meses). NÃO é
+  //    a elegibilidade FPKT completa (min_months/min_courses) — é um sinal de
+  //    "quem está pronto para o sensei olhar". Elegibilidade formal = follow-up.
+  const aptos = await db.query(
+    `SELECT s.id, s.full_name, s.belt_label, cnt.n AS presences_90d
+       FROM karate_dojo_students s
+       JOIN LATERAL (
+         SELECT count(*)::int AS n FROM karate_dojo_attendance a
+          WHERE a.student_id = s.id AND a.present = true
+            AND a.date >= ${SP_TODAY} - INTERVAL '90 days'
+       ) cnt ON true
+      WHERE s.dojo_id = $1 AND s.status = 'active'
+        AND COALESCE(s.belt_label, '') NOT ILIKE '%preta%'
+        AND cnt.n >= 12
+      ORDER BY cnt.n DESC, s.full_name ASC
+      LIMIT 200`,
+    [dojoId]
+  );
+
+  return {
+    evasao: {
+      count: evasao.rows.length,
+      students: evasao.rows.map((r) => ({
+        id: r.id, full_name: r.full_name, belt_label: r.belt_label || null,
+        last_attendance: r.last_attendance || null,
+      })),
+    },
+    birthdays: {
+      count: bdays.rows.length,
+      students: bdays.rows.map((r) => ({
+        id: r.id, full_name: r.full_name, belt_label: r.belt_label || null,
+        birth_date: r.birth_date, day: Number(r.day) || null,
+      })),
+    },
+    exam_candidates: {
+      count: aptos.rows.length,
+      students: aptos.rows.map((r) => ({
+        id: r.id, full_name: r.full_name, belt_label: r.belt_label || null,
+        presences_90d: Number(r.presences_90d) || 0,
+      })),
+    },
+  };
+}
+
 async function getStudent(dojoId, studentId) {
   const { rows } = await withStudentSchemaFallback(() => db.query(
     `SELECT ${studentFields('s.')},
@@ -2654,6 +2737,7 @@ module.exports = {
   listStudentsPaged,
   countStudents,
   getSummary,
+  getDashboard,
   getStudent,
   createStudent,
   updateStudent,

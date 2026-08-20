@@ -309,6 +309,33 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(sql).toMatch(/karate_dojo_charges/);     // filtro toca a cobrança vencida
   });
 
+  test('Onda 4 — GET /dojo/dashboard: evasão, aniversariantes e candidatos a exame', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [{ id: 'e1', full_name: 'Sumido', belt_label: 'Verde', last_attendance: '2026-06-01' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'b1', full_name: 'Aniversariante', belt_label: 'Roxa', birth_date: '2015-08-10', day: 10 }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'a1', full_name: 'Engajado', belt_label: 'Marrom 3º kyu', presences_90d: 20 }] });
+
+    const res = await request(app).get(`${base}/dashboard`).set(canalA());
+
+    expect(res.status).toBe(200);
+    expect(res.body.evasao.count).toBe(1);
+    expect(res.body.evasao.students[0].full_name).toBe('Sumido');
+    expect(res.body.birthdays.students[0].day).toBe(10);
+    expect(res.body.exam_candidates.students[0].presences_90d).toBe(20);
+    // escopo SEMPRE pelo dojo do token
+    for (const call of db.query.mock.calls) expect(call[1]).toEqual([dojoId]);
+  });
+
+  test('Onda 4 — dashboard degrada 42P01 (migração de presença pendente) → schema_pending', async () => {
+    const err = new Error('relation "karate_dojo_attendance" does not exist');
+    err.code = '42P01';
+    db.query.mockRejectedValueOnce(err);
+    const res = await request(app).get(`${base}/dashboard`).set(canalA());
+    expect(res.status).toBe(200);
+    expect(res.body.schema_pending).toBe(true);
+    expect(res.body.evasao.count).toBe(0);
+  });
+
   test('GET ficha de aluno de OUTRO dojô → 404 (query parametrizada por req.dojoId)', async () => {
     db.query.mockResolvedValueOnce({ rows: [] });
     const res = await request(app).get(`${base}/students/${sid}`).set(canalA());
