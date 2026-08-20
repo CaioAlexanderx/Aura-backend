@@ -783,21 +783,22 @@ async function getSummary(dojoId) {
 const SP_TODAY = `(now() AT TIME ZONE 'America/Sao_Paulo')::date`;
 
 async function getDashboard(dojoId) {
-  // 1) EVASÃO — ativo, matriculado há >30 dias, sem presença nos últimos 30.
-  //    O guard enrolled_at evita marcar recém-matriculado (ainda sem chamada).
+  // 1) EVASÃO = quem TREINAVA e parou (dropout): teve presença antes e a
+  //    última foi há >30 dias. NÃO inclui "nunca treinou" — assim um dojô novo
+  //    (ou que ainda não usa chamada) não lista o plantel inteiro como "risco".
+  //    O JOIN (não LEFT) + last_date IS NOT NULL garante "teve presença antes".
   const evasao = await db.query(
     `SELECT s.id, s.full_name, s.belt_label,
             to_char(la.last_date, 'YYYY-MM-DD') AS last_attendance,
             count(*) OVER()::int AS total_count
        FROM karate_dojo_students s
-       LEFT JOIN LATERAL (
+       JOIN LATERAL (
          SELECT max(a.date) AS last_date FROM karate_dojo_attendance a
           WHERE a.student_id = s.id AND a.present = true
-       ) la ON true
+       ) la ON la.last_date IS NOT NULL
       WHERE s.dojo_id = $1 AND s.status = 'active'
-        AND (s.enrolled_at IS NULL OR s.enrolled_at <= ${SP_TODAY} - INTERVAL '30 days')
-        AND (la.last_date IS NULL OR la.last_date < ${SP_TODAY} - INTERVAL '30 days')
-      ORDER BY la.last_date ASC NULLS FIRST, s.full_name ASC
+        AND la.last_date < ${SP_TODAY} - INTERVAL '30 days'
+      ORDER BY la.last_date ASC, s.full_name ASC
       LIMIT 200`,
     [dojoId]
   );
@@ -814,22 +815,20 @@ async function getDashboard(dojoId) {
     [dojoId]
   );
 
-  // 3) CANDIDATOS A EXAME (heurística de engajamento) — ativo, NÃO faixa-preta,
-  //    com >=12 presenças nos últimos 90 dias (~1x/semana por 3 meses). NÃO é
-  //    a elegibilidade FPKT completa (min_months/min_courses) — é um sinal de
-  //    "quem está pronto para o sensei olhar". Elegibilidade formal = follow-up.
-  const aptos = await db.query(
-    `SELECT s.id, s.full_name, s.belt_label, cnt.n AS presences_90d,
+  // 3) RANKING DE ASSIDUIDADE MENSAL — alunos ATIVOS por nº de presenças no MÊS
+  //    corrente, do maior para o menor. Ranking honesto de quem mais treinou —
+  //    NÃO "candidato a exame" (a elegibilidade tem fatores que o sistema não
+  //    mede). Só entra quem tem presença no mês (cnt.n > 0).
+  const ranking = await db.query(
+    `SELECT s.id, s.full_name, s.belt_label, cnt.n AS presences_month,
             count(*) OVER()::int AS total_count
        FROM karate_dojo_students s
        JOIN LATERAL (
          SELECT count(*)::int AS n FROM karate_dojo_attendance a
           WHERE a.student_id = s.id AND a.present = true
-            AND a.date >= ${SP_TODAY} - INTERVAL '90 days'
+            AND date_trunc('month', a.date) = date_trunc('month', ${SP_TODAY})
        ) cnt ON true
-      WHERE s.dojo_id = $1 AND s.status = 'active'
-        AND COALESCE(s.belt_label, '') NOT ILIKE '%preta%'
-        AND cnt.n >= 12
+      WHERE s.dojo_id = $1 AND s.status = 'active' AND cnt.n > 0
       ORDER BY cnt.n DESC, s.full_name ASC
       LIMIT 200`,
     [dojoId]
@@ -855,11 +854,11 @@ async function getDashboard(dojoId) {
         birth_date: r.birth_date, day: Number(r.day) || null,
       })),
     },
-    exam_candidates: {
-      count: totalCount(aptos),
-      students: aptos.rows.map((r) => ({
+    attendance_ranking: {
+      count: totalCount(ranking),
+      students: ranking.rows.map((r) => ({
         id: r.id, full_name: r.full_name, belt_label: r.belt_label || null,
-        presences_90d: Number(r.presences_90d) || 0,
+        presences_month: Number(r.presences_month) || 0,
       })),
     },
   };
