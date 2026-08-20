@@ -10,6 +10,11 @@
 //   POST   /competitions/:cid/categories/:catId/bracket/advance   — avança vencedor (+ placar opcional)
 //   PUT    /competitions/:cid/categories/:catId/bracket/matches   — edição total em lote (Fase 1)
 //   POST   /competitions/:cid/categories/:catId/bracket/reset     — limpa vencedores/placares (mantém seeding)
+//   PATCH  /competitions/:cid/categories/:catId/bracket/phase-plan — plano de fases (P1, migration 296)
+//
+// P1 (migration 296): formato por FASE da chave + registro de DECISÃO
+// (hantei/kettei-sen/...) por luta + kata em CHAVE 1×1 (kata_mode=
+// 'hantei_tree' no generate — reusa todo o motor de matches).
 //
 // Kata (por bateria):
 //   GET    /competitions/:cid/categories/:catId/kata-scores       — lê notas
@@ -30,6 +35,7 @@ const {
   stateToMatchRows,
   rowsToState,
 } = require('../services/karateBracket');
+const phasePlanSvc = require('../services/karatePhasePlanService');
 
 // ── helper: find competition (scoped to federation) ──────────────
 async function findComp(client, federationId, cid) {
@@ -172,12 +178,37 @@ async function loadBracket(client, catId) {
 async function upsertMatches(client, bracketId, matchRowsData, scoreMap) {
   // Delete old matches and re-insert (simpler than diff)
   await client.query(`DELETE FROM karate_bracket_matches WHERE bracket_id = $1`, [bracketId]);
-  let scoresSupported = true;
+  // Três degraus de compatibilidade de schema:
+  //   full   → migration 296 (placar + match_format + decision)
+  //   scores → migration 210 (só placar)
+  //   base   → schema original (183)
+  let tier = 'full';
   for (const m of matchRowsData) {
     const key = m.bracket_kind === 'third' ? 'third' : `r${m.round}-${m.slot}`;
-    const scores = (scoreMap && scoreMap[key]) || { aka_score: null, shiro_score: null };
+    const meta = (scoreMap && scoreMap[key]) || {};
+    const akaScore = meta.aka_score !== undefined ? meta.aka_score : null;
+    const shiroScore = meta.shiro_score !== undefined ? meta.shiro_score : null;
+    const matchFormat = meta.match_format !== undefined ? meta.match_format : null;
+    const decision = meta.decision !== undefined ? meta.decision : null;
 
-    if (scoresSupported) {
+    if (tier === 'full') {
+      try {
+        await client.query(
+          `INSERT INTO karate_bracket_matches
+             (bracket_id, round, slot, bracket_kind, aka_entry_id, shiro_entry_id, winner_entry_id, is_bye,
+              aka_score, shiro_score, match_format, decision)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
+          [m.bracket_id, m.round, m.slot, m.bracket_kind,
+           m.aka_entry_id || null, m.shiro_entry_id || null, m.winner_entry_id || null, m.is_bye,
+           akaScore, shiroScore, matchFormat, decision != null ? JSON.stringify(decision) : null]
+        );
+        continue;
+      } catch (e) {
+        if (e.code === '42703') tier = 'scores'; // 296 pendente
+        else throw e;
+      }
+    }
+    if (tier === 'scores') {
       try {
         await client.query(
           `INSERT INTO karate_bracket_matches
@@ -185,15 +216,12 @@ async function upsertMatches(client, bracketId, matchRowsData, scoreMap) {
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
           [m.bracket_id, m.round, m.slot, m.bracket_kind,
            m.aka_entry_id || null, m.shiro_entry_id || null, m.winner_entry_id || null, m.is_bye,
-           scores.aka_score, scores.shiro_score]
+           akaScore, shiroScore]
         );
         continue;
       } catch (e) {
-        if (e.code === '42703') {
-          scoresSupported = false; // migration 210 ainda não aplicada — cai no fallback abaixo
-        } else {
-          throw e;
-        }
+        if (e.code === '42703') tier = 'base'; // 210 pendente
+        else throw e;
       }
     }
     await client.query(
@@ -216,6 +244,9 @@ function buildScoreMap(matchRows) {
     map[key] = {
       aka_score: m.aka_score !== undefined ? m.aka_score : null,
       shiro_score: m.shiro_score !== undefined ? m.shiro_score : null,
+      // P1 (296): snapshot do formato + registro de decisão da luta.
+      match_format: m.match_format !== undefined ? m.match_format : null,
+      decision: m.decision !== undefined ? m.decision : null,
     };
   }
   return map;
@@ -226,6 +257,12 @@ function buildScoreMap(matchRows) {
 function buildKumiteBracketState(bracketRow, matchRows, athletes, pendingPaymentCount) {
   const state = rowsToState(matchRows, bracketRow, athletes);
   const scoreMap = buildScoreMap(matchRows);
+  // P1: plano de fases (296) → formato por rodada para a UI/súmula.
+  const phasePlan = bracketRow.phase_plan || {};
+  const phaseInfo = state.rounds.length ? phasePlanSvc.phaseByRound(phasePlan, state.rounds.length) : [];
+  const phaseFinal = state.rounds.length
+    ? phasePlanSvc.resolvePhaseForRound(phasePlan, state.rounds.length - 1, state.rounds.length, true)
+    : null;
 
   const athleteMap = {};
   for (const a of athletes) athleteMap[a.id] = a;
@@ -251,6 +288,12 @@ function buildKumiteBracketState(bracketRow, matchRows, athletes, pendingPayment
       is_bye: m.isBye,
       aka_score: scores.aka_score,
       shiro_score: scores.shiro_score,
+      // P1: formato efetivo (snapshot do lançamento OU resolvido do plano)
+      // e o registro de como a luta foi decidida.
+      match_format: scores.match_format
+        || (phaseInfo && m.id !== 'third' && phaseInfo[m.round] ? phaseInfo[m.round].format : null)
+        || (m.id === 'third' && phaseFinal ? phaseFinal.format : null),
+      decision: scores.decision || null,
     };
   };
 
@@ -268,8 +311,11 @@ function buildKumiteBracketState(bracketRow, matchRows, athletes, pendingPayment
     bracket_id: bracketRow.id,
     status: bracketRow.status,
     modality: bracketRow.modality,
+    kata_mode: bracketRow.kata_mode || null,
     seed: bracketRow.draw_seed,
     options: bracketRow.options,
+    phase_plan: phasePlan,
+    phases_by_round: phaseInfo,
     athletes_count: athletes.length,
     pending_payment_count: pendingPaymentCount,
     bye_count: state.byeCount,
@@ -299,9 +345,13 @@ async function applyMatchUpdate(client, matchRow, patch) {
   if (Object.prototype.hasOwnProperty.call(patch, 'is_bye')) {
     fields.push(`is_bye = $${idx++}`); values.push(!!patch.is_bye);
   }
+  // P1 (296): registro de decisão editável na edição total. 42703 (coluna
+  // ausente) é tolerado pelo mesmo caminho dos placares abaixo.
+  const hasDecisionField = Object.prototype.hasOwnProperty.call(patch, 'decision');
 
   const hasScoreFields = Object.prototype.hasOwnProperty.call(patch, 'aka_score') ||
-    Object.prototype.hasOwnProperty.call(patch, 'shiro_score');
+    Object.prototype.hasOwnProperty.call(patch, 'shiro_score') ||
+    Object.prototype.hasOwnProperty.call(patch, 'decision');
 
   async function runUpdate(withScores) {
     const f = [...fields];
@@ -313,6 +363,10 @@ async function applyMatchUpdate(client, matchRow, patch) {
       }
       if (Object.prototype.hasOwnProperty.call(patch, 'shiro_score')) {
         f.push(`shiro_score = $${i++}`); v.push(patch.shiro_score);
+      }
+      if (hasDecisionField) {
+        f.push(`decision = $${i++}::jsonb`);
+        v.push(patch.decision != null ? JSON.stringify(phasePlanSvc.normalizeDecision(patch.decision)) : null);
       }
     }
     if (!f.length) return;
@@ -352,6 +406,10 @@ router.post(
   async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
     const { method = 'ranking', separateSameDojo = false, thirdPlace = false, seed } = req.body;
+    // P1 (296): kata em CHAVE 1x1 por bandeiras - quando 'hantei_tree', a
+    // categoria de kata gera a MESMA arvore do kumite (aka/shiro/hantei) em
+    // vez de bateria de notas. So vale para modalidades de kata.
+    const kataMode = req.body.kata_mode === 'hantei_tree' ? 'hantei_tree' : null;
 
     const client = await db.connect();
     try {
@@ -363,8 +421,9 @@ router.post(
       const cat = await findCat(client, cid, catId);
       if (!cat) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' }); }
 
-      // Kata: handle separately — generate presentation order only
-      const isKata = ['kata', 'team_kata'].includes(cat.modality);
+      // Kata: por padrao gera so a ordem de apresentacao (bateria de notas);
+      // com kata_mode='hantei_tree' cai no caminho da ARVORE (P1/296).
+      const isKata = ['kata', 'team_kata'].includes(cat.modality) && kataMode !== 'hantei_tree';
 
       const athletes = await loadEntries(client, catId, federationId);
       const pendingPaymentCount = await countPendingPayment(client, cid, catId);
@@ -379,16 +438,31 @@ router.post(
       // Upsert bracket row
       let bracketId;
       try {
-        const br = await client.query(
-          `INSERT INTO karate_brackets (competition_id, category_id, modality, status, draw_seed, options, created_by)
-           VALUES ($1,$2,$3,'draft',$4,$5,$6)
-           ON CONFLICT (competition_id, category_id)
-           DO UPDATE SET status='draft', draw_seed=$4, options=$5, updated_at=NOW()
-           RETURNING id`,
-          [cid, catId, cat.modality, drawSeed, JSON.stringify(options),
-           req.user?.id || null]
-        );
-        bracketId = br.rows[0].id;
+        // P1: grava kata_mode junto (296); 42703 -> forma sem a coluna.
+        try {
+          const br = await client.query(
+            `INSERT INTO karate_brackets (competition_id, category_id, modality, status, draw_seed, options, kata_mode, created_by)
+             VALUES ($1,$2,$3,'draft',$4,$5,$6,$7)
+             ON CONFLICT (competition_id, category_id)
+             DO UPDATE SET status='draft', draw_seed=$4, options=$5, kata_mode=$6, updated_at=NOW()
+             RETURNING id`,
+            [cid, catId, cat.modality, drawSeed, JSON.stringify(options),
+             kataMode, req.user?.id || null]
+          );
+          bracketId = br.rows[0].id;
+        } catch (eCol) {
+          if (eCol.code !== '42703') throw eCol;
+          const br = await client.query(
+            `INSERT INTO karate_brackets (competition_id, category_id, modality, status, draw_seed, options, created_by)
+             VALUES ($1,$2,$3,'draft',$4,$5,$6)
+             ON CONFLICT (competition_id, category_id)
+             DO UPDATE SET status='draft', draw_seed=$4, options=$5, updated_at=NOW()
+             RETURNING id`,
+            [cid, catId, cat.modality, drawSeed, JSON.stringify(options),
+             req.user?.id || null]
+          );
+          bracketId = br.rows[0].id;
+        }
       } catch (e) {
         if (e.code === '42P01') {
           await client.query('ROLLBACK');
@@ -462,6 +536,7 @@ router.post(
       res.json({
         bracket_id: bracketId,
         modality: cat.modality,
+        kata_mode: kataMode,
         status: 'draft',
         seed: drawSeed,
         options,
@@ -550,8 +625,10 @@ router.get(
         return res.json({ status: 'not_generated', athletes_count: athletes.length, pending_payment_count: pendingPaymentCount, bracket: null });
       }
 
-      // For kata: return scores instead
-      const isKata = ['kata', 'team_kata'].includes(bracketRow.modality);
+      // Kata: bateria de notas - EXCETO em kata_mode='hantei_tree' (P1),
+      // que devolve a arvore como o kumite.
+      const isKata = ['kata', 'team_kata'].includes(bracketRow.modality)
+        && bracketRow.kata_mode !== 'hantei_tree';
       if (isKata) {
         let scores = [];
         try {
@@ -616,10 +693,15 @@ router.post(
   ...guards.staffWrite(),
   async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
-    const { match_id: matchId, winner_entry_id: winnerId, aka_score: akaScore, shiro_score: shiroScore } = req.body;
+    const { match_id: matchId, winner_entry_id: winnerId, aka_score: akaScore, shiro_score: shiroScore, decision } = req.body;
 
     if (!matchId || !winnerId) {
       return res.status(422).json({ error: 'match_id e winner_entry_id são obrigatórios', code: 'VALIDATION_ERROR' });
+    }
+    // P1: registro de COMO a luta foi decidida (hantei/kettei-sen/...).
+    const dv = phasePlanSvc.validateDecision(decision);
+    if (!dv.ok) {
+      return res.status(422).json({ error: dv.error, code: 'VALIDATION_ERROR' });
     }
 
     const client = await db.connect();
@@ -655,12 +737,29 @@ router.post(
       // Preserva placares já lançados em outras partidas + aplica o novo
       // placar (se enviado) na partida que acabou de ser decidida.
       const scoreMap = buildScoreMap(matchRows);
-      if (akaScore !== undefined || shiroScore !== undefined) {
-        const existing = scoreMap[matchId] || { aka_score: null, shiro_score: null };
+      if (akaScore !== undefined || shiroScore !== undefined || decision != null) {
+        const existing = scoreMap[matchId] || {};
         scoreMap[matchId] = {
-          aka_score: akaScore !== undefined ? akaScore : existing.aka_score,
-          shiro_score: shiroScore !== undefined ? shiroScore : existing.shiro_score,
+          ...existing,
+          aka_score: akaScore !== undefined ? akaScore : (existing.aka_score != null ? existing.aka_score : null),
+          shiro_score: shiroScore !== undefined ? shiroScore : (existing.shiro_score != null ? existing.shiro_score : null),
+          decision: decision != null ? phasePlanSvc.normalizeDecision(decision) : (existing.decision != null ? existing.decision : null),
         };
+      }
+      // Snapshot do formato efetivo da luta decidida (do plano de fases) -
+      // e o que a sumula imprime, imune a mudancas futuras do plano.
+      {
+        const mm = /^r(\d+)-(\d+)$/.exec(String(matchId));
+        const totalRounds = newState.rounds.length;
+        const phase = phasePlanSvc.resolvePhaseForRound(
+          bracketRow.phase_plan || {},
+          mm ? parseInt(mm[1], 10) : totalRounds - 1,
+          totalRounds,
+          matchId === 'third'
+        );
+        if (phase && phase.format) {
+          scoreMap[matchId] = Object.assign({}, scoreMap[matchId] || {}, { match_format: phase.format });
+        }
       }
 
       const newMatchRows = stateToMatchRows(bracketRow.id, newState);
@@ -767,6 +866,11 @@ router.put(
             }
           }
         }
+        // P1: decision, quando presente, precisa ser valida.
+        if (Object.prototype.hasOwnProperty.call(patch, 'decision') && patch.decision !== null) {
+          const dvp = phasePlanSvc.validateDecision(patch.decision);
+          if (!dvp.ok) errors.push(`decision na partida ${patch.id}: ${dvp.error}`);
+        }
         // winner_entry_id, quando presente, deve ser um dos dois lados resultantes do patch
         if (Object.prototype.hasOwnProperty.call(patch, 'winner_entry_id') && patch.winner_entry_id) {
           const row = matchById.get(patch.id);
@@ -834,21 +938,31 @@ router.post(
       }
 
       try {
+        // P1 (296): reset limpa tambem o registro de decisao e o snapshot
+        // de formato — a chave volta ao estado pre-resultados.
         await client.query(
           `UPDATE karate_bracket_matches
-              SET winner_entry_id = NULL, aka_score = NULL, shiro_score = NULL, updated_at = NOW()
+              SET winner_entry_id = NULL, aka_score = NULL, shiro_score = NULL,
+                  match_format = NULL, decision = NULL, updated_at = NOW()
             WHERE bracket_id = $1`,
           [bracketRow.id]
         );
-      } catch (e) {
-        if (e.code === '42703') {
-          // Migration 210 não aplicada — reseta só o vencedor
+      } catch (e296) {
+        if (e296.code !== '42703') throw e296;
+        try {
+          await client.query(
+            `UPDATE karate_bracket_matches
+                SET winner_entry_id = NULL, aka_score = NULL, shiro_score = NULL, updated_at = NOW()
+              WHERE bracket_id = $1`,
+            [bracketRow.id]
+          );
+        } catch (e210) {
+          if (e210.code !== '42703') throw e210;
+          // Nem a 210 aplicada — reseta so o vencedor
           await client.query(
             `UPDATE karate_bracket_matches SET winner_entry_id = NULL, updated_at = NOW() WHERE bracket_id = $1`,
             [bracketRow.id]
           );
-        } else {
-          throw e;
         }
       }
 
@@ -909,6 +1023,70 @@ router.post(
       await client.query('ROLLBACK');
       console.error('[karateBrackets] unlock error:', err.message);
       res.status(500).json({ error: 'Erro ao destravar chave' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// PATCH /competitions/:cid/categories/:catId/bracket/phase-plan
+// Plano de fases da categoria (P1, migration 296): formato/decisao por
+// numero de participantes da rodada, regras de desempate, kata exigido,
+// premiacao. Body: { phase_plan }. Valido em draft E locked (o plano e
+// metadado da prova; muda-lo nao mexe em resultados ja lancados — o
+// match_format de cada luta decidida e SNAPSHOT).
+// Se a chave ainda nao foi gerada, cria a linha do bracket (plan-first:
+// a federacao configura a regra ANTES do sorteio).
+// ═══════════════════════════════════════════════════════════════
+router.patch(
+  '/competitions/:cid/categories/:catId/bracket/phase-plan',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const plan = (req.body && req.body.phase_plan) || {};
+
+    const pv = phasePlanSvc.validatePhasePlan(plan);
+    if (!pv.ok) {
+      return res.status(422).json({ error: pv.error, code: 'VALIDATION_ERROR' });
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' }); }
+      const cat = await findCat(client, cid, catId);
+      if (!cat) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' }); }
+
+      let row;
+      try {
+        const up = await client.query(
+          `INSERT INTO karate_brackets (competition_id, category_id, modality, status, phase_plan, created_by)
+           VALUES ($1,$2,$3,'draft',$4::jsonb,$5)
+           ON CONFLICT (competition_id, category_id)
+           DO UPDATE SET phase_plan = $4::jsonb, updated_at = NOW()
+           RETURNING id, status, phase_plan`,
+          [cid, catId, cat.modality, JSON.stringify(plan), req.user?.id || null]
+        );
+        row = up.rows[0];
+      } catch (e) {
+        await client.query('ROLLBACK');
+        if (e.code === '42P01') {
+          return res.status(503).json({ error: 'Migration 183 não aplicada ainda', code: 'SCHEMA_PENDING' });
+        }
+        if (e.code === '42703') {
+          return res.status(503).json({ error: 'Plano de fases indisponível (migração 296 pendente)', code: 'SCHEMA_PENDING' });
+        }
+        throw e;
+      }
+
+      await client.query('COMMIT');
+      return res.json({ bracket_id: row.id, status: row.status, phase_plan: row.phase_plan });
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* noop */ }
+      console.error('[karateBrackets] phase-plan error:', err.message);
+      return res.status(500).json({ error: 'Erro ao salvar plano de fases' });
     } finally {
       client.release();
     }
