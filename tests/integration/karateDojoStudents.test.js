@@ -311,14 +311,16 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
 
   test('Onda 4 — GET /dojo/dashboard: evasão, aniversariantes e candidatos a exame', async () => {
     db.query
-      .mockResolvedValueOnce({ rows: [{ id: 'e1', full_name: 'Sumido', belt_label: 'Verde', last_attendance: '2026-06-01' }] })
+      // count EXATO via total_count (pré-LIMIT): 250 no total, lista capada em 1
+      .mockResolvedValueOnce({ rows: [{ id: 'e1', full_name: 'Sumido', belt_label: 'Verde', last_attendance: '2026-06-01', total_count: 250 }] })
       .mockResolvedValueOnce({ rows: [{ id: 'b1', full_name: 'Aniversariante', belt_label: 'Roxa', birth_date: '2015-08-10', day: 10 }] })
-      .mockResolvedValueOnce({ rows: [{ id: 'a1', full_name: 'Engajado', belt_label: 'Marrom 3º kyu', presences_90d: 20 }] });
+      .mockResolvedValueOnce({ rows: [{ id: 'a1', full_name: 'Engajado', belt_label: 'Marrom 3º kyu', presences_90d: 20, total_count: 1 }] });
 
     const res = await request(app).get(`${base}/dashboard`).set(canalA());
 
     expect(res.status).toBe(200);
-    expect(res.body.evasao.count).toBe(1);
+    expect(res.body.evasao.count).toBe(250); // total real, não o tamanho da lista capada
+    expect(res.body.evasao.students).toHaveLength(1);
     expect(res.body.evasao.students[0].full_name).toBe('Sumido');
     expect(res.body.birthdays.students[0].day).toBe(10);
     expect(res.body.exam_candidates.students[0].presences_90d).toBe(20);
