@@ -118,7 +118,10 @@ const isCurrentBelt = (s) => /FROM karate_current_belt/.test(s);
 // resolveGraduation quando o front manda belt_history_id.
 const isBeltHistoryById = (s) =>
   /FROM karate_belt_history/.test(s) && /WHERE id = \$1 AND student_id = \$2/.test(s);
-// createOrder (karateCertificateService) — 3 queries + histórico.
+// createOrder (karateCertificateService) — escopo federativo (anti-IDOR) +
+// 3 queries + histórico.
+const isCertDojoScope = (s) => /SELECT 1 FROM companies/.test(s) && /federation_id = \$2/.test(s) && /karate_dojo/.test(s);
+const isCertPractScope = (s) => /SELECT 1 FROM customers/.test(s) && /dojo_id = \$3/.test(s);
 const isCertBeltCheck = (s) => /FROM karate_belt_history kbh/.test(s);
 const isCertDup = (s) => /SELECT id FROM karate_certificate_orders/.test(s);
 const isCertInsert = (s) => /INSERT INTO karate_certificate_orders/.test(s);
@@ -199,6 +202,9 @@ function mockDojo(linkedAt, extra) {
     // GUARDA DE SCHEMA: o banco rejeita ANTES de qualquer mock responder.
     const schemaErr = beltHistoryColError(s);
     if (schemaErr) return Promise.reject(schemaErr);
+    // Escopo federativo do createOrder (anti-IDOR): dojô + praticante pertencem
+    // à federação. Passa por padrão em todos os cenários F5b legítimos.
+    if (isCertDojoScope(s) || isCertPractScope(s)) return Promise.resolve({ rows: [{ ok: 1 }] });
     if (extra) {
       const r = extra(s);
       if (r instanceof Error) return Promise.reject(r);

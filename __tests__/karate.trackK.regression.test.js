@@ -1,9 +1,14 @@
 // ============================================================
 // AURA KARATÊ — Track K: REGRESSÕES (bugs B1 e B2)
 //
-// B1 — settleAnnuity não pode setar status='paid' (viola o CHECK da
-//      migration 152: status IN ('active','expiring','overdue','defaulting',
-//      'suspended')). Teria estourado 23514 em todo match real.
+// B1 — settleAnnuity marca a anuidade do header como PAGA (status='paid').
+//      Historicamente o CHECK da migration 152 proibia 'paid' e setar esse
+//      status estourava 23514 — daí o fix antigo escrever só paid_at. A
+//      migration 219 AMPLIOU o CHECK para incluir 'pending'/'paid' (o mesmo
+//      vocabulário que a conciliação canônica já grava), então setar
+//      status='paid' agora é correto e necessário: as leituras (GET
+//      /annuities/dojos, summary) derivam "pago" de status='paid', não de
+//      paid_at. Este teste passou a exigir status='paid' (pós-219).
 //
 // B2 — deferred (schema da Track K ausente, 42P01) NÃO pode ser drenado
 //      como sucesso. No motor LIGHT (processFederationQueue) e no runner
@@ -33,13 +38,14 @@ function ev(overrides = {}) {
   };
 }
 
-// Conjunto de status permitidos pelo CHECK da migration 152.
-const ALLOWED_ANNUITY_STATUS = ['active', 'expiring', 'overdue', 'defaulting', 'suspended'];
+// Conjunto de status permitidos pelo CHECK — pós-migration 219 (une a saúde
+// da filiação com o ciclo de pagamento: inclui 'pending' e 'paid').
+const ALLOWED_ANNUITY_STATUS = ['active', 'expiring', 'overdue', 'defaulting', 'suspended', 'pending', 'paid'];
 
 // ════════════════════════════════════════════════════════════
-// B1 — annuity_paid respeita o CHECK da migration 152
+// B1 — annuity_paid marca status='paid' (pós-219) sem violar o CHECK
 // ════════════════════════════════════════════════════════════
-describe('B1 — settleAnnuity respeita o CHECK de status (migration 152)', () => {
+describe('B1 — settleAnnuity marca a anuidade como paga (migration 219)', () => {
   // Mock client que ENFORÇA o CHECK: se um UPDATE em
   // karate_dojo_annuity_history setar status para fora da lista permitida,
   // estoura 23514 (check_violation), exatamente como o Postgres real.
@@ -56,8 +62,8 @@ describe('B1 — settleAnnuity respeita o CHECK de status (migration 152)', () =
 
       // o UPDATE da anuidade
       if (/UPDATE\s+karate_dojo_annuity_history/i.test(s)) {
-        // Se o SQL tentar escrever uma string literal status='X' inválida,
-        // simula o check_violation. (O fix não escreve status nenhum.)
+        // Se o SQL tentar escrever uma string literal status='X' inválida
+        // (fora da lista pós-219), simula o check_violation como o Postgres.
         const m = s.match(/SET[\s\S]*?status\s*=\s*'([^']+)'/i);
         if (m && !ALLOWED_ANNUITY_STATUS.includes(m[1])) {
           const e = new Error(
@@ -75,7 +81,7 @@ describe('B1 — settleAnnuity respeita o CHECK de status (migration 152)', () =
     return { query, calls };
   }
 
-  it('NÃO estoura 23514 e seta paid_at (não toca status) quando há cobrança a conciliar', async () => {
+  it('seta status=paid e paid_at (sem violar o CHECK pós-219) quando há cobrança a conciliar', async () => {
     const client = makeCheckEnforcingClient([{ id: 'ann-1' }]);
     const res = await applyEvent(client, ev({
       event_type: 'annuity_paid',
@@ -91,14 +97,13 @@ describe('B1 — settleAnnuity respeita o CHECK de status (migration 152)', () =
     expect(updCall).toBeTruthy();
     const sql = String(updCall.sql);
 
-    // (regressão B1) NÃO pode setar status='paid' nem qualquer status literal.
-    expect(sql).not.toMatch(/status\s*=\s*'paid'/i);
-    expect(sql).not.toMatch(/SET[\s\S]*?status\s*=/i);
+    // Marca a anuidade como PAGA (é o status que as leituras derivam como "pago").
+    expect(sql).toMatch(/SET[\s\S]*?status\s*=\s*'paid'/i);
 
-    // deve setar paid_at (sinal canônico que para a régua / filtra getOpenAnnuities)
-    expect(sql).toMatch(/SET[\s\S]*paid_at\s*=/i);
+    // e continua setando paid_at (sinal que para a régua de lembretes)
+    expect(sql).toMatch(/paid_at\s*=/i);
 
-    // e guardar o WHERE com paid_at IS NULL (no-op idempotente quando já liquidado)
+    // WHERE com paid_at IS NULL (no-op idempotente quando já liquidado)
     expect(sql).toMatch(/WHERE[\s\S]*paid_at\s+IS\s+NULL/i);
   });
 

@@ -61,6 +61,10 @@ afterEach(() => {
 describe('createOrder — criar pedido de certificado', () => {
   it('happy path: insere pedido com status=requested e retorna a linha', async () => {
     db.query
+      // 0a. escopo: dojô pertence à federação (anti-IDOR)
+      .mockResolvedValueOnce({ rows: [{ ok: 1 }] })
+      // 0b. escopo: praticante pertence à federação/dojô
+      .mockResolvedValueOnce({ rows: [{ ok: 1 }] })
       // 1. karate_belt_history — graduação existente
       .mockResolvedValueOnce({ rows: [{ id: 'bh-1' }] })
       // 2. karate_certificate_orders — sem duplicata
@@ -87,6 +91,9 @@ describe('createOrder — criar pedido de certificado', () => {
 
   it('duplicata ativa → lança DUPLICATE_ORDER', async () => {
     db.query
+      // 0a/0b. escopo federativo (anti-IDOR): dojô + praticante da federação
+      .mockResolvedValueOnce({ rows: [{ ok: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ ok: 1 }] })
       // 1. karate_belt_history
       .mockResolvedValueOnce({ rows: [{ id: 'bh-1' }] })
       // 2. karate_certificate_orders — pedido existente

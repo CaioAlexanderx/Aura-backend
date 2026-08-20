@@ -244,10 +244,18 @@ router.patch('/practitioners/:practitionerId/transfers/:transferId', ...guards.s
     return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }
 
+  // A tabela é append-only via trigger de imutabilidade (migration 180/221).
+  // A correção de metadados de UM registro é a "correção excepcional" que a
+  // própria mensagem do trigger prevê para o administrador (esta rota é
+  // staffWrite). O escape hatch é o GUC de transação app.allow_transfer_purge:
+  // SET LOCAL escopa à transação e expira sozinho no COMMIT/ROLLBACK.
+  const client = await db.connect();
   try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL app.allow_transfer_purge = 'on'");
     // Escopo: o registro pertence a ESTE praticante E a ESTA federação.
     vals.push(transferId, practitionerId, federationId);
-    const upd = await db.query(
+    const upd = await client.query(
       `UPDATE karate_practitioner_transfers
           SET ${sets.join(', ')}
         WHERE id = $${i} AND practitioner_id = $${i + 1} AND federation_id = $${i + 2}
@@ -256,15 +264,20 @@ router.patch('/practitioners/:practitionerId/transfers/:transferId', ...guards.s
       vals
     );
     if (!upd.rows.length) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
     }
+    await client.query('COMMIT');
     return res.json(upd.rows[0]);
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
     if (e.code === '42P01') {
       return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
     }
     console.error('[karateTransfers] update error:', e.message);
-    return res.status(500).json({ error: 'Erro ao editar transferência', detail: e.message });
+    return res.status(500).json({ error: 'Erro ao editar transferência' });
+  } finally {
+    client.release();
   }
 });
 
@@ -274,23 +287,32 @@ router.patch('/practitioners/:practitionerId/transfers/:transferId', ...guards.s
 // se faz via nova transferência ou editando a ficha do praticante.
 router.delete('/practitioners/:practitionerId/transfers/:transferId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, practitionerId, transferId } = req.params;
+  // Mesmo escape hatch da imutabilidade que o PATCH acima (migration 221).
+  const client = await db.connect();
   try {
-    const del = await db.query(
+    await client.query('BEGIN');
+    await client.query("SET LOCAL app.allow_transfer_purge = 'on'");
+    const del = await client.query(
       `DELETE FROM karate_practitioner_transfers
         WHERE id = $1 AND practitioner_id = $2 AND federation_id = $3
       RETURNING id`,
       [transferId, practitionerId, federationId]
     );
     if (!del.rows.length) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
     }
+    await client.query('COMMIT');
     return res.json({ deleted: true, id: transferId });
   } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
     if (e.code === '42P01') {
       return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
     }
     console.error('[karateTransfers] delete error:', e.message);
-    return res.status(500).json({ error: 'Erro ao excluir transferência', detail: e.message });
+    return res.status(500).json({ error: 'Erro ao excluir transferência' });
+  } finally {
+    client.release();
   }
 });
 

@@ -761,7 +761,12 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
 });
 
 // ── GET /federation/:id/dojos/:dojoId ──────────────────────
-router.get('/:dojoId', ...guards.dojoScope(), async (req, res) => {
+// guards.read() (não dojoScope): esta é a visão de GESTÃO da federação sobre um
+// dojô (mesma do GET / e do /export, ambos read()). dojoScope aqui abria IDOR —
+// papel de dojô (sensei/dojo_owner) lia a ficha completa (CNPJ, CPF do sensei,
+// endereço) de QUALQUER dojô da federação. O dojô usa a própria superfície
+// /dojo/* (requireDojoAccess), escopada ao seu dojo_id no servidor.
+router.get('/:dojoId', ...guards.read(), async (req, res) => {
   const { id: federationId, dojoId } = req.params;
 
   try {

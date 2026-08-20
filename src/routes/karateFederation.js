@@ -122,11 +122,17 @@ router.post('/federation/setup', requireAuth, async (req, res) => {
     const newId = uuidv4();
     const ownerId = req.user.id;
 
-    // Cria a empresa-federação
+    // Cria a empresa-federação.
+    // companies exige legal_name (NOT NULL) — grava = name, como fazem os
+    // INSERTs irmãos (karateDojos/karateImport). E grava vertical_active junto
+    // de vertical: toda a listagem/contagem da federação filtra por
+    // vertical_active; sem ele a federação nasceria invisível para si mesma.
     const insertRes = await client.query(
       `INSERT INTO companies
-         (id, name, slug, vertical, owner_id, karate_logo_url, is_active, created_at, updated_at)
-       VALUES ($1, $2, $3, 'karate_federation', $4, $5, true, NOW(), NOW())
+         (id, name, legal_name, trade_name, slug, vertical, vertical_active,
+          owner_id, karate_logo_url, is_active, created_at, updated_at)
+       VALUES ($1, $2, $2, $2, $3, 'karate_federation', 'karate_federation',
+               $4, $5, true, NOW(), NOW())
        RETURNING id, name, slug, vertical`,
       [newId, String(name).trim(), cleanSlug, ownerId, logo_url || null]
     );

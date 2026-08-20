@@ -1290,12 +1290,52 @@ async function setStudentPhoto(dojoId, studentId, photoUrl, ctx = {}) {
   return s;
 }
 
+// Tabelas que apontam para o aluno com ON DELETE CASCADE. Um DELETE real
+// destruiria trilha financeira, presenças que alimentam critérios de exame,
+// graduações e certificados JÁ EMITIDOS (com verify_token público que passaria
+// a devolver 404 para um documento entregue impresso).
+const STUDENT_HISTORY_PROBES = Object.freeze([
+  'SELECT 1 FROM karate_dojo_charges WHERE student_id = $1 LIMIT 1',
+  'SELECT 1 FROM karate_dojo_attendance WHERE student_id = $1 LIMIT 1',
+  'SELECT 1 FROM karate_dojo_belt_exam_results WHERE student_id = $1 LIMIT 1',
+  'SELECT 1 FROM karate_dojo_issued_certificates WHERE student_id = $1 LIMIT 1',
+  'SELECT 1 FROM karate_dojo_event_enrollments WHERE student_id = $1 LIMIT 1',
+]);
+
 async function deleteStudent(dojoId, studentId) {
-  // Por ora DELETE REAL: o aluno da F2 ainda não tem dependências. Quando a
-  // F3 criar cobranças (histórico financeiro), este service deve passar a
-  // responder 409 HAS_HISTORY em vez de apagar (preserva trilha).
+  const ex = await db.query(
+    'SELECT id FROM karate_dojo_students WHERE id = $1 AND dojo_id = $2 LIMIT 1',
+    [studentId, dojoId]
+  );
+  if (!ex.rows.length) {
+    throw svcError(404, 'NOT_FOUND', 'Aluno não encontrado neste dojô');
+  }
+
+  // Aluno COM histórico nunca é apagado — preserva a trilha. Espelha deleteClass.
+  // Para "tirar da lista", a UI usa Inativar (status='inactive'), que já existe.
+  let hasHistory = false;
+  for (const sql of STUDENT_HISTORY_PROBES) {
+    try {
+      const r = await db.query(sql, [studentId]);
+      if (r.rows.length) { hasHistory = true; break; }
+    } catch (e) {
+      // 42P01 tabela ausente (deploy parcial) / 42703 coluna ausente: não pode
+      // liberar a exclusão de um aluno que na verdade TEM histórico noutra
+      // tabela — mas essa sonda específica indisponível não prova histórico.
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+  }
+
+  if (hasHistory) {
+    throw svcError(
+      409, 'HAS_HISTORY',
+      'Aluno com histórico (cobranças, presenças, graduações ou certificados) não pode ser excluído. Inative-o para preservar o histórico.'
+    );
+  }
+
+  // Sem histórico: delete real.
   const del = await db.query(
-    `DELETE FROM karate_dojo_students WHERE id = $1 AND dojo_id = $2 RETURNING id`,
+    'DELETE FROM karate_dojo_students WHERE id = $1 AND dojo_id = $2 RETURNING id',
     [studentId, dojoId]
   );
   if (!del.rows.length) {

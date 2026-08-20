@@ -367,13 +367,33 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(db.query.mock.calls.length).toBe(1); // não chegou no UPDATE
   });
 
-  test('DELETE remove (por ora delete real — F3 vira 409 HAS_HISTORY)', async () => {
-    db.query.mockResolvedValueOnce({ rows: [{ id: sid }] });
+  test('DELETE de aluno SEM histórico faz delete real (200)', async () => {
+    // Fluxo: SELECT existência → 5 sondas de histórico (todas vazias) → DELETE.
+    db.query
+      .mockResolvedValueOnce({ rows: [{ id: sid }] }) // existência
+      .mockResolvedValueOnce({ rows: [] })            // charges
+      .mockResolvedValueOnce({ rows: [] })            // attendance
+      .mockResolvedValueOnce({ rows: [] })            // belt_exam_results
+      .mockResolvedValueOnce({ rows: [] })            // issued_certificates
+      .mockResolvedValueOnce({ rows: [] })            // event_enrollments
+      .mockResolvedValueOnce({ rows: [{ id: sid }] }); // DELETE RETURNING
     const res = await request(app).delete(`${base}/students/${sid}`).set(canalA());
 
     expect(res.status).toBe(200);
     expect(res.body.deleted).toBe(true);
-    expect(db.query.mock.calls[0][1]).toEqual([sid, dojoId]);
+    expect(db.query.mock.calls[0][1]).toEqual([sid, dojoId]); // SELECT existência
+  });
+
+  test('DELETE de aluno COM histórico → 409 HAS_HISTORY (nunca apaga a trilha)', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [{ id: sid }] }) // existência
+      .mockResolvedValueOnce({ rows: [{ x: 1 }] });   // 1ª sonda (charges) tem histórico
+    const res = await request(app).delete(`${base}/students/${sid}`).set(canalA());
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('HAS_HISTORY');
+    // Nunca chegou a executar um DELETE (só existência + 1 sonda).
+    expect(db.query.mock.calls.length).toBe(2);
   });
 
   test('Canal B (portal): GET lista OK / POST 403 PORTAL_READ_ONLY', async () => {
