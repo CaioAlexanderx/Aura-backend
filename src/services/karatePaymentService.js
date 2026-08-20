@@ -262,6 +262,32 @@ async function confirmIntent(intentId, opts = {}) {
       // CHECK target_type IN ('annuity','installment') (migration 227) — o
       // rastro de pagamento de evento nasce com trilha própria no P0 da
       // delegação, não remendado no log de anuidades.
+    } else if (intent.source_type === 'delegation_order' && intent.source_id) {
+      // ── P0 Hub de Campeonatos: baixa do PEDIDO DE DELEGAÇÃO ─────────
+      // O submit da delegação (karateDelegations) cria o intent com
+      // source_type='delegation_order' + source_id = pedido. PIX pago:
+      // pedido → 'paid' + cascata fee_paid em TODAS as entries amarradas
+      // ao pedido (individuais e de equipe). SAVEPOINT: 42P01 de deploy
+      // parcial (migration 294 pendente) não envenena o confirm.
+      await client.query('SAVEPOINT sp_delegation_paid');
+      try {
+        await client.query(
+          `UPDATE karate_delegation_orders
+              SET status = 'paid', confirmed_at = COALESCE(confirmed_at, NOW()), updated_at = NOW()
+            WHERE id = $1 AND status NOT IN ('paid','cancelled')`,
+          [intent.source_id]
+        );
+        await client.query(
+          `UPDATE karate_competition_entries
+              SET fee_paid = true, updated_at = NOW()
+            WHERE delegation_order_id = $1 AND fee_paid = false`,
+          [intent.source_id]
+        );
+        await client.query('RELEASE SAVEPOINT sp_delegation_paid');
+      } catch (e) {
+        await client.query('ROLLBACK TO SAVEPOINT sp_delegation_paid');
+        if (e.code !== '42P01' && e.code !== '42703') throw e;
+      }
     }
 
     // Reconcilia transaction (status é o enum transaction_status → 'confirmed')

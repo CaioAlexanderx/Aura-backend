@@ -309,4 +309,108 @@ router.get('/competitions/:cid/delegations', ...guards.read(), async (req, res) 
   }
 });
 
+// ════════════════════════════════════════════════════════════
+// FILA DE CONFERÊNCIA (federação) + PUBLICAÇÕES do ciclo
+// ════════════════════════════════════════════════════════════
+const delegationSvc = require('../services/karateDelegationService');
+
+function mapServiceError(res, e, ctx) {
+  if (e && e.isServiceError) {
+    const body = { error: e.message, code: e.code || 'ERROR' };
+    return res.status(e.status).json(body);
+  }
+  console.error(`[karateCompetitionSetup] ${ctx}:`, e && e.code, e && e.message);
+  return res.status(500).json({ error: 'Erro interno', code: 'INTERNAL_ERROR' });
+}
+
+// ── GET /competitions/:cid/delegations/:orderId — detalhe ───
+router.get('/competitions/:cid/delegations/:orderId', ...guards.read(), async (req, res) => {
+  const { id: federationId, cid, orderId } = req.params;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    const order = await delegationSvc.getOrderForFederation(federationId, cid, orderId);
+    if (!order) return res.status(404).json({ error: 'Pedido não encontrado', code: 'NOT_FOUND' });
+    return res.json({ order });
+  } catch (e) {
+    return mapServiceError(res, e, 'GET delegations/:orderId');
+  }
+});
+
+// ── POST /competitions/:cid/delegations/:orderId/confirm ────
+// A conferência do comprovante: um clique → pedido 'paid' + cascata
+// fee_paid em todas as inscrições do pedido. (Com Aura Pay, este clique
+// não existe — o webhook faz o mesmo caminho.)
+router.post('/competitions/:cid/delegations/:orderId/confirm', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid, orderId } = req.params;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    const out = await delegationSvc.confirmOrder({
+      federationId,
+      competitionId: cid,
+      orderId,
+      actorId: (req.user && req.user.id) || null,
+      actorName: (req.user && (req.user.name || req.user.email)) || null,
+    });
+    return res.json(out);
+  } catch (e) {
+    return mapServiceError(res, e, 'POST delegations/:orderId/confirm');
+  }
+});
+
+// ── POST /competitions/:cid/delegations/:orderId/reject ─────
+// Body: { reason? }. Pedido 'cancelled' + inscrições/equipes 'withdrawn'
+// (rastro preservado — nada é apagado). Pedido já pago não é recusável.
+router.post('/competitions/:cid/delegations/:orderId/reject', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid, orderId } = req.params;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    const out = await delegationSvc.rejectOrder({
+      federationId,
+      competitionId: cid,
+      orderId,
+      reason: req.body && req.body.reason,
+    });
+    return res.json(out);
+  } catch (e) {
+    return mapServiceError(res, e, 'POST delegations/:orderId/reject');
+  }
+});
+
+// ── Publicações do ciclo operacional ────────────────────────
+// POST /competitions/:cid/publish-conference  { published: true|false }
+// POST /competitions/:cid/publish-brackets    { published: true|false }
+// Publicar liga a página pública correspondente (conferência de inscrições
+// / chaves); despublicar (published:false) esconde de novo — o ciclo real
+// tem retificação, então voltar atrás é operação normal, não exceção.
+function makePublishRoute(column, label) {
+  return async (req, res) => {
+    const { id: federationId, cid } = req.params;
+    const published = !(req.body && req.body.published === false);
+    try {
+      const upd = await db.query(
+        `UPDATE karate_competitions
+            SET ${column} = ${published ? 'NOW()' : 'NULL'}, updated_at = NOW()
+          WHERE id = $1 AND federation_id = $2
+        RETURNING id, ${column}`,
+        [cid, federationId]
+      );
+      if (!upd.rows.length) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+      return res.json({ id: cid, [column]: upd.rows[0][column] });
+    } catch (e) {
+      if (e.code === '42703') {
+        return res.status(503).json({ error: `${label} indisponível (migração 294 pendente)`, code: 'SCHEMA_PENDING' });
+      }
+      console.error(`[karateCompetitionSetup] ${label} error:`, e.message);
+      return res.status(500).json({ error: `Erro ao publicar ${label}` });
+    }
+  };
+}
+router.post('/competitions/:cid/publish-conference', ...guards.staffWrite(),
+  makePublishRoute('conference_published_at', 'conferência de inscrições'));
+router.post('/competitions/:cid/publish-brackets', ...guards.staffWrite(),
+  makePublishRoute('brackets_published_at', 'publicação de chaves'));
+
 module.exports = router;
