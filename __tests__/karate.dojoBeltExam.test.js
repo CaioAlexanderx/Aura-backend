@@ -439,7 +439,10 @@ describe('F8.1 — federado gera histórico na federação; não federado não',
     expect(state.calls.studentBeltUpdates).toHaveLength(2);
     const fed = state.calls.studentBeltUpdates.find((p) => p[2] === STUDENT_FED);
     expect(fed[0]).toBe('Azul Claro');
-    expect(fed[1]).toBe(5); // LEVEL_RANK canônico: azul_claro = 5
+    // beltDisplayRank (escala 10..100) — a MESMA que o importador grava, para
+    // a pirâmide agrupar/ordenar por (belt_label, belt_order) sem divergir.
+    // azul_claro = base 5 → 50 (cor de kyu único: sem soma de grau).
+    expect(fed[1]).toBe(50);
     expect(fed[3]).toBe(DOJO_ID); // escopo SEMPRE do token
   });
 

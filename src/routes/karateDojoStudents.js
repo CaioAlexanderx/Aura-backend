@@ -149,6 +149,8 @@ router.get('/dojo/students', requireDojoAccess, async (req, res) => {
     const belt = req.query.belt != null && String(req.query.belt).trim() !== '' ? String(req.query.belt).trim() : null;
     const federated = parseFederatedFilter(req.query.federated);
     const tagId = parseTagIdFilter(req.query.tag_id);
+    // EXP2: ?inadimplente=1 (ou ?overdue=1) filtra só quem tem cobrança vencida.
+    const overdue = ['1', 'true', 'sim'].includes(String(req.query.inadimplente || req.query.overdue || '').toLowerCase());
 
     const page = await svc.listStudentsPaged(req.dojoId, {
       status,
@@ -156,6 +158,7 @@ router.get('/dojo/students', requireDojoAccess, async (req, res) => {
       belt,
       federated,
       tag_id: tagId,
+      overdue,
       limit: req.query.limit,
       offset: req.query.offset,
     });

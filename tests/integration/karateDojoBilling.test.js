@@ -141,6 +141,9 @@ describe('F3a — motor de mensalidades do dojô (charge-based)', () => {
     expect(r1.body).toEqual({ created: 1, skipped: 0 });
     // escopo do count por dojô do token
     expect(db.query.mock.calls[0][1][0]).toBe(dojoId);
+    // EXP3: inativar aluno PARA de cobrar — count e INSERT filtram s.status='active'
+    expect(String(db.query.mock.calls[0][0])).toMatch(/s\.status = 'active'/);
+    expect(String(db.query.mock.calls[1][0])).toMatch(/s\.status = 'active'/);
 
     db.query.mockReset();
 

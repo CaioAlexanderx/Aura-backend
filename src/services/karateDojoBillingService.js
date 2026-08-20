@@ -312,8 +312,12 @@ async function generateCharges(dojoId, competence) {
     throw svcError(422, 'VALIDATION_ERROR', "competence deve estar no formato 'YYYY-MM'");
   }
   const totalRes = await db.query(
-    `SELECT count(*)::int AS n FROM karate_dojo_subscriptions
-      WHERE dojo_id = $1 AND canceled_at IS NULL`,
+    // Só assinaturas de alunos ATIVOS entram na conta — inativar o aluno
+    // (status='inactive') para de gerar mensalidade, sem precisar cancelar a
+    // assinatura à mão. Espelha o filtro do INSERT abaixo p/ o skipped bater.
+    `SELECT count(*)::int AS n FROM karate_dojo_subscriptions sub
+       JOIN karate_dojo_students s ON s.id = sub.student_id
+      WHERE sub.dojo_id = $1 AND sub.canceled_at IS NULL AND s.status = 'active'`,
     [dojoId]
   );
   const total = Number(totalRes.rows[0] && totalRes.rows[0].n) || 0;
@@ -330,7 +334,8 @@ async function generateCharges(dojoId, competence) {
             make_date(split_part($2, '-', 1)::int, split_part($2, '-', 2)::int, sub.due_day),
             'pending'
        FROM karate_dojo_subscriptions sub
-      WHERE sub.dojo_id = $1 AND sub.canceled_at IS NULL
+       JOIN karate_dojo_students s ON s.id = sub.student_id
+      WHERE sub.dojo_id = $1 AND sub.canceled_at IS NULL AND s.status = 'active'
      ON CONFLICT (subscription_id, competence) DO NOTHING
      RETURNING id`,
     [dojoId, competence]

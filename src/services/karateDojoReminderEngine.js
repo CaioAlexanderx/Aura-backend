@@ -335,7 +335,7 @@ async function runForDojo(dojoId, opts = {}) {
          JOIN karate_dojo_charges c
            ON c.dojo_id = $1 AND c.status = 'pending'
           AND c.due_date = ($3::date - o.offset_val)
-         JOIN karate_dojo_students s ON s.id = c.student_id
+         JOIN karate_dojo_students s ON s.id = c.student_id AND s.status = 'active'
          LEFT JOIN karate_dojo_guardians g ON g.id = c.guardian_id
         ORDER BY c.due_date ASC, s.full_name ASC
         LIMIT 5000`,
@@ -482,7 +482,7 @@ async function whatsappQueue(dojoId, { date = null, config = null } = {}) {
          JOIN karate_dojo_charges c
            ON c.dojo_id = $1 AND c.status = 'pending'
           AND c.due_date = ($3::date - o.offset_val)
-         JOIN karate_dojo_students s ON s.id = c.student_id
+         JOIN karate_dojo_students s ON s.id = c.student_id AND s.status = 'active'
          LEFT JOIN karate_dojo_guardians g ON g.id = c.guardian_id
         ORDER BY c.due_date ASC, s.full_name ASC
         LIMIT ${WHATSAPP_QUEUE_LIMIT}`,
