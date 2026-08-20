@@ -991,14 +991,25 @@ router.delete('/:practitionerId', ...guards.staffWrite(), async (req, res) => {
       return res.status(404).json({ error: 'Praticante não encontrado', code: 'NOT_FOUND' });
     }
 
-    // Conta dependentes (defensivo a 42P01 nas tabelas karatê opcionais).
+    // Conta dependentes (defensivo a 42P01/42703 nas tabelas/colunas karatê
+    // opcionais). SAVEPOINT: um erro de schema pendente dentro do BEGIN
+    // envenenaria a transação sem ele (armadilha #10 do CLAUDE.md) — o
+    // catch solto anterior só não quebrava porque as tabelas existem em prod.
     const counts = { graduations: 0, transfers: 0, cards: 0, transactions: 0 };
     const safeCount = async (sql, params) => {
-      try { const r = await client.query(sql, params); return parseInt(r.rows[0].c, 10) || 0; }
-      catch (e) { if (e.code === '42P01') return 0; throw e; }
+      await client.query('SAVEPOINT sp_count');
+      try {
+        const r = await client.query(sql, params);
+        await client.query('RELEASE SAVEPOINT sp_count');
+        return parseInt(r.rows[0].c, 10) || 0;
+      } catch (e) {
+        if (e.code === '42P01' || e.code === '42703') { await client.query('ROLLBACK TO SAVEPOINT sp_count'); return 0; }
+        throw e;
+      }
     };
     counts.graduations  = await safeCount(`SELECT COUNT(*)::int AS c FROM karate_belt_history WHERE student_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
-    counts.transfers    = await safeCount(`SELECT COUNT(*)::int AS c FROM karate_practitioner_transfers WHERE practitioner_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
+    // Transferências anuladas (voided_at) não contam como histórico bloqueante.
+    counts.transfers    = await safeCount(`SELECT COUNT(*)::int AS c FROM karate_practitioner_transfers WHERE practitioner_id = $1 AND federation_id = $2 AND voided_at IS NULL`, [practitionerId, federationId]);
     counts.cards        = await safeCount(`SELECT COUNT(*)::int AS c FROM karate_membership_cards WHERE student_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
     counts.transactions = await safeCount(`SELECT COUNT(*)::int AS c FROM transactions WHERE reference_type = 'customer' AND reference_id = $1 AND federation_id = $2`, [practitionerId, federationId]);
 

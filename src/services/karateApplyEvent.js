@@ -84,6 +84,9 @@ const crypto = require('crypto');
 // F7.3-A — a leitura de "quem mantém esta ficha" é a MESMA dos outros
 // quatro canais (ficha da federação, portal do sensei, auto-atendimento).
 const { loadIdentityOwner } = require('./karateIdentityWriteGuard');
+// Sync da anuidade: o MESMO primitivo de baixa (ledger + amount_paid) do
+// /confirm/receive — ver settleAnnuity para o porquê de NÃO escrever o header.
+const annuityLedger = require('./karateAnnuityLedger');
 
 // ────────────────────────────────────────────────────────────
 // NÚCLEO PURO (sem I/O) — testável isoladamente.
@@ -453,35 +456,66 @@ async function recordAttendance(client, ev, data) {
 }
 
 // ── Mutação: anuidade do dojô conciliada ────────────────────
-// Marca a cobrança do período como paga (se existir). Não cria cobrança do
-// nada (a cobrança nasce na federação, Track B). Se ainda não houver
-// cobrança, segue (settled=false) — idempotente.
 //
-// IMPORTANTE — CORRIGIDO: marca a cobrança do header como PAGA de verdade.
-// O comentário antigo dizia que status='paid' violava o CHECK da migration 152
-// e por isso setava SÓ paid_at. A migration 219 já ampliou o CHECK para incluir
-// 'pending'/'paid', e — o ponto crítico — as leituras canônicas NÃO olham
-// paid_at: GET /annuities/dojos (karateAnnuities.js) deriva o status por
-// `h.status = 'paid'` e o summary conta `FILTER (WHERE status = 'paid')`. Com
-// status parado em 'pending', o dojô que pagou via sync continuava aparecendo
-// como overdue/inadimplente. Agora espelhamos a conciliação canônica (POST
-// /confirm), que grava status='paid'. O guard `paid_at IS NULL` mantém a
-// idempotência (segunda aplicação vira no-op, settled=false).
+// FONTE ÚNICA DE VERDADE = PARCELA (F2-sync, follow-up da Onda 1 do QA).
+// Antes, o sync escrevia SÓ o header (paid_at). Mas o summary
+// (karateAnnuitySummary) lê de karate_annuity_installments (amount_paid/status),
+// não do header — o "pago" via sync ficava invisível no hub e um rollup futuro
+// podia reverter o header. Agora o sync liquida a(s) PARCELA(s) do período pelo
+// MESMO primitivo do /confirm (ledger karate_annuity_payments + amount_paid,
+// via annuityLedger.settlePeriodOnClient) e deixa syncAnnuityHeaderRollup
+// DERIVAR o header. A divergência header↔parcela some por construção, e o
+// header 'paid' nunca mais é escrito à mão (o rollup só marca 'paid' quando
+// TODAS as parcelas pagam — invariante do guardrail).
 //
-// Escopo desta correção: o HEADER (karate_dojo_annuity_history). A
-// reconciliação a nível de PARCELA (karate_annuity_installments), que alimenta
-// o summary detalhado, continua fora do caminho de sync — follow-up.
+// A cobrança NASCE na federação (Track B / /charge), NUNCA aqui.
+//
+// PARK-AND-REPLAY: se o pagamento chega ANTES da cobrança existir, NÃO drenamos
+// (isso perderia o fato para sempre); devolvemos { parked:true } e o chamador
+// mantém o evento 'pending' para re-aplicar quando a cobrança nascer.
 async function settleAnnuity(client, ev, data) {
-  const paidAt = data.paid_at || new Date().toISOString();
-  const upd = await client.query(
-    `UPDATE karate_dojo_annuity_history
-       SET status = 'paid', paid_at = COALESCE(paid_at, $3), updated_at = NOW()
-     WHERE dojo_id = $1 AND reference_period = $2 AND paid_at IS NULL
-     RETURNING id`,
-    [ev.dojo_id, data.reference_period, paidAt]
+  // Resolve o header (anuidade) do período dentro da federação/dojô.
+  const headerRes = await client.query(
+    `SELECT id FROM karate_dojo_annuity_history
+      WHERE dojo_id = $1 AND reference_period = $2 AND federation_id = $3
+      LIMIT 1`,
+    [ev.dojo_id, data.reference_period, ev.federation_id]
   );
-  if (upd.rows.length) return { id: upd.rows[0].id, settled: true };
-  return { id: null, settled: false };
+  if (!headerRes.rows.length) {
+    // Cobrança ainda não existe → park-and-replay (não drena).
+    return { parked: true };
+  }
+  const annuityId = headerRes.rows[0].id;
+
+  // Liquida a(s) parcela(s) pelo primitivo do ledger; o header é derivado.
+  const r = await annuityLedger.settlePeriodOnClient(client, {
+    federation_id: ev.federation_id,
+    annuity_id: annuityId,
+    amount: data.amount != null ? data.amount : null,
+    payment_method: null, // o evento annuity_paid não carrega método
+    paid_at: data.paid_at || null,
+    created_by: null,
+  });
+
+  if (r.no_installments) {
+    // Header legado SEM nenhuma parcela (anomalia de dado): não há parcela para
+    // ser a fonte. Fallback ao comportamento antigo — marca só o paid_at do
+    // header (idempotente, WHERE paid_at IS NULL), sem tocar status (fica dentro
+    // do CHECK). Não aparece no summary (que faz JOIN com parcelas), então não
+    // reintroduz a divergência header↔parcela.
+    const paidAt = data.paid_at || new Date().toISOString();
+    const upd = await client.query(
+      `UPDATE karate_dojo_annuity_history
+          SET paid_at = COALESCE(paid_at, $2), updated_at = NOW()
+        WHERE id = $1 AND paid_at IS NULL
+        RETURNING id`,
+      [annuityId, paidAt]
+    );
+    return { id: annuityId, settled: upd.rows.length > 0 };
+  }
+
+  // settled=true só quando de fato aplicou valor (saldo já quitado → no-op).
+  return { id: annuityId, settled: Number(r.settled_amount) > 0 };
 }
 
 /**
@@ -491,6 +525,9 @@ async function settleAnnuity(client, ev, data) {
  *                ignored ou invalid — todos drenam a fila).
  *   - ok=false → falha recuperável → o motor re-tenta (status volta a pending).
  *   - deferred → schema ausente: NÃO drena (mantém pending até a migration).
+ *   - hold (só annuity) → PARK-AND-REPLAY: cobrança do período ainda não
+ *     existe; NÃO drena e NÃO conta attempt (mantém pending até a cobrança
+ *     nascer). Mesma mecânica de drenagem do deferred no runner/engine.
  *   - identity_skipped (só practitioner) → aplicado, mas a IDENTIDADE não
  *     foi sobrescrita porque a ficha é mantida por um dojô (F7.3-A).
  */
@@ -549,6 +586,16 @@ async function applyEvent(client, ev) {
     }
     if (decision.kind === 'annuity') {
       const r = await settleAnnuity(client, ev, decision.data);
+      if (r.parked) {
+        // PARK-AND-REPLAY: cobrança do período ainda não existe. NÃO drena e
+        // NÃO incrementa attempts — o chamador (runner/engine) faz ROLLBACK
+        // (desfaz o claim em karate_sync_applied) e mantém o evento 'pending'
+        // para re-aplicar quando a cobrança nascer. Mesma mecânica do deferred.
+        return {
+          ok: false, hold: true, applied: false, kind: 'annuity',
+          detail: 'cobrança do período ainda não existe — aguardando (park-and-replay)',
+        };
+      }
       await tagApplied(client, claim.appliedId, 'karate_dojo_annuity_history', r.id);
       return { ok: true, applied: r.settled, kind: 'annuity', settled: r.settled, targetId: r.id };
     }

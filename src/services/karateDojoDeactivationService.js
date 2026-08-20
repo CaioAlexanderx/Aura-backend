@@ -73,7 +73,8 @@ const COUNTS_SQL = `
        JOIN customers cu ON cu.id = bh.student_id
        WHERE cu.dojo_id = $1)::int AS belt_history,
     (SELECT COUNT(*) FROM karate_practitioner_transfers
-       WHERE origin_dojo_id = $1 OR destination_dojo_id = $1)::int AS transfers,
+       WHERE (origin_dojo_id = $1 OR destination_dojo_id = $1)
+         AND voided_at IS NULL)::int AS transfers,
     (SELECT COUNT(*) FROM karate_dojo_connections WHERE dojo_id = $1)::int AS connections`;
 
 // SAVEPOINT + tolerância a schema pendente. Mesmo helper (mesma intenção) do

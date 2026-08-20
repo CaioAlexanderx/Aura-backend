@@ -6,9 +6,12 @@
 //   POST   /practitioners/:practitionerId/transfer                 (staffWrite)
 //        — transfere o praticante para um dojô de destino (mesma federação)
 //   PATCH  /practitioners/:practitionerId/transfers/:transferId    (staffWrite)
-//        — corrige metadados do registro (motivo, data) — NÃO move dojo_id
+//        — corrige metadados do registro (motivo, data) — NÃO move dojo_id.
+//          AUDITADO: grava before/after em karate_practitioner_transfer_audit.
 //   DELETE /practitioners/:practitionerId/transfers/:transferId    (staffWrite)
-//        — exclui o registro de transferência — NÃO reverte customers.dojo_id
+//        — VOID (soft-delete): marca voided_* em vez de apagar. A linha
+//          permanece (append-only preservado), some da leitura. NÃO reverte
+//          customers.dojo_id.
 //
 // Garantias:
 //   - Transacional: reatribui customers.dojo_id + grava histórico append-only.
@@ -26,12 +29,55 @@
 //   data efetiva); NÃO re-executa a movimentação. A exclusão remove o registro
 //   mas NÃO reverte o customers.dojo_id atual (a reversão de dojô se faz via
 //   nova transferência ou editando a ficha do praticante).
+//
+// 20/08/2026 (follow-up QA Onda 1 — migration 293): a "exclusão" vira VOID
+//   (soft-delete: voided_at/by/reason) para preservar o espírito append-only,
+//   e a edição passa a ser AUDITADA (before/after em
+//   karate_practitioner_transfer_audit). VOID e PATCH rodam em transação com
+//   SET LOCAL app.allow_transfer_purge='on' (escape hatch da 221) — sem ele a
+//   trigger de imutabilidade da 180 barra o UPDATE. Guard extra: se o registro
+//   sendo anulado/editado é o que EXPLICA o customers.dojo_id atual do
+//   praticante, exige ?confirm=true (senão 409 EXPLAINS_CURRENT_DOJO).
 // ============================================================
 'use strict';
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
+const { recordTransferCorrection } = require('../services/karateTransferAudit');
+
+// Migration 293: colunas de VOID (soft-delete). Cache module-level p/ o
+// caso do deploy anteceder a migração (armadilha #1 do CLAUDE.md): a
+// primeira leitura que topar 42703 desliga o filtro e não repete o erro.
+let HAS_VOID_COLUMNS = true;
+
+// SET LOCAL do escape hatch da 221 — libera a trigger de imutabilidade só
+// nesta transação (expira sozinho no COMMIT/ROLLBACK; NUNCA SET global).
+async function allowTransferMutation(client) {
+  await client.query("SET LOCAL app.allow_transfer_purge = 'on'");
+}
+
+// O registro é o que EXPLICA o dojô atual do praticante? (é a transferência
+// ativa mais recente E o destino dela é o customers.dojo_id de hoje). Se for,
+// anular/reordenar mexe no "porquê" do estado atual — exige confirmação.
+async function explainsCurrentDojo(client, federationId, practitionerId, transferRow) {
+  const cust = await client.query(
+    `SELECT dojo_id FROM customers WHERE id = $1 AND federation_id = $2`,
+    [practitionerId, federationId]
+  );
+  const currentDojo = cust.rows[0] ? cust.rows[0].dojo_id : null;
+  if (!currentDojo || String(transferRow.destination_dojo_id) !== String(currentDojo)) return false;
+
+  const latest = await client.query(
+    `SELECT id FROM karate_practitioner_transfers
+      WHERE practitioner_id = $1 AND federation_id = $2 AND voided_at IS NULL
+      ORDER BY transferred_at DESC, created_at DESC
+      LIMIT 1`,
+    [practitionerId, federationId]
+  );
+  const latestId = latest.rows[0] ? latest.rows[0].id : null;
+  return latestId != null && String(latestId) === String(transferRow.id);
+}
 
 let sendKarateEmail = null;
 try {
@@ -41,27 +87,40 @@ try {
 // ── GET histórico de transferências do praticante ───────────
 router.get('/practitioners/:practitionerId/transfers', ...guards.read(), async (req, res) => {
   const { id: federationId, practitionerId } = req.params;
+  // Só lista transferências ATIVAS: as anuladas (voided_at) somem da ficha.
+  const listSql = (withVoidFilter) => `
+      SELECT t.id,
+             t.practitioner_id,
+             t.origin_dojo_id,
+             t.destination_dojo_id,
+             COALESCE(t.origin_dojo_name, orig.name)       AS origin_dojo_name,
+             COALESCE(t.destination_dojo_name, dest.name)  AS destination_dojo_name,
+             t.reason,
+             t.transferred_at,
+             t.initiated_by,
+             COALESCE(u.full_name, u.email) AS initiated_by_name,
+             t.created_at
+        FROM karate_practitioner_transfers t
+        LEFT JOIN companies orig ON orig.id = t.origin_dojo_id
+        LEFT JOIN companies dest ON dest.id = t.destination_dojo_id
+        LEFT JOIN users u        ON u.id   = t.initiated_by
+       WHERE t.practitioner_id = $1 AND t.federation_id = $2
+         ${withVoidFilter ? 'AND t.voided_at IS NULL' : ''}
+       ORDER BY t.transferred_at DESC, t.created_at DESC`;
   try {
-    const { rows } = await db.query(
-      `SELECT t.id,
-              t.practitioner_id,
-              t.origin_dojo_id,
-              t.destination_dojo_id,
-              COALESCE(t.origin_dojo_name, orig.name)       AS origin_dojo_name,
-              COALESCE(t.destination_dojo_name, dest.name)  AS destination_dojo_name,
-              t.reason,
-              t.transferred_at,
-              t.initiated_by,
-              COALESCE(u.full_name, u.email) AS initiated_by_name,
-              t.created_at
-         FROM karate_practitioner_transfers t
-         LEFT JOIN companies orig ON orig.id = t.origin_dojo_id
-         LEFT JOIN companies dest ON dest.id = t.destination_dojo_id
-         LEFT JOIN users u        ON u.id   = t.initiated_by
-        WHERE t.practitioner_id = $1 AND t.federation_id = $2
-        ORDER BY t.transferred_at DESC, t.created_at DESC`,
-      [practitionerId, federationId]
-    );
+    let rows;
+    try {
+      ({ rows } = await db.query(listSql(HAS_VOID_COLUMNS), [practitionerId, federationId]));
+    } catch (inner) {
+      // Coluna voided_at ausente (deploy antes da migration 293): desliga o
+      // filtro e re-tenta sem ele (não repete o erro nas próximas chamadas).
+      if (inner.code === '42703' && HAS_VOID_COLUMNS) {
+        HAS_VOID_COLUMNS = false;
+        ({ rows } = await db.query(listSql(false), [practitionerId, federationId]));
+      } else {
+        throw inner;
+      }
+    }
     return res.json({ data: rows });
   } catch (e) {
     // Tabela ainda não migrada — histórico vazio (não quebra a ficha)
@@ -219,41 +278,71 @@ router.post('/practitioners/:practitionerId/transfer', ...guards.staffWrite(), a
 // ── PATCH corrigir metadados de um registro de transferência ──
 // Corrige SÓ os metadados do registro (reason/motivo, transferred_at/data).
 // NÃO re-executa a movimentação (não toca customers.dojo_id, origin/destination).
+// AUDITADO: grava before/after em karate_practitioner_transfer_audit, na MESMA
+// transação (correção sem rastro é justamente o que este follow-up impede).
+// Guard: se o registro é o que explica o dojô atual do praticante, exige
+// ?confirm=true (editar a data pode reordenar qual transferência "vale").
 router.patch('/practitioners/:practitionerId/transfers/:transferId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, practitionerId, transferId } = req.params;
   const b = req.body || {};
+  const confirmed = String(req.query.confirm) === 'true';
 
-  const sets = [];
-  const vals = [];
-  let i = 1;
-
+  // Campos permitidos → colunas + valores validados.
+  const patch = {};
   if (b.reason !== undefined) {
     // string vazia/null → limpa o motivo (dado ausente é neutro)
-    const v = (b.reason === null || String(b.reason).trim() === '') ? null : String(b.reason).trim().slice(0, 1000);
-    sets.push(`reason = $${i}`); vals.push(v); i++;
+    patch.reason = (b.reason === null || String(b.reason).trim() === '') ? null : String(b.reason).trim().slice(0, 1000);
   }
   if (b.transferred_at !== undefined) {
     const v = b.transferred_at != null ? String(b.transferred_at).slice(0, 10) : '';
     if (!v || !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
       return res.status(422).json({ error: 'transferred_at deve ser YYYY-MM-DD', code: 'VALIDATION_ERROR' });
     }
-    sets.push(`transferred_at = $${i}::date`); vals.push(v); i++;
+    patch.transferred_at = v;
   }
 
-  if (!sets.length) {
+  const fields = Object.keys(patch);
+  if (!fields.length) {
     return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   }
 
-  // A tabela é append-only via trigger de imutabilidade (migration 180/221).
-  // A correção de metadados de UM registro é a "correção excepcional" que a
-  // própria mensagem do trigger prevê para o administrador (esta rota é
-  // staffWrite). O escape hatch é o GUC de transação app.allow_transfer_purge:
-  // SET LOCAL escopa à transação e expira sozinho no COMMIT/ROLLBACK.
   const client = await db.connect();
   try {
     await client.query('BEGIN');
-    await client.query("SET LOCAL app.allow_transfer_purge = 'on'");
-    // Escopo: o registro pertence a ESTE praticante E a ESTA federação.
+
+    // Trava o registro ATIVO (não editamos linha já anulada), escopado por
+    // praticante + federação. Captura o "antes" para a auditoria.
+    const cur = await client.query(
+      `SELECT id, practitioner_id, origin_dojo_id, destination_dojo_id,
+              origin_dojo_name, destination_dojo_name, reason, transferred_at, created_at
+         FROM karate_practitioner_transfers
+        WHERE id = $1 AND practitioner_id = $2 AND federation_id = $3 AND voided_at IS NULL
+        FOR UPDATE`,
+      [transferId, practitionerId, federationId]
+    );
+    if (!cur.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
+    }
+    const before = cur.rows[0];
+
+    // Guard: é o registro que explica o dojô atual? Exige confirmação.
+    if (!confirmed && await explainsCurrentDojo(client, federationId, practitionerId, before)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'EXPLAINS_CURRENT_DOJO',
+        error: 'Este é o registro que explica o dojô atual do praticante. Editá-lo pode reordenar o histórico. Reenvie com ?confirm=true para confirmar.',
+      });
+    }
+
+    // Escape hatch da 221: sem ele a trigger de imutabilidade barra o UPDATE.
+    await allowTransferMutation(client);
+
+    const sets = [];
+    const vals = [];
+    let i = 1;
+    if (Object.prototype.hasOwnProperty.call(patch, 'reason')) { sets.push(`reason = $${i}`); vals.push(patch.reason); i++; }
+    if (Object.prototype.hasOwnProperty.call(patch, 'transferred_at')) { sets.push(`transferred_at = $${i}::date`); vals.push(patch.transferred_at); i++; }
     vals.push(transferId, practitionerId, federationId);
     const upd = await client.query(
       `UPDATE karate_practitioner_transfers
@@ -263,54 +352,113 @@ router.patch('/practitioners/:practitionerId/transfers/:transferId', ...guards.s
                 origin_dojo_name, destination_dojo_name, reason, transferred_at, created_at`,
       vals
     );
-    if (!upd.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
-    }
+    const after = upd.rows[0];
+
+    // Rastro atômico do que mudou (só os campos editados).
+    const beforeDiff = {};
+    const afterDiff = {};
+    fields.forEach((f) => { beforeDiff[f] = before[f]; afterDiff[f] = after[f]; });
+    await recordTransferCorrection(client, {
+      transferId, federationId, practitionerId,
+      action: 'patch',
+      actorUserId: (req.user && req.user.id) || null,
+      before: beforeDiff,
+      after: afterDiff,
+    });
+
     await client.query('COMMIT');
-    return res.json(upd.rows[0]);
+    return res.json(after);
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch (_) {}
-    if (e.code === '42P01') {
-      return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
+    // Schema da 293 ausente (tabela/coluna) → correção não é gravável sem rastro.
+    if (e.code === '42P01' || e.code === '42703') {
+      return res.status(503).json({
+        error: 'Correção de transferências ainda não disponível (migração 293 pendente)',
+        code: 'MIGRATION_PENDING',
+      });
     }
     console.error('[karateTransfers] update error:', e.message);
-    return res.status(500).json({ error: 'Erro ao editar transferência' });
+    return res.status(500).json({ error: 'Erro ao editar transferência', detail: e.message });
   } finally {
     client.release();
   }
 });
 
-// ── DELETE excluir um registro de transferência ──
-// Remove a linha do histórico. IMPORTANTE: NÃO reverte o customers.dojo_id
-// atual — apagar o rastro não move o praticante de volta. A reversão de dojô
-// se faz via nova transferência ou editando a ficha do praticante.
+// ── DELETE → VOID (soft-delete) de um registro de transferência ──
+// NÃO apaga a linha: marca voided_at/voided_by/void_reason. A linha
+// permanece no banco (append-only preservado) e some de toda leitura
+// (voided_at IS NULL). IMPORTANTE: NÃO reverte o customers.dojo_id atual —
+// anular o rastro não move o praticante de volta; a reversão de dojô se faz
+// via nova transferência ou editando a ficha. Guard: se este é o registro que
+// explica o dojô atual, exige ?confirm=true.
 router.delete('/practitioners/:practitionerId/transfers/:transferId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, practitionerId, transferId } = req.params;
-  // Mesmo escape hatch da imutabilidade que o PATCH acima (migration 221).
+  const confirmed = String(req.query.confirm) === 'true';
+  const rawReason = (req.body && req.body.reason) != null ? req.body.reason
+    : (req.query.reason != null ? req.query.reason : null);
+  const voidReason = rawReason != null && String(rawReason).trim() !== ''
+    ? String(rawReason).trim().slice(0, 1000) : null;
+
   const client = await db.connect();
   try {
     await client.query('BEGIN');
-    await client.query("SET LOCAL app.allow_transfer_purge = 'on'");
-    const del = await client.query(
-      `DELETE FROM karate_practitioner_transfers
-        WHERE id = $1 AND practitioner_id = $2 AND federation_id = $3
-      RETURNING id`,
+
+    // Trava o registro ATIVO (anular de novo é no-op → 404), escopado por
+    // praticante + federação.
+    const cur = await client.query(
+      `SELECT id, destination_dojo_id, transferred_at, created_at
+         FROM karate_practitioner_transfers
+        WHERE id = $1 AND practitioner_id = $2 AND federation_id = $3 AND voided_at IS NULL
+        FOR UPDATE`,
       [transferId, practitionerId, federationId]
     );
-    if (!del.rows.length) {
+    if (!cur.rows.length) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
     }
+    const row = cur.rows[0];
+
+    // Guard: é o registro que explica o dojô atual? Exige confirmação — anular
+    // deixaria customers.dojo_id "sem explicação" no histórico visível.
+    if (!confirmed && await explainsCurrentDojo(client, federationId, practitionerId, row)) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        code: 'EXPLAINS_CURRENT_DOJO',
+        error: 'Este é o registro que explica o dojô atual do praticante. Anulá-lo NÃO move o praticante de volta e deixa o dojô atual sem rastro no histórico. Reenvie com ?confirm=true para confirmar.',
+      });
+    }
+
+    // Escape hatch da 221: sem ele a trigger de imutabilidade barra o UPDATE.
+    await allowTransferMutation(client);
+
+    const upd = await client.query(
+      `UPDATE karate_practitioner_transfers
+          SET voided_at = NOW(), voided_by = $4, void_reason = $5
+        WHERE id = $1 AND practitioner_id = $2 AND federation_id = $3 AND voided_at IS NULL
+      RETURNING id, voided_at`,
+      [transferId, practitionerId, federationId, (req.user && req.user.id) || null, voidReason]
+    );
+
+    // Rastro atômico do VOID.
+    await recordTransferCorrection(client, {
+      transferId, federationId, practitionerId,
+      action: 'void',
+      actorUserId: (req.user && req.user.id) || null,
+      reason: voidReason,
+    });
+
     await client.query('COMMIT');
-    return res.json({ deleted: true, id: transferId });
+    return res.json({ voided: true, id: transferId, voided_at: upd.rows[0] ? upd.rows[0].voided_at : null });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch (_) {}
-    if (e.code === '42P01') {
-      return res.status(404).json({ error: 'Transferência não encontrada para este praticante', code: 'NOT_FOUND' });
+    if (e.code === '42P01' || e.code === '42703') {
+      return res.status(503).json({
+        error: 'Anulação de transferências ainda não disponível (migração 293 pendente)',
+        code: 'MIGRATION_PENDING',
+      });
     }
-    console.error('[karateTransfers] delete error:', e.message);
-    return res.status(500).json({ error: 'Erro ao excluir transferência' });
+    console.error('[karateTransfers] void error:', e.message);
+    return res.status(500).json({ error: 'Erro ao anular transferência', detail: e.message });
   } finally {
     client.release();
   }

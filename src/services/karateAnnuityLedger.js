@@ -206,6 +206,115 @@ function computeDistribution(installments, amount) {
   };
 }
 
+// ── Escrita da distribuição FIFO (parcela + ledger) sobre um `client` já em
+// transação do CHAMADOR — write path ÚNICO de baixa. Extraído do laço inline
+// de applyAnnuityPayment para ser reusado também por settlePeriodOnClient (o
+// caminho do sync), garantindo que sync e /receive gravem parcela/ledger
+// EXATAMENTE do mesmo jeito (mesmas colunas, mesma ordem — CLAUDE.md: evitar
+// "segunda porta de baixa" com write path divergente). NÃO gerencia
+// transação, lock nem dedup — isso é responsabilidade de quem chama.
+async function writeDistribution(client, {
+  federation_id, annuity_id, allocations, payment_method, paid_at_iso, created_by, operation_id,
+}) {
+  for (const a of allocations) {
+    await client.query(
+      `UPDATE karate_annuity_installments
+          SET amount_paid = $1,
+              status = $2,
+              payment_method = COALESCE($3, payment_method),
+              paid_at = CASE WHEN $2 = 'paid' THEN $4::timestamptz ELSE paid_at END,
+              updated_at = NOW()
+        WHERE id = $5`,
+      [a.amount_paid_after, a.status_after, payment_method, paid_at_iso, a.installment_id]
+    );
+
+    await client.query(
+      `INSERT INTO karate_annuity_payments
+         (federation_id, installment_id, annuity_id, amount, paid_at, payment_method, created_by, operation_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [federation_id, a.installment_id, annuity_id, a.amount_applied, paid_at_iso, payment_method, created_by, operation_id]
+    );
+  }
+}
+
+// ── settlePeriodOnClient — liquidação da anuidade do período pelo sync ────────
+//
+// Usado pelo consumidor de eventos annuity_paid (karateApplyEvent.settleAnnuity):
+// liquida a(s) PARCELA(s) da anuidade pelo MESMO primitivo do /confirm (ledger
+// karate_annuity_payments + amount_paid) e deixa syncAnnuityHeaderRollup DERIVAR
+// o header — a fonte única de verdade passa a ser a parcela; o header é
+// projeção. Isso elimina POR CONSTRUÇÃO a divergência header↔parcela (o summary
+// lê parcela, não header) e o risco de um rollup futuro reverter um header
+// 'paid' escrito à mão.
+//
+// Roda na transação que o CHAMADOR já abriu (o runner de sync) — NÃO gerencia
+// BEGIN/COMMIT nem dedup por operation_id: a idempotência do sync é a claim em
+// karate_sync_applied, na MESMA transação (ver karateApplyEvent.applyEvent).
+//
+// Diferença DELIBERADA vs. applyAnnuityPayment: aqui `amount` é um SINAL de
+// conciliação vindo do dojô, não uma baixa precisa digitada por um operador.
+//   • amount nulo/ausente  → liquida o SALDO EM ABERTO INTEIRO ("anuidade paga"
+//                            sem valor detalhado — semântica histórica do evento).
+//   • amount > saldo aberto → CAPA ao saldo (não lança AMOUNT_EXCEEDS_BALANCE;
+//                            sobra NÃO vira crédito — mesma regra de escopo).
+//   • amount parcial        → aplica FIFO só o valor informado; o header
+//                            DERIVA 'pending' (nunca marca 'paid' um pagamento
+//                            parcial — ver nota ASSOCIAÇÃO SIMÕES no PR).
+//
+// Retorno: { settled_amount, allocations, header } no caso normal;
+//   { no_installments:true, header:null } quando o header existe mas não tem
+//   NENHUMA parcela (anomalia de dado legado — o chamador decide o fallback);
+//   { already_settled:true, settled_amount:0, header } quando o saldo já é zero.
+async function settlePeriodOnClient(client, {
+  federation_id, annuity_id, amount = null, payment_method = null, paid_at = null, created_by = null,
+}) {
+  const { rows: installments } = await client.query(
+    `SELECT id, annuity_id, federation_id, seq, amount, amount_paid, status, due_date, kind
+       FROM karate_annuity_installments
+      WHERE annuity_id = $1 AND federation_id = $2
+      ORDER BY due_date ASC NULLS FIRST, seq ASC
+      FOR UPDATE`,
+    [annuity_id, federation_id]
+  );
+  if (!installments.length) {
+    return { no_installments: true, settled_amount: 0, allocations: [], header: null };
+  }
+
+  const balance = round2(
+    installments.reduce((s, i) => s + Math.max(round2(i.amount) - round2(i.amount_paid), 0), 0)
+  );
+  const requested = amount == null ? balance : round2(Number(amount));
+  const eff = round2(Math.min(Math.max(requested, 0), balance)); // capado ao saldo
+
+  let paidAtIso;
+  if (paid_at) {
+    const d = paid_at instanceof Date ? paid_at : new Date(paid_at);
+    paidAtIso = Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+  } else {
+    paidAtIso = new Date().toISOString();
+  }
+
+  if (eff <= EPSILON) {
+    // Saldo já quitado → no-op idempotente. Ainda deriva o header para
+    // devolvê-lo consistente, sem escrever parcela/ledger.
+    const header = await syncAnnuityHeaderRollup(client, annuity_id);
+    return { already_settled: true, settled_amount: 0, allocations: [], header };
+  }
+
+  const dist = computeDistribution(installments, eff); // eff<=balance → nunca estoura
+  await writeDistribution(client, {
+    federation_id,
+    annuity_id,
+    allocations: dist.allocations,
+    payment_method,
+    paid_at_iso: paidAtIso,
+    created_by,
+    operation_id: null,
+  });
+  const header = await syncAnnuityHeaderRollup(client, annuity_id);
+  return { settled_amount: dist.total_applied, allocations: dist.allocations, header };
+}
+
 // ── applyAnnuityPayment — o motor de baixa FIFO (coração do F1, dedup do F3) ─
 //
 // { federation_id, annuity_id, amount, payment_method, paid_at,
@@ -448,25 +557,15 @@ async function applyAnnuityPayment({
       }
     }
 
-    for (const a of dist.allocations) {
-      await client.query(
-        `UPDATE karate_annuity_installments
-            SET amount_paid = $1,
-                status = $2,
-                payment_method = COALESCE($3, payment_method),
-                paid_at = CASE WHEN $2 = 'paid' THEN $4::timestamptz ELSE paid_at END,
-                updated_at = NOW()
-          WHERE id = $5`,
-        [a.amount_paid_after, a.status_after, payment_method, paidAtIso, a.installment_id]
-      );
-
-      await client.query(
-        `INSERT INTO karate_annuity_payments
-           (federation_id, installment_id, annuity_id, amount, paid_at, payment_method, created_by, operation_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [federation_id, a.installment_id, annuity_id, a.amount_applied, paidAtIso, payment_method, created_by, opId]
-      );
-    }
+    await writeDistribution(client, {
+      federation_id,
+      annuity_id,
+      allocations: dist.allocations,
+      payment_method,
+      paid_at_iso: paidAtIso,
+      created_by,
+      operation_id: opId,
+    });
 
     // Fonte única de verdade do rollup do header — reutiliza
     // karateAnnuityService.syncAnnuityHeaderRollup, não duplica a lógica.
@@ -730,6 +829,8 @@ async function recomputeAnnuityFromLedger(client, { federation_id, annuity_id })
 module.exports = {
   AnnuityPaymentError,
   applyAnnuityPayment,
+  settlePeriodOnClient,
+  writeDistribution,
   computeDistribution,
   deriveStatusFromAmountPaid,
   toIsoDate,

@@ -28,6 +28,7 @@ function toIsoDate(v) {
 //   GET  /renovacao        — taxa de renovação no período
 //   GET  /cobertura        — densidade por região administrativa SP
 //   GET  /inadimplencia    — status anuidades de dojô
+//   GET  /annuity-integrity — guardrail: header 'paid' com parcela não paga (deve ser 0)
 //   GET  /projecao-receita — receita projetada por mês de vencimento
 //   GET  /dormencia        — dojôs ativos × dormentes (sem exam/comp na season)
 //   GET  /concentracao     — concentração top-5 dojôs (praticantes + receita)
@@ -614,6 +615,48 @@ router.get('/inadimplencia', ...guards.read(), async (req, res) => {
   } catch (err) {
     console.error('[networkHealth] inadimplencia error:', err.message);
     res.status(500).json({ error: 'Erro ao carregar inadimplência' });
+  }
+});
+
+// ── Guardrail: integridade header↔parcela da anuidade (F2-sync) ───────────
+// INVARIANTE do modelo de anuidade (ver karateAnnuityService: o header é ROLLUP
+// das parcelas via syncAnnuityHeaderRollup): header status='paid' ⇒ TODAS as
+// parcelas pagas. Uma linha aqui é sinal de write-path divergente — a família
+// de bug "segunda porta de baixa" (CLAUDE.md #7). É a mesma query do follow-up
+// da Onda 1 do QA do Dojô; deve retornar ZERO em produção.
+//
+// NOTA (ASSOCIAÇÃO SIMÕES 2017): pagamento parcial legítimo do backfill 282
+// (3/4 parcelas pagas) fica com header status='pending' — logo NÃO casa aqui
+// (o filtro exige status='paid'). Não é divergência; é o estado correto.
+router.get('/annuity-integrity', ...guards.read(), async (req, res) => {
+  const fedId = req.params.id;
+  try {
+    const r = await safeQuery(
+      `SELECT h.id, h.dojo_id, h.practitioner_id, h.reference_period
+         FROM karate_dojo_annuity_history h
+        WHERE h.federation_id = $1
+          AND h.status = 'paid'
+          AND EXISTS (
+            SELECT 1 FROM karate_annuity_installments i
+             WHERE i.annuity_id = h.id AND i.status <> 'paid'
+          )
+        ORDER BY h.reference_period DESC`,
+      [fedId]
+    );
+    res.json({
+      ok: r.rows.length === 0,
+      divergent_count: r.rows.length,
+      divergent: r.rows.map((x) => ({
+        annuity_id: x.id,
+        dojo_id: x.dojo_id || null,
+        practitioner_id: x.practitioner_id || null,
+        reference_period: x.reference_period,
+      })),
+      _note: "Invariante: header 'paid' ⇒ todas as parcelas pagas. Deve retornar zero.",
+    });
+  } catch (err) {
+    console.error('[networkHealth] annuity-integrity error:', err.message);
+    res.status(500).json({ error: 'Erro ao verificar integridade de anuidades' });
   }
 });
 

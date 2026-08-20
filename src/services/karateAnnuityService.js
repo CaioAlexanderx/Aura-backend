@@ -630,13 +630,6 @@ async function syncAnnuityHeaderRollup(client, annuityId) {
     lastTransactionId = next?.transaction_id || null;
   }
 
-  // NB: paid_at NÃO usa COALESCE aqui de propósito. Este rollup reflete o
-  // estado das PARCELAS: quando allPaid=false, paid_at volta a null junto com
-  // status='pending' — coerente, e necessário porque computeReminder trata
-  // `paid_at` truthy como "pago" (preservar um paid_at obsoleto silenciaria
-  // lembretes de uma anuidade em aberto). A tensão header↔parcela quando a
-  // liquidação veio do sync (settleAnnuity marca o header, sem parcelas) é um
-  // follow-up de reconciliação, não deve ser mascarada aqui.
   const { rows } = await client.query(
     `UPDATE karate_dojo_annuity_history
         SET amount = $1,
