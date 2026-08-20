@@ -104,7 +104,13 @@ app.use(cors({
   maxAge:         600,
 }));
 
-app.use(express.json({ limit: '5mb' }));
+// verify preserva o corpo cru (req.rawBody) — necessário para validar a
+// assinatura HMAC de webhooks (ex.: X-Hub-Signature-256 do WhatsApp/Meta),
+// que é calculada sobre os BYTES exatos do payload, não sobre o JSON reparseado.
+app.use(express.json({
+  limit: '5mb',
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(sentryContext);
