@@ -264,11 +264,28 @@ describe('applyEvent — aplicação idempotente', () => {
     expect(threw.recoverable).toBe(true);
   });
 
-  it('annuity_paid: marca período pago (UPDATE karate_dojo_annuity_history)', async () => {
+  // (F2-sync) annuity_paid agora LIQUIDA A PARCELA pelo primitivo do ledger e
+  // deixa o header ser derivado — ver cobertura de ponta a ponta em
+  // tests/integration/karateSyncAnnuitySettle.test.js. Aqui asseguramos só a
+  // orquestração via mock sequencial. Sequência de queries:
+  //   0: claim INSERT karate_sync_applied … RETURNING id
+  //   1: SELECT id FROM karate_dojo_annuity_history (lookup do header)
+  //   2: SELECT … karate_annuity_installments … FOR UPDATE (settlePeriodOnClient)
+  //   3: UPDATE karate_annuity_installments (writeDistribution — baixa da parcela)
+  //   4: INSERT karate_annuity_payments (writeDistribution — ledger)
+  //   5: SELECT * karate_annuity_installments ORDER BY seq (rollup getInstallments)
+  //   6: UPDATE karate_dojo_annuity_history … RETURNING * (rollup do header)
+  //   7: UPDATE karate_sync_applied (tag)
+  it('annuity_paid: liquida a parcela do período (ledger + rollup do header)', async () => {
     const client = makeMockClient([
-      { rows: [{ id: 'applied-4' }] },  // claim
-      { rows: [{ id: 'ann-1' }] },      // UPDATE annuity history → settled
-      { rows: [] },                     // tag
+      { rows: [{ id: 'applied-4' }] },                                   // 0 claim
+      { rows: [{ id: 'ann-1' }] },                                       // 1 header lookup
+      { rows: [{ id: 'inst-1', annuity_id: 'ann-1', federation_id: FED, seq: 1, amount: 100, amount_paid: 0, status: 'pending', due_date: '2026-05-31', kind: 'anuidade' }] }, // 2 FOR UPDATE
+      { rows: [] },                                                      // 3 UPDATE parcela
+      { rows: [] },                                                      // 4 INSERT ledger
+      { rows: [{ id: 'inst-1', annuity_id: 'ann-1', seq: 1, amount: 100, amount_paid: 100, status: 'paid', due_date: '2026-05-31', paid_at: '2026-06-01' }] }, // 5 rollup getInstallments
+      { rows: [{ id: 'ann-1', status: 'paid' }] },                       // 6 rollup UPDATE header
+      { rows: [] },                                                      // 7 tag
     ]);
     const res = await applyEvent(client, ev({
       event_type: 'annuity_paid',
@@ -277,20 +294,22 @@ describe('applyEvent — aplicação idempotente', () => {
     expect(res.ok).toBe(true);
     expect(res.kind).toBe('annuity');
     expect(res.settled).toBe(true);
+    expect(res.targetId).toBe('ann-1');
   });
 
-  it('annuity_paid sem cobrança prévia: claim ok mas settled=false (drena, idempotente)', async () => {
+  it('annuity_paid sem cobrança prévia: HOLD (park-and-replay, NÃO drena)', async () => {
     const client = makeMockClient([
       { rows: [{ id: 'applied-5' }] },  // claim
-      { rows: [] },                     // UPDATE annuity → nada para conciliar
-      { rows: [] },                     // tag
+      { rows: [] },                     // header lookup → cobrança não existe
     ]);
     const res = await applyEvent(client, ev({
       event_type: 'annuity_paid',
       payload: { event_uid: 'N2', reference_period: '2099' },
     }));
-    expect(res.ok).toBe(true);
-    expect(res.settled).toBe(false);
+    // NÃO drena: o runner/engine faz ROLLBACK e mantém pending até a cobrança nascer.
+    expect(res.ok).toBe(false);
+    expect(res.hold).toBe(true);
+    expect(res.applied).toBe(false);
   });
 
   it('tipo parked: reivindica + tag, sem mutar dados de negócio', async () => {

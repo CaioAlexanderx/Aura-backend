@@ -26,13 +26,14 @@ const MAX_ATTEMPTS = 5;
 
 /**
  * Aplica a fila pendente de uma federação.
- * @returns { applied, duplicate, parked, ignored, invalid, deferred, retried, failed, scanned }
+ * @returns { applied, duplicate, parked, ignored, invalid, deferred, held, retried, failed, scanned }
+ *   held = park-and-replay (annuity_paid antes da cobrança existir; segue pending).
  */
 async function runFederationApply(federationId, opts = {}) {
   const max = opts.max || BATCH;
   const summary = {
     scanned: 0, applied: 0, duplicate: 0, parked: 0,
-    ignored: 0, invalid: 0, deferred: 0, retried: 0, failed: 0,
+    ignored: 0, invalid: 0, deferred: 0, held: 0, retried: 0, failed: 0,
   };
 
   let pend;
@@ -73,6 +74,16 @@ async function runFederationApply(federationId, opts = {}) {
         continue;
       }
 
+      if (outcome.hold) {
+        // PARK-AND-REPLAY (annuity_paid antes da cobrança nascer): ROLLBACK
+        // desfaz o claim em karate_sync_applied, mantém 'pending' SEM bump de
+        // attempts (não é falha — é "cobrança ainda não existe"). Quando a
+        // cobrança nascer, o próximo run aplica. Mesma mecânica do deferred.
+        await client.query('ROLLBACK');
+        summary.held++;
+        continue;
+      }
+
       if (outcome.ok) {
         await client.query(
           `UPDATE karate_sync_events SET status = 'ok', processed_at = NOW(), error = $2 WHERE id = $1`,
@@ -84,7 +95,7 @@ async function runFederationApply(federationId, opts = {}) {
         else if (outcome.parked) summary.parked++;
         else if (outcome.ignored) summary.ignored++;
         else if (outcome.invalid) summary.invalid++;
-        else summary.applied++; // annuity sem cobrança ainda conta como processado
+        else summary.applied++; // annuity já quitada (no-op idempotente) conta como processado
       } else {
         // Falha recuperável: ROLLBACK PRIMEIRO para desfazer a reivindicação
         // (claim) na trilha karate_sync_applied — senão a re-tentativa veria a
