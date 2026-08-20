@@ -60,6 +60,7 @@ async function applyEvent(client, ev) {
   }
   const out = await consumer.applyEvent(client, ev);
   if (out.deferred) return { ok: false, deferred: true };
+  if (out.hold) return { ok: false, hold: true }; // park-and-replay (annuity sem cobrança ainda)
   if (out.ok) return { ok: true, ack: true, applied: !!out.applied, kind: out.kind };
   return { ok: false, error: out.error || 'falha ao aplicar' };
 }
@@ -67,7 +68,7 @@ async function applyEvent(client, ev) {
 /** Processa a fila de UMA federação (chamado no "pull" quando ela abre). */
 async function processFederationQueue(federationId, opts = {}) {
   const max = opts.max || BATCH;
-  const res = { applied: 0, failed: 0, retried: 0, deferred: 0 };
+  const res = { applied: 0, failed: 0, retried: 0, deferred: 0, held: 0 };
 
   const pend = await db.query(
     `SELECT * FROM karate_sync_events
@@ -91,6 +92,12 @@ async function processFederationQueue(federationId, opts = {}) {
         // runner dedicado). Quando a migration vier, o re-processo aplica.
         await client.query('ROLLBACK');
         res.deferred++;
+      } else if (outcome.hold) {
+        // PARK-AND-REPLAY: annuity_paid chegou antes da cobrança nascer.
+        // ROLLBACK desfaz o claim, mantém 'pending' sem bump de attempts —
+        // re-aplica quando a cobrança existir (espelha o runner dedicado).
+        await client.query('ROLLBACK');
+        res.held++;
       } else if (outcome.ok) {
         await client.query(
           `UPDATE karate_sync_events SET status='ok', processed_at=NOW(), error=NULL WHERE id=$1`,
