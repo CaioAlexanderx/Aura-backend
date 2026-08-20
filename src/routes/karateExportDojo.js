@@ -161,16 +161,25 @@ router.get('/:dojoId/export-data', ...guards.dojoScope(), async (req, res) => {
     if (includeTransfers && praticantes.length) {
       const regs = praticantes.map((p) => p.numero_fpkt).filter(Boolean);
       if (regs.length) {
-        const tr = await db.query(
-          `SELECT cu.karate_registration_number AS reg, cu.name AS practitioner_name,
-                  t.origin_dojo_name, t.destination_dojo_name, t.transferred_at
+        // Só exporta transferências ATIVAS (as anuladas somem do relatório).
+        const transfersSql = (withVoidFilter) => `
+          SELECT cu.karate_registration_number AS reg, cu.name AS practitioner_name,
+                 t.origin_dojo_name, t.destination_dojo_name, t.transferred_at
            FROM karate_practitioner_transfers t
            JOIN customers cu ON cu.id = t.practitioner_id
            WHERE t.federation_id = $1
              AND cu.karate_registration_number = ANY($2::text[])
-           ORDER BY cu.name ASC, t.transferred_at ASC`,
-          [federationId, regs]
-        );
+             ${withVoidFilter ? 'AND t.voided_at IS NULL' : ''}
+           ORDER BY cu.name ASC, t.transferred_at ASC`;
+        let tr;
+        try {
+          tr = await db.query(transfersSql(true), [federationId, regs]);
+        } catch (e) {
+          // Coluna voided_at ausente (deploy antes da migration 293): re-tenta
+          // sem o filtro para não derrubar o export inteiro.
+          if (e.code === '42703') tr = await db.query(transfersSql(false), [federationId, regs]);
+          else throw e;
+        }
         transfers = tr.rows.map((r) => ({
           practitioner_ref: r.reg,
           practitioner_name: r.practitioner_name || null,
