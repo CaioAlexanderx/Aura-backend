@@ -205,4 +205,27 @@ describe('F3b — Conta Aura do dojô (BaaS Asaas opt-in)', () => {
     expect(sent.externalReference).toBe(cid);
     expect(sent.split).toEqual([{ walletId: 'wallet-mother-aura', percentualValue: 0.5 }]);
   });
+
+  test('A1 — pix com pix_txid já criado e payload ausente → RE-BUSCA, NÃO cria 2ª cobrança', async () => {
+    process.env.DOJO_BAAS_ENABLED = 'true';
+    const encKey = baasCrypto.encrypt('SUBACCT_KEY');
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(okJson({ payload: '000201REFETCH', encodedImage: 'img' })); // GET pixQrCode (re-busca)
+    db.query
+      .mockResolvedValueOnce({ rows: [{ id: cid, amount: '140.00', competence: '2026-07', status: 'pending', due_date: '2026-07-10', pix_txid: 'pay_existing', pix_payload: null }] }) // SELECT charge: tem pix_txid, sem payload
+      .mockResolvedValueOnce({ rows: [{ status: 'approved', provider_selected: 'baas', api_key_enc: encKey, wallet_id: 'wallet_dojo_1', asaas_account_id: 'acc_1' }] }) // resolveActiveBaas
+      .mockResolvedValue({ rows: [] }); // persistPixArtifacts (best-effort)
+
+    const res = await request(app).post(`${base}/charges/${cid}/pix`).set(canalA());
+
+    expect(res.status).toBe(200);
+    expect(res.body.provider).toBe('baas');
+    expect(res.body.payload).toBe('000201REFETCH');
+    // NÃO duplicou: nenhum POST /payments (criação de cobrança)
+    const createCall = global.fetch.mock.calls.find((c) => c[1] && c[1].method === 'POST' && String(c[0]).includes('/payments'));
+    expect(createCall).toBeUndefined();
+    // Fez a re-busca do pagamento existente
+    const getQr = global.fetch.mock.calls.find((c) => String(c[0]).includes('/payments/pay_existing/pixQrCode'));
+    expect(getQr).toBeDefined();
+  });
 });

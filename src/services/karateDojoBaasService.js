@@ -367,6 +367,16 @@ async function createChargePixViaBaas({ account, amount, chargeId, competence, d
   return { payment_id: payment.id, payload, qr_image: (qr && qr.encodedImage) || null };
 }
 
+// Re-busca o BR Code de um pagamento JÁ criado na subconta (por payment_id =
+// pix_txid). Usado para NÃO criar uma segunda cobrança quando o pagamento já
+// existe mas o pix_payload não persistiu (A1). É uma LEITURA, sem side-effect.
+async function fetchChargePixViaBaas({ account, paymentId }) {
+  const qr = await asaasClient.asaasRequest(
+    'GET', `/payments/${encodeURIComponent(paymentId)}/pixQrCode`, null, account.apiKey
+  );
+  return { payment_id: paymentId, payload: (qr && qr.payload) || null, qr_image: (qr && qr.encodedImage) || null };
+}
+
 // ── Webhook: helpers de conciliação ──
 async function findAccountByWebhookToken(token) {
   const t = str(token);
@@ -445,6 +455,7 @@ module.exports = {
   setProvider,
   resolveActiveBaas,
   createChargePixViaBaas,
+  fetchChargePixViaBaas,
   findAccountByWebhookToken,
   isAccountStatusEvent,
   mapAccountStatus,
