@@ -177,6 +177,13 @@ router.get('/competitions/:cid', ...guards.read(), async (req, res) => {
       event_date: comp.event_date, location: comp.location || null,
       circuit_round: comp.circuit_round != null ? comp.circuit_round : null, fee_amount: comp.fee_amount,
       status: comp.status, created_at: comp.created_at, updated_at: comp.updated_at,
+      // P0 Hub (migration 294): estado do ciclo operacional + precificação.
+      // findCompetition faz SELECT * — os campos existem quando a 294 está
+      // aplicada; pré-migração vêm undefined e caem nos defaults abaixo.
+      pricing_config: comp.pricing_config || {},
+      conference_published_at: comp.conference_published_at || null,
+      brackets_published_at: comp.brackets_published_at || null,
+      rectification_deadline: comp.rectification_deadline || null,
       category_count,
       entry_count,
       categories: cats.rows.map(c => ({
