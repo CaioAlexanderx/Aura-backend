@@ -6,11 +6,21 @@
 'use strict';
 
 const crypto = require('crypto');
-
-// PRECISA vir antes de require do módulo de cifra (getKey é lazy mas lê env).
-process.env.DOJO_BAAS_ENC_KEY = crypto.randomBytes(32).toString('hex');
-
 const { encrypt, decrypt } = require('../src/services/dojoBaasCrypto');
+
+// getKey() é LAZY (lê DOJO_BAAS_ENC_KEY só ao cifrar/decifrar), então basta
+// setar em beforeAll. RESTAURA em afterAll para não vazar a chave para outros
+// arquivos de teste no mesmo worker (runInBand) — ex.: testes que exigem a
+// chave AUSENTE para exercer o caminho de erro.
+let originalKey;
+beforeAll(() => {
+  originalKey = process.env.DOJO_BAAS_ENC_KEY;
+  process.env.DOJO_BAAS_ENC_KEY = crypto.randomBytes(32).toString('hex');
+});
+afterAll(() => {
+  if (originalKey === undefined) delete process.env.DOJO_BAAS_ENC_KEY;
+  else process.env.DOJO_BAAS_ENC_KEY = originalKey;
+});
 
 // Espelha a detecção de legado do whatsappRoutes.decryptToken.
 function decryptToken(stored) {
