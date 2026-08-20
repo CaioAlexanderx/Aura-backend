@@ -197,7 +197,7 @@ router.get('/dojo/dashboard', requireDojoAccess, async (req, res) => {
       return res.json({
         evasao: { count: 0, students: [] },
         birthdays: { count: 0, students: [] },
-        exam_candidates: { count: 0, students: [] },
+        attendance_ranking: { count: 0, students: [] },
         schema_pending: true,
       });
     }

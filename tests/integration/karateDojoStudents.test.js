@@ -314,7 +314,7 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
       // count EXATO via total_count (pré-LIMIT): 250 no total, lista capada em 1
       .mockResolvedValueOnce({ rows: [{ id: 'e1', full_name: 'Sumido', belt_label: 'Verde', last_attendance: '2026-06-01', total_count: 250 }] })
       .mockResolvedValueOnce({ rows: [{ id: 'b1', full_name: 'Aniversariante', belt_label: 'Roxa', birth_date: '2015-08-10', day: 10 }] })
-      .mockResolvedValueOnce({ rows: [{ id: 'a1', full_name: 'Engajado', belt_label: 'Marrom 3º kyu', presences_90d: 20, total_count: 1 }] });
+      .mockResolvedValueOnce({ rows: [{ id: 'a1', full_name: 'Assíduo', belt_label: 'Marrom 3º kyu', presences_month: 12, total_count: 1 }] });
 
     const res = await request(app).get(`${base}/dashboard`).set(canalA());
 
@@ -323,7 +323,7 @@ describe('F2 — alunos do dojô (registro próprio)', () => {
     expect(res.body.evasao.students).toHaveLength(1);
     expect(res.body.evasao.students[0].full_name).toBe('Sumido');
     expect(res.body.birthdays.students[0].day).toBe(10);
-    expect(res.body.exam_candidates.students[0].presences_90d).toBe(20);
+    expect(res.body.attendance_ranking.students[0].presences_month).toBe(12);
     // escopo SEMPRE pelo dojo do token
     for (const call of db.query.mock.calls) expect(call[1]).toEqual([dojoId]);
   });
