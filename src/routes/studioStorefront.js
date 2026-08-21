@@ -248,6 +248,10 @@ router.get('/:slug/studio/products', async (req, res) => {
           primary_color: config.primary_color || '#1E3A8A',
           accent_color: config.accent_color || '#EC4899',
           logo_url: config.logo_url || null,
+          // Tipografia escolhida pela lojista. A coluna `font_family` ja
+          // existia e so a loja comum consumia; a vitrine Studio ignorava e
+          // renderizava sempre no par padrao.
+          font_family: config.font_family || 'classic',
         },
         products: [],
         sla: { sla_base_days: 3, queue_qty: 0, total_estimate_days: 3 },
@@ -368,6 +372,10 @@ router.get('/:slug/studio/products', async (req, res) => {
         primary_color: config.primary_color || '#1E3A8A',
         accent_color: config.accent_color || '#EC4899',
         logo_url: config.logo_url || null,
+        // Tipografia escolhida pela lojista. A coluna `font_family` ja
+        // existia e so a loja comum consumia; a vitrine Studio ignorava e
+        // renderizava sempre no par padrao.
+        font_family: config.font_family || 'classic',
         cover_url: config.cover_url || null,
       },
       products: products.map(p => {
