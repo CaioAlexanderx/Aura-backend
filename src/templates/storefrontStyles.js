@@ -1,5 +1,6 @@
 // AURA. — CSS da vitrine pública v2 (redesign editorial)
 // buildStyles(primary, accent, dark, font) → string CSS
+const { parTipografico } = require('./storefrontTypography');
 // Aceita assinatura legada buildStyles(primary) — accent cai em color-mix,
 // dark=false, font='classic'.
 //
@@ -25,12 +26,13 @@ function buildStyles(primary, accent, dark, font) {
   accent  = accent  || primary;
   font    = font    || 'classic';
 
-  const fontSerif = font === 'modern'
-    ? `'Fraunces','Instrument Serif',Georgia,serif`
-    : font === 'humanist'
-      ? `'DM Sans','Inter',sans-serif`
-      : `'Instrument Serif','Cormorant Garamond',Georgia,serif`;
-  const fontSans = `'DM Sans','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif`;
+  // O par vem do espelho compartilhado. Antes o corpo era SEMPRE DM Sans,
+  // entao `modern` saia como Fraunces + DM Sans aqui e Fraunces + Manrope
+  // na vitrine Studio: a mesma escolha da lojista rendia duas lojas
+  // diferentes.
+  const par = parTipografico(font);
+  const fontSerif = par.display;
+  const fontSans = par.body;
   const fontMono = `'DM Mono','SF Mono','JetBrains Mono',monospace`;
 
   // Light theme tokens

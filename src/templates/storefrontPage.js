@@ -20,6 +20,7 @@
 //  • favicon: injeta <link rel="icon"> com logo_url quando disponível
 // ============================================================
 const buildStyles   = require('./storefrontStyles');
+const { linkDeFontes } = require('./storefrontTypography');
 const buildHtmlBody = require('./storefrontHtml');
 const buildScript   = require('./storefrontScript');
 
@@ -153,7 +154,7 @@ function buildStorefrontPage(data, slug) {
 ${logoUrl ? `<link rel="icon" href="${logoUrl}" type="image/png">` : ''}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=Fraunces:opsz,wght,ital@9..144,400;9..144,500;9..144,600;9..144,400,1&family=DM+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="${linkDeFontes(font)}">
 <style>
 ${css}
 </style>
