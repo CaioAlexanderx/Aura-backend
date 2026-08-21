@@ -34,6 +34,7 @@
 const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
 const creditLedger = require('../services/creditLedger');
+const { MAX_INSTALLMENTS_CEILING } = require('../services/credit/terms');
 const overdueRule  = require('../services/credit/overdue');
 
 async function assertCrediarioEnabled(companyId) {
@@ -541,7 +542,7 @@ router.post('/customer/:cid/accounts', async (req, res) => {
   if (period_unit        !== undefined) termsSnapshot.period_unit          = period_unit;
   if (period_count       !== undefined) termsSnapshot.period_count         = parseInt(period_count) || 1;
   if (due_day            !== undefined) termsSnapshot.due_day              = parseInt(due_day) || null;
-  if (max_installments   !== undefined) termsSnapshot.max_installments     = parseInt(max_installments) || 12;
+  if (max_installments   !== undefined) termsSnapshot.max_installments     = parseInt(max_installments) || MAX_INSTALLMENTS_CEILING;
   if (late_fee_rate      !== undefined) termsSnapshot.late_fee_rate        = parseFloat(late_fee_rate) || 0;
   if (late_interest_daily !== undefined) termsSnapshot.late_interest_daily = parseFloat(late_interest_daily) || 0;
 
@@ -1388,8 +1389,11 @@ router.post('/manual-entry', async (req, res) => {
 
   if (!total || total <= 0)
     return res.status(400).json({ error: 'amount invalido' });
-  if (n < 1 || n > 100)
-    return res.status(400).json({ error: 'installments deve ser entre 1 e 100' });
+  // 21/08/2026: teto unico e alto (500). O 1..100 daqui convivia com um
+  // default de config de 12 e um clamp silencioso no PDV -- tres numeros
+  // diferentes para a mesma pergunta.
+  if (n < 1 || n > MAX_INSTALLMENTS_CEILING)
+    return res.status(400).json({ error: `installments deve ser entre 1 e ${MAX_INSTALLMENTS_CEILING}` });
   if (!customer_id && !new_customer?.name)
     return res.status(400).json({ error: 'Informe customer_id ou new_customer.name' });
   if (!customer_id && !new_customer?.phone)

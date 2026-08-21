@@ -13,7 +13,8 @@
 //                     sobra (amount_due - covered_amount) -- parcela paga em
 //                     parte entra so com o restante.
 //   newAmount:        principal da nova compra (reais).
-//   installments:     N parcelas do carne unificado (escolha do lojista). 1..100.
+//   installments:     N parcelas do carne unificado (escolha do lojista).
+//                     1..MAX_INSTALLMENTS_CEILING (500 desde 21/08/2026).
 //   interestRate:     juros mensais (decimal). Decisao Caio 13/06: "se houver
 //                     juros, recalcular". Modelo: juros simples SO sobre a nova
 //                     compra (newAmount * rate) -- nao re-cobra juros sobre
@@ -24,7 +25,7 @@
 // Invariante: soma(schedule.amount_due) === total (centavo a centavo).
 // =============================================================
 
-const { round2, dueDateForIndex } = require('./terms');
+const { round2, dueDateForIndex, MAX_INSTALLMENTS_CEILING } = require('./terms');
 
 function computeUnifyPlan({
   openInstallments = [],
@@ -35,8 +36,10 @@ function computeUnifyPlan({
   periodUnit = 'month',
   periodCount = 1,
 } = {}) {
-  // N: numero de parcelas do carne unificado, clampado (igual createCreditSale).
-  const N = Math.max(1, Math.min(parseInt(installments, 10) || 1, 100));
+  // N: numero de parcelas do carne unificado, clampado no teto global
+  // (guarda-corpo contra entrada absurda -- o teto da LOJA e checado antes,
+  // na rota, para virar erro explicito em vez de corte silencioso).
+  const N = Math.max(1, Math.min(parseInt(installments, 10) || 1, MAX_INSTALLMENTS_CEILING));
 
   // Saldo carregado: so o que SOBRA das parcelas abertas (face value, ja com
   // os juros que elas porventura ja carreguem). Parcela paga em parte entra so
