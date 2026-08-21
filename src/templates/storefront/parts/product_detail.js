@@ -39,9 +39,12 @@ function showDetail(id){
   // Helper pra renderizar uma imagem (com fallback pra letra inicial).
   function imgHtml(url){
     if(url){
-      return '<img src="'+esc(url)+'" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:var(--r);transition:opacity .25s;">';
+      // "contain" aqui importa ainda mais que na grade: o cliente ABRIU o
+      // produto pra ver a peca inteira, e cover cortava justamente a parte
+      // que ele quer olhar.
+      return '<img src="'+esc(url)+'" alt="" style="width:100%;height:100%;object-fit:contain;padding:4%;border-radius:var(--r);transition:opacity .25s;">';
     }
-    return '<div style="font-size:64px;font-weight:800;color:var(--primary);">'+esc((p.name||'?')[0].toUpperCase())+'</div>';
+    return '<div class="product-ph-initials" style="font-size:64px;">'+esc(INICIAIS(p.name))+'</div>';
   }
 
   // Renderiza os dots indicadores embaixo (so quando >= 2 imagens).

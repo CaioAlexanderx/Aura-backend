@@ -32,8 +32,12 @@ function renderProducts(){
         if(p.variants[vi].image_url){displayImg=p.variants[vi].image_url;break;}
       }
     }
-    var imgH=displayImg?'<img src="'+esc(displayImg)+'" alt="" style="width:100%;height:100%;object-fit:cover;">'
-      :'<div style="font-size:32px;font-weight:800;color:var(--primary);">'+esc((p.name||'?')[0].toUpperCase())+'</div>';
+    // "contain", nao "cover": cover CORTA a peca — um vestido fotografado
+    // inteiro virava um pedaco de tecido. Mesma regra da vitrine Studio.
+    // Sem foto, duas iniciais compostas no lugar da primeira letra crua:
+    // "KIT 3 PARES MEIA" mostrava "K".
+    var imgH=displayImg?'<img src="'+esc(displayImg)+'" alt="" style="width:100%;height:100%;object-fit:contain;padding:6%;">'
+      :'<div class="product-ph-initials">'+esc(INICIAIS(p.name))+'</div>';
     var priceH=(SETTINGS.show_prices!==false&&p.price!=null)?'<div class="product-price">'+fmt(p.price)+'</div>':'';
     var actionH;
     if(hasVar){
