@@ -17,7 +17,13 @@
 // entra no PR seguinte):
 //   GET    /competitions/:cid/delegations             (read)
 //
-// Defensivo 42P01: seguro mergear antes da migração 294 (GET devolve
+// Kotos e ordem do dia (migration 297 — P1):
+//   GET/POST     /competitions/:cid/areas                    (read/staffWrite)
+//   PATCH/DELETE /competitions/:cid/areas/:areaId            (staffWrite)
+//   PATCH        /competitions/:cid/categories/:catId/area   (staffWrite)
+//   GET          /competitions/:cid/schedule-board           (read)
+//
+// Defensivo 42P01: seguro mergear antes das migrações 294/297 (GET devolve
 // vazio; escrita devolve 503 SCHEMA_PENDING).
 // ============================================================
 'use strict';
@@ -412,5 +418,277 @@ router.post('/competitions/:cid/publish-conference', ...guards.staffWrite(),
   makePublishRoute('conference_published_at', 'conferência de inscrições'));
 router.post('/competitions/:cid/publish-brackets', ...guards.staffWrite(),
   makePublishRoute('brackets_published_at', 'publicação de chaves'));
+
+// ════════════════════════════════════════════════════════════
+// KOTOS (áreas de competição) + ORDEM DO DIA — P1, migration 297
+// A digitalização da planilha "DISTRIBUIÇÃO DE KOTOS": áreas do evento,
+// categorias alocadas por área numa ordem, e a estimativa de carga
+// ("(~3,5h) 58 atletas") recalculada ao vivo pelo karateScheduleService.
+// ════════════════════════════════════════════════════════════
+const scheduleSvc = require('../services/karateScheduleService');
+
+// ── GET /competitions/:cid/areas ────────────────────────────
+router.get('/competitions/:cid/areas', ...guards.read(), async (req, res) => {
+  const { id: federationId, cid } = req.params;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    const { rows } = await db.query(
+      `SELECT a.id, a.name, a.sort_order, a.notes,
+              COUNT(cat.id)::int AS category_count
+         FROM karate_competition_areas a
+         LEFT JOIN karate_competition_categories cat ON cat.area_id = a.id
+        WHERE a.competition_id = $1
+        GROUP BY a.id
+        ORDER BY a.sort_order ASC, a.name ASC`,
+      [cid]
+    );
+    return res.json(rows);
+  } catch (e) {
+    if (e.code === '42P01') return res.json([]);
+    console.error('[karateCompetitionSetup] areas list error:', e.message);
+    return res.status(500).json({ error: 'Erro ao listar áreas' });
+  }
+});
+
+// ── POST /competitions/:cid/areas ───────────────────────────
+router.post('/competitions/:cid/areas', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid } = req.params;
+  const name = req.body && req.body.name != null ? String(req.body.name).trim() : '';
+  const sortOrder = parseInt(req.body && req.body.sort_order, 10) || 0;
+  const notes = req.body && req.body.notes != null ? String(req.body.notes).trim().slice(0, 500) || null : null;
+  if (!name) return res.status(422).json({ error: 'name é obrigatório', code: 'VALIDATION_ERROR' });
+
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    const ins = await db.query(
+      `INSERT INTO karate_competition_areas (competition_id, name, sort_order, notes)
+       VALUES ($1,$2,$3,$4)
+       RETURNING id, name, sort_order, notes, created_at`,
+      [cid, name, sortOrder, notes]
+    );
+    return res.status(201).json(Object.assign({}, ins.rows[0], { category_count: 0 }));
+  } catch (e) {
+    if (e.code === '42P01') {
+      return res.status(503).json({ error: 'Áreas indisponíveis (migração 297 pendente)', code: 'SCHEMA_PENDING' });
+    }
+    if (e.code === '23505') {
+      return res.status(409).json({ error: 'Já existe área com este nome nesta competição', code: 'CONFLICT' });
+    }
+    console.error('[karateCompetitionSetup] area create error:', e.message);
+    return res.status(500).json({ error: 'Erro ao criar área' });
+  }
+});
+
+// ── PATCH /competitions/:cid/areas/:areaId ──────────────────
+router.patch('/competitions/:cid/areas/:areaId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid, areaId } = req.params;
+  const sets = [];
+  const vals = [];
+  let i = 1;
+  if (req.body.name !== undefined) {
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(422).json({ error: 'name não pode ser vazio', code: 'VALIDATION_ERROR' });
+    sets.push(`name = $${i++}`); vals.push(name);
+  }
+  if (req.body.sort_order !== undefined) {
+    sets.push(`sort_order = $${i++}`); vals.push(parseInt(req.body.sort_order, 10) || 0);
+  }
+  if (req.body.notes !== undefined) {
+    sets.push(`notes = $${i++}`);
+    vals.push(req.body.notes != null ? String(req.body.notes).trim().slice(0, 500) || null : null);
+  }
+  if (!sets.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    vals.push(areaId, cid);
+    const upd = await db.query(
+      `UPDATE karate_competition_areas SET ${sets.join(', ')}, updated_at = NOW()
+        WHERE id = $${i} AND competition_id = $${i + 1}
+      RETURNING id, name, sort_order, notes, updated_at`,
+      vals
+    );
+    if (!upd.rows.length) return res.status(404).json({ error: 'Área não encontrada', code: 'NOT_FOUND' });
+    return res.json(upd.rows[0]);
+  } catch (e) {
+    if (e.code === '42P01') {
+      return res.status(503).json({ error: 'Áreas indisponíveis (migração 297 pendente)', code: 'SCHEMA_PENDING' });
+    }
+    if (e.code === '23505') {
+      return res.status(409).json({ error: 'Já existe área com este nome nesta competição', code: 'CONFLICT' });
+    }
+    console.error('[karateCompetitionSetup] area patch error:', e.message);
+    return res.status(500).json({ error: 'Erro ao atualizar área' });
+  }
+});
+
+// ── DELETE /competitions/:cid/areas/:areaId ─────────────────
+// FK das categorias é ON DELETE SET NULL — as categorias do koto excluído
+// voltam para "não alocadas" (nunca somem do evento).
+router.delete('/competitions/:cid/areas/:areaId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid, areaId } = req.params;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    const del = await db.query(
+      `DELETE FROM karate_competition_areas WHERE id = $1 AND competition_id = $2 RETURNING id`,
+      [areaId, cid]
+    );
+    if (!del.rows.length) return res.status(404).json({ error: 'Área não encontrada', code: 'NOT_FOUND' });
+    return res.json({ deleted: true, id: areaId });
+  } catch (e) {
+    if (e.code === '42P01') {
+      return res.status(503).json({ error: 'Áreas indisponíveis (migração 297 pendente)', code: 'SCHEMA_PENDING' });
+    }
+    console.error('[karateCompetitionSetup] area delete error:', e.message);
+    return res.status(500).json({ error: 'Erro ao excluir área' });
+  }
+});
+
+// ── PATCH /competitions/:cid/categories/:catId/area ─────────
+// A operação do drag-n-drop: move a categoria para um koto (ou tira,
+// area_id=null) numa posição da ordem do dia.
+router.patch('/competitions/:cid/categories/:catId/area', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid, catId } = req.params;
+  const areaId = req.body && req.body.area_id !== undefined ? req.body.area_id : undefined;
+  const areaOrder = req.body && req.body.area_order !== undefined
+    ? (req.body.area_order === null ? null : parseInt(req.body.area_order, 10))
+    : undefined;
+  if (areaId === undefined && areaOrder === undefined) {
+    return res.status(400).json({ error: 'Informe area_id e/ou area_order' });
+  }
+  if (areaOrder !== undefined && areaOrder !== null && (!Number.isInteger(areaOrder) || areaOrder < 0)) {
+    return res.status(422).json({ error: 'area_order deve ser inteiro >= 0 ou null', code: 'VALIDATION_ERROR' });
+  }
+
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+
+    if (areaId != null) {
+      const a = await db.query(
+        `SELECT id FROM karate_competition_areas WHERE id = $1 AND competition_id = $2 LIMIT 1`,
+        [areaId, cid]
+      );
+      if (!a.rows.length) {
+        return res.status(404).json({ error: 'Área não encontrada nesta competição', code: 'NOT_FOUND' });
+      }
+    }
+
+    const sets = [];
+    const vals = [];
+    let i = 1;
+    if (areaId !== undefined) { sets.push(`area_id = $${i++}`); vals.push(areaId); }
+    if (areaOrder !== undefined) { sets.push(`area_order = $${i++}`); vals.push(areaOrder); }
+    vals.push(catId, cid);
+    const upd = await db.query(
+      `UPDATE karate_competition_categories SET ${sets.join(', ')}, updated_at = NOW()
+        WHERE id = $${i} AND competition_id = $${i + 1}
+      RETURNING id, area_id, area_order`,
+      vals
+    );
+    if (!upd.rows.length) return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' });
+    return res.json(upd.rows[0]);
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') {
+      return res.status(503).json({ error: 'Alocação de kotos indisponível (migração 297 pendente)', code: 'SCHEMA_PENDING' });
+    }
+    console.error('[karateCompetitionSetup] category area patch error:', e.message);
+    return res.status(500).json({ error: 'Erro ao alocar categoria' });
+  }
+});
+
+// ── GET /competitions/:cid/schedule-board ───────────────────
+// O board do dia: áreas com suas categorias (na ordem) + estimativa de
+// carga por área ("~3,5h · 58 atletas") + categorias não alocadas.
+router.get('/competitions/:cid/schedule-board', ...guards.read(), async (req, res) => {
+  const { id: federationId, cid } = req.params;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+
+    let areas = [];
+    try {
+      const a = await db.query(
+        `SELECT id, name, sort_order, notes FROM karate_competition_areas
+          WHERE competition_id = $1 ORDER BY sort_order ASC, name ASC`,
+        [cid]
+      );
+      areas = a.rows;
+    } catch (e) {
+      if (e.code !== '42P01') throw e;
+    }
+
+    // Categorias com contagem de inscritos ativos + kata_mode (para a
+    // heurística distinguir kata por notas de kata em chave). 42703 →
+    // forma sem area_id (297 pendente): tudo vira "não alocada".
+    const catSql = (withArea) => `
+      SELECT cat.id, cat.name, cat.modality, cat.group_label, cat.division_id,
+             ${withArea ? 'cat.area_id, cat.area_order,' : 'NULL AS area_id, NULL AS area_order,'}
+             d.name AS division_name,
+             b.kata_mode,
+             COUNT(e.id) FILTER (WHERE e.status NOT IN ('withdrawn'))::int AS entry_count
+        FROM karate_competition_categories cat
+        LEFT JOIN karate_competition_divisions d ON d.id = cat.division_id
+        LEFT JOIN karate_brackets b ON b.category_id = cat.id
+        LEFT JOIN karate_competition_entries e ON e.category_id = cat.id
+       WHERE cat.competition_id = $1
+       GROUP BY cat.id, d.name, b.kata_mode
+       ORDER BY ${withArea ? 'cat.area_order ASC NULLS LAST,' : ''} cat.created_at ASC`;
+    let cats;
+    try {
+      ({ rows: cats } = await db.query(catSql(true), [cid]));
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      ({ rows: cats } = await db.query(catSql(false), [cid]));
+    }
+
+    const catView = (c) => ({
+      id: c.id,
+      name: c.name,
+      modality: c.modality,
+      group_label: c.group_label || null,
+      division_name: c.division_name || null,
+      area_order: c.area_order != null ? c.area_order : null,
+      entry_count: c.entry_count,
+      est_minutes: scheduleSvc.estimateCategoryMinutes({
+        modality: c.modality, entry_count: c.entry_count, kata_mode: c.kata_mode,
+      }),
+    });
+
+    const board = areas.map((a) => {
+      const own = cats.filter((c) => c.area_id === a.id);
+      const summary = scheduleSvc.summarizeArea(own);
+      return {
+        id: a.id,
+        name: a.name,
+        sort_order: a.sort_order,
+        notes: a.notes || null,
+        entry_count: summary.entry_count,
+        est_minutes: summary.est_minutes,
+        est_label: summary.est_label,
+        categories: own.map(catView),
+      };
+    });
+    const unassigned = cats.filter((c) => !c.area_id).map(catView);
+
+    return res.json({
+      competition_id: cid,
+      areas: board,
+      unassigned,
+      totals: {
+        categories: cats.length,
+        assigned: cats.length - unassigned.length,
+        entry_count: cats.reduce((s, c) => s + c.entry_count, 0),
+      },
+    });
+  } catch (e) {
+    console.error('[karateCompetitionSetup] schedule-board error:', e.message);
+    return res.status(500).json({ error: 'Erro ao montar o board do dia' });
+  }
+});
 
 module.exports = router;
