@@ -79,6 +79,12 @@ function startServer() {
     // F3c: régua de cobrança do dojô (dojô→aluno) — diário ~9h10 BRT
     const { initDojoReminderScheduler } = require('./jobs/dojoReminderScheduler');
     initDojoReminderScheduler();
+
+    // Gestão Aura: reconciliação diária de billing_status (~6h BRT) — cobre
+    // cancelamentos reais no Asaas (SUBSCRIPTION_DELETED/INACTIVATED nunca
+    // chega via webhook) e trials vencidos que nunca transicionam sozinhos.
+    const { initBillingReconciliationJob } = require('./jobs/billingReconciliationJob');
+    initBillingReconciliationJob();
   });
 }
 

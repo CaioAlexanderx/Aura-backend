@@ -5,12 +5,16 @@
 // GET /admin/metrics/mrr-trend   — Serie temporal MRR 12 meses
 // GET /admin/alerts              — Alertas operacionais
 // POST /admin/health/recalculate — Recalcula health scores
+// POST /admin/billing/reconcile  — Reconciliação manual de billing_status
+//                                   (mesma lógica do job diário, ver
+//                                   src/jobs/billingReconciliationJob.js)
 // ============================================================
 
 const router = require('express').Router();
 const pool = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const asyncHandler = require('../utils/asyncHandler');
+const { triggerBillingReconciliation } = require('../jobs/billingReconciliationJob');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -334,6 +338,17 @@ router.post('/health/recalculate', ...adminOnly, asyncHandler(async (req, res) =
   }
 
   res.json({ message: `Health scores recalculados para ${updated} empresas`, updated });
+}));
+
+// ── POST /admin/billing/reconcile ───────────────────────────────
+// Dispara manualmente a mesma reconciliação que roda sozinha 1x/dia
+// (~6h BRT) — ver src/jobs/billingReconciliationJob.js. Útil pra
+// testar/validar sem esperar o horário do job, ou pra rodar sob
+// demanda depois de suspeitar de drift no billing_status.
+router.post('/billing/reconcile', ...adminOnly, asyncHandler(async (req, res) => {
+  const result = await triggerBillingReconciliation();
+  if (!result) return res.status(500).json({ error: 'Reconciliacao falhou — ver logs do servidor' });
+  res.json({ message: 'Reconciliacao de billing_status concluida', result });
 }));
 
 // ── POST /admin/goals ───────────────────────────────────────────
