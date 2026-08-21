@@ -380,7 +380,7 @@ router.get('/customer/:cid', async (req, res) => {
       // GET /credit/balances e do dashboard. Antes daqui saia atraso por data
       // pura enquanto a ficha usava status cru: carne "Em dia" + topo
       // "Em atraso" no mesmo cliente (relato Valen/livia aline, 18/08/2026).
-      const accIsOverdue  = overdueRule.overdueSql({ graceDays: overdueRule.resolveGraceDays(lateConfig) });
+      const accIsOverdue  = overdueRule.overdueSql({ graceDays: overdueRule.signalGraceDays(lateConfig) });
       const accToReview   = overdueRule.toReviewSql({});
       const { rows: instRows } = await db.query(
         `SELECT account_id,

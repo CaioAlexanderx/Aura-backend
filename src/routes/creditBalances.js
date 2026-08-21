@@ -15,18 +15,19 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const overdueRule = require('../services/credit/overdue');
 
-// Carencia da loja (late_grace_days). Defensivo: se a tabela/coluna nao existir,
-// cai no default da regra (3 dias).
+// Carencia do SINAL de atraso: late_grace_days so vale quando a loja cobra
+// encargos (late_charges_enabled). Defensivo: se a tabela/colunas nao existirem,
+// cai em 0 -- atraso a partir do dia seguinte ao vencimento.
 async function loadGraceDays(companyId) {
   try {
     const { rows } = await db.query(
-      `SELECT late_grace_days FROM credit_plan_configs WHERE company_id = $1`,
+      `SELECT late_grace_days, late_charges_enabled FROM credit_plan_configs WHERE company_id = $1`,
       [companyId]
     );
-    return overdueRule.resolveGraceDays(rows[0]);
+    return overdueRule.signalGraceDays(rows[0]);
   } catch (e) {
     if (e.code !== '42P01' && e.code !== '42703') throw e;
-    return overdueRule.DEFAULT_GRACE_DAYS;
+    return 0;
   }
 }
 

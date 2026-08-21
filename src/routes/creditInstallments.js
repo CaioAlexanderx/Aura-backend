@@ -1054,12 +1054,14 @@ router.get('/dashboard', async (req, res) => {
       [companyId]
     );
 
-    let dashGrace = overdueRule.DEFAULT_GRACE_DAYS;
+    // Carencia do SINAL: so vale quando a loja cobra encargos. Sem encargos,
+    // atraso e a partir do dia seguinte ao vencimento.
+    let dashGrace = 0;
     try {
       const cfg = await pool.query(
-        `SELECT late_grace_days FROM credit_plan_configs WHERE company_id=$1`, [companyId]
+        `SELECT late_grace_days, late_charges_enabled FROM credit_plan_configs WHERE company_id=$1`, [companyId]
       );
-      dashGrace = overdueRule.resolveGraceDays(cfg.rows[0]);
+      dashGrace = overdueRule.signalGraceDays(cfg.rows[0]);
     } catch (e) {
       if (e.code !== '42P01' && e.code !== '42703') throw e;
     }
@@ -1168,18 +1170,19 @@ router.get('/dashboard', async (req, res) => {
 router.get('/dashboard/aging', async (req, res) => {
   const companyId = req.params.id;
   try {
-    let agingGrace = overdueRule.DEFAULT_GRACE_DAYS;
+    let agingGrace = 0;
     try {
       const cfg = await pool.query(
-        `SELECT late_grace_days FROM credit_plan_configs WHERE company_id=$1`, [companyId]
+        `SELECT late_grace_days, late_charges_enabled FROM credit_plan_configs WHERE company_id=$1`, [companyId]
       );
-      agingGrace = overdueRule.resolveGraceDays(cfg.rows[0]);
+      agingGrace = overdueRule.signalGraceDays(cfg.rows[0]);
     } catch (e) {
       if (e.code !== '42P01' && e.code !== '42703') throw e;
     }
     // Regra UNICA: so cai nas faixas de atraso o que a regra considera atraso.
-    // Parcela retroativa (carne historico) e residuo de centavos ficam em
-    // 'a_vencer' -- senao o mapa de risco pinta de vermelho quem esta em dia.
+    // Residuo de centavos e carne historico ainda dentro da janela de
+    // conferencia ficam em 'a_vencer' -- senao o mapa de risco pinta de
+    // vermelho quem esta em dia. Passada a janela, o historico entra nas faixas.
     const agingOverdue = overdueRule.overdueSql({ graceDays: agingGrace });
     const r = await pool.query(
       `SELECT
