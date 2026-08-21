@@ -11,6 +11,7 @@
 //   PUT    /competitions/:cid/categories/:catId/bracket/matches   — edição total em lote (Fase 1)
 //   POST   /competitions/:cid/categories/:catId/bracket/reset     — limpa vencedores/placares (mantém seeding)
 //   PATCH  /competitions/:cid/categories/:catId/bracket/phase-plan — plano de fases (P1, migration 296)
+//   GET    /competitions/:cid/categories/:catId/scoresheet       — SÚMULA (P1: chave + fases + regras + koto)
 //
 // P1 (migration 296): formato por FASE da chave + registro de DECISÃO
 // (hantei/kettei-sen/...) por luta + kata em CHAVE 1×1 (kata_mode=
@@ -1456,6 +1457,203 @@ router.put(
       await client.query('ROLLBACK');
       console.error('[karateBrackets] kata-scores order put error:', err.message);
       res.status(500).json({ error: 'Erro ao salvar ordem' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// GET /competitions/:cid/categories/:catId/scoresheet — SÚMULA (P1)
+//
+// Todos os dados da súmula real num payload só (a impressão é do FE):
+//   cabeçalho (competição/categoria/divisão/grupo/KOTO), inscritos,
+//   rodadas com FORMATO da fase (phase_plan) e decisão registrada,
+//   rodapé de regras (desempate encadeado, kata exigido, premiação,
+//   "não tem disputa de 3º lugar") e os campos preenchidos à mão no
+//   ginásio (shuchin, mesário, duração) — ver as súmulas reais do
+//   Dossiê Shiai (KATA MASC ATÉ 7 ANOS / Kata Master II).
+// ═══════════════════════════════════════════════════════════════
+function roundLabelFor(index, totalRounds) {
+  const remaining = totalRounds - index;
+  if (remaining === 1) return 'Final';
+  if (remaining === 2) return 'Semifinal';
+  if (remaining === 3) return 'Quartas de final';
+  if (remaining === 4) return 'Oitavas de final';
+  return `${index + 1}ª rodada`;
+}
+
+router.get(
+  '/competitions/:cid/categories/:catId/scoresheet',
+  ...guards.read(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const client = await db.connect();
+    try {
+      const compRes = await client.query(
+        `SELECT id, name, season, event_date, location
+           FROM karate_competitions
+          WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+        [cid, federationId]
+      );
+      if (!compRes.rows.length) {
+        return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+      }
+      const comp = compRes.rows[0];
+
+      // Categoria + divisão/grupo + koto (colunas 294/297 podem faltar).
+      let cat;
+      try {
+        const c = await client.query(
+          `SELECT cat.id, cat.name, cat.modality, cat.group_label,
+                  d.name AS division_name,
+                  a.name AS area_name
+             FROM karate_competition_categories cat
+             LEFT JOIN karate_competition_divisions d ON d.id = cat.division_id
+             LEFT JOIN karate_competition_areas a ON a.id = cat.area_id
+            WHERE cat.id = $1 AND cat.competition_id = $2 LIMIT 1`,
+          [catId, cid]
+        );
+        cat = c.rows[0];
+      } catch (e) {
+        if (e.code !== '42703' && e.code !== '42P01') throw e;
+        const c = await client.query(
+          `SELECT id, name, modality FROM karate_competition_categories
+            WHERE id = $1 AND competition_id = $2 LIMIT 1`,
+          [catId, cid]
+        );
+        cat = c.rows[0] ? Object.assign({}, c.rows[0], { group_label: null, division_name: null, area_name: null }) : undefined;
+      }
+      if (!cat) return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' });
+
+      const athletes = await loadEntries(client, catId, federationId);
+      const { bracketRow, matchRows } = await loadBracket(client, catId);
+
+      const plan = (bracketRow && bracketRow.phase_plan) || {};
+      const tiebreakLabels = Array.isArray(plan.tiebreak)
+        ? plan.tiebreak.map((t) => phasePlanSvc.DECISION_LABEL[t] || t)
+        : [];
+      const prizePlaces = plan.prize_places != null ? plan.prize_places : 4;
+      const thirdDispute = plan.third_place_dispute === true
+        || !!(bracketRow && bracketRow.options && bracketRow.options.thirdPlace);
+      const rulesFooter = {
+        tiebreak: tiebreakLabels,
+        required_kata: plan.required_kata || null,
+        prize_places: prizePlaces,
+        third_place_dispute: thirdDispute,
+        // O aviso literal das súmulas reais quando não há disputa de 3º.
+        third_place_note: thirdDispute ? null : 'NÃO TEM DISPUTA DE 3º LUGAR — dois 3ºs lugares',
+        notes: plan.notes || null,
+      };
+
+      const base = {
+        competition: { id: comp.id, name: comp.name, season: comp.season, event_date: comp.event_date, location: comp.location || null },
+        category: {
+          id: cat.id, name: cat.name, modality: cat.modality,
+          division_name: cat.division_name || null, group_label: cat.group_label || null,
+        },
+        area: cat.area_name ? { name: cat.area_name } : null,
+        athletes: athletes.map((a) => ({ entry_id: a.id, name: a.student_name, dojo_name: a.dojo || null, is_team: !!a.team_id })),
+        rules_footer: rulesFooter,
+        // Campos manuscritos no ginásio (a UI imprime as linhas em branco).
+        fields: { koto: cat.area_name || null, shuchin: null, mesario: null, duracao: null },
+      };
+
+      if (!bracketRow) {
+        return res.json(Object.assign(base, { bracket: { status: 'not_generated' } }));
+      }
+
+      const isScoreKata = ['kata', 'team_kata'].includes(bracketRow.modality)
+        && bracketRow.kata_mode !== 'hantei_tree';
+      if (isScoreKata) {
+        let scores = [];
+        try {
+          const sc = await client.query(
+            `SELECT ks.entry_id, ks.phase, ks.nota, ks.presentation_order, ks.advances
+               FROM karate_kata_scores ks
+              WHERE ks.bracket_id = $1
+              ORDER BY ks.phase ASC, ks.presentation_order ASC NULLS LAST`,
+            [bracketRow.id]
+          );
+          scores = sc.rows;
+        } catch (e) {
+          if (e.code !== '42P01') throw e;
+        }
+        const nameById = new Map(athletes.map((a) => [a.id, a]));
+        return res.json(Object.assign(base, {
+          bracket: { status: bracketRow.status, kata_mode: 'score_rounds' },
+          kata_scores: scores.map((k) => ({
+            entry_id: k.entry_id,
+            name: (nameById.get(k.entry_id) || {}).student_name || null,
+            dojo_name: (nameById.get(k.entry_id) || {}).dojo || null,
+            phase: k.phase,
+            nota: k.nota !== null ? parseFloat(k.nota) : null,
+            presentation_order: k.presentation_order,
+            advances: k.advances,
+          })),
+        }));
+      }
+
+      // Árvore (kumite ou kata hantei_tree): rodadas com fase resolvida.
+      const state = rowsToState(matchRows, bracketRow, athletes);
+      const metaMap = buildScoreMap(matchRows);
+      const totalRounds = state.rounds.length;
+      const nameById = new Map(athletes.map((a) => [a.id, a]));
+      const side = (id) => {
+        if (id === 'bye') return 'bye';
+        if (!id) return null;
+        const a = nameById.get(id);
+        return { entry_id: id, name: a ? a.student_name : null, dojo_name: a ? (a.dojo || null) : null };
+      };
+      const serialize = (m, key) => {
+        const meta = metaMap[key] || {};
+        return {
+          id: key,
+          aka: side(m.akaId),
+          shiro: side(m.shiroId),
+          winner_entry_id: m.winnerId || null,
+          aka_score: meta.aka_score != null ? meta.aka_score : null,
+          shiro_score: meta.shiro_score != null ? meta.shiro_score : null,
+          decision: meta.decision || null,
+          match_format: meta.match_format || null,
+        };
+      };
+      const rounds = state.rounds.map((round, i) => {
+        const phase = phasePlanSvc.resolvePhaseForRound(plan, i, totalRounds, false);
+        return {
+          round: i,
+          label: roundLabelFor(i, totalRounds),
+          format: phase ? phase.format : null,
+          format_label: phase ? (phasePlanSvc.FORMAT_LABEL[phase.format] || phase.format) : null,
+          duration_sec: phase && phase.duration_sec != null ? phase.duration_sec : null,
+          time_mode: phase ? (phase.time_mode || null) : null,
+          matches: round.map((m) => serialize(m, m.id)),
+        };
+      });
+      const finalPhase = totalRounds
+        ? phasePlanSvc.resolvePhaseForRound(plan, totalRounds - 1, totalRounds, true)
+        : null;
+      const champion = totalRounds && state.rounds[totalRounds - 1][0]
+        ? state.rounds[totalRounds - 1][0].winnerId : null;
+
+      return res.json(Object.assign(base, {
+        bracket: {
+          status: bracketRow.status,
+          kata_mode: bracketRow.kata_mode || null,
+          rounds_count: totalRounds,
+        },
+        rounds,
+        third_place_match: state.thirdPlaceMatch
+          ? Object.assign(serialize(state.thirdPlaceMatch, 'third'), {
+              format: finalPhase ? finalPhase.format : null,
+              format_label: finalPhase ? (phasePlanSvc.FORMAT_LABEL[finalPhase.format] || finalPhase.format) : null,
+            })
+          : null,
+        champion: champion ? side(champion) : null,
+      }));
+    } catch (err) {
+      console.error('[karateBrackets] scoresheet error:', err.message);
+      return res.status(500).json({ error: 'Erro ao montar a súmula' });
     } finally {
       client.release();
     }
