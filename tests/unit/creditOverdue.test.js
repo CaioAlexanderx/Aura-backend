@@ -8,17 +8,28 @@
 //   - 11 de 24 parcelas vencidas eram carnê histórico cadastrado depois
 //     do vencimento ("nasceu vencida") → a conferir, não inadimplência.
 //   - "viviane": 74 dias de atraso por R$1,50 de resíduo de arredondamento.
+//
+// Relato Valen (21/08/2026) — o oposto, falso NEGATIVO:
+//   - carência de 3 dias era aplicada com o motor de encargos DESLIGADO
+//     (39 parcelas / 35 clientes / R$14.560 em "Em dia" sem cobrar mora);
+//   - parcela retroativa ficava "A conferir" para sempre — havia parcela com
+//     77 dias de atraso em âmbar (8 parcelas / 6 clientes / R$1.057).
 // ============================================================
 const {
   classifyInstallment,
   overdueSql,
   toReviewSql,
   resolveGraceDays,
+  signalGraceDays,
   DEFAULT_GRACE_DAYS,
+  REVIEW_WINDOW_DAYS,
 } = require('../../src/services/credit/overdue');
 
 const HOJE = '2026-08-18T12:00:00-03:00';
-const CONFIG = { late_grace_days: 3 };
+/** Loja que COBRA encargos: a carência da mora também segura o sinal. */
+const CONFIG = { late_grace_days: 3, late_charges_enabled: true };
+/** Loja sem encargos (100% da base hoje): sinal a partir do dia 1. */
+const CONFIG_SEM_ENCARGOS = { late_grace_days: 3, late_charges_enabled: false };
 
 /** Parcela base: aberta, com resíduo, cadastrada bem antes do vencimento. */
 function parcela(over) {
@@ -56,10 +67,23 @@ describe('classifyInstallment — regra única de atraso', () => {
     expect(r.days_late).toBe(44);
   });
 
-  it('dentro da carência da loja ainda é em dia', () => {
+  it('dentro da carência da loja QUE COBRA ENCARGOS ainda é em dia', () => {
     const r = classifyInstallment(parcela({ due_date: '2026-08-17' }), CONFIG, HOJE);
     expect(r.is_overdue).toBe(false);
     expect(r.days_late).toBe(1);
+  });
+
+  it('sem encargos ligados, 1 dia de atraso JÁ acende (relato 21/08)', () => {
+    // A carência existe para não cobrar mora em dia de cortesia. Se a loja não
+    // cobra mora nenhuma, não há cortesia a respeitar — e o cliente sumia da
+    // régua de cobrança por 3 dias.
+    const r = classifyInstallment(parcela({ due_date: '2026-08-17' }), CONFIG_SEM_ENCARGOS, HOJE);
+    expect(r.is_overdue).toBe(true);
+    expect(r.days_late).toBe(1);
+  });
+
+  it('config ausente é tratada como loja sem encargos', () => {
+    expect(classifyInstallment(parcela({ due_date: '2026-08-17' }), null, HOJE).is_overdue).toBe(true);
   });
 
   it('primeiro dia após a carência vira atraso', () => {
@@ -89,7 +113,7 @@ describe('classifyInstallment — regra única de atraso', () => {
     expect(r.remaining).toBe(34);
   });
 
-  it('parcela retroativa (cadastrada depois do vencimento) é "a conferir", não atraso', () => {
+  it('parcela retroativa recém-cadastrada é "a conferir", não atraso', () => {
     const r = classifyInstallment(
       parcela({ due_date: '2026-08-07', created_at: '2026-08-18T09:00:00-03:00' }),
       CONFIG,
@@ -97,6 +121,39 @@ describe('classifyInstallment — regra única de atraso', () => {
     );
     expect(r.is_overdue).toBe(false);
     expect(r.needs_review).toBe(true);
+  });
+
+  it('retroativa passada a janela de conferência vira atraso (relato 21/08)', () => {
+    // "viviane": vencimento 05/06, cadastrada em 05/08, 77 dias de atraso —
+    // ficava em âmbar para sempre porque a exceção nunca expirava.
+    const r = classifyInstallment(
+      parcela({ due_date: '2026-06-05', created_at: '2026-08-05T09:00:00-03:00' }),
+      CONFIG,
+      '2026-08-21T12:00:00-03:00'
+    );
+    expect(r.needs_review).toBe(false);
+    expect(r.is_overdue).toBe(true);
+    expect(r.days_late).toBe(77);
+  });
+
+  it('a janela de conferência é contada do cadastro, não do vencimento', () => {
+    const base = { due_date: '2026-08-01' };
+    // Último dia da janela: ainda a conferir.
+    const dentro = classifyInstallment(
+      parcela({ ...base, created_at: '2026-08-11T09:00:00-03:00' }), // hoje-7
+      CONFIG,
+      HOJE
+    );
+    expect(dentro.needs_review).toBe(true);
+    expect(dentro.is_overdue).toBe(false);
+    // Um dia depois da janela: atraso.
+    const fora = classifyInstallment(
+      parcela({ ...base, created_at: '2026-08-10T09:00:00-03:00' }), // hoje-8
+      CONFIG,
+      HOJE
+    );
+    expect(fora.needs_review).toBe(false);
+    expect(fora.is_overdue).toBe(true);
   });
 
   it('parcela paga ou cancelada nunca é atraso', () => {
@@ -110,6 +167,20 @@ describe('classifyInstallment — regra única de atraso', () => {
   it('é defensivo: entrada inválida devolve zeros sem lançar', () => {
     expect(() => classifyInstallment(null, null, HOJE)).not.toThrow();
     expect(classifyInstallment({ status: 'pending', due_date: 'xx' }, null, HOJE).is_overdue).toBe(false);
+  });
+});
+
+describe('signalGraceDays', () => {
+  it('respeita a carência da loja apenas quando ela cobra encargos', () => {
+    expect(signalGraceDays({ late_grace_days: 7, late_charges_enabled: true })).toBe(7);
+  });
+  it('é zero quando a loja não cobra encargos', () => {
+    expect(signalGraceDays({ late_grace_days: 7, late_charges_enabled: false })).toBe(0);
+    expect(signalGraceDays({ late_grace_days: 7 })).toBe(0);
+    expect(signalGraceDays(null)).toBe(0);
+  });
+  it('cai no default da mora quando a loja cobra mas não configurou a carência', () => {
+    expect(signalGraceDays({ late_charges_enabled: true })).toBe(DEFAULT_GRACE_DAYS);
   });
 });
 
@@ -138,8 +209,14 @@ describe('overdueSql / toReviewSql', () => {
     expect(sql).toContain('> 1');
   });
   it('as duas expressões são mutuamente exclusivas por construção', () => {
-    // atraso exige due_date >= created_at; a conferir exige due_date < created_at
+    // atraso: due_date >= created_at OU cadastro fora da janela;
+    // a conferir: due_date < created_at E cadastro dentro da janela.
     expect(overdueSql({})).toContain('due_date >= (created_at');
     expect(toReviewSql({})).toContain('due_date < (created_at');
+  });
+  it('a janela de conferência entra nas duas expressões', () => {
+    expect(overdueSql({ reviewDays: 7 })).toContain(`- 7)`);
+    expect(toReviewSql({ reviewDays: 7 })).toContain(`- 7)`);
+    expect(overdueSql({})).toContain(`- ${REVIEW_WINDOW_DAYS}`);
   });
 });
