@@ -252,6 +252,9 @@ router.get('/:slug/studio/products', async (req, res) => {
           // existia e so a loja comum consumia; a vitrine Studio ignorava e
           // renderizava sempre no par padrao.
           font_family: config.font_family || 'classic',
+          // Mesmo caso da tipografia: a coluna existe, o painel deixa escolher e
+          // so a loja comum consumia.
+          card_style: config.card_style || 'editorial',
         },
         products: [],
         sla: { sla_base_days: 3, queue_qty: 0, total_estimate_days: 3 },
@@ -376,6 +379,9 @@ router.get('/:slug/studio/products', async (req, res) => {
         // existia e so a loja comum consumia; a vitrine Studio ignorava e
         // renderizava sempre no par padrao.
         font_family: config.font_family || 'classic',
+        // Mesmo caso da tipografia: a coluna existe, o painel deixa escolher e
+        // so a loja comum consumia.
+        card_style: config.card_style || 'editorial',
         cover_url: config.cover_url || null,
       },
       products: products.map(p => {
