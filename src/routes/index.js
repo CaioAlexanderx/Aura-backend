@@ -386,6 +386,18 @@ router.use('/federation/:id', require('./karateCategoryTemplates'));
 //   GET          /federation/:id/competitions/:cid/delegations      (read)
 router.use('/federation/:id', require('./karateCompetitionSetup'));
 
+// ── AURA KARATÊ — P1 Hub: ARBITRAGEM + TERMO DE RESPONSABILIDADE ──
+// Migration 298. Cadastro de árbitros/mesários com credencial (A-D),
+// convocação/confirmação/escala por koto/presença/multa, e o termo de
+// responsabilidade digital por atleta (status por delegação).
+//   GET/POST     /federation/:id/officials                      (read/staffWrite)
+//   PATCH/DELETE /federation/:id/officials/:officialId           (staffWrite)
+//   GET/POST     /federation/:id/competitions/:cid/officials     (read/staffWrite)
+//   PATCH/DELETE /federation/:id/competitions/:cid/officials/:rowId (staffWrite)
+//   PATCH        /federation/:id/competitions/:cid/waiver-terms  (staffWrite)
+//   GET/POST     /federation/:id/competitions/:cid/waivers       (read/staffWrite)
+router.use('/federation/:id', require('./karateOfficials'));
+
 // ── AURA KARATÊ — Track F (admin: conectividade dojô / Fase 5) ──
 // Migrations 170 + 171. Contrato docs/karate-fase5-openapi.yaml.
 //   GET/POST /federation/:id/connections (+ /requests)
