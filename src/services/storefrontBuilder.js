@@ -88,7 +88,10 @@ function parseBanners(raw, fallbackCover, fallbackTagline, fallbackDesc) {
   if (!arr.length && (fallbackCover || fallbackTagline)) {
     arr = [{
       kicker: '', headline: fallbackTagline || 'Bem-vindo à nossa loja',
-      body: fallbackDesc || '', cta: 'Ver produtos',
+      // Sem CTA no banner de fallback: os produtos estao logo abaixo e
+      // um botao que rola 200px e ruido fingindo utilidade. CTA so
+      // quando a lojista escreve um, no banner dela.
+      body: fallbackDesc || '', cta: '',
       tone: 'split', tint: 'brand',
       image_url: fallbackCover || null, enabled: true,
     }];
