@@ -43,6 +43,7 @@ router.get('/:token', async function(req, res) {
               q.deposit_pct, q.deposit_amount, q.response_note, q.responded_at,
               c.trade_name, c.legal_name,
               dc.site_name, dc.logo_url, dc.primary_color, dc.secondary_color,
+              dc.font_family,
               dc.whatsapp AS dc_whatsapp, dc.phone AS dc_phone, dc.instagram,
               (SELECT json_agg(json_build_object(
                 'description', qi.description,
@@ -84,6 +85,10 @@ router.get('/:token', async function(req, res) {
         logo_url:        q.logo_url || null,
         primary_color:   q.primary_color || null,
         secondary_color: q.secondary_color || null,
+        // Fase 05 do rebrand: cor e logo ja chegavam, a tipografia nao — a
+        // lojista escolhia o par no painel e o orcamento saia na fonte do
+        // sistema. Mesmo buraco que a vitrine tinha.
+        font_family:     q.font_family || 'classic',
         whatsapp:        waDigits,
         instagram:       q.instagram || null,
       },
