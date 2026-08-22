@@ -160,6 +160,31 @@ describe('renegociação — idempotência', () => {
     expect(lookup[1]).toEqual([cid, 'rsc-abc-123']);
   });
 
+  test('header presente mas chave NOVA a cada clique: a impressão digital segura', async () => {
+    // O app manda `resched-...-Date.now()`: a chave nunca repete, então sozinha
+    // não deduplica nada. Foi assim que a renegociação da Valen entrou 2x.
+    // A busca por chave não acha; a por impressão digital acha.
+    db.query.mockImplementation((sql, params) => {
+      const s = String(sql || '');
+      if (/FROM customers WHERE id/i.test(s))            return Promise.resolve({ rows: [{ id: cust }] });
+      if (/pdv_settings->>'crediario_enabled'/i.test(s)) return Promise.resolve({ rows: [{ enabled: 'true' }] });
+      if (/FROM credit_reschedule_receipts/i.test(s)) {
+        const porChave = /idempotency_key = \$2/i.test(s);
+        return Promise.resolve({ rows: porChave ? [] : [{ result: RESULT_ANTERIOR }] });
+      }
+      if (/FROM credit_plan_configs/i.test(s)) return Promise.resolve({ rows: [{ period_unit: 'month', period_count: 1 }] });
+      return Promise.resolve({ rows: [] });
+    });
+    const client = mockClient();
+    db.connect.mockResolvedValue(client);
+
+    const res = await post(buildApp(), BODY, { 'Idempotency-Key': 'resched-' + Date.now() });
+
+    expect(res.status).toBe(200);
+    expect(res.body.replayed).toBe(true);
+    expect(db.connect).not.toHaveBeenCalled(); // nenhuma parcela tocada
+  });
+
   test('migration 299 pendente (42P01): aplica normalmente, sem proteção', async () => {
     mockPool({ missing: true });
     const client = mockClient({ missing: true });

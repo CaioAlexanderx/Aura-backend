@@ -245,20 +245,31 @@ router.post('/customers/:cid/accounts/:accountId/reschedule', async (req, res) =
     return res.status(err.status || 500).json({ error: err.message, code: err.code });
   }
 
-  // Replay ANTES de qualquer escrita: com header, pela key; sem header, pela
-  // impressao digital do pedido dentro da janela (cobre o clique duplo de um
-  // app que ainda nao manda Idempotency-Key -- exatamente o caso da Valen).
+  // Replay ANTES de qualquer escrita. As DUAS checagens rodam, nesta ordem:
+  //
+  //   1. Idempotency-Key, quando o caller manda uma chave ESTAVEL entre retries.
+  //   2. Impressao digital do pedido dentro da janela -- rede de seguranca que
+  //      vale SEMPRE, inclusive com header.
+  //
+  // O (2) nao e opcional: o app de hoje ja manda Idempotency-Key, mas gera uma
+  // chave nova a cada clique (`resched-...-Date.now()`), entao a chave nunca
+  // repete e sozinha nao deduplica nada -- foi assim que a renegociacao da
+  // Valen entrou duas vezes. Renegociar o mesmo carne para o mesmo total, no
+  // mesmo numero de parcelas e mesma data, duas vezes em menos de um minuto,
+  // nunca e uma segunda intencao: e a primeira resposta que se perdeu.
   const fingerprint = rescheduleFingerprint({
     accountId, total, installments, firstDueDate, periodUnit, periodCount,
   });
   try {
-    const prior = idempotencyKey
-      ? await loadRescheduleReceipt(companyId, idempotencyKey)
-      : await loadRecentByFingerprint(companyId, customerId, fingerprint);
+    let by = 'key';
+    let prior = await loadRescheduleReceipt(companyId, idempotencyKey);
+    if (!prior) {
+      by = 'fingerprint';
+      prior = await loadRecentByFingerprint(companyId, customerId, fingerprint);
+    }
     if (prior) {
       console.info('[creditReschedule] replay', JSON.stringify({
-        companyId, customerId, accountId,
-        by: idempotencyKey ? 'key' : 'fingerprint',
+        companyId, customerId, accountId, by,
       }));
       return res.status(200).json({ ...prior, replayed: true });
     }
@@ -282,9 +293,9 @@ router.post('/customers/:cid/accounts/:accountId/reschedule', async (req, res) =
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [companyId + ':' + customerId]);
 
     // Re-checagem DENTRO da transacao (o vencedor da corrida ja commitou).
-    const priorInTx = idempotencyKey
-      ? await loadRescheduleReceipt(companyId, idempotencyKey, client)
-      : await loadRecentByFingerprint(companyId, customerId, fingerprint, client);
+    // Mesmas duas checagens da entrada -- a impressao digital vale com header.
+    const priorInTx = (await loadRescheduleReceipt(companyId, idempotencyKey, client))
+      || (await loadRecentByFingerprint(companyId, customerId, fingerprint, client));
     if (priorInTx) {
       await client.query('ROLLBACK');
       console.info('[creditReschedule] replay (corrida)', JSON.stringify({
