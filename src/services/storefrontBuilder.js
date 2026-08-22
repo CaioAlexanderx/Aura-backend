@@ -218,6 +218,33 @@ function listVisibilityWhere(cidParam) {
   ))`;
 }
 
+/**
+ * Quantos produtos a loja TEM, nao quantos couberam no payload.
+ *
+ * O `LIMIT 500` abaixo e uma decisao de peso de pagina, nao de catalogo: a
+ * Finesse tem 1302 produtos e a pagina ja sai com 419 KB nos 500. O
+ * problema nao era o teto — era o silencio. Sem esta contagem a loja
+ * afirmava "500 produtos" e 802 sumiam sem aviso, para a lojista e para a
+ * cliente.
+ */
+const LIMITE_DO_PAYLOAD = 500;
+
+async function contarProdutosDaLoja(cid) {
+  const sql = `
+    SELECT COUNT(*)::int AS n
+    FROM products
+    WHERE ${listVisibilityWhere('$1')}
+      AND is_active IS NOT FALSE
+  `;
+  try {
+    const { rows } = await db.query(sql, [cid]);
+    return rows[0] ? rows[0].n : 0;
+  } catch (e) {
+    // Contagem e informativa: se falhar, a loja abre sem o aviso.
+    return 0;
+  }
+}
+
 async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
   const visibility = listVisibilityWhere('$1');
 
@@ -229,7 +256,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
         AND is_active IS NOT FALSE
         AND id::text = ANY($2)
       ORDER BY array_position($2, id::text)
-      LIMIT 500
+      LIMIT ${LIMITE_DO_PAYLOAD}
     `;
     const { rows } = await db.query(sql, [cid, featuredIds]);
     return rows;
@@ -241,7 +268,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
     WHERE ${visibility}
       AND is_active IS NOT FALSE
     ORDER BY created_at DESC
-    LIMIT 500
+    LIMIT ${LIMITE_DO_PAYLOAD}
   `;
   const { rows } = await db.query(sql, [cid]);
   return rows;
@@ -309,6 +336,7 @@ async function buildStorefront(config) {
   const hiddenIds   = parseHiddenIds(config.hidden_product_ids);
 
   const products = await fetchStorefrontProducts(cid, featuredIds, hiddenIds);
+  const catalogoTotal = await contarProdutosDaLoja(cid);
 
   // D3: árvore + vínculo primário. Só categorias visíveis na vitrine
   // entram, e o produto só recebe categoria que esteja nesse conjunto --
@@ -450,6 +478,9 @@ async function buildStorefront(config) {
       };
     }),
     total_products: products.length,
+    // Quantos a loja tem de verdade — ver contarProdutosDaLoja.
+    catalog_total: catalogoTotal,
+    payload_limit: LIMITE_DO_PAYLOAD,
     // D3: lista FLAT com parent_id -- o cliente deriva a hierarquia, mesmo
     // formato que o GET /product-categories já usa (contrato §10). Vazia
     // em base sem as migrations 257/258.

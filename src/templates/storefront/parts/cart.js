@@ -66,7 +66,7 @@ function updateCartUI(){
 
 function openCart(){document.getElementById('cartOverlay').classList.add('open');document.getElementById('cartDrawer').classList.add('open');document.body.style.overflow='hidden';}
 function closeCart(){document.getElementById('cartOverlay').classList.remove('open');document.getElementById('cartDrawer').classList.remove('open');document.body.style.overflow='';}
-function filterCat(cat,el){currentCat=cat;document.querySelectorAll('.cat-chip').forEach(function(c){c.classList.remove('active');});el.classList.add('active');document.getElementById('catTitle').textContent=cat==='Todos'?'Todos os produtos':cat;renderProducts();}
+function filterCat(cat,el){currentCat=cat;document.querySelectorAll('.cat-chip').forEach(function(c){c.classList.remove('active');});el.classList.add('active');document.getElementById('catTitle').textContent=cat==='Todos'?'Todos os produtos':cat;mostrando=LOTE;renderProducts();window.scrollTo({top:document.getElementById('productsAnchor').offsetTop-80,behavior:'smooth'});}
 
 // Search inline (Fase 3 PR A) — toggle adiciona/remove .searching na .topbar.
 // Quando entra em busca foca o input; quando sai limpa input + searchTerm.
@@ -82,6 +82,7 @@ function toggleSearch(){
   }else{
     if(input) input.value='';
     searchTerm='';
+    mostrando=LOTE;
     renderProducts();
   }
 }
@@ -99,6 +100,7 @@ function searchBlur(){
 function filterProducts(){
   var input=document.getElementById('searchInput');
   searchTerm=input?input.value:'';
+  mostrando=LOTE;
   renderProducts();
 }
 `;

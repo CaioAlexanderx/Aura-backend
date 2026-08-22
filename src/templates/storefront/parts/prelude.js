@@ -17,5 +17,9 @@ var CONTACT  = __S.contact  || {};
 var SITE     = __S.site     || {};
 var PROD_MAP = {};
 PRODUCTS.forEach(function(p){ PROD_MAP[p.id] = p; });
+// Quantos produtos a loja TEM (contarProdutosDaLoja) contra quantos couberam
+// no payload. Base sem a contagem devolve 0 e a grade so nao mostra o aviso.
+var CATALOGO_TOTAL = __S.catalog_total || 0;
+var CARREGADOS     = PRODUCTS.length;
 `;
 };
