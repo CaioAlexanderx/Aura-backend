@@ -92,7 +92,34 @@ router.get('/menu/public/:slug', async (req, res) => {
        GROUP BY fi.id ORDER BY fi.sort_order`, [menu.company_id]
     );
 
-    res.json({ menu, categories, items });
+    // Fase 05 do rebrand — o cardapio nao recebia marca NENHUMA: sem logo,
+    // sem cor, sem tipografia. A loja da mesma empresa ja tem tudo isso em
+    // digital_channel_config; era so nao estar sendo lido aqui.
+    //
+    // Defensivo por padrao da casa: a tabela pode nao existir na base (ou
+    // a empresa nao ter canal digital), e cardapio sem marca ainda e um
+    // cardapio — nao pode cair por causa da decoracao.
+    let brand = null;
+    try {
+      const { rows: marca } = await db.query(
+        `SELECT site_name, logo_url, primary_color, accent_color, font_family
+         FROM digital_channel_config WHERE company_id = $1 LIMIT 1`,
+        [menu.company_id]
+      );
+      if (marca.length) {
+        brand = {
+          name: marca[0].site_name || menu.name,
+          logo_url: marca[0].logo_url || null,
+          primary_color: marca[0].primary_color || null,
+          accent_color: marca[0].accent_color || null,
+          font_family: marca[0].font_family || 'classic',
+        };
+      }
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+
+    res.json({ menu, categories, items, brand });
   } catch (e) {
     console.error('[food/menu/public] Erro:', e.message);
     res.status(500).json({ error: 'Erro ao buscar cardápio público' });
