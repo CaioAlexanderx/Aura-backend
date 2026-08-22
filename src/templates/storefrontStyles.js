@@ -130,7 +130,7 @@ h1,h2,h3,h4,.serif{font-family:${fontSerif};font-weight:400;letter-spacing:-0.4p
 /* ============================================================
    TOPBAR / HEADER
    ============================================================ */
-.topbar{position:sticky;top:0;z-index:100;background:color-mix(in oklab,var(--sf-bg) 92%,transparent);backdrop-filter:saturate(180%) blur(12px);-webkit-backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--sf-border);padding:0 20px;height:64px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:sticky;}
+.topbar{position:sticky;top:0;z-index:100;background:color-mix(in oklab,var(--sf-bg) 92%,transparent);backdrop-filter:saturate(180%) blur(12px);-webkit-backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--sf-border);padding:0 max(20px,calc((100% - 1280px)/2 + 20px));height:64px;display:flex;align-items:center;justify-content:space-between;gap:12px;}
 .topbar-brand{display:flex;align-items:center;gap:12px;text-decoration:none;flex:0 1 auto;min-width:0;transition:opacity .2s ease;}
 .topbar-logo{width:40px;height:40px;border-radius:10px;background:var(--sf-brand);display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;font-weight:400;font-family:${fontSerif};flex-shrink:0;overflow:hidden;box-shadow:inset 0 0 0 1px color-mix(in oklab,var(--sf-brand) 40%,transparent);}
 .topbar-logo img{width:100%;height:100%;object-fit:cover;}
@@ -180,10 +180,10 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
    BANNER STAGE (carrossel da home)
    ============================================================ */
 .banner-stage{position:relative;width:100%;max-width:1280px;margin:20px auto;padding:0 20px;}
-.banner-frame{position:relative;width:100%;height:460px;overflow:hidden;border-radius:18px;}
+.banner-frame{position:relative;width:100%;aspect-ratio:16/6;max-height:460px;overflow:hidden;border-radius:18px;}
 @media(max-width:600px){
   .banner-stage{margin:12px auto;padding:0 12px;}
-  .banner-frame{height:320px;border-radius:14px;}
+  .banner-frame{aspect-ratio:4/3;max-height:340px;border-radius:14px;}
 }
 .banner-slide{position:absolute;inset:0;opacity:0;transition:opacity .9s cubic-bezier(.4,0,.2,1);pointer-events:none;}
 .banner-slide.active{opacity:1;pointer-events:auto;}
@@ -293,7 +293,7 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 /* ============================================================
    Categories chip strip
    ============================================================ */
-.cats-wrap{padding:12px 20px 0;display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;position:sticky;top:64px;z-index:50;background:var(--sf-bg);border-bottom:1px solid var(--sf-border);}
+.cats-wrap{padding:12px max(20px,calc((100% - 1280px)/2 + 20px)) 0;display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;position:sticky;top:64px;z-index:50;background:var(--sf-bg);border-bottom:1px solid var(--sf-border);}
 .cats-wrap::-webkit-scrollbar{display:none;}
 .cat-chip{white-space:nowrap;padding:8px 16px;border-radius:999px;font-size:12px;font-weight:500;background:transparent;border:1px solid var(--sf-border-2);color:var(--sf-ink);cursor:pointer;transition:all .18s;flex-shrink:0;margin-bottom:10px;font-family:${fontSans};}
 .cat-chip:hover{background:var(--sf-brand-wash);}
@@ -302,7 +302,7 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 /* ============================================================
    Products grid + card styles
    ============================================================ */
-.products-section{padding:20px 32px;max-width:1280px;margin:0 auto;}
+.products-section{padding:20px;max-width:1280px;margin:0 auto;}
 .products-header{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:24px;gap:18px;}
 .products-header h2{font-family:${fontSerif};font-size:30px;font-weight:400;letter-spacing:-0.4px;}
 @media(max-width:600px){.products-section{padding:20px 16px;}.products-header h2{font-size:22px;}}
@@ -474,7 +474,7 @@ body.card-style-image-heavy .product-name{font-size:16px;margin-bottom:4px;}
    Footer
    ============================================================ */
 .site-footer{background:var(--sf-bg-2);border-top:1px solid var(--sf-border);margin-top:60px;color:var(--sf-ink-2);font-size:13px;line-height:1.6;}
-.site-footer-inner{max-width:1280px;margin:0 auto;padding:56px 32px 24px;}
+.site-footer-inner{max-width:1280px;margin:0 auto;padding:56px 20px 24px;}
 .site-footer-cols{display:grid;grid-template-columns:1.4fr repeat(4,1fr);gap:40px;margin-bottom:48px;}
 @media(max-width:760px){.site-footer-cols{grid-template-columns:1fr 1fr;gap:24px;}}
 .site-footer h4{font-family:${fontSans};font-size:11px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:var(--sf-ink-3);margin-bottom:14px;}
