@@ -80,6 +80,10 @@ function buildStorefrontPage(data, slug) {
     contact:  data.contact,
     settings: data.settings,
     products: data.products,
+    // Quantos produtos a loja TEM. O builder ja calculava e a grade ja
+    // sabia usar, mas o storeData copia campo a campo — a chave parava
+    // aqui e o aviso "500 de 1302" nunca aparecia.
+    catalog_total: data.catalog_total,
   });
 
   const logoInTopbar = logoUrl

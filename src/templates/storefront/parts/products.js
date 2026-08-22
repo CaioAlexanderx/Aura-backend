@@ -135,7 +135,23 @@ function atualizarRodapeDaGrade(visiveis,filtrados,faltam){
   if(filtrados>visiveis) partes.push('Mostrando '+visiveis+' de '+filtrados);
   if(faltam>0&&visiveis>=filtrados) partes.push('Mais '+faltam+' produtos no catalogo — use a busca');
   el.hidden=partes.length===0;
-  el.textContent=partes.join(' · ');
+
+  // BOTAO, nao so rolagem. Rolagem infinita sozinha deixa quem navega por
+  // teclado sem acesso ao resto do catalogo: o foco nunca chega ao fim da
+  // lista pra disparar a sentinela, e o rodape fica inalcancavel.
+  var botao=filtrados>visiveis
+    ? '<button type="button" class="grid-more-btn" onclick="verMais()">Ver mais produtos</button>'
+    : '';
+  el.innerHTML='<span>'+partes.join(' · ')+'</span>'+botao;
+}
+
+/** Proximo lote sob demanda — usado pelo botao e pela sentinela. */
+function verMais(){
+  var grid=document.getElementById('productsGrid');
+  if(!grid||!grid.children.length) return;
+  if(grid.children.length<mostrando) return; // ja mostrou tudo que ha
+  mostrando+=LOTE;
+  renderProducts();
 }
 
 /**
@@ -146,13 +162,8 @@ function atualizarRodapeDaGrade(visiveis,filtrados,faltam){
  */
 function ligarRenderIncremental(){
   var alvo=document.getElementById('gridSentinel'); if(!alvo) return;
-  var crescer=function(){
-    var grid=document.getElementById('productsGrid');
-    if(!grid||!grid.children.length) return;
-    if(grid.children.length<mostrando) return; // ja mostrou tudo que ha
-    mostrando+=LOTE;
-    renderProducts();
-  };
+  // Mesma funcao do botao: um caminho so pra crescer a grade.
+  var crescer=verMais;
   if(typeof IntersectionObserver==='function'){
     new IntersectionObserver(function(ents){
       for(var i=0;i<ents.length;i++){ if(ents[i].isIntersecting) crescer(); }
