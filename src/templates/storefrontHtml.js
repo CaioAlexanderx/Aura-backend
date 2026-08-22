@@ -213,8 +213,25 @@ ${heroLegacy}
   <div class="products-header">
     <h2 id="catTitle">Todos os produtos</h2>
     <span class="products-count" id="prodCount"></span>
+    <!-- Ordenacao aparece so quando ha produto suficiente pra ela servir;
+         numa loja de 9 itens a barra e mais alta que a vitrine. O JS
+         decide (renderOrdenacao). -->
+    <label class="sort-wrap" id="sortWrap" hidden>
+      <span class="sort-lbl">Ordenar</span>
+      <select id="sortSelect" onchange="setOrdem(this.value)">
+        <option value="destaque">Destaque</option>
+        <option value="novidades">Novidades</option>
+        <option value="preco_asc">Menor preco</option>
+        <option value="preco_desc">Maior preco</option>
+        <option value="nome">Nome (A-Z)</option>
+      </select>
+    </label>
   </div>
   <div class="products-grid" id="productsGrid"></div>
+  <!-- Sentinela do render incremental: a Finesse desenhava 410 cartoes de
+       uma vez. Entra em cena quando o cliente chega perto do fim. -->
+  <div id="gridSentinel" style="height:1px;"></div>
+  <div class="grid-more" id="gridMore" hidden></div>
 </section>
 
 ${serviceStrip}
