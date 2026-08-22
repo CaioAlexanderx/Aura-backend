@@ -4,6 +4,7 @@
 // ============================================================
 
 const { computeUnifyPlan } = require('../../src/services/credit/unify');
+const { MAX_INSTALLMENTS_CEILING } = require('../../src/services/credit/terms');
 
 const sumSchedule = (s) => Math.round(s.reduce((a, b) => a + b.amount_due, 0) * 100) / 100;
 
@@ -86,9 +87,13 @@ describe('computeUnifyPlan', () => {
     expect(p.schedule.map((s) => s.amount_due)).toEqual([33.33]);
   });
 
-  test('N clampado em 1..100', () => {
+  test('N clampado em 1..teto global (500 desde 21/08/2026)', () => {
     expect(computeUnifyPlan({ newAmount: 10, installments: 0 }).installments_count).toBe(1);
-    expect(computeUnifyPlan({ newAmount: 10, installments: 999 }).installments_count).toBe(100);
+    expect(computeUnifyPlan({ newAmount: 10, installments: 999 }).installments_count)
+      .toBe(MAX_INSTALLMENTS_CEILING);
+    // 54x (relato Valen) passa direto -- antes era cortado no 100 so em casos
+    // extremos, mas o teto de LOJA (12) ja barrava antes disso.
+    expect(computeUnifyPlan({ newAmount: 5400, installments: 54 }).installments_count).toBe(54);
   });
 
   test('determinismo: soma das parcelas == total em valores quebrados', () => {

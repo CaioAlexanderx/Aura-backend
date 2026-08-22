@@ -26,6 +26,7 @@ module.exports = {
   round2:                   terms.round2,
   LATE_FEE_MAX:             terms.LATE_FEE_MAX,
   LATE_INTEREST_DAILY_MAX:  terms.LATE_INTEREST_DAILY_MAX,
+  MAX_INSTALLMENTS_CEILING: terms.MAX_INSTALLMENTS_CEILING,
   _recalculateScore:        score._recalculateScore,
   _updateCreditUsed:        ledger._updateCreditUsed,
   _getOrCreateProfile:      ledger._getOrCreateProfile,

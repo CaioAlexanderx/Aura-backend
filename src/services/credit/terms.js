@@ -9,6 +9,17 @@
 const LATE_FEE_MAX            = 0.02;       // multa unica maxima
 const LATE_INTEREST_DAILY_MAX = 0.01 / 30;  // mora diaria maxima (1% a.m.)
 
+// ─── Teto de parcelas (21/08/2026) ──────────────────────
+// Era 12 (default de config) + 100 (hard cap espalhado pelo codigo). A Valen
+// vende em 36x/54x: o 12 barrava PDV e parcelamento direto enquanto a
+// renegociacao, sem teto, passava -- e o PDV ainda CLAMPAVA em silencio,
+// gravando 12x numa venda pedida em 54x sem erro em lugar nenhum.
+// Agora o teto e um so, alto, e serve de guarda-corpo contra entrada absurda
+// (dedo escorregando no 5000). Loja que quiser teto de verdade configura
+// max_installments em PUT /credit/plan-config -- e ai o pedido acima do teto
+// vira ERRO EXPLICITO, nunca corte silencioso.
+const MAX_INSTALLMENTS_CEILING = 500;
+
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -38,7 +49,7 @@ function dueDateForIndex(firstDueStr, unit, count, idx) {
 function resolveTerms(profile, config) {
   const defaults = {
     interest_rate:       0,
-    max_installments:    12,
+    max_installments:    MAX_INSTALLMENTS_CEILING,
     period_unit:         'month',
     period_count:        1,
     due_day:             null,
@@ -58,7 +69,7 @@ function resolveTerms(profile, config) {
 
   // Normaliza tipos
   effective.interest_rate       = parseFloat(effective.interest_rate)       || 0;
-  effective.max_installments    = parseInt(effective.max_installments)       || 12;
+  effective.max_installments    = parseInt(effective.max_installments)       || MAX_INSTALLMENTS_CEILING;
   effective.period_count        = parseInt(effective.period_count)           || 1;
   effective.late_fee_rate       = parseFloat(effective.late_fee_rate)        || 0;
   effective.late_interest_daily = parseFloat(effective.late_interest_daily)  || 0;
@@ -81,6 +92,7 @@ module.exports = {
   round2,
   LATE_FEE_MAX,
   LATE_INTEREST_DAILY_MAX,
+  MAX_INSTALLMENTS_CEILING,
   resolvePeriod,
   dueDateForIndex,
   resolveTerms,

@@ -580,7 +580,10 @@ router.post('/installments', async (req, res) => {
   }
   const n = parseInt(installments);
   const total = parseFloat(total_amount);
-  if (isNaN(n) || n < 1 || n > 100) return res.status(400).json({ error: 'installments deve ser entre 1 e 100.' });
+  const CEILING = creditLedger.MAX_INSTALLMENTS_CEILING || 500;
+  if (isNaN(n) || n < 1 || n > CEILING) {
+    return res.status(400).json({ error: `installments deve ser entre 1 e ${CEILING}.` });
+  }
   if (isNaN(total) || total <= 0)   return res.status(400).json({ error: 'total_amount invalido.' });
 
   const client = await pool.connect();
@@ -596,9 +599,16 @@ router.post('/installments', async (req, res) => {
       });
     }
     const config = await creditLedger._getOrCreatePlanConfig(client, companyId);
-    if (config && n > parseInt(config.max_installments)) {
+    // Teto da LOJA (config). Desde 21/08/2026 o default e alto (500): o 12 era
+    // default intocado que barrava quem vende em 36x/54x. Continua sendo erro
+    // explicito -- nunca corte silencioso.
+    const storeMax = parseInt(config?.max_installments, 10);
+    if (Number.isFinite(storeMax) && n > storeMax) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: `Maximo de ${config.max_installments} parcelas configurado.` });
+      return res.status(400).json({
+        error: `Maximo de ${storeMax} parcelas configurado (pedido: ${n}x).`,
+        code: 'MAX_INSTALLMENTS_EXCEEDED',
+      });
     }
 
     // Aviso de score NAO-impeditivo. NUNCA retorna erro por score.

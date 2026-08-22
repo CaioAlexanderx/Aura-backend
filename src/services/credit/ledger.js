@@ -4,7 +4,7 @@
 // =============================================================
 
 const pool = require('../../config/database');
-const { resolvePeriod, dueDateForIndex, resolveTerms, round2 } = require('./terms');
+const { resolvePeriod, dueDateForIndex, resolveTerms, round2, MAX_INSTALLMENTS_CEILING } = require('./terms');
 const { computeLateCharges } = require('./lateCharges');
 const { scoreLabel, scoreWarning, _recalculateScore } = require('./score');
 const { computeUnifyPlan } = require('./unify');
@@ -199,7 +199,11 @@ async function createCreditSale(client, {
       }
     }
 
-    const maxN = parseInt(accountTerms?.max_installments || config?.max_installments) || 12;
+    // 21/08/2026: o default caiu de 12 para o teto alto (services/credit/terms).
+    // O 12 era default de config que ninguem nunca configurou -- e barrava loja
+    // que vende em 36x/54x.
+    const maxN = parseInt(accountTerms?.max_installments || config?.max_installments)
+      || MAX_INSTALLMENTS_CEILING;
     // 17/08/2026 (F2 venda com sinal): taxa EXPLICITA manda, inclusive 0.
     // Antes o teste era `parseFloat(interestRate) > 0`, entao `interestRate: 0`
     // caia no fallback de config -- nao havia como PEDIR juros zero, e o saldo
@@ -210,7 +214,24 @@ async function createCreditSale(client, {
     const effectiveRate = rateGiven
       ? (parseFloat(interestRate) || 0)
       : parseFloat(accountTerms?.interest_rate || config?.interest_rate) || 0;
-    const n = Math.min(nRequested, maxN, 100);
+    // 21/08/2026 -- NUNCA cortar em silencio. Ate aqui era
+    // `Math.min(nRequested, maxN, 100)`: uma venda pedida em 54x virava 12x
+    // gravada como se fosse o que a lojista escolheu, sem erro no response nem
+    // no log. Foi o padrao de falha do relato Valen ("nao consigo, e nao ha
+    // erro em lugar nenhum"). Agora o pedido acima do teto da loja e RECUSADO
+    // com mensagem -- o PDV propaga .statusCode/.code (routes/pdv.js).
+    if (nRequested > maxN) {
+      const err = new Error(
+        `Maximo de ${maxN} parcelas configurado para esta loja (pedido: ${nRequested}x). ` +
+        `Ajuste em Crediario > Configuracoes.`
+      );
+      err.statusCode = 422;
+      err.code       = 'MAX_INSTALLMENTS_EXCEEDED';
+      err.max_installments = maxN;
+      err.requested        = nRequested;
+      throw err;
+    }
+    const n = Math.min(nRequested, MAX_INSTALLMENTS_CEILING);
     const period = resolvePeriod(
       periodUnit || accountTerms?.period_unit,
       periodCount || accountTerms?.period_count,

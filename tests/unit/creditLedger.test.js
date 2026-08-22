@@ -99,6 +99,78 @@ describe('creditLedger.createCreditSale', () => {
     expect(inst1Call[0]).toMatch(/covered_amount/i);
   });
 
+  // ── Teto de parcelas (21/08/2026, relato Valen) ──────────────────────
+  test('acima do teto da loja: RECUSA explicita em vez de cortar em silencio', async () => {
+    // Ate 21/08 isto virava `Math.min(54, 12, 100)` = 12 parcelas gravadas como
+    // se a lojista tivesse pedido 12 -- sem erro no response nem no log.
+    const client = makeMockClient([
+      { rows: [{ id: 'prof-01', status: 'active' }] },
+      { rows: [{ id: 'conf-01', max_installments: 12, interest_rate: '0' }] },
+      { rows: [{ id: 'tx-max', amount: '5400.00' }] },
+      { rows: [] },
+      { rows: [] }, // terms_snapshot do carne (accountId ausente -> nao consultado)
+    ]);
+
+    await expect(creditLedger.createCreditSale(client, {
+      companyId: COMPANY_ID, customerId: CUSTOMER_ID,
+      saleId: SALE_ID, amount: 5400,
+      installments: 54,
+      firstDueDate: '2026-09-20',
+    })).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'MAX_INSTALLMENTS_EXCEEDED',
+      max_installments: 12,
+      requested: 54,
+    });
+
+    // Nenhuma parcela foi gravada.
+    const inserts = client.query.mock.calls.filter(c => /INSERT INTO credit_installments/i.test(c[0]));
+    expect(inserts).toHaveLength(0);
+  });
+
+  test('54x passa quando a loja permite (default novo: 500)', async () => {
+    const responses = [
+      { rows: [{ id: 'prof-01', status: 'active' }] },
+      { rows: [{ id: 'conf-01', max_installments: 500, interest_rate: '0' }] },
+      { rows: [{ id: 'tx-54', amount: '5400.00' }] },
+      { rows: [] },
+    ];
+    for (let i = 1; i <= 54; i++) responses.push({ rows: [{ id: 'inst-' + i }] });
+    responses.push({ rows: [] }, { rows: [] }); // UPDATE sales + credit_used
+
+    const result = await creditLedger.createCreditSale(makeMockClient(responses), {
+      companyId: COMPANY_ID, customerId: CUSTOMER_ID,
+      saleId: SALE_ID, amount: 5400,
+      installments: 54,
+      firstDueDate: '2026-09-20',
+    });
+
+    expect(result.schedule).toHaveLength(54);
+    expect(result.schedule[53].installment_number).toBe(54);
+    // Soma bate centavo a centavo com o total pedido.
+    const soma = result.schedule.reduce((acc, p) => acc + Number(p.amount_due), 0);
+    expect(Math.round(soma * 100) / 100).toBe(5400);
+  });
+
+  test('sem config, o teto e o global (500) -- nao mais 12', async () => {
+    const responses = [
+      { rows: [{ id: 'prof-01', status: 'active' }] },
+      { rows: [] },                                   // _getOrCreatePlanConfig sem linha
+      { rows: [{ id: 'tx-nc', amount: '2000.00' }] },
+      { rows: [] },
+    ];
+    for (let i = 1; i <= 20; i++) responses.push({ rows: [{ id: 'inst-' + i }] });
+    responses.push({ rows: [] }, { rows: [] });
+
+    const result = await creditLedger.createCreditSale(makeMockClient(responses), {
+      companyId: COMPANY_ID, customerId: CUSTOMER_ID,
+      saleId: SALE_ID, amount: 2000,
+      installments: 20,
+      firstDueDate: '2026-09-20',
+    });
+    expect(result.schedule).toHaveLength(20);
+  });
+
   test('juros simples (flat) aplicados quando interest_rate > 0', async () => {
     const debitRow  = { id: 'tx-03', amount: '100.00' };
     const profileRow = { id: 'prof-01', status: 'active' };
