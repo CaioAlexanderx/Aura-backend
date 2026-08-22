@@ -15,9 +15,9 @@ const pix           = require('./parts/pix');
 const productDetail = require('./parts/product_detail');
 const toast         = require('./parts/toast');
 const bootstrap     = require('./parts/bootstrap');
-// Regra das iniciais da capa sem foto — definida uma vez em
-// storefrontIniciais.js e serializada para o navegador.
-const { fonteClienteIniciais } = require('../storefrontIniciais');
+// Regra da capa sem foto (iniciais + degrau do gradiente) — definida uma
+// vez em storefrontCapa.js e serializada para o navegador.
+const { fonteClienteIniciais } = require('../storefrontCapa');
 
 function buildScript(storeData, escapedSlug, apiBase) {
   return prelude(storeData, escapedSlug, apiBase)

@@ -52,7 +52,10 @@ function renderProducts(){
         ?'<div class="qty-ctrl"><button class="qty-btn" onclick="event.stopPropagation();changeQty(\\''+k+'\\',-1)">−</button><span class="qty-num">'+qty+'</span><button class="qty-btn" onclick="event.stopPropagation();changeQty(\\''+k+'\\',1)">+</button></div>'
         :'<button class="add-btn" onclick="event.stopPropagation();addToCart(\\''+p.id+'\\')" >+</button>';
     }
-    return '<div class="product-card" onclick="showDetail(\\''+p.id+'\\')" ><div class="product-img">'+imgH+'</div><div class="product-body">'
+    // Sem foto, cada capa ganha seu proprio degrau do gradiente da loja.
+    // Com o gradiente fixo, a Finesse renderizava 373 ladrilhos iguais.
+    var tileStyle=displayImg?'':' style="background:'+FUNDO_CAPA(p.name)+'"';
+    return '<div class="product-card" onclick="showDetail(\\''+p.id+'\\')" ><div class="product-img"'+tileStyle+'>'+imgH+'</div><div class="product-body">'
       +(p.category?'<div class="product-cat">'+esc(p.category)+'</div>':'')
       +'<div class="product-name">'+esc(p.name)+'</div>'
       +(p.description?'<div class="product-desc">'+esc((p.description||'').substring(0,80))+((p.description||'').length>80?'...':'')+'</div>':'')
