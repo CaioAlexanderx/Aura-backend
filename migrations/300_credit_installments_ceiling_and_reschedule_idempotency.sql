@@ -1,5 +1,5 @@
 -- ============================================================
--- AURA — Migration 299: teto de parcelas 12 -> 500 + idempotência da renegociação
+-- AURA — Migration 300: teto de parcelas 12 -> 500 + idempotência da renegociação
 -- ------------------------------------------------------------
 -- Relato Valen (21/08/2026): "lançamento de R$5.400 em 54 parcelas e não
 -- consigo — sem erro no Railway".

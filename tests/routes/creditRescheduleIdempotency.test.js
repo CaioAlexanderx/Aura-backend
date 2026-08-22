@@ -13,7 +13,7 @@
 //   2. clique repetido SEM Idempotency-Key, dentro da janela -> replay,
 //      sem tocar em NENHUMA parcela
 //   3. Idempotency-Key repetida -> replay pela chave
-//   4. migration 299 pendente (42P01) -> aplica normalmente, sem proteção
+//   4. migration 300 pendente (42P01) -> aplica normalmente, sem proteção
 //
 // Mock por CONTEÚDO DO SQL (nunca fila posicional), igual tests/routes/*.
 // ============================================================
@@ -185,7 +185,7 @@ describe('renegociação — idempotência', () => {
     expect(db.connect).not.toHaveBeenCalled(); // nenhuma parcela tocada
   });
 
-  test('migration 299 pendente (42P01): aplica normalmente, sem proteção', async () => {
+  test('migration 300 pendente (42P01): aplica normalmente, sem proteção', async () => {
     mockPool({ missing: true });
     const client = mockClient({ missing: true });
     db.connect.mockResolvedValue(client);

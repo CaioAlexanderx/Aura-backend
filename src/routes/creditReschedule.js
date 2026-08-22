@@ -51,7 +51,7 @@ function resolveAccountId(raw) {
 //
 // O recibo guarda o payload da primeira aplicacao: replay devolve o mesmo
 // resultado, sem tocar em parcela. Sem header, o comportamento e o de antes.
-// Defensivo: se a migration 299 ainda nao rodou (42P01), segue sem protecao.
+// Defensivo: se a migration 300 ainda nao rodou (42P01), segue sem protecao.
 let receiptsTableAvailable = null; // null = ainda nao sabemos
 
 /** Janela do clique duplo sem header, em segundos. */
@@ -317,7 +317,7 @@ router.post('/customers/:cid/accounts/:accountId/reschedule', async (req, res) =
     });
     // Recibo dentro da MESMA transacao: ou o carne novo e o recibo existem
     // juntos, ou nenhum dos dois. SAVEPOINT para que uma tabela ausente
-    // (migration 299 pendente) nao aborte a renegociacao inteira.
+    // (migration 300 pendente) nao aborte a renegociacao inteira.
     let duplicateKey = false;
     if (receiptsTableAvailable !== false) {
       // Sem header, a key e sintetica: o recibo existe pela impressao digital.
