@@ -255,6 +255,12 @@ router.get('/:slug/studio/products', async (req, res) => {
           // Mesmo caso da tipografia: a coluna existe, o painel deixa escolher e
           // so a loja comum consumia.
           card_style: config.card_style || 'editorial',
+          // WhatsApp da loja. A loja comum ja tinha barra de contato; a
+          // vitrine Studio nao expunha o numero, entao a duvida de quem
+          // esta comprando ("serve no meu tamanho?", "da tempo pro dia
+          // 12?") nao tinha para onde ir — e essa duvida e o que fecha
+          // venda de personalizado.
+          whatsapp: config.whatsapp || config.phone || null,
         },
         products: [],
         sla: { sla_base_days: 3, queue_qty: 0, total_estimate_days: 3 },
@@ -382,6 +388,8 @@ router.get('/:slug/studio/products', async (req, res) => {
         // Mesmo caso da tipografia: a coluna existe, o painel deixa escolher e
         // so a loja comum consumia.
         card_style: config.card_style || 'editorial',
+        // Ver o bloco acima: a duvida de quem compra precisa de destino.
+        whatsapp: config.whatsapp || config.phone || null,
         cover_url: config.cover_url || null,
       },
       products: products.map(p => {
