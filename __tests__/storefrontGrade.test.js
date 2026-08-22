@@ -90,7 +90,7 @@ describe('rodape da grade — sem teto silencioso', () => {
     const el = {
       set hidden(v) { escondido = v; },
       get hidden() { return escondido; },
-      set textContent(v) { texto = v; },
+      set innerHTML(v) { texto = v; },
     };
     const fn = new Function(
       'document',
@@ -101,7 +101,20 @@ describe('rodape da grade — sem teto silencioso', () => {
   }
 
   test('avisa que ha mais para rolar', () => {
-    expect(rodape(60, 410, 0).texto).toBe('Mostrando 60 de 410');
+    expect(rodape(60, 410, 0).texto).toContain('Mostrando 60 de 410');
+  });
+
+  test('oferece BOTAO enquanto ha mais para ver', () => {
+    // Rolagem infinita sozinha deixa quem navega por teclado sem acesso ao
+    // resto do catalogo: o foco nunca chega ao fim pra disparar a sentinela,
+    // e o rodape fica inalcancavel.
+    const html = rodape(60, 410, 0).texto;
+    expect(html).toContain('<button');
+    expect(html).toContain('verMais()');
+  });
+
+  test('sem botao quando a grade ja mostrou tudo', () => {
+    expect(rodape(410, 410, 802).texto).not.toContain('<button');
   });
 
   test('avisa o catalogo que nao coube — o caso Finesse', () => {
