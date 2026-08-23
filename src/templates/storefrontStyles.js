@@ -336,16 +336,29 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .qty-num{font-size:13px;font-weight:600;color:var(--sf-brand-ink);min-width:18px;text-align:center;font-family:${fontMono};}
 
 /* Minimal card */
+/* Minimal: retrato 3:4, sem moldura e grade mais densa. O estilo existe
+   pra caber mais produto na tela; com a mesma grade dos outros, ele era
+   so "o mesmo cartao com fonte menor". */
+body.card-style-minimal .products-grid{grid-template-columns:repeat(auto-fill,minmax(176px,1fr));gap:20px;row-gap:34px;}
+@media(max-width:600px){body.card-style-minimal .products-grid{grid-template-columns:repeat(2,1fr);gap:12px;row-gap:22px;}}
 body.card-style-minimal .product-img{aspect-ratio:3/4;border-radius:4px;margin-bottom:14px;}
 body.card-style-minimal .product-name{font-family:${fontSans};font-size:14px;font-weight:500;letter-spacing:0;margin-bottom:0;}
 body.card-style-minimal .product-cat{font-size:10px;margin-bottom:3px;}
 body.card-style-minimal .product-footer{align-items:baseline;}
 
 /* Image-heavy card */
-body.card-style-image-heavy .product-card{border:1px solid var(--sf-border);border-radius:14px;overflow:hidden;background:var(--sf-bg-card);}
+/* Imagem: a foto SANGRA o cartao e a informacao deita sobre ela. Antes a
+   foto entrava em "contain" com moldura e um corpo branco embaixo — que e
+   o cartao Editorial com outra proporcao. Aqui o corte e a escolha: quem
+   seleciona este estilo troca a peca inteira por impacto. */
+body.card-style-image-heavy .product-card{border:1px solid var(--sf-border);border-radius:14px;overflow:hidden;background:var(--sf-bg-card);position:relative;}
 body.card-style-image-heavy .product-img{aspect-ratio:4/5;border-radius:0;margin-bottom:0;}
-body.card-style-image-heavy .product-body{padding:14px;}
-body.card-style-image-heavy .product-name{font-size:16px;margin-bottom:4px;}
+body.card-style-image-heavy .product-img img{object-fit:cover;padding:0;}
+body.card-style-image-heavy .product-body{position:absolute;left:0;right:0;bottom:0;padding:14px;background:linear-gradient(to top,rgba(0,0,0,.80),rgba(0,0,0,.32) 62%,transparent);}
+body.card-style-image-heavy .product-name{font-size:16px;margin-bottom:4px;color:#fff;}
+body.card-style-image-heavy .product-cat{color:rgba(255,255,255,.78);}
+body.card-style-image-heavy .product-price{color:#fff;}
+body.card-style-image-heavy .product-desc{display:none;}
 
 /* ============================================================
    Cart drawer
