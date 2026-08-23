@@ -25,16 +25,16 @@ describe('pares tipograficos', () => {
     expect(par.familias.length).toBeGreaterThan(0);
   });
 
-  test('modern usa Manrope no corpo, nao DM Sans', () => {
-    // A divergencia que motivou este modulo: o template usava DM Sans no
-    // corpo de TODOS os pares, entao `modern` era Fraunces+DM Sans aqui e
-    // Fraunces+Manrope na vitrine Studio.
-    expect(TIPOGRAFIAS.modern.body).toContain('Manrope');
-    expect(TIPOGRAFIAS.modern.display).toContain('Fraunces');
+  test('modern e SEM SERIFA — era Fraunces, que lia igual as outras serifadas', () => {
+    // Antes `modern` era Fraunces — serifada, igual a classic e a
+    // editorial. Tres serifadas em quatro opcoes e o motivo de ninguem
+    // conseguir diferenciar os pares no painel.
+    expect(TIPOGRAFIAS.modern.display).toContain('Space Grotesk');
+    expect(TIPOGRAFIAS.modern.body).toContain('Inter');
   });
 
-  test('editorial e Playfair — antes caia no ramo do classic', () => {
-    expect(TIPOGRAFIAS.editorial.display).toContain('Playfair');
+  test('editorial e de PESO ALTO — antes era Playfair, serifada como o classic', () => {
+    expect(TIPOGRAFIAS.editorial.display).toContain('Archivo Black');
   });
 
   test('chave desconhecida cai no classico em vez de quebrar', () => {
@@ -48,11 +48,11 @@ describe('pares tipograficos', () => {
 describe('linkDeFontes', () => {
   test('carrega SO o par escolhido, mais a mono', () => {
     const link = linkDeFontes('editorial');
-    expect(link).toContain('Playfair+Display');
-    expect(link).toContain('Manrope');
+    expect(link).toContain('Archivo+Black');
     expect(link).toContain('DM+Mono');
     // O ponto do modulo: antes vinham as tres familias em toda loja.
-    expect(link).not.toContain('Fraunces');
+    expect(link).not.toContain('Instrument');
+    expect(link).not.toContain('Space+Grotesk');
   });
 
   test('classic nao arrasta Playfair nem Fraunces', () => {
@@ -67,5 +67,31 @@ describe('linkDeFontes', () => {
       expect(linkDeFontes(chave)).toMatch(/^https:\/\/fonts\.googleapis\.com\/css2\?family=/);
       expect(linkDeFontes(chave)).toContain('display=swap');
     }
+  });
+});
+
+describe('os quatro pares sao mesmo diferentes', () => {
+  test('nenhum display se repete', () => {
+    // O feedback foi "nao consigo diferenciá-las". A causa era estrutural:
+    // tres serifadas em quatro opcoes, e o quarto display era DM Sans —
+    // que ja era o CORPO do classic.
+    const displays = Object.values(TIPOGRAFIAS).map((p) => p.display.split(',')[0]);
+    expect(new Set(displays).size).toBe(displays.length);
+  });
+
+  test('nenhum display repete o corpo de outro par', () => {
+    const corpos = new Set(Object.values(TIPOGRAFIAS).map((p) => p.body.split(',')[0]));
+    for (const par of Object.values(TIPOGRAFIAS)) {
+      // Excecao: o par pode usar a propria familia nos dois papeis.
+      const display = par.display.split(',')[0];
+      if (display === par.body.split(',')[0]) continue;
+      expect(corpos.has(display)).toBe(false);
+    }
+  });
+
+  test('ha serifada E sem serifa entre as opcoes', () => {
+    const juntos = Object.values(TIPOGRAFIAS).map((p) => p.display).join(' ');
+    expect(juntos).toMatch(/serif/);
+    expect(juntos).toMatch(/sans-serif/);
   });
 });
