@@ -35,6 +35,7 @@ const {
   generateKataOrder,
   stateToMatchRows,
   rowsToState,
+  computePlacements,
 } = require('../services/karateBracket');
 const phasePlanSvc = require('../services/karatePhasePlanService');
 
@@ -598,6 +599,139 @@ router.post(
       await client.query('ROLLBACK');
       console.error('[karateBrackets] lock error:', err.message);
       res.status(500).json({ error: 'Erro ao travar chave' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+// POST /competitions/:cid/categories/:catId/bracket/finalize
+//
+// P2 (modo mesário) — mata o "correio de papel" do dia de evento: quando a
+// última decisão da chave é lançada, este endpoint deriva o PÓDIO
+// (1º/2º/3º[/4º ou dois 3ºs]) e o grava DE VOLTA nas inscrições
+// (placement + points_awarded), alimentando o ranking da temporada e a
+// fila de premiação SEM planilha andando até a mesa central.
+//
+//  - Árvore (kumite / kata hantei_tree): computePlacements sobre o estado.
+//  - Kata por notas (score_rounds): ranking da fase FINAL por nota desc
+//    (empate de nota = mesmo placement, ranking de competição 1,2,2,4).
+//  - Pontos por colocação vêm de karate_competitions.results_config
+//    ({"points_by_placement":{"1":9,"2":6,"3":3}}); sem config, grava só o
+//    placement (atleta aparece no ranking por medalha, sem pontos).
+//  - Idempotente: re-finalizar recomputa e sobrescreve (zera placement dos
+//    não-podiados da categoria antes de aplicar).
+// ═══════════════════════════════════════════════════════════════
+router.post(
+  '/competitions/:cid/categories/:catId/bracket/finalize',
+  ...guards.staffWrite(),
+  async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' }); }
+      const cat = await findCat(client, cid, catId);
+      if (!cat) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' }); }
+
+      const { bracketRow, matchRows } = await loadBracket(client, catId);
+      if (!bracketRow) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Chave não gerada para esta categoria', code: 'NO_BRACKET' }); }
+      if (bracketRow.status !== 'locked') {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'A chave precisa estar travada (locked) para finalizar o resultado.', code: 'BRACKET_NOT_LOCKED' });
+      }
+
+      const athletes = await loadEntries(client, catId, federationId);
+      const byId = new Map(athletes.map((a) => [a.id, a]));
+
+      // ── deriva o pódio ──
+      let placements = [];
+      if (bracketRow.kata_mode === 'score_rounds') {
+        const sc = await client.query(
+          `SELECT entry_id, nota FROM karate_kata_scores
+            WHERE bracket_id = $1 AND phase = 'final' AND nota IS NOT NULL
+            ORDER BY nota DESC`,
+          [bracketRow.id]
+        );
+        if (!sc.rows.length) {
+          await client.query('ROLLBACK');
+          return res.status(422).json({ error: 'Nenhuma nota lançada na fase final ainda.', code: 'FINAL_PENDENTE' });
+        }
+        // Ranking de competição: nota igual = mesmo lugar (1,2,2,4).
+        let lastNota = null; let lastPlace = 0;
+        sc.rows.forEach((r, i) => {
+          const nota = Number(r.nota);
+          const place = lastNota !== null && nota === lastNota ? lastPlace : i + 1;
+          placements.push({ entryId: r.entry_id, placement: place });
+          lastNota = nota; lastPlace = place;
+        });
+      } else {
+        const state = rowsToState(matchRows, bracketRow, athletes);
+        const result = computePlacements(state);
+        if (!result.complete) {
+          await client.query('ROLLBACK');
+          const msg = result.reason === 'TERCEIRO_PENDENTE'
+            ? 'A disputa de 3º lugar ainda não foi decidida.'
+            : 'A final ainda não foi decidida.';
+          return res.status(422).json({ error: msg, code: result.reason });
+        }
+        placements = result.placements;
+      }
+
+      // ── pontos por colocação (results_config; 42703 = migration 301 pendente) ──
+      let pointsMap = null;
+      try {
+        const rc = await client.query(
+          `SELECT results_config FROM karate_competitions WHERE id = $1 LIMIT 1`, [cid]
+        );
+        const cfg = rc.rows[0] && rc.rows[0].results_config;
+        if (cfg && cfg.points_by_placement && typeof cfg.points_by_placement === 'object') {
+          pointsMap = cfg.points_by_placement;
+        }
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+      }
+
+      // ── escreve de volta nas inscrições (idempotente) ──
+      await client.query(
+        `UPDATE karate_competition_entries
+            SET placement = NULL, updated_at = NOW()
+          WHERE category_id = $1 AND placement IS NOT NULL`,
+        [catId]
+      );
+      const podium = [];
+      for (const p of placements) {
+        const pts = pointsMap ? (Number(pointsMap[String(p.placement)]) || 0) : 0;
+        await client.query(
+          `UPDATE karate_competition_entries
+              SET placement = $1, points_awarded = $2, status = 'done', updated_at = NOW()
+            WHERE id = $3 AND category_id = $4`,
+          [p.placement, pts, p.entryId, catId]
+        );
+        const a = byId.get(p.entryId);
+        podium.push({
+          placement: p.placement,
+          entry_id: p.entryId,
+          name: (a && a.student_name) || null,
+          dojo: (a && a.dojo) || null,
+          points_awarded: pts,
+        });
+      }
+
+      await client.query('COMMIT');
+      res.json({
+        finalized: true,
+        category_id: catId,
+        podium,
+        points_applied: !!pointsMap,
+        message: 'Resultado computado. A categoria já aparece na fila de premiação.',
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[karateBrackets] finalize error:', err.message);
+      res.status(500).json({ error: 'Erro ao finalizar o resultado da chave' });
     } finally {
       client.release();
     }

@@ -31,7 +31,9 @@ const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { checkCategoryFit } = require('../services/karateCompetitionService');
 
-const MODALITIES = ['kata', 'kumite', 'kihon_ippon', 'team_kata', 'team_kumite'];
+// P2 (Campeonato Paulista real): + enbu (duplas, janela de tempo + notas) e
+// fukugo (kata Kittei + shobu-ippon combinados). CHECK ampliado na migration 301.
+const MODALITIES = ['kata', 'kumite', 'kihon_ippon', 'team_kata', 'team_kumite', 'enbu', 'fukugo'];
 
 // ── GET /competitions ──
 router.get('/competitions', ...guards.read(), async (req, res) => {
@@ -154,7 +156,7 @@ router.get('/competitions/:cid', ...guards.read(), async (req, res) => {
     const cats = await db.query(
       `SELECT cat.id, cat.name, cat.modality, cat.min_age, cat.max_age,
               cat.belt_min, cat.belt_max, cat.sex, cat.weight_class,
-              cat.max_entries, cat.fee_amount,
+              cat.max_entries, cat.fee_amount, cat.division_id, cat.group_label,
               COUNT(e.id)::int AS entry_count
        FROM karate_competition_categories cat
        LEFT JOIN karate_competition_entries e ON e.category_id = cat.id
@@ -286,7 +288,7 @@ router.get('/competitions/:cid/categories', ...guards.read(), async (req, res) =
     const { rows } = await db.query(
       `SELECT cat.id, cat.name, cat.modality, cat.min_age, cat.max_age,
               cat.belt_min, cat.belt_max, cat.sex, cat.weight_class,
-              cat.max_entries, cat.fee_amount,
+              cat.max_entries, cat.fee_amount, cat.division_id, cat.group_label,
               COUNT(e.id)::int AS entry_count
        FROM karate_competition_categories cat
        LEFT JOIN karate_competition_entries e ON e.category_id = cat.id
@@ -302,10 +304,21 @@ router.get('/competitions/:cid/categories', ...guards.read(), async (req, res) =
   }
 });
 
+// P2 (mesário): a divisão precisa pertencer À MESMA competição — é ela que
+// carrega o conjunto de regras (Copa Aspirantes × Paulista podem ter a MESMA
+// categoria com phase_plan diferente). group_label é o "G1/G2" real.
+async function divisionBelongs(cid, divisionId) {
+  const { rows } = await db.query(
+    `SELECT id FROM karate_competition_divisions WHERE id = $1 AND competition_id = $2 LIMIT 1`,
+    [divisionId, cid]
+  );
+  return rows.length > 0;
+}
+
 // ── POST /competitions/:cid/categories ──
 router.post('/competitions/:cid/categories', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, cid } = req.params;
-  const { name, modality, min_age, max_age, belt_min, belt_max, sex, weight_class, max_entries, fee_amount } = req.body;
+  const { name, modality, min_age, max_age, belt_min, belt_max, sex, weight_class, max_entries, fee_amount, division_id, group_label } = req.body;
 
   if (!name || !String(name).trim()) {
     return res.status(422).json({ error: 'name é obrigatório', code: 'VALIDATION_ERROR' });
@@ -322,13 +335,17 @@ router.post('/competitions/:cid/categories', ...guards.staffWrite(), async (req,
     const comp = await findCompetition(federationId, cid);
     if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
 
+    if (division_id != null && division_id !== '' && !(await divisionBelongs(cid, division_id))) {
+      return res.status(422).json({ error: 'division_id não pertence a esta competição', code: 'DIVISION_NOT_FOUND' });
+    }
+
     const ins = await db.query(
       `INSERT INTO karate_competition_categories
          (competition_id, name, modality, min_age, max_age, belt_min, belt_max,
-          sex, weight_class, max_entries, fee_amount, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, NOW(), NOW())
+          sex, weight_class, max_entries, fee_amount, division_id, group_label, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW(), NOW())
        RETURNING id, competition_id, name, modality, min_age, max_age, belt_min,
-                 belt_max, sex, weight_class, max_entries, fee_amount, created_at`,
+                 belt_max, sex, weight_class, max_entries, fee_amount, division_id, group_label, created_at`,
       [
         cid, String(name).trim(), modality,
         min_age != null ? parseInt(min_age, 10) : null,
@@ -337,6 +354,8 @@ router.post('/competitions/:cid/categories', ...guards.staffWrite(), async (req,
         weight_class || null,
         max_entries != null ? parseInt(max_entries, 10) : null,
         fee_amount != null ? parseFloat(fee_amount) : null,
+        division_id || null,
+        group_label != null && String(group_label).trim() !== '' ? String(group_label).trim().slice(0, 60) : null,
       ]
     );
     res.status(201).json(Object.assign({}, ins.rows[0], { entry_count: 0 }));
@@ -349,7 +368,9 @@ router.post('/competitions/:cid/categories', ...guards.staffWrite(), async (req,
 // ── PATCH /competitions/:cid/categories/:catId ──
 router.patch('/competitions/:cid/categories/:catId', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, cid, catId } = req.params;
-  const ALLOWED = ['name', 'modality', 'min_age', 'max_age', 'belt_min', 'belt_max', 'sex', 'weight_class', 'max_entries', 'fee_amount'];
+  // P2: division_id/group_label entram na lista — eram colunas da 294 sem
+  // NENHUMA rota de escrita (divisões inalcançáveis; cotas nunca disparavam).
+  const ALLOWED = ['name', 'modality', 'min_age', 'max_age', 'belt_min', 'belt_max', 'sex', 'weight_class', 'max_entries', 'fee_amount', 'division_id', 'group_label'];
 
   if (req.body.modality !== undefined && !MODALITIES.includes(req.body.modality)) {
     return res.status(422).json({ error: `modality deve ser: ${MODALITIES.join(', ')}`, code: 'VALIDATION_ERROR' });
@@ -363,8 +384,12 @@ router.patch('/competitions/:cid/categories/:catId', ...guards.staffWrite(), asy
   let idx = 1;
   for (const field of ALLOWED) {
     if (req.body[field] !== undefined) {
+      let v = req.body[field];
+      // null/'' limpam a divisão/grupo (dado ausente é neutro).
+      if (field === 'division_id') v = v || null;
+      if (field === 'group_label') v = v != null && String(v).trim() !== '' ? String(v).trim().slice(0, 60) : null;
       updates.push(`${field} = $${idx}`);
-      values.push(req.body[field]);
+      values.push(v);
       idx++;
     }
   }
@@ -376,11 +401,15 @@ router.patch('/competitions/:cid/categories/:catId', ...guards.staffWrite(), asy
     const comp = await findCompetition(federationId, cid);
     if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
 
+    if (req.body.division_id != null && req.body.division_id !== '' && !(await divisionBelongs(cid, req.body.division_id))) {
+      return res.status(422).json({ error: 'division_id não pertence a esta competição', code: 'DIVISION_NOT_FOUND' });
+    }
+
     const result = await db.query(
       `UPDATE karate_competition_categories SET ${updates.join(', ')}
        WHERE id = $${idx} AND competition_id = $${idx + 1}
        RETURNING id, competition_id, name, modality, min_age, max_age, belt_min,
-                 belt_max, sex, weight_class, max_entries, fee_amount, updated_at`,
+                 belt_max, sex, weight_class, max_entries, fee_amount, division_id, group_label, updated_at`,
       values
     );
     if (!result.rows.length) {

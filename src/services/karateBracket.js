@@ -470,12 +470,67 @@ function rowsToState(matchRows, bracketRow, athletes) {
   };
 }
 
+// ── computePlacements ───────────────────────────────────────────
+/**
+ * P2 (modo mesário): deriva o PÓDIO da chave decidida — mata o "correio de
+ * papel" (planilha → mesa central → premiação) do dia de evento.
+ *
+ * Regra real (Campeonato Paulista/FPKT 2026):
+ *  - COM disputa de 3º lugar: 1º, 2º, 3º (vencedor da disputa), 4º (perdedor).
+ *  - SEM disputa de 3º: os DOIS perdedores das semifinais são 3º ("não tem
+ *    disputa de 3º lugar de forma que haverá dois 3º lugares" — chave real).
+ *  - Byes ('bye'/null) nunca entram no pódio.
+ *
+ * @param {BracketState} state
+ * @returns {{complete: boolean, reason: string|null,
+ *            placements: Array<{entryId: string, placement: number}>}}
+ */
+function computePlacements(state) {
+  const real = (id) => (id && id !== 'bye' ? id : null);
+  const rounds = (state && state.rounds) || [];
+  const lastRound = rounds.length ? rounds[rounds.length - 1] : null;
+  if (!lastRound || !lastRound[0]) {
+    return { complete: false, reason: 'CHAVE_VAZIA', placements: [] };
+  }
+
+  const final = lastRound[0];
+  const champion = real(final.winnerId);
+  if (!champion) {
+    return { complete: false, reason: 'FINAL_PENDENTE', placements: [] };
+  }
+  const runnerUp = real(champion === final.akaId ? final.shiroId : final.akaId);
+
+  const placements = [{ entryId: champion, placement: 1 }];
+  if (runnerUp) placements.push({ entryId: runnerUp, placement: 2 });
+
+  const third = state.thirdPlaceMatch;
+  const thirdHasPlayers = third && (real(third.akaId) || real(third.shiroId));
+  if (thirdHasPlayers) {
+    const w = real(third.winnerId);
+    if (!w) return { complete: false, reason: 'TERCEIRO_PENDENTE', placements: [] };
+    placements.push({ entryId: w, placement: 3 });
+    const fourth = real(w === third.akaId ? third.shiroId : third.akaId);
+    if (fourth) placements.push({ entryId: fourth, placement: 4 });
+  } else if (rounds.length >= 2) {
+    const semis = rounds[rounds.length - 2];
+    for (const m of semis) {
+      const w = real(m.winnerId);
+      if (!w) continue; // semi de bye puro não gera perdedor real
+      const loser = real(w === m.akaId ? m.shiroId : m.akaId);
+      if (loser) placements.push({ entryId: loser, placement: 3 });
+    }
+  }
+
+  return { complete: true, reason: null, placements };
+}
+
 module.exports = {
   seededRng,
   generateKumiteBracket,
   advanceWinner,
   generateKataOrder,
   getChampion,
+  computePlacements,
   stateToMatchRows,
   rowsToState,
 };

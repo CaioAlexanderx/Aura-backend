@@ -691,4 +691,118 @@ router.get('/competitions/:cid/schedule-board', ...guards.read(), async (req, re
   }
 });
 
+// ═════════════════════════════════════════════════════════════════
+// P2 (modo mesário) — FILA DE PREMIAÇÃO AO VIVO
+//
+// O correio de papel do dia real (mesa do koto → mesa central → mesa de
+// premiação) vira uma fila: quando o mesário finaliza a chave (POST
+// .../bracket/finalize), a categoria aparece aqui COM o pódio pronto; a
+// mesa de premiação marca "medalhas entregues" e ela sai da fila.
+// ═════════════════════════════════════════════════════════════════
+
+// GET /competitions/:cid/awards — categorias com pódio computado + status
+// de entrega, ordenadas: pendentes primeiro, na ordem do board (koto/ordem).
+router.get('/competitions/:cid/awards', ...guards.read(), async (req, res) => {
+  const { id: federationId, cid } = req.params;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+
+    let rows;
+    try {
+      ({ rows } = await db.query(
+        `SELECT cat.id AS category_id, cat.name AS category_name, cat.modality,
+                cat.group_label, cat.awards_delivered_at,
+                d.name AS division_name,
+                a.name AS area_name, a.sort_order AS area_sort, cat.area_order,
+                e.id AS entry_id, e.placement, e.points_awarded,
+                COALESCE(cu.name, t.name) AS athlete_name,
+                COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+           FROM karate_competition_categories cat
+           LEFT JOIN karate_competition_divisions d ON d.id = cat.division_id
+           LEFT JOIN karate_competition_areas a ON a.id = cat.area_id
+           JOIN karate_competition_entries e
+             ON e.category_id = cat.id AND e.placement IS NOT NULL
+           LEFT JOIN customers cu ON cu.id = e.student_id
+           LEFT JOIN karate_competition_teams t ON t.id = e.team_id
+           LEFT JOIN companies dj ON dj.id = e.dojo_id
+          WHERE cat.competition_id = $1
+          ORDER BY (cat.awards_delivered_at IS NOT NULL) ASC,
+                   a.sort_order ASC NULLS LAST, cat.area_order ASC NULLS LAST,
+                   cat.name ASC, e.placement ASC`,
+        [cid]
+      ));
+    } catch (e) {
+      // 42703: migration 301 (awards_delivered_at) ou 294 (team/divisões)
+      // pendente — fila indisponível, nunca 500.
+      if (e.code === '42703' || e.code === '42P01') {
+        return res.json({ data: [], count: 0, schema_pending: true });
+      }
+      throw e;
+    }
+
+    // Agrupa por categoria (pódio ordenado por placement).
+    const byCat = new Map();
+    for (const r of rows) {
+      if (!byCat.has(r.category_id)) {
+        byCat.set(r.category_id, {
+          category_id: r.category_id,
+          category_name: r.category_name,
+          modality: r.modality,
+          group_label: r.group_label || null,
+          division_name: r.division_name || null,
+          area_name: r.area_name || null,
+          awards_delivered: !!r.awards_delivered_at,
+          awards_delivered_at: r.awards_delivered_at || null,
+          podium: [],
+        });
+      }
+      byCat.get(r.category_id).podium.push({
+        placement: r.placement,
+        entry_id: r.entry_id,
+        name: r.athlete_name || null,
+        dojo: r.dojo_name || null,
+        points_awarded: r.points_awarded != null ? Number(r.points_awarded) : 0,
+      });
+    }
+    const data = Array.from(byCat.values());
+    return res.json({ data, count: data.length, pending: data.filter((c) => !c.awards_delivered).length });
+  } catch (err) {
+    console.error('[karateCompetitionSetup] awards queue error:', err.message);
+    return res.status(500).json({ error: 'Erro ao montar a fila de premiação' });
+  }
+});
+
+// POST /competitions/:cid/categories/:catId/awards-delivered
+// Body: { delivered: true|false } (default true). Marca/desmarca a entrega.
+router.post('/competitions/:cid/categories/:catId/awards-delivered', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid, catId } = req.params;
+  const delivered = req.body && req.body.delivered === false ? false : true;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+
+    let rows;
+    try {
+      ({ rows } = await db.query(
+        `UPDATE karate_competition_categories
+            SET awards_delivered_at = ${delivered ? 'NOW()' : 'NULL'}, updated_at = NOW()
+          WHERE id = $1 AND competition_id = $2
+          RETURNING id, awards_delivered_at`,
+        [catId, cid]
+      ));
+    } catch (e) {
+      if (e.code === '42703') {
+        return res.status(503).json({ error: 'Fila de premiação ainda não disponível (migration 301 pendente)', code: 'SCHEMA_PENDING' });
+      }
+      throw e;
+    }
+    if (!rows.length) return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' });
+    return res.json({ category_id: rows[0].id, awards_delivered: !!rows[0].awards_delivered_at, awards_delivered_at: rows[0].awards_delivered_at || null });
+  } catch (err) {
+    console.error('[karateCompetitionSetup] awards-delivered error:', err.message);
+    return res.status(500).json({ error: 'Erro ao marcar a entrega da premiação' });
+  }
+});
+
 module.exports = router;
