@@ -20,26 +20,34 @@
 // ============================================================
 'use strict';
 
+// REESCRITO em 23/08/2026: antes TRES dos quatro pares eram serifados
+// (Instrument Serif, Fraunces, Playfair) e o quarto era DM Sans, que ja
+// era o CORPO do classic. Ninguem distinguia. Agora cada par e um tipo de
+// loja diferente. As CHAVES ficam (estao no banco e no CHECK da 299).
 const TIPOGRAFIAS = {
+  // Elegante — boutique, joalheria
   classic: {
     display: "'Instrument Serif','Cormorant Garamond',Georgia,serif",
     body: "'DM Sans','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
     familias: ['Instrument+Serif:ital@0;1', 'DM+Sans:wght@400;500;600;700'],
   },
+  // Moderna — streetwear, tecnologia
   modern: {
-    display: "'Fraunces','Instrument Serif',Georgia,serif",
-    body: "'Manrope','DM Sans',-apple-system,BlinkMacSystemFont,sans-serif",
-    familias: ['Fraunces:opsz,wght@9..144,400;9..144,600', 'Manrope:wght@400;500;700;800'],
+    display: "'Space Grotesk','Inter',-apple-system,sans-serif",
+    body: "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+    familias: ['Space+Grotesk:wght@500;600;700', 'Inter:wght@400;500;600;700'],
   },
+  // Marcante — atacado, promocao
   editorial: {
-    display: "'Playfair Display','Instrument Serif',Georgia,serif",
-    body: "'Manrope','DM Sans',-apple-system,BlinkMacSystemFont,sans-serif",
-    familias: ['Playfair+Display:ital,wght@0,400;0,600', 'Manrope:wght@400;500;700;800'],
+    display: "'Archivo Black',Impact,-apple-system,sans-serif",
+    body: "'Archivo',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+    familias: ['Archivo+Black', 'Archivo:wght@400;500;600;700'],
   },
+  // Acolhedora — artesanal, doces, brecho
   humanist: {
-    display: "'DM Sans','Inter',-apple-system,BlinkMacSystemFont,sans-serif",
-    body: "'DM Sans','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
-    familias: ['DM+Sans:wght@400;500;600;700;800'],
+    display: "'Fraunces',Georgia,serif",
+    body: "'Nunito Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+    familias: ['Fraunces:opsz,wght@9..144,400;9..144,600', 'Nunito+Sans:opsz,wght@6..12,400;6..12,600;6..12,700'],
   },
 };
 
