@@ -36,7 +36,10 @@ var CORES_PT = {
   'verde militar':'#4B5320','verde agua':'#7FD1C1','oliva':'#6B7A3A','menta':'#A8DEC8',
   'azul':'#1F5FBF','azul marinho':'#1B2A4A','marinho':'#1B2A4A','azul claro':'#8FC1E3',
   'jeans':'#4A6D8C','turquesa':'#22A6A6','roxo':'#6D28D9','lilas':'#B79CE0',
-  'lilás':'#B79CE0','violeta':'#7C3AED','transparente':'#EDEDED'
+  'lilás':'#B79CE0','violeta':'#7C3AED','transparente':'#EDEDED',
+  'ciano':'#06B6D4','azul bebe':'#A8D5F2','celeste':'#7EC8E3','salmao':'#FA8072',
+  'terracota':'#B5533C','grafite':'#3A3F44','creme':'#F5EBDC','tabaco':'#6F4E37',
+  'petroleo':'#0F4C5C','uva':'#5B2C6F','ferrugem':'#B7410E'
 };
 
 function corDoValor(val){
@@ -46,6 +49,32 @@ function corDoValor(val){
     .normalize('NFD')
     .split('').filter(function(c){var k=c.charCodeAt(0);return k<0x300||k>0x36f;}).join('');
   return CORES_PT[chave] || null;
+}
+
+/**
+ * Nome legivel de um hex, pelo tom mais proximo do mapa.
+ *
+ * A Finesse grava cor como "#EC4899". Mostrar isso embaixo do circulo e
+ * mostrar codigo, nao cor — e nem serve pra quem usa leitor de tela. O
+ * mais proximo do mapa da um nome de verdade ("Rosa"), e a distancia
+ * maxima evita batizar um tom exotico com o nome errado.
+ */
+function nomeDaCor(hex){
+  var h=String(hex||'').trim();
+  if(h.length===4) h='#'+h[1]+h[1]+h[2]+h[2]+h[3]+h[3];
+  if(!/^#[0-9A-Fa-f]{6}$/.test(h)) return null;
+  var r=parseInt(h.slice(1,3),16), g=parseInt(h.slice(3,5),16), b=parseInt(h.slice(5,7),16);
+  var melhor=null, menor=Infinity;
+  for(var nome in CORES_PT){
+    var c=CORES_PT[nome];
+    var cr=parseInt(c.slice(1,3),16), cg=parseInt(c.slice(3,5),16), cb=parseInt(c.slice(5,7),16);
+    // Distancia com peso perceptual: o olho enxerga mais verde que azul.
+    var d=Math.sqrt(2*(r-cr)*(r-cr) + 4*(g-cg)*(g-cg) + 3*(b-cb)*(b-cb));
+    if(d<menor){ menor=d; melhor=nome; }
+  }
+  // Longe demais de tudo: melhor nao dar nome nenhum do que dar o errado.
+  if(menor>110) return null;
+  return melhor.charAt(0).toUpperCase()+melhor.slice(1);
 }
 
 /** O atributo e de cor? (decide entre circulo e chip de texto) */
@@ -152,10 +181,16 @@ function showDetail(id){
         if(hex){
           // Circulo com o NOME embaixo: a cor se ve de relance e o nome
           // resolve quem nao distingue os tons proximos.
-          return '<button type="button" class="op-cor'+(sel?' sel':'')+(ok?'':' off')+'"'+attrs2+' title="'+esc(val)+'">'
+          //
+          // Se a lojista gravou o HEX (a Finesse grava), o nome vem do
+          // tom mais proximo — "#EC4899" embaixo do circulo e codigo, nao
+          // cor, e nao ajuda ninguem.
+          var ehHex=/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(val).trim());
+          var rotulo=ehHex?(nomeDaCor(val)||'Cor'):val;
+          return '<button type="button" class="op-cor'+(sel?' sel':'')+(ok?'':' off')+'"'+attrs2+' title="'+esc(rotulo)+'" aria-label="'+esc(a+': '+rotulo)+'">'
             +'<span class="op-cor-bola" style="background:'+hex+';">'
             +(sel?'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="'+tintaSobreCor(hex)+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>':'')
-            +'</span><span class="op-cor-nome">'+esc(val)+'</span></button>';
+            +'</span><span class="op-cor-nome">'+esc(rotulo)+'</span></button>';
         }
         return '<button type="button" class="op-chip'+(sel?' sel':'')+(ok?'':' off')+'"'+attrs2+'>'+esc(val)+'</button>';
       }).join('');
