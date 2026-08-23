@@ -623,10 +623,9 @@ router.post(
 //  - Idempotente: re-finalizar recomputa e sobrescreve (zera placement dos
 //    não-podiados da categoria antes de aplicar).
 // ═══════════════════════════════════════════════════════════════
-router.post(
-  '/competitions/:cid/categories/:catId/bracket/finalize',
-  ...guards.staffWrite(),
-  async (req, res) => {
+// Handler NOMEADO (P2.1): compartilhado com a MESA pública do mesário
+// (karateMesaPublic.js), que autentica por token e injeta req.params.id.
+const finalizeHandler = async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
     const client = await db.connect();
     try {
@@ -735,17 +734,14 @@ router.post(
     } finally {
       client.release();
     }
-  }
-);
+  };
+router.post('/competitions/:cid/categories/:catId/bracket/finalize', ...guards.staffWrite(), finalizeHandler);
 
 // ═══════════════════════════════════════════════════════════════
 // GET /competitions/:cid/categories/:catId/bracket
 // Retorna o bracket completo (draft ou locked).
 // ═══════════════════════════════════════════════════════════════
-router.get(
-  '/competitions/:cid/categories/:catId/bracket',
-  ...guards.read(),
-  async (req, res) => {
+const getBracketHandler = async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
     const client = await db.connect();
     try {
@@ -812,8 +808,8 @@ router.get(
     } finally {
       client.release();
     }
-  }
-);
+  };
+router.get('/competitions/:cid/categories/:catId/bracket', ...guards.read(), getBracketHandler);
 
 // ═══════════════════════════════════════════════════════════════
 // POST /competitions/:cid/categories/:catId/bracket/advance
@@ -823,10 +819,7 @@ router.get(
 // comportamento idêntico ao anterior. Defensivo p/ coluna ausente (42703).
 // Requires: bracket status = 'locked'
 // ═══════════════════════════════════════════════════════════════
-router.post(
-  '/competitions/:cid/categories/:catId/bracket/advance',
-  ...guards.staffWrite(),
-  async (req, res) => {
+const advanceHandler = async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
     const { match_id: matchId, winner_entry_id: winnerId, aka_score: akaScore, shiro_score: shiroScore, decision } = req.body;
 
@@ -922,8 +915,8 @@ router.post(
     } finally {
       client.release();
     }
-  }
-);
+  };
+router.post('/competitions/:cid/categories/:catId/bracket/advance', ...guards.staffWrite(), advanceHandler);
 
 // ═══════════════════════════════════════════════════════════════
 // PUT /competitions/:cid/categories/:catId/bracket/matches
@@ -1232,10 +1225,7 @@ router.patch(
 // GET /competitions/:cid/categories/:catId/kata-scores
 // Lê notas da kata (ambas as fases).
 // ═══════════════════════════════════════════════════════════════
-router.get(
-  '/competitions/:cid/categories/:catId/kata-scores',
-  ...guards.read(),
-  async (req, res) => {
+const kataScoresGetHandler = async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
     const client = await db.connect();
     try {
@@ -1277,18 +1267,15 @@ router.get(
     } finally {
       client.release();
     }
-  }
-);
+  };
+router.get('/competitions/:cid/categories/:catId/kata-scores', ...guards.read(), kataScoresGetHandler);
 
 // ═══════════════════════════════════════════════════════════════
 // PUT /competitions/:cid/categories/:catId/kata-scores
 // Salva nota de um atleta numa fase.
 // Body: { entry_id, phase, nota }
 // ═══════════════════════════════════════════════════════════════
-router.put(
-  '/competitions/:cid/categories/:catId/kata-scores',
-  ...guards.staffWrite(),
-  async (req, res) => {
+const kataScorePutHandler = async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
     const { entry_id: entryId, phase, nota } = req.body;
 
@@ -1348,8 +1335,8 @@ router.put(
     } finally {
       client.release();
     }
-  }
-);
+  };
+router.put('/competitions/:cid/categories/:catId/kata-scores', ...guards.staffWrite(), kataScorePutHandler);
 
 // ═══════════════════════════════════════════════════════════════
 // POST /competitions/:cid/categories/:catId/kata-scores/generate-order
@@ -1410,10 +1397,7 @@ router.post(
 // Avança os N melhores da eliminatória para a final.
 // Body: { advance_count } — default 8
 // ═══════════════════════════════════════════════════════════════
-router.post(
-  '/competitions/:cid/categories/:catId/kata-scores/advance',
-  ...guards.staffWrite(),
-  async (req, res) => {
+const kataAdvanceHandler = async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
     const advanceCount = parseInt(req.body.advance_count, 10) || 8;
 
@@ -1485,8 +1469,8 @@ router.post(
     } finally {
       client.release();
     }
-  }
-);
+  };
+router.post('/competitions/:cid/categories/:catId/kata-scores/advance', ...guards.staffWrite(), kataAdvanceHandler);
 
 // ═══════════════════════════════════════════════════════════════
 // PUT /competitions/:cid/categories/:catId/kata-scores/order
@@ -1617,10 +1601,7 @@ function roundLabelFor(index, totalRounds) {
   return `${index + 1}ª rodada`;
 }
 
-router.get(
-  '/competitions/:cid/categories/:catId/scoresheet',
-  ...guards.read(),
-  async (req, res) => {
+const scoresheetHandler = async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
     const client = await db.connect();
     try {
@@ -1791,7 +1772,23 @@ router.get(
     } finally {
       client.release();
     }
-  }
-);
+  };
+router.get('/competitions/:cid/categories/:catId/scoresheet', ...guards.read(), scoresheetHandler);
 
 module.exports = router;
+
+// P2.1 — handlers compartilhados com a MESA pública do mesário
+// (src/routes/karateMesaPublic.js). O router da mesa autentica pelo token
+// opaco (karateMesaTokenService), injeta req.params.id/cid resolvidos do
+// token e delega para estes handlers — uma única fonte de verdade para a
+// lógica de chave/nota; NUNCA exportar handlers de montagem (generate/
+// lock/unlock/reset/matches/phase-plan): montagem é ato da federação.
+module.exports.sharedHandlers = {
+  getBracketHandler,
+  advanceHandler,
+  finalizeHandler,
+  kataScoresGetHandler,
+  kataScorePutHandler,
+  kataAdvanceHandler,
+  scoresheetHandler,
+};

@@ -25,6 +25,7 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
+const mesaTokenService = require('../services/karateMesaTokenService');
 
 const ROLES = ['arbitro', 'mesario', 'staff'];
 const CREDENTIALS = ['A', 'B', 'C', 'D'];
@@ -201,9 +202,15 @@ router.get('/competitions/:cid/officials', ...guards.read(), async (req, res) =>
   try {
     const comp = await findCompetition(federationId, cid);
     if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
-    const { rows } = await db.query(
+    // mesa_token_* são da 302 — fallback 42703 (lista sem status de token).
+    const listSql = (withMesa) =>
       `SELECT co.id, co.official_id, co.area_id, co.status, co.is_chief, co.sort_order,
               co.penalty_amount, co.penalty_note, co.notes, co.confirmed_at,
+              ${withMesa
+                ? `(co.mesa_token_hash IS NOT NULL AND co.mesa_token_revoked_at IS NULL) AS mesa_token_active,
+              co.mesa_token_created_at,`
+                : `false AS mesa_token_active,
+              NULL::timestamptz AS mesa_token_created_at,`}
               o.name, o.role, o.credential,
               COALESCE(o.dojo_name, dj.trade_name, dj.legal_name) AS dojo_name,
               a.name AS area_name
@@ -212,9 +219,14 @@ router.get('/competitions/:cid/officials', ...guards.read(), async (req, res) =>
          LEFT JOIN companies dj ON dj.id = o.dojo_id
          LEFT JOIN karate_competition_areas a ON a.id = co.area_id
         WHERE co.competition_id = $1 AND o.federation_id = $2
-        ORDER BY a.sort_order ASC NULLS LAST, co.is_chief DESC, co.sort_order ASC, o.name ASC`,
-      [cid, federationId]
-    );
+        ORDER BY a.sort_order ASC NULLS LAST, co.is_chief DESC, co.sort_order ASC, o.name ASC`;
+    let rows;
+    try {
+      ({ rows } = await db.query(listSql(true), [cid, federationId]));
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      ({ rows } = await db.query(listSql(false), [cid, federationId]));
+    }
     return res.json(rows.map((r) => ({
       ...r,
       penalty_amount: r.penalty_amount != null ? Number(r.penalty_amount) : null,
@@ -345,6 +357,52 @@ router.delete('/competitions/:cid/officials/:rowId', ...guards.staffWrite(), asy
     if (e.code === '42P01') return schemaPending(res, 'Escala de arbitragem');
     console.error('[karateOfficials] event delete error:', e.message);
     return res.status(500).json({ error: 'Erro ao remover da escala' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// P2.1 — TOKEN DE MESA (acesso do mesário FORA DO SHELL)
+// A federação emite/revoga o link por convocação; o escopo (koto) segue
+// o area_id atual da linha — trocar de koto NÃO exige reemitir o link.
+// Rotas públicas correspondentes em karateMesaPublic.js.
+// ════════════════════════════════════════════════════════════
+
+// ── POST /competitions/:cid/officials/:rowId/mesa-token ─────
+// Emite (rotacionando: substitui o anterior). Token em claro UMA vez.
+router.post('/competitions/:cid/officials/:rowId/mesa-token', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid, rowId } = req.params;
+  try {
+    const out = await mesaTokenService.issueToken({ federationId, competitionId: cid, rowId });
+    if (!out) return res.status(404).json({ error: 'Convocação não encontrada', code: 'NOT_FOUND' });
+    return res.status(201).json({
+      token: out.token,
+      created_at: out.created_at,
+      official_name: out.official_name,
+      note: 'Envie este link ao mesário agora — ele não será mostrado de novo. Emitir outro substitui este.',
+    });
+  } catch (e) {
+    if (e.code === 'SCHEMA_PENDING') {
+      return res.status(503).json({ error: e.message, code: 'SCHEMA_PENDING' });
+    }
+    console.error('[karateOfficials] mesa-token issue error:', e.message);
+    return res.status(500).json({ error: 'Erro ao emitir o link da mesa' });
+  }
+});
+
+// ── DELETE /competitions/:cid/officials/:rowId/mesa-token ───
+// Revoga o token ativo (o mesário perde o acesso no request seguinte).
+router.delete('/competitions/:cid/officials/:rowId/mesa-token', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid, rowId } = req.params;
+  try {
+    const revoked = await mesaTokenService.revokeToken({ federationId, competitionId: cid, rowId });
+    if (!revoked) return res.status(404).json({ error: 'Nenhum link de mesa ativo para esta convocação', code: 'NOT_FOUND' });
+    return res.json({ revoked: true, id: rowId });
+  } catch (e) {
+    if (e.code === 'SCHEMA_PENDING') {
+      return res.status(503).json({ error: e.message, code: 'SCHEMA_PENDING' });
+    }
+    console.error('[karateOfficials] mesa-token revoke error:', e.message);
+    return res.status(500).json({ error: 'Erro ao revogar o link da mesa' });
   }
 });
 
