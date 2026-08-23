@@ -1,262 +1,362 @@
 // AURA. -- storefront/parts/product_detail.js
-// showDetail() — modal do produto com selecao de variantes.
 //
-// 23/05/2026 (v1): selectedVariant trocava a imagem hero.
-// 23/05/2026 (v2 — esta versao): carrossel auto-play com todas as
-// fotos disponiveis (image_url do pai + image_url de cada variante,
-// deduped). Indicadores (dots) embaixo, clicaveis pra navegar.
-// Auto-rotate ~3.5s. Cleanup do interval ao fechar modal.
-// Comportamento independente da selecao de variante — o user ve a
-// galeria completa do produto enquanto escolhe cor/tamanho.
+// PAGINA de produto, nao mais uma folha de 420px.
 //
-// Migration 129 (product_variants.image_url).
+// Reescrito em 23/08/2026. O detalhe era um modal estreito com foto,
+// preco, chips de variante e um botao. Faltava o que todo e-commerce tem
+// e o que o cliente procura antes de decidir: fotos grandes, descricao,
+// escolha de cor e tamanho legivel de relance, frete, e para onde ir
+// depois se este produto nao serviu.
+//
+// O que mudou:
+//  - duas colunas no desktop: galeria a esquerda, decisao a direita
+//  - DUAS acoes: "Adicionar ao carrinho" e "Comprar agora"
+//  - cor vira circulo colorido mesmo quando a lojista escreveu "Preto"
+//    em vez de "#000000" — que e o que ela escreve de verdade
+//  - "Produtos relacionados" embaixo, pra navegar em vez de sair
+//  - a seta volta pra ONDE a pessoa estava (busca, categoria ou inicio),
+//    usando o historico do navegador
 'use strict';
 
 module.exports = `
-// ============================================================
-// showDetail — modal do produto. Se tiver variantes, mostra
-// selects por atributo, atualiza preço dinamicamente, e só
-// libera "Adicionar" quando todas as variantes forem escolhidas.
-// ============================================================
+// ── Cor por NOME ─────────────────────────────────────────
+//
+// O swatch antigo so aparecia se o valor fosse hex. Lojista nao digita
+// "#000000": ela digita "Preto", "Azul marinho", "Off white". Sem este
+// mapa, cor virava chip de texto e a pessoa tinha que ler cada opcao em
+// vez de bater o olho.
+var CORES_PT = {
+  'preto':'#111111','branco':'#FFFFFF','off white':'#F3EFE7','offwhite':'#F3EFE7',
+  'cru':'#EFE7D8','bege':'#E4D5BE','nude':'#E3C4AE','marrom':'#6B4A2F',
+  'caramelo':'#A9682F','camel':'#B8895A','cinza':'#9AA0A6','chumbo':'#4A4F55',
+  'prata':'#C9CCD1','dourado':'#C8A24A','vermelho':'#D32F2F','vinho':'#6E1F2B',
+  'marsala':'#8A3A44','bordo':'#5C1A26','bordô':'#5C1A26','rosa':'#E8879B',
+  'rosa claro':'#F3C0CB','pink':'#E0398B','magenta':'#C2185B','coral':'#F0765B',
+  'laranja':'#EF6C1A','amarelo':'#F2C230','mostarda':'#C9A227','verde':'#2E7D4F',
+  'verde militar':'#4B5320','verde agua':'#7FD1C1','oliva':'#6B7A3A','menta':'#A8DEC8',
+  'azul':'#1F5FBF','azul marinho':'#1B2A4A','marinho':'#1B2A4A','azul claro':'#8FC1E3',
+  'jeans':'#4A6D8C','turquesa':'#22A6A6','roxo':'#6D28D9','lilas':'#B79CE0',
+  'lilás':'#B79CE0','violeta':'#7C3AED','transparente':'#EDEDED'
+};
+
+function corDoValor(val){
+  var s=String(val==null?'':val).trim();
+  if(/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(s)) return s;
+  var chave=s.toLowerCase()
+    .normalize('NFD')
+    .split('').filter(function(c){var k=c.charCodeAt(0);return k<0x300||k>0x36f;}).join('');
+  return CORES_PT[chave] || null;
+}
+
+/** O atributo e de cor? (decide entre circulo e chip de texto) */
+function atributoDeCor(nome){
+  var n=String(nome||'').toLowerCase();
+  return n.indexOf('cor')===0 || n.indexOf('color')===0;
+}
+
+/** Tinta legivel sobre a cor — o check some se for branco no branco. */
+function tintaSobreCor(hex){
+  var h=hex.length===4?('#'+hex[1]+hex[1]+hex[2]+hex[2]+hex[3]+hex[3]):hex;
+  var r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);
+  return (0.299*r+0.587*g+0.114*b)>160?'#111':'#fff';
+}
+
+// ── Estado da pagina ─────────────────────────────────────
+var paginaProduto=null;
+
+/** De onde a pessoa veio — vira o rotulo da seta de voltar. */
+function origemAtual(){
+  if(String(searchTerm||'').trim()) return 'Voltar para a busca';
+  if(currentCat && currentCat!=='Todos') return 'Voltar para ' + currentCat;
+  return 'Voltar para a loja';
+}
+
+function fecharProduto(){
+  if(!paginaProduto) return;
+  if(paginaProduto.parar) paginaProduto.parar();
+  paginaProduto.el.remove();
+  paginaProduto=null;
+  document.body.style.overflow='';
+}
+
+/** A seta e o botao Voltar do navegador fazem a MESMA coisa. */
+window.addEventListener('popstate',function(){ if(paginaProduto) fecharProduto(); });
+
+function voltarDaPagina(){
+  // history.back dispara o popstate, que fecha. Assim a seta da tela e o
+  // gesto de voltar do celular concordam.
+  if(paginaProduto && paginaProduto.empilhou) history.back();
+  else fecharProduto();
+}
+
 function showDetail(id){
-  var p=PROD_MAP[id];if(!p)return;
-  var hasVar=productHasVariants(p);
+  var p=PROD_MAP[id]; if(!p) return;
+  fecharProduto();
 
-  // 23/05/2026 v2: galeria de fotos = pai + variantes (dedupe por URL).
-  // Renderizada como carrossel auto-play.
-  var allImages=[];
-  if(p.image_url) allImages.push(p.image_url);
-  if(p.variants && p.variants.length){
-    for(var ii=0;ii<p.variants.length;ii++){
-      var vu=p.variants[ii].image_url;
-      if(vu && allImages.indexOf(vu)===-1) allImages.push(vu);
-    }
-  }
-  var carouselIdx=0;
-  var carouselTimer=null;
-  var CAROUSEL_MS=3500;
+  var hasVar=!!(p.variants && p.variants.length);
 
-  // Helper pra renderizar uma imagem (com fallback pra letra inicial).
-  function imgHtml(url){
-    if(url){
-      // "contain" aqui importa ainda mais que na grade: o cliente ABRIU o
-      // produto pra ver a peca inteira, e cover cortava justamente a parte
-      // que ele quer olhar.
-      return '<img src="'+esc(url)+'" alt="" style="width:100%;height:100%;object-fit:contain;padding:4%;border-radius:var(--r);transition:opacity .25s;">';
-    }
-    return '<div class="product-ph-initials" style="font-size:64px;">'+esc(INICIAIS(p.name))+'</div>';
-  }
+  // Galeria: foto do pai + de cada variante, sem repetir.
+  var fotos=[];
+  function juntar(u){ if(u && fotos.indexOf(u)===-1) fotos.push(u); }
+  juntar(p.image_url);
+  (p.gallery_urls||[]).forEach(juntar);
+  if(hasVar) p.variants.forEach(function(v){ juntar(v.image_url); });
 
-  // Renderiza os dots indicadores embaixo (so quando >= 2 imagens).
-  // Active = pill mais largo (18px); inativos = bolinha 6px.
-  function dotsHtml(){
-    if(allImages.length<=1) return '';
-    var html='';
-    for(var i=0;i<allImages.length;i++){
-      var active=i===carouselIdx;
-      html+='<span data-idx="'+i+'" style="display:inline-block;width:'+(active?'18px':'6px')+';height:6px;border-radius:3px;background:'+(active?'var(--primary)':'rgba(0,0,0,0.18)')+';transition:all .25s;cursor:pointer;"></span>';
-    }
-    return html;
-  }
+  var fotoAtual=0;
 
-  // Atualiza visualmente a imagem ativa e os dots.
-  function renderImage(){
-    var url=allImages.length?allImages[carouselIdx]:null;
-    var imgEl=ov.querySelector('#dImage');
-    if(imgEl) imgEl.innerHTML=imgHtml(url);
-    var dotsEl=ov.querySelector('#dDots');
-    if(dotsEl){
-      dotsEl.innerHTML=dotsHtml();
-      bindDots();
-    }
-  }
-
-  function startCarousel(){
-    if(allImages.length<=1) return;
-    stopCarousel();
-    carouselTimer=setInterval(function(){
-      carouselIdx=(carouselIdx+1)%allImages.length;
-      renderImage();
-    },CAROUSEL_MS);
-  }
-  function stopCarousel(){
-    if(carouselTimer){clearInterval(carouselTimer);carouselTimer=null;}
-  }
-
-  function bindDots(){
-    var dotsEl=ov.querySelector('#dDots'); if(!dotsEl) return;
-    dotsEl.querySelectorAll('span[data-idx]').forEach(function(d){
-      d.addEventListener('click',function(){
-        var idx=parseInt(d.getAttribute('data-idx'),10);
-        if(isNaN(idx)) return;
-        carouselIdx=idx;
-        renderImage();
-        // Re-arma o timer pra dar tempo de ver a foto escolhida.
-        startCarousel();
-      });
-    });
-  }
-
-  // Estado local da seleção de variante
-  var attrs={}; // attribute -> [valores únicos]
-  var attrOrder=[];
+  // ── Selecao de variante ────────────────────────────────
+  var attrs={}, attrOrder=[];
   if(hasVar){
     p.variants.forEach(function(v){
       (v.values||[]).forEach(function(av){
-        if(!attrs[av.attribute]){attrs[av.attribute]=[];attrOrder.push(av.attribute);}
+        if(!attrs[av.attribute]){ attrs[av.attribute]=[]; attrOrder.push(av.attribute); }
         if(attrs[av.attribute].indexOf(av.value)===-1) attrs[av.attribute].push(av.value);
       });
     });
   }
-  var selected={}; // attribute -> value
-  var selectedVariant=null;
+  var selecionado={}, variante=null;
 
-  function findVariant(){
-    if(!hasVar) return null;
-    if(attrOrder.length===0) return null;
+  function acharVariante(){
+    if(!hasVar || attrOrder.length===0) return null;
     for(var i=0;i<p.variants.length;i++){
-      var v=p.variants[i];
-      var vals=v.values||[];
+      var v=p.variants[i], vals=v.values||[];
       if(vals.length!==attrOrder.length) continue;
-      var match=true;
+      var bate=true;
       for(var j=0;j<vals.length;j++){
-        if(selected[vals[j].attribute]!==vals[j].value){match=false;break;}
+        if(selecionado[vals[j].attribute]!==vals[j].value){ bate=false; break; }
       }
-      if(match) return v;
+      if(bate) return v;
     }
     return null;
   }
 
-  function variantsBox(){
-    if(!hasVar) return '';
-    var html='<div class="variant-box" style="margin-bottom:16px;">';
-    attrOrder.forEach(function(a){
-      html+='<div class="field-group" style="margin-bottom:10px;">'
-        +'<label class="field-label" style="display:block;margin-bottom:6px;font-weight:600;">'+esc(a)+'</label>'
-        +'<div class="variant-chips" data-attr="'+esc(a)+'" style="display:flex;flex-wrap:wrap;gap:6px;">'
-        +attrs[a].map(function(val){
-          // Verifica se essa combinação ainda é possível dada a seleção atual
-          var possible=p.variants.some(function(v){
-            var vmap={}; (v.values||[]).forEach(function(av){vmap[av.attribute]=av.value;});
-            if(vmap[a]!==val) return false;
-            for(var k in selected){ if(k!==a && selected[k] && vmap[k]!==selected[k]) return false; }
-            return v.stock_qty>0;
-          });
-          var isSel=selected[a]===val;
-          var cls='variant-chip'+(isSel?' active':'')+(possible?'':' disabled');
-          // Swatch de cor: se o valor parece hex (#RRGGBB ou #RGB), renderiza circulo colorido
-          var isHex=/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(val);
-          if(isHex){
-            var ringColor=isSel?'var(--primary)':(possible?'rgba(0,0,0,.15)':'#e5e7eb');
-            var swStyle='display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:999px;background:'+val+';border:2px solid '+ringColor+';box-shadow:'+(isSel?'0 0 0 2px #fff inset':'0 0 0 2px #fff inset')+';cursor:'+(possible?'pointer':'not-allowed')+';opacity:'+(possible?'1':'.4')+';transition:all .15s;'+(isSel?'transform:scale(1.05);':'');
-            // Checkmark visivel quando selecionado — cor do check ajusta conforme luminosidade
-            var r=parseInt(val.length===4?val[1]+val[1]:val.slice(1,3),16);
-            var g=parseInt(val.length===4?val[2]+val[2]:val.slice(3,5),16);
-            var b=parseInt(val.length===4?val[3]+val[3]:val.slice(5,7),16);
-            var luma=(0.299*r+0.587*g+0.114*b);
-            var checkColor=luma>160?'#000':'#fff';
-            var checkH=isSel?'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="'+checkColor+'" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>':'';
-            return '<span class="'+cls+'" data-attr="'+esc(a)+'" data-val="'+esc(val)+'" data-possible="'+(possible?'1':'0')+'" title="'+esc(val)+'" style="'+swStyle+'">'+checkH+'</span>';
-          }
-          var style='display:inline-flex;align-items:center;justify-content:center;padding:6px 14px;border-radius:999px;border:1.5px solid '+(isSel?'var(--primary)':(possible?'var(--border)':'#e5e7eb'))+';background:'+(isSel?'var(--primary)':'#fff')+';color:'+(isSel?'#fff':(possible?'var(--text)':'#cbd5e1'))+';font-size:13px;font-weight:600;cursor:'+(possible?'pointer':'not-allowed')+';transition:all .15s;';
-          return '<span class="'+cls+'" data-attr="'+esc(a)+'" data-val="'+esc(val)+'" data-possible="'+(possible?'1':'0')+'" style="'+style+'">'+esc(val)+'</span>';
-        }).join('')
-        +'</div></div>';
+  function possivel(a,val){
+    return p.variants.some(function(v){
+      var m={}; (v.values||[]).forEach(function(av){ m[av.attribute]=av.value; });
+      if(m[a]!==val) return false;
+      for(var k in selecionado){ if(k!==a && selecionado[k] && m[k]!==selecionado[k]) return false; }
+      return v.stock_qty>0;
     });
-    html+='</div>';
-    return html;
   }
 
-  function priceHtml(){
-    if(p.price==null||SETTINGS.show_prices===false) return '';
-    var price=(selectedVariant&&selectedVariant.price_override!=null)?selectedVariant.price_override:p.price;
-    return '<div style="font-size:24px;font-weight:800;color:var(--primary);margin-bottom:8px;" id="dPrice">'+fmt(price)+'</div>';
-  }
-
-  function btnLabel(){
-    if(!hasVar){
-      var qty=getProductCartQty(p.id);
-      return qty>0?'✓ No carrinho ('+qty+')':'+ Adicionar ao carrinho';
-    }
-    if(!selectedVariant) return 'Escolha as opções';
-    var key=cartKey(p.id,selectedVariant.id);
-    var qty=cart[key]?cart[key].qty:0;
-    return qty>0?'+ Adicionar mais ('+qty+' no carrinho)':'+ Adicionar ao carrinho';
-  }
-
-  function btnDisabled(){ return hasVar && !selectedVariant; }
-
-  function stockMsg(){
+  function opcoesHtml(){
     if(!hasVar) return '';
-    if(!selectedVariant) return '';
-    if(selectedVariant.stock_qty<=0) return '<div style="font-size:12px;color:#dc2626;margin:8px 0;">Sem estoque para essa combinação</div>';
-    if(SETTINGS.show_stock) return '<div style="font-size:12px;color:var(--text-3);margin:8px 0;">'+selectedVariant.stock_qty+' em estoque</div>';
+    return attrOrder.map(function(a){
+      var cor=atributoDeCor(a);
+      var escolhido=selecionado[a];
+      var opcoes=attrs[a].map(function(val){
+        var ok=possivel(a,val), sel=escolhido===val;
+        var hex=cor?corDoValor(val):null;
+        var attrs2=' data-attr="'+esc(a)+'" data-val="'+esc(val)+'" data-ok="'+(ok?'1':'0')+'"';
+
+        if(hex){
+          // Circulo com o NOME embaixo: a cor se ve de relance e o nome
+          // resolve quem nao distingue os tons proximos.
+          return '<button type="button" class="op-cor'+(sel?' sel':'')+(ok?'':' off')+'"'+attrs2+' title="'+esc(val)+'">'
+            +'<span class="op-cor-bola" style="background:'+hex+';">'
+            +(sel?'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="'+tintaSobreCor(hex)+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>':'')
+            +'</span><span class="op-cor-nome">'+esc(val)+'</span></button>';
+        }
+        return '<button type="button" class="op-chip'+(sel?' sel':'')+(ok?'':' off')+'"'+attrs2+'>'+esc(val)+'</button>';
+      }).join('');
+
+      return '<div class="op-grupo">'
+        +'<div class="op-label">'+esc(a)
+        +(escolhido?'<span class="op-escolhido">'+esc(escolhido)+'</span>':'<span class="op-pede">escolha</span>')
+        +'</div>'
+        +'<div class="op-lista'+(cor?' op-lista-cor':'')+'">'+opcoes+'</div>'
+        +'</div>';
+    }).join('');
+  }
+
+  function precoAtual(){
+    if(p.price==null||SETTINGS.show_prices===false) return null;
+    return (variante&&variante.price_override!=null)?variante.price_override:p.price;
+  }
+
+  function precoHtml(){
+    var v=precoAtual();
+    if(v==null) return '';
+    var parc=PARCELAS_TXT(v);
+    return '<div class="pd-preco">'+fmt(v)+'</div>'
+      +(parc?'<div class="pd-parcela">'+esc(parc)+'</div>':'');
+  }
+
+  function faltaEscolher(){
+    if(!hasVar) return false;
+    for(var i=0;i<attrOrder.length;i++){ if(!selecionado[attrOrder[i]]) return true; }
+    return false;
+  }
+
+  function avisoHtml(){
+    if(!hasVar) return '';
+    if(faltaEscolher()) return '<div class="pd-aviso">Escolha '+attrOrder.map(function(a){return a.toLowerCase();}).join(' e ')+' para continuar.</div>';
+    if(variante&&variante.stock_qty<=0) return '<div class="pd-aviso pd-aviso-ruim">Esta combinação está sem estoque.</div>';
+    if(variante&&SETTINGS.show_stock) return '<div class="pd-aviso">'+variante.stock_qty+' em estoque.</div>';
     return '';
   }
 
-  // 23/05/2026 v2: imagem inicial = primeira do carrossel (ou fallback).
-  var initialImg=allImages.length?allImages[0]:null;
-  var dotsRowH=allImages.length>1
-    ? '<div id="dDots" style="display:flex;gap:5px;justify-content:center;margin-top:-12px;margin-bottom:14px;">'+dotsHtml()+'</div>'
-    : '<div id="dDots"></div>';
-
-  var ov=document.createElement('div');ov.className='checkout-overlay open';
-  ov.innerHTML='<div class="checkout-sheet" style="max-width:420px;"><div class="checkout-head"><div class="checkout-back" id="dClose">←</div><div class="checkout-head-info"><div class="checkout-title">'+esc(p.name)+'</div><div class="checkout-subtitle">'+(p.category||'Produto')+'</div></div><div class="cart-close" id="dCloseX">×</div></div>'
-    +'<div class="checkout-body" id="dBody">'
-    +'<div id="dImage" style="width:100%;aspect-ratio:1;background:var(--primary-light);border-radius:var(--r);display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:20px;">'+imgHtml(initialImg)+'</div>'
-    +dotsRowH
-    +'<div id="dPriceWrap">'+priceHtml()+'</div>'
-    +(p.description?'<p style="font-size:13px;color:var(--text-2);line-height:1.6;margin-bottom:16px;">'+esc(p.description)+'</p>':'')
-    +'<div id="dVariants">'+variantsBox()+'</div>'
-    +'<div id="dStock">'+stockMsg()+'</div>'
-    +'</div>'
-    +'<div class="checkout-foot"><button class="next-btn'+(btnDisabled()?'':' green')+'" id="dAddBtn"'+(btnDisabled()?' disabled style="opacity:.5;cursor:not-allowed;"':'')+'>'+btnLabel()+'</button></div></div>';
-  document.body.appendChild(ov);document.body.style.overflow='hidden';
-
-  // 23/05/2026 v2: close para o carrossel pra evitar interval leak.
-  function close(){stopCarousel();ov.remove();document.body.style.overflow='';}
-  ov.querySelector('#dClose').addEventListener('click',close);
-  ov.querySelector('#dCloseX').addEventListener('click',close);
-
-  function rerenderVariants(){
-    ov.querySelector('#dVariants').innerHTML=variantsBox();
-    ov.querySelector('#dPriceWrap').innerHTML=priceHtml();
-    ov.querySelector('#dStock').innerHTML=stockMsg();
-    // 23/05/2026 v2: NAO mexer mais na imagem aqui — carrossel
-    // roda independente da selecao de variante.
-    var btn=ov.querySelector('#dAddBtn');
-    btn.textContent=btnLabel();
-    var disabled=btnDisabled()||(selectedVariant&&selectedVariant.stock_qty<=0);
-    btn.disabled=!!disabled;
-    btn.className='next-btn'+(disabled?'':' green');
-    btn.style.opacity=disabled?'.5':'';
-    btn.style.cursor=disabled?'not-allowed':'';
-    bindChips();
+  function bloqueado(){
+    if(!hasVar) return false;
+    return faltaEscolher() || !variante || variante.stock_qty<=0;
   }
 
-  function bindChips(){
-    ov.querySelectorAll('.variant-chip').forEach(function(chip){
-      chip.addEventListener('click',function(){
-        if(chip.dataset.possible!=='1') return;
-        var a=chip.dataset.attr,val=chip.dataset.val;
-        if(selected[a]===val) delete selected[a]; else selected[a]=val;
-        selectedVariant=findVariant();
-        rerenderVariants();
+  function fotosHtml(){
+    if(!fotos.length){
+      return '<div class="pd-foto" style="background:'+FUNDO_CAPA(p.name)+'">'
+        +'<div class="product-ph-initials" style="font-size:64px;">'+esc(INICIAIS(p.name))+'</div></div>';
+    }
+    var mini = fotos.length>1
+      ? '<div class="pd-minis">'+fotos.map(function(u,i){
+          return '<button type="button" class="pd-mini'+(i===fotoAtual?' sel':'')+'" data-foto="'+i+'">'
+            +'<img src="'+esc(u)+'" alt="">'+'</button>';
+        }).join('')+'</div>'
+      : '';
+    return '<div class="pd-foto"><img id="pdFoto" src="'+esc(fotos[fotoAtual])+'" alt="'+esc(p.name)+'"></div>'+mini;
+  }
+
+  // ── Monta a pagina ─────────────────────────────────────
+  var el=document.createElement('div');
+  el.className='pd-overlay';
+  el.innerHTML=
+     '<div class="pd-topo">'
+    +'<button type="button" class="pd-voltar" id="pdVoltar">'
+    +'<span class="pd-voltar-seta">&#8592;</span>'+esc(origemAtual())+'</button>'
+    +'</div>'
+    +'<div class="pd-corpo">'
+    +'<div class="pd-col-foto" id="pdGaleria">'+fotosHtml()+'</div>'
+    +'<div class="pd-col-info">'
+    +(p.category?'<div class="pd-cat">'+esc(p.category)+'</div>':'')
+    +'<h1 class="pd-nome">'+esc(p.name)+'</h1>'
+    +'<div id="pdPreco">'+precoHtml()+'</div>'
+    +'<div id="pdOpcoes">'+opcoesHtml()+'</div>'
+    +'<div id="pdAviso">'+avisoHtml()+'</div>'
+    +'<div class="pd-acoes">'
+    +'<button type="button" class="pd-comprar" id="pdComprar">Comprar agora</button>'
+    +'<button type="button" class="pd-add" id="pdAdd">Adicionar ao carrinho</button>'
+    +'</div>'
+    +(p.description?'<div class="pd-desc"><div class="pd-desc-tit">Sobre este produto</div><p>'+esc(p.description)+'</p></div>':'')
+    +'</div>'
+    +'</div>'
+    +'<section class="pd-relacionados" id="pdRelacionados" hidden>'
+    +'<h2 class="pd-rel-tit">Produtos relacionados</h2>'
+    +'<div class="pd-rel-grade" id="pdRelGrade"></div>'
+    +'</section>';
+
+  document.body.appendChild(el);
+  document.body.style.overflow='hidden';
+  el.scrollTop=0;
+
+  // Empilha no historico pra seta da tela e "voltar" do celular
+  // concordarem. Se pushState falhar (navegador antigo), a seta ainda
+  // fecha direto.
+  var empilhou=false;
+  try{ history.pushState({produto:p.id},'',location.pathname+location.search); empilhou=true; }catch(e){}
+  paginaProduto={el:el,empilhou:empilhou,parar:null};
+
+  function repintar(){
+    el.querySelector('#pdOpcoes').innerHTML=opcoesHtml();
+    el.querySelector('#pdPreco').innerHTML=precoHtml();
+    el.querySelector('#pdAviso').innerHTML=avisoHtml();
+    var trava=bloqueado();
+    ['#pdAdd','#pdComprar'].forEach(function(s){
+      var b=el.querySelector(s);
+      b.disabled=trava;
+      b.classList.toggle('off',trava);
+    });
+    ligarOpcoes();
+  }
+
+  function ligarOpcoes(){
+    el.querySelectorAll('#pdOpcoes [data-attr]').forEach(function(b){
+      b.addEventListener('click',function(){
+        if(b.dataset.ok!=='1') return;
+        var a=b.dataset.attr,val=b.dataset.val;
+        if(selecionado[a]===val) delete selecionado[a]; else selecionado[a]=val;
+        variante=acharVariante();
+        // Trocar de cor troca a foto, se aquela variante tiver uma.
+        if(variante&&variante.image_url){
+          var i=fotos.indexOf(variante.image_url);
+          if(i>=0){ fotoAtual=i; pintarFoto(); }
+        }
+        repintar();
       });
     });
   }
-  bindChips();
-  bindDots();
-  startCarousel();
 
-  ov.querySelector('#dAddBtn').addEventListener('click',function(){
-    if(btnDisabled()) return;
-    if(hasVar && (!selectedVariant || selectedVariant.stock_qty<=0)) return;
-    addToCart(p.id, selectedVariant?selectedVariant.id:null);
-    var btn=this;
-    btn.textContent='✓ Adicionado';
-    btn.className='next-btn green';
-    setTimeout(close,700);
+  function pintarFoto(){
+    var img=el.querySelector('#pdFoto');
+    if(img&&fotos[fotoAtual]) img.src=fotos[fotoAtual];
+    el.querySelectorAll('.pd-mini').forEach(function(m,i){
+      m.classList.toggle('sel',i===fotoAtual);
+    });
+  }
+
+  function ligarMinis(){
+    el.querySelectorAll('.pd-mini').forEach(function(m){
+      m.addEventListener('click',function(){ fotoAtual=parseInt(m.dataset.foto,10)||0; pintarFoto(); });
+    });
+  }
+
+  el.querySelector('#pdVoltar').addEventListener('click',voltarDaPagina);
+
+  el.querySelector('#pdAdd').addEventListener('click',function(){
+    if(bloqueado()) return;
+    addToCart(p.id, variante?variante.id:null);
+    var b=this; var antes=b.textContent;
+    b.textContent='Adicionado';
+    setTimeout(function(){ b.textContent=antes; },1200);
   });
+
+  el.querySelector('#pdComprar').addEventListener('click',function(){
+    if(bloqueado()) return;
+    addToCart(p.id, variante?variante.id:null);
+    // "Comprar" pula o carrinho: quem clicou aqui ja decidiu.
+    fecharProduto();
+    openCheckout();
+  });
+
+  ligarOpcoes();
+  ligarMinis();
+  repintar();
+  carregarRelacionados(p);
+}
+
+/**
+ * Produtos relacionados: mesma categoria, sem repetir o que esta aberto.
+ *
+ * Usa a MESMA rota da grade — nao ha um segundo conceito de "relacionado"
+ * pra manter em sincronia. Se a loja nao tem categoria no produto, a
+ * secao simplesmente nao aparece.
+ */
+function carregarRelacionados(p){
+  if(!p.category) return;
+  fetch(API_BASE+'/api/v1/storefront/'+encodeURIComponent(SLUG)+'/catalogo?limit=12&cat='+encodeURIComponent(p.category))
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if(!paginaProduto) return;
+      var lista=(j&&j.products||[]).filter(function(x){ return x.id!==p.id; }).slice(0,6);
+      if(!lista.length) return;
+      lista.forEach(function(x){ PROD_MAP[x.id]=x; });
+
+      var sec=paginaProduto.el.querySelector('#pdRelacionados');
+      var grade=paginaProduto.el.querySelector('#pdRelGrade');
+      grade.innerHTML=lista.map(function(x){
+        var img=x.image_url;
+        if(!img && x.variants && x.variants.length){
+          for(var i=0;i<x.variants.length;i++){ if(x.variants[i].image_url){ img=x.variants[i].image_url; break; } }
+        }
+        var capa=img
+          ? '<img src="'+esc(img)+'" alt="">'
+          : '<div class="product-ph-initials">'+esc(INICIAIS(x.name))+'</div>';
+        var fundo=img?'':' style="background:'+FUNDO_CAPA(x.name)+'"';
+        var preco=(SETTINGS.show_prices!==false&&x.price!=null)?'<div class="pd-rel-preco">'+fmt(x.price)+'</div>':'';
+        return '<button type="button" class="pd-rel-card" onclick="showDetail(\\''+x.id+'\\')">'
+          +'<div class="pd-rel-foto"'+fundo+'>'+capa+'</div>'
+          +'<div class="pd-rel-nome">'+esc(x.name)+'</div>'+preco+'</button>';
+      }).join('');
+      sec.hidden=false;
+    })
+    .catch(function(){});
 }
 `;

@@ -139,23 +139,13 @@ function renderProducts(){
     var priceH=(SETTINGS.show_prices!==false&&p.price!=null)
       ?'<div class="product-price">'+fmt(p.price)+'</div>'+(parcH?'<div class="product-parcela">'+esc(parcH)+'</div>':'')
       :'';
-    // O botao DIZ a acao. "+" e "→" nao diziam: a cliente tinha que
-    // adivinhar se ia comprar, abrir o produto ou avancar de pagina. E de
-    // largura cheia, preso ao rodape do cartao, em vez de uma bolinha
-    // flutuando no canto sem pertencer a estrutura.
-    var actionH;
-    if(hasVar){
-      // Com variantes o botao ABRE o detalhe: nao da pra comprar sem
-      // escolher tamanho ou cor.
-      actionH=qty>0
-        ?'<button class="card-action card-action-ghost" onclick="event.stopPropagation();showDetail(\\''+p.id+'\\')">'+qty+' no carrinho · escolher mais</button>'
-        :'<button class="card-action" onclick="event.stopPropagation();showDetail(\\''+p.id+'\\')">Escolher opções</button>';
-    }else{
-      var k=cartKey(p.id,null);
-      actionH=qty>0
-        ?'<div class="qty-ctrl"><button class="qty-btn" onclick="event.stopPropagation();changeQty(\\''+k+'\\',-1)" aria-label="Tirar um">−</button><span class="qty-num">'+qty+' no carrinho</span><button class="qty-btn" onclick="event.stopPropagation();changeQty(\\''+k+'\\',1)" aria-label="Adicionar mais um">+</button></div>'
-        :'<button class="card-action" onclick="event.stopPropagation();addToCart(\\''+p.id+'\\')">Adicionar</button>';
-    }
+    // SEM botao no cartao. O cartao inteiro leva pra pagina do produto,
+    // que e onde a decisao acontece — la tem foto grande, cor, tamanho,
+    // descricao e frete. Comprar direto da grade pulava tudo isso e, em
+    // produto com variante, nem era possivel.
+    //
+    // O que o cartao mostra e QUANTO ja esta no carrinho, se houver.
+    var noCarrinho=qty>0?'<div class="card-tag">'+qty+' no carrinho</div>':'';
     // Sem foto, cada capa ganha seu proprio degrau do gradiente da loja.
     // Com o gradiente fixo, a Finesse renderizava 373 ladrilhos iguais.
     var tileStyle=displayImg?'':' style="background:'+FUNDO_CAPA(p.name)+'"';
@@ -163,7 +153,7 @@ function renderProducts(){
       +(p.category?'<div class="product-cat">'+esc(p.category)+'</div>':'')
       +'<div class="product-name">'+esc(p.name)+'</div>'
       +(p.description?'<div class="product-desc">'+esc((p.description||'').substring(0,80))+((p.description||'').length>80?'...':'')+'</div>':'')
-      +'<div class="product-footer">'+priceH+'</div>'+actionH+'</div></div>';
+      +'<div class="product-footer">'+priceH+'</div>'+noCarrinho+'</div></div>';
   }).join('');
 }
 
