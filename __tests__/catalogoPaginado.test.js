@@ -82,3 +82,35 @@ describe('limites', () => {
     expect(LIMITE_MAXIMO).toBeLessThanOrEqual(60);
   });
 });
+
+describe('regra de estoque', () => {
+  const { EM_ESTOQUE } = require('../src/services/catalogoPaginado');
+
+  test('a mesma regra vale pra contagem e pra pagina', () => {
+    // O cliente escondia esgotado DEPOIS de receber a pagina, e a
+    // contagem vinha do servidor sem esse filtro: em "Bolsa" a loja dizia
+    // "29 produtos" e mostrava 19, e a conta de paginas saia errada.
+    const builder = require('fs').readFileSync(
+      require('path').join(__dirname, '../src/services/storefrontBuilder.js'), 'utf8',
+    );
+    // A contagem do catalogo e a pagina 1 embutida usam a constante.
+    expect(builder).toContain('EM_ESTOQUE');
+    expect((builder.match(/\$\{EM_ESTOQUE\}/g) || []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('produto com variante depende do saldo DA VARIANTE', () => {
+    // Produto pai com stock_qty 0 mas variante com saldo continua a
+    // venda — e o inverso tambem: pai com saldo e todas as variantes
+    // zeradas nao pode aparecer.
+    expect(EM_ESTOQUE).toContain('product_variants');
+    expect(EM_ESTOQUE).toContain('v.stock_qty > 0');
+    expect(EM_ESTOQUE).toContain('products.stock_qty > 0');
+  });
+
+  test('o cliente nao filtra de novo', () => {
+    const grade = require('fs').readFileSync(
+      require('path').join(__dirname, '../src/templates/storefront/parts/products.js'), 'utf8',
+    );
+    expect(grade).not.toContain('return p.in_stock;');
+  });
+});

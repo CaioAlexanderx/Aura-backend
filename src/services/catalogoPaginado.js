@@ -26,6 +26,30 @@ const POR_PAGINA = 24;
 /** Teto de segurança: ninguém pede 10 mil de uma vez. */
 const LIMITE_MAXIMO = 60;
 
+/**
+ * Produto disponivel, na MESMA regra que o cliente usa pra desenhar.
+ *
+ * O cliente escondia esgotado depois de receber a pagina, e a contagem
+ * vinha do servidor sem esse filtro: em "Bolsa" a loja dizia "29
+ * produtos" e mostrava 19. A conta de paginas saia errada pelo mesmo
+ * motivo — paginas com buraco no fim.
+ *
+ * A regra e a de montarProdutoPublico: com variante ativa, basta uma com
+ * saldo; sem variante, o saldo do proprio produto.
+ */
+const EM_ESTOQUE = `(
+  CASE WHEN EXISTS (
+    SELECT 1 FROM product_variants v
+     WHERE v.product_id = products.id AND v.is_active = true
+  )
+  THEN EXISTS (
+    SELECT 1 FROM product_variants v
+     WHERE v.product_id = products.id AND v.is_active = true AND v.stock_qty > 0
+  )
+  ELSE products.stock_qty > 0
+  END
+)`;
+
 const ORDENS = {
   // A ordem que a lojista curou (featured primeiro) já vem do array de
   // destaques; sem ele, o mais recente na frente.
@@ -63,7 +87,7 @@ async function paginaDoCatalogo({
   const lim = Math.min(LIMITE_MAXIMO, Math.max(1, parseInt(limit, 10) || POR_PAGINA));
 
   const params = [cid];
-  const filtros = [visibilityWhere, 'is_active IS NOT FALSE'];
+  const filtros = [visibilityWhere, 'is_active IS NOT FALSE', EM_ESTOQUE];
 
   // `featured_product_ids` nao e so ordenacao: quando a lojista cura a
   // lista, a loja mostra SO aqueles produtos. A pagina 1 vem embutida no
@@ -144,4 +168,4 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
   return saida;
 }
 
-module.exports = { POR_PAGINA, LIMITE_MAXIMO, paginaDoCatalogo, janelaDePaginas, normalizar, ordemSql };
+module.exports = { POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, paginaDoCatalogo, janelaDePaginas, normalizar, ordemSql };
