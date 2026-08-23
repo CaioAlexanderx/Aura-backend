@@ -324,10 +324,26 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .sort-lbl{font-family:${fontSans};font-size:11px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:var(--sf-ink-3);}
 .sort-wrap select{font-family:${fontSans};font-size:13px;color:var(--sf-ink);background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:8px;padding:7px 10px;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1);}
 .sort-wrap select:hover{border-color:var(--sf-brand);}
-.grid-more{margin-top:22px;display:flex;flex-direction:column;align-items:center;gap:12px;font-family:${fontSans};font-size:13px;color:var(--sf-ink-3);}
-.grid-more-btn{font-family:${fontSans};font-size:13px;font-weight:600;color:var(--sf-brand-ink);background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:999px;padding:10px 22px;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1),transform 200ms cubic-bezier(.4,0,.2,1);}
-.grid-more-btn:hover{border-color:var(--sf-brand);transform:translateY(-2px);}
-.grid-more-btn:active{transform:scale(0.98);}
+/* Rodape da grade: barra de paginas. */
+.grid-more{margin-top:28px;display:flex;flex-direction:column;align-items:center;gap:10px;font-family:${fontSans};}
+.pg-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:center;}
+.pg-num,.pg-seta{font-family:${fontSans};font-size:13.5px;font-weight:600;color:var(--sf-ink-2);background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:10px;min-width:38px;height:38px;padding:0 12px;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1),color 200ms cubic-bezier(.4,0,.2,1);font-variant-numeric:tabular-nums;}
+.pg-num:hover:not(.pg-atual),.pg-seta:hover:not(:disabled){border-color:var(--sf-brand);color:var(--sf-brand-ink);}
+/* A pagina atual e PREENCHIDA, nao so grifada: em barra de numeros a
+   borda sozinha se perde no meio das outras. */
+.pg-atual{background:var(--sf-brand);border-color:var(--sf-brand);color:#fff;cursor:default;}
+.pg-seta:disabled{opacity:.4;cursor:default;}
+.pg-gap{color:var(--sf-ink-3);padding:0 2px;}
+.pg-info{font-size:12.5px;color:var(--sf-ink-3);font-variant-numeric:tabular-nums;}
+
+/* Acao do cartao: largura cheia, dentro da estrutura.
+   Era uma bolinha com "+" ou "→" flutuando no canto — nao dizia a acao e
+   nao pertencia ao cartao. */
+.card-action{width:100%;margin-top:10px;font-family:${fontSans};font-size:13px;font-weight:700;color:#fff;background:var(--sf-brand);border:1px solid var(--sf-brand);border-radius:10px;padding:10px 12px;cursor:pointer;transition:transform 200ms cubic-bezier(.4,0,.2,1),background 200ms cubic-bezier(.4,0,.2,1);}
+.card-action:hover{background:var(--sf-brand-2);transform:translateY(-1px);}
+.card-action:active{transform:scale(.985);}
+.card-action-ghost{background:transparent;color:var(--sf-brand-ink);border-color:var(--sf-border);font-weight:600;}
+.card-action-ghost:hover{background:var(--sf-brand-wash);border-color:var(--sf-brand);transform:none;}
 .product-parcela{font-family:${fontSans};font-size:11.5px;color:var(--sf-ink-3);margin-top:2px;font-variant-numeric:tabular-nums;}
 .product-body{padding:0;flex:1;display:flex;flex-direction:column;}
 .product-cat{font-family:${fontSans};font-size:11px;color:var(--sf-ink-3);font-weight:600;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:6px;}
@@ -337,7 +353,11 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .product-price{font-family:${fontMono};font-size:14px;font-weight:500;color:var(--sf-ink);}
 .add-btn{background:var(--sf-brand);color:#fff;border:none;border-radius:999px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .18s;flex-shrink:0;font-size:18px;line-height:1;}
 .add-btn:hover{transform:scale(1.08);}
-.qty-ctrl{display:flex;align-items:center;gap:6px;background:var(--sf-brand-wash);border-radius:999px;padding:3px;}
+/* No cartao o controle de quantidade tambem ocupa a largura toda, pra
+   ficar no mesmo lugar e no mesmo tamanho do botao que ele substitui. */
+.qty-ctrl{display:flex;align-items:center;justify-content:space-between;gap:6px;background:var(--sf-brand-wash);border:1px solid var(--sf-border);border-radius:10px;padding:4px;}
+.product-card .qty-ctrl{width:100%;margin-top:10px;}
+.product-card .qty-num{flex:1;text-align:center;font-size:12.5px;font-weight:700;color:var(--sf-brand-ink);}
 .qty-btn{width:28px;height:28px;border-radius:999px;background:var(--sf-brand);color:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600;}
 .qty-num{font-size:13px;font-weight:600;color:var(--sf-brand-ink);min-width:18px;text-align:center;font-family:${fontMono};}
 

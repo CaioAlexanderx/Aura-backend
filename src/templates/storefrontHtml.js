@@ -228,9 +228,6 @@ ${heroLegacy}
     </label>
   </div>
   <div class="products-grid" id="productsGrid"></div>
-  <!-- Sentinela do render incremental: a Finesse desenhava 410 cartoes de
-       uma vez. Entra em cena quando o cliente chega perto do fim. -->
-  <div id="gridSentinel" style="height:1px;"></div>
   <div class="grid-more" id="gridMore" hidden></div>
 </section>
 

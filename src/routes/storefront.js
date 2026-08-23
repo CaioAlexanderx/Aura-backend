@@ -31,7 +31,13 @@ const router              = require('express').Router();
 const db                  = require('../config/database');
 const notify              = require('../services/digitalOrderNotifications');
 const buildStorefrontPage = require('../templates/storefrontPage');
-const { buildStorefront } = require('../services/storefrontBuilder');
+const {
+  buildStorefront, listVisibilityWhere,
+  // A pagina 2 monta o produto com o MESMO codigo da pagina 1.
+  fetchVariantesPorProduto, montarProdutoPublico,
+  fetchStorefrontCategories, fetchPrimaryCategoryLinks, parseFeaturedIds,
+} = require('../services/storefrontBuilder');
+const { paginaDoCatalogo } = require('../services/catalogoPaginado');
 const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
@@ -71,18 +77,10 @@ function validateCnpj(d) {
   return r === parseInt(d[13]);
 }
 
-function listVisibilityWhere(cidParam) {
-  return `(company_id = ${cidParam} OR (
-    is_group_shared = true
-    AND company_id IN (
-      SELECT id FROM companies
-      WHERE COALESCE(NULLIF(billing_owner_company_id, id), id) = (
-        SELECT COALESCE(NULLIF(billing_owner_company_id, id), id)
-        FROM companies WHERE id = ${cidParam}
-      )
-    )
-  ))`;
-}
+// listVisibilityWhere vive em services/storefrontBuilder.js e e
+// importada acima. A copia local daqui era IDENTICA (conferido por
+// diff) — e regra de visibilidade duplicada e como produto de outra
+// empresa vaza pra loja errada quando so uma das copias e corrigida.
 
 router.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -120,6 +118,64 @@ router.get('/:slug', async (req, res) => {
   } catch (err) {
     console.error('storefront error:', err);
     res.status(500).json({ error: 'Erro' });
+  }
+});
+
+// ─────────────────────────────────────────────
+// Catalogo paginado (23/08/2026)
+//
+// A loja mandava 500 produtos de uma vez e escrevia no rodape "Mais 802
+// no catalogo — use a busca". Pra quem esta comprando, essa frase diz
+// "nao vamos te atender". Agora a grade pagina de verdade, e o filtro de
+// categoria, a busca e a ordenacao vao ao SERVIDOR — com paginacao real,
+// filtrar so o que esta carregado esconderia resultado.
+// ─────────────────────────────────────────────
+router.get('/:slug/catalogo', async (req, res) => {
+  try {
+    const slug = req.params.slug.toLowerCase().trim();
+    const { rows } = await db.query(
+      `SELECT company_id, show_prices, featured_product_ids FROM digital_channel_config WHERE slug = $1 AND is_published = true`,
+      [slug]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Loja nao encontrada' });
+    const cfg = rows[0];
+
+    const pagina = await paginaDoCatalogo({
+      cid: cfg.company_id,
+      visibilityWhere: listVisibilityWhere('$1'),
+      offset: req.query.offset,
+      limit: req.query.limit,
+      categoria: req.query.cat,
+      busca: req.query.q,
+      ordem: req.query.ordem,
+      featuredIds: parseFeaturedIds(cfg.featured_product_ids),
+    });
+
+    // O produto sai na MESMA forma do payload embutido. Sem isto o cartao
+    // da pagina 2 renderizaria diferente do cartao da pagina 1: sem
+    // `variants` o botao "+" apareceria onde deveria abrir o detalhe, e
+    // sem `in_stock` produto esgotado voltaria pra grade.
+    const ids = pagina.produtos.map(p => p.id);
+    const [variantsByProduct, primaryLinkByProduct, categorias] = await Promise.all([
+      fetchVariantesPorProduto(ids),
+      fetchPrimaryCategoryLinks(ids),
+      fetchStorefrontCategories(cfg.company_id),
+    ]);
+    const categoryById = {};
+    categorias.forEach(c => { categoryById[c.id] = c; });
+
+    res.json({
+      products: pagina.produtos.map(p => montarProdutoPublico(p, {
+        variantsByProduct, categoryById, primaryLinkByProduct,
+        mostrarPrecos: cfg.show_prices !== false,
+      })),
+      total: pagina.total,
+      offset: pagina.offset,
+      limit: pagina.limit,
+    });
+  } catch (err) {
+    console.error('[storefront] catalogo error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar o catalogo' });
   }
 });
 
