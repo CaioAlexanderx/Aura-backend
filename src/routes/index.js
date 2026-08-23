@@ -168,6 +168,16 @@ router.use('/public/karate/dojo-claim', require('./karateDojoClaimPublic'));
 //   GET  /public/karate/dojo/certificates
 router.use('/public/karate/dojo', require('./karateDojoPortalPublic'));
 
+// ── AURA KARATÊ — P2.1 (MESA pública do mesário, fora do shell) ──
+// Token opaco POR CONVOCAÇÃO (hash SHA-256+segredo em
+// karate_competition_officials — migration 302), Authorization: Bearer.
+// Escopo = koto ATUAL do mesário (relido a cada request — trocar de koto
+// move o acesso junto). Montado ANTES de /public/karate/:slug pelo mesmo
+// motivo do portal do dojô (rota fixa nunca capturada por /:slug/*).
+//   GET  /public/karate/mesa/me                          — bootstrap (evento+koto+fila)
+//   GET/POST/PUT /public/karate/mesa/categories/:catId/* — chave, notas, súmula
+router.use('/public/karate/mesa', require('./karateMesaPublic'));
+
 // ── AURA KARATÊ — Track D (público: carteirinha verify + portal + inscrição) ──
 // SEM auth de empresa. Auth própria por token/OTP. Migration 164.
 //   GET  /public/karate/verify/:token                 — verify carteirinha (mínimo/LGPD)
