@@ -96,3 +96,15 @@ describe('gradiente da capa', () => {
     expect(fundoDaCapa(null)).toMatch(/^linear-gradient/);
   });
 });
+
+describe('a serializacao sobrevive a instrumentacao', () => {
+  const { fonteClienteIniciais } = require('../src/templates/storefrontCapa');
+
+  test('o codigo enviado ao navegador nao cita contador de cobertura', () => {
+    // Ver o cabecalho de storefrontCapa.js. Aqui o bug era LATENTE:
+    // src/templates/** esta fora do collectCoverageFrom, entao passava
+    // por sorte. Bastaria ampliar a cobertura pra loja quebrar em
+    // producao sem ninguem entender por que.
+    expect(fonteClienteIniciais()).not.toMatch(/\bcov_[a-z0-9]+\b/);
+  });
+});
