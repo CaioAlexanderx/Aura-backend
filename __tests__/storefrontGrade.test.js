@@ -215,3 +215,46 @@ describe('cor por nome', () => {
     expect(atributoDeCor('Material')).toBe(false);
   });
 });
+
+describe('nome da cor quando a lojista grava hex', () => {
+  const s = buildScript({ products: [], categories: [] }, 'loja', '');
+  const nomeDaCor = new Function(
+    s.match(/var CORES_PT[\s\S]*?\n};/)[0] + '\n' +
+      s.match(/function nomeDaCor[\s\S]*?\n}/)[0] +
+      '\nreturn nomeDaCor;',
+  )();
+
+  test('hex vira nome de verdade', () => {
+    // A Finesse grava "#EC4899". Mostrar isso embaixo do circulo e mostrar
+    // codigo, nao cor — e nao serve pra leitor de tela nenhum.
+    expect(nomeDaCor('#FFFFFF')).toBe('Branco');
+    expect(nomeDaCor('#000000')).toBe('Preto');
+    expect(nomeDaCor('#1B2A4A')).toBe('Azul marinho');
+    expect(nomeDaCor('#7a1f3a')).toBe('Vinho');
+  });
+
+  test('tom aproximado ganha o nome do vizinho', () => {
+    // Nao precisa bater exato: #111 nao esta no mapa e ainda assim e preto.
+    expect(nomeDaCor('#0a0a0a')).toBe('Preto');
+    expect(nomeDaCor('#fdfdfd')).toBe('Branco');
+  });
+
+  test('forma curta funciona', () => {
+    expect(nomeDaCor('#000')).toBe('Preto');
+    expect(nomeDaCor('#fff')).toBe('Branco');
+  });
+
+  test('entrada invalida nao inventa nome', () => {
+    expect(nomeDaCor('Preto')).toBeNull();
+    expect(nomeDaCor('')).toBeNull();
+    expect(nomeDaCor(null)).toBeNull();
+    expect(nomeDaCor('#12')).toBeNull();
+  });
+
+  test('nunca devolve o proprio hex como rotulo', () => {
+    for (const h of ['#FFFFFF', '#000000', '#EC4899', '#1B2A4A', '#0bbdea']) {
+      const n = nomeDaCor(h);
+      if (n !== null) expect(n).not.toContain('#');
+    }
+  });
+});
