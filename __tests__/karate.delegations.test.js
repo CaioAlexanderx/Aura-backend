@@ -72,13 +72,17 @@ const STUDENTS = {
   [STU_C]: { id: STU_C, full_name: 'Atleta C', practitioner_id: PRAC_C, birth_date: '2007-03-10', gender: 'M', customer_dojo_id: DOJO_ID },
 };
 
-// opts: { linked, existingEntries, individualCounts, divisionRules }
+// opts: { linked, existingEntries, individualCounts, divisionRules,
+//         extraCategories (triagem: categorias adicionais), beltRows
+//         (triagem: linhas de karate_current_belt) }
 function mockPool(opts = {}) {
   const {
     linked = true,
     existingEntries = [],
     individualCounts = [],
     divisionRules = { max_individual_per_dojo_per_category: 7, max_teams_per_dojo_per_category: 1 },
+    extraCategories = [],
+    beltRows = [],
   } = opts;
 
   db.query.mockImplementation((sql, params) => {
@@ -101,6 +105,7 @@ function mockPool(opts = {}) {
           { id: CAT_KATA, name: 'Kata Mirim Fem', modality: 'kata', min_age: 12, max_age: 14, belt_min: null, belt_max: null, sex: 'F', weight_class: null, max_entries: null, fee_amount: null, division_id: DIV_ID, group_label: 'Grupo 1', entry_count: 0 },
           { id: CAT_KUMITE, name: 'Kumite Adulto Masc', modality: 'kumite', min_age: 18, max_age: null, belt_min: null, belt_max: null, sex: 'M', weight_class: null, max_entries: null, fee_amount: null, division_id: DIV_ID, group_label: null, entry_count: 0 },
           { id: CAT_TEAM, name: 'Kata Equipe Adulto Masc', modality: 'team_kata', min_age: null, max_age: null, belt_min: null, belt_max: null, sex: 'M', weight_class: null, max_entries: null, fee_amount: null, division_id: DIV_ID, group_label: null, entry_count: 0 },
+          ...extraCategories,
         ],
       });
     }
@@ -108,7 +113,7 @@ function mockPool(opts = {}) {
       const ids = params[1] || [];
       return Promise.resolve({ rows: ids.map((id) => STUDENTS[id]).filter(Boolean) });
     }
-    if (s.includes('-- p0d:current-belts')) return Promise.resolve({ rows: [] });
+    if (s.includes('-- p0d:current-belts')) return Promise.resolve({ rows: beltRows });
     if (s.includes('-- p0d:existing-entries')) return Promise.resolve({ rows: existingEntries });
     if (s.includes('-- p0d:dojo-individual-counts')) return Promise.resolve({ rows: individualCounts });
     if (s.includes('-- p0d:dojo-team-counts')) return Promise.resolve({ rows: [] });
@@ -305,5 +310,73 @@ describe('GET /dojo/competitions — vitrine', () => {
     expect(res.body.data[0].has_pricing).toBe(true);
     expect(res.body.data[0].divisions).toHaveLength(1);
     expect(res.body.data[0].divisions[0].name).toBe('Principal');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// P2.2 — Triagem automática de categoria
+// ════════════════════════════════════════════════════════════════
+describe('POST /dojo/competitions/:cid/delegation/triage', () => {
+  const triage = (body) => request(buildApp())
+    .post(`/federation/${FED_ID}/dojo/competitions/${COMP_ID}/delegation/triage`)
+    .set('Authorization', `Bearer ${tokenA}`)
+    .send(body);
+
+  it('resolved (1 match), no_fit (idade/sexo) e não-federado — numa chamada, sem gravar nada', async () => {
+    mockPool({});
+    const res = await triage({
+      athletes: [
+        { student_id: STU_A, modalities: ['kata', 'kumite'] }, // F 13: kata 12-14 F ✓; kumite 18+ M ✗
+        { student_id: STU_LOCAL, modalities: ['kata'] },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const a = res.body.results[0];
+    expect(a.status).toBe('ok');
+    const kata = a.triage.find((t) => t.modality === 'kata');
+    expect(kata.status).toBe('resolved');
+    expect(kata.category.category_id).toBe(CAT_KATA);
+    expect(kata.category.group_label).toBe('Grupo 1'); // divisão/G1 viaja junto
+    const kumite = a.triage.find((t) => t.modality === 'kumite');
+    expect(kumite.status).toBe('no_fit');
+    const failed = kumite.considered.flatMap((c) => c.failed);
+    expect(failed).toEqual(expect.arrayContaining(['age', 'sex']));
+    expect(res.body.results[1].status).toBe('ALUNO_NAO_FEDERADO');
+    // dry-run: nenhum INSERT/UPDATE tocou o banco
+    const wrote = db.query.mock.calls.some((c) => /INSERT|UPDATE|DELETE/i.test(String(c[0])));
+    expect(wrote).toBe(false);
+  });
+
+  it('ambiguous quando 2 divisões aceitam a mesma atleta — o sensei só desempata', async () => {
+    const CAT_KATA_ASP = '55555555-5555-4555-8555-555555555559';
+    mockPool({
+      extraCategories: [
+        { id: CAT_KATA_ASP, name: 'Kata Mirim Fem (Aspirantes)', modality: 'kata', min_age: 12, max_age: 14, belt_min: null, belt_max: null, sex: 'F', weight_class: null, max_entries: null, fee_amount: null, division_id: null, group_label: 'Grupo 1', entry_count: 0 },
+      ],
+    });
+    const res = await triage({ athletes: [{ student_id: STU_A, modalities: ['kata'] }] });
+    expect(res.status).toBe(200);
+    const kata = res.body.results[0].triage[0];
+    expect(kata.status).toBe('ambiguous');
+    expect(kata.options.map((o) => o.category_id).sort()).toEqual([CAT_KATA, CAT_KATA_ASP].sort());
+  });
+
+  it('gating de FAIXA com cor↔grau: laranja não entra em categoria verde→marrom; marrom entra (ambiguous)', async () => {
+    const CAT_KUM_GRAD = '55555555-5555-4555-8555-555555555558';
+    const extra = [
+      { id: CAT_KUM_GRAD, name: 'Kumite Adulto Masc Graduados', modality: 'kumite', min_age: 18, max_age: null, belt_min: 'verde', belt_max: 'marrom', sex: 'M', weight_class: null, max_entries: null, fee_amount: null, division_id: DIV_ID, group_label: 'Grupo 2', entry_count: 0 },
+    ];
+    // Laranja (8º kyu, ABAIXO de verde) → só a categoria sem limite de faixa serve.
+    mockPool({ extraCategories: extra, beltRows: [{ student_id: PRAC_B, belt_level: 'laranja', belt_kyu: 8, belt_dan: null }] });
+    let res = await triage({ athletes: [{ student_id: STU_B, modalities: ['kumite'] }] });
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].triage[0].status).toBe('resolved');
+    expect(res.body.results[0].triage[0].category.category_id).toBe(CAT_KUMITE);
+
+    // Marrom 2º kyu (dentro de verde→marrom) → as DUAS servem → ambiguous.
+    mockPool({ extraCategories: extra, beltRows: [{ student_id: PRAC_B, belt_level: 'marrom', belt_kyu: 2, belt_dan: null }] });
+    res = await triage({ athletes: [{ student_id: STU_B, modalities: ['kumite'] }] });
+    expect(res.body.results[0].triage[0].status).toBe('ambiguous');
+    expect(res.body.results[0].triage[0].options).toHaveLength(2);
   });
 });

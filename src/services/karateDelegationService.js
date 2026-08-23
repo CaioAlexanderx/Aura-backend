@@ -161,7 +161,8 @@ async function loadDojoStudents(dojoId, ids) {
   const { rows } = await db.query(
     `-- p0d:load-students
      SELECT s.id, s.full_name, s.practitioner_id,
-            cu.birth_date, cu.gender, cu.dojo_id AS customer_dojo_id
+            cu.birth_date, COALESCE(cu.sex, cu.gender) AS gender,
+            cu.dojo_id AS customer_dojo_id
        FROM karate_dojo_students s
        LEFT JOIN customers cu ON cu.id = s.practitioner_id
       WHERE s.dojo_id = $1 AND s.id = ANY($2::uuid[])`,
@@ -171,16 +172,26 @@ async function loadDojoStudents(dojoId, ids) {
 }
 
 // Faixa atual dos praticantes (para o category_fit) — uma query.
+// Triagem (P2.2): tenta trazer também o GRAU (belt_kyu/belt_dan da view 264)
+// para comparação exata; sem as colunas (42703), degrada para só a cor.
 async function loadCurrentBelts(federationId, practitionerIds) {
   if (!practitionerIds.length) return new Map();
+  const run = async (withDegree) => db.query(
+    `-- p0d:current-belts
+     SELECT student_id, belt_level${withDegree ? ', belt_kyu, belt_dan' : ''}
+       FROM karate_current_belt
+      WHERE federation_id = $1 AND student_id = ANY($2::uuid[])`,
+    [federationId, practitionerIds]
+  );
   try {
-    const { rows } = await db.query(
-      `-- p0d:current-belts
-       SELECT student_id, belt_level FROM karate_current_belt
-        WHERE federation_id = $1 AND student_id = ANY($2::uuid[])`,
-      [federationId, practitionerIds]
-    );
-    return new Map(rows.map((r) => [r.student_id, r.belt_level]));
+    let rows;
+    try { ({ rows } = await run(true)); }
+    catch (e) { if (e.code !== '42703') throw e; ({ rows } = await run(false)); }
+    return new Map(rows.map((r) => [r.student_id, {
+      belt_level: r.belt_level,
+      belt_kyu: r.belt_kyu != null ? Number(r.belt_kyu) : null,
+      belt_dan: r.belt_dan != null ? Number(r.belt_dan) : null,
+    }]));
   } catch (e) {
     if (e.code === '42P01') return new Map();
     throw e;
@@ -429,11 +440,12 @@ async function planDelegation({ federationId, dojoId, competitionId, body }) {
   for (const p of finalAthletes) {
     for (const cid of p.category_ids) {
       const cat = catById.get(cid);
+      const beltInfo = belts.get(p.student.practitioner_id) || null;
       const fit = checkCategoryFit({
         student: {
           birth_date: p.student.birth_date,
           gender: p.student.gender,
-          belt_level: belts.get(p.student.practitioner_id) || null,
+          belt_level: beltInfo ? beltInfo.belt_level : null,
         },
         category: cat,
         refDate: competition.event_date,
@@ -932,9 +944,149 @@ async function getOrderForFederation(federationId, competitionId, orderId) {
   }
 }
 
+// ════════════════════════════════════════════════════════════════
+// P2.2 — TRIAGEM AUTOMÁTICA de categoria (insight pós-Paulista)
+//
+// O sensei escolhe o ATLETA e as MODALIDADES; o sistema resolve a categoria
+// pelos requisitos que a federação já cadastrou (idade na data do EVENTO,
+// faixa, sexo, divisão/G1-G2). Regras:
+//   1 match  → resolved (o caso normal — zero escolha manual);
+//   2+       → ambiguous (o sensei só desempata, ex.: Paulista × Aspirantes);
+//   0        → no_fit com os critérios que falharam (o "vermelho manual" da
+//              conferência real vira aviso NA ORIGEM).
+//
+// Comparação de FAIXA robusta: categorias guardam COR (wizard) e o comparador
+// antigo esperava token kyu/dan — check inerte. Rank unificado: kyu 10..1 →
+// 0..9; dan 1..10 → 10..19. Atleta usa o GRAU exato (belt_kyu/belt_dan da
+// view 264) quando existe; cor sem grau usa o degrau mais BAIXO da cor
+// ("grau desconhecido nunca promove", filosofia da escala). Limites de
+// categoria em cor: min = degrau mais baixo da cor, max = mais alto
+// (inclusivos). Dado ausente NUNCA bloqueia (FPKT #1).
+// ════════════════════════════════════════════════════════════════
+const beltScale = require('../utils/karateBeltScale');
+
+const kyuRank = (k) => 10 - k;
+const danRank = (d) => 9 + d;
+
+function athleteBeltRank(beltInfo) {
+  if (!beltInfo || !beltInfo.belt_level) return null;
+  if (beltInfo.belt_dan != null) return danRank(beltInfo.belt_dan);
+  if (beltInfo.belt_kyu != null) return kyuRank(beltInfo.belt_kyu);
+  if (beltScale.isBlackBelt(beltInfo.belt_level)) return danRank(1); // preta sem dan → shodan
+  const color = beltScale.colorOf(beltInfo.belt_level);
+  if (!color || !color.kyus.length) return null;
+  return kyuRank(Math.max(...color.kyus)); // maior kyu = menos graduado
+}
+
+function categoryBeltBound(value, end) {
+  if (value == null || String(value).trim() === '') return null;
+  const m = String(value).toLowerCase().replace(/[º°]/g, '').match(/^(\d+)\s*(kyu|dan)$/);
+  if (m) return m[2] === 'dan' ? danRank(Number(m[1])) : kyuRank(Number(m[1]));
+  if (beltScale.isBlackBelt(value)) return end === 'min' ? danRank(1) : danRank(beltScale.MAX_DAN);
+  const color = beltScale.colorOf(value);
+  if (!color || !color.kyus.length) return null;
+  return end === 'min' ? kyuRank(Math.max(...color.kyus)) : kyuRank(Math.min(...color.kyus));
+}
+
+function beltFits(beltInfo, beltMin, beltMax) {
+  const min = categoryBeltBound(beltMin, 'min');
+  const max = categoryBeltBound(beltMax, 'max');
+  if (min == null && max == null) return { ok: true };
+  const r = athleteBeltRank(beltInfo);
+  if (r == null) return { ok: true }; // sem dado de faixa → informativo, não bloqueia
+  if (min != null && r < min) return { ok: false, reason: 'graduacao_minima' };
+  if (max != null && r > max) return { ok: false, reason: 'graduacao_maxima' };
+  return { ok: true };
+}
+
+async function triageDelegation({ federationId, dojoId, competitionId, body }) {
+  const athletesIn = Array.isArray(body && body.athletes) ? body.athletes : [];
+  if (!athletesIn.length) throw serviceError(422, 'VALIDATION_ERROR', 'Informe athletes');
+  if (athletesIn.length > MAX_ATHLETES) {
+    throw serviceError(422, 'VALIDATION_ERROR', `Máximo de ${MAX_ATHLETES} atletas por triagem`);
+  }
+  const competition = await loadCompetition(federationId, competitionId);
+  if (!competition) throw serviceError(404, 'NOT_FOUND', 'Competição não encontrada nesta federação');
+
+  const cats = await listCategoriesForEnrollment(competitionId);
+  // v1 da triagem: modalidades INDIVIDUAIS (equipes têm roster próprio).
+  const individual = cats.filter((c) => !['team_kata', 'team_kumite'].includes(c.modality));
+
+  const ids = [...new Set(athletesIn.map((a) => String((a && a.student_id) || '')).filter(isUuid))];
+  const students = await loadDojoStudents(dojoId, ids);
+  const practIds = [...students.values()].map((s) => s.practitioner_id).filter(Boolean);
+  const belts = await loadCurrentBelts(federationId, practIds);
+
+  const catView = (c) => ({
+    category_id: c.id, name: c.name, modality: c.modality,
+    group_label: c.group_label || null, division_id: c.division_id || null,
+  });
+
+  const results = athletesIn.map((raw) => {
+    const sid = String((raw && raw.student_id) || '').trim();
+    if (!isUuid(sid)) return { student_id: raw && raw.student_id || null, status: 'ID_INVALIDO' };
+    const student = students.get(sid);
+    if (!student) return { student_id: sid, status: 'ALUNO_NAO_ENCONTRADO' };
+    if (!student.practitioner_id) {
+      return {
+        student_id: sid, name: student.full_name, status: 'ALUNO_NAO_FEDERADO',
+        message: 'Competição é ato federativo — federe o aluno antes de inscrevê-lo',
+      };
+    }
+    const beltInfo = belts.get(student.practitioner_id) || null;
+    const modalities = [...new Set(((raw && raw.modalities) || []).map(String))];
+    if (!modalities.length) return { student_id: sid, name: student.full_name, status: 'SEM_MODALIDADE' };
+
+    const triage = modalities.map((m) => {
+      const candidates = individual.filter((c) => c.modality === m);
+      if (!candidates.length) return { modality: m, status: 'no_fit', considered: [], message: 'Sem categorias desta modalidade no campeonato' };
+      const fits = [];
+      const misses = [];
+      for (const c of candidates) {
+        // Idade/sexo pelo checkCategoryFit (idade na data do EVENTO);
+        // faixa pelo comparador unificado acima (cor↔kyu/dan).
+        const base = checkCategoryFit({
+          student: { birth_date: student.birth_date, gender: student.gender, belt_level: beltInfo ? beltInfo.belt_level : null },
+          category: { ...c, belt_min: null, belt_max: null },
+          refDate: competition.event_date,
+        });
+        const belt = beltFits(beltInfo, c.belt_min, c.belt_max);
+        if (base.fits && belt.ok) fits.push(c);
+        else {
+          misses.push({
+            category: catView(c),
+            failed: [
+              ...base.checks.filter((ch) => !ch.ok).map((ch) => ch.criterion),
+              ...(belt.ok ? [] : [belt.reason]),
+            ],
+          });
+        }
+      }
+      if (fits.length === 1) return { modality: m, status: 'resolved', category: catView(fits[0]) };
+      if (fits.length > 1) return { modality: m, status: 'ambiguous', options: fits.map(catView) };
+      return { modality: m, status: 'no_fit', considered: misses.slice(0, 8) };
+    });
+
+    return {
+      student_id: sid,
+      name: student.full_name,
+      status: 'ok',
+      belt: beltInfo ? beltInfo.belt_level : null,
+      triage,
+    };
+  });
+
+  return {
+    competition_id: competitionId,
+    event_date: competition.event_date ? String(competition.event_date).slice(0, 10) : null,
+    results,
+  };
+}
+
 module.exports = {
   MAX_ATHLETES,
   MAX_TEAMS,
+  triageDelegation,
   listOpenCompetitions,
   listCategoriesForEnrollment,
   planDelegation,
