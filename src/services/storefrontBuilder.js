@@ -450,6 +450,11 @@ async function buildStorefront(config) {
       has_pix:                  hasPix,
       // Migration 121: has_card respeita card_enabled toggle
       has_card:                 hasMpGateway && cardEnabled,
+      // Migration 301 — teto de parcelas declarado pela lojista. Sem
+      // cartao nao ha o que parcelar, entao o campo so sai com has_card.
+      card_max_installments: (hasMpGateway && cardEnabled)
+        ? (config.card_max_installments || null)
+        : null,
       pay_on_delivery_enabled:  payOnDeliveryEnabled,
       pickup_eta_text:   config.pickup_eta_text   || null,
       delivery_eta_text: config.delivery_eta_text || null,

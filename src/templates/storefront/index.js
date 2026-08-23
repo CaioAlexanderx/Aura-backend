@@ -18,12 +18,16 @@ const bootstrap     = require('./parts/bootstrap');
 // Regra da capa sem foto (iniciais + degrau do gradiente) — definida uma
 // vez em storefrontCapa.js e serializada para o navegador.
 const { fonteClienteIniciais } = require('../storefrontCapa');
+// Parcelamento: mesma estrategia — a regra vive no servico e vai
+// serializada, em vez de reescrita a mao no cliente.
+const { fonteClienteParcelamento } = require('../../services/parcelamento');
 
 function buildScript(storeData, escapedSlug, apiBase) {
   return prelude(storeData, escapedSlug, apiBase)
        + init
        + stateUtils
        + fonteClienteIniciais()
+       + fonteClienteParcelamento()
        + products
        + cart
        + checkout
