@@ -312,7 +312,12 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 
 .product-card{cursor:pointer;display:flex;flex-direction:column;transition:transform .18s ease;background:transparent;border:none;border-radius:0;padding:0;}
 .product-card:hover{transform:translateY(-2px);}
-.product-img{width:100%;aspect-ratio:1/1;background:linear-gradient(135deg,var(--sf-ph-from),var(--sf-ph-to));position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;border-radius:12px;margin-bottom:16px;}
+/* Ladrilho NEUTRO atras da foto. O gradiente --sf-ph-* e a capa de
+   quem NAO tem foto, e o markup injeta ele inline nesse caso. Deixar
+   o gradiente aqui fazia toda foto aparecer sobre um tapete colorido
+   assim que a foto passou a entrar em "contain" — e foto recortada
+   em fundo branco ficava com uma moldura pessego em volta. */
+.product-img{width:100%;aspect-ratio:1/1;background:var(--sf-bg-2);position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;border-radius:12px;margin-bottom:16px;}
 .product-img img{width:100%;height:100%;object-fit:contain;padding:6%;}
 .product-ph-initials{font-family:${fontSerif};font-size:34px;line-height:1;color:var(--sf-brand-ink);letter-spacing:0.5px;}
 .sort-wrap{margin-left:auto;display:inline-flex;align-items:center;gap:8px;}
@@ -375,7 +380,7 @@ body.card-style-image-heavy .product-desc{display:none;}
 .cart-items{flex:1;overflow-y:auto;padding:16px 24px;}
 .cart-item{display:flex;gap:14px;align-items:flex-start;padding:16px 0;border-bottom:1px solid var(--sf-border);}
 .cart-item:last-child{border-bottom:none;}
-.cart-item-img{width:80px;height:80px;border-radius:10px;background:linear-gradient(135deg,var(--sf-ph-from),var(--sf-ph-to));display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;}
+.cart-item-img{width:80px;height:80px;border-radius:10px;background:var(--sf-bg-2);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;}
 .cart-item-img img{width:100%;height:100%;object-fit:contain;padding:5%;}
 .cart-item-info{flex:1;}
 .cart-item-name{font-family:${fontSerif};font-size:15px;font-weight:400;letter-spacing:-0.2px;margin-bottom:4px;line-height:1.25;}
