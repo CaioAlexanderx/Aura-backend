@@ -116,3 +116,102 @@ describe('barra de paginas', () => {
     }
   });
 });
+
+describe('pagina de produto', () => {
+  const s = buildScript({ products: [], categories: [] }, 'loja', '');
+
+  test('o cartao nao tem mais botao de comprar', () => {
+    // A decisao acontece na PAGINA do produto, onde tem foto grande, cor,
+    // tamanho, descricao e frete. Comprar direto da grade pulava tudo
+    // isso — e em produto com variante nem era possivel.
+    expect(s).not.toContain('class="card-action"');
+    expect(s).toContain('card-tag');
+  });
+
+  test('duas acoes: adicionar e comprar', () => {
+    expect(s).toContain('Adicionar ao carrinho');
+    expect(s).toContain('Comprar agora');
+  });
+
+  test('"Comprar agora" pula o carrinho e vai pro checkout', () => {
+    // Ancora no LISTENER, nao na primeira mencao de '#pdComprar' — a
+    // primeira esta em repintar(), que so liga/desliga os dois botoes.
+    const i = s.indexOf("querySelector('#pdComprar').addEventListener");
+    expect(i).toBeGreaterThan(0);
+    const trecho = s.slice(i, i + 500);
+    expect(trecho).toContain('addToCart');
+    expect(trecho).toContain('openCheckout()');
+  });
+
+  test('"Adicionar ao carrinho" NAO leva pro checkout', () => {
+    // As duas acoes existem porque sao coisas diferentes: uma continua
+    // comprando, a outra fecha. Se as duas fossem pro checkout, a
+    // primeira nao teria razao de existir.
+    const i = s.indexOf("querySelector('#pdAdd').addEventListener");
+    expect(i).toBeGreaterThan(0);
+    const trecho = s.slice(i, i + 500);
+    expect(trecho).toContain('addToCart');
+    expect(trecho).not.toContain('openCheckout()');
+  });
+
+  test('a seta volta pra onde a pessoa estava', () => {
+    const fn = new Function(
+      'searchTerm', 'currentCat',
+      s.match(/function origemAtual[\s\S]*?\n}/)[0] + '\nreturn origemAtual;',
+    );
+    expect(fn('vestido', 'Todos')()).toBe('Voltar para a busca');
+    expect(fn('', 'Bolsa')()).toBe('Voltar para Bolsa');
+    expect(fn('', 'Todos')()).toBe('Voltar para a loja');
+  });
+
+  test('tem secao de relacionados', () => {
+    expect(s).toContain('Produtos relacionados');
+    expect(s).toContain('function carregarRelacionados');
+  });
+});
+
+describe('cor por nome', () => {
+  const s = buildScript({ products: [], categories: [] }, 'loja', '');
+  const corDoValor = new Function(
+    s.match(/var CORES_PT[\s\S]*?\n};/)[0] + '\n' +
+      s.match(/function corDoValor[\s\S]*?\n}/)[0] +
+      '\nreturn corDoValor;',
+  )();
+
+  test('nome de cor vira swatch — a lojista nao digita hex', () => {
+    // O swatch antigo so aparecia com "#000000". Lojista escreve "Preto".
+    expect(corDoValor('Preto')).toBe('#111111');
+    expect(corDoValor('azul marinho')).toBe('#1B2A4A');
+    expect(corDoValor('Off White')).toBe('#F3EFE7');
+  });
+
+  test('acento e caixa nao atrapalham', () => {
+    expect(corDoValor('Lilás')).toBe(corDoValor('lilas'));
+    expect(corDoValor('VERMELHO')).toBe(corDoValor('vermelho'));
+  });
+
+  test('hex continua funcionando', () => {
+    expect(corDoValor('#e11d48')).toBe('#e11d48');
+    expect(corDoValor('#abc')).toBe('#abc');
+  });
+
+  test('o que nao e cor vira chip de texto', () => {
+    // "Xadrez", "P", "38" nao sao cores — chip de texto e o certo.
+    expect(corDoValor('Xadrez')).toBeNull();
+    expect(corDoValor('38')).toBeNull();
+    expect(corDoValor('')).toBeNull();
+  });
+
+  test('so o atributo de COR vira bolinha', () => {
+    const atributoDeCor = new Function(
+      s.match(/function atributoDeCor[\s\S]*?\n}/)[0] + '\nreturn atributoDeCor;',
+    )();
+    expect(atributoDeCor('Cor')).toBe(true);
+    expect(atributoDeCor('Cor da alça')).toBe(true);
+    expect(atributoDeCor('Tamanho')).toBe(false);
+    // "Corte" comeca com "cor" mas nao e cor... e um caso real de moda.
+    // Aceito o falso positivo: o valor ("Reto", "Slim") nao acha cor no
+    // mapa e cai em chip de texto de qualquer jeito.
+    expect(atributoDeCor('Material')).toBe(false);
+  });
+});

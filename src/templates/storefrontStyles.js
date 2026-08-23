@@ -336,14 +336,10 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .pg-gap{color:var(--sf-ink-3);padding:0 2px;}
 .pg-info{font-size:12.5px;color:var(--sf-ink-3);font-variant-numeric:tabular-nums;}
 
-/* Acao do cartao: largura cheia, dentro da estrutura.
-   Era uma bolinha com "+" ou "→" flutuando no canto — nao dizia a acao e
-   nao pertencia ao cartao. */
-.card-action{width:100%;margin-top:10px;font-family:${fontSans};font-size:13px;font-weight:700;color:#fff;background:var(--sf-brand);border:1px solid var(--sf-brand);border-radius:10px;padding:10px 12px;cursor:pointer;transition:transform 200ms cubic-bezier(.4,0,.2,1),background 200ms cubic-bezier(.4,0,.2,1);}
-.card-action:hover{background:var(--sf-brand-2);transform:translateY(-1px);}
-.card-action:active{transform:scale(.985);}
-.card-action-ghost{background:transparent;color:var(--sf-brand-ink);border-color:var(--sf-border);font-weight:600;}
-.card-action-ghost:hover{background:var(--sf-brand-wash);border-color:var(--sf-brand);transform:none;}
+/* O cartao nao tem mais botao: ele inteiro leva pra pagina do produto.
+   Sobra so a marca de quanto ja esta no carrinho. */
+.card-tag{margin-top:9px;display:inline-flex;align-items:center;font-family:${fontSans};font-size:11.5px;font-weight:700;color:var(--sf-brand-ink);background:var(--sf-brand-wash);border-radius:999px;padding:4px 10px;}
+.product-card{cursor:pointer;}
 .product-parcela{font-family:${fontSans};font-size:11.5px;color:var(--sf-ink-3);margin-top:2px;font-variant-numeric:tabular-nums;}
 .product-body{padding:0;flex:1;display:flex;flex-direction:column;}
 .product-cat{font-family:${fontSans};font-size:11px;color:var(--sf-ink-3);font-weight:600;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:6px;}
@@ -531,6 +527,84 @@ body.card-style-image-heavy .product-desc{display:none;}
 .toast.show{transform:translateX(-50%) translateY(0);}
 @keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.2);}}
 .pulse{animation:pulse .3s ease;}
+
+/* ── Pagina de produto ────────────────────────────────────
+   Era uma folha de 420px com foto, preco e um botao. Agora e pagina:
+   galeria a esquerda, decisao a direita, relacionados embaixo. */
+.pd-overlay{position:fixed;inset:0;z-index:200;background:var(--sf-bg);overflow-y:auto;overscroll-behavior:contain;}
+.pd-topo{position:sticky;top:0;z-index:2;background:color-mix(in oklab,var(--sf-bg) 92%,transparent);backdrop-filter:saturate(180%) blur(12px);-webkit-backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--sf-border);padding:0 max(20px,calc((100% - 1280px)/2 + 20px));height:60px;display:flex;align-items:center;}
+.pd-voltar{display:inline-flex;align-items:center;gap:9px;font-family:${fontSans};font-size:14px;font-weight:600;color:var(--sf-ink-2);background:none;border:0;padding:8px 0;cursor:pointer;transition:color 200ms cubic-bezier(.4,0,.2,1);}
+.pd-voltar:hover{color:var(--sf-brand);}
+.pd-voltar-seta{font-size:18px;line-height:1;}
+
+.pd-corpo{max-width:1280px;margin:0 auto;padding:28px 20px 8px;display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:44px;align-items:start;}
+@media(max-width:860px){.pd-corpo{grid-template-columns:1fr;gap:24px;padding-top:18px;}}
+
+.pd-foto{width:100%;aspect-ratio:1/1;background:var(--sf-bg-2);border:1px solid var(--sf-border);border-radius:16px;overflow:hidden;display:flex;align-items:center;justify-content:center;}
+.pd-foto img{width:100%;height:100%;object-fit:contain;padding:4%;}
+.pd-minis{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
+.pd-mini{width:64px;height:64px;border-radius:10px;overflow:hidden;border:1px solid var(--sf-border);background:var(--sf-bg-2);padding:0;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1);}
+.pd-mini img{width:100%;height:100%;object-fit:contain;padding:6%;}
+.pd-mini.sel{border-color:var(--sf-brand);border-width:2px;}
+
+.pd-cat{font-family:${fontSans};font-size:11px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:var(--sf-ink-3);margin-bottom:8px;}
+.pd-nome{font-family:${fontSerif};font-size:30px;line-height:1.15;font-weight:400;color:var(--sf-ink);margin:0 0 14px;letter-spacing:-0.4px;}
+.pd-preco{font-family:${fontSans};font-size:28px;font-weight:800;color:var(--sf-brand-ink);font-variant-numeric:tabular-nums;}
+.pd-parcela{font-family:${fontSans};font-size:13px;color:var(--sf-ink-3);margin-top:3px;font-variant-numeric:tabular-nums;}
+
+/* ── Escolher cor e tamanho ───────────────────────────────
+   O rotulo diz o que e E o que ja foi escolhido, entao a pessoa sabe de
+   relance o que falta sem ler as opcoes uma a uma. */
+.op-grupo{margin-top:22px;}
+.op-label{font-family:${fontSans};font-size:12px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--sf-ink-3);margin-bottom:10px;display:flex;align-items:baseline;gap:8px;}
+.op-escolhido{text-transform:none;letter-spacing:0;font-size:13px;font-weight:600;color:var(--sf-ink);}
+.op-pede{text-transform:none;letter-spacing:0;font-size:12px;font-weight:500;color:var(--sf-brand);}
+.op-lista{display:flex;flex-wrap:wrap;gap:8px;}
+.op-lista-cor{gap:14px;}
+
+.op-cor{display:flex;flex-direction:column;align-items:center;gap:5px;background:none;border:0;padding:0;cursor:pointer;width:56px;}
+.op-cor-bola{width:38px;height:38px;border-radius:999px;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12);outline:2px solid transparent;outline-offset:3px;transition:outline-color 200ms cubic-bezier(.4,0,.2,1),transform 200ms cubic-bezier(.4,0,.2,1);}
+.op-cor:hover .op-cor-bola{transform:scale(1.06);}
+.op-cor.sel .op-cor-bola{outline-color:var(--sf-brand);}
+.op-cor-nome{font-family:${fontSans};font-size:11px;line-height:1.2;color:var(--sf-ink-3);text-align:center;}
+.op-cor.sel .op-cor-nome{color:var(--sf-ink);font-weight:700;}
+
+.op-chip{font-family:${fontSans};font-size:13.5px;font-weight:600;color:var(--sf-ink-2);background:var(--sf-bg-card);border:1.5px solid var(--sf-border);border-radius:10px;min-width:48px;padding:9px 14px;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1),color 200ms cubic-bezier(.4,0,.2,1);}
+.op-chip:hover{border-color:var(--sf-brand);}
+.op-chip.sel{background:var(--sf-brand);border-color:var(--sf-brand);color:#fff;}
+
+/* Indisponivel: risco diagonal, nao so cinza — cinza sozinho parece
+   "nao selecionado" e a pessoa clica achando que vai funcionar. */
+.op-chip.off,.op-cor.off{opacity:.45;cursor:not-allowed;}
+.op-chip.off{text-decoration:line-through;}
+.op-cor.off .op-cor-bola{box-shadow:inset 0 0 0 1px rgba(0,0,0,.12);position:relative;}
+
+.pd-aviso{font-family:${fontSans};font-size:13px;color:var(--sf-ink-3);margin-top:14px;}
+.pd-aviso-ruim{color:#b91c1c;}
+
+.pd-acoes{display:flex;flex-direction:column;gap:10px;margin-top:22px;}
+@media(min-width:520px){.pd-acoes{flex-direction:row;}.pd-acoes button{flex:1;}}
+.pd-comprar,.pd-add{font-family:${fontSans};font-size:14.5px;font-weight:700;border-radius:12px;padding:15px 20px;cursor:pointer;transition:transform 200ms cubic-bezier(.4,0,.2,1),background 200ms cubic-bezier(.4,0,.2,1);border:1.5px solid var(--sf-brand);}
+.pd-comprar{background:var(--sf-brand);color:#fff;}
+.pd-comprar:hover:not(.off){background:var(--sf-brand-2);transform:translateY(-1px);}
+.pd-add{background:transparent;color:var(--sf-brand-ink);}
+.pd-add:hover:not(.off){background:var(--sf-brand-wash);transform:translateY(-1px);}
+.pd-comprar.off,.pd-add.off{opacity:.45;cursor:not-allowed;transform:none;}
+
+.pd-desc{margin-top:28px;padding-top:22px;border-top:1px solid var(--sf-border);}
+.pd-desc-tit{font-family:${fontSans};font-size:12px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--sf-ink-3);margin-bottom:8px;}
+.pd-desc p{font-family:${fontSans};font-size:14.5px;line-height:1.65;color:var(--sf-ink-2);margin:0;max-width:62ch;white-space:pre-line;}
+
+.pd-relacionados{max-width:1280px;margin:0 auto;padding:40px 20px 56px;border-top:1px solid var(--sf-border);margin-top:36px;}
+.pd-rel-tit{font-family:${fontSerif};font-size:22px;font-weight:400;color:var(--sf-ink);margin:0 0 18px;}
+.pd-rel-grade{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:18px;}
+.pd-rel-card{background:none;border:0;padding:0;text-align:left;cursor:pointer;}
+.pd-rel-foto{width:100%;aspect-ratio:1/1;background:var(--sf-bg-2);border:1px solid var(--sf-border);border-radius:12px;overflow:hidden;display:flex;align-items:center;justify-content:center;transition:border-color 200ms cubic-bezier(.4,0,.2,1);}
+.pd-rel-card:hover .pd-rel-foto{border-color:var(--sf-brand);}
+.pd-rel-foto img{width:100%;height:100%;object-fit:contain;padding:6%;}
+.pd-rel-nome{font-family:${fontSerif};font-size:14.5px;line-height:1.25;color:var(--sf-ink);margin-top:9px;}
+.pd-rel-preco{font-family:${fontSans};font-size:13px;font-weight:800;color:var(--sf-brand-ink);margin-top:3px;font-variant-numeric:tabular-nums;}
+
 `;
 }
 module.exports = buildStyles;
