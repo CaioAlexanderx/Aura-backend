@@ -233,7 +233,7 @@ function listVisibilityWhere(cidParam) {
 // A pagina nasce com UMA pagina de produtos, nao com o catalogo. Antes
 // eram 500 (419 KB na Finesse) pra desenhar 24. O resto chega pela rota
 // /storefront/:slug/catalogo conforme a cliente navega.
-const { POR_PAGINA } = require('./catalogoPaginado');
+const { POR_PAGINA, EM_ESTOQUE } = require('./catalogoPaginado');
 const LIMITE_DO_PAYLOAD = POR_PAGINA;
 
 async function contarProdutosDaLoja(cid) {
@@ -242,6 +242,7 @@ async function contarProdutosDaLoja(cid) {
     FROM products
     WHERE ${listVisibilityWhere('$1')}
       AND is_active IS NOT FALSE
+      AND ${EM_ESTOQUE}
   `;
   try {
     const { rows } = await db.query(sql, [cid]);
@@ -325,6 +326,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
       FROM products
       WHERE ${visibility}
         AND is_active IS NOT FALSE
+        AND ${EM_ESTOQUE}
         AND id::text = ANY($2)
       ORDER BY array_position($2, id::text)
       LIMIT ${LIMITE_DO_PAYLOAD}
@@ -338,6 +340,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
     FROM products
     WHERE ${visibility}
       AND is_active IS NOT FALSE
+      AND ${EM_ESTOQUE}
     ORDER BY created_at DESC
     LIMIT ${LIMITE_DO_PAYLOAD}
   `;

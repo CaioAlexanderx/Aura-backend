@@ -98,8 +98,10 @@ function setOrdem(v){ ordem=v; recarregarDoInicio(); }
 
 function renderProducts(){
   var grid=document.getElementById('productsGrid'); if(!grid) return;
-  // O servidor ja filtrou, ordenou e paginou: aqui so desenha.
-  var visiveis=PRODUCTS.filter(function(p){ return p.in_stock; });
+  // O servidor ja filtrou (inclusive esgotado), ordenou e paginou: aqui
+  // so desenha. Filtrar de novo aqui era o que fazia a loja dizer "29
+  // produtos" e mostrar 19.
+  var visiveis=PRODUCTS;
 
   var txt=totalFiltrado+' produto'+(totalFiltrado!==1?'s':'');
   document.getElementById('prodCount').textContent=txt;
