@@ -71,20 +71,10 @@ function filterCat(cat,el){
   document.querySelectorAll('.cat-chip').forEach(function(c){c.classList.remove('active');});
   el.classList.add('active');
   document.getElementById('catTitle').textContent=cat==='Todos'?'Todos os produtos':cat;
-  mostrando=LOTE;renderProducts();
-  // So rola se o titulo da secao estiver FORA da tela — quem ja esta na
-  // grade nao pode ser puxado. E o offset e MEDIDO das barras fixas
-  // (topbar + chips), nao um numero magico: com -80 fixo o titulo ficava
-  // cortado embaixo delas.
-  var alvo=document.getElementById('productsAnchor');
-  var fixas=0;
-  var tb=document.querySelector('.topbar'); if(tb) fixas+=tb.offsetHeight;
-  var cw=document.querySelector('.cats-wrap'); if(cw) fixas+=cw.offsetHeight;
-  var topo=alvo.getBoundingClientRect().top;
-  if(topo<fixas-4||topo>window.innerHeight){
-    window.scrollTo({top:alvo.offsetTop-fixas-8,behavior:'smooth'});
-  }
+  // Trocar de categoria refaz a busca NO SERVIDOR e volta pra pagina 1.
+  recarregarDoInicio();
 }
+
 
 // Search inline (Fase 3 PR A) — toggle adiciona/remove .searching na .topbar.
 // Quando entra em busca foca o input; quando sai limpa input + searchTerm.
@@ -100,8 +90,7 @@ function toggleSearch(){
   }else{
     if(input) input.value='';
     searchTerm='';
-    mostrando=LOTE;
-    renderProducts();
+    recarregarDoInicio();
   }
 }
 function searchBlur(){
@@ -118,7 +107,9 @@ function searchBlur(){
 function filterProducts(){
   var input=document.getElementById('searchInput');
   searchTerm=input?input.value:'';
-  mostrando=LOTE;
-  renderProducts();
+  // Espera a pessoa parar de digitar: sem isso cada tecla vira uma
+  // requisicao, e a resposta da penultima pode chegar depois da ultima.
+  if(buscaTimer) clearTimeout(buscaTimer);
+  buscaTimer=setTimeout(recarregarDoInicio,320);
 }
 `;

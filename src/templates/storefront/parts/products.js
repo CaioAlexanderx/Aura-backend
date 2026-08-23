@@ -1,84 +1,118 @@
-// AURA. -- storefront/parts/products.js
-// renderProducts() — grid de produtos com filtro por categoria/busca.
-//
-// 23/05/2026: layout do card preservado (mesmo aspect/posicionamento)
-// mas a foto exibida cai pra primeira variante com image_url quando
-// o produto pai nao tem image_url. Isso evita placeholders 'A' em
-// catalogos onde o lojista so subiu foto por cor/tamanho.
-'use strict';
-
 module.exports = `
-// Render incremental: a Finesse desenhava 410 cartoes de uma vez, cada um
-// com foto. O lote entra conforme o cliente desce.
-var LOTE=60, mostrando=LOTE;
+// ── Paginacao ────────────────────────────────────────────
+//
+// A loja mandava 500 produtos de uma vez e escrevia no rodape "Mais 802
+// no catalogo — use a busca". Pra quem esta comprando, essa frase diz
+// "nao vamos te atender, procure em outra loja".
+//
+// Agora: 24 por pagina, numeros embaixo da grade, catalogo inteiro
+// alcancavel. A pagina 1 ja vem no HTML (primeira tela sem espera); as
+// outras chegam pela rota /storefront/:slug/catalogo.
+//
+// Filtro, busca e ordem sao do SERVIDOR: com paginacao real, filtrar so o
+// que esta carregado esconderia resultado.
+var paginaAtual=1, ordem='destaque', totalFiltrado=CATALOGO_TOTAL||PRODUCTS.length;
+var carregandoPagina=false, buscaTimer=null;
 
-// Ordem escolhida pela cliente. 'destaque' e a ordem que o servidor mandou
-// — featured primeiro, depois mais recente — entao nao reordena nada.
-var ordem='destaque';
+function totalDePaginas(){ return Math.max(1, Math.ceil(totalFiltrado/POR_PAGINA)); }
 
-function setOrdem(v){ ordem=v; mostrando=LOTE; renderProducts(); }
-
-// Busca sem acento e com termos em qualquer ordem, igual a vitrine Studio.
-// Antes era indexOf cru: "vestido" nao achava "Vestído" e "longo vestido"
-// nao achava nada.
-// Sem regex de proposito: este arquivo e um template literal, onde toda
-// barra invertida precisa ser dobrada na fonte (CLAUDE.md, armadilha 8).
-// Um \\s que vira s parte a busca em silencio — split(/s+/) quebra em cada
-// letra "s". Comparar codepoint nao tem essa armadilha.
-function normalizarBusca(s){
-  var d=String(s==null?'':s).normalize('NFD'), out='';
-  for(var i=0;i<d.length;i++){
-    var k=d.charCodeAt(i);
-    // 0x300-0x36F: bloco dos diacriticos combinantes que o NFD separou.
-    if(k<0x300||k>0x36f) out+=d[i];
+/**
+ * Numeros da barra: as vizinhas, a primeira, a ultima, reticencias no meio.
+ *
+ * Espelho de janelaDePaginas em services/catalogoPaginado.js. Com 55
+ * paginas nao da pra desenhar 55 botoes.
+ */
+function janelaDePaginas(atual,total){
+  if(total<=1) return [1];
+  var p=Math.min(Math.max(1,atual),total);
+  var vistos={}; var lista=[1,total];
+  lista.push(p-1,p,p+1);
+  var ok=[];
+  for(var i=0;i<lista.length;i++){
+    var n=lista[i];
+    if(n>=1&&n<=total&&!vistos[n]){ vistos[n]=1; ok.push(n); }
   }
-  return out.toLowerCase();
-}
-function casaBusca(termo,texto){
-  var t=normalizarBusca(termo).trim(); if(!t) return true;
-  var alvo=normalizarBusca(texto);
-  var partes=t.split(' ').filter(Boolean);
-  for(var i=0;i<partes.length;i++){ if(alvo.indexOf(partes[i])<0) return false; }
-  return true;
+  ok.sort(function(a,b){return a-b;});
+  var saida=[], ant=0;
+  for(var j=0;j<ok.length;j++){
+    if(ant && ok[j]-ant>1) saida.push('...');
+    saida.push(ok[j]); ant=ok[j];
+  }
+  return saida;
 }
 
-function ordenarProdutos(lista){
-  var l=lista.slice();
-  if(ordem==='preco_asc')  return l.sort(function(a,b){return (a.price||0)-(b.price||0);});
-  if(ordem==='preco_desc') return l.sort(function(a,b){return (b.price||0)-(a.price||0);});
-  if(ordem==='nome')       return l.sort(function(a,b){return String(a.name||'').localeCompare(String(b.name||''),'pt-BR');});
-  if(ordem==='novidades')  return l.sort(function(a,b){return String(b.created_at||'').localeCompare(String(a.created_at||''));});
-  return l;
+/** Busca uma pagina no servidor e redesenha. */
+function irParaPagina(n){
+  var total=totalDePaginas();
+  n=Math.min(Math.max(1,n),total);
+  if(carregandoPagina) return;
+  carregandoPagina=true;
+  paginaAtual=n;
+  marcarCarregando(true);
+
+  var q=[
+    'offset='+((n-1)*POR_PAGINA),
+    'limit='+POR_PAGINA,
+    'ordem='+encodeURIComponent(ordem)
+  ];
+  if(currentCat&&currentCat!=='Todos') q.push('cat='+encodeURIComponent(currentCat));
+  if(String(searchTerm||'').trim()) q.push('q='+encodeURIComponent(searchTerm.trim()));
+
+  fetch(API_BASE+'/api/v1/storefront/'+encodeURIComponent(SLUG)+'/catalogo?'+q.join('&'))
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if(!j||!Array.isArray(j.products)) throw new Error('resposta invalida');
+      PRODUCTS=j.products;
+      totalFiltrado=(typeof j.total==='number')?j.total:PRODUCTS.length;
+      // PROD_MAP ACUMULA: o carrinho procura por id, e um item posto na
+      // pagina 1 tem que continuar existindo quando a cliente esta na 5.
+      PRODUCTS.forEach(function(p){ PROD_MAP[p.id]=p; });
+      renderProducts();
+      var alvo=document.getElementById('productsAnchor');
+      if(alvo) window.scrollTo({top:alvo.offsetTop-alturaDasBarras()-8,behavior:'smooth'});
+    })
+    .catch(function(){
+      var grid=document.getElementById('productsGrid');
+      if(grid) grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:48px 0;color:var(--sf-ink-3);">Nao consegui carregar esta pagina. Tente de novo.</div>';
+    })
+    .then(function(){ carregandoPagina=false; marcarCarregando(false); });
 }
+
+function marcarCarregando(estado){
+  var grid=document.getElementById('productsGrid');
+  if(grid) grid.style.opacity=estado?'0.45':'1';
+}
+
+/** Altura somada das barras fixas — o titulo nao pode ficar embaixo delas. */
+function alturaDasBarras(){
+  var h=0;
+  var tb=document.querySelector('.topbar'); if(tb) h+=tb.offsetHeight;
+  var cw=document.querySelector('.cats-wrap'); if(cw) h+=cw.offsetHeight;
+  return h;
+}
+
+/** Qualquer mudanca de filtro volta pra pagina 1. */
+function recarregarDoInicio(){ irParaPagina(1); }
+
+function setOrdem(v){ ordem=v; recarregarDoInicio(); }
 
 function renderProducts(){
   var grid=document.getElementById('productsGrid'); if(!grid) return;
-  var filtered=PRODUCTS.filter(function(p){
-    var mc=currentCat==='Todos'||p.category===currentCat;
-    var ms=casaBusca(searchTerm,(p.name||'')+' '+(p.description||''));
-    return mc&&ms&&p.in_stock;
-  });
-  filtered=ordenarProdutos(filtered);
+  // O servidor ja filtrou, ordenou e paginou: aqui so desenha.
+  var visiveis=PRODUCTS.filter(function(p){ return p.in_stock; });
 
-  // A contagem diz o que a loja TEM, nao o que coube no payload. A Finesse
-  // afirmava "500 produtos" com 1302 no catalogo — 802 sumiam sem aviso.
-  var faltam=Math.max(0,CATALOGO_TOTAL-CARREGADOS);
-  var semFiltro=(currentCat==='Todos'&&!String(searchTerm||'').trim());
-  var txt=filtered.length+' produto'+(filtered.length!==1?'s':'');
-  if(semFiltro&&faltam>0) txt+=' de '+CATALOGO_TOTAL;
+  var txt=totalFiltrado+' produto'+(totalFiltrado!==1?'s':'');
   document.getElementById('prodCount').textContent=txt;
 
-  // Ordenacao so aparece quando ha produto suficiente pra ela servir.
   var sw=document.getElementById('sortWrap');
-  if(sw) sw.hidden=(filtered.length<20);
+  if(sw) sw.hidden=(totalFiltrado<20);
 
-  if(!filtered.length){
-    grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:60px 0;color:var(--text-3);"><div style="font-size:40px;margin-bottom:12px;">🔍</div><div style="font-size:15px;font-weight:700;">Nenhum produto encontrado</div></div>';
-    atualizarRodapeDaGrade(0,0,faltam);
+  if(!visiveis.length){
+    grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:60px 0;color:var(--sf-ink-3);"><div style="font-size:15px;font-weight:700;">Nenhum produto encontrado</div><div style="font-size:13px;margin-top:6px;">Tente outra palavra ou veja todas as categorias.</div></div>';
+    renderPaginacao();
     return;
   }
-  var visiveis=filtered.slice(0,mostrando);
-  atualizarRodapeDaGrade(visiveis.length,filtered.length,faltam);
+  renderPaginacao();
   grid.innerHTML=visiveis.map(function(p){
     var qty=getProductCartQty(p.id);
     var hasVar=productHasVariants(p);
@@ -103,18 +137,22 @@ function renderProducts(){
     var priceH=(SETTINGS.show_prices!==false&&p.price!=null)
       ?'<div class="product-price">'+fmt(p.price)+'</div>'+(parcH?'<div class="product-parcela">'+esc(parcH)+'</div>':'')
       :'';
+    // O botao DIZ a acao. "+" e "→" nao diziam: a cliente tinha que
+    // adivinhar se ia comprar, abrir o produto ou avancar de pagina. E de
+    // largura cheia, preso ao rodape do cartao, em vez de uma bolinha
+    // flutuando no canto sem pertencer a estrutura.
     var actionH;
     if(hasVar){
-      // Produto com variantes: botão sempre abre o detalhe pra escolher
+      // Com variantes o botao ABRE o detalhe: nao da pra comprar sem
+      // escolher tamanho ou cor.
       actionH=qty>0
-        ?'<button class="add-btn" onclick="event.stopPropagation();showDetail(\\''+p.id+'\\')" title="Adicionar mais"><span style="font-size:11px;font-weight:700;">'+qty+'</span></button>'
-        :'<button class="add-btn" onclick="event.stopPropagation();showDetail(\\''+p.id+'\\')" title="Escolher variante">→</button>';
+        ?'<button class="card-action card-action-ghost" onclick="event.stopPropagation();showDetail(\\''+p.id+'\\')">'+qty+' no carrinho · escolher mais</button>'
+        :'<button class="card-action" onclick="event.stopPropagation();showDetail(\\''+p.id+'\\')">Escolher opções</button>';
     }else{
-      // Produto simples: + e qty-ctrl direto no card
       var k=cartKey(p.id,null);
       actionH=qty>0
-        ?'<div class="qty-ctrl"><button class="qty-btn" onclick="event.stopPropagation();changeQty(\\''+k+'\\',-1)">−</button><span class="qty-num">'+qty+'</span><button class="qty-btn" onclick="event.stopPropagation();changeQty(\\''+k+'\\',1)">+</button></div>'
-        :'<button class="add-btn" onclick="event.stopPropagation();addToCart(\\''+p.id+'\\')" >+</button>';
+        ?'<div class="qty-ctrl"><button class="qty-btn" onclick="event.stopPropagation();changeQty(\\''+k+'\\',-1)" aria-label="Tirar um">−</button><span class="qty-num">'+qty+' no carrinho</span><button class="qty-btn" onclick="event.stopPropagation();changeQty(\\''+k+'\\',1)" aria-label="Adicionar mais um">+</button></div>'
+        :'<button class="card-action" onclick="event.stopPropagation();addToCart(\\''+p.id+'\\')">Adicionar</button>';
     }
     // Sem foto, cada capa ganha seu proprio degrau do gradiente da loja.
     // Com o gradiente fixo, a Finesse renderizava 373 ladrilhos iguais.
@@ -123,61 +161,37 @@ function renderProducts(){
       +(p.category?'<div class="product-cat">'+esc(p.category)+'</div>':'')
       +'<div class="product-name">'+esc(p.name)+'</div>'
       +(p.description?'<div class="product-desc">'+esc((p.description||'').substring(0,80))+((p.description||'').length>80?'...':'')+'</div>':'')
-      +'<div class="product-footer"><div>'+priceH+'</div>'+actionH+'</div></div></div>';
+      +'<div class="product-footer">'+priceH+'</div>'+actionH+'</div></div>';
   }).join('');
 }
 
 /**
- * Rodape da grade: quantos ja apareceram e quantos a loja ainda tem.
+ * Barra de paginas embaixo da grade.
  *
- * "Sem tetos silenciosos": se a loja tem 1302 produtos e a pagina carrega
- * 500, quem esta comprando precisa saber que existe mais — e a lojista
- * precisa saber que o catalogo dela nao cabe todo aqui.
+ * Substitui "Mais 802 produtos no catalogo — use a busca", que dizia pra
+ * cliente "nao vamos te atender, procure em outra loja". Agora o catalogo
+ * inteiro esta a um clique, no padrao que todo e-commerce usa.
  */
-function atualizarRodapeDaGrade(visiveis,filtrados,faltam){
+function renderPaginacao(){
   var el=document.getElementById('gridMore'); if(!el) return;
-  var partes=[];
-  if(filtrados>visiveis) partes.push('Mostrando '+visiveis+' de '+filtrados);
-  if(faltam>0&&visiveis>=filtrados) partes.push('Mais '+faltam+' produtos no catalogo — use a busca');
-  el.hidden=partes.length===0;
+  var total=totalDePaginas();
+  if(total<=1){ el.hidden=true; el.innerHTML=''; return; }
+  el.hidden=false;
 
-  // BOTAO, nao so rolagem. Rolagem infinita sozinha deixa quem navega por
-  // teclado sem acesso ao resto do catalogo: o foco nunca chega ao fim da
-  // lista pra disparar a sentinela, e o rodape fica inalcancavel.
-  var botao=filtrados>visiveis
-    ? '<button type="button" class="grid-more-btn" onclick="verMais()">Ver mais produtos</button>'
-    : '';
-  el.innerHTML='<span>'+partes.join(' · ')+'</span>'+botao;
-}
+  var botoes=janelaDePaginas(paginaAtual,total).map(function(n){
+    if(n==='...') return '<span class="pg-gap">&#8230;</span>';
+    var atual=(n===paginaAtual);
+    return '<button class="pg-num'+(atual?' pg-atual':'')+'"'
+      +(atual?' aria-current="page"':'')
+      +' onclick="irParaPagina('+n+')">'+n+'</button>';
+  }).join('');
 
-/** Proximo lote sob demanda — usado pelo botao e pela sentinela. */
-function verMais(){
-  var grid=document.getElementById('productsGrid');
-  if(!grid||!grid.children.length) return;
-  if(grid.children.length<mostrando) return; // ja mostrou tudo que ha
-  mostrando+=LOTE;
-  renderProducts();
-}
-
-/**
- * Proximo lote quando a sentinela entra na tela.
- *
- * IntersectionObserver com fallback pro scroll: navegador antigo continua
- * vendo a loja, so com o lote entrando um pouco mais tarde.
- */
-function ligarRenderIncremental(){
-  var alvo=document.getElementById('gridSentinel'); if(!alvo) return;
-  // Mesma funcao do botao: um caminho so pra crescer a grade.
-  var crescer=verMais;
-  if(typeof IntersectionObserver==='function'){
-    new IntersectionObserver(function(ents){
-      for(var i=0;i<ents.length;i++){ if(ents[i].isIntersecting) crescer(); }
-    },{rootMargin:'600px'}).observe(alvo);
-    return;
-  }
-  window.addEventListener('scroll',function(){
-    var r=alvo.getBoundingClientRect();
-    if(r.top<window.innerHeight+600) crescer();
-  },{passive:true});
+  el.innerHTML=
+     '<nav class="pg-bar" aria-label="Paginas de produtos">'
+    +'<button class="pg-seta" onclick="irParaPagina('+(paginaAtual-1)+')"'+(paginaAtual<=1?' disabled':'')+'>Anterior</button>'
+    +botoes
+    +'<button class="pg-seta" onclick="irParaPagina('+(paginaAtual+1)+')"'+(paginaAtual>=total?' disabled':'')+'>Próxima</button>'
+    +'</nav>'
+    +'<div class="pg-info">Página '+paginaAtual+' de '+total+'</div>';
 }
 `;

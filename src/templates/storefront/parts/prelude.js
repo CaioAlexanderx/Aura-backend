@@ -20,6 +20,9 @@ PRODUCTS.forEach(function(p){ PROD_MAP[p.id] = p; });
 // Quantos produtos a loja TEM (contarProdutosDaLoja) contra quantos couberam
 // no payload. Base sem a contagem devolve 0 e a grade so nao mostra o aviso.
 var CATALOGO_TOTAL = __S.catalog_total || 0;
+// Tamanho da pagina, decidido no servidor (services/catalogoPaginado.js).
+// O payload embutido E a pagina 1, entao os dois tem que concordar.
+var POR_PAGINA = __S.payload_limit || 24;
 var CARREGADOS     = PRODUCTS.length;
 `;
 };

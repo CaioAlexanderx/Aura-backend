@@ -9,7 +9,6 @@
 module.exports = `
 updateCartUI();
 renderProducts();
-ligarRenderIncremental();
 
 // Fase 2 + Migration 121: detecta retorno do CheckoutPro (cartão MP) via back_url
 // e faz polling do status real do pedido antes de mostrar o toast.

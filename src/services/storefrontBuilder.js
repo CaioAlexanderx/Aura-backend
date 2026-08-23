@@ -230,7 +230,11 @@ function listVisibilityWhere(cidParam) {
  * afirmava "500 produtos" e 802 sumiam sem aviso, para a lojista e para a
  * cliente.
  */
-const LIMITE_DO_PAYLOAD = 500;
+// A pagina nasce com UMA pagina de produtos, nao com o catalogo. Antes
+// eram 500 (419 KB na Finesse) pra desenhar 24. O resto chega pela rota
+// /storefront/:slug/catalogo conforme a cliente navega.
+const { POR_PAGINA } = require('./catalogoPaginado');
+const LIMITE_DO_PAYLOAD = POR_PAGINA;
 
 async function contarProdutosDaLoja(cid) {
   const sql = `
@@ -246,6 +250,70 @@ async function contarProdutosDaLoja(cid) {
     // Contagem e informativa: se falhar, a loja abre sem o aviso.
     return 0;
   }
+}
+
+/**
+ * Variantes de um lote de produtos, no formato do payload publico.
+ *
+ * Extraido de buildStorefront em 23/08/2026 para a rota paginada usar a
+ * MESMA montagem. Sem isso, a grade paginada receberia produto sem
+ * `variants` e sem `in_stock`, e o cartao renderizaria diferente do
+ * cartao da primeira pagina — que veio do payload embutido.
+ */
+async function fetchVariantesPorProduto(productIds) {
+  const porProduto = {};
+  if (!productIds || productIds.length === 0) return porProduto;
+
+  // 23/05/2026: inclui pv.image_url no SELECT (Migration 129).
+  const { rows: variantRows } = await db.query(`
+    SELECT pv.id, pv.product_id, pv.sku_suffix,
+           pv.price_override, pv.stock_qty, pv.is_active, pv.image_url,
+           COALESCE(
+             json_agg(
+               json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
+               ORDER BY pvv.attribute_name
+             ) FILTER (WHERE pvv.id IS NOT NULL),
+             '[]'::json
+           ) AS values
+    FROM product_variants pv
+    LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
+    WHERE pv.product_id = ANY($1::uuid[]) AND pv.is_active = true
+    GROUP BY pv.id
+    ORDER BY
+      CAST(NULLIF(regexp_replace(split_part(pv.sku_suffix, '/', 1), '[^0-9]', '', 'g'), '') AS numeric) NULLS LAST,
+      pv.sku_suffix ASC
+  `, [productIds]);
+
+  for (const v of variantRows) {
+    if (!porProduto[v.product_id]) porProduto[v.product_id] = [];
+    porProduto[v.product_id].push({
+      id: v.id, sku_suffix: v.sku_suffix,
+      price_override: v.price_override !== null ? parseFloat(v.price_override) : null,
+      stock_qty: parseFloat(v.stock_qty),
+      image_url: v.image_url || null,
+      values: v.values || [],
+    });
+  }
+  return porProduto;
+}
+
+/** Uma linha de produto no formato do payload publico. */
+function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkByProduct, mostrarPrecos }) {
+  const pvariants = variantsByProduct[p.id] || [];
+  const hasVariants = pvariants.length > 0;
+  const inStock = hasVariants ? pvariants.some(v => v.stock_qty > 0) : p.stock_qty > 0;
+  const cat = categoryById[primaryLinkByProduct[p.id]] || null;
+  return {
+    id: p.id, name: p.name, description: p.description,
+    price: mostrarPrecos ? parseFloat(p.price) : null,
+    image_url: p.image_url,
+    gallery_urls: Array.isArray(p.gallery_urls) ? p.gallery_urls : [],
+    category: p.category,
+    category_id:   cat ? cat.id   : null,
+    category_slug: cat ? cat.slug : null,
+    category_path: cat ? cat.path : null,
+    stock_qty: p.stock_qty, in_stock: inStock, variants: pvariants,
+  };
 }
 
 async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
@@ -350,41 +418,7 @@ async function buildStorefront(config) {
   categories.forEach(c => { categoryById[c.id] = c; });
   const primaryLinkByProduct = await fetchPrimaryCategoryLinks(products.map(p => p.id));
 
-  let variantsByProduct = {};
-  if (products.length > 0) {
-    const productIds = products.map(p => p.id);
-    // 23/05/2026: inclui pv.image_url no SELECT (Migration 129).
-    // Template usa pra trocar foto principal ao selecionar variante e
-    // pra fallback no card da vitrine quando produto pai nao tem foto.
-    const { rows: variantRows } = await db.query(`
-      SELECT pv.id, pv.product_id, pv.sku_suffix,
-             pv.price_override, pv.stock_qty, pv.is_active, pv.image_url,
-             COALESCE(
-               json_agg(
-                 json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
-                 ORDER BY pvv.attribute_name
-               ) FILTER (WHERE pvv.id IS NOT NULL),
-               '[]'::json
-             ) AS values
-      FROM product_variants pv
-      LEFT JOIN product_variant_values pvv ON pvv.variant_id = pv.id
-      WHERE pv.product_id = ANY($1::uuid[]) AND pv.is_active = true
-      GROUP BY pv.id
-      ORDER BY
-        CAST(NULLIF(regexp_replace(split_part(pv.sku_suffix, '/', 1), '[^0-9]', '', 'g'), '') AS numeric) NULLS LAST,
-        pv.sku_suffix ASC
-    `, [productIds]);
-    for (const v of variantRows) {
-      if (!variantsByProduct[v.product_id]) variantsByProduct[v.product_id] = [];
-      variantsByProduct[v.product_id].push({
-        id: v.id, sku_suffix: v.sku_suffix,
-        price_override: v.price_override !== null ? parseFloat(v.price_override) : null,
-        stock_qty: parseFloat(v.stock_qty),
-        image_url: v.image_url || null,   // 23/05/2026
-        values: v.values || [],
-      });
-    }
-  }
+  const variantsByProduct = await fetchVariantesPorProduto(products.map(p => p.id));
 
   const { rows: companies } = await db.query(
     `SELECT trade_name, legal_name, logo_url FROM companies WHERE id = $1`, [cid]);
@@ -463,28 +497,10 @@ async function buildStorefront(config) {
         ? parseFloat(config.delivery_free_above_amount)
         : null,
     },
-    products: products.map(p => {
-      const pvariants = variantsByProduct[p.id] || [];
-      const hasVariants = pvariants.length > 0;
-      const inStock = hasVariants ? pvariants.some(v => v.stock_qty > 0) : p.stock_qty > 0;
-      const cat = categoryById[primaryLinkByProduct[p.id]] || null;
-      return {
-        id: p.id, name: p.name, description: p.description,
-        price: config.show_prices !== false ? parseFloat(p.price) : null,
-        // `category` (texto) PERMANECE -- ver a regra em fetchStorefrontCategories.
-        image_url: p.image_url,
-        // S9 — carrossel de fotos (migration 290). [] quando nao ha galeria.
-        gallery_urls: Array.isArray(p.gallery_urls) ? p.gallery_urls : [],
-        category: p.category,
-        // D3: campos ADITIVOS. null quando o produto ainda não tem
-        // vínculo (catálogo pré-migração) ou quando a categoria não é
-        // visível na vitrine.
-        category_id:   cat ? cat.id   : null,
-        category_slug: cat ? cat.slug : null,
-        category_path: cat ? cat.path : null,
-        stock_qty: p.stock_qty, in_stock: inStock, variants: pvariants,
-      };
-    }),
+    products: products.map(p => montarProdutoPublico(p, {
+      variantsByProduct, categoryById, primaryLinkByProduct,
+      mostrarPrecos: config.show_prices !== false,
+    })),
     total_products: products.length,
     // Quantos a loja tem de verdade — ver contarProdutosDaLoja.
     catalog_total: catalogoTotal,
@@ -512,4 +528,12 @@ module.exports = {
   // os dois: so categoria com is_visible_storefront entra, e so o
   // vinculo primario sai no payload.
   fetchStorefrontCategories, fetchPrimaryCategoryLinks,
+  // A regra de visibilidade mora AQUI e e exportada em vez de
+  // reimplementada: duas versoes da mesma regra e como produto de outra
+  // empresa vaza para a loja errada.
+  listVisibilityWhere,
+  LIMITE_DO_PAYLOAD,
+  // Usados pela rota paginada, pra grade nao montar produto de um
+  // jeito diferente do payload embutido.
+  fetchVariantesPorProduto, montarProdutoPublico,
 };

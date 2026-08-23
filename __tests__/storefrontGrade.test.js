@@ -1,128 +1,118 @@
 // A grade da loja comum roda no NAVEGADOR, dentro de um template literal.
 // Testar o texto do template nao pega nada: o bug classico daqui e a barra
-// invertida que some (CLAUDE.md, armadilha 8) e transforma /\s+/ em /s+/.
-// Entao estes testes EXECUTAM o codigo que a pagina vai receber.
+// invertida que some (CLAUDE.md, armadilha 8). Entao estes testes
+// EXECUTAM o codigo que a pagina vai receber.
+//
+// Busca e ordenacao sairam do cliente em 23/08/2026 — agora sao do
+// servidor (services/catalogoPaginado.js, coberto por
+// __tests__/catalogoPaginado.test.js). O que sobrou aqui e a paginacao.
 const buildScript = require('../src/templates/storefront/index');
+const { janelaDePaginas: janelaServidor } = require('../src/services/catalogoPaginado');
 
 function carregarDaPagina(nomes) {
   const s = buildScript({ products: [], categories: [] }, 'loja', '');
-  const corpo = nomes
+  return nomes
     .map((n) => {
       const m = s.match(new RegExp('function ' + n + '\\([\\s\\S]*?\\n\\}'));
       if (!m) throw new Error('funcao ausente no <script>: ' + n);
       return m[0];
     })
     .join('\n');
-  return corpo;
 }
 
-describe('busca da grade', () => {
-  const f = new Function(
-    carregarDaPagina(['normalizarBusca', 'casaBusca']) +
-      '\nreturn { normalizarBusca, casaBusca };',
+describe('janela de paginas no navegador', () => {
+  const janelaCliente = new Function(
+    carregarDaPagina(['janelaDePaginas']) + '\nreturn janelaDePaginas;',
   )();
 
-  test('ignora acento nos dois lados', () => {
-    expect(f.casaBusca('vestido', 'Vestído longo')).toBe(true);
-    expect(f.casaBusca('acucar', 'Açúcar mascavo')).toBe(true);
+  test('poucas paginas: mostra todas', () => {
+    expect(janelaCliente(2, 3)).toEqual([1, 2, 3]);
+    expect(janelaCliente(1, 1)).toEqual([1]);
   });
 
-  test('termos em qualquer ordem', () => {
-    // Esta e a asserção que pega o \\s comido: com split(/s+/) os termos
-    // quebram em cada letra "s" e a busca passa a nao achar nada.
-    expect(f.casaBusca('longo vestido', 'Vestido longo drapeado')).toBe(true);
-    expect(f.casaBusca('  vestido   longo  ', 'Vestido longo')).toBe(true);
+  test('catalogo grande nao vira parede de numeros', () => {
+    // A Finesse tem 1302 produtos = 55 paginas de 24.
+    expect(janelaCliente(28, 55)).toEqual([1, '...', 27, 28, 29, '...', 55]);
   });
 
-  test('termo ausente reprova', () => {
-    expect(f.casaBusca('saia', 'Vestido longo')).toBe(false);
-    expect(f.casaBusca('vestido curto', 'Vestido longo')).toBe(false);
+  test('primeira e ultima sempre visiveis', () => {
+    for (const p of [1, 2, 27, 54, 55]) {
+      const j = janelaCliente(p, 55);
+      expect(j[0]).toBe(1);
+      expect(j[j.length - 1]).toBe(55);
+    }
   });
 
-  test('busca vazia passa tudo', () => {
-    expect(f.casaBusca('', 'qualquer')).toBe(true);
-    expect(f.casaBusca('   ', 'qualquer')).toBe(true);
-  });
-});
-
-describe('ordenacao da grade', () => {
-  const monta = (ordem) =>
-    new Function(
-      'var ordem=' + JSON.stringify(ordem) + ';\n' +
-        carregarDaPagina(['ordenarProdutos']) +
-        '\nreturn ordenarProdutos;',
-    )();
-
-  const lista = [
-    { name: 'Camiseta', price: 50, created_at: '2026-01-02' },
-    { name: 'Almofada', price: 30, created_at: '2026-03-01' },
-    { name: 'Boné', price: 90, created_at: '2026-02-01' },
-  ];
-
-  test('destaque preserva a ordem do servidor', () => {
-    expect(monta('destaque')(lista).map((p) => p.name)).toEqual(['Camiseta', 'Almofada', 'Boné']);
-  });
-
-  test('preco sobe e desce', () => {
-    expect(monta('preco_asc')(lista).map((p) => p.price)).toEqual([30, 50, 90]);
-    expect(monta('preco_desc')(lista).map((p) => p.price)).toEqual([90, 50, 30]);
-  });
-
-  test('nome respeita acento do portugues', () => {
-    expect(monta('nome')(lista).map((p) => p.name)).toEqual(['Almofada', 'Boné', 'Camiseta']);
-  });
-
-  test('novidades poe a mais recente primeiro', () => {
-    expect(monta('novidades')(lista).map((p) => p.name)).toEqual(['Almofada', 'Boné', 'Camiseta']);
-  });
-
-  test('nao muta a lista recebida', () => {
-    const orig = lista.map((p) => p.name);
-    monta('preco_asc')(lista);
-    expect(lista.map((p) => p.name)).toEqual(orig);
+  test('CONCORDA com a do servidor', () => {
+    // As duas sao a mesma regra em lugares diferentes. Se divergirem, a
+    // barra desenha uma pagina que o servidor nao serve — ou esconde uma
+    // que ele serve.
+    for (const total of [1, 2, 3, 7, 20, 55, 120]) {
+      for (const atual of [1, 2, Math.ceil(total / 2), total - 1, total]) {
+        if (atual < 1) continue;
+        expect(janelaCliente(atual, total)).toEqual(janelaServidor(atual, total));
+      }
+    }
   });
 });
 
-describe('rodape da grade — sem teto silencioso', () => {
-  function rodape(visiveis, filtrados, faltam) {
-    let texto = null;
+describe('barra de paginas', () => {
+  function barra(pagina, total) {
+    let html = null;
     let escondido = null;
     const el = {
       set hidden(v) { escondido = v; },
       get hidden() { return escondido; },
-      set innerHTML(v) { texto = v; },
+      set innerHTML(v) { html = v; },
     };
     const fn = new Function(
-      'document',
-      carregarDaPagina(['atualizarRodapeDaGrade']) + '\nreturn atualizarRodapeDaGrade;',
-    )({ getElementById: () => el });
-    fn(visiveis, filtrados, faltam);
-    return { texto, escondido };
+      'document', 'paginaAtual', 'totalFiltrado', 'POR_PAGINA',
+      carregarDaPagina(['janelaDePaginas', 'totalDePaginas', 'renderPaginacao']) +
+        '\nreturn renderPaginacao;',
+    )({ getElementById: () => el }, pagina, total * 24, 24);
+    fn();
+    return { html, escondido };
   }
 
-  test('avisa que ha mais para rolar', () => {
-    expect(rodape(60, 410, 0).texto).toContain('Mostrando 60 de 410');
+  test('uma pagina so: barra nao aparece', () => {
+    // Loja de 9 produtos nao precisa de "Pagina 1 de 1".
+    expect(barra(1, 1).escondido).toBe(true);
   });
 
-  test('oferece BOTAO enquanto ha mais para ver', () => {
-    // Rolagem infinita sozinha deixa quem navega por teclado sem acesso ao
-    // resto do catalogo: o foco nunca chega ao fim pra disparar a sentinela,
-    // e o rodape fica inalcancavel.
-    const html = rodape(60, 410, 0).texto;
-    expect(html).toContain('<button');
-    expect(html).toContain('verMais()');
+  test('desenha numeros, setas e a posicao atual', () => {
+    const { html } = barra(3, 10);
+    expect(html).toContain('pg-bar');
+    expect(html).toContain('Anterior');
+    expect(html).toContain('Próxima');
+    expect(html).toContain('aria-current="page"');
+    expect(html).toContain('Página 3 de 10');
   });
 
-  test('sem botao quando a grade ja mostrou tudo', () => {
-    expect(rodape(410, 410, 802).texto).not.toContain('<button');
+  test('na primeira pagina, "Anterior" fica desabilitado', () => {
+    expect(barra(1, 10).html).toMatch(/Anterior[\s\S]*?/);
+    const { html } = barra(1, 10);
+    // O disabled tem que estar no botao Anterior, nao no Proxima.
+    const anterior = html.slice(html.indexOf('<button'), html.indexOf('</button>'));
+    expect(anterior).toContain('disabled');
   });
 
-  test('avisa o catalogo que nao coube — o caso Finesse', () => {
-    // 1302 no catalogo, 500 no payload: 802 sumiam sem uma palavra.
-    expect(rodape(500, 500, 802).texto).toContain('Mais 802 produtos');
+  test('na ultima, "Proxima" fica desabilitado', () => {
+    const { html } = barra(10, 10);
+    const proxima = html.slice(html.lastIndexOf('<button'));
+    expect(proxima).toContain('disabled');
   });
 
-  test('some quando nao ha nada a dizer', () => {
-    expect(rodape(12, 12, 0).escondido).toBe(true);
+  test('o rodape nao manda mais a cliente embora', () => {
+    // "Mais 802 produtos no catalogo — use a busca" dizia "nao vamos te
+    // atender, procure em outra loja". O rodape agora so navega.
+    //
+    // A assercao olha o HTML RENDERIZADO, nao o texto do template: o
+    // comentario que explica esta mudanca cita a frase antiga, e o
+    // comentario viaja junto no <script>.
+    for (const [pagina, total] of [[1, 10], [5, 10], [10, 10]]) {
+      const { html } = barra(pagina, total);
+      expect(html).not.toMatch(/use a busca/i);
+      expect(html).not.toMatch(/no cat[aá]logo/i);
+    }
   });
 });
