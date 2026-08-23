@@ -150,6 +150,30 @@ router.post('/dojo/competitions/:cid/delegation/quote', requireDojoAccess, requi
   }
 });
 
+// ── POST /dojo/competitions/:cid/delegation/triage — P2.2 ───
+// Triagem automática: o sensei manda ATLETA + MODALIDADES e o sistema
+// resolve a categoria pelos requisitos da federação (idade na data do
+// evento, faixa, sexo, divisão/G1-G2). Body:
+//   { athletes: [{ student_id, modalities: ['kata','kumite',...] }] }
+// Por atleta/modalidade: resolved (1 match — zero escolha manual) |
+// ambiguous (sensei só desempata) | no_fit (critérios que falharam —
+// o "vermelho manual" da conferência vira aviso NA ORIGEM). Dry-run:
+// nada é gravado; o front usa o resultado para montar os category_ids
+// do quote/submit, que seguem inalterados.
+router.post('/dojo/competitions/:cid/delegation/triage', requireDojoAccess, requireChannelA, requireLinked, async (req, res) => {
+  try {
+    const out = await svc.triageDelegation({
+      federationId: req.federationId,
+      dojoId: req.dojoId,
+      competitionId: req.params.cid,
+      body: req.body,
+    });
+    return res.json(out);
+  } catch (e) {
+    return handleWriteError(res, e, 'POST delegation/triage');
+  }
+});
+
 // ── POST /dojo/competitions/:cid/delegation — submete ───────
 // Mesmo body do quote + { payment_mode: 'pix_direct'|'manual' }.
 // pix_direct: gera o PIX (provider da federação) best-effort após o COMMIT
