@@ -354,6 +354,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     pix_key, pix_key_type, pix_holder_name, pix_holder_city,
     pay_on_delivery_enabled,
     card_enabled,
+    card_max_installments,
     // Fase 5
     pickup_address, pickup_eta_text, delivery_eta_text,
     origin_zip, delivery_pricing_mode, delivery_distance_tiers,
@@ -737,6 +738,34 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       } catch (e) {
         if (e.code === '42703') {
           console.error('[canal-card-enabled] coluna card_enabled inexistente — skip:', e.message);
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    // ============================================================
+    // Migration 301: teto de parcelas no cartao, declarado pela lojista.
+    // UPDATE separado pelo mesmo motivo do card_enabled — nao mexer no
+    // UPSERT principal e sobreviver a base sem a migration (42703).
+    // ============================================================
+    if (card_max_installments !== undefined) {
+      // null/0/"" limpam o campo: e assim que a lojista desliga o
+      // parcelamento sem precisar de um toggle separado.
+      const bruto = parseInt(card_max_installments, 10);
+      const teto = Number.isFinite(bruto) && bruto >= 2 ? Math.min(bruto, 12) : null;
+      try {
+        const { rows: updated } = await db.query(
+          `UPDATE digital_channel_config
+             SET card_max_installments = $1, updated_at = NOW()
+           WHERE company_id = $2
+           RETURNING *`,
+          [teto, cid]
+        );
+        if (updated.length) savedConfig = updated[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          console.error('[canal-parcelas] coluna card_max_installments inexistente — skip:', e.message);
         } else {
           throw e;
         }

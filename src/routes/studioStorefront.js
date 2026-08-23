@@ -439,6 +439,9 @@ router.get('/:slug/studio/products', async (req, res) => {
         has_pix: hasPix,
         has_card: hasCard,
         pay_on_delivery_enabled: hasOnDelivery,
+        // Migration 301 — teto de parcelas DECLARADO pela lojista. So faz
+        // sentido com cartao ligado: sem cartao nao ha o que parcelar.
+        card_max_installments: hasCard ? (config.card_max_installments || null) : null,
       },
       // migration 288 — este payload nao expunha modalidade de entrega
       // nenhuma, entao o checkout do Studio oferecia "Retirar na loja" e

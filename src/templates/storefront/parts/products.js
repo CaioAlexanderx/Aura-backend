@@ -97,7 +97,12 @@ function renderProducts(){
     // "KIT 3 PARES MEIA" mostrava "K".
     var imgH=displayImg?'<img src="'+esc(displayImg)+'" alt="" style="width:100%;height:100%;object-fit:contain;padding:6%;">'
       :'<div class="product-ph-initials">'+esc(INICIAIS(p.name))+'</div>';
-    var priceH=(SETTINGS.show_prices!==false&&p.price!=null)?'<div class="product-price">'+fmt(p.price)+'</div>':'';
+    // "3x de R$ 53,30" e uma frase diferente de "R$ 159,90" pra quem
+    // esta decidindo. So sai quando a lojista declarou o teto.
+    var parcH=PARCELAS_TXT(p.price);
+    var priceH=(SETTINGS.show_prices!==false&&p.price!=null)
+      ?'<div class="product-price">'+fmt(p.price)+'</div>'+(parcH?'<div class="product-parcela">'+esc(parcH)+'</div>':'')
+      :'';
     var actionH;
     if(hasVar){
       // Produto com variantes: botão sempre abre o detalhe pra escolher

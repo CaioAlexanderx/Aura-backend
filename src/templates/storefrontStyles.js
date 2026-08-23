@@ -323,6 +323,7 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .grid-more-btn{font-family:${fontSans};font-size:13px;font-weight:600;color:var(--sf-brand-ink);background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:999px;padding:10px 22px;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1),transform 200ms cubic-bezier(.4,0,.2,1);}
 .grid-more-btn:hover{border-color:var(--sf-brand);transform:translateY(-2px);}
 .grid-more-btn:active{transform:scale(0.98);}
+.product-parcela{font-family:${fontSans};font-size:11.5px;color:var(--sf-ink-3);margin-top:2px;font-variant-numeric:tabular-nums;}
 .product-body{padding:0;flex:1;display:flex;flex-direction:column;}
 .product-cat{font-family:${fontSans};font-size:11px;color:var(--sf-ink-3);font-weight:600;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:6px;}
 .product-name{font-family:${fontSerif};font-size:18px;font-weight:400;color:var(--sf-ink);line-height:1.2;letter-spacing:-0.3px;margin-bottom:8px;}
