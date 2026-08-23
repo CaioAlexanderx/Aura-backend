@@ -81,3 +81,18 @@ describe('codigo serializado para a loja comum', () => {
     expect(noNavegador(6)(120)).toBe('ou 6x de R$ 20,00 sem juros');
   });
 });
+
+describe('a serializacao sobrevive a instrumentacao', () => {
+  const { fonteClienteParcelamento } = require('../src/services/parcelamento');
+
+  test('o codigo enviado ao navegador nao cita contador de cobertura', () => {
+    // Function.prototype.toString() serializa o codigo INSTRUMENTADO
+    // quando o modulo esta no escopo de cobertura, e o contador
+    // (cov_xxx) so existe no escopo do modulo. O <script> da loja
+    // quebrava com "ReferenceError: cov_177evhcc8t is not defined" — em
+    // silencio, porque em producao nao ha instrumentacao.
+    //
+    // Este teste falha se alguem voltar a usar toString() aqui.
+    expect(fonteClienteParcelamento()).not.toMatch(/\bcov_[a-z0-9]+\b/);
+  });
+});
