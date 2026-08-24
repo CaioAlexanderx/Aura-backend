@@ -3,7 +3,8 @@
 // Montado em /federation/:id (requireDojoAccess — token do DOJÔ).
 //
 //   GET  /dojo/competitions                          (A+B) vitrine de
-//        campeonatos 'open' da federação (divisões + preço "a partir de")
+//        campeonatos 'open' + closed/done onde o dojô tem delegação
+//        (enrollment_open no payload; divisões + preço "a partir de")
 //   GET  /dojo/competitions/:cid/categories          (A+B) categorias p/
 //        o seletor (divisão, grupo, faixa etária, sexo, vagas)
 //   POST /dojo/competitions/:cid/delegation/quote    (A) cotação DRY-RUN:
@@ -105,7 +106,7 @@ router.get('/dojo/competitions', requireDojoAccess, async (req, res) => {
   try {
     const linked = await isDojoLinked(req.dojoId).catch(() => true);
     if (!linked) return res.json({ data: [], not_linked: true });
-    const data = await svc.listOpenCompetitions(req.federationId);
+    const data = await svc.listOpenCompetitions(req.federationId, req.dojoId);
     return res.json({ data });
   } catch (e) {
     return handleReadError(res, e, 'GET /dojo/competitions');

@@ -57,30 +57,50 @@ function serviceError(status, code, message, extra) {
 
 // ── Leituras ────────────────────────────────────────────────
 
-// Competições abertas da federação — a vitrine do dojô. Divisões vêm
-// juntas (42P01-safe: migration 294 pendente → sem divisões, lista segue).
-async function listOpenCompetitions(federationId) {
-  const { rows } = await db.query(
-    `-- p0d:list-open-competitions
+// Competições da federação — a vitrine do dojô. Além das 'open', entram
+// as closed/done onde o dojô TEM delegação (entries ou pedido): no dia do
+// evento as inscrições fecham, mas a tela do dojô (check-in, minhas
+// chaves) resolve o campeonato por esta lista — sumir daqui apagaria as
+// abas de dia-de-evento exatamente quando mais são usadas. O payload leva
+// enrollment_open para o front bloquear só o wizard de inscrição.
+// Divisões vêm juntas (42P01-safe: migration 294 pendente → sem divisões,
+// lista segue; sem karate_delegation_orders → participação só por entries).
+async function listOpenCompetitions(federationId, dojoId) {
+  // participation: 'orders' (entries OU pedido de delegação) → 'entries'
+  // (294 pendente) → 'none' (sem dojoId, comportamento original: só open).
+  const buildSql = (withPricing, participation) => {
+    const closedMine = participation === 'none' ? 'FALSE' : `(
+            c.status IN ('closed','done') AND (
+              EXISTS (SELECT 1 FROM karate_competition_entries e
+                       WHERE e.competition_id = c.id AND e.dojo_id = $2
+                         AND e.status <> 'withdrawn')${participation === 'orders' ? `
+              OR EXISTS (SELECT 1 FROM karate_delegation_orders o
+                          WHERE o.competition_id = c.id AND o.dojo_id = $2
+                            AND o.status <> 'cancelled')` : ''}
+            ))`;
+    return `-- p0d:list-open-competitions
      SELECT c.id, c.name, c.season, c.event_date, c.location, c.status,
-            c.fee_amount, c.pricing_config, c.rectification_deadline
+            c.fee_amount${withPricing ? ', c.pricing_config, c.rectification_deadline' : ''}
        FROM karate_competitions c
-      WHERE c.federation_id = $1 AND c.status = 'open'
-      ORDER BY c.event_date ASC NULLS LAST`,
-    [federationId]
-  ).catch((e) => {
-    if (e.code === '42703') {
-      // pricing_config/rectification_deadline ausentes (294 pendente)
-      return db.query(
-        `SELECT c.id, c.name, c.season, c.event_date, c.location, c.status, c.fee_amount
-           FROM karate_competitions c
-          WHERE c.federation_id = $1 AND c.status = 'open'
-          ORDER BY c.event_date ASC NULLS LAST`,
-        [federationId]
-      );
+      WHERE c.federation_id = $1 AND (c.status = 'open' OR ${closedMine})
+      ORDER BY c.event_date ASC NULLS LAST`;
+  };
+
+  let withPricing = true;
+  let participation = isUuid(dojoId) ? 'orders' : 'none';
+  let rows;
+  for (;;) {
+    try {
+      const params = participation === 'none' ? [federationId] : [federationId, dojoId];
+      ({ rows } = await db.query(buildSql(withPricing, participation), params));
+      break;
+    } catch (e) {
+      if (e.code === '42703' && withPricing) { withPricing = false; continue; }
+      if (e.code === '42P01' && participation === 'orders') { participation = 'entries'; continue; }
+      if (e.code === '42P01' && participation === 'entries') { participation = 'none'; continue; }
+      throw e;
     }
-    throw e;
-  });
+  }
 
   let divisions = [];
   try {
@@ -103,6 +123,8 @@ async function listOpenCompetitions(federationId) {
     season: c.season,
     event_date: c.event_date,
     location: c.location || null,
+    status: c.status,
+    enrollment_open: c.status === 'open',
     fee_amount: c.fee_amount != null ? Number(c.fee_amount) : null,
     has_pricing: !!(c.pricing_config && Object.keys(c.pricing_config).length),
     rectification_deadline: c.rectification_deadline || null,
