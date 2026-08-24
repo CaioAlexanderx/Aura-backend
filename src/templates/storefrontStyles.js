@@ -293,11 +293,33 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 /* ============================================================
    Categories chip strip
    ============================================================ */
-.cats-wrap{padding:12px max(20px,calc((100% - 1280px)/2 + 20px)) 0;display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;position:sticky;top:64px;z-index:50;background:var(--sf-bg);border-bottom:1px solid var(--sf-border);}
-.cats-wrap::-webkit-scrollbar{display:none;}
-.cat-chip{white-space:nowrap;padding:8px 16px;border-radius:999px;font-size:12px;font-weight:500;background:transparent;border:1px solid var(--sf-border-2);color:var(--sf-ink);cursor:pointer;transition:all .18s;flex-shrink:0;margin-bottom:10px;font-family:${fontSans};}
-.cat-chip:hover{background:var(--sf-brand-wash);}
-.cat-chip.active{background:var(--sf-brand-wash);border-color:var(--sf-brand);color:var(--sf-brand-ink);font-weight:600;}
+/* ── Barra de categorias ──────────────────────────────────
+   Era uma fila rolante derivada dos produtos carregados. Com paginacao de
+   24, a Finesse (28 categorias) mostrava 11 — e mesmo completa, 28 chips
+   em fila e uma parede. Agora: as que cabem na barra, e um painel com
+   todas, em colunas e com a contagem de cada uma. */
+.cats-wrap{padding:12px max(20px,calc((100% - 1280px)/2 + 20px));display:flex;gap:8px;flex-wrap:wrap;align-items:center;position:sticky;top:64px;z-index:50;background:var(--sf-bg);border-bottom:1px solid var(--sf-border);}
+.cat-chip,.cat-todas{display:inline-flex;align-items:center;gap:7px;font-family:${fontSans};font-size:13px;font-weight:600;color:var(--sf-ink-2);background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:999px;padding:8px 15px;cursor:pointer;white-space:nowrap;transition:border-color 200ms cubic-bezier(.4,0,.2,1),color 200ms cubic-bezier(.4,0,.2,1);}
+.cat-chip:hover,.cat-todas:hover{border-color:var(--sf-brand);color:var(--sf-brand-ink);}
+.cat-chip.active{background:var(--sf-brand);border-color:var(--sf-brand);color:#fff;}
+/* A contagem em mono e tabular: numero que muda de largura faz a barra
+   dancar quando a pessoa troca de categoria. */
+.cat-num{font-family:${fontMono};font-size:11px;font-variant-numeric:tabular-nums;opacity:.65;}
+.cat-todas{border-style:dashed;}
+.cat-todas.aberto{border-style:solid;border-color:var(--sf-brand);color:var(--sf-brand-ink);}
+
+.cats-painel{position:sticky;top:112px;z-index:60;padding:0 max(20px,calc((100% - 1280px)/2 + 20px));}
+.cats-painel-inner{background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:0 0 16px 16px;border-top:0;box-shadow:var(--sf-shadow);padding:18px 20px 20px;}
+.cats-painel-topo{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+.cats-painel-tit{font-family:${fontSerif};font-size:17px;color:var(--sf-ink);}
+.cats-painel-x{background:none;border:0;font-size:22px;line-height:1;color:var(--sf-ink-3);cursor:pointer;padding:0 4px;}
+.cats-painel-x:hover{color:var(--sf-ink);}
+.cats-painel-grade{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:2px 18px;}
+.cats-item{display:flex;align-items:baseline;justify-content:space-between;gap:10px;background:none;border:0;border-radius:8px;padding:9px 10px;cursor:pointer;text-align:left;transition:background 200ms cubic-bezier(.4,0,.2,1);}
+.cats-item:hover{background:var(--sf-brand-wash);}
+.cats-item-nome{font-family:${fontSans};font-size:13.5px;color:var(--sf-ink);}
+.cats-item.sel .cats-item-nome{font-weight:800;color:var(--sf-brand-ink);}
+.cats-item-num{font-family:${fontMono};font-size:11.5px;color:var(--sf-ink-3);font-variant-numeric:tabular-nums;}
 
 /* ============================================================
    Products grid + card styles

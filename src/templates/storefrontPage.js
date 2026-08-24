@@ -84,6 +84,9 @@ function buildStorefrontPage(data, slug) {
     // sabia usar, mas o storeData copia campo a campo — a chave parava
     // aqui e o aviso "500 de 1302" nunca aparecia.
     catalog_total: data.catalog_total,
+    // A barra de categorias precisa da lista do BANCO, nao dos produtos
+    // da pagina 1 — ver contarPorCategoria.
+    categorias_barra: data.categorias_barra,
   });
 
   const logoInTopbar = logoUrl

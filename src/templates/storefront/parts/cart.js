@@ -69,9 +69,12 @@ function closeCart(){document.getElementById('cartOverlay').classList.remove('op
 function filterCat(cat,el){
   currentCat=cat;
   document.querySelectorAll('.cat-chip').forEach(function(c){c.classList.remove('active');});
-  el.classList.add('active');
+  // "el" e null quando o clique veio do painel "Todas as categorias" —
+  // ali nao ha chip pra marcar, e renderCategorias() repinta em seguida.
+  if(el) el.classList.add('active');
   document.getElementById('catTitle').textContent=cat==='Todos'?'Todos os produtos':cat;
   // Trocar de categoria refaz a busca NO SERVIDOR e volta pra pagina 1.
+  if(typeof renderCategorias==='function') renderCategorias();
   recarregarDoInicio();
 }
 

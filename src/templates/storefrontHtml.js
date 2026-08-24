@@ -208,6 +208,7 @@ ${bannerStage}
 ${heroLegacy}
 
 <div class="cats-wrap" id="catsWrap"></div>
+<div class="cats-painel" id="catsPainel" hidden></div>
 
 <section class="products-section" id="productsAnchor">
   <div class="products-header">

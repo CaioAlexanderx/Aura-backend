@@ -26,14 +26,8 @@ module.exports = `
   if(w) w.innerHTML=pills.map(function(p){return '<span class="hero-pill">'+p+'</span>';}).join('');
 })();
 
-var ALL_CATS=['Todos'];
-PRODUCTS.forEach(function(p){if(p.category&&ALL_CATS.indexOf(p.category)===-1)ALL_CATS.push(p.category);});
-(function(){
-  var w=document.getElementById('catsWrap'); if(!w) return;
-  w.innerHTML=ALL_CATS.map(function(c,i){return '<div class="cat-chip'+(i===0?' active':'')+'" data-ci="'+i+'">'+esc(c)+'</div>';}).join('');
-  w.querySelectorAll('.cat-chip').forEach(function(chip){
-    chip.addEventListener('click',function(){filterCat(ALL_CATS[parseInt(chip.dataset.ci)],chip);});
-  });
-})();
+// A barra de categorias mudou de lugar: parts/categorias.js. Ela era
+// derivada de PRODUCTS, o que quebrou quando a grade passou a carregar
+// 24 produtos por vez em vez de 500.
 
 `;

@@ -9,6 +9,7 @@ const prelude       = require('./parts/prelude');
 const init          = require('./parts/init');
 const stateUtils    = require('./parts/state_utils');
 const products      = require('./parts/products');
+const categorias    = require('./parts/categorias');
 const cart          = require('./parts/cart');
 const checkout      = require('./parts/checkout');
 const pix           = require('./parts/pix');
@@ -29,6 +30,7 @@ function buildScript(storeData, escapedSlug, apiBase) {
        + fonteClienteIniciais()
        + fonteClienteParcelamento()
        + products
+       + categorias
        + cart
        + checkout
        + pix

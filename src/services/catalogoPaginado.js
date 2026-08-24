@@ -143,6 +143,33 @@ async function paginaDoCatalogo({
 }
 
 /**
+ * Quantos produtos VISIVEIS cada categoria tem.
+ *
+ * A barra de categorias era montada a partir de PRODUCTS — ou seja, dos
+ * produtos carregados. Com 500 embutidos isso quase funcionava; com
+ * paginacao de 24, a Finesse (28 categorias) passou a mostrar so as
+ * categorias que caiam na pagina 1. Regressao que a paginacao trouxe.
+ *
+ * A contagem vem junto porque "Vestidos 143" ajuda a escolher, e porque
+ * categoria com zero produto visivel nao deve aparecer na barra.
+ */
+async function contarPorCategoria({ cid, visibilityWhere }) {
+  const { rows } = await bd().query(
+    `SELECT category AS nome, COUNT(*)::int AS total
+       FROM products
+      WHERE ${visibilityWhere}
+        AND is_active IS NOT FALSE
+        AND ${EM_ESTOQUE}
+        AND category IS NOT NULL
+        AND btrim(category) <> ''
+      GROUP BY category
+      ORDER BY COUNT(*) DESC, category ASC`,
+    [cid],
+  );
+  return rows;
+}
+
+/**
  * Números de página para a barra.
  *
  * Com 55 páginas não dá para desenhar 55 botões. Mostra as vizinhas, a
@@ -168,4 +195,7 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
   return saida;
 }
 
-module.exports = { POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, paginaDoCatalogo, janelaDePaginas, normalizar, ordemSql };
+module.exports = {
+  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE,
+  paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,
+};

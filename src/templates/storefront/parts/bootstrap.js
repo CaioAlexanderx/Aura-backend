@@ -8,6 +8,7 @@
 
 module.exports = `
 updateCartUI();
+renderCategorias();
 renderProducts();
 
 // Fase 2 + Migration 121: detecta retorno do CheckoutPro (cartão MP) via back_url
