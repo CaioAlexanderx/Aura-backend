@@ -1776,15 +1776,21 @@ const scoresheetHandler = async (req, res) => {
         && bracketRow.kata_mode !== 'hantei_tree';
       if (isScoreKata) {
         let scores = [];
+        // `notas` (individuais dos árbitros, 303) entra na súmula impressa
+        // com os extremos riscados — fallback 42703 mantém só o total.
+        const scoresheetKataSql = (withNotas) =>
+          `SELECT ks.entry_id, ks.phase, ks.nota, ${withNotas ? 'ks.notas,' : 'NULL AS notas,'}
+                  ks.presentation_order, ks.advances
+             FROM karate_kata_scores ks
+            WHERE ks.bracket_id = $1
+            ORDER BY ks.phase ASC, ks.presentation_order ASC NULLS LAST`;
         try {
-          const sc = await client.query(
-            `SELECT ks.entry_id, ks.phase, ks.nota, ks.presentation_order, ks.advances
-               FROM karate_kata_scores ks
-              WHERE ks.bracket_id = $1
-              ORDER BY ks.phase ASC, ks.presentation_order ASC NULLS LAST`,
-            [bracketRow.id]
-          );
-          scores = sc.rows;
+          try {
+            scores = (await client.query(scoresheetKataSql(true), [bracketRow.id])).rows;
+          } catch (e303) {
+            if (e303.code !== '42703') throw e303;
+            scores = (await client.query(scoresheetKataSql(false), [bracketRow.id])).rows;
+          }
         } catch (e) {
           if (e.code !== '42P01') throw e;
         }
@@ -1797,6 +1803,7 @@ const scoresheetHandler = async (req, res) => {
             dojo_name: (nameById.get(k.entry_id) || {}).dojo || null,
             phase: k.phase,
             nota: k.nota !== null ? parseFloat(k.nota) : null,
+            notas: k.notas || null,
             presentation_order: k.presentation_order,
             advances: k.advances,
           })),
