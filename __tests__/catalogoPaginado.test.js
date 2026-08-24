@@ -114,3 +114,58 @@ describe('regra de estoque', () => {
     expect(grade).not.toContain('return p.in_stock;');
   });
 });
+
+describe('barra de categorias', () => {
+  const buildScript = require('../src/templates/storefront/index');
+
+  function comCategorias(lista) {
+    return buildScript(
+      JSON.stringify({ products: [], site: {}, settings: {}, contact: {}, categorias_barra: lista }),
+      'loja', '',
+    );
+  }
+
+  test('a barra NAO sai mais dos produtos carregados', () => {
+    // Com paginacao de 24, derivar de PRODUCTS mostrava so as categorias
+    // que caiam na pagina 1: a Finesse tem 28 e mostrava 11.
+    const s = comCategorias([]);
+    expect(s).not.toContain('ALL_CATS');
+    expect(s).toContain('__S.categorias_barra');
+  });
+
+  test('categoria sem produto visivel nao entra', () => {
+    const filtro = new Function(
+      '__S',
+      comCategorias([]).match(/var CATEGORIAS = [\s\S]*?\n\}\);/)[0] + '\nreturn CATEGORIAS;',
+    );
+    const saida = filtro({
+      categorias_barra: [
+        { nome: 'Vestidos', total: 143 },
+        { nome: 'Fantasma', total: 0 },
+        { nome: '', total: 9 },
+        null,
+      ],
+    });
+    expect(saida.map((c) => c.nome)).toEqual(['Vestidos']);
+  });
+
+  test('quantas cabem depende da largura', () => {
+    const s = comCategorias([]);
+    const monta = (w) =>
+      new Function('window', s.match(/function cabemNaBarra[\s\S]*?\n\}/)[0] + '\nreturn cabemNaBarra;')({ innerWidth: w })();
+    expect(monta(390)).toBe(4);
+    expect(monta(1440)).toBeGreaterThan(monta(390));
+    // Nunca menos de 4: uma barra com 1 chip nao e uma barra.
+    expect(monta(280)).toBeGreaterThanOrEqual(4);
+  });
+
+  test('o painel abre com TODAS, nao so com as que cabem', () => {
+    const s = comCategorias([]);
+    // renderCategorias corta pra barra; abrirPainelCats percorre a lista
+    // inteira. Se os dois usassem o mesmo recorte, o botao "Todas as
+    // categorias" mentiria.
+    const painel = s.slice(s.indexOf('function abrirPainelCats'));
+    expect(painel.slice(0, 1200)).toContain('CATEGORIAS.map');
+    expect(painel.slice(0, 1200)).not.toContain('slice(0, cabemNaBarra())');
+  });
+});

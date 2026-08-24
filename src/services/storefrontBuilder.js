@@ -233,7 +233,7 @@ function listVisibilityWhere(cidParam) {
 // A pagina nasce com UMA pagina de produtos, nao com o catalogo. Antes
 // eram 500 (419 KB na Finesse) pra desenhar 24. O resto chega pela rota
 // /storefront/:slug/catalogo conforme a cliente navega.
-const { POR_PAGINA, EM_ESTOQUE } = require('./catalogoPaginado');
+const { POR_PAGINA, EM_ESTOQUE, contarPorCategoria } = require('./catalogoPaginado');
 const LIMITE_DO_PAYLOAD = POR_PAGINA;
 
 async function contarProdutosDaLoja(cid) {
@@ -411,6 +411,13 @@ async function buildStorefront(config) {
 
   const products = await fetchStorefrontProducts(cid, featuredIds, hiddenIds);
   const catalogoTotal = await contarProdutosDaLoja(cid);
+  // Barra de categorias: vem do BANCO, nao dos produtos carregados. Ver
+  // contarPorCategoria — com paginacao de 24, derivar da pagina mostrava
+  // so as categorias que caiam nela.
+  let categoriasComTotal = [];
+  try {
+    categoriasComTotal = await contarPorCategoria({ cid, visibilityWhere: listVisibilityWhere('$1') });
+  } catch (e) { categoriasComTotal = []; }
 
   // D3: árvore + vínculo primário. Só categorias visíveis na vitrine
   // entram, e o produto só recebe categoria que esteja nesse conjunto --
@@ -508,6 +515,8 @@ async function buildStorefront(config) {
     // Quantos a loja tem de verdade — ver contarProdutosDaLoja.
     catalog_total: catalogoTotal,
     payload_limit: LIMITE_DO_PAYLOAD,
+    // [{ nome, total }] — ver contarPorCategoria.
+    categorias_barra: categoriasComTotal,
     // D3: lista FLAT com parent_id -- o cliente deriva a hierarquia, mesmo
     // formato que o GET /product-categories já usa (contrato §10). Vazia
     // em base sem as migrations 257/258.
