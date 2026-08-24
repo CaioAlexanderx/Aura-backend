@@ -310,6 +310,11 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
     image_url: p.image_url,
     gallery_urls: Array.isArray(p.gallery_urls) ? p.gallery_urls : [],
     category: p.category,
+    // Migration 305 — ficha tecnica. NULL quando a lojista nao preencheu,
+    // e ai a secao simplesmente nao aparece na loja.
+    material: p.material || null,
+    medidas:  p.medidas  || null,
+    cuidados: p.cuidados || null,
     category_id:   cat ? cat.id   : null,
     category_slug: cat ? cat.slug : null,
     category_path: cat ? cat.path : null,
@@ -322,7 +327,8 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
 
   if (featuredIds && featuredIds.length > 0) {
     const sql = `
-      SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty, created_at
+      SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty, created_at,
+             material, medidas, cuidados
       FROM products
       WHERE ${visibility}
         AND is_active IS NOT FALSE
@@ -336,7 +342,8 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
   }
 
   const sql = `
-    SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty, created_at
+    SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty, created_at,
+           material, medidas, cuidados
     FROM products
     WHERE ${visibility}
       AND is_active IS NOT FALSE

@@ -617,6 +617,14 @@ body.card-style-image-heavy .product-desc{display:none;}
 .pd-desc-tit{font-family:${fontSans};font-size:12px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--sf-ink-3);margin-bottom:8px;}
 .pd-desc p{font-family:${fontSans};font-size:14.5px;line-height:1.65;color:var(--sf-ink-2);margin:0;max-width:62ch;white-space:pre-line;}
 
+/* Ficha tecnica: rotulo a esquerda, valor a direita, so as linhas que
+   existem. "Material: —" e pior que nada — anuncia que a loja nao sabe do
+   que vende. */
+.pd-ficha{margin-top:22px;border-top:1px solid var(--sf-border);padding-top:6px;}
+.pd-ficha-linha{display:grid;grid-template-columns:118px 1fr;gap:14px;padding:11px 0;border-bottom:1px solid var(--sf-border);}
+.pd-ficha-linha:last-child{border-bottom:0;}
+.pd-ficha-rot{font-family:${fontSans};font-size:12px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--sf-ink-3);}
+.pd-ficha-val{font-family:${fontSans};font-size:14px;line-height:1.55;color:var(--sf-ink-2);white-space:pre-line;}
 .pd-relacionados{max-width:1280px;margin:0 auto;padding:40px 20px 56px;border-top:1px solid var(--sf-border);margin-top:36px;}
 .pd-rel-tit{font-family:${fontSerif};font-size:22px;font-weight:400;color:var(--sf-ink);margin:0 0 18px;}
 .pd-rel-grade{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:18px;}
