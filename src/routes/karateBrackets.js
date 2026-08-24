@@ -1758,8 +1758,14 @@ const scoresheetHandler = async (req, res) => {
         area: cat.area_name ? { name: cat.area_name } : null,
         athletes: athletes.map((a) => ({ entry_id: a.id, name: a.student_name, dojo_name: a.dojo || null, is_team: !!a.team_id })),
         rules_footer: rulesFooter,
-        // Campos manuscritos no ginásio (a UI imprime as linhas em branco).
-        fields: { koto: cat.area_name || null, shuchin: null, mesario: null, duracao: null },
+        // Campos da folha real — GRAVÁVEIS desde a 304 (PATCH .../scoresheet,
+        // inclusive pela mesa pública); sem valor, a UI imprime linha em branco.
+        fields: {
+          koto: cat.area_name || null,
+          shuchin: (bracketRow && bracketRow.sumula && bracketRow.sumula.shuchin) || null,
+          mesario: (bracketRow && bracketRow.sumula && bracketRow.sumula.mesario) || null,
+          duracao: (bracketRow && bracketRow.sumula && bracketRow.sumula.duracao) || null,
+        },
       };
 
       if (!bracketRow) {
@@ -1863,6 +1869,60 @@ const scoresheetHandler = async (req, res) => {
   };
 router.get('/competitions/:cid/categories/:catId/scoresheet', ...guards.read(), scoresheetHandler);
 
+// ═══════════════════════════════════════════════════════════════
+// PATCH /competitions/:cid/categories/:catId/scoresheet — SÚMULA
+// GRAVÁVEL (Onda B, migration 304). Body: { shuchin?, mesario?,
+// duracao? } — merge parcial no JSONB da chave; string vazia limpa o
+// campo. Compartilhado com a mesa pública (o mesário preenche os
+// campos que na folha real eram manuscritos).
+// ═══════════════════════════════════════════════════════════════
+const scoresheetPatchHandler = async (req, res) => {
+    const { id: federationId, cid, catId } = req.params;
+    const b = req.body || {};
+    const patch = {};
+    for (const k of ['shuchin', 'mesario', 'duracao']) {
+      if (b[k] !== undefined) {
+        if (b[k] !== null && typeof b[k] !== 'string') {
+          return res.status(422).json({ error: `${k} deve ser texto`, code: 'VALIDATION_ERROR' });
+        }
+        const v = b[k] === null ? '' : String(b[k]).trim().slice(0, 120);
+        patch[k] = v === '' ? null : v;
+      }
+    }
+    if (!Object.keys(patch).length) {
+      return res.status(422).json({ error: 'Informe shuchin, mesario e/ou duracao', code: 'VALIDATION_ERROR' });
+    }
+
+    const client = await db.connect();
+    try {
+      const comp = await findComp(client, federationId, cid);
+      if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+      const { bracketRow } = await loadBracket(client, catId);
+      if (!bracketRow) return res.status(409).json({ error: 'Chave não gerada para esta categoria', code: 'NO_BRACKET' });
+
+      const merged = Object.assign({}, bracketRow.sumula || {}, patch);
+      for (const k of Object.keys(merged)) if (merged[k] === null) delete merged[k];
+      try {
+        await client.query(
+          `UPDATE karate_brackets SET sumula = $1, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify(merged), bracketRow.id]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          return res.status(503).json({ error: 'Súmula gravável indisponível (migração 304 pendente)', code: 'SCHEMA_PENDING' });
+        }
+        throw e;
+      }
+      return res.json({ sumula: merged });
+    } catch (err) {
+      console.error('[karateBrackets] scoresheet patch error:', err.message);
+      return res.status(500).json({ error: 'Erro ao gravar a súmula' });
+    } finally {
+      client.release();
+    }
+  };
+router.patch('/competitions/:cid/categories/:catId/scoresheet', ...guards.staffWrite(), scoresheetPatchHandler);
+
 module.exports = router;
 
 // P2.1 — handlers compartilhados com a MESA pública do mesário
@@ -1879,4 +1939,5 @@ module.exports.sharedHandlers = {
   kataScorePutHandler,
   kataAdvanceHandler,
   scoresheetHandler,
+  scoresheetPatchHandler,
 };
