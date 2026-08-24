@@ -21,6 +21,25 @@
 //           append-only). NÃO gera cobrança.
 //   POST  /federation/:id/practitioner-requests/:requestId/reject
 //         — rejeita com motivo (obrigatório — o sensei tem que ver).
+//   POST  /federation/:id/practitioner-requests/batch-approve-create
+//         — aprova VÁRIAS como criação numa chamada. Cada item traz seu
+//           fpkt_number (a federação numera cada ficha — número continua
+//           obrigatório e emitido por ela, nunca por nós).
+//   POST  /federation/:id/practitioner-requests/batch-reject
+//         — rejeita várias com um motivo compartilhado (opcional; sem
+//           motivo vai um texto padrão — o sensei sempre vê ALGUM motivo).
+//
+// ── Lote (24/08/2026) — aprovação/rejeição EM MASSA ──────────
+// QA 23/08: "a aprovação tem 5 passos e é feita de um por um" — um dojô
+// grande envia dezenas de fichas de uma vez e a federação precisava de
+// dezenas de viagens à tela de detalhe. As rotas batch-* reusam EXATAMENTE
+// o caminho individual (approveCreateOne/rejectOne, extraídos dos handlers
+// originais): mesma validação, mesmos eventos de roster, mesma transação
+// POR ITEM. Deliberadamente NÃO é uma transação única para o lote inteiro:
+// um número FPKT duplicado no item 7 não pode desfazer as 6 aprovações
+// anteriores — o item que falha permanece pendente na fila e volta com o
+// erro na resposta, item a item. Transferência NUNCA entra em lote:
+// escolher a pessoa certa exige análise individual (caminho preservado).
 //
 // Auditoria: cada resolução grava resolved_by/resolved_at na própria linha
 // da solicitação + um evento em karate_dojo_roster_events (mesmo padrão dos
@@ -624,18 +643,13 @@ router.patch('/practitioner-requests/:requestId', ...guards.staffWrite(), async 
   }
 });
 
-// ── POST aprovar como CRIAÇÃO ────────────────────────────
-router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffWrite(), async (req, res) => {
-  const { id: federationId, requestId } = req.params;
-  const fpktNumber = req.body && req.body.fpkt_number != null ? normalizeFpktNumber(req.body.fpkt_number) : '';
-
-  if (!fpktNumber) {
-    return res.status(422).json({
-      error: 'Campo fpkt_number é obrigatório para aprovar como criação — o número é emitido pela federação, este sistema nunca gera número.',
-      code: 'FPKT_NUMBER_REQUIRED',
-    });
-  }
-
+// ── Núcleo: aprovar UMA solicitação como CRIAÇÃO ───────────
+// Extraído do handler individual para ser reusado pelo lote
+// (batch-approve-create): mesma transação, mesmas validações, mesmos
+// eventos. Devolve { httpStatus, body } em vez de escrever no res — quem
+// chama decide como responder (a rota individual repassa direto; o lote
+// agrega item a item).
+async function approveCreateOne({ federationId, requestId, fpktNumber, actorId }) {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -646,12 +660,12 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
     );
     if (!cur.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Solicitação não encontrada', code: 'NOT_FOUND' });
+      return { httpStatus: 404, body: { error: 'Solicitação não encontrada', code: 'NOT_FOUND' } };
     }
     const reqRow = cur.rows[0];
     if (reqRow.status !== 'pendente') {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Solicitação já foi resolvida', code: 'ALREADY_RESOLVED' });
+      return { httpStatus: 409, body: { error: 'Solicitação já foi resolvida', code: 'ALREADY_RESOLVED' } };
     }
 
     const dupRes = await client.query(
@@ -660,7 +674,7 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
     );
     if (dupRes.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Número de matrícula já em uso.', code: 'FPKT_NUMBER_TAKEN' });
+      return { httpStatus: 409, body: { error: 'Número de matrícula já em uso.', code: 'FPKT_NUMBER_TAKEN' } };
     }
 
     const payload = reqRow.payload || {};
@@ -721,7 +735,7 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
         [
           practitioner.id, federationId, reqRow.claimed_belt,
           'Faixa alegada pelo sensei na solicitação de cadastro; registrada na data de aprovação (sem validação de faixa).',
-          (req.user && req.user.id) || null,
+          actorId,
         ]
       );
     }
@@ -731,7 +745,7 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
           SET status = 'aprovada', resolution = 'created', resolved_practitioner_id = $1,
               resolved_at = NOW(), resolved_by = $2
         WHERE id = $3`,
-      [practitioner.id, (req.user && req.user.id) || null, requestId]
+      [practitioner.id, actorId, requestId]
     );
 
     // F5a: se a solicitação nasceu de um ALUNO do dojô, o vínculo volta
@@ -745,39 +759,61 @@ router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffW
     await logRosterEventBestEffort(client, {
       dojoId: reqRow.dojo_id, federationId, event: 'practitioner_request_approved_create',
       affected: [{ request_id: requestId, practitioner_id: practitioner.id, fpkt_number: fpktNumber, student_id: reqRow.student_id || null }],
-      actorId: (req.user && req.user.id) || null,
+      actorId,
     });
 
     await client.query('COMMIT');
 
-    return res.status(201).json({
-      request_id: requestId,
-      status: 'aprovada',
-      resolution: 'created',
-      student_id: reqRow.student_id || null,
-      student_linked: studentLink.linked === true,
-      practitioner: {
-        id: practitioner.id,
-        name: practitioner.name,
-        karate_registration_number: practitioner.karate_registration_number,
-        dojo_id: practitioner.dojo_id,
-        // F7.0 (aditivo): o que a federação acabou de gravar a partir da
-        // ficha do dojô — visível na resposta para não virar dado invisível
-        // de novo.
-        sex: practitioner.sex || null,
-        affiliation_since: practitioner.affiliation_since || null,
+    return {
+      httpStatus: 201,
+      body: {
+        request_id: requestId,
+        status: 'aprovada',
+        resolution: 'created',
+        student_id: reqRow.student_id || null,
+        student_linked: studentLink.linked === true,
+        practitioner: {
+          id: practitioner.id,
+          name: practitioner.name,
+          karate_registration_number: practitioner.karate_registration_number,
+          dojo_id: practitioner.dojo_id,
+          // F7.0 (aditivo): o que a federação acabou de gravar a partir da
+          // ficha do dojô — visível na resposta para não virar dado invisível
+          // de novo.
+          sex: practitioner.sex || null,
+          affiliation_since: practitioner.affiliation_since || null,
+        },
       },
-    });
+    };
   } catch (e) {
     await client.query('ROLLBACK');
     if (e.code === '23505') {
-      return res.status(409).json({ error: 'Número de matrícula já em uso.', code: 'FPKT_NUMBER_TAKEN' });
+      return { httpStatus: 409, body: { error: 'Número de matrícula já em uso.', code: 'FPKT_NUMBER_TAKEN' } };
     }
     console.error('[karatePractitionerRequestsAdmin] approve-create error:', e.message);
-    return res.status(500).json({ error: 'Erro ao aprovar solicitação', detail: e.message });
+    return { httpStatus: 500, body: { error: 'Erro ao aprovar solicitação', detail: e.message } };
   } finally {
     client.release();
   }
+}
+
+// ── POST aprovar como CRIAÇÃO ────────────────────────────
+router.post('/practitioner-requests/:requestId/approve-create', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, requestId } = req.params;
+  const fpktNumber = req.body && req.body.fpkt_number != null ? normalizeFpktNumber(req.body.fpkt_number) : '';
+
+  if (!fpktNumber) {
+    return res.status(422).json({
+      error: 'Campo fpkt_number é obrigatório para aprovar como criação — o número é emitido pela federação, este sistema nunca gera número.',
+      code: 'FPKT_NUMBER_REQUIRED',
+    });
+  }
+
+  const out = await approveCreateOne({
+    federationId, requestId, fpktNumber,
+    actorId: (req.user && req.user.id) || null,
+  });
+  return res.status(out.httpStatus).json(out.body);
 });
 
 // ── POST aprovar como TRANSFERÊNCIA ────────────────────────
@@ -901,6 +937,57 @@ router.post('/practitioner-requests/:requestId/approve-transfer', ...guards.staf
   }
 });
 
+// ── Núcleo: rejeitar UMA solicitação ────────────────────────
+// Extraído do handler individual para ser reusado pelo lote (batch-reject).
+// Inclui o evento de roster e a reabertura do acesso do dojô (o sensei
+// PRECISA conseguir ver o motivo, no lote também). NÃO inclui os campos de
+// WhatsApp — extra da rota individual (no lote seriam N consultas por nada;
+// a federação pode reabrir o detalhe depois, que também os traz).
+async function rejectOne({ federationId, requestId, reason, actorId }) {
+  try {
+    const upd = await db.query(
+      `UPDATE karate_practitioner_requests
+          SET status = 'rejeitada', resolution = 'rejected', reject_reason = $1,
+              resolved_at = NOW(), resolved_by = $2
+        WHERE id = $3 AND federation_id = $4 AND status = 'pendente'
+      RETURNING id, dojo_id, full_name`,
+      [reason.slice(0, 1000), actorId, requestId, federationId]
+    );
+    if (!upd.rows.length) {
+      const exists = await db.query(`SELECT id FROM karate_practitioner_requests WHERE id = $1 AND federation_id = $2`, [requestId, federationId]);
+      if (!exists.rows.length) return { httpStatus: 404, body: { error: 'Solicitação não encontrada', code: 'NOT_FOUND' } };
+      return { httpStatus: 409, body: { error: 'Solicitação já foi resolvida', code: 'ALREADY_RESOLVED' } };
+    }
+    const row = upd.rows[0];
+
+    await logRosterEventStandalone({
+      dojoId: row.dojo_id, federationId, event: 'practitioner_request_rejected',
+      affected: [{ request_id: requestId, reason: reason.slice(0, 1000) }],
+      actorId,
+    });
+
+    // Item 4 (H3): rejeitar reabre/estende o acesso do link público do
+    // dojô, para o sensei conseguir voltar, ver o motivo e reenviar
+    // corrigido mesmo se ele já tinha "fechado" o quadro antes.
+    const dojoAccess = await reopenDojoRosterAccessBestEffort(row.dojo_id);
+
+    return {
+      httpStatus: 200,
+      dojoId: row.dojo_id,
+      body: {
+        request_id: requestId,
+        status: 'rejeitada',
+        reject_reason: reason,
+        dojo_access_reopened: dojoAccess.reopened,
+      },
+    };
+  } catch (e) {
+    if (e.code === '42P01') return { httpStatus: 404, body: { error: 'Solicitação não encontrada', code: 'NOT_FOUND' } };
+    console.error('[karatePractitionerRequestsAdmin] reject error:', e.message);
+    return { httpStatus: 500, body: { error: 'Erro ao rejeitar solicitação' } };
+  }
+}
+
 // ── POST rejeitar ───────────────────────────────────────
 router.post('/practitioner-requests/:requestId/reject', ...guards.staffWrite(), async (req, res) => {
   const { id: federationId, requestId } = req.params;
@@ -910,52 +997,162 @@ router.post('/practitioner-requests/:requestId/reject', ...guards.staffWrite(), 
     return res.status(422).json({ error: 'Campo reason é obrigatório (o sensei vê o motivo)', code: 'VALIDATION_ERROR' });
   }
 
-  try {
-    const upd = await db.query(
-      `UPDATE karate_practitioner_requests
-          SET status = 'rejeitada', resolution = 'rejected', reject_reason = $1,
-              resolved_at = NOW(), resolved_by = $2
-        WHERE id = $3 AND federation_id = $4 AND status = 'pendente'
-      RETURNING id, dojo_id, full_name`,
-      [reason.slice(0, 1000), (req.user && req.user.id) || null, requestId, federationId]
-    );
-    if (!upd.rows.length) {
-      const exists = await db.query(`SELECT id FROM karate_practitioner_requests WHERE id = $1 AND federation_id = $2`, [requestId, federationId]);
-      if (!exists.rows.length) return res.status(404).json({ error: 'Solicitação não encontrada', code: 'NOT_FOUND' });
-      return res.status(409).json({ error: 'Solicitação já foi resolvida', code: 'ALREADY_RESOLVED' });
-    }
-    const row = upd.rows[0];
+  const out = await rejectOne({ federationId, requestId, reason, actorId: (req.user && req.user.id) || null });
+  if (out.httpStatus !== 200) return res.status(out.httpStatus).json(out.body);
 
-    await logRosterEventStandalone({
-      dojoId: row.dojo_id, federationId, event: 'practitioner_request_rejected',
-      affected: [{ request_id: requestId, reason: reason.slice(0, 1000) }],
-      actorId: (req.user && req.user.id) || null,
-    });
+  // Botão "Avisar no WhatsApp" (wa.me simples, click-to-chat — a
+  // federação decide se clica; nada automático). Telefone do DOJÔ
+  // (celular > fixo) + a MESMA URL do link do sensei que acabou de ser
+  // reaberto no rejectOne, pra mensagem carregar direto pra onde ele
+  // corrige. Best-effort/aditivo: nunca derruba a rejeição, já persistida.
+  const dojoFields = await dojoWhatsappFieldsBestEffort(out.dojoId);
+  return res.json({ ...out.body, ...dojoFields });
+});
 
-    // Item 4 (H3): rejeitar reabre/estende o acesso do link público do
-    // dojô, para o sensei conseguir voltar, ver o motivo e reenviar
-    // corrigido mesmo se ele já tinha "fechado" o quadro antes.
-    const dojoAccess = await reopenDojoRosterAccessBestEffort(row.dojo_id);
+// ── Lote — limites e validação comum ────────────────────────
+// 50 = LIMIT da própria lista (100) com folga; um lote maior que isso é
+// sinal de uso via script, não da tela — e cada item abre transação
+// própria, então o teto também protege o pool de conexões.
+const BATCH_LIMIT = 50;
 
-    // Botão "Avisar no WhatsApp" (wa.me simples, click-to-chat — a
-    // federação decide se clica; nada automático). Telefone do DOJÔ
-    // (celular > fixo) + a MESMA URL do link do sensei que acabou de ser
-    // reaberto acima, pra mensagem carregar direto pra onde ele corrige.
-    // Best-effort/aditivo: nunca derruba a rejeição, que já foi persistida.
-    const dojoFields = await dojoWhatsappFieldsBestEffort(row.dojo_id);
+// Motivo padrão da rejeição em lote quando a federação não escreve um —
+// reject_reason continua NOT-vazio no contrato: o sensei sempre vê ALGO.
+const BATCH_REJECT_DEFAULT_REASON =
+  'Solicitação rejeitada pela federação. Entre em contato com a federação para mais detalhes.';
 
-    return res.json({
-      request_id: requestId,
-      status: 'rejeitada',
-      reject_reason: reason,
-      dojo_access_reopened: dojoAccess.reopened,
-      ...dojoFields,
-    });
-  } catch (e) {
-    if (e.code === '42P01') return res.status(404).json({ error: 'Solicitação não encontrada', code: 'NOT_FOUND' });
-    console.error('[karatePractitionerRequestsAdmin] reject error:', e.message);
-    return res.status(500).json({ error: 'Erro ao rejeitar solicitação' });
+// ── POST aprovar EM LOTE como criação ───────────────────────
+// Body: { items: [{ request_id, fpkt_number }] } — número por item,
+// obrigatório (emitido pela federação, nunca gerado aqui; igual ao
+// individual). Validação do formato é all-or-nothing (422 antes de tocar o
+// banco); a EXECUÇÃO é item a item, cada um na sua transação — falha de um
+// não desfaz os demais, e a resposta diz o que aconteceu com cada um.
+router.post('/practitioner-requests/batch-approve-create', ...guards.staffWrite(), async (req, res) => {
+  const federationId = req.params.id;
+  const items = req.body && Array.isArray(req.body.items) ? req.body.items : null;
+
+  if (!items || !items.length) {
+    return res.status(422).json({ error: 'Campo items é obrigatório — lista de { request_id, fpkt_number }', code: 'VALIDATION_ERROR' });
   }
+  if (items.length > BATCH_LIMIT) {
+    return res.status(422).json({ error: `Lote grande demais — máximo de ${BATCH_LIMIT} solicitações por vez`, code: 'BATCH_TOO_LARGE' });
+  }
+
+  const seenRequestIds = new Set();
+  const seenNumbers = new Set();
+  const normalized = [];
+  for (const it of items) {
+    const requestId = it && it.request_id != null ? String(it.request_id).trim() : '';
+    const fpktNumber = it && it.fpkt_number != null ? normalizeFpktNumber(it.fpkt_number) : '';
+    if (!requestId) {
+      return res.status(422).json({ error: 'Cada item do lote precisa de request_id', code: 'VALIDATION_ERROR' });
+    }
+    if (!fpktNumber) {
+      return res.status(422).json({
+        error: 'Todo item do lote precisa de fpkt_number — o número é emitido pela federação, este sistema nunca gera número.',
+        code: 'FPKT_NUMBER_REQUIRED',
+        request_id: requestId,
+      });
+    }
+    if (seenRequestIds.has(requestId)) {
+      return res.status(422).json({ error: 'Solicitação repetida no lote', code: 'VALIDATION_ERROR', request_id: requestId });
+    }
+    if (seenNumbers.has(fpktNumber)) {
+      // Pegar aqui, antes de executar: se deixasse passar, o primeiro item
+      // com o número seria aprovado e o segundo falharia com
+      // FPKT_NUMBER_TAKEN — tecnicamente correto, mas quase certamente um
+      // erro de digitação que a federação prefere corrigir ANTES.
+      return res.status(422).json({
+        error: `O número FPKT ${fpktNumber} aparece em mais de um item do lote`,
+        code: 'FPKT_NUMBER_DUPLICATED_IN_BATCH',
+        request_id: requestId,
+      });
+    }
+    seenRequestIds.add(requestId);
+    seenNumbers.add(fpktNumber);
+    normalized.push({ requestId, fpktNumber });
+  }
+
+  const actorId = (req.user && req.user.id) || null;
+
+  // Sequencial de propósito (não Promise.all): cada item abre transação
+  // própria e o dup-check de número FPKT do item N precisa enxergar o
+  // COMMIT do item N-1 — em paralelo, dois itens com números livres mas
+  // conflitantes entre si virariam corrida.
+  const results = [];
+  for (const { requestId, fpktNumber } of normalized) {
+    const out = await approveCreateOne({ federationId, requestId, fpktNumber, actorId });
+    if (out.httpStatus === 201) {
+      results.push({
+        request_id: requestId,
+        ok: true,
+        practitioner: out.body.practitioner,
+        student_linked: out.body.student_linked,
+      });
+    } else {
+      results.push({
+        request_id: requestId,
+        ok: false,
+        code: out.body.code || null,
+        error: out.body.error || 'Erro ao aprovar solicitação',
+      });
+    }
+  }
+
+  const approved = results.filter((r) => r.ok).length;
+  return res.status(200).json({ results, approved, failed: results.length - approved });
+});
+
+// ── POST rejeitar EM LOTE ───────────────────────────────────
+// Body: { request_ids: [...], reason?: string } — motivo compartilhado,
+// OPCIONAL (pedido do produto): sem motivo, vai o texto padrão — o
+// contrato "o sensei sempre vê um motivo" continua de pé. Execução item a
+// item, mesma resposta itemizada do lote de aprovação.
+router.post('/practitioner-requests/batch-reject', ...guards.staffWrite(), async (req, res) => {
+  const federationId = req.params.id;
+  const requestIds = req.body && Array.isArray(req.body.request_ids) ? req.body.request_ids : null;
+  const reasonRaw = req.body && req.body.reason != null ? String(req.body.reason).trim() : '';
+  const reason = reasonRaw || BATCH_REJECT_DEFAULT_REASON;
+
+  if (!requestIds || !requestIds.length) {
+    return res.status(422).json({ error: 'Campo request_ids é obrigatório — lista de ids de solicitação', code: 'VALIDATION_ERROR' });
+  }
+  if (requestIds.length > BATCH_LIMIT) {
+    return res.status(422).json({ error: `Lote grande demais — máximo de ${BATCH_LIMIT} solicitações por vez`, code: 'BATCH_TOO_LARGE' });
+  }
+
+  const seen = new Set();
+  const ids = [];
+  for (const raw of requestIds) {
+    const requestId = raw != null ? String(raw).trim() : '';
+    if (!requestId) {
+      return res.status(422).json({ error: 'request_ids contém item vazio', code: 'VALIDATION_ERROR' });
+    }
+    if (seen.has(requestId)) {
+      return res.status(422).json({ error: 'Solicitação repetida no lote', code: 'VALIDATION_ERROR', request_id: requestId });
+    }
+    seen.add(requestId);
+    ids.push(requestId);
+  }
+
+  const actorId = (req.user && req.user.id) || null;
+
+  const results = [];
+  for (const requestId of ids) {
+    const out = await rejectOne({ federationId, requestId, reason, actorId });
+    if (out.httpStatus === 200) {
+      results.push({ request_id: requestId, ok: true, dojo_access_reopened: out.body.dojo_access_reopened });
+    } else {
+      results.push({
+        request_id: requestId,
+        ok: false,
+        code: out.body.code || null,
+        error: out.body.error || 'Erro ao rejeitar solicitação',
+      });
+    }
+  }
+
+  const rejected = results.filter((r) => r.ok).length;
+  return res.status(200).json({ results, reason, rejected, failed: results.length - rejected });
 });
 
 module.exports = router;
