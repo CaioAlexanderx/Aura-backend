@@ -258,3 +258,38 @@ describe('nome da cor quando a lojista grava hex', () => {
     }
   });
 });
+
+describe('ficha tecnica do produto', () => {
+  const s = buildScript({ products: [], categories: [] }, 'loja', '');
+  const ficha = (p) =>
+    new Function(
+      'p', 'esc',
+      s.match(/function fichaHtml[\s\S]*?\n  \}/)[0] + '\nreturn fichaHtml();',
+    )(p, (x) => String(x));
+
+  test('so entra a linha que a lojista preencheu', () => {
+    const html = ficha({ material: 'Viscose com elastano' });
+    expect(html).toContain('Material');
+    expect(html).toContain('Viscose com elastano');
+    expect(html).not.toContain('Medidas');
+    expect(html).not.toContain('Cuidados');
+  });
+
+  test('sem nada preenchido, a secao nao aparece', () => {
+    // Uma ficha com "Material: —" e pior que ficha nenhuma: anuncia que a
+    // loja nao sabe do que vende.
+    expect(ficha({})).toBe('');
+    expect(ficha({ material: '', medidas: null, cuidados: '   ' })).toBe('');
+  });
+
+  test('as tres linhas juntas', () => {
+    const html = ficha({ material: 'Algodão', medidas: 'Busto 92cm', cuidados: 'Lavar à mão' });
+    expect(html).toContain('Algodão');
+    expect(html).toContain('Busto 92cm');
+    expect(html).toContain('Lavar à mão');
+  });
+
+  test('espaco em branco nao vira linha', () => {
+    expect(ficha({ material: '   ', medidas: 'P: 60cm' })).not.toContain('Material');
+  });
+});

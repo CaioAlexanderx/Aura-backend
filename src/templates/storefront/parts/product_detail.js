@@ -250,6 +250,28 @@ function showDetail(id){
     return '<div class="pd-foto"><img id="pdFoto" src="'+esc(fotos[fotoAtual])+'" alt="'+esc(p.name)+'"></div>'+mini;
   }
 
+  /**
+   * Ficha tecnica: so as linhas que a lojista preencheu.
+   *
+   * Migration 305. Uma ficha com "Material: —" e pior que ficha nenhuma:
+   * anuncia que a loja nao sabe do que vende. Linha vazia nao entra.
+   */
+  function fichaHtml(){
+    var linhas=[
+      ['Material', p.material],
+      ['Medidas', p.medidas],
+      ['Cuidados', p.cuidados]
+    ].filter(function(l){ return l[1] && String(l[1]).trim(); });
+    if(!linhas.length) return '';
+    return '<div class="pd-ficha">'
+      + linhas.map(function(l){
+          return '<div class="pd-ficha-linha">'
+            + '<span class="pd-ficha-rot">'+esc(l[0])+'</span>'
+            + '<span class="pd-ficha-val">'+esc(String(l[1]).trim())+'</span></div>';
+        }).join('')
+      + '</div>';
+  }
+
   // ── Monta a pagina ─────────────────────────────────────
   var el=document.createElement('div');
   el.className='pd-overlay';
@@ -271,6 +293,7 @@ function showDetail(id){
     +'<button type="button" class="pd-add" id="pdAdd">Adicionar ao carrinho</button>'
     +'</div>'
     +(p.description?'<div class="pd-desc"><div class="pd-desc-tit">Sobre este produto</div><p>'+esc(p.description)+'</p></div>':'')
+    +fichaHtml()
     +'</div>'
     +'</div>'
     +'<section class="pd-relacionados" id="pdRelacionados" hidden>'

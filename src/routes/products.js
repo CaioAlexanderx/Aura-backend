@@ -176,9 +176,13 @@ router.get('/', async (req, res) => {
     }
 
     const countRes = await db.query(`SELECT COUNT(*) AS total FROM products ${where}`, params);
-    const dataRes = await db.query(
+    // Migration 305 — ficha tecnica. Tentar-e-cair em vez de consultar o
+    // information_schema: uma query a mais desloca a sequencia de mocks
+    // dos testes de integracao, e no caminho feliz ela e pura perda.
+    const dataRes = await comFallbackDeFicha((colsFicha) => db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
+              ${colsFicha}
               is_active, is_group_shared, company_id, created_at,
               (SELECT EXISTS(SELECT 1 FROM product_variants pv WHERE pv.product_id = products.id AND pv.is_active = true)) AS has_variants,
               -- 19/05/2026: SUM do estoque das variants ativas pra alimentar UI/KPIs
@@ -199,7 +203,7 @@ router.get('/', async (req, res) => {
               ) AS variant_barcodes
        FROM products ${where} ORDER BY name ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
-    );
+    ));
 
     const products = dataRes.rows.map(r => ({
       id: r.id, name: r.name || '', sku: r.sku || '', barcode: r.barcode || '',
@@ -210,6 +214,9 @@ router.get('/', async (req, res) => {
       color: r.color || '', size: r.size || '',
       image_url: r.image_url || '',
       ncm: r.ncm || '',
+      // Migration 305 — ficha tecnica. '' quando a coluna nao existe na
+      // base ainda, entao o formulario abre vazio em vez de quebrar.
+      material: r.material || '', medidas: r.medidas || '', cuidados: r.cuidados || '',
       is_active: r.is_active !== false,
       is_group_shared: r.is_group_shared || false,
       stock_company_id: r.company_id,
@@ -255,7 +262,7 @@ router.get('/:pid/variants', async (req, res) => {
 // calls — compat com testes existentes).
 router.post('/', async (req, res) => {
   const cid = req.params.id;
-  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size, ncm, image_url } = req.body;
+  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size, ncm, image_url, material, medidas, cuidados } = req.body;
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'name e obrigatorio' });
 
   let defaultShared = false;
@@ -295,30 +302,54 @@ router.post('/', async (req, res) => {
     : defaultShared;
 
   try {
-    const colsBase = 'company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared';
-    const paramsBase = [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
+    // Migration 305: ficha tecnica. Texto curto e opcional; o corte de
+    // tamanho evita que um paste de 40 KB vire coluna.
+    const ficha = (v) => (v && String(v).trim() ? String(v).trim().slice(0, 600) : null);
+
+    const COLS_ANTIGAS = 'company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared';
+    const paramsAntigos = [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
        parseFloat(price)||0, parseFloat(cost_price)||0, parseInt(stock_qty)||0, parseInt(min_stock)||0,
        parseInt(stock_max)||0, unit||'un', color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
        size ? String(size).slice(0,100) : null, sanitizeNcm(ncm), isGroupShared];
 
-    let result;
-    try {
-      result = await db.query(
-        `INSERT INTO products (${colsBase}, image_url, gallery_urls)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb) RETURNING *`,
-        [...paramsBase, capaNova, JSON.stringify(capaNova ? [capaNova] : [])]
-      );
-    } catch (e) {
-      // gallery_urls veio na migration 290. Se o banco estiver atras do
-      // deploy, criar produto nao pode quebrar pro varejo inteiro: cai pro
-      // INSERT antigo e a foto se perde so nesse intervalo.
-      if (e.code !== '42703') throw e;
-      result = await db.query(
-        `INSERT INTO products (${colsBase})
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-        paramsBase
-      );
+    const paramsFicha = [ficha(material), ficha(medidas), ficha(cuidados)];
+
+    /** $1..$n pra n parametros — a contagem era escrita a mao e ficou errada. */
+    function marcadores(n, jsonbNoFim) {
+      var l = [];
+      for (var k = 1; k <= n; k++) l.push('$' + k + (jsonbNoFim && k === n ? '::jsonb' : ''));
+      return l.join(',');
     }
+
+    // Duas migrations podem faltar numa base atrasada: a 290
+    // (gallery_urls) e a 305 (ficha). O backend nao roda migration no
+    // boot, entao cada uma tem seu degrau — cadastrar produto nao pode
+    // quebrar pro varejo inteiro por causa de campo novo.
+    const tentativas = [
+      { cols: COLS_ANTIGAS + ', material, medidas, cuidados, image_url, gallery_urls',
+        params: [...paramsAntigos, ...paramsFicha, capaNova, JSON.stringify(capaNova ? [capaNova] : [])],
+        jsonb: true },
+      { cols: COLS_ANTIGAS + ', image_url, gallery_urls',
+        params: [...paramsAntigos, capaNova, JSON.stringify(capaNova ? [capaNova] : [])],
+        jsonb: true },
+      { cols: COLS_ANTIGAS, params: paramsAntigos, jsonb: false },
+    ];
+
+    let result = null;
+    let ultimoErro = null;
+    for (const t of tentativas) {
+      try {
+        result = await db.query(
+          `INSERT INTO products (${t.cols}) VALUES (${marcadores(t.params.length, t.jsonb)}) RETURNING *`,
+          t.params
+        );
+        break;
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        ultimoErro = e;
+      }
+    }
+    if (!result) throw ultimoErro;
 
     // Detectar sugestão de merge: verifica se existem outros produtos sem variantes
     // com o mesmo nome base (após strip do sufixo de tamanho) na mesma empresa.
@@ -359,6 +390,23 @@ router.post('/', async (req, res) => {
 });
 
 // ─── PATCH /:pid ────────────────────────────────
+/**
+ * Roda a query com as colunas da ficha; se a base estiver atras da
+ * migration 305, roda de novo sem elas.
+ *
+ * O backend nao aplica migration no boot, entao coluna nova sempre tem um
+ * intervalo em que o codigo ja subiu e o banco nao (CLAUDE.md, armadilha
+ * 1). Aqui o custo do degrau e uma query extra SO nesse intervalo.
+ */
+async function comFallbackDeFicha(rodar) {
+  try {
+    return await rodar('material, medidas, cuidados,');
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+    return await rodar('');
+  }
+}
+
 router.patch('/:pid', async (req, res) => {
   const { id: cid, pid } = req.params;
 
@@ -389,7 +437,9 @@ router.patch('/:pid', async (req, res) => {
     galeria = g;
   }
 
-  const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size', image_url:'image_url', ncm:'ncm', is_group_shared:'is_group_shared', studio_storefront_visible:'studio_storefront_visible' };
+  const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size', image_url:'image_url', ncm:'ncm', is_group_shared:'is_group_shared', studio_storefront_visible:'studio_storefront_visible',
+    // Migration 305 — ficha tecnica na pagina do produto.
+    material:'material', medidas:'medidas', cuidados:'cuidados' };
   const numFields = ['price','cost_price','stock_qty','stock_min','stock_max'];
   const updates = [], values = []; let idx = 1;
   for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
