@@ -203,5 +203,9 @@ router.post('/categories/:catId/kata-scores/advance',
   requireMesaToken, requireCategoryInArea, sharedHandlers.kataAdvanceHandler);
 router.get('/categories/:catId/scoresheet',
   requireMesaToken, requireCategoryInArea, sharedHandlers.scoresheetHandler);
+// Súmula gravável (304): o mesário preenche shuchin/mesário/duração —
+// os campos que na folha real eram manuscritos.
+router.patch('/categories/:catId/scoresheet',
+  requireMesaToken, requireCategoryInArea, sharedHandlers.scoresheetPatchHandler);
 
 module.exports = router;

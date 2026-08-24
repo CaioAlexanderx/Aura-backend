@@ -275,3 +275,57 @@ describe('mesa pública: mesário ainda sem koto', () => {
     expect(op.body.code).toBe('MESARIO_SEM_KOTO');
   });
 });
+
+// ── (6) súmula gravável pela mesa (304) ─────────────────────
+describe('mesa pública: súmula gravável', () => {
+  it('(6) PATCH scoresheet grava shuchin/mesário/duração no escopo do koto', async () => {
+    const saved = {};
+    db.query.mockImplementation((sql, params) => {
+      const s = String(sql);
+      if (/-- mesa:resolve/.test(s)) return Promise.resolve({ rows: [mesaContext()] });
+      if (/-- mesa:cat-scope/.test(s)) {
+        return Promise.resolve({ rows: [{ id: params[0], area_id: AREA_1 }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    db.connect.mockImplementation(() => Promise.resolve({
+      query: (sql, params) => {
+        const s = String(sql);
+        if (/FROM karate_competitions WHERE id/.test(s)) {
+          return Promise.resolve({ rows: [{ id: COMP_ID, status: 'open' }] });
+        }
+        if (/FROM karate_brackets WHERE category_id/.test(s)) {
+          return Promise.resolve({ rows: [{ id: 'br-1', status: 'locked', sumula: { shuchin: 'Sensei Okada' } }] });
+        }
+        if (/UPDATE karate_brackets SET sumula/.test(s)) {
+          Object.assign(saved, JSON.parse(params[0]));
+          return Promise.resolve({ rows: [] });
+        }
+        return Promise.resolve({ rows: [] });
+      },
+      release: () => {},
+    }));
+
+    const res = await request(buildMesaApp())
+      .patch(`/public/karate/mesa/categories/${CAT_A}/scoresheet`)
+      .set('Authorization', 'Bearer ' + MESA_TOKEN)
+      .send({ mesario: 'Marina Kobayashi', duracao: '2h10' });
+    expect(res.status).toBe(200);
+    // merge parcial: preserva o shuchin já gravado.
+    expect(res.body.sumula).toEqual({ shuchin: 'Sensei Okada', mesario: 'Marina Kobayashi', duracao: '2h10' });
+    expect(saved).toEqual(res.body.sumula);
+
+    // Categoria de outro koto segue 403 também no PATCH.
+    db.query.mockImplementation((sql, params) => {
+      const s = String(sql);
+      if (/-- mesa:resolve/.test(s)) return Promise.resolve({ rows: [mesaContext()] });
+      if (/-- mesa:cat-scope/.test(s)) return Promise.resolve({ rows: [{ id: params[0], area_id: AREA_2 }] });
+      return Promise.resolve({ rows: [] });
+    });
+    const fora = await request(buildMesaApp())
+      .patch(`/public/karate/mesa/categories/${CAT_B}/scoresheet`)
+      .set('Authorization', 'Bearer ' + MESA_TOKEN)
+      .send({ mesario: 'X' });
+    expect(fora.status).toBe(403);
+  });
+});
