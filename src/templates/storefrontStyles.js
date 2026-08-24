@@ -531,6 +531,12 @@ body.card-style-image-heavy .product-desc{display:none;}
    Footer
    ============================================================ */
 .site-footer{background:var(--sf-bg-2);border-top:1px solid var(--sf-border);margin-top:60px;color:var(--sf-ink-2);font-size:13px;line-height:1.6;}
+/* Rodape institucional: como pagar e o que acontece se nao servir.
+   Texto, nao selo de bandeira — nao temos as marcas, e desenhar um
+   retangulo escrito "VISA" seria falsificar. */
+.footer-inst{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:22px 40px;padding:22px 0;border-top:1px solid var(--sf-border);margin-bottom:20px;}
+.footer-inst-tit{font-family:${fontSans};font-size:11px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;color:var(--sf-ink-3);margin-bottom:7px;}
+.footer-inst-txt{font-family:${fontSans};font-size:13px;line-height:1.6;color:var(--sf-ink-2);max-width:52ch;}
 .site-footer-inner{max-width:1280px;margin:0 auto;padding:56px 20px 24px;}
 .site-footer-cols{display:grid;grid-template-columns:1.4fr repeat(4,1fr);gap:40px;margin-bottom:48px;}
 @media(max-width:760px){.site-footer-cols{grid-template-columns:1fr 1fr;gap:24px;}}

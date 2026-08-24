@@ -524,6 +524,9 @@ async function buildStorefront(config) {
     payload_limit: LIMITE_DO_PAYLOAD,
     // [{ nome, total }] — ver contarPorCategoria.
     categorias_barra: categoriasComTotal,
+    // Migration 306 — politica de troca do rodape. NULL faz o template
+    // usar o texto padrao.
+    politica_troca: config.politica_troca || null,
     // D3: lista FLAT com parent_id -- o cliente deriva a hierarquia, mesmo
     // formato que o GET /product-categories já usa (contrato §10). Vazia
     // em base sem as migrations 257/258.
