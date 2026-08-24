@@ -25,38 +25,58 @@ var CATEGORIAS = (__S.categorias_barra || []).filter(function(c){
 var painelCatsAberto = false;
 
 /**
- * Quantas cabem na barra sem virar rolagem.
+ * Onde parar de mostrar categoria na barra.
  *
- * Estimativa por largura media do chip — medir cada um exigiria desenhar
- * antes, e a barra apareceria montando. Erra pra menos de proposito: e
- * melhor sobrar espaco do que estourar.
+ * Era estimativa: 150px por chip. Estimativa so funciona enquanto o chip
+ * tem tamanho previsivel — quando ele perdeu a caixa e virou texto puro,
+ * 150px passou a sobrar muito, e "Todas as categorias" caiu pra uma
+ * segunda linha com a barra meio vazia.
+ *
+ * Agora MEDE. Desenha tudo, pergunta ao layout se coube numa linha so, e
+ * tira do fim ate caber. E o unico jeito que nao depende do tamanho da
+ * fonte, do comprimento dos nomes nem do idioma. O custo e um reflow por
+ * chip removido, num elemento com uma duzia de filhos — imperceptivel, e
+ * so acontece no primeiro desenho e no resize.
  */
-function cabemNaBarra(){
-  var largura = Math.min(window.innerWidth || 1024, 1280) - 40;
-  if(largura < 640) return 4;
-  return Math.max(4, Math.floor(largura / 150) - 1);
+var MINIMO_NA_BARRA = 3;
+
+function passouDeUmaLinha(w){
+  var f = w.firstElementChild, l = w.lastElementChild;
+  if(!f || f === l) return false;
+  // Dois filhos com offsetTop diferente = o flex-wrap quebrou a linha.
+  return l.offsetTop > f.offsetTop;
 }
 
 function renderCategorias(){
   var w = document.getElementById('catsWrap');
   if(!w) return;
 
-  var naBarra = CATEGORIAS.slice(0, cabemNaBarra());
-  var sobra = CATEGORIAS.length - naBarra.length;
-
-  var chips = '<button type="button" class="cat-chip' + (currentCat === 'Todos' ? ' active' : '') + '" data-cat="Todos">Todos</button>';
-  chips += naBarra.map(function(c){
+  function chipHtml(c){
     return '<button type="button" class="cat-chip' + (currentCat === c.nome ? ' active' : '') + '" data-cat="' + esc(c.nome) + '">'
       + esc(c.nome) + '<span class="cat-num">' + c.total + '</span></button>';
-  }).join('');
-
-  // O botao so aparece quando ha o que ele revelar.
-  if(sobra > 0){
-    chips += '<button type="button" class="cat-todas" id="catTodas" aria-expanded="false">'
+  }
+  function botaoTodas(){
+    return '<button type="button" class="cat-todas" id="catTodas" aria-expanded="false">'
       + 'Todas as categorias<span class="cat-num">' + CATEGORIAS.length + '</span></button>';
   }
+  var todos = '<button type="button" class="cat-chip' + (currentCat === 'Todos' ? ' active' : '') + '" data-cat="Todos">Todos</button>';
 
-  w.innerHTML = chips;
+  function desenhar(quantas){
+    var sobra = CATEGORIAS.length - quantas;
+    w.innerHTML = todos
+      + CATEGORIAS.slice(0, quantas).map(chipHtml).join('')
+      // O botao so aparece quando ha o que ele revelar.
+      + (sobra > 0 ? botaoTodas() : '');
+  }
+
+  var quantas = CATEGORIAS.length;
+  desenhar(quantas);
+  // Tira uma por vez ate caber. O piso existe pra que uma janela muito
+  // estreita mostre alguma categoria em vez de so o botao "Todas".
+  while(quantas > MINIMO_NA_BARRA && passouDeUmaLinha(w)){
+    quantas--;
+    desenhar(quantas);
+  }
 
   w.querySelectorAll('.cat-chip').forEach(function(chip){
     chip.addEventListener('click', function(){
@@ -125,9 +145,22 @@ document.addEventListener('keydown', function(e){
   if(e.key === 'Escape' && painelCatsAberto) fecharPainelCats();
 });
 
-// A quantidade que cabe muda com a largura da janela.
+// A quantidade que cabe muda com a largura da janela. Agrupado num frame
+// porque agora cada render mede o layout: resize dispara dezenas de vezes
+// por segundo e nao ha motivo pra remedir mais de uma vez por quadro.
+var reagendado = false;
 window.addEventListener('resize', function(){
   if(painelCatsAberto) fecharPainelCats();
-  renderCategorias();
+  if(reagendado) return;
+  reagendado = true;
+  requestAnimationFrame(function(){ reagendado = false; renderCategorias(); });
 });
+
+// A medida so vale depois que a fonte da loja carregou. O primeiro desenho
+// acontece na fonte de fallback; quando a real entra, os nomes mudam de
+// largura e a barra pode passar a quebrar sem que ninguem tenha
+// redimensionado nada. Este e o unico jeito de saber a hora certa.
+if(document.fonts && document.fonts.ready && document.fonts.ready.then){
+  document.fonts.ready.then(function(){ renderCategorias(); });
+}
 `;

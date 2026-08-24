@@ -156,8 +156,12 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 }
 
 /* Search button (icon-only, na .topbar-right) */
-.search-btn{position:relative;width:42px;height:42px;border-radius:999px;background:transparent;border:1px solid var(--sf-border);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;color:var(--sf-ink);padding:0;font-family:inherit;}
-.search-btn:hover{background:var(--sf-brand-wash);border-color:var(--sf-border-2);}
+/* Sem anel. Dois circulos contornados no cabecalho eram os dois primeiros
+   "botoes" que a pessoa via, e nenhum dos dois e acao principal. Icone
+   sozinho ja e o padrao que todo e-commerce usa ali — a area de clique de
+   42px continua igual, so o contorno saiu. */
+.search-btn{position:relative;width:42px;height:42px;border-radius:0;background:transparent;border:0;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:color .2s;color:var(--sf-ink-2);padding:0;font-family:inherit;}
+.search-btn:hover{color:var(--sf-ink);background:transparent;}
 
 /* Search inline — input expandido sobrepondo o nome da loja quando .searching */
 .topbar-search-inline{position:absolute;left:20px;right:20px;top:11px;height:42px;display:none;align-items:center;gap:10px;background:var(--sf-bg-card);border:1px solid var(--sf-border-2);border-radius:999px;padding:0 14px 0 16px;opacity:0;transform:translateY(-4px);transition:opacity .2s ease, transform .2s ease;z-index:2;}
@@ -171,8 +175,8 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .topbar.searching .topbar-brand,
 .topbar.searching .topbar-right{opacity:0;pointer-events:none;}
 
-.cart-btn{position:relative;width:42px;height:42px;border-radius:999px;background:transparent;border:1px solid var(--sf-border);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .2s;color:var(--sf-ink);}
-.cart-btn:hover{background:var(--sf-brand-wash);border-color:var(--sf-border-2);}
+.cart-btn{position:relative;width:42px;height:42px;border-radius:0;background:transparent;border:0;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:color .2s;color:var(--sf-ink-2);}
+.cart-btn:hover{color:var(--sf-ink);background:transparent;}
 .cart-badge{position:absolute;top:-2px;right:-2px;background:var(--sf-accent);color:#fff;width:18px;height:18px;border-radius:50%;font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center;border:2px solid var(--sf-bg);font-family:${fontMono};}
 .cart-badge.visible{display:flex;}
 
@@ -217,8 +221,20 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .banner-headline{font-family:${fontSerif};font-size:clamp(28px,5vw,56px);line-height:1.02;margin:0 0 14px;color:var(--sf-ink);letter-spacing:-0.8px;font-weight:400;max-width:480px;text-wrap:balance;}
 .banner-body{font-size:15px;color:var(--sf-ink-2);max-width:380px;margin:0 0 22px;line-height:1.5;text-wrap:pretty;}
 @media(max-width:600px){.banner-headline{font-size:32px;}.banner-body{font-size:13px;}}
-.banner-cta{display:inline-flex;align-items:center;gap:8px;padding:12px 22px;border-radius:999px;background:var(--sf-brand);color:#fff;border:1px solid var(--sf-brand);font-family:${fontSans};font-weight:600;font-size:14px;cursor:pointer;letter-spacing:0.2px;transition:transform .15s ease;}
-.banner-cta:hover{transform:translateY(-1px);}
+/* Deixou de ser pilula cheia. "Ver produtos" nao e a acao principal da
+   loja — a acao principal e comprar, e ela mora na pagina do produto.
+   Uma pilula preenchida no banner competia com o proprio banner e ainda
+   assim, nas palavras do lojista, "nao faz muita coisa": ela so rola a
+   pagina. Agora e o que ela e — um link com regua e seta.
+
+   Como a regua e a borda do proprio elemento, ele PRECISA ter a largura
+   do texto: dentro de um flex column o botao estica e a linha atravessa
+   o banner inteiro. Dai o align-self e o width:fit-content. */
+.banner-cta{display:inline-flex;align-self:flex-start;width:fit-content;align-items:center;gap:8px;padding:4px 0;border:0;border-bottom:1.5px solid currentColor;border-radius:0;background:none;color:inherit;font-family:${fontSans};font-weight:600;font-size:14px;cursor:pointer;letter-spacing:0.2px;transition:opacity .2s;}
+.banner-cta::after{content:"→";font-size:15px;line-height:1;transition:transform 200ms cubic-bezier(.4,0,.2,1);}
+/* O movimento fica na SETA, nao no bloco todo. Bloco que levanta no hover
+   foi exatamente a queixa de "elemento flutuante". */
+.banner-cta:hover::after{transform:translateX(3px);}
 .banner-art-shape{position:absolute;right:-30px;top:-10px;width:60%;height:120%;opacity:0.9;}
 .banner-dots{position:absolute;left:0;right:0;bottom:16px;display:flex;justify-content:center;gap:8px;z-index:3;}
 .banner-dot{width:8px;height:8px;border-radius:4px;border:none;cursor:pointer;background:color-mix(in oklab,var(--sf-ink) 30%,transparent);transition:all .4s cubic-bezier(.4,0,.2,1);padding:0;}
@@ -298,15 +314,30 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
    24, a Finesse (28 categorias) mostrava 11 — e mesmo completa, 28 chips
    em fila e uma parede. Agora: as que cabem na barra, e um painel com
    todas, em colunas e com a contagem de cada uma. */
-.cats-wrap{padding:12px max(20px,calc((100% - 1280px)/2 + 20px));display:flex;gap:8px;flex-wrap:wrap;align-items:center;position:sticky;top:64px;z-index:50;background:var(--sf-bg);border-bottom:1px solid var(--sf-border);}
-.cat-chip,.cat-todas{display:inline-flex;align-items:center;gap:7px;font-family:${fontSans};font-size:13px;font-weight:600;color:var(--sf-ink-2);background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:999px;padding:8px 15px;cursor:pointer;white-space:nowrap;transition:border-color 200ms cubic-bezier(.4,0,.2,1),color 200ms cubic-bezier(.4,0,.2,1);}
-.cat-chip:hover,.cat-todas:hover{border-color:var(--sf-brand);color:var(--sf-brand-ink);}
-.cat-chip.active{background:var(--sf-brand);border-color:var(--sf-brand);color:#fff;}
+.cats-wrap{padding:12px max(20px,calc((100% - 1280px)/2 + 20px));display:flex;gap:20px;flex-wrap:wrap;align-items:center;position:sticky;top:64px;z-index:50;background:var(--sf-bg);border-bottom:1px solid var(--sf-border);}
+/* Sem pilula, sem caixa. Uma fila de categorias com contorno em cada uma
+   sao 12 retangulos disputando atencao logo abaixo do banner — a barra
+   pesava mais que os produtos. A selecionada se marca por REGUA: uma
+   linha embaixo da palavra, que e como catalogo impresso e vitrine de
+   loja grande marcam a secao aberta. */
+/* ink-2, nao ink-3. Enquanto o chip tinha caixa, a borda carregava a
+   leitura e o texto podia ser fraco. Sem caixa, o texto e tudo que
+   existe: ink-3 sobre a barra da 2.91:1, abaixo do minimo de 4.5:1 da
+   WCAG. ink-2 da 6.48:1 e continua bem separado da ativa (16.98:1). */
+.cat-chip,.cat-todas{display:inline-flex;align-items:center;gap:7px;font-family:${fontSans};font-size:13.5px;font-weight:600;color:var(--sf-ink-2);background:none;border:0;border-bottom:2px solid transparent;border-radius:0;padding:7px 2px;cursor:pointer;white-space:nowrap;transition:color 200ms cubic-bezier(.4,0,.2,1),border-color 200ms cubic-bezier(.4,0,.2,1);}
+.cat-chip:hover,.cat-todas:hover{color:var(--sf-ink);}
+.cat-chip.active{color:var(--sf-ink);border-bottom-color:var(--sf-brand);}
 /* A contagem em mono e tabular: numero que muda de largura faz a barra
    dancar quando a pessoa troca de categoria. */
-.cat-num{font-family:${fontMono};font-size:11px;font-variant-numeric:tabular-nums;opacity:.65;}
-.cat-todas{border-style:dashed;}
-.cat-todas.aberto{border-style:solid;border-color:var(--sf-brand);color:var(--sf-brand-ink);}
+.cat-num{font-family:${fontMono};font-size:11px;font-variant-numeric:tabular-nums;opacity:.7;}
+/* A contagem herda a cor do chip, entao ela SOBE junto quando a categoria
+   e a ativa — sem isso o numero da ativa ficaria mais fraco que o da
+   vizinha inativa. */
+.cat-chip.active .cat-num{opacity:.8;}
+/* "Todas" e a unica que continua parecendo controle — ela ABRE algo, e
+   isso precisa ficar visivel. Regua pontilhada em vez de solida. */
+.cat-todas{border-bottom-style:dotted;border-bottom-color:var(--sf-border-2);color:var(--sf-ink-2);}
+.cat-todas.aberto{border-bottom-style:solid;border-bottom-color:var(--sf-brand);color:var(--sf-ink);}
 
 .cats-painel{position:sticky;top:112px;z-index:60;padding:0 max(20px,calc((100% - 1280px)/2 + 20px));}
 .cats-painel-inner{background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:0 0 16px 16px;border-top:0;box-shadow:var(--sf-shadow);padding:18px 20px 20px;}
@@ -332,15 +363,19 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:28px;row-gap:48px;}
 @media(max-width:600px){.products-grid{grid-template-columns:repeat(2,1fr);gap:14px;row-gap:28px;}}
 
-.product-card{cursor:pointer;display:flex;flex-direction:column;transition:transform .18s ease;background:transparent;border:none;border-radius:0;padding:0;}
-.product-card:hover{transform:translateY(-2px);}
+/* O cartao NAO se move mais no hover. Vinte e quatro cartoes que sobem um
+   ao passar o mouse foi a origem da queixa de "elementos flutuantes": a
+   pagina inteira parecia solta. Quem responde agora e a FOTO, que cresce
+   um pouco dentro da moldura — o produto reage, o layout fica parado. */
+.product-card{cursor:pointer;display:flex;flex-direction:column;background:transparent;border:none;border-radius:0;padding:0;}
+.product-card:hover .product-img img{transform:scale(1.04);}
 /* Ladrilho NEUTRO atras da foto. O gradiente --sf-ph-* e a capa de
    quem NAO tem foto, e o markup injeta ele inline nesse caso. Deixar
    o gradiente aqui fazia toda foto aparecer sobre um tapete colorido
    assim que a foto passou a entrar em "contain" — e foto recortada
    em fundo branco ficava com uma moldura pessego em volta. */
 .product-img{width:100%;aspect-ratio:1/1;background:var(--sf-bg-2);position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;border-radius:12px;margin-bottom:16px;}
-.product-img img{width:100%;height:100%;object-fit:contain;padding:6%;}
+.product-img img{width:100%;height:100%;object-fit:contain;padding:6%;transition:transform 320ms cubic-bezier(.4,0,.2,1);}
 .product-ph-initials{font-family:${fontSerif};font-size:34px;line-height:1;color:var(--sf-brand-ink);letter-spacing:0.5px;}
 .sort-wrap{margin-left:auto;display:inline-flex;align-items:center;gap:8px;}
 .sort-lbl{font-family:${fontSans};font-size:11px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:var(--sf-ink-3);}
@@ -348,13 +383,23 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .sort-wrap select:hover{border-color:var(--sf-brand);}
 /* Rodape da grade: barra de paginas. */
 .grid-more{margin-top:28px;display:flex;flex-direction:column;align-items:center;gap:10px;font-family:${fontSans};}
-.pg-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:center;}
-.pg-num,.pg-seta{font-family:${fontSans};font-size:13.5px;font-weight:600;color:var(--sf-ink-2);background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:10px;min-width:38px;height:38px;padding:0 12px;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1),color 200ms cubic-bezier(.4,0,.2,1);font-variant-numeric:tabular-nums;}
-.pg-num:hover:not(.pg-atual),.pg-seta:hover:not(:disabled){border-color:var(--sf-brand);color:var(--sf-brand-ink);}
-/* A pagina atual e PREENCHIDA, nao so grifada: em barra de numeros a
-   borda sozinha se perde no meio das outras. */
-.pg-atual{background:var(--sf-brand);border-color:var(--sf-brand);color:#fff;cursor:default;}
-.pg-seta:disabled{opacity:.4;cursor:default;}
+.pg-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:center;}
+/* Numeros, nao botoes. Onze caixas em fila no rodape pareciam um teclado
+   e competiam com os produtos logo acima. */
+/* ink-2 pelo mesmo motivo das categorias: sem a caixa, o numero e o unico
+   sinal, e ink-3 nao passa em contraste. */
+.pg-num,.pg-seta{font-family:${fontSans};font-size:14px;font-weight:600;color:var(--sf-ink-2);background:none;border:0;border-bottom:2px solid transparent;border-radius:0;min-width:30px;height:34px;padding:0 4px;cursor:pointer;transition:color 200ms cubic-bezier(.4,0,.2,1),border-color 200ms cubic-bezier(.4,0,.2,1);font-variant-numeric:tabular-nums;}
+.pg-num:hover:not(.pg-atual),.pg-seta:hover:not(:disabled){color:var(--sf-ink);}
+/* A pagina atual se marca por REGUA. Antes ela era preenchida, com o
+   argumento de que borda sozinha se perde no meio das outras — o que era
+   verdade enquanto as outras TAMBEM tinham borda. Sem as caixas, o unico
+   numero grifado da fila e o mais visivel dela. */
+.pg-atual{color:var(--sf-ink);border-bottom-color:var(--sf-brand);cursor:default;}
+/* "Anterior" e "Proxima" escritos por extenso, nao setas soltas — a seta
+   sozinha ja foi apontada como controle que nao diz o que faz. O padding
+   maior separa as palavras da fila de numeros. */
+.pg-seta{padding:0 10px;}
+.pg-seta:disabled{opacity:.25;cursor:default;}
 .pg-gap{color:var(--sf-ink-3);padding:0 2px;}
 .pg-info{font-size:12.5px;color:var(--sf-ink-3);font-variant-numeric:tabular-nums;}
 
@@ -369,8 +414,6 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .product-desc{font-size:12px;color:var(--sf-ink-3);line-height:1.5;margin-bottom:12px;display:none;}
 .product-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:auto;}
 .product-price{font-family:${fontMono};font-size:14px;font-weight:500;color:var(--sf-ink);}
-.add-btn{background:var(--sf-brand);color:#fff;border:none;border-radius:999px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .18s;flex-shrink:0;font-size:18px;line-height:1;}
-.add-btn:hover{transform:scale(1.08);}
 /* No cartao o controle de quantidade tambem ocupa a largura toda, pra
    ficar no mesmo lugar e no mesmo tamanho do botao que ele substitui. */
 .qty-ctrl{display:flex;align-items:center;justify-content:space-between;gap:6px;background:var(--sf-brand-wash);border:1px solid var(--sf-border);border-radius:10px;padding:4px;}
@@ -507,7 +550,13 @@ body.card-style-image-heavy .product-desc{display:none;}
 /* Contact bar (footer area) */
 .contact-bar{background:var(--sf-bg-card);border-top:1px solid var(--sf-border);padding:24px 20px;text-align:center;}
 .contact-bar p{font-size:13px;color:var(--sf-ink-3);margin-bottom:14px;font-family:${fontSans};}
-.whatsapp-cta{display:inline-flex;align-items:center;gap:8px;background:#25D366;color:#fff;padding:12px 26px;border-radius:999px;font-size:14px;font-weight:600;text-decoration:none;font-family:${fontSans};}
+/* Contornado, nao preenchido. Uma pilula verde solida no rodape era o
+   elemento mais forte de uma pagina que vende roupa, e o verde nem e da
+   loja — e do WhatsApp. O ICONE fica verde: e ele que da o
+   reconhecimento, nao o fundo. */
+.whatsapp-cta{display:inline-flex;align-items:center;gap:9px;background:transparent;color:var(--sf-ink);padding:11px 24px;border:1px solid var(--sf-border-2);border-radius:999px;font-size:14px;font-weight:600;text-decoration:none;font-family:${fontSans};transition:border-color 200ms cubic-bezier(.4,0,.2,1);}
+.whatsapp-cta svg{color:#25D366;flex-shrink:0;}
+.whatsapp-cta:hover{border-color:#25D366;}
 
 /* ============================================================
    Quote ribbon (press blurb)
@@ -612,12 +661,16 @@ body.card-style-image-heavy .product-desc{display:none;}
 
 .pd-acoes{display:flex;flex-direction:column;gap:10px;margin-top:22px;}
 @media(min-width:520px){.pd-acoes{flex-direction:row;}.pd-acoes button{flex:1;}}
-.pd-comprar,.pd-add{font-family:${fontSans};font-size:14.5px;font-weight:700;border-radius:12px;padding:15px 20px;cursor:pointer;transition:transform 200ms cubic-bezier(.4,0,.2,1),background 200ms cubic-bezier(.4,0,.2,1);border:1.5px solid var(--sf-brand);}
+/* Estas DUAS sao as unicas acoes preenchidas da navegacao — e so uma
+   delas e solida. Depois de tirar o preenchimento das categorias, da
+   paginacao, do cabecalho e do banner, o par de botoes aqui e o unico
+   lugar cheio de cor da jornada inteira, que e onde ele deve estar. */
+.pd-comprar,.pd-add{font-family:${fontSans};font-size:14.5px;font-weight:700;border-radius:10px;padding:15px 20px;cursor:pointer;transition:background 200ms cubic-bezier(.4,0,.2,1),border-color 200ms cubic-bezier(.4,0,.2,1);border:1.5px solid var(--sf-brand);}
 .pd-comprar{background:var(--sf-brand);color:#fff;}
-.pd-comprar:hover:not(.off){background:var(--sf-brand-2);transform:translateY(-1px);}
+.pd-comprar:hover:not(.off){background:var(--sf-brand-2);}
 .pd-add{background:transparent;color:var(--sf-brand-ink);}
-.pd-add:hover:not(.off){background:var(--sf-brand-wash);transform:translateY(-1px);}
-.pd-comprar.off,.pd-add.off{opacity:.45;cursor:not-allowed;transform:none;}
+.pd-add:hover:not(.off){background:var(--sf-brand-wash);}
+.pd-comprar.off,.pd-add.off{opacity:.45;cursor:not-allowed;}
 
 .pd-desc{margin-top:28px;padding-top:22px;border-top:1px solid var(--sf-border);}
 .pd-desc-tit{font-family:${fontSans};font-size:12px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--sf-ink-3);margin-bottom:8px;}

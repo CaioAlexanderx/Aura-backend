@@ -149,14 +149,25 @@ describe('barra de categorias', () => {
     expect(saida.map((c) => c.nome)).toEqual(['Vestidos']);
   });
 
-  test('quantas cabem depende da largura', () => {
+  test('quantas cabem e MEDIDO, nao estimado', () => {
+    // Era `Math.floor(largura / 150)`. A estimativa por largura media so
+    // vale enquanto o chip tem tamanho previsivel — quando ele perdeu a
+    // caixa e virou texto puro, 150px passou a sobrar e a barra quebrava
+    // em duas linhas com metade do espaco vazio.
     const s = comCategorias([]);
-    const monta = (w) =>
-      new Function('window', s.match(/function cabemNaBarra[\s\S]*?\n\}/)[0] + '\nreturn cabemNaBarra;')({ innerWidth: w })();
-    expect(monta(390)).toBe(4);
-    expect(monta(1440)).toBeGreaterThan(monta(390));
-    // Nunca menos de 4: uma barra com 1 chip nao e uma barra.
-    expect(monta(280)).toBeGreaterThanOrEqual(4);
+    expect(s).not.toContain('cabemNaBarra');
+    expect(s).toContain('function passouDeUmaLinha');
+    // A prova de que e medicao: ele compara a posicao real dos filhos.
+    expect(s).toContain('offsetTop');
+  });
+
+  test('o corte para quando cabe, e nao antes do minimo', () => {
+    const s = comCategorias([]);
+    const laco = s.slice(s.indexOf('var quantas = CATEGORIAS.length;'));
+    // Sem o piso, uma janela estreita esconderia todas as categorias e
+    // sobraria so o botao "Todas".
+    expect(laco).toContain('quantas > MINIMO_NA_BARRA');
+    expect(laco).toContain('passouDeUmaLinha(w)');
   });
 
   test('o painel abre com TODAS, nao so com as que cabem', () => {
@@ -166,6 +177,6 @@ describe('barra de categorias', () => {
     // categorias" mentiria.
     const painel = s.slice(s.indexOf('function abrirPainelCats'));
     expect(painel.slice(0, 1200)).toContain('CATEGORIAS.map');
-    expect(painel.slice(0, 1200)).not.toContain('slice(0, cabemNaBarra())');
+    expect(painel.slice(0, 1200)).not.toContain('CATEGORIAS.slice(0,');
   });
 });
