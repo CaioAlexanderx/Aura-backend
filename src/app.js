@@ -87,7 +87,10 @@ app.use('/api/v1/reports', function(req, res, next) {
 // padrao aberto do storefront/reports — libera qualquer origem nessas rotas.
 app.use('/api/v1/public/karate', function(req, res, next) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  // PUT/PATCH: a MESA pública do mesário salva nota de kata (PUT
+  // kata-scores) e a súmula (PATCH scoresheet) — sem eles o preflight
+  // matava o save com "Failed to fetch" (achado do QA de 24/08).
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-ID');
   res.setHeader('Access-Control-Max-Age', '600');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
