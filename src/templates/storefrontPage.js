@@ -110,6 +110,13 @@ function buildStorefrontPage(data, slug) {
     siteName, tagline, logoInTopbar, logoInHero, contactBar,
     addrText, coverUrl, announcementBar, banners, serviceCards,
     isOpenNow, nextOpenText,
+    // Formas de pagamento vem do que a lojista LIGOU, nao de lista fixa.
+    pagamentos: {
+      pix:  data.settings && data.settings.has_pix === true,
+      card: data.settings && data.settings.has_card === true,
+      na_entrega: data.settings && data.settings.pay_on_delivery_enabled === true,
+    },
+    politicaTroca: data.politica_troca,
   });
   const script = buildScript(storeData, escJs(slug), API_BASE);
 

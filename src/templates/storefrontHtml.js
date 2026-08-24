@@ -24,10 +24,27 @@
 //
 // Fase 5 (20/05/2026): badge Aberta/Fechada ao lado do nome da loja.
 // Verde quando is_open_now=true; cinza com next_open_text quando false.
+/**
+ * Politica de troca padrao.
+ *
+ * Espelha o prazo de 7 dias do Codigo de Defesa do Consumidor para compra
+ * fora do estabelecimento (art. 49). NAO promete mais que a lei: lojista
+ * que quiser ser mais generosa reescreve no painel, e a que nao escrever
+ * nada fica com algo correto no lugar de nada.
+ */
+const POLITICA_PADRAO =
+  'Você tem até 7 dias corridos após receber o pedido para desistir da compra, '
+  + 'conforme o Código de Defesa do Consumidor. Para trocar por outro tamanho ou '
+  + 'cor, fale com a loja pelo WhatsApp.';
+
 function buildHtmlBody({
   siteName, tagline, logoInTopbar, logoInHero, contactBar,
   addrText, coverUrl, announcementBar, banners, serviceCards,
   isOpenNow, nextOpenText,
+  // Rodape institucional (24/08/2026): como pagar e o que acontece se a
+  // peca nao servir. As duas coisas que o rodape de e-commerce grande tem
+  // e o nosso nao tinha.
+  pagamentos, politicaTroca,
 }) {
   banners = Array.isArray(banners) ? banners : [];
   serviceCards = Array.isArray(serviceCards) ? serviceCards : [];
@@ -35,6 +52,37 @@ function buildHtmlBody({
   const hasCover = !!coverUrl;
   const heroSectionClass = hasCover ? 'hero-section has-cover' : 'hero-section no-cover';
   const coverStyle = hasCover ? ` style="background-image:url('${coverUrl}')"` : '';
+
+  // ── Rodape institucional ──────────────────────────────
+  //
+  // As formas de pagamento saem da CONFIGURACAO da lojista, nao de uma
+  // lista fixa: loja sem Pix nem cartao nao mostra nada (anunciar forma
+  // de pagamento que a loja nao aceita e pior que nao anunciar), loja so
+  // com Pix mostra so Pix.
+  //
+  // Sem selo de bandeira: nao temos as marcas, e inventar um retangulo
+  // escrito "VISA" seria falsificar. Texto simples, que e tambem a linha
+  // minimalista escolhida pro resto da loja.
+  const formas = [];
+  if (pagamentos && pagamentos.pix)   formas.push('Pix');
+  if (pagamentos && pagamentos.card)  formas.push('Cartão de crédito e débito');
+  if (pagamentos && pagamentos.na_entrega) formas.push('Pagamento na entrega');
+
+  const politica = (politicaTroca && String(politicaTroca).trim())
+    ? String(politicaTroca).trim()
+    : POLITICA_PADRAO;
+
+  const rodapeInstitucional = (formas.length || politica) ? `
+    <div class="footer-inst">
+      ${formas.length ? `<div class="footer-inst-bloco">
+        <div class="footer-inst-tit">Formas de pagamento</div>
+        <div class="footer-inst-txt">${formas.join(' · ')}</div>
+      </div>` : ''}
+      ${politica ? `<div class="footer-inst-bloco">
+        <div class="footer-inst-tit">Trocas e devoluções</div>
+        <div class="footer-inst-txt">${escHtml(politica)}</div>
+      </div>` : ''}
+    </div>` : '';
 
   // Icon set (mesmos paths que parts/products.js usa). Stroke=currentColor.
   const ICONS = {
@@ -248,6 +296,7 @@ ${contactBar}
         <span class="brand">Aura<span class="brand-dot">.</span></span>
       </div>
     </div>
+    ${rodapeInstitucional}
     <div class="site-footer-bottom">
       <span>© ${new Date().getFullYear()} ${siteName}</span>
       <a href="https://getaura.com.br" target="_blank" style="color:inherit;text-decoration:none;">Quero uma loja como essa</a>

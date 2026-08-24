@@ -355,6 +355,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     pay_on_delivery_enabled,
     card_enabled,
     card_max_installments,
+    politica_troca,
     // Fase 5
     pickup_address, pickup_eta_text, delivery_eta_text,
     origin_zip, delivery_pricing_mode, delivery_distance_tiers,
@@ -749,6 +750,33 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     // UPDATE separado pelo mesmo motivo do card_enabled — nao mexer no
     // UPSERT principal e sobreviver a base sem a migration (42703).
     // ============================================================
+    // Migration 306 — politica de troca do rodape. UPDATE separado pelo
+    // mesmo motivo dos outros: nao mexer no UPSERT principal e sobreviver
+    // a base sem a migration (42703).
+    if (politica_troca !== undefined) {
+      // String vazia LIMPA e faz o template voltar ao texto padrao — e
+      // assim que ela desfaz uma edicao sem precisar recopiar o padrao.
+      const texto = (politica_troca && String(politica_troca).trim())
+        ? String(politica_troca).trim().slice(0, 1200)
+        : null;
+      try {
+        const { rows: updated } = await db.query(
+          `UPDATE digital_channel_config
+             SET politica_troca = $1, updated_at = NOW()
+           WHERE company_id = $2
+           RETURNING *`,
+          [texto, cid]
+        );
+        if (updated.length) savedConfig = updated[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          console.error('[canal-politica] coluna politica_troca inexistente — skip:', e.message);
+        } else {
+          throw e;
+        }
+      }
+    }
+
     if (card_max_installments !== undefined) {
       // null/0/"" limpam o campo: e assim que a lojista desliga o
       // parcelamento sem precisar de um toggle separado.
