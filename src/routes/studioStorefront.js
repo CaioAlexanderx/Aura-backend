@@ -218,8 +218,12 @@ router.get('/:slug/studio/products', async (req, res) => {
 
     // Lista produtos personalizaveis (respeita visibility canonica)
     const visibility = listVisibilityWhere('$1');
-    const { rows: products } = await db.query(
+    // Migration 305 — ficha tecnica. Tentar-e-cair: o backend nao roda
+    // migration no boot, entao coluna nova sempre tem um intervalo em que
+    // o codigo subiu e o banco nao.
+    const consultaProdutos = (colsFicha) => db.query(
       `SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty,
+              ${colsFicha}
               customization_config
          FROM products
         WHERE ${visibility}
@@ -231,6 +235,14 @@ router.get('/:slug/studio/products', async (req, res) => {
         LIMIT 200`,
       [cid]
     );
+
+    let products;
+    try {
+      ({ rows: products } = await consultaProdutos('material, medidas, cuidados,'));
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      ({ rows: products } = await consultaProdutos(''));
+    }
 
     // Revisions policy — exposta sempre (default null/0 = sem limite/preco)
     const revisions = {
@@ -407,6 +419,13 @@ router.get('/:slug/studio/products', async (req, res) => {
           // na foto unica de antes.
           gallery_urls: Array.isArray(p.gallery_urls) ? p.gallery_urls : [],
           category: p.category || null,
+          // Migration 305 — ficha tecnica. A loja comum ja mostra; a
+          // vitrine nasceu sem porque esta rota tem o proprio mapeamento
+          // de produto, separado de montarProdutoPublico. Sem isto a
+          // ficha ja teria divergido no dia em que foi criada.
+          material: p.material || null,
+          medidas:  p.medidas  || null,
+          cuidados: p.cuidados || null,
           category_id:   cat ? cat.id   : null,
           category_slug: cat ? cat.slug : null,
           category_path: cat ? cat.path : null,
