@@ -340,3 +340,50 @@ describe('scoresheet (súmula)', () => {
     expect(res.body.rules_footer.required_kata).toMatch(/menos graduado/);
   });
 });
+
+// ── Onda B: check-in leve (federação) ───────────────────────
+describe('check-in leve (credenciamento)', () => {
+  it('(7) rollup por atleta com totais; marcar propaga às inscrições; status inválido → 422', async () => {
+    let marked = null;
+    db.query.mockImplementation((sql, params) => {
+      const s = String(sql);
+      if (/FROM karate_competitions/i.test(s)) return Promise.resolve({ rows: [compRow] });
+      if (/-- p2b:checkin-list/.test(s)) {
+        return Promise.resolve({ rows: [
+          { student_id: 'stu-1', student_name: 'Yuri', dojo_id: 'd1', dojo_name: 'Kondei', category_name: 'Kata Mirim', checked_in_at: '2026-10-01T08:00:00Z', no_show_at: null, check_in_source: 'dojo' },
+          { student_id: 'stu-1', student_name: 'Yuri', dojo_id: 'd1', dojo_name: 'Kondei', category_name: 'Kumite Mirim', checked_in_at: '2026-10-01T08:00:00Z', no_show_at: null, check_in_source: 'dojo' },
+          { student_id: 'stu-2', student_name: 'Theo', dojo_id: 'd1', dojo_name: 'Kondei', category_name: 'Kata Mirim', checked_in_at: null, no_show_at: '2026-10-01T09:00:00Z', check_in_source: 'federacao' },
+          { student_id: 'stu-3', student_name: 'Ana', dojo_id: 'd2', dojo_name: 'Areikan', category_name: 'Kata Fem', checked_in_at: null, no_show_at: null, check_in_source: null },
+        ] });
+      }
+      if (/-- p2b:checkin-mark/.test(s)) {
+        marked = { params };
+        return Promise.resolve({ rows: [{ id: 'e1' }, { id: 'e2' }] }); // 2 inscrições do atleta
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const list = await request(buildSetupApp())
+      .get(`/federation/${FED_ID}/competitions/${COMP_ID}/check-in`)
+      .set('Authorization', 'Bearer ' + adminToken);
+    expect(list.status).toBe(200);
+    expect(list.body.totals).toEqual({ atletas: 3, presentes: 1, ausentes: 1, pendentes: 1 });
+    const yuri = list.body.data.find((s) => s.student_id === 'stu-1');
+    expect(yuri.status).toBe('presente');
+    expect(yuri.categories).toEqual(['Kata Mirim', 'Kumite Mirim']); // rollup POR ATLETA
+
+    const mark = await request(buildSetupApp())
+      .patch(`/federation/${FED_ID}/competitions/${COMP_ID}/check-in/stu-1`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ status: 'ausente' });
+    expect(mark.status).toBe(200);
+    expect(mark.body.entries_updated).toBe(2); // propagou às DUAS inscrições
+    expect(marked.params).toEqual([COMP_ID, 'stu-1', 'ausente']);
+
+    const bad = await request(buildSetupApp())
+      .patch(`/federation/${FED_ID}/competitions/${COMP_ID}/check-in/stu-1`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ status: 'talvez' });
+    expect(bad.status).toBe(422);
+  });
+});
