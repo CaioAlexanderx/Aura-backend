@@ -267,12 +267,11 @@ function propagateWinners(rounds) {
       if (feedB && feedB.winnerId !== null) {
         cur[p].shiroId = feedB.winnerId;
       }
-      // Auto-advance if one side is null (bye propagation)
-      if (cur[p].akaId === null && cur[p].shiroId !== null) {
-        cur[p].winnerId = cur[p].shiroId;
-      } else if (cur[p].shiroId === null && cur[p].akaId !== null) {
-        cur[p].winnerId = cur[p].akaId;
-      }
+      // NUNCA auto-avançar por lado null aqui: em rodadas >= 1, null
+      // significa "alimentadora ainda não decidida" — NÃO é bye. O bye
+      // real usa o sentinel 'bye' e só existe na rodada 0, onde o
+      // generate já lança o vencedor. O auto-avanço antigo coroava
+      // campeão em cascata ao lançar UMA luta (achado do QA 23/08).
     }
   }
 }
