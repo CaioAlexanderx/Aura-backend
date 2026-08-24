@@ -213,7 +213,49 @@ describe('schedule-board', () => {
     expect(res.body.areas[1].categories).toHaveLength(0);
     expect(res.body.unassigned).toHaveLength(1);
     expect(res.body.unassigned[0].id).toBe(CAT_3);
-    expect(res.body.totals).toEqual({ categories: 3, assigned: 2, entry_count: 41 });
+    expect(res.body.totals).toEqual({ categories: 3, assigned: 2, entry_count: 41, conflict_count: 0 });
+    expect(res.body.conflicts).toEqual([]);
+  });
+
+  it('(5b) atleta com provas em kotos DIFERENTES vira conflito (aviso, nunca bloqueio)', async () => {
+    db.query.mockImplementation((sql) => {
+      const s = String(sql);
+      if (/FROM karate_competitions/i.test(s)) return Promise.resolve({ rows: [compRow] });
+      if (/FROM karate_competition_areas/i.test(s)) {
+        return Promise.resolve({ rows: [
+          { id: AREA_A, name: 'Koto A', sort_order: 0, notes: null },
+          { id: AREA_B, name: 'Koto B', sort_order: 1, notes: null },
+        ] });
+      }
+      if (/FROM karate_competition_categories cat/i.test(s)) {
+        return Promise.resolve({ rows: [
+          { id: CAT_1, name: 'Kata Mirim', modality: 'kata', group_label: null, division_id: null, division_name: null, area_id: AREA_A, area_order: 0, kata_mode: null, entry_count: 2 },
+          { id: CAT_2, name: 'Kumite Mirim', modality: 'kumite', group_label: null, division_id: null, division_name: null, area_id: AREA_B, area_order: 0, kata_mode: null, entry_count: 2 },
+        ] });
+      }
+      if (/-- p2b:koto-conflicts/.test(s)) {
+        return Promise.resolve({ rows: [
+          // Yuri: kata no Koto A E kumite no Koto B → conflito.
+          { student_id: 'stu-yuri', student_name: 'Yuri Watanabe', category_id: CAT_1, category_name: 'Kata Mirim', area_id: AREA_A, area_name: 'Koto A' },
+          { student_id: 'stu-yuri', student_name: 'Yuri Watanabe', category_id: CAT_2, category_name: 'Kumite Mirim', area_id: AREA_B, area_name: 'Koto B' },
+          // Theo: duas provas no MESMO koto → sem conflito.
+          { student_id: 'stu-theo', student_name: 'Theo Foratini', category_id: CAT_1, category_name: 'Kata Mirim', area_id: AREA_A, area_name: 'Koto A' },
+        ] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await request(buildSetupApp())
+      .get(`/federation/${FED_ID}/competitions/${COMP_ID}/schedule-board`)
+      .set('Authorization', 'Bearer ' + adminToken);
+
+    expect(res.status).toBe(200);
+    expect(res.body.totals.conflict_count).toBe(1);
+    expect(res.body.conflicts).toHaveLength(1);
+    expect(res.body.conflicts[0]).toMatchObject({
+      student_id: 'stu-yuri', student_name: 'Yuri Watanabe', area_count: 2,
+    });
+    expect(res.body.conflicts[0].categories.map((c) => c.area_name)).toEqual(['Koto A', 'Koto B']);
   });
 });
 
