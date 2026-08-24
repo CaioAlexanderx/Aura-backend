@@ -38,6 +38,7 @@ const {
   computePlacements,
 } = require('../services/karateBracket');
 const phasePlanSvc = require('../services/karatePhasePlanService');
+const kataScoring = require('../services/karateKataScoring');
 
 // ── helper: find competition (scoped to federation) ──────────────
 async function findComp(client, federationId, cid) {
@@ -648,23 +649,36 @@ const finalizeHandler = async (req, res) => {
       // ── deriva o pódio ──
       let placements = [];
       if (bracketRow.kata_mode === 'score_rounds') {
-        const sc = await client.query(
-          `SELECT entry_id, nota FROM karate_kata_scores
-            WHERE bracket_id = $1 AND phase = 'final' AND nota IS NOT NULL
-            ORDER BY nota DESC`,
-          [bracketRow.id]
-        );
-        if (!sc.rows.length) {
+        // Ranking pela cascata real (total cortado → +menor → +maior);
+        // `notas` é da 303 — fallback 42703 mantém o ranking por nota.
+        let scRows;
+        try {
+          scRows = (await client.query(
+            `SELECT entry_id, nota, notas FROM karate_kata_scores
+              WHERE bracket_id = $1 AND phase = 'final' AND nota IS NOT NULL`,
+            [bracketRow.id]
+          )).rows;
+        } catch (e303) {
+          if (e303.code !== '42703') throw e303;
+          scRows = (await client.query(
+            `SELECT entry_id, nota, NULL AS notas FROM karate_kata_scores
+              WHERE bracket_id = $1 AND phase = 'final' AND nota IS NOT NULL`,
+            [bracketRow.id]
+          )).rows;
+        }
+        if (!scRows.length) {
           await client.query('ROLLBACK');
           return res.status(422).json({ error: 'Nenhuma nota lançada na fase final ainda.', code: 'FINAL_PENDENTE' });
         }
-        // Ranking de competição: nota igual = mesmo lugar (1,2,2,4).
-        let lastNota = null; let lastPlace = 0;
-        sc.rows.forEach((r, i) => {
-          const nota = Number(r.nota);
-          const place = lastNota !== null && nota === lastNota ? lastPlace : i + 1;
+        scRows = scRows.map((r) => ({ ...r, nota: Number(r.nota) })).sort(kataScoring.compareKata);
+        // Ranking de competição: empate PERSISTENTE (após a cascata) =
+        // mesmo lugar (1,2,2,4) — na prática o dia resolve com novo kata.
+        let last = null; let lastPlace = 0;
+        scRows.forEach((r, i) => {
+          const tied = last !== null && kataScoring.compareKata(last, r) === 0;
+          const place = tied ? lastPlace : i + 1;
           placements.push({ entryId: r.entry_id, placement: place });
-          lastNota = nota; lastPlace = place;
+          last = r; lastPlace = place;
         });
       } else {
         const state = rowsToState(matchRows, bracketRow, athletes);
@@ -1245,21 +1259,26 @@ const kataScoresGetHandler = async (req, res) => {
       if (!comp) return res.status(404).json({ error: 'Competição não encontrada' });
 
       let rows = [];
+      // `notas` (individuais dos árbitros) é da 303 — fallback 42703.
+      const kataGetSql = (withNotas) =>
+        `SELECT ks.entry_id, ks.phase, ks.nota, ${withNotas ? 'ks.notas,' : 'NULL AS notas,'}
+                ks.presentation_order, ks.advances,
+                cu.name AS student_name,
+                COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
+         FROM karate_kata_scores ks
+         JOIN karate_brackets kb ON kb.id = ks.bracket_id
+         JOIN karate_competition_entries e ON e.id = ks.entry_id
+         JOIN customers cu ON cu.id = e.student_id
+         LEFT JOIN companies dj ON dj.id = e.dojo_id
+         WHERE kb.category_id = $1
+         ORDER BY ks.phase ASC, ks.presentation_order ASC NULLS LAST, ks.nota DESC NULLS LAST`;
       try {
-        const r = await client.query(
-          `SELECT ks.entry_id, ks.phase, ks.nota, ks.presentation_order, ks.advances,
-                  cu.name AS student_name,
-                  COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
-           FROM karate_kata_scores ks
-           JOIN karate_brackets kb ON kb.id = ks.bracket_id
-           JOIN karate_competition_entries e ON e.id = ks.entry_id
-           JOIN customers cu ON cu.id = e.student_id
-           LEFT JOIN companies dj ON dj.id = e.dojo_id
-           WHERE kb.category_id = $1
-           ORDER BY ks.phase ASC, ks.presentation_order ASC NULLS LAST, ks.nota DESC NULLS LAST`,
-          [catId]
-        );
-        rows = r.rows;
+        try {
+          rows = (await client.query(kataGetSql(true), [catId])).rows;
+        } catch (e303) {
+          if (e303.code !== '42703') throw e303;
+          rows = (await client.query(kataGetSql(false), [catId])).rows;
+        }
       } catch (e) {
         if (e.code !== '42P01') throw e;
       }
@@ -1270,6 +1289,7 @@ const kataScoresGetHandler = async (req, res) => {
         dojo_name: r.dojo_name,
         phase: r.phase,
         nota: r.nota !== null ? parseFloat(r.nota) : null,
+        notas: r.notas || null,
         presentation_order: r.presentation_order,
         advances: r.advances,
       })));
@@ -1289,17 +1309,30 @@ router.get('/competitions/:cid/categories/:catId/kata-scores', ...guards.read(),
 // ═══════════════════════════════════════════════════════════════
 const kataScorePutHandler = async (req, res) => {
     const { id: federationId, cid, catId } = req.params;
-    const { entry_id: entryId, phase, nota } = req.body;
+    const { entry_id: entryId, phase, nota, notas } = req.body;
 
-    if (!entryId || !phase || nota === undefined || nota === null) {
-      return res.status(422).json({ error: 'entry_id, phase e nota são obrigatórios', code: 'VALIDATION_ERROR' });
+    if (!entryId || !phase || (nota === undefined || nota === null) && !notas) {
+      return res.status(422).json({ error: 'entry_id, phase e nota (ou notas[]) são obrigatórios', code: 'VALIDATION_ERROR' });
     }
     if (!['eliminatoria', 'final'].includes(phase)) {
       return res.status(422).json({ error: 'phase deve ser eliminatoria ou final', code: 'VALIDATION_ERROR' });
     }
-    const notaNum = parseFloat(nota);
-    if (isNaN(notaNum) || notaNum < 0 || notaNum > 30) {
-      return res.status(422).json({ error: 'nota deve ser número entre 0 e 30', code: 'VALIDATION_ERROR' });
+    // Regra real (5 notas, uma por árbitro): total = soma cortando a maior
+    // e a menor; as notas individuais ficam guardadas para o desempate.
+    // `nota` sozinha segue aceita (legado / bandeirada convertida).
+    let notaNum;
+    let notasArr = null;
+    if (notas !== undefined && notas !== null) {
+      notasArr = kataScoring.normalizeNotas(notas);
+      if (!notasArr) {
+        return res.status(422).json({ error: 'notas deve ser um array de 3 a 7 números entre 0 e 10 (padrão: 5 árbitros)', code: 'VALIDATION_ERROR' });
+      }
+      notaNum = kataScoring.computeKataTotals(notasArr).total;
+    } else {
+      notaNum = parseFloat(nota);
+      if (isNaN(notaNum) || notaNum < 0 || notaNum > 30) {
+        return res.status(422).json({ error: 'nota deve ser número entre 0 e 30', code: 'VALIDATION_ERROR' });
+      }
     }
 
     const client = await db.connect();
@@ -1313,25 +1346,39 @@ const kataScorePutHandler = async (req, res) => {
       if (bracketRow.status !== 'locked') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave deve estar travada para lançar notas', code: 'CONFLICT' }); }
 
       let updated;
-      try {
+      const notasJson = notasArr ? JSON.stringify(notasArr) : null;
+      const upsert = async (withNotas) => {
+        const setNotas = withNotas ? ', notas=$5' : '';
+        const params = [notaNum, bracketRow.id, entryId, phase];
+        if (withNotas) params.push(notasJson);
         const r = await client.query(
-          `UPDATE karate_kata_scores SET nota=$1, updated_at=NOW()
+          `UPDATE karate_kata_scores SET nota=$1, updated_at=NOW()${setNotas}
            WHERE bracket_id=$2 AND entry_id=$3 AND phase=$4
            RETURNING entry_id, phase, nota, presentation_order, advances`,
-          [notaNum, bracketRow.id, entryId, phase]
+          params
         );
-        if (!r.rows.length) {
-          // Insert if missing (can happen for 'final' phase created on advance)
-          const ins = await client.query(
-            `INSERT INTO karate_kata_scores (bracket_id, entry_id, phase, nota)
-             VALUES ($1,$2,$3,$4)
-             ON CONFLICT (bracket_id, entry_id, phase) DO UPDATE SET nota=$4, updated_at=NOW()
-             RETURNING entry_id, phase, nota, presentation_order, advances`,
-            [bracketRow.id, entryId, phase, notaNum]
-          );
-          updated = ins.rows[0];
-        } else {
-          updated = r.rows[0];
+        if (r.rows.length) return r.rows[0];
+        // Insert if missing (can happen for 'final' phase created on advance)
+        const insCols = withNotas ? ', notas' : '';
+        const insVals = withNotas ? ',$5' : '';
+        const insSet = withNotas ? ', notas=$5' : '';
+        const ins = await client.query(
+          `INSERT INTO karate_kata_scores (bracket_id, entry_id, phase, nota${insCols})
+           VALUES ($2,$3,$4,$1${insVals})
+           ON CONFLICT (bracket_id, entry_id, phase) DO UPDATE SET nota=$1, updated_at=NOW()${insSet}
+           RETURNING entry_id, phase, nota, presentation_order, advances`,
+          params
+        );
+        return ins.rows[0];
+      };
+      try {
+        try {
+          updated = await upsert(true);
+        } catch (e303) {
+          if (e303.code !== '42703') throw e303;
+          // Coluna notas ausente (303 pendente): grava só o total.
+          updated = await upsert(false);
+          notasArr = null;
         }
       } catch (e) {
         if (e.code === '42P01') { await client.query('ROLLBACK'); return res.status(503).json({ error: 'Migration 183 não aplicada' }); }
@@ -1339,7 +1386,11 @@ const kataScorePutHandler = async (req, res) => {
       }
 
       await client.query('COMMIT');
-      res.json({ entry_id: updated.entry_id, phase: updated.phase, nota: parseFloat(updated.nota), updated_at: new Date().toISOString() });
+      res.json({
+        entry_id: updated.entry_id, phase: updated.phase,
+        nota: parseFloat(updated.nota), notas: notasArr,
+        updated_at: new Date().toISOString(),
+      });
     } catch (err) {
       await client.query('ROLLBACK');
       console.error('[karateBrackets] kata-score put error:', err.message);
@@ -1423,16 +1474,24 @@ const kataAdvanceHandler = async (req, res) => {
       if (!bracketRow) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave não gerada' }); }
       if (bracketRow.status !== 'locked') { await client.query('ROLLBACK'); return res.status(409).json({ error: 'Chave deve estar travada' }); }
 
-      // Get eliminatória scores sorted by nota DESC
+      // Notas da eliminatória — a ORDEM vem da cascata real de desempate
+      // (total cortado → +menor → +maior); `notas` é da 303 (42703-safe).
       let elimRows;
       try {
-        const r = await client.query(
-          `SELECT entry_id, nota FROM karate_kata_scores
-           WHERE bracket_id=$1 AND phase='eliminatoria'
-           ORDER BY nota DESC NULLS LAST`,
-          [bracketRow.id]
-        );
-        elimRows = r.rows;
+        try {
+          elimRows = (await client.query(
+            `SELECT entry_id, nota, notas FROM karate_kata_scores
+             WHERE bracket_id=$1 AND phase='eliminatoria'`,
+            [bracketRow.id]
+          )).rows;
+        } catch (e303) {
+          if (e303.code !== '42703') throw e303;
+          elimRows = (await client.query(
+            `SELECT entry_id, nota, NULL AS notas FROM karate_kata_scores
+             WHERE bracket_id=$1 AND phase='eliminatoria'`,
+            [bracketRow.id]
+          )).rows;
+        }
       } catch (e) {
         if (e.code === '42P01') { await client.query('ROLLBACK'); return res.status(503).json({ error: 'Migration 183 não aplicada' }); }
         throw e;
@@ -1443,9 +1502,25 @@ const kataAdvanceHandler = async (req, res) => {
         return res.status(422).json({ error: 'Todos os atletas devem ter nota da eliminatória antes de avançar', code: 'VALIDATION_ERROR' });
       }
 
+      elimRows = elimRows
+        .map((r) => ({ ...r, nota: parseFloat(r.nota) }))
+        .sort(kataScoring.compareKata);
+
       const n = Math.min(advanceCount, elimRows.length);
       const advancing = elimRows.slice(0, n);
       const eliminated = elimRows.slice(n);
+
+      // EMPATE PERSISTENTE cruzando a linha de corte → novo kata (decisão
+      // humana). O avanço acontece mesmo assim (nunca bloqueia); a mesa
+      // recebe os envolvidos para refazer a apresentação e re-lançar.
+      let tieBreakNeeded = [];
+      if (eliminated.length > 0 && n > 0
+          && kataScoring.compareKata(advancing[n - 1], eliminated[0]) === 0) {
+        const boundary = [advancing[n - 1], eliminated[0]];
+        for (let i = n - 2; i >= 0 && kataScoring.compareKata(advancing[i], advancing[n - 1]) === 0; i--) boundary.unshift(advancing[i]);
+        for (let i = 1; i < eliminated.length && kataScoring.compareKata(eliminated[0], eliminated[i]) === 0; i++) boundary.push(eliminated[i]);
+        tieBreakNeeded = boundary.map((r) => r.entry_id);
+      }
 
       // Mark advances
       for (const row of advancing) {
@@ -1473,6 +1548,7 @@ const kataAdvanceHandler = async (req, res) => {
         advanced: n,
         eliminated: elimRows.length - n,
         advancing_entry_ids: advancing.map(r => r.entry_id),
+        tie_break_needed: tieBreakNeeded,
       });
     } catch (err) {
       await client.query('ROLLBACK');
