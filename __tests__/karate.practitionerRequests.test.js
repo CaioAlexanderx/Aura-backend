@@ -730,3 +730,205 @@ describe('GET /federation/:id/practitioner-requests/metrics', () => {
       });
   });
 });
+
+// ════════════════════════════════════════════════════════════
+// Lote (24/08/2026) — batch-approve-create / batch-reject
+// QA 23/08: "5 passos, um por um". O lote reusa o caminho individual
+// (approveCreateOne/rejectOne) item a item, transação POR ITEM: a falha de
+// um não desfaz os demais. Aqui cobrimos:
+//   (g) validação all-or-nothing ANTES do banco (422 sem tocar db.connect)
+//   (h) número FPKT repetido DENTRO do lote é barrado antes de executar
+//   (i) resultado misto: item 1 aprova, item 2 falha e volta itemizado
+//   (j) lote de aprovação também NUNCA toca anuidade/cobrança (extensão do (e))
+//   (k) batch-reject sem reason usa o texto padrão (o sensei sempre vê algo)
+//   (l) batch-reject misto: já resolvida vira ok:false ALREADY_RESOLVED
+// ════════════════════════════════════════════════════════════
+describe('POST /federation/:id/practitioner-requests/batch-approve-create', () => {
+  it('422 quando items não é enviado — nada toca o banco (g)', (done) => {
+    const app = buildAdminApp();
+    request(app)
+      .post(`/federation/${FED_ID}/practitioner-requests/batch-approve-create`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({})
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        expect(res.body.code).toBe('VALIDATION_ERROR');
+        expect(db.connect).not.toHaveBeenCalled();
+        done();
+      });
+  });
+
+  it('422 FPKT_NUMBER_DUPLICATED_IN_BATCH quando o mesmo número aparece em dois itens (h)', (done) => {
+    const app = buildAdminApp();
+    request(app)
+      .post(`/federation/${FED_ID}/practitioner-requests/batch-approve-create`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ items: [
+        { request_id: 'req-001', fpkt_number: '10001-D' },
+        { request_id: 'req-002', fpkt_number: '10001-D' },
+      ] })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        expect(res.body.code).toBe('FPKT_NUMBER_DUPLICATED_IN_BATCH');
+        expect(res.body.request_id).toBe('req-002');
+        // Barrado ANTES de executar — nem o item 1 (que seria válido) roda.
+        expect(db.connect).not.toHaveBeenCalled();
+        done();
+      });
+  });
+
+  it('200 com resultado misto: item 1 aprovado, item 2 FPKT_NUMBER_TAKEN — sem desfazer o item 1 (i)(j)', (done) => {
+    const app = buildAdminApp();
+
+    // Cada item abre a PRÓPRIA transação (client próprio) — dois clients.
+    const client1 = { query: jest.fn(), release: jest.fn() };
+    const client2 = { query: jest.fn(), release: jest.fn() };
+    db.connect.mockResolvedValueOnce(client1).mockResolvedValueOnce(client2);
+
+    client1.query
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ // SELECT solicitação FOR UPDATE
+        id: 'req-001', federation_id: FED_ID, dojo_id: DOJO_ID, status: 'pendente',
+        full_name: 'Primeiro Do Lote', cpf: null, rg: null, birth_date: '2010-05-05',
+        email: null, phone: null, claimed_belt: 'faixa branca', payload: {},
+      }] })
+      .mockResolvedValueOnce({ rows: [] }) // SELECT dup fpkt — livre
+      .mockResolvedValueOnce({ rows: [{ id: 'prac-lote-001', name: 'Primeiro Do Lote', karate_registration_number: '20001-D', dojo_id: DOJO_ID }] }) // INSERT customers
+      .mockResolvedValueOnce({ rows: [] }) // INSERT karate_belt_history
+      .mockResolvedValueOnce({ rows: [] }) // UPDATE karate_practitioner_requests
+      .mockResolvedValueOnce({}) // SAVEPOINT (roster event)
+      .mockResolvedValueOnce({ rows: [] }) // INSERT roster event
+      .mockResolvedValueOnce({}) // RELEASE SAVEPOINT
+      .mockResolvedValueOnce({}); // COMMIT
+
+    client2.query
+      .mockResolvedValueOnce({}) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: 'req-002', federation_id: FED_ID, dojo_id: DOJO_ID, status: 'pendente', full_name: 'Segundo Do Lote', payload: {} }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'alguem' }] }) // dup fpkt — JÁ EM USO
+      .mockResolvedValueOnce({}); // ROLLBACK
+
+    request(app)
+      .post(`/federation/${FED_ID}/practitioner-requests/batch-approve-create`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ items: [
+        { request_id: 'req-001', fpkt_number: '20001-D' },
+        { request_id: 'req-002', fpkt_number: '20002-D' },
+      ] })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.approved).toBe(1);
+        expect(res.body.failed).toBe(1);
+
+        expect(res.body.results[0].request_id).toBe('req-001');
+        expect(res.body.results[0].ok).toBe(true);
+        expect(res.body.results[0].practitioner.karate_registration_number).toBe('20001-D');
+
+        expect(res.body.results[1].request_id).toBe('req-002');
+        expect(res.body.results[1].ok).toBe(false);
+        expect(res.body.results[1].code).toBe('FPKT_NUMBER_TAKEN');
+
+        // O item que falhou fez ROLLBACK só da PRÓPRIA transação; o item 1
+        // seguiu até o COMMIT — falha não desfaz os demais.
+        const sql1 = client1.query.mock.calls.map((c) => String(c[0])).join('\n');
+        const sql2 = client2.query.mock.calls.map((c) => String(c[0])).join('\n');
+        expect(sql1).toMatch(/COMMIT/);
+        expect(sql1).not.toMatch(/ROLLBACK/);
+        expect(sql2).toMatch(/ROLLBACK/);
+        expect(sql2).not.toMatch(/COMMIT/);
+
+        // (j) extensão do (e): o lote também nunca toca anuidade/cobrança.
+        const allSql = sql1 + '\n' + sql2;
+        expect(allSql).not.toMatch(/annuity/i);
+        expect(allSql).not.toMatch(/payment/i);
+        expect(allSql).not.toMatch(/charge/i);
+        done();
+      });
+  });
+});
+
+describe('POST /federation/:id/practitioner-requests/batch-reject', () => {
+  it('422 quando request_ids não é enviado', (done) => {
+    const app = buildAdminApp();
+    request(app)
+      .post(`/federation/${FED_ID}/practitioner-requests/batch-reject`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({})
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(422);
+        expect(res.body.code).toBe('VALIDATION_ERROR');
+        done();
+      });
+  });
+
+  it('200 sem reason usa o motivo padrão — o sensei sempre vê ALGUM motivo (k)', (done) => {
+    const app = buildAdminApp();
+
+    // Despacho por SQL (nunca por posição — lição do PR #422 no topo do
+    // arquivo): o UPDATE de rejeição devolve a linha; o resto (evento de
+    // roster, reabertura de acesso) responde vazio, best-effort.
+    db.query.mockImplementation((sql, params) => {
+      const s = String(sql);
+      if (/UPDATE karate_practitioner_requests/.test(s)) {
+        return Promise.resolve({ rows: [{ id: params[2], dojo_id: DOJO_ID, full_name: 'Fulano' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    request(app)
+      .post(`/federation/${FED_ID}/practitioner-requests/batch-reject`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ request_ids: ['req-001', 'req-002'] })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.rejected).toBe(2);
+        expect(res.body.failed).toBe(0);
+        expect(res.body.reason).toMatch(/rejeitada pela federação/i);
+
+        // O motivo padrão foi de fato PERSISTIDO ($1 do UPDATE), não só
+        // devolvido na resposta.
+        const updCalls = db.query.mock.calls.filter((c) => /UPDATE karate_practitioner_requests/.test(String(c[0])));
+        expect(updCalls.length).toBe(2);
+        for (const call of updCalls) {
+          expect(call[1][0]).toMatch(/rejeitada pela federação/i);
+        }
+        done();
+      });
+  });
+
+  it('200 misto: já resolvida vira ok:false ALREADY_RESOLVED sem derrubar as demais (l)', (done) => {
+    const app = buildAdminApp();
+
+    db.query.mockImplementation((sql, params) => {
+      const s = String(sql);
+      if (/UPDATE karate_practitioner_requests/.test(s)) {
+        // req-done já foi resolvida: o UPDATE (status = 'pendente') não pega nada.
+        if (params[2] === 'req-done') return Promise.resolve({ rows: [] });
+        return Promise.resolve({ rows: [{ id: params[2], dojo_id: DOJO_ID, full_name: 'Fulano' }] });
+      }
+      if (/SELECT id FROM karate_practitioner_requests/.test(s)) {
+        return Promise.resolve({ rows: [{ id: params[0] }] }); // existe, logo 409
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    request(app)
+      .post(`/federation/${FED_ID}/practitioner-requests/batch-reject`)
+      .set('Authorization', 'Bearer ' + adminToken)
+      .send({ request_ids: ['req-001', 'req-done'], reason: 'Documentação ilegível' })
+      .end((err, res) => {
+        if (err) return done(err);
+        expect(res.status).toBe(200);
+        expect(res.body.rejected).toBe(1);
+        expect(res.body.failed).toBe(1);
+        expect(res.body.results[0].ok).toBe(true);
+        expect(res.body.results[1].ok).toBe(false);
+        expect(res.body.results[1].code).toBe('ALREADY_RESOLVED');
+        done();
+      });
+  });
+});
