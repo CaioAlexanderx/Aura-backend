@@ -236,6 +236,110 @@ router.post('/dojo/competitions/:cid/delegation', requireDojoAccess, requireChan
   }
 });
 
+// ═══════════════════════════════════════════════════════════
+// ONDA B — "MINHAS CHAVES" no portal do dojô (A+B, leitura)
+// O sensei vê e imprime as chaves das categorias onde TEM atleta —
+// digitaliza o "procurar minha chave no PDF/parede" do dia real.
+// Gate: chaves PUBLICADAS (brackets_published_at) — antes disso o
+// endpoint responde 200 { published: false } (nunca 403 mudo).
+// ═══════════════════════════════════════════════════════════
+
+async function findCompPublished(federationId, cid) {
+  const { rows } = await db.query(
+    `-- p0d:comp-published
+     SELECT id, name, brackets_published_at
+       FROM karate_competitions
+      WHERE id = $1 AND federation_id = $2 LIMIT 1`,
+    [cid, federationId]
+  );
+  return rows[0] || null;
+}
+
+// ── GET /dojo/competitions/:cid/my-brackets ─────────────────
+router.get('/dojo/competitions/:cid/my-brackets', requireDojoAccess, async (req, res) => {
+  try {
+    const comp = await findCompPublished(req.federationId, req.params.cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    if (!comp.brackets_published_at) {
+      return res.json({ published: false, data: [] });
+    }
+
+    // area/division/group podem faltar (297/301 pendentes) → fallback.
+    const sql = (full) => `
+      -- p0d:my-brackets
+      SELECT cat.id, cat.name, cat.modality,
+             ${full ? `cat.group_label, d.name AS division_name,
+             a.name AS area_name, cat.area_order,` : `NULL AS group_label, NULL AS division_name,
+             NULL AS area_name, NULL AS area_order,`}
+             b.status AS bracket_status, b.kata_mode,
+             cu.name AS student_name
+        FROM karate_competition_entries e
+        JOIN karate_competition_categories cat ON cat.id = e.category_id
+        ${full ? `LEFT JOIN karate_competition_divisions d ON d.id = cat.division_id
+        LEFT JOIN karate_competition_areas a ON a.id = cat.area_id` : ''}
+        LEFT JOIN karate_brackets b ON b.category_id = cat.id
+        LEFT JOIN customers cu ON cu.id = e.student_id
+       WHERE cat.competition_id = $1 AND e.dojo_id = $2
+         AND e.status NOT IN ('withdrawn')
+       ORDER BY ${full ? 'cat.area_order ASC NULLS LAST,' : ''} cat.name ASC, cu.name ASC`;
+    let rows;
+    try {
+      ({ rows } = await db.query(sql(true), [req.params.cid, req.dojoId]));
+    } catch (e) {
+      if (e.code !== '42703' && e.code !== '42P01') throw e;
+      ({ rows } = await db.query(sql(false), [req.params.cid, req.dojoId]));
+    }
+
+    const byCat = new Map();
+    for (const r of rows) {
+      if (!byCat.has(r.id)) {
+        byCat.set(r.id, {
+          id: r.id, name: r.name, modality: r.modality,
+          group_label: r.group_label || null, division_name: r.division_name || null,
+          area_name: r.area_name || null, area_order: r.area_order != null ? r.area_order : null,
+          bracket_status: r.bracket_status || 'not_generated',
+          kata_mode: r.kata_mode || null,
+          my_athletes: [],
+        });
+      }
+      if (r.student_name) byCat.get(r.id).my_athletes.push(r.student_name);
+    }
+    return res.json({ published: true, competition_name: comp.name, data: [...byCat.values()] });
+  } catch (e) {
+    return handleReadError(res, e, 'GET /dojo/competitions/:cid/my-brackets', { published: false });
+  }
+});
+
+// ── GET /dojo/competitions/:cid/categories/:catId/scoresheet ─
+// A folha completa da categoria (mesmo payload da federação/mesa),
+// SOMENTE leitura e SOMENTE onde o dojô tem atleta + chaves publicadas.
+// Delegado ao handler compartilhado de karateBrackets (fonte única).
+async function requireMyPublishedCategory(req, res, next) {
+  try {
+    const comp = await findCompPublished(req.federationId, req.params.cid);
+    if (!comp || !comp.brackets_published_at) {
+      return res.status(404).json({ error: 'Chaves ainda não publicadas', code: 'NOT_PUBLISHED' });
+    }
+    const { rows } = await db.query(
+      `-- p0d:my-cat-gate
+       SELECT 1 FROM karate_competition_entries e
+        WHERE e.category_id = $1 AND e.dojo_id = $2
+          AND e.status NOT IN ('withdrawn')
+        LIMIT 1`,
+      [req.params.catId, req.dojoId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Categoria não encontrada entre as suas chaves', code: 'NOT_FOUND' });
+    }
+    return next();
+  } catch (e) {
+    return handleReadError(res, e, 'gate my-category scoresheet');
+  }
+}
+router.get('/dojo/competitions/:cid/categories/:catId/scoresheet',
+  requireDojoAccess, requireMyPublishedCategory,
+  require('./karateBrackets').sharedHandlers.scoresheetHandler);
+
 // ── GET /dojo/delegations — meus pedidos ────────────────────
 router.get('/dojo/delegations', requireDojoAccess, async (req, res) => {
   try {
