@@ -358,17 +358,33 @@ function showDetail(id){
 
   el.querySelector('#pdVoltar').addEventListener('click',voltarDaPagina);
 
+  // O rotulo original mora no proprio elemento, nao numa variavel de
+  // clique. Antes ele era lido de textContent na hora: o segundo clique
+  // dentro da janela de 1,2s lia "Adicionado" como rotulo original e o
+  // botao ficava preso nesse texto pra sempre.
+  var voltarRotulo;
   el.querySelector('#pdAdd').addEventListener('click',function(){
     if(bloqueado()) return;
-    addToCart(p.id, variante?variante.id:null);
-    var b=this; var antes=b.textContent;
-    b.textContent='Adicionado';
-    setTimeout(function(){ b.textContent=antes; },1200);
+    var b=this;
+    if(!b.dataset.rotulo) b.dataset.rotulo=b.textContent;
+    // O BOTAO e quem confirma — o toast diria a mesma coisa um centimetro
+    // ao lado, e sao os olhos da pessoa que estao no botao que ela acabou
+    // de clicar. Tres sinais pra uma acao (rotulo + toast + badge) e
+    // ruido.
+    addToCart(p.id, variante?variante.id:null, { semToast:true });
+    b.textContent='Adicionado ao carrinho';
+    b.classList.add('feito');
+    clearTimeout(voltarRotulo);
+    voltarRotulo=setTimeout(function(){
+      b.textContent=b.dataset.rotulo;
+      b.classList.remove('feito');
+    },1400);
   });
 
   el.querySelector('#pdComprar').addEventListener('click',function(){
     if(bloqueado()) return;
-    addToCart(p.id, variante?variante.id:null);
+    // Aqui o toast tambem nao serve: a tela toda muda pro checkout.
+    addToCart(p.id, variante?variante.id:null, { semToast:true });
     // "Comprar" pula o carrinho: quem clicou aqui ja decidiu.
     fecharProduto();
     openCheckout();

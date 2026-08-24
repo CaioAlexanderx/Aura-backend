@@ -211,3 +211,91 @@ describe('a barra de categorias mede em vez de estimar', () => {
     expect(bloco).toContain('requestAnimationFrame');
   });
 });
+
+// ============================================================
+// Micro-interacoes: um sinal por acao, e nenhum movimento pra quem pediu
+// pra parar de mexer.
+// ============================================================
+describe('quem pediu pra parar de mexer', () => {
+  test('a loja respeita prefers-reduced-motion', () => {
+    // "Reduzir movimento" e opcao do sistema, e quem liga costuma ter um
+    // motivo fisico. A loja nao tinha esse bloco: foto que cresce, badge
+    // que pulsa e toast que sobe rodavam igual pra todo mundo.
+    expect(css).toContain('@media (prefers-reduced-motion: reduce)');
+  });
+
+  test('para o movimento sem apagar o feedback', () => {
+    const i = css.indexOf('@media (prefers-reduced-motion: reduce)');
+    // O bloco vai ate o fim da folha; pego o suficiente pra cobrir ele.
+    const bloco = css.slice(i);
+    // Movimento morre...
+    expect(bloco).toContain('transform:none !important');
+    expect(bloco).toContain('.pulse{animation:none !important;}');
+    // ...mas a opacidade continua, senao a grade deixa de avisar que
+    // esta carregando e o botao deixa de confirmar o clique.
+    expect(bloco).toContain('transition-property:opacity !important');
+  });
+
+  test('a transicao curta nao vira zero na grade', () => {
+    // Uma regra generica de 0.01ms apagaria o fade da grade junto. A
+    // excecao devolve uma duracao curta, mas perceptivel.
+    const bloco = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
+    const m = bloco.match(/\.products-grid\{[^}]*transition-duration:(\d+)ms/);
+    expect(m).not.toBeNull();
+    expect(Number(m[1])).toBeGreaterThan(0);
+  });
+});
+
+describe('um sinal por acao', () => {
+  const pd = require('fs').readFileSync(
+    require('path').join(__dirname, '../src/templates/storefront/parts/product_detail.js'), 'utf8',
+  );
+  const cart = require('fs').readFileSync(
+    require('path').join(__dirname, '../src/templates/storefront/parts/cart.js'), 'utf8',
+  );
+
+  test('a pagina do produto nao mostra toast — o botao ja confirma', () => {
+    // Rotulo + toast + badge sao tres avisos da mesma coisa, e os olhos
+    // da pessoa estao no botao que ela acabou de clicar.
+    expect(pd).toContain('semToast:true');
+    expect(cart).toContain('if(!opcoes.semToast) showToast');
+  });
+
+  test('o badge pulsa MESMO sem toast', () => {
+    // Ele e o unico sinal de que o carrinho cresceu, e fica no cabecalho,
+    // longe de onde a pessoa clicou.
+    const i = cart.indexOf("getElementById('cartBadge')");
+    const j = cart.indexOf('if(!opcoes.semToast)');
+    expect(i).toBeGreaterThan(0);
+    // O pulso vem ANTES da checagem do toast, logo nao depende dela.
+    expect(i).toBeLessThan(j);
+  });
+
+  test('clicar duas vezes nao prende o rotulo do botao', () => {
+    // O bug: o rotulo original era lido de textContent no clique. O
+    // segundo clique dentro da janela lia "Adicionado" como original e o
+    // botao ficava preso nesse texto pra sempre.
+    expect(pd).toContain('b.dataset.rotulo');
+    expect(pd).toContain('clearTimeout(voltarRotulo)');
+    expect(pd).not.toMatch(/var antes\s*=\s*b\.textContent/);
+  });
+});
+
+describe('trocar de pagina nao pisca', () => {
+  const prods = require('fs').readFileSync(
+    require('path').join(__dirname, '../src/templates/storefront/parts/products.js'), 'utf8',
+  );
+
+  test('o estado de carregando tem duracao minima', () => {
+    // Resposta em 40ms apagava e reacendia a grade rapido demais pra ler
+    // como "carregou" — lia como a tela piscando.
+    expect(prods).toContain('MINIMO_CARREGANDO');
+    const m = prods.match(/MINIMO_CARREGANDO\s*=\s*(\d+)/);
+    expect(Number(m[1])).toBeGreaterThanOrEqual(150);
+  });
+
+  test('a grade tem transicao de opacidade', () => {
+    const i = css.indexOf('.products-grid{');
+    expect(css.slice(i, css.indexOf('}', i))).toContain('transition:opacity');
+  });
+});

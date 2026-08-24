@@ -7,8 +7,14 @@
 'use strict';
 
 module.exports = `
-function addToCart(productId,variantId){
+/**
+ * @param opcoes.semToast quando quem chamou ja confirma a acao sozinho.
+ *   A pagina do produto troca o rotulo do proprio botao; o toast repetiria
+ *   a mesma informacao um centimetro ao lado.
+ */
+function addToCart(productId,variantId,opcoes){
   variantId = variantId || null;
+  opcoes = opcoes || {};
   var p=PROD_MAP[productId]; if(!p) return;
   // Se produto tem variantes e não veio variantId, abre o modal pra escolher
   if(productHasVariants(p) && !variantId){
@@ -30,8 +36,10 @@ function addToCart(productId,variantId){
   if(!cart[key]) cart[key]={key:key,product_id:productId,variant_id:variantId,name:name,price:price,image_url:p.image_url,qty:0};
   cart[key].qty++;
   updateCartUI();renderProducts();
+  // O badge pulsa SEMPRE, com ou sem toast: ele e o unico sinal de que o
+  // carrinho cresceu, e fica no cabecalho, longe de onde a pessoa clicou.
   var b=document.getElementById('cartBadge');b.classList.add('pulse');setTimeout(function(){b.classList.remove('pulse');},300);
-  showToast(esc(name)+' adicionado!');
+  if(!opcoes.semToast) showToast(esc(name)+' adicionado!');
 }
 
 function changeQty(key,d){if(!cart[key])return;cart[key].qty+=d;if(cart[key].qty<=0)delete cart[key];updateCartUI();renderProducts();}

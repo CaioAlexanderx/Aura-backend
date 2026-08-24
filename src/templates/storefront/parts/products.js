@@ -78,9 +78,23 @@ function irParaPagina(n){
     .then(function(){ carregandoPagina=false; marcarCarregando(false); });
 }
 
+// Quando a resposta volta rapido demais, apagar e reacender a grade em
+// 40ms nao le como "carregou" — le como a tela piscando. Este e o tempo
+// minimo que o estado de carregando fica na tela.
+var MINIMO_CARREGANDO=220;
+var comecouACarregar=0;
+
 function marcarCarregando(estado){
   var grid=document.getElementById('productsGrid');
-  if(grid) grid.style.opacity=estado?'0.45':'1';
+  if(!grid) return;
+  if(estado){
+    comecouACarregar=Date.now();
+    grid.style.opacity='0.45';
+    return;
+  }
+  // A transicao de volta espera o que faltar pro minimo.
+  var falta=Math.max(0, MINIMO_CARREGANDO-(Date.now()-comecouACarregar));
+  setTimeout(function(){ grid.style.opacity='1'; }, falta);
 }
 
 /** Altura somada das barras fixas — o titulo nao pode ficar embaixo delas. */
