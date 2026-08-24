@@ -442,3 +442,39 @@ describe('GET /dojo/competitions/:cid/my-brackets', () => {
     expect(res.status).toBe(404);
   });
 });
+
+// ── Onda B: check-in do lado do dojô ────────────────────────
+describe('check-in do dojô', () => {
+  it('marca só atleta do PRÓPRIO dojô (escopo no UPDATE) e Canal A', async () => {
+    let params = null;
+    mockPool();
+    const prev = db.query.getMockImplementation();
+    db.query.mockImplementation((sql, p) => {
+      const s = String(sql);
+      if (s.includes('-- p0d:comp-published')) {
+        return Promise.resolve({ rows: [{ id: p[0], name: 'Paulista QA', brackets_published_at: null }] });
+      }
+      if (s.includes('-- p2b:checkin-mark')) {
+        params = p;
+        return Promise.resolve({ rows: [{ id: 'e1' }] });
+      }
+      return prev(sql, p);
+    });
+
+    const res = await request(buildApp())
+      .patch(`/federation/${FED_ID}/dojo/competitions/${COMP_ID}/check-in/stu-1`)
+      .set('Authorization', 'Bearer ' + tokenA)
+      .send({ status: 'presente' });
+    expect(res.status).toBe(200);
+    // O escopo do dojô vai NO SQL ($4) — nunca do body.
+    expect(params).toEqual([COMP_ID, 'stu-1', 'presente', DOJO_ID]);
+
+    // Canal B (portal) é somente leitura.
+    const portal = await request(buildApp())
+      .patch(`/federation/${FED_ID}/dojo/competitions/${COMP_ID}/check-in/stu-1`)
+      .set('Authorization', 'Bearer ' + tokenB)
+      .send({ status: 'presente' });
+    expect(portal.status).toBe(403);
+    expect(portal.body.code).toBe('PORTAL_READ_ONLY');
+  });
+});

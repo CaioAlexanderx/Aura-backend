@@ -737,6 +737,117 @@ router.get('/competitions/:cid/schedule-board', ...guards.read(), async (req, re
 });
 
 // ═════════════════════════════════════════════════════════════════
+// ONDA B — CHECK-IN LEVE (credenciamento do dia, migration 305)
+// Presença por ATLETA: marcar propaga a todas as inscrições dele na
+// competição. Estados: presente / ausente / pendente (sem info).
+// ═════════════════════════════════════════════════════════════════
+
+// Rollup por atleta a partir das linhas de inscrição (compartilhado
+// com o lado do dojô em karateDelegations via require deste módulo).
+function rollupCheckin(rows) {
+  const byStudent = new Map();
+  for (const r of rows) {
+    if (!byStudent.has(r.student_id)) {
+      byStudent.set(r.student_id, {
+        student_id: r.student_id,
+        student_name: r.student_name || null,
+        dojo_id: r.dojo_id || null,
+        dojo_name: r.dojo_name || null,
+        categories: [],
+        status: r.no_show_at ? 'ausente' : (r.checked_in_at ? 'presente' : 'pendente'),
+        checked_in_at: r.checked_in_at || null,
+        check_in_source: r.check_in_source || null,
+      });
+    }
+    byStudent.get(r.student_id).categories.push(r.category_name);
+  }
+  const data = [...byStudent.values()];
+  const totals = {
+    atletas: data.length,
+    presentes: data.filter((s) => s.status === 'presente').length,
+    ausentes: data.filter((s) => s.status === 'ausente').length,
+    pendentes: data.filter((s) => s.status === 'pendente').length,
+  };
+  return { data, totals };
+}
+
+const CHECKIN_SELECT = `
+  -- p2b:checkin-list
+  SELECT e.student_id, cu.name AS student_name, e.dojo_id,
+         COALESCE(dj.trade_name, dj.legal_name) AS dojo_name,
+         cat.name AS category_name,
+         e.checked_in_at, e.no_show_at, e.check_in_source
+    FROM karate_competition_entries e
+    JOIN karate_competition_categories cat ON cat.id = e.category_id
+    LEFT JOIN customers cu ON cu.id = e.student_id
+    LEFT JOIN companies dj ON dj.id = e.dojo_id
+   WHERE cat.competition_id = $1
+     AND e.student_id IS NOT NULL
+     AND e.status NOT IN ('withdrawn')`;
+
+// SET do PATCH: presente/ausente são mutuamente exclusivos; 'limpar'
+// volta ao estado sem informação.
+const CHECKIN_UPDATE = (source) => `
+  -- p2b:checkin-mark
+  UPDATE karate_competition_entries e
+     SET checked_in_at  = CASE WHEN $3 = 'presente' THEN NOW() ELSE NULL END,
+         no_show_at     = CASE WHEN $3 = 'ausente'  THEN NOW() ELSE NULL END,
+         check_in_source = CASE WHEN $3 = 'limpar' THEN NULL ELSE '${source}' END,
+         updated_at = NOW()
+    FROM karate_competition_categories cat
+   WHERE cat.id = e.category_id AND cat.competition_id = $1
+     AND e.student_id = $2 AND e.status NOT IN ('withdrawn')`;
+
+const CHECKIN_STATUSES = ['presente', 'ausente', 'limpar'];
+
+// ── GET /competitions/:cid/check-in ─────────────────────────
+router.get('/competitions/:cid/check-in', ...guards.read(), async (req, res) => {
+  const { id: federationId, cid } = req.params;
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    let rows;
+    try {
+      ({ rows } = await db.query(`${CHECKIN_SELECT}
+       ORDER BY dojo_name ASC NULLS LAST, student_name ASC`, [cid]));
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      return res.json({ schema_pending: true, data: [], totals: { atletas: 0, presentes: 0, ausentes: 0, pendentes: 0 } });
+    }
+    return res.json(rollupCheckin(rows));
+  } catch (e) {
+    console.error('[karateCompetitionSetup] check-in list error:', e.message);
+    return res.status(500).json({ error: 'Erro ao carregar o credenciamento' });
+  }
+});
+
+// ── PATCH /competitions/:cid/check-in/:studentId ────────────
+// Body: { status: 'presente' | 'ausente' | 'limpar' }
+router.patch('/competitions/:cid/check-in/:studentId', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid, studentId } = req.params;
+  const status = req.body && req.body.status;
+  if (!CHECKIN_STATUSES.includes(status)) {
+    return res.status(422).json({ error: `status deve ser: ${CHECKIN_STATUSES.join(', ')}`, code: 'VALIDATION_ERROR' });
+  }
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    let upd;
+    try {
+      upd = await db.query(`${CHECKIN_UPDATE('federacao')} RETURNING e.id`, [cid, studentId, status]);
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      return res.status(503).json({ error: 'Check-in indisponível (migração 305 pendente)', code: 'SCHEMA_PENDING' });
+    }
+    if (!upd.rows.length) return res.status(404).json({ error: 'Atleta sem inscrição nesta competição', code: 'NOT_FOUND' });
+    return res.json({ student_id: studentId, status, entries_updated: upd.rows.length });
+  } catch (e) {
+    console.error('[karateCompetitionSetup] check-in mark error:', e.message);
+    return res.status(500).json({ error: 'Erro ao marcar o credenciamento' });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════
 // P2 (modo mesário) — FILA DE PREMIAÇÃO AO VIVO
 //
 // O correio de papel do dia real (mesa do koto → mesa central → mesa de
@@ -851,3 +962,8 @@ router.post('/competitions/:cid/categories/:catId/awards-delivered', ...guards.s
 });
 
 module.exports = router;
+
+// Check-in compartilhado com o lado do DOJÔ (karateDelegations) — os
+// mesmos SQL/rollup, escopados lá por e.dojo_id. Depois do export do
+// router para não ser sobrescrito.
+module.exports.checkinShared = { rollupCheckin, CHECKIN_SELECT, CHECKIN_UPDATE, CHECKIN_STATUSES };

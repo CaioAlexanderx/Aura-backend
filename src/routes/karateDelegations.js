@@ -340,6 +340,59 @@ router.get('/dojo/competitions/:cid/categories/:catId/scoresheet',
   requireDojoAccess, requireMyPublishedCategory,
   require('./karateBrackets').sharedHandlers.scoresheetHandler);
 
+// ═══════════════════════════════════════════════════════════
+// ONDA B — CHECK-IN LEVE do lado do DOJÔ (migration 305)
+// O dojô responde pela presença dos SEUS atletas no dia (regra real do
+// credenciamento). Leitura A+B; marcação só no Canal A. Mesmos SQL/
+// rollup da federação (checkinShared), escopados por e.dojo_id.
+// ═══════════════════════════════════════════════════════════
+const checkinShared = require('./karateCompetitionSetup').checkinShared;
+
+// ── GET /dojo/competitions/:cid/check-in ────────────────────
+router.get('/dojo/competitions/:cid/check-in', requireDojoAccess, async (req, res) => {
+  try {
+    const comp = await findCompPublished(req.federationId, req.params.cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    let rows;
+    try {
+      ({ rows } = await db.query(`${checkinShared.CHECKIN_SELECT}
+       AND e.dojo_id = $2
+       ORDER BY student_name ASC`, [req.params.cid, req.dojoId]));
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      return res.json({ schema_pending: true, data: [], totals: { atletas: 0, presentes: 0, ausentes: 0, pendentes: 0 } });
+    }
+    return res.json(checkinShared.rollupCheckin(rows));
+  } catch (e) {
+    return handleReadError(res, e, 'GET /dojo/competitions/:cid/check-in');
+  }
+});
+
+// ── PATCH /dojo/competitions/:cid/check-in/:studentId ───────
+// Body: { status: 'presente' | 'ausente' | 'limpar' } — só atletas DESTE dojô.
+router.patch('/dojo/competitions/:cid/check-in/:studentId', requireDojoAccess, requireChannelA, async (req, res) => {
+  const status = req.body && req.body.status;
+  if (!checkinShared.CHECKIN_STATUSES.includes(status)) {
+    return res.status(422).json({ error: `status deve ser: ${checkinShared.CHECKIN_STATUSES.join(', ')}`, code: 'VALIDATION_ERROR' });
+  }
+  try {
+    const comp = await findCompPublished(req.federationId, req.params.cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    let upd;
+    try {
+      upd = await db.query(`${checkinShared.CHECKIN_UPDATE('dojo')}
+        AND e.dojo_id = $4 RETURNING e.id`, [req.params.cid, req.params.studentId, status, req.dojoId]);
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      return res.status(503).json({ error: 'Check-in indisponível (migração 305 pendente)', code: 'SCHEMA_PENDING' });
+    }
+    if (!upd.rows.length) return res.status(404).json({ error: 'Atleta do seu dojô não encontrado nesta competição', code: 'NOT_FOUND' });
+    return res.json({ student_id: req.params.studentId, status, entries_updated: upd.rows.length });
+  } catch (e) {
+    return handleWriteError(res, e, 'PATCH /dojo/check-in');
+  }
+});
+
 // ── GET /dojo/delegations — meus pedidos ────────────────────
 router.get('/dojo/delegations', requireDojoAccess, async (req, res) => {
   try {
