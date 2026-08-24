@@ -341,3 +341,7 @@ ${contactBar}
 <div class="toast" id="toast"></div>`;
 }
 module.exports = buildHtmlBody;
+// O painel precisa do MESMO texto para pre-preencher o campo da lojista.
+// Exportado em vez de duplicado no app: politica que diverge entre o que
+// o painel mostra e o que a loja publica e pior que politica nenhuma.
+module.exports.POLITICA_PADRAO = POLITICA_PADRAO;

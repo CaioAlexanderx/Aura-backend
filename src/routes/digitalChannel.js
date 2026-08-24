@@ -23,6 +23,7 @@ const { requireRole } = require('../middleware/auth');
 const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
 const { validatePixKey } = require('../services/staticPixService');
 const { geocodeCep, normalizeCep } = require('../services/cepGeocoding');
+const { POLITICA_PADRAO } = require('../templates/storefrontHtml');
 
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
@@ -156,6 +157,7 @@ router.get('/', async (req, res) => {
         phone: co.phone || '',
         exists: false,
         storefront_url: null,
+        politica_troca_padrao: POLITICA_PADRAO,
       });
     }
     const config = rows[0];
@@ -188,6 +190,12 @@ router.get('/', async (req, res) => {
         ? parseFloat(config.delivery_free_above_amount)
         : null,
       exists: true,
+      // O texto padrao vem do MESMO lugar que a loja usa. O painel
+      // pre-preenche o campo com ele; se duplicassemos no app, uma
+      // correcao no texto passaria a valer na loja e nao no painel — e a
+      // lojista leria uma politica e publicaria outra.
+      politica_troca: config.politica_troca ?? null,
+      politica_troca_padrao: POLITICA_PADRAO,
       storefront_url: config.slug ? `${STOREFRONT_BASE}/${config.slug}` : null,
       domain_pricing: { '1year': 80, '2years': 152 },
     });

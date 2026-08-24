@@ -91,3 +91,29 @@ describe('politica de troca', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 });
+
+describe('o painel recebe o mesmo texto que a loja publica', () => {
+  // Se o app duplicasse o texto padrao, uma correcao aqui passaria a valer
+  // na loja e nao no painel: a lojista leria uma politica no campo e
+  // publicaria outra no rodape. Por isso o padrao viaja no GET da config.
+  const fs = require('fs');
+  const path = require('path');
+  const rota = fs.readFileSync(
+    path.join(__dirname, '../src/routes/digitalChannel.js'), 'utf8',
+  );
+
+  test('o GET da config devolve politica_troca_padrao', () => {
+    expect(rota).toContain('politica_troca_padrao: POLITICA_PADRAO');
+    // Nos DOIS caminhos: loja que ainda nao existe tambem precisa do texto,
+    // senao o campo nasce vazio na primeira configuracao.
+    expect(rota.match(/politica_troca_padrao/g).length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('o padrao sai de um so lugar', () => {
+    const tpl = require('../src/templates/storefrontHtml');
+    expect(typeof tpl.POLITICA_PADRAO).toBe('string');
+    expect(tpl.POLITICA_PADRAO).toContain('7 dias corridos');
+    // O texto nao pode estar escrito a mao dentro da rota.
+    expect(rota).not.toContain('7 dias corridos');
+  });
+});
