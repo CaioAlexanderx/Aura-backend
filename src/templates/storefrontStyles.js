@@ -360,7 +360,9 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .products-header h2{font-family:${fontSerif};font-size:30px;font-weight:400;letter-spacing:-0.4px;}
 @media(max-width:600px){.products-section{padding:20px 16px;}.products-header h2{font-size:22px;}}
 .products-count{font-size:12px;color:var(--sf-ink-3);font-family:${fontMono};}
-.products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:28px;row-gap:48px;}
+/* A opacidade e mexida pelo JS ao trocar de pagina. Sem transicao ela
+   salta de 1 pra 0.45 e de volta — dois piscadas por clique. */
+.products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:28px;row-gap:48px;transition:opacity 200ms cubic-bezier(.4,0,.2,1);}
 @media(max-width:600px){.products-grid{grid-template-columns:repeat(2,1fr);gap:14px;row-gap:28px;}}
 
 /* O cartao NAO se move mais no hover. Vinte e quatro cartoes que sobem um
@@ -618,7 +620,14 @@ body.card-style-image-heavy .product-desc{display:none;}
 @media(max-width:860px){.pd-corpo{grid-template-columns:1fr;gap:24px;padding-top:18px;}}
 
 .pd-foto{width:100%;aspect-ratio:1/1;background:var(--sf-bg-2);border:1px solid var(--sf-border);border-radius:16px;overflow:hidden;display:flex;align-items:center;justify-content:center;}
-.pd-foto img{width:100%;height:100%;object-fit:contain;padding:4%;}
+/* Mesmo gesto do cartao na grade: a foto cresce dentro da moldura. Numa
+   loja de roupa a foto e o produto, e poder chegar mais perto e a coisa
+   que a vitrine fisica faz de graca. */
+.pd-foto img{width:100%;height:100%;object-fit:contain;padding:4%;transition:transform 380ms cubic-bezier(.4,0,.2,1);}
+.pd-foto:hover img{transform:scale(1.12);}
+/* O botao confirma a propria acao trocando de rotulo. O fundo lavado
+   segura o olho por um instante sem virar outra cor cheia na tela. */
+.pd-add.feito{background:var(--sf-brand-wash);border-color:var(--sf-brand);}
 .pd-minis{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
 .pd-mini{width:64px;height:64px;border-radius:10px;overflow:hidden;border:1px solid var(--sf-border);background:var(--sf-bg-2);padding:0;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1);}
 .pd-mini img{width:100%;height:100%;object-fit:contain;padding:6%;}
@@ -693,6 +702,37 @@ body.card-style-image-heavy .product-desc{display:none;}
 .pd-rel-foto img{width:100%;height:100%;object-fit:contain;padding:6%;}
 .pd-rel-nome{font-family:${fontSerif};font-size:14.5px;line-height:1.25;color:var(--sf-ink);margin-top:9px;}
 .pd-rel-preco{font-family:${fontSans};font-size:13px;font-weight:800;color:var(--sf-brand-ink);margin-top:3px;font-variant-numeric:tabular-nums;}
+
+/* ============================================================
+   Quem pediu pra parar de mexer.
+
+   "Reduzir movimento" e uma opcao do sistema operacional, e quem liga
+   costuma ter um motivo fisico — vertigem, enxaqueca vestibular,
+   sensibilidade vestibular. A loja nao tinha esse bloco: as fotos que
+   crescem, o badge que pulsa, o toast que sobe e o carrossel do banner
+   rodavam igual pra todo mundo.
+
+   A regra e parar o MOVIMENTO, nao apagar o feedback: opacidade e cor
+   continuam mudando, entao o botao ainda confirma que foi clicado e a
+   grade ainda escurece enquanto carrega. So nada desliza, cresce ou
+   pulsa.
+   ============================================================ */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:0.01ms !important;
+    animation-iteration-count:1 !important;
+    transition-duration:0.01ms !important;
+    scroll-behavior:auto !important;
+  }
+  /* A transicao some, mas o transform tambem precisa sair: sem isto a
+     foto ainda cresceria — so que instantaneamente, que e pior. */
+  .product-card:hover .product-img img,
+  .pd-foto:hover img{transform:none !important;}
+  .banner-cta:hover::after{transform:none !important;}
+  .pulse{animation:none !important;}
+  /* A opacidade e a cor CONTINUAM: sao feedback, nao movimento. */
+  .products-grid{transition-property:opacity !important;transition-duration:120ms !important;}
+}
 
 `;
 }
