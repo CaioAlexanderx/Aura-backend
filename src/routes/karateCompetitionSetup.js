@@ -659,6 +659,49 @@ router.get('/competitions/:cid/schedule-board', ...guards.read(), async (req, re
       }),
     });
 
+    // ── P2b: CONFLITO DE ATLETA ENTRE KOTOS ────────────────────
+    // A dor real do dia: o mesmo atleta com provas alocadas em kotos
+    // DIFERENTES pode ser chamado em duas áreas ao mesmo tempo. Aviso
+    // para a mesa central sequenciar — NUNCA bloqueio (filosofia FPKT).
+    // 42703/42P01 (297 pendente) → sem conflitos, board segue.
+    let conflicts = [];
+    try {
+      const { rows: confRows } = await db.query(
+        `-- p2b:koto-conflicts
+         SELECT e.student_id, cu.name AS student_name,
+                cat.id AS category_id, cat.name AS category_name,
+                cat.area_id, a.name AS area_name
+           FROM karate_competition_entries e
+           JOIN karate_competition_categories cat ON cat.id = e.category_id
+           LEFT JOIN customers cu ON cu.id = e.student_id
+           LEFT JOIN karate_competition_areas a ON a.id = cat.area_id
+          WHERE cat.competition_id = $1
+            AND e.student_id IS NOT NULL
+            AND e.status NOT IN ('withdrawn')
+            AND cat.area_id IS NOT NULL`,
+        [cid]
+      );
+      const byStudent = new Map();
+      for (const r of confRows) {
+        if (!byStudent.has(r.student_id)) {
+          byStudent.set(r.student_id, { name: r.student_name, areas: new Set(), cats: [] });
+        }
+        const s = byStudent.get(r.student_id);
+        s.areas.add(r.area_id);
+        s.cats.push({ id: r.category_id, name: r.category_name, area_name: r.area_name || null });
+      }
+      conflicts = [...byStudent.entries()]
+        .filter(([, s]) => s.areas.size >= 2)
+        .map(([studentId, s]) => ({
+          student_id: studentId,
+          student_name: s.name || null,
+          area_count: s.areas.size,
+          categories: s.cats,
+        }));
+    } catch (e) {
+      if (e.code !== '42703' && e.code !== '42P01') throw e;
+    }
+
     const board = areas.map((a) => {
       const own = cats.filter((c) => c.area_id === a.id);
       const summary = scheduleSvc.summarizeArea(own);
@@ -679,10 +722,12 @@ router.get('/competitions/:cid/schedule-board', ...guards.read(), async (req, re
       competition_id: cid,
       areas: board,
       unassigned,
+      conflicts,
       totals: {
         categories: cats.length,
         assigned: cats.length - unassigned.length,
         entry_count: cats.reduce((s, c) => s + c.entry_count, 0),
+        conflict_count: conflicts.length,
       },
     });
   } catch (e) {
