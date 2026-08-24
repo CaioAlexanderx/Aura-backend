@@ -8,6 +8,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const { validateWebhookSignature } = require('../utils/webhook');
+const waOutbox = require('../services/waOutbox');
 
 // Sem fallback hardcoded (era 'aura_whatsapp_verify_2026' — token previsível).
 // O verify token PRECISA vir do ambiente; sem ele, a verificação da Meta falha.
@@ -97,6 +98,29 @@ router.post('/', async (req, res) => {
           if (rows.length) companyId = rows[0].id;
         }
 
+        // ── ONDA 5b: aprovação/rejeição de template (o campo
+        // message_template_status_update já está assinado na Meta).
+        // O evento vem no nível do WABA — companyId pode ser null;
+        // resolvemos pela company dona do waba_id quando preciso.
+        if (change.field === 'message_template_status_update') {
+          let tplCompanyId = companyId;
+          if (!tplCompanyId && entry.id) {
+            const r = await db.query(
+              'SELECT id FROM companies WHERE wa_waba_id=$1 LIMIT 1', [entry.id]
+            ).catch(() => ({ rows: [] }));
+            if (r.rows.length) tplCompanyId = r.rows[0].id;
+          }
+          if (tplCompanyId) {
+            await waOutbox.applyTemplateStatus(tplCompanyId, {
+              name: value.message_template_name,
+              language: value.message_template_language,
+              status: value.event,                 // APPROVED | REJECTED | PAUSED...
+              metaTemplateId: value.message_template_id != null ? String(value.message_template_id) : null,
+            }).catch((e) => console.error('[WA-WEBHOOK] template status error:', e.message));
+          }
+          continue;
+        }
+
         // Handle message status updates (sent → delivered → read)
         const statuses = value.statuses || [];
         for (const status of statuses) {
@@ -106,6 +130,11 @@ router.post('/', async (req, res) => {
              WHERE wa_message_id=$2 AND company_id=$3`,
             [status.status, status.id, companyId]
           ).catch((e) => console.error('[WA-WEBHOOK] wa_messages write error:', e.message));
+          // ONDA 5b: espelha na fila (delivered/read/failed por wamid).
+          await waOutbox.applyStatusUpdate(
+            companyId, status.id, status.status,
+            status.errors && status.errors[0] && status.errors[0].title || null
+          ).catch((e) => console.error('[WA-WEBHOOK] outbox status error:', e.message));
         }
 
         // Handle incoming messages
@@ -118,6 +147,10 @@ router.post('/', async (req, res) => {
              VALUES ($1,'inbound',$2,$3,$4,'received',$5)`,
             [companyId, msg.id, msg.from, content, JSON.stringify(msg)]
           ).catch((e) => console.error('[WA-WEBHOOK] wa_messages write error:', e.message));
+          // ONDA 5b: abre a janela de 24h e processa SAIR/PARAR (opt-out)
+          // e VOLTAR (opt-in) — opt-out sempre vence na fila.
+          await waOutbox.touchInbound(companyId, msg.from, msg.text?.body)
+            .catch((e) => console.error('[WA-WEBHOOK] contact touch error:', e.message));
         }
       }
     }
