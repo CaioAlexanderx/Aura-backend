@@ -1,0 +1,189 @@
+// ============================================================
+// AURA — ONDA 5b: administração do WhatsApp (Cloud API)
+// Montado em /company/:id (qualquer vertical — cobrança por WhatsApp é
+// da COMPANY conectada; no karatê, o dojô). guards adminOnly: mexer em
+// canal de mensagem é ato do dono.
+//
+//   GET   /whatsapp/status            — conexão + contadores da fila
+//   GET   /whatsapp/templates         — registro local (status da Meta)
+//   POST  /whatsapp/templates/sync    — puxa da Meta p/ o registro
+//   GET   /whatsapp/outbox            — últimos itens da fila
+//   POST  /whatsapp/test-send         — enfileira + despacha na hora
+//   POST  /whatsapp/contacts/opt      — opt-in/opt-out manual
+//
+// 42P01 (307 pendente) → SCHEMA_PENDING; credenciais 039 → 42703-safe.
+// ============================================================
+'use strict';
+
+const router = require('express').Router({ mergeParams: true });
+const db = require('../config/database');
+const { requireAuth, requireCompanyAccess } = require('../middleware/auth');
+const waOutbox = require('../services/waOutbox');
+const wa = require('../services/whatsapp');
+
+const guard = [requireAuth, requireCompanyAccess({})];
+
+function schemaPending(res) {
+  return res.status(503).json({ error: 'WhatsApp indisponível (migração 307 pendente)', code: 'SCHEMA_PENDING' });
+}
+
+async function loadCompanyWa(companyId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT wa_waba_id, wa_phone_number_id, wa_phone_display, wa_access_token IS NOT NULL AS has_token
+         FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    if (e.code === '42703') return null;
+    throw e;
+  }
+}
+
+// ── GET /whatsapp/status ────────────────────────────────────
+router.get('/whatsapp/status', ...guard, async (req, res) => {
+  try {
+    const conn = await loadCompanyWa(req.params.id);
+    let queue = null;
+    try {
+      const { rows } = await db.query(
+        `SELECT status, COUNT(*)::int AS n FROM wa_outbox WHERE company_id = $1 GROUP BY status`,
+        [req.params.id]
+      );
+      queue = Object.fromEntries(rows.map((r) => [r.status, r.n]));
+    } catch (e) {
+      if (e.code !== '42P01') throw e;
+    }
+    return res.json({
+      connected: !!(conn && conn.wa_phone_number_id && conn.has_token),
+      phone_display: (conn && conn.wa_phone_display) || null,
+      waba_id: (conn && conn.wa_waba_id) || null,
+      queue: queue || {},
+      schema_pending: queue === null,
+    });
+  } catch (e) {
+    console.error('[karateWhatsapp] status error:', e.message);
+    return res.status(500).json({ error: 'Erro ao carregar o status do WhatsApp' });
+  }
+});
+
+// ── GET /whatsapp/templates ─────────────────────────────────
+router.get('/whatsapp/templates', ...guard, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT name, language, category, status, body_preview, last_status_at
+         FROM wa_templates WHERE company_id = $1 ORDER BY name ASC, language ASC`,
+      [req.params.id]
+    );
+    return res.json({ data: rows });
+  } catch (e) {
+    if (e.code === '42P01') return schemaPending(res);
+    console.error('[karateWhatsapp] templates error:', e.message);
+    return res.status(500).json({ error: 'Erro ao listar templates' });
+  }
+});
+
+// ── POST /whatsapp/templates/sync — puxa da Meta ────────────
+router.post('/whatsapp/templates/sync', ...guard, async (req, res) => {
+  try {
+    const conn = await loadCompanyWa(req.params.id);
+    if (!conn || !conn.wa_waba_id || !conn.has_token) {
+      return res.status(409).json({ error: 'WhatsApp não conectado (WABA/token ausentes)', code: 'NAO_CONECTADO' });
+    }
+    const { rows: tok } = await db.query(
+      'SELECT wa_access_token FROM companies WHERE id = $1 LIMIT 1', [req.params.id]
+    );
+    const list = await wa.listTemplates(conn.wa_waba_id, tok[0].wa_access_token);
+    const items = (list && list.data) || [];
+    let synced = 0;
+    for (const t of items) {
+      await waOutbox.applyTemplateStatus(req.params.id, {
+        name: t.name, language: t.language, status: t.status,
+        metaTemplateId: t.id != null ? String(t.id) : null,
+      });
+      synced++;
+    }
+    return res.json({ synced });
+  } catch (e) {
+    if (e.code === '42P01') return schemaPending(res);
+    console.error('[karateWhatsapp] sync error:', e.message);
+    return res.status(502).json({ error: 'Falha ao consultar a Meta: ' + String(e.message).slice(0, 200) });
+  }
+});
+
+// ── GET /whatsapp/outbox ────────────────────────────────────
+router.get('/whatsapp/outbox', ...guard, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, to_phone, kind, template_name, status, skip_reason, attempts,
+              last_error, source_type, created_at, updated_at
+         FROM wa_outbox WHERE company_id = $1
+        ORDER BY created_at DESC LIMIT 50`,
+      [req.params.id]
+    );
+    return res.json({ data: rows });
+  } catch (e) {
+    if (e.code === '42P01') return schemaPending(res);
+    console.error('[karateWhatsapp] outbox error:', e.message);
+    return res.status(500).json({ error: 'Erro ao listar a fila' });
+  }
+});
+
+// ── POST /whatsapp/test-send — sandbox: enfileira e despacha ─
+// Body: { to, template_name?, language?, components?, text? }
+router.post('/whatsapp/test-send', ...guard, async (req, res) => {
+  const b = req.body || {};
+  try {
+    const r = await waOutbox.enqueue({
+      companyId: req.params.id,
+      toPhone: b.to,
+      kind: b.text ? 'text' : 'template',
+      templateName: b.template_name || null,
+      templateLanguage: b.language || 'pt_BR',
+      components: b.components || null,
+      textBody: b.text || null,
+      sourceType: 'teste',
+    });
+    if (!r.queued && r.reason !== 'DUPLICADO') {
+      return res.status(422).json({ error: `Não enfileirado: ${r.reason}`, code: r.reason });
+    }
+    const batch = await waOutbox.processBatch(5);
+    const { rows } = await db.query(
+      `SELECT status, skip_reason, last_error, wa_message_id FROM wa_outbox WHERE id = $1`, [r.id]
+    );
+    return res.json({ outbox_id: r.id, result: rows[0] || null, batch });
+  } catch (e) {
+    if (e.code === '42P01') return schemaPending(res);
+    console.error('[karateWhatsapp] test-send error:', e.message);
+    return res.status(500).json({ error: 'Erro no envio de teste' });
+  }
+});
+
+// ── POST /whatsapp/contacts/opt — opt manual ────────────────
+// Body: { phone, action: 'in' | 'out' }
+router.post('/whatsapp/contacts/opt', ...guard, async (req, res) => {
+  const b = req.body || {};
+  const phone = waOutbox.normalizePhone(b.phone);
+  if (!phone || !['in', 'out'].includes(b.action)) {
+    return res.status(422).json({ error: 'phone válido e action in|out são obrigatórios', code: 'VALIDATION_ERROR' });
+  }
+  try {
+    await db.query(
+      `INSERT INTO wa_contacts (company_id, phone, opted_in_at, opted_out_at, opt_source)
+       VALUES ($1,$2, CASE WHEN $3 = 'in' THEN NOW() END, CASE WHEN $3 = 'out' THEN NOW() END, 'manual')
+       ON CONFLICT (company_id, phone) DO UPDATE SET
+         opted_in_at  = CASE WHEN $3 = 'in' THEN NOW() ELSE NULL END,
+         opted_out_at = CASE WHEN $3 = 'out' THEN NOW() ELSE NULL END,
+         opt_source = 'manual', updated_at = NOW()`,
+      [req.params.id, phone, b.action]
+    );
+    return res.json({ phone, action: b.action });
+  } catch (e) {
+    if (e.code === '42P01') return schemaPending(res);
+    console.error('[karateWhatsapp] opt error:', e.message);
+    return res.status(500).json({ error: 'Erro ao registrar o opt' });
+  }
+});
+
+module.exports = router;

@@ -56,7 +56,7 @@ const env = validateRuntimeEnv();
 const CHANNEL = 'email';
 const CHANNEL_WHATSAPP = 'whatsapp';
 const DEFAULT_OFFSETS = [-3, 0, 3];
-const DEFAULT_CONFIG = { enabled: false, offsets: DEFAULT_OFFSETS.slice(), send_email: true, updated_at: null };
+const DEFAULT_CONFIG = { enabled: false, offsets: DEFAULT_OFFSETS.slice(), send_email: true, send_whatsapp_auto: false, updated_at: null };
 const WHATSAPP_QUEUE_LIMIT = 500;
 
 function svcError(status, code, message) {
@@ -98,6 +98,9 @@ function shapeConfig(row) {
     enabled: row.enabled === true,
     offsets: Array.isArray(row.offsets) && row.offsets.length ? row.offsets.map(Number) : DEFAULT_OFFSETS.slice(),
     send_email: row.send_email !== false,
+    // ONDA 5b: envio AUTOMÁTICO pela Cloud API (fila wa_outbox). Opt-in
+    // explícito do dojô — a pista manual (wa.me) continua existindo.
+    send_whatsapp_auto: row.send_whatsapp_auto === true,
     updated_at: row.updated_at || null,
   };
 }
@@ -120,6 +123,7 @@ function validateConfigPayload(body) {
   const b = body || {};
   const enabled = b.enabled === true || b.enabled === 'true';
   const send_email = b.send_email === undefined || b.send_email === null ? true : !(b.send_email === false || b.send_email === 'false');
+  const send_whatsapp_auto = b.send_whatsapp_auto === true || b.send_whatsapp_auto === 'true';
 
   if (!Array.isArray(b.offsets)) {
     throw svcError(422, 'VALIDATION_ERROR', 'offsets deve ser uma lista de inteiros');
@@ -139,19 +143,19 @@ function validateConfigPayload(body) {
     throw svcError(422, 'VALIDATION_ERROR', 'offsets não pode ter valores repetidos');
   }
   uniq.sort((a, z) => a - z);
-  return { enabled, offsets: uniq, send_email };
+  return { enabled, offsets: uniq, send_email, send_whatsapp_auto };
 }
 
 async function putConfig(dojoId, body) {
   const data = validateConfigPayload(body);
   const { rows } = await db.query(
-    `INSERT INTO karate_dojo_reminder_config (dojo_id, enabled, offsets, send_email, updated_at)
-     VALUES ($1, $2, $3, $4, now())
+    `INSERT INTO karate_dojo_reminder_config (dojo_id, enabled, offsets, send_email, send_whatsapp_auto, updated_at)
+     VALUES ($1, $2, $3, $4, $5, now())
      ON CONFLICT (dojo_id) DO UPDATE SET
        enabled = EXCLUDED.enabled, offsets = EXCLUDED.offsets,
-       send_email = EXCLUDED.send_email, updated_at = now()
-     RETURNING enabled, offsets, send_email, updated_at`,
-    [dojoId, data.enabled, data.offsets, data.send_email]
+       send_email = EXCLUDED.send_email, send_whatsapp_auto = EXCLUDED.send_whatsapp_auto, updated_at = now()
+     RETURNING enabled, offsets, send_email, send_whatsapp_auto, updated_at`,
+    [dojoId, data.enabled, data.offsets, data.send_email, data.send_whatsapp_auto]
   );
   return shapeConfig(rows[0]);
 }
@@ -578,31 +582,105 @@ async function markWhatsappSent(dojoId, chargeId, offsetRaw) {
 async function getEnabledConfigs() {
   try {
     const { rows } = await db.query(
-      `SELECT dojo_id, offsets, send_email
+      `SELECT dojo_id, offsets, send_email, send_whatsapp_auto
          FROM karate_dojo_reminder_config
-        WHERE enabled = true AND send_email = true`
+        WHERE enabled = true AND (send_email = true OR send_whatsapp_auto = true)`
     );
     return rows;
   } catch (e) {
-    if (e && (e.code === '42P01' || e.code === '42703')) return [];
+    // 42703 = 307 pendente: cai na forma antiga (só e-mail) — a régua de
+    // e-mail JAMAIS pode ser silenciada por causa da coluna nova.
+    if (e && e.code === '42703') {
+      try {
+        const { rows } = await db.query(
+          `SELECT dojo_id, offsets, send_email
+             FROM karate_dojo_reminder_config
+            WHERE enabled = true AND send_email = true`
+        );
+        return rows;
+      } catch (e2) {
+        if (e2 && e2.code === '42P01') return [];
+        throw e2;
+      }
+    }
+    if (e && e.code === '42P01') return [];
     throw e;
   }
+}
+
+// ── ONDA 5b: envio AUTOMÁTICO da fila de WhatsApp da régua ─────────
+// Reusa whatsappQueue() (mesmos alvos e dedupe por log da pista manual):
+// cada item vira um TEMPLATE na wa_outbox (fora da janela de 24h só
+// template aprovado passa na Meta). Template por env WA_TPL_MENSALIDADE
+// (default 'mensalidade_lembrete', pt_BR) com params:
+//   {{1}} nome · {{2}} competência · {{3}} valor · {{4}} vencimento.
+// Sucesso no ENFILEIRAR marca o log (como o "marcar enviado" manual);
+// falha de entrega fica visível na wa_outbox (retry/failed).
+async function runWhatsappAutoForDojo(dojoId, { today = null, config = null } = {}) {
+  const waOutbox = require('./waOutbox');
+  const tpl = process.env.WA_TPL_MENSALIDADE || 'mensalidade_lembrete';
+  const q = await whatsappQueue(dojoId, { date: today, config });
+  const out = { enqueued: 0, skipped: 0 };
+  for (const item of q.data || []) {
+    if (item.already_sent) { out.skipped++; continue; }
+    const r = await waOutbox.enqueue({
+      companyId: dojoId,
+      toPhone: item.phone,
+      kind: 'template',
+      templateName: tpl,
+      templateLanguage: 'pt_BR',
+      components: [{
+        type: 'body',
+        parameters: [
+          { type: 'text', text: item.recipient_name || item.student_name || 'atleta' },
+          { type: 'text', text: fmtCompetence(item.competence) },
+          { type: 'text', text: fmtBRL(item.amount) },
+          { type: 'text', text: karateMailer.fmtDateBR(item.due_date) },
+        ],
+      }],
+      sourceType: 'dojo_mensalidade',
+      sourceId: String(item.charge_id),
+      dedupeKey: `dojo-mens-${item.charge_id}-${item.offset}`,
+    });
+    if (r.queued) {
+      out.enqueued++;
+      await logSend(dojoId, item.charge_id, item.offset, 'sent', item.phone, CHANNEL_WHATSAPP);
+    } else {
+      out.skipped++;
+    }
+  }
+  return out;
 }
 
 async function runAll(today) {
   const cfgs = await getEnabledConfigs();
   const agg = { dojos: cfgs.length, sent: 0, skipped_no_email: 0, skipped_sent: 0, failed: 0, skipped: 0 };
+  agg.wa_enqueued = 0;
+  agg.wa_skipped = 0;
   for (const cfg of cfgs) {
+    const config = shapeConfig({ enabled: true, offsets: cfg.offsets, send_email: cfg.send_email, send_whatsapp_auto: cfg.send_whatsapp_auto, updated_at: null });
     try {
-      const config = shapeConfig({ enabled: true, offsets: cfg.offsets, send_email: cfg.send_email, updated_at: null });
-      const r = await runForDojo(cfg.dojo_id, { today, config });
-      agg.sent += r.sent;
-      agg.skipped_no_email += r.skipped_no_email;
-      agg.skipped_sent += r.skipped_sent;
-      agg.failed += r.failed;
-      agg.skipped += r.skipped;
+      if (config.send_email) {
+        const r = await runForDojo(cfg.dojo_id, { today, config });
+        agg.sent += r.sent;
+        agg.skipped_no_email += r.skipped_no_email;
+        agg.skipped_sent += r.skipped_sent;
+        agg.failed += r.failed;
+        agg.skipped += r.skipped;
+      }
     } catch (e) {
-      console.error('[karateDojoReminder] dojô', cfg.dojo_id, 'falhou:', e.message);
+      console.error('[karateDojoReminder] dojô', cfg.dojo_id, 'falhou (email):', e.message);
+    }
+    // ONDA 5b: pista automática do WhatsApp — independente do e-mail; a
+    // falha de um canal nunca derruba o outro.
+    try {
+      if (config.send_whatsapp_auto) {
+        const w = await runWhatsappAutoForDojo(cfg.dojo_id, { today, config });
+        agg.wa_enqueued += w.enqueued;
+        agg.wa_skipped += w.skipped;
+      }
+    } catch (e) {
+      console.error('[karateDojoReminder] dojô', cfg.dojo_id, 'falhou (whatsapp):', e.message);
     }
   }
   return agg;
@@ -620,8 +698,9 @@ module.exports = {
   runForDojo,
   runAll,
   getEnabledConfigs,
-  // canal WhatsApp (fila manual)
+  // canal WhatsApp (fila manual + automático 5b)
   whatsappQueue,
+  runWhatsappAutoForDojo,
   markWhatsappSent,
   whatsappMessage,
   normalizeBrPhone,

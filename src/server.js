@@ -79,6 +79,11 @@ function startServer() {
     // F3c: régua de cobrança do dojô (dojô→aluno) — diário ~9h10 BRT
     const { initDojoReminderScheduler } = require('./jobs/dojoReminderScheduler');
     initDojoReminderScheduler();
+
+    // ONDA 5b: dispatcher da fila WhatsApp (wa_outbox) — tick 30s,
+    // kill switch WA_DISPATCH_ENABLED=false.
+    const { initWaDispatcher } = require('./jobs/waDispatcherJob');
+    initWaDispatcher();
   });
 }
 
