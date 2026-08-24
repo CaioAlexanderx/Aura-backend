@@ -38,6 +38,11 @@ const {
   computePlacements,
 } = require('../services/karateBracket');
 const phasePlanSvc = require('../services/karatePhasePlanService');
+
+// Modalidades apuradas por NOTAS (bateria): kata, kata equipe e ENBU
+// (duplas em apresentação — regra real FPKT). Fukugo fica na árvore
+// (Kitei + shobu-ippon) até ganhar fluxo próprio.
+const NOTAS_MODALITIES = ['kata', 'team_kata', 'enbu'];
 const kataScoring = require('../services/karateKataScoring');
 
 // ── helper: find competition (scoped to federation) ──────────────
@@ -426,7 +431,7 @@ router.post(
 
       // Kata: por padrao gera so a ordem de apresentacao (bateria de notas);
       // com kata_mode='hantei_tree' cai no caminho da ARVORE (P1/296).
-      const isKata = ['kata', 'team_kata'].includes(cat.modality) && kataMode !== 'hantei_tree';
+      const isKata = NOTAS_MODALITIES.includes(cat.modality) && kataMode !== 'hantei_tree';
 
       const athletes = await loadEntries(client, catId, federationId);
       const pendingPaymentCount = await countPendingPayment(client, cid, catId);
@@ -772,7 +777,7 @@ const getBracketHandler = async (req, res) => {
 
       // Kata: bateria de notas - EXCETO em kata_mode='hantei_tree' (P1),
       // que devolve a arvore como o kumite.
-      const isKata = ['kata', 'team_kata'].includes(bracketRow.modality)
+      const isKata = NOTAS_MODALITIES.includes(bracketRow.modality)
         && bracketRow.kata_mode !== 'hantei_tree';
       if (isKata) {
         let scores = [];
@@ -1772,7 +1777,7 @@ const scoresheetHandler = async (req, res) => {
         return res.json(Object.assign(base, { bracket: { status: 'not_generated' } }));
       }
 
-      const isScoreKata = ['kata', 'team_kata'].includes(bracketRow.modality)
+      const isScoreKata = NOTAS_MODALITIES.includes(bracketRow.modality)
         && bracketRow.kata_mode !== 'hantei_tree';
       if (isScoreKata) {
         let scores = [];
