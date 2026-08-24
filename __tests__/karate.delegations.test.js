@@ -74,7 +74,9 @@ const STUDENTS = {
 
 // opts: { linked, existingEntries, individualCounts, divisionRules,
 //         extraCategories (triagem: categorias adicionais), beltRows
-//         (triagem: linhas de karate_current_belt) }
+//         (triagem: linhas de karate_current_belt), vitrineRows (linhas
+//         da vitrine), vitrineOrdersMissing (42P01 quando o SQL da
+//         vitrine referencia karate_delegation_orders — 294 pendente) }
 function mockPool(opts = {}) {
   const {
     linked = true,
@@ -83,6 +85,8 @@ function mockPool(opts = {}) {
     divisionRules = { max_individual_per_dojo_per_category: 7, max_teams_per_dojo_per_category: 1 },
     extraCategories = [],
     beltRows = [],
+    vitrineRows = [{ id: COMP_ID, name: 'Paulista 2026', season: 2026, event_date: '2026-08-22', location: 'Barueri', status: 'open', fee_amount: null, pricing_config: JKA_PRICING, rectification_deadline: '2026-07-31' }],
+    vitrineOrdersMissing = false,
   } = opts;
 
   db.query.mockImplementation((sql, params) => {
@@ -91,7 +95,12 @@ function mockPool(opts = {}) {
       return Promise.resolve({ rows: [{ karate_dojo_linked_at: linked ? '2026-01-01T00:00:00Z' : null }] });
     }
     if (s.includes('-- p0d:list-open-competitions')) {
-      return Promise.resolve({ rows: [{ id: COMP_ID, name: 'Paulista 2026', season: 2026, event_date: '2026-08-22', location: 'Barueri', status: 'open', fee_amount: null, pricing_config: JKA_PRICING, rectification_deadline: '2026-07-31' }] });
+      if (vitrineOrdersMissing && s.includes('karate_delegation_orders')) {
+        const e = new Error('relation "karate_delegation_orders" does not exist');
+        e.code = '42P01';
+        return Promise.reject(e);
+      }
+      return Promise.resolve({ rows: vitrineRows });
     }
     if (s.includes('-- p0d:list-divisions')) {
       return Promise.resolve({ rows: [{ id: DIV_ID, competition_id: COMP_ID, name: 'Principal', sort_order: 0, rules: divisionRules }] });
@@ -310,6 +319,51 @@ describe('GET /dojo/competitions — vitrine', () => {
     expect(res.body.data[0].has_pricing).toBe(true);
     expect(res.body.data[0].divisions).toHaveLength(1);
     expect(res.body.data[0].divisions[0].name).toBe('Principal');
+  });
+
+  it('dia do evento: closed/done com delegação do dojô entram na lista com enrollment_open=false', async () => {
+    const COMP_CLOSED = '33333333-3333-4333-8333-333333333334';
+    mockPool({
+      vitrineRows: [
+        { id: COMP_ID, name: 'Paulista 2026', season: 2026, event_date: '2026-08-22', location: 'Barueri', status: 'open', fee_amount: null, pricing_config: JKA_PRICING, rectification_deadline: '2026-07-31' },
+        { id: COMP_CLOSED, name: 'Regional Encerrado', season: 2026, event_date: '2026-08-24', location: 'Osasco', status: 'closed', fee_amount: null, pricing_config: null, rectification_deadline: null },
+      ],
+    });
+    const res = await request(buildApp())
+      .get(`/federation/${FED_ID}/dojo/competitions`)
+      .set('Authorization', 'Bearer ' + tokenA);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    const open = res.body.data.find((c) => c.id === COMP_ID);
+    const closed = res.body.data.find((c) => c.id === COMP_CLOSED);
+    expect(open.enrollment_open).toBe(true);
+    expect(open.status).toBe('open');
+    expect(closed.enrollment_open).toBe(false);
+    expect(closed.status).toBe('closed');
+
+    // O SQL restringe closed/done à participação do dojô (entries OU
+    // pedido de delegação), com o dojo_id do TOKEN como parâmetro.
+    const call = db.query.mock.calls.find((c) => String(c[0]).includes('-- p0d:list-open-competitions'));
+    const sql = String(call[0]);
+    expect(sql).toMatch(/status IN \('closed','done'\)/);
+    expect(sql).toMatch(/karate_competition_entries/);
+    expect(sql).toMatch(/karate_delegation_orders/);
+    expect(call[1]).toEqual([FED_ID, DOJO_ID]);
+  });
+
+  it('migração 294 pendente (42P01 em delegation_orders) → refaz só com entries, lista segue', async () => {
+    mockPool({ vitrineOrdersMissing: true });
+    const res = await request(buildApp())
+      .get(`/federation/${FED_ID}/dojo/competitions`)
+      .set('Authorization', 'Bearer ' + tokenA);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    const sqls = db.query.mock.calls
+      .map((c) => String(c[0]))
+      .filter((s) => s.includes('-- p0d:list-open-competitions'));
+    expect(sqls.length).toBe(2);
+    expect(sqls[1]).toMatch(/karate_competition_entries/);
+    expect(sqls[1]).not.toMatch(/karate_delegation_orders/);
   });
 });
 
