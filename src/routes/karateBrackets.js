@@ -1065,6 +1065,18 @@ router.post(
         return res.status(409).json({ error: 'Destrave a chave para editar.' });
       }
 
+      // Posições em rodadas >= 1 (e na disputa de 3º) são DERIVADAS dos
+      // resultados — "voltar ao estado pré-resultados" exige limpá-las
+      // também. Sem isso, atletas ficavam plantados na semi/final após o
+      // reset (achado do QA de 23/08, junto do fix do avanço em cascata).
+      await client.query(
+        `UPDATE karate_bracket_matches
+            SET aka_entry_id = NULL, shiro_entry_id = NULL, updated_at = NOW()
+          WHERE bracket_id = $1
+            AND (round > 0 OR bracket_kind = 'third')`,
+        [bracketRow.id]
+      );
+
       try {
         // P1 (296): reset limpa tambem o registro de decisao e o snapshot
         // de formato — a chave volta ao estado pre-resultados.
