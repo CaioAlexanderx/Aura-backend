@@ -380,3 +380,65 @@ describe('POST /dojo/competitions/:cid/delegation/triage', () => {
     expect(res.body.results[0].triage[0].options).toHaveLength(2);
   });
 });
+
+// ── Onda B: "minhas chaves" no portal do dojô ───────────────
+describe('GET /dojo/competitions/:cid/my-brackets', () => {
+  const CAT_X = 'cat-x-uuid';
+  function withMyBrackets({ published }) {
+    mockPool();
+    const prev = db.query.getMockImplementation();
+    db.query.mockImplementation((sql, params) => {
+      const s = String(sql);
+      if (s.includes('-- p0d:comp-published')) {
+        return Promise.resolve({ rows: [{ id: params[0], name: 'Paulista QA', brackets_published_at: published ? '2026-10-01T00:00:00Z' : null }] });
+      }
+      if (s.includes('-- p0d:my-brackets')) {
+        return Promise.resolve({ rows: [
+          { id: CAT_X, name: 'Kata Mirim', modality: 'kata', group_label: 'Grupo 1', division_name: 'Paulista', area_name: 'Koto 2', area_order: 3, bracket_status: 'locked', kata_mode: 'score_rounds', student_name: 'Atleta A' },
+          { id: CAT_X, name: 'Kata Mirim', modality: 'kata', group_label: 'Grupo 1', division_name: 'Paulista', area_name: 'Koto 2', area_order: 3, bracket_status: 'locked', kata_mode: 'score_rounds', student_name: 'Atleta C' },
+        ] });
+      }
+      if (s.includes('-- p0d:my-cat-gate')) {
+        return Promise.resolve({ rows: params[0] === CAT_X ? [{ '?column?': 1 }] : [] });
+      }
+      return prev(sql, params);
+    });
+  }
+
+  it('chaves publicadas: agrupa por categoria com MEUS atletas e o koto', async () => {
+    withMyBrackets({ published: true });
+    const res = await request(buildApp())
+      .get(`/federation/${FED_ID}/dojo/competitions/${COMP_ID}/my-brackets`)
+      .set('Authorization', 'Bearer ' + tokenA);
+    expect(res.status).toBe(200);
+    expect(res.body.published).toBe(true);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0]).toMatchObject({
+      id: CAT_X, area_name: 'Koto 2', bracket_status: 'locked',
+      my_athletes: ['Atleta A', 'Atleta C'],
+    });
+  });
+
+  it('antes de publicar: 200 { published: false } (nunca 403 mudo); súmula 404 NOT_PUBLISHED', async () => {
+    withMyBrackets({ published: false });
+    const res = await request(buildApp())
+      .get(`/federation/${FED_ID}/dojo/competitions/${COMP_ID}/my-brackets`)
+      .set('Authorization', 'Bearer ' + tokenA);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ published: false, data: [] });
+
+    const sheet = await request(buildApp())
+      .get(`/federation/${FED_ID}/dojo/competitions/${COMP_ID}/categories/${CAT_X}/scoresheet`)
+      .set('Authorization', 'Bearer ' + tokenA);
+    expect(sheet.status).toBe(404);
+    expect(sheet.body.code).toBe('NOT_PUBLISHED');
+  });
+
+  it('súmula de categoria SEM atleta meu → 404 (não vaza chave alheia)', async () => {
+    withMyBrackets({ published: true });
+    const res = await request(buildApp())
+      .get(`/federation/${FED_ID}/dojo/competitions/${COMP_ID}/categories/cat-alheia/scoresheet`)
+      .set('Authorization', 'Bearer ' + tokenA);
+    expect(res.status).toBe(404);
+  });
+});
