@@ -94,7 +94,8 @@ router.post('/whatsapp/templates/sync', ...guard, async (req, res) => {
     const { rows: tok } = await db.query(
       'SELECT wa_access_token FROM companies WHERE id = $1 LIMIT 1', [req.params.id]
     );
-    const list = await wa.listTemplates(conn.wa_waba_id, tok[0].wa_access_token);
+    // Token cifrado em repouso (A9) — decifrar antes de falar com a Meta.
+    const list = await wa.listTemplates(conn.wa_waba_id, waOutbox.decryptToken(tok[0].wa_access_token));
     // listTemplates JÁ devolve o array (data.data). Aceitar as duas formas
     // evita o bug de "0 sincronizados" com templates existentes.
     const items = Array.isArray(list) ? list : ((list && list.data) || []);
@@ -152,7 +153,7 @@ router.post('/whatsapp/templates', ...guard, async (req, res) => {
     const components = [{ type: 'BODY', text: tpl.body, ...(example ? { example } : {}) }];
     if (tpl.footer) components.push({ type: 'FOOTER', text: tpl.footer });
 
-    const created = await wa.createTemplate(conn.wa_waba_id, tok[0].wa_access_token, {
+    const created = await wa.createTemplate(conn.wa_waba_id, waOutbox.decryptToken(tok[0].wa_access_token), {
       name: tpl.name, language: tpl.language, category: tpl.category, components,
     });
     await waOutbox.applyTemplateStatus(req.params.id, {

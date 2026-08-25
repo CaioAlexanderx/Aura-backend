@@ -18,6 +18,8 @@
 
 process.env.WA_VERIFY_TOKEN = 'verify-test';
 process.env.WA_APP_SECRET = 'secret-test';
+// Cofre do token cifrado (A9) — mesma chave do dojoBaasCrypto.
+process.env.DOJO_BAAS_ENC_KEY = process.env.DOJO_BAAS_ENC_KEY || 'a'.repeat(64);
 
 jest.mock('../src/config/database');
 jest.mock('../src/services/whatsapp', () => ({
@@ -128,6 +130,25 @@ describe('processBatch', () => {
     expect(r.sent).toBe(1);
     expect(wa.sendTemplate).toHaveBeenCalledWith('PN1', 'TK', '5511988887777', 'mensalidade_lembrete', 'pt_BR', undefined);
     expect(updates.some(u => u.params.includes('wamid.ABC'))).toBe(true);
+  });
+
+  it('token CIFRADO (v1:) é decifrado antes de ir à Meta; texto puro passa direto', async () => {
+    // O Embedded Signup grava cifrado (A9). Sem decifrar, o Bearer seria o
+    // ciphertext e TODO dojô conectado pelo fluxo oficial falharia.
+    const { encrypt } = require('../src/services/dojoBaasCrypto');
+    const cifrado = encrypt('TOKEN-REAL-DA-META');
+    expect(cifrado.startsWith('v1:')).toBe(true);
+
+    mockBatch(baseRow, { creds: { wa_phone_number_id: 'PN1', wa_access_token: cifrado } });
+    wa.sendTemplate.mockResolvedValue({ messages: [{ id: 'wamid.CRYPT' }] });
+    await outbox.processBatch(5);
+    expect(wa.sendTemplate).toHaveBeenCalledWith('PN1', 'TOKEN-REAL-DA-META', expect.anything(), expect.anything(), expect.anything(), undefined);
+
+    wa.sendTemplate.mockReset();
+    mockBatch(baseRow, { creds: { wa_phone_number_id: 'PN1', wa_access_token: 'TOKEN-LEGADO' } });
+    wa.sendTemplate.mockResolvedValue({ messages: [{ id: 'wamid.PLAIN' }] });
+    await outbox.processBatch(5);
+    expect(wa.sendTemplate).toHaveBeenCalledWith('PN1', 'TOKEN-LEGADO', expect.anything(), expect.anything(), expect.anything(), undefined);
   });
 
   it('erro da Meta → retry com backoff; no teto → failed permanente', async () => {
