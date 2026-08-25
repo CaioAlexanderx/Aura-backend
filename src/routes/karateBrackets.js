@@ -69,6 +69,34 @@ async function findCat(client, cid, catId) {
 // de quem existir. Cache module-level otimista: se team_id ainda não
 // existe (294 pendente), degrada para a forma antiga (só atletas) sem
 // repetir o 42703 a cada request.
+// Quantos ÁRBITROS dão nota nesta categoria (migration 308). A mesa usa
+// isso para desenhar N campos de nota em vez dos 5 fixos. Hierarquia:
+// categoria > competição > 5 (padrão FPKT/JKA). O lançamento continua
+// aceitando 3..7 — config não pode travar a competição em andamento.
+const DEFAULT_JUDGE_COUNT = 5;
+let HAS_JUDGE_COUNT = true;
+async function loadJudgeCount(client, cid, catId) {
+  if (!HAS_JUDGE_COUNT) return DEFAULT_JUDGE_COUNT;
+  try {
+    const r = await client.query(
+      `SELECT COALESCE(cat.judge_count, comp.judge_count, $3) AS judge_count
+         FROM karate_competition_categories cat
+         JOIN karate_competitions comp ON comp.id = cat.competition_id
+        WHERE cat.id = $1 AND cat.competition_id = $2 LIMIT 1`,
+      [catId, cid, DEFAULT_JUDGE_COUNT]
+    );
+    const n = r.rows[0] && Number(r.rows[0].judge_count);
+    return Number.isInteger(n) && n >= 3 && n <= 7 ? n : DEFAULT_JUDGE_COUNT;
+  } catch (err) {
+    if (err.code === '42703' || err.code === '42P01') {
+      HAS_JUDGE_COUNT = false;
+      console.warn('[karateBrackets] judge_count ausente (migração 308 pendente) — assumindo 5');
+      return DEFAULT_JUDGE_COUNT;
+    }
+    throw err;
+  }
+}
+
 // P2 chamada do koto (migration 305): a chave carrega o estado de PRESENCA
 // de cada inscricao para a mesa marcar o ausente sem sair da tela.
 //   checked_in -> credenciado    no_show -> ausencia confirmada
@@ -818,6 +846,7 @@ const getBracketHandler = async (req, res) => {
       if (isKata) {
         const entryPresence = {};
         for (const a of athletes) entryPresence[a.id] = a;
+        const judgeCount = await loadJudgeCount(client, cid, catId);
         let scores = [];
         try {
           const sc = await client.query(
@@ -844,6 +873,7 @@ const getBracketHandler = async (req, res) => {
           options: bracketRow.options,
           athletes_count: athletes.length,
           pending_payment_count: pendingPaymentCount,
+          judge_count: judgeCount,
           kata_scores: scores.map(s => ({
             entry_id: s.entry_id,
             student_name: s.student_name,
