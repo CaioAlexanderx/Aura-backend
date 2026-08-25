@@ -1,13 +1,18 @@
 // ============================================================
-// AURA. — Sprint 5: WhatsApp Routes
-// Multi-tenant: each client uses their own number
-// Mounted at: /companies/:id/whatsapp
+// AURA — WhatsApp (LEGADO): envio avulso e histórico
+//
+// CONSOLIDAÇÃO (25/08/2026): connect/disconnect/status/templates
+// mudaram para src/routes/whatsappCloud.js (fonte única, montado em
+// /companies/:id SEM gate de plano — o gate certo é o addon de
+// lembretes). Aqui ficaram só /send e /messages, que seguem atrás de
+// requirePlan('negocio','expansao') por serem uso avulso das outras
+// verticais. Novas features de WhatsApp vão no whatsappCloud.js.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const wa = require('../services/whatsapp');
-const { encrypt, decrypt } = require('../services/dojoBaasCrypto');
+const { decrypt } = require('../services/dojoBaasCrypto');
 
 // A9 — o token permanente do Graph API é cifrado em repouso (AES-256-GCM,
 // mesmo cofre do dojoBaasCrypto). Formato cifrado = "v1:...". Token legado
@@ -33,74 +38,6 @@ async function getWaConfig(companyId) {
 }
 
 // ── POST /whatsapp/connect — Embedded Signup callback ────
-router.post('/connect', async (req, res) => {
-  const cid = req.params.id;
-  const { code, waba_id, phone_number_id } = req.body;
-  if (!code) return res.status(400).json({ error: 'Authorization code obrigatorio' });
-  try {
-    // Exchange code for permanent token
-    const accessToken = await wa.exchangeCodeForToken(code);
-
-    // Get phone display number
-    let phoneDisplay = '';
-    if (phone_number_id) {
-      try {
-        const info = await wa.getPhoneInfo(phone_number_id, accessToken);
-        phoneDisplay = info.display_phone_number || '';
-      } catch {}
-    }
-
-    // Save to company — token CIFRADO em repouso (A9).
-    await db.query(
-      `UPDATE companies SET
-        wa_waba_id=$1, wa_phone_number_id=$2, wa_phone_display=$3,
-        wa_access_token=$4, wa_connected_at=NOW(), updated_at=NOW()
-       WHERE id=$5`,
-      [waba_id || null, phone_number_id || null, phoneDisplay, encrypt(accessToken), cid]
-    );
-
-    res.json({
-      connected: true,
-      phone_display: phoneDisplay,
-      waba_id: waba_id,
-      message: 'WhatsApp conectado com sucesso!',
-    });
-  } catch (err) {
-    console.error('[WA] Connect error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ── GET /whatsapp/status — Connection status ────────────
-router.get('/status', async (req, res) => {
-  try {
-    const { rows } = await db.query(
-      'SELECT wa_waba_id, wa_phone_number_id, wa_phone_display, wa_connected_at FROM companies WHERE id=$1',
-      [req.params.id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
-    const c = rows[0];
-    res.json({
-      connected: !!c.wa_access_token || !!c.wa_phone_number_id,
-      phone_display: c.wa_phone_display || null,
-      waba_id: c.wa_waba_id || null,
-      connected_at: c.wa_connected_at || null,
-    });
-  } catch (err) { res.status(500).json({ error: 'Erro ao verificar status' }); }
-});
-
-// ── POST /whatsapp/disconnect — Remove connection ───────
-router.post('/disconnect', async (req, res) => {
-  try {
-    await db.query(
-      `UPDATE companies SET wa_waba_id=NULL, wa_phone_number_id=NULL, wa_phone_display=NULL,
-       wa_access_token=NULL, wa_connected_at=NULL, updated_at=NOW() WHERE id=$1`,
-      [req.params.id]
-    );
-    res.json({ disconnected: true });
-  } catch (err) { res.status(500).json({ error: 'Erro ao desconectar' }); }
-});
-
 // ── POST /whatsapp/send — Send message ─────────────────
 router.post('/send', async (req, res) => {
   const cid = req.params.id;
@@ -134,22 +71,6 @@ router.post('/send', async (req, res) => {
     console.error('[WA] Send error:', err.message);
     res.status(500).json({ error: err.message });
   }
-});
-
-// ── GET /whatsapp/templates — List templates ────────────
-router.get('/templates', async (req, res) => {
-  try {
-    const config = await getWaConfig(req.params.id);
-    if (!config.wa_waba_id) return res.json({ templates: [] });
-    const templates = await wa.listTemplates(config.wa_waba_id, config.wa_access_token);
-    res.json({
-      total: templates.length,
-      templates: templates.map(t => ({
-        name: t.name, status: t.status, category: t.category,
-        language: t.language, components: t.components,
-      })),
-    });
-  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── GET /whatsapp/messages — Message history ────────────

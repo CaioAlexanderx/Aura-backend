@@ -34,9 +34,9 @@ router.use('/me/financeiro', require('./financeiroComparative').meRouter);
 
 router.use('/companies/:id', privateCompaniesRouter);
 
-// ── ONDA 5b: WhatsApp Cloud API por company (fila, templates, opt) ──
-//   GET/POST /companies/:id/whatsapp/* — ver karateWhatsapp.js
-router.use('/companies/:id', require('./karateWhatsapp'));
+// ── WhatsApp Cloud API por company (FONTE ÚNICA: connect, status,
+// templates, fila, opt). Sem gate de plano — ver whatsappCloud.js.
+router.use('/companies/:id', require('./whatsappCloud'));
 
 router.use('/admin', require('./admin'));
 router.use('/admin', require('./adminAccessCodes'));
