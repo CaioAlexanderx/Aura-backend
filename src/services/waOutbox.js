@@ -111,6 +111,18 @@ async function enqueue({
   return { queued: status === 'pending', id: rows[0].id, status, reason: skipReason };
 }
 
+// O token do Graph API é cifrado em repouso (AES-256-GCM, prefixo 'v1:',
+// mesmo cofre do dojoBaasCrypto) desde o A9 — é assim que o Embedded
+// Signup (/whatsapp/connect) grava. Token legado em texto puro NÃO tem o
+// prefixo e passa direto. Sem isso, o dispatcher mandaria o ciphertext
+// como Bearer e TODO dojô conectado pelo fluxo oficial falharia no envio.
+function decryptToken(stored) {
+  if (!stored) return stored;
+  if (!/^v1:/.test(String(stored))) return stored;
+  const { decrypt } = require('./dojoBaasCrypto');
+  return decrypt(stored);
+}
+
 // Credenciais da company — 42703-safe (039 fora do CI).
 async function loadCreds(companyId) {
   try {
@@ -121,7 +133,7 @@ async function loadCreds(companyId) {
     );
     const r = rows[0];
     if (!r || !r.wa_phone_number_id || !r.wa_access_token) return null;
-    return { phoneNumberId: r.wa_phone_number_id, accessToken: r.wa_access_token };
+    return { phoneNumberId: r.wa_phone_number_id, accessToken: decryptToken(r.wa_access_token) };
   } catch (e) {
     if (e.code === '42703') return null;
     throw e;
@@ -243,7 +255,7 @@ async function applyTemplateStatus(companyId, { name, language, status, metaTemp
 }
 
 module.exports = {
-  normalizePhone, touchInbound, windowOpen, getContact,
+  normalizePhone, touchInbound, windowOpen, getContact, decryptToken,
   enqueue, processBatch, applyStatusUpdate, applyTemplateStatus,
   MAX_ATTEMPTS,
 };
