@@ -95,7 +95,9 @@ router.post('/whatsapp/templates/sync', ...guard, async (req, res) => {
       'SELECT wa_access_token FROM companies WHERE id = $1 LIMIT 1', [req.params.id]
     );
     const list = await wa.listTemplates(conn.wa_waba_id, tok[0].wa_access_token);
-    const items = (list && list.data) || [];
+    // listTemplates JÁ devolve o array (data.data). Aceitar as duas formas
+    // evita o bug de "0 sincronizados" com templates existentes.
+    const items = Array.isArray(list) ? list : ((list && list.data) || []);
     let synced = 0;
     for (const t of items) {
       await waOutbox.applyTemplateStatus(req.params.id, {
@@ -109,6 +111,66 @@ router.post('/whatsapp/templates/sync', ...guard, async (req, res) => {
     if (e.code === '42P01') return schemaPending(res);
     console.error('[karateWhatsapp] sync error:', e.message);
     return res.status(502).json({ error: 'Falha ao consultar a Meta: ' + String(e.message).slice(0, 200) });
+  }
+});
+
+// ── POST /whatsapp/templates — cria na Meta e registra ──────
+// Body: { name?, language?, category?, body?, footer? }. Sem body,
+// usa o TEMPLATE PADRÃO DE COBRANÇA (4 variáveis, categoria UTILITY —
+// cobrança é utilitário, não marketing: aprova mais rápido e não cai
+// nas regras de opt-in de marketing).
+const DEFAULT_BILLING_TEMPLATE = {
+  name: 'mensalidade_lembrete',
+  language: 'pt_BR',
+  category: 'UTILITY',
+  body: 'Olá, {{1}}! Lembrete da mensalidade de {{2}}: {{3}}, com vencimento em {{4}}. Qualquer dúvida, é só responder esta mensagem.',
+  footer: 'Para não receber mais, responda SAIR.',
+};
+
+router.post('/whatsapp/templates', ...guard, async (req, res) => {
+  const b = req.body || {};
+  const tpl = {
+    name: (b.name || DEFAULT_BILLING_TEMPLATE.name).trim(),
+    language: b.language || DEFAULT_BILLING_TEMPLATE.language,
+    category: b.category || DEFAULT_BILLING_TEMPLATE.category,
+    body: b.body || DEFAULT_BILLING_TEMPLATE.body,
+    footer: b.footer !== undefined ? b.footer : DEFAULT_BILLING_TEMPLATE.footer,
+  };
+  try {
+    const conn = await loadCompanyWa(req.params.id);
+    if (!conn || !conn.wa_waba_id || !conn.has_token) {
+      return res.status(409).json({ error: 'WhatsApp não conectado (WABA/token ausentes)', code: 'NAO_CONECTADO' });
+    }
+    const { rows: tok } = await db.query(
+      'SELECT wa_access_token FROM companies WHERE id = $1 LIMIT 1', [req.params.id]
+    );
+    // Exemplos são exigidos pela Meta quando o corpo tem variáveis.
+    const nVars = (tpl.body.match(/\{\{\d+\}\}/g) || []).length;
+    const example = nVars
+      ? { body_text: [['Ana Souza', 'agosto/2026', 'R$ 150,00', '10/08/2026'].slice(0, nVars)] }
+      : undefined;
+    const components = [{ type: 'BODY', text: tpl.body, ...(example ? { example } : {}) }];
+    if (tpl.footer) components.push({ type: 'FOOTER', text: tpl.footer });
+
+    const created = await wa.createTemplate(conn.wa_waba_id, tok[0].wa_access_token, {
+      name: tpl.name, language: tpl.language, category: tpl.category, components,
+    });
+    await waOutbox.applyTemplateStatus(req.params.id, {
+      name: tpl.name, language: tpl.language,
+      status: created && created.status ? created.status : 'PENDING',
+      metaTemplateId: created && created.id != null ? String(created.id) : null,
+    });
+    // Guarda a prévia para a UI mostrar o texto sem ir à Meta.
+    await db.query(
+      `UPDATE wa_templates SET body_preview = $1, category = $2, updated_at = NOW()
+        WHERE company_id = $3 AND name = $4 AND language = $5`,
+      [tpl.body, tpl.category, req.params.id, tpl.name, tpl.language]
+    ).catch(() => {});
+    return res.status(201).json({ name: tpl.name, language: tpl.language, meta: created });
+  } catch (e) {
+    if (e.code === '42P01') return schemaPending(res);
+    console.error('[karateWhatsapp] create template error:', e.message);
+    return res.status(502).json({ error: 'Falha ao criar o template na Meta: ' + String(e.message).slice(0, 200) });
   }
 });
 
