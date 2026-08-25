@@ -1,15 +1,25 @@
 // ============================================================
-// AURA — ONDA 5b: administração do WhatsApp (Cloud API)
-// Montado em /company/:id (qualquer vertical — cobrança por WhatsApp é
-// da COMPANY conectada; no karatê, o dojô). guards adminOnly: mexer em
-// canal de mensagem é ato do dono.
+// AURA — WhatsApp Cloud API por COMPANY (fonte única)
+// Montado em /companies/:id. Qualquer vertical: o canal pertence à
+// company conectada (no karatê, o dojô).
 //
+//   POST  /whatsapp/connect           — Embedded Signup (code → token)
+//   POST  /whatsapp/disconnect        — solta o número da company
 //   GET   /whatsapp/status            — conexão + contadores da fila
 //   GET   /whatsapp/templates         — registro local (status da Meta)
+//   POST  /whatsapp/templates         — cria na Meta e registra
 //   POST  /whatsapp/templates/sync    — puxa da Meta p/ o registro
 //   GET   /whatsapp/outbox            — últimos itens da fila
 //   POST  /whatsapp/test-send         — enfileira + despacha na hora
 //   POST  /whatsapp/contacts/opt      — opt-in/opt-out manual
+//
+// CONSOLIDAÇÃO (25/08/2026): estas rotas viviam em DOIS routers — o
+// legado (whatsappRoutes.js, atrás de requirePlan('negocio','expansao'))
+// sombreava status/templates e devolvia outro shape, deixando o card de
+// Templates vazio no app. Aqui NÃO há gate de plano: 104 dos 106 dojôs
+// estão em 'essencial' e são justamente o público do addon de lembretes
+// (R$39/mês) — o gate certo é o ADDON, não o plano. O legado ficou só
+// com /send e /messages (uso antigo de outras verticais).
 //
 // 42P01 (307 pendente) → SCHEMA_PENDING; credenciais 039 → 42703-safe.
 // ============================================================
@@ -20,6 +30,7 @@ const db = require('../config/database');
 const { requireAuth, requireCompanyAccess } = require('../middleware/auth');
 const waOutbox = require('../services/waOutbox');
 const wa = require('../services/whatsapp');
+const { encrypt } = require('../services/dojoBaasCrypto');
 
 const guard = [requireAuth, requireCompanyAccess({})];
 
@@ -30,7 +41,8 @@ function schemaPending(res) {
 async function loadCompanyWa(companyId) {
   try {
     const { rows } = await db.query(
-      `SELECT wa_waba_id, wa_phone_number_id, wa_phone_display, wa_access_token IS NOT NULL AS has_token
+      `SELECT wa_waba_id, wa_phone_number_id, wa_phone_display, wa_connected_at,
+              wa_access_token IS NOT NULL AS has_token
          FROM companies WHERE id = $1 LIMIT 1`,
       [companyId]
     );
@@ -40,6 +52,51 @@ async function loadCompanyWa(companyId) {
     throw e;
   }
 }
+
+// ── POST /whatsapp/connect — Embedded Signup ────────────────
+// Body: { code, waba_id, phone_number_id }. O token permanente é
+// gravado CIFRADO em repouso (A9) — quem envia decifra (waOutbox).
+router.post('/whatsapp/connect', ...guard, async (req, res) => {
+  const { code, waba_id, phone_number_id } = req.body || {};
+  if (!code) return res.status(400).json({ error: 'Authorization code obrigatorio', code: 'VALIDATION_ERROR' });
+  try {
+    const accessToken = await wa.exchangeCodeForToken(code);
+    let phoneDisplay = '';
+    if (phone_number_id) {
+      try {
+        const info = await wa.getPhoneInfo(phone_number_id, accessToken);
+        phoneDisplay = info.display_phone_number || '';
+      } catch { /* display é conforto, não requisito */ }
+    }
+    await db.query(
+      `UPDATE companies SET
+         wa_waba_id=$1, wa_phone_number_id=$2, wa_phone_display=$3,
+         wa_access_token=$4, wa_connected_at=NOW(), updated_at=NOW()
+       WHERE id=$5`,
+      [waba_id || null, phone_number_id || null, phoneDisplay, encrypt(accessToken), req.params.id]
+    );
+    return res.json({ connected: true, phone_display: phoneDisplay, waba_id: waba_id || null });
+  } catch (err) {
+    console.error('[whatsappCloud] connect error:', err.message);
+    return res.status(502).json({ error: String(err.message).slice(0, 200) });
+  }
+});
+
+// ── POST /whatsapp/disconnect ───────────────────────────────
+router.post('/whatsapp/disconnect', ...guard, async (req, res) => {
+  try {
+    await db.query(
+      `UPDATE companies SET wa_waba_id=NULL, wa_phone_number_id=NULL, wa_phone_display=NULL,
+              wa_access_token=NULL, wa_connected_at=NULL, updated_at=NOW()
+        WHERE id=$1`,
+      [req.params.id]
+    );
+    return res.json({ disconnected: true });
+  } catch (err) {
+    console.error('[whatsappCloud] disconnect error:', err.message);
+    return res.status(500).json({ error: 'Erro ao desconectar' });
+  }
+});
 
 // ── GET /whatsapp/status ────────────────────────────────────
 router.get('/whatsapp/status', ...guard, async (req, res) => {
@@ -59,11 +116,12 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
       connected: !!(conn && conn.wa_phone_number_id && conn.has_token),
       phone_display: (conn && conn.wa_phone_display) || null,
       waba_id: (conn && conn.wa_waba_id) || null,
+      connected_at: (conn && conn.wa_connected_at) || null, // compat legado
       queue: queue || {},
       schema_pending: queue === null,
     });
   } catch (e) {
-    console.error('[karateWhatsapp] status error:', e.message);
+    console.error('[whatsappCloud] status error:', e.message);
     return res.status(500).json({ error: 'Erro ao carregar o status do WhatsApp' });
   }
 });
@@ -76,10 +134,12 @@ router.get('/whatsapp/templates', ...guard, async (req, res) => {
          FROM wa_templates WHERE company_id = $1 ORDER BY name ASC, language ASC`,
       [req.params.id]
     );
-    return res.json({ data: rows });
+    // `data` é o shape do app; `templates`/`total` mantêm o contrato do
+    // router legado que esta rota substituiu.
+    return res.json({ data: rows, templates: rows, total: rows.length });
   } catch (e) {
     if (e.code === '42P01') return schemaPending(res);
-    console.error('[karateWhatsapp] templates error:', e.message);
+    console.error('[whatsappCloud] templates error:', e.message);
     return res.status(500).json({ error: 'Erro ao listar templates' });
   }
 });
@@ -110,7 +170,7 @@ router.post('/whatsapp/templates/sync', ...guard, async (req, res) => {
     return res.json({ synced });
   } catch (e) {
     if (e.code === '42P01') return schemaPending(res);
-    console.error('[karateWhatsapp] sync error:', e.message);
+    console.error('[whatsappCloud] sync error:', e.message);
     return res.status(502).json({ error: 'Falha ao consultar a Meta: ' + String(e.message).slice(0, 200) });
   }
 });
@@ -170,7 +230,7 @@ router.post('/whatsapp/templates', ...guard, async (req, res) => {
     return res.status(201).json({ name: tpl.name, language: tpl.language, meta: created });
   } catch (e) {
     if (e.code === '42P01') return schemaPending(res);
-    console.error('[karateWhatsapp] create template error:', e.message);
+    console.error('[whatsappCloud] create template error:', e.message);
     return res.status(502).json({ error: 'Falha ao criar o template na Meta: ' + String(e.message).slice(0, 200) });
   }
 });
@@ -188,7 +248,7 @@ router.get('/whatsapp/outbox', ...guard, async (req, res) => {
     return res.json({ data: rows });
   } catch (e) {
     if (e.code === '42P01') return schemaPending(res);
-    console.error('[karateWhatsapp] outbox error:', e.message);
+    console.error('[whatsappCloud] outbox error:', e.message);
     return res.status(500).json({ error: 'Erro ao listar a fila' });
   }
 });
@@ -218,7 +278,7 @@ router.post('/whatsapp/test-send', ...guard, async (req, res) => {
     return res.json({ outbox_id: r.id, result: rows[0] || null, batch });
   } catch (e) {
     if (e.code === '42P01') return schemaPending(res);
-    console.error('[karateWhatsapp] test-send error:', e.message);
+    console.error('[whatsappCloud] test-send error:', e.message);
     return res.status(500).json({ error: 'Erro no envio de teste' });
   }
 });
@@ -244,7 +304,7 @@ router.post('/whatsapp/contacts/opt', ...guard, async (req, res) => {
     return res.json({ phone, action: b.action });
   } catch (e) {
     if (e.code === '42P01') return schemaPending(res);
-    console.error('[karateWhatsapp] opt error:', e.message);
+    console.error('[whatsappCloud] opt error:', e.message);
     return res.status(500).json({ error: 'Erro ao registrar o opt' });
   }
 });
