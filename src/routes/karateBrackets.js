@@ -69,6 +69,38 @@ async function findCat(client, cid, catId) {
 // de quem existir. Cache module-level otimista: se team_id ainda não
 // existe (294 pendente), degrada para a forma antiga (só atletas) sem
 // repetir o 42703 a cada request.
+// P2 chamada do koto (migration 305): a chave carrega o estado de PRESENCA
+// de cada inscricao para a mesa marcar o ausente sem sair da tela.
+//   checked_in -> credenciado    no_show -> ausencia confirmada
+// Ambos false = SEM INFORMACAO (nao é o mesmo que ausente) — o badge de
+// ausente só aparece com no_show. Query separada e 42703-safe: com a 305
+// pendente, degrada para a chave de sempre em vez de derrubar o request.
+let HAS_CHECKIN = true;
+async function attachPresence(client, catId, entries) {
+  if (!HAS_CHECKIN || !entries.length) return entries;
+  try {
+    const r = await client.query(
+      `SELECT id, checked_in_at, no_show_at
+         FROM karate_competition_entries WHERE category_id = $1`,
+      [catId]
+    );
+    const map = {};
+    for (const row of r.rows) map[row.id] = row;
+    return entries.map(e => ({
+      ...e,
+      checked_in: !!(map[e.id] && map[e.id].checked_in_at),
+      no_show: !!(map[e.id] && map[e.id].no_show_at),
+    }));
+  } catch (err) {
+    if (err.code === '42703' || err.code === '42P01') {
+      HAS_CHECKIN = false;
+      console.warn('[karateBrackets] checked_in_at/no_show_at ausente (migração 305 pendente) — chave sem presença');
+      return entries;
+    }
+    throw err;
+  }
+}
+
 let HAS_TEAM_ENTRIES = true;
 async function loadEntries(client, catId, federationId) {
   if (HAS_TEAM_ENTRIES) {
@@ -86,14 +118,14 @@ async function loadEntries(client, catId, federationId) {
          ORDER BY e.created_at ASC`,
         [catId]
       );
-      return r.rows.map(r => ({
+      return attachPresence(client, catId, r.rows.map(r => ({
         id: r.id,
         student_id: r.student_id,
         team_id: r.team_id || null,
         dojo_id: r.dojo_id,
         dojo: r.dojo_name,
         student_name: r.student_name,
-      }));
+      })));
     } catch (e) {
       if (e.code === '42703' || e.code === '42P01') {
         HAS_TEAM_ENTRIES = false;
@@ -113,13 +145,13 @@ async function loadEntries(client, catId, federationId) {
      ORDER BY e.created_at ASC`,
     [catId]
   );
-  return r.rows.map(r => ({
+  return attachPresence(client, catId, r.rows.map(r => ({
     id: r.id,
     student_id: r.student_id,
     dojo_id: r.dojo_id,
     dojo: r.dojo_name,
     student_name: r.student_name,
-  }));
+  })));
 }
 
 // ── helper: inscritos aguardando confirmação de pagamento ───────
@@ -286,11 +318,15 @@ function buildKumiteBracketState(bracketRow, matchRows, athletes, pendingPayment
         entry_id: m.akaId,
         student_name: athleteMap[m.akaId]?.student_name || null,
         dojo_name: athleteMap[m.akaId]?.dojo || null,
+        checked_in: !!athleteMap[m.akaId]?.checked_in,
+        no_show: !!athleteMap[m.akaId]?.no_show,
       } : (m.akaId === 'bye' ? 'bye' : null),
       shiro: m.shiroId && m.shiroId !== 'bye' && m.shiroId !== null ? {
         entry_id: m.shiroId,
         student_name: athleteMap[m.shiroId]?.student_name || null,
         dojo_name: athleteMap[m.shiroId]?.dojo || null,
+        checked_in: !!athleteMap[m.shiroId]?.checked_in,
+        no_show: !!athleteMap[m.shiroId]?.no_show,
       } : (m.shiroId === 'bye' ? 'bye' : null),
       winner_entry_id: m.winnerId,
       is_bye: m.isBye,
@@ -780,6 +816,8 @@ const getBracketHandler = async (req, res) => {
       const isKata = NOTAS_MODALITIES.includes(bracketRow.modality)
         && bracketRow.kata_mode !== 'hantei_tree';
       if (isKata) {
+        const entryPresence = {};
+        for (const a of athletes) entryPresence[a.id] = a;
         let scores = [];
         try {
           const sc = await client.query(
@@ -810,6 +848,8 @@ const getBracketHandler = async (req, res) => {
             entry_id: s.entry_id,
             student_name: s.student_name,
             dojo_name: s.dojo_name,
+            checked_in: !!entryPresence[s.entry_id]?.checked_in,
+            no_show: !!entryPresence[s.entry_id]?.no_show,
             phase: s.phase,
             nota: s.nota !== null ? parseFloat(s.nota) : null,
             presentation_order: s.presentation_order,
