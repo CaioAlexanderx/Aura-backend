@@ -961,6 +961,60 @@ router.post('/competitions/:cid/categories/:catId/awards-delivered', ...guards.s
   }
 });
 
+// ── PATCH árbitros que dão nota (migration 308) ────────────────
+// Um endpoint para os dois níveis: sem catId no corpo, mexe na
+// competição (padrão do evento); com category_id, sobrescreve só aquela
+// categoria. judge_count null volta a herdar.
+// Não valida contra notas já lançadas: mudar o número no meio do evento
+// é decisão da mesa, e as notas antigas continuam válidas (a apuração
+// corta maior e menor independentemente de quantas forem).
+router.patch('/competitions/:cid/judge-count', ...guards.staffWrite(), async (req, res) => {
+  const { id: federationId, cid } = req.params;
+  const raw = req.body ? req.body.judge_count : undefined;
+  const categoryId = req.body && req.body.category_id ? req.body.category_id : null;
+
+  if (raw === undefined) {
+    return res.status(400).json({ error: 'Informe judge_count', code: 'VALIDATION_ERROR' });
+  }
+  let judgeCount = null;
+  if (raw !== null) {
+    judgeCount = parseInt(raw, 10);
+    if (!Number.isInteger(judgeCount) || judgeCount < 3 || judgeCount > 7) {
+      return res.status(422).json({ error: 'judge_count deve ser um inteiro de 3 a 7 (ou null para herdar)', code: 'VALIDATION_ERROR' });
+    }
+  }
+
+  try {
+    const comp = await findCompetition(federationId, cid);
+    if (!comp) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+
+    if (categoryId) {
+      const upd = await db.query(
+        `UPDATE karate_competition_categories SET judge_count = $1, updated_at = NOW()
+          WHERE id = $2 AND competition_id = $3
+        RETURNING id, judge_count`,
+        [judgeCount, categoryId, cid]
+      );
+      if (!upd.rows.length) return res.status(404).json({ error: 'Categoria não encontrada', code: 'NOT_FOUND' });
+      return res.json({ scope: 'category', category_id: upd.rows[0].id, judge_count: upd.rows[0].judge_count });
+    }
+
+    const upd = await db.query(
+      `UPDATE karate_competitions SET judge_count = $1, updated_at = NOW()
+        WHERE id = $2 RETURNING id, judge_count`,
+      [judgeCount, cid]
+    );
+    if (!upd.rows.length) return res.status(404).json({ error: 'Competição não encontrada', code: 'NOT_FOUND' });
+    return res.json({ scope: 'competition', competition_id: upd.rows[0].id, judge_count: upd.rows[0].judge_count });
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') {
+      return res.status(503).json({ error: 'Configuração de árbitros indisponível (migração 308 pendente)', code: 'SCHEMA_PENDING' });
+    }
+    console.error('[karateCompetitionSetup] judge-count patch error:', e.message);
+    return res.status(500).json({ error: 'Erro ao configurar os árbitros' });
+  }
+});
+
 module.exports = router;
 
 // Check-in compartilhado com o lado do DOJÔ (karateDelegations) — os
