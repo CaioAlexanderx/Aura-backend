@@ -62,6 +62,13 @@ const ALLOWED_NUMBER_KEYS = [
 // escorregado (500 em vez de 5) viraria despesa maior que a venda.
 const PCT_KEYS = ['card_fee_credit_pct', 'card_fee_debit_pct'];
 
+// 26/08/2026 — calibracao de etiqueta por loja (labels.js). O offset compensa
+// a margem fisica do driver da impressora, entao pode ser negativo.
+const ALLOWED_RANGED_KEYS = {
+  label_offset_mm: { min: -8, max: 5 },
+  label_cols:      { min: 1,  max: 5, integer: true },
+};
+
 const DEFAULT_SETTINGS = {
   require_customer:          false,
   require_seller:            false,
@@ -81,6 +88,8 @@ const DEFAULT_SETTINGS = {
   card_fee_enabled:          false,
   card_fee_credit_pct:       0,
   card_fee_debit_pct:        0,
+  label_offset_mm:           -2,
+  label_cols:                3,
 };
 
 function validateSettings(settings) {
@@ -126,6 +135,18 @@ function validateSettings(settings) {
     }
   }
 
+  // Numbers com faixa propria (podem ser negativos)
+  for (const key of Object.keys(ALLOWED_RANGED_KEYS)) {
+    if (key in settings) {
+      const { min, max, integer } = ALLOWED_RANGED_KEYS[key];
+      const num = Number(settings[key]);
+      if (!Number.isFinite(num) || num < min || num > max || (integer && !Number.isInteger(num))) {
+        throw new AppError(key + ' deve ser numero entre ' + min + ' e ' + max, 400);
+      }
+      clean[key] = num;
+    }
+  }
+
   return clean;
 }
 
@@ -144,10 +165,22 @@ router.get('/pdv-settings', asyncHandler(async (req, res) => {
 }));
 
 // PUT /companies/:id/pdv-settings
+// Merge sobre o salvo, nao replace: a calibracao de etiqueta e gravada por
+// labels.js fora desta tela — um save parcial do app nao pode reseta-la.
 router.put('/pdv-settings', asyncHandler(async (req, res) => {
   const companyId = req.params.id;
   const { settings } = req.body || {};
-  const clean = validateSettings(settings);
+  if (settings !== null && settings !== undefined && (typeof settings !== 'object' || Array.isArray(settings))) {
+    throw new AppError('pdv_settings deve ser objeto', 400);
+  }
+
+  const { rows } = await pool.query(
+    'SELECT pdv_settings FROM companies WHERE id = $1',
+    [companyId]
+  );
+  if (!rows.length) throw new AppError('Empresa nao encontrada', 404);
+  const saved = rows[0].pdv_settings || {};
+  const clean = validateSettings({ ...saved, ...(settings || {}) });
 
   await pool.query(
     'UPDATE companies SET pdv_settings = $1, updated_at = NOW() WHERE id = $2',
