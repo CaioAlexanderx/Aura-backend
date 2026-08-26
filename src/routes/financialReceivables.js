@@ -31,7 +31,24 @@ router.get('/receivables', async (req, res) => {
            COALESCE(SUM(t.amount) FILTER (WHERE t.due_date < ${SP_DATE}), 0) AS overdue_amount,
            MAX(t.created_at) AS last_sale_at
          FROM transactions t
-         LEFT JOIN sales s ON ('pdv-credit-receivable-' || s.id::text) = t.idempotency_key
+         // FIX 24/08/2026 -- saldo de pagamento parcial ficava orfao.
+         //
+         // O join era igualdade exata: ('pdv-credit-receivable-' || s.id) = idempotency_key.
+         // Mas applyPayment cria o saldo remanescente com a chave
+         // 'pdv-credit-receivable-<saleId>-rest-<timestamp>' (ver INSERT do resto), que
+         // NUNCA casa com a igualdade. Consequencia medida em producao (21/08/2026):
+         // dos 246 recebiveis de crediario pendentes, os 145 com '-rest-' tinham 0% de
+         // quitacao contra 63% dos normais -- nenhum era alcancado por este join.
+         //
+         // O saldo remanescente ficava invisivel pro FIFO (nunca quitava), pra
+         // renegociacao e pro card "Crediario - A Receber" (caia sem nome de cliente),
+         // enquanto seguia somando no "a receber" do Financeiro.
+         //
+         // refund.js (auditoria 12/06) e cancelCreditSale ja usavam LIKE com prefixo;
+         // a correcao nao tinha sido propagada pra ca. Prefixo casa as duas formas da
+         // chave e nao tem risco de colisao: UUID tem tamanho fixo, entao um id nunca e
+         // prefixo de outro.
+         LEFT JOIN sales s ON t.idempotency_key LIKE 'pdv-credit-receivable-' || s.id::text || '%'
          LEFT JOIN customers c ON c.id = s.customer_id
          WHERE t.company_id = $1
            AND t.category ILIKE 'Crediario%A Receber%'

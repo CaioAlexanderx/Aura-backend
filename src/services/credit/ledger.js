@@ -16,6 +16,42 @@ const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 const BACKDATE_TS = (p) =>
   `COALESCE((${p}::date + time '12:00') AT TIME ZONE 'America/Sao_Paulo', NOW())`;
 
+// --- Vinculo do recebivel com o cliente (24/08/2026) ---------------------
+//
+// transactions nao tem customer_id. Ate aqui, o unico caminho ate o nome do
+// cliente era decodificar o idempotency_key ('pdv-credit-receivable-<saleId>')
+// e passar por sales -- fragil, e foi exatamente o que quebrou no saldo de
+// pagamento parcial, cuja chave leva sufixo '-rest-<ts>'.
+//
+// A migration 155 ja criou o poly-ref reference_type/reference_id COM indice
+// (idx_transactions_reference), e o karate ja o usa com reference_type
+// 'customer'. Passamos a grava-lo tambem no crediario: o vinculo deixa de
+// depender do formato da chave, e o Financeiro consegue nomear o recebivel
+// sem o join por string.
+//
+// Defensivo (armadilha #1 do CLAUDE.md): estes INSERTs rodam DENTRO da
+// transacao do pagamento/venda, entao um 42703 por coluna ausente abortaria a
+// venda inteira. Sondamos uma vez, fora da transacao, e cacheamos.
+let _refColsCache = null;
+async function _hasReferenceCols() {
+  if (_refColsCache !== null) return _refColsCache;
+  try {
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int AS n
+         FROM information_schema.columns
+        WHERE table_name = 'transactions'
+          AND column_name IN ('reference_type', 'reference_id')`
+    );
+    _refColsCache = (rows && rows[0] && rows[0].n) === 2;
+  } catch (e) {
+    // information_schema nao falha em banco sadio. Se falhar, seguir sem o
+    // vinculo e mais seguro do que derrubar a venda.
+    console.warn('[credit/ledger] probe de reference_* falhou (segue sem vinculo):', e && e.message);
+    _refColsCache = false;
+  }
+  return _refColsCache;
+}
+
 async function _getOrCreateProfile(client, companyId, customerId) {
   try {
     const r = await client.query(
@@ -149,20 +185,27 @@ async function createCreditSale(client, {
   // olhasse "A Receber vencido" via a linha estourada no mesmo dia da venda.
   // Agora, quando o caller informa `firstDueDate`, ela manda. Sem ela o
   // comportamento antigo fica intacto.
-  const arDueExpr = firstDueDate ? '$6::date' : SP_DATE_NOW;
+  // Monta os params em ordem, pra numeracao nunca depender de quais opcionais
+  // entraram. $1..$5 fixos; customerId e firstDueDate entram na sequencia.
+  const arWithRef = await _hasReferenceCols();
   const arParams = [
     companyId, amount,
     `Crediario - venda ${saleId}`,
     createdBy,
     'pdv-credit-receivable-' + saleId,
   ];
+  if (arWithRef) arParams.push(customerId);
+  const arRefIdx = arWithRef ? arParams.length : null;
   if (firstDueDate) arParams.push(firstDueDate);
+  const arDueExpr = firstDueDate ? `$${arParams.length}::date` : SP_DATE_NOW;
   await client.query(
     `INSERT INTO transactions
        (company_id, type, status, amount, description, category,
-        due_date, paid_at, created_by, idempotency_key)
+        due_date, paid_at, created_by, idempotency_key
+        ${arWithRef ? ', reference_type, reference_id' : ''})
      VALUES ($1, 'income', 'pending', $2, $3, 'Crediario - A Receber',
-             ${arDueExpr}, NULL, $4, $5)
+             ${arDueExpr}, NULL, $4, $5
+             ${arWithRef ? `, 'customer', $${arRefIdx}::uuid` : ''})
      ON CONFLICT (idempotency_key) DO NOTHING`,
     arParams
   );
@@ -585,7 +628,24 @@ async function applyPayment(client, {
     pendingTxsQuery = `
       SELECT t.id, t.amount, t.idempotency_key, s.id AS sale_id
       FROM transactions t
-      JOIN sales s ON ('pdv-credit-receivable-' || s.id::text) = t.idempotency_key
+      // FIX 24/08/2026 -- saldo de pagamento parcial ficava orfao.
+      //
+      // O join era igualdade exata: ('pdv-credit-receivable-' || s.id) = idempotency_key.
+      // Mas applyPayment cria o saldo remanescente com a chave
+      // 'pdv-credit-receivable-<saleId>-rest-<timestamp>' (ver INSERT do resto), que
+      // NUNCA casa com a igualdade. Consequencia medida em producao (21/08/2026):
+      // dos 246 recebiveis de crediario pendentes, os 145 com '-rest-' tinham 0% de
+      // quitacao contra 63% dos normais -- nenhum era alcancado por este join.
+      //
+      // O saldo remanescente ficava invisivel pro FIFO (nunca quitava), pra
+      // renegociacao e pro card "Crediario - A Receber" (caia sem nome de cliente),
+      // enquanto seguia somando no "a receber" do Financeiro.
+      //
+      // refund.js (auditoria 12/06) e cancelCreditSale ja usavam LIKE com prefixo;
+      // a correcao nao tinha sido propagada pra ca. Prefixo casa as duas formas da
+      // chave e nao tem risco de colisao: UUID tem tamanho fixo, entao um id nunca e
+      // prefixo de outro.
+      JOIN sales s ON t.idempotency_key LIKE 'pdv-credit-receivable-' || s.id::text || '%'
       JOIN customer_credit_transactions cct
         ON cct.sale_id = s.id AND cct.company_id = $1
         AND cct.type = 'debit' AND cct.account_id = $3
@@ -602,7 +662,24 @@ async function applyPayment(client, {
     pendingTxsQuery = `
       SELECT t.id, t.amount, t.idempotency_key, s.id AS sale_id
       FROM transactions t
-      JOIN sales s ON ('pdv-credit-receivable-' || s.id::text) = t.idempotency_key
+      // FIX 24/08/2026 -- saldo de pagamento parcial ficava orfao.
+      //
+      // O join era igualdade exata: ('pdv-credit-receivable-' || s.id) = idempotency_key.
+      // Mas applyPayment cria o saldo remanescente com a chave
+      // 'pdv-credit-receivable-<saleId>-rest-<timestamp>' (ver INSERT do resto), que
+      // NUNCA casa com a igualdade. Consequencia medida em producao (21/08/2026):
+      // dos 246 recebiveis de crediario pendentes, os 145 com '-rest-' tinham 0% de
+      // quitacao contra 63% dos normais -- nenhum era alcancado por este join.
+      //
+      // O saldo remanescente ficava invisivel pro FIFO (nunca quitava), pra
+      // renegociacao e pro card "Crediario - A Receber" (caia sem nome de cliente),
+      // enquanto seguia somando no "a receber" do Financeiro.
+      //
+      // refund.js (auditoria 12/06) e cancelCreditSale ja usavam LIKE com prefixo;
+      // a correcao nao tinha sido propagada pra ca. Prefixo casa as duas formas da
+      // chave e nao tem risco de colisao: UUID tem tamanho fixo, entao um id nunca e
+      // prefixo de outro.
+      JOIN sales s ON t.idempotency_key LIKE 'pdv-credit-receivable-' || s.id::text || '%'
       WHERE t.company_id = $1
         AND t.category ILIKE 'Crediario%A Receber%'
         AND t.status = 'pending'
@@ -624,7 +701,24 @@ async function applyPayment(client, {
       const r = await client.query(
         `SELECT t.id, t.amount, t.idempotency_key, s.id AS sale_id
          FROM transactions t
-         JOIN sales s ON ('pdv-credit-receivable-' || s.id::text) = t.idempotency_key
+         // FIX 24/08/2026 -- saldo de pagamento parcial ficava orfao.
+         //
+         // O join era igualdade exata: ('pdv-credit-receivable-' || s.id) = idempotency_key.
+         // Mas applyPayment cria o saldo remanescente com a chave
+         // 'pdv-credit-receivable-<saleId>-rest-<timestamp>' (ver INSERT do resto), que
+         // NUNCA casa com a igualdade. Consequencia medida em producao (21/08/2026):
+         // dos 246 recebiveis de crediario pendentes, os 145 com '-rest-' tinham 0% de
+         // quitacao contra 63% dos normais -- nenhum era alcancado por este join.
+         //
+         // O saldo remanescente ficava invisivel pro FIFO (nunca quitava), pra
+         // renegociacao e pro card "Crediario - A Receber" (caia sem nome de cliente),
+         // enquanto seguia somando no "a receber" do Financeiro.
+         //
+         // refund.js (auditoria 12/06) e cancelCreditSale ja usavam LIKE com prefixo;
+         // a correcao nao tinha sido propagada pra ca. Prefixo casa as duas formas da
+         // chave e nao tem risco de colisao: UUID tem tamanho fixo, entao um id nunca e
+         // prefixo de outro.
+         JOIN sales s ON t.idempotency_key LIKE 'pdv-credit-receivable-' || s.id::text || '%'
          WHERE t.company_id = $1
            AND t.category ILIKE 'Crediario%A Receber%'
            AND t.status = 'pending'
@@ -675,19 +769,29 @@ async function applyPayment(client, {
         [pt.sale_id, companyId, fifoMethod, paidNow, sessaoId, paidAt]
       );
 
+      // Esta e a linha que originou o bug de 24/08/2026: a chave ganha o
+      // sufixo '-rest-<ts>' e deixava de casar com o join por igualdade das
+      // demais queries, virando um recebivel que ninguem alcancava. O join
+      // agora usa prefixo (LIKE) e, com as colunas presentes, o vinculo com o
+      // cliente vem por reference_id -- sem depender do formato da chave.
       const restKey = pt.idempotency_key + '-rest-' + Date.now();
+      const restWithRef = await _hasReferenceCols();
+      const restParams = [
+        companyId, restAmt,
+        `Crediario - saldo venda ${pt.sale_id} (parcial)`,
+        createdBy, restKey,
+      ];
+      if (restWithRef) restParams.push(customerId);
       await client.query(
         `INSERT INTO transactions
            (company_id, type, status, amount, description, category,
-            due_date, paid_at, created_by, idempotency_key)
+            due_date, paid_at, created_by, idempotency_key
+            ${restWithRef ? ', reference_type, reference_id' : ''})
          VALUES ($1, 'income', 'pending', $2, $3, 'Crediario - A Receber',
-                 ${SP_DATE_NOW}, NULL, $4, $5)
+                 ${SP_DATE_NOW}, NULL, $4, $5
+                 ${restWithRef ? ", 'customer', $6::uuid" : ''})
          ON CONFLICT (idempotency_key) DO NOTHING`,
-        [
-          companyId, restAmt,
-          `Crediario - saldo venda ${pt.sale_id} (parcial)`,
-          createdBy, restKey,
-        ]
+        restParams
       );
 
       settledReceivables.push({ id: pt.id, sale_id: pt.sale_id, amount: paidNow, partial: true, rest: restAmt });
