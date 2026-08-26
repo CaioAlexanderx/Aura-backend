@@ -7,7 +7,9 @@
 //
 // Cobertura:
 //  (1) kumite: cada lado (aka/shiro) carrega checked_in e no_show.
-//  (2) kata: cada linha da bateria carrega os mesmos campos.
+//  (2) kata: cada linha da bateria carrega os mesmos campos — no GET
+//      bracket E no GET kata-scores (a federação abre por este último;
+//      achado do QA de 26/08, em que a pill não podia aparecer lá).
 //  (3) SEM INFORMAÇÃO ≠ AUSENTE: inscrição com as duas colunas NULL sai
 //      com no_show=false (o badge de ausente não pode aparecer sozinho).
 //  (4) 305 pendente (42703): degrada para a chave de sempre — 200, sem
@@ -121,6 +123,39 @@ it('(2)(3) kata: a bateria carrega presença, e o sem-informação sai com no_sh
   expect(byId[E1]).toMatchObject({ checked_in: true, no_show: false });
   expect(byId[E2]).toMatchObject({ checked_in: false, no_show: true });
   // Sem informação: nem credenciado nem ausente — o badge não aparece.
+  expect(byId[E3]).toMatchObject({ checked_in: false, no_show: false });
+});
+
+
+// ── kata-scores: a superfície que a federação abre ──────────
+// Achado do QA (26/08): Apuração Kata da federação lê /kata-scores, não
+// /bracket. Sem presença aqui, a pill de ausente só existia na mesa.
+it('(2b) kata-scores carrega presença por linha (e sem informação sai false)', async () => {
+  db.connect.mockImplementation(() => Promise.resolve({
+    query: (sql) => {
+      const s = String(sql);
+      if (/FROM karate_competitions WHERE id/.test(s)) return Promise.resolve({ rows: [{ id: COMP, status: 'open' }] });
+      if (/FROM karate_kata_scores ks/.test(s)) {
+        expect(s).toContain('e.checked_in_at');
+        return Promise.resolve({ rows: [
+          { entry_id: E1, student_name: 'Marina Kobayashi', dojo_name: 'Kondei', phase: 'eliminatoria', nota: null, notas: null, presentation_order: 1, advances: null, checked_in_at: '2026-08-22T12:00:00Z', no_show_at: null },
+          { entry_id: E2, student_name: 'Rafael Tanaka', dojo_name: 'Kondei', phase: 'eliminatoria', nota: null, notas: null, presentation_order: 2, advances: null, checked_in_at: null, no_show_at: '2026-08-22T13:30:00Z' },
+          { entry_id: E3, student_name: 'Beatriz Souza', dojo_name: 'Finesse', phase: 'eliminatoria', nota: null, notas: null, presentation_order: 3, advances: null, checked_in_at: null, no_show_at: null },
+        ] });
+      }
+      return Promise.resolve({ rows: [] });
+    },
+    release: () => {},
+  }));
+  db.query.mockImplementation(() => Promise.resolve({ rows: [] }));
+
+  const res = await request(buildApp())
+    .get(`/federation/${FED}/competitions/${COMP}/categories/${CAT}/kata-scores`)
+    .set('Authorization', 'Bearer ' + token);
+  expect(res.status).toBe(200);
+  const byId = Object.fromEntries(res.body.map((k) => [k.entry_id, k]));
+  expect(byId[E1]).toMatchObject({ checked_in: true, no_show: false });
+  expect(byId[E2]).toMatchObject({ checked_in: false, no_show: true });
   expect(byId[E3]).toMatchObject({ checked_in: false, no_show: false });
 });
 
