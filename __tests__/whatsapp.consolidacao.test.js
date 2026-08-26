@@ -119,7 +119,9 @@ describe('consolidação dos routers de WhatsApp', () => {
     wa.exchangeCodeForToken.mockResolvedValue('TOKEN-PERMANENTE-DA-META');
     wa.getPhoneInfo.mockResolvedValue({ display_phone_number: '+55 11 99999-0000' });
     db.query.mockImplementation((sql, params) => {
-      if (/UPDATE companies SET/i.test(String(sql))) { gravado = params[3]; }
+      // Só o UPDATE que grava a credencial — o connect também roda um
+      // segundo UPDATE (limpar a marca de token recusado, 309).
+      if (/wa_access_token\s*=/i.test(String(sql))) { gravado = params[3]; }
       return Promise.resolve({ rows: [] });
     });
     const res = await request(buildApp())

@@ -123,6 +123,49 @@ function decryptToken(stored) {
   return decrypt(stored);
 }
 
+// ── Token recusado pela Meta (migration 309) ────────────────
+// A Meta recusa credencial com o código 190 ("Error validating access
+// token: Session has expired..."). Quem descobre isso primeiro quase
+// sempre é a FILA, não a tela: o dispatcher tenta enviar e leva o erro.
+// Carimbando aqui, o status do dojô para de mentir "Conectado" mesmo
+// que ninguém tenha aberto a tela de templates. (Achado no QA 26/08.)
+const TOKEN_ERROR_MARKERS = [
+  'error validating access token',
+  'session has expired',
+  'access token',
+  'oauthexception',
+];
+
+function isTokenError(err) {
+  const msg = String((err && err.message) || err || '').toLowerCase();
+  if (/code:?\s*190/.test(msg)) return true;
+  return TOKEN_ERROR_MARKERS.some((m) => msg.includes(m));
+}
+
+// Silencioso com a 309 pendente: registrar o problema não pode virar
+// um segundo problema.
+async function markTokenInvalid(companyId, reason) {
+  try {
+    await db.query(
+      `UPDATE companies SET wa_token_invalid_at = NOW(), wa_token_invalid_reason = $2 WHERE id = $1`,
+      [companyId, reason ? String(reason).slice(0, 500) : null]
+    );
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+  }
+}
+
+async function clearTokenInvalid(companyId) {
+  try {
+    await db.query(
+      `UPDATE companies SET wa_token_invalid_at = NULL, wa_token_invalid_reason = NULL WHERE id = $1`,
+      [companyId]
+    );
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+  }
+}
+
 // Credenciais da company — 42703-safe (039 fora do CI).
 async function loadCreds(companyId) {
   try {
@@ -207,6 +250,10 @@ async function processBatch(limit = 20) {
     } catch (e) {
       const attempts = (row.attempts || 0) + 1;
       const msg = String(e && e.message || e).slice(0, 500);
+      // Credencial recusada não é falha transitória: carimba a company
+      // para o status parar de dizer "Conectado" (o retry continua —
+      // reconectar limpa a marca e a mensagem sai na próxima tentativa).
+      if (isTokenError(e)) await markTokenInvalid(row.company_id, msg);
       if (attempts >= MAX_ATTEMPTS) {
         await markRow(row.id, { status: 'failed', attempts, last_error: msg });
         out.failed++;
@@ -256,6 +303,7 @@ async function applyTemplateStatus(companyId, { name, language, status, metaTemp
 
 module.exports = {
   normalizePhone, touchInbound, windowOpen, getContact, decryptToken,
+  isTokenError, markTokenInvalid, clearTokenInvalid,
   enqueue, processBatch, applyStatusUpdate, applyTemplateStatus,
   MAX_ATTEMPTS,
 };
