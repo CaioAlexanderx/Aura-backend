@@ -31,7 +31,9 @@ router.get('/receivables', async (req, res) => {
            COALESCE(SUM(t.amount) FILTER (WHERE t.due_date < ${SP_DATE}), 0) AS overdue_amount,
            MAX(t.created_at) AS last_sale_at
          FROM transactions t
-         LEFT JOIN sales s ON t.idempotency_key LIKE 'pdv-credit-receivable-' || s.id::text || '%'
+         LEFT JOIN sales s
+                ON s.company_id = t.company_id
+               AND t.idempotency_key LIKE 'pdv-credit-receivable-' || s.id::text || '%'
          LEFT JOIN customers c ON c.id = s.customer_id
          WHERE t.company_id = $1
            AND t.category ILIKE 'Crediario%A Receber%'
