@@ -1,10 +1,16 @@
 // ============================================================
-// AURA. -- Etiquetas v7 (grid explicito -- 3 por linha)
+// AURA. -- Etiquetas v8 (calibracao persistida por loja)
 //
-// FIX: flex-wrap nao garante N por linha em contexto de impressao.
+// v7: flex-wrap nao garante N por linha em contexto de impressao.
 // Solucao: CSS Grid com grid-template-columns: repeat(cols, LABEL_W).
-// Isso forca exatamente 3 etiquetas por LINHA (horizontal),
-// independente do driver ou tamanho de papel.
+//
+// v8: offset/cols calibrados viviam so na query string e no dialogo
+// do Chrome — qualquer visita nova voltava ao padrao e a etiqueta
+// saia cortada de novo. Agora "Aplicar e imprimir" grava a calibracao
+// em companies.pdv_settings (label_offset_mm, label_cols) via save=1
+// na propria rota autenticada, e a rota usa o valor salvo como padrao
+// quando a URL nao traz offset/cols. Whitelist correspondente em
+// pdvSettings.js (PUT la faz merge, nao replace, pra nao resetar isto).
 // ============================================================
 const express = require('express');
 const router = express.Router({ mergeParams: true });
@@ -15,6 +21,20 @@ const LABEL_W = 33;
 const LABEL_H = 21;
 const COLS = 3;
 
+// Calibracao salva da loja (pdv_settings.label_offset_mm / label_cols).
+// Fallback nos padroes se nunca calibrada ou se a leitura falhar.
+async function readCalibration(company_id) {
+  let saved = {};
+  try {
+    const s = await pool.query('SELECT pdv_settings FROM companies WHERE id=$1', [company_id]);
+    saved = (s.rows[0] && s.rows[0].pdv_settings) || {};
+  } catch (e) { console.error('label calibration read error:', e.message); }
+  return {
+    cols: Number.isInteger(Number(saved.label_cols)) && Number(saved.label_cols) >= 1 ? Number(saved.label_cols) : COLS,
+    offset_mm: Number.isFinite(Number(saved.label_offset_mm)) ? Number(saved.label_offset_mm) : -2,
+  };
+}
+
 router.get('/:pid/label', requireAuth, async (req, res) => {
   const { id: company_id, pid: product_id } = req.params;
   const { show_name = 'true', show_price = 'true', qty = '1' } = req.query;
@@ -24,19 +44,36 @@ router.get('/:pid/label', requireAuth, async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     const p = result.rows[0];
     if (!p.barcode) return res.status(422).json({ error: 'Produto sem codigo cadastrado' });
-    res.json({ product: p, label_options: { show_name: show_name === 'true', show_price: show_price === 'true', quantity, width_mm: LABEL_W, height_mm: LABEL_H, cols: COLS } });
+    const cal = await readCalibration(company_id);
+    res.json({ product: p, label_options: { show_name: show_name === 'true', show_price: show_price === 'true', quantity, width_mm: LABEL_W, height_mm: LABEL_H, cols: cal.cols, offset_mm: cal.offset_mm } });
   } catch (err) { res.status(500).json({ error: 'Erro ao gerar dados da etiqueta' }); }
 });
 
 router.get('/:pid/label/print', requireAuth, async (req, res) => {
   const { id: company_id, pid: product_id } = req.params;
-  const { show_name = 'true', show_price = 'true', qty = '1', mode = 'barcode', cols: colsParam, offset: offsetParam, override_color, override_size } = req.query;
+  const { show_name = 'true', show_price = 'true', qty = '1', mode = 'barcode', cols: colsParam, offset: offsetParam, save, override_color, override_size } = req.query;
   const quantity = Math.min(Math.max(parseInt(qty) || 1, 1), 200);
-  const cols = Math.min(Math.max(parseInt(colsParam) || COLS, 1), 5);
+
+  // Calibracao salva da loja — padrao quando a URL nao traz offset/cols.
+  const cal = await readCalibration(company_id);
+  // parseFloat(x) || padrao trataria offset 0 como ausente ("Sem ajuste" nunca
+  // funcionava) — por isso o Number.isFinite explicito.
+  const parsedCols = parseInt(colsParam);
+  const parsedOffset = parseFloat(offsetParam);
+  const cols = Math.min(Math.max(Number.isInteger(parsedCols) ? parsedCols : cal.cols, 1), 5);
+  const offset = Math.min(Math.max(Number.isFinite(parsedOffset) ? parsedOffset : cal.offset_mm, -8), 5);
   const sheetW = LABEL_W * cols;
-  const offset = Math.min(Math.max(parseFloat(offsetParam) || -2, -8), 5);
 
   try {
+    if (save === '1' && (offset !== cal.offset_mm || cols !== cal.cols)) {
+      try {
+        await pool.query(
+          `UPDATE companies SET pdv_settings = COALESCE(pdv_settings,'{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify({ label_offset_mm: offset, label_cols: cols }), company_id]
+        );
+      } catch (e) { console.error('label calibration save error:', e.message); }
+    }
+
     const result = await pool.query('SELECT id,name,price,barcode,barcode_format,sku,color,size FROM products WHERE id=$1 AND company_id=$2', [product_id, company_id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     const product = result.rows[0];
@@ -48,13 +85,19 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     const barcodeData = product.barcode;
     const effectiveSize = (override_size || (product.size ? product.size.trim() : ''));
     const effectiveColor = (override_color || product.color || '');
-    const labelName = (function() {
+    const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    // Nome numa linha (CSS corta com reticencias, nao no meio da letra) e
+    // tamanho/cor numa linha propria — tamanho e o que a loja le de relance.
+    const labelTitle = (function() {
       var n = product.name || '';
+      return n.length > 34 ? n.substring(0, 34).trim() + '…' : n;
+    })();
+    const labelMeta = (function() {
       var sz = effectiveSize;
       var cl = effectiveColor && /^#[0-9A-Fa-f]{6}$/.test(effectiveColor) ? effectiveColor : '';
-      if (!sz && !cl) return n;
-      var parts = [n.length > 16 ? n.substring(0,16).trim()+'...' : n];
-      if (sz) parts.push(sz);
+      if (!sz && !cl) return '';
+      var parts = [];
+      if (sz) parts.push('Tam ' + sz);
       if (cl) {
         var map = {'#000000':'Preto','#ffffff':'Branco','#ff0000':'Vermelho','#0000ff':'Azul','#00ff00':'Verde','#ffff00':'Amarelo','#ffa500':'Laranja','#ffc0cb':'Rosa','#800080':'Roxo','#a52a2a':'Marrom','#800000':'Vinho','#808080':'Cinza','#000080':'Marinho','#c0c0c0':'Prata','#ffd700':'Dourado','#f5f5dc':'Bege','#ff6347':'Coral','#4b0082':'Indigo','#d2691e':'Caramelo','#40e0d0':'Turquesa','#dc143c':'Carmesim','#ff69b4':'Pink','#daa520':'Mostarda','#8b4513':'Cafe','#ff1493':'Magenta','#8b0000':'Bordo','#006400':'Vd Esc','#191970':'Az Esc','#556b2f':'Oliva','#2f4f4f':'Chumbo','#cd853f':'Areia','#9acd32':'Limao','#964b00':'Marrom','#8be8b3':'Menta','#196110':'Vd Esc','#fa946c':'Salmao','#ff6ec7':'Pink'};
         var colorName = map[cl.toLowerCase()];
@@ -66,7 +109,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
         }
         parts.push(colorName);
       }
-      return parts.join(' | ');
+      return parts.join(' • ');
     })();
 
     const barcodeLen = barcodeData.replace(/\D/g, '').length;
@@ -80,6 +123,8 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
       const fmtMap = { ean13: 'EAN13', ean8: 'EAN8', upc: 'UPC', code128: 'CODE128', code39: 'CODE39' };
       jsFormat = fmtMap[product.barcode_format] || jsFormat;
     }
+
+    const labelInner = `<div class="bc-wrap"><svg class="barcode"></svg></div>${showName ? `<div class="name">${esc(labelTitle)}</div>` : ''}${showName && labelMeta ? `<div class="meta">${esc(labelMeta)}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}`;
 
     const html = `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -124,25 +169,31 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
   }
 
   .bc-wrap {
-    width: 32mm;
-    max-height: ${showName && showPrice ? '13' : showName || showPrice ? '15' : '17'}mm;
+    width: 31.5mm;
+    max-height: ${showName && showPrice ? '10.5' : showName || showPrice ? '12.5' : '16'}mm;
     display: flex;
     align-items: center;
     justify-content: center;
     overflow: hidden;
   }
+  /* Altura do svg inclui os digitos do codigo (displayValue) */
   .bc-wrap svg {
-    height: ${showName && showPrice ? '11' : showName || showPrice ? '13' : '16'}mm;
+    height: ${showName && showPrice ? '10' : showName || showPrice ? '12' : '15.5'}mm;
   }
 
   .label .name {
-    font-size: 5.5pt; font-weight:700; line-height:1.1;
-    max-height:4mm; overflow:hidden; word-break:break-word;
-    color:#000; margin-top:0.3mm;
+    font-size: 5.5pt; font-weight:700; line-height:1.2;
+    max-width:31.5mm; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
+    color:#000; margin-top:0.2mm;
+  }
+  .label .meta {
+    font-size: 5pt; font-weight:400; line-height:1.15; letter-spacing:0.2pt;
+    max-width:31.5mm; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
+    color:#000;
   }
   .label .price {
     font-size: 8pt; font-weight:900; color:#000;
-    white-space:nowrap; letter-spacing:0.3pt;
+    white-space:nowrap; letter-spacing:0.3pt; margin-top:0.2mm;
   }
 
   /* ===== SCREEN PREVIEW ===== */
@@ -245,7 +296,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
     <input type="range" id="offsetRange" min="-6" max="2" step="0.5" value="${offset}" oninput="document.getElementById('offsetVal').textContent=this.value+'mm'; updateSimPreview(this.value);" />
     <span class="val" id="offsetVal">${offset}mm</span>
     <button onclick="applyOffset()">Aplicar e imprimir</button>
-    <span class="hint">Arraste para a esquerda ate o codigo de barras ficar centralizado na etiqueta.</span>
+    <span class="hint">Arraste ate o codigo ficar centralizado. "Aplicar e imprimir" salva a calibracao para a loja &mdash; vale para todas as maquinas.</span>
   </div>
 
   <div class="presets">
@@ -272,7 +323,7 @@ router.get('/:pid/label/print', requireAuth, async (req, res) => {
       <div class="printer-margin-overlay"></div>
       <div class="printer-margin-label">margem</div>
       <div class="sim-labels" id="simLabels">
-${Array.from({length: Math.min(quantity, cols * 3)}, (_, i) => `        <div class="label"><div class="bc-wrap"><svg class="barcode" data-idx="s${i}"></svg></div>${showName ? `<div class="name">${labelName}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}</div>`).join('\n')}
+${Array.from({length: Math.min(quantity, cols * 3)}, () => `        <div class="label">${labelInner}</div>`).join('\n')}
       </div>
     </div>
   </div>
@@ -280,13 +331,13 @@ ${Array.from({length: Math.min(quantity, cols * 3)}, (_, i) => `        <div cla
 </div>
 
 <div class="print-grid">
-${Array.from({length: quantity}, (_, i) => `<div class="label"><div class="bc-wrap"><svg class="barcode" data-idx="p${i}"></svg></div>${showName ? `<div class="name">${labelName}</div>` : ''}${showPrice ? `<div class="price">${priceText}</div>` : ''}</div>`).join('\n')}
+${Array.from({length: quantity}, () => `<div class="label">${labelInner}</div>`).join('\n')}
 </div>
 
 <div class="preview-bar">
   <div>
     <span>${jsFormat} | ${sheetW}x${LABEL_H}mm | ${cols} por linha | offset ${offset}mm</span><br>
-    <b>${product.name} ${showPrice ? '| ' + priceText : ''}</b>
+    <b>${esc(product.name)} ${showPrice ? '| ' + priceText : ''}</b>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
     <span>${quantity} etiqueta${quantity > 1 ? 's' : ''}</span>
@@ -295,7 +346,7 @@ ${Array.from({length: quantity}, (_, i) => `<div class="label"><div class="bc-wr
 </div>
 
 <script>
-var BARCODE_DATA = "${barcodeData}";
+var BARCODE_DATA = ${JSON.stringify(barcodeData)};
 var FORMAT = "${jsFormat}";
 
 document.querySelectorAll('.barcode').forEach(function(el) {
@@ -303,20 +354,23 @@ document.querySelectorAll('.barcode').forEach(function(el) {
     JsBarcode(el, BARCODE_DATA, {
       format: FORMAT,
       width: 1,
-      height: 50,
+      height: 44,
       margin: 0,
       marginTop: 1,
       marginBottom: 0,
       marginLeft: 0,
       marginRight: 0,
-      displayValue: false,
+      displayValue: true,
+      fontSize: 11,
+      textMargin: 0,
+      font: "Arial",
       background: "#ffffff",
       lineColor: "#000000",
       flat: false
     });
   } catch(e) {
     try {
-      JsBarcode(el, BARCODE_DATA, { format:"CODE128", width:1, height:50, margin:0, marginLeft:0, marginRight:0, displayValue:false, background:"#ffffff", lineColor:"#000000" });
+      JsBarcode(el, BARCODE_DATA, { format:"CODE128", width:1, height:44, margin:0, marginLeft:0, marginRight:0, displayValue:true, fontSize:11, textMargin:0, background:"#ffffff", lineColor:"#000000" });
     } catch(e2) {
       el.outerHTML = '<div style="font-size:7pt;color:red;padding:2mm">Erro: ' + e2.message + '</div>';
     }
@@ -337,6 +391,7 @@ function applyOffset() {
   var val = document.getElementById('offsetRange').value;
   var url = new URL(window.location.href);
   url.searchParams.set('offset', val);
+  url.searchParams.set('save', '1');
   window.location.href = url.toString();
 }
 <\/script>
@@ -359,7 +414,8 @@ router.get('/labels/batch', requireAuth, async (req, res) => {
       `SELECT id,name,price,barcode,barcode_format,sku,color,size FROM products WHERE id=ANY($1::uuid[]) AND company_id=$2 AND barcode IS NOT NULL ORDER BY name`,
       [productIds, company_id]
     );
-    res.json({ products: result.rows, label_options: { show_name: show_name === 'true', show_price: show_price === 'true', width_mm: LABEL_W, height_mm: LABEL_H, cols: COLS }, total: result.rows.length });
+    const cal = await readCalibration(company_id);
+    res.json({ products: result.rows, label_options: { show_name: show_name === 'true', show_price: show_price === 'true', width_mm: LABEL_W, height_mm: LABEL_H, cols: cal.cols, offset_mm: cal.offset_mm }, total: result.rows.length });
   } catch (err) { res.status(500).json({ error: 'Erro ao buscar produtos' }); }
 });
 
