@@ -1334,9 +1334,13 @@ const kataScoresGetHandler = async (req, res) => {
       if (!comp) return res.status(404).json({ error: 'Competição não encontrada' });
 
       let rows = [];
-      // `notas` (individuais dos árbitros) é da 303 — fallback 42703.
-      const kataGetSql = (withNotas) =>
+      // Duas colunas opcionais aqui: `notas` (individuais dos árbitros, 303)
+      // e a PRESENÇA da inscrição (305). Esta é a superfície que a federação
+      // abre em Apuração Kata — sem os campos de presença, a pill de ausente
+      // nunca apareceria aqui, só na mesa. Fallback 42703 para cada uma.
+      const kataGetSql = (withNotas, withPresence) =>
         `SELECT ks.entry_id, ks.phase, ks.nota, ${withNotas ? 'ks.notas,' : 'NULL AS notas,'}
+                ${withPresence ? 'e.checked_in_at, e.no_show_at,' : 'NULL AS checked_in_at, NULL AS no_show_at,'}
                 ks.presentation_order, ks.advances,
                 cu.name AS student_name,
                 COALESCE(dj.trade_name, dj.legal_name) AS dojo_name
@@ -1347,12 +1351,27 @@ const kataScoresGetHandler = async (req, res) => {
          LEFT JOIN companies dj ON dj.id = e.dojo_id
          WHERE kb.category_id = $1
          ORDER BY ks.phase ASC, ks.presentation_order ASC NULLS LAST, ks.nota DESC NULLS LAST`;
+      const runKata = async (withNotas, withPresence) =>
+        (await client.query(kataGetSql(withNotas, withPresence), [catId])).rows;
       try {
         try {
-          rows = (await client.query(kataGetSql(true), [catId])).rows;
+          rows = await runKata(true, HAS_CHECKIN);
         } catch (e303) {
           if (e303.code !== '42703') throw e303;
-          rows = (await client.query(kataGetSql(false), [catId])).rows;
+          // Degrada uma coluna de cada vez: primeiro a presença (305),
+          // depois as notas individuais (303).
+          if (HAS_CHECKIN) {
+            HAS_CHECKIN = false;
+            console.warn('[karateBrackets] checked_in_at/no_show_at ausente (migração 305 pendente) — kata-scores sem presença');
+            try {
+              rows = await runKata(true, false);
+            } catch (eNotas) {
+              if (eNotas.code !== '42703') throw eNotas;
+              rows = await runKata(false, false);
+            }
+          } else {
+            rows = await runKata(false, false);
+          }
         }
       } catch (e) {
         if (e.code !== '42P01') throw e;
@@ -1367,6 +1386,9 @@ const kataScoresGetHandler = async (req, res) => {
         notas: r.notas || null,
         presentation_order: r.presentation_order,
         advances: r.advances,
+        // SEM INFORMAÇÃO não é AUSENTE: as duas colunas NULL saem false.
+        checked_in: !!r.checked_in_at,
+        no_show: !!r.no_show_at,
       })));
     } catch (err) {
       console.error('[karateBrackets] kata-scores get error:', err.message);
