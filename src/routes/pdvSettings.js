@@ -88,7 +88,11 @@ const DEFAULT_SETTINGS = {
   card_fee_enabled:          false,
   card_fee_credit_pct:       0,
   card_fee_debit_pct:        0,
-  label_offset_mm:           -2,
+  // 0 = neutro: o fluxo real de impressao (aura-app/buildLabelHtml) nunca
+  // aplicou offset — um default != 0 deslocaria a impressao de toda loja
+  // que nunca calibrou. (-2 era o default da pagina orfa labels.js, que
+  // mantem o proprio fallback ao ler o jsonb cru.)
+  label_offset_mm:           0,
   label_cols:                3,
 };
 
