@@ -63,6 +63,47 @@ async function findCat(client, cid, catId) {
   return r.rows[0] || null;
 }
 
+// ── helper: quem PODE entrar na chave ───────────────────────────
+// Regra do dono do produto (26/08): a chave leva só quem está com a taxa
+// paga. Achado no QA: o sorteio incluía inscrição com fee_paid=false
+// enquanto a própria tela prometia que ela entraria "após a federação
+// confirmar" — o código dizia uma coisa e a tela, outra.
+//
+// DOIS cuidados:
+//  - Categoria GRATUITA: fee_paid=false ali não é dívida, é ausência de
+//    taxa. Todo mundo entra (mesmo critério do countPendingPayment).
+//  - Filtro SÓ na geração. A LEITURA da chave continua trazendo todo
+//    mundo: quem já foi sorteado não pode sumir da chave porque o
+//    financeiro mudou depois.
+async function filterEligibleForDraw(client, cid, catId, athletes) {
+  if (!athletes.length) return athletes;
+  try {
+    const feeRes = await client.query(
+      `SELECT COALESCE(cat.fee_amount, comp.fee_amount, 0) AS effective_fee
+         FROM karate_competition_categories cat
+         JOIN karate_competitions comp ON comp.id = cat.competition_id
+        WHERE cat.id = $1 AND cat.competition_id = $2
+        LIMIT 1`,
+      [catId, cid]
+    );
+    const effectiveFee = Number(feeRes.rows[0]?.effective_fee) || 0;
+    if (effectiveFee <= 0) return athletes; // categoria gratuita: ninguém deve nada
+
+    const paid = await client.query(
+      `SELECT id FROM karate_competition_entries
+        WHERE category_id = $1 AND status NOT IN ('withdrawn') AND fee_paid = true`,
+      [catId]
+    );
+    const ok = new Set(paid.rows.map((r) => r.id));
+    return athletes.filter((a) => ok.has(a.id));
+  } catch (e) {
+    // Sem a coluna/tabela de taxa não dá para afirmar que alguém deve —
+    // não é motivo para deixar a categoria sem chave.
+    if (e.code === '42P01' || e.code === '42703') return athletes;
+    throw e;
+  }
+}
+
 // ── helper: load entries for a category ─────────────────────────
 // P0 equipes (migration 294): a entry pode apontar para um ATLETA
 // (student_id) ou para uma EQUIPE (team_id) — o nome exibido na chave vem
@@ -497,10 +538,24 @@ router.post(
       // com kata_mode='hantei_tree' cai no caminho da ARVORE (P1/296).
       const isKata = NOTAS_MODALITIES.includes(cat.modality) && kataMode !== 'hantei_tree';
 
-      const athletes = await loadEntries(client, catId, federationId);
+      const inscritos = await loadEntries(client, catId, federationId);
       const pendingPaymentCount = await countPendingPayment(client, cid, catId);
+      // Só entra na chave quem está com a taxa paga (categoria gratuita
+      // não exclui ninguém). Ver filterEligibleForDraw.
+      const athletes = await filterEligibleForDraw(client, cid, catId, inscritos);
       if (athletes.length < 2) {
         await client.query('ROLLBACK');
+        // Mensagem específica quando o que falta é confirmação de
+        // pagamento: "faltam atletas" mandaria a federação procurar
+        // inscrição que já existe.
+        if (pendingPaymentCount > 0 && inscritos.length >= 2) {
+          return res.status(422).json({
+            error: `${pendingPaymentCount} inscrito(s) ainda aguardam confirmação de pagamento e não entram na chave. Confirme o pagamento em Delegações para sortear.`,
+            code: 'PAGAMENTO_PENDENTE',
+            eligible_count: athletes.length,
+            pending_payment_count: pendingPaymentCount,
+          });
+        }
         return res.status(422).json({ error: 'Mínimo de 2 atletas inscritos para gerar chave', code: 'VALIDATION_ERROR' });
       }
 
@@ -836,7 +891,17 @@ const getBracketHandler = async (req, res) => {
       const { bracketRow, matchRows } = await loadBracket(client, catId);
 
       if (!bracketRow) {
-        return res.json({ status: 'not_generated', athletes_count: athletes.length, pending_payment_count: pendingPaymentCount, bracket: null });
+        // eligible_count = quem de fato entraria no sorteio agora (taxa
+        // paga). athletes_count segue sendo TODOS os inscritos — a tela
+        // precisa dos dois para não chamar de "confirmado" quem não é.
+        const eligible = await filterEligibleForDraw(client, cid, catId, athletes);
+        return res.json({
+          status: 'not_generated',
+          athletes_count: athletes.length,
+          eligible_count: eligible.length,
+          pending_payment_count: pendingPaymentCount,
+          bracket: null,
+        });
       }
 
       // Kata: bateria de notas - EXCETO em kata_mode='hantei_tree' (P1),
