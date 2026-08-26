@@ -38,6 +38,22 @@ function schemaPending(res) {
   return res.status(503).json({ error: 'WhatsApp indisponível (migração 307 pendente)', code: 'SCHEMA_PENDING' });
 }
 
+// Coluna da 309 — consultada à parte para que a ausência dela não
+// derrube o status inteiro.
+let HAS_TOKEN_FLAG = true;
+async function loadTokenInvalidAt(companyId) {
+  if (!HAS_TOKEN_FLAG) return null;
+  try {
+    const { rows } = await db.query(
+      'SELECT wa_token_invalid_at FROM companies WHERE id = $1 LIMIT 1', [companyId]
+    );
+    return (rows[0] && rows[0].wa_token_invalid_at) || null;
+  } catch (e) {
+    if (e.code === '42703') { HAS_TOKEN_FLAG = false; return null; }
+    throw e;
+  }
+}
+
 async function loadCompanyWa(companyId) {
   try {
     const { rows } = await db.query(
@@ -46,11 +62,38 @@ async function loadCompanyWa(companyId) {
          FROM companies WHERE id = $1 LIMIT 1`,
       [companyId]
     );
-    return rows[0] || null;
+    const row = rows[0] || null;
+    if (row) row.wa_token_invalid_at = await loadTokenInvalidAt(companyId);
+    return row;
   } catch (e) {
     if (e.code === '42703') return null;
     throw e;
   }
+}
+
+// ── Token recusado pela Meta (migration 309) ────────────────
+// A Meta recusa credencial com o código 190 ("Error validating access
+// token: Session has expired..."). Sem tratar isso, o dojô via o selo
+// verde "Conectado" com o token morto havia dias e, ao tentar usar,
+// recebia o erro cru em inglês. Achado no QA de 26/08.
+//
+// Não checamos o token a cada tela (seria uma chamada à Graph por
+// request): quem carimba é a chamada que a Meta recusou, e o /status
+// passa a dizer a verdade até alguém reconectar.
+// isTokenError/markTokenInvalid/clearTokenInvalid vivem no waOutbox: a
+// FILA descobre a recusa antes da tela na maioria das vezes, e uma
+// definição só evita as duas superfícies divergirem.
+const { isTokenError, markTokenInvalid, clearTokenInvalid } = waOutbox;
+
+// Resposta única para credencial recusada: 409 + mensagem em PORTUGUÊS
+// dizendo o que fazer. O texto da Meta vai em `detail` (suporte), não na
+// mensagem que o dono do dojô lê.
+function tokenExpiredResponse(res, err) {
+  return res.status(409).json({
+    error: 'A conexão com o WhatsApp expirou. Reconecte o número do dojô para voltar a enviar.',
+    code: 'TOKEN_EXPIRADO',
+    detail: String((err && err.message) || '').slice(0, 300),
+  });
 }
 
 // ── POST /whatsapp/connect — Embedded Signup ────────────────
@@ -75,6 +118,8 @@ router.post('/whatsapp/connect', ...guard, async (req, res) => {
        WHERE id=$5`,
       [waba_id || null, phone_number_id || null, phoneDisplay, encrypt(accessToken), req.params.id]
     );
+    // Reconectou: a recusa anterior (309) não vale mais.
+    await clearTokenInvalid(req.params.id);
     return res.json({ connected: true, phone_display: phoneDisplay, waba_id: waba_id || null });
   } catch (err) {
     console.error('[whatsappCloud] connect error:', err.message);
@@ -112,8 +157,13 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
     } catch (e) {
       if (e.code !== '42P01') throw e;
     }
+    // Token recusado pela Meta derruba o "conectado": o selo verde com
+    // credencial morta era pior do que não ter selo (QA 26/08).
+    const tokenExpired = !!(conn && conn.wa_token_invalid_at);
     return res.json({
-      connected: !!(conn && conn.wa_phone_number_id && conn.has_token),
+      connected: !!(conn && conn.wa_phone_number_id && conn.has_token && !tokenExpired),
+      token_expired: tokenExpired,
+      token_expired_at: (conn && conn.wa_token_invalid_at) || null,
       phone_display: (conn && conn.wa_phone_display) || null,
       waba_id: (conn && conn.wa_waba_id) || null,
       connected_at: (conn && conn.wa_connected_at) || null, // compat legado
@@ -170,6 +220,10 @@ router.post('/whatsapp/templates/sync', ...guard, async (req, res) => {
     return res.json({ synced });
   } catch (e) {
     if (e.code === '42P01') return schemaPending(res);
+    if (isTokenError(e)) {
+      await markTokenInvalid(req.params.id, e.message);
+      return tokenExpiredResponse(res, e);
+    }
     console.error('[whatsappCloud] sync error:', e.message);
     return res.status(502).json({ error: 'Falha ao consultar a Meta: ' + String(e.message).slice(0, 200) });
   }
@@ -230,6 +284,10 @@ router.post('/whatsapp/templates', ...guard, async (req, res) => {
     return res.status(201).json({ name: tpl.name, language: tpl.language, meta: created });
   } catch (e) {
     if (e.code === '42P01') return schemaPending(res);
+    if (isTokenError(e)) {
+      await markTokenInvalid(req.params.id, e.message);
+      return tokenExpiredResponse(res, e);
+    }
     console.error('[whatsappCloud] create template error:', e.message);
     return res.status(502).json({ error: 'Falha ao criar o template na Meta: ' + String(e.message).slice(0, 200) });
   }
