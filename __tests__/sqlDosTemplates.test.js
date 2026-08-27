@@ -15,16 +15,27 @@
 //
 // O QUE ELE FAZ
 //   Extrai, com parser JS de verdade, todo template literal que parece SQL em
-//   src/, e manda cada um pro Postgres com PREPARE. O banco é quem diz se
-//   parseia — não uma heurística de regex. Pega `//` dentro de SQL, parêntese
-//   solto, palavra-chave errada, em qualquer arquivo, para sempre.
+//   src/, em duas camadas:
+//
+//   1. Procura comentário JS dentro do SQL. Roda em TODOS os ~3.100 templates,
+//      não precisa de banco, e é a assinatura exata da regressão acima.
+//   2. Manda pro Postgres com PREPARE os ~2.670 que são SQL literal e INTEIRO.
+//      Quem julga é o banco, não uma heurística.
 //
 //   Regex literal e comentário JS confundem scanner ingênuo (uma varredura por
 //   regex dava 193 falsos positivos neste repo), por isso o parser.
 //
+// POR QUE A CAMADA 2 NÃO OLHA TUDO
+//   Template com `${...}` costuma receber um FRAGMENTO (`${arDueExpr}`, um
+//   ORDER BY montado, uma lista de colunas). Não existe substituto neutro que
+//   sirva em toda posição: trocar por NULL dá `ORDER BY NULL` e outros 300
+//   erros que não são defeito nenhum — foi o que aconteceu na primeira versão
+//   deste arquivo. Idem para o SQL montado por concatenação. Esses ficam de
+//   fora do PREPARE, mas seguem cobertos pela camada 1.
+//
 // LIMITE HONESTO
-//   Valida SINTAXE, não semântica: não pega coluna inexistente em query com
-//   interpolação, nem numeração de $n errada. Para o ciclo de negócio existe
+//   Valida SINTAXE, não semântica: não pega coluna inexistente nem numeração
+//   de $n errada. Para o ciclo de negócio existe
 //   __tests__/credito.recebivelSaldoParcial.test.js.
 // ============================================================
 'use strict';
@@ -60,13 +71,25 @@ function arquivosJs(dir, acc = []) {
 // Só o que é claramente SQL — evita pegar template de mensagem, URL, etc.
 const COMECO_SQL = /^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)\b/i;
 
-// Templates com interpolação viram SQL incompleto se a expressão for um
-// fragmento (ex.: `${arDueExpr}`). Substituímos por um literal neutro para
-// que o PREPARE ainda consiga julgar a ESTRUTURA em volta.
-function normalizar(raw) {
-  return raw
-    .replace(/\$\{[^}]*\}/g, 'NULL')   // interpolação -> literal
-    .replace(/\$(\d+)/g, '$$$1');      // mantém os placeholders do pg
+// Nomes de variáveis que aparecem em alguma concatenação com '+' no arquivo.
+// Serve para reconhecer o SQL montado por pedaços (`let sql = \`INSERT ...\`;
+// ... sql + \`) VALUES ...\``): cada pedaço é incompleto de propósito.
+function nomesConcatenados(ast) {
+  const nomes = new Set();
+  (function andar(nó) {
+    if (!nó || typeof nó !== 'object') return;
+    if (nó.type === 'BinaryExpression' && nó.operator === '+') {
+      for (const lado of [nó.left, nó.right]) {
+        if (lado && lado.type === 'Identifier') nomes.add(lado.name);
+      }
+    }
+    for (const k of Object.keys(nó)) {
+      const v = nó[k];
+      if (Array.isArray(v)) v.forEach(andar);
+      else if (v && typeof v === 'object' && v.type) andar(v);
+    }
+  })(ast);
+  return nomes;
 }
 
 function extrairSql(arquivo) {
@@ -81,24 +104,33 @@ function extrairSql(arquivo) {
     return []; // arquivo que o parser não lê não é problema deste teste
   }
 
+  const concatenados = nomesConcatenados(ast);
   const achados = [];
-  (function andar(nó) {
+  (function andar(nó, pai) {
     if (!nó || typeof nó !== 'object') return;
     if (nó.type === 'TemplateLiteral') {
-      const bruto = nó.quasis.map((q) => q.value.cooked ?? q.value.raw).join(' NULL ');
+      const bruto = nó.quasis.map((q) => q.value.cooked ?? q.value.raw).join('');
       if (COMECO_SQL.test(bruto)) {
+        const fragmento =
+          (pai && pai.type === 'BinaryExpression' && pai.operator === '+') ||
+          (pai && pai.type === 'VariableDeclarator' && pai.id.type === 'Identifier' &&
+            concatenados.has(pai.id.name)) ||
+          (pai && pai.type === 'AssignmentExpression' && pai.left.type === 'Identifier' &&
+            concatenados.has(pai.left.name));
         achados.push({
-          sql: normalizar(bruto),
+          sql: bruto,
           linha: nó.loc && nó.loc.start.line,
+          // Só o SQL literal e inteiro pode ser julgado pelo PREPARE.
+          completo: nó.expressions.length === 0 && !fragmento,
         });
       }
     }
     for (const k of Object.keys(nó)) {
       const v = nó[k];
-      if (Array.isArray(v)) v.forEach(andar);
-      else if (v && typeof v === 'object' && v.type) andar(v);
+      if (Array.isArray(v)) v.forEach((f) => andar(f, nó));
+      else if (v && typeof v === 'object' && v.type) andar(v, nó);
     }
-  })(ast);
+  })(ast, null);
   return achados;
 }
 
@@ -140,7 +172,8 @@ describe('SQL dos template literals de src/', () => {
     let testados = 0;
 
     for (const arq of arquivosJs(SRC)) {
-      for (const { sql, linha } of extrairSql(arq)) {
+      for (const { sql, linha, completo } of extrairSql(arq)) {
+        if (!completo) continue;
         testados++;
         const nome = 'chk_' + testados;
         // SAVEPOINT por query: um PREPARE que falha envenenaria a transação
@@ -151,7 +184,8 @@ describe('SQL dos template literals de src/', () => {
           await client.query(`DEALLOCATE ${nome}`);
         } catch (err) {
           // 42601 = syntax_error. Só ele interessa aqui: coluna/tabela ausente
-          // (42703/42P01) pode ser efeito da normalização da interpolação.
+          // (42703/42P01) é migration ainda não aplicada no banco do CI, não
+          // SQL malformado — e é justamente o malformado que este teste caça.
           if (err.code === '42601') {
             falhas.push(`${path.relative(ROOT, arq)}:${linha} — ${err.message}`);
           }
@@ -164,7 +198,9 @@ describe('SQL dos template literals de src/', () => {
     client.release();
     await pool.end();
 
-    expect(testados).toBeGreaterThan(100); // se cair, a extração quebrou
+    // Eram 2.672 em 26/08/2026. Um piso alto protege contra a extração
+    // degradar em silêncio e o teste virar um "verde" que não olha nada.
+    expect(testados).toBeGreaterThan(2000);
     expect(falhas).toEqual([]);
   }, 120000);
 });
