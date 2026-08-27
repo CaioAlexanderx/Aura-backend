@@ -17,6 +17,9 @@
 //   require_deposit_for_production em studio_settings (opt-in, default false).
 //   force:true bypassa o gate e loga. M2: auto-criação do marco de pagamento
 //   no convert está em studioQuotes.js.
+// 27/08/2026: POST /orders/:oid/registrar-pagamento — baixa do saldo da
+//   encomenda sem passar pelo produto crediario (relato Sheid Mania: saldo de
+//   venda com sinal ficava sem porta de quitacao na UI).
 // 03/07/2026 (Visual Engine F2): POST /orders/:oid/approval aceita render_id
 //   (studio_visual_renders.id do render HD gerado pelo motor). Coluna
 //   render_id em studio_approval_links (migration 209); defensivo 42703
@@ -27,6 +30,7 @@ const router  = express.Router({ mergeParams: true });
 const crypto  = require('crypto');
 const db      = require('../config/database');
 const collectionNotice = require('../services/credit/collectionNotice');
+const creditLedger     = require('../services/creditLedger');
 
 // ═══════════════════════════════════════════════════════
 // FASE 4: KDS de Produção (atualizado 25/05 — KDS unificado + S-2.5)
@@ -254,6 +258,155 @@ router.post('/orders/:oid/cobrar-saldo', async function(req, res) {
     await client.query('ROLLBACK');
     console.error('[studio/orders/cobrar-saldo]', err.message);
     return res.status(500).json({ error: 'Erro ao preparar a cobranca do saldo.' });
+  } finally { client.release(); }
+});
+
+// ─── POST /orders/:oid/registrar-pagamento ───────────────────────────────────
+// Baixa do saldo da encomenda. A outra metade do /cobrar-saldo: um manda a
+// cobranca, o outro registra que o dinheiro entrou.
+//
+// 27/08/2026 (relato Sheid Mania). O saldo da venda com sinal nasce em
+// credit_installments e SO tinha uma porta de baixa: PATCH
+// /credit/installments/:iid/pay, que fica atras do `router.use(
+// assertCrediarioEnabled)` de creditInstallments.js. Loja de personalizados nao
+// liga crediario -- nao existe fiado nesse mercado --, entao a lojista recebia o
+// saldo no Pix e nao tinha onde dar baixa: o pedido ficava eternamente "em
+// aberto" e o A Receber vencido no Financeiro. O saldo tinha cobranca e nao
+// tinha quitacao.
+//
+// Mesma separacao do /cobrar-saldo: de SUPERFICIE, nao de dado. Por baixo e o
+// mesmo applyPayment do ledger -- liquida o A Receber, cobre a parcela, lanca
+// sale_payments e entra no caixa do dia. O que nao atravessa e o PRODUTO
+// crediario.
+//
+// Escopo estreito igual ao /cobrar-saldo: recebe o ID do PEDIDO, resolve a
+// parcela a partir dele e confere a empresa. Nao aceita installment_id solto,
+// nem customer_id -- esta rota nao vira porta lateral pro ledger inteiro.
+//
+// `saleId` no applyPayment e o que impede o tiro sair pela culatra: sem ele o
+// FIFO e oldest-first por CLIENTE, entao dar baixa na encomenda de hoje
+// quitaria a encomenda de marco do mesmo cliente e o card clicado continuaria
+// aberto.
+const BALANCE_PAYMENT_METHODS = ['dinheiro', 'pix', 'cartao', 'debito'];
+
+router.post('/orders/:oid/registrar-pagamento', async function(req, res) {
+  const cid = req.params.id;
+  const oid = req.params.oid;
+  const { method = 'dinheiro', amount } = req.body || {};
+
+  const payMethod = String(method || 'dinheiro').toLowerCase();
+  if (!BALANCE_PAYMENT_METHODS.includes(payMethod)) {
+    return res.status(400).json({
+      error: `Forma de pagamento invalida. Use: ${BALANCE_PAYMENT_METHODS.join(', ')}.`,
+      code: 'METHOD_INVALIDO',
+    });
+  }
+
+  if (!(await hasInstallmentsTable())) {
+    return res.status(409).json({
+      error: 'Baixa de saldo indisponivel neste ambiente.',
+      code: 'BALANCE_UNAVAILABLE',
+    });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    // FOR UPDATE: duas abas abertas no mesmo pedido (acontece -- o Kanban e a
+    // lista de Pedidos leem a MESMA encomenda) nao podem dar baixa em dobro.
+    const { rows } = await client.query(
+      `SELECT ci.id, ci.customer_id, ci.amount_due, ci.covered_amount, ci.due_date,
+              ROUND((ci.amount_due - COALESCE(ci.covered_amount, 0))::numeric, 2) AS open_amount
+         FROM credit_installments ci
+        WHERE ci.company_id = $1
+          AND ci.sale_id = $2
+          AND ci.status NOT IN ('paid', 'cancelled')
+          AND (ci.amount_due - COALESCE(ci.covered_amount, 0)) > 0.005
+        ORDER BY ci.due_date ASC
+        LIMIT 1
+        FOR UPDATE`,
+      [cid, oid]
+    );
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        error: 'Esta encomenda nao tem saldo em aberto.',
+        code: 'NO_OPEN_BALANCE',
+      });
+    }
+    const inst = rows[0];
+    const openAmount = parseFloat(inst.open_amount);
+
+    // Sem `amount` a baixa e do saldo INTEIRO -- o caso de 9 em 10 cliques
+    // ("recebi o restante"). Com `amount`, pagamento parcial: o saldo diminui
+    // e a encomenda continua na aba A receber com o que falta.
+    const payAmount = (amount === undefined || amount === null || amount === '')
+      ? openAmount
+      : parseFloat(amount);
+
+    if (!(payAmount > 0)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'O valor recebido deve ser maior que zero.',
+        code: 'AMOUNT_INVALIDO',
+      });
+    }
+    // Teto no saldo: o excedente viraria credito do cliente no ledger --
+    // vocabulario de crediario, que e justamente o que esta rota evita.
+    if (payAmount > openAmount + 0.005) {
+      await client.query('ROLLBACK');
+      return res.status(422).json({
+        error: `O valor recebido (R$ ${payAmount.toFixed(2)}) e maior que o saldo em aberto (R$ ${openAmount.toFixed(2)}).`,
+        code: 'AMOUNT_ACIMA_DO_SALDO',
+        open_amount: openAmount,
+      });
+    }
+
+    let activeSessaoId = null;
+    try {
+      const sessRes = await client.query(
+        `SELECT id FROM caixa_sessoes WHERE company_id = $1 AND status = 'aberta' LIMIT 1`,
+        [cid]
+      );
+      activeSessaoId = sessRes?.rows?.[0]?.id || null;
+    } catch (_) {}
+
+    await creditLedger.applyPayment(client, {
+      companyId:  cid,
+      customerId: inst.customer_id,
+      amount:     Math.round(payAmount * 100) / 100,
+      method:     payMethod,
+      sessaoId:   activeSessaoId,
+      createdBy:  req.user?.id || null,
+      saleId:     oid,
+    });
+
+    // Saldo restante DEPOIS da baixa, lido de dentro da transacao -- e o que o
+    // card vai mostrar assim que a lista recarregar.
+    const { rows: after } = await client.query(
+      `SELECT COALESCE(ROUND(SUM(ci.amount_due - COALESCE(ci.covered_amount, 0))::numeric, 2), 0) AS remaining
+         FROM credit_installments ci
+        WHERE ci.company_id = $1
+          AND ci.sale_id = $2
+          AND ci.status NOT IN ('paid', 'cancelled')
+          AND (ci.amount_due - COALESCE(ci.covered_amount, 0)) > 0.005`,
+      [cid, oid]
+    );
+    const remaining = parseFloat(after[0]?.remaining || 0);
+
+    await client.query('COMMIT');
+    return res.json({
+      success:        true,
+      installment_id: inst.id,
+      paid:           Math.round(payAmount * 100) / 100,
+      method:         payMethod,
+      remaining,
+      settled:        remaining <= 0.005,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[studio/orders/registrar-pagamento]', err.message);
+    return res.status(500).json({ error: 'Erro ao registrar o pagamento do saldo.' });
   } finally { client.release(); }
 });
 

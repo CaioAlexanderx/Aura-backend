@@ -359,11 +359,18 @@ async function createCreditSale(client, {
   return { debited: debitRows[0], schedule, warnings };
 }
 
+// 27/08/2026 -- `saleId` (opcional): PRENDE os tres FIFOs deste pagamento a UMA
+// venda. Nasceu da baixa de saldo de encomenda no Studio: la a lojista clica no
+// card de UM pedido, e o FIFO global (oldest-first por cliente) abateria a
+// encomenda mais antiga do mesmo cliente -- o card clicado continuaria em
+// aberto e o outro sumiria sozinho. Sem o parametro nada muda: o FIFO segue
+// global por cliente, ou por carne quando accountId manda.
 async function applyPayment(client, {
   companyId, customerId, amount, method = null,
   sessaoId = null, createdBy = null, idempotencyKey = null,
   paidAt = null,
   accountId = null,
+  saleId = null,
   config = undefined,
   profile = undefined,
 }) {
@@ -489,27 +496,24 @@ async function applyPayment(client, {
 
   if (config && config.late_charges_enabled === true && isNewPayment) {
     // 1.1. Parcelas em aberto (pending/overdue), oldest-first.
-    //      Escopo por carne quando accountId fornecido (mesma regra do FIFO).
-    let chargeInstQuery;
-    let chargeInstParams;
+    //      Escopo por carne quando accountId fornecido (mesma regra do FIFO)
+    //      e por encomenda quando saleId fornecido.
+    const chargeInstParams = [companyId, customerId];
+    let chargeInstScope = '';
     if (accountId) {
-      chargeInstQuery = `
-        SELECT id, sale_id, amount_due, covered_amount, status, due_date
-        FROM credit_installments
-        WHERE company_id = $1 AND customer_id = $2
-          AND account_id = $3
-          AND status IN ('pending', 'overdue')
-        ORDER BY due_date ASC`;
-      chargeInstParams = [companyId, customerId, accountId];
-    } else {
-      chargeInstQuery = `
-        SELECT id, sale_id, amount_due, covered_amount, status, due_date
-        FROM credit_installments
-        WHERE company_id = $1 AND customer_id = $2
-          AND status IN ('pending', 'overdue')
-        ORDER BY due_date ASC`;
-      chargeInstParams = [companyId, customerId];
+      chargeInstParams.push(accountId);
+      chargeInstScope += ` AND account_id = $${chargeInstParams.length}`;
     }
+    if (saleId) {
+      chargeInstParams.push(saleId);
+      chargeInstScope += ` AND sale_id = $${chargeInstParams.length}`;
+    }
+    const chargeInstQuery = `
+        SELECT id, sale_id, amount_due, covered_amount, status, due_date
+        FROM credit_installments
+        WHERE company_id = $1 AND customer_id = $2${chargeInstScope}
+          AND status IN ('pending', 'overdue')
+        ORDER BY due_date ASC`;
 
     let openInst = [];
     try {
@@ -517,13 +521,21 @@ async function applyPayment(client, {
       openInst = r.rows;
     } catch (err) {
       if (err.code === '42703') {
+        // account_id ainda nao existe: cai pro FIFO global. O escopo por
+        // encomenda NAO cai junto -- sale_id e coluna original da tabela.
+        const fbParams = [companyId, customerId];
+        let fbScope = '';
+        if (saleId) {
+          fbParams.push(saleId);
+          fbScope = ` AND sale_id = $${fbParams.length}`;
+        }
         const r = await client.query(
           `SELECT id, sale_id, amount_due, covered_amount, status, due_date
            FROM credit_installments
-           WHERE company_id = $1 AND customer_id = $2
+           WHERE company_id = $1 AND customer_id = $2${fbScope}
              AND status IN ('pending', 'overdue')
            ORDER BY due_date ASC`,
-          [companyId, customerId]
+          fbParams
         );
         openInst = r.rows;
       } else throw err;
@@ -622,40 +634,32 @@ async function applyPayment(client, {
 
   // Para FIFO escopo por carne, precisamos do sale_id das transacoes do carne
   // O filtro de carne e feito via account_id na customer_credit_transactions (debit)
-  let pendingTxsQuery;
-  let pendingTxsParams;
+  const pendingTxsParams = [companyId, customerId];
+  let pendingTxsJoin  = '';
+  let pendingTxsScope = '';
   if (accountId) {
-    pendingTxsQuery = `
-      SELECT t.id, t.amount, t.idempotency_key, s.id AS sale_id
-      FROM transactions t
-      JOIN sales s ON t.idempotency_key LIKE 'pdv-credit-receivable-' || s.id::text || '%'
+    pendingTxsParams.push(accountId);
+    pendingTxsJoin = `
       JOIN customer_credit_transactions cct
         ON cct.sale_id = s.id AND cct.company_id = $1
-        AND cct.type = 'debit' AND cct.account_id = $3
-      WHERE t.company_id = $1
-        AND t.category ILIKE 'Crediario%A Receber%'
-        AND t.status = 'pending'
-        AND s.customer_id = $2
-        AND COALESCE(s.status, 'active') != 'cancelled'
-      ORDER BY t.created_at ASC
-      LIMIT 100
-      FOR UPDATE OF t`;
-    pendingTxsParams = [companyId, customerId, accountId];
-  } else {
-    pendingTxsQuery = `
+        AND cct.type = 'debit' AND cct.account_id = $${pendingTxsParams.length}`;
+  }
+  if (saleId) {
+    pendingTxsParams.push(saleId);
+    pendingTxsScope = ` AND s.id = $${pendingTxsParams.length}`;
+  }
+  const pendingTxsQuery = `
       SELECT t.id, t.amount, t.idempotency_key, s.id AS sale_id
       FROM transactions t
-      JOIN sales s ON t.idempotency_key LIKE 'pdv-credit-receivable-' || s.id::text || '%'
+      JOIN sales s ON t.idempotency_key LIKE 'pdv-credit-receivable-' || s.id::text || '%'${pendingTxsJoin}
       WHERE t.company_id = $1
         AND t.category ILIKE 'Crediario%A Receber%'
         AND t.status = 'pending'
-        AND s.customer_id = $2
+        AND s.customer_id = $2${pendingTxsScope}
         AND COALESCE(s.status, 'active') != 'cancelled'
       ORDER BY t.created_at ASC
       LIMIT 100
       FOR UPDATE OF t`;
-    pendingTxsParams = [companyId, customerId];
-  }
 
   let pendingTxs;
   try {
@@ -663,7 +667,14 @@ async function applyPayment(client, {
     pendingTxs = r.rows;
   } catch (err) {
     if (err.code === '42703' || err.code === '42P01') {
-      // fallback: FIFO global sem filtro de carne
+      // fallback: FIFO global sem filtro de carne. O escopo por encomenda
+      // sobrevive -- ele nao depende de nenhuma coluna nova.
+      const fbParams = [companyId, customerId];
+      let fbScope = '';
+      if (saleId) {
+        fbParams.push(saleId);
+        fbScope = ` AND s.id = $${fbParams.length}`;
+      }
       const r = await client.query(
         `SELECT t.id, t.amount, t.idempotency_key, s.id AS sale_id
          FROM transactions t
@@ -671,12 +682,12 @@ async function applyPayment(client, {
          WHERE t.company_id = $1
            AND t.category ILIKE 'Crediario%A Receber%'
            AND t.status = 'pending'
-           AND s.customer_id = $2
+           AND s.customer_id = $2${fbScope}
            AND COALESCE(s.status, 'active') != 'cancelled'
          ORDER BY t.created_at ASC
          LIMIT 100
          FOR UPDATE OF t`,
-        [companyId, customerId]
+        fbParams
       );
       pendingTxs = r.rows;
     } else throw err;
@@ -773,28 +784,23 @@ async function applyPayment(client, {
   const coveredInstallments = [];
   let toAllocate = principalAmount;
 
-  let instQuery;
-  let instParams;
+  const instParams = [companyId, customerId];
+  let instScope = '';
   if (accountId) {
-    instQuery = `
-      SELECT id, amount_due, covered_amount, status, due_date
-      FROM credit_installments
-      WHERE company_id = $1 AND customer_id = $2
-        AND account_id = $3
-        AND status IN ('pending', 'overdue')
-      ORDER BY due_date ASC
-      FOR UPDATE`;
-    instParams = [companyId, customerId, accountId];
-  } else {
-    instQuery = `
-      SELECT id, amount_due, covered_amount, status, due_date
-      FROM credit_installments
-      WHERE company_id = $1 AND customer_id = $2
-        AND status IN ('pending', 'overdue')
-      ORDER BY due_date ASC
-      FOR UPDATE`;
-    instParams = [companyId, customerId];
+    instParams.push(accountId);
+    instScope += ` AND account_id = $${instParams.length}`;
   }
+  if (saleId) {
+    instParams.push(saleId);
+    instScope += ` AND sale_id = $${instParams.length}`;
+  }
+  const instQuery = `
+      SELECT id, amount_due, covered_amount, status, due_date
+      FROM credit_installments
+      WHERE company_id = $1 AND customer_id = $2${instScope}
+        AND status IN ('pending', 'overdue')
+      ORDER BY due_date ASC
+      FOR UPDATE`;
 
   let installments;
   try {
@@ -802,15 +808,22 @@ async function applyPayment(client, {
     installments = r.rows;
   } catch (err) {
     if (err.code === '42703') {
-      // account_id nao existe ainda: FIFO global
+      // account_id nao existe ainda: FIFO global -- mas o escopo por encomenda
+      // permanece (sale_id e coluna original da tabela).
+      const fbParams = [companyId, customerId];
+      let fbScope = '';
+      if (saleId) {
+        fbParams.push(saleId);
+        fbScope = ` AND sale_id = $${fbParams.length}`;
+      }
       const r = await client.query(
         `SELECT id, amount_due, covered_amount, status, due_date
          FROM credit_installments
-         WHERE company_id = $1 AND customer_id = $2
+         WHERE company_id = $1 AND customer_id = $2${fbScope}
            AND status IN ('pending', 'overdue')
          ORDER BY due_date ASC
          FOR UPDATE`,
-        [companyId, customerId]
+        fbParams
       );
       installments = r.rows;
     } else throw err;

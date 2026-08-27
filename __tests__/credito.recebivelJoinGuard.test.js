@@ -49,7 +49,11 @@ describe('guarda-corpo: a igualdade exata não pode voltar', () => {
 
   test('os cinco pontos que liam recebível usam o join novo', () => {
     const esperado = {
-      'src/services/credit/ledger.js': 3,          // FIFO: accountId, sem accountId, fallback
+      // 27/08/2026: eram 3 (accountId, sem accountId, fallback). O escopo por
+      // encomenda (`saleId` do applyPayment) trocou os dois primeiros ramos --
+      // que só diferiam no filtro de carnê -- por uma query montada com
+      // cláusulas opcionais. Sobraram a query principal e o fallback.
+      'src/services/credit/ledger.js': 2,          // FIFO: query montada + fallback
       'src/services/credit/reschedule.js': 1,      // renegociação
       'src/routes/financialReceivables.js': 1,     // card "Crediário — A Receber"
     };
