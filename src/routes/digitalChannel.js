@@ -158,6 +158,7 @@ router.get('/', async (req, res) => {
         exists: false,
         storefront_url: null,
         politica_troca_padrao: POLITICA_PADRAO,
+        require_product_image: false,
       });
     }
     const config = rows[0];
@@ -195,6 +196,7 @@ router.get('/', async (req, res) => {
       // correcao no texto passaria a valer na loja e nao no painel — e a
       // lojista leria uma politica e publicaria outra.
       politica_troca: config.politica_troca ?? null,
+      require_product_image: config.require_product_image === true,
       politica_troca_padrao: POLITICA_PADRAO,
       storefront_url: config.slug ? `${STOREFRONT_BASE}/${config.slug}` : null,
       domain_pricing: { '1year': 80, '2years': 152 },
@@ -364,6 +366,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     card_enabled,
     card_max_installments,
     politica_troca,
+    require_product_image,
     // Fase 5
     pickup_address, pickup_eta_text, delivery_eta_text,
     origin_zip, delivery_pricing_mode, delivery_distance_tiers,
@@ -758,6 +761,28 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     // UPDATE separado pelo mesmo motivo do card_enabled — nao mexer no
     // UPSERT principal e sobreviver a base sem a migration (42703).
     // ============================================================
+    // Migration 308 — "so mostrar pecas com foto". UPDATE separado pelo
+    // mesmo motivo dos outros: nao mexer no UPSERT principal e sobreviver
+    // a base sem a migration (42703).
+    if (require_product_image !== undefined) {
+      try {
+        const { rows: updated } = await db.query(
+          `UPDATE digital_channel_config
+             SET require_product_image = $1, updated_at = NOW()
+           WHERE company_id = $2
+           RETURNING *`,
+          [require_product_image === true, cid]
+        );
+        if (updated.length) savedConfig = updated[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          console.error('[canal-foto] coluna require_product_image inexistente — skip:', e.message);
+        } else {
+          throw e;
+        }
+      }
+    }
+
     // Migration 306 — politica de troca do rodape. UPDATE separado pelo
     // mesmo motivo dos outros: nao mexer no UPSERT principal e sobreviver
     // a base sem a migration (42703).

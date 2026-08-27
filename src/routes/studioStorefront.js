@@ -57,6 +57,7 @@ const {
   fetchStorefrontCategories, fetchPrimaryCategoryLinks,
 } = require('../services/storefrontBuilder');
 const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
+const { filtroDeFoto } = require('../services/catalogoPaginado');
 const { initialArtStatus } = require('../services/artReview');
 
 function validateCpfCnpj(raw) {
@@ -218,6 +219,10 @@ router.get('/:slug/studio/products', async (req, res) => {
 
     // Lista produtos personalizaveis (respeita visibility canonica)
     const visibility = listVisibilityWhere('$1');
+    // Migration 308 — a MESMA regra da loja comum. Campo de produto que
+    // vale de um lado e nao do outro ja foi o bug daqui quatro vezes;
+    // ver __tests__/paridadeDosPayloads.js.
+    const comFoto = filtroDeFoto(config.require_product_image === true);
     // Migration 305 — ficha tecnica. Tentar-e-cair: o backend nao roda
     // migration no boot, entao coluna nova sempre tem um intervalo em que
     // o codigo subiu e o banco nao.
@@ -231,6 +236,7 @@ router.get('/:slug/studio/products', async (req, res) => {
           AND is_personalizable = true
           AND customization_config IS NOT NULL
           AND studio_storefront_visible IS NOT FALSE
+          AND ${comFoto}
         ORDER BY created_at DESC
         LIMIT 200`,
       [cid]

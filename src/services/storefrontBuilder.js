@@ -233,16 +233,17 @@ function listVisibilityWhere(cidParam) {
 // A pagina nasce com UMA pagina de produtos, nao com o catalogo. Antes
 // eram 500 (419 KB na Finesse) pra desenhar 24. O resto chega pela rota
 // /storefront/:slug/catalogo conforme a cliente navega.
-const { POR_PAGINA, EM_ESTOQUE, contarPorCategoria } = require('./catalogoPaginado');
+const { POR_PAGINA, EM_ESTOQUE, filtroDeFoto, contarPorCategoria } = require('./catalogoPaginado');
 const LIMITE_DO_PAYLOAD = POR_PAGINA;
 
-async function contarProdutosDaLoja(cid) {
+async function contarProdutosDaLoja(cid, exigeFoto) {
   const sql = `
     SELECT COUNT(*)::int AS n
     FROM products
     WHERE ${listVisibilityWhere('$1')}
       AND is_active IS NOT FALSE
       AND ${EM_ESTOQUE}
+      AND ${filtroDeFoto(exigeFoto)}
   `;
   try {
     const { rows } = await db.query(sql, [cid]);
@@ -322,8 +323,11 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
   };
 }
 
-async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
+async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) {
   const visibility = listVisibilityWhere('$1');
+  // migration 308. Entra nos DOIS caminhos abaixo — o curado e o normal.
+  // Aplicar so num deles faria a loja com destaques ignorar a regra.
+  const comFoto = filtroDeFoto(exigeFoto);
 
   if (featuredIds && featuredIds.length > 0) {
     const sql = `
@@ -333,6 +337,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
       WHERE ${visibility}
         AND is_active IS NOT FALSE
         AND ${EM_ESTOQUE}
+        AND ${comFoto}
         AND id::text = ANY($2)
       ORDER BY array_position($2, id::text)
       LIMIT ${LIMITE_DO_PAYLOAD}
@@ -348,6 +353,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds) {
     WHERE ${visibility}
       AND is_active IS NOT FALSE
       AND ${EM_ESTOQUE}
+      AND ${comFoto}
     ORDER BY created_at DESC
     LIMIT ${LIMITE_DO_PAYLOAD}
   `;
@@ -416,14 +422,19 @@ async function buildStorefront(config) {
   const featuredIds = parseFeaturedIds(config.featured_product_ids);
   const hiddenIds   = parseHiddenIds(config.hidden_product_ids);
 
-  const products = await fetchStorefrontProducts(cid, featuredIds, hiddenIds);
-  const catalogoTotal = await contarProdutosDaLoja(cid);
+  // migration 308 — a lojista pode pedir que so pecas com foto
+  // aparecam. O valor vem do SELECT * da rota; base sem a migration
+  // devolve undefined, que filtroDeFoto trata como desligado.
+  const exigeFoto = config.require_product_image === true;
+
+  const products = await fetchStorefrontProducts(cid, featuredIds, hiddenIds, exigeFoto);
+  const catalogoTotal = await contarProdutosDaLoja(cid, exigeFoto);
   // Barra de categorias: vem do BANCO, nao dos produtos carregados. Ver
   // contarPorCategoria — com paginacao de 24, derivar da pagina mostrava
   // so as categorias que caiam nela.
   let categoriasComTotal = [];
   try {
-    categoriasComTotal = await contarPorCategoria({ cid, visibilityWhere: listVisibilityWhere('$1') });
+    categoriasComTotal = await contarPorCategoria({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
   } catch (e) { categoriasComTotal = []; }
 
   // D3: árvore + vínculo primário. Só categorias visíveis na vitrine

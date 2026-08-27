@@ -50,6 +50,36 @@ const EM_ESTOQUE = `(
   END
 )`;
 
+/**
+ * A peca tem foto? (migration 308)
+ *
+ * Capa OU galeria: a lojista pode ter subido foto pela galeria sem
+ * definir capa, e esconder a peca nesse caso seria esconder trabalho que
+ * ela ja fez.
+ *
+ * Isto e uma REGRA, nao uma lista. A diferenca importa: com lista, a peca
+ * fotografada hoje so aparece quando alguem editar a lista; com regra,
+ * ela acende sozinha. Ver migration 308.
+ */
+const COM_FOTO = `(
+  btrim(COALESCE(products.image_url, '')) <> ''
+  OR (
+    jsonb_typeof(products.gallery_urls) = 'array'
+    AND jsonb_array_length(products.gallery_urls) > 0
+  )
+)`;
+
+/**
+ * O filtro de foto, ou nada.
+ *
+ * Devolver a string 'TRUE' em vez de montar o WHERE condicionalmente
+ * mantem UMA forma de query: quem le o SQL ve sempre a mesma lista de
+ * filtros, e nao precisa segurar na cabeca dois formatos possiveis.
+ */
+function filtroDeFoto(exigeFoto) {
+  return exigeFoto === true ? COM_FOTO : 'TRUE';
+}
+
 const ORDENS = {
   // A ordem que a lojista curou (featured primeiro) já vem do array de
   // destaques; sem ele, o mais recente na frente.
@@ -82,12 +112,15 @@ function normalizar(s) {
  */
 async function paginaDoCatalogo({
   cid, visibilityWhere, offset, limit, categoria, busca, ordem, featuredIds,
+  // migration 308 — a loja pode exigir foto. Chega de fora, como o
+  // visibilityWhere, porque quem le a config e a rota.
+  exigeFoto,
 }) {
   const off = Math.max(0, parseInt(offset, 10) || 0);
   const lim = Math.min(LIMITE_MAXIMO, Math.max(1, parseInt(limit, 10) || POR_PAGINA));
 
   const params = [cid];
-  const filtros = [visibilityWhere, 'is_active IS NOT FALSE', EM_ESTOQUE];
+  const filtros = [visibilityWhere, 'is_active IS NOT FALSE', EM_ESTOQUE, filtroDeFoto(exigeFoto)];
 
   // `featured_product_ids` nao e so ordenacao: quando a lojista cura a
   // lista, a loja mostra SO aqueles produtos. A pagina 1 vem embutida no
@@ -154,13 +187,14 @@ async function paginaDoCatalogo({
  * A contagem vem junto porque "Vestidos 143" ajuda a escolher, e porque
  * categoria com zero produto visivel nao deve aparecer na barra.
  */
-async function contarPorCategoria({ cid, visibilityWhere }) {
+async function contarPorCategoria({ cid, visibilityWhere, exigeFoto }) {
   const { rows } = await bd().query(
     `SELECT category AS nome, COUNT(*)::int AS total
        FROM products
       WHERE ${visibilityWhere}
         AND is_active IS NOT FALSE
         AND ${EM_ESTOQUE}
+        AND ${filtroDeFoto(exigeFoto)}
         AND category IS NOT NULL
         AND btrim(category) <> ''
       GROUP BY category
@@ -197,6 +231,6 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 }
 
 module.exports = {
-  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE,
+  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, filtroDeFoto,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,
 };
