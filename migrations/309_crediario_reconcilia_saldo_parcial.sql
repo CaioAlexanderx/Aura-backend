@@ -151,7 +151,13 @@ UPDATE transactions t
                     || 'Reconciliado pela migration 309 (saldo de pagamento parcial ja quitado no ledger)',
        updated_at = NOW()
   FROM registro r
- WHERE t.id = r.transaction_id;
+ WHERE t.id = r.transaction_id
+   -- Guard de corrida: as CTEs filtram status no snapshot do inicio do
+   -- statement. Se um pagamento concorrente confirmar esta linha entre o
+   -- snapshot e o lock, sem este predicado o EvalPlanQual so re-checaria o id
+   -- e a migration sobrescreveria uma linha ja 'confirmed' -- apagando receita
+   -- registrada. Com ele, a linha simplesmente sai do UPDATE.
+   AND t.status = 'pending';
 
 COMMIT;
 

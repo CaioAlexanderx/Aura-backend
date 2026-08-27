@@ -97,7 +97,7 @@ async function computeGuideValues(slug, companyId, period) {
            COALESCE(SUM(CASE WHEN type='income' THEN amount ELSE 0 END),0) AS fat
          FROM transactions
          WHERE company_id=$1
-           AND date>=(DATE $2 - INTERVAL '11 months')::date
+           AND date>=($2::date - INTERVAL '11 months')::date
            AND date<=$3`,
         [companyId, start, end]
       );
