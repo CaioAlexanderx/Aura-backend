@@ -4,15 +4,22 @@
 // CONSOLIDAÇÃO (25/08/2026): connect/disconnect/status/templates
 // mudaram para src/routes/whatsappCloud.js (fonte única, montado em
 // /companies/:id SEM gate de plano — o gate certo é o addon de
-// lembretes). Aqui ficaram só /send e /messages, que seguem atrás de
-// requirePlan('negocio','expansao') por serem uso avulso das outras
-// verticais. Novas features de WhatsApp vão no whatsappCloud.js.
+// lembretes). Aqui ficaram só /send e /messages, com o
+// requirePlan('negocio','expansao') aplicado ROTA A ROTA — nunca no
+// prefixo do mount, que barraria por prefixo e derrubaria as rotas do
+// whatsappCloud (achado no QA de 27/08). Novas features de WhatsApp
+// vão no whatsappCloud.js.
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const wa = require('../services/whatsapp');
 const { decrypt } = require('../services/dojoBaasCrypto');
+// O gate de plano vale SÓ para estas rotas legadas — nunca no prefixo
+// /whatsapp do mount (ver private.js): lá ele barrava por prefixo e
+// derrubava as rotas consolidadas do whatsappCloud para dojôs essencial.
+const { requirePlan } = require('../middleware/auth');
+const legacyGate = requirePlan('negocio', 'expansao');
 
 // A9 — o token permanente do Graph API é cifrado em repouso (AES-256-GCM,
 // mesmo cofre do dojoBaasCrypto). Formato cifrado = "v1:...". Token legado
@@ -39,7 +46,7 @@ async function getWaConfig(companyId) {
 
 // ── POST /whatsapp/connect — Embedded Signup callback ────
 // ── POST /whatsapp/send — Send message ─────────────────
-router.post('/send', async (req, res) => {
+router.post('/send', legacyGate, async (req, res) => {
   const cid = req.params.id;
   const { to, type = 'template', template_name, text, media_url, media_type, language, components } = req.body;
   if (!to) return res.status(400).json({ error: 'Destinatario (to) obrigatorio' });
@@ -74,7 +81,7 @@ router.post('/send', async (req, res) => {
 });
 
 // ── GET /whatsapp/messages — Message history ────────────
-router.get('/messages', async (req, res) => {
+router.get('/messages', legacyGate, async (req, res) => {
   const { limit = 50, offset = 0 } = req.query;
   try {
     const { rows } = await db.query(
