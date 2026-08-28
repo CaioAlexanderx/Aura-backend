@@ -55,6 +55,29 @@ const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const creditLedger = require('../services/creditLedger');
 
+// Lancamento financeiro da venda, pra UI abrir "Editar lancamento".
+//
+// 28/08/2026 (relato Eryca #1): so olhava 'pdv-sale-<id>'. A venda 100% fiada
+// NAO tem essa linha — pdv.js so insere a receita quando entrou dinheiro
+// (cashAmount > 0); o lancamento dela e o 'A Receber' do crediario,
+// 'pdv-credit-receivable-<id>' (ou '...-rest-<ts>' quando houve pagamento
+// parcial). Sem o fallback, transaction_id vinha null justamente nas vendas
+// no crediario e o botao sumia.
+//
+// Range (>= / < ...||'z') em vez de LIKE de proposito: o LIKE com padrao
+// montado em runtime nao usa o indice de idempotency_key e o subselect virava
+// bitmap scan (medido em prod: 98ms/30 linhas contra 2.7ms com o range).
+// Os sufixos possiveis comecam em '-', sempre < 'z'.
+const TX_ID_SUBQUERY =
+  '       COALESCE( ' +
+  "         (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1), " +
+  '         (SELECT t.id FROM transactions t ' +
+  '           WHERE t.company_id = s.company_id ' +
+  "             AND t.idempotency_key >= 'pdv-credit-receivable-' || s.id " +
+  "             AND t.idempotency_key <  'pdv-credit-receivable-' || s.id || 'z' " +
+  '           ORDER BY t.idempotency_key LIMIT 1) ' +
+  '       ) AS transaction_id ';
+
 // Constroi clausula WHERE dinamica baseada nos filtros recebidos.
 function buildWhere(companyId, filters) {
   const conds = ['s.company_id = $1'];
@@ -140,7 +163,7 @@ router.get('/', asyncHandler(async (req, res) => {
     '       s.seller_id, COALESCE(s.seller_name, e.name) AS seller_name, s.employee_id, ' +
     '       (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS items_count, ' +
     "       (SELECT COALESCE(SUM(NULLIF(tri.quantity,'NaN'::numeric) * NULLIF(tri.unit_price,'NaN'::numeric)), 0) FROM troca_returned_items tri WHERE tri.troca_sale_id = s.id) AS returned_value, " +
-    "       (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS transaction_id " +
+    TX_ID_SUBQUERY +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +
@@ -220,7 +243,7 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   const saleRes = await pool.query(
     'SELECT s.*, c.name AS customer_name, c.phone AS customer_phone, c.email AS customer_email, ' +
     '       COALESCE(s.seller_name, e.name) AS seller_name_eff, ' +
-    "       (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS transaction_id " +
+    TX_ID_SUBQUERY +
     'FROM sales s ' +
     'LEFT JOIN customers c ON c.id = s.customer_id ' +
     'LEFT JOIN employees e ON e.id = s.employee_id OR e.id = s.seller_id ' +

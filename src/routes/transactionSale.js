@@ -11,18 +11,54 @@
 //   POST   /transactions/:tx_id/sale-items           (adicionar produto - EXTRA C)
 //   DELETE /transactions/:tx_id/sale-items/:item_id  (devolucao parcial)
 //   PATCH  /transactions/:tx_id/seller               (mudar vendedora)
+//
+// 28/08/2026 — CREDIARIO (relato Eryca #1): "editar lancamento de venda nao
+//   lista os produtos". A venda 100% fiada NAO gera 'pdv-sale-<id>' (pdv.js so
+//   insere a receita quando cashAmount > 0); o unico lancamento dela e o
+//   'A Receber' com chave 'pdv-credit-receivable-<saleId>' (ledger.js). O
+//   extractSaleId antigo so casava 'pdv-sale-' -> has_sale=false -> a secao de
+//   mercadorias sumia. Agora o vinculo cobre os dois formatos (incluindo o
+//   saldo parcial 'pdv-credit-receivable-<saleId>-rest-<ts>').
+//
+//   Como o crediario tem ledger proprio (customer_credit_transactions +
+//   credit_installments + credit_used), remover item NAO pode seguir o caminho
+//   do dinheiro (deletar sale_item / mexer em transactions.amount na mao) —
+//   isso deixaria divida e parcelas de pe. O DELETE delega ao motor oficial de
+//   devolucao (services/credit/refund.js), o mesmo do botao "Devolver" do
+//   detalhe da venda. Por simetria, adicionar produto fica BLOQUEADO no
+//   crediario (nao existe motor de "aumentar a divida" pos-venda).
 // ============================================================
 
 const router = require('express').Router({ mergeParams: true });
 const pool = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
+const { refundCreditSale } = require('../services/credit/refund');
+// Quais idempotency_key amarram um lancamento a uma venda — e de que origem
+// ('pdv' = recebeu na hora / 'credit' = A Receber do crediario).
+const { resolveSaleLink, extractSaleId } = require('../utils/saleLink');
 
-// Extrai sale_id da idempotency_key. Retorna null se nao for venda do PDV.
-function extractSaleId(idempotencyKey) {
-  if (!idempotencyKey || typeof idempotencyKey !== 'string') return null;
-  const m = idempotencyKey.match(/^pdv-sale-([0-9a-f-]+)$/i);
-  return m ? m[1] : null;
+// Quanto ja foi devolvido/trocado por item da venda (troca_returned_items).
+// Best-effort: em deploy parcial a tabela pode nao existir (42P01) -> tudo 0.
+async function returnedQtyBySaleItem(client, saleId) {
+  try {
+    const { rows } = await client.query(
+      `SELECT tri.original_sale_item_id AS item_id,
+              COALESCE(SUM(tri.quantity), 0)::numeric AS returned_qty
+         FROM troca_returned_items tri
+         JOIN sales ts ON ts.id = tri.troca_sale_id
+        WHERE tri.original_sale_id = $1
+          AND COALESCE(ts.status, 'completed') != 'cancelled'
+        GROUP BY tri.original_sale_item_id`,
+      [saleId]
+    );
+    return new Map(rows.map(function(r) {
+      return [r.item_id, parseFloat(r.returned_qty) || 0];
+    }));
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return new Map();
+    throw e;
+  }
 }
 
 // GET /transactions/:tx_id/sale-details
@@ -39,7 +75,8 @@ router.get('/transactions/:tx_id/sale-details', asyncHandler(async (req, res) =>
   );
   if (!txRes.rows.length) throw new AppError('Lancamento nao encontrado', 404);
   const tx = txRes.rows[0];
-  const saleId = extractSaleId(tx.idempotency_key);
+  const link = resolveSaleLink(tx.idempotency_key);
+  const saleId = link ? link.saleId : null;
 
   // Lista de funcionarios pra dropdown (ativos)
   const empRes = await pool.query(
@@ -103,8 +140,18 @@ router.get('/transactions/:tx_id/sale-details', asyncHandler(async (req, res) =>
     [saleId]
   );
 
+  // 28/08/2026: no crediario a devolucao NAO apaga o sale_item — ela grava um
+  // troca_returned_items e ancora uma venda type='devolucao'. Sem expor isso, a
+  // tela mostraria o item como se ainda estivesse na venda e ofereceria
+  // "remover" de novo (o motor barra com DOUBLE_RETURN_BLOCKED).
+  const returnedMap = await returnedQtyBySaleItem(pool, saleId);
+  const isCredit = link.source === 'credit';
+
   res.json({
     has_sale: true,
+    // Fonte do vinculo: 'pdv' (receita em dinheiro) ou 'credit' (A Receber).
+    // O front usa pra trocar o texto da devolucao e esconder "adicionar produto".
+    sale_source: link.source,
     transaction: {
       id: tx.id,
       amount: parseFloat(tx.amount),
@@ -120,6 +167,9 @@ router.get('/transactions/:tx_id/sale-details', asyncHandler(async (req, res) =>
       status: sale.status,
       cancelled_at: sale.cancelled_at,
       created_at: sale.created_at,
+      is_credit: isCredit,
+      // No crediario a venda continua inteira; quem some e a divida.
+      can_add_items: !isCredit,
     },
     customer: sale.customer_id ? {
       id: sale.customer_id,
@@ -131,16 +181,20 @@ router.get('/transactions/:tx_id/sale-details', asyncHandler(async (req, res) =>
       name: sale.seller_name,
     },
     items: itemsRes.rows.map(function(r) {
+      const qty = parseFloat(r.quantity);
+      const returnedQty = returnedMap.get(r.id) || 0;
       return {
         id: r.id,
         product_id: r.product_id,
         variant_id: r.variant_id,
-        quantity: parseFloat(r.quantity),
+        quantity: qty,
         unit_price: parseFloat(r.unit_price),
         discount: parseFloat(r.discount || 0),
         total_price: parseFloat(r.total_price),
         product_name: r.product_name || r.product_name_snapshot || 'Item',
         image_url: r.image_url,
+        returned_quantity: returnedQty,
+        available_quantity: Math.max(0, parseFloat((qty - returnedQty).toFixed(3))),
       };
     }),
     available_employees: availableEmployees,
@@ -182,8 +236,21 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
     );
     if (!txRes.rows.length) throw new AppError('Lancamento nao encontrado', 404);
     const tx = txRes.rows[0];
-    const saleId = extractSaleId(tx.idempotency_key);
-    if (!saleId) throw new AppError('Lancamento nao esta vinculado a uma venda', 400);
+    const link = resolveSaleLink(tx.idempotency_key);
+    if (!link) throw new AppError('Lancamento nao esta vinculado a uma venda', 400);
+    const saleId = link.saleId;
+
+    // 28/08/2026: somar item na mao aqui aumentaria a receita/recebivel SEM
+    // aumentar o debit do ledger nem as parcelas — a divida do cliente ficaria
+    // menor que a venda. Nao existe motor de "acrescimo pos-venda" no crediario;
+    // o caminho e lancar uma venda nova.
+    if (link.source === 'credit') {
+      throw new AppError(
+        'Venda no crediario nao aceita produto novo depois de fechada — ' +
+        'a divida e as parcelas ja foram geradas. Lance uma venda nova pro cliente.',
+        400
+      );
+    }
 
     // 2. Carrega venda + valida nao cancelada
     const saleRes = await client.query(
@@ -332,10 +399,16 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
     );
     if (!txRes.rows.length) throw new AppError('Lancamento nao encontrado', 404);
     const tx = txRes.rows[0];
-    const saleId = extractSaleId(tx.idempotency_key);
-    if (!saleId) throw new AppError('Lancamento nao esta vinculado a uma venda', 400);
+    const link = resolveSaleLink(tx.idempotency_key);
+    if (!link) throw new AppError('Lancamento nao esta vinculado a uma venda', 400);
+    const saleId = link.saleId;
 
     // 2. Carrega item da venda + valida pertence a essa venda + empresa
+    //
+    // 28/08/2026: era `FOR UPDATE` puro num LEFT JOIN products — Postgres
+    // recusa com 0A000 ("FOR UPDATE cannot be applied to the nullable side of
+    // an outer join"), entao TODA remocao de item explodia em 500, crediario ou
+    // nao. Trava so as tabelas do lado interno (si, s), que sao as que mudam.
     const itemRes = await client.query(
       `SELECT si.id, si.sale_id, si.product_id, si.variant_id,
               si.quantity, si.total_price, si.product_name_snapshot,
@@ -343,7 +416,7 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
        FROM sale_items si
        LEFT JOIN products p ON p.id = si.product_id
        JOIN sales s ON s.id = si.sale_id
-       WHERE si.id = $1 AND s.id = $2 AND s.company_id = $3 FOR UPDATE`,
+       WHERE si.id = $1 AND s.id = $2 AND s.company_id = $3 FOR UPDATE OF si, s`,
       [itemId, saleId, companyId]
     );
     if (!itemRes.rows.length) throw new AppError('Item nao encontrado nessa venda', 404);
@@ -351,6 +424,68 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
     const itemTotal = parseFloat(item.total_price);
     const itemQty = parseFloat(item.quantity);
     const itemName = item.product_name || item.product_name_snapshot || 'Item';
+
+    // 2b. CREDIARIO: delega ao motor oficial de devolucao.
+    //
+    // Apagar o sale_item aqui deixaria o debit do ledger, as parcelas e o
+    // credit_used intactos — o cliente continuaria devendo por um produto que
+    // voltou pra prateleira. refundCreditSale faz o certo: repoe estoque, grava
+    // troca_returned_items (guarda anti-dupla-devolucao), lanca 'refund' no
+    // ledger, abate as ultimas parcelas abertas e reduz o 'A Receber'.
+    if (link.source === 'credit') {
+      const returnedMap = await returnedQtyBySaleItem(client, saleId);
+      const already = returnedMap.get(item.id) || 0;
+      const remaining = parseFloat((itemQty - already).toFixed(3));
+      if (remaining <= 0) {
+        throw new AppError('Esse produto ja foi devolvido por inteiro.', 409);
+      }
+
+      let refund;
+      try {
+        refund = await refundCreditSale(client, {
+          companyId: companyId,
+          saleId: saleId,
+          items: [{ sale_item_id: item.id, quantity: remaining }],
+          reason: 'Devolucao pela edicao do lancamento',
+          createdBy: req.user?.id || null,
+        });
+      } catch (e) {
+        // O motor usa err(status, body); traduz pro AppError do resto da rota.
+        if (e.isRefundError) throw new AppError(e.body?.error || 'Erro na devolucao', e.status || 400);
+        throw e;
+      }
+
+      // Recebivel depois do abatimento (o motor pode ter zerado/apagado a linha).
+      const afterTx = await client.query(
+        'SELECT amount FROM transactions WHERE id = $1 AND company_id = $2',
+        [txId, companyId]
+      );
+      const newTxAmount = afterTx.rows.length ? parseFloat(afterTx.rows[0].amount) : 0;
+
+      const saleAfter = await client.query(
+        'SELECT total_amount FROM sales WHERE id = $1', [saleId]
+      );
+
+      await client.query('COMMIT');
+      return res.json({
+        ok: true,
+        mode: 'credit_refund',
+        removed_item: { id: itemId, name: itemName, quantity: remaining, refund_amount: refund.refund_value },
+        // A venda no crediario nao encolhe: o valor devolvido vira devolucao
+        // ancorada (sales type='devolucao') + abatimento das parcelas.
+        new_sale_total: parseFloat(saleAfter.rows[0]?.total_amount || 0),
+        new_tx_amount: newTxAmount,
+        tx_removed: afterTx.rows.length === 0,
+        sale_cancelled: false,
+        credit_refund: {
+          devolucao_sale_id: refund.devolucao_sale_id,
+          refund_value: refund.refund_value,
+          abated_installments: refund.abated_installments,
+          credit_generated: refund.credit_generated,
+          new_balance: refund.new_balance,
+        },
+      });
+    }
 
     // 3. Devolve estoque (variant tem prioridade)
     if (item.variant_id) {
