@@ -136,7 +136,12 @@ router.use('/digital-channel/orders', requirePlan('negocio', 'expansao'), requir
 router.use('/digital-channel/asaas', requirePlan('negocio', 'expansao'), require('./asaasSubconta'));
 router.use('/payment-gateways', requirePlan('negocio', 'expansao'), require('./paymentGateways'));
 router.use('/members', requirePlan('negocio', 'expansao'), require('./members'));
-router.use('/whatsapp', requirePlan('negocio', 'expansao'), require('./whatsappRoutes'));
+// SEM gate no prefixo: router.use('/whatsapp', requirePlan, ...) barrava
+// por PREFIXO — /whatsapp/status de um dojô essencial levava 403 aqui e
+// nunca chegava ao whatsappCloud montado depois (achado no QA de 27/08,
+// dojô Areikan). O requirePlan das rotas legadas (/send, /messages) mora
+// DENTRO de whatsappRoutes.js, rota a rota.
+router.use('/whatsapp', require('./whatsappRoutes'));
 router.use('/ai/insights', requirePlan('negocio', 'expansao'), require('./aiInsights'));
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barbershop'));
 router.use('/barbershop', requirePlan('negocio', 'expansao'), require('./barberTier3'));
