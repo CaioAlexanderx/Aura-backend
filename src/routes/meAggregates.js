@@ -697,7 +697,17 @@ router.get('/sales', async (req, res) => {
               s.customer_id, c.name AS customer_name,
               s.seller_id, COALESCE(s.seller_name, e.name) AS seller_name, s.employee_id,
               (SELECT COUNT(*)::int FROM sale_items WHERE sale_id = s.id) AS items_count,
-              (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1) AS transaction_id,
+              -- 28/08/2026: fallback pro 'A Receber' do crediario — venda 100%
+              -- fiada nao tem 'pdv-sale-<id>'. Mesmo criterio de sales.js
+              -- (range em vez de LIKE pra usar o indice de idempotency_key).
+              COALESCE(
+                (SELECT t.id FROM transactions t WHERE t.idempotency_key = 'pdv-sale-' || s.id AND t.company_id = s.company_id LIMIT 1),
+                (SELECT t.id FROM transactions t
+                  WHERE t.company_id = s.company_id
+                    AND t.idempotency_key >= 'pdv-credit-receivable-' || s.id
+                    AND t.idempotency_key <  'pdv-credit-receivable-' || s.id || 'z'
+                  ORDER BY t.idempotency_key LIMIT 1)
+              ) AS transaction_id,
               s.company_id
          FROM sales s
          LEFT JOIN customers c ON c.id = s.customer_id
