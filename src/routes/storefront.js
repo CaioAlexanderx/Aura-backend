@@ -134,7 +134,7 @@ router.get('/:slug/catalogo', async (req, res) => {
   try {
     const slug = req.params.slug.toLowerCase().trim();
     const { rows } = await db.query(
-      `SELECT company_id, show_prices, featured_product_ids FROM digital_channel_config WHERE slug = $1 AND is_published = true`,
+      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`,
       [slug]
     );
     if (!rows.length) return res.status(404).json({ error: 'Loja nao encontrada' });
@@ -149,6 +149,9 @@ router.get('/:slug/catalogo', async (req, res) => {
       busca: req.query.q,
       ordem: req.query.ordem,
       featuredIds: parseFeaturedIds(cfg.featured_product_ids),
+      // migration 308. A pagina 2 tem que obedecer a MESMA regra da
+      // pagina 1, senao a grade cresce ao rolar.
+      exigeFoto: cfg.require_product_image === true,
     });
 
     // O produto sai na MESMA forma do payload embutido. Sem isto o cartao
