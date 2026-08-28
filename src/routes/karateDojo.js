@@ -6,11 +6,13 @@
 // Ambos são resolvidos por requireDojoAccess → req.dojoId + req.federationId.
 //
 // Endpoints efetivos:
-//   GET   /federation/:id/dojo/me   — contexto + cadastro completo do dojô
-//   PATCH /federation/:id/dojo/me   — o dojô edita o PRÓPRIO cadastro (Canal A)
-//   GET   /federation/:id/dojo/events
-//   GET   /federation/:id/dojo/practitioners
-//   GET   /federation/:id/dojo/annuity
+//   GET    /federation/:id/dojo/me       — contexto + cadastro completo do dojô
+//   PATCH  /federation/:id/dojo/me       — o dojô edita o PRÓPRIO cadastro (Canal A)
+//   POST   /federation/:id/dojo/me/logo  — upload da logo do dojô (Canal A)
+//   DELETE /federation/:id/dojo/me/logo  — remove a logo do dojô (Canal A)
+//   GET    /federation/:id/dojo/events
+//   GET    /federation/:id/dojo/practitioners
+//   GET    /federation/:id/dojo/annuity
 //
 // ── GATE DE CONEXÃO (polish 25/07/2026) ─────────────────────
 // companies.karate_dojo_linked_at (migration 251, PR #420) é a CONEXÃO do
@@ -54,6 +56,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { requireDojoAccess } = require('../middleware/requireDojoAccess');
 const { getDojoLinkStatus } = require('../services/karateDojoLinkStatus');
+const { uploadToR2 } = require('../utils/r2Storage');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -91,7 +94,7 @@ function dojoSelectSql() {
     ? "to_char(c.dojo_founded_at, 'YYYY-MM-DD') AS founded_at"
     : 'NULL::text AS founded_at';
   return `SELECT c.id, c.legal_name, c.trade_name, c.slug, c.cnpj, c.email, c.phone,
-              c.federation_id, c.vertical, c.created_at,
+              c.federation_id, c.vertical, c.created_at, c.karate_logo_url,
               c.fpkt_affiliation_id, c.affiliation_model, c.region,
               to_char(c.affiliation_since, 'YYYY-MM-DD') AS affiliated_since,
               ${foundedAt},
@@ -149,6 +152,10 @@ function shapeDojo(row, { authChannel, link }) {
     email: row.email || null,
     phone: row.phone || null,
     founded_at: row.founded_at || null,
+    // Na coluna é karate_logo_url (migration 147); no fio é logo_url — MESMO
+    // nome que a identidade da federação já usa (karateSettings.js). Um nome
+    // só para a mesma coisa: o app não deve ter que lembrar de qual lado veio.
+    logo_url: row.karate_logo_url || null,
     // ── bloco FEDERATIVO (read-only para o dojô) ──
     federation_id: row.federation_id,
     federation_name: row.federation_name || null,
@@ -324,6 +331,119 @@ router.patch('/dojo/me', requireDojoAccess, requireChannelA, async (req, res) =>
       return res.status(409).json({ error: 'Já existe uma empresa com este CNPJ', code: 'DUPLICATE_CNPJ' });
     }
     console.error('[karateDojo] PATCH /dojo/me error:', err.message);
+    return res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// ============================================================
+// LOGO DO DOJÔ — POST/DELETE /federation/:id/dojo/me/logo (Canal A)
+//
+// QA 27/08/2026: a sidebar do dojô mostrava a logo da FPKT acima do nome do
+// dojô — a federação ocupando a identidade de quem entrou. O dojô é dono da
+// própria marca; a FPKT continua sendo a marca DELA (KarateShell.tsx).
+//
+// REUSA o mecanismo de upload do aluno do dojô (POST /dojo/students/:sid/photo)
+// e do praticante: JSON + base64 → uploadToR2, MESMOS tipos e MESMO limite de
+// 5 MB herdado de express.json({ limit: '5mb' }) em src/app.js. Nenhum segundo
+// caminho de upload de arquivo.
+//
+// SEM MIGRATION: companies.karate_logo_url já existe desde a 147 — é a mesma
+// coluna que a federação escreve pelo PATCH /dojos/:dojoId (karateDojos.js) e
+// que o portal Canal B já lê. O que faltava era o dojô poder escrever nela.
+//
+// Body JSON:
+//   content      {string}  Imagem em base64 (obrigatório).
+//   content_type {string?} MIME. Default: "image/jpeg".
+//                          Aceitos: image/jpeg, image/png, image/webp.
+//
+// Resposta: o MESMO shape do GET /dojo/me (o front rehidrata a tela inteira
+// com uma resposta só, sem um segundo GET para ver a logo nova).
+// ============================================================
+const LOGO_ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+// A chave é DETERMINÍSTICA por dojô — trocar a logo sobrescreve o objeto em
+// vez de acumular lixo no R2. O preço é que a URL não muda entre uploads: sem
+// o ?v= abaixo, o navegador e o CDN continuariam servindo a logo ANTIGA e o
+// sensei juraria que o upload não funcionou.
+function logoKey(dojoId, ext) {
+  return 'karate/dojos/' + dojoId + '/logo.' + ext;
+}
+
+async function respondWithDojo(req, res) {
+  const dojo = await loadDojo(req.dojoId, req.federationId);
+  if (!dojo) return notFound(res);
+  const link = await getDojoLinkStatus(req.dojoId);
+  return res.json({
+    dojo: shapeDojo(dojo, { authChannel: req.dojoAuthChannel, link }),
+    linked: link.linked,
+    linked_at: link.linked_at,
+  });
+}
+
+// Escopado por (id, federation_id, vertical) — o dojô do GUARD, nunca do body.
+async function setDojoLogo(dojoId, federationId, url) {
+  const { rows } = await db.query(
+    `UPDATE companies SET karate_logo_url = $1, updated_at = now()
+      WHERE id = $2
+        AND federation_id = $3
+        AND vertical = 'karate_dojo'
+      RETURNING id`,
+    [url, dojoId, federationId]
+  );
+  return rows.length > 0;
+}
+
+router.post('/dojo/me/logo', requireDojoAccess, requireChannelA, async (req, res) => {
+  const { content, content_type } = req.body || {};
+
+  if (!content || typeof content !== 'string' || !content.trim()) {
+    return res.status(400).json({
+      error: 'Campo content (imagem em base64) é obrigatório',
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  const mime = ((content_type || 'image/jpeg') + '').toLowerCase().split(';')[0].trim();
+  if (!LOGO_ALLOWED_TYPES.includes(mime)) {
+    return res.status(400).json({
+      error: 'Tipo de imagem não suportado: ' + mime + '. Use image/jpeg, image/png ou image/webp.',
+      code: 'INVALID_CONTENT_TYPE',
+    });
+  }
+  const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+
+  try {
+    // Confirma que o dojô existe (e é DESTA federação) ANTES de gastar um
+    // upload no R2 — mesma ordem de karateDojoStudents: valida, depois sobe.
+    const dojo = await loadDojo(req.dojoId, req.federationId);
+    if (!dojo) return notFound(res);
+
+    const result = await uploadToR2(logoKey(req.dojoId, ext), content, mime);
+    if (!result.success) {
+      console.error('[karateDojo] logo R2 error:', result.error);
+      return res.status(500).json({ error: 'Erro no armazenamento da imagem' });
+    }
+
+    const ok = await setDojoLogo(req.dojoId, req.federationId, result.url + '?v=' + Date.now());
+    if (!ok) return notFound(res);
+
+    return await respondWithDojo(req, res);
+  } catch (err) {
+    console.error('[karateDojo] POST /dojo/me/logo error:', err.message);
+    return res.status(500).json({ error: 'Erro interno' });
+  }
+});
+
+// Remove a logo. Só limpa a coluna — o objeto no R2 fica e é sobrescrito no
+// próximo upload (chave determinística). Apagar do R2 exigiria adivinhar a
+// extensão do arquivo antigo, e uma logo órfã não é dado sensível.
+router.delete('/dojo/me/logo', requireDojoAccess, requireChannelA, async (req, res) => {
+  try {
+    const ok = await setDojoLogo(req.dojoId, req.federationId, null);
+    if (!ok) return notFound(res);
+    return await respondWithDojo(req, res);
+  } catch (err) {
+    console.error('[karateDojo] DELETE /dojo/me/logo error:', err.message);
     return res.status(500).json({ error: 'Erro interno' });
   }
 });
