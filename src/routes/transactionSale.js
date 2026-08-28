@@ -373,6 +373,9 @@ router.post('/transactions/:tx_id/sale-items', asyncHandler(async (req, res) => 
 
 // DELETE /transactions/:tx_id/sale-items/:item_id
 // Devolucao parcial:
+//   0. Desconta o que uma TROCA anterior ja devolveu desse item
+//      (troca_returned_items) — tudo abaixo trabalha com o que AINDA estava
+//      com o cliente, nunca com a quantidade vendida
 //   1. Devolve quantidade ao stock (product ou variant)
 //   2. Reduz sales.total_amount
 //   3. Reduz transactions.amount (ou DELETE se for o último item)
@@ -487,23 +490,81 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
       });
     }
 
-    // 3. Devolve estoque (variant tem prioridade)
+    // 2c. Quanto desse item AINDA esta com o cliente.
+    //
+    // 28/08/2026: uma TROCA anterior pode ter levado parte do item de volta pra
+    // prateleira — troca_returned_items com original_sale_item_id = si.id — sem
+    // encostar em sale_items. A troca nao encolhe a venda original: ela ancora
+    // uma venda type='troca' e o abatimento vive no returned_value DELA. Entao
+    // sale_items.quantity continua sendo a quantidade VENDIDA, nao a que sobrou
+    // com o cliente. Creditar item.quantity aqui somava de novo a parte ja
+    // devolvida: item de 3 com 1 trocado devolvia 3 ao estoque em vez de 2 —
+    // estoque inflando em silencio, uma unidade por troca.
+    //
+    // Sem devolucao anterior (o caso comum) nada muda: remaining == itemQty e o
+    // fluxo segue identico ao de antes.
+    const returnedMap = await returnedQtyBySaleItem(client, saleId);
+    const alreadyReturned = returnedMap.get(item.id) || 0;
+    const hasPartialReturn = alreadyReturned > 0;
+    const remainingQty = hasPartialReturn
+      ? parseFloat((itemQty - alreadyReturned).toFixed(3))
+      : itemQty;
+    if (hasPartialReturn && remainingQty <= 0) {
+      // O GET ja manda available_quantity = 0 e a tela desabilita o botao, mas
+      // a rota nao pode depender disso (chamada direta / tela desatualizada).
+      throw new AppError('Esse produto ja foi devolvido por inteiro.', 409);
+    }
+
+    // Valor da devolucao proporcional ao que ainda estava com o cliente. Mesma
+    // conta do motor de crediario: preco efetivo = total_price / quantity, ja
+    // liquido do item_discount. keptTotal fecha por subtracao pra nao sobrar
+    // centavo de arredondamento entre a venda e o espelho de devolucao.
+    const refundValue = hasPartialReturn && itemQty > 0
+      ? parseFloat(((itemTotal / itemQty) * remainingQty).toFixed(2))
+      : itemTotal;
+    const keptTotal = parseFloat((itemTotal - refundValue).toFixed(2));
+
+    // 3. Devolve estoque (variant tem prioridade) — so o que voltou AGORA.
     if (item.variant_id) {
       await client.query(
         `UPDATE product_variants SET stock_qty = COALESCE(stock_qty, 0) + $1, updated_at = NOW()
          WHERE id = $2`,
-        [itemQty, item.variant_id]
+        [remainingQty, item.variant_id]
       );
     } else if (item.product_id) {
       await client.query(
         `UPDATE products SET stock_qty = COALESCE(stock_qty, 0) + $1, updated_at = NOW()
          WHERE id = $2 AND company_id = $3`,
-        [itemQty, item.product_id, companyId]
+        [remainingQty, item.product_id, companyId]
       );
     }
 
-    // 4. Remove o item da venda
-    await client.query('DELETE FROM sale_items WHERE id = $1', [itemId]);
+    // 4. Tira da venda o que voltou agora.
+    //
+    // Sem devolucao anterior a linha some, como sempre foi. COM devolucao
+    // anterior ela NAO pode sumir, por dois motivos:
+    //
+    //   (a) sales.total_amount e a soma dos sale_items (o passo 5 recalcula por
+    //       SUM). Apagar a linha inteira tiraria da receita tambem a parte que o
+    //       cliente trocou — e essa parte JA e abatida no returned_value da
+    //       venda de troca. A loja perderia o mesmo valor duas vezes.
+    //   (b) troca_returned_items.original_sale_item_id e ON DELETE SET NULL:
+    //       apagar levaria junto a guarda anti-dupla-devolucao daquela troca.
+    //
+    // A linha encolhe pra parte trocada. Com quantity == returned_quantity o GET
+    // passa a devolver available_quantity = 0 e a tela para de oferecer remover.
+    if (hasPartialReturn) {
+      await client.query(
+        `UPDATE sale_items
+            SET quantity = $1,
+                total_price = $2,
+                discount = ROUND(COALESCE(discount, 0) * $3::numeric, 2)
+          WHERE id = $4`,
+        [alreadyReturned, keptTotal, itemQty > 0 ? alreadyReturned / itemQty : 0, itemId]
+      );
+    } else {
+      await client.query('DELETE FROM sale_items WHERE id = $1', [itemId]);
+    }
 
     // 5. Verifica quantos items restaram
     const remainingRes = await client.query(
@@ -534,7 +595,10 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
     //    - Último item: DELETE (UPDATE amount=0 violaria CHECK amount > 0).
     //      Receita some do financeiro junto com o cancelamento da venda.
     //    - Ainda há itens: UPDATE pra novo total. Mantém a tx de receita ativa.
-    const newTxAmount = parseFloat(tx.amount) - itemTotal;
+    //    Desce so o refundValue: o que saiu do caixa agora. A parte trocada ja
+    //    foi abatida no returned_value da venda de troca — descontar o
+    //    itemTotal cheio tiraria a mesma receita duas vezes.
+    const newTxAmount = parseFloat(tx.amount) - refundValue;
     let txRemoved = false;
 
     if (isLastItem || newTxAmount <= 0) {
@@ -553,7 +617,7 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
     //    inteira foi cancelada e a tx de receita removida; criar mirror aqui
     //    duplicaria a baixa.
     if (!isLastItem) {
-      const refundDesc = 'Devolucao: ' + itemName + ' (qty ' + itemQty + ')';
+      const refundDesc = 'Devolucao: ' + itemName + ' (qty ' + remainingQty + ')';
       await client.query(
         `INSERT INTO transactions (
            company_id, type, status, amount, description, category, due_date,
@@ -565,7 +629,7 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
          )`,
         [
           companyId,
-          itemTotal,
+          refundValue,
           refundDesc,
           'refund-' + saleId + '-' + itemId,
           req.user?.id || null,
@@ -576,7 +640,16 @@ router.delete('/transactions/:tx_id/sale-items/:item_id', asyncHandler(async (re
     await client.query('COMMIT');
     res.json({
       ok: true,
-      removed_item: { id: itemId, name: itemName, quantity: itemQty, refund_amount: itemTotal },
+      removed_item: {
+        id: itemId,
+        name: itemName,
+        // Quantidade que voltou pra prateleira AGORA (nao a vendida).
+        quantity: remainingQty,
+        refund_amount: refundValue,
+        // Quanto desse item ja tinha voltado numa troca anterior. > 0 significa
+        // que a linha encolheu em vez de sumir (ver passo 4).
+        returned_before: alreadyReturned,
+      },
       new_sale_total: newTotal,
       new_tx_amount: txRemoved ? 0 : Math.max(0, newTxAmount),
       tx_removed: txRemoved,
