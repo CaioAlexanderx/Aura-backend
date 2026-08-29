@@ -233,7 +233,7 @@ function listVisibilityWhere(cidParam) {
 // A pagina nasce com UMA pagina de produtos, nao com o catalogo. Antes
 // eram 500 (419 KB na Finesse) pra desenhar 24. O resto chega pela rota
 // /storefront/:slug/catalogo conforme a cliente navega.
-const { POR_PAGINA, EM_ESTOQUE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias } = require('./catalogoPaginado');
+const { POR_PAGINA, EM_ESTOQUE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias, facetasDoCatalogo } = require('./catalogoPaginado');
 const LIMITE_DO_PAYLOAD = POR_PAGINA;
 
 async function contarProdutosDaLoja(cid, exigeFoto) {
@@ -440,6 +440,14 @@ async function buildStorefront(config) {
   try {
     arvoreBarra = await arvoreDeCategorias({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
   } catch (e) { arvoreBarra = []; }
+  // Facetas de tamanho e cor. Vem do banco inteiro, nao da pagina 1: com
+  // paginacao de 24, derivar dos produtos carregados daria um filtro que
+  // muda de opcoes conforme a pessoa navega.
+  let facetas = {};
+  try {
+    facetas = await facetasDoCatalogo({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
+  } catch (e) { facetas = {}; }
+
   if (!arvoreBarra.length) {
     try {
       categoriasComTotal = await contarPorCategoria({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
@@ -546,6 +554,9 @@ async function buildStorefront(config) {
     categorias_barra: categoriasComTotal,
     // [] quando a loja nao tem arvore — o cliente decide qual usar.
     categorias_arvore: arvoreBarra,
+    facetas,
+    // Migration 309. 0 = nao mostra nada no cartao.
+    pix_discount_pct: Number(config.pix_discount_pct) || 0,
     // Migration 306 — politica de troca do rodape. NULL faz o template
     // usar o texto padrao.
     politica_troca: config.politica_troca || null,

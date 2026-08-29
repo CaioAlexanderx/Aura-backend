@@ -340,6 +340,85 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .cat-todas.aberto{border-bottom-style:solid;border-bottom-color:var(--sf-brand);color:var(--sf-ink);}
 
 
+
+/* ── Filtrar por tamanho e cor ────────────────────────────
+   Fica acima da grade, nao na barra de categorias: categoria e por onde a
+   pessoa ENTRA, tamanho e cor sao o refino de quem ja esta olhando.
+
+   Segue a regra da loja — nada preenchido a nao ser a acao principal. A
+   opcao ligada se marca por borda e tinta, nao por fundo cheio. */
+.filtros-wrap{
+  display:flex;flex-wrap:wrap;align-items:center;gap:9px;
+  padding:0 max(20px,calc((100% - 1280px)/2 + 20px));margin-bottom:14px;
+}
+.filtros-wrap[hidden]{display:none;}
+
+.filtro-btn{
+  font-family:${fontSans};font-size:13px;font-weight:700;
+  color:var(--sf-ink);background:none;border:1px solid var(--sf-border-2);
+  border-radius:999px;padding:7px 15px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:7px;
+  transition:border-color 200ms cubic-bezier(.4,0,.2,1);
+}
+.filtro-btn:hover,.filtro-btn.aberto{border-color:var(--sf-brand);}
+/* O numero no botao existe pra quem rolou a pagina: sem ele, a pessoa nao
+   sabe que a grade esta filtrada e acha que a loja tem menos peca.
+   NAO e uma pilula preenchida: a regra da loja reserva preenchimento pra
+   acao principal, e um contador nao e acao. O sinal vem da borda do botao
+   (que fica na cor da loja quando ha filtro) e da tinta do numero. */
+.filtro-n{
+  font-family:${fontMono};font-size:11px;font-variant-numeric:tabular-nums;
+  color:var(--sf-brand-ink);font-weight:700;
+}
+.filtro-btn:has(.filtro-n){border-color:var(--sf-brand);}
+
+.filtro-ficha{
+  font-family:${fontSans};font-size:12.5px;font-weight:600;
+  color:var(--sf-ink-2);background:var(--sf-brand-wash);
+  border:1px solid transparent;border-radius:999px;padding:6px 11px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:6px;
+  transition:color 200ms cubic-bezier(.4,0,.2,1);
+}
+.filtro-ficha:hover{color:var(--sf-ink);}
+.filtro-x{font-size:14px;line-height:1;opacity:.6;}
+.filtro-limpar{
+  font-family:${fontSans};font-size:12.5px;font-weight:600;color:var(--sf-ink-3);
+  background:none;border:0;border-bottom:1px solid var(--sf-border-2);
+  border-radius:0;padding:2px 0;cursor:pointer;margin-left:2px;
+}
+.filtro-limpar:hover{color:var(--sf-ink);}
+
+.filtro-painel{
+  flex-basis:100%;display:flex;flex-wrap:wrap;gap:26px;
+  padding:16px 0 4px;margin-top:4px;border-top:1px solid var(--sf-border);
+}
+.filtro-grupo{display:flex;flex-direction:column;gap:9px;}
+.filtro-tit{
+  font-family:${fontSans};font-size:10.5px;font-weight:700;letter-spacing:1px;
+  text-transform:uppercase;color:var(--sf-ink-3);
+}
+.filtro-ops{display:flex;flex-wrap:wrap;gap:8px;max-width:640px;}
+.filtro-op{
+  font-family:${fontSans};font-size:12.5px;font-weight:600;
+  color:var(--sf-ink-2);background:none;border:1px solid var(--sf-border);
+  border-radius:8px;padding:6px 11px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:7px;
+  transition:border-color 200ms cubic-bezier(.4,0,.2,1),color 200ms cubic-bezier(.4,0,.2,1);
+}
+.filtro-op:hover{border-color:var(--sf-border-2);color:var(--sf-ink);}
+.filtro-op.on{border-color:var(--sf-brand);color:var(--sf-ink);border-width:1.5px;}
+.filtro-op-n{
+  font-family:${fontMono};font-size:10.5px;font-variant-numeric:tabular-nums;
+  color:var(--sf-ink-3);
+}
+/* Bolinha COM o nome ao lado: a bolinha sozinha exclui quem nao distingue
+   tons proximos, e "Vinho" e "Bordo" viram a mesma mancha escura numa fila
+   de amostras. O anel interno garante que branco apareca no fundo claro. */
+.filtro-bola{
+  width:14px;height:14px;border-radius:999px;flex:none;
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.18);
+}
+
 /* ── Segunda linha: o ramo aberto ─────────────────────────
    Ela e visualmente MENOR que a primeira e fica colada nela. A hierarquia
    tem que se ler na forma, nao so no recuo: se as duas linhas tivessem o
@@ -452,6 +531,9 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
    Sobra so a marca de quanto ja esta no carrinho. */
 .card-tag{margin-top:9px;display:inline-flex;align-items:center;font-family:${fontSans};font-size:11.5px;font-weight:700;color:var(--sf-brand-ink);background:var(--sf-brand-wash);border-radius:999px;padding:4px 10px;}
 .product-card{cursor:pointer;}
+/* Verde nao: a loja tem UMA cor, e o Pix nao e uma marca dentro dela.
+   O peso vem do texto, nao de mais uma cor competindo no cartao. */
+.product-pix{font-family:${fontSans};font-size:12px;font-weight:600;color:var(--sf-ink-2);margin-top:2px;}
 .product-parcela{font-family:${fontSans};font-size:11.5px;color:var(--sf-ink-3);margin-top:2px;font-variant-numeric:tabular-nums;}
 .product-body{padding:0;flex:1;display:flex;flex-direction:column;}
 .product-cat{font-family:${fontSans};font-size:11px;color:var(--sf-ink-3);font-weight:600;text-transform:uppercase;letter-spacing:1.2px;margin-bottom:6px;}

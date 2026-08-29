@@ -37,7 +37,8 @@ const {
   fetchVariantesPorProduto, montarProdutoPublico,
   fetchStorefrontCategories, fetchPrimaryCategoryLinks, parseFeaturedIds,
 } = require('../services/storefrontBuilder');
-const { paginaDoCatalogo } = require('../services/catalogoPaginado');
+const { paginaDoCatalogo, facetasDoCatalogo } = require('../services/catalogoPaginado');
+const { normalizarTamanho } = require('../services/tamanhosDaLoja');
 const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
@@ -130,6 +131,53 @@ router.get('/:slug', async (req, res) => {
 // categoria, a busca e a ordenacao vao ao SERVIDOR — com paginacao real,
 // filtrar so o que esta carregado esconderia resultado.
 // ─────────────────────────────────────────────
+
+/**
+ * O rotulo que o cliente manda vira os valores GRAVADOS no banco.
+ *
+ * O filtro mostra "M"; o banco tem "m" e "M". Mostra "Preto"; o banco tem
+ * os hex daquela familia. Traduzir aqui e o que faz o clique encontrar
+ * produto — buscar o rotulo cru nao acharia nada, e o resultado vazio
+ * pareceria "acabou o estoque".
+ */
+function valoresDeTamanho(bruto) {
+  const pedidos = String(bruto || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!pedidos.length) return [];
+  // Cada rotulo pedido cobre as variacoes de caixa que existem no banco.
+  // Gerar as formas em vez de consultar evita uma ida ao banco por
+  // request num filtro que muda a cada clique.
+  const saida = new Set();
+  for (const r of pedidos) {
+    saida.add(r);
+    saida.add(r.toLowerCase());
+    saida.add(r.toUpperCase());
+    if (normalizarTamanho(r) === 'Único') {
+      for (const u of ['u', 'U', 'un', 'UN', 'uni', 'UNI', 'Único', 'unico', 'UNICO', 'Unico']) saida.add(u);
+    }
+  }
+  return [...saida];
+}
+
+/**
+ * A familia de cor pedida ("Preto") vira todos os hex daquela familia.
+ *
+ * Aqui NAO da pra gerar: os hex sao os que a lojista cadastrou, e so o
+ * banco sabe quais existem. A consulta e a mesma das facetas, entao o
+ * conjunto e coerente com o que o filtro ofereceu.
+ */
+async function valoresDeCor(cid, bruto, exigeFoto) {
+  const pedidas = String(bruto || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (!pedidas.length) return [];
+  const facetas = await facetasDoCatalogo({
+    cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto,
+  });
+  const saida = [];
+  for (const f of facetas.cor || []) {
+    if (pedidas.includes(String(f.familia).toLowerCase())) saida.push(...f.valores);
+  }
+  return saida;
+}
+
 router.get('/:slug/catalogo', async (req, res) => {
   try {
     const slug = req.params.slug.toLowerCase().trim();
@@ -152,6 +200,12 @@ router.get('/:slug/catalogo', async (req, res) => {
       // migration 308. A pagina 2 tem que obedecer a MESMA regra da
       // pagina 1, senao a grade cresce ao rolar.
       exigeFoto: cfg.require_product_image === true,
+      // Os rotulos chegam normalizados ("M", "Preto") e viram os valores
+      // GRAVADOS ("m","M" / os hex daquela familia) — senao o filtro
+      // buscaria um texto que nao existe no banco.
+      tamanhos: valoresDeTamanho(req.query.tam),
+      cores: await valoresDeCor(cfg.company_id, req.query.cor,
+                                cfg.require_product_image === true),
     });
 
     // O produto sai na MESMA forma do payload embutido. Sem isto o cartao

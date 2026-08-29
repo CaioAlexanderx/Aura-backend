@@ -88,6 +88,8 @@ function buildStorefrontPage(data, slug) {
     // da pagina 1 — ver contarPorCategoria.
     categorias_barra: data.categorias_barra,
     categorias_arvore: data.categorias_arvore,
+    facetas: data.facetas,
+    pix_discount_pct: data.pix_discount_pct,
   });
 
   const logoInTopbar = logoUrl
