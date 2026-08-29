@@ -136,9 +136,31 @@ async function paginaDoCatalogo({
     ordenacao = `array_position($${params.length}, id::text), ${ordenacao}`;
   }
 
-  if (categoria && String(categoria).trim() && String(categoria).trim() !== 'Todos') {
-    params.push(String(categoria).trim());
-    filtros.push(`category = $${params.length}`);
+  // Categoria: por CAMINHO quando a loja tem arvore, por texto quando nao.
+  //
+  // O texto so consegue casar folha — nenhum produto tem
+  // `category = 'Vestidos'`, porque Vestidos e um no de navegacao. Clicar
+  // no pai traria zero, que e a pior forma de quebrar: silenciosa e
+  // parecida com "acabou o estoque".
+  //
+  // O caminho resolve pai e folha com a mesma consulta: `/vestidos` casa
+  // ele e tudo abaixo; `/vestidos/festa/vestido-midi-festa` casa so a
+  // folha. O prefixo termina em '/' pra que `/vestidos` nao arraste um
+  // futuro `/vestidos-infantil`.
+  const cat = String(categoria == null ? '' : categoria).trim();
+  if (cat && cat !== 'Todos') {
+    if (cat.charAt(0) === '/') {
+      params.push(cat);
+      filtros.push(`EXISTS (
+        SELECT 1 FROM product_category_links l
+          JOIN product_categories c ON c.id = l.category_id
+         WHERE l.product_id = products.id AND l.is_primary
+           AND (c.path = $${params.length} OR left(c.path, length($${params.length}) + 1) = $${params.length} || '/')
+      )`);
+    } else {
+      params.push(cat);
+      filtros.push(`category = $${params.length}`);
+    }
   }
 
   const termos = normalizar(busca).split(/\s+/).filter(Boolean);
@@ -187,6 +209,62 @@ async function paginaDoCatalogo({
  * A contagem vem junto porque "Vestidos 143" ajuda a escolher, e porque
  * categoria com zero produto visivel nao deve aparecer na barra.
  */
+/**
+ * A barra de categorias pela ARVORE, nao pelo texto.
+ *
+ * A barra sempre foi montada de `products.category` — o texto plano. Com
+ * a Finesse a arvore virou real (Vestidos > Festa > Vestido Midi Festa) e
+ * a barra continuava mostrando 12 folhas soltas: a organizacao existia no
+ * banco e nao chegava na cliente.
+ *
+ * Cada no traz o total da PROPRIA SUBARVORE. "Vestidos 71" so significa
+ * alguma coisa se somar Festa e Casual; contar so o que esta pendurado
+ * direto no no daria 0 em todo pai, e a barra diria que a loja esta
+ * vazia.
+ *
+ * Nos com zero produto visivel ficam de fora — categoria que abre numa
+ * grade vazia e pior que categoria que nao existe.
+ *
+ * Devolve [] quando a loja nao tem arvore povoada. Quem chama cai no
+ * comportamento antigo: hoje so 4 das lojas em producao tem vinculo, e
+ * quebrar as outras para organizar uma nao e troca aceitavel.
+ */
+async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
+  const sql = `
+    WITH visiveis AS (
+      SELECT l.category_id
+        FROM products p
+        JOIN product_category_links l
+          ON l.product_id = p.id AND l.is_primary
+       WHERE ${visibilityWhere}
+         AND is_active IS NOT FALSE
+         AND ${EM_ESTOQUE}
+         AND ${filtroDeFoto(exigeFoto)}
+    )
+    SELECT c.id, c.name AS nome, c.slug, c.path, c.depth,
+           pai.slug AS pai_slug,
+           (SELECT COUNT(*)::int FROM visiveis v
+              JOIN product_categories d ON d.id = v.category_id
+             WHERE d.company_id = c.company_id
+               AND (d.id = c.id OR left(d.path, length(c.path) + 1) = c.path || '/')
+           ) AS total
+      FROM product_categories c
+      LEFT JOIN product_categories pai ON pai.id = c.parent_id
+     WHERE c.company_id = $1
+       AND c.type = 'product'
+       AND c.is_visible_storefront IS NOT FALSE
+     ORDER BY c.depth, c.sort_order NULLS LAST, c.name`;
+  try {
+    const { rows } = await bd().query(sql, [cid]);
+    return rows.filter((r) => r.total > 0);
+  } catch (e) {
+    // Base sem a arvore (42P01) ou sem alguma coluna dela (42703): a loja
+    // abre com a barra antiga em vez de nao abrir.
+    if (e.code === '42P01' || e.code === '42703') return [];
+    throw e;
+  }
+}
+
 async function contarPorCategoria({ cid, visibilityWhere, exigeFoto }) {
   const { rows } = await bd().query(
     `SELECT category AS nome, COUNT(*)::int AS total
@@ -232,5 +310,6 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 
 module.exports = {
   POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, filtroDeFoto,
+  arvoreDeCategorias,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,
 };

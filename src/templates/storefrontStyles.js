@@ -339,6 +339,49 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .cat-todas{border-bottom-style:dotted;border-bottom-color:var(--sf-border-2);color:var(--sf-ink-2);}
 .cat-todas.aberto{border-bottom-style:solid;border-bottom-color:var(--sf-brand);color:var(--sf-ink);}
 
+
+/* ── Segunda linha: o ramo aberto ─────────────────────────
+   Ela e visualmente MENOR que a primeira e fica colada nela. A hierarquia
+   tem que se ler na forma, nao so no recuo: se as duas linhas tivessem o
+   mesmo peso, seriam duas barras concorrentes em vez de uma barra e seu
+   desdobramento. */
+.cats-sub{
+  padding:0 max(20px,calc((100% - 1280px)/2 + 20px)) 11px;
+  display:flex;gap:16px;flex-wrap:wrap;align-items:center;
+  position:sticky;top:calc(64px + 45px);z-index:49;
+  background:var(--sf-bg);border-bottom:1px solid var(--sf-border);
+}
+.cats-sub[hidden]{display:none;}
+.cat-sub{
+  font-family:${fontSans};font-size:12.5px;font-weight:600;
+  color:var(--sf-ink-2);background:none;border:0;
+  border-bottom:2px solid transparent;border-radius:0;
+  padding:5px 2px;cursor:pointer;white-space:nowrap;
+  transition:color 200ms cubic-bezier(.4,0,.2,1),border-color 200ms cubic-bezier(.4,0,.2,1);
+}
+.cat-sub:hover{color:var(--sf-ink);}
+.cat-sub.active{color:var(--sf-ink);border-bottom-color:var(--sf-brand);}
+.cat-sub .cat-num{font-family:${fontMono};font-size:10.5px;font-variant-numeric:tabular-nums;opacity:.6;margin-left:6px;}
+
+/* ── Painel como mapa da loja ─────────────────────────────
+   Uma coluna por ramo. O topo do ramo e clicavel: quem quer "tudo em
+   Vestidos" nao deveria ter que escolher uma subcategoria pra chegar la. */
+.cats-painel-ramos{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
+  gap:22px 26px;align-items:start;
+}
+.cats-ramo{display:flex;flex-direction:column;gap:2px;}
+.cats-ramo-topo{
+  font-family:${fontSans};font-size:13.5px;font-weight:800;
+  color:var(--sf-ink);background:none;border:0;border-radius:0;
+  padding:4px 0 7px;margin-bottom:4px;text-align:left;cursor:pointer;
+  border-bottom:1px solid var(--sf-border);
+  display:flex;align-items:baseline;justify-content:space-between;gap:8px;
+}
+.cats-ramo-topo:hover{color:var(--sf-brand-ink);}
+.cats-ramo-topo.sel{color:var(--sf-brand-ink);border-bottom-color:var(--sf-brand);}
+.cats-ramo .cats-item{padding:5px 0;}
+
 .cats-painel{position:sticky;top:112px;z-index:60;padding:0 max(20px,calc((100% - 1280px)/2 + 20px));}
 .cats-painel-inner{background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:0 0 16px 16px;border-top:0;box-shadow:var(--sf-shadow);padding:18px 20px 20px;}
 .cats-painel-topo{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}

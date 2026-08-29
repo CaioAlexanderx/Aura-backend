@@ -133,12 +133,22 @@ describe('barra de categorias', () => {
     expect(s).toContain('__S.categorias_barra');
   });
 
+  /**
+   * Executa o preludio do cliente (ARVORE + TEM_ARVORE + CATEGORIAS).
+   *
+   * ATUALIZADO em 29/08: CATEGORIAS deixou de ser um bloco isolado — ela
+   * agora depende da arvore. Extrair so o `var CATEGORIAS` passou a jogar
+   * ReferenceError, e o teste estava CERTO em quebrar: a premissa dele
+   * mudou.
+   */
+  function categoriasDoCliente(estado) {
+    const s = comCategorias([]);
+    const preludio = s.slice(s.indexOf('var ARVORE ='), s.indexOf('/** Filhas diretas'));
+    return new Function('__S', preludio + '\nreturn CATEGORIAS;')(estado);
+  }
+
   test('categoria sem produto visivel nao entra', () => {
-    const filtro = new Function(
-      '__S',
-      comCategorias([]).match(/var CATEGORIAS = [\s\S]*?\n\}\);/)[0] + '\nreturn CATEGORIAS;',
-    );
-    const saida = filtro({
+    const saida = categoriasDoCliente({
       categorias_barra: [
         { nome: 'Vestidos', total: 143 },
         { nome: 'Fantasma', total: 0 },
@@ -147,6 +157,31 @@ describe('barra de categorias', () => {
       ],
     });
     expect(saida.map((c) => c.nome)).toEqual(['Vestidos']);
+  });
+
+  test('sem arvore, o caminho e o proprio nome', () => {
+    // E o que o filtro por TEXTO ja esperava. Uma loja sem arvore nao
+    // pode parar de funcionar porque outra loja ganhou hierarquia.
+    const saida = categoriasDoCliente({ categorias_barra: [{ nome: 'Bolsa', total: 4 }] });
+    expect(saida[0].caminho).toBe('Bolsa');
+  });
+
+  test('com arvore, a barra mostra so o TOPO', () => {
+    // O ganho concreto da Finesse: 12 folhas soltas ("Vestido Midi
+    // Festa", "Vestido longo de Festa", "Vestido Festa"...) viram uma
+    // entrada de topo, e as filhas descem pra segunda linha.
+    const saida = categoriasDoCliente({
+      categorias_barra: [{ nome: 'IGNORAR', total: 99 }],
+      categorias_arvore: [
+        { nome: 'Vestidos', slug: 'vestidos', path: '/vestidos', depth: 0, pai_slug: null, total: 71 },
+        { nome: 'Festa', slug: 'festa', path: '/vestidos/festa', depth: 1, pai_slug: 'vestidos', total: 55 },
+        { nome: 'Casual', slug: 'casual', path: '/vestidos/casual', depth: 1, pai_slug: 'vestidos', total: 16 },
+        { nome: 'Bolsa', slug: 'bolsa', path: '/bolsa', depth: 0, pai_slug: null, total: 4 },
+      ],
+    });
+    expect(saida.map((c) => c.nome)).toEqual(['Vestidos', 'Bolsa']);
+    // E o caminho, nao o nome, e o que vai pro filtro.
+    expect(saida[0].caminho).toBe('/vestidos');
   });
 
   test('quantas cabem e MEDIDO, nao estimado', () => {

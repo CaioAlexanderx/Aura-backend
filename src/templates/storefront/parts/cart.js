@@ -80,7 +80,12 @@ function filterCat(cat,el){
   // "el" e null quando o clique veio do painel "Todas as categorias" —
   // ali nao ha chip pra marcar, e renderCategorias() repinta em seguida.
   if(el) el.classList.add('active');
-  document.getElementById('catTitle').textContent=cat==='Todos'?'Todos os produtos':cat;
+  // currentCat virou CAMINHO quando a loja tem arvore. O titulo mostra o
+  // NOME — "/vestidos/festa" no cabecalho da grade seria endereco, nao
+  // categoria.
+  var rotulo=cat;
+  if(typeof nomeDoCaminho==='function'){ rotulo=nomeDoCaminho(cat)||cat; }
+  document.getElementById('catTitle').textContent=cat==='Todos'?'Todos os produtos':rotulo;
   // Trocar de categoria refaz a busca NO SERVIDOR e volta pra pagina 1.
   if(typeof renderCategorias==='function') renderCategorias();
   recarregarDoInicio();
