@@ -39,7 +39,27 @@
 --     lembrar. O BEFORE INSERT cobre todos, inclusive import e seed, e
 --     o `RETURNING *` que o pdv.js ja faz devolve o numero de graca.
 --     Se o INSERT vier com sale_number explicito, a trigger respeita
---     (caminho de migracao de dados).
+--     (caminho de migracao de dados) MAS empurra o contador junto --
+--     ver (f).
+--
+-- (f) NUMERO EXPLICITO TAMBEM EMPURRA O CONTADOR. Respeitar o numero do
+--     import sem mexer no contador plantava uma bomba-relogio: importar
+--     a venda #500 numa empresa com contador em 10 deixa o contador em
+--     10, e MESES DEPOIS a numeracao automatica chega em 500, colide com
+--     uq_sales_company_sale_number e a venda do BALCAO falha -- longe do
+--     import, sem nenhuma pista da causa. O GREATEST do seed so roda na
+--     hora da migration; nao protege runtime. Por isso o ramo explicito
+--     faz UPSERT com GREATEST: o contador so anda pra frente.
+--
+--     CONSEQUENCIA DE LOCK, documentada de proposito: os dois ramos
+--     travam a linha do contador da empresa ate o COMMIT. Uma transacao
+--     que grave vendas de DUAS empresas pode fazer deadlock com outra
+--     que toque as mesmas duas na ordem inversa (reproduzido em
+--     Postgres 18; o banco detecta e aborta uma das duas -- nao ha
+--     corrupcao). Hoje isso e inalcancavel: os 5 caminhos de INSERT
+--     gravam exatamente UMA venda de UMA empresa por transacao. Quem
+--     for escrever import em lote multi-empresa: commit por empresa, ou
+--     ordene os company_id antes de inserir.
 --
 -- (e) BACKFILL cronologico por empresa: as vendas que ja existem
 --     recebem numero por ordem de created_at, entao o historico fica
@@ -132,10 +152,27 @@ COMMENT ON FUNCTION next_sale_number(UUID) IS
 CREATE OR REPLACE FUNCTION assign_sale_number()
 RETURNS TRIGGER AS $$
 BEGIN
-  -- INSERT com numero explicito (migracao/import) e respeitado.
-  IF NEW.sale_number IS NULL AND NEW.company_id IS NOT NULL THEN
-    NEW.sale_number := next_sale_number(NEW.company_id);
+  IF NEW.company_id IS NULL THEN
+    RETURN NEW;
   END IF;
+
+  IF NEW.sale_number IS NULL THEN
+    NEW.sale_number := next_sale_number(NEW.company_id);
+  ELSE
+    -- INSERT com numero explicito (migracao/import) e respeitado, MAS o
+    -- contador precisa acompanhar. Sem isto: importar a venda #500 numa
+    -- empresa cujo contador esta em 10 deixa o contador em 10, e la na
+    -- frente a numeracao automatica chega em 500 e colide com o indice
+    -- unico — a venda do balcao falha, muito depois do import, sem
+    -- nenhuma pista do que causou. O UPSERT abaixo so empurra pra frente
+    -- (GREATEST), nunca pra tras.
+    INSERT INTO company_sale_counters AS c (company_id, last_number)
+         VALUES (NEW.company_id, NEW.sale_number)
+    ON CONFLICT (company_id) DO UPDATE
+         SET last_number = GREATEST(c.last_number, EXCLUDED.last_number),
+             updated_at  = NOW();
+  END IF;
+
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

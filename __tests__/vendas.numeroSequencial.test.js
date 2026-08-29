@@ -66,6 +66,55 @@ describe('a alocacao do numero — o que impede duas vendas com o mesmo numero',
     expect(migration).toMatch(/IF NEW\.sale_number IS NULL/);
   });
 
+  it('numero explicito EMPURRA o contador -- a bomba-relogio do import', () => {
+    // Respeitar o numero do import sem mexer no contador plantava uma
+    // falha com meses de atraso: importa a venda #500 numa empresa com
+    // contador em 10, o contador fica em 10, e la na frente a numeracao
+    // automatica chega em 500, colide com o indice unico e a venda do
+    // BALCAO falha -- longe do import, sem pista nenhuma da causa.
+    //
+    // O GREATEST do seed so roda na hora da migration: nao protege
+    // runtime. Tem que ser no ramo explicito da trigger.
+    const fn = migration.slice(migration.indexOf('FUNCTION assign_sale_number'));
+    expect(fn).toMatch(/ELSE[\s\S]{0,900}INSERT INTO company_sale_counters/);
+    expect(fn).toMatch(/GREATEST\(c\.last_number, EXCLUDED\.last_number\)/);
+  });
+
+  it('numero explicito ABAIXO do contador nao faz o contador retroceder', () => {
+    // GREATEST nos dois sentidos: importar a venda #7 numa empresa com
+    // contador em 500 nao pode devolver o contador pra 7 -- a proxima
+    // venda automatica sairia #8 e colidiria com a #8 que ja existe.
+    const fn = migration.slice(migration.indexOf('FUNCTION assign_sale_number'));
+    expect(fn).toMatch(/GREATEST\(/);
+    expect(fn).not.toMatch(/SET last_number = EXCLUDED\.last_number\s*,/);
+  });
+
+  it('o ramo explicito nao chama next_sale_number (nao queima numero)', () => {
+    // Chamar os dois gastaria um numero do contador a cada linha
+    // importada -- o import de 1.000 vendas antigas empurraria a
+    // numeracao do balcao 1.000 pra frente sem motivo.
+    const fn = migration.slice(
+      migration.indexOf('FUNCTION assign_sale_number'),
+      migration.indexOf('DROP TRIGGER IF EXISTS trg_sales_assign_number')
+    );
+    expect((fn.match(/next_sale_number\(/g) || []).length).toBe(1);
+  });
+
+  it('company_id nulo sai da trigger sem tocar o contador', () => {
+    const fn = migration.slice(migration.indexOf('FUNCTION assign_sale_number'));
+    expect(fn).toMatch(/IF NEW\.company_id IS NULL THEN[\s]*RETURN NEW;/);
+  });
+
+  it('o custo de lock do contador esta documentado', () => {
+    // Os dois ramos travam a linha do contador ate o COMMIT. Duas
+    // empresas na mesma transacao podem deadlockar com outra transacao
+    // na ordem inversa (reproduzido em PG18). Hoje e inalcancavel --
+    // todo caminho grava UMA venda de UMA empresa por transacao -- mas
+    // quem escrever import em lote multi-empresa precisa saber.
+    expect(migration).toMatch(/deadlock/i);
+    expect(migration).toMatch(/commit por empresa, ou[\s\S]{0,20}ordene os company_id/);
+  });
+
   it('o backfill numera o historico em ordem cronologica, por empresa', () => {
     // Numerar por ordem de insercao fisica embaralharia a linha do tempo
     // que a lojista ja conhece.
