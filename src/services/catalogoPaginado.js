@@ -287,11 +287,17 @@ async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
   const sql = `
     WITH visiveis AS (
       SELECT l.category_id
-        FROM products p
+        -- SEM ALIAS. visibilityWhere, EM_ESTOQUE e COM_FOTO sao fragmentos
+        -- prontos que dizem products-ponto; um alias quebra os tres de uma
+        -- vez com 42P01 — o mesmo codigo de "tabela nao existe", que o
+        -- catch abaixo tolera. Foi assim que esta consulta ficou dias
+        -- devolvendo vazio em producao.
+        FROM products
         JOIN product_category_links l
-          ON l.product_id = p.id AND l.is_primary
+          ON l.product_id = products.id AND l.is_primary
        WHERE ${visibilityWhere}
-         AND is_active IS NOT FALSE
+         -- Qualificado: nao ha conflito hoje, mas o proximo JOIN traz.
+         AND products.is_active IS NOT FALSE
          AND ${EM_ESTOQUE}
          AND ${filtroDeFoto(exigeFoto)}
     )
@@ -314,7 +320,13 @@ async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
   } catch (e) {
     // Base sem a arvore (42P01) ou sem alguma coluna dela (42703): a loja
     // abre com a barra antiga em vez de nao abrir.
-    if (e.code === '42P01' || e.code === '42703') return [];
+    //
+    // GRITA. Este catch ja escondeu um alias errado nesta mesma consulta,
+    // que da 42P01 igualzinho. Ver o catch de facetasDoCatalogo.
+    if (e.code === '42P01' || e.code === '42703') {
+      console.error('[arvore-categorias] consulta falhou (' + e.code + '), barra cai na lista plana:', e.message);
+      return [];
+    }
     throw e;
   }
 }
