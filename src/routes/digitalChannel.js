@@ -160,6 +160,7 @@ router.get('/', async (req, res) => {
         politica_troca_padrao: POLITICA_PADRAO,
         require_product_image: false,
         pix_discount_pct: 0,
+        always_open: false,
       });
     }
     const config = rows[0];
@@ -199,6 +200,9 @@ router.get('/', async (req, res) => {
       politica_troca: config.politica_troca ?? null,
       require_product_image: config.require_product_image === true,
       pix_discount_pct: Number(config.pix_discount_pct) || 0,
+      // Base sem a migration 310 devolve undefined; o painel recebe
+      // false e desenha a grade de horarios normal.
+      always_open: config.always_open === true,
       politica_troca_padrao: POLITICA_PADRAO,
       storefront_url: config.slug ? `${STOREFRONT_BASE}/${config.slug}` : null,
       domain_pricing: { '1year': 80, '2years': 152 },
@@ -370,6 +374,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     politica_troca,
     require_product_image,
     pix_discount_pct,
+    always_open,
     // Fase 5
     pickup_address, pickup_eta_text, delivery_eta_text,
     origin_zip, delivery_pricing_mode, delivery_distance_tiers,
@@ -804,6 +809,29 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       } catch (e) {
         if (e.code === '42703') {
           console.error('[canal-foto] coluna require_product_image inexistente — skip:', e.message);
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    // Migration 310 — "aberta 24 horas". UPDATE separado pelo mesmo motivo
+    // dos outros. E uma coluna propria, e nao sete dias de 00:00 as 23:59,
+    // porque 24h e um ESTADO da loja: dito uma vez, sem intervalo pra
+    // interpretar errado. Ver o comentario em computeOpenState.
+    if (always_open !== undefined) {
+      try {
+        const { rows: updated } = await db.query(
+          `UPDATE digital_channel_config
+             SET always_open = $1, updated_at = NOW()
+           WHERE company_id = $2
+           RETURNING *`,
+          [always_open === true, cid]
+        );
+        if (updated.length) savedConfig = updated[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          console.error('[canal-24h] coluna always_open inexistente — skip:', e.message);
         } else {
           throw e;
         }
