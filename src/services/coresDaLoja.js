@@ -100,6 +100,117 @@ const api = new Function(
   FONTE + '\nreturn { CORES_PT: CORES_PT, nomeDaCor: nomeDaCor, rotuloDaCor: rotuloDaCor, corDoValor: corDoValor, normalizarHex: normalizarHex };',
 )();
 
+
+// ── Famílias, para o FILTRO ──────────────────────────────
+//
+// São duas necessidades diferentes do mesmo dado, e tratá-las como uma só
+// produziu um filtro ruim em produção: 30 entradas, seis delas mostrando
+// hex cru porque nenhum tom da tabela chegou perto — inclusive vermelho
+// puro (#FF0000) e verde (#22C55E). E catorze famílias com UMA peça.
+//
+//   Nomear um swatch na página do produto pede PRECISÃO: "Marsala" diz
+//   mais que "Vermelho", e ali há espaço para um nome só.
+//
+//   Agrupar um filtro pede o CONTRÁRIO. Quem procura vestido não filtra
+//   por marsala — filtra por vermelho, e espera achar o marsala dentro.
+//
+// Por isso o mapa do filtro é curto: treze baldes que uma pessoa usa para
+// procurar roupa. E sem teto de distância — no filtro, um balde
+// aproximado é sempre melhor que um código hexadecimal na tela.
+const FAMILIAS = {
+  'preto':    '#111111',
+  'cinza':    '#9AA0A6',
+  'branco':   '#FFFFFF',
+  'bege':     '#E4D5BE',
+  'marrom':   '#6B4A2F',
+  'vermelho': '#D32F2F',
+  'vinho':    '#6E1F2B',
+  'rosa':     '#E8879B',
+  'laranja':  '#EF6C1A',
+  'amarelo':  '#F2C230',
+  'verde':    '#2E7D4F',
+  'azul':     '#1F5FBF',
+  'roxo':     '#6D28D9',
+};
+
+/**
+ * O balde de uma cor, por MATIZ e SATURAÇÃO — não por distância no RGB.
+ *
+ * A primeira versão usava distância euclidiana com pesos perceptuais, a
+ * mesma de `nomeDaCor`. Ela funciona para achar o tom mais parecido; não
+ * funciona para dizer a que cor uma pessoa chama isso. Medido nas cores
+ * reais da Finesse: `#6B7280` — um cinza-azulado — caía em "verde",
+ * porque o peso 4 no canal verde aproximava mais dele que do cinza.
+ *
+ * Matiz e saturação resolvem direto, e na ordem que o olho usa: primeiro
+ * "isso tem cor?" (cinzas saem antes de qualquer coisa), depois "que cor
+ * é?" (a faixa de matiz), e só então o quão clara ou escura.
+ */
+function familiaDaCor(hex) {
+  const h = api.normalizarHex(hex);
+  if (!h) return null;
+  const r = parseInt(h.slice(1, 3), 16) / 255;
+  const g = parseInt(h.slice(3, 5), 16) / 255;
+  const b = parseInt(h.slice(5, 7), 16) / 255;
+
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const luz = (max + min) / 2;
+  const delta = max - min;
+  const sat = delta === 0 ? 0 : delta / (1 - Math.abs(2 * luz - 1));
+
+  // ── Sem cor: preto, branco, cinza ────────────────────────
+  // Vem PRIMEIRO. Um cinza levemente esverdeado é cinza para quem compra,
+  // e classificá-lo por matiz é como o #6B7280 virou verde.
+  if (luz <= 0.12) return 'preto';
+  // Quase-preto COM um tingimento fraco tambem e preto pra quem compra:
+  // #1F2937 (chumbo azulado) ia pra 'azul' pelo matiz. O corte de
+  // saturacao preserva o azul-marinho de verdade (#082F6D, sat 0.86).
+  if (luz < 0.22 && sat < 0.40) return 'preto';
+  // Branco usa DELTA, nao saturacao: perto do branco a saturacao HSL
+  // infla (off white #F3EFE7 da 0.33 com 4% de diferenca entre canais) e
+  // qualquer teto razoavel deixaria off white de fora.
+  if (luz >= 0.90 && delta <= 0.08) return 'branco';
+  if (sat < 0.14) return luz < 0.35 ? 'preto' : 'cinza';
+
+  let matiz = 0;
+  if (delta !== 0) {
+    if (max === r) matiz = ((g - b) / delta) % 6;
+    else if (max === g) matiz = (b - r) / delta + 2;
+    else matiz = (r - g) / delta + 4;
+  }
+  matiz = (matiz * 60 + 360) % 360;
+
+  // ── Bege: claro, pouco saturado, na faixa quente ─────────
+  // Nude, creme, cru e areia moram aqui. Sem esta regra eles cairiam em
+  // "laranja" ou "amarelo", que é o que ninguém chamaria uma peça nude.
+  if (matiz >= 15 && matiz <= 60 && luz >= 0.72 && sat <= 0.82) return 'bege';
+
+  // ── Marrom: laranja escuro ───────────────────────────────
+  // Caramelo, tabaco, ferrugem e chocolate são todos laranja com pouca
+  // luz. Um balde "marrom" existe porque a pessoa procura marrom.
+  if (matiz >= 12 && matiz <= 45 && luz < 0.48) return 'marrom';
+
+  // ── Vinho: vermelho escuro ───────────────────────────────
+  // Bordô e marsala entram aqui. Vinho é categoria própria em moda: quem
+  // procura vestido vinho não aceita vermelho.
+  if ((matiz >= 330 || matiz <= 12) && luz < 0.40) return 'vinho';
+
+  if (matiz < 12 || matiz >= 345) return 'vermelho';
+  // A fronteira em 40 e nao 45: dourado (#C8A24A, 42 graus) e amarelo
+  // pra quem compra, e laranja puro (#FFA500) fica em 39.
+  if (matiz < 40)  return 'laranja';
+  // 65 e nao 70: verde militar (#4B5320) fica em 69 graus, e oliva e
+  // verde pra quem compra. Amarelo puro esta em 60.
+  if (matiz < 65)  return 'amarelo';
+  // 175 e nao 165: verde agua (#7FD1C1) fica em 168 graus. Ciano puro
+  // (#06B6D4, 189) continua azul.
+  if (matiz < 175) return 'verde';
+  if (matiz < 255) return 'azul';
+  if (matiz < 290) return 'roxo';
+  return 'rosa';
+}
+
 /**
  * Agrupa valores de cor em famílias, somando o que cada uma tem.
  *
@@ -113,10 +224,9 @@ function agruparPorFamilia(linhas) {
   for (const l of linhas || []) {
     const hex = api.normalizarHex(l.value);
     if (!hex) continue;
-    const familia = api.nomeDaCor(hex);
-    // Sem nome, a cor vira família dela mesma: some do agrupamento mas
-    // não some da loja. Esconder produto por causa de um tom exótico
-    // seria pior que uma entrada a mais no filtro.
+    const familia = familiaDaCor(hex);
+    // familiaDaCor sempre acha um balde; o `|| hex` fica como rede para
+    // um valor que nem é cor.
     const chave = familia || hex;
     const total = Number(l.total) || 0;
     const atual = mapa.get(chave);
@@ -128,7 +238,7 @@ function agruparPorFamilia(linhas) {
     } else {
       mapa.set(chave, {
         familia: chave,
-        rotulo: familia ? api.rotuloDaCor(hex) : hex,
+        rotulo: familia ? familia.charAt(0).toUpperCase() + familia.slice(1) : hex,
         hex,
         total,
         pico: total,
@@ -143,6 +253,8 @@ function agruparPorFamilia(linhas) {
 
 module.exports = {
   FONTE,
+  FAMILIAS,
+  familiaDaCor,
   ...api,
   agruparPorFamilia,
 };
