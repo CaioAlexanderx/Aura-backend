@@ -152,23 +152,40 @@ function getNowInSaoPaulo() {
   return { hour, minute, dayIndex };
 }
 
+/**
+ * "HH:MM" em minutos desde a meia-noite.
+ *
+ * ACEITA 24:00, que nao e um horario mas um LIMITE: e como se escreve
+ * "ate o fim do dia". A comparacao de aberto e `agora < fechamento`, entao
+ * uma loja 24h fechada as 23:59 apareceria FECHADA no ultimo minuto de
+ * cada dia. Com 24:00 o intervalo cobre o dia inteiro.
+ *
+ * So 24:00 — 24:30 continua invalido, porque nao quer dizer nada.
+ */
 function parseHHMM(str) {
   if (!str || typeof str !== 'string') return null;
   const m = /^(\d{1,2}):(\d{2})$/.exec(str.trim());
   if (!m) return null;
   const h = parseInt(m[1], 10);
   const mn = parseInt(m[2], 10);
+  if (h === 24) return mn === 0 ? 24 * 60 : null;
   if (h < 0 || h > 23 || mn < 0 || mn > 59) return null;
   return h * 60 + mn;
 }
 
-function computeOpenState(businessHours) {
+/**
+ * @param agora opcional, so pra teste: { hour, minute, dayIndex }. Sem
+ *   ele usa o relogio de Sao Paulo. Existe porque a unica forma de
+ *   verificar "aberta as 23:59" era recortar a funcao com regex do
+ *   arquivo — e o recorte trazia junto os `require` do modulo.
+ */
+function computeOpenState(businessHours, agora) {
   const hours = parseBusinessHours(businessHours);
   if (!hours || !Object.keys(hours).length) {
     return { is_open_now: true, next_open_text: '' };
   }
 
-  const { hour, minute, dayIndex } = getNowInSaoPaulo();
+  const { hour, minute, dayIndex } = agora || getNowInSaoPaulo();
   const nowMinutes = hour * 60 + minute;
 
   const todayKey = WEEK_KEYS[dayIndex];
@@ -581,6 +598,9 @@ async function buildStorefront(config) {
 }
 
 module.exports = {
+  // parseHHMM so e exportado pra teste: ver __tests__/horario24h.test.js.
+  // computeOpenState ja saia daqui embaixo.
+  parseHHMM,
   buildStorefront, parseFeaturedIds, parseHiddenIds, computeOpenState,
   // Exportados em 19/08/2026 (S1) para o storefront do Studio montar a
   // MESMA arvore de categorias que a loja comum, em vez de uma segunda
