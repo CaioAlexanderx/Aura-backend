@@ -8,6 +8,8 @@
 // Onda 2.1: /me/dashboard — KPIs somados + breakdown.
 // Onda 2.2: /me/transactions — listagem + drill-down via ?company_id=.
 // Onda 2.3: /me/customers — lista UNICA owner-scoped.
+// 29/08/2026: /me/customers aceita ?sort=recent (mesmo contrato do
+//   per-company /companies/:id/customers) e expoe last_purchase_at.
 // Onda 2.4: /me/sales — listagem agregada com stats e breakdown.
 // Onda 2.6 (atual): /me/sales/analytics — analytics agregadas
 //   (summary/series/top_products/top_employees/by_payment) com
@@ -572,6 +574,13 @@ router.get('/customers', async (req, res) => {
       params.push(`%${search}%`);
     }
 
+    // Mesmo contrato do per-company: default alfabetico, ?sort=recent
+    // ordena por atendimento mais recente. Whitelist fechada (concatena
+    // no SQL). Ordenar no banco, nao no app: o app so recebe uma pagina.
+    const orderBy = String(req.query.sort || '').toLowerCase() === 'recent'
+      ? 'ORDER BY last_purchase_at DESC NULLS LAST, name ASC'
+      : 'ORDER BY name ASC';
+
     const countRes = await db.query(
       `SELECT COUNT(*) AS total FROM customers ${where}`,
       params
@@ -582,7 +591,7 @@ router.get('/customers', async (req, res) => {
               total_purchases, total_spent, last_purchase_at, first_purchase_at,
               notes, is_active, created_at, company_id
          FROM customers ${where}
-        ORDER BY name ASC
+        ${orderBy}
         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset]
     );
@@ -599,7 +608,9 @@ router.get('/customers', async (req, res) => {
       visits: parseInt(r.total_purchases) || 0,
       visit_count: parseInt(r.total_purchases) || 0,
       last_purchase: r.last_purchase_at,
+      last_purchase_at: r.last_purchase_at,
       first_visit: r.first_purchase_at,
+      first_purchase_at: r.first_purchase_at,
       notes: r.notes || '',
       is_active: r.is_active !== false,
       rating: null,

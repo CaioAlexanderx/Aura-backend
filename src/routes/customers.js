@@ -26,6 +26,16 @@
 // "date/time field value out of range" quando o FE enviava
 // valores como "1984-95-97" (conversao mal-feita de dd/mm/yyyy).
 //
+// 29/08/2026 (QA de usabilidade): GET / aceita ?sort=recent. O seletor de
+// cliente do PDV abria em ordem alfabetica (Abbey, Abdel, Adamo...), a
+// ordenacao menos util possivel com o cliente na frente do balcao. O
+// default continua sendo o alfabetico -- a tela de Clientes e uma agenda,
+// onde procurar pelo nome faz sentido; o balcao e que precisa de recencia.
+//
+// Ordenar no BANCO, nao no app: o app so recebe a primeira pagina, entao
+// ordenar o que chegou colocaria no topo o cliente mais recente ENTRE OS
+// PRIMEIROS ALFABETICAMENTE, nao o mais recente de verdade.
+//
 // Justificativa em src/utils/ownerScope.js.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
@@ -76,6 +86,28 @@ function parseBirthDate(raw) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
+
+/**
+ * ORDER BY da listagem de clientes.
+ *
+ * 'recent' = atendidos por ultimo primeiro. NULLS LAST porque quem nunca
+ * comprou nao pode ocupar o topo do balcao; o desempate alfabetico deixa
+ * o bloco dos "sem compra" navegavel. last_purchase_at e confiavel desde
+ * a migration 311 (antes era NOW() fixo, que mentia em cancelamento e em
+ * venda retroativa).
+ *
+ * Whitelist fechada: o valor entra concatenado no SQL.
+ */
+function buildOrderBy(sort, alias) {
+  const a = alias ? alias + '.' : '';
+  switch (String(sort || '').toLowerCase()) {
+    case 'recent':
+      return `ORDER BY ${a}last_purchase_at DESC NULLS LAST, ${a}name ASC`;
+    default:
+      return `ORDER BY ${a}name ASC`;
+  }
+}
+
 // GET / -- list customers (owner-scoped: todas as empresas do owner)
 router.get('/', async (req, res) => {
   const companyId = req.params.id;
@@ -83,6 +115,7 @@ router.get('/', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || planLimit, planLimit);
   const offset = parseInt(req.query.offset) || 0;
   const search = req.query.search;
+  const orderBy = buildOrderBy(req.query.sort, 'c');
 
   try {
     // MULTICNPJ Onda 2.3: expande pra todas as empresas do owner
@@ -103,21 +136,34 @@ router.get('/', async (req, res) => {
     // JOIN companies pra trazer nome da loja onde foi registrado (info pra UI)
     // LEFT JOIN customer_credit_balances pra trazer saldo do crediario.
     // Match por (customer_id, company_id) pra respeitar o escopo da view.
-    const dataRes = await db.query(
-      `SELECT c.id, c.name, c.cpf_cnpj, c.email, c.phone, c.birth_date, c.instagram_handle,
-              c.total_purchases, c.total_spent, c.last_purchase_at, c.first_purchase_at,
-              c.notes, c.is_active, c.created_at, c.company_id,
-              comp.trade_name AS company_trade, comp.legal_name AS company_legal,
-              COALESCE(cb.balance, 0) AS credit_balance
-       FROM customers c
-       JOIN companies comp ON comp.id = c.company_id
-       LEFT JOIN customer_credit_balances cb
-         ON cb.customer_id = c.id AND cb.company_id = c.company_id
+    // 29/08/2026: o saldo do crediario e ENFEITE nesta tela; a lista de
+    // clientes nao pode morrer junto com ele. A view
+    // customer_credit_balances some em deploy parcial / banco restaurado
+    // sem as migrations de crediario, e ai um 42P01 virava 500 -> a tela
+    // inteira em branco com "Total de clientes: 0" (armadilha 10 do
+    // CLAUDE.md). Sem a view, lista sem o saldo.
+    const selectCustomers = (comCredito) => `
+      SELECT c.id, c.name, c.cpf_cnpj, c.email, c.phone, c.birth_date, c.instagram_handle,
+             c.total_purchases, c.total_spent, c.last_purchase_at, c.first_purchase_at,
+             c.notes, c.is_active, c.created_at, c.company_id,
+             comp.trade_name AS company_trade, comp.legal_name AS company_legal,
+             ${comCredito ? 'COALESCE(cb.balance, 0)' : '0'} AS credit_balance
+        FROM customers c
+        JOIN companies comp ON comp.id = c.company_id
+        ${comCredito ? `LEFT JOIN customer_credit_balances cb
+          ON cb.customer_id = c.id AND cb.company_id = c.company_id` : ''}
        ${where}
-       ORDER BY c.name ASC
-       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, limit, offset]
-    );
+       ${orderBy}
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+
+    let dataRes;
+    try {
+      dataRes = await db.query(selectCustomers(true), [...params, limit, offset]);
+    } catch (creditErr) {
+      if (creditErr.code !== '42P01' && creditErr.code !== '42703') throw creditErr;
+      console.warn('[customers] customer_credit_balances indisponivel, listando sem saldo:', creditErr.code);
+      dataRes = await db.query(selectCustomers(false), [...params, limit, offset]);
+    }
 
     const customers = dataRes.rows.map(r => ({
       id: r.id, name: r.name || '', email: r.email || '', phone: r.phone || '',
@@ -126,7 +172,11 @@ router.get('/', async (req, res) => {
       birth_date: r.birth_date, instagram: r.instagram_handle || '', instagram_handle: r.instagram_handle || '',
       total_spent: parseFloat(r.total_spent) || 0, totalSpent: parseFloat(r.total_spent) || 0,
       visits: parseInt(r.total_purchases) || 0, visit_count: parseInt(r.total_purchases) || 0,
-      last_purchase: r.last_purchase_at, first_visit: r.first_purchase_at,
+      last_purchase: r.last_purchase_at,
+      // Alias explicito: o nome da coluna, pro app nao ter que adivinhar
+      // que 'last_purchase' e um timestamp. Aditivo -- last_purchase fica.
+      last_purchase_at: r.last_purchase_at,
+      first_visit: r.first_purchase_at, first_purchase_at: r.first_purchase_at,
       notes: r.notes || '', is_active: r.is_active !== false, rating: null, created_at: r.created_at,
       // Multi-CNPJ: empresa onde foi cadastrado (FE mostra badge se owner tem 2+ lojas)
       company_id: r.company_id,
