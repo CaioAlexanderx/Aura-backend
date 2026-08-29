@@ -87,6 +87,7 @@ function buildStorefrontPage(data, slug) {
     // A barra de categorias precisa da lista do BANCO, nao dos produtos
     // da pagina 1 — ver contarPorCategoria.
     categorias_barra: data.categorias_barra,
+    categorias_arvore: data.categorias_arvore,
   });
 
   const logoInTopbar = logoUrl

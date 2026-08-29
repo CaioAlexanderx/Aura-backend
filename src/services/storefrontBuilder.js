@@ -233,7 +233,7 @@ function listVisibilityWhere(cidParam) {
 // A pagina nasce com UMA pagina de produtos, nao com o catalogo. Antes
 // eram 500 (419 KB na Finesse) pra desenhar 24. O resto chega pela rota
 // /storefront/:slug/catalogo conforme a cliente navega.
-const { POR_PAGINA, EM_ESTOQUE, filtroDeFoto, contarPorCategoria } = require('./catalogoPaginado');
+const { POR_PAGINA, EM_ESTOQUE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias } = require('./catalogoPaginado');
 const LIMITE_DO_PAYLOAD = POR_PAGINA;
 
 async function contarProdutosDaLoja(cid, exigeFoto) {
@@ -432,10 +432,19 @@ async function buildStorefront(config) {
   // Barra de categorias: vem do BANCO, nao dos produtos carregados. Ver
   // contarPorCategoria — com paginacao de 24, derivar da pagina mostrava
   // so as categorias que caiam nela.
+  // A barra prefere a ARVORE. So cai no texto plano quando a loja nao
+  // tem arvore povoada — hoje 4 das lojas em producao tem, e as outras
+  // nao podem parar de funcionar por causa disso.
   let categoriasComTotal = [];
+  let arvoreBarra = [];
   try {
-    categoriasComTotal = await contarPorCategoria({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
-  } catch (e) { categoriasComTotal = []; }
+    arvoreBarra = await arvoreDeCategorias({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
+  } catch (e) { arvoreBarra = []; }
+  if (!arvoreBarra.length) {
+    try {
+      categoriasComTotal = await contarPorCategoria({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
+    } catch (e) { categoriasComTotal = []; }
+  }
 
   // D3: árvore + vínculo primário. Só categorias visíveis na vitrine
   // entram, e o produto só recebe categoria que esteja nesse conjunto --
@@ -535,6 +544,8 @@ async function buildStorefront(config) {
     payload_limit: LIMITE_DO_PAYLOAD,
     // [{ nome, total }] — ver contarPorCategoria.
     categorias_barra: categoriasComTotal,
+    // [] quando a loja nao tem arvore — o cliente decide qual usar.
+    categorias_arvore: arvoreBarra,
     // Migration 306 — politica de troca do rodape. NULL faz o template
     // usar o texto padrao.
     politica_troca: config.politica_troca || null,
