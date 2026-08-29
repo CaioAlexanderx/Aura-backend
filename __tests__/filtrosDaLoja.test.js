@@ -333,3 +333,74 @@ describe('a consulta das facetas não pode repetir os dois bugs', () => {
     expect(builderSrc).toContain("'[storefront] facetas indisponiveis:'");
   });
 });
+
+// ============================================================
+// O agrupamento de cor, refeito depois de ver o resultado em produção.
+//
+// A primeira versão usava a MESMA distância que nomeia o swatch da página
+// do produto. Funcionou como código e falhou como filtro: 30 famílias,
+// seis mostrando hex cru porque nada chegou perto — inclusive vermelho
+// puro (#FF0000) — e catorze famílias com uma peça só.
+//
+// São duas necessidades diferentes do mesmo dado:
+//   nomear um swatch pede PRECISÃO — "Marsala" diz mais que "Vermelho";
+//   agrupar um filtro pede o CONTRÁRIO — quem procura vestido filtra por
+//   vermelho e espera achar o marsala dentro.
+//
+// E a distância no RGB é a ferramenta errada para a segunda: `#6B7280`,
+// um cinza-azulado, caía em "verde" porque o peso perceptual no canal
+// verde o aproximava mais dele que do cinza. Matiz e saturação resolvem
+// na ordem que o olho usa — primeiro "isso tem cor?", depois "qual?".
+// ============================================================
+describe('as famílias de cor, contra as cores REAIS da Finesse', () => {
+  const { familiaDaCor, FAMILIAS } = require('../src/services/coresDaLoja');
+
+  // Amostra dos 121 hex com estoque e foto, lidos do banco em 29/08.
+  const REAIS = {
+    '#000000': 'preto', '#0D0D0D': 'preto', '#1F2937': 'preto',
+    '#6B7280': 'cinza', '#C0C0C0': 'cinza', '#E2E3E4': 'cinza',
+    '#FFFFFF': 'branco', '#F0EBDF': 'branco',
+    '#F5DEB3': 'bege', '#E0E094': 'bege',
+    '#92400E': 'marrom', '#8B4513': 'marrom', '#A06513': 'marrom', '#683708': 'marrom',
+    '#FF0000': 'vermelho', '#D20F0F': 'vermelho', '#EF4444': 'vermelho',
+    '#800000': 'vinho', '#800020': 'vinho', '#6B0000': 'vinho',
+    '#EC4899': 'rosa', '#FF6EC7': 'rosa', '#CE1270': 'rosa',
+    '#FFA500': 'laranja', '#F97316': 'laranja',
+    '#FFFF00': 'amarelo', '#EAB308': 'amarelo', '#DAA520': 'amarelo',
+    '#22C55E': 'verde', '#137149': 'verde', '#196110': 'verde',
+    '#0000FF': 'azul', '#0161FD': 'azul', '#06B6D4': 'azul', '#ADD8E6': 'azul',
+    '#A020F0': 'roxo', '#8B5CF6': 'roxo', '#32047C': 'roxo',
+  };
+
+  test.each(Object.entries(REAIS))('%s é %s', (hex, esperado) => {
+    expect(familiaDaCor(hex)).toBe(esperado);
+  });
+
+  test('cinza-azulado é CINZA, não verde', () => {
+    // O caso concreto que derrubou a distância no RGB.
+    expect(familiaDaCor('#6B7280')).toBe('cinza');
+  });
+
+  test('nenhuma cor fica sem balde', () => {
+    // No filtro, um balde aproximado é sempre melhor que hex cru na tela.
+    // Antes, seis das trinta famílias eram um código hexadecimal.
+    for (const hex of Object.keys(REAIS)) {
+      expect(familiaDaCor(hex)).not.toBeNull();
+      expect(familiaDaCor(hex).startsWith('#')).toBe(false);
+    }
+  });
+
+  test('são treze baldes, não quarenta e sete tons', () => {
+    // O mapa fino continua existindo — ele nomeia o swatch da página do
+    // produto. Este é outro, e curto de propósito.
+    expect(Object.keys(FAMILIAS).length).toBeLessThanOrEqual(14);
+  });
+
+  test('a precisão do swatch NÃO foi perdida', () => {
+    // Os dois mapas convivem: o filtro agrupa, a página do produto nomeia.
+    const { rotuloDaCor } = require('../src/services/coresDaLoja');
+    expect(rotuloDaCor('#6E1F2B')).toBe('Vinho');
+    expect(rotuloDaCor('#8A3A44')).toBe('Marsala');
+    expect(familiaDaCor('#8A3A44')).toBe('vinho');
+  });
+});
