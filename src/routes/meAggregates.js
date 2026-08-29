@@ -39,6 +39,11 @@
 //   top_products e top_employees mantidos sem filtro: itens reais
 //   vendidos e seller real continuam contando.
 //
+// 29/08/2026 (numero da venda): /me/sales expoe sale_number (migration 310),
+//   igual ao per-company /companies/:id/sales. Em modo consolidado o numero
+//   e da EMPRESA da venda -- duas empresas podem ter uma venda #12 cada, e a
+//   linha ja traz company_id/company_name pra desambiguar.
+//
 // 29/05/2026 (type na listagem): /me/sales expoe COALESCE(s.type,'sale')
 //   AS type pra UI consolidada marcar "Troca" (igual ao per-company
 //   /companies/:id/sales). A troca SEMPRE apareceu na listagem (sem
@@ -49,6 +54,7 @@ const router = require('express').Router();
 const { requireAuth } = require('../middleware/auth');
 const db = require('../config/database');
 const { resolvePeriod } = require('../services/salesAnalytics');
+const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 
 router.use(requireAuth);
 
@@ -690,8 +696,10 @@ router.get('/sales', async (req, res) => {
     );
     const total = countRes.rows[0]?.total || 0;
 
+    const withSaleNumber = await hasSaleNumberColumn(db);
     const listRes = await db.query(
-      `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status,
+      `SELECT s.id, ${saleNumberSelect(withSaleNumber)},
+              s.total_amount, s.discount_amount, s.payment_method, s.status,
               COALESCE(s.type, 'sale') AS type,
               s.cancelled_at, s.created_at,
               s.customer_id, c.name AS customer_name,
@@ -773,6 +781,8 @@ router.get('/sales', async (req, res) => {
       const c = companyMap.get(r.company_id);
       return {
         id: r.id,
+        // 310: numero sequencial da venda na empresa dela (null em base antiga).
+        sale_number: r.sale_number == null ? null : parseInt(r.sale_number, 10),
         total_amount: parseFloat(r.total_amount),
         discount_amount: parseFloat(r.discount_amount || 0),
         payment_method: r.payment_method,
