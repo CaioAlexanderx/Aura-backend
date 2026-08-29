@@ -337,12 +337,15 @@ async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto }) {
   const sql = `
     SELECT av.attribute_name AS atributo,
            av.value          AS valor,
-           COUNT(DISTINCT p.id)::int AS total
-      FROM products p
-      JOIN product_variants v        ON v.product_id = p.id AND v.is_active = true AND v.stock_qty > 0
+           COUNT(DISTINCT products.id)::int AS total
+      FROM products
+      JOIN product_variants v        ON v.product_id = products.id AND v.is_active = true AND v.stock_qty > 0
       JOIN product_variant_values av ON av.variant_id = v.id
      WHERE ${visibilityWhere}
-       AND is_active IS NOT FALSE
+       -- QUALIFICADO: product_variants tambem tem is_active, e sem o
+       -- prefixo o Postgres devolve 42702 (ambiguo). Nas outras consultas
+       -- daqui nao ha JOIN, entao is_active cru bastava.
+       AND products.is_active IS NOT FALSE
        AND ${filtroDeFoto(exigeFoto)}
        AND btrim(COALESCE(av.value, '')) <> ''
      GROUP BY av.attribute_name, av.value`;
@@ -369,7 +372,17 @@ async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto }) {
   } catch (e) {
     // Base sem as tabelas de variante: a loja abre sem filtro em vez de
     // nao abrir.
-    if (e.code === '42P01' || e.code === '42703') return {};
+    //
+    // MAS GRITA NO LOG. Este catch ja engoliu um bug meu: a consulta
+    // usava `FROM products p` enquanto visibilityWhere e o filtro de foto
+    // referenciam `products.`, o que da 42P01 — o MESMO codigo de "tabela
+    // nao existe". O filtro voltou vazio em producao sem nenhum sinal.
+    // Um catch que tolera uma classe de erro acaba tolerando um bug dessa
+    // classe; o log e o que separa os dois.
+    if (e.code === '42P01' || e.code === '42703') {
+      console.error('[facetas] consulta falhou (' + e.code + '), loja abre sem filtro:', e.message);
+      return {};
+    }
     throw e;
   }
 }

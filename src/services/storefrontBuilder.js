@@ -446,7 +446,12 @@ async function buildStorefront(config) {
   let facetas = {};
   try {
     facetas = await facetasDoCatalogo({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
-  } catch (e) { facetas = {}; }
+  } catch (e) {
+    // Ver o catch de facetasDoCatalogo: silencio aqui ja escondeu dois
+    // bugs de SQL em producao.
+    console.error('[storefront] facetas indisponiveis:', e.message);
+    facetas = {};
+  }
 
   if (!arvoreBarra.length) {
     try {

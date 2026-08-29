@@ -13,6 +13,7 @@ const { rotuloDaCor, agruparPorFamilia, FONTE } = require('../src/services/cores
 
 const paginado = fs.readFileSync(path.join(__dirname, '../src/services/catalogoPaginado.js'), 'utf8');
 const rota = fs.readFileSync(path.join(__dirname, '../src/routes/storefront.js'), 'utf8');
+const builderSrc = fs.readFileSync(path.join(__dirname, '../src/services/storefrontBuilder.js'), 'utf8');
 const clienteFiltros = require('../src/templates/storefront/parts/filtros');
 
 // Os 17 valores REAIS de tamanho da Finesse, lidos do banco em 29/08.
@@ -148,8 +149,10 @@ describe('a consulta: tamanho e cor na MESMA variante', () => {
     // Um vestido com sete grades de cor conta uma vez em cada cor, nunca
     // sete vezes — o número ao lado do filtro tem que casar com o que a
     // grade mostra depois.
+    // Conta `products.id`, não `p.id`: o alias era justamente o bug que
+    // fez a consulta inteira falhar em produção.
     const i = paginado.indexOf('async function facetasDoCatalogo');
-    expect(paginado.slice(i, i + 1600)).toContain('COUNT(DISTINCT p.id)');
+    expect(paginado.slice(i, i + 1600)).toContain('COUNT(DISTINCT products.id)');
   });
 });
 
@@ -265,5 +268,68 @@ describe('ordenar por mais vendidos', () => {
     // primeiro — a loja abriria com o que ninguém comprou.
     const i = paginado.indexOf('mais_vendidos:');
     expect(paginado.slice(i, i + 700)).toContain('DESC NULLS LAST');
+  });
+});
+
+// ============================================================
+// Os dois bugs de SQL que chegaram em produção, e o silêncio que os
+// deixou chegar.
+//
+// A consulta das facetas subiu quebrada de duas formas ao mesmo tempo:
+//
+//   1. `FROM products p` com alias, enquanto `visibilityWhere` e o filtro
+//      de foto referenciam `products.` — Postgres devolve 42P01, o MESMO
+//      código de "tabela não existe".
+//   2. `is_active` sem prefixo, ambíguo porque product_variants também
+//      tem a coluna — 42702.
+//
+// O PRIMEIRO FOI ENGOLIDO PELO PRÓPRIO CATCH que existe para tolerar base
+// sem as tabelas de variante. Um catch que tolera uma classe de erro
+// acaba tolerando um bug dessa classe. O filtro voltou vazio em produção
+// sem nenhum sinal — e o segundo catch, no builder, engoliu o resto.
+//
+// Estes testes verificam a FORMA do SQL, que é o que dá para verificar
+// sem banco. O que realmente pegou os bugs foi rodar a consulta contra o
+// banco real; o que impede a volta é isto aqui mais o log.
+// ============================================================
+describe('a consulta das facetas não pode repetir os dois bugs', () => {
+  // Só o SQL, sem os comentários em volta. O comentário que EXPLICA o bug
+  // contém a string "FROM products p" e reprovava o próprio teste — o
+  // mesmo tropeço do teste do `!important`.
+  const bloco = paginado.slice(
+    paginado.indexOf('async function facetasDoCatalogo'),
+    paginado.indexOf('async function contarPorCategoria'),
+  );
+  const sql = bloco.slice(bloco.indexOf('const sql = `'), bloco.indexOf('`;', bloco.indexOf('const sql = `')));
+
+  test('products NÃO leva alias', () => {
+    // visibilityWhere e COM_FOTO são fragmentos prontos que dizem
+    // `products.` — dar um alias quebra os dois de uma vez.
+    expect(sql).toMatch(/FROM products\s*[\r\n]/);
+    // Um alias seria "FROM products p" — palavra logo depois, na MESMA
+    // linha. Casar `\s` genérico pegaria a quebra de linha e reprovaria
+    // o código correto.
+    expect(sql).not.toMatch(/FROM products[ \t]+\w/);
+  });
+
+  test('is_active vem qualificado', () => {
+    // product_variants também tem is_active. Sem prefixo: 42702.
+    expect(sql).toContain('products.is_active IS NOT FALSE');
+    expect(sql).not.toMatch(/\n\s+AND is_active/);
+  });
+
+  test('o COUNT usa a mesma referência', () => {
+    expect(sql).toContain('COUNT(DISTINCT products.id)');
+  });
+
+  test('o catch grita antes de devolver vazio', () => {
+    // É a diferença entre "esta base não tem variantes" e "eu escrevi o
+    // SQL errado". Sem o log, os dois parecem iguais em produção.
+    expect(bloco).toContain('console.error');
+    expect(bloco).toContain("'[facetas] consulta falhou");
+  });
+
+  test('o catch do builder também', () => {
+    expect(builderSrc).toContain("'[storefront] facetas indisponiveis:'");
   });
 });
