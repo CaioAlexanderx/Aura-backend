@@ -41,6 +41,12 @@
 //   fica SOMENTE no sistema de trocas (pdv.js sales-for-troca /
 //   sales-by-product-barcode), que ja era group-aware.
 //
+// 29/08/2026 — sale_number (migration 310): a lista e o detalhe expoem o
+//   numero sequencial da venda por empresa, do lado do id. O UUID continua
+//   sendo a chave (nenhum campo foi renomeado ou removido); o sale_number e
+//   o que a operadora le em voz alta. Vem NULL enquanto a migration nao
+//   rodou — a probe de coluna evita 42703 nesse intervalo.
+//
 // 24/06/2026 — stats NaN-safe: um único numeric 'NaN' (ex.: unit_price de um
 //   returned_item vindo de payload invalido) envenenava o SUM e a receita por
 //   empresa virava NaN -> JSON null -> crash/zero na tela de Vendas. Agora o
@@ -54,6 +60,7 @@ const pool = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const creditLedger = require('../services/creditLedger');
+const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 
 // Lancamento financeiro da venda, pra UI abrir "Editar lancamento".
 //
@@ -155,8 +162,11 @@ router.get('/', asyncHandler(async (req, res) => {
   // 02/06/2026: lista expoe net_amount/returned_value pra troca (lista mostra liquido).
   // net = total_amount (novos) - SUM(troca_returned_items) quando type='troca'.
   // 24/06/2026: NULLIF(...,'NaN') no subselect — um numeric 'NaN' nao polui o returned_value.
+  const withSaleNumber = await hasSaleNumberColumn(pool);
+
   const listQuery =
-    'SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.status, ' +
+    'SELECT s.id, ' + saleNumberSelect(withSaleNumber) + ', ' +
+    '       s.total_amount, s.discount_amount, s.payment_method, s.status, ' +
     "       COALESCE(s.type, 'sale') AS type, s.exchange_of_sale_id, " +
     '       s.cancelled_at, s.created_at, ' +
     '       s.customer_id, c.name AS customer_name, ' +
@@ -208,6 +218,8 @@ router.get('/', asyncHandler(async (req, res) => {
       const isTroca = type === 'troca';
       return {
         id: r.id,
+        // 310: numero legivel da venda por empresa. null em base antiga.
+        sale_number: r.sale_number == null ? null : parseInt(r.sale_number, 10),
         total_amount: newValue,
         discount_amount: parseFloat(r.discount_amount || 0) || 0,
         payment_method: r.payment_method,
@@ -356,6 +368,7 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
   res.json({
     sale: {
       id: sale.id,
+      sale_number: sale.sale_number == null ? null : parseInt(sale.sale_number, 10),
       total_amount: parseFloat(sale.total_amount) || 0,
       discount_amount: parseFloat(sale.discount_amount || 0) || 0,
       payment_method: sale.payment_method,

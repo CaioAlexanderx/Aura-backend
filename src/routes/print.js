@@ -37,6 +37,18 @@ function esc(s) {
     .replace(/'/g, '&#39;');
 }
 
+// 29/08/2026 (migration 310): o cupom passa a imprimir o numero sequencial da
+// venda -- o MESMO numero que a tela de sucesso do PDV mostra e que a
+// operadora fala em voz alta. Os ultimos 8 do UUID ficam como fallback pras
+// vendas anteriores ao backfill (e pro intervalo entre deploy e migration):
+// melhor um codigo velho do que um cupom sem identificacao.
+function saleLabel(sale) {
+  if (sale && sale.sale_number != null && sale.sale_number !== '') {
+    return String(sale.sale_number);
+  }
+  return String(sale && sale.id ? sale.id : '').slice(-8).toUpperCase();
+}
+
 function receiptHTML({ company, sale, items, payments, options = {} }) {
   const { autoprint = false, width80 = true } = options;
   const date = new Date(sale.created_at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
@@ -114,7 +126,7 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
   <div class="center bold">CUPOM NAO FISCAL</div>
   <div class="divider"></div>
   <div>Data: ${date}</div>
-  <div class="sale-id">Venda: #${sale.id.slice(-8).toUpperCase()}</div>
+  <div class="sale-id">Venda: #${saleLabel(sale)}</div>
   ${sale.seller_name ? `<div>Vendedor: ${sale.seller_name}</div>` : ''}
   ${sale.customer_name ? `<div>Cliente: ${sale.customer_name}</div>` : ''}
   <div class="divider"></div>

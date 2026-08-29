@@ -43,6 +43,10 @@
 //   - O saldo e DERIVADO do total calculado no servidor (total - sinal), entao
 //     `sinal + saldo = total` por construcao: nao e split, e forma de pagamento
 //     propria. splitIsBalanced (app) nao se aplica.
+// 29/08/2026 (numero da venda): GET /sales expoe s.sale_number (migration
+//   310). POST /sale e GET /sale/:saleId ja usam RETURNING * / SELECT s.*,
+//   entao recebem o campo sem mudanca de codigo. Nenhum campo foi renomeado:
+//   `id` (uuid) continua sendo a chave que o app usa nas rotas.
 // 04/08/2026 (fix syntax error json_build_object): sales-for-troca e
 //   sales-by-product-barcode tinham virgula faltando entre
 //   'original_sale_item_id',si.id e 'total_price',si.total_price (patch
@@ -55,6 +59,7 @@ const db          = require('../config/database');
 const trocaV2     = require('../services/trocaV2');
 const { createCreditSale, cancelCreditSale } = require('../services/creditLedger');
 const { checkCouponOwner } = require('../services/couponPolicy');
+const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -842,8 +847,10 @@ router.get('/sales', async (req, res) => {
     vals.push(product_barcode); i++;
   }
   try {
+    const withSaleNumber = await hasSaleNumberColumn(db);
     const { rows } = await db.query(
-      `SELECT s.id, s.total_amount, s.discount_amount, s.payment_method, s.coupon_code, s.status,
+      `SELECT s.id, ${saleNumberSelect(withSaleNumber)}, s.total_amount, s.discount_amount,
+              s.payment_method, s.coupon_code, s.status,
               s.seller_name, s.created_at,
               u.full_name AS user_seller_name, c.name AS customer_name, c.cpf_cnpj,
               e.name AS employee_name, COUNT(si.id) AS items_count
