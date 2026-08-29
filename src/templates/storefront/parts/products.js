@@ -57,6 +57,9 @@ function irParaPagina(n){
   ];
   if(currentCat&&currentCat!=='Todos') q.push('cat='+encodeURIComponent(currentCat));
   if(String(searchTerm||'').trim()) q.push('q='+encodeURIComponent(searchTerm.trim()));
+  // Tamanho e cor vao na MESMA requisicao: filtrar no cliente esconderia
+  // resultado que esta nas outras paginas.
+  if(typeof paramsDeFiltro==='function') q=q.concat(paramsDeFiltro());
 
   fetch(API_BASE+'/api/v1/storefront/'+encodeURIComponent(SLUG)+'/catalogo?'+q.join('&'))
     .then(function(r){ return r.json(); })
@@ -129,6 +132,7 @@ function renderProducts(){
     return;
   }
   renderPaginacao();
+  if(typeof renderFiltros==='function') renderFiltros();
   grid.innerHTML=visiveis.map(function(p){
     var qty=getProductCartQty(p.id);
     var hasVar=productHasVariants(p);
@@ -150,8 +154,17 @@ function renderProducts(){
     // "3x de R$ 53,30" e uma frase diferente de "R$ 159,90" pra quem
     // esta decidindo. So sai quando a lojista declarou o teto.
     var parcH=PARCELAS_TXT(p.price);
+    // "ou R$ 208,99 no Pix" — a conta que a cliente faria, feita antes de
+    // ela decidir. Diferente do parcelamento, que responde a pergunta de
+    // quem NAO tem o valor a vista. So sai quando a lojista declarou o
+    // desconto (migration 309); 0 nao mostra nada.
+    var pixH='';
+    var pixPct=Number(__S.pix_discount_pct)||0;
+    if(pixPct>0 && p.price!=null){
+      pixH='<div class="product-pix">ou '+fmt(p.price*(1-pixPct/100))+' no Pix</div>';
+    }
     var priceH=(SETTINGS.show_prices!==false&&p.price!=null)
-      ?'<div class="product-price">'+fmt(p.price)+'</div>'+(parcH?'<div class="product-parcela">'+esc(parcH)+'</div>':'')
+      ?'<div class="product-price">'+fmt(p.price)+'</div>'+pixH+(parcH?'<div class="product-parcela">'+esc(parcH)+'</div>':'')
       :'';
     // SEM botao no cartao. O cartao inteiro leva pra pagina do produto,
     // que e onde a decisao acontece — la tem foto grande, cor, tamanho,

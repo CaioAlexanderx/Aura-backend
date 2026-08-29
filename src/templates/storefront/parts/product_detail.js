@@ -19,63 +19,16 @@
 'use strict';
 
 module.exports = `
-// ── Cor por NOME ─────────────────────────────────────────
+// ── Cor ──────────────────────────────────────────────────
 //
-// O swatch antigo so aparecia se o valor fosse hex. Lojista nao digita
-// "#000000": ela digita "Preto", "Azul marinho", "Off white". Sem este
-// mapa, cor virava chip de texto e a pessoa tinha que ler cada opcao em
-// vez de bater o olho.
-var CORES_PT = {
-  'preto':'#111111','branco':'#FFFFFF','off white':'#F3EFE7','offwhite':'#F3EFE7',
-  'cru':'#EFE7D8','bege':'#E4D5BE','nude':'#E3C4AE','marrom':'#6B4A2F',
-  'caramelo':'#A9682F','camel':'#B8895A','cinza':'#9AA0A6','chumbo':'#4A4F55',
-  'prata':'#C9CCD1','dourado':'#C8A24A','vermelho':'#D32F2F','vinho':'#6E1F2B',
-  'marsala':'#8A3A44','bordo':'#5C1A26','bordô':'#5C1A26','rosa':'#E8879B',
-  'rosa claro':'#F3C0CB','pink':'#E0398B','magenta':'#C2185B','coral':'#F0765B',
-  'laranja':'#EF6C1A','amarelo':'#F2C230','mostarda':'#C9A227','verde':'#2E7D4F',
-  'verde militar':'#4B5320','verde agua':'#7FD1C1','oliva':'#6B7A3A','menta':'#A8DEC8',
-  'azul':'#1F5FBF','azul marinho':'#1B2A4A','marinho':'#1B2A4A','azul claro':'#8FC1E3',
-  'jeans':'#4A6D8C','turquesa':'#22A6A6','roxo':'#6D28D9','lilas':'#B79CE0',
-  'lilás':'#B79CE0','violeta':'#7C3AED','transparente':'#EDEDED',
-  'ciano':'#06B6D4','azul bebe':'#A8D5F2','celeste':'#7EC8E3','salmao':'#FA8072',
-  'terracota':'#B5533C','grafite':'#3A3F44','creme':'#F5EBDC','tabaco':'#6F4E37',
-  'petroleo':'#0F4C5C','uva':'#5B2C6F','ferrugem':'#B7410E'
-};
-
-function corDoValor(val){
-  var s=String(val==null?'':val).trim();
-  if(/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(s)) return s;
-  var chave=s.toLowerCase()
-    .normalize('NFD')
-    .split('').filter(function(c){var k=c.charCodeAt(0);return k<0x300||k>0x36f;}).join('');
-  return CORES_PT[chave] || null;
-}
-
-/**
- * Nome legivel de um hex, pelo tom mais proximo do mapa.
- *
- * A Finesse grava cor como "#EC4899". Mostrar isso embaixo do circulo e
- * mostrar codigo, nao cor — e nem serve pra quem usa leitor de tela. O
- * mais proximo do mapa da um nome de verdade ("Rosa"), e a distancia
- * maxima evita batizar um tom exotico com o nome errado.
- */
-function nomeDaCor(hex){
-  var h=String(hex||'').trim();
-  if(h.length===4) h='#'+h[1]+h[1]+h[2]+h[2]+h[3]+h[3];
-  if(!/^#[0-9A-Fa-f]{6}$/.test(h)) return null;
-  var r=parseInt(h.slice(1,3),16), g=parseInt(h.slice(3,5),16), b=parseInt(h.slice(5,7),16);
-  var melhor=null, menor=Infinity;
-  for(var nome in CORES_PT){
-    var c=CORES_PT[nome];
-    var cr=parseInt(c.slice(1,3),16), cg=parseInt(c.slice(3,5),16), cb=parseInt(c.slice(5,7),16);
-    // Distancia com peso perceptual: o olho enxerga mais verde que azul.
-    var d=Math.sqrt(2*(r-cr)*(r-cr) + 4*(g-cg)*(g-cg) + 3*(b-cb)*(b-cb));
-    if(d<menor){ menor=d; melhor=nome; }
-  }
-  // Longe demais de tudo: melhor nao dar nome nenhum do que dar o errado.
-  if(menor>110) return null;
-  return melhor.charAt(0).toUpperCase()+melhor.slice(1);
-}
+// CORES_PT, corDoValor e nomeDaCor MORAVAM AQUI. Sairam em 29/08 para
+// services/coresDaLoja.js, porque o SERVIDOR passou a precisar da mesma
+// nomeacao pra agrupar as 151 cores da Finesse nas familias do filtro.
+// Duas copias divergiriam, e cor com nome errado de um lado so e o tipo
+// de bug que ninguem nota ate a cliente reclamar.
+//
+// O modulo e serializado pro navegador ANTES deste arquivo (ver
+// storefront/index.js), entao as tres funcoes ja existem aqui.
 
 /** O atributo e de cor? (decide entre circulo e chip de texto) */
 function atributoDeCor(nome){

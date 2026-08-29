@@ -260,6 +260,11 @@ ${heroLegacy}
 <div class="cats-painel" id="catsPainel" hidden></div>
 
 <section class="products-section" id="productsAnchor">
+  <!-- Filtrar por tamanho e cor. Fica acima do cabecalho da grade, e
+       nao na barra de categorias: categoria e por onde a pessoa ENTRA,
+       tamanho e cor sao o refino de quem ja esta olhando. -->
+  <div class="filtros-wrap" id="filtrosWrap" hidden></div>
+
   <div class="products-header">
     <h2 id="catTitle">Todos os produtos</h2>
     <span class="products-count" id="prodCount"></span>
@@ -271,6 +276,7 @@ ${heroLegacy}
       <select id="sortSelect" onchange="setOrdem(this.value)">
         <option value="destaque">Destaque</option>
         <option value="novidades">Novidades</option>
+        <option value="mais_vendidos">Mais vendidos</option>
         <option value="preco_asc">Menor preco</option>
         <option value="preco_desc">Maior preco</option>
         <option value="nome">Nome (A-Z)</option>

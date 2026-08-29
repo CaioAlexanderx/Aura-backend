@@ -20,6 +20,9 @@
 // precisam ser testaveis sem banco e sem ambiente.
 function bd() { return require('../config/database'); }
 
+const { agruparPorFamilia } = require('./coresDaLoja');
+const { agruparTamanhos } = require('./tamanhosDaLoja');
+
 /** Quantos produtos por página. */
 const POR_PAGINA = 24;
 
@@ -85,6 +88,21 @@ const ORDENS = {
   // destaques; sem ele, o mais recente na frente.
   destaque: 'created_at DESC',
   novidades: 'created_at DESC',
+  // "Mais vendidos" nao e uma coluna: e uma subconsulta em sale_items.
+  // A janela de 90 dias existe porque campeao de venda de dois anos atras
+  // nao e o que a loja quer empurrar hoje — e porque sem recorte a ordem
+  // congela e a vitrine nunca muda.
+  //
+  // NULLS LAST importa: produto nunca vendido tem SUM null, e sem isso o
+  // Postgres o colocaria PRIMEIRO num ORDER BY DESC.
+  mais_vendidos: `(
+    SELECT COALESCE(SUM(si.quantity), 0)
+      FROM sale_items si
+      JOIN sales s ON s.id = si.sale_id
+     WHERE si.product_id = products.id
+       AND COALESCE(s.status, 'completed') <> 'cancelled'
+       AND s.created_at >= NOW() - INTERVAL '90 days'
+  ) DESC NULLS LAST, created_at DESC`,
   preco_asc: 'price ASC NULLS LAST',
   preco_desc: 'price DESC NULLS LAST',
   nome: 'name ASC',
@@ -115,6 +133,9 @@ async function paginaDoCatalogo({
   // migration 308 — a loja pode exigir foto. Chega de fora, como o
   // visibilityWhere, porque quem le a config e a rota.
   exigeFoto,
+  // Filtros de atributo: arrays dos valores GRAVADOS (nao dos rotulos).
+  // Quem traduz "M" para ['m','M'] e a rota, com agruparTamanhos.
+  tamanhos, cores,
 }) {
   const off = Math.max(0, parseInt(offset, 10) || 0);
   const lim = Math.min(LIMITE_MAXIMO, Math.max(1, parseInt(limit, 10) || POR_PAGINA));
@@ -161,6 +182,39 @@ async function paginaDoCatalogo({
       params.push(cat);
       filtros.push(`category = $${params.length}`);
     }
+  }
+
+  // ── Tamanho e cor ──────────────────────────────────────
+  //
+  // A regra que nao e obvia: os dois tem que casar na MESMA variante.
+  // Duas condicoes separadas trariam o vestido que existe em "P azul" e
+  // "G preto" quando a pessoa pede "P preto" — combinacao que a loja nao
+  // tem. Por isso um unico EXISTS com as duas condicoes dentro.
+  //
+  // E so variante COM SALDO: o filtro promete uma peca comprável.
+  const listaTam = Array.isArray(tamanhos) ? tamanhos.filter(Boolean) : [];
+  const listaCor = Array.isArray(cores) ? cores.filter(Boolean) : [];
+  if (listaTam.length || listaCor.length) {
+    const dentro = [];
+    if (listaTam.length) {
+      params.push(listaTam);
+      dentro.push(`EXISTS (SELECT 1 FROM product_variant_values t
+                            WHERE t.variant_id = v.id
+                              AND lower(t.attribute_name) IN ('tamanho','tamanhos')
+                              AND t.value = ANY($${params.length}))`);
+    }
+    if (listaCor.length) {
+      params.push(listaCor);
+      dentro.push(`EXISTS (SELECT 1 FROM product_variant_values c
+                            WHERE c.variant_id = v.id
+                              AND lower(c.attribute_name) IN ('cor','cores')
+                              AND c.value = ANY($${params.length}))`);
+    }
+    filtros.push(`EXISTS (
+      SELECT 1 FROM product_variants v
+       WHERE v.product_id = products.id AND v.is_active = true AND v.stock_qty > 0
+         AND ${dentro.join(' AND ')}
+    )`);
   }
 
   const termos = normalizar(busca).split(/\s+/).filter(Boolean);
@@ -265,6 +319,61 @@ async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
   }
 }
 
+/**
+ * As facetas de tamanho e cor, com a contagem de cada valor.
+ *
+ * A loja so filtrava por categoria. Quem entra procurando "vestido preto
+ * tamanho M" precisava abrir peca por peca pra descobrir — e a Finesse ja
+ * tem o dado: Cor em 81 das 112 pecas visiveis, Tamanho em 64.
+ *
+ * A CONTAGEM E DE PRODUTO, nao de variante. Um vestido com sete grades de
+ * cor conta UMA vez em cada cor, nunca sete vezes em nenhuma — o numero
+ * ao lado do filtro tem que casar com o que a grade mostra depois.
+ *
+ * So entra variante COM SALDO: filtro que leva a peca esgotada e pior que
+ * filtro nenhum.
+ */
+async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto }) {
+  const sql = `
+    SELECT av.attribute_name AS atributo,
+           av.value          AS valor,
+           COUNT(DISTINCT p.id)::int AS total
+      FROM products p
+      JOIN product_variants v        ON v.product_id = p.id AND v.is_active = true AND v.stock_qty > 0
+      JOIN product_variant_values av ON av.variant_id = v.id
+     WHERE ${visibilityWhere}
+       AND is_active IS NOT FALSE
+       AND ${filtroDeFoto(exigeFoto)}
+       AND btrim(COALESCE(av.value, '')) <> ''
+     GROUP BY av.attribute_name, av.value`;
+  try {
+    const { rows } = await bd().query(sql, [cid]);
+    const porAtributo = {};
+    for (const r of rows) {
+      const a = String(r.atributo || '').trim();
+      if (!porAtributo[a]) porAtributo[a] = [];
+      porAtributo[a].push({ value: r.valor, total: r.total });
+    }
+    // Cor vira familia (151 hex viram ~20 nomes); tamanho vira regua.
+    // Os outros atributos que a lojista tenha criado saem como estao.
+    const saida = {};
+    for (const a of Object.keys(porAtributo)) {
+      const chave = a.toLowerCase();
+      if (chave === 'cor' || chave === 'cores') {
+        saida.cor = agruparPorFamilia(porAtributo[a]);
+      } else if (chave === 'tamanho' || chave === 'tamanhos') {
+        saida.tamanho = agruparTamanhos(porAtributo[a]);
+      }
+    }
+    return saida;
+  } catch (e) {
+    // Base sem as tabelas de variante: a loja abre sem filtro em vez de
+    // nao abrir.
+    if (e.code === '42P01' || e.code === '42703') return {};
+    throw e;
+  }
+}
+
 async function contarPorCategoria({ cid, visibilityWhere, exigeFoto }) {
   const { rows } = await bd().query(
     `SELECT category AS nome, COUNT(*)::int AS total
@@ -310,6 +419,6 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 
 module.exports = {
   POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, filtroDeFoto,
-  arvoreDeCategorias,
+  arvoreDeCategorias, facetasDoCatalogo,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,
 };

@@ -171,12 +171,15 @@ describe('pagina de produto', () => {
 });
 
 describe('cor por nome', () => {
+  // MUDOU DE CASA em 29/08: CORES_PT e corDoValor saíram do template para
+  // services/coresDaLoja, porque o SERVIDOR passou a precisar da mesma
+  // nomeação para agrupar as 151 cores da Finesse nas famílias do filtro.
+  // Duas cópias divergiriam. O teste continua valendo — só aponta para a
+  // fonte única.
+  const { corDoValor } = require('../src/services/coresDaLoja');
+  // atributoDeCor continua no template: ele decide LAYOUT (bolinha ou
+  // chip de texto), não cor, e o servidor não tem o que fazer com isso.
   const s = buildScript({ products: [], categories: [] }, 'loja', '');
-  const corDoValor = new Function(
-    s.match(/var CORES_PT[\s\S]*?\n};/)[0] + '\n' +
-      s.match(/function corDoValor[\s\S]*?\n}/)[0] +
-      '\nreturn corDoValor;',
-  )();
 
   test('nome de cor vira swatch — a lojista nao digita hex', () => {
     // O swatch antigo so aparecia com "#000000". Lojista escreve "Preto".
@@ -190,9 +193,14 @@ describe('cor por nome', () => {
     expect(corDoValor('VERMELHO')).toBe(corDoValor('vermelho'));
   });
 
-  test('hex continua funcionando', () => {
-    expect(corDoValor('#e11d48')).toBe('#e11d48');
-    expect(corDoValor('#abc')).toBe('#abc');
+  test('hex sai NORMALIZADO', () => {
+    // MUDOU em 29/08. Antes devolvia o hex como a lojista escreveu; agora
+    // sai em forma longa e maiúscula. Na tela não muda nada — `#abc` e
+    // `#AABBCC` pintam o mesmo. Muda no FILTRO: agrupar cor por família
+    // exige comparar hex, e `#e11d48` com `#E11D48` seriam duas cores
+    // diferentes na lista.
+    expect(corDoValor('#e11d48')).toBe('#E11D48');
+    expect(corDoValor('#abc')).toBe('#AABBCC');
   });
 
   test('o que nao e cor vira chip de texto', () => {
@@ -217,12 +225,9 @@ describe('cor por nome', () => {
 });
 
 describe('nome da cor quando a lojista grava hex', () => {
-  const s = buildScript({ products: [], categories: [] }, 'loja', '');
-  const nomeDaCor = new Function(
-    s.match(/var CORES_PT[\s\S]*?\n};/)[0] + '\n' +
-      s.match(/function nomeDaCor[\s\S]*?\n}/)[0] +
-      '\nreturn nomeDaCor;',
-  )();
+  // Mesma mudança de casa: a nomeação agora é a do serviço, e é a MESMA
+  // que agrupa as 151 cores da Finesse nas famílias do filtro.
+  const { rotuloDaCor: nomeDaCor } = require('../src/services/coresDaLoja');
 
   test('hex vira nome de verdade', () => {
     // A Finesse grava "#EC4899". Mostrar isso embaixo do circulo e mostrar

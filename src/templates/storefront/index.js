@@ -10,6 +10,7 @@ const init          = require('./parts/init');
 const stateUtils    = require('./parts/state_utils');
 const products      = require('./parts/products');
 const categorias    = require('./parts/categorias');
+const filtros       = require('./parts/filtros');
 const cart          = require('./parts/cart');
 const checkout      = require('./parts/checkout');
 const pix           = require('./parts/pix');
@@ -22,6 +23,9 @@ const { fonteClienteIniciais } = require('../storefrontCapa');
 // Parcelamento: mesma estrategia — a regra vive no servico e vai
 // serializada, em vez de reescrita a mao no cliente.
 const { fonteClienteParcelamento } = require('../../services/parcelamento');
+// Cor: o mapa e a nomeacao moram no servico e vao serializados, porque o
+// SERVIDOR tambem usa (pra agrupar as facetas). Duas copias divergiriam.
+const { FONTE: fonteDasCores } = require('../../services/coresDaLoja');
 
 function buildScript(storeData, escapedSlug, apiBase) {
   return prelude(storeData, escapedSlug, apiBase)
@@ -29,8 +33,10 @@ function buildScript(storeData, escapedSlug, apiBase) {
        + stateUtils
        + fonteClienteIniciais()
        + fonteClienteParcelamento()
+       + fonteDasCores
        + products
        + categorias
+       + filtros
        + cart
        + checkout
        + pix
