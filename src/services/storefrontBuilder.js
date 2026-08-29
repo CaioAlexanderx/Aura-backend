@@ -152,6 +152,14 @@ function getNowInSaoPaulo() {
   return { hour, minute, dayIndex };
 }
 
+/**
+ * "HH:MM" em minutos desde a meia-noite. Estrito: 24:00 nao passa.
+ *
+ * Chegou a aceitar 24:00 como "fim do dia", pra loja 24h fechar depois
+ * do ultimo minuto. Era a pergunta errada: 24h nao e um intervalo que
+ * por acaso cobre o dia, e um ESTADO — ver always_open logo abaixo.
+ * Horario invalido volta a ser so horario invalido.
+ */
 function parseHHMM(str) {
   if (!str || typeof str !== 'string') return null;
   const m = /^(\d{1,2}):(\d{2})$/.exec(str.trim());
@@ -162,13 +170,28 @@ function parseHHMM(str) {
   return h * 60 + mn;
 }
 
-function computeOpenState(businessHours) {
+/**
+ * A loja esta aberta agora?
+ *
+ * @param businessHours mapa dia -> { open, close, closed }.
+ * @param alwaysOpen loja 24h (migration 310). Curto-circuita tudo: e um
+ *   ESTADO declarado, nao um intervalo que por acaso cobre o dia. A
+ *   tentativa de expressar 24h como 00:00–23:59 deixava a loja Fechada
+ *   no ultimo minuto de todo dia; como 00:00–24:00, o parse rejeitava e
+ *   ela ficava Fechada o dia INTEIRO. Aconteceu em producao (29/08/2026).
+ * @param agora opcional, so pra teste: { hour, minute, dayIndex }. Sem
+ *   ele usa o relogio de Sao Paulo. Existe porque a unica forma de
+ *   verificar "aberta as 23:59" era recortar a funcao com regex do
+ *   arquivo — e o recorte trazia junto os `require` do modulo.
+ */
+function computeOpenState(businessHours, alwaysOpen, agora) {
+  if (alwaysOpen === true) return { is_open_now: true, next_open_text: '' };
   const hours = parseBusinessHours(businessHours);
   if (!hours || !Object.keys(hours).length) {
     return { is_open_now: true, next_open_text: '' };
   }
 
-  const { hour, minute, dayIndex } = getNowInSaoPaulo();
+  const { hour, minute, dayIndex } = agora || getNowInSaoPaulo();
   const nowMinutes = hour * 60 + minute;
 
   const todayKey = WEEK_KEYS[dayIndex];
@@ -177,7 +200,16 @@ function computeOpenState(businessHours) {
   if (today && !today.closed) {
     const openM = parseHHMM(today.open);
     const closeM = parseHHMM(today.close);
-    if (openM != null && closeM != null && nowMinutes >= openM && nowMinutes < closeM) {
+    // Dia marcado como aberto mas com horario ilegivel: erro de
+    // cadastro, nao fechamento. Antes caia direto no laco de baixo e a
+    // loja anunciava "Fechada, abre amanha" o dia todo — sem erro, sem
+    // sinal, e a lojista so descobre pela venda que nao veio. Entre
+    // errar pra aberta e errar pra fechada, aberta custa menos.
+    if (openM == null || closeM == null) {
+      console.error('[storefront] horario ilegivel em', todayKey, today);
+      return { is_open_now: true, next_open_text: '' };
+    }
+    if (nowMinutes >= openM && nowMinutes < closeM) {
       return { is_open_now: true, next_open_text: '' };
     }
   }
@@ -494,7 +526,10 @@ async function buildStorefront(config) {
   const serviceCards = parseServiceCards(config.service_cards);
 
   const businessHours = parseBusinessHours(config.business_hours);
-  const { is_open_now, next_open_text } = computeOpenState(businessHours);
+  // always_open chega undefined enquanto a migration 310 nao rodou; o
+  // `=== true` la dentro trata isso como "nao e 24h", que e o padrao.
+  const alwaysOpen = config.always_open === true;
+  const { is_open_now, next_open_text } = computeOpenState(businessHours, alwaysOpen);
 
   return {
     site: {
@@ -522,6 +557,9 @@ async function buildStorefront(config) {
       pickup_address: config.pickup_address || null,
     },
     business_hours: businessHours,
+    // Quem desenha a grade de horarios precisa saber que ela nao vale:
+    // com always_open, business_hours fica no banco mas nao decide nada.
+    always_open: alwaysOpen,
     settings: {
       show_prices:      config.show_prices !== false,
       show_stock:       config.show_stock  || false,
@@ -581,6 +619,9 @@ async function buildStorefront(config) {
 }
 
 module.exports = {
+  // parseHHMM so e exportado pra teste: ver __tests__/horario24h.test.js.
+  // computeOpenState ja saia daqui embaixo.
+  parseHHMM,
   buildStorefront, parseFeaturedIds, parseHiddenIds, computeOpenState,
   // Exportados em 19/08/2026 (S1) para o storefront do Studio montar a
   // MESMA arvore de categorias que a loja comum, em vez de uma segunda
