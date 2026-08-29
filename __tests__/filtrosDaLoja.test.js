@@ -404,3 +404,57 @@ describe('as famílias de cor, contra as cores REAIS da Finesse', () => {
     expect(familiaDaCor('#8A3A44')).toBe('vinho');
   });
 });
+
+// ============================================================
+// O QA em produção pegou duas coisas que nenhum teste pegou.
+// ============================================================
+describe('o alias que quebrou a árvore também', () => {
+  const arv = paginado.slice(
+    paginado.indexOf('async function arvoreDeCategorias'),
+    paginado.indexOf('async function facetasDoCatalogo'),
+  );
+  const sql = arv.slice(arv.indexOf('const sql = `'), arv.indexOf('`;', arv.indexOf('const sql = `')));
+
+  test('products sem alias, aqui também', () => {
+    // O MESMO bug das facetas, na consulta que eu tinha escrito antes.
+    // Consertei um e não olhei o outro; a barra ficou dias caindo na
+    // lista plana em produção, e o catch de 42P01 escondeu.
+    expect(sql).toMatch(/FROM products\s*[\r\n]/);
+    expect(sql).not.toMatch(/FROM products[ \t]+\w/);
+  });
+
+  test('is_active qualificado', () => {
+    expect(sql).toContain('products.is_active IS NOT FALSE');
+  });
+
+  test('e o catch grita', () => {
+    expect(arv).toContain("'[arvore-categorias] consulta falhou");
+  });
+});
+
+describe('clique durante o carregamento não some', () => {
+  const prods = require('../src/templates/storefront/parts/products');
+
+  test('a intenção fica pendente em vez de ser descartada', () => {
+    // Peguei no QA: clicar num filtro enquanto a página 1 ainda carregava
+    // não fazia nada. A ficha "Preto" aparecia na barra e a grade
+    // continuava inteira — sem erro, sem sinal, só a impressão de que o
+    // filtro não funciona.
+    expect(prods).toContain('pedidoPendente=n');
+    expect(prods).not.toContain('if(carregandoPagina) return;');
+  });
+
+  test('roda o pendente quando a carga atual termina', () => {
+    // Ancora no `.then` final, não na declaração da variável lá em cima —
+    // que é onde o `indexOf` cru cai.
+    const i = prods.indexOf('marcarCarregando(false);');
+    expect(i).toBeGreaterThan(0);
+    expect(prods.slice(i, i + 300)).toContain('irParaPagina(p)');
+  });
+
+  test('guarda a ÚLTIMA intenção, não uma fila', () => {
+    // Quem clicou em três filtros seguidos quer o resultado dos três
+    // juntos, não três recargas em sequência.
+    expect(prods).toContain('var pedidoPendente=null');
+  });
+});

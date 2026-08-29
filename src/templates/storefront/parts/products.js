@@ -42,10 +42,25 @@ function janelaDePaginas(atual,total){
 }
 
 /** Busca uma pagina no servidor e redesenha. */
+/**
+ * Uma requisicao de cada vez — mas nenhuma perdida.
+ *
+ * Antes era um return seco quando havia carga em curso, e o clique sumia. Peguei no
+ * QA: clicar num filtro enquanto a pagina 1 ainda carregava nao fazia
+ * NADA, e a pessoa ficava com a ficha "Preto" na barra e a grade
+ * inteira na tela. Sem erro, sem sinal — so a impressao de que o filtro
+ * nao funciona.
+ *
+ * Agora a ultima intencao fica pendente e roda quando a atual termina.
+ * A ULTIMA, nao uma fila: quem clicou em tres filtros seguidos quer o
+ * resultado dos tres juntos, nao tres recargas em sequencia.
+ */
+var pedidoPendente=null;
+
 function irParaPagina(n){
   var total=totalDePaginas();
   n=Math.min(Math.max(1,n),total);
-  if(carregandoPagina) return;
+  if(carregandoPagina){ pedidoPendente=n; return; }
   carregandoPagina=true;
   paginaAtual=n;
   marcarCarregando(true);
@@ -78,7 +93,12 @@ function irParaPagina(n){
       var grid=document.getElementById('productsGrid');
       if(grid) grid.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:48px 0;color:var(--sf-ink-3);">Nao consegui carregar esta pagina. Tente de novo.</div>';
     })
-    .then(function(){ carregandoPagina=false; marcarCarregando(false); });
+    .then(function(){
+      carregandoPagina=false; marcarCarregando(false);
+      // O que o usuario pediu enquanto esta rodava. filtro, busca e ordem
+      // ja estao no estado do modulo, entao a recarga pega o valor atual.
+      if(pedidoPendente!=null){ var p=pedidoPendente; pedidoPendente=null; irParaPagina(p); }
+    });
 }
 
 // Quando a resposta volta rapido demais, apagar e reacender a grade em
