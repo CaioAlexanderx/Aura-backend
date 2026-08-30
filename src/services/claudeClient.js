@@ -30,7 +30,7 @@ function getApiKey() {
 // Chamada generica ao Messages API. `messages` segue o formato Anthropic
 // (array de { role, content } onde content pode ser string ou array de
 // content blocks). Retorna o response.content[0].text quando ha texto.
-async function callClaude({ messages, system, model, maxTokens, anthropicBeta }) {
+async function callClaude({ messages, system, model, maxTokens, anthropicBeta, tools, toolChoice }) {
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     throw new Error('messages obrigatorio (array nao vazio)');
   }
@@ -47,6 +47,12 @@ async function callClaude({ messages, system, model, maxTokens, anthropicBeta })
     messages:   messages,
   };
   if (system) body.system = system;
+  // Tool use (function calling) — usado pela Aurinha. `tools` segue o
+  // formato Anthropic ({ name, description, input_schema }). O chamador
+  // é responsavel pelo loop: stop_reason 'tool_use' → executar → devolver
+  // tool_result num novo turn de user. `raw.content` carrega os blocks.
+  if (tools) body.tools = tools;
+  if (toolChoice) body.tool_choice = toolChoice;
 
   const resp = await fetch(ANTHROPIC_URL, {
     method: 'POST',
@@ -68,6 +74,8 @@ async function callClaude({ messages, system, model, maxTokens, anthropicBeta })
   return {
     raw:           data,
     text:          textBlock ? textBlock.text : '',
+    content:       data.content || [],
+    toolUses:      (data.content || []).filter(b => b.type === 'tool_use'),
     inputTokens:   data.usage?.input_tokens || 0,
     outputTokens:  data.usage?.output_tokens || 0,
     stopReason:    data.stop_reason,
