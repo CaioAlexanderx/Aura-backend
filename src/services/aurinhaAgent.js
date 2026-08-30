@@ -54,6 +54,18 @@ const TOOLS = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'link_do_produto',
+    description: 'Gera o link da loja virtual com o produto já aberto para o cliente finalizar a compra (com atribuição da conversa). Use quando o cliente demonstrar intenção de compra — junto com o link, cite o desconto Pix se houver.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        produto_id: { type: 'string', description: 'id (uuid) do produto, de buscar_produtos' },
+        variante:   { type: 'string', description: 'sku_suffix da variação escolhida (opcional), de detalhe_produto' },
+      },
+      required: ['produto_id'],
+    },
+  },
+  {
     name: 'escalar',
     description: 'Escala a conversa para a equipe humana da loja. Use para: reclamação/defeito, pedido de desconto além do Pix cadastrado, promessa de prazo, ou qualquer pergunta que você não consegue responder com segurança.',
     input_schema: {
@@ -68,7 +80,8 @@ const TOOLS = [
 ];
 
 // ── Execução das ferramentas (SQL direto, escopo por company) ─
-async function execTool(companyId, channelConfig, name, input) {
+// ctx: { conversationId } — atribuição do link de checkout.
+async function execTool(companyId, channelConfig, name, input, ctx = {}) {
   if (name === 'buscar_produtos') {
     const termo = `%${String(input.termo || '').trim()}%`;
     const { rows } = await db.query(
@@ -132,6 +145,28 @@ async function execTool(companyId, channelConfig, name, input) {
       entrega: !!cfg.delivery_enabled,
       entrega_detalhe: cfg.delivery_eta_text || null,
       loja_virtual: cfg.slug ? `https://loja.getaura.com.br/${cfg.slug}` : null,
+    };
+  }
+
+  if (name === 'link_do_produto') {
+    const cfg = channelConfig || {};
+    if (!cfg.slug) {
+      return { erro: 'loja virtual não configurada — informe que a compra pode ser feita na loja física e escale se o cliente quiser link' };
+    }
+    const { rows } = await db.query(
+      `SELECT id, name FROM products WHERE company_id = $1 AND id = $2 LIMIT 1`,
+      [companyId, input.produto_id]
+    );
+    if (!rows.length) return { erro: 'produto não encontrado' };
+    // Contrato: docs/aurinha-checkout-contract.md — a loja repaginada abre
+    // o produto e propaga origem/conversa no POST /order (atribuição).
+    const qs = new URLSearchParams({ produto: rows[0].id, origem: 'aurinha' });
+    if (input.variante) qs.set('variante', String(input.variante).slice(0, 40));
+    if (ctx.conversationId) qs.set('conversa', ctx.conversationId);
+    return {
+      produto: rows[0].name,
+      link: `https://loja.getaura.com.br/${cfg.slug}?${qs.toString()}`,
+      desconto_pix_pct: Number(cfg.pix_discount_pct || 0),
     };
   }
 
@@ -264,7 +299,7 @@ async function handleInbound(companyId, conversationId) {
         }
         let output;
         try {
-          output = await execTool(companyId, channelConfig, tu.name, tu.input || {});
+          output = await execTool(companyId, channelConfig, tu.name, tu.input || {}, { conversationId });
         } catch (e) {
           output = { erro: String(e.message || e).slice(0, 300) };
         }
@@ -309,6 +344,18 @@ async function handleInbound(companyId, conversationId) {
         [querEscalar.motivo, conversationId]
       );
       await logEvent(companyId, conversationId, 'handoff', querEscalar);
+      // Sino do app (nunca derruba o fluxo — appNotifications engole falha).
+      // Dedupe por conversa+dia: handoff repetido no mesmo dia não spamma.
+      const { notifyCompany } = require('./appNotifications');
+      const dia = new Date().toISOString().slice(0, 10);
+      notifyCompany(companyId, {
+        type: 'hub_handoff',
+        title: 'Uma conversa precisa de você',
+        body: `Aurinha escalou: ${querEscalar.motivo}`.slice(0, 200),
+        ctaLabel: 'Abrir atendimento',
+        ctaRoute: '/agentes',
+        dedupeKey: `hub_handoff:${conversationId}:${dia}`,
+      });
     }
 
     if (parsed.resposta && parsed.resposta.trim()) {
