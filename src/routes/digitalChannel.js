@@ -24,6 +24,10 @@ const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
 const { validatePixKey } = require('../services/staticPixService');
 const { geocodeCep, normalizeCep } = require('../services/cepGeocoding');
 const { POLITICA_PADRAO } = require('../templates/storefrontHtml');
+const {
+  CAMPOS: CAMPOS_DE_VITRINE, condicaoDeFalta,
+  exigeFotoNoUniverso, sanitizarItens,
+} = require('../services/pendenciasDaVitrine');
 
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
@@ -296,6 +300,144 @@ router.get('/products', requireRole('client', 'analyst', 'admin'), async (req, r
   } catch (err) {
     console.error('digital channel products error:', err);
     res.status(500).json({ error: 'Erro ao listar produtos do canal digital' });
+  }
+});
+
+// ============================================================
+// GET /companies/:id/digital-channel/pendencias
+//
+// "O que falta pra minha loja ficar pronta." Sem `campo`, devolve a
+// contagem de cada pendencia; com `campo`, a lista paginada das pecas.
+//
+// NAO tem gate de plano: e LEITURA do que a lojista ja cadastrou. Bloquear
+// aqui esconderia o proprio trabalho dela (armadilha 3 do CLAUDE.md).
+// ============================================================
+router.get('/pendencias', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const cid = req.params.id;
+  const visibility = listVisibilityWhere('$1');
+  const campoPedido = String(req.query.campo || '').trim();
+  const limit  = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+
+  // O universo muda por campo — ver exigeFotoNoUniverso. "Falta foto"
+  // pergunta sobre o catalogo inteiro; o resto, so sobre o que ja esta
+  // na vitrine, senao a lojista escreveria descricao pra peca invisivel.
+  const COM_FOTO = `(
+    btrim(COALESCE(products.image_url, '')) <> ''
+    OR (
+      jsonb_typeof(products.gallery_urls) = 'array'
+      AND jsonb_array_length(products.gallery_urls) > 0
+    )
+  )`;
+  const base = `${visibility} AND products.is_active IS NOT FALSE`;
+
+  try {
+    if (campoPedido) {
+      const onde = condicaoDeFalta(campoPedido);
+      if (!onde) return res.status(400).json({ error: 'Campo desconhecido' });
+      const universo = exigeFotoNoUniverso(campoPedido) ? ` AND ${COM_FOTO}` : '';
+      const { rows } = await db.query(
+        `SELECT products.id, products.name, products.image_url, products.price,
+                products.description, products.size, products.brand, products.category
+           FROM products
+          WHERE ${base}${universo} AND ${onde}
+          ORDER BY products.name
+          LIMIT ${limit} OFFSET ${offset}`,
+        [cid]
+      );
+      return res.json({ campo: campoPedido, produtos: rows, limit, offset });
+    }
+
+    // Uma varredura so, com um COUNT FILTER por campo: cinco consultas
+    // separadas dariam cinco numeros de cinco instantes diferentes.
+    const contagens = CAMPOS_DE_VITRINE.map(
+      (c) => `COUNT(*) FILTER (WHERE ${exigeFotoNoUniverso(c.chave) ? COM_FOTO + ' AND ' : ''}${c.onde})::int AS "${c.chave}"`
+    ).join(',\n           ');
+
+    const { rows } = await db.query(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE ${COM_FOTO})::int AS publicadas,
+              ${contagens}
+         FROM products
+        WHERE ${base}`,
+      [cid]
+    );
+
+    const r = rows[0] || {};
+    res.json({
+      total: r.total || 0,
+      publicadas: r.publicadas || 0,
+      campos: CAMPOS_DE_VITRINE.map((c) => ({
+        chave: c.chave,
+        titulo: c.titulo,
+        editavel: !!c.editavel,
+        faltando: r[c.chave] || 0,
+      })),
+    });
+  } catch (err) {
+    // 42703: base sem alguma coluna (size/brand/gallery_urls). Devolver 500
+    // aqui deixaria a tela inteira sem conteudo por causa de uma coluna.
+    if (err.code === '42703') {
+      console.error('[pendencias] coluna ausente — devolvendo vazio:', err.message);
+      return res.json({ total: 0, publicadas: 0, campos: [] });
+    }
+    console.error('pendencias da vitrine error:', err);
+    res.status(500).json({ error: 'Erro ao levantar o que falta na loja' });
+  }
+});
+
+// ============================================================
+// PATCH /companies/:id/digital-channel/produtos
+//
+// Grava descricao/tamanho/marca de VARIAS pecas num request so. E o que
+// torna "deixar a loja pronta" viavel: 143 pecas, uma requisicao por
+// tecla salva seria a tela inteira travando.
+//
+// Escreve com a MESMA visibilidade do GET (armadilha 7 do CLAUDE.md):
+// subsidiaria que enxerga a peca compartilhada tem que conseguir editar,
+// e a que nao enxerga nao pode escrever nela por id adivinhado.
+// ============================================================
+router.patch('/produtos', requireRole('client', 'analyst', 'admin'), async (req, res) => {
+  const cid = req.params.id;
+  const { itens, descartados } = sanitizarItens(req.body && req.body.itens);
+  if (!itens.length) {
+    return res.status(400).json({ error: 'Nenhum item válido', descartados });
+  }
+
+  // VALUES tipado: sem os casts o Postgres nao sabe o tipo de um NULL
+  // solto e recusa a juncao.
+  const params = [cid];
+  const linhas = itens.map((it) => {
+    const pos = [];
+    for (const col of ['id', 'description', 'size', 'brand']) {
+      params.push(it[col] === undefined ? null : it[col]);
+      pos.push(`$${params.length}`);
+    }
+    return `(${pos[0]}::uuid, ${pos[1]}::text, ${pos[2]}::text, ${pos[3]}::text)`;
+  }).join(', ');
+
+  try {
+    const { rows } = await db.query(
+      `UPDATE products SET
+         description = COALESCE(v.description, products.description),
+         size        = COALESCE(v.size,        products.size),
+         brand       = COALESCE(v.brand,       products.brand),
+         updated_at  = NOW()
+       FROM (VALUES ${linhas}) AS v(id, description, size, brand)
+      WHERE products.id = v.id
+        AND ${listVisibilityWhere('$1')}
+        AND products.is_active IS NOT FALSE
+      RETURNING products.id`,
+      params
+    );
+    res.json({ atualizados: rows.length, enviados: itens.length, descartados });
+  } catch (err) {
+    if (err.code === '42703') {
+      console.error('[produtos-lote] coluna ausente — nada gravado:', err.message);
+      return res.status(409).json({ error: 'Campo indisponível nesta base' });
+    }
+    console.error('patch produtos em lote error:', err);
+    res.status(500).json({ error: 'Erro ao salvar os produtos' });
   }
 });
 
