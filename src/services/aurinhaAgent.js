@@ -21,7 +21,10 @@ const { buildSystemPrompt, CATEGORIES } = require('./aurinhaPrompt');
 const igOutbox = require('./igOutbox');
 
 // Modelo da Aurinha — override por env ou por hub_agent_settings.model.
-const AURINHA_MODEL = process.env.AURINHA_MODEL || 'claude-opus-5';
+// Piloto roda Sonnet 5 (decisão 30/08: se apertar em algum caso, o teste
+// pega e a argumentação pelo Opus como upsell fica mais forte). A taxa
+// de edição/rejeição em hub_agent_events é a métrica da comparação.
+const AURINHA_MODEL = process.env.AURINHA_MODEL || 'claude-sonnet-5';
 const MAX_TOOL_ROUNDS = 6;
 const HISTORY_LIMIT = 20;
 
