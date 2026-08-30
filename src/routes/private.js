@@ -105,6 +105,11 @@ router.use('/notifications', require('./notifications'));
 // qualquer /employees gateado, a rota fica de fato acessivel.
 router.use('/employees/ranking', require('./employeesRanking'));
 
+// AURINHA (312): hub social — inbox multicanal + agente de IA. SEM
+// requirePlan de propósito (mesma decisão do WhatsApp Cloud: o gate
+// comercial é o addon — hub_agent_settings.enabled — não o plano).
+router.use('/hub', require('./hubSocial'));
+
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));

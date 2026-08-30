@@ -84,6 +84,11 @@ function startServer() {
     // kill switch WA_DISPATCH_ENABLED=false.
     const { initWaDispatcher } = require('./jobs/waDispatcherJob');
     initWaDispatcher();
+
+    // AURINHA (312): dispatcher da fila Instagram (ig_outbox) — tick 15s,
+    // kill switch IG_DISPATCH_ENABLED=false.
+    const { initIgDispatcher } = require('./jobs/igDispatcherJob');
+    initIgDispatcher();
   });
 }
 
