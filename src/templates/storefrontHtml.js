@@ -24,18 +24,10 @@
 //
 // Fase 5 (20/05/2026): badge Aberta/Fechada ao lado do nome da loja.
 // Verde quando is_open_now=true; cinza com next_open_text quando false.
-/**
- * Politica de troca padrao.
- *
- * Espelha o prazo de 7 dias do Codigo de Defesa do Consumidor para compra
- * fora do estabelecimento (art. 49). NAO promete mais que a lei: lojista
- * que quiser ser mais generosa reescreve no painel, e a que nao escrever
- * nada fica com algo correto no lugar de nada.
- */
-const POLITICA_PADRAO =
-  'Você tem até 7 dias corridos após receber o pedido para desistir da compra, '
-  + 'conforme o Código de Defesa do Consumidor. Para trocar por outro tamanho ou '
-  + 'cor, fale com a loja pelo WhatsApp.';
+// O texto da politica e as formas de pagamento moram em
+// services/rodapeInstitucional.js — a vitrine Studio desenha o MESMO
+// rodape, e calcular em dois lugares e como as duas lojas divergem.
+const { POLITICA_PADRAO, montarRodape } = require('../services/rodapeInstitucional');
 
 function buildHtmlBody({
   siteName, tagline, logoInTopbar, logoInHero, contactBar,
@@ -63,14 +55,16 @@ function buildHtmlBody({
   // Sem selo de bandeira: nao temos as marcas, e inventar um retangulo
   // escrito "VISA" seria falsificar. Texto simples, que e tambem a linha
   // minimalista escolhida pro resto da loja.
-  const formas = [];
-  if (pagamentos && pagamentos.pix)   formas.push('Pix');
-  if (pagamentos && pagamentos.card)  formas.push('Cartão de crédito e débito');
-  if (pagamentos && pagamentos.na_entrega) formas.push('Pagamento na entrega');
-
-  const politica = (politicaTroca && String(politicaTroca).trim())
-    ? String(politicaTroca).trim()
-    : POLITICA_PADRAO;
+  // `pagamentos` chega no formato do template ({pix, card, na_entrega});
+  // o servico fala o formato do payload ({has_pix, ...}). A traducao
+  // e aqui, num lugar so.
+  const rodape = montarRodape({
+    has_pix: !!(pagamentos && pagamentos.pix),
+    has_card: !!(pagamentos && pagamentos.card),
+    pay_on_delivery_enabled: !!(pagamentos && pagamentos.na_entrega),
+  }, politicaTroca);
+  const formas = rodape.formas;
+  const politica = rodape.politica;
 
   const rodapeInstitucional = (formas.length || politica) ? `
     <div class="footer-inst">

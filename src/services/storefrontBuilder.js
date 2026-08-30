@@ -48,6 +48,8 @@
 'use strict';
 
 const db = require('../config/database');
+// O rodape institucional e o MESMO nas duas lojas — ver o modulo.
+const { montarRodape } = require('./rodapeInstitucional');
 
 const DEFAULT_SERVICE_CARDS = [
   { icon: 'truck',   title: 'Entrega rápida',      body: 'Confirmação no WhatsApp', enabled: true },
@@ -603,6 +605,14 @@ async function buildStorefront(config) {
     // Migration 306 — politica de troca do rodape. NULL faz o template
     // usar o texto padrao.
     politica_troca: config.politica_troca || null,
+    // Rodape institucional JA RESOLVIDO. A vitrine Studio nao remonta a
+    // lista de formas nem repete o texto padrao: se repetisse, uma
+    // correcao no texto valeria numa loja e nao na outra.
+    rodape_institucional: montarRodape({
+      has_pix: hasPix,
+      has_card: hasMpGateway && cardEnabled,
+      pay_on_delivery_enabled: payOnDeliveryEnabled,
+    }, config.politica_troca),
     // D3: lista FLAT com parent_id -- o cliente deriva a hierarquia, mesmo
     // formato que o GET /product-categories já usa (contrato §10). Vazia
     // em base sem as migrations 257/258.
