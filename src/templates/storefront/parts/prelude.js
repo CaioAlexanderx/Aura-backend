@@ -24,5 +24,9 @@ var CATALOGO_TOTAL = __S.catalog_total || 0;
 // O payload embutido E a pagina 1, entao os dois tem que concordar.
 var POR_PAGINA = __S.payload_limit || 24;
 var CARREGADOS     = PRODUCTS.length;
+// Tira de categorias da home. JA resolvida no servidor (so o primeiro
+// nivel, minimo de tres) — ver services/tiraDeCategorias.js. Vazia = a
+// loja nao desenha. A regra NAO se repete aqui de proposito.
+var TIRA_CATEGORIAS = __S.tira_de_categorias || [];
 `;
 };

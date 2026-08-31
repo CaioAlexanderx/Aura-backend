@@ -249,6 +249,11 @@ ${serviceCards.map((c) => `  <div class="service-card">
 ${bannerStage}
 ${heroLegacy}
 
+<!-- Tira de categorias: depois do banner, ANTES da barra de texto.
+     A barra continua sendo a navegacao completa; a tira e a porta de
+     entrada visual pras poucas categorias de topo. -->
+<section class="tira-cats" id="tiraCats" hidden></section>
+
 <div class="cats-wrap" id="catsWrap"></div>
 <div class="cats-sub" id="catsSub" hidden></div>
 <div class="cats-painel" id="catsPainel" hidden></div>

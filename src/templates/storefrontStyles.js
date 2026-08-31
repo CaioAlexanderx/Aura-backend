@@ -306,6 +306,33 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 @media(max-width:600px){.sf-section-head{margin-bottom:18px;}.sf-section-head h2{font-size:22px;}}
 .sf-section-head-link{color:var(--sf-ink-2);font-size:13px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;text-decoration:none;}
 
+/* ── Tira de categorias (home) ────────────────────────────
+   Cartoes grandes de categoria antes da grade — a porta de entrada
+   visual pras poucas categorias de topo. A barra de texto logo abaixo
+   continua sendo a navegacao completa.
+
+   Regua minimalista: sem preenchimento solido da marca (reservado a
+   acao principal), e NADA levanta no hover. Quem responde ao mouse e a
+   arte dentro da moldura — mesma ideia do cartao de produto. */
+.tira-cats{max-width:1280px;margin:8px auto 0;padding:0 20px;}
+.tira-cats-inner{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;}
+.tira-cat{appearance:none;border:0;background:none;padding:0;cursor:pointer;text-align:left;font:inherit;}
+.tira-cat-arte{position:relative;width:100%;aspect-ratio:4/5;overflow:hidden;border-radius:14px;background:var(--sf-bg-card);}
+.tira-cat-arte img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .6s cubic-bezier(.4,0,.2,1);}
+/* A foto cresce DENTRO da moldura: a moldura nao se mexe, entao a
+   fila nao dança quando o mouse passa. */
+.tira-cat:hover .tira-cat-arte img,.tira-cat:focus-visible .tira-cat-arte img{transform:scale(1.04);}
+.tira-cat:focus-visible .tira-cat-arte{outline:2px solid var(--sf-brand);outline-offset:2px;}
+.tira-cat-nome{margin-top:10px;font-size:14px;font-weight:600;color:var(--sf-ink);}
+.tira-cat-total{margin-top:2px;font-size:12px;color:var(--sf-ink-3);font-variant-numeric:tabular-nums;}
+@media(max-width:600px){
+  .tira-cats{padding:0 12px;}
+  .tira-cats-inner{grid-template-columns:repeat(2,1fr);gap:10px;}
+}
+@media(prefers-reduced-motion:reduce){
+  .tira-cat-arte img{transition:none;}
+  .tira-cat:hover .tira-cat-arte img,.tira-cat:focus-visible .tira-cat-arte img{transform:none;}
+}
 /* ============================================================
    Categories chip strip
    ============================================================ */

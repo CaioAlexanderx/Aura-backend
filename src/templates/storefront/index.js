@@ -10,6 +10,7 @@ const init          = require('./parts/init');
 const stateUtils    = require('./parts/state_utils');
 const products      = require('./parts/products');
 const categorias    = require('./parts/categorias');
+const tiraCategorias = require('./parts/tira_categorias');
 const filtros       = require('./parts/filtros');
 const cart          = require('./parts/cart');
 const checkout      = require('./parts/checkout');
@@ -36,6 +37,7 @@ function buildScript(storeData, escapedSlug, apiBase) {
        + fonteDasCores
        + products
        + categorias
+       + tiraCategorias
        + filtros
        + cart
        + checkout
