@@ -10,7 +10,7 @@
 //         cash_tender_modal_enabled, studio_enabled, studio_kds_enabled,
 //         studio_gallery_enabled, studio_approval_enabled, food_mode_enabled,
 //         food_nfce_manual_enabled, food_comanda_print_enabled,
-//         card_fee_enabled
+//         card_fee_enabled, os_enabled
 //   STRING (enum): studio_approval_mode (wa_me | whatsapp_business)
 //   NUMBER: service_fee_pct, food_service_fee_pct,
 //           card_fee_credit_pct, card_fee_debit_pct
@@ -42,6 +42,10 @@ const ALLOWED_BOOL_KEYS = [
   'food_comanda_print_enabled',
   // 17/08/2026 — taxa da maquininha (Negocio + Studio)
   'card_fee_enabled',
+  // 31/08/2026 — Ordem de Servico. Opt-in: nem toda loja emite OS, e pra
+  // quem nao emite o modulo inteiro fica invisivel (menu, botao de imprimir
+  // na tela pos-venda, rotas). Ver migration 313.
+  'os_enabled',
 ];
 
 // String enum: studio_approval_mode pode ser "wa_me" ou "whatsapp_business"
@@ -88,6 +92,7 @@ const DEFAULT_SETTINGS = {
   card_fee_enabled:          false,
   card_fee_credit_pct:       0,
   card_fee_debit_pct:        0,
+  os_enabled:                false,
   // 0 = neutro: o fluxo real de impressao (aura-app/buildLabelHtml) nunca
   // aplicou offset — um default != 0 deslocaria a impressao de toda loja
   // que nunca calibrou. (-2 era o default da pagina orfa labels.js, que
