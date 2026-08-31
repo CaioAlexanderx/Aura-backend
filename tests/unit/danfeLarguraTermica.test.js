@@ -15,9 +15,13 @@
 
 const { buildDanfeNfceHtml } = require('../../src/utils/buildDanfeNfceHtml');
 
-// Área imprimível de uma térmica 80mm: 72mm é o padrão do setor (576 dots a
-// 203dpi). O scan mediu ~74,5mm nesta impressora; 72mm deixa a folga.
-const LIMITE_IMPRIMIVEL_MM = 72;
+// 2a rodada (31/08/2026, foto da nota 67 reimpressa): a coluna de 72mm ainda
+// cortava ~1 caractere, porque o DRIVER desloca a impressao ~5,6mm pra
+// direita antes do CSS entrar em cena. Cabeca imprime ate ~74,5mm; o limite
+// da COLUNA declarada portanto e 74,5 - 5,6 = ~69mm. Este teste afirma a
+// geometria que o CSS controla; o offset do driver entra como constante.
+const OFFSET_DRIVER_MM = 5.6;
+const LIMITE_IMPRIMIVEL_MM = 74.5 - OFFSET_DRIVER_MM; // ~68.9
 
 const company = {
   cnpj: '11222333000181',
@@ -188,6 +192,20 @@ describe('DANFE NFC-e — largura na térmica 80mm', () => {
   test('sobra coluna de texto pra caber o cupom (>= 60mm)', () => {
     // Piso, não teto: estreitar demais quebraria as linhas de total em duas.
     expect(colunaDeTextoMm(html)).toBeGreaterThanOrEqual(60);
+  });
+
+  test('a linha mais longa do cupom cabe na coluna com folga', () => {
+    // Courier: avanco fixo de 0.6em. A linha de tributos era a mais longa
+    // (37 chars) e ficou a 2,2mm do corte; sem os parenteses do label
+    // sobram ~5,5mm. Se alguem realargar o texto, este teste avisa antes
+    // da termica do Davi avisar.
+    const PT_MM = 0.352778;
+    const coluna = colunaDeTextoMm(html);
+    const m = html.match(/<span>(Trib\.[^<]*)<\/span><span>([^<]*)<\/span>/);
+    expect(m).toBeTruthy();
+    const chars = m[1].length + m[2].length;
+    const larguraMm = chars * 7.5 * 0.6 * PT_MM + 1; // 7.5pt + ~1mm de gap
+    expect(larguraMm).toBeLessThanOrEqual(coluna - 3); // 3mm de folga minima
   });
 
   test('a chave de acesso quebra em 6+5 grupos, sempre no mesmo lugar', () => {

@@ -271,10 +271,16 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '@page{size:80mm auto;margin:0}';
   html += '*{margin:0;padding:0;box-sizing:border-box}';
   html += 'html,body{background:#f3f4f6;color:#000;font-family:"Courier New",Courier,monospace;font-size:8.5pt;line-height:1.2}';
-  // 72mm de página, 2.5mm de recuo de cada lado → coluna de texto de 67mm.
+  // 66mm de pagina, 2mm de recuo de cada lado -> coluna de texto de 62mm.
   // padding-bottom de 8mm é avanço de papel: sem ele a última linha nasce em
   // cima do serrilhado e a marca do rodapé sai pela metade.
-  html += '.page{width:72mm;max-width:72mm;margin:0 auto;background:#fff;padding:0 2.5mm 8mm;color:#000}';
+  // 31/08/2026 (2a rodada, foto da nota 67 reimpressa): 72mm ainda cortava
+  // ~1 caractere. Medindo a foto (regua = papel de 80mm), o DRIVER da
+  // impressora desloca a coluna ~5,6mm pra direita antes do CSS entrar em
+  // cena — offset de hardware/driver que nenhum @page alcanca. Cabeca
+  // imprime ate ~74,5mm; coluna segura = 74,5 - 5,6 = ~69mm. Ficamos em
+  // 66mm pra sobrar ~3mm de folga com qualquer driver parecido.
+  html += '.page{width:66mm;max-width:66mm;margin:0 auto;background:#fff;padding:0 2mm 8mm;color:#000}';
   // Tela: imita papel térmico
   html += '@media screen{body{padding:24px 0}.page{box-shadow:0 4px 20px rgba(0,0,0,0.15);margin-bottom:24px}.print-toolbar{position:fixed;top:0;left:0;right:0;background:#1a1a2e;color:#fff;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;z-index:1000}.print-toolbar button{background:#7c3aed;color:#fff;border:none;padding:8px 18px;border-radius:6px;font-weight:700;cursor:pointer;font-size:13px}.print-toolbar span{font-size:12px;color:#a78bfa}}';
   // Print: papel cru
@@ -393,7 +399,7 @@ function buildDanfeNfceHtml({ emission, company }) {
   page += '<div class="section-label">Forma de Pagamento</div>';
   page += paymentsHtml;
   // Tributos aproximados (Lei 12.741) — placeholder neutro
-  page += '<div class="row small mt1"><span>Trib. aprox. (Lei 12.741)</span><span>conforme NCM</span></div>';
+  page += '<div class="row small mt1"><span>Trib. aprox. Lei 12.741</span><span>conforme NCM</span></div>';
 
   page += '<div class="divider"></div>';
 
