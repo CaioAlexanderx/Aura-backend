@@ -134,6 +134,12 @@ router.get('/', async (req, res) => {
     // — tem `total_amount` e `display_name`. A query antiga floodava os logs
     // com `column "order_number" does not exist`. Usamos as colunas reais e
     // expomos display_name (ou o id curto) como order_number pro card do app.
+    //
+    // 31/08/2026: source <> 'pdv'. Notificação avisa do que chegou DE FORA
+    // (Canal Digital, pedido digital/marketplace do Studio). Venda de balcão
+    // com produto personalizável entra na view via trigger (pending_art) —
+    // certo pro KDS, que é fila de produção e continua mostrando — mas o
+    // operador acabou de registrá-la com as próprias mãos; notificar é ruído.
     let studioOrders = [];
     try {
       const { rows } = await db.query(`
@@ -146,6 +152,7 @@ router.get('/', async (req, res) => {
                'studio' AS source
         FROM studio_orders
         WHERE company_id = $1
+          AND source <> 'pdv'
           AND created_at > NOW() - INTERVAL '24 hours'
         ORDER BY created_at DESC
         LIMIT 10
