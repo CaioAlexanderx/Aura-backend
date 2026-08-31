@@ -8,6 +8,7 @@
 
 module.exports = `
 updateCartUI();
+renderTiraCategorias();
 renderCategorias();
 renderProducts();
 

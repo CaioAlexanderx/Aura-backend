@@ -4,7 +4,7 @@
 // PUT  /companies/:id/digital-channel
 // GET  /companies/:id/digital-channel/products       (Fase 4)
 // POST /companies/:id/digital-channel/request-domain
-// POST /companies/:id/digital-channel/upload-image?type=logo|banner|banner_0|banner_1|banner_2
+// POST /companies/:id/digital-channel/upload-image?type=logo|banner|banner_0|banner_1|banner_2|categoria
 // POST /companies/:id/digital-channel/setup-pix       (legado Asaas)
 //
 // Migration 115: v2 redesign — accent_color, dark_mode, font_family,
@@ -1098,14 +1098,25 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
   const bannerIdx = isBannerN ? parseInt(bannerMatch[1], 10) : -1;
   const isLogo = type === 'logo';
   const isCover = type === 'banner';
-  if (!isLogo && !isCover && !isBannerN) {
-    return res.status(400).json({ error: 'type deve ser logo|banner|banner_0|banner_1|banner_2' });
+  // Banner da categoria (tira da home, so o primeiro nivel). O id vem na
+  // query e e VALIDADO contra a empresa antes de qualquer escrita: sem
+  // isso, um uuid adivinhado escreveria banner na categoria de outra loja.
+  const isCategoria = type === 'categoria';
+  const categoriaId = String(req.query.categoria_id || '').trim();
+  if (!isLogo && !isCover && !isBannerN && !isCategoria) {
+    return res.status(400).json({ error: 'type deve ser logo|banner|banner_0|banner_1|banner_2|categoria' });
+  }
+  if (isCategoria && !/^[0-9a-f-]{36}$/i.test(categoriaId)) {
+    return res.status(400).json({ error: 'categoria_id obrigatorio' });
   }
   if (!content) return res.status(400).json({ error: 'content (base64) obrigatorio' });
   try {
     const mime = content_type || 'image/jpeg';
     const ext  = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
-    const keyName = isLogo ? 'logo' : isCover ? 'banner' : `banner_${bannerIdx}`;
+    const keyName = isLogo ? 'logo'
+      : isCover ? 'banner'
+      : isCategoria ? `categoria_${categoriaId}`
+      : `banner_${bannerIdx}`;
     const key = `${cid}/canal/${keyName}.${ext}`;
     const result = await uploadToR2(key, content, mime);
     if (!result.success) {
@@ -1126,6 +1137,19 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
         ON CONFLICT (company_id) DO UPDATE SET cover_url = $2, updated_at = NOW()
       `, [cid, url]);
       return res.json({ cover_url: url, key: result.key });
+    }
+    if (isCategoria) {
+      // O WHERE carrega company_id: a categoria tem que ser DESTA empresa.
+      // Zero linhas = id de outra loja (ou inexistente) e nada foi escrito.
+      const { rows } = await db.query(
+        `UPDATE product_categories
+            SET banner_url = $1, updated_at = NOW()
+          WHERE id = $2 AND company_id = $3
+          RETURNING id, name, banner_url`,
+        [url, categoriaId, cid]
+      );
+      if (!rows.length) return res.status(404).json({ error: 'Categoria nao encontrada' });
+      return res.json({ categoria: rows[0], key: result.key });
     }
     const v2 = await hasV2Columns();
     if (!v2) return res.status(409).json({ error: 'Schema v2 ainda não aplicado. Aguarde a migração.' });

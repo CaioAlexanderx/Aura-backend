@@ -50,6 +50,8 @@
 const db = require('../config/database');
 // O rodape institucional e o MESMO nas duas lojas — ver o modulo.
 const { montarRodape } = require('./rodapeInstitucional');
+// A tira de categorias da home: quem entra e regra unica das duas lojas.
+const { montarTira } = require('./tiraDeCategorias');
 
 const DEFAULT_SERVICE_CARDS = [
   { icon: 'truck',   title: 'Entrega rápida',      body: 'Confirmação no WhatsApp', enabled: true },
@@ -599,6 +601,10 @@ async function buildStorefront(config) {
     categorias_barra: categoriasComTotal,
     // [] quando a loja nao tem arvore — o cliente decide qual usar.
     categorias_arvore: arvoreBarra,
+    // Tira de categorias da home: so o primeiro nivel, e so a partir de
+    // tres. Vazia = a loja nao desenha nada, sem precisar saber do
+    // limiar. Ver services/tiraDeCategorias.js.
+    tira_de_categorias: montarTira(arvoreBarra),
     facetas,
     // Migration 309. 0 = nao mostra nada no cartao.
     pix_discount_pct: Number(config.pix_discount_pct) || 0,
