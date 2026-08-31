@@ -171,6 +171,14 @@ function buildDanfeNfceHtml({ emission, company }) {
 
   const chave = emission.chave_acesso || '';
   const chaveFmt = formatChaveAcesso(chave);
+  // A chave são 54 chars (44 dígitos + 10 espaços) numa coluna de 67mm que
+  // comporta ~40 a 7.5pt. Deixar o browser quebrar sozinho corta no meio de um
+  // grupo e muda de posição conforme a fonte. Quebra declarada em 6+5 grupos:
+  // duas linhas sempre iguais, sempre no mesmo lugar.
+  const chaveGrupos = chaveFmt.includes(' ') ? chaveFmt.split(' ') : null;
+  const chaveHtml = chaveGrupos
+    ? escapeHtml(chaveGrupos.slice(0, 6).join(' ')) + '<br>' + escapeHtml(chaveGrupos.slice(6).join(' '))
+    : escapeHtml(chaveFmt);
   const protocolo = emission.protocolo || '';
   const numero = emission.numero || '';
   const serie = emission.serie || '';
@@ -243,14 +251,38 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += `<title>DANFE NFC-e #${numero} — ${escapeHtml(empresaNome)}</title>`;
   html += '<style>';
   // ===== Página térmica 80mm =====
-  html += '@page{size:80mm auto;margin:2mm 3mm}';
+  // Largura (31/08/2026): o cupom saía cortado na direita da térmica do Davi
+  // — "R$ 289,99" virava "R$ 289,", "conforme NCM" virava "conforme N", e o
+  // valor de "Qtd. itens" sumia inteiro. Causa: `margin:2mm 3mm` num @page de
+  // 80mm dá uma content box de 74mm, e a `.page` esticava pra 100% dela no
+  // print. Medindo o scan do cupom impresso (calibrado pelo QR de 28mm), a
+  // cabeça térmica só marca até ~74,5mm da borda esquerda do papel — ou seja,
+  // a coluna terminava em cima do limite físico.
+  //
+  // Agora a largura é declarada, não herdada: @page sem margem (assim
+  // "Padrão" e "Nenhuma" no diálogo do Chrome convergem pro mesmo resultado)
+  // e a `.page` fixa em 72mm — a área imprimível padrão de uma 80mm, com
+  // ~2,5mm de folga pro que foi medido. O recuo lateral vira padding da
+  // própria página, que nenhum ajuste de margem do operador consegue comer.
+  //
+  // ⚠️ .page NÃO muda de largura entre tela e print. Era essa divergência
+  // (74mm no print, 68mm na tela) que escondia o bug: a pré-visualização
+  // mostrava um cupom que cabia, e o papel saía outro.
+  html += '@page{size:80mm auto;margin:0}';
   html += '*{margin:0;padding:0;box-sizing:border-box}';
   html += 'html,body{background:#f3f4f6;color:#000;font-family:"Courier New",Courier,monospace;font-size:8.5pt;line-height:1.2}';
-  html += '.page{width:74mm;margin:0 auto;background:#fff;padding:3mm;color:#000}';
+  // 72mm de página, 2.5mm de recuo de cada lado → coluna de texto de 67mm.
+  // padding-bottom de 8mm é avanço de papel: sem ele a última linha nasce em
+  // cima do serrilhado e a marca do rodapé sai pela metade.
+  html += '.page{width:72mm;max-width:72mm;margin:0 auto;background:#fff;padding:0 2.5mm 8mm;color:#000}';
   // Tela: imita papel térmico
   html += '@media screen{body{padding:24px 0}.page{box-shadow:0 4px 20px rgba(0,0,0,0.15);margin-bottom:24px}.print-toolbar{position:fixed;top:0;left:0;right:0;background:#1a1a2e;color:#fff;padding:10px 20px;display:flex;align-items:center;justify-content:space-between;z-index:1000}.print-toolbar button{background:#7c3aed;color:#fff;border:none;padding:8px 18px;border-radius:6px;font-weight:700;cursor:pointer;font-size:13px}.print-toolbar span{font-size:12px;color:#a78bfa}}';
   // Print: papel cru
-  html += '@media print{body{background:#fff;padding:0}.page{box-shadow:none;width:100%;padding:0}.print-toolbar{display:none!important}}';
+  // Print: papel cru. `margin:0` (e não `0 auto`) porque centralizar 72mm
+  // dentro de 80mm jogaria 4mm da coluna pra fora da cabeça térmica na
+  // direita. Alinhado à esquerda, a coluna ocupa 0..72mm do papel. Largura e
+  // padding NÃO são reescritos aqui — são os mesmos da tela, de propósito.
+  html += '@media print{body{background:#fff;padding:0}.page{box-shadow:none;margin:0}.print-toolbar{display:none!important}}';
   // Helpers
   html += '.center{text-align:center}.small{font-size:7.5pt}.tiny{font-size:6.5pt}.mt1{margin-top:1mm}';
   // Divisores
@@ -258,8 +290,12 @@ function buildDanfeNfceHtml({ emission, company }) {
   html += '.divider-solid{border-top:1px solid #000;margin:1.5mm 0}';
   // Linha row (label + value)
   html += '.row{display:flex;justify-content:space-between;align-items:flex-end;gap:4px;line-height:1.3}';
-  html += '.row span:first-child{flex:1;text-align:left}';
-  html += '.row span:last-child{text-align:right;white-space:nowrap}';
+  // min-width:0 no label: sem isso um flex item não encolhe abaixo do próprio
+  // conteúdo e empurra o valor pra fora da coluna — que é exatamente como
+  // "R$ 289,99" some numa térmica. Agora quem quebra é o label; o valor, que
+  // é o que o consumidor confere, chega inteiro.
+  html += '.row span:first-child{flex:1;min-width:0;text-align:left;overflow-wrap:anywhere}';
+  html += '.row span:last-child{flex:0 0 auto;text-align:right;white-space:nowrap}';
   // Header com logo
   html += '.header{display:flex;align-items:center;gap:2.5mm;margin-bottom:1mm}';
   html += '.header .logo-img,.header .logo-fallback{flex-shrink:0;width:14mm;height:14mm;border-radius:1.5mm;background:#fff}';
@@ -387,7 +423,7 @@ function buildDanfeNfceHtml({ emission, company }) {
 
   // Chave acesso
   page += '<div class="section-label center">Chave de Acesso</div>';
-  page += `<div class="chave">${escapeHtml(chaveFmt)}</div>`;
+  page += `<div class="chave">${chaveHtml}</div>`;
 
   // QR único (SEFAZ) 28mm — SVG inline, sem request
   if (qrSvg) page += `<div class="qr-wrap">${qrSvg}</div>`;
