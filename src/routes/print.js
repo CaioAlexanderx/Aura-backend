@@ -22,6 +22,7 @@ const nuvemfiscal = require('../services/nuvemfiscal');
 const { buildStaticBrCode, validatePixKey } = require('../services/staticPixService');
 const { autoPrintScript } = require('../utils/autoPrintScript');
 const { qrInlineSvg } = require('../utils/qrInline');
+const { buildServiceOrderHtml } = require('../utils/buildServiceOrderHtml');
 
 const NUVEM_URL = process.env.NUVEM_FISCAL_URL || 'https://api.sandbox.nuvemfiscal.com.br';
 
@@ -228,6 +229,85 @@ router.get('/receipt/:saleId/a4', requireAuth, async (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(receiptHTML({ ...data, options: { autoprint: false, width80: false } }));
   } catch (err) { console.error('[print] a4 error:', err.message); res.status(500).json({ error: 'Erro ao gerar cupom' }); }
+});
+
+// ============================================================
+// GET /print/os/:osId — Ordem de Servico em A4
+//
+// Documento da LOJA, nao da Aura: logo e cor vem da marca do lojista, e a
+// Aura fica so numa linha do rodape (pedido de 31/08/2026).
+//
+// Sem gate de os_enabled aqui, de proposito: se a loja desligar o toggle, as
+// OS que ela ja imprimiu e entregou ao cliente continuam precisando de segunda
+// via. Mesmo raciocinio do GET em serviceOrders.js.
+//
+// ?autoprint=1 abre ja no dialogo de impressao.
+// ============================================================
+router.get('/os/:osId', requireAuth, async (req, res) => {
+  try {
+    const companyId = req.params.id;
+
+    const { rows: osRows } = await db.query(
+      `SELECT so.*,
+              c.name  AS customer_name,
+              c.phone AS customer_phone,
+              e.name  AS technician_name
+         FROM service_orders so
+         JOIN customers c ON c.id = so.customer_id
+         LEFT JOIN employees e ON e.id = so.technician_id
+        WHERE so.id = $1 AND so.company_id = $2`,
+      [req.params.osId, companyId]
+    );
+    if (!osRows.length) return res.status(404).json({ error: 'Ordem de servico nao encontrada' });
+
+    const { rows: items } = await db.query(
+      `SELECT kind, description, quantity, unit_price, total_price
+         FROM service_order_items
+        WHERE service_order_id = $1
+        ORDER BY sort_order, created_at`,
+      [req.params.osId]
+    );
+
+    // Armadilha #2: companies nao tem coluna `name`.
+    const { rows: companyRows } = await db.query(
+      `SELECT trade_name, legal_name, cnpj, inscricao_estadual, phone, logo_url,
+              address_street, address_number, address_district,
+              address_city, address_state, address_zip
+         FROM companies WHERE id = $1`,
+      [companyId]
+    );
+
+    // Marca do lojista. Mesma fonte da vitrine e do orcamento do Studio.
+    // Best-effort: se digital_channel_config nao existir neste deploy, o
+    // documento sai com o logo de companies e a cor neutra — melhor que 500.
+    let brand = {};
+    try {
+      const { rows } = await db.query(
+        `SELECT logo_url, primary_color, whatsapp
+           FROM digital_channel_config WHERE company_id = $1`,
+        [companyId]
+      );
+      if (rows.length) brand = rows[0];
+    } catch (e) {
+      if (e.code !== '42P01') throw e;
+    }
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(buildServiceOrderHtml({
+      os: osRows[0],
+      items,
+      company: companyRows[0] || {},
+      brand,
+      autoprint: req.query.autoprint === '1',
+    }));
+  } catch (err) {
+    // 42P01: migration 313 ainda nao aplicada.
+    if (err.code === '42P01') {
+      return res.status(503).json({ error: 'Modulo de Ordem de Servico ainda nao instalado neste ambiente' });
+    }
+    console.error('[print] os error:', err.message);
+    res.status(500).json({ error: 'Erro ao gerar ordem de servico' });
+  }
 });
 
 // ============================================================

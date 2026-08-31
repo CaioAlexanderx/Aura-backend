@@ -27,6 +27,9 @@ router.use('/pdv', require('./scanner'));
 router.use('/pdv', require('./pdv'));
 router.use('/', require('./pdvSettings'));
 router.use('/caixa', require('./caixa'));
+// 31/08/2026 — Ordem de Servico (migration 313). Gate por pdv_settings.os_enabled
+// dentro do proprio router, so na escrita.
+router.use('/service-orders', require('./serviceOrders'));
 // F0 Bloco B2 (30/07/2026): categoryMigration atende /categories/migration/*
 // e /products/brand-candidates + /products/brand/apply, com os caminhos ja
 // completos dentro do proprio router -- por isso monta na RAIZ. Tem que vir
