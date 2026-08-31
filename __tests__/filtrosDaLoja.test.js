@@ -440,7 +440,10 @@ describe('clique durante o carregamento não some', () => {
     // não fazia nada. A ficha "Preto" aparecia na barra e a grade
     // continuava inteira — sem erro, sem sinal, só a impressão de que o
     // filtro não funciona.
-    expect(prods).toContain('pedidoPendente=n');
+    // O pendente virou registro ({n, rolar}) quando a rolagem passou a
+    // depender de quem pediu — a intencao de rolar precisa sobreviver
+    // junto com o numero da pagina.
+    expect(prods).toContain('pedidoPendente={n:n');
     expect(prods).not.toContain('if(carregandoPagina) return;');
   });
 
@@ -449,7 +452,7 @@ describe('clique durante o carregamento não some', () => {
     // que é onde o `indexOf` cru cai.
     const i = prods.indexOf('marcarCarregando(false);');
     expect(i).toBeGreaterThan(0);
-    expect(prods.slice(i, i + 300)).toContain('irParaPagina(p)');
+    expect(prods.slice(i, i + 300)).toContain('irParaPagina(p.n,{rolar:p.rolar})');
   });
 
   test('guarda a ÚLTIMA intenção, não uma fila', () => {

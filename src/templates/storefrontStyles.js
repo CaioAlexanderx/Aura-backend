@@ -133,8 +133,17 @@ h1,h2,h3,h4,.serif{font-family:${fontSerif};font-weight:400;letter-spacing:-0.4p
 .topbar{position:sticky;top:0;z-index:100;background:color-mix(in oklab,var(--sf-bg) 92%,transparent);backdrop-filter:saturate(180%) blur(12px);-webkit-backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--sf-border);padding:0 max(20px,calc((100% - 1280px)/2 + 20px));height:64px;display:flex;align-items:center;justify-content:space-between;gap:12px;}
 .topbar-brand{display:flex;align-items:center;gap:12px;text-decoration:none;flex:0 1 auto;min-width:0;transition:opacity .2s ease;}
 .topbar-logo{width:40px;height:40px;border-radius:10px;background:var(--sf-brand);display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;font-weight:400;font-family:${fontSerif};flex-shrink:0;overflow:hidden;box-shadow:inset 0 0 0 1px color-mix(in oklab,var(--sf-brand) 40%,transparent);}
-.topbar-logo img{width:100%;height:100%;object-fit:cover;}
-.topbar-brand-text{display:flex;flex-direction:column;align-items:flex-start;min-width:0;gap:2px;line-height:1.05;}
+/* O logo da lojista entra INTEIRO. object-fit:cover cortava qualquer
+   logo que nao fosse quadrado — o da Finesse e retangular, com texto, e
+   virava um recorte ilegivel. Com imagem, a caixa larga o quadrado (e o
+   fundo de marca, que e capa da INICIAL, nao moldura de logo) e a
+   largura segue a proporcao do arquivo, ate um teto que protege o
+   espaco do nome e da busca. Sem imagem — ou com img quebrado, que o
+   onerror REMOVE do DOM — o :has() nao casa e a caixa da inicial fica. */
+.topbar-logo:has(img){width:auto;max-width:140px;background:transparent;box-shadow:none;border-radius:0;}
+.topbar-logo img{display:block;height:100%;width:auto;max-width:140px;object-fit:contain;}
+/* gap 4px: o selo Aberta encostava no nome. */
+.topbar-brand-text{display:flex;flex-direction:column;align-items:flex-start;min-width:0;gap:4px;line-height:1.05;}
 .topbar-name{font-size:18px;font-weight:400;font-family:${fontSerif};letter-spacing:-0.3px;color:var(--sf-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
 .topbar-right{display:flex;align-items:center;gap:10px;flex-shrink:0;transition:opacity .2s ease;}
 
@@ -230,7 +239,7 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
    Como a regua e a borda do proprio elemento, ele PRECISA ter a largura
    do texto: dentro de um flex column o botao estica e a linha atravessa
    o banner inteiro. Dai o align-self e o width:fit-content. */
-.banner-cta{display:inline-flex;align-self:flex-start;width:fit-content;align-items:center;gap:8px;padding:4px 0;border:0;border-bottom:1.5px solid currentColor;border-radius:0;background:none;color:inherit;font-family:${fontSans};font-weight:600;font-size:14px;cursor:pointer;letter-spacing:0.2px;transition:opacity .2s;}
+.banner-cta{display:inline-flex;align-self:flex-start;width:fit-content;align-items:center;gap:8px;padding:4px 0;border:0;border-bottom:1.5px solid currentColor;border-radius:0;background:none;color:inherit;font-family:${fontSans};font-weight:600;font-size:14px;cursor:pointer;letter-spacing:0.2px;transition:opacity .2s;text-decoration:none;}
 .banner-cta::after{content:"→";font-size:15px;line-height:1;transition:transform 200ms cubic-bezier(.4,0,.2,1);}
 /* O movimento fica na SETA, nao no bloco todo. Bloco que levanta no hover
    foi exatamente a queixa de "elemento flutuante". */
@@ -278,7 +287,11 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .hero-card-logo{width:64px;height:64px;border-radius:18px;background:var(--sf-brand);color:#fff;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:400;font-family:${fontSerif};flex-shrink:0;border:3px solid var(--sf-bg-card);box-shadow:var(--sf-shadow-sm);overflow:hidden;}
 .hero-section.has-cover .hero-card-logo{margin-top:-26px;}
 .hero-section.no-cover .hero-card-logo{width:54px;height:54px;border-radius:50%;margin-top:-30px;border-width:3px;}
-.hero-card-logo img{width:100%;height:100%;object-fit:cover;}
+/* Mesmo remedio da topbar: contain, nao cover — o logo entra inteiro.
+   Com imagem, o fundo vira o do cartao pra logo com fundo branco nao
+   flutuar num quadrado de marca. */
+.hero-card-logo img{width:100%;height:100%;object-fit:contain;}
+.hero-card-logo:has(img){background:var(--sf-bg-card);}
 .hero-card-info{flex:1;min-width:0;padding-top:4px;}
 .hero-card-name{font-size:22px;font-weight:400;font-family:${fontSerif};letter-spacing:-0.4px;color:var(--sf-ink);line-height:1.2;margin-bottom:4px;}
 .hero-card-tag{font-size:14px;color:var(--sf-ink-2);line-height:1.5;margin-bottom:10px;}
@@ -365,6 +378,8 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
    isso precisa ficar visivel. Regua pontilhada em vez de solida. */
 .cat-todas{border-bottom-style:dotted;border-bottom-color:var(--sf-border-2);color:var(--sf-ink-2);}
 .cat-todas.aberto{border-bottom-style:solid;border-bottom-color:var(--sf-brand);color:var(--sf-ink);}
+/* A resposta ao mouse dos chips (as reguas de hover) mora logo depois
+   da secao da segunda linha — precisa dos dois seletores definidos. */
 
 
 
@@ -468,6 +483,21 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .cat-sub:hover{color:var(--sf-ink);}
 .cat-sub.active{color:var(--sf-ink);border-bottom-color:var(--sf-brand);}
 .cat-sub .cat-num{font-family:${fontMono};font-size:10.5px;font-variant-numeric:tabular-nums;opacity:.6;margin-left:6px;}
+
+/* ── Resposta ao mouse, DENTRO da regua ───────────────────
+   Alem da tinta que sobe, uma regua neutra cresce sob a palavra — a
+   previa do proprio sinal de ativa, no lugar exato onde ele vai ficar.
+   Nada levanta, nada ganha caixa. Neutra (ink-3), nao de marca: a regua
+   de MARCA e o distintivo da categoria aberta, e a previa nao pode se
+   vestir igual ao estado. Peso e tamanho NAO mudam no hover: texto que
+   engorda muda de largura e faz a barra inteira dancar. */
+.cat-chip,.cat-sub{position:relative;}
+.cat-chip::after,.cat-sub::after{content:'';position:absolute;left:2px;right:2px;bottom:-2px;height:2px;background:var(--sf-ink-3);transform:scaleX(0);transform-origin:left center;transition:transform 200ms cubic-bezier(.4,0,.2,1);}
+.cat-chip:hover::after,.cat-sub:hover::after{transform:scaleX(1);}
+.cat-chip.active::after,.cat-sub.active::after{content:none;}
+/* "Todas" responde no proprio pontilhado — ele escurece. Nao ganha a
+   regua dos chips: ela diz "categoria", e "Todas" nao e uma. */
+.cat-todas:hover{border-bottom-color:var(--sf-ink-3);}
 
 /* ── Painel como mapa da loja ─────────────────────────────
    Uma coluna por ramo. O topo do ramo e clicavel: quem quer "tudo em
@@ -737,7 +767,10 @@ body.card-style-image-heavy .product-desc{display:none;}
 /* Rodape institucional: como pagar e o que acontece se nao servir.
    Texto, nao selo de bandeira — nao temos as marcas, e desenhar um
    retangulo escrito "VISA" seria falsificar. */
-.footer-inst{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:22px 40px;padding:22px 0;border-top:1px solid var(--sf-border);margin-bottom:20px;}
+/* align-items:start: os dois blocos abrem a primeira linha na MESMA
+   altura — coluna que estica pra acompanhar a vizinha e o que fazia o
+   par parecer desalinhado. */
+.footer-inst{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:22px 40px;padding:22px 0;border-top:1px solid var(--sf-border);margin-bottom:20px;align-items:start;}
 .footer-inst-tit{font-family:${fontSans};font-size:11px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;color:var(--sf-ink-3);margin-bottom:7px;}
 .footer-inst-txt{font-family:${fontSans};font-size:13px;line-height:1.6;color:var(--sf-ink-2);max-width:52ch;}
 .site-footer-inner{max-width:1280px;margin:0 auto;padding:56px 20px 24px;}
@@ -747,7 +780,16 @@ body.card-style-image-heavy .product-desc{display:none;}
 .site-footer ul{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:9px;}
 .site-footer li{font-size:13px;color:var(--sf-ink-2);cursor:pointer;}
 .site-footer-bottom{border-top:1px solid var(--sf-border);padding-top:22px;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--sf-ink-3);}
-.powered{display:inline-flex;align-items:center;gap:6px;}
+/* Identidade da loja sozinha na primeira linha do rodape. */
+.site-footer-id{margin-bottom:24px;}
+.site-footer-nome{font-size:22px;margin-bottom:6px;}
+.site-footer-addr{font-size:13px;color:var(--sf-ink-2);max-width:380px;}
+/* UMA mencao a Aura, num lugar so: assinatura e convite viraram a mesma
+   frase, no rodape do rodape, e a frase INTEIRA e o link de aquisicao.
+   Antes eram duas — "desenvolvida com" num canto, "quero uma loja" no
+   outro — dizendo a mesma coisa como dois patrocinadores diferentes. */
+.powered{display:inline-flex;align-items:center;gap:5px;text-decoration:none;color:var(--sf-ink-3);transition:color 200ms cubic-bezier(.4,0,.2,1);}
+.powered:hover{color:var(--sf-ink);}
 .powered .brand{font-family:${fontSerif};font-size:14px;color:var(--sf-ink-2);}
 .powered .brand-dot{color:${primary};}
 
@@ -881,6 +923,10 @@ body.card-style-image-heavy .product-desc{display:none;}
   .product-card:hover .product-img img,
   .pd-foto:hover img{transform:none !important;}
   .banner-cta:hover::after{transform:none !important;}
+  /* A regua de hover das categorias nao entra aqui de proposito: com a
+     duracao zerada ela aparece pronta em vez de crescer, que e o
+     feedback sem o movimento. (transform:none a MOSTRARIA sempre —
+     none e identidade, nao "escondida".) */
   .pulse{animation:none !important;}
   /* A opacidade e a cor CONTINUAM: sao feedback, nao movimento. */
   .products-grid{transition-property:opacity !important;transition-duration:120ms !important;}
