@@ -302,6 +302,10 @@ async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
          AND ${filtroDeFoto(exigeFoto)}
     )
     SELECT c.id, c.name AS nome, c.slug, c.path, c.depth,
+           -- banner_url: a tira de categorias da home (so raizes). A
+           -- coluna ja existia e ninguem lia; o catch de 42703 abaixo
+           -- cobre base que ainda nao a tenha.
+           c.banner_url,
            pai.slug AS pai_slug,
            (SELECT COUNT(*)::int FROM visiveis v
               JOIN product_categories d ON d.id = v.category_id
