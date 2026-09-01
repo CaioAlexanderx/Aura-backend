@@ -75,6 +75,7 @@ const router  = express.Router();
 const db      = require('../config/database');
 const crypto  = require('crypto');
 const notify  = require('../services/digitalOrderNotifications');
+const lojaEvents = require('../services/lojaEvents');
 const { asaas } = require('../services/asaasClient');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
@@ -417,6 +418,12 @@ async function handleDigitalOrderPayment(req, res, event, payment, extRef, newPa
     if (shouldConfirmOrder) {
       notify.notifyPaymentConfirmed({ order: { ...order, status: 'confirmed' } })
         .catch(err => console.error('[notify] payment confirmed error:', err.message));
+    }
+    // Evento durável: "o dinheiro caiu" é o momento de separar a mercadoria,
+    // e era invisível no sino. dedupe_key por pedido — webhook reprocessado
+    // (o Asaas reenvia) não vira segundo aviso.
+    if (newPaymentStatus === 'confirmed') {
+      lojaEvents.emit('loja_pedido_pago', { id: orderId, company_id: order.company_id });
     }
 
     res.status(200).json({

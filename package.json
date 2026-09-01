@@ -5,6 +5,9 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "migrate": "node scripts/migrate.js up",
+    "migrate:status": "node scripts/migrate.js status",
+    "migrate:baseline": "node scripts/migrate.js baseline",
     "dev": "nodemon src/index.js",
     "test": "node node_modules/jest/bin/jest.js --forceExit --detectOpenHandles --runInBand",
     "test:watch": "node node_modules/jest/bin/jest.js --watch --runInBand",

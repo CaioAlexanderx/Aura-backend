@@ -45,6 +45,7 @@ const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
 const { calculateShippingQuote } = require('../services/shippingQuote');
 const { COURIER, validateCourierPickup } = require('../services/courierPickup');
+const lojaEvents          = require('../services/lojaEvents');
 
 function validateCpfCnpj(raw) {
   if (!raw) return null;
@@ -386,6 +387,15 @@ router.post('/:slug/order', async (req, res) => {
       pmethod = hasPix ? 'pix' : (hasCard ? 'card' : (hasOnDelivery ? 'on_delivery' : null));
     }
     if (!pmethod) {
+      // 01/09/2026 — dinheiro parado na mesa: o cliente CHEGOU no checkout e
+      // foi barrado porque a loja não tem Pix, cartão nem pagar-na-entrega.
+      // Não há pedido para linkar (ele não chega a existir — é justamente
+      // esse o ponto), então a dedupe_key é por empresa e por DIA: repetir o
+      // aviso a cada tentativa transformaria uma configuração faltando em
+      // enxurrada de sino.
+      const hoje = new Date().toISOString().slice(0, 10);
+      lojaEvents.emit('loja_sem_pagamento_configurado', { company_id: cid },
+        { dedupeSuffix: `${cid}:${hoje}` });
       return res.status(400).json({ error: 'Esta loja nao aceita pagamentos no momento' });
     }
     if (pmethod !== 'pix' && pmethod !== 'on_delivery' && pmethod !== 'card') {
@@ -685,6 +695,14 @@ router.post('/:slug/order', async (req, res) => {
         .catch(err => console.error('[storefront] notifyPaymentConfirmed error:', err.message));
     }
 
+    // Eventos duráveis no sino da lojista. 'loja_pedido_novo' já existia como
+    // feed de 24h em /notifications — agora vira linha que só some quando
+    // alguém lê. O de portador nasce aqui porque courier_name é preenchido no
+    // checkout pelo CLIENTE e por nenhum fluxo depois: o aviso é "confira nome
+    // e placa antes de entregar", não "o pacote saiu".
+    lojaEvents.emit('loja_pedido_novo', order);
+    if (courierData) lojaEvents.emit('loja_pedido_saiu_entrega', order);
+
     res.status(201).json({
       order_id:       order.id,
       order_number:   order.order_number,
@@ -747,6 +765,10 @@ router.post('/:slug/order/:oid/upload-proof', async (req, res) => {
       UPDATE digital_orders SET payment_proof_url = $1, payment_proof_uploaded_at = NOW(), updated_at = NOW() WHERE id = $2
     `, [url, oid]);
     res.json({ payment_proof_url: url, key: result.key });
+
+    // Comprovante EXIGE conferência humana e até 01/09/2026 não avisava
+    // ninguém: o comprovante ficava no pedido esperando alguém abrir a aba.
+    lojaEvents.emit('loja_comprovante_enviado', order);
   } catch (err) {
     console.error('[storefront] upload-proof error:', err.message);
     res.status(500).json({ error: 'Erro ao enviar comprovante' });

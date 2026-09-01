@@ -9,12 +9,18 @@
 //
 // fix (22/05/2026): approve-payment chama notifyPaymentConfirmed para
 // enviar e-mail de confirmação ao cliente após aprovação manual do Pix.
+//
+// 01/09/2026: os mesmos três pontos passam a gravar EVENTO DURÁVEL no sino
+// (services/lojaEvents.js). notify.* fala com o CLIENTE (e-mail/push); os
+// lojaEvents.emit falam com a LOJISTA e ficam no app até serem lidos —
+// antes disso, o que acontecia depois do pedido não aparecia em lugar nenhum.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
 const notify = require('../services/digitalOrderNotifications');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
+const lojaEvents = require('../services/lojaEvents');
 
 // GET — Lista pedidos com filtro por status e paginação
 router.get('/', async (req, res) => {
@@ -161,6 +167,14 @@ router.patch('/:oid/status', requireRole('client', 'analyst', 'admin'), async (r
     notify.notifyStatusChange(updated[0])
       .catch(err => console.error('[notify] status change error:', err.message));
 
+    // Evento durável no sino. Um por transição — a dedupe_key é por pedido,
+    // então reenviar o mesmo status não vira segundo aviso.
+    if (status === 'delivered') lojaEvents.emit('loja_pedido_entregue', updated[0]);
+    if (status === 'cancelled') lojaEvents.emit('loja_pedido_cancelado', updated[0]);
+    if (status === 'confirmed' && current !== 'confirmed') {
+      lojaEvents.emit('loja_pedido_pago', updated[0]);
+    }
+
   } catch (err) {
     console.error('digital order status update error:', err);
     res.status(500).json({ error: 'Erro ao atualizar status' });
@@ -208,6 +222,8 @@ router.post('/:oid/approve-payment', requireRole('client', 'analyst', 'admin'), 
     notify.notifyStatusChange(updated[0])
       .catch(err => console.error('[notify] approve-payment error:', err.message));
 
+    lojaEvents.emit('loja_pedido_pago', updated[0]);
+
   } catch (err) {
     console.error('[orders] approve-payment error:', err.message);
     res.status(500).json({ error: 'Erro ao aprovar pagamento' });
@@ -252,6 +268,8 @@ router.post('/:oid/reject-payment', requireRole('client', 'analyst', 'admin'), a
 
     notify.notifyStatusChange(updated[0])
       .catch(err => console.error('[notify] reject-payment error:', err.message));
+
+    lojaEvents.emit('loja_pedido_cancelado', updated[0]);
 
   } catch (err) {
     console.error('[orders] reject-payment error:', err.message);

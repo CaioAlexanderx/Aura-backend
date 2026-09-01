@@ -30,8 +30,15 @@ function err(code) {
   return e;
 }
 
+// 01/09/2026: app_notifications passou a ter DUAS leituras por poll —
+// banners (type NOT LIKE 'loja_%') e eventos da loja (type LIKE 'loja_%').
+// Este predicado casava com as duas, então o mock devolvia o mesmo banner
+// nas duas e o unread_count vinha dobrado. O corte por type é o mesmo que a
+// rota usa; ele é o que garante que evento de pedido não seja renderizado
+// como card de endomarketing.
 function isBannerSelect(sql) {
-  return /FROM app_notifications/.test(sql) && /^\s*SELECT/.test(sql);
+  return /FROM app_notifications/.test(sql) && /^\s*SELECT/.test(sql)
+      && /NOT LIKE/.test(sql);
 }
 function isReadAll(sql) {
   return /INSERT INTO notification_reads/.test(sql) && /FROM app_notifications/.test(sql);

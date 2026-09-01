@@ -2,6 +2,17 @@
 builder = "NIXPACKS"
 
 [deploy]
+# 01/09/2026 — migrations passam a rodar AQUI, antes da versao nova subir.
+# Ate hoje nao havia runner nenhum: os .sql eram aplicados a mao e por isso
+# as 310/311 subiram no codigo e nao no banco. preDeployCommand roda uma vez
+# por deploy e, se falhar, o deploy NAO sobe — que e exatamente o que se quer
+# quando o codigo novo depende de uma coluna que ainda nao existe.
+#
+# ATENCAO — passo unico ja feito em producao antes do primeiro deploy:
+#   node scripts/migrate.js baseline
+# (registra as ~315 migrations aplicadas a mao como aplicadas, sem executar).
+# Sem ele o runner RECUSA e explica; ver src/utils/migrationRunner.js.
+preDeployCommand = "node scripts/migrate.js up"
 startCommand = "node src/index.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 60
