@@ -7,7 +7,7 @@
 //  • passa accent_color, dark_mode, font_family ao CSS builder
 //  • passa banners[] + announcement_bar + service_cards[] ao HTML builder
 //  • aplica classes no <body>: sf-dark, card-style-{editorial|minimal|image-heavy}
-//  • injeta JS pra auto-rotação do banner-stage e scrollToProducts
+//  • injeta JS pra auto-rotação do banner-stage
 //
 // v3 (18/05/2026 — Fase 3 PR A):
 //  • banner_rotation_seconds (3–15s, default 7s) lido de site.banner_rotation_seconds
@@ -64,6 +64,10 @@ function buildStorefrontPage(data, slug) {
     headline: escHtml(b.headline || ''),
     body: escHtml(b.body || ''),
     cta: escHtml(b.cta || ''),
+    // Validado (http/https apenas) no parseBanners. O re-map copia campo
+    // a campo — sem esta linha o destino do CTA morreria aqui, como ja
+    // aconteceu com catalog_total.
+    cta_url: b.cta_url ? escHtml(b.cta_url) : '',
     tone: b.tone || 'split',
     tint: b.tint || 'brand',
     image_url: b.image_url ? escHtml(b.image_url) : null,
@@ -94,11 +98,16 @@ function buildStorefrontPage(data, slug) {
     pix_discount_pct: data.pix_discount_pct,
   });
 
+  // O <img> quebrado SAI do DOM (remove(), nao display:none): o CSS usa
+  // .topbar-logo:has(img) pra decidir entre a caixa quadrada da inicial
+  // e a caixa livre do logo, e um img invisivel ainda casaria o :has().
+  // O object-fit dos dois e "contain" (no CSS): cover cortava qualquer
+  // logo que nao fosse quadrado — o da Finesse e retangular, com texto.
   const logoInTopbar = logoUrl
-    ? `<img src="${logoUrl}" alt="" onerror="this.style.display='none';var s=document.getElementById('logoInitial');if(s){s.style.display='flex';}"><span id="logoInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:400;color:#fff;font-family:inherit;"></span>`
+    ? `<img src="${logoUrl}" alt="" onerror="this.remove();var s=document.getElementById('logoInitial');if(s){s.style.display='flex';}"><span id="logoInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:400;color:#fff;font-family:inherit;"></span>`
     : `<span id="logoInitial" style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:400;color:#fff;font-family:inherit;"></span>`;
   const logoInHero = logoUrl
-    ? `<img src="${logoUrl}" alt="" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display='none';var s=document.getElementById('heroInitial');if(s){s.style.display='flex';}"><span id="heroInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:26px;font-weight:400;color:#fff;font-family:inherit;"></span>`
+    ? `<img src="${logoUrl}" alt="" onerror="this.remove();var s=document.getElementById('heroInitial');if(s){s.style.display='flex';}"><span id="heroInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:26px;font-weight:400;color:#fff;font-family:inherit;"></span>`
     : `<span id="heroInitial" style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:26px;font-weight:400;color:#fff;font-family:inherit;"></span>`;
 
   const contactBar = whatsNum ? `
@@ -156,10 +165,9 @@ function buildStorefrontPage(data, slug) {
     stage.addEventListener('touchcancel',function(){ paused = false; }, { passive: true });
     restart();
   }
-  window.scrollToProducts = function(){
-    var el = document.getElementById('productsAnchor');
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
+  // O helper de rolar-ate-a-grade saiu junto com o CTA que so rolava a
+  // pagina: o CTA do banner agora e um <a> com destino real (cta_url)
+  // ou nao existe.
 })();
 </script>`;
 

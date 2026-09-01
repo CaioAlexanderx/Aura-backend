@@ -105,6 +105,14 @@ function parseBanners(raw, fallbackCover, fallbackTagline, fallbackDesc) {
     headline:  typeof b?.headline === 'string'  ? b.headline  : '',
     body:      typeof b?.body === 'string'      ? b.body      : '',
     cta:       typeof b?.cta === 'string'       ? b.cta       : '',
+    // CTA so com destino de verdade. "Ver produtos" que rola 200px ate a
+    // grade que ja esta na tela e ruido fingindo utilidade — o mesmo
+    // motivo do fallback acima, e ele vale pro banner escrito tambem.
+    // Quando o painel mandar cta_url, o CTA vira link; sem destino, o
+    // template nao desenha botao nenhum. So http(s): javascript: e
+    // afins nao passam.
+    cta_url:   (typeof b?.cta_url === 'string' && /^https?:\/\//i.test(b.cta_url.trim()))
+      ? b.cta_url.trim() : '',
     tone:      ['split','editorial','centered'].includes(b?.tone) ? b.tone : 'split',
     tint:      ['brand','accent'].includes(b?.tint) ? b.tint : 'brand',
     image_url: typeof b?.image_url === 'string' && b.image_url ? b.image_url : null,
@@ -653,4 +661,7 @@ module.exports = {
   // Usados pela rota paginada, pra grade nao montar produto de um
   // jeito diferente do payload embutido.
   fetchVariantesPorProduto, montarProdutoPublico,
+  // So pra teste: a regra "CTA apenas com destino http(s) de verdade"
+  // vive no parse, e o teste precisa exercita-la sem subir banco.
+  parseBanners,
 };

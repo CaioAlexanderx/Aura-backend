@@ -57,10 +57,20 @@ function janelaDePaginas(atual,total){
  */
 var pedidoPendente=null;
 
-function irParaPagina(n){
+/**
+ * @param opcoes.rolar false quando o clique veio de um controle que a
+ *   pessoa AINDA esta usando — menu de categorias, filtro de tamanho e
+ *   cor, busca, ordenacao. Rolar ate a grade no meio dessa navegacao
+ *   arranca a pagina da mao dela: clicava numa categoria e a tela
+ *   descia, tirando o proprio menu da vista. Paginacao continua
+ *   rolando: "pagina 2" e um pedido explicito de ver a pagina 2 do
+ *   comeco.
+ */
+function irParaPagina(n,opcoes){
+  var rolar=!(opcoes&&opcoes.rolar===false);
   var total=totalDePaginas();
   n=Math.min(Math.max(1,n),total);
-  if(carregandoPagina){ pedidoPendente=n; return; }
+  if(carregandoPagina){ pedidoPendente={n:n,rolar:rolar}; return; }
   carregandoPagina=true;
   paginaAtual=n;
   marcarCarregando(true);
@@ -87,7 +97,14 @@ function irParaPagina(n){
       PRODUCTS.forEach(function(p){ PROD_MAP[p.id]=p; });
       renderProducts();
       var alvo=document.getElementById('productsAnchor');
-      if(alvo) window.scrollTo({top:alvo.offsetTop-alturaDasBarras()-8,behavior:'smooth'});
+      if(alvo){
+        var topo=alvo.offsetTop-alturaDasBarras()-8;
+        // Sem "rolar" a pagina NUNCA desce — mas sobe ate o topo da
+        // grade se a pessoa ja tinha passado dele: trocar de categoria
+        // no pe da pagina 5 e ficar olhando o MEIO da grade nova e
+        // outra forma de se perder.
+        if(rolar||window.scrollY>topo) window.scrollTo({top:topo,behavior:comportamentoDeRolagem()});
+      }
     })
     .catch(function(){
       var grid=document.getElementById('productsGrid');
@@ -97,7 +114,7 @@ function irParaPagina(n){
       carregandoPagina=false; marcarCarregando(false);
       // O que o usuario pediu enquanto esta rodava. filtro, busca e ordem
       // ja estao no estado do modulo, entao a recarga pega o valor atual.
-      if(pedidoPendente!=null){ var p=pedidoPendente; pedidoPendente=null; irParaPagina(p); }
+      if(pedidoPendente!=null){ var p=pedidoPendente; pedidoPendente=null; irParaPagina(p.n,{rolar:p.rolar}); }
     });
 }
 
@@ -128,8 +145,17 @@ function alturaDasBarras(){
   return h;
 }
 
-/** Qualquer mudanca de filtro volta pra pagina 1. */
-function recarregarDoInicio(){ irParaPagina(1); }
+// Rolagem suave e MOVIMENTO. Quem ligou "reduzir movimento" no sistema
+// recebe o salto seco — mesma regra do bloco reduced-motion do CSS, que
+// nao alcanca o parametro do scrollTo.
+function comportamentoDeRolagem(){
+  return (window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches)?'auto':'smooth';
+}
+
+/** Qualquer mudanca de filtro volta pra pagina 1 — sem rolar: quem
+    chama aqui (categoria, filtro, busca, ordem) esta com a mao num
+    controle que a rolagem tiraria da tela. Ver irParaPagina. */
+function recarregarDoInicio(){ irParaPagina(1,{rolar:false}); }
 
 function setOrdem(v){ ordem=v; recarregarDoInicio(); }
 

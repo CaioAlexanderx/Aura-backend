@@ -120,7 +120,14 @@ function buildHtmlBody({
     const kicker  = b.kicker   ? `<div class="banner-kicker">${b.kicker}</div>` : '';
     const headline = b.headline ? `<h2 class="banner-headline">${b.headline}</h2>` : '';
     const body    = b.body     ? `<p class="banner-body">${b.body}</p>` : '';
-    const cta     = b.cta      ? `<button class="banner-cta" onclick="scrollToProducts()">${b.cta}</button>` : '';
+    // CTA so quando ha destino de verdade (cta_url, validado no builder).
+    // O antigo onclick="scrollToProducts()" rolava ~200px ate uma grade
+    // que ja estava na tela — a decisao do fallback (parseBanners) vale
+    // pro banner escrito tambem. Nova aba porque o carrinho vive em
+    // memoria (state_utils): navegar na mesma aba jogaria a sacola fora.
+    const cta     = (b.cta && b.cta_url)
+      ? `<a class="banner-cta" href="${escHtml(b.cta_url)}" target="_blank" rel="noopener">${b.cta}</a>`
+      : '';
 
     // v3: image-clean — quando há image_url, imagem fica no topo full-bleed
     // (sem scrim, sem SVG decorativo, sem texto overlay) e headline+body+CTA
@@ -292,20 +299,24 @@ ${contactBar}
 
 <footer class="site-footer">
   <div class="site-footer-inner">
-    <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:18px;margin-bottom:24px;">
-      <div>
-        <div style="font-family:inherit;font-size:22px;color:var(--sf-ink);margin-bottom:6px;" class="serif">${siteName}</div>
-        ${addrText ? `<div style="font-size:13px;color:var(--sf-ink-2);max-width:380px;">${addrText}</div>` : ''}
-      </div>
-      <div class="powered">
-        <span style="font-size:11px;color:var(--sf-ink-3);">Loja desenvolvida com</span>
-        <span class="brand">Aura<span class="brand-dot">.</span></span>
-      </div>
+    <!-- Tres andares, um assunto por andar: quem e a loja; como ela
+         atende (pagamento e troca); o juridico + a assinatura. O
+         "Loja desenvolvida com Aura." que dividia a primeira linha com
+         o endereco desceu e se fundiu com o convite de aquisicao —
+         eram DUAS mencoes a Aura dizendo a mesma coisa em dois cantos,
+         e o rodape da lojista abria dividindo palco com a plataforma. -->
+    <div class="site-footer-id">
+      <div class="site-footer-nome serif">${siteName}</div>
+      ${addrText ? `<div class="site-footer-addr">${addrText}</div>` : ''}
     </div>
     ${rodapeInstitucional}
     <div class="site-footer-bottom">
       <span>© ${new Date().getFullYear()} ${siteName}</span>
-      <a href="https://getaura.com.br" target="_blank" style="color:inherit;text-decoration:none;">Quero uma loja como essa</a>
+      <a class="powered" href="https://getaura.com.br" target="_blank" rel="noopener">
+        <span>Loja desenvolvida com</span>
+        <span class="brand">Aura<span class="brand-dot">.</span></span>
+        <span class="powered-cta">— quero a minha</span>
+      </a>
     </div>
   </div>
 </footer>
