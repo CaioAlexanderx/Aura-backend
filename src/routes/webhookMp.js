@@ -58,6 +58,7 @@ const db                   = require('../config/database');
 const { getMpPayment }     = require('../services/mpService');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const notify                = require('../services/digitalOrderNotifications');
+const lojaEvents            = require('../services/lojaEvents');
 
 // Parse "ts=1704908010,v1=618c85345248..." → { ts, v1 } ou null.
 function parseMpSignatureHeader(header) {
@@ -210,6 +211,7 @@ router.post('/', async (req, res) => {
         // Notifica cliente por e-mail que o pagamento (cartão) foi confirmado
         notify.notifyPaymentConfirmed({ order })
           .catch(err => console.error('[webhookMp] notifyPaymentConfirmed (card) error:', err.message));
+        lojaEvents.emit('loja_pedido_pago', order);
       }
       return;
     }
@@ -249,6 +251,7 @@ router.post('/', async (req, res) => {
     // Notifica cliente por e-mail que o pagamento (Pix MP) foi confirmado
     notify.notifyPaymentConfirmed({ order })
       .catch(err => console.error('[webhookMp] notifyPaymentConfirmed (pix) error:', err.message));
+    lojaEvents.emit('loja_pedido_pago', order);
   } catch (err) {
     console.error('[webhookMp] error:', err.message);
   }

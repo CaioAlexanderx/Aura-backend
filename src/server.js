@@ -89,6 +89,11 @@ function startServer() {
     // kill switch IG_DISPATCH_ENABLED=false.
     const { initIgDispatcher } = require('./jobs/igDispatcherJob');
     initIgDispatcher();
+
+    // Loja online (315): Pix vencido sem pagamento — tick 10min. É o único
+    // evento do sino sem gancho de fluxo: ninguém "faz" um Pix expirar.
+    const { initPixExpiradoJob } = require('./jobs/lojaPixExpiradoJob');
+    initPixExpiradoJob();
   });
 }
 

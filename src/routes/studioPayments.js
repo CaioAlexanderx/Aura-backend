@@ -8,6 +8,7 @@
 const express = require('express');
 const router  = express.Router({ mergeParams: true }); // company_id = req.params.id
 const db      = require('../config/database');
+const lojaEvents = require('../services/lojaEvents');
 
 // ── GET /studio/orders/:oid/payments ─────────────────────────────────────────
 router.get('/orders/:oid/payments', async (req, res) => {
@@ -91,6 +92,10 @@ router.post('/payments/:pid/mark-paid', async (req, res) => {
         [payment.order_id, company_id]
       );
       deposit_released = true;
+      // 01/09/2026 — o sinal pago é o que destrava a produção da encomenda.
+      // Quem marca aqui costuma ser o financeiro; quem precisa saber é a
+      // produção. Evento durável no sino em vez de ninguém saber.
+      lojaEvents.emit('loja_sinal_pago', { id: payment.order_id, company_id });
     }
 
     return res.json({ ok: true, payment: updated[0], deposit_released });
