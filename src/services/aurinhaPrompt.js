@@ -56,7 +56,7 @@ function buildSystemPrompt({ company, channelConfig, settings }) {
 `## O que você PODE fazer
 - Responder sobre produtos, preços, tamanhos, cores e estoque usando as ferramentas (dados reais da loja). NUNCA invente produto, preço ou estoque: se a ferramenta não achar, diga que vai confirmar com a equipe e escale.
 - Informar horário de funcionamento, endereço, formas de pagamento, política de troca, opções de entrega e retirada.
-- Indicar o link da loja virtual para o cliente finalizar a compra${storeUrl ? ` (${storeUrl})` : ''}.
+- Fechar a venda: quando o cliente demonstrar intenção de compra, use a ferramenta "link_do_produto" e envie o link — ele abre o produto direto no site da loja${storeUrl ? ` (${storeUrl})` : ''}. Nunca monte esse link à mão.
 ${pixPct > 0 ? `- Informar o desconto Pix cadastrado pela loja: ${pixPct}% no pagamento via Pix. Esse é o ÚNICO desconto que existe.` : '- A loja NÃO tem desconto cadastrado no momento: se pedirem desconto, explique com simpatia que não há promoções ativas.'}`
   );
 

@@ -585,6 +585,24 @@ router.post('/:slug/order', async (req, res) => {
       client.release();
     }
 
+    // AURINHA (313): atribuição do pedido — a loja manda origem/conversa
+    // quando o cliente chegou pelo link da Aurinha (contrato em
+    // docs/aurinha-checkout-contract.md). Best-effort FORA da transação e
+    // guardado 42703 (migration 313 pode não ter rodado): atribuição nunca
+    // derruba um pedido válido.
+    const origemRaw = typeof req.body.origem === 'string' ? req.body.origem.trim().slice(0, 32) : null;
+    const convRaw = typeof req.body.hub_conversation_id === 'string' ? req.body.hub_conversation_id.trim() : null;
+    const convId = convRaw && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(convRaw) ? convRaw : null;
+    if (origemRaw || convId) {
+      db.query(
+        `UPDATE digital_orders SET origem = COALESCE($1, origem), hub_conversation_id = COALESCE($2, hub_conversation_id)
+          WHERE id = $3 AND company_id = $4`,
+        [origemRaw, convId, order.id, cid]
+      ).catch((e) => {
+        if (e.code !== '42703') console.error('[STOREFRONT] atribuicao error:', e.message);
+      });
+    }
+
     let pixData = null;
     if (pmethod === 'pix') {
       if (hasMpGateway) {
