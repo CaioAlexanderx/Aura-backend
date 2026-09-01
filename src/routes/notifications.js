@@ -160,8 +160,24 @@ router.get('/', async (req, res) => {
       studioOrders = rows;
     } catch (_) { /* view studio_orders não disponível neste ambiente */ }
 
-    // Mescla e ordena por data desc
-    const orders = [...digitalOrders, ...studioOrders]
+    // Mescla e ordena por data desc.
+    //
+    // 31/08/2026 — dedup por id: um pedido de digital_orders com
+    // vertical 'studio' vem nas DUAS queries — direto do bloco 2 e via
+    // view studio_orders (primeiro ramo da view é digital_orders WHERE
+    // vertical = 'studio'), com o MESMO id. O card do app usa key
+    // id+source, então não colide — o pedido só aparece duplicado na
+    // gaveta e conta dobrado no unread_count. Deduplicamos aqui (e não
+    // com WHERE vertical <> 'studio' no bloco 2) porque a criação da
+    // view é condicional (208: "deferida" sem marketplace_orders) — num
+    // ambiente sem a view, o filtro SQL faria o pedido sumir do feed.
+    // O card 'studio' vence por vir primeiro: roteia pro fluxo de
+    // produção, o destino certo de um pedido do Studio.
+    const byId = new Map();
+    for (const o of [...studioOrders, ...digitalOrders]) {
+      if (!byId.has(o.id)) byId.set(o.id, o);
+    }
+    const orders = [...byId.values()]
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
       .slice(0, 15);
 
