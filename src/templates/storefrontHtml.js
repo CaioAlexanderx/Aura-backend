@@ -108,7 +108,11 @@ function buildHtmlBody({
     kicker: '', headline: tagline || siteName, body: '', cta: '', cta_url: '', image_url: null,
   }]).map((b, i) => {
     const comFoto = !!b.image_url;
-    const bgStyle = comFoto ? ` style="background-image:url('${b.image_url}')"` : '';
+    // A foto vai em variaveis CSS: --hero-desk sempre, --hero-mob quando
+    // a lojista subiu a versao do celular. O CSS escolhe por largura
+    // (storefrontHomeStyles.js) — sem --hero-mob, o celular usa a larga.
+    const mob = comFoto && b.image_url_mobile ? `;--hero-mob:url('${b.image_url_mobile}')` : '';
+    const bgStyle = comFoto ? ` style="--hero-desk:url('${b.image_url}')${mob}"` : '';
     const kicker  = b.kicker   ? `<div class="hero-kicker">${b.kicker}</div>` : '';
     const headline = b.headline ? `<h1 class="hero-headline">${b.headline}</h1>` : '';
     const body    = b.body     ? `<p class="hero-body">${b.body}</p>` : '';

@@ -87,7 +87,7 @@ function homeStyles({ fontSerif, fontSans, fontMono }) {
 .hero{position:relative;width:100%;height:auto;aspect-ratio:3/1;max-height:640px;min-height:280px;overflow:hidden;background:linear-gradient(135deg,color-mix(in oklab,var(--sf-brand) 16%,transparent),var(--sf-brand-wash) 55%,var(--sf-canvas));}
 .hero-slide{position:absolute;inset:0;opacity:0;transition:opacity .9s var(--sf-ease);pointer-events:none;}
 .hero-slide.active{opacity:1;pointer-events:auto;}
-.hero-bg{position:absolute;inset:0;background-position:center;background-size:cover;background-repeat:no-repeat;}
+.hero-bg{position:absolute;inset:0;background-image:var(--hero-desk);background-position:center;background-size:cover;background-repeat:no-repeat;}
 .hero-slide.com-foto .hero-scrim{position:absolute;inset:0;background:linear-gradient(to right,rgba(32,26,20,.55) 0%,rgba(32,26,20,.18) 52%,transparent 78%);pointer-events:none;}
 .hero-inner{position:absolute;inset:0;display:flex;align-items:center;}
 .hero-text{max-width:1280px;width:100%;margin:0 auto;padding:0 32px;display:flex;flex-direction:column;align-items:flex-start;gap:16px;}
@@ -563,6 +563,8 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
   .search-pill{order:4;flex:1 0 100%;width:auto;margin:0 8px 12px;height:42px;}
   .search-pill:focus-within{width:auto;}
   .hero{height:340px;}
+  /* Banner do celular (image_url_mobile): quadrado, quando a lojista subiu. */
+  .hero-bg{background-image:var(--hero-mob,var(--hero-desk));}
   .hero-slide.com-foto .hero-scrim{background:linear-gradient(to top,rgba(32,26,20,.62) 0%,rgba(32,26,20,.18) 55%,transparent 80%);}
   .hero-inner{align-items:flex-end;}
   .hero-text{padding:20px 20px 30px;gap:10px;}

@@ -16,8 +16,8 @@
 // Foto que nao mora no nosso R2 (URL externa) ou que sumiu de la (404)
 // recebe image_thumb_url = image_url: a loja segue mostrando o que tem
 // e o job nao fica preso nela. Erro de rede/decodificacao fica pendente
-// e volta na proxima subida — ate MAX_POR_RODADA fotos por rodada, pra
-// uma subida nunca virar uma maratona.
+// e volta na proxima subida — ate MAX_POR_RODADA fotos por rodada, uma
+// trava contra loop.
 // ============================================================
 'use strict';
 
@@ -26,7 +26,11 @@ const { uploadToR2, R2_CONFIG } = require('../src/utils/r2Storage');
 
 const LOTE = 40;
 const PARALELO = 3;
-const MAX_POR_RODADA = 400;
+// 02/09, primeira rodada em producao: 1.734 fotos (1.384 produtos + 350
+// variantes) a ~40 por minuto. Com 400 por subida o acervo levaria cinco
+// deploys; como roda em segundo plano e nao segura nada, o teto e so uma
+// trava contra loop — nao contra o tamanho do acervo.
+const MAX_POR_RODADA = 5000;
 
 function chaveDaUrl(url) {
   const pub = String(R2_CONFIG.publicUrl || '').replace(/\/$/, '');
