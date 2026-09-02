@@ -88,6 +88,8 @@ function openCart(){document.getElementById('cartOverlay').classList.add('open')
 function closeCart(){document.getElementById('cartOverlay').classList.remove('open');document.getElementById('cartDrawer').classList.remove('open');document.body.style.overflow='';}
 function filterCat(cat,el){
   currentCat=cat;
+  // Escolher categoria fecha a vista "Novidades"/"Mais vendidos" (home.js).
+  if(typeof vistaEspecial!=='undefined') vistaEspecial=null;
   document.querySelectorAll('.cat-chip').forEach(function(c){c.classList.remove('active');});
   // "el" e null quando o clique veio do painel "Todas as categorias" —
   // ali nao ha chip pra marcar, e renderCategorias() repinta em seguida.

@@ -141,6 +141,10 @@ function showDetail(id){
     return attrOrder.map(function(a){
       var cor=atributoDeCor(a);
       var escolhido=selecionado[a];
+      // O rotulo mostra o NOME da cor, nao o hex cadastrado ("Cor — #92400E"
+      // nao diz nada a cliente; a bolinha ja tem o nome embaixo).
+      var escolhidoRotulo=escolhido;
+      if(escolhido&&cor&&/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(escolhido).trim())) escolhidoRotulo=nomeDaCor(escolhido)||escolhido;
       var opcoes=attrs[a].map(function(val){
         var ok=possivel(a,val), sel=escolhido===val;
         var hex=cor?corDoValor(val):null;
@@ -157,7 +161,7 @@ function showDetail(id){
       }).join('');
       return '<div class="op-grupo">'
         +'<div class="op-label"><span class="sf-label">'+esc(a)
-        +(escolhido?' — <span class="op-escolhido">'+esc(escolhido)+'</span>':'')+'</span>'
+        +(escolhido?' — <span class="op-escolhido">'+esc(escolhidoRotulo)+'</span>':'')+'</span>'
         +(escolhido?'':'<span class="op-pede">escolha</span>')
         +'</div>'
         +'<div class="op-lista'+(cor?' op-lista-cor':'')+'">'+opcoes+'</div>'
