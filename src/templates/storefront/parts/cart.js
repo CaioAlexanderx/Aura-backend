@@ -12,6 +12,28 @@ module.exports = `
  *   A pagina do produto troca o rotulo do proprio botao; o toast repetiria
  *   a mesma informacao um centimetro ao lado.
  */
+function varianteDoProduto(p,variantId){
+  if(!p||!variantId) return null;
+  for(var i=0;i<(p.variants||[]).length;i++){ if(p.variants[i].id===variantId) return p.variants[i]; }
+  return null;
+}
+/**
+ * O nome do item na sacola: "Vestido (Azul marinho / M)". Cor cadastrada
+ * como hex vira o NOME da cor ("Preto") — "#000000" nao diz nada a
+ * cliente — e cada valor ganha a primeira letra maiuscula. E uma funcao so
+ * porque a sacola salva no navegador tambem passa por aqui ao carregar
+ * (sacola.js): item guardado antes de uma correcao nao fica com o rotulo
+ * velho por sete dias.
+ */
+function nomeDoItem(p,v){
+  if(!v) return p.name;
+  var vlabel=(v.values||[]).map(function(x){
+    var val=String(x.value==null?'':x.value);
+    if(typeof atributoDeCor==='function'&&atributoDeCor(x.attribute)&&/^#/.test(val)&&typeof nomeDaCor==='function') return primeiraMaiuscula(nomeDaCor(val)||val);
+    return primeiraMaiuscula(val);
+  }).join(' / ');
+  return vlabel?p.name+' ('+vlabel+')':p.name;
+}
 function addToCart(productId,variantId,opcoes){
   variantId = variantId || null;
   opcoes = opcoes || {};
@@ -23,22 +45,9 @@ function addToCart(productId,variantId,opcoes){
   }
   var key=cartKey(productId,variantId);
   var price=p.price;
-  var name=p.name;
-  if(variantId){
-    var v=null;
-    for(var i=0;i<(p.variants||[]).length;i++){ if(p.variants[i].id===variantId){v=p.variants[i];break;} }
-    if(v){
-      if(v.price_override!=null) price=v.price_override;
-      // Cor cadastrada como hex vira o NOME da cor ("Preto"), como na
-      // pagina do produto — "#000000" na sacola nao diz nada a cliente.
-      var vlabel=(v.values||[]).map(function(x){
-        var val=String(x.value==null?'':x.value);
-        if(typeof atributoDeCor==='function'&&atributoDeCor(x.attribute)&&/^#/.test(val)&&typeof nomeDaCor==='function') return nomeDaCor(val)||val;
-        return val;
-      }).join(' / ');
-      if(vlabel) name=p.name+' ('+vlabel+')';
-    }
-  }
+  var v=varianteDoProduto(p,variantId);
+  if(v&&v.price_override!=null) price=v.price_override;
+  var name=nomeDoItem(p,v);
   if(!cart[key]) cart[key]={key:key,product_id:productId,variant_id:variantId,name:name,price:price,image_url:p.image_url,qty:0};
   cart[key].qty++;
   updateCartUI();renderProducts();

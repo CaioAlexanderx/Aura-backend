@@ -37,7 +37,14 @@ function carregarSacola(){
     if(!d||!d.ts||(Date.now()-d.ts)>VALIDADE_DA_SACOLA){ window.localStorage.removeItem(CHAVE_DA_SACOLA); return; }
     (d.itens||[]).forEach(function(i){
       if(!i||!i.key||!i.product_id||!(i.qty>0)||i.price==null) return;
-      cart[i.key]={ key:i.key, product_id:i.product_id, variant_id:i.variant_id||null, name:i.name||'', price:Number(i.price), image_url:i.image_url||null, qty:Math.round(i.qty) };
+      // O nome e recalculado do catalogo de hoje (nomeDoItem, cart.js): um
+      // rotulo salvo antes de uma correcao ("(#000000)") nao sobrevive na
+      // sacola por sete dias. Variante que sumiu do catalogo fica com o
+      // nome salvo — e melhor que perder a cor.
+      var p=PROD_MAP[i.product_id];
+      var v=p?varianteDoProduto(p,i.variant_id||null):null;
+      var nome=(p&&(v||!i.variant_id))?nomeDoItem(p,v):(i.name||'');
+      cart[i.key]={ key:i.key, product_id:i.product_id, variant_id:i.variant_id||null, name:nome, price:Number(i.price), image_url:i.image_url||null, qty:Math.round(i.qty) };
     });
   }catch(_){}
 }

@@ -14,4 +14,6 @@ function esc(s){var d=document.createElement('div');d.textContent=s;return d.inn
 function cartKey(pid,vid){return pid+(vid?':'+vid:'');}
 function getProductCartQty(pid){return Object.values(cart).filter(function(i){return i.product_id===pid;}).reduce(function(s,i){return s+i.qty;},0);}
 function productHasVariants(p){return !!(p&&p.variants&&p.variants.length>0);}
+/** "azul marinho" (como a lojista digitou) vira "Azul marinho" na loja. */
+function primeiraMaiuscula(s){s=String(s==null?'':s).trim();return s?s.charAt(0).toUpperCase()+s.slice(1):s;}
 `;

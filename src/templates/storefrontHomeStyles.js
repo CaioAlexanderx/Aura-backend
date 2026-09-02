@@ -145,7 +145,9 @@ body.home .cats-wrap{display:none;}
 /* O cartao: selo, preco com parcela, Pix, tamanhos */
 .card-badge{position:absolute;top:10px;left:10px;background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:999px;padding:4px 10px;font-family:${fontMono};font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--sf-ink);pointer-events:none;}
 .product-body{display:flex;flex-direction:column;gap:3px;}
-.product-name{font-size:14.5px;font-weight:500;line-height:1.35;color:var(--sf-ink);}
+/* O nome no card e sans: a serifa fica pro titulo das secoes. A regra
+   antiga (acima) ainda poe a serifa, por isso a fonte e dita aqui. */
+.product-name{font-family:${fontSans};font-size:14.5px;font-weight:500;line-height:1.35;color:var(--sf-ink);}
 .product-price-row{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}
 .product-price{font-family:${fontMono};font-size:15px;font-weight:500;color:var(--sf-ink);}
 .product-parcela{font-size:12px;color:var(--sf-ink-2);}
@@ -250,7 +252,12 @@ body.home .products-layout{grid-template-columns:minmax(0,1fr);}
 /* Na home a lateral nao entra: a grade e o catalogo inteiro, e o filtro
    pertence a pagina de categoria (o cabecalho leva pra la). */
 body.home .filtros-wrap,body.home .filtro-btn-mobile{display:none !important;}
-.filtros-wrap{position:sticky;top:102px;display:flex;flex-direction:column;gap:26px;padding:0;margin:0;}
+/* flex-wrap:nowrap e align-items:stretch desfazem a regra antiga (linha
+   centralizada, que ainda existe acima): sem isso a lateral saia com os
+   grupos centralizados e a folha do celular QUEBRAVA EM DUAS COLUNAS ao
+   passar da altura maxima — o botao "Ver resultados" aparecia no canto de
+   cima, cortado (QA da Finesse, 02/09). */
+.filtros-wrap{position:sticky;top:102px;display:flex;flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:26px;padding:0;margin:0;}
 .filtro-topo{display:none;align-items:center;justify-content:space-between;}
 .filtro-topo-tit{font-family:${fontSerif};font-size:20px;}
 .filtro-fechar{width:44px;height:44px;background:none;border:0;font-size:26px;line-height:1;color:var(--sf-ink);cursor:pointer;}
@@ -299,7 +306,7 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
   .filtros-wrap{position:fixed;left:0;right:0;bottom:0;top:auto;max-height:82vh;overflow-y:auto;background:var(--sf-bg);border-radius:18px 18px 0 0;padding:16px 20px 24px;z-index:190;transform:translateY(100%);transition:transform var(--sf-motion) var(--sf-ease);box-shadow:0 -24px 48px rgba(32,26,20,.18);}
   .filtros-wrap.aberto{transform:translateY(0);}
   .filtro-topo{display:flex;}
-  .filtro-aplicar{display:block;width:100%;padding:15px;background:var(--sf-brand);color:#fff;border:0;border-radius:var(--sf-r);font-family:${fontSans};font-size:15px;font-weight:600;cursor:pointer;}
+  .filtro-aplicar{display:block;width:100%;padding:15px;background:var(--sf-brand);color:#fff;border:0;border-radius:var(--sf-r);font-family:${fontSans};font-size:15px;font-weight:600;cursor:pointer;position:sticky;bottom:0;margin-top:4px;box-shadow:0 -14px 14px var(--sf-bg);}
   .filtros-overlay{position:fixed;inset:0;background:rgba(32,26,20,.5);z-index:180;}
   body:has(.filtros-wrap.aberto) .filtros-overlay{display:block;}
   .pg-num,.pg-seta{min-width:36px;height:36px;padding:0 10px;font-size:12.5px;}
@@ -308,19 +315,19 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
 /* ============================================================
    REDESIGN 09/2026 — pagina do produto (fase 5)
    ============================================================ */
-.pd-topo{position:sticky;top:0;z-index:2;background:color-mix(in oklab,var(--sf-bg) 94%,transparent);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid var(--sf-border);padding:0;}
+.pd-topo{position:sticky;top:0;z-index:2;background:color-mix(in oklab,var(--sf-bg) 94%,transparent);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid var(--sf-border);padding:0;height:auto;}
 .pd-topo-inner{max-width:1280px;margin:0 auto;padding:12px 32px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;}
 .pd-voltar{display:inline-flex;align-items:center;gap:8px;font-family:${fontSans};font-size:13.5px;font-weight:600;color:var(--sf-ink-2);background:none;border:0;padding:8px 0;cursor:pointer;}
 .pd-voltar:hover{color:var(--sf-brand);}
 .pd-crumbs{margin:0;}
-.pd-corpo{max-width:1280px;margin:0 auto;padding:24px 32px 8px;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:48px;align-items:start;}
+.pd-corpo{max-width:1280px;margin:0 auto;padding:24px 32px 8px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:48px;align-items:start;}
 /* Galeria: miniaturas em coluna, foto grande 3:4 no canvas */
 .pd-col-foto{display:flex;gap:14px;}
 .pd-minis{display:flex;flex-direction:column;gap:10px;flex:0 0 76px;margin:0;order:0;}
 .pd-mini{width:76px;aspect-ratio:3/4;height:auto;border-radius:10px;overflow:hidden;border:1px solid var(--sf-border);background:var(--sf-canvas);padding:0;cursor:pointer;transition:border-color var(--sf-motion) var(--sf-ease);}
 .pd-mini img{width:100%;height:100%;object-fit:contain;padding:0;}
 .pd-mini.sel{border:2px solid var(--sf-brand);}
-.pd-foto{position:relative;flex:1;min-width:0;aspect-ratio:3/4;background:var(--sf-canvas);border:1px solid var(--sf-border);border-radius:18px;overflow:hidden;display:flex;align-items:center;justify-content:center;order:1;}
+.pd-foto{position:relative;flex:1;min-width:0;aspect-ratio:3/4;max-height:min(78vh,680px);background:var(--sf-canvas);border:1px solid var(--sf-border);border-radius:18px;overflow:hidden;display:flex;align-items:center;justify-content:center;order:1;}
 .pd-foto img{width:100%;height:100%;object-fit:contain;padding:0;transition:transform 380ms var(--sf-ease);}
 .pd-foto:hover img{transform:scale(1.6);}
 .pd-foto-vazia .product-ph-initials{font-size:clamp(64px,10vw,120px);}
@@ -380,7 +387,14 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
 .pd-rel-tit{font-family:${fontSerif};font-size:30px;font-weight:500;color:var(--sf-ink);margin:0 0 22px;}
 .pd-rel-grade{display:grid;grid-template-columns:repeat(4,1fr);gap:20px 16px;}
 @media(max-width:900px){
-  .pd-topo-inner{padding:10px 16px;}
+  /* A barra tinha altura fixa (60px) e as migalhas quebravam em duas
+     linhas: o nome da peca vazava por cima da foto. Agora "Voltar" fica
+     numa linha, as migalhas noutra que rola de lado, e o nome da peca
+     (que ja e o titulo logo abaixo) sai das migalhas. */
+  .pd-topo-inner{padding:10px 16px;flex-wrap:nowrap;flex-direction:column;align-items:flex-start;gap:2px;}
+  .pd-crumbs{flex-wrap:nowrap;white-space:nowrap;overflow-x:auto;max-width:100%;scrollbar-width:none;}
+  .pd-crumbs::-webkit-scrollbar{display:none;}
+  .pd-crumbs [aria-current],.pd-crumbs .crumbs-sep:nth-last-child(2){display:none;}
   .pd-corpo{grid-template-columns:1fr;gap:24px;padding:16px 16px 8px;}
   .pd-col-foto{flex-direction:column;}
   .pd-minis{flex-direction:row;order:1;flex:none;overflow-x:auto;padding-bottom:2px;}
