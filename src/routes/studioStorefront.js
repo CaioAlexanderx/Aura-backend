@@ -229,7 +229,7 @@ router.get('/:slug/studio/products', async (req, res) => {
     // migration no boot, entao coluna nova sempre tem um intervalo em que
     // o codigo subiu e o banco nao.
     const consultaProdutos = (colsFicha) => db.query(
-      `SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty, created_at,
+      `SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
               ${colsFicha}
               customization_config
          FROM products
@@ -422,6 +422,8 @@ router.get('/:slug/studio/products', async (req, res) => {
           description: p.description || null,
           price: parseFloat(p.price),
           image_url: p.image_url || null,
+          // Migration 317 — miniatura, a mesma da loja comum.
+          thumb_url: p.image_thumb_url || null,
           // S9 — carrossel de fotos. A capa e o indice 0 e espelha
           // image_url; produto sem galeria devolve [] e o consumidor cai
           // na foto unica de antes.

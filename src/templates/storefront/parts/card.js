@@ -53,11 +53,13 @@ function tamanhosDoCartao(p){
 function cardHtml(p,opts){
   opts=opts||{};
   var qty=getProductCartQty(p.id);
-  // Fallback foto: sem image_url no pai, a primeira variante com foto.
-  var displayImg=p.image_url;
+  // A miniatura (ate 640px) quando existe; senao a foto grande.
+  // Fallback foto: sem foto no pai, a primeira variante com foto.
+  var displayImg=p.thumb_url||p.image_url;
   if(!displayImg && p.variants && p.variants.length){
     for(var vi=0;vi<p.variants.length;vi++){
-      if(p.variants[vi].image_url){displayImg=p.variants[vi].image_url;break;}
+      var vf=p.variants[vi].thumb_url||p.variants[vi].image_url;
+      if(vf){displayImg=vf;break;}
     }
   }
   // "contain", nao "cover": cover CORTA a peca. Sem foto, duas iniciais.
