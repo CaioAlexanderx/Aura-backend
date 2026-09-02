@@ -23,7 +23,7 @@ function renderTiraCategorias(){
 
   el.innerHTML='<div class="home-sec-inner">'
     +(typeof cabecalhoDeSecao==='function'
-      ? cabecalhoDeSecao('Compre por categoria','Categorias e contagens vêm direto do estoque — sem peça disponível, a categoria some sozinha.')
+      ? cabecalhoDeSecao('Compre por categoria','Escolha por onde começar.')
       : '')
     +'<div class="tira-cats-inner">'+lista.map(function(c){
       var capa=c.capa_url||c.banner_url;

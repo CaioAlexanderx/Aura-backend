@@ -65,21 +65,21 @@ function renderHome(){
     var lista=HOME.mais_vendidos||[];
     mv.hidden=!lista.length;
     mv.innerHTML=lista.length?'<div class="home-sec-inner">'
-      +cabecalhoDeSecao('Mais vendidos','Ranking automático pelas vendas do Caixa.','Ver tudo',"verTudo('mais_vendidos')")
+      +cabecalhoDeSecao('Mais vendidos','As peças que mais saem daqui.','Ver tudo',"verTudo('mais_vendidos')")
       +'<div class="home-grid">'+lista.map(function(p){return cardHtml(p);}).join('')+'</div></div>':'';
   }
   if(uu){
     var ult=HOME.ultimas_unidades||[];
     uu.hidden=!ult.length;
     uu.innerHTML=ult.length?'<div class="home-sec-inner">'
-      +cabecalhoDeSecao('Últimas unidades','As peças que estão acabando no estoque.')
+      +cabecalhoDeSecao('Últimas unidades','Restam poucas de cada uma.')
       +'<div class="home-linhas">'+ult.map(linhaUltimaHtml).join('')+'</div></div>':'';
   }
   if(nv){
     var nov=HOME.novidades||[];
     nv.hidden=!nov.length;
     nv.innerHTML=nov.length?'<div class="home-sec-inner">'
-      +cabecalhoDeSecao('Acabaram de chegar','Os últimos cadastros do estoque, direto na vitrine.','Ver novidades',"verTudo('novidades')")
+      +cabecalhoDeSecao('Acabaram de chegar','O que entrou por último na loja.','Ver novidades',"verTudo('novidades')")
       +'<div class="home-grid">'+nov.map(function(p){return cardHtml(p);}).join('')+'</div></div>':'';
   }
 }
@@ -254,7 +254,7 @@ function megaHtml(){
         }).join('')
         +'</div>';
     }).join('')
-    +'</div><div class="mega-nota sf-caption">Menu montado pelo cadastro de categorias do estoque — categoria sem peça não aparece.</div></div>';
+    +'</div></div>';
 }
 function abrirMega(){
   var m=document.getElementById('megaMenu'); if(!m||!TEM_ARVORE) return;
@@ -286,8 +286,7 @@ function drawerHtml(){
   }).join('');
   return '<div class="drawer-head"><span class="serif drawer-tit">Categorias</span>'
     +'<button type="button" class="drawer-x" onclick="fecharDrawer()" aria-label="Fechar">&#215;</button></div>'
-    +'<nav class="drawer-nav">'+itens+'</nav>'
-    +'<div class="drawer-nota sf-caption">Categoria sem peça em estoque não aparece.</div>';
+    +'<nav class="drawer-nav">'+itens+'</nav>';
 }
 function abrirDrawer(){
   var d=document.getElementById('drawerMenu'), o=document.getElementById('drawerOverlay');
