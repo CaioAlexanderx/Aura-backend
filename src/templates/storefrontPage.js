@@ -24,8 +24,10 @@ const { linkDeFontes } = require('./storefrontTypography');
 const buildHtmlBody = require('./storefrontHtml');
 const buildScript   = require('./storefrontScript');
 
-const API_BASE = process.env.STOREFRONT_API_BASE_URL
-  || 'https://aura-backend-production-f805.up.railway.app';
+// Lido a cada pagina, e nao uma vez no load do modulo: trocar a variavel
+// no ambiente passa a valer no proximo boot sem depender da ordem em que
+// os modulos foram carregados. Mesma fonte do CSP (routes/storefront.js).
+const { enderecoDaApi } = require('../config/enderecoDaApi');
 
 function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function escJs(s)   { return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/[\n\r]/g,' '); }
@@ -148,7 +150,7 @@ function buildStorefrontPage(data, slug) {
     // builder (services/redesSociais.js).
     redes: (data.contact && data.contact.redes) || [],
   });
-  const script = buildScript(storeData, escJs(slug), API_BASE);
+  const script = buildScript(storeData, escJs(slug), enderecoDaApi());
 
   const bodyClasses = [
     dark ? 'sf-dark' : 'sf-light',

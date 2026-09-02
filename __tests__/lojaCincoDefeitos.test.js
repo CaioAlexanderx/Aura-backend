@@ -108,7 +108,11 @@ describe('o logo da lojista entra inteiro na topbar', () => {
 // ── 3. Rodape ────────────────────────────────────────────
 describe('a Aura aparece UMA vez no rodape, num lugar so', () => {
   const html = pagina({});
-  const foot = html.slice(html.indexOf('<footer'));
+  // Ate o </footer>, e nao ate o fim da pagina: depois dele vem o <script>
+  // da loja, que carrega o endereco da API — e passou a conter
+  // "getaura.com.br" quando o endereco deixou de nomear o provedor
+  // (02/09). Contar a marca ali dentro nao e o que este teste quer dizer.
+  const foot = html.slice(html.indexOf('<footer'), html.indexOf('</footer>') + 9);
 
   test('assinatura e convite viraram uma frase so, e a frase e o link', () => {
     expect((foot.match(/getaura\.com\.br/g) || []).length).toBe(1);

@@ -93,8 +93,11 @@ router.use((req, res, next) => {
   next();
 });
 
-const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
-  || 'https://aura-backend-production-f805.up.railway.app';
+// O endereco publico da API vive em config/enderecoDaApi.js — o mesmo que
+// a pagina injeta. Os dois TEM que concordar: divergiu, o CSP bloqueia a
+// chamada e o sintoma e identico ao de servidor fora do ar.
+const { enderecoDaApi } = require('../config/enderecoDaApi');
+const STOREFRONT_API_BASE = enderecoDaApi();
 
 const STOREFRONT_CSP = [
   "default-src 'self'",

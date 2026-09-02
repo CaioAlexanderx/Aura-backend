@@ -56,6 +56,11 @@ function startServer() {
   server.listen(env.PORT, '0.0.0.0', function() {
     console.log('\n Aura. API — porta ' + env.PORT);
     console.log('   Env:     ' + env.NODE_ENV);
+    // O endereco que a vitrine usa pra chamar a API. Se estiver errado,
+    // as lojas abrem e nao vendem — e o log e onde isso aparece.
+    const { enderecoDaApi, avisarSeNaoConfigurado } = require('./config/enderecoDaApi');
+    console.log('   API:     ' + enderecoDaApi());
+    avisarSeNaoConfigurado(console.warn);
     console.log('   Release: ' + (env.GIT_SHA || 'local'));
     console.log('   Health:  http://localhost:' + env.PORT + '/health\n');
 
