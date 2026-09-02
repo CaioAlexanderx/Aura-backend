@@ -348,21 +348,22 @@ function renderCheckoutStep(){
   });
   var btn=document.getElementById('nextBtn');
   btn.disabled=false;btn.className='next-btn'+(s===3?' green':'');
-  btn.textContent=s===1?'Continuar':s===2?'Ir para pagamento':'Já paguei ✓';
+  btn.textContent=s===1?'Continuar para a entrega':s===2?'Continuar para o pagamento':'Já paguei';
+  var prev=document.getElementById('prevBtn');
+  if(prev) prev.hidden=!(s>1&&s<3);
+  if(typeof renderResumoDoCheckout==='function') renderResumoDoCheckout();
   var sub=getSubtotal(),fee=getFee(),body=document.getElementById('checkoutBody');
   if(s===1){
     var nfceChecked=customerData.request_nfce?'checked':'';
     var cpfDisplay=nfceChecked?'block':'none';
-    body.innerHTML='<div class="order-summary">'
-      +Object.values(cart).map(function(i){return '<div class="summary-row"><span>'+esc(i.name)+' ×'+i.qty+'</span><span>'+fmt(i.price*i.qty)+'</span></div>';}).join('')
-      +'<div class="summary-row total"><span>Total estimado</span><span>'+fmt(sub)+'</span></div></div>'
-      +'<div class="field-group"><label class="field-label">Nome completo *</label><input class="field-input" type="text" id="inp_name" placeholder="Maria da Silva" value="'+(customerData.name||'')+'"></div>'
-      +'<div class="field-row"><div class="field-group"><label class="field-label">WhatsApp *</label><input class="field-input" type="tel" id="inp_phone" placeholder="(12) 99999-0000" value="'+(customerData.phone||'')+'"></div>'
-      +'<div class="field-group"><label class="field-label">E-mail</label><input class="field-input" type="email" id="inp_email" placeholder="opcional" value="'+(customerData.email||'')+'"></div></div>'
-      +'<div style="margin-top:14px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;">'
+    body.innerHTML='<div class="field-group"><label class="field-label">Nome completo</label><input class="field-input" type="text" id="inp_name" placeholder="Como no seu documento" value="'+(customerData.name||'')+'"></div>'
+      +'<div class="field-row"><div class="field-group"><label class="field-label">WhatsApp</label><input class="field-input" type="tel" id="inp_phone" placeholder="(34) 9 9999-9999" value="'+(customerData.phone||'')+'"></div>'
+      +'<div class="field-group"><label class="field-label">E-mail</label><input class="field-input" type="email" id="inp_email" placeholder="voce@email.com (opcional)" value="'+(customerData.email||'')+'"></div></div>'
+      +'<div class="checkout-nota">Usamos o WhatsApp só para avisar sobre o pedido — nada de spam.</div>'
+      +'<div class="nfce-box">'
       +'<label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text-2);">'
       +'<input type="checkbox" id="inp_nfce_check" '+nfceChecked+' style="width:18px;height:18px;accent-color:var(--primary);cursor:pointer;">'
-      +'<span>📄 Quero CPF/CNPJ na nota fiscal</span>'
+      +'<span>Quero CPF/CNPJ na nota fiscal</span>'
       +'</label>'
       +'<div id="cpfBox" style="display:'+cpfDisplay+';margin-top:10px;">'
       +'<input class="field-input" type="text" id="inp_cpf" inputmode="numeric" placeholder="CPF (000.000.000-00) ou CNPJ (00.000.000/0000-00)" value="'+(customerData.customer_cpf_cnpj||'')+'">'
@@ -407,14 +408,10 @@ function renderCheckoutStep(){
     var deliveryEta=SETTINGS.delivery_eta_text||'';
     var pickupAddr=(CONTACT && CONTACT.pickup_address) || (CONTACT && CONTACT.address) || 'Na loja';
     var addrHtml=selectedDelivery==='delivery'?renderAddressForm():'';
-    body.innerHTML='<p style="font-size:12px;color:var(--text-3);margin-bottom:16px;">Como deseja receber?</p>'
-      +'<div class="delivery-opts">'
-      +(pickupOk?'<div class="delivery-opt'+(selectedDelivery==="pickup"?" active":"")+'" id="opt_pickup"><div class="delivery-opt-radio"></div><div class="delivery-opt-icon">🏪</div><div class="delivery-opt-info"><div class="delivery-opt-name">Retirada no local</div><div class="delivery-opt-detail">'+esc(pickupAddr)+'</div>'+(pickupEta?'<div class="delivery-opt-eta">'+esc(pickupEta)+'</div>':'')+'</div><div class="delivery-opt-price">Grátis</div></div>':'')
-      +(deliveryOk?'<div class="delivery-opt'+(selectedDelivery==="delivery"?" active":"")+'" id="opt_delivery"><div class="delivery-opt-radio"></div><div class="delivery-opt-icon">🚚</div><div class="delivery-opt-info"><div class="delivery-opt-name">Entrega a domicílio</div><div class="delivery-opt-detail">'+(SETTINGS.delivery_pricing_mode==='distance'?'Frete calculado por distancia':'Conforme disponibilidade')+'</div>'+(deliveryEta?'<div class="delivery-opt-eta">'+esc(deliveryEta)+'</div>':'')+'</div><div class="delivery-opt-price">'+(fee2?fmt(fee2):'Grátis')+'</div></div>':'')
-      +'</div>'+addrHtml
-      +'<div class="order-summary"><div class="summary-row"><span>Subtotal</span><span>'+fmt(sub)+'</span></div>'
-      +'<div class="summary-row"><span>Entrega</span><span>'+(fee?fmt(fee):'Grátis')+'</span></div>'
-      +'<div class="summary-row total"><span>Total</span><span>'+fmt(sub+fee)+'</span></div></div>';
+    body.innerHTML='<div class="delivery-opts">'
+      +(pickupOk?'<div class="delivery-opt'+(selectedDelivery==="pickup"?" active":"")+'" id="opt_pickup" role="radio" aria-checked="'+(selectedDelivery==="pickup")+'"><div class="delivery-opt-radio"></div><div class="delivery-opt-info"><div class="delivery-opt-name">Retirar na loja</div><div class="delivery-opt-detail">'+esc(pickupAddr)+(pickupEta?' — '+esc(pickupEta):'')+'</div></div><div class="delivery-opt-price gratis">Grátis</div></div>':'')
+      +(deliveryOk?'<div class="delivery-opt'+(selectedDelivery==="delivery"?" active":"")+'" id="opt_delivery" role="radio" aria-checked="'+(selectedDelivery==="delivery")+'"><div class="delivery-opt-radio"></div><div class="delivery-opt-info"><div class="delivery-opt-name">Entrega'+(deliveryEta?' — '+esc(deliveryEta):'')+'</div><div class="delivery-opt-detail">'+(SETTINGS.delivery_pricing_mode==='distance'?'Frete calculado pelo CEP':'Combinado com a loja')+'</div></div><div class="delivery-opt-price'+(fee2?'':' gratis')+'">'+(fee2?fmt(fee2):'Grátis')+'</div></div>':'')
+      +'</div>'+addrHtml;
     var op=document.getElementById('opt_pickup'),od=document.getElementById('opt_delivery');
     if(op) op.addEventListener('click',function(){selectDelivery('pickup');});
     if(od) od.addEventListener('click',function(){selectDelivery('delivery');});
@@ -433,11 +430,13 @@ function renderCheckoutStep(){
     var nMethods=(hasPix?1:0)+(hasOd?1:0)+(hasCard?1:0);
     if(!customerData.payment_method && nMethods>1){
       var opts='';
-      if(hasPix) opts+='<div class="delivery-opt" id="opt_pix_method" style="cursor:pointer;"><div style="background:#32BCAD;border-radius:6px;padding:6px 10px;color:#fff;font-size:11px;font-weight:800;flex-shrink:0;">PIX</div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar com Pix agora</div><div class="delivery-opt-detail">Você paga, a loja confirma o pagamento.</div></div><span style="color:var(--primary);font-size:18px;">→</span></div>';
-      if(hasCard) opts+='<div class="delivery-opt" id="opt_card_method" style="cursor:pointer;"><div style="background:#5C6BC0;border-radius:6px;padding:6px 10px;color:#fff;font-size:11px;font-weight:800;flex-shrink:0;">CARTÃO</div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar com Cartão</div><div class="delivery-opt-detail">Até 3x sem juros. Você será redirecionado para pagar.</div></div><span style="color:var(--primary);font-size:18px;">→</span></div>';
-      if(hasOd) opts+='<div class="delivery-opt" id="opt_od_method" style="cursor:pointer;"><div style="font-size:24px;flex-shrink:0;">💵</div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar na entrega</div><div class="delivery-opt-detail">Combine com a loja: dinheiro, cartão, etc.</div></div><span style="color:var(--primary);font-size:18px;">→</span></div>';
-      body.innerHTML='<p style="font-size:13px;color:var(--text-2);margin-bottom:16px;">Como você quer pagar?</p>'
-        +'<div class="delivery-opts">'+opts+'</div>';
+      var totalSem=sub+fee;
+      var descPix=(typeof descontoPix==='function')?descontoPix(sub):0;
+      var parcTxt=PARCELAS_TXT(totalSem);
+      if(hasPix) opts+='<div class="delivery-opt pix" id="opt_pix_method" role="button"><div class="delivery-opt-radio"></div><div class="delivery-opt-info"><div class="delivery-opt-name">Pix — aprovação na hora</div><div class="delivery-opt-detail">QR Code gerado ao confirmar</div></div><div class="delivery-opt-price pix">'+fmt(totalSem-descPix)+(descPix>0?' · -'+pctDoPix()+'%':'')+'</div></div>';
+      if(hasCard) opts+='<div class="delivery-opt" id="opt_card_method" role="button"><div class="delivery-opt-radio"></div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar com cartão</div><div class="delivery-opt-detail">'+(parcTxt?'Em até '+esc(parcTxt)+' sem juros. ':'')+'Você paga no Mercado Pago e volta pra cá.</div></div><div class="delivery-opt-price">'+fmt(totalSem)+'</div></div>';
+      if(hasOd) opts+='<div class="delivery-opt" id="opt_od_method" role="button"><div class="delivery-opt-radio"></div><div class="delivery-opt-info"><div class="delivery-opt-name">Pagar na entrega</div><div class="delivery-opt-detail">Dinheiro ou maquininha, combinado com a loja</div></div><div class="delivery-opt-price">'+fmt(totalSem)+'</div></div>';
+      body.innerHTML='<div class="delivery-opts">'+opts+'</div>';
       var ep=document.getElementById('opt_pix_method');
       var ecard=document.getElementById('opt_card_method');
       var eod=document.getElementById('opt_od_method');
@@ -484,12 +483,12 @@ function renderCheckoutStep(){
       body.innerHTML='<div class="pix-box">'
         +'<div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:14px;"><span style="background:#32BCAD;border-radius:8px;padding:4px 12px;color:#fff;font-size:12px;font-weight:800;letter-spacing:.5px;">PIX</span><span style="font-size:12px;color:var(--text-3);">Pedido #'+esc(currentOrder.order_number)+'</span></div>'
         +'<div class="pix-qr">'+(qrUrl?'<img src="'+qrUrl+'" alt="QR Pix" style="width:200px;height:200px;border-radius:8px;background:#fff;padding:8px;">':'<div style="font-size:12px;color:var(--text-3);padding:20px;">QR indisponível — use o código abaixo</div>')+'</div>'
-        +'<div style="font-size:26px;font-weight:800;color:var(--text);margin:14px 0 4px;">'+fmt(currentOrder.total)+'</div>'
+        +'<div class="pix-valor">'+fmt(currentOrder.total)+'</div>'
         +'<div style="font-size:11px;color:var(--text-3);margin-bottom:14px;">Copie o código e pague no app do banco</div>'
         +'<div class="pix-key-box"><span class="pix-key" id="pixPayload">'+esc(payload||'Indisponível')+'</span><span class="pix-copy" id="pixCopyBtn">Copiar código</span></div>'
         +'</div>'
-        +'<div style="margin-top:14px;background:var(--bg);border:1.5px dashed var(--border);border-radius:var(--r);padding:14px;">'
-        +'<label for="proofInput" style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;color:var(--text-2);font-weight:600;"><span style="font-size:20px;">📎</span><span id="proofLabel">Anexar comprovante (opcional)</span></label>'
+        +'<div class="proof-box">'
+        +'<label for="proofInput" style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;color:var(--text-2);font-weight:600;"><span id="proofLabel">Anexar comprovante (opcional)</span></label>'
         +'<input type="file" id="proofInput" accept="image/*,application/pdf" style="display:none;">'
         +'<p style="margin-top:8px;font-size:11px;color:var(--text-3);line-height:1.5;">Anexar agiliza a confirmação do lojista.</p>'
         +'</div>';
@@ -497,10 +496,11 @@ function renderCheckoutStep(){
       if(pcb) pcb.addEventListener('click',copyPix);
       var pin=document.getElementById('proofInput');
       if(pin) pin.addEventListener('change',uploadProof);
-      btn.textContent='Já paguei ✓';
+      btn.textContent='Já paguei';
       btn.className='next-btn green';
     }
   }
+  if(typeof renderResumoDoCheckout==='function') renderResumoDoCheckout();
 }
 
 // Renderiza form estruturado de endereco (CEP+ViaCEP, rua, num, bairro, cidade, UF)

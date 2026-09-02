@@ -51,13 +51,16 @@ function updateCartUI(){
   var count=getCount(),sub=getSubtotal(),fee=getFee();
   var badge=document.getElementById('cartBadge');
   badge.textContent=count;badge.classList.toggle('visible',count>0);
+  // A sacola sobrevive a aba (fase 6) e o resumo do checkout acompanha.
+  if(typeof salvarSacola==='function') salvarSacola();
+  if(typeof renderResumoDoCheckout==='function') renderResumoDoCheckout();
   var items=document.getElementById('cartItems'),footer=document.getElementById('cartFooter');
   if(!count){
-    items.innerHTML='<div style="text-align:center;padding:60px 20px;"><div style="font-size:52px;margin-bottom:12px;">🛒</div><div style="font-size:15px;font-weight:700;color:var(--text-2);">Carrinho vazio</div></div>';
+    items.innerHTML='<div class="cart-vazio"><span class="cart-vazio-tit">Sua sacola está vazia</span><span>As peças que você escolher aparecem aqui.</span></div>';
     footer.style.display='none';return;
   }
   items.innerHTML=Object.values(cart).map(function(i){
-    var img=i.image_url?'<img src="'+esc(i.image_url)+'" alt="">':'<span style="font-size:22px;">🛍️</span>';
+    var img=i.image_url?'<img src="'+esc(i.image_url)+'" alt="">':'<span class="product-ph-initials" style="font-size:22px;">'+esc(INICIAIS(i.name))+'</span>';
     return '<div class="cart-item"><div class="cart-item-img">'+img+'</div>'
       +'<div class="cart-item-info"><div class="cart-item-name">'+esc(i.name)+'</div><div class="cart-item-price">'+fmt(i.price)+' × '+i.qty+'</div></div>'
       +'<div class="cart-item-right"><div class="cart-item-total">'+fmt(i.price*i.qty)+'</div>'
@@ -68,6 +71,9 @@ function updateCartUI(){
   document.getElementById('cartSubtotal').textContent=fmt(sub);
   document.getElementById('deliveryLabel').textContent=selectedDelivery==='delivery'?'Entrega':'Retirada';
   document.getElementById('deliveryVal').textContent=fee?fmt(fee):'Grátis';
+  var desc=(typeof descontoPix==='function')?descontoPix(sub):0;
+  var pixRow=document.getElementById('cartPixRow');
+  if(pixRow){ pixRow.hidden=!(desc>0); var v=document.getElementById('cartPixVal'); if(v) v.textContent=fmt(sub-desc+fee)+' no Pix'; }
   document.getElementById('cartTotal').textContent=fmt(sub+fee);
   footer.style.display='block';
 }

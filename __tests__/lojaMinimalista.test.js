@@ -49,6 +49,7 @@ const PODEM_SER_PREENCHIDOS = {
   '.filtro-aplicar': 'ACAO PRINCIPAL da folha de filtros no celular',
   '.filtro-linha.on .filtro-caixa': 'caixa marcada da faixa de preco — estado, nao acao',
   '.pd-comprar.feito': 'confirmacao de adicionado — feedback, nao acao nova (fase 5)',
+  '.step-dot.active,.step-dot.done': 'passo atual e passos feitos do checkout — estado (fase 6)',
 };
 
 describe('preenchimento solido e reservado', () => {

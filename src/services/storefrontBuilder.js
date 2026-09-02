@@ -56,12 +56,36 @@ const { montarTira } = require('./tiraDeCategorias');
 // regras (janela, minimo, limite) moram la, nao aqui nem no template.
 const { montarHome, capasDasCategorias, ehNovo } = require('./homeDaLoja');
 
-const DEFAULT_SERVICE_CARDS = [
-  { icon: 'truck',   title: 'Entrega rápida',      body: 'Confirmação no WhatsApp', enabled: true },
-  { icon: 'pkg',     title: 'Embalagem cuidadosa', body: 'Pronta pra presentear',   enabled: true },
-  { icon: 'shield',  title: 'Pagamento seguro',    body: 'Pix e demais opções',     enabled: true },
-  { icon: 'sparkle', title: 'Curadoria editada',   body: 'Produtos selecionados',   enabled: true },
-];
+/**
+ * Os selos padrao, DERIVADOS do que a lojista ligou (decisao 7, 02/09/2026).
+ *
+ * O design trazia quatro selos fixos ("Envio para todo o Brasil", "Troca
+ * facil — primeira troca gratis"...). Selo que afirma o que a loja nao faz
+ * e pior que selo nenhum: a entrega da Aura e local, nao existe Correios,
+ * e "primeira troca gratis" e promessa da lojista, nao da lei. Cada selo
+ * aqui nasce de uma configuracao real; "Troca em 7 dias" nasce do CDC.
+ * Ela pode reescrever tudo em service_cards.
+ */
+function selosPadrao(cfg) {
+  const c = cfg || {};
+  const selos = [];
+  if (c.has_pix || c.has_card) {
+    selos.push({ icon: 'shield', title: 'Compra segura', body: [c.has_pix ? 'Pix' : null, c.has_card ? 'cartão' : null].filter(Boolean).join(' ou ') + ', pagamento protegido', enabled: true });
+  } else if (c.pay_on_delivery_enabled) {
+    selos.push({ icon: 'shield', title: 'Pague na entrega', body: 'Combinado direto com a loja', enabled: true });
+  }
+  selos.push({ icon: 'pkg', title: 'Troca em até 7 dias', body: 'Conforme o Código de Defesa do Consumidor', enabled: true });
+  if (c.delivery_enabled) {
+    const piso = Number(c.delivery_free_above_amount);
+    selos.push({ icon: 'truck', title: 'Entrega', body: (Number.isFinite(piso) && piso > 0) ? 'Grátis acima de R$ ' + (Number.isInteger(piso) ? piso : piso.toFixed(2).replace('.', ',')) : (c.delivery_eta_text || 'Combinada com a loja'), enabled: true });
+  } else if (c.pickup_enabled !== false) {
+    selos.push({ icon: 'bag', title: 'Retire na loja', body: c.pickup_eta_text || 'Sem custo de envio', enabled: true });
+  }
+  if (c.whatsapp) {
+    selos.push({ icon: 'user', title: 'Atendimento humano', body: 'WhatsApp direto com a loja', enabled: true });
+  }
+  return selos.slice(0, 4);
+}
 
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
@@ -142,13 +166,13 @@ function destinoDoCta(raw) {
   return '';
 }
 
-function parseServiceCards(raw) {
+function parseServiceCards(raw, cfg) {
   let arr = [];
   if (Array.isArray(raw)) arr = raw;
   else if (typeof raw === 'string') {
     try { const p = JSON.parse(raw); if (Array.isArray(p)) arr = p; } catch {}
   }
-  if (!arr.length) arr = DEFAULT_SERVICE_CARDS;
+  if (!arr.length) arr = selosPadrao(cfg);
   return arr.slice(0, 4).map((c) => ({
     icon:    ALLOWED_ICONS.includes(c?.icon) ? c.icon : 'sparkle',
     title:   typeof c?.title === 'string' ? c.title : '',
@@ -687,7 +711,14 @@ async function buildStorefront(config) {
   const payOnDeliveryEnabled = !!config.pay_on_delivery_enabled;
 
   const banners = parseBanners(config.banners, config.cover_url, config.tagline, config.description);
-  const serviceCards = parseServiceCards(config.service_cards);
+  const serviceCards = parseServiceCards(config.service_cards, {
+    has_pix: hasPix, has_card: hasMpGateway && cardEnabled, pay_on_delivery_enabled: payOnDeliveryEnabled,
+    delivery_enabled: config.delivery_enabled || false,
+    delivery_free_above_amount: config.delivery_free_above_amount,
+    delivery_eta_text: config.delivery_eta_text || null,
+    pickup_enabled: config.pickup_enabled !== false, pickup_eta_text: config.pickup_eta_text || null,
+    whatsapp: config.whatsapp || null,
+  });
 
   const businessHours = parseBusinessHours(config.business_hours);
   // always_open chega undefined enquanto a migration 310 nao rodou; o
@@ -820,7 +851,7 @@ module.exports = {
   // com o painel (aura-app, destinoDoCta.ts).
   destinoDoCta,
   // Fase 3: barra de anuncio composta, horario do rodape, CNPJ.
-  anuncioAutomatico, resumoDeHorario, formatarCnpj,
+  anuncioAutomatico, resumoDeHorario, formatarCnpj, selosPadrao,
   // Exportados em 19/08/2026 (S1) para o storefront do Studio montar a
   // MESMA arvore de categorias que a loja comum, em vez de uma segunda
   // implementacao. As duas regras que importam vivem aqui e valem para
