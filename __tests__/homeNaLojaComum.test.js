@@ -102,7 +102,9 @@ describe('hero full-bleed', () => {
   });
   test('a proporcao e 3:1 no desktop (1920x640) e 340px no celular', () => {
     const css = buildStyles('#7a1f3a', null, false, 'classic');
-    expect(css).toContain('.hero{position:relative;width:100%;height:clamp(360px,38vw,540px)');
+    // 3:1 exato: e a proporcao do 1920x640 que o painel pede. O clamp
+    // anterior cortava o banner feito na medida certa.
+    expect(css).toContain('.hero{position:relative;width:100%;height:auto;aspect-ratio:3/1;max-height:640px');
     expect(css).toMatch(/@media\(max-width:600px\)\{[\s\S]*\.hero\{height:340px;\}/);
   });
 });

@@ -78,7 +78,13 @@ function homeStyles({ fontSerif, fontSans, fontMono }) {
 /* ============================================================
    REDESIGN 09/2026 — hero full-bleed 3:1
    ============================================================ */
-.hero{position:relative;width:100%;height:clamp(360px,38vw,540px);overflow:hidden;background:linear-gradient(135deg,color-mix(in oklab,var(--sf-brand) 16%,transparent),var(--sf-brand-wash) 55%,var(--sf-canvas));}
+/* A caixa e EXATAMENTE 3:1 — a proporcao do 1920x640 que o painel pede.
+   Vinha de clamp(360px,38vw,540px), que dava 2,67:1 a 1440 e 3,56:1 a
+   1920: o banner que a lojista fez na medida certa era cortado nas
+   laterais num monitor e em cima/embaixo no outro (Finesse, 02/09). Teto
+   de 640px: acima de 1920 de largura a arte nao e ampliada alem do
+   tamanho em que foi feita. */
+.hero{position:relative;width:100%;height:auto;aspect-ratio:3/1;max-height:640px;min-height:280px;overflow:hidden;background:linear-gradient(135deg,color-mix(in oklab,var(--sf-brand) 16%,transparent),var(--sf-brand-wash) 55%,var(--sf-canvas));}
 .hero-slide{position:absolute;inset:0;opacity:0;transition:opacity .9s var(--sf-ease);pointer-events:none;}
 .hero-slide.active{opacity:1;pointer-events:auto;}
 .hero-bg{position:absolute;inset:0;background-position:center;background-size:cover;background-repeat:no-repeat;}
