@@ -29,7 +29,13 @@ function addToCart(productId,variantId,opcoes){
     for(var i=0;i<(p.variants||[]).length;i++){ if(p.variants[i].id===variantId){v=p.variants[i];break;} }
     if(v){
       if(v.price_override!=null) price=v.price_override;
-      var vlabel=(v.values||[]).map(function(x){return x.value;}).join(' / ');
+      // Cor cadastrada como hex vira o NOME da cor ("Preto"), como na
+      // pagina do produto — "#000000" na sacola nao diz nada a cliente.
+      var vlabel=(v.values||[]).map(function(x){
+        var val=String(x.value==null?'':x.value);
+        if(typeof atributoDeCor==='function'&&atributoDeCor(x.attribute)&&/^#/.test(val)&&typeof nomeDaCor==='function') return nomeDaCor(val)||val;
+        return val;
+      }).join(' / ');
       if(vlabel) name=p.name+' ('+vlabel+')';
     }
   }
