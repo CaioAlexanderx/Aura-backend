@@ -207,6 +207,9 @@ router.get('/:slug/catalogo', async (req, res) => {
       tamanhos: valoresDeTamanho(req.query.tam),
       cores: await valoresDeCor(cfg.company_id, req.query.cor,
                                 cfg.require_product_image === true),
+      // Faixa de preco (redesign 09/2026). O servico valida.
+      precoMin: req.query.preco_min,
+      precoMax: req.query.preco_max,
     });
 
     // O produto sai na MESMA forma do payload embutido. Sem isto o cartao

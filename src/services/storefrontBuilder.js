@@ -52,6 +52,9 @@ const db = require('../config/database');
 const { montarRodape } = require('./rodapeInstitucional');
 // A tira de categorias da home: quem entra e regra unica das duas lojas.
 const { montarTira } = require('./tiraDeCategorias');
+// Redesign 09/2026: os blocos da home nascem do estoque e do Caixa. As
+// regras (janela, minimo, limite) moram la, nao aqui nem no template.
+const { montarHome, capasDasCategorias, ehNovo } = require('./homeDaLoja');
 
 const DEFAULT_SERVICE_CARDS = [
   { icon: 'truck',   title: 'Entrega rápida',      body: 'Confirmação no WhatsApp', enabled: true },
@@ -111,13 +114,32 @@ function parseBanners(raw, fallbackCover, fallbackTagline, fallbackDesc) {
     // Quando o painel mandar cta_url, o CTA vira link; sem destino, o
     // template nao desenha botao nenhum. So http(s): javascript: e
     // afins nao passam.
-    cta_url:   (typeof b?.cta_url === 'string' && /^https?:\/\//i.test(b.cta_url.trim()))
-      ? b.cta_url.trim() : '',
+    // Redesign 09/2026: alem de http(s), o CTA pode apontar pra uma
+    // categoria DA PROPRIA loja, no formato `#cat=/caminho`. E o destino
+    // que o design pede ("Ver a colecao" -> Vestidos) e a loja resolve
+    // sem sair da pagina — a sacola, que vive no navegador, sobrevive.
+    cta_url:   destinoDoCta(b?.cta_url),
     tone:      ['split','editorial','centered'].includes(b?.tone) ? b.tone : 'split',
     tint:      ['brand','accent'].includes(b?.tint) ? b.tint : 'brand',
     image_url: typeof b?.image_url === 'string' && b.image_url ? b.image_url : null,
     enabled:   b?.enabled !== false,
   })).filter((b) => b.enabled && (b.headline || b.image_url || b.body || b.kicker));
+}
+
+/**
+ * O que conta como destino de CTA: http(s) ou categoria da loja.
+ *
+ * `#cat=/vestidos` e o unico formato interno aceito — o caminho e o
+ * `path` da arvore, o mesmo que a tira e a barra usam pra filtrar. Tudo
+ * que nao for isso nem http(s) (javascript:, data:, caminho solto) vira
+ * vazio, e sem destino o template nao desenha botao nenhum.
+ */
+function destinoDoCta(raw) {
+  const u = typeof raw === 'string' ? raw.trim() : '';
+  if (!u) return '';
+  if (/^https?:\/\//i.test(u)) return u;
+  if (/^#cat=\/[a-z0-9][a-z0-9\-\/]*$/i.test(u)) return u;
+  return '';
 }
 
 function parseServiceCards(raw) {
@@ -277,7 +299,7 @@ function listVisibilityWhere(cidParam) {
 // A pagina nasce com UMA pagina de produtos, nao com o catalogo. Antes
 // eram 500 (419 KB na Finesse) pra desenhar 24. O resto chega pela rota
 // /storefront/:slug/catalogo conforme a cliente navega.
-const { POR_PAGINA, EM_ESTOQUE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias, facetasDoCatalogo } = require('./catalogoPaginado');
+const { POR_PAGINA, EM_ESTOQUE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias, facetasDoCatalogo, faixaDePreco } = require('./catalogoPaginado');
 const LIMITE_DO_PAYLOAD = POR_PAGINA;
 
 async function contarProdutosDaLoja(cid, exigeFoto) {
@@ -363,6 +385,10 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
     category_id:   cat ? cat.id   : null,
     category_slug: cat ? cat.slug : null,
     category_path: cat ? cat.path : null,
+    // Redesign 09/2026 — selo NOVO. Decidido por peca, a partir do
+    // cadastro, na regra de homeDaLoja (14 dias). A vitrine Studio le a
+    // mesma funcao.
+    is_new: ehNovo(p.created_at),
     stock_qty: p.stock_qty, in_stock: inStock, variants: pvariants,
   };
 }
@@ -507,15 +533,61 @@ async function buildStorefront(config) {
   // entram, e o produto só recebe categoria que esteja nesse conjunto --
   // produto compartilhado de outra empresa não pode arrastar a categoria
   // dela para o payload público desta loja.
+  // Faixa de preco (redesign 09/2026): a pagina de categoria desenha as
+  // faixas a partir do menor e do maior preco da loja. null = sem filtro.
+  facetas.preco = await faixaDePreco({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
+
   const categories = await fetchStorefrontCategories(cid);
   const categoryById = {};
   categories.forEach(c => { categoryById[c.id] = c; });
   const primaryLinkByProduct = await fetchPrimaryCategoryLinks(products.map(p => p.id));
 
-  const variantsByProduct = await fetchVariantesPorProduto(products.map(p => p.id));
+  // Blocos da home (redesign 09/2026). As linhas vem cruas do servico e
+  // passam por montarProdutoPublico com os MESMOS mapas da grade — o
+  // cartao de "Mais vendidos" e o cartao da pagina 2 sao o mesmo cartao.
+  // Os produtos dos blocos podem nao estar na pagina 1, entao as
+  // variantes deles sao buscadas junto.
+  const mostrarPrecos = config.show_prices !== false;
+  const homeBruta = await montarHome({
+    cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto,
+  });
+  const idsDaHome = []
+    .concat(homeBruta.mais_vendidos, homeBruta.ultimas_unidades, homeBruta.novidades)
+    .map(p => p.id);
+  const idsComVariante = Array.from(new Set(products.map(p => p.id).concat(idsDaHome)));
+  const variantsByProduct = await fetchVariantesPorProduto(idsComVariante);
+  const linksDaHome = await fetchPrimaryCategoryLinks(idsDaHome);
+
+  const mapear = (p) => montarProdutoPublico(p, {
+    variantsByProduct, categoryById,
+    primaryLinkByProduct: Object.assign({}, linksDaHome, primaryLinkByProduct),
+    mostrarPrecos,
+  });
+  const home = {
+    mais_vendidos:    homeBruta.mais_vendidos.map(p => Object.assign(mapear(p), { vendidos: p.vendidos })),
+    ultimas_unidades: homeBruta.ultimas_unidades.map(p => Object.assign(mapear(p), { restam: p.restam })),
+    novidades:        homeBruta.novidades.map(mapear),
+  };
+
+  // Capa das categorias de topo: banner da lojista, ou a foto da peca
+  // mais vendida da subarvore. A tira ja saia pronta; ganha `capa_url` e
+  // continua mandando `banner_url` pra quem ja le.
+  const tira = montarTira(arvoreBarra);
+  if (tira.length) {
+    let capas = {};
+    try {
+      capas = await capasDasCategorias({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
+    } catch (e) {
+      console.error('[home] capas de categoria falharam (' + e.code + '):', e.message);
+    }
+    for (const c of tira) {
+      c.capa_url = c.banner_url || capas[c.caminho] || null;
+      c.capa_origem = c.banner_url ? 'banner' : (capas[c.caminho] ? 'produto' : null);
+    }
+  }
 
   const { rows: companies } = await db.query(
-    `SELECT trade_name, legal_name, logo_url FROM companies WHERE id = $1`, [cid]);
+    `SELECT trade_name, legal_name, logo_url, cnpj FROM companies WHERE id = $1`, [cid]);
   const company = companies[0] || {};
 
   // Fase 2 (21/05/2026): detecta gateway MP para expor has_card e corrigir has_pix
@@ -556,6 +628,9 @@ async function buildStorefront(config) {
       announcement_bar: config.announcement_bar || '',
       logo_url:      config.logo_url  || company.logo_url || null,
       cover_url:     config.cover_url || null,
+      // Redesign 09/2026: o rodape em tres colunas mostra o CNPJ ao lado
+      // do copyright, como todo e-commerce. Vem de companies, ja lido.
+      cnpj:          company.cnpj || null,
       banners,
       service_cards: serviceCards,
       is_open_now,
@@ -599,8 +674,12 @@ async function buildStorefront(config) {
     },
     products: products.map(p => montarProdutoPublico(p, {
       variantsByProduct, categoryById, primaryLinkByProduct,
-      mostrarPrecos: config.show_prices !== false,
+      mostrarPrecos,
     })),
+    // Redesign 09/2026 — os blocos da home, ja no formato de produto da
+    // grade: { mais_vendidos[], ultimas_unidades[] (com `restam`),
+    // novidades[] (com `is_new`) }. Lista vazia = o bloco nao aparece.
+    home,
     total_products: products.length,
     // Quantos a loja tem de verdade — ver contarProdutosDaLoja.
     catalog_total: catalogoTotal,
@@ -612,7 +691,7 @@ async function buildStorefront(config) {
     // Tira de categorias da home: so o primeiro nivel, e so a partir de
     // tres. Vazia = a loja nao desenha nada, sem precisar saber do
     // limiar. Ver services/tiraDeCategorias.js.
-    tira_de_categorias: montarTira(arvoreBarra),
+    tira_de_categorias: tira,
     facetas,
     // Migration 309. 0 = nao mostra nada no cartao.
     pix_discount_pct: Number(config.pix_discount_pct) || 0,
@@ -647,6 +726,9 @@ module.exports = {
   // computeOpenState ja saia daqui embaixo.
   parseHHMM,
   buildStorefront, parseFeaturedIds, parseHiddenIds, computeOpenState,
+  // Exportado pra teste: o formato interno `#cat=/caminho` e contrato
+  // com o painel (aura-app, destinoDoCta.ts).
+  destinoDoCta,
   // Exportados em 19/08/2026 (S1) para o storefront do Studio montar a
   // MESMA arvore de categorias que a loja comum, em vez de uma segunda
   // implementacao. As duas regras que importam vivem aqui e valem para

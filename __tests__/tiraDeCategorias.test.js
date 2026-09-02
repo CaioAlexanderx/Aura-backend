@@ -111,7 +111,10 @@ describe('as duas lojas leem a mesma tira', () => {
     path.join(__dirname, '..', 'src/services/storefrontBuilder.js'), 'utf8');
 
   test('o payload traz a tira pronta, não a árvore crua', () => {
-    expect(builder).toContain('tira_de_categorias: montarTira(arvoreBarra)');
+    // Redesign 09/2026: a tira ainda sai de montarTira, mas passa antes
+    // por capasDasCategorias (capa_url) — por isso vira variavel.
+    expect(builder).toContain('const tira = montarTira(arvoreBarra)');
+    expect(builder).toContain('tira_de_categorias: tira,');
     expect(builder).toContain("require('./tiraDeCategorias')");
   });
 
