@@ -48,6 +48,7 @@ const PODEM_SER_PREENCHIDOS = {
   '.filtro-op.on': 'tamanho selecionado no filtro da pagina de categoria — estado (fase 4)',
   '.filtro-aplicar': 'ACAO PRINCIPAL da folha de filtros no celular',
   '.filtro-linha.on .filtro-caixa': 'caixa marcada da faixa de preco — estado, nao acao',
+  '.pd-comprar.feito': 'confirmacao de adicionado — feedback, nao acao nova (fase 5)',
 };
 
 describe('preenchimento solido e reservado', () => {
@@ -104,7 +105,7 @@ describe('elevacao no hover: so o clicavel, e sempre com a sombra da marca', () 
   });
 
   test('so o que e clicavel sobe', () => {
-    const clicaveis = ['.product-card', '.checkout-btn', '.next-btn', '.pd-comprar', '.pd-add', '.hero-text .banner-cta', '.tira-cat', '.whatsapp-cta', '.cart-btn', '.home-linha', '.pg-num', '.pg-seta'];
+    const clicaveis = ['.product-card', '.checkout-btn', '.next-btn', '.pd-comprar', '.pd-whats', '.hero-text .banner-cta', '.tira-cat', '.whatsapp-cta', '.cart-btn', '.home-linha', '.pg-num', '.pg-seta'];
     for (const { sel } of levantam) {
       const base = sel.replace(/:hover.*$/, '').replace(/:not\([^)]*\)/g, '').trim();
       expect({ sel, clicavel: clicaveis.includes(base) }).toEqual({ sel, clicavel: true });

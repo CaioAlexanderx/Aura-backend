@@ -298,6 +298,96 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
 }
 
 /* ============================================================
+   REDESIGN 09/2026 — pagina do produto (fase 5)
+   ============================================================ */
+.pd-topo{position:sticky;top:0;z-index:2;background:color-mix(in oklab,var(--sf-bg) 94%,transparent);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid var(--sf-border);padding:0;}
+.pd-topo-inner{max-width:1280px;margin:0 auto;padding:12px 32px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;}
+.pd-voltar{display:inline-flex;align-items:center;gap:8px;font-family:${fontSans};font-size:13.5px;font-weight:600;color:var(--sf-ink-2);background:none;border:0;padding:8px 0;cursor:pointer;}
+.pd-voltar:hover{color:var(--sf-brand);}
+.pd-crumbs{margin:0;}
+.pd-corpo{max-width:1280px;margin:0 auto;padding:24px 32px 8px;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:48px;align-items:start;}
+/* Galeria: miniaturas em coluna, foto grande 3:4 no canvas */
+.pd-col-foto{display:flex;gap:14px;}
+.pd-minis{display:flex;flex-direction:column;gap:10px;flex:0 0 76px;margin:0;order:0;}
+.pd-mini{width:76px;aspect-ratio:3/4;height:auto;border-radius:10px;overflow:hidden;border:1px solid var(--sf-border);background:var(--sf-canvas);padding:0;cursor:pointer;transition:border-color var(--sf-motion) var(--sf-ease);}
+.pd-mini img{width:100%;height:100%;object-fit:contain;padding:0;}
+.pd-mini.sel{border:2px solid var(--sf-brand);}
+.pd-foto{position:relative;flex:1;min-width:0;aspect-ratio:3/4;background:var(--sf-canvas);border:1px solid var(--sf-border);border-radius:18px;overflow:hidden;display:flex;align-items:center;justify-content:center;order:1;}
+.pd-foto img{width:100%;height:100%;object-fit:contain;padding:0;transition:transform 380ms var(--sf-ease);}
+.pd-foto:hover img{transform:scale(1.6);}
+.pd-foto-vazia .product-ph-initials{font-size:clamp(64px,10vw,120px);}
+.pd-zoom-dica{position:absolute;right:14px;bottom:14px;background:color-mix(in oklab,var(--sf-bg) 94%,transparent);border:1px solid var(--sf-border);border-radius:999px;padding:8px 14px;font-size:12px;font-weight:600;color:var(--sf-ink);display:inline-flex;align-items:center;gap:7px;pointer-events:none;}
+.pd-foto:hover .pd-zoom-dica{opacity:0;}
+/* Coluna de informacao */
+.pd-col-info{display:flex;flex-direction:column;gap:20px;}
+.pd-cat{color:var(--sf-brand);margin:0 0 8px;}
+.pd-nome{font-family:${fontSerif};font-size:38px;line-height:1.1;font-weight:500;color:var(--sf-ink);margin:0;letter-spacing:-.3px;}
+.pd-preco-card{background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:16px;padding:20px 22px;display:flex;flex-direction:column;gap:6px;}
+.pd-preco-linha{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;}
+.pd-preco{font-family:${fontMono};font-size:28px;font-weight:500;color:var(--sf-ink);}
+.pd-parcela{font-family:${fontSans};font-size:13.5px;color:var(--sf-ink-2);margin:0;}
+.pd-pix{display:inline-flex;align-items:center;gap:8px;color:var(--sf-pix);font-weight:600;font-size:14px;}
+.op-grupo{margin:0;display:flex;flex-direction:column;gap:10px;}
+.op-label{display:flex;align-items:center;justify-content:space-between;margin:0;}
+.op-escolhido{text-transform:none;letter-spacing:0;color:var(--sf-ink);}
+.op-pede{font-family:${fontSans};font-size:12.5px;font-weight:600;color:var(--sf-brand);text-transform:none;letter-spacing:0;}
+.op-lista{display:flex;flex-wrap:wrap;gap:9px;}
+.op-chip{font-family:${fontSans};font-size:13.5px;font-weight:600;min-width:52px;padding:12px 14px;border-radius:10px;border:1px solid var(--sf-border-2);background:var(--sf-bg-card);color:var(--sf-ink-2);cursor:pointer;text-align:center;transition:all 180ms var(--sf-ease);}
+.op-chip:hover{border-color:var(--sf-brand);color:var(--sf-ink);}
+.op-chip.sel{background:var(--sf-brand);border-color:var(--sf-brand);color:#fff;}
+.op-chip.off{color:var(--sf-ink-3);background:var(--sf-canvas);cursor:not-allowed;text-decoration:line-through;opacity:1;}
+.pd-aviso{font-size:13px;color:var(--sf-ink-2);margin:0;}
+.pd-aviso-ruim{color:#b91c1c;}
+.pd-ultimas{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--sf-urgencia-ink);font-weight:600;}
+.pd-ultimas-dot{width:7px;height:7px;border-radius:50%;background:#d97706;}
+.pd-acoes{display:flex;flex-direction:column;gap:10px;margin:0;}
+@media(min-width:520px){.pd-acoes{flex-direction:column;}.pd-acoes button,.pd-acoes a{flex:none;}}
+.pd-comprar{font-family:${fontSans};font-size:15px;font-weight:600;background:var(--sf-brand);color:#fff;border:0;border-radius:var(--sf-r);padding:16px;cursor:pointer;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease);}
+.pd-comprar:hover:not(.off){transform:translateY(var(--sf-lift)) scale(1.01);box-shadow:var(--sf-shadow-hover);}
+.pd-comprar.feito{background:var(--sf-pix);}
+.pd-comprar.off{opacity:.45;cursor:not-allowed;}
+.pd-whats{display:inline-flex;align-items:center;justify-content:center;gap:9px;font-family:${fontSans};font-size:14px;font-weight:600;background:var(--sf-bg-card);color:var(--sf-pix);border:1px solid color-mix(in oklab,var(--sf-pix) 35%,transparent);border-radius:var(--sf-r);padding:14px;text-decoration:none;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease);}
+.pd-whats:hover{transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
+.pd-frete{background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:16px;padding:18px 20px;display:flex;flex-direction:column;gap:12px;}
+.pd-frete-linha{display:flex;gap:10px;}
+.pd-frete-linha input{flex:1;min-width:0;font-family:${fontMono};font-size:14px;padding:11px 14px;border:1px solid var(--sf-border-2);border-radius:10px;background:var(--sf-bg);color:var(--sf-ink);outline:none;}
+.pd-frete-linha input:focus{border-color:var(--sf-brand);box-shadow:0 0 0 3px color-mix(in oklab,var(--sf-brand) 15%,transparent);}
+.pd-frete-btn{font-family:${fontSans};font-size:13.5px;font-weight:600;background:var(--sf-canvas);color:var(--sf-ink);border:1px solid var(--sf-border-2);border-radius:10px;padding:11px 20px;cursor:pointer;}
+.pd-frete-res{font-size:13.5px;color:var(--sf-ink-2);display:flex;flex-direction:column;gap:6px;}
+.pd-frete-res:empty{display:none;}
+.pd-frete-res.erro{color:#b91c1c;}
+.pd-frete-op{display:flex;justify-content:space-between;gap:12px;color:var(--sf-ink);}
+.pd-frete-gratis{font-family:${fontMono};font-weight:500;color:var(--sf-pix);}
+.pd-retirada{display:flex;flex-direction:column;gap:2px;padding:0 4px;}
+.pd-retirada-tit{font-size:13.5px;font-weight:600;color:var(--sf-ink);}
+.pd-desc{margin:0;padding-top:18px;border-top:1px solid var(--sf-border);display:flex;flex-direction:column;gap:8px;}
+.pd-desc p{font-family:${fontSans};font-size:14.5px;line-height:1.65;color:var(--sf-ink-2);margin:0;max-width:62ch;white-space:pre-line;}
+.pd-ficha{margin:0;border-top:1px solid var(--sf-border);padding-top:18px;display:grid;grid-template-columns:90px 1fr;gap:6px 16px;font-size:13.5px;}
+.pd-ficha-linha{display:contents;}
+.pd-ficha-rot{font-family:${fontSans};font-size:13.5px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--sf-ink-3);}
+.pd-ficha-val{font-family:${fontSans};font-size:13.5px;line-height:1.55;color:var(--sf-ink);white-space:pre-line;}
+.pd-politica{display:flex;gap:10px;align-items:flex-start;background:color-mix(in oklab,var(--sf-brand) 6%,transparent);border-radius:12px;padding:12px 16px;font-size:12.5px;color:var(--sf-ink-2);}
+.pd-politica svg{color:var(--sf-brand);flex:0 0 auto;margin-top:1px;}
+.pd-relacionados{max-width:1280px;margin:64px auto 0;padding:0 32px 56px;border:0;}
+.pd-rel-tit{font-family:${fontSerif};font-size:30px;font-weight:500;color:var(--sf-ink);margin:0 0 22px;}
+.pd-rel-grade{display:grid;grid-template-columns:repeat(4,1fr);gap:20px 16px;}
+@media(max-width:900px){
+  .pd-topo-inner{padding:10px 16px;}
+  .pd-corpo{grid-template-columns:1fr;gap:24px;padding:16px 16px 8px;}
+  .pd-col-foto{flex-direction:column;}
+  .pd-minis{flex-direction:row;order:1;flex:none;overflow-x:auto;padding-bottom:2px;}
+  .pd-mini{flex:0 0 64px;width:64px;}
+  .pd-foto{order:0;border-radius:14px;}
+  .pd-foto:hover img{transform:none;}
+  .pd-zoom-dica{display:none;}
+  .pd-nome{font-size:28px;}
+  .pd-preco{font-size:24px;}
+  .pd-relacionados{margin-top:40px;padding:0 16px 40px;}
+  .pd-rel-tit{font-size:24px;}
+  .pd-rel-grade{grid-template-columns:repeat(2,1fr);gap:16px 10px;}
+}
+
+/* ============================================================
    REDESIGN 09/2026 — celular (390)
    ============================================================ */
 @media(max-width:900px){
