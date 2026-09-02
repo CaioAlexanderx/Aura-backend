@@ -768,7 +768,6 @@ body.card-style-image-heavy .product-desc{display:none;}
 .pd-foto:hover img{transform:scale(1.12);}
 /* O botao confirma a propria acao trocando de rotulo. O fundo lavado
    segura o olho por um instante sem virar outra cor cheia na tela. */
-.pd-add.feito{background:var(--sf-brand-wash);border-color:var(--sf-brand);}
 .pd-minis{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
 .pd-mini{width:64px;height:64px;border-radius:10px;overflow:hidden;border:1px solid var(--sf-border);background:var(--sf-bg-2);padding:0;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1);}
 .pd-mini img{width:100%;height:100%;object-fit:contain;padding:6%;}
@@ -815,12 +814,10 @@ body.card-style-image-heavy .product-desc{display:none;}
    delas e solida. Depois de tirar o preenchimento das categorias, da
    paginacao, do cabecalho e do banner, o par de botoes aqui e o unico
    lugar cheio de cor da jornada inteira, que e onde ele deve estar. */
-.pd-comprar,.pd-add{font-family:${fontSans};font-size:14.5px;font-weight:700;border-radius:var(--sf-r);padding:15px 20px;cursor:pointer;transition:background var(--sf-motion) var(--sf-ease),border-color var(--sf-motion) var(--sf-ease),transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease);border:1.5px solid var(--sf-brand);}
+.pd-comprar{font-family:${fontSans};font-size:14.5px;font-weight:700;border-radius:var(--sf-r);padding:15px 20px;cursor:pointer;transition:background var(--sf-motion) var(--sf-ease),border-color var(--sf-motion) var(--sf-ease),transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease);border:1.5px solid var(--sf-brand);}
 .pd-comprar{background:var(--sf-brand);color:#fff;}
 .pd-comprar:hover:not(.off){transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
-.pd-add{background:transparent;color:var(--sf-brand-ink);}
-.pd-add:hover:not(.off){background:var(--sf-brand-wash);transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
-.pd-comprar.off,.pd-add.off{opacity:.45;cursor:not-allowed;}
+.pd-comprar.off{opacity:.45;cursor:not-allowed;}
 
 .pd-desc{margin-top:28px;padding-top:22px;border-top:1px solid var(--sf-border);}
 .pd-desc-tit{font-family:${fontSans};font-size:12px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--sf-ink-3);margin-bottom:8px;}
@@ -870,7 +867,7 @@ ${homeStyles({ fontSerif, fontSans, fontMono })}
   /* A transicao some, mas o transform tambem precisa sair: sem isto a
      foto ainda cresceria — so que instantaneamente, que e pior. */
   .product-card:hover,.checkout-btn:hover,.next-btn:hover,
-  .pd-comprar:hover,.pd-add:hover,
+  .pd-comprar:hover,.pd-whats:hover,
   .cart-btn:hover,.hero-text .banner-cta:hover,.home-linha:hover,.whatsapp-cta:hover,
   .pd-foto:hover img{transform:none !important;}
   .banner-cta:hover::after{transform:none !important;}
