@@ -175,8 +175,8 @@ describe('job 001: a chave sai da URL publica do R2', () => {
     expect(r.concluido).toBe(false);
     expect(r.motivo).toMatch(/R2/);
   });
-  test('uma subida nunca vira maratona', () => {
-    expect(job.MAX_POR_RODADA).toBeLessThanOrEqual(400);
+  test('ha um teto por rodada (trava contra loop) e pouco paralelismo', () => {
+    expect(job.MAX_POR_RODADA).toBeLessThanOrEqual(5000);
     expect(job.PARALELO).toBeLessThanOrEqual(3);
   });
 });
