@@ -532,7 +532,14 @@ router.post('/:slug/order', async (req, res) => {
         delivery_fee = parseFloat(config.delivery_fee) || 0;
       }
     }
-    const total = subtotal + delivery_fee;
+    // Desconto do Pix (migration 309 anuncia; 316 grava). Calculado AQUI,
+    // nunca confiado no cliente: o percentual e da loja, e o cartao e a
+    // pagina do produto mostram a mesma conta. Frete nao tem desconto.
+    const pixPct = Number(config.pix_discount_pct) || 0;
+    const discount_amount = (pmethod === 'pix' && pixPct > 0)
+      ? Math.round(subtotal * pixPct) / 100
+      : 0;
+    const total = subtotal - discount_amount + delivery_fee;
 
     const initialStatus = pmethod === 'on_delivery' ? 'confirmed' : 'pending_payment';
     const initialPaymentStatus = 'pending';
@@ -549,7 +556,10 @@ router.post('/:slug/order', async (req, res) => {
           ` - CEP ${String(address_zip).replace(/\D/g, '')}`;
       }
 
-      const { rows: [newOrder] } = await client.query(`
+      // As colunas de desconto (316) entram por ultimo e SO quando o banco
+      // ja as tem — o runner aplica antes do deploy, mas base sem a
+      // migration nao pode derrubar o pedido inteiro (armadilha 1).
+      const insertPedido = (comDesconto) => client.query(`
         INSERT INTO digital_orders (
           company_id, order_number, customer_name, customer_phone, customer_email,
           delivery_type, delivery_address, delivery_fee, subtotal, total,
@@ -558,7 +568,7 @@ router.post('/:slug/order', async (req, res) => {
           customer_cpf_cnpj, nfce_requested,
           address_zip, address_street, address_number, address_complement,
           address_neighborhood, address_city, address_state,
-          courier_name, courier_plate
+          courier_name, courier_plate${comDesconto ? ', discount_amount, discount_reason' : ''}
         ) VALUES (
           $1, next_digital_order_number($1), $2, $3, $4,
           $5, $6, $7, $8, $9,
@@ -567,7 +577,7 @@ router.post('/:slug/order', async (req, res) => {
           $14, $15,
           $16, $17, $18, $19,
           $20, $21, $22,
-          $23, $24
+          $23, $24${comDesconto ? ', $25, $26' : ''}
         ) RETURNING *
       `, [
         cid, customer_name, customer_phone, customer_email || null,
@@ -580,7 +590,17 @@ router.post('/:slug/order', async (req, res) => {
         address_state ? String(address_state).toUpperCase() : null,
         courierData ? courierData.courier_name : null,
         courierData ? courierData.courier_plate : null,
-      ]);
+      ].concat(comDesconto ? [discount_amount, discount_amount > 0 ? 'pix' : null] : []));
+      let newOrder;
+      try {
+        ({ rows: [newOrder] } = await insertPedido(true));
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        await client.query('ROLLBACK');
+        await client.query('BEGIN');
+        ({ rows: [newOrder] } = await insertPedido(false));
+        newOrder.discount_amount = discount_amount;
+      }
       order = newOrder;
       for (const item of orderItems) {
         await client.query(`

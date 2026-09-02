@@ -17,6 +17,9 @@ const tiraCategorias = require('./parts/tira_categorias');
 // Depois de categorias e tira: usa CATEGORIAS, filhasDe, irParaCategoria.
 const home          = require('./parts/home');
 const filtros       = require('./parts/filtros');
+// A sacola que sobrevive + o resumo do checkout (fase 6). Antes de cart:
+// cart chama salvarSacola/renderResumoDoCheckout.
+const sacola        = require('./parts/sacola');
 const cart          = require('./parts/cart');
 const checkout      = require('./parts/checkout');
 const pix           = require('./parts/pix');
@@ -50,6 +53,7 @@ function buildScript(storeData, escapedSlug, apiBase) {
        + tiraCategorias
        + home
        + filtros
+       + sacola
        + cart
        + checkout
        + pix
