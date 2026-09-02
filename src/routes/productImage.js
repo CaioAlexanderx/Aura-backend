@@ -10,7 +10,8 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
-const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
+// 02/09/2026: toda foto vira DUAS (grande + miniatura) — fotosDeProduto.js.
+const { salvarFotoEmDoisTamanhos, apagarFoto } = require('../utils/fotosDeProduto');
 
 // Mesma lógica de visibilidade bidirecional de products.js.
 // Produto P visível para empresa X se:
@@ -44,18 +45,16 @@ router.post('/:pid/image', async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
 
     const ownerCid = rows[0].company_id; // company_id real do produto (pode ser da matriz)
-    const ext = (content_type || 'image/jpeg').includes('png') ? 'png' : 'jpg';
-    const key = `${ownerCid}/products/${pid}.${ext}`;
-    const result = await uploadToR2(key, content, content_type || 'image/jpeg');
-    if (!result.success) return res.status(500).json({ error: 'Erro no upload' });
+    const salvo = await salvarFotoEmDoisTamanhos(`${ownerCid}/products/${pid}`, content, content_type);
+    if (!salvo.success) return res.status(500).json({ error: 'Erro no upload' });
 
     // Atualiza pelo id real do produto (sem filtrar company_id pois já validamos acima)
     await db.query(
-      'UPDATE products SET image_url=$1, updated_at=NOW() WHERE id=$2',
-      [result.url, pid]
+      'UPDATE products SET image_url=$1, image_thumb_url=$2, updated_at=NOW() WHERE id=$3',
+      [salvo.image_url, salvo.image_thumb_url, pid]
     );
 
-    res.json({ image_url: result.url, key: result.key });
+    res.json({ image_url: salvo.image_url, image_thumb_url: salvo.image_thumb_url, key: salvo.key });
   } catch (err) {
     console.error('[product-image] upload error:', err.message);
     res.status(500).json({ error: 'Erro ao salvar imagem' });
@@ -73,13 +72,11 @@ router.delete('/:pid/image', async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
 
     if (rows[0].image_url) {
-      const ownerCid = rows[0].company_id;
-      const key = rows[0].image_url.split('/').slice(-2).join('/');
-      try { await deleteFromR2(`${ownerCid}/products/${key}`); } catch (_) {}
+      await apagarFoto(`${rows[0].company_id}/products/${pid}`);
     }
 
     await db.query(
-      'UPDATE products SET image_url=NULL, updated_at=NOW() WHERE id=$1',
+      'UPDATE products SET image_url=NULL, image_thumb_url=NULL, updated_at=NOW() WHERE id=$1',
       [pid]
     );
     res.json({ deleted: true });

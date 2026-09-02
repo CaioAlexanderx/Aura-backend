@@ -48,7 +48,7 @@ function addToCart(productId,variantId,opcoes){
   var v=varianteDoProduto(p,variantId);
   if(v&&v.price_override!=null) price=v.price_override;
   var name=nomeDoItem(p,v);
-  if(!cart[key]) cart[key]={key:key,product_id:productId,variant_id:variantId,name:name,price:price,image_url:p.image_url,qty:0};
+  if(!cart[key]) cart[key]={key:key,product_id:productId,variant_id:variantId,name:name,price:price,image_url:p.thumb_url||p.image_url,qty:0};
   cart[key].qty++;
   updateCartUI();renderProducts();
   // O badge pulsa SEMPRE, com ou sem toast: ele e o unico sinal de que o

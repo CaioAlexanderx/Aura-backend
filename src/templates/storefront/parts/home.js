@@ -40,7 +40,8 @@ function fraseDeTamanhos(p){
 }
 
 function linhaUltimaHtml(p){
-  var img=p.image_url||((p.variants||[]).filter(function(v){return v.image_url;})[0]||{}).image_url;
+  var comFoto=(p.variants||[]).filter(function(v){return v.thumb_url||v.image_url;})[0]||{};
+  var img=p.thumb_url||p.image_url||comFoto.thumb_url||comFoto.image_url;
   var thumb=img?'<img src="'+esc(img)+'" alt="" loading="lazy">'
     :'<div class="product-ph-initials home-linha-ini">'+esc(INICIAIS(p.name))+'</div>';
   var fundo=img?'':' style="background:'+FUNDO_CAPA(p.name)+'"';

@@ -439,7 +439,7 @@ async function fetchVariantesPorProduto(productIds) {
   // 23/05/2026: inclui pv.image_url no SELECT (Migration 129).
   const { rows: variantRows } = await db.query(`
     SELECT pv.id, pv.product_id, pv.sku_suffix,
-           pv.price_override, pv.stock_qty, pv.is_active, pv.image_url,
+           pv.price_override, pv.stock_qty, pv.is_active, pv.image_url, pv.image_thumb_url,
            COALESCE(
              json_agg(
                json_build_object('attribute', pvv.attribute_name, 'value', pvv.value)
@@ -463,6 +463,7 @@ async function fetchVariantesPorProduto(productIds) {
       price_override: v.price_override !== null ? parseFloat(v.price_override) : null,
       stock_qty: parseFloat(v.stock_qty),
       image_url: v.image_url || null,
+      thumb_url: v.image_thumb_url || null,
       values: v.values || [],
     });
   }
@@ -479,6 +480,9 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
     id: p.id, name: p.name, description: p.description,
     price: mostrarPrecos ? parseFloat(p.price) : null,
     image_url: p.image_url,
+    // Migration 317 — miniatura (ate 640px) pra grade, home e sacola.
+    // NULL enquanto o job 001 nao passou; o template cai em image_url.
+    thumb_url: p.image_thumb_url || null,
     gallery_urls: Array.isArray(p.gallery_urls) ? p.gallery_urls : [],
     category: p.category,
     // Migration 305 — ficha tecnica. NULL quando a lojista nao preencheu,
@@ -505,7 +509,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
 
   if (featuredIds && featuredIds.length > 0) {
     const sql = `
-      SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty, created_at,
+      SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
              material, medidas, cuidados
       FROM products
       WHERE ${visibility}
@@ -521,7 +525,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
   }
 
   const sql = `
-    SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty, created_at,
+    SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
            material, medidas, cuidados
     FROM products
     WHERE ${visibility}

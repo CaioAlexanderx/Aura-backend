@@ -62,6 +62,11 @@ function startServer() {
     // Iniciar scheduler de relatórios
     const { initReportScheduler } = require('./jobs/reportScheduler');
     initReportScheduler();
+    // Jobs de uma vez so (src/utils/jobRunner.js, arquivos em jobs/):
+    // rodam em segundo plano e ficam registrados em jobs_run. Hoje: as
+    // miniaturas do acervo de fotos (job 001).
+    const { agendarJobs } = require('./utils/jobRunner');
+    agendarJobs({ pool: require('./config/database') });
     // Aura Notas: refresh de status + retransmissão de contingência (S2.4/S3.1)
     const { initNfceRefreshJob } = require('./jobs/nfceRefreshJob');
     initNfceRefreshJob();

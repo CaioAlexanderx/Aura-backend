@@ -35,7 +35,8 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
-const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
+// 02/09/2026: toda foto vira DUAS (grande + miniatura) — fotosDeProduto.js.
+const { salvarFotoEmDoisTamanhos, apagarFoto, chaveBaseDe } = require('../utils/fotosDeProduto');
 
 function visibilityWhere(idParam, cidParam) {
   return `id = ${idParam} AND (company_id = ${cidParam} OR (
@@ -153,18 +154,17 @@ router.post('/:pid/variant-image', async (req, res) => {
     if (!resolved) return res.status(404).json({ error: 'Variante nao encontrada' });
 
     const { variantId, ownerCid } = resolved;
-    const ext = (content_type || 'image/jpeg').includes('png') ? 'png' : 'jpg';
-    const key = `${ownerCid}/products/${pid}/variants/${variantId}.${ext}`;
-    const result = await uploadToR2(key, content, content_type || 'image/jpeg');
-    if (!result.success) return res.status(500).json({ error: 'Erro no upload' });
+    const salvo = await salvarFotoEmDoisTamanhos(`${ownerCid}/products/${pid}/variants/${variantId}`, content, content_type);
+    if (!salvo.success) return res.status(500).json({ error: 'Erro no upload' });
 
     await db.query(
-      'UPDATE product_variants SET image_url = $1, updated_at = NOW() WHERE id = $2',
-      [result.url, variantId]
+      'UPDATE product_variants SET image_url = $1, image_thumb_url = $2, updated_at = NOW() WHERE id = $3',
+      [salvo.image_url, salvo.image_thumb_url, variantId]
     );
 
     res.json({
-      image_url: result.url,
+      image_url: salvo.image_url,
+      image_thumb_url: salvo.image_thumb_url,
       variant_id: variantId,
       color_hex: color_hex || null,
       size_value: size_value || null,
@@ -190,22 +190,10 @@ router.delete('/:pid/variant-image', async (req, res) => {
 
     const { variantId, ownerCid } = resolved;
 
-    const { rows: vRows } = await db.query(
-      'SELECT image_url FROM product_variants WHERE id = $1',
-      [variantId]
-    );
-    const currentUrl = vRows[0]?.image_url;
-    if (currentUrl) {
-      try {
-        const m = currentUrl.match(/\/([^\/]+\/products\/[^\/]+\/variants\/[^\/]+)$/);
-        if (m && m[1]) {
-          await deleteFromR2(m[1]);
-        }
-      } catch (_) { /* swallow */ }
-    }
+    await apagarFoto(`${ownerCid}/products/${pid}/variants/${variantId}`);
 
     await db.query(
-      'UPDATE product_variants SET image_url = NULL, updated_at = NOW() WHERE id = $1',
+      'UPDATE product_variants SET image_url = NULL, image_thumb_url = NULL, updated_at = NOW() WHERE id = $1',
       [variantId]
     );
 
@@ -237,19 +225,18 @@ router.post('/:pid/color-image', async (req, res) => {
     // Upload R2 (1 unico arquivo; key inclui hex normalizado UPPERCASE pra
     // evitar colisao entre cores diferentes do mesmo produto)
     const hexKeyPart = String(color_hex).toUpperCase().replace(/[^0-9A-F]/g, '');
-    const ext = (content_type || 'image/jpeg').includes('png') ? 'png' : 'jpg';
-    const key = `${ownerCid}/products/${pid}/colors/${hexKeyPart}.${ext}`;
-    const result = await uploadToR2(key, content, content_type || 'image/jpeg');
-    if (!result.success) return res.status(500).json({ error: 'Erro no upload' });
+    const salvo = await salvarFotoEmDoisTamanhos(`${ownerCid}/products/${pid}/colors/${hexKeyPart}`, content, content_type);
+    if (!salvo.success) return res.status(500).json({ error: 'Erro no upload' });
 
     // Aplica a mesma URL em todas as variantes da cor
     await db.query(
-      'UPDATE product_variants SET image_url = $1, updated_at = NOW() WHERE id = ANY($2::uuid[])',
-      [result.url, variantIds]
+      'UPDATE product_variants SET image_url = $1, image_thumb_url = $2, updated_at = NOW() WHERE id = ANY($3::uuid[])',
+      [salvo.image_url, salvo.image_thumb_url, variantIds]
     );
 
     res.json({
-      image_url: result.url,
+      image_url: salvo.image_url,
+      image_thumb_url: salvo.image_thumb_url,
       color_hex: String(color_hex).toUpperCase(),
       variants_affected: variantIds.length,
     });
@@ -284,17 +271,14 @@ router.delete('/:pid/color-image', async (req, res) => {
     );
     const currentUrl = vRows[0]?.image_url;
     if (currentUrl) {
-      try {
-        // Padrao /colors/<hex>.<ext> — mais novo. Fallback: variants/<vid>.<ext>
-        const m = currentUrl.match(/\/([^\/]+\/products\/[^\/]+\/(?:colors|variants)\/[^\/]+)$/);
-        if (m && m[1]) {
-          await deleteFromR2(m[1]);
-        }
-      } catch (_) { /* swallow */ }
+      // Padrao /colors/<hex> — mais novo. Fallback: variants/<vid>. A chave
+      // vem da URL sem o "?v=" (chaveBaseDe), e apaga grande + miniatura.
+      const m = String(currentUrl).split('?')[0].match(/\/([^\/]+\/products\/[^\/]+\/(?:colors|variants)\/[^\/?]+)$/);
+      if (m && m[1]) await apagarFoto(chaveBaseDe(m[1]));
     }
 
     await db.query(
-      'UPDATE product_variants SET image_url = NULL, updated_at = NOW() WHERE id = ANY($1::uuid[])',
+      'UPDATE product_variants SET image_url = NULL, image_thumb_url = NULL, updated_at = NOW() WHERE id = ANY($1::uuid[])',
       [variantIds]
     );
 

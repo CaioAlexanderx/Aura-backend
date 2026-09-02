@@ -50,6 +50,8 @@ const CAMPOS_COMPARTILHADOS = [
   'description',
   'price',
   'image_url',
+  // Migration 317 — miniatura. Nasceu nos dois no mesmo PR (02/09).
+  'thumb_url',
   'gallery_urls',
   'category',
   'material',

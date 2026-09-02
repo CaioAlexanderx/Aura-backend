@@ -32,7 +32,7 @@ const LIMITE_NOVIDADES = 8;
 const DIAS_DE_NOVO = 14;
 
 /** As mesmas colunas do builder — o cartão da home é o cartão da grade. */
-const COLUNAS = `id, name, description, price, image_url, gallery_urls, category,
+const COLUNAS = `id, name, description, price, image_url, image_thumb_url, gallery_urls, category,
   stock_qty, stock_min, created_at, material, medidas, cuidados`;
 
 /**
@@ -140,7 +140,7 @@ async function capasDasCategorias({ cid, visibilityWhere, exigeFoto }) {
   // 42702, coluna ambigua. Mesma armadilha que ja derrubou a arvore.
   const sql = `
     WITH pecas AS (
-      SELECT products.id, products.image_url, products.gallery_urls, products.created_at,
+      SELECT products.id, products.image_url, products.image_thumb_url, products.gallery_urls, products.created_at,
              ${VENDIDOS_RECENTES} AS vendidos
         FROM products
        WHERE ${filtrosBase(visibilityWhere, exigeFoto)}
@@ -148,7 +148,7 @@ async function capasDasCategorias({ cid, visibilityWhere, exigeFoto }) {
     )
     SELECT DISTINCT ON (raiz.path)
            raiz.path AS caminho,
-           COALESCE(NULLIF(btrim(p.image_url), ''), p.gallery_urls->>0) AS url
+           COALESCE(NULLIF(btrim(p.image_thumb_url), ''), NULLIF(btrim(p.image_url), ''), p.gallery_urls->>0) AS url
       FROM product_categories raiz
       JOIN product_categories d
         ON d.company_id = raiz.company_id AND d.type = raiz.type
