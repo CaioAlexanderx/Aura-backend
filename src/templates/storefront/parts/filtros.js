@@ -23,6 +23,32 @@ var folhaDeFiltrosAberta = false;
 var FAIXAS = (FACETAS.preco && typeof faixasDePreco==='function')
   ? faixasDePreco(FACETAS.preco.min, FACETAS.preco.max) : [];
 
+/**
+ * As opcoes do filtro passam a ser as da CATEGORIA aberta.
+ *
+ * Antes vinham da loja inteira e nunca mudavam: numa loja de calcado isso
+ * punha 40 chips de numeracao (17 ao 44, mais 95/100/110 que sao de
+ * cinto) dentro de "Infantil > Botas", onde so existe do 17 ao 36.
+ *
+ * Devolve true quando alguma selecao caiu fora da categoria nova — quem
+ * chamou refaz a busca, senao a grade continuaria filtrada por um chip
+ * que nao existe mais na lateral.
+ */
+function atualizarFacetas(novas){
+  if(!novas) return false;  // consulta falhou: fica com as opcoes que tinha
+  FACETAS = novas;
+  FAIXAS = (FACETAS.preco && typeof faixasDePreco==='function')
+    ? faixasDePreco(FACETAS.preco.min, FACETAS.preco.max) : [];
+  var antes = tamSel.length + corSel.length + (precoSel!=null?1:0);
+  var tams = (FACETAS.tamanho||[]).map(function(t){ return t.rotulo; });
+  var fams = (FACETAS.cor||[]).map(function(c){ return c.familia; });
+  tamSel = tamSel.filter(function(r){ return tams.indexOf(r) >= 0; });
+  corSel = corSel.filter(function(f){ return fams.indexOf(f) >= 0; });
+  if(precoSel!=null && !FAIXAS[precoSel]) precoSel = null;
+  renderFiltros();
+  return (tamSel.length + corSel.length + (precoSel!=null?1:0)) < antes;
+}
+
 function temFacetas(){
   return (FACETAS.tamanho && FACETAS.tamanho.length > 1)
       || (FACETAS.cor && FACETAS.cor.length > 1)

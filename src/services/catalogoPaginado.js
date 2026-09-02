@@ -184,21 +184,8 @@ async function paginaDoCatalogo({
   // ele e tudo abaixo; `/vestidos/festa/vestido-midi-festa` casa so a
   // folha. O prefixo termina em '/' pra que `/vestidos` nao arraste um
   // futuro `/vestidos-infantil`.
-  const cat = String(categoria == null ? '' : categoria).trim();
-  if (cat && cat !== 'Todos') {
-    if (cat.charAt(0) === '/') {
-      params.push(cat);
-      filtros.push(`EXISTS (
-        SELECT 1 FROM product_category_links l
-          JOIN product_categories c ON c.id = l.category_id
-         WHERE l.product_id = products.id AND l.is_primary
-           AND (c.path = $${params.length} OR left(c.path, length($${params.length}) + 1) = $${params.length} || '/')
-      )`);
-    } else {
-      params.push(cat);
-      filtros.push(`category = $${params.length}`);
-    }
-  }
+  const condCat = condicaoDeCategoria(categoria, params);
+  if (condCat) filtros.push(condCat);
 
   // ── Tamanho e cor ──────────────────────────────────────
   //
@@ -394,7 +381,47 @@ async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
  * So entra variante COM SALDO: filtro que leva a peca esgotada e pior que
  * filtro nenhum.
  */
-async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto }) {
+/**
+ * A condicao que casa a categoria — UMA fonte para as tres consultas.
+ *
+ * Empurra o parametro em `params` e devolve o fragmento (ou null quando
+ * nao ha categoria). Estava escrita so dentro de paginaDoCatalogo; as
+ * facetas e a faixa de preco nao filtravam por categoria e por isso o
+ * filtro lateral mostrava a loja inteira: na Davi Calcados, 40 chips de
+ * numeracao — do 17 ao 44, mais 95/100/110 que sao de CINTO — mesmo
+ * dentro de "Infantil > Botas", onde so existe do 17 ao 36.
+ *
+ * O caminho resolve pai e folha: `/feminino` casa ele e tudo abaixo. O
+ * texto plano continua atendido pra loja que ainda nao tem arvore.
+ */
+function condicaoDeCategoria(categoria, params) {
+  const cat = String(categoria == null ? '' : categoria).trim();
+  if (!cat || cat === 'Todos') return null;
+  params.push(cat);
+  const n = params.length;
+  if (cat.charAt(0) === '/') {
+    return `EXISTS (
+        SELECT 1 FROM product_category_links l
+          JOIN product_categories c ON c.id = l.category_id
+         WHERE l.product_id = products.id AND l.is_primary
+           AND (c.path = $${n} OR left(c.path, length($${n}) + 1) = $${n} || '/')
+      )`;
+  }
+  return `category = $${n}`;
+}
+
+/**
+ * @param categoria caminho (ou texto) da categoria aberta. As opcoes do
+ *        filtro passam a ser as DAQUELA categoria.
+ *
+ * De proposito NAO recebe tamanho/cor: se as opcoes fossem calculadas
+ * com o proprio filtro aplicado, escolher "38" apagaria os outros
+ * numeros da regua e a pessoa nao teria como trocar de tamanho sem
+ * limpar tudo.
+ */
+async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto, categoria }) {
+  const params = [cid];
+  const condCat = condicaoDeCategoria(categoria, params);
   const sql = `
     SELECT av.attribute_name AS atributo,
            av.value          AS valor,
@@ -409,9 +436,10 @@ async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto }) {
        AND products.is_active IS NOT FALSE
        AND ${filtroDeFoto(exigeFoto)}
        AND btrim(COALESCE(av.value, '')) <> ''
+       ${condCat ? 'AND ' + condCat : ''}
      GROUP BY av.attribute_name, av.value`;
   try {
-    const { rows } = await bd().query(sql, [cid]);
+    const { rows } = await bd().query(sql, params);
     const porAtributo = {};
     for (const r of rows) {
       const a = String(r.atributo || '').trim();
@@ -456,7 +484,9 @@ async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto }) {
  * loja de bijuteria as tres faixas cairiam na primeira. Devolve null
  * quando nao ha peca com preco.
  */
-async function faixaDePreco({ cid, visibilityWhere, exigeFoto }) {
+async function faixaDePreco({ cid, visibilityWhere, exigeFoto, categoria }) {
+  const params = [cid];
+  const condCat = condicaoDeCategoria(categoria, params);
   const sql = `
     SELECT MIN(price)::float AS min, MAX(price)::float AS max
       FROM products
@@ -464,9 +494,10 @@ async function faixaDePreco({ cid, visibilityWhere, exigeFoto }) {
        AND is_active IS NOT FALSE
        AND ${EM_ESTOQUE}
        AND ${filtroDeFoto(exigeFoto)}
-       AND price IS NOT NULL AND price > 0`;
+       AND price IS NOT NULL AND price > 0
+       ${condCat ? 'AND ' + condCat : ''}`;
   try {
-    const { rows } = await bd().query(sql, [cid]);
+    const { rows } = await bd().query(sql, params);
     const r = rows[0];
     if (!r || r.min == null || r.max == null) return null;
     return { min: r.min, max: r.max };
@@ -522,6 +553,6 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 module.exports = {
   POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, filtroDeFoto,
   JANELA_DE_VENDAS_DIAS, VENDIDOS_RECENTES,
-  arvoreDeCategorias, facetasDoCatalogo, faixaDePreco,
+  arvoreDeCategorias, facetasDoCatalogo, faixaDePreco, condicaoDeCategoria,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,
 };
