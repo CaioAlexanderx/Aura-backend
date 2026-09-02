@@ -28,7 +28,8 @@ describe('estrutura da pagina do produto', () => {
     expect(src).toContain("'<div class=\"pd-minis\">'");
     // A coluna de minis vem ANTES da foto no markup; o CSS ordena.
     expect(src.indexOf("class=\"pd-minis\"")).toBeLessThan(src.indexOf('id="pdFoto"'));
-    expect(css).toContain('.pd-foto{position:relative;flex:1;min-width:0;aspect-ratio:3/4;background:var(--sf-canvas)');
+    // QA 02/09: a foto ganhou teto de altura (max-height) — no desktop ela passava da tela.
+    expect(css).toContain('.pd-foto{position:relative;flex:1;min-width:0;aspect-ratio:3/4;max-height:min(78vh,680px);background:var(--sf-canvas)');
     expect(css).toContain('.pd-foto img{width:100%;height:100%;object-fit:contain');
   });
   test('o zoom segue o mouse, e no celular nao existe', () => {

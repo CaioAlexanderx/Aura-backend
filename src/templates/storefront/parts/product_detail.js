@@ -145,13 +145,14 @@ function showDetail(id){
       // nao diz nada a cliente; a bolinha ja tem o nome embaixo).
       var escolhidoRotulo=escolhido;
       if(escolhido&&cor&&/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(escolhido).trim())) escolhidoRotulo=nomeDaCor(escolhido)||escolhido;
+      if(cor) escolhidoRotulo=primeiraMaiuscula(escolhidoRotulo);
       var opcoes=attrs[a].map(function(val){
         var ok=possivel(a,val), sel=escolhido===val;
         var hex=cor?corDoValor(val):null;
         var attrs2=' data-attr="'+esc(a)+'" data-val="'+esc(val)+'" data-ok="'+(ok?'1':'0')+'"';
         if(hex){
           var ehHex=/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(val).trim());
-          var rotulo=ehHex?(nomeDaCor(val)||'Cor'):val;
+          var rotulo=primeiraMaiuscula(ehHex?(nomeDaCor(val)||'Cor'):val);
           return '<button type="button" class="op-cor'+(sel?' sel':'')+(ok?'':' off')+'"'+attrs2+' title="'+esc(rotulo)+'" aria-label="'+esc(a+': '+rotulo)+'">'
             +'<span class="op-cor-bola" style="background:'+hex+';">'
             +(sel?'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="'+tintaSobreCor(hex)+'" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>':'')
