@@ -128,28 +128,23 @@ describe('pagina de produto', () => {
     expect(s).toContain('card-tag');
   });
 
-  test('duas acoes: adicionar e comprar', () => {
-    expect(s).toContain('Adicionar ao carrinho');
-    expect(s).toContain('Comprar agora');
+  // Fase 5 do redesign (02/09/2026): a pagina ganhou UMA acao de compra
+  // ("Adicionar a sacola") e o WhatsApp da loja. "Comprar agora" saiu —
+  // a sacola tem "Finalizar compra", e um botao a menos na decisao e o
+  // design aprovado.
+  test('uma acao de compra e o WhatsApp', () => {
+    expect(s).toContain('Adicionar à sacola');
+    expect(s).toContain('Tirar dúvida no WhatsApp');
+    expect(s).not.toContain('Comprar agora');
+    expect(s).not.toContain('Adicionar ao carrinho');
   });
 
-  test('"Comprar agora" pula o carrinho e vai pro checkout', () => {
+  test('"Adicionar a sacola" poe na sacola e NAO leva pro checkout', () => {
     // Ancora no LISTENER, nao na primeira mencao de '#pdComprar' — a
-    // primeira esta em repintar(), que so liga/desliga os dois botoes.
+    // primeira esta em repintar(), que so liga/desliga o botao.
     const i = s.indexOf("querySelector('#pdComprar').addEventListener");
     expect(i).toBeGreaterThan(0);
-    const trecho = s.slice(i, i + 500);
-    expect(trecho).toContain('addToCart');
-    expect(trecho).toContain('openCheckout()');
-  });
-
-  test('"Adicionar ao carrinho" NAO leva pro checkout', () => {
-    // As duas acoes existem porque sao coisas diferentes: uma continua
-    // comprando, a outra fecha. Se as duas fossem pro checkout, a
-    // primeira nao teria razao de existir.
-    const i = s.indexOf("querySelector('#pdAdd').addEventListener");
-    expect(i).toBeGreaterThan(0);
-    const trecho = s.slice(i, i + 500);
+    const trecho = s.slice(i, i + 600);
     expect(trecho).toContain('addToCart');
     expect(trecho).not.toContain('openCheckout()');
   });
@@ -165,7 +160,9 @@ describe('pagina de produto', () => {
   });
 
   test('tem secao de relacionados', () => {
-    expect(s).toContain('Produtos relacionados');
+    // Titulo honesto (decisao 15, 02/09/2026): nao temos dado de "quem viu
+    // tambem levou"; o que ha e a mesma categoria.
+    expect(s).toContain('Da mesma categoria');
     expect(s).toContain('function carregarRelacionados');
   });
 });
