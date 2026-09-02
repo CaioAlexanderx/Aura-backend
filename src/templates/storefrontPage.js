@@ -99,6 +99,9 @@ function buildStorefrontPage(data, slug) {
     // Redesign 09/2026 — os blocos da home. Copiado campo a campo como
     // tudo aqui: sem esta linha o builder calcula e a pagina nunca ve.
     home: data.home,
+    // A politica de troca ja resolvida (uma fonte so): a pagina do produto
+    // mostra o mesmo texto do rodape (fase 5).
+    rodape_institucional: data.rodape_institucional,
   });
 
   // O <img> quebrado SAI do DOM (remove(), nao display:none): o CSS usa
