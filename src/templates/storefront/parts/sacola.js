@@ -52,6 +52,9 @@ function descontoPix(sub){ var p=pctDoPix(); return p>0?Math.round(sub*p)/100:0;
  * mudanca de entrega/pagamento — e uma funcao so, entao subtotal, frete,
  * desconto e total nunca discordam entre o passo 1 e o passo 3.
  */
+/** No celular os itens do resumo ficam recolhidos; este botao abre. */
+function alternarResumo(){ var el=document.getElementById('checkoutResumo'); if(el){ el.classList.toggle('aberto'); renderResumoDoCheckout(); } }
+
 function renderResumoDoCheckout(){
   var el=document.getElementById('checkoutResumo'); if(!el) return;
   var itens=Object.values(cart);
@@ -68,7 +71,8 @@ function renderResumoDoCheckout(){
       +'<span class="mono resumo-preco">'+fmt(i.price*i.qty)+'</span></div>'
       +'<button type="button" class="resumo-x" aria-label="Tirar da sacola" onclick="changeQty(\\''+escJsAttr(i.key)+'\\',-'+i.qty+')">&#215;</button></div>';
   }).join('');
-  el.innerHTML='<div class="sf-label">Sua sacola · '+n+(n===1?' item':' itens')+'</div>'
+  el.innerHTML='<div class="resumo-cabeca"><span class="sf-label">Sua sacola · '+n+(n===1?' item':' itens')+'</span>'
+    +'<button type="button" class="resumo-toggle" onclick="alternarResumo()" aria-controls="checkoutResumo">'+(el.classList.contains('aberto')?'Esconder itens':'Ver itens')+'</button></div>'
     +linhas
     +'<div class="resumo-totais">'
     +'<div class="resumo-linha"><span>Subtotal</span><span class="mono">'+fmt(sub)+'</span></div>'

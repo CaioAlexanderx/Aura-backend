@@ -104,3 +104,15 @@ describe('o desconto do Pix e aplicado no pedido, no servidor', () => {
     expect(src).toContain('function descontoPix(sub){ var p=pctDoPix(); return p>0?Math.round(sub*p)/100:0; }');
   });
 });
+
+describe('acabamentos vistos na Finesse no ar', () => {
+  test('cor em hex vira o nome da cor na sacola', () => {
+    const src = semComentarios(parts('cart.js'));
+    expect(src).toContain('return nomeDaCor(val)||val;');
+  });
+  test('no celular o resumo tem um botao pra abrir os itens', () => {
+    const src = semComentarios(parts('sacola.js'));
+    expect(src).toContain('function alternarResumo()');
+    expect(src).toContain('class="resumo-toggle" onclick="alternarResumo()"');
+  });
+});
