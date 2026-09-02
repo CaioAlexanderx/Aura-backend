@@ -49,11 +49,12 @@ describe('o hero poe as duas fotos em variaveis CSS', () => {
   test('sem a foto do celular: so --hero-desk, e nada de --hero-mob', () => {
     const html = pagina([{ headline: 'Oi', image_url: 'https://a/x.jpg', enabled: true }]);
     expect(html).toContain(`style="--hero-desk:url('https://a/x.jpg')"`);
-    expect(html).not.toContain('--hero-mob');
+    // O CSS cita a variavel; o que nao pode existir e o VALOR no slide.
+    expect(html).not.toContain('--hero-mob:url(');
   });
   test('sem foto nenhuma: sem style', () => {
     const html = pagina([{ headline: 'Oi', enabled: true }]);
-    expect(html).not.toContain('--hero-desk');
+    expect(html).not.toContain('--hero-desk:url(');
   });
 });
 
