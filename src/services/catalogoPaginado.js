@@ -316,7 +316,16 @@ async function paginaDoCatalogo({
 async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
   const sql = `
     WITH visiveis AS (
-      SELECT l.category_id
+      -- O CAMINHO, nao o id do no: a loja de um grupo (matriz + filial)
+      -- mostra o estoque das duas empresas, mas cada produto so pode ser
+      -- vinculado a uma categoria DA PROPRIA empresa (link_tenant_guard,
+      -- migration 259). Contando por id, a arvore da filial via so as
+      -- pecas dela: na Davi Calcados isso escondia 144 dos 175 produtos e
+      -- APAGAVA do menu todo no cujo dono e a matriz (o filter total > 0
+      -- la embaixo). Contar por caminho e o mesmo criterio que o filtro de
+      -- categoria ja usa (paginaDoCatalogo), entao o numero do menu e o
+      -- que a pessoa encontra ao clicar.
+      SELECT cat.path AS caminho
         -- SEM ALIAS. visibilityWhere, EM_ESTOQUE e COM_FOTO sao fragmentos
         -- prontos que dizem products-ponto; um alias quebra os tres de uma
         -- vez com 42P01 — o mesmo codigo de "tabela nao existe", que o
@@ -325,6 +334,7 @@ async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
         FROM products
         JOIN product_category_links l
           ON l.product_id = products.id AND l.is_primary
+        JOIN product_categories cat ON cat.id = l.category_id
        WHERE ${visibilityWhere}
          -- Qualificado: nao ha conflito hoje, mas o proximo JOIN traz.
          AND products.is_active IS NOT FALSE
@@ -338,9 +348,8 @@ async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
            c.banner_url,
            pai.slug AS pai_slug,
            (SELECT COUNT(*)::int FROM visiveis v
-              JOIN product_categories d ON d.id = v.category_id
-             WHERE d.company_id = c.company_id
-               AND (d.id = c.id OR left(d.path, length(c.path) + 1) = c.path || '/')
+             WHERE v.caminho = c.path
+                OR left(v.caminho, length(c.path) + 1) = c.path || '/'
            ) AS total
       FROM product_categories c
       LEFT JOIN product_categories pai ON pai.id = c.parent_id

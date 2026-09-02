@@ -28,6 +28,11 @@ function fonte(rel) {
   return fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 }
 
+// A função seguinte no arquivo — marca o fim do bloco de arvoreDeCategorias.
+// Fatia até aqui em vez de uma janela de N caracteres: um comentário que
+// cresce empurrava a asserção para fora da janela e o teste quebrava sem
+// que o código tivesse mudado.
+const BLOCO_FIM = 'async function contarPorCategoria';
 const paginado = fonte('src/services/catalogoPaginado.js');
 const builder = fonte('src/services/storefrontBuilder.js');
 const cliente = require('../src/templates/storefront/parts/categorias');
@@ -36,24 +41,25 @@ describe('a contagem soma a subárvore', () => {
   test('o SQL casa o nó E os descendentes', () => {
     const i = paginado.indexOf('async function arvoreDeCategorias');
     const bloco = paginado.slice(i, paginado.indexOf('\nasync function contarPorCategoria', i));
-    // d.id = c.id  → o próprio nó (folha tem produto direto)
-    // left(d.path, ...) → tudo abaixo dele
-    expect(bloco).toContain('d.id = c.id');
-    expect(bloco).toContain("left(d.path, length(c.path) + 1) = c.path || '/'");
+    // 02/09/2026: a contagem passou a ser por CAMINHO, não por id do nó
+    // (loja de grupo — ver __tests__/arvoreDeGrupo.test.js). O critério
+    // continua o mesmo: o próprio nó E tudo abaixo dele.
+    expect(bloco).toContain('v.caminho = c.path');
+    expect(bloco).toContain("left(v.caminho, length(c.path) + 1) = c.path || '/'");
   });
 
   test('nó sem produto visível fica de fora', () => {
     // Categoria que abre numa grade vazia é pior que categoria que não
     // existe. Na Finesse isso tira Saias, Shorts, Cropped e mais 15.
     const i = paginado.indexOf('async function arvoreDeCategorias');
-    expect(paginado.slice(i, i + 2600)).toContain('rows.filter((r) => r.total > 0)');
+    expect(paginado.slice(i, paginado.indexOf(BLOCO_FIM, i))).toContain('rows.filter((r) => r.total > 0)');
   });
 
   test('respeita o filtro de foto e o de estoque', () => {
     // Se a barra contasse sem esses filtros, ela diria "Vestidos 611" e a
     // grade mostraria 71 — o mesmo bug de "Bolsa 29 / mostra 19".
     const i = paginado.indexOf('async function arvoreDeCategorias');
-    const bloco = paginado.slice(i, i + 2600);
+    const bloco = paginado.slice(i, paginado.indexOf(BLOCO_FIM, i));
     expect(bloco).toContain('EM_ESTOQUE');
     expect(bloco).toContain('filtroDeFoto(exigeFoto)');
   });
@@ -62,7 +68,7 @@ describe('a contagem soma a subárvore', () => {
     // 42P01/42703: o backend não roda migration no boot. A loja abre com
     // a barra antiga em vez de não abrir.
     const i = paginado.indexOf('async function arvoreDeCategorias');
-    const bloco = paginado.slice(i, i + 2600);
+    const bloco = paginado.slice(i, paginado.indexOf(BLOCO_FIM, i));
     expect(bloco).toContain("e.code === '42P01' || e.code === '42703'");
   });
 
