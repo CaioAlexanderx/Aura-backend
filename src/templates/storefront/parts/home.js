@@ -107,9 +107,49 @@ function modoHome(){
 function atualizarModoHome(){
   var home=modoHome();
   document.body.classList.toggle('home',home);
-  // A grade continua embaixo dos blocos na home, com o titulo de sempre.
+  renderCabecalhoDaGrade(home);
+}
+
+/**
+ * Migalhas e titulo da pagina de categoria (fase 4).
+ *
+ * "Início / Vestidos / Festa" vem do caminho: cada prefixo do path e um
+ * no da arvore. Busca vira "Resultados para “x”"; na home, "Todos os
+ * produtos" sem migalhas.
+ */
+function noDoCaminho(caminho){
+  for(var i=0;i<ARVORE.length;i++){ if(ARVORE[i].caminho===caminho) return ARVORE[i]; }
+  return null;
+}
+function renderCabecalhoDaGrade(home){
   var t=document.getElementById('catTitle');
-  if(t&&home&&currentCat==='Todos') t.textContent='Todos os produtos';
+  var nav=document.getElementById('crumbs');
+  var busca=String(searchTerm||'').trim();
+  var itens=[];
+  if(!home){
+    itens.push('<a href="#" onclick="return irParaHome()">Início</a>');
+    if(currentCat&&currentCat!=='Todos'){
+      var partes=String(currentCat).split('/').filter(Boolean);
+      var acum='';
+      partes.forEach(function(seg,i){
+        acum+='/'+seg;
+        var no=noDoCaminho(acum);
+        var nome=no?no.nome:seg;
+        if(i===partes.length-1) itens.push('<span aria-current="page">'+esc(nome)+'</span>');
+        else itens.push('<a href="#" onclick="irParaCategoria(\\''+escJsAttr(acum)+'\\');return false;">'+esc(nome)+'</a>');
+      });
+    }
+    if(busca) itens.push('<span aria-current="page">Busca</span>');
+  }
+  if(nav){
+    nav.hidden=!itens.length;
+    nav.innerHTML=itens.join('<span class="crumbs-sep">/</span>');
+  }
+  if(t){
+    if(busca) t.textContent='Resultados para “'+busca+'”';
+    else if(currentCat&&currentCat!=='Todos') t.textContent=(typeof nomeDoCaminho==='function'?nomeDoCaminho(currentCat):currentCat)||currentCat;
+    else t.textContent='Todos os produtos';
+  }
 }
 
 /** Volta pra home: sem categoria, busca, filtro nem ordem. */
