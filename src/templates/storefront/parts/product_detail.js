@@ -41,6 +41,16 @@ function tintaSobreCor(hex){
 
 var paginaProduto=null;
 
+/** De onde a pessoa veio — vira o rotulo da seta de voltar. */
+function origemAtual(){
+  if(String(searchTerm||'').trim()) return 'Voltar para a busca';
+  if(currentCat && currentCat!=='Todos'){
+    var nome=(typeof nomeDoCaminho==='function')?(nomeDoCaminho(currentCat)||currentCat):currentCat;
+    return 'Voltar para ' + nome;
+  }
+  return 'Voltar para a loja';
+}
+
 /** Abaixo disto a pagina avisa "Ultimas N unidades" na variante escolhida. */
 var LIMITE_DE_ULTIMAS=3;
 
@@ -267,7 +277,7 @@ function showDetail(id){
   el.className='pd-overlay';
   el.innerHTML=
      '<div class="pd-topo"><div class="pd-topo-inner">'
-    +'<button type="button" class="pd-voltar" id="pdVoltar"><span class="pd-voltar-seta">&#8592;</span>Voltar</button>'
+    +'<button type="button" class="pd-voltar" id="pdVoltar"><span class="pd-voltar-seta">&#8592;</span>'+esc(origemAtual())+'</button>'
     +'<nav class="crumbs pd-crumbs" aria-label="Você está em">'+migalhasDoProduto(p)+'</nav>'
     +'</div></div>'
     +'<div class="pd-corpo">'
