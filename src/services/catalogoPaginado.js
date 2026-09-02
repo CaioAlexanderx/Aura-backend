@@ -325,7 +325,14 @@ async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
       -- la embaixo). Contar por caminho e o mesmo criterio que o filtro de
       -- categoria ja usa (paginaDoCatalogo), entao o numero do menu e o
       -- que a pessoa encontra ao clicar.
-      SELECT cat.path AS caminho
+      -- SUBCONSULTA, e nao JOIN com product_categories: o visibilityWhere
+      -- fala em company_id PELADO, e product_categories tambem tem essa
+      -- coluna. Com o JOIN no FROM, company_id fica ambiguo e o Postgres
+      -- devolve 42702 — que o catch la embaixo engolia, deixando a loja
+      -- na barra plana sem uma linha de log. Aconteceu comigo em 02/09,
+      -- horas depois de escrever "o proximo JOIN traz" no comentario
+      -- abaixo. Na subconsulta escalar o escopo e outro: nada a resolver.
+      SELECT (SELECT c2.path FROM product_categories c2 WHERE c2.id = l.category_id) AS caminho
         -- SEM ALIAS. visibilityWhere, EM_ESTOQUE e COM_FOTO sao fragmentos
         -- prontos que dizem products-ponto; um alias quebra os tres de uma
         -- vez com 42P01 — o mesmo codigo de "tabela nao existe", que o
@@ -334,7 +341,6 @@ async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
         FROM products
         JOIN product_category_links l
           ON l.product_id = products.id AND l.is_primary
-        JOIN product_categories cat ON cat.id = l.category_id
        WHERE ${visibilityWhere}
          -- Qualificado: nao ha conflito hoje, mas o proximo JOIN traz.
          AND products.is_active IS NOT FALSE

@@ -50,6 +50,7 @@
 const db = require('../config/database');
 // O rodape institucional e o MESMO nas duas lojas — ver o modulo.
 const { montarRodape } = require('./rodapeInstitucional');
+const { montarRedes } = require('./redesSociais');
 // A tira de categorias da home: quem entra e regra unica das duas lojas.
 const { montarTira } = require('./tiraDeCategorias');
 // Redesign 09/2026: os blocos da home nascem do estoque e do Caixa. As
@@ -621,7 +622,14 @@ async function buildStorefront(config) {
   let arvoreBarra = [];
   try {
     arvoreBarra = await arvoreDeCategorias({ cid, visibilityWhere: listVisibilityWhere('$1'), exigeFoto });
-  } catch (e) { arvoreBarra = []; }
+  } catch (e) {
+    // GRITA. Este catch era mudo e escondeu um 42702 (company_id ambiguo)
+    // por horas na Davi Calcados: a loja caiu na barra plana e nada no log
+    // dizia por que. Cair na barra plana continua certo; cair em silencio,
+    // nao. Mesmo motivo do catch de facetasDoCatalogo.
+    console.error('[storefront] arvore de categorias indisponivel (' + e.code + '), barra plana:', e.message);
+    arvoreBarra = [];
+  }
   // Facetas de tamanho e cor. Vem do banco inteiro, nao da pagina 1: com
   // paginacao de 24, derivar dos produtos carregados daria um filtro que
   // muda de opcoes conforme a pessoa navega.
@@ -771,6 +779,10 @@ async function buildStorefront(config) {
       instagram: config.instagram || '',
       address:   config.address   || '',
       pickup_address: config.pickup_address || null,
+      // 02/09/2026 — Instagram, TikTok e Facebook no rodape. Ja normalizado
+      // (o @ limpo e o endereco), pra que as duas lojas desenhem o mesmo
+      // link sem cada uma refazer o parse. Vazio = a linha nao aparece.
+      redes: montarRedes(config),
     },
     business_hours: businessHours,
     // Quem desenha a grade de horarios precisa saber que ela nao vale:
