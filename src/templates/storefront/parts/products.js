@@ -96,6 +96,13 @@ function irParaPagina(n,opcoes){
       // pagina 1 tem que continuar existindo quando a cliente esta na 5.
       PRODUCTS.forEach(function(p){ PROD_MAP[p.id]=p; });
       renderProducts();
+      // A lateral passa a mostrar as opcoes DESTA categoria. Se alguma
+      // selecao nao existe mais aqui, ela cai e a busca se refaz — como
+      // carregandoPagina ainda e true, isto vira pedidoPendente e roda
+      // uma vez so, no fim.
+      if(typeof atualizarFacetas==='function' && atualizarFacetas(j.facetas)){
+        irParaPagina(1,{rolar:false});
+      }
       var alvo=document.getElementById('productsAnchor');
       if(alvo){
         var topo=alvo.offsetTop-alturaDasBarras()-8;

@@ -37,7 +37,7 @@ const {
   fetchVariantesPorProduto, montarProdutoPublico,
   fetchStorefrontCategories, fetchPrimaryCategoryLinks, parseFeaturedIds,
 } = require('../services/storefrontBuilder');
-const { paginaDoCatalogo, facetasDoCatalogo } = require('../services/catalogoPaginado');
+const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco } = require('../services/catalogoPaginado');
 const { normalizarTamanho } = require('../services/tamanhosDaLoja');
 const { generatePix }     = require('../services/pixService');
 const { uploadToR2 }      = require('../utils/r2Storage');
@@ -225,6 +225,26 @@ router.get('/:slug/catalogo', async (req, res) => {
     const categoryById = {};
     categorias.forEach(c => { categoryById[c.id] = c; });
 
+    // As opcoes do filtro lateral SAO as da categoria aberta. Antes vinham
+    // da loja inteira e nunca mudavam: na Davi Calcados isso punha 40
+    // chips de numeracao — do 17 ao 44, mais 95/100/110, que sao de CINTO
+    // — dentro de "Infantil > Botas", onde so existe do 17 ao 36.
+    //
+    // Calculadas SEM tamanho/cor de proposito (ver facetasDoCatalogo): com
+    // o proprio filtro aplicado, escolher "38" apagaria os outros numeros
+    // e a pessoa nao teria como trocar sem limpar tudo.
+    const exigeFoto = cfg.require_product_image === true;
+    const facetas = await facetasDoCatalogo({
+      cid: cfg.company_id, visibilityWhere: listVisibilityWhere('$1'),
+      exigeFoto, categoria: req.query.cat,
+    }).catch((e) => { console.error('[storefront] facetas da categoria:', e.message); return null; });
+    if (facetas) {
+      facetas.preco = await faixaDePreco({
+        cid: cfg.company_id, visibilityWhere: listVisibilityWhere('$1'),
+        exigeFoto, categoria: req.query.cat,
+      }).catch(() => null);
+    }
+
     res.json({
       products: pagina.produtos.map(p => montarProdutoPublico(p, {
         variantsByProduct, categoryById, primaryLinkByProduct,
@@ -233,6 +253,9 @@ router.get('/:slug/catalogo', async (req, res) => {
       total: pagina.total,
       offset: pagina.offset,
       limit: pagina.limit,
+      // null quando a consulta falhou — o cliente mantem as opcoes que ja
+      // tinha em vez de esvaziar a lateral.
+      facetas,
     });
   } catch (err) {
     console.error('[storefront] catalogo error:', err.message);
