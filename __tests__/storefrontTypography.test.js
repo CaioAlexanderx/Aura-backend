@@ -26,15 +26,17 @@ describe('pares tipograficos', () => {
   });
 
   test('modern e SEM SERIFA — era Fraunces, que lia igual as outras serifadas', () => {
+    // Re-curado em 02/09/2026: corpo Manrope (era Inter), pelo redesign.
     // Antes `modern` era Fraunces — serifada, igual a classic e a
     // editorial. Tres serifadas em quatro opcoes e o motivo de ninguem
     // conseguir diferenciar os pares no painel.
     expect(TIPOGRAFIAS.modern.display).toContain('Space Grotesk');
-    expect(TIPOGRAFIAS.modern.body).toContain('Inter');
+    expect(TIPOGRAFIAS.modern.body).toContain('Manrope');
   });
 
   test('editorial e de PESO ALTO — antes era Playfair, serifada como o classic', () => {
-    expect(TIPOGRAFIAS.editorial.display).toContain('Archivo Black');
+    // 02/09/2026: Anton (era Archivo Black), mesmo tipo de loja.
+    expect(TIPOGRAFIAS.editorial.display).toContain('Anton');
   });
 
   test('chave desconhecida cai no classico em vez de quebrar', () => {
@@ -48,16 +50,19 @@ describe('pares tipograficos', () => {
 describe('linkDeFontes', () => {
   test('carrega SO o par escolhido, mais a mono', () => {
     const link = linkDeFontes('editorial');
-    expect(link).toContain('Archivo+Black');
+    expect(link).toContain('family=Anton');
     expect(link).toContain('DM+Mono');
     // O ponto do modulo: antes vinham as tres familias em toda loja.
-    expect(link).not.toContain('Instrument');
+    expect(link).not.toContain('Cormorant');
     expect(link).not.toContain('Space+Grotesk');
   });
 
   test('classic nao arrasta Playfair nem Fraunces', () => {
     const link = linkDeFontes('classic');
-    expect(link).toContain('Instrument+Serif');
+    // 02/09/2026: Cormorant Garamond + Figtree (era Instrument + DM Sans).
+    expect(link).toContain('Cormorant+Garamond');
+    expect(link).toContain('Figtree');
+    expect(link).not.toContain('Instrument');
     expect(link).not.toContain('Playfair');
     expect(link).not.toContain('Fraunces');
   });
