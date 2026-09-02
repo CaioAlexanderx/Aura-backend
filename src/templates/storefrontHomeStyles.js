@@ -107,8 +107,10 @@ function homeStyles({ fontSerif, fontSans, fontMono }) {
    REDESIGN 09/2026 — blocos da home
    ============================================================ */
 .home-sec{max-width:1280px;margin:0 auto;padding:44px 32px 8px;}
-/* Fora do modo home, os blocos somem; a grade vira a pagina de categoria. */
+/* Fora do modo home, os blocos E O HERO somem; a grade vira a pagina de
+   categoria, que no design comeca nas migalhas. */
 body:not(.home) .home-sec{display:none;}
+body:not(.home) .hero{display:none;}
 /* No modo home, a barra de categorias antiga sai: o cabecalho ja navega. */
 body.home .cats-wrap{display:none;}
 .home-sec-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:22px;}

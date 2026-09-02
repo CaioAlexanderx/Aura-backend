@@ -68,6 +68,8 @@ describe('a lateral de filtros', () => {
   test('na home nao ha lateral: grade em quatro; na categoria, tres ao lado da lateral', () => {
     const css = buildStyles('#7a1f3a', null, false, 'classic');
     expect(css).toContain('body.home .filtros-wrap,body.home .filtro-btn-mobile{display:none !important;}');
+    // A pagina de categoria comeca nas migalhas: sem hero (peguei na Finesse no ar).
+    expect(css).toContain('body:not(.home) .hero{display:none;}');
     expect(css).toContain('.products-layout{display:grid;grid-template-columns:230px minmax(0,1fr)');
     expect(css).toContain('body.home .products-layout{grid-template-columns:minmax(0,1fr);}');
     expect(css).toContain('.products-grid{grid-template-columns:repeat(3,1fr)');
