@@ -1,63 +1,53 @@
-// AURA. — HTML body da vitrine pública v2
+// AURA. — HTML body da loja comum
+//
+// REESCRITO em 02/09/2026 (fase 3 do redesign, Claude Design, loja-modelo
+// Finesse). A home passa a ter secoes que nascem do estoque — ver
+// services/homeDaLoja.js — em vez de "banner + grade". A ordem:
+//
+//   barra de anuncio (da config, ou composta do que a lojista LIGOU)
+//   cabecalho: logo grande, categorias de topo com mega-menu, busca, sacola
+//   hero full-bleed 3:1 (ate 3 banners; sem banner, headline sobre o wash)
+//   Compre por categoria · Mais vendidos · Ultimas unidades · Acabaram de chegar
+//   a grade de sempre (Todos os produtos, paginada)
+//   selos · bloco do WhatsApp · rodape em tres colunas
+//
+// Os blocos da home so aparecem no MODO HOME (sem categoria, busca ou
+// filtro) — o JS liga a classe `home` no <body>. Trocar de categoria
+// esconde os blocos e mostra a grade: e a "pagina de categoria" da fase 4.
+//
+// Ids que o JS ja usava continuam os mesmos (topbar, searchInput,
+// cartBadge, bannerStage/bannerDots, tiraCats, catsWrap, productsGrid,
+// checkout...). O que mudou e o desenho, nao o contrato com os parts/.
+//
 // buildHtmlBody({
-//   siteName, tagline, logoInTopbar, logoInHero, contactBar,
-//   addrText, coverUrl, announcementBar, banners[], serviceCards[],
-//   isOpenNow, nextOpenText
+//   siteName, tagline, logoInTopbar, logoNoRodape, contactBar,
+//   addrText, horarioTexto, cnpjTexto, announcementBar, banners[],
+//   serviceCards[], isOpenNow, nextOpenText, pagamentos, politicaTroca,
+//   whatsNum,
 // }) → string HTML
 //
-// banners[]      = [{ kicker, headline, body, cta, tone, tint, image_url }]
-// serviceCards[] = [{ icon, title, body }] — strip de benefícios na home
-//
-// O JS de auto-rotação fica em storefrontPage.js (injetado inline).
-//
-// v3 (18/05/2026): quando b.image_url é setado, renderiza variante
-// "image-clean" independente do tone — imagem ocupa o topo full-bleed
-// (sem scrim, sem SVG decorativo, sem texto overlay) e headline+body+CTA
-// ficam numa caption band branca logo abaixo, dentro do mesmo slide.
-// Cada slide do carrossel mantém sua própria caption (auto-rotation continua).
-// Lojas com banner text-only (sem image_url) seguem em split/editorial/
-// centered como antes — esses modos foram desenhados pra texto protagonista.
-//
-// v3.1 (18/05/2026 — Fase 3 PR A):
-// Search agora é inline na topbar — botão lupa expande input sobrepondo
-// o nome da loja (.topbar.searching). Sem .search-bar-wrap sticky abaixo.
-//
-// Fase 5 (20/05/2026): badge Aberta/Fechada ao lado do nome da loja.
-// Verde quando is_open_now=true; cinza com next_open_text quando false.
 // O texto da politica e as formas de pagamento moram em
 // services/rodapeInstitucional.js — a vitrine Studio desenha o MESMO
 // rodape, e calcular em dois lugares e como as duas lojas divergem.
 const { POLITICA_PADRAO, montarRodape } = require('../services/rodapeInstitucional');
 
+// Logo oficial do WhatsApp (glyph 24x24, fill currentColor). Nao usar o
+// balao generico: e a logo que a cliente reconhece de relance.
+const WHATSAPP_GLYPH = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413"/></svg>';
+
 function buildHtmlBody({
-  siteName, tagline, logoInTopbar, logoInHero, contactBar,
-  addrText, coverUrl, announcementBar, banners, serviceCards,
+  siteName, tagline, logoInTopbar, logoNoRodape, contactBar,
+  addrText, horarioTexto, cnpjTexto, announcementBar, banners, serviceCards,
   isOpenNow, nextOpenText,
-  // Rodape institucional (24/08/2026): como pagar e o que acontece se a
-  // peca nao servir. As duas coisas que o rodape de e-commerce grande tem
-  // e o nosso nao tinha.
-  pagamentos, politicaTroca,
+  pagamentos, politicaTroca, whatsNum,
 }) {
   banners = Array.isArray(banners) ? banners : [];
   serviceCards = Array.isArray(serviceCards) ? serviceCards : [];
-  const hasBanners = banners.length > 0;
-  const hasCover = !!coverUrl;
-  const heroSectionClass = hasCover ? 'hero-section has-cover' : 'hero-section no-cover';
-  const coverStyle = hasCover ? ` style="background-image:url('${coverUrl}')"` : '';
 
   // ── Rodape institucional ──────────────────────────────
-  //
-  // As formas de pagamento saem da CONFIGURACAO da lojista, nao de uma
-  // lista fixa: loja sem Pix nem cartao nao mostra nada (anunciar forma
-  // de pagamento que a loja nao aceita e pior que nao anunciar), loja so
-  // com Pix mostra so Pix.
-  //
-  // Sem selo de bandeira: nao temos as marcas, e inventar um retangulo
-  // escrito "VISA" seria falsificar. Texto simples, que e tambem a linha
-  // minimalista escolhida pro resto da loja.
-  // `pagamentos` chega no formato do template ({pix, card, na_entrega});
-  // o servico fala o formato do payload ({has_pix, ...}). A traducao
-  // e aqui, num lugar so.
+  // As formas saem da CONFIGURACAO da lojista, nao de uma lista fixa. Sem
+  // selo de bandeira: nao temos as marcas, e inventar um retangulo escrito
+  // "VISA" seria falsificar.
   const rodape = montarRodape({
     has_pix: !!(pagamentos && pagamentos.pix),
     has_card: !!(pagamentos && pagamentos.card),
@@ -66,19 +56,19 @@ function buildHtmlBody({
   const formas = rodape.formas;
   const politica = rodape.politica;
 
-  const rodapeInstitucional = (formas.length || politica) ? `
-    <div class="footer-inst">
-      ${formas.length ? `<div class="footer-inst-bloco">
-        <div class="footer-inst-tit">Formas de pagamento</div>
-        <div class="footer-inst-txt">${formas.join(' · ')}</div>
-      </div>` : ''}
-      ${politica ? `<div class="footer-inst-bloco">
-        <div class="footer-inst-tit">Trocas e devoluções</div>
-        <div class="footer-inst-txt">${escHtml(politica)}</div>
-      </div>` : ''}
-    </div>` : '';
+  const rodapeInstitucional = `
+      <div class="footer-inst">
+        ${formas.length ? `<div class="footer-inst-bloco">
+          <div class="sf-label">Formas de pagamento</div>
+          <div class="footer-inst-txt">${formas.join(' · ')}</div>
+        </div>` : ''}
+        ${politica ? `<div class="footer-inst-bloco">
+          <div class="sf-label">Trocas e devoluções</div>
+          <div class="footer-inst-txt">${escHtml(politica)}</div>
+        </div>` : ''}
+      </div>`;
 
-  // Icon set (mesmos paths que parts/products.js usa). Stroke=currentColor.
+  // Icones Feather (stroke 1.6, round). Mesmos paths que parts/products.js.
   const ICONS = {
     truck:   '<path d="M3 16V6h12v10M15 9h4l2 4v3h-6"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/>',
     pkg:     '<path d="M3 7v10l9 4 9-4V7l-9-4-9 4z"/><path d="M3 7l9 4 9-4M12 11v10"/>',
@@ -99,126 +89,65 @@ function buildHtmlBody({
   }
   function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-  // Fase 5: badge Aberta/Fechada
-  // Mostra apenas se isOpenNow foi passado explicitamente (true/false).
-  // Quando undefined (build sem business_hours), nao renderiza.
+  // Selo Aberta/Fechada. So o FECHADA aparece no cabecalho novo: "Aberta"
+  // ao lado da logo era ruido num cabecalho que ficou limpo, e fechada e
+  // a informacao que muda o que a cliente faz (decisao 13, 02/09/2026).
   let openBadgeHtml = '';
-  if (typeof isOpenNow === 'boolean') {
-    const cls = isOpenNow ? 'open-badge is-open' : 'open-badge is-closed';
-    const label = isOpenNow
-      ? 'Aberta'
-      : ('Fechada' + (nextOpenText ? ` · ${escHtml(nextOpenText)}` : ''));
-    openBadgeHtml = `<span class="${cls}"><span class="open-badge-dot"></span><span class="open-badge-text">${label}</span></span>`;
+  if (isOpenNow === false) {
+    openBadgeHtml = `<span class="open-badge is-closed"><span class="open-badge-dot"></span><span class="open-badge-text">Fechada${nextOpenText ? ` · ${escHtml(nextOpenText)}` : ''}</span></span>`;
   }
 
-  // Banner slides
-  const slidesHtml = banners.map((b, i) => {
-    const tone = b.tone || 'split';
-    const tint = b.tint || 'brand';
-    const bgStyle = b.image_url ? ` style="background-image:url('${b.image_url}')"` : '';
-    const bgClass = b.image_url ? 'banner-slide-bg with-image' : 'banner-slide-bg';
-    const kicker  = b.kicker   ? `<div class="banner-kicker">${b.kicker}</div>` : '';
-    const headline = b.headline ? `<h2 class="banner-headline">${b.headline}</h2>` : '';
-    const body    = b.body     ? `<p class="banner-body">${b.body}</p>` : '';
-    // CTA so quando ha destino de verdade (cta_url, validado no builder).
-    // O antigo onclick="scrollToProducts()" rolava ~200px ate uma grade
-    // que ja estava na tela — a decisao do fallback (parseBanners) vale
-    // pro banner escrito tambem. Nova aba porque o carrinho vive em
-    // memoria (state_utils): navegar na mesma aba jogaria a sacola fora.
-    const cta     = (b.cta && b.cta_url)
-      ? `<a class="banner-cta" href="${escHtml(b.cta_url)}" target="_blank" rel="noopener">${b.cta}</a>`
-      : '';
-
-    // v3: image-clean — quando há image_url, imagem fica no topo full-bleed
-    // (sem scrim, sem SVG decorativo, sem texto overlay) e headline+body+CTA
-    // ficam numa caption band branca abaixo, dentro do mesmo slide.
-    if (b.image_url) {
-      const captionText = (headline || body) ? `<div class="banner-caption-text">${headline}${body}</div>` : '';
-      const captionBand = (captionText || cta) ? `
-        <div class="banner-caption-band">
-          ${captionText}
-          ${cta}
-        </div>` : '';
-      return `<div class="banner-slide tint-${tint} ${i===0?'active':''}" data-tone="image-clean">
-        <div class="${bgClass}"${bgStyle}></div>
-        ${captionBand}
-      </div>`;
+  // ── Hero full-bleed 3:1 ───────────────────────────────
+  // Ate 3 banners rotativos (o JS de rotacao esta em storefrontPage.js e
+  // le #bannerStage .banner-slide / #bannerDots .banner-dot). Texto e CTA
+  // sobre um gradiente a esquerda; com foto, a foto cobre; sem foto, o
+  // wash da marca. CTA so com destino: http(s) abre em nova aba (a sacola
+  // vive na memoria), categoria da loja (#cat=/caminho) navega aqui.
+  const hasBanners = banners.length > 0;
+  const slidesHtml = (hasBanners ? banners : [{
+    kicker: '', headline: tagline || siteName, body: '', cta: '', cta_url: '', image_url: null,
+  }]).map((b, i) => {
+    const comFoto = !!b.image_url;
+    const bgStyle = comFoto ? ` style="background-image:url('${b.image_url}')"` : '';
+    const kicker  = b.kicker   ? `<div class="hero-kicker">${b.kicker}</div>` : '';
+    const headline = b.headline ? `<h1 class="hero-headline">${b.headline}</h1>` : '';
+    const body    = b.body     ? `<p class="hero-body">${b.body}</p>` : '';
+    let cta = '';
+    if (b.cta && b.cta_url) {
+      const interno = b.cta_url.charAt(0) === '#';
+      cta = interno
+        ? `<a class="banner-cta" href="${escHtml(b.cta_url)}" onclick="return irPeloCta(this)">${b.cta}<span class="hero-cta-seta" aria-hidden="true">→</span></a>`
+        : `<a class="banner-cta" href="${escHtml(b.cta_url)}" target="_blank" rel="noopener">${b.cta}<span class="hero-cta-seta" aria-hidden="true">→</span></a>`;
     }
-
-    if (tone === 'editorial') {
-      const word = b.headline || siteName;
-      return `<div class="banner-slide tint-${tint} ${i===0?'active':''}" data-tone="editorial">
-        <div class="${bgClass}"${bgStyle}></div>
-        <div class="banner-slide-content">
-          <div class="banner-editorial-word">${word}</div>
-          <div class="banner-text">${kicker}${body}${cta}</div>
-        </div>
-      </div>`;
-    }
-    if (tone === 'centered') {
-      return `<div class="banner-slide tint-${tint} ${i===0?'active':''}" data-tone="centered">
-        <div class="${bgClass}"${bgStyle}></div>
-        <div class="banner-slide-content">
-          <div class="banner-text">${kicker}${headline}${body}${cta}</div>
-        </div>
-      </div>`;
-    }
-    return `<div class="banner-slide tint-${tint} ${i===0?'active':''}" data-tone="split">
-      <div class="${bgClass}"${bgStyle}></div>
-      <div class="banner-slide-content">
-        <div class="banner-text">${kicker}${headline}${body}${cta}</div>
-        <div class="banner-art">
-          <svg viewBox="0 0 200 200" class="banner-art-shape" preserveAspectRatio="xMidYMid meet">
-            <defs>
-              <linearGradient id="bg${i}" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0" stop-color="var(--sf-brand)" stop-opacity="0.35"/>
-                <stop offset="1" stop-color="var(--sf-accent)" stop-opacity="0.2"/>
-              </linearGradient>
-            </defs>
-            <circle cx="100" cy="100" r="80" fill="url(#bg${i})"/>
-            <circle cx="100" cy="100" r="40" fill="none" stroke="var(--sf-brand)" stroke-opacity="0.3" stroke-width="0.5"/>
-          </svg>
-        </div>
-      </div>
+    return `<div class="banner-slide hero-slide${comFoto ? ' com-foto' : ' sem-foto'}${i===0?' active':''}">
+      <div class="hero-bg"${bgStyle}></div>
+      <div class="hero-scrim"></div>
+      <div class="hero-inner"><div class="hero-text">${kicker}${headline}${body}${cta}</div></div>
     </div>`;
   }).join('\n');
 
   const dotsHtml = banners.length > 1
     ? `<div class="banner-dots" id="bannerDots">
-        ${banners.map((_, i) => `<button class="banner-dot ${i===0?'active':''}" data-idx="${i}" onclick="goBanner(${i})"></button>`).join('')}
+        ${banners.map((_, i) => `<button class="banner-dot ${i===0?'active':''}" data-idx="${i}" onclick="goBanner(${i})" aria-label="Banner ${i+1}"></button>`).join('')}
       </div>`
     : '';
 
-  const bannerStage = hasBanners ? `
-<section class="banner-stage" id="bannerStage">
-  <div class="banner-frame">
-    ${slidesHtml}
-    ${dotsHtml}
-  </div>
-</section>` : '';
-
-  const heroLegacy = hasBanners ? '' : `
-<section class="${heroSectionClass}">
-  <div class="hero-cover"${coverStyle}></div>
-  <div class="hero-card">
-    <div class="hero-card-logo">${logoInHero}</div>
-    <div class="hero-card-info">
-      <h1 class="hero-card-name">${siteName}</h1>
-      ${tagline ? `<p class="hero-card-tag">${tagline}</p>` : ''}
-      <div class="hero-card-pills" id="heroPills"></div>
-    </div>
-  </div>
+  const heroHtml = `
+<section class="hero" id="bannerStage">
+  ${slidesHtml}
+  ${dotsHtml}
 </section>`;
 
   const announcementHtml = announcementBar
     ? `<div class="announcement-bar">${announcementBar}</div>`
     : '';
 
-  // Service strip dinâmica — só renderiza se houver ao menos 1 card habilitado
+  // Selos: o que a lojista escreveu (service_cards) — ou os padroes, que
+  // o builder deriva do que ela ligou. Grade de 4, 2x2 no celular.
   const serviceStrip = serviceCards.length > 0 ? `
 <section class="service-strip">
 ${serviceCards.map((c) => `  <div class="service-card">
-    <div class="service-card-icon">${svgFor(c.icon)}</div>
+    <span class="service-card-icon">${svgFor(c.icon)}</span>
     <div>
       <div class="service-card-title">${escHtml(c.title)}</div>
       ${c.body ? `<div class="service-card-body">${escHtml(c.body)}</div>` : ''}
@@ -226,57 +155,67 @@ ${serviceCards.map((c) => `  <div class="service-card">
   </div>`).join('\n')}
 </section>` : '';
 
-  // Topbar — search agora é inline (Fase 3 PR A). Botão lupa expande input
-  // sobre .topbar-brand quando .topbar ganha classe .searching.
+  // Bloco do WhatsApp: em vez da contact-bar, um cartao no wash da marca
+  // com o botao verde e a logo oficial. Chega pronto de storefrontPage
+  // (contactBar) quando ha numero; vazio quando nao ha.
+  const whatsBlock = whatsNum ? `
+<section class="whats-block">
+  <div class="whats-block-inner">
+    <div>
+      <div class="whats-block-tit serif">Dúvida com tamanho ou tecido?</div>
+      <div class="whats-block-txt">Fale direto com a gente no WhatsApp.</div>
+    </div>
+    <a class="whatsapp-cta" href="https://wa.me/${whatsNum}" target="_blank" rel="noopener">${WHATSAPP_GLYPH}Chamar no WhatsApp</a>
+  </div>
+</section>` : (contactBar || '');
+
   return `${announcementHtml}
 <header class="topbar" id="topbar">
-  <a class="topbar-brand" href="#" onclick="return false">
+  <button type="button" class="menu-btn" onclick="abrirDrawer()" aria-label="Abrir categorias" aria-controls="drawerMenu">
+    <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+  </button>
+  <a class="topbar-brand" href="#" onclick="return irParaHome()" aria-label="${siteName}">
     <div class="topbar-logo">${logoInTopbar}</div>
     <div class="topbar-brand-text">
       <span class="topbar-name">${siteName}</span>
       ${openBadgeHtml}
     </div>
   </a>
-  <div class="topbar-search-inline" id="topbarSearchInline">
-    <svg class="topbar-search-icon" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-    <input type="text" placeholder="Buscar produtos..." id="searchInput" oninput="filterProducts()" onblur="searchBlur()" autocomplete="off">
-    <button class="topbar-search-close" type="button" onclick="toggleSearch()" aria-label="Fechar busca">×</button>
-  </div>
+  <nav class="topnav" id="topNav" aria-label="Categorias"></nav>
   <div class="topbar-right">
-    <button class="search-btn" type="button" onclick="toggleSearch()" aria-label="Buscar produtos">
-      <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-    </button>
-    <div class="cart-btn" onclick="openCart()">
-      <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M5 7h14l-1 13H6L5 7z"/><path d="M9 7V5a3 3 0 016 0v2"/></svg>
+    <div class="cart-btn" onclick="openCart()" role="button" tabindex="0" aria-label="Abrir sacola">
+      <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M5 7h14l-1 13H6L5 7z"/><path d="M9 7V5a3 3 0 016 0v2"/></svg>
       <div class="cart-badge" id="cartBadge">0</div>
     </div>
   </div>
+  <div class="search-pill" id="topbarSearchInline">
+    <svg class="topbar-search-icon" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+    <input type="text" placeholder="Buscar na ${siteName}" id="searchInput" oninput="filterProducts()" autocomplete="off" aria-label="Buscar produtos">
+    <button class="topbar-search-close" type="button" onclick="limparBusca()" aria-label="Limpar busca" hidden>×</button>
+  </div>
+  <div class="mega" id="megaMenu" hidden></div>
 </header>
+<div class="drawer-overlay" id="drawerOverlay" hidden onclick="fecharDrawer()"></div>
+<aside class="drawer" id="drawerMenu" hidden aria-label="Categorias"></aside>
 
-${bannerStage}
-${heroLegacy}
+${heroHtml}
 
-<!-- Tira de categorias: depois do banner, ANTES da barra de texto.
-     A barra continua sendo a navegacao completa; a tira e a porta de
-     entrada visual pras poucas categorias de topo. -->
-<section class="tira-cats" id="tiraCats" hidden></section>
+<!-- Os blocos da home. Nascem escondidos; o JS decide o que tem dado. -->
+<section class="home-sec" id="tiraCats" hidden></section>
+<section class="home-sec" id="homeMaisVendidos" hidden></section>
+<section class="home-sec" id="homeUltimas" hidden></section>
+<section class="home-sec" id="homeNovidades" hidden></section>
 
 <div class="cats-wrap" id="catsWrap"></div>
 <div class="cats-sub" id="catsSub" hidden></div>
 <div class="cats-painel" id="catsPainel" hidden></div>
 
 <section class="products-section" id="productsAnchor">
-  <!-- Filtrar por tamanho e cor. Fica acima do cabecalho da grade, e
-       nao na barra de categorias: categoria e por onde a pessoa ENTRA,
-       tamanho e cor sao o refino de quem ja esta olhando. -->
   <div class="filtros-wrap" id="filtrosWrap" hidden></div>
 
   <div class="products-header">
     <h2 id="catTitle">Todos os produtos</h2>
     <span class="products-count" id="prodCount"></span>
-    <!-- Ordenacao aparece so quando ha produto suficiente pra ela servir;
-         numa loja de 9 itens a barra e mais alta que a vitrine. O JS
-         decide (renderOrdenacao). -->
     <label class="sort-wrap" id="sortWrap" hidden>
       <span class="sort-lbl">Ordenar</span>
       <select id="sortSelect" onchange="setOrdem(this.value)">
@@ -295,28 +234,34 @@ ${heroLegacy}
 
 ${serviceStrip}
 
-${contactBar}
+${whatsBlock}
 
 <footer class="site-footer">
   <div class="site-footer-inner">
-    <!-- Tres andares, um assunto por andar: quem e a loja; como ela
-         atende (pagamento e troca); o juridico + a assinatura. O
-         "Loja desenvolvida com Aura." que dividia a primeira linha com
-         o endereco desceu e se fundiu com o convite de aquisicao —
-         eram DUAS mencoes a Aura dizendo a mesma coisa em dois cantos,
-         e o rodape da lojista abria dividindo palco com a plataforma. -->
-    <div class="site-footer-id">
-      <div class="site-footer-nome serif">${siteName}</div>
-      ${addrText ? `<div class="site-footer-addr">${addrText}</div>` : ''}
+    <!-- Tres colunas: quem e a loja; como ela atende; por onde navegar.
+         Embaixo, o juridico e a assinatura — a Aura aparece UMA vez, na
+         mesma frase-link, com o selo ao lado (decisao 5, 02/09/2026). -->
+    <div class="site-footer-cols3">
+      <div class="site-footer-id">
+        <div class="site-footer-logo">${logoNoRodape || `<span class="site-footer-nome serif">${siteName}</span>`}</div>
+        ${addrText ? `<div class="site-footer-addr">${addrText}${horarioTexto ? `<br>${escHtml(horarioTexto)}` : ''}</div>` : (horarioTexto ? `<div class="site-footer-addr">${escHtml(horarioTexto)}</div>` : '')}
+      </div>
+      ${rodapeInstitucional}
+      <div class="footer-nav">
+        <div class="sf-label">Navegue</div>
+        <ul id="footerNav"></ul>
+      </div>
     </div>
-    ${rodapeInstitucional}
     <div class="site-footer-bottom">
-      <span>© ${new Date().getFullYear()} ${siteName}</span>
-      <a class="powered" href="https://getaura.com.br" target="_blank" rel="noopener">
-        <span>Loja desenvolvida com</span>
-        <span class="brand">Aura<span class="brand-dot">.</span></span>
-        <span class="powered-cta">— quero a minha</span>
-      </a>
+      <span>© ${new Date().getFullYear()} ${siteName}${cnpjTexto ? ` · CNPJ ${escHtml(cnpjTexto)}` : ''}</span>
+      <span class="site-footer-aura">
+        <a class="powered" href="https://getaura.com.br" target="_blank" rel="noopener">
+          <span>Loja desenvolvida com</span>
+          <span class="brand">Aura<span class="brand-dot">.</span></span>
+          <span class="powered-cta">— quero a minha</span>
+        </a>
+        <span class="selo-aura"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Loja verificada Aura</span>
+      </span>
     </div>
   </div>
 </footer>
@@ -359,6 +304,5 @@ ${contactBar}
 }
 module.exports = buildHtmlBody;
 // O painel precisa do MESMO texto para pre-preencher o campo da lojista.
-// Exportado em vez de duplicado no app: politica que diverge entre o que
-// o painel mostra e o que a loja publica e pior que politica nenhuma.
 module.exports.POLITICA_PADRAO = POLITICA_PADRAO;
+module.exports.WHATSAPP_GLYPH = WHATSAPP_GLYPH;

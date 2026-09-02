@@ -42,6 +42,9 @@ const PODEM_SER_PREENCHIDOS = {
   '.delivery-opt.active .delivery-opt-radio': 'radio marcado — estado, nao acao',
   '.op-chip.sel': 'tamanho escolhido na pagina do produto — estado',
   '.pd-comprar': 'ACAO PRINCIPAL da loja inteira',
+  // Redesign (fase 3, 02/09/2026)
+  '.hero-text .banner-cta': 'ACAO PRINCIPAL da home — o CTA do hero, solido por decisao do design',
+  '.cart-badge': 'contador da sacola — estado, nao acao',
 };
 
 describe('preenchimento solido e reservado', () => {
@@ -98,7 +101,7 @@ describe('elevacao no hover: so o clicavel, e sempre com a sombra da marca', () 
   });
 
   test('so o que e clicavel sobe', () => {
-    const clicaveis = ['.product-card', '.checkout-btn', '.next-btn', '.pd-comprar', '.pd-add', '.banner-cta', '.tira-cat', '.whatsapp-cta', '.home-cat', '.home-linha', '.pg-num', '.pg-seta'];
+    const clicaveis = ['.product-card', '.checkout-btn', '.next-btn', '.pd-comprar', '.pd-add', '.hero-text .banner-cta', '.tira-cat', '.whatsapp-cta', '.cart-btn', '.home-linha', '.pg-num', '.pg-seta'];
     for (const { sel } of levantam) {
       const base = sel.replace(/:hover.*$/, '').replace(/:not\([^)]*\)/g, '').trim();
       expect({ sel, clicavel: clicaveis.includes(base) }).toEqual({ sel, clicavel: true });

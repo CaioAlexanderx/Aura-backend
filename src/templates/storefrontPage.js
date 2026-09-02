@@ -109,24 +109,27 @@ function buildStorefrontPage(data, slug) {
   const logoInTopbar = logoUrl
     ? `<img src="${logoUrl}" alt="" onerror="this.remove();var s=document.getElementById('logoInitial');if(s){s.style.display='flex';}"><span id="logoInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:400;color:#fff;font-family:inherit;"></span>`
     : `<span id="logoInitial" style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:15px;font-weight:400;color:#fff;font-family:inherit;"></span>`;
-  const logoInHero = logoUrl
-    ? `<img src="${logoUrl}" alt="" onerror="this.remove();var s=document.getElementById('heroInitial');if(s){s.style.display='flex';}"><span id="heroInitial" style="display:none;width:100%;height:100%;align-items:center;justify-content:center;font-size:26px;font-weight:400;color:#fff;font-family:inherit;"></span>`
-    : `<span id="heroInitial" style="display:flex;width:100%;height:100%;align-items:center;justify-content:center;font-size:26px;font-weight:400;color:#fff;font-family:inherit;"></span>`;
+  // (O hero antigo com logo e capa saiu na fase 3: o hero e full-bleed e a
+  // capa da loja foi aposentada — decisao 4/18 de 02/09/2026.)
 
-  const contactBar = whatsNum ? `
-<div class="contact-bar">
-  <p>Dúvidas? Fale conosco direto no WhatsApp.</p>
-  <a class="whatsapp-cta" href="https://wa.me/${whatsNum}" target="_blank">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 0C5.373 0 0 5.373 0 12c0 2.127.558 4.122 1.533 5.85L0 24l6.335-1.524A11.94 11.94 0 0 0 12 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 22c-1.852 0-3.587-.5-5.088-1.375l-.362-.215-3.762.905.947-3.674-.237-.376A9.969 9.969 0 0 1 2 12C2 6.477 6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z"/></svg>
-    Chamar no WhatsApp
-  </a>
-</div>` : '';
+  // O bloco do WhatsApp e desenhado em buildHtmlBody a partir do numero.
+  const contactBar = '';
+
+  // Logo grande no rodape (220x64). Sem imagem, o nome em display.
+  const logoNoRodape = logoUrl
+    ? `<img src="${logoUrl}" alt="${siteName}" onerror="this.outerHTML='<span class=&quot;site-footer-nome serif&quot;>${siteName}</span>'">`
+    : '';
+
+  // Barra de anuncio: o texto da lojista, ou o que o builder compos do que
+  // ela LIGOU (frete gratis, troca, Pix). Nunca uma frase inventada.
+  const announcementFinal = announcementBar || escHtml(site.announcement_auto || '');
 
   const css    = buildStyles(primary, accent, dark, font);
   const body   = buildHtmlBody({
-    siteName, tagline, logoInTopbar, logoInHero, contactBar,
-    addrText, coverUrl, announcementBar, banners, serviceCards,
-    isOpenNow, nextOpenText,
+    siteName, tagline, logoInTopbar, logoNoRodape, contactBar,
+    addrText, horarioTexto: site.horario_resumo || '', cnpjTexto: site.cnpj_formatado || '',
+    announcementBar: announcementFinal, banners, serviceCards,
+    isOpenNow, nextOpenText, whatsNum,
     // Formas de pagamento vem do que a lojista LIGOU, nao de lista fixa.
     pagamentos: {
       pix:  data.settings && data.settings.has_pix === true,
@@ -141,6 +144,9 @@ function buildStorefrontPage(data, slug) {
     dark ? 'sf-dark' : 'sf-light',
     `card-style-${cardStyle}`,
     `font-${font}`,
+    // Modo home (fase 3): os blocos aparecem ate a pessoa escolher
+    // categoria, busca ou filtro. O JS reavalia a cada render da grade.
+    'home',
   ].join(' ');
 
   const inlineHelpers = `

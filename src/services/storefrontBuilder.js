@@ -274,6 +274,86 @@ function computeOpenState(businessHours, alwaysOpen, agora) {
   return { is_open_now: false, next_open_text: '' };
 }
 
+/** 12.345.678/0001-90 — ou '' quando o CNPJ nao tem 14 digitos. */
+function formatarCnpj(raw) {
+  const d = String(raw || '').replace(/\D/g, '');
+  if (d.length !== 14) return '';
+  return d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+}
+
+function reais(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '';
+  const inteiro = Math.floor(n);
+  return 'R$ ' + (n === inteiro ? String(inteiro) : n.toFixed(2).replace('.', ','));
+}
+
+/**
+ * A barra de anuncio quando a lojista nao escreveu uma.
+ *
+ * Composta SO do que ela ligou: frete gratis acima de X (entrega ligada e
+ * valor cadastrado), troca em ate 7 dias (e lei — art. 49 do CDC — e vale
+ * pra toda loja) e o desconto do Pix (migration 309). O design trazia
+ * "Frete gratis acima de R$ 299 · 5% off no Pix" fixo; decisao 16 de
+ * 02/09/2026: texto comercial nasce da configuracao ou nao existe.
+ */
+function anuncioAutomatico({ delivery_enabled, delivery_free_above_amount, pix_discount_pct }) {
+  const partes = [];
+  const piso = Number(delivery_free_above_amount);
+  if (delivery_enabled === true && Number.isFinite(piso) && piso > 0) {
+    partes.push('Frete grátis acima de ' + reais(piso));
+  }
+  partes.push('Troca em até 7 dias');
+  const pix = Number(pix_discount_pct);
+  if (Number.isFinite(pix) && pix > 0) {
+    partes.push((Number.isInteger(pix) ? String(pix) : String(pix).replace('.', ',')) + '% off no Pix');
+  }
+  return partes.join(' · ');
+}
+
+const DIA_CURTO = { dom: 'Dom', seg: 'Seg', ter: 'Ter', qua: 'Qua', qui: 'Qui', sex: 'Sex', sab: 'Sáb' };
+const ORDEM_SEMANA = ['seg', 'ter', 'qua', 'qui', 'sex', 'sab', 'dom'];
+
+function horaCurta(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '').trim());
+  if (!m) return '';
+  const h = String(parseInt(m[1], 10));
+  return m[2] === '00' ? h + 'h' : h + 'h' + m[2];
+}
+
+/**
+ * "Seg a sáb, 9h às 18h" — o horario num rodape, nao numa tabela.
+ *
+ * Agrupa dias CONSECUTIVOS com o mesmo horario; grupos diferentes viram
+ * "Seg a sex, 9h às 18h · Sáb, 9h às 13h". 24h vira "Aberta 24 horas".
+ * Sem horario cadastrado, ''. Horario ilegivel e ignorado (nao inventa).
+ */
+function resumoDeHorario(businessHours, alwaysOpen) {
+  if (alwaysOpen === true) return 'Aberta 24 horas';
+  const h = parseBusinessHours(businessHours);
+  if (!h || !Object.keys(h).length) return '';
+  const grupos = [];
+  for (const dia of ORDEM_SEMANA) {
+    const d = h[dia];
+    if (!d || d.closed) continue;
+    const abre = horaCurta(d.open), fecha = horaCurta(d.close);
+    if (!abre || !fecha) continue;
+    const faixa = abre + ' às ' + fecha;
+    const ultimo = grupos[grupos.length - 1];
+    const idx = ORDEM_SEMANA.indexOf(dia);
+    if (ultimo && ultimo.faixa === faixa && ultimo.fimIdx === idx - 1) {
+      ultimo.fim = dia; ultimo.fimIdx = idx;
+    } else {
+      grupos.push({ inicio: dia, fim: dia, fimIdx: idx, faixa });
+    }
+  }
+  if (!grupos.length) return '';
+  return grupos.map((g) => {
+    const dias = g.inicio === g.fim ? DIA_CURTO[g.inicio] : DIA_CURTO[g.inicio] + ' a ' + DIA_CURTO[g.fim].toLowerCase();
+    return dias + ', ' + g.faixa;
+  }).join(' · ');
+}
+
 function listVisibilityWhere(cidParam) {
   return `(company_id = ${cidParam} OR (
     is_group_shared = true
@@ -631,6 +711,16 @@ async function buildStorefront(config) {
       // Redesign 09/2026: o rodape em tres colunas mostra o CNPJ ao lado
       // do copyright, como todo e-commerce. Vem de companies, ja lido.
       cnpj:          company.cnpj || null,
+      cnpj_formatado: formatarCnpj(company.cnpj),
+      // Barra de anuncio composta do que a lojista LIGOU (fase 3). So
+      // vale quando ela nao escreveu a dela. '' = sem barra.
+      announcement_auto: anuncioAutomatico({
+        delivery_enabled: config.delivery_enabled || false,
+        delivery_free_above_amount: config.delivery_free_above_amount,
+        pix_discount_pct: Number(config.pix_discount_pct) || 0,
+      }),
+      // "Seg a sáb, 9h às 18h" pro rodape. '' quando nao ha horario.
+      horario_resumo: resumoDeHorario(businessHours, alwaysOpen),
       banners,
       service_cards: serviceCards,
       is_open_now,
@@ -729,6 +819,8 @@ module.exports = {
   // Exportado pra teste: o formato interno `#cat=/caminho` e contrato
   // com o painel (aura-app, destinoDoCta.ts).
   destinoDoCta,
+  // Fase 3: barra de anuncio composta, horario do rodape, CNPJ.
+  anuncioAutomatico, resumoDeHorario, formatarCnpj,
   // Exportados em 19/08/2026 (S1) para o storefront do Studio montar a
   // MESMA arvore de categorias que a loja comum, em vez de uma segunda
   // implementacao. As duas regras que importam vivem aqui e valem para

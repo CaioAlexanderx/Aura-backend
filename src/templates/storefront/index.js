@@ -8,9 +8,14 @@
 const prelude       = require('./parts/prelude');
 const init          = require('./parts/init');
 const stateUtils    = require('./parts/state_utils');
+// O cartao de produto: uma funcao pra grade e pra home (fase 3).
+const card          = require('./parts/card');
 const products      = require('./parts/products');
 const categorias    = require('./parts/categorias');
 const tiraCategorias = require('./parts/tira_categorias');
+// A home que nasce do estoque + cabecalho novo (fase 3 do redesign).
+// Depois de categorias e tira: usa CATEGORIAS, filhasDe, irParaCategoria.
+const home          = require('./parts/home');
 const filtros       = require('./parts/filtros');
 const cart          = require('./parts/cart');
 const checkout      = require('./parts/checkout');
@@ -35,9 +40,11 @@ function buildScript(storeData, escapedSlug, apiBase) {
        + fonteClienteIniciais()
        + fonteClienteParcelamento()
        + fonteDasCores
+       + card
        + products
        + categorias
        + tiraCategorias
+       + home
        + filtros
        + cart
        + checkout

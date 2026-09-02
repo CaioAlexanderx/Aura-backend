@@ -1,6 +1,8 @@
 // AURA. — CSS da vitrine pública v2 (redesign editorial)
 // buildStyles(primary, accent, dark, font) → string CSS
 const { parTipografico } = require('./storefrontTypography');
+// A home e o cabecalho do redesign (fase 3) moram num arquivo proprio.
+const homeStyles = require('./storefrontHomeStyles');
 // Aceita assinatura legada buildStyles(primary) — accent cai em color-mix,
 // dark=false, font='classic'.
 //
@@ -317,79 +319,6 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .banner-frame:has(.banner-slide[data-tone="image-clean"]) .banner-dot{background:rgba(255,255,255,0.55);}
 .banner-frame:has(.banner-slide[data-tone="image-clean"]) .banner-dot.active{background:#fff;}
 
-/* ============================================================
-   Legacy hero (compat com getStorefrontPage que ainda renderiza
-   .hero-section quando não há banners). Mantido pra empresas
-   pré-migration. Banner stage renderiza ACIMA quando banners[] existe.
-   ============================================================ */
-.hero-section{position:relative;background:var(--sf-bg-card);}
-.hero-cover{width:100%;background-position:center;background-size:cover;background-repeat:no-repeat;background-color:var(--sf-brand);}
-.hero-section.has-cover .hero-cover{height:180px;background-image:linear-gradient(135deg,var(--sf-brand) 0%,color-mix(in oklab,var(--sf-accent) 80%,var(--sf-brand)) 100%);}
-.hero-section.no-cover .hero-cover{height:90px;background-image:linear-gradient(135deg,var(--sf-brand) 0%,color-mix(in oklab,var(--sf-accent) 80%,var(--sf-brand)) 100%);}
-.hero-card{max-width:1280px;margin:0 auto;padding:14px 20px 18px;display:flex;gap:14px;align-items:flex-start;position:relative;}
-.hero-section.has-cover .hero-card{margin-top:-26px;}
-.hero-card-logo{width:64px;height:64px;border-radius:18px;background:var(--sf-brand);color:#fff;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:400;font-family:${fontSerif};flex-shrink:0;border:3px solid var(--sf-bg-card);box-shadow:var(--sf-shadow-sm);overflow:hidden;}
-.hero-section.has-cover .hero-card-logo{margin-top:-26px;}
-.hero-section.no-cover .hero-card-logo{width:54px;height:54px;border-radius:50%;margin-top:-30px;border-width:3px;}
-/* Mesmo remedio da topbar: contain, nao cover — o logo entra inteiro.
-   Com imagem, o fundo vira o do cartao pra logo com fundo branco nao
-   flutuar num quadrado de marca. */
-.hero-card-logo img{width:100%;height:100%;object-fit:contain;}
-.hero-card-logo:has(img){background:var(--sf-bg-card);}
-.hero-card-info{flex:1;min-width:0;padding-top:4px;}
-.hero-card-name{font-size:22px;font-weight:400;font-family:${fontSerif};letter-spacing:-0.4px;color:var(--sf-ink);line-height:1.2;margin-bottom:4px;}
-.hero-card-tag{font-size:14px;color:var(--sf-ink-2);line-height:1.5;margin-bottom:10px;}
-.hero-card-pills{display:flex;gap:6px;flex-wrap:wrap;}
-.hero-pill{display:inline-flex;align-items:center;gap:4px;background:var(--sf-bg);border:1px solid var(--sf-border);border-radius:999px;padding:5px 11px;font-size:12px;font-weight:500;color:var(--sf-ink-2);white-space:nowrap;}
-@media(max-width:480px){.hero-section.has-cover .hero-cover{height:140px;}.hero-card{padding:12px 16px 16px;gap:12px;}.hero-card-logo{width:54px;height:54px;font-size:22px;}.hero-section.has-cover .hero-card-logo{margin-top:-22px;}.hero-card-name{font-size:18px;}.hero-card-tag{font-size:12px;}}
-
-/* ============================================================
-   Editorial note (between banner and categories)
-   ============================================================ */
-.editorial-note{max-width:1280px;margin:0 auto;padding:60px 32px 20px;display:grid;grid-template-columns:1fr 1.4fr;gap:80px;align-items:center;}
-.editorial-note h2{font-family:${fontSerif};font-size:44px;font-weight:400;font-style:italic;color:var(--sf-ink);letter-spacing:-0.6px;line-height:1.08;margin:0 0 18px;}
-.editorial-note p{font-size:16px;color:var(--sf-ink-2);line-height:1.7;margin:0;max-width:560px;}
-@media(max-width:760px){
-  .editorial-note{padding:32px 24px 8px;grid-template-columns:1fr;gap:14px;}
-  .editorial-note h2{font-size:30px;}
-  .editorial-note p{font-size:14px;}
-}
-
-/* ============================================================
-   Section heads
-   ============================================================ */
-.sf-section-head{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:28px;gap:18px;}
-.sf-section-head h2{font-family:${fontSerif};font-size:30px;font-weight:400;color:var(--sf-ink);letter-spacing:-0.4px;margin:0;line-height:1.1;}
-@media(max-width:600px){.sf-section-head{margin-bottom:18px;}.sf-section-head h2{font-size:22px;}}
-.sf-section-head-link{color:var(--sf-ink-2);font-size:13px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;text-decoration:none;}
-
-/* ── Tira de categorias (home) ────────────────────────────
-   Cartoes grandes de categoria antes da grade — a porta de entrada
-   visual pras poucas categorias de topo. A barra de texto logo abaixo
-   continua sendo a navegacao completa.
-
-   Regua minimalista: sem preenchimento solido da marca (reservado a
-   acao principal), e NADA levanta no hover. Quem responde ao mouse e a
-   arte dentro da moldura — mesma ideia do cartao de produto. */
-.tira-cats{max-width:1280px;margin:8px auto 0;padding:0 20px;}
-.tira-cats-inner{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;}
-.tira-cat{appearance:none;border:0;background:none;padding:0;cursor:pointer;text-align:left;font:inherit;}
-.tira-cat-arte{position:relative;width:100%;aspect-ratio:4/5;overflow:hidden;border-radius:14px;background:var(--sf-bg-card);}
-.tira-cat-arte img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .6s cubic-bezier(.4,0,.2,1);}
-/* A foto cresce DENTRO da moldura: a moldura nao se mexe, entao a
-   fila nao dança quando o mouse passa. */
-.tira-cat:hover .tira-cat-arte img,.tira-cat:focus-visible .tira-cat-arte img{transform:scale(1.04);}
-.tira-cat:focus-visible .tira-cat-arte{outline:2px solid var(--sf-brand);outline-offset:2px;}
-.tira-cat-nome{margin-top:10px;font-size:14px;font-weight:600;color:var(--sf-ink);}
-.tira-cat-total{margin-top:2px;font-size:12px;color:var(--sf-ink-3);font-variant-numeric:tabular-nums;}
-@media(max-width:600px){
-  .tira-cats{padding:0 12px;}
-  .tira-cats-inner{grid-template-columns:repeat(2,1fr);gap:10px;}
-}
-@media(prefers-reduced-motion:reduce){
-  .tira-cat-arte img{transition:none;}
-  .tira-cat:hover .tira-cat-arte img,.tira-cat:focus-visible .tira-cat-arte img{transform:none;}
-}
 /* ============================================================
    Categories chip strip
    ============================================================ */
@@ -778,35 +707,6 @@ body.card-style-image-heavy .product-desc{display:none;}
 .confirm-desc{font-size:15px;color:var(--sf-ink-2);line-height:1.6;max-width:380px;margin:0 auto 24px;}
 .whats-btn{display:inline-flex;align-items:center;gap:8px;background:#25D366;color:#fff;padding:14px 28px;border-radius:999px;font-size:14px;font-weight:600;text-decoration:none;border:none;cursor:pointer;font-family:${fontSans};}
 
-/* Contact bar (footer area) */
-.contact-bar{background:var(--sf-bg-card);border-top:1px solid var(--sf-border);padding:24px 20px;text-align:center;}
-.contact-bar p{font-size:13px;color:var(--sf-ink-3);margin-bottom:14px;font-family:${fontSans};}
-/* Contornado, nao preenchido. Uma pilula verde solida no rodape era o
-   elemento mais forte de uma pagina que vende roupa, e o verde nem e da
-   loja — e do WhatsApp. O ICONE fica verde: e ele que da o
-   reconhecimento, nao o fundo. */
-.whatsapp-cta{display:inline-flex;align-items:center;gap:9px;background:transparent;color:var(--sf-ink);padding:11px 24px;border:1px solid var(--sf-border-2);border-radius:999px;font-size:14px;font-weight:600;text-decoration:none;font-family:${fontSans};transition:border-color 200ms cubic-bezier(.4,0,.2,1);}
-.whatsapp-cta svg{color:#25D366;flex-shrink:0;}
-.whatsapp-cta:hover{border-color:#25D366;}
-
-/* ============================================================
-   Quote ribbon (press blurb)
-   ============================================================ */
-.quote-ribbon{margin:96px auto 0;max-width:1280px;padding:64px 80px;border-top:1px solid var(--sf-border);border-bottom:1px solid var(--sf-border);text-align:center;background:var(--sf-brand-wash-2);}
-.quote-ribbon blockquote{font-family:${fontSerif};font-style:italic;font-size:32px;line-height:1.25;color:var(--sf-ink);margin:0 auto;max-width:760px;letter-spacing:-0.4px;font-weight:400;}
-.quote-ribbon .quote-source{margin-top:18px;font-family:${fontSans};font-size:12px;color:var(--sf-ink-3);letter-spacing:1.2px;text-transform:uppercase;}
-@media(max-width:760px){.quote-ribbon{margin:56px 16px 0;padding:36px 22px;}.quote-ribbon blockquote{font-size:22px;}}
-
-/* ============================================================
-   Service strip (4 cards: frete, embalagem, segurança, avaliação)
-   ============================================================ */
-.service-strip{max-width:1280px;margin:0 auto;padding:56px 32px 0;display:grid;grid-template-columns:repeat(4,1fr);gap:24px;}
-@media(max-width:760px){.service-strip{padding:32px 16px 0;grid-template-columns:repeat(2,1fr);gap:14px;}}
-.service-card{padding:18px;border-radius:12px;border:1px solid var(--sf-border);background:var(--sf-bg-card);display:flex;flex-direction:column;gap:10px;}
-.service-card-icon{width:38px;height:38px;border-radius:10px;background:var(--sf-brand-wash);display:flex;align-items:center;justify-content:center;color:var(--sf-brand-ink);font-size:20px;}
-.service-card-title{font-size:14px;font-weight:600;color:var(--sf-ink);}
-.service-card-body{font-size:12px;color:var(--sf-ink-2);margin-top:2px;}
-
 /* ============================================================
    Footer
    ============================================================ */
@@ -944,6 +844,8 @@ body.card-style-image-heavy .product-desc{display:none;}
 .pd-rel-nome{font-family:${fontSerif};font-size:14.5px;line-height:1.25;color:var(--sf-ink);margin-top:9px;}
 .pd-rel-preco{font-family:${fontSans};font-size:13px;font-weight:800;color:var(--sf-brand-ink);margin-top:3px;font-variant-numeric:tabular-nums;}
 
+${homeStyles({ fontSerif, fontSans, fontMono })}
+
 /* ============================================================
    Quem pediu pra parar de mexer.
 
@@ -969,6 +871,7 @@ body.card-style-image-heavy .product-desc{display:none;}
      foto ainda cresceria — so que instantaneamente, que e pior. */
   .product-card:hover,.checkout-btn:hover,.next-btn:hover,
   .pd-comprar:hover,.pd-add:hover,
+  .cart-btn:hover,.hero-text .banner-cta:hover,.home-linha:hover,.whatsapp-cta:hover,
   .pd-foto:hover img{transform:none !important;}
   .banner-cta:hover::after{transform:none !important;}
   /* A regua de hover das categorias nao entra aqui de proposito: com a
