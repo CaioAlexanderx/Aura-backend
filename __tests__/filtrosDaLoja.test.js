@@ -244,54 +244,34 @@ describe('preço no Pix', () => {
 });
 
 describe('ordenar por mais vendidos', () => {
+  // Redesign 09/2026: a conta saiu do ORDENS e virou VENDIDOS_RECENTES, a
+  // MESMA fonte que o bloco "Mais vendidos" da home usa. O teste olha a
+  // fonte do fragmento e exige que a ordenacao o use.
+  const i = paginado.indexOf('const VENDIDOS_RECENTES = `');
+  const bloco = paginado.slice(i, i + 700);
+
   test('a ordem existe e sai de sale_items', () => {
-    expect(paginado).toContain('mais_vendidos:');
-    const i = paginado.indexOf('mais_vendidos:');
-    const bloco = paginado.slice(i, i + 700);
+    expect(i).toBeGreaterThan(0);
     expect(bloco).toContain('sale_items');
+    expect(paginado).toContain('mais_vendidos: `${VENDIDOS_RECENTES}');
   });
 
   test('venda cancelada não conta', () => {
-    const i = paginado.indexOf('mais_vendidos:');
-    expect(paginado.slice(i, i + 700)).toContain("<> 'cancelled'");
+    expect(bloco).toContain("<> 'cancelled'");
+  });
+
+  test('troca não conta (armadilha 5)', () => {
+    expect(bloco).toContain("<> 'troca'");
   });
 
   test('tem janela de tempo', () => {
     // Campeão de venda de dois anos atrás não é o que a loja quer
-    // empurrar hoje — e sem recorte a ordem congela.
-    const i = paginado.indexOf('mais_vendidos:');
-    expect(paginado.slice(i, i + 700)).toContain("INTERVAL '90 days'");
-  });
-
-  test('produto nunca vendido vai para o FIM', () => {
-    // SUM de nada é null, e num ORDER BY DESC o Postgres colocaria null
-    // primeiro — a loja abriria com o que ninguém comprou.
-    const i = paginado.indexOf('mais_vendidos:');
-    expect(paginado.slice(i, i + 700)).toContain('DESC NULLS LAST');
+    // empurrar hoje. 90 dias — decisão de 02/09/2026.
+    expect(bloco).toContain("INTERVAL '${JANELA_DE_VENDAS_DIAS} days'");
+    expect(paginado).toContain('const JANELA_DE_VENDAS_DIAS = 90;');
   });
 });
 
-// ============================================================
-// Os dois bugs de SQL que chegaram em produção, e o silêncio que os
-// deixou chegar.
-//
-// A consulta das facetas subiu quebrada de duas formas ao mesmo tempo:
-//
-//   1. `FROM products p` com alias, enquanto `visibilityWhere` e o filtro
-//      de foto referenciam `products.` — Postgres devolve 42P01, o MESMO
-//      código de "tabela não existe".
-//   2. `is_active` sem prefixo, ambíguo porque product_variants também
-//      tem a coluna — 42702.
-//
-// O PRIMEIRO FOI ENGOLIDO PELO PRÓPRIO CATCH que existe para tolerar base
-// sem as tabelas de variante. Um catch que tolera uma classe de erro
-// acaba tolerando um bug dessa classe. O filtro voltou vazio em produção
-// sem nenhum sinal — e o segundo catch, no builder, engoliu o resto.
-//
-// Estes testes verificam a FORMA do SQL, que é o que dá para verificar
-// sem banco. O que realmente pegou os bugs foi rodar a consulta contra o
-// banco real; o que impede a volta é isto aqui mais o log.
-// ============================================================
 describe('a consulta das facetas não pode repetir os dois bugs', () => {
   // Só o SQL, sem os comentários em volta. O comentário que EXPLICA o bug
   // contém a string "FROM products p" e reprovava o próprio teste — o

@@ -55,6 +55,9 @@ const CAMPOS_COMPARTILHADOS = [
   'material',
   'medidas',
   'cuidados',
+  // Redesign 09/2026 — selo NOVO. Nasceu na loja comum e na vitrine no
+  // mesmo PR, e este teste e o que impede um dos lados de perder o selo.
+  'is_new',
 ];
 
 describe('paridade entre a loja comum e a vitrine Studio', () => {

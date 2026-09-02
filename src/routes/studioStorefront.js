@@ -58,6 +58,8 @@ const {
 } = require('../services/storefrontBuilder');
 const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
 const { filtroDeFoto } = require('../services/catalogoPaginado');
+// Selo NOVO com a mesma regra da loja comum (redesign 09/2026).
+const { ehNovo } = require('../services/homeDaLoja');
 const { initialArtStatus } = require('../services/artReview');
 
 function validateCpfCnpj(raw) {
@@ -227,7 +229,7 @@ router.get('/:slug/studio/products', async (req, res) => {
     // migration no boot, entao coluna nova sempre tem um intervalo em que
     // o codigo subiu e o banco nao.
     const consultaProdutos = (colsFicha) => db.query(
-      `SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty,
+      `SELECT id, name, description, price, image_url, gallery_urls, category, stock_qty, created_at,
               ${colsFicha}
               customization_config
          FROM products
@@ -432,6 +434,9 @@ router.get('/:slug/studio/products', async (req, res) => {
           material: p.material || null,
           medidas:  p.medidas  || null,
           cuidados: p.cuidados || null,
+          // Redesign 09/2026 — selo NOVO, a mesma regra da loja comum
+          // (services/homeDaLoja.js). O teste de paridade exige nos dois.
+          is_new: ehNovo(p.created_at),
           category_id:   cat ? cat.id   : null,
           category_slug: cat ? cat.slug : null,
           category_path: cat ? cat.path : null,

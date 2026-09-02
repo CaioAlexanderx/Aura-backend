@@ -96,6 +96,9 @@ function buildStorefrontPage(data, slug) {
     tira_de_categorias: data.tira_de_categorias,
     facetas: data.facetas,
     pix_discount_pct: data.pix_discount_pct,
+    // Redesign 09/2026 — os blocos da home. Copiado campo a campo como
+    // tudo aqui: sem esta linha o builder calcula e a pagina nunca ve.
+    home: data.home,
   });
 
   // O <img> quebrado SAI do DOM (remove(), nao display:none): o CSS usa

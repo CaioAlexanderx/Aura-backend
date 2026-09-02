@@ -83,6 +83,27 @@ function filtroDeFoto(exigeFoto) {
   return exigeFoto === true ? COM_FOTO : 'TRUE';
 }
 
+/** Janela do ranking de vendas. Decisao de Caio (02/09/2026): 90 dias. */
+const JANELA_DE_VENDAS_DIAS = 90;
+
+/**
+ * Quantas unidades da peca sairam pelo Caixa na janela.
+ *
+ * UMA fonte pra ordenacao "Mais vendidos" da grade e pro bloco da home
+ * (services/homeDaLoja.js). Troca fica de fora: `sales.type = 'troca'`
+ * registra a peca nova que saiu no lugar de outra, nao uma venda —
+ * armadilha 5 do CLAUDE.md, que ja inflou receita e inflaria ranking.
+ */
+const VENDIDOS_RECENTES = `(
+    SELECT COALESCE(SUM(si.quantity), 0)
+      FROM sale_items si
+      JOIN sales s ON s.id = si.sale_id
+     WHERE si.product_id = products.id
+       AND COALESCE(s.status, 'completed') <> 'cancelled'
+       AND COALESCE(s.type, '') <> 'troca'
+       AND s.created_at >= NOW() - INTERVAL '${JANELA_DE_VENDAS_DIAS} days'
+  )`;
+
 const ORDENS = {
   // A ordem que a lojista curou (featured primeiro) já vem do array de
   // destaques; sem ele, o mais recente na frente.
@@ -95,14 +116,7 @@ const ORDENS = {
   //
   // NULLS LAST importa: produto nunca vendido tem SUM null, e sem isso o
   // Postgres o colocaria PRIMEIRO num ORDER BY DESC.
-  mais_vendidos: `(
-    SELECT COALESCE(SUM(si.quantity), 0)
-      FROM sale_items si
-      JOIN sales s ON s.id = si.sale_id
-     WHERE si.product_id = products.id
-       AND COALESCE(s.status, 'completed') <> 'cancelled'
-       AND s.created_at >= NOW() - INTERVAL '90 days'
-  ) DESC NULLS LAST, created_at DESC`,
+  mais_vendidos: `${VENDIDOS_RECENTES} DESC NULLS LAST, created_at DESC`,
   preco_asc: 'price ASC NULLS LAST',
   preco_desc: 'price DESC NULLS LAST',
   nome: 'name ASC',
@@ -136,6 +150,8 @@ async function paginaDoCatalogo({
   // Filtros de atributo: arrays dos valores GRAVADOS (nao dos rotulos).
   // Quem traduz "M" para ['m','M'] e a rota, com agruparTamanhos.
   tamanhos, cores,
+  // Faixa de preco (redesign 09/2026). Validada abaixo.
+  precoMin, precoMax,
 }) {
   const off = Math.max(0, parseInt(offset, 10) || 0);
   const lim = Math.min(LIMITE_MAXIMO, Math.max(1, parseInt(limit, 10) || POR_PAGINA));
@@ -215,6 +231,20 @@ async function paginaDoCatalogo({
        WHERE v.product_id = products.id AND v.is_active = true AND v.stock_qty > 0
          AND ${dentro.join(' AND ')}
     )`);
+  }
+
+  // Faixa de preco (redesign 09/2026): a pagina de categoria ganhou o
+  // filtro. Valor ilegivel ou negativo e tratado como ausente — filtro que
+  // esvazia a grade por causa de um "abc" na URL e pior que filtro nenhum.
+  const pMin = Number(precoMin);
+  const pMax = Number(precoMax);
+  if (Number.isFinite(pMin) && pMin > 0) {
+    params.push(pMin);
+    filtros.push(`price >= $${params.length}`);
+  }
+  if (Number.isFinite(pMax) && pMax > 0) {
+    params.push(pMax);
+    filtros.push(`price <= $${params.length}`);
   }
 
   const termos = normalizar(busca).split(/\s+/).filter(Boolean);
@@ -403,6 +433,34 @@ async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto }) {
   }
 }
 
+/**
+ * O menor e o maior preco entre as pecas visiveis.
+ *
+ * O filtro de preco da pagina de categoria desenha as faixas a partir
+ * disto, em vez de "ate R$ 200 / 200 a 300 / acima de 300" fixos: numa
+ * loja de bijuteria as tres faixas cairiam na primeira. Devolve null
+ * quando nao ha peca com preco.
+ */
+async function faixaDePreco({ cid, visibilityWhere, exigeFoto }) {
+  const sql = `
+    SELECT MIN(price)::float AS min, MAX(price)::float AS max
+      FROM products
+     WHERE ${visibilityWhere}
+       AND is_active IS NOT FALSE
+       AND ${EM_ESTOQUE}
+       AND ${filtroDeFoto(exigeFoto)}
+       AND price IS NOT NULL AND price > 0`;
+  try {
+    const { rows } = await bd().query(sql, [cid]);
+    const r = rows[0];
+    if (!r || r.min == null || r.max == null) return null;
+    return { min: r.min, max: r.max };
+  } catch (e) {
+    console.error('[faixa-de-preco] consulta falhou (' + e.code + '):', e.message);
+    return null;
+  }
+}
+
 async function contarPorCategoria({ cid, visibilityWhere, exigeFoto }) {
   const { rows } = await bd().query(
     `SELECT category AS nome, COUNT(*)::int AS total
@@ -448,6 +506,7 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 
 module.exports = {
   POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, filtroDeFoto,
-  arvoreDeCategorias, facetasDoCatalogo,
+  JANELA_DE_VENDAS_DIAS, VENDIDOS_RECENTES,
+  arvoreDeCategorias, facetasDoCatalogo, faixaDePreco,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,
 };
