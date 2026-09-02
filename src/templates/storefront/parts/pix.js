@@ -52,6 +52,7 @@ function showConfirmation(order){
 
 function chooseMethod(method){
   customerData.payment_method=method;
+  if(typeof renderResumoDoCheckout==='function') renderResumoDoCheckout();
   submitOrder();
 }
 

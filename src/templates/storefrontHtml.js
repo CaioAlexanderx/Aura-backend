@@ -287,29 +287,53 @@ ${whatsBlock}
     <div class="cart-summary-row"><span>Subtotal</span><span id="cartSubtotal">R$ 0,00</span></div>
     <div class="cart-summary-row"><span id="deliveryLabel">Entrega</span><span id="deliveryVal">—</span></div>
     <div class="cart-summary-row total"><span>Total</span><span id="cartTotal">R$ 0,00</span></div>
+    <div class="cart-summary-row pix" id="cartPixRow" hidden><span>Pagando no Pix</span><span id="cartPixVal"></span></div>
     <button class="checkout-btn" onclick="openCheckout()">Finalizar compra →</button>
   </div>
 </div>
 
+<!-- Checkout em pagina inteira, no mesmo documento (decisao 9, 02/09/2026):
+     a sacola vive no navegador e uma rota nova a perderia. Os ids que o
+     JS usa (checkoutTitle/Sub, dot1-3, lbl1-3, checkoutBody, nextBtn)
+     continuam; o resumo da direita e novo (parts/sacola.js). -->
 <div class="checkout-overlay" id="checkoutOverlay">
-  <div class="checkout-sheet">
-    <div class="checkout-head">
-      <div class="checkout-back" onclick="checkoutBack()">←</div>
-      <div class="checkout-head-info">
-        <div class="checkout-title" id="checkoutTitle">Seus dados</div>
-        <div class="checkout-subtitle" id="checkoutSub">Etapa 1 de 3</div>
+  <div class="checkout-page">
+    <div class="checkout-topo"><div class="checkout-topo-inner">
+      <button type="button" class="checkout-voltar-loja" onclick="closeCheckout()">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 18l-6-6 6-6"/></svg><span>Continuar comprando</span>
+      </button>
+      <div class="checkout-topo-logo">${logoNoRodape || `<span class="serif">${siteName}</span>`}</div>
+      <span class="checkout-seguro"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg><span>Compra segura</span></span>
+    </div></div>
+    <div class="checkout-corpo">
+      <div class="steps-bar">
+        <div class="step"><div class="step-dot active" id="dot1">1</div><div class="step-label active" id="lbl1">Seus dados</div></div>
+        <div class="step-linha"></div>
+        <div class="step"><div class="step-dot" id="dot2">2</div><div class="step-label" id="lbl2">Entrega</div></div>
+        <div class="step-linha"></div>
+        <div class="step"><div class="step-dot" id="dot3">3</div><div class="step-label" id="lbl3">Pagamento</div></div>
       </div>
-      <div class="cart-close" onclick="closeCheckout()">×</div>
+      <div class="checkout-cols">
+        <div class="checkout-main">
+          <div class="checkout-card">
+            <div class="checkout-head">
+              <div class="checkout-back" onclick="checkoutBack()">←</div>
+              <div class="checkout-head-info">
+                <div class="checkout-title" id="checkoutTitle">Seus dados</div>
+                <div class="checkout-subtitle" id="checkoutSub">Etapa 1 de 3</div>
+              </div>
+            </div>
+            <div class="checkout-body" id="checkoutBody"></div>
+          </div>
+          <div class="checkout-foot">
+            <button type="button" class="prev-btn" id="prevBtn" onclick="checkoutBack()" hidden>← Voltar</button>
+            <button class="next-btn" id="nextBtn" onclick="checkoutNext()">Continuar</button>
+          </div>
+          <div class="checkout-protegido"><svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>Seus dados são protegidos e usados só para este pedido</div>
+        </div>
+        <aside class="checkout-resumo" id="checkoutResumo" aria-label="Resumo da sacola"></aside>
+      </div>
     </div>
-    <div class="steps-bar">
-      <div class="step"><div class="step-dot active" id="dot1">1</div><div class="step-label active" id="lbl1">Dados</div></div>
-      <div style="flex:0 0 36px;height:1px;background:var(--sf-border-2);"></div>
-      <div class="step"><div class="step-dot" id="dot2">2</div><div class="step-label" id="lbl2">Entrega</div></div>
-      <div style="flex:0 0 36px;height:1px;background:var(--sf-border-2);"></div>
-      <div class="step"><div class="step-dot" id="dot3">3</div><div class="step-label" id="lbl3">Pagamento</div></div>
-    </div>
-    <div class="checkout-body" id="checkoutBody"></div>
-    <div class="checkout-foot"><button class="next-btn" id="nextBtn" onclick="checkoutNext()">Continuar</button></div>
   </div>
 </div>
 

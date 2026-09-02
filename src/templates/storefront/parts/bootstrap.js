@@ -7,6 +7,7 @@
 'use strict';
 
 module.exports = `
+carregarSacola();
 updateCartUI();
 renderTopNav();
 renderFooterNav();
