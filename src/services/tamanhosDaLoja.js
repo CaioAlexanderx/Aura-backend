@@ -27,6 +27,17 @@ const ESCALA = ['PP', 'P', 'M', 'G', 'GG', 'XG', 'XGG', 'ÚNICO'];
 /** Sinônimos que a lojista escreve e significam "serve em qualquer uma". */
 const UNICO = ['U', 'UN', 'UNI', 'ÚNICO', 'UNICO', 'TAMANHO ÚNICO', 'TAMANHO UNICO'];
 
+/**
+ * Numeracao em par — "37/38", "45/46".
+ *
+ * Chinelo e sandalia de dedo sao vendidos assim, e uma loja de calcado
+ * grava os dois formatos na mesma vitrine (a Davi tem 17 ao 44 avulsos E
+ * 17/18 ao 47/48 em par). Sem reconhecer o par, ele caia no balde do
+ * "nao reconhecido" e a regua o jogava DEPOIS de todo numero e de toda
+ * letra: a pessoa via 34, 35, 36 ... 44 e so entao 33/34, 35/36.
+ */
+const PAR = /^(\d+)\s*\/\s*(\d+)$/;
+
 function semAcento(s) {
   return String(s == null ? '' : s)
     .normalize('NFD')
@@ -51,6 +62,10 @@ function normalizarTamanho(bruto) {
   const alto = semAcento(s).toUpperCase();
   if (UNICO.includes(alto)) return 'Único';
 
+  // Par (37/38): so tira o espaco em volta da barra e o zero a esquerda.
+  const par = alto.match(PAR);
+  if (par) return parseInt(par[1], 10) + '/' + parseInt(par[2], 10);
+
   // Numérico (34, 36, 38…): devolve o número limpo, sem zero à esquerda.
   const num = alto.replace(/[^0-9]/g, '');
   if (num && num === alto.replace(/\s/g, '')) return String(parseInt(num, 10));
@@ -73,7 +88,12 @@ function normalizarTamanho(bruto) {
  */
 function pesoDoTamanho(rotulo) {
   const s = String(rotulo == null ? '' : rotulo).trim();
-  if (/^\d+$/.test(s)) return { grupo: 0, ordem: parseInt(s, 10) };
+  // Numero e par entram na MESMA escala, ordenados pelo primeiro numero.
+  // O x2 (+1 no par) desempata sem inventar posicao: 37 vem logo antes de
+  // 37/38, e os dois ficam entre 36 e 38 — que e onde a pessoa procura.
+  if (/^\d+$/.test(s)) return { grupo: 0, ordem: parseInt(s, 10) * 2 };
+  const par = s.match(PAR);
+  if (par) return { grupo: 0, ordem: parseInt(par[1], 10) * 2 + 1 };
   const i = ESCALA.indexOf(semAcento(s).toUpperCase());
   if (i >= 0) return { grupo: 1, ordem: i };
   return { grupo: 2, ordem: 0, texto: s };
