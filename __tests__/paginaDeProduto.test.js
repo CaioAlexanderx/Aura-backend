@@ -55,8 +55,10 @@ describe('preco, tamanho e urgencia', () => {
     expect(src).toContain("' no tamanho '+esc(tam)");
     expect(src).toContain("'Última unidade'");
   });
-  test('o rotulo diz o que ja foi escolhido', () => {
-    expect(src).toContain("' — <span class=\"op-escolhido\">'+esc(escolhido)+'</span>'");
+  test('o rotulo diz o que ja foi escolhido — e cor em hex vira o NOME da cor', () => {
+    // "Cor — #92400E" nao diz nada a cliente (Caio, 02/09, Finesse no ar).
+    expect(src).toContain("' — <span class=\"op-escolhido\">'+esc(escolhidoRotulo)+'</span>'");
+    expect(src).toContain('escolhidoRotulo=nomeDaCor(escolhido)||escolhido;');
   });
 });
 

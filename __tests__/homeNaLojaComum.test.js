@@ -207,3 +207,21 @@ describe('CNPJ formatado', () => {
     expect(formatarCnpj(null)).toBe('');
   });
 });
+
+describe('"Novidades" e "Mais vendidos" sao vistas, nao "Todos os produtos"', () => {
+  const src = semComentarios(parts('home.js'));
+  test('verTudo liga a vista e sai do modo home', () => {
+    expect(src).toContain("var VISTAS={ novidades:'Novidades', mais_vendidos:'Mais vendidos' };");
+    expect(src).toContain('vistaEspecial=VISTAS[criterio]?criterio:null;');
+    expect(src).toContain('if(vistaEspecial) return false;');
+  });
+  test('o titulo e as migalhas dizem a vista', () => {
+    expect(src).toContain("else if(vistaEspecial) t.textContent=VISTAS[vistaEspecial];");
+    expect(src).toContain("if(!busca&&vistaEspecial) itens.push(");
+  });
+  test('escolher categoria ou voltar pra home fecha a vista', () => {
+    expect(semComentarios(parts('cart.js'))).toContain("if(typeof vistaEspecial!=='undefined') vistaEspecial=null;");
+    expect(src).toContain('function irParaHome(){\n  vistaEspecial=null;');
+  });
+});
+

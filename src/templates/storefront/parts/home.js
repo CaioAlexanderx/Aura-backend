@@ -83,11 +83,19 @@ function renderHome(){
   }
 }
 
-/** "Ver tudo": a grade inteira ordenada pelo criterio do bloco. */
+/**
+ * "Novidades" e "Mais vendidos" sao VISTAS: a grade inteira ordenada pelo
+ * criterio, com titulo e migalhas proprios, fora do modo home. Antes
+ * "Novidades" no menu so trocava a ordem e a pagina continuava dizendo
+ * "Todos os produtos" (Caio, 02/09).
+ */
+var VISTAS={ novidades:'Novidades', mais_vendidos:'Mais vendidos' };
+var vistaEspecial=null;
 function verTudo(criterio){
+  vistaEspecial=VISTAS[criterio]?criterio:null;
   ordem=criterio;
   var sel=document.getElementById('sortSelect'); if(sel) sel.value=criterio;
-  if(currentCat!=='Todos'){ filterCat('Todos',null); }
+  if(currentCat!=='Todos'){ currentCat='Todos'; if(typeof renderCategorias==='function') renderCategorias(); }
   // "Ver tudo" e um pedido explicito de ver a grade: aqui a rolagem vale.
   irParaPagina(1,{rolar:true});
 }
@@ -99,6 +107,7 @@ function verTudo(criterio){
 // categoria (fase 4). O <body> nasce com a classe, e cada render da
 // grade reavalia.
 function modoHome(){
+  if(vistaEspecial) return false;
   if(currentCat&&currentCat!=='Todos') return false;
   if(String(searchTerm||'').trim()) return false;
   if(typeof paramsDeFiltro==='function'&&paramsDeFiltro().length) return false;
@@ -108,6 +117,8 @@ function atualizarModoHome(){
   var home=modoHome();
   document.body.classList.toggle('home',home);
   renderCabecalhoDaGrade(home);
+  // O menu marca a vista aberta ("Novidades") como marca a categoria.
+  if(typeof renderTopNav==='function') renderTopNav();
 }
 
 /**
@@ -139,6 +150,7 @@ function renderCabecalhoDaGrade(home){
         else itens.push('<a href="#" onclick="irParaCategoria(\\''+escJsAttr(acum)+'\\');return false;">'+esc(nome)+'</a>');
       });
     }
+    if(!busca&&vistaEspecial) itens.push('<span aria-current="page">'+esc(VISTAS[vistaEspecial])+'</span>');
     if(busca) itens.push('<span aria-current="page">Busca</span>');
   }
   if(nav){
@@ -148,12 +160,14 @@ function renderCabecalhoDaGrade(home){
   if(t){
     if(busca) t.textContent='Resultados para “'+busca+'”';
     else if(currentCat&&currentCat!=='Todos') t.textContent=(typeof nomeDoCaminho==='function'?nomeDoCaminho(currentCat):currentCat)||currentCat;
+    else if(vistaEspecial) t.textContent=VISTAS[vistaEspecial];
     else t.textContent='Todos os produtos';
   }
 }
 
 /** Volta pra home: sem categoria, busca, filtro nem ordem. */
 function irParaHome(){
+  vistaEspecial=null;
   searchTerm='';
   var inp=document.getElementById('searchInput'); if(inp) inp.value='';
   ordem='destaque';
@@ -209,7 +223,7 @@ var megaAberto=false;
 
 function renderTopNav(){
   var nav=document.getElementById('topNav'); if(!nav) return;
-  var itens='<button type="button" class="topnav-item" onclick="verTudo(\\'novidades\\')">Novidades</button>';
+  var itens='<button type="button" class="topnav-item'+(vistaEspecial==='novidades'?' active':'')+'" onclick="verTudo(\\'novidades\\')">Novidades</button>';
   itens+=CATEGORIAS.map(function(c){
     var temFilhas=filhasDe(c.slug).length>0;
     return '<button type="button" class="topnav-item'+(dentroDe(c.caminho)?' active':'')+'" data-cat="'+esc(c.caminho)+'"'
