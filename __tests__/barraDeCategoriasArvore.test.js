@@ -102,10 +102,14 @@ describe('o filtro por caminho', () => {
 
 describe('a loja sem árvore continua funcionando', () => {
   test('o builder só cai no texto plano quando a árvore vem vazia', () => {
-    const i = builder.indexOf('let categoriasComTotal');
-    const bloco = builder.slice(i, i + 900);
-    expect(bloco).toContain('if (!arvoreBarra.length)');
-    expect(bloco).toContain('contarPorCategoria');
+    // Ancora no PRÓPRIO guarda, e não numa janela de N caracteres a
+    // partir de outro ponto: comentário que cresce empurrava a asserção
+    // para fora da janela e quebrava o teste sem o código ter mudado.
+    expect(builder).toContain('let categoriasComTotal');
+    const i = builder.indexOf('if (!arvoreBarra.length)');
+    expect(i).toBeGreaterThan(0);
+    // A contagem plana só existe DENTRO do guarda.
+    expect(builder.slice(i, i + 500)).toContain('contarPorCategoria');
   });
 
   test('o payload leva os dois campos', () => {

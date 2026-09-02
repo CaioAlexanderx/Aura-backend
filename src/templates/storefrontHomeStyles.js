@@ -199,6 +199,16 @@ body.home .cats-wrap{display:none;}
 body.sf-dark .site-footer-logo img{mix-blend-mode:normal;}
 .site-footer-nome{font-size:28px;color:var(--sf-ink);}
 .site-footer-addr{font-size:13px;color:var(--sf-ink-2);max-width:380px;}
+/* Redes sociais: a logo herda a tinta do rodape e acende na cor da loja
+   no hover. Alvo de 40px — o dedo no celular precisa dele, mesmo com o
+   glyph desenhado em 18. */
+.footer-redes{display:flex;gap:6px;margin-top:14px;}
+.footer-rede{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:10px;color:var(--sf-ink-2);border:1px solid var(--sf-border);background:var(--sf-bg-card);transition:color var(--sf-motion) var(--sf-ease),border-color var(--sf-motion) var(--sf-ease);}
+/* Acende na tinta e na borda, e NAO sobe: elevacao e da peca e do botao
+   que levam a uma decisao de compra. Tres iconezinhos de 40px pulando no
+   rodape seriam movimento sem conteudo. */
+.footer-rede:hover{color:var(--sf-brand);border-color:var(--sf-brand);}
+.footer-rede:focus-visible{outline:2px solid var(--sf-brand);outline-offset:3px;}
 .footer-inst{display:flex;flex-direction:column;gap:14px;padding:0;border:0;margin:0;}
 .footer-inst-bloco{display:flex;flex-direction:column;gap:8px;}
 .footer-inst-txt{font-family:${fontSans};font-size:13.5px;line-height:1.6;color:var(--sf-ink-2);max-width:52ch;}

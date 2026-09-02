@@ -24,6 +24,7 @@ const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
 const { validatePixKey } = require('../services/staticPixService');
 const { geocodeCep, normalizeCep } = require('../services/cepGeocoding');
 const { POLITICA_PADRAO } = require('../templates/storefrontHtml');
+const { normalizarHandle } = require('../services/redesSociais');
 const {
   CAMPOS: CAMPOS_DE_VITRINE, condicaoDeFalta,
   exigeFotoNoUniverso, sanitizarItens,
@@ -47,7 +48,7 @@ const DEFAULT_CONFIG = {
   accent_color: '#a78bfa', dark_mode: false, font_family: 'classic', card_style: 'editorial',
   banners: DEFAULT_BANNERS, announcement_bar: '', service_cards: DEFAULT_SERVICE_CARDS,
   logo_url: null, cover_url: null, description: '', address: '', phone: '', whatsapp: '',
-  instagram: '', google_maps_url: '',
+  instagram: '', tiktok: '', facebook: '', google_maps_url: '',
   pix_key: null, pix_key_type: null, pix_holder_name: null, pix_holder_city: null,
   pay_on_delivery_enabled: false,
   business_hours: {
@@ -509,7 +510,7 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
     site_name, tagline, primary_color, secondary_color, accent_color,
     dark_mode, font_family, card_style, announcement_bar,
     logo_url, cover_url, description, address, phone, whatsapp,
-    instagram, google_maps_url, business_hours, featured_product_ids,
+    instagram, tiktok, facebook, google_maps_url, business_hours, featured_product_ids,
     show_prices, show_stock, delivery_enabled, delivery_fee,
     delivery_radius_km, pickup_enabled, is_published,
     pix_key, pix_key_type, pix_holder_name, pix_holder_city,
@@ -954,6 +955,35 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       } catch (e) {
         if (e.code === '42703') {
           console.error('[canal-foto] coluna require_product_image inexistente — skip:', e.message);
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    // Migration 319 — redes sociais do rodape. UPDATE separado pelo mesmo
+    // motivo dos outros. O @ e normalizado ANTES de gravar
+    // (services/redesSociais.js): a coluna guarda so o perfil limpo, e o
+    // que nao for perfil valido daquela rede vira NULL em vez de virar
+    // href no rodape de uma loja publica. String vazia limpa o campo.
+    //
+    // `instagram` entra aqui tambem, ainda que a coluna seja antiga e o
+    // UPSERT ja a grave: sem isto, o Instagram continuaria sendo gravado
+    // cru enquanto TikTok e Facebook chegariam limpos — a mesma opcao com
+    // duas regras, que e como as coisas divergem.
+    for (const [campo, valor] of [['instagram', instagram], ['tiktok', tiktok], ['facebook', facebook]]) {
+      if (valor === undefined) continue;
+      const limpo = normalizarHandle(campo, valor);
+      try {
+        const { rows: updated } = await db.query(
+          `UPDATE digital_channel_config SET ${campo} = $1, updated_at = NOW()
+            WHERE company_id = $2 RETURNING *`,
+          [limpo, cid]
+        );
+        if (updated.length) savedConfig = updated[0];
+      } catch (e) {
+        if (e.code === '42703') {
+          console.error(`[canal-redes] coluna ${campo} inexistente — skip:`, e.message);
         } else {
           throw e;
         }

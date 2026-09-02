@@ -144,6 +144,9 @@ function buildStorefrontPage(data, slug) {
       na_entrega: data.settings && data.settings.pay_on_delivery_enabled === true,
     },
     politicaTroca: data.politica_troca,
+    // Instagram, TikTok e Facebook do rodape — ja normalizados pelo
+    // builder (services/redesSociais.js).
+    redes: (data.contact && data.contact.redes) || [],
   });
   const script = buildScript(storeData, escJs(slug), API_BASE);
 

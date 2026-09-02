@@ -35,8 +35,22 @@ const bloco = (() => {
 
 describe('a contagem do menu é por caminho, não por dono do nó', () => {
   test('o conjunto visível traz o caminho da categoria', () => {
-    expect(bloco).toContain('SELECT cat.path AS caminho');
-    expect(bloco).toContain('JOIN product_categories cat ON cat.id = l.category_id');
+    expect(bloco).toContain('SELECT (SELECT c2.path FROM product_categories c2 WHERE c2.id = l.category_id) AS caminho');
+  });
+
+  test('o caminho vem por SUBCONSULTA — um JOIN aqui torna company_id ambíguo', () => {
+    // Custou uma ida a produção em 02/09: `visibilityWhere` fala em
+    // `company_id` PELADO e product_categories também tem essa coluna.
+    // Com o JOIN no FROM o Postgres devolve 42702 e o catch do builder
+    // engolia — a loja da Davi caiu na barra plana sem uma linha de log.
+    const visiveis = bloco.slice(bloco.indexOf('WITH visiveis'), bloco.indexOf('SELECT c.id'));
+    expect(visiveis).not.toMatch(/JOIN\s+product_categories/);
+  });
+
+  test('quando a árvore falha, o builder GRITA antes de cair na barra plana', () => {
+    const builder = fonte('src/services/storefrontBuilder.js');
+    const i = builder.indexOf('arvoreBarra = await arvoreDeCategorias');
+    expect(builder.slice(i, i + 700)).toContain("console.error('[storefront] arvore de categorias indisponivel");
   });
 
   test('o dono do nó saiu da contagem', () => {
