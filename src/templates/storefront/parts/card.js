@@ -67,7 +67,7 @@ function cardHtml(p,opts){
   var badgeH=badge?'<span class="card-badge">'+esc(badge)+'</span>':'';
   var parcH=PARCELAS_TXT(p.price);
   var pixPct=Number(__S.pix_discount_pct)||0;
-  var pixH=(pixPct>0&&p.price!=null)?'<div class="product-pix">'+fmt(p.price*(1-pixPct/100))+' no Pix · -'+pixPct+'%</div>':'';
+  var pixH=(pixPct>0&&p.price!=null)?'<div class="product-pix">'+fmt(p.price*(1-pixPct/100))+' no Pix &middot; -'+pixPct+'%</div>':'';
   var priceH=(SETTINGS.show_prices!==false&&p.price!=null)
     ?'<div class="product-price-row"><span class="product-price mono">'+fmt(p.price)+'</span>'+(parcH?'<span class="product-parcela">'+esc(parcH)+'</span>':'')+'</div>'+pixH
     :'';
