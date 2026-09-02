@@ -67,28 +67,57 @@ describe('preenchimento solido e reservado', () => {
   });
 });
 
-describe('nada levanta no hover', () => {
-  test('nenhum controle sobe ao passar o mouse', () => {
-    // "Parecem elementos flutuantes" vinha literalmente disto: cartao,
-    // banner-cta e os dois botoes do produto subiam 1-2px no hover. O que
-    // se move agora e a foto DENTRO da moldura e a seta DENTRO do link —
-    // o layout fica parado.
-    const re = /([^\n{]+):hover[^{]*\{([^}]*)\}/g;
-    const levantam = [];
-    let m;
-    while ((m = re.exec(css))) {
-      if (/transform:translateY\(-/.test(m[2])) levantam.push(m[1].trim());
+describe('elevacao no hover: so o clicavel, e sempre com a sombra da marca', () => {
+  // REVISTO em 02/09/2026. A regra de 24/08 era "nada levanta"; Caio
+  // considerou a decisao errada — o aplicativo inteiro usa elevacao e
+  // sombra — e o redesign (Claude Design) traz o cartao subindo 3px e o
+  // botao 2px. O que fica de guardrail e a DISCIPLINA: quem sobe e
+  // clicavel, sobe pelos tokens (--sf-lift / --sf-lift-2) e sobe com
+  // --sf-shadow-hover. Um pixel solto ou uma sombra inventada por regra e
+  // como a loja volta a parecer "solta".
+  const re = /([^\n{]+):hover[^{]*\{([^}]*)\}/g;
+  const levantam = [];
+  let m;
+  while ((m = re.exec(css))) {
+    if (/transform:translateY\(/.test(m[2])) levantam.push({ sel: m[1].trim(), decl: m[2] });
+  }
+
+  test('quem sobe, sobe pelo token — nunca por pixel solto', () => {
+    for (const { sel, decl } of levantam) {
+      expect({ sel, ok: /translateY\(var\(--sf-lift(-2)?\)\)/.test(decl) }).toEqual({ sel, ok: true });
     }
-    expect(levantam).toEqual([]);
   });
 
-  test('a foto do produto responde no lugar do cartao', () => {
-    expect(css).toContain('.product-card:hover .product-img img{transform:scale(');
-    // E ela precisa de transicao, senao o crescimento e um salto.
-    // O \n ancora a regra BASE: sem ele o indexOf casa primeiro com a
-    // regra de hover, que contem a mesma substring.
-    const i = css.indexOf('\n.product-img img{');
+  test('quem sobe leva a sombra da marca junto', () => {
+    for (const { sel, decl } of levantam) {
+      // O cartao poe a sombra na moldura da foto, numa regra irma.
+      const comSombra = decl.includes('var(--sf-shadow-hover)')
+        || css.includes(sel + ':hover .product-img{box-shadow:var(--sf-shadow-hover)');
+      expect({ sel, comSombra }).toEqual({ sel, comSombra: true });
+    }
+  });
+
+  test('so o que e clicavel sobe', () => {
+    const clicaveis = ['.product-card', '.checkout-btn', '.next-btn', '.pd-comprar', '.pd-add', '.banner-cta', '.tira-cat', '.whatsapp-cta', '.home-cat', '.home-linha', '.pg-num', '.pg-seta'];
+    for (const { sel } of levantam) {
+      const base = sel.replace(/:hover.*$/, '').replace(/:not\([^)]*\)/g, '').trim();
+      expect({ sel, clicavel: clicaveis.includes(base) }).toEqual({ sel, clicavel: true });
+    }
+  });
+
+  test('o cartao de produto e o primeiro a subir', () => {
+    expect(levantam.map((l) => l.sel)).toContain('.product-card');
+    // E precisa de transicao, senao a subida e um salto.
+    const i = css.indexOf('\n.product-card{');
     expect(css.slice(i, css.indexOf('}', i))).toContain('transition:transform');
+  });
+
+  test('com movimento reduzido, nada sobe', () => {
+    const i = css.indexOf('prefers-reduced-motion: reduce');
+    const bloco = css.slice(i);
+    for (const { sel } of levantam) {
+      expect(bloco).toContain(sel.split(' ')[0]);
+    }
   });
 });
 

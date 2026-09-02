@@ -21,6 +21,36 @@ const { parTipografico } = require('./storefrontTypography');
 // Fase 5 (20/05/2026): badge Aberta/Fechada na topbar (.open-badge).
 // .topbar-brand-text wrappa nome + badge em coluna pra acomodar a linha
 // extra. Mobile esconde o texto next_open mantendo so "Fechada".
+/**
+ * Tokens do redesign (09/2026, Claude Design). Tudo deriva de UMA cor:
+ *
+ *   --sf-brand-deep   brand x 0.72 — barra de anuncio, fundo editorial
+ *   --sf-canvas       o ladrilho neutro atras de toda foto (3:4, contain)
+ *   --sf-shadow-hover sombra tingida pela marca, so no que e clicavel
+ *   --sf-ease / --sf-motion  a curva e a duracao unicas da loja
+ *   --sf-lift / --sf-lift-2  quanto cartao e botao sobem no hover
+ *
+ * A elevacao no hover voltou por decisao de Caio (02/09/2026): a regra
+ * de 24/08 ("nada levanta") foi tomada errada — o aplicativo inteiro usa
+ * elevacao e sombra. O que continua valendo: so sobe o que e clicavel, e
+ * sempre com a sombra da marca (ver lojaMinimalista.test.js).
+ */
+function tokensDoRedesign(primary) {
+  return `
+  --sf-brand-deep:color-mix(in oklab,${primary} 72%,black);
+  --sf-canvas:#f4eee6;
+  --sf-shadow-hover:0 8px 20px color-mix(in oklab,${primary} 20%,transparent);
+  --sf-ease:cubic-bezier(.4,0,.2,1);
+  --sf-motion:220ms;
+  --sf-lift:-2px;
+  --sf-lift-2:-3px;
+  --sf-r:14px;
+  --sf-pix:#0e8345;
+  --sf-urgencia-bg:#fdf3e0;
+  --sf-urgencia-border:rgba(180,120,20,0.3);
+  --sf-urgencia-ink:#8a5a00;`;
+}
+
 function buildStyles(primary, accent, dark, font) {
   primary = primary || '#7c3aed';
   accent  = accent  || primary;
@@ -44,19 +74,20 @@ function buildStyles(primary, accent, dark, font) {
   --sf-brand-wash-2:color-mix(in oklab,${primary} 4%,transparent);
   --sf-accent:${accent};
   --sf-accent-wash:color-mix(in oklab,${accent} 10%,transparent);
-  --sf-bg:#fbf8f3;
-  --sf-bg-2:#f4efe6;
-  --sf-bg-3:#eee7d9;
+  --sf-bg:#fbf9f6;
+  --sf-bg-2:#f4eee6;
+  --sf-bg-3:#ede5da;
   --sf-bg-card:#ffffff;
-  --sf-ink:#1a1612;
-  --sf-ink-2:rgba(26,22,18,0.70);
-  --sf-ink-3:rgba(26,22,18,0.45);
-  --sf-border:color-mix(in oklab,${primary} 12%,transparent);
-  --sf-border-2:color-mix(in oklab,${primary} 22%,transparent);
+  --sf-ink:#201a14;
+  --sf-ink-2:rgba(48,38,30,0.72);
+  --sf-ink-3:rgba(48,38,30,0.50);
+  --sf-border:color-mix(in oklab,${primary} 14%,transparent);
+  --sf-border-2:color-mix(in oklab,${primary} 28%,transparent);
   --sf-shadow:0 12px 32px -8px color-mix(in oklab,${primary} 22%,transparent);
   --sf-shadow-sm:0 4px 12px -2px color-mix(in oklab,${primary} 12%,transparent);
   --sf-ph-from:color-mix(in oklab,${primary} 22%,#f0e8d8);
   --sf-ph-to:color-mix(in oklab,${accent} 16%,#ece4d4);
+  ${tokensDoRedesign(primary)}
   `;
 
   // Dark theme tokens
@@ -81,12 +112,14 @@ function buildStyles(primary, accent, dark, font) {
   --sf-shadow-sm:0 4px 12px -2px color-mix(in oklab,${primary} 18%,transparent);
   --sf-ph-from:color-mix(in oklab,${primary} 30%,#2a201c);
   --sf-ph-to:color-mix(in oklab,${accent} 22%,#1a1411);
+  ${tokensDoRedesign(primary)}
+  --sf-canvas:#1e1815;
   `;
 
   return `
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
 html{scroll-behavior:smooth;}
-body{font-family:${fontSans};background:var(--sf-bg);color:var(--sf-ink);min-height:100vh;overflow-x:hidden;font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased;}
+body{font-family:${fontSans};font-size:15px;line-height:1.55;background:var(--sf-bg);color:var(--sf-ink);min-height:100vh;overflow-x:hidden;font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased;}
 body:not(.sf-dark){${light}}
 body.sf-dark{${darkTokens}}
 body::selection{background:var(--sf-brand-wash);}
@@ -117,9 +150,16 @@ body{
 /* ============================================================
    Type helpers
    ============================================================ */
-.sf-eyebrow{font-family:${fontSans};font-size:11px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:var(--sf-ink-3);}
-h1,h2,h3,h4,.serif{font-family:${fontSerif};font-weight:400;letter-spacing:-0.4px;color:var(--sf-ink);}
+/* Escala do redesign (09/2026): display 52/40/32/26, corpo 15, legenda
+   12.5, rotulo 11 em DM Mono caixa-alta com +1.2px. Display so em h1/h2
+   e banner; DM Mono e exclusiva de preco, codigo, CEP e contagem. */
+.sf-eyebrow,.sf-label{font-family:${fontMono};font-size:11px;font-weight:500;letter-spacing:1.2px;text-transform:uppercase;color:var(--sf-ink-3);}
+h1,h2,h3,h4,.serif{font-family:${fontSerif};font-weight:500;letter-spacing:-0.3px;color:var(--sf-ink);line-height:1.1;}
+h1{font-size:clamp(36px,3.8vw,52px);}
+h2{font-size:32px;}
+h3{font-size:26px;}
 .mono{font-family:${fontMono};font-variant-numeric:tabular-nums;}
+.sf-caption{font-size:12.5px;color:var(--sf-ink-2);}
 
 /* ============================================================
    Announcement bar (top strip, desktop only)
@@ -132,7 +172,7 @@ h1,h2,h3,h4,.serif{font-family:${fontSerif};font-weight:400;letter-spacing:-0.4p
    ============================================================ */
 .topbar{position:sticky;top:0;z-index:100;background:color-mix(in oklab,var(--sf-bg) 92%,transparent);backdrop-filter:saturate(180%) blur(12px);-webkit-backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--sf-border);padding:0 max(20px,calc((100% - 1280px)/2 + 20px));height:64px;display:flex;align-items:center;justify-content:space-between;gap:12px;}
 .topbar-brand{display:flex;align-items:center;gap:12px;text-decoration:none;flex:0 1 auto;min-width:0;transition:opacity .2s ease;}
-.topbar-logo{width:40px;height:40px;border-radius:10px;background:var(--sf-brand);display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;font-weight:400;font-family:${fontSerif};flex-shrink:0;overflow:hidden;box-shadow:inset 0 0 0 1px color-mix(in oklab,var(--sf-brand) 40%,transparent);}
+.topbar-logo{width:46px;height:46px;border-radius:10px;background:var(--sf-brand);display:flex;align-items:center;justify-content:center;font-size:17px;color:#fff;font-weight:400;font-family:${fontSerif};flex-shrink:0;overflow:hidden;box-shadow:inset 0 0 0 1px color-mix(in oklab,var(--sf-brand) 40%,transparent);}
 /* O logo da lojista entra INTEIRO. object-fit:cover cortava qualquer
    logo que nao fosse quadrado — o da Finesse e retangular, com texto, e
    virava um recorte ilegivel. Com imagem, a caixa larga o quadrado (e o
@@ -140,8 +180,12 @@ h1,h2,h3,h4,.serif{font-family:${fontSerif};font-weight:400;letter-spacing:-0.4p
    largura segue a proporcao do arquivo, ate um teto que protege o
    espaco do nome e da busca. Sem imagem — ou com img quebrado, que o
    onerror REMOVE do DOM — o :has() nao casa e a caixa da inicial fica. */
-.topbar-logo:has(img){width:auto;max-width:140px;background:transparent;box-shadow:none;border-radius:0;}
-.topbar-logo img{display:block;height:100%;width:auto;max-width:140px;object-fit:contain;}
+/* Logo em destaque (redesign 09/2026): caixa de 150x46, contain, e
+   multiply pra JPEG de fundo branco nao virar um retangulo branco sobre
+   o creme — o caso da Finesse. */
+.topbar-logo:has(img){width:auto;max-width:150px;background:transparent;box-shadow:none;border-radius:0;}
+.topbar-logo img{display:block;height:100%;width:auto;max-width:150px;object-fit:contain;mix-blend-mode:multiply;}
+body.sf-dark .topbar-logo img{mix-blend-mode:normal;}
 /* gap 4px: o selo Aberta encostava no nome. */
 .topbar-brand-text{display:flex;flex-direction:column;align-items:flex-start;min-width:0;gap:4px;line-height:1.05;}
 .topbar-name{font-size:18px;font-weight:400;font-family:${fontSerif};letter-spacing:-0.3px;color:var(--sf-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
@@ -544,20 +588,23 @@ body.sf-dark .open-badge.is-closed{color:var(--sf-ink-2);}
 .products-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:28px;row-gap:48px;transition:opacity 200ms cubic-bezier(.4,0,.2,1);}
 @media(max-width:600px){.products-grid{grid-template-columns:repeat(2,1fr);gap:14px;row-gap:28px;}}
 
-/* O cartao NAO se move mais no hover. Vinte e quatro cartoes que sobem um
-   ao passar o mouse foi a origem da queixa de "elementos flutuantes": a
-   pagina inteira parecia solta. Quem responde agora e a FOTO, que cresce
-   um pouco dentro da moldura — o produto reage, o layout fica parado. */
-.product-card{cursor:pointer;display:flex;flex-direction:column;background:transparent;border:none;border-radius:0;padding:0;}
-.product-card:hover .product-img img{transform:scale(1.04);}
-/* Ladrilho NEUTRO atras da foto. O gradiente --sf-ph-* e a capa de
-   quem NAO tem foto, e o markup injeta ele inline nesse caso. Deixar
-   o gradiente aqui fazia toda foto aparecer sobre um tapete colorido
-   assim que a foto passou a entrar em "contain" — e foto recortada
-   em fundo branco ficava com uma moldura pessego em volta. */
-.product-img{width:100%;aspect-ratio:1/1;background:var(--sf-bg-2);position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;border-radius:12px;margin-bottom:16px;}
-.product-img img{width:100%;height:100%;object-fit:contain;padding:6%;transition:transform 320ms cubic-bezier(.4,0,.2,1);}
-.product-ph-initials{font-family:${fontSerif};font-size:34px;line-height:1;color:var(--sf-brand-ink);letter-spacing:0.5px;}
+/* O cartao SOBE no hover (redesign 09/2026, decisao de Caio em 02/09):
+   3px, com a sombra tingida pela marca. A regra de 24/08 ("nada levanta,
+   a foto responde") foi revista — o aplicativo inteiro usa elevacao. A
+   foto fica parada: o que reage e o cartao, como em todo e-commerce. */
+.product-card{cursor:pointer;display:flex;flex-direction:column;background:transparent;border:none;border-radius:0;padding:0;transition:transform var(--sf-motion) var(--sf-ease);}
+.product-card:hover{transform:translateY(var(--sf-lift-2));}
+.product-card:hover .product-img{box-shadow:var(--sf-shadow-hover);}
+/* Canvas UNIFORME atras de toda foto: 3:4, fundo neutro fixo (--sf-canvas),
+   foto em "contain" com moldura fina. Nenhuma foto estica, corta ou muda
+   a altura da grade — e o piso de qualidade que faz 143 fotos de celular
+   parecerem uma colecao. O gradiente --sf-ph-* continua sendo a capa de
+   quem NAO tem foto, injetado inline pelo markup. */
+.product-img{width:100%;aspect-ratio:3/4;background:var(--sf-canvas);border:1px solid var(--sf-border);position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;border-radius:var(--sf-r);margin-bottom:12px;transition:box-shadow var(--sf-motion) var(--sf-ease);}
+.product-img img{width:100%;height:100%;object-fit:contain;padding:4%;transition:transform 320ms cubic-bezier(.4,0,.2,1);}
+/* Monograma: as iniciais na fonte display da marca, a 38% sobre o wash.
+   Continuam DUAS iniciais (23/08: "KIT 3 PARES MEIA" mostrava so "K"). */
+.product-ph-initials{font-family:${fontSerif};font-size:clamp(48px,9vw,88px);line-height:1;color:var(--sf-brand);opacity:.38;letter-spacing:0;}
 .sort-wrap{margin-left:auto;display:inline-flex;align-items:center;gap:8px;}
 .sort-lbl{font-family:${fontSans};font-size:11px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:var(--sf-ink-3);}
 .sort-wrap select{font-family:${fontSans};font-size:13px;color:var(--sf-ink);background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:8px;padding:7px 10px;cursor:pointer;transition:border-color 200ms cubic-bezier(.4,0,.2,1);}
@@ -656,8 +703,8 @@ body.card-style-image-heavy .product-desc{display:none;}
 .cart-summary-row{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:var(--sf-ink-2);margin-bottom:8px;font-family:${fontMono};}
 .cart-summary-row.total{font-family:${fontSerif};font-size:20px;font-weight:400;color:var(--sf-ink);margin-bottom:18px;letterSpacing:-0.3px;}
 .cart-summary-row.total span:last-child{font-family:${fontMono};}
-.checkout-btn{width:100%;padding:16px;background:var(--sf-brand);color:#fff;border:none;border-radius:999px;font-size:15px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;font-family:${fontSans};letter-spacing:0.2px;}
-.checkout-btn:hover{background:var(--sf-brand-2);}
+.checkout-btn{width:100%;padding:16px;background:var(--sf-brand);color:#fff;border:none;border-radius:var(--sf-r);font-size:15px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;font-family:${fontSans};letter-spacing:0.2px;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease),background var(--sf-motion) var(--sf-ease);}
+.checkout-btn:hover{transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
 
 /* ============================================================
    Checkout
@@ -716,8 +763,8 @@ body.card-style-image-heavy .product-desc{display:none;}
 .summary-row.total{font-family:${fontSerif};font-size:18px;font-weight:400;color:var(--sf-ink);border-top:1px solid var(--sf-border);padding-top:10px;margin-top:6px;letter-spacing:-0.2px;}
 .summary-row.total span:last-child{font-family:${fontMono};}
 .checkout-foot{padding:18px 24px 26px;border-top:1px solid var(--sf-border);flex-shrink:0;}
-.next-btn{width:100%;padding:16px;background:var(--sf-brand);color:#fff;border:none;border-radius:999px;font-size:15px;font-weight:600;cursor:pointer;transition:background .18s;display:flex;align-items:center;justify-content:center;gap:8px;font-family:${fontSans};letter-spacing:0.2px;}
-.next-btn:hover{background:var(--sf-brand-2);}
+.next-btn{width:100%;padding:16px;background:var(--sf-brand);color:#fff;border:none;border-radius:var(--sf-r);font-size:15px;font-weight:600;cursor:pointer;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease),background var(--sf-motion) var(--sf-ease);display:flex;align-items:center;justify-content:center;gap:8px;font-family:${fontSans};letter-spacing:0.2px;}
+.next-btn:hover{transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
 .next-btn:disabled{background:var(--sf-border);color:var(--sf-ink-3);cursor:not-allowed;}
 .next-btn.green{background:#10b981;}
 .next-btn.green:hover{background:#059669;}
@@ -868,11 +915,11 @@ body.card-style-image-heavy .product-desc{display:none;}
    delas e solida. Depois de tirar o preenchimento das categorias, da
    paginacao, do cabecalho e do banner, o par de botoes aqui e o unico
    lugar cheio de cor da jornada inteira, que e onde ele deve estar. */
-.pd-comprar,.pd-add{font-family:${fontSans};font-size:14.5px;font-weight:700;border-radius:10px;padding:15px 20px;cursor:pointer;transition:background 200ms cubic-bezier(.4,0,.2,1),border-color 200ms cubic-bezier(.4,0,.2,1);border:1.5px solid var(--sf-brand);}
+.pd-comprar,.pd-add{font-family:${fontSans};font-size:14.5px;font-weight:700;border-radius:var(--sf-r);padding:15px 20px;cursor:pointer;transition:background var(--sf-motion) var(--sf-ease),border-color var(--sf-motion) var(--sf-ease),transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease);border:1.5px solid var(--sf-brand);}
 .pd-comprar{background:var(--sf-brand);color:#fff;}
-.pd-comprar:hover:not(.off){background:var(--sf-brand-2);}
+.pd-comprar:hover:not(.off){transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
 .pd-add{background:transparent;color:var(--sf-brand-ink);}
-.pd-add:hover:not(.off){background:var(--sf-brand-wash);}
+.pd-add:hover:not(.off){background:var(--sf-brand-wash);transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
 .pd-comprar.off,.pd-add.off{opacity:.45;cursor:not-allowed;}
 
 .pd-desc{margin-top:28px;padding-top:22px;border-top:1px solid var(--sf-border);}
@@ -920,7 +967,8 @@ body.card-style-image-heavy .product-desc{display:none;}
   }
   /* A transicao some, mas o transform tambem precisa sair: sem isto a
      foto ainda cresceria — so que instantaneamente, que e pior. */
-  .product-card:hover .product-img img,
+  .product-card:hover,.checkout-btn:hover,.next-btn:hover,
+  .pd-comprar:hover,.pd-add:hover,
   .pd-foto:hover img{transform:none !important;}
   .banner-cta:hover::after{transform:none !important;}
   /* A regua de hover das categorias nao entra aqui de proposito: com a
