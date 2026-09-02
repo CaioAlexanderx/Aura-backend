@@ -146,6 +146,10 @@ function parseBanners(raw, fallbackCover, fallbackTagline, fallbackDesc) {
     tone:      ['split','editorial','centered'].includes(b?.tone) ? b.tone : 'split',
     tint:      ['brand','accent'].includes(b?.tint) ? b.tint : 'brand',
     image_url: typeof b?.image_url === 'string' && b.image_url ? b.image_url : null,
+    // Redesign 09/2026, QA da Finesse: o banner 3:1 e cortado no centro
+    // no celular e leva o texto da arte junto. A lojista pode subir uma
+    // versao quadrada so pro celular; sem ela, a larga serve nos dois.
+    image_url_mobile: typeof b?.image_url_mobile === 'string' && b.image_url_mobile ? b.image_url_mobile : null,
     enabled:   b?.enabled !== false,
   })).filter((b) => b.enabled && (b.headline || b.image_url || b.body || b.kicker));
 }

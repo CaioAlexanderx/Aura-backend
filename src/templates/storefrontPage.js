@@ -71,6 +71,10 @@ function buildStorefrontPage(data, slug) {
     tone: b.tone || 'split',
     tint: b.tint || 'brand',
     image_url: b.image_url ? escHtml(b.image_url) : null,
+    // Versao quadrada pro celular (02/09/2026). O re-map copia campo a
+    // campo — sem esta linha a foto do celular morreria aqui, como o
+    // cta_url quase morreu.
+    image_url_mobile: b.image_url_mobile ? escHtml(b.image_url_mobile) : null,
   }));
   const serviceCards = (site.service_cards || []).map((c) => ({
     icon: c.icon || 'sparkle',

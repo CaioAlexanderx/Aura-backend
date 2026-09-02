@@ -451,6 +451,9 @@ function sanitizeBanners(input) {
     tone:      ['split','editorial','centered'].includes(b?.tone) ? b.tone : 'split',
     tint:      ['brand','accent'].includes(b?.tint) ? b.tint : 'brand',
     image_url: typeof b?.image_url === 'string' && b.image_url.startsWith('http') ? b.image_url : null,
+    // Versao quadrada pro celular (02/09/2026). So faz sentido com a
+    // larga; sem a larga o item nem e "banner com foto".
+    image_url_mobile: typeof b?.image_url_mobile === 'string' && b.image_url_mobile.startsWith('http') ? b.image_url_mobile : null,
     enabled:   b?.enabled !== false,
   }));
 }
@@ -1093,9 +1096,15 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
   const cid = req.params.id;
   const { type } = req.query;
   const { content, content_type } = req.body;
-  const bannerMatch = /^banner_([0-2])$/.exec(type || '');
+  // 02/09/2026: `banner_N_mobile` e a versao quadrada do banner N pro
+  // celular (o 3:1 e cortado no centro e leva o texto da arte junto).
+  // Mora no mesmo item do JSON, em image_url_mobile; sem ela a loja
+  // usa a larga, como sempre.
+  const bannerMatch = /^banner_([0-2])(_mobile)?$/.exec(type || '');
   const isBannerN = !!bannerMatch;
   const bannerIdx = isBannerN ? parseInt(bannerMatch[1], 10) : -1;
+  const bannerMobile = !!(bannerMatch && bannerMatch[2]);
+  const bannerCampo = bannerMobile ? 'image_url_mobile' : 'image_url';
   const isLogo = type === 'logo';
   const isCover = type === 'banner';
   // Banner da categoria (tira da home, so o primeiro nivel). O id vem na
@@ -1104,7 +1113,7 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
   const isCategoria = type === 'categoria';
   const categoriaId = String(req.query.categoria_id || '').trim();
   if (!isLogo && !isCover && !isBannerN && !isCategoria) {
-    return res.status(400).json({ error: 'type deve ser logo|banner|banner_0|banner_1|banner_2|categoria' });
+    return res.status(400).json({ error: 'type deve ser logo|banner|banner_0|banner_1|banner_2|banner_N_mobile|categoria' });
   }
   if (isCategoria && !/^[0-9a-f-]{36}$/i.test(categoriaId)) {
     return res.status(400).json({ error: 'categoria_id obrigatorio' });
@@ -1116,7 +1125,7 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
     const keyName = isLogo ? 'logo'
       : isCover ? 'banner'
       : isCategoria ? `categoria_${categoriaId}`
-      : `banner_${bannerIdx}`;
+      : `banner_${bannerIdx}${bannerMobile ? '_mobile' : ''}`;
     const key = `${cid}/canal/${keyName}.${ext}`;
     const result = await uploadToR2(key, content, mime);
     if (!result.success) {
@@ -1175,11 +1184,11 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
     }
     await db.query(`
       UPDATE digital_channel_config
-         SET banners = jsonb_set(banners, ARRAY[$2::text, 'image_url'], to_jsonb($3::text), true),
+         SET banners = jsonb_set(banners, ARRAY[$2::text, $4::text], to_jsonb($3::text), true),
              updated_at = NOW()
        WHERE company_id = $1
-    `, [cid, String(bannerIdx), url]);
-    return res.json({ banner_index: bannerIdx, image_url: url, key: result.key });
+    `, [cid, String(bannerIdx), url, bannerCampo]);
+    return res.json({ banner_index: bannerIdx, campo: bannerCampo, [bannerCampo]: url, key: result.key });
   } catch (err) {
     console.error('[canal-upload] error:', err.message);
     res.status(500).json({ error: 'Erro ao salvar imagem' });
@@ -1189,16 +1198,18 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
 router.delete('/upload-image', requireRole('client', 'analyst', 'admin'), async (req, res) => {
   const cid = req.params.id;
   const { type } = req.query;
-  const bannerMatch = /^banner_([0-2])$/.exec(type || '');
+  const bannerMatch = /^banner_([0-2])(_mobile)?$/.exec(type || '');
   const isBannerN = !!bannerMatch;
   const bannerIdx = isBannerN ? parseInt(bannerMatch[1], 10) : -1;
+  const bannerMobile = !!(bannerMatch && bannerMatch[2]);
+  const bannerCampo = bannerMobile ? 'image_url_mobile' : 'image_url';
   const isLogo = type === 'logo';
   const isCover = type === 'banner';
   if (!isLogo && !isCover && !isBannerN) {
-    return res.status(400).json({ error: 'type deve ser logo|banner|banner_0|banner_1|banner_2' });
+    return res.status(400).json({ error: 'type deve ser logo|banner|banner_0|banner_1|banner_2|banner_N_mobile' });
   }
   try {
-    const keyName = isLogo ? 'logo' : isCover ? 'banner' : `banner_${bannerIdx}`;
+    const keyName = isLogo ? 'logo' : isCover ? 'banner' : `banner_${bannerIdx}${bannerMobile ? '_mobile' : ''}`;
     for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
       try { await deleteFromR2(`${cid}/canal/${keyName}.${ext}`); } catch (_) {}
     }
@@ -1216,12 +1227,12 @@ router.delete('/upload-image', requireRole('client', 'analyst', 'admin'), async 
         UPDATE digital_channel_config
            SET banners = CASE
              WHEN jsonb_array_length(banners) > $2
-               THEN jsonb_set(banners, ARRAY[$2::text, 'image_url'], 'null'::jsonb, false)
+               THEN jsonb_set(banners, ARRAY[$2::text, $3::text], 'null'::jsonb, false)
              ELSE banners
            END,
              updated_at = NOW()
          WHERE company_id = $1
-      `, [cid, String(bannerIdx)]);
+      `, [cid, String(bannerIdx), bannerCampo]);
     }
     res.json({ deleted: true, banner_index: bannerIdx });
   } catch (err) {
