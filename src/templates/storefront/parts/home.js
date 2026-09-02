@@ -136,7 +136,7 @@ function renderCabecalhoDaGrade(home){
         var no=noDoCaminho(acum);
         var nome=no?no.nome:seg;
         if(i===partes.length-1) itens.push('<span aria-current="page">'+esc(nome)+'</span>');
-        else itens.push('<a href="#" onclick="irParaCategoria(''+escJsAttr(acum)+'');return false;">'+esc(nome)+'</a>');
+        else itens.push('<a href="#" onclick="irParaCategoria(\''+escJsAttr(acum)+'\');return false;">'+esc(nome)+'</a>');
       });
     }
     if(busca) itens.push('<span aria-current="page">Busca</span>');
