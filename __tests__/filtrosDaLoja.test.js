@@ -198,17 +198,20 @@ describe('o cliente', () => {
     expect(clienteFiltros).toContain('FACETAS.cor.length > 1');
   });
 
-  test('o que está filtrando aparece mesmo com o painel fechado', () => {
-    // Fechar o painel não pode esconder o filtro ativo: a pessoa acharia
-    // que a loja tem menos peça do que tem.
-    expect(clienteFiltros).toContain('filtro-ficha');
+  test('o que está filtrando aparece mesmo com a folha fechada', () => {
+    // Fase 4 (02/09/2026): no desktop a lateral fica sempre visível; no
+    // celular a folha fecha e o botão "Filtrar" mostra quantos estão
+    // ligados. Sem isso a pessoa acharia que a loja tem menos peça.
     expect(clienteFiltros).toContain('function contarFiltros');
+    expect(clienteFiltros).toContain("getElementById('filtroBtnMobile')");
+    expect(clienteFiltros).toContain("btn.innerHTML = 'Filtrar' + (n ?");
   });
 
   test('a bolinha de cor vem COM o nome', () => {
     // A bolinha sozinha exclui quem não distingue tons próximos, e
     // "Vinho" e "Bordô" viram a mesma mancha escura numa fila.
-    const i = clienteFiltros.indexOf('filtro-op-cor');
+    const i = clienteFiltros.indexOf("data-op=\"cor\"");
+    expect(i).toBeGreaterThan(0);
     expect(clienteFiltros.slice(i, i + 400)).toContain('c.rotulo');
   });
 });

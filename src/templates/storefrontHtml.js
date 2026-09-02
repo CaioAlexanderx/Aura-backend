@@ -207,30 +207,43 @@ ${heroHtml}
 <section class="home-sec" id="homeNovidades" hidden></section>
 
 <div class="cats-wrap" id="catsWrap"></div>
-<div class="cats-sub" id="catsSub" hidden></div>
 <div class="cats-painel" id="catsPainel" hidden></div>
 
+<!-- A pagina de categoria (fase 4): migalhas, titulo com contagem e
+     ordenacao, subcategorias, e a grade com a lateral de filtros. Na home
+     a mesma secao e "Todos os produtos", sem lateral. -->
 <section class="products-section" id="productsAnchor">
-  <div class="filtros-wrap" id="filtrosWrap" hidden></div>
-
+  <nav class="crumbs" id="crumbs" aria-label="Você está em" hidden></nav>
   <div class="products-header">
-    <h2 id="catTitle">Todos os produtos</h2>
-    <span class="products-count" id="prodCount"></span>
-    <label class="sort-wrap" id="sortWrap" hidden>
-      <span class="sort-lbl">Ordenar</span>
-      <select id="sortSelect" onchange="setOrdem(this.value)">
-        <option value="destaque">Destaque</option>
-        <option value="novidades">Novidades</option>
-        <option value="mais_vendidos">Mais vendidos</option>
-        <option value="preco_asc">Menor preco</option>
-        <option value="preco_desc">Maior preco</option>
-        <option value="nome">Nome (A-Z)</option>
-      </select>
-    </label>
+    <div class="products-header-tit">
+      <h2 id="catTitle">Todos os produtos</h2>
+      <span class="products-count mono" id="prodCount"></span>
+    </div>
+    <div class="products-header-acoes">
+      <button type="button" class="filtro-btn-mobile" id="filtroBtnMobile" onclick="abrirFolhaDeFiltros()" hidden>Filtrar</button>
+      <label class="sort-wrap" id="sortWrap" hidden>
+        <span class="sort-lbl">Ordenar</span>
+        <select id="sortSelect" onchange="setOrdem(this.value)">
+          <option value="destaque">Destaque</option>
+          <option value="novidades">Novidades</option>
+          <option value="mais_vendidos">Mais vendidos</option>
+          <option value="preco_asc">Menor preço</option>
+          <option value="preco_desc">Maior preço</option>
+          <option value="nome">Nome (A-Z)</option>
+        </select>
+      </label>
+    </div>
   </div>
-  <div class="products-grid" id="productsGrid"></div>
-  <div class="grid-more" id="gridMore" hidden></div>
+  <div class="cats-sub" id="catsSub" hidden></div>
+  <div class="products-layout">
+    <aside class="filtros-wrap" id="filtrosWrap" aria-label="Filtros" hidden></aside>
+    <div class="products-main">
+      <div class="products-grid" id="productsGrid"></div>
+      <div class="grid-more" id="gridMore" hidden></div>
+    </div>
+  </div>
 </section>
+<div class="filtros-overlay" id="filtrosOverlay" onclick="fecharFolhaDeFiltros()"></div>
 
 ${serviceStrip}
 

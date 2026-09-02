@@ -208,6 +208,96 @@ body.sf-dark .site-footer-logo img{mix-blend-mode:normal;}
 .selo-aura svg{color:var(--sf-pix);}
 
 /* ============================================================
+   REDESIGN 09/2026 — pagina de categoria (fase 4)
+   ============================================================ */
+/* A barra antiga de categorias saiu de cena: o cabecalho navega. O
+   elemento fica no DOM (o JS ainda mede e repinta), mas nao aparece. */
+.cats-wrap{display:none;}
+.products-section{max-width:1280px;margin:0 auto;padding:24px 32px 64px;}
+.crumbs{font-size:12.5px;color:var(--sf-ink-3);display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap;}
+.crumbs a{color:var(--sf-ink-3);text-decoration:none;}
+.crumbs a:hover{color:var(--sf-ink);}
+.crumbs [aria-current]{color:var(--sf-ink);font-weight:500;}
+.products-header{display:flex;align-items:baseline;justify-content:space-between;gap:18px;margin-bottom:20px;flex-wrap:wrap;}
+.products-header-tit{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;}
+.products-header h2{font-family:${fontSerif};font-size:40px;font-weight:500;letter-spacing:-.3px;line-height:1.1;margin:0;}
+body.home .products-header h2{font-size:32px;}
+.products-count{font-size:13px;color:var(--sf-ink-3);}
+.products-header-acoes{display:flex;align-items:center;gap:10px;}
+.sort-wrap{display:inline-flex;align-items:center;gap:10px;font-size:13px;color:var(--sf-ink-2);}
+.sort-lbl{font-family:${fontSans};font-size:13px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--sf-ink-2);}
+.sort-wrap select{font-family:${fontSans};font-size:13.5px;padding:9px 14px;border:1px solid var(--sf-border);border-radius:10px;background:var(--sf-bg-card);color:var(--sf-ink);}
+.sort-wrap select:hover{border-color:var(--sf-brand);}
+/* Subcategorias: chips sob o titulo, na pagina de categoria. */
+.cats-sub{position:static;padding:0 0 18px;border:0;background:transparent;display:flex;gap:8px;flex-wrap:wrap;top:auto;}
+.cat-sub{font-family:${fontSans};font-size:12.5px;font-weight:600;color:var(--sf-ink-2);background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:999px;padding:7px 14px;cursor:pointer;white-space:nowrap;transition:border-color var(--sf-motion) var(--sf-ease),color var(--sf-motion) var(--sf-ease);}
+.cat-sub:hover{border-color:var(--sf-brand);color:var(--sf-ink);}
+.cat-sub.active{border-color:var(--sf-brand);color:var(--sf-brand);}
+.cat-sub::after,.cat-sub:hover::after{content:none;}
+.cat-sub .cat-num{opacity:.7;margin-left:6px;}
+
+/* Lateral + grade */
+.products-layout{display:grid;grid-template-columns:230px minmax(0,1fr);gap:36px;align-items:start;}
+body.home .products-layout{grid-template-columns:minmax(0,1fr);}
+/* Na home a lateral nao entra: a grade e o catalogo inteiro, e o filtro
+   pertence a pagina de categoria (o cabecalho leva pra la). */
+body.home .filtros-wrap,body.home .filtro-btn-mobile{display:none !important;}
+.filtros-wrap{position:sticky;top:102px;display:flex;flex-direction:column;gap:26px;padding:0;margin:0;}
+.filtro-topo{display:none;align-items:center;justify-content:space-between;}
+.filtro-topo-tit{font-family:${fontSerif};font-size:20px;}
+.filtro-fechar{width:44px;height:44px;background:none;border:0;font-size:26px;line-height:1;color:var(--sf-ink);cursor:pointer;}
+.filtro-aplicar{display:none;}
+.filtro-grupo{display:flex;flex-direction:column;gap:10px;}
+.filtro-ops{display:flex;flex-wrap:wrap;gap:8px;}
+.filtro-op{font-family:${fontSans};font-size:12px;font-weight:600;padding:7px 12px;border-radius:8px;border:1px solid var(--sf-border-2);background:var(--sf-bg-card);color:var(--sf-ink-2);cursor:pointer;transition:all 180ms var(--sf-ease);}
+.filtro-op:hover{border-color:var(--sf-brand);color:var(--sf-ink);}
+.filtro-op.on{background:var(--sf-brand);border-color:var(--sf-brand);color:#fff;}
+.filtro-lista{display:flex;flex-direction:column;gap:9px;}
+.filtro-linha{display:flex;align-items:center;gap:10px;background:none;border:0;padding:0;cursor:pointer;font-family:${fontSans};font-size:13.5px;color:var(--sf-ink-2);text-align:left;transition:color var(--sf-motion) var(--sf-ease);}
+.filtro-linha:hover,.filtro-linha.on{color:var(--sf-ink);}
+.filtro-linha.on .filtro-linha-nome{font-weight:600;}
+.filtro-linha-nome{flex:1;}
+.filtro-linha-n{font-size:11.5px;color:var(--sf-ink-3);}
+.filtro-bola{width:16px;height:16px;border-radius:50%;flex:none;box-shadow:inset 0 0 0 1px rgba(0,0,0,.15);}
+.filtro-caixa{width:15px;height:15px;border-radius:4px;border:1px solid var(--sf-border-2);background:var(--sf-bg-card);flex:none;position:relative;}
+.filtro-linha.on .filtro-caixa{border-color:var(--sf-brand);background:var(--sf-brand);}
+.filtro-linha.on .filtro-caixa::after{content:"";position:absolute;left:4px;top:1px;width:5px;height:9px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);}
+.filtro-limpar{align-self:flex-start;font-family:${fontSans};font-size:12.5px;font-weight:600;color:var(--sf-brand);background:none;border:0;border-bottom:1px solid var(--sf-border-2);padding:2px 0;cursor:pointer;}
+.filtro-btn-mobile{display:none;}
+.filtros-overlay{display:none;}
+/* A grade ao lado da lateral: tres colunas. Na home, quatro. */
+.products-grid{grid-template-columns:repeat(3,1fr);gap:24px 18px;}
+body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
+/* Paginacao no estilo novo */
+.grid-more{margin-top:40px;}
+.pg-bar{display:flex;justify-content:center;align-items:center;gap:6px;flex-wrap:wrap;}
+.pg-num,.pg-seta{font-family:${fontSans};font-size:13.5px;font-weight:600;color:var(--sf-ink-2);background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:10px;min-width:40px;height:40px;padding:0 12px;cursor:pointer;transition:all var(--sf-motion) var(--sf-ease);}
+.pg-num:hover:not(.pg-atual),.pg-seta:hover:not(:disabled){border-color:var(--sf-brand);color:var(--sf-ink);}
+.pg-num{font-family:${fontMono};}
+.pg-atual{color:var(--sf-brand);border-color:var(--sf-brand);border-bottom-color:var(--sf-brand);}
+.pg-seta:disabled{opacity:.4;cursor:not-allowed;}
+.pg-gap{color:var(--sf-ink-3);padding:0 4px;}
+.pg-info{text-align:center;font-family:${fontMono};font-size:12px;color:var(--sf-ink-3);margin-top:12px;}
+
+@media(max-width:900px){
+  .products-section{padding:20px 16px 48px;}
+  .products-header h2{font-size:28px;}
+  body.home .products-header h2{font-size:24px;}
+  .products-layout{grid-template-columns:minmax(0,1fr);}
+  .products-grid,body.home .products-grid{grid-template-columns:repeat(2,1fr);gap:16px 10px;}
+  /* A lateral vira folha: sobe do rodape quando o botao "Filtrar" abre. */
+  .filtro-btn-mobile{display:inline-flex;align-items:center;gap:6px;font-family:${fontSans};font-size:13px;font-weight:600;color:var(--sf-ink);background:var(--sf-bg-card);border:1px solid var(--sf-border-2);border-radius:10px;padding:9px 14px;cursor:pointer;}
+  .filtro-btn-mobile .filtro-n{color:var(--sf-brand);font-size:11px;}
+  .filtros-wrap{position:fixed;left:0;right:0;bottom:0;top:auto;max-height:82vh;overflow-y:auto;background:var(--sf-bg);border-radius:18px 18px 0 0;padding:16px 20px 24px;z-index:190;transform:translateY(100%);transition:transform var(--sf-motion) var(--sf-ease);box-shadow:0 -24px 48px rgba(32,26,20,.18);}
+  .filtros-wrap.aberto{transform:translateY(0);}
+  .filtro-topo{display:flex;}
+  .filtro-aplicar{display:block;width:100%;padding:15px;background:var(--sf-brand);color:#fff;border:0;border-radius:var(--sf-r);font-family:${fontSans};font-size:15px;font-weight:600;cursor:pointer;}
+  .filtros-overlay{position:fixed;inset:0;background:rgba(32,26,20,.5);z-index:180;}
+  body:has(.filtros-wrap.aberto) .filtros-overlay{display:block;}
+  .pg-num,.pg-seta{min-width:36px;height:36px;padding:0 10px;font-size:12.5px;}
+}
+
+/* ============================================================
    REDESIGN 09/2026 — celular (390)
    ============================================================ */
 @media(max-width:900px){

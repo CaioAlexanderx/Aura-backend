@@ -45,6 +45,9 @@ const PODEM_SER_PREENCHIDOS = {
   // Redesign (fase 3, 02/09/2026)
   '.hero-text .banner-cta': 'ACAO PRINCIPAL da home — o CTA do hero, solido por decisao do design',
   '.cart-badge': 'contador da sacola — estado, nao acao',
+  '.filtro-op.on': 'tamanho selecionado no filtro da pagina de categoria — estado (fase 4)',
+  '.filtro-aplicar': 'ACAO PRINCIPAL da folha de filtros no celular',
+  '.filtro-linha.on .filtro-caixa': 'caixa marcada da faixa de preco — estado, nao acao',
 };
 
 describe('preenchimento solido e reservado', () => {

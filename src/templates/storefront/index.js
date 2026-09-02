@@ -32,6 +32,9 @@ const { fonteClienteParcelamento } = require('../../services/parcelamento');
 // Cor: o mapa e a nomeacao moram no servico e vao serializados, porque o
 // SERVIDOR tambem usa (pra agrupar as facetas). Duas copias divergiriam.
 const { FONTE: fonteDasCores } = require('../../services/coresDaLoja');
+// Faixas do filtro de preco: a regra mora no servico (testavel) e vai
+// serializada, como parcelamento e cores.
+const { FONTE: fonteDasFaixas } = require('../../services/faixasDePreco');
 
 function buildScript(storeData, escapedSlug, apiBase) {
   return prelude(storeData, escapedSlug, apiBase)
@@ -40,6 +43,7 @@ function buildScript(storeData, escapedSlug, apiBase) {
        + fonteClienteIniciais()
        + fonteClienteParcelamento()
        + fonteDasCores
+       + fonteDasFaixas
        + card
        + products
        + categorias
