@@ -17,8 +17,10 @@ const buildPage = require('../src/templates/storefrontPage');
 
 const parte = fs.readFileSync(
   path.join(__dirname, '..', 'src/templates/storefront/parts/tira_categorias.js'), 'utf8');
+// Fase 3 (02/09/2026): o CSS da home e do cabecalho mora em
+// storefrontHomeStyles.js; a tira virou "Compre por categoria".
 const estilos = fs.readFileSync(
-  path.join(__dirname, '..', 'src/templates/storefrontStyles.js'), 'utf8');
+  path.join(__dirname, '..', 'src/templates/storefrontHomeStyles.js'), 'utf8');
 
 function pagina(tira) {
   return buildPage({
@@ -96,7 +98,7 @@ describe('desenho dentro da régua', () => {
   });
 
   test('nada levanta no hover — quem cresce é a foto DENTRO da moldura', () => {
-    const bloco = estilos.slice(estilos.indexOf('.tira-cat{'), estilos.indexOf('Categories chip strip'));
+    const bloco = estilos.slice(estilos.indexOf('.tira-cat{'), estilos.indexOf('/* O cartao:'));
     expect(bloco).toContain('.tira-cat-arte img');
     expect(bloco).toMatch(/\.tira-cat:hover[^}]*transform:scale/);
     // translateY seria a moldura se mexendo, e a fila inteira dançando.
@@ -104,7 +106,7 @@ describe('desenho dentro da régua', () => {
   });
 
   test('respeita prefers-reduced-motion', () => {
-    const bloco = estilos.slice(estilos.indexOf('.tira-cat{'), estilos.indexOf('Categories chip strip'));
+    const bloco = estilos.slice(estilos.indexOf('.tira-cat{'), estilos.indexOf('/* O cartao:'));
     expect(bloco).toContain('prefers-reduced-motion');
     expect(bloco).toMatch(/prefers-reduced-motion[\s\S]*transform:none/);
   });
@@ -113,7 +115,7 @@ describe('desenho dentro da régua', () => {
     // <button>, não <div onclick>. E foco visível, senão quem navega por
     // teclado não sabe onde está.
     expect(parte).toContain("'<button type=\"button\" class=\"tira-cat\"");
-    const bloco = estilos.slice(estilos.indexOf('.tira-cat{'), estilos.indexOf('Categories chip strip'));
+    const bloco = estilos.slice(estilos.indexOf('.tira-cat{'), estilos.indexOf('/* O cartao:'));
     expect(bloco).toContain(':focus-visible');
   });
 });

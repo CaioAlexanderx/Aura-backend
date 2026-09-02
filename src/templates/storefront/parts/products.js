@@ -179,55 +179,8 @@ function renderProducts(){
   }
   renderPaginacao();
   if(typeof renderFiltros==='function') renderFiltros();
-  grid.innerHTML=visiveis.map(function(p){
-    var qty=getProductCartQty(p.id);
-    var hasVar=productHasVariants(p);
-    // 23/05/2026: fallback foto. Se produto pai nao tem image_url,
-    // procura a primeira variante com image_url (Array.find).
-    // Mantem placeholder (letter) so quando nem pai nem variante tem foto.
-    var displayImg=p.image_url;
-    if(!displayImg && p.variants && p.variants.length){
-      for(var vi=0;vi<p.variants.length;vi++){
-        if(p.variants[vi].image_url){displayImg=p.variants[vi].image_url;break;}
-      }
-    }
-    // "contain", nao "cover": cover CORTA a peca — um vestido fotografado
-    // inteiro virava um pedaco de tecido. Mesma regra da vitrine Studio.
-    // Sem foto, duas iniciais compostas no lugar da primeira letra crua:
-    // "KIT 3 PARES MEIA" mostrava "K".
-    var imgH=displayImg?'<img src="'+esc(displayImg)+'" alt="" style="width:100%;height:100%;object-fit:contain;padding:6%;">'
-      :'<div class="product-ph-initials">'+esc(INICIAIS(p.name))+'</div>';
-    // "3x de R$ 53,30" e uma frase diferente de "R$ 159,90" pra quem
-    // esta decidindo. So sai quando a lojista declarou o teto.
-    var parcH=PARCELAS_TXT(p.price);
-    // "ou R$ 208,99 no Pix" — a conta que a cliente faria, feita antes de
-    // ela decidir. Diferente do parcelamento, que responde a pergunta de
-    // quem NAO tem o valor a vista. So sai quando a lojista declarou o
-    // desconto (migration 309); 0 nao mostra nada.
-    var pixH='';
-    var pixPct=Number(__S.pix_discount_pct)||0;
-    if(pixPct>0 && p.price!=null){
-      pixH='<div class="product-pix">ou '+fmt(p.price*(1-pixPct/100))+' no Pix</div>';
-    }
-    var priceH=(SETTINGS.show_prices!==false&&p.price!=null)
-      ?'<div class="product-price">'+fmt(p.price)+'</div>'+pixH+(parcH?'<div class="product-parcela">'+esc(parcH)+'</div>':'')
-      :'';
-    // SEM botao no cartao. O cartao inteiro leva pra pagina do produto,
-    // que e onde a decisao acontece — la tem foto grande, cor, tamanho,
-    // descricao e frete. Comprar direto da grade pulava tudo isso e, em
-    // produto com variante, nem era possivel.
-    //
-    // O que o cartao mostra e QUANTO ja esta no carrinho, se houver.
-    var noCarrinho=qty>0?'<div class="card-tag">'+qty+' no carrinho</div>':'';
-    // Sem foto, cada capa ganha seu proprio degrau do gradiente da loja.
-    // Com o gradiente fixo, a Finesse renderizava 373 ladrilhos iguais.
-    var tileStyle=displayImg?'':' style="background:'+FUNDO_CAPA(p.name)+'"';
-    return '<div class="product-card" onclick="showDetail(\\''+p.id+'\\')" ><div class="product-img"'+tileStyle+'>'+imgH+'</div><div class="product-body">'
-      +(p.category?'<div class="product-cat">'+esc(p.category)+'</div>':'')
-      +'<div class="product-name">'+esc(p.name)+'</div>'
-      +(p.description?'<div class="product-desc">'+esc((p.description||'').substring(0,80))+((p.description||'').length>80?'...':'')+'</div>':'')
-      +'<div class="product-footer">'+priceH+'</div>'+noCarrinho+'</div></div>';
-  }).join('');
+  if(typeof atualizarModoHome==='function') atualizarModoHome();
+  grid.innerHTML=visiveis.map(function(p){ return cardHtml(p); }).join('');
 }
 
 /**

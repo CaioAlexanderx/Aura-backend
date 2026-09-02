@@ -1,0 +1,260 @@
+// AURA. -- storefront/parts/home.js
+//
+// A home que nasce do estoque (fase 3 do redesign, 02/09/2026).
+//
+// Tres blocos, desenhados a partir de __S.home — que o servidor ja
+// resolveu em services/homeDaLoja.js (janela, minimo, limite). Aqui nao
+// ha regra de negocio: lista vazia = bloco nao aparece, e pronto.
+//
+// Tambem moram aqui o cabecalho novo (categorias de topo com mega-menu,
+// gaveta no celular, links do rodape) e o MODO HOME: os blocos so
+// aparecem quando nao ha categoria, busca nem filtro. Escolher qualquer
+// coisa esconde os blocos e mostra a grade, que e a pagina de categoria.
+'use strict';
+
+module.exports = `
+// ── Dados da home ────────────────────────────────────────
+var HOME = __S.home || { mais_vendidos:[], ultimas_unidades:[], novidades:[] };
+// As pecas dos blocos entram no PROD_MAP: o clique abre a pagina do
+// produto pelo id, e a peca pode nao estar na pagina 1 da grade.
+[].concat(HOME.mais_vendidos||[], HOME.ultimas_unidades||[], HOME.novidades||[]).forEach(function(p){ if(p&&p.id) PROD_MAP[p.id]=p; });
+
+/** Cabecalho de secao: titulo, legenda e (opcional) link a direita. */
+function cabecalhoDeSecao(titulo, legenda, linkTxt, linkFn){
+  return '<div class="home-sec-head">'
+    + '<div><h2 class="home-sec-tit">'+esc(titulo)+'</h2>'
+    + (legenda?'<div class="sf-caption">'+esc(legenda)+'</div>':'')+'</div>'
+    + (linkTxt?'<a href="#" class="home-sec-link" onclick="'+linkFn+';return false;">'+esc(linkTxt)+' →</a>':'')
+    + '</div>';
+}
+
+/**
+ * "Tamanhos M e G" — a frase da linha de ultimas unidades. Le as
+ * variantes com saldo; sem tamanho cadastrado, nao escreve nada.
+ */
+function fraseDeTamanhos(p){
+  var t=(typeof tamanhosDoCartao==='function')?tamanhosDoCartao(p):[];
+  if(!t.length) return '';
+  if(t.length===1) return 'Tamanho '+t[0];
+  return 'Tamanhos '+t.slice(0,-1).join(', ')+' e '+t[t.length-1];
+}
+
+function linhaUltimaHtml(p){
+  var img=p.image_url||((p.variants||[]).filter(function(v){return v.image_url;})[0]||{}).image_url;
+  var thumb=img?'<img src="'+esc(img)+'" alt="" loading="lazy">'
+    :'<div class="product-ph-initials home-linha-ini">'+esc(INICIAIS(p.name))+'</div>';
+  var fundo=img?'':' style="background:'+FUNDO_CAPA(p.name)+'"';
+  var restam=Number(p.restam)||0;
+  var badge=restam===1?'RESTA 1':'RESTAM '+restam;
+  var tam=fraseDeTamanhos(p);
+  return '<a href="#" class="home-linha" onclick="showDetail(\\''+p.id+'\\');return false;">'
+    +'<div class="home-linha-thumb"'+fundo+'>'+thumb+'</div>'
+    +'<div class="home-linha-info"><span class="home-linha-nome">'+esc(p.name)+'</span>'
+    +(tam?'<span class="home-linha-tam">'+esc(tam)+'</span>':'')
+    +(SETTINGS.show_prices!==false&&p.price!=null?'<span class="home-linha-preco mono">'+fmt(p.price)+'</span>':'')
+    +'</div>'
+    +'<span class="badge-urgencia">'+badge+'</span></a>';
+}
+
+function renderHome(){
+  var mv=document.getElementById('homeMaisVendidos');
+  var uu=document.getElementById('homeUltimas');
+  var nv=document.getElementById('homeNovidades');
+  if(mv){
+    var lista=HOME.mais_vendidos||[];
+    mv.hidden=!lista.length;
+    mv.innerHTML=lista.length?'<div class="home-sec-inner">'
+      +cabecalhoDeSecao('Mais vendidos','Ranking automático pelas vendas do Caixa.','Ver tudo',"verTudo('mais_vendidos')")
+      +'<div class="home-grid">'+lista.map(function(p){return cardHtml(p);}).join('')+'</div></div>':'';
+  }
+  if(uu){
+    var ult=HOME.ultimas_unidades||[];
+    uu.hidden=!ult.length;
+    uu.innerHTML=ult.length?'<div class="home-sec-inner">'
+      +cabecalhoDeSecao('Últimas unidades','As peças que estão acabando no estoque.')
+      +'<div class="home-linhas">'+ult.map(linhaUltimaHtml).join('')+'</div></div>':'';
+  }
+  if(nv){
+    var nov=HOME.novidades||[];
+    nv.hidden=!nov.length;
+    nv.innerHTML=nov.length?'<div class="home-sec-inner">'
+      +cabecalhoDeSecao('Acabaram de chegar','Os últimos cadastros do estoque, direto na vitrine.','Ver novidades',"verTudo('novidades')")
+      +'<div class="home-grid">'+nov.map(function(p){return cardHtml(p);}).join('')+'</div></div>':'';
+  }
+}
+
+/** "Ver tudo": a grade inteira ordenada pelo criterio do bloco. */
+function verTudo(criterio){
+  ordem=criterio;
+  var sel=document.getElementById('sortSelect'); if(sel) sel.value=criterio;
+  if(currentCat!=='Todos'){ filterCat('Todos',null); }
+  // "Ver tudo" e um pedido explicito de ver a grade: aqui a rolagem vale.
+  irParaPagina(1,{rolar:true});
+}
+
+// ── Modo home ────────────────────────────────────────────
+//
+// Sem categoria, busca nem filtro, a pagina e a HOME e mostra os blocos.
+// Com qualquer um deles, os blocos somem e a grade vira a pagina de
+// categoria (fase 4). O <body> nasce com a classe, e cada render da
+// grade reavalia.
+function modoHome(){
+  if(currentCat&&currentCat!=='Todos') return false;
+  if(String(searchTerm||'').trim()) return false;
+  if(typeof paramsDeFiltro==='function'&&paramsDeFiltro().length) return false;
+  return true;
+}
+function atualizarModoHome(){
+  var home=modoHome();
+  document.body.classList.toggle('home',home);
+  // A grade continua embaixo dos blocos na home, com o titulo de sempre.
+  var t=document.getElementById('catTitle');
+  if(t&&home&&currentCat==='Todos') t.textContent='Todos os produtos';
+}
+
+/** Volta pra home: sem categoria, busca, filtro nem ordem. */
+function irParaHome(){
+  searchTerm='';
+  var inp=document.getElementById('searchInput'); if(inp) inp.value='';
+  ordem='destaque';
+  var sel=document.getElementById('sortSelect'); if(sel) sel.value='destaque';
+  if(typeof limparFiltros==='function') limparFiltros({semRecarregar:true});
+  filterCat('Todos',null);
+  window.scrollTo({top:0,behavior:comportamentoDeRolagem()});
+  return false;
+}
+
+/** O X da busca: limpa e volta ao que estava. */
+function limparBusca(){
+  var inp=document.getElementById('searchInput');
+  if(inp) inp.value='';
+  searchTerm='';
+  atualizarBotaoDaBusca();
+  recarregarDoInicio();
+}
+function atualizarBotaoDaBusca(){
+  var inp=document.getElementById('searchInput');
+  var x=document.querySelector('#topbarSearchInline .topbar-search-close');
+  if(x) x.hidden=!(inp&&inp.value);
+}
+document.addEventListener('input',function(e){ if(e.target&&e.target.id==='searchInput') atualizarBotaoDaBusca(); });
+
+/**
+ * CTA do banner com destino interno: "#cat=/vestidos" abre a categoria
+ * AQUI, sem sair da pagina (a sacola vive na memoria). Aqui a rolagem ate
+ * a grade vale: "Ver a colecao" e um pedido explicito de ver a colecao.
+ */
+function irPeloCta(a){
+  var h=String(a&&a.getAttribute('href')||'');
+  var m=/^#cat=(\\/.+)$/.exec(h);
+  if(!m) return true;
+  if(typeof irParaCategoria==='function') irParaCategoria(m[1]);
+  irParaPagina(1,{rolar:true});
+  return false;
+}
+// Link colado com #cat=/... abre direto na categoria.
+(function(){
+  var m=/^#cat=(\\/.+)$/.exec(window.location.hash||'');
+  if(m&&typeof filterCat==='function') setTimeout(function(){ filterCat(decodeURIComponent(m[1]),null); },0);
+})();
+
+// ── Cabecalho: categorias de topo e mega-menu ────────────
+//
+// Nivel 1 na barra (e nas colunas do mega-menu), nivel 2 listado com a
+// contagem; nivel 3 so na pagina de categoria. Abre no mouse E no clique
+// — toque nao tem hover. Fecha ao sair do cabecalho, no Esc ou clicando
+// fora. Tudo vem de ARVORE/CATEGORIAS (parts/categorias.js): categoria
+// sem peca nem chega aqui.
+var megaAberto=false;
+
+function renderTopNav(){
+  var nav=document.getElementById('topNav'); if(!nav) return;
+  var itens='<button type="button" class="topnav-item" onclick="verTudo(\\'novidades\\')">Novidades</button>';
+  itens+=CATEGORIAS.map(function(c){
+    var temFilhas=filhasDe(c.slug).length>0;
+    return '<button type="button" class="topnav-item'+(dentroDe(c.caminho)?' active':'')+'" data-cat="'+esc(c.caminho)+'"'
+      +(temFilhas?' data-mega="1" aria-haspopup="true" aria-expanded="false"':'')+'>'
+      +esc(c.nome)+(temFilhas?'<svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>':'')
+      +'</button>';
+  }).join('');
+  nav.innerHTML=itens;
+  nav.querySelectorAll('.topnav-item[data-cat]').forEach(function(b){
+    b.addEventListener('click',function(){ fecharMega(); irParaCategoria(b.dataset.cat); });
+    if(b.dataset.mega){
+      b.addEventListener('mouseenter',function(){ abrirMega(); });
+    } else {
+      b.addEventListener('mouseenter',function(){ fecharMega(); });
+    }
+  });
+}
+
+function megaHtml(){
+  return '<div class="mega-inner"><div class="mega-cols">'
+    +CATEGORIAS.map(function(topo){
+      var filhas=filhasDe(topo.slug);
+      return '<div class="mega-col">'
+        +'<button type="button" class="mega-topo" data-cat="'+esc(topo.caminho)+'">'+esc(topo.nome)+'<span class="mono mega-num">'+topo.total+'</span></button>'
+        +filhas.map(function(f){
+          return '<button type="button" class="mega-item" data-cat="'+esc(f.caminho)+'">'+esc(f.nome)+'<span class="mono mega-num">'+f.total+'</span></button>';
+        }).join('')
+        +'</div>';
+    }).join('')
+    +'</div><div class="mega-nota sf-caption">Menu montado pelo cadastro de categorias do estoque — categoria sem peça não aparece.</div></div>';
+}
+function abrirMega(){
+  var m=document.getElementById('megaMenu'); if(!m||!TEM_ARVORE) return;
+  if(!megaAberto){ m.innerHTML=megaHtml(); m.hidden=false; megaAberto=true;
+    m.querySelectorAll('[data-cat]').forEach(function(b){ b.addEventListener('click',function(){ fecharMega(); irParaCategoria(b.dataset.cat); }); });
+  }
+  document.querySelectorAll('.topnav-item[data-mega]').forEach(function(b){ b.setAttribute('aria-expanded','true'); });
+}
+function fecharMega(){
+  var m=document.getElementById('megaMenu'); if(!m) return;
+  m.hidden=true; m.innerHTML=''; megaAberto=false;
+  document.querySelectorAll('.topnav-item[data-mega]').forEach(function(b){ b.setAttribute('aria-expanded','false'); });
+}
+(function(){
+  var tb=document.getElementById('topbar'); if(!tb) return;
+  tb.addEventListener('mouseleave',fecharMega);
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'){ fecharMega(); fecharDrawer(); } });
+  document.addEventListener('click',function(e){ if(megaAberto&&!tb.contains(e.target)) fecharMega(); });
+})();
+
+// ── Gaveta (celular) ─────────────────────────────────────
+function drawerHtml(){
+  var itens='<button type="button" class="drawer-item drawer-novidades" onclick="fecharDrawer();verTudo(\\'novidades\\')">Novidades</button><div class="drawer-sep"></div>';
+  itens+=CATEGORIAS.map(function(topo){
+    return '<button type="button" class="drawer-topo" data-cat="'+esc(topo.caminho)+'">'+esc(topo.nome)+'<span class="mono mega-num">'+topo.total+'</span></button>'
+      +filhasDe(topo.slug).map(function(f){
+        return '<button type="button" class="drawer-item" data-cat="'+esc(f.caminho)+'">'+esc(f.nome)+'<span class="mono mega-num">'+f.total+'</span></button>';
+      }).join('');
+  }).join('');
+  return '<div class="drawer-head"><span class="serif drawer-tit">Categorias</span>'
+    +'<button type="button" class="drawer-x" onclick="fecharDrawer()" aria-label="Fechar">&#215;</button></div>'
+    +'<nav class="drawer-nav">'+itens+'</nav>'
+    +'<div class="drawer-nota sf-caption">Categoria sem peça em estoque não aparece.</div>';
+}
+function abrirDrawer(){
+  var d=document.getElementById('drawerMenu'), o=document.getElementById('drawerOverlay');
+  if(!d) return;
+  d.innerHTML=drawerHtml(); d.hidden=false; if(o) o.hidden=false;
+  document.body.style.overflow='hidden';
+  d.querySelectorAll('[data-cat]').forEach(function(b){ b.addEventListener('click',function(){ fecharDrawer(); irParaCategoria(b.dataset.cat); }); });
+}
+function fecharDrawer(){
+  var d=document.getElementById('drawerMenu'), o=document.getElementById('drawerOverlay');
+  if(d&&!d.hidden){ d.hidden=true; d.innerHTML=''; document.body.style.overflow=''; }
+  if(o) o.hidden=true;
+}
+
+// ── Rodape: Navegue ──────────────────────────────────────
+function renderFooterNav(){
+  var ul=document.getElementById('footerNav'); if(!ul) return;
+  var li='<li><a href="#" onclick="verTudo(\\'novidades\\');return false;">Novidades</a></li>';
+  li+=CATEGORIAS.slice(0,5).map(function(c){
+    return '<li><a href="#" onclick="irParaCategoria(\\''+escJsAttr(c.caminho)+'\\');return false;">'+esc(c.nome)+'</a></li>';
+  }).join('');
+  li+='<li><a href="#" onclick="openCart();return false;">Minha sacola</a></li>';
+  ul.innerHTML=li;
+}
+`;

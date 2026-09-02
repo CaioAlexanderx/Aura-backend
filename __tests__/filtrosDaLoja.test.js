@@ -214,7 +214,9 @@ describe('o cliente', () => {
 });
 
 describe('preço no Pix', () => {
-  const prods = require('../src/templates/storefront/parts/products');
+  // Fase 3 (02/09/2026): o cartao mudou pra parts/card.js — grade e home
+  // desenham com a mesma funcao.
+  const prods = require('../src/templates/storefront/parts/card');
   const css = require('../src/templates/storefrontStyles')('#7a1f3a', '#7a1f3a', false, 'classic');
 
   test('só aparece quando a lojista declarou o desconto', () => {
