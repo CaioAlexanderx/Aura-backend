@@ -5,6 +5,8 @@
 // GET  /storefront/:slug/studio/order/:oid — poll status do pedido
 // POST /storefront/:slug/studio/upload    — upload de imagem/pdf (cliente envia foto)
 // GET  /storefront/:slug/studio/shipping-quote — cotacao de frete por CEP (S2)
+// POST /storefront/:slug/studio/bulk-quote — preco de um lote, sem gravar (S0)
+// POST /storefront/:slug/studio/bulk-order — registra o lote como rascunho (S0)
 //
 // Nivel 1 Sub-onda D (25/05/2026)
 // 25/05/2026 (Loja Digital Studio fechamento):
@@ -55,7 +57,13 @@ const { calculateShippingQuote } = require('../services/shippingQuote');
 const { COURIER, validateCourierPickup } = require('../services/courierPickup');
 const {
   fetchStorefrontCategories, fetchPrimaryCategoryLinks,
+  // S0 do redesign (03/09/2026): banner e redes sociais existem no
+  // digital_channel_config desde sempre e so a loja comum lia. A vitrine
+  // Studio desenhava um cabecalho fixo e nao tinha rodape com contato.
+  parseBanners,
 } = require('../services/storefrontBuilder');
+const { montarRedes } = require('../services/redesSociais');
+const { cotarLote } = require('../services/studioLote');
 const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
 const { filtroDeFoto } = require('../services/catalogoPaginado');
 // Selo NOVO com a mesma regra da loja comum (redesign 09/2026).
@@ -194,6 +202,47 @@ const UPLOAD_ALLOWED_TYPES = new Set([
   'application/pdf',
 ]);
 
+/**
+ * O bloco `site` do payload, num lugar so.
+ *
+ * Ele nascia escrito DUAS vezes nesta mesma rota — uma no retorno de loja
+ * sem produto, outra no retorno normal — e as duas ja tinham divergido: a
+ * de cima nao mandava `tagline` nem `cover_url`. Campo que existe num
+ * caminho e nao no outro e a loja mudando de cara conforme o estoque.
+ *
+ * S0 (03/09/2026) acrescenta banners e redes sociais. As duas colunas
+ * existem no digital_channel_config desde sempre e so a loja comum lia:
+ * a vitrine Studio desenhava um cabecalho fixo e um rodape sem contato.
+ */
+function montarSite(config, nomeDaEmpresa) {
+  return {
+    name: config.site_name || nomeDaEmpresa,
+    tagline: config.tagline || '',
+    primary_color: config.primary_color || '#1E3A8A',
+    accent_color: config.accent_color || '#EC4899',
+    logo_url: config.logo_url || null,
+    cover_url: config.cover_url || null,
+    // Tipografia escolhida pela lojista. A coluna `font_family` ja
+    // existia e so a loja comum consumia; a vitrine Studio ignorava e
+    // renderizava sempre no par padrao.
+    font_family: config.font_family || 'classic',
+    // Mesmo caso da tipografia: a coluna existe, o painel deixa escolher e
+    // so a loja comum consumia.
+    card_style: config.card_style || 'editorial',
+    // WhatsApp da loja. A loja comum ja tinha barra de contato; a
+    // vitrine Studio nao expunha o numero, entao a duvida de quem
+    // esta comprando ("serve no meu tamanho?", "da tempo pro dia
+    // 12?") nao tinha para onde ir — e essa duvida e o que fecha
+    // venda de personalizado.
+    whatsapp: config.whatsapp || config.phone || null,
+    // A MESMA funcao da loja comum: banner com fallback para a capa e a
+    // tagline, no maximo 3, e a versao de celular quando existe.
+    banners: parseBanners(config.banners, config.cover_url, config.tagline, config.description),
+    // Instagram, TikTok e Facebook normalizados, com a URL pronta.
+    redes: montarRedes(config),
+  };
+}
+
 // ─────────────────────────────────────────────
 // GET /storefront/:slug/studio/products
 // Lista produtos da loja onde is_personalizable=true, com
@@ -265,28 +314,11 @@ router.get('/:slug/studio/products', async (req, res) => {
 
     if (!products.length) {
       return res.json({
-        site: {
-          name: config.site_name || configs[0].company_display_name,
-          primary_color: config.primary_color || '#1E3A8A',
-          accent_color: config.accent_color || '#EC4899',
-          logo_url: config.logo_url || null,
-          // Tipografia escolhida pela lojista. A coluna `font_family` ja
-          // existia e so a loja comum consumia; a vitrine Studio ignorava e
-          // renderizava sempre no par padrao.
-          font_family: config.font_family || 'classic',
-          // Mesmo caso da tipografia: a coluna existe, o painel deixa escolher e
-          // so a loja comum consumia.
-          card_style: config.card_style || 'editorial',
-          // WhatsApp da loja. A loja comum ja tinha barra de contato; a
-          // vitrine Studio nao expunha o numero, entao a duvida de quem
-          // esta comprando ("serve no meu tamanho?", "da tempo pro dia
-          // 12?") nao tinha para onde ir — e essa duvida e o que fecha
-          // venda de personalizado.
-          whatsapp: config.whatsapp || config.phone || null,
-        },
+        site: montarSite(config, configs[0].company_display_name),
         products: [],
         sla: { sla_base_days: 3, queue_qty: 0, total_estimate_days: 3 },
         revisions,
+        numeros: { pedidos_entregues: 0 },
         total_products: 0,
       });
     }
@@ -391,29 +423,74 @@ router.get('/:slug/studio/products', async (req, res) => {
       if (e.code !== '42P01' && e.code !== '42703') throw e;
     }
 
+    // S0 (03/09/2026) — quantos pedidos cada peca ja teve, e quantos a
+    // loja ja entregou.
+    //
+    // A home do design abre com "Os queridinhos da Sheid" e um numero de
+    // pedidos entregues. Os dois nasciam de contagem no cliente, que so
+    // enxerga a pagina atual, ou de numero inventado. Aqui sai do banco.
+    //
+    // Cancelado nao conta, senao pedido desfeito viraria popularidade. A
+    // janela e a vida inteira da loja de proposito: personalizado vende
+    // pouco e devagar, e a janela de 90 dias da loja comum zeraria o
+    // ranking de quase toda loja Studio.
+    let pedidosPorProduto = {};
+    let entregues = 0;
+    try {
+      const { rows } = await db.query(
+        `SELECT i.product_id, COUNT(*)::int AS pedidos
+           FROM digital_order_items i
+           JOIN digital_orders o ON o.id = i.order_id
+          WHERE o.company_id = $1
+            AND o.vertical = 'studio'
+            AND COALESCE(o.status, '') <> 'cancelled'
+            AND i.product_id = ANY($2::uuid[])
+          GROUP BY i.product_id`,
+        [cid, productIds]
+      );
+      rows.forEach((r) => { pedidosPorProduto[r.product_id] = r.pedidos; });
+
+      const { rows: ent } = await db.query(
+        `SELECT COUNT(*)::int AS n FROM digital_orders
+          WHERE company_id = $1 AND vertical = 'studio' AND delivered_at IS NOT NULL`,
+        [cid]
+      );
+      entregues = ent[0] ? ent[0].n : 0;
+    } catch (e) {
+      // Coluna ou tabela ausente neste ambiente: a loja segue sem ranking
+      // (armadilha 1). Bloco vazio some da home, que e o comportamento certo.
+      if (e.code !== '42703' && e.code !== '42P01') throw e;
+    }
+
+    // S0 — que TIPO de mockup cada peca tem.
+    //
+    // `visual_template_key` ja saia implicitamente pelo endpoint de
+    // template, um por produto e sob demanda. O card da vitrine precisa
+    // do chip "Mockup 3D" na grade inteira, e 12 requisicoes para
+    // desenhar 12 chips e o tipo de coisa que faz a grade piscar.
+    let visualPorProduto = {};
+    try {
+      const { rows } = await db.query(
+        `SELECT p.id, t.kind
+           FROM products p
+           JOIN studio_visual_templates t
+             ON t.key = p.visual_template_key AND t.status = 'published'
+          WHERE p.id = ANY($1::uuid[])`,
+        [productIds]
+      );
+      rows.forEach((r) => { visualPorProduto[r.id] = r.kind; });
+    } catch (e) {
+      // Migration 208 pendente: sem chip, com a loja inteira de pe.
+      if (e.code !== '42703' && e.code !== '42P01') throw e;
+    }
+
     const categories = await fetchStorefrontCategories(cid);
     const categoryById = {};
     categories.forEach(c => { categoryById[c.id] = c; });
     const primaryLinkByProduct = await fetchPrimaryCategoryLinks(products.map(p => p.id));
 
     res.json({
-      site: {
-        name: config.site_name || configs[0].company_display_name,
-        tagline: config.tagline || '',
-        primary_color: config.primary_color || '#1E3A8A',
-        accent_color: config.accent_color || '#EC4899',
-        logo_url: config.logo_url || null,
-        // Tipografia escolhida pela lojista. A coluna `font_family` ja
-        // existia e so a loja comum consumia; a vitrine Studio ignorava e
-        // renderizava sempre no par padrao.
-        font_family: config.font_family || 'classic',
-        // Mesmo caso da tipografia: a coluna existe, o painel deixa escolher e
-        // so a loja comum consumia.
-        card_style: config.card_style || 'editorial',
-        // Ver o bloco acima: a duvida de quem compra precisa de destino.
-        whatsapp: config.whatsapp || config.phone || null,
-        cover_url: config.cover_url || null,
-      },
+      site: montarSite(config, configs[0].company_display_name),
       products: products.map(p => {
         // Produto compartilhado de outra empresa não arrasta a categoria
         // dela: só entra vínculo cuja categoria está na árvore DESTA loja.
@@ -448,6 +525,13 @@ router.get('/:slug/studio/products', async (req, res) => {
           // nao configurou faixa nenhuma, que e o caso de toda a base hoje.
           qty_tiers: buildLadder(parseFloat(p.price), tiersByProduct[p.id]),
           stock_qty: p.stock_qty,
+          // S0 — quantos pedidos esta peca ja teve. O bloco "mais
+          // pedidos" da home ordena por aqui e some quando ninguem
+          // pediu nada ainda, que e o caso de toda loja Studio nova.
+          pedidos: pedidosPorProduto[p.id] || 0,
+          // S0 — 'model3d' | 'photo2d' | null. Vira o chip "Mockup 3D"
+          // no card sem uma requisicao por produto.
+          visual_kind: visualPorProduto[p.id] || null,
           customization_config: p.customization_config,
           templates: [
             ...(templatesByProduct[p.id] || []),
@@ -469,10 +553,19 @@ router.get('/:slug/studio/products', async (req, res) => {
         total_estimate_days: slaTotal,
       },
       revisions,
+      // S0 — os numeros que a home mostra na faixa de confianca. Saem do
+      // banco ou nao saem; numero de vitrine inventado e o tipo de coisa
+      // que a lojista descobre quando um cliente pergunta.
+      numeros: { pedidos_entregues: entregues },
       payment: {
         has_pix: hasPix,
         has_card: hasCard,
         pay_on_delivery_enabled: hasOnDelivery,
+        // S0 — paridade com a loja comum (migration 309/316). O Studio
+        // anunciava nada e cobrava cheio; a loja comum anuncia e cobra
+        // com desconto desde a fase 6. Duas vitrines da mesma empresa
+        // com regra de dinheiro diferente e o bug esperando a vez.
+        pix_discount_pct: Number(config.pix_discount_pct) || 0,
         // Migration 301 — teto de parcelas DECLARADO pela lojista. So faz
         // sentido com cartao ligado: sem cartao nao ha o que parcelar.
         card_max_installments: hasCard ? (config.card_max_installments || null) : null,
@@ -971,7 +1064,21 @@ router.post('/:slug/studio/order', async (req, res) => {
         delivery_fee = parseFloat(config.delivery_fee) || 0;
       }
     }
-    const total = subtotal + delivery_fee;
+    // Desconto do Pix — a MESMA conta da loja comum (storefront.js), e
+    // pelo mesmo motivo: o percentual e da loja e a pagina do produto
+    // mostra o valor com desconto. Calculado AQUI, nunca confiado no que
+    // o cliente mandou. Frete nao entra no desconto.
+    //
+    // S0 (03/09/2026). Ate aqui a vitrine Studio nao aplicava nada: a
+    // loja anunciava 5% no Pix pela migration 309 e o pedido cobrava
+    // cheio — exatamente o defeito que a fase 6 corrigiu do outro lado.
+    // Hoje as duas lojas Studio estao em 0%, entao ninguem foi cobrado a
+    // mais; a paridade entra antes de alguem ligar o desconto.
+    const pixPct = Number(config.pix_discount_pct) || 0;
+    const discount_amount = (pmethod === 'pix' && pixPct > 0)
+      ? Math.round(subtotal * pixPct) / 100
+      : 0;
+    const total = subtotal - discount_amount + delivery_fee;
 
     // Pedido Studio nasce sempre como pending_payment (Pix/cartao) ou
     // confirmed (on_delivery). studio_production_status='pending_art'.
@@ -989,7 +1096,11 @@ router.post('/:slug/studio/order', async (req, res) => {
           (address_zip ? ` - CEP ${String(address_zip).replace(/\D/g, '')}` : '');
       }
 
-      const { rows: [newOrder] } = await client.query(`
+      // As colunas de desconto (migration 316) entram por ultimo e SO
+      // quando o banco ja as tem — o runner aplica antes do deploy, mas
+      // base sem a migration nao pode derrubar o pedido inteiro
+      // (armadilha 1). Mesmo padrao da loja comum.
+      const insertPedido = (comDesconto) => client.query(`
         INSERT INTO digital_orders (
           company_id, order_number, customer_name, customer_phone, customer_email,
           delivery_type, delivery_address, delivery_fee, subtotal, total,
@@ -999,7 +1110,7 @@ router.post('/:slug/studio/order', async (req, res) => {
           address_zip, address_street, address_number, address_complement,
           address_neighborhood, address_city, address_state,
           courier_name, courier_plate,
-          vertical, studio_production_status
+          vertical, studio_production_status${comDesconto ? ', discount_amount, discount_reason' : ''}
         ) VALUES (
           $1, next_digital_order_number($1), $2, $3, $4,
           $5, $6, $7, $8, $9,
@@ -1009,7 +1120,7 @@ router.post('/:slug/studio/order', async (req, res) => {
           $15, $16, $17, $18,
           $19, $20, $21,
           $22, $23,
-          'studio', 'pending_art'
+          'studio', 'pending_art'${comDesconto ? ', $24, $25' : ''}
         ) RETURNING *
       `, [
         cid, customer_name, customer_phone, customer_email || null,
@@ -1022,7 +1133,21 @@ router.post('/:slug/studio/order', async (req, res) => {
         address_state ? String(address_state).toUpperCase() : null,
         courierData ? courierData.courier_name : null,
         courierData ? courierData.courier_plate : null,
+        ...(comDesconto ? [discount_amount, discount_amount > 0 ? 'pix' : null] : []),
       ]);
+
+      let newOrder;
+      try {
+        ({ rows: [newOrder] } = await insertPedido(true));
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        // Sem as colunas de desconto: grava o pedido do jeito antigo. O
+        // total ja esta calculado, entao o cliente paga o valor certo; o
+        // que se perde e a linha do desconto no historico.
+        await client.query('ROLLBACK');
+        await client.query('BEGIN');
+        ({ rows: [newOrder] } = await insertPedido(false));
+      }
       order = newOrder;
 
       for (const item of orderItems) {
@@ -1194,6 +1319,151 @@ router.get('/:slug/studio/order/:oid', async (req, res) => {
   }
 });
 
+// ═════════════════════════════════════════════════════════════
+// Orcamento em lote, publico (S0 · 03/09/2026)
+//
+// "50 canecas com o nome de cada convidado, quanto fica?" era uma
+// conversa de WhatsApp que a lojista respondia na mao, e o wizard que
+// calcula isso morava so no painel, atras de login. A pessoa que esta
+// organizando o casamento nao tem login.
+//
+// Duas rotas, e a diferenca entre elas e proposital:
+//   bulk-quote  — so calcula, nao grava nada. Pode ser chamada a cada
+//                 tecla enquanto a pessoa cola a lista de nomes.
+//   bulk-order  — grava o evento, e grava como RASCUNHO. Pedido em lote
+//                 e conversa: quem confirma e a lojista, olhando. Um
+//                 evento "confirmado" criado por qualquer um da internet
+//                 entraria na fila de producao dela sem ninguem ter dito
+//                 sim.
+//
+// O preco unitario vem SEMPRE do produto no banco. Aceitar preco do
+// cliente faria a cotacao ser o que ele quisesse.
+// ═════════════════════════════════════════════════════════════
+
+/** Resolve loja + produto para as duas rotas de lote. Devolve erro pronto. */
+async function lojaEProdutoDoLote(slug, productId) {
+  const { rows: cfg } = await db.query(
+    `SELECT company_id FROM digital_channel_config
+      WHERE slug = $1 AND is_published = true LIMIT 1`,
+    [slug]
+  );
+  if (!cfg.length) return { erro: [404, 'Loja nao encontrada'] };
+  const cid = cfg[0].company_id;
+
+  if (!productId) return { erro: [400, 'product_id obrigatorio'] };
+  const { rows: prod } = await db.query(
+    `SELECT id, name, price FROM products
+      WHERE id = $1
+        AND ${listVisibilityWhere('$2')}
+        AND is_active IS NOT FALSE
+        AND is_personalizable = true
+        AND studio_storefront_visible IS NOT FALSE
+      LIMIT 1`,
+    [productId, cid]
+  );
+  if (!prod.length) return { erro: [404, 'Produto nao encontrado nesta loja'] };
+  return { cid, produto: prod[0] };
+}
+
+/** A lista de nomes, limpa. Cada linha vira uma peca. */
+function nomesDoLote(bruto) {
+  const arr = Array.isArray(bruto)
+    ? bruto
+    : String(bruto || '').split(/\r?\n/);
+  return arr.map((n) => String(n || '').trim()).filter(Boolean).slice(0, 200);
+}
+
+// POST /storefront/:slug/studio/bulk-quote — { product_id, qty } ou { product_id, names[] }
+router.post('/:slug/studio/bulk-quote', async (req, res) => {
+  try {
+    const { produto, erro } = await lojaEProdutoDoLote(
+      req.params.slug.toLowerCase().trim(), req.body?.product_id);
+    if (erro) return res.status(erro[0]).json({ error: erro[1] });
+
+    // A tela manda a lista enquanto a pessoa digita; `qty` serve pros
+    // tres cartoes de faixa, que sao numeros redondos sem nome nenhum.
+    const qty = req.body?.names != null
+      ? nomesDoLote(req.body.names).length
+      : Math.max(0, Math.floor(Number(req.body?.qty) || 0));
+
+    res.json({
+      product: { id: produto.id, name: produto.name, price: parseFloat(produto.price) },
+      ...cotarLote(qty, parseFloat(produto.price)),
+    });
+  } catch (err) {
+    console.error('[studio-storefront] bulk-quote error:', err.message);
+    res.status(500).json({ error: 'Erro ao calcular o lote' });
+  }
+});
+
+// POST /storefront/:slug/studio/bulk-order — cria o evento como rascunho
+router.post('/:slug/studio/bulk-order', async (req, res) => {
+  const b = req.body || {};
+  try {
+    const { cid, produto, erro } = await lojaEProdutoDoLote(
+      req.params.slug.toLowerCase().trim(), b.product_id);
+    if (erro) return res.status(erro[0]).json({ error: erro[1] });
+
+    const evento = String(b.event_name || '').trim();
+    if (evento.length < 2) return res.status(400).json({ error: 'Diga de qual evento se trata' });
+
+    // WhatsApp obrigatorio: o evento nasce rascunho e a lojista precisa
+    // responder. Sem contato, o registro so ocupa a fila dela.
+    const fone = String(b.customer_phone || '').replace(/\D/g, '');
+    if (fone.length < 10) return res.status(400).json({ error: 'WhatsApp com DDD obrigatorio' });
+
+    const nomes = nomesDoLote(b.names);
+    if (!nomes.length) return res.status(400).json({ error: 'Cole ao menos um nome' });
+
+    const preco = parseFloat(produto.price);
+    const cot = cotarLote(nomes.length, preco);
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows: [ev] } = await client.query(
+        `INSERT INTO studio_bulk_events
+           (company_id, event_name, event_date, customer_name, customer_phone, customer_email,
+            product_id, product_name_snapshot, base_unit_price, total_qty, total_amount,
+            discount_pct, delivery_deadline, notes, status, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'draft',NULL)
+         RETURNING id, event_name, total_qty, total_amount, discount_pct, status`,
+        [cid, evento, b.event_date || null,
+         String(b.customer_name || '').trim() || null, fone,
+         String(b.customer_email || '').trim() || null,
+         produto.id, produto.name, preco, nomes.length, cot.total_amount,
+         cot.discount_pct, b.delivery_deadline || null,
+         String(b.notes || '').trim() || null]
+      );
+
+      const valores = [];
+      const params = [ev.id];
+      nomes.forEach((nome, i) => {
+        valores.push(`($1, $${params.length + 1}, $${params.length + 2})`);
+        params.push(i + 1, nome);
+      });
+      await client.query(
+        `INSERT INTO studio_bulk_event_items (event_id, line_number, recipient_name)
+         VALUES ${valores.join(', ')}`,
+        params
+      );
+      await client.query('COMMIT');
+
+      res.status(201).json({ event: ev, item_count: nomes.length, pricing: cot });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally { client.release(); }
+  } catch (err) {
+    if (err.code === '42P01') {
+      // Migration 133 pendente neste ambiente (armadilha 10).
+      return res.status(503).json({ error: 'Orcamento em lote indisponivel nesta loja' });
+    }
+    console.error('[studio-storefront] bulk-order error:', err.message);
+    res.status(500).json({ error: 'Erro ao registrar o orcamento' });
+  }
+});
+
 // ─── GET /:slug/studio — endereco publico da vitrine de personalizados ───
 // loja.getaura.com.br/:slug/studio e o endereco que o painel divulga (botao
 // "Ver como cliente" e o card de WhatsApp). Ele NUNCA existiu: o
@@ -1221,7 +1491,8 @@ router.get('/:slug/studio', function(req, res) {
 router.get('/:slug/studio/:pid', function(req, res, next) {
   // Nao sequestra os subcaminhos reais da API, caso algum seja adicionado
   // depois desta linha por engano.
-  const reservados = ['products', 'order', 'upload', 'shipping-quote'];
+  const reservados = ['products', 'order', 'upload', 'shipping-quote',
+                      'bulk-quote', 'bulk-order'];
   if (reservados.includes(req.params.pid)) return next();
   res.redirect(302, urlVitrineStudio(req.params.slug));
 });
