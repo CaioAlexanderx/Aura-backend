@@ -21,43 +21,57 @@ www.davicalcados2.com.br
   → customDomain.js le X-Aura-Host (so quando cf-ray existe) e serve a loja certa
 ```
 
+## Onde esta o que
+
+- `worker.js` — o Worker inteiro, num arquivo so. **O editor do painel da
+  Cloudflare aceita um modulo apenas**, e este arquivo e byte-identico ao
+  que esta publicado la. Nao quebre em varios arquivos sem trocar o deploy
+  para `wrangler`.
+- `__tests__/workerDeDominios.test.js` (na raiz do repo) importa
+  `worker.js` pelo loader ESM do Node, num processo filho, e exercita as
+  funcoes de verdade. Nao existe copia das regras em lugar nenhum.
+
 ## Deploy
+
+Duas formas, e as duas publicam o mesmo arquivo:
+
+**Pelo painel** — Workers & Pages → `aura-dominios` → Edit code, colar
+`worker.js` inteiro, Ctrl+S, Deploy. Foi assim que ele subiu em 03/09/2026.
+
+**Pelo wrangler** — precisa de login (abre o navegador; o token nao passa
+pelo repo):
 
 ```bash
 cd workers/dominios
-npx wrangler login      # abre o navegador; o token nao passa por aqui
+npx wrangler login
 npx wrangler deploy
 ```
 
-## As rotas, uma vez so, no painel
+## As rotas, no painel da zona `getaura.com.br`
 
-Workers Routes da zona `getaura.com.br`, nesta ordem. O padrao mais
-especifico ganha, entao as duas primeiras protegem tudo que e nosso:
+| Rota                          | Worker                          |
+| ----------------------------- | ------------------------------- |
+| `www.davicalcados2.com.br/*`  | `aura-dominios`                 |
+| `getaura.com.br/*`            | *(nenhum — Workers desativados)* |
+| `*.getaura.com.br/*`          | *(nenhum — Workers desativados)* |
 
-| Rota                  | Worker          |
-| --------------------- | --------------- |
-| `getaura.com.br/*`    | *(nenhum)*      |
-| `*.getaura.com.br/*`  | *(nenhum)*      |
-| `*/*`                 | `aura-dominios` |
+**Uma rota por loja, e nunca um `*/*`.** O painel (`app`) e o site
+(`getaura.com.br`) vivem nesta mesma zona; um curinga colocaria os dois
+atras de um Worker que, com defeito, derrubaria tudo. As duas linhas sem
+Worker sao rede de protecao caso alguem adicione um curinga um dia, e
+`ehNosso()` dentro do codigo e a terceira camada.
 
-Sem as duas primeiras, `loja.getaura.com.br` cairia no proprio Worker e
-chamaria a si mesma. O `ehNosso()` no codigo e o cinto de seguranca para
-esse caso, mas a rota e o cinto de verdade.
+## Cadastrar o dominio de uma lojista nova
 
-## Onde esta o que
-
-- `src/regras.js` — a decisao toda, em CommonJS, porque o Jest deste repo
-  roda CommonJS puro. E o arquivo que `__tests__/workerDeDominios.test.js`
-  cobre.
-- `src/index.mjs` — a casca no formato de modulo da Cloudflare. Chama as
-  regras e nao decide nada por conta propria.
-
-## Cadastrar o dominio de uma lojista
-
-1. SSL/TLS → Custom Hostnames → **Add Custom Hostname**, com o dominio dela.
-2. No DNS do registrador dela: `www` CNAME → `lojas.getaura.com.br`
-   (a origem de fallback), e o apex redirecionando para `https://www`.
-3. No painel da Aura: Meu Site → dominio proprio, o mesmo hostname.
+1. **SSL/TLS → Custom Hostnames → Add Custom Hostname** com o dominio dela,
+   validacao TXT. A Cloudflare devolve um par
+   `_cf-custom-hostname.<dominio>` para ela publicar no registrador.
+2. **Workers Routes → Add route**: `<dominio>/*` → `aura-dominios`.
+3. No registrador dela: `www` CNAME → `lojas.getaura.com.br` (a origem de
+   fallback), e o apex redirecionando para `https://www`.
+4. No painel da Aura: Meu Site → dominio proprio, o mesmo hostname. Ele
+   grava `custom_domain` e `custom_domain_status = 'active'`, que e o que
+   `customDomain.js` procura.
 
 ## Custo
 
