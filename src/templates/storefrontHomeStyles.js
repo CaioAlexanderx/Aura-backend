@@ -59,7 +59,6 @@ function homeStyles({ fontSerif, fontSans, fontMono }) {
 .mega-topo{font-family:${fontSerif};font-size:20px;font-weight:500;border-bottom:1px solid var(--sf-border);padding-bottom:8px;margin-bottom:6px;justify-content:flex-start;}
 .mega-topo:hover,.mega-item:hover{color:var(--sf-brand);}
 .mega-num{font-size:11px;color:var(--sf-ink-2);}
-.mega-nota{border-top:1px solid var(--sf-border);padding-top:14px;font-style:italic;}
 
 /* Gaveta (celular) */
 .drawer-overlay{position:fixed;inset:0;background:rgba(32,26,20,.5);z-index:180;}
@@ -73,7 +72,6 @@ function homeStyles({ fontSerif, fontSans, fontMono }) {
 .drawer-item{padding-left:34px;}
 .drawer-novidades{padding-left:20px;font-weight:600;font-size:14.5px;min-height:48px;}
 .drawer-sep{border-top:1px solid var(--sf-border);margin:4px 20px;}
-.drawer-nota{margin-top:auto;padding:16px 20px;border-top:1px solid var(--sf-border);font-style:italic;}
 
 /* ============================================================
    REDESIGN 09/2026 — hero full-bleed 3:1
