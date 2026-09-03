@@ -54,6 +54,30 @@ async function resolveSlugByDomain(hostname) {
   return slug;
 }
 
+/**
+ * O host que a pessoa digitou, e nao o que chegou na porta do Railway.
+ *
+ * O Railway roteia pelo cabecalho Host e devolve "Application not found"
+ * para host que ele nao conhece — testado em 02/09/2026 com
+ * `Host: www.davicalcados2.com.br` contra a origem. Cadastrar cada dominio
+ * de cliente la seria um passo manual por loja.
+ *
+ * O caminho sem isso: a Cloudflare (for SaaS) recebe o dominio do cliente,
+ * REESCREVE o Host para loja.getaura.com.br (que o Railway conhece) e guarda
+ * o original em X-Aura-Host. Aqui a gente prefere esse cabecalho — mas so
+ * quando a requisicao passou mesmo pela Cloudflare (cf-ray presente). Sem
+ * ele, quem bate direto na origem com um X-Aura-Host inventado cai no
+ * fluxo normal, como sempre foi.
+ */
+function hostOriginal(req) {
+  const viaCloudflare = Boolean(req.headers['cf-ray']);
+  const declarado = req.headers['x-aura-host'];
+  if (viaCloudflare && typeof declarado === 'string' && declarado.trim()) {
+    return declarado.trim().toLowerCase().replace(/:\d+$/, '');
+  }
+  return req.hostname; // trust proxy ja configurado
+}
+
 /** Invalida a entrada de cache para um hostname (chamar ao atualizar/remover custom_domain). */
 function invalidateCustomDomainCache(hostname) {
   if (hostname) _cache.delete(hostname);
@@ -74,7 +98,7 @@ function rewriteToStorefront(req, res, slug, subPath, query) {
 
 async function customDomainMiddleware(req, res, next) {
   try {
-    const hostname = req.hostname; // trust proxy já configurado
+    const hostname = hostOriginal(req);
 
     // Sempre ignora rotas internas da API e health checks
     if (!hostname || req.url.startsWith('/api/') || req.url.startsWith('/health')) {
@@ -125,4 +149,4 @@ async function customDomainMiddleware(req, res, next) {
   }
 }
 
-module.exports = { customDomainMiddleware, invalidateCustomDomainCache };
+module.exports = { customDomainMiddleware, invalidateCustomDomainCache, hostOriginal };
