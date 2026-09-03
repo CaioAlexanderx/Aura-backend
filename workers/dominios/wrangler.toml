@@ -1,0 +1,13 @@
+# aura-dominios — ver src/regras.js para o porque.
+#
+# As rotas NAO estao declaradas aqui de proposito: a zona getaura.com.br ja
+# tem rotas de outros Workers (aura-app, aura-site) e um deploy com rotas
+# erradas derrubaria o painel. Elas sao criadas uma vez, a mao, no painel
+# da Cloudflare — o README ao lado diz quais e em que ordem.
+
+name = "aura-dominios"
+main = "src/index.mjs"
+compatibility_date = "2026-09-03"
+
+[observability]
+enabled = true
