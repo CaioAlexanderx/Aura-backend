@@ -83,11 +83,14 @@ describe('o alcance: toda consulta que desenha a vitrine', () => {
 describe('a curadoria não é aplicada duas vezes', () => {
   test('featuredIds passa a servir só para ORDENAR', () => {
     const paginado = fonte('src/services/catalogoPaginado.js');
-    const i = paginado.indexOf('const curados = Array.isArray(featuredIds)');
-    const bloco = paginado.slice(i, i + 400);
-    expect(bloco).toContain('array_position($');
+    // Sem janela de N caracteres: em 03/09/2026 a lista curada mudou de
+    // lugar (saiu da contagem, foi para a consulta da página, ver
+    // catalogoDeLojaCurada.test.js) e uma janela fixa reprovaria código
+    // certo. O que importa é o par, não a distância entre as linhas.
+    expect(paginado).toContain('const curados = Array.isArray(featuredIds)');
+    expect(paginado).toContain('array_position($');
     // O filtro saiu: quem decide quem aparece é o fragmento.
-    expect(bloco).not.toContain("filtros.push(`id::text = ANY(");
+    expect(paginado).not.toContain("filtros.push(`id::text = ANY(");
   });
 
   test('o payload embutido também ordena pela curadoria e filtra pelo fragmento', () => {
