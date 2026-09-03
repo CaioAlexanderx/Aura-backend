@@ -408,7 +408,7 @@ function listVisibilityWhere(cidParam) {
 // A pagina nasce com UMA pagina de produtos, nao com o catalogo. Antes
 // eram 500 (419 KB na Finesse) pra desenhar 24. O resto chega pela rota
 // /storefront/:slug/catalogo conforme a cliente navega.
-const { POR_PAGINA, EM_ESTOQUE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias, facetasDoCatalogo, faixaDePreco } = require('./catalogoPaginado');
+const { POR_PAGINA, EM_ESTOQUE, NA_VITRINE, filtroDeFoto, contarPorCategoria, arvoreDeCategorias, facetasDoCatalogo, faixaDePreco } = require('./catalogoPaginado');
 const LIMITE_DO_PAYLOAD = POR_PAGINA;
 
 async function contarProdutosDaLoja(cid, exigeFoto) {
@@ -513,6 +513,8 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
   const comFoto = filtroDeFoto(exigeFoto);
 
   if (featuredIds && featuredIds.length > 0) {
+    // NA_VITRINE ja diz QUEM aparece; o ANY aqui seria a mesma regra
+    // escrita duas vezes. O array segue como ORDEM da curadoria.
     const sql = `
       SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
              material, medidas, cuidados
@@ -521,7 +523,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
         AND is_active IS NOT FALSE
         AND ${EM_ESTOQUE}
         AND ${comFoto}
-        AND id::text = ANY($2)
+        AND ${NA_VITRINE}
       ORDER BY array_position($2, id::text)
       LIMIT ${LIMITE_DO_PAYLOAD}
     `;
@@ -537,6 +539,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
       AND is_active IS NOT FALSE
       AND ${EM_ESTOQUE}
       AND ${comFoto}
+      AND ${NA_VITRINE}
     ORDER BY created_at DESC
     LIMIT ${LIMITE_DO_PAYLOAD}
   `;

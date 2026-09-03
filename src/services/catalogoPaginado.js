@@ -73,6 +73,39 @@ const COM_FOTO = `(
 )`;
 
 /**
+ * A peca esta NA VITRINE que a lojista curou.
+ *
+ * `featured_product_ids` e uma lista de INCLUSAO: vazia, a loja mostra
+ * tudo; cheia, mostra so o que esta nela. E isso que o botao "visivel na
+ * loja" do painel liga e desliga (TabVitrine).
+ *
+ * ISTO E UM FRAGMENTO, como EM_ESTOQUE e COM_FOTO, e pelo mesmo motivo: a
+ * regra vale pra grade, pros blocos da home, pra arvore de categorias e
+ * pras facetas. Ela morava so dentro da consulta da GRADE — e o redesign
+ * de 09/2026 trouxe home, arvore e facetas, que nasceram sem ela.
+ *
+ * O preco apareceu na FK Store (Fernanda, 02/09): ela desligou 7 pecas,
+ * a grade obedeceu e o "Acabaram de chegar" seguiu mostrando 5 delas, com
+ * o menu contando as 25. Do lado de quem usa, o botao "nao funciona".
+ *
+ * Le a config por $1 — o company da loja, o MESMO parametro que
+ * visibilityWhere ja usa em todas essas consultas.
+ */
+const NA_VITRINE = `(
+  NOT EXISTS (
+    SELECT 1 FROM digital_channel_config dcv
+     WHERE dcv.company_id = $1
+       AND jsonb_typeof(dcv.featured_product_ids) = 'array'
+       AND jsonb_array_length(dcv.featured_product_ids) > 0
+  )
+  OR EXISTS (
+    SELECT 1 FROM digital_channel_config dcv
+     WHERE dcv.company_id = $1
+       AND dcv.featured_product_ids @> to_jsonb(products.id::text)
+  )
+)`;
+
+/**
  * O filtro de foto, ou nada.
  *
  * Devolver a string 'TRUE' em vez de montar o WHERE condicionalmente
@@ -157,19 +190,15 @@ async function paginaDoCatalogo({
   const lim = Math.min(LIMITE_MAXIMO, Math.max(1, parseInt(limit, 10) || POR_PAGINA));
 
   const params = [cid];
-  const filtros = [visibilityWhere, 'is_active IS NOT FALSE', EM_ESTOQUE, filtroDeFoto(exigeFoto)];
+  const filtros = [visibilityWhere, 'is_active IS NOT FALSE', EM_ESTOQUE, filtroDeFoto(exigeFoto), NA_VITRINE];
 
-  // `featured_product_ids` nao e so ordenacao: quando a lojista cura a
-  // lista, a loja mostra SO aqueles produtos. A pagina 1 vem embutida no
-  // HTML com essa restricao, entao a rota tem que aplicar a mesma — senao
-  // a pagina 2 traria produto que a pagina 1 nao mostra, e produto curado
-  // apareceria duas vezes.
+  // QUEM aparece e NA_VITRINE (fragmento, aplicado em todas as consultas).
+  // Aqui featuredIds serve so pra ORDEM: a peca curada vem primeiro, na
+  // ordem em que a lojista arrastou.
   const curados = Array.isArray(featuredIds) ? featuredIds.map(String).filter(Boolean) : [];
   let ordenacao = ordemSql(ordem);
   if (curados.length > 0) {
     params.push(curados);
-    filtros.push(`id::text = ANY($${params.length})`);
-    // Ordem curada primeiro; o criterio escolhido decide o desempate.
     ordenacao = `array_position($${params.length}, id::text), ${ordenacao}`;
   }
 
@@ -333,6 +362,7 @@ async function arvoreDeCategorias({ cid, visibilityWhere, exigeFoto }) {
          AND products.is_active IS NOT FALSE
          AND ${EM_ESTOQUE}
          AND ${filtroDeFoto(exigeFoto)}
+         AND ${NA_VITRINE}
     )
     SELECT c.id, c.name AS nome, c.slug, c.path, c.depth,
            -- banner_url: a tira de categorias da home (so raizes). A
@@ -436,6 +466,7 @@ async function facetasDoCatalogo({ cid, visibilityWhere, exigeFoto, categoria })
        AND products.is_active IS NOT FALSE
        AND ${filtroDeFoto(exigeFoto)}
        AND btrim(COALESCE(av.value, '')) <> ''
+       AND ${NA_VITRINE}
        ${condCat ? 'AND ' + condCat : ''}
      GROUP BY av.attribute_name, av.value`;
   try {
@@ -495,6 +526,7 @@ async function faixaDePreco({ cid, visibilityWhere, exigeFoto, categoria }) {
        AND ${EM_ESTOQUE}
        AND ${filtroDeFoto(exigeFoto)}
        AND price IS NOT NULL AND price > 0
+       AND ${NA_VITRINE}
        ${condCat ? 'AND ' + condCat : ''}`;
   try {
     const { rows } = await bd().query(sql, params);
@@ -515,6 +547,7 @@ async function contarPorCategoria({ cid, visibilityWhere, exigeFoto }) {
         AND is_active IS NOT FALSE
         AND ${EM_ESTOQUE}
         AND ${filtroDeFoto(exigeFoto)}
+        AND ${NA_VITRINE}
         AND category IS NOT NULL
         AND btrim(category) <> ''
       GROUP BY category
@@ -551,7 +584,7 @@ function janelaDePaginas(atual, totalPaginas, vizinhas = 1) {
 }
 
 module.exports = {
-  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, filtroDeFoto,
+  POR_PAGINA, LIMITE_MAXIMO, EM_ESTOQUE, COM_FOTO, NA_VITRINE, filtroDeFoto,
   JANELA_DE_VENDAS_DIAS, VENDIDOS_RECENTES,
   arvoreDeCategorias, facetasDoCatalogo, faixaDePreco, condicaoDeCategoria,
   paginaDoCatalogo, contarPorCategoria, janelaDePaginas, normalizar, ordemSql,
