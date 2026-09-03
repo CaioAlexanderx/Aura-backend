@@ -179,8 +179,10 @@ router.use((req, res, next) => {
   next();
 });
 
-const STOREFRONT_API_BASE = process.env.STOREFRONT_API_BASE_URL
-  || 'https://aura-backend-production-f805.up.railway.app';
+// Mesmo endereco da loja comum — as duas vitrines chamam a mesma API, e
+// dividir isso em duas constantes e como as duas lojas divergem.
+const { enderecoDaApi } = require('../config/enderecoDaApi');
+const STOREFRONT_API_BASE = enderecoDaApi();
 
 // Limites de upload (cliente envia foto/pdf pra personalizar)
 const UPLOAD_MAX_BYTES = 15 * 1024 * 1024; // 15MB

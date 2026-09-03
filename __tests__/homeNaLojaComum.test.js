@@ -139,7 +139,11 @@ describe('um cartao so', () => {
 
 describe('rodape', () => {
   const html = pagina();
-  const foot = html.slice(html.indexOf('<footer'));
+  // Ate o </footer>, e nao ate o fim da pagina: depois dele vem o <script>
+  // da loja, que carrega o endereco da API — e passou a conter
+  // "getaura.com.br" quando o endereco deixou de nomear o provedor
+  // (02/09). Contar a marca ali dentro nao e o que este teste quer dizer.
+  const foot = html.slice(html.indexOf('<footer'), html.indexOf('</footer>') + 9);
   test('tres colunas: identidade, como atende, navegue', () => {
     expect(foot).toContain('site-footer-cols3');
     expect(foot).toContain('site-footer-logo');
