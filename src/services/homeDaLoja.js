@@ -19,7 +19,7 @@
 
 function bd() { return require('../config/database'); }
 
-const { EM_ESTOQUE, COM_FOTO, filtroDeFoto, VENDIDOS_RECENTES } = require('./catalogoPaginado');
+const { EM_ESTOQUE, COM_FOTO, NA_VITRINE, filtroDeFoto, VENDIDOS_RECENTES } = require('./catalogoPaginado');
 
 /** Abaixo disto o bloco não aparece: um cartão sozinho lê como defeito. */
 const MINIMO_PARA_O_BLOCO = 2;
@@ -69,6 +69,8 @@ function filtrosBase(visibilityWhere, exigeFoto) {
     'products.is_active IS NOT FALSE',
     EM_ESTOQUE,
     filtroDeFoto(exigeFoto),
+    // Peca que a lojista desligou nao aparece em bloco nenhum da home.
+    NA_VITRINE,
   ].join('\n       AND ');
 }
 
