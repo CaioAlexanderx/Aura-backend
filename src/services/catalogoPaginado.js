@@ -195,12 +195,15 @@ async function paginaDoCatalogo({
   // QUEM aparece e NA_VITRINE (fragmento, aplicado em todas as consultas).
   // Aqui featuredIds serve so pra ORDEM: a peca curada vem primeiro, na
   // ordem em que a lojista arrastou.
+  //
+  // A lista NAO entra em `params` aqui. Ela so e usada no ORDER BY, e o
+  // ORDER BY so existe na segunda consulta — a contagem nao ordena nada.
+  // Empurrar agora deixaria a contagem recebendo um parametro que o texto
+  // dela nunca cita, e o Postgres conta os parametros pelo maior $n do
+  // texto: sobra um, e o Bind falha inteiro. Foi assim que o catalogo das
+  // lojas com curadoria caiu em 03/09/2026 (Davi, Jenny, FK Store, aura),
+  // enquanto as sem curadoria seguiam de pe.
   const curados = Array.isArray(featuredIds) ? featuredIds.map(String).filter(Boolean) : [];
-  let ordenacao = ordemSql(ordem);
-  if (curados.length > 0) {
-    params.push(curados);
-    ordenacao = `array_position($${params.length}, id::text), ${ordenacao}`;
-  }
 
   // Categoria: por CAMINHO quando a loja tem arvore, por texto quando nao.
   //
@@ -278,21 +281,31 @@ async function paginaDoCatalogo({
 
   const where = filtros.join(' AND ');
 
+  // A contagem le exatamente os parametros que o WHERE cita — nem um a mais.
   const { rows: contagem } = await bd().query(
     `SELECT COUNT(*)::int AS n FROM products WHERE ${where}`,
     params,
   );
   const total = contagem[0] ? contagem[0].n : 0;
 
-  params.push(lim, off);
+  // A partir daqui e a consulta da pagina, que tem ORDER BY e LIMIT. So
+  // ela ganha a lista curada e os limites.
+  const paramsDaPagina = params.slice();
+  let ordenacao = ordemSql(ordem);
+  if (curados.length > 0) {
+    paramsDaPagina.push(curados);
+    ordenacao = `array_position($${paramsDaPagina.length}, id::text), ${ordenacao}`;
+  }
+
+  paramsDaPagina.push(lim, off);
   const { rows: produtos } = await bd().query(
     `SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
             material, medidas, cuidados
      FROM products
      WHERE ${where}
      ORDER BY ${ordenacao}
-     LIMIT $${params.length - 1} OFFSET $${params.length}`,
-    params,
+     LIMIT $${paramsDaPagina.length - 1} OFFSET $${paramsDaPagina.length}`,
+    paramsDaPagina,
   );
 
   return { produtos, total, offset: off, limit: lim };
