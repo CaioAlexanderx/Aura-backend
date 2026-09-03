@@ -7,15 +7,13 @@ const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 
-// ─── Helper: desconto por quantidade ─────────────────────────
-// Tabela default — pode virar configurável em pdv_settings depois.
-function discountPctForQty(qty) {
-  if (qty >= 100) return 20;
-  if (qty >=  50) return 15;
-  if (qty >=  20) return 10;
-  if (qty >=  10) return 5;
-  return 0;
-}
+// ─── Desconto por quantidade ─────────────────────────────────
+// A tabela saiu daqui em 03/09/2026 (S0 da vitrine Studio): a loja
+// publica passou a cotar lote tambem, e escada de preco com duas
+// implementacoes e a conta do cliente divergindo da conta da lojista.
+// Uma regra, dois leitores — ver services/studioLote.js.
+const { descontoPorQuantidade, cotarLote } = require('../services/studioLote');
+const discountPctForQty = descontoPorQuantidade;
 
 // ═══════════════════════════════════════════════════════════
 // F6 — Bulk Events
@@ -189,21 +187,8 @@ router.delete('/bulk-events/:eid', async function(req, res) {
 // GET /studio/bulk-events/pricing/preview?qty=X&unit_price=Y
 // Calcula preço escalonado sem persistir
 router.get('/bulk-events/pricing/preview', function(req, res) {
-  const qty = parseInt(req.query.qty) || 0;
-  const unitPrice = parseFloat(req.query.unit_price) || 0;
-  const discountPct = discountPctForQty(qty);
-  const totalAmount = +(unitPrice * qty * (1 - discountPct / 100)).toFixed(2);
-  const savings = +(unitPrice * qty * (discountPct / 100)).toFixed(2);
-  res.json({
-    qty, unit_price: unitPrice, discount_pct: discountPct,
-    total_amount: totalAmount, savings,
-    tiers: [
-      { from: 10,  pct: 5,  label: '5% off acima de 10' },
-      { from: 20,  pct: 10, label: '10% off acima de 20' },
-      { from: 50,  pct: 15, label: '15% off acima de 50' },
-      { from: 100, pct: 20, label: '20% off acima de 100' },
-    ],
-  });
+  // A mesma conta que a loja publica faz em /storefront/:slug/studio/bulk-quote.
+  res.json(cotarLote(req.query.qty, req.query.unit_price));
 });
 
 // ═══════════════════════════════════════════════════════════
