@@ -67,6 +67,8 @@ const {
   resumoDeHorario, formatarCnpj,
 } = require('../services/storefrontBuilder');
 const { montarRodape } = require('../services/rodapeInstitucional');
+// Empresa de teste: nao notifica ninguem nem cria cobranca de verdade.
+const { ehLojaDeTeste, anotarBloqueio, pixDeTeste } = require('../services/lojaDeTeste');
 const { montarRedes } = require('../services/redesSociais');
 const { cotarLote } = require('../services/studioLote');
 const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
@@ -1204,7 +1206,13 @@ router.post('/:slug/studio/order', async (req, res) => {
 
     // Pagamento Pix / Cartao (mesma logica do storefront.js principal)
     let pixData = null;
-    if (pmethod === 'pix') {
+    const lojaDeTeste = await ehLojaDeTeste(cid);
+    if (pmethod === 'pix' && lojaDeTeste) {
+      // Loja de teste nao cria cobranca em gateway. A tela de
+      // confirmacao renderiza inteira — que e o ponto de poder testa-la.
+      anotarBloqueio(`cobranca Pix do pedido #${order.order_number}`, cid);
+      pixData = pixDeTeste(order, total);
+    } else if (pmethod === 'pix') {
       if (hasMpGateway) {
         try {
           pixData = await createMpPixPayment({
