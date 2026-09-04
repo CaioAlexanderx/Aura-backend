@@ -15,6 +15,9 @@
 // Email: via mailer.js (Resend / SMTP / dev fallback)
 // ============================================================
 const db = require('../config/database');
+// Empresa de teste nao dispara notificacao real: o pedido de teste
+// tocaria o celular de alguem. Ver services/lojaDeTeste.js.
+const { ehLojaDeTeste, anotarBloqueio } = require('./lojaDeTeste');
 const {
   sendOrderStatusEmail,
   sendOwnerNewOrderEmail,
@@ -183,6 +186,14 @@ async function notifyPaymentConfirmed({ order: input }) {
   if (!order) return;
 
   const company_id = order.company_id;
+
+  // A trava fica ANTES de tudo: se e um pedido de teste, do outro lado
+  // dos tres envios abaixo ha um celular e duas caixas de e-mail reais.
+  if (await ehLojaDeTeste(company_id)) {
+    anotarBloqueio(`pedido #${order.order_number} confirmado`, company_id);
+    return;
+  }
+
   const store_name = await getStoreName(company_id);
 
   // 'courier' (migration 288) precisa de rótulo próprio: sem ele o pedido
@@ -241,6 +252,10 @@ async function notifyStatusChange(order) {
   const CUSTOMER_NOTIFY_STATUSES = ['preparing', 'ready', 'delivered', 'cancelled'];
   if (!CUSTOMER_NOTIFY_STATUSES.includes(order.status)) return;
   if (!order.customer_email) return;
+  if (await ehLojaDeTeste(order.company_id)) {
+    anotarBloqueio(`mudanca de status para "${order.status}"`, order.company_id);
+    return;
+  }
 
   const store_name = await getStoreName(order.company_id);
   await sendOrderStatusEmail(order.customer_email, {
