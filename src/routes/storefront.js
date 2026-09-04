@@ -37,6 +37,11 @@ const {
   fetchVariantesPorProduto, montarProdutoPublico,
   fetchStorefrontCategories, fetchPrimaryCategoryLinks, parseFeaturedIds,
 } = require('../services/storefrontBuilder');
+// Empresa em modo Studio: este endereco serve a vitrine de
+// personalizados, nao a loja comum. Ver services/vitrineStudioShell.js.
+const {
+  ehLojaStudio, montarVitrineStudio, cspDaVitrineStudio,
+} = require('../services/vitrineStudioShell');
 const { paginaDoCatalogo, facetasDoCatalogo, faixaDePreco } = require('../services/catalogoPaginado');
 const { normalizarTamanho } = require('../services/tamanhosDaLoja');
 const { generatePix }     = require('../services/pixService');
@@ -270,12 +275,38 @@ router.get('/:slug/page', async (req, res) => {
   try {
     const slug = req.params.slug.toLowerCase().trim();
     const { rows } = await db.query(
-      `SELECT * FROM digital_channel_config WHERE slug = $1 AND is_published = true`, [slug]);
+      `SELECT dcc.*, COALESCE(c.pdv_settings, '{}'::jsonb) AS company_pdv_settings
+         FROM digital_channel_config dcc
+         JOIN companies c ON c.id = dcc.company_id
+        WHERE dcc.slug = $1 AND dcc.is_published = true`, [slug]);
     if (!rows.length) {
       res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
       res.removeHeader('X-Frame-Options');
       return res.status(404).send('<html><body style="font-family:sans-serif;padding:40px;text-align:center;"><h1>Loja não encontrada</h1><p>Verifique o link ou peça ao lojista pra publicar a loja.</p></body></html>');
     }
+
+    // Empresa em modo Studio tem UMA loja, e e esta (decisao de
+    // 04/09/2026). Antes a mesma empresa vivia em dois enderecos e a
+    // lojista divulgava o errado — o painel copiava este aqui e a
+    // vitrine que ela vende morava no host do painel.
+    //
+    // Se o app nao responder, `montarVitrineStudio` devolve null e a
+    // loja comum atende: loja com a vitrine antiga e melhor do que loja
+    // fora do ar.
+    if (ehLojaStudio({ pdv_settings: rows[0].company_pdv_settings })) {
+      const pagina = await montarVitrineStudio(slug);
+      if (pagina) {
+        res.setHeader('Content-Security-Policy', cspDaVitrineStudio(STOREFRONT_API_BASE));
+        res.removeHeader('X-Frame-Options');
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        // A casca e a mesma para todas as lojas Studio; o que muda e o
+        // recado com o slug. Sem cache no navegador para o deploy do app
+        // chegar sem ninguem limpar nada.
+        res.setHeader('Cache-Control', 'no-store');
+        return res.send(pagina);
+      }
+    }
+
     const data = await buildStorefront(rows[0]);
     res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
     res.removeHeader('X-Frame-Options');
