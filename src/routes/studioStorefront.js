@@ -1501,13 +1501,15 @@ router.post('/:slug/studio/bulk-order', async (req, res) => {
 // /api/v1/storefront/x/y, e aqui so havia /studio/products, /studio/order e
 // afins. A lojista clicava e caia num JSON de erro.
 //
-// A vitrine em si e uma rota do app (app/cardapio/studio/[slug].tsx), entao
-// o que falta aqui e so a ponte. 302 e nao 301 de proposito: se um dia a
-// vitrine mudar de casa, ninguem fica preso a um redirect cacheado no
-// navegador do cliente.
+// 04/09/2026 — a vitrine MUDOU DE CASA, e este 302 foi feito para isso.
+// Ela agora e servida em `loja.getaura.com.br/<slug>`, sem sufixo: empresa
+// em modo Studio tem uma loja so, nesse endereco (ver
+// services/vitrineStudioShell.js). Este caminho antigo continua de pe e
+// leva para la — quem tiver o link com `/studio` no fim nao quebra, e a
+// barra de endereco passa a mostrar o endereco bom.
 function urlVitrineStudio(slug) {
-  const appUrl = process.env.APP_URL || 'https://app.getaura.com.br';
-  return `${appUrl}/cardapio/studio/${encodeURIComponent(slug)}`;
+  const lojaUrl = process.env.STOREFRONT_PUBLIC_URL || 'https://loja.getaura.com.br';
+  return `${lojaUrl}/${encodeURIComponent(slug)}`;
 }
 
 router.get('/:slug/studio', function(req, res) {
