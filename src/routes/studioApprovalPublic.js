@@ -19,7 +19,7 @@ router.get('/:token', async function(req, res) {
     const r = await db.query(
       `SELECT a.id, a.token, a.mockup_url, a.status, a.expires_at, a.response_note,
               a.responded_at, a.message_text,
-              o.id AS order_id, o.total_amount,
+              o.id AS order_id, o.total AS total_amount,
               o.customer_name,
               c.trade_name, c.legal_name,
               (SELECT json_agg(json_build_object(
