@@ -63,7 +63,8 @@ describe('loja fechada para pedido', () => {
       expect(m.aceita).toBe(false);
       expect(typeof m.recado).toBe('string');
       expect(m.recado.length).toBeGreaterThan(30);
-      expect(m.recado).toMatch(/orcamento/i);
+      // A frase e lida pela CLIENTE, na vitrine: vai com acento.
+      expect(m.recado).toMatch(/orçamento/i);
     }
   });
 });

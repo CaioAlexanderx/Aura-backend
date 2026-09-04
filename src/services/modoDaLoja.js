@@ -57,7 +57,7 @@ function modoDaLoja(config, agora = new Date()) {
       motivo: 'pausado',
       // Escrito aqui, e nao na vitrine, para as duas lojas dizerem o
       // mesmo — e para a lojista poder reescrever um dia num lugar so.
-      recado: 'No momento a loja esta fechada para pedidos novos. Voce pode pedir um orcamento e a loja responde com prazo.',
+      recado: 'No momento a loja está fechada para pedidos novos. Você pode pedir um orçamento e a loja responde com prazo.',
       pedidos_ate: ate,
     };
   }
@@ -66,7 +66,7 @@ function modoDaLoja(config, agora = new Date()) {
     return {
       aceita: false,
       motivo: 'prazo',
-      recado: 'Os pedidos desta temporada ja fecharam. Voce pode pedir um orcamento para a proxima leva.',
+      recado: 'Os pedidos desta temporada já fecharam. Você pode pedir um orçamento para a próxima leva.',
       pedidos_ate: ate,
     };
   }
