@@ -28,6 +28,9 @@
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
+const {
+  margemMinima, pecasEmRisco, precoParaOPiso, recadoDoRisco,
+} = require('../services/margemEmRisco');
 
 // ─── Schema customization_config (Fase 1 + Verso 26/05/2026) ─
 const VALID_FIELD_TYPES = ['text', 'image', 'template', 'color', 'option'];
@@ -484,6 +487,45 @@ router.get('/inputs', async function(req, res) {
   } catch (err) { res.status(500).json({ error: 'Erro ao listar insumos' }); }
 });
 
+
+// ── Margem em risco ──────────────────────────────────────────
+// A composicao e a view de resumo ja calculavam custo e margem. O que
+// faltava era o AVISO: a lojista sobe o preco da louca, salva, e nada
+// acontece — duas semanas depois descobre no fim do mes que vendeu no
+// prejuizo. Ver services/margemEmRisco.js.
+async function lerRisco(cid) {
+  const { rows: cfg } = await db.query(
+    `SELECT COALESCE(studio_settings, '{}'::jsonb) AS s FROM companies WHERE id = $1`,
+    [cid]
+  );
+  const piso = margemMinima(cfg[0] ? cfg[0].s : {});
+  const { rows } = await db.query(
+    `SELECT product_id, product_name, product_price, total_cost, margin_pct
+       FROM studio_compositions_summary
+      WHERE company_id = $1 AND is_active = true`,
+    [cid]
+  );
+  const pecas = pecasEmRisco(rows, piso).map((p) => ({
+    ...p,
+    preco_sugerido: precoParaOPiso(p.custo, piso),
+  }));
+  return { piso, pecas, recado: recadoDoRisco(pecas, piso) };
+}
+
+router.get('/margem/risco', async function(req, res) {
+  try {
+    res.json(await lerRisco(req.params.id));
+  } catch (err) {
+    // 42P01: a view de resumo nao existe nesta base. Sem composicao nao
+    // ha margem para julgar — lista vazia e a resposta honesta.
+    if (err.code === '42P01' || err.code === '42703') {
+      return res.json({ piso: null, pecas: [], recado: null });
+    }
+    console.error('[studio/margem/risco]', err.message);
+    res.status(500).json({ error: 'Erro ao calcular margem' });
+  }
+});
+
 router.get('/inputs/low-stock', async function(req, res) {
   try {
     const r = await db.query(
@@ -541,6 +583,18 @@ router.patch('/inputs/:iid', async function(req, res) {
       vals
     );
     if (!r.rows.length) return res.status(404).json({ error: 'Insumo não encontrado' });
+
+    // Mudou o CUSTO: devolve junto o que isso fez com as pecas. E o
+    // ponto do recurso — ela sobe o preco da louca e ve na hora quais
+    // pecas ficaram no prejuizo, sem ir procurar.
+    if (req.body.unit_cost !== undefined) {
+      try {
+        return res.json({ ...r.rows[0], margem: await lerRisco(req.params.id) });
+      } catch (e) {
+        // Falha no calculo nao pode derrubar o salvamento do insumo.
+        console.warn('[studio/inputs:PATCH] margem nao calculada:', e.message);
+      }
+    }
     res.json(r.rows[0]);
   } catch (err) { res.status(500).json({ error: 'Erro ao atualizar insumo' }); }
 });
