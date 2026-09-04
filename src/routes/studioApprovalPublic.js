@@ -20,7 +20,7 @@ router.get('/:token', async function(req, res) {
       `SELECT a.id, a.token, a.mockup_url, a.status, a.expires_at, a.response_note,
               a.responded_at, a.message_text,
               o.id AS order_id, o.total_amount,
-              COALESCE(o.customer_data->>'name', o.customer_name) AS customer_name,
+              o.customer_name,
               c.trade_name, c.legal_name,
               (SELECT json_agg(json_build_object(
                 'product_name', oi.product_name,

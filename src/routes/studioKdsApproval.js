@@ -871,7 +871,7 @@ router.post('/orders/:oid/approval', async function(req, res) {
 
   const orderRes = await db.query(
     `SELECT o.id, o.customer_name, o.customer_phone,
-            COALESCE(o.customer_data->>'name', o.customer_name) AS display_name,
+            o.customer_name AS display_name,
             c.trade_name, c.legal_name
        FROM digital_orders o
        LEFT JOIN companies c ON c.id = o.company_id
