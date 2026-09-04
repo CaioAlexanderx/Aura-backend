@@ -3,11 +3,13 @@
 // Extraido de creditLedger.js (refactor 11/06/2026, sem mudanca de comportamento).
 // =============================================================
 
-// ─── F2 PR1: tetos CDC (imutaveis) ──────────────────────
-// Multa unica <= 2% do principal; mora <= 1% ao mes (linear, 0.01/30/dia).
+// ─── F2 PR1: tetos de encargo de atraso ──────────────────────
+// Multa unica <= 2% do principal; mora <= 2% ao mes (linear, 0.02/30/dia).
 // Acima do teto na ESCRITA -> rejeitar (422). Na LEITURA o engine sempre clampa.
+// Teto de mora elevado de 1% para 2% a.m. em 04/09/2026, a pedido do usuario
+// apos validacao juridica/contabil propria (nao mais o teto CDC original).
 const LATE_FEE_MAX            = 0.02;       // multa unica maxima
-const LATE_INTEREST_DAILY_MAX = 0.01 / 30;  // mora diaria maxima (1% a.m.)
+const LATE_INTEREST_DAILY_MAX = 0.02 / 30;  // mora diaria maxima (2% a.m.)
 
 // ─── Teto de parcelas (21/08/2026) ──────────────────────
 // Era 12 (default de config) + 100 (hard cap espalhado pelo codigo). A Valen
