@@ -30,6 +30,15 @@ describe('a coluna fantasma customer_data', () => {
     expect(fonte).not.toMatch(/\bo\.customer_data\b/);
   });
 
+  test('a página pública lê o total pelo nome que a tabela tem (total, não total_amount)', () => {
+    // digital_orders guarda `total`; `total_amount` é da view studio_orders.
+    // A consulta foi validada contra o banco em 04/09/2026.
+    const fonte = fs.readFileSync(
+      path.join(__dirname, '..', 'src/routes/studioApprovalPublic.js'), 'utf8');
+    expect(fonte).toContain('o.total AS total_amount');
+    expect(fonte).not.toMatch(/o.total_amount/);
+  });
+
   test('a página pública lê o nome do pedido direto', () => {
     const fonte = fs.readFileSync(
       path.join(__dirname, '..', 'src/routes/studioApprovalPublic.js'), 'utf8');
