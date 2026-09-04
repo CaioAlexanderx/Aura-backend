@@ -61,7 +61,12 @@ const {
   // digital_channel_config desde sempre e so a loja comum lia. A vitrine
   // Studio desenhava um cabecalho fixo e nao tinha rodape com contato.
   parseBanners,
+  // Rodape (04/09/2026): o resumo de horario e o CNPJ formatado ja eram
+  // calculados aqui para a loja comum. A vitrine Studio nao tinha rodape
+  // nenhum — repetir as duas regras seria a quinta copia da mesma coisa.
+  resumoDeHorario, formatarCnpj,
 } = require('../services/storefrontBuilder');
+const { montarRodape } = require('../services/rodapeInstitucional');
 const { montarRedes } = require('../services/redesSociais');
 const { cotarLote } = require('../services/studioLote');
 const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
@@ -240,6 +245,13 @@ function montarSite(config, nomeDaEmpresa) {
     banners: parseBanners(config.banners, config.cover_url, config.tagline, config.description),
     // Instagram, TikTok e Facebook normalizados, com a URL pronta.
     redes: montarRedes(config),
+    // O que o rodape da loja comum mostra na coluna de identidade
+    // (04/09/2026). Endereco, horario e CNPJ ja estavam no banco e so
+    // aquela vitrine lia: a do Studio terminava a pagina no ultimo
+    // produto, sem dizer de quem e a loja nem onde ela fica.
+    endereco: config.address || '',
+    horario_resumo: resumoDeHorario(config.business_hours, config.always_open === true),
+    cnpj_formatado: formatarCnpj(config.company_cnpj),
   };
 }
 
@@ -259,6 +271,7 @@ router.get('/:slug/studio/products', async (req, res) => {
     const slug = req.params.slug.toLowerCase().trim();
     const { rows: configs } = await db.query(
       `SELECT dcc.*, COALESCE(c.trade_name, c.legal_name) AS company_display_name,
+              c.cnpj AS company_cnpj,
               COALESCE(c.studio_settings, '{}'::jsonb) AS studio_settings
          FROM digital_channel_config dcc
          JOIN companies c ON c.id = dcc.company_id
@@ -312,6 +325,34 @@ router.get('/:slug/studio/products', async (req, res) => {
       policy_text: ss.revision_policy_text || null,
     };
 
+    // Detecta gateway de pagamento (Pix MP, Pix estatico, Cartao).
+    //
+    // Sobe ANTES do retorno de loja vazia (04/09/2026) porque o rodape
+    // institucional lista as formas de pagamento, e ele existe nos dois
+    // retornos. Calcular a lista so no caminho com produto faria a loja
+    // recem-aberta anunciar formas diferentes da mesma loja com produto.
+    let hasMpGateway = false;
+    try {
+      const { rows: gws } = await db.query(
+        `SELECT id FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
+        [cid]
+      );
+      hasMpGateway = gws.length > 0;
+    } catch (_) {}
+    const hasStaticPix = !!(config.pix_key && String(config.pix_key).trim());
+    const hasPix = hasStaticPix || hasMpGateway;
+    const cardEnabled = config.card_enabled !== false;
+    const hasCard = hasMpGateway && cardEnabled;
+    const hasOnDelivery = !!config.pay_on_delivery_enabled;
+
+    // As formas de pagamento e a politica de troca JA RESOLVIDAS pelo
+    // mesmo modulo que a loja comum usa. Se a vitrine remontasse a lista,
+    // uma correcao no texto valeria numa loja e nao na outra.
+    const rodape_institucional = montarRodape(
+      { has_pix: hasPix, has_card: hasCard, pay_on_delivery_enabled: hasOnDelivery },
+      config.politica_troca
+    );
+
     if (!products.length) {
       return res.json({
         site: montarSite(config, configs[0].company_display_name),
@@ -319,6 +360,7 @@ router.get('/:slug/studio/products', async (req, res) => {
         sla: { sla_base_days: 3, queue_qty: 0, total_estimate_days: 3 },
         revisions,
         numeros: { pedidos_entregues: 0 },
+        rodape_institucional,
         total_products: 0,
       });
     }
@@ -373,21 +415,6 @@ router.get('/:slug/studio/products', async (req, res) => {
 
     const queueDays = Math.ceil(queueQty / capacity);
     const slaTotal = slaBaseDays + queueDays;
-
-    // Detecta gateway de pagamento (Pix MP, Pix estatico, Cartao)
-    let hasMpGateway = false;
-    try {
-      const { rows: gws } = await db.query(
-        `SELECT id FROM companies_payment_gateways WHERE company_id = $1 AND gateway = 'mercadopago' LIMIT 1`,
-        [cid]
-      );
-      hasMpGateway = gws.length > 0;
-    } catch (_) {}
-    const hasStaticPix = !!(config.pix_key && String(config.pix_key).trim());
-    const hasPix = hasStaticPix || hasMpGateway;
-    const cardEnabled = config.card_enabled !== false;
-    const hasCard = hasMpGateway && cardEnabled;
-    const hasOnDelivery = !!config.pay_on_delivery_enabled;
 
     // S1 (19/08/2026) — árvore de categorias no payload do Studio.
     //
@@ -557,6 +584,9 @@ router.get('/:slug/studio/products', async (req, res) => {
       // banco ou nao saem; numero de vitrine inventado e o tipo de coisa
       // que a lojista descobre quando um cliente pergunta.
       numeros: { pedidos_entregues: entregues },
+      // O mesmo rodape da loja comum: como pagar e o que acontece se a
+      // peca nao servir. Sai de services/rodapeInstitucional.js.
+      rodape_institucional,
       payment: {
         has_pix: hasPix,
         has_card: hasCard,
