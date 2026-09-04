@@ -69,6 +69,8 @@ const {
 const { montarRodape } = require('../services/rodapeInstitucional');
 // Empresa de teste: nao notifica ninguem nem cria cobranca de verdade.
 const { ehLojaDeTeste, anotarBloqueio, pixDeTeste } = require('../services/lojaDeTeste');
+// Pico: a loja continua no ar e o botao vira orcamento.
+const { modoDaLoja } = require('../services/modoDaLoja');
 const { montarRedes } = require('../services/redesSociais');
 const { cotarLote } = require('../services/studioLote');
 const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
@@ -362,6 +364,7 @@ router.get('/:slug/studio/products', async (req, res) => {
         sla: { sla_base_days: 3, queue_qty: 0, total_estimate_days: 3 },
         revisions,
         numeros: { pedidos_entregues: 0 },
+        pedidos: modoDaLoja(config),
         rodape_institucional,
         total_products: 0,
       });
@@ -586,6 +589,10 @@ router.get('/:slug/studio/products', async (req, res) => {
       // banco ou nao saem; numero de vitrine inventado e o tipo de coisa
       // que a lojista descobre quando um cliente pergunta.
       numeros: { pedidos_entregues: entregues },
+      // Pico: `aceita: false` mantem a vitrine inteira e troca o botao
+      // por "pedir orcamento". Nunca vem sem motivo — loja sem botao de
+      // comprar e sem explicacao parece quebrada.
+      pedidos: modoDaLoja(config),
       // O mesmo rodape da loja comum: como pagar e o que acontece se a
       // peca nao servir. Sai de services/rodapeInstitucional.js.
       rodape_institucional,
@@ -878,6 +885,18 @@ router.post('/:slug/studio/order', async (req, res) => {
     if (!configs.length) return res.status(404).json({ error: 'Loja nao encontrada' });
     const config = configs[0];
     const cid = config.company_id;
+
+    // A trava do pico vale no SERVIDOR, nao so no botao. Uma pagina
+    // aberta antes de a lojista fechar a loja continuaria enviando — e o
+    // pedido que ela nao consegue produzir entraria assim mesmo.
+    const modo = modoDaLoja(config);
+    if (!modo.aceita) {
+      return res.status(409).json({
+        error: modo.recado,
+        motivo: modo.motivo,
+        pedidos_ate: modo.pedidos_ate,
+      });
+    }
 
     // MP gateway
     let mpGateway = null;
