@@ -69,6 +69,7 @@ const {
 const { montarRodape } = require('../services/rodapeInstitucional');
 // Empresa de teste: nao notifica ninguem nem cria cobranca de verdade.
 const { ehLojaDeTeste, anotarBloqueio, pixDeTeste } = require('../services/lojaDeTeste');
+const { normalizarDataDoLote } = require('../services/dataDoLote');
 // Pico: a loja continua no ar e o botao vira orcamento.
 const { modoDaLoja } = require('../services/modoDaLoja');
 const { montarRedes } = require('../services/redesSociais');
@@ -1472,6 +1473,14 @@ router.post('/:slug/studio/bulk-order', async (req, res) => {
     const nomes = nomesDoLote(b.names);
     if (!nomes.length) return res.status(400).json({ error: 'Cole ao menos um nome' });
 
+    // A cliente escreve "20/09/2026", como a tela sugere; a coluna e DATE.
+    // Sem isto o Postgres lia mes 20, a rota devolvia 500 e o orcamento
+    // se perdia no ultimo passo (QA de 04/09/2026). Ver services/dataDoLote.
+    const prazo = normalizarDataDoLote(b.delivery_deadline);
+    if (prazo.erro) return res.status(400).json({ error: prazo.erro });
+    const dataDoEvento = normalizarDataDoLote(b.event_date);
+    if (dataDoEvento.erro) return res.status(400).json({ error: dataDoEvento.erro });
+
     const preco = parseFloat(produto.price);
     const cot = cotarLote(nomes.length, preco);
 
@@ -1485,11 +1494,11 @@ router.post('/:slug/studio/bulk-order', async (req, res) => {
             discount_pct, delivery_deadline, notes, status, created_by)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'draft',NULL)
          RETURNING id, event_name, total_qty, total_amount, discount_pct, status`,
-        [cid, evento, b.event_date || null,
+        [cid, evento, dataDoEvento.data,
          String(b.customer_name || '').trim() || null, fone,
          String(b.customer_email || '').trim() || null,
          produto.id, produto.name, preco, nomes.length, cot.total_amount,
-         cot.discount_pct, b.delivery_deadline || null,
+         cot.discount_pct, prazo.data,
          String(b.notes || '').trim() || null]
       );
 
