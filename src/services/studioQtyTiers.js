@@ -48,7 +48,14 @@ function parseTiers(raw) {
     // do lado do app, onde Number(null) === 0 passava pela guarda.
     if (unitPrice != null && unitPrice <= 0) continue;
     if (mult != null && mult <= 0) continue;
-    out.push({ min_qty: min, max_qty: max, unit_price: unitPrice, unit_multiplier: mult });
+    // Prazo por faixa (04/09/2026): dias uteis para produzir a tiragem.
+    // Opcional — faixa sem prazo vira "a loja informa" na cotacao, nunca
+    // um numero inventado. Zero ou negativo e o mesmo que ausente.
+    const lead = t.lead_days == null ? null : num(t.lead_days);
+    out.push({
+      min_qty: min, max_qty: max, unit_price: unitPrice, unit_multiplier: mult,
+      lead_days: lead != null && lead > 0 ? Math.ceil(lead) : null,
+    });
   }
   // Ordena por min_qty: a primeira faixa que casar vence, e o configurador
   // nao garante ordem.
@@ -107,10 +114,23 @@ function buildLadder(basePrice, rawTiers) {
         max_qty: t.max_qty,
         unit_price: Math.round(unit * 100) / 100,
         discount_pct: Math.round(((base - unit) / base) * 1000) / 10,
+        lead_days: t.lead_days ?? null,
       };
     })
     // Faixa sem desconto nenhum nao merece uma linha na vitrine.
     .filter((l) => l.discount_pct > 0);
 }
 
-module.exports = { parseTiers, matchTier, unitPriceForQty, buildLadder };
+/**
+ * Os dias uteis que a lojista declarou para esta quantidade.
+ *
+ * `null` quando a faixa nao tem prazo, ou quando nao ha faixa: a tela
+ * escreve "a loja informa". Prazo de tiragem e promessa dela, e promessa
+ * que o sistema inventa e a que quebra.
+ */
+function leadDaysForQty(rawTiers, qty) {
+  const t = matchTier(parseTiers(rawTiers), qty);
+  return t && t.lead_days != null ? t.lead_days : null;
+}
+
+module.exports = { parseTiers, matchTier, unitPriceForQty, buildLadder, leadDaysForQty };

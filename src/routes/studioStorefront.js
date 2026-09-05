@@ -455,6 +455,12 @@ router.get('/:slug/studio/products', async (req, res) => {
       // Tabela ausente neste ambiente: loja segue sem escada (armadilha 10).
       if (e.code !== '42P01' && e.code !== '42703') throw e;
     }
+    // A regra GLOBAL (product_id NULL) vale para todo produto sem regra
+    // propria. Ela ficava guardada na chave "null" e ninguem a lia: a
+    // lojista configurava uma escada para a loja inteira e a vitrine
+    // seguia sem desconto (04/09/2026).
+    const tiersGlobais = tiersByProduct['null'] ?? null;
+    const faixasDe = (productId) => tiersByProduct[productId] ?? tiersGlobais;
 
     // S0 (03/09/2026) — quantos pedidos cada peca ja teve, e quantos a
     // loja ja entregou.
@@ -556,7 +562,7 @@ router.get('/:slug/studio/products', async (req, res) => {
           category_path: cat ? cat.path : null,
           // S6 — escada de desconto por quantidade. [] quando a lojista
           // nao configurou faixa nenhuma, que e o caso de toda a base hoje.
-          qty_tiers: buildLadder(parseFloat(p.price), tiersByProduct[p.id]),
+          qty_tiers: buildLadder(parseFloat(p.price), faixasDe(p.id)),
           stock_qty: p.stock_qty,
           // S0 — quantos pedidos esta peca ja teve. O bloco "mais
           // pedidos" da home ordena por aqui e some quando ninguem
@@ -583,7 +589,13 @@ router.get('/:slug/studio/products', async (req, res) => {
         queue_qty: queueQty,
         capacity_per_day: capacity,
         queue_added_days: queueDays,
-        total_estimate_days: slaTotal,
+        // 04/09/2026 (decisao do Caio): o prazo que a loja promete e a
+        // estimativa que a LOJISTA definiu, sempre. Somar a fila por cima
+        // fazia a primeira caneca do dia empurrar a promessa de 3 para 4
+        // dias (⌈1/10⌉ = 1), e a cliente lia um numero que ninguem tinha
+        // prometido. A fila continua no payload para o painel mostrar;
+        // ela so nao decide mais o que a vitrine escreve.
+        total_estimate_days: slaBaseDays,
       },
       revisions,
       // S0 — os numeros que a home mostra na faixa de confianca. Saem do
@@ -988,6 +1000,11 @@ router.post('/:slug/studio/order', async (req, res) => {
         [cid]
       );
       regras.forEach((r) => { tiersByProductOrder[r.product_id] = r.qty_tiers; });
+      // A mesma queda para a regra global que a listagem faz: o pedido
+      // tem que cobrar o preco que a pagina mostrou.
+      if (tiersByProductOrder['null'] != null) {
+        tiersByProductOrder.__global = tiersByProductOrder['null'];
+      }
     } catch (e) {
       if (e.code !== '42P01' && e.code !== '42703') throw e;
     }
@@ -1020,7 +1037,8 @@ router.post('/:slug/studio/order', async (req, res) => {
       // os deltas de personalizacao sao adicionais e entram DEPOIS. Sem
       // isso o cliente veria a escada na pagina e pagaria o preco cheio.
       const listPrice = parseFloat(p.price);
-      const basePrice = unitPriceForQty(listPrice, tiersByProductOrder[p.id], qty);
+      const basePrice = unitPriceForQty(
+        listPrice, tiersByProductOrder[p.id] ?? tiersByProductOrder.__global, qty);
       if (basePrice !== listPrice) {
         console.log(`[studio/storefront/order] faixa de quantidade em "${p.name}": ${qty}un R$${listPrice.toFixed(2)} -> R$${basePrice.toFixed(2)}`);
       }
@@ -1420,7 +1438,26 @@ async function lojaEProdutoDoLote(slug, productId) {
     [productId, cid]
   );
   if (!prod.length) return { erro: [404, 'Produto nao encontrado nesta loja'] };
-  return { cid, produto: prod[0] };
+
+  // A escada da LOJISTA — a mesma do produto avulso (04/09/2026). Regra
+  // do produto vence; sem ela, a regra global da loja; sem nenhuma, o
+  // lote sai sem desconto, em vez dos 5% que uma tabela fixa nossa
+  // inventava. Ver services/studioLote.js.
+  let faixas = null;
+  try {
+    const { rows: regras } = await db.query(
+      `SELECT product_id, qty_tiers FROM studio_pricing_rules
+        WHERE company_id = $1 AND is_active IS NOT FALSE AND qty_tiers IS NOT NULL
+          AND (product_id = $2 OR product_id IS NULL)`,
+      [cid, productId]
+    );
+    const propria = regras.find((r) => r.product_id === productId);
+    const global = regras.find((r) => r.product_id == null);
+    faixas = (propria || global || {}).qty_tiers ?? null;
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+  }
+  return { cid, produto: prod[0], faixas };
 }
 
 /** A lista de nomes, limpa. Cada linha vira uma peca. */
@@ -1434,7 +1471,7 @@ function nomesDoLote(bruto) {
 // POST /storefront/:slug/studio/bulk-quote — { product_id, qty } ou { product_id, names[] }
 router.post('/:slug/studio/bulk-quote', async (req, res) => {
   try {
-    const { produto, erro } = await lojaEProdutoDoLote(
+    const { produto, faixas, erro } = await lojaEProdutoDoLote(
       req.params.slug.toLowerCase().trim(), req.body?.product_id);
     if (erro) return res.status(erro[0]).json({ error: erro[1] });
 
@@ -1446,7 +1483,7 @@ router.post('/:slug/studio/bulk-quote', async (req, res) => {
 
     res.json({
       product: { id: produto.id, name: produto.name, price: parseFloat(produto.price) },
-      ...cotarLote(qty, parseFloat(produto.price)),
+      ...cotarLote(qty, parseFloat(produto.price), faixas),
     });
   } catch (err) {
     console.error('[studio-storefront] bulk-quote error:', err.message);
@@ -1458,7 +1495,7 @@ router.post('/:slug/studio/bulk-quote', async (req, res) => {
 router.post('/:slug/studio/bulk-order', async (req, res) => {
   const b = req.body || {};
   try {
-    const { cid, produto, erro } = await lojaEProdutoDoLote(
+    const { cid, produto, faixas, erro } = await lojaEProdutoDoLote(
       req.params.slug.toLowerCase().trim(), b.product_id);
     if (erro) return res.status(erro[0]).json({ error: erro[1] });
 
@@ -1482,7 +1519,7 @@ router.post('/:slug/studio/bulk-order', async (req, res) => {
     if (dataDoEvento.erro) return res.status(400).json({ error: dataDoEvento.erro });
 
     const preco = parseFloat(produto.price);
-    const cot = cotarLote(nomes.length, preco);
+    const cot = cotarLote(nomes.length, preco, faixas);
 
     const client = await db.connect();
     try {

@@ -116,7 +116,10 @@ describe('as rotas de lote', () => {
     const bloco = studio.slice(i, i + 1200);
     expect(bloco).toContain('SELECT id, name, price FROM products');
     // A rota le produto.price; nao existe unit_price vindo do corpo.
-    expect(studio).toContain('cotarLote(qty, parseFloat(produto.price))');
+    // 04/09/2026: a cotacao passou a levar as faixas da LOJISTA como
+    // terceiro argumento — a regra guardada (preco do banco, nunca do
+    // cliente) e a mesma.
+    expect(studio).toContain('cotarLote(qty, parseFloat(produto.price), faixas)');
     expect(studio).not.toContain('req.body.unit_price');
     expect(studio).not.toContain('b.unit_price');
   });

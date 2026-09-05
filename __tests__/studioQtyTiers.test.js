@@ -124,8 +124,9 @@ describe('matchTier', () => {
 describe('buildLadder — o que a pagina exibe', () => {
   test('uma linha por faixa, com preco unitario e desconto', () => {
     expect(buildLadder(39.9, ESCADA)).toEqual([
-      { min_qty: 10, max_qty: 49, unit_price: 35.91, discount_pct: 10 },
-      { min_qty: 50, max_qty: null, unit_price: 29.9, discount_pct: 25.1 },
+      // lead_days (04/09/2026): prazo por faixa, null quando nao declarado.
+      { min_qty: 10, max_qty: 49, unit_price: 35.91, discount_pct: 10, lead_days: null },
+      { min_qty: 50, max_qty: null, unit_price: 29.9, discount_pct: 25.1, lead_days: null },
     ]);
   });
 
@@ -135,7 +136,8 @@ describe('buildLadder — o que a pagina exibe', () => {
       { min_qty: 10, unit_multiplier: 0.9, labor_cost: 12, setup_fee: 40, default_margin_pct: 60 },
     ]);
     expect(Object.keys(linhas[0]).sort())
-      .toEqual(['discount_pct', 'max_qty', 'min_qty', 'unit_price']);
+      // `lead_days` e prazo, nao custo: pode ir a publico.
+      .toEqual(['discount_pct', 'lead_days', 'max_qty', 'min_qty', 'unit_price']);
   });
 
   test('faixa sem desconto nao vira linha na vitrine', () => {
