@@ -70,19 +70,26 @@ router.get('/', async function(req, res) {
     // Filtro por data do lancamento (due_date com fallback created_at SP).
     var where = 'WHERE company_id = $1';
     var params = [cid];
+    // Lentidao do Studio (QA 04/09/2026): o app roda em us-west e o banco em
+    // Sao Paulo, entao cada ida ao banco custa ~190ms mesmo com a consulta em
+    // 1ms. Esta rota fazia TRES idas em sequencia (contagem, pagina, somas) e o
+    // Financeiro a chama tres vezes em paralelo. Agora contagem e somas viajam
+    // numa consulta so, em paralelo com a pagina: 3 idas viram 1. Os indices
+    // de start/end sao guardados porque a clausula das somas reaproveita os
+    // mesmos parametros da listagem (sem o filtro de type).
+    var startIdx = null;
+    var endIdx = null;
     if (type === 'income' || type === 'expense') { params.push(type); where += ' AND type = $' + params.length; }
-    if (start) { params.push(start); where += ' AND ' + dateClauseCompetencia('>=', params.length); }
-    if (end)   { params.push(end);   where += ' AND ' + dateClauseCompetencia('<=', params.length); }
-    var countRes = await db.query('SELECT COUNT(*) AS total FROM transactions ' + where, params);
+    if (start) { params.push(start); startIdx = params.length; where += ' AND ' + dateClauseCompetencia('>=', startIdx); }
+    if (end)   { params.push(end);   endIdx = params.length;   where += ' AND ' + dateClauseCompetencia('<=', endIdx); }
     var dataParams = params.concat([limit, offset]);
-    var dataRes = await db.query(
+    var dataSql =
       'SELECT id, type, amount, description, category, status, notes, due_date, paid_at, created_at,' +
       '       recurrence_type, recurrence_group_id, recurrence_index,' +
       '       payment_method, employee_id, employee_name, idempotency_key' +
       ' FROM transactions ' + where +
       " ORDER BY COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) DESC, created_at DESC" +
-      ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2), dataParams
-    );
+      ' LIMIT $' + (params.length + 1) + ' OFFSET $' + (params.length + 2);
 
     // --- Summary: income/expenses CONFIRMED + pending_* separado ---
     // Filtra por COALESCE(due_date, created_at SP) (mesmo do listing).
@@ -93,21 +100,30 @@ router.get('/', async function(req, res) {
         " AND COALESCE(due_date, (created_at AT TIME ZONE 'America/Sao_Paulo')::date) <  (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '1 month')::date"
       : '';
 
-    var sumP = [cid];
     var sumW = 'WHERE company_id = $1';
-    if (start) { sumP.push(start); sumW += ' AND ' + dateClauseCompetencia('>=', sumP.length); }
-    if (end)   { sumP.push(end);   sumW += ' AND ' + dateClauseCompetencia('<=', sumP.length); }
+    if (startIdx) sumW += ' AND ' + dateClauseCompetencia('>=', startIdx);
+    if (endIdx)   sumW += ' AND ' + dateClauseCompetencia('<=', endIdx);
     sumW += defaultW;
 
-    var sumRes = await db.query(
+    // A contagem da listagem (com filtro de type) entra como subconsulta
+    // escalar na mesma ida das somas (sem filtro de type). Os dois blocos
+    // referenciam $1..$N de `params`; o type, quando existe, e citado so
+    // dentro da subconsulta — e basta ser citado uma vez.
+    var aggSql =
       'SELECT' +
+      '  (SELECT COUNT(*) FROM transactions ' + where + ') AS total,' +
       "  COALESCE(SUM(amount) FILTER (WHERE type = 'income'  AND status = 'confirmed'), 0) AS income," +
       "  COALESCE(SUM(amount) FILTER (WHERE type = 'expense' AND status = 'confirmed'), 0) AS expenses," +
       "  COALESCE(SUM(amount) FILTER (WHERE type = 'income'  AND status = 'pending'),   0) AS pending_income," +
       "  COALESCE(SUM(amount) FILTER (WHERE type = 'expense' AND status = 'pending'),   0) AS pending_expenses" +
-      ' FROM transactions ' + sumW,
-      sumP
-    );
+      ' FROM transactions ' + sumW;
+
+    var results = await Promise.all([
+      db.query(aggSql, params),
+      db.query(dataSql, dataParams),
+    ]);
+    var sumRes  = results[0];
+    var dataRes = results[1];
 
     var income           = parseFloat(sumRes.rows[0]?.income)           || 0;
     var expenses         = parseFloat(sumRes.rows[0]?.expenses)         || 0;
@@ -138,7 +154,7 @@ router.get('/', async function(req, res) {
 
     res.json({
       transactions: transactions,
-      total: parseInt(countRes.rows[0]?.total) || 0,
+      total: parseInt(sumRes.rows[0]?.total) || 0,
       limit: limit, offset: offset,
       summary: {
         income:           income,           // confirmed no periodo (regime caixa)

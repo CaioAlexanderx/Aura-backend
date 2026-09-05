@@ -449,20 +449,6 @@ async function computeInsights(companyIds, period) {
     WHERE company_id = ANY($1::uuid[])
       AND COALESCE(due_date, created_at::date) BETWEEN $2::date AND $3::date
   `;
-  const sumRes = await db.query(summarySQL, [companyIds, range.start, range.end]);
-  const sum = sumRes.rows[0];
-  const income = parseFloat(sum.income) || 0;
-  const expenses = parseFloat(sum.expenses) || 0;
-  const incomeCount = parseInt(sum.income_count) || 0;
-  const txCount = parseInt(sum.tx_count) || 0;
-  const balance = income - expenses;
-
-  let prevIncome = 0;
-  if (prev) {
-    const prevRes = await db.query(summarySQL, [companyIds, prev.start, prev.end]);
-    prevIncome = parseFloat(prevRes.rows[0].income) || 0;
-  }
-
   const overdueSQL = `
     SELECT
       COALESCE(SUM(amount), 0) AS total,
@@ -475,14 +461,16 @@ async function computeInsights(companyIds, period) {
       AND due_date IS NOT NULL
       AND due_date::date < CURRENT_DATE
   `;
-  const overdueRes = await db.query(overdueSQL, [companyIds]);
-  const overdue = overdueRes.rows[0];
-  const overdueTotal = parseFloat(overdue.total) || 0;
-  const overdueCount = parseInt(overdue.count) || 0;
-  const oldestDays = parseInt(overdue.oldest_days) || 0;
-
-  // Onda 2 + Onda 3 — paralelo
+  // Lentidao do Studio (QA 04/09/2026): o app roda em us-west e o banco em
+  // Sao Paulo, entao cada ida ao banco custa ~190ms mesmo com a consulta em
+  // 1ms. Resumo do periodo, resumo do periodo anterior e atrasados eram tres
+  // idas em sequencia ANTES da rodada paralela — 4 rodadas no total. As tres
+  // nao dependem uma da outra nem das demais, entao entram na mesma rodada:
+  // 4 idas viram 1.
   const [
+    sumRes,
+    prevRes,
+    overdueRes,
     top5Income,
     top5Expense,
     incomeMethods,
@@ -495,6 +483,9 @@ async function computeInsights(companyIds, period) {
     monthlyEvolution,
     professionalRanking,
   ] = await Promise.all([
+    db.query(summarySQL, [companyIds, range.start, range.end]),
+    prev ? db.query(summarySQL, [companyIds, prev.start, prev.end]) : Promise.resolve(null),
+    db.query(overdueSQL, [companyIds]),
     fetchTop5(companyIds, 'income', range.start, range.end),
     fetchTop5(companyIds, 'expense', range.start, range.end),
     fetchPaymentMethods(companyIds, 'income', range.start, range.end),
@@ -507,6 +498,20 @@ async function computeInsights(companyIds, period) {
     fetchMonthlyEvolution(companyIds),
     fetchProfessionalRanking(companyIds, range.start, range.end),
   ]);
+
+  const sum = sumRes.rows[0];
+  const income = parseFloat(sum.income) || 0;
+  const expenses = parseFloat(sum.expenses) || 0;
+  const incomeCount = parseInt(sum.income_count) || 0;
+  const txCount = parseInt(sum.tx_count) || 0;
+  const balance = income - expenses;
+
+  const prevIncome = prevRes ? (parseFloat(prevRes.rows[0].income) || 0) : 0;
+
+  const overdue = overdueRes.rows[0];
+  const overdueTotal = parseFloat(overdue.total) || 0;
+  const overdueCount = parseInt(overdue.count) || 0;
+  const oldestDays = parseInt(overdue.oldest_days) || 0;
 
   // Cashflow: history + projection derivada
   const projectionData = buildCashflowProjection(cashflowHistory);
