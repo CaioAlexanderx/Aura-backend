@@ -206,3 +206,77 @@ describe('mapa de etapas', () => {
     expect(etapa('qualquer_coisa')).toBe(0);
   });
 });
+
+// ── Pedido da vitrine (05/09/2026) ──────────────────────────────────────
+// O token da vitrine mora em digital_orders (migration 322). A pagina e a
+// mesma; o cliente nao sabe por qual porta entrou.
+describe('pedido feito pela vitrine', () => {
+  const PEDIDO = {
+    id: '11111111-2222-3333-4444-555555555555',
+    order_number: 'SM-0042',
+    company_id: 'comp-1',
+    created_at: '2026-09-05T12:00:00Z',
+    total: '89.90',
+    status: 'confirmed',
+    studio_production_status: 'pending_art',
+    customer_name: 'Ana Paula Ribeiro',
+    loja: 'Sheid Mania',
+    itens: [{ nome: 'Caneca personalizada', qtd: 1 }],
+    imagem: 'https://cdn/caneca.png',
+  };
+
+  function mockVitrine({ pedido = PEDIDO, semColuna = false } = {}) {
+    db.query.mockImplementation((sql) => {
+      const s = String(sql || '');
+      if (/FROM sales s/i.test(s)) return Promise.resolve({ rows: [] });
+      if (/FROM digital_orders o/i.test(s)) {
+        if (semColuna) return Promise.reject(Object.assign(new Error('x'), { code: '42703' }));
+        return Promise.resolve({ rows: pedido ? [pedido] : [] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+  }
+
+  test('quando nao e venda do balcao, procura em digital_orders e responde no mesmo formato', async () => {
+    mockVitrine();
+    const res = await track();
+
+    expect(res.status).toBe(200);
+    expect(res.body.loja).toBe('Sheid Mania');
+    expect(res.body.pedido).toBe('SM-0042');
+    expect(res.body.cliente).toBe('Ana');
+    expect(res.body.etapas).toHaveLength(4);
+    expect(res.body.etapa_atual).toBe(1);            // pending_art
+    expect(res.body.itens[0]).toMatchObject({ nome: 'Caneca personalizada', qtd: 1 });
+    expect(res.body.total).toBe(89.9);
+    expect(res.body.saldo).toBeNull();
+  });
+
+  test('pedido cancelado avisa', async () => {
+    mockVitrine({ pedido: { ...PEDIDO, status: 'cancelled' } });
+    const res = await track();
+    expect(res.body.cancelado).toBe(true);
+    expect(res.body.etapa_atual).toBeUndefined();
+  });
+
+  test('so o primeiro nome, e nada de telefone, e-mail ou endereco na consulta', async () => {
+    mockVitrine();
+    const res = await track();
+    const corpo = JSON.stringify(res.body);
+    expect(corpo).not.toContain('Ribeiro');
+    const sql = db.query.mock.calls.map((c) => String(c[0] || '')).find((s) => /FROM digital_orders o/i.test(s)) || '';
+    expect(sql).not.toMatch(/customer_phone|customer_email|customer_cpf|address_|payment_method/i);
+  });
+
+  test('antes da migration 322, token desconhecido e 404 e nao 500', async () => {
+    mockVitrine({ semColuna: true });
+    const res = await track();
+    expect(res.status).toBe(404);
+  });
+
+  test('token que nao existe em lugar nenhum e 404', async () => {
+    mockVitrine({ pedido: null });
+    const res = await track();
+    expect(res.status).toBe(404);
+  });
+});

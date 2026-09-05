@@ -50,6 +50,7 @@
 const db = require('../config/database');
 // O rodape institucional e o MESMO nas duas lojas — ver o modulo.
 const { montarRodape } = require('./rodapeInstitucional');
+const { rastreadoresDaLoja } = require('./rastreadores');
 const { montarRedes } = require('./redesSociais');
 // A tira de categorias da home: quem entra e regra unica das duas lojas.
 const { montarTira } = require('./tiraDeCategorias');
@@ -762,6 +763,9 @@ async function buildStorefront(config) {
       // do copyright, como todo e-commerce. Vem de companies, ja lido.
       cnpj:          company.cnpj || null,
       cnpj_formatado: formatarCnpj(company.cnpj),
+      // GA4 e Pixel (04/09/2026) — gravados pelo painel desde a migration
+      // 220 e nunca lidos por loja nenhuma. Ver services/rastreadores.js.
+      rastreadores:  rastreadoresDaLoja(config),
       // Barra de anuncio composta do que a lojista LIGOU (fase 3). So
       // vale quando ela nao escreveu a dela. '' = sem barra.
       announcement_auto: anuncioAutomatico({

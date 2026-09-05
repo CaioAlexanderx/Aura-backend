@@ -31,6 +31,8 @@
 // ============================================================
 'use strict';
 
+const { HOSTS_DOS_RASTREADORES } = require('./rastreadores');
+
 /** Onde o app Expo esta publicado de verdade. */
 const HOST_DO_APP = process.env.STUDIO_APP_ORIGIN || 'https://app.getaura.com.br';
 
@@ -126,14 +128,18 @@ async function montarVitrineStudio(slug) {
  * curinga em script-src.
  */
 function cspDaVitrineStudio(baseDaApi) {
+  // GA4 e Pixel (04/09/2026): os hosts vem de services/rastreadores.js,
+  // o mesmo lugar que decide o que injetar. Lista aqui e lista la
+  // divergindo e o script carregando e a CSP bloqueando em silencio.
+  const R = HOSTS_DOS_RASTREADORES;
   return [
     "default-src 'self'",
-    `script-src 'self' 'unsafe-inline' ${HOST_DO_APP} https://cdnjs.cloudflare.com https://static.cloudflareinsights.com`,
+    `script-src 'self' 'unsafe-inline' ${HOST_DO_APP} https://cdnjs.cloudflare.com https://static.cloudflareinsights.com ${R.script.join(' ')}`,
     "script-src-attr 'unsafe-inline'",
     `style-src 'self' 'unsafe-inline' ${HOST_DO_APP} https://fonts.googleapis.com`,
     "img-src 'self' data: blob: https:",
     "media-src 'self' data: blob: https:",
-    `connect-src 'self' ${HOST_DO_APP} ${baseDaApi} https://cloudflareinsights.com https://viacep.com.br https://brasilapi.com.br https://r2.getaura.com.br https://*.r2.dev`,
+    `connect-src 'self' ${HOST_DO_APP} ${baseDaApi} https://cloudflareinsights.com https://viacep.com.br https://brasilapi.com.br https://r2.getaura.com.br https://*.r2.dev ${R.connect.join(' ')}`,
     `font-src 'self' data: ${HOST_DO_APP} https://fonts.gstatic.com`,
     "frame-ancestors *",
     "object-src 'none'",

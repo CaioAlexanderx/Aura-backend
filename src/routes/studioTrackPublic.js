@@ -51,6 +51,64 @@ function etapaDoStatus(status) {
 
 const primeiroNome = (nome) => String(nome || '').trim().split(/\s+/)[0] || 'você';
 
+// ── Pedido da VITRINE (05/09/2026) ──────────────────────────────────────
+//
+// O token do balcao mora em sales; o da vitrine, em digital_orders
+// (migration 322). Sao duas tabelas porque sao dois caminhos de venda, e
+// o cliente nao sabe nem precisa saber por qual entrou: a pagina e a
+// mesma. Aqui o pedido digital e traduzido para o MESMO formato da venda,
+// com a mesma lista de coisas que nao saem (CPF, telefone, endereco,
+// sobrenome, forma de pagamento).
+//
+// Sem `saldo`: o pedido da vitrine e pago integral (Pix ou cartao) ou
+// combinado na entrega — nao ha parcela de sinal para cobrar aqui.
+async function pedidoDaVitrine(token) {
+  try {
+    const { rows } = await db.query(
+      `SELECT o.id, o.order_number, o.company_id, o.created_at, o.total, o.status,
+              o.studio_production_status, o.customer_name,
+              COALESCE(co.trade_name, co.legal_name) AS loja,
+              (SELECT json_agg(json_build_object('nome', i.product_name, 'qtd', i.quantity) ORDER BY i.id)
+                 FROM digital_order_items i WHERE i.order_id = o.id) AS itens,
+              (SELECT i2.product_image FROM digital_order_items i2
+                WHERE i2.order_id = o.id AND NULLIF(TRIM(i2.product_image), '') IS NOT NULL
+                ORDER BY i2.id LIMIT 1) AS imagem
+         FROM digital_orders o
+         LEFT JOIN companies co ON co.id = o.company_id
+        WHERE o.public_token = $1
+        LIMIT 1`,
+      [token]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    // Antes da migration 322 a coluna nao existe: o link do balcao segue
+    // funcionando e o da vitrine ainda nao foi gerado por ninguem.
+    if (e.code === '42703' || e.code === '42P01') return null;
+    throw e;
+  }
+}
+
+function respostaDoPedidoDaVitrine(o) {
+  const pedido = String(o.order_number || o.id).toUpperCase();
+  if (String(o.status || '').toLowerCase() === 'cancelled') {
+    return { cancelado: true, loja: o.loja, cliente: primeiroNome(o.customer_name), pedido };
+  }
+  return {
+    cancelado: false,
+    loja:      o.loja,
+    cliente:   primeiroNome(o.customer_name),
+    pedido,
+    criado_em: o.created_at,
+    entrega_combinada: null,
+    imagem:    o.imagem,
+    itens:     o.itens || [],
+    total:     parseFloat(o.total) || 0,
+    etapa_atual: etapaDoStatus(o.studio_production_status),
+    etapas:      ETAPAS,
+    saldo:       null,
+  };
+}
+
 router.get('/:token', async function(req, res) {
   const token = String(req.params.token || '').trim();
   // Token curto nem chega ao banco: evita varredura barata.
@@ -82,7 +140,11 @@ router.get('/:token', async function(req, res) {
       [token]
     );
 
-    if (!rows.length) return res.status(404).json({ error: 'Acompanhamento nao encontrado.' });
+    if (!rows.length) {
+      const pedido = await pedidoDaVitrine(token);
+      if (!pedido) return res.status(404).json({ error: 'Acompanhamento nao encontrado.' });
+      return res.json(respostaDoPedidoDaVitrine(pedido));
+    }
     const v = rows[0];
 
     // Venda cancelada nao vira 404: o cliente merece saber que foi cancelada,
@@ -162,3 +224,4 @@ module.exports = router;
 module.exports._etapaDoStatus = etapaDoStatus;
 module.exports._primeiroNome = primeiroNome;
 module.exports._ETAPAS = ETAPAS;
+module.exports._respostaDoPedidoDaVitrine = respostaDoPedidoDaVitrine;
