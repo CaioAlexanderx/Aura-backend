@@ -12,8 +12,31 @@ const db      = require('../config/database');
 // publica passou a cotar lote tambem, e escada de preco com duas
 // implementacoes e a conta do cliente divergindo da conta da lojista.
 // Uma regra, dois leitores — ver services/studioLote.js.
-const { descontoPorQuantidade, cotarLote } = require('../services/studioLote');
-const discountPctForQty = descontoPorQuantidade;
+const { cotarLote } = require('../services/studioLote');
+
+/**
+ * A escada da LOJISTA para um produto: a regra dele, ou a global da loja.
+ *
+ * 04/09/2026 — o lote lia uma tabela fixa nossa; a pagina do produto lia
+ * a dela. Uma escada so, e ela e a que a lojista configurou. Sem regra,
+ * `null`: cotarLote entende como "sem desconto".
+ */
+async function faixasDaLojista(cid, productId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT product_id, qty_tiers FROM studio_pricing_rules
+        WHERE company_id = $1 AND is_active IS NOT FALSE AND qty_tiers IS NOT NULL
+          AND (product_id = $2 OR product_id IS NULL)`,
+      [cid, productId || null]
+    );
+    const propria = productId ? rows.find((r) => r.product_id === productId) : null;
+    const global = rows.find((r) => r.product_id == null);
+    return (propria || global || {}).qty_tiers ?? null;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return null;
+    throw e;
+  }
+}
 
 // ═══════════════════════════════════════════════════════════
 // F6 — Bulk Events
@@ -92,8 +115,10 @@ router.post('/bulk-events', async function(req, res) {
 
   const totalQty       = items.length;
   const basePrice      = parseFloat(base_unit_price) || 0;
-  const discountPct    = discountPctForQty(totalQty);
-  const totalAmount    = +(basePrice * totalQty * (1 - discountPct / 100)).toFixed(2);
+  // A MESMA conta da loja publica, com a MESMA escada — a da lojista.
+  const cot            = cotarLote(totalQty, basePrice, await faixasDaLojista(req.params.id, product_id));
+  const discountPct    = cot.discount_pct;
+  const totalAmount    = cot.total_amount;
 
   const client = await db.connect();
   try {
@@ -184,11 +209,18 @@ router.delete('/bulk-events/:eid', async function(req, res) {
   } catch (err) { res.status(500).json({ error: 'Erro ao cancelar evento' }); }
 });
 
-// GET /studio/bulk-events/pricing/preview?qty=X&unit_price=Y
+// GET /studio/bulk-events/pricing/preview?qty=X&unit_price=Y&product_id=Z
 // Calcula preço escalonado sem persistir
-router.get('/bulk-events/pricing/preview', function(req, res) {
-  // A mesma conta que a loja publica faz em /storefront/:slug/studio/bulk-quote.
-  res.json(cotarLote(req.query.qty, req.query.unit_price));
+router.get('/bulk-events/pricing/preview', async function(req, res) {
+  // A mesma conta que a loja publica faz em /storefront/:slug/studio/bulk-quote,
+  // com a escada da lojista. Sem product_id cai na regra global da loja.
+  try {
+    const faixas = await faixasDaLojista(req.params.id, req.query.product_id || null);
+    res.json(cotarLote(req.query.qty, req.query.unit_price, faixas));
+  } catch (err) {
+    console.error('[studio/bulk-events/preview]', err.message);
+    res.status(500).json({ error: 'Erro ao calcular o lote' });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════

@@ -365,6 +365,31 @@ router.get('/painel', async function(req, res) {
     console.error('[studio/painel][funil_aprovacao]', err.message);
   }
 
+  // ─── 7. Precisa de voce ──────────────────────────────────
+  // Decisao do Caio (04/09/2026): o painel de metricas fica — mas a acao
+  // urgente nao pode se esconder atras do grafico. Uma faixa fina acima
+  // dos KPIs diz o que esta esperando ELA agora. Sao contagens do estado
+  // atual, nao do periodo: uma arte esperando aprovacao ha 40 dias
+  // continua esperando.
+  //
+  // Cada consulta tem o proprio try: tabela ausente numa base nao pode
+  // apagar as outras duas contagens (armadilha 10).
+  out.precisa_de_voce = { artes_aguardando_cliente: 0, pedidos_nao_pagos: 0, orcamentos_novos: 0 };
+  const contar = async (chave, sql) => {
+    try {
+      const r = await db.query(sql, [cid]);
+      out.precisa_de_voce[chave] = parseInt(r.rows[0]?.n) || 0;
+    } catch (err) {
+      if (err.code !== '42P01' && err.code !== '42703') console.error(`[studio/painel][${chave}]`, err.message);
+    }
+  };
+  await contar('artes_aguardando_cliente',
+    `SELECT COUNT(*)::int AS n FROM studio_approval_links WHERE company_id = $1 AND status = 'pending'`);
+  await contar('pedidos_nao_pagos',
+    `SELECT COUNT(*)::int AS n FROM digital_orders WHERE company_id = $1 AND status = 'pending_payment'`);
+  await contar('orcamentos_novos',
+    `SELECT COUNT(*)::int AS n FROM studio_bulk_events WHERE company_id = $1 AND status = 'draft'`);
+
   res.json(out);
 });
 
