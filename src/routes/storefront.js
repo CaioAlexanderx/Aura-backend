@@ -104,13 +104,15 @@ router.use((req, res, next) => {
 const { enderecoDaApi } = require('../config/enderecoDaApi');
 const STOREFRONT_API_BASE = enderecoDaApi();
 
+// GA4 e Pixel (04/09/2026): hosts do mesmo modulo que injeta os scripts.
+const { HOSTS_DOS_RASTREADORES: RASTREIO } = require('../services/rastreadores');
 const STOREFRONT_CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
+  "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com " + RASTREIO.script.join(' '),
   "script-src-attr 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "img-src 'self' data: blob: https:",
-  "connect-src 'self' https://cloudflareinsights.com https://viacep.com.br https://brasilapi.com.br " + STOREFRONT_API_BASE,
+  "connect-src 'self' https://cloudflareinsights.com https://viacep.com.br https://brasilapi.com.br " + STOREFRONT_API_BASE + " " + RASTREIO.connect.join(' '),
   "font-src 'self' data: https://fonts.gstatic.com",
   "frame-ancestors *",
   "object-src 'none'",

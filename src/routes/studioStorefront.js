@@ -72,6 +72,7 @@ const { ehLojaDeTeste, anotarBloqueio, pixDeTeste } = require('../services/lojaD
 const { normalizarDataDoLote } = require('../services/dataDoLote');
 // Pico: a loja continua no ar e o botao vira orcamento.
 const { modoDaLoja } = require('../services/modoDaLoja');
+const { rastreadoresDaLoja } = require('../services/rastreadores');
 const { montarRedes } = require('../services/redesSociais');
 const { cotarLote } = require('../services/studioLote');
 const { unitPriceForQty, buildLadder } = require('../services/studioQtyTiers');
@@ -257,6 +258,10 @@ function montarSite(config, nomeDaEmpresa) {
     endereco: config.address || '',
     horario_resumo: resumoDeHorario(config.business_hours, config.always_open === true),
     cnpj_formatado: formatarCnpj(config.company_cnpj),
+    // GA4 e Pixel (04/09/2026): as colunas existiam desde a migration 220
+    // e o painel gravava; nenhuma loja lia. Validados aqui — ID mal
+    // copiado vira null, nao script quebrado. Ver services/rastreadores.js.
+    rastreadores: rastreadoresDaLoja(config),
   };
 }
 
@@ -1331,6 +1336,13 @@ router.post('/:slug/studio/order', async (req, res) => {
     res.status(201).json({
       order_id:       order.id,
       order_number:   order.order_number,
+      // 05/09/2026: link de acompanhamento, pronto para a confirmacao
+      // mostrar. O token vem do RETURNING * (DEFAULT no banco, migration
+      // 322); null enquanto a migration nao rodou — a tela simplesmente
+      // nao mostra o bloco.
+      track_url: order.public_token
+        ? `${process.env.APP_PUBLIC_URL || ''}/acompanhar/${order.public_token}`
+        : null,
       total,
       delivery_fee,
       subtotal,

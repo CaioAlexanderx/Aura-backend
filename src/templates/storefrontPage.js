@@ -20,6 +20,8 @@
 //  • favicon: injeta <link rel="icon"> com logo_url quando disponível
 // ============================================================
 const buildStyles   = require('./storefrontStyles');
+// GA4, Pixel e Open Graph (04/09/2026) — ver services/rastreadores.js.
+const { scriptsDoHead, metatagsDeSeo } = require('../services/rastreadores');
 const { linkDeFontes } = require('./storefrontTypography');
 const buildHtmlBody = require('./storefrontHtml');
 const buildScript   = require('./storefrontScript');
@@ -199,6 +201,8 @@ function buildStorefrontPage(data, slug) {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${siteName}</title>
 <meta name="description" content="${tagline}">
+${metatagsDeSeo({ titulo: siteName, descricao: tagline, url: site.storefront_url, imagem: coverUrl || logoUrl })}
+${scriptsDoHead(site.rastreadores || {})}
 ${logoUrl ? `<link rel="icon" href="${logoUrl}" type="image/png">` : ''}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
