@@ -36,6 +36,8 @@ const {
   // A pagina 2 monta o produto com o MESMO codigo da pagina 1.
   fetchVariantesPorProduto, montarProdutoPublico,
   fetchStorefrontCategories, fetchPrimaryCategoryLinks, parseFeaturedIds,
+  // URL propria do produto (08/09/2026).
+  produtoPublicoPorId,
 } = require('../services/storefrontBuilder');
 // Empresa em modo Studio: este endereco serve a vitrine de
 // personalizados, nao a loja comum. Ver services/vitrineStudioShell.js.
@@ -273,7 +275,13 @@ router.get('/:slug/catalogo', async (req, res) => {
   }
 });
 
-router.get('/:slug/page', async (req, res) => {
+/**
+ * A pagina da loja. Com `produtoId` (rota /:slug/p/:id, 08/09/2026) a
+ * mesma pagina sai com a peca embutida e as metatags dela — e o link que
+ * a cliente cola no WhatsApp. Peca que nao existe mais abre a loja com
+ * um aviso, nao um erro: o link antigo continua levando a algum lugar.
+ */
+async function servirPaginaDaLoja(req, res, produtoId) {
   try {
     const slug = req.params.slug.toLowerCase().trim();
     const { rows } = await db.query(
@@ -310,6 +318,15 @@ router.get('/:slug/page', async (req, res) => {
     }
 
     const data = await buildStorefront(rows[0]);
+    if (produtoId) {
+      const peca = await produtoPublicoPorId({
+        cid: rows[0].company_id, id: produtoId,
+        exigeFoto: rows[0].require_product_image === true,
+        mostrarPrecos: rows[0].show_prices !== false,
+      }).catch((e) => { console.error('[storefront] peca da URL:', e.message); return null; });
+      if (peca) data.produto_inicial = peca;
+      else data.produto_ausente = true;
+    }
     res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
     res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -318,7 +335,13 @@ router.get('/:slug/page', async (req, res) => {
     console.error('storefront page error:', err);
     res.status(500).send('<html><body><h1>Erro ao carregar loja</h1></body></html>');
   }
-});
+}
+
+router.get('/:slug/page', (req, res) => servirPaginaDaLoja(req, res, null));
+// loja.getaura.com.br/<slug>/p/<id> e www.dominio-proprio/p/<id> chegam
+// aqui pelo middleware de dominio (customDomain.js) sem regra nova: ele
+// so cola o caminho que sobrou depois do slug.
+router.get('/:slug/p/:id', (req, res) => servirPaginaDaLoja(req, res, req.params.id));
 
 router.get('/:slug/shipping-quote', async (req, res) => {
   try {
