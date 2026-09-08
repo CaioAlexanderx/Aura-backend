@@ -50,6 +50,8 @@ const PODEM_SER_PREENCHIDOS = {
   '.filtro-linha.on .filtro-caixa': 'caixa marcada da faixa de preco — estado, nao acao',
   '.pd-comprar.feito': 'confirmacao de adicionado — feedback, nao acao nova (fase 5)',
   '.step-dot.active,.step-dot.done': 'passo atual e passos feitos do checkout — estado (fase 6)',
+  // Galeria por cor (migration 323)
+  '.pd-ponto.sel::before': 'bolinha da foto que esta na tela — estado, nao acao (a foto ja e o conteudo)',
 };
 
 describe('preenchimento solido e reservado', () => {

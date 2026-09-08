@@ -25,7 +25,9 @@ describe('estrutura da pagina do produto', () => {
     for (let i = 1; i < idx.length; i++) expect(idx[i]).toBeGreaterThan(idx[i - 1]);
   });
   test('as miniaturas ficam em coluna a esquerda, e a foto grande e 3:4 em contain', () => {
-    expect(src).toContain("'<div class=\"pd-minis\">'");
+    // A div ganhou role/aria-label com a galeria por cor (323); o que o
+    // teste guarda e que a coluna existe e vem antes da foto grande.
+    expect(src).toContain("'<div class=\"pd-minis\"");
     // A coluna de minis vem ANTES da foto no markup; o CSS ordena.
     expect(src.indexOf("class=\"pd-minis\"")).toBeLessThan(src.indexOf('id="pdFoto"'));
     // QA 02/09: a foto ganhou teto de altura (max-height) — no desktop ela passava da tela.

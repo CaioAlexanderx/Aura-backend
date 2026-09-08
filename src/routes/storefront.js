@@ -2,6 +2,7 @@
 // AURA. — Storefront Público (sem auth)
 // GET  /storefront/:slug                     — JSON API
 // GET  /storefront/:slug/page                — HTML renderizado (vitrine pública)
+// GET  /storefront/:slug/produto/:id/fotos  — Galeria por cor de uma peca (323)
 // GET  /storefront/:slug/shipping-quote      — Calcula frete por CEP (Fase 5b)
 // POST /storefront/:slug/order               — Cria pedido (Pix, cartão, ou na entrega)
 // POST /storefront/:slug/order/:oid/upload-proof — Cliente envia comprovante de Pix
@@ -38,6 +39,8 @@ const {
   fetchStorefrontCategories, fetchPrimaryCategoryLinks, parseFeaturedIds,
   // URL propria do produto (08/09/2026).
   produtoPublicoPorId,
+  // Galeria por cor de UMA peca (migration 323), com a visibilidade da grade.
+  galeriaDaPeca,
 } = require('../services/storefrontBuilder');
 // Empresa em modo Studio: este endereco serve a vitrine de
 // personalizados, nao a loja comum. Ver services/vitrineStudioShell.js.
@@ -349,6 +352,42 @@ router.get('/:slug/page', (req, res) => servirPaginaDaLoja(req, res, null));
 // aqui pelo middleware de dominio (customDomain.js) sem regra nova: ele
 // so cola o caminho que sobrou depois do slug.
 router.get('/:slug/p/:id', (req, res) => servirPaginaDaLoja(req, res, req.params.id));
+
+/**
+ * GET /storefront/:slug/produto/:id/fotos  — a galeria por cor de UMA peca
+ * (migration 323). `{ main: [...], by_color: { "#hex": [...] } }`.
+ *
+ * POR QUE EXISTE. A peca aberta pela URL propria (/p/<id>) ja vem com
+ * `images` no payload. A peca aberta por um CLIQUE NA GRADE, nao: a grade
+ * carrega ate 500 cartoes e cada um desenha UMA foto — quatro fotos vezes
+ * quatro cores vezes quinhentas pecas no mesmo payload para nada. Entao a
+ * pagina do produto busca a galeria quando a pessoa abre a peca, uma vez,
+ * e guarda.
+ *
+ * UMA query pra galeria (a visibilidade entra nela, ver galeriaDaPeca), e
+ * nao uma por cor. Peca que nao existe, some ou e de outra empresa
+ * devolve galeria VAZIA e 200: a pagina cai na foto de sempre, que e o
+ * mesmo que ela faz para todo o catalogo que ainda nao tem galeria.
+ */
+router.get('/:slug/produto/:id/fotos', async (req, res) => {
+  const vazia = { main: [], by_color: {} };
+  try {
+    const slug = String(req.params.slug || '').toLowerCase().trim();
+    const { rows } = await db.query(
+      `SELECT company_id FROM digital_channel_config WHERE slug = $1 AND is_published = true`,
+      [slug]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Loja nao encontrada' });
+    const galeria = await galeriaDaPeca(req.params.id, rows[0].company_id);
+    // Cinco minutos de cache: a galeria muda quando a lojista sobe foto,
+    // e ate la e o mesmo JSON para todo mundo que abre a peca.
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.json(galeria);
+  } catch (err) {
+    console.error('[storefront] fotos da peca:', err.message);
+    res.json(vazia);
+  }
+});
 
 router.get('/:slug/shipping-quote', async (req, res) => {
   try {

@@ -518,7 +518,10 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
     // carrega isso (produtoPublicoPorId): na GRADE seriam ate 4 fotos
     // vezes 4 cores vezes 500 pecas no mesmo payload, e o cartao da grade
     // desenha UMA foto. Quem precisar antes tem o GET /images do painel.
-    images: p.__galeria || { main: [], by_color: {} },
+    // NULL = nao foi carregada; objeto, ainda que vazio = foi. Um objeto
+    // vazio na grade seria indistinguivel de "esta peca nao tem galeria"
+    // e a pagina buscaria de novo em toda peca do catalogo antigo.
+    images: p.__galeria || null,
     category_id:   cat ? cat.id   : null,
     category_slug: cat ? cat.slug : null,
     category_path: cat ? cat.path : null,
@@ -573,18 +576,41 @@ async function produtoPublicoPorId({ cid, id, exigeFoto, mostrarPrecos }) {
 /**
  * `{ main: [...], by_color: {...} }` de UMA peca (migration 323).
  *
+ * UMA query, sempre — inclusive com `cid`. A peca aberta pela grade
+ * precisa da galeria depois que o payload ja saiu (a grade nao carrega
+ * foto de cor: seriam 4 fotos x 4 cores x 500 pecas para um cartao que
+ * desenha uma), e uma consulta por COR ali dentro seria uma cascata de
+ * round-trips na pagina que mais converte da loja.
+ *
+ * Com `cid`, o EXISTS aplica a MESMA visibilidade da grade: peca de outra
+ * empresa, inativa ou nao compartilhada devolve galeria vazia em vez de
+ * 403 — quem chama e a loja aberta, e ali "nao tem foto extra" e a
+ * resposta certa para tudo que a pessoa nao deveria estar vendo.
+ *
  * Loja aberta e o lugar onde um erro custa venda: base sem a migration
  * (42P01) devolve a galeria vazia e a pagina abre com a foto de sempre.
  */
-async function galeriaDaPeca(productId) {
+async function galeriaDaPeca(productId, cid) {
   const vazia = { main: [], by_color: {} };
+  if (!/^[0-9a-f-]{36}$/i.test(String(productId || ''))) return vazia;
+  // Dentro do EXISTS, `id`, `is_active` e `company_id` sao os de
+  // `products` (escopo mais interno) — `product_images` tambem tem
+  // company_id, e sem a subconsulta a coluna ficaria ambigua.
+  const gate = cid
+    ? `AND EXISTS (
+         SELECT 1 FROM products
+          WHERE id = $1 AND is_active IS NOT FALSE
+            AND ${listVisibilityWhere('$2')}
+       )`
+    : '';
   try {
     const { rows } = await db.query(
       `SELECT id, color_hex, url, thumb_url, position
          FROM product_images
         WHERE product_id = $1
+        ${gate}
         ORDER BY color_hex NULLS FIRST, position ASC, created_at ASC`,
-      [productId]
+      cid ? [productId, cid] : [productId]
     );
     return agruparGaleria(rows);
   } catch (e) {
@@ -1000,6 +1026,9 @@ module.exports = {
   // Usados pela rota paginada, pra grade nao montar produto de um
   // jeito diferente do payload embutido.
   fetchVariantesPorProduto, montarProdutoPublico,
+  // Migration 323 — a galeria por cor de UMA peca, com a visibilidade da
+  // grade. A pagina do produto aberta pela grade busca por aqui.
+  galeriaDaPeca,
   // So pra teste: a regra "CTA apenas com destino http(s) de verdade"
   // vive no parse, e o teste precisa exercita-la sem subir banco.
   parseBanners,

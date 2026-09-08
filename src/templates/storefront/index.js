@@ -38,6 +38,10 @@ const { FONTE: fonteDasCores } = require('../../services/coresDaLoja');
 // Faixas do filtro de preco: a regra mora no servico (testavel) e vai
 // serializada, como parcelamento e cores.
 const { FONTE: fonteDasFaixas } = require('../../services/faixasDePreco');
+// Quais fotos a pagina do produto mostra (galeria por cor, migration 323).
+// Mesma estrategia: a regra mora no servico, e testada la, e vai
+// serializada — o navegador e o teste rodam o MESMO codigo.
+const { FONTE: fonteDasFotos } = require('../../services/fotosDaVitrine');
 
 function buildScript(storeData, escapedSlug, apiBase) {
   return prelude(storeData, escapedSlug, apiBase)
@@ -47,6 +51,7 @@ function buildScript(storeData, escapedSlug, apiBase) {
        + fonteClienteParcelamento()
        + fonteDasCores
        + fonteDasFaixas
+       + fonteDasFotos
        + card
        + products
        + categorias

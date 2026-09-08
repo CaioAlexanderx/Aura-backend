@@ -17,6 +17,16 @@
 //   - descricao, ficha tecnica (migration 305) e a politica de troca
 //   - "Da mesma categoria": os cartoes da grade, pela MESMA rota
 //
+// GALERIA POR COR (migration 323, 08/09/2026). A foto grande deixou de
+// ser uma lista achatada de URLs: a peca tem ate 4 fotos por cor. QUAIS
+// fotos aparecem e regra pura, em services/fotosDaVitrine.js — cor
+// escolhida -> fotos da cor; cor sem foto -> galeria principal; peca sem
+// galeria nenhuma -> o que a loja sempre mostrou. Aqui so se desenha.
+//
+// Escolher TAMANHO nao mexe na galeria. Antes mexia: a foto vinha da
+// variante INTEIRA, entao escolher "38" trocava a foto — e a cliente que
+// so queria saber se tinha o numero via a peca mudar debaixo dela.
+//
 // Toda regra de dado continua do servidor: variantes, estoque, ficha,
 // politica (rodape_institucional). Aqui so se desenha.
 'use strict';
@@ -40,6 +50,17 @@ function tintaSobreCor(hex){
 }
 
 var paginaProduto=null;
+
+/**
+ * A galeria de cada peca que a pagina ja carregou, por id.
+ *
+ * A peca aberta pela URL propria (/p/<id>) chega com images no payload.
+ * A aberta por um clique na grade, nao — a grade nao carrega foto de cor
+ * (seriam 4 fotos x 4 cores x 500 cartoes que desenham UMA foto). Entao a
+ * pagina busca UMA vez, por peca, e guarda: reabrir a mesma peca (ou
+ * voltar pra ela) nao pede de novo.
+ */
+var GALERIAS={};
 
 /**
  * URL propria da peca (08/09/2026): /<slug>/p/<id> no host da Aura,
@@ -133,13 +154,17 @@ function showDetail(id,opts){
 
   var hasVar=!!(p.variants && p.variants.length);
 
-  // Galeria: foto do pai + galeria + de cada variante, sem repetir.
-  var fotos=[];
-  function juntar(u){ if(u && fotos.indexOf(u)===-1) fotos.push(u); }
-  juntar(p.image_url);
-  (p.gallery_urls||[]).forEach(juntar);
-  if(hasVar) p.variants.forEach(function(v){ juntar(v.image_url); });
-  var fotoAtual=0;
+  // Galeria (migration 323): a regra de QUAIS fotos aparecem esta em
+  // services/fotosDaVitrine.js e roda igual aqui e no teste. Este bloco
+  // so guarda o estado.
+  // p.images NULL = a galeria nem foi carregada (peca vinda da grade);
+  // objeto, ainda que vazio = foi, e nao ha o que buscar.
+  var galeria=GALERIAS[p.id]||null;
+  if(!galeria&&p.images){
+    GALERIAS[p.id]=p.images;
+    if(galeriaTemFoto(p.images)) galeria=p.images;
+  }
+  var fotos=[], origemFotos='legado', corDasFotos=null, fotoAtual=0, assinaturaFotos='';
 
   // ── Selecao de variante ────────────────────────────────
   var attrs={}, attrOrder=[];
@@ -253,20 +278,110 @@ function showDetail(id,opts){
     return faltaEscolher() || !variante || variante.stock_qty<=0;
   }
 
+  /**
+   * O hex da cor escolhida, ou null. TAMANHO nao entra aqui de proposito:
+   * a galeria e por COR, e escolher numero nao pode trocar a foto.
+   */
+  function corEscolhida(){
+    for(var i=0;i<attrOrder.length;i++){
+      var a=attrOrder[i];
+      if(!atributoDeCor(a)) continue;
+      var v=selecionado[a];
+      if(v) return corDoValor(v)||v;
+    }
+    return null;
+  }
+  /** O nome da cor escolhida ("Marsala"), pro texto alternativo. */
+  function nomeDaCorEscolhida(){
+    for(var i=0;i<attrOrder.length;i++){
+      var a=attrOrder[i];
+      if(!atributoDeCor(a)) continue;
+      var v=selecionado[a];
+      if(!v) continue;
+      var ehHex=/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(v).trim());
+      return primeiraMaiuscula(ehHex?(nomeDaCor(v)||'Cor'):v);
+    }
+    return '';
+  }
+  /** Nome da peca + cor: e o que um leitor de tela le no lugar da foto. */
+  function altDaFoto(i){
+    var cor=nomeDaCorEscolhida();
+    var base=p.name+(cor?' \u2014 '+cor:'');
+    return fotos.length>1?(base+' \u2014 foto '+(i+1)+' de '+fotos.length):base;
+  }
+  /**
+   * ANTES da 323 a foto da cor morava na variante. Sem galeria cadastrada
+   * a pagina continua assim: escolher vermelho mostra a foto da variante
+   * vermelha. So que agora pela COR e nao pela variante inteira — senao
+   * escolher o tamanho tambem trocaria a foto.
+   */
+  function indiceLegadoDaCor(){
+    if(!corDasFotos||!hasVar) return 0;
+    for(var i=0;i<p.variants.length;i++){
+      var v=p.variants[i], vals=v.values||[], bate=false;
+      for(var j=0;j<vals.length;j++){
+        if(!atributoDeCor(vals[j].attribute)) continue;
+        var h=corDoValor(vals[j].value);
+        if(h&&String(h).toLowerCase()===corDasFotos) bate=true;
+      }
+      if(bate&&v.image_url){
+        for(var k=0;k<fotos.length;k++){ if(fotos[k].url===v.image_url) return k; }
+      }
+    }
+    return 0;
+  }
+  /**
+   * Recalcula a lista. A foto volta pra CAPA so quando a lista muda de
+   * dono (outra cor, ou a galeria que acabou de chegar do servidor):
+   * repintar por qualquer outro motivo mantem a pessoa na foto que ela
+   * estava olhando.
+   */
+  function recalcularFotos(){
+    var est=fotosDaPeca(p,corEscolhida(),galeria);
+    fotos=est.fotos; origemFotos=est.origem; corDasFotos=est.cor;
+    var assinatura=origemFotos+'|'+(corDasFotos||'')+'|'+fotos.length;
+    if(assinatura!==assinaturaFotos){
+      assinaturaFotos=assinatura;
+      fotoAtual=(origemFotos==='legado')?indiceLegadoDaCor():0;
+    }
+    if(fotoAtual>=fotos.length) fotoAtual=0;
+  }
+
   function fotosHtml(){
+    recalcularFotos();
     if(!fotos.length){
       return '<div class="pd-foto pd-foto-vazia" style="background:'+FUNDO_CAPA(p.name)+'">'
         +'<div class="product-ph-initials">'+esc(INICIAIS(p.name))+'</div></div>';
     }
-    var mini = fotos.length>1
-      ? '<div class="pd-minis">'+fotos.map(function(u,i){
-          return '<button type="button" class="pd-mini'+(i===fotoAtual?' sel':'')+'" data-foto="'+i+'" aria-label="Foto '+(i+1)+'">'
-            +'<img src="'+esc(u)+'" alt="">'+'</button>';
+    var varias=fotos.length>1;
+    // A miniatura usa thumb_url (ate 640px, migration 317) e a foto grande
+    // usa url. Sem isso a pagina baixa quatro originais de 1600px pra
+    // desenhar quatro quadradinhos de 76px.
+    var mini = varias
+      ? '<div class="pd-minis" role="group" aria-label="Escolher foto">'+fotos.map(function(f,i){
+          return '<button type="button" class="pd-mini'+(i===fotoAtual?' sel':'')+'" data-foto="'+i+'" aria-label="'+esc(altDaFoto(i))+'"'+(i===fotoAtual?' aria-current="true"':'')+'>'
+            +'<img src="'+esc(f.thumb_url||f.url)+'" alt=""'+(i===0?'':' loading="lazy" decoding="async"')+'>'+'</button>';
+        }).join('')+'</div>'
+      : '';
+    // As setas sao BOTOES visiveis, nao controle que aparece no hover: no
+    // celular nao existe hover e o controle simplesmente nao existiria.
+    var setas = varias
+      ? '<button type="button" class="pd-seta pd-seta-ant" data-passo="-1" aria-label="Foto anterior"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>'
+       +'<button type="button" class="pd-seta pd-seta-prox" data-passo="1" aria-label="Pr\u00f3xima foto"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>'
+      : '';
+    // Bolinhas no lugar das miniaturas na tela estreita (o CSS troca):
+    // quatro miniaturas de 64px comem meia tela de celular.
+    var pontos = varias
+      ? '<div class="pd-pontos" role="group" aria-label="Escolher foto">'+fotos.map(function(f,i){
+          return '<button type="button" class="pd-ponto'+(i===fotoAtual?' sel':'')+'" data-foto="'+i+'" aria-label="Foto '+(i+1)+' de '+fotos.length+'"></button>';
         }).join('')+'</div>'
       : '';
     return mini
-      +'<div class="pd-foto"><img id="pdFoto" src="'+esc(fotos[fotoAtual])+'" alt="'+esc(p.name)+'">'
-      +'<span class="pd-zoom-dica"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35M11 8v6M8 11h6"/></svg>Passe o mouse para ampliar</span></div>';
+      +'<div class="pd-foto" id="pdFotoBox"><img id="pdFoto" src="'+esc(fotos[fotoAtual].url)+'" alt="'+esc(altDaFoto(fotoAtual))+'" fetchpriority="high">'
+      +setas
+      +'<span class="pd-zoom-dica"><svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35M11 8v6M8 11h6"/></svg>Passe o mouse para ampliar</span></div>'
+      +pontos
+      +(varias?'<p class="pd-foto-conta" id="pdFotoConta" aria-live="polite">Foto '+(fotoAtual+1)+' de '+fotos.length+'</p>':'');
   }
 
   /** Ficha tecnica: so as linhas que a lojista preencheu (migration 305). */
@@ -329,7 +444,7 @@ function showDetail(id,opts){
     +'<nav class="crumbs pd-crumbs" aria-label="Você está em">'+migalhasDoProduto(p)+'</nav>'
     +'</div></div>'
     +'<div class="pd-corpo">'
-    +'<div class="pd-col-foto" id="pdGaleria">'+fotosHtml()+'</div>'
+    +'<div class="pd-col-foto" id="pdGaleria" role="group" tabindex="0" aria-label="'+esc('Fotos de '+p.name)+'">'+fotosHtml()+'</div>'
     +'<div class="pd-col-info">'
     +(catNome?'<div class="pd-cat sf-label">'+esc(catNome)+'</div>':'')
     +'<h1 class="pd-nome">'+esc(p.name)+'</h1>'
@@ -360,7 +475,7 @@ function showDetail(id,opts){
     if(historico==='empilhar'){ history.pushState({produto:p.id},'',urlDoProduto(p.id)); empilhou=true; }
     else if(historico==='trocar'){ history.replaceState({produto:p.id},'',urlDoProduto(p.id)); }
   }catch(e){}
-  paginaProduto={el:el,empilhou:empilhou,parar:null};
+  paginaProduto={el:el,empilhou:empilhou,parar:null,peca:p.id};
   var botaoShare=el.querySelector('#pdShare');
   if(botaoShare) botaoShare.addEventListener('click',function(){ compartilharProduto(p); });
 
@@ -378,29 +493,54 @@ function showDetail(id,opts){
       b.addEventListener('click',function(){
         if(b.dataset.ok!=='1') return;
         var a=b.dataset.attr,val=b.dataset.val;
+        var corAntes=corEscolhida();
         if(selecionado[a]===val) delete selecionado[a]; else selecionado[a]=val;
         variante=acharVariante();
-        if(variante&&variante.image_url){
-          var i=fotos.indexOf(variante.image_url);
-          if(i>=0){ fotoAtual=i; pintarFoto(); }
-        }
+        // A galeria so muda quando a COR muda. Escolher tamanho nao mexe
+        // na foto: antes mexia (a foto vinha da variante inteira) e a
+        // peca trocava de imagem debaixo de quem so procurava o numero.
+        if(corEscolhida()!==corAntes) repintarGaleria();
         repintar();
       });
     });
   }
   function pintarFoto(){
+    if(!fotos.length) return;
+    if(fotoAtual<0) fotoAtual=fotos.length-1;
+    if(fotoAtual>=fotos.length) fotoAtual=0;
     var img=el.querySelector('#pdFoto');
-    if(img&&fotos[fotoAtual]) img.src=fotos[fotoAtual];
+    if(img){ img.src=fotos[fotoAtual].url; img.alt=altDaFoto(fotoAtual); }
     el.querySelectorAll('.pd-mini').forEach(function(m,i){
       m.classList.toggle('sel',i===fotoAtual);
+      if(i===fotoAtual) m.setAttribute('aria-current','true'); else m.removeAttribute('aria-current');
     });
+    el.querySelectorAll('.pd-ponto').forEach(function(d,i){ d.classList.toggle('sel',i===fotoAtual); });
+    var conta=el.querySelector('#pdFotoConta');
+    if(conta) conta.textContent='Foto '+(fotoAtual+1)+' de '+fotos.length;
   }
-  function ligarMinis(){
-    el.querySelectorAll('.pd-mini').forEach(function(m){
+  function passarFoto(passo){
+    if(fotos.length<2) return;
+    fotoAtual=(fotoAtual+passo+fotos.length)%fotos.length;
+    pintarFoto();
+  }
+  /** Redesenha a coluna da foto inteira (mudou de cor, ou chegou galeria). */
+  function repintarGaleria(){
+    var box=el.querySelector('#pdGaleria');
+    if(!box) return;
+    box.innerHTML=fotosHtml();
+    ligarGaleria();
+  }
+  function ligarGaleria(){
+    // Miniatura e bolinha levam ao mesmo lugar: o mesmo data-foto.
+    el.querySelectorAll('#pdGaleria [data-foto]').forEach(function(m){
       m.addEventListener('click',function(){ fotoAtual=parseInt(m.dataset.foto,10)||0; pintarFoto(); });
     });
+    el.querySelectorAll('#pdGaleria .pd-seta').forEach(function(b){
+      b.addEventListener('click',function(){ passarFoto(parseInt(b.dataset.passo,10)||1); });
+    });
     // Zoom que segue o mouse: a foto cresce DENTRO da moldura, no ponto
-    // em que o cursor esta. No toque, nada acontece (o toque abre a mini).
+    // em que o cursor esta. No toque nao existe hover — por isso o toque
+    // tem o proprio gesto (arrastar) e as setas ficam sempre visiveis.
     var foto=el.querySelector('.pd-foto img');
     if(foto){
       foto.addEventListener('mousemove',function(e){
@@ -408,6 +548,42 @@ function showDetail(id,opts){
         foto.style.transformOrigin=((e.clientX-r.left)/r.width*100)+'% '+((e.clientY-r.top)/r.height*100)+'%';
       });
     }
+    // Arrastar de lado troca a foto. So no eixo X: rolar a pagina com o
+    // dedo em cima da foto continua rolando a pagina.
+    var caixa=el.querySelector('#pdFotoBox');
+    if(caixa){
+      var x0=null,y0=null;
+      caixa.addEventListener('touchstart',function(e){
+        var t=e.touches[0]; x0=t.clientX; y0=t.clientY;
+      },{passive:true});
+      caixa.addEventListener('touchend',function(e){
+        if(x0===null) return;
+        var t=e.changedTouches[0],dx=t.clientX-x0,dy=t.clientY-y0;
+        x0=null;
+        if(Math.abs(dx)>40&&Math.abs(dx)>Math.abs(dy)) passarFoto(dx<0?1:-1);
+      },{passive:true});
+    }
+  }
+  /**
+   * A galeria da peca aberta pela GRADE nao vem no payload (a grade nao
+   * carrega foto de cor). Uma busca, uma vez por peca, guardada em
+   * GALERIAS. Ate ela chegar a pagina ja esta desenhada com a foto de
+   * sempre — nada pisca vazio.
+   */
+  function buscarGaleria(){
+    if(galeria||GALERIAS[p.id]) return;
+    fetch(API_BASE+'/api/v1/storefront/'+encodeURIComponent(SLUG)+'/produto/'+encodeURIComponent(p.id)+'/fotos')
+      .then(function(r){ return r.json(); })
+      .then(function(g){
+        GALERIAS[p.id]=g||{main:[],by_color:{}};
+        if(!galeriaTemFoto(GALERIAS[p.id])) return;
+        // A pessoa pode ter fechado a peca (ou aberto outra) no meio.
+        if(!paginaProduto||paginaProduto.peca!==p.id) return;
+        galeria=GALERIAS[p.id];
+        assinaturaFotos='';
+        repintarGaleria();
+      })
+      .catch(function(){});
   }
   function ligarFrete(){
     var btn=el.querySelector('#pdCalcular'), inp=el.querySelector('#pdCep'), res=el.querySelector('#pdFreteRes');
@@ -458,9 +634,20 @@ function showDetail(id,opts){
     },1400);
   });
   ligarOpcoes();
-  ligarMinis();
+  ligarGaleria();
   ligarFrete();
+  // Seta do teclado no desktop: o grupo da galeria e focavel e as
+  // miniaturas sao botoes, entao a tecla funciona com o foco em qualquer
+  // ponto dela. O ouvinte fica no container, que sobrevive ao repintar.
+  var galeriaEl=el.querySelector('#pdGaleria');
+  if(galeriaEl){
+    galeriaEl.addEventListener('keydown',function(e){
+      if(e.key==='ArrowLeft'){ e.preventDefault(); passarFoto(-1); }
+      else if(e.key==='ArrowRight'){ e.preventDefault(); passarFoto(1); }
+    });
+  }
   repintar();
+  buscarGaleria();
   carregarRelacionados(p);
 }
 
