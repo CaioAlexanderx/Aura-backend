@@ -60,7 +60,17 @@ function addToCart(productId,variantId,opcoes){
 function changeQty(key,d){if(!cart[key])return;cart[key].qty+=d;if(cart[key].qty<=0)delete cart[key];updateCartUI();renderProducts();}
 function getCount(){return Object.values(cart).reduce(function(s,i){return s+i.qty;},0);}
 function getSubtotal(){return Object.values(cart).reduce(function(s,i){return s+i.price*i.qty;},0);}
-function getFee(){return selectedDelivery==='delivery'?parseFloat(SETTINGS.delivery_fee)||0:0;}
+/**
+ * O frete que a pessoa vai pagar. Com cotacao por CEP feita, e o valor da
+ * cotacao — o mesmo que o servidor confere no pedido (expectedFee). Antes
+ * o resumo somava o delivery_fee fixo da config mesmo depois da cotacao
+ * (QA 08/09/2026).
+ */
+function getFee(){
+  if(selectedDelivery!=='delivery') return 0;
+  if(typeof shippingQuote!=='undefined' && shippingQuote && shippingQuote.fee!=null) return parseFloat(shippingQuote.fee)||0;
+  return parseFloat(SETTINGS.delivery_fee)||0;
+}
 
 function updateCartUI(){
   var count=getCount(),sub=getSubtotal(),fee=getFee();
@@ -85,7 +95,7 @@ function updateCartUI(){
   }).join('');
   document.getElementById('cartSubtotal').textContent=fmt(sub);
   document.getElementById('deliveryLabel').textContent=selectedDelivery==='delivery'?'Entrega':'Retirada';
-  document.getElementById('deliveryVal').textContent=fee?fmt(fee):'Grátis';
+  document.getElementById('deliveryVal').textContent=(typeof textoDoFrete==='function')?textoDoFrete(fee):(fee?fmt(fee):'Grátis');
   var desc=(typeof descontoPix==='function')?descontoPix(sub):0;
   var pixRow=document.getElementById('cartPixRow');
   if(pixRow){ pixRow.hidden=!(desc>0); var v=document.getElementById('cartPixVal'); if(v) v.textContent=fmt(sub-desc+fee)+' no Pix'; }

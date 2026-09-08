@@ -33,14 +33,15 @@ const {
 const ALLOWED_ICONS = ['truck','pkg','shield','sparkle','leaf','heart','star','pix','card','receipt','bag','user'];
 
 const DEFAULT_BANNERS = [
-  { kicker: '', headline: 'Bem-vindo à nossa loja', body: 'Curadoria editada, pensada pra durar.', cta: 'Ver produtos', tone: 'split', tint: 'brand', image_url: null, enabled: true },
+  { kicker: '', headline: 'Bem-vindo à nossa loja', body: 'Peças escolhidas a dedo pra você.', cta: 'Ver produtos', tone: 'split', tint: 'brand', image_url: null, enabled: true },
 ];
 
 const DEFAULT_SERVICE_CARDS = [
   { icon: 'truck',   title: 'Entrega rápida',      body: 'Confirmação no WhatsApp', enabled: true },
   { icon: 'pkg',     title: 'Embalagem cuidadosa', body: 'Pronta pra presentear',   enabled: true },
   { icon: 'shield',  title: 'Pagamento seguro',    body: 'Pix e demais opções',     enabled: true },
-  { icon: 'sparkle', title: 'Curadoria editada',   body: 'Produtos selecionados',   enabled: true },
+  // "Curadoria editada" era jargao de moda numa loja de calcados (QA 08/09/2026).
+  { icon: 'sparkle', title: 'Seleção da loja',     body: 'Escolhidos a dedo',        enabled: true },
 ];
 
 const DEFAULT_CONFIG = {

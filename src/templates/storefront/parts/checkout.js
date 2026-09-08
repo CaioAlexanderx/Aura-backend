@@ -188,6 +188,14 @@ function fetchCep(){
 // Fase 5: estado da cotacao de frete (atualizada sob demanda)
 var shippingQuote=null;
 var shippingOutOfArea=false;
+/**
+ * Frete por distancia ainda sem CEP: nao existe valor pra mostrar. Antes
+ * a opcao dizia "Gratis" antes de qualquer CEP (QA 08/09/2026) — era o
+ * delivery_fee zero da config, nao um frete de verdade.
+ */
+function freteACalcular(){ return SETTINGS.delivery_pricing_mode==='distance' && !shippingQuote; }
+function fretePendente(){ return selectedDelivery==='delivery' && freteACalcular(); }
+function textoDoFrete(fee){ return fretePendente()?'A calcular':(fee?fmt(fee):'Grátis'); }
 var shippingFetchTimer=null;
 
 // Calcula frete server-side. Chamado a cada CEP novo ou no blur do input.
@@ -237,11 +245,20 @@ function fetchShippingQuote(){
           statusEl.textContent='Frete '+fmt(q.fee)+(q.distance_km?' · '+q.distance_km+' km':'')+(q.eta?' · '+q.eta:'');
         } else {
           statusEl.className='shipping-quote-status';
-          statusEl.textContent='Frete '+fmt(q.fee)+(q.eta?' · '+q.eta:'')+(q.alert?' · '+q.alert:'');
+          // q.alert e recado pra lojista (config incompleta); nao vai pra cliente.
+          statusEl.textContent='Frete '+fmt(q.fee)+(q.eta?' · '+q.eta:'');
         }
       }
-      // Atualiza linhas Entrega/Total no resumo
+      // Atualiza linhas Entrega/Total no resumo — e o valor na opcao de
+      // entrega, que ate aqui dizia "A calcular".
       refreshOrderSummaryWithQuote();
+      var precoOp=document.getElementById('opt_delivery_preco');
+      if(precoOp){
+        var cobrado=parseFloat(q.fee)||0;
+        precoOp.textContent=cobrado?fmt(cobrado):'Grátis';
+        precoOp.classList.remove('a-calcular');
+        precoOp.classList.toggle('gratis',!cobrado);
+      }
     })
     .catch(function(){
       if(statusEl){
@@ -256,7 +273,7 @@ function refreshOrderSummaryWithQuote(){
   var fee=getFee();
   document.querySelectorAll('.summary-row').forEach(function(r){
     var spans=r.querySelectorAll('span');
-    if(spans[0]&&spans[0].textContent==='Entrega') spans[1].textContent=fee?fmt(fee):'Grátis';
+    if(spans[0]&&spans[0].textContent==='Entrega') spans[1].textContent=textoDoFrete(fee);
     if(r.classList.contains('total')&&spans[0]&&spans[0].textContent==='Total') spans[1].textContent=fmt(sub+fee);
   });
 }
@@ -410,7 +427,7 @@ function renderCheckoutStep(){
     var addrHtml=selectedDelivery==='delivery'?renderAddressForm():'';
     body.innerHTML='<div class="delivery-opts">'
       +(pickupOk?'<div class="delivery-opt'+(selectedDelivery==="pickup"?" active":"")+'" id="opt_pickup" role="radio" aria-checked="'+(selectedDelivery==="pickup")+'"><div class="delivery-opt-radio"></div><div class="delivery-opt-info"><div class="delivery-opt-name">Retirar na loja</div><div class="delivery-opt-detail">'+esc(pickupAddr)+(pickupEta?' — '+esc(pickupEta):'')+'</div></div><div class="delivery-opt-price gratis">Grátis</div></div>':'')
-      +(deliveryOk?'<div class="delivery-opt'+(selectedDelivery==="delivery"?" active":"")+'" id="opt_delivery" role="radio" aria-checked="'+(selectedDelivery==="delivery")+'"><div class="delivery-opt-radio"></div><div class="delivery-opt-info"><div class="delivery-opt-name">Entrega'+(deliveryEta?' — '+esc(deliveryEta):'')+'</div><div class="delivery-opt-detail">'+(SETTINGS.delivery_pricing_mode==='distance'?'Frete calculado pelo CEP':'Combinado com a loja')+'</div></div><div class="delivery-opt-price'+(fee2?'':' gratis')+'">'+(fee2?fmt(fee2):'Grátis')+'</div></div>':'')
+      +(deliveryOk?'<div class="delivery-opt'+(selectedDelivery==="delivery"?" active":"")+'" id="opt_delivery" role="radio" aria-checked="'+(selectedDelivery==="delivery")+'"><div class="delivery-opt-radio"></div><div class="delivery-opt-info"><div class="delivery-opt-name">Entrega'+(deliveryEta?' — '+esc(deliveryEta):'')+'</div><div class="delivery-opt-detail">'+(SETTINGS.delivery_pricing_mode==='distance'?'Frete calculado pelo CEP':'Combinado com a loja')+'</div></div><div class="delivery-opt-price'+(freteACalcular()?' a-calcular':(fee2?'':' gratis'))+'" id="opt_delivery_preco">'+(freteACalcular()?'A calcular':(fee2?fmt(fee2):'Grátis'))+'</div></div>':'')
       +'</div>'+addrHtml;
     var op=document.getElementById('opt_pickup'),od=document.getElementById('opt_delivery');
     if(op) op.addEventListener('click',function(){selectDelivery('pickup');});
@@ -563,7 +580,7 @@ function selectDelivery(type){
   updateCartUI();
   document.querySelectorAll('.summary-row').forEach(function(r){
     var spans=r.querySelectorAll('span');
-    if(spans[0]&&spans[0].textContent==='Entrega') spans[1].textContent=fee?fmt(fee):'Grátis';
+    if(spans[0]&&spans[0].textContent==='Entrega') spans[1].textContent=textoDoFrete(fee);
     if(r.classList.contains('total')&&spans[0]&&spans[0].textContent==='Total') spans[1].textContent=fmt(sub+fee);
   });
   var hasForm=!!document.querySelector('.address-form');
