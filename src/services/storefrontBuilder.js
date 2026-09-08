@@ -533,7 +533,10 @@ async function produtoPublicoPorId({ cid, id, exigeFoto, mostrarPrecos }) {
   const p = rows[0];
   const [variantsByProduct, primaryLinkByProduct, categorias] = await Promise.all([
     fetchVariantesPorProduto([p.id]),
-    fetchPrimaryCategoryLinks([p.id]),
+    // cid: num grupo, o vinculo aponta pra categoria da matriz e a loja e
+    // da filial; com a empresa da loja o vinculo e traduzido pelo caminho
+    // (fetchPrimaryCategoryLinks aprende isso no PR da fase 5).
+    fetchPrimaryCategoryLinks([p.id], cid),
     fetchStorefrontCategories(cid),
   ]);
   const categoryById = {};
