@@ -47,6 +47,17 @@ describe('a pagina de uma peca', () => {
     expect(html).toContain('<link rel="canonical" href="https://loja.getaura.com.br/finesse/p/1f4a63bc-9c6c-43e0-a590-ab6516d58748">');
   });
 
+  test('o endereco da loja vem da RAIZ do payload, como o builder devolve', () => {
+    // Em producao site.storefront_url nao existe: o builder poe
+    // storefront_url ao lado de site/contact/products. A canonica nunca
+    // tinha saido por isso (QA 08/09/2026).
+    const raiz = paginaDe({ produto_inicial: peca, storefront_url: 'https://loja.getaura.com.br/finesse', site: { name: 'Finesse', primary_color: '#7a1f3a' } });
+    expect(raiz).toContain('<link rel="canonical" href="https://loja.getaura.com.br/finesse/p/1f4a63bc-9c6c-43e0-a590-ab6516d58748">');
+    expect(raiz).toContain('<meta property="og:url" content="https://loja.getaura.com.br/finesse/p/1f4a63bc-9c6c-43e0-a590-ab6516d58748">');
+    const home = paginaDe({ storefront_url: 'https://loja.getaura.com.br/finesse', site: { name: 'Finesse', primary_color: '#7a1f3a' } });
+    expect(home).toContain('<link rel="canonical" href="https://loja.getaura.com.br/finesse">');
+  });
+
   test('a peca atravessa ate o <script> e o boot abre ela', () => {
     expect(html).toContain('"produto_inicial":{"id":"1f4a63bc-9c6c-43e0-a590-ab6516d58748"');
     expect(html).toContain("showDetail(PRODUTO_INICIAL.id,{historico:'trocar'})");
