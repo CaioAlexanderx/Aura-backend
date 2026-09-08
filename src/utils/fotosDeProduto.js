@@ -56,6 +56,35 @@ async function derivarFotos(entrada) {
   return { grande, mini, largura: meta.width || 0, altura: meta.height || 0, bytesOriginais: original.length };
 }
 
+// Artes da loja (08/09/2026, QA das lojas): o banner da home subia como
+// veio do designer — a Davi Calcados tinha tres PNG de 2 MB cada, 6 MB
+// antes da primeira foto de produto. A arte e larga e passa por aqui:
+// uma versao so, JPEG, no maximo LARGURA_BANNER de largura (1920, o 3:1
+// pedido no painel), 1080 pra versao do celular e 1200 pra capa de
+// categoria. Logo NAO passa: pode ter fundo transparente.
+const LARGURA_BANNER = 1920;
+const LARGURA_BANNER_MOBILE = 1080;
+const LARGURA_CAPA = 1200;
+const QUALIDADE_ARTE = 82;
+
+/**
+ * @param {Buffer|string} entrada  bytes da imagem, ou base64.
+ * @param {number} larguraMax       largura maxima (nunca amplia).
+ * @returns {Promise<{buffer:Buffer, largura:number, altura:number, bytesOriginais:number}>}
+ */
+async function comprimirArteDaLoja(entrada, larguraMax) {
+  const original = Buffer.isBuffer(entrada) ? entrada : Buffer.from(String(entrada || ''), 'base64');
+  if (!original.length) throw new Error('imagem vazia');
+  const s = sharp();
+  const base = s(original, { failOn: 'none' }).rotate().flatten({ background: '#ffffff' });
+  const meta = await base.metadata();
+  const buffer = await base
+    .resize({ width: larguraMax || LARGURA_BANNER, withoutEnlargement: true })
+    .jpeg({ quality: QUALIDADE_ARTE, mozjpeg: true })
+    .toBuffer();
+  return { buffer, largura: meta.width || 0, altura: meta.height || 0, bytesOriginais: original.length };
+}
+
 /**
  * As duas chaves no R2 a partir da chave-base (sem extensao):
  *   "<cid>/products/<pid>" -> "<cid>/products/<pid>.jpg" e ".thumb.jpg"
@@ -112,4 +141,7 @@ async function apagarFoto(chaveBase) {
   }
 }
 
-module.exports = { derivarFotos, chavesDaFoto, chaveBaseDe, salvarFotoEmDoisTamanhos, apagarFoto, LADO_GRANDE, LADO_MINI };
+module.exports = {
+  derivarFotos, chavesDaFoto, chaveBaseDe, salvarFotoEmDoisTamanhos, apagarFoto, LADO_GRANDE, LADO_MINI,
+  comprimirArteDaLoja, LARGURA_BANNER, LARGURA_BANNER_MOBILE, LARGURA_CAPA,
+};
