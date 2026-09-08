@@ -379,7 +379,9 @@ function showDetail(id){
           var q=x.d;
           var valor=(q.fee===0||q.free_shipping)?'<span class="pd-frete-gratis">Grátis</span>':(q.fee!=null?'<span class="mono">'+fmt(q.fee)+'</span>':'—');
           res.innerHTML='<div class="pd-frete-op"><span>Entrega'+(q.eta?' — '+esc(q.eta):'')+'</span>'+valor+'</div>'
-            +(q.alert?'<div class="sf-caption">'+esc(q.alert)+'</div>':'');
+            // q.alert e recado pra lojista ("sem CEP de origem, usando
+            // taxa fixa") — fica no JSON pro painel, nao na loja (QA 08/09/2026).
+            +'';
           res.className='pd-frete-res';
         })
         .catch(function(){ res.textContent='Não consegui calcular o frete. Tente de novo.'; res.className='pd-frete-res erro'; });

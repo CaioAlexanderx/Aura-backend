@@ -489,6 +489,7 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
 .delivery-opt-eta{color:var(--sf-ink-2);font-weight:500;}
 .delivery-opt-price{font-family:${fontMono};font-size:14px;font-weight:500;}
 .delivery-opt-price.gratis,.delivery-opt-price.pix{color:var(--sf-pix);}
+.delivery-opt-price.a-calcular{color:var(--sf-ink-2);font-weight:400;font-size:12px;}
 .address-form{background:var(--sf-bg);border:1px solid var(--sf-border);border-radius:12px;padding:16px;margin-top:14px;display:flex;flex-direction:column;gap:14px;}
 .address-form .field-row{margin:0;}
 .shipping-quote-status{margin:0;border-radius:10px;font-size:12.5px;}

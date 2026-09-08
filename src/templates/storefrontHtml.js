@@ -188,7 +188,7 @@ ${serviceCards.map((c) => `  <div class="service-card">
 <section class="whats-block">
   <div class="whats-block-inner">
     <div>
-      <div class="whats-block-tit serif">Dúvida com tamanho ou tecido?</div>
+      <div class="whats-block-tit serif">Dúvida sobre tamanho ou modelo?</div>
       <div class="whats-block-txt">Fale direto com a gente no WhatsApp.</div>
     </div>
     <a class="whatsapp-cta" href="https://wa.me/${whatsNum}" target="_blank" rel="noopener">${WHATSAPP_GLYPH}Chamar no WhatsApp</a>

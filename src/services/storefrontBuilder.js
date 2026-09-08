@@ -179,12 +179,21 @@ function parseServiceCards(raw, cfg) {
     try { const p = JSON.parse(raw); if (Array.isArray(p)) arr = p; } catch {}
   }
   if (!arr.length) arr = selosPadrao(cfg);
-  return arr.slice(0, 4).map((c) => ({
-    icon:    ALLOWED_ICONS.includes(c?.icon) ? c.icon : 'sparkle',
-    title:   typeof c?.title === 'string' ? c.title : '',
-    body:    typeof c?.body  === 'string' ? c.body  : '',
-    enabled: c?.enabled !== false,
-  })).filter((c) => c.enabled && (c.title || c.body));
+  return arr.slice(0, 4).map((c) => {
+    let title = typeof c?.title === 'string' ? c.title : '';
+    let body  = typeof c?.body  === 'string' ? c.body  : '';
+    // O padrao antigo do painel ("Curadoria editada") foi gravado em lojas
+    // que nunca mexeram no selo — inclusive numa de calcados. Quem ainda
+    // tem o par antigo intacto recebe o padrao novo (QA 08/09/2026).
+    if (title === 'Curadoria editada' && body === 'Produtos selecionados') {
+      title = 'Seleção da loja'; body = 'Escolhidos a dedo';
+    }
+    return {
+      icon:    ALLOWED_ICONS.includes(c?.icon) ? c.icon : 'sparkle',
+      title, body,
+      enabled: c?.enabled !== false,
+    };
+  }).filter((c) => c.enabled && (c.title || c.body));
 }
 
 function parseBusinessHours(raw) {
