@@ -531,7 +531,9 @@ router.get('/:slug/studio/products', async (req, res) => {
     const categories = await fetchStorefrontCategories(cid);
     const categoryById = {};
     categories.forEach(c => { categoryById[c.id] = c; });
-    const primaryLinkByProduct = await fetchPrimaryCategoryLinks(products.map(p => p.id));
+    // cid: vinculo de produto compartilhado traduzido pra categoria DESTA
+    // loja pelo caminho (grupo com arvores espelhadas).
+    const primaryLinkByProduct = await fetchPrimaryCategoryLinks(products.map(p => p.id), cid);
 
     res.json({
       site: montarSite(config, configs[0].company_display_name),

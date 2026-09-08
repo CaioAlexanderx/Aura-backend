@@ -632,15 +632,34 @@ async function fetchStorefrontCategories(cid) {
 // Vínculo PRIMÁRIO de cada produto. Secundárias ficam de fora do payload
 // v1: navegação por faceta é da fase de vitrine, e mandar todos os
 // vínculos agora inflaria o payload sem consumidor.
-async function fetchPrimaryCategoryLinks(productIds) {
+/**
+ * @param cid  a empresa DA LOJA. Num grupo (Davi Calcados: matriz + Villa
+ *   Branca) o produto compartilhado esta vinculado a categoria da MATRIZ,
+ *   e a loja da filial so conhece as categorias dela — o vinculo nao
+ *   casava com nada e a peca saia sem trilha ("Inicio / Chinelos", sem
+ *   o genero; QA 08/09/2026). As arvores sao espelhadas: o vinculo e
+ *   traduzido pra categoria da loja com o MESMO caminho quando ela
+ *   existe; senao fica o id original (loja sem grupo nao muda nada).
+ */
+async function fetchPrimaryCategoryLinks(productIds, cid) {
   if (!productIds.length) return {};
   try {
-    const { rows } = await db.query(
-      `SELECT product_id, category_id
-         FROM product_category_links
-        WHERE product_id = ANY($1::uuid[]) AND is_primary`,
-      [productIds]
-    );
+    const { rows } = cid
+      ? await db.query(
+        `SELECT l.product_id, COALESCE(mesma.id, l.category_id) AS category_id
+           FROM product_category_links l
+           JOIN product_categories c ON c.id = l.category_id
+           LEFT JOIN product_categories mesma
+             ON mesma.company_id = $2 AND mesma.path = c.path AND mesma.type = c.type
+          WHERE l.product_id = ANY($1::uuid[]) AND l.is_primary`,
+        [productIds, cid]
+      )
+      : await db.query(
+        `SELECT product_id, category_id
+           FROM product_category_links
+          WHERE product_id = ANY($1::uuid[]) AND is_primary`,
+        [productIds]
+      );
     const map = {};
     rows.forEach(r => { map[r.product_id] = r.category_id; });
     return map;
@@ -710,7 +729,7 @@ async function buildStorefront(config) {
   const categories = await fetchStorefrontCategories(cid);
   const categoryById = {};
   categories.forEach(c => { categoryById[c.id] = c; });
-  const primaryLinkByProduct = await fetchPrimaryCategoryLinks(products.map(p => p.id));
+  const primaryLinkByProduct = await fetchPrimaryCategoryLinks(products.map(p => p.id), cid);
 
   // Blocos da home (redesign 09/2026). As linhas vem cruas do servico e
   // passam por montarProdutoPublico com os MESMOS mapas da grade — o
@@ -726,7 +745,7 @@ async function buildStorefront(config) {
     .map(p => p.id);
   const idsComVariante = Array.from(new Set(products.map(p => p.id).concat(idsDaHome)));
   const variantsByProduct = await fetchVariantesPorProduto(idsComVariante);
-  const linksDaHome = await fetchPrimaryCategoryLinks(idsDaHome);
+  const linksDaHome = await fetchPrimaryCategoryLinks(idsDaHome, cid);
 
   const mapear = (p) => montarProdutoPublico(p, {
     variantsByProduct, categoryById,

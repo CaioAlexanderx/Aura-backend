@@ -164,6 +164,13 @@ function valoresDeTamanho(bruto) {
     saida.add(r);
     saida.add(r.toLowerCase());
     saida.add(r.toUpperCase());
+    // Numero inteiro cobre a meia numeracao que o contem: quem pede 34
+    // tambem quer o chinelo gravado como "33/34" ou "34/35" (QA 08/09/2026,
+    // Davi Calcados). O par pedido direto ("33/34") continua exato.
+    if (/^\d+$/.test(r)) {
+      const n = parseInt(r, 10);
+      for (const par of [`${n - 1}/${n}`, `${n}/${n + 1}`]) { saida.add(par); saida.add(par.replace('/', ' / ')); }
+    }
     if (normalizarTamanho(r) === 'Único') {
       for (const u of ['u', 'U', 'un', 'UN', 'uni', 'UNI', 'Único', 'unico', 'UNICO', 'Unico']) saida.add(u);
     }
@@ -231,7 +238,7 @@ router.get('/:slug/catalogo', async (req, res) => {
     const ids = pagina.produtos.map(p => p.id);
     const [variantsByProduct, primaryLinkByProduct, categorias] = await Promise.all([
       fetchVariantesPorProduto(ids),
-      fetchPrimaryCategoryLinks(ids),
+      fetchPrimaryCategoryLinks(ids, cfg.company_id),
       fetchStorefrontCategories(cfg.company_id),
     ]);
     const categoryById = {};
