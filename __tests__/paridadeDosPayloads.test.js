@@ -32,7 +32,11 @@ const studio = fs.readFileSync(
 function mapeamentoDaLojaComum() {
   const i = builder.indexOf('function montarProdutoPublico');
   expect(i).toBeGreaterThan(0);
-  return builder.slice(i, i + 2000);
+  // A janela e orcamento de LEITURA, nao regra: ela existe para nao varrer
+  // o arquivo inteiro atras de 'name'. Estava a 56 caracteres de estourar
+  // e um comentario novo no mapeamento derrubava a paridade de CAMPO, que
+  // nao tem nada a ver com o tamanho do comentario (08/09/2026).
+  return builder.slice(i, i + 3000);
 }
 
 function mapeamentoDaVitrine() {

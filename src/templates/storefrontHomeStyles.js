@@ -345,6 +345,24 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
 .pd-foto-vazia .product-ph-initials{font-size:clamp(64px,10vw,120px);}
 .pd-zoom-dica{position:absolute;right:14px;bottom:14px;background:color-mix(in oklab,var(--sf-bg) 94%,transparent);border:1px solid var(--sf-border);border-radius:999px;padding:8px 14px;font-size:12px;font-weight:600;color:var(--sf-ink);display:inline-flex;align-items:center;gap:7px;pointer-events:none;}
 .pd-foto:hover .pd-zoom-dica{opacity:0;}
+/* Galeria por cor (migration 323): setas, bolinhas e o contador.
+
+   As setas sao BOTOES sempre visiveis, e nao um controle que aparece no
+   hover — no celular nao existe hover, e celular e a maior parte da loja.
+   As bolinhas trocam as miniaturas na tela estreita, onde quatro
+   miniaturas de 64px comem meia tela. E o contador nao ocupa espaco
+   nenhum: e um aviso de leitor de tela, porque quem enxerga ja ve qual
+   miniatura esta marcada. */
+.pd-seta{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;padding:0;border-radius:999px;border:1px solid var(--sf-border);background:color-mix(in oklab,var(--sf-bg) 88%,transparent);color:var(--sf-ink);display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2;transition:background var(--sf-motion) var(--sf-ease);}
+.pd-seta:hover{background:var(--sf-bg);}
+.pd-seta-ant{left:10px;}
+.pd-seta-prox{right:10px;}
+.pd-pontos{display:none;order:2;flex:0 0 auto;width:100%;justify-content:center;align-items:center;gap:2px;padding-top:4px;}
+.pd-ponto{width:28px;height:32px;padding:0;border:0;background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.pd-ponto::before{content:'';display:block;width:8px;height:8px;border-radius:999px;background:var(--sf-border-2);transition:width var(--sf-motion) var(--sf-ease),background var(--sf-motion) var(--sf-ease);}
+.pd-ponto.sel::before{width:20px;background:var(--sf-brand);}
+.pd-foto-conta{position:absolute;width:1px;height:1px;margin:0;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;}
+.pd-mini:focus-visible,.pd-ponto:focus-visible,.pd-seta:focus-visible,.pd-col-foto:focus-visible{outline:2px solid var(--sf-brand);outline-offset:3px;}
 /* Coluna de informacao */
 .pd-col-info{display:flex;flex-direction:column;gap:20px;}
 .pd-cat{color:var(--sf-brand);margin:0 0 8px;}
@@ -635,6 +653,25 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
   .site-footer-cols3{grid-template-columns:1fr;gap:24px;}
   .site-footer-logo img{width:170px;height:50px;}
   .site-footer-bottom{flex-direction:column;align-items:flex-start;gap:12px;}
+}
+
+/* Tela estreita: bolinha no lugar da miniatura. Quatro miniaturas de 64px
+   com rolagem lateral comem meia tela de celular e competem com a rolagem
+   da propria pagina; a bolinha diz onde a pessoa esta e o dedo arrasta a
+   foto. As setas ficam, porque nem todo mundo descobre o arrasto. */
+@media(max-width:560px){
+  .pd-minis{display:none;}
+  .pd-pontos{display:flex;}
+  .pd-seta{width:40px;height:40px;}
+}
+
+/* Sem hover nao pode haver controle que so aparece no hover — e a dica de
+   ampliar mente num aparelho que nao tem mouse. (A regra de 900px ja
+   cobre o celular; esta cobre o tablet grande e o notebook com tela de
+   toque, que tem largura de desktop e nenhum cursor.) */
+@media(hover:none){
+  .pd-foto:hover img{transform:none;}
+  .pd-zoom-dica{display:none;}
 }
 `;
 }
