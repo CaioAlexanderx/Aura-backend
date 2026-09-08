@@ -867,7 +867,7 @@ ${homeStyles({ fontSerif, fontSans, fontMono })}
   /* A transicao some, mas o transform tambem precisa sair: sem isto a
      foto ainda cresceria — so que instantaneamente, que e pior. */
   .product-card:hover,.checkout-btn:hover,.next-btn:hover,
-  .pd-comprar:hover,.pd-whats:hover,
+  .pd-comprar:hover,.pd-whats:hover,.pd-share:hover,
   .cart-btn:hover,.hero-text .banner-cta:hover,.home-linha:hover,.whatsapp-cta:hover,
   .pd-foto:hover img{transform:none !important;}
   .banner-cta:hover::after{transform:none !important;}
