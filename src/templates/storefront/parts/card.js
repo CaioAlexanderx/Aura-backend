@@ -37,16 +37,24 @@ function tamanhosDoCartao(p){
       if(t&&!vistos[t]){ vistos[t]=1; lista.push(t); }
     });
   });
-  lista.sort(function(a,b){
-    var na=parseFloat(a), nb=parseFloat(b);
-    var an=!isNaN(na), bn=!isNaN(nb);
-    if(an&&bn) return na-nb;
-    if(an) return -1; if(bn) return 1;
-    var ia=ESCALA_TAM.indexOf(a), ib=ESCALA_TAM.indexOf(b);
-    if(ia<0) ia=99; if(ib<0) ib=99;
-    return ia-ib||a.localeCompare(b);
-  });
+  lista.sort(compararTamanhos);
   return lista.map(function(t){ return t==='U'?'Único':t; });
+}
+
+/**
+ * A regua, num lugar so: numeros crescentes (33, 33/34, 34...), depois
+ * PP..XGG e Unico, depois o resto por nome. O cartao e a pagina do
+ * produto ordenam com ESTA funcao — ate 08/09/2026 a pagina mostrava os
+ * tamanhos na ordem em que a lojista cadastrou ("G M P").
+ */
+function compararTamanhos(a,b){
+  var na=parseFloat(a), nb=parseFloat(b);
+  var an=!isNaN(na), bn=!isNaN(nb);
+  if(an&&bn) return (na-nb)||String(a).localeCompare(String(b));
+  if(an) return -1; if(bn) return 1;
+  var ia=ESCALA_TAM.indexOf(normTam(a)), ib=ESCALA_TAM.indexOf(normTam(b));
+  if(ia<0) ia=99; if(ib<0) ib=99;
+  return ia-ib||String(a).localeCompare(String(b));
 }
 
 // ── O cartao ─────────────────────────────────────────────

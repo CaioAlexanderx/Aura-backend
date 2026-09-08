@@ -111,6 +111,10 @@ function showDetail(id){
         if(attrs[av.attribute].indexOf(av.value)===-1) attrs[av.attribute].push(av.value);
       });
     });
+    // Tamanho sai na regua (P M G, 33 34 35), nao na ordem do cadastro —
+    // a mesma funcao que ordena o cartao (card.js). Cor fica como veio:
+    // nao ha regua de cor.
+    attrOrder.forEach(function(a){ if(atributoDeTamanho(a)) attrs[a].sort(compararTamanhos); });
   }
   var selecionado={}, variante=null;
 
