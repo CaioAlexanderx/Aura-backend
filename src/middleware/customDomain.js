@@ -78,6 +78,34 @@ function hostOriginal(req) {
   return req.hostname; // trust proxy ja configurado
 }
 
+/**
+ * Desfaz a reescrita que a borda (Cloudflare, host loja.getaura.com.br)
+ * faz antes de chegar aqui.
+ *
+ * Descoberto em 08/09/2026, ao publicar a URL propria da peca: pela
+ * Cloudflare, `/finesse/p/<id>` chegava como
+ * `/api/v1/storefront/finesse/p/<id>/page` e caia no 404 — a regra da
+ * zona monta "/api/v1/storefront" + caminho + "/page" para QUALQUER
+ * caminho, e so `/<slug>` sobrevive a isso (na origem, com o Host certo,
+ * `/finesse/order/<id>` responde "Pedido nao encontrado"; pela Cloudflare,
+ * "Rota nao encontrada"). Aqui a gente reconstroi o caminho que a pessoa
+ * digitou e deixa o fluxo normal (modo 1 ou 2) reescrever do jeito certo.
+ *
+ * Idempotente: `/api/v1/storefront/finesse/page` vira `/finesse` e o modo
+ * 1 devolve `/api/v1/storefront/finesse/page`. Quando a regra da borda for
+ * corrigida (ou removida), nada aqui muda de resultado.
+ */
+function desfazerReescritaDaBorda(url) {
+  const u = String(url || '');
+  const concat = /^\/api\/v1\/storefront\/(.*?)\/page(\?.*)?$/.exec(u);
+  if (concat) return '/' + concat[1] + (concat[2] || '');
+  // Variante que so anexa: /finesse/p/<id>/page (dois ou mais segmentos
+  // antes do sufixo; /finesse/page sozinho e a pagina, fica).
+  const anexa = /^(\/[^/?]+(?:\/[^/?]+)+)\/page(\?.*)?$/.exec(u);
+  if (anexa && !u.startsWith('/api/')) return anexa[1] + (anexa[2] || '');
+  return u;
+}
+
 /** Invalida a entrada de cache para um hostname (chamar ao atualizar/remover custom_domain). */
 function invalidateCustomDomainCache(hostname) {
   if (hostname) _cache.delete(hostname);
@@ -99,6 +127,16 @@ function rewriteToStorefront(req, res, slug, subPath, query) {
 async function customDomainMiddleware(req, res, next) {
   try {
     const hostname = hostOriginal(req);
+
+    // A borda reescreve o caminho antes de chegar aqui (ver
+    // desfazerReescritaDaBorda). So para o host da loja e para dominio de
+    // cliente, e so quando a requisicao passou mesmo pela Cloudflare —
+    // api.getaura.com.br recebe /api/v1/storefront/<slug>/page de
+    // verdade e nao pode ser tocado.
+    const viaCloudflare = Boolean(req.headers['cf-ray']);
+    const hostDeLoja = hostname === LOJA_HOST
+      || !OWNED_HOST_SUFFIXES.some(s => hostname === s || hostname.endsWith('.' + s));
+    if (viaCloudflare && hostname && hostDeLoja) req.url = desfazerReescritaDaBorda(req.url);
 
     // Sempre ignora rotas internas da API e health checks
     if (!hostname || req.url.startsWith('/api/') || req.url.startsWith('/health')) {
@@ -149,4 +187,4 @@ async function customDomainMiddleware(req, res, next) {
   }
 }
 
-module.exports = { customDomainMiddleware, invalidateCustomDomainCache, hostOriginal };
+module.exports = { customDomainMiddleware, invalidateCustomDomainCache, hostOriginal, desfazerReescritaDaBorda };
