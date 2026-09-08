@@ -194,7 +194,9 @@ describe('resumo de horario', () => {
     expect(resumoDeHorario(h, false)).toBe('Seg a sex, 9h às 18h · Sáb, 9h às 13h30');
   });
   test('24 horas e um estado, nao um intervalo', () => {
-    expect(resumoDeHorario({ seg: { open: '09:00', close: '18:00' } }, true)).toBe('Aberta 24 horas');
+    // E a loja ONLINE que nao fecha; a frase nao pode soar como a fisica
+    // varando a madrugada (QA 08/09/2026).
+    expect(resumoDeHorario({ seg: { open: '09:00', close: '18:00' } }, true)).toBe('Pedidos online a qualquer hora');
   });
   test('sem horario, nada — e horario ilegivel nao inventa', () => {
     expect(resumoDeHorario({}, false)).toBe('');

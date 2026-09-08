@@ -359,7 +359,10 @@ function horaCurta(hhmm) {
  * Sem horario cadastrado, ''. Horario ilegivel e ignorado (nao inventa).
  */
 function resumoDeHorario(businessHours, alwaysOpen) {
-  if (alwaysOpen === true) return 'Aberta 24 horas';
+  // "Sempre aberta" e a LOJA ONLINE recebendo pedido a qualquer hora, nao
+  // uma boutique varando a madrugada. "Aberta 24 horas" embaixo de um
+  // endereco fisico lia como isso (QA 08/09/2026, Finesse).
+  if (alwaysOpen === true) return 'Pedidos online a qualquer hora';
   const h = parseBusinessHours(businessHours);
   if (!h || !Object.keys(h).length) return '';
   const grupos = [];

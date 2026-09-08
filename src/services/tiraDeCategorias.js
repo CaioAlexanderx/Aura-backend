@@ -26,6 +26,13 @@
 const MINIMO_PARA_APARECER = 3;
 
 /**
+ * Abaixo disto a categoria nao ganha cartao na tira (segue na barra e
+ * no menu). Um cartao grande com foto pra UMA peca ("Blusas 1", Finesse,
+ * QA 08/09/2026) promete uma prateleira e entrega um produto.
+ */
+const MINIMO_DE_PECAS_NO_CARTAO = 2;
+
+/**
  * Monta a tira a partir da arvore que a barra ja usa.
  *
  * @param arvore linhas de arvoreDeCategorias — ja filtradas por
@@ -37,7 +44,7 @@ function montarTira(arvore) {
   const linhas = Array.isArray(arvore) ? arvore : [];
 
   const raizes = linhas
-    .filter((c) => Number(c.depth) === 0 && Number(c.total) > 0)
+    .filter((c) => Number(c.depth) === 0 && Number(c.total) >= MINIMO_DE_PECAS_NO_CARTAO)
     .map((c) => ({
       nome: c.nome,
       caminho: c.path,
@@ -58,4 +65,4 @@ function texto(v) {
   return s || null;
 }
 
-module.exports = { MINIMO_PARA_APARECER, montarTira };
+module.exports = { MINIMO_PARA_APARECER, MINIMO_DE_PECAS_NO_CARTAO, montarTira };
