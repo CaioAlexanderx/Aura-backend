@@ -145,7 +145,13 @@ function buildHtmlBody({
         ? `<a class="banner-cta" href="${escHtml(b.cta_url)}" onclick="return irPeloCta(this)">${b.cta}<span class="hero-cta-seta" aria-hidden="true">→</span></a>`
         : `<a class="banner-cta" href="${escHtml(b.cta_url)}" target="_blank" rel="noopener">${b.cta}<span class="hero-cta-seta" aria-hidden="true">→</span></a>`;
     }
-    return `<div class="banner-slide hero-slide${comFoto ? ' com-foto' : ' sem-foto'}${i===0?' active':''}">
+    // com-texto: so com texto ou CTA sobre a foto o gradiente escuro entra
+    // (08/09/2026 — ele escurecia a esquerda da arte da Finesse, onde ela
+    // mesma tinha escrito). sem-foto-mob: sem a versao do celular; o CSS
+    // decide o que fazer com a larga.
+    const temTexto = !!(b.kicker || b.headline || b.body || cta);
+    const semArteMobile = comFoto && !b.image_url_mobile;
+    return `<div class="banner-slide hero-slide${comFoto ? ' com-foto' : ' sem-foto'}${temTexto ? ' com-texto' : ''}${semArteMobile ? ' sem-foto-mob' : ''}${i===0?' active':''}">
       <div class="hero-bg"${bgStyle}></div>
       <div class="hero-scrim"></div>
       <div class="hero-inner"><div class="hero-text">${kicker}${headline}${body}${cta}</div></div>
@@ -158,8 +164,14 @@ function buildHtmlBody({
       </div>`
     : '';
 
+  // Nenhum banner com foto tem a versao do celular: o hero do celular
+  // fica na proporcao da arte larga (3:1) e mostra ela inteira, em vez
+  // de cortar o centro e deixar o texto da arte de fora (QA 08/09/2026).
+  // Basta UMA arte do celular pra voltar ao hero alto de sempre.
+  const comFotos = hasBanners && banners.some((b) => b.image_url);
+  const largaNoCelular = comFotos && !banners.some((b) => b.image_url && b.image_url_mobile);
   const heroHtml = `
-<section class="hero" id="bannerStage">
+<section class="hero${largaNoCelular ? ' hero-larga-no-celular' : ''}" id="bannerStage">
   ${slidesHtml}
   ${dotsHtml}
 </section>`;

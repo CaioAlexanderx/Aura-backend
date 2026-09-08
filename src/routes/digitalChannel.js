@@ -1150,14 +1150,30 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
   }
   if (!content) return res.status(400).json({ error: 'content (base64) obrigatorio' });
   try {
-    const mime = content_type || 'image/jpeg';
-    const ext  = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
+    let mime = content_type || 'image/jpeg';
+    let ext  = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : 'jpg';
+    let corpo = content;
+    // Banner e capa de categoria passam pelo sharp (08/09/2026): a arte
+    // do designer chegava como PNG de 2 MB e a home da Davi Calcados
+    // abria com 6 MB de banner. Vira JPEG na largura da loja. O logo
+    // fica como veio (pode ter fundo transparente). Sem o binario do
+    // sharp no ambiente, sobe o original — como sempre foi.
+    if (isBannerN || isCover || isCategoria) {
+      const { comprimirArteDaLoja, LARGURA_BANNER, LARGURA_BANNER_MOBILE, LARGURA_CAPA } = require('../utils/fotosDeProduto');
+      const largura = bannerMobile ? LARGURA_BANNER_MOBILE : isCategoria ? LARGURA_CAPA : LARGURA_BANNER;
+      try {
+        const arte = await comprimirArteDaLoja(content, largura);
+        corpo = arte.buffer; mime = 'image/jpeg'; ext = 'jpg';
+      } catch (e) {
+        console.warn('[canal-upload] arte sem compressao (sharp):', e.message);
+      }
+    }
     const keyName = isLogo ? 'logo'
       : isCover ? 'banner'
       : isCategoria ? `categoria_${categoriaId}`
       : `banner_${bannerIdx}${bannerMobile ? '_mobile' : ''}`;
     const key = `${cid}/canal/${keyName}.${ext}`;
-    const result = await uploadToR2(key, content, mime);
+    const result = await uploadToR2(key, corpo, mime);
     if (!result.success) {
       console.error('[canal-upload] R2 error:', result.error);
       return res.status(500).json({ error: 'Erro no upload da imagem' });

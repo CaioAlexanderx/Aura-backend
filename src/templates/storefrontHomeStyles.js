@@ -86,7 +86,9 @@ function homeStyles({ fontSerif, fontSans, fontMono }) {
 .hero-slide{position:absolute;inset:0;opacity:0;transition:opacity .9s var(--sf-ease);pointer-events:none;}
 .hero-slide.active{opacity:1;pointer-events:auto;}
 .hero-bg{position:absolute;inset:0;background-image:var(--hero-desk);background-position:center;background-size:cover;background-repeat:no-repeat;}
-.hero-slide.com-foto .hero-scrim{position:absolute;inset:0;background:linear-gradient(to right,rgba(32,26,20,.55) 0%,rgba(32,26,20,.18) 52%,transparent 78%);pointer-events:none;}
+/* O gradiente escuro existe pra dar contraste ao texto sobre a foto. Sem
+   texto (arte pronta do designer) ele so escurecia a arte (08/09/2026). */
+.hero-slide.com-foto.com-texto .hero-scrim{position:absolute;inset:0;background:linear-gradient(to right,rgba(32,26,20,.55) 0%,rgba(32,26,20,.18) 52%,transparent 78%);pointer-events:none;}
 .hero-inner{position:absolute;inset:0;display:flex;align-items:center;}
 .hero-text{max-width:1280px;width:100%;margin:0 auto;padding:0 32px;display:flex;flex-direction:column;align-items:flex-start;gap:16px;}
 .hero-text>*{max-width:520px;}
@@ -573,7 +575,13 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
   .hero{height:340px;}
   /* Banner do celular (image_url_mobile): quadrado, quando a lojista subiu. */
   .hero-bg{background-image:var(--hero-mob,var(--hero-desk));}
-  .hero-slide.com-foto .hero-scrim{background:linear-gradient(to top,rgba(32,26,20,.62) 0%,rgba(32,26,20,.18) 55%,transparent 80%);}
+  /* Sem arte do celular em NENHUM banner (08/09/2026): o hero fica na
+     proporcao da arte larga e mostra ela inteira — antes cortava o centro
+     e o texto da arte ("Aqui voce encontra") ficava de fora. */
+  .hero.hero-larga-no-celular{height:auto;aspect-ratio:3/1;min-height:0;}
+  .hero.hero-larga-no-celular .hero-slide.sem-foto-mob .hero-bg{background-size:contain;background-color:var(--sf-brand-wash);}
+  .hero.hero-larga-no-celular .banner-dots{bottom:6px;}
+  .hero-slide.com-foto.com-texto .hero-scrim{background:linear-gradient(to top,rgba(32,26,20,.62) 0%,rgba(32,26,20,.18) 55%,transparent 80%);}
   .hero-inner{align-items:flex-end;}
   .hero-text{padding:20px 20px 30px;gap:10px;}
   .hero-headline{font-size:30px;line-height:1.08;letter-spacing:-.4px;}
