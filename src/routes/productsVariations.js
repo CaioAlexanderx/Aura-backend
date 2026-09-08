@@ -53,6 +53,8 @@
 
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
+// 08/09/2026 (migration 323): a galeria por cor sai no mesmo GET.
+const { agruparGaleria } = require('../services/productImageGallery');
 
 // ─── 30/06/2026: Normalizacao de cor (nome -> hex) ───────────
 // Imports/legados gravavam NOME no atributo Cor (ex.: "DARK BROWN",
@@ -205,6 +207,27 @@ router.get('/:pid/variations', async (req, res) => {
     else if (colors.length > 0) mode = 'color';
     else if (sizes.length > 0) mode = 'size';
 
+    // 08/09/2026 (migration 323): a galeria por cor vem junto. Este GET ja
+    // e por UM produto — e a tela que edita as cores e a mesma que edita
+    // as fotos delas, entao uma query a mais aqui poupa um round-trip por
+    // cor no editor. `images` (o mapa antigo cor|tamanho -> foto unica)
+    // continua igual: ADICIONA, NUNCA REMOVE.
+    let galeria = { main: [], by_color: {} };
+    try {
+      const { rows: fotoRows } = await db.query(
+        `SELECT id, color_hex, url, thumb_url, position
+           FROM product_images
+          WHERE product_id = $1
+          ORDER BY color_hex NULLS FIRST, position ASC, created_at ASC`,
+        [pid]
+      );
+      galeria = agruparGaleria(fotoRows);
+    } catch (e) {
+      // 42P01: base ainda sem a migration 323 — o editor abre sem galeria
+      // em vez de nao abrir (CLAUDE.md, armadilha 1).
+      if (e.code !== '42P01') throw e;
+    }
+
     res.json({
       product_id: pid,
       product_name: prodRows[0].name,
@@ -213,6 +236,7 @@ router.get('/:pid/variations', async (req, res) => {
       matrix,
       barcodes,
       images,   // 23/05/2026: foto por combinacao
+      gallery: galeria,   // 08/09/2026: { main: [...], by_color: { "#hex": [...] } }
       mode,
       total_variants: variantRows.length,
     });
