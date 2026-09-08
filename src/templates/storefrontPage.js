@@ -121,9 +121,12 @@ function buildStorefrontPage(data, slug) {
   const peca = data.produto_inicial || null;
   const tituloDaPagina = peca ? `${escHtml(peca.name)} · ${siteName}` : siteName;
   const descricaoDaPagina = peca ? escHtml(peca.description || `${peca.name} na ${site.name || ''}`.trim()) : tagline;
-  const urlDaPagina = peca && site.storefront_url
-    ? `${String(site.storefront_url).replace(/\/+$/, '')}/p/${encodeURIComponent(peca.id)}`
-    : site.storefront_url;
+  // O builder devolve storefront_url na RAIZ do payload (22/05/2026); o
+  // template lia site.storefront_url e a canonica nunca saia (QA 08/09).
+  const urlDaLoja = data.storefront_url || site.storefront_url || '';
+  const urlDaPagina = peca && urlDaLoja
+    ? `${String(urlDaLoja).replace(/\/+$/, '')}/p/${encodeURIComponent(peca.id)}`
+    : urlDaLoja;
   const imagemDaPagina = (peca && peca.image_url) ? escHtml(peca.image_url) : (coverUrl || logoUrl);
 
   // O <img> quebrado SAI do DOM (remove(), nao display:none): o CSS usa
