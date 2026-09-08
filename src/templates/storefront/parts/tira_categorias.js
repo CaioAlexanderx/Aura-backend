@@ -25,7 +25,7 @@ function renderTiraCategorias(){
     +(typeof cabecalhoDeSecao==='function'
       ? cabecalhoDeSecao('Compre por categoria','Escolha por onde começar.')
       : '')
-    +'<div class="tira-cats-inner">'+lista.map(function(c){
+    +'<div class="tira-cats-inner tira-n'+lista.length+'">'+lista.map(function(c){
       var capa=c.capa_url||c.banner_url;
       var arte=capa
         ? '<img src="'+esc(capa)+'" alt="" loading="lazy">'

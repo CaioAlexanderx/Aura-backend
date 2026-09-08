@@ -128,6 +128,8 @@ body.home .cats-wrap{display:none;}
 
 /* Compre por categoria: 4:3, pilula com nome e contagem */
 .tira-cats-inner{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;}
+/* Tres categorias (Davi Calcados): tres colunas, sem a quarta vaga vazia (QA 08/09/2026). */
+.tira-cats-inner.tira-n3{grid-template-columns:repeat(3,1fr);}
 .tira-cat{appearance:none;border:1px solid var(--sf-border);background:var(--sf-canvas);padding:0;cursor:pointer;text-align:left;font:inherit;position:relative;border-radius:var(--sf-r);overflow:hidden;aspect-ratio:4/3;display:block;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease);}
 .tira-cat:hover,.tira-cat:focus-visible{box-shadow:var(--sf-shadow-hover);}
 .tira-cat:focus-visible{outline:2px solid var(--sf-brand);outline-offset:2px;}
@@ -559,7 +561,9 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
    ============================================================ */
 @media(max-width:900px){
   .home-grid{grid-template-columns:repeat(3,1fr);}
-  .tira-cats-inner{grid-template-columns:repeat(2,1fr);}
+  .tira-cats-inner,.tira-cats-inner.tira-n3{grid-template-columns:repeat(2,1fr);}
+  /* Com tres, o ultimo cartao ocupa a linha inteira em vez de sobrar meio vazio. */
+  .tira-cats-inner.tira-n3 .tira-cat:last-child{grid-column:1/-1;aspect-ratio:2/1;}
   .site-footer-cols3{grid-template-columns:1fr 1fr;}
   .mega{display:none;}
   .topnav{display:none;}
