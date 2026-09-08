@@ -106,7 +106,7 @@ describe('elevacao no hover: so o clicavel, e sempre com a sombra da marca', () 
   });
 
   test('so o que e clicavel sobe', () => {
-    const clicaveis = ['.product-card', '.checkout-btn', '.next-btn', '.pd-comprar', '.pd-whats', '.hero-text .banner-cta', '.tira-cat', '.whatsapp-cta', '.cart-btn', '.home-linha', '.pg-num', '.pg-seta'];
+    const clicaveis = ['.product-card', '.checkout-btn', '.next-btn', '.pd-comprar', '.pd-whats', '.pd-share', '.hero-text .banner-cta', '.tira-cat', '.whatsapp-cta', '.cart-btn', '.home-linha', '.pg-num', '.pg-seta'];
     for (const { sel } of levantam) {
       const base = sel.replace(/:hover.*$/, '').replace(/:not\([^)]*\)/g, '').trim();
       expect({ sel, clicavel: clicaveis.includes(base) }).toEqual({ sel, clicavel: true });

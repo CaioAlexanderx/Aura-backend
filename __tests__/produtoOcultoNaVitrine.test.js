@@ -53,7 +53,11 @@ describe('o alcance: toda consulta que desenha a vitrine', () => {
 
   test('a grade (página 1 embutida e as seguintes)', () => {
     expect(paginado).toContain("filtroDeFoto(exigeFoto), NA_VITRINE]");
-    expect((builder.match(/\$\{NA_VITRINE\}/g) || []).length).toBe(2);
+    // Tres consultas: a grade curada, a grade normal e a peca da URL
+    // propria (produtoPublicoPorId, 08/09/2026) — um link colado nao
+    // pode abrir o que a grade esconde.
+    expect((builder.match(/\$\{NA_VITRINE\}/g) || []).length).toBe(3);
+    expect(builder).toContain('async function produtoPublicoPorId');
   });
 
   test('os quatro blocos da home, por filtrosBase', () => {

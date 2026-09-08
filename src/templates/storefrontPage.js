@@ -110,7 +110,21 @@ function buildStorefrontPage(data, slug) {
     // A politica de troca ja resolvida (uma fonte so): a pagina do produto
     // mostra o mesmo texto do rodape (fase 5).
     rodape_institucional: data.rodape_institucional,
+    // URL propria do produto (08/09/2026): a peca da rota /p/<id>, ja no
+    // formato do payload, e o aviso de que ela nao esta mais na loja.
+    produto_inicial: data.produto_inicial || null,
+    produto_ausente: !!data.produto_ausente,
   });
+
+  // Titulo e metatags da pagina de UMA peca: nome e foto da peca, com o
+  // nome da loja como site. O WhatsApp e o Instagram leem daqui.
+  const peca = data.produto_inicial || null;
+  const tituloDaPagina = peca ? `${escHtml(peca.name)} · ${siteName}` : siteName;
+  const descricaoDaPagina = peca ? escHtml(peca.description || `${peca.name} na ${site.name || ''}`.trim()) : tagline;
+  const urlDaPagina = peca && site.storefront_url
+    ? `${String(site.storefront_url).replace(/\/+$/, '')}/p/${encodeURIComponent(peca.id)}`
+    : site.storefront_url;
+  const imagemDaPagina = (peca && peca.image_url) ? escHtml(peca.image_url) : (coverUrl || logoUrl);
 
   // O <img> quebrado SAI do DOM (remove(), nao display:none): o CSS usa
   // .topbar-logo:has(img) pra decidir entre a caixa quadrada da inicial
@@ -199,9 +213,9 @@ function buildStorefrontPage(data, slug) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${siteName}</title>
-<meta name="description" content="${tagline}">
-${metatagsDeSeo({ titulo: siteName, descricao: tagline, url: site.storefront_url, imagem: coverUrl || logoUrl })}
+<title>${tituloDaPagina}</title>
+<meta name="description" content="${descricaoDaPagina}">
+${metatagsDeSeo({ titulo: tituloDaPagina, descricao: descricaoDaPagina, url: urlDaPagina, imagem: imagemDaPagina, tipo: peca ? 'product' : 'website', nomeDaLoja: siteName })}
 ${scriptsDoHead(site.rastreadores || {})}
 ${logoUrl ? `<link rel="icon" href="${logoUrl}" type="image/png">` : ''}
 <link rel="preconnect" href="https://fonts.googleapis.com">

@@ -17,6 +17,13 @@ var CONTACT  = __S.contact  || {};
 var SITE     = __S.site     || {};
 var PROD_MAP = {};
 PRODUCTS.forEach(function(p){ PROD_MAP[p.id] = p; });
+// URL propria do produto (08/09/2026): a pagina aberta em /<slug>/p/<id>
+// ja traz a peca no payload, mesmo que ela nao esteja na primeira pagina
+// da grade. BASE_PATH e o endereco da loja sem o sufixo da peca — e o
+// que a URL volta a ser quando a peca fecha.
+var PRODUTO_INICIAL = __S.produto_inicial || null;
+if (PRODUTO_INICIAL && PRODUTO_INICIAL.id) PROD_MAP[PRODUTO_INICIAL.id] = PRODUTO_INICIAL;
+var BASE_PATH = (window.location.pathname || '/').replace(/\\/p\\/[^/]+\\/?$/, '') || '/';
 // Quantos produtos a loja TEM (contarProdutosDaLoja) contra quantos couberam
 // no payload. Base sem a contagem devolve 0 e a grade so nao mostra o aviso.
 var CATALOGO_TOTAL = __S.catalog_total || 0;

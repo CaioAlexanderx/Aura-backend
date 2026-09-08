@@ -41,6 +41,25 @@ function tintaSobreCor(hex){
 
 var paginaProduto=null;
 
+/**
+ * URL propria da peca (08/09/2026): /<slug>/p/<id> no host da Aura,
+ * /p/<id> no dominio proprio. E o que vai no WhatsApp e o que o servidor
+ * sabe abrir com a foto e o nome da peca nas metatags.
+ */
+function urlDoProduto(id){
+  var base=(BASE_PATH==='/')?'':BASE_PATH.replace(/\\/$/,'');
+  return base+'/p/'+encodeURIComponent(id);
+}
+function compartilharProduto(p){
+  var url=location.origin+urlDoProduto(p.id);
+  var texto=p.name+(SITE.name?' · '+SITE.name:'');
+  if(navigator.share){ navigator.share({title:p.name,text:texto,url:url}).catch(function(){}); return; }
+  var pedirCopia=function(){ window.prompt('Copie o link da peça:',url); };
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(url).then(function(){ showToast('Link da peça copiado'); },pedirCopia);
+  } else pedirCopia();
+}
+
 /** De onde a pessoa veio — vira o rotulo da seta de voltar. */
 function origemAtual(){
   if(String(searchTerm||'').trim()) return 'Voltar para a busca';
@@ -57,13 +76,27 @@ var LIMITE_DE_ULTIMAS=3;
 function fecharProduto(){
   if(!paginaProduto) return;
   if(paginaProduto.parar) paginaProduto.parar();
+  var empilhou=paginaProduto.empilhou;
   paginaProduto.el.remove();
   paginaProduto=null;
   document.body.style.overflow='';
+  // Peca aberta sem empilhar (link direto, ou restaurada pelo Voltar):
+  // a URL volta a ser a da loja sem mexer no historico.
+  if(!empilhou){
+    try{ if(/\\/p\\/[^/]+\\/?$/.test(location.pathname)) history.replaceState({},'',BASE_PATH+location.search); }catch(e){}
+  }
 }
 
-/** A seta e o botao Voltar do navegador fazem a MESMA coisa. */
-window.addEventListener('popstate',function(){ if(paginaProduto) fecharProduto(); });
+/**
+ * A seta e o botao Voltar do navegador fazem a MESMA coisa. Cada peca
+ * aberta e uma entrada no historico com a propria URL: voltar de uma
+ * peca aberta a partir de "Da mesma categoria" reabre a anterior.
+ */
+window.addEventListener('popstate',function(e){
+  var st=e&&e.state;
+  if(st&&st.produto&&PROD_MAP[st.produto]){ showDetail(st.produto,{historico:'nenhum'}); return; }
+  if(paginaProduto) fecharProduto();
+});
 
 function voltarDaPagina(){
   if(paginaProduto && paginaProduto.empilhou) history.back();
@@ -88,8 +121,14 @@ function migalhasDoProduto(p){
   return itens.join('<span class="crumbs-sep">/</span>');
 }
 
-function showDetail(id){
+/**
+ * opts.historico: 'empilhar' (clique na grade — padrao), 'trocar' (a pagina
+ * ja abriu em /p/<id>: so registra o estado) ou 'nenhum' (restaurada pelo
+ * Voltar do navegador, a entrada ja existe).
+ */
+function showDetail(id,opts){
   var p=PROD_MAP[id]; if(!p) return;
+  var historico=(opts&&opts.historico)||'empilhar';
   fecharProduto();
 
   var hasVar=!!(p.variants && p.variants.length);
@@ -296,6 +335,7 @@ function showDetail(id){
     +'<div class="pd-acoes">'
     +'<button type="button" class="pd-comprar" id="pdComprar">Adicionar à sacola</button>'
     +whatsHtml
+    +'<button type="button" class="pd-share" id="pdShare"><svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg>Compartilhar</button>'
     +'</div>'
     +entregaHtml()
     +(p.description?'<div class="pd-desc"><div class="sf-label">Sobre esta peça</div><p>'+esc(p.description)+'</p></div>':'')
@@ -312,8 +352,13 @@ function showDetail(id){
   el.scrollTop=0;
 
   var empilhou=false;
-  try{ history.pushState({produto:p.id},'',location.pathname+location.search); empilhou=true; }catch(e){}
+  try{
+    if(historico==='empilhar'){ history.pushState({produto:p.id},'',urlDoProduto(p.id)); empilhou=true; }
+    else if(historico==='trocar'){ history.replaceState({produto:p.id},'',urlDoProduto(p.id)); }
+  }catch(e){}
   paginaProduto={el:el,empilhou:empilhou,parar:null};
+  var botaoShare=el.querySelector('#pdShare');
+  if(botaoShare) botaoShare.addEventListener('click',function(){ compartilharProduto(p); });
 
   function repintar(){
     el.querySelector('#pdOpcoes').innerHTML=opcoesHtml();

@@ -17,6 +17,11 @@ renderCategorias();
 renderProducts();
 atualizarModoHome();
 
+// URL propria do produto (08/09/2026): aberta em /<slug>/p/<id>, a pagina
+// ja mostra a peca. Se ela saiu de linha, a loja abre e avisa.
+if(PRODUTO_INICIAL&&PRODUTO_INICIAL.id){ showDetail(PRODUTO_INICIAL.id,{historico:'trocar'}); }
+else if(__S.produto_ausente){ setTimeout(function(){ showToast('Essa peça não está mais disponível na loja.'); },300); }
+
 // Fase 2 + Migration 121: detecta retorno do CheckoutPro (cartão MP) via back_url
 // e faz polling do status real do pedido antes de mostrar o toast.
 (function(){

@@ -371,6 +371,9 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
 .pd-comprar.off{opacity:.45;cursor:not-allowed;}
 .pd-whats{display:inline-flex;align-items:center;justify-content:center;gap:9px;font-family:${fontSans};font-size:14px;font-weight:600;background:var(--sf-bg-card);color:var(--sf-pix);border:1px solid color-mix(in oklab,var(--sf-pix) 35%,transparent);border-radius:var(--sf-r);padding:14px;text-decoration:none;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease);}
 .pd-whats:hover{transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
+/* Compartilhar a peca (08/09/2026): mesmo desenho do botao do WhatsApp, na tinta da marca. */
+.pd-share{display:inline-flex;align-items:center;justify-content:center;gap:9px;font-family:${fontSans};font-size:14px;font-weight:600;background:var(--sf-bg-card);color:var(--sf-brand);border:1px solid color-mix(in oklab,var(--sf-brand) 35%,transparent);border-radius:var(--sf-r);padding:14px;cursor:pointer;transition:transform var(--sf-motion) var(--sf-ease),box-shadow var(--sf-motion) var(--sf-ease);}
+.pd-share:hover{transform:translateY(var(--sf-lift));box-shadow:var(--sf-shadow-hover);}
 .pd-frete{background:var(--sf-bg-card);border:1px solid var(--sf-border);border-radius:16px;padding:18px 20px;display:flex;flex-direction:column;gap:12px;}
 .pd-frete-linha{display:flex;gap:10px;}
 .pd-frete-linha input{flex:1;min-width:0;font-family:${fontMono};font-size:14px;padding:11px 14px;border:1px solid var(--sf-border-2);border-radius:10px;background:var(--sf-bg);color:var(--sf-ink);outline:none;}

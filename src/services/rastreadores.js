@@ -82,14 +82,16 @@ const HOSTS_DOS_RASTREADORES = {
  * O link da loja no WhatsApp mostra titulo, descricao e imagem so com
  * Open Graph — sem isso aparece a URL crua, que ninguem clica.
  */
-function metatagsDeSeo({ titulo, descricao, url, imagem }) {
+function metatagsDeSeo({ titulo, descricao, url, imagem, tipo, nomeDaLoja }) {
   const esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
   const t = esc(titulo);
   const d = esc(descricao);
+  // A pagina de UMA peca (08/09/2026) e "product": o WhatsApp mostra a
+  // foto da peca com o nome da loja embaixo, nao o logo com o slogan.
   const partes = [
-    `<meta property="og:type" content="website">`,
+    `<meta property="og:type" content="${tipo === 'product' ? 'product' : 'website'}">`,
     `<meta property="og:title" content="${t}">`,
-    `<meta property="og:site_name" content="${t}">`,
+    `<meta property="og:site_name" content="${esc(nomeDaLoja || titulo)}">`,
   ];
   if (d) partes.push(`<meta property="og:description" content="${d}">`);
   if (url) partes.push(`<link rel="canonical" href="${esc(url)}">`, `<meta property="og:url" content="${esc(url)}">`);

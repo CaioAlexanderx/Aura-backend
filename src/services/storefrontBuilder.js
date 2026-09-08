@@ -507,6 +507,43 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
   };
 }
 
+/**
+ * UMA peca, no formato do payload publico, para a URL propria do produto
+ * (`/<slug>/p/<id>`, 08/09/2026). Mesma regra de visibilidade da grade:
+ * peca oculta, inativa, sem estoque ou sem foto (quando a loja exige)
+ * devolve null — o link compartilhado de uma peca que saiu de linha abre
+ * a loja, nao a peca.
+ */
+async function produtoPublicoPorId({ cid, id, exigeFoto, mostrarPrecos }) {
+  if (!/^[0-9a-f-]{36}$/i.test(String(id || ''))) return null;
+  const sql = `
+    SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
+           material, medidas, cuidados
+    FROM products
+    WHERE ${listVisibilityWhere('$1')}
+      AND id = $2
+      AND is_active IS NOT FALSE
+      AND ${EM_ESTOQUE}
+      AND ${filtroDeFoto(exigeFoto)}
+      AND ${NA_VITRINE}
+    LIMIT 1
+  `;
+  const { rows } = await db.query(sql, [cid, id]);
+  if (!rows.length) return null;
+  const p = rows[0];
+  const [variantsByProduct, primaryLinkByProduct, categorias] = await Promise.all([
+    fetchVariantesPorProduto([p.id]),
+    // cid: num grupo, o vinculo aponta pra categoria da matriz e a loja e
+    // da filial; com a empresa da loja o vinculo e traduzido pelo caminho
+    // (fetchPrimaryCategoryLinks aprende isso no PR da fase 5).
+    fetchPrimaryCategoryLinks([p.id], cid),
+    fetchStorefrontCategories(cid),
+  ]);
+  const categoryById = {};
+  categorias.forEach(c => { categoryById[c.id] = c; });
+  return montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkByProduct, mostrarPrecos });
+}
+
 async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) {
   const visibility = listVisibilityWhere('$1');
   // migration 308. Entra nos DOIS caminhos abaixo — o curado e o normal.
@@ -874,6 +911,8 @@ module.exports = {
   // computeOpenState ja saia daqui embaixo.
   parseHHMM,
   buildStorefront, parseFeaturedIds, parseHiddenIds, computeOpenState,
+  // URL propria do produto (08/09/2026).
+  produtoPublicoPorId,
   // Exportado pra teste: o formato interno `#cat=/caminho` e contrato
   // com o painel (aura-app, destinoDoCta.ts).
   destinoDoCta,
