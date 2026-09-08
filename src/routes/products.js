@@ -68,6 +68,31 @@ function sanitizeNcm(raw) {
   return digits;
 }
 
+// ─── duration_minutes (migration 323) ────────────────────
+//
+// O app escrevia "Duracao: 45 min" no FIM DA DESCRICAO. Descricao e texto
+// livre que vai pra vitrine e pro WhatsApp — a duracao ficava presa la,
+// impossivel de somar numa agenda ou de ordenar. Agora e coluna.
+//
+// So INTEIRO de minutos. "1h30" e problema do cliente: quem converte e a
+// tela, porque e la que a lojista digita e e la que o erro tem que
+// aparecer. Aceitar string aqui seria inventar um segundo parser de
+// duracao, e dois parsers de duracao sempre divergem.
+//
+// null/'' apagam o valor — servico que deixou de ter duracao fixa.
+//
+// @returns {{value: number|null} | {error: string}}
+function sanitizeDurationMinutes(raw) {
+  const bruto = typeof raw === 'string' ? raw.trim() : raw;
+  if (bruto === null || bruto === undefined || bruto === '') return { value: null };
+  if (typeof bruto === 'boolean') return { error: 'duration_minutes deve ser um inteiro de minutos (>= 0) ou null' };
+  const n = Number(bruto);
+  if (!Number.isInteger(n) || n < 0) {
+    return { error: 'duration_minutes deve ser um inteiro de minutos (>= 0) ou null' };
+  }
+  return { value: n };
+}
+
 // ─── Visibilidade de grupo (BIDIRECIONAL) ────────────────
 //
 // Regra: produto P visível para empresa X se
@@ -179,10 +204,11 @@ router.get('/', async (req, res) => {
     // Migration 305 — ficha tecnica. Tentar-e-cair em vez de consultar o
     // information_schema: uma query a mais desloca a sequencia de mocks
     // dos testes de integracao, e no caminho feliz ela e pura perda.
-    const dataRes = await comFallbackDeFicha((colsFicha) => db.query(
+    const dataRes = await comFallbackDeFicha((colsFicha, colDuracao) => db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
               ${colsFicha}
+              ${colDuracao}
               is_active, is_group_shared, company_id, created_at,
               (SELECT EXISTS(SELECT 1 FROM product_variants pv WHERE pv.product_id = products.id AND pv.is_active = true)) AS has_variants,
               -- 19/05/2026: SUM do estoque das variants ativas pra alimentar UI/KPIs
@@ -217,6 +243,10 @@ router.get('/', async (req, res) => {
       // Migration 305 — ficha tecnica. '' quando a coluna nao existe na
       // base ainda, entao o formulario abre vazio em vez de quebrar.
       material: r.material || '', medidas: r.medidas || '', cuidados: r.cuidados || '',
+      // Migration 323 — duracao do servico em minutos. null (e nao 0) quando
+      // nao e servico: 0 minutos e uma duracao, "sem duracao" nao e.
+      duration_minutes: r.duration_minutes === null || r.duration_minutes === undefined
+        ? null : (parseInt(r.duration_minutes, 10) || 0),
       is_active: r.is_active !== false,
       is_group_shared: r.is_group_shared || false,
       stock_company_id: r.company_id,
@@ -297,6 +327,11 @@ router.post('/', async (req, res) => {
     capaNova = g.cover;
   }
 
+  // Migration 323 — duracao do servico. Validar ANTES do INSERT: um
+  // "45 min" que vira NULL em silencio e o bug que a coluna veio resolver.
+  const duracao = sanitizeDurationMinutes(req.body.duration_minutes);
+  if (duracao.error) return res.status(400).json({ error: duracao.error });
+
   const isGroupShared = req.body.is_group_shared !== undefined
     ? !!req.body.is_group_shared
     : defaultShared;
@@ -321,16 +356,25 @@ router.post('/', async (req, res) => {
       return l.join(',');
     }
 
-    // Duas migrations podem faltar numa base atrasada: a 290
-    // (gallery_urls) e a 305 (ficha). O backend nao roda migration no
-    // boot, entao cada uma tem seu degrau — cadastrar produto nao pode
-    // quebrar pro varejo inteiro por causa de campo novo.
+    // Tres migrations podem faltar numa base atrasada: a 290
+    // (gallery_urls), a 305 (ficha) e a 323 (duracao). O backend nao roda
+    // migration no boot, entao cada uma tem seu degrau — cadastrar produto
+    // nao pode quebrar pro varejo inteiro por causa de campo novo.
+    // gallery_urls e SEMPRE o ultimo parametro: `marcadores(n, jsonb)` so
+    // sabe marcar ::jsonb no fim da lista.
+    const galeriaJson = JSON.stringify(capaNova ? [capaNova] : []);
     const tentativas = [
+      { cols: COLS_ANTIGAS + ', material, medidas, cuidados, duration_minutes, image_url, gallery_urls',
+        params: [...paramsAntigos, ...paramsFicha, duracao.value, capaNova, galeriaJson],
+        jsonb: true },
       { cols: COLS_ANTIGAS + ', material, medidas, cuidados, image_url, gallery_urls',
-        params: [...paramsAntigos, ...paramsFicha, capaNova, JSON.stringify(capaNova ? [capaNova] : [])],
+        params: [...paramsAntigos, ...paramsFicha, capaNova, galeriaJson],
+        jsonb: true },
+      { cols: COLS_ANTIGAS + ', duration_minutes, image_url, gallery_urls',
+        params: [...paramsAntigos, duracao.value, capaNova, galeriaJson],
         jsonb: true },
       { cols: COLS_ANTIGAS + ', image_url, gallery_urls',
-        params: [...paramsAntigos, capaNova, JSON.stringify(capaNova ? [capaNova] : [])],
+        params: [...paramsAntigos, capaNova, galeriaJson],
         jsonb: true },
       { cols: COLS_ANTIGAS, params: paramsAntigos, jsonb: false },
     ];
@@ -391,20 +435,32 @@ router.post('/', async (req, res) => {
 
 // ─── PATCH /:pid ────────────────────────────────
 /**
- * Roda a query com as colunas da ficha; se a base estiver atras da
- * migration 305, roda de novo sem elas.
+ * Roda a query com as colunas novas; se a base estiver atras de alguma
+ * migration, roda de novo sem ela.
  *
  * O backend nao aplica migration no boot, entao coluna nova sempre tem um
  * intervalo em que o codigo ja subiu e o banco nao (CLAUDE.md, armadilha
  * 1). Aqui o custo do degrau e uma query extra SO nesse intervalo.
+ *
+ * Duas migrations podem faltar, independentes: a 305 (ficha tecnica) e a
+ * 323 (duracao). Por isso as quatro combinacoes, da mais completa pra
+ * mais pobre — uma base sem a 305 mas com a 323 nao pode perder a
+ * duracao so porque a ficha faltou.
  */
 async function comFallbackDeFicha(rodar) {
-  try {
-    return await rodar('material, medidas, cuidados,');
-  } catch (e) {
-    if (e.code !== '42703') throw e;
-    return await rodar('');
+  const FICHA = 'material, medidas, cuidados,';
+  const DURACAO = 'duration_minutes,';
+  const degraus = [[FICHA, DURACAO], [FICHA, ''], ['', DURACAO], ['', '']];
+  let ultimo = null;
+  for (const [ficha, duracao] of degraus) {
+    try {
+      return await rodar(ficha, duracao);
+    } catch (e) {
+      if (e.code !== '42703') throw e;
+      ultimo = e;
+    }
   }
+  throw ultimo;
 }
 
 router.patch('/:pid', async (req, res) => {
@@ -437,37 +493,71 @@ router.patch('/:pid', async (req, res) => {
     galeria = g;
   }
 
+  // Migration 323 — duracao do servico. Fora do fieldMap por dois
+  // motivos: tem validacao propria (inteiro >= 0 ou null, nada de
+  // parseFloat silencioso) e precisa de degrau quando a base ainda nao
+  // recebeu a migration — o UPDATE roda de novo sem ela em vez de dar 500.
+  let duracao = null;
+  if (req.body.duration_minutes !== undefined) {
+    const d = sanitizeDurationMinutes(req.body.duration_minutes);
+    if (d.error) return res.status(400).json({ error: d.error });
+    duracao = d;
+  }
+
   const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size', image_url:'image_url', ncm:'ncm', is_group_shared:'is_group_shared', studio_storefront_visible:'studio_storefront_visible',
     // Migration 305 — ficha tecnica na pagina do produto.
     material:'material', medidas:'medidas', cuidados:'cuidados' };
   const numFields = ['price','cost_price','stock_qty','stock_min','stock_max'];
-  const updates = [], values = []; let idx = 1;
-  for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
-    if (req.body[bodyKey] !== undefined) {
-      updates.push(`${dbCol} = $${idx}`); let val = req.body[bodyKey];
-      if (numFields.includes(dbCol)) val = parseFloat(val);
-      if (dbCol === 'color' && val && !/^#[0-9A-Fa-f]{6}$/.test(val)) val = null;
-      if (dbCol === 'ncm') val = sanitizeNcm(val);
-      values.push(val); idx++;
+
+  function montarUpdate(comDuracao) {
+    const updates = [], values = []; let idx = 1;
+    for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
+      if (req.body[bodyKey] !== undefined) {
+        updates.push(`${dbCol} = $${idx}`); let val = req.body[bodyKey];
+        if (numFields.includes(dbCol)) val = parseFloat(val);
+        if (dbCol === 'color' && val && !/^#[0-9A-Fa-f]{6}$/.test(val)) val = null;
+        if (dbCol === 'ncm') val = sanitizeNcm(val);
+        values.push(val); idx++;
+      }
     }
-  }
-  if (galeria) {
-    updates.push(`gallery_urls = $${idx}::jsonb`);
-    values.push(JSON.stringify(galeria.gallery)); idx++;
-    // A capa segue a galeria, a menos que o proprio request tenha mandado
-    // image_url junto — nesse caso a escolha explicita vence.
-    if (req.body.image_url === undefined) {
-      updates.push(`image_url = $${idx}`);
-      values.push(galeria.cover); idx++;
+    if (comDuracao && duracao) {
+      updates.push(`duration_minutes = $${idx}`);
+      values.push(duracao.value); idx++;
     }
+    if (galeria) {
+      updates.push(`gallery_urls = $${idx}::jsonb`);
+      values.push(JSON.stringify(galeria.gallery)); idx++;
+      // A capa segue a galeria, a menos que o proprio request tenha mandado
+      // image_url junto — nesse caso a escolha explicita vence.
+      if (req.body.image_url === undefined) {
+        updates.push(`image_url = $${idx}`);
+        values.push(galeria.cover); idx++;
+      }
+    }
+    return { updates, values, idx };
   }
-  if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-  updates.push('updated_at = NOW()'); values.push(pid, cid);
-  try {
-    const result = await db.query(
-      `UPDATE products SET ${updates.join(', ')} WHERE ${visibilityWhere(`$${idx}`, `$${idx+1}`)} RETURNING *`,
-      values
+
+  function rodarUpdate({ updates, values, idx }) {
+    const u = updates.concat(['updated_at = NOW()']);
+    return db.query(
+      `UPDATE products SET ${u.join(', ')} WHERE ${visibilityWhere(`$${idx}`, `$${idx + 1}`)} RETURNING *`,
+      [...values, pid, cid]
     );
+  }
+
+  const montado = montarUpdate(true);
+  if (montado.updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+  try {
+    let result;
+    try {
+      result = await rodarUpdate(montado);
+    } catch (e) {
+      // 42703 com duration_minutes no SET = base atras da 323.
+      if (e.code !== '42703' || !duracao) throw e;
+      const semDuracao = montarUpdate(false);
+      if (semDuracao.updates.length === 0) throw e;
+      result = await rodarUpdate(semDuracao);
+    }
     if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
     res.json(result.rows[0]);
   } catch (err) { console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' }); }

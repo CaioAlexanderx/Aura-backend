@@ -56,6 +56,11 @@ router.use('/products', require('./products'));
 router.use('/products', require('./productsRanking'));
 router.use('/products', require('./productImage'));
 router.use('/products', require('./variantImage'));
+// Galeria de ate 4 fotos por cor (migration 323). Convive com as duas
+// rotas acima: a posicao 0 de cada galeria continua espelhando
+// products.image_url e a foto das variantes da cor, que e o que a
+// vitrine, o PDV e o marketplace leem.
+router.use('/products', require('./productImages'));
 router.use('/products', require('./barcode'));
 router.use('/products', require('./labels'));
 router.use('/products', require('./danfeImport'));

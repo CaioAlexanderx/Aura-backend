@@ -57,6 +57,8 @@ const { montarTira } = require('./tiraDeCategorias');
 // Redesign 09/2026: os blocos da home nascem do estoque e do Caixa. As
 // regras (janela, minimo, limite) moram la, nao aqui nem no template.
 const { montarHome, capasDasCategorias, ehNovo } = require('./homeDaLoja');
+// Migration 323 — galeria por cor na peca aberta pela URL propria.
+const { agruparGaleria } = require('./productImageGallery');
 
 /**
  * Os selos padrao, DERIVADOS do que a lojista ligou (decisao 7, 02/09/2026).
@@ -508,6 +510,15 @@ function montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkB
     material: p.material || null,
     medidas:  p.medidas  || null,
     cuidados: p.cuidados || null,
+    // Migration 323 — duracao do servico, em minutos. NULL pra quem nao e
+    // servico; a loja so escreve "45 min" quando o numero existe.
+    duration_minutes: p.duration_minutes === null || p.duration_minutes === undefined
+      ? null : (parseInt(p.duration_minutes, 10) || 0),
+    // Migration 323 — galeria por cor. So a peca aberta pela URL propria
+    // carrega isso (produtoPublicoPorId): na GRADE seriam ate 4 fotos
+    // vezes 4 cores vezes 500 pecas no mesmo payload, e o cartao da grade
+    // desenha UMA foto. Quem precisar antes tem o GET /images do painel.
+    images: p.__galeria || { main: [], by_color: {} },
     category_id:   cat ? cat.id   : null,
     category_slug: cat ? cat.slug : null,
     category_path: cat ? cat.path : null,
@@ -530,7 +541,7 @@ async function produtoPublicoPorId({ cid, id, exigeFoto, mostrarPrecos }) {
   if (!/^[0-9a-f-]{36}$/i.test(String(id || ''))) return null;
   const sql = `
     SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-           material, medidas, cuidados
+           material, medidas, cuidados, duration_minutes
     FROM products
     WHERE ${listVisibilityWhere('$1')}
       AND id = $2
@@ -553,7 +564,33 @@ async function produtoPublicoPorId({ cid, id, exigeFoto, mostrarPrecos }) {
   ]);
   const categoryById = {};
   categorias.forEach(c => { categoryById[c.id] = c; });
+  // Migration 323 — a galeria por cor entra SO aqui, na peca aberta pela
+  // URL propria: e a unica tela da loja que mostra mais de uma foto.
+  p.__galeria = await galeriaDaPeca(p.id);
   return montarProdutoPublico(p, { variantsByProduct, categoryById, primaryLinkByProduct, mostrarPrecos });
+}
+
+/**
+ * `{ main: [...], by_color: {...} }` de UMA peca (migration 323).
+ *
+ * Loja aberta e o lugar onde um erro custa venda: base sem a migration
+ * (42P01) devolve a galeria vazia e a pagina abre com a foto de sempre.
+ */
+async function galeriaDaPeca(productId) {
+  const vazia = { main: [], by_color: {} };
+  try {
+    const { rows } = await db.query(
+      `SELECT id, color_hex, url, thumb_url, position
+         FROM product_images
+        WHERE product_id = $1
+        ORDER BY color_hex NULLS FIRST, position ASC, created_at ASC`,
+      [productId]
+    );
+    return agruparGaleria(rows);
+  } catch (e) {
+    if (e.code !== '42P01') console.error('[storefront] galeria da peca:', e.message);
+    return vazia;
+  }
 }
 
 async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) {
@@ -567,7 +604,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
     // escrita duas vezes. O array segue como ORDEM da curadoria.
     const sql = `
       SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-             material, medidas, cuidados
+             material, medidas, cuidados, duration_minutes
       FROM products
       WHERE ${visibility}
         AND is_active IS NOT FALSE
@@ -583,7 +620,7 @@ async function fetchStorefrontProducts(cid, featuredIds, _hiddenIds, exigeFoto) 
 
   const sql = `
     SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-           material, medidas, cuidados
+           material, medidas, cuidados, duration_minutes
     FROM products
     WHERE ${visibility}
       AND is_active IS NOT FALSE

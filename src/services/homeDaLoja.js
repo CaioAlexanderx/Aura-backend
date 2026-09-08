@@ -33,7 +33,7 @@ const DIAS_DE_NOVO = 14;
 
 /** As mesmas colunas do builder — o cartão da home é o cartão da grade. */
 const COLUNAS = `id, name, description, price, image_url, image_thumb_url, gallery_urls, category,
-  stock_qty, stock_min, created_at, material, medidas, cuidados`;
+  stock_qty, stock_min, created_at, material, medidas, cuidados, duration_minutes`;
 
 /**
  * Saldo total da peça, na mesma regra de EM_ESTOQUE: com variante ativa,

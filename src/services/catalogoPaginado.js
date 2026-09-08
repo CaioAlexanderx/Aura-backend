@@ -300,7 +300,7 @@ async function paginaDoCatalogo({
   paramsDaPagina.push(lim, off);
   const { rows: produtos } = await bd().query(
     `SELECT id, name, description, price, image_url, image_thumb_url, gallery_urls, category, stock_qty, created_at,
-            material, medidas, cuidados
+            material, medidas, cuidados, duration_minutes
      FROM products
      WHERE ${where}
      ORDER BY ${ordenacao}
