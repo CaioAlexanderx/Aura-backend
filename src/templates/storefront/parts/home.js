@@ -225,16 +225,23 @@ document.addEventListener('input',function(e){ if(e.target&&e.target.id==='searc
  */
 function irPeloCta(a){
   var h=String(a&&a.getAttribute('href')||'');
+  // "#vista=todos|novidades|mais_vendidos": a grade inteira numa ordem —
+  // o destino de "Ver a colecao" e "Ver novidades" (10/09/2026).
+  var v=/^#vista=(todos|novidades|mais_vendidos)$/.exec(h);
+  if(v){ verTudo(v[1]); return false; }
   var m=/^#cat=(\\/.+)$/.exec(h);
   if(!m) return true;
   if(typeof irParaCategoria==='function') irParaCategoria(m[1]);
   irParaPagina(1,{rolar:true});
   return false;
 }
-// Link colado com #cat=/... abre direto na categoria.
+// Link colado com #cat=/... abre direto na categoria; #vista=..., na vista.
 (function(){
-  var m=/^#cat=(\\/.+)$/.exec(window.location.hash||'');
+  var hash=window.location.hash||'';
+  var m=/^#cat=(\\/.+)$/.exec(hash);
   if(m&&typeof filterCat==='function') setTimeout(function(){ filterCat(decodeURIComponent(m[1]),null); },0);
+  var v=/^#vista=(todos|novidades|mais_vendidos)$/.exec(hash);
+  if(v) setTimeout(function(){ verTudo(v[1]); },0);
 })();
 
 // ── Cabecalho: categorias de topo e mega-menu ────────────

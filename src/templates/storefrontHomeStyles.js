@@ -90,6 +90,9 @@ function homeStyles({ fontSerif, fontSans, fontMono }) {
    texto (arte pronta do designer) ele so escurecia a arte (08/09/2026). */
 .hero-slide.com-foto.com-texto .hero-scrim{position:absolute;inset:0;background:linear-gradient(to right,rgba(32,26,20,.55) 0%,rgba(32,26,20,.18) 52%,transparent 78%);pointer-events:none;}
 .hero-inner{position:absolute;inset:0;display:flex;align-items:center;}
+/* Arte pronta com destino: o slide inteiro e o link, por cima do scrim e
+   abaixo dos pontos de navegacao (z-index 3). */
+.hero-link{position:absolute;inset:0;z-index:2;display:block;cursor:pointer;}
 .hero-text{max-width:1280px;width:100%;margin:0 auto;padding:0 32px;display:flex;flex-direction:column;align-items:flex-start;gap:16px;}
 .hero-text>*{max-width:520px;}
 .hero-slide.com-foto .hero-text{color:#fff;}
