@@ -54,6 +54,8 @@ const { uploadToR2 }      = require('../utils/r2Storage');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
 const { calculateShippingQuote } = require('../services/shippingQuote');
+// A home da loja sai da memoria por 60 s (10/09/2026).
+const { paginaLembrada, lembrarPagina } = require('../services/cacheDaPaginaDaLoja');
 const { COURIER, validateCourierPickup } = require('../services/courierPickup');
 const lojaEvents          = require('../services/lojaEvents');
 
@@ -294,6 +296,20 @@ router.get('/:slug/catalogo', async (req, res) => {
 async function servirPaginaDaLoja(req, res, produtoId) {
   try {
     const slug = req.params.slug.toLowerCase().trim();
+    // A home (sem peca na URL e sem query) sai da memoria por 60 s — ver
+    // services/cacheDaPaginaDaLoja.js. Cabecalhos iguais aos da pagina
+    // montada na hora: o navegador nao distingue.
+    const ehHome = !produtoId && !String(req.url || '').includes('?');
+    if (ehHome) {
+      const guardada = paginaLembrada(slug);
+      if (guardada) {
+        res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
+        res.removeHeader('X-Frame-Options');
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('X-Aura-Cache', 'hit');
+        return res.send(guardada);
+      }
+    }
     const { rows } = await db.query(
       `SELECT dcc.*, COALESCE(c.pdv_settings, '{}'::jsonb) AS company_pdv_settings
          FROM digital_channel_config dcc
@@ -340,7 +356,9 @@ async function servirPaginaDaLoja(req, res, produtoId) {
     res.setHeader('Content-Security-Policy', STOREFRONT_CSP);
     res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(buildStorefrontPage(data, slug));
+    const html = buildStorefrontPage(data, slug);
+    if (ehHome) { lembrarPagina(slug, html); res.setHeader('X-Aura-Cache', 'miss'); }
+    res.send(html);
   } catch (err) {
     console.error('storefront page error:', err);
     res.status(500).send('<html><body><h1>Erro ao carregar loja</h1></body></html>');

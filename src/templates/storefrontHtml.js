@@ -243,6 +243,7 @@ ${heroHtml}
 <section class="home-sec" id="homeMaisVendidos" hidden></section>
 <section class="home-sec" id="homeUltimas" hidden></section>
 <section class="home-sec" id="homeNovidades" hidden></section>
+<section class="home-sec home-vertudo" id="homeVerTudo" hidden></section>
 
 <div class="cats-wrap" id="catsWrap"></div>
 <div class="cats-painel" id="catsPainel" hidden></div>

@@ -21,6 +21,8 @@ const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { requireRole } = require('../middleware/auth');
 const { uploadToR2, deleteFromR2 } = require('../utils/r2Storage');
+// Salvar a loja ou subir imagem esquece a home guardada (10/09/2026).
+const { esquecerPagina } = require('../services/cacheDaPaginaDaLoja');
 const { validatePixKey } = require('../services/staticPixService');
 const { geocodeCep, normalizeCep } = require('../services/cepGeocoding');
 const { POLITICA_PADRAO } = require('../templates/storefrontHtml');
@@ -1064,6 +1066,8 @@ router.put('/', requireRole('client', 'analyst', 'admin'), async (req, res) => {
       }
     }
 
+    // A home guardada foi montada com a config antiga: esquece.
+    esquecerPagina(savedConfig.slug || undefined);
     return res.json({
       config: savedConfig,
       saved: true,
@@ -1175,6 +1179,8 @@ router.post('/upload-image', requireRole('client', 'analyst', 'admin'), async (r
       : `banner_${bannerIdx}${bannerMobile ? '_mobile' : ''}`;
     const key = `${cid}/canal/${keyName}.${ext}`;
     const result = await uploadToR2(key, corpo, mime);
+    // A home guardada tem a imagem antiga: esquece (todas — o slug nao esta a mao).
+    esquecerPagina();
     if (!result.success) {
       console.error('[canal-upload] R2 error:', result.error);
       return res.status(500).json({ error: 'Erro no upload da imagem' });

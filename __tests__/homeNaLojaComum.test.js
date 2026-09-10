@@ -217,7 +217,7 @@ describe('CNPJ formatado', () => {
 describe('"Novidades" e "Mais vendidos" sao vistas, nao "Todos os produtos"', () => {
   const src = semComentarios(parts('home.js'));
   test('verTudo liga a vista e sai do modo home', () => {
-    expect(src).toContain("var VISTAS={ novidades:'Novidades', mais_vendidos:'Mais vendidos' };");
+    expect(src).toContain("var VISTAS={ novidades:'Novidades', mais_vendidos:'Mais vendidos', todos:'Todas as peças' };");
     expect(src).toContain('vistaEspecial=VISTAS[criterio]?criterio:null;');
     expect(src).toContain('if(vistaEspecial) return false;');
   });
