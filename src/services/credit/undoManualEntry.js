@@ -70,42 +70,46 @@ async function findLinkedInstallments(client, companyId, tx) {
   // gravadas no mesmo instante sao o cronograma novo inteiro -- nao dele.
   if (tx.source && tx.source !== 'manual') return [];
 
-  const semVinculo = hasTxCol ? 'AND transaction_id IS NULL' : '';
-  const accountId  = tx.account_id || null;
+  const semVinculo = hasTxCol ? 'AND ci.transaction_id IS NULL' : '';
+
+  // Candidatas: parcelas sem venda do mesmo cliente e carne do debito.
+  // Nenhum instante passa pelo JS. O Date do node-pg guarda milissegundo e o
+  // timestamptz guarda microssegundo (NOW() = 19:18:49.882506): ler created_at
+  // e devolve-lo como parametro truncava o valor e a igualdade nunca casava.
+  // Toda comparacao de instante e feita em SQL contra a linha do debito ($3).
+  const candidatas = `
+      FROM credit_installments ci
+      JOIN customer_credit_transactions t ON t.id = $3
+     WHERE ci.company_id = $1 AND ci.customer_id = $2
+       AND ci.sale_id IS NULL
+       AND ci.status <> 'cancelled'
+       AND ci.account_id IS NOT DISTINCT FROM t.account_id
+       ${semVinculo}`;
 
   // b. mesmo instante
   {
     const { rows } = await client.query(
-      `SELECT id, amount_due, covered_amount, status ${where}
-          ${semVinculo}
-          AND created_at = $3
-          AND account_id IS NOT DISTINCT FROM $4
-          FOR UPDATE`,
-      [companyId, tx.customer_id, tx.created_at, accountId]
+      `SELECT ci.id, ci.amount_due, ci.covered_amount, ci.status ${candidatas}
+          AND ci.created_at = t.created_at
+          FOR UPDATE OF ci`,
+      [companyId, tx.customer_id, tx.id]
     );
     if (rows.length) return rows;
   }
 
-  // c. grupo cuja soma bate com o debito
-  const { rows: grupos } = await client.query(
-    `SELECT created_at ${where}
-        ${semVinculo}
-        AND account_id IS NOT DISTINCT FROM $3
-      GROUP BY created_at
-     HAVING ABS(SUM(amount_due) - $4::numeric) < 0.005
-      ORDER BY ABS(EXTRACT(EPOCH FROM (created_at - $5::timestamptz))) ASC
-      LIMIT 1`,
-    [companyId, tx.customer_id, accountId, tx.amount, tx.created_at]
-  );
-  if (!grupos.length) return [];
-
+  // c. grupo cuja soma bate com o debito (o mais proximo no tempo)
   const { rows } = await client.query(
-    `SELECT id, amount_due, covered_amount, status ${where}
-        ${semVinculo}
-        AND created_at = $3
-        AND account_id IS NOT DISTINCT FROM $4
-        FOR UPDATE`,
-    [companyId, tx.customer_id, grupos[0].created_at, accountId]
+    `WITH grupo AS (
+       SELECT ci.created_at ${candidatas}
+        GROUP BY ci.created_at, t.amount, t.created_at
+       HAVING ABS(SUM(ci.amount_due) - t.amount) < 0.005
+        ORDER BY ABS(EXTRACT(EPOCH FROM (ci.created_at - t.created_at))) ASC
+        LIMIT 1
+     )
+     SELECT ci.id, ci.amount_due, ci.covered_amount, ci.status ${candidatas}
+        AND ci.created_at = (SELECT created_at FROM grupo)
+        FOR UPDATE OF ci`,
+    [companyId, tx.customer_id, tx.id]
   );
   return rows;
 }

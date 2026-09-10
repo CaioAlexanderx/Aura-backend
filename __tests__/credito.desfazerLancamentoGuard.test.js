@@ -57,9 +57,15 @@ describe('serviço undoManualEntry', () => {
   });
 
   test('acha as parcelas pelo vínculo novo e pelos dois caminhos de legado', () => {
-    expect(fonte).toContain('transaction_id = $3');            // migration 324
-    expect(fonte).toContain('created_at = $3');                // mesmo NOW()
-    expect(fonte).toMatch(/HAVING ABS\(SUM\(amount_due\) - \$4::numeric\) < 0\.005/); // soma
+    expect(fonte).toContain('transaction_id = $3');                        // migration 324
+    expect(fonte).toContain('ci.created_at = t.created_at');               // mesmo NOW()
+    expect(fonte).toMatch(/HAVING ABS\(SUM\(ci\.amount_due\) - t\.amount\) < 0\.005/); // soma
+  });
+
+  test('nenhum instante faz ida e volta pelo JS (o Date trunca o microssegundo)', () => {
+    // CI de 10/09/2026: created_at lido do banco e devolvido como parâmetro
+    // perdia o microssegundo e a igualdade nunca casava.
+    expect(fonte).not.toMatch(/\[[^\]]*\.created_at[^\]]*\]/);
   });
 });
 

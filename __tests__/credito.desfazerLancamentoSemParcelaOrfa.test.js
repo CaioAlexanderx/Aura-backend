@@ -171,7 +171,9 @@ describe('undoManualEntry', () => {
 
   test('2. legado sem vínculo, mesmo instante: acha as parcelas pelo created_at', async () => {
     const cid = await cliente('Legado Mesmo Instante');
-    const t0 = '2026-06-16T19:18:49.882Z';
+    // Instante REAL do débito da Ana Lucia, com microssegundo. Com milissegundo
+    // redondo o teste passava mesmo com o bug de truncamento do Date do JS.
+    const t0 = '2026-06-16T19:18:49.882506Z';
     const d = await debito(cid, 600, { createdAt: t0 });
     const p1 = await parcela(cid, 300, { createdAt: t0, number: 1, total: 2 });
     const p2 = await parcela(cid, 300, { createdAt: t0, number: 2, total: 2, dueDate: '2027-01-01' });
@@ -192,10 +194,12 @@ describe('undoManualEntry', () => {
 
   test('3. legado com data retroativa: acha o grupo cuja soma bate com o débito', async () => {
     const cid = await cliente('Legado Retroativo');
-    // Débito com created_at = data informada (meio-dia SP); parcelas no NOW().
+    // Débito com created_at = data informada (meio-dia SP); parcelas no NOW()
+    // real, com microssegundo (instante da parcela órfã da Ana Lucia).
+    const tParcelas = '2026-07-08T16:47:00.36509Z';
     const d = await debito(cid, 500, { createdAt: '2026-06-01T15:00:00Z' });
-    const p1 = await parcela(cid, 250, { number: 1, total: 2 });
-    const p2 = await parcela(cid, 250, { number: 2, total: 2, dueDate: '2027-01-01' });
+    const p1 = await parcela(cid, 250, { createdAt: tParcelas, number: 1, total: 2 });
+    const p2 = await parcela(cid, 250, { createdAt: tParcelas, number: 2, total: 2, dueDate: '2027-01-01' });
     // Grupo de outro lançamento, soma diferente: não pode ser confundido.
     await debito(cid, 120, { createdAt: '2026-06-02T15:00:00Z' });
     const pOutro = await parcela(cid, 120, { createdAt: '2026-06-02T15:00:01Z' });
