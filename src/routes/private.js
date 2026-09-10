@@ -91,6 +91,9 @@ router.use('/customers', require('./customers'));
 router.use('/employees', require('./employees'));
 // Notificações do app (endomarketing banners + avisos de pedido) — sem gate de plano
 router.use('/notifications', require('./notifications'));
+// Web Push (10/09/2026): o navegador da lojista se inscreve para receber o
+// aviso de pedido com a aba fechada. Sem gate de plano, como o sino.
+router.use('/web-push', require('./webPush'));
 // 02/08/2026 — Ranking de vendedores liberado pro Essencial.
 //
 // O ranking saiu da tela de Folha e virou aba propria em /vendas no app. Ele e

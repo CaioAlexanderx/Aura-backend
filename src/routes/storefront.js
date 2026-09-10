@@ -871,6 +871,13 @@ router.post('/:slug/order', async (req, res) => {
     // e placa antes de entregar", não "o pacote saiu".
     lojaEvents.emit('loja_pedido_novo', order);
     if (courierData) lojaEvents.emit('loja_pedido_saiu_entrega', order);
+    // Pix MANUAL (chave da lojista, sem gateway): ninguém confirma sozinho —
+    // é a lojista quem confere o extrato. Sem este e-mail o pedido só
+    // aparecia no sino (10/09/2026, fila de pedidos).
+    if (pixData && pixData.mode === 'manual') {
+      notify.notifyManualPixOrder({ order })
+        .catch(err => console.error('[storefront] notifyManualPixOrder error:', err.message));
+    }
 
     res.status(201).json({
       order_id:       order.id,
