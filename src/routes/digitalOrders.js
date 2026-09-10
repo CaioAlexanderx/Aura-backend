@@ -23,44 +23,24 @@ const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const lojaEvents = require('../services/lojaEvents');
 
 // GET — Lista pedidos com filtro por status e paginação
+// Fila de pedidos (10/09/2026): consulta e apresentacao em um servico testavel.
+const { montarConsultaDaFila, apresentarLinhaDaFila, nomeLegivelDoItem } = require('../services/filaDePedidos');
+
 router.get('/', async (req, res) => {
   const cid = req.params.id;
-  const { status, page = 1, limit = 20 } = req.query;
-  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const { status, page = 1, limit = 20, q } = req.query;
+  const pagina = Math.max(1, parseInt(page, 10) || 1);
+  const porPagina = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+  const offset = (pagina - 1) * porPagina;
 
   try {
-    const conditions = ['o.company_id = $1'];
-    const values = [cid];
-    let idx = 2;
-
-    if (status && status !== 'all') {
-      conditions.push(`o.status = $${idx}`);
-      values.push(status);
-      idx++;
-    }
-
-    const where = conditions.join(' AND ');
-
-    const { rows: orders } = await db.query(`
-      SELECT
-        o.id, o.order_number, o.customer_name, o.customer_phone, o.customer_email,
-        o.delivery_type, o.subtotal, o.total, o.delivery_fee,
-        o.status, o.payment_status, o.payment_method, o.notes,
-        o.payment_proof_url, o.payment_proof_uploaded_at,
-        o.confirmed_at, o.delivered_at, o.cancelled_at, o.created_at,
-        o.customer_id, o.transaction_id, o.stock_deducted, o.nfce_id,
-        -- migration 288: esta lista e explicita, entao coluna nova nao
-        -- aparece sozinha aqui. Sem as duas o lojista ve delivery_type
-        -- 'courier' na listagem sem saber quem vai buscar o pedido.
-        o.courier_name, o.courier_plate,
-        COUNT(i.id)::int AS item_count
-      FROM digital_orders o
-      LEFT JOIN digital_order_items i ON i.order_id = o.id
-      WHERE ${where}
-      GROUP BY o.id
-      ORDER BY o.created_at DESC
-      LIMIT $${idx} OFFSET $${idx + 1}
-    `, [...values, parseInt(limit), offset]);
+    // 10/09/2026: a consulta mora em services/filaDePedidos.js — busca por
+    // numero/telefone/texto e foto + nome do primeiro item. A lista antiga
+    // so devolvia a contagem de itens e nao tinha busca.
+    const consulta = montarConsultaDaFila({ cid, status, q, limit: porPagina, offset });
+    const { rows } = await db.query(consulta.sql, consulta.params);
+    const orders = rows.map(apresentarLinhaDaFila);
+    const totalFiltrado = rows.length ? Number(rows[0].total_filtrado) || 0 : 0;
 
     const { rows: counts } = await db.query(`
       SELECT
@@ -71,7 +51,8 @@ router.get('/', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'preparing')::int            AS preparing,
         COUNT(*) FILTER (WHERE status = 'ready')::int                AS ready,
         COUNT(*) FILTER (WHERE status = 'delivered')::int            AS delivered,
-        COUNT(*) FILTER (WHERE status = 'cancelled')::int            AS cancelled
+        COUNT(*) FILTER (WHERE status = 'cancelled')::int            AS cancelled,
+        COUNT(*) FILTER (WHERE status = 'cancelled' AND payment_status = 'expired')::int AS expired
       FROM digital_orders WHERE company_id = $1
     `, [cid]);
 
@@ -79,10 +60,11 @@ router.get('/', async (req, res) => {
       orders,
       counts: counts[0],
       pagination: {
-        page:  parseInt(page),
-        limit: parseInt(limit),
-        total: counts[0].total,
-        pages: Math.ceil(counts[0].total / parseInt(limit)),
+        page:  pagina,
+        limit: porPagina,
+        // Total DA BUSCA (antes era sempre o total da empresa).
+        total: totalFiltrado,
+        pages: Math.ceil(totalFiltrado / porPagina),
       },
     });
   } catch (err) {
@@ -99,11 +81,21 @@ router.get('/:oid', async (req, res) => {
       `SELECT * FROM digital_orders WHERE id = $1 AND company_id = $2`, [oid, cid]
     );
     if (!orders.length) return res.status(404).json({ error: 'Pedido não encontrado' });
+    // 10/09/2026: miniatura do produto quando existe (a foto gravada no item
+    // e a original, de 1 a 3 MB) e o nome do item com a cor por extenso.
+    // product_name continua o gravado; o painel usa product_name_display.
     const { rows: items } = await db.query(
-      `SELECT id, product_id, variant_id, product_name, product_image, unit_price, quantity, subtotal
-       FROM digital_order_items WHERE order_id = $1 ORDER BY id`, [oid]
+      `SELECT i.id, i.product_id, i.variant_id, i.product_name, i.variant_label,
+              COALESCE(p.image_thumb_url, i.product_image, p.image_url) AS product_image,
+              i.unit_price, i.quantity, i.subtotal
+       FROM digital_order_items i
+       LEFT JOIN products p ON p.id = i.product_id
+       WHERE i.order_id = $1 ORDER BY i.id`, [oid]
     );
-    res.json({ ...orders[0], items });
+    res.json({
+      ...orders[0],
+      items: items.map((it) => ({ ...it, product_name_display: nomeLegivelDoItem(it.product_name) })),
+    });
   } catch (err) {
     console.error('digital order detail error:', err);
     res.status(500).json({ error: 'Erro ao buscar pedido' });

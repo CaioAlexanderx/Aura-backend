@@ -62,6 +62,70 @@ async function tickPixExpirado({ db, lojaEvents }) {
   return summary;
 }
 
+// ── Cancelamento do Pix vencido (10/09/2026) ─────────────────
+//
+// Decisao do Caio: Pix sem pagamento em PRAZO_HORAS vira "Expirado" e o
+// pedido e cancelado. O aviso de cima so avisava, e so para Pix com data de
+// expiracao — Pix MANUAL nao tem data, e os pedidos ficavam meses em
+// "Precisa agir" (Finesse: tres de 21/05).
+//
+// Pode cancelar sem devolver nada: o estoque so e baixado na confirmacao
+// (digitalOrderConfirmation) e pedido pendente nao tem lancamento.
+//
+// Fora de proposito:
+//   - awaiting_approval: a cliente mandou comprovante, alguem precisa olhar.
+//   - Studio: arte e orcamento tem ritmo proprio; pedido parado la nao e
+//     necessariamente abandonado.
+// Pedido recente (JANELA_DIAS) avisa no sino; pedido antigo cancela calado
+// para o primeiro deploy nao despejar meses de aviso.
+const PRAZO_HORAS = 48;
+
+const fmtReais = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? `R$ ${n.toFixed(2).replace('.', ',')}` : 'R$ —';
+};
+
+/** @returns {Promise<{cancelados:number, avisados:number}>} */
+async function tickCancelarPixVencido({ db, lojaEvents }) {
+  const resumo = { cancelados: 0, avisados: 0 };
+  const nota = `\n[EXPIRADO em ${new Date().toISOString()}]: Pix sem pagamento em ${PRAZO_HORAS} h, cancelado automaticamente.`;
+
+  const { rows } = await db.query(
+    `UPDATE digital_orders SET
+        status         = 'cancelled',
+        payment_status = 'expired',
+        cancelled_at   = NOW(),
+        updated_at     = NOW(),
+        notes          = COALESCE(notes, '') || $2
+      WHERE id IN (
+        SELECT id FROM digital_orders
+         WHERE status = 'pending_payment'
+           AND payment_method = 'pix'
+           AND COALESCE(vertical, 'retail') <> 'studio'
+           AND COALESCE(payment_status, 'pending') NOT IN ('confirmed', 'paid', 'received')
+           AND created_at < NOW() - INTERVAL '${PRAZO_HORAS} hours'
+         ORDER BY created_at
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED
+      )
+        AND status = 'pending_payment'
+      RETURNING id, company_id, order_number, customer_name, total, vertical, created_at`,
+    [BATCH, nota]
+  );
+
+  const limiteDoAviso = Date.now() - JANELA_DIAS * 24 * 3600 * 1000;
+  for (const pedido of rows) {
+    resumo.cancelados++;
+    if (new Date(pedido.created_at).getTime() < limiteDoAviso) continue;
+    const quem = pedido.customer_name ? ` de ${pedido.customer_name}` : '';
+    const criado = await lojaEvents.emitLojaEvent('loja_pix_expirado', pedido, {
+      body: `O Pix de ${fmtReais(pedido.total)}${quem} não foi pago em ${PRAZO_HORAS} h e o pedido foi cancelado automaticamente. Se ainda quiser a venda, chame o cliente.`,
+    });
+    if (criado) resumo.avisados++;
+  }
+  return resumo;
+}
+
 let _interval = null;
 
 function initPixExpiradoJob() {
@@ -73,7 +137,14 @@ function initPixExpiradoJob() {
       .then((s) => {
         if (s.notified > 0) console.log(`[pixExpirado] scanned=${s.scanned} avisados=${s.notified}`);
       })
-      .catch((e) => console.error('[pixExpirado] tick crash:', e.message));
+      .catch((e) => console.error('[pixExpirado] tick crash:', e.message))
+      // Depois do aviso, e nao em paralelo: o Pix com data que venceu ha
+      // pouco recebe o aviso de "recuperavel" antes de ser cancelado.
+      .then(() => tickCancelarPixVencido({ db, lojaEvents }))
+      .then((r) => {
+        if (r && r.cancelados > 0) console.log(`[pixExpirado] cancelados=${r.cancelados} avisados=${r.avisados}`);
+      })
+      .catch((e) => console.error('[pixExpirado] cancelamento crash:', e.message));
   }, INTERVALO_MS);
   if (_interval.unref) _interval.unref();
   console.log('[pixExpirado] iniciado — Pix da loja online vencido sem pagamento');
@@ -87,6 +158,8 @@ module.exports = {
   initPixExpiradoJob,
   stopPixExpiradoJob,
   tickPixExpirado,
+  tickCancelarPixVencido,
+  PRAZO_HORAS,
   BATCH,
   JANELA_DIAS,
   INTERVALO_MS,
