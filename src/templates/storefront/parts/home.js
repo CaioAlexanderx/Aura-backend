@@ -90,12 +90,14 @@ function renderHome(){
  * "Novidades" no menu so trocava a ordem e a pagina continuava dizendo
  * "Todos os produtos" (Caio, 02/09).
  */
-var VISTAS={ novidades:'Novidades', mais_vendidos:'Mais vendidos' };
+// "todos" (10/09/2026): a grade inteira em ordem de destaque — o destino
+// do botao "Ver todas as pecas" no fim da home curada.
+var VISTAS={ novidades:'Novidades', mais_vendidos:'Mais vendidos', todos:'Todas as peças' };
 var vistaEspecial=null;
 function verTudo(criterio){
   vistaEspecial=VISTAS[criterio]?criterio:null;
-  ordem=criterio;
-  var sel=document.getElementById('sortSelect'); if(sel) sel.value=criterio;
+  ordem=(criterio==='todos')?'destaque':criterio;
+  var sel=document.getElementById('sortSelect'); if(sel) sel.value=ordem;
   if(currentCat!=='Todos'){ currentCat='Todos'; if(typeof renderCategorias==='function') renderCategorias(); }
   // "Ver tudo" e um pedido explicito de ver a grade: aqui a rolagem vale.
   irParaPagina(1,{rolar:true});
@@ -114,9 +116,31 @@ function modoHome(){
   if(typeof paramsDeFiltro==='function'&&paramsDeFiltro().length) return false;
   return true;
 }
+/**
+ * Home CURADA: modo home com pelo menos um bloco desenhado. Ai a grade de
+ * "Todos os produtos" sai da home (ela repetia as 8 pecas de "Acabaram de
+ * chegar") e entra o botao "Ver todas as pecas". Loja sem bloco nenhum
+ * (poucas pecas, sem venda) continua com a grade — home vazia e pior.
+ */
+function homeCurada(){
+  return ['tiraCats','homeMaisVendidos','homeUltimas','homeNovidades'].some(function(id){
+    var el=document.getElementById(id); return !!(el&&!el.hidden);
+  });
+}
+function renderVerTudo(mostrar){
+  var el=document.getElementById('homeVerTudo'); if(!el) return;
+  el.hidden=!mostrar;
+  if(!mostrar){ el.innerHTML=''; return; }
+  var total=Number(CATALOGO_TOTAL)||0;
+  el.innerHTML='<button type="button" class="home-vertudo-btn" onclick="verTudo(\\'todos\\')">Ver todas as peças'
+    +(total?'<span class="mono">'+total+'</span>':'')+'<span aria-hidden="true">→</span></button>';
+}
 function atualizarModoHome(){
   var home=modoHome();
+  var curada=home&&homeCurada();
   document.body.classList.toggle('home',home);
+  document.body.classList.toggle('home-curada',curada);
+  renderVerTudo(curada);
   renderCabecalhoDaGrade(home);
   // O menu marca a vista aberta ("Novidades") como marca a categoria.
   if(typeof renderTopNav==='function') renderTopNav();

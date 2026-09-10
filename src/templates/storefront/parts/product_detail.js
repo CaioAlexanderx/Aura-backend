@@ -124,16 +124,33 @@ function voltarDaPagina(){
   else fecharProduto();
 }
 
+/**
+ * A folha da arvore repete o nome do pai? "Vestidos / Casual / Vestido
+ * casual": o terceiro nivel so existe porque a folha guardou o nome que a
+ * lojista usa no estoque (decisao de 28/08). Na trilha isso le como erro;
+ * o nivel some quando contem o nome do nivel de cima (10/09/2026).
+ */
+function nivelRedundante(nomePai,nomeFilho){
+  var limpar=function(s){ return String(s||'').toLowerCase().normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').trim(); };
+  var pai=limpar(nomePai), filho=limpar(nomeFilho);
+  if(!pai||!filho) return false;
+  return filho===pai || filho.indexOf(pai)>=0;
+}
+
 /** Migalhas da pagina do produto: Inicio / categoria (pelo caminho) / peca. */
 function migalhasDoProduto(p){
   var itens=['<a href="#" onclick="fecharProduto();return irParaHome();">Início</a>'];
   var caminho=p.category_path||'';
   if(caminho&&typeof noDoCaminho==='function'){
-    var partes=String(caminho).split('/').filter(Boolean), acum='';
-    partes.forEach(function(seg){
+    var partes=String(caminho).split('/').filter(Boolean), acum='', anterior='';
+    partes.forEach(function(seg,i){
       acum+='/'+seg;
       var no=noDoCaminho(acum);
-      if(no) itens.push('<a href="#" data-cat="'+esc(acum)+'" class="pd-crumb-cat">'+esc(no.nome)+'</a>');
+      if(!no) return;
+      // So a partir do terceiro nivel: o segundo e navegacao de verdade.
+      if(i>=2&&nivelRedundante(anterior,no.nome)) return;
+      anterior=no.nome;
+      itens.push('<a href="#" data-cat="'+esc(acum)+'" class="pd-crumb-cat">'+esc(no.nome)+'</a>');
     });
   } else if(p.category){
     itens.push('<span>'+esc(p.category)+'</span>');

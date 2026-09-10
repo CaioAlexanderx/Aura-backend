@@ -119,6 +119,15 @@ body:not(.home) .home-sec{display:none;}
 body:not(.home) .hero{display:none;}
 /* No modo home, a barra de categorias antiga sai: o cabecalho ja navega. */
 body.home .cats-wrap{display:none;}
+/* Home curada (10/09/2026): com pelo menos um bloco desenhado, a grade de
+   "Todos os produtos" nao entra na home — ela repetia as mesmas 8 pecas de
+   "Acabaram de chegar" logo abaixo. A grade vive em categoria, busca e na
+   vista "Todas as pecas". Loja sem bloco nenhum continua com a grade. */
+body.home-curada .products-section{display:none;}
+.home-vertudo{display:flex;justify-content:center;padding:8px 0 40px;}
+.home-vertudo-btn{appearance:none;background:var(--sf-bg-card);border:1px solid color-mix(in oklab,var(--sf-brand) 35%,transparent);color:var(--sf-brand);border-radius:var(--sf-r);padding:15px 28px;font-family:${fontSans};font-size:15px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:10px;}
+.home-vertudo-btn:hover{border-color:var(--sf-brand);}
+.home-vertudo-btn .mono{font-size:12px;color:var(--sf-ink-2);}
 .home-sec-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:22px;}
 .home-sec-head>div{display:flex;flex-direction:column;gap:4px;}
 .home-sec-tit{font-family:${fontSerif};font-weight:500;font-size:32px;margin:0;letter-spacing:-.3px;line-height:1.1;}
@@ -134,7 +143,10 @@ body.home .cats-wrap{display:none;}
 .tira-cat:hover,.tira-cat:focus-visible{box-shadow:var(--sf-shadow-hover);}
 .tira-cat:focus-visible{outline:2px solid var(--sf-brand);outline-offset:2px;}
 .tira-cat-arte{position:absolute;inset:0;overflow:hidden;}
-.tira-cat-arte img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .6s var(--sf-ease);}
+/* A capa e uma foto de produto em pe (9:16) num cartao deitado (4:3): com
+   o corte no centro a modelo saia sem cabeca. Foco no terco de cima, onde
+   esta o rosto (vitrine Finesse, 10/09/2026). */
+.tira-cat-arte img{width:100%;height:100%;object-fit:cover;object-position:50% 18%;display:block;transition:transform .6s var(--sf-ease);}
 /* A foto cresce DENTRO da moldura. */
 .tira-cat:hover .tira-cat-arte img,.tira-cat:focus-visible .tira-cat-arte img{transform:scale(1.04);}
 .tira-cat-pill{position:absolute;left:14px;bottom:12px;background:color-mix(in oklab,var(--sf-bg) 94%,transparent);padding:7px 16px;border-radius:999px;font-size:13px;font-weight:600;color:var(--sf-ink);display:inline-flex;align-items:baseline;gap:6px;pointer-events:none;}
@@ -373,6 +385,9 @@ body.home .products-grid{grid-template-columns:repeat(4,1fr);gap:20px 16px;}
 .pd-parcela{font-family:${fontSans};font-size:13.5px;color:var(--sf-ink-2);margin:0;}
 .pd-pix{display:inline-flex;align-items:center;gap:8px;color:var(--sf-pix);font-weight:600;font-size:14px;}
 .op-grupo{margin:0;display:flex;flex-direction:column;gap:10px;}
+/* Cor e tamanho sao grupos distintos: o rotulo TAMANHO encostava nos nomes
+   das cores (1 px de distancia, vitrine Finesse 10/09/2026). */
+.op-grupo+.op-grupo{margin-top:22px;}
 .op-label{display:flex;align-items:center;justify-content:space-between;margin:0;}
 .op-escolhido{text-transform:none;letter-spacing:0;color:var(--sf-ink);}
 .op-pede{font-family:${fontSans};font-size:12.5px;font-weight:600;color:var(--sf-brand);text-transform:none;letter-spacing:0;}
