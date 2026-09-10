@@ -151,10 +151,22 @@ function buildHtmlBody({
     // decide o que fazer com a larga.
     const temTexto = !!(b.kicker || b.headline || b.body || cta);
     const semArteMobile = comFoto && !b.image_url_mobile;
+    // Arte pronta com destino (10/09/2026): a lojista desenhou o texto e o
+    // "Ver ..." dentro da imagem e so preencheu o destino. Sem texto nosso
+    // por cima, o banner INTEIRO vira o link — senao o "Ver a colecao" da
+    // arte e um convite sem clique.
+    let linkDaArte = '';
+    if (comFoto && !temTexto && b.cta_url) {
+      const interno = b.cta_url.charAt(0) === '#';
+      const rotulo = escHtml(b.headline || siteName);
+      linkDaArte = interno
+        ? `<a class="hero-link" href="${escHtml(b.cta_url)}" aria-label="${rotulo}" onclick="return irPeloCta(this)"></a>`
+        : `<a class="hero-link" href="${escHtml(b.cta_url)}" aria-label="${rotulo}" target="_blank" rel="noopener"></a>`;
+    }
     return `<div class="banner-slide hero-slide${comFoto ? ' com-foto' : ' sem-foto'}${temTexto ? ' com-texto' : ''}${semArteMobile ? ' sem-foto-mob' : ''}${i===0?' active':''}">
       <div class="hero-bg"${bgStyle}></div>
       <div class="hero-scrim"></div>
-      <div class="hero-inner"><div class="hero-text">${kicker}${headline}${body}${cta}</div></div>
+      <div class="hero-inner"><div class="hero-text">${kicker}${headline}${body}${cta}</div></div>${linkDaArte}
     </div>`;
   }).join('\n');
 

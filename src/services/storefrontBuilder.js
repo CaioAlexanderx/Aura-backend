@@ -171,6 +171,10 @@ function destinoDoCta(raw) {
   if (!u) return '';
   if (/^https?:\/\//i.test(u)) return u;
   if (/^#cat=\/[a-z0-9][a-z0-9\-\/]*$/i.test(u)) return u;
+  // Vistas da grade (10/09/2026): "Ver a colecao" e "Ver novidades" nao
+  // sao categoria; sao a grade inteira numa ordem. Mesmo contrato do
+  // painel (destinoDoCta.ts) e do botao da home curada.
+  if (/^#vista=(todos|novidades|mais_vendidos)$/.test(u)) return u;
   return '';
 }
 
