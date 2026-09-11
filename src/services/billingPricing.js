@@ -107,6 +107,22 @@ function getFirstChargeValue(plan, cycle, billingType, extraSeats = 0, discountP
   return round2(discountedPlan + getSeatsValue(extraSeats, cycle, billingType));
 }
 
+// 11/09/2026: quanto o cupom abate de CADA mensalidade, em reais.
+// O cupom agora pode ser em percentual (discount_pct) OU em valor fixo
+// (discount_value, ex.: R$ 50). Nos dois casos incide so no plano e nunca
+// passa do valor do plano. Para discount_pct o resultado bate centavo a
+// centavo com getFirstChargeValue (total - abatimento = primeira cobranca).
+function getCouponDiscountAmount(plan, cycle, billingType, { discountPct = 0, discountValue = 0 } = {}) {
+  const planValue = getPlanValue(plan, cycle, billingType);
+  if (planValue === null) return null;
+
+  const pct = Number.isFinite(discountPct) && discountPct > 0 ? Math.min(discountPct, 100) : 0;
+  if (pct > 0) return round2(planValue - round2(planValue * (1 - pct / 100)));
+
+  const fixed = Number.isFinite(discountValue) && discountValue > 0 ? discountValue : 0;
+  return round2(Math.min(fixed, planValue));
+}
+
 module.exports = {
   PLANS,
   ANNUAL_DISCOUNT,
@@ -118,4 +134,5 @@ module.exports = {
   getSeatsValue,
   getTotalValue,
   getFirstChargeValue,
+  getCouponDiscountAmount,
 };

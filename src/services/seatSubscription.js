@@ -15,8 +15,10 @@
 // granted continua sendo a fonte de verdade do que foi contratado.
 // ============================================================
 
+const db = require('../config/database');
 const { asaas } = require('./asaasClient');
-const { getTotalValue, PLANS } = require('./billingPricing');
+const { getTotalValue, PLANS, MIN_CHARGE_BRL } = require('./billingPricing');
+const { getSyncAdjustment } = require('./subscriptionDiscount');
 
 // Status de assinatura no Asaas que aceitam atualizacao de valor.
 const SYNCABLE_STATUSES = new Set(['ACTIVE', 'active']);
@@ -61,10 +63,16 @@ async function syncSubscriptionSeatValue(company) {
     }
 
     const billingType = sub?.billingType || 'CREDIT_CARD';
-    const newValue = getTotalValue(company.plan, cycle, billingType, seats);
-    if (newValue === null) {
+    const tableValue = getTotalValue(company.plan, cycle, billingType, seats);
+    if (tableValue === null) {
       return { updated: false, skipped: 'invalid_plan' };
     }
+
+    // 11/09/2026: desconto de varios meses em andamento. Sem este ajuste,
+    // conceder um acesso extra no 2o mes gravaria o valor de tabela e apagaria
+    // o desconto em silencio (ver services/subscriptionDiscount.js).
+    const adjust = await getSyncAdjustment(db, company.id, subId);
+    const newValue = Math.max(MIN_CHARGE_BRL, Math.round((tableValue - adjust.discountAmount) * 100) / 100);
 
     // Sem mudanca de valor → nada a fazer.
     if (typeof sub?.value === 'number' && Math.abs(sub.value - newValue) < 0.005) {
@@ -77,8 +85,10 @@ async function syncSubscriptionSeatValue(company) {
 
     await asaas('PUT', '/subscriptions/' + subId, {
       value: newValue,
-      description: desc,
-      updatePendingPayments: true,
+      // Durante o desconto a descricao mantem o cupom (a rotina tira no fim) e
+      // as cobrancas ja geradas nao mudam.
+      description: adjust.discountAmount > 0 && sub?.description ? sub.description : desc,
+      updatePendingPayments: adjust.updatePendingPayments,
     });
 
     return {

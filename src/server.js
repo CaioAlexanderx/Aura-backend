@@ -104,6 +104,11 @@ function startServer() {
     // evento do sino sem gancho de fluxo: ninguém "faz" um Pix expirar.
     const { initPixExpiradoJob } = require('./jobs/lojaPixExpiradoJob');
     initPixExpiradoJob();
+
+    // Assinatura (326): cupom com desconto por varios meses — devolve o valor
+    // cheio no Asaas e avisa o cliente antes da 1a mensalidade cheia. Tick 6h.
+    const { initSubscriptionDiscountJob } = require('./jobs/subscriptionDiscountJob');
+    initSubscriptionDiscountJob();
   });
 }
 
