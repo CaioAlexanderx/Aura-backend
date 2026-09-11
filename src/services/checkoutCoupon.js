@@ -29,6 +29,16 @@
 //   3. cobra no Asaas
 //   4a. sucesso → recordRedemption (auditoria em coupon_redemptions)
 //   4b. falha   → releaseCoupon (uses-1) — cobranca recusada nao queima o cupom
+//
+// 11/09/2026 — DESCONTO EM REAIS E POR VARIOS MESES (migration 326):
+//   discount_value    → desconto em reais (alternativa ao discount_pct; nunca
+//                       os dois no mesmo cupom).
+//   discount_months   → quantas mensalidades levam o desconto. 1 = o
+//                       comportamento acima, intacto. Mais de 1 = a assinatura
+//                       nasce descontada e services/subscriptionDiscount.js
+//                       cuida de devolver o valor cheio. So no ciclo mensal
+//                       (o anual ja tem 2 meses gratis) e nunca com trial_days.
+//   restrict_to_plan  → o cupom so vale no plano da coluna `plan`.
 // ============================================================
 
 const db = require('../config/database');
@@ -52,11 +62,11 @@ async function validateCoupon(rawCode, companyId) {
 
   let rows;
   try {
+    // SELECT * de proposito: as colunas da migration 326 (discount_value,
+    // discount_months, restrict_to_plan) podem nao existir ainda — uma lista
+    // explicita quebraria com 42703; aqui elas so chegam undefined.
     ({ rows } = await db.query(
-      `SELECT id, code, type, plan, discount_pct, trial_days, max_uses, uses,
-              expires_at, is_active, referrer_id
-         FROM access_codes
-        WHERE code = $1`,
+      `SELECT * FROM access_codes WHERE code = $1`,
       [code]
     ));
   } catch (err) {
@@ -80,13 +90,21 @@ async function validateCoupon(rawCode, companyId) {
 
   const discountPct = parseInt(ac.discount_pct, 10) || 0;
   const trialDays = parseInt(ac.trial_days, 10) || 0;
-  if (discountPct <= 0 && trialDays <= 0) {
+  const discountValue = Math.round((parseFloat(ac.discount_value) || 0) * 100) / 100;
+  const discountMonths = parseInt(ac.discount_months, 10) || 1;
+  if (discountPct <= 0 && discountValue <= 0 && trialDays <= 0) {
     // Codigo existe mas nao desconta nem adia nada — dizer isso e melhor do que
     // aceitar em silencio e cobrar cheio (foi exatamente o bug antigo).
     return { valid: false, error: 'Este cupom nao concede desconto nem dias gratis.' };
   }
   if (discountPct > 100) {
     return { valid: false, error: 'Cupom com desconto invalido (acima de 100%).' };
+  }
+  // Combinacoes que o painel ja recusa na criacao; aqui e a ultima linha de
+  // defesa para cupom criado direto no banco.
+  if ((discountPct > 0 && discountValue > 0) || (discountMonths > 1 && trialDays > 0) ||
+      (discountMonths > 1 && discountPct <= 0 && discountValue <= 0)) {
+    return { valid: false, error: 'Cupom configurado de forma invalida.' };
   }
 
   // Mesma empresa nao resgata o mesmo cupom duas vezes.
@@ -112,9 +130,30 @@ async function validateCoupon(rawCode, companyId) {
     code: ac.code,
     type: ac.type,
     discount_pct: discountPct,
+    discount_value: discountValue,
+    discount_months: discountMonths,
     trial_days: trialDays,
+    plan: ac.plan || null,
+    restrict_to_plan: ac.restrict_to_plan === true,
     referrer_id: ac.referrer_id || null,
   };
+}
+
+const PLAN_LABELS = { essencial: 'Essencial', negocio: 'Negócio', expansao: 'Expansão' };
+
+/**
+ * O cupom (ja validado) serve para este plano e ciclo? Puro.
+ * @returns {string|null} mensagem de erro, ou null quando serve.
+ */
+function checkCouponFits(coupon, { plan, cycle }) {
+  if (!coupon) return null;
+  if (coupon.restrict_to_plan && coupon.plan && plan !== coupon.plan) {
+    return 'Este cupom vale só para o plano ' + (PLAN_LABELS[coupon.plan] || coupon.plan) + '.';
+  }
+  if ((coupon.discount_months || 1) > 1 && cycle === 'annual') {
+    return 'Este cupom vale só no plano mensal.';
+  }
+  return null;
 }
 
 /**
@@ -163,30 +202,41 @@ async function releaseCoupon(codeId) {
  * Defensivo pre-migration 228 (42P01 -> so loga).
  */
 async function recordRedemption(data) {
-  try {
-    await db.query(
-      `INSERT INTO coupon_redemptions
-         (company_id, user_id, code_id, code, type, discount_pct, trial_days,
+  const base = [
+    data.companyId,
+    data.userId || null,
+    data.codeId || null,
+    data.code,
+    data.type || null,
+    data.discountPct || 0,
+    data.trialDays || 0,
+    data.plan || null,
+    data.cycle || null,
+    data.billingType || null,
+    data.recurringValue != null ? data.recurringValue : null,
+    data.chargedValue != null ? data.chargedValue : null,
+    data.paymentId || null,
+    data.subscriptionId || null,
+  ];
+  const columns = `company_id, user_id, code_id, code, type, discount_pct, trial_days,
           plan, cycle, billing_type, recurring_value, charged_value,
-          asaas_payment_id, asaas_subscription_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-      [
-        data.companyId,
-        data.userId || null,
-        data.codeId || null,
-        data.code,
-        data.type || null,
-        data.discountPct || 0,
-        data.trialDays || 0,
-        data.plan || null,
-        data.cycle || null,
-        data.billingType || null,
-        data.recurringValue != null ? data.recurringValue : null,
-        data.chargedValue != null ? data.chargedValue : null,
-        data.paymentId || null,
-        data.subscriptionId || null,
-      ]
-    );
+          asaas_payment_id, asaas_subscription_id`;
+  try {
+    try {
+      await db.query(
+        `INSERT INTO coupon_redemptions (${columns}, discount_value, discount_months)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+        [...base, data.discountValue || 0, data.discountMonths || 1]
+      );
+    } catch (err) {
+      // Pre-migration 326: grava sem as colunas novas em vez de perder a auditoria.
+      if (err.code !== '42703') throw err;
+      await db.query(
+        `INSERT INTO coupon_redemptions (${columns})
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        base
+      );
+    }
   } catch (err) {
     if (err.code === '42P01') {
       console.warn('[COUPON] coupon_redemptions nao existe (migration 228 pendente) — resgate nao auditado');
@@ -199,6 +249,7 @@ async function recordRedemption(data) {
 module.exports = {
   REDEEMABLE_TYPES,
   validateCoupon,
+  checkCouponFits,
   reserveCoupon,
   releaseCoupon,
   recordRedemption,

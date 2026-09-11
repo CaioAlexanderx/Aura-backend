@@ -15,6 +15,8 @@
 // ============================================================
 
 const db = require('../config/database');
+const { getSyncAdjustment } = require('../services/subscriptionDiscount');
+const { MIN_CHARGE_BRL } = require('../services/billingPricing');
 
 const ASAAS_URL = process.env.ASAAS_URL || 'https://api.asaas.com/v3';
 const ASAAS_KEY = process.env.ASAAS_API_KEY;
@@ -186,9 +188,16 @@ async function syncSubscriptionValue(primaryCompanyId) {
     throw err;
   }
 
+  // 11/09/2026: desconto de varios meses em andamento (services/subscriptionDiscount).
+  // Sem este ajuste, adicionar um CNPJ no 2o mes gravaria o valor de tabela e
+  // apagaria o desconto em silencio.
+  const adjust = await getSyncAdjustment(db, primaryCompanyId, company.asaas_subscription_id);
+  const targetValue = Math.max(MIN_CHARGE_BRL,
+    Math.round((calc.total_monthly - adjust.discountAmount) * 100) / 100);
+
   // Sem mudança? evita PUT desnecessário (cada PUT no Asaas
   // pode disparar email de notificação ao cliente)
-  if (currentValue !== null && Math.abs(currentValue - calc.total_monthly) < 0.01) {
+  if (currentValue !== null && Math.abs(currentValue - targetValue) < 0.01) {
     return {
       synced: false,
       reason: 'no_change',
@@ -201,11 +210,13 @@ async function syncSubscriptionValue(primaryCompanyId) {
   let updated;
   try {
     updated = await asaas('POST', '/subscriptions/' + company.asaas_subscription_id, {
-      value: calc.total_monthly,
+      value: targetValue,
       // updatePendingPayments=true: aplica novo valor a faturas pendentes ainda
       // não pagas. Se false (default), só vale pra próximas faturas — o que pode
       // gerar inconsistência se o user adiciona CNPJ no dia do vencimento.
-      updatePendingPayments: true,
+      // Durante um desconto de varios meses fica false: uma mensalidade com
+      // desconto ainda por vencer nao pode subir pro valor cheio.
+      updatePendingPayments: adjust.updatePendingPayments,
     });
   } catch (err) {
     console.error('[multicnpjBilling] PUT subscription failed:', err.message);
@@ -213,13 +224,14 @@ async function syncSubscriptionValue(primaryCompanyId) {
   }
 
   console.log('[multicnpjBilling] Synced subscription ' + company.asaas_subscription_id +
-              ' from R$ ' + currentValue + ' to R$ ' + calc.total_monthly +
-              ' (' + calc.total_companies + ' empresas, ' + calc.extra_cnpjs + ' extras)');
+              ' from R$ ' + currentValue + ' to R$ ' + targetValue +
+              ' (' + calc.total_companies + ' empresas, ' + calc.extra_cnpjs + ' extras' +
+              (adjust.discountAmount > 0 ? ', desconto em andamento -' + adjust.discountAmount : '') + ')');
 
   return {
     synced: true,
     old_value: currentValue,
-    new_value: calc.total_monthly,
+    new_value: targetValue,
     asaas_subscription_id: company.asaas_subscription_id,
     preview: calc,
   };
