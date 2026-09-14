@@ -240,8 +240,12 @@ router.put('/dojo/billing/reminder-config', requireDojoAccess, requireChannelA, 
   const querAutomatico = b.send_whatsapp_auto === true || b.send_whatsapp_auto === 'true';
   try {
     if (querAutomatico) {
-      const temAddon = await addons.hasAddon(req.dojoId, addons.ADDON_WHATSAPP_AUTO);
-      if (!temAddon) {
+      // Gate único (Fase 6): adicional contratado OU plano que já inclui
+      // o WhatsApp. Para o dojô, na prática, é o adicional — 104 dos 106
+      // estão no 'essencial' —, mas o dojô que por acaso esteja no
+      // Negócio não deve ser cobrado duas vezes pela mesma coisa.
+      const podeAutomatico = await addons.canAutoWhatsapp(req.dojoId);
+      if (!podeAutomatico) {
         return res.status(403).json({
           error: 'O envio automático por WhatsApp é um adicional do plano. Fale com a Aura para ativar.',
           code: 'ADDON_REQUIRED',

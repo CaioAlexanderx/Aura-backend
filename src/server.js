@@ -95,6 +95,12 @@ function startServer() {
     const { initWaDispatcher } = require('./jobs/waDispatcherJob');
     initWaDispatcher();
 
+    // FASE 6: régua do crediário pelo WhatsApp oficial — diário 9h BRT,
+    // kill switch CREDIT_WA_AUTO_ENABLED=false. Quem despacha continua
+    // sendo o waDispatcher; este job só enfileira.
+    const { initCreditCollectionAutoJob } = require('./jobs/creditCollectionAutoJob');
+    initCreditCollectionAutoJob();
+
     // AURINHA (312): dispatcher da fila Instagram (ig_outbox) — tick 15s,
     // kill switch IG_DISPATCH_ENABLED=false.
     const { initIgDispatcher } = require('./jobs/igDispatcherJob');

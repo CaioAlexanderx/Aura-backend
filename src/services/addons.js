@@ -64,6 +64,48 @@ async function hasAddon(companyId, key) {
   return value;
 }
 
+// ── Gate ÚNICO do envio automático (Fase 6) ─────────────────
+// Quem pode gastar mensagem paga: quem CONTRATOU o adicional (o caso do
+// dojô, quase todo mundo no 'essencial') OU quem já paga um plano que
+// inclui WhatsApp (Negócio/Expansão — MODULE_PLAN_MAP já põe o módulo
+// 'whatsapp' no 'negocio'). O adicional de R$39 é justamente para quem
+// está fora desses planos; cobrar de novo de quem já paga o plano seria
+// vender duas vezes a mesma coisa.
+//
+// O plano vem SEMPRE do banco, nunca do JWT: o token do app carrega o
+// plano de quando a pessoa entrou e não revalida sozinho (armadilha nº 9
+// do CLAUDE.md) — uma troca de plano hoje só valeria no próximo login.
+const PLANOS_COM_WHATSAPP_AUTO = new Set(['negocio', 'expansao']);
+const PLAN_CACHE_KEY = '__plan__';
+
+async function planAllowsAutoWhatsapp(companyId) {
+  const ck = `${companyId}:${PLAN_CACHE_KEY}`;
+  const hit = _cache.get(ck);
+  if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
+
+  let value = false;
+  try {
+    const { rows } = await db.query(
+      `-- addon:plan
+       SELECT plan FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    const plan = rows[0] && rows[0].plan ? String(rows[0].plan).toLowerCase() : null;
+    value = !!plan && PLANOS_COM_WHATSAPP_AUTO.has(plan);
+  } catch (e) {
+    if (!schemaMissing(e)) throw e;
+    value = false;
+  }
+  _cache.set(ck, { value, at: Date.now() });
+  return value;
+}
+
+async function canAutoWhatsapp(companyId) {
+  if (!companyId) return false;
+  if (await hasAddon(companyId, ADDON_WHATSAPP_AUTO)) return true;
+  return planAllowsAutoWhatsapp(companyId);
+}
+
 async function listAddons(companyId) {
   try {
     const { rows } = await db.query(
@@ -114,6 +156,8 @@ async function setAddon(companyId, key, { active = true, priceCents = null, sour
 module.exports = {
   ADDON_WHATSAPP_AUTO,
   DEFAULT_PRICE_CENTS,
-  hasAddon, listAddons, setAddon,
+  PLANOS_COM_WHATSAPP_AUTO,
+  hasAddon, canAutoWhatsapp, planAllowsAutoWhatsapp,
+  listAddons, setAddon,
   invalidate, clearCache,
 };
