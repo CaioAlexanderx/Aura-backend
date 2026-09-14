@@ -24,6 +24,7 @@ const db = require('../../config/database');
 const waOutbox = require('../waOutbox');
 const addons = require('../addons');
 const mkt = require('./marketingCommon');
+const quota = require('./marketingQuota');
 
 // Janelas de recência, iguais às da tela (customerReactivation.js):
 // active ≤30d, at_risk ≤60d, dormant ≤120d. 'both' cobre as duas faixas
@@ -151,9 +152,15 @@ async function runForCompany(companyId, {
 
   // Tetos são sobre ACÚMULO: no envio real quem aplica é o enqueue; na
   // prévia o acumulado é mantido aqui, na mesma ordem em que a rotina
-  // enfileiraria (igual às prévias do dojô e do crediário).
-  const marketingLimit = waOutbox.marketingDailyCap();
-  let marketingHoje = dryRun ? await waOutbox.countMarketing(companyId, { todayOnly: true }) : 0;
+  // enfileiraria (igual às prévias do dojô e do crediário). São DOIS
+  // acúmulos desde a Fase 8b — o teto diário anti-rajada e a cota mensal
+  // do plano — e a prévia precisa dos dois, senão ela promete 30 envios
+  // para quem só tem 4 de cota sobrando.
+  const tracker = quota.makeCapTracker({
+    dailyCap: waOutbox.marketingDailyCap(),
+    dailyUsed: dryRun ? await waOutbox.countMarketing(companyId, { todayOnly: true }) : 0,
+    remaining: dryRun ? await quota.remainingThisMonth(companyId) : Infinity,
+  });
 
   for (const c of candidatos) {
     if (await mkt.jaRecebeu(companyId, c.id, mkt.KIND_REATIVACAO, { days: REATIVACAO_JANELA_DIAS })) {
@@ -169,9 +176,10 @@ async function runForCompany(companyId, {
       sourceType: mkt.KIND_REATIVACAO,
     });
     if (!sim.ok) { bump(sim.reason); pushItem(c, sim.reason); continue; }
-    if (marketingHoje >= marketingLimit) { bump('LIMITE_MARKETING'); pushItem(c, 'LIMITE_MARKETING'); continue; }
+    const limite = tracker.reason();
+    if (limite) { bump(limite); pushItem(c, limite); continue; }
 
-    if (dryRun) { marketingHoje++; out.enqueued++; continue; }
+    if (dryRun) { tracker.bump(); out.enqueued++; continue; }
 
     const cupom = await mkt.createCoupon(companyId, c, mkt.KIND_REATIVACAO);
     if (!cupom) { bump('SEM_CUPOM'); pushItem(c, 'SEM_CUPOM'); continue; }
@@ -198,7 +206,7 @@ async function runForCompany(companyId, {
 
     if (r.queued) {
       out.enqueued++;
-      marketingHoje++;
+      tracker.bump();
       await mkt.logMarketing({
         companyId, customerId: c.id, kind: mkt.KIND_REATIVACAO,
         segment: seg === 'both' ? (Number(c.days_since) > 60 ? 'dormant' : 'at_risk') : seg,

@@ -13,6 +13,8 @@
 //   GET   /whatsapp/preview           — prévia da régua automática, SEM enfileirar
 //   POST  /whatsapp/test-send         — enfileira + despacha na hora
 //   POST  /whatsapp/contacts/opt      — opt-in/opt-out manual
+//   GET   /whatsapp/marketing-packs   — pacotes extras de marketing
+//   POST  /whatsapp/marketing-packs   — compra um pacote de 100 por R$49
 //
 // CONSOLIDAÇÃO (25/08/2026): estas rotas viviam em DOIS routers — o
 // legado (whatsappRoutes.js, atrás de requirePlan('negocio','expansao'))
@@ -33,6 +35,8 @@ const { requireAuth, requireCompanyAccess } = require('../middleware/auth');
 const waOutbox = require('../services/waOutbox');
 const wa = require('../services/whatsapp');
 const addons = require('../services/addons');
+const quota = require('../services/marketing/marketingQuota');
+const { asaasRequest } = require('../services/asaasClient');
 const { encrypt } = require('../services/dojoBaasCrypto');
 
 const guard = [requireAuth, requireCompanyAccess({})];
@@ -570,6 +574,13 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
     const templateStatus = await loadBillingTemplate(req.params.id);
     const templatesReady = await loadTemplatesReady(req.params.id);
     const usage = await loadUsage(req.params.id);
+    // Fase 8b: a tela precisa separar o que é ILIMITADO (cobrança, uso
+    // justo silencioso) do que tem COTA VISÍVEL (marketing, 100/mês +
+    // pacotes). Os campos antigos de `usage` continuam onde estavam — a
+    // versão do app que ainda não conhece estes dois blocos não pode
+    // perder o contador que já mostra.
+    const marketingUsage = await quota.marketingStatus(req.params.id);
+    const utilityUsage = await quota.utilityStatus(req.params.id);
     const creditSharedAt = await loadCreditShared(req.params.id);
     const coexistence = await loadCoexistence(req.params.id);
     // Fases 7/8: a tela de marketing precisa de UM campo para travar o
@@ -615,7 +626,12 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
       registered: !!(extras && extras.wa_registered_at),
       credit_shared: !!creditSharedAt,
       coexistence,
-      usage: { ...usage, daily_cap: dailyCap() },
+      usage: {
+        ...usage,
+        daily_cap: dailyCap(),
+        marketing: marketingUsage,
+        utility: utilityUsage,
+      },
       // A tela do dojô monta o Embedded Signup com isto; sem config_id
       // não há botão (e não adianta pedir para "conectar").
       embedded_signup: {
@@ -1020,6 +1036,146 @@ router.post('/whatsapp/contacts/opt', ...guard, async (req, res) => {
     if (e.code === '42P01') return schemaPending(res);
     console.error('[whatsappCloud] opt error:', e.message);
     return res.status(500).json({ error: 'Erro ao registrar o opt' });
+  }
+});
+
+// ============================================================
+// FASE 8b — PACOTES EXTRAS DE MARKETING (100 por R$49)
+//
+//   GET  /whatsapp/marketing-packs   — histórico (últimos 12)
+//   POST /whatsapp/marketing-packs   — compra um pacote
+//
+// Por que a cobrança é AVULSA e não um item na assinatura: o pacote é
+// eventual (a loja compra no mês da Black Friday e não compra em
+// fevereiro) e precisa valer na hora em que o dinheiro cai, não no
+// próximo ciclo. Mexer na subscription do Asaas para somar R$49 mudaria
+// o valor recorrente do cliente — o tipo de coisa que ninguém desfaz
+// sozinho e que vira estorno no mês seguinte.
+//
+// O pacote nasce 'pending' e SÓ o webhook do Asaas (PAYMENT_RECEIVED/
+// CONFIRMED, externalReference wa-pack-<id>) o ativa. Sem cliente Asaas
+// ou com o Asaas fora do ar, ele fica 'pending' com needs_manual e a
+// Aura ativa pela Gestão — nunca liberamos a cota antes do pagamento.
+// ============================================================
+
+// Dias até o vencimento da cobrança avulsa. Curto de propósito: quem
+// compra pacote está com a cota estourada HOJE.
+const PACK_DUE_DAYS = 3;
+
+function packDueDate() {
+  const d = new Date(Date.now() - 3 * 3600000 + PACK_DUE_DAYS * 86400000);
+  return d.toISOString().slice(0, 10);
+}
+
+async function loadAsaasCustomerId(companyId) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:pack-asaas-customer
+       SELECT asaas_customer_id FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    return (rows[0] && rows[0].asaas_customer_id) || null;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') return null;
+    throw e;
+  }
+}
+
+// Registra em alert_history que existe um pacote esperando ativação
+// manual. É o que impede o pedido de morrer em silêncio quando a loja
+// não tem cliente no Asaas (cortesia, cobrança fora da plataforma).
+async function avisarSuportePacoteManual(companyId, pack, motivo) {
+  console.warn(
+    `[whatsappCloud] pacote de marketing ${pack.id} da company ${companyId} precisa de ativação MANUAL — ${motivo}`
+  );
+  try {
+    await db.query(
+      `-- wa:pack-alerta-manual
+       INSERT INTO alert_history (company_id, alert_type, severity, title, message, data)
+       VALUES ($1, 'wa_marketing_pack_manual', 'warning', $2, $3, $4)`,
+      [companyId, 'Pacote de mensagens aguardando ativação',
+       `A loja pediu um pacote de ${pack.qty} mensagens promocionais (R$ ${(pack.price_cents / 100).toFixed(2).replace('.', ',')}) e a cobrança automática não pôde ser criada: ${motivo}. Ativar pela Gestão Aura.`,
+       JSON.stringify({ pack_id: pack.id, qty: pack.qty, price_cents: pack.price_cents, motivo })]
+    );
+  } catch (e) {
+    // Mesma regra do appNotifications: avisar nunca derruba o fluxo. Só
+    // a tabela ausente é silenciosa; o resto grita no log.
+    if (e.code !== '42P01' && e.code !== '42703') {
+      console.error('[whatsappCloud] alerta de pacote manual falhou:', e.code || '', e.message);
+    }
+  }
+}
+
+router.get('/whatsapp/marketing-packs', ...guard, async (req, res) => {
+  try {
+    const data = await quota.listPacks(req.params.id, 12);
+    return res.json({ data });
+  } catch (e) {
+    console.error('[whatsappCloud] marketing-packs list error:', e.message);
+    return res.status(500).json({ error: 'Erro ao listar os pacotes' });
+  }
+});
+
+router.post('/whatsapp/marketing-packs', ...guard, async (req, res) => {
+  const b = req.body || {};
+  // Só o pacote da vitrine por ora. Aceitar qty livre aqui seria deixar
+  // o cliente escolher o preço — o valor da cobrança sai do nosso lado,
+  // nunca do corpo da requisição.
+  const qty = b.qty === undefined || b.qty === null || b.qty === '' ? quota.PACK_QTY : Number(b.qty);
+  if (qty !== quota.PACK_QTY) {
+    return res.status(422).json({
+      error: `Por ora só há o pacote de ${quota.PACK_QTY} mensagens.`,
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  try {
+    const pack = await quota.createPack(req.params.id, {
+      qty: quota.PACK_QTY,
+      priceCents: quota.PACK_PRICE_CENTS,
+      status: 'pending',
+      source: 'app',
+      createdBy: (req.user && req.user.id) || null,
+    });
+    if (!pack) {
+      return res.status(503).json({
+        error: 'Pacotes de mensagens ainda não disponíveis (migration 332 pendente)',
+        code: 'SCHEMA_PENDING',
+      });
+    }
+
+    const customerId = await loadAsaasCustomerId(req.params.id);
+    if (!customerId) {
+      await avisarSuportePacoteManual(req.params.id, pack, 'a empresa não tem cliente no Asaas');
+      return res.json({ pack, payment_url: null, needs_manual: true });
+    }
+
+    try {
+      const cobranca = await asaasRequest('POST', '/payments', {
+        customer: customerId,
+        // UNDEFINED deixa o Asaas oferecer Pix, boleto e cartão na mesma
+        // fatura — o lojista escolhe, e o Pix é o que ativa na hora.
+        billingType: 'UNDEFINED',
+        value: quota.PACK_PRICE_CENTS / 100,
+        dueDate: packDueDate(),
+        description: `Aura — pacote de ${pack.qty} mensagens promocionais no WhatsApp`,
+        externalReference: `wa-pack-${pack.id}`,
+      });
+      const paymentUrl = cobranca.invoiceUrl || cobranca.bankSlipUrl || null;
+      const atualizado = await quota.setPackPayment(pack.id, {
+        asaasPaymentId: cobranca.id || null,
+        paymentUrl,
+      });
+      return res.json({ pack: atualizado || pack, payment_url: paymentUrl, needs_manual: false });
+    } catch (e) {
+      // Asaas fora do ar, chave ausente, cliente recusado: o pedido do
+      // lojista NÃO se perde — fica pendente e o suporte ativa.
+      await avisarSuportePacoteManual(req.params.id, pack, `o Asaas recusou a cobrança (${e.message})`);
+      return res.json({ pack, payment_url: null, needs_manual: true });
+    }
+  } catch (e) {
+    console.error('[whatsappCloud] marketing-pack error:', e.message);
+    return res.status(500).json({ error: 'Erro ao pedir o pacote de mensagens' });
   }
 });
 

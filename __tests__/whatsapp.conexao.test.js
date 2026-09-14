@@ -264,7 +264,16 @@ it('(7) status devolve addon, template, uso e embedded_signup — com wa_outbox 
     subscribed: true, registered: true,
   });
   // Fila ausente não zera o resto: o uso vem em zeros, nunca undefined.
-  expect(res.body.usage).toEqual({ today_sent: 0, month_sent: 0, daily_cap: 300 });
+  // Os blocos `marketing`/`utility` chegaram na Fase 8b e obedecem à mesma
+  // regra — sem wa_outbox, contadores em zero e a cota base do plano.
+  expect(res.body.usage).toEqual({
+    today_sent: 0, month_sent: 0, daily_cap: 300,
+    marketing: {
+      month_sent: 0, quota_base: 100, packs_qty: 0, quota: 100, remaining: 100,
+      pack_price_cents: 4900, pack_qty: 100,
+    },
+    utility: { month_sent: 0, cap: 1500 },
+  });
   expect(res.body.embedded_signup).toEqual({
     app_id: '1496711532094674', config_id: 'CFG-ES-TESTE', graph_version: 'v21.0',
   });

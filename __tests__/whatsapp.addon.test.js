@@ -12,8 +12,14 @@
 //  (2) o cache de 60s poupa a ida ao banco; setAddon invalida.
 //  (3) setAddon desativando grava 'cancelled' com ended_at.
 //  (4) rotas admin: listar e ligar/desligar o adicional.
-//  (5) régua do dojô com send_whatsapp_auto=true SEM adicional → 403
-//      ADDON_REQUIRED, e o banco de configuração nem é tocado.
+//  (2b)(2c)(2d) Fase 8b: Negócio/Expansão (plano) e Aura Dojô/federação
+//      (vertical) passaram a INCLUIR o WhatsApp; o Essencial de varejo
+//      continua dependendo do adicional.
+//  (5) régua do dojô com send_whatsapp_auto=true, sem adicional e sem
+//      produto que inclua → 403 ADDON_REQUIRED, e o banco de
+//      configuração nem é tocado.
+//  (5b) o MESMO cenário com a vertical de dojô → 200: o Aura Dojô já
+//      inclui o WhatsApp e não cobra os R$39 por cima.
 //  (6) com adicional mas sem número conectado → 409 NAO_CONECTADO.
 //  (7) com adicional e conectado → 200 (salva).
 //  (8) DESLIGAR nunca é barrado (sem adicional, send_whatsapp_auto
@@ -60,14 +66,26 @@ function buildAdminApp() {
 }
 
 // Estado do "banco" por âncora de SQL. `addonAtivo` decide o adicional;
+// `plano`/`vertical` decidem o que o PRODUTO já inclui (Fase 8b);
 // `conectado` decide a credencial do WhatsApp (039/309).
-function mockBanco({ addonAtivo = false, conectado = true, tokenExpirado = false } = {}) {
-  const visto = { configSalva: null, addonHas: 0 };
+//
+// O default é a empresa mais restrita que existe hoje: varejo no
+// 'essencial', sem vertical de karatê e sem adicional. Quem quiser o
+// caso liberado diz isso no teste.
+function mockBanco({
+  addonAtivo = false, conectado = true, tokenExpirado = false,
+  plano = 'essencial', vertical = null,
+} = {}) {
+  const visto = { configSalva: null, addonHas: 0, planLookups: 0 };
   db.query.mockImplementation((sql, params) => {
     const s = String(sql);
     if (s.includes('-- addon:has')) {
       visto.addonHas++;
       return Promise.resolve({ rows: addonAtivo ? [{ '?column?': 1 }] : [] });
+    }
+    if (s.includes('-- addon:plan')) {
+      visto.planLookups++;
+      return Promise.resolve({ rows: [{ plan: plano, vertical_active: vertical, vertical }] });
     }
     if (s.includes('-- wa:conn-state-flag')) {
       return Promise.resolve({ rows: [{ wa_token_invalid_at: tokenExpirado ? '2026-09-10T00:00:00Z' : null }] });
@@ -120,6 +138,52 @@ describe('serviço de adicionais', () => {
     await addons.setAddon('c-3', addons.ADDON_WHATSAPP_AUTO, { active: false });
     await addons.hasAddon('c-3', addons.ADDON_WHATSAPP_AUTO);
     expect(visto.addonHas).toBe(2); // o cache foi invalidado pela mudança
+  });
+
+  // ── Fase 8b: o produto passou a incluir o WhatsApp ────────
+  // O adicional de R$39 deixou de ser o único caminho. Negócio e
+  // Expansão já valiam pelo plano; o Aura Dojô vale pela VERTICAL,
+  // porque no banco o dojô continua marcado como 'essencial' e gatear
+  // só por plano barraria justamente quem paga R$140 pelo produto que
+  // promete o WhatsApp incluso.
+  it('(2b) plano/vertical que INCLUEM o WhatsApp liberam sem adicional nenhum', async () => {
+    const casos = [
+      { plano: 'negocio', vertical: null },
+      { plano: 'expansao', vertical: null },
+      { plano: 'essencial', vertical: 'karate_dojo' },
+      { plano: 'essencial', vertical: 'karate_federation' },
+    ];
+    let i = 0;
+    for (const caso of casos) {
+      addons.clearCache();
+      mockBanco({ addonAtivo: false, ...caso });
+      await expect(addons.canAutoWhatsapp(`c-inc-${i++}`)).resolves.toBe(true);
+    }
+  });
+
+  it('(2c) Essencial de VAREJO sem adicional continua barrado — e o adicional continua liberando', async () => {
+    addons.clearCache();
+    mockBanco({ addonAtivo: false, plano: 'essencial', vertical: null });
+    await expect(addons.canAutoWhatsapp('c-varejo')).resolves.toBe(false);
+
+    addons.clearCache();
+    mockBanco({ addonAtivo: true, plano: 'essencial', vertical: null });
+    await expect(addons.canAutoWhatsapp('c-varejo-2')).resolves.toBe(true);
+  });
+
+  it('(2d) coluna de vertical ausente (42703) cai no gate só de plano, sem 500', async () => {
+    addons.clearCache();
+    db.query.mockImplementation((sql) => {
+      const s = String(sql);
+      if (s.includes('-- addon:has')) return Promise.resolve({ rows: [] });
+      if (s.includes('-- addon:plan-legado')) return Promise.resolve({ rows: [{ plan: 'negocio' }] });
+      if (s.includes('-- addon:plan')) {
+        const e = new Error('column "vertical" does not exist'); e.code = '42703';
+        return Promise.reject(e);
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    await expect(addons.canAutoWhatsapp('c-legado')).resolves.toBe(true);
   });
 
   it('(3) desativar grava cancelled + ended_at', async () => {
@@ -186,8 +250,11 @@ describe('rotas admin de adicionais', () => {
 
 // ── (5)-(8) gate na régua do dojô ───────────────────────────
 describe('PUT reminder-config — gate do adicional', () => {
-  it('(5) ligar sem adicional → 403 ADDON_REQUIRED, sem tocar a configuração', async () => {
-    const visto = mockBanco({ addonAtivo: false });
+  it('(5) empresa no essencial sem adicional e sem vertical de karatê → 403 ADDON_REQUIRED, sem tocar a configuração', async () => {
+    // O portão continua existindo depois da Fase 8b: quem não está num
+    // produto que inclui o WhatsApp e não contratou o adicional não liga
+    // o envio automático. O que mudou foi QUEM cai aqui — ver (5b).
+    const visto = mockBanco({ addonAtivo: false, plano: 'essencial', vertical: null });
     const res = await request(buildDojoApp())
       .put(`/federation/${FED_ID}/dojo/billing/reminder-config`)
       .set('Authorization', 'Bearer ' + dojoToken)
@@ -196,6 +263,22 @@ describe('PUT reminder-config — gate do adicional', () => {
     expect(res.body.code).toBe('ADDON_REQUIRED');
     expect(res.body.error).toMatch(/adicional do plano/i);
     expect(visto.configSalva).toBeNull();
+  });
+
+  it('(5b) dojô no essencial liga a régua SEM adicional — o Aura Dojô já inclui o WhatsApp', async () => {
+    // A mudança comercial da Fase 8b em uma asserção: até 14/09/2026
+    // este mesmo cenário devolvia 403 e cobrava R$39 por cima dos R$140
+    // do Aura Dojô.
+    const visto = mockBanco({ addonAtivo: false, plano: 'essencial', vertical: 'karate_dojo', conectado: true });
+    const res = await request(buildDojoApp())
+      .put(`/federation/${FED_ID}/dojo/billing/reminder-config`)
+      .set('Authorization', 'Bearer ' + dojoToken)
+      .send(BODY_LIGADO);
+    expect(res.status).toBe(200);
+    expect(res.body.send_whatsapp_auto).toBe(true);
+    expect(visto.configSalva[4]).toBe(true);
+    expect(visto.addonHas).toBe(1);   // perguntou pelo adicional…
+    expect(visto.planLookups).toBe(1); // …e liberou pelo produto
   });
 
   it('(6) com adicional mas sem número conectado → 409 NAO_CONECTADO', async () => {
