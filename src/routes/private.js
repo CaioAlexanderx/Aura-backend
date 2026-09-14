@@ -169,7 +169,11 @@ router.use('/goals', requirePlan('expansao'), require('./salesGoals'));
 router.use('/margin', requirePlan('expansao'), require('./productMargin'));
 router.use('/dre-simples', requirePlan('expansao'), require('./dreSimples'));
 router.use('/alerts', requirePlan('expansao'), require('./smartAlerts'));
-router.use('/reactivation', requirePlan('expansao'), require('./customerReactivation'));
+// Reativação faz parte da oferta do Negócio desde a Fase 7 do WhatsApp
+// (14/09/2026): o disparo de cupom de reativação pelo WhatsApp oficial é
+// vendido no plano de R$ 169, então a tela que o aciona não pode ficar
+// presa ao Expansão.
+router.use('/reactivation', requirePlan('negocio', 'expansao'), require('./customerReactivation'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalDashboard'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalFunnel'));
