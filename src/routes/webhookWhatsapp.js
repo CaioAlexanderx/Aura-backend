@@ -121,6 +121,75 @@ router.post('/', async (req, res) => {
           continue;
         }
 
+        // ── Fase 2: qualidade do número (phone_number_quality_update) ──
+        // A Meta manda o campo quality_rating quando presente; nos anos
+        // em que não manda, o SINAL é o event FLAGGED/UNFLAGGED. FLAGGED
+        // já pausa a fila (QUALIDADE_BAIXA) — não faz sentido esperar o
+        // próximo envio falhar para descobrir que a qualidade caiu.
+        if (change.field === 'phone_number_quality_update') {
+          let qCompanyId = companyId;
+          if (!qCompanyId && entry.id) {
+            const r = await db.query(
+              'SELECT id FROM companies WHERE wa_waba_id=$1 LIMIT 1', [entry.id]
+            ).catch(() => ({ rows: [] }));
+            if (r.rows.length) qCompanyId = r.rows[0].id;
+          }
+          if (qCompanyId) {
+            const quality = value.quality_rating
+              || (value.event === 'FLAGGED' ? 'RED' : value.event === 'UNFLAGGED' ? 'GREEN' : null);
+            try {
+              if (quality) {
+                await db.query('UPDATE companies SET wa_quality_rating=$2 WHERE id=$1', [qCompanyId, quality]);
+              }
+              if (value.event === 'FLAGGED') {
+                await db.query(
+                  'UPDATE companies SET wa_paused_reason=$2, wa_paused_at=NOW() WHERE id=$1',
+                  [qCompanyId, 'QUALIDADE_BAIXA']
+                );
+              } else if (value.event === 'UNFLAGGED') {
+                // Só destrava se a pausa ATUAL for de qualidade — uma
+                // pausa manual ou de conta restrita não pode ser
+                // destravada por um evento de qualidade voltando ao normal.
+                await db.query(
+                  `UPDATE companies SET wa_paused_reason=NULL, wa_paused_at=NULL
+                    WHERE id=$1 AND wa_paused_reason='QUALIDADE_BAIXA'`,
+                  [qCompanyId]
+                );
+              }
+            } catch (e) {
+              if (e.code !== '42703' && e.code !== '42P01') {
+                console.error('[WA-WEBHOOK] quality update error:', e.message);
+              }
+            }
+          }
+          continue;
+        }
+
+        // ── Fase 2: conta restrita/desabilitada (account_update) ──
+        if (change.field === 'account_update') {
+          const RESTRICT_EVENTS = ['DISABLED_UPDATE', 'ACCOUNT_RESTRICTION', 'ACCOUNT_VIOLATION'];
+          if (RESTRICT_EVENTS.includes(value.event)) {
+            let aCompanyId = companyId;
+            if (!aCompanyId && entry.id) {
+              const r = await db.query(
+                'SELECT id FROM companies WHERE wa_waba_id=$1 LIMIT 1', [entry.id]
+              ).catch(() => ({ rows: [] }));
+              if (r.rows.length) aCompanyId = r.rows[0].id;
+            }
+            if (aCompanyId) {
+              await db.query(
+                'UPDATE companies SET wa_paused_reason=$2, wa_paused_at=NOW() WHERE id=$1',
+                [aCompanyId, 'CONTA_RESTRITA']
+              ).catch((e) => {
+                if (e.code !== '42703' && e.code !== '42P01') {
+                  console.error('[WA-WEBHOOK] account update error:', e.message);
+                }
+              });
+            }
+          }
+          continue;
+        }
+
         // Handle message status updates (sent → delivered → read)
         const statuses = value.statuses || [];
         for (const status of statuses) {
@@ -135,6 +204,18 @@ router.post('/', async (req, res) => {
             companyId, status.id, status.status,
             status.errors && status.errors[0] && status.errors[0].title || null
           ).catch((e) => console.error('[WA-WEBHOOK] outbox status error:', e.message));
+          // Fase 2: telefone que a Meta recusou de vez (não é WhatsApp ou
+          // estourou o limite de marketing por usuário) nunca mais entra
+          // na fila automática — sem isto o dojô paga chamada todo dia
+          // no mesmo número morto.
+          if (status.status === 'failed') {
+            const errCode = status.errors && status.errors[0] && Number(status.errors[0].code);
+            if (errCode === 131026 || errCode === 131049) {
+              const recipient = waOutbox.normalizePhone(status.recipient_id) || status.recipient_id;
+              await waOutbox.markContactInvalid(companyId, recipient, status.errors[0].title || null)
+                .catch((e) => console.error('[WA-WEBHOOK] contact invalid error:', e.message));
+            }
+          }
         }
 
         // Handle incoming messages

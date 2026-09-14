@@ -137,6 +137,19 @@ async function createTemplate(wabaId, accessToken, template) {
   return graphPost(`/${wabaId}/message_templates`, accessToken, template);
 }
 
+// Compartilha a LINHA DE CRÉDITO do Tech Provider (Aura) com uma WABA
+// integrada pelo Embedded Signup. A Meta EXIGE isto: sem a linha
+// compartilhada o número conecta e mostra selo verde, mas o primeiro
+// envio de template PAGO morre — a WABA não tem como ser cobrada. O
+// accessToken aqui é o do SISTEMA da Aura (dono da linha de crédito),
+// NUNCA o do cliente que acabou de conectar o número dele.
+async function shareCreditLine(extendedCreditId, wabaId, accessToken, currency = 'BRL') {
+  return graphPost(`/${extendedCreditId}/whatsapp_credit_sharing_and_attach`, accessToken, {
+    waba_id: wabaId,
+    waba_currency: currency,
+  });
+}
+
 // Get phone number info
 async function getPhoneInfo(phoneNumberId, accessToken) {
   const resp = await fetch(`${GRAPH_URL}/${phoneNumberId}?fields=display_phone_number,verified_name,quality_rating`, {
@@ -166,4 +179,5 @@ module.exports = {
   listTemplates, createTemplate,
   getPhoneInfo, graphPost, graphError,
   listPhoneNumbers, subscribeApp, unsubscribeApp, registerPhone,
+  shareCreditLine,
 };

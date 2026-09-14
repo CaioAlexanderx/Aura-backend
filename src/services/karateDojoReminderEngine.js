@@ -503,10 +503,11 @@ async function whatsappQueue(dojoId, { date = null, config = null } = {}) {
 
   const meta = await getDojoMeta(dojoId);
   const data = [];
+  let noPhoneCount = 0; // Fase 2: GET /whatsapp/preview precisa contar quem cai aqui.
 
   for (const row of rows) {
     const phone = normalizeBrPhone(row.guardian_phone) || normalizeBrPhone(row.student_phone);
-    if (!phone) continue; // sem telefone não há o que enfileirar
+    if (!phone) { noPhoneCount++; continue; } // sem telefone não há o que enfileirar
 
     const offset = Number(row.offset_val);
     // Best-effort: link é conforto, não requisito — falha nunca derruba a
@@ -537,7 +538,7 @@ async function whatsappQueue(dojoId, { date = null, config = null } = {}) {
     });
   }
 
-  return { date: day, data, count: data.length };
+  return { date: day, data, count: data.length, no_phone_count: noPhoneCount };
 }
 
 // Confirmação manual do envio. IDEMPOTENTE: chamar duas vezes devolve 200
