@@ -34,6 +34,31 @@ function perPhoneDailyCap() {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2;
 }
 
+// ── Guardas de MARKETING (Fases 7/8) — mais duras que as de cobrança ──
+// Reativação e aniversário são templates de categoria MARKETING na Meta:
+// custam mais, têm limite POR USUÁRIO (131049) e derrubam a qualidade do
+// número quando a pessoa marca como spam. Nenhuma delas vale para
+// cobrança — um lembrete de parcela continua saindo sob YELLOW e sem
+// consentimento declarado, porque é utilitário de uma relação que a
+// pessoa já tem com a loja.
+const MARKETING_SOURCE_TYPES = new Set(['reativacao', 'aniversario', 'campanha']);
+
+function isMarketingSource(sourceType) {
+  return MARKETING_SOURCE_TYPES.has(String(sourceType || ''));
+}
+
+// Teto diário SÓ de marketing, separado do geral: 100 promoções e 300
+// cobranças no mesmo dia são coisas diferentes para a Meta e para a
+// qualidade do número.
+function marketingDailyCap() {
+  const n = Number(process.env.WA_MARKETING_DAILY_CAP);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 100;
+}
+
+// Janela de frequência: no máximo 1 marketing por contato a cada 7 dias,
+// somando TODAS as origens (reativação, aniversário, campanha futura).
+const MARKETING_WINDOW_DAYS = 7;
+
 // Teto FIXO de envio de teste (2f) — não é env: um número fixo baixo é
 // o bastante para o sensei testar o template e alto o suficiente para
 // não travar QA. Não faz sentido alguém precisar mudar isso por env.
@@ -97,6 +122,129 @@ async function countToday(companyId, { phone = null, sourceType = null } = {}) {
   }
 }
 
+// ── Consultas das guardas de marketing (331) ────────────────
+
+// A empresa DECLAROU que os clientes autorizaram receber mensagens dela?
+// Com a 331 pendente (42703) ou a tabela ausente (42P01) a resposta é
+// NÃO: a direção segura aqui é o silêncio — marketing sem consentimento
+// declarado é o tipo de envio que gera denúncia, não só custo.
+async function hasMarketingConsent(companyId) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:guard-marketing-consent
+       SELECT wa_marketing_consent_at FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    return !!(rows[0] && rows[0].wa_marketing_consent_at);
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') return false;
+    throw e;
+  }
+}
+
+// Qualidade do número (328). YELLOW já barra MARKETING — esperar chegar
+// em RED (que barra tudo) é esperar o número ser punido. 42703/42P01 →
+// null: sem informação não se inventa um bloqueio.
+async function loadQualityRating(companyId) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:guard-quality
+       SELECT wa_quality_rating FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    return (rows[0] && rows[0].wa_quality_rating) || null;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') return null;
+    throw e;
+  }
+}
+
+// Contato que estourou o limite de marketing por usuário (131049).
+// Diferente do invalid_at: aqui a COBRANÇA continua passando.
+async function isMarketingBlocked(companyId, phone) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:guard-marketing-blocked
+       SELECT 1 FROM wa_contacts
+        WHERE company_id = $1 AND phone = $2 AND marketing_blocked_until > NOW()
+        LIMIT 1`,
+      [companyId, phone]
+    );
+    return rows.length > 0;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') return false;
+    throw e;
+  }
+}
+
+// Quantas mensagens de marketing este CONTATO recebeu na janela, e
+// quantas a EMPRESA mandou hoje. As duas contas saem da mesma consulta
+// com filtros opcionais, e nenhuma delas conta 'skipped'/'failed' (o que
+// não saiu não incomodou ninguém nem custou nada).
+//
+// O escopo é sempre (company, …): a promoção de uma loja não pode
+// bloquear a promoção de outra para o mesmo telefone — são relações
+// diferentes, e o limite de 7 dias é sobre o que ESTA loja mandou.
+async function countMarketing(companyId, { phone = null, days = null, todayOnly = false } = {}) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:guard-marketing-count
+       SELECT COUNT(*)::int AS n FROM wa_outbox
+        WHERE company_id = $1
+          AND source_type = ANY($2::text[])
+          AND ($3::text IS NULL OR to_phone = $3)
+          AND status NOT IN ('skipped','failed')
+          AND ($4::int IS NULL OR created_at > NOW() - ($4::int || ' days')::interval)
+          AND ($5::boolean IS NOT TRUE OR
+               (created_at AT TIME ZONE 'America/Sao_Paulo')::date
+                 = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date)`,
+      [companyId, Array.from(MARKETING_SOURCE_TYPES), phone, days, todayOnly]
+    );
+    return Number((rows[0] && rows[0].n) || 0);
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return 0;
+    throw e;
+  }
+}
+
+// Carimba o bloqueio de marketing do contato (131049) por N dias. Upsert
+// porque o contato pode nem existir ainda em wa_contacts: quem nunca
+// respondeu não tem linha, e é exatamente quem recebe promoção.
+async function markContactMarketingBlocked(companyId, phone, days = 30) {
+  const p = normalizePhone(phone) || phone;
+  if (!p) return;
+  const dias = Number.isFinite(Number(days)) && Number(days) > 0 ? Math.floor(Number(days)) : 30;
+  try {
+    await db.query(
+      `-- wa:contact-marketing-block
+       INSERT INTO wa_contacts (company_id, phone, marketing_blocked_until, opt_source)
+       VALUES ($1, $2, NOW() + ($3 || ' days')::interval, 'meta')
+       ON CONFLICT (company_id, phone) DO UPDATE SET
+         marketing_blocked_until = NOW() + ($3 || ' days')::interval,
+         updated_at = NOW()`,
+      [companyId, p, String(dias)]
+    );
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+  }
+}
+
+// Todas as guardas de marketing de UM envio, em ordem de "quão
+// definitivo é o não". Devolve null quando nada barra. Usada no enqueue,
+// no reforço do despacho e na simulação — uma definição só para as três
+// superfícies não divergirem.
+async function marketingSkipReason(companyId, phone) {
+  if (!(await hasMarketingConsent(companyId))) return 'SEM_CONSENTIMENTO';
+  if (await isMarketingBlocked(companyId, phone)) return 'MARKETING_BLOQUEADO';
+  const quality = await loadQualityRating(companyId);
+  if (quality === 'YELLOW' || quality === 'RED') return 'QUALIDADE_MARKETING';
+  const naJanela = await countMarketing(companyId, { phone, days: MARKETING_WINDOW_DAYS });
+  if (naJanela > 0) return 'FREQUENCIA_MARKETING';
+  const hoje = await countMarketing(companyId, { todayOnly: true });
+  if (hoje >= marketingDailyCap()) return 'LIMITE_MARKETING';
+  return null;
+}
+
 // Contato marcado como inválido pela Meta (wa_contacts.invalid_at, 328)
 // — telefone que não é WhatsApp ou estourou limite de marketing por
 // usuário nunca mais entra na fila automática.
@@ -153,12 +301,18 @@ const PERMANENT_ERROR_CODES = new Set([
   132012, 132015, 132016, 133010, 470, 131031, 131053,
 ]);
 
-// Telefone que a Meta disse não ser WhatsApp (131026) ou que estourou o
-// limite de marketing por usuário (131049): marca invalid_at para
-// futuros enqueues pularem — 131049 não é permanente HOJE (o limite
-// pode resetar), mas continuar tentando o MESMO contato é dinheiro
-// jogado fora.
-const CONTACT_INVALID_ERROR_CODES = new Set([131026, 131049]);
+// Telefone que a Meta disse não ser WhatsApp (131026): marca invalid_at
+// para futuros enqueues pularem — continuar tentando o MESMO contato é
+// dinheiro jogado fora.
+const CONTACT_INVALID_ERROR_CODES = new Set([131026]);
+
+// 131049 é OUTRA coisa: "esta pessoa já recebeu marketing demais neste
+// período", e não "este número não presta". Até a Fase 7 ele caía no
+// invalid_at junto com o 131026 e cegava o contato também para COBRANÇA
+// — uma promoção recusada passava a impedir o lembrete da parcela do
+// mesmo cliente. Agora bloqueia só marketing, e por 30 dias.
+const MARKETING_BLOCK_ERROR_CODES = new Set([131049]);
+const MARKETING_BLOCK_DAYS = 30;
 
 // Conta restrita ou com problema de pagamento: pausa a FILA INTEIRA da
 // company (não só esta mensagem) — 131031 também é permanente (lista
@@ -264,6 +418,14 @@ async function enqueue({
       skipReason = pauseReason === 'QUALIDADE_BAIXA' ? 'QUALIDADE_BAIXA' : 'PAUSADO';
     }
   }
+  // ── Guardas de MARKETING (Fases 7/8) — antes dos tetos gerais porque
+  // o motivo específico é o que a tela precisa mostrar (e o teto de
+  // marketing é menor que o geral de qualquer forma).
+  const isMarketing = isMarketingSource(sourceType);
+  if (status === 'pending' && isMarketing) {
+    const motivo = await marketingSkipReason(companyId, phone);
+    if (motivo) { status = 'skipped'; skipReason = motivo; }
+  }
   if (status === 'pending' && !isTeste) {
     const n = await countToday(companyId, {});
     if (n >= dailyCap()) { status = 'skipped'; skipReason = 'LIMITE_DIARIO'; }
@@ -319,6 +481,15 @@ async function simulate({ companyId, toPhone, templateName = null, templateLangu
   const pauseReason = await loadPauseReason(companyId);
   if (pauseReason) {
     return { ok: false, reason: pauseReason === 'QUALIDADE_BAIXA' ? 'QUALIDADE_BAIXA' : 'PAUSADO' };
+  }
+
+  // Marketing (Fases 7/8): consentimento, bloqueio por 131049, qualidade
+  // e frequência de 7 dias são todos consultas de ESTADO — cabem na
+  // simulação. O teto diário de marketing é acúmulo e fica com quem
+  // chama, igual aos tetos da cobrança.
+  if (isMarketingSource(sourceType)) {
+    const motivo = await marketingSkipReason(companyId, phone);
+    if (motivo && motivo !== 'LIMITE_MARKETING') return { ok: false, reason: motivo };
   }
 
   return { ok: true, reason: null };
@@ -503,6 +674,22 @@ async function processBatch(limit = 20) {
         out.skipped++;
         continue;
       }
+      // Reforço das guardas de MARKETING no despacho: entre enfileirar e
+      // enviar, o lojista pode ter retirado o consentimento, a qualidade
+      // pode ter caído para YELLOW e a Meta pode ter bloqueado o contato
+      // com 131049. Item de marketing que esperou na fila é justamente o
+      // que mais tempo teve para essas coisas acontecerem.
+      if (isMarketingSource(row.source_type)) {
+        const motivoAgora = await marketingSkipReason(row.company_id, row.to_phone);
+        // FREQUENCIA_MARKETING não vale aqui: o próprio item já está na
+        // janela de 7 dias (ele conta a si mesmo), e barrá-lo agora seria
+        // cancelar toda mensagem que passou pelo enqueue.
+        if (motivoAgora && motivoAgora !== 'FREQUENCIA_MARKETING') {
+          await markRow(row.id, { status: 'skipped', skip_reason: motivoAgora });
+          out.skipped++;
+          continue;
+        }
+      }
 
       let resp;
       if (row.kind === 'template') {
@@ -541,6 +728,9 @@ async function processBatch(limit = 20) {
       const code = metaErrorCode(e);
       if (CONTACT_INVALID_ERROR_CODES.has(code)) {
         await markContactInvalid(row.company_id, row.to_phone, msg);
+      }
+      if (MARKETING_BLOCK_ERROR_CODES.has(code)) {
+        await markContactMarketingBlocked(row.company_id, row.to_phone, MARKETING_BLOCK_DAYS);
       }
       if (code === 133010) {
         await clearRegisteredFlag(row.company_id);
@@ -607,4 +797,10 @@ module.exports = {
   markContactInvalid, markCompanyPaused, clearRegisteredFlag,
   TEST_DAILY_CAP,
   MAX_ATTEMPTS,
+  // Guardas de MARKETING (Fases 7/8) — expostas para os serviços de
+  // reativação/aniversário, para as prévias e para os testes.
+  MARKETING_SOURCE_TYPES, MARKETING_WINDOW_DAYS, MARKETING_BLOCK_DAYS,
+  isMarketingSource, marketingDailyCap, marketingSkipReason,
+  hasMarketingConsent, loadQualityRating, isMarketingBlocked,
+  countMarketing, markContactMarketingBlocked,
 };
