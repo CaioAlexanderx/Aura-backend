@@ -385,6 +385,29 @@ async function touchInbound(companyId, phone, textBody) {
   return { row: rows[0] || null, opt_out: optOut, opt_in: optIn };
 }
 
+// Upsert disparado pelo WEBHOOK a cada echo de mensagem que a PRÓPRIA
+// empresa mandou pelo app WhatsApp Business do celular (Coexistence,
+// change.field === 'smb_message_echoes'). Só garante que o contato
+// existe — CRIA se faltar — e propositalmente NÃO mexe em
+// last_inbound_at nem em opted_in_at/opted_out_at: a janela de 24h de
+// atendimento e o opt-in/opt-out só podem mudar quando o CLIENTE manda
+// mensagem (touchInbound), nunca quando é a loja que manda pelo
+// celular. Misturar os dois abriria a janela de graça toda vez que a
+// dona da loja mandasse um "oi" pelo próprio WhatsApp.
+async function touchOutboundHuman(companyId, toPhone) {
+  const p = normalizePhone(toPhone);
+  if (!p) return null;
+  const { rows } = await db.query(
+    `-- wa:contact-touch-outbound-human
+     INSERT INTO wa_contacts (company_id, phone)
+     VALUES ($1, $2)
+     ON CONFLICT (company_id, phone) DO UPDATE SET updated_at = NOW()
+     RETURNING id`,
+    [companyId, p]
+  );
+  return rows[0] || null;
+}
+
 function windowOpen(contact) {
   return !!(contact && contact.last_inbound_at
     && Date.now() - new Date(contact.last_inbound_at).getTime() < WINDOW_MS);
@@ -798,7 +821,7 @@ async function applyTemplateStatus(companyId, { name, language, status, metaTemp
 }
 
 module.exports = {
-  normalizePhone, touchInbound, windowOpen, getContact, decryptToken,
+  normalizePhone, touchInbound, touchOutboundHuman, windowOpen, getContact, decryptToken,
   isTokenError, markTokenInvalid, clearTokenInvalid, connectionState,
   enqueue, processBatch, simulate, applyStatusUpdate, applyTemplateStatus,
   // Guardas de custo (Fase 2) — expostas para o GET /whatsapp/preview e

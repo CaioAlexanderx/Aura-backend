@@ -190,6 +190,57 @@ router.post('/', async (req, res) => {
           continue;
         }
 
+        // ── Coexistence (331): eventos do app WhatsApp Business do celular ──
+        // Com o número em Coexistence, a Meta também manda change.field:
+        //  - smb_message_echoes: mensagem que a PRÓPRIA empresa mandou pelo
+        //    app do celular (não pela Cloud API). Grava em wa_messages como
+        //    outbound (source: smb_app) só para o histórico da tela mostrar
+        //    a conversa completa — NÃO abre a janela de 24h de atendimento
+        //    (isso só acontece quando o CLIENTE manda mensagem) e por isso
+        //    usa touchOutboundHuman, nunca touchInbound.
+        //  - history: sincronização do histórico de mensagens do app.
+        //  - smb_app_state_sync: estado do app (contatos, etc).
+        // Os dois últimos ainda não gravam nada — só log da contagem —
+        // porque a tela ainda não tem onde mostrar isso.
+        if (change.field === 'smb_message_echoes') {
+          try {
+            const echoes = value.message_echoes || [];
+            for (const echo of echoes) {
+              if (!companyId) continue;
+              const toPhone = waOutbox.normalizePhone(echo.to) || echo.to;
+              const content = echo.text?.body || echo.caption || `[${echo.type || 'mensagem'}]`;
+              try {
+                await db.query(
+                  `INSERT INTO wa_messages (company_id, direction, wa_message_id, to_phone, content, status, metadata)
+                   VALUES ($1,'outbound',$2,$3,$4,'sent',$5)`,
+                  [companyId, echo.id, toPhone, content, JSON.stringify({ source: 'smb_app' })]
+                );
+              } catch (e) {
+                if (e.code !== '42703' && e.code !== '42P01') {
+                  console.error('[WA-WEBHOOK] smb_message_echoes wa_messages error:', e.message);
+                }
+              }
+              await waOutbox.touchOutboundHuman(companyId, toPhone)
+                .catch((e) => console.error('[WA-WEBHOOK] touchOutboundHuman error:', e.message));
+            }
+          } catch (e) {
+            console.error('[WA-WEBHOOK] smb_message_echoes error:', e.message);
+          }
+          continue;
+        }
+
+        if (change.field === 'history') {
+          const count = Array.isArray(value.history) ? value.history.length : 0;
+          console.log(`[wa webhook] history sync: ${count} itens`);
+          continue;
+        }
+
+        if (change.field === 'smb_app_state_sync') {
+          const count = Array.isArray(value.state_sync) ? value.state_sync.length : 0;
+          console.log(`[wa webhook] smb_app_state_sync: ${count} itens`);
+          continue;
+        }
+
         // Handle message status updates (sent → delivered → read)
         const statuses = value.statuses || [];
         for (const status of statuses) {
