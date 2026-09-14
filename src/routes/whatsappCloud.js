@@ -428,12 +428,15 @@ async function loadBillingTemplate(companyId) {
   }
 }
 
-// Quais templates de cobrança estão APROVADOS — o do dojô e os dois do
-// crediário. Mesma definição de "aprovado" que a fila usa
-// (waOutbox.isTemplateApproved): uma só, para a tela não liberar o
-// toggle de algo que o enqueue vai pular. 42P01 → tudo false.
+// Quais templates estão APROVADOS — o do dojô, os dois do crediário e
+// (Fases 7/8) os dois de marketing. Mesma definição de "aprovado" que a
+// fila usa (waOutbox.isTemplateApproved): uma só, para a tela não
+// liberar o toggle de algo que o enqueue vai pular. 42P01 → tudo false.
 async function loadTemplatesReady(companyId) {
-  const nomes = [billingTemplateName(), 'parcela_lembrete', 'parcela_atraso'];
+  const nomes = [
+    billingTemplateName(), 'parcela_lembrete', 'parcela_atraso',
+    'reativacao_cupom', 'aniversario_cupom',
+  ];
   const out = {};
   for (const nome of nomes) {
     out[nome] = await waOutbox.isTemplateApproved(companyId, nome, 'pt_BR');
@@ -632,6 +635,32 @@ const TEMPLATE_PRESETS = {
     body: 'Olá, {{1}}! A parcela {{3}} da sua compra em {{2}}, de {{4}}, venceu há {{5}} dias. Regularize pelo Pix copia e cola abaixo ou fale com a loja.\n\n{{6}}',
     footer: 'Para não receber mais, responda SAIR.',
     example: ['Ana Souza', 'Loja Exemplo', '2/6', 'R$ 150,00', '3', '00020126...'],
+  },
+
+  // ── Presets de MARKETING (Fases 7/8) ──────────────────────
+  // Categoria MARKETING, não UTILITY: a Meta reprova (ou recategoriza
+  // sozinha, cobrando como marketing) template que oferece desconto
+  // dizendo ser utilitário. Declarar a categoria certa é o que evita o
+  // número ser punido por "categorização enganosa".
+  //
+  // O footer com "responda SAIR" não é decoração: marketing sem saída
+  // visível é o caminho mais curto para a pessoa marcar como spam e
+  // derrubar a qualidade do número da loja.
+  reativacao_cupom: {
+    name: 'reativacao_cupom',
+    language: 'pt_BR',
+    category: 'MARKETING',
+    body: 'Olá, {{1}}! Sentimos sua falta na {{2}}. Preparamos um cupom de {{3}} para a sua próxima compra, válido até {{4}}. Código: {{5}}. Esperamos você!',
+    footer: 'Para não receber mais, responda SAIR.',
+    example: ['Ana', 'Loja Exemplo', '10% de desconto', '30/09/2026', 'VOLTA10'],
+  },
+  aniversario_cupom: {
+    name: 'aniversario_cupom',
+    language: 'pt_BR',
+    category: 'MARKETING',
+    body: 'Feliz aniversário, {{1}}! A {{2}} preparou um presente: {{3}} na sua próxima compra, válido até {{4}}. Código: {{5}}. Aproveite o seu dia!',
+    footer: 'Para não receber mais, responda SAIR.',
+    example: ['Ana', 'Loja Exemplo', '15% de desconto', '14/10/2026', 'NIVER15'],
   },
 };
 
