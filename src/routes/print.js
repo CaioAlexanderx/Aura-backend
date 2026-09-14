@@ -521,9 +521,11 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
     ].filter(k => groups[k]);
 
     function statusLabel(s) {
-      if (s === 'paid') return '<span style="color:#166534">Paga</span>';
-      if (s === 'overdue') return '<span style="color:#991b1b;font-weight:bold">Atrasada</span>';
-      return '<span style="color:#1e40af">Pendente</span>';
+      // 14/09/2026: so preto. Impressora termica transforma cor e cinza em
+      // pontilhado claro — o status saia apagado no papel.
+      if (s === 'paid') return 'Paga';
+      if (s === 'overdue') return '<strong>Atrasada</strong>';
+      return 'Pendente';
     }
 
     function fmtDate(d) {
@@ -537,7 +539,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 
     let accountsHTML = '';
     if (orderedKeys.length === 0) {
-      accountsHTML = '<p style="color:#666;font-size:12px">Nenhuma parcela registrada.</p>';
+      accountsHTML = '<p style="font-size:12px">Nenhuma parcela registrada.</p>';
     } else {
       for (const key of orderedKeys) {
         const instList = groups[key] || [];
@@ -562,12 +564,12 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
               txid:            `CRED${String(inst.id).replace(/-/g, '').slice(0, 20)}`,
             });
             pixRow = `<tr><td colspan="5" style="padding:2px 4px 10px">
-              <div style="border:1px solid #ccc;background:#fafafa;padding:6px;page-break-inside:avoid">
-                <div style="font-size:10px;font-weight:bold;margin-bottom:3px">
+              <div style="border:1px solid #000;padding:6px;page-break-inside:avoid">
+                <div style="font-size:11px;font-weight:bold;margin-bottom:3px">
                   Pix da parcela ${inst.installment_number}/${inst.total_installments} — R$${fmt(remaining)}
                 </div>
-                <div style="font-family:'Courier New',monospace;font-size:8px;word-break:break-all;
-                            background:#fff;border:1px solid #ddd;padding:4px;margin-bottom:5px;
+                <div style="font-family:'Courier New',monospace;font-size:9px;word-break:break-all;
+                            border:1px solid #000;padding:4px;margin-bottom:5px;
                             user-select:all">${instPix}</div>
                 <div style="text-align:center">${qrInlineSvg(instPix, QR_CARNE_OPTS)}</div>
               </div>
@@ -586,11 +588,11 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
         accountsHTML += `
           <div style="margin-bottom:16px">
             <div style="font-weight:bold;font-size:13px;margin-bottom:4px">
-              ${esc(accName)}${accStatus === 'closed' ? ' <span style="font-size:10px;color:#666">(encerrado)</span>' : ''}
+              ${esc(accName)}${accStatus === 'closed' ? ' <span style="font-size:11px">(encerrado)</span>' : ''}
             </div>
-            <table style="width:100%;border-collapse:collapse;font-size:11px">
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
               <thead>
-                <tr style="border-bottom:1px solid #333">
+                <tr style="border-bottom:1px solid #000">
                   <th style="text-align:left;padding:3px 4px">Parcela</th>
                   <th style="text-align:left;padding:3px 4px">Vencimento</th>
                   <th style="text-align:right;padding:3px 4px">Valor</th>
@@ -600,7 +602,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
               </thead>
               <tbody>${rowsHTML}</tbody>
             </table>
-            <div style="text-align:right;font-size:11px;margin-top:4px;color:#444">
+            <div style="text-align:right;font-size:12px;margin-top:4px">
               Saldo em aberto: <strong>R$${fmt(accBalance)}</strong>
             </div>
           </div>`;
@@ -614,20 +616,20 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       pixHTML = `
         <div style="border:1px solid #000;padding:10px;margin-top:12px;page-break-inside:avoid">
           <div style="font-weight:bold;font-size:13px;margin-bottom:6px">Pagar tudo de uma vez via Pix${balLabel}</div>
-          <div style="font-size:10px;margin-bottom:6px;color:#444">
+          <div style="font-size:11px;margin-bottom:6px">
             Copie o codigo abaixo ou escaneie o QR Code com o app do seu banco.
           </div>
-          <div style="font-family:'Courier New',monospace;font-size:9px;word-break:break-all;
-                      background:#f5f5f5;padding:6px;border:1px solid #ccc;margin-bottom:8px;
+          <div style="font-family:'Courier New',monospace;font-size:10px;word-break:break-all;
+                      padding:6px;border:1px solid #000;margin-bottom:8px;
                       user-select:all">${pixPayload}</div>
           <div style="text-align:center">${qrInlineSvg(pixPayload, QR_CARNE_OPTS)}</div>
-          <div style="font-size:9px;color:#666;margin-top:6px;text-align:center">
+          <div style="font-size:10px;margin-top:6px;text-align:center">
             Pagamento confirmado manualmente pela loja.
           </div>
         </div>`;
     } else {
       pixHTML = `
-        <div style="border:1px dashed #999;padding:8px;margin-top:12px;font-size:10px;color:#666;text-align:center">
+        <div style="border:1px dashed #000;padding:8px;margin-top:12px;font-size:11px;text-align:center">
           Pagamento confirmado manualmente pela loja. Nenhuma chave Pix configurada.
         </div>`;
     }
@@ -640,7 +642,10 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   <meta charset="UTF-8">
   <title>Carne - ${esc(company.display_name)}</title>
   <style>
-    @page { margin: 10mm 12mm; size: A4; }
+    /* 14/09/2026: size:auto — o papel vem da impressora. Com A4 fixo, a bobina
+       termica de 80mm encolhia a pagina inteira (~0,36x) e o carne saia miudo
+       e fraco. Em A4 nada muda: a impressora ja e A4. */
+    @page { margin: 10mm 12mm; size: auto; }
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:'Courier New',monospace; font-size:12px; color:#000; max-width:700px; margin:0 auto; }
     .center { text-align:center; }
@@ -649,6 +654,14 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
     .company-name { font-size:18px; font-weight:bold; }
     .section-title { font-size:14px; font-weight:bold; border-bottom:2px solid #000; padding-bottom:3px; margin-bottom:8px; }
     @media print { body { -webkit-print-color-adjust:exact; print-color-adjust:exact; } button { display:none !important; } }
+    /* Bobina termica (58/80mm): margem curta, sem coluna de 700px, e a tabela
+       um ponto menor para as 5 colunas caberem sem encolher a pagina. */
+    @media print and (max-width: 120mm) {
+      @page { margin: 4mm 3mm; }
+      body { max-width:none; }
+      table { font-size:11px !important; }
+      th, td:not([colspan]) { padding:3px 2px !important; }
+    }
   </style>
 </head>
 <body>
@@ -660,7 +673,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   </div>
   <div class="divider"></div>
   <div class="center bold" style="font-size:15px;margin-bottom:4px">CARNE / EXTRATO DE CREDIARIO</div>
-  <div style="font-size:10px;text-align:center;margin-bottom:8px">Emitido em: ${printDate}</div>
+  <div style="font-size:11px;text-align:center;margin-bottom:8px">Emitido em: ${printDate}</div>
   <div class="divider"></div>
   <div style="margin-bottom:8px">
     <div><strong>Cliente:</strong> ${esc(customer.name)}</div>
@@ -669,7 +682,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   </div>
   <div class="divider"></div>
   <div class="section-title">Cronograma de Parcelas</div>
-  <div style="font-size:10px;color:#444;margin-bottom:10px">
+  <div style="font-size:11px;margin-bottom:10px">
     Os valores exibidos sao de <strong>principal</strong>. Parcelas em atraso estao sujeitas a
     multa e mora, calculadas no momento do pagamento.
   </div>
@@ -680,7 +693,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   </div>
   ${pixHTML}
   <div class="divider"></div>
-  <div style="font-size:9px;text-align:center;margin-top:6px;color:#666">
+  <div style="font-size:10px;text-align:center;margin-top:6px">
     ${esc(company.display_name)} &mdash; Powered by Aura. &mdash; getaura.com.br
   </div>
   <br>
