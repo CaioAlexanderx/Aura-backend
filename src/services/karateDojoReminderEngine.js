@@ -503,10 +503,11 @@ async function whatsappQueue(dojoId, { date = null, config = null } = {}) {
 
   const meta = await getDojoMeta(dojoId);
   const data = [];
+  let noPhoneCount = 0; // Fase 2: GET /whatsapp/preview precisa contar quem cai aqui.
 
   for (const row of rows) {
     const phone = normalizeBrPhone(row.guardian_phone) || normalizeBrPhone(row.student_phone);
-    if (!phone) continue; // sem telefone não há o que enfileirar
+    if (!phone) { noPhoneCount++; continue; } // sem telefone não há o que enfileirar
 
     const offset = Number(row.offset_val);
     // Best-effort: link é conforto, não requisito — falha nunca derruba a
@@ -537,7 +538,7 @@ async function whatsappQueue(dojoId, { date = null, config = null } = {}) {
     });
   }
 
-  return { date: day, data, count: data.length };
+  return { date: day, data, count: data.length, no_phone_count: noPhoneCount };
 }
 
 // Confirmação manual do envio. IDEMPOTENTE: chamar duas vezes devolve 200
@@ -657,6 +658,7 @@ async function runAll(today) {
   const agg = { dojos: cfgs.length, sent: 0, skipped_no_email: 0, skipped_sent: 0, failed: 0, skipped: 0 };
   agg.wa_enqueued = 0;
   agg.wa_skipped = 0;
+  agg.wa_sem_addon = 0;
   for (const cfg of cfgs) {
     const config = shapeConfig({ enabled: true, offsets: cfg.offsets, send_email: cfg.send_email, send_whatsapp_auto: cfg.send_whatsapp_auto, updated_at: null });
     try {
@@ -675,9 +677,17 @@ async function runAll(today) {
     // falha de um canal nunca derruba o outro.
     try {
       if (config.send_whatsapp_auto) {
-        const w = await runWhatsappAutoForDojo(cfg.dojo_id, { today, config });
-        agg.wa_enqueued += w.enqueued;
-        agg.wa_skipped += w.skipped;
+        // O toggle pode estar ligado de antes e o adicional ter sido
+        // cancelado depois — a coluna no banco não sabe disso. Sem o
+        // adicional, o job não gasta uma única mensagem paga.
+        const addons = require('./addons');
+        if (!(await addons.hasAddon(cfg.dojo_id, addons.ADDON_WHATSAPP_AUTO))) {
+          agg.wa_sem_addon++;
+        } else {
+          const w = await runWhatsappAutoForDojo(cfg.dojo_id, { today, config });
+          agg.wa_enqueued += w.enqueued;
+          agg.wa_skipped += w.skipped;
+        }
       }
     } catch (e) {
       console.error('[karateDojoReminder] dojô', cfg.dojo_id, 'falhou (whatsapp):', e.message);

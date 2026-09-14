@@ -10,6 +10,7 @@
 //   POST  /whatsapp/templates         — cria na Meta e registra
 //   POST  /whatsapp/templates/sync    — puxa da Meta p/ o registro
 //   GET   /whatsapp/outbox            — últimos itens da fila
+//   GET   /whatsapp/preview           — prévia da régua automática, SEM enfileirar
 //   POST  /whatsapp/test-send         — enfileira + despacha na hora
 //   POST  /whatsapp/contacts/opt      — opt-in/opt-out manual
 //
@@ -25,14 +26,38 @@
 // ============================================================
 'use strict';
 
+const crypto = require('crypto');
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { requireAuth, requireCompanyAccess } = require('../middleware/auth');
 const waOutbox = require('../services/waOutbox');
 const wa = require('../services/whatsapp');
+const addons = require('../services/addons');
 const { encrypt } = require('../services/dojoBaasCrypto');
 
 const guard = [requireAuth, requireCompanyAccess({})];
+
+// Template de cobrança efetivo: o nome vive numa env porque a Meta
+// aprova POR NOME e um dojô pode ter herdado outro do onboarding.
+function billingTemplateName() {
+  return process.env.WA_TPL_MENSALIDADE || 'mensalidade_lembrete';
+}
+
+// Teto diário de mensagens automáticas por company (Fase 2 aplica; o
+// status já mostra para a tela poder avisar antes de alguém ligar).
+function dailyCap() {
+  const n = Number(process.env.WA_DAILY_CAP);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 300;
+}
+
+// Mostra só os 4 últimos dígitos — o preview é sobre CONTAGEM, não sobre
+// vazar telefone de aluno pra quem tem acesso à tela.
+function maskPhone(p) {
+  const d = String(p || '').replace(/\D/g, '');
+  if (!d) return null;
+  if (d.length <= 4) return `***${d}`;
+  return `***${d.slice(-4)}`;
+}
 
 function schemaPending(res) {
   return res.status(503).json({ error: 'WhatsApp indisponível (migração 307 pendente)', code: 'SCHEMA_PENDING' });
@@ -50,6 +75,117 @@ async function loadTokenInvalidAt(companyId) {
     return (rows[0] && rows[0].wa_token_invalid_at) || null;
   } catch (e) {
     if (e.code === '42703') { HAS_TOKEN_FLAG = false; return null; }
+    throw e;
+  }
+}
+
+// ── Colunas da 328 (conexão completa) ───────────────────────
+// Mesmo truque da 309: em bloco próprio, com cache module-level, para
+// que a migration pendente no deploy não derrube o status inteiro nem
+// custe um try/catch por request depois da primeira descoberta.
+let HAS_CONN_COLS = true;
+
+async function loadConnExtras(companyId) {
+  if (!HAS_CONN_COLS) return null;
+  try {
+    const { rows } = await db.query(
+      `-- wa:conn-extras-get
+       SELECT wa_subscribed_at, wa_registered_at, wa_quality_rating, wa_paused_reason, wa_paused_at
+         FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') { HAS_CONN_COLS = false; return null; }
+    throw e;
+  }
+}
+
+// Grava o resultado dos passos extras do connect. PIN só entra quando
+// FOMOS NÓS que registramos o número agora — num número já registrado
+// o PIN guardado seria uma mentira (o de verdade está com quem
+// registrou antes).
+async function saveConnExtras(companyId, { encryptedPin, subscribed, registered, quality }) {
+  if (!HAS_CONN_COLS) return;
+  try {
+    await db.query(
+      `-- wa:conn-extras-set
+       UPDATE companies SET
+         wa_register_pin   = COALESCE($2, wa_register_pin),
+         wa_subscribed_at  = CASE WHEN $3 THEN NOW() ELSE wa_subscribed_at END,
+         wa_registered_at  = CASE WHEN $4 THEN NOW() ELSE wa_registered_at END,
+         wa_quality_rating = COALESCE($5, wa_quality_rating),
+         wa_paused_reason  = NULL,
+         wa_paused_at      = NULL
+       WHERE id = $1`,
+      [companyId, encryptedPin || null, !!subscribed, !!registered, quality || null]
+    );
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') { HAS_CONN_COLS = false; return; }
+    throw e;
+  }
+}
+
+async function clearConnExtras(companyId) {
+  if (!HAS_CONN_COLS) return;
+  try {
+    await db.query(
+      `-- wa:conn-extras-clear
+       UPDATE companies SET wa_register_pin = NULL, wa_subscribed_at = NULL,
+              wa_registered_at = NULL, wa_quality_rating = NULL
+        WHERE id = $1`,
+      [companyId]
+    );
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') { HAS_CONN_COLS = false; return; }
+    throw e;
+  }
+}
+
+// ── Coluna da 329 (linha de crédito compartilhada) — item extra da
+// Fase 2. Mesmo truque das 309/328: cache module-level para não pagar
+// try/catch a cada request quando a migration ainda não subiu.
+let HAS_CREDIT_COL = true;
+
+async function saveCreditShared(companyId) {
+  if (!HAS_CREDIT_COL) return;
+  try {
+    await db.query(
+      `-- wa:credit-shared-set
+       UPDATE companies SET wa_credit_shared_at = NOW() WHERE id = $1`,
+      [companyId]
+    );
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') { HAS_CREDIT_COL = false; return; }
+    throw e;
+  }
+}
+
+async function loadCreditShared(companyId) {
+  if (!HAS_CREDIT_COL) return null;
+  try {
+    const { rows } = await db.query(
+      `-- wa:credit-shared-get
+       SELECT wa_credit_shared_at FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    return (rows[0] && rows[0].wa_credit_shared_at) || null;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') { HAS_CREDIT_COL = false; return null; }
+    throw e;
+  }
+}
+
+async function clearCreditShared(companyId) {
+  if (!HAS_CREDIT_COL) return;
+  try {
+    await db.query(
+      `-- wa:credit-shared-clear
+       UPDATE companies SET wa_credit_shared_at = NULL WHERE id = $1`,
+      [companyId]
+    );
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') { HAS_CREDIT_COL = false; return; }
     throw e;
   }
 }
@@ -96,31 +232,144 @@ function tokenExpiredResponse(res, err) {
   });
 }
 
+// A Meta responde "already registered" de formas diferentes conforme o
+// caminho (código 133005/133006 ou só a frase). Número já registrado é
+// EXATAMENTE o estado que queremos — tratar como erro faria o dojô
+// reconectar em looping tentando consertar o que já estava certo.
+function alreadyRegistered(err) {
+  const code = err && err.meta ? Number(err.meta.code) : NaN;
+  if (code === 133005 || code === 133006) return true;
+  return /already/i.test(String((err && err.message) || ''));
+}
+
 // ── POST /whatsapp/connect — Embedded Signup ────────────────
 // Body: { code, waba_id, phone_number_id }. O token permanente é
 // gravado CIFRADO em repouso (A9) — quem envia decifra (waOutbox).
+//
+// Trocar o code por um token NÃO deixa o número pronto: faltam os dois
+// passos que ninguém vê e que, sem eles, o dojô fica com um selo verde
+// que não envia nem recebe nada —
+//   subscribed_apps → é o que liga o webhook deste número ao nosso app;
+//   /register       → é o que autoriza o número a enviar (senão: 133010).
+// Os dois são best-effort: falhar neles vira WARNING e não desfaz a
+// conexão (o token já é válido e o dojô pode terminar pelo suporte),
+// mas o carimbo (wa_subscribed_at/wa_registered_at) só existe em caso
+// de sucesso — o status precisa contar a verdade.
 router.post('/whatsapp/connect', ...guard, async (req, res) => {
-  const { code, waba_id, phone_number_id } = req.body || {};
+  const { code, waba_id } = req.body || {};
   if (!code) return res.status(400).json({ error: 'Authorization code obrigatorio', code: 'VALIDATION_ERROR' });
+
+  const wabaId = waba_id || null;
+  let phoneNumberId = (req.body && req.body.phone_number_id) || null;
+  const warnings = [];
+  const warn = (txt, e) => warnings.push(`${txt}${e ? ': ' + String(e.message || e).slice(0, 160) : ''}`);
+
   try {
     const accessToken = await wa.exchangeCodeForToken(code);
     let phoneDisplay = '';
-    if (phone_number_id) {
+
+    // O Embedded Signup nem sempre devolve o phone_number_id (depende
+    // do passo em que a pessoa terminou) — buscar na WABA evita uma
+    // conexão pela metade.
+    if (!phoneNumberId && wabaId) {
       try {
-        const info = await wa.getPhoneInfo(phone_number_id, accessToken);
-        phoneDisplay = info.display_phone_number || '';
+        const list = await wa.listPhoneNumbers(wabaId, accessToken);
+        const first = Array.isArray(list) ? list[0] : null;
+        if (first && first.id) {
+          phoneNumberId = String(first.id);
+          phoneDisplay = first.display_phone_number || '';
+        } else {
+          warn('Nenhum número de telefone encontrado nesta conta do WhatsApp Business');
+        }
+      } catch (e) {
+        warn('Não foi possível listar os números da conta', e);
+      }
+    }
+
+    // Assinatura do webhook — sem isto nenhum evento deste número chega.
+    let subscribed = false;
+    if (wabaId) {
+      try {
+        await wa.subscribeApp(wabaId, accessToken);
+        subscribed = true;
+      } catch (e) {
+        warn('Não foi possível assinar os eventos do WhatsApp (webhook)', e);
+      }
+    } else {
+      warn('waba_id ausente: os eventos do WhatsApp (entrega, aprovação de template) não serão recebidos');
+    }
+
+    // ── Linha de crédito compartilhada (item extra da Fase 2) ───────
+    // A Meta exige que a Aura (Tech Provider) compartilhe a PRÓPRIA
+    // linha de crédito com cada WABA — sem isso o número conecta mas
+    // não envia template PAGO. Só roda com as duas envs setadas
+    // (WA_SYSTEM_TOKEN é o token do SISTEMA da Aura, nunca o do
+    // cliente); sem elas, pula em silêncio — não é erro, é feature
+    // ainda não configurada no Railway (Fase 4).
+    let creditShared = false;
+    if (wabaId && process.env.WA_EXTENDED_CREDIT_ID && process.env.WA_SYSTEM_TOKEN) {
+      try {
+        await wa.shareCreditLine(process.env.WA_EXTENDED_CREDIT_ID, wabaId, process.env.WA_SYSTEM_TOKEN);
+        creditShared = true;
+      } catch (e) {
+        warn('Não foi possível compartilhar a linha de crédito da Aura com esta conta', e);
+      }
+    }
+
+    // Registro do número. PIN de 6 dígitos por crypto (randomInt é
+    // uniforme — Math.random aqui seria previsível) e guardado cifrado.
+    let registered = false;
+    let encryptedPin = null;
+    if (phoneNumberId) {
+      const pin = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+      try {
+        await wa.registerPhone(phoneNumberId, accessToken, pin);
+        registered = true;
+        encryptedPin = encrypt(pin);
+      } catch (e) {
+        if (alreadyRegistered(e)) {
+          registered = true; // já estava pronto; o PIN é de quem registrou antes
+        } else {
+          warn('Não foi possível registrar o número na Cloud API', e);
+        }
+      }
+    }
+
+    // Display + qualidade: conforto na tela, não requisito da conexão.
+    let quality = null;
+    if (phoneNumberId) {
+      try {
+        const info = await wa.getPhoneInfo(phoneNumberId, accessToken);
+        phoneDisplay = (info && info.display_phone_number) || phoneDisplay;
+        quality = (info && info.quality_rating) || null;
       } catch { /* display é conforto, não requisito */ }
     }
+
     await db.query(
       `UPDATE companies SET
          wa_waba_id=$1, wa_phone_number_id=$2, wa_phone_display=$3,
          wa_access_token=$4, wa_connected_at=NOW(), updated_at=NOW()
        WHERE id=$5`,
-      [waba_id || null, phone_number_id || null, phoneDisplay, encrypt(accessToken), req.params.id]
+      [wabaId, phoneNumberId || null, phoneDisplay, encrypt(accessToken), req.params.id]
     );
     // Reconectou: a recusa anterior (309) não vale mais.
     await clearTokenInvalid(req.params.id);
-    return res.json({ connected: true, phone_display: phoneDisplay, waba_id: waba_id || null });
+    // Colunas da 328 — em UPDATE separado, 42703-safe: migration pendente
+    // não pode impedir a conexão de acontecer.
+    await saveConnExtras(req.params.id, { encryptedPin, subscribed, registered, quality });
+    // Coluna da 329 — mesma lógica: só grava em caso de sucesso real.
+    if (creditShared) await saveCreditShared(req.params.id);
+
+    return res.json({
+      connected: true,
+      phone_display: phoneDisplay,
+      waba_id: wabaId,
+      phone_number_id: phoneNumberId || null,
+      subscribed,
+      registered,
+      credit_shared: creditShared,
+      warnings,
+    });
   } catch (err) {
     console.error('[whatsappCloud] connect error:', err.message);
     return res.status(502).json({ error: String(err.message).slice(0, 200) });
@@ -128,14 +377,33 @@ router.post('/whatsapp/connect', ...guard, async (req, res) => {
 });
 
 // ── POST /whatsapp/disconnect ───────────────────────────────
+// Antes de esquecer a credencial, soltar a assinatura do webhook: o
+// token some daqui, mas a WABA continuaria mandando evento para um app
+// que não sabe mais de quem é o número.
 router.post('/whatsapp/disconnect', ...guard, async (req, res) => {
   try {
+    try {
+      const conn = await loadCompanyWa(req.params.id);
+      if (conn && conn.wa_waba_id && conn.has_token) {
+        const { rows: tok } = await db.query(
+          'SELECT wa_access_token FROM companies WHERE id = $1 LIMIT 1', [req.params.id]
+        );
+        const stored = tok[0] && tok[0].wa_access_token;
+        if (stored) await wa.unsubscribeApp(conn.wa_waba_id, waOutbox.decryptToken(stored));
+      }
+    } catch (e) {
+      // Best-effort de verdade: desconectar do lado da Aura nunca pode
+      // depender da Meta responder.
+      console.warn('[whatsappCloud] unsubscribe best-effort falhou:', e.message);
+    }
     await db.query(
       `UPDATE companies SET wa_waba_id=NULL, wa_phone_number_id=NULL, wa_phone_display=NULL,
               wa_access_token=NULL, wa_connected_at=NULL, updated_at=NOW()
         WHERE id=$1`,
       [req.params.id]
     );
+    await clearConnExtras(req.params.id);
+    await clearCreditShared(req.params.id);
     return res.json({ disconnected: true });
   } catch (err) {
     console.error('[whatsappCloud] disconnect error:', err.message);
@@ -143,7 +411,55 @@ router.post('/whatsapp/disconnect', ...guard, async (req, res) => {
   }
 });
 
+// Status do template de COBRANÇA no registro local (o status verdadeiro
+// vem do webhook da Meta — nunca "achamos" que está aprovado).
+async function loadBillingTemplate(companyId) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:status-template
+       SELECT status FROM wa_templates
+        WHERE company_id = $1 AND name = $2 AND language = 'pt_BR' LIMIT 1`,
+      [companyId, billingTemplateName()]
+    );
+    return (rows[0] && rows[0].status) || null;
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return null;
+    throw e;
+  }
+}
+
+// Consumo: só o que a Meta COBROU (sent/delivered/read). Fuso de São
+// Paulo porque "hoje" para o dono do dojô é o dia dele, não o do UTC —
+// um envio das 22h viraria "amanhã" e o teto diário perderia o sentido.
+async function loadUsage(companyId) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:status-usage
+       SELECT
+         COUNT(*) FILTER (
+           WHERE (created_at AT TIME ZONE 'America/Sao_Paulo')::date
+               = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date)::int AS today_sent,
+         COUNT(*) FILTER (
+           WHERE date_trunc('month', created_at AT TIME ZONE 'America/Sao_Paulo')
+               = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo'))::int AS month_sent
+         FROM wa_outbox
+        WHERE company_id = $1 AND status IN ('sent','delivered','read')`,
+      [companyId]
+    );
+    return {
+      today_sent: Number((rows[0] && rows[0].today_sent) || 0),
+      month_sent: Number((rows[0] && rows[0].month_sent) || 0),
+    };
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return { today_sent: 0, month_sent: 0 };
+    throw e;
+  }
+}
+
 // ── GET /whatsapp/status ────────────────────────────────────
+// Este endpoint é o que a tela usa para DESABILITAR o toggle de envio
+// automático. Cada campo aqui é um motivo possível de "não pode ligar":
+// sem adicional, sem número, template não aprovado, fila pausada.
 router.get('/whatsapp/status', ...guard, async (req, res) => {
   try {
     const conn = await loadCompanyWa(req.params.id);
@@ -157,6 +473,11 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
     } catch (e) {
       if (e.code !== '42P01') throw e;
     }
+    const extras = await loadConnExtras(req.params.id);
+    const addonActive = await addons.hasAddon(req.params.id, addons.ADDON_WHATSAPP_AUTO);
+    const templateStatus = await loadBillingTemplate(req.params.id);
+    const usage = await loadUsage(req.params.id);
+    const creditSharedAt = await loadCreditShared(req.params.id);
     // Token recusado pela Meta derruba o "conectado": o selo verde com
     // credencial morta era pior do que não ter selo (QA 26/08).
     const tokenExpired = !!(conn && conn.wa_token_invalid_at);
@@ -166,9 +487,29 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
       token_expired_at: (conn && conn.wa_token_invalid_at) || null,
       phone_display: (conn && conn.wa_phone_display) || null,
       waba_id: (conn && conn.wa_waba_id) || null,
+      phone_number_id: (conn && conn.wa_phone_number_id) || null,
       connected_at: (conn && conn.wa_connected_at) || null, // compat legado
       queue: queue || {},
       schema_pending: queue === null,
+
+      addon_active: addonActive,
+      template_name: billingTemplateName(),
+      template_status: templateStatus,
+      template_ready: templateStatus === 'APPROVED',
+      quality_rating: (extras && extras.wa_quality_rating) || null,
+      paused_reason: (extras && extras.wa_paused_reason) || null,
+      paused_at: (extras && extras.wa_paused_at) || null,
+      subscribed: !!(extras && extras.wa_subscribed_at),
+      registered: !!(extras && extras.wa_registered_at),
+      credit_shared: !!creditSharedAt,
+      usage: { ...usage, daily_cap: dailyCap() },
+      // A tela do dojô monta o Embedded Signup com isto; sem config_id
+      // não há botão (e não adianta pedir para "conectar").
+      embedded_signup: {
+        app_id: process.env.WA_APP_ID || null,
+        config_id: process.env.WA_ES_CONFIG_ID || null,
+        graph_version: 'v21.0',
+      },
     });
   } catch (e) {
     console.error('[whatsappCloud] status error:', e.message);
@@ -308,6 +649,94 @@ router.get('/whatsapp/outbox', ...guard, async (req, res) => {
     if (e.code === '42P01') return schemaPending(res);
     console.error('[whatsappCloud] outbox error:', e.message);
     return res.status(500).json({ error: 'Erro ao listar a fila' });
+  }
+});
+
+// ── GET /whatsapp/preview — prévia da régua automática, SEM enfileirar ──
+// A tela usa isto ANTES de alguém ligar o toggle: "hoje X alunos
+// receberiam". Reusa a MESMA seleção do runner automático
+// (karateDojoReminderEngine.whatsappQueue) e repete as guardas de custo
+// (2a) em modo leitura (waOutbox.simulate) — nenhuma chamada à Meta,
+// nenhuma linha nova na wa_outbox.
+//
+// Os tetos diário/por-contato (4/5) são sobre ACÚMULO ao longo de
+// vários itens: simulate() não tem estado entre chamadas, então aqui a
+// gente mantém um contador local que começa no que JÁ foi enviado hoje
+// (America/Sao_Paulo) e cresce na MESMA ordem em que o runner
+// automático processaria a fila — a mesma ordem de whatsappQueue.
+router.get('/whatsapp/preview', ...guard, async (req, res) => {
+  const companyId = req.params.id;
+  const templateName = billingTemplateName();
+  const skipped = {
+    OPT_OUT: 0, JA_ENVIADO: 0, SEM_TELEFONE: 0, TELEFONE_INVALIDO: 0,
+    TEMPLATE_NAO_APROVADO: 0, LIMITE_DIARIO: 0, LIMITE_POR_CONTATO: 0,
+    PAUSADO: 0, ADDON_INATIVO: 0,
+  };
+  const items = [];
+  const bumpSkip = (reason) => { skipped[reason] = (skipped[reason] || 0) + 1; };
+  const pushItem = (it, reason) => {
+    if (items.length < 200) {
+      items.push({
+        student_name: it.student_name || null,
+        phone_masked: maskPhone(it.phone),
+        amount: it.amount != null ? Number(it.amount) : null,
+        due_date: it.due_date,
+        reason,
+      });
+    }
+  };
+
+  try {
+    const reminders = require('../services/karateDojoReminderEngine');
+    const dateParam = req.query.date != null && String(req.query.date).trim() !== ''
+      ? String(req.query.date).trim() : null;
+
+    let q;
+    try {
+      q = await reminders.whatsappQueue(companyId, { date: dateParam });
+    } catch (e) {
+      if (e && e.status) return res.status(e.status).json({ error: e.message, code: e.code || 'ERROR' });
+      throw e;
+    }
+    // Company sem karate_dojo_reminder_config (não é dojô) → nada a prever.
+    if (q.schema_pending) {
+      return res.json({ date: dateParam || q.date, template_name: templateName, would_send: 0, skipped, items: [] });
+    }
+    skipped.SEM_TELEFONE = q.no_phone_count || 0;
+
+    const addonActive = await addons.hasAddon(companyId, addons.ADDON_WHATSAPP_AUTO);
+    let dailyCount = await waOutbox.countToday(companyId, {});
+    const dailyLimit = waOutbox.dailyCap();
+    const perPhoneLimit = waOutbox.perPhoneDailyCap();
+    const phoneCounts = new Map();
+
+    let wouldSend = 0;
+    for (const it of q.data || []) {
+      if (it.already_sent) { bumpSkip('JA_ENVIADO'); pushItem(it, 'JA_ENVIADO'); continue; }
+      if (!addonActive) { bumpSkip('ADDON_INATIVO'); pushItem(it, 'ADDON_INATIVO'); continue; }
+
+      const sim = await waOutbox.simulate({
+        companyId, toPhone: it.phone, templateName, templateLanguage: 'pt_BR',
+      });
+      if (!sim.ok) { bumpSkip(sim.reason); pushItem(it, sim.reason); continue; }
+
+      if (dailyCount >= dailyLimit) { bumpSkip('LIMITE_DIARIO'); pushItem(it, 'LIMITE_DIARIO'); continue; }
+      if (!phoneCounts.has(it.phone)) {
+        phoneCounts.set(it.phone, await waOutbox.countToday(companyId, { phone: it.phone }));
+      }
+      const usedPhone = phoneCounts.get(it.phone);
+      if (usedPhone >= perPhoneLimit) { bumpSkip('LIMITE_POR_CONTATO'); pushItem(it, 'LIMITE_POR_CONTATO'); continue; }
+
+      wouldSend++;
+      dailyCount++;
+      phoneCounts.set(it.phone, usedPhone + 1);
+    }
+
+    return res.json({ date: q.date, template_name: templateName, would_send: wouldSend, skipped, items });
+  } catch (e) {
+    if (e.code === '42P01') return schemaPending(res);
+    console.error('[whatsappCloud] preview error:', e.message);
+    return res.status(500).json({ error: 'Erro ao montar a prévia do WhatsApp' });
   }
 });
 

@@ -22,6 +22,154 @@ const wa = require('./whatsapp');
 const MAX_ATTEMPTS = 5;
 const WINDOW_MS = 24 * 3600 * 1000;
 
+// ── Guardas de custo (Fase 2) — CADA MENSAGEM CUSTA DINHEIRO ────────
+// Tetos configuráveis por env; default seguro quando ausente/inválida.
+function dailyCap() {
+  const n = Number(process.env.WA_DAILY_CAP);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 300;
+}
+
+function perPhoneDailyCap() {
+  const n = Number(process.env.WA_PER_PHONE_DAILY_CAP);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 2;
+}
+
+// Teto FIXO de envio de teste (2f) — não é env: um número fixo baixo é
+// o bastante para o sensei testar o template e alto o suficiente para
+// não travar QA. Não faz sentido alguém precisar mudar isso por env.
+const TEST_DAILY_CAP = 5;
+
+// Template aprovado PARA ESTA COMPANY? 42P01 (307 pendente) ou nenhuma
+// linha local contam como NÃO aprovado — sem registro local não há
+// garantia nenhuma de que a Meta aceitaria o nome agora.
+async function isTemplateApproved(companyId, name, language) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:guard-template
+       SELECT status FROM wa_templates
+        WHERE company_id = $1 AND name = $2 AND language = $3 LIMIT 1`,
+      [companyId, name, language || 'pt_BR']
+    );
+    return !!(rows[0] && rows[0].status === 'APPROVED');
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return false;
+    throw e;
+  }
+}
+
+// Motivo de pausa da fila (328) — 42703/42P01-safe: migration pendente
+// nunca pode travar quem já está enviando sem pausa nenhuma.
+async function loadPauseReason(companyId) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:guard-paused
+       SELECT wa_paused_reason FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    return (rows[0] && rows[0].wa_paused_reason) || null;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') return null;
+    throw e;
+  }
+}
+
+// Contagem de HOJE (America/Sao_Paulo) na wa_outbox — não conta
+// 'skipped' nem 'failed' (nem gasto real, nem gasto pendente). Serve os
+// dois tetos (4 e 5) e o teto fixo de teste (2f) conforme os filtros
+// opcionais: phone (por contato) e sourceType (só itens de teste).
+async function countToday(companyId, { phone = null, sourceType = null } = {}) {
+  try {
+    const { rows } = await db.query(
+      `-- wa:guard-count-today
+       SELECT COUNT(*)::int AS n FROM wa_outbox
+        WHERE company_id = $1
+          AND ($2::text IS NULL OR to_phone = $2)
+          AND ($3::text IS NULL OR source_type = $3)
+          AND status NOT IN ('skipped','failed')
+          AND (created_at AT TIME ZONE 'America/Sao_Paulo')::date
+            = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date`,
+      [companyId, phone, sourceType]
+    );
+    return Number((rows[0] && rows[0].n) || 0);
+  } catch (e) {
+    if (e.code === '42P01' || e.code === '42703') return 0;
+    throw e;
+  }
+}
+
+// Contato marcado como inválido pela Meta (wa_contacts.invalid_at, 328)
+// — telefone que não é WhatsApp ou estourou limite de marketing por
+// usuário nunca mais entra na fila automática.
+async function markContactInvalid(companyId, phone, reason) {
+  const p = normalizePhone(phone) || phone;
+  if (!p) return;
+  try {
+    await db.query(
+      `-- wa:contact-invalid
+       UPDATE wa_contacts SET invalid_at = NOW(), invalid_reason = $3
+        WHERE company_id = $1 AND phone = $2`,
+      [companyId, p, reason ? String(reason).slice(0, 300) : null]
+    );
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+  }
+}
+
+// Pausa a fila da company (328) — QUALIDADE_BAIXA | CONTA_RESTRITA |
+// MANUAL. 42703/42P01-safe: migration pendente não pode virar exceção
+// no meio do tratamento de um erro que JÁ é ruim.
+async function markCompanyPaused(companyId, reason) {
+  try {
+    await db.query(
+      `-- wa:company-pause
+       UPDATE companies SET wa_paused_reason = $2, wa_paused_at = NOW() WHERE id = $1`,
+      [companyId, reason]
+    );
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+  }
+}
+
+// 133010 ("phone number not registered"): o /register de algum jeito
+// deixou de valer — carimbar NULL aqui é o que faz o /status voltar a
+// pedir reconexão/registro em vez de mentir "registrado".
+async function clearRegisteredFlag(companyId) {
+  try {
+    await db.query(
+      `-- wa:clear-registered
+       UPDATE companies SET wa_registered_at = NULL WHERE id = $1`,
+      [companyId]
+    );
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+  }
+}
+
+// Erros da Graph que NUNCA vão melhorar com retry (2c) — falha na 1ª
+// tentativa em vez de gastar mais 4 chamadas pagas/bloqueadas até
+// desistir. Por código (err.meta.code), nunca por regex na mensagem.
+const PERMANENT_ERROR_CODES = new Set([
+  100, 130472, 131026, 131047, 131051, 132000, 132001, 132005, 132007,
+  132012, 132015, 132016, 133010, 470, 131031, 131053,
+]);
+
+// Telefone que a Meta disse não ser WhatsApp (131026) ou que estourou o
+// limite de marketing por usuário (131049): marca invalid_at para
+// futuros enqueues pularem — 131049 não é permanente HOJE (o limite
+// pode resetar), mas continuar tentando o MESMO contato é dinheiro
+// jogado fora.
+const CONTACT_INVALID_ERROR_CODES = new Set([131026, 131049]);
+
+// Conta restrita ou com problema de pagamento: pausa a FILA INTEIRA da
+// company (não só esta mensagem) — 131031 também é permanente (lista
+// acima); 131042 fica de fora da lista de permanentes porque um
+// problema de pagamento pode ser resolvido rápido pelo lojista.
+const PAUSE_ERROR_CODES = new Set([131031, 131042]);
+
+function metaErrorCode(err) {
+  return err && err.meta ? Number(err.meta.code) : NaN;
+}
+
 // E.164 sem '+': só dígitos. BR de 10 dígitos (fixo) ou 11 com '9' na
 // 3ª posição (celular DDD+9...) ganha 55. Onze dígitos SEM esse '9'
 // (ex.: o número de teste da Meta, 1 555 630 9005) passam como
@@ -89,11 +237,47 @@ async function enqueue({
   if (!phone) return { queued: false, reason: 'TELEFONE_INVALIDO' };
   if (kind === 'template' && !templateName) return { queued: false, reason: 'TEMPLATE_OBRIGATORIO' };
 
+  const isTeste = sourceType === 'teste';
   const contact = await getContact(companyId, phone);
   let status = 'pending';
   let skipReason = null;
   if (contact && contact.opted_out_at) { status = 'skipped'; skipReason = 'OPT_OUT'; }
   else if (kind === 'text' && !windowOpen(contact)) { status = 'skipped'; skipReason = 'JANELA_FECHADA'; }
+
+  // ── Guardas de custo (Fase 2) — só valem quando ainda 'pending'
+  // (opt-out e janela fechada, acima, sempre vencem primeiro). Item de
+  // TESTE pula template (2) e os dois tetos automáticos (4/5), mas
+  // continua respeitando telefone inválido (1) e pausa (3) — testar
+  // não pode gastar num número que a Meta já recusou nem numa fila
+  // pausada. Em vez disso, teste tem o PRÓPRIO teto fixo (2f).
+  if (status === 'pending' && contact && contact.invalid_at) {
+    status = 'skipped'; skipReason = 'TELEFONE_INVALIDO_META';
+  }
+  if (status === 'pending' && kind === 'template' && !isTeste) {
+    const approved = await isTemplateApproved(companyId, templateName, templateLanguage);
+    if (!approved) { status = 'skipped'; skipReason = 'TEMPLATE_NAO_APROVADO'; }
+  }
+  if (status === 'pending') {
+    const pauseReason = await loadPauseReason(companyId);
+    if (pauseReason) {
+      status = 'skipped';
+      skipReason = pauseReason === 'QUALIDADE_BAIXA' ? 'QUALIDADE_BAIXA' : 'PAUSADO';
+    }
+  }
+  if (status === 'pending' && !isTeste) {
+    const n = await countToday(companyId, {});
+    if (n >= dailyCap()) { status = 'skipped'; skipReason = 'LIMITE_DIARIO'; }
+  }
+  if (status === 'pending' && !isTeste) {
+    const n = await countToday(companyId, { phone });
+    if (n >= perPhoneDailyCap()) { status = 'skipped'; skipReason = 'LIMITE_POR_CONTATO'; }
+  }
+  if (status === 'pending' && isTeste) {
+    // Cap fixo de 5/dia (2f) — contado só entre itens de teste, não
+    // disputa o teto da fila automática nem é disputado por ela.
+    const n = await countToday(companyId, { sourceType: 'teste' });
+    if (n >= TEST_DAILY_CAP) { status = 'skipped'; skipReason = 'LIMITE_DIARIO'; }
+  }
 
   const { rows } = await db.query(
     `-- wa:outbox-enqueue
@@ -109,6 +293,35 @@ async function enqueue({
   );
   if (!rows.length) return { queued: false, reason: 'DUPLICADO' };
   return { queued: status === 'pending', id: rows[0].id, status, reason: skipReason };
+}
+
+// Simula as guardas 1 (telefone inválido), OPT_OUT, 2 (template) e 3
+// (pausa) de UM possível envio, SEM GRAVAR NADA — usado pelo
+// GET /whatsapp/preview para mostrar quem seria pulado hoje sem gastar
+// uma chamada à Meta nem escrever na wa_outbox. Os tetos (4/5) ficam de
+// fora de propósito: são sobre ACÚMULO ao longo de vários itens, e o
+// preview precisa somar isso na ORDEM em que os itens seriam enviados —
+// quem chama mantém esse acumulado (ver GET /whatsapp/preview).
+async function simulate({ companyId, toPhone, templateName = null, templateLanguage = 'pt_BR', sourceType = null }) {
+  const phone = normalizePhone(toPhone);
+  if (!phone) return { ok: false, reason: 'TELEFONE_INVALIDO' };
+  const isTeste = sourceType === 'teste';
+
+  const contact = await getContact(companyId, phone);
+  if (contact && contact.opted_out_at) return { ok: false, reason: 'OPT_OUT' };
+  if (contact && contact.invalid_at) return { ok: false, reason: 'TELEFONE_INVALIDO_META' };
+
+  if (templateName && !isTeste) {
+    const approved = await isTemplateApproved(companyId, templateName, templateLanguage);
+    if (!approved) return { ok: false, reason: 'TEMPLATE_NAO_APROVADO' };
+  }
+
+  const pauseReason = await loadPauseReason(companyId);
+  if (pauseReason) {
+    return { ok: false, reason: pauseReason === 'QUALIDADE_BAIXA' ? 'QUALIDADE_BAIXA' : 'PAUSADO' };
+  }
+
+  return { ok: true, reason: null };
 }
 
 // O token do Graph API é cifrado em repouso (AES-256-GCM, prefixo 'v1:',
@@ -137,6 +350,10 @@ const TOKEN_ERROR_MARKERS = [
 ];
 
 function isTokenError(err) {
+  // Desde o erro estruturado da Graph (whatsapp.graphError) o código vem
+  // limpo em err.meta — casar por texto continua valendo para o que já
+  // está gravado em last_error e para quem lança Error puro.
+  if (err && err.meta && Number(err.meta.code) === 190) return true;
   const msg = String((err && err.message) || err || '').toLowerCase();
   if (/code:?\s*190/.test(msg)) return true;
   return TOKEN_ERROR_MARKERS.some((m) => msg.includes(m));
@@ -183,6 +400,42 @@ async function loadCreds(companyId) {
   }
 }
 
+// Estado da conexão para quem só precisa responder "este dojô pode
+// enviar?" (o gate da régua). O /whatsapp/status carrega mais campos e
+// tem o loader dele; aqui basta o veredito — e ele nasce das MESMAS
+// três condições: número + token + token não recusado.
+// Colunas da 039/309 podem faltar: 42703/42P01 → "não conectado".
+async function connectionState(companyId) {
+  let row = null;
+  try {
+    const { rows } = await db.query(
+      `-- wa:conn-state
+       SELECT wa_phone_number_id, wa_access_token IS NOT NULL AS has_token
+         FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    row = rows[0] || null;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') return { connected: false, token_expired: false };
+    throw e;
+  }
+  let tokenExpired = false;
+  try {
+    const { rows } = await db.query(
+      `-- wa:conn-state-flag
+       SELECT wa_token_invalid_at FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    tokenExpired = !!(rows[0] && rows[0].wa_token_invalid_at);
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+  }
+  return {
+    connected: !!(row && row.wa_phone_number_id && row.has_token && !tokenExpired),
+    token_expired: tokenExpired,
+  };
+}
+
 async function markRow(id, fields) {
   const sets = [];
   const vals = [];
@@ -224,6 +477,32 @@ async function processBatch(limit = 20) {
         out.skipped++;
         continue;
       }
+      // ── Reforço 2b: repete as guardas 1, 2 e 3 do enqueue — o estado
+      // pode ter mudado enquanto o item esperava na fila (a Meta marcou
+      // o contato inválido, o template caiu, a fila foi pausada). Item
+      // de teste pula só o 2 (template), igual no enqueue.
+      if (contact && contact.invalid_at) {
+        await markRow(row.id, { status: 'skipped', skip_reason: 'TELEFONE_INVALIDO_META' });
+        out.skipped++;
+        continue;
+      }
+      if (row.kind === 'template' && row.source_type !== 'teste') {
+        const approved = await isTemplateApproved(row.company_id, row.template_name, row.template_language);
+        if (!approved) {
+          await markRow(row.id, { status: 'skipped', skip_reason: 'TEMPLATE_NAO_APROVADO' });
+          out.skipped++;
+          continue;
+        }
+      }
+      const pauseReasonNow = await loadPauseReason(row.company_id);
+      if (pauseReasonNow) {
+        await markRow(row.id, {
+          status: 'skipped',
+          skip_reason: pauseReasonNow === 'QUALIDADE_BAIXA' ? 'QUALIDADE_BAIXA' : 'PAUSADO',
+        });
+        out.skipped++;
+        continue;
+      }
 
       let resp;
       if (row.kind === 'template') {
@@ -254,7 +533,24 @@ async function processBatch(limit = 20) {
       // para o status parar de dizer "Conectado" (o retry continua —
       // reconectar limpa a marca e a mensagem sai na próxima tentativa).
       if (isTokenError(e)) await markTokenInvalid(row.company_id, msg);
-      if (attempts >= MAX_ATTEMPTS) {
+
+      // ── Erros permanentes da Meta (2c) — por CÓDIGO (err.meta.code),
+      // nunca por regex na frase em inglês. Erro de REDE (fetch rejeita
+      // antes de ter resposta da Meta, sem err.meta) não é permanente:
+      // continua no retry/backoff de sempre.
+      const code = metaErrorCode(e);
+      if (CONTACT_INVALID_ERROR_CODES.has(code)) {
+        await markContactInvalid(row.company_id, row.to_phone, msg);
+      }
+      if (code === 133010) {
+        await clearRegisteredFlag(row.company_id);
+      }
+      if (PAUSE_ERROR_CODES.has(code)) {
+        await markCompanyPaused(row.company_id, 'CONTA_RESTRITA');
+      }
+      const permanent = PERMANENT_ERROR_CODES.has(code);
+
+      if (permanent || attempts >= MAX_ATTEMPTS) {
         await markRow(row.id, { status: 'failed', attempts, last_error: msg });
         out.failed++;
       } else {
@@ -303,7 +599,12 @@ async function applyTemplateStatus(companyId, { name, language, status, metaTemp
 
 module.exports = {
   normalizePhone, touchInbound, windowOpen, getContact, decryptToken,
-  isTokenError, markTokenInvalid, clearTokenInvalid,
-  enqueue, processBatch, applyStatusUpdate, applyTemplateStatus,
+  isTokenError, markTokenInvalid, clearTokenInvalid, connectionState,
+  enqueue, processBatch, simulate, applyStatusUpdate, applyTemplateStatus,
+  // Guardas de custo (Fase 2) — expostas para o GET /whatsapp/preview e
+  // para os testes de guarda.
+  dailyCap, perPhoneDailyCap, countToday, isTemplateApproved, loadPauseReason,
+  markContactInvalid, markCompanyPaused, clearRegisteredFlag,
+  TEST_DAILY_CAP,
   MAX_ATTEMPTS,
 };
