@@ -190,6 +190,40 @@ async function clearCreditShared(companyId) {
   }
 }
 
+// ── Coluna da 331 (Coexistence) — mesmo truque das 309/328/329: cache
+// module-level para não pagar try/catch a cada request quando a
+// migration ainda não subiu no deploy.
+let HAS_COEXISTENCE_COL = true;
+
+async function saveCoexistence(companyId, isCoexistence) {
+  if (!HAS_COEXISTENCE_COL) return;
+  try {
+    await db.query(
+      `-- wa:coexistence-set
+       UPDATE companies SET wa_coexistence = $2 WHERE id = $1`,
+      [companyId, !!isCoexistence]
+    );
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') { HAS_COEXISTENCE_COL = false; return; }
+    throw e;
+  }
+}
+
+async function loadCoexistence(companyId) {
+  if (!HAS_COEXISTENCE_COL) return false;
+  try {
+    const { rows } = await db.query(
+      `-- wa:coexistence-get
+       SELECT wa_coexistence FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    return !!(rows[0] && rows[0].wa_coexistence);
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') { HAS_COEXISTENCE_COL = false; return false; }
+    throw e;
+  }
+}
+
 async function loadCompanyWa(companyId) {
   try {
     const { rows } = await db.query(
@@ -256,11 +290,15 @@ function alreadyRegistered(err) {
 // mas o carimbo (wa_subscribed_at/wa_registered_at) só existe em caso
 // de sucesso — o status precisa contar a verdade.
 router.post('/whatsapp/connect', ...guard, async (req, res) => {
-  const { code, waba_id } = req.body || {};
+  const { code, waba_id, mode: modeRaw } = req.body || {};
   if (!code) return res.status(400).json({ error: 'Authorization code obrigatorio', code: 'VALIDATION_ERROR' });
 
   const wabaId = waba_id || null;
   let phoneNumberId = (req.body && req.body.phone_number_id) || null;
+  // Coexistence (Onboard WhatsApp Business app users): o frontend já sabe
+  // que é este caminho porque mandou featureType: 'whatsapp_business_app_onboarding'
+  // no Embedded Signup. Qualquer valor diferente de 'coexistence' vira 'padrao'.
+  const mode = modeRaw === 'coexistence' ? 'coexistence' : 'padrao';
   const warnings = [];
   const warn = (txt, e) => warnings.push(`${txt}${e ? ': ' + String(e.message || e).slice(0, 160) : ''}`);
 
@@ -299,6 +337,29 @@ router.post('/whatsapp/connect', ...guard, async (req, res) => {
       warn('waba_id ausente: os eventos do WhatsApp (entrega, aprovação de template) não serão recebidos');
     }
 
+    // ── Coexistence: o número já está no app do celular? ────────────
+    // GET /{phone_number_id}?fields=is_on_biz_app,platform_type diz se
+    // este número já roda no WhatsApp Business do celular. Se sim, ele
+    // JÁ ESTÁ registrado na Cloud API — chamar /register de novo
+    // QUEBRARIA o app do celular (doc da Meta "Onboard WhatsApp Business
+    // app users"). `mode: 'coexistence'` vindo do frontend força o mesmo
+    // caminho mesmo que esta checagem falhe (rede, permissão) — o
+    // frontend só manda esse mode quando o signup foi feito com
+    // featureType: 'whatsapp_business_app_onboarding'.
+    let isOnBizApp = false;
+    if (phoneNumberId) {
+      try {
+        const onboarding = await wa.getPhoneOnboarding(phoneNumberId, accessToken);
+        isOnBizApp = !!(onboarding && onboarding.is_on_biz_app === true);
+        if (onboarding && onboarding.display_phone_number) phoneDisplay = onboarding.display_phone_number;
+      } catch (e) {
+        // Best-effort: sem resposta da Meta, segue como se não estivesse no
+        // app (mode='coexistence' explícito ainda pula o /register abaixo).
+        console.warn('[whatsappCloud] getPhoneOnboarding falhou:', e.message);
+      }
+    }
+    const coexistence = isOnBizApp || mode === 'coexistence';
+
     // ── Linha de crédito compartilhada (item extra da Fase 2) ───────
     // A Meta exige que a Aura (Tech Provider) compartilhe a PRÓPRIA
     // linha de crédito com cada WABA — sem isso o número conecta mas
@@ -318,9 +379,14 @@ router.post('/whatsapp/connect', ...guard, async (req, res) => {
 
     // Registro do número. PIN de 6 dígitos por crypto (randomInt é
     // uniforme — Math.random aqui seria previsível) e guardado cifrado.
+    // Coexistence: o número já está registrado na Cloud API pelo próprio
+    // app do celular — NUNCA chamar /register aqui (quebraria o app).
+    // Só carimbamos o que já é verdade, sem gerar PIN nenhum.
     let registered = false;
     let encryptedPin = null;
-    if (phoneNumberId) {
+    if (coexistence) {
+      registered = true;
+    } else if (phoneNumberId) {
       const pin = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
       try {
         await wa.registerPhone(phoneNumberId, accessToken, pin);
@@ -359,6 +425,9 @@ router.post('/whatsapp/connect', ...guard, async (req, res) => {
     await saveConnExtras(req.params.id, { encryptedPin, subscribed, registered, quality });
     // Coluna da 329 — mesma lógica: só grava em caso de sucesso real.
     if (creditShared) await saveCreditShared(req.params.id);
+    // Coluna da 331 — grava sempre (inclusive false): reconectar em modo
+    // padrão depois de já ter sido coexistence precisa desligar a flag.
+    await saveCoexistence(req.params.id, coexistence);
 
     return res.json({
       connected: true,
@@ -368,6 +437,8 @@ router.post('/whatsapp/connect', ...guard, async (req, res) => {
       subscribed,
       registered,
       credit_shared: creditShared,
+      coexistence,
+      is_on_biz_app: isOnBizApp,
       warnings,
     });
   } catch (err) {
@@ -404,6 +475,7 @@ router.post('/whatsapp/disconnect', ...guard, async (req, res) => {
     );
     await clearConnExtras(req.params.id);
     await clearCreditShared(req.params.id);
+    await saveCoexistence(req.params.id, false);
     return res.json({ disconnected: true });
   } catch (err) {
     console.error('[whatsappCloud] disconnect error:', err.message);
@@ -496,6 +568,7 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
     const templatesReady = await loadTemplatesReady(req.params.id);
     const usage = await loadUsage(req.params.id);
     const creditSharedAt = await loadCreditShared(req.params.id);
+    const coexistence = await loadCoexistence(req.params.id);
     // Token recusado pela Meta derruba o "conectado": o selo verde com
     // credencial morta era pior do que não ter selo (QA 26/08).
     const tokenExpired = !!(conn && conn.wa_token_invalid_at);
@@ -523,6 +596,7 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
       subscribed: !!(extras && extras.wa_subscribed_at),
       registered: !!(extras && extras.wa_registered_at),
       credit_shared: !!creditSharedAt,
+      coexistence,
       usage: { ...usage, daily_cap: dailyCap() },
       // A tela do dojô monta o Embedded Signup com isto; sem config_id
       // não há botão (e não adianta pedir para "conectar").
