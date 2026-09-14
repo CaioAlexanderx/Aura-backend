@@ -147,6 +147,10 @@ function mockBanco({
     if (s.includes('-- mkt:coupon-defaults')) {
       return Promise.resolve({ rows: [{ reactivation_coupon_defaults: {}, birthday_coupon_defaults: {} }] });
     }
+    // SELECT do GET /birthday/settings (rota antiga, sem âncora de comentário).
+    if (s.includes('birthday_message_template') && s.includes('FROM companies')) {
+      return Promise.resolve({ rows: [{ birthday_coupon_defaults: {}, birthday_message_template: null, name: 'Loja Exemplo' }] });
+    }
     if (s.includes('-- mkt:cupom-insert')) {
       visto.cupons.push(params);
       return Promise.resolve({ rows: [{
@@ -538,6 +542,18 @@ describe('gates das rotas de settings', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(visto.autoFlags).toHaveLength(0);
+  });
+
+  it('(9e) GET /birthday/settings ecoa o interruptor e o consentimento — a tela reaberta não pode mentir "desligado"', async () => {
+    mockBanco({ consentimento: true });
+    const res = await request(buildBirthdayApp())
+      .get(`/companies/${COMPANY}/birthday/settings`);
+    expect(res.status).toBe(200);
+    expect(res.body.wa_birthday_auto).toBe(true);
+    expect(res.body.wa_marketing_consent_at).toBe('2026-09-01T00:00:00Z');
+    // O contrato antigo continua inteiro.
+    expect(res.body).toHaveProperty('defaults');
+    expect(res.body).toHaveProperty('template');
   });
 });
 
