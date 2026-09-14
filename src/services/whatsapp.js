@@ -158,6 +158,23 @@ async function getPhoneInfo(phoneNumberId, accessToken) {
   return resp.json();
 }
 
+// ── Coexistence (Onboard WhatsApp Business app users) ───────
+// Diz se o número JÁ está no app WhatsApp Business do celular
+// (is_on_biz_app) e, se sim, se já está do lado da Cloud API
+// (platform_type: 'CLOUD_API'). O connect usa isto para decidir se pode
+// chamar /register: registrar de novo um número que já está no app do
+// celular QUEBRA o app — por isso o caller nunca deve pular esta
+// checagem em nome de "economizar uma chamada".
+async function getPhoneOnboarding(phoneNumberId, accessToken) {
+  const resp = await fetch(
+    `${GRAPH_URL}/${phoneNumberId}?fields=is_on_biz_app,platform_type,display_phone_number,quality_rating`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const data = await resp.json();
+  if (data.error) throw graphError(data, resp.status);
+  return data;
+}
+
 // Helper: POST to Graph API
 async function graphPost(path, accessToken, body) {
   const resp = await fetch(`${GRAPH_URL}${path}`, {
@@ -177,7 +194,7 @@ module.exports = {
   exchangeCodeForToken,
   sendTemplate, sendText, sendMedia,
   listTemplates, createTemplate,
-  getPhoneInfo, graphPost, graphError,
+  getPhoneInfo, getPhoneOnboarding, graphPost, graphError,
   listPhoneNumbers, subscribeApp, unsubscribeApp, registerPhone,
   shareCreditLine,
 };
