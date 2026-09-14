@@ -681,7 +681,7 @@ async function runAll(today) {
         // cancelado depois — a coluna no banco não sabe disso. Sem o
         // adicional, o job não gasta uma única mensagem paga.
         const addons = require('./addons');
-        if (!(await addons.hasAddon(cfg.dojo_id, addons.ADDON_WHATSAPP_AUTO))) {
+        if (!(await addons.canAutoWhatsapp(cfg.dojo_id))) {
           agg.wa_sem_addon++;
         } else {
           const w = await runWhatsappAutoForDojo(cfg.dojo_id, { today, config });

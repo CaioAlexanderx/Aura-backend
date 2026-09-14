@@ -428,6 +428,19 @@ async function loadBillingTemplate(companyId) {
   }
 }
 
+// Quais templates de cobrança estão APROVADOS — o do dojô e os dois do
+// crediário. Mesma definição de "aprovado" que a fila usa
+// (waOutbox.isTemplateApproved): uma só, para a tela não liberar o
+// toggle de algo que o enqueue vai pular. 42P01 → tudo false.
+async function loadTemplatesReady(companyId) {
+  const nomes = [billingTemplateName(), 'parcela_lembrete', 'parcela_atraso'];
+  const out = {};
+  for (const nome of nomes) {
+    out[nome] = await waOutbox.isTemplateApproved(companyId, nome, 'pt_BR');
+  }
+  return out;
+}
+
 // Consumo: só o que a Meta COBROU (sent/delivered/read). Fuso de São
 // Paulo porque "hoje" para o dono do dojô é o dia dele, não o do UTC —
 // um envio das 22h viraria "amanhã" e o teto diário perderia o sentido.
@@ -474,8 +487,13 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
       if (e.code !== '42P01') throw e;
     }
     const extras = await loadConnExtras(req.params.id);
-    const addonActive = await addons.hasAddon(req.params.id, addons.ADDON_WHATSAPP_AUTO);
+    // Gate único (Fase 6): `addon_active` responde "esta empresa PODE
+    // mandar mensagem automática?" — adicional contratado ou plano que
+    // já inclui o WhatsApp. A tela confia neste campo e não precisa
+    // saber a diferença entre as duas formas de estar autorizado.
+    const addonActive = await addons.canAutoWhatsapp(req.params.id);
     const templateStatus = await loadBillingTemplate(req.params.id);
+    const templatesReady = await loadTemplatesReady(req.params.id);
     const usage = await loadUsage(req.params.id);
     const creditSharedAt = await loadCreditShared(req.params.id);
     // Token recusado pela Meta derruba o "conectado": o selo verde com
@@ -496,6 +514,9 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
       template_name: billingTemplateName(),
       template_status: templateStatus,
       template_ready: templateStatus === 'APPROVED',
+      // Fase 6: o varejo depende de OUTROS dois templates. `template_ready`
+      // continua sendo o da mensalidade (contrato da tela do dojô).
+      templates_ready: templatesReady,
       quality_rating: (extras && extras.wa_quality_rating) || null,
       paused_reason: (extras && extras.wa_paused_reason) || null,
       paused_at: (extras && extras.wa_paused_at) || null,
@@ -581,16 +602,55 @@ const DEFAULT_BILLING_TEMPLATE = {
   category: 'UTILITY',
   body: 'Olá, {{1}}! Lembrete da mensalidade de {{2}}: {{3}}, com vencimento em {{4}}. Qualquer dúvida, é só responder esta mensagem.',
   footer: 'Para não receber mais, responda SAIR.',
+  example: ['Ana Souza', 'agosto/2026', 'R$ 150,00', '10/08/2026'],
+};
+
+// ── Presets (Fase 6) ────────────────────────────────────────
+// O varejo cobra PARCELA de crediário, não mensalidade: outro texto,
+// outro número de variáveis. Em vez de pedir para a lojista redigir um
+// template e descobrir só na recusa da Meta que faltava exemplo ou que
+// o texto virou marketing, a tela manda só `{ preset }` e o texto certo
+// (UTILITY, pt_BR, com exemplos) sai daqui.
+//
+// Os dois presets do crediário têm 6 variáveis e o Pix copia-e-cola em
+// {{6}}, sozinho na última linha — é o que torna o "copiar" da mensagem
+// utilizável no celular.
+const TEMPLATE_PRESETS = {
+  mensalidade_lembrete: DEFAULT_BILLING_TEMPLATE,
+  parcela_lembrete: {
+    name: 'parcela_lembrete',
+    language: 'pt_BR',
+    category: 'UTILITY',
+    body: 'Olá, {{1}}! Lembrete da sua compra em {{2}}: parcela {{3}} de {{4}}, com vencimento em {{5}}. Pague pelo Pix copia e cola abaixo. Se já pagou, desconsidere.\n\n{{6}}',
+    footer: 'Para não receber mais, responda SAIR.',
+    example: ['Ana Souza', 'Loja Exemplo', '2/6', 'R$ 150,00', '10/10/2026', '00020126...'],
+  },
+  parcela_atraso: {
+    name: 'parcela_atraso',
+    language: 'pt_BR',
+    category: 'UTILITY',
+    body: 'Olá, {{1}}! A parcela {{3}} da sua compra em {{2}}, de {{4}}, venceu há {{5}} dias. Regularize pelo Pix copia e cola abaixo ou fale com a loja.\n\n{{6}}',
+    footer: 'Para não receber mais, responda SAIR.',
+    example: ['Ana Souza', 'Loja Exemplo', '2/6', 'R$ 150,00', '3', '00020126...'],
+  },
 };
 
 router.post('/whatsapp/templates', ...guard, async (req, res) => {
   const b = req.body || {};
+  const preset = b.preset && TEMPLATE_PRESETS[b.preset] ? TEMPLATE_PRESETS[b.preset] : DEFAULT_BILLING_TEMPLATE;
+  if (b.preset && !TEMPLATE_PRESETS[b.preset]) {
+    return res.status(422).json({
+      error: 'Modelo de template desconhecido: ' + String(b.preset).slice(0, 40),
+      code: 'VALIDATION_ERROR',
+    });
+  }
   const tpl = {
-    name: (b.name || DEFAULT_BILLING_TEMPLATE.name).trim(),
-    language: b.language || DEFAULT_BILLING_TEMPLATE.language,
-    category: b.category || DEFAULT_BILLING_TEMPLATE.category,
-    body: b.body || DEFAULT_BILLING_TEMPLATE.body,
-    footer: b.footer !== undefined ? b.footer : DEFAULT_BILLING_TEMPLATE.footer,
+    name: (b.name || preset.name).trim(),
+    language: b.language || preset.language,
+    category: b.category || preset.category,
+    body: b.body || preset.body,
+    footer: b.footer !== undefined ? b.footer : preset.footer,
+    example: b.body ? null : (preset.example || DEFAULT_BILLING_TEMPLATE.example),
   };
   try {
     const conn = await loadCompanyWa(req.params.id);
@@ -600,10 +660,13 @@ router.post('/whatsapp/templates', ...guard, async (req, res) => {
     const { rows: tok } = await db.query(
       'SELECT wa_access_token FROM companies WHERE id = $1 LIMIT 1', [req.params.id]
     );
-    // Exemplos são exigidos pela Meta quando o corpo tem variáveis.
+    // Exemplos são exigidos pela Meta quando o corpo tem variáveis. Cada
+    // preset traz o seu; corpo escrito à mão cai no exemplo genérico,
+    // preenchido até o número de variáveis que o texto realmente tem.
     const nVars = (tpl.body.match(/\{\{\d+\}\}/g) || []).length;
+    const amostra = tpl.example || DEFAULT_BILLING_TEMPLATE.example;
     const example = nVars
-      ? { body_text: [['Ana Souza', 'agosto/2026', 'R$ 150,00', '10/08/2026'].slice(0, nVars)] }
+      ? { body_text: [Array.from({ length: nVars }, (_, i) => amostra[i] || 'exemplo')] }
       : undefined;
     const components = [{ type: 'BODY', text: tpl.body, ...(example ? { example } : {}) }];
     if (tpl.footer) components.push({ type: 'FOOTER', text: tpl.footer });
@@ -664,9 +727,54 @@ router.get('/whatsapp/outbox', ...guard, async (req, res) => {
 // gente mantém um contador local que começa no que JÁ foi enviado hoje
 // (America/Sao_Paulo) e cresce na MESMA ordem em que o runner
 // automático processaria a fila — a mesma ordem de whatsappQueue.
+// `?source=crediario` (Fase 6) troca a origem dos candidatos: em vez da
+// régua do dojô, a régua do crediário do varejo. O SHAPE da resposta é o
+// mesmo de propósito — a tela de prévia é uma só, e a pergunta que ela
+// responde ("quantos recebem hoje e quantos são pulados, por quê") é a
+// mesma nas duas verticais.
 router.get('/whatsapp/preview', ...guard, async (req, res) => {
   const companyId = req.params.id;
   const templateName = billingTemplateName();
+
+  if (String(req.query.source || '').trim() === 'crediario') {
+    try {
+      const collectionAuto = require('../services/credit/collectionAuto');
+      const dateParam = req.query.date != null && String(req.query.date).trim() !== ''
+        ? String(req.query.date).trim() : null;
+      // dryRun: a mesma seleção e as mesmas guardas do runner, sem uma
+      // única escrita — nem na wa_outbox, nem no histórico de cobrança.
+      const r = await collectionAuto.runForCompany(companyId, { today: dateParam, dryRun: true });
+      const skippedCrediario = {
+        OPT_OUT: 0, JA_ENVIADO: 0, SEM_TELEFONE: 0, TELEFONE_INVALIDO: 0,
+        TEMPLATE_NAO_APROVADO: 0, LIMITE_DIARIO: 0, LIMITE_POR_CONTATO: 0,
+        PAUSADO: 0, ADDON_INATIVO: 0,
+        ...(r.skipped || {}),
+      };
+      // Company barrada inteira (sem régua, sem plano, sem conexão): a
+      // prévia devolve zero e o motivo, nunca um erro — a tela precisa
+      // mostrar o motivo por baixo do interruptor travado.
+      return res.json({
+        source: 'crediario',
+        date: dateParam,
+        template_name: 'parcela_lembrete',
+        would_send: r.enqueued || 0,
+        skipped: skippedCrediario,
+        skipped_reason: r.skipped_reason || null,
+        rules: r.rules || 0,
+        items: (r.items || []).map((it) => ({
+          student_name: it.student_name,
+          phone_masked: maskPhone(it.phone),
+          amount: it.amount,
+          due_date: it.due_date,
+          reason: it.reason,
+        })),
+      });
+    } catch (e) {
+      if (e.code === '42P01') return schemaPending(res);
+      console.error('[whatsappCloud] preview crediário error:', e.message);
+      return res.status(500).json({ error: 'Erro ao montar a prévia do crediário' });
+    }
+  }
   const skipped = {
     OPT_OUT: 0, JA_ENVIADO: 0, SEM_TELEFONE: 0, TELEFONE_INVALIDO: 0,
     TEMPLATE_NAO_APROVADO: 0, LIMITE_DIARIO: 0, LIMITE_POR_CONTATO: 0,
@@ -704,7 +812,8 @@ router.get('/whatsapp/preview', ...guard, async (req, res) => {
     }
     skipped.SEM_TELEFONE = q.no_phone_count || 0;
 
-    const addonActive = await addons.hasAddon(companyId, addons.ADDON_WHATSAPP_AUTO);
+    // Mesmo gate único do /status: quem tem o adicional OU o plano.
+    const addonActive = await addons.canAutoWhatsapp(companyId);
     let dailyCount = await waOutbox.countToday(companyId, {});
     const dailyLimit = waOutbox.dailyCap();
     const perPhoneLimit = waOutbox.perPhoneDailyCap();
