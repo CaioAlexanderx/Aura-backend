@@ -101,6 +101,19 @@ function startServer() {
     const { initCreditCollectionAutoJob } = require('./jobs/creditCollectionAutoJob');
     initCreditCollectionAutoJob();
 
+    // FASE 8: parabéns de aniversário pelo WhatsApp — diário 9h30 BRT
+    // (meia hora DEPOIS da régua do crediário, para cobrança e parabéns
+    // do mesmo cliente não saírem no mesmo minuto). Kill switch
+    // BIRTHDAY_WA_AUTO_ENABLED=false.
+    const { initBirthdayAutoJob } = require('./jobs/birthdayAutoJob');
+    initBirthdayAutoJob();
+
+    // FASE 7: reativação de clientes — SEMANAL, terça 10h BRT. Marketing
+    // em volume derruba a qualidade do número; por isso semanal e com
+    // teto pequeno. Kill switch REACTIVATION_WA_AUTO_ENABLED=false.
+    const { initReactivationAutoJob } = require('./jobs/reactivationAutoJob');
+    initReactivationAutoJob();
+
     // AURINHA (312): dispatcher da fila Instagram (ig_outbox) — tick 15s,
     // kill switch IG_DISPATCH_ENABLED=false.
     const { initIgDispatcher } = require('./jobs/igDispatcherJob');
