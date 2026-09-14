@@ -57,12 +57,20 @@ router.get('/settings', async (req, res) => {
     const defaults = { ...DEFAULTS_FALLBACK, ...(rows[0].birthday_coupon_defaults || {}) };
     const template = rows[0].birthday_message_template || TEMPLATE_FALLBACK;
 
+    // O PUT grava wa_birthday_auto e wa_marketing_consent, mas o GET não
+    // devolvia nenhum dos dois: ao reabrir a tela, o interruptor da rotina
+    // aparecia desligado mesmo com o job ligado. Consulta à parte e
+    // 42703-safe (331 pendente = tudo desligado), como no loadMarketingSettings.
+    const marketing = await mkt.loadMarketingSettings(req.params.id);
+
     res.json({
       defaults,
       template,
       // Flag pro front saber se já foi configurado uma vez
       configured: !!rows[0].birthday_message_template ||
                   Object.keys(rows[0].birthday_coupon_defaults || {}).length > 0,
+      wa_birthday_auto: marketing.wa_birthday_auto,
+      wa_marketing_consent_at: marketing.wa_marketing_consent_at,
     });
   } catch (err) {
     console.error('[birthday] settings get:', err.message);
