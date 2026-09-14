@@ -255,16 +255,22 @@ router.post('/', async (req, res) => {
             companyId, status.id, status.status,
             status.errors && status.errors[0] && status.errors[0].title || null
           ).catch((e) => console.error('[WA-WEBHOOK] outbox status error:', e.message));
-          // Fase 2: telefone que a Meta recusou de vez (não é WhatsApp ou
-          // estourou o limite de marketing por usuário) nunca mais entra
-          // na fila automática — sem isto o dojô paga chamada todo dia
-          // no mesmo número morto.
+          // Fase 2: telefone que a Meta recusou de vez (131026, não é
+          // WhatsApp) nunca mais entra na fila automática — sem isto o
+          // dojô paga chamada todo dia no mesmo número morto.
+          //
+          // Fase 7: 131049 é o limite de MARKETING por usuário e não diz
+          // nada sobre o número — bloqueia só marketing, por 30 dias, e a
+          // cobrança do mesmo cliente continua saindo.
           if (status.status === 'failed') {
             const errCode = status.errors && status.errors[0] && Number(status.errors[0].code);
-            if (errCode === 131026 || errCode === 131049) {
-              const recipient = waOutbox.normalizePhone(status.recipient_id) || status.recipient_id;
+            const recipient = waOutbox.normalizePhone(status.recipient_id) || status.recipient_id;
+            if (errCode === 131026) {
               await waOutbox.markContactInvalid(companyId, recipient, status.errors[0].title || null)
                 .catch((e) => console.error('[WA-WEBHOOK] contact invalid error:', e.message));
+            } else if (errCode === 131049) {
+              await waOutbox.markContactMarketingBlocked(companyId, recipient, waOutbox.MARKETING_BLOCK_DAYS)
+                .catch((e) => console.error('[WA-WEBHOOK] marketing block error:', e.message));
             }
           }
         }

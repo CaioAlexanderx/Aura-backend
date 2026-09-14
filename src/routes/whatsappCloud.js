@@ -500,12 +500,15 @@ async function loadBillingTemplate(companyId) {
   }
 }
 
-// Quais templates de cobrança estão APROVADOS — o do dojô e os dois do
-// crediário. Mesma definição de "aprovado" que a fila usa
-// (waOutbox.isTemplateApproved): uma só, para a tela não liberar o
-// toggle de algo que o enqueue vai pular. 42P01 → tudo false.
+// Quais templates estão APROVADOS — o do dojô, os dois do crediário e
+// (Fases 7/8) os dois de marketing. Mesma definição de "aprovado" que a
+// fila usa (waOutbox.isTemplateApproved): uma só, para a tela não
+// liberar o toggle de algo que o enqueue vai pular. 42P01 → tudo false.
 async function loadTemplatesReady(companyId) {
-  const nomes = [billingTemplateName(), 'parcela_lembrete', 'parcela_atraso'];
+  const nomes = [
+    billingTemplateName(), 'parcela_lembrete', 'parcela_atraso',
+    'reativacao_cupom', 'aniversario_cupom',
+  ];
   const out = {};
   for (const nome of nomes) {
     out[nome] = await waOutbox.isTemplateApproved(companyId, nome, 'pt_BR');
@@ -569,6 +572,18 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
     const usage = await loadUsage(req.params.id);
     const creditSharedAt = await loadCreditShared(req.params.id);
     const coexistence = await loadCoexistence(req.params.id);
+    // Fases 7/8: a tela de marketing precisa de UM campo para travar o
+    // interruptor e de UMA data para explicar o porquê. `marketing_ready`
+    // junta as três condições que não são do template: consentimento
+    // declarado, qualidade que a Meta ainda aceita para marketing
+    // (YELLOW já barra) e fila não pausada. 42703 (331 pendente) → null e
+    // false, que é a verdade: sem a coluna, nenhum marketing sai.
+    const marketingConsentAt = await waOutbox.loadMarketingConsentAt(req.params.id);
+    const qualityRating = (extras && extras.wa_quality_rating) || null;
+    const pausedReason = (extras && extras.wa_paused_reason) || null;
+    const marketingReady = !!marketingConsentAt
+      && qualityRating !== 'YELLOW' && qualityRating !== 'RED'
+      && !pausedReason;
     // Token recusado pela Meta derruba o "conectado": o selo verde com
     // credencial morta era pior do que não ter selo (QA 26/08).
     const tokenExpired = !!(conn && conn.wa_token_invalid_at);
@@ -590,8 +605,11 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
       // Fase 6: o varejo depende de OUTROS dois templates. `template_ready`
       // continua sendo o da mensalidade (contrato da tela do dojô).
       templates_ready: templatesReady,
-      quality_rating: (extras && extras.wa_quality_rating) || null,
-      paused_reason: (extras && extras.wa_paused_reason) || null,
+      // Marketing (Fases 7/8) — reativação e aniversário.
+      marketing_consent_at: marketingConsentAt,
+      marketing_ready: marketingReady,
+      quality_rating: qualityRating,
+      paused_reason: pausedReason,
       paused_at: (extras && extras.wa_paused_at) || null,
       subscribed: !!(extras && extras.wa_subscribed_at),
       registered: !!(extras && extras.wa_registered_at),
@@ -706,6 +724,32 @@ const TEMPLATE_PRESETS = {
     body: 'Olá, {{1}}! A parcela {{3}} da sua compra em {{2}}, de {{4}}, venceu há {{5}} dias. Regularize pelo Pix copia e cola abaixo ou fale com a loja.\n\n{{6}}',
     footer: 'Para não receber mais, responda SAIR.',
     example: ['Ana Souza', 'Loja Exemplo', '2/6', 'R$ 150,00', '3', '00020126...'],
+  },
+
+  // ── Presets de MARKETING (Fases 7/8) ──────────────────────
+  // Categoria MARKETING, não UTILITY: a Meta reprova (ou recategoriza
+  // sozinha, cobrando como marketing) template que oferece desconto
+  // dizendo ser utilitário. Declarar a categoria certa é o que evita o
+  // número ser punido por "categorização enganosa".
+  //
+  // O footer com "responda SAIR" não é decoração: marketing sem saída
+  // visível é o caminho mais curto para a pessoa marcar como spam e
+  // derrubar a qualidade do número da loja.
+  reativacao_cupom: {
+    name: 'reativacao_cupom',
+    language: 'pt_BR',
+    category: 'MARKETING',
+    body: 'Olá, {{1}}! Sentimos sua falta na {{2}}. Preparamos um cupom de {{3}} para a sua próxima compra, válido até {{4}}. Código: {{5}}. Esperamos você!',
+    footer: 'Para não receber mais, responda SAIR.',
+    example: ['Ana', 'Loja Exemplo', '10% de desconto', '30/09/2026', 'VOLTA10'],
+  },
+  aniversario_cupom: {
+    name: 'aniversario_cupom',
+    language: 'pt_BR',
+    category: 'MARKETING',
+    body: 'Feliz aniversário, {{1}}! A {{2}} preparou um presente: {{3}} na sua próxima compra, válido até {{4}}. Código: {{5}}. Aproveite o seu dia!',
+    footer: 'Para não receber mais, responda SAIR.',
+    example: ['Ana', 'Loja Exemplo', '15% de desconto', '14/10/2026', 'NIVER15'],
   },
 };
 
