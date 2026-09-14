@@ -131,6 +131,18 @@ function mockBanco({
       return Promise.resolve({ rows: [{ wa_phone_number_id: 'PN1', wa_access_token: 'tok' }] });
     }
     // ── marketing comum
+    // loadCompanyWa do /status (SELECT sem âncora, é o contrato antigo).
+    if (s.includes('SELECT wa_waba_id')) {
+      return Promise.resolve({ rows: [conectado
+        ? { wa_waba_id: 'WABA1', wa_phone_number_id: 'PN1', wa_phone_display: '+55 11 90000-0000', wa_connected_at: '2026-09-01T00:00:00Z', has_token: true }
+        : { wa_waba_id: null, wa_phone_number_id: null, wa_phone_display: null, wa_connected_at: null, has_token: false }] });
+    }
+    if (s.includes('-- wa:conn-extras-get')) {
+      return Promise.resolve({ rows: [{
+        wa_subscribed_at: '2026-09-01T00:00:00Z', wa_registered_at: '2026-09-01T00:00:00Z',
+        wa_quality_rating: qualidade, wa_paused_reason: pausa, wa_paused_at: null,
+      }] });
+    }
     if (s.includes('-- mkt:store-name')) return Promise.resolve({ rows: [{ store_name: 'Loja Exemplo' }] });
     if (s.includes('-- mkt:coupon-defaults')) {
       return Promise.resolve({ rows: [{ reactivation_coupon_defaults: {}, birthday_coupon_defaults: {} }] });
@@ -271,13 +283,38 @@ describe('waOutbox.enqueue — guardas de MARKETING', () => {
     expect(r.reason).toBe('LIMITE_MARKETING');
   });
 
-  it('(5b) contato bloqueado pelo 131049 → MARKETING_BLOQUEADO', async () => {
+  it('(5b) contato bloqueado pelo 131049 sai como FREQUENCIA_MARKETING', async () => {
+    // A UI traduz uma lista fechada de motivos; um código novo só para
+    // este caso apareceria cru na fila. Para quem lê, a frase é a mesma
+    // ("já recebeu marketing demais") — muda só quem impôs o limite.
     mockBanco({ bloqueadoMarketing: true });
     const r = await outbox.enqueue({
       companyId: COMPANY, toPhone: '11988887777',
       templateName: 'reativacao_cupom', sourceType: 'reativacao',
     });
-    expect(r.reason).toBe('MARKETING_BLOQUEADO');
+    expect(r.reason).toBe('FREQUENCIA_MARKETING');
+  });
+
+  it('(5c) os motivos de marketing são exatamente os quatro que a UI traduz', async () => {
+    const esperados = [
+      'SEM_CONSENTIMENTO', 'FREQUENCIA_MARKETING', 'QUALIDADE_MARKETING', 'LIMITE_MARKETING',
+    ];
+    const vistos = new Set();
+    const cenarios = [
+      { consentimento: false },
+      { marketingNaJanela: 1 },
+      { qualidade: 'YELLOW' },
+      { marketingHoje: 999 },
+    ];
+    for (const cfg of cenarios) {
+      mockBanco(cfg);
+      const r = await outbox.enqueue({
+        companyId: COMPANY, toPhone: '11988887777',
+        templateName: 'reativacao_cupom', sourceType: 'reativacao',
+      });
+      vistos.add(r.reason);
+    }
+    expect(Array.from(vistos).sort()).toEqual([...esperados].sort());
   });
 });
 
@@ -501,6 +538,55 @@ describe('gates das rotas de settings', () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(visto.autoFlags).toHaveLength(0);
+  });
+});
+
+// ── contrato do /status para a tela de marketing ────────────
+describe('GET /whatsapp/status — campos de marketing', () => {
+  function buildWaApp() {
+    const app = express();
+    app.use(express.json());
+    app.use('/companies/:id', require('../src/routes/whatsappCloud'));
+    return app;
+  }
+
+  async function status() {
+    const res = await request(buildWaApp())
+      .get(`/companies/${COMPANY}/whatsapp/status`)
+      .set('Authorization', 'Bearer ' + token);
+    expect(res.status).toBe(200);
+    return res.body;
+  }
+
+  it('devolve marketing_consent_at, marketing_ready e os dois presets em templates_ready', async () => {
+    mockBanco({});
+    const body = await status();
+    expect(body.marketing_consent_at).toBe('2026-09-01T00:00:00Z');
+    expect(body.marketing_ready).toBe(true);
+    expect(body.templates_ready.reativacao_cupom).toBe(true);
+    expect(body.templates_ready.aniversario_cupom).toBe(true);
+  });
+
+  it('sem consentimento declarado: data null e marketing_ready false', async () => {
+    mockBanco({ consentimento: false });
+    const body = await status();
+    expect(body.marketing_consent_at).toBeNull();
+    expect(body.marketing_ready).toBe(false);
+  });
+
+  it('YELLOW derruba marketing_ready sem derrubar a conexão nem o template de cobrança', async () => {
+    mockBanco({ qualidade: 'YELLOW' });
+    const body = await status();
+    expect(body.marketing_ready).toBe(false);
+    expect(body.connected).toBe(true);
+    expect(body.quality_rating).toBe('YELLOW');
+  });
+
+  it('fila pausada derruba marketing_ready', async () => {
+    mockBanco({ pausa: 'CONTA_RESTRITA' });
+    const body = await status();
+    expect(body.marketing_ready).toBe(false);
+    expect(body.paused_reason).toBe('CONTA_RESTRITA');
   });
 });
 

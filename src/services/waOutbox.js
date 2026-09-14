@@ -128,18 +128,22 @@ async function countToday(companyId, { phone = null, sourceType = null } = {}) {
 // Com a 331 pendente (42703) ou a tabela ausente (42P01) a resposta é
 // NÃO: a direção segura aqui é o silêncio — marketing sem consentimento
 // declarado é o tipo de envio que gera denúncia, não só custo.
-async function hasMarketingConsent(companyId) {
+async function loadMarketingConsentAt(companyId) {
   try {
     const { rows } = await db.query(
       `-- wa:guard-marketing-consent
        SELECT wa_marketing_consent_at FROM companies WHERE id = $1 LIMIT 1`,
       [companyId]
     );
-    return !!(rows[0] && rows[0].wa_marketing_consent_at);
+    return (rows[0] && rows[0].wa_marketing_consent_at) || null;
   } catch (e) {
-    if (e.code === '42703' || e.code === '42P01') return false;
+    if (e.code === '42703' || e.code === '42P01') return null;
     throw e;
   }
+}
+
+async function hasMarketingConsent(companyId) {
+  return !!(await loadMarketingConsentAt(companyId));
 }
 
 // Qualidade do número (328). YELLOW já barra MARKETING — esperar chegar
@@ -235,7 +239,13 @@ async function markContactMarketingBlocked(companyId, phone, days = 30) {
 // superfícies não divergirem.
 async function marketingSkipReason(companyId, phone) {
   if (!(await hasMarketingConsent(companyId))) return 'SEM_CONSENTIMENTO';
-  if (await isMarketingBlocked(companyId, phone)) return 'MARKETING_BLOQUEADO';
+  // Contato bloqueado pelo 131049 também sai como FREQUENCIA_MARKETING:
+  // para quem lê a fila são a mesma frase ("este cliente já recebeu
+  // marketing demais"), muda só quem impôs o limite — nós (7 dias) ou a
+  // Meta (30 dias). Um código a mais aqui viraria código CRU na tela, que
+  // é o que a UI não pode mostrar; o motivo técnico fica no
+  // wa_contacts.marketing_blocked_until, que é onde se investiga.
+  if (await isMarketingBlocked(companyId, phone)) return 'FREQUENCIA_MARKETING';
   const quality = await loadQualityRating(companyId);
   if (quality === 'YELLOW' || quality === 'RED') return 'QUALIDADE_MARKETING';
   const naJanela = await countMarketing(companyId, { phone, days: MARKETING_WINDOW_DAYS });
@@ -801,6 +811,6 @@ module.exports = {
   // reativação/aniversário, para as prévias e para os testes.
   MARKETING_SOURCE_TYPES, MARKETING_WINDOW_DAYS, MARKETING_BLOCK_DAYS,
   isMarketingSource, marketingDailyCap, marketingSkipReason,
-  hasMarketingConsent, loadQualityRating, isMarketingBlocked,
+  hasMarketingConsent, loadMarketingConsentAt, loadQualityRating, isMarketingBlocked,
   countMarketing, markContactMarketingBlocked,
 };

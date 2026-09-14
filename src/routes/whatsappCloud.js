@@ -499,6 +499,18 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
     const templatesReady = await loadTemplatesReady(req.params.id);
     const usage = await loadUsage(req.params.id);
     const creditSharedAt = await loadCreditShared(req.params.id);
+    // Fases 7/8: a tela de marketing precisa de UM campo para travar o
+    // interruptor e de UMA data para explicar o porquê. `marketing_ready`
+    // junta as três condições que não são do template: consentimento
+    // declarado, qualidade que a Meta ainda aceita para marketing
+    // (YELLOW já barra) e fila não pausada. 42703 (331 pendente) → null e
+    // false, que é a verdade: sem a coluna, nenhum marketing sai.
+    const marketingConsentAt = await waOutbox.loadMarketingConsentAt(req.params.id);
+    const qualityRating = (extras && extras.wa_quality_rating) || null;
+    const pausedReason = (extras && extras.wa_paused_reason) || null;
+    const marketingReady = !!marketingConsentAt
+      && qualityRating !== 'YELLOW' && qualityRating !== 'RED'
+      && !pausedReason;
     // Token recusado pela Meta derruba o "conectado": o selo verde com
     // credencial morta era pior do que não ter selo (QA 26/08).
     const tokenExpired = !!(conn && conn.wa_token_invalid_at);
@@ -520,8 +532,11 @@ router.get('/whatsapp/status', ...guard, async (req, res) => {
       // Fase 6: o varejo depende de OUTROS dois templates. `template_ready`
       // continua sendo o da mensalidade (contrato da tela do dojô).
       templates_ready: templatesReady,
-      quality_rating: (extras && extras.wa_quality_rating) || null,
-      paused_reason: (extras && extras.wa_paused_reason) || null,
+      // Marketing (Fases 7/8) — reativação e aniversário.
+      marketing_consent_at: marketingConsentAt,
+      marketing_ready: marketingReady,
+      quality_rating: qualityRating,
+      paused_reason: pausedReason,
       paused_at: (extras && extras.wa_paused_at) || null,
       subscribed: !!(extras && extras.wa_subscribed_at),
       registered: !!(extras && extras.wa_registered_at),
