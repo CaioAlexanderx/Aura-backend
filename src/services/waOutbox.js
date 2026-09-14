@@ -18,6 +18,7 @@
 
 const db = require('../config/database');
 const wa = require('./whatsapp');
+const quota = require('./marketing/marketingQuota');
 
 const MAX_ATTEMPTS = 5;
 const WINDOW_MS = 24 * 3600 * 1000;
@@ -58,6 +59,59 @@ function marketingDailyCap() {
 // Janela de frequência: no máximo 1 marketing por contato a cada 7 dias,
 // somando TODAS as origens (reativação, aniversário, campanha futura).
 const MARKETING_WINDOW_DAYS = 7;
+
+// ── Uso justo MENSAL da cobrança (Fase 8b) ──────────────────
+// Cobrança e lembrete são "ilimitados" na tabela de preços e continuam
+// sendo: este teto é para o caso patológico (régua em loop, importação
+// que criou 3000 parcelas no mesmo dia), não para o cliente grande. Por
+// isso o motivo é DIFERENTE do de marketing — LIMITE_MENSAL — e a
+// reação é avisar o suporte, não vender pacote: quem chega aqui tem um
+// problema para alguém olhar.
+const UTILITY_SOURCE_TYPES = new Set(quota.UTILITY_SOURCE_TYPES);
+
+function isUtilitySource(sourceType) {
+  return UTILITY_SOURCE_TYPES.has(String(sourceType || ''));
+}
+
+// Um aviso por empresa por mês POR PROCESSO. Sem isso, cada mensagem
+// barrada depois do teto viraria uma linha nova em alert_history — o
+// alerta que se repete 400 vezes é o alerta que ninguém lê.
+const _usoJustoAvisado = new Set();
+
+async function avisarSuporteUsoJusto(companyId, usadas, teto) {
+  const mes = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 7);
+  const chave = `${companyId}:${mes}`;
+  if (_usoJustoAvisado.has(chave)) return;
+  _usoJustoAvisado.add(chave);
+  console.warn(
+    `[waOutbox] uso justo MENSAL de cobrança estourado — company=${companyId} ` +
+    `enviadas=${usadas} teto=${teto} mes=${mes}. Mensagens de cobrança estão sendo puladas ` +
+    `com LIMITE_MENSAL até a virada do mês.`
+  );
+  try {
+    await db.query(
+      `-- wa:uso-justo-alerta
+       INSERT INTO alert_history (company_id, alert_type, severity, title, message, data)
+       VALUES ($1, 'wa_uso_justo_mensal', 'warning', $2, $3, $4)`,
+      [companyId, 'Uso justo do WhatsApp atingido',
+       `A loja já enviou ${usadas} mensagens de cobrança pelo WhatsApp neste mês (teto de uso justo: ${teto}). Novas cobranças automáticas estão pausadas até a virada do mês.`,
+       JSON.stringify({ month: mes, sent: usadas, cap: teto })]
+    );
+  } catch (e) {
+    // Mesma regra do appNotifications: NOTIFICAR NUNCA DERRUBA O FLUXO
+    // DE ORIGEM. alert_history é tabela legada e pode não existir no
+    // ambiente (42P01) — esse caso é esperado e silencioso. Qualquer
+    // outro erro é gritado no log em vez de engolido, mas também não
+    // vira exceção: não faz sentido a cobrança de quem está DENTRO do
+    // teto quebrar porque o alerta de quem estourou falhou.
+    if (e.code !== '42P01' && e.code !== '42703') {
+      console.error('[waOutbox] alerta de uso justo falhou:', e.code || '', e.message);
+    }
+  }
+}
+
+// Só para teste: o cache do aviso é module-level e sobrevive entre casos.
+function _resetUsoJustoAvisos() { _usoJustoAvisado.clear(); }
 
 // Teto FIXO de envio de teste (2f) — não é env: um número fixo baixo é
 // o bastante para o sensei testar o template e alto o suficiente para
@@ -250,6 +304,13 @@ async function marketingSkipReason(companyId, phone) {
   if (quality === 'YELLOW' || quality === 'RED') return 'QUALIDADE_MARKETING';
   const naJanela = await countMarketing(companyId, { phone, days: MARKETING_WINDOW_DAYS });
   if (naJanela > 0) return 'FREQUENCIA_MARKETING';
+  // Cota MENSAL do plano (Fase 8b): 100 inclusas + pacotes ativos. É o
+  // limite que o cliente vê na tela e pode resolver comprando pacote —
+  // por isso vem antes do teto diário, que é anti-rajada interno e
+  // ninguém compra. Os dois devolvem LIMITE_MARKETING porque a UI
+  // traduz uma lista fechada de motivos; o número que diferencia os
+  // dois está no /whatsapp/status.usage.marketing.
+  if ((await quota.remainingThisMonth(companyId)) <= 0) return 'LIMITE_MARKETING';
   const hoje = await countMarketing(companyId, { todayOnly: true });
   if (hoje >= marketingDailyCap()) return 'LIMITE_MARKETING';
   return null;
@@ -458,6 +519,20 @@ async function enqueue({
   if (status === 'pending' && isMarketing) {
     const motivo = await marketingSkipReason(companyId, phone);
     if (motivo) { status = 'skipped'; skipReason = motivo; }
+  }
+  // ── Uso justo MENSAL da cobrança (Fase 8b) ────────────────
+  // Silencioso para o cliente na tabela de preços (cobrança continua
+  // "ilimitada"), visível na fila: quem abrir a fila lê LIMITE_MENSAL
+  // traduzido. O suporte é avisado uma vez por mês — o teto só é
+  // alcançado por acidente, e acidente precisa de gente olhando.
+  if (status === 'pending' && isUtilitySource(sourceType)) {
+    const teto = quota.utilityMonthlyCap();
+    const usadas = await quota.monthUsage(companyId, 'utility');
+    if (usadas >= teto) {
+      status = 'skipped';
+      skipReason = 'LIMITE_MENSAL';
+      await avisarSuporteUsoJusto(companyId, usadas, teto);
+    }
   }
   if (status === 'pending' && !isTeste) {
     const n = await countToday(companyId, {});
@@ -714,10 +789,14 @@ async function processBatch(limit = 20) {
       // que mais tempo teve para essas coisas acontecerem.
       if (isMarketingSource(row.source_type)) {
         const motivoAgora = await marketingSkipReason(row.company_id, row.to_phone);
-        // FREQUENCIA_MARKETING não vale aqui: o próprio item já está na
-        // janela de 7 dias (ele conta a si mesmo), e barrá-lo agora seria
-        // cancelar toda mensagem que passou pelo enqueue.
-        if (motivoAgora && motivoAgora !== 'FREQUENCIA_MARKETING') {
+        // FREQUENCIA_MARKETING e LIMITE_MARKETING não valem aqui: as
+        // duas contas incluem o PRÓPRIO item (ele já está na wa_outbox
+        // como 'pending', que não é 'skipped' nem 'failed'), então
+        // barrá-lo agora cancelaria toda mensagem que passou pelo
+        // enqueue — e no caso da cota mensal cancelaria o lote inteiro
+        // assim que ele enchesse a cota. Quem decide sobre acúmulo é o
+        // enfileiramento, uma vez só, na entrada.
+        if (motivoAgora && motivoAgora !== 'FREQUENCIA_MARKETING' && motivoAgora !== 'LIMITE_MARKETING') {
           await markRow(row.id, { status: 'skipped', skip_reason: motivoAgora });
           out.skipped++;
           continue;
@@ -834,6 +913,8 @@ module.exports = {
   // reativação/aniversário, para as prévias e para os testes.
   MARKETING_SOURCE_TYPES, MARKETING_WINDOW_DAYS, MARKETING_BLOCK_DAYS,
   isMarketingSource, marketingDailyCap, marketingSkipReason,
+  // Uso justo mensal da cobrança (Fase 8b).
+  UTILITY_SOURCE_TYPES, isUtilitySource, _resetUsoJustoAvisos,
   hasMarketingConsent, loadMarketingConsentAt, loadQualityRating, isMarketingBlocked,
   countMarketing, markContactMarketingBlocked,
 };

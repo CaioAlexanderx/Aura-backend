@@ -20,6 +20,7 @@ const db = require('../../config/database');
 const waOutbox = require('../waOutbox');
 const addons = require('../addons');
 const mkt = require('./marketingCommon');
+const quota = require('./marketingQuota');
 
 // Aniversariantes do dia. `today` (YYYY-MM-DD) é o que permite ao QA
 // rodar o dia de ontem sem mexer no relógio do servidor; sem ele, a data
@@ -205,8 +206,14 @@ async function runForCompany(companyId, { today = null, dryRun = false, limit = 
 
   const ref = mkt.hojeBRT(today);
   const ano = new Date(ref.getTime() - 3 * 3600000).getUTCFullYear();
-  const marketingLimit = waOutbox.marketingDailyCap();
-  let marketingHoje = dryRun ? await waOutbox.countMarketing(companyId, { todayOnly: true }) : 0;
+  // Dois acúmulos desde a Fase 8b: o teto diário anti-rajada e a cota
+  // MENSAL de marketing do plano. A prévia tem que aplicar os dois, senão
+  // mostra "12 aniversariantes recebem hoje" para quem só tem 3 de cota.
+  const tracker = quota.makeCapTracker({
+    dailyCap: waOutbox.marketingDailyCap(),
+    dailyUsed: dryRun ? await waOutbox.countMarketing(companyId, { todayOnly: true }) : 0,
+    remaining: dryRun ? await quota.remainingThisMonth(companyId) : Infinity,
+  });
 
   for (const c of aniversariantes) {
     if (dryRun) {
@@ -219,14 +226,15 @@ async function runForCompany(companyId, { today = null, dryRun = false, limit = 
         sourceType: mkt.KIND_ANIVERSARIO,
       });
       if (!sim.ok) { bump(sim.reason); pushItem(c, sim.reason); continue; }
-      if (marketingHoje >= marketingLimit) { bump('LIMITE_MARKETING'); pushItem(c, 'LIMITE_MARKETING'); continue; }
-      marketingHoje++;
+      const limite = tracker.reason();
+      if (limite) { bump(limite); pushItem(c, limite); continue; }
+      tracker.bump();
       out.enqueued++;
       continue;
     }
 
     const r = await sendForCustomer(companyId, { customerId: c.id, today });
-    if (r.queued) out.enqueued++;
+    if (r.queued) { out.enqueued++; tracker.bump(); }
     else { bump(r.reason || 'NAO_ENFILEIRADO'); pushItem(c, r.reason || 'NAO_ENFILEIRADO'); }
   }
 

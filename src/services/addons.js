@@ -7,6 +7,12 @@
 // 106 dojôs estão no 'essencial' e são exatamente o público do
 // adicional; gatear por plano barraria quem paga.
 //
+// 14/09/2026 (Fase 8b): o Aura Dojô e o plano Negócio passaram a INCLUIR
+// o WhatsApp oficial no preço, então o gate deixou de ser só o adicional
+// — ver planAllowsAutoWhatsapp. O adicional continua valendo e continua
+// sendo consultado primeiro: virou a exceção administrativa para o
+// Essencial de varejo, que segue fora do WhatsApp automático.
+//
 // hasAddon é chamado em caminho quente (toda checagem antes de
 // enfileirar/ligar o toggle), por isso o cache de 60s em memória. O
 // cache é invalidado no setAddon do mesmo processo; em outro processo,
@@ -64,19 +70,50 @@ async function hasAddon(companyId, key) {
   return value;
 }
 
-// ── Gate ÚNICO do envio automático (Fase 6) ─────────────────
-// Quem pode gastar mensagem paga: quem CONTRATOU o adicional (o caso do
-// dojô, quase todo mundo no 'essencial') OU quem já paga um plano que
-// inclui WhatsApp (Negócio/Expansão — MODULE_PLAN_MAP já põe o módulo
-// 'whatsapp' no 'negocio'). O adicional de R$39 é justamente para quem
-// está fora desses planos; cobrar de novo de quem já paga o plano seria
-// vender duas vezes a mesma coisa.
+// ── Gate ÚNICO do envio automático (Fase 6, revisto na Fase 8b) ─────
+// Quem pode gastar mensagem paga: quem CONTRATOU o adicional OU quem já
+// paga um produto que INCLUI o WhatsApp oficial.
+//
+// A Fase 8b mudou o que "inclui" quer dizer. Até 14/09/2026 o gate era
+// só o plano (Negócio/Expansão) e o dojô dependia do adicional de R$39 —
+// 104 dos 106 dojôs estão no 'essencial'. Com a nova vitrine, o Aura
+// Dojô (R$140) e o plano Negócio (R$169) trazem o WhatsApp DENTRO do
+// preço: o dojô não paga mais R$39 por algo que o produto dele promete.
+// Por isso a vertical entra no gate ao lado do plano — é ela que
+// identifica quem comprou o Aura Dojô, já que no banco esse cliente
+// continua marcado como 'essencial'.
+//
+// O adicional continua existindo e continua sendo checado primeiro: ele
+// é a exceção administrativa para o Essencial de VAREJO, que segue sem
+// WhatsApp oficial no plano.
 //
 // O plano vem SEMPRE do banco, nunca do JWT: o token do app carrega o
 // plano de quando a pessoa entrou e não revalida sozinho (armadilha nº 9
 // do CLAUDE.md) — uma troca de plano hoje só valeria no próximo login.
 const PLANOS_COM_WHATSAPP_AUTO = new Set(['negocio', 'expansao']);
+// A federação entra junto porque a régua de cobrança dela é a mesma da
+// dos dojôs filiados — barrar a federação deixaria a anuidade sem o
+// canal que os dojôs já usam.
+const VERTICAIS_COM_WHATSAPP_AUTO = new Set(['karate_dojo', 'karate_federation']);
 const PLAN_CACHE_KEY = '__plan__';
+
+// A vertical mora em DUAS colunas por herança: `vertical_active` (o
+// shell que o app abre) e `vertical` (147, gravada pelo adminKarate).
+// O adminKarate escreve as duas, mas cadastro antigo pode ter só uma —
+// qualquer das duas apontando para karatê vale.
+function verticalLiberada(row) {
+  if (!row) return false;
+  for (const col of ['vertical_active', 'vertical']) {
+    const v = row[col] ? String(row[col]).toLowerCase() : null;
+    if (v && VERTICAIS_COM_WHATSAPP_AUTO.has(v)) return true;
+  }
+  return false;
+}
+
+function planoLiberado(row) {
+  const plan = row && row.plan ? String(row.plan).toLowerCase() : null;
+  return !!plan && PLANOS_COM_WHATSAPP_AUTO.has(plan);
+}
 
 async function planAllowsAutoWhatsapp(companyId) {
   const ck = `${companyId}:${PLAN_CACHE_KEY}`;
@@ -87,14 +124,27 @@ async function planAllowsAutoWhatsapp(companyId) {
   try {
     const { rows } = await db.query(
       `-- addon:plan
-       SELECT plan FROM companies WHERE id = $1 LIMIT 1`,
+       SELECT plan, vertical_active, vertical FROM companies WHERE id = $1 LIMIT 1`,
       [companyId]
     );
-    const plan = rows[0] && rows[0].plan ? String(rows[0].plan).toLowerCase() : null;
-    value = !!plan && PLANOS_COM_WHATSAPP_AUTO.has(plan);
+    value = planoLiberado(rows[0]) || verticalLiberada(rows[0]);
   } catch (e) {
     if (!schemaMissing(e)) throw e;
-    value = false;
+    // Uma das colunas de vertical pode faltar em banco antigo (a 147 é
+    // recente para o CI). Cair para o gate só de plano é pior do que o
+    // ideal — um dojô ficaria barrado —, mas é melhor do que 500 na tela
+    // de quem não tem nada a ver com karatê.
+    try {
+      const { rows } = await db.query(
+        `-- addon:plan-legado
+         SELECT plan FROM companies WHERE id = $1 LIMIT 1`,
+        [companyId]
+      );
+      value = planoLiberado(rows[0]);
+    } catch (e2) {
+      if (!schemaMissing(e2)) throw e2;
+      value = false;
+    }
   }
   _cache.set(ck, { value, at: Date.now() });
   return value;
@@ -157,6 +207,7 @@ module.exports = {
   ADDON_WHATSAPP_AUTO,
   DEFAULT_PRICE_CENTS,
   PLANOS_COM_WHATSAPP_AUTO,
+  VERTICAIS_COM_WHATSAPP_AUTO,
   hasAddon, canAutoWhatsapp, planAllowsAutoWhatsapp,
   listAddons, setAddon,
   invalidate, clearCache,
