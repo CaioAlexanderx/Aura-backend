@@ -50,7 +50,7 @@ function saleLabel(sale) {
   return String(sale && sale.id ? sale.id : '').slice(-8).toUpperCase();
 }
 
-function receiptHTML({ company, sale, items, payments, options = {} }) {
+function receiptHTML({ company, sale, items, payments, installments = [], options = {} }) {
   const { autoprint = false, width80 = true } = options;
   const date = new Date(sale.created_at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
@@ -89,6 +89,29 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
          <div style="font-size:10px;margin-bottom:3px">Pix para pagamento:</div>
          ${pixQr}
        </div>` : '';
+
+  // 14/09/2026: venda no crediario imprime o cronograma das parcelas no
+  // cupom (numero, vencimento, valor), no mesmo formato do carne.
+  let installmentsHTML = '';
+  if (installments?.length) {
+    const instRows = installments.map(i => `<tr>
+      <td>${i.installment_number}/${i.total_installments}</td>
+      <td style="text-align:center">${esc(i.due_date_br)}</td>
+      <td style="text-align:right">R$${fmt(i.amount_due)}</td>
+    </tr>`).join('');
+    const instTotal = installments.reduce((s, i) => s + parseFloat(i.amount_due || 0), 0);
+    installmentsHTML = `<div class="divider"></div>
+  <div class="bold">Crediario - ${installments.length}x</div>
+  <table>
+    <thead><tr>
+      <th style="text-align:left">Parcela</th>
+      <th style="text-align:center">Vencimento</th>
+      <th style="text-align:right">Valor</th>
+    </tr></thead>
+    <tbody>${instRows}</tbody>
+    <tr class="bold"><td colspan="2">Total parcelado</td><td style="text-align:right">R$${fmt(instTotal)}</td></tr>
+  </table>`;
+  }
 
   const w = width80 ? '72mm' : '100%';
 
@@ -150,6 +173,7 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
     ${change ? `<tr><td>Troco</td><td style="text-align:right">R$${change}</td></tr>` : ''}
   </table>
   ${pixSection}
+  ${installmentsHTML}
   <div class="divider"></div>
   ${sale.notes ? `<div style="font-size:10px">Obs: ${sale.notes}</div><div class="divider"></div>` : ''}
   <div class="footer">Obrigado pela preferencia!<br>${company.trade_name || company.legal_name}<br><small>Powered by Aura. - getaura.com.br</small></div>
@@ -163,7 +187,7 @@ function _payLabel(method) {
   const m = {
     pix: 'Pix', dinheiro: 'Dinheiro', cartao: 'Cartao',
     debito: 'Cartao Debito', credito: 'Cartao Credito',
-    fiado: 'Fiado', outro: 'Outro'
+    fiado: 'Fiado', crediario: 'Crediario', outro: 'Outro'
   };
   return m[method] || method;
 }
@@ -198,7 +222,28 @@ async function _loadSaleData(saleId, companyId) {
   const { rows: payments } = await db.query(
     `SELECT method, amount FROM sale_payments WHERE sale_id=$1`, [saleId]
   );
-  return { company: companyRows[0] || {}, sale: saleRows[0], items, payments };
+  // 14/09/2026: parcelas do crediario para o cupom. So consulta quando a
+  // venda (ou parte dela) foi no crediario — credit_installments guarda o
+  // sale_id. Data ja formatada no SQL para nao depender do fuso do Node.
+  let installments = [];
+  const isCrediario = String(saleRows[0].payment_method || '').toLowerCase() === 'crediario'
+    || payments.some(p => String(p.method || '').toLowerCase() === 'crediario');
+  if (isCrediario) {
+    try {
+      const { rows } = await db.query(
+        `SELECT installment_number, total_installments, amount_due,
+                to_char(due_date, 'DD/MM/YYYY') AS due_date_br
+           FROM credit_installments
+          WHERE sale_id = $1 AND company_id = $2 AND status <> 'cancelled'
+          ORDER BY installment_number ASC`,
+        [saleId, companyId]
+      );
+      installments = rows;
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+  }
+  return { company: companyRows[0] || {}, sale: saleRows[0], items, payments, installments };
 }
 
 // GET /print/receipt/:saleId

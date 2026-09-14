@@ -1,6 +1,7 @@
 // ============================================================
 // AURA. — Testes Integração: Impressão PDV (INF-04)
 // _loadSaleData faz 4 queries: company, sale+join, items, sale_payments
+// (+1 credit_installments quando a venda foi no crediario — 14/09/2026)
 // ============================================================
 const request = require('supertest');
 const jwt     = require('jsonwebtoken');
@@ -101,5 +102,78 @@ describe('GET /print/receipt/:saleId/preview', () => {
     const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}/preview`).set(auth);
     expect(res.text).toContain('Feijão 1kg');
     expect(res.text).toContain('Arroz 5kg');
+  });
+});
+
+// 14/09/2026: venda no crediario imprime as parcelas no cupom
+describe('GET /print/receipt/:saleId — crediario', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.query.mockReset();
+  });
+
+  const crediarioSale = { ...mockSale, payment_method: 'crediario' };
+  const mockInstallments = [
+    { installment_number: 1, total_installments: 2, amount_due: '42.75', due_date_br: '14/10/2026' },
+    { installment_number: 2, total_installments: 2, amount_due: '42.75', due_date_br: '14/11/2026' },
+  ];
+
+  test('lista parcela, vencimento e valor', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [{ role: 'owner' }] })
+      .mockResolvedValueOnce({ rows: [mockCompany] })
+      .mockResolvedValueOnce({ rows: [crediarioSale] })
+      .mockResolvedValueOnce({ rows: mockItems })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: mockInstallments });
+    const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}`).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Crediario - 2x');
+    expect(res.text).toContain('1/2');
+    expect(res.text).toContain('14/10/2026');
+    expect(res.text).toContain('14/11/2026');
+    expect(res.text).toContain('R$42.75');
+    expect(res.text).toContain('Total parcelado');
+    expect(res.text).toContain('R$85.50');
+    const instSql = db.query.mock.calls[5][0];
+    expect(instSql).toMatch(/credit_installments/);
+    expect(db.query.mock.calls[5][1]).toEqual([saleId, cid]);
+  });
+
+  test('crediario informado em sale_payments tambem consulta as parcelas', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [{ role: 'owner' }] })
+      .mockResolvedValueOnce({ rows: [mockCompany] })
+      .mockResolvedValueOnce({ rows: [{ ...mockSale, payment_method: 'misto' }] })
+      .mockResolvedValueOnce({ rows: mockItems })
+      .mockResolvedValueOnce({ rows: [{ method: 'pix', amount: 40 }, { method: 'crediario', amount: 45.5 }] })
+      .mockResolvedValueOnce({ rows: mockInstallments.slice(0, 1) });
+    const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}`).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Crediario - 1x');
+    expect(res.text).toContain('<td>Crediario</td>');
+  });
+
+  test('venda sem crediario nao consulta credit_installments', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    mockSaleQueries(db);
+    const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}`).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('Crediario -');
+    expect(db.query.mock.calls.length).toBe(5);
+  });
+
+  test('tabela credit_installments ausente (42P01) nao derruba o cupom', async () => {
+    db.query
+      .mockResolvedValueOnce({ rows: [{ role: 'owner' }] })
+      .mockResolvedValueOnce({ rows: [mockCompany] })
+      .mockResolvedValueOnce({ rows: [crediarioSale] })
+      .mockResolvedValueOnce({ rows: mockItems })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockRejectedValueOnce(Object.assign(new Error('relation does not exist'), { code: '42P01' }));
+    const res = await request(app).get(`/api/v1/companies/${cid}/print/receipt/${saleId}`).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('CUPOM NAO FISCAL');
+    expect(res.text).not.toContain('Crediario -');
   });
 });
