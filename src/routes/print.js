@@ -123,7 +123,10 @@ function receiptHTML({ company, sale, items, payments, installments = [], option
   <style>
     @page { margin: 4mm 5mm; size: ${width80 ? '80mm' : 'A4'} auto; }
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family:'Courier New',monospace; font-size:11px; width:${w}; color:#000; }
+    /* 14/09/2026: Courier New tem traco de 1 ponto na cabeca termica de 203dpi
+       e as letras saem falhadas (a pagina de teste do Windows, em fonte mais
+       grossa, sai legivel na mesma impressora). Consolas segura o traco. */
+    body { font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace; font-size:11px; width:${w}; color:#000; }
     .center { text-align:center; }
     .bold { font-weight:bold; }
     .divider { border-top:1px dashed #000; margin:4px 0; }
@@ -613,7 +616,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
                 <div style="font-size:11px;font-weight:bold;margin-bottom:3px">
                   Pix da parcela ${inst.installment_number}/${inst.total_installments} — R$${fmt(remaining)}
                 </div>
-                <div style="font-family:'Courier New',monospace;font-size:9px;word-break:break-all;
+                <div style="font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace;font-size:9px;word-break:break-all;
                             border:1px solid #000;padding:4px;margin-bottom:5px;
                             user-select:all">${instPix}</div>
                 <div style="text-align:center">${qrInlineSvg(instPix, QR_CARNE_OPTS)}</div>
@@ -664,7 +667,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
           <div style="font-size:11px;margin-bottom:6px">
             Copie o codigo abaixo ou escaneie o QR Code com o app do seu banco.
           </div>
-          <div style="font-family:'Courier New',monospace;font-size:10px;word-break:break-all;
+          <div style="font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace;font-size:10px;word-break:break-all;
                       padding:6px;border:1px solid #000;margin-bottom:8px;
                       user-select:all">${pixPayload}</div>
           <div style="text-align:center">${qrInlineSvg(pixPayload, QR_CARNE_OPTS)}</div>
@@ -692,7 +695,10 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
        e fraco. Em A4 nada muda: a impressora ja e A4. */
     @page { margin: 10mm 12mm; size: auto; }
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family:'Courier New',monospace; font-size:12px; color:#000; max-width:700px; margin:0 auto; }
+    /* 14/09/2026: Courier New tem traco de 1 ponto na cabeca termica de 203dpi
+       e as letras saem falhadas (a pagina de teste do Windows, em fonte mais
+       grossa, sai legivel na mesma impressora). Consolas segura o traco. */
+    body { font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace; font-size:12px; color:#000; max-width:700px; margin:0 auto; }
     .center { text-align:center; }
     .bold { font-weight:bold; }
     .divider { border-top:1px dashed #000; margin:8px 0; }
@@ -884,7 +890,7 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       '  <style>\n' +
       '    @page { margin: 10mm 12mm; size: A4; }\n' +
       '    * { margin:0; padding:0; box-sizing:border-box; }\n' +
-      '    body { font-family:\'Courier New\',monospace; font-size:12px; color:#000; max-width:500px; margin:0 auto; }\n' +
+      '    body { font-family:Consolas,\'Lucida Console\',Menlo,\'Courier New\',monospace; font-size:12px; color:#000; max-width:500px; margin:0 auto; }\n' +
       '    .center { text-align:center; }\n' +
       '    .bold { font-weight:bold; }\n' +
       '    .divider { border-top:1px dashed #000; margin:8px 0; }\n' +
