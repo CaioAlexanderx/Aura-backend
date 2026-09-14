@@ -137,6 +137,10 @@ const TOKEN_ERROR_MARKERS = [
 ];
 
 function isTokenError(err) {
+  // Desde o erro estruturado da Graph (whatsapp.graphError) o código vem
+  // limpo em err.meta — casar por texto continua valendo para o que já
+  // está gravado em last_error e para quem lança Error puro.
+  if (err && err.meta && Number(err.meta.code) === 190) return true;
   const msg = String((err && err.message) || err || '').toLowerCase();
   if (/code:?\s*190/.test(msg)) return true;
   return TOKEN_ERROR_MARKERS.some((m) => msg.includes(m));
@@ -181,6 +185,42 @@ async function loadCreds(companyId) {
     if (e.code === '42703') return null;
     throw e;
   }
+}
+
+// Estado da conexão para quem só precisa responder "este dojô pode
+// enviar?" (o gate da régua). O /whatsapp/status carrega mais campos e
+// tem o loader dele; aqui basta o veredito — e ele nasce das MESMAS
+// três condições: número + token + token não recusado.
+// Colunas da 039/309 podem faltar: 42703/42P01 → "não conectado".
+async function connectionState(companyId) {
+  let row = null;
+  try {
+    const { rows } = await db.query(
+      `-- wa:conn-state
+       SELECT wa_phone_number_id, wa_access_token IS NOT NULL AS has_token
+         FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    row = rows[0] || null;
+  } catch (e) {
+    if (e.code === '42703' || e.code === '42P01') return { connected: false, token_expired: false };
+    throw e;
+  }
+  let tokenExpired = false;
+  try {
+    const { rows } = await db.query(
+      `-- wa:conn-state-flag
+       SELECT wa_token_invalid_at FROM companies WHERE id = $1 LIMIT 1`,
+      [companyId]
+    );
+    tokenExpired = !!(rows[0] && rows[0].wa_token_invalid_at);
+  } catch (e) {
+    if (e.code !== '42703' && e.code !== '42P01') throw e;
+  }
+  return {
+    connected: !!(row && row.wa_phone_number_id && row.has_token && !tokenExpired),
+    token_expired: tokenExpired,
+  };
 }
 
 async function markRow(id, fields) {
@@ -303,7 +343,7 @@ async function applyTemplateStatus(companyId, { name, language, status, metaTemp
 
 module.exports = {
   normalizePhone, touchInbound, windowOpen, getContact, decryptToken,
-  isTokenError, markTokenInvalid, clearTokenInvalid,
+  isTokenError, markTokenInvalid, clearTokenInvalid, connectionState,
   enqueue, processBatch, applyStatusUpdate, applyTemplateStatus,
   MAX_ATTEMPTS,
 };

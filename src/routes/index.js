@@ -50,6 +50,9 @@ router.use('/admin', require('./adminClients360'));
 router.use('/admin', require('./adminRevenue'));
 router.use('/admin', require('./adminOps'));
 router.use('/admin', require('./adminGrowth'));
+// Adicionais por empresa (migration 328): hoje só 'whatsapp_auto'
+// (R$39/mês). O gate do envio automático lê company_addons, não o plano.
+router.use('/admin', require('./adminAddons'));
 // Endomarketing banners (13/06/2026): CRUD admin de banners de notificação
 router.use('/admin', require('./adminNotifications'));
 router.use('/admin/leads', require('./adminLeads'));

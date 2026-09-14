@@ -657,6 +657,7 @@ async function runAll(today) {
   const agg = { dojos: cfgs.length, sent: 0, skipped_no_email: 0, skipped_sent: 0, failed: 0, skipped: 0 };
   agg.wa_enqueued = 0;
   agg.wa_skipped = 0;
+  agg.wa_sem_addon = 0;
   for (const cfg of cfgs) {
     const config = shapeConfig({ enabled: true, offsets: cfg.offsets, send_email: cfg.send_email, send_whatsapp_auto: cfg.send_whatsapp_auto, updated_at: null });
     try {
@@ -675,9 +676,17 @@ async function runAll(today) {
     // falha de um canal nunca derruba o outro.
     try {
       if (config.send_whatsapp_auto) {
-        const w = await runWhatsappAutoForDojo(cfg.dojo_id, { today, config });
-        agg.wa_enqueued += w.enqueued;
-        agg.wa_skipped += w.skipped;
+        // O toggle pode estar ligado de antes e o adicional ter sido
+        // cancelado depois — a coluna no banco não sabe disso. Sem o
+        // adicional, o job não gasta uma única mensagem paga.
+        const addons = require('./addons');
+        if (!(await addons.hasAddon(cfg.dojo_id, addons.ADDON_WHATSAPP_AUTO))) {
+          agg.wa_sem_addon++;
+        } else {
+          const w = await runWhatsappAutoForDojo(cfg.dojo_id, { today, config });
+          agg.wa_enqueued += w.enqueued;
+          agg.wa_skipped += w.skipped;
+        }
       }
     } catch (e) {
       console.error('[karateDojoReminder] dojô', cfg.dojo_id, 'falhou (whatsapp):', e.message);
