@@ -293,7 +293,10 @@ async function sendOrderStatusEmail(to, { order_number, customer_name, status, s
 // -- Template: novo pedido confirmado (lojista) --
 // Enviado ao lojista após pagamento confirmado (Pix, Cartão ou Na Entrega).
 async function sendOwnerNewOrderEmail(to, opts) {
-  const { order_number, customer_name, customer_phone, total, delivery_type, store_name, payment_method } = opts;
+  const { order_number, customer_name, customer_phone, total, delivery_type, store_name, payment_method, aguardando_pagamento } = opts;
+  // Pix manual (10/09/2026): o pedido chega ANTES do dinheiro, e quem
+  // confere e a lojista. Mesmo resumo, outro titulo e outra instrucao.
+  const aguardando = aguardando_pagamento === true;
   const fmtR = (v) => `R$ ${Number(v).toFixed(2).replace('.', ',')}`;
   const deliveryLabel = delivery_type === 'delivery' ? '🚚 Entrega' : '🏪 Retirada na loja';
   const paymentLabel  = payment_method === 'pix' ? 'Pix' :
@@ -305,7 +308,7 @@ async function sendOwnerNewOrderEmail(to, opts) {
     : '';
 
   const html = emailLayout(`
-    <p style="font-size:15px;color:#e2e8f0;margin:0 0 4px;">📦 Novo pedido confirmado!</p>
+    <p style="font-size:15px;color:#e2e8f0;margin:0 0 4px;">${aguardando ? '📦 Pedido novo — confira o Pix' : '📦 Novo pedido confirmado!'}</p>
     <p style="font-size:13px;color:#94a3b8;margin:0 0 20px;">
       Um novo pedido chegou na sua loja <strong style="color:#e2e8f0;">${store_name}</strong>.
     </p>
@@ -329,7 +332,7 @@ async function sendOwnerNewOrderEmail(to, opts) {
             </tr>
             <tr>
               <td style="padding:5px 0;font-size:12px;color:#64748b;">Pagamento</td>
-              <td style="padding:5px 0;font-size:13px;color:#34d399;font-weight:600;">${paymentLabel} ✓</td>
+              <td style="padding:5px 0;font-size:13px;color:${aguardando ? '#fbbf24' : '#34d399'};font-weight:600;">${paymentLabel} ${aguardando ? '· aguardando' : '✓'}</td>
             </tr>
             ${phone ? `<tr>
               <td style="padding:5px 0;font-size:12px;color:#64748b;">Contato</td>
@@ -341,14 +344,18 @@ async function sendOwnerNewOrderEmail(to, opts) {
     </table>
 
     <p style="font-size:12px;color:#64748b;text-align:center;margin:0;">
-      Acesse o app Aura para gerenciar o pedido e avanc&oacute; o status conforme o andamento.
+      ${aguardando ? 'Quando o Pix cair na sua conta, confirme o pagamento no app Aura para liberar o pedido.' : 'Acesse o app Aura para gerenciar o pedido e avanc&oacute; o status conforme o andamento.'}
     </p>
   `);
 
   return sendMail({
     to,
-    subject: `📦 Pedido #${order_number} confirmado — ${store_name}`,
-    text: `Novo pedido #${order_number} confirmado em ${store_name}. Cliente: ${customer_name}. Total: ${fmtR(total)}. Pagamento: ${paymentLabel}. Acesse o app Aura para gerenciar.`,
+    subject: aguardando
+      ? `📦 Pedido #${order_number} recebido — confira o Pix — ${store_name}`
+      : `📦 Pedido #${order_number} confirmado — ${store_name}`,
+    text: aguardando
+      ? `Pedido #${order_number} recebido em ${store_name}, aguardando o Pix. Cliente: ${customer_name}. Total: ${fmtR(total)}. Quando o Pix cair, confirme o pagamento no app Aura.`
+      : `Novo pedido #${order_number} confirmado em ${store_name}. Cliente: ${customer_name}. Total: ${fmtR(total)}. Pagamento: ${paymentLabel}. Acesse o app Aura para gerenciar.`,
     html,
   });
 }

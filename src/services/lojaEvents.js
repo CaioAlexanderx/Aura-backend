@@ -44,6 +44,10 @@ const db = require('../config/database');
 // desestruturar congela a referência no require e o teste perde o ponto de
 // costura — é o mesmo motivo de sempre, e vale a linha a mais.
 const appNotifications = require('./appNotifications');
+// Web Push do painel (10/09/2026): o aviso que pede acao tambem vai para o
+// navegador da lojista, com a aba fechada. Mesmo ponto de costura (objeto
+// inteiro, nao desestruturado) do appNotifications acima.
+const webPush = require('./webPush');
 
 const PREFIX = 'loja_';
 
@@ -109,6 +113,7 @@ const EVENTS = Object.freeze({
   loja_pedido_novo: {
     severity: 'info',
     defaultOn: true,
+    push: true,
     label: 'Pedido novo',
     hint: 'Um pedido entrou na loja online.',
     title: (o) => `Pedido novo ${num(o)}`,
@@ -118,6 +123,7 @@ const EVENTS = Object.freeze({
   loja_pedido_pago: {
     severity: 'info',
     defaultOn: true,
+    push: true,
     label: 'Pagamento confirmado',
     hint: 'O pagamento caiu — é a hora de separar a mercadoria.',
     title: (o) => `Pagamento confirmado ${num(o)}`,
@@ -127,6 +133,7 @@ const EVENTS = Object.freeze({
   loja_comprovante_enviado: {
     severity: 'atencao',
     defaultOn: true,
+    push: true,
     label: 'Comprovante para conferir',
     hint: 'O cliente enviou comprovante de Pix. Alguém precisa conferir e aprovar.',
     title: (o) => `Comprovante para conferir ${num(o)}`,
@@ -463,6 +470,20 @@ async function emitLojaEvent(type, order = {}, opts = {}) {
     // ver com isto. Aqui o pior caso é o card não agrupar. O UPDATE só roda
     // quando a linha foi REALMENTE criada (dedupe devolve null).
     if (row && row.id) await tagEntity(row, spec, payload);
+    // Web Push so quando a linha foi REALMENTE criada: a dedupe_key e a
+    // unica idempotencia, e ela vale para o navegador tambem (webhook
+    // reenviado nao toca o computador duas vezes). A tag do pedido faz o
+    // "pagamento confirmado" substituir o "pedido novo" na central do
+    // sistema. Fire-and-forget: navegador lento nao segura o fluxo.
+    if (row && row.id && spec.push) {
+      webPush.notifyCompany(companyId, {
+        title: spec.title(payload),
+        body: opts.body || spec.body(payload),
+        url: spec.ctaRoute ? spec.ctaRoute(payload) : routeForOrder(payload),
+        tag: entityOf(spec, payload).ref || type,
+        type,
+      }).catch(() => {});
+    }
     return row;
   } catch (err) {
     // Mesma regra de appNotifications: notificar não derruba o fluxo.
