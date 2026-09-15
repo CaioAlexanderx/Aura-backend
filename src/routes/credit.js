@@ -1305,6 +1305,8 @@ router.post('/customers/:cid/payments', async (req, res) => {
       applied,
       new_balance:      result.new_balance,
       credit_generated: creditGenerated,
+      // 15/09/2026: o app abre o recibo logo apos receber, sem ir ao Historico.
+      transaction_id:   result.transaction?.id || null,
     });
   } catch (err) {
     await client.query('ROLLBACK');

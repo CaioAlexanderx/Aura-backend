@@ -177,3 +177,82 @@ describe('GET /print/receipt/:saleId — crediario', () => {
     expect(res.text).not.toContain('Crediario -');
   });
 });
+
+// 15/09/2026: recibo de pagamento do crediario lista as parcelas que o
+// pagamento cobriu (credit_payment_allocations) e nao mostra mais saldo.
+describe('GET /print/credit/receipts/:transactionId', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.query.mockReset();
+  });
+
+  const txId = '00000000-0000-0000-0000-0000000000aa';
+  const url  = `/api/v1/companies/${cid}/print/credit/receipts/${txId}`;
+  const company  = { display_name: 'Erick Lange', cnpj: null, phone: '51995484654', address_city: null, address_state: null };
+  const tx       = { id: txId, customer_id: 'cust-1', amount: '25.00', payment_method: 'dinheiro', created_at: '2026-09-14T20:36:21Z', account_id: null };
+  const customer = { name: 'Veronica Packes', phone: '(51) 98461-0795', cpf_cnpj: null };
+  const allocations = [
+    { installment_number: 1, total_installments: 6, due_date_br: '14/10/2026', principal_paid: '16.66', charges_paid: '0', status_after: 'paid' },
+    { installment_number: 2, total_installments: 6, due_date_br: '14/11/2026', principal_paid: '8.34',  charges_paid: '0', status_after: 'pending' },
+  ];
+
+  function mockReceipt(allocResult) {
+    db.query
+      .mockResolvedValueOnce({ rows: [{ role: 'owner' }] })  // companyAccess
+      .mockResolvedValueOnce({ rows: [company] })
+      .mockResolvedValueOnce({ rows: [tx] })
+      .mockResolvedValueOnce({ rows: [customer] })
+      .mockResolvedValueOnce({ rows: [] });                   // encargos
+    if (allocResult instanceof Error) db.query.mockRejectedValueOnce(allocResult);
+    else db.query.mockResolvedValueOnce({ rows: allocResult });
+  }
+
+  test('lista as parcelas pagas com vencimento, valor e situacao', async () => {
+    mockReceipt(allocations);
+    const res = await request(app).get(url).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Parcelas pagas');
+    expect(res.text).toContain('1/6');
+    expect(res.text).toContain('14/10/2026');
+    expect(res.text).toContain('R$16.66');
+    expect(res.text).toContain('Quitada');
+    expect(res.text).toContain('2/6');
+    expect(res.text).toContain('R$8.34');
+    expect(res.text).toContain('Parcial');
+    // a leitura e da distribuicao DESTE pagamento, escopada na empresa
+    const allocCall = db.query.mock.calls[5];
+    expect(allocCall[0]).toMatch(/credit_payment_allocations/);
+    expect(allocCall[1]).toEqual([txId, cid]);
+  });
+
+  test('texto de WhatsApp traz as parcelas', async () => {
+    mockReceipt(allocations);
+    const res = await request(app).get(url).set(auth);
+    expect(res.text).toContain('Parcela 1/6 (venc. 14/10/2026): R$16.66 - quitada');
+    expect(res.text).toContain('Parcela 2/6 (venc. 14/11/2026): R$8.34 - parcial');
+  });
+
+  test('nao mostra saldo restante nem credito a favor', async () => {
+    mockReceipt(allocations);
+    const res = await request(app).get(url).set(auth);
+    expect(res.text).not.toMatch(/Saldo restante/i);
+    expect(res.text).not.toMatch(/Credito a favor/i);
+    expect(db.query.mock.calls.some(c => /customer_credit_balances/.test(c[0]))).toBe(false);
+  });
+
+  test('pagamento sem distribuicao gravada sai sem o bloco de parcelas', async () => {
+    mockReceipt([]);
+    const res = await request(app).get(url).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('RECIBO DE PAGAMENTO');
+    expect(res.text).toContain('R$25.00');
+    expect(res.text).not.toContain('Parcelas pagas');
+  });
+
+  test('tabela ainda nao criada (42P01) nao derruba o recibo', async () => {
+    mockReceipt(Object.assign(new Error('relation does not exist'), { code: '42P01' }));
+    const res = await request(app).get(url).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('Parcelas pagas');
+  });
+});
