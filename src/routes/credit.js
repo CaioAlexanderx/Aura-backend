@@ -35,7 +35,7 @@ const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
 const creditLedger = require('../services/creditLedger');
 const { MAX_INSTALLMENTS_CEILING } = require('../services/credit/terms');
-const overdueRule  = require('../services/credit/overdue');
+const overdueRule  = require('../services/credit/overdue');  // .ymd: due_date das linhas de applied como 'AAAA-MM-DD' (15/09/2026)
 const { undoManualEntry } = require('../services/credit/undoManualEntry');
 
 async function assertCrediarioEnabled(companyId) {
@@ -179,6 +179,8 @@ function computePaymentPlan(openInstallments, currentBalance, opts) {
       installment_id: inst.id,
       account_id:     inst.account_id || null,
       number:         inst.installment_number || null,
+      total_installments: inst.total_installments || null,
+      due_date:       overdueRule.ymd(inst.due_date),
       charges_paid:   round2(chargesEntry.charges_paid),
       principal_paid: principalPaid,
       status_after:   statusAfter,
@@ -194,6 +196,8 @@ function computePaymentPlan(openInstallments, currentBalance, opts) {
           installment_id: inst.id,
           account_id:     inst.account_id || null,
           number:         inst.installment_number || null,
+          total_installments: inst.total_installments || null,
+          due_date:       overdueRule.ymd(inst.due_date),
           charges_paid:   round2(chargesEntry.charges_paid),
           principal_paid: 0,
           status_after:   inst.status,
@@ -1016,7 +1020,7 @@ router.get('/customers/:cid/history', async (req, res) => {
 //
 // Shape de resposta:
 //   {
-//     applied: [{ installment_id, account_id, number,
+//     applied: [{ installment_id, account_id, number, total_installments, due_date,
 //                 charges_paid, principal_paid, status_after }],
 //     new_balance: N,
 //     credit_generated: N
@@ -1155,7 +1159,7 @@ router.get('/customers/:cid/payments/preview', async (req, res) => {
 //
 // Shape de resposta (identico ao preview):
 //   {
-//     applied: [{ installment_id, account_id, number,
+//     applied: [{ installment_id, account_id, number, total_installments, due_date,
 //                 charges_paid, principal_paid, status_after }],
 //     new_balance: N,
 //     credit_generated: N
@@ -1266,13 +1270,18 @@ router.post('/customers/:cid/payments', async (req, res) => {
     if (allInstIds.size > 0) {
       try {
         const { rows: metaRows } = await client.query(
-          `SELECT id, installment_number, account_id
+          `SELECT id, installment_number, total_installments, due_date, account_id
              FROM credit_installments
             WHERE id = ANY($1::uuid[]) AND company_id = $2`,
           [[...allInstIds], companyId]
         );
         for (const r of metaRows) {
-          instMeta[r.id] = { number: r.installment_number, account_id: r.account_id || null };
+          instMeta[r.id] = {
+            number:             r.installment_number,
+            total_installments: r.total_installments || null,
+            due_date:           overdueRule.ymd(r.due_date),
+            account_id:         r.account_id || null,
+          };
         }
       } catch (e) {
         if (e.code !== '42703' && e.code !== '42P01') throw e;
@@ -1292,6 +1301,8 @@ router.post('/customers/:cid/payments', async (req, res) => {
         installment_id: instId,
         account_id:     meta.account_id || null,
         number:         meta.number || null,
+        total_installments: meta.total_installments || null,
+        due_date:       meta.due_date || null,
         charges_paid:   chargesPaid,
         principal_paid: principalPaid,
         status_after:   ci.status || null,
