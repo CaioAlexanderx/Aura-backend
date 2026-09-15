@@ -1,5 +1,5 @@
 -- ============================================================
--- 334 — Distribuição de cada pagamento do crediário entre as parcelas
+-- 335 — Distribuição de cada pagamento do crediário entre as parcelas
 --
 -- Feedback de lojista (15/09/2026): o recibo de pagamento saía "sobre o
 -- valor, e não sobre a parcela". O applyPayment sempre calculou quais

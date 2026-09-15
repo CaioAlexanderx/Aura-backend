@@ -4,7 +4,7 @@
 // Feedback de lojista: o recibo saía "sobre o valor, e não sobre a parcela",
 // e o "Saldo restante" mudava sempre que o cliente comprava mais.
 //
-// applyPayment passa a gravar credit_payment_allocations (migration 334) e o
+// applyPayment passa a gravar credit_payment_allocations (migration 335) e o
 // recibo lê de lá. Os testes unitários cobrem a ordem das queries com mock;
 // este cobre o SQL em Postgres real: o INSERT com unnest, os tipos, a
 // constraint de unicidade e o JOIN do recibo.

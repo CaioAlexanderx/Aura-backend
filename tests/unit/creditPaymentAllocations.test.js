@@ -2,7 +2,7 @@
 // AURA. -- applyPayment grava a distribuicao do pagamento entre parcelas
 // 15/09/2026 (feedback de lojista: recibo "sobre o valor, nao sobre a parcela")
 //
-// A sondagem da tabela (credit_payment_allocations, migration 334) fica em
+// A sondagem da tabela (credit_payment_allocations, migration 335) fica em
 // cache no modulo, entao cada teste carrega o ledger isolado.
 // ============================================================
 

@@ -56,7 +56,7 @@ async function _hasReferenceCols() {
 //
 // applyPayment sempre calculou quais parcelas cada pagamento cobriu, mas so
 // devolvia a lista para a tela. O recibo impresso depois (Historico) nao tinha
-// de onde tirar as parcelas. credit_payment_allocations (migration 334) guarda
+// de onde tirar as parcelas. credit_payment_allocations (migration 335) guarda
 // essa distribuicao.
 //
 // O INSERT roda DENTRO da transacao do pagamento: um 42P01 ali abortaria o

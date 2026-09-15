@@ -769,7 +769,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 //        AND company_id=:id AND type='payment'.
 // Encargos: transactions WHERE idempotency_key='credit-charges-<txId>'
 //           (defensivo a 42703/42P01 — campo opcional).
-// Parcelas: credit_payment_allocations (migration 334) — quais parcelas
+// Parcelas: credit_payment_allocations (migration 335) — quais parcelas
 //           ESTE pagamento cobriu. Pagamento anterior a ela sai sem o bloco.
 //
 // 15/09/2026: saiu o "Saldo restante" / "Credito a favor". Era o saldo do
@@ -828,7 +828,7 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] charges warn:', e.message);
     }
 
-    // 5. Parcelas que este pagamento cobriu — defensivo (migration 334)
+    // 5. Parcelas que este pagamento cobriu — defensivo (migration 335)
     let allocations = [];
     try {
       const { rows: allocRows } = await db.query(
