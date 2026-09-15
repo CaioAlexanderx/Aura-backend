@@ -185,6 +185,8 @@ function classifyInstallment(inst, config, asOf) {
 }
 
 module.exports = {
+  // 15/09/2026: usado por routes/credit.js para devolver due_date como dia de calendario.
+  ymd,
   DEFAULT_GRACE_DAYS,
   RESIDUE_TOLERANCE,
   REVIEW_WINDOW_DAYS,
