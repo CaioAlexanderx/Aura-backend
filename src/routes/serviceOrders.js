@@ -282,7 +282,12 @@ const SELECT_OS = `
          c.phone AS customer_phone,
          e.name  AS technician_name,
          l.name  AS lab_name,
-         ds.total_amount AS deposit_sale_total
+         ds.total_amount AS deposit_sale_total,
+         -- O que ja entrou no caixa pela venda do sinal. total_amount e o
+         -- valor cheio do par; sem esta soma a tela mostrava o total como se
+         -- fosse o sinal (QA no app, 15/09/2026).
+         (SELECT COALESCE(SUM(sp.amount), 0) FROM sale_payments sp
+           WHERE sp.sale_id = so.deposit_sale_id) AS deposit_paid
     FROM service_orders so
     JOIN customers c ON c.id = so.customer_id
     LEFT JOIN employees e ON e.id = so.technician_id
