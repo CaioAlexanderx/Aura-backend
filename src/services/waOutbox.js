@@ -42,7 +42,9 @@ function perPhoneDailyCap() {
 // cobrança — um lembrete de parcela continua saindo sob YELLOW e sem
 // consentimento declarado, porque é utilitário de uma relação que a
 // pessoa já tem com a loja.
-const MARKETING_SOURCE_TYPES = new Set(['reativacao', 'aniversario', 'campanha']);
+// A lista mora no marketingQuota (que não pode depender deste módulo —
+// ciclo); aqui é só o Set para a guarda. Inclui 'otica_revisao' (334).
+const MARKETING_SOURCE_TYPES = new Set(quota.MARKETING_SOURCE_TYPES);
 
 function isMarketingSource(sourceType) {
   return MARKETING_SOURCE_TYPES.has(String(sourceType || ''));

@@ -295,18 +295,63 @@ router.get('/os/:osId', requireAuth, async (req, res) => {
   try {
     const companyId = req.params.id;
 
-    const { rows: osRows } = await db.query(
-      `SELECT so.*,
-              c.name  AS customer_name,
-              c.phone AS customer_phone,
-              e.name  AS technician_name
-         FROM service_orders so
-         JOIN customers c ON c.id = so.customer_id
-         LEFT JOIN employees e ON e.id = so.technician_id
-        WHERE so.id = $1 AND so.company_id = $2`,
-      [req.params.osId, companyId]
-    );
+    // Otica (334): laboratorio e venda do sinal entram no documento. Com a
+    // migration pendente o join em optical_labs da 42P01 — cai pro SELECT
+    // original, e a OS de reparo imprime como sempre imprimiu.
+    let osRows;
+    try {
+      ({ rows: osRows } = await db.query(
+        `SELECT so.*,
+                c.name  AS customer_name,
+                c.phone AS customer_phone,
+                e.name  AS technician_name,
+                l.name  AS lab_name,
+                ds.total_amount AS deposit_sale_total
+           FROM service_orders so
+           JOIN customers c ON c.id = so.customer_id
+           LEFT JOIN employees e ON e.id = so.technician_id
+           LEFT JOIN optical_labs l ON l.id = so.lab_id
+           LEFT JOIN sales ds ON ds.id = so.deposit_sale_id
+          WHERE so.id = $1 AND so.company_id = $2`,
+        [req.params.osId, companyId]
+      ));
+    } catch (e) {
+      // So cai pro SELECT original quando o que falta e da 334 (o nome do
+      // objeto vem na mensagem). 42P01 de service_orders (313 pendente) segue
+      // pro catch de baixo, que responde 503.
+      const falta334 = (e.code === '42P01' || e.code === '42703')
+        && /optical_labs|lab_id|deposit_sale_id/i.test(String(e.message || ''));
+      if (!falta334) throw e;
+      ({ rows: osRows } = await db.query(
+        `SELECT so.*,
+                c.name  AS customer_name,
+                c.phone AS customer_phone,
+                e.name  AS technician_name
+           FROM service_orders so
+           JOIN customers c ON c.id = so.customer_id
+           LEFT JOIN employees e ON e.id = so.technician_id
+          WHERE so.id = $1 AND so.company_id = $2`,
+        [req.params.osId, companyId]
+      ));
+    }
     if (!osRows.length) return res.status(404).json({ error: 'Ordem de servico nao encontrada' });
+
+    // Saldo do sinal (otica): soma das parcelas em aberto da venda do sinal.
+    // Best-effort — sem crediario o documento sai sem a linha de saldo.
+    if (osRows[0].kind === 'otica' && osRows[0].deposit_sale_id) {
+      try {
+        const { rows } = await db.query(
+          `SELECT COALESCE(SUM(ci.amount_due - COALESCE(ci.covered_amount, 0)), 0)::numeric AS saldo
+             FROM credit_installments ci
+            WHERE ci.company_id = $1 AND ci.sale_id = $2
+              AND ci.status NOT IN ('paid', 'cancelled')`,
+          [companyId, osRows[0].deposit_sale_id]
+        );
+        osRows[0].deposit_balance = rows[0] ? Number(rows[0].saldo) : 0;
+      } catch (e) {
+        if (e.code !== '42P01' && e.code !== '42703') throw e;
+      }
+    }
 
     const { rows: items } = await db.query(
       `SELECT kind, description, quantity, unit_price, total_price
