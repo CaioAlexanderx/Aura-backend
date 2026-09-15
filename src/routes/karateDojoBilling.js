@@ -45,6 +45,8 @@ const { requireDojoAccess } = require('../middleware/requireDojoAccess');
 const svc = require('../services/karateDojoBillingService');
 const baasSvc = require('../services/karateDojoBaasService');
 const reminders = require('../services/karateDojoReminderEngine');
+const addons = require('../services/addons');
+const waOutbox = require('../services/waOutbox');
 
 // Canal B (portal do dojô) é SOMENTE LEITURA — alterar cobrança exige a
 // conta do dojô (Canal A).
@@ -228,9 +230,38 @@ router.get('/dojo/billing/reminder-config', requireDojoAccess, async (req, res) 
   }
 });
 
+// Ligar o envio automático é a única linha desta tela que passa a
+// gastar dinheiro: cada mensagem é paga. Por isso o portão fica ANTES
+// do banco — e são dois, porque "não pode" tem dois motivos bem
+// diferentes para quem está do outro lado: não contratou o adicional,
+// ou contratou e ainda não conectou o número. Desligar é sempre livre.
 router.put('/dojo/billing/reminder-config', requireDojoAccess, requireChannelA, async (req, res) => {
+  const b = req.body || {};
+  const querAutomatico = b.send_whatsapp_auto === true || b.send_whatsapp_auto === 'true';
   try {
-    const cfg = await reminders.putConfig(req.dojoId, req.body || {});
+    if (querAutomatico) {
+      // Gate único (Fase 6): adicional contratado OU plano que já inclui
+      // o WhatsApp. Para o dojô, na prática, é o adicional — 104 dos 106
+      // estão no 'essencial' —, mas o dojô que por acaso esteja no
+      // Negócio não deve ser cobrado duas vezes pela mesma coisa.
+      const podeAutomatico = await addons.canAutoWhatsapp(req.dojoId);
+      if (!podeAutomatico) {
+        return res.status(403).json({
+          error: 'O envio automático por WhatsApp é um adicional do plano. Fale com a Aura para ativar.',
+          code: 'ADDON_REQUIRED',
+        });
+      }
+      const conn = await waOutbox.connectionState(req.dojoId);
+      if (!conn.connected) {
+        return res.status(409).json({
+          error: conn.token_expired
+            ? 'A conexão com o WhatsApp expirou. Reconecte o número do dojô antes de ligar o envio automático.'
+            : 'Conecte o número de WhatsApp do dojô antes de ligar o envio automático.',
+          code: 'NAO_CONECTADO',
+        });
+      }
+    }
+    const cfg = await reminders.putConfig(req.dojoId, b);
     return res.json(cfg);
   } catch (e) {
     return handleWriteError(res, e, 'reminder config');

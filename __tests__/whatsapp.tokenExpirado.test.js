@@ -112,6 +112,10 @@ it('(4) a fila carimba a recusa — o dispatcher descobre antes da tela', async 
       }] });
     }
     if (s.includes('-- wa:creds')) return Promise.resolve({ rows: [{ wa_phone_number_id: 'PN1', wa_access_token: 'TK' }] });
+    // Reforço 2b (Fase 2): o item já está na fila, logo já passou pelo
+    // enqueue que só aprova templates aprovados — sem isto o teste
+    // pararia no reforço e nunca chegaria a chamar sendTemplate.
+    if (s.includes('-- wa:guard-template')) return Promise.resolve({ rows: [{ status: 'APPROVED' }] });
     if (/wa_token_invalid_at = NOW\(\)/.test(s)) { carimbado = true; return Promise.resolve({ rows: [] }); }
     return Promise.resolve({ rows: [] });
   });

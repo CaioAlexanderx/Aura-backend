@@ -5,6 +5,9 @@
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
 var { requireAuth } = require('../middleware/auth');
+// FASE 7: a lista de quem sumiu deixa de ser só uma lista — ela envia.
+var mkt = require('../services/marketing/marketingCommon');
+var reactivationAuto = require('../services/marketing/reactivationAuto');
 
 // Segment thresholds (days since last purchase)
 var SEGMENTS = [
@@ -129,6 +132,174 @@ router.patch('/:customerId/contact', requireAuth, async function(req, res) {
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: 'Erro' }); }
 });
+
+// ============================================================
+// FASE 7 — envio de reativação pelo WhatsApp oficial (MARKETING)
+//
+// O PATCH /:customerId/contact acima continua sendo o registro do
+// contato MANUAL e não mudou de comportamento. As rotas abaixo são a
+// pista automática: cada mensagem é um template de categoria MARKETING
+// na Meta e custa dinheiro — por isso a prévia existe, o limite por
+// disparo é baixo e todas as guardas do waOutbox valem.
+// ============================================================
+
+// GET /reactivation/settings — estado do interruptor para a tela
+router.get('/settings', requireAuth, async function (req, res) {
+  try {
+    var settings = await mkt.loadMarketingSettings(req.params.id);
+    res.json({
+      wa_reactivation_auto: settings.wa_reactivation_auto,
+      wa_marketing_consent_at: settings.wa_marketing_consent_at,
+      reactivation_coupon_defaults: {
+        ...mkt.DEFAULTS[mkt.KIND_REATIVACAO],
+        ...(settings.reactivation_coupon_defaults || {}),
+      },
+      template_name: mkt.TEMPLATE_REATIVACAO,
+      schema_pending: settings.schema_pending,
+    });
+  } catch (err) {
+    console.error('[reactivation] settings get:', err.message);
+    res.status(500).json({ error: 'Erro ao carregar as configuracoes de reativacao' });
+  }
+});
+
+// PUT /reactivation/settings — body { wa_reactivation_auto?, reactivation_coupon_defaults? }
+// Ligar passa pelos quatro portões; DESLIGAR é sempre livre (travar quem
+// quer parar de mandar mensagem seria o contrário do que a guarda serve).
+router.put('/settings', requireAuth, async function (req, res) {
+  var body = req.body || {};
+  var querAuto = body.wa_reactivation_auto === true || body.wa_reactivation_auto === 'true';
+  try {
+    if (querAuto) {
+      var gate = await mkt.marketingGate(req.params.id, mkt.TEMPLATE_REATIVACAO);
+      if (!gate.ok) return res.status(gate.status).json({ error: gate.error, code: gate.code });
+    }
+
+    if (body.reactivation_coupon_defaults !== undefined) {
+      var limpo = {};
+      for (var k of Object.keys(mkt.DEFAULTS[mkt.KIND_REATIVACAO])) {
+        if (body.reactivation_coupon_defaults[k] !== undefined) {
+          limpo[k] = body.reactivation_coupon_defaults[k];
+        }
+      }
+      if (limpo.discount_type && ['percent', 'fixed'].indexOf(limpo.discount_type) === -1) {
+        return res.status(400).json({ error: 'discount_type invalido' });
+      }
+      if (limpo.discount_value !== undefined && !(parseFloat(limpo.discount_value) > 0)) {
+        return res.status(400).json({ error: 'discount_value deve ser > 0' });
+      }
+      try {
+        await db.query(
+          "-- mkt:react-defaults-set\n" +
+          " UPDATE companies SET reactivation_coupon_defaults = $2 WHERE id = $1",
+          [req.params.id, JSON.stringify(limpo)]
+        );
+      } catch (e) {
+        if (!mkt.schemaMissing(e)) throw e;
+        return res.status(503).json({
+          error: 'A reativacao automatica ainda nao esta disponivel neste ambiente (migracao 331 pendente).',
+          code: 'SCHEMA_PENDING',
+        });
+      }
+    }
+
+    if (body.wa_reactivation_auto !== undefined) {
+      var ok = await mkt.setAutoFlag(req.params.id, 'wa_reactivation_auto', querAuto);
+      if (!ok) {
+        return res.status(503).json({
+          error: 'A reativacao automatica ainda nao esta disponivel neste ambiente (migracao 331 pendente).',
+          code: 'SCHEMA_PENDING',
+        });
+      }
+    }
+
+    var settings = await mkt.loadMarketingSettings(req.params.id);
+    res.json({
+      ok: true,
+      wa_reactivation_auto: settings.wa_reactivation_auto,
+      reactivation_coupon_defaults: settings.reactivation_coupon_defaults,
+    });
+  } catch (err) {
+    console.error('[reactivation] settings put:', err.message);
+    res.status(500).json({ error: 'Erro ao salvar as configuracoes de reativacao' });
+  }
+});
+
+// GET /reactivation/preview?segment=&limit= — quem receberia HOJE, sem
+// enfileirar nada. Mesmo shape das prévias do dojô e do crediário.
+router.get('/preview', requireAuth, async function (req, res) {
+  try {
+    var r = await reactivationAuto.runForCompany(req.params.id, {
+      today: req.query.date ? String(req.query.date).trim() : null,
+      dryRun: true,
+      segment: req.query.segment,
+      limit: req.query.limit ? parseInt(req.query.limit, 10) : 30,
+    });
+    res.json({
+      source: 'reativacao',
+      segment: r.segment,
+      template_name: mkt.TEMPLATE_REATIVACAO,
+      would_send: r.enqueued || 0,
+      skipped: r.skipped || {},
+      skipped_reason: r.skipped_reason || null,
+      items: (r.items || []).map(function (it) {
+        return {
+          customer_id: it.customer_id,
+          customer_name: it.customer_name,
+          phone_masked: maskPhone(it.phone),
+          total_spent: it.total_spent,
+          days_since: it.days_since,
+          reason: it.reason,
+        };
+      }),
+    });
+  } catch (err) {
+    console.error('[reactivation] preview:', err.message);
+    res.status(500).json({ error: 'Erro ao montar a previa de reativacao' });
+  }
+});
+
+// POST /reactivation/send — body { segment?, limit?, customer_ids? }
+// Envio IMEDIATO (não é job): a confirmação de custo é feita na tela,
+// que mostra a prévia antes. Teto de 50 por disparo — marketing em
+// volume derruba a qualidade do número, e o que é enfileirado ainda
+// passa pelo teto diário de marketing.
+router.post('/send', requireAuth, async function (req, res) {
+  var body = req.body || {};
+  var ids = Array.isArray(body.customer_ids) && body.customer_ids.length
+    ? body.customer_ids.map(String).slice(0, 50)
+    : null;
+  var limite = Math.min(parseInt(body.limit, 10) || 30, 50);
+  try {
+    var gate = await mkt.marketingGate(req.params.id, mkt.TEMPLATE_REATIVACAO);
+    if (!gate.ok) return res.status(gate.status).json({ error: gate.error, code: gate.code });
+
+    var r = await reactivationAuto.runForCompany(req.params.id, {
+      today: body.date ? String(body.date).trim() : null,
+      segment: body.segment,
+      limit: ids ? ids.length : limite,
+      customerIds: ids,
+    });
+    res.json({
+      queued: r.enqueued || 0,
+      segment: r.segment,
+      skipped: r.skipped || {},
+      skipped_reason: r.skipped_reason || null,
+    });
+  } catch (err) {
+    console.error('[reactivation] send:', err.message);
+    res.status(500).json({ error: 'Erro ao enviar as mensagens de reativacao' });
+  }
+});
+
+// Só os 4 últimos dígitos: a prévia é sobre CONTAGEM, não sobre expor o
+// telefone de cliente para quem abre a tela.
+function maskPhone(p) {
+  var d = String(p || '').replace(/\D/g, '');
+  if (!d) return null;
+  if (d.length <= 4) return '***' + d;
+  return '***' + d.slice(-4);
+}
 
 // Helper: Build reactivation suggestion
 function buildSuggestion(segment, customer, avgTicket, daysSince) {

@@ -35,7 +35,8 @@ const router      = require('express').Router({ mergeParams: true });
 const db          = require('../config/database');
 const creditLedger = require('../services/creditLedger');
 const { MAX_INSTALLMENTS_CEILING } = require('../services/credit/terms');
-const overdueRule  = require('../services/credit/overdue');
+const overdueRule  = require('../services/credit/overdue');  // .ymd: due_date das linhas de applied como 'AAAA-MM-DD' (15/09/2026)
+const { undoManualEntry } = require('../services/credit/undoManualEntry');
 
 async function assertCrediarioEnabled(companyId) {
   const { rows } = await db.query(
@@ -178,6 +179,8 @@ function computePaymentPlan(openInstallments, currentBalance, opts) {
       installment_id: inst.id,
       account_id:     inst.account_id || null,
       number:         inst.installment_number || null,
+      total_installments: inst.total_installments || null,
+      due_date:       overdueRule.ymd(inst.due_date),
       charges_paid:   round2(chargesEntry.charges_paid),
       principal_paid: principalPaid,
       status_after:   statusAfter,
@@ -193,6 +196,8 @@ function computePaymentPlan(openInstallments, currentBalance, opts) {
           installment_id: inst.id,
           account_id:     inst.account_id || null,
           number:         inst.installment_number || null,
+          total_installments: inst.total_installments || null,
+          due_date:       overdueRule.ymd(inst.due_date),
           charges_paid:   round2(chargesEntry.charges_paid),
           principal_paid: 0,
           status_after:   inst.status,
@@ -729,29 +734,32 @@ router.post('/customer/:cid/payment', async (req, res) => {
   }
 });
 
-// DELETE /transaction/:txid
+// DELETE /transaction/:txid -- desfaz um lancamento manual (debito sem venda).
+//
+// Incidente Jenniffer / Ana Lucia (10/09/2026): esta rota apagava SO a linha
+// do ledger e deixava vivas as parcelas que o /manual-entry criou junto. O
+// FIFO seguia cobrindo-as e a ficha mostrava EM ABERTO R$199 com parcelas
+// somando R$938. Agora tudo acontece em UMA transacao: cancela as parcelas
+// do lancamento, devolve ao FIFO o que elas ja tinham coberto e so entao
+// apaga o debito (src/services/credit/undoManualEntry.js).
 router.delete('/transaction/:txid', async (req, res) => {
+  const companyId = req.params.id;
+  const client = await db.connect();
   try {
-    const { rows } = await db.query(
-      `DELETE FROM customer_credit_transactions
-        WHERE id = $1 AND company_id = $2 AND sale_id IS NULL
-        RETURNING id, customer_id`,
-      [req.params.txid, req.params.id]
-    );
-    if (!rows.length) {
-      return res.status(404).json({
-        error: 'Lancamento nao encontrado ou vinculado a uma venda (cancele a venda no PDV)',
-      });
-    }
-    const { rows: b } = await db.query(
-      `SELECT balance FROM customer_credit_balances
-        WHERE customer_id = $1 AND company_id = $2`,
-      [rows[0].customer_id, req.params.id]
-    );
-    res.json({ deleted: true, new_balance: parseFloat(b[0]?.balance || 0) });
+    await client.query('BEGIN');
+    const result = await undoManualEntry(client, { companyId, transactionId: req.params.txid });
+    await creditLedger._updateCreditUsed(client, companyId, result.customer_id);
+    await client.query('COMMIT');
+    res.json(result);
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    if (err.status && err.code) {
+      return res.status(err.status).json({ error: err.message, code: err.code });
+    }
     console.error('[credit] delete tx error:', err.message);
     res.status(500).json({ error: 'Erro ao desfazer lancamento' });
+  } finally {
+    client.release();
   }
 });
 
@@ -1012,7 +1020,7 @@ router.get('/customers/:cid/history', async (req, res) => {
 //
 // Shape de resposta:
 //   {
-//     applied: [{ installment_id, account_id, number,
+//     applied: [{ installment_id, account_id, number, total_installments, due_date,
 //                 charges_paid, principal_paid, status_after }],
 //     new_balance: N,
 //     credit_generated: N
@@ -1151,7 +1159,7 @@ router.get('/customers/:cid/payments/preview', async (req, res) => {
 //
 // Shape de resposta (identico ao preview):
 //   {
-//     applied: [{ installment_id, account_id, number,
+//     applied: [{ installment_id, account_id, number, total_installments, due_date,
 //                 charges_paid, principal_paid, status_after }],
 //     new_balance: N,
 //     credit_generated: N
@@ -1262,13 +1270,18 @@ router.post('/customers/:cid/payments', async (req, res) => {
     if (allInstIds.size > 0) {
       try {
         const { rows: metaRows } = await client.query(
-          `SELECT id, installment_number, account_id
+          `SELECT id, installment_number, total_installments, due_date, account_id
              FROM credit_installments
             WHERE id = ANY($1::uuid[]) AND company_id = $2`,
           [[...allInstIds], companyId]
         );
         for (const r of metaRows) {
-          instMeta[r.id] = { number: r.installment_number, account_id: r.account_id || null };
+          instMeta[r.id] = {
+            number:             r.installment_number,
+            total_installments: r.total_installments || null,
+            due_date:           overdueRule.ymd(r.due_date),
+            account_id:         r.account_id || null,
+          };
         }
       } catch (e) {
         if (e.code !== '42703' && e.code !== '42P01') throw e;
@@ -1288,6 +1301,8 @@ router.post('/customers/:cid/payments', async (req, res) => {
         installment_id: instId,
         account_id:     meta.account_id || null,
         number:         meta.number || null,
+        total_installments: meta.total_installments || null,
+        due_date:       meta.due_date || null,
         charges_paid:   chargesPaid,
         principal_paid: principalPaid,
         status_after:   ci.status || null,
@@ -1301,6 +1316,8 @@ router.post('/customers/:cid/payments', async (req, res) => {
       applied,
       new_balance:      result.new_balance,
       credit_generated: creditGenerated,
+      // 15/09/2026: o app abre o recibo logo apos receber, sem ir ao Historico.
+      transaction_id:   result.transaction?.id || null,
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1325,6 +1342,43 @@ router.post('/customers/:cid/payments', async (req, res) => {
 // resposta original (customer/transaction/installments/new_balance) para
 // devolver ao cliente em vez de duplicar o lancamento.
 // ============================================================
+// Parcela do /manual-entry. Tres formas do mesmo INSERT porque o banco pode
+// estar um deploy atras do codigo (fallback 42703 em cascata): com
+// transaction_id (migration 324) -> so account_id (migration 152) -> nenhum.
+async function insertManualInstallment(client, {
+  companyId, custId, i, n, instAmount, dueDateStr, accountId, transactionId,
+}) {
+  const cols = `company_id, sale_id, customer_id, installment_number, total_installments,
+                amount_due, due_date, status, pix_link, covered_amount`;
+  const base = [companyId, custId, i, n, instAmount, dueDateStr, null];
+  try {
+    const { rows } = await client.query(
+      `INSERT INTO credit_installments (${cols}, account_id, transaction_id)
+       VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0, $8, $9) RETURNING *`,
+      [...base, accountId, transactionId]
+    );
+    return rows[0];
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+  }
+  try {
+    const { rows } = await client.query(
+      `INSERT INTO credit_installments (${cols}, account_id)
+       VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0, $8) RETURNING *`,
+      [...base, accountId]
+    );
+    return rows[0];
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+  }
+  const { rows } = await client.query(
+    `INSERT INTO credit_installments (${cols})
+     VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0) RETURNING *`,
+    base
+  );
+  return rows[0];
+}
+
 async function buildManualEntryReplay(companyId, tx) {
   const { rows: custRows } = await db.query(
     `SELECT id, name FROM customers WHERE id = $1 AND company_id = $2`,
@@ -1573,28 +1627,12 @@ router.post('/manual-entry', async (req, res) => {
       const instAmount = i === n ? baseAmount + remainder : baseAmount;
       const dueDateStr = creditLedger.dueDateForIndex(firstDue, period.unit, period.count, i - 1);
 
-      let row;
-      try {
-        const ins = await client.query(
-          `INSERT INTO credit_installments
-             (company_id, sale_id, customer_id, installment_number, total_installments,
-              amount_due, due_date, status, pix_link, covered_amount, account_id)
-           VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0, $8) RETURNING *`,
-          [companyId, custId, i, n, instAmount, dueDateStr, null, resolvedAccountId]
-        );
-        row = ins.rows[0];
-      } catch (e) {
-        if (e.code === '42703') {
-          const ins = await client.query(
-            `INSERT INTO credit_installments
-               (company_id, sale_id, customer_id, installment_number, total_installments,
-                amount_due, due_date, status, pix_link, covered_amount)
-             VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, 0) RETURNING *`,
-            [companyId, custId, i, n, instAmount, dueDateStr, null]
-          );
-          row = ins.rows[0];
-        } else throw e;
-      }
+      // transaction_id (migration 324): a parcela sabe de qual debito nasceu,
+      // e o DELETE /transaction/:txid cancela exatamente essas.
+      const row = await insertManualInstallment(client, {
+        companyId, custId, i, n, instAmount, dueDateStr,
+        accountId: resolvedAccountId, transactionId: transaction.id,
+      });
       // B2: sem pix_link fake -- o campo fica NULL; o Pix real (EMV copia-e-cola)
       // e gerado on-demand via GET /credit/installments/:iid/pix.
       createdInstallments.push(row);
