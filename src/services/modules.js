@@ -18,6 +18,11 @@ const MODULE_PLAN_MAP = {
   os:             'essencial',
   estoque:        'essencial',
   configuracoes:  'essencial',
+  // 15/09/2026 — Ótica (migration 334). A configuração fica no Essencial
+  // para o admin poder dar override do módulo inteiro por empresa; o
+  // laboratório e as receitas são Negócio. Sem gate de rota: otica.js e
+  // serviceOrders.js dependem só de pdv_settings.otica_enabled.
+  'otica.config':      'essencial',
 
   // Negócio+
   folha:          'negocio',
@@ -25,6 +30,8 @@ const MODULE_PLAN_MAP = {
   clientes:       'negocio',
   canal:          'negocio',
   whatsapp:       'negocio',
+  'otica.laboratorio': 'negocio',
+  'otica.receitas':    'negocio',
 
   // Expansão only
   agentes:        'expansao',

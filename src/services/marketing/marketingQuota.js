@@ -46,8 +46,12 @@ const DEFAULT_UTILITY_CAP = 1500;
 // do dojô). 'teste', 'humano' e 'aurinha' ficam FORA das duas contas de
 // propósito: teste tem teto próprio e os outros dois são conversa, não
 // disparo automático.
-const MARKETING_SOURCE_TYPES = ['reativacao', 'aniversario', 'campanha'];
-const UTILITY_SOURCE_TYPES = ['crediario', 'crediario_manual', 'dojo_mensalidade'];
+//
+// Ótica (15/09/2026): "óculos prontos" e "pós-venda de adaptação" são
+// resposta a um pedido que o cliente fez — utilidade. "Revisão da receita"
+// é convite para voltar à loja — marketing, com consentimento e cota.
+const MARKETING_SOURCE_TYPES = ['reativacao', 'aniversario', 'campanha', 'otica_revisao'];
+const UTILITY_SOURCE_TYPES = ['crediario', 'crediario_manual', 'dojo_mensalidade', 'otica_pronta', 'otica_adaptacao'];
 
 function schemaMissing(e) {
   return !!e && (e.code === '42P01' || e.code === '42703');

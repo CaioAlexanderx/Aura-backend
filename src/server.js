@@ -123,6 +123,13 @@ function startServer() {
     // evento do sino sem gancho de fluxo: ninguém "faz" um Pix expirar.
     const { initPixExpiradoJob } = require('./jobs/lojaPixExpiradoJob');
     initPixExpiradoJob();
+
+    // Otica (334): pos-venda de adaptacao (3 dias apos a entrega) e lembrete
+    // de revisao da receita (30 dias antes de vencer) — diario 10h BRT,
+    // depois do crediario (9h) e do aniversario (9h30). Kill switch
+    // OTICA_WA_AUTO_ENABLED=false. Quem despacha e o waDispatcher.
+    const { initOticaReminderJob } = require('./jobs/oticaReminderJob');
+    initOticaReminderJob();
   });
 }
 
