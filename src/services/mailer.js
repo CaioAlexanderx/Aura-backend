@@ -443,7 +443,54 @@ async function sendSelfServeSignupNotification(info) {
   });
 }
 
+// -- Template: fim do desconto por varios meses (jobs/subscriptionDiscountJob) --
+// Vai 5 dias antes da primeira mensalidade cheia. So e enviado depois que a
+// assinatura ja voltou ao valor cheio no Asaas, entao o valor dito aqui e o
+// que sera cobrado.
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function sendDiscountEndingEmail(to, opts) {
+  const { firstName, companyName, planName, months, discountedValue, fullValue, dueDate } = opts;
+  const fmtR = (v) => 'R$ ' + Number(v).toFixed(2).replace('.', ',');
+  const [y, m, d] = String(dueDate).slice(0, 10).split('-');
+  const dueLabel = `${d}/${m}/${y}`;
+  const plan = escapeHtml(planName);
+  const company = companyName ? ` de <strong style="color:#e2e8f0;">${escapeHtml(companyName)}</strong>` : '';
+
+  const html = emailLayout(`
+    <p style="font-size:15px;color:#e2e8f0;margin:0 0 6px;">Ol&aacute;${firstName ? ', ' + escapeHtml(firstName) : ''}!</p>
+    <p style="font-size:13px;color:#94a3b8;line-height:22px;margin:0 0 20px;">
+      As ${months} mensalidades com desconto do plano <strong style="color:#e2e8f0;">${plan}</strong>${company} chegaram ao fim.
+      A partir de <strong style="color:#e2e8f0;">${dueLabel}</strong>, sua mensalidade volta ao valor normal:
+    </p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;">
+      <tr><td align="center" style="background:#1e1b4b;border:1px solid #4c1d95;border-radius:14px;padding:20px;">
+        <p style="margin:0 0 6px;font-size:13px;color:#64748b;text-decoration:line-through;">${fmtR(discountedValue)} por m&ecirc;s</p>
+        <p style="margin:0;font-size:24px;font-weight:800;color:#c4b5fd;">${fmtR(fullValue)} <span style="font-size:13px;font-weight:600;color:#94a3b8;">por m&ecirc;s</span></p>
+      </td></tr>
+    </table>
+    <p style="font-size:13px;color:#94a3b8;line-height:22px;margin:0 0 16px;">
+      Voc&ecirc; n&atilde;o precisa fazer nada: a cobran&ccedil;a continua na mesma forma de pagamento de hoje.
+    </p>
+    <p style="font-size:11px;color:#64748b;margin:0;">D&uacute;vidas? Fale com a gente em
+      <a href="mailto:contato@getaura.com.br" style="color:#7c3aed;text-decoration:none;">contato@getaura.com.br</a>.</p>
+  `);
+
+  return sendMail({
+    to,
+    subject: `Seu desconto terminou: a mensalidade volta a ${fmtR(fullValue)} em ${dueLabel}`,
+    text: `Ola${firstName ? ' ' + firstName : ''}! As ${months} mensalidades com desconto do plano ${planName} chegaram ao fim. ` +
+      `A partir de ${dueLabel}, sua mensalidade volta ao valor normal de ${fmtR(fullValue)} (antes ${fmtR(discountedValue)}). ` +
+      `Voce nao precisa fazer nada. Duvidas: contato@getaura.com.br`,
+    html,
+  });
+}
+
 module.exports = {
+  sendDiscountEndingEmail,
   sendVerificationEmail,
   sendVerificationLinkEmail,
   sendPasswordResetEmail,

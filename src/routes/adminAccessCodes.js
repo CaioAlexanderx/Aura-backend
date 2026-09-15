@@ -20,11 +20,16 @@ const CODE_REGEX = /^[A-Z0-9-]{3,20}$/;
 const VALID_TYPES = ['trial', 'promo', 'manual'];
 const VALID_PLANS = ['essencial', 'negocio', 'expansao', 'personalizado'];
 
+// 11/09/2026 (migration 326): desconto em reais, por varios meses, e trava
+// de plano. Regras de combinacao (as mesmas que checkoutCoupon reconfere):
+//   - percentual OU reais, nunca os dois
+//   - varios meses exige um desconto e nao combina com dias gratis
 function validateCreate(body) {
   const {
     code, type, plan,
     trial_days = 0, discount_pct = 0, max_uses = 1,
     expires_at = null,
+    discount_value = 0, discount_months = 1, restrict_to_plan = false,
   } = body || {};
 
   if (!code || typeof code !== 'string') {
@@ -56,6 +61,31 @@ function validateCreate(body) {
     throw new AppError('max_uses deve ser inteiro entre 1 e 99999', 400);
   }
 
+  const discountValueNum = Number(discount_value);
+  if (!Number.isFinite(discountValueNum) || discountValueNum < 0 || discountValueNum > 10000) {
+    throw new AppError('discount_value deve ser um valor em reais entre 0 e 10000', 400);
+  }
+  const discountValueRounded = Math.round(discountValueNum * 100) / 100;
+
+  const monthsNum = parseInt(discount_months, 10);
+  if (Number.isNaN(monthsNum) || monthsNum < 1 || monthsNum > 24) {
+    throw new AppError('discount_months deve ser inteiro entre 1 e 24', 400);
+  }
+
+  if (typeof restrict_to_plan !== 'boolean') {
+    throw new AppError('restrict_to_plan deve ser true ou false', 400);
+  }
+
+  if (discountNum > 0 && discountValueRounded > 0) {
+    throw new AppError('Use desconto em percentual OU em reais, nao os dois', 400);
+  }
+  if (monthsNum > 1 && discountNum === 0 && discountValueRounded === 0) {
+    throw new AppError('Desconto por varios meses precisa de discount_pct ou discount_value', 400);
+  }
+  if (monthsNum > 1 && trialDaysNum > 0) {
+    throw new AppError('Desconto por varios meses nao combina com dias gratis', 400);
+  }
+
   let expiresAtDate = null;
   if (expires_at) {
     expiresAtDate = new Date(expires_at);
@@ -73,9 +103,17 @@ function validateCreate(body) {
     plan,
     trial_days: trialDaysNum,
     discount_pct: discountNum,
+    discount_value: discountValueRounded,
+    discount_months: monthsNum,
+    restrict_to_plan: restrict_to_plan,
     max_uses: maxUsesNum,
     expires_at: expiresAtDate,
   };
+}
+
+// O payload usa algum campo da migration 326?
+function usesNewColumns(payload) {
+  return payload.discount_value > 0 || payload.discount_months > 1 || payload.restrict_to_plan;
 }
 
 // ── GET /admin/access-codes ───────────────────────────────────
@@ -105,9 +143,10 @@ router.get('/access-codes', ...adminOnly, asyncHandler(async (req, res) => {
   const limitNum = Math.min(parseInt(limit, 10) || 50, 200);
   params.push(limitNum);
 
+  // SELECT *: as colunas da migration 326 aparecem quando existirem, sem
+  // quebrar com 42703 antes disso.
   const sql = `
-    SELECT id, code, type, plan, discount_pct, trial_days, max_uses, uses,
-           referrer_id, expires_at, is_active, created_at, updated_at
+    SELECT *
     FROM access_codes
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     ORDER BY created_at DESC
@@ -122,18 +161,35 @@ router.get('/access-codes', ...adminOnly, asyncHandler(async (req, res) => {
 router.post('/access-codes', ...adminOnly, asyncHandler(async (req, res) => {
   const payload = validateCreate(req.body);
 
+  const baseParams = [
+    payload.code, payload.type, payload.plan,
+    payload.trial_days, payload.discount_pct, payload.max_uses,
+    payload.expires_at,
+  ];
+
   try {
-    const { rows } = await pool.query(
-      `INSERT INTO access_codes (code, type, plan, trial_days, discount_pct, max_uses, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, code, type, plan, discount_pct, trial_days, max_uses, uses,
-                 referrer_id, expires_at, is_active, created_at, updated_at`,
-      [
-        payload.code, payload.type, payload.plan,
-        payload.trial_days, payload.discount_pct, payload.max_uses,
-        payload.expires_at,
-      ]
-    );
+    let rows;
+    try {
+      ({ rows } = await pool.query(
+        `INSERT INTO access_codes (code, type, plan, trial_days, discount_pct, max_uses, expires_at,
+                                   discount_value, discount_months, restrict_to_plan)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING *`,
+        [...baseParams, payload.discount_value, payload.discount_months, payload.restrict_to_plan]
+      ));
+    } catch (err) {
+      if (err.code !== '42703') throw err;
+      // Pre-migration 326: so da para criar o cupom antigo.
+      if (usesNewColumns(payload)) {
+        throw new AppError('Desconto em reais, por varios meses ou com trava de plano ainda nao disponivel (migration 326 pendente)', 400);
+      }
+      ({ rows } = await pool.query(
+        `INSERT INTO access_codes (code, type, plan, trial_days, discount_pct, max_uses, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *`,
+        baseParams
+      ));
+    }
     res.status(201).json({ code: rows[0] });
   } catch (err) {
     if (err.code === '23505') {
@@ -162,8 +218,7 @@ router.patch('/access-codes/:id', ...adminOnly, asyncHandler(async (req, res) =>
     `UPDATE access_codes
      SET is_active = $1, updated_at = NOW()
      WHERE id = $2
-     RETURNING id, code, type, plan, discount_pct, trial_days, max_uses, uses,
-               referrer_id, expires_at, is_active, created_at, updated_at`,
+     RETURNING *`,
     [is_active, id]
   );
 
@@ -172,3 +227,4 @@ router.patch('/access-codes/:id', ...adminOnly, asyncHandler(async (req, res) =>
 }));
 
 module.exports = router;
+module.exports.validateCreate = validateCreate;
