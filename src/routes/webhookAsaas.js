@@ -77,6 +77,7 @@ const crypto  = require('crypto');
 const notify  = require('../services/digitalOrderNotifications');
 const lojaEvents = require('../services/lojaEvents');
 const { asaas } = require('../services/asaasClient');
+const marketingQuota = require('../services/marketing/marketingQuota');
 
 const ASAAS_WEBHOOK_TOKEN = process.env.ASAAS_WEBHOOK_SECRET;
 
@@ -288,6 +289,15 @@ router.post('/', async function(req, res) {
     return handleDigitalOrderPayment(req, res, event, payment, extRef, newOrderPaymentStatus);
   }
 
+  // ── 1b. Pacote extra de mensagens de marketing (Fase 8b)
+  // Cobranca avulsa criada em POST /companies/:id/whatsapp/marketing-packs.
+  // Nao e billing de plano: nao pode passar pelo bloco de companies
+  // abaixo, senao um pacote pago viraria "assinatura em dia" e um pacote
+  // vencido viraria "assinatura vencida" de uma empresa adimplente.
+  if (extRef.startsWith('wa-pack-')) {
+    return handleMarketingPackPayment(req, res, event, payment, extRef, isPaid);
+  }
+
   // ── 2. Company billing (plano)
   try {
     if (!newStatus && !isNeutral) {
@@ -374,6 +384,43 @@ router.post('/', async function(req, res) {
     res.status(200).json({ received: true, error: true });
   }
 });
+
+// Pacote extra de mensagens de MARKETING (wa_marketing_packs, 332).
+//
+// So DINHEIRO RECEBIDO ativa: `isPaid` ja vem decidido la em cima pelo
+// status real do Asaas (ou pelo evento, quando o segredo do webhook
+// validou o body). Qualquer outro evento e registrado como ignorado — o
+// pacote fica 'pending' e a cota nao muda, que e o comportamento seguro
+// para quem so gerou o boleto.
+//
+// A ativacao e idempotente no servico (activated_at com COALESCE): o
+// Asaas reenvia o mesmo evento e isso nao pode virar cota dobrada.
+async function handleMarketingPackPayment(req, res, event, payment, extRef, isPaid) {
+  const packId = extRef.replace('wa-pack-', '').trim();
+
+  if (!isPaid) {
+    console.log('[WEBHOOK] wa-pack ' + packId + ': evento sem dinheiro recebido (' + event + ') — ignorado');
+    return res.status(200).json({ received: true, handled: false, reason: 'event_ignored' });
+  }
+
+  try {
+    const pack = await marketingQuota.activatePack(packId, payment.id);
+    if (!pack) {
+      console.warn('[WEBHOOK] wa-pack nao encontrado (ou cancelado/migration 332 pendente):', packId);
+      return res.status(200).json({ received: true, pack_found: false });
+    }
+    await logWebhookEvent(pack.company_id, event, payment);
+    console.log('[WEBHOOK] wa-pack ' + pack.id + ' ativado para a company ' + pack.company_id +
+      ' (+' + pack.qty + ' mensagens de marketing)');
+    return res.status(200).json({
+      received: true, handled: true,
+      pack_id: pack.id, company_id: pack.company_id, qty: pack.qty, status: pack.status,
+    });
+  } catch (err) {
+    console.error('[WEBHOOK] Error ativando pacote de marketing:', err.message);
+    return res.status(200).json({ received: true, error: true });
+  }
+}
 
 async function handleDigitalOrderPayment(req, res, event, payment, extRef, newPaymentStatus) {
   const orderId = extRef.replace('digital-order-', '').trim();

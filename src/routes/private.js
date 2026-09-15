@@ -30,6 +30,10 @@ router.use('/caixa', require('./caixa'));
 // 31/08/2026 — Ordem de Servico (migration 313). Gate por pdv_settings.os_enabled
 // dentro do proprio router, so na escrita.
 router.use('/service-orders', require('./serviceOrders'));
+// 15/09/2026 — Otica (migration 334): configuracao, laboratorios, receitas
+// e painel. Mesmo desenho da OS: gate por pdv_settings.otica_enabled dentro
+// do router, so na escrita, sem requirePlan no prefixo.
+router.use('/otica', require('./otica'));
 // F0 Bloco B2 (30/07/2026): categoryMigration atende /categories/migration/*
 // e /products/brand-candidates + /products/brand/apply, com os caminhos ja
 // completos dentro do proprio router -- por isso monta na RAIZ. Tem que vir
@@ -169,7 +173,11 @@ router.use('/goals', requirePlan('expansao'), require('./salesGoals'));
 router.use('/margin', requirePlan('expansao'), require('./productMargin'));
 router.use('/dre-simples', requirePlan('expansao'), require('./dreSimples'));
 router.use('/alerts', requirePlan('expansao'), require('./smartAlerts'));
-router.use('/reactivation', requirePlan('expansao'), require('./customerReactivation'));
+// Reativação faz parte da oferta do Negócio desde a Fase 7 do WhatsApp
+// (14/09/2026): o disparo de cupom de reativação pelo WhatsApp oficial é
+// vendido no plano de R$ 169, então a tela que o aciona não pode ficar
+// presa ao Expansão.
+router.use('/reactivation', requirePlan('negocio', 'expansao'), require('./customerReactivation'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dental'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalDashboard'));
 router.use('/dental', requirePlan('negocio', 'expansao'), require('./dentalFunnel'));

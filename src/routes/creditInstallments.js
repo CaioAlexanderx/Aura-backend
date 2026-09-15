@@ -41,6 +41,12 @@ const pool = require('../config/database');
 const creditLedger = require('../services/creditLedger');
 const { buildStaticBrCode, validatePixKey, sanitizeTxid } = require('../services/staticPixService');
 const collectionNotice = require('../services/credit/collectionNotice');
+// Fase 6: a régua do crediário passa a poder enfileirar na fila paga do
+// WhatsApp (wa_outbox). Ligar isso é o único botão desta tela que gasta
+// dinheiro por clique — daí o gate próprio no PUT de regras.
+const collectionAuto = require('../services/credit/collectionAuto');
+const waOutbox = require('../services/waOutbox');
+const addons = require('../services/addons');
 
 const router = express.Router({ mergeParams: true });
 
@@ -1243,29 +1249,131 @@ router.get('/collection/rules', async (req, res) => {
   } finally { client.release(); }
 });
 
+// Os dois templates que a régua do crediário usa. Os dois precisam estar
+// APROVADOS pela Meta antes de alguém ligar o automático: a régua quase
+// sempre tem regra de lembrete E de atraso, e ligar com metade aprovada
+// significaria metade das cobranças virando skip silencioso na fila.
+const TEMPLATES_CREDIARIO = ['parcela_lembrete', 'parcela_atraso'];
+
+// Coluna da 330. Cache module-level pelo mesmo motivo das 309/328 no
+// whatsappCloud: o deploy sobe antes da migration e não dá para pagar
+// try/catch a cada request depois de já saber a resposta.
+let HAS_WA_AUTO_COL = true;
+
+// Ligar o envio automático é a única linha desta tela que passa a gastar
+// dinheiro — cada mensagem da Cloud API é paga. Por isso o portão fica
+// ANTES do banco, e são TRÊS, porque "não pode" tem três motivos bem
+// diferentes para quem está do outro lado: não está no plano (nem tem o
+// adicional), não conectou o número, ou os templates ainda não foram
+// aprovados pela Meta. DESLIGAR é sempre livre.
 router.put('/collection/rules', async (req, res) => {
-  const { enabled, whatsapp_connected, rules, pix_key } = req.body;
+  const { enabled, whatsapp_connected, rules, pix_key, whatsapp_auto } = req.body;
+  const querAuto = whatsapp_auto === true || whatsapp_auto === 'true';
   const client = await pool.connect();
   try {
-    const r = await client.query(
-      `INSERT INTO credit_collection_rules (company_id, enabled, whatsapp_connected, rules, pix_key)
+    if (querAuto) {
+      if (!(await addons.canAutoWhatsapp(req.params.id))) {
+        return res.status(403).json({
+          error: 'O envio automático por WhatsApp não está no seu plano. Fale com a Aura para ativar.',
+          code: 'ADDON_REQUIRED',
+        });
+      }
+      const conn = await waOutbox.connectionState(req.params.id);
+      if (!conn.connected) {
+        return res.status(409).json({
+          error: conn.token_expired
+            ? 'A conexão com o WhatsApp expirou. Reconecte o número da loja antes de ligar o envio automático.'
+            : 'Conecte o número de WhatsApp da loja antes de ligar o envio automático.',
+          code: 'NAO_CONECTADO',
+        });
+      }
+      for (const nome of TEMPLATES_CREDIARIO) {
+        if (!(await waOutbox.isTemplateApproved(req.params.id, nome, 'pt_BR'))) {
+          return res.status(409).json({
+            error: 'Os templates de cobrança ainda não foram aprovados pela Meta.',
+            code: 'TEMPLATE_NAO_APROVADO',
+          });
+        }
+      }
+    }
+
+    // null = "não mexer no interruptor" (a tela antiga não manda o campo).
+    const autoFlag = whatsapp_auto === undefined ? null : querAuto;
+    const params = [req.params.id,
+      enabled !== undefined ? enabled : true,
+      whatsapp_connected !== undefined ? whatsapp_connected : false,
+      rules ? JSON.stringify(rules) : null,
+      pix_key !== undefined ? String(pix_key).trim() : null,
+      autoFlag];
+
+    if (HAS_WA_AUTO_COL) {
+      try {
+        const r = await client.query(
+          `-- cred:rules-save
+           INSERT INTO credit_collection_rules
+             (company_id, enabled, whatsapp_connected, rules, pix_key, whatsapp_auto, whatsapp_auto_since)
+           VALUES ($1,$2,$3,$4,$5, COALESCE($6::boolean, false),
+                   CASE WHEN $6::boolean IS TRUE THEN NOW() END)
+           ON CONFLICT (company_id) DO UPDATE SET
+             enabled=$2, whatsapp_connected=$3, rules=$4,
+             pix_key=COALESCE($5, credit_collection_rules.pix_key),
+             whatsapp_auto = COALESCE($6::boolean, credit_collection_rules.whatsapp_auto),
+             whatsapp_auto_since = CASE
+               WHEN $6::boolean IS TRUE AND credit_collection_rules.whatsapp_auto IS NOT TRUE THEN NOW()
+               ELSE credit_collection_rules.whatsapp_auto_since END,
+             updated_at=NOW()
+           RETURNING *`,
+          params
+        );
+        return res.json(r.rows[0]);
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        HAS_WA_AUTO_COL = false;
+      }
+    }
+    // 330 ainda não aplicada. Salvar o resto continua valendo; o que NÃO
+    // pode é responder 200 para quem pediu para ligar o automático e
+    // deixar o interruptor sem lugar para morar.
+    if (querAuto) {
+      return res.status(503).json({
+        error: 'O envio automático ainda não está disponível neste ambiente (migração 330 pendente).',
+        code: 'SCHEMA_PENDING',
+      });
+    }
+    const legado = await client.query(
+      `-- cred:rules-save-legado
+       INSERT INTO credit_collection_rules (company_id, enabled, whatsapp_connected, rules, pix_key)
        VALUES ($1,$2,$3,$4,$5)
        ON CONFLICT (company_id) DO UPDATE SET
          enabled=$2, whatsapp_connected=$3, rules=$4,
          pix_key=COALESCE($5, credit_collection_rules.pix_key), updated_at=NOW()
        RETURNING *`,
-      [req.params.id,
-       enabled !== undefined ? enabled : true,
-       whatsapp_connected !== undefined ? whatsapp_connected : false,
-       rules ? JSON.stringify(rules) : null,
-       pix_key !== undefined ? String(pix_key).trim() : null]
+      params.slice(0, 5)
     );
-    res.json(r.rows[0]);
+    res.json(legado.rows[0]);
   } catch (err) {
     if (err.code === '42P01') return res.status(503).json({ error: 'Tabela de regua ainda nao disponivel.' });
     console.error('PUT /credit/collection/rules', err.message);
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
+});
+
+// ── POST /credit/collection/auto/run ────────────────────────────────────
+// "Rodar agora" da régua do crediário (e o motor da prévia no QA). Passa
+// pelas MESMAS guardas do job noturno — não existe caminho que pule as
+// guardas de custo, nem para teste.
+router.post('/collection/auto/run', async (req, res) => {
+  const b = req.body || {};
+  const dryRun = b.dry_run === true || b.dry_run === 'true';
+  const date = b.date != null && String(b.date).trim() !== '' ? String(b.date).trim() : null;
+  try {
+    const r = await collectionAuto.runForCompany(req.params.id, { today: date, dryRun });
+    return res.json({ dry_run: dryRun, date, ...r });
+  } catch (e) {
+    if (e.code === '42P01') return res.status(503).json({ error: 'Tabela de regua ainda nao disponivel.', code: 'SCHEMA_PENDING' });
+    console.error('POST /credit/collection/auto/run', e.message);
+    return res.status(500).json({ error: e.message });
+  }
 });
 
 // B2: a mensagem de cobranca agora carrega o Pix copia-e-cola REAL (EMV),
@@ -1274,10 +1382,102 @@ router.put('/collection/rules', async (req, res) => {
 // 17/08/2026: corpo extraido pra services/credit/collectionNotice.js, SEM
 // mudanca de comportamento. O mesmo motor agora atende a cobranca do saldo
 // de encomenda do Studio, que nao passa pelo gate de crediario.
+//
+// Cobrança avulsa pela via OFICIAL (Fase 6). Mesma parcela, mesmo texto,
+// mas o que sai é um TEMPLATE aprovado pela fila paga — então passa
+// pelas mesmas guardas: plano/adicional, número conectado, e todas as
+// guardas de custo do enqueue. Uma por parcela por DIA (dedupeKey), para
+// que clicar duas vezes no botão não vire duas mensagens cobradas.
+//
+// Evento de histórico SÓ quando a fila aceita — igual à régua
+// automática. Marcar "cobrado" o que a guarda barrou esconderia da
+// lojista exatamente a cobrança que não aconteceu.
+async function triggerViaCloudApi(req, res, { companyId, installmentId, template }) {
+  const client = await pool.connect();
+  try {
+    if (!(await addons.canAutoWhatsapp(companyId))) {
+      return res.status(403).json({
+        error: 'O envio automático por WhatsApp não está no seu plano. Fale com a Aura para ativar.',
+        code: 'ADDON_REQUIRED',
+      });
+    }
+    const conn = await waOutbox.connectionState(companyId);
+    if (!conn.connected) {
+      return res.status(409).json({
+        error: conn.token_expired
+          ? 'A conexão com o WhatsApp expirou. Reconecte o número da loja para enviar pelo WhatsApp oficial.'
+          : 'Conecte o número de WhatsApp da loja para enviar pelo WhatsApp oficial.',
+        code: 'NAO_CONECTADO',
+      });
+    }
+
+    const inst = await collectionNotice.loadInstallment(client, companyId, installmentId);
+    if (!inst) return res.status(404).json({ error: 'Parcela nao encontrada.' });
+
+    const composed = await collectionNotice.composeNotice({ companyId, template, row: inst });
+    const daysLate = composed.days_late;
+    // Template pedido pela régua quando ele existe; senão, o atraso da
+    // parcela decide (é o que a pessoa está olhando na tela).
+    const pedido = req.body && req.body.template ? collectionAuto.templateForRule(req.body.template) : null;
+    const templateName = pedido
+      || (daysLate > 0 ? collectionAuto.TEMPLATE_ATRASO : collectionAuto.TEMPLATE_LEMBRETE);
+    const components = collectionAuto.buildComponents(composed, { templateName, daysLate });
+
+    // Dia de São Paulo: às 22h o dia do lojista ainda é hoje, e o UTC já
+    // virou — a chave precisa acompanhar o dia dele.
+    const diaSP = new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 10);
+
+    const r = await waOutbox.enqueue({
+      companyId,
+      toPhone: inst.phone,
+      kind: 'template',
+      templateName,
+      templateLanguage: 'pt_BR',
+      components,
+      sourceType: 'crediario_manual',
+      sourceId: String(inst.id),
+      dedupeKey: `cred-manual-${installmentId}-${diaSP}`,
+    });
+
+    if (r.queued) {
+      await collectionAuto.recordEvent({
+        installmentId: inst.id,
+        templateName,
+        daysRelative: daysLate,
+        preview: composed.message,
+      });
+    }
+
+    return res.json({
+      success: true,
+      installment_id: inst.id,
+      channel: 'whatsapp_auto',
+      template: templateName,
+      message: composed.message,
+      pix_copia_cola: composed.pix_copia_cola,
+      phone: inst.phone,
+      days_late: daysLate,
+      queued: !!r.queued,
+      outbox_id: r.id || null,
+      reason: r.reason || null,
+    });
+  } catch (err) {
+    console.error('POST /credit/collection/trigger/:iid (whatsapp_auto)', err.message);
+    return res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+}
+
+// Fase 6: `channel: 'whatsapp_auto'` manda a MESMA cobrança pela via
+// oficial (template aprovado + fila com guardas) em vez de devolver o
+// texto para a pessoa colar no wa.me. O canal 'whatsapp' continua
+// idêntico — é a pista grátis, e é ela que a maioria usa.
 router.post('/collection/trigger/:iid', async (req, res) => {
   const companyId     = req.params.id;
   const installmentId = req.params.iid;
   const { template = 'atraso_1', channel = 'whatsapp' } = req.body;
+
+  if (channel === 'whatsapp_auto') return triggerViaCloudApi(req, res, { companyId, installmentId, template });
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');

@@ -74,6 +74,45 @@ const STATUS_LABEL = {
 
 const KIND_LABEL = { servico: 'Serviço', peca: 'Peça' };
 
+const LAB_STATUS_LABEL = {
+  aguardando_envio: 'Aguardando envio',
+  no_laboratorio:   'No laboratório',
+  recebida:         'Lentes recebidas',
+  em_montagem:      'Em montagem',
+  refacao:          'Em refação',
+};
+
+const USO_LABEL = { longe: 'Longe', perto: 'Perto', multifocal: 'Multifocal', bifocal: 'Bifocal' };
+const FRAME_SOURCE_LABEL = { estoque: 'Da loja', cliente: 'Do cliente' };
+
+// Grau com sinal e duas casas, como o prescritor escreve: "-1,75", "+2,00".
+// Vazio quando nao ha valor — a celula em branco e informacao (olho sem
+// cilindro, por exemplo), e "0,00" seria mentira.
+function formatGrau(v, { sinal = true } = {}) {
+  if (v === null || v === undefined || v === '') return '';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '';
+  const s = n.toFixed(2).replace('.', ',');
+  return sinal && n > 0 ? `+${s}` : s;
+}
+
+function formatMm(v) {
+  if (v === null || v === undefined || v === '') return '';
+  const n = Number(v);
+  return Number.isFinite(n) ? String(n).replace('.', ',') : '';
+}
+
+// Snapshot `optical` da OS de otica (ver migration 334). Pode vir como
+// objeto (pg decodifica jsonb) ou como string (caminhos que nao passam
+// pelo pg) — aceita os dois e nunca lanca: documento sem bloco de receita
+// e melhor que documento nenhum.
+function lerOptical(os) {
+  const raw = os && os.optical;
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
 // Garantia expressa em data, nao em "90 dias". O cliente guarda o papel por
 // meses; "90 dias" obriga ele a lembrar de quando contou, e a discussao no
 // balcao vira a palavra de um contra a do outro.
@@ -120,6 +159,12 @@ function buildServiceOrderHtml({ os, items = [], company, brand = {}, autoprint 
   const totalOrcado = Number(os.estimated_amount) || totalItens;
   const gAte = garantiaAte(os);
 
+  // Otica: titulo proprio e blocos de receita/lentes/laboratorio/sinal. O
+  // layout do reparo nao muda em nada — so o que e otica entra aqui.
+  const otica = os.kind === 'otica';
+  const optical = otica ? lerOptical(os) : null;
+  const tituloDoc = otica ? 'Ordem de Serviço — Óculos' : 'Ordem de Serviço';
+
   const logoHtml = logoUrl
     ? `<img class="logo" src="${escapeHtml(logoUrl)}" alt="">`
     : `<div class="logo logo-fb">${escapeHtml(getInitials(empresaNome))}</div>`;
@@ -162,7 +207,7 @@ function buildServiceOrderHtml({ os, items = [], company, brand = {}, autoprint 
 
   let h = '';
   h += '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">';
-  h += `<title>Ordem de Serviço nº ${escapeHtml(numero)} — ${escapeHtml(empresaNome)}</title>`;
+  h += `<title>${escapeHtml(tituloDoc)} nº ${escapeHtml(numero)} — ${escapeHtml(empresaNome)}</title>`;
   h += '<style>';
   h += '@page{size:A4;margin:14mm}';
   h += '*{margin:0;padding:0;box-sizing:border-box}';
@@ -218,7 +263,7 @@ function buildServiceOrderHtml({ os, items = [], company, brand = {}, autoprint 
   h += '.rodape{margin-top:7mm;padding-top:2mm;border-top:.5pt dotted #bbb;display:flex;justify-content:space-between;font-size:7pt;color:#999}';
   h += '</style></head><body>';
 
-  h += '<div class="toolbar"><span>Ordem de Serviço nº ' + escapeHtml(numero) + ' — A4</span>';
+  h += '<div class="toolbar"><span>' + escapeHtml(tituloDoc) + ' nº ' + escapeHtml(numero) + ' — A4</span>';
   h += '<button onclick="window.print()">Imprimir</button></div>';
 
   h += '<div class="page">';
@@ -238,7 +283,7 @@ function buildServiceOrderHtml({ os, items = [], company, brand = {}, autoprint 
   ].filter(Boolean).join(' &middot; ');
   if (contato) h += `<br>${contato}`;
   h += '</div></div>';
-  h += '<div class="hd-os"><div class="rot">Ordem de Serviço</div>';
+  h += `<div class="hd-os"><div class="rot">${escapeHtml(tituloDoc)}</div>`;
   h += `<div class="num">nº ${escapeHtml(numero)}</div>`;
   h += `<div class="badge">${escapeHtml(statusLabel)}</div></div>`;
   h += '</div>';
@@ -271,8 +316,74 @@ function buildServiceOrderHtml({ os, items = [], company, brand = {}, autoprint 
     h += '</div>';
   }
 
-  // ===== Defeito relatado =====
-  h += '<div class="bl"><div class="bl-tit">Defeito relatado pelo cliente</div>';
+  // ===== Otica: receita, armacao/lentes, laboratorio =====
+  if (otica) {
+    const rx = optical && optical.prescription;
+    const od = (rx && rx.od) || {};
+    const oe = (rx && rx.oe) || {};
+    h += '<div class="bl"><div class="bl-tit">Receita</div>';
+    if (rx) {
+      h += '<table class="tab"><thead><tr><th class="l">Olho</th><th class="c">Esf.</th><th class="c">Cil.</th>'
+        + '<th class="c">Eixo</th><th class="c">Adição</th><th class="c">DNP</th><th class="c">Altura</th></tr></thead><tbody>';
+      for (const [rot, o] of [['OD', od], ['OE', oe]]) {
+        h += `<tr><td class="l"><b>${rot}</b></td>`
+          + `<td class="c">${escapeHtml(formatGrau(o.sph))}</td>`
+          + `<td class="c">${escapeHtml(formatGrau(o.cyl))}</td>`
+          + `<td class="c">${o.axis != null && o.axis !== '' ? escapeHtml(String(o.axis)) + '°' : ''}</td>`
+          + `<td class="c">${escapeHtml(formatGrau(o.add))}</td>`
+          + `<td class="c">${escapeHtml(formatMm(o.pd))}</td>`
+          + `<td class="c">${escapeHtml(formatMm(o.height))}</td></tr>`;
+      }
+      h += '</tbody></table>';
+      const prescritor = [rx.prescriber_name, rx.prescriber_registry].filter(Boolean).join(' — ');
+      h += '<div class="grid" style="margin-top:2mm">';
+      if (prescritor) h += `<div class="f"><span class="k">Prescritor</span><span class="v">${escapeHtml(prescritor)}</span></div>`;
+      if (rx.issued_at) h += `<div class="f"><span class="k">Emitida em</span><span class="v">${escapeHtml(formatDateBR(rx.issued_at, false))}</span></div>`;
+      if (rx.valid_until) h += `<div class="f"><span class="k">Válida até</span><span class="v">${escapeHtml(formatDateBR(rx.valid_until, false))}</span></div>`;
+      if (optical.use) h += `<div class="f"><span class="k">Uso</span><span class="v">${escapeHtml(USO_LABEL[optical.use] || optical.use)}</span></div>`;
+      h += '</div>';
+    } else {
+      h += '<div class="vazio">Receita não informada.</div>';
+    }
+    h += '</div>';
+
+    const frame = (optical && optical.frame) || null;
+    const lens = (optical && optical.lens) || null;
+    if (frame || lens) {
+      h += '<div class="bl"><div class="bl-tit">Armação e lentes</div><div class="grid">';
+      if (frame) {
+        if (frame.description) h += `<div class="f"><span class="k">Armação</span><span class="v">${escapeHtml(frame.description)}</span></div>`;
+        if (frame.source) h += `<div class="f"><span class="k">Origem da armação</span><span class="v">${escapeHtml(FRAME_SOURCE_LABEL[frame.source] || frame.source)}</span></div>`;
+        if (frame.color) h += `<div class="f"><span class="k">Cor</span><span class="v">${escapeHtml(frame.color)}</span></div>`;
+        if (frame.size) h += `<div class="f"><span class="k">Tamanho</span><span class="v">${escapeHtml(frame.size)}</span></div>`;
+      }
+      if (lens) {
+        const lente = [lens.brand, lens.design].filter(Boolean).join(' ');
+        if (lente) h += `<div class="f"><span class="k">Lente</span><span class="v">${escapeHtml(lente)}</span></div>`;
+        if (lens.type) h += `<div class="f"><span class="k">Tipo</span><span class="v">${escapeHtml(lens.type === 'surfacada' ? 'Surfaçada' : lens.type === 'pronta' ? 'Pronta' : lens.type)}</span></div>`;
+        if (lens.material) h += `<div class="f"><span class="k">Material</span><span class="v">${escapeHtml(lens.material)}</span></div>`;
+        if (Array.isArray(lens.treatments) && lens.treatments.length) {
+          h += `<div class="f"><span class="k">Tratamentos</span><span class="v">${escapeHtml(lens.treatments.join(', '))}</span></div>`;
+        }
+      }
+      h += '</div>';
+      if (lens && lens.notes) h += `<div class="txt" style="margin-top:2mm">${escapeHtml(lens.notes)}</div>`;
+      h += '</div>';
+    }
+
+    if (os.lab_name || os.lab_order_ref || os.lab_sent_at || os.lab_status) {
+      h += '<div class="bl"><div class="bl-tit">Laboratório</div><div class="grid">';
+      if (os.lab_name) h += `<div class="f"><span class="k">Laboratório</span><span class="v">${escapeHtml(os.lab_name)}</span></div>`;
+      if (os.lab_order_ref) h += `<div class="f"><span class="k">Nº do pedido</span><span class="v">${escapeHtml(os.lab_order_ref)}</span></div>`;
+      if (os.lab_sent_at) h += `<div class="f"><span class="k">Enviada em</span><span class="v">${escapeHtml(formatDateBR(os.lab_sent_at))}</span></div>`;
+      if (os.lab_received_at) h += `<div class="f"><span class="k">Recebida em</span><span class="v">${escapeHtml(formatDateBR(os.lab_received_at))}</span></div>`;
+      if (os.lab_status) h += `<div class="f"><span class="k">Situação</span><span class="v">${escapeHtml(LAB_STATUS_LABEL[os.lab_status] || os.lab_status)}</span></div>`;
+      h += '</div></div>';
+    }
+  }
+
+  // ===== Defeito relatado / servico =====
+  h += `<div class="bl"><div class="bl-tit">${otica ? 'Serviço' : 'Defeito relatado pelo cliente'}</div>`;
   h += `<div class="txt">${escapeHtml(os.reported_issue || '')}</div></div>`;
 
   // ===== Diagnostico / solucao =====
@@ -292,13 +403,31 @@ function buildServiceOrderHtml({ os, items = [], company, brand = {}, autoprint 
   if (os.approved_at) {
     h += `<div class="vazio" style="margin-top:1.5mm">Orçamento aprovado pelo cliente em ${escapeHtml(formatDateBR(os.approved_at))}.</div>`;
   }
+  // Sinal e saldo (otica): deposit_sale_total vem do join com a venda do
+  // sinal; deposit_balance e o que print.js somou das parcelas em aberto.
+  const sinalTotal = Number(os.deposit_sale_total);
+  if (otica && Number.isFinite(sinalTotal) && sinalTotal > 0) {
+    const saldo = Number(os.deposit_balance);
+    const temSaldo = Number.isFinite(saldo) && saldo > 0.005;
+    const pago = temSaldo ? sinalTotal - saldo : sinalTotal;
+    h += `<div class="tot"><span class="k">Sinal recebido</span><span class="v" style="font-size:11pt">R$ ${formatBRL(pago)}</span></div>`;
+    if (temSaldo) {
+      h += `<div class="tot"><span class="k">Saldo a pagar na retirada</span><span class="v" style="font-size:11pt">R$ ${formatBRL(saldo)}</span></div>`;
+    }
+  }
   h += '</div>';
 
   // ===== Garantia =====
-  if (gAte) {
+  const gAdapt = otica && optical ? Number(optical.adaptation_warranty_days) : NaN;
+  if (gAte || (Number.isFinite(gAdapt) && gAdapt > 0)) {
     h += '<div class="bl"><div class="bl-tit">Garantia</div><div class="grid">';
-    h += `<div class="f"><span class="k">Prazo</span><span class="v">${escapeHtml(String(os.warranty_days))} dias</span></div>`;
-    h += `<div class="f"><span class="k">Válida até</span><span class="v">${escapeHtml(formatDateBR(gAte, false))}</span></div>`;
+    if (gAte) {
+      h += `<div class="f"><span class="k">Prazo</span><span class="v">${escapeHtml(String(os.warranty_days))} dias</span></div>`;
+      h += `<div class="f"><span class="k">Válida até</span><span class="v">${escapeHtml(formatDateBR(gAte, false))}</span></div>`;
+    }
+    if (Number.isFinite(gAdapt) && gAdapt > 0) {
+      h += `<div class="f"><span class="k">Garantia de adaptação</span><span class="v">${escapeHtml(String(gAdapt))} dias</span></div>`;
+    }
     h += '</div></div>';
   }
 
@@ -310,15 +439,28 @@ function buildServiceOrderHtml({ os, items = [], company, brand = {}, autoprint 
 
   // ===== Assinaturas =====
   h += '<div class="assins">';
-  h += blocoAssinatura('Entrega do equipamento', os.intake_signature_url, os.intake_signed_at, os.customer_name || 'Cliente');
-  h += blocoAssinatura('Retirada do equipamento', os.pickup_signature_url, os.pickup_signed_at, os.customer_name || 'Cliente');
+  if (otica) {
+    h += blocoAssinatura('Confirmação do pedido', os.intake_signature_url, os.intake_signed_at, os.customer_name || 'Cliente');
+    h += blocoAssinatura('Retirada dos óculos', os.pickup_signature_url, os.pickup_signed_at, os.customer_name || 'Cliente');
+  } else {
+    h += blocoAssinatura('Entrega do equipamento', os.intake_signature_url, os.intake_signed_at, os.customer_name || 'Cliente');
+    h += blocoAssinatura('Retirada do equipamento', os.pickup_signature_url, os.pickup_signed_at, os.customer_name || 'Cliente');
+  }
   h += '</div>';
 
   h += '<div class="termos">';
-  h += 'O cliente declara que o equipamento foi entregue nas condições descritas acima. '
-    + 'A garantia cobre exclusivamente o serviço executado e as peças substituídas, não se estendendo a '
-    + 'defeitos alheios ao reparo. Equipamentos não retirados em até 90 dias após a comunicação de '
-    + 'conclusão poderão ser cobrados por armazenagem, nos termos do Art. 1.275 do Código Civil.';
+  if (otica) {
+    h += 'O cliente confere a receita e as especificações de armação e lentes acima. '
+      + 'A garantia de adaptação cobre a troca das lentes por dificuldade de adaptação dentro do prazo indicado, '
+      + 'mediante avaliação. Lentes surfaçadas são fabricadas sob medida e não admitem devolução por desistência. '
+      + 'Óculos não retirados em até 90 dias após o aviso de conclusão poderão ser cobrados por armazenagem, '
+      + 'nos termos do Art. 1.275 do Código Civil.';
+  } else {
+    h += 'O cliente declara que o equipamento foi entregue nas condições descritas acima. '
+      + 'A garantia cobre exclusivamente o serviço executado e as peças substituídas, não se estendendo a '
+      + 'defeitos alheios ao reparo. Equipamentos não retirados em até 90 dias após a comunicação de '
+      + 'conclusão poderão ser cobrados por armazenagem, nos termos do Art. 1.275 do Código Civil.';
+  }
   h += '</div>';
 
   // ===== Rodape: Aura discreta (pedido explicito) =====
@@ -338,5 +480,6 @@ module.exports = {
   buildServiceOrderHtml,
   // expostos pra teste
   formatBRL, formatCnpj, formatDateBR, getInitials, garantiaAte,
-  STATUS_LABEL,
+  formatGrau, lerOptical,
+  STATUS_LABEL, LAB_STATUS_LABEL,
 };
