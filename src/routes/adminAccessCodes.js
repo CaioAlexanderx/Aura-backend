@@ -139,6 +139,15 @@ router.post('/access-codes', ...adminOnly, asyncHandler(async (req, res) => {
     if (err.code === '23505') {
       throw new AppError(`Codigo "${payload.code}" ja existe`, 409);
     }
+    // Banco sem a migration 327: o CHECK da 019 nao conhece 'manual' nem
+    // 'personalizado'. Sem isto o painel recebe 500 sem dizer o motivo.
+    if (err.code === '23514' &&
+        (err.constraint === 'access_codes_type_check' || err.constraint === 'access_codes_plan_check')) {
+      throw new AppError(
+        `Tipo "${payload.type}" ou plano "${payload.plan}" ainda nao aceito pelo banco (migration 327 pendente)`,
+        400
+      );
+    }
     throw err;
   }
 }));
