@@ -145,7 +145,9 @@ const LAB_STATUS_VALIDOS = Object.keys(LAB_TRANSICOES);
 // Lente que ainda nao voltou do laboratorio nao pode virar oculos pronto.
 const LAB_STATUS_PRONTA_OK = ['recebida', 'em_montagem'];
 
-const USOS = ['longe', 'perto', 'multifocal', 'bifocal'];
+// 'sol' = oculos de sol com grau (QA no app, 15/09/2026: o front ja oferecia
+// a opcao e o backend recusava a OS inteira).
+const USOS = ['longe', 'perto', 'multifocal', 'bifocal', 'sol'];
 
 // Shape minimo do snapshot `optical`. Nao valida o grau em si (isso e a
 // receita, em otica.js): aqui so garante que a OS nasceu com o que a
