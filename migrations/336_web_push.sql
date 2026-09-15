@@ -1,5 +1,5 @@
 -- ============================================================
--- 324 — Web Push do painel
+-- 336 — Web Push do painel (renumerada: a 324 foi usada em main)
 -- 10/09/2026
 --
 -- POR QUE: o aviso de pedido novo nunca chegou a ninguem fora do sino. O

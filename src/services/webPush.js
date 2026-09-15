@@ -236,7 +236,7 @@ async function notifyCompany(companyId, aviso = {}) {
         [companyId]
       ));
     } catch (err) {
-      if (err.code === '42P01') return vazio; // migration 324 ainda nao aplicada
+      if (err.code === '42P01') return vazio; // migration 336 ainda nao aplicada
       throw err;
     }
     if (!rows || !rows.length) return vazio;

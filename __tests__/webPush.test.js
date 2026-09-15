@@ -213,7 +213,7 @@ describe('envio e faxina', () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  test('migration 324 ausente nao derruba o aviso', async () => {
+  test('migration 336 ausente nao derruba o aviso', async () => {
     db.query.mockRejectedValue(Object.assign(new Error('relation does not exist'), { code: '42P01' }));
     global.fetch = jest.fn();
     expect(await webPush.notifyCompany('c1', { title: 'x' })).toEqual({ enviados: 0, removidos: 0, falhas: 0 });
