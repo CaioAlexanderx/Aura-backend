@@ -12,6 +12,10 @@ const MODULE_PLAN_MAP = {
   contabilidade:  'essencial',
   suporte:        'essencial',
   pdv:            'essencial',
+  // 14/09/2026 — Ordem de Serviço ganha chave própria (antes o /os do app
+  // usava "pdv" emprestado). Mesmo plano mínimo do pdv. Sem gate de rota:
+  // serviceOrders.js continua dependendo só de pdv_settings.os_enabled.
+  os:             'essencial',
   estoque:        'essencial',
   configuracoes:  'essencial',
 
