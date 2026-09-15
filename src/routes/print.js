@@ -814,8 +814,13 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 //        AND company_id=:id AND type='payment'.
 // Encargos: transactions WHERE idempotency_key='credit-charges-<txId>'
 //           (defensivo a 42703/42P01 — campo opcional).
-// Saldo: customer_credit_balances.balance (defensivo).
-// Crédito a favor: balance < 0 → exibe valor absoluto.
+// Parcelas: credit_payment_allocations (migration 335) — quais parcelas
+//           ESTE pagamento cobriu. Pagamento anterior a ela sai sem o bloco.
+//
+// 15/09/2026: saiu o "Saldo restante" / "Credito a favor". Era o saldo do
+//   cliente NA HORA DA IMPRESSAO, nao o do pagamento: o cliente quitava,
+//   comprava mais, e o recibo reimpresso mostrava um numero sem relacao
+//   com aquele pagamento.
 //
 // Frontend chama via fetch + Authorization header + document.write
 // (mesmo padrão /print/credit/:cid/carne).
@@ -868,18 +873,22 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] charges warn:', e.message);
     }
 
-    // 5. Saldo restante após pagamento — defensivo
-    let balance = null;
+    // 5. Parcelas que este pagamento cobriu — defensivo (migration 335)
+    let allocations = [];
     try {
-      const { rows: balRows } = await db.query(
-        `SELECT COALESCE(balance, 0) AS balance
-           FROM customer_credit_balances
-          WHERE customer_id = $1 AND company_id = $2`,
-        [tx.customer_id, companyId]
+      const { rows: allocRows } = await db.query(
+        `SELECT ci.installment_number, ci.total_installments,
+                to_char(ci.due_date, 'DD/MM/YYYY') AS due_date_br,
+                a.principal_paid, a.charges_paid, a.status_after
+           FROM credit_payment_allocations a
+           JOIN credit_installments ci ON ci.id = a.installment_id
+          WHERE a.transaction_id = $1 AND a.company_id = $2
+          ORDER BY ci.due_date ASC, ci.installment_number ASC`,
+        [transactionId, companyId]
       );
-      if (balRows.length) balance = parseFloat(balRows[0].balance);
+      allocations = allocRows;
     } catch (e) {
-      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] balance warn:', e.message);
+      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] allocations warn:', e.message);
     }
 
     // 6. Montar HTML
@@ -889,21 +898,33 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
     const payMethodLabel = _payLabel(tx.payment_method || 'outro');
 
     const chargesRow = chargesAmount > 0
-      ? '<tr><td style="padding:3px 0;color:#666">Encargos (mora/multa)</td>' +
-        '<td style="text-align:right;padding:3px 0;color:#666">R$' + fmt(chargesAmount) + '</td></tr>'
+      ? '<tr><td style="padding:3px 0">Encargos (mora/multa)</td>' +
+        '<td style="text-align:right;padding:3px 0">R$' + fmt(chargesAmount) + '</td></tr>'
       : '';
 
-    let balanceRow = '';
-    if (balance !== null) {
-      if (balance < 0) {
-        balanceRow =
-          '<tr><td style="padding:3px 0;color:#166534;font-weight:bold">Credito a favor</td>' +
-          '<td style="text-align:right;padding:3px 0;color:#166534;font-weight:bold">R$' + fmt(Math.abs(balance)) + '</td></tr>';
-      } else {
-        balanceRow =
-          '<tr><td style="padding:3px 0">Saldo restante</td>' +
-          '<td style="text-align:right;padding:3px 0">R$' + fmt(balance) + '</td></tr>';
-      }
+    // Situacao da parcela logo apos ESTE pagamento (retrato, nao estado atual).
+    const allocSituation = (a) => {
+      if (a.status_after === 'paid') return 'Quitada';
+      if (parseFloat(a.principal_paid || 0) <= 0.005) return 'Encargos';
+      return 'Parcial';
+    };
+    const allocPaid = (a) => parseFloat(a.principal_paid || 0) + parseFloat(a.charges_paid || 0);
+
+    let allocHTML = '';
+    if (allocations.length) {
+      allocHTML =
+        '  <div class="divider"></div>\n' +
+        '  <div class="bold" style="margin-bottom:4px">Parcelas pagas</div>\n' +
+        '  <table>\n' +
+        '    <tr><th style="text-align:left">Parcela</th><th style="text-align:center">Vencimento</th>' +
+        '<th style="text-align:right">Pago</th><th style="text-align:right">Situacao</th></tr>\n' +
+        allocations.map(a =>
+          '    <tr><td>' + a.installment_number + '/' + a.total_installments + '</td>' +
+          '<td style="text-align:center">' + esc(a.due_date_br) + '</td>' +
+          '<td style="text-align:right">R$' + fmt(allocPaid(a)) + '</td>' +
+          '<td style="text-align:right">' + allocSituation(a) + '</td></tr>\n'
+        ).join('') +
+        '  </table>\n';
     }
 
     // Bloco WhatsApp (texto pré-formatado — trivial pois é só concatenar)
@@ -917,11 +938,13 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       'Metodo: ' + payMethodLabel,
     ];
     if (chargesAmount > 0) waLines.push('Encargos: R$' + fmt(chargesAmount));
-    if (balance !== null) {
-      if (balance < 0) {
-        waLines.push('Credito a favor: R$' + fmt(Math.abs(balance)));
-      } else {
-        waLines.push('Saldo restante: R$' + fmt(balance));
+    if (allocations.length) {
+      waLines.push('', 'Parcelas pagas:');
+      for (const a of allocations) {
+        waLines.push(
+          'Parcela ' + a.installment_number + '/' + a.total_installments +
+          ' (venc. ' + a.due_date_br + '): R$' + fmt(allocPaid(a)) + ' - ' + allocSituation(a).toLowerCase()
+        );
       }
     }
     waLines.push('', 'Powered by Aura. - getaura.com.br');
@@ -933,7 +956,7 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       '  <meta charset="UTF-8">\n' +
       '  <title>Recibo Crediario - ' + esc(company.display_name) + '</title>\n' +
       '  <style>\n' +
-      '    @page { margin: 10mm 12mm; size: A4; }\n' +
+      '    @page { margin: 10mm 12mm; size: auto; }\n' +
       '    * { margin:0; padding:0; box-sizing:border-box; }\n' +
       '    body { font-family:Consolas,\'Lucida Console\',Menlo,\'Courier New\',monospace; font-size:12px; color:#000; max-width:500px; margin:0 auto; }\n' +
       '    .center { text-align:center; }\n' +
@@ -941,12 +964,14 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       '    .divider { border-top:1px dashed #000; margin:8px 0; }\n' +
       '    .company-name { font-size:16px; font-weight:bold; }\n' +
       '    table { width:100%; border-collapse:collapse; }\n' +
-      '    td { vertical-align:top; font-size:12px; }\n' +
+      '    td { vertical-align:top; font-size:12px; padding:3px 0; }\n' +
+      '    th { font-size:11px; font-weight:bold; border-bottom:1px solid #000; padding:2px 0; }\n' +
       '    .total-row td { font-weight:bold; font-size:14px; border-top:2px solid #000; padding-top:5px; }\n' +
-      '    .footer { font-size:9px; text-align:center; margin-top:8px; color:#666; }\n' +
+      '    .footer { font-size:10px; text-align:center; margin-top:8px; }\n' +
       '    .wa-block { background:#f0fdf4; border:1px solid #86efac; border-radius:4px; padding:10px; margin-top:12px; }\n' +
       '    .wa-block textarea { width:100%; font-family:monospace; font-size:11px; border:none; background:transparent; resize:none; outline:none; }\n' +
       '    @media print { body { -webkit-print-color-adjust:exact; print-color-adjust:exact; } button, .wa-block { display:none !important; } }\n' +
+      '    @media print and (max-width: 120mm) { @page { margin: 4mm 3mm; } body { max-width:none; } }\n' +
       '  </style>\n' +
       '</head>\n' +
       '<body>\n' +
@@ -970,8 +995,8 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       '    <tr><td style="padding:3px 0">Metodo</td><td style="text-align:right;padding:3px 0">' + payMethodLabel + '</td></tr>\n' +
       chargesRow +
       '    <tr class="total-row"><td>Valor pago</td><td style="text-align:right">R$' + fmt(amountPaid) + '</td></tr>\n' +
-      balanceRow +
       '  </table>\n' +
+      allocHTML +
       '  <div class="divider"></div>\n' +
       '  <div class="footer">Powered by Aura. - getaura.com.br</div>\n' +
       '  <br>\n' +
