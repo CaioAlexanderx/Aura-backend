@@ -125,6 +125,15 @@ router.use('/employees/ranking', require('./employeesRanking'));
 // comercial é o addon — hub_agent_settings.enabled — não o plano).
 router.use('/hub', require('./hubSocial'));
 
+// ── Fase 1 · consentimento (CRM de varejo, migration 340) ──────────
+// GET/POST /customers/:cid/consent e GET/PUT /whatsapp/consent/settings,
+// GET /whatsapp/consent/summary. Monta AQUI, e não no fim do arquivo,
+// porque os mounts de /customers logo abaixo têm requirePlan no PREFIXO
+// (403 para o Essencial antes de chegar a qualquer router depois deles),
+// e registrar o consentimento no balcão vale para qualquer plano.
+router.use('/', require('./customerConsent').companyRouter);
+// ── fim Fase 1 · consentimento ─────────────────────────────────────
+
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
