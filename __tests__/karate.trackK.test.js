@@ -209,7 +209,8 @@ describe('applyEvent — aplicação idempotente', () => {
     } catch (e) { threw = e; }
     expect(threw).not.toBeNull();
     expect(threw.recoverable).toBe(false);
-    expect(threw.message).toMatch(/número de matrícula FPKT/i);
+    expect(threw.message).toMatch(/número de matrícula da federação/i);
+    expect(threw.message).not.toMatch(/FPKT/);
     // só claim + CPF lookup rodaram — nenhum INSERT em customers foi tentado
     expect(client.query).toHaveBeenCalledTimes(2);
     const allSql = client.query.mock.calls.map((c) => (typeof c[0] === 'string' ? c[0] : '')).join('\n');

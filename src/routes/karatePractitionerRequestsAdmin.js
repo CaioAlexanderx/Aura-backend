@@ -1062,7 +1062,7 @@ router.post('/practitioner-requests/batch-approve-create', ...guards.staffWrite(
       // FPKT_NUMBER_TAKEN — tecnicamente correto, mas quase certamente um
       // erro de digitação que a federação prefere corrigir ANTES.
       return res.status(422).json({
-        error: `O número FPKT ${fpktNumber} aparece em mais de um item do lote`,
+        error: `O número de matrícula ${fpktNumber} aparece em mais de um item do lote`,
         code: 'FPKT_NUMBER_DUPLICATED_IN_BATCH',
         request_id: requestId,
       });

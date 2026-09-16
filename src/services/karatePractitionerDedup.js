@@ -192,7 +192,7 @@ async function lookupByFpktNumber(db, { federationId, number }) {
   return {
     found: true,
     is_transfer: true,
-    message: 'Este número FPKT já pertence a um praticante cadastrado. Isto é uma TRANSFERÊNCIA, não uma criação.',
+    message: 'Este número de matrícula já pertence a um praticante cadastrado. Isto é uma TRANSFERÊNCIA, não uma criação.',
     practitioner: {
       id: p.id,
       name: p.name,

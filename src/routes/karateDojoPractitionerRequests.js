@@ -171,7 +171,7 @@ router.get('/dojo/practitioner-requests/lookup-fpkt', requireDojoAccess, lookupL
     return res.json(result);
   } catch (e) {
     console.error('[karateDojoPractitionerRequests] lookup-fpkt error:', e.message);
-    return res.status(500).json({ error: 'Erro ao consultar número FPKT' });
+    return res.status(500).json({ error: 'Erro ao consultar número de matrícula' });
   }
 });
 

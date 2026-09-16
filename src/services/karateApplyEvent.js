@@ -406,7 +406,7 @@ async function upsertPractitioner(client, ev, data) {
   // explícita em vez de inventar. NÃO recuperável: re-tentar sozinho não
   // muda o payload (ele nunca vai ganhar um número por conta própria).
   const err = new Error(
-    'practitioner_added sem correspondência por CPF: seria uma criação nova, mas o evento não carrega número de matrícula FPKT e o backend não gera número (regra H1/H2). Evento não aplicado — resolva manualmente (import/solicitação) com o número emitido pela federação.'
+    'practitioner_added sem correspondência por CPF: seria uma criação nova, mas o evento não carrega número de matrícula da federação e o backend não gera número (regra H1/H2). Evento não aplicado — resolva manualmente (import/solicitação) com o número emitido pela federação.'
   );
   err.recoverable = false;
   err.code = 'FPKT_NUMBER_REQUIRED';

@@ -1041,7 +1041,7 @@ router.post('/:token/practitioner', practitionerCreateLimiter, async (req, res) 
       fpkt_lookup: fpktHint,
       message: alreadyPending
         ? 'Já existe uma solicitação pendente para esta pessoa neste dojô.'
-        : 'Solicitação enviada à federação. Ela vai validar e emitir o número FPKT — este praticante ainda não está no quadro.',
+        : 'Solicitação enviada à federação. Ela vai validar e emitir o número de matrícula — este praticante ainda não está no quadro.',
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1153,7 +1153,7 @@ router.get('/:token/fpkt-lookup', fpktLookupLimiter, async (req, res) => {
       return res.status(404).json({ error: 'Link inválido' });
     }
     console.error('[karateRosterPortalPublic] fpkt-lookup error:', err.message);
-    res.status(500).json({ error: 'Erro ao consultar número FPKT' });
+    res.status(500).json({ error: 'Erro ao consultar número de matrícula' });
   }
 });
 
@@ -1224,7 +1224,7 @@ router.get('/:token/export', async (req, res) => {
 
     const quadro = await fetchQuadro(resolved.dojo_id, resolved.federation_id);
 
-    const header = ['Nome', 'Registro FPKT', 'Faixa', 'Situação'];
+    const header = ['Nome', 'Registro na federação', 'Faixa', 'Situação'];
     const lines = [header.map(csvEscape).join(';')];
     for (const p of quadro.praticantes) {
       lines.push([
@@ -1264,7 +1264,7 @@ router.get('/:token/export-missing', async (req, res) => {
     const quadro = await fetchQuadro(resolved.dojo_id, resolved.federation_id);
     const faltando = quadro.praticantes.filter((p) => p.missing.length > 0);
 
-    const header = ['Matrícula FPKT', 'Nome', 'Telefone', 'E-mail'];
+    const header = ['Matrícula na federação', 'Nome', 'Telefone', 'E-mail'];
     const lines = [header.map(csvEscape).join(';')];
     for (const p of faltando) {
       lines.push([
@@ -1302,7 +1302,7 @@ router.get('/:token/export-missing', async (req, res) => {
 // dessas fichas são puladas e DECLARADAS na resposta
 // (skipped_identity_managed_by_dojo[]); pular em silêncio seria pior que
 // sobrescrever.
-const IDENTIFIER_HEADER_ALIASES = ['matricula fpkt', 'matricula', 'registro fpkt', 'registro', 'karate_registration_number', 'fpkt'];
+const IDENTIFIER_HEADER_ALIASES = ['matricula na federacao', 'registro na federacao', 'matricula fpkt', 'matricula', 'registro fpkt', 'registro', 'karate_registration_number', 'fpkt'];
 const PHONE_HEADER_ALIASES = ['telefone', 'phone', 'fone', 'celular'];
 const EMAIL_HEADER_ALIASES = ['email', 'e-mail'];
 

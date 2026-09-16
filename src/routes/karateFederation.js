@@ -1,6 +1,7 @@
 // ============================================================
 // AURA KARATÊ — Rotas da Federação (Track A + Track P)
 // POST /karate/federation/setup
+// GET  /federation/:id/identity          (identidade visual — nome + logo)
 // GET  /federation/:id/dashboard          (Track A + P alerts)
 // GET  /federation/:id/belt-distribution
 // GET  /federation/:id/search             (Track P: busca rápida)
@@ -16,6 +17,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { guards } = require('../config/karateRoles');
+const { getFederationIdentity } = require('../services/karateCertificateService');
 
 // ── Ordenação estável de faixas — DELEGADA ao dicionário canônico ──
 // O backend devolve um `rank` numérico por faixa para o FE ordenar de forma
@@ -167,6 +169,46 @@ router.post('/federation/setup', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Erro ao criar federação', detail: err.message });
   } finally {
     client.release();
+  }
+});
+
+// ── GET /federation/:id/identity ───────────────────────
+// A identidade VISUAL da federação: nome, slug, logo e contato.
+//
+// POR QUE UM ENDPOINT E NÃO O JWT: o app já tira o nome da federação do
+// token (shapeCompany em src/routes/auth.js), mas a logo não pode ir junto.
+// O auth store carrega o token e NUNCA revalida — a mesma armadilha do
+// "plano stale no JWT". Logo trocada hoje só apareceria no próximo login do
+// usuário, que pode ser daqui a semanas. Identidade visual muda; token não.
+//
+// Leve de propósito: 1 SELECT, sem agregado, sem JOIN. Reusa
+// getFederationIdentity (karateCertificateService) — o MESMO SELECT que
+// alimenta os e-mails, para nunca haver duas versões da identidade.
+//
+// guards.read(): qualquer papel da federação enxerga a própria marca. Quem
+// EDITA é adminOnly, em /settings/identity (karateSettings.js).
+//
+// Cache-Control curto: a tela do app pede isto no boot e a cada troca de
+// aba; 5 min corta a maioria das idas ao banco e ainda faz a logo nova
+// aparecer sem o usuário deslogar. `private` porque a resposta é escopada
+// ao usuário autenticado — nunca deve parar em cache compartilhado.
+router.get('/identity', ...guards.read(), async (req, res) => {
+  try {
+    const row = await getFederationIdentity(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Federação não encontrada', code: 'NOT_FOUND' });
+
+    res.set('Cache-Control', 'private, max-age=300');
+    return res.json({
+      id:        row.id,
+      name:      row.name || null,
+      slug:      row.slug || null,
+      logo_url:  row.karate_logo_url || null,
+      email:     row.email || null,
+      whatsapp:  row.wa_phone_display || null,
+    });
+  } catch (err) {
+    console.error('[karateFederation] identity get:', err.message);
+    return res.status(500).json({ error: 'Erro ao ler identidade da federação' });
   }
 });
 

@@ -269,7 +269,8 @@ describe('practitioner_added sem correspondência por CPF (H1/H2)', () => {
     expect(threw).not.toBeNull();
     expect(threw.code).toBe('FPKT_NUMBER_REQUIRED');
     expect(threw.recoverable).toBe(false);
-    expect(threw.message).toMatch(/número de matrícula FPKT/i);
+    expect(threw.message).toMatch(/número de matrícula da federação/i);
+    expect(threw.message).not.toMatch(/FPKT/);
   });
 
   it('não toca customers e nem consulta a guarda (não há ficha sobre a qual perguntar)', async () => {

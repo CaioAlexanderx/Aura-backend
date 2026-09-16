@@ -36,9 +36,10 @@
 // ── ONDE O SENSEI PARA ───────────────────────
 // O teto da graduação feita pelo DOJÔ é o 1º kyu (Marrom 1º kyu).
 // Faixa preta é EXCLUSIVAMENTE banca da federação — e isso não é regra
-// nova nossa: a própria tabela de requisitos da FPKT (seed da migration
-// 150) carrega, no degrau 1kyu → 1dan, a nota "Exame estadual
-// obrigatório com banca designada pela FPKT".
+// nova nossa: a própria tabela de requisitos da federação (seed da
+// migration 150, texto neutralizado na 338) carrega, no degrau
+// 1kyu → 1dan, a nota "Exame estadual obrigatório com banca designada
+// pela federação".
 //
 // ── DUAS ESCALAS, NÃO UMA ─────────────────────
 // karate_belt_history.belt_schema separa 'fpkt_shotokan' (a atual, 10
@@ -159,9 +160,9 @@ const FPKT_LADDER = Object.freeze(
 // Último degrau que o dojô pode conceder. Tudo acima é banca federativa.
 const DOJO_CEILING = Object.freeze({ level: 'marrom', kyu: 1, label: 'Marrom 1º kyu' });
 const DOJO_CEILING_REASON =
-  'Faixa preta é exame de banca da federação (FPKT). A própria tabela de ' +
+  'Faixa preta é exame de banca da federação. A própria tabela de ' +
   'requisitos da federação registra isso no degrau 1kyu → 1dan: "Exame ' +
-  'estadual obrigatório com banca designada pela FPKT".';
+  'estadual obrigatório com banca designada pela federação".';
 
 // ============================================================
 // Normalização

@@ -45,7 +45,9 @@ test('token válido devolve certificate_type dojo + official:false + notice', as
   expect(res.body.certificate_type).toBe('dojo');
   expect(res.body.official).toBe(false);
   expect(res.body.notice).toMatch(/próprio dojô/i);
-  expect(res.body.notice).toMatch(/federação \(fpkt\)/i);
+  expect(res.body.notice).toMatch(/emitido separadamente pela federação/i);
+  // O aviso é lido pelo aluno de QUALQUER federação — não pode nomear uma.
+  expect(res.body.notice).not.toMatch(/FPKT/);
   expect(res.body.dojo_name).toBe('Dojô Kondei');
 });
 

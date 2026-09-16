@@ -165,7 +165,7 @@ router.delete('/practitioners/:practitionerId', ...guards.staffWrite(), async (r
         student_link:
           'O aluno do dojô NÃO foi apagado: ele continua no cadastro do dojô e apenas perdeu o vínculo com ' +
           'este praticante (o campo de vínculo volta a ficar vazio). Se a exclusão foi engano, o sensei ' +
-          'precisará federar o aluno de novo com o número FPKT — nenhum dado do aluno se perdeu.',
+          'precisará federar o aluno de novo com o número de matrícula da federação — nenhum dado do aluno se perdeu.',
       };
 
   // Só entra na resposta de sucesso. 409 HAS_HISTORY / 404 seguem como são.

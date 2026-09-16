@@ -114,7 +114,7 @@ async function issueCard({ federation_id, student_id, issued_by }) {
     // consertar hoje.
     if (!p.karate_registration_number) {
       await client.query('ROLLBACK');
-      const err = new Error('Praticante sem número de matrícula FPKT — carteirinha não pode ser emitida sem matrícula.');
+      const err = new Error('Praticante sem número de matrícula da federação — carteirinha não pode ser emitida sem matrícula.');
       err.code = 'FPKT_NUMBER_REQUIRED';
       throw err;
     }
