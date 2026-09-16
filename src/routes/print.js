@@ -21,6 +21,8 @@ const { requireAuth } = require('../middleware/auth');
 const nuvemfiscal = require('../services/nuvemfiscal');
 const { buildStaticBrCode, validatePixKey } = require('../services/staticPixService');
 const { autoPrintScript } = require('../utils/autoPrintScript');
+// 16/09/2026: cliente de outra loja do mesmo dono tambem vale (utils/customerScope.js).
+const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 const { qrInlineSvg } = require('../utils/qrInline');
 const { buildServiceOrderHtml } = require('../utils/buildServiceOrderHtml');
 
@@ -491,12 +493,8 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
     const company = companyRows[0];
 
     // 2. Dados do cliente
-    const { rows: custRows } = await db.query(
-      `SELECT id, name, phone, cpf_cnpj FROM customers WHERE id = $1 AND company_id = $2`,
-      [customerId, companyId]
-    );
-    if (!custRows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
-    const customer = custRows[0];
+    const customer = await findOwnerScopedCustomer(db, companyId, customerId, 'id, name, phone, cpf_cnpj');
+    if (!customer) return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
 
     // 3. Saldo total em aberto (view customer_credit_balances)
     let totalBalance = 0;
@@ -851,11 +849,8 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
     const tx = txRows[0];
 
     // 3. Cliente
-    const { rows: custRows } = await db.query(
-      `SELECT name, phone, cpf_cnpj FROM customers WHERE id = $1 AND company_id = $2`,
-      [tx.customer_id, companyId]
-    );
-    const customer = custRows[0] || { name: 'Cliente', phone: null, cpf_cnpj: null };
+    const customer = (await findOwnerScopedCustomer(db, companyId, tx.customer_id, 'name, phone, cpf_cnpj'))
+      || { name: 'Cliente', phone: null, cpf_cnpj: null };
 
     // 4. Encargos vinculados (mora/multa) — opcional, defensivo
     let chargesAmount = 0;

@@ -58,7 +58,7 @@ const CID = 'comp-1', CUST = 'cust-1', EMP = 'emp-1', PROD = 'prod-1', SALE = 's
 // reescrever o dispatcher -- e por onde cada teste diz o que ha de diferente
 // nele (funcionario inexistente, venda sem cliente, etc).
 function despachar(over = {}) {
-  mockClient.query.mockImplementation((sql) => {
+  mockClient.query.mockImplementation((sql, params) => {
     const s = String(sql || '');
     for (const [padrao, valor] of Object.entries(over)) {
       if (new RegExp(padrao, 'i').test(s)) return Promise.resolve(valor);
@@ -72,6 +72,8 @@ function despachar(over = {}) {
       return Promise.resolve({ rows: [{ name: 'Corte', cost_price: 10, stock_qty: 50, stock_company_id: CID }] });
     }
     if (/FROM employees WHERE id/i.test(s))   return Promise.resolve({ rows: [{ id: EMP }] });
+    // conferencia do cliente (mesmo dono) -- utils/customerScope.js
+    if (/FROM customers WHERE id/i.test(s))   return Promise.resolve({ rows: [{ id: params[0] }] });
     if (/INSERT INTO sales/i.test(s)) {
       return Promise.resolve({ rows: [{ id: SALE, total_amount: 70, employee_id: EMP, customer_id: CUST }] });
     }
@@ -122,6 +124,25 @@ describe('PDV → Cliente → Funcionário', () => {
       // A venda saiu do estoque e deixou rastro.
       expect(houve(/UPDATE products SET stock_qty/i)).toBe(true);
       expect(houve(/INSERT INTO stock_movements/i)).toBe(true);
+    });
+
+    // 16/09/2026: o customer_id sozinho ia direto pro INSERT, sem conferencia.
+    // Cliente de outra loja do MESMO dono passa (a conferencia usa o dono);
+    // cliente de outro dono (a consulta nao acha) e 404, sem gravar venda.
+    it('confere o cliente pelo dono e recusa cliente de outro dono', async () => {
+      despachar({ 'FROM customers WHERE id': { rows: [] } });
+      db.query.mockResolvedValue({ rows: [] });
+
+      const res = await request(app)
+        .post(`/companies/${CID}/pdv/sale`)
+        .send({ items: [{ product_id: PROD, quantity: 1, unit_price: 70 }], customer_id: 'cust-de-outro-dono', payment_method: 'pix' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe('CUSTOMER_NOT_FOUND');
+      expect(houve(/INSERT INTO sales/i)).toBe(false);
+      // A conferencia e a do dono, com [cliente, loja da URL].
+      expect(paramsDe(/FROM customers WHERE id/i)).toEqual(['cust-de-outro-dono', CID]);
+      expect(sqls().find((s) => /FROM customers WHERE id/i.test(s))).toMatch(/owner_id/);
     });
 
     it('cria venda sem cliente/funcionário (ambos opcionais)', async () => {
