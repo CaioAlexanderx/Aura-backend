@@ -785,7 +785,7 @@ async function planResults({ dojoId, federationId, examId, items }) {
         errors.push({
           student_id: sid,
           code: 'FAIXA_DESCONHECIDA',
-          message: 'Faixa de destino fora da escala oficial da FPKT',
+          message: 'Faixa de destino fora da escala oficial da federação',
         });
         continue;
       }
@@ -802,7 +802,7 @@ async function planResults({ dojoId, federationId, examId, items }) {
         errors.push({
           student_id: sid,
           code: 'FAIXA_DESCONHECIDA',
-          message: 'Faixa de destino fora da escala oficial da FPKT',
+          message: 'Faixa de destino fora da escala oficial da federação',
         });
         continue;
       }
@@ -1189,7 +1189,7 @@ async function requestCertificates({
     if (!a.federated) {
       a.certificate.reason = 'ALUNO_NAO_FEDERADO';
       a.certificate.message =
-        'Certificado é emitido pela federação para um PRATICANTE. Este aluno não tem vínculo federativo confirmado — federe-o (número FPKT) e peça o certificado pela fila de aptos.';
+        'Certificado é emitido pela federação para um PRATICANTE. Este aluno não tem vínculo federativo confirmado — federe-o (número de matrícula) e peça o certificado pela fila de aptos.';
       continue;
     }
     if (!a.belt_history_id) {

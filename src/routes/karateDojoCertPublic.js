@@ -57,7 +57,7 @@ router.get('/verify/dojo-cert/:token', async (req, res) => {
       certificate_type: 'dojo',
       official: false,
       notice:
-        'Este é o certificado emitido pelo PRÓPRIO DOJÔ — documento interno, sem valor oficial junto à federação. O certificado OFICIAL de graduação é emitido separadamente pela federação (FPKT).',
+        'Este é o certificado emitido pelo PRÓPRIO DOJÔ — documento interno, sem valor oficial junto à federação. O certificado OFICIAL de graduação é emitido separadamente pela federação.',
       issued_at: row.issued_at,
       dojo_name: row.dojo_name,
       data: row.data_snapshot,

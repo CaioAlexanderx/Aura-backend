@@ -1,0 +1,22 @@
+-- ============================================================
+-- 343 — a devolução do crediário registra o que abateu
+--
+-- Cancelar uma devolução (sales.type = 'devolucao') não desfazia nada:
+-- o item devolvido ficava no estoque, o crédito 'refund' ficava no
+-- ledger e as parcelas/A Receber abatidos não voltavam. Ao mesmo tempo a
+-- guarda anti-dupla-devolução ignora devolução cancelada, então a mesma
+-- peça podia ser devolvida de novo. Caso MHT / Karina Quadros
+-- (16/09/2026): duas devoluções canceladas deixaram R$ 240 de crédito
+-- fantasma e 2 tênis a mais no estoque.
+--
+-- Para desfazer sem adivinhar, a devolução passa a guardar o estado
+-- ANTERIOR de cada parcela e de cada A Receber que ela tocou:
+--   { "installments": [{ id, prev_status, prev_amount_due, prev_covered,
+--                         new_status, new_amount_due }],
+--     "receivables":  [{ id, key, cut, prev_amount, action }] }
+--
+-- Devolução antiga (coluna NULL) que mexeu em parcela não é restaurada
+-- por palpite: o cancelamento é recusado com aviso.
+-- ============================================================
+
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS refund_abatement JSONB;

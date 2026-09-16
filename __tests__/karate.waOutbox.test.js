@@ -103,6 +103,11 @@ describe('processBatch', () => {
       if (s.includes('-- wa:outbox-pick')) return Promise.resolve({ rows: [row] });
       if (s.includes('-- wa:creds')) return Promise.resolve({ rows: creds ? [creds] : [] });
       if (s.includes('-- wa:contact-get')) return Promise.resolve({ rows: contact ? [contact] : [] });
+      // Reforço 2b (Fase 2): sem isto, todo item chegaria "não aprovado"
+      // e nenhum destes testes de ENVIO (que datam da Fase 1) chegaria
+      // a chamar a Meta — o item já está na fila, então já passou pelo
+      // enqueue que aprova o template.
+      if (s.includes('-- wa:guard-template')) return Promise.resolve({ rows: [{ status: 'APPROVED' }] });
       if (/UPDATE wa_outbox/i.test(s)) { updates.push({ s, params }); return Promise.resolve({ rows: [] }); }
       if (/INSERT INTO wa_messages/i.test(s)) return Promise.resolve({ rows: [] });
       return Promise.resolve({ rows: [] });

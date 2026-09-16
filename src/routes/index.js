@@ -50,6 +50,9 @@ router.use('/admin', require('./adminClients360'));
 router.use('/admin', require('./adminRevenue'));
 router.use('/admin', require('./adminOps'));
 router.use('/admin', require('./adminGrowth'));
+// Adicionais por empresa (migration 328): hoje só 'whatsapp_auto'
+// (R$39/mês). O gate do envio automático lê company_addons, não o plano.
+router.use('/admin', require('./adminAddons'));
 // Endomarketing banners (13/06/2026): CRUD admin de banners de notificação
 router.use('/admin', require('./adminNotifications'));
 router.use('/admin/leads', require('./adminLeads'));
@@ -348,9 +351,19 @@ router.use('/federation/:id/financial', require('./karateOpenItems'));
 router.use('/federation/:id/financial', require('./karateFinanceAuditRead'));
 
 // ── AURA KARATÊ — Track C (backend exames + cursos) ─────
+// CURSO VIVE EM karate_belt_exams (exam_type='curso'), servido por
+// karateExams.js sob /belt-exams — migration 212 declara essa a tabela
+// canônica de evento (exame + curso + seminário). karate_events (160) é o
+// caminho LEGADO: 0 linhas em prod, só leitura na agenda pública e nos
+// services; ninguém mais escreve nela.
+//
+// karateCourses.js (/courses) foi REMOVIDO em 16/09/2026: validava
+// event_type IN ('course','seminar','training'), valores que o CHECK da
+// migration 160 (oficial|chancelado|nacional) nunca aceitou — todo POST
+// estourava 23514 e o GET filtrava por valores ingravaveis, devolvendo
+// sempre vazio. A rota nunca funcionou e nenhuma tela do app a chamava.
 router.use('/federation/:id', require('./karateRequirements'));
 router.use('/federation/:id', require('./karateExams'));
-router.use('/federation/:id', require('./karateCourses'));
 
 // ── AURA KARATÊ — Track J (certificados: fluxo de pedido) ─────
 // Substitui o fluxo Track C de emissão sob demanda.

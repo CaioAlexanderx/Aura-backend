@@ -52,6 +52,35 @@ async function _hasReferenceCols() {
   return _refColsCache;
 }
 
+// --- Distribuicao do pagamento entre parcelas (15/09/2026) ---------------
+//
+// applyPayment sempre calculou quais parcelas cada pagamento cobriu, mas so
+// devolvia a lista para a tela. O recibo impresso depois (Historico) nao tinha
+// de onde tirar as parcelas. credit_payment_allocations (migration 335) guarda
+// essa distribuicao.
+//
+// O INSERT roda DENTRO da transacao do pagamento: um 42P01 ali abortaria o
+// recebimento inteiro. Sondamos fora dela. "Presente" fica em cache para
+// sempre; "ausente" so por 60 s, para a migration aplicada com o backend no ar
+// entrar sem restart.
+let _allocTableCache = null;
+let _allocTableCheckedAt = 0;
+async function _hasAllocationsTable() {
+  if (_allocTableCache === true) return true;
+  if (_allocTableCache === false && Date.now() - _allocTableCheckedAt < 60000) return false;
+  try {
+    const r = await pool.query(
+      `SELECT to_regclass('public.credit_payment_allocations') IS NOT NULL AS ok`
+    );
+    _allocTableCache = !!(r && r.rows && r.rows[0] && r.rows[0].ok);
+  } catch (e) {
+    console.warn('[credit/ledger] probe de credit_payment_allocations falhou (segue sem gravar):', e && e.message);
+    _allocTableCache = false;
+  }
+  _allocTableCheckedAt = Date.now();
+  return _allocTableCache;
+}
+
 async function _getOrCreateProfile(client, companyId, customerId) {
   try {
     const r = await client.query(
@@ -365,6 +394,27 @@ async function createCreditSale(client, {
 // encomenda mais antiga do mesmo cliente -- o card clicado continuaria em
 // aberto e o outro sumiria sozinho. Sem o parametro nada muda: o FIFO segue
 // global por cliente, ou por carne quando accountId manda.
+// Funde principal (covered_installments) e encargos (charges_detail) numa linha
+// por parcela, na ordem em que o FIFO as tocou. Pura -- testada sem banco.
+function buildPaymentAllocations(covered = [], chargesDetail = []) {
+  const byInst = new Map();
+  const touch = (id) => {
+    const k = String(id);
+    if (!byInst.has(k)) byInst.set(k, { installment_id: id, principal_paid: 0, charges_paid: 0, status_after: null });
+    return byInst.get(k);
+  };
+  for (const d of chargesDetail) {
+    const a = touch(d.installment_id);
+    a.charges_paid = round2(a.charges_paid + (Number(d.late_fee) || 0) + (Number(d.late_interest) || 0));
+  }
+  for (const c of covered) {
+    const a = touch(c.id);
+    a.principal_paid = round2(a.principal_paid + (Number(c.covered) || 0));
+    a.status_after = c.status || null;
+  }
+  return [...byInst.values()].filter(a => a.principal_paid > 0.005 || a.charges_paid > 0.005);
+}
+
 async function applyPayment(client, {
   companyId, customerId, amount, method = null,
   sessaoId = null, createdBy = null, idempotencyKey = null,
@@ -471,9 +521,11 @@ async function applyPayment(client, {
     if (_whoCache !== undefined) return _whoCache;
     let nm = null;
     try {
+      // O cliente pode ser de outra loja do mesmo dono (16/09/2026) --
+      // o id ja e unico, a trava de empresa so escondia o nome.
       const { rows: _cn } = await client.query(
-        `SELECT name FROM customers WHERE id = $1 AND company_id = $2`,
-        [customerId, companyId]
+        `SELECT name FROM customers WHERE id = $1`,
+        [customerId]
       );
       nm = _cn[0]?.name || null;
     } catch (_) {}
@@ -865,6 +917,29 @@ async function applyPayment(client, {
     [customerId, companyId]
   );
 
+  // Distribuicao por parcela (principal + encargos) para o recibo. Fica DEPOIS
+  // do saldo de proposito: nao muda a ordem das queries acima. Um INSERT so,
+  // com unnest -- cada ida ao banco custa ~190 ms (latencia cross-region).
+  const allocations = buildPaymentAllocations(coveredInstallments, chargesDetail);
+  if (allocations.length > 0 && txRow && txRow.id && await _hasAllocationsTable()) {
+    await client.query(
+      `INSERT INTO credit_payment_allocations
+         (company_id, transaction_id, installment_id, principal_paid, charges_paid, status_after)
+       SELECT $1, $2, x.installment_id, x.principal_paid, x.charges_paid, x.status_after
+         FROM unnest($3::uuid[], $4::numeric[], $5::numeric[], $6::text[])
+              AS x(installment_id, principal_paid, charges_paid, status_after)
+       ON CONFLICT (transaction_id, installment_id) DO NOTHING`,
+      [
+        companyId,
+        txRow.id,
+        allocations.map(a => a.installment_id),
+        allocations.map(a => a.principal_paid),
+        allocations.map(a => a.charges_paid),
+        allocations.map(a => a.status_after),
+      ]
+    );
+  }
+
   return {
     new_balance:          parseFloat(balRows[0]?.balance || 0),
     settled_receivables:  settledReceivables,
@@ -1135,11 +1210,13 @@ async function applyUnify(client, {
 }
 
 module.exports = {
+  _hasReferenceCols,
   _getOrCreateProfile,
   _getOrCreatePlanConfig,
   _updateCreditUsed,
   createCreditSale,
   applyPayment,
+  buildPaymentAllocations,
   cancelCreditSale,
   getCustomerCreditPreview,
   applyUnify,

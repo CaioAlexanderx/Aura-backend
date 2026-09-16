@@ -129,10 +129,11 @@ function buildMessage(template, params = {}) {
 // Carrega a parcela + cliente + loja. Escopo por empresa sempre.
 async function loadInstallment(client, companyId, installmentId) {
   const { rows } = await client.query(
-    `SELECT ci.*, COALESCE(c.name, c.phone) AS customer_name, c.phone,
+    `-- cred:trigger-parcela
+     SELECT ci.*, COALESCE(c.name, c.phone) AS customer_name, c.phone,
             COALESCE(co.trade_name, co.legal_name) AS store_name
        FROM credit_installments ci
-       LEFT JOIN customers c ON c.id = ci.customer_id AND c.company_id = ci.company_id
+       LEFT JOIN customers c ON c.id = ci.customer_id
        LEFT JOIN companies co ON co.id = ci.company_id
       WHERE ci.id = $1 AND ci.company_id = $2`,
     [installmentId, companyId]
@@ -140,22 +141,35 @@ async function loadInstallment(client, companyId, installmentId) {
   return rows[0] || null;
 }
 
-// Monta o aviso (mensagem + Pix) e registra o evento de cobranca.
-// `client` vem do caller pra participar da transacao dele.
-async function buildNotice(client, { companyId, installmentId, template = 'atraso_1', channel = 'whatsapp', row = null }) {
-  const inst = row || await loadInstallment(client, companyId, installmentId);
+// ── composeNotice: o aviso SEM efeito colateral (Fase 6) ─────────────
+// Mesmo miolo do buildNotice (mensagem + Pix copia-e-cola + valores),
+// mas sem gravar evento nem mexer em collection_stage. Foi extraido
+// porque a regua AUTOMATICA do crediario (services/credit/collectionAuto)
+// precisa dos MESMOS numeros para montar os parametros do template da
+// Meta -- e la o evento so pode ser gravado se a fila ACEITAR o item.
+// Recalcular isso num segundo lugar era garantia de as duas pistas
+// divergirem no primeiro ajuste de encargo.
+//
+// `today` existe para a regua: os dias de atraso precisam ser contados
+// a partir da data que a regua esta processando, nao do relogio. Sem
+// `today` o comportamento e exatamente o de antes (Date.now()).
+async function composeNotice({ companyId, template = 'atraso_1', row, today = null }) {
+  const inst = row;
   if (!inst) return null;
 
-  const daysLate = Math.floor((Date.now() - new Date(inst.due_date)) / 86400000);
+  const ref = today ? new Date(`${today}T12:00:00Z`).getTime() : Date.now();
+  const daysLate = Math.floor((ref - new Date(inst.due_date)) / 86400000);
 
   // Pix copia-e-cola real (defensivo: qualquer falha => sem Pix, nunca erro).
   let pixCopiaECola = '';
+  let remaining = null;
+  let totalDue = null;
   try {
     const { config, profile } = await loadLateContext(companyId, inst.customer_id);
     const terms = creditLedger.resolveTerms(profile, config);
-    const remaining = parseFloat((parseFloat(inst.amount_due) - parseFloat(inst.covered_amount || 0)).toFixed(2));
+    remaining = parseFloat((parseFloat(inst.amount_due) - parseFloat(inst.covered_amount || 0)).toFixed(2));
     const lc = creditLedger.computeLateCharges(inst, terms, config);
-    const totalDue = parseFloat((remaining + lc.charges_total).toFixed(2));
+    totalDue = parseFloat((remaining + lc.charges_total).toFixed(2));
     const pix = await resolvePixSetup(companyId);
     if (pix && totalDue > 0) {
       pixCopiaECola = buildStaticBrCode({
@@ -168,17 +182,52 @@ async function buildNotice(client, { companyId, installmentId, template = 'atras
     }
   } catch (_) { pixCopiaECola = ''; }
 
+  const amount = parseFloat(inst.amount_due).toFixed(2).replace('.', ',');
+  const dueDateBR = new Date(inst.due_date).toLocaleDateString('pt-BR');
+
   const message = buildMessage(template, {
     customerName:      inst.customer_name,
     storeName:         inst.store_name || 'Loja',
-    amount:            parseFloat(inst.amount_due).toFixed(2).replace('.', ','),
-    dueDate:           new Date(inst.due_date).toLocaleDateString('pt-BR'),
+    amount,
+    dueDate:           dueDateBR,
     installmentNum:    inst.installment_number,
     totalInstallments: inst.total_installments,
     pixLink:           pixCopiaECola || inst.pix_link || '',
     daysLate:          String(Math.max(0, daysLate)),
     daysLateNum:       daysLate,
   });
+
+  return {
+    installment_id:    inst.id,
+    template,
+    message,
+    pix_copia_cola:    pixCopiaECola || null,
+    // O legado da parcela ainda serve de Pix quando nao ha EMV novo --
+    // e o que o texto da mensagem ja usava.
+    pix_text:          pixCopiaECola || inst.pix_link || null,
+    phone:             inst.phone,
+    days_late:         Math.max(0, daysLate),
+    days_late_signed:  daysLate,
+    customer_name:     inst.customer_name || null,
+    store_name:        inst.store_name || 'Loja',
+    amount_br:         `R$ ${amount}`,
+    due_date_br:       dueDateBR,
+    installment_label: `${inst.installment_number}/${inst.total_installments}`,
+    remaining,
+    total_due:         totalDue,
+  };
+}
+
+// Monta o aviso (mensagem + Pix) e registra o evento de cobranca.
+// `client` vem do caller pra participar da transacao dele.
+async function buildNotice(client, { companyId, installmentId, template = 'atraso_1', channel = 'whatsapp', row = null }) {
+  const inst = row || await loadInstallment(client, companyId, installmentId);
+  if (!inst) return null;
+
+  const composed = await composeNotice({ companyId, template, row: inst });
+  const daysLate = composed.days_late_signed;
+  const message = composed.message;
+  const pixCopiaECola = composed.pix_copia_cola || '';
 
   try {
     await client.query(
@@ -209,5 +258,6 @@ module.exports = {
   loadLateContext,
   buildMessage,
   loadInstallment,
+  composeNotice,
   buildNotice,
 };

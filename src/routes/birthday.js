@@ -13,6 +13,10 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
+// FASE 8: o mesmo parabéns, agora também pela Cloud API (paga). O fluxo
+// manual (create-coupon + wa.me + send-log) continua idêntico.
+const mkt          = require('../services/marketing/marketingCommon');
+const birthdayAuto = require('../services/marketing/birthdayAuto');
 
 // ── helpers ────────────────────────────────────────────────
 const DEFAULTS_FALLBACK = {
@@ -53,12 +57,20 @@ router.get('/settings', async (req, res) => {
     const defaults = { ...DEFAULTS_FALLBACK, ...(rows[0].birthday_coupon_defaults || {}) };
     const template = rows[0].birthday_message_template || TEMPLATE_FALLBACK;
 
+    // O PUT grava wa_birthday_auto e wa_marketing_consent, mas o GET não
+    // devolvia nenhum dos dois: ao reabrir a tela, o interruptor da rotina
+    // aparecia desligado mesmo com o job ligado. Consulta à parte e
+    // 42703-safe (331 pendente = tudo desligado), como no loadMarketingSettings.
+    const marketing = await mkt.loadMarketingSettings(req.params.id);
+
     res.json({
       defaults,
       template,
       // Flag pro front saber se já foi configurado uma vez
       configured: !!rows[0].birthday_message_template ||
                   Object.keys(rows[0].birthday_coupon_defaults || {}).length > 0,
+      wa_birthday_auto: marketing.wa_birthday_auto,
+      wa_marketing_consent_at: marketing.wa_marketing_consent_at,
     });
   } catch (err) {
     console.error('[birthday] settings get:', err.message);
@@ -70,6 +82,41 @@ router.get('/settings', async (req, res) => {
 router.put('/settings', requireOwnerOrAdmin, async (req, res) => {
   const { defaults, template } = req.body || {};
   const updates = []; const values = []; let idx = 1;
+
+  // ── FASE 8: interruptor do automático + consentimento de marketing ──
+  // Ligar o automático passa pelos quatro portões (plano/adicional,
+  // número conectado, template aprovado, consentimento declarado);
+  // desligar é sempre livre. O consentimento é gravado ANTES do gate
+  // quando vem no mesmo PUT — é o próprio ato de declarar, e o gate
+  // seguinte já enxerga a declaração nova.
+  const querAuto = req.body.wa_birthday_auto === true || req.body.wa_birthday_auto === 'true';
+  if (req.body.wa_marketing_consent !== undefined) {
+    const consent = req.body.wa_marketing_consent === true || req.body.wa_marketing_consent === 'true';
+    const ok = await mkt.setMarketingConsent(req.params.id, consent);
+    if (!ok) {
+      return res.status(503).json({
+        error: 'O envio automático de aniversário ainda não está disponível neste ambiente (migração 331 pendente).',
+        code: 'SCHEMA_PENDING',
+      });
+    }
+  }
+  if (req.body.wa_birthday_auto !== undefined) {
+    if (querAuto) {
+      const gate = await mkt.marketingGate(req.params.id, mkt.TEMPLATE_ANIVERSARIO);
+      if (!gate.ok) return res.status(gate.status).json({ error: gate.error, code: gate.code });
+    }
+    const ok = await mkt.setAutoFlag(req.params.id, 'wa_birthday_auto', querAuto);
+    if (!ok) {
+      return res.status(503).json({
+        error: 'O envio automático de aniversário ainda não está disponível neste ambiente (migração 331 pendente).',
+        code: 'SCHEMA_PENDING',
+      });
+    }
+    // Só o interruptor no corpo: nada a fazer nas colunas antigas.
+    if (defaults === undefined && template === undefined) {
+      return res.json({ ok: true, wa_birthday_auto: querAuto });
+    }
+  }
 
   if (defaults !== undefined) {
     // Sanitização: só aceita chaves conhecidas
@@ -96,7 +143,15 @@ router.put('/settings', requireOwnerOrAdmin, async (req, res) => {
     values.push(template);
   }
 
-  if (!updates.length) return res.status(400).json({ error: 'Nada para atualizar' });
+  if (!updates.length) {
+    // PUT só com o consentimento (sem defaults nem template) é um salvar
+    // legítimo — a declaração já foi gravada acima.
+    if (req.body.wa_marketing_consent !== undefined) {
+      const settings = await mkt.loadMarketingSettings(req.params.id);
+      return res.json({ ok: true, wa_marketing_consent_at: settings.wa_marketing_consent_at });
+    }
+    return res.status(400).json({ error: 'Nada para atualizar' });
+  }
 
   try {
     values.push(req.params.id);
@@ -254,7 +309,77 @@ router.get('/sent-this-year', async (req, res) => {
   }
 });
 
+// ── POST /send-whatsapp ────────────────────────────────────
+// Body: { customer_id, coupon_id? }
+// Envia o parabéns pela Cloud API (MARKETING, pago). Cria o cupom se ele
+// não veio — a tela pode ter criado antes (create-coupon) ou não.
+//
+// Nunca lança por causa de guarda: `queued:false` + `reason` é resposta
+// normal, porque "não mandei porque este cliente já recebeu este ano" é
+// exatamente o que a tela precisa mostrar.
+router.post('/send-whatsapp', requireOwnerOrAdmin, async (req, res) => {
+  const { customer_id, coupon_id } = req.body || {};
+  if (!customer_id) return res.status(400).json({ error: 'customer_id obrigatório' });
+
+  try {
+    const gate = await mkt.marketingGate(req.params.id, mkt.TEMPLATE_ANIVERSARIO);
+    if (!gate.ok) return res.status(gate.status).json({ error: gate.error, code: gate.code });
+
+    const r = await birthdayAuto.sendForCustomer(req.params.id, {
+      customerId: customer_id,
+      couponId: coupon_id || null,
+      userId: (req.user && req.user.id) || null,
+    });
+    if (r.status === 404) return res.status(404).json({ error: 'Cliente não encontrado' });
+
+    res.json({
+      queued: !!r.queued,
+      outbox_id: r.outbox_id || null,
+      reason: r.reason || null,
+      coupon: r.coupon || null,
+    });
+  } catch (err) {
+    console.error('[birthday] send-whatsapp:', err.message);
+    res.status(500).json({ error: 'Erro ao enviar a mensagem de aniversário' });
+  }
+});
+
+// ── GET /preview ───────────────────────────────────────────
+// Quem receberia HOJE pela pista automática, sem enfileirar nada.
+router.get('/preview', async (req, res) => {
+  try {
+    const r = await birthdayAuto.runForCompany(req.params.id, {
+      today: req.query.date ? String(req.query.date).trim() : null,
+      dryRun: true,
+    });
+    res.json({
+      source: 'aniversario',
+      template_name: mkt.TEMPLATE_ANIVERSARIO,
+      would_send: r.enqueued || 0,
+      skipped: r.skipped || {},
+      skipped_reason: r.skipped_reason || null,
+      items: (r.items || []).map((it) => ({
+        customer_id: it.customer_id,
+        customer_name: it.customer_name,
+        phone_masked: maskPhone(it.phone),
+        reason: it.reason,
+      })),
+    });
+  } catch (err) {
+    console.error('[birthday] preview:', err.message);
+    res.status(500).json({ error: 'Erro ao montar a prévia de aniversário' });
+  }
+});
+
 // ── helpers internos ───────────────────────────────────────
+// Prévia é sobre CONTAGEM: o telefone do cliente aparece mascarado.
+function maskPhone(p) {
+  const d = String(p || '').replace(/\D/g, '');
+  if (!d) return null;
+  if (d.length <= 4) return `***${d}`;
+  return `***${d.slice(-4)}`;
+}
+
 function generateBirthdayCode(customerName, attempt = 0) {
   const raw = String(customerName || 'CLIENTE')
     .trim()

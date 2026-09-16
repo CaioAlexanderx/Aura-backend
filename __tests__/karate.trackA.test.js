@@ -210,29 +210,37 @@ describe('POST /federation/:id/dojos (criar dojô)', () => {
     const mockClient = { query: jest.fn(), release: jest.fn() };
     db.connect.mockResolvedValue(mockClient);
 
-    mockClient.query
-      .mockResolvedValueOnce({})                          // BEGIN
-      .mockResolvedValueOnce({ rows: [{ id: FED_ID }] }) // verifica federação
-      .mockResolvedValueOnce({ rows: [{ owner_id: 'sys-owner-uuid' }] }) // resolve owner de sistema (reusa dono de dojô existente)
-      .mockResolvedValueOnce({ rows: [] })               // advisory lock
-      .mockResolvedValueOnce({ rows: [] })               // MAX fpkt_affiliation_id (nenhum)
-      .mockResolvedValueOnce({                            // INSERT company
-        rows: [{
-          id: 'dojo-uuid-001',
-          name: 'Dojô São Paulo',
-          cnpj: null,
-          region: 'Capital',
-          fpkt_affiliation_id: 'FPKT-001',
-          affiliation_model: 'annual',
-          affiliation_since: '2025-01-01',
-          dojo_founded_year: null,
-          address: null,
-          phone: null,
-          email: null,
-          is_active: true,
-        }],
-      })
-      .mockResolvedValueOnce({});                    // COMMIT
+    const dojoRow = {
+      id: 'dojo-uuid-001',
+      name: 'Dojô São Paulo',
+      cnpj: null,
+      region: 'Capital',
+      fpkt_affiliation_id: 'FPKT-001',
+      affiliation_model: 'annual',
+      affiliation_since: '2025-01-01',
+      dojo_founded_year: null,
+      address: null,
+      phone: null,
+      email: null,
+      is_active: true,
+    };
+
+    mockClient.query.mockImplementation(function(sql) {
+      const s = String(sql);
+      if (/^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(s)) return Promise.resolve({ rows: [] });
+      if (/pg_advisory_xact_lock/.test(s)) return Promise.resolve({ rows: [] });
+      // Prefixo declarado da federação (migration 337). 'FPKT' aqui porque
+      // ESTA federação de teste é a incumbente — é o que trava a não-regressão.
+      if (/karate_affiliation_prefix/.test(s)) {
+        return Promise.resolve({ rows: [{ prefix: 'FPKT', slug: 'fpkt', name: 'FPKT' }] });
+      }
+      if (/INSERT INTO companies/i.test(s)) return Promise.resolve({ rows: [dojoRow] });
+      // Último fpkt_affiliation_id emitido: nenhum (federação sem dojô).
+      if (/fpkt_affiliation_id/.test(s) && /karate_dojo/.test(s)) return Promise.resolve({ rows: [] });
+      // Owner de sistema (reusa dono de dojô existente) / verificação da federação.
+      if (/owner_id/.test(s)) return Promise.resolve({ rows: [{ owner_id: 'sys-owner-uuid' }] });
+      return Promise.resolve({ rows: [{ id: FED_ID }] });
+    });
   });
 
   it('cria dojo e retorna FPKT-NNN no formato correto', function(done) {

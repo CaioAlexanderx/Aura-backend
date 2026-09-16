@@ -6,19 +6,87 @@
 
 const db = require('../config/database');
 
-// ── Geração de FPKT-NNN (dojô) ─────────────────────────────
-// Formato: FPKT-NNN  (3 dígitos com zero-padding, ex: FPKT-014)
-// Estratégia: dentro de uma transação já aberta, faz SELECT FOR UPDATE no MAX
-// existente para a federação, incrementa e retorna.
+// ── Geração do código de filiação do dojô (PREFIXO-NNN) ────────────
+// Formato: PREFIXO-NNN  (3 dígitos com zero-padding, ex.: FPKT-014).
+//
+// ⚠️ 16/09/2026 — O PREFIXO NÃO É MAIS HARDCODED. Até aqui esta função
+// devolvia `FPKT-NNN` para QUALQUER federação: ao criar a segunda federação
+// (JKA Teste) os 10 dojôs dela nasceram FPKT-001..FPKT-010, com o código de
+// uma federação carimbado na outra. Diretriz do Caio: nenhuma identidade de
+// federação escrita no código — tudo deriva do registro em `companies`.
+//
+// Ordem de resolução (a primeira que responder ganha):
+//   1. companies.karate_affiliation_prefix (migration 337) — o dado
+//      declarado, editável em PUT /federation/:id/settings/identity.
+//   2. O prefixo que os PRÓPRIOS dojôs da federação já usam. É o que
+//      garante que NADA muda para quem já está numerado: mesmo com a coluna
+//      ausente (42703, deploy parcial) ou vazia, a federação incumbente
+//      continua FPKT-NNN porque os dojôs dela dizem FPKT.
+//   3. Federação nova, sem dojô e sem prefixo: deriva do slug (primeiro
+//      segmento) ou das iniciais do nome. Último recurso: 'FED' — genérico
+//      de propósito, nunca o nome de uma federação existente.
+//
+// Estratégia de concorrência: dentro de uma transação já aberta, advisory
+// lock por federação + MAX existente, incrementa e retorna.
 // Chame DENTRO de um client de transação para garantir atomicidade.
-async function nextDojoAffiliationId(client, federationId) {
-  // Trava em nível de linha usando advisory lock por federação
-  // hashtext(federationId) garante um lock numérico único por UUID
-  await client.query(
-    `SELECT pg_advisory_xact_lock(hashtext($1::text))`,
-    [federationId]
-  );
 
+// 'FPKT-014' -> 'FPKT'. Sem o `-NNN` final não há prefixo a extrair.
+function affiliationPrefixOf(affiliationId) {
+  const m = String(affiliationId || '').match(/^(.+)-\d+$/);
+  return m ? m[1] : null;
+}
+
+// Normaliza o que veio do banco (ou do slug/nome) num prefixo utilizável:
+// maiúsculas, só A-Z/0-9, no máximo 12 caracteres. Devolve null se sobrar
+// nada — o caller decide o próximo passo da cadeia.
+function normalizeAffiliationPrefix(raw) {
+  const clean = String(raw || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 12);
+  return clean || null;
+}
+
+// Fallback para federação NOVA (sem prefixo declarado e sem nenhum dojô
+// numerado). Slug 'jka-teste' -> 'JKA' (primeiro segmento, que é como
+// federação se identifica); sem slug, as iniciais do nome
+// ('Federação Paulista de Karatê Tradicional' -> 'FPKT').
+function derivePrefixFromIdentity({ slug, name }) {
+  const fromSlug = normalizeAffiliationPrefix(String(slug || '').split(/[-_]/)[0]);
+  if (fromSlug) return fromSlug;
+
+  const initials = String(name || '')
+    .split(/\s+/)
+    .filter((w) => w.length > 2) // ignora "de", "do", "da", "e"
+    .map((w) => w[0])
+    .join('');
+  return normalizeAffiliationPrefix(initials);
+}
+
+// Lê o prefixo declarado da federação. Defensivo a 42703: a coluna nasce na
+// migration 337 e o backend sobe antes dela ser aplicada.
+async function readDeclaredPrefix(client, federationId) {
+  try {
+    const { rows } = await client.query(
+      `SELECT karate_affiliation_prefix AS prefix, slug, name
+         FROM companies WHERE id = $1 LIMIT 1`,
+      [federationId]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    if (e.code !== '42703') throw e;
+    const { rows } = await client.query(
+      `SELECT NULL::text AS prefix, slug, name
+         FROM companies WHERE id = $1 LIMIT 1`,
+      [federationId]
+    );
+    return rows[0] || null;
+  }
+}
+
+// Último código de filiação emitido pela federação (o maior). Serve para
+// DUAS coisas: o próximo número e o prefixo já em uso.
+async function lastAffiliationId(client, federationId) {
   const { rows } = await client.query(
     `SELECT fpkt_affiliation_id
      FROM companies
@@ -27,15 +95,48 @@ async function nextDojoAffiliationId(client, federationId) {
      LIMIT 1`,
     [federationId]
   );
+  return (rows[0] && rows[0].fpkt_affiliation_id) || null;
+}
+
+// O PREFIXO da federação, resolvido pela cadeia descrita acima. Exportada
+// porque o gerador (nextDojoAffiliationId) não é o único a montar um código
+// de filiação: o import legado em massa (src/routes/karateImport.js) monta o
+// dele a partir da coluna "cod" da planilha e tinha o MESMO 'FPKT-' cravado.
+// Dois lugares montando o código, um só lugar decidindo o prefixo.
+//
+// [lastId] é opcional e existe só para não repetir a consulta quando quem
+// chama já a fez (cada ida ao banco custa ~190 ms cross-region).
+async function resolveAffiliationPrefix(client, federationId, lastId) {
+  const ultimo = lastId !== undefined ? lastId : await lastAffiliationId(client, federationId);
+  const prefixEmUso = normalizeAffiliationPrefix(affiliationPrefixOf(ultimo));
+  const fed = await readDeclaredPrefix(client, federationId);
+  return (
+    normalizeAffiliationPrefix(fed && fed.prefix) ||
+    prefixEmUso ||
+    derivePrefixFromIdentity(fed || {}) ||
+    'FED'
+  );
+}
+
+async function nextDojoAffiliationId(client, federationId) {
+  // Trava em nível de linha usando advisory lock por federação
+  // hashtext(federationId) garante um lock numérico único por UUID
+  await client.query(
+    `SELECT pg_advisory_xact_lock(hashtext($1::text))`,
+    [federationId]
+  );
+
+  const ultimo = await lastAffiliationId(client, federationId);
 
   let nextNum = 1;
-  if (rows.length > 0 && rows[0].fpkt_affiliation_id) {
-    // Extrai o número do formato FPKT-NNN
-    const match = rows[0].fpkt_affiliation_id.match(/(\d+)$/);
+  if (ultimo) {
+    // Extrai o número do formato PREFIXO-NNN
+    const match = ultimo.match(/(\d+)$/);
     if (match) nextNum = parseInt(match[1], 10) + 1;
   }
 
-  return `FPKT-${String(nextNum).padStart(3, '0')}`;
+  const prefix = await resolveAffiliationPrefix(client, federationId, ultimo);
+  return `${prefix}-${String(nextNum).padStart(3, '0')}`;
 }
 
 // (14/07/2026 — H2) nextPractitionerRegistrationNumber FOI REMOVIDA daqui.
@@ -170,6 +271,12 @@ function parseDate(value) {
 
 module.exports = {
   nextDojoAffiliationId,
+  resolveAffiliationPrefix,
+  // Exportados para teste e para quem precise mostrar/validar o prefixo
+  // sem duplicar a cadeia de resolução (ver nextDojoAffiliationId).
+  affiliationPrefixOf,
+  normalizeAffiliationPrefix,
+  derivePrefixFromIdentity,
   computeDojoStatus,
   parseCSVLine,
   suggestPractitionerMapping,

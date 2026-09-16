@@ -26,9 +26,15 @@ types.setTypeParser(1700, (val) => (val === null ? null : parseFloat(val)));
 //   chamada de rede externa — SEFAZ — antes de liberar o client) esgotava o
 //   pool e TRAVAVA o app todo (incidente 23/06). 15 da folga ampla e segue
 //   bem abaixo de max_connections=60 do Postgres.
-// idleTimeoutMillis: 60000  →  conexao ociosa volta pro servidor depois de 60s.
-//   ANTES era 30s; subido p/ dar margem ao keep-alive (abaixo) e evitar reciclar
-//   conexao quente entre rajadas.
+// idleTimeoutMillis: 600000  →  conexao ociosa volta pro servidor depois de 10min.
+//   ANTES era 60s (e antes disso 30s). Lentidao do Studio (QA 04/09/2026): o
+//   keep-alive abaixo so mantem UMA conexao quente; as outras 14 morriam depois
+//   de 60s paradas, e a proxima tela do painel (Financeiro dispara 7 requests
+//   em paralelo, insights abre mais 14 consultas) pagava um cold connect
+//   cross-region (~1,3s) em quase todas. Medido no painel da Aura QA: a mesma
+//   rajada de 7 requests levou 1,2s com o pool quente e 2,7s depois de 70s de
+//   ociosidade. Quem paga a conexao parada e o Supavisor (lado cliente), nao o
+//   Postgres — as 15 continuam bem abaixo de max_connections=60.
 // connectionTimeoutMillis: 5000  →  se nao houver client livre em 5s, rejeita
 //   (em vez de pendurar pra sempre).
 // keepAlive: true  →  previne que conexões idle sejam derrubadas silenciosamente
@@ -39,7 +45,7 @@ const pool = new Pool({
   connectionString,
   ssl: { rejectUnauthorized: false },
   max: 15,
-  idleTimeoutMillis: 60000,
+  idleTimeoutMillis: 600000,
   connectionTimeoutMillis: 5000,
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,

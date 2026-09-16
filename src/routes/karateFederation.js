@@ -1,6 +1,7 @@
 // ============================================================
 // AURA KARATÊ — Rotas da Federação (Track A + Track P)
 // POST /karate/federation/setup
+// GET  /federation/:id/identity          (identidade visual — nome + logo)
 // GET  /federation/:id/dashboard          (Track A + P alerts)
 // GET  /federation/:id/belt-distribution
 // GET  /federation/:id/search             (Track P: busca rápida)
@@ -16,6 +17,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { guards } = require('../config/karateRoles');
+const { getFederationIdentity } = require('../services/karateCertificateService');
 
 // ── Ordenação estável de faixas — DELEGADA ao dicionário canônico ──
 // O backend devolve um `rank` numérico por faixa para o FE ordenar de forma
@@ -170,6 +172,46 @@ router.post('/federation/setup', requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /federation/:id/identity ───────────────────────
+// A identidade VISUAL da federação: nome, slug, logo e contato.
+//
+// POR QUE UM ENDPOINT E NÃO O JWT: o app já tira o nome da federação do
+// token (shapeCompany em src/routes/auth.js), mas a logo não pode ir junto.
+// O auth store carrega o token e NUNCA revalida — a mesma armadilha do
+// "plano stale no JWT". Logo trocada hoje só apareceria no próximo login do
+// usuário, que pode ser daqui a semanas. Identidade visual muda; token não.
+//
+// Leve de propósito: 1 SELECT, sem agregado, sem JOIN. Reusa
+// getFederationIdentity (karateCertificateService) — o MESMO SELECT que
+// alimenta os e-mails, para nunca haver duas versões da identidade.
+//
+// guards.read(): qualquer papel da federação enxerga a própria marca. Quem
+// EDITA é adminOnly, em /settings/identity (karateSettings.js).
+//
+// Cache-Control curto: a tela do app pede isto no boot e a cada troca de
+// aba; 5 min corta a maioria das idas ao banco e ainda faz a logo nova
+// aparecer sem o usuário deslogar. `private` porque a resposta é escopada
+// ao usuário autenticado — nunca deve parar em cache compartilhado.
+router.get('/identity', ...guards.read(), async (req, res) => {
+  try {
+    const row = await getFederationIdentity(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Federação não encontrada', code: 'NOT_FOUND' });
+
+    res.set('Cache-Control', 'private, max-age=300');
+    return res.json({
+      id:        row.id,
+      name:      row.name || null,
+      slug:      row.slug || null,
+      logo_url:  row.karate_logo_url || null,
+      email:     row.email || null,
+      whatsapp:  row.wa_phone_display || null,
+    });
+  } catch (err) {
+    console.error('[karateFederation] identity get:', err.message);
+    return res.status(500).json({ error: 'Erro ao ler identidade da federação' });
+  }
+});
+
 // ── GET /federation/:id/dashboard ──────────────────────
 // Track P extende o dashboard com alerts[] derivados de dados já existentes.
 // Sem novas queries obrigatórias — as de tabelas novas são defensivas (42P01).
@@ -304,12 +346,20 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
     // belt_level sozinho NÃO separaria os Dan — por isso o rank vai no payload e a
     // lista já sai pré-ordenada. (A distribuição continua incluindo a Vermelha
     // aqui; quem oculta a Vermelha é o FE.)
+    //
+    // `cb.federation_id = $1` NÃO é redundante com `c.federation_id = $1`: só
+    // o filtro na coluna da VIEW entra no DISTINCT ON de karate_current_belt.
+    // Sem ele a view recalcula o histórico de TODAS as federações, e se a
+    // estatística de customers estiver velha (federação recém-criada) o
+    // planejador faz isso uma vez por praticante — 16/09/2026: 12,7 s e
+    // statement timeout no Painel da JKA com só 200 praticantes.
     const beltParams = practitionerActiveValues ? [federationId, practitionerActiveValues] : [federationId];
     const beltRes = await db.query(
       `SELECT cb.belt_level, cb.belt_name, COUNT(*) AS count
        FROM karate_current_belt cb
        JOIN customers c ON c.id = cb.student_id
        WHERE c.federation_id = $1
+         AND cb.federation_id = $1
          ${practitionerActiveValues ? 'AND c.is_active = ANY($2::boolean[])' : ''}
        GROUP BY cb.belt_level, cb.belt_name
        ORDER BY cb.belt_level`,
@@ -470,12 +520,15 @@ router.get('/belt-distribution', ...guards.read(), async (req, res) => {
   const practitionerActiveValues = practitionerStatusToIsActiveValues(practitionerStatus);
 
   try {
+    // `cb.federation_id = $1` mantém o filtro dentro da view — ver o mesmo
+    // bloco em GET /dashboard.
     const beltParams = practitionerActiveValues ? [federationId, practitionerActiveValues] : [federationId];
     const { rows } = await db.query(
       `SELECT cb.belt_level, cb.belt_name, COUNT(*) AS count
        FROM karate_current_belt cb
        JOIN customers c ON c.id = cb.student_id
        WHERE c.federation_id = $1
+         AND cb.federation_id = $1
          ${practitionerActiveValues ? 'AND c.is_active = ANY($2::boolean[])' : ''}
        GROUP BY cb.belt_level, cb.belt_name
        ORDER BY cb.belt_level`,

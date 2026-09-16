@@ -21,6 +21,8 @@ const { requireAuth } = require('../middleware/auth');
 const nuvemfiscal = require('../services/nuvemfiscal');
 const { buildStaticBrCode, validatePixKey } = require('../services/staticPixService');
 const { autoPrintScript } = require('../utils/autoPrintScript');
+// 16/09/2026: cliente de outra loja do mesmo dono tambem vale (utils/customerScope.js).
+const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 const { qrInlineSvg } = require('../utils/qrInline');
 const { buildServiceOrderHtml } = require('../utils/buildServiceOrderHtml');
 
@@ -50,7 +52,7 @@ function saleLabel(sale) {
   return String(sale && sale.id ? sale.id : '').slice(-8).toUpperCase();
 }
 
-function receiptHTML({ company, sale, items, payments, options = {} }) {
+function receiptHTML({ company, sale, items, payments, installments = [], options = {} }) {
   const { autoprint = false, width80 = true } = options;
   const date = new Date(sale.created_at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 
@@ -90,6 +92,29 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
          ${pixQr}
        </div>` : '';
 
+  // 14/09/2026: venda no crediario imprime o cronograma das parcelas no
+  // cupom (numero, vencimento, valor), no mesmo formato do carne.
+  let installmentsHTML = '';
+  if (installments?.length) {
+    const instRows = installments.map(i => `<tr>
+      <td>${i.installment_number}/${i.total_installments}</td>
+      <td style="text-align:center">${esc(i.due_date_br)}</td>
+      <td style="text-align:right">R$${fmt(i.amount_due)}</td>
+    </tr>`).join('');
+    const instTotal = installments.reduce((s, i) => s + parseFloat(i.amount_due || 0), 0);
+    installmentsHTML = `<div class="divider"></div>
+  <div class="bold">Crediario - ${installments.length}x</div>
+  <table>
+    <thead><tr>
+      <th style="text-align:left">Parcela</th>
+      <th style="text-align:center">Vencimento</th>
+      <th style="text-align:right">Valor</th>
+    </tr></thead>
+    <tbody>${instRows}</tbody>
+    <tr class="bold"><td colspan="2">Total parcelado</td><td style="text-align:right">R$${fmt(instTotal)}</td></tr>
+  </table>`;
+  }
+
   const w = width80 ? '72mm' : '100%';
 
   return `<!DOCTYPE html>
@@ -100,7 +125,10 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
   <style>
     @page { margin: 4mm 5mm; size: ${width80 ? '80mm' : 'A4'} auto; }
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family:'Courier New',monospace; font-size:11px; width:${w}; color:#000; }
+    /* 14/09/2026: Courier New tem traco de 1 ponto na cabeca termica de 203dpi
+       e as letras saem falhadas (a pagina de teste do Windows, em fonte mais
+       grossa, sai legivel na mesma impressora). Consolas segura o traco. */
+    body { font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace; font-size:11px; width:${w}; color:#000; }
     .center { text-align:center; }
     .bold { font-weight:bold; }
     .divider { border-top:1px dashed #000; margin:4px 0; }
@@ -150,6 +178,7 @@ function receiptHTML({ company, sale, items, payments, options = {} }) {
     ${change ? `<tr><td>Troco</td><td style="text-align:right">R$${change}</td></tr>` : ''}
   </table>
   ${pixSection}
+  ${installmentsHTML}
   <div class="divider"></div>
   ${sale.notes ? `<div style="font-size:10px">Obs: ${sale.notes}</div><div class="divider"></div>` : ''}
   <div class="footer">Obrigado pela preferencia!<br>${company.trade_name || company.legal_name}<br><small>Powered by Aura. - getaura.com.br</small></div>
@@ -163,7 +192,7 @@ function _payLabel(method) {
   const m = {
     pix: 'Pix', dinheiro: 'Dinheiro', cartao: 'Cartao',
     debito: 'Cartao Debito', credito: 'Cartao Credito',
-    fiado: 'Fiado', outro: 'Outro'
+    fiado: 'Fiado', crediario: 'Crediario', outro: 'Outro'
   };
   return m[method] || method;
 }
@@ -198,7 +227,28 @@ async function _loadSaleData(saleId, companyId) {
   const { rows: payments } = await db.query(
     `SELECT method, amount FROM sale_payments WHERE sale_id=$1`, [saleId]
   );
-  return { company: companyRows[0] || {}, sale: saleRows[0], items, payments };
+  // 14/09/2026: parcelas do crediario para o cupom. So consulta quando a
+  // venda (ou parte dela) foi no crediario — credit_installments guarda o
+  // sale_id. Data ja formatada no SQL para nao depender do fuso do Node.
+  let installments = [];
+  const isCrediario = String(saleRows[0].payment_method || '').toLowerCase() === 'crediario'
+    || payments.some(p => String(p.method || '').toLowerCase() === 'crediario');
+  if (isCrediario) {
+    try {
+      const { rows } = await db.query(
+        `SELECT installment_number, total_installments, amount_due,
+                to_char(due_date, 'DD/MM/YYYY') AS due_date_br
+           FROM credit_installments
+          WHERE sale_id = $1 AND company_id = $2 AND status <> 'cancelled'
+          ORDER BY installment_number ASC`,
+        [saleId, companyId]
+      );
+      installments = rows;
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+  }
+  return { company: companyRows[0] || {}, sale: saleRows[0], items, payments, installments };
 }
 
 // GET /print/receipt/:saleId
@@ -247,18 +297,63 @@ router.get('/os/:osId', requireAuth, async (req, res) => {
   try {
     const companyId = req.params.id;
 
-    const { rows: osRows } = await db.query(
-      `SELECT so.*,
-              c.name  AS customer_name,
-              c.phone AS customer_phone,
-              e.name  AS technician_name
-         FROM service_orders so
-         JOIN customers c ON c.id = so.customer_id
-         LEFT JOIN employees e ON e.id = so.technician_id
-        WHERE so.id = $1 AND so.company_id = $2`,
-      [req.params.osId, companyId]
-    );
+    // Otica (334): laboratorio e venda do sinal entram no documento. Com a
+    // migration pendente o join em optical_labs da 42P01 — cai pro SELECT
+    // original, e a OS de reparo imprime como sempre imprimiu.
+    let osRows;
+    try {
+      ({ rows: osRows } = await db.query(
+        `SELECT so.*,
+                c.name  AS customer_name,
+                c.phone AS customer_phone,
+                e.name  AS technician_name,
+                l.name  AS lab_name,
+                ds.total_amount AS deposit_sale_total
+           FROM service_orders so
+           JOIN customers c ON c.id = so.customer_id
+           LEFT JOIN employees e ON e.id = so.technician_id
+           LEFT JOIN optical_labs l ON l.id = so.lab_id
+           LEFT JOIN sales ds ON ds.id = so.deposit_sale_id
+          WHERE so.id = $1 AND so.company_id = $2`,
+        [req.params.osId, companyId]
+      ));
+    } catch (e) {
+      // So cai pro SELECT original quando o que falta e da 334 (o nome do
+      // objeto vem na mensagem). 42P01 de service_orders (313 pendente) segue
+      // pro catch de baixo, que responde 503.
+      const falta334 = (e.code === '42P01' || e.code === '42703')
+        && /optical_labs|lab_id|deposit_sale_id/i.test(String(e.message || ''));
+      if (!falta334) throw e;
+      ({ rows: osRows } = await db.query(
+        `SELECT so.*,
+                c.name  AS customer_name,
+                c.phone AS customer_phone,
+                e.name  AS technician_name
+           FROM service_orders so
+           JOIN customers c ON c.id = so.customer_id
+           LEFT JOIN employees e ON e.id = so.technician_id
+          WHERE so.id = $1 AND so.company_id = $2`,
+        [req.params.osId, companyId]
+      ));
+    }
     if (!osRows.length) return res.status(404).json({ error: 'Ordem de servico nao encontrada' });
+
+    // Saldo do sinal (otica): soma das parcelas em aberto da venda do sinal.
+    // Best-effort — sem crediario o documento sai sem a linha de saldo.
+    if (osRows[0].kind === 'otica' && osRows[0].deposit_sale_id) {
+      try {
+        const { rows } = await db.query(
+          `SELECT COALESCE(SUM(ci.amount_due - COALESCE(ci.covered_amount, 0)), 0)::numeric AS saldo
+             FROM credit_installments ci
+            WHERE ci.company_id = $1 AND ci.sale_id = $2
+              AND ci.status NOT IN ('paid', 'cancelled')`,
+          [companyId, osRows[0].deposit_sale_id]
+        );
+        osRows[0].deposit_balance = rows[0] ? Number(rows[0].saldo) : 0;
+      } catch (e) {
+        if (e.code !== '42P01' && e.code !== '42703') throw e;
+      }
+    }
 
     const { rows: items } = await db.query(
       `SELECT kind, description, quantity, unit_price, total_price
@@ -398,12 +493,8 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
     const company = companyRows[0];
 
     // 2. Dados do cliente
-    const { rows: custRows } = await db.query(
-      `SELECT id, name, phone, cpf_cnpj FROM customers WHERE id = $1 AND company_id = $2`,
-      [customerId, companyId]
-    );
-    if (!custRows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
-    const customer = custRows[0];
+    const customer = await findOwnerScopedCustomer(db, companyId, customerId, 'id, name, phone, cpf_cnpj');
+    if (!customer) return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
 
     // 3. Saldo total em aberto (view customer_credit_balances)
     let totalBalance = 0;
@@ -521,9 +612,11 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
     ].filter(k => groups[k]);
 
     function statusLabel(s) {
-      if (s === 'paid') return '<span style="color:#166534">Paga</span>';
-      if (s === 'overdue') return '<span style="color:#991b1b;font-weight:bold">Atrasada</span>';
-      return '<span style="color:#1e40af">Pendente</span>';
+      // 14/09/2026: so preto. Impressora termica transforma cor e cinza em
+      // pontilhado claro — o status saia apagado no papel.
+      if (s === 'paid') return 'Paga';
+      if (s === 'overdue') return '<strong>Atrasada</strong>';
+      return 'Pendente';
     }
 
     function fmtDate(d) {
@@ -537,7 +630,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 
     let accountsHTML = '';
     if (orderedKeys.length === 0) {
-      accountsHTML = '<p style="color:#666;font-size:12px">Nenhuma parcela registrada.</p>';
+      accountsHTML = '<p style="font-size:12px">Nenhuma parcela registrada.</p>';
     } else {
       for (const key of orderedKeys) {
         const instList = groups[key] || [];
@@ -562,12 +655,12 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
               txid:            `CRED${String(inst.id).replace(/-/g, '').slice(0, 20)}`,
             });
             pixRow = `<tr><td colspan="5" style="padding:2px 4px 10px">
-              <div style="border:1px solid #ccc;background:#fafafa;padding:6px;page-break-inside:avoid">
-                <div style="font-size:10px;font-weight:bold;margin-bottom:3px">
+              <div style="border:1px solid #000;padding:6px;page-break-inside:avoid">
+                <div style="font-size:11px;font-weight:bold;margin-bottom:3px">
                   Pix da parcela ${inst.installment_number}/${inst.total_installments} — R$${fmt(remaining)}
                 </div>
-                <div style="font-family:'Courier New',monospace;font-size:8px;word-break:break-all;
-                            background:#fff;border:1px solid #ddd;padding:4px;margin-bottom:5px;
+                <div style="font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace;font-size:9px;word-break:break-all;
+                            border:1px solid #000;padding:4px;margin-bottom:5px;
                             user-select:all">${instPix}</div>
                 <div style="text-align:center">${qrInlineSvg(instPix, QR_CARNE_OPTS)}</div>
               </div>
@@ -586,11 +679,11 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
         accountsHTML += `
           <div style="margin-bottom:16px">
             <div style="font-weight:bold;font-size:13px;margin-bottom:4px">
-              ${esc(accName)}${accStatus === 'closed' ? ' <span style="font-size:10px;color:#666">(encerrado)</span>' : ''}
+              ${esc(accName)}${accStatus === 'closed' ? ' <span style="font-size:11px">(encerrado)</span>' : ''}
             </div>
-            <table style="width:100%;border-collapse:collapse;font-size:11px">
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
               <thead>
-                <tr style="border-bottom:1px solid #333">
+                <tr style="border-bottom:1px solid #000">
                   <th style="text-align:left;padding:3px 4px">Parcela</th>
                   <th style="text-align:left;padding:3px 4px">Vencimento</th>
                   <th style="text-align:right;padding:3px 4px">Valor</th>
@@ -600,7 +693,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
               </thead>
               <tbody>${rowsHTML}</tbody>
             </table>
-            <div style="text-align:right;font-size:11px;margin-top:4px;color:#444">
+            <div style="text-align:right;font-size:12px;margin-top:4px">
               Saldo em aberto: <strong>R$${fmt(accBalance)}</strong>
             </div>
           </div>`;
@@ -614,20 +707,20 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
       pixHTML = `
         <div style="border:1px solid #000;padding:10px;margin-top:12px;page-break-inside:avoid">
           <div style="font-weight:bold;font-size:13px;margin-bottom:6px">Pagar tudo de uma vez via Pix${balLabel}</div>
-          <div style="font-size:10px;margin-bottom:6px;color:#444">
+          <div style="font-size:11px;margin-bottom:6px">
             Copie o codigo abaixo ou escaneie o QR Code com o app do seu banco.
           </div>
-          <div style="font-family:'Courier New',monospace;font-size:9px;word-break:break-all;
-                      background:#f5f5f5;padding:6px;border:1px solid #ccc;margin-bottom:8px;
+          <div style="font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace;font-size:10px;word-break:break-all;
+                      padding:6px;border:1px solid #000;margin-bottom:8px;
                       user-select:all">${pixPayload}</div>
           <div style="text-align:center">${qrInlineSvg(pixPayload, QR_CARNE_OPTS)}</div>
-          <div style="font-size:9px;color:#666;margin-top:6px;text-align:center">
+          <div style="font-size:10px;margin-top:6px;text-align:center">
             Pagamento confirmado manualmente pela loja.
           </div>
         </div>`;
     } else {
       pixHTML = `
-        <div style="border:1px dashed #999;padding:8px;margin-top:12px;font-size:10px;color:#666;text-align:center">
+        <div style="border:1px dashed #000;padding:8px;margin-top:12px;font-size:11px;text-align:center">
           Pagamento confirmado manualmente pela loja. Nenhuma chave Pix configurada.
         </div>`;
     }
@@ -640,15 +733,29 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   <meta charset="UTF-8">
   <title>Carne - ${esc(company.display_name)}</title>
   <style>
-    @page { margin: 10mm 12mm; size: A4; }
+    /* 14/09/2026: size:auto — o papel vem da impressora. Com A4 fixo, a bobina
+       termica de 80mm encolhia a pagina inteira (~0,36x) e o carne saia miudo
+       e fraco. Em A4 nada muda: a impressora ja e A4. */
+    @page { margin: 10mm 12mm; size: auto; }
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family:'Courier New',monospace; font-size:12px; color:#000; max-width:700px; margin:0 auto; }
+    /* 14/09/2026: Courier New tem traco de 1 ponto na cabeca termica de 203dpi
+       e as letras saem falhadas (a pagina de teste do Windows, em fonte mais
+       grossa, sai legivel na mesma impressora). Consolas segura o traco. */
+    body { font-family:Consolas,'Lucida Console',Menlo,'Courier New',monospace; font-size:12px; color:#000; max-width:700px; margin:0 auto; }
     .center { text-align:center; }
     .bold { font-weight:bold; }
     .divider { border-top:1px dashed #000; margin:8px 0; }
     .company-name { font-size:18px; font-weight:bold; }
     .section-title { font-size:14px; font-weight:bold; border-bottom:2px solid #000; padding-bottom:3px; margin-bottom:8px; }
     @media print { body { -webkit-print-color-adjust:exact; print-color-adjust:exact; } button { display:none !important; } }
+    /* Bobina termica (58/80mm): margem curta, sem coluna de 700px, e a tabela
+       um ponto menor para as 5 colunas caberem sem encolher a pagina. */
+    @media print and (max-width: 120mm) {
+      @page { margin: 4mm 3mm; }
+      body { max-width:none; }
+      table { font-size:11px !important; }
+      th, td:not([colspan]) { padding:3px 2px !important; }
+    }
   </style>
 </head>
 <body>
@@ -660,7 +767,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   </div>
   <div class="divider"></div>
   <div class="center bold" style="font-size:15px;margin-bottom:4px">CARNE / EXTRATO DE CREDIARIO</div>
-  <div style="font-size:10px;text-align:center;margin-bottom:8px">Emitido em: ${printDate}</div>
+  <div style="font-size:11px;text-align:center;margin-bottom:8px">Emitido em: ${printDate}</div>
   <div class="divider"></div>
   <div style="margin-bottom:8px">
     <div><strong>Cliente:</strong> ${esc(customer.name)}</div>
@@ -669,7 +776,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   </div>
   <div class="divider"></div>
   <div class="section-title">Cronograma de Parcelas</div>
-  <div style="font-size:10px;color:#444;margin-bottom:10px">
+  <div style="font-size:11px;margin-bottom:10px">
     Os valores exibidos sao de <strong>principal</strong>. Parcelas em atraso estao sujeitas a
     multa e mora, calculadas no momento do pagamento.
   </div>
@@ -680,7 +787,7 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
   </div>
   ${pixHTML}
   <div class="divider"></div>
-  <div style="font-size:9px;text-align:center;margin-top:6px;color:#666">
+  <div style="font-size:10px;text-align:center;margin-top:6px">
     ${esc(company.display_name)} &mdash; Powered by Aura. &mdash; getaura.com.br
   </div>
   <br>
@@ -705,8 +812,13 @@ router.get('/credit/:cid/carne', requireAuth, async (req, res) => {
 //        AND company_id=:id AND type='payment'.
 // Encargos: transactions WHERE idempotency_key='credit-charges-<txId>'
 //           (defensivo a 42703/42P01 — campo opcional).
-// Saldo: customer_credit_balances.balance (defensivo).
-// Crédito a favor: balance < 0 → exibe valor absoluto.
+// Parcelas: credit_payment_allocations (migration 335) — quais parcelas
+//           ESTE pagamento cobriu. Pagamento anterior a ela sai sem o bloco.
+//
+// 15/09/2026: saiu o "Saldo restante" / "Credito a favor". Era o saldo do
+//   cliente NA HORA DA IMPRESSAO, nao o do pagamento: o cliente quitava,
+//   comprava mais, e o recibo reimpresso mostrava um numero sem relacao
+//   com aquele pagamento.
 //
 // Frontend chama via fetch + Authorization header + document.write
 // (mesmo padrão /print/credit/:cid/carne).
@@ -737,11 +849,8 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
     const tx = txRows[0];
 
     // 3. Cliente
-    const { rows: custRows } = await db.query(
-      `SELECT name, phone, cpf_cnpj FROM customers WHERE id = $1 AND company_id = $2`,
-      [tx.customer_id, companyId]
-    );
-    const customer = custRows[0] || { name: 'Cliente', phone: null, cpf_cnpj: null };
+    const customer = (await findOwnerScopedCustomer(db, companyId, tx.customer_id, 'name, phone, cpf_cnpj'))
+      || { name: 'Cliente', phone: null, cpf_cnpj: null };
 
     // 4. Encargos vinculados (mora/multa) — opcional, defensivo
     let chargesAmount = 0;
@@ -759,18 +868,22 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] charges warn:', e.message);
     }
 
-    // 5. Saldo restante após pagamento — defensivo
-    let balance = null;
+    // 5. Parcelas que este pagamento cobriu — defensivo (migration 335)
+    let allocations = [];
     try {
-      const { rows: balRows } = await db.query(
-        `SELECT COALESCE(balance, 0) AS balance
-           FROM customer_credit_balances
-          WHERE customer_id = $1 AND company_id = $2`,
-        [tx.customer_id, companyId]
+      const { rows: allocRows } = await db.query(
+        `SELECT ci.installment_number, ci.total_installments,
+                to_char(ci.due_date, 'DD/MM/YYYY') AS due_date_br,
+                a.principal_paid, a.charges_paid, a.status_after
+           FROM credit_payment_allocations a
+           JOIN credit_installments ci ON ci.id = a.installment_id
+          WHERE a.transaction_id = $1 AND a.company_id = $2
+          ORDER BY ci.due_date ASC, ci.installment_number ASC`,
+        [transactionId, companyId]
       );
-      if (balRows.length) balance = parseFloat(balRows[0].balance);
+      allocations = allocRows;
     } catch (e) {
-      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] balance warn:', e.message);
+      if (e.code !== '42P01' && e.code !== '42703') console.warn('[print/recibo] allocations warn:', e.message);
     }
 
     // 6. Montar HTML
@@ -780,21 +893,33 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
     const payMethodLabel = _payLabel(tx.payment_method || 'outro');
 
     const chargesRow = chargesAmount > 0
-      ? '<tr><td style="padding:3px 0;color:#666">Encargos (mora/multa)</td>' +
-        '<td style="text-align:right;padding:3px 0;color:#666">R$' + fmt(chargesAmount) + '</td></tr>'
+      ? '<tr><td style="padding:3px 0">Encargos (mora/multa)</td>' +
+        '<td style="text-align:right;padding:3px 0">R$' + fmt(chargesAmount) + '</td></tr>'
       : '';
 
-    let balanceRow = '';
-    if (balance !== null) {
-      if (balance < 0) {
-        balanceRow =
-          '<tr><td style="padding:3px 0;color:#166534;font-weight:bold">Credito a favor</td>' +
-          '<td style="text-align:right;padding:3px 0;color:#166534;font-weight:bold">R$' + fmt(Math.abs(balance)) + '</td></tr>';
-      } else {
-        balanceRow =
-          '<tr><td style="padding:3px 0">Saldo restante</td>' +
-          '<td style="text-align:right;padding:3px 0">R$' + fmt(balance) + '</td></tr>';
-      }
+    // Situacao da parcela logo apos ESTE pagamento (retrato, nao estado atual).
+    const allocSituation = (a) => {
+      if (a.status_after === 'paid') return 'Quitada';
+      if (parseFloat(a.principal_paid || 0) <= 0.005) return 'Encargos';
+      return 'Parcial';
+    };
+    const allocPaid = (a) => parseFloat(a.principal_paid || 0) + parseFloat(a.charges_paid || 0);
+
+    let allocHTML = '';
+    if (allocations.length) {
+      allocHTML =
+        '  <div class="divider"></div>\n' +
+        '  <div class="bold" style="margin-bottom:4px">Parcelas pagas</div>\n' +
+        '  <table>\n' +
+        '    <tr><th style="text-align:left">Parcela</th><th style="text-align:center">Vencimento</th>' +
+        '<th style="text-align:right">Pago</th><th style="text-align:right">Situacao</th></tr>\n' +
+        allocations.map(a =>
+          '    <tr><td>' + a.installment_number + '/' + a.total_installments + '</td>' +
+          '<td style="text-align:center">' + esc(a.due_date_br) + '</td>' +
+          '<td style="text-align:right">R$' + fmt(allocPaid(a)) + '</td>' +
+          '<td style="text-align:right">' + allocSituation(a) + '</td></tr>\n'
+        ).join('') +
+        '  </table>\n';
     }
 
     // Bloco WhatsApp (texto pré-formatado — trivial pois é só concatenar)
@@ -808,11 +933,13 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       'Metodo: ' + payMethodLabel,
     ];
     if (chargesAmount > 0) waLines.push('Encargos: R$' + fmt(chargesAmount));
-    if (balance !== null) {
-      if (balance < 0) {
-        waLines.push('Credito a favor: R$' + fmt(Math.abs(balance)));
-      } else {
-        waLines.push('Saldo restante: R$' + fmt(balance));
+    if (allocations.length) {
+      waLines.push('', 'Parcelas pagas:');
+      for (const a of allocations) {
+        waLines.push(
+          'Parcela ' + a.installment_number + '/' + a.total_installments +
+          ' (venc. ' + a.due_date_br + '): R$' + fmt(allocPaid(a)) + ' - ' + allocSituation(a).toLowerCase()
+        );
       }
     }
     waLines.push('', 'Powered by Aura. - getaura.com.br');
@@ -824,20 +951,22 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       '  <meta charset="UTF-8">\n' +
       '  <title>Recibo Crediario - ' + esc(company.display_name) + '</title>\n' +
       '  <style>\n' +
-      '    @page { margin: 10mm 12mm; size: A4; }\n' +
+      '    @page { margin: 10mm 12mm; size: auto; }\n' +
       '    * { margin:0; padding:0; box-sizing:border-box; }\n' +
-      '    body { font-family:\'Courier New\',monospace; font-size:12px; color:#000; max-width:500px; margin:0 auto; }\n' +
+      '    body { font-family:Consolas,\'Lucida Console\',Menlo,\'Courier New\',monospace; font-size:12px; color:#000; max-width:500px; margin:0 auto; }\n' +
       '    .center { text-align:center; }\n' +
       '    .bold { font-weight:bold; }\n' +
       '    .divider { border-top:1px dashed #000; margin:8px 0; }\n' +
       '    .company-name { font-size:16px; font-weight:bold; }\n' +
       '    table { width:100%; border-collapse:collapse; }\n' +
-      '    td { vertical-align:top; font-size:12px; }\n' +
+      '    td { vertical-align:top; font-size:12px; padding:3px 0; }\n' +
+      '    th { font-size:11px; font-weight:bold; border-bottom:1px solid #000; padding:2px 0; }\n' +
       '    .total-row td { font-weight:bold; font-size:14px; border-top:2px solid #000; padding-top:5px; }\n' +
-      '    .footer { font-size:9px; text-align:center; margin-top:8px; color:#666; }\n' +
+      '    .footer { font-size:10px; text-align:center; margin-top:8px; }\n' +
       '    .wa-block { background:#f0fdf4; border:1px solid #86efac; border-radius:4px; padding:10px; margin-top:12px; }\n' +
       '    .wa-block textarea { width:100%; font-family:monospace; font-size:11px; border:none; background:transparent; resize:none; outline:none; }\n' +
       '    @media print { body { -webkit-print-color-adjust:exact; print-color-adjust:exact; } button, .wa-block { display:none !important; } }\n' +
+      '    @media print and (max-width: 120mm) { @page { margin: 4mm 3mm; } body { max-width:none; } }\n' +
       '  </style>\n' +
       '</head>\n' +
       '<body>\n' +
@@ -861,8 +990,8 @@ router.get('/credit/receipts/:transactionId', requireAuth, async (req, res) => {
       '    <tr><td style="padding:3px 0">Metodo</td><td style="text-align:right;padding:3px 0">' + payMethodLabel + '</td></tr>\n' +
       chargesRow +
       '    <tr class="total-row"><td>Valor pago</td><td style="text-align:right">R$' + fmt(amountPaid) + '</td></tr>\n' +
-      balanceRow +
       '  </table>\n' +
+      allocHTML +
       '  <div class="divider"></div>\n' +
       '  <div class="footer">Powered by Aura. - getaura.com.br</div>\n' +
       '  <br>\n' +

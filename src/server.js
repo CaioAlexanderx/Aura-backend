@@ -95,6 +95,25 @@ function startServer() {
     const { initWaDispatcher } = require('./jobs/waDispatcherJob');
     initWaDispatcher();
 
+    // FASE 6: régua do crediário pelo WhatsApp oficial — diário 9h BRT,
+    // kill switch CREDIT_WA_AUTO_ENABLED=false. Quem despacha continua
+    // sendo o waDispatcher; este job só enfileira.
+    const { initCreditCollectionAutoJob } = require('./jobs/creditCollectionAutoJob');
+    initCreditCollectionAutoJob();
+
+    // FASE 8: parabéns de aniversário pelo WhatsApp — diário 9h30 BRT
+    // (meia hora DEPOIS da régua do crediário, para cobrança e parabéns
+    // do mesmo cliente não saírem no mesmo minuto). Kill switch
+    // BIRTHDAY_WA_AUTO_ENABLED=false.
+    const { initBirthdayAutoJob } = require('./jobs/birthdayAutoJob');
+    initBirthdayAutoJob();
+
+    // FASE 7: reativação de clientes — SEMANAL, terça 10h BRT. Marketing
+    // em volume derruba a qualidade do número; por isso semanal e com
+    // teto pequeno. Kill switch REACTIVATION_WA_AUTO_ENABLED=false.
+    const { initReactivationAutoJob } = require('./jobs/reactivationAutoJob');
+    initReactivationAutoJob();
+
     // AURINHA (312): dispatcher da fila Instagram (ig_outbox) — tick 15s,
     // kill switch IG_DISPATCH_ENABLED=false.
     const { initIgDispatcher } = require('./jobs/igDispatcherJob');
@@ -109,6 +128,13 @@ function startServer() {
     // cheio no Asaas e avisa o cliente antes da 1a mensalidade cheia. Tick 6h.
     const { initSubscriptionDiscountJob } = require('./jobs/subscriptionDiscountJob');
     initSubscriptionDiscountJob();
+
+    // Otica (334): pos-venda de adaptacao (3 dias apos a entrega) e lembrete
+    // de revisao da receita (30 dias antes de vencer) — diario 10h BRT,
+    // depois do crediario (9h) e do aniversario (9h30). Kill switch
+    // OTICA_WA_AUTO_ENABLED=false. Quem despacha e o waDispatcher.
+    const { initOticaReminderJob } = require('./jobs/oticaReminderJob');
+    initOticaReminderJob();
   });
 }
 

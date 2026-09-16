@@ -121,6 +121,126 @@ router.post('/', async (req, res) => {
           continue;
         }
 
+        // ── Fase 2: qualidade do número (phone_number_quality_update) ──
+        // A Meta manda o campo quality_rating quando presente; nos anos
+        // em que não manda, o SINAL é o event FLAGGED/UNFLAGGED. FLAGGED
+        // já pausa a fila (QUALIDADE_BAIXA) — não faz sentido esperar o
+        // próximo envio falhar para descobrir que a qualidade caiu.
+        if (change.field === 'phone_number_quality_update') {
+          let qCompanyId = companyId;
+          if (!qCompanyId && entry.id) {
+            const r = await db.query(
+              'SELECT id FROM companies WHERE wa_waba_id=$1 LIMIT 1', [entry.id]
+            ).catch(() => ({ rows: [] }));
+            if (r.rows.length) qCompanyId = r.rows[0].id;
+          }
+          if (qCompanyId) {
+            const quality = value.quality_rating
+              || (value.event === 'FLAGGED' ? 'RED' : value.event === 'UNFLAGGED' ? 'GREEN' : null);
+            try {
+              if (quality) {
+                await db.query('UPDATE companies SET wa_quality_rating=$2 WHERE id=$1', [qCompanyId, quality]);
+              }
+              if (value.event === 'FLAGGED') {
+                await db.query(
+                  'UPDATE companies SET wa_paused_reason=$2, wa_paused_at=NOW() WHERE id=$1',
+                  [qCompanyId, 'QUALIDADE_BAIXA']
+                );
+              } else if (value.event === 'UNFLAGGED') {
+                // Só destrava se a pausa ATUAL for de qualidade — uma
+                // pausa manual ou de conta restrita não pode ser
+                // destravada por um evento de qualidade voltando ao normal.
+                await db.query(
+                  `UPDATE companies SET wa_paused_reason=NULL, wa_paused_at=NULL
+                    WHERE id=$1 AND wa_paused_reason='QUALIDADE_BAIXA'`,
+                  [qCompanyId]
+                );
+              }
+            } catch (e) {
+              if (e.code !== '42703' && e.code !== '42P01') {
+                console.error('[WA-WEBHOOK] quality update error:', e.message);
+              }
+            }
+          }
+          continue;
+        }
+
+        // ── Fase 2: conta restrita/desabilitada (account_update) ──
+        if (change.field === 'account_update') {
+          const RESTRICT_EVENTS = ['DISABLED_UPDATE', 'ACCOUNT_RESTRICTION', 'ACCOUNT_VIOLATION'];
+          if (RESTRICT_EVENTS.includes(value.event)) {
+            let aCompanyId = companyId;
+            if (!aCompanyId && entry.id) {
+              const r = await db.query(
+                'SELECT id FROM companies WHERE wa_waba_id=$1 LIMIT 1', [entry.id]
+              ).catch(() => ({ rows: [] }));
+              if (r.rows.length) aCompanyId = r.rows[0].id;
+            }
+            if (aCompanyId) {
+              await db.query(
+                'UPDATE companies SET wa_paused_reason=$2, wa_paused_at=NOW() WHERE id=$1',
+                [aCompanyId, 'CONTA_RESTRITA']
+              ).catch((e) => {
+                if (e.code !== '42703' && e.code !== '42P01') {
+                  console.error('[WA-WEBHOOK] account update error:', e.message);
+                }
+              });
+            }
+          }
+          continue;
+        }
+
+        // ── Coexistence (331): eventos do app WhatsApp Business do celular ──
+        // Com o número em Coexistence, a Meta também manda change.field:
+        //  - smb_message_echoes: mensagem que a PRÓPRIA empresa mandou pelo
+        //    app do celular (não pela Cloud API). Grava em wa_messages como
+        //    outbound (source: smb_app) só para o histórico da tela mostrar
+        //    a conversa completa — NÃO abre a janela de 24h de atendimento
+        //    (isso só acontece quando o CLIENTE manda mensagem) e por isso
+        //    usa touchOutboundHuman, nunca touchInbound.
+        //  - history: sincronização do histórico de mensagens do app.
+        //  - smb_app_state_sync: estado do app (contatos, etc).
+        // Os dois últimos ainda não gravam nada — só log da contagem —
+        // porque a tela ainda não tem onde mostrar isso.
+        if (change.field === 'smb_message_echoes') {
+          try {
+            const echoes = value.message_echoes || [];
+            for (const echo of echoes) {
+              if (!companyId) continue;
+              const toPhone = waOutbox.normalizePhone(echo.to) || echo.to;
+              const content = echo.text?.body || echo.caption || `[${echo.type || 'mensagem'}]`;
+              try {
+                await db.query(
+                  `INSERT INTO wa_messages (company_id, direction, wa_message_id, to_phone, content, status, metadata)
+                   VALUES ($1,'outbound',$2,$3,$4,'sent',$5)`,
+                  [companyId, echo.id, toPhone, content, JSON.stringify({ source: 'smb_app' })]
+                );
+              } catch (e) {
+                if (e.code !== '42703' && e.code !== '42P01') {
+                  console.error('[WA-WEBHOOK] smb_message_echoes wa_messages error:', e.message);
+                }
+              }
+              await waOutbox.touchOutboundHuman(companyId, toPhone)
+                .catch((e) => console.error('[WA-WEBHOOK] touchOutboundHuman error:', e.message));
+            }
+          } catch (e) {
+            console.error('[WA-WEBHOOK] smb_message_echoes error:', e.message);
+          }
+          continue;
+        }
+
+        if (change.field === 'history') {
+          const count = Array.isArray(value.history) ? value.history.length : 0;
+          console.log(`[wa webhook] history sync: ${count} itens`);
+          continue;
+        }
+
+        if (change.field === 'smb_app_state_sync') {
+          const count = Array.isArray(value.state_sync) ? value.state_sync.length : 0;
+          console.log(`[wa webhook] smb_app_state_sync: ${count} itens`);
+          continue;
+        }
+
         // Handle message status updates (sent → delivered → read)
         const statuses = value.statuses || [];
         for (const status of statuses) {
@@ -135,6 +255,24 @@ router.post('/', async (req, res) => {
             companyId, status.id, status.status,
             status.errors && status.errors[0] && status.errors[0].title || null
           ).catch((e) => console.error('[WA-WEBHOOK] outbox status error:', e.message));
+          // Fase 2: telefone que a Meta recusou de vez (131026, não é
+          // WhatsApp) nunca mais entra na fila automática — sem isto o
+          // dojô paga chamada todo dia no mesmo número morto.
+          //
+          // Fase 7: 131049 é o limite de MARKETING por usuário e não diz
+          // nada sobre o número — bloqueia só marketing, por 30 dias, e a
+          // cobrança do mesmo cliente continua saindo.
+          if (status.status === 'failed') {
+            const errCode = status.errors && status.errors[0] && Number(status.errors[0].code);
+            const recipient = waOutbox.normalizePhone(status.recipient_id) || status.recipient_id;
+            if (errCode === 131026) {
+              await waOutbox.markContactInvalid(companyId, recipient, status.errors[0].title || null)
+                .catch((e) => console.error('[WA-WEBHOOK] contact invalid error:', e.message));
+            } else if (errCode === 131049) {
+              await waOutbox.markContactMarketingBlocked(companyId, recipient, waOutbox.MARKETING_BLOCK_DAYS)
+                .catch((e) => console.error('[WA-WEBHOOK] marketing block error:', e.message));
+            }
+          }
         }
 
         // Handle incoming messages

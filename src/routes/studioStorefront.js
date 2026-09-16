@@ -49,6 +49,8 @@
 const router              = require('express').Router();
 const db                  = require('../config/database');
 const notify              = require('../services/digitalOrderNotifications');
+// Sino da loja (10/09/2026): pedido do Studio tambem avisa ao nascer.
+const lojaEvents          = require('../services/lojaEvents');
 const { generatePix }     = require('../services/pixService');
 const { onOrderConfirmed } = require('../services/digitalOrderConfirmation');
 const { createMpPixPayment, createMpPreference } = require('../services/mpService');
@@ -1333,6 +1335,16 @@ router.post('/:slug/studio/order', async (req, res) => {
         .catch(err => console.error('[studio-storefront] onOrderConfirmed error:', err.message));
       notify.notifyPaymentConfirmed({ order })
         .catch(err => console.error('[studio-storefront] notifyPaymentConfirmed error:', err.message));
+    }
+
+    // 10/09/2026: pedido do Studio nascia sem evento no sino (so a janela
+    // de 24h do feed) e, portanto, sem Web Push. Mesmo evento da loja
+    // comum; a rota do CTA ja manda vertical 'studio' para a tela do pedido.
+    lojaEvents.emit('loja_pedido_novo', order);
+    // Pix manual: ninguem confirma sozinho, a lojista precisa conferir.
+    if (pixData && pixData.mode === 'manual') {
+      notify.notifyManualPixOrder({ order })
+        .catch(err => console.error('[studio-storefront] notifyManualPixOrder error:', err.message));
     }
 
     res.status(201).json({

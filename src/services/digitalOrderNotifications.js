@@ -275,4 +275,40 @@ async function notifyNewOrder() {
   // No-op. Notificações movidas para notifyPaymentConfirmed().
 }
 
-module.exports = { notifyNewOrder, notifyPaymentConfirmed, notifyStatusChange };
+/**
+ * Pedido com Pix MANUAL acabou de nascer (10/09/2026).
+ *
+ * No Pix manual ninguém confirma o pagamento sozinho: é a lojista quem
+ * confere o extrato. O e-mail ao dono só saía em notifyPaymentConfirmed —
+ * que, no Pix manual, é disparado pela própria lojista ao clicar em
+ * "Confirmar pagamento". O aviso chegava depois de ela já saber.
+ *
+ * Só o e-mail ao dono: a cliente ainda não tem nada confirmado, e o aviso
+ * no navegador vem pelo evento 'loja_pedido_novo' (services/lojaEvents.js).
+ */
+async function notifyManualPixOrder({ order: input }) {
+  const order = await loadOrderForNotify(input);
+  if (!order) return;
+
+  if (await ehLojaDeTeste(order.company_id)) {
+    anotarBloqueio(`pedido #${order.order_number} aguardando Pix`, order.company_id);
+    return;
+  }
+
+  const store_name = await getStoreName(order.company_id);
+  const ownerEmails = await getOwnerEmails(order.company_id);
+  await Promise.all(ownerEmails.map(email =>
+    sendOwnerNewOrderEmail(email, {
+      order_number:         order.order_number,
+      customer_name:        order.customer_name,
+      customer_phone:       order.customer_phone,
+      total:                order.total,
+      delivery_type:        order.delivery_type,
+      store_name,
+      payment_method:       order.payment_method,
+      aguardando_pagamento: true,
+    }).catch(err => console.error('[notify] manual pix owner email error:', err.message))
+  ));
+}
+
+module.exports = { notifyNewOrder, notifyPaymentConfirmed, notifyStatusChange, notifyManualPixOrder };

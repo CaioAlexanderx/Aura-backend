@@ -12,8 +12,17 @@ const MODULE_PLAN_MAP = {
   contabilidade:  'essencial',
   suporte:        'essencial',
   pdv:            'essencial',
+  // 14/09/2026 — Ordem de Serviço ganha chave própria (antes o /os do app
+  // usava "pdv" emprestado). Mesmo plano mínimo do pdv. Sem gate de rota:
+  // serviceOrders.js continua dependendo só de pdv_settings.os_enabled.
+  os:             'essencial',
   estoque:        'essencial',
   configuracoes:  'essencial',
+  // 15/09/2026 — Ótica (migration 334). A configuração fica no Essencial
+  // para o admin poder dar override do módulo inteiro por empresa; o
+  // laboratório e as receitas são Negócio. Sem gate de rota: otica.js e
+  // serviceOrders.js dependem só de pdv_settings.otica_enabled.
+  'otica.config':      'essencial',
 
   // Negócio+
   folha:          'negocio',
@@ -21,6 +30,8 @@ const MODULE_PLAN_MAP = {
   clientes:       'negocio',
   canal:          'negocio',
   whatsapp:       'negocio',
+  'otica.laboratorio': 'negocio',
+  'otica.receitas':    'negocio',
 
   // Expansão only
   agentes:        'expansao',

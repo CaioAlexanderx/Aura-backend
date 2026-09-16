@@ -88,6 +88,147 @@ async function pedidoDaVitrine(token) {
   }
 }
 
+// ── Ordem de Servico (15/09/2026, migration 334) ────────────────────────
+//
+// Terceiro caminho: o token mora em service_orders.tracker_token. A otica
+// e o caso que pediu isso (o cliente espera a lente voltar do laboratorio
+// por uma semana), mas a OS de reparo tambem tem token e ganha o mesmo
+// tracker com etapas proprias. Mesma lista do que NAO sai — e, na otica,
+// mais tres coisas: receita, prescritor e laboratorio. Receita e dado de
+// saude; o link pode ser reencaminhado.
+//
+// `tipo: 'oculos'` so na OS de otica: o front troca "sua encomenda" por
+// "seus oculos" com isso. A venda e a vitrine nao levam o campo.
+const ETAPAS_OTICA = [
+  { key: 'recebido',    label: 'Pedido recebido' },
+  { key: 'laboratorio', label: 'Lentes no laboratório' },
+  { key: 'montagem',    label: 'Montagem e conferência' },
+  { key: 'pronto',      label: 'Pronto para retirar' },
+];
+
+const ETAPAS_REPARO = [
+  { key: 'recebido', label: 'Equipamento recebido' },
+  { key: 'execucao', label: 'Em execução' },
+  { key: 'pronto',   label: 'Pronto para retirar' },
+];
+
+function etapaDaOs(os) {
+  if (os.kind === 'otica') {
+    if (os.status === 'pronta' || os.status === 'entregue') return 3;
+    switch (os.lab_status) {
+      case 'no_laboratorio':
+      case 'refacao':      return 1;
+      case 'recebida':
+      case 'em_montagem':  return 2;
+      default:             return 0; // aberta / aguardando_envio
+    }
+  }
+  switch (os.status) {
+    case 'em_execucao': return 1;
+    case 'pronta':
+    case 'entregue':    return 2;
+    default:            return 0;
+  }
+}
+
+async function ordemDeServico(token) {
+  try {
+    const { rows } = await db.query(
+      `SELECT so.id, so.os_number, so.company_id, so.created_at, so.status,
+              so.kind, so.lab_status, so.promised_at, so.estimated_amount,
+              so.deposit_sale_id,
+              cu.name AS customer_name,
+              COALESCE(co.trade_name, co.legal_name) AS loja,
+              (SELECT json_agg(json_build_object('nome', i.description, 'qtd', i.quantity)
+                               ORDER BY i.sort_order, i.created_at)
+                 FROM service_order_items i WHERE i.service_order_id = so.id) AS itens
+         FROM service_orders so
+         LEFT JOIN customers cu ON cu.id = so.customer_id
+         LEFT JOIN companies co ON co.id = so.company_id
+        WHERE so.tracker_token = $1
+        LIMIT 1`,
+      [token]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    // Antes da 334 nao ha token de OS: os outros dois caminhos seguem.
+    if (e.code === '42703' || e.code === '42P01') return null;
+    throw e;
+  }
+}
+
+async function respostaDaOs(os) {
+  const oculos = os.kind === 'otica';
+  const pedido = `OS ${os.os_number != null ? os.os_number : String(os.id).slice(0, 8).toUpperCase()}`;
+  const base = { loja: os.loja, cliente: primeiroNome(os.customer_name), pedido };
+  if (oculos) base.tipo = 'oculos';
+
+  if (os.status === 'cancelada') return { cancelado: true, ...base };
+
+  // Saldo do sinal: a venda que registrou o sinal fica em deposit_sale_id
+  // e o saldo esta em credit_installments, igual a encomenda do Studio.
+  const saldo = os.deposit_sale_id
+    ? await saldoEmAberto(os.company_id, os.deposit_sale_id, 'OS')
+    : null;
+
+  return {
+    cancelado: false,
+    ...base,
+    criado_em: os.created_at,
+    entrega_combinada: os.promised_at
+      ? new Date(os.promised_at).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+      : null,
+    imagem:    null,
+    itens:     os.itens || [],
+    total:     parseFloat(os.estimated_amount) || 0,
+    etapa_atual: etapaDaOs(os),
+    etapas:      oculos ? ETAPAS_OTICA : ETAPAS_REPARO,
+    saldo,
+  };
+}
+
+// Parcela em aberto (venda com sinal) + Pix copia-e-cola. Defensivo: sem a
+// tabela, o acompanhamento continua funcionando -- so nao mostra saldo.
+// Falha no Pix tambem nao derruba nada.
+async function saldoEmAberto(companyId, saleId, txidPrefix) {
+  let saldo = null;
+  try {
+    const { rows: br } = await db.query(
+      `SELECT ci.id,
+              ROUND((ci.amount_due - COALESCE(ci.covered_amount, 0))::numeric, 2) AS valor,
+              ci.due_date
+         FROM credit_installments ci
+        WHERE ci.company_id = $1 AND ci.sale_id = $2
+          AND ci.status NOT IN ('paid', 'cancelled')
+          AND (ci.amount_due - COALESCE(ci.covered_amount, 0)) > 0.005
+        ORDER BY ci.due_date ASC LIMIT 1`,
+      [companyId, saleId]
+    );
+    if (br.length) {
+      saldo = {
+        valor:      parseFloat(br[0].valor),
+        vencimento: br[0].due_date,
+        pix:        null,
+      };
+      try {
+        const pix = await resolvePixSetup(companyId);
+        if (pix && saldo.valor > 0) {
+          saldo.pix = buildStaticBrCode({
+            pixKey:          pix.pixKey,
+            amount:          saldo.valor,
+            beneficiaryName: pix.name,
+            beneficiaryCity: pix.city,
+            txid:            sanitizeTxid(txidPrefix + String(saleId).replace(/-/g, '')),
+          });
+        }
+      } catch (_) { /* segue sem Pix */ }
+    }
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+  }
+  return saldo;
+}
+
 function respostaDoPedidoDaVitrine(o) {
   const pedido = String(o.order_number || o.id).toUpperCase();
   if (String(o.status || '').toLowerCase() === 'cancelled') {
@@ -142,8 +283,10 @@ router.get('/:token', async function(req, res) {
 
     if (!rows.length) {
       const pedido = await pedidoDaVitrine(token);
-      if (!pedido) return res.status(404).json({ error: 'Acompanhamento nao encontrado.' });
-      return res.json(respostaDoPedidoDaVitrine(pedido));
+      if (pedido) return res.json(respostaDoPedidoDaVitrine(pedido));
+      const os = await ordemDeServico(token);
+      if (os) return res.json(await respostaDaOs(os));
+      return res.status(404).json({ error: 'Acompanhamento nao encontrado.' });
     }
     const v = rows[0];
 
@@ -160,45 +303,8 @@ router.get('/:token', async function(req, res) {
 
     const etapaAtual = etapaDoStatus(v.studio_production_status);
 
-    // Saldo em aberto (venda com sinal). Defensivo: sem a tabela, o
-    // acompanhamento continua funcionando -- so nao mostra saldo.
-    let saldo = null;
-    try {
-      const { rows: br } = await db.query(
-        `SELECT ci.id,
-                ROUND((ci.amount_due - COALESCE(ci.covered_amount, 0))::numeric, 2) AS valor,
-                ci.due_date
-           FROM credit_installments ci
-          WHERE ci.company_id = $1 AND ci.sale_id = $2
-            AND ci.status NOT IN ('paid', 'cancelled')
-            AND (ci.amount_due - COALESCE(ci.covered_amount, 0)) > 0.005
-          ORDER BY ci.due_date ASC LIMIT 1`,
-        [v.company_id, v.id]
-      );
-      if (br.length) {
-        saldo = {
-          valor:      parseFloat(br[0].valor),
-          vencimento: br[0].due_date,
-          pix:        null,
-        };
-        // Pix copia-e-cola: o cliente paga sem precisar pedir os dados.
-        // Falha aqui nao pode derrubar o acompanhamento.
-        try {
-          const pix = await resolvePixSetup(v.company_id);
-          if (pix && saldo.valor > 0) {
-            saldo.pix = buildStaticBrCode({
-              pixKey:          pix.pixKey,
-              amount:          saldo.valor,
-              beneficiaryName: pix.name,
-              beneficiaryCity: pix.city,
-              txid:            sanitizeTxid('ENC' + String(v.id).replace(/-/g, '')),
-            });
-          }
-        } catch (_) { /* segue sem Pix */ }
-      }
-    } catch (e) {
-      if (e.code !== '42P01' && e.code !== '42703') throw e;
-    }
+    // Saldo em aberto (venda com sinal) — ver saldoEmAberto().
+    const saldo = await saldoEmAberto(v.company_id, v.id, 'ENC');
 
     return res.json({
       cancelado: false,
@@ -225,3 +331,5 @@ module.exports._etapaDoStatus = etapaDoStatus;
 module.exports._primeiroNome = primeiroNome;
 module.exports._ETAPAS = ETAPAS;
 module.exports._respostaDoPedidoDaVitrine = respostaDoPedidoDaVitrine;
+module.exports._etapaDaOs = etapaDaOs;
+module.exports._ETAPAS_OTICA = ETAPAS_OTICA;

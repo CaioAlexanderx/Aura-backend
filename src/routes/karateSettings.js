@@ -25,6 +25,10 @@
 //      GET  /settings/identity           — lê campos de identidade da federação
 //      PUT  /settings/identity           — salva identidade + contato + fiscal
 //
+//   6. Logo da federação (upload)
+//      POST   /settings/identity/logo    — sobe a logo (base64 → R2)
+//      DELETE /settings/identity/logo    — remove a logo
+//
 // Defensivo: 42P01 (tabela ausente) e 42703 (coluna ausente) tratados.
 // ============================================================
 'use strict';
@@ -35,6 +39,7 @@ const db = require('../config/database');
 const { guards } = require('../config/karateRoles');
 const { sendInviteEmail } = require('../services/mailer');
 const { buildInviteUrl } = require('../services/members');
+const { uploadToR2 } = require('../utils/r2Storage');
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -46,6 +51,33 @@ const ROLE_LABEL = {
   federation_staff:    'Staff',
   federation_examiner: 'Examinador',
 };
+
+// ── karate_affiliation_prefix (migration 337) ───────────────────
+// O prefixo do código de filiação dos dojôs (FPKT-001, JKA-001) deixou de
+// ser hardcoded em karateService.js e virou coluna da federação. O backend
+// sobe antes da migration ser aplicada, então a coluna entra no SELECT/UPDATE
+// só enquanto a flag estiver ligada; o primeiro 42703 a desliga para o
+// processo inteiro (cache module-level — sem try/catch por request).
+let HAS_AFFILIATION_PREFIX_COL = true;
+
+function affiliationPrefixCol() {
+  return HAS_AFFILIATION_PREFIX_COL ? ', karate_affiliation_prefix' : '';
+}
+
+// Retorna true se a flag foi desligada agora — quem chamou deve repetir a
+// consulta (affiliationPrefixCol() já reflete a mudança).
+function disableMissingPrefixCol(e) {
+  if (e.code !== '42703') return false;
+  if (!HAS_AFFILIATION_PREFIX_COL) return false;
+  if (!/karate_affiliation_prefix/.test(e.message || '')) return false;
+  HAS_AFFILIATION_PREFIX_COL = false;
+  return true;
+}
+
+// Prefixo aceito: A-Z e 0-9, 2 a 12 caracteres. Sem hífen — o hífen é o
+// separador que o gerador acrescenta (PREFIXO-NNN); aceitá-lo aqui produziria
+// 'JKA--001'. String vazia = "limpar" (volta a resolver na hora).
+const AFFILIATION_PREFIX_RE = /^[A-Z0-9]{2,12}$/;
 
 const REGIME_LABEL = {
   simples_nacional: 'Simples Nacional',
@@ -315,28 +347,16 @@ router.put('/settings/flags', ...guards.adminOnly(), async (req, res) => {
 router.get('/settings/identity', ...guards.adminOnly(), async (req, res) => {
   const fed = req.params.id;
   try {
-    const { rows } = await db.query(
-      `SELECT
-         name,
-         slug,
-         karate_logo_url,
-         wa_phone_display,
-         email AS secretary_email,
-         cnpj,
-         COALESCE(legal_name, name) AS legal_name,
-         (SELECT inscricao_municipal FROM companies c2 WHERE c2.id = c.id) AS inscricao_municipal,
-         (SELECT regime_tributario  FROM companies c2 WHERE c2.id = c.id) AS regime_tributario,
-         city, state
-       FROM companies c
-       WHERE id = $1`,
-      [fed]
-    );
+    const { rows } = await readIdentity(fed);
     if (!rows.length) return res.status(404).json({ error: 'Federação não encontrada' });
     const r = rows[0];
     return res.json({
       name:                r.name,
       slug:                r.slug,
       logo_url:            r.karate_logo_url,
+      // null = ainda não declarado; karateService resolve na hora a partir
+      // dos dojôs existentes (ou do slug, para federação nova).
+      affiliation_prefix:  r.karate_affiliation_prefix || null,
       wa_phone_display:    r.wa_phone_display,
       secretary_email:     r.secretary_email,
       cnpj:                r.cnpj,
@@ -360,7 +380,7 @@ router.put('/settings/identity', ...guards.adminOnly(), async (req, res) => {
 
   // Campos permitidos + validações
   const UPDATABLE = [
-    'name', 'slug', 'karate_logo_url', 'wa_phone_display',
+    'name', 'slug', 'karate_logo_url', 'karate_affiliation_prefix', 'wa_phone_display',
     'email', 'cnpj', 'legal_name', 'inscricao_municipal',
     'regime_tributario', 'city', 'state',
   ];
@@ -373,6 +393,19 @@ router.put('/settings/identity', ...guards.adminOnly(), async (req, res) => {
 
   if (body.slug && !/^[a-z0-9_-]+$/.test(body.slug)) {
     return res.status(422).json({ error: 'Slug inválido (use apenas letras minúsculas, números, hífens e underscores)' });
+  }
+
+  // affiliation_prefix é normalizado ANTES de validar: o admin digita "jka"
+  // ou "JKA-" e o que importa é o resultado.
+  if (body.affiliation_prefix !== undefined && body.affiliation_prefix !== null) {
+    const norm = String(body.affiliation_prefix).toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (norm && !AFFILIATION_PREFIX_RE.test(norm)) {
+      return res.status(422).json({
+        error: 'Prefixo de filiação inválido (use 2 a 12 letras ou números, sem hífen)',
+        code: 'VALIDATION_ERROR',
+      });
+    }
+    body.affiliation_prefix = norm; // '' quando o admin limpa o campo
   }
 
   // Mapeia campo FE → coluna DB
@@ -390,6 +423,7 @@ router.put('/settings/identity', ...guards.adminOnly(), async (req, res) => {
     name:                'name',
     slug:                'slug',
     logo_url:            'karate_logo_url',
+    affiliation_prefix:  'karate_affiliation_prefix',
     wa_phone_display:    'wa_phone_display',
     secretary_email:     'email',
     cnpj:                'cnpj',
@@ -401,6 +435,9 @@ router.put('/settings/identity', ...guards.adminOnly(), async (req, res) => {
   };
 
   for (const [feKey, dbCol] of Object.entries(fieldMap)) {
+    // Migration 337 pendente: ignora o campo em vez de derrubar o PUT inteiro
+    // (o resto da identidade continua salvável).
+    if (dbCol === 'karate_affiliation_prefix' && !HAS_AFFILIATION_PREFIX_COL) continue;
     if (body[feKey] !== undefined) {
       fields.push(`${dbCol} = $${idx++}`);
       values.push(body[feKey] === '' ? null : body[feKey]);
@@ -420,6 +457,15 @@ router.put('/settings/identity', ...guards.adminOnly(), async (req, res) => {
     // Retorna o estado atualizado
     return res.json({ updated: true });
   } catch (e) {
+    if (disableMissingPrefixCol(e)) {
+      // Migration 337 pendente. Desligada a flag, o próximo PUT já grava o
+      // resto da identidade — mas ESTE não gravou nada (o UPDATE é atômico),
+      // então o cliente precisa saber que deve repetir.
+      return res.status(503).json({
+        error: 'Prefixo de filiação ainda não disponível (migration 337 pendente) — tente de novo',
+        code: 'COLUMN_MISSING',
+      });
+    }
     if (e.code === '42703') {
       // Coluna ausente (inscricao_municipal ou regime_tributario) — migration 181 pendente
       return res.status(503).json({ error: 'Coluna ausente (migration 181 pendente)' });
@@ -429,6 +475,138 @@ router.put('/settings/identity', ...guards.adminOnly(), async (req, res) => {
     }
     console.error('[karateSettings] identity put:', e.message);
     return res.status(500).json({ error: 'Erro ao salvar identidade' });
+  }
+});
+
+// ── Leitura da identidade (compartilhada pelo GET e pelo upload de logo) ──
+// Uma consulta só, defensiva a 42703 da coluna nova: no primeiro erro a flag
+// é desligada e a consulta repetida SEM a coluna.
+async function readIdentity(fed) {
+  try {
+    return await db.query(
+      `SELECT
+         name,
+         slug,
+         karate_logo_url${affiliationPrefixCol()},
+         wa_phone_display,
+         email AS secretary_email,
+         cnpj,
+         COALESCE(legal_name, name) AS legal_name,
+         (SELECT inscricao_municipal FROM companies c2 WHERE c2.id = c.id) AS inscricao_municipal,
+         (SELECT regime_tributario  FROM companies c2 WHERE c2.id = c.id) AS regime_tributario,
+         city, state
+       FROM companies c
+       WHERE id = $1`,
+      [fed]
+    );
+  } catch (e) {
+    if (!disableMissingPrefixCol(e)) throw e;
+    return readIdentity(fed);
+  }
+}
+
+// ============================================================
+// SEÇÃO 6 — Logo da federação (upload)
+//
+// A marca da federação é o que o app do dojô e do praticante mostram no topo.
+// Até aqui só dava para trocá-la colando uma URL pronta em PUT
+// /settings/identity — ou seja, só quem já tivesse hospedado a imagem em
+// algum lugar. O dojô tem upload próprio desde o PR da logo do dojô
+// (POST /federation/:id/dojo/me/logo); a federação não tinha.
+//
+// ESPELHA o caminho do dojô (src/routes/karateDojo.js): JSON + base64 →
+// uploadToR2, MESMOS tipos, MESMO limite de 5 MB herdado de
+// express.json({ limit: '5mb' }) em src/app.js. Nenhum segundo mecanismo de
+// upload de arquivo.
+//
+// SEM MIGRATION: companies.karate_logo_url existe desde a migration 147 — é a
+// mesma coluna que PUT /settings/identity já escreve e que
+// GET /federation/:id/identity lê.
+//
+// adminOnly: trocar a marca da federação é ato de administração, não de
+// operação (quem só LÊ a identidade usa GET /federation/:id/identity).
+//
+//   POST   /federation/:id/settings/identity/logo   { content, content_type? }
+//   DELETE /federation/:id/settings/identity/logo
+// ============================================================
+const LOGO_ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+// Chave DETERMINÍSTICA por federação — trocar a logo sobrescreve o objeto em
+// vez de acumular lixo no R2. O preço é que a URL não muda entre uploads: sem
+// o ?v= de baixo, navegador e CDN continuariam servindo a logo ANTIGA e o
+// admin juraria que o upload não funcionou.
+function federationLogoKey(federationId, ext) {
+  return 'karate/federations/' + federationId + '/logo.' + ext;
+}
+
+// Escopado por (id, vertical): só grava se o :id for mesmo uma federação.
+async function setFederationLogo(federationId, url) {
+  const { rows } = await db.query(
+    `UPDATE companies SET karate_logo_url = $1, updated_at = NOW()
+      WHERE id = $2
+        AND vertical = 'karate_federation'
+      RETURNING karate_logo_url`,
+    [url, federationId]
+  );
+  return rows.length ? rows[0] : null;
+}
+
+router.post('/settings/identity/logo', ...guards.adminOnly(), async (req, res) => {
+  const fed = req.params.id;
+  const { content, content_type } = req.body || {};
+
+  if (!content || typeof content !== 'string' || !content.trim()) {
+    return res.status(400).json({
+      error: 'Campo content (imagem em base64) é obrigatório',
+      code: 'VALIDATION_ERROR',
+    });
+  }
+
+  const mime = ((content_type || 'image/jpeg') + '').toLowerCase().split(';')[0].trim();
+  if (!LOGO_ALLOWED_TYPES.includes(mime)) {
+    return res.status(400).json({
+      error: 'Tipo de imagem não suportado: ' + mime + '. Use image/jpeg, image/png ou image/webp.',
+      code: 'INVALID_CONTENT_TYPE',
+    });
+  }
+  const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+
+  try {
+    // Confirma que o :id é uma federação ANTES de gastar um upload no R2 —
+    // mesma ordem do upload do dojô: valida, depois sobe.
+    const { rows } = await db.query(
+      `SELECT id FROM companies WHERE id = $1 AND vertical = 'karate_federation' LIMIT 1`,
+      [fed]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Federação não encontrada' });
+
+    const result = await uploadToR2(federationLogoKey(fed, ext), content, mime);
+    if (!result.success) {
+      console.error('[karateSettings] logo R2 error:', result.error);
+      return res.status(500).json({ error: 'Erro no armazenamento da imagem' });
+    }
+
+    const saved = await setFederationLogo(fed, result.url + '?v=' + Date.now());
+    if (!saved) return res.status(404).json({ error: 'Federação não encontrada' });
+
+    return res.json({ logo_url: saved.karate_logo_url });
+  } catch (e) {
+    console.error('[karateSettings] identity logo post:', e.message);
+    return res.status(500).json({ error: 'Erro ao salvar a logo' });
+  }
+});
+
+// Remove a logo. Só limpa a coluna — o objeto no R2 fica e é sobrescrito no
+// próximo upload (chave determinística). Apagar do R2 exigiria adivinhar a
+// extensão do arquivo antigo, e uma logo órfã não é dado sensível.
+router.delete('/settings/identity/logo', ...guards.adminOnly(), async (req, res) => {
+  try {
+    const saved = await setFederationLogo(req.params.id, null);
+    if (!saved) return res.status(404).json({ error: 'Federação não encontrada' });
+    return res.json({ logo_url: null });
+  } catch (e) {
+    console.error('[karateSettings] identity logo delete:', e.message);
+    return res.status(500).json({ error: 'Erro ao remover a logo' });
   }
 });
 

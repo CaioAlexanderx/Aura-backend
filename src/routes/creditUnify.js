@@ -17,6 +17,8 @@
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const creditLedger = require('../services/creditLedger');
+// 16/09/2026: cliente de outra loja do mesmo dono tambem vale (utils/customerScope.js).
+const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 
 // Helper copiado de creditRefund.js (padrao canonico de checagem do modulo).
 async function assertCrediarioEnabled(companyId) {
@@ -141,11 +143,9 @@ router.get('/customers/:cid/accounts/:accountId/unify/preview', async (req, res)
 
   // Valida que o cliente pertence a empresa.
   try {
-    const { rows } = await db.query(
-      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
-      [customerId, companyId]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
+    if (!(await findOwnerScopedCustomer(db, companyId, customerId))) {
+      return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
+    }
   } catch (err) {
     console.error('[creditUnify] preview customer check:', err.code, err.message);
     return res.status(500).json({ error: 'Erro ao verificar cliente' });
@@ -196,11 +196,9 @@ router.post('/customers/:cid/accounts/:accountId/unify', async (req, res) => {
 
   // Valida que o cliente pertence a empresa.
   try {
-    const { rows } = await db.query(
-      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
-      [customerId, companyId]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
+    if (!(await findOwnerScopedCustomer(db, companyId, customerId))) {
+      return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
+    }
   } catch (err) {
     console.error('[creditUnify] apply customer check:', err.code, err.message);
     return res.status(500).json({ error: 'Erro ao verificar cliente' });

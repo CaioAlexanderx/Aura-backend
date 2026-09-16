@@ -34,6 +34,7 @@ const {
   applyMap,
   parseDate,
   parseCSVLine,
+  resolveAffiliationPrefix,
 } = require('../services/karateService');
 
 // ── Multer (reutiliza padrão do projeto se disponível; fallback raw body) ─
@@ -76,7 +77,7 @@ function validateRow(data, rowIndex) {
   // descartada silenciosamente, e não ganha um número inventado).
   const registrationNumber = data.registration_number ? String(data.registration_number).trim() : '';
   if (!registrationNumber) {
-    errors.push({ row: rowIndex + 1, field: 'registration_number', message: 'Número de matrícula FPKT obrigatório (não é gerado pelo sistema)' });
+    errors.push({ row: rowIndex + 1, field: 'registration_number', message: 'Número de matrícula da federação obrigatório (não é gerado pelo sistema)' });
   }
 
   const parsedBirth = parseDate(data.birth_date);
@@ -364,13 +365,22 @@ const batchFpktHandler = async (req, res) => {
     }
 
     // ── Dojôs (Academias) ──
+    // O prefixo do código de filiação vem da federação (migration 337), não
+    // mais cravado como 'FPKT-' — era o segundo lugar do backend a carimbar
+    // o código de uma federação em outra. Resolvido UMA vez, fora do laço.
+    const affiliationPrefix = dojos.length
+      ? await resolveAffiliationPrefix(client, federationId)
+      : null;
+
     for (const d of dojos) {
       const name = cleanCell(d.name);
       if (!name) continue;
       const address = cleanCell(d.address);
       const phone = cleanCell(d.phone);
       const cod = cleanCell(d.cod);
-      const fpktId = cod ? `FPKT-${cod.replace(/\D/g, '').padStart(3, '0')}` : null;
+      const fpktId = cod
+        ? `${affiliationPrefix}-${cod.replace(/\D/g, '').padStart(3, '0')}`
+        : null;
       const isActive = d.status === 'active';
 
       const exists = await client.query(
@@ -424,7 +434,7 @@ const batchFpktHandler = async (req, res) => {
           summary.skipped_detail.push({
             name: name || null,
             registration_number: reg || null,
-            reason: !reg ? 'sem Número FPKT (chave)' : 'sem nome',
+            reason: !reg ? 'sem número de matrícula (chave)' : 'sem nome',
           });
         }
         continue;
@@ -590,7 +600,7 @@ const batchFpktHandler = async (req, res) => {
   } catch (err) {
     try { await client.query('ROLLBACK'); } catch (_) {}
     console.error('[karateImport] batch-fpkt error:', err.message);
-    res.status(500).json({ error: 'Erro na importação FPKT', detail: err.message, ...summary });
+    res.status(500).json({ error: 'Erro na importação', detail: err.message, ...summary });
   } finally {
     client.release();
   }
