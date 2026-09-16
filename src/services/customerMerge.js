@@ -21,6 +21,10 @@
 //   4. alvo recebe os campos escolhidos, a união das tags e das datas, a
 //      soma de total_purchases/total_spent, a menor primeira compra e a
 //      maior última compra; opt-out de marketing de qualquer um vence
+//      (customers.marketing_opt_out = OR dos dois e, se existir
+//      customer_consent_events — migration 340 —, um evento opt_out novo
+//      para o alvo em cada empresa/finalidade onde um dos dois estava com
+//      opt-out e o histórico unido terminaria em opt-in)
 //   5. origem: merged_into_id = alvo, is_active = false
 //   6. nota automática (kind = 'merge') na linha do tempo do alvo
 //
@@ -43,7 +47,7 @@ const OWNER_REFS = [
   { table: 'purchase_reviews', column: 'customer_id', label: 'avaliacoes' },
   { table: 'wa_marketing_log', column: 'customer_id', label: 'envios de marketing' },
   { table: 'birthday_messages_sent', column: 'customer_id', label: 'mensagens de aniversario' },
-  // Ainda não existe em main; entra sozinha quando a tabela for criada.
+  // Migration 340 (consentimento por cliente, PR #713). Sem a tabela, é pulada.
   { table: 'customer_consent_events', column: 'customer_id', label: 'eventos de consentimento' },
   { table: 'hub_conversations', column: 'customer_id', label: 'conversas do hub' },
   { table: 'digital_orders', column: 'customer_id', label: 'pedidos online' },
@@ -411,6 +415,61 @@ async function countRefSafe(client, ref, sourceId) {
   }
 }
 
+/** Query num SAVEPOINT; tabela/coluna ausente -> null. */
+async function optionalQuery(client, sql, params) {
+  await client.query('SAVEPOINT merge_opt');
+  try {
+    const r = await client.query(sql, params);
+    await client.query('RELEASE SAVEPOINT merge_opt');
+    return r;
+  } catch (e) {
+    await client.query('ROLLBACK TO SAVEPOINT merge_opt');
+    await client.query('RELEASE SAVEPOINT merge_opt');
+    if (isSkippable(e)) return null;
+    throw e;
+  }
+}
+
+// Estado atual do consentimento = evento mais recente por empresa e
+// finalidade (regra da migration 340).
+const CONSENT_STATE_SQL = `
+     SELECT DISTINCT ON (customer_id, company_id, purpose)
+            customer_id, company_id, purpose, action
+       FROM customer_consent_events
+      WHERE customer_id = ANY($1::uuid[])
+      ORDER BY customer_id, company_id, purpose, created_at DESC, id DESC`;
+
+async function readConsentOptOuts(client, ids) {
+  const r = await optionalQuery(client, `-- merge:consentimento-antes${CONSENT_STATE_SQL}`, [ids]);
+  if (!r) return null;
+  const keys = new Map();
+  for (const row of r.rows) {
+    if (row.action === 'opt_out') keys.set(`${row.company_id}|${row.purpose}`, row);
+  }
+  return keys;
+}
+
+async function enforceConsentOptOut(client, target, optOuts, user) {
+  if (!optOuts || !optOuts.size) return 0;
+  const r = await optionalQuery(client, `-- merge:consentimento-depois${CONSENT_STATE_SQL}`, [[target.id]]);
+  if (!r) return 0;
+  const current = new Map(r.rows.map(row => [`${row.company_id}|${row.purpose}`, row.action]));
+  let inserted = 0;
+  for (const [key, row] of optOuts) {
+    if (current.get(key) === 'opt_out') continue;
+    await client.query(
+      `-- merge:consentimento-optout
+       INSERT INTO customer_consent_events
+         (company_id, customer_id, phone, action, channel, purpose, consent_text, collected_by)
+       VALUES ($1, $2, $3, 'opt_out', 'manual', $4, $5, $6)`,
+      [row.company_id, target.id, target.phone_e164 || null, row.purpose,
+        'Mesclagem de cadastros: o opt-out de um dos cadastros prevalece.', (user && user.id) || null]
+    );
+    inserted++;
+  }
+  return inserted;
+}
+
 async function executeMerge({ ownerCompanyIds, targetId, sourceId, fields, user }) {
   const choices = validateFieldChoices(fields);
   const client = await db.connect();
@@ -418,6 +477,7 @@ async function executeMerge({ ownerCompanyIds, targetId, sourceId, fields, user 
     await client.query('BEGIN');
     const { target, source } = await loadPair(client, { ownerCompanyIds, targetId, sourceId, forUpdate: true });
     const sameCompany = target.company_id === source.company_id;
+    const consentOptOuts = await readConsentOptOuts(client, [target.id, source.id]);
 
     const moved = [];
     const kept = [];
@@ -444,6 +504,8 @@ async function executeMerge({ ownerCompanyIds, targetId, sourceId, fields, user 
         else if (n) kept.push({ table: ref.table, label: ref.label, rows: n, reason: 'crediario_de_outra_empresa' });
       }
     }
+
+    const consentOptOutsAdded = await enforceConsentOptOut(client, target, consentOptOuts, user);
 
     const { updates, conflicts } = planFields(target, source, choices);
     const upd = buildTargetUpdate(target.id, updates);
@@ -473,6 +535,7 @@ async function executeMerge({ ownerCompanyIds, targetId, sourceId, fields, user 
       kept,
       skipped_tables: skippedTables,
       conflicts_resolved: conflicts,
+      consent_opt_outs_added: consentOptOutsAdded,
       note_id: note ? note.id : null,
     };
   } catch (e) {
