@@ -55,7 +55,6 @@ function buildApp() {
   // Track C routes montados como em index.js (sem prefixo duplicado)
   app.use('/federation/:id', require('../src/routes/karateRequirements'));
   app.use('/federation/:id', require('../src/routes/karateExams'));
-  app.use('/federation/:id', require('../src/routes/karateCourses'));
   app.use('/federation/:id', require('../src/routes/karateCertificates'));
   return app;
 }
