@@ -673,7 +673,7 @@ async function buildTimeline({ companyIds, customer, query }) {
     events,
     next_cursor: hasMore && last ? encodeCursor(last.at, last.key) : null,
     types: effectiveTypes,
-    locked_types: lockedTypes.filter(t => types.includes(t)),
+    locked_types: types.filter(t => lockedTypes.includes(t)),
   };
 }
 

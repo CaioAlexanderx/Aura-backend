@@ -3,6 +3,7 @@
 //
 // companyRouter — montado em private.js como /companies/:id/customers:
 //   GET    /tags                          tags da base do dono, com contagem
+//                                          (sem diferenciar maiusculas)
 //   GET    /duplicates                    grupos candidatos a mesclagem
 //   GET    /:cid/timeline                 linha do tempo (eventos desta empresa)
 //   GET    /:cid/summary                  métricas do topo da ficha
@@ -75,13 +76,13 @@ companyRouter.get('/tags', async (req, res) => {
     try {
       ({ rows } = await db.query(
         `-- perfil:tags
-         SELECT t.tag, COUNT(*)::int AS count
+         SELECT MIN(t.tag) AS tag, COUNT(*)::int AS count
            FROM customers c
           CROSS JOIN LATERAL unnest(c.tags) AS t(tag)
           WHERE c.company_id = ANY($1)
             AND c.merged_into_id IS NULL
-          GROUP BY t.tag
-          ORDER BY count DESC, t.tag ASC`,
+          GROUP BY lower(t.tag)
+          ORDER BY count DESC, MIN(t.tag) ASC`,
         [ownerCompanyIds]
       ));
     } catch (e) {
