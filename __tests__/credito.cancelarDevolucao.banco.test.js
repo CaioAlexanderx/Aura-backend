@@ -14,6 +14,7 @@
 //   3. devolução antiga (sem registro) em venda COM parcela: 409
 //   4. devolução antiga em venda SEM parcela (o caso da Karina): desfaz
 //   5. activeReturnsOf enxerga a devolução só enquanto ela está ativa
+//   6. GET /sales/:id marca o item devolvido e a devolução mostra o que voltou
 //
 // Tudo dentro de UMA transação revertida no afterAll — zero resíduo.
 // ============================================================
@@ -275,4 +276,40 @@ test('5. activeReturnsOf só enxerga devolução ativa', async () => {
 
   await cancelar(dev.devolucao_sale_id);
   expect(await refund.activeReturnsOf(client, { companyId, saleId: v.saleId })).toEqual([]);
+});
+
+test('6. detalhe da venda mostra o devolvido; a devolução mostra o que voltou', async () => {
+  const express = require('express');
+  const request = require('supertest');
+  const app = express();
+  app.use('/companies/:id/sales', require('../src/routes/sales'));
+
+  const vans = await produto('VANS 42/43 D', 0);
+  const sand = await produto('SANDALIA D', 0);
+  const v = await vendaCrediario({
+    itens: [{ productId: vans, preco: 120, nome: 'VANS 42/43' }, { productId: sand, preco: 85, nome: 'SANDALIA' }],
+    parcelas: [],
+  });
+  const dev = await devolver(v.saleId, v.itemIds[0]);
+
+  const venda = await request(app).get(`/companies/${companyId}/sales/${v.saleId}`);
+  expect(venda.status).toBe(200);
+  const porId = Object.fromEntries(venda.body.items.map((i) => [i.id, i]));
+  expect(porId[v.itemIds[0]]).toMatchObject({ returned_quantity: 1, available_quantity: 0 });
+  expect(porId[v.itemIds[1]]).toMatchObject({ returned_quantity: 0, available_quantity: 1 });
+  expect(venda.body.returns.map((r) => r.id)).toEqual([dev.devolucao_sale_id]);
+
+  const devolucao = await request(app).get(`/companies/${companyId}/sales/${dev.devolucao_sale_id}`);
+  expect(devolucao.status).toBe(200);
+  expect(devolucao.body.devolucao).toMatchObject({
+    original_sale_id: v.saleId,
+    refund_value: 120,
+    items: [expect.objectContaining({ quantity: 1, product_name: 'VANS 42/43 D' })],
+  });
+
+  // Desfeita a devolução, o item volta a contar como vendido.
+  await cancelar(dev.devolucao_sale_id);
+  const depois = await request(app).get(`/companies/${companyId}/sales/${v.saleId}`);
+  expect(depois.body.items.find((i) => i.id === v.itemIds[0])).toMatchObject({ returned_quantity: 0 });
+  expect(depois.body.returns).toEqual([]);
 });
