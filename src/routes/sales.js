@@ -60,6 +60,7 @@ const pool = require('../config/database');
 const asyncHandler = require('../utils/asyncHandler');
 const AppError = require('../errors/AppError');
 const creditLedger = require('../services/creditLedger');
+const { cancelDevolucao, activeReturnsOf } = require('../services/credit/refund');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
 
 // Lancamento financeiro da venda, pra UI abrir "Editar lancamento".
@@ -449,6 +450,31 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       throw new AppError('Venda ja esta cancelada', 400);
     }
     const isTroca = saleRes.rows[0].type === 'troca';
+    const isDevolucao = saleRes.rows[0].type === 'devolucao';
+
+    // 16/09/2026 (caso MHT / Karina Quadros): venda com devolucao ou troca
+    // ATIVA nao pode ser cancelada direto -- o cancel repoe TODOS os itens
+    // (inclusive o ja devolvido, somando duas vezes) e o credito da
+    // devolucao ficava solto no ledger. Desfaz a devolucao/troca primeiro.
+    if (!isTroca && !isDevolucao) {
+      const ativas = await activeReturnsOf(client, { companyId: companyId, saleId: saleId });
+      if (ativas.length) {
+        const nums = ativas.map(function(a) { return a.sale_number ? '#' + a.sale_number : 'sem numero'; }).join(', ');
+        const e = new Error('Esta venda tem devolução ou troca registrada (' + nums + '). Cancele a devolução ou a troca primeiro.');
+        e.isRefundError = true;
+        e.status = 409;
+        e.body = { error: e.message, code: 'SALE_HAS_ACTIVE_RETURN', returns: ativas };
+        throw e;
+      }
+    }
+
+    // Devolucao do crediario: desfaz estoque, credito, parcelas e A Receber
+    // (services/credit/refund.js). O cancel generico abaixo nao acha nada
+    // dela (nao tem sale_items, receita nem debito) -- so marca a linha.
+    let devolucaoUndo = null;
+    if (isDevolucao) {
+      devolucaoUndo = await cancelDevolucao(client, { companyId: companyId, devolucaoSaleId: saleId });
+    }
 
     // Repoe estoque dos itens da venda (na troca = itens NOVOS levados)
     const itemsRes = await client.query(
@@ -627,9 +653,12 @@ router.post('/:sale_id/cancel', asyncHandler(async (req, res) => {
       troca_tx_removed: trocaTxRemoved,
       payouts_reversed: payoutsReversed,
       fiscal_warnings: fiscalWarnings,
+      devolucao_undo: devolucaoUndo,
     });
   } catch (err) {
     await client.query('ROLLBACK');
+    // Recusas com code (o handler global so repassa a mensagem).
+    if (err.isRefundError) return res.status(err.status).json(err.body);
     throw err;
   } finally {
     client.release();

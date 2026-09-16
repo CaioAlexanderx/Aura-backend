@@ -1210,6 +1210,7 @@ async function applyUnify(client, {
 }
 
 module.exports = {
+  _hasReferenceCols,
   _getOrCreateProfile,
   _getOrCreatePlanConfig,
   _updateCreditUsed,
