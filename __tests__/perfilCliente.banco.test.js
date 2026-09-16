@@ -408,7 +408,10 @@ describe('duplicados e mesclagem no schema real', () => {
       { table: 'sales', label: 'vendas', rows: 1 },
       { table: 'customer_credit_transactions', label: 'lancamentos do crediario', rows: 1 },
     ]));
-    expect(prev.body.skipped_tables).toContain('customer_consent_events');
+    // customer_consent_events chega com a migration 340 (PR #713)
+    const [{ consent }] = await sql(`SELECT to_regclass('public.customer_consent_events') IS NOT NULL AS consent`);
+    if (consent) expect(prev.body.skipped_tables).not.toContain('customer_consent_events');
+    else expect(prev.body.skipped_tables).toContain('customer_consent_events');
 
     const res = await request(app).post(`/companies/${companyA}/customers/${alvo}/merge`)
       .send({ source_id: origem, fields: { name: 'target' } });

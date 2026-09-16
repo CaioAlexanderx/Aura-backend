@@ -186,12 +186,12 @@ function fakeClient(handler) {
 }
 
 function tagOf(sql) {
-  const m = /-- (merge:\w+(?: \w+)?)/.exec(sql);
+  const m = /-- (merge:[\w-]+(?: \w+)?)/.exec(sql);
   return m ? m[1] : sql.split(/\s+/).slice(0, 2).join(' ');
 }
 
 describe('POST /:cid/merge — execução transacional', () => {
-  function setup({ sourceOver = {}, onMove = {}, failAt = null } = {}) {
+  function setup({ sourceOver = {}, onMove = {}, failAt = null, consent = {} } = {}) {
     db.query.mockImplementation(async (sql) => {
       if (ownerScope(sql)) return { rows: [{ id: CO_A }, { id: CO_B }] };
       throw new Error('fora da transacao: ' + sql);
@@ -200,6 +200,8 @@ describe('POST /:cid/merge — execução transacional', () => {
       const tag = tagOf(sql);
       if (failAt && tag === failAt) throw pgError('XX000', 'falha simulada');
       if (tag === 'merge:carrega') return { rows: [target(), source(sourceOver)] };
+      if (consent[tag] instanceof Error) throw consent[tag];
+      if (consent[tag]) return { rows: consent[tag] };
       const mv = /^merge:move (\w+)$/.exec(tag);
       if (mv) {
         const h = onMove[mv[1]];
@@ -235,10 +237,12 @@ describe('POST /:cid/merge — execução transacional', () => {
     expect(tags[0]).toBe('BEGIN');
     expect(tags[1]).toBe('merge:carrega');
     expect(client.log[1].sql).toMatch(/FOR UPDATE OF c/);
+    // estado do consentimento lido antes de mover, em savepoint próprio
+    expect(tags.slice(2, 5)).toEqual(['SAVEPOINT merge_opt', 'merge:consentimento-antes', 'RELEASE SAVEPOINT']);
     // cada tabela do dono: SAVEPOINT -> UPDATE -> RELEASE
-    expect(tags.slice(2, 5)).toEqual(['SAVEPOINT merge_ref', 'merge:move sales', 'RELEASE SAVEPOINT']);
-    expect(client.log[3].params).toEqual([TARGET, SOURCE]);
-    expect(client.log[3].sql).toMatch(/UPDATE sales SET customer_id = \$1 WHERE customer_id = \$2/);
+    expect(tags.slice(5, 8)).toEqual(['SAVEPOINT merge_ref', 'merge:move sales', 'RELEASE SAVEPOINT']);
+    expect(client.log[6].params).toEqual([TARGET, SOURCE]);
+    expect(client.log[6].sql).toMatch(/UPDATE sales SET customer_id = \$1 WHERE customer_id = \$2/);
     // o fim é sempre alvo -> origem -> nota -> COMMIT
     expect(tags.slice(-4)).toEqual(['merge:alvo', 'merge:origem', 'merge:nota', 'COMMIT']);
     expect(tags).not.toContain('ROLLBACK');
@@ -304,6 +308,55 @@ describe('POST /:cid/merge — execução transacional', () => {
     expect(nota.params[3]).toMatch(/Cadastro "Ana S\." mesclado/);
     expect(nota.params[3]).toMatch(/Movido: 4 vendas, 1 cupons/);
     expect(nota.params[3]).toMatch(/Ficou no cadastro antigo: 1 mensagens de aniversario, 2 lancamentos do crediario/);
+  });
+
+  it('consentimento: opt-out de qualquer um vence mesmo com opt-in mais recente no alvo', async () => {
+    const client = setup({
+      consent: {
+        'merge:consentimento-antes': [
+          { customer_id: SOURCE, company_id: CO_A, purpose: 'marketing', action: 'opt_out' },
+          { customer_id: SOURCE, company_id: CO_B, purpose: 'marketing', action: 'opt_out' },
+          { customer_id: TARGET, company_id: CO_A, purpose: 'marketing', action: 'opt_in' },
+        ],
+        // histórico unido: na Loja A o opt-in do alvo é o mais recente; na
+        // Loja B o opt-out da origem continua valendo
+        'merge:consentimento-depois': [
+          { customer_id: TARGET, company_id: CO_A, purpose: 'marketing', action: 'opt_in' },
+          { customer_id: TARGET, company_id: CO_B, purpose: 'marketing', action: 'opt_out' },
+        ],
+      },
+    });
+
+    const res = await request(app).post(`/companies/${CO_A}/customers/${TARGET}/merge`).send({ source_id: SOURCE });
+    expect(res.status).toBe(200);
+    expect(res.body.consent_opt_outs_added).toBe(1);
+    const ins = client.log.filter(q => tagOf(q.sql) === 'merge:consentimento-optout');
+    expect(ins).toHaveLength(1);
+    expect(ins[0].sql).toMatch(/'opt_out', 'manual'/);
+    expect(ins[0].params).toEqual([
+      CO_A, TARGET, null, 'marketing',
+      'Mesclagem de cadastros: o opt-out de um dos cadastros prevalece.', USER,
+    ]);
+    const antes = client.log.find(q => tagOf(q.sql) === 'merge:consentimento-antes');
+    expect(antes.params[0]).toEqual([TARGET, SOURCE]);
+    expect(antes.sql).toMatch(/DISTINCT ON \(customer_id, company_id, purpose\)/);
+    const tags = client.log.map(q => tagOf(q.sql));
+    expect(tags.indexOf('merge:consentimento-depois')).toBeGreaterThan(tags.indexOf('merge:move customer_consent_events'));
+    expect(tags.indexOf('merge:consentimento-optout')).toBeLessThan(tags.indexOf('merge:alvo'));
+  });
+
+  it('consentimento: sem a tabela (migration 340 pendente) a mesclagem segue', async () => {
+    const client = setup({
+      onMove: { customer_consent_events: pgError('42P01') },
+      consent: { 'merge:consentimento-antes': pgError('42P01') },
+    });
+    const res = await request(app).post(`/companies/${CO_A}/customers/${TARGET}/merge`).send({ source_id: SOURCE });
+    expect(res.status).toBe(200);
+    expect(res.body.consent_opt_outs_added).toBe(0);
+    const tags = client.log.map(q => tagOf(q.sql));
+    expect(tags.slice(2, 6)).toEqual(['SAVEPOINT merge_opt', 'merge:consentimento-antes', 'ROLLBACK TO', 'RELEASE SAVEPOINT']);
+    expect(tags).not.toContain('merge:consentimento-depois');
+    expect(tags[tags.length - 1]).toBe('COMMIT');
   });
 
   it('mesma empresa: o crediário também é movido', async () => {
