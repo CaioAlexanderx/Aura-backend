@@ -37,10 +37,25 @@
 // PRIMEIROS ALFABETICAMENTE, nao o mais recente de verdade.
 //
 // Justificativa em src/utils/ownerScope.js.
+//
+// 16/09/2026 (Fase 1 · perfil do cliente, migration 341): PATCH aceita
+// tags, preferences (substitui o objeto inteiro) e important_dates; cpf_cnpj
+// passa a ser validado (digito verificador; vazio apaga) e gravado so com
+// digitos. POST e PATCH mantem phone_e164 (src/utils/phone.js) -- o trigger
+// da 341 faz o mesmo nos outros caminhos de escrita. Antes da migration as
+// colunas novas nao existem: 42703 -> cache module-level e a escrita segue
+// sem elas, devolvendo ignored_fields (armadilha 1).
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { getOwnerScopedCompanyIds } = require('../utils/ownerScope');
+const { toPhoneE164BR } = require('../utils/phone');
+const { parseCpfCnpjInput } = require('../utils/cpfCnpj');
+const { parseTags, parsePreferences, parseImportantDates } = require('../services/customerProfileFields');
+
+// Colunas da migration 341. null = ainda nao sabemos; false = 42703 visto.
+let profileColumnsAvailable = null;
+function _resetProfileColumnsCache() { profileColumnsAvailable = null; }
 
 function getPlanLimit(plan) {
   switch ((plan || '').toLowerCase()) {
@@ -232,12 +247,30 @@ router.post('/', async (req, res) => {
   const finalInstagram = instagram_handle || instagram || null;
 
   try {
-    const result = await db.query(
-      `INSERT INTO customers (company_id, name, email, phone, notes, birth_date, instagram_handle, cpf_cnpj)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING *`,
-      [companyId, String(name).trim(), email || null, phone || null, notes || null, finalBirthDate, finalInstagram, cpf_cnpj || null]
-    );
+    const baseValues = [companyId, String(name).trim(), email || null, phone || null, notes || null, finalBirthDate, finalInstagram, cpf_cnpj || null];
+    let result;
+    if (profileColumnsAvailable !== false) {
+      try {
+        result = await db.query(
+          `INSERT INTO customers (company_id, name, email, phone, notes, birth_date, instagram_handle, cpf_cnpj, phone_e164)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           RETURNING *`,
+          [...baseValues, toPhoneE164BR(phone)]
+        );
+        profileColumnsAvailable = true;
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        profileColumnsAvailable = false; // migration 341 ainda nao aplicada
+      }
+    }
+    if (!result) {
+      result = await db.query(
+        `INSERT INTO customers (company_id, name, email, phone, notes, birth_date, instagram_handle, cpf_cnpj)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        baseValues
+      );
+    }
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('[customers] create error:', err.message);
@@ -248,39 +281,97 @@ router.post('/', async (req, res) => {
 // PATCH /:cid -- update customer (owner-scoped: pode editar de qualquer loja do owner)
 router.patch('/:cid', async (req, res) => {
   const { id: companyId, cid } = req.params;
+  const body = req.body || {};
   const fieldMap = {
     name: 'name', email: 'email', phone: 'phone', notes: 'notes',
     cpf_cnpj: 'cpf_cnpj', birth_date: 'birth_date', birthday: 'birth_date',
     instagram: 'instagram_handle', instagram_handle: 'instagram_handle', is_active: 'is_active',
   };
-  const updates = []; const values = []; let idx = 1;
+  // { col, val, cast, profile, field } -- profile = coluna da migration 341
+  const sets = [];
   const seen = new Set();
 
   for (const [bodyKey, dbCol] of Object.entries(fieldMap)) {
-    if (req.body[bodyKey] !== undefined && !seen.has(dbCol)) {
-      let val = req.body[bodyKey];
+    if (body[bodyKey] !== undefined && !seen.has(dbCol)) {
+      let val = body[bodyKey];
       // Sanitiza datas antes de mandar ao Postgres
       if (dbCol === 'birth_date') val = parseBirthDate(val);
-      updates.push(`${dbCol} = $${idx}`);
-      values.push(val);
-      idx++; seen.add(dbCol);
+      if (dbCol === 'cpf_cnpj') {
+        const doc = parseCpfCnpjInput(val);
+        if (!doc.ok) return res.status(400).json({ error: doc.error, field: 'cpf_cnpj' });
+        val = doc.value;
+      }
+      sets.push({ col: dbCol, val });
+      seen.add(dbCol);
     }
   }
+  if (body.phone !== undefined) {
+    sets.push({ col: 'phone_e164', val: toPhoneE164BR(body.phone), profile: true });
+  }
+  if (body.tags !== undefined) {
+    const r = parseTags(body.tags);
+    if (!r.ok) return res.status(400).json({ error: r.error, field: 'tags' });
+    sets.push({ col: 'tags', val: r.value, cast: 'text[]', profile: true, field: 'tags' });
+  }
+  if (body.preferences !== undefined) {
+    const r = parsePreferences(body.preferences);
+    if (!r.ok) return res.status(400).json({ error: r.error, field: 'preferences' });
+    sets.push({ col: 'preferences', val: JSON.stringify(r.value), cast: 'jsonb', profile: true, field: 'preferences' });
+  }
+  if (body.important_dates !== undefined) {
+    const r = parseImportantDates(body.important_dates);
+    if (!r.ok) return res.status(400).json({ error: r.error, field: 'important_dates' });
+    sets.push({ col: 'important_dates', val: JSON.stringify(r.value), cast: 'jsonb', profile: true, field: 'important_dates' });
+  }
 
-  if (updates.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-  updates.push('updated_at = NOW()');
+  if (sets.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
+
+  const runUpdate = (ownerCompanyIds, withProfile) => {
+    const active = sets.filter(x => withProfile || !x.profile);
+    if (!active.length) return null;
+    const values = [];
+    const parts = active.map((x) => {
+      values.push(x.val);
+      return `${x.col} = $${values.length}${x.cast ? '::' + x.cast : ''}`;
+    });
+    parts.push('updated_at = NOW()');
+    values.push(cid, ownerCompanyIds);
+    return db.query(
+      `UPDATE customers SET ${parts.join(', ')} WHERE id = $${values.length - 1} AND company_id = ANY($${values.length}) RETURNING *`,
+      values
+    );
+  };
 
   try {
     // MULTICNPJ Onda 2.3: pode editar cliente "de outra loja" do mesmo owner
     const ownerCompanyIds = await getOwnerScopedCompanyIds(companyId);
-    values.push(cid, ownerCompanyIds);
 
-    const result = await db.query(
-      `UPDATE customers SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = ANY($${idx + 1}) RETURNING *`,
-      values
-    );
+    const hasProfile = sets.some(x => x.profile);
+    const ignoredFields = [];
+    let result = null;
+    if (hasProfile && profileColumnsAvailable !== false) {
+      try {
+        result = await runUpdate(ownerCompanyIds, true);
+        profileColumnsAvailable = true;
+      } catch (e) {
+        if (e.code !== '42703') throw e;
+        profileColumnsAvailable = false; // migration 341 ainda nao aplicada
+      }
+    }
+    if (!result) {
+      if (hasProfile) ignoredFields.push(...sets.filter(x => x.profile && x.field).map(x => x.field));
+      result = await runUpdate(ownerCompanyIds, false);
+      if (!result) {
+        return res.status(409).json({
+          error: 'Campos do perfil ainda indisponiveis (migration 341 pendente)',
+          code: 'PROFILE_COLUMNS_MISSING',
+          ignored_fields: ignoredFields,
+        });
+      }
+    }
     if (!result.rows.length) return res.status(404).json({ error: 'Cliente nao encontrado' });
-    res.json(result.rows[0]);
+    const row = result.rows[0];
+    res.json(ignoredFields.length ? { ...row, ignored_fields: ignoredFields } : row);
   } catch (err) {
     console.error('[customers] update error:', err.message);
     res.status(500).json({ error: 'Erro ao atualizar cliente' });
@@ -305,3 +396,4 @@ router.delete('/:cid', async (req, res) => {
 });
 
 module.exports = router;
+module.exports._resetProfileColumnsCache = _resetProfileColumnsCache;
