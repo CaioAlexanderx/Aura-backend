@@ -277,19 +277,79 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
     [saleId]
   );
 
+  // 16/09/2026 (caso MHT / Karina Quadros): devolucao e troca nao apagam o
+  // sale_item -- ancoram outra venda. Sem expor isso, a tela de Vendas
+  // mostrava o Vans 42/43 como vendido depois de devolvido ("o 42
+  // permanece"). Mesma conta do Editar lancamento (transactionSale.js).
+  const returnedByItem = new Map();
+  let activeReturns = [];
+  try {
+    const retQty = await pool.query(
+      'SELECT tri.original_sale_item_id AS item_id, COALESCE(SUM(tri.quantity), 0) AS qty ' +
+      'FROM troca_returned_items tri JOIN sales ts ON ts.id = tri.troca_sale_id ' +
+      "WHERE tri.original_sale_id = $1 AND COALESCE(ts.status, 'completed') <> 'cancelled' " +
+      'GROUP BY tri.original_sale_item_id',
+      [saleId]
+    );
+    retQty.rows.forEach(function(r) { returnedByItem.set(r.item_id, parseFloat(r.qty) || 0); });
+    activeReturns = (await activeReturnsOf(pool, { companyId: companyId, saleId: saleId })).map(function(r) {
+      return { id: r.id, sale_number: r.sale_number || null, type: r.type };
+    });
+  } catch (e) {
+    if (e.code !== '42P01' && e.code !== '42703') throw e;
+  }
+
   const items = itemsRes.rows.map(function(r) {
+    const qty = parseFloat(r.quantity) || 0;
+    const returnedQty = returnedByItem.get(r.id) || 0;
     return {
       id: r.id,
       product_id: r.product_id,
       variant_id: r.variant_id,
-      quantity: parseFloat(r.quantity) || 0,
+      quantity: qty,
       unit_price: parseFloat(r.unit_price) || 0,
       discount: parseFloat(r.discount || 0) || 0,
       total_price: parseFloat(r.total_price) || 0,
       product_name: r.product_name || r.product_name_snapshot || 'Item',
       image_url: r.image_url,
+      returned_quantity: returnedQty,
+      available_quantity: Math.max(0, parseFloat((qty - returnedQty).toFixed(3))),
     };
   });
+
+  // Venda type='devolucao' nao tem sale_items: o que voltou vive em
+  // troca_returned_items. Sem este bloco o detalhe abria com 0 itens.
+  let devolucao = null;
+  if ((sale.type || 'sale') === 'devolucao') {
+    try {
+      const devRes = await pool.query(
+        'SELECT tri.product_id, tri.variant_id, tri.quantity, tri.unit_price, ' +
+        '       COALESCE(p.name, tri.product_name_snapshot) AS product_name, ' +
+        '       o.sale_number AS original_sale_number ' +
+        'FROM troca_returned_items tri ' +
+        'LEFT JOIN products p ON p.id = tri.product_id ' +
+        'LEFT JOIN sales o ON o.id = tri.original_sale_id ' +
+        'WHERE tri.troca_sale_id = $1 ORDER BY tri.id',
+        [saleId]
+      );
+      devolucao = {
+        original_sale_id: sale.exchange_of_sale_id || null,
+        original_sale_number: devRes.rows[0] ? devRes.rows[0].original_sale_number : null,
+        refund_value: Math.abs(parseFloat(sale.total_amount) || 0),
+        items: devRes.rows.map(function(r) {
+          return {
+            product_id: r.product_id,
+            variant_id: r.variant_id,
+            quantity: parseFloat(r.quantity) || 0,
+            unit_price: parseFloat(r.unit_price) || 0,
+            product_name: r.product_name || 'Item',
+          };
+        }),
+      };
+    } catch (e) {
+      if (e.code !== '42P01' && e.code !== '42703') throw e;
+    }
+  }
 
   // 02/06/2026: bloco `troca` quando type='troca' — lado devolvido + liquido + pagamentos.
   let troca = null;
@@ -395,6 +455,9 @@ router.get('/:sale_id', asyncHandler(async (req, res) => {
     },
     items: items,
     troca: troca,
+    devolucao: devolucao,
+    // Devolucoes/trocas ativas desta venda (cancelar a venda exige desfaze-las).
+    returns: activeReturns,
     fiscal: fiscal,
   });
 }));
