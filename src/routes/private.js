@@ -230,4 +230,13 @@ router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPayme
 // aprovação formal da F2). Contrato no chat c/ Caio.
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioVisualTemplates'));
 
+// ============================================================
+// Fase 1 · resultado das mensagens (16/09/2026)
+// "quanto a mensagem vendeu" — reativação e aniversário pelo WhatsApp
+// oficial (Fases 7/8) ganham atribuição de venda (direta por cupom,
+// estimada por last-touch de 5 dias). Mesmo plano de quem manda a
+// mensagem (customerReactivation.js/birthday.js).
+// ============================================================
+router.use('/marketing', requirePlan('negocio', 'expansao'), require('./marketingResults'));
+
 module.exports = router;
