@@ -9,6 +9,7 @@ const router = express.Router();
 const db = require('../config/database');
 const { validateWebhookSignature } = require('../utils/webhook');
 const waOutbox = require('../services/waOutbox');
+const customerConsent = require('../services/customerConsent');
 
 // Sem fallback hardcoded (era 'aura_whatsapp_verify_2026' — token previsível).
 // O verify token PRECISA vir do ambiente; sem ele, a verificação da Meta falha.
@@ -287,8 +288,21 @@ router.post('/', async (req, res) => {
           ).catch((e) => console.error('[WA-WEBHOOK] wa_messages write error:', e.message));
           // ONDA 5b: abre a janela de 24h e processa SAIR/PARAR (opt-out)
           // e VOLTAR (opt-in) — opt-out sempre vence na fila.
-          await waOutbox.touchInbound(companyId, msg.from, msg.text?.body)
-            .catch((e) => console.error('[WA-WEBHOOK] contact touch error:', e.message));
+          const touched = await waOutbox.touchInbound(companyId, msg.from, msg.text?.body)
+            .catch((e) => { console.error('[WA-WEBHOOK] contact touch error:', e.message); return null; });
+          // CRM Fase 1 (340): SAIR/VOLTAR viram EVENTO de consentimento, e
+          // "SIM"/"QUERO"/"ACEITO" em resposta a uma mensagem da loja
+          // grava o opt-in individual. Clique em botão de template também
+          // é resposta (o texto vem em button.text / button_reply.title).
+          const replyText = msg.text?.body || msg.button?.text
+            || msg.interactive?.button_reply?.title || null;
+          await customerConsent.handleInboundReply({
+            companyId,
+            phone: msg.from,
+            text: replyText,
+            touched,
+            isReply: !!(msg.context && msg.context.id) || msg.type === 'button' || msg.type === 'interactive',
+          }).catch((e) => console.error('[WA-WEBHOOK] consent error:', e.message));
         }
       }
     }

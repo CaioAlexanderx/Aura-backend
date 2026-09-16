@@ -33,6 +33,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { requireAuth, requireCompanyAccess } = require('../middleware/auth');
 const waOutbox = require('../services/waOutbox');
+const customerConsent = require('../services/customerConsent');
 const wa = require('../services/whatsapp');
 const addons = require('../services/addons');
 const quota = require('../services/marketing/marketingQuota');
@@ -1031,7 +1032,22 @@ router.post('/whatsapp/contacts/opt', ...guard, async (req, res) => {
          opt_source = 'manual', updated_at = NOW()`,
       [req.params.id, phone, b.action]
     );
-    return res.json({ phone, action: b.action });
+    // CRM Fase 1 (340): o opt manual também vira EVENTO de consentimento
+    // (e o opt-out se espalha pelas outras lojas do mesmo dono). Falha
+    // aqui não desfaz o opt acima — ele é o que a fila lê.
+    let consentEvent = false;
+    try {
+      const r = await customerConsent.recordConsent({
+        companyId: req.params.id, phone,
+        action: b.action === 'in' ? 'opt_in' : 'opt_out',
+        channel: 'manual',
+        userId: req.user && req.user.id,
+      });
+      consentEvent = !!r.ok;
+    } catch (e) {
+      console.error('[whatsappCloud] opt consent event error:', e.message);
+    }
+    return res.json({ phone, action: b.action, consent_event: consentEvent });
   } catch (e) {
     if (e.code === '42P01') return schemaPending(res);
     console.error('[whatsappCloud] opt error:', e.message);
