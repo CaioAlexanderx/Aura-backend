@@ -138,7 +138,7 @@ async function loadInstallmentsForRule(companyId, { today, days }) {
               COALESCE(cu.name, cu.phone) AS customer_name, cu.phone,
               COALESCE(co.trade_name, co.legal_name) AS store_name
          FROM credit_installments ci
-         LEFT JOIN customers cu ON cu.id = ci.customer_id AND cu.company_id = ci.company_id
+         LEFT JOIN customers cu ON cu.id = ci.customer_id
          LEFT JOIN companies  co ON co.id = ci.company_id
         WHERE ci.company_id = $1
           AND ci.status IN ('pending','overdue')

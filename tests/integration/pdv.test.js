@@ -193,7 +193,7 @@ describe('POST /companies/:id/pdv/sale — cupom + desconto', () => {
   // Cliente transacional que responde por conteudo do SQL, nao por ordem.
   function mockSaleClient({ coupon = null, sale = { id: 'sale1' } } = {}) {
     const client = { query: jest.fn(), release: jest.fn() };
-    client.query.mockImplementation((sql) => {
+    client.query.mockImplementation((sql, params) => {
       const q = typeof sql === 'string' ? sql : String((sql && sql.text) || '');
       if (/^\s*BEGIN/i.test(q))    return Promise.resolve({ rows: [] });
       if (/^\s*COMMIT/i.test(q))   return Promise.resolve({ rows: [] });
@@ -201,6 +201,8 @@ describe('POST /companies/:id/pdv/sale — cupom + desconto', () => {
       if (/pdv_settings/.test(q))  return Promise.resolve({ rows: [{ pdv_settings: { caixa_enabled: false } }] });
       if (/caixa_sessoes/.test(q)) return Promise.resolve({ rows: [] });
       if (/FROM coupons/.test(q))  return Promise.resolve({ rows: coupon ? [coupon] : [] });
+      // conferencia do cliente (mesmo dono) -- utils/customerScope.js
+      if (/FROM customers WHERE id/.test(q)) return Promise.resolve({ rows: [{ id: params[0] }] });
       if (/UPDATE coupons/.test(q))            return Promise.resolve({ rows: [] });
       if (/INSERT INTO sales/.test(q))         return Promise.resolve({ rows: [sale] });
       if (/INSERT INTO sale_items/.test(q))    return Promise.resolve({ rows: [] });

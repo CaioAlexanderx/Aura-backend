@@ -60,6 +60,8 @@ const trocaV2     = require('../services/trocaV2');
 const { createCreditSale, cancelCreditSale } = require('../services/creditLedger');
 const { checkCouponOwner } = require('../services/couponPolicy');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
+// 16/09/2026: cliente de outra loja do mesmo dono vale (utils/customerScope.js).
+const { findOwnerScopedCustomer } = require('../utils/customerScope');
 
 const fmt = (v) => parseFloat(v || 0).toFixed(2);
 const SP_DATE_NOW = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
@@ -141,19 +143,20 @@ const isValidISODate = (s) => {
 // `required` separa os dois casos: na venda com sinal o saldo e de ALGUEM,
 // entao sem identificador e 422. Na venda comum o cliente e opcional desde
 // sempre, entao devolve null e a venda segue sem vinculo.
+//
+// 16/09/2026: com customer_id, vale cliente de QUALQUER loja ativa do mesmo
+// dono -- o seletor do PDV lista a carteira do dono inteira (ownerScope.js).
+// Cliente de outro dono continua 404.
 async function resolveInlineCustomer(client, companyId, body, { required = false } = {}) {
   if (body?.customer_id) {
-    const { rows } = await client.query(
-      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
-      [body.customer_id, companyId]
-    );
-    if (!rows.length) {
-      const err = new Error('Cliente nao encontrado nesta empresa.');
+    const found = await findOwnerScopedCustomer(client, companyId, body.customer_id);
+    if (!found) {
+      const err = new Error('Cliente não encontrado nesta empresa.');
       err.statusCode = 404;
       err.code = 'CUSTOMER_NOT_FOUND';
       throw err;
     }
-    return rows[0].id;
+    return found.id;
   }
 
   const c     = body?.customer || {};
@@ -367,7 +370,10 @@ async function handleSale(req, res, opts = {}) {
     // nome em seller_name -- que e o campo do VENDEDOR. Resultado: a venda
     // aparecia como "Consumidor" e o nome do cliente saia na posicao de quem
     // vendeu, e o cliente nunca existia no cadastro.
-    if (opts.signalSale || req.body?.customer || req.body?.customer_name) {
+    // 16/09/2026: o customer_id sozinho tambem passa aqui. Antes ele ia
+    // direto pro INSERT sem conferencia nenhuma -- um id de cliente de outro
+    // dono virava venda (e divida no crediario) desta loja.
+    if (opts.signalSale || customerId || req.body?.customer || req.body?.customer_name) {
       customerId = await resolveInlineCustomer(client, req.params.id, req.body, {
         required: !!opts.signalSale,
       });
