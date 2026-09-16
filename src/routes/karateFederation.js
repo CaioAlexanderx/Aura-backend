@@ -346,12 +346,20 @@ router.get('/dashboard', ...guards.read(), async (req, res) => {
     // belt_level sozinho NÃO separaria os Dan — por isso o rank vai no payload e a
     // lista já sai pré-ordenada. (A distribuição continua incluindo a Vermelha
     // aqui; quem oculta a Vermelha é o FE.)
+    //
+    // `cb.federation_id = $1` NÃO é redundante com `c.federation_id = $1`: só
+    // o filtro na coluna da VIEW entra no DISTINCT ON de karate_current_belt.
+    // Sem ele a view recalcula o histórico de TODAS as federações, e se a
+    // estatística de customers estiver velha (federação recém-criada) o
+    // planejador faz isso uma vez por praticante — 16/09/2026: 12,7 s e
+    // statement timeout no Painel da JKA com só 200 praticantes.
     const beltParams = practitionerActiveValues ? [federationId, practitionerActiveValues] : [federationId];
     const beltRes = await db.query(
       `SELECT cb.belt_level, cb.belt_name, COUNT(*) AS count
        FROM karate_current_belt cb
        JOIN customers c ON c.id = cb.student_id
        WHERE c.federation_id = $1
+         AND cb.federation_id = $1
          ${practitionerActiveValues ? 'AND c.is_active = ANY($2::boolean[])' : ''}
        GROUP BY cb.belt_level, cb.belt_name
        ORDER BY cb.belt_level`,
@@ -512,12 +520,15 @@ router.get('/belt-distribution', ...guards.read(), async (req, res) => {
   const practitionerActiveValues = practitionerStatusToIsActiveValues(practitionerStatus);
 
   try {
+    // `cb.federation_id = $1` mantém o filtro dentro da view — ver o mesmo
+    // bloco em GET /dashboard.
     const beltParams = practitionerActiveValues ? [federationId, practitionerActiveValues] : [federationId];
     const { rows } = await db.query(
       `SELECT cb.belt_level, cb.belt_name, COUNT(*) AS count
        FROM karate_current_belt cb
        JOIN customers c ON c.id = cb.student_id
        WHERE c.federation_id = $1
+         AND cb.federation_id = $1
          ${practitionerActiveValues ? 'AND c.is_active = ANY($2::boolean[])' : ''}
        GROUP BY cb.belt_level, cb.belt_name
        ORDER BY cb.belt_level`,
