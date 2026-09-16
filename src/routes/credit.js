@@ -822,26 +822,12 @@ const HISTORY_TYPE_SQL = {
 const historyTxCols = { account_id: true, source: true };
 let historySaleItemsHasSnapshot = true;
 
-function decodeHistoryCursor(raw) {
-  try {
-    const decoded = Buffer.from(String(raw), 'base64').toString('utf8');
-    const sep = decoded.lastIndexOf('|');
-    if (sep <= 0) return null;
-    const createdAt = decoded.slice(0, sep);
-    const id = decoded.slice(sep + 1);
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null;
-    if (Number.isNaN(Date.parse(createdAt))) return null;
-    return { createdAt, id };
-  } catch (_) {
-    return null;
-  }
-}
+// Formato do cursor extraido para src/utils/timelineCursor.js (Fase 1 --
+// perfil do cliente): a linha do tempo da ficha usa o MESMO cursor.
+const { decodeCursor: decodeHistoryCursor, encodeCursor } = require('../utils/timelineCursor');
 
 function encodeHistoryCursor(row) {
-  const ts = row.created_at instanceof Date
-    ? row.created_at.toISOString()
-    : new Date(row.created_at).toISOString();
-  return Buffer.from(`${ts}|${row.id}`, 'utf8').toString('base64');
+  return encodeCursor(row.created_at, row.id);
 }
 
 async function fetchHistoryTransactions(conditions, params, limitPlusOne) {
