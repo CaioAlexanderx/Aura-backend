@@ -825,6 +825,7 @@ let historySaleItemsHasSnapshot = true;
 // Formato do cursor extraido para src/utils/timelineCursor.js (Fase 1 --
 // perfil do cliente): a linha do tempo da ficha usa o MESMO cursor.
 const { decodeCursor: decodeHistoryCursor, encodeCursor } = require('../utils/timelineCursor');
+const { creditHistoryEventType, creditHistorySignedAmount } = require('../services/credit/historyEventType');
 
 function encodeHistoryCursor(row) {
   return encodeCursor(row.created_at, row.id);
@@ -955,15 +956,7 @@ router.get('/customers/:cid/history', async (req, res) => {
     const itemsBySale = await fetchHistoryItems(companyId, purchaseSaleIds);
 
     const events = page.map(r => {
-      const amount = parseFloat(r.amount) || 0;
-      let eventType;
-      if (r.type === 'debit') {
-        eventType = r.sale_id ? 'purchase' : 'manual_debit';
-      } else if (r.type === 'refund') {
-        eventType = 'refund';
-      } else {
-        eventType = r.payment_method === 'crediario_credito' ? 'exchange_credit' : 'payment';
-      }
+      const eventType = creditHistoryEventType(r);
       const meta = {};
       if (r.source !== undefined && r.source !== null) meta.source = r.source;
       if (r.notes) meta.notes = r.notes;
@@ -971,7 +964,7 @@ router.get('/customers/:cid/history', async (req, res) => {
         id:          r.id,
         type:        eventType,
         occurred_at: r.created_at,
-        amount:      r.type === 'debit' ? amount : parseFloat((-amount).toFixed(2)),
+        amount:      creditHistorySignedAmount(r),
         sale_id:     r.sale_id || null,
         account_id:  r.account_id || null,
         items:       eventType === 'purchase' ? (itemsBySale[r.sale_id] || []) : null,
