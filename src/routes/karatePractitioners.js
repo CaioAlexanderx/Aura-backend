@@ -377,7 +377,7 @@ router.post('/', ...guards.staffWrite(), async (req, res) => {
   // (solicitação), que fica pendente até a federação aprovar com o número.
   if (!karate_registration_number || !String(karate_registration_number).trim()) {
     return res.status(422).json({
-      error: 'Campo karate_registration_number é obrigatório. O número FPKT é emitido pela federação — este sistema nunca gera número automaticamente.',
+      error: 'Campo karate_registration_number é obrigatório. O número de matrícula é emitido pela federação — este sistema nunca gera número automaticamente.',
       code: 'FPKT_NUMBER_REQUIRED',
     });
   }

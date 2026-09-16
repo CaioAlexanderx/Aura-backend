@@ -359,7 +359,7 @@ async function loadPractitionerByNumber(q, federationId, number, probe, forUpdat
     throw svcError(
       404,
       'FPKT_NUMBER_NOT_FOUND',
-      'Número FPKT não encontrado nesta federação. Confira o número ou marque o aluno como novo para solicitar o cadastro à federação.'
+      'Número de matrícula não encontrado nesta federação. Confira o número ou marque o aluno como novo para solicitar o cadastro à federação.'
     );
   }
   return rows[0];
@@ -427,9 +427,9 @@ function buildBlockers({ student, practitioner, claim, dojoId }) {
       code: 'CPF_CONFLITANTE',
       field: 'cpf',
       message:
-        `O CPF do aluno (${student.cpf}) é diferente do CPF do praticante ${practitioner.karate_registration_number || 'FPKT'} (${practitioner.cpf}). ` +
+        `O CPF do aluno (${student.cpf}) é diferente do CPF do praticante ${practitioner.karate_registration_number || 'sem matrícula'} (${practitioner.cpf}). ` +
         'CPF diferente indica que são pessoas diferentes — não é possível vincular, e não existe confirmar mesmo assim. ' +
-        'Corrija o CPF no cadastro do aluno ou informe outro número FPKT.',
+        'Corrija o CPF no cadastro do aluno ou informe outro número de matrícula.',
     });
   }
 
@@ -440,8 +440,8 @@ function buildBlockers({ student, practitioner, claim, dojoId }) {
       code: 'PRATICANTE_JA_VINCULADO',
       field: 'fpkt_number',
       message: mesmoDojo
-        ? `Este número FPKT já está vinculado ao aluno "${claim.full_name}" deste dojô.`
-        : `Este número FPKT já está vinculado ao aluno "${claim.full_name}" do dojô "${claim.dojo_name || 'outro dojô'}". Um praticante só pode pertencer a um aluno.`,
+        ? `Este número de matrícula já está vinculado ao aluno "${claim.full_name}" deste dojô.`
+        : `Este número de matrícula já está vinculado ao aluno "${claim.full_name}" do dojô "${claim.dojo_name || 'outro dojô'}". Um praticante só pode pertencer a um aluno.`,
     });
   }
 
@@ -684,7 +684,7 @@ async function federateByNumber({
 } = {}) {
   const number = normalizeFpktNumber(rawNumber);
   if (!number) {
-    throw svcError(422, 'VALIDATION_ERROR', 'Informe o número FPKT do aluno');
+    throw svcError(422, 'VALIDATION_ERROR', 'Informe o número de matrícula do aluno');
   }
 
   const probe = await loadSchemaProbe();

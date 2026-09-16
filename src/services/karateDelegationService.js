@@ -336,7 +336,7 @@ async function planDelegation({ federationId, dojoId, competitionId, body }) {
       skipped.push({
         student_id: sid, name: student.full_name,
         reason: 'ALUNO_NAO_FEDERADO',
-        message: 'Competição é ato federativo — federe o aluno (número FPKT) antes de inscrevê-lo',
+        message: 'Competição é ato federativo — federe o aluno (número de matrícula) antes de inscrevê-lo',
       });
       continue;
     }

@@ -40,14 +40,23 @@ function safeTable(err) {
 }
 
 // ── Busca dados da federação para e-mails ─────────────────────
+// A CONSULTA de identidade, sozinha. Um SELECT, um lugar: quando entrar um
+// campo novo de identidade da federação (logo, WhatsApp, e-mail), ele entra
+// aqui e chega junto nos e-mails e no GET /federation/:id/identity.
+// Devolve null quando a federação não existe — quem chama decide se isso é
+// 404 (endpoint) ou valor padrão (e-mail best-effort).
+async function getFederationIdentity(federationId) {
+  const res = await db.query(
+    `SELECT id, name, slug, email, karate_logo_url, wa_phone_display
+       FROM companies WHERE id = $1 LIMIT 1`,
+    [federationId]
+  );
+  return res.rows[0] || null;
+}
+
 async function getFederationEmailData(federationId) {
   try {
-    const res = await db.query(
-      `SELECT name, slug, email, karate_logo_url, wa_phone_display
-       FROM companies WHERE id = $1 LIMIT 1`,
-      [federationId]
-    );
-    const row = res.rows[0] || {};
+    const row = (await getFederationIdentity(federationId)) || {};
     return {
       federationName:     row.name || 'Federação',
       federationSlug:     row.slug || null,
@@ -501,6 +510,7 @@ async function refuseOrder(orderId, federationId, reason, opts) {
 }
 
 module.exports = {
+  getFederationIdentity,
   createOrder,
   getOrder,
   getOrdersByDojo,

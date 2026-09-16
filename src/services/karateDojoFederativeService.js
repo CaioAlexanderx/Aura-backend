@@ -265,7 +265,7 @@ async function createCertOrdersBatch({
         student_id: item.student_id,
         name: student.full_name,
         reason: 'ALUNO_NAO_FEDERADO',
-        message: 'Aluno ainda não confirmado pela federação — federe o aluno (número FPKT) antes de pedir o certificado',
+        message: 'Aluno ainda não confirmado pela federação — federe o aluno (número de matrícula) antes de pedir o certificado',
       });
       continue;
     }
@@ -447,7 +447,7 @@ async function enrollBatch({ dojoId, federationId, eventId, studentIds, mode }) 
         student_id: sid,
         name: student.full_name,
         reason: 'ALUNO_NAO_FEDERADO',
-        message: 'Aluno ainda não confirmado pela federação — federe o aluno (número FPKT) antes de inscrevê-lo',
+        message: 'Aluno ainda não confirmado pela federação — federe o aluno (número de matrícula) antes de inscrevê-lo',
       });
       continue;
     }

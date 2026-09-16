@@ -170,9 +170,15 @@ describe('F8.0 — a fronteira do sensei (teto 1º kyu)', () => {
     expect(scale.canDojoGrant({ level: 'vermelha' })).toBe(false);
   });
 
-  test('o motivo do teto cita a banca da FPKT (mesma nota do seed da migration 150)', () => {
+  test('o motivo do teto cita a banca da federação (mesma nota do seed da migration 150)', () => {
     expect(scale.DOJO_CEILING_REASON).toMatch(/banca/i);
-    expect(scale.DOJO_CEILING_REASON).toMatch(/FPKT/);
+    expect(scale.DOJO_CEILING_REASON).toMatch(/federa/i);
+  });
+
+  test('o motivo do teto NÃO nomeia uma federação específica', () => {
+    // O dojô da JKA lê a mesma frase que o dojô da FPKT. Se um nome próprio
+    // voltar para cá, ele volta errado para todo mundo menos uma.
+    expect(scale.DOJO_CEILING_REASON).not.toMatch(/FPKT/);
   });
 });
 
