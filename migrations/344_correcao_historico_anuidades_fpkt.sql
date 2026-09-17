@@ -39,14 +39,16 @@
 --     federacao mudou no app vale mais que a planilha.
 -- ============================================================
 
-BEGIN;
-
+-- Sem BEGIN/COMMIT proprios: o runner (scripts/migrate.js) ja envolve o
+-- arquivo numa transacao, e o bloco DO abaixo e atomico por si so (o psql
+-- do CI roda em autocommit).
+DROP TABLE IF EXISTS _m344_hdr, _m344_inst, _m344_led;
 CREATE TEMP TABLE _m344_hdr (id uuid, dojo_id uuid, reference_period text, plan text, amount numeric,
-  status text, paid_at date, payment_method text, due_date date, is_new boolean) ON COMMIT DROP;
+  status text, paid_at date, payment_method text, due_date date, is_new boolean);
 CREATE TEMP TABLE _m344_inst (id uuid, annuity_id uuid, seq smallint, kind text, amount numeric,
-  amount_paid numeric, due_date date, paid_at timestamptz, payment_method text, status text) ON COMMIT DROP;
+  amount_paid numeric, due_date date, paid_at timestamptz, payment_method text, status text);
 CREATE TEMP TABLE _m344_led (id uuid, installment_id uuid, annuity_id uuid, amount numeric,
-  paid_at timestamptz, payment_method text) ON COMMIT DROP;
+  paid_at timestamptz, payment_method text);
 
 INSERT INTO _m344_hdr VALUES
     ('c46f50d0-2d06-4190-886a-f3a8b34e55fb'::uuid,'c5e24753-90fe-4c06-b356-331530707f6a'::uuid,'2017'::text,'trimestral'::text,500.00::numeric,'paid'::text,'2017-11-30'::date,'pix'::text,'2017-11-30'::date,false::boolean),  -- 2017 ASSOCIAÇÃO SHOBUKAN JOSÉ BONIFÁCIO
@@ -684,4 +686,4 @@ BEGIN
   RAISE NOTICE '344: % anuidades corrigidas, % novas, % parcelas, % recebimentos', v_upd, v_new, v_inst, v_led;
 END $$;
 
-COMMIT;
+DROP TABLE _m344_hdr, _m344_inst, _m344_led;
