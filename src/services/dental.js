@@ -15,6 +15,9 @@
 
 const db = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
+const {
+  ScheduleError, assertTransition, timestampSetsFor, queryConflicts, NON_BLOCKING_STATUSES,
+} = require('./dentalSchedule');
 
 function calcAppointmentTotal(procedures, discountType, discountValue) {
   const subtotal = procedures.reduce((sum, p) => sum + parseFloat(p.price_total || 0), 0);
@@ -66,9 +69,9 @@ async function listPatients(companyId, opts = {}) {
            c.photo_url,
            c.lgpd_consent,
            c.created_at,
-           COUNT(a.id) FILTER (WHERE a.status NOT IN ('cancelado','faltou')) AS appointments_total,
-           MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido' OR (a.status NOT IN ('cancelado','faltou') AND a.scheduled_at < NOW())) AS last_visit_at,
-           MIN(a.scheduled_at) FILTER (WHERE a.scheduled_at >= NOW() AND a.status NOT IN ('cancelado','faltou','concluido')) AS next_appointment_at
+           COUNT(a.id) FILTER (WHERE a.status::text NOT IN ('cancelado','faltou','falta_justificada')) AS appointments_total,
+           MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido' OR (a.status::text NOT IN ('cancelado','faltou','falta_justificada') AND a.scheduled_at < NOW())) AS last_visit_at,
+           MIN(a.scheduled_at) FILTER (WHERE a.scheduled_at >= NOW() AND a.status::text NOT IN ('cancelado','faltou','falta_justificada','concluido')) AS next_appointment_at
     FROM customers c
     LEFT JOIN dental_appointments a ON a.customer_id = c.id
     ${where}
@@ -76,8 +79,8 @@ async function listPatients(companyId, opts = {}) {
 
   if (inactiveDays != null && inactiveDays !== '' && !isNaN(parseInt(inactiveDays))) {
     const days = parseInt(inactiveDays);
-    sql += ` HAVING (MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido' OR (a.status NOT IN ('cancelado','faltou') AND a.scheduled_at < NOW())) IS NULL
-                    OR MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido' OR (a.status NOT IN ('cancelado','faltou') AND a.scheduled_at < NOW())) < NOW() - INTERVAL '${days} days')`;
+    sql += ` HAVING (MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido' OR (a.status::text NOT IN ('cancelado','faltou','falta_justificada') AND a.scheduled_at < NOW())) IS NULL
+                    OR MAX(a.scheduled_at) FILTER (WHERE a.status = 'concluido' OR (a.status::text NOT IN ('cancelado','faltou','falta_justificada') AND a.scheduled_at < NOW())) < NOW() - INTERVAL '${days} days')`;
   }
 
   sql += `
@@ -115,30 +118,87 @@ async function getAgendaByPeriod(companyId, startDate, endDate) {
   return rows;
 }
 
+// QA odonto 16/09/2026: a tabela de transições saiu daqui para
+// services/dentalSchedule.js (documentada lá). updateAppointment aplica status
+// + demais campos NUMA transação — antes a rota descartava clinical_notes etc.
+// quando o body trazia status — e devolve os conflitos de horário.
+const PATCHABLE_FIELDS = [
+  'chief_complaint', 'anamnesis', 'clinical_notes', 'discount_type', 'discount_value',
+  'cancel_reason', 'practitioner_id', 'scheduled_at', 'duration_min',
+];
+const SCHEDULE_FIELDS = ['scheduled_at', 'duration_min', 'practitioner_id'];
+
+async function updateAppointment(companyId, appointmentId, { status, fields = {}, rejectOnConflict = false } = {}) {
+  const hasStatus = status !== undefined && status !== null && status !== '';
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: cur } = await client.query(
+      `SELECT id, status::text AS status, scheduled_at, duration_min, practitioner_id
+         FROM dental_appointments
+        WHERE id = $1 AND company_id = $2
+        FOR UPDATE`,
+      [appointmentId, companyId]
+    );
+    if (!cur.length) throw new ScheduleError('Agendamento nao encontrado', 'NOT_FOUND', 404);
+    const current = cur[0];
+
+    if (hasStatus) assertTransition(current.status, status);
+    const changingStatus = hasStatus && status !== current.status;
+
+    const sets = [];
+    const values = [];
+    const push = (col, v) => { values.push(v); sets.push(`${col} = $${values.length}`); };
+    for (const k of PATCHABLE_FIELDS) {
+      if (fields[k] === undefined) continue;
+      push(k, k === 'practitioner_id' ? (fields[k] || null) : fields[k]);
+    }
+    if (changingStatus) {
+      push('status', status);
+      sets.push(...timestampSetsFor(current.status, status));
+    }
+    if (!sets.length && !hasStatus) {
+      throw new ScheduleError('Nenhum campo para atualizar', 'NO_FIELDS', 400);
+    }
+
+    const finalStatus = changingStatus ? status : current.status;
+    const scheduleTouched = SCHEDULE_FIELDS.some((k) => fields[k] !== undefined)
+      || (changingStatus && NON_BLOCKING_STATUSES.includes(current.status));
+    let conflicts = [];
+    if (scheduleTouched && !NON_BLOCKING_STATUSES.includes(finalStatus)) {
+      conflicts = await queryConflicts(client, companyId, {
+        id: appointmentId,
+        scheduled_at: fields.scheduled_at !== undefined ? fields.scheduled_at : current.scheduled_at,
+        duration_min: fields.duration_min !== undefined ? fields.duration_min : current.duration_min,
+        practitioner_id: fields.practitioner_id !== undefined ? (fields.practitioner_id || null) : current.practitioner_id,
+      });
+      if (rejectOnConflict && conflicts.length) {
+        throw new ScheduleError('Horario em conflito com outro agendamento', 'SCHEDULE_CONFLICT', 409, { conflicts });
+      }
+    }
+
+    sets.push('updated_at = NOW()');
+    values.push(appointmentId, companyId);
+    const { rows } = await client.query(
+      `UPDATE dental_appointments SET ${sets.join(', ')}
+        WHERE id = $${values.length - 1} AND company_id = $${values.length}
+        RETURNING *, customer_id AS patient_id`,
+      values
+    );
+    await client.query('COMMIT');
+    return { appointment: rows[0], conflicts, previous_status: current.status };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Compat: só status.
 async function updateAppointmentStatus(companyId, appointmentId, newStatus) {
-  const validTransitions = {
-    agendado:       ['avaliacao', 'em_atendimento', 'cancelado', 'faltou'],
-    avaliacao:      ['aprovado', 'cancelado'],
-    aprovado:       ['em_atendimento', 'cancelado'],
-    em_atendimento: ['concluido', 'cancelado'],
-  };
-  const { rows: current } = await db.query(
-    'SELECT status FROM dental_appointments WHERE id = $1 AND company_id = $2',
-    [appointmentId, companyId]
-  );
-  if (!current.length) throw new Error('Agendamento nao encontrado');
-  const currentStatus = current[0].status;
-  const allowed = validTransitions[currentStatus] || [];
-  if (!allowed.includes(newStatus)) throw new Error(`Transicao invalida: ${currentStatus} -> ${newStatus}`);
-
-  const tsMap = { em_atendimento: 'started_at', concluido: 'concluded_at', cancelado: 'cancelled_at' };
-  const tsField = tsMap[newStatus] ? `, ${tsMap[newStatus]} = NOW()` : '';
-
-  const { rows } = await db.query(
-    `UPDATE dental_appointments SET status=$1, updated_at=NOW()${tsField} WHERE id=$2 AND company_id=$3 RETURNING *`,
-    [newStatus, appointmentId, companyId]
-  );
-  return rows[0];
+  const { appointment } = await updateAppointment(companyId, appointmentId, { status: newStatus });
+  return appointment;
 }
 
 async function addProcedureToAppointment(appointmentId, companyId, {
@@ -229,6 +289,6 @@ async function validateWsToken(token) {
   return rows[0] || null;
 }
 
-module.exports = { listPatients, getAgendaByPeriod, updateAppointmentStatus,
+module.exports = { listPatients, getAgendaByPeriod, updateAppointmentStatus, updateAppointment,
   addProcedureToAppointment, recalcAppointmentTotal, calcAppointmentTotal,
   generateWsToken, validateWsToken };

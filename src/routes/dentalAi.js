@@ -259,9 +259,9 @@ async function fetchClinicContext(cid) {
     const { rows: hoje } = await db.query(
       `SELECT
          COUNT(*) AS total,
-         COUNT(*) FILTER (WHERE status = 'confirmado')   AS confirmados,
+         COUNT(*) FILTER (WHERE status::text IN ('confirmado','aprovado')) AS confirmados,
          COUNT(*) FILTER (WHERE status = 'agendado')      AS pendentes,
-         COUNT(*) FILTER (WHERE status = 'faltou')        AS faltas
+         COUNT(*) FILTER (WHERE status::text IN ('faltou','falta_justificada')) AS faltas
        FROM dental_appointments
        WHERE company_id = $1
          AND (scheduled_at AT TIME ZONE 'America/Sao_Paulo')::date = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date`,

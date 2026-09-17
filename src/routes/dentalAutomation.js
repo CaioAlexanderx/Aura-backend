@@ -95,7 +95,7 @@ router.post('/automation/trigger', requireAuth, requireRole('client','admin'), a
                 c.phone AS phone
          FROM dental_appointments a
          JOIN customers c ON c.id = a.customer_id
-         WHERE a.company_id=$1 AND a.status::text IN ('scheduled','confirmed','agendado')
+         WHERE a.company_id=$1 AND a.status::text IN ('scheduled','confirmed','agendado','confirmado')
            AND a.scheduled_at BETWEEN NOW() AND NOW() + INTERVAL '3 hours'
            AND NOT EXISTS (
              SELECT 1 FROM dental_automation_log l
@@ -207,7 +207,7 @@ router.get('/automation/recall/list', requireAuth, async (req, res) => {
            WHERE a2.customer_id = lv.id
              AND a2.company_id = $1
              AND a2.scheduled_at > NOW()
-             AND a2.status::text NOT IN ('cancelado','cancelled','faltou','no_show')
+             AND a2.status::text NOT IN ('cancelado','cancelled','faltou','falta_justificada','no_show')
          )
        ORDER BY next_recall ASC
        LIMIT 100`,
