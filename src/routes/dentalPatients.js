@@ -166,6 +166,7 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
     photo_url,
     lgpd_consent = false,
     existing_customer_id, // opcional: converter cliente existente em paciente
+    allow_duplicate_cpf = false, // 1.3: forca cadastro mesmo com CPF ja usado
   } = req.body;
 
   const finalName = (full_name || name || '').trim();
@@ -182,6 +183,29 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
   }
 
   try {
+    // 1.3: bloqueia CPF duplicado na mesma empresa (compara so digitos).
+    // allow_duplicate_cpf=true no body forca o cadastro mesmo assim.
+    if (finalCpf && allow_duplicate_cpf !== true) {
+      const cpfDigits = String(finalCpf).replace(/[^0-9]/g, '');
+      if (cpfDigits) {
+        const { rows: dup } = await db.query(
+          `SELECT id, name FROM customers
+           WHERE company_id = $1 AND is_patient = true
+             AND regexp_replace(COALESCE(cpf_cnpj, ''), '[^0-9]', '', 'g') = $2
+           LIMIT 1`,
+          [req.params.id, cpfDigits]
+        );
+        if (dup.length) {
+          return res.status(409).json({
+            error: 'Já existe um paciente com este CPF',
+            code: 'CPF_DUPLICADO',
+            patient_id: dup[0].id,
+            patient_name: dup[0].name,
+          });
+        }
+      }
+    }
+
     // Caso 1: converter customer existente em paciente
     if (existing_customer_id) {
       const { rows } = await db.query(
@@ -317,6 +341,30 @@ router.patch('/patients/:pid', requireAuth, requireRole('client','analyst','admi
   values.push(req.params.pid, req.params.id);
 
   try {
+    // 1.3: mesmo bloqueio de CPF duplicado na edicao — so entra em vigor se
+    // o CPF novo pertencer a OUTRO paciente (nao ao proprio que esta sendo editado).
+    const newCpfRaw = req.body.cpf_cnpj !== undefined ? req.body.cpf_cnpj : req.body.cpf;
+    if (newCpfRaw !== undefined && newCpfRaw !== null && req.body.allow_duplicate_cpf !== true) {
+      const cpfDigits = String(newCpfRaw).replace(/[^0-9]/g, '');
+      if (cpfDigits) {
+        const { rows: dup } = await db.query(
+          `SELECT id, name FROM customers
+           WHERE company_id = $1 AND is_patient = true AND id != $2
+             AND regexp_replace(COALESCE(cpf_cnpj, ''), '[^0-9]', '', 'g') = $3
+           LIMIT 1`,
+          [req.params.id, req.params.pid, cpfDigits]
+        );
+        if (dup.length) {
+          return res.status(409).json({
+            error: 'Já existe um paciente com este CPF',
+            code: 'CPF_DUPLICADO',
+            patient_id: dup[0].id,
+            patient_name: dup[0].name,
+          });
+        }
+      }
+    }
+
     const { rows } = await db.query(
       `UPDATE customers SET ${fields.join(', ')}
        WHERE id = $${idx++} AND company_id = $${idx} AND is_patient = true
