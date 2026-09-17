@@ -116,6 +116,7 @@ async function getAgendaByPeriod(companyId, startDate, endDate) {
             c.name         AS patient_name,
             c.phone        AS patient_phone,
             c.insurance_name,
+            NULLIF(TRIM(c.allergies), '') AS allergies, -- a grade mostra o alerta de alergia no bloco
             pr.name        AS professional_name,
             pr.color       AS professional_color,
             COUNT(ap.id) AS procedure_count
