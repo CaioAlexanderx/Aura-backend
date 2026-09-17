@@ -22,6 +22,7 @@ const {
 const {
   ScheduleError, isValidTimestamp, isValidDuration, queryConflicts,
 } = require('../services/dentalSchedule');
+const { outsideHoursFlag } = require('../services/dentalHours');
 
 // ── Sub-routes (extracted) ──
 router.use('/', require('./dentalPatients'));
@@ -31,6 +32,7 @@ router.use('/', require('./dentalSpecialtyForms'));
 router.use('/', require('./dentalProcedures'));
 router.use('/', require('./dentalPractitioners'));
 router.use('/', require('./dentalBookingAdmin'));
+router.use('/', require('./dentalHours'));   // horário de funcionamento (17/09/2026)
 router.use('/', require('./dentalConsent')); // W2-04: TCLE templates + documents
 router.use('/ai', require('./dentalAi'));     // W2-05: IA Odonto persistente (Expansao only)
 router.use('/tiss', require('./dentalTiss')); // W2-02: TISS 4.01 completo
@@ -77,6 +79,9 @@ router.get('/agenda', requireAuth, async (req, res) => {
 
 // QA odonto 16/09/2026 (1.5): conflito de horário NÃO bloqueia — volta em
 // `conflicts`. Com `reject_on_conflict: true` no body vira 409 SCHEDULE_CONFLICT.
+// Horário de funcionamento (17/09/2026): agendar fora do horário continua
+// permitido (encaixe); a resposta traz `outside_hours` quando a clínica
+// configurou horário.
 router.post('/appointments', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
   const { scheduled_at, duration_min = 60, chief_complaint, practitioner_id, reject_on_conflict } = req.body;
   if (!scheduled_at) return res.status(400).json({ error: 'scheduled_at e obrigatorio', code: 'SCHEDULED_AT_REQUIRED' });
@@ -107,7 +112,10 @@ router.post('/appointments', requireAuth, requireRole('client','analyst','admin'
        RETURNING *, customer_id AS patient_id`,
       [req.params.id, customerId, scheduled_at, Number(duration_min), chief_complaint||null, practitioner_id||null]
     );
-    res.status(201).json({ appointment: rows[0], conflicts });
+    const body = { appointment: rows[0], conflicts };
+    const outside = await outsideHoursFlag(db, req.params.id, scheduled_at, duration_min);
+    if (outside !== undefined) body.outside_hours = outside;
+    res.status(201).json(body);
   } catch (err) {
     console.error('[dental POST /appointments]', err.message);
     res.status(500).json({ error: 'Erro ao criar agendamento' });
@@ -169,7 +177,14 @@ router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','
       const totals = await recalcAppointmentTotal(req.params.aid);
       result = { ...appointment, subtotal: totals.subtotal, total: totals.total };
     }
-    res.json({ appointment: result, conflicts });
+    const body = { appointment: result, conflicts };
+    // outside_hours só quando o PATCH mexe no horário/duração.
+    if (fields.scheduled_at !== undefined || fields.duration_min !== undefined) {
+      const outside = await outsideHoursFlag(db, req.params.id,
+        appointment.scheduled_at ?? fields.scheduled_at, appointment.duration_min ?? fields.duration_min);
+      if (outside !== undefined) body.outside_hours = outside;
+    }
+    res.json(body);
   } catch (err) {
     if (err instanceof ScheduleError) {
       const body = { error: err.message, code: err.code };
