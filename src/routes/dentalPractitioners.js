@@ -274,8 +274,13 @@ router.get('/appointments', requireAuth, async (req, res) => {
 
   if (status) { params.push(status); where += ` AND a.status = $${params.length}`; }
   if (practitioner_id) { params.push(practitioner_id); where += ` AND a.practitioner_id = $${params.length}`; }
-  if (from) { params.push(from); where += ` AND a.scheduled_at >= $${params.length}::date`; }
-  if (to)   { params.push(to);   where += ` AND a.scheduled_at < ($${params.length}::date + INTERVAL '1 day')`; }
+  // QA 2026-09-16 (fuso horario): $n::date castado direto pra timestamptz
+  // usa o fuso da SESSAO (UTC no Supabase), nao America/Sao_Paulo. "Hoje"
+  // em SP perdia os agendamentos entre 21h e 24h (iam pro dia UTC seguinte)
+  // e pegava os de 21h-24h do dia anterior (que ainda nao tinha virado em
+  // UTC). Interpreta o filtro no fuso de SP antes de comparar.
+  if (from) { params.push(from); where += ` AND a.scheduled_at >= ($${params.length}::date)::timestamp AT TIME ZONE 'America/Sao_Paulo'`; }
+  if (to)   { params.push(to);   where += ` AND a.scheduled_at < (($${params.length}::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo')`; }
 
   try {
     const { rows } = await db.query(

@@ -49,10 +49,23 @@ async function resolveCustomerId(companyId, body) {
 
 // ── Agenda ──
 
+// QA 2026-09-16 (fuso horario): o default de "hoje" usava
+// now.getFullYear()/getMonth()/getDate(), que le os componentes no fuso
+// LOCAL DO PROCESSO NODE (UTC em producao), nao em America/Sao_Paulo.
+// Entre 21h e 24h em SP (ja virou o dia seguinte em UTC), a agenda de
+// "hoje" pulava pro dia de amanha. America/Sao_Paulo = UTC-3 o ano todo
+// (DST abolido em 2019), entao o offset fixo -03:00 e seguro aqui.
+function todaySaoPauloBoundsISO() {
+  const ymd = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // "2026-09-16"
+  const start = new Date(`${ymd}T00:00:00-03:00`);
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
 router.get('/agenda', requireAuth, async (req, res) => {
-  const now = new Date();
-  const startDate = req.query.start || new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-  const endDate   = req.query.end   || new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
+  const defaults = (!req.query.start || !req.query.end) ? todaySaoPauloBoundsISO() : null;
+  const startDate = req.query.start || defaults.start;
+  const endDate   = req.query.end   || defaults.end;
   try {
     const appointments = await getAgendaByPeriod(req.params.id, startDate, endDate);
     res.json({ start: startDate, end: endDate, total: appointments.length, appointments });
