@@ -30,7 +30,7 @@ router.get('/:slug', async (req, res) => {
     const { rows: existingAppts } = await db.query(
       `SELECT scheduled_at, duration_min FROM dental_appointments
        WHERE company_id=$1 AND scheduled_at >= $2 AND scheduled_at <= $3
-       AND status NOT IN ('cancelado')`,
+       AND status::text NOT IN ('cancelado','faltou','falta_justificada')`,
       [config.company_id, today.toISOString(), endDate.toISOString()]
     );
 

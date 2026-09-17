@@ -23,6 +23,7 @@ const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { listPatients } = require('../services/dental');
+const { isBirthDateInFuture } = require('../services/dentalSchedule');
 
 // Converte registro customers -> shape paciente odonto
 function patientShape(c) {
@@ -123,6 +124,9 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
   const finalCpf  = cpf_cnpj || cpf || null;
 
   if (!finalName) return res.status(400).json({ error: 'Nome e obrigatorio' });
+  if (isBirthDateInFuture(birth_date)) {
+    return res.status(400).json({ error: 'Data de nascimento no futuro', code: 'BIRTH_DATE_FUTURE' });
+  }
   if (!lgpd_consent) {
     return res.status(400).json({
       error: 'Consentimento LGPD Art.11 e obrigatorio para dados de saude',
@@ -242,6 +246,10 @@ router.patch('/patients/:pid', requireAuth, requireRole('client','analyst','admi
     // PR30: foto
     photo_url:       'photo_url',
   };
+
+  if (isBirthDateInFuture(req.body.birth_date)) {
+    return res.status(400).json({ error: 'Data de nascimento no futuro', code: 'BIRTH_DATE_FUTURE' });
+  }
 
   const fields = [], values = [];
   let idx = 1;
