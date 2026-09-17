@@ -44,7 +44,21 @@ async function listPatients(companyId, opts = {}) {
 
   if (search) {
     params.push(`%${search}%`);
-    where += ` AND (c.name ILIKE $${params.length} OR c.cpf_cnpj ILIKE $${params.length} OR c.phone ILIKE $${params.length})`;
+    const p1 = params.length;
+    let searchClause = `(c.name ILIKE $${p1} OR c.cpf_cnpj ILIKE $${p1} OR c.phone ILIKE $${p1})`;
+
+    // 1.4: busca por telefone ignorando formatacao — "99999-0002" e
+    // "(99) 99999-0002" devem achar o mesmo registro. So ativa quando o
+    // termo tem 4+ digitos pra nao virar um LIKE '%%' largo demais.
+    const digitsOnly = search.replace(/[^0-9]/g, '');
+    if (digitsOnly.length >= 4) {
+      params.push(`%${digitsOnly}%`);
+      const p2 = params.length;
+      searchClause += ` OR regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g') LIKE $${p2}`;
+      searchClause += ` OR regexp_replace(COALESCE(c.phone_secondary, ''), '[^0-9]', '', 'g') LIKE $${p2}`;
+    }
+
+    where += ` AND ${searchClause}`;
   }
   if (hasAllergies === true || hasAllergies === 'true' || hasAllergies === '1') {
     where += ` AND c.allergies IS NOT NULL AND TRIM(c.allergies) <> ''`;

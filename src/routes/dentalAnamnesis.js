@@ -58,7 +58,19 @@ router.put('/patients/:pid/anamnesis', requireAuth, requireRole('client','analys
 
   // Sanitizacao defensiva: so persiste campos conhecidos do wizard.
   // Evita injecao de chaves arbitrarias no JSONB.
+  // QA odonto 16/09/2026: os campos do PR20 (ultima_visita_dentista,
+  // bisfosfonatos, etilismo, ansiedade_dental, higiene_*, queixa_principal,
+  // historico_familiar) eram descartados aqui e sumiam ao reabrir a ficha.
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
   const clean = {
+    ultima_visita_dentista: str(data.ultima_visita_dentista, 40),
+    bisfosfonatos:        !!data.bisfosfonatos,
+    etilismo:             !!data.etilismo,
+    ansiedade_dental:     !!data.ansiedade_dental,
+    higiene_escovacao:    str(data.higiene_escovacao, 40),
+    higiene_fio:          !!data.higiene_fio,
+    queixa_principal:     str(data.queixa_principal, 1000),
+    historico_familiar:   Array.isArray(data.historico_familiar) ? data.historico_familiar.filter(v => typeof v === 'string') : [],
     doencas:              Array.isArray(data.doencas) ? data.doencas.filter(v => typeof v === 'string') : [],
     alergias:             Array.isArray(data.alergias) ? data.alergias.filter(v => typeof v === 'string') : [],
     medicacoes:           Array.isArray(data.medicacoes) ? data.medicacoes.filter(v => typeof v === 'string') : [],

@@ -190,8 +190,14 @@ router.get('/booking/requests', requireAuth, async (req, res) => {
 
   try {
     const { rows } = await db.query(
+      // 1.6: preferred_date e DATE — o driver pg (sem type parser custom pra
+      // oid 1082) devolve um Date que o JSON.stringify serializa em UTC
+      // meia-noite. Em America/Sao_Paulo (UTC-3) isso vira o dia anterior
+      // na tela do dentista (17/09 virava 16/09). Devolve como texto puro
+      // YYYY-MM-DD pra nao passar pela conversao de fuso.
       `SELECT id, patient_name, patient_phone, patient_email,
-              preferred_date, preferred_time, chief_complaint,
+              to_char(preferred_date, 'YYYY-MM-DD') AS preferred_date,
+              preferred_time, chief_complaint,
               status, appointment_id, notes, created_at
        FROM dental_booking_requests
        ${where}
@@ -291,10 +297,21 @@ router.post('/booking/requests/:rid/convert', requireAuth, requireRole('client',
     }
 
     // Monta scheduled_at — usa o do body OU combina preferred_date + preferred_time
+    // 1.6: antes fazia `${bookingReq.preferred_date}T...` — preferred_date
+    // vem do driver pg como objeto Date (DATE sem type parser custom), entao
+    // o template literal chamava Date.toString() (ex. "Tue Sep 16 2026...",
+    // dependendo do TZ do processo) em vez do texto "2026-09-17", gerando
+    // um scheduled_at errado. Agora deixa o Postgres montar o timestamp:
+    // soma DATE + TIME (timestamp sem fuso) e interpreta em America/Sao_Paulo,
+    // convertendo pra timestamptz correto (17/09 11:00 -03:00 -> 14:00Z).
     let finalScheduledAt = scheduled_at;
     if (!finalScheduledAt) {
-      // Combina date + time (assumindo America/Sao_Paulo)
-      finalScheduledAt = `${bookingReq.preferred_date}T${bookingReq.preferred_time}-03:00`;
+      const { rows: combined } = await db.query(
+        `SELECT (preferred_date + preferred_time) AT TIME ZONE 'America/Sao_Paulo' AS scheduled_at
+         FROM dental_booking_requests WHERE id = $1`,
+        [req.params.rid]
+      );
+      finalScheduledAt = combined[0].scheduled_at;
     }
 
     // Cria appointment
