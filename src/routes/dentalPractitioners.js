@@ -75,7 +75,7 @@ async function autoAllocateSoloDentist(companyId, settings) {
     ),
   };
   await db.query(
-    'UPDATE companies SET dental_settings = $1::jsonb WHERE id = $2',
+    "UPDATE companies SET dental_settings = COALESCE(dental_settings, '{}'::jsonb) || $1::jsonb WHERE id = $2",
     [JSON.stringify(updated), companyId]
   );
   return updated;
@@ -119,7 +119,7 @@ router.put('/settings', requireAuth, requireRole('client', 'analyst', 'admin'), 
     }
 
     await db.query(
-      'UPDATE companies SET dental_settings = $1::jsonb WHERE id = $2',
+      "UPDATE companies SET dental_settings = COALESCE(dental_settings, '{}'::jsonb) || $1::jsonb WHERE id = $2",
       [JSON.stringify(newSettings), req.params.id]
     );
     res.json({ settings: newSettings, plan: companyRows[0].plan, max_chairs: max });
