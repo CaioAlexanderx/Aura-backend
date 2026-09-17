@@ -18,12 +18,15 @@
 //
 // PR30 (2026-04-28): photo_url em CRUD + filtros (has_allergies,
 // has_insurance, inactive_days, convenio) no GET listing.
+//
+// 1.2 (2026-09-16): GET /patients/birthdays — aniversariantes proximos N dias.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { listPatients } = require('../services/dental');
 const { isBirthDateInFuture } = require('../services/dentalSchedule');
+const { daysUntilNextBirthday, todayInTimeZone } = require('../utils/birthdayCalc');
 
 // Converte registro customers -> shape paciente odonto
 function patientShape(c) {
@@ -84,6 +87,51 @@ router.get('/patients', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[dentalPatients GET /patients]', err.message);
     res.status(500).json({ error: 'Erro ao buscar pacientes' });
+  }
+});
+
+// ── GET /patients/birthdays ──
+// 1.2: precisa vir ANTES de /patients/:pid, senao "birthdays" cai como :pid.
+// Aniversariantes dos proximos N dias (default 7, max 60).
+//
+// O calculo (virada de ano, 29/02 em ano nao-bissexto) fica em JS puro
+// (src/utils/birthdayCalc.js) em vez de SQL — testavel sem banco e mais
+// facil de auditar que uma cadeia de make_date/EXTRACT. "Hoje" e calculado
+// em America/Sao_Paulo via Intl, nao CURRENT_DATE (que segue o TZ da sessao
+// do Postgres/Supabase, tipicamente UTC — mesma classe de bug do item 1.6).
+router.get('/patients/birthdays', requireAuth, async (req, res) => {
+  try {
+    let days = parseInt(req.query.days);
+    if (isNaN(days)) days = 7;
+    days = Math.min(Math.max(days, 0), 60);
+
+    const { rows } = await db.query(
+      `SELECT id, name, phone, to_char(birth_date, 'YYYY-MM-DD') AS birth_date
+       FROM customers
+       WHERE company_id = $1
+         AND is_patient = true
+         AND is_active = true
+         AND birth_date IS NOT NULL`,
+      [req.params.id]
+    );
+
+    const today = todayInTimeZone('America/Sao_Paulo');
+
+    const patients = rows
+      .map((r) => ({
+        id: r.id,
+        full_name: r.name,
+        phone: r.phone,
+        birth_date: r.birth_date,
+        days_until: daysUntilNextBirthday(r.birth_date, today),
+      }))
+      .filter((p) => p.days_until !== null && p.days_until >= 0 && p.days_until <= days)
+      .sort((a, b) => a.days_until - b.days_until || a.full_name.localeCompare(b.full_name));
+
+    res.json({ patients });
+  } catch (err) {
+    console.error('[dentalPatients GET /patients/birthdays]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar aniversariantes' });
   }
 });
 
