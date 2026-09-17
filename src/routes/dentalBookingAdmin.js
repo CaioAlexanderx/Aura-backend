@@ -237,6 +237,26 @@ router.post('/booking/requests/:rid/convert', requireAuth, requireRole('client',
   const { practitioner_id, scheduled_at, duration_min } = req.body;
 
   try {
+    // D-QA #7 (2026-09-16): agendamento online sem dentista escolhido no
+    // body cai pro dentista alocado na primeira cadeira ativa (se houver)
+    // — mesma configuracao usada no card "Cadeiras" de DentalSettings.tsx.
+    // Sem isso, um agendamento convertido do site ficava sem practitioner_id
+    // mesmo quando a clinica so tem 1 dentista, obrigando reatribuicao manual.
+    let finalPractitionerId = practitioner_id || null;
+    if (!finalPractitionerId) {
+      const { rows: settingsRows } = await db.query(
+        'SELECT dental_settings FROM companies WHERE id = $1',
+        [req.params.id]
+      );
+      const settings = settingsRows[0]?.dental_settings;
+      const chairsActive = Array.isArray(settings?.chairs_active) ? settings.chairs_active : [];
+      const chairPractitionerIds = Array.isArray(settings?.chair_practitioner_ids) ? settings.chair_practitioner_ids : [];
+      const firstActiveChairIdx = chairsActive.findIndex(Boolean);
+      if (firstActiveChairIdx !== -1 && chairPractitionerIds[firstActiveChairIdx]) {
+        finalPractitionerId = chairPractitionerIds[firstActiveChairIdx];
+      }
+    }
+
     // Busca request
     const { rows: reqRows } = await db.query(
       'SELECT * FROM dental_booking_requests WHERE id = $1 AND company_id = $2',
@@ -326,7 +346,7 @@ router.post('/booking/requests/:rid/convert', requireAuth, requireRole('client',
         finalScheduledAt,
         duration_min || 60,
         bookingReq.chief_complaint || null,
-        practitioner_id || null,
+        finalPractitionerId,
       ]
     );
 

@@ -55,6 +55,7 @@ describe('POST /dental/booking/requests/:rid/convert — montagem do scheduled_a
 
   test('sem scheduled_at no body, usa query SQL com AT TIME ZONE America/Sao_Paulo (17/09 11:00 -> 14:00Z)', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });          // companyAccess
+    db.query.mockResolvedValueOnce({ rows: [{ dental_settings: null }] });  // D-QA#7: fallback practitioner (sem settings salvos)
     db.query.mockResolvedValueOnce({ rows: [bookingReq] });                  // SELECT request
     db.query.mockResolvedValueOnce({ rows: [] });                           // busca customer por phone -> nao achou
     db.query.mockResolvedValueOnce({ rows: [{ id: 'cust1' }] });            // INSERT customer novo
@@ -69,8 +70,9 @@ describe('POST /dental/booking/requests/:rid/convert — montagem do scheduled_a
 
     expect(res.status).toBe(200);
 
-    // Call index 4 (0-based) e a query que combina preferred_date + preferred_time
-    const combineCall = db.query.mock.calls[4];
+    // Call index 5 (0-based) e a query que combina preferred_date + preferred_time
+    // (index 1 agora e o SELECT dental_settings do fallback de practitioner_id, D-QA#7)
+    const combineCall = db.query.mock.calls[5];
     expect(combineCall[0]).toMatch(/preferred_date \+ preferred_time/);
     expect(combineCall[0]).toMatch(/AT TIME ZONE 'America\/Sao_Paulo'/);
     expect(combineCall[1]).toEqual(['req1']);
@@ -82,6 +84,7 @@ describe('POST /dental/booking/requests/:rid/convert — montagem do scheduled_a
 
   test('com scheduled_at explicito no body, NAO chama a query de combinacao', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ dental_settings: null }] });  // D-QA#7: fallback practitioner (sem settings salvos)
     db.query.mockResolvedValueOnce({ rows: [bookingReq] });
     db.query.mockResolvedValueOnce({ rows: [] });
     db.query.mockResolvedValueOnce({ rows: [{ id: 'cust1' }] });
@@ -94,10 +97,12 @@ describe('POST /dental/booking/requests/:rid/convert — montagem do scheduled_a
       .send({ scheduled_at: '2026-10-01T12:00:00.000Z', duration_min: 30 });
 
     expect(res.status).toBe(200);
-    // So 6 chamadas (sem a query extra de combinacao de data+hora)
-    expect(db.query.mock.calls.length).toBe(6);
+    // 7 chamadas: companyAccess + fallback settings (D-QA#7) + request +
+    // busca customer + insert customer + insert appointment + update request
+    // (sem a query extra de combinacao de data+hora, essa continua fora)
+    expect(db.query.mock.calls.length).toBe(7);
     for (const call of db.query.mock.calls) {
-      expect(call[0]).not.toMatch(/AT TIME ZONE/);
+      expect(call[0]).not.toMatch(/preferred_date \+ preferred_time/);
     }
   });
 });

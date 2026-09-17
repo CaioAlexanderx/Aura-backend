@@ -7,7 +7,7 @@
 // - faturamento_mes (concluido) + estimativa (agendado)
 // - funil (leads por stage + total pipeline)
 // - parcelas_vencidas + parcelas_proximas_7d
-// - pacientes_recall (sem consulta 150+ dias)
+// - pacientes_recall (sem consulta ha recall_days dias; padrao 180, igual a automacao)
 // - repasse_mes (total a repassar)
 // - top_procedimentos_mes
 //
@@ -131,7 +131,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
          )
          SELECT COUNT(*)::int AS qtd
          FROM last_visits
-         WHERE last_visit < NOW() - INTERVAL '150 days'`,
+         WHERE last_visit < NOW() - make_interval(days => COALESCE((SELECT recall_days FROM dental_automation_config WHERE company_id = $1), 180))`,
         [cid]
       ).catch(() => ({ rows: [{}] })),
 
