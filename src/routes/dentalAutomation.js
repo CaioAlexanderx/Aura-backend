@@ -137,7 +137,7 @@ router.post('/automation/trigger', requireAuth, requireRole('client','admin'), a
 });
 
 // POST recall — disparador (insere log com msg pendente)
-router.post('/automation/recall', requireAuth, async (req, res) => {
+router.post('/automation/recall', requireAuth, requireRole('client','admin'), async (req, res) => {
   const cid = req.params.id;
   try {
     const { rows: config } = await db.query(
@@ -291,7 +291,7 @@ router.get('/no-shows', requireAuth, async (req, res) => {
 });
 
 // POST satisfaction
-router.post('/automation/satisfaction/:aid', requireAuth, async (req, res) => {
+router.post('/automation/satisfaction/:aid', requireAuth, requireRole('client','admin'), async (req, res) => {
   const cid = req.params.id;
   try {
     const { rows } = await db.query(
