@@ -238,11 +238,61 @@ async function sendNotificationEmails({ notification, recipients, subject, pix, 
   return { sent, failed };
 }
 
+// ── Caminho único do envio de um banner ──────────────────────
+// Usado pela rota do painel e pela fila de disparos da equipe
+// (staffDispatch). Devolve { status, body } no formato HTTP para a rota
+// repassar e a fila registrar. `recipients` ausente/null = os endereços
+// que o painel sugere marcados (dono e empresa).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function sendBannerEmail({ notificationId, recipients, subject, pix: rawPix, sentBy }) {
+  if (!UUID_RE.test(String(notificationId || ''))) {
+    return { status: 400, body: { error: 'Banner inválido' } };
+  }
+  const { pix, error: pixError } = parsePix(rawPix);
+  if (pixError) return { status: 400, body: { error: pixError } };
+
+  const { rows } = await db.query(
+    `SELECT id, title, body, cta_label, cta_url, target_company_id
+       FROM app_notifications WHERE id = $1`,
+    [notificationId]
+  );
+  if (!rows.length) return { status: 404, body: { error: 'Banner não encontrado' } };
+  const notification = rows[0];
+  if (!notification.target_company_id) {
+    return { status: 400, body: {
+      error: 'Só banners de empresa específica podem ser enviados por e-mail', code: 'BANNER_SEM_EMPRESA',
+    } };
+  }
+
+  const data = await listRecipients(notification.target_company_id);
+  const known = data ? data.recipients : [];
+  const wanted = recipients == null
+    ? known.filter((r) => r.selected).map((r) => r.email)
+    : Array.from(new Set((Array.isArray(recipients) ? recipients : []).map(normEmail).filter(Boolean)));
+
+  if (!wanted.length) return { status: 400, body: { error: 'Escolha ao menos um destinatário' } };
+  if (wanted.length > MAX_RECIPIENTS) {
+    return { status: 400, body: { error: `No máximo ${MAX_RECIPIENTS} destinatários por envio` } };
+  }
+  const allowed = new Set(known.map((r) => r.email));
+  if (wanted.some((e) => !allowed.has(e))) {
+    return { status: 400, body: {
+      error: 'Destinatário fora do cadastro da empresa', code: 'DESTINATARIO_FORA_DA_EMPRESA',
+    } };
+  }
+
+  const subj = String(subject || '').trim().slice(0, 200) || notification.title;
+  const result = await sendNotificationEmails({ notification, recipients: wanted, subject: subj, pix, sentBy });
+  return { status: result.sent.length ? 200 : 502, body: result };
+}
+
 module.exports = {
   listRecipients,
   parsePix,
   buildNotificationEmail,
   sendNotificationEmails,
+  sendBannerEmail,
   normEmail,
   MAX_RECIPIENTS,
   _resetForTests() { _logTableMissing = false; },
