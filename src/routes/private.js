@@ -125,6 +125,17 @@ router.use('/employees/ranking', require('./employeesRanking'));
 // comercial é o addon — hub_agent_settings.enabled — não o plano).
 router.use('/hub', require('./hubSocial'));
 
+// ── Fase 1 · perfil do cliente (16/09/2026, migration 341) ──────────
+// Ficha 360º: tags, linha do tempo, resumo, notas, duplicados e mesclagem.
+// SEM requirePlan: vale para todo plano; o gate de mensagem/crediario e por
+// tipo de evento, lido do banco (src/services/customerTimeline.js).
+// A POSICAO importa: o requirePlan do mount de ./crm logo abaixo responde
+// 403 para QUALQUER /customers/* que chegar nele (mesma armadilha do
+// /employees/ranking acima) -- por isso este bloco nao pode ir para o fim do
+// arquivo. As rotas estaticas (/tags, /duplicates) nao colidem com
+// ./customers, que so tem PATCH/DELETE /:cid.
+router.use('/customers', require('./customerProfile').companyRouter);
+
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./crm'));
 router.use('/customers', requirePlan('negocio', 'expansao'), require('./retention'));
 router.use('/customers/ranking-ltv', requirePlan('negocio', 'expansao'), require('./customerRanking'));
