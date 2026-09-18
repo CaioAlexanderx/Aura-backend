@@ -28,9 +28,7 @@ const db     = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { SHELLS, isValidShell, createAppNotification } = require('../services/appNotifications');
 
-const {
-  listRecipients, parsePix, sendNotificationEmails, normEmail, MAX_RECIPIENTS,
-} = require('../services/notificationEmail');
+const { listRecipients, sendBannerEmail } = require('../services/notificationEmail');
 
 const adminOnly = [requireAuth, requireRole('admin')];
 
@@ -188,52 +186,18 @@ router.get('/notifications/recipients', ...adminOnly, async (req, res) => {
 // Os endereços precisam estar entre os destinatários da empresa do banner
 // (dono, empresa, membros) — a rota não é um disparador de e-mail livre.
 router.post('/notifications/banners/:nid/email', ...adminOnly, async (req, res) => {
-  const { nid } = req.params;
-  if (!UUID_RE.test(nid)) return res.status(400).json({ error: 'Banner inválido' });
-
-  const wanted = Array.isArray(req.body.recipients)
-    ? Array.from(new Set(req.body.recipients.map(normEmail).filter(Boolean)))
-    : [];
-  if (!wanted.length) return res.status(400).json({ error: 'Escolha ao menos um destinatário' });
-  if (wanted.length > MAX_RECIPIENTS) {
-    return res.status(400).json({ error: `No máximo ${MAX_RECIPIENTS} destinatários por envio` });
+  if (!Array.isArray(req.body.recipients) || !req.body.recipients.length) {
+    return res.status(400).json({ error: 'Escolha ao menos um destinatário' });
   }
-
-  const { pix, error: pixError } = parsePix(req.body.pix);
-  if (pixError) return res.status(400).json({ error: pixError });
-
   try {
-    const { rows } = await db.query(
-      `SELECT id, title, body, cta_label, cta_url, target_company_id
-         FROM app_notifications WHERE id = $1`,
-      [nid]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Banner não encontrado' });
-    const notification = rows[0];
-    if (!notification.target_company_id) {
-      return res.status(400).json({
-        error: 'Só banners de empresa específica podem ser enviados por e-mail',
-        code: 'BANNER_SEM_EMPRESA',
-      });
-    }
-
-    const data = await listRecipients(notification.target_company_id);
-    const allowed = new Set((data ? data.recipients : []).map((r) => r.email));
-    const foreign = wanted.filter((e) => !allowed.has(e));
-    if (foreign.length) {
-      return res.status(400).json({
-        error: 'Destinatário fora do cadastro da empresa',
-        code: 'DESTINATARIO_FORA_DA_EMPRESA',
-      });
-    }
-
-    const subject = String(req.body.subject || '').trim().slice(0, 200) || notification.title;
-    const result = await sendNotificationEmails({
-      notification, recipients: wanted, subject, pix, sentBy: req.user && req.user.id,
+    const r = await sendBannerEmail({
+      notificationId: req.params.nid,
+      recipients:     req.body.recipients,
+      subject:        req.body.subject,
+      pix:            req.body.pix,
+      sentBy:         req.user && req.user.id,
     });
-
-    const status = result.sent.length ? 200 : 502;
-    res.status(status).json(result);
+    res.status(r.status).json(r.body);
   } catch (err) {
     console.error('[admin/notifications] email error:', err.message);
     res.status(500).json({ error: 'Erro ao enviar e-mail' });
