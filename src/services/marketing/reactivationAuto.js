@@ -31,6 +31,10 @@ const quota = require('./marketingQuota');
 // que ainda vale a pena reconquistar — quem passou de 120 dias ('lost')
 // fica fora do automático de propósito: é a lista com menor resposta e
 // maior chance de a pessoa nem lembrar da loja (= denúncia de spam).
+//
+// CRM Fase 1 (340): com a data de corte do opt-in alcançada, quem não
+// deu opt-in individual sai da prévia e do envio como SEM_OPTIN_CLIENTE
+// (a guarda mora no waOutbox; aqui só passa o id do cliente).
 const SEGMENT_RANGES = {
   at_risk: [31, 60],
   dormant: [61, 120],
@@ -174,6 +178,7 @@ async function runForCompany(companyId, {
       companyId, toPhone: c.phone,
       templateName: mkt.TEMPLATE_REATIVACAO, templateLanguage: 'pt_BR',
       sourceType: mkt.KIND_REATIVACAO,
+      customerId: c.id,
     });
     if (!sim.ok) { bump(sim.reason); pushItem(c, sim.reason); continue; }
     const limite = tracker.reason();
