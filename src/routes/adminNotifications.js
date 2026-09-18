@@ -4,6 +4,12 @@
 // POST   /admin/notifications/banners               — cria banner
 // PATCH  /admin/notifications/banners/:nid          — edita banner
 // DELETE /admin/notifications/banners/:nid          — remove banner
+// GET    /admin/notifications/recipients?company_id — destinatários de e-mail
+// POST   /admin/notifications/banners/:nid/email    — manda o banner por e-mail
+//
+// 18/09/2026 — e-mail de notificação de empresa específica (migration 347,
+//   src/services/notificationEmail.js). Só banner com target_company_id;
+//   destinatário só do cadastro da empresa; cada envio fica registrado.
 //
 // Criado: 13/06/2026
 // Apenas staff admin pode criar/editar/deletar banners.
@@ -22,19 +28,46 @@ const db     = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { SHELLS, isValidShell, createAppNotification } = require('../services/appNotifications');
 
+const {
+  listRecipients, parsePix, sendNotificationEmails, normEmail, MAX_RECIPIENTS,
+} = require('../services/notificationEmail');
+
 const adminOnly = [requireAuth, requireRole('admin')];
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Migration 347 (app_notification_emails) pode não estar no banco ainda:
+// a lista cai no formato antigo, sem o "e-mail enviado".
+let _emailLogMissing = false;
+
+const LIST_BASE = `
+      SELECT n.*,
+             (SELECT COUNT(*)::int FROM notification_reads r
+              WHERE r.notification_id = n.id) AS read_count`;
+const LIST_EMAIL = `,
+             (SELECT MAX(e.created_at) FROM app_notification_emails e
+              WHERE e.notification_id = n.id AND e.status = 'sent') AS last_emailed_at,
+             (SELECT COUNT(*)::int FROM app_notification_emails e
+              WHERE e.notification_id = n.id AND e.status = 'sent') AS email_count`;
+const LIST_TAIL = `
+      FROM app_notifications n
+      ORDER BY n.created_at DESC
+      LIMIT 200`;
 
 // GET — lista todos os banners (ativos e inativos)
 router.get('/notifications/banners', ...adminOnly, async (req, res) => {
   try {
-    const { rows } = await db.query(`
-      SELECT n.*,
-             (SELECT COUNT(*)::int FROM notification_reads r
-              WHERE r.notification_id = n.id) AS read_count
-      FROM app_notifications n
-      ORDER BY n.created_at DESC
-      LIMIT 200
-    `);
+    let rows;
+    if (!_emailLogMissing) {
+      try {
+        ({ rows } = await db.query(LIST_BASE + LIST_EMAIL + LIST_TAIL));
+      } catch (err) {
+        if (err.code !== '42P01') throw err;
+        _emailLogMissing = true;
+        console.error('[admin/notifications] migration 347 ausente: lista sem dados de e-mail');
+      }
+    }
+    if (!rows) ({ rows } = await db.query(LIST_BASE + LIST_TAIL));
     res.json({ banners: rows });
   } catch (err) {
     console.error('[admin/notifications] list error:', err.message);
@@ -132,6 +165,78 @@ router.patch('/notifications/banners/:nid', ...adminOnly, async (req, res) => {
     }
     console.error('[admin/notifications] update error:', err.message);
     res.status(500).json({ error: 'Erro ao atualizar banner' });
+  }
+});
+
+// GET — quem pode receber o e-mail de um banner de empresa específica.
+// Alimenta o painel (nome da empresa + lista de endereços com a origem).
+router.get('/notifications/recipients', ...adminOnly, async (req, res) => {
+  const companyId = String(req.query.company_id || '').trim();
+  if (!UUID_RE.test(companyId)) return res.status(400).json({ error: 'company_id inválido' });
+  try {
+    const data = await listRecipients(companyId);
+    if (!data) return res.status(404).json({ error: 'Empresa não encontrada' });
+    res.json(data);
+  } catch (err) {
+    console.error('[admin/notifications] recipients error:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar destinatários' });
+  }
+});
+
+// POST — manda por e-mail um banner de empresa específica.
+// body: { recipients: string[], subject?: string, pix?: { code, amount?, due_date? } }
+// Os endereços precisam estar entre os destinatários da empresa do banner
+// (dono, empresa, membros) — a rota não é um disparador de e-mail livre.
+router.post('/notifications/banners/:nid/email', ...adminOnly, async (req, res) => {
+  const { nid } = req.params;
+  if (!UUID_RE.test(nid)) return res.status(400).json({ error: 'Banner inválido' });
+
+  const wanted = Array.isArray(req.body.recipients)
+    ? Array.from(new Set(req.body.recipients.map(normEmail).filter(Boolean)))
+    : [];
+  if (!wanted.length) return res.status(400).json({ error: 'Escolha ao menos um destinatário' });
+  if (wanted.length > MAX_RECIPIENTS) {
+    return res.status(400).json({ error: `No máximo ${MAX_RECIPIENTS} destinatários por envio` });
+  }
+
+  const { pix, error: pixError } = parsePix(req.body.pix);
+  if (pixError) return res.status(400).json({ error: pixError });
+
+  try {
+    const { rows } = await db.query(
+      `SELECT id, title, body, cta_label, cta_url, target_company_id
+         FROM app_notifications WHERE id = $1`,
+      [nid]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Banner não encontrado' });
+    const notification = rows[0];
+    if (!notification.target_company_id) {
+      return res.status(400).json({
+        error: 'Só banners de empresa específica podem ser enviados por e-mail',
+        code: 'BANNER_SEM_EMPRESA',
+      });
+    }
+
+    const data = await listRecipients(notification.target_company_id);
+    const allowed = new Set((data ? data.recipients : []).map((r) => r.email));
+    const foreign = wanted.filter((e) => !allowed.has(e));
+    if (foreign.length) {
+      return res.status(400).json({
+        error: 'Destinatário fora do cadastro da empresa',
+        code: 'DESTINATARIO_FORA_DA_EMPRESA',
+      });
+    }
+
+    const subject = String(req.body.subject || '').trim().slice(0, 200) || notification.title;
+    const result = await sendNotificationEmails({
+      notification, recipients: wanted, subject, pix, sentBy: req.user && req.user.id,
+    });
+
+    const status = result.sent.length ? 200 : 502;
+    res.status(status).json(result);
+  } catch (err) {
+    console.error('[admin/notifications] email error:', err.message);
+    res.status(500).json({ error: 'Erro ao enviar e-mail' });
   }
 });
 
