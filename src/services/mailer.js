@@ -50,14 +50,18 @@ async function sendViaResend(opts) {
       subject: opts.subject,
       html: opts.html,
       text: opts.text,
-      // Imagem no corpo (cid): { filename, content: Buffer, cid } vira o
-      // formato do Resend (base64 + content_id). O SMTP (nodemailer) já
-      // entende { filename, content, cid } como está.
+      // Imagem no corpo (cid): { filename, content: Buffer, cid, contentType }
+      // vira o formato do Resend (base64 + content_id + content_type). O
+      // SMTP (nodemailer) já entende { filename, content, cid, contentType }.
+      // 18/09/2026: sem content_type o QR do e-mail de notificação chegou
+      // como imagem quebrada — o cliente não trata o anexo como imagem.
+      // Mesmo formato do karateBillingMailer, que já funcionava.
       ...(opts.attachments && opts.attachments.length ? {
         attachments: opts.attachments.map((a) => ({
-          filename:   a.filename,
-          content:    Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content,
-          content_id: a.cid,
+          filename:     a.filename,
+          content:      Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content,
+          content_id:   a.cid,
+          ...(a.contentType ? { content_type: a.contentType } : {}),
         })),
       } : {}),
     }),
