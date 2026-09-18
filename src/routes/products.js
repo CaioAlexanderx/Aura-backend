@@ -47,7 +47,30 @@
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const { normalizeGallery } = require('../services/productGallery');
+const { companyGroupWhere } = require('../utils/companyGroup');
 const db = require('../config/database');
+
+// ─── Fase 1 fornecedores (16/09/2026) ────────────────────────
+//
+// products.supplier_id (migration 342) aponta pra suppliers. A mesma
+// visibilidade de GRUPO ECONOMICO de suppliers.js (companyGroupWhere) --
+// NAO a visibilidade de produto (visibilityWhere/is_group_shared): um
+// fornecedor do grupo pode ser vinculado por qualquer empresa do grupo,
+// tenha ela is_group_shared ligado ou nao nos PRODUTOS dela. As duas
+// visibilidades sao dominios diferentes que so coincidem por acaso
+// quando a empresa e standalone.
+//
+// Retorna { id, name, cnpj } do supplier se `supplierId` for visivel
+// pra `cid`, ou null se nao existir/nao for visivel (o caller decide se
+// isso e 404).
+async function resolveSupplier(supplierId, cid) {
+  if (!supplierId) return null;
+  const { rows } = await db.query(
+    `SELECT id, name, cnpj FROM suppliers WHERE id = $1 AND ${companyGroupWhere('$2')}`,
+    [supplierId, cid]
+  );
+  return rows[0] || null;
+}
 
 const HARD_CAP = 20000;
 
@@ -210,6 +233,13 @@ router.get('/', async (req, res) => {
               ${colsFicha}
               ${colDuracao}
               is_active, is_group_shared, company_id, created_at,
+              supplier_id,
+              -- Fase 1 fornecedores: objeto pronto em vez de 3 colunas soltas --
+              -- fica null quando supplier_id e null OU aponta pra um supplier
+              -- fora da visibilidade de grupo (nao deveria acontecer, mas o
+              -- JOIN sem checar grupo aqui e so leitura, nao escrita).
+              (SELECT json_build_object('id', sup.id, 'name', sup.name, 'cnpj', sup.cnpj)
+               FROM suppliers sup WHERE sup.id = products.supplier_id) AS supplier_json,
               (SELECT EXISTS(SELECT 1 FROM product_variants pv WHERE pv.product_id = products.id AND pv.is_active = true)) AS has_variants,
               -- 19/05/2026: SUM do estoque das variants ativas pra alimentar UI/KPIs
               -- depois que a migration zera products.stock_qty do pai.
@@ -249,6 +279,9 @@ router.get('/', async (req, res) => {
         ? null : (parseInt(r.duration_minutes, 10) || 0),
       is_active: r.is_active !== false,
       is_group_shared: r.is_group_shared || false,
+      // Fase 1 fornecedores (16/09/2026, migration 342).
+      supplier_id: r.supplier_id || null,
+      supplier: r.supplier_json || null,
       stock_company_id: r.company_id,
       created_at: r.created_at,
       has_variants: r.has_variants || false,
@@ -336,16 +369,30 @@ router.post('/', async (req, res) => {
     ? !!req.body.is_group_shared
     : defaultShared;
 
+  // Fase 1 fornecedores (16/09/2026): supplier_id e a unica entrada
+  // escrivel; supplier_name/supplier_cnpj sao DERIVADOS do supplier
+  // resolvido, pra compatibilidade de leitura com o front atual (que
+  // ainda pode ler essas duas colunas soltas). supplier_id precisa ser
+  // visivel pra esta empresa (propria OU grupo economico -- armadilha
+  // 4/7 do CLAUDE.md, mesmo raciocinio de visibilityWhere).
+  let supplierFields = { supplier_id: null, supplier_name: null, supplier_cnpj: null };
+  if (req.body.supplier_id !== undefined && req.body.supplier_id !== null && String(req.body.supplier_id).trim() !== '') {
+    const supplier = await resolveSupplier(req.body.supplier_id, cid);
+    if (!supplier) return res.status(404).json({ error: 'Fornecedor nao encontrado' });
+    supplierFields = { supplier_id: supplier.id, supplier_name: supplier.name, supplier_cnpj: supplier.cnpj };
+  }
+
   try {
     // Migration 305: ficha tecnica. Texto curto e opcional; o corte de
     // tamanho evita que um paste de 40 KB vire coluna.
     const ficha = (v) => (v && String(v).trim() ? String(v).trim().slice(0, 600) : null);
 
-    const COLS_ANTIGAS = 'company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared';
+    const COLS_ANTIGAS = 'company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared, supplier_id, supplier_name, supplier_cnpj';
     const paramsAntigos = [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
        parseFloat(price)||0, parseFloat(cost_price)||0, parseInt(stock_qty)||0, parseInt(min_stock)||0,
        parseInt(stock_max)||0, unit||'un', color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
-       size ? String(size).slice(0,100) : null, sanitizeNcm(ncm), isGroupShared];
+       size ? String(size).slice(0,100) : null, sanitizeNcm(ncm), isGroupShared,
+       supplierFields.supplier_id, supplierFields.supplier_name, supplierFields.supplier_cnpj];
 
     const paramsFicha = [ficha(material), ficha(medidas), ficha(cuidados)];
 
@@ -429,7 +476,10 @@ router.post('/', async (req, res) => {
       }
     } catch (_) { /* não bloqueia a criação */ }
 
-    res.status(201).json({ ...result.rows[0], merge_suggestion });
+    const supplierOut = supplierFields.supplier_id
+      ? { id: supplierFields.supplier_id, name: supplierFields.supplier_name, cnpj: supplierFields.supplier_cnpj }
+      : null;
+    res.status(201).json({ ...result.rows[0], supplier: supplierOut, merge_suggestion });
   } catch (err) { console.error('[products] create error:', err.message); res.status(500).json({ error: 'Erro ao criar produto' }); }
 });
 
@@ -504,6 +554,23 @@ router.patch('/:pid', async (req, res) => {
     duracao = d;
   }
 
+  // Fase 1 fornecedores (16/09/2026). Fora do fieldMap porque precisa de
+  // uma consulta ao banco pra validar visibilidade (mesma razao de
+  // duracao/galeria acima terem saido do fieldMap). undefined = nao
+  // mexe; null (ou string vazia) = desvincula (limpa os 3 campos);
+  // string = revalida e resincroniza supplier_name/supplier_cnpj a
+  // partir do supplier (compatibilidade com o front atual).
+  let supplierUpdate = null;
+  if (req.body.supplier_id !== undefined) {
+    if (req.body.supplier_id === null || String(req.body.supplier_id).trim() === '') {
+      supplierUpdate = { supplier_id: null, supplier_name: null, supplier_cnpj: null };
+    } else {
+      const supplier = await resolveSupplier(req.body.supplier_id, cid);
+      if (!supplier) return res.status(404).json({ error: 'Fornecedor nao encontrado' });
+      supplierUpdate = { supplier_id: supplier.id, supplier_name: supplier.name, supplier_cnpj: supplier.cnpj };
+    }
+  }
+
   const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size', image_url:'image_url', ncm:'ncm', is_group_shared:'is_group_shared', studio_storefront_visible:'studio_storefront_visible',
     // Migration 305 — ficha tecnica na pagina do produto.
     material:'material', medidas:'medidas', cuidados:'cuidados' };
@@ -534,6 +601,11 @@ router.patch('/:pid', async (req, res) => {
         values.push(galeria.cover); idx++;
       }
     }
+    if (supplierUpdate) {
+      updates.push(`supplier_id = $${idx}`); values.push(supplierUpdate.supplier_id); idx++;
+      updates.push(`supplier_name = $${idx}`); values.push(supplierUpdate.supplier_name); idx++;
+      updates.push(`supplier_cnpj = $${idx}`); values.push(supplierUpdate.supplier_cnpj); idx++;
+    }
     return { updates, values, idx };
   }
 
@@ -559,7 +631,11 @@ router.patch('/:pid', async (req, res) => {
       result = await rodarUpdate(semDuracao);
     }
     if (!result.rows.length) return res.status(404).json({ error: 'Produto nao encontrado' });
-    res.json(result.rows[0]);
+    const row = result.rows[0];
+    const supplierOut = row.supplier_id
+      ? { id: row.supplier_id, name: row.supplier_name, cnpj: row.supplier_cnpj }
+      : null;
+    res.json({ ...row, supplier: supplierOut });
   } catch (err) { console.error('[products] update error:', err.message); res.status(500).json({ error: 'Erro ao atualizar produto' }); }
 });
 

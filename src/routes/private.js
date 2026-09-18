@@ -230,4 +230,9 @@ router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPayme
 // aprovação formal da F2). Contrato no chat c/ Caio.
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioVisualTemplates'));
 
+// Fase 1 · fornecedores (16/09/2026, migration 342). Todos os planos --
+// modulo estoque.fornecedores e Essencial (src/services/modules.js).
+// Sem requirePlan, igual a ./products.
+router.use('/suppliers', require('./suppliers'));
+
 module.exports = router;

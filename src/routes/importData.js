@@ -23,6 +23,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
 const { linkImportedCategories } = require('../services/importCategoryLink');
+const { findOrCreateSupplierByCnpj } = require('../services/supplierLookup');
 
 // ─── Mapeamento de colunas — fuzzy match ────────────────────
 
@@ -532,6 +533,34 @@ function parseNFeXML(xml) {
   return result;
 }
 
+// ─── Fase 1 fornecedores: registra a entrada no estoque ─────────
+//
+// stock_movements nasceu (migration 018) so pra vendas ('out') e
+// devolucao/troca ('in') -- a importacao de NF-e nunca registrou nada
+// aqui, so somava products.stock_qty direto. Agora que existe
+// supplier_id + unit_cost (migration 342), o import passa a deixar
+// rastro tambem, sem mudar em nada o calculo de quantidade/custo do
+// produto (isso continua acima, inalterado).
+//
+// SAVEPOINT: falha aqui (ex: coluna nao migrada num deploy fora de
+// ordem) nao pode abortar a transacao inteira do import -- o produto ja
+// salvo e o que importa; o rastro de estoque e best-effort.
+async function registrarEntradaDeEstoque(client, { productId, companyId, supplierId, quantity, unitCost, referenceId, notes }) {
+  try {
+    await client.query('SAVEPOINT sp_stock_mov');
+    await client.query(
+      `INSERT INTO stock_movements
+         (product_id, company_id, type, quantity, unit_cost, supplier_id, reference_id, reference_type, notes)
+       VALUES ($1,$2,'in',$3,$4,$5,$6,'nfe_import',$7)`,
+      [productId, companyId, quantity, unitCost || null, supplierId || null, referenceId, notes || null]
+    );
+    await client.query('RELEASE SAVEPOINT sp_stock_mov');
+  } catch (err) {
+    console.error('[import-nfe] stock_movements insert error:', err.message);
+    try { await client.query('ROLLBACK TO SAVEPOINT sp_stock_mov'); } catch (_) { /* ignora */ }
+  }
+}
+
 // ─── POST /products/import-nfe ────────────────────────────────
 
 router.post('/products/import-nfe', requireAuth, async (req, res) => {
@@ -573,6 +602,16 @@ router.post('/products/import-nfe', requireAuth, async (req, res) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+
+    // Fase 1 fornecedores (16/09/2026): acha/cria o supplier UMA vez pelo
+    // CNPJ do emitente da NF-e (uma nota tem um unico emitente -- vale
+    // pra todos os itens dela). Nao bloqueia o import: sem CNPJ nem nome
+    // no XML, supplierId fica null e o resto do fluxo segue igual.
+    const supplierId = await findOrCreateSupplierByCnpj(client, companyId, {
+      cnpj: parsed.nfe_info.cnpj_emitente,
+      name: parsed.nfe_info.nome_emitente,
+    });
+
     for (const p of toSave) {
       if (!p.name) continue;
       let existing = null;
@@ -590,25 +629,43 @@ router.post('/products/import-nfe', requireAuth, async (req, res) => {
         );
         existing = r.rows[0];
         if (existing) {
+          // Quantidade e custo: comportamento inalterado. supplier_id so
+          // preenche quando o produto ainda nao tinha um (nao sobrescreve
+          // fornecedor ja cadastrado manualmente por outro).
           await client.query(
-            `UPDATE products SET stock_qty=stock_qty+$1, cost_price=$2, updated_at=NOW() WHERE id=$3`,
-            [p.stock_qty || 0, p.cost_price || null, existing.id]
+            `UPDATE products SET stock_qty=stock_qty+$1, cost_price=$2,
+               supplier_id=COALESCE(supplier_id,$4), updated_at=NOW() WHERE id=$3`,
+            [p.stock_qty || 0, p.cost_price || null, existing.id, supplierId]
           );
+          if (p.stock_qty > 0) {
+            await registrarEntradaDeEstoque(client, {
+              productId: existing.id, companyId, supplierId,
+              quantity: p.stock_qty, unitCost: p.cost_price || null,
+              referenceId: batchId, notes: 'Importacao NF-e',
+            });
+          }
           dupes++; continue;
         }
       }
       if (existing) { dupes++; continue; }
       const price = parseFloat(p.price) || 0;
       if (price <= 0) continue;
-      await client.query(
+      const novo = await client.query(
         `INSERT INTO products
            (company_id, name, price, cost_price, stock_qty,
-            barcode, sku, unit, ncm, supplier_cnpj, import_batch_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            barcode, sku, unit, ncm, supplier_cnpj, supplier_id, import_batch_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
         [companyId, p.name, price, p.cost_price || null, p.stock_qty || 0,
          p.barcode || null, p.sku || null, p.unit || 'un',
-         p.ncm || null, p.supplier_cnpj || null, batchId]
+         p.ncm || null, p.supplier_cnpj || null, supplierId, batchId]
       );
+      if (p.stock_qty > 0) {
+        await registrarEntradaDeEstoque(client, {
+          productId: novo.rows[0].id, companyId, supplierId,
+          quantity: p.stock_qty, unitCost: p.cost_price || null,
+          referenceId: batchId, notes: 'Importacao NF-e',
+        });
+      }
       saved++;
     }
     if (req.body.create_expense && parsed.nfe_info.valor_total > 0) {
