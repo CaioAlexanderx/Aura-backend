@@ -148,7 +148,7 @@ async function buildNotificationEmail({ title, body, ctaLabel, ctaUrl, pix }) {
           </td>`).join('');
 
     const png = await QRCode.toBuffer(pix.code, { type: 'png', errorCorrectionLevel: 'M', margin: 1, width: 400 });
-    attachments.push({ filename: 'pix-qrcode.png', content: png, cid: QR_CID });
+    attachments.push({ filename: 'pix-qrcode.png', content: png, cid: QR_CID, contentType: 'image/png' });
 
     pixHtml = `
     ${facts.length ? `<table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 18px;"><tr>${factCells}
