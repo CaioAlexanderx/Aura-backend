@@ -50,6 +50,16 @@ async function sendViaResend(opts) {
       subject: opts.subject,
       html: opts.html,
       text: opts.text,
+      // Imagem no corpo (cid): { filename, content: Buffer, cid } vira o
+      // formato do Resend (base64 + content_id). O SMTP (nodemailer) já
+      // entende { filename, content, cid } como está.
+      ...(opts.attachments && opts.attachments.length ? {
+        attachments: opts.attachments.map((a) => ({
+          filename:   a.filename,
+          content:    Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content,
+          content_id: a.cid,
+        })),
+      } : {}),
     }),
   });
   if (!res.ok) {
@@ -497,6 +507,9 @@ async function sendDiscountEndingEmail(to, opts) {
 }
 
 module.exports = {
+  sendMail,
+  emailLayout,
+  escapeHtml,
   sendDiscountEndingEmail,
   sendVerificationEmail,
   sendVerificationLinkEmail,
