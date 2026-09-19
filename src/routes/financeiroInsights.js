@@ -23,6 +23,7 @@
 const express = require('express');
 const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
+const { getUserCompanyIds } = require('../utils/userCompanyIds');
 
 const HEALTH_TARGETS = {
   margin_pct: 20,
@@ -674,11 +675,7 @@ meRouter.get('/insights', async (req, res) => {
 
     const period = req.query.period || 'month';
 
-    const companiesRes = await db.query(
-      `SELECT company_id FROM company_users WHERE user_id = $1`,
-      [userId]
-    );
-    const companyIds = companiesRes.rows.map(r => r.company_id);
+    const companyIds = await getUserCompanyIds(userId);
     if (companyIds.length === 0) {
       return res.json({
         period: period,
