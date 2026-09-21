@@ -17,6 +17,11 @@ const MODULE_PLAN_MAP = {
   // serviceOrders.js continua dependendo só de pdv_settings.os_enabled.
   os:             'essencial',
   estoque:        'essencial',
+  // 16/09/2026 — Fase 1 fornecedores (migration 342). Chave propria pra
+  // permitir override por empresa igual aos demais submodulos
+  // (otica.config etc); a rota (src/routes/suppliers.js) nao gateia por
+  // plano, so o app usa isto pra esconder/mostrar o item de menu.
+  'estoque.fornecedores': 'essencial',
   configuracoes:  'essencial',
   // 15/09/2026 — Ótica (migration 334). A configuração fica no Essencial
   // para o admin poder dar override do módulo inteiro por empresa; o

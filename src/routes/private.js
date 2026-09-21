@@ -248,4 +248,9 @@ router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioVisua
 // ============================================================
 router.use('/marketing', requirePlan('negocio', 'expansao'), require('./marketingResults'));
 
+// Fase 1 · fornecedores (16/09/2026, migration 342). Todos os planos --
+// modulo estoque.fornecedores e Essencial (src/services/modules.js).
+// Sem requirePlan, igual a ./products.
+router.use('/suppliers', require('./suppliers'));
+
 module.exports = router;
