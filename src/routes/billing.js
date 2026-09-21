@@ -84,6 +84,14 @@ const {
   recordRedemption,
 } = require('../services/checkoutCoupon');
 const subscriptionDiscount = require('../services/subscriptionDiscount');
+// 21/09/2026: o Asaas nao cobra cliente sem CPF/CNPJ e a maioria das empresas
+// nao tem CNPJ cadastrado. O documento agora vem do checkout (cpf_cnpj).
+const {
+  ensureAsaasCustomer,
+  companyHasTaxId,
+  isTaxIdAsaasError,
+  TAX_ID_REQUIRED_MSG,
+} = require('../services/asaasCustomer');
 
 function money(v) {
   return Math.round(Number(v) * 100) / 100;
@@ -165,20 +173,6 @@ function karateDojoGate(c, res) {
   });
 }
 
-async function ensureAsaasCustomer(company, user) {
-  if (company.asaas_customer_id) return company.asaas_customer_id;
-  const customer = await asaas('POST', '/customers', {
-    name: user.full_name || user.name,
-    email: user.email,
-    phone: user.phone || undefined,
-    cpfCnpj: company.cnpj?.replace(/\D/g, '') || undefined,
-    company: company.legal_name || company.trade_name,
-    externalReference: company.id,
-  });
-  await db.query('UPDATE companies SET asaas_customer_id=$1 WHERE id=$2', [customer.id, company.id]);
-  return customer.id;
-}
-
 function addDaysIso(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
@@ -239,6 +233,9 @@ router.get('/status', requireAuth, async (req, res) => {
       trial_ends_at: c.trial_ends_at || null,
       next_billing_date: c.next_billing_date || null,
       has_payment_method: !!c.asaas_subscription_id,
+      // 21/09: empresa sem CNPJ valido — o checkout precisa pedir CPF/CNPJ
+      // (o Asaas nao gera cobranca sem documento).
+      needs_cpf_cnpj: !companyHasTaxId(c),
       // 13/07: a tela precisa saber que Essencial nao e opcao pra esta empresa.
       vertical_active: c.vertical_active || null,
       allowed_plans: c.vertical_active && VERTICAL_MIN_PLANS[c.vertical_active]
@@ -327,6 +324,7 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
   const {
     card_number, card_expiry_month, card_expiry_year, card_ccv,
     holder_name, holder_cpf, holder_postal_code, holder_address_number, holder_address,
+    cpf_cnpj,
   } = req.body;
 
   if (!card_number || !card_expiry_month || !card_expiry_year || !card_ccv || !holder_name) {
@@ -345,7 +343,8 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
     const { rows: users } = await db.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
     const user = users[0];
 
-    customerId = await ensureAsaasCustomer(company, user);
+    // Sem CNPJ na empresa, o CPF do titular preenche o documento do cliente.
+    customerId = await ensureAsaasCustomer(company, user, { taxId: cpf_cnpj, fallbackTaxId: holder_cpf });
 
     // Log sanitizado — nunca logar dados de cartão
     console.log('[BILLING] Tokenize for company ' + company.id + ' — holderInfo:', JSON.stringify({
@@ -407,7 +406,7 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
       }
     }
     console.error('[BILLING] Tokenize error:', err.message);
-    res.status(400).json({ error: err.message || 'Erro ao tokenizar cartao' });
+    res.status(400).json({ error: err.message || 'Erro ao tokenizar cartao', stage: err.stage });
   }
 });
 
@@ -478,6 +477,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     cycle = 'monthly',
     end_date,
     access_code,
+    cpf_cnpj,
     credit_card_token,
     credit_card_holder_name,
     credit_card_holder_cpf,
@@ -529,7 +529,12 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     const { rows: users } = await db.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
     const user = users[0];
 
-    const customerId = await ensureAsaasCustomer(company, user);
+    // 21/09: documento digitado no checkout > CNPJ da empresa > CPF do titular.
+    // Sem nenhum: 400 stage='cpf_cnpj' (tratado no catch) e a tela abre o campo.
+    const customerId = await ensureAsaasCustomer(company, user, {
+      taxId: cpf_cnpj,
+      fallbackTaxId: credit_card_holder_cpf,
+    });
 
     // 15/06/2026: acessos extras pagos (R$19/seat) entram no valor cobrado.
     // Cliente sem seat extra → extraSeats=0 → value identico ao de antes.
@@ -994,6 +999,14 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     console.error('[BILLING] Subscribe error:', err.message);
     // Qualquer falha depois da reserva: devolve o uso do cupom.
     if (reservedCouponId) { await releaseCoupon(reservedCouponId); reservedCouponId = null; }
+    // Falta/invalidez de CPF/CNPJ: erro que a tela sabe resolver (abre o campo),
+    // nao um 500. Cobre tambem a recusa vinda do proprio Asaas.
+    if (err.stage === 'cpf_cnpj') {
+      return res.status(400).json({ error: err.message, stage: 'cpf_cnpj' });
+    }
+    if (isTaxIdAsaasError(err)) {
+      return res.status(400).json({ error: TAX_ID_REQUIRED_MSG, stage: 'cpf_cnpj', detail: err.message });
+    }
     res.status(500).json({ error: err.message || 'Erro ao criar assinatura' });
   }
 });
