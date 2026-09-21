@@ -31,6 +31,10 @@ router.use('/me', productLinksUserRouter);
 router.use('/me', require('./meAggregates'));
 // Fase 1 · consentimento (340): GET /me/whatsapp/consent/summary.
 router.use('/me', require('./customerConsent').meRouter);
+
+// Fase 1 · perfil do cliente: GET /me/customers/:cid/timeline|summary
+// (visao consolidada multi-CNPJ da ficha).
+router.use('/me', require('./customerProfile').meRouter);
 router.use('/me/financeiro', require('./financeiroInsights').meRouter);
 router.use('/me/financeiro', require('./financeiroComparative').meRouter);
 
