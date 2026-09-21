@@ -20,6 +20,8 @@
 const router = require('express').Router({ mergeParams: true });
 const db     = require('../config/database');
 const { randomUUID } = require('crypto');
+// 16/09/2026: cliente de outra loja do mesmo dono tambem vale (utils/customerScope.js).
+const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 const { computeReschedulePlan, applyReschedule, loadOpenInstallments, sumRemaining, getUnscheduledBalance } = require('../services/credit/reschedule');
 
 // Helper canonico (mesmo de creditUnify.js/creditRefund.js).
@@ -143,11 +145,7 @@ async function resolveReschedulePeriod(companyId, accountId) {
 }
 
 async function ensureCustomer(companyId, customerId) {
-  const { rows } = await db.query(
-    `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
-    [customerId, companyId]
-  );
-  return rows.length > 0;
+  return !!(await findOwnerScopedCustomer(db, companyId, customerId));
 }
 
 // ---------------------------------------------------------------
@@ -174,7 +172,7 @@ router.get('/customers/:cid/accounts/:accountId/reschedule/preview', async (req,
 
   try {
     if (!(await ensureCustomer(companyId, customerId))) {
-      return res.status(404).json({ error: 'Cliente nao encontrado' });
+      return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
     }
   } catch (err) {
     console.error('[creditReschedule] preview customer check:', err.code, err.message);
@@ -232,7 +230,7 @@ router.post('/customers/:cid/accounts/:accountId/reschedule', async (req, res) =
 
   try {
     if (!(await ensureCustomer(companyId, customerId))) {
-      return res.status(404).json({ error: 'Cliente nao encontrado' });
+      return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
     }
   } catch (err) {
     console.error('[creditReschedule] apply customer check:', err.code, err.message);

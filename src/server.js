@@ -124,6 +124,11 @@ function startServer() {
     const { initPixExpiradoJob } = require('./jobs/lojaPixExpiradoJob');
     initPixExpiradoJob();
 
+    // Assinatura (326): cupom com desconto por varios meses — devolve o valor
+    // cheio no Asaas e avisa o cliente antes da 1a mensalidade cheia. Tick 6h.
+    const { initSubscriptionDiscountJob } = require('./jobs/subscriptionDiscountJob');
+    initSubscriptionDiscountJob();
+
     // Otica (334): pos-venda de adaptacao (3 dias apos a entrega) e lembrete
     // de revisao da receita (30 dias antes de vencer) — diario 10h BRT,
     // depois do crediario (9h) e do aniversario (9h30). Kill switch

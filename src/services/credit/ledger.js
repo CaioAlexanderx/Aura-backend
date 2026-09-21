@@ -521,9 +521,11 @@ async function applyPayment(client, {
     if (_whoCache !== undefined) return _whoCache;
     let nm = null;
     try {
+      // O cliente pode ser de outra loja do mesmo dono (16/09/2026) --
+      // o id ja e unico, a trava de empresa so escondia o nome.
       const { rows: _cn } = await client.query(
-        `SELECT name FROM customers WHERE id = $1 AND company_id = $2`,
-        [customerId, companyId]
+        `SELECT name FROM customers WHERE id = $1`,
+        [customerId]
       );
       nm = _cn[0]?.name || null;
     } catch (_) {}
@@ -1208,6 +1210,7 @@ async function applyUnify(client, {
 }
 
 module.exports = {
+  _hasReferenceCols,
   _getOrCreateProfile,
   _getOrCreatePlanConfig,
   _updateCreditUsed,

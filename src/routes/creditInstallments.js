@@ -52,6 +52,8 @@ const router = express.Router({ mergeParams: true });
 
 const SP_DATE = "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date";
 const overdueRule = require('../services/credit/overdue');
+// 16/09/2026: cliente de outra loja do mesmo dono tambem vale (utils/customerScope.js).
+const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 
 const nz = (v) => (v === undefined || v === null || v === '') ? null : v;
 
@@ -274,11 +276,9 @@ router.get('/customers/:cid/pix', async (req, res) => {
     return res.status(400).json({ error: 'amount deve ser um numero maior que zero.' });
   }
   try {
-    const { rows: custRows } = await pool.query(
-      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
-      [customerId, companyId]
-    );
-    if (!custRows.length) return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa.' });
+    if (!(await findOwnerScopedCustomer(pool, companyId, customerId))) {
+      return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
+    }
 
     const pix = await resolvePixSetup(companyId);
     if (!pix) {
@@ -710,7 +710,7 @@ router.get('/installments', async (req, res) => {
               COALESCE(c.name, c.phone) AS customer_name,
               c.phone AS customer_phone
        FROM credit_installments ci
-       LEFT JOIN customers c ON c.id=ci.customer_id AND c.company_id=ci.company_id
+       LEFT JOIN customers c ON c.id=ci.customer_id
        ${where}
        ORDER BY ci.due_date ASC
        LIMIT $${idx} OFFSET $${idx+1}`,
@@ -774,7 +774,7 @@ router.get('/installments/:iid/pix', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT ci.*, COALESCE(c.name, c.phone) AS customer_name
          FROM credit_installments ci
-         LEFT JOIN customers c ON c.id = ci.customer_id AND c.company_id = ci.company_id
+         LEFT JOIN customers c ON c.id = ci.customer_id
         WHERE ci.id = $1 AND ci.company_id = $2`,
       [installmentId, companyId]
     );
@@ -1120,7 +1120,7 @@ router.get('/dashboard', async (req, res) => {
          MAX(ci.collection_stage) AS collection_stage,
          ccp.credit_score, ccp.status AS credit_status
        FROM credit_installments ci
-       LEFT JOIN customers c ON c.id=ci.customer_id AND c.company_id=ci.company_id
+       LEFT JOIN customers c ON c.id=ci.customer_id
        LEFT JOIN customer_credit_profiles ccp
          ON ccp.customer_id=ci.customer_id AND ccp.company_id=ci.company_id
        WHERE ci.company_id=$1 AND ${overdueRule.overdueSql({ alias: 'ci', graceDays: dashGrace })}

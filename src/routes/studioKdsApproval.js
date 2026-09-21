@@ -231,7 +231,7 @@ router.post('/orders/:oid/cobrar-saldo', async function(req, res) {
       `SELECT ci.*, COALESCE(c.name, c.phone) AS customer_name, c.phone,
               COALESCE(co.trade_name, co.legal_name) AS store_name
          FROM credit_installments ci
-         LEFT JOIN customers c ON c.id = ci.customer_id AND c.company_id = ci.company_id
+         LEFT JOIN customers c ON c.id = ci.customer_id
          LEFT JOIN companies co ON co.id = ci.company_id
         WHERE ci.company_id = $1
           AND ci.sale_id = $2

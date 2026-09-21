@@ -15,10 +15,14 @@ const router  = express.Router({ mergeParams: true });
 const db      = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const {
-  getAgendaByPeriod, updateAppointmentStatus,
+  getAgendaByPeriod, updateAppointment,
   addProcedureToAppointment, recalcAppointmentTotal,
   generateWsToken, validateWsToken,
 } = require('../services/dental');
+const {
+  ScheduleError, isValidTimestamp, isValidDuration, queryConflicts,
+} = require('../services/dentalSchedule');
+const { outsideHoursFlag } = require('../services/dentalHours');
 
 // ── Sub-routes (extracted) ──
 router.use('/', require('./dentalPatients'));
@@ -28,6 +32,7 @@ router.use('/', require('./dentalSpecialtyForms'));
 router.use('/', require('./dentalProcedures'));
 router.use('/', require('./dentalPractitioners'));
 router.use('/', require('./dentalBookingAdmin'));
+router.use('/', require('./dentalHours'));   // horário de funcionamento (17/09/2026)
 router.use('/', require('./dentalConsent')); // W2-04: TCLE templates + documents
 router.use('/ai', require('./dentalAi'));     // W2-05: IA Odonto persistente (Expansao only)
 router.use('/tiss', require('./dentalTiss')); // W2-02: TISS 4.01 completo
@@ -46,10 +51,23 @@ async function resolveCustomerId(companyId, body) {
 
 // ── Agenda ──
 
+// QA 2026-09-16 (fuso horario): o default de "hoje" usava
+// now.getFullYear()/getMonth()/getDate(), que le os componentes no fuso
+// LOCAL DO PROCESSO NODE (UTC em producao), nao em America/Sao_Paulo.
+// Entre 21h e 24h em SP (ja virou o dia seguinte em UTC), a agenda de
+// "hoje" pulava pro dia de amanha. America/Sao_Paulo = UTC-3 o ano todo
+// (DST abolido em 2019), entao o offset fixo -03:00 e seguro aqui.
+function todaySaoPauloBoundsISO() {
+  const ymd = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // "2026-09-16"
+  const start = new Date(`${ymd}T00:00:00-03:00`);
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  return { start: start.toISOString(), end: end.toISOString() };
+}
+
 router.get('/agenda', requireAuth, async (req, res) => {
-  const now = new Date();
-  const startDate = req.query.start || new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-  const endDate   = req.query.end   || new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).toISOString();
+  const defaults = (!req.query.start || !req.query.end) ? todaySaoPauloBoundsISO() : null;
+  const startDate = req.query.start || defaults.start;
+  const endDate   = req.query.end   || defaults.end;
   try {
     const appointments = await getAgendaByPeriod(req.params.id, startDate, endDate);
     res.json({ start: startDate, end: endDate, total: appointments.length, appointments });
@@ -59,22 +77,45 @@ router.get('/agenda', requireAuth, async (req, res) => {
   }
 });
 
+// QA odonto 16/09/2026 (1.5): conflito de horário NÃO bloqueia — volta em
+// `conflicts`. Com `reject_on_conflict: true` no body vira 409 SCHEDULE_CONFLICT.
+// Horário de funcionamento (17/09/2026): agendar fora do horário continua
+// permitido (encaixe); a resposta traz `outside_hours` quando a clínica
+// configurou horário.
 router.post('/appointments', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { scheduled_at, duration_min = 60, chief_complaint, practitioner_id } = req.body;
-  if (!scheduled_at) return res.status(400).json({ error: 'scheduled_at e obrigatorio' });
-
-  const customerId = await resolveCustomerId(req.params.id, req.body);
-  if (!customerId) return res.status(400).json({ error: 'Paciente (customer_id ou patient_id) invalido ou nao encontrado' });
+  const { scheduled_at, duration_min = 60, chief_complaint, practitioner_id, reject_on_conflict } = req.body;
+  if (!scheduled_at) return res.status(400).json({ error: 'scheduled_at e obrigatorio', code: 'SCHEDULED_AT_REQUIRED' });
+  if (!isValidTimestamp(scheduled_at)) {
+    return res.status(400).json({ error: 'Data/hora do agendamento invalida', code: 'INVALID_SCHEDULED_AT' });
+  }
+  if (!isValidDuration(duration_min)) {
+    return res.status(400).json({ error: 'Duracao invalida (1 a 1440 minutos)', code: 'INVALID_DURATION' });
+  }
 
   try {
+    const customerId = await resolveCustomerId(req.params.id, req.body);
+    if (!customerId) return res.status(400).json({ error: 'Paciente (customer_id ou patient_id) invalido ou nao encontrado' });
+
+    const conflicts = await queryConflicts(db, req.params.id, {
+      scheduled_at, duration_min: Number(duration_min), practitioner_id: practitioner_id || null,
+    });
+    if (reject_on_conflict === true && conflicts.length) {
+      return res.status(409).json({
+        error: 'Horario em conflito com outro agendamento', code: 'SCHEDULE_CONFLICT', conflicts,
+      });
+    }
+
     const { rows } = await db.query(
       `INSERT INTO dental_appointments
          (company_id, customer_id, scheduled_at, duration_min, chief_complaint, practitioner_id)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *, customer_id AS patient_id`,
-      [req.params.id, customerId, scheduled_at, duration_min, chief_complaint||null, practitioner_id||null]
+      [req.params.id, customerId, scheduled_at, Number(duration_min), chief_complaint||null, practitioner_id||null]
     );
-    res.status(201).json({ appointment: rows[0] });
+    const body = { appointment: rows[0], conflicts };
+    const outside = await outsideHoursFlag(db, req.params.id, scheduled_at, duration_min);
+    if (outside !== undefined) body.outside_hours = outside;
+    res.status(201).json(body);
   } catch (err) {
     console.error('[dental POST /appointments]', err.message);
     res.status(500).json({ error: 'Erro ao criar agendamento' });
@@ -109,32 +150,47 @@ router.get('/appointments/:aid', requireAuth, async (req, res) => {
   }
 });
 
+// QA odonto 16/09/2026 (1.1 + 1.5): status e demais campos vão juntos, numa
+// transação (antes, com `status` no body, clinical_notes & cia eram
+// descartados). Transições em services/dentalSchedule.js.
 router.patch('/appointments/:aid', requireAuth, requireRole('client','analyst','admin'), async (req, res) => {
-  const { status, chief_complaint, anamnesis, clinical_notes,
-          discount_type, discount_value, cancel_reason, practitioner_id, scheduled_at, duration_min } = req.body;
+  const { status, scheduled_at, duration_min, reject_on_conflict } = req.body;
+  if (scheduled_at !== undefined && !isValidTimestamp(scheduled_at)) {
+    return res.status(400).json({ error: 'Data/hora do agendamento invalida', code: 'INVALID_SCHEDULED_AT' });
+  }
+  if (duration_min !== undefined && !isValidDuration(duration_min)) {
+    return res.status(400).json({ error: 'Duracao invalida (1 a 1440 minutos)', code: 'INVALID_DURATION' });
+  }
+  const fields = {};
+  for (const k of ['chief_complaint', 'anamnesis', 'clinical_notes', 'discount_type', 'discount_value',
+    'cancel_reason', 'practitioner_id', 'scheduled_at', 'duration_min']) {
+    if (req.body[k] !== undefined) fields[k] = req.body[k];
+  }
+  if (fields.duration_min !== undefined) fields.duration_min = Number(fields.duration_min);
+
   try {
-    if (status) {
-      const updated = await updateAppointmentStatus(req.params.id, req.params.aid, status);
-      return res.json({ appointment: updated });
+    const { appointment, conflicts } = await updateAppointment(req.params.id, req.params.aid, {
+      status, fields, rejectOnConflict: reject_on_conflict === true,
+    });
+    let result = appointment;
+    if (fields.discount_type !== undefined || fields.discount_value !== undefined) {
+      const totals = await recalcAppointmentTotal(req.params.aid);
+      result = { ...appointment, subtotal: totals.subtotal, total: totals.total };
     }
-    const fields=[], values=[];
-    let idx=1;
-    const allowed = { chief_complaint, anamnesis, clinical_notes, discount_type, discount_value, cancel_reason, practitioner_id, scheduled_at, duration_min };
-    for (const [k,v] of Object.entries(allowed)) {
-      if (v !== undefined) { fields.push(`${k}=$${idx++}`); values.push(v); }
+    const body = { appointment: result, conflicts };
+    // outside_hours só quando o PATCH mexe no horário/duração.
+    if (fields.scheduled_at !== undefined || fields.duration_min !== undefined) {
+      const outside = await outsideHoursFlag(db, req.params.id,
+        appointment.scheduled_at ?? fields.scheduled_at, appointment.duration_min ?? fields.duration_min);
+      if (outside !== undefined) body.outside_hours = outside;
     }
-    if (!fields.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
-    fields.push(`updated_at=NOW()`);
-    values.push(req.params.aid, req.params.id);
-    const { rows } = await db.query(
-      `UPDATE dental_appointments SET ${fields.join(',')} WHERE id=$${idx++} AND company_id=$${idx} RETURNING *`, values
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Agendamento nao encontrado' });
-    if (discount_type !== undefined || discount_value !== undefined) await recalcAppointmentTotal(req.params.aid);
-    res.json({ appointment: rows[0] });
+    res.json(body);
   } catch (err) {
-    if (err.message.includes('Transicao') || err.message.includes('Transição')) {
-      return res.status(400).json({ error: err.message });
+    if (err instanceof ScheduleError) {
+      const body = { error: err.message, code: err.code };
+      if (err.from !== undefined) { body.from = err.from; body.to = err.to; }
+      if (err.conflicts) body.conflicts = err.conflicts;
+      return res.status(err.httpStatus).json(body);
     }
     console.error('[dental PATCH /appointments/:aid]', err.message);
     res.status(500).json({ error: 'Erro ao atualizar agendamento' });

@@ -45,6 +45,42 @@ function normalizeSettings(raw, plan) {
   return { chairs_active, chair_practitioner_ids };
 }
 
+// D-QA #6 (2026-09-16): dona que atende sozinha ja fica alocada na
+// primeira cadeira ativa por padrao. Sem isso a Visao geral (app) so
+// consegue detectar "dentista solo" olhando pra alocacao, e a dona
+// tem que ir em Configuracoes alocar manualmente algo que ja eh
+// verdade (ela e a unica dentista da clinica).
+// So mexe quando: exatamente 1 dentista ativo E nenhuma cadeira tem
+// alocacao ainda. Empresas com 2+ dentistas ativos, ou que ja tem
+// qualquer alocacao configurada (mesmo que so 1 cadeira), ficam
+// intocadas. Persiste quando aloca; devolve settings sem mudanca
+// (nem query extra de UPDATE) nos demais casos.
+async function autoAllocateSoloDentist(companyId, settings) {
+  const alreadyAllocated = settings.chair_practitioner_ids.some(Boolean);
+  if (alreadyAllocated) return settings;
+
+  const { rows: active } = await db.query(
+    'SELECT id FROM dental_practitioners WHERE company_id = $1 AND is_active = true',
+    [companyId]
+  );
+  if (active.length !== 1) return settings;
+
+  const firstActiveChairIdx = settings.chairs_active.findIndex(Boolean);
+  if (firstActiveChairIdx === -1) return settings;
+
+  const updated = {
+    chairs_active: settings.chairs_active,
+    chair_practitioner_ids: settings.chair_practitioner_ids.map(
+      (id, i) => (i === firstActiveChairIdx ? active[0].id : id)
+    ),
+  };
+  await db.query(
+    "UPDATE companies SET dental_settings = COALESCE(dental_settings, '{}'::jsonb) || $1::jsonb WHERE id = $2",
+    [JSON.stringify(updated), companyId]
+  );
+  return updated;
+}
+
 // ===== SETTINGS =====
 
 router.get('/settings', requireAuth, async (req, res) => {
@@ -54,7 +90,8 @@ router.get('/settings', requireAuth, async (req, res) => {
       [req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
-    const settings = normalizeSettings(rows[0].dental_settings, rows[0].plan);
+    let settings = normalizeSettings(rows[0].dental_settings, rows[0].plan);
+    settings = await autoAllocateSoloDentist(req.params.id, settings);
     res.json({ settings, plan: rows[0].plan, max_chairs: getMaxChairs(rows[0].plan) });
   } catch (err) {
     console.error('[dentalSettings GET]', err.message);
@@ -82,7 +119,7 @@ router.put('/settings', requireAuth, requireRole('client', 'analyst', 'admin'), 
     }
 
     await db.query(
-      'UPDATE companies SET dental_settings = $1::jsonb WHERE id = $2',
+      "UPDATE companies SET dental_settings = COALESCE(dental_settings, '{}'::jsonb) || $1::jsonb WHERE id = $2",
       [JSON.stringify(newSettings), req.params.id]
     );
     res.json({ settings: newSettings, plan: companyRows[0].plan, max_chairs: max });
@@ -121,6 +158,24 @@ router.get('/practitioners', requireAuth, async (req, res) => {
          VALUES ($1, $2, true, '#06B6D4') RETURNING *`,
         [req.params.id, ownerName]
       );
+
+      // D-QA #6: o dentista recem-criado (RESPONSAVEL) agora e o unico
+      // ativo da clinica — aloca ele na primeira cadeira ativa, se a
+      // empresa ainda nao tiver nenhuma alocacao configurada. Erro aqui
+      // nao deve derrubar a resposta do bootstrap (dentista ja foi criado).
+      try {
+        const { rows: companyRows } = await db.query(
+          'SELECT dental_settings, plan FROM companies WHERE id = $1',
+          [req.params.id]
+        );
+        if (companyRows.length) {
+          const settings = normalizeSettings(companyRows[0].dental_settings, companyRows[0].plan);
+          await autoAllocateSoloDentist(req.params.id, settings);
+        }
+      } catch (allocErr) {
+        console.error('[practitioners GET bootstrap alloc]', allocErr.message);
+      }
+
       return res.json({ total: 1, practitioners: created, bootstrapped: true });
     }
 
@@ -219,8 +274,13 @@ router.get('/appointments', requireAuth, async (req, res) => {
 
   if (status) { params.push(status); where += ` AND a.status = $${params.length}`; }
   if (practitioner_id) { params.push(practitioner_id); where += ` AND a.practitioner_id = $${params.length}`; }
-  if (from) { params.push(from); where += ` AND a.scheduled_at >= $${params.length}::date`; }
-  if (to)   { params.push(to);   where += ` AND a.scheduled_at < ($${params.length}::date + INTERVAL '1 day')`; }
+  // QA 2026-09-16 (fuso horario): $n::date castado direto pra timestamptz
+  // usa o fuso da SESSAO (UTC no Supabase), nao America/Sao_Paulo. "Hoje"
+  // em SP perdia os agendamentos entre 21h e 24h (iam pro dia UTC seguinte)
+  // e pegava os de 21h-24h do dia anterior (que ainda nao tinha virado em
+  // UTC). Interpreta o filtro no fuso de SP antes de comparar.
+  if (from) { params.push(from); where += ` AND a.scheduled_at >= ($${params.length}::date)::timestamp AT TIME ZONE 'America/Sao_Paulo'`; }
+  if (to)   { params.push(to);   where += ` AND a.scheduled_at < (($${params.length}::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo')`; }
 
   try {
     const { rows } = await db.query(

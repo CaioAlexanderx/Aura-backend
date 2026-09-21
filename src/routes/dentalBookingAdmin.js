@@ -11,6 +11,16 @@
 // Rotas publicas (paciente sem login) ficam em routes/dentalBooking.js
 // e sao montadas em routes/index.js em /dental/book/:slug.
 //
+// Horário de funcionamento (17/09/2026, migration 346):
+//   use_clinic_hours (padrão true) — a agenda online herda o horário da
+//     clínica (dental_clinic_hours). Desligado, `online_window`
+//     { from, to, days: [1..7], seg=1 } só RESTRINGE: vale a interseção.
+//   slot_duration_custom — o dentista escolheu a duração dos horários
+//     online; senão vale o intervalo padrão da clínica. Mandar
+//     slot_duration_min: null volta a seguir a clínica.
+//   A resposta traz `effective` = { source, hours, day_windows,
+//     slot_duration_min, clinic_hours_configured }.
+//
 // Tabelas usadas:
 //   dental_booking_config     (1:1 company_id, slug UNIQUE)
 //   dental_booking_requests   (1:N por company_id, status pendente|aprovado|rejeitado)
@@ -19,6 +29,28 @@
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const H = require('../services/dentalHours');
+
+async function withEffective(companyId, config) {
+  if (!config) return { config };
+  let clinic = { configured: false, hours: null, default_interval_min: null };
+  try {
+    clinic = await H.loadClinicHours(db, companyId);
+  } catch (err) {
+    console.error('[dentalBookingAdmin clinic hours]', err.message);
+  }
+  const eff = H.effectiveOnlineHours(clinic, config);
+  return {
+    config,
+    effective: {
+      source: eff.source,
+      clinic_hours_configured: clinic.configured,
+      hours: eff.hours,
+      day_windows: H.toDayWindows(eff.hours),
+      slot_duration_min: eff.slot_duration_min,
+    },
+  };
+}
 
 // Slugify simples — minusculas, sem acentos, hifens
 function slugify(text) {
@@ -71,7 +103,7 @@ router.get('/booking/config', requireAuth, async (req, res) => {
       rows = created;
     }
 
-    res.json({ config: rows[0] });
+    res.json(await withEffective(req.params.id, rows[0]));
   } catch (err) {
     console.error('[dentalBookingAdmin GET config]', err.message);
     res.status(500).json({ error: 'Erro ao buscar configuracao' });
@@ -84,6 +116,7 @@ router.put('/booking/config', requireAuth, requireRole('client','analyst','admin
     is_active, slug, welcome_msg,
     min_advance_hours, max_advance_days, slot_duration_min,
     available_days, start_hour, end_hour, require_phone,
+    use_clinic_hours, online_window,
   } = req.body;
 
   // Validacao do slug se vier
@@ -114,13 +147,24 @@ router.put('/booking/config', requireAuth, requireRole('client','analyst','admin
   if (start_hour !== undefined && end_hour !== undefined && start_hour >= end_hour) {
     return res.status(400).json({ error: 'start_hour deve ser menor que end_hour' });
   }
-  if (slot_duration_min !== undefined && ![15, 20, 30, 45, 60, 90, 120].includes(slot_duration_min)) {
+  if (slot_duration_min !== undefined && slot_duration_min !== null
+      && ![15, 20, 30, 45, 60, 90, 120].includes(slot_duration_min)) {
     return res.status(400).json({ error: 'slot_duration_min deve ser um de: 15, 20, 30, 45, 60, 90, 120' });
   }
   if (available_days !== undefined) {
     if (!Array.isArray(available_days) || available_days.some(d => d < 0 || d > 6)) {
       return res.status(400).json({ error: 'available_days deve ser array de inteiros 0-6 (0=domingo)' });
     }
+  }
+
+  if (use_clinic_hours !== undefined && typeof use_clinic_hours !== 'boolean') {
+    return res.status(400).json({ error: 'use_clinic_hours deve ser true ou false' });
+  }
+  let cleanWindow;
+  if (online_window !== undefined) {
+    const w = H.validateOnlineWindow(online_window);
+    if (!w.ok) return res.status(400).json({ error: w.error, code: 'INVALID_ONLINE_WINDOW' });
+    cleanWindow = w.value;
   }
 
   try {
@@ -145,18 +189,26 @@ router.put('/booking/config', requireAuth, requireRole('client','analyst','admin
     set('welcome_msg',       welcome_msg);
     set('min_advance_hours', min_advance_hours);
     set('max_advance_days',  max_advance_days);
-    set('slot_duration_min', slot_duration_min);
+    // null = volta a seguir o intervalo padrao da clinica (mantem o valor antigo).
+    if (slot_duration_min !== undefined) {
+      set('slot_duration_custom', slot_duration_min !== null);
+      set('slot_duration_min', slot_duration_min === null ? undefined : slot_duration_min);
+    }
     set('available_days',    available_days ? JSON.stringify(available_days) : undefined, '::jsonb');
     set('start_hour',        start_hour);
     set('end_hour',          end_hour);
     set('require_phone',     require_phone);
+    set('use_clinic_hours',  use_clinic_hours);
+    if (online_window !== undefined) {
+      set('online_window', cleanWindow === null ? null : JSON.stringify(cleanWindow), '::jsonb');
+    }
 
     if (!updates.length) {
       const { rows } = await db.query(
         'SELECT * FROM dental_booking_config WHERE company_id = $1',
         [req.params.id]
       );
-      return res.json({ config: rows[0] });
+      return res.json(await withEffective(req.params.id, rows[0]));
     }
 
     updates.push('updated_at = NOW()');
@@ -170,7 +222,7 @@ router.put('/booking/config', requireAuth, requireRole('client','analyst','admin
       values
     );
 
-    res.json({ config: rows[0] });
+    res.json(await withEffective(req.params.id, rows[0]));
   } catch (err) {
     console.error('[dentalBookingAdmin PUT config]', err.message);
     res.status(500).json({ error: 'Erro ao salvar configuracao' });
@@ -190,8 +242,14 @@ router.get('/booking/requests', requireAuth, async (req, res) => {
 
   try {
     const { rows } = await db.query(
+      // 1.6: preferred_date e DATE — o driver pg (sem type parser custom pra
+      // oid 1082) devolve um Date que o JSON.stringify serializa em UTC
+      // meia-noite. Em America/Sao_Paulo (UTC-3) isso vira o dia anterior
+      // na tela do dentista (17/09 virava 16/09). Devolve como texto puro
+      // YYYY-MM-DD pra nao passar pela conversao de fuso.
       `SELECT id, patient_name, patient_phone, patient_email,
-              preferred_date, preferred_time, chief_complaint,
+              to_char(preferred_date, 'YYYY-MM-DD') AS preferred_date,
+              preferred_time, chief_complaint,
               status, appointment_id, notes, created_at
        FROM dental_booking_requests
        ${where}
@@ -231,6 +289,26 @@ router.post('/booking/requests/:rid/convert', requireAuth, requireRole('client',
   const { practitioner_id, scheduled_at, duration_min } = req.body;
 
   try {
+    // D-QA #7 (2026-09-16): agendamento online sem dentista escolhido no
+    // body cai pro dentista alocado na primeira cadeira ativa (se houver)
+    // — mesma configuracao usada no card "Cadeiras" de DentalSettings.tsx.
+    // Sem isso, um agendamento convertido do site ficava sem practitioner_id
+    // mesmo quando a clinica so tem 1 dentista, obrigando reatribuicao manual.
+    let finalPractitionerId = practitioner_id || null;
+    if (!finalPractitionerId) {
+      const { rows: settingsRows } = await db.query(
+        'SELECT dental_settings FROM companies WHERE id = $1',
+        [req.params.id]
+      );
+      const settings = settingsRows[0]?.dental_settings;
+      const chairsActive = Array.isArray(settings?.chairs_active) ? settings.chairs_active : [];
+      const chairPractitionerIds = Array.isArray(settings?.chair_practitioner_ids) ? settings.chair_practitioner_ids : [];
+      const firstActiveChairIdx = chairsActive.findIndex(Boolean);
+      if (firstActiveChairIdx !== -1 && chairPractitionerIds[firstActiveChairIdx]) {
+        finalPractitionerId = chairPractitionerIds[firstActiveChairIdx];
+      }
+    }
+
     // Busca request
     const { rows: reqRows } = await db.query(
       'SELECT * FROM dental_booking_requests WHERE id = $1 AND company_id = $2',
@@ -291,10 +369,21 @@ router.post('/booking/requests/:rid/convert', requireAuth, requireRole('client',
     }
 
     // Monta scheduled_at — usa o do body OU combina preferred_date + preferred_time
+    // 1.6: antes fazia `${bookingReq.preferred_date}T...` — preferred_date
+    // vem do driver pg como objeto Date (DATE sem type parser custom), entao
+    // o template literal chamava Date.toString() (ex. "Tue Sep 16 2026...",
+    // dependendo do TZ do processo) em vez do texto "2026-09-17", gerando
+    // um scheduled_at errado. Agora deixa o Postgres montar o timestamp:
+    // soma DATE + TIME (timestamp sem fuso) e interpreta em America/Sao_Paulo,
+    // convertendo pra timestamptz correto (17/09 11:00 -03:00 -> 14:00Z).
     let finalScheduledAt = scheduled_at;
     if (!finalScheduledAt) {
-      // Combina date + time (assumindo America/Sao_Paulo)
-      finalScheduledAt = `${bookingReq.preferred_date}T${bookingReq.preferred_time}-03:00`;
+      const { rows: combined } = await db.query(
+        `SELECT (preferred_date + preferred_time) AT TIME ZONE 'America/Sao_Paulo' AS scheduled_at
+         FROM dental_booking_requests WHERE id = $1`,
+        [req.params.rid]
+      );
+      finalScheduledAt = combined[0].scheduled_at;
     }
 
     // Cria appointment
@@ -309,7 +398,7 @@ router.post('/booking/requests/:rid/convert', requireAuth, requireRole('client',
         finalScheduledAt,
         duration_min || 60,
         bookingReq.chief_complaint || null,
-        practitioner_id || null,
+        finalPractitionerId,
       ]
     );
 
