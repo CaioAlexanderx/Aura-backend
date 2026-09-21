@@ -27,6 +27,7 @@
 var router = require('express').Router({ mergeParams: true });
 var db = require('../config/database');
 var crypto = require('crypto');
+var { resolveSaleLink } = require('../utils/saleLink');
 
 function todayBR() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
@@ -242,6 +243,28 @@ router.patch('/:txId', async function(req, res) {
       req.body.employee_name = empRes.rows[0].name;
     } catch (err) { console.error('[transactions] validate employee:', err.message); }
   } else if (req.body.employee_id === null) { req.body.employee_name = null; }
+  // 17/09/2026 (Finesse, venda 2307): o "A Receber" do crediario e derivado
+  // das parcelas e das devolucoes. O modal "Editar lancamento" guardava o valor
+  // de quando abriu; a lojista removeu um item (devolucao abateu 159,90) e o
+  // Salvar regravou o valor antigo por cima do abatimento. Valor igual ao atual
+  // passa (o modal sempre manda amount); valor diferente e recusado.
+  if (req.body.amount !== undefined) {
+    try {
+      var curRes = await db.query('SELECT amount, idempotency_key FROM transactions WHERE id = $1 AND company_id = $2', [txId, cid]);
+      var cur = curRes.rows[0];
+      var link = cur ? resolveSaleLink(cur.idempotency_key) : null;
+      if (link && link.source === 'credit') {
+        if (Math.abs(parseFloat(req.body.amount) - parseFloat(cur.amount)) > 0.005) {
+          return res.status(409).json({
+            error: 'O valor do crediário acompanha as parcelas e as devoluções e não pode ser editado aqui. Para mudar o valor, faça uma devolução ou troca.',
+            code: 'CREDIT_AMOUNT_DERIVED',
+            current_amount: parseFloat(cur.amount),
+          });
+        }
+        delete req.body.amount;
+      }
+    } catch (err) { console.error('[transactions] check credit amount:', err.message); return res.status(500).json({ error: 'Erro ao atualizar lancamento' }); }
+  }
   for (var i = 0; i < fields.length; i++) {
     var f = fields[i];
     if (req.body[f] !== undefined) { updates.push(f + ' = $' + idx); values.push(f === 'amount' ? parseFloat(req.body[f]) : req.body[f]); idx++; }

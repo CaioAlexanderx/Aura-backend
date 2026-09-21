@@ -53,10 +53,11 @@
 //   seguem excluindo troca (analytics/dashboard) — sem mudanca.
 // ============================================================
 const router = require('express').Router();
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requirePlan } = require('../middleware/auth');
 const db = require('../config/database');
 const { resolvePeriod } = require('../services/salesAnalytics');
 const { hasSaleNumberColumn, saleNumberSelect } = require('../utils/saleNumber');
+const attribution = require('../services/marketingAttribution');
 
 router.use(requireAuth);
 
@@ -1045,6 +1046,92 @@ router.get('/sales/analytics', async (req, res) => {
   } catch (err) {
     console.error('[meAggregates] /sales/analytics error:', err.message, err.stack);
     res.status(500).json({ error: 'Erro ao calcular analytics de vendas consolidadas' });
+  }
+});
+
+// ──────────────────────────────────────────────────────────
+// Fase 1 · resultado das mensagens (16/09/2026) — versão consolidada.
+// Mesma regra de atribuição do per-company (companies/:id/marketing/
+// results, em routes/marketingResults.js), somada nas empresas do dono.
+// requirePlan aqui (diferente do resto do /me, que não gateia por
+// plano): a mensagem que gera o resultado já exige negocio/expansao —
+// consolidar não pode dar acesso a quem não tem a feature em nenhuma
+// empresa.
+// ──────────────────────────────────────────────────────────
+router.get('/marketing/results', requirePlan('negocio', 'expansao'), async (req, res) => {
+  try {
+    const companies = await getUserCompanies(req.user.id);
+    if (!companies.length) {
+      return res.json({
+        kind: attribution.normalizeKind(req.query.kind),
+        periodo: attribution.resolvePeriod(req.query.from, req.query.to),
+        enviadas: 0, entregues: 0, lidas: 0, puladas_por_motivo: {},
+        clientes_que_voltaram: 0,
+        vendas: { diretas: { qtd: 0, valor: 0 }, estimadas: { qtd: 0, valor: 0 } },
+        receita_total: 0,
+        custo_estimado: { mensagens: 0, valor_brl: 0 },
+        janela_dias: attribution.WINDOW_DAYS, rotulo: 'estimativa',
+        breakdown: [], company_count: 0,
+      });
+    }
+
+    const porEmpresa = await Promise.all(companies.map(async (c) => {
+      const r = await attribution.buildResults(c.id, {
+        kind: req.query.kind, from: req.query.from, to: req.query.to,
+      });
+      return { company: c, resultado: r };
+    }));
+
+    const somaPuladas = {};
+    let enviadas = 0, entregues = 0, lidas = 0, clientesQueVoltaram = 0;
+    let diretasQtd = 0, diretasValor = 0, estimadasQtd = 0, estimadasValor = 0;
+    let custoMensagens = 0, custoValor = 0;
+
+    for (const { resultado: r } of porEmpresa) {
+      enviadas += r.enviadas;
+      entregues += r.entregues;
+      lidas += r.lidas;
+      clientesQueVoltaram += r.clientes_que_voltaram;
+      diretasQtd += r.vendas.diretas.qtd;
+      diretasValor += r.vendas.diretas.valor;
+      estimadasQtd += r.vendas.estimadas.qtd;
+      estimadasValor += r.vendas.estimadas.valor;
+      custoMensagens += r.custo_estimado.mensagens;
+      custoValor += r.custo_estimado.valor_brl;
+      for (const [motivo, n] of Object.entries(r.puladas_por_motivo || {})) {
+        somaPuladas[motivo] = (somaPuladas[motivo] || 0) + n;
+      }
+    }
+
+    res.json({
+      kind: porEmpresa[0].resultado.kind,
+      periodo: porEmpresa[0].resultado.periodo,
+      enviadas, entregues, lidas,
+      puladas_por_motivo: somaPuladas,
+      clientes_que_voltaram: clientesQueVoltaram,
+      vendas: {
+        diretas: { qtd: diretasQtd, valor: Math.round(diretasValor * 100) / 100 },
+        estimadas: { qtd: estimadasQtd, valor: Math.round(estimadasValor * 100) / 100 },
+      },
+      receita_total: Math.round((diretasValor + estimadasValor) * 100) / 100,
+      custo_estimado: {
+        mensagens: custoMensagens,
+        valor_brl: Math.round(custoValor * 100) / 100,
+      },
+      janela_dias: attribution.WINDOW_DAYS,
+      rotulo: 'estimativa',
+      breakdown: porEmpresa.map(({ company, resultado: r }) => ({
+        company_id: company.id,
+        company_name: company.trade_name || company.legal_name,
+        enviadas: r.enviadas, entregues: r.entregues, lidas: r.lidas,
+        clientes_que_voltaram: r.clientes_que_voltaram,
+        receita_total: r.receita_total,
+      })),
+      company_count: companies.length,
+    });
+  } catch (err) {
+    console.error('[meAggregates] /marketing/results error:', err.message, err.stack);
+    res.status(500).json({ error: 'Erro ao calcular o resultado consolidado das mensagens' });
   }
 });
 

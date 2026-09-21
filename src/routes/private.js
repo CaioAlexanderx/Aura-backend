@@ -125,6 +125,15 @@ router.use('/employees/ranking', require('./employeesRanking'));
 // comercial é o addon — hub_agent_settings.enabled — não o plano).
 router.use('/hub', require('./hubSocial'));
 
+// ── Fase 1 · consentimento (CRM de varejo, migration 340) ──────────
+// GET/POST /customers/:cid/consent e GET/PUT /whatsapp/consent/settings,
+// GET /whatsapp/consent/summary. Monta AQUI, e não no fim do arquivo,
+// porque os mounts de /customers logo abaixo têm requirePlan no PREFIXO
+// (403 para o Essencial antes de chegar a qualquer router depois deles),
+// e registrar o consentimento no balcão vale para qualquer plano.
+router.use('/', require('./customerConsent').companyRouter);
+// ── fim Fase 1 · consentimento ─────────────────────────────────────
+
 // ── Fase 1 · perfil do cliente (16/09/2026, migration 341) ──────────
 // Ficha 360º: tags, linha do tempo, resumo, notas, duplicados e mesclagem.
 // SEM requirePlan: vale para todo plano; o gate de mensagem/crediario e por
@@ -240,5 +249,14 @@ router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioPayme
 // Aura (CRUD staff-only) + registro de renders com content_hash (base da
 // aprovação formal da F2). Contrato no chat c/ Caio.
 router.use('/studio', requirePlan('negocio', 'expansao'), require('./studioVisualTemplates'));
+
+// ============================================================
+// Fase 1 · resultado das mensagens (16/09/2026)
+// "quanto a mensagem vendeu" — reativação e aniversário pelo WhatsApp
+// oficial (Fases 7/8) ganham atribuição de venda (direta por cupom,
+// estimada por last-touch de 5 dias). Mesmo plano de quem manda a
+// mensagem (customerReactivation.js/birthday.js).
+// ============================================================
+router.use('/marketing', requirePlan('negocio', 'expansao'), require('./marketingResults'));
 
 module.exports = router;

@@ -48,6 +48,17 @@
 //   produto que a tela dele sequer carrega. Pagou e não recebeu.
 //   A regra agora vive AQUI, não só na tela (o mesmo tipo de bug que já nos
 //   custou o checkout mostrando 74,17 e cobrando 93,17).
+//
+// 11/09/2026 — CUPOM COM DESCONTO POR VARIOS MESES (migration 326):
+//   "R$ 50 de desconto nas 3 primeiras mensalidades do Negocio". Com
+//   discount_months > 1 a assinatura no Asaas nasce JA descontada e o desconto
+//   em andamento e registrado em subscription_discounts; a rotina
+//   jobs/subscriptionDiscountJob.js devolve o valor cheio e avisa o cliente.
+//   So no mensal. Trocar de plano ou cancelar durante o desconto perde o que
+//   faltava (regra comercial). Assinar outro plano DEPOIS do fim do desconto
+//   (ex.: o anual) segue o caminho normal — o desconto concluido nao interfere.
+//   Cupom de 1 mes (inclusive o novo desconto em reais) segue a regra acima:
+//   so a 1a cobranca.
 // ============================================================
 
 const express = require('express');
@@ -63,14 +74,48 @@ const {
   SEAT_PRICE_BRL,
   getPlanValue,
   getTotalValue,
-  getFirstChargeValue,
+  getCouponDiscountAmount,
 } = require('../services/billingPricing');
 const {
   validateCoupon,
+  checkCouponFits,
   reserveCoupon,
   releaseCoupon,
   recordRedemption,
 } = require('../services/checkoutCoupon');
+const subscriptionDiscount = require('../services/subscriptionDiscount');
+// 21/09/2026: o Asaas nao cobra cliente sem CPF/CNPJ e a maioria das empresas
+// nao tem CNPJ cadastrado. O documento agora vem do checkout (cpf_cnpj).
+const {
+  ensureAsaasCustomer,
+  companyHasTaxId,
+  isTaxIdAsaasError,
+  TAX_ID_REQUIRED_MSG,
+} = require('../services/asaasCustomer');
+
+function money(v) {
+  return Math.round(Number(v) * 100) / 100;
+}
+
+function brl(v) {
+  return 'R$ ' + Number(v).toFixed(2).replace('.', ',');
+}
+
+// Rotulo do cupom nas descricoes que o cliente ve na cobranca do Asaas.
+function couponLabel(coupon, discountPct, discountValue) {
+  const off = discountPct > 0 ? '-' + discountPct + '%' : '-' + brl(discountValue);
+  return ' — cupom ' + coupon.code + ' (' + off + ')';
+}
+
+// Quanto o cupom abate da mensalidade. Cupom de dias gratis nao abate nada:
+// nao ha cobranca imediata (ver checkoutCoupon.js).
+function couponDiscountAmount(coupon, plan, cycle, billingType) {
+  if (!coupon || coupon.trial_days > 0) return 0;
+  return getCouponDiscountAmount(plan, cycle, billingType, {
+    discountPct: coupon.discount_pct,
+    discountValue: coupon.discount_value,
+  }) || 0;
+}
 
 // Verticais que exigem plano minimo. Espelha o gate do app (Negocio+).
 // Studio: nao existe Aura Studio no Essencial — a tela nem carrega.
@@ -128,20 +173,6 @@ function karateDojoGate(c, res) {
   });
 }
 
-async function ensureAsaasCustomer(company, user) {
-  if (company.asaas_customer_id) return company.asaas_customer_id;
-  const customer = await asaas('POST', '/customers', {
-    name: user.full_name || user.name,
-    email: user.email,
-    phone: user.phone || undefined,
-    cpfCnpj: company.cnpj?.replace(/\D/g, '') || undefined,
-    company: company.legal_name || company.trade_name,
-    externalReference: company.id,
-  });
-  await db.query('UPDATE companies SET asaas_customer_id=$1 WHERE id=$2', [customer.id, company.id]);
-  return customer.id;
-}
-
 function addDaysIso(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
@@ -151,12 +182,49 @@ function addDaysIso(days) {
 // GET /billing/status
 router.get('/status', requireAuth, async (req, res) => {
   try {
-    const { rows } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]);
+    // 11/09: desconto de varios meses ainda valendo, na MESMA ida ao banco (a
+    // tela chama esta rota a cada abertura). Serve para mostrar "R$ 119 ate
+    // dd/mm" e para avisar que trocar de plano perde o desconto. Mesmo filtro
+    // de subscriptionDiscount.findDiscountInEffect. Pre-migration 326: 42P01.
+    let rows;
+    try {
+      ({ rows } = await db.query(
+        `SELECT c.*,
+                (SELECT json_build_object(
+                          'code', d.code,
+                          'discount_amount', d.discount_amount,
+                          'months', d.months,
+                          'first_full_due_date', to_char(d.first_full_due_date, 'YYYY-MM-DD'))
+                   FROM subscription_discounts d
+                  WHERE d.company_id = c.id
+                    AND d.asaas_subscription_id = c.asaas_subscription_id
+                    AND d.status IN ('active', 'restored')
+                    AND d.first_full_due_date > CURRENT_DATE
+                  ORDER BY d.created_at DESC
+                  LIMIT 1) AS subscription_discount
+           FROM companies c
+          WHERE c.id = $1`,
+        [req.params.id]
+      ));
+    } catch (err) {
+      if (err.code !== '42P01') throw err;
+      ({ rows } = await db.query('SELECT * FROM companies WHERE id=$1', [req.params.id]));
+    }
     if (!rows.length) return res.status(404).json({ error: 'Empresa nao encontrada' });
     const c = rows[0];
     const trialActive = c.trial_ends_at && new Date(c.trial_ends_at) > new Date();
     const daysLeft = trialActive ? Math.ceil((new Date(c.trial_ends_at) - new Date()) / 86400000) : 0;
+
+    const d = c.subscription_discount;
+    const discount = d ? {
+      code: d.code,
+      discount_amount: money(d.discount_amount),
+      months: d.months,
+      first_full_due_date: d.first_full_due_date,
+    } : null;
+
     res.json({
+      discount,
       plan: c.plan || 'essencial',
       billing_status: c.billing_status || (trialActive ? 'trial' : 'inactive'),
       billing_cycle: c.billing_cycle || 'monthly',
@@ -165,6 +233,9 @@ router.get('/status', requireAuth, async (req, res) => {
       trial_ends_at: c.trial_ends_at || null,
       next_billing_date: c.next_billing_date || null,
       has_payment_method: !!c.asaas_subscription_id,
+      // 21/09: empresa sem CNPJ valido — o checkout precisa pedir CPF/CNPJ
+      // (o Asaas nao gera cobranca sem documento).
+      needs_cpf_cnpj: !companyHasTaxId(c),
       // 13/07: a tela precisa saber que Essencial nao e opcao pra esta empresa.
       vertical_active: c.vertical_active || null,
       allowed_plans: c.vertical_active && VERTICAL_MIN_PLANS[c.vertical_active]
@@ -253,6 +324,7 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
   const {
     card_number, card_expiry_month, card_expiry_year, card_ccv,
     holder_name, holder_cpf, holder_postal_code, holder_address_number, holder_address,
+    cpf_cnpj,
   } = req.body;
 
   if (!card_number || !card_expiry_month || !card_expiry_year || !card_ccv || !holder_name) {
@@ -271,7 +343,8 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
     const { rows: users } = await db.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
     const user = users[0];
 
-    customerId = await ensureAsaasCustomer(company, user);
+    // Sem CNPJ na empresa, o CPF do titular preenche o documento do cliente.
+    customerId = await ensureAsaasCustomer(company, user, { taxId: cpf_cnpj, fallbackTaxId: holder_cpf });
 
     // Log sanitizado — nunca logar dados de cartão
     console.log('[BILLING] Tokenize for company ' + company.id + ' — holderInfo:', JSON.stringify({
@@ -333,7 +406,7 @@ router.post('/tokenize', requireAuth, requireRole('client', 'admin'), async (req
       }
     }
     console.error('[BILLING] Tokenize error:', err.message);
-    res.status(400).json({ error: err.message || 'Erro ao tokenizar cartao' });
+    res.status(400).json({ error: err.message || 'Erro ao tokenizar cartao', stage: err.stage });
   }
 });
 
@@ -357,21 +430,37 @@ router.post('/validate-coupon', requireAuth, requireRole('client', 'admin'), asy
     const selectedPlan = PLANS[plan] ? plan : (company.plan || 'essencial');
     const extraSeats = parseInt(company.extra_seats_granted, 10) || 0;
 
+    const fitError = checkCouponFits(coupon, { plan: selectedPlan, cycle });
+    if (fitError) return res.json({ valid: false, error: fitError });
+    if (coupon.discount_months > 1 && !(await subscriptionDiscount.discountTableReady(db))) {
+      return res.json({ valid: false, error: 'Este cupom ainda não pode ser usado. Tente novamente mais tarde.' });
+    }
+
     const recurring = getTotalValue(selectedPlan, cycle, billing_type, extraSeats);
-    const first = coupon.trial_days > 0
-      ? 0
-      : getFirstChargeValue(selectedPlan, cycle, billing_type, extraSeats, coupon.discount_pct);
+    const discountAmount = couponDiscountAmount(coupon, selectedPlan, cycle, billing_type);
+    const first = coupon.trial_days > 0 ? 0 : money(recurring - discountAmount);
+
+    // Data prevista da 1a mensalidade cheia (mesma conta do /subscribe).
+    const firstDue = billing_type === 'CREDIT_CARD' ? addDaysIso(0) : addDaysIso(1);
+    const months = coupon.trial_days > 0 ? 0 : coupon.discount_months;
 
     res.json({
       valid: true,
       code: coupon.code,
       type: coupon.type,
       discount_pct: coupon.discount_pct,
+      discount_value: coupon.discount_value,
+      discount_months: coupon.discount_months,
       trial_days: coupon.trial_days,
       // O que o cliente paga HOJE e o que ele passa a pagar depois.
       first_charge_value: first,
       recurring_value: recurring,
       first_charge_date: coupon.trial_days > 0 ? addDaysIso(coupon.trial_days) : addDaysIso(0),
+      // Desconto de varios meses: valor de cada mensalidade com desconto e
+      // quando comeca a cheia. Para cupom de 1 mes, discounted_months = 1.
+      discounted_value: coupon.trial_days > 0 ? null : first,
+      discounted_months: months,
+      first_full_charge_date: months > 0 ? subscriptionDiscount.addMonthsIso(firstDue, months) : null,
       extra_seats: extraSeats,
     });
   } catch (err) {
@@ -388,6 +477,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     cycle = 'monthly',
     end_date,
     access_code,
+    cpf_cnpj,
     credit_card_token,
     credit_card_holder_name,
     credit_card_holder_cpf,
@@ -439,7 +529,12 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     const { rows: users } = await db.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
     const user = users[0];
 
-    const customerId = await ensureAsaasCustomer(company, user);
+    // 21/09: documento digitado no checkout > CNPJ da empresa > CPF do titular.
+    // Sem nenhum: 400 stage='cpf_cnpj' (tratado no catch) e a tela abre o campo.
+    const customerId = await ensureAsaasCustomer(company, user, {
+      taxId: cpf_cnpj,
+      fallbackTaxId: credit_card_holder_cpf,
+    });
 
     // 15/06/2026: acessos extras pagos (R$19/seat) entram no valor cobrado.
     // Cliente sem seat extra → extraSeats=0 → value identico ao de antes.
@@ -459,14 +554,38 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       }
     }
     const discountPct = coupon ? coupon.discount_pct : 0;
+    const discountValue = coupon ? coupon.discount_value : 0;
+    const discountMonths = coupon ? coupon.discount_months : 1;
     const trialDays = coupon ? coupon.trial_days : 0;
+    // 11/09: desconto que vale em VARIAS mensalidades (a assinatura nasce descontada).
+    const recurringDiscount = !!coupon && trialDays === 0 && discountMonths > 1;
+
+    if (coupon) {
+      const fitError = checkCouponFits(coupon, { plan, cycle });
+      if (fitError) return res.status(400).json({ error: fitError, stage: 'coupon' });
+    }
+    // Sem a tabela nada devolveria o valor cheio: a assinatura ficaria
+    // descontada para sempre. Recusa o cupom ate a migration 326 subir.
+    if (recurringDiscount && !(await subscriptionDiscount.discountTableReady(db))) {
+      return res.status(503).json({
+        error: 'Este cupom ainda não pode ser usado. Tente novamente mais tarde.',
+        stage: 'coupon',
+      });
+    }
 
     // Valor da PRIMEIRA cobranca (desconto so no plano). Com trial_days nao ha
     // cobranca imediata nenhuma — o desconto e ignorado de proposito (ver
     // comentario em checkoutCoupon.js).
-    const firstValue = getFirstChargeValue(plan, cycle, billing_type, extraSeats, discountPct);
+    const discountAmount = couponDiscountAmount(coupon, plan, cycle, billing_type);
+    const firstValue = money(value - discountAmount);
+    // Valor da ASSINATURA no Asaas: cheio, exceto no desconto de varios meses.
+    const subscriptionValue = recurringDiscount ? firstValue : value;
+    const couponSuffix = coupon && discountAmount > 0 ? couponLabel(coupon, discountPct, discountValue) : '';
+    const recurringSuffix = recurringDiscount
+      ? ' — cupom ' + coupon.code + ': ' + brl(discountAmount) + ' de desconto nas ' + discountMonths + ' primeiras mensalidades'
+      : '';
 
-    if (trialDays === 0 && discountPct > 0 && firstValue < MIN_CHARGE_BRL) {
+    if (trialDays === 0 && discountAmount > 0 && firstValue < MIN_CHARGE_BRL) {
       return res.status(400).json({
         error: 'O desconto deixa a primeira mensalidade abaixo do minimo de R$ ' + MIN_CHARGE_BRL +
                ' aceito pelo provedor. Use um cupom de dias gratis para isentar o periodo.',
@@ -484,6 +603,11 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     }
 
     if (company.asaas_subscription_id) {
+      // Trocar de plano durante um desconto de varios meses perde o que faltava
+      // (regra comercial 11/09 — a tela avisa antes). Desconto ja concluido nao
+      // e tocado: assinar o anual depois dos 3 meses e o caminho normal.
+      const lost = await subscriptionDiscount.loseDiscount(db, company.id, 'plan_change');
+      if (lost) console.log('[BILLING] Desconto em andamento perdido na troca de assinatura — company=' + company.id);
       try { await asaas('DELETE', '/subscriptions/' + company.asaas_subscription_id); } catch {}
     }
 
@@ -583,8 +707,8 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     // ════════════════════════════════════════════════════════════════
     if (billing_type === 'CREDIT_CARD') {
       console.log('[BILLING] Cobranca imediata cartao — company=' + company.id + ' first=' + firstValue +
-                  ' recorrente=' + value + ' cycle=' + cycle + ' seats=' + extraSeats +
-                  (coupon ? ' cupom=' + coupon.code + ' (-' + discountPct + '%)' : ''));
+                  ' recorrente=' + subscriptionValue + ' (cheio ' + value + ') cycle=' + cycle + ' seats=' + extraSeats +
+                  (coupon ? ' cupom=' + coupon.code + ' (-' + discountAmount + ' x ' + discountMonths + ' meses)' : ''));
 
       // 1. Cobrar primeira mensalidade AGORA (captura sincrona via cartao)
       let firstPayment;
@@ -595,7 +719,7 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           value: firstValue,
           dueDate: todayStr,
           description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual - 1ª mensalidade)' : '') + seatsSuffix +
-                       (coupon ? ' — cupom ' + coupon.code + ' (-' + discountPct + '%)' : ''),
+                       couponSuffix,
           externalReference: company.id,
           creditCardToken: credit_card_token,
         };
@@ -642,12 +766,13 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       const subscriptionBody = {
         customer: customerId,
         billingType: 'CREDIT_CARD',
-        // Recorrencia SEMPRE no valor cheio — o cupom valeu so na 1a.
-        value: value,
+        // Recorrencia no valor cheio — o cupom de 1 mes valeu so na 1a. No
+        // desconto de varios meses ela nasce descontada e a rotina devolve o cheio.
+        value: subscriptionValue,
         nextDueDate: subStartStr,
         cycle: 'MONTHLY',
         endDate: subscriptionEndDate,
-        description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : '') + seatsSuffix,
+        description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : '') + seatsSuffix + recurringSuffix,
         externalReference: company.id,
         creditCardToken: credit_card_token,
       };
@@ -667,10 +792,17 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
            isPaid ? todayStr : null, company.id]
         );
         // O cupom FOI usado (a cobranca com desconto passou) — registra e nao libera.
+        // Desconto de varios meses: sem assinatura nao ha o que registrar; a
+        // reconciliacao manual precisa criar a assinatura ja descontada.
         if (coupon) {
+          if (recurringDiscount) {
+            console.error('[BILLING] RECONCILIAR: assinatura com desconto de ' + discountAmount + ' por ' +
+              discountMonths + ' meses nao foi criada (1a ja cobrada) — company=' + company.id + ' cupom=' + coupon.code);
+          }
           await recordRedemption({
             companyId: company.id, userId: user.id, codeId: coupon.id, code: coupon.code,
-            type: coupon.type, discountPct, trialDays, plan, cycle, billingType: 'CREDIT_CARD',
+            type: coupon.type, discountPct, discountValue, discountMonths, trialDays, plan, cycle,
+            billingType: 'CREDIT_CARD',
             recurringValue: value, chargedValue: firstValue,
             paymentId: firstPayment.id, subscriptionId: null,
           });
@@ -683,7 +815,10 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
           plan, cycle, value, billing_type: 'CREDIT_CARD',
           extra_seats: extraSeats,
           charged_now: firstValue,
-          coupon: coupon ? { code: coupon.code, discount_pct: discountPct, trial_days: 0 } : null,
+          coupon: coupon ? {
+            code: coupon.code, discount_pct: discountPct, discount_value: discountValue,
+            discount_months: discountMonths, trial_days: 0,
+          } : null,
           confirmed: isPaid,
           warning: 'Primeira mensalidade capturada com sucesso, mas falha ao agendar recorrência. Suporte foi notificado para reconciliação manual.',
         });
@@ -701,10 +836,21 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
          subscription.nextDueDate, company.id]
       );
 
+      let firstFullDueDate = null;
       if (coupon) {
+        if (recurringDiscount) {
+          // A 1a (cobrada agora, avulsa) ja conta como uma das mensalidades.
+          firstFullDueDate = subscriptionDiscount.addMonthsIso(todayStr, discountMonths);
+          await subscriptionDiscount.startDiscount(db, {
+            companyId: company.id, userId: user.id, codeId: coupon.id, code: coupon.code,
+            subscriptionId: subscription.id, billingType: 'CREDIT_CARD',
+            discountAmount, months: discountMonths, chargedUpfront: 1, firstFullDueDate,
+          });
+        }
         await recordRedemption({
           companyId: company.id, userId: user.id, codeId: coupon.id, code: coupon.code,
-          type: coupon.type, discountPct, trialDays, plan, cycle, billingType: 'CREDIT_CARD',
+          type: coupon.type, discountPct, discountValue, discountMonths, trialDays, plan, cycle,
+          billingType: 'CREDIT_CARD',
           recurringValue: value, chargedValue: firstValue,
           paymentId: firstPayment.id, subscriptionId: subscription.id,
         });
@@ -719,7 +865,11 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
         plan, cycle, value, billing_type: 'CREDIT_CARD',
         extra_seats: extraSeats,
         charged_now: firstValue,
-        coupon: coupon ? { code: coupon.code, discount_pct: discountPct, trial_days: 0 } : null,
+        coupon: coupon ? {
+          code: coupon.code, discount_pct: discountPct, discount_value: discountValue,
+          discount_months: discountMonths, trial_days: 0,
+          discounted_value: firstValue, first_full_due_date: firstFullDueDate,
+        } : null,
         payment_status: firstPayment.status,
         next_due_date: subscription.nextDueDate,
         confirmed: isPaid,
@@ -740,18 +890,22 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     //   desconto    → a subscription gera a 1a cobranca no valor cheio, entao
     //                 damos PUT /payments/{id} com o valor descontado ANTES de
     //                 pedir o QR. O cliente ve o QR ja no valor certo.
+    //
+    // 11/09 — desconto de varios meses no Pix: a assinatura nasce descontada,
+    //   entao a 1a cobranca ja vem no valor certo e nao ha PUT a fazer.
     // ════════════════════════════════════════════════════════════════
     const pixFirstDue = trialDays > 0 ? trialEndsStr : tomorrowStr;
 
     const subscriptionBody = {
       customer: customerId,
       billingType: 'PIX',
-      value: value,
+      value: subscriptionValue,
       nextDueDate: pixFirstDue,
       cycle: 'MONTHLY',
       endDate: cycle === 'annual' ? end_date : undefined,
       description: PLANS[plan].name + (cycle === 'annual' ? ' (Anual)' : '') + seatsSuffix +
-                   (trialDays > 0 ? ' — ' + trialDays + ' dias gratis (' + coupon.code + ')' : ''),
+                   (trialDays > 0 ? ' — ' + trialDays + ' dias gratis (' + coupon.code + ')' : '') +
+                   recurringSuffix,
       externalReference: company.id,
     };
 
@@ -764,12 +918,12 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       firstPaymentId = payments.data?.[0]?.id || null;
 
       if (firstPaymentId && trialDays === 0) {
-        // Cupom de desconto: reduz a 1a cobranca ANTES de gerar o QR.
-        if (discountPct > 0 && firstValue !== value) {
+        // Cupom de desconto de 1 mes: reduz a 1a cobranca ANTES de gerar o QR.
+        if (!recurringDiscount && discountAmount > 0 && firstValue !== value) {
           try {
             await asaas('PUT', '/payments/' + firstPaymentId, {
               value: firstValue,
-              description: PLANS[plan].name + seatsSuffix + ' — cupom ' + coupon.code + ' (-' + discountPct + '%)',
+              description: PLANS[plan].name + seatsSuffix + couponSuffix,
             });
             console.log('[BILLING] Pix 1a cobranca ajustada pelo cupom: ' + value + ' → ' + firstValue);
           } catch (putErr) {
@@ -799,10 +953,20 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       [plan, subscription.id, pixStatus, cycle, subscription.nextDueDate || pixFirstDue, trialEndsStr, company.id]
     );
 
+    let pixFirstFullDueDate = null;
     if (coupon) {
+      if (recurringDiscount) {
+        pixFirstFullDueDate = subscriptionDiscount.addMonthsIso(pixFirstDue, discountMonths);
+        await subscriptionDiscount.startDiscount(db, {
+          companyId: company.id, userId: user.id, codeId: coupon.id, code: coupon.code,
+          subscriptionId: subscription.id, billingType: 'PIX',
+          discountAmount, months: discountMonths, chargedUpfront: 0, firstFullDueDate: pixFirstFullDueDate,
+        });
+      }
       await recordRedemption({
         companyId: company.id, userId: user.id, codeId: coupon.id, code: coupon.code,
-        type: coupon.type, discountPct, trialDays, plan, cycle, billingType: 'PIX',
+        type: coupon.type, discountPct, discountValue, discountMonths, trialDays, plan, cycle,
+        billingType: 'PIX',
         recurringValue: value,
         chargedValue: trialDays > 0 ? null : firstValue,
         paymentId: firstPaymentId, subscriptionId: subscription.id,
@@ -815,7 +979,11 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
       plan, cycle, value, billing_type: 'PIX',
       extra_seats: extraSeats,
       charged_now: trialDays > 0 ? 0 : firstValue,
-      coupon: coupon ? { code: coupon.code, discount_pct: discountPct, trial_days: trialDays } : null,
+      coupon: coupon ? {
+        code: coupon.code, discount_pct: discountPct, discount_value: discountValue,
+        discount_months: discountMonths, trial_days: trialDays,
+        discounted_value: trialDays > 0 ? null : firstValue, first_full_due_date: pixFirstFullDueDate,
+      } : null,
       trial_ends_at: trialEndsStr,
       next_due_date: subscription.nextDueDate || pixFirstDue,
       pix_qr_code: pixData?.encodedImage || null,
@@ -831,6 +999,14 @@ router.post('/subscribe', requireAuth, requireRole('client', 'admin'), async (re
     console.error('[BILLING] Subscribe error:', err.message);
     // Qualquer falha depois da reserva: devolve o uso do cupom.
     if (reservedCouponId) { await releaseCoupon(reservedCouponId); reservedCouponId = null; }
+    // Falta/invalidez de CPF/CNPJ: erro que a tela sabe resolver (abre o campo),
+    // nao um 500. Cobre tambem a recusa vinda do proprio Asaas.
+    if (err.stage === 'cpf_cnpj') {
+      return res.status(400).json({ error: err.message, stage: 'cpf_cnpj' });
+    }
+    if (isTaxIdAsaasError(err)) {
+      return res.status(400).json({ error: TAX_ID_REQUIRED_MSG, stage: 'cpf_cnpj', detail: err.message });
+    }
     res.status(500).json({ error: err.message || 'Erro ao criar assinatura' });
   }
 });
@@ -847,6 +1023,9 @@ router.post('/cancel', requireAuth, requireRole('client', 'admin'), async (req, 
       'UPDATE companies SET billing_status=\'cancelled\', asaas_subscription_id=NULL, updated_at=NOW() WHERE id=$1',
       [req.params.id]
     );
+    // Cancelou durante o desconto de varios meses: perde o que faltava, e o
+    // mesmo cupom nao vale de novo para esta empresa (checkoutCoupon).
+    await subscriptionDiscount.loseDiscount(db, req.params.id, 'cancelled');
     res.json({ message: 'Assinatura cancelada', cancelled_at: new Date().toISOString() });
   } catch (err) { res.status(500).json({ error: 'Erro ao cancelar' }); }
 });

@@ -131,6 +131,7 @@ async function sendForCustomer(companyId, { customerId, couponId = null, today =
     companyId, toPhone: cliente.phone,
     templateName: mkt.TEMPLATE_ANIVERSARIO, templateLanguage: 'pt_BR',
     sourceType: mkt.KIND_ANIVERSARIO,
+    customerId: cliente.id,
   });
   if (!sim.ok) return { queued: false, reason: sim.reason, coupon: null };
 
@@ -224,6 +225,7 @@ async function runForCompany(companyId, { today = null, dryRun = false, limit = 
         companyId, toPhone: c.phone,
         templateName: mkt.TEMPLATE_ANIVERSARIO, templateLanguage: 'pt_BR',
         sourceType: mkt.KIND_ANIVERSARIO,
+        customerId: c.id,
       });
       if (!sim.ok) { bump(sim.reason); pushItem(c, sim.reason); continue; }
       const limite = tracker.reason();

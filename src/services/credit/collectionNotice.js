@@ -133,7 +133,7 @@ async function loadInstallment(client, companyId, installmentId) {
      SELECT ci.*, COALESCE(c.name, c.phone) AS customer_name, c.phone,
             COALESCE(co.trade_name, co.legal_name) AS store_name
        FROM credit_installments ci
-       LEFT JOIN customers c ON c.id = ci.customer_id AND c.company_id = ci.company_id
+       LEFT JOIN customers c ON c.id = ci.customer_id
        LEFT JOIN companies co ON co.id = ci.company_id
       WHERE ci.id = $1 AND ci.company_id = $2`,
     [installmentId, companyId]

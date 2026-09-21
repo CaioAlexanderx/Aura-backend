@@ -37,6 +37,9 @@ const creditLedger = require('../services/creditLedger');
 const { MAX_INSTALLMENTS_CEILING } = require('../services/credit/terms');
 const overdueRule  = require('../services/credit/overdue');  // .ymd: due_date das linhas de applied como 'AAAA-MM-DD' (15/09/2026)
 const { undoManualEntry } = require('../services/credit/undoManualEntry');
+// 16/09/2026: cliente cadastrado em outra loja do mesmo dono tambem vale
+// (src/utils/customerScope.js -- incidente Davi / Mary Lucy).
+const { findOwnerScopedCustomer, CUSTOMER_NOT_FOUND_BODY } = require('../utils/customerScope');
 
 async function assertCrediarioEnabled(companyId) {
   const { rows } = await db.query(
@@ -278,11 +281,11 @@ router.get('/balances', async (req, res) => {
 router.get('/customer/:cid', async (req, res) => {
   try {
     await assertCrediarioEnabled(req.params.id);
-    const { rows: cust } = await db.query(
-      `SELECT id, name, phone, cpf_cnpj FROM customers WHERE id = $1 AND company_id = $2`,
-      [req.params.cid, req.params.id]
+    const custRow = await findOwnerScopedCustomer(
+      db, req.params.id, req.params.cid, 'id, name, phone, cpf_cnpj, company_id'
     );
-    if (!cust.length) return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+    if (!custRow) return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
+    const cust = [custRow];
 
     const { rows: balanceRows } = await db.query(
       `SELECT balance, total_debited, total_paid, last_activity_at
@@ -458,8 +461,39 @@ router.get('/customer/:cid', async (req, res) => {
       accounts = [];
     }
 
+    // 16/09/2026: saldo em aberto da MESMA cliente nas outras lojas do dono.
+    // O cadastro e do dono, mas a divida e da loja que vendeu -- sem isto o
+    // lojista abre a ficha na Matriz, nao ve o carne da Villa Branca e acha
+    // que o sistema perdeu parcelas. So leitura; receber continua na loja
+    // dona da divida. Opcional: falha aqui nunca derruba a ficha.
+    let groupOpen = [];
+    try {
+      const { rows: goRows } = await db.query(
+        `SELECT cb.company_id,
+                COALESCE(co.trade_name, co.legal_name) AS company_name,
+                cb.balance
+           FROM customer_credit_balances cb
+           JOIN companies co ON co.id = cb.company_id
+          WHERE cb.customer_id = $1
+            AND cb.company_id <> $2
+            AND cb.balance > 0.009
+            AND co.is_active = true
+            AND co.owner_id = (SELECT me.owner_id FROM companies me WHERE me.id = $2)
+          ORDER BY company_name`,
+        [req.params.cid, req.params.id]
+      );
+      groupOpen = goRows.map(r => ({
+        company_id:   r.company_id,
+        company_name: r.company_name,
+        balance:      parseFloat(r.balance) || 0,
+      }));
+    } catch (goErr) {
+      console.error('[credit] group_open error:', goErr.message);
+    }
+
     res.json({
       customer:          cust[0],
+      group_open:        groupOpen,
       balance:           parseFloat(b.balance) || 0,
       total_debited:     parseFloat(b.total_debited) || 0,
       total_paid:        parseFloat(b.total_paid) || 0,
@@ -535,11 +569,9 @@ router.post('/customer/:cid/accounts', async (req, res) => {
   }
 
   // Verificar cliente
-  const { rows: custRows } = await db.query(
-    `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
-    [customerId, companyId]
-  );
-  if (!custRows.length) return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+  if (!(await findOwnerScopedCustomer(db, companyId, customerId))) {
+    return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
+  }
 
   // Montar terms_snapshot apenas com campos fornecidos
   const termsSnapshot = {};
@@ -611,13 +643,9 @@ router.post('/customer/:cid/payment', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const { rows: cust } = await client.query(
-      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
-      [req.params.cid, req.params.id]
-    );
-    if (!cust.length) {
+    if (!(await findOwnerScopedCustomer(client, req.params.id, req.params.cid))) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+      return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
     }
 
     let activeSessaoId = null;
@@ -928,11 +956,9 @@ router.get('/customers/:cid/history', async (req, res) => {
       if (!requestedTypes.length) requestedTypes = null;
     }
 
-    const { rows: cust } = await db.query(
-      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
-      [customerId, companyId]
-    );
-    if (!cust.length) return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+    if (!(await findOwnerScopedCustomer(db, companyId, customerId))) {
+      return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
+    }
 
     const conditions = ['t.company_id = $1', 't.customer_id = $2'];
     const params = [companyId, customerId];
@@ -1020,11 +1046,9 @@ router.get('/customers/:cid/payments/preview', async (req, res) => {
     await assertCrediarioEnabled(companyId);
 
     // Verifica cliente
-    const { rows: custRows } = await db.query(
-      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
-      [customerId, companyId]
-    );
-    if (!custRows.length) return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+    if (!(await findOwnerScopedCustomer(db, companyId, customerId))) {
+      return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
+    }
 
     // Saldo atual (read-only)
     let currentBalance = 0;
@@ -1172,13 +1196,9 @@ router.post('/customers/:cid/payments', async (req, res) => {
     await client.query('BEGIN');
 
     // Verifica cliente
-    const { rows: cust } = await client.query(
-      `SELECT id FROM customers WHERE id = $1 AND company_id = $2`,
-      [customerId, companyId]
-    );
-    if (!cust.length) {
+    if (!(await findOwnerScopedCustomer(client, companyId, customerId))) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+      return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
     }
 
     // Sessao de caixa aberta (best-effort)
@@ -1359,10 +1379,8 @@ async function insertManualInstallment(client, {
 }
 
 async function buildManualEntryReplay(companyId, tx) {
-  const { rows: custRows } = await db.query(
-    `SELECT id, name FROM customers WHERE id = $1 AND company_id = $2`,
-    [tx.customer_id, companyId]
-  );
+  const replayCust = await findOwnerScopedCustomer(db, companyId, tx.customer_id, 'id, name');
+  const custRows = replayCust ? [replayCust] : [];
   const { rows: instRows } = await db.query(
     `SELECT * FROM credit_installments
       WHERE company_id = $1 AND customer_id = $2 AND sale_id IS NULL
@@ -1483,14 +1501,12 @@ router.post('/manual-entry', async (req, res) => {
       }
     }
 
-    const { rows: custRows } = await client.query(
-      `SELECT id, name FROM customers WHERE id = $1 AND company_id = $2`,
-      [custId, companyId]
-    );
-    if (!custRows.length) {
+    const entryCust = await findOwnerScopedCustomer(client, companyId, custId, 'id, name');
+    if (!entryCust) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Cliente nao encontrado nesta empresa' });
+      return res.status(404).json(CUSTOMER_NOT_FOUND_BODY);
     }
+    const custRows = [entryCust];
 
     // 2. F3: resolve account_id
     let resolvedAccountId = account_id || null;

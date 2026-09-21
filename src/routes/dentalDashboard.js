@@ -7,7 +7,7 @@
 // - faturamento_mes (concluido) + estimativa (agendado)
 // - funil (leads por stage + total pipeline)
 // - parcelas_vencidas + parcelas_proximas_7d
-// - pacientes_recall (sem consulta 150+ dias)
+// - pacientes_recall (sem consulta ha recall_days dias; padrao 180, igual a automacao)
 // - repasse_mes (total a repassar)
 // - top_procedimentos_mes
 //
@@ -16,6 +16,13 @@
 // validos: agendado, avaliacao, aprovado, em_atendimento, concluido,
 // cancelado, faltou). Antes a query explodia silenciosamente via
 // .catch() e retornava todos os contadores zerados.
+//
+// QA odonto 16/09/2026: 'confirmado', 'paciente_consultorio' e
+// 'falta_justificada' entraram no enum (migration 345). confirmados passa a
+// somar confirmado + aprovado (o aprovado segue contando, como no PR23);
+// na_clinica = paciente_consultorio; faltas soma faltou + falta_justificada
+// (faltas_justificadas separado). Comparações com ::text para não quebrar a
+// query se o código subir antes da migration.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
@@ -32,11 +39,13 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       // Consultas hoje (SP timezone + status PT-BR)
       db.query(
         `SELECT COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status = 'aprovado')          AS confirmados,
+                COUNT(*) FILTER (WHERE status::text IN ('confirmado','aprovado')) AS confirmados,
                 COUNT(*) FILTER (WHERE status = 'agendado')          AS pendentes,
+                COUNT(*) FILTER (WHERE status::text = 'paciente_consultorio') AS na_clinica,
                 COUNT(*) FILTER (WHERE status = 'em_atendimento')    AS em_atendimento,
                 COUNT(*) FILTER (WHERE status = 'concluido')         AS concluidos,
-                COUNT(*) FILTER (WHERE status = 'faltou')            AS faltas,
+                COUNT(*) FILTER (WHERE status::text IN ('faltou','falta_justificada')) AS faltas,
+                COUNT(*) FILTER (WHERE status::text = 'falta_justificada') AS faltas_justificadas,
                 COUNT(*) FILTER (WHERE status = 'cancelado')         AS cancelados
          FROM dental_appointments
          WHERE company_id = $1
@@ -48,7 +57,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       // Consultas semana (7 dias a frente)
       db.query(
         `SELECT COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status != 'cancelado') AS ativos
+                COUNT(*) FILTER (WHERE status::text NOT IN ('cancelado','faltou','falta_justificada')) AS ativos
          FROM dental_appointments
          WHERE company_id = $1
            AND scheduled_at >= NOW()
@@ -60,7 +69,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
       db.query(
         `SELECT
            COALESCE(SUM(total) FILTER (WHERE status='concluido'), 0) AS realizado,
-           COALESCE(SUM(total) FILTER (WHERE status IN ('agendado','aprovado','em_atendimento','avaliacao')), 0) AS previsto
+           COALESCE(SUM(total) FILTER (WHERE status::text IN ('agendado','confirmado','paciente_consultorio','aprovado','em_atendimento','avaliacao')), 0) AS previsto
          FROM dental_appointments
          WHERE company_id = $1
            AND (scheduled_at AT TIME ZONE 'America/Sao_Paulo') >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))
@@ -122,7 +131,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
          )
          SELECT COUNT(*)::int AS qtd
          FROM last_visits
-         WHERE last_visit < NOW() - INTERVAL '150 days'`,
+         WHERE last_visit < NOW() - make_interval(days => COALESCE((SELECT recall_days FROM dental_automation_config WHERE company_id = $1), 180))`,
         [cid]
       ).catch(() => ({ rows: [{}] })),
 
@@ -191,9 +200,11 @@ router.get('/dashboard', requireAuth, async (req, res) => {
         total:          parseInt(today.total)          || 0,
         confirmados:    parseInt(today.confirmados)    || 0,
         pendentes:      parseInt(today.pendentes)      || 0,
+        na_clinica:     parseInt(today.na_clinica)     || 0,
         em_atendimento: parseInt(today.em_atendimento) || 0,
         concluidos:     parseInt(today.concluidos)     || 0,
         faltas:         parseInt(today.faltas)         || 0,
+        faltas_justificadas: parseInt(today.faltas_justificadas) || 0,
         cancelados:     parseInt(today.cancelados)     || 0,
       },
       consultas_semana: {

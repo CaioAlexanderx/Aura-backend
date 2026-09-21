@@ -28,7 +28,13 @@ router.get('/automation/config', requireAuth, async (req, res) => {
         `INSERT INTO dental_automation_config (company_id) VALUES ($1) RETURNING *`, [cid]);
       rows = created;
     }
-    res.json({ config: rows[0] });
+    // 1.7: whatsapp_connected fixo em false — hoje nao existe nenhum worker/job
+    // consumindo dental_automation_log com status='pending' e disparando de
+    // fato pro WhatsApp (os inserts em /trigger, /recall e /satisfaction so
+    // gravam o log, ninguem envia). Ate essa integracao existir, o front
+    // deve esconder os toggles de automacao enquanto whatsapp_connected=false
+    // pra nao dar a falsa impressao de que a mensagem sai.
+    res.json({ config: { ...rows[0], whatsapp_connected: false } });
   } catch (err) {
     console.error('[dentalAutomation config GET]', err.message);
     res.status(500).json({ error: 'Erro config' });
@@ -71,6 +77,8 @@ router.post('/automation/trigger', requireAuth, requireRole('client','admin'), a
   try {
     let appointments = [];
     if (type === 'confirm_24h') {
+      // 1.7: confirmacao 24h so faz sentido pra quem AINDA NAO confirmou —
+      // por isso considera so status 'agendado' (nao 'confirmado').
       const { rows } = await db.query(
         `SELECT a.id, a.scheduled_at, a.status,
                 a.customer_id,
@@ -78,7 +86,7 @@ router.post('/automation/trigger', requireAuth, requireRole('client','admin'), a
                 c.phone AS phone
          FROM dental_appointments a
          JOIN customers c ON c.id = a.customer_id
-         WHERE a.company_id=$1 AND a.status::text IN ('scheduled','pending','agendado')
+         WHERE a.company_id=$1 AND a.status::text IN ('agendado')
            AND a.scheduled_at BETWEEN NOW() AND NOW() + INTERVAL '24 hours'
            AND NOT EXISTS (
              SELECT 1 FROM dental_automation_log l
@@ -88,6 +96,8 @@ router.post('/automation/trigger', requireAuth, requireRole('client','admin'), a
          ORDER BY a.scheduled_at`, [cid]);
       appointments = rows;
     } else if (type === 'remind_2h') {
+      // 1.7: lembrete 2h vale tanto pra quem so agendou quanto pra quem ja
+      // confirmou (ambos ainda vao comparecer, so mudou a etapa anterior).
       const { rows } = await db.query(
         `SELECT a.id, a.scheduled_at,
                 a.customer_id,
@@ -95,7 +105,7 @@ router.post('/automation/trigger', requireAuth, requireRole('client','admin'), a
                 c.phone AS phone
          FROM dental_appointments a
          JOIN customers c ON c.id = a.customer_id
-         WHERE a.company_id=$1 AND a.status::text IN ('scheduled','confirmed','agendado')
+         WHERE a.company_id=$1 AND a.status::text IN ('agendado', 'confirmado')
            AND a.scheduled_at BETWEEN NOW() AND NOW() + INTERVAL '3 hours'
            AND NOT EXISTS (
              SELECT 1 FROM dental_automation_log l
@@ -127,7 +137,7 @@ router.post('/automation/trigger', requireAuth, requireRole('client','admin'), a
 });
 
 // POST recall — disparador (insere log com msg pendente)
-router.post('/automation/recall', requireAuth, async (req, res) => {
+router.post('/automation/recall', requireAuth, requireRole('client','admin'), async (req, res) => {
   const cid = req.params.id;
   try {
     const { rows: config } = await db.query(
@@ -207,7 +217,7 @@ router.get('/automation/recall/list', requireAuth, async (req, res) => {
            WHERE a2.customer_id = lv.id
              AND a2.company_id = $1
              AND a2.scheduled_at > NOW()
-             AND a2.status::text NOT IN ('cancelado','cancelled','faltou','no_show')
+             AND a2.status::text NOT IN ('cancelado','cancelled','faltou','falta_justificada','no_show')
          )
        ORDER BY next_recall ASC
        LIMIT 100`,
@@ -281,7 +291,7 @@ router.get('/no-shows', requireAuth, async (req, res) => {
 });
 
 // POST satisfaction
-router.post('/automation/satisfaction/:aid', requireAuth, async (req, res) => {
+router.post('/automation/satisfaction/:aid', requireAuth, requireRole('client','admin'), async (req, res) => {
   const cid = req.params.id;
   try {
     const { rows } = await db.query(

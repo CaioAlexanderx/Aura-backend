@@ -44,7 +44,8 @@ function setupDentalWebSocket(wss) {
         await db.query(
           `UPDATE dental_appointments
            SET conclusion_sig_url=$2, conclusion_signed=true,
-               conclusion_at=NOW(), status='concluido', concluded_at=NOW(), updated_at=NOW()
+               conclusion_at=NOW(), status='concluido', concluded_at=NOW(), updated_at=NOW(),
+               started_at=COALESCE(started_at, LEAST(scheduled_at, NOW()))
            WHERE id=$1`,
           [session.appointment_id, sigData]
         );

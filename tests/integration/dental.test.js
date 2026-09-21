@@ -37,9 +37,9 @@ describe('POST /dental/patients — LGPD', () => {
   test('cria paciente com consentimento válido', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] }); // companyAccess
     db.query
-      .mockResolvedValueOnce({ rows: [{ role: 'owner' }] }) // companyAccess
+      // 1.3: checagem de CPF duplicado (nova query antes do INSERT) — vazia = sem duplicata
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ id: 'pat1', full_name: 'João Silva' }] });
+      .mockResolvedValueOnce({ rows: [{ id: 'pat1', full_name: 'João Silva' }] }); // INSERT
     const res = await request(app)
       .post(`/api/v1/companies/${cid}/dental/patients`)
       .set(auth).send({

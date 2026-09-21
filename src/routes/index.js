@@ -29,6 +29,9 @@ router.use('/public/leads', require('./leadsPublic'));
 router.use('/me/companies', require('./userCompanies'));
 router.use('/me', productLinksUserRouter);
 router.use('/me', require('./meAggregates'));
+// Fase 1 · consentimento (340): GET /me/whatsapp/consent/summary.
+router.use('/me', require('./customerConsent').meRouter);
+
 // Fase 1 · perfil do cliente: GET /me/customers/:cid/timeline|summary
 // (visao consolidada multi-CNPJ da ficha).
 router.use('/me', require('./customerProfile').meRouter);
@@ -58,6 +61,8 @@ router.use('/admin', require('./adminGrowth'));
 router.use('/admin', require('./adminAddons'));
 // Endomarketing banners (13/06/2026): CRUD admin de banners de notificação
 router.use('/admin', require('./adminNotifications'));
+// Pedidos de disparo preparados pelo Claude, executados só com aprovação (348)
+router.use('/admin', require('./adminDispatchRequests'));
 router.use('/admin/leads', require('./adminLeads'));
 router.use('/admin/aura-notas', require('./adminAuraNotas')); // Gestão Aura — NFC-e engine própria (staff)
 

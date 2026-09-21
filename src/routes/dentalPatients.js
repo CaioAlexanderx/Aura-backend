@@ -18,11 +18,15 @@
 //
 // PR30 (2026-04-28): photo_url em CRUD + filtros (has_allergies,
 // has_insurance, inactive_days, convenio) no GET listing.
+//
+// 1.2 (2026-09-16): GET /patients/birthdays — aniversariantes proximos N dias.
 // ============================================================
 const router = require('express').Router({ mergeParams: true });
 const db = require('../config/database');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { listPatients } = require('../services/dental');
+const { isBirthDateInFuture } = require('../services/dentalSchedule');
+const { daysUntilNextBirthday, todayInTimeZone } = require('../utils/birthdayCalc');
 
 // Converte registro customers -> shape paciente odonto
 function patientShape(c) {
@@ -86,6 +90,51 @@ router.get('/patients', requireAuth, async (req, res) => {
   }
 });
 
+// ── GET /patients/birthdays ──
+// 1.2: precisa vir ANTES de /patients/:pid, senao "birthdays" cai como :pid.
+// Aniversariantes dos proximos N dias (default 7, max 60).
+//
+// O calculo (virada de ano, 29/02 em ano nao-bissexto) fica em JS puro
+// (src/utils/birthdayCalc.js) em vez de SQL — testavel sem banco e mais
+// facil de auditar que uma cadeia de make_date/EXTRACT. "Hoje" e calculado
+// em America/Sao_Paulo via Intl, nao CURRENT_DATE (que segue o TZ da sessao
+// do Postgres/Supabase, tipicamente UTC — mesma classe de bug do item 1.6).
+router.get('/patients/birthdays', requireAuth, async (req, res) => {
+  try {
+    let days = parseInt(req.query.days);
+    if (isNaN(days)) days = 7;
+    days = Math.min(Math.max(days, 0), 60);
+
+    const { rows } = await db.query(
+      `SELECT id, name, phone, to_char(birth_date, 'YYYY-MM-DD') AS birth_date
+       FROM customers
+       WHERE company_id = $1
+         AND is_patient = true
+         AND is_active = true
+         AND birth_date IS NOT NULL`,
+      [req.params.id]
+    );
+
+    const today = todayInTimeZone('America/Sao_Paulo');
+
+    const patients = rows
+      .map((r) => ({
+        id: r.id,
+        full_name: r.name,
+        phone: r.phone,
+        birth_date: r.birth_date,
+        days_until: daysUntilNextBirthday(r.birth_date, today),
+      }))
+      .filter((p) => p.days_until !== null && p.days_until >= 0 && p.days_until <= days)
+      .sort((a, b) => a.days_until - b.days_until || a.full_name.localeCompare(b.full_name));
+
+    res.json({ patients });
+  } catch (err) {
+    console.error('[dentalPatients GET /patients/birthdays]', err.message);
+    res.status(500).json({ error: 'Erro ao buscar aniversariantes' });
+  }
+});
+
 // ── GET /patients/:pid ──
 router.get('/patients/:pid', requireAuth, async (req, res) => {
   try {
@@ -117,12 +166,16 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
     photo_url,
     lgpd_consent = false,
     existing_customer_id, // opcional: converter cliente existente em paciente
+    allow_duplicate_cpf = false, // 1.3: forca cadastro mesmo com CPF ja usado
   } = req.body;
 
   const finalName = (full_name || name || '').trim();
   const finalCpf  = cpf_cnpj || cpf || null;
 
   if (!finalName) return res.status(400).json({ error: 'Nome e obrigatorio' });
+  if (isBirthDateInFuture(birth_date)) {
+    return res.status(400).json({ error: 'Data de nascimento no futuro', code: 'BIRTH_DATE_FUTURE' });
+  }
   if (!lgpd_consent) {
     return res.status(400).json({
       error: 'Consentimento LGPD Art.11 e obrigatorio para dados de saude',
@@ -130,6 +183,29 @@ router.post('/patients', requireAuth, requireRole('client','analyst','admin'), a
   }
 
   try {
+    // 1.3: bloqueia CPF duplicado na mesma empresa (compara so digitos).
+    // allow_duplicate_cpf=true no body forca o cadastro mesmo assim.
+    if (finalCpf && allow_duplicate_cpf !== true) {
+      const cpfDigits = String(finalCpf).replace(/[^0-9]/g, '');
+      if (cpfDigits) {
+        const { rows: dup } = await db.query(
+          `SELECT id, name FROM customers
+           WHERE company_id = $1 AND is_patient = true
+             AND regexp_replace(COALESCE(cpf_cnpj, ''), '[^0-9]', '', 'g') = $2
+           LIMIT 1`,
+          [req.params.id, cpfDigits]
+        );
+        if (dup.length) {
+          return res.status(409).json({
+            error: 'Já existe um paciente com este CPF',
+            code: 'CPF_DUPLICADO',
+            patient_id: dup[0].id,
+            patient_name: dup[0].name,
+          });
+        }
+      }
+    }
+
     // Caso 1: converter customer existente em paciente
     if (existing_customer_id) {
       const { rows } = await db.query(
@@ -243,6 +319,10 @@ router.patch('/patients/:pid', requireAuth, requireRole('client','analyst','admi
     photo_url:       'photo_url',
   };
 
+  if (isBirthDateInFuture(req.body.birth_date)) {
+    return res.status(400).json({ error: 'Data de nascimento no futuro', code: 'BIRTH_DATE_FUTURE' });
+  }
+
   const fields = [], values = [];
   let idx = 1;
   const seen = new Set();
@@ -261,6 +341,30 @@ router.patch('/patients/:pid', requireAuth, requireRole('client','analyst','admi
   values.push(req.params.pid, req.params.id);
 
   try {
+    // 1.3: mesmo bloqueio de CPF duplicado na edicao — so entra em vigor se
+    // o CPF novo pertencer a OUTRO paciente (nao ao proprio que esta sendo editado).
+    const newCpfRaw = req.body.cpf_cnpj !== undefined ? req.body.cpf_cnpj : req.body.cpf;
+    if (newCpfRaw !== undefined && newCpfRaw !== null && req.body.allow_duplicate_cpf !== true) {
+      const cpfDigits = String(newCpfRaw).replace(/[^0-9]/g, '');
+      if (cpfDigits) {
+        const { rows: dup } = await db.query(
+          `SELECT id, name FROM customers
+           WHERE company_id = $1 AND is_patient = true AND id != $2
+             AND regexp_replace(COALESCE(cpf_cnpj, ''), '[^0-9]', '', 'g') = $3
+           LIMIT 1`,
+          [req.params.id, req.params.pid, cpfDigits]
+        );
+        if (dup.length) {
+          return res.status(409).json({
+            error: 'Já existe um paciente com este CPF',
+            code: 'CPF_DUPLICADO',
+            patient_id: dup[0].id,
+            patient_name: dup[0].name,
+          });
+        }
+      }
+    }
+
     const { rows } = await db.query(
       `UPDATE customers SET ${fields.join(', ')}
        WHERE id = $${idx++} AND company_id = $${idx} AND is_patient = true

@@ -24,6 +24,25 @@
 // =============================================================
 
 const creditLedger = require('../creditLedger');
+const ledger = require('./ledger');
+const pool = require('../../config/database');
+
+// 16/09/2026 (migration 343): sales.refund_abatement guarda o que a
+// devolucao abateu, para o cancelamento desfazer sem adivinhar. Conferido
+// FORA da transacao (um 42703 dentro dela abortaria a devolucao inteira).
+// So o "sim" fica em cache: a coluna nao some depois de criada.
+let _abatementColOk = false;
+async function hasAbatementCol() {
+  if (_abatementColOk) return true;
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'sales' AND column_name = 'refund_abatement'`
+    );
+    _abatementColOk = rows.length > 0;
+  } catch (_) { /* sem como saber: segue sem registrar */ }
+  return _abatementColOk;
+}
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
@@ -233,6 +252,7 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
   //    nem o que ja foi coberto (covered_amount).
   let rem = refundValue;
   const abated = [];
+  const abatementLog = { installments: [], receivables: [] };
   let installments = [];
   try {
     const { rows } = await client.query(
@@ -264,6 +284,10 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
       );
       rem = round2(rem - uncovered);
       abated.push({ installment_id: inst.id, number: inst.installment_number, action: 'cancelled', amount: uncovered });
+      abatementLog.installments.push({
+        id: inst.id, prev_status: inst.status, prev_amount_due: due, prev_covered: cov,
+        new_status: 'cancelled', new_amount_due: due,
+      });
     } else {
       const newDue = round2(due - rem);
       await client.query(
@@ -271,6 +295,10 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
         [inst.id, saleCompanyId, newDue]
       );
       abated.push({ installment_id: inst.id, number: inst.installment_number, action: 'reduced', amount: rem, new_amount_due: newDue });
+      abatementLog.installments.push({
+        id: inst.id, prev_status: inst.status, prev_amount_due: due, prev_covered: cov,
+        new_status: inst.status, new_amount_due: newDue,
+      });
       rem = 0;
     }
   }
@@ -305,6 +333,7 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
           `DELETE FROM transactions WHERE id = $1 AND company_id = $2 AND status = 'pending'`,
           [recv.id, saleCompanyId]
         );
+        abatementLog.receivables.push({ id: recv.id, key: recv.idempotency_key, cut, prev_amount: recvAmount, action: 'deleted' });
       } else {
         await client.query(
           `UPDATE transactions
@@ -312,11 +341,20 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
             WHERE id = $2 AND company_id = $3`,
           [cut, recv.id, saleCompanyId]
         );
+        abatementLog.receivables.push({ id: recv.id, key: recv.idempotency_key, cut, prev_amount: recvAmount, action: 'reduced' });
       }
       toReduce = round2(toReduce - cut);
     }
   } catch (e) {
     console.warn('[credit/refund] reduce A Receber (non-fatal):', e.message);
+  }
+
+  // 9.1. Registro do abatimento (migration 343) -- base do cancelamento.
+  if (await hasAbatementCol()) {
+    await client.query(
+      `UPDATE sales SET refund_abatement = $1::jsonb WHERE id = $2`,
+      [JSON.stringify(abatementLog), devolucaoSaleId]
+    );
   }
 
   // 10. Recalcula credit_used + saldo novo
@@ -341,4 +379,175 @@ async function refundCreditSale(client, { companyId, saleId, items, reason = nul
   };
 }
 
-module.exports = { refundCreditSale };
+// =============================================================
+// cancelDevolucao -- desfaz uma devolucao do crediario (16/09/2026).
+//
+// Caso MHT / Karina Quadros: cancelar a devolucao so marcava a linha como
+// cancelada. O item devolvido seguia no estoque, o credito 'refund' seguia
+// no ledger e a guarda anti-dupla-devolucao (que ignora devolucao
+// cancelada) deixava devolver a mesma peca de novo -- duas vezes R$ 120 de
+// credito fantasma e 2 tenis a mais no estoque.
+//
+// Desfaz, na ordem inversa da devolucao:
+//   1. retira do estoque o que ela repos (stock_movements 'out')
+//   2. apaga o credito 'refund' dela (casado pela nota "dev <id8>")
+//   3. restaura parcelas e A Receber pelo registro da migration 343
+//
+// Devolucao antiga (sem registro) que abateu parcela nao e restaurada por
+// palpite: 409 DEVOLUCAO_SEM_REGISTRO. Sem parcela tocada, segue normal.
+// Chamar DENTRO de uma transacao, com a devolucao ja travada (FOR UPDATE).
+// =============================================================
+async function cancelDevolucao(client, { companyId, devolucaoSaleId }) {
+  const withLog = await hasAbatementCol();
+  const { rows: devRows } = await client.query(
+    `SELECT id, customer_id, exchange_of_sale_id
+            ${withLog ? ', refund_abatement' : ''}
+       FROM sales
+      WHERE id = $1 AND company_id = $2 AND type = 'devolucao'`,
+    [devolucaoSaleId, companyId]
+  );
+  if (!devRows.length) throw err(404, { error: 'Devolucao nao encontrada' });
+  const dev = devRows[0];
+  const originalSaleId = dev.exchange_of_sale_id;
+  const log = dev.refund_abatement || null;
+
+  // Sem registro: so segue se a venda original nao tem parcela nenhuma --
+  // ai a devolucao nao tinha o que abater. Com parcela nao da pra provar o
+  // que ela mexeu (um pagamento depois muda o updated_at), entao recusa.
+  if (!log && originalSaleId) {
+    const { rows: touched } = await client.query(
+      `SELECT 1 FROM credit_installments WHERE sale_id = $1 AND company_id = $2 LIMIT 1`,
+      [originalSaleId, companyId]
+    );
+    if (touched.length) {
+      throw err(409, {
+        error: 'Esta devolução é anterior ao registro de abatimento e mexeu nas parcelas. Fale com o suporte para desfazê-la.',
+        code: 'DEVOLUCAO_SEM_REGISTRO',
+      });
+    }
+  }
+
+  // 1. Estoque: retira o que a devolucao repos.
+  const { rows: returned } = await client.query(
+    `SELECT product_id, variant_id, quantity FROM troca_returned_items WHERE troca_sale_id = $1`,
+    [devolucaoSaleId]
+  );
+  const stockRemoved = [];
+  for (const r of returned) {
+    const qty = parseFloat(r.quantity) || 0;
+    if (qty <= 0) continue;
+    if (r.variant_id) {
+      await client.query(
+        `UPDATE product_variants SET stock_qty = GREATEST(0, COALESCE(stock_qty, 0) - $1), updated_at = NOW() WHERE id = $2`,
+        [qty, r.variant_id]
+      );
+    } else if (r.product_id) {
+      await client.query(
+        `UPDATE products SET stock_qty = GREATEST(0, COALESCE(stock_qty, 0) - $1), updated_at = NOW() WHERE id = $2`,
+        [qty, r.product_id]
+      );
+    }
+    if (r.product_id) {
+      await client.query(
+        `INSERT INTO stock_movements (product_id, company_id, type, quantity, reference_id, reference_type, notes)
+         SELECT p.id, p.company_id, 'out', $2, $3, 'devolucao_cancel', 'Cancelamento de devolucao - retira item devolvido'
+           FROM products p WHERE p.id = $1`,
+        [r.product_id, qty, devolucaoSaleId]
+      );
+    }
+    stockRemoved.push({ product_id: r.product_id, variant_id: r.variant_id || null, quantity: qty });
+  }
+
+  // 2. Credito da devolucao (mesma nota que refundCreditSale grava).
+  const { rows: refundDel } = await client.query(
+    `DELETE FROM customer_credit_transactions
+      WHERE company_id = $1 AND sale_id = $2 AND type = 'refund' AND notes = $3
+      RETURNING amount`,
+    [companyId, originalSaleId, `Devolucao de venda (dev ${String(devolucaoSaleId).slice(0, 8)})`]
+  );
+  const creditRemoved = round2(refundDel.reduce((acc, r) => acc + (parseFloat(r.amount) || 0), 0));
+
+  // 3a. Parcelas: voltam ao estado anterior -- so se ainda estiverem como a
+  //     devolucao deixou (um pagamento posterior nao e atropelado).
+  const restored = [];
+  const skipped = [];
+  for (const it of (log && log.installments) || []) {
+    const { rowCount } = await client.query(
+      `UPDATE credit_installments
+          SET status = $3, amount_due = $4, covered_amount = $5, updated_at = NOW()
+        WHERE id = $1 AND company_id = $2
+          AND status = $6 AND amount_due = $7`,
+      [it.id, companyId, it.prev_status, it.prev_amount_due, it.prev_covered, it.new_status, it.new_amount_due]
+    );
+    (rowCount ? restored : skipped).push(it.id);
+  }
+
+  // 3b. A Receber: devolve o que foi cortado. Linha reduzida ainda pendente
+  //     recebe de volta; apagada (ou ja baixada) vira linha nova com a chave
+  //     da venda como prefixo -- o casamento por LIKE do ledger a encontra.
+  let receivableRestored = 0;
+  const receivables = (log && log.receivables) || [];
+  const withRef = receivables.length ? await ledger._hasReferenceCols() : false;
+  for (let k = 0; k < receivables.length; k++) {
+    const rc = receivables[k];
+    const cut = round2(rc.cut);
+    if (cut <= 0.005) continue;
+    let done = false;
+    if (rc.action === 'reduced') {
+      const { rowCount } = await client.query(
+        `UPDATE transactions SET amount = amount + $1, updated_at = NOW()
+          WHERE id = $2 AND company_id = $3 AND status = 'pending'`,
+        [cut, rc.id, companyId]
+      );
+      done = rowCount > 0;
+    }
+    if (!done) {
+      const params = [
+        companyId, cut,
+        `Crediario - venda ${originalSaleId} (devolucao cancelada)`,
+        `pdv-credit-receivable-${originalSaleId}-devcancel-${String(devolucaoSaleId).slice(0, 8)}-${k}`,
+      ];
+      if (withRef) params.push(dev.customer_id);
+      await client.query(
+        `INSERT INTO transactions
+           (company_id, type, status, amount, description, category, due_date, paid_at, idempotency_key
+            ${withRef ? ', reference_type, reference_id' : ''})
+         VALUES ($1, 'income', 'pending', $2, $3, 'Crediario - A Receber',
+                 (NOW() AT TIME ZONE 'America/Sao_Paulo')::date, NULL, $4
+                 ${withRef ? ", 'customer', $5::uuid" : ''})
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        params
+      );
+    }
+    receivableRestored = round2(receivableRestored + cut);
+  }
+
+  if (dev.customer_id) {
+    try { await creditLedger._updateCreditUsed(client, companyId, dev.customer_id); } catch (_) {}
+  }
+
+  return {
+    stock_removed: stockRemoved,
+    credit_removed: creditRemoved,
+    installments_restored: restored,
+    installments_skipped: skipped,
+    receivable_restored: receivableRestored,
+  };
+}
+
+// Devolucoes/trocas ATIVAS de uma venda. Cancelar a venda com uma delas de
+// pe repunha o item devolvido de novo e deixava o credito solto.
+async function activeReturnsOf(client, { companyId, saleId }) {
+  const { rows } = await client.query(
+    `SELECT DISTINCT ts.id, ts.sale_number, ts.type
+       FROM troca_returned_items tri
+       JOIN sales ts ON ts.id = tri.troca_sale_id
+      WHERE tri.original_sale_id = $1
+        AND ts.company_id = $2
+        AND COALESCE(ts.status, 'completed') <> 'cancelled'`,
+    [saleId, companyId]
+  );
+  return rows;
+}
+
+module.exports = { refundCreditSale, cancelDevolucao, activeReturnsOf };

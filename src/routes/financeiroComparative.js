@@ -29,6 +29,7 @@
 const express = require('express');
 const db = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
+const { getUserCompanyIds } = require('../utils/userCompanyIds');
 
 const MONTH_NAMES_FULL = [
   'Janeiro', 'Fevereiro', 'Marco', 'Abril', 'Maio', 'Junho',
@@ -240,11 +241,7 @@ meRouter.get('/comparative', async (req, res) => {
     const userId = req.user && req.user.id;
     if (!userId) return res.status(401).json({ error: 'Nao autenticado' });
 
-    const companiesRes = await db.query(
-      `SELECT company_id FROM company_users WHERE user_id = $1`,
-      [userId]
-    );
-    const companyIds = companiesRes.rows.map((r) => r.company_id);
+    const companyIds = await getUserCompanyIds(userId);
 
     const opts = {
       period: req.query.period || 'month',
