@@ -289,12 +289,28 @@ async function markContactMarketingBlocked(companyId, phone, days = 30) {
   }
 }
 
+// Origens de marketing cujo source_id É o id do cliente (reativação e
+// aniversário gravam String(cliente.id)). Nas outras (otica_revisao usa
+// o id da receita) o despacho só conhece o telefone.
+const CUSTOMER_SOURCE_TYPES = new Set(['reativacao', 'aniversario']);
+
+function customerIdFromSource(sourceType, sourceId) {
+  if (!sourceId || !CUSTOMER_SOURCE_TYPES.has(String(sourceType || ''))) return null;
+  const id = String(sourceId);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
+}
+
 // Todas as guardas de marketing de UM envio, em ordem de "quão
 // definitivo é o não". Devolve null quando nada barra. Usada no enqueue,
 // no reforço do despacho e na simulação — uma definição só para as três
 // superfícies não divergirem.
-async function marketingSkipReason(companyId, phone) {
-  if (!(await hasMarketingConsent(companyId))) return 'SEM_CONSENTIMENTO';
+async function marketingSkipReason(companyId, phone, { customerId = null } = {}) {
+  // Consentimento (CRM Fase 1, 340): opt-out do cliente sempre barra; sem
+  // data de corte vale a declaração da empresa (SEM_CONSENTIMENTO); com o
+  // corte alcançado, só sai para quem deu opt-in (SEM_OPTIN_CLIENTE).
+  // Require tardio: customerConsent usa este módulo (ciclo).
+  const consent = await require('./customerConsent').canSendMarketing({ companyId, customerId, phone });
+  if (!consent.ok) return consent.reason;
   // Contato bloqueado pelo 131049 também sai como FREQUENCIA_MARKETING:
   // para quem lê a fila são a mesma frase ("este cliente já recebeu
   // marketing demais"), muda só quem impôs o limite — nós (7 dias) ou a
@@ -482,6 +498,7 @@ async function enqueue({
   companyId, toPhone, kind = 'template',
   templateName = null, templateLanguage = 'pt_BR', components = null,
   textBody = null, sourceType = null, sourceId = null, dedupeKey = null,
+  customerId = null,
 }) {
   const phone = normalizePhone(toPhone);
   if (!phone) return { queued: false, reason: 'TELEFONE_INVALIDO' };
@@ -519,7 +536,9 @@ async function enqueue({
   // marketing é menor que o geral de qualquer forma).
   const isMarketing = isMarketingSource(sourceType);
   if (status === 'pending' && isMarketing) {
-    const motivo = await marketingSkipReason(companyId, phone);
+    const motivo = await marketingSkipReason(companyId, phone, {
+      customerId: customerId || customerIdFromSource(sourceType, sourceId),
+    });
     if (motivo) { status = 'skipped'; skipReason = motivo; }
   }
   // ── Uso justo MENSAL da cobrança (Fase 8b) ────────────────
@@ -574,7 +593,7 @@ async function enqueue({
 // fora de propósito: são sobre ACÚMULO ao longo de vários itens, e o
 // preview precisa somar isso na ORDEM em que os itens seriam enviados —
 // quem chama mantém esse acumulado (ver GET /whatsapp/preview).
-async function simulate({ companyId, toPhone, templateName = null, templateLanguage = 'pt_BR', sourceType = null }) {
+async function simulate({ companyId, toPhone, templateName = null, templateLanguage = 'pt_BR', sourceType = null, customerId = null }) {
   const phone = normalizePhone(toPhone);
   if (!phone) return { ok: false, reason: 'TELEFONE_INVALIDO' };
   const isTeste = sourceType === 'teste';
@@ -598,7 +617,7 @@ async function simulate({ companyId, toPhone, templateName = null, templateLangu
   // simulação. O teto diário de marketing é acúmulo e fica com quem
   // chama, igual aos tetos da cobrança.
   if (isMarketingSource(sourceType)) {
-    const motivo = await marketingSkipReason(companyId, phone);
+    const motivo = await marketingSkipReason(companyId, phone, { customerId });
     if (motivo && motivo !== 'LIMITE_MARKETING') return { ok: false, reason: motivo };
   }
 
@@ -790,7 +809,9 @@ async function processBatch(limit = 20) {
       // com 131049. Item de marketing que esperou na fila é justamente o
       // que mais tempo teve para essas coisas acontecerem.
       if (isMarketingSource(row.source_type)) {
-        const motivoAgora = await marketingSkipReason(row.company_id, row.to_phone);
+        const motivoAgora = await marketingSkipReason(row.company_id, row.to_phone, {
+          customerId: customerIdFromSource(row.source_type, row.source_id),
+        });
         // FREQUENCIA_MARKETING e LIMITE_MARKETING não valem aqui: as
         // duas contas incluem o PRÓPRIO item (ele já está na wa_outbox
         // como 'pending', que não é 'skipped' nem 'failed'), então
@@ -915,6 +936,7 @@ module.exports = {
   // reativação/aniversário, para as prévias e para os testes.
   MARKETING_SOURCE_TYPES, MARKETING_WINDOW_DAYS, MARKETING_BLOCK_DAYS,
   isMarketingSource, marketingDailyCap, marketingSkipReason,
+  CUSTOMER_SOURCE_TYPES, customerIdFromSource,
   // Uso justo mensal da cobrança (Fase 8b).
   UTILITY_SOURCE_TYPES, isUtilitySource, _resetUsoJustoAvisos,
   hasMarketingConsent, loadMarketingConsentAt, loadQualityRating, isMarketingBlocked,

@@ -29,6 +29,8 @@ router.use('/public/leads', require('./leadsPublic'));
 router.use('/me/companies', require('./userCompanies'));
 router.use('/me', productLinksUserRouter);
 router.use('/me', require('./meAggregates'));
+// Fase 1 · consentimento (340): GET /me/whatsapp/consent/summary.
+router.use('/me', require('./customerConsent').meRouter);
 router.use('/me/financeiro', require('./financeiroInsights').meRouter);
 router.use('/me/financeiro', require('./financeiroComparative').meRouter);
 

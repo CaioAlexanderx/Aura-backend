@@ -241,6 +241,9 @@ router.get('/preview', requireAuth, async function (req, res) {
       template_name: mkt.TEMPLATE_REATIVACAO,
       would_send: r.enqueued || 0,
       skipped: r.skipped || {},
+      // CRM Fase 1 (340): quantos ficam de fora por falta de opt-in
+      // individual depois da data de corte (também está em skipped).
+      skipped_sem_optin_cliente: (r.skipped && r.skipped.SEM_OPTIN_CLIENTE) || 0,
       skipped_reason: r.skipped_reason || null,
       items: (r.items || []).map(function (it) {
         return {

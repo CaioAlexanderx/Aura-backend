@@ -132,7 +132,7 @@ async function reguaRevisao(company, today, out) {
   try {
     const { rows } = await db.query(
       `-- otica:revisao-alvos
-       SELECT p.id, c.name AS customer_name, c.phone
+       SELECT p.id, c.id AS customer_id, c.name AS customer_name, c.phone
          FROM optical_prescriptions p
          JOIN customers c ON c.id = p.customer_id
         WHERE p.company_id = $1
@@ -161,6 +161,9 @@ async function reguaRevisao(company, today, out) {
         components: componentes(rx.customer_name, company.loja),
         sourceType: 'otica_revisao',
         sourceId: String(rx.id),
+        // Marketing: a guarda de consentimento (340) olha o cliente, não
+        // só o telefone.
+        customerId: rx.customer_id || null,
         dedupeKey: `otica_revisao:${rx.id}`,
       });
       if (r && r.queued) {
