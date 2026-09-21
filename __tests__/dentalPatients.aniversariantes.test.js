@@ -38,8 +38,15 @@ describe('GET /dental/patients/birthdays', () => {
 
   test('shape da resposta: { patients: [{ id, full_name, phone, birth_date, days_until }] }', async () => {
     db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    // Data RELATIVA a hoje (como os dois testes abaixo). Era '2026-09-20' fixo:
+    // passou de 13 a 20/09 e, a partir de 21/09/2026, o aniversario ficou a 364
+    // dias — fora da janela de 7 — e o CI de TODO PR passou a falhar aqui.
+    // 3 dias a frente deixa folga para a diferenca UTC x America/Sao_Paulo.
+    const soon = new Date();
+    soon.setDate(soon.getDate() + 3);
+    const birthDate = soon.toISOString().slice(0, 10);
     db.query.mockResolvedValueOnce({
-      rows: [{ id: 'p1', name: 'Ana Aniversariante', phone: '11999990000', birth_date: '2026-09-20' }],
+      rows: [{ id: 'p1', name: 'Ana Aniversariante', phone: '11999990000', birth_date: birthDate }],
     });
 
     const res = await request(app)
@@ -53,7 +60,7 @@ describe('GET /dental/patients/birthdays', () => {
       id: 'p1',
       full_name: 'Ana Aniversariante',
       phone: '11999990000',
-      birth_date: '2026-09-20',
+      birth_date: birthDate,
       days_until: expect.any(Number),
     });
   });
