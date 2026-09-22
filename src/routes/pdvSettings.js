@@ -49,7 +49,20 @@ const ALLOWED_BOOL_KEYS = [
   // 15/09/2026 — Otica (oculos de grau sobre a OS, kind='otica'). Liga
   // sozinha, sem exigir os_enabled. Ver migration 334 e routes/otica.js.
   'otica_enabled',
+  // 22/09/2026 — Matcon (materiais de construcao). Semi-vertical sobre o
+  // shell de varejo, mesmo opt-in da OS/Otica. Contrato: aura-app/docs/
+  // CONTRACT_MATCON.md. Sem migration: pdv_settings e jsonb.
+  'matcon_enabled',
+  'matcon_round_to_package',
+  'matcon_club_enabled',
+  'matcon_lots_enabled',
 ];
+
+// 22/09/2026 — Matcon: lista de unidades habilitadas ("Minha loja vende
+// em m², m³, sc..."). Array de strings curtas; ver ALLOWED_STRING_ARRAY_KEYS.
+const ALLOWED_STRING_ARRAY_KEYS = {
+  matcon_units: { maxItems: 20, maxLen: 8 },
+};
 
 // String enum: studio_approval_mode pode ser "wa_me" ou "whatsapp_business"
 const ALLOWED_STRING_KEYS = {
@@ -58,6 +71,14 @@ const ALLOWED_STRING_KEYS = {
 
 const ALLOWED_NUMBER_KEYS = [
   'service_fee_pct',
+  // 22/09/2026 — Matcon (docs/CONTRACT_MATCON.md secoes M0, M1, M3)
+  'matcon_default_waste_pct',
+  'matcon_default_delivery_days',
+  'matcon_quote_valid_days',
+  'matcon_quote_warn_days',
+  'matcon_points_per_100',
+  'matcon_points_to_coupon',
+  'matcon_coupon_value',
   'food_service_fee_pct',
   // 17/08/2026 — aliquotas SEPARADAS: a adquirente cobra diferente em
   // credito e debito. Percentuais (5 = 5%), teto de 100 abaixo.
@@ -67,7 +88,7 @@ const ALLOWED_NUMBER_KEYS = [
 
 // Percentuais que nao fazem sentido acima de 100% — sem teto, um dedo
 // escorregado (500 em vez de 5) viraria despesa maior que a venda.
-const PCT_KEYS = ['card_fee_credit_pct', 'card_fee_debit_pct'];
+const PCT_KEYS = ['card_fee_credit_pct', 'card_fee_debit_pct', 'matcon_default_waste_pct'];
 
 // 26/08/2026 — calibracao de etiqueta por loja (labels.js). O offset compensa
 // a margem fisica do driver da impressora, entao pode ser negativo.
@@ -97,6 +118,19 @@ const DEFAULT_SETTINGS = {
   card_fee_debit_pct:        0,
   os_enabled:                false,
   otica_enabled:             false,
+  // 22/09/2026 — Matcon. Defaults espelham aura-app/constants/matcon.ts.
+  matcon_enabled:            false,
+  matcon_units:              ['m²', 'm³', 'm', 'sc', 'br', 'mlh', 'ton', 'pç'],
+  matcon_default_waste_pct:  10,
+  matcon_round_to_package:   true,
+  matcon_default_delivery_days: 2,
+  matcon_quote_valid_days:   7,
+  matcon_quote_warn_days:    3,
+  matcon_club_enabled:       true,
+  matcon_lots_enabled:       false,
+  matcon_points_per_100:     10,
+  matcon_points_to_coupon:   100,
+  matcon_coupon_value:       10,
   // 0 = neutro: o fluxo real de impressao (aura-app/buildLabelHtml) nunca
   // aplicou offset — um default != 0 deslocaria a impressao de toda loja
   // que nunca calibrou. (-2 era o default da pagina orfa labels.js, que
@@ -131,6 +165,19 @@ function validateSettings(settings) {
         throw new AppError(key + ' deve ser um de: ' + allowedValues.join(', '), 400);
       }
       clean[key] = settings[key];
+    }
+  }
+
+  // Arrays de strings curtas (22/09/2026 — matcon_units)
+  for (const key of Object.keys(ALLOWED_STRING_ARRAY_KEYS)) {
+    if (key in settings) {
+      const { maxItems, maxLen } = ALLOWED_STRING_ARRAY_KEYS[key];
+      const arr = settings[key];
+      if (!Array.isArray(arr) || arr.length > maxItems ||
+          arr.some(v => typeof v !== 'string' || !v.trim() || v.length > maxLen)) {
+        throw new AppError(key + ' deve ser lista de ate ' + maxItems + ' textos curtos', 400);
+      }
+      clean[key] = arr.map(v => v.trim());
     }
   }
 
