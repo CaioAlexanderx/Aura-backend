@@ -98,6 +98,16 @@ function sanitizeCest(v) {
   return d.length === 7 ? d : null;
 }
 
+// 22/09/2026: products.brand (migration 261) existia so pra extracao
+// retroativa (brand-candidates); o front do Matcon (app#941) agora manda
+// `brand` direto no corpo do POST/PATCH e o valor se perdia — nem
+// fieldMap nem INSERT tinham a coluna. Mesmo tratamento dos outros campos
+// de texto curtos e opcionais (material/medidas/cuidados): trim, null
+// quando vazio, corte de tamanho pra nao virar coluna gigante.
+function sanitizeBrand(v) {
+  return v && String(v).trim() ? String(v).trim().slice(0, 120) : null;
+}
+
 // ─── duration_minutes (migration 323) ────────────────────
 //
 // O app escrevia "Duracao: 45 min" no FIM DA DESCRICAO. Descricao e texto
@@ -237,6 +247,9 @@ router.get('/', async (req, res) => {
     const dataRes = await comFallbackDeFicha((colsFicha, colDuracao, colsMatcon) => db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
+              -- brand (migration 261) e mais antiga que a 305/342/350 acima,
+              -- entao fica direto aqui, sem degrau de fallback 42703.
+              brand,
               ${colsMatcon}
               ${colsFicha}
               ${colDuracao}
@@ -288,6 +301,8 @@ router.get('/', async (req, res) => {
       color: r.color || '', size: r.size || '',
       image_url: r.image_url || '',
       ncm: r.ncm || '',
+      // Migration 261 — marca do produto (app#941, perfil Matcon).
+      brand: r.brand || '',
       // Migration 305 — ficha tecnica. '' quando a coluna nao existe na
       // base ainda, entao o formulario abre vazio em vez de quebrar.
       material: r.material || '', medidas: r.medidas || '', cuidados: r.cuidados || '',
@@ -343,7 +358,7 @@ router.get('/:pid/variants', async (req, res) => {
 // calls — compat com testes existentes).
 router.post('/', async (req, res) => {
   const cid = req.params.id;
-  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size, ncm, image_url, material, medidas, cuidados } = req.body;
+  const { name, sku, barcode, category, description, price, cost_price, stock_qty, min_stock, stock_max, unit, color, size, ncm, image_url, material, medidas, cuidados, brand } = req.body;
   if (!name || !String(name).trim()) return res.status(400).json({ error: 'name e obrigatorio' });
 
   let defaultShared = false;
@@ -405,12 +420,15 @@ router.post('/', async (req, res) => {
     // tamanho evita que um paste de 40 KB vire coluna.
     const ficha = (v) => (v && String(v).trim() ? String(v).trim().slice(0, 600) : null);
 
-    const COLS_ANTIGAS = 'company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared, supplier_id, supplier_name, supplier_cnpj';
+    // brand (migration 261) entra direto em COLS_ANTIGAS, sem degrau: a
+    // coluna e bem mais antiga que a 305 (ficha) e a 342 (supplier_id, que
+    // ja esta aqui do mesmo jeito), entao nao precisa do fallback 42703.
+    const COLS_ANTIGAS = 'company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared, supplier_id, supplier_name, supplier_cnpj, brand';
     const paramsAntigos = [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
        parseFloat(price)||0, parseFloat(cost_price)||0, parseFloat(stock_qty)||0, parseFloat(min_stock)||0,
        parseFloat(stock_max)||0, unit||'un', color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
        size ? String(size).slice(0,100) : null, sanitizeNcm(ncm), isGroupShared,
-       supplierFields.supplier_id, supplierFields.supplier_name, supplierFields.supplier_cnpj];
+       supplierFields.supplier_id, supplierFields.supplier_name, supplierFields.supplier_cnpj, sanitizeBrand(brand)];
 
     const paramsFicha = [ficha(material), ficha(medidas), ficha(cuidados)];
 
@@ -629,6 +647,9 @@ router.patch('/:pid', async (req, res) => {
   const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size', image_url:'image_url', ncm:'ncm', is_group_shared:'is_group_shared', studio_storefront_visible:'studio_storefront_visible',
     // Migration 305 — ficha tecnica na pagina do produto.
     material:'material', medidas:'medidas', cuidados:'cuidados',
+    // Migration 261 — marca do produto. O front do Matcon (app#941) manda
+    // brand no PATCH; sanitizeBrand trim/limita/null abaixo.
+    brand:'brand',
     // Migration 350 — Matcon: unidade de compra e fiscal do Simples. null limpa.
     purchase_unit:'purchase_unit', purchase_factor:'purchase_factor', weight_kg:'weight_kg',
     cest:'cest', origem:'origem', icms_st_paid:'icms_st_paid' };
@@ -646,6 +667,7 @@ router.patch('/:pid', async (req, res) => {
         if (dbCol === 'purchase_factor' && val !== null && val <= 0) return res.status(400).json({ error: 'purchase_factor deve ser maior que zero' });
         if (dbCol === 'purchase_unit') val = val ? String(val).trim().slice(0, 10) : null;
         if (dbCol === 'cest') val = sanitizeCest(val);
+        if (dbCol === 'brand') val = sanitizeBrand(val);
         if (dbCol === 'origem' && val !== null && (val < 0 || val > 8)) val = null;
         if (dbCol === 'icms_st_paid') val = (val === null || val === undefined) ? null : val === true;
         if (dbCol === 'color' && val && !/^#[0-9A-Fa-f]{6}$/.test(val)) val = null;

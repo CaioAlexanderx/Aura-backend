@@ -126,6 +126,24 @@ describe('GET /companies/:id/products — plan limits', () => {
   });
 });
 
+// ── GET /products — brand (app#941: grava no create/update, listagem devolve) ──
+describe('GET /companies/:id/products — brand', () => {
+  test('SELECT da listagem inclui a coluna brand, e o valor volta mapeado no produto', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '1' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Porcelanato', brand: 'Portobello' }] });
+
+    const res = await request(app)
+      .get(`/api/v1/companies/${cid}/products`)
+      .set(authEssencial);
+
+    expect(res.status).toBe(200);
+    const selectCall = db.query.mock.calls[2];
+    expect(selectCall[0]).toMatch(/\bbrand\b/);
+    expect(res.body.products[0].brand).toBe('Portobello');
+  });
+});
+
 // ── POST /products — plan limit enforcement ───────────────
 describe('POST /companies/:id/products — plan limit enforcement', () => {
   test('201 — cria produto quando abaixo do limite (essencial)', async () => {
@@ -224,6 +242,40 @@ describe('POST /companies/:id/products — color e size', () => {
   });
 });
 
+// ── POST /products — brand (app#941: Matcon manda marca no cadastro) ──
+describe('POST /companies/:id/products — brand', () => {
+  test('201 — grava brand sanitizado (trim) no INSERT', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '0' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Porcelanato', brand: 'Portobello' }] });
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/products`)
+      .set(authEssencial)
+      .send({ name: 'Porcelanato', price: 10, brand: '  Portobello  ' });
+
+    expect(res.status).toBe(201);
+    const insertCall = db.query.mock.calls[2];
+    expect(insertCall[0]).toMatch(/brand/);
+    expect(insertCall[1]).toContain('Portobello'); // trim aplicado
+  });
+
+  test('201 — brand vazio vira null (nao quebra o INSERT)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '0' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p2', name: 'Produto sem marca' }] });
+
+    const res = await request(app)
+      .post(`/api/v1/companies/${cid}/products`)
+      .set(authEssencial)
+      .send({ name: 'Produto sem marca', price: 10, brand: '   ' });
+
+    expect(res.status).toBe(201);
+    const insertCall = db.query.mock.calls[2];
+    expect(insertCall[1]).toContain(null);
+  });
+});
+
 // ── PATCH /:pid — stock decrement (atomico) ───────────────
 describe('PATCH /companies/:id/products/:pid — stock_qty_decrement', () => {
   test('200 — decrementa estoque atomicamente', async () => {
@@ -260,6 +312,38 @@ describe('PATCH /companies/:id/products/:pid — stock_qty_decrement', () => {
       .send({ stock_qty_decrement: 1 });
 
     expect(res.status).toBe(404);
+  });
+});
+
+// ── PATCH /:pid — brand (app#941: Matcon manda marca na edicao) ───
+describe('PATCH /companies/:id/products/:pid — brand', () => {
+  test('200 — atualiza brand sanitizado (trim)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', brand: 'Portobello' }] });
+
+    const res = await request(app)
+      .patch(`/api/v1/companies/${cid}/products/p1`)
+      .set(authEssencial)
+      .send({ brand: '  Portobello  ' });
+
+    expect(res.status).toBe(200);
+    const updateCall = db.query.mock.calls[1];
+    expect(updateCall[0]).toMatch(/brand = \$/);
+    expect(updateCall[1]).toContain('Portobello'); // trim aplicado
+  });
+
+  test('200 — brand vazio limpa o campo (null)', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', brand: null }] });
+
+    const res = await request(app)
+      .patch(`/api/v1/companies/${cid}/products/p1`)
+      .set(authEssencial)
+      .send({ brand: '' });
+
+    expect(res.status).toBe(200);
+    const updateCall = db.query.mock.calls[1];
+    expect(updateCall[1]).toContain(null);
   });
 });
 
