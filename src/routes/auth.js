@@ -85,6 +85,7 @@ const { sendSelfServeSignupNotification } = require('../services/mailer');
 const { issueVerification } = require('./verification');
 const { resolveKarateContext } = require('../config/karateRoles');
 const { getExtraSeatsForCompany } = require('../services/extraSeats');
+const { appModeDoCabecalho } = require('../utils/appMode');
 
 const env        = validateRuntimeEnv();
 const JWT_SECRET = env.JWT_SECRET;
@@ -119,7 +120,19 @@ function setRefreshCookie(res, refreshToken) {
 }
 function clearRefreshCookie(res) { res.clearCookie('aura_refresh', { path: '/api/v1/auth' }); }
 async function storeRefreshToken(userId, refreshToken, req) {
-  try { await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5)', [userId, hashToken(refreshToken), new Date(Date.now() + REFRESH_TTL_MS), req.ip, (req.headers['user-agent'] || '').substring(0, 200)]); } catch (_) {}
+  const base = [userId, hashToken(refreshToken), new Date(Date.now() + REFRESH_TTL_MS), req.ip, (req.headers['user-agent'] || '').substring(0, 200)];
+  // 22/09/2026 (PWA Fase 2): por onde a pessoa abriu o painel (X-Aura-App),
+  // para medir quem usa pelo app instalado. Coluna da migration 349.
+  const appMode = appModeDoCabecalho(req.headers['x-aura-app']);
+  try {
+    await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent, app_mode) VALUES ($1, $2, $3, $4, $5, $6)', [...base, appMode]);
+  } catch (err) {
+    // 42703 = coluna ainda nao existe (codigo novo antes da 349 rodar). O
+    // refresh token vale mais que a metrica: grava do jeito antigo.
+    if (err && err.code === '42703') {
+      try { await db.query('INSERT INTO refresh_tokens (user_id, token_hash, expires_at, ip_address, user_agent) VALUES ($1, $2, $3, $4, $5)', base); } catch (_) {}
+    }
+  }
 }
 
 // 15/06/2026: anexa extra_seats_granted ao objeto company ja moldado.

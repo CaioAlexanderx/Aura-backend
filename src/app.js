@@ -102,7 +102,9 @@ app.use(cors({
   origin: env.ALLOWED_ORIGINS === '*' ? '*' : allowedOrigins,
   credentials: true,
   methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Idempotency-Key', 'Idempotency-Key'],
+  // X-Aura-App (22/09/2026, PWA Fase 2): o painel instalado se identifica em
+  // toda requisicao. Sem ele aqui o preflight recusa e NADA funciona pelo app.
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'X-Idempotency-Key', 'Idempotency-Key', 'X-Aura-App'],
   exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
   maxAge:         600,
 }));
