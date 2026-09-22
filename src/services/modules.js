@@ -28,6 +28,12 @@ const MODULE_PLAN_MAP = {
   // laboratório e as receitas são Negócio. Sem gate de rota: otica.js e
   // serviceOrders.js dependem só de pdv_settings.otica_enabled.
   'otica.config':      'essencial',
+  // 22/09/2026 — Matcon (materiais de construcao). Mesmo desenho da Otica:
+  // config no Essencial (override do modulo inteiro por empresa), telas no
+  // Negocio. Sem gate de rota: as rotas matcon dependem so de
+  // pdv_settings.matcon_enabled. Chaves espelham aura-app/hooks/
+  // useVisibleModules.ts.
+  'matcon.config':     'essencial',
 
   // Negócio+
   folha:          'negocio',
@@ -37,6 +43,10 @@ const MODULE_PLAN_MAP = {
   whatsapp:       'negocio',
   'otica.laboratorio': 'negocio',
   'otica.receitas':    'negocio',
+  'matcon.orcamentos':    'negocio',
+  'matcon.entregas':      'negocio',
+  'matcon.profissionais': 'negocio',
+  'matcon.compras':       'negocio',
 
   // Expansão only
   agentes:        'expansao',

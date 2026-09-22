@@ -91,6 +91,13 @@ function sanitizeNcm(raw) {
   return digits;
 }
 
+// 22/09/2026 (Matcon M2): CEST tem 7 digitos; guardamos so digitos ou null.
+function sanitizeCest(v) {
+  if (v === null || v === undefined) return null;
+  const d = String(v).replace(/\D/g, '');
+  return d.length === 7 ? d : null;
+}
+
 // ─── duration_minutes (migration 323) ────────────────────
 //
 // O app escrevia "Duracao: 45 min" no FIM DA DESCRICAO. Descricao e texto
@@ -227,9 +234,10 @@ router.get('/', async (req, res) => {
     // Migration 305 — ficha tecnica. Tentar-e-cair em vez de consultar o
     // information_schema: uma query a mais desloca a sequencia de mocks
     // dos testes de integracao, e no caminho feliz ela e pura perda.
-    const dataRes = await comFallbackDeFicha((colsFicha, colDuracao) => db.query(
+    const dataRes = await comFallbackDeFicha((colsFicha, colDuracao, colsMatcon) => db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
+              ${colsMatcon}
               ${colsFicha}
               ${colDuracao}
               is_active, is_group_shared, company_id, created_at,
@@ -265,8 +273,18 @@ router.get('/', async (req, res) => {
       id: r.id, name: r.name || '', sku: r.sku || '', barcode: r.barcode || '',
       category: r.category || 'Produtos', description: r.description || '',
       price: parseFloat(r.price) || 0, cost_price: parseFloat(r.cost_price) || 0,
-      stock_qty: parseInt(r.stock_qty) || 0, min_stock: parseInt(r.stock_min) || 0,
-      stock_max: parseInt(r.stock_max) || 0, unit: r.unit || 'un',
+      // 22/09/2026 (Matcon M0): stock_qty e NUMERIC(10,3) desde a 001, mas o
+      // parseInt aqui truncava 12,5 m² para 12 na resposta. parseFloat e
+      // neutro para inteiros.
+      stock_qty: parseFloat(r.stock_qty) || 0, min_stock: parseFloat(r.stock_min) || 0,
+      stock_max: parseFloat(r.stock_max) || 0, unit: r.unit || 'un',
+      // Matcon M0/M2 (migration 350): unidade de compra e fiscal do Simples.
+      purchase_unit: r.purchase_unit || null,
+      purchase_factor: r.purchase_factor === null || r.purchase_factor === undefined ? null : parseFloat(r.purchase_factor),
+      weight_kg: r.weight_kg === null || r.weight_kg === undefined ? null : parseFloat(r.weight_kg),
+      cest: r.cest || null,
+      origem: r.origem === null || r.origem === undefined ? null : parseInt(r.origem, 10),
+      icms_st_paid: r.icms_st_paid === null || r.icms_st_paid === undefined ? null : r.icms_st_paid === true,
       color: r.color || '', size: r.size || '',
       image_url: r.image_url || '',
       ncm: r.ncm || '',
@@ -389,8 +407,8 @@ router.post('/', async (req, res) => {
 
     const COLS_ANTIGAS = 'company_id, name, sku, barcode, category, description, price, cost_price, stock_qty, stock_min, stock_max, unit, color, size, ncm, is_group_shared, supplier_id, supplier_name, supplier_cnpj';
     const paramsAntigos = [cid, String(name).trim(), sku||null, barcode||null, category||'Produtos', description||null,
-       parseFloat(price)||0, parseFloat(cost_price)||0, parseInt(stock_qty)||0, parseInt(min_stock)||0,
-       parseInt(stock_max)||0, unit||'un', color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
+       parseFloat(price)||0, parseFloat(cost_price)||0, parseFloat(stock_qty)||0, parseFloat(min_stock)||0,
+       parseFloat(stock_max)||0, unit||'un', color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null,
        size ? String(size).slice(0,100) : null, sanitizeNcm(ncm), isGroupShared,
        supplierFields.supplier_id, supplierFields.supplier_name, supplierFields.supplier_cnpj];
 
@@ -476,6 +494,34 @@ router.post('/', async (req, res) => {
       }
     } catch (_) { /* não bloqueia a criação */ }
 
+    // 22/09/2026 (Matcon M0/M2, migration 350): unidade de compra e fiscal do
+    // Simples entram num UPDATE separado, de proposito -- o INSERT acima e
+    // posicional (COLS_ANTIGAS + marcadores) e mexer nele desalinha os $n.
+    // So roda quando o body traz algum dos campos (loja sem Matcon nunca
+    // passa aqui).
+    const matcon = req.body || {};
+    const temMatcon = ['purchase_unit','purchase_factor','weight_kg','cest','origem','icms_st_paid']
+      .some(k => matcon[k] !== undefined && matcon[k] !== null && matcon[k] !== '');
+    if (temMatcon) {
+      const pf = Number(matcon.purchase_factor);
+      if (matcon.purchase_factor !== undefined && matcon.purchase_factor !== null && !(Number.isFinite(pf) && pf > 0)) {
+        return res.status(400).json({ error: 'purchase_factor deve ser maior que zero' });
+      }
+      const origem = Number(matcon.origem);
+      const upd = await db.query(
+        `UPDATE products SET purchase_unit = $2, purchase_factor = $3, weight_kg = $4, cest = $5, origem = $6, icms_st_paid = $7
+         WHERE id = $1 RETURNING *`,
+        [result.rows[0].id,
+         matcon.purchase_unit ? String(matcon.purchase_unit).trim().slice(0, 10) : null,
+         Number.isFinite(pf) && pf > 0 ? pf : null,
+         Number.isFinite(Number(matcon.weight_kg)) && matcon.weight_kg !== null && matcon.weight_kg !== '' ? Number(matcon.weight_kg) : null,
+         sanitizeCest(matcon.cest),
+         Number.isInteger(origem) && origem >= 0 && origem <= 8 ? origem : null,
+         matcon.icms_st_paid === true ? true : (matcon.icms_st_paid === false ? false : null)]
+      );
+      if (upd.rows[0]) result.rows[0] = upd.rows[0];
+    }
+
     const supplierOut = supplierFields.supplier_id
       ? { id: supplierFields.supplier_id, name: supplierFields.supplier_name, cnpj: supplierFields.supplier_cnpj }
       : null;
@@ -500,11 +546,20 @@ router.post('/', async (req, res) => {
 async function comFallbackDeFicha(rodar) {
   const FICHA = 'material, medidas, cuidados,';
   const DURACAO = 'duration_minutes,';
-  const degraus = [[FICHA, DURACAO], [FICHA, ''], ['', DURACAO], ['', '']];
+  // 22/09/2026 (Matcon, migration 350): terceiro degrau. O backend sobe
+  // antes da migration ser aplicada (CLAUDE.md, armadilha 1); sem isto a
+  // listagem inteira cairia com 42703 ate alguem rodar a 350.
+  const MATCON = 'purchase_unit, purchase_factor, weight_kg, cest, origem, icms_st_paid,';
+  const degraus = [];
+  for (const matcon of [MATCON, '']) {
+    for (const [ficha, duracao] of [[FICHA, DURACAO], [FICHA, ''], ['', DURACAO], ['', '']]) {
+      degraus.push([ficha, duracao, matcon]);
+    }
+  }
   let ultimo = null;
-  for (const [ficha, duracao] of degraus) {
+  for (const [ficha, duracao, matcon] of degraus) {
     try {
-      return await rodar(ficha, duracao);
+      return await rodar(ficha, duracao, matcon);
     } catch (e) {
       if (e.code !== '42703') throw e;
       ultimo = e;
@@ -573,8 +628,13 @@ router.patch('/:pid', async (req, res) => {
 
   const fieldMap = { name:'name', sku:'sku', barcode:'barcode', category:'category', description:'description', price:'price', cost_price:'cost_price', stock_qty:'stock_qty', min_stock:'stock_min', stock_max:'stock_max', unit:'unit', is_active:'is_active', color:'color', size:'size', image_url:'image_url', ncm:'ncm', is_group_shared:'is_group_shared', studio_storefront_visible:'studio_storefront_visible',
     // Migration 305 — ficha tecnica na pagina do produto.
-    material:'material', medidas:'medidas', cuidados:'cuidados' };
+    material:'material', medidas:'medidas', cuidados:'cuidados',
+    // Migration 350 — Matcon: unidade de compra e fiscal do Simples. null limpa.
+    purchase_unit:'purchase_unit', purchase_factor:'purchase_factor', weight_kg:'weight_kg',
+    cest:'cest', origem:'origem', icms_st_paid:'icms_st_paid' };
   const numFields = ['price','cost_price','stock_qty','stock_min','stock_max'];
+  // Numericos que aceitam null (limpar a conversao/peso/origem).
+  const nullableNumFields = ['purchase_factor','weight_kg','origem'];
 
   function montarUpdate(comDuracao) {
     const updates = [], values = []; let idx = 1;
@@ -582,6 +642,12 @@ router.patch('/:pid', async (req, res) => {
       if (req.body[bodyKey] !== undefined) {
         updates.push(`${dbCol} = $${idx}`); let val = req.body[bodyKey];
         if (numFields.includes(dbCol)) val = parseFloat(val);
+        if (nullableNumFields.includes(dbCol)) val = (val === null || val === '') ? null : (Number.isFinite(Number(val)) ? Number(val) : null);
+        if (dbCol === 'purchase_factor' && val !== null && val <= 0) return res.status(400).json({ error: 'purchase_factor deve ser maior que zero' });
+        if (dbCol === 'purchase_unit') val = val ? String(val).trim().slice(0, 10) : null;
+        if (dbCol === 'cest') val = sanitizeCest(val);
+        if (dbCol === 'origem' && val !== null && (val < 0 || val > 8)) val = null;
+        if (dbCol === 'icms_st_paid') val = (val === null || val === undefined) ? null : val === true;
         if (dbCol === 'color' && val && !/^#[0-9A-Fa-f]{6}$/.test(val)) val = null;
         if (dbCol === 'ncm') val = sanitizeNcm(val);
         values.push(val); idx++;
