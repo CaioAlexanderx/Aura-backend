@@ -247,6 +247,9 @@ router.get('/', async (req, res) => {
     const dataRes = await comFallbackDeFicha((colsFicha, colDuracao, colsMatcon) => db.query(
       `SELECT id, name, sku, barcode, category, description, price, cost_price,
               stock_qty, stock_min, stock_max, unit, color, size, image_url, ncm,
+              -- brand (migration 261) e mais antiga que a 305/342/350 acima,
+              -- entao fica direto aqui, sem degrau de fallback 42703.
+              brand,
               ${colsMatcon}
               ${colsFicha}
               ${colDuracao}
@@ -298,6 +301,8 @@ router.get('/', async (req, res) => {
       color: r.color || '', size: r.size || '',
       image_url: r.image_url || '',
       ncm: r.ncm || '',
+      // Migration 261 — marca do produto (app#941, perfil Matcon).
+      brand: r.brand || '',
       // Migration 305 — ficha tecnica. '' quando a coluna nao existe na
       // base ainda, entao o formulario abre vazio em vez de quebrar.
       material: r.material || '', medidas: r.medidas || '', cuidados: r.cuidados || '',

@@ -126,6 +126,24 @@ describe('GET /companies/:id/products — plan limits', () => {
   });
 });
 
+// ── GET /products — brand (app#941: grava no create/update, listagem devolve) ──
+describe('GET /companies/:id/products — brand', () => {
+  test('SELECT da listagem inclui a coluna brand, e o valor volta mapeado no produto', async () => {
+    db.query.mockResolvedValueOnce({ rows: [{ role: 'owner' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ total: '1' }] });
+    db.query.mockResolvedValueOnce({ rows: [{ id: 'p1', name: 'Porcelanato', brand: 'Portobello' }] });
+
+    const res = await request(app)
+      .get(`/api/v1/companies/${cid}/products`)
+      .set(authEssencial);
+
+    expect(res.status).toBe(200);
+    const selectCall = db.query.mock.calls[2];
+    expect(selectCall[0]).toMatch(/\bbrand\b/);
+    expect(res.body.products[0].brand).toBe('Portobello');
+  });
+});
+
 // ── POST /products — plan limit enforcement ───────────────
 describe('POST /companies/:id/products — plan limit enforcement', () => {
   test('201 — cria produto quando abaixo do limite (essencial)', async () => {
