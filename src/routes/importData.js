@@ -4,7 +4,7 @@
 //           BE-28e (historico + desfazer)
 // ============================================================
 // FIX products/import: substituiu inserts linha-a-linha por:
-//   1. Dedup dentro do proprio batch (barcode + nome)
+//   1. Dedup dentro do proprio batch (barcode; nome + unidade + marca)
 //   2. Lookup de existentes em 2 queries com ANY()
 //   3. Bulk INSERT em chunks de 100 com ON CONFLICT DO NOTHING
 // Isso reduz de ~4.000 queries individuais para ~14 queries
@@ -58,7 +58,7 @@ const PRODUCT_FIELDS = {
   name:       ['nome do produto', 'nome', 'produto', 'name', 'descricao', 'descrição', 'description', 'item'],
   card_price: ['preco no cartao', 'preco cartao', 'valor cartao', 'valor cart', 'cartao', 'card_price'],
   price:      ['preco de venda', 'preco venda', 'preço de venda', 'price', 'valor venda', 'valor', 'preco de venda (r$)',
-               'valor din', 'valor dinheiro', 'preco a vista', 'a vista'],
+               'valor din', 'valor dinheiro', 'preco a vista', 'a vista', 'preco unitario', 'preco un'],
   stock_min:  ['estoque minimo', 'estoque mínimo', 'min', 'minimo', 'stock_min'],
   stock_qty:  ['estoque atual', 'estoque', 'quantidade', 'qty', 'stock', 'qtd', 'saldo'],
   barcode:    ['codigo de barras', 'codigo barras', 'código barras', 'ean', 'barcode', 'gtin', 'codigo de barras (ean)'],
@@ -66,7 +66,11 @@ const PRODUCT_FIELDS = {
   category:   ['categoria', 'category', 'grupo', 'tipo'],
   color:      ['cor', 'color', 'cores'],
   size:       ['tamanho', 'tam', 'grade', 'size'],
-  unit:       ['unidade', 'un', 'unit', 'medida'],
+  // 22/09/2026 (Matcon): planilha de deposito traz "UNID." e "MARCA".
+  // 'unid' (4 letras) tambem casa por substring — "Preço unid." casaria
+  // unit; por isso unit cede pra preco/custo (FIELD_YIELDS_TO).
+  unit:       ['unidade', 'un', 'unit', 'medida', 'unid', 'unid.', 'und', 'unidade de medida', 'un.'],
+  brand:      ['marca', 'fabricante', 'brand'],
   description:['descricao longa', 'descrição longa', 'detalhes', 'observacoes', 'observações'],
   ncm:        ['ncm', 'ncm produto'],
 };
@@ -76,6 +80,17 @@ const PRODUCT_FIELDS = {
 // que fala de cartao nunca pode virar o preco normal.
 const FIELD_YIELDS_TO = {
   price: ['card_price'],
+  // "Preço unitário", "Preço un.", "Custo unitário": e preco, nao unidade.
+  unit:  ['price', 'cost_price', 'card_price'],
+};
+
+// Alias FRACO: so vale quando nenhum outro cabecalho da planilha casou o
+// mesmo campo por um alias normal. Planilha de deposito traz "ITEM" (numero
+// da linha / codigo) ao lado de "NOME": os dois casavam `name` e a coluna
+// mais a direita vencia no applyMap — com ITEM depois de NOME o produto
+// virava o numero da linha. Com NOME presente, ITEM fica sem campo.
+const ALIAS_FRACO = {
+  name: ['item'],
 };
 
 // Forca de um alias contra o cabecalho normalizado: 3 = igual,
@@ -95,6 +110,7 @@ function aliasScore(normalized, a) {
 // fica com a ordem do objeto (o comportamento antigo).
 function suggestMapping(headers, fieldDefs) {
   const map = {};
+  const fraco = {}; // header -> true quando venceu so por alias fraco
   for (const header of headers) {
     const normalized = header.toLowerCase().trim()
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -104,7 +120,7 @@ function suggestMapping(headers, fieldDefs) {
       for (const a of aliases) {
         const score = aliasScore(normalized, a);
         if (score && (!melhor || score > melhor.score || (score === melhor.score && a.length > melhor.len))) {
-          melhor = { score, len: a.length };
+          melhor = { score, len: a.length, alias: a };
         }
       }
       if (melhor) candidatos.push({ field, ...melhor });
@@ -115,7 +131,15 @@ function suggestMapping(headers, fieldDefs) {
       if ((FIELD_YIELDS_TO[c.field] || []).some(f => casados.has(f))) continue;
       if (!vencedor || c.score > vencedor.score || (c.score === vencedor.score && c.len > vencedor.len)) vencedor = c;
     }
-    if (vencedor) map[header] = vencedor.field;
+    if (vencedor) {
+      map[header] = vencedor.field;
+      if ((ALIAS_FRACO[vencedor.field] || []).includes(vencedor.alias)) fraco[header] = true;
+    }
+  }
+  for (const header of Object.keys(fraco)) {
+    const field = map[header];
+    const temForte = Object.keys(map).some(h => h !== header && map[h] === field && !fraco[h]);
+    if (temForte) delete map[header];
   }
   return map;
 }
@@ -133,6 +157,101 @@ function parseBRL(value) {
   }
   const n = parseFloat(clean);
   return isNaN(n) || n < 0 ? null : n;
+}
+
+// 22/09/2026 (Matcon): quantidade de estoque em formato BR. Antes era
+// parseFloat — "1,5" virava 1 e "1.234,5" virava 1,234. Aceita "1,5",
+// "1.234,5", "1,234.5" (o separador mais a direita e o decimal), "1.5",
+// numero puro e sujeira depois do numero ("10 un", como o parseFloat
+// aceitava). Negativo passa (estoque vendido a descoberto existia antes).
+// 3 casas: products.stock_qty/stock_min sao NUMERIC(10,3).
+function parseQuantidade(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? Math.round(value * 1000) / 1000 : null;
+  const m = String(value).replace(/\s/g, '').match(/^(-?)([\d.,]+)/);
+  if (!m) return null;
+  let s = m[2];
+  const virgula = s.lastIndexOf(','), ponto = s.lastIndexOf('.');
+  if (virgula >= 0 && ponto >= 0) {
+    const decimal = virgula > ponto ? ',' : '.';
+    const milhar = decimal === ',' ? '.' : ',';
+    s = s.split(milhar).join('').replace(decimal, '.');
+  } else if (virgula >= 0) {
+    s = s.split(',').length > 2 ? s.split(',').join('') : s.replace(',', '.');
+  } else if (s.split('.').length > 2) {
+    s = s.split('.').join('');
+  }
+  const n = Number(s);
+  if (!Number.isFinite(n)) return null;
+  return Math.round((m[1] ? -n : n) * 1000) / 1000;
+}
+
+// Minusculas, sem acento, espacos colapsados — so para COMPARAR.
+function chaveTexto(v) {
+  return String(v === null || v === undefined ? '' : v)
+    .normalize('NFD').replace(/\p{Mn}/gu, '')
+    .toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// ─── Unidade (22/09/2026, Matcon) ───────────────────────────
+// Planilha de deposito escreve a unidade do jeito dela ("MT", "RL", "PÇ",
+// "UM"). O Caixa decide fracionar pela unidade (m, m², kg, L...), entao
+// "MT" gravado como veio vendia metro no stepper inteiro. Chave = sem
+// acento, minuscula, sem ponto final; valor = grafia canonica do app
+// (utils/matconUnits.ts e UNITS do estoque no front).
+const UNIDADES_IMPORT = {};
+for (const [canonica, grafias] of Object.entries({
+  'un':      ['un', 'und', 'unid', 'unidade', 'unidades', 'um', 'u', 'uni'],
+  'm':       ['m', 'mt', 'mts', 'metro', 'metros'],
+  'm²':      ['m2', 'm²', 'mt2', 'mts2', 'metro quadrado', 'metros quadrados'],
+  'm³':      ['m3', 'm³', 'mt3', 'mts3', 'metro cubico', 'metros cubicos'],
+  'rolo':    ['rl', 'rolo', 'rolos'],
+  'pç':      ['pc', 'pca', 'peca', 'pecas', 'pcs'],
+  'kg':      ['kg', 'kgs', 'quilo', 'quilos', 'kilo', 'quilograma'],
+  'g':       ['g', 'gr', 'grs', 'grama', 'gramas'],
+  'L':       ['l', 'lt', 'lts', 'litro', 'litros'],
+  'ml':      ['ml'],
+  'pct':     ['pct', 'pcte', 'pacote', 'pacotes'],
+  'cx':      ['cx', 'caixa', 'caixas'],
+  'sc':      ['sc', 'saco', 'sacos'],
+  'br':      ['br', 'barra', 'barras'],
+  'dz':      ['dz', 'duzia', 'duzias'],
+  'cartela': ['cart', 'cartela', 'cartelas'],
+  'mlh':     ['mlh', 'milheiro', 'milheiros', 'mil'],
+  'ton':     ['ton', 't', 'tonelada', 'toneladas'],
+  'par':     ['par', 'pr', 'pares'],
+  'kit':     ['kit', 'kits', 'jg', 'jogo', 'jogos'],
+  'lata':    ['lata', 'latas'],
+  'balde':   ['balde', 'baldes', 'bd'],
+  'gl':      ['gl', 'galao', 'galoes'],
+})) {
+  for (const g of grafias) UNIDADES_IMPORT[chaveTexto(g)] = canonica;
+}
+
+// { unit, conhecida }: vazia vira 'un' (como antes); desconhecida e
+// gravada em minusculas como veio — nunca recusa a linha.
+function resolverUnidadeImport(raw) {
+  const bruto = String(raw === null || raw === undefined ? '' : raw).trim();
+  if (!bruto) return { unit: 'un', conhecida: true };
+  const chave = chaveTexto(bruto).replace(/\.+$/, '').trim();
+  if (UNIDADES_IMPORT[chave]) return { unit: UNIDADES_IMPORT[chave], conhecida: true };
+  return { unit: bruto.toLowerCase(), conhecida: false };
+}
+
+function normalizarUnidadeImport(raw) {
+  return resolverUnidadeImport(raw).unit;
+}
+
+// Mesmo tratamento de products.js (sanitizeBrand): trim, null se vazio,
+// corte em 120.
+function sanitizarMarcaImport(v) {
+  return v && String(v).trim() ? String(v).trim().slice(0, 120) : null;
+}
+
+// Duplicata = mesmo nome + unidade + marca. Deposito tem o mesmo nome em
+// marcas diferentes e em "pacote x unidade" / "metro x rolo".
+function chaveProdutoImport(name, unit, brand) {
+  return [chaveTexto(name), chaveTexto(normalizarUnidadeImport(unit)), chaveTexto(brand)].join('|');
 }
 
 function parseDate(value) {
@@ -315,8 +434,9 @@ router.post('/customers/import', requireAuth, async (req, res) => {
 
 // ─── POST /products/import ────────────────────────────────────
 // FIX: substituiu loop de queries individuais por abordagem em 3 fases:
-//   Fase 1 — dedup dentro do batch (barcode + nome)
-//   Fase 2 — lookup de existentes em 2 queries ANY()
+//   Fase 1 — dedup dentro do batch (barcode; nome + unidade + marca)
+//   Fase 2 — lookup de existentes em 2 queries (barcode ANY(); nome/
+//            unidade/marca da empresa, chave montada no Node)
 //   Fase 3 — bulk INSERT em chunks de 100
 // Reduz ~4.000 queries para ~14, eliminando o statement timeout.
 //
@@ -341,6 +461,12 @@ router.post('/products/import', requireAuth, async (req, res) => {
     : suggestMapping(headers, PRODUCT_FIELDS);
 
   const valid = [], errors = [];
+  // Linha da planilha (indice em `rows`) de cada item de `valid` — o
+  // relatorio de duplicatas aponta a linha que o front mostra.
+  const linhaDe = [];
+  // Unidade fora do mapa: gravada em minusculas como veio, e contada aqui
+  // para o front avisar (valor gravado -> quantas linhas).
+  const unidadesDesconhecidas = new Map();
 
   rows.forEach((row, i) => {
     const data = applyMap(row, map);
@@ -356,23 +482,112 @@ router.post('/products/import', requireAuth, async (req, res) => {
     // Preco no cartao (351): opcional, mesmo parse do custo. Vazio, zero ou
     // invalido = null (segue o % da loja) — nao derruba a linha.
     const cardPrice = parseBRL(data.card_price);
+    const unidade = resolverUnidadeImport(data.unit);
+    if (!unidade.conhecida) {
+      unidadesDesconhecidas.set(unidade.unit, (unidadesDesconhecidas.get(unidade.unit) || 0) + 1);
+    }
+    const stockQty = parseQuantidade(data.stock_qty);
+    const stockMin = parseQuantidade(data.stock_min);
+    linhaDe.push(i);
     valid.push({
       name:        data.name,
       price,
       card_price:  cardPrice > 0 ? Math.round(cardPrice * 100) / 100 : null,
       cost_price:  parseBRL(data.cost_price),
-      stock_qty:   parseFloat(data.stock_qty) || 0,
-      stock_min:   parseFloat(data.stock_min) || null,
+      stock_qty:   stockQty === null ? 0 : stockQty,
+      stock_min:   stockMin || null,
       barcode:     data.barcode || null,
       sku:         data.sku     || null,
       category:    data.category || null,
       color:       data.color    || null,
       size:        data.size     || null,
-      unit:        data.unit     || 'un',
+      unit:        unidade.unit,
+      brand:       sanitizarMarcaImport(data.brand),
       description: data.description || null,
       ncm:         data.ncm || null,
     });
   });
+
+  const resumoUnidades = {
+    total:   [...unidadesDesconhecidas.values()].reduce((a, b) => a + b, 0),
+    valores: [...unidadesDesconhecidas.keys()],
+  };
+
+  // ── Duplicatas: dentro do lote e contra o banco ──────────
+  // Antes: so o nome em minusculas. Deposito tem o mesmo nome em marcas
+  // diferentes e em "pacote x unidade" / "metro x rolo" — 189 das 2.017
+  // linhas da primeira planilha Matcon sumiam como duplicata. Agora a chave
+  // e nome + unidade + marca (sem acento, espacos colapsados); o codigo de
+  // barras continua deduplicando sozinho. Roda tambem no dry_run, para o
+  // front mostrar o que NAO vai entrar antes de confirmar.
+  const duplicatas = [];
+  const descrever = (p, index, origem, extra) => ({
+    index, origem, ...extra,
+    name: p.name, unit: p.unit, brand: p.brand, barcode: p.barcode,
+  });
+
+  // Fase 1 — dentro do proprio lote (primeira linha vence).
+  const primeiraPorBarcode = new Map();
+  const primeiraPorChave   = new Map();
+  const candidatos = [];
+  valid.forEach((p, k) => {
+    const index = linhaDe[k];
+    const chave = chaveProdutoImport(p.name, p.unit, p.brand);
+    if (p.barcode && primeiraPorBarcode.has(p.barcode)) {
+      duplicatas.push(descrever(p, index, 'lote', { criterio: 'codigo_de_barras', duplicata_de: primeiraPorBarcode.get(p.barcode) }));
+      return;
+    }
+    if (primeiraPorChave.has(chave)) {
+      duplicatas.push(descrever(p, index, 'lote', { criterio: 'nome_unidade_marca', duplicata_de: primeiraPorChave.get(chave) }));
+      return;
+    }
+    if (p.barcode) primeiraPorBarcode.set(p.barcode, index);
+    primeiraPorChave.set(chave, index);
+    candidatos.push({ p, index, chave });
+  });
+
+  // Fase 2 — contra o banco. Nome sem acento/espacos nao da pra casar com
+  // ANY() no SQL, entao vem nome/unidade/marca dos produtos da empresa e a
+  // chave e montada aqui, com a MESMA funcao do lote (unidade antiga "MT"
+  // no banco casa "m" da planilha). Sem filtro de is_active, como antes:
+  // exclusao e DELETE fisico, e produto inativo (filho de variante
+  // mesclado) nao pode voltar ativo numa reimportacao.
+  const barcodeList = candidatos.filter(c => c.p.barcode).map(c => c.p.barcode);
+  const existentesPorBarcode = new Map();
+  const existentesPorChave   = new Map();
+
+  try {
+    const [barRes, nomeRes] = await Promise.all([
+      barcodeList.length > 0
+        ? db.query(`SELECT id, barcode FROM products WHERE company_id=$1 AND barcode = ANY($2::text[])`, [companyId, barcodeList])
+        : { rows: [] },
+      candidatos.length > 0
+        ? db.query(`SELECT id, name, unit, brand FROM products WHERE company_id=$1`, [companyId])
+        : { rows: [] },
+    ]);
+    for (const r of barRes.rows) existentesPorBarcode.set(r.barcode, r.id || null);
+    for (const r of nomeRes.rows) {
+      const k = chaveProdutoImport(r.name, r.unit, r.brand);
+      if (!existentesPorChave.has(k)) existentesPorChave.set(k, r.id || null);
+    }
+  } catch (err) {
+    console.error('[import-products] lookup error:', err.message);
+    return res.status(500).json({ error: 'Erro ao verificar duplicatas', detail: err.message });
+  }
+
+  const toInsert = [];
+  for (const { p, index, chave } of candidatos) {
+    if (p.barcode && existentesPorBarcode.has(p.barcode)) {
+      duplicatas.push(descrever(p, index, 'banco', { criterio: 'codigo_de_barras', produto_id: existentesPorBarcode.get(p.barcode) }));
+      continue;
+    }
+    if (existentesPorChave.has(chave)) {
+      duplicatas.push(descrever(p, index, 'banco', { criterio: 'nome_unidade_marca', produto_id: existentesPorChave.get(chave) }));
+      continue;
+    }
+    toInsert.push(p);
+  }
+  duplicatas.sort((a, b) => a.index - b.index);
 
   if (dry_run) {
     return res.json({
@@ -383,6 +598,10 @@ router.post('/products/import', requireAuth, async (req, res) => {
       suggested_map: map,
       errors,
       preview:       valid.slice(0, 5),
+      a_importar:      toInsert.length,
+      duplicate_count: duplicatas.length,
+      duplicatas,
+      unidades_desconhecidas: resumoUnidades,
     });
   }
 
@@ -395,55 +614,10 @@ router.post('/products/import', requireAuth, async (req, res) => {
   }
 
   const batchId = uuidv4();
-  let saved = 0, dupes = 0;
+  let saved = 0;
+  const dupes = duplicatas.length;
   // D4: relatorio de taxonomia da importacao (vinculados x pendentes no wizard)
   const categorias = { linked: 0, pending: [], ambiguous: [], skipped: false };
-
-  // ── Fase 1: dedup dentro do proprio lote ──────────────────
-  // Previne falha de unique constraint quando o CSV tem o mesmo
-  // codigo de barras ou nome em linhas diferentes.
-  const seenBarcodes = new Set();
-  const seenNames    = new Set();
-  const dedupedValid = [];
-
-  for (const p of valid) {
-    const bKey = p.barcode || null;
-    const nKey = p.name.toLowerCase().trim();
-    if (bKey && seenBarcodes.has(bKey)) { dupes++; continue; }
-    if (seenNames.has(nKey))            { dupes++; continue; }
-    if (bKey) seenBarcodes.add(bKey);
-    seenNames.add(nKey);
-    dedupedValid.push(p);
-  }
-
-  // ── Fase 2: detectar existentes no DB em 2 queries em lote ─
-  // Substitui N queries individuais por 2 consultas com ANY().
-  const barcodeList = dedupedValid.filter(p => p.barcode).map(p => p.barcode);
-  const nameList    = dedupedValid.map(p => p.name.toLowerCase().trim());
-
-  let existingBarcodes = new Set();
-  let existingNames    = new Set();
-
-  try {
-    const [barRes, nameRes] = await Promise.all([
-      barcodeList.length > 0
-        ? db.query(`SELECT barcode FROM products WHERE company_id=$1 AND barcode = ANY($2::text[])`, [companyId, barcodeList])
-        : { rows: [] },
-      db.query(`SELECT lower(name) AS lname FROM products WHERE company_id=$1 AND lower(name) = ANY($2::text[])`, [companyId, nameList]),
-    ]);
-    existingBarcodes = new Set(barRes.rows.map(r => r.barcode));
-    existingNames    = new Set(nameRes.rows.map(r => r.lname));
-  } catch (err) {
-    console.error('[import-products] lookup error:', err.message);
-    return res.status(500).json({ error: 'Erro ao verificar duplicatas', detail: err.message });
-  }
-
-  const toInsert = [];
-  for (const p of dedupedValid) {
-    if (p.barcode && existingBarcodes.has(p.barcode)) { dupes++; continue; }
-    if (existingNames.has(p.name.toLowerCase().trim())) { dupes++; continue; }
-    toInsert.push(p);
-  }
 
   // ── Fase 3: bulk INSERT em chunks de 100 ─────────────────
   // ON CONFLICT DO NOTHING: seguranca extra contra race conditions;
@@ -454,6 +628,7 @@ router.post('/products/import', requireAuth, async (req, res) => {
   // planilha trouxe algum valor — sem ela, a query e a mesma de antes. Base
   // atras da 351 (42703): o chunk roda de novo sem a coluna e os chunks
   // seguintes nem tentam; a importacao nao cai por um campo opcional.
+  // brand (migration 261) entra sempre, sem degrau: a coluna e anterior a 351.
   let comCardPrice = toInsert.some(p => p.card_price !== null);
   let cardPriceIgnorado = false;
 
@@ -465,7 +640,7 @@ router.post('/products/import', requireAuth, async (req, res) => {
       const valores = [
         p.name, p.price, p.cost_price, p.stock_qty, p.stock_min,
         p.barcode, p.sku, p.category, p.color, p.size,
-        p.unit, p.description, p.ncm,
+        p.unit, p.description, p.ncm, p.brand,
       ];
       if (incluirCardPrice) valores.push(p.card_price);
       placeholders.push(`($1,${valores.map(() => '$' + (n++)).join(',')},$2)`);
@@ -475,7 +650,7 @@ router.post('/products/import', requireAuth, async (req, res) => {
     return {
       sql: `INSERT INTO products
            (company_id, name, price, cost_price, stock_qty, stock_min,
-            barcode, sku, category, color, size, unit, description, ncm${colCard}, import_batch_id)
+            barcode, sku, category, color, size, unit, description, ncm, brand${colCard}, import_batch_id)
          VALUES ${placeholders.join(',')}
          ON CONFLICT DO NOTHING
          RETURNING id, category`,
@@ -547,6 +722,8 @@ router.post('/products/import', requireAuth, async (req, res) => {
       pendentes:  categorias.pending,
       ambiguos:   categorias.ambiguous,
     },
+    duplicatas,
+    unidades_desconhecidas: resumoUnidades,
     // So aparece quando a base ainda nao tem a migration 351.
     ...(cardPriceIgnorado ? { card_price_ignorado: true } : {}),
   });
@@ -871,3 +1048,6 @@ module.exports = router;
 module.exports.suggestMapping = suggestMapping;
 module.exports.applyMap = applyMap;
 module.exports.PRODUCT_FIELDS = PRODUCT_FIELDS;
+module.exports.normalizarUnidadeImport = normalizarUnidadeImport;
+module.exports.parseQuantidade = parseQuantidade;
+module.exports.chaveProdutoImport = chaveProdutoImport;

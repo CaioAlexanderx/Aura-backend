@@ -275,11 +275,12 @@ describe('importacao -- dinheiro e cartao em colunas separadas', () => {
     });
     expect(res.status).toBe(201);
     const [sql, params] = chamadas(/INSERT INTO products/i)[0];
-    expect(sql).toMatch(/ncm, card_price, import_batch_id/);
-    // $1 empresa, $2 lote, depois 14 valores por linha; card_price e o ultimo.
+    expect(sql).toMatch(/ncm, brand, card_price, import_batch_id/);
+    // $1 empresa, $2 lote, depois 15 valores por linha (brand desde a
+    // importacao Matcon); card_price e o ultimo.
     expect(params[2 + 1]).toBe(32.9);   // price da linha 1
-    expect(params[2 + 13]).toBe(34.5);  // card_price da linha 1
-    expect(params[2 + 14 + 13]).toBeNull(); // card_price da linha 2
+    expect(params[2 + 14]).toBe(34.5);  // card_price da linha 1
+    expect(params[2 + 15 + 14]).toBeNull(); // card_price da linha 2
     expect(res.body.card_price_ignorado).toBeUndefined();
   });
 
